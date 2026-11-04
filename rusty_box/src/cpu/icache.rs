@@ -806,6 +806,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         let mut tlen = 0usize;
 
         for n in 0..quantum {
+            // An armed code breakpoint begins a trace of its own, so the CPU
+            // loop's trace-start check meets it (`cpu/breakpoints.rs`).
+            if n > 0
+                && self.code_breakpoints.armed()
+                && self.code_breakpoints.cuts_trace_at(current_page_offset)
+            {
+                break;
+            }
             // Check bounds before accessing mpool
             if current_mpindex >= BX_ICACHE_MEM_POOL {
                 // Only log once per trace to reduce spam - mpool full is handled gracefully
@@ -903,9 +911,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                     current_page_offset = (current_page_offset + i_len) & 0xfff;
                     current_fetch_ptr = &current_fetch_ptr[i_len as usize..];
 
-                    // Try to find a trace starting from current pAddr and merge
-                    // TODO: Check if debugger is active (matching C++ line 194)
-                    if remaining >= 15u32 {
+                    // Try to find a trace starting from current pAddr and
+                    // merge. Not while code breakpoints are armed: the merged
+                    // trace could carry a breakpoint's instruction past the
+                    // trace start the CPU loop checks.
+                    if remaining >= 15u32 && !self.code_breakpoints.armed() {
                         // avoid merging with page split trace
                         if let Some(merged) = self.merge_traces_internal(
                             entry_idx,

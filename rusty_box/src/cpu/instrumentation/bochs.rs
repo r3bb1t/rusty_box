@@ -848,6 +848,9 @@ mod hook_delivery {
     fn place_a_vmx_guest<T: Instrumentation>(ctx: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>) {
         ctx.in_vmx = true;
         ctx.in_vmx_guest = true;
+        // A guest runs from a current VMCS (VMLAUNCH needs one), which its
+        // VM exit writes back into (Bochs vmx.cc VMexit).
+        ctx.vmcsptr = 0x5_0000;
         ctx.vmcs.host_cr0 = u64::from(ctx.cr0.get32());
         ctx.vmcs.host_cr4 = 0;
         ctx.vmcs.host_cr3 = 0;

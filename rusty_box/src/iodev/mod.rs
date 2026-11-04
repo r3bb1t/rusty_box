@@ -119,6 +119,8 @@ pub mod devices;
 pub use crate::dma;
 pub mod fw_cfg;
 pub mod harddrv;
+#[cfg(feature = "std")]
+pub mod hdimage;
 pub mod hpet;
 pub mod ioapic;
 pub mod irq;

@@ -32,6 +32,11 @@ fn quoted_flags(flags: &[&str]) -> String {
         .join(", ")
 }
 
+/// A `[virt.display]` dimension as a refusal shows it: the number, or "unset".
+fn display_dimension(value: Option<u32>) -> String {
+    value.map_or_else(|| "unset".to_owned(), |value| value.to_string())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
     #[error("failed to read config {}: {source}", path.display())]
@@ -61,6 +66,84 @@ pub enum RunError {
         quoted_flags(flags)
     )]
     RunFlagsNeedAMachine { flags: Vec<&'static str> },
+
+    /// A setting, in the VM file or on the command line, that the VM's
+    /// machine does not have: a PC table on an Arm `virt` VM, or `[virt]` on
+    /// a PC. It is refused rather than dropped without a word.
+    #[error("{setting} is not a setting of {machine}; set `[vm] machine` to the machine it belongs to, or remove it")]
+    NotForMachine {
+        setting: &'static str,
+        machine: crate::config::MachineKind,
+    },
+
+    #[error(
+        "virt.memory_mib = {memory_mib} is outside what the Arm virt board maps: {min}-{max} MiB",
+        min = rusty_box_aarch64::RamSize::MIN.get().div_ceil(1 << 20),
+        max = rusty_box_aarch64::RamSize::MAX.get() >> 20
+    )]
+    InvalidVirtMemory { memory_mib: u32 },
+
+    #[error("virt.firmware and virt.kernel cannot both be set: the board boots one or the other")]
+    ConflictingVirtBoot,
+
+    #[error("virt.builtin_firmware and {setting} cannot both be set: the board boots one firmware or kernel")]
+    ConflictingBuiltinFirmware { setting: &'static str },
+
+    #[error("virt.display.refresh_hz = {hz} is outside 1-{max}", max = crate::config::RefreshHz::MAX)]
+    InvalidRefreshRate { hz: u32 },
+
+    #[error("{setting} needs virt.kernel: firmware loads its own kernel")]
+    VirtSettingNeedsKernel { setting: &'static str },
+
+    #[error("{setting} needs virt.firmware: only firmware keeps a variable store")]
+    VirtSettingNeedsFirmware { setting: &'static str },
+
+    #[error("{setting} has nothing to go with: set virt.firmware or virt.kernel")]
+    VirtSettingWithoutBoot { setting: &'static str },
+
+    #[error("{setting} has no disk to go with: set virt.disk")]
+    VirtSettingWithoutDisk { setting: &'static str },
+
+    #[error(
+        "virt.display needs both a width and a height, neither zero; got {} x {}",
+        display_dimension(*width),
+        display_dimension(*height)
+    )]
+    InvalidVirtDisplay {
+        width: Option<u32>,
+        height: Option<u32>,
+    },
+
+    #[error(
+        "an Arm virt VM needs something to boot: set virt.firmware or virt.kernel in the VM file, \
+         or the firmware or kernel under Hardware › Boot"
+    )]
+    MissingVirtBoot,
+
+    #[error("{} is not a kernel the Arm virt board can boot: {source}", path.display())]
+    VirtKernel {
+        path: PathBuf,
+        source: rusty_box_aarch64::boot::ImageError,
+    },
+
+    #[error("the Arm virt machine could not be built: {source}")]
+    VirtBuild {
+        source: rusty_box_aarch64::BuildError,
+    },
+
+    /// A stop the shell's Arm runs never ask for: an exit address, a
+    /// debugging stop, a stop flag on the machine itself, or a guest reset
+    /// left to the host.
+    #[error("the Arm virt machine stopped where no run asked it to: {stop:?}")]
+    VirtStopped {
+        stop: rusty_box_aarch64::StopReason,
+    },
+
+    #[error("failed to write the UEFI variable store back to {}: {source}", path.display())]
+    VariableStoreWrite { path: PathBuf, source: io::Error },
+
+    #[error("failed to make what the guest wrote to the disk {} durable: {source}", path.display())]
+    DiskFlush { path: PathBuf, source: io::Error },
 
     #[error("{field} must be greater than zero")]
     ZeroValue { field: &'static str },
@@ -140,6 +223,18 @@ pub enum RunError {
         first: &'static str,
         second: &'static str,
     },
+
+    /// A journal named for a disk whose writes go to the image: the file or
+    /// flag that names one expects the image to stay unchanged.
+    #[error(
+        "disk.journal names a journal, which only a volatile disk has; set disk.mode = \"volatile\" (or --disk-mode volatile)"
+    )]
+    JournalWithoutVolatileDisk,
+
+    /// A relative journal path that cannot be made absolute: the folder the
+    /// run starts in cannot be read.
+    #[error("journal path {}: {source}", path.display())]
+    JournalPath { path: PathBuf, source: io::Error },
 
     #[error("existing disk image {} is not a usable flat image ({len} bytes, not a non-zero multiple of 512); set disk.create.overwrite = true to replace it, or delete it", path.display())]
     InvalidExistingDiskImage { path: PathBuf, len: u64 },

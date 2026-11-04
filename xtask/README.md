@@ -5,24 +5,25 @@ Repository automation for Rusty Box. Run it through the Cargo alias in `.cargo/c
 ```bash
 cargo xtask ci                   # the local gate, run before every commit
 cargo xtask ci --skip-boot       # the same, without the DLX boot gate
+cargo xtask ci --skip-aarchmrs   # the same, without Arm's AARCHMRS (its conformance tests ignored)
 cargo xtask ci --full            # also the full rusty_box test suite and a GUI release build
-cargo xtask perf-baseline        # archive a release perfbench binary for A/B runs
+cargo xtask perf-baseline        # archive the release perfbench binaries for A/B runs
 cargo xtask android build        # Android APK, see "Android commands"
 cargo xtask --help               # usage for every subcommand
 ```
 
 `cargo xtask` with no arguments, `--help` or `-h` prints the usage for every subcommand and exits with status 1. `cargo xtask ci --help` prints the `ci` options.
 
-## `cargo xtask ci [--full] [--skip-boot]`
+## `cargo xtask ci [--full] [--skip-boot] [--skip-aarchmrs]`
 
-This is the local gate suite, defined in `xtask/src/ci.rs`. It runs its steps in the order below and stops at the first failure, naming the failed step and its exit status. A clean run ends with `ci: N steps passed in <seconds>s`.
+This is the local gate suite, defined in `xtask/src/ci.rs`. It runs its steps in the order below and stops at the first failure, naming the failed step and its exit status. A clean run ends with `ci: N steps passed in <seconds>s`, followed by a note when `--skip-aarchmrs` left the AArch64 conformance tests out. `--skip-aarchmrs` changes no step count.
 
 | Invocation | Steps |
 | --- | --- |
-| `cargo xtask ci` | 29 |
-| `cargo xtask ci --skip-boot` | 28 |
-| `cargo xtask ci --full` | 31 |
-| `cargo xtask ci --full --skip-boot` | 30 |
+| `cargo xtask ci` | 37 |
+| `cargo xtask ci --skip-boot` | 36 |
+| `cargo xtask ci --full` | 39 |
+| `cargo xtask ci --full --skip-boot` | 38 |
 
 ### Prerequisites
 
@@ -33,58 +34,84 @@ This is the local gate suite, defined in `xtask/src/ci.rs`. It runs its steps in
 
   The boot gate also finds them there. The step "Download Bochs BIOS ROMs for wasm GUI" in `.github/workflows/ci.yml` shows one way to fetch them.
 - **The DLX Linux disk image `dlxlinux/hd10meg.img`**, also gitignored. The UEFI example build embeds it, so you need it even with `--skip-boot`. The boot gate boots it.
+- **Arm's AARCHMRS** (the A-profile Architecture Machine Readable Specification, release 2026-09, BSD 3-clause; not in the repository). Unpack it and set `RUSTY_BOX_AARCHMRS` to the directory holding its `Features.json`, `Instructions.json` and `Registers.json`. The gate hands every step the directory as an absolute path (a relative one is taken from where you run the gate; give an absolute one, or each switch between the gate and a plain `cargo test` rebuilds `rusty_box_aarch64`, whose build script reruns when the value changes), so the AArch64 test steps (10 and 11) build and run the conformance tests that read it (`rusty_box_aarch64/tests/unit/spec.rs` and `sysreg_spec.rs`). Without the variable the gate stops before its first step, unless `--skip-aarchmrs` is given: that withholds the variable from every step, so those tests are ignored. Withholding it is a change of value too: in a shell that sets the variable, each switch between `--skip-aarchmrs` and a plain `cargo` command or a full gate rebuilds `rusty_box_aarch64` and every crate that depends on it (`rusty_box_gui` among them). Unset the variable in that shell to skip without the rebuilds.
 
 ### Step 1: doctrine ratchets
 
-This step is an in-process text scan, not a cargo command. It enforces the Safety Doctrine counts (`docs/safety-doctrine.md`) over eight source trees: `rusty_box`, `rusty_box_decoder`, `rusty_box_core`, `rusty_box_devices`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_whp_engine` and `rusty_box_gui`. It checks four counts:
+This step is an in-process text scan, not a cargo command. It enforces the Safety Doctrine counts (`docs/safety-doctrine.md`) over ten source trees: `rusty_box`, `rusty_box_decoder`, `rusty_box_core`, `rusty_box_devices`, `rusty_box_aarch64`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_whp_engine`, `rusty_box_gui` and `rusty_box_symbols`. It checks four counts:
 
 - **`unsafe` tokens per crate (R1)**, with comment lines stripped, against `UNSAFE_TOKEN_BASELINES`. A count above its baseline fails the step. A count below it passes, but prints a reminder to lower the baseline in the same commit.
 - **`unsafe impl … Send` / `Sync` lines in `rusty_box/src` (R6).** Baseline zero.
 - **Files with a blanket `dead_code` allow, per crate**, against `BLANKET_DEAD_CODE_BASELINES`. A file counts if it carries a crate-inner `#![allow(…)]` or `#![expect(…)]` that covers `dead_code`, whether it names the lint directly or through `unused` or `warnings`. A scanned crate with no entry in the table is held at zero. Above the baseline fails; below prints a reminder to tighten it. A targeted `#[allow(dead_code)]` on a single item is not counted.
-- **`.unwrap()` / `.expect(` outside test code.** Baseline zero in every scanned crate. The scan skips `#[cfg(test)]` blocks, files named `tests.rs` or `*_tests.rs`, comment lines, and doc comments.
+- **`.unwrap()` / `.expect(` outside test code.** Baseline zero in every scanned crate. The scan skips `#[cfg(test)]` blocks, files named `tests.rs` or `*_tests.rs`, files whose `mod` declaration is `#[cfg(test)]`-gated (by their `#[path]` when they carry one), comment lines, and doc comments.
 
 It is a line scan, not a parser. The baseline constants and the reason each one moved are in `xtask/src/ci.rs`.
 
-### Steps 2 to 28: the build and test matrix
+The same step parses each root in `SHAPE_CHECKED` with `syn` and refuses tuple
+types and values (a tuple used only as a `match` scrutinee aside), `dyn` trait
+objects and `impl Trait` types. Its roots are folders or single files. It then builds `xtask/no_panic_canary`, whose
+`#[no_panic]` function indexes past the end of a slice, and passes only if that
+link fails: the proof that `#[no_panic]` still proves something on this
+toolchain. Last, it sweeps `rusty_box_symbols` for `#[no_panic]` functions
+its tests do not reach (`xtask/src/tier_p.rs`, through the call graph): the
+proof is made when the crate's own release test binary links, so a function
+its tests do not reach is proven by nothing, and a name in an integration
+test does not count. A function is known by its module path, its `impl`
+type and its name, so a tested function does not cover an untested namesake;
+only a reference it cannot resolve, such as `receiver.method()`, counts every
+function of that name.
 
-Every step is `--release` except the debug-assertions check, which exists to compile the `#[cfg(debug_assertions)]` code that release builds leave out.
+### Steps 2 to 36: the build and test matrix
+
+Every step is `--release` except the debug-assertions check, which exists to compile the `#[cfg(debug_assertions)]` code that release builds leave out. Every cargo command the gate runs, step 13's build included, inherits the environment `cargo xtask ci` runs in but for `RUSTY_BOX_AARCHMRS`, which the gate sets to the absolute directory or withholds (see the prerequisites).
 
 | # | Step | Command |
 | --- | --- | --- |
-| 2 | core tests (no_std + no_alloc) | `cargo test --release -p rusty_box_core` |
-| 3 | core tests (alloc) | `cargo test --release -p rusty_box_core --features alloc` |
-| 4 | core tests (std) | `cargo test --release -p rusty_box_core --features std` |
-| 5 | core bare-metal target check | `cargo check --release -p rusty_box_core --target x86_64-unknown-none` |
-| 6 | devices tests (no_std + no_alloc) | `cargo test --release -p rusty_box_devices` |
-| 7 | devices tests (std) | `cargo test --release -p rusty_box_devices --features std` |
-| 8 | devices bare-metal target check | `cargo check --release -p rusty_box_devices --features alloc --target x86_64-unknown-none` |
-| 9 | WHP sys tests | `cargo test --release -p rusty_box_whp_sys` |
-| 10 | WHP leaf tests | `cargo test --release -p rusty_box_whp` |
-| 11 | WHP probe builds | `cargo check --release -p rusty_box_whp --examples` |
-| 12 | WHP engine tests | `cargo test --release -p rusty_box_whp_engine --all-targets` |
-| 13 | decoder tests | `cargo test --release -p rusty_box_decoder` |
-| 14 | lib tests (default features) | `cargo test --release -p rusty_box --lib` |
-| 15 | no_std + no_alloc check | `cargo check --release -p rusty_box --no-default-features` |
-| 16 | no_std + alloc check | `cargo check --release -p rusty_box --no-default-features --features alloc` |
-| 17 | bare-metal target check | `cargo check --release -p rusty_box --no-default-features --target x86_64-unknown-none` |
-| 18 | UEFI example build | `cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi` |
-| 19 | wasm target check (lib, alloc) | `cargo check --release -p rusty_box --no-default-features --features alloc --target wasm32-unknown-unknown` |
-| 20 | public API examples | `cargo test --release -p rusty_box --features std --test api_examples` |
-| 21 | doc examples | `cargo test --release -p rusty_box --doc` |
-| 22 | doctrine compile-fail fixtures | `cargo test --release -p rusty_box --features std --test compile_fail` |
-| 23 | GUI wasm target check | `cargo check --release -p rusty_box_gui --target wasm32-unknown-unknown` |
-| 24 | GUI host check, tests included | `cargo check --release -p rusty_box_gui --all-targets` |
-| 25 | GUI guest-trace check, tests included | `cargo check --release -p rusty_box_gui --features guest-trace --all-targets` |
-| 26 | GUI guest-trace tests | `cargo test --release -p rusty_box_gui --features guest-trace --lib guest_trace` |
-| 27 | all-features check | `cargo check --release -p rusty_box --all-features` |
-| 28 | debug-assertions check (all targets, all features) | `cargo check -p rusty_box --all-targets --all-features` |
+| 2 | xtask tests | `cargo test --release -p xtask` |
+| 3 | core tests (no_std + no_alloc) | `cargo test --release -p rusty_box_core` |
+| 4 | core tests (alloc) | `cargo test --release -p rusty_box_core --features alloc` |
+| 5 | core tests (std) | `cargo test --release -p rusty_box_core --features std` |
+| 6 | core bare-metal target check | `cargo check --release -p rusty_box_core --target x86_64-unknown-none` |
+| 7 | devices tests (no_std + no_alloc) | `cargo test --release -p rusty_box_devices` |
+| 8 | devices tests (std) | `cargo test --release -p rusty_box_devices --features std` |
+| 9 | devices bare-metal target check | `cargo check --release -p rusty_box_devices --features alloc --target x86_64-unknown-none` |
+| 10 | aarch64 tests (no_std + no_alloc) | `cargo test --release -p rusty_box_aarch64` |
+| 11 | aarch64 tests (std) | `cargo test --release -p rusty_box_aarch64 --features std` |
+| 12 | aarch64 bare-metal target check | `cargo check --release -p rusty_box_aarch64 --features alloc --target x86_64-unknown-none` |
+| 13 | aarch64 hot-loop host instructions | `cargo build --release -p rusty_box_aarch64 --features std --example aarch64_perfbench`, then callgrind over its ten loop cells (`xtask/src/hot_loop.rs`) |
+| 14 | WHP sys tests | `cargo test --release -p rusty_box_whp_sys` |
+| 15 | WHP leaf tests | `cargo test --release -p rusty_box_whp` |
+| 16 | WHP probe builds | `cargo check --release -p rusty_box_whp --examples` |
+| 17 | WHP engine tests | `cargo test --release -p rusty_box_whp_engine --all-targets` |
+| 18 | decoder tests | `cargo test --release -p rusty_box_decoder` |
+| 19 | symbols tests | `cargo test --release -p rusty_box_symbols` |
+| 20 | symbols clippy | `cargo clippy --release -p rusty_box_symbols --all-targets --features fakes --no-deps -- -D warnings` |
+| 21 | gui clippy | `cargo clippy --release -p rusty_box_gui --lib --no-deps -- -A clippy::all` |
+| 22 | lib tests (default features) | `cargo test --release -p rusty_box --lib` |
+| 23 | no_std + no_alloc check | `cargo check --release -p rusty_box --no-default-features` |
+| 24 | no_std + alloc check | `cargo check --release -p rusty_box --no-default-features --features alloc` |
+| 25 | bare-metal target check | `cargo check --release -p rusty_box --no-default-features --target x86_64-unknown-none` |
+| 26 | UEFI example build | `cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi` |
+| 27 | wasm target check (lib, alloc) | `cargo check --release -p rusty_box --no-default-features --features alloc --target wasm32-unknown-unknown` |
+| 28 | public API examples | `cargo test --release -p rusty_box --features std --test api_examples` |
+| 29 | doc examples | `cargo test --release -p rusty_box --doc` |
+| 30 | doctrine compile-fail fixtures | `cargo test --release -p rusty_box --features std --test compile_fail` |
+| 31 | GUI wasm target check | `cargo check --release -p rusty_box_gui --target wasm32-unknown-unknown` |
+| 32 | GUI host check, tests included | `cargo check --release -p rusty_box_gui --all-targets` |
+| 33 | GUI guest-trace check, tests included | `cargo check --release -p rusty_box_gui --features guest-trace --all-targets` |
+| 34 | GUI guest-trace tests | `cargo test --release -p rusty_box_gui --features guest-trace --lib guest_trace` |
+| 35 | all-features check | `cargo check --release -p rusty_box --all-features` |
+| 36 | debug-assertions check (all targets, all features) | `cargo check -p rusty_box --all-targets --all-features` |
 
 Notes on specific steps:
 
-- **WHP steps (9 to 12)** need no hypervisor. The sys and wrapper tests cover layouts and arithmetic. Engine tests that need hardware skip themselves on a host without it. `--all-targets` on step 12 also compiles the engine's example harnesses.
-- **Doc examples (step 21)** compile the crate's doc comments and the Rust blocks of [`docs/automation.md`](../docs/automation.md), which `rusty_box/src/lib.rs` includes behind `#[cfg(doctest)]`. An example in that guide that names a signature the crate does not have fails here.
-- **Compile-fail fixtures (step 22)** are the doctrine's trybuild tests. Their goldens are rustc's rendered diagnostics, so they change when the quoted code or the toolchain changes. Once you have confirmed the rule still holds, regenerate them with `TRYBUILD=overwrite cargo test --release -p rusty_box --features std --test compile_fail`.
-- **Guest-trace steps (25 and 26)** cover `rusty_box_gui/src/guest_trace.rs`, which only the `guest-trace` feature compiles. Step 26 passes only if its stdout shows `test guest_trace::tests::flight_dump_names_the_opcodes_it_recorded ... ok`, so a test filter that matches nothing fails it.
+- **xtask tests (step 2)** hold the gate's own scanners to their cases, the ratchet's test-code rules among them, and cover the Android APK packing. The `cargo xtask` alias runs a debug build, so this release build never replaces the binary running the gate.
+- **AArch64 steps (10 to 12)** run the interpreter's unit tests (the Unicorn vector replay among them), its integration tests, and with `std` the Rust blocks of [`docs/aarch64-automation.md`](../docs/aarch64-automation.md), which `rusty_box_aarch64/src/lib.rs` includes behind `#[cfg(all(doctest, feature = "std"))]`. With `RUSTY_BOX_AARCHMRS` naming an unpacked copy of Arm's machine-readable specification (AARCHMRS), steps 10 and 11 also check the A64 decoder (`rusty_box_aarch64/tests/unit/spec.rs`) and the System register accesses and fieldsets (`sysreg_spec.rs`) against it; with `--skip-aarchmrs` those tests are ignored.
+- **The hot-loop step (13)** counts, under callgrind, the host instructions `VirtMachine::run_until` executes on the five `aarch64_perfbench` loops, plain and hooked, and fails when one rises more than 0.5% over `xtask/aarch64_hot_loop_baseline.txt`. The counts belong to one compiler and host, which the baseline names: on another, or without valgrind, the step passes saying why it measured nothing. `cargo xtask hot-loop-baseline` counts this host and rewrites the baseline.
+- **WHP steps (14 to 17)** need no hypervisor. The sys and wrapper tests cover layouts and arithmetic. Engine tests that need hardware skip themselves on a host without it. `--all-targets` on step 17 also compiles the engine's example harnesses.
+- **Doc examples (step 29)** compile the crate's doc comments and the Rust blocks of [`docs/automation.md`](../docs/automation.md), which `rusty_box/src/lib.rs` includes behind `#[cfg(doctest)]`. An example in that guide that names a signature the crate does not have fails here.
+- **Compile-fail fixtures (step 30)** are the doctrine's trybuild tests. Their goldens are rustc's rendered diagnostics, so they change when the quoted code or the toolchain changes. Once you have confirmed the rule still holds, regenerate them with `TRYBUILD=overwrite cargo test --release -p rusty_box --features std --test compile_fail`.
+- **Guest-trace steps (33 and 34)** cover `rusty_box_gui/src/guest_trace.rs`, which only the `guest-trace` feature compiles. Step 34 passes only if its stdout shows `test guest_trace::tests::flight_dump_names_the_opcodes_it_recorded ... ok`, so a test filter that matches nothing fails it.
 
 ### `--full`: two more steps
 
@@ -109,18 +136,27 @@ It passes only if the run exits successfully and its stdout contains `*** LOGIN 
 ### What `ci` does not cover
 
 - It compiles the `rusty_box_gui` tests but runs only the guest-trace tracer's. Run the rest with `cargo test --release -p rusty_box_gui`.
-- No step runs the tests of `rusty_box_bximage` or of `xtask`. Both are compiled: `rusty_box_bximage` as a dependency of the GUI steps, and `xtask` by the `cargo xtask` alias that runs the gate. Run the xtask's own, among them the APK packing's, with `cargo test --release -p xtask`.
+- No step runs the tests of `rusty_box_bximage`. It is compiled as a dependency of the GUI steps.
 - No step builds `examples/rusty_box_web`, `examples/no_alloc_smoke` or the Android APK. The GUI steps compile the APK's library, the `rusty_box_gui_android` example, only for the host, where it is empty.
 
 ## `cargo xtask perf-baseline`
 
-This command takes no options; anything written after it is ignored. It does three things:
+This command takes no options; anything written after it is ignored. For each of two benchmarks, in this order, it does three things:
 
-1. Builds the `perfbench` example: `cargo build --release -p rusty_box --example perfbench --features std`. The source is `rusty_box/examples/perfbench/perfbench.rs`.
+1. Builds the example with `cargo build --release -p <package> --example <example> --features std`.
 2. Copies the binary to `target/perf-baselines/<rev>/`, where `<rev>` is `git rev-parse --short=12 HEAD`. The directory is named after `HEAD`, so a build of an uncommitted tree is filed under the last commit's revision.
 3. Prints the archived path.
 
-Use it for interleaved A/B runs: alternate the baseline and candidate binaries for at least 10 pairs and compare the medians. `perfbench` runs a synthetic guest workload and needs no ROMs or disk images. The `PERFBENCH_MODE`, `PERFBENCH_INSN`, `PERFBENCH_CPUS` and `PERFBENCH_QUANTUM` environment variables select what it runs (see the environment-variable table in [`rusty_box/examples/README.md`](../rusty_box/examples/README.md)).
+The two benchmarks:
+
+| Package | Example | Source | What it runs |
+|---|---|---|---|
+| `rusty_box` | `perfbench` | `rusty_box/examples/perfbench/perfbench.rs` | A synthetic x86 guest workload; needs no ROMs or disk images. The `PERFBENCH_MODE`, `PERFBENCH_INSN`, `PERFBENCH_CPUS` and `PERFBENCH_QUANTUM` environment variables select what it runs (see the environment-variable table in [`rusty_box/examples/README.md`](../rusty_box/examples/README.md)). |
+| `rusty_box_aarch64` | `aarch64_perfbench` | `rusty_box_aarch64/examples/perfbench.rs` | The AArch64 interpreter's embedded loops (ALU, an `ldp`/`stp` copy, an FNV-1a hash, an FP chain), plain and with hooks, and two boots, EDK2 to `Shell>` and Linux to `login:`, from the images its `PERFBENCH_*` environment variables name; the table at the top of the source lists them. |
+
+The AArch64 example is named apart from `perfbench` because both would build to `target/release/examples/perfbench`.
+
+Use them for interleaved A/B runs: alternate the baseline and candidate binaries for at least 10 pairs and compare the medians.
 
 ## Android commands
 

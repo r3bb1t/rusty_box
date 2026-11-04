@@ -6,6 +6,7 @@ pub use instrumentation::{
     BranchEvent, BranchType, CacheCntrl, CodeSize, CpuDebugView, CpuSetupMode, CpuSnapshot,
     EmuStopReason, ExecutionMode, Fetched, ProcessorActivity, SegmentBases,
     DescriptorTable, LinearRange, MappingWalk, PageAccess, PageMapping, WalkStep,
+    GuestPhysicalMemory, VmxGuest,
     ExitSet, HookCtx, HookMask, HwInterruptEvent, InstrAction, Instrumentation, InvEptType,
     InvPcidType, IoHookEvent, LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemPerms,
     MemType, MemUnmapped, MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent,
@@ -60,6 +61,11 @@ pub(super) mod bit32;
 pub(super) mod bit64;
 pub(super) mod bmi32;
 pub(super) mod bmi64;
+pub(crate) mod breakpoints;
+pub use breakpoints::{
+    BreakpointRefusal, BreakpointSupport, CodeBreakpoint, CodeBreakpointHit,
+    MAX_LINEAR_BREAKPOINTS, MAX_PHYSICAL_BREAKPOINTS,
+};
 pub mod builder;
 pub(super) mod cet;
 #[allow(clippy::module_inception)]

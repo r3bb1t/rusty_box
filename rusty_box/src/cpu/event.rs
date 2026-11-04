@@ -1475,9 +1475,12 @@ mod tests {
         assert_eq!(ap.activity_state, CpuActivityState::WaitForSipi);
 
         // VMENTRY with guest activity state 3 leaves the CPU in
-        // WAIT_FOR_SIPI while in VMX non-root operation.
+        // WAIT_FOR_SIPI while in VMX non-root operation, from a current
+        // VMCS (VMLAUNCH needs one), which the SIPI's VM exit writes back
+        // into (Bochs vmx.cc VMexit).
         ap.in_vmx = true;
         ap.in_vmx_guest = true;
+        ap.vmcsptr = 0x5_0000;
 
         bus.ctx(&mut ap).deliver_sipi(TEST_SIPI_VECTOR);
 

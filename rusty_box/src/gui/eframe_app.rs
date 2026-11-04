@@ -5,7 +5,7 @@
 //! translated by `host_input` into guest key and mouse events, queued on the
 //! `SharedDisplay` for the emulator thread to drain.
 
-use super::host_input::HeldModifiers;
+use super::host_input::{HeldModifiers, PointerDevice};
 use super::touchpad::{TouchSample, TouchZone, Touchpad};
 use crate::iodev::scancodes::BxKey;
 use super::shared_display::SharedDisplay;
@@ -17,7 +17,6 @@ use std::sync::{
 
 const SERIAL_PANEL_MIN_HEIGHT: f32 = 48.0;
 const SERIAL_PANEL_DEFAULT_HEIGHT: f32 = 88.0;
-const SERIAL_PANEL_MAX_HEIGHT: f32 = 200.0;
 
 /// The startup notice: a spinner over one row of text.
 const STARTUP_SPINNER_SIZE: f32 = 28.0;
@@ -42,12 +41,15 @@ pub struct RustyBoxApp {
     cached_ips: u32,
     cached_emu_running: bool,
     // Cached serial log for display (updated each frame from shared)
-    cached_serial_log: String,
-    serial_log_len: usize,
+    /// The serial console's screen, fed from the shared log.
+    serial_terminal: super::serial_terminal::SerialTerminal,
     // Cached transient startup status (e.g. "Creating disk image…"), shown
     // before the guest produces video.
     cached_startup_status: Option<String>,
     serial_input: String,
+    /// The serial terminal held the keyboard last frame: keys go to the
+    /// guest's serial console, not to its keyboard.
+    serial_focused: bool,
     /// How the framebuffer fills the region it is drawn in.
     display_scale: DisplayScale,
     /// The shape of one guest pixel: square by default, or 4:3 for the VGA
@@ -64,7 +66,39 @@ pub struct RustyBoxApp {
     pointer_speed: f32,
     /// The gestures in progress while touch drives the guest's mouse.
     touchpad: Touchpad,
+    /// What the guest's tablet was last told, when the machine has one.
+    tablet: TabletState,
 }
+
+/// What a machine's tablet was last told: where the pointer is, which
+/// buttons are down, and the part of a wheel detent turned so far — so each
+/// change is sent once.
+#[derive(Debug, Default)]
+struct TabletState {
+    /// The run ([`SharedDisplay::runs_started`]) this state was told to.
+    run: u64,
+    position: Option<rusty_box_core::input::pointer::PointerPos>,
+    held: [bool; 5],
+    wheel_detents: f32,
+    /// The finger that holds the left button down, while touch drives the
+    /// tablet; a second finger does nothing.
+    finger: Option<egui::TouchId>,
+}
+
+/// The points one wheel line scrolls in egui on a native window
+/// (`egui::InputOptions::line_scroll_speed`'s default there), which turns a
+/// wheel reported in points back into detents.
+const POINTS_PER_WHEEL_DETENT: f32 = 40.0;
+
+/// egui's pointer buttons, in [`rusty_box_core::input::pointer::PointerButton`]'s
+/// terms.
+const TABLET_BUTTONS: [(egui::PointerButton, rusty_box_core::input::pointer::PointerButton); 5] = [
+    (egui::PointerButton::Primary, rusty_box_core::input::pointer::PointerButton::Left),
+    (egui::PointerButton::Secondary, rusty_box_core::input::pointer::PointerButton::Right),
+    (egui::PointerButton::Middle, rusty_box_core::input::pointer::PointerButton::Middle),
+    (egui::PointerButton::Extra1, rusty_box_core::input::pointer::PointerButton::Side),
+    (egui::PointerButton::Extra2, rusty_box_core::input::pointer::PointerButton::Extra),
+];
 
 impl RustyBoxApp {
     /// Create a new RustyBoxApp with the given shared display.
@@ -81,10 +115,10 @@ impl RustyBoxApp {
             last_height: 0,
             cached_ips: 0,
             cached_emu_running: false,
-            cached_serial_log: String::new(),
-            serial_log_len: 0,
+            serial_terminal: super::serial_terminal::SerialTerminal::new(),
             cached_startup_status: None,
             serial_input: String::new(),
+            serial_focused: false,
             display_scale: DisplayScale::Crisp,
             pixel_aspect: PixelAspect::Square,
             prev_mouse_buttons: 0,
@@ -92,6 +126,171 @@ impl RustyBoxApp {
             pointer_mode: PointerMode::Mouse,
             pointer_speed: 1.0,
             touchpad: Touchpad::new(),
+            tablet: TabletState::default(),
+        }
+    }
+
+    /// The pointing device of the machine on the display.
+    fn pointer_device(&self) -> super::host_input::PointerDevice {
+        self.shared
+            .lock()
+            .map(|display| display.pointer_device)
+            .unwrap_or_default()
+    }
+
+    /// Forgets what the tablet was told once a new run has begun on the
+    /// display: the new run's tablet starts from its reset state, with no
+    /// position and no button down.
+    fn tablet_for_this_run(&mut self) {
+        let run = self.shared.lock().map_or(self.tablet.run, |display| display.runs_started);
+        if run != self.tablet.run {
+            self.tablet = TabletState {
+                run,
+                ..TabletState::default()
+            };
+        }
+    }
+
+    /// The point of the guest's picture under `pos`, on the tablet's scale,
+    /// for a picture drawn in `image_rect`.
+    fn tablet_position(&self, image_rect: egui::Rect, pos: egui::Pos2) -> rusty_box_core::input::pointer::PointerPos {
+        let (w, h) = (self.last_width.max(1), self.last_height.max(1));
+        let x = ((pos.x - image_rect.min.x) / image_rect.width().max(1.0) * w as f32).clamp(0.0, (w - 1) as f32);
+        let y = ((pos.y - image_rect.min.y) / image_rect.height().max(1.0) * h as f32).clamp(0.0, (h - 1) as f32);
+        rusty_box_core::input::pointer::PointerPos::from_pixel(x as u32, y as u32, w, h)
+    }
+
+    /// Route the host pointer over the picture to a machine's tablet: where
+    /// it is, its buttons and its wheel, each as it changes. The pointer is
+    /// never captured — it is the guest's while it is over the picture, and
+    /// the guest draws its own cursor there, so the host's is hidden.
+    fn handle_tablet_pointer(&mut self, ui: &egui::Ui, image_rect: egui::Rect) {
+        use super::host_input::AbsolutePointerEvent;
+        use rusty_box_core::input::pointer::WheelSteps;
+        use rusty_box_core::input::KeyAction;
+
+        if !self.shared_emu_running() {
+            return;
+        }
+        self.tablet_for_this_run();
+        // A button pressed over the picture is the guest's until it is
+        // released, wherever the pointer then goes: the pointer follows to
+        // the picture's edge, and the release is sent. Over nothing else is
+        // anything the guest's.
+        let over = ui.rect_contains_pointer(image_rect);
+        if !over && !self.tablet.held.contains(&true) {
+            return;
+        }
+        if over {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        }
+        let (hover, buttons, wheel) = ui.ctx().input(|input| {
+            let buttons = TABLET_BUTTONS.map(|(egui_button, _)| input.pointer.button_down(egui_button));
+            let wheel: f32 = input
+                .raw
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::MouseWheel { unit, delta, .. } => Some(match unit {
+                        egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => delta.y,
+                        egui::MouseWheelUnit::Point => delta.y / POINTS_PER_WHEEL_DETENT,
+                    }),
+                    _ => None,
+                })
+                .sum();
+            (input.pointer.hover_pos(), buttons, wheel)
+        });
+        let mut events = Vec::new();
+        if let Some(pos) = hover {
+            let at = self.tablet_position(image_rect, pos);
+            if self.tablet.position != Some(at) {
+                self.tablet.position = Some(at);
+                events.push(AbsolutePointerEvent::MoveTo(at));
+            }
+        }
+        for (i, &down) in buttons.iter().enumerate() {
+            // A press off the picture is not the guest's.
+            if down != self.tablet.held[i] && (over || !down) {
+                self.tablet.held[i] = down;
+                let action = if down { KeyAction::Press } else { KeyAction::Release };
+                events.push(AbsolutePointerEvent::Button(TABLET_BUTTONS[i].1, action));
+            }
+        }
+        if !over {
+            if !events.is_empty() {
+                if let Ok(mut display) = self.shared.lock() {
+                    display.pending_pointer.extend(events);
+                }
+            }
+            return;
+        }
+        self.tablet.wheel_detents += wheel;
+        let whole = self.tablet.wheel_detents.trunc();
+        if whole != 0.0 {
+            self.tablet.wheel_detents -= whole;
+            events.push(AbsolutePointerEvent::Wheel(WheelSteps(whole as i32)));
+        }
+        if !events.is_empty() {
+            if let Ok(mut display) = self.shared.lock() {
+                display.pending_pointer.extend(events);
+            }
+        }
+    }
+
+    /// Touch on a machine with a tablet is a touchscreen: a finger down on
+    /// the picture moves the pointer there and presses the left button, a
+    /// finger moving drags, and lifting it releases.
+    fn handle_tablet_touch(&mut self, ui: &egui::Ui, image_rect: egui::Rect) {
+        use super::host_input::AbsolutePointerEvent;
+        use rusty_box_core::input::pointer::PointerButton;
+        use rusty_box_core::input::KeyAction;
+
+        if !self.shared_emu_running() {
+            return;
+        }
+        self.tablet_for_this_run();
+        let touches: Vec<(egui::TouchId, egui::TouchPhase, egui::Pos2)> = ui.ctx().input(|input| {
+            input
+                .raw
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Touch { id, phase, pos, .. } => Some((*id, *phase, *pos)),
+                    _ => None,
+                })
+                .collect()
+        });
+        let mut events = Vec::new();
+        // One finger is the pointer, from its touch to its lift; any other
+        // finger meanwhile does nothing.
+        for (id, phase, pos) in touches {
+            let on_picture = image_rect.contains(pos) && ui.ctx().layer_id_at(pos) == Some(ui.layer_id());
+            let at = self.tablet_position(image_rect, pos);
+            let holding = self.tablet.finger == Some(id);
+            match phase {
+                egui::TouchPhase::Start if on_picture && self.tablet.finger.is_none() => {
+                    self.tablet.finger = Some(id);
+                    self.tablet.position = Some(at);
+                    self.tablet.held[0] = true;
+                    events.push(AbsolutePointerEvent::MoveTo(at));
+                    events.push(AbsolutePointerEvent::Button(PointerButton::Left, KeyAction::Press));
+                }
+                egui::TouchPhase::Move if holding && self.tablet.position != Some(at) => {
+                    self.tablet.position = Some(at);
+                    events.push(AbsolutePointerEvent::MoveTo(at));
+                }
+                egui::TouchPhase::End | egui::TouchPhase::Cancel if holding => {
+                    self.tablet.finger = None;
+                    self.tablet.held[0] = false;
+                    events.push(AbsolutePointerEvent::Button(PointerButton::Left, KeyAction::Release));
+                }
+                egui::TouchPhase::Start | egui::TouchPhase::Move | egui::TouchPhase::End | egui::TouchPhase::Cancel => {}
+            }
+        }
+        if !events.is_empty() {
+            if let Ok(mut display) = self.shared.lock() {
+                display.pending_pointer.extend(events);
+            }
         }
     }
 
@@ -129,6 +328,62 @@ impl RustyBoxApp {
             .lock()
             .map(|display| display.emu_running)
             .unwrap_or(false)
+    }
+
+    /// The serial terminal `screen`, shown in `area`, as a keyboard target:
+    /// a click on it takes the keyboard, as clicking a terminal window does,
+    /// and while it holds it every key is sent to the guest's serial console
+    /// as xterm sends it, Tab, the arrows and Esc included; a click
+    /// elsewhere gives the keyboard back.
+    fn type_into_serial_terminal(&mut self, ui: &egui::Ui, screen: &egui::Response, area: egui::Rect) {
+        // The text is only as large as what the guest has written; a click
+        // anywhere in the terminal's area, below or beside it, counts too.
+        let backdrop = ui.interact(area, screen.id.with("area"), egui::Sense::click());
+        if screen.clicked() || backdrop.clicked() {
+            screen.request_focus();
+        }
+        self.serial_focused = screen.has_focus();
+        if !self.serial_focused {
+            return;
+        }
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                screen.id,
+                egui::EventFilter {
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                },
+            );
+        });
+        let application_cursor = self.serial_terminal.application_cursor();
+        // With text selected, Ctrl+C (and Ctrl+X) copy it, as in a terminal
+        // window; egui's label selection does the copying.
+        let selected = ui
+            .ctx()
+            .with_plugin(|selection: &mut egui::text_selection::LabelSelectionState| selection.has_selection())
+            .unwrap_or(false);
+        let typed: Vec<u8> = ui.input(|input| {
+            input
+                .events
+                .iter()
+                .filter(|event| !(selected && matches!(event, egui::Event::Copy | egui::Event::Cut)))
+                .filter_map(|event| super::serial_terminal::terminal_input(event, application_cursor))
+                .flatten()
+                .collect()
+        });
+        if !typed.is_empty() && self.cached_emu_running {
+            if let Ok(mut display) = self.shared.lock() {
+                display.queue_serial_input(&typed);
+            }
+        }
+        ui.painter().rect_stroke(
+            area,
+            0.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(0x56, 0x9C, 0xD6)),
+            egui::StrokeKind::Inside,
+        );
     }
 
     fn send_serial_input(&mut self) {
@@ -307,11 +562,9 @@ impl RustyBoxApp {
             }
             self.cached_startup_status.clone_from(&display.startup_status);
 
-            // Sync serial log if it changed.
-            if display.serial_log.len() != self.serial_log_len {
-                self.cached_serial_log.clone_from(&display.serial_log);
-                self.serial_log_len = display.serial_log.len();
-            }
+            // Feed the serial terminal what the log gained.
+            self.serial_terminal
+                .catch_up(&display.serial_log, display.serial_written);
 
             if !display.fb_dirty && self.texture.is_some() {
                 return;
@@ -435,6 +688,7 @@ impl RustyBoxApp {
         // bypass egui's focus gate so chords (Ctrl+C, Alt+Tab in the guest) reach
         // the VM even if a host widget holds focus.
         if self.shared_emu_running()
+            && !self.serial_focused
             && (self.mouse_captured() || !ctx.egui_wants_keyboard_input())
         {
             self.process_input(&ctx);
@@ -538,52 +792,127 @@ impl RustyBoxApp {
                 .resizable(true)
                 .min_size(SERIAL_PANEL_MIN_HEIGHT)
                 .default_size(SERIAL_PANEL_DEFAULT_HEIGHT)
-                .max_size(SERIAL_PANEL_MAX_HEIGHT)
+                // No cap: a drag takes it as tall as the console area allows.
                 .frame(
                     egui::Frame::NONE
                         .fill(console_bg)
                         .inner_margin(egui::Margin::same(6)),
                 )
                 .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new("Serial Console (ttyS0)")
-                            .monospace()
-                            .size(10.0)
-                            .color(egui::Color32::from_rgb(0x66, 0x66, 0x88)),
-                    );
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .stick_to_bottom(true)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(&self.cached_serial_log)
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(console_text),
+                    // The input row is laid out first, from the panel's bottom
+                    // edge, and the log fills only the height left above it: a
+                    // log that claimed the whole panel would push the row past
+                    // the panel, which the panel then grows to hold, up to its
+                    // cap, where the overflow is clipped and the drawn edge is
+                    // no longer the one that resizes it.
+                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                        // A phone's soft keyboard opens for a text field, so
+                        // there a line is typed here and sent with Enter;
+                        // elsewhere the terminal takes the keyboard itself.
+                        if cfg!(target_os = "android") {
+                            ui.horizontal(|ui| {
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut self.serial_input)
+                                        .desired_width(260.0)
+                                        .hint_text("serial input"),
+                                );
+                                let enter_pressed = response.lost_focus()
+                                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                                let send_enabled = self.cached_emu_running && !self.serial_input.is_empty();
+                                if ui
+                                    .add_enabled(send_enabled, egui::Button::new("Send"))
+                                    .clicked()
+                                    || (send_enabled && enter_pressed)
+                                {
+                                    self.send_serial_input();
+                                }
+                            });
+                            ui.separator();
+                        }
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                            ui.horizontal(|ui| {
+                                let muted = egui::Color32::from_rgb(0x66, 0x66, 0x88);
+                                ui.label(egui::RichText::new("Serial Console").monospace().size(10.0).color(muted));
+                                let hint = if self.serial_focused {
+                                    "typing to the guest; click outside to stop"
+                                } else {
+                                    "click to type, drag to select"
+                                };
+                                ui.label(egui::RichText::new(hint).monospace().size(10.0).color(muted));
+                                if ui.small_button("Copy Log").clicked() {
+                                    ui.ctx().copy_text(self.serial_terminal.text());
+                                }
+                            });
+                            ui.separator();
+                            // Both ways: a guest may size its screen wider
+                            // than the panel (GRUB on EDK2 asks for 240
+                            // columns).
+                            let font = egui::FontId::monospace(11.0);
+                            let screen = self.serial_terminal.layout(
+                                &font,
+                                super::serial_terminal::TerminalColours {
+                                    foreground: console_text,
+                                    background: console_bg,
+                                },
                             );
+                            // New output brings the screen into view as a
+                            // terminal window shows it: from its top row when
+                            // the rows down to the cursor fit, else as far as
+                            // the cursor. Between outputs the view stays where
+                            // it was scrolled, the scrollback above it.
+                            let follow = self
+                                .serial_terminal
+                                .take_new_output()
+                                .then(|| self.serial_terminal.cursor_cell())
+                                .flatten();
+                            let screen_lines = self.serial_terminal.screen_lines();
+                            // Not animated: a terminal shows its cursor at
+                            // once, and output arriving every frame would
+                            // otherwise retarget an easing scroll each frame.
+                            let scrolled = egui::ScrollArea::both()
+                                .auto_shrink([false, false])
+                                .animated(false)
+                                .show(ui, |ui| {
+                                    // Selectable as any text is: a drag
+                                    // selects, Ctrl+C copies the selection.
+                                    let shown = ui.add(
+                                        egui::Label::new(screen)
+                                            .extend()
+                                            .selectable(true)
+                                            .sense(egui::Sense::click_and_drag()),
+                                    );
+                                    if let Some(cell) = follow {
+                                        // The rows as laid out, not the font's
+                                        // nominal height, whose difference
+                                        // would grow down the scrollback.
+                                        let lines = screen_lines.first + screen_lines.count;
+                                        let line_height = shown.rect.height() / lines.max(1) as f32;
+                                        let cell_width = ui.fonts_mut(|fonts| fonts.glyph_width(&font, 'M'));
+                                        let line_top = |line: usize| shown.rect.top() + line as f32 * line_height;
+                                        let cursor = egui::Rect::from_min_size(
+                                            egui::pos2(
+                                                shown.rect.left() + cell.col as f32 * cell_width,
+                                                line_top(cell.line),
+                                            ),
+                                            egui::vec2(cell_width, line_height),
+                                        );
+                                        let screen_top = line_top(screen_lines.first);
+                                        if cursor.bottom() - screen_top <= ui.clip_rect().height() {
+                                            ui.scroll_to_rect(
+                                                egui::Rect::from_min_max(
+                                                    egui::pos2(shown.rect.left(), screen_top),
+                                                    cursor.max,
+                                                ),
+                                                Some(egui::Align::TOP),
+                                            );
+                                        } else {
+                                            ui.scroll_to_rect(cursor, None);
+                                        }
+                                    }
+                                    shown
+                                });
+                            self.type_into_serial_terminal(ui, &scrolled.inner, scrolled.inner_rect);
                         });
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut self.serial_input)
-                                .desired_width(260.0)
-                                .hint_text("serial input"),
-                        );
-                        let enter_pressed = response.lost_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                        let send_enabled = self.cached_emu_running && !self.serial_input.is_empty();
-                        if ui
-                            .add_enabled(send_enabled, egui::Button::new("Send"))
-                            .clicked()
-                            || (send_enabled && enter_pressed)
-                        {
-                            self.send_serial_input();
-                        }
-                        if ui.button("Copy Log").clicked() {
-                            ui.ctx().copy_text(self.cached_serial_log.clone());
-                        }
-                        ui.add_enabled(false, egui::Button::new("Paste"));
                     });
                 });
         }
@@ -666,9 +995,12 @@ impl RustyBoxApp {
                     });
                 }
                 if let Some(rect) = image_rect {
-                    match self.pointer_mode {
-                        PointerMode::Mouse => self.handle_display_pointer(ui, rect),
-                        PointerMode::Touchpad => self.handle_touchpad(ui, rect, region),
+                    match (self.pointer_device(), self.pointer_mode) {
+                        (PointerDevice::RelativeMouse, PointerMode::Mouse) => self.handle_display_pointer(ui, rect),
+                        (PointerDevice::RelativeMouse, PointerMode::Touchpad) => self.handle_touchpad(ui, rect, region),
+                        (PointerDevice::AbsoluteTablet, PointerMode::Mouse) => self.handle_tablet_pointer(ui, rect),
+                        (PointerDevice::AbsoluteTablet, PointerMode::Touchpad) => self.handle_tablet_touch(ui, rect),
+                        (PointerDevice::Absent, PointerMode::Mouse | PointerMode::Touchpad) => {}
                     }
                 }
             });
@@ -837,7 +1169,7 @@ mod tests {
 
         assert_eq!(
             shared.lock().unwrap().drain_serial_input(),
-            b"help\n".to_vec()
+            b"help\r".to_vec()
         );
         assert!(app.serial_input.is_empty());
     }
@@ -845,7 +1177,6 @@ mod tests {
     #[test]
     fn serial_panel_uses_compact_default_size() {
         assert!(SERIAL_PANEL_DEFAULT_HEIGHT <= 96.0);
-        assert!(SERIAL_PANEL_MAX_HEIGHT <= 220.0);
     }
 
     #[test]

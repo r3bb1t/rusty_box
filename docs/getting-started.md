@@ -439,8 +439,9 @@ reads `This VM is powered off`. While a startup disk is being created, the
 display shows a spinner and a notice naming the image until the guest draws
 its first frame.
 
-The serial pane is headed `Serial Console (ttyS0)` and shows what the guest
-writes to its first serial port, COM1:
+The serial pane is headed `Serial Console` and shows what the guest writes to
+its first serial port: COM1 on a PC (Linux's `ttyS0`), the PL011 UART on an
+Arm `virt` board (Linux's `ttyAMA0`):
 
 - the log, scrolled to its end;
 - a `serial input` line: `Send`, or Enter, sends the line with a newline
@@ -529,6 +530,13 @@ under Hardware › Hard Disk, open the new-disk sheet on that pane:
 The disk is a flat image with 16 heads and 63 sectors per track. It is
 written by seeking to its end, so on ext4, APFS and a phone's storage the file
 grows as the guest fills it, while on NTFS the whole size is taken at once.
+
+**Where writes go.** The attached disk's card has a `Writes` choice:
+`Saved to the image` (the default) or `Kept until power-off`. The second opens
+the image read-only and keeps the guest's writes in a journal that is removed
+at power-off, so every power-on starts from the same disk; Restart keeps them. `Journal` names the file
+the journal is named after, with a random suffix added; leave it blank to keep
+the journal beside the image.
 
 **A floppy image.** `…` › `Create floppy image…` opens the floppy maker: one
 of the ten bximage formats, from 160 KB to 2.88 MB, written to the path under
@@ -686,6 +694,8 @@ disk instead of the installer again. No guest install is recorded yet (see
 path = "my-disk.img"
 channel = 0          # ATA channel 0 or 1 (default 0)
 drive = 0            # master (0) or slave (1) (default 0)
+mode = "flat"        # or "volatile": the image is read-only; writes go to a journal removed at power-off
+# journal = "xp.journal"   # volatile only, optional: the journal's name, with a random suffix added; default: beside the image
 chs = { cylinders = 1024, heads = 16, sectors_per_track = 63 }  # optional override
 ```
 
@@ -693,6 +703,19 @@ When `chs` is omitted, the geometry is worked out from the file size: 16 heads
 and 63 sectors per track, with as many cylinders as the size needs. The file
 must be a non-zero multiple of 512 bytes. Override `chs` only for images that
 expect an unusual layout.
+
+With `mode = "volatile"` the guest can write the disk but the file never
+changes: the image is opened read-only and every sector written goes to a
+journal, named after the image (or after `journal`) with a random suffix, that
+is removed at power-off. The shell's Restart keeps the writes; only powering
+off discards them. Every power-on starts from the same disk, which is what a
+debugging run wants. A snapshot taken while the VM runs carries the written
+sectors and restores them, and refuses to restore over an image that has been
+modified since. A `journal` without `mode = "volatile"` is refused, unless
+`--disk-mode flat` on the command line sets the file's volatile mode aside;
+an empty `journal` or `"none"` means beside the image, and a relative one on
+the command line or the Hard disk page names a file in the folder the
+emulator was started in.
 
 ### `[disk.create]`: create a blank disk automatically
 
@@ -1044,6 +1067,8 @@ add the memory and IPS target the guest needs (see
 | `--boot <disk,cdrom>` | `boot.order` | Boot order: `disk`, `cdrom`, or both, comma-separated, each at most once |
 | `--disk <PATH>` | `disk.path` | Attach an existing disk image |
 | `--disk-chs <C:H:S>` | `disk.chs` | Override the disk geometry (`,` also accepted as separator) |
+| `--disk-mode <flat\|volatile>` | `disk.mode` | Where writes go: into the image (`flat`, the default) or into a journal removed at power-off (`volatile`) |
+| `--disk-journal <PATH>` | `disk.journal` | The volatile journal's name (a random suffix is added); default: beside the image |
 | `--create-disk <PATH>` | `disk.create.path` | Create the disk image at this path (conflicts with `--disk` / `--disk-chs`) |
 | `--create-disk-size <SIZE>` | `disk.create.size` | Size of the created disk, e.g. `12G` |
 | `--overwrite-created-disk` | `disk.create.overwrite` | Recreate the image on every launch |

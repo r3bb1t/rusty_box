@@ -1439,7 +1439,10 @@ mod tests {
         let raised = machine
             .with_machine(|m| {
                 assert!(
-                    m.keyboard().key(rusty_box::iodev::scancodes::BxKey::A, true),
+                    m.keyboard().key(
+                        rusty_box::iodev::scancodes::BxKey::A,
+                        rusty_box::emulator::KeyAction::Press
+                    ),
                     "the 8042 took the keystroke"
                 );
                 for _ in 0..200 {

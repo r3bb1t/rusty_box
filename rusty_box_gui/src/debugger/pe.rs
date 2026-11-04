@@ -43,13 +43,28 @@ pub(crate) struct PeSection {
 }
 
 fn read_u16(bytes: &[u8], at: usize) -> Option<u16> {
-    bytes.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]))
+    bytes
+        .get(at..)
+        .and_then(<[u8]>::first_chunk)
+        .copied()
+        .map(u16::from_le_bytes)
 }
 
 fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
     bytes
-        .get(at..at + 4)
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .get(at..)
+        .and_then(<[u8]>::first_chunk)
+        .copied()
+        .map(u32::from_le_bytes)
+}
+
+/// The bytes of `bytes` before its first NUL, or all of them when it has none.
+fn before_nul(bytes: &[u8]) -> &[u8] {
+    bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .and_then(|end| bytes.get(..end))
+        .unwrap_or(bytes)
 }
 
 /// The sections of the image whose headers begin at `header`, or `None` when
@@ -66,18 +81,19 @@ pub(crate) fn parse_sections(header: &[u8]) -> Option<Vec<PeSection>> {
     }
     // IMAGE_FILE_HEADER: NumberOfSections at +2, SizeOfOptionalHeader at +16,
     // relative to the signature's end.
-    let file_header = nt + 4;
-    let number_of_sections = read_u16(header, file_header + 2)?;
-    let optional_header_size = read_u16(header, file_header + 16)? as usize;
+    let file_header = nt.checked_add(4)?;
+    let number_of_sections = read_u16(header, file_header.checked_add(2)?)?;
+    let optional_header_size = usize::from(read_u16(header, file_header.checked_add(16)?)?);
     if number_of_sections == 0 || number_of_sections > MAX_SECTIONS {
         return None;
     }
-    let mut at = file_header + 20 + optional_header_size;
-    let mut sections = Vec::with_capacity(number_of_sections as usize);
+    let mut at = file_header
+        .checked_add(20)?
+        .checked_add(optional_header_size)?;
+    let mut sections = Vec::with_capacity(usize::from(number_of_sections));
     for _ in 0..number_of_sections {
-        let entry = header.get(at..at + SECTION_HEADER_LEN)?;
-        let end = entry[..8].iter().position(|&b| b == 0).unwrap_or(8);
-        let name = String::from_utf8_lossy(&entry[..end]).into_owned();
+        let entry: &[u8; SECTION_HEADER_LEN] = header.get(at..).and_then(<[u8]>::first_chunk)?;
+        let name = String::from_utf8_lossy(before_nul(entry.get(..8)?)).into_owned();
         let characteristics = read_u32(entry, 36)?;
         sections.push(PeSection {
             name,
@@ -89,7 +105,7 @@ pub(crate) fn parse_sections(header: &[u8]) -> Option<Vec<PeSection>> {
             executable: characteristics & SCN_MEM_EXECUTE != 0,
             code: characteristics & SCN_CNT_CODE != 0,
         });
-        at += SECTION_HEADER_LEN;
+        at = at.checked_add(SECTION_HEADER_LEN)?;
     }
     Some(sections)
 }
@@ -154,7 +170,17 @@ fn optional_header(header: &[u8]) -> Option<usize> {
     }
     // The optional header follows the 4-byte signature and the 20-byte file
     // header.
-    Some(nt + 4 + 20)
+    nt.checked_add(24)
+}
+
+/// The little-endian `u32`s of `bytes`, four bytes each; a trailing part
+/// shorter than four is not one.
+fn u32s(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .filter_map(|chunk| <[u8; 4]>::try_from(chunk).ok())
+        .map(u32::from_le_bytes)
+        .collect()
 }
 
 /// The exports of the image whose headers begin at `header`. `read(rva, len)`
@@ -170,14 +196,20 @@ where
     let Some(optional) = optional_header(header) else {
         return ExportRead::NotPe;
     };
-    let directory_at = match read_u16(header, optional) {
-        Some(PE32_PLUS_MAGIC) => optional + PE32_PLUS_EXPORT_DIRECTORY,
-        Some(PE32_MAGIC) => optional + PE32_EXPORT_DIRECTORY,
+    let directory = match read_u16(header, optional) {
+        Some(PE32_PLUS_MAGIC) => PE32_PLUS_EXPORT_DIRECTORY,
+        Some(PE32_MAGIC) => PE32_EXPORT_DIRECTORY,
         Some(_) | None => return ExportRead::NotPe,
     };
-    let (Some(table_rva), Some(table_size)) =
-        (read_u32(header, directory_at), read_u32(header, directory_at + 4))
-    else {
+    let Some(directory_at) = optional.checked_add(directory) else {
+        return ExportRead::NotPe;
+    };
+    let (Some(table_rva), Some(table_size)) = (
+        read_u32(header, directory_at),
+        directory_at
+            .checked_add(4)
+            .and_then(|at| read_u32(header, at)),
+    ) else {
         return ExportRead::NotPe;
     };
     if table_rva == 0 || table_size == 0 {
@@ -192,28 +224,27 @@ where
     if functions > MAX_EXPORTS || names > MAX_EXPORTS {
         return ExportRead::Unreadable;
     }
-    let u32s = |bytes: Vec<u8>| -> Vec<u32> {
-        bytes
-            .chunks_exact(4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect()
-    };
-    let Some(function_rvas) = read(field(28), functions as usize * 4).map(u32s) else {
+    // Both counts are at most MAX_EXPORTS, so the byte lengths cannot wrap.
+    let (functions, names) = (functions as usize, names as usize);
+    let Some(function_rvas) = read(field(28), functions.wrapping_mul(4)).map(|bytes| u32s(&bytes))
+    else {
         return ExportRead::Unreadable;
     };
-    let Some(name_rvas) = read(field(32), names as usize * 4).map(u32s) else {
+    let Some(name_rvas) = read(field(32), names.wrapping_mul(4)).map(|bytes| u32s(&bytes)) else {
         return ExportRead::Unreadable;
     };
-    let Some(name_ordinals) = read(field(36), names as usize * 2) else {
+    let Some(name_ordinals) = read(field(36), names.wrapping_mul(2)) else {
         return ExportRead::Unreadable;
     };
     // Each name names the function its ordinal index points at; the first
     // name for a function is kept.
     let mut name_of: Vec<Option<String>> = vec![None; function_rvas.len()];
-    for (name_rva, index) in name_rvas
-        .iter()
-        .zip(name_ordinals.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])))
-    {
+    for (name_rva, index) in name_rvas.iter().zip(
+        name_ordinals
+            .chunks_exact(2)
+            .filter_map(|chunk| <[u8; 2]>::try_from(chunk).ok())
+            .map(u16::from_le_bytes),
+    ) {
         if let Some(slot) = name_of.get_mut(usize::from(index)) {
             if slot.is_none() {
                 *slot = read_c_string(&mut read, *name_rva);
@@ -246,6 +277,334 @@ where
     ExportRead::Listed(exports)
 }
 
+/// `DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]` inside each optional header.
+const PE32_IMPORT_DIRECTORY: usize = 0x68;
+const PE32_PLUS_IMPORT_DIRECTORY: usize = 0x78;
+/// One `IMAGE_IMPORT_DESCRIPTOR`.
+const IMPORT_DESCRIPTOR_LEN: u32 = 20;
+/// The most modules and functions an import table is read for: past what
+/// any image imports, so more is a corrupt table.
+const MAX_IMPORT_MODULES: u32 = 1024;
+const MAX_IMPORTS: usize = 1 << 14;
+
+/// How an imported function is named in its module's name table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ImportName {
+    /// `IMAGE_IMPORT_BY_NAME`: the loader's hint into the exporter's name
+    /// table, and the name.
+    Named { hint: u16, name: String },
+    /// By ordinal: the name-table entry has its top bit set.
+    Ordinal(u16),
+    /// The module has no name table apart from its IAT, which the loader
+    /// overwrote with addresses: the name is gone from the loaded image.
+    Overwritten,
+    /// The `IMAGE_IMPORT_BY_NAME` it points at is paged out.
+    PagedOut,
+}
+
+/// One imported function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PeImport {
+    pub(crate) name: ImportName,
+    /// The RVA of its IAT slot.
+    pub(crate) slot: u32,
+    /// What the loaded slot holds: the address the import was bound to, or
+    /// `None` where the slot does not read.
+    pub(crate) bound: Option<u64>,
+}
+
+/// Where a module's list of imported functions stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThunksEnd {
+    /// At the table's terminating zero entry.
+    Terminated,
+    /// At an entry that is paged out, or that lies past the image's end: the
+    /// functions after it are unknown.
+    PagedOut,
+}
+
+/// The functions an image imports from one module.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImportedModule {
+    /// The module's name, as the descriptor names it; `None` where that
+    /// string is paged out.
+    pub(crate) name: Option<String>,
+    pub(crate) functions: Vec<PeImport>,
+    pub(crate) end: ThunksEnd,
+}
+
+/// What an image's import table came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ImportRead {
+    /// In the table's order.
+    Listed(Vec<ImportedModule>),
+    /// The image has no import table.
+    NoTable,
+    /// The headers do not read as a PE image.
+    NotPe,
+    /// The descriptor array is paged out or corrupt.
+    Unreadable,
+}
+
+/// The imports of the image whose headers begin at `header`, read through
+/// `read(rva, len)` as `parse_exports` reads. The layout is the PE
+/// specification's `IMAGE_IMPORT_DESCRIPTOR` array, ended by a zero
+/// descriptor: OriginalFirstThunk (+0), Name (+12) and FirstThunk (+16). The
+/// name table (OriginalFirstThunk, or FirstThunk when there is none) holds
+/// pointer-sized entries, the top bit marking an ordinal; the IAT
+/// (FirstThunk) holds, once loaded, the address each import was bound to.
+pub(crate) fn parse_imports<R>(header: &[u8], mut read: R) -> ImportRead
+where
+    R: FnMut(u32, usize) -> Option<Vec<u8>>,
+{
+    let Some(optional) = optional_header(header) else {
+        return ImportRead::NotPe;
+    };
+    let (directory, format) = match read_u16(header, optional) {
+        Some(PE32_PLUS_MAGIC) => (PE32_PLUS_IMPORT_DIRECTORY, THUNK64),
+        Some(PE32_MAGIC) => (PE32_IMPORT_DIRECTORY, THUNK32),
+        Some(_) | None => return ImportRead::NotPe,
+    };
+    let thunk = format.width;
+    let ordinal_flag = format.ordinal_flag;
+    let Some(directory_at) = optional.checked_add(directory) else {
+        return ImportRead::NotPe;
+    };
+    let Some(table_rva) = read_u32(header, directory_at) else {
+        return ImportRead::NotPe;
+    };
+    let table_size = directory_at
+        .checked_add(4)
+        .and_then(|at| read_u32(header, at))
+        .unwrap_or(0);
+    if table_rva == 0 || table_size == 0 {
+        return ImportRead::NoTable;
+    }
+    // A thunk array is read no further than the image: what lies past it is
+    // not the image's. A header that gives no size bounds nothing.
+    let image_end = optional
+        .checked_add(SIZE_OF_IMAGE)
+        .and_then(|at| read_u32(header, at))
+        .filter(|&size| size != 0)
+        .unwrap_or(u32::MAX);
+    let mut modules = Vec::new();
+    let mut functions_read = 0usize;
+    for index in 0..MAX_IMPORT_MODULES {
+        // `index` stays below MAX_IMPORT_MODULES, so the product cannot wrap.
+        let at = table_rva.wrapping_add(index.wrapping_mul(IMPORT_DESCRIPTOR_LEN));
+        let Some(descriptor) = read(at, IMPORT_DESCRIPTOR_LEN as usize) else {
+            return ImportRead::Unreadable;
+        };
+        let field = |at: usize| read_u32(&descriptor, at).unwrap_or(0);
+        let (names_rva, name_rva, iat_rva) = (field(0), field(12), field(16));
+        if descriptor.iter().all(|&byte| byte == 0) {
+            return ImportRead::Listed(modules);
+        }
+        // Without OriginalFirstThunk the IAT is the name table, and the
+        // loader has written addresses over it.
+        let overwritten = names_rva == 0;
+        let names_rva = if overwritten { iat_rva } else { names_rva };
+        let mut names = ThunkPages::new(thunk, image_end);
+        let mut iat = ThunkPages::new(thunk, image_end);
+        let mut functions = Vec::new();
+        let mut end = ThunksEnd::PagedOut;
+        for n in 0u32.. {
+            if functions_read >= MAX_IMPORTS {
+                return ImportRead::Unreadable;
+            }
+            let offset = n.wrapping_mul(thunk);
+            let Some(entry) = names.entry(&mut read, names_rva.wrapping_add(offset)) else {
+                break;
+            };
+            if entry == 0 {
+                end = ThunksEnd::Terminated;
+                break;
+            }
+            let slot = iat_rva.wrapping_add(offset);
+            let name = if overwritten {
+                ImportName::Overwritten
+            } else if entry & ordinal_flag != 0 {
+                ImportName::Ordinal(entry as u16)
+            } else {
+                read_by_name(&mut read, entry as u32)
+            };
+            let bound = if overwritten {
+                Some(entry)
+            } else {
+                iat.entry(&mut read, slot)
+            };
+            functions.push(PeImport { name, slot, bound });
+            functions_read = functions_read.saturating_add(1);
+        }
+        modules.push(ImportedModule {
+            name: read_c_string(&mut read, name_rva),
+            functions,
+            end,
+        });
+    }
+    ImportRead::Unreadable
+}
+
+/// `DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION]` inside each optional
+/// header.
+const PE32_EXCEPTION_DIRECTORY: usize = 0x78;
+const PE32_PLUS_EXCEPTION_DIRECTORY: usize = 0x88;
+
+/// One `IMAGE_DATA_DIRECTORY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DataDirectory {
+    pub(crate) rva: u32,
+    pub(crate) size: u32,
+}
+
+/// The exception directory (x64: the `RUNTIME_FUNCTION` table) of the image
+/// whose headers begin at `header`; `None` when it has none or the headers
+/// do not read as PE.
+pub(crate) fn exception_directory(header: &[u8]) -> Option<DataDirectory> {
+    let optional = optional_header(header)?;
+    let entry = match read_u16(header, optional)? {
+        PE32_PLUS_MAGIC => PE32_PLUS_EXCEPTION_DIRECTORY,
+        PE32_MAGIC => PE32_EXCEPTION_DIRECTORY,
+        _ => return None,
+    };
+    let at = optional.checked_add(entry)?;
+    let directory = DataDirectory { rva: read_u32(header, at)?, size: read_u32(header, at.checked_add(4)?)? };
+    (directory.rva != 0 && directory.size != 0).then_some(directory)
+}
+
+/// `IMAGE_OPTIONAL_HEADER.SizeOfImage`, at one offset in PE32 and PE32+.
+const SIZE_OF_IMAGE: usize = 0x38;
+/// `IMAGE_OPTIONAL_HEADER.AddressOfEntryPoint`, at one offset in PE32 and
+/// PE32+.
+const ADDRESS_OF_ENTRY_POINT: usize = 16;
+
+/// The width of the code an image holds, as its optional header's magic
+/// says: PE32 is 32-bit, PE32+ 64-bit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageWidth {
+    Bits32,
+    Bits64,
+}
+
+/// The width of the image whose headers begin at `header`; `None` when they
+/// do not read as PE.
+pub(crate) fn image_width(header: &[u8]) -> Option<ImageWidth> {
+    match read_u16(header, optional_header(header)?)? {
+        PE32_PLUS_MAGIC => Some(ImageWidth::Bits64),
+        PE32_MAGIC => Some(ImageWidth::Bits32),
+        _ => None,
+    }
+}
+
+/// The RVA the image starts running at; `None` for an image without one (a
+/// DLL may have none) or headers that do not read as PE.
+pub(crate) fn entry_point(header: &[u8]) -> Option<u32> {
+    image_width(header)?;
+    let at = optional_header(header)?.checked_add(ADDRESS_OF_ENTRY_POINT)?;
+    read_u32(header, at).filter(|rva| *rva != 0)
+}
+
+/// A name-table entry's shape: its width in bytes, and the bit that marks an
+/// import by ordinal.
+#[derive(Clone, Copy)]
+struct ThunkFormat {
+    width: u32,
+    ordinal_flag: u64,
+}
+
+/// `IMAGE_THUNK_DATA32` with `IMAGE_ORDINAL_FLAG32`.
+const THUNK32: ThunkFormat = ThunkFormat {
+    width: 4,
+    ordinal_flag: 1 << 31,
+};
+/// `IMAGE_THUNK_DATA64` with `IMAGE_ORDINAL_FLAG64`.
+const THUNK64: ThunkFormat = ThunkFormat {
+    width: 8,
+    ordinal_flag: 1 << 63,
+};
+
+/// A thunk array's entries, `width` bytes each, read a page at a time and
+/// never past `image_end`.
+struct ThunkPages {
+    width: u32,
+    image_end: u32,
+    /// The bytes last read, from RVA `at`.
+    at: u32,
+    bytes: Vec<u8>,
+}
+
+impl ThunkPages {
+    fn new(width: u32, image_end: u32) -> Self {
+        Self {
+            width,
+            image_end,
+            at: 0,
+            bytes: Vec::new(),
+        }
+    }
+
+    /// The entry at `rva`, or `None` where it lies past the image or does
+    /// not read. A read brings in the rest of the entry's page.
+    fn entry<R>(&mut self, read: &mut R, rva: u32) -> Option<u64>
+    where
+        R: FnMut(u32, usize) -> Option<Vec<u8>>,
+    {
+        let end = rva.checked_add(self.width).filter(|&end| end <= self.image_end)?;
+        let held = rva >= self.at
+            && u64::from(end) <= u64::from(self.at).saturating_add(self.bytes.len() as u64);
+        if !held {
+            // `rva` fits in 32 bits, so the next page boundary fits in 64.
+            let page_end = (u64::from(rva) | u64::from(PAGE_BYTES - 1)).wrapping_add(1);
+            // An entry that crosses a page boundary is read whole. Both
+            // `page_end` and `end` lie past `rva`, and `end <= image_end`, so
+            // the fill length cannot wrap.
+            let fill_end = page_end.max(u64::from(end)).min(u64::from(self.image_end));
+            self.bytes = read(rva, fill_end.wrapping_sub(u64::from(rva)) as usize)?;
+            self.at = rva;
+        }
+        // Held bytes start at or before `rva`, so the offset cannot wrap.
+        let from = rva.wrapping_sub(self.at) as usize;
+        let entry = self.bytes.get(from..)?.get(..self.width as usize)?;
+        let mut raw = [0u8; 8];
+        for (to, &byte) in raw.iter_mut().zip(entry) {
+            *to = byte;
+        }
+        Some(u64::from_le_bytes(raw))
+    }
+}
+
+/// The `IMAGE_IMPORT_BY_NAME` at `rva` — a 2-byte hint, then the name — read
+/// with its page in one read; a name that runs on into the next page is read
+/// on from there.
+fn read_by_name<R>(read: &mut R, rva: u32) -> ImportName
+where
+    R: FnMut(u32, usize) -> Option<Vec<u8>>,
+{
+    let in_page = bytes_left_in_page(rva);
+    // A hint split across a page boundary is read whole.
+    let take = in_page.clamp(2, 2 + MAX_EXPORT_NAME);
+    let Some(chunk) = read(rva, take) else {
+        return ImportName::PagedOut;
+    };
+    let Some((hint, text)) = chunk.split_first_chunk::<2>() else {
+        return ImportName::PagedOut;
+    };
+    let hint = u16::from_le_bytes(*hint);
+    let name = match text.iter().position(|&byte| byte == 0).and_then(|end| text.get(..end)) {
+        Some(name) => String::from_utf8_lossy(name).into_owned(),
+        None => {
+            let Some(rest) = rva
+                .checked_add(take as u32)
+                .and_then(|next| read_c_string(read, next))
+            else {
+                return ImportName::PagedOut;
+            };
+            format!("{}{rest}", String::from_utf8_lossy(text))
+        }
+    };
+    ImportName::Named { hint, name }
+}
+
 /// The NUL-terminated ASCII string at `rva`, up to `MAX_EXPORT_NAME` bytes,
 /// read a page at a time so a short name near a page's end reads even when
 /// the next page does not.
@@ -256,12 +615,11 @@ where
     let mut bytes = Vec::new();
     let mut at = rva;
     while bytes.len() < MAX_EXPORT_NAME {
-        let in_page = (PAGE_BYTES - at % PAGE_BYTES) as usize;
-        let take = in_page.min(MAX_EXPORT_NAME - bytes.len());
+        let take = bytes_left_in_page(at).min(MAX_EXPORT_NAME.saturating_sub(bytes.len()));
         let chunk = read(at, take)?;
-        match chunk.iter().position(|&b| b == 0) {
-            Some(end) => {
-                bytes.extend_from_slice(&chunk[..end]);
+        match chunk.iter().position(|&b| b == 0).and_then(|end| chunk.get(..end)) {
+            Some(text) => {
+                bytes.extend_from_slice(text);
                 return Some(String::from_utf8_lossy(&bytes).into_owned());
             }
             None => bytes.extend_from_slice(&chunk),
@@ -271,8 +629,13 @@ where
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// How many bytes from `rva` to the end of its page: 1 through `PAGE_BYTES`.
+fn bytes_left_in_page(rva: u32) -> usize {
+    PAGE_BYTES.wrapping_sub(rva & (PAGE_BYTES - 1)) as usize
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn put_u16(bytes: &mut [u8], at: usize, value: u16) {
@@ -308,6 +671,47 @@ mod tests {
         put_u32(&mut bytes, at + 16, 0x2000);
         put_u32(&mut bytes, at + 36, SCN_MEM_READ | SCN_MEM_WRITE);
         bytes
+    }
+
+    /// Headers of a PE32 (`wide` false) or PE32+ image whose exception
+    /// directory is `directory`.
+    fn with_exception_directory(wide: bool, directory: DataDirectory) -> Vec<u8> {
+        let mut bytes = vec![0u8; 0x200];
+        put_u16(&mut bytes, 0, 0x5A4D);
+        put_u32(&mut bytes, 0x3C, 0x80);
+        put_u32(&mut bytes, 0x80, 0x0000_4550);
+        let optional = 0x98;
+        put_u16(&mut bytes, optional, if wide { PE32_PLUS_MAGIC } else { PE32_MAGIC });
+        let entry = optional + if wide { 0x88 } else { 0x78 };
+        put_u32(&mut bytes, entry, directory.rva);
+        put_u32(&mut bytes, entry + 4, directory.size);
+        bytes
+    }
+
+    #[test]
+    fn the_width_and_entry_point_read_from_the_optional_header() {
+        for wide in [false, true] {
+            let mut header = with_exception_directory(wide, DataDirectory { rva: 0, size: 0 });
+            let width = if wide { ImageWidth::Bits64 } else { ImageWidth::Bits32 };
+            assert_eq!(image_width(&header), Some(width));
+            assert_eq!(entry_point(&header), None, "no entry point");
+            // AddressOfEntryPoint sits 16 bytes into either optional header.
+            put_u32(&mut header, 0x98 + 16, 0x1234);
+            assert_eq!(entry_point(&header), Some(0x1234));
+        }
+        assert_eq!(image_width(b"MZ"), None);
+        assert_eq!(entry_point(&[0u8; 0x200]), None);
+    }
+
+    #[test]
+    fn the_exception_directory_is_read_from_either_header() {
+        let directory = DataDirectory { rva: 0x5000, size: 0x30 };
+        for wide in [false, true] {
+            assert_eq!(exception_directory(&with_exception_directory(wide, directory)), Some(directory), "wide {wide}");
+        }
+        let empty = DataDirectory { rva: 0, size: 0 };
+        assert_eq!(exception_directory(&with_exception_directory(true, empty)), None);
+        assert_eq!(exception_directory(b"MZ"), None);
     }
 
     #[test]
@@ -425,6 +829,163 @@ mod tests {
         assert_eq!(parse_exports(&[0u8; 0x200], |_, _| None), ExportRead::NotPe);
     }
 
+    /// A flat image (each RVA its own offset) with an import table at RVA
+    /// 0x2400: ntdll.dll's `NtClose` by name and ordinal 16, and OLD.dll,
+    /// whose name table is its IAT, so the loader overwrote its names.
+    /// `wide` lays it out as PE32+ (8-byte thunks), else as PE32.
+    pub(crate) fn importing_image(wide: bool) -> Vec<u8> {
+        let mut bytes = vec![0u8; 0x3000];
+        put_u16(&mut bytes, 0, 0x5A4D);
+        let nt = 0x80usize;
+        put_u32(&mut bytes, 0x3C, nt as u32);
+        put_u32(&mut bytes, nt, 0x0000_4550);
+        let optional = nt + 4 + 20;
+        let (magic, directory, thunk, ordinal_flag) = if wide {
+            (0x20B, 0x78, 8, 1u64 << 63)
+        } else {
+            (0x10B, 0x68, 4, 1u64 << 31)
+        };
+        put_u16(&mut bytes, optional, magic);
+        put_u32(&mut bytes, optional + 0x38, 0x3000); // SizeOfImage
+        put_u32(&mut bytes, optional + directory, 0x2400); // DataDirectory[IMPORT]
+        put_u32(&mut bytes, optional + directory + 4, 0x3C);
+        let put_thunk = |bytes: &mut Vec<u8>, at: usize, value: u64| {
+            bytes[at..at + thunk].copy_from_slice(&value.to_le_bytes()[..thunk]);
+        };
+        // ntdll.dll: OriginalFirstThunk, Name, FirstThunk.
+        put_u32(&mut bytes, 0x2400, 0x2500);
+        put_u32(&mut bytes, 0x2400 + 12, 0x2600);
+        put_u32(&mut bytes, 0x2400 + 16, 0x2700);
+        put_thunk(&mut bytes, 0x2500, 0x2800);
+        put_thunk(&mut bytes, 0x2500 + thunk, ordinal_flag | 16);
+        put_thunk(&mut bytes, 0x2700, 0x7FF8_1380);
+        put_thunk(&mut bytes, 0x2700 + thunk, 0x7FF8_2000);
+        put_u16(&mut bytes, 0x2800, 5); // hint
+        bytes[0x2802..0x280A].copy_from_slice(b"NtClose\0");
+        bytes[0x2600..0x260A].copy_from_slice(b"ntdll.dll\0");
+        // OLD.dll: no OriginalFirstThunk.
+        put_u32(&mut bytes, 0x2414 + 12, 0x2610);
+        put_u32(&mut bytes, 0x2414 + 16, 0x2720);
+        put_thunk(&mut bytes, 0x2720, 0x7FF9_0000);
+        bytes[0x2610..0x2618].copy_from_slice(b"OLD.dll\0");
+        bytes
+    }
+
+    fn imported_by_both() -> Vec<ImportedModule> {
+        vec![
+            ImportedModule {
+                name: Some("ntdll.dll".to_owned()),
+                functions: vec![
+                    PeImport {
+                        name: ImportName::Named {
+                            hint: 5,
+                            name: "NtClose".to_owned(),
+                        },
+                        slot: 0x2700,
+                        bound: Some(0x7FF8_1380),
+                    },
+                    PeImport {
+                        name: ImportName::Ordinal(16),
+                        slot: 0,
+                        bound: Some(0x7FF8_2000),
+                    },
+                ],
+                end: ThunksEnd::Terminated,
+            },
+            ImportedModule {
+                name: Some("OLD.dll".to_owned()),
+                functions: vec![PeImport {
+                    name: ImportName::Overwritten,
+                    slot: 0x2720,
+                    bound: Some(0x7FF9_0000),
+                }],
+                end: ThunksEnd::Terminated,
+            },
+        ]
+    }
+
+    #[test]
+    fn imports_are_read_by_name_and_ordinal_with_where_each_slot_points() {
+        for (wide, thunk) in [(true, 8), (false, 4)] {
+            let image = importing_image(wide);
+            let mut expected = imported_by_both();
+            expected[0].functions[1].slot = 0x2700 + thunk;
+            assert_eq!(
+                parse_imports(&image[..HEADER_BYTES], reader(&image)),
+                ImportRead::Listed(expected),
+                "PE32+ is {wide}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_image_without_an_import_table_lists_none() {
+        let mut image = importing_image(true);
+        put_u32(&mut image, 0x80 + 4 + 20 + 0x78, 0);
+        assert_eq!(parse_imports(&image[..HEADER_BYTES], reader(&image)), ImportRead::NoTable);
+    }
+
+    #[test]
+    fn an_import_table_that_does_not_read_says_so() {
+        let image = importing_image(true);
+        let header_only = |rva: u32, len: usize| -> Option<Vec<u8>> {
+            (rva < 0x2400).then(|| image[rva as usize..rva as usize + len].to_vec())
+        };
+        assert_eq!(parse_imports(&image[..HEADER_BYTES], header_only), ImportRead::Unreadable);
+        assert_eq!(parse_imports(&[0u8; 0x200], |_, _| None), ImportRead::NotPe);
+    }
+
+    /// The name tables and the IAT are read a page at a time, and a name
+    /// with its hint in one read: the three descriptors, the two module names,
+    /// ntdll's name table, its IAT and its one name, and OLD.dll's IAT.
+    #[test]
+    fn an_import_table_is_read_a_page_at_a_time() {
+        let image = importing_image(true);
+        let mut reads = 0usize;
+        let counted = |rva: u32, len: usize| {
+            reads += 1;
+            image.get(rva as usize..rva as usize + len).map(<[u8]>::to_vec)
+        };
+        let read = parse_imports(&image[..HEADER_BYTES], counted);
+        assert!(matches!(read, ImportRead::Listed(_)), "{read:?}");
+        assert_eq!(reads, 9);
+    }
+
+    /// A name table that runs on past the image's end is read only up to
+    /// it: what lies beyond is not the image's.
+    #[test]
+    fn a_name_table_is_read_no_further_than_the_image() {
+        let mut image = importing_image(true);
+        put_u32(&mut image, 0x80 + 4 + 20 + 0x38, 0x2508); // SizeOfImage
+        let ImportRead::Listed(modules) = parse_imports(&image[..HEADER_BYTES], reader(&image)) else {
+            panic!("the table reads");
+        };
+        assert_eq!(modules[0].functions.len(), 1);
+        assert_eq!(modules[0].end, ThunksEnd::PagedOut);
+    }
+
+    /// A name table that runs into a page that is paged out keeps what read
+    /// before it, and says the rest is paged out.
+    #[test]
+    fn a_name_table_paged_out_partway_keeps_what_read() {
+        let mut image = importing_image(true);
+        image.resize(0x4000, 0);
+        put_u32(&mut image, 0x80 + 4 + 20 + 0x38, 0x4000); // SizeOfImage
+        // ntdll's name table ends its page with NtClose; the page after it,
+        // where its next entry lies, is paged out.
+        put_u32(&mut image, 0x2400, 0x2FF8);
+        image[0x2FF8..0x3000].copy_from_slice(&0x2800u64.to_le_bytes());
+        let short = |rva: u32, len: usize| -> Option<Vec<u8>> {
+            (rva as usize + len <= 0x3000).then(|| image[rva as usize..rva as usize + len].to_vec())
+        };
+        let ImportRead::Listed(modules) = parse_imports(&image[..HEADER_BYTES], short) else {
+            panic!("the table reads");
+        };
+        assert_eq!(modules[0].functions.len(), 1);
+        assert_eq!(modules[0].end, ThunksEnd::PagedOut);
+        assert_eq!(modules[1].end, ThunksEnd::Terminated);
+    }
+
     #[test]
     fn bytes_that_are_not_a_pe_read_as_none() {
         assert_eq!(parse_sections(&[0u8; 0x200]), None);
@@ -434,5 +995,39 @@ mod tests {
         put_u16(&mut truncated, 0, 0x5A4D);
         put_u32(&mut truncated, 0x3C, 0x1000);
         assert_eq!(parse_sections(&truncated), None);
+    }
+
+    /// Every corruption of the test images — each truncation, each field set
+    /// to 0, its maximum or one past itself, seeded bit flips — parses to an
+    /// answer or a refusal; none reads out of range.
+    #[test]
+    fn the_header_parsers_survive_every_corruption_of_their_images() {
+        use rusty_box_symbols_fixtures::mutate::{variants, Budget};
+        struct Parsed {
+            sections: usize,
+            exports: usize,
+            imports: usize,
+        }
+        let mut parsed = Parsed { sections: 0, exports: 0, imports: 0 };
+        for original in [image(), importing_image(false), importing_image(true)] {
+            for mutation in variants(original.len(), Budget::STANDARD) {
+                let bytes = mutation.apply(&original);
+                let read = |rva: u32, len: usize| {
+                    let start = usize::try_from(rva).ok()?;
+                    bytes.get(start..start.checked_add(len)?).map(<[u8]>::to_vec)
+                };
+                if parse_sections(&bytes).is_some() {
+                    parsed.sections += 1;
+                }
+                if !matches!(parse_exports(&bytes, read), ExportRead::NotPe) {
+                    parsed.exports += 1;
+                }
+                if !matches!(parse_imports(&bytes, read), ImportRead::NotPe) {
+                    parsed.imports += 1;
+                }
+            }
+        }
+        // Most variants leave the headers whole: each parser still answers.
+        assert!(parsed.sections > 0 && parsed.exports > 0 && parsed.imports > 0);
     }
 }

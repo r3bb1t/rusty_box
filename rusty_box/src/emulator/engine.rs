@@ -21,7 +21,9 @@
 //! count at the other, with nothing on the page saying which was which (R0).
 
 use super::{PcIo, Progress};
-use crate::cpu::{cpu::BxCpuC, exec_ctx::ExecCtx, instrumentation::Instrumentation, Result};
+use crate::cpu::{
+    cpu::BxCpuC, exec_ctx::ExecCtx, instrumentation::Instrumentation, BreakpointSupport, Result,
+};
 use crate::iodev::irq::IoApicDelivery;
 #[cfg(doc)]
 use crate::memory::plan::MemoryPlan;
@@ -176,6 +178,14 @@ pub trait SliceEngine<T: Instrumentation> {
     /// gets and what this port's interpreter has always had.
     const EVENT_DELIVERY: EventDelivery = EventDelivery::Machine;
 
+    /// Whether this engine stops before an instruction at a debugger code
+    /// breakpoint.
+    ///
+    /// Defaulted to refusing: only an engine that runs the guest through this
+    /// port's interpreter loop meets the instruction boundaries the check
+    /// runs at, and an engine that says nothing is not assumed to.
+    const CODE_BREAKPOINTS: BreakpointSupport = BreakpointSupport::Refused;
+
     /// Run `cpu` against `io` for the stretch `request` describes, and report
     /// how far the guest got.
     ///
@@ -300,6 +310,7 @@ pub struct SoftwareEngine;
 
 impl<T: Instrumentation> SliceEngine<T> for SoftwareEngine {
     const PROGRESS_UNIT: ProgressUnit = ProgressUnit::Instructions;
+    const CODE_BREAKPOINTS: BreakpointSupport = BreakpointSupport::Honoured;
 
     #[inline]
     fn run_slice(

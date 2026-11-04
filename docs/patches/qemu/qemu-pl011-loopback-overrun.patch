@@ -1,0 +1,43 @@
+--- a/hw/char/pl011.c
++++ b/hw/char/pl011.c
+@@ -61,6 +61,9 @@
+ /* Data Register, UARTDR */
+ #define DR_BE   (1 << 10)
+ 
++/* Receive Status Register, UARTRSR, and Error Clear Register, UARTECR */
++#define RSR_OE  (1 << 3)
++
+ /* Interrupt status bits in UARTRIS, UARTMIS, UARTIMSC */
+ #define INT_OE (1 << 10)
+ #define INT_BE (1 << 9)
+@@ -181,6 +184,20 @@
+     unsigned pipe_depth;
+ 
+     pipe_depth = pl011_get_fifo_depth(s);
++    /*
++     * A character that finds the RX fifo full is an overrun, as the
++     * PL011 TRM describes it: the character is lost, the fifo's contents
++     * stay valid, and the overrun is flagged in UARTRSR.OE (until a
++     * write to UARTECR) and in the overrun interrupt. Loopback and a
++     * break can overrun; pl011_can_receive() keeps the chardev's
++     * characters from doing so.
++     */
++    if (s->read_count >= pipe_depth) {
++        s->rsr |= RSR_OE;
++        s->int_level |= INT_OE;
++        pl011_update(s);
++        return;
++    }
+     slot = (s->read_pos + s->read_count) & (pipe_depth - 1);
+     s->read_fifo[slot] = value;
+     s->read_count++;
+@@ -278,7 +295,8 @@
+         s->int_level &= ~INT_RX;
+     }
+     trace_pl011_read_fifo(s->read_count, fifo_depth);
+-    s->rsr = c >> 8;
++    /* The overrun flag stays until UARTECR is written. */
++    s->rsr = (c >> 8) | (s->rsr & RSR_OE);
+     pl011_update(s);
+     qemu_chr_fe_accept_input(&s->chr);
+     return c;

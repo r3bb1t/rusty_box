@@ -2,7 +2,7 @@
 //! occupies it and how much of it is resident.
 //!
 //! The page-table map built here is the foundation: it walks the process's
-//! own paging structures (`DebugCpu::dbg_page_mappings_in`) for the pages
+//! own paging structures (`GuestMemory::page_mappings`) for the pages
 //! actually mapped, and labels them with the modules the loader list names
 //! and the sections their PE headers declare. Windows' own region records
 //! (the VAD tree) can be overlaid to add reserved-but-unmapped regions and
@@ -135,8 +135,8 @@ pub(crate) fn group(map: &MemoryMap) -> Vec<MapGroup> {
                 ..
             }) => {
                 regions.push(index);
-                *resident_pages += region.resident_pages;
-                *total_pages += region.total_pages;
+                *resident_pages = resident_pages.saturating_add(region.resident_pages);
+                *total_pages = total_pages.saturating_add(region.total_pages);
             }
             Some(MapGroup::Region(_)) | None => {
                 by_base.insert(base, groups.len());
@@ -254,7 +254,7 @@ fn span_at(spans: &[Span], address: u64) -> Option<Span> {
     let after = spans.partition_point(|span| span.start <= address);
     after
         .checked_sub(1)
-        .map(|at| spans[at])
+        .and_then(|at| spans.get(at).copied())
         .filter(|span| address < span.end)
 }
 
@@ -264,7 +264,7 @@ fn vad_covering(vads: &[VadRegion], address: u64) -> Option<usize> {
     let after = vads.partition_point(|vad| vad.start <= address);
     after
         .checked_sub(1)
-        .filter(|&at| address < vads[at].end)
+        .filter(|&at| vads.get(at).is_some_and(|vad| address < vad.end))
 }
 
 /// The combined access of every mapped page in `[lo, hi)`, and how many
@@ -273,7 +273,7 @@ fn resident(mappings: &[PageMapping], lo: u64, hi: u64) -> (u64, Option<RegionAc
     let first = mappings.partition_point(|mapping| mapping.linear.saturating_add(mapping.size) <= lo);
     let mut pages = 0u64;
     let mut access: Option<RegionAccess> = None;
-    for mapping in &mappings[first..] {
+    for mapping in mappings.iter().skip(first) {
         if mapping.linear >= hi {
             break;
         }
@@ -282,7 +282,8 @@ fn resident(mappings: &[PageMapping], lo: u64, hi: u64) -> (u64, Option<RegionAc
         if start >= end {
             continue;
         }
-        pages += (end - start) / PAGE;
+        // `start < end` here, so the difference cannot wrap.
+        pages = pages.saturating_add(end.wrapping_sub(start) / PAGE);
         let here = RegionAccess {
             user: mapping.access.user,
             writable: mapping.access.writable,
@@ -312,10 +313,13 @@ pub(crate) fn clip_mappings(mappings: &[PageMapping], range: LinearRange) -> Vec
         .filter_map(|mapping| {
             let start = mapping.linear.max(range.start);
             let end = mapping.linear.saturating_add(mapping.size).min(range.end);
+            // `mapping.linear <= start < end`, so neither difference wraps.
             (start < end).then(|| PageMapping {
                 linear: start,
-                physical: mapping.physical.wrapping_add(start - mapping.linear),
-                size: end - start,
+                physical: mapping
+                    .physical
+                    .wrapping_add(start.wrapping_sub(mapping.linear)),
+                size: end.wrapping_sub(start),
                 access: mapping.access,
             })
         })
@@ -356,16 +360,19 @@ fn assemble(
 
     // Each module label becomes a region, residency read from the mappings.
     for label in &labels {
-        let total_pages = (label.end - label.start) / PAGE;
+        // `module_labels` keeps only labels with `start < end`.
+        let size = label.end.wrapping_sub(label.start);
         let (resident_pages, observed) = resident(mappings, label.start, label.end);
         regions.push(MapRegion {
             start: label.start,
-            size: label.end - label.start,
+            size,
             resident_pages,
-            total_pages,
+            total_pages: size / PAGE,
             access: observed.or(label.section_access),
             owner: label.owner.clone(),
-            vad: vad_covering(records, label.start).map(|at| records[at].info),
+            vad: vad_covering(records, label.start)
+                .and_then(|at| records.get(at))
+                .map(|vad| vad.info),
         });
     }
 
@@ -396,7 +403,7 @@ fn reserved_regions(regions: &[MapRegion], vads: &[VadRegion]) -> Vec<MapRegion>
         let mut cursor = vad.start;
         let mut module_owned = false;
         let mut gaps: Vec<Span> = Vec::new();
-        for region in &regions[first..] {
+        for region in regions.iter().skip(first) {
             if region.start >= vad.end {
                 break;
             }
@@ -424,7 +431,8 @@ fn reserved_regions(regions: &[MapRegion], vads: &[VadRegion]) -> Vec<MapRegion>
             continue;
         }
         for gap in gaps {
-            let size = gap.end - gap.start;
+            // Every gap is pushed with `start < end`.
+            let size = gap.end.wrapping_sub(gap.start);
             reserved.push(MapRegion {
                 start: gap.start,
                 size,
@@ -447,7 +455,8 @@ pub(crate) fn label_stacks(map: &mut MemoryMap, threads: &[WinThread]) {
         if !matches!(region.owner, RegionOwner::Private) {
             continue;
         }
-        if let Some(tid) = stack_owner(region.start, region.start + region.size, threads) {
+        let end = region.start.saturating_add(region.size);
+        if let Some(tid) = stack_owner(region.start, end, threads) {
             region.owner = RegionOwner::Stack { tid };
         }
     }
@@ -488,13 +497,13 @@ fn private_runs(mappings: &[PageMapping], spans: &[Span], vads: &[VadRegion]) ->
             let vad = vad_covering(vads, page);
             match &mut run {
                 Some(open)
-                    if open.region.start + open.region.size == page
+                    if open.region.start.saturating_add(open.region.size) == page
                         && open.region.access == Some(access)
                         && open.vad == vad =>
                 {
-                    open.region.size += PAGE;
-                    open.region.resident_pages += 1;
-                    open.region.total_pages += 1;
+                    open.region.size = open.region.size.saturating_add(PAGE);
+                    open.region.resident_pages = open.region.resident_pages.saturating_add(1);
+                    open.region.total_pages = open.region.total_pages.saturating_add(1);
                 }
                 _ => {
                     if let Some(open) = run.take() {
@@ -508,13 +517,17 @@ fn private_runs(mappings: &[PageMapping], spans: &[Span], vads: &[VadRegion]) ->
                             total_pages: 1,
                             access: Some(access),
                             owner: RegionOwner::Private,
-                            vad: vad.map(|at| vads[at].info),
+                            vad: vad.and_then(|at| vads.get(at)).map(|record| record.info),
                         },
                         vad,
                     });
                 }
             }
-            page += PAGE;
+            // The last page of the address space ends the mapping.
+            match page.checked_add(PAGE) {
+                Some(next) => page = next,
+                None => break,
+            }
         }
     }
     if let Some(open) = run.take() {

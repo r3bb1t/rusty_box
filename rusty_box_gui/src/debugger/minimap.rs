@@ -77,9 +77,9 @@ fn extents(weights: &[f32], length: f32) -> Vec<f32> {
             .sum();
         let room = length - held_count * MIN_LANE_EXTENT;
         let mut newly_held = false;
-        for (index, weight) in weights.iter().enumerate() {
-            if !held[index] && weight / free_weight * room < MIN_LANE_EXTENT {
-                held[index] = true;
+        for (weight, held) in weights.iter().zip(held.iter_mut()) {
+            if !*held && weight / free_weight * room < MIN_LANE_EXTENT {
+                *held = true;
                 newly_held = true;
             }
         }

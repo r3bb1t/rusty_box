@@ -1222,6 +1222,283 @@ upstream PR). The PR is prepared and NOT FILED; see
 
 ---
 
+## D20 — Debugger code breakpoints keep whole traces, and each boundary is checked once
+
+**Bochs:** `cpu/cpu.cc`. While its internal debugger is active Bochs runs
+`cpu_loop_debugger`, which raises `BX_ASYNC_EVENT_STOP_TRACE` before every
+instruction, so it executes one instruction per trace and checks code
+breakpoints after each (`dbg_instruction_epilog` → `dbg_check_code_bpoints`),
+after a new fetch window (`prefetch` → `dbg_code_bp_after_fetch`) and after
+event delivery. A boundary is not reported until one instruction has
+executed since `cpu_loop_debugger` was entered (`dbg_loop_icount`).
+
+**rusty_box:** `cpu/breakpoints.rs`. While a set is armed the normal loop
+runs, with three changes: a trace is cut before every instruction at a
+breakpoint's page offset (`serve_icache_miss`), no trace is merged or linked,
+and the boundary is checked at each trace start and where the loop leaves the
+processor. Setting breakpoints flushes the trace cache. A boundary once
+reported is passed over by the next run exactly once, keyed by the
+processor's instruction count and the boundary's linear address.
+
+### What the guest observes
+
+Nothing. Nothing is written to guest memory and no debug register changes;
+which traces are built is not guest-visible (as for A2 single dispatch in
+`cpu.rs`). Where the processor stops is Bochs's: before the first instruction
+whose linear (CS base plus RIP) or physical address is a breakpoint's.
+
+### Why the divergence is the correct side
+
+- **Speed while armed.** One instruction per trace would make a guest run
+  several times slower for as long as any breakpoint is set, which is how
+  long a person debugging a boot leaves one. The cut by page offset costs a
+  trace only where a breakpoint could be; it is by offset, not by address,
+  because a trace is keyed by its physical page and runs under any linear
+  mapping of it (`a_linear_breakpoint_is_met_through_another_mapping_of_its_page`).
+- **No boundary skipped.** Bochs passes over the first boundary of every
+  `cpu_loop_debugger` entry. A multiprocessor run enters it once per quantum,
+  so a breakpoint that falls where a quantum ends is never reported, and an
+  interrupt delivered at entry hides one at its handler. Here only the
+  boundary already reported is passed over, once.
+- **Unarmed cost.** One flag test per trace start, and none per instruction.
+
+Bochs's virtual (CS:EIP) breakpoints are not built; its linear and physical
+ones are, 16 of each as its shipped `config.h`.
+
+### Price of closing it
+
+Running one instruction per trace while armed is a smaller loop than this,
+at the speed cost above. The tests in `emulator/breakpoint_tests.rs` hold the
+stopping behaviour either way.
+
+**Status:** deliberate (built 2026-10-17 on the owner's "Commit and keep
+going", which chose sub-project 3; awaiting the owner's review).
+
+---
+
+## D21 — A VM exit writes back every field the VMCS cache holds
+
+**Bochs:** `cpu/vmx.cc`. A VMCS is a region of guest-physical memory, laid
+out by `vmcs.cc` `init_generic_mapping` with access rights rotated
+(`VMCS_AR_ROTATE`). VMREAD and VMWRITE reach the current one through
+`vmcsptr`; VM entry reads it field by field (`VMenterLoadCheckVmControls`,
+`VMenterLoadCheckHostState`, `VMenterLoadCheckGuestState`); VM exit writes
+the exit information and the guest state field by field (`VMexit`,
+`VMexitSaveGuestState`), several under a gate — guest EFER only with the
+STORE_EFER exit control, the instruction-information field only for the
+exits that have one. VMFUNC's EPTP switch (`vmfunc.cc`) writes the EPTP
+when it happens.
+
+**rusty_box:** `cpu/vmx.rs`. The VMCS is the same region with the same
+layout, and VMREAD, VMWRITE, VMfail, VMCLEAR and the launch state go to it
+as Bochs's do. VM entry reads every field the processor's VMCS cache holds
+(`vmcs_load_cache`); VM exit, after saving the guest state and before the
+MSR-store list, writes every one of them back (`vmcs_store_cache`).
+
+### What the guest observes
+
+What Bochs's guest observes. A field Bochs leaves alone at an exit holds the
+value the entry read from that same VMCS, so writing it back puts the same
+bytes in memory. Three things differ, none of them defined behaviour a VMM
+can rely on:
+
+- Software that writes a VMCS region directly while that VMCS is active
+  finds an exit overwriting the fields it changed. The SDM leaves such
+  writes undefined: a processor may keep an active VMCS on the chip.
+- An instrumentation observer sees a physical write for every held field at
+  each exit, where Bochs reports one per `VMwrite`.
+- A field Bochs writes while the guest runs lands in memory at the next exit
+  instead. Of those, only VMFUNC's EPTP switch and the PML index exist, and
+  this processor offers neither VMFUNC nor PML
+  (`VMX_PROCBASED_CTLS2_ALLOWED_1`).
+
+### Why the divergence is the correct side
+
+The exit path updates the cache in many places, some of them per exit
+reason. Writing back the whole cache cannot miss one of them, where a
+hand-kept list of Bochs's gated writes would leave a stale field in memory
+the first time an update was added without its write.
+`every_field_the_cache_holds_survives_an_entry_and_an_exit` holds the load
+and the store to the same set of fields.
+
+### Price of closing it
+
+A list of the fields Bochs's `VMexit` and `VMexitSaveGuestState` write, with
+their gates, replacing the whole-cache write — and every exit-specific write
+(`VMexit_Instruction`'s instruction information, an EPT violation's guest
+addresses) moved onto it.
+
+**Status:** deliberate (2026-10-17, while making the VMCS memory-resident
+for sub-project 2b Part B).
+
+---
+
+## D22 — The debugger reads a paused VMM's guest through its VMCS
+
+**Bochs:** `bx_debug/dbg_main.cc` and `cpu/paging.cc`
+`dbg_xlate_linear2phy`. The debugger shows and walks the processor's own
+registers. A processor paused in VMX root operation shows the VMM; its guest
+is reachable only by resuming until the guest runs.
+
+**rusty_box:** `emulator/debug.rs` `DebugCpu::vmx_guest`,
+`dbg_xlate_vmx_guest_linear2phy`, `dbg_vmx_guest_page_mappings`. In VMX root
+operation with a launched current VMCS, the guest's registers are read out of
+that VMCS's guest-state area in memory, and its address spaces are walked
+under its own CR0, CR4 and EFER, every paging-structure address and every
+result through the VMCS's EPT (Bochs `dbg_translate_guest_physical_ept`). The
+guest's EFER is derived as Bochs's `VMenterLoadCheckGuestState` loads it, and
+its CPL is its SS's DPL, as that entry sets it.
+
+### What the guest observes
+
+Nothing: every read is a debugger read, through the TLB-free walk and
+`dbg_fetch_mem`, and none changes the VMCS.
+
+### Why the divergence is the correct side
+
+It is a debugger capability Bochs does not have (R7, declared provenance):
+with Hyper-V or VBS running, Windows is a VMX guest, and a pause that lands
+in the hypervisor would otherwise show no Windows at all. The state read is
+the architectural VMCS guest-state area, the same bytes the next VM entry
+loads, so the view is the guest the processor would resume.
+
+### Price of closing it
+
+Removing the three calls; nothing else depends on them in the library.
+
+**Status:** deliberate (2026-10-17, sub-project 2b Part B, approved by the
+owner).
+
+---
+
+## D23 — A volatile disk's journal is a slot file, unnamed the moment it is made
+
+**Bochs:** `iodev/hdimage/hdimage.cc` `volatile_image_t::open`,
+`volatile_image_t::close`, `redolog_t`. The journal is a redolog: a 512-byte
+`redolog_header_t` (`"Bochs Virtual HD Image"`, type `Redolog`, subtype
+`Volatile`), a catalog of extents, a bitmap per extent, then the extents'
+sectors. It is named `<journal or image path>.XXXXXX` by `mkstemp`; it is
+unlinked as soon as it is created, except on Windows and Bochs's classic Mac
+OS port (`BX_WITH_MACOS`), where it is unlinked at `close`. A snapshot copies
+the redolog file beside the machine's state (`save_state`), and
+`restore_state` checks the copy against the base image (`coherency_check`)
+before swapping it in.
+
+**rusty_box:** `iodev/hdimage.rs` `VolatileImage`. The journal is a file of
+512-byte slots, one per sector written, in the order the sectors were first
+written; the LBA-to-slot map is in memory (`slots`). It is named as Bochs names
+it, an empty `journal` or `none` naming it after the image as Bochs's
+constructor does, and its name is removed as soon as it is made on every
+platform that allows it; where one refuses, the name goes at close, as on
+Bochs's Windows. Each name is tried with create-new, where Bochs's own
+`bx_mkstemp` (osdep.cc), used without a C-library `mkstemp`, opens with
+`O_TRUNC` and so could empty a file that took the name first. A snapshot
+carries the written sectors themselves in the HARDDRV section (media tag 5:
+the image's identity and its modification time when it was opened, then each
+LBA and its bytes). A restore writes them into a fresh journal, which takes
+over only once every record is read and checked, and is refused when the
+image's size or modification time is not what was saved: `coherency_check`'s
+two checks, the time kept to the nanosecond rather than as a 2-second FAT
+local time.
+
+The shell refuses a `journal` on a flat disk, where Bochs's configuration
+ignores it: a VM that names a journal expects its image to stay unchanged, and
+running it flat would change it without a word.
+
+### What the guest observes
+
+Nothing. A read returns the sector's latest write, else the image's bytes; the
+image is never written; nothing of the journal outlives the drive.
+
+### Why the divergence is the correct side
+
+The redolog format exists so a journal can outlive a run and be read back by
+Bochs — `undoable` mode commits one, a snapshot copies one. A volatile journal
+is read by nothing but the drive that made it, and the one thing a snapshot
+needs from it is the set of written sectors, which the section carries itself.
+A slot file holds exactly that set, with no header, catalog or bitmap to keep
+coherent, and no second file beside a snapshot.
+
+Unlinking at once on Windows: Bochs waits for `close` because its C runtime
+opens the file without delete sharing, so `unlink` fails while it is open.
+Rust's `File` opens with `FILE_SHARE_DELETE`, so `remove_file` on the open
+journal succeeds; the name is gone at once, or on an older Windows when the
+last handle closes, and in both cases a crash cannot leave a journal behind —
+the one outcome Bochs's close-time unlink cannot promise.
+
+### Price of closing it
+
+Porting `redolog_t` (header, catalog, bitmap, extent allocation; about 500
+lines of hdimage.cc) for a file no other program reads. Not paid.
+
+**Status:** deliberate (2026-10-18, volatile hard disks, approved by the owner).
+
+---
+
+## D24 — A disk geometry larger than its image is attached, not refused
+
+**Bochs:** `iodev/harddrv.cc` `bx_hard_drive_c::init` multiplies the
+configured cylinders, heads, sectors per track and sector size, and stops with
+`BX_PANIC("ata%d-%d: specified geometry doesn't fit on disk image")` when that
+is more than the image holds. When it is less, it logs `extra data outside of
+CHS address range`.
+
+**rusty_box:** `iodev/harddrv.rs` `AtaDrive::attach_opened` logs both cases,
+the first as a warning, and attaches the image either way. Every access is
+still checked against the image's own sector count
+(`calculate_logical_address`, for every sector of every transfer), so a sector
+past the image is refused when it is addressed, as Bochs refuses any address
+past the disk.
+
+### What the guest observes
+
+A BIOS and an IDENTIFY that report the configured geometry, whose last
+cylinder is partly past the image. A CHS access there is aborted with ERR.
+
+### Why the divergence is the correct side
+
+The shell's geometry detection rounds the cylinder count up, so that the tail
+of an image whose size is not a whole number of cylinders stays reachable by
+CHS; VM files saved by the shell carry that geometry. Refusing it, as Bochs
+does, would refuse VMs that boot today.
+
+### If a guest trips on it
+
+What it looks like: a disk error on a sector near the very end of the disk,
+in the last, partial cylinder, and nowhere else. The likeliest guests are ones
+that address the disk by cylinder, head and sector instead of by sector number
+(DOS, old boot loaders, BIOS-based partitioning tools), and installers that
+size a partition from the reported geometry, so the partition ends past the
+image and the install fails late with write errors.
+
+How to confirm it: the attach logs
+`ATA: geometry C/H/S describes N bytes, more than '<image>' holds (M bytes)`,
+and the failing access logs
+`ATA: logical address out of bounds (x/y) - aborting command` with x at or past
+y, the image's sector count.
+
+What to do for that VM: under Hardware › Hard disk › Advanced, turn on
+`Override CHS geometry` and set cylinders to the image's bytes divided by
+heads × sectors per track × 512, rounded down. Do it before the guest
+partitions the disk; a partition already made up to the old end still reaches
+past the image.
+
+What to do for good: the price below.
+
+### Price of closing it
+
+Detect the geometry by rounding down, as Bochs's own auto-geometry does
+(`hd_size / (heads * spt * sect_size)`) in `rusty_box_gui` `config.rs`
+`auto_detect_chs`, and refuse a larger one here. A VM whose saved geometry was
+rounded up then needs its cylinder count lowered. Every CHS address inside the
+remaining cylinders stays where it is, but the last, partial cylinder drops
+out, and the BIOS's translated geometry for a large disk (the one INT 13h
+reports, which a partition table records) can change with it.
+
+**Status:** deliberate (2026-10-18, approved by the owner).
+
+---
+
 ## Hypervisor-engine divergences (`H<n>`)
 
 A machine running its guest on `rusty_box_whp_engine` executes on the host's
