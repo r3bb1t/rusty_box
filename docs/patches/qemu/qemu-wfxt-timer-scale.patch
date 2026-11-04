@@ -1,0 +1,15 @@
+--- a/target/arm/cpu.c
++++ b/target/arm/cpu.c
+@@ -2291,8 +2291,10 @@
+      * enable from V6K up. There is no event stream on M-profile.
+      */
+     if (tcg_enabled() && arm_feature(env, ARM_FEATURE_V6K)) {
+-        cpu->wfxt_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+-                                       arm_wfxt_timer_cb, cpu);
++        /* Its expiry is a system counter value, as the gt_timer[]s' are. */
++        cpu->wfxt_timer = timer_new(QEMU_CLOCK_VIRTUAL,
++                                    gt_cntfrq_period_ns(cpu),
++                                    arm_wfxt_timer_cb, cpu);
+     }
+ #endif
+ 

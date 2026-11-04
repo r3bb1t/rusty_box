@@ -89,6 +89,8 @@ pub(crate) const BREAKPOINT_ADDRESS: &str = "Breakpoint address";
 const BREAKPOINTS_NEED_INTERPRETER: &str =
     "Breakpoints need the interpreter: a VM on the hypervisor runs its instructions where this debugger cannot stop them.";
 const BREAKPOINTS_IDLE: &str = "These breakpoints stay idle while the VM runs on the hypervisor.";
+const NEEDS_PC: &str =
+    "An Arm board steps one instruction at a time and takes no breakpoints: the rest of the debugger reads a PC.";
 /// What the Breakpoints tab's Remove does.
 const REMOVE_BREAKPOINT: &str = "Remove the picked breakpoint.";
 /// A code line's menu items.
@@ -964,6 +966,7 @@ fn note_text(note: DebugNote) -> String {
         DebugNote::TooManyBreakpoints => {
             format!("The machine holds at most {MAX_LINEAR_BREAKPOINTS} breakpoints; the last change was not taken.")
         }
+        DebugNote::NeedsPc => NEEDS_PC.to_owned(),
         DebugNote::StepCut(cut) => step_cut_text(cut),
     }
 }
@@ -2766,6 +2769,7 @@ fn search_bar(
                 TEXT_MUTED,
             ),
             FindOutcome::Abandoned => ("Search stopped: the VM is stopping".to_owned(), TEXT_MUTED),
+            FindOutcome::NoDebugger => ("This machine's memory cannot be searched".to_owned(), TEXT_MUTED),
         };
         ui.label(RichText::new(text).color(color));
     }
@@ -2786,7 +2790,12 @@ fn search_start(snapshot: &DebugSnapshot, find: Option<FindOutcome>) -> GuestAdd
                 value: found.at.value.wrapping_add(1),
             }
         }
-        Some(FindOutcome::Found(_) | FindOutcome::NotFound { .. } | FindOutcome::Abandoned)
+        Some(
+            FindOutcome::Found(_)
+            | FindOutcome::NotFound { .. }
+            | FindOutcome::Abandoned
+            | FindOutcome::NoDebugger,
+        )
         | None => window,
     }
 }
@@ -2818,7 +2827,12 @@ fn memory_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
         Some(FindOutcome::Found(found)) if found.at.space == snapshot.memory.start.space => {
             Some(found)
         }
-        Some(FindOutcome::Found(_) | FindOutcome::NotFound { .. } | FindOutcome::Abandoned)
+        Some(
+            FindOutcome::Found(_)
+            | FindOutcome::NotFound { .. }
+            | FindOutcome::Abandoned
+            | FindOutcome::NoDebugger,
+        )
         | None => None,
     };
     let font = mono_font();

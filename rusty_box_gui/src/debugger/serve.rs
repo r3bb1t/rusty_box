@@ -165,8 +165,8 @@ fn copy_images<T: Instrumentation, E: SliceEngine<T>>(emu: &mut Emulator<T, E>, 
 }
 
 /// A step under way: the control hears it ended however the step leaves.
-struct StepUnderWay<'a> {
-    control: &'a RunControl,
+pub(crate) struct StepUnderWay<'a> {
+    pub(crate) control: &'a RunControl,
 }
 
 impl Drop for StepUnderWay<'_> {

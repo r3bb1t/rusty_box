@@ -55,8 +55,9 @@ The repository does not ship the BIOS ROMs or the DLX disk image. Both locations
 | System BIOS | `cpp_orig/bochs/bochs/bios/BIOS-bochs-latest` | a Bochs checkout: `git clone https://github.com/bochs-emu/Bochs cpp_orig/bochs` |
 | VGA BIOS | `cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin` | the same checkout |
 | DLX Linux disk | `dlxlinux/hd10meg.img` | [Bochs disk images](https://bochs.sourceforge.io/diskimages.html) |
+| Arm AARCHMRS (2026-09) | anywhere, named by `RUSTY_BOX_AARCHMRS` | Arm's A-profile Architecture Machine Readable Specification, unpacked (BSD 3-clause) |
 
-The Bochs checkout is also the C++ reference source that every port decision is checked against. The browser builds, the Android APK, the UEFI application and `cargo xtask ci` embed or read these files, so they fail without them. For Alpine, download the **Virtual** x86_64 ISO from [alpinelinux.org/downloads](https://alpinelinux.org/downloads/); this page and the harnesses use `alpine-virt-3.24.1-x86_64.iso`.
+The Bochs checkout is also the C++ reference source that every port decision is checked against. The browser builds, the Android APK, the UEFI application and `cargo xtask ci` embed or read these files, so they fail without them; the AArch64 conformance tests read the AARCHMRS, which `cargo xtask ci` requires unless given `--skip-aarchmrs`. For Alpine, download the **Virtual** x86_64 ISO from [alpinelinux.org/downloads](https://alpinelinux.org/downloads/); this page and the harnesses use `alpine-virt-3.24.1-x86_64.iso`.
 
 ## Where it runs
 
@@ -113,7 +114,7 @@ There is no network adapter, no sound card (not even the PC speaker), no USB con
 
 ## Using it as a library
 
-[docs/automation.md](docs/automation.md) is the task-based guide: boot a machine headless, read the screen, type at it, run and stop it, read and write its memory and registers, watch what it does, and what differs on the hypervisor engine. Its examples are compiled by the gate.
+[docs/automation.md](docs/automation.md) is the task-based guide: boot a machine headless, read the screen, type at it, run and stop it, read and write its memory and registers, watch what it does, and what differs on the hypervisor engine. Its examples are compiled by the gate. [docs/aarch64-automation.md](docs/aarch64-automation.md) is its counterpart for the AArch64 machine; the run budget, the key vocabulary and the `Machine` trait are shared, so the same driving code runs either guest.
 
 - **Building a machine.** `MachineBuilder::new(config).build()` builds an interpreter machine, and `build_on::<WhpEngine>()` builds a hypervisor one. The engine is part of the machine's type.
 - **Instrumentation.** A machine's type parameter `T: Instrumentation` observes the CPU. `()` observes nothing, and its empty hook mask makes the CPU skip every dispatch. A hook such as `pre_syscall` sees each system call: `shellcode_trace` uses it to intercept a shellcode's syscalls, and `alpine_strace` to trace Alpine's.
@@ -233,10 +234,12 @@ rusty_box/
 ## Testing
 
 ```bash
-# The full local gate; run it before every commit
+# The full local gate; run it before every commit. It needs RUSTY_BOX_AARCHMRS set
+# to an unpacked copy of Arm's AARCHMRS (an absolute path), or --skip-aarchmrs.
 cargo xtask ci
-cargo xtask ci --skip-boot   # without the DLX boot gate
-cargo xtask ci --full        # plus the integration tests and the GUI release build
+cargo xtask ci --skip-boot       # without the DLX boot gate
+cargo xtask ci --skip-aarchmrs   # without the AArch64 conformance tests against Arm's AARCHMRS
+cargo xtask ci --full            # plus the integration tests and the GUI release build
 
 # The fast loop
 cargo test --release -p rusty_box --lib --features std
@@ -250,12 +253,13 @@ cd rusty_box_decoder && cargo +nightly fuzz run fuzz_fetchdecode64
 
 A bare `cargo test` tests only the default workspace member (`rusty_box`), in a debug build.
 
-`cargo xtask ci` runs 33 steps; [xtask/README.md](xtask/README.md) lists every one.
+`cargo xtask ci` runs 37 steps; [xtask/README.md](xtask/README.md) lists every one.
 
-1. The doctrine ratchets, over nine source trees, the GUI's included. They check the unsafe-token baselines, that there is no `unsafe impl Send/Sync`, the blanket `dead_code` allows, and that there is no production `unwrap`/`expect`.
-2. A 31-step matrix:
-   - It tests the gate itself (the `xtask` crate), then `rusty_box_core`, `rusty_box_devices`, the three WHP crates, the decoder, `rusty_box_symbols` (with clippy) and `rusty_box`. It runs the panic lints over the GUI's debugger.
-   - It checks `rusty_box_core` and `rusty_box_devices` for bare metal, and builds the WHP probe examples.
+1. The doctrine ratchets, over ten source trees, the GUI's, the AArch64 interpreter's and the symbol engine's included. They check the unsafe-token baselines, that there is no `unsafe impl Send/Sync`, the blanket `dead_code` allows, and that there is no production `unwrap`/`expect`.
+2. A 35-step matrix:
+   - It tests the gate itself (the `xtask` crate), then `rusty_box_core`, `rusty_box_devices`, `rusty_box_aarch64` (without features and with std), the three WHP crates, the decoder, `rusty_box_symbols` (with clippy) and `rusty_box`. It runs the panic lints over the GUI's debugger.
+   - It counts the host instructions the AArch64 interpreter's hot loop executes, under callgrind, against a committed baseline.
+   - It checks `rusty_box_core`, `rusty_box_devices` and `rusty_box_aarch64` for bare metal, and builds the WHP probe examples.
    - It checks `rusty_box` without std (with and without alloc), for bare metal, for wasm, with all features, and with debug assertions.
    - It checks `rusty_box_gui` for the host, with its tests, for wasm, and with its `guest-trace` feature, whose tracer tests it runs.
    - It builds the UEFI application.
@@ -273,6 +277,7 @@ It needs the rustup targets `x86_64-unknown-none`, `x86_64-unknown-uefi` and `wa
 - [docs/getting-started.md](docs/getting-started.md) -- using the shell: the guests and their settings, the VM file, pacing, CPU topology, disks, display
 - [rusty_box_gui/README.md](rusty_box_gui/README.md) -- the shell in full: the VM library, pages, engines, disk images, Android, browser
 - [docs/automation.md](docs/automation.md) -- driving a guest from Rust: boot it headless, read the screen, type at it, watch what it does
+- [docs/aarch64-automation.md](docs/aarch64-automation.md) -- the same for the AArch64 `virt` machine ([rusty_box_aarch64](rusty_box_aarch64/README.md)): boot UEFI or a Linux kernel, the serial console and its keyboard, registers, snapshots
 - [docs/whp-guest-capabilities.md](docs/whp-guest-capabilities.md) -- what a machine on the hypervisor may advertise to its guest
 
 **Contributing**

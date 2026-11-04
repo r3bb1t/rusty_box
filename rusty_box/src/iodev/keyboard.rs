@@ -3398,17 +3398,17 @@ mod tests {
     #[test]
     fn a_key_that_does_not_fit_leaves_none_of_its_bytes_in_the_ring() {
         use super::super::scancodes::BxKey;
-        use crate::emulator::Keyboard;
+        use crate::emulator::{KeyAction, Keyboard};
 
         let mut kbd = BxKeyboardC::new();
         kbd.init();
         // Fifteen one-byte makes: one slot of sixteen left.
         for _ in 0..15 {
-            assert!(Keyboard::new(&mut kbd).key(BxKey::A, true));
+            assert!(Keyboard::new(&mut kbd).key(BxKey::A, KeyAction::Press));
         }
 
         assert!(
-            !Keyboard::new(&mut kbd).key(BxKey::Up, true),
+            !Keyboard::new(&mut kbd).key(BxKey::Up, KeyAction::Press),
             "two bytes do not fit in one slot"
         );
         assert_eq!(
@@ -3417,7 +3417,7 @@ mod tests {
             "the guest reads the fifteen makes and nothing of the refused key"
         );
 
-        assert!(Keyboard::new(&mut kbd).key(BxKey::Up, true));
+        assert!(Keyboard::new(&mut kbd).key(BxKey::Up, KeyAction::Press));
         assert_eq!(drain(&mut kbd), [0xE0, 0x48], "offered again, it arrives once");
     }
 
@@ -3429,12 +3429,12 @@ mod tests {
     #[test]
     fn typed_text_waits_for_room_for_a_whole_character() {
         use super::super::scancodes::BxKey;
-        use crate::emulator::{Keyboard, Typed};
+        use crate::emulator::{KeyAction, Keyboard, Typed};
 
         let mut kbd = BxKeyboardC::new();
         kbd.init();
         for _ in 0..8 {
-            assert!(Keyboard::new(&mut kbd).key(BxKey::A, true));
+            assert!(Keyboard::new(&mut kbd).key(BxKey::A, KeyAction::Press));
         }
 
         assert_eq!(
@@ -3461,12 +3461,12 @@ mod tests {
     #[test]
     fn a_tap_that_cannot_finish_sends_nothing() {
         use super::super::scancodes::BxKey;
-        use crate::emulator::Keyboard;
+        use crate::emulator::{KeyAction, Keyboard};
 
         let mut kbd = BxKeyboardC::new();
         kbd.init();
         for _ in 0..8 {
-            assert!(Keyboard::new(&mut kbd).key(BxKey::A, true));
+            assert!(Keyboard::new(&mut kbd).key(BxKey::A, KeyAction::Press));
         }
 
         assert!(!Keyboard::new(&mut kbd).tap(BxKey::B));

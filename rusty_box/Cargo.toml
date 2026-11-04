@@ -20,7 +20,7 @@ default = ["std", "gui-egui"]
 
 alloc = ["dep:tracing", "rusty_box_core/alloc", "rusty_box_devices/alloc"]
 std = ["alloc", "tracing/std", "tempfile", "crossterm", "rusty_box_core/std", "rusty_box_devices/std"]
-gui-egui = ["dep:egui", "dep:eframe"]
+gui-egui = ["dep:egui", "dep:eframe", "dep:vt100"]
 profiling = ["std"]
 bench = ["std", "dep:criterion"]
 
@@ -38,6 +38,8 @@ rusty_box_decoder = { path = "../rusty_box_decoder" }
 crossterm = { version = "0.29", optional = true }
 egui = { workspace = true, optional = true }
 eframe = { workspace = true, optional = true, features = ["default_fonts", "glow"] }
+# The serial console's terminal: the guest's VT100/xterm output as a screen.
+vt100 = { version = "0.16", optional = true }
 criterion = { version = "0.5", features = ["html_reports"], optional = true }
 
 [[example]]

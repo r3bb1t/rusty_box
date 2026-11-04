@@ -439,8 +439,9 @@ reads `This VM is powered off`. While a startup disk is being created, the
 display shows a spinner and a notice naming the image until the guest draws
 its first frame.
 
-The serial pane is headed `Serial Console (ttyS0)` and shows what the guest
-writes to its first serial port, COM1:
+The serial pane is headed `Serial Console` and shows what the guest writes to
+its first serial port: COM1 on a PC (Linux's `ttyS0`), the PL011 UART on an
+Arm `virt` board (Linux's `ttyAMA0`):
 
 - the log, scrolled to its end;
 - a `serial input` line: `Send`, or Enter, sends the line with a newline

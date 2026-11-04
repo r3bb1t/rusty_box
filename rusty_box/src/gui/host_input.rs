@@ -30,6 +30,34 @@ pub struct HostMouseEvent {
     pub buttons: u8,
 }
 
+/// Which kind of pointing device the running machine has, so a front end
+/// knows whether to report how far the pointer moved or where it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PointerDevice {
+    /// A mouse that reports movement (PS/2): the front end captures the host
+    /// pointer and sends deltas ([`HostMouseEvent`]).
+    #[default]
+    RelativeMouse,
+    /// A tablet that reports positions on the guest's picture (QEMU's
+    /// `virtio-tablet`): the host pointer stays free and its place over the
+    /// picture is the guest's ([`AbsolutePointerEvent`]).
+    AbsoluteTablet,
+    /// No pointing device (an Arm `virt` board without a tablet): the front
+    /// end neither captures the host pointer nor sends it anywhere.
+    Absent,
+}
+
+/// An update from a pointer that reports where it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbsolutePointerEvent {
+    /// The pointer is at this point of the guest's picture.
+    MoveTo(rusty_box_core::input::pointer::PointerPos),
+    /// A button went down or came up.
+    Button(rusty_box_core::input::pointer::PointerButton, rusty_box_core::input::KeyAction),
+    /// The wheel turned this many detents.
+    Wheel(rusty_box_core::input::pointer::WheelSteps),
+}
+
 /// A single portable host input event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostInputEvent {

@@ -56,6 +56,36 @@ pub(crate) enum Task {
     CopyImages(CopyRequest),
 }
 
+/// Whether a guest can run on, whatever machine it is: the one fact
+/// [`RunControl::after_run`] needs from a machine's own power state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GuestPower {
+    /// Executing, or waiting for an interrupt.
+    On,
+    /// Switched itself off, or its processor stopped for good.
+    Over,
+}
+
+impl From<PowerState> for GuestPower {
+    fn from(power: PowerState) -> Self {
+        match power {
+            PowerState::Running => Self::On,
+            PowerState::PoweredOff | PowerState::CpuShutdown => Self::Over,
+        }
+    }
+}
+
+impl From<rusty_box_aarch64::PowerState> for GuestPower {
+    fn from(power: rusty_box_aarch64::PowerState) -> Self {
+        match power {
+            rusty_box_aarch64::PowerState::Running => Self::On,
+            rusty_box_aarch64::PowerState::PoweredOff | rusty_box_aarch64::PowerState::ProcessorOff => {
+                Self::Over
+            }
+        }
+    }
+}
+
 /// What a run thread does once its machine handed control back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AfterRun {
@@ -108,6 +138,10 @@ pub(crate) enum DebugNote {
     /// The machine holds at most `MAX_LINEAR_BREAKPOINTS` code breakpoints of
     /// a kind.
     TooManyBreakpoints,
+    /// The Arm `virt` board steps one instruction into whatever it meets and
+    /// takes no code breakpoints: stepping over, out, to an address or by
+    /// line, and breakpoints, read the PC's code, symbols and stack.
+    NeedsPc,
     /// A step stopped before it finished.
     StepCut(StepCut),
 }
@@ -636,10 +670,10 @@ impl RunControl {
     /// guest that switched itself off, or a stop the shell asked for, ends
     /// the run; a flag raised for a pause or a dump is served, even when the
     /// pause was withdrawn since; a budget spent with nothing asked ends it.
-    pub(crate) fn after_run(&self, power: PowerState) -> AfterRun {
+    pub(crate) fn after_run(&self, power: GuestPower) -> AfterRun {
         match power {
-            PowerState::Running => {}
-            PowerState::PoweredOff | PowerState::CpuShutdown => return AfterRun::End,
+            GuestPower::On => {}
+            GuestPower::Over => return AfterRun::End,
         }
         let state = self.lock();
         if state.ending {
@@ -660,11 +694,11 @@ impl RunControl {
     /// asked meanwhile is seen here first, so it is never lowered by
     /// mistake); anything asked, or a guest that switched off, is
     /// [`Self::after_run`]'s.
-    pub(crate) fn after_passing(&self, power: PowerState) -> Passing {
+    pub(crate) fn after_passing(&self, power: GuestPower) -> Passing {
         {
             let state = self.lock();
             let asked = state.ending || state.serve_requested || state.wanted == Wanted::Pause || !state.tasks.is_empty();
-            if power == PowerState::Running && !asked {
+            if power == GuestPower::On && !asked {
                 self.stop_flag.store(false, Ordering::Relaxed);
                 return Passing::RunOn;
             }
@@ -1098,7 +1132,7 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         control.pause();
         control.end_run();
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End);
         assert_eq!(control.next_between_runs(), BetweenRuns::End);
     }
 
@@ -1107,8 +1141,14 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.pause();
-        assert_eq!(control.after_run(PowerState::PoweredOff), AfterRun::End);
-        assert_eq!(control.after_run(PowerState::CpuShutdown), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::PoweredOff.into()), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::CpuShutdown.into()), AfterRun::End);
+        for arm in [
+            rusty_box_aarch64::PowerState::PoweredOff,
+            rusty_box_aarch64::PowerState::ProcessorOff,
+        ] {
+            assert_eq!(control.after_run(arm.into()), AfterRun::End, "{arm:?}");
+        }
     }
 
     #[test]
@@ -1117,7 +1157,7 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         control.pause();
         assert!(raised(&control));
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
         assert_eq!(control.phase(), RunPhase::Paused);
     }
@@ -1149,7 +1189,7 @@ mod tests {
         assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
         assert!(raised(&control));
         assert!(control.dump_pending());
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::DumpRam(path)));
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert!(!raised(&control));
@@ -1170,7 +1210,7 @@ mod tests {
         let path = PathBuf::from("memory.bin");
         assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
         control.end_run();
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End);
         control.finish_run();
         assert!(!control.dump_pending());
         assert_eq!(
@@ -1190,10 +1230,10 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         control.pause();
         control.resume();
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert!(!raised(&control));
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End);
     }
 
     #[test]
@@ -1251,7 +1291,7 @@ mod tests {
         control.end_run(); // a power-off between the two runs
         control.begin_run(RunStart::Restart);
         assert!(raised(&control), "a stop after the run ended still stands");
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End);
     }
 
     /// A dump being written still counts as pending, so the page keeps
@@ -1262,7 +1302,7 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         let path = PathBuf::from("memory.bin");
         assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::DumpRam(path.clone())));
         assert!(control.dump_pending(), "taken off the queue, but not written yet");
         control.record_dump(DumpOutcome::Saved { path, bytes: 1 });
@@ -1415,7 +1455,7 @@ mod tests {
     fn a_run_that_spent_its_budget_with_nothing_asked_ends() {
         let control = control();
         control.begin_run(RunStart::PowerOn);
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End);
     }
 
     #[test]
@@ -1423,7 +1463,7 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.step(StepRequest::instruction_into(0));
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::End, "no step queued");
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End, "no step queued");
         control.pause();
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
         control.step(StepRequest::instruction_into(0));
@@ -1476,7 +1516,7 @@ mod tests {
         control.set_breakpoints(global(first));
         control.set_breakpoints(global(newest.clone()));
         assert!(raised(&control), "the run stops for the change");
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::ApplyBreakpoints(newest.clone())));
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert!(!raised(&control), "and runs on");
@@ -1493,13 +1533,13 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         // The machine's hit raised the run's stop flag; running on lowers it.
         control.stop_flag().store(true, Ordering::Relaxed);
-        assert_eq!(control.after_passing(PowerState::Running), Passing::RunOn);
+        assert_eq!(control.after_passing(PowerState::Running.into()), Passing::RunOn);
         assert!(!raised(&control), "the run goes on");
-        assert_eq!(control.after_passing(PowerState::PoweredOff), Passing::Then(AfterRun::End));
+        assert_eq!(control.after_passing(PowerState::PoweredOff.into()), Passing::Then(AfterRun::End));
         control.pause();
-        assert_eq!(control.after_passing(PowerState::Running), Passing::Then(AfterRun::Serve));
+        assert_eq!(control.after_passing(PowerState::Running.into()), Passing::Then(AfterRun::Serve));
         control.end_run();
-        assert_eq!(control.after_passing(PowerState::Running), Passing::Then(AfterRun::End));
+        assert_eq!(control.after_passing(PowerState::Running.into()), Passing::Then(AfterRun::End));
     }
 
     fn global(set: Vec<CodeBreakpoint>) -> AppliedBreakpoints {
@@ -1514,7 +1554,7 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         let set = vec![CodeBreakpoint::Linear(0x1000), CodeBreakpoint::Linear(0x2000)];
         control.set_breakpoints(global(set.clone()));
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::ApplyBreakpoints(set.clone())));
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         let program = PlacedImage { base: 0x400, image: PeImageId { time_date_stamp: 7, size_of_image: 0x2000 } };
@@ -1540,7 +1580,7 @@ mod tests {
             linear: 0x1000,
         };
         control.stopped_at_breakpoint(hit);
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
         assert_eq!(control.phase(), RunPhase::Paused);
         assert_eq!(control.view().cpu, 1, "the stopped processor is shown");

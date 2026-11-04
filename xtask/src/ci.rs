@@ -4,10 +4,13 @@
 //! steps, every one but the last a release build: the xtask crate's own
 //! tests; tests for rusty_box_core and
 //! rusty_box_devices (their no_std + no_alloc builds included) and bare-metal
-//! (`x86_64-unknown-none`) checks of both, devices with alloc; tests for the
-//! three WHP crates, the engine's with every target, and a check of
-//! rusty_box_whp's examples; tests and clippy for the symbol engine; the
-//! debugger's panic lints; tests for the decoder and the rusty_box library;
+//! (`x86_64-unknown-none`) checks of both, devices with alloc; tests for
+//! rusty_box_aarch64 without features and with std, and its bare-metal check
+//! with alloc; the AArch64 trace loop's host instructions against a
+//! committed baseline (`hot_loop`, skipped where valgrind does not run);
+//! tests for the three WHP crates, the engine's with every target, and a check of
+//! rusty_box_whp's examples; tests for the decoder; tests and clippy for the
+//! symbol engine; the debugger's panic lints; tests for the rusty_box library;
 //! checks of rusty_box as no_std with and without alloc, for
 //! `x86_64-unknown-none`, and for `wasm32-unknown-unknown` with alloc; the UEFI
 //! application build; the public-API, doc-example and doctrine compile-fail
@@ -17,6 +20,13 @@
 //! adds the whole rusty_box test suite and the GUI release build, and the DLX
 //! Linux headless boot gate runs last unless `--skip-boot` is given.
 //!
+//! The aarch64 test steps also check its decoder and system registers
+//! against Arm's machine-readable specification (AARCHMRS), which is not in
+//! this repository: `RUSTY_BOX_AARCHMRS` must name the unpacked package,
+//! which every cargo the gate runs inherits, unless `--skip-aarchmrs` is
+//! given, which withholds the variable from every one so those tests are
+//! ignored.
+//!
 //! It is not a copy of `.github/workflows/ci.yml`. That workflow runs debug
 //! builds, and among its steps are several no step here runs: the tests of
 //! rusty_box_bximage and rusty_box_gui, the egui serial-path tests, and checks
@@ -24,13 +34,16 @@
 //! rusty_box for `x86_64-unknown-uefi`, and of the GUI without its default
 //! features.
 //!
-//! `cargo xtask perf-baseline` builds the release perfbench binary and archives it
-//! (with the git revision) under `target/perf-baselines/<rev>/` for interleaved
-//! A/B comparison against later phases.
+//! `cargo xtask perf-baseline` builds the release perfbench binaries — the x86
+//! machine's `perfbench` and the AArch64 interpreter's `aarch64_perfbench` — and
+//! archives them (with the git revision) under `target/perf-baselines/<rev>/` for
+//! interleaved A/B comparison against later phases. `cargo xtask
+//! hot-loop-baseline` counts the AArch64 trace loop's host instructions and
+//! rewrites the baseline the ci step holds them to.
 
 use std::{
     env,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Instant,
 };
@@ -42,6 +55,10 @@ pub struct CiCommand {
     pub full: bool,
     /// Skip the DLX boot gate (needs the DLX disk image and several minutes).
     pub skip_boot: bool,
+    /// Run without Arm's AARCHMRS: the aarch64 tests that check the decoder
+    /// and the system registers against it are then ignored. Without this,
+    /// `RUSTY_BOX_AARCHMRS` must name the unpacked AARCHMRS directory.
+    pub skip_aarchmrs: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -53,6 +70,15 @@ const DLX_LOGIN_MARKER: &str = "*** LOGIN DETECTED ***";
 /// Instruction budget that reliably reaches the DLX login prompt headlessly
 /// (LILO Enter injected ~130M, `dlx login:` appears ~364M, margin on top).
 const DLX_BOOT_BUDGET: &str = "450000000";
+
+/// The environment variable naming the unpacked AARCHMRS directory (Arm's
+/// A-profile machine-readable specification, which is not in this
+/// repository). `rusty_box_aarch64`'s build script turns it into
+/// `cfg(aarchmrs)`, without which its conformance tests are ignored.
+const AARCHMRS_VAR: &str = "RUSTY_BOX_AARCHMRS";
+/// The AARCHMRS files the aarch64 conformance tests read
+/// (`tests/unit/spec.rs`, `tests/unit/sysreg_spec.rs`).
+const AARCHMRS_FILES: [&str; 3] = ["Features.json", "Instructions.json", "Registers.json"];
 
 /// Doctrine R1/R6 ratchet baselines (docs/safety-doctrine.md). Counts may only
 /// DECREASE; a commit that removes unsafe tightens the matching constant in the
@@ -98,6 +124,10 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // `#![forbid(unsafe_code)]`. A device model has no business with raw memory
     // — it is handed what it may touch.
     ("rusty_box_devices/src", 0),
+    // Zero, structurally, for the same reason again: the AArch64 interpreter
+    // carries `#![forbid(unsafe_code)]`. Naming it here is also what puts it
+    // under the production-panic and blanket-`dead_code` scans.
+    ("rusty_box_aarch64/src", 0),
     // The host-FFI leaf, and the one crate whose baseline is not zero and is
     // not aiming there: calling the WinHvPlatform C API is its whole purpose.
     // What the ratchet enforces here is CONFINEMENT — every host call lives in
@@ -319,7 +349,7 @@ const BLANKET_DEAD_CODE_BASELINES: &[(&str, usize)] = &[
 
 /// `.unwrap()` / `.expect(…)` outside test code, in each crate
 /// `UNSAFE_TOKEN_BASELINES` names: rusty_box, the decoder, core, devices, the
-/// three WHP crates, the GUI and the symbol engine.
+/// AArch64 interpreter, the three WHP crates, the GUI and the symbol engine.
 /// Zero, and it is to stay zero: a library that panics on a condition it could
 /// have returned is a library its caller cannot contain.
 ///
@@ -429,10 +459,12 @@ fn production_panics(text: &str) -> usize {
     for line in text.lines() {
         let trimmed = line.trim_start();
         let is_doc_or_comment = trimmed.starts_with("//");
+        // Literals blanked first, so a `//` inside a string ("a//b",
+        // "http://…") does not cut the line's code short.
         let code = if is_doc_or_comment {
             String::new()
         } else {
-            without_literals(line.split("//").next().unwrap_or(""))
+            without_literals(line).split("//").next().unwrap_or("").to_owned()
         };
         let opens = code.matches('{').count() as i32;
         let closes = code.matches('}').count() as i32;
@@ -921,7 +953,9 @@ struct Step {
     stdout_marker: Option<&'static str>,
 }
 
-const MATRIX: &[Step] = &[
+/// The gate's own tests, then the crates the x86 machine does not depend on:
+/// rusty_box_core, rusty_box_devices and rusty_box_aarch64.
+const FOUNDATION_MATRIX: &[Step] = &[
     // The gate's own scanners first: the ratchets above ran on their rules,
     // and these tests are what hold those rules to their cases. The
     // `cargo xtask` alias runs a debug build, so this release build of the
@@ -998,6 +1032,43 @@ const MATRIX: &[Step] = &[
         envs: &[],
         stdout_marker: None,
     },
+    // The AArch64 machine, under the same rule: its default build has no
+    // allocator, and the guide's examples (`docs/aarch64-automation.md`)
+    // compile only with `std`, so both configurations are tested and the bare
+    // target proves the core of it needs no host at all.
+    Step {
+        name: "aarch64 tests (no_std + no_alloc)",
+        args: &["test", "--release", "-p", "rusty_box_aarch64"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
+        name: "aarch64 tests (std)",
+        args: &["test", "--release", "-p", "rusty_box_aarch64", "--features", "std"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
+        name: "aarch64 bare-metal target check",
+        args: &[
+            "check",
+            "--release",
+            "-p",
+            "rusty_box_aarch64",
+            "--features",
+            "alloc",
+            "--target",
+            "x86_64-unknown-none",
+        ],
+        envs: &[],
+        stdout_marker: None,
+    },
+];
+
+/// The steps after the AArch64 hot-loop count, which runs once the AArch64
+/// machine's tests have passed and before the steps that build only on
+/// Windows, so that a Linux host reaches it.
+const MATRIX: &[Step] = &[
     // The Windows Hypervisor Platform seam. Its tests need no hypervisor —
     // they cover the bitfield layouts transcribed from the SDK, which is
     // exactly the part a reader cannot check by eye — so this step runs
@@ -1339,12 +1410,39 @@ const DLX_BOOT_GATE: Step = Step {
     stdout_marker: Some(DLX_LOGIN_MARKER),
 };
 
-fn run_step(root: &PathBuf, step: &Step) -> Result<(), String> {
+/// What every step's environment holds of Arm's AARCHMRS.
+enum Aarchmrs {
+    /// `RUSTY_BOX_AARCHMRS` names this directory, absolute
+    /// ([`locate_aarchmrs`]), so that each step's tests find it whatever
+    /// their working directory.
+    At(PathBuf),
+    /// `RUSTY_BOX_AARCHMRS` is withheld (`--skip-aarchmrs`).
+    Withheld,
+}
+
+impl Aarchmrs {
+    /// A `cargo` command in `root`, inheriting this process's environment
+    /// but for `RUSTY_BOX_AARCHMRS`, which this decides: every cargo the
+    /// gate runs is made here, so that each builds `rusty_box_aarch64` with
+    /// the value the others do and its build script reruns for none.
+    fn cargo(&self, root: &Path) -> Command {
+        let mut command = Command::new("cargo");
+        command.current_dir(root);
+        match self {
+            Self::At(dir) => command.env(AARCHMRS_VAR, dir),
+            Self::Withheld => command.env_remove(AARCHMRS_VAR),
+        };
+        command
+    }
+}
+
+/// Run `step` by a cargo [`Aarchmrs::cargo`] makes.
+fn run_step(root: &Path, step: &Step, aarchmrs: &Aarchmrs) -> Result<(), String> {
     let started = Instant::now();
     println!("==> {}", step.name);
 
-    let mut command = Command::new("cargo");
-    command.args(step.args).current_dir(root);
+    let mut command = aarchmrs.cargo(root);
+    command.args(step.args);
     for (key, value) in step.envs {
         command.env(key, value);
     }
@@ -1390,34 +1488,104 @@ fn run_step(root: &PathBuf, step: &Step) -> Result<(), String> {
     Ok(())
 }
 
+/// The directory `RUSTY_BOX_AARCHMRS` names, once it is seen to hold the
+/// AARCHMRS files the aarch64 conformance tests read. An absolute path is
+/// kept as written, so that the steps see the value a shell's own cargo
+/// runs see and the build script that reads it reruns for neither; a
+/// relative one is this process's working directory's. The steps are given
+/// it, so the aarch64 test steps build and run those tests.
+fn locate_aarchmrs() -> Result<PathBuf, String> {
+    let named = env::var_os(AARCHMRS_VAR).map(PathBuf::from).ok_or_else(|| {
+        format!(
+            "{AARCHMRS_VAR} is not set: set it to the unpacked AARCHMRS directory (Arm's \
+             A-profile machine-readable specification, release 2026-09) so the aarch64 \
+             conformance tests run, or pass --skip-aarchmrs"
+        )
+    })?;
+    let dir = if named.is_absolute() {
+        named
+    } else {
+        env::current_dir()
+            .map_err(|err| format!("{AARCHMRS_VAR} names a relative path, and the working directory is unknown: {err}"))?
+            .join(named)
+    };
+    for file in AARCHMRS_FILES {
+        if !dir.join(file).is_file() {
+            return Err(format!("{AARCHMRS_VAR} names {}, which holds no {file}", dir.display()));
+        }
+    }
+    Ok(dir)
+}
+
 pub fn execute_ci(command: CiCommand) -> Result<(), String> {
     let root = repo_root()?;
     let started = Instant::now();
     let mut ran = 0usize;
 
+    let aarchmrs = if command.skip_aarchmrs {
+        Aarchmrs::Withheld
+    } else {
+        Aarchmrs::At(locate_aarchmrs()?)
+    };
+
     doctrine_ratchets(&root)?;
     ran += 1;
 
+    for step in FOUNDATION_MATRIX {
+        run_step(&root, step, &aarchmrs)?;
+        ran += 1;
+    }
+    run_hot_loop_step(&root, &aarchmrs)?;
+    ran += 1;
     for step in MATRIX {
-        run_step(&root, step)?;
+        run_step(&root, step, &aarchmrs)?;
         ran += 1;
     }
     if command.full {
         for step in FULL_MATRIX {
-            run_step(&root, step)?;
+            run_step(&root, step, &aarchmrs)?;
             ran += 1;
         }
     }
     if !command.skip_boot {
-        run_step(&root, &DLX_BOOT_GATE)?;
+        run_step(&root, &DLX_BOOT_GATE, &aarchmrs)?;
         ran += 1;
     }
 
+    let skipped = match aarchmrs {
+        Aarchmrs::At(_) => "",
+        Aarchmrs::Withheld => " (the aarch64 AARCHMRS conformance tests skipped)",
+    };
     println!(
-        "ci: {ran} steps passed in {:.1}s",
+        "ci: {ran} steps passed in {:.1}s{skipped}",
         started.elapsed().as_secs_f32()
     );
     Ok(())
+}
+
+/// The name the AArch64 hot-loop count runs under, between the AArch64
+/// machine's steps and the WHP crates'.
+const HOT_LOOP_STEP: &str = "aarch64 hot-loop host instructions";
+
+/// The AArch64 trace loop's host instructions against the committed
+/// baseline (`hot_loop`): fails on a rise over the limit, passes with the
+/// reason printed where it cannot count. Its build is a cargo
+/// [`Aarchmrs::cargo`] makes, as every step's is.
+fn run_hot_loop_step(root: &Path, aarchmrs: &Aarchmrs) -> Result<(), String> {
+    let started = Instant::now();
+    println!("==> {HOT_LOOP_STEP}");
+    crate::hot_loop::check(root, aarchmrs.cargo(root))
+        .map_err(|err| format!("{HOT_LOOP_STEP}: {err}"))?;
+    println!(
+        "<== {HOT_LOOP_STEP} ok ({:.1}s)",
+        started.elapsed().as_secs_f32()
+    );
+    Ok(())
+}
+
+/// `cargo xtask hot-loop-baseline`.
+pub fn execute_hot_loop_baseline() -> Result<(), String> {
+    crate::hot_loop::refresh(&repo_root()?)
 }
 
 pub fn execute_perf_baseline(_command: PerfBaselineCommand) -> Result<(), String> {
@@ -1435,42 +1603,70 @@ pub fn execute_perf_baseline(_command: PerfBaselineCommand) -> Result<(), String
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     };
 
-    let status = Command::new("cargo")
-        .args([
-            "build", "--release", "-p", "rusty_box", "--example", "perfbench", "--features", "std",
-        ])
-        .current_dir(&root)
-        .status()
-        .map_err(|err| format!("failed to spawn cargo: {err}"))?;
-    if !status.success() {
-        return Err(format!("perfbench build exited with {status}"));
-    }
-
-    let exe = if cfg!(windows) {
-        "perfbench.exe"
-    } else {
-        "perfbench"
-    };
-    let built = root
-        .join("target")
-        .join("release")
-        .join("examples")
-        .join(exe);
-    if !built.exists() {
-        return Err(format!("built perfbench not found at {}", built.display()));
-    }
-
     let dest_dir = root.join("target").join("perf-baselines").join(&rev);
     std::fs::create_dir_all(&dest_dir)
         .map_err(|err| format!("failed to create {}: {err}", dest_dir.display()))?;
-    let dest = dest_dir.join(exe);
-    std::fs::copy(&built, &dest)
-        .map_err(|err| format!("failed to copy perfbench to {}: {err}", dest.display()))?;
+    for bench in PERF_BENCHES {
+        let status = Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "-p",
+                bench.package,
+                "--example",
+                bench.example,
+                "--features",
+                "std",
+            ])
+            .current_dir(&root)
+            .status()
+            .map_err(|err| format!("failed to spawn cargo: {err}"))?;
+        if !status.success() {
+            return Err(format!("{} build exited with {status}", bench.example));
+        }
 
-    println!("perf baseline archived: {}", dest.display());
+        let exe = if cfg!(windows) {
+            format!("{}.exe", bench.example)
+        } else {
+            bench.example.to_string()
+        };
+        let built = root
+            .join("target")
+            .join("release")
+            .join("examples")
+            .join(&exe);
+        if !built.exists() {
+            return Err(format!("built {} not found at {}", bench.example, built.display()));
+        }
+        let dest = dest_dir.join(&exe);
+        std::fs::copy(&built, &dest).map_err(|err| {
+            format!("failed to copy {} to {}: {err}", bench.example, dest.display())
+        })?;
+        println!("perf baseline archived: {}", dest.display());
+    }
+
     println!("A/B usage: alternate baseline and candidate binaries >= 10 pairs, compare medians.");
     Ok(())
 }
+
+/// A benchmark example `perf-baseline` builds and archives.
+struct PerfBench {
+    package: &'static str,
+    example: &'static str,
+}
+
+/// The x86 machine's CPU-core benchmark, and the AArch64 interpreter's
+/// loops and boots (`rusty_box_aarch64/examples/perfbench.rs`).
+const PERF_BENCHES: &[PerfBench] = &[
+    PerfBench {
+        package: "rusty_box",
+        example: "perfbench",
+    },
+    PerfBench {
+        package: "rusty_box_aarch64",
+        example: "aarch64_perfbench",
+    },
+];
 
 pub fn parse_ci_args(args: &[String]) -> Result<CiCommand, String> {
     let mut command = CiCommand::default();
@@ -1478,6 +1674,7 @@ pub fn parse_ci_args(args: &[String]) -> Result<CiCommand, String> {
         match arg.as_str() {
             "--full" => command.full = true,
             "--skip-boot" => command.skip_boot = true,
+            "--skip-aarchmrs" => command.skip_aarchmrs = true,
             "--help" | "-h" => return Err(ci_usage()),
             other => return Err(format!("unknown ci option {other:?}\n{}", ci_usage())),
         }
@@ -1487,9 +1684,11 @@ pub fn parse_ci_args(args: &[String]) -> Result<CiCommand, String> {
 
 pub fn ci_usage() -> String {
     [
-        "usage: cargo xtask ci [--full] [--skip-boot]",
-        "  --full       also run the full integration test suite and GUI release build",
-        "  --skip-boot  skip the DLX Linux headless boot gate",
+        "usage: cargo xtask ci [--full] [--skip-boot] [--skip-aarchmrs]",
+        "  --full           also run the full integration test suite and GUI release build",
+        "  --skip-boot      skip the DLX Linux headless boot gate",
+        "  --skip-aarchmrs  run without Arm's AARCHMRS, so the aarch64 conformance tests",
+        "                   are ignored (otherwise RUSTY_BOX_AARCHMRS must name it)",
     ]
     .join("\n")
 }
@@ -1511,6 +1710,16 @@ mod tests {
             CiCommand {
                 full: true,
                 skip_boot: true,
+                skip_aarchmrs: false,
+            }
+        );
+        let parsed = parse_ci_args(&["--skip-aarchmrs".into()]).unwrap();
+        assert_eq!(
+            parsed,
+            CiCommand {
+                full: false,
+                skip_boot: false,
+                skip_aarchmrs: true,
             }
         );
     }
@@ -1521,7 +1730,10 @@ mod tests {
     #[test]
     fn the_matrix_runs_the_xtask_tests() {
         let wanted: &[&str] = &["test", "--release", "-p", "xtask"];
-        assert!(MATRIX.iter().any(|step| step.args == wanted), "no MATRIX step runs `cargo test --release -p xtask`");
+        assert!(
+            FOUNDATION_MATRIX.iter().any(|step| step.args == wanted),
+            "no FOUNDATION_MATRIX step runs `cargo test --release -p xtask`"
+        );
     }
 
     #[test]
@@ -1636,5 +1848,34 @@ mod tests {
 }
 "##;
         assert_eq!(production_panics(source), 2);
+    }
+
+    /// A `//` inside a string is not a comment: the code after it on the
+    /// line is counted, and the braces on it are too, so a test module
+    /// holding one stays test code to its end.
+    #[test]
+    fn a_double_slash_in_a_string_is_not_a_comment() {
+        let production = r##"
+fn production(url: Option<&str>) -> usize {
+    "http://example".len() + url.unwrap().len()
+}
+"##;
+        assert_eq!(production_panics(production), 1);
+
+        let tests = r##"
+#[cfg(test)]
+mod tests {
+    fn paths() {
+        for refused in ["/", "a//b"] {
+            assert!(!refused.is_empty());
+        }
+    }
+
+    fn after() {
+        Some(1).expect("not counted");
+    }
+}
+"##;
+        assert_eq!(production_panics(tests), 0);
     }
 }

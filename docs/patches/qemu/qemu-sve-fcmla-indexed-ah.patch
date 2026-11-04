@@ -1,0 +1,12 @@
+--- a/target/arm/tcg/translate-sve.c
++++ b/target/arm/tcg/translate-sve.c
+@@ -4666,7 +4666,8 @@
+     NULL, gen_helper_gvec_fcmlah_idx, gen_helper_gvec_fcmlas_idx, NULL
+ };
+ TRANS_FEAT(FCMLA_zzxz, aa64_sme_or_sve, gen_gvec_fpst_zzzz, fcmla_idx_fns[a->esz],
+-           a->rd, a->rn, a->rm, a->ra, a->index * 4 + a->rot,
++           a->rd, a->rn, a->rm, a->ra,
++           (s->fpcr_ah << 4) | (a->index << 2) | a->rot,
+            a->esz == MO_16 ? FPST_A64_F16 : FPST_A64)
+ 
+ /*

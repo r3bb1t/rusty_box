@@ -19,6 +19,17 @@ impl ShellPage {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const ALL: [Self; 4] = [Self::Home, Self::Console, Self::Hardware, Self::Debugger];
 
+    /// The pages a VM of `machine` has, in the order the tree draws them.
+    /// The Debugger page reads a PC's processors and memory, so an Arm
+    /// board's VM has no Debugger page.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const fn of(machine: crate::config::MachineKind) -> &'static [Self] {
+        match machine {
+            crate::config::MachineKind::Pc => &Self::ALL,
+            crate::config::MachineKind::ArmVirt => &[Self::Home, Self::Console, Self::Hardware],
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn label(self) -> &'static str {
         match self {
