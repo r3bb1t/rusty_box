@@ -39,6 +39,10 @@ use core::sync::atomic::AtomicBool;
 
 mod builder;
 pub use builder::{AtaSlot, BootDevice, BootOrder, BuildError, DiskGeometry, MachineBuilder};
+/// Where a volatile disk keeps its writes, and a volatile disk carried from
+/// one machine to the next; named here beside the builder that takes them.
+#[cfg(feature = "std")]
+pub use crate::iodev::hdimage::{Journal, VolatileDisk};
 mod debug;
 pub use debug::{DebugCpu, RamOffset};
 mod display;
@@ -1969,6 +1973,61 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             .attach_disk(channel, drive, path, cylinders, heads, spt)
     }
 
+    /// Attach a hard disk image the guest cannot change: it is opened
+    /// read-only and every sector written goes to a journal placed as
+    /// `journal` says and removed when the drive closes (Bochs
+    /// `volatile_image_t`).
+    #[cfg(feature = "std")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn attach_volatile_disk(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        path: &str,
+        journal: &Journal,
+        cylinders: u32,
+        heads: u8,
+        spt: u8,
+    ) -> std::io::Result<()> {
+        self.device_manager
+            .ide
+            .drives
+            .attach_volatile_disk(channel, drive, path, journal, cylinders, heads, spt)
+    }
+
+    /// Attach a volatile disk already open, or taken back from another
+    /// machine ([`Self::take_volatile_disk`]), journal and all.
+    #[cfg(feature = "std")]
+    pub(crate) fn attach_open_volatile_disk(
+        &mut self,
+        slot: AtaSlot,
+        disk: VolatileDisk,
+        geometry: DiskGeometry,
+    ) -> std::io::Result<()> {
+        self.device_manager.ide.drives.attach_open_volatile_disk(
+            slot.channel(),
+            slot.drive(),
+            disk,
+            geometry.cylinders,
+            geometry.heads,
+            geometry.sectors_per_track,
+        )
+    }
+
+    /// The volatile disk in `slot`, journal and all, taken back from this
+    /// machine so the next one built for a restart can be given it
+    /// ([`MachineBuilder::volatile_disk`]): the guest's writes then last until
+    /// power-off, as Bochs's redolog lasts across a reset (hdimage.cc
+    /// `volatile_image_t::close` runs only at exit). The drive is left with no
+    /// image. `None` where the slot holds no volatile disk.
+    #[cfg(feature = "std")]
+    pub fn take_volatile_disk(&mut self, slot: AtaSlot) -> Option<VolatileDisk> {
+        self.device_manager
+            .ide
+            .drives
+            .take_volatile_disk(slot.channel(), slot.drive())
+    }
+
     /// Attach a CD-ROM ISO image to a channel/drive (requires std feature)
     #[cfg(feature = "std")]
     pub(crate) fn attach_cdrom(
@@ -2534,3 +2593,5 @@ fn assert_machine_send_for_every_send_tracer<T: Instrumentation + Send>() {
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests;
+#[cfg(all(test, feature = "std"))]
+mod breakpoint_tests;

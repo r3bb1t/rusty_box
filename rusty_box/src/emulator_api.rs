@@ -983,6 +983,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
                 | StopReason::EngineFault => return Ok(EmuStopReason::Stopped),
                 StopReason::CpuShutdown => return Ok(EmuStopReason::Shutdown),
                 StopReason::Halted => return Ok(EmuStopReason::Halted),
+                StopReason::Breakpoint(hit) => return Ok(EmuStopReason::ReachedBreakpoint(hit)),
                 StopReason::BudgetExhausted => {}
             }
         }

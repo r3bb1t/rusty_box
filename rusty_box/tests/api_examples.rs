@@ -263,7 +263,8 @@ fn a_batch_reports_both_how_far_it_got_and_why_it_stopped() {
             StopReason::GuestPowerOff
             | StopReason::CpuShutdown
             | StopReason::StopRequested
-            | StopReason::EngineFault => break outcome.stop,
+            | StopReason::EngineFault
+            | StopReason::Breakpoint(_) => break outcome.stop,
         }
         assert!(executed < 100_000, "a halting guest must not run forever");
     };

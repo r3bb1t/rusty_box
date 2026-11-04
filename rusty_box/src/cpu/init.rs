@@ -174,6 +174,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             // on a hardware reset and stays monotone across software resets.
             self.tick_surplus = 0;
         }
+        // The breakpoints are the debugger's and outlive a reset, as Bochs's
+        // `bx_guard` does; the boundary last reported does not.
+        self.code_breakpoints.forget_reported();
 
         self.ticks_last_sync = self.cpu_ticks();
 

@@ -214,6 +214,7 @@ rusty_box/
 +-- rusty_box_core/            # no_std, forbid(unsafe) foundations (the engine seam and GPA plan, ring buffer, time units, snapshot sections)
 +-- rusty_box_devices/         # no_std, forbid(unsafe) device models with no CPU or bus access (VGA, PCI)
 +-- rusty_box_decoder/         # x86 instruction decoder
++-- rusty_box_symbols/         # Debug information (PDB, DWARF), symbol stores and servers
 +-- rusty_box_whp_sys/         # Windows Hypervisor Platform FFI leaf (every hypervisor call is confined to its windows.rs)
 +-- rusty_box_whp/             # Safe wrapper over the WHP leaf
 +-- rusty_box_whp_engine/      # Runs a rusty_box machine's guest on WHP
@@ -249,11 +250,11 @@ cd rusty_box_decoder && cargo +nightly fuzz run fuzz_fetchdecode64
 
 A bare `cargo test` tests only the default workspace member (`rusty_box`), in a debug build.
 
-`cargo xtask ci` runs 29 steps; [xtask/README.md](xtask/README.md) lists every one.
+`cargo xtask ci` runs 33 steps; [xtask/README.md](xtask/README.md) lists every one.
 
-1. The doctrine ratchets, over eight source trees, the GUI's included. They check the unsafe-token baselines, that there is no `unsafe impl Send/Sync`, the blanket `dead_code` allows, and that there is no production `unwrap`/`expect`.
-2. A 27-step matrix:
-   - It tests `rusty_box_core`, `rusty_box_devices`, the three WHP crates, the decoder and `rusty_box`.
+1. The doctrine ratchets, over nine source trees, the GUI's included. They check the unsafe-token baselines, that there is no `unsafe impl Send/Sync`, the blanket `dead_code` allows, and that there is no production `unwrap`/`expect`.
+2. A 31-step matrix:
+   - It tests the gate itself (the `xtask` crate), then `rusty_box_core`, `rusty_box_devices`, the three WHP crates, the decoder, `rusty_box_symbols` (with clippy) and `rusty_box`. It runs the panic lints over the GUI's debugger.
    - It checks `rusty_box_core` and `rusty_box_devices` for bare metal, and builds the WHP probe examples.
    - It checks `rusty_box` without std (with and without alloc), for bare metal, for wasm, with all features, and with debug assertions.
    - It checks `rusty_box_gui` for the host, with its tests, for wasm, and with its `guest-trace` feature, whose tracer tests it runs.
@@ -261,7 +262,7 @@ A bare `cargo test` tests only the default workspace member (`rusty_box`), in a 
    - It runs the public-API and doc examples and the doctrine compile-fail fixtures.
 3. The DLX boot gate: DLX boots headlessly to its login prompt, on the interpreter. It is the only guest boot in the gate.
 
-The gate does not run the tests of `rusty_box_bximage` or `xtask`, nor those of `rusty_box_gui` beyond the guest-trace tracer's, and does not build the Android APK; run those with `cargo test --release -p <crate>` and `cargo xtask android build`.
+The gate does not run the tests of `rusty_box_bximage`, nor those of `rusty_box_gui` beyond the guest-trace tracer's, and does not build the Android APK; run those with `cargo test --release -p <crate>` and `cargo xtask android build`.
 
 It needs the rustup targets `x86_64-unknown-none`, `x86_64-unknown-uefi` and `wasm32-unknown-unknown`, plus the firmware and disk image above. [CONTRIBUTING.md](CONTRIBUTING.md) has the details.
 

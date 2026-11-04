@@ -19,6 +19,14 @@ use crate::sessions::{
 use crate::shell::destination::{SidebarAction, VmBarAction};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::debugger::control::{DumpOutcome, DumpRequest, Wanted};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::debugger::xref::service::{ModuleKey, XrefQuery};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::debugger_page::references::{copy_module, copy_request, scope_modules, ModuleRow, ReferencesView};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::debugger_page::{pause_source, DebuggerTab};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::debugger::inspect::{AddressSpace, CodeTarget, GuestAddress};
 use crate::shell::destination::{Destination, ShellPage};
 use crate::shell::sidebar::{Drawer, VmLibraryEntry};
 #[cfg(not(target_arch = "wasm32"))]
@@ -122,6 +130,10 @@ pub(crate) enum BrowseTarget {
     NewFloppy,
     /// Where the shown VM's RAM is saved.
     RamDump,
+    /// A file of debug information for the module the Symbols tab picked.
+    SymbolFile,
+    /// The source file the source view could not find.
+    SourceFile,
 }
 
 /// A Browse press the Android host answers with a file browser of its own.
@@ -191,6 +203,37 @@ fn phone_shows_notice(kind: ShellNoticeKind) -> bool {
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 fn pick_native_file() -> Option<PathBuf> {
     rfd::FileDialog::new().pick_file()
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+fn pick_native_folder() -> Option<PathBuf> {
+    rfd::FileDialog::new().pick_folder()
+}
+
+/// Opens `folder`, made first if it is not there yet, in the system's file
+/// manager. The manager is left running; a thread reaps it when it exits.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+pub(crate) fn open_folder(folder: &std::path::Path) -> std::io::Result<()> {
+    let manager = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::fs::create_dir_all(folder)?;
+    let mut child = std::process::Command::new(manager).arg(folder).spawn()?;
+    // explorer exits 1 even when it opened the folder, so the status says
+    // nothing; only a failure to wait is worth a line.
+    let reaper = std::thread::Builder::new().name("open-folder".to_owned()).spawn(move || {
+        if let Err(error) = child.wait() {
+            tracing::warn!("the file manager's exit was not read: {error}");
+        }
+    })?;
+    // The reaper runs detached; the folder is open whether or not it is
+    // joined.
+    drop(reaper);
+    Ok(())
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
@@ -294,6 +337,24 @@ pub struct NativeShellApp {
     /// Keeps the app running while any power-on lasts: each power-on takes
     /// a hold, and its run's thread gives it back.
     keep_alive: KeepAlive,
+    /// The symbol settings file and what it resolved to.
+    symbol_settings: crate::symbol_settings::SettingsState,
+    /// What the symbol engine has found, for every VM: symbol files are
+    /// keyed by the build they describe, so one hub serves every guest.
+    symbols: crate::symbols::hub::SymbolHub,
+    /// The symbol workers, once a window started them; dropping them closes
+    /// the hub.
+    symbol_workers: Option<crate::symbols::worker::SymbolWorkers>,
+    /// The module a file chooser is open for, to load the chosen file as its
+    /// debug information.
+    symbol_file_for: Option<rusty_box_symbols::identity::ModuleIdentity>,
+    /// The build path of the source file a file chooser is open for: the
+    /// chosen file maps it for the rest of the run.
+    source_file_for: Option<String>,
+    /// The Settings page's edits, kept while the page is left and back.
+    settings_draft: Option<crate::symbol_settings::SettingsDraft>,
+    /// Why the Settings page's last Save did not write.
+    settings_save_problem: Option<String>,
     chrome: ShellChrome,
     floppy_maker: FloppyMaker,
     /// The floppy maker's window is open.
@@ -555,6 +616,11 @@ struct NativeVmSettings {
     disk_drive: usize,
     disk_chs_override: Option<crate::args::DiskGeometry>,
     disk_creation: Option<crate::config::ResolvedDiskCreation>,
+    /// Where the guest's writes go: the Hard disk page's Writes choice.
+    disk_mode: crate::config::DiskModeName,
+    /// The file a volatile disk's journal is named after, as typed; blank
+    /// keeps it beside the image.
+    disk_journal: String,
     cdrom_enabled: bool,
     cdrom_path: String,
     cdrom_channel: usize,
@@ -611,6 +677,20 @@ impl NativeVmSettings {
             // unreachable, which is where a boot loader keeps its map.
             disk_chs_override: disk.map(|disk| disk.geometry),
             disk_creation: disk.and_then(|disk| disk.creation.clone()),
+            disk_mode: match disk.map(|disk| &disk.mode) {
+                None | Some(crate::config::DiskMode::Flat) => crate::config::DiskModeName::Flat,
+                Some(crate::config::DiskMode::Volatile { .. }) => {
+                    crate::config::DiskModeName::Volatile
+                }
+            },
+            disk_journal: match disk.map(|disk| &disk.mode) {
+                Some(crate::config::DiskMode::Volatile {
+                    journal: Some(journal),
+                }) => journal.display().to_string(),
+                None
+                | Some(crate::config::DiskMode::Flat)
+                | Some(crate::config::DiskMode::Volatile { journal: None }) => String::new(),
+            },
             cdrom_enabled: cdrom.is_some(),
             cdrom_path: cdrom.map_or_else(String::new, |cdrom| cdrom.path.display().to_string()),
             cdrom_channel: cdrom.map_or(1, |cdrom| cdrom.channel),
@@ -685,11 +765,30 @@ impl NativeVmSettings {
                 crate::config::detect_disk_geometry(&path)
                     .map_err(|error| format!("Failed to inspect hard disk: {error}"))?
             };
+            let mode = match self.disk_mode {
+                crate::config::DiskModeName::Flat => crate::config::DiskMode::Flat,
+                crate::config::DiskModeName::Volatile => {
+                    let named = trimmed_optional_path(&self.disk_journal)
+                        .filter(|journal| !crate::config::names_no_journal(journal));
+                    // A relative name is kept as the file it names now, in the
+                    // folder the shell runs in, so the VM file means the same
+                    // file when it is loaded again.
+                    let journal = match named {
+                        Some(journal) => Some(
+                            std::path::absolute(&journal)
+                                .map_err(|error| format!("Journal path {}: {error}", journal.display()))?,
+                        ),
+                        None => None,
+                    };
+                    crate::config::DiskMode::Volatile { journal }
+                }
+            };
             config.disk = Some(crate::config::ResolvedDisk {
                 path,
                 geometry,
                 channel: self.disk_channel,
                 drive: self.disk_drive,
+                mode,
                 creation,
             });
         } else {
@@ -1137,6 +1236,9 @@ pub(crate) struct ShellChrome {
     /// away to its grab handle.
     library: Drawer,
     show_about: bool,
+    /// A VM's page, or the app's Settings.
+    #[cfg(not(target_arch = "wasm32"))]
+    surface: crate::shell::destination::Surface,
 }
 
 impl Default for ShellChrome {
@@ -1149,6 +1251,8 @@ impl Default for ShellChrome {
             show_serial: true,
             library: Drawer::Open,
             show_about: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            surface: crate::shell::destination::Surface::Vm,
         }
     }
 }
@@ -1660,7 +1764,23 @@ impl NativeShellApp {
         alive: AliveEffect,
     ) -> Self {
         configure_shell_style(&cc.egui_ctx);
-        Self::with_commands(command_tx, start, alive)
+        let mut app = Self::with_commands(command_tx, start, alive);
+        app.start_symbol_workers(&cc.egui_ctx);
+        app
+    }
+
+    /// Starts the symbol workers, the window drawing each thing they
+    /// publish. Tests build the shell through `with_commands`, which starts
+    /// none. When they do not start, symbols stay unavailable and the shell
+    /// says why.
+    fn start_symbol_workers(&mut self, context: &egui::Context) {
+        self.symbols.set_repaint(context.clone());
+        match crate::symbols::worker::start(&self.symbols) {
+            Ok(workers) => self.symbol_workers = Some(workers),
+            Err(error) => self.notify(ShellNotice::error(format!(
+                "The symbol workers did not start, so no module will be named: {error}"
+            ))),
+        }
     }
 
     /// The shell opened on `start`'s VM list, powering VMs on through
@@ -1690,10 +1810,24 @@ impl NativeShellApp {
             chrome.show_serial = false;
         }
         let close_choice = start.library.close_choice();
+        let symbol_settings = crate::symbol_settings::SettingsState::load(
+            start.settings_file.clone(),
+            crate::symbol_settings::Environment::from_process(),
+        );
+        let symbols = crate::symbols::hub::SymbolHub::new(crate::symbols::hub::HubConfig::from_settings(
+            &symbol_settings.resolved,
+        ));
         Self {
             sessions: Sessions::default(),
             holdings: Holdings::default(),
             keep_alive: KeepAlive::new(alive),
+            symbol_settings,
+            symbols,
+            symbol_workers: None,
+            symbol_file_for: None,
+            source_file_for: None,
+            settings_draft: None,
+            settings_save_problem: None,
             chrome,
             floppy_maker: FloppyMaker::default(),
             floppy_maker_open: false,
@@ -1975,12 +2109,16 @@ impl NativeShellApp {
                 self.sessions.open(&vm).console().send_ctrl_alt_del();
             }
             Some(VmBarAction::CreateFloppy) => self.floppy_maker_open = true,
+            Some(VmBarAction::OpenSettings) => self.open_settings(),
             Some(VmBarAction::ShowAbout) => self.chrome.show_about = true,
             Some(VmBarAction::Quit) => {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
             #[cfg(target_os = "android")]
-            Some(VmBarAction::GoTo(page)) => self.chrome.go_to(page),
+            Some(VmBarAction::GoTo(page)) => {
+                self.chrome.surface = crate::shell::destination::Surface::Vm;
+                self.chrome.go_to(page);
+            }
         }
     }
 
@@ -1998,6 +2136,7 @@ impl NativeShellApp {
             dots: &dots,
             broken: &self.broken_files,
             drawer: &mut self.chrome.library,
+            surface: self.chrome.surface,
         }
         .show(ui);
         if let Some(action) = action {
@@ -2048,6 +2187,7 @@ impl NativeShellApp {
                 }
             }
             SidebarAction::Select(destination) => {
+                self.chrome.surface = crate::shell::destination::Surface::Vm;
                 if destination.vm() == self.chrome.destination.vm() {
                     self.chrome.go_to(destination.page());
                 } else {
@@ -2058,6 +2198,7 @@ impl NativeShellApp {
                     self.chrome.library = Drawer::Closed;
                 }
             }
+            SidebarAction::OpenSettings => self.open_settings(),
         }
     }
 
@@ -2119,16 +2260,115 @@ impl NativeShellApp {
     }
 
     fn draw_central(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG_BASE))
-            .show(ui, |ui| {
-                match self.chrome.page() {
-                    ShellPage::Home => self.draw_home_page(ui),
-                    ShellPage::Console => self.draw_console_page(ui, frame),
-                    ShellPage::Hardware => self.draw_hardware_page(ui),
-                    ShellPage::Debugger => self.draw_debugger_page(ui),
+        use crate::shell::destination::Surface;
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG_BASE)).show(ui, |ui| match self.chrome.surface {
+            Surface::Settings => self.draw_settings_page(ui),
+            Surface::Vm => match self.chrome.page() {
+                ShellPage::Home => self.draw_home_page(ui),
+                ShellPage::Console => self.draw_console_page(ui, frame),
+                ShellPage::Hardware => self.draw_hardware_page(ui),
+                ShellPage::Debugger => self.draw_debugger_page(ui),
+            },
+        });
+    }
+
+    /// Shows the app's Settings, its fields filled from the settings file
+    /// unless an edit is under way, and has the store measured.
+    fn open_settings(&mut self) {
+        self.chrome.surface = crate::shell::destination::Surface::Settings;
+        if self.settings_draft.is_none() {
+            self.settings_draft = Some(crate::symbol_settings::SettingsDraft::of(&self.symbol_settings.file));
+        }
+        self.symbols.measure_store();
+        #[cfg(target_os = "android")]
+        {
+            self.chrome.library = Drawer::Closed;
+        }
+    }
+
+    fn draw_settings_page(&mut self, ui: &mut egui::Ui) {
+        use crate::shell::symbols_page::{draw_symbols_page, SymbolsPageAction, SymbolsPageState};
+        let draft =
+            self.settings_draft.get_or_insert_with(|| crate::symbol_settings::SettingsDraft::of(&self.symbol_settings.file));
+        let view = self.symbols.view();
+        let action = draw_symbols_page(
+            ui,
+            SymbolsPageState {
+                draft,
+                settings: &self.symbol_settings,
+                usage: view.store_usage.as_ref(),
+                save_problem: self.settings_save_problem.as_deref(),
+            },
+        );
+        match action {
+            None => {}
+            Some(SymbolsPageAction::Save) => self.save_settings(),
+            Some(SymbolsPageAction::Revert) => {
+                self.settings_draft = Some(crate::symbol_settings::SettingsDraft::of(&self.symbol_settings.file));
+                self.settings_save_problem = None;
+            }
+            #[cfg(not(target_os = "android"))]
+            Some(SymbolsPageAction::Browse(field)) => {
+                if let Some(folder) = pick_native_folder() {
+                    self.put_folder(field, &folder);
                 }
-            });
+            }
+            #[cfg(not(target_os = "android"))]
+            Some(SymbolsPageAction::OpenStore) => {
+                let store = self.symbol_settings.resolved.store.value.clone();
+                if let Err(error) = open_folder(&store) {
+                    self.notify(ShellNotice::error(format!("The symbol store {} did not open: {error}", store.display())));
+                }
+            }
+        }
+    }
+
+    /// Writes the page's draft to the settings file and has the engine run
+    /// on it; a draft that is no settings file says why on the page.
+    fn save_settings(&mut self) {
+        let Some(draft) = &self.settings_draft else {
+            return;
+        };
+        let file = match draft.to_file() {
+            Ok(file) => file,
+            Err(problem) => {
+                self.settings_save_problem = Some(problem.to_string());
+                return;
+            }
+        };
+        match self.symbol_settings.save(file) {
+            Ok(()) => {
+                self.settings_save_problem = None;
+                self.symbols.reconfigure(crate::symbols::hub::HubConfig::from_settings(&self.symbol_settings.resolved));
+                self.notify(ShellNotice::info("The symbol settings were saved."));
+            }
+            Err(error) => self.notify(ShellNotice::error(format!("The symbol settings were not saved: {error}"))),
+        }
+    }
+
+    /// Puts a picked `folder` into the page's `field`: the store's field
+    /// takes it whole, a list takes it as one more line.
+    #[cfg(not(target_os = "android"))]
+    fn put_folder(&mut self, field: crate::shell::symbols_page::FolderField, folder: &std::path::Path) {
+        use crate::shell::symbols_page::FolderField;
+        let Some(draft) = self.settings_draft.as_mut() else {
+            return;
+        };
+        let text = folder.display().to_string();
+        let list = match field {
+            FolderField::Store => {
+                draft.store = text;
+                return;
+            }
+            FolderField::ProjectSymbols(index) => draft.projects.get_mut(index).map(|p| &mut p.symbols),
+            FolderField::ProjectSources(index) => draft.projects.get_mut(index).map(|p| &mut p.sources),
+        };
+        if let Some(list) = list {
+            if !list.trim().is_empty() {
+                list.push('\n');
+            }
+            list.push_str(&text);
+        }
     }
 
     fn draw_debugger_page(&mut self, ui: &mut egui::Ui) {
@@ -2140,13 +2380,93 @@ impl NativeShellApp {
         let control = Arc::clone(session.control());
         let snapshot = control.snapshot();
         let previous = control.previous_snapshot();
+        // Each new pause's modules are asked of the symbol engine once.
+        if let Some(shown) = &snapshot {
+            let pane = session.debugger_mut();
+            let fresh = Arc::downgrade(shown);
+            let asked = pane.symbols_asked.as_ref().is_some_and(|last| last.ptr_eq(&fresh));
+            if !asked {
+                pane.symbols_asked = Some(fresh);
+                let addresses = crate::symbols::wanted::shown_addresses(shown);
+                self.symbols.want(&crate::symbols::wanted::wanted_modules(
+                    &shown.symbols,
+                    &addresses,
+                ));
+                // The binaries its call stack needed for bytes the guest had
+                // not paged in.
+                self.symbols.want_images(&shown.frames.awaiting_images, std::time::Instant::now());
+                // The owner's programs in other processes, for source lines
+                // to bind in.
+                let elsewhere: Vec<crate::symbols::hub::WantedModule> = shown
+                    .elsewhere
+                    .modules
+                    .iter()
+                    .filter_map(|found| found.module.identity.known())
+                    .map(|identity| crate::symbols::hub::WantedModule {
+                        identity: identity.clone(),
+                        priority: crate::symbols::hub::Priority::Shown,
+                    })
+                    .collect();
+                self.symbols.want(&elsewhere);
+            }
+            // The kernel's layouts go to the run as soon as its tables load,
+            // whether or not a new pause brought them.
+            let layout = crate::symbols::kernel::kernel_layout(&shown.symbols, &self.symbols.view(), &mut pane.kernel_layout);
+            control.set_kernel_layout(layout);
+        }
         let step_available = session.run_engine() != Some(crate::config::Engine::Whp);
+        let symbols = self.symbols.view();
+        // A step reads line rows from the engine's latest view; the machine's
+        // breakpoints follow the owner's as the pause's modules and their
+        // symbols resolve source lines.
+        control.set_symbols(Arc::clone(&symbols));
+        // The pause's source file is read as soon as its module's tables say
+        // which it is.
+        let pause_source = snapshot.as_deref().and_then(|shown| pause_source(shown, &symbols));
+        if let Some(source) = &pause_source {
+            self.symbols.want_source(&source.key);
+        }
+        let targets = control.targets();
+        // Worked out again only when the targets, the pause or the symbols
+        // changed; the page reads the same answers.
+        let mut resolutions = std::mem::take(&mut session.debugger_mut().resolutions);
+        resolutions.follow(&targets, snapshot.as_ref(), &symbols);
+        control.set_breakpoints(resolutions.applied().clone());
+        let breakpoints = control.breakpoints();
+        let stopped_at = control.stopped_at();
+        // The processor switch shows the processor the run reads, which a
+        // breakpoint stop sets to the one that stopped.
+        session.debugger_mut().cpu = control.view().cpu;
+        // A tip the run closed, as the guest ran, closes in the pane too.
+        let asked_tip = control.inspect().tip;
+        let variables = &mut session.debugger_mut().variables;
+        if variables.tip.as_ref().is_some_and(|tip| asked_tip.as_deref() != Some(tip.expression.as_str())) {
+            variables.tip = None;
+        }
+        // The References tab's answer, read from the indexes as they are now:
+        // a module still indexing is named as waiting, and the next frame
+        // reads again.
+        let references_view = {
+            let pane = session.debugger_mut();
+            match (&pane.references, snapshot.as_deref()) {
+                (Some(target), Some(shown)) if pane.tab == DebuggerTab::References => {
+                    let query = XrefQuery { target: target.clone(), scope: pane.references_scope };
+                    let keys: Vec<ModuleKey> =
+                        scope_modules(shown, query.scope, &query.target).into_iter().map(|module| module.key).collect();
+                    let answer = control.xrefs().answer(&query, &keys);
+                    let modules = keys.into_iter().map(|key| ModuleRow { state: control.xrefs().state(&key), key }).collect();
+                    Some(ReferencesView { answer, modules })
+                }
+                (Some(_) | None, Some(_) | None) => None,
+            }
+        };
         let action = draw_debugger_page(
             ui,
             DebuggerPageState {
                 live: status.running,
                 paused: status.paused,
                 step_available,
+                stepping: control.stepping(),
                 dump_pending: control.dump_pending(),
                 note: control.note(),
                 snapshot: snapshot.as_deref(),
@@ -2154,8 +2474,18 @@ impl NativeShellApp {
                 find: control.find_outcome(),
                 searching: control.searching(),
                 pane: session.debugger_mut(),
+                symbols: &symbols,
+                targets: &targets,
+                resolutions: &resolutions,
+                breakpoints: &breakpoints,
+                stopped_at,
+                references: references_view.as_ref(),
             },
         );
+        self.sessions.open(&vm).debugger_mut().resolutions = resolutions;
+        // The watches and the values open, as the panes left them: a paused
+        // run reads them again when they changed.
+        control.set_inspect(self.sessions.open(&vm).debugger_mut().variables.ask());
         // A paused run answers on its own thread; keep looking while it may.
         if status.running {
             ui.ctx()
@@ -2163,10 +2493,78 @@ impl NativeShellApp {
         }
         match action {
             None => {}
-            Some(DebuggerAction::Step) => control.step(),
+            Some(DebuggerAction::Step { kind, unit }) => {
+                control.step(crate::debugger::stepping::StepRequest { kind, unit, cpu: control.view().cpu });
+            }
+            Some(DebuggerAction::CancelStep) => control.cancel_step(),
+            Some(DebuggerAction::LocateSource { build_path }) => {
+                self.source_file_for = Some(build_path);
+                if self.browse(BrowseTarget::SourceFile) {
+                    if let Err(message) = self.apply_pending_settings() {
+                        self.notify(ShellNotice::error(message));
+                    }
+                }
+            }
+            Some(DebuggerAction::SaveRunMap { project, map }) => self.save_run_map(&project, map),
             Some(DebuggerAction::DumpRam) => self.ask_for_ram_dump(),
             Some(DebuggerAction::ShowMemory(memory)) => {
                 control.set_view(ViewRequest { memory, ..control.view() });
+            }
+            Some(DebuggerAction::ShowCode(code)) => {
+                self.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Cpu;
+                // Back at RIP is back in the innermost frame.
+                if code == CodeTarget::Rip {
+                    control.select_frame(0);
+                }
+                control.set_view(ViewRequest { code, ..control.view() });
+            }
+            Some(DebuggerAction::SelectFrame(number)) => {
+                // A caller's code is shown from its return address; the
+                // innermost frame's is RIP's.
+                let frame = snapshot.as_deref().and_then(|shown| shown.frames.frames.get(number));
+                let code = match frame {
+                    Some(frame) if number > 0 => {
+                        CodeTarget::At(GuestAddress { space: AddressSpace::Linear, value: frame.registers.rip })
+                    }
+                    Some(_) | None => CodeTarget::Rip,
+                };
+                control.select_frame(number);
+                control.set_view(ViewRequest { code, ..control.view() });
+                // A tip was read in the frame picked before.
+                control.show_tip(None);
+                self.sessions.open(&vm).debugger_mut().variables.tip = None;
+            }
+            Some(DebuggerAction::ShowTip(tip)) => {
+                control.show_tip(Some(tip.expression.clone()));
+                self.sessions.open(&vm).debugger_mut().variables.tip = Some(tip);
+            }
+            Some(DebuggerAction::CloseTip) => {
+                control.show_tip(None);
+                self.sessions.open(&vm).debugger_mut().variables.tip = None;
+            }
+            Some(DebuggerAction::FindReferences(target)) => {
+                let pane = self.sessions.open(&vm).debugger_mut();
+                pane.tab = DebuggerTab::References;
+                pane.references = Some(target.clone());
+                let scope = pane.references_scope;
+                if let Some(shown) = snapshot.as_deref() {
+                    control.find_references(copy_request(shown, scope_modules(shown, scope, &target)));
+                }
+            }
+            Some(DebuggerAction::CancelReferences) => control.cancel_references(),
+            Some(DebuggerAction::Reindex(bases)) => {
+                if let Some(shown) = snapshot.as_deref() {
+                    let modules: Vec<_> = shown
+                        .symbols
+                        .modules
+                        .iter()
+                        .filter(|module| bases.contains(&module.base))
+                        .map(|module| copy_module(shown, module))
+                        .collect();
+                    let keys: Vec<_> = modules.iter().map(|module| module.key.clone()).collect();
+                    control.xrefs().forget(&keys);
+                    control.find_references(copy_request(shown, modules));
+                }
             }
             Some(DebuggerAction::SelectCpu(cpu)) => {
                 control.set_view(ViewRequest { cpu, ..control.view() });
@@ -2216,6 +2614,69 @@ impl NativeShellApp {
                     system: SystemView::Off,
                     ..control.view()
                 });
+            }
+            Some(DebuggerAction::Symbols(asked)) => self.act_on_symbols(asked),
+            Some(DebuggerAction::SetTargets(targets)) => {
+                let applied = crate::debugger::source_breakpoints::applied_set(
+                    &targets,
+                    snapshot.as_deref().map(crate::debugger::source_breakpoints::BreakpointModules::of).as_ref(),
+                    &symbols,
+                );
+                control.set_targets(targets);
+                control.set_breakpoints(applied);
+            }
+        }
+    }
+
+    /// Writes a map the owner made by locating a source file into the
+    /// settings of `project`, the project the file's module came from, and
+    /// looks symbols and sources up again under them.
+    fn save_run_map(&mut self, project: &str, map: crate::source::find::PathMap) {
+        let mut file = self.symbol_settings.file.clone();
+        let Some(entry) = file.projects.iter_mut().find(|entry| entry.name == project) else {
+            self.notify(ShellNotice::error(format!("The settings have no project named {project}.")));
+            return;
+        };
+        let kept = crate::symbol_settings::PathMapToml { from: PathBuf::from(&map.from), to: map.to };
+        if !entry.map.contains(&kept) {
+            entry.map.push(kept);
+        }
+        match self.symbol_settings.save(file) {
+            Ok(()) => {
+                self.symbols.reconfigure(crate::symbols::hub::HubConfig::from_settings(&self.symbol_settings.resolved));
+                self.notify(ShellNotice::info(format!("The path map is saved in {project}'s settings.")));
+            }
+            Err(error) => self.notify(ShellNotice::error(format!("The path map was not saved: {error}"))),
+        }
+    }
+
+    /// Does what the Symbols tab asked of the symbol engine.
+    fn act_on_symbols(&mut self, asked: crate::shell::debugger_page::SymbolsAction) {
+        use crate::shell::debugger_page::SymbolsAction;
+        use rusty_box_symbols::service::Consent;
+        match asked {
+            SymbolsAction::LoadFromFile(identity) => {
+                self.symbol_file_for = Some(identity);
+                if self.browse(BrowseTarget::SymbolFile) {
+                    if let Err(message) = self.apply_pending_settings() {
+                        self.notify(ShellNotice::error(message));
+                    }
+                }
+            }
+            SymbolsAction::LoadAnyway { identity, path } => {
+                self.symbols.attach(&identity, path, Consent::LoadAnyway);
+            }
+            SymbolsAction::Retry(identity) => self.symbols.retry(&identity),
+            SymbolsAction::Cancel(identity) => self.symbols.cancel(&identity),
+            SymbolsAction::Unload(identity) => self.symbols.unload(&identity),
+            SymbolsAction::Rescan => self.symbols.rescan(),
+            SymbolsAction::OpenSettings => self.open_settings(),
+            #[cfg(not(target_os = "android"))]
+            SymbolsAction::OpenStore => {
+                let store = self.symbol_settings.resolved.store.value.clone();
+                if let Err(error) = open_folder(&store) {
+                    self.notify(ShellNotice::error(format!("The symbol store {} did not open: {error}", store.display())));
+                }
             }
         }
     }
@@ -3138,6 +3599,8 @@ impl NativeShellApp {
                         );
                     }
                     ui.add_space(SPACE_ITEM);
+                    changed |= self.draw_disk_writes(ui);
+                    ui.add_space(SPACE_ITEM);
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Change").clicked() {
                             changed |= self.browse(BrowseTarget::HardDisk);
@@ -3161,6 +3624,51 @@ impl NativeShellApp {
         }
         if open_sheet {
             self.open_new_disk_sheet();
+        }
+        changed
+    }
+
+    /// Where the guest's writes to the attached disk go (Bochs `mode=`) and,
+    /// for a volatile disk, the file its journal is named after (Bochs
+    /// `journal=`). Returns whether the VM's settings changed.
+    fn draw_disk_writes(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut changed = false;
+        field_row(ui, "Writes", |ui| {
+            egui::ComboBox::from_id_salt("Disk writes")
+                .selected_text(disk_writes_label(self.settings.disk_mode))
+                .show_ui(ui, |ui| {
+                    for mode in [
+                        crate::config::DiskModeName::Flat,
+                        crate::config::DiskModeName::Volatile,
+                    ] {
+                        changed |= ui
+                            .selectable_value(
+                                &mut self.settings.disk_mode,
+                                mode,
+                                disk_writes_label(mode),
+                            )
+                            .on_hover_text(disk_writes_hint(mode))
+                            .changed();
+                    }
+                });
+        });
+        match self.settings.disk_mode {
+            crate::config::DiskModeName::Flat => {}
+            crate::config::DiskModeName::Volatile => {
+                field_row(ui, "Journal", |ui| {
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.settings.disk_journal)
+                                .hint_text("Beside the image, named after it")
+                                .desired_width(path_field_width(ui)),
+                        )
+                        .on_hover_text(
+                            "The file the journal is named after, with a random suffix added. \
+                             Leave blank to keep it beside the image.",
+                        )
+                        .changed();
+                });
+            }
         }
         changed
     }
@@ -4153,6 +4661,10 @@ impl NativeShellApp {
                 self.overwrite_confirmed.extend(agreed);
                 self.overwrite_confirmed.extend(nothing_to_erase);
                 self.chrome.go_to(ShellPage::Console);
+                // A booting machine gets the whole page: the serial pane and
+                // the library come back from their buttons.
+                self.chrome.show_serial = false;
+                self.chrome.library = Drawer::Closed;
             }
             // The Start comes back in the error, and what it holds is given
             // back as the error is dropped.
@@ -4465,7 +4977,9 @@ impl NativeShellApp {
             BrowseTarget::HardDisk
             | BrowseTarget::Cdrom
             | BrowseTarget::Bios
-            | BrowseTarget::VgaBios => pick_native_file(),
+            | BrowseTarget::VgaBios
+            | BrowseTarget::SymbolFile
+            | BrowseTarget::SourceFile => pick_native_file(),
         };
         chosen.is_some_and(|path| self.set_browsed_path(target, path))
     }
@@ -4533,6 +5047,18 @@ impl NativeShellApp {
                 }
                 false
             }
+            BrowseTarget::SymbolFile => {
+                if let Some(identity) = self.symbol_file_for.take() {
+                    self.symbols.attach(&identity, path, rusty_box_symbols::service::Consent::MatchOnly);
+                }
+                false
+            }
+            BrowseTarget::SourceFile => {
+                if let Some(build_path) = self.source_file_for.take() {
+                    self.symbols.add_run_map(crate::shell::debugger_page::source_view::located_map(&build_path, &path));
+                }
+                false
+            }
         }
     }
 
@@ -4563,6 +5089,7 @@ impl NativeShellApp {
             ),
             // The browser opens in the shared Download folder.
             BrowseTarget::RamDump => (PathBuf::new(), Some(RAM_DUMP_FILE_NAME)),
+            BrowseTarget::SymbolFile | BrowseTarget::SourceFile => (PathBuf::new(), None),
         };
         Some(BrowseRequest {
             target,
@@ -6450,6 +6977,27 @@ fn engine_label(engine: crate::config::Engine) -> &'static str {
     }
 }
 
+/// The Hard disk page's name for where a disk's writes go.
+#[cfg(not(target_arch = "wasm32"))]
+fn disk_writes_label(mode: crate::config::DiskModeName) -> &'static str {
+    match mode {
+        crate::config::DiskModeName::Flat => "Saved to the image",
+        crate::config::DiskModeName::Volatile => "Kept until power-off",
+    }
+}
+
+/// What each choice of [`disk_writes_label`] does to the image.
+#[cfg(not(target_arch = "wasm32"))]
+fn disk_writes_hint(mode: crate::config::DiskModeName) -> &'static str {
+    match mode {
+        crate::config::DiskModeName::Flat => "The guest's writes change the image file.",
+        crate::config::DiskModeName::Volatile => {
+            "The image is opened read-only. Writes go to a journal that is removed at \
+             power-off, so every run starts from the same disk."
+        }
+    }
+}
+
 #[cfg(test)]
 #[cfg(feature = "gui-egui")]
 mod tests {
@@ -6540,6 +7088,12 @@ mod tests {
             crate::library::VmLibrary::open(self.dir.clone()).expect("open scratch library")
         }
 
+        /// A symbol settings file of this test's own, beside the library
+        /// folder (whose parent is the shared temporary folder).
+        fn settings_file(&self) -> std::path::PathBuf {
+            self.dir.with_extension("settings.toml")
+        }
+
         fn toml_files(&self) -> Vec<String> {
             let mut names: Vec<String> = fs::read_dir(&self.dir)
                 .expect("list scratch library")
@@ -6557,7 +7111,27 @@ mod tests {
             if let Err(error) = fs::remove_dir_all(&self.dir) {
                 eprintln!("could not remove {}: {error}", self.dir.display());
             }
+            match fs::remove_file(self.settings_file()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => eprintln!("could not remove {}: {error}", self.settings_file().display()),
+            }
         }
+    }
+
+    /// The shell resolves its symbol settings from its own file at start: a
+    /// key the file sets wins. A test shell starts no symbol workers.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_shell_reads_its_symbol_settings_at_start() {
+        let scratch = ScratchLibrary::new();
+        fs::write(scratch.settings_file(), "[symbols]\ndownload = \"off\"\n").expect("write the settings");
+        let (app, _command_rx) = native_test_app_over(&scratch, None, None);
+        let downloads = &app.symbol_settings.resolved.downloads;
+        assert_eq!(downloads.value, rusty_box_symbols::service::Downloads::Off);
+        assert_eq!(downloads.origin, crate::symbol_settings::Origin::File);
+        assert!(app.symbol_settings.problem.is_none());
+        assert!(app.symbol_workers.is_none());
     }
 
     /// A shell opened the way the command line opens it: `test_resolved_config()`
@@ -6597,6 +7171,7 @@ mod tests {
                 crate::runner::ShellOpening::Launch,
             ),
             notice,
+            settings_file: scratch.settings_file(),
         };
         (
             NativeShellApp::with_commands(command_tx, start, AliveEffect::Nothing),
@@ -6715,6 +7290,7 @@ mod tests {
             },
             channel: 0,
             drive: 0,
+            mode: crate::config::DiskMode::Flat,
             creation: Some(crate::config::ResolvedDiskCreation {
                 path: disk,
                 size: rusty_box_bximage::ImageSize::mib(10),
@@ -6811,6 +7387,7 @@ mod tests {
             library,
             opening: crate::runner::ShellOpening::LibraryVm(beta.clone()),
             notice: None,
+            settings_file: scratch.settings_file(),
         };
 
         let opening = OpeningList::from_start(&start);
@@ -6869,6 +7446,7 @@ mod tests {
             library,
             opening: crate::runner::ShellOpening::LastShown,
             notice: Some("a bundled VM was not imported".to_owned()),
+            settings_file: scratch.settings_file(),
         };
 
         let opening = OpeningList::from_start(&start);
@@ -7924,6 +8502,7 @@ mod tests {
             },
             channel: 0,
             drive: 0,
+            mode: crate::config::DiskMode::Flat,
             creation: Some(crate::config::ResolvedDiskCreation {
                 path: disk.to_path_buf(),
                 size: rusty_box_bximage::ImageSize::mib(8),
@@ -8561,6 +9140,7 @@ mod tests {
             },
             channel: 0,
             drive: 0,
+            mode: crate::config::DiskMode::Flat,
             creation: Some(crate::config::ResolvedDiskCreation {
                 path: disk_path.clone(),
                 size: rusty_box_bximage::ImageSize::mib(10),
@@ -8575,6 +9155,67 @@ mod tests {
         assert_eq!(disk.path, disk_path);
         assert!(disk.creation.is_some());
         assert_eq!(disk.geometry.cylinders, 20);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_vm_settings_keep_where_writes_go() {
+        let mut config = test_resolved_config();
+        let disk_path = unique_temp_path("rusty-box-gui-volatile-settings");
+        let journal = disk_path.with_extension("journal");
+        config.disk = Some(crate::config::ResolvedDisk {
+            path: disk_path.clone(),
+            geometry: crate::args::DiskGeometry {
+                cylinders: 20,
+                heads: 16,
+                sectors_per_track: 63,
+            },
+            channel: 0,
+            drive: 0,
+            mode: crate::config::DiskMode::Volatile {
+                journal: Some(journal.clone()),
+            },
+            creation: None,
+        });
+        let mut settings = NativeVmSettings::from_config(&config);
+        assert_eq!(settings.disk_mode, crate::config::DiskModeName::Volatile);
+        assert_eq!(settings.disk_journal, journal.display().to_string());
+        settings.apply_to_config(&mut config).unwrap();
+        assert_eq!(
+            config.disk.as_ref().unwrap().mode,
+            crate::config::DiskMode::Volatile {
+                journal: Some(journal)
+            }
+        );
+
+        settings.disk_journal = "   ".to_owned();
+        settings.apply_to_config(&mut config).unwrap();
+        assert_eq!(
+            config.disk.as_ref().unwrap().mode,
+            crate::config::DiskMode::Volatile { journal: None },
+            "a blank journal is none"
+        );
+
+        // Bochs hdimage.cc `volatile_image_t::volatile_image_t`: `none`
+        // names no journal either.
+        settings.disk_journal = "none".to_owned();
+        settings.apply_to_config(&mut config).unwrap();
+        assert_eq!(config.disk.as_ref().unwrap().mode, crate::config::DiskMode::Volatile { journal: None });
+
+        // A relative name is kept as the file it names now, so the VM file
+        // means the same file when it is loaded again.
+        settings.disk_journal = "rel-journal".to_owned();
+        settings.apply_to_config(&mut config).unwrap();
+        assert_eq!(
+            config.disk.as_ref().unwrap().mode,
+            crate::config::DiskMode::Volatile {
+                journal: Some(std::path::absolute("rel-journal").unwrap())
+            }
+        );
+
+        settings.disk_mode = crate::config::DiskModeName::Flat;
+        settings.apply_to_config(&mut config).unwrap();
+        assert_eq!(config.disk.as_ref().unwrap().mode, crate::config::DiskMode::Flat);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -8840,6 +9481,20 @@ mod tests {
             panic!("a power-on sends a Start");
         };
         assert!(!start.display.lock().unwrap().stop_flag.load(Ordering::Relaxed));
+    }
+
+    /// A power-on shows the console alone: the serial pane hidden and the
+    /// library drawer folded to its handle.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_power_on_hides_the_serial_pane_and_folds_the_library() {
+        let (mut app, command_rx, _scratch) = library_app();
+        assert!(app.chrome.show_serial, "shown before the power-on");
+        assert_eq!(app.chrome.library, Drawer::Open);
+        app.start_vm();
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+        assert!(!app.chrome.show_serial, "the serial pane is hidden");
+        assert_eq!(app.chrome.library, Drawer::Closed, "the library is folded");
     }
 
     /// Every VM has a display of its own.
@@ -9713,6 +10368,32 @@ mod tests {
             kittest::{NodeT, Queryable},
             Harness,
         };
+        use crate::debugger::control::Task;
+        use crate::debugger::inspect::{
+            AddressSpace, CodeTarget, GuestAddress, ModuleSpace, SymModule, SymbolIndex, ViewRequest,
+        };
+        use crate::debugger::module_identity::GuestIdentity;
+        use crate::debugger::xref::index::ModuleSpan;
+        use crate::debugger::xref::service::{IndexJob, IndexState};
+        use crate::debugger::xref::test_image::{module_image, ImageSpec};
+        use crate::shell::debugger_page::references::{
+            ALL_MODULES, CANCEL, REFERENCES_FIELD, REFERENCES_TO, REINDEX, REINDEX_ALL, REINDEX_MODULE,
+        };
+        use crate::shell::debugger_page::BACK_TO_RIP;
+        use crate::debugger::control::RunControl;
+        use crate::debugger::frames::{FramesRead, LocalsRead, TipRead, WatchRead};
+        use crate::debugger::unwind::{Frame, FrameFound, FrameRegisters, StackEnd};
+        use crate::debugger::variables::{
+            Expand, MemorySpan, PathRoot, PathStep, Preview, RowKind, ShownValue, Signedness, ValuePath, VariableRow,
+        };
+        use crate::debugger::xref::service::{AddressRange, XrefTarget};
+        use crate::shell::debugger_page::frames_view::{
+            ADD_WATCH, CALLER_LINE, CALL_STACK, MORE_ELEMENTS, TIP_READING, VALUE_TIP, WATCH,
+        };
+        use crate::shell::debugger_page::source_view::line_char_x;
+        use crate::shell::listing::mono_font;
+        use crate::source::find::SourceCheck;
+        use crate::symbols::kernel::tests::KERNEL_BASE;
 
         /// A frame every sixtieth of a second, as a desktop draws them, so a
         /// double-click's two clicks land inside egui's double-click delay,
@@ -9798,7 +10479,9 @@ mod tests {
             crate::debugger::inspect::read_snapshot(
                 &mut machine,
                 &crate::debugger::inspect::ViewRequest::default(),
+                &[],
                 &mut crate::debugger::windows::WindowsDiscovery::default(),
+                None,
                 None,
             )
         }
@@ -9864,6 +10547,407 @@ mod tests {
                 .is_some());
         }
 
+        /// Code shown at an address other than RIP says so, and its button
+        /// shows RIP again.
+        #[test]
+        fn showing_code_elsewhere_has_a_way_back() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            let elsewhere = CodeTarget::At(GuestAddress { space: AddressSpace::Linear, value: snapshot.rip + 4 });
+            snapshot.code_at = elsewhere;
+            control.set_view(ViewRequest { code: elsewhere, ..control.view() });
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.starts_with("Showing code at")))
+                .next()
+                .is_some());
+            window.get_by_label(BACK_TO_RIP).click();
+            window.run();
+            assert_eq!(control.view().code, CodeTarget::Rip);
+        }
+
+        /// A pause's modules are asked of the symbol engine when the page
+        /// shows it, and only once however often it is drawn.
+        #[test]
+        fn a_pauses_modules_are_asked_for_once() {
+            use crate::debugger::inspect::{ModuleSpace, SymModule, SymbolIndex};
+            use crate::debugger::module_identity::GuestIdentity;
+            use crate::symbols::hub::ModuleSymbols;
+            use rusty_box_symbols::identity::{ModuleIdentity, PeImageId};
+            let kernel = ModuleIdentity::Pe {
+                file_name: "ntoskrnl.exe".to_owned(),
+                image: PeImageId {
+                    time_date_stamp: 0x5E1D_2A4B,
+                    size_of_image: 0x10_0000,
+                },
+                pdb: None,
+            };
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = live_vm(&mut app);
+            control.pause();
+            assert_eq!(
+                control.next_between_runs(),
+                crate::debugger::control::BetweenRuns::Perform(crate::debugger::control::Task::Refresh)
+            );
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = SymbolIndex {
+                modules: vec![SymModule {
+                    base: 0xFFFF_F800_0100_0000,
+                    size: 0x10_0000,
+                    name: "ntoskrnl.exe".to_owned(),
+                    space: ModuleSpace::Kernel,
+                    identity: GuestIdentity::Known(kernel.clone()),
+                }],
+                kernel: Some(0xFFFF_F800_0100_0000),
+            };
+            control.publish(snapshot);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            let view = window.state().app.symbols.view();
+            assert_eq!(view.state(&kernel), Some(&ModuleSymbols::Pending));
+            let generation = view.generation;
+            window.run();
+            assert_eq!(window.state().app.symbols.view().generation, generation);
+        }
+
+        /// A pause whose call stack wanted a module's binary, for bytes the
+        /// guest had not paged in, asks the symbol engine for it.
+        #[test]
+        fn a_pauses_awaited_binaries_are_asked_for() {
+            let key = crate::symbols::hub::ImageKey {
+                file_name: "rbdemo.exe".to_owned(),
+                image: rusty_box_symbols::identity::PeImageId { time_date_stamp: 0x6AD5_0324, size_of_image: 0x8000 },
+            };
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = live_vm(&mut app);
+            control.pause();
+            assert_eq!(
+                control.next_between_runs(),
+                crate::debugger::control::BetweenRuns::Perform(crate::debugger::control::Task::Refresh)
+            );
+            let mut snapshot = paused_snapshot();
+            snapshot.frames.awaiting_images = vec![key.clone()];
+            control.publish(snapshot);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            let view = window.state().app.symbols.view();
+            assert_eq!(view.image_state(&key), Some(&crate::symbols::hub::ImageState::Pending));
+        }
+
+        /// The owner's program found in a process the pause does not stand
+        /// in has its symbols asked for, so a source line binds in it.
+        #[test]
+        fn a_pauses_modules_in_other_processes_are_asked_for() {
+            let program = rusty_box_symbols::identity::ModuleIdentity::Pe {
+                file_name: "rbdemo.exe".to_owned(),
+                image: rusty_box_symbols::identity::PeImageId { time_date_stamp: 0x6AD5_0324, size_of_image: 0x8000 },
+                pdb: None,
+            };
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = live_vm(&mut app);
+            control.pause();
+            assert_eq!(
+                control.next_between_runs(),
+                crate::debugger::control::BetweenRuns::Perform(crate::debugger::control::Task::Refresh)
+            );
+            let mut snapshot = paused_snapshot();
+            snapshot.elsewhere = crate::debugger::windows::ModulesElsewhere {
+                names: vec!["rbdemo.exe".to_owned()],
+                modules: vec![crate::debugger::windows::ProcessModule {
+                    cr3: 0x494_F000,
+                    process: "rbdemo.exe".to_owned(),
+                    module: crate::debugger::inspect::SymModule {
+                        base: 0x1_4000_0000,
+                        size: 0x8000,
+                        name: "rbdemo.exe".to_owned(),
+                        space: crate::debugger::inspect::ModuleSpace::User,
+                        identity: crate::debugger::module_identity::GuestIdentity::Known(program.clone()),
+                    },
+                }],
+            };
+            control.publish(snapshot);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            let view = window.state().app.symbols.view();
+            assert_eq!(view.state(&program), Some(&crate::symbols::hub::ModuleSymbols::Pending));
+        }
+
+        /// Once the kernel's tables load, its layouts go to the paused run,
+        /// which reads the guest again under them.
+        #[test]
+        fn a_loaded_kernel_pdb_is_handed_to_the_paused_run() {
+            use crate::debugger::control::{BetweenRuns, Task};
+            use crate::symbols::kernel::tests::{hub_with_kernel_tables, kernel_symbols};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            app.symbols = hub_with_kernel_tables();
+            let control = live_vm(&mut app);
+            control.pause();
+            assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = kernel_symbols();
+            control.publish(snapshot);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            let layout = control.kernel_layout().expect("handed over");
+            assert_eq!(layout.process.unique_process_id.map(|offset| offset.0), Some(0x440));
+            assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        }
+
+        /// With the kernel's tables loaded, the code pane heads a function
+        /// with its name, names a call's target and gives the source line.
+        #[test]
+        fn the_code_pane_names_functions_and_branch_targets() {
+            use crate::debugger::inspect::{CodeLine, CodeText};
+            use crate::symbols::kernel::tests::{kernel_symbols, KERNEL_BASE};
+            use crate::symbols::names::tests::{hub_with_kernel_code, loaded};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            app.symbols = hub_with_kernel_code(loaded());
+            let control = live_vm(&mut app);
+            control.pause();
+            assert_eq!(
+                control.next_between_runs(),
+                crate::debugger::control::BetweenRuns::Perform(crate::debugger::control::Task::Refresh)
+            );
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = kernel_symbols();
+            snapshot.code = vec![CodeLine {
+                address: KERNEL_BASE + 0x1040,
+                bytes: vec![0xE8, 0xBB, 0x00, 0x00, 0x00],
+                text: CodeText::Opcode("CallJq".to_owned()),
+                target: Some(KERNEL_BASE + 0x1100),
+            }];
+            control.publish(snapshot);
+            // The pause has a source line; the disassembly is asked for.
+            let vm = app.shown_vm();
+            app.sessions.open(&vm).debugger_mut().code_view =
+                Some(crate::shell::debugger_page::source_view::CodeView::Disassembly);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            let shows = |text: &str| {
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|label| label.contains(text)))
+                    .next()
+                    .is_some()
+            };
+            assert!(shows("ntoskrnl!KiSystemCall64:"), "the function's heading");
+            assert!(shows("CallJq -> ntoskrnl!KeBugCheckEx"), "the call's target");
+            assert!(shows("trap.asm:100"), "the source line");
+            assert!(shows("at ntoskrnl!KiSystemCall64"), "the at chip");
+        }
+
+        /// The header chip counts the pause's modules and opens the Symbols
+        /// tab, which lists a module the servers lack; picking it offers
+        /// Retry, which asks the engine again.
+        #[test]
+        fn the_symbols_tab_lists_a_missing_module_and_retries_it() {
+            use crate::symbols::hub::{ModuleEntry, ModuleSymbols};
+            use crate::symbols::kernel::tests::{kernel_identity, kernel_symbols, look_up_as_a_worker, quiet_hub};
+            let hub = quiet_hub();
+            look_up_as_a_worker(&hub, &kernel_identity(), ModuleEntry { state: ModuleSymbols::NotOnServer, tables: None });
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            app.symbols = hub.clone();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = kernel_symbols();
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("1 missing").click();
+            window.run();
+            assert!(
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.contains("not on the symbol servers")))
+                    .next()
+                    .is_some(),
+                "the Symbols tab lists the module's state"
+            );
+            let_clicks_settle(&mut window);
+            let row = row_center(&window, "ntoskrnl.exe");
+            single_click(&mut window, row);
+            window.run();
+            window.get_by_label("Retry").click();
+            window.run();
+            assert_eq!(hub.view().state(&kernel_identity()), Some(&ModuleSymbols::Pending));
+        }
+
+        /// A pause that names no module (a guest with no 64-bit Windows
+        /// kernel) shows why on the Symbols tab, not an empty table.
+        #[test]
+        fn the_symbols_tab_says_why_it_lists_no_modules() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(paused_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Symbols").click();
+            window.run();
+            assert!(
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.contains("No modules in this pause")))
+                    .next()
+                    .is_some(),
+                "the tab says why it is empty"
+            );
+        }
+
+        /// A project file the index could not read says so on the Symbols
+        /// tab, with its path: the owner's build that is never found has a
+        /// visible reason.
+        #[test]
+        fn the_symbols_tab_lists_project_files_that_did_not_index() {
+            use crate::symbols::hub::{ModuleEntry, ModuleSymbols};
+            use crate::symbols::kernel::tests::{kernel_identity, kernel_symbols, look_up_as_a_worker, quiet_hub};
+            use rusty_box_symbols::projects::{IndexProblem, ProjectIndex};
+            let hub = quiet_hub();
+            look_up_as_a_worker(&hub, &kernel_identity(), ModuleEntry { state: ModuleSymbols::NotOnServer, tables: None });
+            let mut index = ProjectIndex::default();
+            index.problems.push(IndexProblem {
+                path: std::path::PathBuf::from("work").join("build").join("mydriver.pdb"),
+                reason: "the PDB is cut short".to_owned(),
+            });
+            hub.set_projects(index);
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            app.symbols = hub;
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = kernel_symbols();
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("1 missing").click();
+            window.run();
+            let shown = |needle: &str| {
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.contains(needle)))
+                    .next()
+                    .is_some()
+            };
+            assert!(shown("mydriver.pdb"), "the file is named");
+            assert!(shown("the PDB is cut short"), "with why it did not index");
+        }
+
+        /// The drawer's Settings opens the app's Settings, whose Save writes
+        /// the settings file and has the engine run on it.
+        #[test]
+        fn the_settings_page_saves_the_symbol_settings() {
+            use crate::symbol_settings::Origin;
+            use rusty_box_symbols::service::Downloads;
+            let (app, _command_rx, scratch) = native_test_app();
+            let mut window = tall_window(app);
+            window.run();
+            window.get_by_label(crate::shell::vm_bar::SETTINGS).click();
+            window.run();
+            assert!(window.query_by_label(crate::shell::symbols_page::SYMBOLS_HEADING).is_some());
+            window.get_by_label("Off").click();
+            window.run();
+            window.get_by_label("Save").click();
+            window.run();
+            let saved = &window.state().app.symbol_settings.resolved.downloads;
+            assert_eq!(saved.value, Downloads::Off);
+            assert_eq!(saved.origin, Origin::File);
+            let text = fs::read_to_string(scratch.settings_file()).expect("the settings file");
+            assert!(text.contains("download = \"off\""), "{text}");
+        }
+
+        /// The Symbols tab's own way to the app's Settings opens them.
+        #[test]
+        fn the_symbols_tab_opens_the_symbol_settings() {
+            use crate::shell::debugger_page::DebuggerTab;
+            use crate::shell::destination::Surface;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = crate::symbols::kernel::tests::kernel_symbols();
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let vm = window.state().app.shown_vm();
+            window.state_mut().app.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Symbols;
+            window.run();
+            window.get_by_label(crate::shell::debugger_page::SYMBOL_SETTINGS).click();
+            window.run();
+            assert_eq!(window.state().app.chrome.surface, Surface::Settings);
+            assert!(window.query_by_label(crate::shell::symbols_page::SYMBOLS_HEADING).is_some());
+        }
+
+        /// The SSDT tab lists the kernel's services by name with a hook in
+        /// red and how the table was found, and switches to the GUI's table,
+        /// still saying the kernel's has hooks.
+        #[test]
+        fn the_ssdt_tab_lists_both_tables_by_name() {
+            use crate::debugger::windows::{
+                GuiServices, InlineJump, PointerSite, ServiceTableRead, SsdtListing, SsdtService, SystemListing,
+                TablePlace, TableSource,
+            };
+            use crate::shell::debugger_page::DebuggerTab;
+            let service = |index: u32, name: &str, routine: u64, module: &str| SsdtService {
+                index,
+                routine,
+                site: PointerSite::OwnImage,
+                module_name: Some(module.to_owned()),
+                stub_name: Some(name.to_owned()),
+                inline: None,
+            };
+            let mut hooked = service(1, "NtCreateFile", 0xFFFF_F800_0100_5120, "ntoskrnl.exe");
+            hooked.inline = Some(InlineJump { target: 0xFFFF_F800_0300_0200, module_name: Some("disk.sys".to_owned()) });
+            let listing = SsdtListing {
+                kernel: ServiceTableRead {
+                    source: TableSource::Code,
+                    base: 0xFFFF_F800_0100_6000,
+                    place: TablePlace::InOwner,
+                    services: vec![service(0, "NtClose", 0xFFFF_F800_0100_5100, "ntoskrnl.exe"), hooked],
+                    any_hooked: true,
+                },
+                gui: GuiServices::Listed(ServiceTableRead {
+                    source: TableSource::Pdb,
+                    base: 0xFFFF_F960_0000_2000,
+                    place: TablePlace::InOwner,
+                    services: vec![service(0, "NtUserGetMessage", 0xFFFF_F960_0000_1000, "win32k.sys")],
+                    any_hooked: false,
+                }),
+            };
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.system = SystemListing::Ssdt(listing);
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let vm = window.state().app.shown_vm();
+            window.state_mut().app.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Ssdt;
+            window.run();
+            let shown = |window: &Harness<'_, Window>, needle: &str| {
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.contains(needle)))
+                    .next()
+                    .is_some()
+            };
+            assert!(shown(&window, "NtClose"), "the kernel's services are named");
+            assert!(shown(&window, "inline hook, jumps to disk.sys"), "an inline hook is said");
+            assert!(shown(&window, "found by: code"));
+            assert!(shown(&window, "hooks present"));
+            window.get_by_label("GUI").click();
+            window.run();
+            assert!(shown(&window, "NtUserGetMessage"), "the GUI's services are named");
+            assert!(shown(&window, "found by: PDB"));
+            assert!(shown(&window, "the kernel table has hooks"));
+            assert!(!shown(&window, "NtClose"), "the kernel's list is not shown with the GUI's");
+        }
+
         #[test]
         fn the_debugger_page_of_a_vm_that_is_off_says_how_to_start() {
             let (app, _command_rx, _scratch) = native_test_app();
@@ -9883,9 +10967,12 @@ mod tests {
             let mut window = window(app);
             window.run();
             open_debugger(&mut window);
-            window.get_by_label("Step").click();
+            window.get_by_label("Step into").click();
             window.run();
-            assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step));
+            assert_eq!(
+                control.next_between_runs(),
+                BetweenRuns::Perform(Task::Step(crate::debugger::stepping::StepRequest::instruction_into(0)))
+            );
         }
 
         #[test]
@@ -9899,7 +10986,988 @@ mod tests {
             let mut window = window(app);
             window.run();
             open_debugger(&mut window);
-            assert!(window.get_by_label("Step").accesskit_node().is_disabled());
+            assert!(window.get_by_label("Step into").accesskit_node().is_disabled());
+        }
+
+        #[test]
+        fn the_breakpoints_tab_adds_from_its_field_and_removes_the_picked_one() {
+            use crate::shell::debugger_page::{DebuggerTab, BREAKPOINT_ADDRESS, NO_BREAKPOINTS};
+            use rusty_box::cpu::CodeBreakpoint;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let vm = window.state().app.shown_vm();
+            window.state_mut().app.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Breakpoints;
+            window.run();
+            assert!(window.query_by_label(NO_BREAKPOINTS).is_some(), "an empty list says how to add one");
+            let field = || egui::accesskit::Role::TextInput;
+            window.get_by_role_and_label(field(), BREAKPOINT_ADDRESS).click();
+            window.run();
+            window.get_by_role_and_label(field(), BREAKPOINT_ADDRESS).type_text("0x1000");
+            window.run();
+            window.get_by_label("Add").click();
+            window.run();
+            assert_eq!(control.breakpoints(), [CodeBreakpoint::Linear(0x1000)]);
+            window.run();
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.contains("0000000000001000")))
+                .next()
+                .expect("the breakpoint's row")
+                .click();
+            window.run();
+            window.key_press(egui::Key::F2);
+            window.run();
+            assert!(control.breakpoints().is_empty(), "F2 removed the picked row");
+        }
+
+        /// The kernel fixture's `trap.asm` as the build recorded it.
+        const TRAP_ASM: &str = r"d:\os\src\ntos\ke\amd64\trap.asm";
+
+        /// The shown VM paused at `KiSystemCall64`, line 100 of the kernel's
+        /// `trap.asm`, its tables loaded and its source read as `found`
+        /// (lines `source line 1` to `source line 120`).
+        fn paused_in_trap_asm(
+            app: &mut NativeShellApp,
+            found: crate::source::find::SourceFound,
+        ) -> Arc<crate::debugger::control::RunControl> {
+            use crate::debugger::control::{BetweenRuns, Task};
+            use crate::debugger::inspect::{CodeLine, CodeText};
+            use crate::source::find::{LoadedSource, SourceText};
+            use crate::symbols::hub::{Job, SourceKey};
+            use crate::symbols::kernel::tests::{kernel_identity, kernel_symbols, KERNEL_BASE};
+            use crate::symbols::names::tests::{hub_with_kernel_code, loaded};
+            app.symbols = hub_with_kernel_code(loaded());
+            let control = live_vm(app);
+            control.pause();
+            assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = kernel_symbols();
+            snapshot.code = vec![CodeLine {
+                address: KERNEL_BASE + 0x1040,
+                bytes: vec![0x90],
+                text: CodeText::Opcode("Nop".to_owned()),
+                target: None,
+            }];
+            control.publish(snapshot);
+            let key = SourceKey { identity: kernel_identity(), file: 0 };
+            app.symbols.want_source(&key);
+            let ticket = app.symbols.try_next_job().expect("the read");
+            assert_eq!(ticket.job, Job::ReadSource { key: key.clone() });
+            let text = SourceText { lines: (1..=120).map(|line| format!("source line {line}")).collect() };
+            app.symbols.finish_source(&key, LoadedSource { found, text: Some(text) });
+            control
+        }
+
+        fn found_in_folders(check: crate::source::find::SourceCheck) -> crate::source::find::SourceFound {
+            crate::source::find::SourceFound::Disk {
+                path: PathBuf::from(r"D:\work\trap.asm"),
+                by: crate::source::find::FoundBy::SourceFolder,
+                check,
+            }
+        }
+
+        /// Whether a node whose label or value holds `text` is drawn.
+        fn shown_anywhere(window: &Harness<'_, Window>, text: &str) -> bool {
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|label| label.contains(text)))
+                .next()
+                .is_some()
+        }
+
+        #[test]
+        fn the_source_view_shows_the_file_at_the_pause_line() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_in_trap_asm(&mut app, found_in_folders(crate::source::find::SourceCheck::Matches));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(shown_anywhere(&window, "source line 100"), "the pause's line");
+            assert!(shown_anywhere(&window, "trap.asm"), "the file's name");
+            assert!(shown_anywhere(&window, "in the project's source folders"), "how it was found");
+            assert!(shown_anywhere(&window, "matches the build"), "its check");
+            assert!(!shown_anywhere(&window, "Nop"), "the source, not the disassembly");
+        }
+
+        /// F2 in the source view sets a breakpoint on the pause's line, by
+        /// its build path; the machine gets the line's address.
+        #[test]
+        fn f2_in_the_source_view_sets_a_breakpoint_on_the_line() {
+            use crate::debugger::source_breakpoints::{BreakpointTarget, SourceTarget};
+            use crate::symbols::kernel::tests::KERNEL_BASE;
+            use rusty_box::cpu::CodeBreakpoint;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_in_trap_asm(&mut app, found_in_folders(crate::source::find::SourceCheck::Matches));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.key_press(egui::Key::F2);
+            window.run();
+            window.run();
+            assert_eq!(control.targets(), [BreakpointTarget::Source(SourceTarget { file: TRAP_ASM.into(), line: 100 })]);
+            assert_eq!(control.breakpoints(), [CodeBreakpoint::Linear(KERNEL_BASE + 0x1040)]);
+        }
+
+        #[test]
+        fn a_file_that_differs_from_the_build_says_so() {
+            use crate::shell::debugger_page::source_view::SOURCE_DIFFERS;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_in_trap_asm(&mut app, found_in_folders(crate::source::find::SourceCheck::Differs));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(shown_anywhere(&window, SOURCE_DIFFERS));
+            assert!(shown_anywhere(&window, "source line 100"), "the lines are still shown");
+        }
+
+        #[test]
+        fn a_source_file_not_found_offers_to_locate_it() {
+            use crate::shell::debugger_page::source_view::LOCATE;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_in_trap_asm(&mut app, crate::source::find::SourceFound::Missing { build_path: TRAP_ASM.into() });
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(shown_anywhere(&window, &format!("Source not found: {TRAP_ASM}")));
+            assert!(window.query_by_label(LOCATE).is_some());
+        }
+
+        /// `KiSystemCall64` paused at line 100 of `trap.asm`, called from
+        /// line 104 (its return address `KERNEL_BASE + 0x1051`).
+        fn two_frames() -> Vec<Frame> {
+            vec![
+                Frame {
+                    registers: FrameRegisters { rip: KERNEL_BASE + 0x1040, rsp: 0x7_0000, registers: [Some(0); 16] },
+                    how: FrameFound::Registers,
+                },
+                Frame {
+                    registers: FrameRegisters { rip: KERNEL_BASE + 0x1051, rsp: 0x7_0040, registers: [None; 16] },
+                    how: FrameFound::Unwind,
+                },
+            ]
+        }
+
+        /// The caller's code, as Go to shows it.
+        const CALLER_CODE: CodeTarget = CodeTarget::At(GuestAddress { space: AddressSpace::Linear, value: KERNEL_BASE + 0x1051 });
+
+        fn frames_read(selected: usize, locals: LocalsRead) -> FramesRead {
+            FramesRead {
+                frames: two_frames(),
+                end: StackEnd::Top,
+                selected,
+                locals,
+                watches: Vec::new(),
+                tip: TipRead::None,
+                awaiting: Vec::new(),
+                awaiting_images: Vec::new(),
+            }
+        }
+
+        /// The published pause again, with `frames` and its code at `code_at`.
+        fn republish(control: &RunControl, frames: FramesRead, code_at: CodeTarget) {
+            let again = control.snapshot().expect("published");
+            let mut next = paused_snapshot();
+            next.symbols = again.symbols.clone();
+            next.code = again.code.clone();
+            next.frames = frames;
+            next.code_at = code_at;
+            control.publish(next);
+        }
+
+        fn local_path(name: &str, steps: Vec<PathStep>) -> ValuePath {
+            ValuePath { root: PathRoot::Variable(name.into()), steps }
+        }
+
+        fn variable_row(path: ValuePath, type_name: &str, value: ShownValue, expand: Expand) -> VariableRow {
+            let name = match path.steps.last() {
+                Some(PathStep::Element(index)) => format!("[{index}]"),
+                Some(PathStep::Field(field)) => field.clone(),
+                Some(PathStep::Deref) | None => match &path.root {
+                    PathRoot::Variable(name) => name.clone(),
+                    PathRoot::Watch(index) => format!("watch {index}"),
+                    PathRoot::Tip => "tip".to_owned(),
+                },
+            };
+            VariableRow {
+                depth: u8::try_from(path.steps.len()).unwrap_or(u8::MAX),
+                name,
+                type_name: type_name.into(),
+                kind: if path.steps.is_empty() { RowKind::Local } else { RowKind::Element },
+                value,
+                expand,
+                memory: None,
+                path,
+            }
+        }
+
+        /// The pause in `trap.asm` with two frames, `locals` read in frame 0.
+        fn paused_with_locals(app: &mut NativeShellApp, locals: Vec<VariableRow>) -> Arc<RunControl> {
+            let control = paused_in_trap_asm(app, found_in_folders(SourceCheck::Matches));
+            republish(&control, frames_read(0, LocalsRead::Rows(locals)), CodeTarget::Rip);
+            control
+        }
+
+        #[test]
+        fn the_call_stack_lists_frames_and_a_click_selects_one() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_with_locals(&mut app, Vec::new());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.query_by_label(CALL_STACK).is_some(), "a pause with source shows the call stack");
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.contains("ntoskrnl!KiSystemCall64+0x11")))
+                .next()
+                .expect("the caller's row")
+                .click();
+            window.run();
+            assert_eq!(control.inspect().frame, 1);
+            assert!(control.queued().contains(&Task::Refresh));
+            assert_eq!(control.view().code, CALLER_CODE, "the code pane shows the caller's code");
+        }
+
+        #[test]
+        fn a_selected_caller_frame_shows_its_line_with_a_hollow_arrow() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_in_trap_asm(&mut app, found_in_folders(SourceCheck::Matches));
+            control.select_frame(1);
+            control.set_view(ViewRequest { code: CALLER_CODE, ..control.view() });
+            republish(&control, frames_read(1, LocalsRead::Rows(Vec::new())), CALLER_CODE);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.query_by_label(CALLER_LINE).is_some(), "the caller's line is marked");
+            assert!(shown_anywhere(&window, "source line 104"), "the call's line");
+            assert!(shown_anywhere(&window, "Showing caller frame 1"));
+            window.get_by_label(BACK_TO_RIP).click();
+            window.run();
+            assert_eq!(control.inspect().frame, 0, "back at RIP is back in the innermost frame");
+            assert_eq!(control.view().code, CodeTarget::Rip);
+        }
+
+        #[test]
+        fn locals_show_names_values_and_types() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let count = variable_row(
+                local_path("count", Vec::new()),
+                "int",
+                ShownValue::Integer { raw: 0xFFFF_FFFB, size: 4, signedness: Signedness::Signed },
+                Expand::Leaf,
+            );
+            paused_with_locals(&mut app, vec![count]);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(shown_anywhere(&window, "count  -5 (0xfffffffb)  int"));
+        }
+
+        #[test]
+        fn expanding_a_structure_asks_for_its_members() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let flags = local_path("flags", Vec::new());
+            let row = variable_row(
+                flags.clone(),
+                "_MMVAD_FLAGS",
+                ShownValue::Aggregate { count: None, preview: Vec::new(), more: Preview::Cut },
+                Expand::Closed,
+            );
+            let control = paused_with_locals(&mut app, vec![row]);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.starts_with("flags")))
+                .next()
+                .expect("the structure's row")
+                .click();
+            window.run();
+            assert!(control.inspect().expanded.contains(&flags));
+        }
+
+        #[test]
+        fn show_more_asks_for_the_next_hundred() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let table = local_path("table", Vec::new());
+            let mut rows = vec![variable_row(
+                table.clone(),
+                "int[250]",
+                ShownValue::Aggregate { count: Some(250), preview: Vec::new(), more: Preview::Cut },
+                Expand::Open,
+            )];
+            rows.push(VariableRow {
+                kind: RowKind::MoreElements { shown: 100, of: 250 },
+                ..variable_row(table.clone(), "", ShownValue::NotAvailable, Expand::Leaf)
+            });
+            let control = paused_with_locals(&mut app, rows);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label(MORE_ELEMENTS).click();
+            window.run();
+            assert_eq!(control.inspect().pages.get(&table), Some(&1));
+        }
+
+        #[test]
+        fn a_watch_is_added_and_removed() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_with_locals(&mut app, Vec::new());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label(WATCH).click();
+            window.run();
+            let field = || egui::accesskit::Role::TextInput;
+            window.get_by_role_and_label(field(), ADD_WATCH).click();
+            window.run();
+            window.get_by_role_and_label(field(), ADD_WATCH).type_text("node->value");
+            window.run();
+            window.key_press(egui::Key::Enter);
+            window.run();
+            assert_eq!(control.inspect().watches, ["node->value"]);
+            window.get_by_label("Remove watch node->value").click();
+            window.run();
+            assert!(control.inspect().watches.is_empty());
+        }
+
+        /// A click on character `column` of line `line` of `trap.asm` (lines
+        /// 88 to 167 are shown, so numbers take three digits).
+        fn click_source_character(window: &mut Harness<'_, Window>, line: u32, column: usize) {
+            let label = format!("{line}  source line {line}");
+            let rect = window
+                .query_all_by(|node| node.label().is_some_and(|text| text == label))
+                .next()
+                .expect("the source line")
+                .rect();
+            let width = window.ctx.fonts_mut(|fonts| fonts.glyph_width(&mono_font(), '0'));
+            let x = line_char_x(rect, 3, width, column).expect("the column") + width / 2.0;
+            let at = egui::pos2(x, rect.center().y);
+            window.hover_at(at);
+            window.drag_at(at);
+            window.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            window.run();
+        }
+
+        /// The pause republished with `tip` read.
+        fn answer_tip(control: &RunControl, tip: TipRead) {
+            let mut frames = frames_read(0, LocalsRead::Rows(Vec::new()));
+            frames.tip = tip;
+            republish(control, frames, CodeTarget::Rip);
+        }
+
+        fn tip_row(name: &str, type_name: &str, value: ShownValue, expand: Expand) -> VariableRow {
+            VariableRow {
+                name: name.into(),
+                kind: RowKind::Watch,
+                ..variable_row(ValuePath { root: PathRoot::Tip, steps: Vec::new() }, type_name, value, expand)
+            }
+        }
+
+        /// The tip open on the word `source` of line 100.
+        fn tip_on_source(app: NativeShellApp) -> Harness<'static, Window> {
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            click_source_character(&mut window, 100, 2);
+            window
+        }
+
+        #[test]
+        fn clicking_a_variable_in_the_source_shows_its_value() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_with_locals(&mut app, Vec::new());
+            let mut window = tip_on_source(app);
+            assert_eq!(control.inspect().tip.as_deref(), Some("source"));
+            assert!(control.queued().contains(&Task::Refresh));
+            assert!(shown_anywhere(&window, TIP_READING), "the tip waits for its read");
+            let count = ShownValue::Integer { raw: 0xFFFF_FFFB, size: 4, signedness: Signedness::Signed };
+            let rows = vec![tip_row("source", "int", count, Expand::Leaf)];
+            answer_tip(&control, TipRead::Rows(WatchRead { text: "source".into(), rows }));
+            window.run();
+            assert!(window.query_by_label(VALUE_TIP).is_some());
+            assert!(shown_anywhere(&window, "-5 (0xfffffffb)"));
+        }
+
+        #[test]
+        fn a_structure_in_a_tip_expands_in_place() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_with_locals(&mut app, Vec::new());
+            let mut window = tip_on_source(app);
+            let pair = ShownValue::Aggregate { count: None, preview: Vec::new(), more: Preview::Cut };
+            let rows = vec![tip_row("source", "Pair", pair, Expand::Closed)];
+            answer_tip(&control, TipRead::Rows(WatchRead { text: "source".into(), rows }));
+            window.run();
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.starts_with("source  {…}")))
+                .next()
+                .expect("the tip's row")
+                .click();
+            window.run();
+            assert!(control.inspect().expanded.contains(&ValuePath { root: PathRoot::Tip, steps: Vec::new() }));
+            assert!(window.query_by_label(VALUE_TIP).is_some(), "a click inside keeps the tip open");
+        }
+
+        #[test]
+        fn escape_closes_the_tip() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_with_locals(&mut app, Vec::new());
+            let mut window = tip_on_source(app);
+            assert!(window.query_by_label(VALUE_TIP).is_some());
+            window.key_press(egui::Key::Escape);
+            window.run();
+            assert!(window.query_by_label(VALUE_TIP).is_none());
+            assert_eq!(control.inspect().tip, None);
+        }
+
+        #[test]
+        fn clicking_a_word_that_is_no_variable_shows_nothing() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_with_locals(&mut app, Vec::new());
+            let mut window = tip_on_source(app);
+            answer_tip(&control, TipRead::NoVariable { text: "source".into() });
+            window.run();
+            assert!(window.query_by_label(VALUE_TIP).is_none());
+            assert_eq!(control.inspect().tip, None);
+        }
+
+        #[test]
+        fn a_global_in_locals_asks_for_references_over_its_bytes() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let at = KERNEL_BASE + 0x3000;
+            let global = VariableRow {
+                kind: RowKind::Static,
+                memory: Some(MemorySpan { address: at, size: 4 }),
+                ..variable_row(
+                    local_path("g_count", Vec::new()),
+                    "int",
+                    ShownValue::Integer { raw: 7, size: 4, signedness: Signedness::Signed },
+                    Expand::Leaf,
+                )
+            };
+            paused_with_locals(&mut app, vec![global]);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.starts_with("g_count")))
+                .next()
+                .expect("the global's row")
+                .click_secondary();
+            window.run();
+            window.get_by_label(&format!("{REFERENCES_TO} g_count")).click();
+            window.run();
+            let vm = window.state().app.shown_vm();
+            let pane = window.state_mut().app.sessions.open(&vm).debugger_mut();
+            assert_eq!(pane.tab, DebuggerTab::References);
+            assert_eq!(
+                pane.references,
+                Some(XrefTarget { ranges: vec![AddressRange { start: at, end: at + 4 }], label: "g_count".into() })
+            );
+        }
+
+        /// The owner's pick of Disassembly stays when a step brings a new
+        /// pause.
+        #[test]
+        fn the_disassembly_picked_stays_across_a_step() {
+            use crate::shell::debugger_page::source_view::DISASSEMBLY_SWITCH;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_in_trap_asm(&mut app, found_in_folders(crate::source::find::SourceCheck::Matches));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label(DISASSEMBLY_SWITCH).click();
+            window.run();
+            assert!(shown_anywhere(&window, "Nop"), "the disassembly");
+            let again = control.snapshot().expect("published");
+            let mut next = paused_snapshot();
+            next.symbols = again.symbols.clone();
+            next.code = again.code.clone();
+            control.publish(next);
+            window.run();
+            assert!(shown_anywhere(&window, "Nop"), "still the disassembly");
+            assert!(!shown_anywhere(&window, "source line 100"));
+        }
+
+        /// F11, F10, Shift+F11 step into, over and out by line in the source
+        /// view; F10 steps over by instruction in the disassembly.
+        /// The steps queued for the run, in order.
+        fn queued_steps(control: &crate::debugger::control::RunControl) -> Vec<crate::debugger::stepping::StepRequest> {
+            control
+                .queued()
+                .into_iter()
+                .filter_map(|task| match task {
+                    crate::debugger::control::Task::Step(request) => Some(request),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn the_step_keys_ask_for_their_steps_in_the_shown_unit() {
+            use crate::debugger::stepping::{StepKind, StepRequest, StepUnit};
+            use crate::shell::debugger_page::source_view::DISASSEMBLY_SWITCH;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_in_trap_asm(&mut app, found_in_folders(crate::source::find::SourceCheck::Matches));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let asked = |kind: StepKind, unit: StepUnit| StepRequest { kind, unit, cpu: 0 };
+            window.key_press(egui::Key::F11);
+            window.run();
+            window.key_press(egui::Key::F10);
+            window.run();
+            window.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::F11);
+            window.run();
+            window.get_by_label(DISASSEMBLY_SWITCH).click();
+            window.run();
+            window.key_press(egui::Key::F10);
+            window.run();
+            assert_eq!(
+                queued_steps(&control),
+                [
+                    asked(StepKind::Into, StepUnit::Line),
+                    asked(StepKind::Over, StepUnit::Line),
+                    asked(StepKind::Out, StepUnit::Line),
+                    asked(StepKind::Over, StepUnit::Instruction),
+                ]
+            );
+        }
+
+        /// Ctrl+F10 runs to the picked source line's code.
+        #[test]
+        fn run_to_cursor_runs_to_the_picked_line() {
+            use crate::debugger::stepping::{StepKind, StepRequest, StepUnit};
+            use crate::symbols::kernel::tests::KERNEL_BASE;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_in_trap_asm(&mut app, found_in_folders(crate::source::find::SourceCheck::Matches));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.get_by_label("Run to cursor").accesskit_node().is_disabled(), "nothing picked yet");
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|label| label.contains("source line 104")))
+                .next()
+                .expect("line 104")
+                .click();
+            window.run();
+            window.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::F10);
+            window.run();
+            assert_eq!(
+                queued_steps(&control),
+                [StepRequest { kind: StepKind::RunTo { address: KERNEL_BASE + 0x1050 }, unit: StepUnit::Line, cpu: 0 }]
+            );
+        }
+
+        /// A step that did not finish says why.
+        #[test]
+        fn a_step_that_did_not_finish_says_why() {
+            use crate::debugger::control::{DebugNote, StepCut};
+            use crate::debugger::stepping::StepCeiling;
+            use crate::shell::debugger_page::STEP_TIME_CEILING;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.note_refusal(DebugNote::StepCut(StepCut::Ceiling(StepCeiling::Time)));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(shown_anywhere(&window, STEP_TIME_CEILING));
+            control.note_refusal(DebugNote::StepCut(StepCut::Ceiling(StepCeiling::Instructions(10_000_000))));
+            window.run();
+            assert!(shown_anywhere(&window, "The step did not finish: stopped after 10000000 instructions."));
+        }
+
+        /// A source line no module of the pause has stays on the list as
+        /// pending, saying why, and gives the machine nothing.
+        #[test]
+        fn a_file_and_line_typed_in_the_field_is_listed_as_pending() {
+            use crate::debugger::source_breakpoints::{BreakpointTarget, SourceTarget};
+            use crate::shell::debugger_page::{DebuggerTab, BREAKPOINT_ADDRESS, PENDING_NO_LINE};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let vm = window.state().app.shown_vm();
+            window.state_mut().app.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Breakpoints;
+            window.run();
+            let field = || egui::accesskit::Role::TextInput;
+            window.get_by_role_and_label(field(), BREAKPOINT_ADDRESS).click();
+            window.run();
+            window.get_by_role_and_label(field(), BREAKPOINT_ADDRESS).type_text(r"io\read.c:120");
+            window.run();
+            window.get_by_label("Add").click();
+            window.run();
+            window.run();
+            assert_eq!(
+                control.targets(),
+                [BreakpointTarget::Source(SourceTarget { file: r"io\read.c".into(), line: 120 })]
+            );
+            assert!(control.breakpoints().is_empty(), "no module has the line");
+            let shown = |text: &str| window.query_all_by(|node| node.label().or(node.value()).is_some_and(|shown| shown.contains(text))).next().is_some();
+            assert!(shown(r"io\read.c:120"), "the row names the line");
+            assert!(shown(PENDING_NO_LINE), "and why it is pending");
+        }
+
+        /// A click picks a code line, and F2 sets a breakpoint there and then
+        /// removes it; with no line picked F2 acts on the line at RIP.
+        #[test]
+        fn f2_sets_and_removes_a_breakpoint_on_the_picked_code_line() {
+            use rusty_box::cpu::CodeBreakpoint;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let snapshot = control.snapshot().expect("published");
+            let rip = snapshot.code[0].address;
+            let next = snapshot.code[1].address;
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.key_press(egui::Key::F2);
+            window.run();
+            assert_eq!(control.breakpoints(), [CodeBreakpoint::Linear(rip)], "nothing picked: RIP's line");
+            let row = format!("{next:016X}");
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.starts_with(&row)))
+                .next()
+                .expect("the second code line")
+                .click();
+            window.run();
+            window.key_press(egui::Key::F2);
+            window.run();
+            assert_eq!(
+                control.breakpoints(),
+                [CodeBreakpoint::Linear(rip), CodeBreakpoint::Linear(next)],
+                "the picked line"
+            );
+            window.key_press(egui::Key::F2);
+            window.run();
+            assert_eq!(control.breakpoints(), [CodeBreakpoint::Linear(rip)], "F2 again removes it");
+        }
+
+        /// A code line's menu sets a breakpoint there, and then removes it;
+        /// the line is marked while one is set.
+        #[test]
+        fn a_code_lines_menu_sets_and_removes_a_breakpoint_there() {
+            use crate::shell::debugger_page::{REMOVE_BREAKPOINT_HERE, SET_BREAKPOINT_HERE};
+            use rusty_box::cpu::CodeBreakpoint;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let rip = control.snapshot().expect("published").cpus[0].registers.rip;
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let row = format!("{rip:016X}");
+            let open_menu = |window: &mut Harness<'_, Window>| {
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.starts_with(&row)))
+                    .next()
+                    .expect("the code line at RIP")
+                    .click_secondary();
+                window.run();
+            };
+            open_menu(&mut window);
+            window.get_by_label(SET_BREAKPOINT_HERE).click();
+            window.run();
+            assert_eq!(control.breakpoints(), [CodeBreakpoint::Linear(rip)]);
+            open_menu(&mut window);
+            window.get_by_label(REMOVE_BREAKPOINT_HERE).click();
+            window.run();
+            assert!(control.breakpoints().is_empty());
+        }
+
+        /// The paused snapshot with one kernel module, `flat.sys`, holding
+        /// RIP: its base, and the snapshot.
+        struct FlatModule {
+            base: u64,
+            rip: u64,
+            snapshot: crate::debugger::inspect::DebugSnapshot,
+        }
+
+        const FLAT_SIZE: u64 = 0x6000;
+
+        fn flat_module() -> FlatModule {
+            let mut snapshot = paused_snapshot();
+            let rip = snapshot.rip;
+            let base = rip & !0xFFF;
+            snapshot.symbols = SymbolIndex {
+                modules: vec![SymModule { base, size: FLAT_SIZE, name: "flat.sys".into(), space: ModuleSpace::Kernel, identity: GuestIdentity::Unnamed }],
+                kernel: None,
+            };
+            FlatModule { base, rip, snapshot }
+        }
+
+        /// The shown VM's control, paused in `flat.sys`.
+        struct PausedInFlat {
+            control: Arc<crate::debugger::control::RunControl>,
+            flat: FlatModule,
+        }
+
+        fn paused_in_flat(app: &mut NativeShellApp) -> PausedInFlat {
+            let control = paused_vm(app);
+            // A snapshot is not `Clone`: the published one is read again,
+            // the same as the one kept.
+            control.publish(flat_module().snapshot);
+            PausedInFlat { control, flat: flat_module() }
+        }
+
+        /// `flat.sys` indexed: `call rip` at `.text`, then `call [rip+slot]`,
+        /// the slot in `.data` holding RIP.
+        fn index_flat(control: &crate::debugger::control::RunControl, flat: &FlatModule) {
+            let spec = ImageSpec::bits64(0x1000);
+            let slot = flat.base + u64::from(spec.data_free());
+            let mut text = vec![0xE8];
+            text.extend_from_slice(&(flat.rip.wrapping_sub(flat.base + 0x1005) as u32).to_le_bytes());
+            text.extend_from_slice(&[0xFF, 0x15]);
+            text.extend_from_slice(&(slot.wrapping_sub(flat.base + 0x100B) as u32).to_le_bytes());
+            let image = module_image(flat.base, &spec, &text, &flat.rip.to_le_bytes(), &[0x1000]);
+            assert_eq!(image.bytes.len() as u64, FLAT_SIZE);
+            let key = copy_module(&flat.snapshot, &flat.snapshot.symbols.modules[0]).key;
+            control.xrefs().accept(IndexJob {
+                key: key.clone(),
+                image,
+                extra_sync: Vec::new(),
+                spans: Arc::from(vec![ModuleSpan { base: flat.base, size: FLAT_SIZE }]),
+                taken_at: 1,
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !matches!(control.xrefs().state(&key), Some(IndexState::Ready(_))) {
+                assert!(std::time::Instant::now() < deadline, "flat.sys was not indexed");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
+        fn has_text_starting(window: &Harness<'_, Window>, start: &str) -> bool {
+            window.query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.starts_with(start))).next().is_some()
+        }
+
+        /// Opens RIP's code line menu and asks who refers to it.
+        fn ask_references_to_rip(window: &mut Harness<'_, Window>, rip: u64) {
+            let row = format!("{rip:016X}");
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.starts_with(&row)))
+                .next()
+                .expect("the code line at RIP")
+                .click_secondary();
+            window.run();
+            window.get_by_label(&format!("{REFERENCES_TO} {rip:#X}")).click();
+            window.run();
+        }
+
+        #[test]
+        fn references_to_a_code_line_open_the_tab_and_ask_for_the_module() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { control, flat } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            assert!(window.query_by_label(REFERENCES_FIELD).is_some(), "the References tab is shown");
+            let queued = control.queued();
+            let [Task::CopyImages(request)] = queued.as_slice() else {
+                panic!("one copy is asked: {queued:?}")
+            };
+            let names: Vec<&str> = request.modules.iter().map(|module| module.key.name.as_str()).collect();
+            assert_eq!(names, ["flat.sys"]);
+        }
+
+        #[test]
+        fn a_found_site_opens_in_the_code_pane() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { control, flat } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            index_flat(&control, &flat);
+            window.run();
+            let call = flat.base + 0x1000;
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.starts_with(&format!("{call:016X}"))))
+                .next()
+                .expect("the call's row")
+                .click();
+            window.run();
+            assert_eq!(control.view().code, CodeTarget::At(GuestAddress { space: AddressSpace::Linear, value: call }));
+            assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
+        }
+
+        #[test]
+        fn a_pointer_row_lists_its_readers_under_it() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { control, flat } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            index_flat(&control, &flat);
+            window.run();
+            let slot = flat.base + u64::from(crate::debugger::xref::test_image::ImageSpec::bits64(0x1000).data_free());
+            assert!(has_text_starting(&window, &format!("{slot:016X}")), "the pointer's row");
+            assert!(has_text_starting(&window, &format!("{:016X}", flat.base + 0x1005)), "its reader's row");
+            assert!(has_text_starting(&window, "1 reference") || has_text_starting(&window, "2 references"));
+        }
+
+        #[test]
+        fn indexing_shows_progress_and_cancels() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { control, flat } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            assert!(window.query_by_label("waiting to be copied").is_some());
+            window.get_by_label(CANCEL).click();
+            window.run();
+            assert_eq!(control.queued(), []);
+        }
+
+        #[test]
+        fn the_field_takes_a_name_or_an_address() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { flat, .. } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let vm = window.state().app.shown_vm();
+            window.state_mut().app.sessions.open(&vm).debugger_mut().tab = DebuggerTab::References;
+            window.run();
+            let field = || egui::accesskit::Role::TextInput;
+            window.get_by_role_and_label(field(), REFERENCES_FIELD).click();
+            window.run();
+            window.get_by_role_and_label(field(), REFERENCES_FIELD).type_text(&format!("{:#x}", flat.rip));
+            window.run();
+            window.get_by_label("Find").click();
+            window.run();
+            let asked = window.state_mut().app.sessions.open(&vm).debugger_mut().references.clone();
+            assert_eq!(asked.map(|target| target.ranges[0].start), Some(flat.rip));
+            window.get_by_role_and_label(field(), REFERENCES_FIELD).click();
+            window.run();
+            window.get_by_role_and_label(field(), REFERENCES_FIELD).type_text("zz");
+            window.run();
+            window.get_by_label("Find").click();
+            window.run();
+            assert!(has_text_starting(&window, "An address is hexadecimal digits"));
+        }
+
+        #[test]
+        fn all_modules_asks_for_every_module_of_the_pause() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut flat = flat_module();
+            flat.snapshot.symbols.modules.push(SymModule {
+                base: 0xFFFF_F800_0100_0000,
+                size: 0x10_0000,
+                name: "ntoskrnl.exe".into(),
+                space: ModuleSpace::Kernel,
+                identity: GuestIdentity::Unnamed,
+            });
+            control.publish(flat.snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            window.get_by_label(ALL_MODULES).click();
+            window.run();
+            let names: Vec<String> = control
+                .queued()
+                .into_iter()
+                .flat_map(|task| match task {
+                    Task::CopyImages(request) => request.modules.into_iter().map(|module| module.key.name).collect(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            assert_eq!(names, ["flat.sys", "ntoskrnl.exe"], "flat.sys is asked once, then the kernel");
+        }
+
+        #[test]
+        fn reindexing_a_module_copies_it_again() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { control, flat } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            control.cancel_references();
+            index_flat(&control, &flat);
+            window.run();
+            assert!(has_text_starting(&window, "indexed at instruction 1"));
+            window.get_by_label(&format!("{REINDEX} flat.sys")).click();
+            window.run();
+            let key = copy_module(&flat.snapshot, &flat.snapshot.symbols.modules[0]).key;
+            assert_eq!(control.xrefs().state(&key), Some(IndexState::Copying), "its old index is gone");
+            assert!(matches!(control.queued().as_slice(), [Task::CopyImages(request)] if request.modules[0].key == key));
+        }
+
+        #[test]
+        fn reindex_all_copies_every_module_of_the_scope() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { control, flat } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            control.cancel_references();
+            index_flat(&control, &flat);
+            window.run();
+            window.get_by_label(REINDEX_ALL).click();
+            window.run();
+            assert!(matches!(control.queued().as_slice(), [Task::CopyImages(request)] if request.modules.len() == 1));
+        }
+
+        #[test]
+        fn a_module_row_menu_reindexes_it() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = kernel_listing_snapshot(None);
+            snapshot.symbols = SymbolIndex {
+                modules: vec![SymModule {
+                    base: TCPIP_BASE,
+                    size: 0x11_0000,
+                    name: "tcpip.sys".into(),
+                    space: ModuleSpace::Kernel,
+                    identity: GuestIdentity::Unnamed,
+                }],
+                kernel: None,
+            };
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.contains("tcpip.sys")))
+                .next()
+                .expect("tcpip.sys's row")
+                .click_secondary();
+            window.run();
+            window.get_by_label(REINDEX_MODULE).click();
+            window.run();
+            // The listing's own refresh is queued too.
+            let copies: Vec<Task> = control.queued().into_iter().filter(|task| matches!(task, Task::CopyImages(_))).collect();
+            assert!(matches!(
+                copies.as_slice(),
+                [Task::CopyImages(request)] if request.modules.len() == 1 && request.modules[0].key.base == TCPIP_BASE
+            ));
+        }
+
+        /// A run paused at a breakpoint says which, on which processor.
+        #[test]
+        fn a_breakpoint_stop_is_said_under_the_header() {
+            use rusty_box::cpu::{CodeBreakpoint, CodeBreakpointHit};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.stepped_onto_breakpoint(CodeBreakpointHit {
+                cpu: 0,
+                breakpoint: CodeBreakpoint::Linear(0x1000),
+                linear: 0x1000,
+            });
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.query_by_label("Stopped at breakpoint 1000 · CPU 0 (boot)").is_some());
         }
 
         #[test]
@@ -10031,10 +12099,7 @@ mod tests {
             window.run();
             assert_eq!(
                 control.view().system,
-                SystemView::Processes {
-                    selected: None,
-                    detail: crate::debugger::windows::ProcessDetail::Modules,
-                }
+                processes_view(None, crate::debugger::windows::ProcessDetail::Modules)
             );
             window.get_by_label("Kernel modules").click();
             window.run();
@@ -10042,7 +12107,7 @@ mod tests {
                 control.view().system,
                 SystemView::KernelModules {
                     selected: None,
-                    detail: crate::debugger::windows::KernelDetail::Sections,
+                    detail: crate::debugger::windows::ModuleDetail::Sections,
                 }
             );
             window.get_by_label("CPU").click();
@@ -10086,7 +12151,7 @@ mod tests {
             window.run();
             open_debugger(&mut window);
             let step = window
-                .get_by_role_and_label(egui::accesskit::Role::Button, "Step")
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Step into")
                 .rect();
             let chip = window.get_by_label("64-bit mode").rect();
             assert!(
@@ -10137,21 +12202,21 @@ mod tests {
             window.run();
             open_debugger(&mut window);
             let step = window
-                .get_by_role_and_label(egui::accesskit::Role::Button, "Step")
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Step into")
                 .rect();
             let tabs = window
                 .get_by_role_and_label(egui::accesskit::Role::Button, "Kernel modules")
                 .rect();
             let chip = window.get_by_label("64-bit mode").rect();
-            for (name, rect) in [("Step", step), ("Kernel modules", tabs), ("64-bit mode", chip)] {
+            for (name, rect) in [("Step into", step), ("Kernel modules", tabs), ("64-bit mode", chip)] {
                 assert!(
                     rect.right() <= NARROW_PAGE.x,
                     "{name} at {rect:?} runs past the window's edge"
                 );
             }
-            // The tab switch wrapped under the buttons, and the chips under it.
+            // The tab switch has its own row, under the buttons and the chips.
             assert!(tabs.top() > step.bottom() - 1.0, "tabs {tabs:?} step {step:?}");
-            assert!(chip.top() > tabs.bottom() - 1.0, "chip {chip:?} tabs {tabs:?}");
+            assert!(tabs.top() > chip.bottom() - 1.0, "tabs {tabs:?} chip {chip:?}");
         }
 
         /// A guest's process list and the modules of one process.
@@ -10194,9 +12259,297 @@ mod tests {
                     }]),
                     map: None,
                     threads: Vec::new(),
+                    picked: None,
                 }),
             });
             snapshot
+        }
+
+        /// ntdll.dll's base in `process_listing_snapshot`.
+        const LISTED_NTDLL: u64 = 0x7FF0_0000_0000;
+
+        /// `process_listing_snapshot` with ntdll.dll picked, showing what it
+        /// imports: `CreateFileW` from KERNELBASE.dll, bound to an address
+        /// inside ntdll.dll itself.
+        fn importing_process_snapshot() -> crate::debugger::inspect::DebugSnapshot {
+            use crate::debugger::pe::{ImportName, ImportRead, ImportedModule, PeImport, ThunksEnd};
+            use crate::debugger::windows::{PickedDetail, PickedModule, SystemListing};
+            let mut snapshot = process_listing_snapshot();
+            if let SystemListing::Processes(listing) = &mut snapshot.system {
+                if let Some(modules) = listing.modules.as_mut() {
+                    modules.picked = Some(PickedModule {
+                        base: LISTED_NTDLL,
+                        shown: PickedDetail::Imports(ImportRead::Listed(vec![ImportedModule {
+                            name: Some("KERNELBASE.dll".to_owned()),
+                            functions: vec![PeImport {
+                                name: ImportName::Named {
+                                    hint: 7,
+                                    name: "CreateFileW".to_owned(),
+                                },
+                                slot: 0x900,
+                                bound: Some(LISTED_NTDLL + 0x800),
+                            }],
+                            end: ThunksEnd::Terminated,
+                        }])),
+                    });
+                }
+            }
+            snapshot
+        }
+
+        /// Whether a row whose label holds `text` is drawn.
+        fn shows(window: &Harness<'_, Window>, text: &str) -> bool {
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.contains(text)))
+                .next()
+                .is_some()
+        }
+
+        /// A kernel listing says whose layouts read it.
+        #[test]
+        fn a_kernel_listing_says_whose_layouts_read_it() {
+            use crate::debugger::windows::KernelLayouts;
+            for layouts in [KernelLayouts::Pdb, KernelLayouts::PdbDisagrees] {
+                let (mut app, _command_rx, _scratch) = native_test_app();
+                let control = paused_vm(&mut app);
+                let mut snapshot = process_listing_snapshot();
+                snapshot.layouts = Some(layouts);
+                control.publish(snapshot);
+                let mut window = tall_window(app);
+                window.run();
+                open_processes(&mut window);
+                assert!(window.query_by_label(layouts.label()).is_some(), "{layouts:?} is said");
+            }
+        }
+
+        /// A kernel listing read through the kernel's page tables (a
+        /// KVA-shadow user-mode pause) says so; one read through the
+        /// processor's own says nothing of tables.
+        #[test]
+        fn a_kernel_listing_says_when_it_was_read_through_the_kernels_tables() {
+            use crate::debugger::windows::ReadThrough;
+            let kernel = ReadThrough::KernelTables { cr3: 0x3_0002 };
+            let said = kernel.label().expect("the kernel's tables are said");
+            for (through, shown) in [ReadThrough::ProcessorTables, kernel].into_iter().zip([false, true]) {
+                let (mut app, _command_rx, _scratch) = native_test_app();
+                let control = paused_vm(&mut app);
+                let mut snapshot = process_listing_snapshot();
+                snapshot.through = through;
+                control.publish(snapshot);
+                let mut window = tall_window(app);
+                window.run();
+                open_processes(&mut window);
+                assert_eq!(window.query_by_label(said).is_some(), shown, "{through:?}");
+            }
+        }
+
+        /// A kernel listing read as the guest a VMCS holds (a pause in the
+        /// hypervisor) says so, and names the VMCS; one read through the
+        /// processor itself says nothing of it.
+        #[test]
+        fn a_kernel_listing_says_when_it_was_read_as_a_vmcs_guest() {
+            use crate::shell::debugger_page::vmx_guest_label;
+            let said = vmx_guest_label(0xB_0000);
+            for (vmcs, shown) in [None, Some(0xB_0000)].into_iter().zip([false, true]) {
+                let (mut app, _command_rx, _scratch) = native_test_app();
+                let control = paused_vm(&mut app);
+                let mut snapshot = process_listing_snapshot();
+                snapshot.vmcs = vmcs;
+                control.publish(snapshot);
+                let mut window = tall_window(app);
+                window.run();
+                open_processes(&mut window);
+                assert_eq!(window.query_by_label(&said).is_some(), shown, "{vmcs:?}");
+            }
+        }
+
+        /// A pause in the hypervisor whose VMCS guest runs no Windows kernel
+        /// says what that guest may be: under VBS, the secure kernel.
+        #[test]
+        fn no_windows_in_a_vmcs_guest_says_it_may_be_the_secure_kernel() {
+            use crate::debugger::windows::{KernelMiss, SystemListing};
+            use crate::shell::debugger_page::no_windows_kernel_in;
+            let said = no_windows_kernel_in(KernelMiss::NoKpcr, Some(0xB_0000));
+            assert!(said.contains("secure kernel"), "{said}");
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.system = SystemListing::NoWindowsKernel(KernelMiss::NoKpcr);
+            snapshot.vmcs = Some(0xB_0000);
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Kernel modules").click();
+            window.run();
+            assert!(window.query_by_label(&said).is_some());
+        }
+
+        /// A click on a process's module picks it: the run is asked for its
+        /// sections, and the page stays on the lists.
+        #[test]
+        fn clicking_a_processes_module_picks_it() {
+            use crate::debugger::windows::{ModuleDetail, ProcessDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            let_clicks_settle(&mut window);
+            let ntdll = row_center(&window, "ntdll.dll");
+            single_click(&mut window, ntdll);
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::Processes {
+                    selected: None,
+                    detail: ProcessDetail::Modules,
+                    module: Some(LISTED_NTDLL),
+                    module_detail: ModuleDetail::Sections,
+                }
+            );
+            assert!(window.query_by_label("Registers").is_none(), "still on the lists");
+        }
+
+        /// The picked module's imports list under the module they come from;
+        /// Left folds that module's row and Right opens it again, and Enter
+        /// on an import opens where it was bound.
+        #[test]
+        fn a_picked_modules_imports_list_by_module_and_fold_with_the_keys() {
+            use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+            use crate::debugger::windows::{ModuleDetail, ProcessDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(importing_process_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            let_clicks_settle(&mut window);
+            let ntdll = row_center(&window, "ntdll.dll");
+            single_click(&mut window, ntdll);
+            window.run();
+            window.get_by_label("Imports").click();
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::Processes {
+                    selected: None,
+                    detail: ProcessDetail::Modules,
+                    module: Some(LISTED_NTDLL),
+                    module_detail: ModuleDetail::Imports,
+                }
+            );
+            assert!(shows(&window, "KERNELBASE.dll"));
+            assert!(shows(&window, "CreateFileW"), "the import is listed under its module");
+            // The keys go to the modules, then to the picked module's card.
+            press_key(&mut window, egui::Key::Tab);
+            press_key(&mut window, egui::Key::Tab);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowLeft);
+            assert!(!shows(&window, "CreateFileW"), "Left folded KERNELBASE.dll");
+            press_key(&mut window, egui::Key::ArrowRight);
+            assert!(shows(&window, "CreateFileW"), "Right opened it again");
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::Enter);
+            assert_eq!(
+                control.view().memory,
+                MemoryTarget::At(GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: LISTED_NTDLL + 0x800,
+                })
+            );
+        }
+
+        /// Shift+Tab in the picked module's card shows its next view.
+        #[test]
+        fn shift_tab_in_a_modules_card_shows_its_next_view() {
+            use crate::debugger::windows::{ModuleDetail, ProcessDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            press_key(&mut window, egui::Key::Tab);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::Tab);
+            for module_detail in [ModuleDetail::Exports, ModuleDetail::Imports, ModuleDetail::Symbols, ModuleDetail::Sections] {
+                press_shift_tab(&mut window);
+                assert_eq!(
+                    control.view().system,
+                    SystemView::Processes {
+                        selected: None,
+                        detail: ProcessDetail::Modules,
+                        module: Some(LISTED_NTDLL),
+                        module_detail,
+                    }
+                );
+            }
+        }
+
+        /// The Kernel modules list says what the engine has for each module,
+        /// and a picked module's Symbols view offers the action its state
+        /// takes.
+        #[test]
+        fn a_modules_symbols_show_in_the_list_and_its_symbols_view() {
+            use crate::debugger::module_identity::GuestIdentity;
+            use crate::debugger::windows::{ModuleDetail, PickedDetail, PickedModule};
+            use crate::symbols::kernel::tests::{kernel_identity, kernel_symbols, KERNEL_BASE};
+            use crate::symbols::names::tests::{hub_with_kernel_code, loaded};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            app.symbols = hub_with_kernel_code(loaded());
+            let control = paused_vm(&mut app);
+            let mut snapshot = kernel_listing_snapshot(Some(PickedModule {
+                base: KERNEL_BASE,
+                shown: PickedDetail::Symbols(GuestIdentity::Known(kernel_identity())),
+            }));
+            snapshot.symbols = kernel_symbols();
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            let row_says = |window: &Harness<'_, Window>, module: &str, state: &str| {
+                window
+                    .query_all_by(|node| node.label().is_some_and(|label| label.contains(module) && label.contains(state)))
+                    .next()
+                    .is_some()
+            };
+            assert!(row_says(&window, "ntoskrnl.exe", "loaded"));
+            assert!(row_says(&window, "tcpip.sys", "-"), "a module this pause did not name");
+            let vm = window.state().app.shown_vm();
+            {
+                let pane = window.state_mut().app.sessions.open(&vm).debugger_mut();
+                pane.selected_kernel_module = Some(KERNEL_BASE);
+                pane.kernel_detail = ModuleDetail::Symbols;
+            }
+            window.run();
+            assert!(window.query_by_label("Unload").is_some());
+            assert!(window.query_by_label(crate::shell::debugger_page::LOAD_FROM_FILE).is_some());
+        }
+
+        /// A driver's imports are asked for by the switch, as its exports are.
+        #[test]
+        fn a_kernel_modules_imports_are_asked_for_by_the_switch() {
+            use crate::debugger::windows::{ModuleDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(kernel_listing_snapshot(None));
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            let tcpip = row_center(&window, "tcpip.sys");
+            single_click(&mut window, tcpip);
+            window.run();
+            window.get_by_label("Imports").click();
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::KernelModules {
+                    selected: Some(TCPIP_BASE),
+                    detail: ModuleDetail::Imports,
+                }
+            );
         }
 
         /// tcpip.sys's base in the kernel listings below.
@@ -10245,7 +12598,7 @@ mod tests {
         /// and the page stays on the list.
         #[test]
         fn clicking_a_kernel_module_picks_it() {
-            use crate::debugger::windows::{KernelDetail, SystemView};
+            use crate::debugger::windows::{ModuleDetail, SystemView};
             let (mut app, _command_rx, _scratch) = native_test_app();
             let control = paused_vm(&mut app);
             control.publish(kernel_listing_snapshot(None));
@@ -10259,7 +12612,7 @@ mod tests {
                 control.view().system,
                 SystemView::KernelModules {
                     selected: Some(TCPIP_BASE),
-                    detail: KernelDetail::Sections,
+                    detail: ModuleDetail::Sections,
                 }
             );
             assert!(window.query_by_label("Registers").is_none(), "still on the list");
@@ -10296,7 +12649,7 @@ mod tests {
                 MapOrigin, MapRegion, MemoryMap, RegionAccess, RegionOwner,
             };
             use crate::debugger::windows::{
-                KernelDetail, PickedDetail, PickedModule, SectionsRead, SystemView,
+                ModuleDetail, PickedDetail, PickedModule, SectionsRead, SystemView,
             };
             let text = MapRegion {
                 start: TCPIP_BASE + 0x1000,
@@ -10345,7 +12698,7 @@ mod tests {
                 control.view().system,
                 SystemView::KernelModules {
                     selected: Some(TCPIP_BASE),
-                    detail: KernelDetail::Exports,
+                    detail: ModuleDetail::Exports,
                 }
             );
         }
@@ -10555,7 +12908,7 @@ mod tests {
                     .is_some(),
                 "the banner says the live CPU is shown"
             );
-            assert!(!window.get_by_label("Step").accesskit_node().is_disabled());
+            assert!(!window.get_by_label("Step into").accesskit_node().is_disabled());
             assert!(window.query_by_label(BACK_TO_LIVE).is_some());
         }
 
@@ -10642,6 +12995,19 @@ mod tests {
             window.run();
         }
 
+        /// The Processes view of `selected`'s `detail`, with no module picked.
+        fn processes_view(
+            selected: Option<u64>,
+            detail: crate::debugger::windows::ProcessDetail,
+        ) -> crate::debugger::windows::SystemView {
+            crate::debugger::windows::SystemView::Processes {
+                selected,
+                detail,
+                module: None,
+                module_detail: crate::debugger::windows::ModuleDetail::Sections,
+            }
+        }
+
         /// System's and smss.exe's EPROCESS in `process_listing_snapshot`.
         const SYSTEM_EPROCESS: u64 = 0xFFFF_FA80_0000_1000;
         const SMSS_EPROCESS: u64 = 0xFFFF_FA80_0000_2000;
@@ -10649,7 +13015,7 @@ mod tests {
         /// Up and Down pick the process above or below the one shown.
         #[test]
         fn the_arrow_keys_pick_the_process_above_or_below() {
-            use crate::debugger::windows::{ProcessDetail, SystemView};
+            use crate::debugger::windows::ProcessDetail;
             let (mut app, _command_rx, _scratch) = native_test_app();
             let control = paused_vm(&mut app);
             control.publish(process_listing_snapshot());
@@ -10660,18 +13026,12 @@ mod tests {
             press_key(&mut window, egui::Key::ArrowUp);
             assert_eq!(
                 control.view().system,
-                SystemView::Processes {
-                    selected: Some(SYSTEM_EPROCESS),
-                    detail: ProcessDetail::Modules,
-                }
+                processes_view(Some(SYSTEM_EPROCESS), ProcessDetail::Modules)
             );
             press_key(&mut window, egui::Key::ArrowDown);
             assert_eq!(
                 control.view().system,
-                SystemView::Processes {
-                    selected: Some(SMSS_EPROCESS),
-                    detail: ProcessDetail::Modules,
-                }
+                processes_view(Some(SMSS_EPROCESS), ProcessDetail::Modules)
             );
         }
 
@@ -10718,25 +13078,25 @@ mod tests {
             assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
         }
 
-        /// Tab again gives the keys back to the process list.
+        /// Tab past the last card gives the keys back to the process list: in
+        /// the Modules view the cards are the processes, their modules and the
+        /// picked module's detail.
         #[test]
-        fn a_second_tab_gives_the_keys_back_to_the_list() {
-            use crate::debugger::windows::{ProcessDetail, SystemView};
+        fn a_tab_past_the_last_card_gives_the_keys_back_to_the_list() {
+            use crate::debugger::windows::ProcessDetail;
             let (mut app, _command_rx, _scratch) = native_test_app();
             let control = paused_vm(&mut app);
             control.publish(process_listing_snapshot());
             let mut window = tall_window(app);
             window.run();
             open_processes(&mut window);
-            press_key(&mut window, egui::Key::Tab);
-            press_key(&mut window, egui::Key::Tab);
+            for _ in 0..3 {
+                press_key(&mut window, egui::Key::Tab);
+            }
             press_key(&mut window, egui::Key::ArrowUp);
             assert_eq!(
                 control.view().system,
-                SystemView::Processes {
-                    selected: Some(SYSTEM_EPROCESS),
-                    detail: ProcessDetail::Modules,
-                }
+                processes_view(Some(SYSTEM_EPROCESS), ProcessDetail::Modules)
             );
         }
 
@@ -10744,7 +13104,7 @@ mod tests {
         /// them: modules, memory map, threads, and round again.
         #[test]
         fn shift_tab_shows_the_next_detail_view() {
-            use crate::debugger::windows::{ProcessDetail, SystemView};
+            use crate::debugger::windows::ProcessDetail;
             let (mut app, _command_rx, _scratch) = native_test_app();
             let control = paused_vm(&mut app);
             control.publish(process_listing_snapshot());
@@ -10755,7 +13115,7 @@ mod tests {
                 press_shift_tab(&mut window);
                 assert_eq!(
                     control.view().system,
-                    SystemView::Processes { selected: None, detail },
+                    processes_view(None, detail),
                     "after Shift+Tab"
                 );
             }
@@ -10765,7 +13125,7 @@ mod tests {
         /// process while the field has them.
         #[test]
         fn the_keys_of_a_filter_being_typed_in_stay_in_it() {
-            use crate::debugger::windows::{ProcessDetail, SystemView};
+            use crate::debugger::windows::ProcessDetail;
             use crate::shell::debugger_page::FILTER;
             let (mut app, _command_rx, _scratch) = native_test_app();
             let control = paused_vm(&mut app);
@@ -10781,7 +13141,7 @@ mod tests {
             press_key(&mut window, egui::Key::Tab);
             assert_eq!(
                 control.view().system,
-                SystemView::Processes { selected: None, detail: ProcessDetail::Modules }
+                processes_view(None, ProcessDetail::Modules)
             );
         }
 
@@ -10791,9 +13151,78 @@ mod tests {
         #[test]
         fn the_keys_open_a_module_in_the_memory_map_and_walk_into_its_sections() {
             use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(memory_map_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            press_shift_tab(&mut window);
+            press_key(&mut window, egui::Key::Tab);
+            // The private region, then ntdll's module row.
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::Enter);
+            assert!(shows_text(&window), "the module opened to show its sections");
+            // Its header, then its .text.
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::Enter);
+            assert_eq!(
+                control.view().memory,
+                MemoryTarget::At(GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: MAP_NTDLL + 0x1000,
+                })
+            );
+        }
+
+        /// Right shows a module's sections and Left hides them; Left on a
+        /// section steps out to its module first, as in a tree.
+        #[test]
+        fn left_and_right_hide_and_show_a_modules_sections() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(memory_map_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            press_shift_tab(&mut window);
+            press_key(&mut window, egui::Key::Tab);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowRight);
+            assert!(shows_text(&window), "Right showed the module's sections");
+            press_key(&mut window, egui::Key::ArrowLeft);
+            assert!(!shows_text(&window), "Left hid them");
+            press_key(&mut window, egui::Key::ArrowRight);
+            // Down to the header, then to .text; Left steps out to the
+            // module, and a second Left hides its sections.
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowLeft);
+            assert!(shows_text(&window), "the first Left only stepped out");
+            press_key(&mut window, egui::Key::ArrowLeft);
+            assert!(!shows_text(&window), "the second Left hid the sections");
+        }
+
+        /// ntdll's base in `memory_map_snapshot`.
+        const MAP_NTDLL: u64 = 0x7FF0_0000_0000;
+
+        /// Whether a row showing ntdll's .text section is drawn.
+        fn shows_text(window: &Harness<'_, Window>) -> bool {
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.contains(".text")))
+                .next()
+                .is_some()
+        }
+
+        /// The process listing with smss.exe's memory map: a private region,
+        /// then ntdll's header and .text grouped under its module row.
+        fn memory_map_snapshot() -> crate::debugger::inspect::DebugSnapshot {
             use crate::debugger::memory_map::{MapOrigin, MapRegion, MemoryMap, RegionOwner};
             use crate::debugger::windows::SystemListing;
-            const NTDLL: u64 = 0x7FF0_0000_0000;
+            const NTDLL: u64 = MAP_NTDLL;
             let region = |start: u64, owner: RegionOwner| MapRegion {
                 start,
                 size: 0x1000,
@@ -10826,36 +13255,7 @@ mod tests {
                     });
                 }
             }
-            let (mut app, _command_rx, _scratch) = native_test_app();
-            let control = paused_vm(&mut app);
-            control.publish(snapshot);
-            let mut window = tall_window(app);
-            window.run();
-            open_processes(&mut window);
-            press_shift_tab(&mut window);
-            press_key(&mut window, egui::Key::Tab);
-            // The private region, then ntdll's module row.
-            press_key(&mut window, egui::Key::ArrowDown);
-            press_key(&mut window, egui::Key::ArrowDown);
-            press_key(&mut window, egui::Key::Enter);
-            assert!(
-                window
-                    .query_all_by(|node| node.label().is_some_and(|label| label.contains(".text")))
-                    .next()
-                    .is_some(),
-                "the module opened to show its sections"
-            );
-            // Its header, then its .text.
-            press_key(&mut window, egui::Key::ArrowDown);
-            press_key(&mut window, egui::Key::ArrowDown);
-            press_key(&mut window, egui::Key::Enter);
-            assert_eq!(
-                control.view().memory,
-                MemoryTarget::At(GuestAddress {
-                    space: AddressSpace::Linear,
-                    value: NTDLL + 0x1000,
-                })
-            );
+            snapshot
         }
 
         /// Down picks the drivers in turn from the top, Shift+Tab switches
@@ -10863,7 +13263,7 @@ mod tests {
         #[test]
         fn the_keys_pick_a_kernel_module_show_its_exports_and_open_it() {
             use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
-            use crate::debugger::windows::{KernelDetail, SystemView};
+            use crate::debugger::windows::{ModuleDetail, SystemView};
             let (mut app, _command_rx, _scratch) = native_test_app();
             let control = paused_vm(&mut app);
             control.publish(kernel_listing_snapshot(None));
@@ -10875,7 +13275,7 @@ mod tests {
                 control.view().system,
                 SystemView::KernelModules {
                     selected: Some(0xFFFF_F800_0100_0000),
-                    detail: KernelDetail::Sections,
+                    detail: ModuleDetail::Sections,
                 }
             );
             press_key(&mut window, egui::Key::ArrowDown);
@@ -10884,7 +13284,7 @@ mod tests {
                 control.view().system,
                 SystemView::KernelModules {
                     selected: Some(TCPIP_BASE),
-                    detail: KernelDetail::Exports,
+                    detail: ModuleDetail::Exports,
                 }
             );
             press_key(&mut window, egui::Key::Enter);
@@ -10983,7 +13383,7 @@ mod tests {
             assert!(shows(&window, "Viewing winlogon.exe"), "the banner names the process");
             assert!(shows(&window, "thread 500"), "and the thread (0x1F4)");
             assert!(shows(&window, "00007FF700012345"), "the saved RIP is shown");
-            assert!(window.get_by_label("Step").accesskit_node().is_disabled());
+            assert!(window.get_by_label("Step into").accesskit_node().is_disabled());
             window.get_by_label(BACK_TO_LIVE).click();
             window.run();
             assert_eq!(control.view().context, ViewContext::Live);
@@ -11450,6 +13850,39 @@ mod tests {
                 "Windows XP is off: its fields can be edited: {xp_fields:?}"
             );
             drop(alpine);
+        }
+
+        /// The Hard disk page's Writes choice reaches the VM's configuration:
+        /// "Kept until power-off" makes the disk volatile, the power-on
+        /// configuration says so, and the Journal row appears only then.
+        #[test]
+        fn the_hard_disk_page_chooses_where_writes_go() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let disk = unique_temp_path("rusty-box-gui-writes-choice");
+            write_test_disk(&disk);
+            app.settings.disk_enabled = true;
+            app.settings.disk_path = disk.display().to_string();
+            app.apply_pending_settings().expect("a disk the shell can use");
+            app.chrome.go_to(ShellPage::Hardware);
+            app.chrome.selected_hardware = HardwareDevice::HardDisk;
+            let mut window = tall_window(app);
+            window.run_steps(2);
+            assert!(window.query_by_label("Journal").is_none(), "a flat disk has no journal");
+
+            window
+                .query_all_by_role(egui::accesskit::Role::ComboBox)
+                .find(|node| node.accesskit_node().value().as_deref() == Some("Saved to the image"))
+                .expect("the Writes choice shows where writes go")
+                .click();
+            window.run_steps(2);
+            window.get_by_label("Kept until power-off").click();
+            window.run_steps(2);
+
+            let mode = window.state().app.config.disk.as_ref().map(|disk| disk.mode.clone());
+            assert_eq!(mode, Some(crate::config::DiskMode::Volatile { journal: None }));
+            assert!(window.query_by_label("Journal").is_some(), "a volatile disk names its journal");
+            drop(window);
+            remove_test_file(&disk);
         }
 
         /// The floppy maker does not replace a file a running VM uses as its

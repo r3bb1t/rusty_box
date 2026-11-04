@@ -101,9 +101,13 @@ use alloc::vec::Vec;
 use bitflags::bitflags;
 
 #[cfg(feature = "std")]
+use crate::iodev::hdimage::{DiskImage, ImageModified, Journal, VolatileDisk, VolatileImage};
+#[cfg(feature = "std")]
 use std::fs::File;
 #[cfg(feature = "std")]
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
+#[cfg(feature = "std")]
+use std::path::Path;
 #[cfg(feature = "std")]
 use crate::snapshot::{
     bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
@@ -529,9 +533,10 @@ pub struct AtaDrive {
     /// Image file path (only available with std feature)
     #[cfg(feature = "std")]
     pub(crate) image_path: Option<String>,
-    /// Image file (only available with std feature)
+    /// The disk image, flat or volatile (Bochs `hdimage`), when a file backs
+    /// the drive.
     #[cfg(feature = "std")]
-    image_file: Option<File>,
+    image: Option<DiskImage>,
     /// Raw disk/CD-ROM data for in-memory I/O (alloc path).
     #[cfg(feature = "alloc")]
     disk_data: Option<Vec<u8>>,
@@ -583,7 +588,7 @@ impl AtaDrive {
             #[cfg(feature = "std")]
             image_path: None,
             #[cfg(feature = "std")]
-            image_file: None,
+            image: None,
             #[cfg(feature = "alloc")]
             disk_data: None,
             disk_data_ref: None,
@@ -616,7 +621,7 @@ impl AtaDrive {
             #[cfg(feature = "std")]
             image_path: None,
             #[cfg(feature = "std")]
-            image_file: None,
+            image: None,
             #[cfg(feature = "alloc")]
             disk_data: None,
             disk_data_ref: None,
@@ -653,7 +658,7 @@ impl AtaDrive {
             #[cfg(feature = "std")]
             image_path: None,
             #[cfg(feature = "std")]
-            image_file: None,
+            image: None,
             #[cfg(feature = "alloc")]
             disk_data: None,
             disk_data_ref: None,
@@ -752,12 +757,54 @@ impl AtaDrive {
         Ok(())
     }
 
-    /// Attach a disk image file (requires std feature)
+    /// Attach a disk image file the guest writes in place (Bochs `flat`).
     #[cfg(feature = "std")]
     pub fn attach_image(&mut self, path: &str) -> std::io::Result<()> {
-        let file = File::options().read(true).write(true).open(path)?;
+        let image = DiskImage::open_flat(Path::new(path))?;
+        self.attach_opened(path, image)
+    }
 
-        let size = file.metadata()?.len();
+    /// Attach a disk image file the guest can write but never changes (Bochs
+    /// `volatile`): the image is opened read-only and every sector written
+    /// goes to a journal placed as `journal` says, removed when the drive
+    /// closes.
+    #[cfg(feature = "std")]
+    pub fn attach_volatile_image(&mut self, path: &str, journal: &Journal) -> std::io::Result<()> {
+        self.attach_volatile(VolatileDisk::open(path, journal)?)
+    }
+
+    /// Attach a volatile disk already open, or taken back from another drive
+    /// ([`Self::take_volatile`]): its journal, and what the guest wrote to
+    /// it, come with it.
+    #[cfg(feature = "std")]
+    pub fn attach_volatile(&mut self, disk: VolatileDisk) -> std::io::Result<()> {
+        let VolatileDisk { image, path } = disk;
+        self.attach_opened(&path, DiskImage::Volatile(image))
+    }
+
+    /// The drive's volatile disk, journal and all, taken back from it; the
+    /// drive is left with no image. `None` for a drive whose image is not
+    /// volatile, which keeps it.
+    #[cfg(feature = "std")]
+    pub fn take_volatile(&mut self) -> Option<VolatileDisk> {
+        match self.image.take() {
+            Some(DiskImage::Volatile(image)) => Some(VolatileDisk {
+                image,
+                path: self.image_path.take().unwrap_or_default(),
+            }),
+            other => {
+                self.image = other;
+                None
+            }
+        }
+    }
+
+    /// The part of attaching an image every mode shares: its sector count,
+    /// its path, and the seek model's starting place. An image whose size
+    /// cannot be read is not attached.
+    #[cfg(feature = "std")]
+    fn attach_opened(&mut self, path: &str, image: DiskImage) -> std::io::Result<()> {
+        let size = image.size()?;
         self.geometry.total_sectors = size / SECTOR_SIZE as u64;
 
         tracing::debug!(
@@ -766,9 +813,30 @@ impl AtaDrive {
             self.geometry.total_sectors,
             size / (1024 * 1024)
         );
+        // Bochs harddrv.cc init compares the configured geometry with the
+        // image. A geometry larger than the image is kept (D24): the sectors
+        // past it are refused as each is addressed.
+        let geometry_bytes = u64::from(self.geometry.cylinders)
+            * u64::from(self.geometry.heads)
+            * u64::from(self.geometry.sectors_per_track)
+            * SECTOR_SIZE as u64;
+        match geometry_bytes.cmp(&size) {
+            core::cmp::Ordering::Greater => tracing::warn!(
+                "ATA: geometry {}/{}/{} describes {} bytes, more than '{}' holds ({} bytes): \
+                 sectors past the image are refused when addressed",
+                self.geometry.cylinders,
+                self.geometry.heads,
+                self.geometry.sectors_per_track,
+                geometry_bytes,
+                path,
+                size
+            ),
+            core::cmp::Ordering::Less => tracing::info!("ATA: extra data outside of CHS address range in '{}'", path),
+            core::cmp::Ordering::Equal => {}
+        }
 
         self.image_path = Some(String::from(path));
-        self.image_file = Some(file);
+        self.image = Some(image);
         // Bochs harddrv.cc init: next_lsector = 0, curr_lsector = sector
         // count (one past the last LBA) — seeds the first seek distance.
         self.next_lsector = 0;
@@ -1194,27 +1262,21 @@ impl AtaDrive {
         #[cfg(feature = "std")]
         {
             for _ in 0..sector_count {
-                let lba = self.current_lba();
-                let Some(offset) = lba.checked_mul(SECTOR_SIZE as u64) else {
+                // Bochs harddrv.cc ide_read_sector: every sector's address is
+                // checked (calculate_logical_address); one past the disk
+                // aborts the command.
+                let Some(lba) = self.calculate_logical_address().and_then(|sector| u64::try_from(sector).ok()) else {
                     return false;
                 };
-
-                let file = match self.image_file.as_mut() {
-                    Some(f) => f,
-                    None => return false,
+                let Some(image) = self.image.as_mut() else {
+                    return false;
                 };
-
-                if file.seek(SeekFrom::Start(offset)).is_err() {
-                    tracing::error!("ATA: ide_read_sector: seek failed at LBA {}", lba);
-                    return false;
-                }
-
-                if file
-                    .read_exact(&mut self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE])
-                    .is_err()
-                {
-                    tracing::error!("ATA: ide_read_sector: read failed at LBA {}", lba);
-                    return false;
+                match image.read_sector(lba, &mut self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE]) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        tracing::error!("ATA: ide_read_sector: read failed at LBA {lba}: {error}");
+                        return false;
+                    }
                 }
 
                 tracing::trace!("ATA: read LBA {}", lba);
@@ -1308,27 +1370,23 @@ impl AtaDrive {
         #[cfg(feature = "std")]
         {
             for _ in 0..sector_count {
-                let lba = self.current_lba();
-                let Some(offset) = lba.checked_mul(SECTOR_SIZE as u64) else {
+                // Bochs harddrv.cc ide_write_sector: every sector's address
+                // is checked (calculate_logical_address); one past the disk
+                // aborts the command, so a flat image never grows.
+                let Some(lba) = self.calculate_logical_address().and_then(|sector| u64::try_from(sector).ok()) else {
                     return false;
                 };
-
-                let file = match self.image_file.as_mut() {
-                    Some(f) => f,
-                    None => return false,
+                let Some(image) = self.image.as_mut() else {
+                    return false;
                 };
-
-                if file.seek(SeekFrom::Start(offset)).is_err() {
-                    tracing::error!("ATA: ide_write_sector: seek failed at LBA {}", lba);
-                    return false;
-                }
-
-                if file
-                    .write_all(&self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE])
-                    .is_err()
-                {
-                    tracing::error!("ATA: ide_write_sector: write failed at LBA {}", lba);
-                    return false;
+                // A volatile image routes the write to its journal; nothing
+                // here reaches the image file itself.
+                match image.write_sector(lba, &self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE]) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        tracing::error!("ATA: ide_write_sector: write failed at LBA {lba}: {error}");
+                        return false;
+                    }
                 }
 
                 self.increment_address();
@@ -1343,11 +1401,16 @@ impl AtaDrive {
                 buf_offset += SECTOR_SIZE;
             }
 
-            if let Some(f) = self.image_file.as_mut() {
-                f.flush().ok();
-            }
-
-            return true;
+            let Some(image) = self.image.as_mut() else {
+                return false;
+            };
+            return match image.flush() {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::error!("ATA: ide_write_sector: flush failed: {error}");
+                    false
+                }
+            };
         }
 
         #[cfg(not(feature = "std"))]
@@ -1782,6 +1845,51 @@ impl BxHardDriveC {
         self.channels[channel].drives[drive] = AtaDrive::create_disk(geometry);
         self.channels[channel].drives[drive].attach_image(path)?;
         Ok(())
+    }
+
+    /// Attach a disk image the guest can write but never changes (Bochs
+    /// `volatile_image_t`): it is opened read-only and every sector written
+    /// goes to a journal placed as `journal` says, removed when the drive
+    /// closes.
+    #[cfg(feature = "std")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach_volatile_disk(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        path: &str,
+        journal: &Journal,
+        cylinders: u32,
+        heads: u8,
+        spt: u8,
+    ) -> std::io::Result<()> {
+        let disk = VolatileDisk::open(path, journal)?;
+        self.attach_open_volatile_disk(channel, drive, disk, cylinders, heads, spt)
+    }
+
+    /// Attach a volatile disk already open, or taken back from another
+    /// machine's drive ([`Self::take_volatile_disk`]), with its journal and
+    /// what the guest wrote to it.
+    #[cfg(feature = "std")]
+    pub fn attach_open_volatile_disk(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        disk: VolatileDisk,
+        cylinders: u32,
+        heads: u8,
+        spt: u8,
+    ) -> std::io::Result<()> {
+        let geometry = DriveGeometry::from_chs(cylinders, heads, spt);
+        self.channels[channel].drives[drive] = AtaDrive::create_disk(geometry);
+        self.channels[channel].drives[drive].attach_volatile(disk)
+    }
+
+    /// The volatile disk on `channel`/`drive`, journal and all, taken back
+    /// for the next machine; `None` where that drive has none.
+    #[cfg(feature = "std")]
+    pub fn take_volatile_disk(&mut self, channel: usize, drive: usize) -> Option<VolatileDisk> {
+        self.channels.get_mut(channel)?.drives.get_mut(drive)?.take_volatile()
     }
 
     /// Attach disk data to a drive (alloc path).
@@ -5162,6 +5270,62 @@ const SNAPSHOT_MEDIA_STATIC: u8 = 2;
 const SNAPSHOT_MEDIA_DISK_FILE: u8 = 3;
 #[cfg(feature = "std")]
 const SNAPSHOT_MEDIA_CDROM_FILE: u8 = 4;
+/// A volatile disk (Bochs hdimage.cc `volatile_image_t`): the read-only
+/// image's identity, as `SNAPSHOT_MEDIA_DISK_FILE` carries it (`u64` length,
+/// `u8` scheme, two `u64`s); the image's modification time when it was
+/// opened (`u64` seconds and `u32` nanoseconds since the epoch, both zero
+/// when unknown); then a `u64` count and that many records of a `u64` LBA and
+/// the sector's 512 bytes, in ascending LBA order. Bochs hdimage.cc
+/// `volatile_image_t::save_state` copies the redolog file, and
+/// `volatile_image_t::restore_state` lets the copy over the image only when
+/// `coherency_check` finds the image's size and modification time as they
+/// were; here the section carries the sectors themselves and the same two
+/// checks (D23).
+///
+/// A reader without this tag refuses a stream that holds it as an invalid
+/// media tag; the container version does not rise for it, because no older
+/// layout can be misread as this one.
+#[cfg(feature = "std")]
+const SNAPSHOT_MEDIA_VOLATILE_DISK_FILE: u8 = 5;
+/// The bytes of a volatile disk's media record before its sectors: the tag,
+/// the image's identity, its modification time, and the sector count.
+#[cfg(feature = "std")]
+const SNAPSHOT_VOLATILE_MEDIA_FIXED: u64 = 1 + 8 + 1 + 8 + 8 + 8 + 4 + 8;
+/// The bytes one written sector takes in the record: its LBA and its bytes.
+#[cfg(feature = "std")]
+const SNAPSHOT_WRITTEN_SECTOR_LEN: u64 = 8 + SECTOR_SIZE as u64;
+/// The most written sectors one record can carry inside a section's ceiling.
+#[cfg(feature = "std")]
+const MAX_SNAPSHOT_WRITTEN_SECTORS: u64 =
+    (bounds::MAX_SNAPSHOT_SECTION_LEN - SNAPSHOT_VOLATILE_MEDIA_FIXED) / SNAPSHOT_WRITTEN_SECTOR_LEN;
+/// Why a save is refused when the volatile journals are what overflows the
+/// HARDDRV section.
+#[cfg(feature = "std")]
+const VOLATILE_JOURNALS_TOO_LONG: &str = "ATA volatile journals exceed the snapshot section bound";
+
+/// One drive's part of the HARDDRV section: its state and media record, and
+/// the journal sectors that record carries.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DriveSnapshotLen {
+    fixed: u64,
+    journal: u64,
+}
+
+/// The HARDDRV section's length: `fixed` bytes of channel, drive and media
+/// state and `journals` bytes of volatile journal sectors. Past the section
+/// ceiling it is refused, naming the journals when they are what does not
+/// fit.
+#[cfg(feature = "std")]
+fn harddrv_section_len(fixed: u64, journals: u64) -> SnapResult<u64> {
+    match fixed.checked_add(journals) {
+        Some(len) if len <= bounds::MAX_SNAPSHOT_SECTION_LEN => Ok(len),
+        Some(_) | None if fixed > bounds::MAX_SNAPSHOT_SECTION_LEN || journals == 0 => {
+            Err(SnapError::LengthOutOfRange)
+        }
+        Some(_) | None => Err(snapshot_invalid(VOLATILE_JOURNALS_TOO_LONG)),
+    }
+}
 
 #[cfg(feature = "std")]
 #[derive(Clone, Copy)]
@@ -5496,13 +5660,36 @@ impl SnapshotDriveState {
 
 #[cfg(feature = "std")]
 impl AtaDrive {
+    /// The drive's volatile image, which a volatile media record needs.
+    fn volatile_image(&self) -> SnapResult<&VolatileImage> {
+        match &self.image {
+            Some(DiskImage::Volatile(volatile)) => Ok(volatile),
+            Some(DiskImage::Flat(_)) | None => Err(snapshot_invalid("ATA volatile media disappeared")),
+        }
+    }
+
+    fn volatile_image_mut(&mut self) -> SnapResult<&mut VolatileImage> {
+        match &mut self.image {
+            Some(DiskImage::Volatile(volatile)) => Ok(volatile),
+            Some(DiskImage::Flat(_)) | None => Err(snapshot_invalid("ATA volatile media disappeared")),
+        }
+    }
+
+    /// The bytes the journal's sectors take in a snapshot.
+    fn snapshot_volatile_journal_len(&self) -> SnapResult<u64> {
+        u64::try_from(self.volatile_image()?.written_count())
+            .ok()
+            .and_then(|count| count.checked_mul(SNAPSHOT_WRITTEN_SECTOR_LEN))
+            .ok_or_else(|| snapshot_invalid(VOLATILE_JOURNALS_TOO_LONG))
+    }
+
     fn snapshot_media_descriptor(&self) -> SnapResult<SnapshotMediaDescriptor> {
         #[cfg(feature = "alloc")]
         let owned = self.disk_data.as_deref();
         #[cfg(not(feature = "alloc"))]
         let owned: Option<&[u8]> = None;
         let static_data = self.disk_data_ref;
-        let has_disk_file = self.image_file.is_some();
+        let has_disk_file = self.image.is_some();
         let has_cdrom_file = self.cdrom_file.is_some();
         let media_count = usize::from(u8::from(owned.is_some()))
             + usize::from(u8::from(static_data.is_some()))
@@ -5553,21 +5740,24 @@ impl AtaDrive {
             .as_deref()
             .filter(|path| !path.is_empty())
             .ok_or_else(|| snapshot_invalid("ATA file media has no configured identity"))?;
-        let (tag, file) = if let Some(file) = self.image_file.as_ref() {
-            if self.device_type != DeviceType::Disk {
-                return Err(snapshot_invalid("ATA disk file does not match drive type"));
+        let (tag, file) = match (&self.image, &self.cdrom_file) {
+            (Some(image), _) => {
+                if self.device_type != DeviceType::Disk {
+                    return Err(snapshot_invalid("ATA disk file does not match drive type"));
+                }
+                let tag = match image {
+                    DiskImage::Flat(_) => SNAPSHOT_MEDIA_DISK_FILE,
+                    DiskImage::Volatile(_) => SNAPSHOT_MEDIA_VOLATILE_DISK_FILE,
+                };
+                (tag, image.image_file())
             }
-            (SNAPSHOT_MEDIA_DISK_FILE, file)
-        } else {
-            if self.device_type != DeviceType::Cdrom {
-                return Err(snapshot_invalid("ATA CD-ROM file does not match drive type"));
+            (None, Some(file)) => {
+                if self.device_type != DeviceType::Cdrom {
+                    return Err(snapshot_invalid("ATA CD-ROM file does not match drive type"));
+                }
+                (SNAPSHOT_MEDIA_CDROM_FILE, file)
             }
-            (
-                SNAPSHOT_MEDIA_CDROM_FILE,
-                self.cdrom_file
-                    .as_ref()
-                    .ok_or_else(|| snapshot_invalid("ATA file backing disappeared"))?,
-            )
+            (None, None) => return Err(snapshot_invalid("ATA file backing disappeared")),
         };
         let metadata = file
             .metadata()
@@ -5583,7 +5773,7 @@ impl AtaDrive {
         })
     }
 
-    fn snapshot_len(&self) -> SnapResult<u64> {
+    fn snapshot_len(&self) -> SnapResult<DriveSnapshotLen> {
         let media = self.snapshot_media_descriptor()?;
         let mut len = 0;
         // Immutable drive identity: type, geometry, strings, and slot number.
@@ -5609,10 +5799,15 @@ impl AtaDrive {
             }
             SNAPSHOT_MEDIA_STATIC => 17,
             SNAPSHOT_MEDIA_DISK_FILE | SNAPSHOT_MEDIA_CDROM_FILE => 26,
+            SNAPSHOT_MEDIA_VOLATILE_DISK_FILE => SNAPSHOT_VOLATILE_MEDIA_FIXED,
             _ => return Err(snapshot_invalid("ATA drive has invalid live media tag")),
         };
         snapshot_add_len(&mut len, media_len)?;
-        Ok(len)
+        let journal = match media.tag {
+            SNAPSHOT_MEDIA_VOLATILE_DISK_FILE => self.snapshot_volatile_journal_len()?,
+            _ => 0,
+        };
+        Ok(DriveSnapshotLen { fixed: len, journal })
     }
 
     fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
@@ -5728,6 +5923,28 @@ impl AtaDrive {
                 writer.write_u8(media.identity_scheme)?;
                 writer.write_u64(media.identity_a)?;
                 writer.write_u64(media.identity_b)
+            }
+            SNAPSHOT_MEDIA_VOLATILE_DISK_FILE => {
+                writer.write_u64(media.len)?;
+                writer.write_u8(media.identity_scheme)?;
+                writer.write_u64(media.identity_a)?;
+                writer.write_u64(media.identity_b)?;
+                // Bochs hdimage.cc volatile_image_t::save_state: the journal,
+                // here as its sectors rather than a copy of its file (D23),
+                // each read as it is written so one is in memory at a time.
+                let volatile = self.volatile_image()?;
+                let modified = volatile.image_modified();
+                writer.write_u64(modified.seconds)?;
+                writer.write_u32(modified.nanos)?;
+                let count = u64::try_from(volatile.written_count())
+                    .map_err(|_| snapshot_invalid("ATA snapshot length does not fit u64"))?;
+                writer.write_u64(count)?;
+                for sector in volatile.written() {
+                    let sector = sector.map_err(|_| SnapError::Host)?;
+                    writer.write_u64(sector.lba)?;
+                    writer.write_bytes(&sector.bytes)?;
+                }
+                Ok(())
             }
             _ => Err(snapshot_invalid("ATA drive has invalid live media tag")),
         }
@@ -5846,6 +6063,65 @@ impl AtaDrive {
                 }
                 Ok(())
             }
+            SNAPSHOT_MEDIA_VOLATILE_DISK_FILE => {
+                let saved_len = reader.read_u64()?;
+                let saved_scheme = reader.read_u8()?;
+                let saved_a = reader.read_u64()?;
+                let saved_b = reader.read_u64()?;
+                // Bochs hdimage.cc volatile_image_t::restore_state refuses a
+                // redolog that does not belong to the image: coherency_check
+                // compares the image's size, and its modification time when
+                // the redolog recorded one. The identity check is a further
+                // one this port adds.
+                if saved_len != live.len
+                    || saved_scheme != live.identity_scheme
+                    || saved_a != live.identity_a
+                    || saved_b != live.identity_b
+                {
+                    return Err(snapshot_invalid("ATA snapshot file media does not match live resource"));
+                }
+                let saved_modified = ImageModified {
+                    seconds: reader.read_u64()?,
+                    nanos: reader.read_u32()?,
+                };
+                if saved_modified != ImageModified::UNKNOWN
+                    && saved_modified != self.volatile_image()?.image_modified()
+                {
+                    return Err(snapshot_invalid(
+                        "ATA snapshot volatile journal belongs to an image modified since it was saved",
+                    ));
+                }
+                let count = reader.read_u64()?;
+                if count > MAX_SNAPSHOT_WRITTEN_SECTORS {
+                    return Err(snapshot_invalid("ATA snapshot volatile journal exceeds bound"));
+                }
+                // Each record is a different sector of the image, so no more
+                // of them than the image has sectors.
+                if count > self.geometry.total_sectors {
+                    return Err(snapshot_invalid("ATA snapshot volatile journal holds more sectors than its image"));
+                }
+                // The records go into a new journal beside the live one, which
+                // takes over only once every record is read and checked: a
+                // refused snapshot leaves the live journal as it was, and no
+                // record is held in memory past its own write.
+                let mut refill = self.volatile_image()?.begin_refill().map_err(|_| SnapError::Host)?;
+                let mut previous: Option<u64> = None;
+                for _ in 0..count {
+                    let lba = reader.read_u64()?;
+                    if lba >= self.geometry.total_sectors {
+                        return Err(snapshot_invalid("ATA snapshot volatile journal names a sector past the image"));
+                    }
+                    if previous.is_some_and(|previous| previous >= lba) {
+                        return Err(snapshot_invalid("ATA snapshot volatile journal is not in sector order"));
+                    }
+                    previous = Some(lba);
+                    let mut bytes = [0u8; SECTOR_SIZE];
+                    reader.read_bytes(&mut bytes)?;
+                    refill.write(lba, &bytes).map_err(|_| SnapError::Host)?;
+                }
+                self.volatile_image_mut()?.adopt(refill);
+                Ok(())
+            }
             _ => Err(snapshot_invalid("ATA snapshot has invalid media tag")),
         }
     }
@@ -5859,10 +6135,15 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
     /// Exact payload length for the HARDDRV v3 section, including its version.
     fn snapshot_len(&self) -> SnapResult<u64> {
         let mut len = 4u64;
+        let mut journals = 0u64;
         for channel in &self.channels {
             snapshot_add_len(&mut len, 6)?;
             for drive in &channel.drives {
-                snapshot_add_len(&mut len, drive.snapshot_len()?)?;
+                let drive_len = drive.snapshot_len()?;
+                snapshot_add_len(&mut len, drive_len.fixed)?;
+                journals = journals
+                    .checked_add(drive_len.journal)
+                    .ok_or_else(|| snapshot_invalid(VOLATILE_JOURNALS_TOO_LONG))?;
             }
         }
         // Seek-arm latches: presence bool per slot, plus 4 bytes when armed.
@@ -5871,7 +6152,7 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
                 snapshot_add_len(&mut len, if arm.is_some() { 5 } else { 1 })?;
             }
         }
-        Ok(len)
+        harddrv_section_len(len, journals)
     }
 
     /// Streams the complete HARDDRV v3 section without staging its fixed buffers or media.
@@ -5954,6 +6235,8 @@ mod tests {
     use std::{
         fs::{self, File},
         io::{Read, Seek, SeekFrom, Write},
+        path::{Path, PathBuf},
+        time::{Duration, UNIX_EPOCH},
     };
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
@@ -6613,5 +6896,331 @@ mod tests {
             matches!(error, SnapError::Invalid(_)),
             "a rejected device state names what was wrong: {error:?}"
         );
+    }
+
+    /// A disk image on the host, and the bytes it was made with.
+    struct TestImage {
+        path: PathBuf,
+        bytes: Vec<u8>,
+    }
+
+    /// An image of `sectors` sectors, sector `n` filled with byte `n`.
+    fn image_of(name: &str, sectors: u8) -> TestImage {
+        let path = unique_temp_path(name);
+        let mut bytes = Vec::new();
+        for sector in 0..sectors {
+            bytes.extend_from_slice(&[sector; SECTOR_SIZE]);
+        }
+        fs::write(&path, &bytes).unwrap();
+        TestImage { path, bytes }
+    }
+
+    /// Points the drive's task file at `lba` for a one-sector LBA28 transfer:
+    /// the registers `current_lba` composes the address from.
+    fn address_lba28(drive: &mut AtaDrive, lba: u32) {
+        drive.controller.lba_mode = true;
+        drive.controller.lba48 = false;
+        drive.controller.sector_no = lba as u8;
+        drive.controller.cylinder_no = (lba >> 8) as u16;
+        drive.controller.head_no = ((lba >> 24) & 0xF) as u8;
+        drive.controller.buffer_size = SECTOR_SIZE;
+        drive.controller.num_sectors = 1;
+    }
+
+    /// Every file beside `image` whose name is the image's name and a dot:
+    /// where a journal named after it would be.
+    fn beside(image: &Path) -> Vec<PathBuf> {
+        let prefix = format!("{}.", image.file_name().unwrap().to_string_lossy());
+        let mut found = Vec::new();
+        for entry in fs::read_dir(image.parent().unwrap()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                found.push(entry.path());
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_volatile_drive_keeps_its_writes_in_the_journal_and_the_image_unchanged() {
+        let TestImage { path, bytes } = image_of("rusty-box-volatile", 4);
+        let mut hd = BxHardDriveC::new();
+        hd.attach_volatile_disk(0, 0, path.to_str().unwrap(), &Journal::BesideImage, 1, 1, 4).unwrap();
+        // Unix removes an open file's name at once. Windows does with POSIX
+        // delete semantics (NTFS, Windows 10 1903 and later) and otherwise at
+        // close, so only the check after the drive closes holds everywhere.
+        if cfg!(unix) {
+            assert!(beside(&path).is_empty(), "the journal has no name once it is made");
+        }
+        let drive = &mut hd.channels[0].drives[0];
+        assert_eq!(drive.device_type, DeviceType::Disk);
+        assert_eq!(drive.geometry.total_sectors, 4);
+        assert_eq!(drive.curr_lsector, 4, "Bochs parks the heads one past the last LBA");
+        address_lba28(drive, 1);
+        drive.controller.buffer[..SECTOR_SIZE].fill(0xAA);
+        assert!(drive.ide_write_sector());
+        address_lba28(drive, 1);
+        drive.controller.buffer[..SECTOR_SIZE].fill(0);
+        assert!(drive.ide_read_sector());
+        assert_eq!(&drive.controller.buffer[..SECTOR_SIZE], &[0xAA; SECTOR_SIZE][..], "the journal's copy");
+        address_lba28(drive, 2);
+        assert!(drive.ide_read_sector());
+        assert_eq!(&drive.controller.buffer[..SECTOR_SIZE], &[2u8; SECTOR_SIZE][..], "the image's copy");
+        drop(hd);
+        assert_eq!(fs::read(&path).unwrap(), bytes, "the image is never written");
+        assert!(beside(&path).is_empty(), "nothing of the journal outlives the drive");
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_volatile_drive_refuses_a_sector_past_the_image() {
+        let TestImage { path, .. } = image_of("rusty-box-volatile-end", 2);
+        let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(1, 1, 2));
+        drive.attach_volatile_image(path.to_str().unwrap(), &Journal::BesideImage).unwrap();
+        address_lba28(&mut drive, 2);
+        assert!(!drive.ide_write_sector());
+        address_lba28(&mut drive, 2);
+        assert!(!drive.ide_read_sector());
+        drop(drive);
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_flat_drive_still_writes_its_image() {
+        let TestImage { path, .. } = image_of("rusty-box-flat", 2);
+        let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(1, 1, 2));
+        drive.attach_image(path.to_str().unwrap()).unwrap();
+        address_lba28(&mut drive, 1);
+        drive.controller.buffer[..SECTOR_SIZE].fill(0xAA);
+        assert!(drive.ide_write_sector());
+        drop(drive);
+        assert_eq!(fs::read(&path).unwrap()[SECTOR_SIZE], 0xAA);
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn snapshot_written_sector_bound_is_the_section_ceiling_in_records() {
+        assert_eq!(MAX_SNAPSHOT_WRITTEN_SECTORS, 8_259_552);
+    }
+
+    /// One guest write of `byte` over sector `lba` of the primary master.
+    fn write_sector_of(hd: &mut BxHardDriveC, lba: u32, byte: u8) {
+        let drive = &mut hd.channels[0].drives[0];
+        address_lba28(drive, lba);
+        drive.controller.buffer[..SECTOR_SIZE].fill(byte);
+        assert!(drive.ide_write_sector());
+    }
+
+    /// The first byte the guest reads back from sector `lba` of the primary
+    /// master.
+    fn first_byte_of(hd: &mut BxHardDriveC, lba: u32) -> u8 {
+        let drive = &mut hd.channels[0].drives[0];
+        address_lba28(drive, lba);
+        assert!(drive.ide_read_sector());
+        drive.controller.buffer[0]
+    }
+
+    #[test]
+    fn ata_snapshot_carries_a_volatile_journal_and_refills_it() {
+        let TestImage { path, .. } = image_of("rusty-box-volatile-snap", 4);
+        let mut hd = BxHardDriveC::new();
+        hd.attach_volatile_disk(0, 0, path.to_str().unwrap(), &Journal::BesideImage, 1, 1, 4).unwrap();
+        write_sector_of(&mut hd, 3, 0xBB);
+        write_sector_of(&mut hd, 0, 0xAA);
+        let saved_len = hd.snapshot_len().unwrap();
+        let mut saved = Vec::new();
+        hd.save(&mut saved).unwrap();
+        assert_eq!(saved.len() as u64, saved_len);
+        assert_eq!(hd.channels[0].drives[0].snapshot_volatile_journal_len().unwrap(), 2 * 520);
+
+        write_sector_of(&mut hd, 1, 0xCC);
+        write_sector_of(&mut hd, 0, 0xDD);
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        hd.restore(&mut reader).unwrap();
+        reader.finish_exact().unwrap();
+        assert_eq!(first_byte_of(&mut hd, 0), 0xAA, "the saved write is back");
+        assert_eq!(first_byte_of(&mut hd, 1), 1, "a write after the save is gone: the image's byte again");
+        assert_eq!(first_byte_of(&mut hd, 3), 0xBB);
+        drop(hd);
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn ata_snapshot_refuses_a_volatile_journal_past_the_bound() {
+        let TestImage { path, .. } = image_of("rusty-box-volatile-bound", 2);
+        let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(1, 1, 2));
+        drive.attach_volatile_image(path.to_str().unwrap(), &Journal::BesideImage).unwrap();
+        let descriptor = drive.snapshot_media_descriptor().unwrap();
+        assert_eq!(descriptor.tag, SNAPSHOT_MEDIA_VOLATILE_DISK_FILE);
+        let mut media = Vec::new();
+        drive.save_snapshot_media(&mut media, descriptor).unwrap();
+        assert_eq!(media.len() as u64, SNAPSHOT_VOLATILE_MEDIA_FIXED, "nothing written: the fixed part alone");
+        let count_at = SNAPSHOT_VOLATILE_MEDIA_FIXED as usize - 8;
+        media[count_at..].copy_from_slice(&(MAX_SNAPSHOT_WRITTEN_SECTORS + 1).to_le_bytes());
+        let mut reader = media.as_slice();
+        assert_eq!(
+            drive.restore_snapshot_media(&mut reader),
+            Err(SnapError::Invalid("ATA snapshot volatile journal exceeds bound"))
+        );
+        drop(drive);
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn ata_snapshot_rejects_a_volatile_journal_for_a_flat_drive_or_another_image() {
+        let TestImage { path, .. } = image_of("rusty-box-volatile-mismatch", 2);
+        let TestImage { path: other, .. } = image_of("rusty-box-volatile-other", 2);
+        let mut volatile = BxHardDriveC::new();
+        volatile.attach_volatile_disk(0, 0, path.to_str().unwrap(), &Journal::BesideImage, 1, 1, 2).unwrap();
+        let mut saved = Vec::new();
+        volatile.save(&mut saved).unwrap();
+
+        let mut flat = BxHardDriveC::new();
+        flat.attach_disk(0, 0, path.to_str().unwrap(), 1, 1, 2).unwrap();
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        assert_eq!(
+            flat.restore(&mut reader),
+            Err(SnapError::Invalid("ATA snapshot media backing does not match live media"))
+        );
+
+        // The same size and geometry, so the drive identity passes; a different file.
+        let mut elsewhere = BxHardDriveC::new();
+        elsewhere.attach_volatile_disk(0, 0, other.to_str().unwrap(), &Journal::BesideImage, 1, 1, 2).unwrap();
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        assert_eq!(
+            elsewhere.restore(&mut reader),
+            Err(SnapError::Invalid("ATA snapshot file media does not match live resource"))
+        );
+        drop(volatile);
+        drop(flat);
+        drop(elsewhere);
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(&other).unwrap();
+    }
+
+    /// Sets the file at `path` as last modified `seconds` after the epoch.
+    fn touch(path: &Path, seconds: u64) {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
+            .unwrap();
+    }
+
+    /// Bochs hdimage.cc `coherency_check`: a saved journal goes back over
+    /// its image only while the image's modification time is the one it was
+    /// saved with.
+    #[test]
+    fn ata_snapshot_rejects_a_volatile_journal_when_its_image_changed_since() {
+        let TestImage { path, .. } = image_of("rusty-box-volatile-mtime", 2);
+        let image = path.to_str().unwrap();
+        touch(&path, 1_600_000_000);
+        let mut saved = Vec::new();
+        {
+            let mut hd = BxHardDriveC::new();
+            hd.attach_volatile_disk(0, 0, image, &Journal::BesideImage, 1, 1, 2).unwrap();
+            hd.save(&mut saved).unwrap();
+        }
+        let mut same = BxHardDriveC::new();
+        same.attach_volatile_disk(0, 0, image, &Journal::BesideImage, 1, 1, 2).unwrap();
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        assert_eq!(same.restore(&mut reader), Ok(()), "the image as it was saved over");
+        drop(same);
+
+        touch(&path, 1_700_000_000);
+        let mut changed = BxHardDriveC::new();
+        changed.attach_volatile_disk(0, 0, image, &Journal::BesideImage, 1, 1, 2).unwrap();
+        let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+        assert_eq!(
+            changed.restore(&mut reader),
+            Err(SnapError::Invalid(
+                "ATA snapshot volatile journal belongs to an image modified since it was saved"
+            ))
+        );
+        drop(changed);
+        fs::remove_file(&path).unwrap();
+    }
+
+    /// Bochs harddrv.cc `ide_write_sector` checks every sector's address
+    /// (`calculate_logical_address`) and aborts at the first past the disk.
+    #[test]
+    fn a_flat_drive_refuses_a_sector_past_the_image() {
+        let TestImage { path, bytes } = image_of("rusty-box-flat-end", 2);
+        let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(1, 1, 2));
+        drive.attach_image(path.to_str().unwrap()).unwrap();
+        address_lba28(&mut drive, 2);
+        drive.controller.buffer[..SECTOR_SIZE].fill(0xAA);
+        assert!(!drive.ide_write_sector(), "one sector past the disk");
+        assert_eq!(fs::read(&path).unwrap(), bytes, "the image neither grows nor changes");
+
+        address_lba28(&mut drive, 1);
+        drive.controller.buffer_size = 2 * SECTOR_SIZE;
+        drive.controller.num_sectors = 2;
+        drive.controller.buffer[..SECTOR_SIZE].fill(0xAA);
+        drive.controller.buffer[SECTOR_SIZE..2 * SECTOR_SIZE].fill(0xBB);
+        assert!(!drive.ide_write_sector(), "a batch that runs off the disk");
+        drop(drive);
+        let after = fs::read(&path).unwrap();
+        assert_eq!(after.len(), 2 * SECTOR_SIZE, "the image does not grow");
+        assert_eq!(after[SECTOR_SIZE], 0xAA, "the sector inside the disk is written, as Bochs writes it");
+        fs::remove_file(&path).unwrap();
+    }
+
+    /// A journal cannot hold more sectors than its image has; a count that
+    /// says it does is refused before any record is read.
+    #[test]
+    fn ata_snapshot_refuses_a_volatile_journal_larger_than_its_image() {
+        let TestImage { path, .. } = image_of("rusty-box-volatile-count", 2);
+        let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(1, 1, 2));
+        drive.attach_volatile_image(path.to_str().unwrap(), &Journal::BesideImage).unwrap();
+        let descriptor = drive.snapshot_media_descriptor().unwrap();
+        let mut media = Vec::new();
+        drive.save_snapshot_media(&mut media, descriptor).unwrap();
+        let count_at = SNAPSHOT_VOLATILE_MEDIA_FIXED as usize - 8;
+        media[count_at..].copy_from_slice(&3u64.to_le_bytes());
+        let mut reader = media.as_slice();
+        assert_eq!(
+            drive.restore_snapshot_media(&mut reader),
+            Err(SnapError::Invalid("ATA snapshot volatile journal holds more sectors than its image"))
+        );
+        drop(drive);
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_harddrv_section_too_long_names_the_journals_when_they_are_why() {
+        assert_eq!(harddrv_section_len(100, 520), Ok(620));
+        assert_eq!(
+            harddrv_section_len(bounds::MAX_SNAPSHOT_SECTION_LEN - 100, 520),
+            Err(SnapError::Invalid("ATA volatile journals exceed the snapshot section bound"))
+        );
+        assert_eq!(
+            harddrv_section_len(bounds::MAX_SNAPSHOT_SECTION_LEN + 1, 0),
+            Err(SnapError::LengthOutOfRange)
+        );
+    }
+
+    /// A front end that builds a new machine for a restart hands the same
+    /// volatile disk to it, and what the guest wrote comes with it.
+    #[test]
+    fn a_volatile_disk_keeps_its_journal_from_drive_to_drive() {
+        let TestImage { path, .. } = image_of("rusty-box-volatile-carry", 4);
+        let image = path.to_str().unwrap();
+        let mut first = BxHardDriveC::new();
+        let disk = VolatileDisk::open(image, &Journal::BesideImage).unwrap();
+        first.attach_open_volatile_disk(0, 0, disk, 1, 1, 4).unwrap();
+        write_sector_of(&mut first, 2, 0xAA);
+        let disk = first.take_volatile_disk(0, 0).expect("the drive gives its disk back");
+        assert!(first.take_volatile_disk(0, 0).is_none(), "and has none left");
+
+        let mut next = BxHardDriveC::new();
+        next.attach_open_volatile_disk(0, 0, disk, 1, 1, 4).unwrap();
+        assert_eq!(first_byte_of(&mut next, 2), 0xAA, "the guest's write outlives the drive that took it");
+        assert_eq!(first_byte_of(&mut next, 3), 3);
+        drop(first);
+        drop(next);
+        assert_eq!(fs::read(&path).unwrap()[2 * SECTOR_SIZE], 2, "the image is never written");
+        fs::remove_file(&path).unwrap();
     }
 }

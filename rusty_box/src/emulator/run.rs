@@ -2,7 +2,7 @@ use crate::{
     cpu::{
         cpu::CpuActivityState,
         instrumentation::Instrumentation,
-        BxCpuC,
+        BxCpuC, CodeBreakpointHit,
     },
     Result,
 };
@@ -364,6 +364,11 @@ pub enum StopReason {
     /// that heard it. This is what a caller sees when the boundary's error had
     /// nowhere to go, which is the case on every path that only logs one.
     EngineFault,
+    /// A processor reached a debugger code breakpoint and stopped before its
+    /// instruction (see [`Emulator::set_code_breakpoints`]). The machine's
+    /// stop flag is raised; lowering it runs on, and the processor then
+    /// executes that instruction rather than stopping again.
+    Breakpoint(CodeBreakpointHit),
 }
 
 /// What bounds one run.
@@ -514,17 +519,19 @@ impl BatchOutcome {
     /// Whether the machine should not be stepped again without host action.
     ///
     /// `Halted` and `BudgetExhausted` are ordinary yields — the guest is still
-    /// live and stepping again makes progress. The other four mean execution
-    /// has ended: the guest or the host asked, the processor is in shutdown, or
-    /// the engine refused work the machine cannot do without it. A caller that
-    /// keeps stepping past any of them is spinning.
+    /// live and stepping again makes progress. The others mean execution has
+    /// stopped until the host acts: the guest or the host asked, the processor
+    /// is in shutdown, the engine refused work the machine cannot do without
+    /// it, or a breakpoint stopped a processor and raised the stop flag. A
+    /// caller that keeps stepping past any of them is spinning.
     #[inline]
     pub fn is_terminal(&self) -> bool {
         match self.stop {
             StopReason::GuestPowerOff
             | StopReason::StopRequested
             | StopReason::CpuShutdown
-            | StopReason::EngineFault => true,
+            | StopReason::EngineFault
+            | StopReason::Breakpoint(_) => true,
             StopReason::Halted | StopReason::BudgetExhausted => false,
         }
     }
@@ -546,6 +553,8 @@ pub(crate) enum StopCause {
     /// The machine's engine refused work the machine cannot do without it, so
     /// the boundary that heard the refusal stopped the machine beneath it.
     EngineFault,
+    /// A processor stopped before the instruction at a code breakpoint.
+    Breakpoint(CodeBreakpointHit),
 }
 
 impl StopCause {
@@ -566,17 +575,22 @@ impl StopCause {
     /// which runs the tail unconditionally; a refused I/O APIC delivery is put
     /// back in the IRR and offered again at the next assertion of that line or
     /// the next redirection-entry write, because nothing re-runs the delivery
-    /// path per boundary. A refusal in turn
-    /// outranks a bare host request, which is the absence of a machine cause
-    /// rather than a cause of its own.
+    /// path per boundary. A breakpoint is not owed again: its processor
+    /// reported the boundary and executes past it on the next run, so it
+    /// outranks a refusal. A refusal in turn outranks a bare host request,
+    /// which is the absence of a machine cause rather than a cause of its
+    /// own. Of two breakpoints in one batch the first recorded stands.
     const fn displaces(self, recorded: Self) -> bool {
-        match (recorded, self) {
-            (Self::GuestPowerOff, _) => false,
-            (_, Self::GuestPowerOff) => true,
-            (Self::HostRequested, Self::EngineFault) => true,
-            (Self::HostRequested, Self::HostRequested)
-            | (Self::EngineFault, Self::EngineFault)
-            | (Self::EngineFault, Self::HostRequested) => false,
+        self.rank() > recorded.rank()
+    }
+
+    /// Precedence among causes that describe one raised flag.
+    const fn rank(self) -> u8 {
+        match self {
+            Self::HostRequested => 0,
+            Self::EngineFault => 1,
+            Self::Breakpoint(_) => 2,
+            Self::GuestPowerOff => 3,
         }
     }
 }
@@ -589,6 +603,7 @@ impl From<StopCause> for StopReason {
             StopCause::HostRequested => Self::StopRequested,
             StopCause::GuestPowerOff => Self::GuestPowerOff,
             StopCause::EngineFault => Self::EngineFault,
+            StopCause::Breakpoint(hit) => Self::Breakpoint(hit),
         }
     }
 }
@@ -1308,6 +1323,18 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         None
     }
 
+    /// A breakpoint is one event, told once: once `cause` has been reported,
+    /// the flag it raised stands on as a plain stop, so a run made before the
+    /// host lowers it (a debugger's single step) does not report the same hit
+    /// again. A guest power-off and an engine fault describe the machine and
+    /// stay.
+    pub(super) fn breakpoint_reported(&mut self, cause: StopCause) {
+        match cause {
+            StopCause::Breakpoint(_) => self.stop_cause = StopCause::HostRequested,
+            StopCause::HostRequested | StopCause::GuestPowerOff | StopCause::EngineFault => {}
+        }
+    }
+
     /// Why the batch loop above just ended.
     ///
     /// Asked once, after the loop, from state that is still live — which is
@@ -1317,6 +1344,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// the next call and the power-off request does not.
     fn classify_batch_stop(&mut self) -> StopReason {
         if let Some(cause) = self.stop_in_force() {
+            self.breakpoint_reported(cause);
             return cause.into();
         }
 

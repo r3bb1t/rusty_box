@@ -363,6 +363,13 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                             boundary_reached = true;
                             break;
                         }
+                        // A processor stopped at a code breakpoint ends the
+                        // round there: no other processor runs past the
+                        // moment the debugger is asked to look.
+                        if self.cpu_ref(cpu_index).code_breakpoints.hit_pending() {
+                            boundary_reached = true;
+                            break;
+                        }
                     }
                     Err(err) => {
                         result = Err(err);
@@ -419,6 +426,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         #[cfg(test)]
         self.assert_cpu_masks_match_scan();
         self.drain_hook_stop_requests();
+        self.drain_code_breakpoint_hits();
         result.map(|_| {
             // Bochs main.cc: an SMP round credits every processor a quantum and
             // advances machine time by the round's average, so what this batch
@@ -454,6 +462,21 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         if honored {
             self.stop_flag
                 .store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Turn a code breakpoint a processor stopped at into the machine's stop,
+    /// with its cause (R5: the one place a hit crosses from a processor to the
+    /// machine). Each processor's hit is collected once.
+    fn drain_code_breakpoint_hits(&mut self) {
+        for index in 0..self.cpu_count() {
+            if let Some(pending) = self.cpu_mut_at(index).code_breakpoints.take_hit() {
+                self.raise_stop(crate::emulator::StopCause::Breakpoint(crate::cpu::CodeBreakpointHit {
+                    cpu: index,
+                    breakpoint: pending.breakpoint,
+                    linear: pending.linear,
+                }));
+            }
         }
     }
 

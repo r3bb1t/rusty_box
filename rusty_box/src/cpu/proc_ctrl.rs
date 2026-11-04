@@ -1537,34 +1537,36 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.msr.ia32_fred_ssp[idx]
             }
             BX_MSR_IA32_FRED_CONFIG => self.msr.ia32_fred_cfg,
-            BX_MSR_VMX_BASIC => {
-                // IA32_VMX_BASIC: VMCS revision=1, VMCS size=4096, memory type=WB(6)
-                // Bits 48=1 (true controls supported), bit 55=1 (INS/OUTS exit info)
-                0x0001_0006_0000_0001u64
-            }
-            // Each of these packs allowed-1 in the high half and allowed-0
-            // (must-be-1) in the low half, and MUST equal the matching
-            // constants in vmx.rs — a guest reads the MSR to decide what it
-            // may set, and VMENTRY then validates against the constant.
+            BX_MSR_VMX_BASIC => self.vmx_basic_msr(),
+            // Each of these packs allowed-1 in the high half and must-be-1
+            // in the low half, from the constants VM entry validates against
+            // (vmx.rs): a guest reads the MSR to decide what it may set. The
+            // TRUE MSRs carry the must-be-1 bits VM entry checks; the older
+            // ones report the reserved default-1 bits as must-be-1 too.
             BX_MSR_VMX_PINBASED_CTRLS => vmx_ctls_msr(
-                super::vmx::VMX_PINBASED_CTLS_ALLOWED_0,
+                super::vmx::VMX_PINBASED_CTLS_DEFAULT1,
                 super::vmx::VMX_PINBASED_CTLS_ALLOWED_1,
             ),
             BX_MSR_VMX_PROCBASED_CTRLS => vmx_ctls_msr(
-                super::vmx::VMX_PROCBASED_CTLS_ALLOWED_0,
+                super::vmx::VMX_PROCBASED_CTLS_DEFAULT1,
                 super::vmx::VMX_PROCBASED_CTLS_ALLOWED_1,
             ),
             BX_MSR_VMX_VMEXIT_CTRLS => vmx_ctls_msr(
-                super::vmx::VMX_EXIT_CTLS_ALLOWED_0,
+                super::vmx::VMX_EXIT_CTLS_DEFAULT1,
                 super::vmx::VMX_EXIT_CTLS_ALLOWED_1,
             ),
-            BX_MSR_VMX_VMENTRY_CTRLS => 0x0000_FFFF_0000_0011u64,
-            BX_MSR_VMX_MISC => 0x0000_0000_0000_0000u64,
-            BX_MSR_VMX_CR0_FIXED0 => 0x0000_0000_8000_0000u64,
-            BX_MSR_VMX_CR0_FIXED1 => 0x0000_0000_FFFF_FFFFu64,
-            BX_MSR_VMX_CR4_FIXED0 => 0x0000_0000_0000_2000u64,
-            BX_MSR_VMX_CR4_FIXED1 => 0x0000_0000_003F_27FFu64,
-            BX_MSR_VMX_VMCS_ENUM => 0x0000_002C_0000_0000u64,
+            BX_MSR_VMX_VMENTRY_CTRLS => vmx_ctls_msr(
+                super::vmx::VMX_ENTRY_CTLS_DEFAULT1,
+                super::vmx::VMX_ENTRY_CTLS_ALLOWED_1,
+            ),
+            BX_MSR_VMX_MISC => self.vmx_misc_msr(),
+            BX_MSR_VMX_CR0_FIXED0 => super::vmx::VMX_MSR_CR0_FIXED0,
+            BX_MSR_VMX_CR0_FIXED1 => super::vmx::VMX_MSR_CR0_FIXED1,
+            BX_MSR_VMX_CR4_FIXED0 => super::vmx::VMX_MSR_CR4_FIXED0,
+            // Bochs msr.cc: `get_cr4_allow_mask()`, the CR4 bits this model
+            // has — `cr4_suppmask`.
+            BX_MSR_VMX_CR4_FIXED1 => self.cr4_suppmask,
+            BX_MSR_VMX_VMCS_ENUM => super::vmx::VMX_MSR_VMCS_ENUM,
             // IA32_VMX_PROCBASED_CTLS2 — no secondary control is required, so
             // allowed-0 is zero and only the allowed-1 half carries anything.
             // Read from the same constant VMENTRY validates against: a guest
@@ -1573,23 +1575,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             BX_MSR_VMX_PROCBASED_CTRLS2 => {
                 vmx_ctls_msr(0, super::vmx::VMX_PROCBASED_CTLS2_ALLOWED_1)
             }
-            // IA32_VMX_EPT_VPID_CAP — Bochs vmcs.cc `init_ept_vpid_capabilities`
-            // composes this from what the EPT walker and the invalidation
-            // instructions actually implement:
-            //   [0]     execute-only EPT translations
-            //   [6]     4-level page walk (the only length is_eptptr_valid takes)
-            //   [8]     UC EPT paging structure memory type
-            //   [14]    WB EPT paging structure memory type
-            //   [16]    2 MiB EPT pages
-            //   [20]    INVEPT supported
-            //   [25:24] INVEPT single-context and all-context types
-            //   [32]    INVVPID supported
-            //   [43:40] INVVPID individual/single/all/single-non-global types
-            BX_MSR_VMX_EPT_VPID_CAP => {
-                const EPT_CAPS: u64 = 0x0611_4141;
-                const VPID_CAPS: u64 = 0x0000_0F01 << 32;
-                EPT_CAPS | VPID_CAPS
-            }
+            BX_MSR_VMX_EPT_VPID_CAP => self.vmx_ept_vpid_cap_msr(),
             BX_MSR_VMX_TRUE_PINBASED_CTRLS => vmx_ctls_msr(
                 super::vmx::VMX_PINBASED_CTLS_ALLOWED_0,
                 super::vmx::VMX_PINBASED_CTLS_ALLOWED_1,
@@ -1602,16 +1588,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 super::vmx::VMX_EXIT_CTLS_ALLOWED_0,
                 super::vmx::VMX_EXIT_CTLS_ALLOWED_1,
             ),
-            BX_MSR_VMX_TRUE_VMENTRY_CTRLS => 0x0000_FFFF_0000_0011u64,
-            BX_MSR_VMX_VMFUNC => 0x0000_0000_0000_0000u64,
-            // IA32_VMX_PROCBASED_CTLS3 and IA32_VMX_EXIT_CTLS2. Bochs msr.cc
-            // answers each only while its `vmx_cap` has supported bits for it
-            // and #GPs otherwise. The tertiary controls are 64 allowed-1 bits;
-            // this port offers no secondary exit control.
+            BX_MSR_VMX_TRUE_VMENTRY_CTRLS => vmx_ctls_msr(
+                super::vmx::VMX_ENTRY_CTLS_ALLOWED_0,
+                super::vmx::VMX_ENTRY_CTLS_ALLOWED_1,
+            ),
+            // IA32_VMX_VMFUNC, IA32_VMX_PROCBASED_CTLS3 and IA32_VMX_EXIT_CTLS2.
+            // Bochs msr.cc answers each only while its `vmx_cap` has supported
+            // bits for it and #GPs otherwise; each is 64 allowed-1 bits.
+            BX_MSR_VMX_VMFUNC if self.vmx_vmfunc_supported_bits() != 0 => {
+                self.vmx_vmfunc_supported_bits()
+            }
             BX_MSR_VMX_PROCBASED_CTRLS3 if super::vmx::VMX_PROCBASED_CTLS3_ALLOWED_1 != 0 => {
                 super::vmx::VMX_PROCBASED_CTLS3_ALLOWED_1
             }
-            BX_MSR_VMX_PROCBASED_CTRLS3 | BX_MSR_VMX_VMEXIT_CTRLS2 => {
+            BX_MSR_VMX_VMEXIT_CTRLS2 if super::vmx::VMX_EXIT_CTLS2_ALLOWED_1 != 0 => {
+                super::vmx::VMX_EXIT_CTLS2_ALLOWED_1
+            }
+            BX_MSR_VMX_VMFUNC | BX_MSR_VMX_PROCBASED_CTRLS3 | BX_MSR_VMX_VMEXIT_CTRLS2 => {
                 tracing::debug!("RDMSR: MSR {msr:#010x} has no supported bits, #GP(0)");
                 self.exception(super::cpu::Exception::Gp, 0)?;
                 return Ok(0);

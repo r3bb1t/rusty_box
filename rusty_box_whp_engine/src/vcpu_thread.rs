@@ -131,11 +131,14 @@ impl Parked {
             // An engine that refused work the machine cannot do without, or a
             // machine reporting a batch vocabulary no fast machine runs —
             // `Halted` and `BudgetExhausted` describe a stepping loop this
-            // machine does not have, so a boundary that reports one is
-            // describing a machine in a state its driver cannot explain.
+            // machine does not have, and this engine refuses every code
+            // breakpoint (`SliceEngine::CODE_BREAKPOINTS`), so a boundary that
+            // reports one of them is describing a machine in a state its
+            // driver cannot explain.
             StopReason::EngineFault
             | StopReason::Halted
-            | StopReason::BudgetExhausted => Self::Fault(EngineFault::new(
+            | StopReason::BudgetExhausted
+            | StopReason::Breakpoint(_) => Self::Fault(EngineFault::new(
                 EngineFaultKind::Host,
                 "the machine stopped its own devices",
             )),

@@ -268,7 +268,17 @@ pub(crate) const HOME_FACT_GAP: f32 = 28.0;
 /// A labelled fact in a page header: a muted caption over its value.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn home_fact(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.vertical(|ui| {
+    // As wide as its text, up to a whole row: a long value (a disk image's
+    // path) starts a row of its own and wraps there, rather than taking the
+    // row's room from the facts after it.
+    let measure = |text: &str, size: f32| {
+        ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(size), TEXT_PRIMARY).size().x
+    };
+    let natural = measure(label, TEXT_CAPTION).max(measure(value, TEXT_BODY));
+    let width = natural.min(ui.max_rect().width()).ceil();
+    crate::shell::listing::wrap_before(ui, width);
+    ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.set_width(width);
         ui.spacing_mut().item_spacing.y = 2.0;
         ui.label(RichText::new(label).size(TEXT_CAPTION).color(TEXT_MUTED));
         ui.label(RichText::new(value).size(TEXT_BODY).color(TEXT_PRIMARY));

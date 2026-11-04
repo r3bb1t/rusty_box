@@ -53,6 +53,9 @@ pub(crate) struct VmBarState<'a> {
 /// egui's default fonts hold; `shell::tests` checks each against the font.
 #[cfg(not(target_arch = "wasm32"))]
 const OVERFLOW: &str = "…";
+/// The app's Settings, in the `…` menu as in the drawer.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const SETTINGS: &str = "Settings";
 #[cfg(not(target_arch = "wasm32"))]
 const RESTART: &str = "↻ Restart";
 #[cfg(not(target_arch = "wasm32"))]
@@ -268,6 +271,10 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                         }
                         if ui.button("Create floppy image…").clicked() {
                             action = Some(VmBarAction::CreateFloppy);
+                            ui.close();
+                        }
+                        if ui.button(SETTINGS).clicked() {
+                            action = Some(VmBarAction::OpenSettings);
                             ui.close();
                         }
                         if ui.button("About Rusty Box Workstation").clicked() {
