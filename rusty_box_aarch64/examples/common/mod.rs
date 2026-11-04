@@ -421,6 +421,45 @@ pub fn run<S: GuestStorage, L: Levels>(machine: &mut VirtMachine<S, L>, args: &R
     outcome
 }
 
+/// The console output a script's `--until` searches: what the guest has
+/// printed since the last match. A match consumes the output through its
+/// own end, and what follows it stays for the next step to search, so a
+/// prompt printed in the same burst as the matched text is still found.
+#[derive(Default)]
+struct ConsoleWindow {
+    bytes: Vec<u8>,
+}
+
+impl ConsoleWindow {
+    fn push(&mut self, out: &[u8]) {
+        self.bytes.extend_from_slice(out);
+    }
+
+    /// Whether `text` has appeared; if it has, the output through its first
+    /// appearance is consumed.
+    fn take_through(&mut self, text: &[u8]) -> bool {
+        if text.is_empty() {
+            return true;
+        }
+        match self.bytes.windows(text.len()).position(|w| w == text) {
+            Some(at) => {
+                self.bytes.drain(..at + text.len());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drop what can no longer begin `text`: all but its last
+    /// `text.len() - 1` bytes, which a later burst may complete.
+    fn keep_tail_for(&mut self, text: &[u8]) {
+        let keep = text.len().max(1) - 1;
+        if self.bytes.len() > keep {
+            self.bytes.drain(..self.bytes.len() - keep);
+        }
+    }
+}
+
 fn run_with_screen<S: GuestStorage, L: Levels>(
     machine: &mut VirtMachine<S, L>,
     args: &RunArgs,
@@ -429,7 +468,7 @@ fn run_with_screen<S: GuestStorage, L: Levels>(
     let mut stdout = std::io::stdout().lock();
     let mut script = args.script.iter();
     let mut current = script.next();
-    let mut window: Vec<u8> = Vec::new();
+    let mut window = ConsoleWindow::default();
     let mut pending: VecDeque<(Keys, String)> = VecDeque::new();
     loop {
         // Run every Type step that is now current; stop at the next Until.
@@ -469,11 +508,10 @@ fn run_with_screen<S: GuestStorage, L: Levels>(
                     script_completed: false,
                 };
             }
-            window.extend_from_slice(&out);
+            window.push(&out);
         }
         if let Some(Action::Until(text)) = current {
-            if window.windows(text.len()).any(|w| w == text.as_slice()) {
-                window.clear();
+            if window.take_through(text) {
                 current = script.next();
                 if current.is_none() {
                     return Outcome {
@@ -483,10 +521,7 @@ fn run_with_screen<S: GuestStorage, L: Levels>(
                 }
                 continue;
             }
-            let keep = text.len().max(1) - 1;
-            if window.len() > keep {
-                window.drain(..window.len() - keep);
-            }
+            window.keep_tail_for(text);
         }
         if outcome.is_terminal() {
             // A script that ends by typing (`poweroff`, say) is complete once
@@ -615,5 +650,50 @@ pub fn exit_code(args: &RunArgs, outcome: &Outcome) -> ExitCode {
         | StopReason::ProcessorOff
         | StopReason::Undefined(_)
         | StopReason::BusFault { .. } => ExitCode::from(1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConsoleWindow;
+
+    /// A command's output and the next prompt in one burst: the prompt
+    /// after the matched text is still there for the next `--until`.
+    #[test]
+    fn a_match_leaves_what_follows_it_for_the_next_step() {
+        let mut window = ConsoleWindow::default();
+        window.push(b"echo A-$((1+1))\r\nA-2\r\nlocalhost:~# ");
+        assert!(window.take_through(b"A-2"));
+        assert!(window.take_through(b"# "));
+        assert!(!window.take_through(b"# "));
+    }
+
+    /// The echo of a typed command never satisfies a later step: the
+    /// output through a match is consumed.
+    #[test]
+    fn a_match_consumes_the_output_through_it() {
+        let mut window = ConsoleWindow::default();
+        window.push(b"login: root\r\n");
+        assert!(window.take_through(b"login: "));
+        assert!(!window.take_through(b"login: "));
+        window.push(b"localhost login: ");
+        assert!(window.take_through(b"login: "));
+    }
+
+    /// Text split across bursts is found once its last byte arrives.
+    #[test]
+    fn a_match_split_across_bursts_is_found() {
+        let mut window = ConsoleWindow::default();
+        window.push(b"...NESTED-SH");
+        assert!(!window.take_through(b"NESTED-SHELL"));
+        window.keep_tail_for(b"NESTED-SHELL");
+        window.push(b"ELL aarch64");
+        assert!(window.take_through(b"NESTED-SHELL"));
+    }
+
+    #[test]
+    fn an_empty_step_matches_at_once() {
+        let mut window = ConsoleWindow::default();
+        assert!(window.take_through(b""));
     }
 }

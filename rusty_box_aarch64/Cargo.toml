@@ -46,6 +46,9 @@ required-features = ["std"]
 [[example]]
 name = "linux_virt"
 required-features = ["std"]
+# `cargo test` runs the console script's tests in `examples/common`, which
+# this example and `uefi_virt` share.
+test = true
 
 # Named apart from rusty_box's own `perfbench`, which builds to the same
 # path under target/.
