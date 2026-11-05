@@ -28,6 +28,7 @@ use rusty_box_core::{ClockHz, SnapError, VmClock, VmInstant};
 use super::el2::{
     El2Reg, CNTHCTL_ECV_POFF, CPTR_TFP, CPTR_TSM, HCR_AMO, HCR_CD, HCR_DC, HCR_FMO, HCR_HCD,
     HCR_IMO, HCR_PTW, HCR_TEA, HCR_TGE, HCR_TSC, HCR_VF, HCR_VI, HCR_VM, HCR_VSE, MDCR_TDE,
+    VirtualLines,
 };
 use super::exception::AccessSyndrome;
 use super::exec::Fault;
@@ -1281,6 +1282,78 @@ fn virtual_interrupts_are_taken_at_el1() {
         (EC_SERROR << 26) | IL,
         "no syndrome without FEAT_RAS"
     );
+}
+
+/// The interrupt controller's virtual IRQ and FIQ inputs are pending where
+/// `HCR_EL2.VI` and `VF` would be (Arm `AArch64_InterruptPending`'s
+/// `VirtualIRQPending()` and `VirtualFIQPending()`): each only where `IMO`
+/// or `FMO` routes its physical kind to EL2, never with `TGE` set or at
+/// EL2, each taken as its own kind and shown in `ISR_EL1` as its own bit.
+#[test]
+fn the_virtual_inputs_are_pending_where_vi_and_vf_would_be() {
+    const MRS_ISR: u32 = 0xD538_C100; // mrs x0, isr_el1
+    const I: u64 = 1 << 7;
+    const F: u64 = 1 << 6;
+    let mut m = Machine::with_el2();
+    let reset = m.cpu.el2_state.regs.hcr;
+    let unmasked_at = |m: &mut Machine<WithEl2>, el: El, hcr: u64| {
+        m.cpu.el2_state.regs.hcr = reset | hcr;
+        m.at(el);
+        m.cpu.pstate.i = false;
+        m.cpu.pstate.f = false;
+    };
+    let isr = |m: &mut Machine<WithEl2>, hcr: u64| {
+        m.cpu.el2_state.regs.hcr = reset | hcr;
+        m.at(El::El1);
+        assert_eq!(m.run(MRS_ISR), None, "HCR {hcr:#x}");
+        m.cpu.x[0]
+    };
+    for (lines, routing, other, kind, vector, bit) in [
+        (
+            VirtualLines {
+                irq: true,
+                fiq: false,
+            },
+            HCR_IMO,
+            HCR_FMO,
+            ExceptionKind::VirtualIrq,
+            IRQ,
+            I,
+        ),
+        (
+            VirtualLines {
+                irq: false,
+                fiq: true,
+            },
+            HCR_FMO,
+            HCR_IMO,
+            ExceptionKind::VirtualFiq,
+            FIQ,
+            F,
+        ),
+    ] {
+        m.cpu.set_virtual_interrupt_lines(lines);
+        unmasked_at(&mut m, El::El1, 0);
+        assert!(m.cpu.deliver_interrupt().is_none(), "{kind:?}: nothing routed");
+        unmasked_at(&mut m, El::El1, other);
+        assert!(m.cpu.deliver_interrupt().is_none(), "{kind:?}: the other kind routed");
+        unmasked_at(&mut m, El::El1, routing | HCR_TGE);
+        assert!(m.cpu.deliver_interrupt().is_none(), "{kind:?}: TGE set");
+        unmasked_at(&mut m, El::El2, routing);
+        assert!(m.cpu.deliver_interrupt().is_none(), "{kind:?}: at EL2");
+        assert_eq!(isr(&mut m, other), 0, "{kind:?}: not pending");
+        assert_eq!(isr(&mut m, routing | other), bit, "{kind:?}: its own bit");
+
+        unmasked_at(&mut m, El::El1, routing | other);
+        let taken = m.cpu.deliver_interrupt().expect("pending and unmasked");
+        assert_eq!(
+            (taken.kind, taken.to, taken.vector),
+            (kind, El::El1, VBAR_EL1 + CURRENT_SPX + vector)
+        );
+        m.cpu.set_virtual_interrupt_lines(VirtualLines::NONE);
+        unmasked_at(&mut m, El::El1, routing | other);
+        assert!(m.cpu.deliver_interrupt().is_none(), "{kind:?}: lowered");
+    }
 }
 
 /// ESB at EL0 or EL1 defers a virtual SError that `PSTATE.A` masks into

@@ -17,6 +17,7 @@ use rusty_box_core::VmInstant;
 
 use super::VirtMachine;
 use crate::board::{GIC_CPU_BASE, GIC_DIST_BASE, RAM_BASE};
+use crate::devices::gicv2::GicExtensions;
 use crate::{
     LentStorage, MachineBuilder, MemoryLoan, NoEl2, Progress, RamSize, Reg, RunBudget, StopReason,
     SysReg, VirtConfig,
@@ -270,10 +271,14 @@ fn a_waiting_processor_sleeps_past_a_stuck_deadline_to_the_timer() {
 /// function identifiers its own named. QEMU's tree for this board with a
 /// PSCI 0.1 node of other identifiers in place of its own and a second
 /// memory node, named as the board names itself, comes out as the board's
-/// own tree does, byte for byte, for either conduit.
+/// own tree does, byte for byte, with EL2 or without, but for the GIC node
+/// the board gives the virtual interface in its own tree.
 #[test]
 fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
-    use super::{describe, BootChoice, Description, DeviceTree, PsciConduit, TreeSource};
+    use super::{
+        describe, BootChoice, Description, DeviceTree, PsciConduit, TreeLevels, TreeSource,
+    };
+    use crate::cpu::{NoEl2, WithEl2};
     use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
     use crate::boot::QEMU_VIRT_DEVICE_TREE;
     use crate::identity::BoardIdentity;
@@ -313,13 +318,18 @@ fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
         fdt::property(foreign, "psci", "cpu_on"),
         Ok(Some(&0x95C1_BA60u32.to_be_bytes()[..]))
     );
-    for conduit in [PsciConduit::Hvc, PsciConduit::Smc] {
+    let gic = NodePath::of("intc@8000000");
+    for (levels, conduit) in [
+        (TreeLevels::of::<NoEl2>(), PsciConduit::Hvc),
+        (TreeLevels::of::<WithEl2>(), PsciConduit::Smc),
+    ] {
+        assert_eq!(levels.psci, conduit);
         let machine = Description {
             ram_len: 256 << 20,
             cpu: CpuModel::CortexA57,
             choice: BootChoice::Bare,
             layout: None,
-            psci: conduit,
+            levels,
         };
         let mut from_board = std::boxed::Box::new(DeviceTree::EMPTY);
         describe(TreeSource::Board, machine, &identity, &mut from_board).expect("describes");
@@ -331,11 +341,43 @@ fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
             &mut from_host,
         )
         .expect("describes");
-        assert_eq!(
-            from_host.as_slice(),
-            from_board.as_slice(),
-            "{conduit:?}"
-        );
+        // A host's GIC node is the host's: with EL2 the board names the
+        // virtual interface's windows and maintenance interrupt in its own
+        // tree alone, as QEMU's `-dtb` leaves a tree's GIC node as it is.
+        let board_gic = |name| {
+            fdt::property(from_board.as_slice(), "intc@8000000", name)
+                .expect("parses")
+                .expect("present")
+                .to_vec()
+        };
+        let host_gic = |name| {
+            fdt::property(from_host.as_slice(), "intc@8000000", name)
+                .expect("parses")
+                .map(<[u8]>::to_vec)
+        };
+        match levels.gic {
+            GicExtensions::Absent => {
+                assert_eq!(from_host.as_slice(), from_board.as_slice(), "{conduit:?}");
+            }
+            GicExtensions::Virtualization => {
+                let (reg, interrupts) = (board_gic("reg"), board_gic("interrupts"));
+                assert_eq!(reg.len(), 64, "four windows");
+                assert_eq!(host_gic("reg").map(|r| r.len()), Some(32), "the host's two");
+                assert_eq!(host_gic("interrupts"), None, "the host's has none");
+                let mut renamed = vec![0u8; 64 * 1024];
+                let len = fdt::rebuild(
+                    from_host.as_slice(),
+                    &[],
+                    &[
+                        Edit::set(gic, "reg", Value::Bytes(&reg)),
+                        Edit::set(gic, "interrupts", Value::Bytes(&interrupts)),
+                    ],
+                    &mut renamed,
+                )
+                .expect("rebuild");
+                assert_eq!(&renamed[..len], from_board.as_slice(), "all but the GIC node");
+            }
+        }
         assert_eq!(
             fdt::property(from_host.as_slice(), "psci", "cpu_on"),
             Ok(Some(&0xC400_0003u32.to_be_bytes()[..])),
@@ -359,7 +401,7 @@ fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
         cpu: CpuModel::CortexA57,
         choice: BootChoice::Bare,
         layout: None,
-        psci: PsciConduit::Hvc,
+        levels: TreeLevels::of::<NoEl2>(),
     };
     let mut from_board = std::boxed::Box::new(DeviceTree::EMPTY);
     describe(TreeSource::Board, machine, &identity, &mut from_board).expect("describes");
@@ -389,9 +431,10 @@ fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
 /// which the board does not have.
 #[test]
 fn the_device_tree_names_the_board_by_its_identity() {
-    use super::{describe, BootChoice, Description, DeviceTree, PsciConduit, TreeSource};
+    use super::{describe, BootChoice, Description, DeviceTree, TreeLevels, TreeSource};
     use crate::boot::fdt;
     use crate::boot::QEMU_VIRT_DEVICE_TREE;
+    use crate::cpu::NoEl2;
     use crate::identity::{BoardIdentity, IdentityNames};
     use crate::CpuModel;
 
@@ -400,7 +443,7 @@ fn the_device_tree_names_the_board_by_its_identity() {
         cpu: CpuModel::CortexA57,
         choice: BootChoice::Bare,
         layout: None,
-        psci: PsciConduit::Hvc,
+        levels: TreeLevels::of::<NoEl2>(),
     };
     let host = BoardIdentity::new(IdentityNames {
         model: "Acme Board",

@@ -296,10 +296,10 @@ is) must reproduce, are:
 | Part | Model |
 |---|---|
 | Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, with QEMU's 62.5 MHz system counter. `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, an MMU with the 4 KiB granule and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB and 64 KiB granules too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
-| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
+| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0803_0000, the common base and processor 0's at 0x0803_1000, 4 KiB each) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0804_0000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as QEMU's `virtualization=on` board names them |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
 | Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), no `fw_cfg` (see "Where the references differ"), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
-| Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two QEMU bugs fixed, see "Where the references differ"; its `rng-seed` and `kaslr-seed` fixed, see below), its memory node replaced by one for the machine's RAM, `/chosen` set per machine, its `/psci` node replaced by QEMU's for the conduit the firmware answers on (`fdt_add_psci_node`), its processor's `compatible` set to the model's, and its `/model` and root `compatible` set to the board's identity's, where libfdt puts them, so a kernel boot's tree is QEMU's property for property but for the names; neither the `fw-cfg` node nor QEMU's platform bus, which the board does not have (see "Where the references differ"); a host's own tree gets the same, its names the identity's too, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does |
+| Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two QEMU bugs fixed, see "Where the references differ"; its `rng-seed` and `kaslr-seed` fixed, see below), its memory node replaced by one for the machine's RAM, `/chosen` set per machine, its `/psci` node replaced by QEMU's for the conduit the firmware answers on (`fdt_add_psci_node`), its processor's `compatible` set to the model's, and its `/model` and root `compatible` set to the board's identity's, where libfdt puts them, so a kernel boot's tree is QEMU's property for property but for the names; with EL2, its GIC node's `reg` named QEMU's four windows and an `interrupts` property for the maintenance interrupt added, as QEMU's `virtualization=on` gives them (`fdt_add_gic_node`), the one difference that `interrupts` stands before `phandle` where QEMU's, set before QEMU sets `phandle`, stands after it (libfdt puts a new property first; the Devicetree Specification gives property order no meaning); neither the `fw-cfg` node nor QEMU's platform bus, which the board does not have (see "Where the references differ"); a host's own tree gets the same, its names the identity's too, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves, and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
 Provenance: Arm's documents decide wherever they speak — the Arm ARM (DDI
@@ -503,8 +503,11 @@ walk reads its descriptors at, and of its output, are kept beside the
 entries, tagged with stage 2's context alone (`VTTBR_EL2`, with its VMID,
 and `VTCR_EL2`; fifteen at once), as Arm tags them with the VMID: a
 guest's switch between its processes keeps them, and one translation
-walks stage 2 once for each IPA page it reads. The GIC's virtualization
-extensions are not built yet (see "Not implemented").
+walks stage 2 once for each IPA page it reads. The GIC's Virtualization
+Extensions (`src/devices/gicv2_virt.rs`) give a hypervisor the List
+registers and the guest its virtual CPU interface; the processor takes
+their virtual IRQ and FIQ as `HCR_EL2.VI` and `VF` would raise them (Arm
+`AArch64_InterruptPending`), routed by `IMO` and `FMO`.
 The Armv9.2 model is refused EL2 (`BuildError::El2Unavailable`):
 `Features.json` requires of an Armv9.2 processor with EL2 FEAT_VHE,
 FEAT_FGT, FEAT_HCX, FEAT_EVT, FEAT_EVT2, FEAT_S2FWB and FEAT_XNX, none of
@@ -1086,9 +1089,8 @@ integration tests of the public API.
   runs `qemu-system-aarch64 -M virt,gic-version=2,kernel-irqchip=off
   -accel kvm -cpu host -m 192` with Alpine's own kernel and initramfs. The
   nested guest boots under KVM, through stage 2, to its initramfs shell,
-  and there `uname -m` answers `aarch64` (2026-11-02). The board has no
-  vGIC (see "Not implemented"), so QEMU emulates the guest's GIC in user
-  space. Counted through the instrumentation hooks
+  and there `uname -m` answers `aarch64` (2026-11-02). That run has QEMU
+  emulate the guest's GIC in user space. Counted through the instrumentation hooks
   (`docs/aarch64-automation.md`), nine of the guest's exits in ten are
   stage 2 aborts on two device pages, the GIC CPU interface and the UART,
   each a round trip through KVM to QEMU; an exit costs about 24,000
@@ -1102,6 +1104,17 @@ integration tests of the public API.
   shell at 6.55 s, 52 s of host time after its kernel starts, and the
   whole run, the host's boot and QEMU's install included, takes under 4
   minutes.
+- With the GIC's Virtualization Extensions, the same Alpine's KVM finds
+  the board's virtual interface (`kvm [1]: vgic interrupt IRQ9`, the
+  maintenance interrupt the device tree names), and QEMU 10.1.5 runs with
+  its default in-kernel irqchip (`-M virt,gic-version=2 -accel kvm`): KVM
+  drives the List registers and the guest acknowledges through `GICV`.
+  The nested guest boots to its shell, `uname -m` answering `aarch64` at
+  6.49 s of its uptime; its timer, which KVM maps to the host's through a
+  hardware List register, keeps interrupting across a 10 s `sleep` (264
+  ticks, its uptime 6.49 s to 16.57 s). At `--ips 1000000000` the whole
+  run takes 24.2 s of emulated time and 134 s of host time, the same
+  each time to the state hash (2026-11-04).
 - `tests/timer_interrupts.rs`: hand-written guests drive the interrupt path
   end to end. One runs GIC + timer + `WFI` + IRQ entry/`ERET` + PSCI; its
   outcome is identical for every budget slicing, and a snapshot taken
@@ -1122,7 +1135,20 @@ integration tests of the public API.
   distributor or the CPU interface leaves disabled hiding nothing;
   preemption by group priority under each group's binary point; SGIs on a
   uniprocessor; and snapshots whose SGI state disagrees, refused with
-  nothing changed. The PL011: the receiver and transmitter gated by
+  nothing changed. Its Virtualization Extensions
+  (`src/devices/gicv2_virt.rs`), through the `GICH` and `GICV` frames as a
+  hypervisor and its guest use them: the reset values and `GICH_VTR`; List
+  registers signalled by priority under `GICV_PMR`, each group's enable and
+  binary point, and `GICH_HCR.En`; both acknowledge views and `AckCtl`;
+  Group 0 on the virtual FIQ under `FIQEn`; a hardware interrupt's EOI
+  deactivating it in the distributor; `EOImode` splitting the priority
+  drop from `GICV_DIR`; `EOICount`; every maintenance condition, and
+  INTID 25 following them at the distributor; `GICH_VMCR`; and snapshots
+  refused by a GIC whose extensions differ. `tests/virtualization.rs` runs
+  the whole path as guest code: a List register's interrupt taken at EL1,
+  acknowledged and completed through `GICV`, its `EOI` maintenance
+  interrupt taken at EL2; and without EL2, both frames unassigned. The
+  PL011: the receiver and transmitter gated by
   `UARTEN`, `RXE` and `TXE`; both FIFO interrupts as transitions through
   the `UARTIFLS` levels, with the FIFO enabled and disabled, and a
   `TXIFLSEL` write alone changing nothing; a burst longer than the FIFO,
@@ -1954,7 +1980,21 @@ one open.
   System Architecture 1.0C, DEN0094C, I.9.3). That section asks for the
   implementer's JEP106 code, which this project does not hold, so the
   field reads 0, as QEMU's does; a host with a code gives it, and its
-  product and revision, through `MsiFrameFields`. And no device tree
+  product and revision, through `IidrFields`. The GIC's identification
+  registers are the identity's too (`GicIdentity`): the distributor's
+  `GICD_IIDR` (IHI 0048B §4.3.3), and the CPU interface's `GICC_IIDR` and
+  with EL2 `GICV_IIDR`, which reads the same (§4.4.15, §5.5.13; the
+  GIC-400 gives the two one value, DDI 0471B Tables 3-6 and 3-10). QEMU's
+  (`gic_dist_readb`, `gic_cpu_read`) read Arm's JEP106 code, 0x43B, saying
+  Arm made the GIC, where this board's read no product and no
+  implementer by default, `GICD_IIDR` 0 and `GICC_IIDR` 0x0002_0000 with
+  its architecture version 2, and a host's code, product, variant and
+  revision through `GicDistIidr` and `GicCpuIidr`. The GIC's peripheral ID
+  registers stay Arm's: "despite their names", they "refer only to the
+  architecture of the implementation" (§4.3.18), Arm's GICv2. Linux's GIC
+  driver keys on Arm's code in `GICC_IIDR` to recognise a GIC-400 behind
+  a CPU interface a device tree gives as 4 KiB (`gic_check_gicv2`); this
+  board's tree gives 64 KiB. And no device tree
   has QEMU's platform bus, on which the board puts no device. A tree the
   host gives is named the same way: QEMU's
   `-dtb` keeps a tree's own names, but a tree dumped from QEMU would then
@@ -2061,40 +2101,114 @@ one open.
   reported. QEMU 11.1.2 (`gic_cpu_read`, `gic_cpu_write`) reads them as zero
   and ignores writes. This model implements them as QEMU's own Non-secure
   view of `GICC_IAR`, `GICC_EOIR` and `GICC_HPPIR`: a Group 0 interrupt
-  reads as 1023 and an end of interrupt naming one is ignored.
-- **A disabled GIC group takes no part.** IHI 0048B §4.3.1 (`GICD_CTLR`)
-  forwards a group's interrupts to the CPU interface only while
-  `EnableGrpN` is set, so an interrupt the distributor does not forward is
-  no candidate at the CPU interface. §4.4.1 (`GICC_CTLR`) makes the
-  interface's `EnableGrpN` the enable for signalling the group's
-  interrupts, and §4.4.4 has `GICC_IAR` return 1023 while signalling is
-  disabled. QEMU 11.1.2 (`gic_update_internal`, `gic_acknowledge_irq`)
-  chooses the highest-priority interrupt across both groups and only then
-  checks its group, so a higher-priority interrupt of a disabled group
-  blocks the enabled group's, and `GICC_IAR`/`GICC_HPPIR` return it. This
-  model chooses among the groups both enables allow, so a disabled group's
-  interrupt is neither signalled nor read and hides nothing. For the
-  distributor's enable and for `GICC_IAR` that is IHI 0048B's rule. For the
-  CPU interface's enable, whether a group it does not signal still hides
-  the other group's is this model's reading where IHI 0048B is silent:
-  neither §4.4.1 nor §4.4.4 says, and an architecture in which the
-  distributor picks the highest-priority interrupt and the CPU interface
-  then decides whether to signal it could be read QEMU's way. The reading
-  taken treats the CPU interface's enable as §4.3.1 treats the
-  distributor's. It is also the rule the GICv3 architecture (IHI 0069) is
-  cited for, where `ICC_HPPIR0_EL1`/`ICC_HPPIR1_EL1` and
-  `ICC_IAR0_EL1`/`ICC_IAR1_EL1` consider only interrupts of a group
-  enabled by `ICC_IGRPEN0_EL1`/`ICC_IGRPEN1_EL1`; that citation is from
-  memory, not from IHI 0069's text, and QEMU 11.1.2's GICv3 CPU interface
-  (`icc_no_enabled_hppi`) does not follow it.
-- **GIC preemption compares group priorities.** IHI 0048B §3.3
-  ("Preemption", "Priority grouping") signals a pending interrupt only if its
-  group priority, under its own group's binary point (`GICC_BPR`, or
-  `GICC_ABPR` for Group 1 while `CBPR` is clear), is higher than the
-  running priority. QEMU 11.1.2 (`gic_update_internal`,
-  `gic_acknowledge_irq`) compares the whole priority, which differs only
-  when the two groups' binary points differ; this model compares group
-  priorities.
+  reads as 1023 and an end of interrupt naming one is ignored. The virtual
+  CPU interface has them too, `GICV_AIAR`, `GICV_AEOIR` and `GICV_AHPPIR`
+  (Table 5-10), and its `GICV_HPPIR` and `GICV_AHPPIR` report a software
+  interrupt's `CPUID` (§5.5.7), where QEMU's vCPU has no aliases and
+  reports the `VirtualID` alone (`docs/qemu-upstream-bugs.md` entry 39).
+- **A GIC reads 1022 only for an interrupt it could signal.** IHI 0048B
+  Tables 4-35 (`GICC_IAR`) and 5-12 (`GICV_IAR`) give 1022 for a
+  highest-priority pending Group 1 interrupt while `AckCtl` is clear only
+  when it is "of sufficient priority to be signaled" (note a), and 1023
+  otherwise; §4.4.4's `ReadGICC_IAR` gives 1023 too while `GICC_CTLR`
+  does not enable Group 1. QEMU 11.1.2's `gic_acknowledge_irq` returns
+  1022 before it compares the interrupt's group priority with the running
+  priority, and whatever the CPU interface enables, so a Group 1 interrupt
+  behind a higher active one, or one while only Group 0 is enabled, reads
+  1022; both CPU interfaces here read 1023 then
+  (`docs/qemu-upstream-bugs.md` entry 38).
+- **A deactivation naming a List register only pending is not counted.**
+  IHI 0048B Table 5-2 counts in `GICH_HCR.EOICount` the EOIs "that do not
+  have a corresponding entry in the List registers", and §5.5.14 the
+  `GICV_DIR` writes whose interrupt "does not exist in the List
+  registers". A List register in the pending state is such an entry, so
+  an EOI or `GICV_DIR` naming one counts nothing here and leaves it
+  pending (deactivating an interrupt that is not active is UNPREDICTABLE,
+  §5.5.14). QEMU 11.1.2's `gic_complete_irq` and `gic_deactivate_irq`
+  count it, `gic_virq_is_valid` holding only for an active List register.
+  The write is outside the registers' usage constraints (an EOI must
+  match the last acknowledge), so this is a choice where Arm's text
+  leaves room, not a QEMU bug.
+- **`GICV_IAR` reports a software List register's `CPUID` whatever its
+  interrupt.** IHI 0048B §5.5.4: "If the `GICH_LRn.HW` bit is set to 0
+  ... bits [12:10] of the `GICH_LRn`, that indicate the CPU ID, are
+  returned in the `GICV_IAR.CPUID` field". Table 5-9 has a hypervisor
+  write them as 0 for an interrupt that is not an SGI; QEMU 11.1.2's
+  `gic_acknowledge_irq` returns them only for an SGI, so a hypervisor
+  that sets them for another interrupt reads them in `GICV_IAR` here and
+  not there.
+- **`GICV_ABPR` keeps the virtual minimum.** IHI 0048B §5.5.3 sets the
+  virtual CPU interface's minimum binary point from `GICH_VTR.PREbits`,
+  2 for the GIC-400's five preemption bits, and `GICV_ABPR`'s one above
+  it (§3.5.3), 3, so a write of less reads back 3. QEMU 11.1.2's
+  `gic_cpu_write` raises a vCPU's `GICV_ABPR` only to the physical
+  interface's minimum, 1, where its own `GICH_VMCR` path uses
+  `GIC_VIRT_MIN_ABPR` (`docs/qemu-upstream-bugs.md` entry 41).
+- **The GIC's virtual interface control registers have both bases, and
+  four List registers.** IHI 0048B §5.2.7 requires a common base, which
+  redirects an access to the accessing processor's registers, and a
+  processor-specific base for each processor. This board decodes 8 KiB of
+  `GICH`: the common base at 0x0803_0000 and processor 0's base at
+  0x0803_1000, as the GIC-400 places them (DDI 0471B §3.7, the CPU ID in
+  address bits [11:9]); QEMU's `virt` maps only the common base. With four
+  List registers (`GICH_VTR.ListRegs` 3, the GIC-400's), `GICH_LR4` and up
+  are RAZ/WI, where QEMU's `gic_hyp_read`/`gic_hyp_write` keep a fifth
+  (`docs/qemu-upstream-bugs.md` entry 37). The NP maintenance interrupt
+  counts a List register as pending only in the pending state, not active
+  and pending (Table 5-5: "no List register is in pending state"), as
+  QEMU's `gic_extract_lr_info` does.
+- **A hardware List register deactivates either group's interrupt.**
+  IHI 0048B §5.5.5 likens the deactivation a hardware List register sends
+  the distributor to a Non-secure `GICC_DIR` write, which "is ignored" for
+  a Group 0 interrupt. §5.1's note says the chapter describes only a GIC
+  that implements the Security Extensions too, "for which Group 0
+  physical interrupts are Secure interrupts". This GIC, like QEMU's
+  `virt` GIC with the Virtualization Extensions, has no Security
+  Extensions: Group 0 is not Secure, no access is Non-secure, and its CPU
+  interface controls both groups (§4.4.1). So the deactivation reaches the
+  distributor for either group, as QEMU's does (`gic_cpu_ns_access` is
+  false without the extensions). A `PhysicalID` naming an SGI or a special
+  ID is UNPREDICTABLE (Table 5-9) and deactivates nothing.
+- **The distributor's group enables mask before prioritisation.** IHI
+  0048B leaves it to the implementation whether a group the distributor
+  does not forward (§4.3.1 `GICD_CTLR.EnableGrpN`) takes part in choosing
+  the highest-priority pending interrupt (`IGNORE_GROUP_ENABLE`, §3.7.1;
+  §4.1.5: "Although this is IMPLEMENTATION DEFINED"). Here it does not, so
+  such a group's interrupts hide nothing; QEMU 11.1.2
+  (`gic_update_internal`) chooses first and checks the group after, so a
+  higher-priority interrupt of a group the distributor does not forward
+  blocks the other group's. The CPU interface's group enables (§4.4.1
+  `GICC_CTLR.EnableGrpN`) take no part in the choice in either, as the
+  pseudocode has it (§3.7.2 `UpdateExceptionState`: "masked by
+  distributor enables but not cpu i/f enables"; §4.4.4 `ReadGICC_IAR`):
+  an interrupt of a group the CPU interface does not signal is neither
+  signalled nor acknowledged, and hides the other group's. The one
+  exception is §4.1.5's: with `AckCtl` set, Group 0 disabled and Group 1
+  enabled, "Group 0 interrupts are ignored and GICC_IAR behaves as
+  GICC_AIAR", so there a Group 0 interrupt hides nothing; QEMU lets it
+  hide the Group 1 one there too. `GICC_HPPIR` and `GICC_AHPPIR` still report it,
+  the other IMPLEMENTATION DEFINED choice (`GICC_MASK_HPPIR`, §4.4.1) taken
+  as the GIC-400 takes it ("even when the appropriate `GICC_CTLR.EnableGrp`
+  bit is set to 0", DDI 0471B Table 3-6, note c), where QEMU's read 1023
+  while the CPU interface enables neither group. The
+  virtual CPU interface chooses among its List registers the same way,
+  whatever `GICV_CTLR` enables (§5.4.1; DDI 0471B Table 3-10, note b for
+  `GICV_HPPIR`), as QEMU's `gic_get_best_virq` does, but that QEMU's
+  `GICV_HPPIR` and `GICV_AHPPIR` read 1023 while `GICV_CTLR` enables
+  neither group, as its `GICC_HPPIR` does, where here they report the
+  highest pending List register.
+- **GIC preemption compares group priorities.** IHI 0048B §3.3.3 signals a
+  pending interrupt only if its group priority is higher than the running
+  priority's, both under the pending interrupt's own group's binary point
+  (`GICC_BPR`, or `GICC_ABPR` for Group 1 while `CBPR` is clear), and
+  §3.7.2's `UpdateExceptionState` tests `PriorityIsHigher(priority,
+  GICC_RPR AND mask)`. QEMU 11.1.2 (`gic_update_internal`,
+  `gic_acknowledge_irq`) compares the whole priority with the running
+  priority, which differs only when the two groups' binary points differ:
+  there it lets an interrupt preempt whose group priority equals the
+  running priority's under its own point. Both CPU interfaces here,
+  physical and virtual (`GICV_BPR`, `GICV_ABPR`, §5.5.3), compare as the
+  pseudocode does (`docs/qemu-upstream-bugs.md` entry 40).
 - **SGIs on a uniprocessor GIC.** The GIC here has one CPU interface
   (`GICD_TYPER.CPUNumber` = 0). IHI 0048B gives `GICD_CPENDSGIRn` and
   `GICD_SPENDSGIRn` a bit per supported SGI and source processor, where a
@@ -2330,13 +2444,7 @@ one open.
   whatever FEAT_LPA2 makes of a `TLBI` operand's address, an
   over-invalidation Arm permits, and a 16 KiB or 64 KiB page, or a block,
   is walked once for each 4 KiB piece the processor touches.
-- Of EL2: the GIC's virtualization extensions (no virtual CPU interface
-  raises a virtual interrupt; only `HCR_EL2` does, and the device tree's
-  GIC node has no GICH and GICV frames or maintenance interrupt, which
-  QEMU's `virtualization=on` board gives it, so Linux's KVM finds no vGIC,
-  and a VMM must emulate its guest's GIC itself, as QEMU does with
-  `kernel-irqchip=off`); FEAT_VHE and the later EL2
-  features; and EL2 on the Armv9.2 model, which Arm requires FEAT_VHE and
+- Of EL2: FEAT_VHE and the later EL2 features; and EL2 on the Armv9.2 model, which Arm requires FEAT_VHE and
   others of there, so the EL2 features built for it — FEAT_S2TGran16K,
   FEAT_S2TGran64K, FEAT_TTST's stage 2 rules, FEAT_ECV_POFF — reach no
   guest yet.

@@ -94,7 +94,7 @@ use rusty_box_core::{ClockHz, VmClock, VmInstant};
 
 use el2::El2Storage;
 
-pub use el2::{Levels, NoEl2, WithEl2};
+pub use el2::{Levels, NoEl2, VirtualLines, WithEl2};
 pub use exception::ExceptionClass;
 pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
 pub use features::{
@@ -701,6 +701,16 @@ impl<L: Levels> Cpu<L> {
     pub fn set_interrupt_lines(&mut self, irq: bool, fiq: bool) {
         self.irq_line = irq;
         self.fiq_line = fiq;
+    }
+
+    /// Drive the processor's virtual interrupt inputs from the interrupt
+    /// controller's virtual CPU interface. A processor without EL2 has
+    /// none, and ignores them.
+    #[inline]
+    pub fn set_virtual_interrupt_lines(&mut self, lines: VirtualLines) {
+        if let Some(state) = self.el2_state.get_mut() {
+            state.virtual_lines = lines;
+        }
     }
 
     /// Advance time while waiting, to `until` (never backwards).

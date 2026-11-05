@@ -1,6 +1,7 @@
 //! What a guest reads of who made its machine (R9: each test asserts what
 //! the guest sees): the device tree's `/model` and root `compatible`, the
-//! virtio-mmio `VendorID`, the GICv2m frame's `MSI_IIDR`, and the input
+//! virtio-mmio `VendorID`, the GIC's `GICD_IIDR`, `GICC_IIDR` and `GICV_IIDR`, the
+//! GICv2m frame's `MSI_IIDR`, and the input
 //! devices' names, vendor, products and versions are the board's
 //! identity's, the default [`BoardIdentity::RUSTY_BOX`] or one a host gives;
 //! nothing names QEMU, and the tree has no `fw-cfg` node.
@@ -9,14 +10,17 @@
 //! Guest code is hand-assembled (GNU as for aarch64); each snippet's source
 //! is beside its words.
 
-use rusty_box_aarch64::board::{GIC_V2M_BASE, RAM_BASE, VIRTIO_MMIO_BASE};
+use rusty_box_aarch64::board::{
+    GIC_CPU_BASE, GIC_DIST_BASE, GIC_V2M_BASE, GIC_VCPU_BASE, RAM_BASE, VIRTIO_MMIO_BASE,
+};
 use rusty_box_aarch64::boot::fdt;
 use rusty_box_aarch64::{
-    BoardIdentity, EdidDate, EdidWeek, EdidWeekNumber, EdidYear, IdentityError, IdentityField,
-    IdentityNames, IdentityProblem, InputDeviceId, InputProductId, InputVendorId, InputVersion,
-    LentStorage, MachineBuilder, MemoryLoan, MsiFrameField, MsiFrameFields, MsiFrameIidr, NoEl2,
-    NotAnEdidWeek, NotAnEdidYear, NotMsiFrameFields, NotPnpId, PnpId, RamSize, Reg, RunBudget,
-    StopReason, VirtConfig, VirtMachine, VirtioVendorId,
+    BoardIdentity, EdidDate, EdidWeek, EdidWeekNumber, EdidYear, GicCpuIidr, GicDistFields,
+    GicDistIidr, GicIdentity, IdentityError,
+    IdentityField, IdentityNames, IdentityProblem, IidrField, IidrFields, InputDeviceId,
+    InputProductId, InputVendorId, InputVersion, LentStorage, Levels, MachineBuilder, MemoryLoan,
+    MsiFrameIidr, NoEl2, NotAnEdidWeek, NotAnEdidYear, NotIidrFields, NotPnpId, PnpId, RamSize,
+    Reg, RunBudget, StopReason, VirtConfig, VirtMachine, VirtioVendorId,
 };
 
 const RAM_LEN: usize = 4 << 20;
@@ -168,7 +172,7 @@ fn the_input_devices_name_themselves_by_the_identity() {
 }
 
 /// What the guest's `ldr w2, [x1]` reads at `addr` on `m`.
-fn guest_load(m: &mut VirtMachine<LentStorage<'_>, NoEl2>, addr: u64) -> u64 {
+fn guest_load<L: Levels>(m: &mut VirtMachine<LentStorage<'_>, L>, addr: u64) -> u64 {
     for (i, word) in LOAD_WORD.iter().enumerate() {
         m.mem_write(RAM_BASE + 4 * i as u64, &word.to_le_bytes())
             .expect("code is in RAM");
@@ -212,7 +216,7 @@ fn a_virtio_transport_reads_the_identitys_vendor() {
 /// JEP106 code where it gives them, the architecture version 0 between.
 #[test]
 fn the_msi_frame_reads_the_identitys_iidr() {
-    let fields = MsiFrameFields {
+    let fields = IidrFields {
         product: 0x123,
         revision: 0x5,
         jep106_continuation: 0x6,
@@ -230,6 +234,109 @@ fn the_msi_frame_reads_the_identitys_iidr() {
         let mut m = bare(&mut ram, identity, Devices::None);
         assert_eq!(guest_load(&mut m, GIC_V2M_BASE + MSI_IIDR), iidr);
     }
+}
+
+/// The GIC's identification registers are the identity's: the
+/// distributor's `GICD_IIDR` (IHI 0048B §4.3.3), the CPU interface's
+/// `GICC_IIDR` (§4.4.15), and with EL2 the virtual CPU interface's
+/// `GICV_IIDR`, which reads the same (§5.5.13; DDI 0471B Tables 3-6 and
+/// 3-10). By default a GICv2 of no product and no implementer, where
+/// QEMU's read Arm's JEP106 code, 0x43B (`gic_dist_readb`,
+/// `gic_cpu_read`); a host's fields where it gives them, `GICC_IIDR`'s
+/// architecture version 2 between.
+#[test]
+fn the_gic_reads_the_identitys_iidrs() {
+    let fields = IidrFields {
+        product: 0x123,
+        revision: 0x5,
+        jep106_continuation: 0x6,
+        jep106_identity: 0x78,
+    };
+    let cpu_interface = GicCpuIidr::new(fields).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(cpu_interface.fields(), fields);
+    let dist_fields = GicDistFields {
+        product: 0xAB,
+        variant: 0x3,
+        revision: 0x4,
+        jep106_continuation: 0x6,
+        jep106_identity: 0x78,
+    };
+    let distributor = GicDistIidr::new(dist_fields).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(distributor.fields(), dist_fields);
+    let hosts = BoardIdentity::new(IdentityNames {
+        gic: GicIdentity {
+            distributor,
+            cpu_interface,
+        },
+        ..IdentityNames::RUSTY_BOX
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    const GICD_IIDR: u64 = GIC_DIST_BASE + 0x008;
+    const GICC_IIDR: u64 = GIC_CPU_BASE + 0xFC;
+    const GICV_IIDR: u64 = GIC_VCPU_BASE + 0xFC;
+    for (identity, dist, iidr) in [
+        (BoardIdentity::RUSTY_BOX, 0, 0x0002_0000),
+        (hosts, 0xAB03_4678, 0x1232_5678),
+    ] {
+        let mut ram = vec![0u8; RAM_LEN];
+        let mut m = bare(&mut ram, identity, Devices::None);
+        assert_eq!(guest_load(&mut m, GICD_IIDR), dist);
+        assert_eq!(guest_load(&mut m, GICC_IIDR), iidr);
+        let mut ram = vec![0u8; RAM_LEN];
+        let mut m = MachineBuilder::new(VirtConfig::DEFAULT)
+            .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
+            .identity(identity)
+            .bare()
+            .with_el2()
+            .build_in(MemoryLoan {
+                ram: &mut ram,
+                vars: &mut [],
+            })
+            .expect("a bare machine builds");
+        assert_eq!(guest_load(&mut m, GICC_IIDR), iidr, "with EL2");
+        assert_eq!(guest_load(&mut m, GICV_IIDR), iidr, "the virtual CPU interface");
+    }
+    // Every field at its widest leaves the architecture version 2 between.
+    let widest = IidrFields {
+        product: 0xFFF,
+        revision: 0xF,
+        jep106_continuation: 0xF,
+        jep106_identity: 0x7F,
+    };
+    assert_eq!(
+        GicCpuIidr::new(widest).map(GicCpuIidr::get),
+        Ok(0xFFF2_FF7F)
+    );
+    assert_eq!(
+        GicCpuIidr::new(IidrFields {
+            revision: 0x10,
+            ..widest
+        }),
+        Err(NotIidrFields {
+            field: IidrField::Revision
+        })
+    );
+    // GICD_IIDR's widest leaves its reserved bits [23:20] and bit 7 clear.
+    let widest = GicDistFields {
+        product: 0xFF,
+        variant: 0xF,
+        revision: 0xF,
+        jep106_continuation: 0xF,
+        jep106_identity: 0x7F,
+    };
+    assert_eq!(
+        GicDistIidr::new(widest).map(GicDistIidr::get),
+        Ok(0xFF0F_FF7F)
+    );
+    assert_eq!(
+        GicDistIidr::new(GicDistFields {
+            variant: 0x10,
+            ..widest
+        }),
+        Err(NotIidrFields {
+            field: IidrField::Variant
+        })
+    );
 }
 
 /// The tree the firmware is handed names the board by its identity, and
@@ -383,7 +490,7 @@ fn an_identity_the_board_cannot_give_is_refused() {
 /// I.9.3), and a field wider than its bits is refused, named.
 #[test]
 fn an_msi_iidr_field_wider_than_its_bits_is_refused() {
-    let widest = MsiFrameFields {
+    let widest = IidrFields {
         product: 0xFFF,
         revision: 0xF,
         jep106_continuation: 0xF,
@@ -397,37 +504,37 @@ fn an_msi_iidr_field_wider_than_its_bits_is_refused() {
     );
     for (wide, field) in [
         (
-            MsiFrameFields {
+            IidrFields {
                 product: 0x1000,
                 ..widest
             },
-            MsiFrameField::Product,
+            IidrField::Product,
         ),
         (
-            MsiFrameFields {
+            IidrFields {
                 revision: 0x10,
                 ..widest
             },
-            MsiFrameField::Revision,
+            IidrField::Revision,
         ),
         (
-            MsiFrameFields {
+            IidrFields {
                 jep106_continuation: 0x10,
                 ..widest
             },
-            MsiFrameField::Jep106Continuation,
+            IidrField::Jep106Continuation,
         ),
         (
-            MsiFrameFields {
+            IidrFields {
                 jep106_identity: 0x80,
                 ..widest
             },
-            MsiFrameField::Jep106Identity,
+            IidrField::Jep106Identity,
         ),
     ] {
         assert_eq!(
             MsiFrameIidr::new(wide),
-            Err(NotMsiFrameFields { field }),
+            Err(NotIidrFields { field }),
             "{field:?}"
         );
     }

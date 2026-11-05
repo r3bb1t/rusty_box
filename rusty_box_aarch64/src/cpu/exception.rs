@@ -12,7 +12,7 @@
 use super::debug::Stepped;
 use super::el2::{
     hpfar_fipa, El2Regs, El2Storage, HCR_AMO, HCR_FMO, HCR_IMO, HCR_TEA, HCR_TGE, HCR_VF, HCR_VI,
-    HCR_VSE, MDCR_TDE, VSESR_MASK,
+    HCR_VSE, MDCR_TDE, VSESR_MASK, VirtualLines,
 };
 use super::features::Feature;
 use super::mmu::{Fsc, Ipa};
@@ -680,10 +680,12 @@ impl Interrupt {
     }
 }
 
-/// The virtual interrupts `HCR_EL2` raises for EL1 and EL0 (FEAT_EL2).
+/// The virtual interrupts for EL1 and EL0 (FEAT_EL2), which `HCR_EL2` routes.
 ///
-/// Closed (R5): with no GIC virtual CPU interface, `VirtualIRQPending()`
-/// and `VirtualFIQPending()` are FALSE and `HCR_EL2` is their only source.
+/// Closed (R5). Each is raised by its `HCR_EL2` bit or, for IRQ and FIQ, by
+/// the interrupt controller's virtual input (`VirtualIRQPending()`,
+/// `VirtualFIQPending()`: a GIC virtual CPU interface's); a virtual SError
+/// has no such input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VirtualInterrupt {
     Irq,
@@ -909,18 +911,38 @@ impl<L: Levels> Cpu<L> {
 
     /// Whether virtual `interrupt` is pending at the current level (the
     /// virtual part of Arm `AArch64_InterruptPending`): at EL0 or EL1 with
-    /// EL2 enabled, `HCR_EL2.TGE` clear, and its routing and pending bits
-    /// set.
+    /// EL2 enabled, `HCR_EL2.TGE` clear, its routing bit set, and its
+    /// pending bit set or its virtual input asserted.
     fn virtual_pending(&self, interrupt: VirtualInterrupt) -> bool {
-        let bits = interrupt.routing() | interrupt.pending();
-        L::EL2 && self.el2().hcr & (bits | HCR_TGE) == bits && self.pstate.el != El::El2
+        let routing = interrupt.routing();
+        let hcr = self.el2().hcr;
+        L::EL2
+            && hcr & (routing | HCR_TGE) == routing
+            && self.pstate.el != El::El2
+            && (hcr & interrupt.pending() != 0 || self.virtual_input(interrupt))
+    }
+
+    /// The interrupt controller's virtual input for `interrupt`: never for
+    /// a virtual SError, nor on a processor without EL2.
+    #[inline(always)]
+    fn virtual_input(&self, interrupt: VirtualInterrupt) -> bool {
+        let lines = self.el2_state.get().map_or(VirtualLines::NONE, |s| s.virtual_lines);
+        match interrupt {
+            VirtualInterrupt::Irq => lines.irq,
+            VirtualInterrupt::Fiq => lines.fiq,
+            VirtualInterrupt::SError => false,
+        }
     }
 
     /// Whether a virtual interrupt is raised: `HCR_EL2.VI`, `VF` or `VSE`
-    /// set, whether or not it is pending at the current level.
+    /// set, or a virtual input asserted, whether or not it is pending at
+    /// the current level.
     #[inline(always)]
     fn virtual_raised(&self) -> bool {
-        L::EL2 && self.el2().hcr & HCR_VIRTUAL_PENDING != 0
+        L::EL2
+            && self.el2_state.get().is_some_and(|s| {
+                s.regs.hcr & HCR_VIRTUAL_PENDING != 0 || (s.virtual_lines.irq | s.virtual_lines.fiq)
+            })
     }
 
     /// Whether any virtual interrupt is pending at the current level,
@@ -1080,7 +1102,7 @@ impl<L: Levels> Cpu<L> {
     /// `IDS` and `ISS`; without it, the syndrome is IMPLEMENTATION DEFINED
     /// and none is chosen here (`ISS` 0). Taking it clears `HCR_EL2.VSE`
     /// (`ClearPendingVirtualSError`); a virtual IRQ or FIQ stays pending until
-    /// EL2 clears `VI` or `VF`.
+    /// EL2 clears `VI` or `VF` and the interrupt controller lowers its input.
     fn take_virtual_interrupt(&mut self, interrupt: VirtualInterrupt) -> ExceptionTaken {
         let (vector_kind, kind, record) = match interrupt {
             VirtualInterrupt::Irq => (

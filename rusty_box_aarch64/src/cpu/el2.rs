@@ -809,21 +809,45 @@ impl El2Regs {
 }
 
 /// What a processor with FEAT_EL2 holds of EL2: `SP_EL2` and the EL2
-/// registers, which a snapshot of it carries too. Public as
+/// registers, which a snapshot of it carries too, and the interrupt
+/// controller's virtual interrupt inputs, which a snapshot leaves out: the
+/// machine drives them again from its restored GIC. Public as
 /// [`El2Storage`] is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct El2State {
     pub(crate) sp_el2: u64,
     pub(crate) regs: El2Regs,
+    /// The interrupt controller's virtual interrupt inputs (Arm
+    /// `VirtualIRQPending()` and `VirtualFIQPending()`, IMPLEMENTATION
+    /// DEFINED there), which a GIC with the Virtualization Extensions
+    /// drives. Inputs, as the physical lines are, so a snapshot holds
+    /// neither: the machine drives them again.
+    pub(crate) virtual_lines: VirtualLines,
+}
+
+/// The virtual IRQ and FIQ inputs from the interrupt controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtualLines {
+    pub irq: bool,
+    pub fiq: bool,
+}
+
+impl VirtualLines {
+    pub const NONE: Self = Self {
+        irq: false,
+        fiq: false,
+    };
 }
 
 impl El2State {
     /// The state out of reset on a processor implementing `imp`: `SP_EL2`
-    /// zero and the registers as [`El2Regs::reset`] leaves them.
+    /// zero, the registers as [`El2Regs::reset`] leaves them and neither
+    /// virtual input asserted.
     pub(crate) const fn reset<L: Levels>(imp: LeveledImplementation<L>) -> Self {
         Self {
             sp_el2: 0,
             regs: El2Regs::reset(imp),
+            virtual_lines: VirtualLines::NONE,
         }
     }
 }

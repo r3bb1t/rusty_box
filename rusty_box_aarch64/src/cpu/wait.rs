@@ -178,8 +178,9 @@ impl<L: Levels> Cpu<L> {
 
     /// Arm `AArch64_InterruptPending` for this processor's interrupt
     /// sources, which raise no physical SError: an asserted physical IRQ or
-    /// FIQ, or at EL0 and EL1 a virtual interrupt `HCR_EL2` makes pending,
-    /// masked by `PSTATE` or not.
+    /// FIQ, or at EL0 and EL1 a virtual interrupt that `HCR_EL2` or the
+    /// interrupt controller's virtual IRQ or FIQ input makes pending, masked
+    /// by `PSTATE` or not.
     #[inline]
     fn interrupt_pending(&self) -> bool {
         self.irq_line || self.fiq_line || self.virtual_interrupt_pending()

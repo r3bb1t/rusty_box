@@ -92,7 +92,8 @@ was given. `boot::fdt::property` reads a property back out of it.
 
 **The machine's name.** Everything a guest reads that says who made the
 machine — the device tree's `/model` and root `compatible`, every
-virtio-mmio transport's `VendorID`, the GICv2m frame's `MSI_IIDR`, the
+virtio-mmio transport's `VendorID`, the GIC's `GICD_IIDR` and `GICC_IIDR`
+(which `GICV_IIDR` repeats), the GICv2m frame's `MSI_IIDR`, the
 virtio keyboard's and tablet's names, vendor, products and versions, and
 the virtio display's EDID maker, product, name and date — comes from a
 `BoardIdentity`, by default
@@ -175,7 +176,14 @@ called with `SMC`, `HVC` being the hypervisor's own. The level set is part of
 the machine's type, `VirtMachine<S, NoEl2>` or `VirtMachine<S, WithEl2>`: a
 machine without EL2 holds no EL2 state and runs no EL2 check. Only a
 `WithEl2` machine has `sp_el2()` and `set_sp_el2()`, and `set_pstate`
-refuses EL2 (`PstateRefusal::AbsentLevel`) on one without it.
+refuses EL2 (`PstateRefusal::AbsentLevel`) on one without it. Its GIC has
+the Virtualization Extensions (IHI 0048B chapter 5): the virtual interface
+control registers (`GICH`) at `board::GIC_HYP_BASE` and the virtual CPU
+interface (`GICV`) at `board::GIC_VCPU_BASE`, 8 KiB each, with four List
+registers, and the maintenance interrupt on PPI 9 (INTID 25). The device
+tree's GIC node gains both frames in its `reg` and the maintenance
+interrupt in `interrupts`, as QEMU's `virtualization=on` gives them; a
+machine without EL2 has neither frame, and an access there aborts.
 
 ```rust
 use rusty_box_aarch64::{El, LentStorage, MachineBuilder, MemoryLoan, RamSize, VirtConfig, VirtMachine, WithEl2};

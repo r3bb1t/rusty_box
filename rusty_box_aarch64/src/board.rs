@@ -28,7 +28,7 @@ use crate::bus::{
 };
 use crate::cpu::TimerLines;
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
-use crate::devices::gicv2::GicV2;
+use crate::devices::gicv2::{GicExtensions, GicNames, GicV2};
 use crate::devices::pl011::{BaudRate, Pl011, Received, UartClocks};
 use crate::devices::pl031::Pl031;
 use crate::devices::pl061::{Pl061, POWER_BUTTON_LINE};
@@ -42,12 +42,17 @@ use crate::devices::virtio::{Device, Transport, Vdev, MAX_DEVICES};
 use crate::devices::virtio_mmio::{self, Layout};
 #[cfg(feature = "alloc")]
 use crate::disk::Disk;
-use crate::identity::{BoardIdentity, MsiFrameIidr, VirtioVendorId};
+use crate::identity::{BoardIdentity, VirtioVendorId};
 use crate::storage::GuestStorage;
 
 pub const FLASH0_BASE: u64 = 0x0000_0000;
 pub const FLASH_BANK_SIZE: u64 = 0x0400_0000;
 pub const FLASH1_BASE: u64 = FLASH0_BASE + FLASH_BANK_SIZE;
+/// The window `virt` reserves for each of the GIC's frames, and which the
+/// device tree's GIC node gives as each one's size (QEMU `virt`'s
+/// `memmap`: `VIRT_GIC_DIST`, `VIRT_GIC_CPU`, `VIRT_GIC_HYP`,
+/// `VIRT_GIC_VCPU`); the frame decodes less of it (`GIC_*_SIZE`).
+pub const GIC_WINDOW: u64 = 0x1_0000;
 pub const GIC_DIST_BASE: u64 = 0x0800_0000;
 /// The distributor's region (QEMU `gic_init_irqs_and_mmio`'s `gic_dist`).
 /// `virt` reserves 64 KiB for it; the rest of that window is unassigned.
@@ -59,6 +64,18 @@ pub const GIC_CPU_BASE: u64 = 0x0801_0000;
 pub const GIC_CPU_SIZE: u64 = 0x2000;
 pub const GIC_V2M_BASE: u64 = 0x0802_0000;
 pub const GIC_V2M_SIZE: u64 = 0x1000;
+/// The virtual interface control registers (`GICH_*`, IHI 0048B §5.3), on
+/// a board whose GIC has the Virtualization Extensions (QEMU `virt`
+/// `VIRT_GIC_HYP`): the common base and the processor-specific bases IHI
+/// 0048B §5.2.7 requires, 4 KiB each, as the GIC-400 places them (DDI
+/// 0471B §3.7). `virt` reserves 64 KiB, the rest of which is unassigned.
+pub const GIC_HYP_BASE: u64 = 0x0803_0000;
+pub const GIC_HYP_SIZE: u64 = 0x2000;
+/// The virtual CPU interface (`GICV_*`, §5.5), reaching `GICV_DIR` at
+/// 0x1000 (QEMU `virt` `VIRT_GIC_VCPU`, `gic_vcpu`); the rest of its 64 KiB
+/// window is unassigned.
+pub const GIC_VCPU_BASE: u64 = 0x0804_0000;
+pub const GIC_VCPU_SIZE: u64 = 0x2000;
 pub const UART0_BASE: u64 = 0x0900_0000;
 pub const RTC_BASE: u64 = 0x0901_0000;
 pub const GPIO_BASE: u64 = 0x0903_0000;
@@ -191,9 +208,6 @@ pub struct VirtBoard<S> {
     /// What every virtio-mmio transport's `VendorID` reads, the board's
     /// identity's ([`BoardIdentity::virtio_vendor`]).
     pub(crate) virtio_vendor: VirtioVendorId,
-    /// What the GICv2m frame's `MSI_IIDR` reads, the board's identity's
-    /// ([`BoardIdentity::msi_frame_iidr`]).
-    pub(crate) msi_frame_iidr: MsiFrameIidr,
     /// Host bytes waiting for room in the UART's receive FIFO.
     pub(crate) serial_input: RingBuffer<u8, SERIAL_INPUT_CAPACITY>,
     /// When the pressed power button is released, if it is held.
@@ -228,12 +242,15 @@ pub struct VirtBoard<S> {
 
 impl<S: GuestStorage> VirtBoard<S> {
     /// A board over `storage` whose RTC starts at `rtc_epoch_seconds`, with
-    /// the devices `plugs` names, each naming itself as `identity` says.
+    /// the devices `plugs` names, each naming itself as `identity` says, and
+    /// a GIC with `gic` (the Virtualization Extensions for a processor with
+    /// EL2), whose frames it maps.
     pub(crate) fn new(
         storage: S,
         rtc_epoch_seconds: u64,
         plugs: Plugs,
         identity: &BoardIdentity,
+        gic: GicExtensions,
     ) -> Self {
         let devices = plugs.devices;
         let virtio_vendor = identity.virtio_vendor();
@@ -270,12 +287,14 @@ impl<S: GuestStorage> VirtBoard<S> {
             storage,
             flash0: CfiFlash::new(FLASH_BANK_SIZE),
             flash1: CfiFlash::new(FLASH_BANK_SIZE),
-            gic: GicV2::new(),
+            gic: GicV2::with_extensions(gic).identified_as(GicNames {
+                gic: identity.gic(),
+                msi_frame: identity.msi_frame_iidr(),
+            }),
             uart: Pl011::new(),
             rtc: Pl031::new(rtc_epoch_seconds),
             gpio: Pl061::new(),
             virtio_vendor,
-            msi_frame_iidr: identity.msi_frame_iidr(),
             serial_input: RingBuffer::new(),
             power_button_release: None,
             deadline_moved: false,
@@ -393,7 +412,7 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.flash0.reset();
         self.flash1.reset();
         self.flash_epoch += 1;
-        self.gic = GicV2::new();
+        self.gic.reset();
         self.uart.reset();
         self.rtc.reset(clock);
         if self.power_button_release.take().is_some() {
@@ -687,7 +706,18 @@ impl<S: GuestStorage> VirtBoard<S> {
             return Ok(self.gic.cpu_read(off, width));
         }
         if let Some(off) = addr.offset_in(GIC_V2M_BASE, GIC_V2M_SIZE) {
-            return Ok(self.gic.v2m_read(off, width, self.msi_frame_iidr));
+            return Ok(self.gic.v2m_read(off, width));
+        }
+        match self.gic.extensions() {
+            GicExtensions::Virtualization => {
+                if let Some(off) = addr.offset_in(GIC_HYP_BASE, GIC_HYP_SIZE) {
+                    return Ok(self.gic.hyp_read(off, width));
+                }
+                if let Some(off) = addr.offset_in(GIC_VCPU_BASE, GIC_VCPU_SIZE) {
+                    return Ok(self.gic.vcpu_read(off, width));
+                }
+            }
+            GicExtensions::Absent => {}
         }
         if let Some(off) = addr.offset_in(UART0_BASE, PRIMECELL_SIZE) {
             let deadline = self.uart.next_deadline();
@@ -759,6 +789,19 @@ impl<S: GuestStorage> VirtBoard<S> {
         if let Some(off) = addr.offset_in(GIC_V2M_BASE, GIC_V2M_SIZE) {
             self.gic.v2m_write(off, width, value);
             return Ok(());
+        }
+        match self.gic.extensions() {
+            GicExtensions::Virtualization => {
+                if let Some(off) = addr.offset_in(GIC_HYP_BASE, GIC_HYP_SIZE) {
+                    self.gic.hyp_write(off, width, value);
+                    return Ok(());
+                }
+                if let Some(off) = addr.offset_in(GIC_VCPU_BASE, GIC_VCPU_SIZE) {
+                    self.gic.vcpu_write(off, width, value);
+                    return Ok(());
+                }
+            }
+            GicExtensions::Absent => {}
         }
         if let Some(off) = addr.offset_in(UART0_BASE, PRIMECELL_SIZE) {
             let deadline = self.uart.next_deadline();

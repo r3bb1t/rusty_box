@@ -112,9 +112,9 @@ fn assert_external_abort<S: GuestStorage, I: Instrumentation>(
 fn the_distributor_decodes_its_first_4_kib_only() {
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram);
-    // GICD_IIDR: Arm's JEP106 identity.
-    access(&mut m, &LOAD, GIC_DIST_BASE + 0x008);
-    assert_eq!(m.reg_read(Reg::X2), 0x43B);
+    // GICD_TYPER: ITLinesNumber 8, 288 interrupts, one processor.
+    access(&mut m, &LOAD, GIC_DIST_BASE + 0x004);
+    assert_eq!(m.reg_read(Reg::X2), 8);
     assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 4, "no abort");
 
     let mut ram = vec![0u8; RAM_LEN];

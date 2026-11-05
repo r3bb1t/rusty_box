@@ -1415,6 +1415,176 @@ Found on QEMU 11.1.2; master (2026-10-31) has the same tables.
 `sizeof(VIRTIO_ID_NAME_...) - 1`. `rusty_box_aarch64` sizes a name to its
 length (`src/devices/virtio/input.rs`, `ConfigEntry::name`).
 
+### 37. The GICv2's virtual interface control registers keep one List register more than `GICH_VTR` reports
+
+**Impact**: small. A hypervisor that writes the List register past the
+last one `GICH_VTR.ListRegs` reports reads its value back, as though it
+existed, though the GIC never signals what it holds.
+
+**Location**: `hw/intc/arm_gic.c`, `gic_hyp_read` and `gic_hyp_write`,
+whose `A_GICH_LR0 ... A_GICH_LR63` case tests `lr_idx > s->num_lrs`.
+With `num_lrs` 4, `GICH_LR4` passes and reads and writes `h_lr[4]`, an
+element of the `GIC_MAX_LR`-long array that `gic_get_best_virq` and
+`gic_extract_lr_info`, which loop to `lr_idx < s->num_lrs`, never look at.
+
+**What the specification says**: IHI 0048B.b §5.3.2: `GICH_VTR.ListRegs`
+is "the number of implemented List registers, minus one"; Table 5-1 gives
+`GICH_LRn` for the implemented ones only, and a register that is not
+implemented is RAZ/WI there.
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    GICH_VTR.ListRegs 3; write 0x10000028 to GICH_LR4, read it back
+    IHI 0048B: 0
+    QEMU:      0x10000028
+
+Found on QEMU 11.1.2; master (2026-11-04) has the same test.
+
+**Fix**: not yet written: the test would be `lr_idx >= s->num_lrs`.
+`rusty_box_aarch64` reads `GICH_LR4` and up as zero and ignores writes
+(`src/devices/gicv2_virt.rs`, `VirtInterface::hyp_read`).
+
+### 38. A Group 1 interrupt that cannot be signalled reads as 1022 at `GICC_IAR` and `GICV_IAR`
+
+**Impact**: small. Software that reads 1022 takes it that a Group 1
+interrupt is pending for it to acknowledge through the alias register,
+where none it could be signalled is.
+
+**Location**: `hw/intc/arm_gic.c`, `gic_acknowledge_irq`, which returns
+`gic_get_current_pending_irq`'s 1022 for a Group 1 interrupt while
+`AckCtl` is clear before it compares the interrupt's group priority with
+the running priority, and without looking at `GICC_CTLR.EnableGrp1`
+(`gic_update_internal` sets `current_pending` whatever the CPU interface
+enables).
+
+**What the specification says**: IHI 0048B.b Table 4-35 (`GICC_IAR`) and
+Table 5-12 (`GICV_IAR`): the rows giving 1022 are for a highest-priority
+pending interrupt "of sufficient priority to be signaled" (note a);
+without one the read is 1023. §4.4.4 `ReadGICC_IAR`: a Group 1
+interrupt while `GICC_CTLR.EnableGrp1` is 0 gives 1023 ("If the highest
+priority isn't enabled, then no interrupt").
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    a Group 0 interrupt at priority 0x10 active, a Group 1 one at 0x20
+    pending, AckCtl 0; read GICC_IAR
+    IHI 0048B: 1023
+    QEMU:      1022
+
+    GICC_CTLR = EnableGrp0 only; Group 1 SPI 41 at 0x10 and Group 0 SPI
+    40 at 0x20 pending; read GICC_IAR
+    IHI 0048B: 1023
+    QEMU:      1022
+
+Found on QEMU 11.1.2; master (2026-11-04) has the same `gic_acknowledge_irq`.
+
+**Fix**: not yet written: `gic_acknowledge_irq` would compare the
+priority before mapping the ID. `rusty_box_aarch64` does
+(`src/devices/gicv2.rs` and `src/devices/gicv2_virt.rs`, `acknowledge`).
+
+### 39. The GICv2's virtual CPU interface has no Group 1 aliases, and its `GICV_HPPIR` omits a software interrupt's CPUID
+
+**Impact**: small. A guest that completes Group 1 interrupts through
+`GICV_AIAR` and `GICV_AEOIR`, as IHI 0048B §5.5.9 and §5.5.10 describe,
+reads 0 and its EOI is lost; one that reads `GICV_HPPIR` for a virtual SGI
+does not learn its source.
+
+**Location**: `hw/intc/arm_gic.c`, `gic_cpu_read` and `gic_cpu_write`,
+which serve a vCPU and have no case for offsets 0x20, 0x24 and 0x28 (a
+guest error, read as 0); and `gic_get_current_pending_irq`, which returns
+`current_pending`, a List register's `VirtualID` alone, for a vCPU.
+
+**What the specification says**: IHI 0048B.b Table 5-10 has `GICV_AIAR`,
+`GICV_AEOIR` and `GICV_AHPPIR` at 0x20, 0x24 and 0x28; §5.5.7 gives
+`GICV_HPPIR` `GICC_HPPIR`'s bits, `CPUID` in [12:10], which §5.5.4 fills
+from a software List register's bits [12:10].
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    GICH_LR0 = pending, Group 1, CPUID 5, VirtualID 3; read GICV_AHPPIR, GICV_HPPIR (AckCtl 1)
+    IHI 0048B: 0x1403, 0x1403
+    QEMU:      0 (guest error), 3
+
+Found on QEMU 11.1.2; master (2026-11-04) has the same `gic_cpu_read` and
+`gic_get_current_pending_irq`.
+
+**Fix**: not yet written. `rusty_box_aarch64` implements the aliases and
+reports `CPUID` (`src/devices/gicv2_virt.rs`, `VirtInterface::vcpu_read`).
+
+### 40. The GICv2 preempts by an interrupt's whole priority, not its group priority
+
+**Impact**: small. Only where the two groups' binary points differ
+(`GICC_BPR` against `GICC_ABPR` with `CBPR` clear), and the running
+priority has bits below the pending interrupt's binary point: an
+interrupt of the same group priority as the active one under its own
+group's point is signalled and acknowledged as though it preempted,
+nesting interrupts the binary point keeps apart.
+
+**Location**: `hw/intc/arm_gic.c`, `gic_update_internal` (`best_prio <
+s->running_priority`) and `gic_acknowledge_irq` (`gic_get_priority(...) >=
+s->running_priority`), for the physical and the virtual CPU interface
+alike.
+
+**What the specification says**: IHI 0048B.b §3.3.3: "the value of the
+group priority field for the new interrupt must be less than the value of
+the group priority field of the Running priority", both fields under the
+new interrupt's group's binary point; §3.7.2 `UpdateExceptionState`:
+`PriorityIsHigher(ReadGICD_IPRIORITYR(intID), GICC_RPR[cpu_id]<7:0> AND
+smsk)`, with `nsmsk` for Group 1; §5.5.3 for `GICV_BPR`.
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    GICC_BPR 2, GICC_ABPR 1, CBPR 0; Group 1 interrupt A at 0x42 active
+    (running priority 0x42 under ABPR - 1 = 0); Group 0 interrupt B at
+    0x41 pending (mask 0xF8 under BPR 2)
+    IHI 0048B: 0x41 < (0x42 AND 0xF8 = 0x40) is false: not signalled,
+               GICC_IAR returns 1023
+    QEMU:      0x41 < 0x42: signalled, GICC_IAR returns B
+
+Found on QEMU 11.1.2; master (2026-11-04) has the same `gic_update_internal`
+and `gic_acknowledge_irq`.
+
+**Fix**: not yet written: both comparisons would mask the running
+priority with the pending interrupt's group mask, as the pseudocode does.
+`rusty_box_aarch64` does (`src/devices/gicv2.rs`, `preempts`, for both CPU
+interfaces).
+
+### 41. The GICv2's virtual CPU interface lets `GICV_ABPR` go below its minimum
+
+**Impact**: small. A guest that writes `GICV_ABPR` with 1 or 2 reads that
+value back, and its Group 1 interrupts are then grouped by priority under
+a binary point the virtual interface does not have, splitting preemption
+levels the hypervisor's view (`GICH_VMCR.VMABP`, `GICH_APR`) cannot hold.
+
+**Location**: `hw/intc/arm_gic.c`, `gic_cpu_write`, case 0x1c, which
+writes `s->abpr[cpu] = MAX(value & 0x7, GIC_MIN_ABPR)` for a vCPU as for
+the physical interface; `gic_vmcr_write` raises the same field to
+`GIC_VIRT_MIN_ABPR`.
+
+**What the specification says**: IHI 0048B.b §5.5.3: the virtual
+interface's minimum binary point "is determined by the value of
+`GICH_VTR.PREbits`", 2 for five preemption bits; §3.5.3: `GICC_ABPR`'s
+minimum is "one greater than the minimum value supported for" `GICC_BPR`,
+so 3 for `GICV_ABPR`.
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    GICH_VTR.PREbits 4 (five bits); write 1 to GICV_ABPR, read it back
+    IHI 0048B: 3
+    QEMU:      1
+
+Found on QEMU 11.1.2; master (2026-11-05) has the same `gic_cpu_write`.
+
+**Fix**: not yet written: case 0x1c would use `gic_is_vcpu(cpu) ?
+GIC_VIRT_MIN_ABPR : GIC_MIN_ABPR`, as case 0x08 does for the binary
+point. `rusty_box_aarch64` does (`src/devices/gicv2_virt.rs`,
+`VirtInterface::vcpu_write`).
+
 ---
 
 ## Deliberate QEMU omissions

@@ -1,6 +1,7 @@
 //! GICv2 distributor and CPU interface for one processor, without the
 //! Security Extensions (QEMU's `virt` without EL3), plus the GICv2m MSI
-//! frame.
+//! frame, and on a board with EL2 the Virtualization Extensions
+//! ([`super::gicv2_virt`]).
 //!
 //! Provenance (R7): the ARM Generic Interrupt Controller Architecture
 //! Specification, GIC architecture version 2.0 (IHI 0048B.b), first; QEMU
@@ -16,18 +17,38 @@
 //! (`arm_gic_common_reset_hold`, the `gic_dist` and `gic_cpu` regions) and
 //! `hw/intc/arm_gicv2m.c` (`gicv2m_read`, `gicv2m_write`, `gicv2m_set_irq`).
 //!
-//! Where IHI 0048B and QEMU differ, this model follows IHI 0048B:
+//! The highest-priority pending interrupt is chosen as IHI 0048B's
+//! pseudocode chooses it (§3.7.2 `UpdateExceptionState`, §4.4.4
+//! `ReadGICC_IAR`, §4.4.7 `ReadGICC_HPPIR`), where the specification leaves
+//! two choices to the implementation (§3.7.1):
 //! - A group the distributor does not forward (§4.3.1 GICD_CTLR.EnableGrpN)
-//!   takes no part in choosing the highest-priority pending interrupt, so its
-//!   interrupts are neither signalled nor returned by an acknowledge or
-//!   highest-pending read, and do not hide the other group's.
-//! - An interrupt of a group the CPU interface does not signal (§4.4.1
-//!   GICC_CTLR.EnableGrpN) is never acknowledged: GICC_IAR returns 1023
-//!   while signalling is disabled (§4.4.4).
-//! - A pending interrupt preempts when its group priority, under the binary
-//!   point of its own group, is higher than the running priority (§3.3
-//!   "Interrupt prioritization": "Preemption", and "Priority grouping" with
-//!   Table 3-3).
+//!   takes no part in the choice, so its interrupts are neither signalled
+//!   nor read and do not hide the other group's: `IGNORE_GROUP_ENABLE`
+//!   FALSE, the distributor's enables masking before prioritisation. QEMU
+//!   11.1.2 (`gic_update_internal`) masks after it, the other choice.
+//! - The CPU interface's group enables (§4.4.1 GICC_CTLR.EnableGrpN) take
+//!   no part in the choice: they decide whether the interrupt chosen is
+//!   signalled and acknowledged, so a higher-priority interrupt of a group
+//!   the CPU interface does not signal hides the other group's, as in QEMU.
+//!   §4.1.5 makes one exception, which QEMU does not: with AckCtl set,
+//!   EnableGrp0 clear and EnableGrp1 set, "Group 0 interrupts are ignored
+//!   and GICC_IAR behaves as GICC_AIAR". The pseudocode does not make it
+//!   (`ReadGICC_IAR` returns 1023 for a highest pending Group 0 interrupt
+//!   whatever AckCtl); the prose, which names the case, is taken over the
+//!   pseudocode, which does not. Arm deprecates AckCtl set (§4.1.5).
+//!   GICC_HPPIR and GICC_AHPPIR still report it: `GICC_MASK_HPPIR` FALSE,
+//!   as in the GIC-400 ("even when the appropriate GICC_CTLR.EnableGrp bit
+//!   is set to 0", DDI 0471B Table 3-6, note c).
+//!
+//! Where IHI 0048B and QEMU differ, this model follows IHI 0048B:
+//! - A Group 1 interrupt reads as 1022 at GICC_IAR only when it is of
+//!   "sufficient priority to be signaled" (Table 4-35, note a), where
+//!   QEMU's `gic_acknowledge_irq` returns 1022 before comparing priorities.
+//! - A pending interrupt preempts when its group priority is higher than
+//!   the running priority's, both under the binary point of the pending
+//!   interrupt's group (§3.3.3; §3.7.2 `UpdateExceptionState`:
+//!   `PriorityIsHigher(priority, GICC_RPR AND mask)`), where QEMU compares
+//!   the whole priority with the running priority.
 //! - The Group 1 aliases GICC_AIAR, GICC_AEOIR and GICC_AHPPIR (Table 4-2,
 //!   GICv2 only; §4.4.1 AckCtl) acknowledge, complete and report Group 1
 //!   interrupts, as QEMU's Non-secure accesses to GICC_IAR, GICC_EOIR and
@@ -38,25 +59,6 @@
 //!   SGI and source processor combination, a write of 0 having no effect),
 //!   and GICC_IAR.CPUID is RAZ (§4.4.4: it identifies an SGI's source only
 //!   in a multiprocessor implementation).
-//!
-//! Where IHI 0048B is silent, this model reads it as follows. Whether a
-//! group the CPU interface does not signal still takes part in choosing the
-//! highest-priority pending interrupt, and so can hide the other group's, the
-//! specification does not say: §4.4.1 makes GICC_CTLR.EnableGrpN the enable
-//! for the signalling of Group N interrupts, and §4.4.4 has GICC_IAR return
-//! 1023 while signalling is disabled, and nothing more. This model leaves
-//! such a group out of the choice, as §4.3.1 leaves out a group the
-//! distributor does not forward, so its interrupts hide nothing. That the
-//! GICv3 architecture (IHI 0069) states this rule for ICC_HPPIR0_EL1/
-//! ICC_HPPIR1_EL1 and ICC_IAR0_EL1/ICC_IAR1_EL1 under ICC_IGRPEN0_EL1/
-//! ICC_IGRPEN1_EL1 is cited from memory, not from IHI 0069's text, and
-//! QEMU 11.1.2's GICv3 CPU interface (`hw/intc/arm_gicv3_cpuif.c`,
-//! `icc_no_enabled_hppi`) does not follow it. QEMU 11.1.2's GICv2
-//! (`gic_update_internal`, `gic_acknowledge_irq`) reads IHI 0048B the
-//! other way: it chooses the highest-priority interrupt across both groups
-//! and only then checks the CPU interface's enables, so a higher-priority
-//! interrupt of a group the CPU interface does not signal blocks the
-//! enabled group's, and GICC_IAR and GICC_HPPIR return it.
 //!
 //! With one processor every per-CPU mask QEMU keeps reduces to its bit 0,
 //! and every interrupt targets that processor, so each per-interrupt state
@@ -69,14 +71,16 @@
 //! `offset` and then `offset + 4`.
 //!
 //! Interrupt state is recomputed after every register access and every
-//! input line change; the machine reads `irq_out`/`fiq_out` between
-//! instructions.
+//! input line change; the machine reads `irq_out`/`fiq_out`, and with the
+//! Virtualization Extensions `virtual_lines`, between instructions.
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
+use super::gicv2_virt::{HwDeactivation, ReadEffect, VirtInterface, MAINTENANCE_INTID};
 use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
-use crate::identity::MsiFrameIidr;
+use crate::cpu::VirtualLines;
+use crate::identity::{GicIdentity, MsiFrameIidr};
 
 /// SGIs, PPIs and QEMU `virt`'s 256 SPIs (`num-irq` = `NUM_IRQS + 32`).
 pub const NUM_IRQ: usize = 288;
@@ -84,26 +88,27 @@ const WORDS: usize = NUM_IRQ / 32;
 /// QEMU `GIC_NR_SGIS`.
 const NR_SGIS: usize = 16;
 /// QEMU `GIC_MAXIRQ`: interrupt IDs from here up are special.
-const MAXIRQ: u32 = 1020;
-const SPURIOUS: u32 = 1023;
-const SPURIOUS_GROUP1: u32 = 1022;
+pub(super) const MAXIRQ: u32 = 1020;
+pub(super) const SPURIOUS: u32 = 1023;
+pub(super) const SPURIOUS_GROUP1: u32 = 1022;
 /// QEMU `running_priority` while nothing is active: above every priority.
-const IDLE_PRIORITY: u16 = 0x100;
+pub(super) const IDLE_PRIORITY: u16 = 0x100;
 /// QEMU `GIC_NR_APRS`: 128 preemption levels at the minimum binary point.
 const NR_APRS: usize = 4;
 /// QEMU `GIC_MIN_BPR` and `GIC_MIN_ABPR`.
 const MIN_BPR: u8 = 0;
 const MIN_ABPR: u8 = MIN_BPR + 1;
 
-const GICD_CTLR_EN_GRP0: u32 = 1 << 0;
-const GICD_CTLR_EN_GRP1: u32 = 1 << 1;
-const GICC_CTLR_ACK_CTL: u32 = 1 << 2;
-const GICC_CTLR_FIQ_EN: u32 = 1 << 3;
-const GICC_CTLR_CBPR: u32 = 1 << 4;
-const GICC_CTLR_EOIMODE: u32 = 1 << 9;
+/// `GICD_CTLR`'s and `GICC_CTLR`'s group enables, the same bits in both.
+pub(super) const GICD_CTLR_EN_GRP0: u32 = 1 << 0;
+pub(super) const GICD_CTLR_EN_GRP1: u32 = 1 << 1;
+pub(super) const GICC_CTLR_ACK_CTL: u32 = 1 << 2;
+pub(super) const GICC_CTLR_FIQ_EN: u32 = 1 << 3;
+pub(super) const GICC_CTLR_CBPR: u32 = 1 << 4;
+pub(super) const GICC_CTLR_EOIMODE: u32 = 1 << 9;
 /// QEMU `GICC_CTLR_V2_MASK`: the bits a GICv2 without the Security
 /// Extensions keeps.
-const GICC_CTLR_V2_MASK: u32 = 0x21F;
+pub(super) const GICC_CTLR_V2_MASK: u32 = 0x21F;
 /// The SGI source bit of processor 0, the one processor there is, in a
 /// `GICD_CPENDSGIRn`/`GICD_SPENDSGIRn` byte.
 const SGI_SOURCE_CPU0: u8 = 1;
@@ -111,13 +116,77 @@ const SGI_SOURCE_CPU0: u8 = 1;
 /// The two register sets of the CPU interface (IHI 0048B §4.4.1 AckCtl,
 /// Table 4-2).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CpuView {
+pub(super) enum CpuView {
     /// `GICC_IAR`, `GICC_EOIR` and `GICC_HPPIR`: Group 0, and Group 1 while
     /// `AckCtl` is set — as a Secure access in QEMU.
     Primary,
     /// `GICC_AIAR`, `GICC_AEOIR` and `GICC_AHPPIR`: Group 1 only — as a
     /// Non-secure access to the primary registers in QEMU.
     Group1Alias,
+}
+
+/// How `view` reads interrupt `id` of Group 1 (`group1`) or Group 0, on a
+/// CPU interface physical or virtual (IHI 0048B §5.4: a virtual machine
+/// cannot tell the two apart) whose `AckCtl` is `ack_ctl`: through the
+/// primary registers a Group 1 interrupt reads as 1022 unless `AckCtl` is
+/// set (§4.4.1 AckCtl; Tables 4-35, 5-12 and 5-14); through the Group 1
+/// aliases a Group 0 interrupt reads as 1023 (Tables 5-15 and 5-17), as for
+/// QEMU's Non-secure access (`gic_get_current_pending_irq`).
+pub(super) const fn read_through(view: CpuView, group1: bool, ack_ctl: bool, id: u32) -> u32 {
+    match view {
+        CpuView::Primary if group1 && !ack_ctl => SPURIOUS_GROUP1,
+        CpuView::Group1Alias if !group1 => SPURIOUS,
+        CpuView::Primary | CpuView::Group1Alias => id,
+    }
+}
+
+/// The enable bit of Group 1 (`group1`) or Group 0 in `GICD_CTLR`,
+/// `GICC_CTLR` and `GICV_CTLR`, the same bit in all three.
+pub(super) const fn group_enable(group1: bool) -> u32 {
+    if group1 {
+        GICD_CTLR_EN_GRP1
+    } else {
+        GICD_CTLR_EN_GRP0
+    }
+}
+
+/// The mask of a group priority's bits for an interrupt of Group 1
+/// (`group1`) or Group 0, on a CPU interface physical or virtual: the bits
+/// above the binary point of its group, `abpr` minus one for Group 1 unless
+/// `cbpr` is set, `bpr` otherwise (IHI 0048B §3.3 "Priority grouping",
+/// §3.7.2 `GIC_PriorityMask`, §5.5.3; QEMU `gic_get_group_priority`).
+pub(super) const fn group_mask(group1: bool, cbpr: bool, bpr: u8, abpr: u8) -> u8 {
+    let point = if group1 && !cbpr { abpr - 1 } else { bpr };
+    (0xFFu32 << ((point & 7) + 1)) as u8
+}
+
+/// The group priority of an interrupt of `priority` under `mask`
+/// ([`group_mask`]).
+pub(super) const fn group_priority(priority: u8, mask: u8) -> u8 {
+    priority & mask
+}
+
+/// Whether a pending interrupt of `priority`, whose group's mask is `mask`,
+/// preempts the running priority `running`: always while nothing is
+/// active, and otherwise if its group priority is higher than the running
+/// priority's under the same mask (IHI 0048B §3.3.3: "the value of the
+/// group priority field for the new interrupt must be less than the value
+/// of the group priority field of the Running priority"; §3.7.2
+/// `UpdateExceptionState`: `PriorityIsHigher(priority, GICC_RPR AND
+/// mask)`).
+pub(super) const fn preempts(priority: u8, mask: u8, running: u16) -> bool {
+    running >= IDLE_PRIORITY || priority & mask < running as u8 & mask
+}
+
+/// Whether the GIC implements the Virtualization Extensions (IHI 0048B
+/// chapter 5): on a board whose processor has EL2, as QEMU's `virt` gives
+/// its GICv2 them under `virtualization=on`
+/// (`has-virtualization-extensions`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GicExtensions {
+    /// None of them: the GIC of a board whose processor has no EL2.
+    Absent,
+    Virtualization,
 }
 
 /// QEMU `gic_id_gicv2`, for offsets 0xFD0..=0xFFC.
@@ -194,8 +263,32 @@ pub struct GicV2 {
     nsapr: [u32; NR_APRS],
     /// QEMU `current_pending`, recomputed by [`GicV2::update`].
     current_pending: u32,
+    /// The interrupt the CPU interface signals and `GICC_IAR` would
+    /// acknowledge, recomputed by [`GicV2::update`]; 1023 while none is.
+    signalled: u32,
     irq_out: bool,
     fiq_out: bool,
+    /// The virtual interface, with the Virtualization Extensions.
+    virt: Option<VirtInterface>,
+    /// Who the GIC says made it, and its GICv2m frame: the board's
+    /// identity, kept across a reset and a restore.
+    names: GicNames,
+}
+
+/// What the GIC's identification registers read: `GICD_IIDR`, `GICC_IIDR`
+/// and `GICV_IIDR` ([`GicIdentity`]), and the GICv2m frame's `MSI_IIDR`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GicNames {
+    pub gic: GicIdentity,
+    pub msi_frame: MsiFrameIidr,
+}
+
+impl GicNames {
+    /// No product and no implementer anywhere.
+    pub const NONE: Self = Self {
+        gic: GicIdentity::NONE,
+        msi_frame: MsiFrameIidr::NONE,
+    };
 }
 
 impl Default for GicV2 {
@@ -205,9 +298,40 @@ impl Default for GicV2 {
 }
 
 impl GicV2 {
+    /// A GIC out of reset with `extensions`.
+    pub fn with_extensions(extensions: GicExtensions) -> Self {
+        let virt = match extensions {
+            GicExtensions::Absent => None,
+            GicExtensions::Virtualization => Some(VirtInterface::new()),
+        };
+        Self { virt, ..Self::new() }
+    }
+
+    /// This GIC with its identification registers reading as `names` says.
+    pub fn identified_as(self, names: GicNames) -> Self {
+        Self { names, ..self }
+    }
+
+    /// A reset: the GIC out of reset with the extensions and the identity
+    /// it has.
+    pub fn reset(&mut self) {
+        *self = Self::with_extensions(self.extensions()).identified_as(self.names);
+    }
+
+    /// The extensions this GIC implements.
+    pub fn extensions(&self) -> GicExtensions {
+        if self.virt.is_some() {
+            GicExtensions::Virtualization
+        } else {
+            GicExtensions::Absent
+        }
+    }
+
     /// QEMU `arm_gic_common_reset_hold`: SGIs enabled and edge-triggered,
     /// every other interrupt disabled, level-sensitive, Group 0 and at
-    /// priority 0.
+    /// priority 0. No Virtualization Extensions ([`GicV2::with_extensions`]),
+    /// and CPU interfaces of no product or implementer
+    /// ([`GicV2::identified_as`]).
     pub fn new() -> Self {
         let mut enabled = Bits::new();
         let mut edge = Bits::new();
@@ -232,9 +356,24 @@ impl GicV2 {
             apr: [0; NR_APRS],
             nsapr: [0; NR_APRS],
             current_pending: SPURIOUS,
+            signalled: SPURIOUS,
             irq_out: false,
             fiq_out: false,
+            virt: None,
+            names: GicNames::NONE,
         }
+    }
+
+    /// The virtual IRQ and FIQ outputs to the processor (Arm
+    /// `VirtualIRQPending()`, `VirtualFIQPending()`), which only the
+    /// Virtualization Extensions drive. They follow from the virtual
+    /// interface's registers alone, so they are computed where they are
+    /// read.
+    #[inline]
+    pub fn virtual_lines(&self) -> VirtualLines {
+        self.virt
+            .as_ref()
+            .map_or(VirtualLines::NONE, VirtInterface::outputs)
     }
 
     /// The IRQ output to the processor.
@@ -275,7 +414,14 @@ impl GicV2 {
         // section of the image, and `restore` refuses bytes that disagree
         // with `pending`.
         let sources: [u8; NR_SGIS] = core::array::from_fn(|sgi| self.sgi_sources(sgi));
-        w.write_bytes(&sources)
+        w.write_bytes(&sources)?;
+        match &self.virt {
+            None => w.write_u8(0),
+            Some(virt) => {
+                w.write_u8(1)?;
+                virt.save(w)
+            }
+        }
     }
 
     /// SGI `sgi`'s `GICD_CPENDSGIRn`/`GICD_SPENDSGIRn` byte: the source bit
@@ -314,6 +460,16 @@ impl GicV2 {
         r.read_bytes(&mut priority)?;
         let mut sgi_sources = [0u8; NR_SGIS];
         r.read_bytes(&mut sgi_sources)?;
+        let virt = match r.read_u8()? {
+            0 => None,
+            1 => Some(VirtInterface::restore(r)?),
+            _ => return Err(SnapError::Invalid("GIC extensions tag out of range")),
+        };
+        if virt.is_some() != self.virt.is_some() {
+            return Err(SnapError::Invalid(
+                "GIC image's Virtualization Extensions differ from the board's",
+            ));
+        }
         let restored = Self {
             dist_ctlr,
             enabled,
@@ -331,20 +487,26 @@ impl GicV2 {
             apr,
             nsapr,
             current_pending: SPURIOUS,
+            signalled: SPURIOUS,
             irq_out: false,
             fiq_out: false,
+            virt,
+            names: self.names,
         };
         restored.check_restored(&sgi_sources)?;
         *self = restored;
         self.update();
+        self.sync_virtual();
         Ok(())
     }
 
     /// The one check of a restored image, made before it replaces anything:
     /// refuses binary points the registers cannot hold, a running priority
     /// above idle, an SGI source bit of a processor other than processor 0,
-    /// and SGI source bytes that disagree with the SGI's pending state (a
-    /// source with the SGI not pending, or the SGI pending with no source).
+    /// SGI source bytes that disagree with the SGI's pending state (a
+    /// source with the SGI not pending, or the SGI pending with no source),
+    /// and with the Virtualization Extensions a maintenance interrupt line
+    /// whose level is not the one the virtual interface gives.
     fn check_restored(&self, sgi_sources: &[u8; NR_SGIS]) -> SnapResult {
         if self.bpr > 7 || !(MIN_ABPR..=7).contains(&self.abpr) {
             return Err(SnapError::Invalid(
@@ -363,6 +525,15 @@ impl GicV2 {
             if *sources != self.sgi_sources(sgi) {
                 return Err(SnapError::Invalid(
                     "GIC SGI source disagrees with its pending state",
+                ));
+            }
+        }
+        // The virtual interface alone drives the maintenance interrupt's
+        // line, so its level is the one the interface's state gives.
+        if let Some(virt) = &self.virt {
+            if self.level.get(MAINTENANCE_INTID as usize) != virt.maintenance() {
+                return Err(SnapError::Invalid(
+                    "GIC maintenance interrupt line disagrees with the virtual interface",
                 ));
             }
         }
@@ -423,49 +594,77 @@ impl GicV2 {
         best
     }
 
-    /// The groups the CPU interface considers: those the distributor forwards
-    /// (IHI 0048B §4.3.1 GICD_CTLR.EnableGrp0/EnableGrp1) and the CPU
-    /// interface signals (§4.4.1 GICC_CTLR.EnableGrp0/EnableGrp1). Leaving
-    /// out a group the CPU interface does not signal is this model's reading
-    /// where IHI 0048B is silent; QEMU 11.1.2 lets such a group's interrupt
-    /// block the other's (module docs, with the evidence for the reading).
+    /// Whether the CPU interface signals interrupt `irq`'s group (IHI 0048B
+    /// §4.4.1 GICC_CTLR.EnableGrp0/EnableGrp1).
     #[inline]
-    fn signalled_groups(&self) -> u32 {
-        self.dist_ctlr & self.cpu_ctlr & (GICD_CTLR_EN_GRP0 | GICD_CTLR_EN_GRP1)
+    fn cpu_signals(&self, irq: usize) -> bool {
+        self.cpu_ctlr & group_enable(self.group1.get(irq)) != 0
     }
 
-    /// IHI 0048B §3.3 "Preemption": a pending interrupt is signalled only if
-    /// its group priority — under its own group's binary point ("Priority
-    /// grouping", Table 3-3) — is higher than the running priority.
+    /// Whether interrupt `irq` preempts the running priority, under its own
+    /// group's binary point ([`preempts`]).
     #[inline]
     fn preempts(&self, irq: usize) -> bool {
-        u16::from(self.group_priority(irq)) < self.running_priority
+        preempts(self.priority[irq], self.group_mask(irq), self.running_priority)
     }
 
-    /// QEMU `gic_update_internal`, with the highest-priority pending
-    /// interrupt chosen from the signalled groups only: it becomes the
-    /// current pending interrupt if it beats the priority mask (its whole
-    /// priority, IHI 0048B §3.3 "Priority masking"), and is signalled if it
-    /// also preempts the running priority — as FIQ if it is Group 0 and
-    /// `FIQEn` is set (§4.4.1 GICC_CTLR.FIQEn), as IRQ otherwise.
+    /// The groups the CPU interface chooses its interrupt among (IHI 0048B
+    /// §4.1.5): both, its group enables deciding only whether the interrupt
+    /// chosen is signalled, but for `AckCtl` set with Group 0 disabled and
+    /// Group 1 enabled, where "Group 0 interrupts are ignored and GICC_IAR
+    /// behaves as GICC_AIAR". `ctlr` is `GICC_CTLR`, or `GICV_CTLR`, whose
+    /// bits are the same (§5.4: a virtual machine cannot tell its CPU
+    /// interface from a physical one).
+    pub(super) const fn considered_groups(ctlr: u32) -> u32 {
+        let group1_only = GICD_CTLR_EN_GRP1 | GICC_CTLR_ACK_CTL;
+        if ctlr & (GICD_CTLR_EN_GRP0 | group1_only) == group1_only {
+            GICD_CTLR_EN_GRP1
+        } else {
+            GICD_CTLR_EN_GRP0 | GICD_CTLR_EN_GRP1
+        }
+    }
+
+    /// IHI 0048B §3.7.2 `UpdateExceptionState` and `GIC_GenerateExceptions`
+    /// (QEMU `gic_update_internal`): the highest-priority pending interrupt
+    /// of the groups the distributor forwards becomes the current pending
+    /// interrupt, which `GICC_HPPIR` reports, if it beats the priority mask
+    /// (its whole priority, §3.3 "Priority masking"). The distributor's
+    /// group enables mask before prioritisation, the IMPLEMENTATION DEFINED
+    /// `IGNORE_GROUP_ENABLE` FALSE (§3.7.1); the CPU interface's take no
+    /// part in the choice ([`Self::considered_groups`] gives its one
+    /// exception), so a higher-priority interrupt of a group it does not
+    /// signal hides the other group's. The interrupt chosen is signalled,
+    /// and is the one `GICC_IAR` acknowledges, if its group is enabled at
+    /// the CPU interface and it preempts the running priority: as FIQ if it
+    /// is Group 0 and `FIQEn` is set (§4.4.1 GICC_CTLR.FIQEn), as IRQ
+    /// otherwise.
     fn update(&mut self) {
         self.current_pending = SPURIOUS;
+        self.signalled = SPURIOUS;
         self.irq_out = false;
         self.fiq_out = false;
-        let groups = self.signalled_groups();
-        if groups == 0 {
-            return;
+        let forwarded = self.dist_ctlr & (GICD_CTLR_EN_GRP0 | GICD_CTLR_EN_GRP1);
+        let below_mask = |g: &Self, irq: usize| g.priority[irq] < g.pmr;
+        let highest = self.best_irq(forwarded).filter(|&i| below_mask(self, i));
+        if let Some(best) = highest {
+            self.current_pending = best as u32;
         }
-        let Some(best) = self.best_irq(groups) else {
+        let considered = forwarded & Self::considered_groups(self.cpu_ctlr);
+        // The highest pending interrupt is the choice unless it is of a group
+        // left out, the one case that takes a second look.
+        let chosen = match highest {
+            Some(i) if considered & group_enable(self.group1.get(i)) == 0 => {
+                self.best_irq(considered).filter(|&i| below_mask(self, i))
+            }
+            Some(_) | None => highest,
+        };
+        let Some(best) = chosen else {
             return;
         };
-        if self.priority[best] >= self.pmr {
+        if !self.cpu_signals(best) || !self.preempts(best) {
             return;
         }
-        self.current_pending = best as u32;
-        if !self.preempts(best) {
-            return;
-        }
+        self.signalled = best as u32;
         if !self.group1.get(best) && self.cpu_ctlr & GICC_CTLR_FIQ_EN != 0 {
             self.fiq_out = true;
         } else {
@@ -500,13 +699,25 @@ impl GicV2 {
         (irq < NUM_IRQ).then_some(irq)
     }
 
+    /// Byte `n` of `GICD_IIDR`, the board's identity's.
+    #[inline(always)]
+    fn iidr_byte(&self, n: usize) -> u8 {
+        self.names.gic.distributor.get().to_le_bytes()[n]
+    }
+
     /// QEMU `gic_dist_readb`.
     fn dist_readb(&self, off: u64) -> u8 {
         match off {
             0x000 => self.dist_ctlr as u8,
             0x004 => ((NUM_IRQ / 32) - 1) as u8,
-            0x008 => 0x3B,
-            0x009 => 0x04,
+            // GICD_IIDR, the board's identity's where QEMU's reads Arm's
+            // JEP106 code, 0x43B. An arm per byte keeps the offsets below
+            // 0x00C one jump table, which every other register's read skips
+            // in two instructions (`cargo xtask ci`'s hot-loop step).
+            0x008 => self.iidr_byte(0),
+            0x009 => self.iidr_byte(1),
+            0x00A => self.iidr_byte(2),
+            0x00B => self.iidr_byte(3),
             0x080..=0x0FF => Self::bank_irq(off, 0x080).map_or(0, |irq| self.group1.byte(irq)),
             0x100..=0x17F => Self::bank_irq(off, 0x100).map_or(0, |irq| self.enabled.byte(irq)),
             0x180..=0x1FF => Self::bank_irq(off, 0x180).map_or(0, |irq| self.enabled.byte(irq)),
@@ -691,34 +902,46 @@ impl GicV2 {
 
     // ----- CPU interface -----
 
-    /// QEMU `gic_get_current_pending_irq`: the `GICC_HPPIR` or `GICC_AHPPIR`
-    /// value. Through the primary registers a Group 1 interrupt reads as
-    /// 1022 unless `AckCtl` is set (IHI 0048B §4.4.1 AckCtl); through the
-    /// Group 1 aliases a Group 0 interrupt reads as 1023, as for QEMU's
-    /// Non-secure access. Its CPUID field is RAZ, as on any uniprocessor.
-    fn current_pending_irq(&self, view: CpuView) -> u32 {
-        let irq = self.current_pending;
+    /// IHI 0048B §4.4.7 (`ReadGICC_HPPIR`): `GICC_HPPIR` or `GICC_AHPPIR`,
+    /// the current pending interrupt read through `view`: one "of
+    /// sufficient priority" (§4.1.5), past the priority mask, whether or not
+    /// the CPU interface signals its group, the IMPLEMENTATION DEFINED
+    /// `GICC_MASK_HPPIR` (§4.4.1) FALSE, as in the GIC-400 ("even when the
+    /// appropriate `GICC_CTLR.EnableGrp` bit is set to 0", DDI 0471B Table
+    /// 3-6, note c).
+    fn highest_pending_irq(&self, view: CpuView) -> u32 {
+        self.reported(self.current_pending, view)
+    }
+
+    /// QEMU `gic_get_current_pending_irq`: interrupt `irq` as `view` reads
+    /// it ([`read_through`]). Its CPUID field is RAZ, as on any
+    /// uniprocessor.
+    fn reported(&self, irq: u32, view: CpuView) -> u32 {
         if irq >= MAXIRQ {
             return irq;
         }
-        let group1 = self.group1.get(irq as usize);
-        match view {
-            CpuView::Primary if group1 && self.cpu_ctlr & GICC_CTLR_ACK_CTL == 0 => SPURIOUS_GROUP1,
-            CpuView::Group1Alias if !group1 => SPURIOUS,
-            CpuView::Primary | CpuView::Group1Alias => irq,
-        }
+        read_through(
+            view,
+            self.group1.get(irq as usize),
+            self.cpu_ctlr & GICC_CTLR_ACK_CTL != 0,
+            irq,
+        )
     }
 
-    /// QEMU `gic_get_group_priority`: the priority's bits above the binary
-    /// point — `GICC_ABPR` minus one for a Group 1 interrupt unless `CBPR`
-    /// is set, `GICC_BPR` otherwise.
+    /// Interrupt `irq`'s group mask under `GICC_BPR` and `GICC_ABPR`
+    /// ([`group_mask`]).
+    fn group_mask(&self, irq: usize) -> u8 {
+        group_mask(
+            self.group1.get(irq),
+            self.cpu_ctlr & GICC_CTLR_CBPR != 0,
+            self.bpr,
+            self.abpr,
+        )
+    }
+
+    /// Interrupt `irq`'s group priority ([`group_priority`]).
     fn group_priority(&self, irq: usize) -> u8 {
-        let bpr = if self.cpu_ctlr & GICC_CTLR_CBPR == 0 && self.group1.get(irq) {
-            self.abpr - 1
-        } else {
-            self.bpr
-        };
-        self.priority[irq] & (0xFFu32 << ((bpr & 7) + 1)) as u8
+        group_priority(self.priority[irq], self.group_mask(irq))
     }
 
     /// QEMU `gic_activate_irq`.
@@ -768,14 +991,18 @@ impl GicV2 {
     /// field is RAZ (§4.4.4 GICC_IAR.CPUID: an SGI's source processor is
     /// reported only in a multiprocessor implementation).
     fn acknowledge(&mut self, view: CpuView) -> u32 {
-        let irq = self.current_pending_irq(view);
+        // `ReadGICC_IAR`: only the interrupt [`GicV2::update`] signals, one
+        // whose group the CPU interface enables and "of sufficient priority
+        // to be signaled", reads as its ID or as 1022 (IHI 0048B Table 4-35,
+        // note a).
+        if self.signalled >= MAXIRQ {
+            return SPURIOUS;
+        }
+        let irq = self.reported(self.signalled, view);
         if irq >= MAXIRQ {
             return irq;
         }
         let i = irq as usize;
-        if !self.preempts(i) {
-            return SPURIOUS;
-        }
         self.activate(i);
         self.pending.set(i, false);
         self.update();
@@ -833,13 +1060,13 @@ impl GicV2 {
             0x08 => u32::from(self.bpr),
             0x0C => self.acknowledge(CpuView::Primary),
             0x14 => u32::from(self.running_priority.min(0xFF)),
-            0x18 => self.current_pending_irq(CpuView::Primary),
+            0x18 => self.highest_pending_irq(CpuView::Primary),
             0x1C => u32::from(self.abpr),
             0x20 => self.acknowledge(CpuView::Group1Alias),
-            0x28 => self.current_pending_irq(CpuView::Group1Alias),
+            0x28 => self.highest_pending_irq(CpuView::Group1Alias),
             0xD0 | 0xD4 | 0xD8 | 0xDC => self.apr[((off - 0xD0) / 4) as usize],
             0xE0 | 0xE4 | 0xE8 | 0xEC => self.nsapr[((off - 0xE0) / 4) as usize],
-            0xFC => (2 << 16) | 0x43B,
+            0xFC => self.names.gic.cpu_interface.get(),
             _ => 0,
         }
     }
@@ -876,12 +1103,111 @@ impl GicV2 {
         }
     }
 
+    // ----- Virtualization Extensions -----
+
+    /// The register of this processor's virtual interface control block at
+    /// `offset` in the `GICH` frame, as the GIC-400 lays the frame out (DDI
+    /// 0471B §3.7): the common base, which an access redirects to its own
+    /// processor's block, at 0x0000, and from 0x1000 the processor-specific
+    /// bases, 0x200 apart by CPU ID (IHI 0048B §5.2.7). Only processor 0's
+    /// exists; the others' are reserved.
+    fn hyp_register(offset: RegOffset) -> Option<u64> {
+        match offset.get() {
+            off @ 0x0000..=0x0FFF => Some(off),
+            off @ 0x1000..=0x11FF => Some(off - 0x1000),
+            _ => None,
+        }
+    }
+
+    /// A read of the virtual interface control registers (`GICH_*`, IHI
+    /// 0048B §5.3). Without the extensions the board maps no such frame,
+    /// and every register reads as zero.
+    pub fn hyp_read(&self, offset: RegOffset, width: AccessWidth) -> u64 {
+        read_by_words(offset, width, |offset| {
+            let value = match (&self.virt, Self::hyp_register(offset)) {
+                (Some(virt), Some(off)) => virt.hyp_read(off),
+                (Some(_), None) | (None, _) => 0,
+            };
+            u64::from(value)
+        })
+    }
+
+    pub fn hyp_write(&mut self, offset: RegOffset, width: AccessWidth, value: u64) {
+        write_by_words(offset, width, value, |offset, word| {
+            if let (Some(virt), Some(off)) = (self.virt.as_mut(), Self::hyp_register(offset)) {
+                virt.hyp_write(off, word as u32);
+            }
+        });
+        self.sync_virtual();
+    }
+
+    /// A read of the virtual CPU interface (`GICV_*`, §5.5).
+    pub fn vcpu_read(&mut self, offset: RegOffset, width: AccessWidth) -> u64 {
+        let mut effect = ReadEffect::Nothing;
+        let iidr = self.names.gic.cpu_interface.get();
+        let value = read_by_words(offset, width, |offset| {
+            let Some(virt) = self.virt.as_mut() else {
+                return 0;
+            };
+            let read = virt.vcpu_read(offset.get(), iidr);
+            if read.effect == ReadEffect::Acknowledged {
+                effect = ReadEffect::Acknowledged;
+            }
+            u64::from(read.value)
+        });
+        // An acknowledge changes the List registers, and with them the
+        // outputs; no other read changes anything.
+        match effect {
+            ReadEffect::Acknowledged => self.sync_virtual(),
+            ReadEffect::Nothing => {}
+        }
+        value
+    }
+
+    pub fn vcpu_write(&mut self, offset: RegOffset, width: AccessWidth, value: u64) {
+        write_by_words(offset, width, value, |offset, word| {
+            let retired = match self.virt.as_mut() {
+                Some(virt) => virt.vcpu_write(offset.get(), word as u32),
+                None => HwDeactivation(None),
+            };
+            self.retire_physical(retired);
+        });
+        self.sync_virtual();
+    }
+
+    /// A hardware List register's deactivation reaching the distributor:
+    /// its physical interrupt is no longer active (IHI 0048B §5.5.5), and
+    /// the distributor chooses again. A PPI is this processor's, the one
+    /// there is.
+    fn retire_physical(&mut self, retired: HwDeactivation) {
+        // `deactivate_lr` gives a PPI's or an SPI's ID; one past this GIC's
+        // interrupts names none of them.
+        if let HwDeactivation(Some(id)) = retired {
+            if (id as usize) < NUM_IRQ {
+                self.active.set(id as usize, false);
+                self.update();
+            }
+        }
+    }
+
+    /// Drive the maintenance interrupt's line from the virtual interface
+    /// ([`GicV2::set_line`] has the distributor choose again when the level
+    /// changes).
+    fn sync_virtual(&mut self) {
+        let Some(virt) = &self.virt else {
+            return;
+        };
+        let level = virt.maintenance();
+        self.set_line(MAINTENANCE_INTID, level);
+    }
+
     // ----- GICv2m MSI frame -----
 
-    /// A read of the frame on a board whose identity gives `MSI_IIDR` as
-    /// `iidr` ([`crate::identity::BoardIdentity::msi_frame_iidr`]).
-    pub fn v2m_read(&mut self, offset: RegOffset, width: AccessWidth, iidr: MsiFrameIidr) -> u64 {
+    /// A read of the frame, whose `MSI_IIDR` the GIC's names give
+    /// ([`GicNames::msi_frame`]).
+    pub fn v2m_read(&mut self, offset: RegOffset, width: AccessWidth) -> u64 {
         let off = offset.get();
+        let iidr = self.names.msi_frame;
         match width {
             AccessWidth::Byte | AccessWidth::Half => 0,
             AccessWidth::Word => u64::from(Self::v2m_register(off, iidr)),
@@ -930,22 +1256,25 @@ impl GicV2 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn dist(g: &mut GicV2, off: u64, v: u32) {
+    // Word accesses to the distributor and the CPU interface, for this
+    // module's tests and the virtual interface's (`super::gicv2_virt`).
+
+    pub(in crate::devices) fn dist(g: &mut GicV2, off: u64, v: u32) {
         g.dist_write(RegOffset::new(off), AccessWidth::Word, u64::from(v));
     }
 
-    fn cpu(g: &mut GicV2, off: u64, v: u32) {
+    pub(in crate::devices) fn cpu(g: &mut GicV2, off: u64, v: u32) {
         g.cpu_write(RegOffset::new(off), AccessWidth::Word, u64::from(v));
     }
 
-    fn cpu_get(g: &mut GicV2, off: u64) -> u32 {
+    pub(in crate::devices) fn cpu_get(g: &mut GicV2, off: u64) -> u32 {
         g.cpu_read(RegOffset::new(off), AccessWidth::Word) as u32
     }
 
-    fn dist_get(g: &mut GicV2, off: u64) -> u32 {
+    pub(in crate::devices) fn dist_get(g: &mut GicV2, off: u64) -> u32 {
         g.dist_read(RegOffset::new(off), AccessWidth::Word) as u32
     }
 
@@ -1015,7 +1344,10 @@ mod tests {
         assert_eq!(cpu_get(&mut g, IAR), 1023);
     }
 
-    /// The priority mask hides an interrupt whose priority is not higher.
+    /// The priority mask hides an interrupt whose priority is not higher:
+    /// it is neither signalled, acknowledged nor reported, being of no
+    /// "sufficient priority" (IHI 0048B §4.1.5; Table 5-17 for the virtual
+    /// `GICV_AHPPIR`).
     #[test]
     fn pmr_masks_lower_priority_interrupts() {
         let mut g = enabled();
@@ -1023,6 +1355,7 @@ mod tests {
         raise(&mut g, 32, 0x80);
         assert!(!g.irq_out());
         assert_eq!(cpu_get(&mut g, HPPIR), 1023);
+        assert_eq!(cpu_get(&mut g, IAR), 1023);
         cpu(&mut g, PMR, 0x81);
         assert!(g.irq_out());
     }
@@ -1149,9 +1482,12 @@ mod tests {
         assert_eq!(cpu_get(&mut g, RPR), 0xFF);
     }
 
-    /// IHI 0048B §3.3 "Preemption" and "Priority grouping": with CBPR clear
-    /// each group's binary point sets its own group priority, and a pending
-    /// interrupt preempts when that is higher than the running priority.
+    /// IHI 0048B §3.3.3 and §3.7.2 `UpdateExceptionState`: with CBPR clear
+    /// each group's binary point sets its own mask, and a pending interrupt
+    /// preempts when its group priority is higher than the running
+    /// priority's under that same mask (`PriorityIsHigher(priority,
+    /// GICC_RPR AND mask)`). QEMU 11.1.2 compares whole priorities, so it
+    /// would take 0x41 here.
     #[test]
     fn preemption_compares_group_priorities_under_each_groups_binary_point() {
         let mut g = enabled();
@@ -1161,20 +1497,19 @@ mod tests {
         raise(&mut g, 40, 0x42);
         assert_eq!(cpu_get(&mut g, AIAR), 40);
         assert_eq!(cpu_get(&mut g, RPR), 0x42, "ABPR 1: Group 1 bits [7:1]");
-        raise(&mut g, 42, 0x48);
+        raise(&mut g, 41, 0x41);
         assert!(
             !g.irq_out(),
-            "0x48 at BPR 2 is group priority 0x48, not higher than 0x42"
+            "0x41 at BPR 2 is group priority 0x40, and the running 0x42 is 0x40 under BPR 2"
         );
-        raise(&mut g, 41, 0x43);
-        assert!(
-            g.irq_out(),
-            "0x43 at BPR 2 is group priority 0x40, higher than 0x42"
-        );
-        assert_eq!(cpu_get(&mut g, HPPIR), 41);
-        assert_eq!(cpu_get(&mut g, IAR), 41);
-        assert_eq!(cpu_get(&mut g, RPR), 0x40);
-        cpu(&mut g, EOIR, 41);
+        assert_eq!(cpu_get(&mut g, IAR), 1023);
+        raise(&mut g, 43, 0x3F);
+        assert!(g.irq_out(), "0x3F at BPR 2 is group priority 0x38, higher than 0x40");
+        assert_eq!(cpu_get(&mut g, HPPIR), 43);
+        assert_eq!(cpu_get(&mut g, IAR), 43);
+        assert_eq!(cpu_get(&mut g, RPR), 0x38);
+        g.set_line(43, false);
+        cpu(&mut g, EOIR, 43);
         assert_eq!(cpu_get(&mut g, RPR), 0x42);
         cpu(&mut g, AEOIR, 40);
         assert_eq!(cpu_get(&mut g, RPR), 0xFF);
@@ -1219,9 +1554,28 @@ mod tests {
         assert!(g.irq_out(), "not acknowledged");
     }
 
+    /// Only a Group 1 interrupt "of sufficient priority to be signaled"
+    /// reads 1022 at `GICC_IAR` (IHI 0048B Table 4-35, note a): one behind
+    /// a higher running priority reads 1023, while `GICC_HPPIR` names it.
+    #[test]
+    fn a_group_1_interrupt_that_cannot_preempt_reads_1023() {
+        let mut g = enabled();
+        raise(&mut g, 41, 0x10);
+        assert_eq!(cpu_get(&mut g, IAR), 41);
+        dist(&mut g, 0x084, 1 << 8);
+        raise(&mut g, 40, 0x20);
+        assert_eq!(cpu_get(&mut g, HPPIR), 1022);
+        assert_eq!(cpu_get(&mut g, IAR), 1023);
+        g.set_line(41, false);
+        cpu(&mut g, EOIR, 41);
+        assert_eq!(cpu_get(&mut g, IAR), 1022);
+    }
+
     /// IHI 0048B §4.3.1: GICD_CTLR.EnableGrp1 clear stops the distributor
-    /// forwarding Group 1, so its interrupt is neither signalled nor read, and
-    /// the Group 0 interrupt behind it is.
+    /// forwarding Group 1, and its enables mask before prioritisation (the
+    /// IMPLEMENTATION DEFINED `IGNORE_GROUP_ENABLE` FALSE, §3.7.1), so its
+    /// interrupt is neither signalled nor read, and the Group 0 interrupt
+    /// behind it is.
     #[test]
     fn a_group_the_distributor_does_not_forward_hides_nothing() {
         let mut g = enabled();
@@ -1260,32 +1614,52 @@ mod tests {
         );
     }
 
-    /// IHI 0048B §4.4.1: GICC_CTLR.EnableGrp0 clear stops the CPU interface
-    /// signalling Group 0, and §4.4.4: GICC_IAR then returns 1023 rather than
-    /// a Group 0 interrupt. That the Group 0 interrupt does not hide the
-    /// Group 1 one is this model's reading where IHI 0048B is silent (the
-    /// module docs give its evidence); QEMU 11.1.2 lets it block the Group 1
-    /// interrupt.
+    /// IHI 0048B §4.1.5: with AckCtl set, EnableGrp0 clear and EnableGrp1
+    /// set, "Group 0 interrupts are ignored and GICC_IAR behaves as
+    /// GICC_AIAR": the higher-priority Group 0 interrupt hides nothing, and
+    /// the Group 1 one is signalled and acknowledged. With AckCtl clear the
+    /// Group 0 interrupt hides it again.
     #[test]
-    fn a_group_the_cpu_interface_does_not_signal_hides_nothing() {
+    fn with_ackctl_a_disabled_group_0_is_ignored() {
+        let mut g = enabled();
+        cpu(&mut g, CTLR, 2 | GICC_CTLR_ACK_CTL);
+        dist(&mut g, 0x084, 1 << 9);
+        raise(&mut g, 40, 0x10);
+        raise(&mut g, 41, 0x20);
+        assert!(g.irq_out(), "the Group 1 interrupt is signalled");
+        assert_eq!(cpu_get(&mut g, IAR), 41);
+        // 41's line stays high: completed, it is pending again.
+        cpu(&mut g, EOIR, 41);
+        assert!(g.irq_out(), "pending again, and signalled");
+        cpu(&mut g, CTLR, 2);
+        assert!(!g.irq_out(), "without AckCtl Group 0 hides it again");
+        assert_eq!(cpu_get(&mut g, AIAR), 1023);
+    }
+
+    /// IHI 0048B §3.7.2 `GIC_GenerateExceptions` and §4.4.4 `ReadGICC_IAR`:
+    /// the CPU interface's group enables take no part in choosing the
+    /// highest-priority pending interrupt, so a Group 0 interrupt the CPU
+    /// interface does not signal hides a lower-priority Group 1 one: neither
+    /// is signalled, and `GICC_AIAR` reads 1023. `GICC_HPPIR` names it, as
+    /// the GIC-400's does whatever `GICC_CTLR` enables (DDI 0471B Table 3-6,
+    /// note c). Once it is no longer pending, the Group 1 interrupt is
+    /// signalled and acknowledged.
+    #[test]
+    fn a_group_the_cpu_interface_does_not_signal_hides_the_other() {
         let mut g = enabled();
         cpu(&mut g, CTLR, 2);
         dist(&mut g, 0x084, 1 << 9);
         raise(&mut g, 40, 0x10);
         raise(&mut g, 41, 0x20);
+        assert!(!g.irq_out() && !g.fiq_out(), "Group 0's interrupt is highest");
+        assert_eq!(cpu_get(&mut g, HPPIR), 40, "Group 0's, though not signalled");
+        assert_eq!(cpu_get(&mut g, AHPPIR), 1023, "a Group 0 interrupt is highest");
+        assert_eq!(cpu_get(&mut g, AIAR), 1023);
+        assert_eq!(cpu_get(&mut g, IAR), 1023, "Group 0 is not signalled");
+        assert_eq!(dist_get(&mut g, 0x304), 0, "nothing acknowledged");
+        g.set_line(40, false);
         assert!(g.irq_out(), "the Group 1 interrupt is signalled");
-        assert_eq!(cpu_get(&mut g, HPPIR), 1022, "Group 1, AckCtl clear");
-        assert_eq!(cpu_get(&mut g, AHPPIR), 41);
         assert_eq!(cpu_get(&mut g, AIAR), 41);
-        cpu(&mut g, AEOIR, 41);
-        g.set_line(41, false);
-        assert!(!g.irq_out());
-        assert_eq!(
-            cpu_get(&mut g, IAR),
-            1023,
-            "Group 0 is not signalled, so not acknowledged"
-        );
-        assert_eq!(dist_get(&mut g, 0x304), 0);
     }
 
     #[test]
@@ -1400,13 +1774,12 @@ mod tests {
         assert!(!g.irq_out(), "a byte write is ignored");
         g.v2m_write(RegOffset::new(V2M_MSI_SETSPI_NS), AccessWidth::Half, 80);
         assert_eq!(cpu_get(&mut g, IAR), 80);
-        let iidr = MsiFrameIidr::NONE;
         assert_eq!(
-            g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Byte, iidr),
+            g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Byte),
             0
         );
         assert_eq!(
-            g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Word, iidr),
+            g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Word),
             u64::from((80u32 << 16) | 64)
         );
     }
@@ -1442,8 +1815,10 @@ mod tests {
         dist(&mut g, 0xF00, (2 << 24) | 3);
         let mut image = std::vec::Vec::new();
         g.save(&mut image).expect("save");
-        // The image ends with the SGIs' source bytes; SGI 3 is pending.
-        let source_byte = |sgi: usize| image.len() - NR_SGIS + sgi;
+        // The image of a GIC without the Virtualization Extensions ends with
+        // the SGIs' source bytes and then the extensions' tag; SGI 3 is
+        // pending.
+        let source_byte = |sgi: usize| image.len() - 1 - NR_SGIS + sgi;
         let refused = [
             (source_byte(3), 0x08, "SGI 3 from processor 3"),
             (source_byte(3), 0x09, "SGI 3 from processors 0 and 3"),

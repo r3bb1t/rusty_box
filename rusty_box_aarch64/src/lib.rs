@@ -71,9 +71,10 @@ pub use cpu::{
 pub use disk::{Access, Disk};
 pub use identity::{
     BoardIdentity, CompatibleList, CompatibleStrings, EdidDate, EdidProductCode, EdidWeek,
-    EdidWeekNumber, EdidYear, IdentityError, IdentityField, IdentityNames, IdentityProblem,
-    InputDeviceId, InputProductId, InputVendorId, InputVersion, MsiFrameField, MsiFrameFields,
-    MsiFrameIidr, NotAnEdidWeek, NotAnEdidYear, NotMsiFrameFields, NotPnpId, PnpId, VirtioVendorId,
+    EdidWeekNumber, EdidYear, GicCpuIidr, GicDistFields, GicDistIidr, GicIdentity, IdentityError,
+    IdentityField, IdentityNames, IdentityProblem, Iidr, IidrField, IidrFields, InputDeviceId, InputProductId, InputVendorId,
+    InputVersion, MsiFrameIidr, NotAnEdidWeek, NotAnEdidYear, NotIidrFields, NotPnpId, PnpId,
+    VirtioVendorId,
 };
 pub use instrumentation::{Execution, Instrumentation, NoInstrumentation};
 #[cfg(feature = "alloc")]

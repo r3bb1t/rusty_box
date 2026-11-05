@@ -2,7 +2,8 @@
 //!
 //! A guest reads who made its machine from a handful of names and numbers:
 //! the device tree's `/model` and root `compatible`, the virtio-mmio
-//! `VendorID`, the GICv2m frame's `MSI_IIDR`, the virtio input devices'
+//! `VendorID`, the GIC's `GICD_IIDR`, `GICC_IIDR` and `GICV_IIDR`, the GICv2m frame's
+//! `MSI_IIDR`, the virtio input devices'
 //! names (`VIRTIO_INPUT_CFG_ID_NAME`) and vendor, products and versions
 //! (`VIRTIO_INPUT_CFG_ID_DEVIDS`), and the maker, product code, name and
 //! date in the virtio-gpu display's EDID. Software keys on them —
@@ -328,19 +329,31 @@ impl InputVersion {
     }
 }
 
-/// What the GICv2m frame's `MSI_IIDR` reads (Arm Base System Architecture
-/// 1.0C, DEN0094C, I.9.3): the frame's product in bits [31:20], its
-/// revision in bits [15:12] and its implementer's JEP106 code in bits
-/// [11:0], the continuation code in [11:8] and the identity code in [6:0].
-/// Bits [19:16], the architecture version, are 0 for GICv2m v0, and bit 7
-/// is always 0.
+/// A GIC identification register laid out as `MSI_IIDR` and `GICC_IIDR`
+/// are: the product in bits [31:20], the architecture version
+/// `ARCHITECTURE` in [19:16], the revision in [15:12] and the implementer's
+/// JEP106 code in [11:0], the continuation code in [11:8] and the identity
+/// code in [6:0]; bit 7 is always 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MsiFrameIidr(u32);
+pub struct Iidr<const ARCHITECTURE: u8>(u32);
 
-/// The fields of an [`MsiFrameIidr`] as a host gives them, each within the
-/// bits the register holds it in.
+/// What the GICv2m frame's `MSI_IIDR` reads (Arm Base System Architecture
+/// 1.0C, DEN0094C, I.9.3), the architecture version 0 for GICv2m v0.
+pub type MsiFrameIidr = Iidr<0>;
+
+/// What the GIC's CPU interface identification registers read, `GICC_IIDR`
+/// (IHI 0048B §4.4.15) and, with the Virtualization Extensions, the
+/// virtual CPU interface's `GICV_IIDR`, whose bits are the same (§5.5.13)
+/// and whose value the GIC-400 gives as `GICC_IIDR`'s (DDI 0471B Tables
+/// 3-6 and 3-10): the architecture version 2, for GICv2.
+pub type GicCpuIidr = Iidr<2>;
+
+/// The fields of a GIC identification register, [`MsiFrameIidr`] or
+/// [`GicCpuIidr`], as a host gives them, each within the bits the register
+/// holds it in. Both registers lay them out alike, around an architecture
+/// version in bits [19:16] that the register's architecture sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MsiFrameFields {
+pub struct IidrFields {
     /// The product, 12 bits.
     pub product: u16,
     /// The revision, 4 bits.
@@ -351,79 +364,181 @@ pub struct MsiFrameFields {
     pub jep106_identity: u8,
 }
 
-/// One of an [`MsiFrameFields`]' fields.
+/// One of an [`IidrFields`]' fields.
 ///
 /// Closed (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MsiFrameField {
+pub enum IidrField {
     Product,
+    /// `GICD_IIDR`'s alone ([`GicDistFields`]).
+    Variant,
     Revision,
     Jep106Continuation,
     Jep106Identity,
 }
 
-/// A field wider than the bits `MSI_IIDR` holds it in.
+/// A field wider than the bits an identification register holds it in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NotMsiFrameFields {
-    pub field: MsiFrameField,
+pub struct NotIidrFields {
+    pub field: IidrField,
 }
 
-impl core::fmt::Display for NotMsiFrameFields {
+impl core::fmt::Display for NotIidrFields {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let (field, bits) = match self.field {
-            MsiFrameField::Product => ("product", 12),
-            MsiFrameField::Revision => ("revision", 4),
-            MsiFrameField::Jep106Continuation => ("JEP106 continuation code", 4),
-            MsiFrameField::Jep106Identity => ("JEP106 identity code", 7),
+            IidrField::Product => ("product", 12),
+            IidrField::Variant => ("variant", 4),
+            IidrField::Revision => ("revision", 4),
+            IidrField::Jep106Continuation => ("JEP106 continuation code", 4),
+            IidrField::Jep106Identity => ("JEP106 identity code", 7),
         };
-        write!(f, "the MSI_IIDR {field} is wider than its {bits} bits")
+        write!(f, "the IIDR {field} is wider than its {bits} bits")
     }
 }
 
-impl core::error::Error for NotMsiFrameFields {}
+impl core::error::Error for NotIidrFields {}
 
-impl MsiFrameIidr {
-    /// No product, revision 0 and no implementer: every field 0.
-    pub const NONE: Self = Self(0);
-
-    /// The register `fields` make, with the architecture version 0.
-    ///
-    /// # Errors
-    ///
-    /// [`NotMsiFrameFields`] names the first field wider than its bits.
-    pub const fn new(fields: MsiFrameFields) -> Result<Self, NotMsiFrameFields> {
-        let MsiFrameFields {
+impl IidrFields {
+    /// The register's bits but for the architecture version, which stays 0.
+    const fn encode(self) -> Result<u32, NotIidrFields> {
+        let Self {
             product,
             revision,
             jep106_continuation,
             jep106_identity,
-        } = fields;
+        } = self;
         let field = if product > 0xFFF {
-            MsiFrameField::Product
+            IidrField::Product
         } else if revision > 0xF {
-            MsiFrameField::Revision
+            IidrField::Revision
         } else if jep106_continuation > 0xF {
-            MsiFrameField::Jep106Continuation
+            IidrField::Jep106Continuation
         } else if jep106_identity > 0x7F {
-            MsiFrameField::Jep106Identity
+            IidrField::Jep106Identity
         } else {
-            return Ok(Self(
-                (product as u32) << 20
-                    | (revision as u32) << 12
-                    | (jep106_continuation as u32) << 8
-                    | jep106_identity as u32,
-            ));
+            return Ok((product as u32) << 20
+                | (revision as u32) << 12
+                | (jep106_continuation as u32) << 8
+                | jep106_identity as u32);
         };
-        Err(NotMsiFrameFields { field })
+        Err(NotIidrFields { field })
+    }
+
+    /// The fields of register value `iidr`.
+    const fn decode(iidr: u32) -> Self {
+        Self {
+            product: (iidr >> 20) as u16,
+            revision: ((iidr >> 12) & 0xF) as u8,
+            jep106_continuation: ((iidr >> 8) & 0xF) as u8,
+            jep106_identity: (iidr & 0x7F) as u8,
+        }
+    }
+}
+
+impl<const ARCHITECTURE: u8> Iidr<ARCHITECTURE> {
+    /// Bits [19:16], the architecture version.
+    const ARCHITECTURE_BITS: u32 = (ARCHITECTURE as u32 & 0xF) << 16;
+
+    /// No product, revision 0 and no implementer: every field 0 but the
+    /// architecture version.
+    pub const NONE: Self = Self(Self::ARCHITECTURE_BITS);
+
+    /// The register `fields` make, with its architecture version.
+    ///
+    /// # Errors
+    ///
+    /// [`NotIidrFields`] names the first field wider than its bits.
+    pub const fn new(fields: IidrFields) -> Result<Self, NotIidrFields> {
+        match fields.encode() {
+            Ok(bits) => Ok(Self(bits | Self::ARCHITECTURE_BITS)),
+            Err(e) => Err(e),
+        }
     }
 
     /// The register's fields.
-    pub const fn fields(self) -> MsiFrameFields {
-        MsiFrameFields {
-            product: (self.0 >> 20) as u16,
-            revision: ((self.0 >> 12) & 0xF) as u8,
-            jep106_continuation: ((self.0 >> 8) & 0xF) as u8,
-            jep106_identity: (self.0 & 0x7F) as u8,
+    pub const fn fields(self) -> IidrFields {
+        IidrFields::decode(self.0)
+    }
+
+    /// The register's value.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// What the GIC distributor's `GICD_IIDR` reads (IHI 0048B §4.3.3, Table
+/// 4-7): the product in bits [31:24], a variant in [19:16], a revision in
+/// [15:12] and the implementer's JEP106 code in [11:0], the continuation
+/// code in [11:8] and the identity code in [6:0]; bits [23:20] and 7 are
+/// 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GicDistIidr(u32);
+
+/// The fields of a [`GicDistIidr`] as a host gives them, each within the
+/// bits the register holds it in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GicDistFields {
+    /// The product, 8 bits.
+    pub product: u8,
+    /// The variant, 4 bits.
+    pub variant: u8,
+    /// The revision, 4 bits.
+    pub revision: u8,
+    /// The implementer's JEP106 continuation code, 4 bits.
+    pub jep106_continuation: u8,
+    /// The implementer's JEP106 identity code, 7 bits.
+    pub jep106_identity: u8,
+}
+
+impl GicDistIidr {
+    /// No product, variant and revision 0, and no implementer.
+    pub const NONE: Self = Self(0);
+
+    /// The register `fields` make.
+    ///
+    /// # Errors
+    ///
+    /// [`NotIidrFields`] names the first field wider than its bits.
+    pub const fn new(fields: GicDistFields) -> Result<Self, NotIidrFields> {
+        let GicDistFields {
+            product,
+            variant,
+            revision,
+            jep106_continuation,
+            jep106_identity,
+        } = fields;
+        if variant > 0xF {
+            return Err(NotIidrFields {
+                field: IidrField::Variant,
+            });
+        }
+        // Bits [15:0] are laid out as in the other identification registers.
+        let low = IidrFields {
+            product: 0,
+            revision,
+            jep106_continuation,
+            jep106_identity,
+        };
+        match low.encode() {
+            Ok(bits) => Ok(Self((product as u32) << 24 | (variant as u32) << 16 | bits)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The register's fields.
+    pub const fn fields(self) -> GicDistFields {
+        let IidrFields {
+            revision,
+            jep106_continuation,
+            jep106_identity,
+            ..
+        } = IidrFields::decode(self.0);
+        GicDistFields {
+            product: (self.0 >> 24) as u8,
+            variant: ((self.0 >> 16) & 0xF) as u8,
+            revision,
+            jep106_continuation,
+            jep106_identity,
         }
     }
 
@@ -431,6 +546,24 @@ impl MsiFrameIidr {
     pub const fn get(self) -> u32 {
         self.0
     }
+}
+
+/// Who the GIC says made it: its distributor's `GICD_IIDR` and its CPU
+/// interfaces' `GICC_IIDR` and `GICV_IIDR`. Its peripheral ID registers
+/// are not part of it: "despite their names", they "refer only to the
+/// architecture of the implementation" (IHI 0048B §4.3.18), Arm's GICv2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GicIdentity {
+    pub distributor: GicDistIidr,
+    pub cpu_interface: GicCpuIidr,
+}
+
+impl GicIdentity {
+    /// A GIC of no product and no implementer.
+    pub const NONE: Self = Self {
+        distributor: GicDistIidr::NONE,
+        cpu_interface: GicCpuIidr::NONE,
+    };
 }
 
 /// What a virtio input device reports of its model beside the vendor
@@ -618,6 +751,9 @@ pub struct IdentityNames<'a> {
     pub compatible: &'a [&'a str],
     /// The `VendorID` of every virtio-mmio transport.
     pub virtio_vendor: VirtioVendorId,
+    /// What the GIC's `GICD_IIDR`, `GICC_IIDR` and, with EL2, `GICV_IIDR`
+    /// read.
+    pub gic: GicIdentity,
     /// What the GICv2m frame's `MSI_IIDR` reads.
     pub msi_frame_iidr: MsiFrameIidr,
     /// The virtio input devices' vendor.
@@ -645,13 +781,15 @@ impl IdentityNames<'static> {
     /// Forum's registry (its export of 2026-10-31); the virtio vendor reads
     /// "RBOX" in the register's little-endian bytes, and the input vendor
     /// is "RB" read big-endian, 0x5242, whose products are numbered here:
-    /// the keyboard 1 and the tablet 2, each at version 1. The GICv2m
-    /// frame names no product and no implementer: BSA I.9.3 asks for the
-    /// implementer's JEP106 code, and the project holds none.
+    /// the keyboard 1 and the tablet 2, each at version 1. Neither the GIC
+    /// nor its GICv2m frame names a product or an implementer: their
+    /// identification registers ask for the implementer's JEP106 code (IHI
+    /// 0048B §4.3.3 and §4.4.15, BSA I.9.3), and the project holds none.
     pub const RUSTY_BOX: Self = Self {
         model: "Rusty Box virt",
         compatible: &["rusty-box,virt"],
         virtio_vendor: VirtioVendorId::from_ascii(*b"RBOX"),
+        gic: GicIdentity::NONE,
         msi_frame_iidr: MsiFrameIidr::NONE,
         input_vendor: InputVendorId::new(u16::from_be_bytes(*b"RB")),
         keyboard: "Rusty Box Virtio Keyboard",
@@ -686,6 +824,7 @@ pub struct BoardIdentity {
     model: Text<MODEL_CAPACITY>,
     compatible: CompatibleList,
     virtio_vendor: VirtioVendorId,
+    gic: GicIdentity,
     msi_frame_iidr: MsiFrameIidr,
     input_vendor: InputVendorId,
     keyboard: Text<INPUT_NAME_CAPACITY>,
@@ -817,6 +956,7 @@ impl BoardIdentity {
             model,
             compatible,
             virtio_vendor: names.virtio_vendor,
+            gic: names.gic,
             msi_frame_iidr: names.msi_frame_iidr,
             input_vendor: names.input_vendor,
             keyboard,
@@ -845,6 +985,12 @@ impl BoardIdentity {
     /// The virtio-mmio `VendorID`.
     pub const fn virtio_vendor(&self) -> VirtioVendorId {
         self.virtio_vendor
+    }
+
+    /// What the GIC's `GICD_IIDR`, `GICC_IIDR` and, with EL2, `GICV_IIDR`
+    /// read.
+    pub const fn gic(&self) -> GicIdentity {
+        self.gic
     }
 
     /// What the GICv2m frame's `MSI_IIDR` reads.
@@ -935,6 +1081,11 @@ impl BoardIdentity {
             model,
             compatible,
             virtio_vendor,
+            gic:
+                GicIdentity {
+                    distributor,
+                    cpu_interface,
+                },
             msi_frame_iidr,
             input_vendor,
             keyboard,
@@ -960,6 +1111,8 @@ impl BoardIdentity {
             part(&[0]);
         }
         part(&virtio_vendor.get().to_le_bytes());
+        part(&distributor.get().to_le_bytes());
+        part(&cpu_interface.get().to_le_bytes());
         part(&msi_frame_iidr.get().to_le_bytes());
         part(&input_vendor.get().to_le_bytes());
         for InputDeviceId { product, version } in [keyboard_id, tablet_id] {

@@ -30,7 +30,8 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{ClockHz, Progress, RunBudget, SnapError, VmClock, VmInstant};
 
 use crate::board::{
-    Plugged, Plugs, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE, RAM_BASE, RAM_LIMIT,
+    Plugged, Plugs, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE, GIC_CPU_BASE,
+    GIC_DIST_BASE, GIC_HYP_BASE, GIC_VCPU_BASE, GIC_WINDOW, RAM_BASE, RAM_LIMIT,
 };
 use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
 use crate::boot::{
@@ -42,6 +43,8 @@ use crate::cpu::{
     NoTranslation, PsciConduit, PsciNode, Pstate, PstateRefusal, Reg, Step, StopCause, SysReg,
     SysRegRefusal, UndefinedInsn, VReg, WithEl2, WriteEffect,
 };
+use crate::devices::gicv2::GicExtensions;
+use crate::devices::gicv2_virt::MAINTENANCE_INTID;
 use crate::devices::pl011::TX_CAPACITY;
 use crate::devices::virtio::input::InputKind;
 #[cfg(feature = "alloc")]
@@ -703,6 +706,53 @@ impl DeviceTree {
     }
 }
 
+/// The GIC of a machine whose processor implements `L`: with the
+/// Virtualization Extensions where it has EL2, as QEMU's `virt` builds its
+/// GICv2 under `virtualization=on`.
+const fn gic_extensions<L: Levels>() -> GicExtensions {
+    if L::EL2 {
+        GicExtensions::Virtualization
+    } else {
+        GicExtensions::Absent
+    }
+}
+
+/// `values` as a device tree property's big-endian cells, each `width`
+/// bytes (4, one cell, or 8, two), into exactly `N` bytes.
+const fn big_endian_cells<const N: usize>(values: &[u64], width: usize) -> [u8; N] {
+    assert!(values.len() * width == N, "the cells fill the property");
+    let mut cells = [0u8; N];
+    let mut n = 0;
+    while n < values.len() {
+        let bytes = values[n].to_be_bytes();
+        let mut b = 0;
+        while b < width {
+            cells[n * width + b] = bytes[8 - width + b];
+            b += 1;
+        }
+        n += 1;
+    }
+    cells
+}
+
+/// What a machine's level set decides of its device tree, both from the one
+/// `L` ([`TreeLevels::of`]): the conduit the processor's firmware answers
+/// on, and whether the GIC has the Virtualization Extensions.
+#[derive(Clone, Copy)]
+struct TreeLevels {
+    psci: PsciConduit,
+    gic: GicExtensions,
+}
+
+impl TreeLevels {
+    const fn of<L: Levels>() -> Self {
+        Self {
+            psci: PsciConduit::of::<L>(),
+            gic: gic_extensions::<L>(),
+        }
+    }
+}
+
 /// What `describe` needs to know about the machine besides where its tree
 /// comes from.
 #[derive(Clone, Copy)]
@@ -711,8 +761,7 @@ struct Description<'i> {
     cpu: CpuModel,
     choice: BootChoice<'i>,
     layout: Option<KernelLayout>,
-    /// The conduit the processor's firmware answers on.
-    psci: PsciConduit,
+    levels: TreeLevels,
 }
 
 /// Edit the tree `source` names to describe the machine `machine` names,
@@ -730,7 +779,11 @@ struct Description<'i> {
 /// The board's own tree, QEMU's for this board, gets the processor's
 /// `compatible` first, as QEMU's `virt` writes the processor node from the
 /// processor it is given (`fdt_add_cpu_nodes`), which in QEMU's tree for
-/// the Cortex-A57 is the value it has. Every tree, the board's or a host's,
+/// the Cortex-A57 is the value it has; and with the GIC's Virtualization
+/// Extensions, the GIC node's `reg` naming the virtual interface's two
+/// frames too and an `interrupts` naming its maintenance interrupt, as
+/// QEMU's `fdt_add_gic_node` writes them under `virtualization=on`. A
+/// host's tree keeps its own GIC node. Every tree, the board's or a host's,
 /// names the board `identity`'s way, its `/model` and root `compatible`
 /// replacing the tree's own (QEMU's `linux,dummy-virt`, whose binding is
 /// "QEMU virt machine").
@@ -745,6 +798,7 @@ fn describe(
     const MEMORY: NodePath<'static> = NodePath::of("memory@40000000");
     const CHOSEN: NodePath<'static> = NodePath::of("chosen");
     const PSCI: NodePath<'static> = NodePath::of("psci");
+    const GIC: NodePath<'static> = NodePath::of("intc@8000000");
     const REMOVALS: [Removal<'static>; 4] = [
         Removal::Named("memory"),
         Removal::At(PSCI),
@@ -756,11 +810,29 @@ fn describe(
         cpu,
         choice,
         layout,
-        psci,
+        levels: TreeLevels { psci, gic },
     } = machine;
-    let mut reg = [0u8; 16];
-    reg[..8].copy_from_slice(&RAM_BASE.to_be_bytes());
-    reg[8..].copy_from_slice(&ram_len.to_be_bytes());
+    /// QEMU `fdt_add_gic_node`'s GIC node `reg` with `virtualization=on`: the
+    /// distributor's, the CPU interface's, the virtual interface control
+    /// registers' and the virtual CPU interface's windows.
+    const GIC_REG: [u8; 64] = big_endian_cells(
+        &[
+            GIC_DIST_BASE,
+            GIC_WINDOW,
+            GIC_CPU_BASE,
+            GIC_WINDOW,
+            GIC_HYP_BASE,
+            GIC_WINDOW,
+            GIC_VCPU_BASE,
+            GIC_WINDOW,
+        ],
+        8,
+    );
+    /// Its `interrupts`: the maintenance interrupt, PPI 9 (INTID 25),
+    /// level-high.
+    const GIC_INTERRUPTS: [u8; 12] =
+        big_endian_cells(&[1, (MAINTENANCE_INTID - 16) as u64, 4], 4);
+    let reg: [u8; 16] = big_endian_cells(&[RAM_BASE, ram_len], 8);
     let initrd = match (choice, layout.and_then(|l| l.initrd_offset)) {
         (BootChoice::Kernel(k), Some(offset)) => {
             let start = RAM_BASE + offset;
@@ -778,15 +850,24 @@ fn describe(
     /// The most edits a description makes: the processor's `compatible`
     /// (the board's tree), the board's two names, the memory node's two
     /// properties, `/chosen` and its command line, the initrd's two
-    /// properties, and the `/psci` node's six. A kernel boot of the board's
-    /// tree with a command line and an initrd makes them all (`tests/api.rs`,
-    /// `a_directly_booted_kernel_is_entered_as_qemu_enters_it`).
-    const MOST_EDITS: usize = 1 + 2 + 2 + 2 + 2 + 6;
+    /// properties, the `/psci` node's six, and with the Virtualization
+    /// Extensions the GIC node's two (the board's tree). A kernel boot of
+    /// the board's tree with EL2, a command line and an initrd makes them
+    /// all (`tests/virtualization.rs`,
+    /// `a_kernel_booted_with_el2_gets_every_device_tree_edit`).
+    const MOST_EDITS: usize = 1 + 2 + 2 + 2 + 2 + 6 + 2;
     let mut edits = [Edit::node(CHOSEN); MOST_EDITS];
     let (tree, mut count) = match source {
         TreeSource::Board => {
             edits[0] = Edit::set(PROCESSOR, "compatible", Value::String(cpu.compatible()));
-            (boot::QEMU_VIRT_DEVICE_TREE, 1)
+            match gic {
+                GicExtensions::Virtualization => {
+                    edits[1] = Edit::set(GIC, "reg", Value::Bytes(&GIC_REG));
+                    edits[2] = Edit::set(GIC, "interrupts", Value::Bytes(&GIC_INTERRUPTS));
+                    (boot::QEMU_VIRT_DEVICE_TREE, 3)
+                }
+                GicExtensions::Absent => (boot::QEMU_VIRT_DEVICE_TREE, 1),
+            }
         }
         TreeSource::Host(tree) => (tree, 0),
     };
@@ -868,7 +949,7 @@ fn plan<L: Levels>(
             cpu,
             choice,
             layout,
-            psci: PsciConduit::of::<L>(),
+            levels: TreeLevels::of::<L>(),
         };
         describe(source_tree, machine, identity, &mut device_tree)?;
         let tree_len = device_tree.len as u64;
@@ -908,7 +989,13 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
     let devices = plugs.devices;
     let mut machine = VirtMachine {
         cpu,
-        board: VirtBoard::new(storage, config.rtc_epoch_seconds, plugs, &identity),
+        board: VirtBoard::new(
+            storage,
+            config.rtc_epoch_seconds,
+            plugs,
+            &identity,
+            gic_extensions::<L>(),
+        ),
         identity_hash: identity_hash(&identity),
         observer,
         config,
@@ -1300,8 +1387,16 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             .chain(device_deadline)
             .min()
             .map_or(u64::MAX, VmInstant::ticks);
-        self.cpu
-            .set_interrupt_lines(self.board.gic.irq_out(), self.board.gic.fiq_out());
+        self.drive_interrupt_inputs();
+    }
+
+    /// Drive the processor's interrupt inputs, physical and virtual, from
+    /// the GIC.
+    #[inline]
+    fn drive_interrupt_inputs(&mut self) {
+        let gic = &self.board.gic;
+        self.cpu.set_interrupt_lines(gic.irq_out(), gic.fiq_out());
+        self.cpu.set_virtual_interrupt_lines(gic.virtual_lines());
     }
 
     /// Run until `budget` is spent or something stops the machine.
@@ -1531,8 +1626,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             self.sync_events();
             NextEvent::WorkedOutAgain
         } else {
-            self.cpu
-                .set_interrupt_lines(self.board.gic.irq_out(), self.board.gic.fiq_out());
+            self.drive_interrupt_inputs();
             NextEvent::Unchanged
         }
     }
@@ -2125,16 +2219,17 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, WithEl2, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-/// The image layout's version: 17 holds the processor's level set (the
+/// The image layout's version: 18 holds the processor's level set (the
 /// shape's `virtualization`, the EL2 registers, `CNTPOFF_EL2` among them), a
 /// feature set of 128 bits, `RVBAR_ELx` and `RMR_ELx` of the highest level,
 /// what Software Step stepped, each TLB entry's stage 2 permissions and
 /// level beside stage 1's and the memory each stage and both together map
 /// it to, the TLB's kept stage 2 translations, its tables of EL1&0 and
 /// stage 2 contexts, the shape's identity fingerprint, and the board's
-/// devices: the GIC, the PL011, the PL031, the PL061, both flash banks and
-/// every virtio-mmio transport.
-const SNAPSHOT_VERSION: u32 = 17;
+/// devices: the GIC with its Virtualization Extensions where it has them,
+/// the PL011, the PL031, the PL061, both flash banks and every virtio-mmio
+/// transport.
+const SNAPSHOT_VERSION: u32 = 18;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
