@@ -137,13 +137,23 @@ callgrind (Alpine to its first 40M instructions):
 | every pure ALU op in `run` (`Cpu/Alu.lean`, shared with `execOp`) | | 24.6 s | 23.6 s |
 | the common trace lookup inline in `run` (no `Next` allocated) | 394 | 15.2 s | 20.9 s |
 | counter polls fast-forwarded exactly (`Cpu/Poll.lean`, poll.rs's rule) | | 11.5 s | 20.9 s |
+| a word in bounds read under one check, its bytes proven in bounds (`ByteArray.word_lt`) | 300 | | |
+
+The last step, measured on a slower 4-core VM, best of three, the timed loop
+only: Alpine to its root shell 23.3 → 30.2 M instructions/s, EDK2 to `Shell>`
+46.7 → 62.0 M (rusty_box on the same VM: 97.3 M and 209.7 M). One 8-byte
+access per word through a C helper, tried to measure the ceiling and not kept
+(it would not be pure Lean), reached 268 host instructions per guest
+instruction, 33.5 M and 68.1 M: the proof recovers about 70% of that, the
+rest being the stores, whose bytes the C compiler cannot join because the
+runtime checks the array's exclusivity before each.
 
 A register file of `FloatArray` words (one unboxed element per register,
 `Float.ofBits`/`toBits` as the casts) was tried and dropped: Lean canonicalizes
 a NaN's payload through `Float.ofBits`, so a register holding a NaN-shaped bit
 pattern changes, and the boot diverged at once. The register file stays a
-`ByteArray`, whose 8-byte accesses are eight bounds-checked byte accesses (each
-store also checks exclusivity): what remains of `run`'s cost is mostly that.
+`ByteArray`: an 8-byte read is one bounds check and one load, an 8-byte store
+one bounds check and eight byte stores, each after an exclusivity check.
 
 ### What decided the speed of the perfbench loops
 
