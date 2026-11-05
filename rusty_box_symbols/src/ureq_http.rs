@@ -23,17 +23,32 @@ pub struct UreqHttp {
 impl UreqHttp {
     #[must_use]
     pub fn new() -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(15))
-            .timeout_read(Duration::from_secs(30))
-            .timeout_write(Duration::from_secs(30))
-            .redirects(8)
-            .user_agent(SYMBOL_SERVER_USER_AGENT)
+        let agent = Self::builder()
             // HTTPS_PROXY / HTTP_PROXY / ALL_PROXY, as other symbol clients
             // honour them.
             .try_proxy_from_env(true)
             .build();
         UreqHttp { agent }
+    }
+
+    /// An agent that connects directly whatever proxy the environment
+    /// names: the tests' servers are on 127.0.0.1, and `ureq` 2 takes
+    /// `HTTPS_PROXY` for plain HTTP too, with no `NO_PROXY`.
+    #[cfg(test)]
+    fn direct() -> Self {
+        UreqHttp {
+            agent: Self::builder().build(),
+        }
+    }
+
+    /// The agent's timeouts, redirects and user agent.
+    fn builder() -> ureq::AgentBuilder {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(15))
+            .timeout_read(Duration::from_secs(30))
+            .timeout_write(Duration::from_secs(30))
+            .redirects(8)
+            .user_agent(SYMBOL_SERVER_USER_AGENT)
     }
 }
 
@@ -156,21 +171,21 @@ mod tests {
     #[test]
     fn a_redirect_is_followed_to_the_file() {
         let base = serve(2);
-        let response = UreqHttp::new().get(&format!("{base}/moved"), 1 << 20, |_| Flow::Continue).unwrap();
+        let response = UreqHttp::direct().get(&format!("{base}/moved"), 1 << 20, |_| Flow::Continue).unwrap();
         assert_eq!(response, HttpResponse { status: 200, body: b"hello".to_vec() });
     }
 
     #[test]
     fn a_missing_file_is_a_404_response_not_an_error() {
         let base = serve(1);
-        let response = UreqHttp::new().get(&format!("{base}/nope"), 1 << 20, |_| Flow::Continue).unwrap();
+        let response = UreqHttp::direct().get(&format!("{base}/nope"), 1 << 20, |_| Flow::Continue).unwrap();
         assert_eq!(response.status, 404);
     }
 
     #[test]
     fn a_body_over_the_cap_is_refused_before_it_is_read() {
         let base = serve(1);
-        let error = UreqHttp::new().get(&format!("{base}/large"), 1000, |_| Flow::Continue).unwrap_err();
+        let error = UreqHttp::direct().get(&format!("{base}/large"), 1000, |_| Flow::Continue).unwrap_err();
         assert!(matches!(error, HttpError::TooLarge { cap: 1000, declared: Some(200_000), .. }), "{error:?}");
     }
 
@@ -178,7 +193,7 @@ mod tests {
     fn a_cancel_stops_the_download_between_reads() {
         let base = serve(1);
         let mut reports = 0;
-        let error = UreqHttp::new()
+        let error = UreqHttp::direct()
             .get(&format!("{base}/large"), 1 << 20, |_| {
                 reports += 1;
                 Flow::Cancel
@@ -192,9 +207,9 @@ mod tests {
     fn an_unreachable_host_is_a_retryable_transport_error() {
         // Nothing listens on a port that was just freed.
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let error = UreqHttp::new().get(&format!("http://127.0.0.1:{port}/x"), 1 << 20, |_| Flow::Continue).unwrap_err();
+        let error = UreqHttp::direct().get(&format!("http://127.0.0.1:{port}/x"), 1 << 20, |_| Flow::Continue).unwrap_err();
         assert_eq!(error.retry(), Retry::Retryable, "{error:?}");
-        let malformed = UreqHttp::new().get("not a url", 1 << 20, |_| Flow::Continue).unwrap_err();
+        let malformed = UreqHttp::direct().get("not a url", 1 << 20, |_| Flow::Continue).unwrap_err();
         assert_eq!(malformed.retry(), Retry::Final, "{malformed:?}");
     }
 }
