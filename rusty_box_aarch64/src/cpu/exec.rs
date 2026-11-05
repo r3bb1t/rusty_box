@@ -258,6 +258,13 @@ impl<L: Levels> Cpu<L> {
         self.debug_stops = stops;
     }
 
+    /// Choose what the board's firmware tells the guest of the
+    /// speculative-execution workarounds; [`SpectreReport::DEFAULT`] until
+    /// chosen.
+    pub fn set_spectre_report(&mut self, report: super::SpectreReport) {
+        self.spectre = report;
+    }
+
     /// Execute one instruction (or take the exception it raises) against
     /// `bus`, advancing time by one tick unless the step stops the machine,
     /// and tell `observer` what happened.

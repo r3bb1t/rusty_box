@@ -537,13 +537,13 @@ fn hvc_calls_the_hypervisor_unless_hcd_disables_it() {
 #[test]
 fn smc_is_the_firmware_call_with_el2_unless_tsc_traps_it() {
     const PSCI_VERSION: u64 = 0x8400_0000;
-    const VERSION_1_1: u64 = 0x0001_0001;
+    const VERSION_1_2: u64 = 0x0001_0002;
     let mut m = Machine::with_el2();
     for el in [El::El1, El::El2] {
         m.at(el);
         m.cpu.x[0] = PSCI_VERSION;
         assert_eq!(m.run(SMC), None, "{el:?}");
-        assert_eq!((m.cpu.x[0], m.cpu.pc), (VERSION_1_1, CODE + 4), "{el:?}");
+        assert_eq!((m.cpu.x[0], m.cpu.pc), (VERSION_1_2, CODE + 4), "{el:?}");
     }
     m.hcr(HCR_TSC);
     m.at(El::El1);
@@ -560,7 +560,7 @@ fn smc_is_the_firmware_call_with_el2_unless_tsc_traps_it() {
     assert_eq!(v80.run(SMC), sync(El::El1, CURRENT_SPX, EC_UNKNOWN, 0));
     v80.cpu.x[0] = PSCI_VERSION;
     assert_eq!(v80.run(HVC), None);
-    assert_eq!(v80.cpu.x[0], VERSION_1_1);
+    assert_eq!(v80.cpu.x[0], VERSION_1_2);
 }
 
 /// `ERET` at EL2 returns to EL2, EL1 or EL0 as `SPSR_EL2.M` says, with the

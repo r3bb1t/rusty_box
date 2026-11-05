@@ -639,6 +639,17 @@ fn cpu_model_label(model: rusty_box_aarch64::CpuModel) -> &'static str {
     }
 }
 
+/// What the Processor page's Speculation list shows for each
+/// [`rusty_box_aarch64::SpectreReport`].
+#[cfg(not(target_arch = "wasm32"))]
+fn spectre_report_label(report: rusty_box_aarch64::SpectreReport) -> &'static str {
+    match report {
+        rusty_box_aarch64::SpectreReport::NotRequired => "Not affected (no mitigation needed)",
+        rusty_box_aarch64::SpectreReport::Mitigated => "Mitigated by firmware",
+        rusty_box_aarch64::SpectreReport::Unreported => "Not reported",
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeVmSettings {
@@ -701,6 +712,7 @@ struct VirtSettings {
     memory_mib: u32,
     ips: u32,
     cpu: rusty_box_aarch64::CpuModel,
+    spectre: rusty_box_aarch64::SpectreReport,
     boot: VirtBootChoice,
     firmware_path: String,
     vars_path: String,
@@ -756,6 +768,7 @@ impl VirtSettings {
             memory_mib: config.memory_mib,
             ips: config.ips,
             cpu: config.cpu,
+            spectre: config.spectre,
             boot: VirtBootChoice::Nothing,
             firmware_path: String::new(),
             vars_path: String::new(),
@@ -848,6 +861,7 @@ impl VirtSettings {
             memory_mib: self.memory_mib,
             ips: self.ips.max(1),
             cpu: self.cpu,
+            spectre: self.spectre,
             boot,
             display,
             keyboard: self.keyboard,
@@ -3520,6 +3534,19 @@ impl NativeShellApp {
                                 for model in rusty_box_aarch64::CpuModel::ALL {
                                     changed |= ui
                                         .selectable_value(&mut virt.cpu, model, cpu_model_label(model))
+                                        .changed();
+                                }
+                            });
+                    });
+                    // What the firmware tells the guest of the speculative-
+                    // execution workarounds (SMCCC `SMCCC_ARCH_FEATURES`).
+                    field_row(ui, "Speculation", |ui| {
+                        egui::ComboBox::from_id_salt("virt speculation report")
+                            .selected_text(spectre_report_label(virt.spectre))
+                            .show_ui(ui, |ui| {
+                                for report in rusty_box_aarch64::SpectreReport::ALL {
+                                    changed |= ui
+                                        .selectable_value(&mut virt.spectre, report, spectre_report_label(report))
                                         .changed();
                                 }
                             });
@@ -7900,6 +7927,7 @@ mod tests {
                 memory_mib: 512,
                 ips: 50_000_000,
                 cpu: rusty_box_aarch64::CpuModel::Armv9p2,
+                spectre: rusty_box_aarch64::SpectreReport::Mitigated,
                 boot: crate::config::ArmBoot::Linux {
                     kernel: std::path::PathBuf::from("Image"),
                     initrd: Some(std::path::PathBuf::from("initramfs.cpio.gz")),

@@ -1024,6 +1024,13 @@ impl core::str::FromStr for CpuModel {
     }
 }
 
+/// The model's [`CpuModel::name`].
+impl core::fmt::Display for CpuModel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// A name no [`CpuModel`] has. It prints the names there are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UnknownCpuModel;

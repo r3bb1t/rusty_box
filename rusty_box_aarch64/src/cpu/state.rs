@@ -255,6 +255,7 @@ impl<L: Levels> Cpu<L> {
             irq_line,
             fiq_line,
             debug_stops: _,
+            spectre: _,
             history,
         } = self;
         *x = [0; 31];

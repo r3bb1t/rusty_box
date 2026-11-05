@@ -52,6 +52,20 @@ unless the builder is given another: `MachineBuilder::identity` takes a
 `BoardIdentity::new(IdentityNames { model: "Acme Board", ..IdentityNames::RUSTY_BOX })`,
 whose names are checked and copied into the machine, with no allocator.
 
+Where Arm's documents allow a guest more than one answer, the answer is
+the host's to choose, as a field of `VirtConfig` of a type that holds only
+the answers the document allows, and the board takes the one in the table
+unless told otherwise. A snapshot records each, and is refused by a
+machine built with another (the guest may have read and acted on it).
+
+| Setting | Type | Answers (default first) | Specification |
+|---|---|---|---|
+| `spectre` | `SpectreReport` | `NotRequired`, `Mitigated`, `Unreported` | DEN 0028F §7.5 to §7.7 |
+
+The front end takes them as its `[virt]` table's keys (`spectre =
+"mitigated"`, by each answer's `name`), refusing a name none has with the
+names there are.
+
 [docs/aarch64-automation.md](../docs/aarch64-automation.md) is the guide:
 building (firmware, direct kernel or bare; owned or lent memory), the serial
 console and the terminal keyboard, budgets and stop reasons, the power button
@@ -295,7 +309,7 @@ is) must reproduce, are:
 
 | Part | Model |
 |---|---|
-| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, an MMU with the 4 KiB granule and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB and 64 KiB granules too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
+| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, an MMU with the 4 KiB granule and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB and 64 KiB granules too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (480 SPIs, PPIs 25 to 31, level-sensitive; five priority bits, minimum binary points 2 and 3, one active priority register a group; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0803_0000, the common base and processor 0's at 0x0803_1000, 4 KiB each) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0804_0000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
 | Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), no `fw_cfg` (see "Where the references differ"), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
@@ -305,8 +319,9 @@ is) must reproduce, are:
 Provenance: Arm's documents decide wherever they speak — the Arm ARM (DDI
 0487) and its machine-readable data (AARCHMRS) for the processor, IHI 0048B
 for the GIC, DDI 0183F for the PL011, DDI 0224C for the PL031, DDI 0190B for
-the PL061, DEN 0022D for PSCI and DEN 0028B for the SMC Calling Convention.
-QEMU's `virt` board decides what those documents
+the PL061, DEN 0022E for PSCI and DEN 0028F for the SMC Calling Convention
+(and their earlier issues D and B, whose sections the older citations
+name). QEMU's `virt` board decides what those documents
 do not: the memory map, the interrupt wiring, the device tree, the choices
 Arm leaves to an implementation, and the devices Arm does not document
 (virtio, the CFI flash, `gpio-key`). A device with its own published
@@ -1027,7 +1042,9 @@ integration tests of the public API.
   cache, TLB or address translation maintenance, a SIMD&FP access or an
   exception return at EL0, EL1 or EL2, and reporting the exception it
   took with its level, ESR, ELR, SPSR and FAR, or X0 after it. All of them
-  agree; the generator leaves out what QEMU's Cortex-A57 has and this core
+  agree, but for the firmware's `PSCI_VERSION`, which the replay expects
+  as the board's PSCI 1.2 where QEMU recorded 1.1 (see "Where the
+  references differ"); the generator leaves out what QEMU's Cortex-A57 has and this core
   does not (AArch32, the PMU, its IMPLEMENTATION DEFINED registers) and
   DBGPRCR_EL1, which QEMU lacks. `tests/virtualization.rs` runs the board
   with virtualization: firmware entered at EL2, the device tree's PSCI
@@ -1292,7 +1309,10 @@ integration tests of the public API.
 - `tests/translation_and_firmware.rs`: an out-of-range T1SZ, a table base or
   block beyond the output size `TCR_EL1.IPS` selects, `AT` meeting an
   external abort on its walk, PSCI's target, entry-point and
-  affinity-level checks and the W registers of its 32-bit calls, and a
+  affinity-level checks and the W registers of its 32-bit calls, the
+  firmware's PSCI 1.2 and SMCCC 1.5 (`SMCCC_VERSION` through
+  `PSCI_FEATURES`, `SMCCC_ARCH_FEATURES`, the SVE hint bit taken as 0) and
+  each `SpectreReport`'s answers and workaround calls, and a
   store-exclusive to an unmonitored address failing without a fault.
 - `tests/device_regions.rs`: the GIC distributor and CPU interface answer
   in their 4 KiB and 8 KiB regions, and an access to the rest of their 64
@@ -1301,8 +1321,8 @@ integration tests of the public API.
 ## Where the references differ
 
 Arm's documents decide wherever they speak: the Arm ARM and AARCHMRS what
-an instruction does, IHI 0048B the GIC, DDI 0183F the PL011, DEN 0022D and
-DEN 0028B the firmware calls; OASIS virtio 1.2 the virtio devices and VESA
+an instruction does, IHI 0048B the GIC, DDI 0183F the PL011, DEN 0022E and
+DEN 0028F the firmware calls; OASIS virtio 1.2 the virtio devices and VESA
 E-EDID 1.4 the display's EDID. QEMU 11.1.2's `virt` board and `cortex-a57`
 decide what they do not: the board's layout, wiring and device tree, the
 devices no specification describes, and the choices the specifications
@@ -1903,8 +1923,21 @@ one open.
   and at EL0 it is UNDEFINED. The SMC Calling Convention (DEN 0028B §2.9)
   leaves nonzero `HVC` immediates to the hypervisor, and they are
   answered like `#0`.
-- **PSCI as DEN 0022D specifies it.** The firmware reports PSCI 1.1, as
-  QEMU 11.1.2 does. In four cases QEMU (target/arm/tcg/psci.c
+- **The firmware is PSCI 1.2 and SMCCC 1.5.** It reports PSCI 1.2 (DEN
+  0022E), where QEMU 11.1.2 reports 1.1, with the same functions: every
+  one DEN 0022E Table 17 makes mandatory, and `MIGRATE_INFO_TYPE`. It
+  implements SMCCC 1.5 (DEN 0028F), where QEMU's firmware has no SMCCC
+  call and so reads as SMCCC 1.0: `SMCCC_VERSION`, which `PSCI_FEATURES`
+  reports (DEN 0022E §5.15.2), `SMCCC_ARCH_FEATURES`, and the three
+  speculation workarounds as the host's `SpectreReport` answers them
+  (§7.5 to §7.7). The interpreter executes nothing speculatively, so by
+  default (`NotRequired`) each workaround is reported as not required,
+  `WORKAROUND_1` and `WORKAROUND_3` being calls with no effect;
+  `Mitigated` reports each as required and provided, and `Unreported`
+  gives no information, as SMCCC 1.0 firmware does. `SMCCC_ARCH_SOC_ID`,
+  `SMCCC_ARCH_FEATURE_AVAILABILITY` and the general service queries are
+  optional (§6.2, §7.4, §7.8) and not implemented.
+- **PSCI as DEN 0022D specifies it.** In four cases QEMU (target/arm/tcg/psci.c
   `arm_handle_psci_call`, target/arm/arm-powerctl.c `arm_set_cpu_on`)
   answers otherwise; this model answers as the specification says, or,
   where it leaves the choice open, as stated here:
@@ -2686,7 +2719,8 @@ the board's own:
   it to, which the device tree's `gpio-keys` node names.
 - The flash's CFI identity: manufacturer 0x89 (Intel), device 0x18, and
   QEMU's CFI table values.
-- The PSCI and SMCCC function set, PSCI 1.1 and SMCCC 1.0 alone.
+- PSCI's optional functions: `MIGRATE_INFO_TYPE` alone of DEN 0022E
+  Table 17's, QEMU's set, which `PSCI_FEATURES` reports.
 - virtio values: queue sizes, the block device's limits and geometry, the
   GPU's resource and backing limits, the 20-byte GPU configuration.
 - The EDID's layout, which is `qemu_edid_generate`'s: its mode list,

@@ -31,7 +31,7 @@
 //! Arm's documents decide wherever they speak: the instruction semantics
 //! follow the Arm Architecture Reference Manual for A-profile (DDI 0487)
 //! pseudocode, the GIC IHI 0048B, the PL011 DDI 0183F, and the firmware
-//! calls PSCI (DEN 0022D) and the SMC Calling Convention (DEN 0028B); the
+//! calls PSCI (DEN 0022E) and the SMC Calling Convention (DEN 0028F); the
 //! virtio devices follow OASIS virtio 1.2 and the display's EDID VESA
 //! E-EDID 1.4 where those speak. QEMU's `hw/arm/virt.c` and the device
 //! models it instantiates decide what those documents do not — the memory
@@ -65,7 +65,8 @@ pub use board::{Plugged, VirtioDevices};
 pub use bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 pub use cpu::{
     Btype, Cpu, CpuConfig, CpuModel, CpuState, CpuStateEl2, El, El2Unavailable, Levels, NoEl2,
-    Pstate, PstateRefusal, Reg, SysReg, SysRegRefusal, UnknownCpuModel, VReg, WithEl2,
+    Pstate, PstateRefusal, Reg, SpectreReport, SysReg, SysRegRefusal, UnknownCpuModel,
+    UnknownSpectreReport, VReg, WithEl2,
 };
 #[cfg(feature = "alloc")]
 pub use disk::{Access, Disk};

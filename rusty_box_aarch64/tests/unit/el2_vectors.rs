@@ -288,10 +288,28 @@ fn reads(word: u32) -> bool {
     word & 0xFFE0_0000 == 0xD520_0000 || word & 0xFFF0_0000 == 0xD530_0000
 }
 
+/// The outcome QEMU recorded for `v`, but where the board departs from QEMU
+/// (README "Where the references differ"): a firmware call of
+/// `PSCI_VERSION`, an `HVC` or `SMC` with W0 naming it, reads PSCI 1.2
+/// (DEN 0022E), where QEMU's reads 1.1.
+fn the_boards_outcome(v: &Vector) -> Outcome {
+    const PSCI_VERSION: u64 = 0x8400_0000;
+    const QEMU_PSCI_1_1: u64 = 0x0001_0001;
+    const PSCI_1_2: u64 = 0x0001_0002;
+    // `HVC #imm16` and `SMC #imm16` (Arm ARM C6.2: `opc` 000, `LL` 10 and
+    // 11), whatever their immediates.
+    let firmware_call = v.word & 0xFFE0_001F == 0xD400_0002 || v.word & 0xFFE0_001F == 0xD400_0003;
+    let mut want = v.outcome;
+    if firmware_call && want.kind == 0 && v.x0 == PSCI_VERSION && want.x0 == QEMU_PSCI_1_1 {
+        want.x0 = PSCI_1_2;
+    }
+    want
+}
+
 /// Every case of every family takes the outcome QEMU's Cortex-A57 with EL2
-/// took: the same exception at the same level with the same ESR, ELR and
-/// SPSR (and FAR where the class reports one), or completion with the same
-/// X0.
+/// took ([`the_boards_outcome`]): the same exception at the same level with
+/// the same ESR, ELR and SPSR (and FAR where the class reports one), or
+/// completion with the same X0.
 #[test]
 fn the_el2_cases_end_as_on_qemu() {
     let mut ram = Ram(std::vec![0; RAM_BYTES]);
@@ -301,7 +319,7 @@ fn the_el2_cases_end_as_on_qemu() {
         let v = parse(line);
         count += 1;
         let got = replay(&v, &mut ram);
-        let want = v.outcome;
+        let want = the_boards_outcome(&v);
         let value_matters = !reads(v.word) || v.compare_value || want.kind != 0;
         let same = got.kind == want.kind
             && (got.x0 == want.x0 || !value_matters)

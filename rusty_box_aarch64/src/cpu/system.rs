@@ -1,9 +1,9 @@
 //! System instructions (Arm ARM C5): hints, barriers, PSTATE access, cache
 //! and TLB maintenance, address translation, `MRS`/`MSR`, and the
 //! exception-generating instructions — including the PSCI calls (Arm DEN
-//! 0022D, over the SMC Calling Convention, DEN 0028B) that the board's
-//! firmware answers on `HVC` without EL2 and on `SMC` with it, as QEMU's
-//! `virt` does (its device tree's `method`).
+//! 0022E) and the SMC Calling Convention's Arm Architecture Calls (DEN
+//! 0028F) that the board's firmware answers on `HVC` without EL2 and on
+//! `SMC` with it, as QEMU's `virt` does (its device tree's `method`).
 
 use super::el2::{CPTR_TFP, HCR_HCD, HCR_TDZ, HCR_TPCP, HCR_TPU, HCR_TSC, HCR_TSW, HCR_TTLB};
 use super::exception::{Exception, Route, SyndromeClass};
@@ -44,9 +44,10 @@ mod psci {
     /// `AFFINITY_INFO`: at least one core of the instance is on.
     pub(super) const ON: u64 = 0;
 
-    /// PSCI 1.1, the version QEMU's `virt` implements for current machine
-    /// types (target/arm/tcg/psci.c, `QEMU_PSCI_VERSION_1_1`).
-    pub(super) const IMPLEMENTED_VERSION: u64 = 0x0001_0001;
+    /// PSCI 1.2, the version DEN 0022E specifies: every function Table 17
+    /// makes mandatory for it, and `MIGRATE_INFO_TYPE`, of the optional
+    /// ones.
+    pub(super) const IMPLEMENTED_VERSION: u64 = 0x0001_0002;
     /// "Trusted OS is not present or does not require migration".
     pub(super) const MIGRATE_NOT_REQUIRED: u64 = 2;
 
@@ -77,6 +78,193 @@ mod psci {
         }
     }
 }
+
+/// The SMC Calling Convention's Arm Architecture Calls (Arm DEN 0028F §7)
+/// the board's firmware answers, beside PSCI.
+mod smccc {
+    pub(super) const VERSION: u32 = 0x8000_0000;
+    pub(super) const ARCH_FEATURES: u32 = 0x8000_0001;
+    pub(super) const ARCH_WORKAROUND_1: u32 = 0x8000_8000;
+    pub(super) const ARCH_WORKAROUND_2: u32 = 0x8000_7FFF;
+    pub(super) const ARCH_WORKAROUND_3: u32 = 0x8000_3FFF;
+
+    /// SMCCC 1.5, the version DEN 0028F specifies (Table 13-1: major 1 in
+    /// bits 30:16, minor 5 in bits 15:0).
+    pub(super) const IMPLEMENTED_VERSION: u64 = 0x0001_0005;
+
+    /// Function identifier bit 31: a Fast Call (DEN 0028F §2.5, Table 2-1).
+    const FAST_CALL: u32 = 1 << 31;
+    /// Function identifier bit 16 of a Fast Call, from SMCCC 1.3: the hint
+    /// that the caller holds no SVE live state, "not part of the function
+    /// identification" (§2.5.1).
+    const SVE_HINT: u32 = 1 << 16;
+
+    /// The function `fid` identifies: a Fast Call's with its SVE hint
+    /// taken as 0, as "the SMCCC implementation must disregard this bit
+    /// and consider it to be 0 for the purpose of function identification"
+    /// (§2.5.1). The board keeps every register over a call, so the hint
+    /// asks nothing of it (§2.8).
+    pub(super) const fn identify(fid: u32) -> u32 {
+        if fid & FAST_CALL != 0 {
+            fid & !SVE_HINT
+        } else {
+            fid
+        }
+    }
+
+    /// Table 7-1's return codes beyond PSCI's `SUCCESS` and
+    /// `NOT_SUPPORTED`, which have the same values.
+    pub(super) const NOT_REQUIRED: u64 = (-2i64) as u64;
+    /// `SMCCC_ARCH_FEATURES` of a workaround: it "can be invoked safely on
+    /// all PEs in the system", and the PE asking "does not require firmware
+    /// mitigation" (§7.5.2, §7.6.2, §7.7.2).
+    pub(super) const SAFE_AND_NOT_REQUIRED: u64 = 1;
+}
+
+/// What the board's firmware tells a guest about the speculative-execution
+/// vulnerabilities the SMC Calling Convention has workarounds for:
+/// CVE-2017-5715 (`SMCCC_ARCH_WORKAROUND_1`), CVE-2018-3639
+/// (`SMCCC_ARCH_WORKAROUND_2`) and CVE-2022-23960 with CVE-2017-5715
+/// (`SMCCC_ARCH_WORKAROUND_3`), through `SMCCC_ARCH_FEATURES` (Arm DEN
+/// 0028F §7.5 to §7.7). The interpreter executes nothing speculatively, so
+/// no workaround has anything to do; each answer DEN 0028F allows is
+/// offered, the choice being the host's.
+///
+/// Closed (R5): the three answers the discovery sections give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpectreReport {
+    /// Each workaround "can be invoked safely" and the processor "does not
+    /// require firmware mitigation" (discovery 1), and `WORKAROUND_2`'s
+    /// mitigation is "not required" (`NOT_REQUIRED`): what is true of an
+    /// interpreter. `WORKAROUND_1` and `WORKAROUND_3` are implemented as
+    /// calls that have no effect (§7.5.4, §7.7.4); `WORKAROUND_2` is not,
+    /// as `NOT_REQUIRED` says it "must not be invoked".
+    NotRequired,
+    /// The processor requires firmware mitigation and the firmware
+    /// provides it (discovery 0 for all three), so a guest takes its
+    /// firmware mitigation paths. Each workaround is implemented as a call
+    /// that has no effect, there being nothing to mitigate.
+    Mitigated,
+    /// The firmware "does not provide any information" (`NOT_SUPPORTED`
+    /// for all three), as firmware of SMCCC 1.0 does not; no workaround is
+    /// implemented.
+    Unreported,
+}
+
+impl SpectreReport {
+    /// Every answer, in the order a list of them shows.
+    pub const ALL: [SpectreReport; 3] = [Self::NotRequired, Self::Mitigated, Self::Unreported];
+
+    /// The answer a board gives unless its host chooses another.
+    pub const DEFAULT: Self = Self::NotRequired;
+
+    /// The answer's name for a command line or a configuration file, which
+    /// [`str::parse`] reads back.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NotRequired => "not-required",
+            Self::Mitigated => "mitigated",
+            Self::Unreported => "unreported",
+        }
+    }
+
+    /// The answer as a snapshot's machine shape records it, fixed per
+    /// answer whatever order the variants are declared in.
+    pub(crate) const fn tag(self) -> u8 {
+        match self {
+            Self::NotRequired => 0,
+            Self::Mitigated => 1,
+            Self::Unreported => 2,
+        }
+    }
+
+    /// `SMCCC_ARCH_FEATURES` of `workaround`.
+    const fn discovery(self, workaround: Workaround) -> u64 {
+        match (self, workaround) {
+            (Self::NotRequired, Workaround::Two) => smccc::NOT_REQUIRED,
+            (Self::NotRequired, Workaround::One | Workaround::Three) => {
+                smccc::SAFE_AND_NOT_REQUIRED
+            }
+            (Self::Mitigated, _) => psci::SUCCESS,
+            (Self::Unreported, _) => psci::NOT_SUPPORTED,
+        }
+    }
+
+    /// Whether `workaround` is implemented: its discovery is not negative
+    /// (§7.3.4).
+    const fn implements(self, workaround: Workaround) -> bool {
+        (self.discovery(workaround) as i64) >= 0
+    }
+}
+
+/// The SMC Calling Convention's speculation workarounds (DEN 0028F §7.5 to
+/// §7.7).
+///
+/// Closed (R5): the three SMCCC 1.5 defines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Workaround {
+    /// `SMCCC_ARCH_WORKAROUND_1`, CVE-2017-5715.
+    One,
+    /// `SMCCC_ARCH_WORKAROUND_2`, CVE-2018-3639.
+    Two,
+    /// `SMCCC_ARCH_WORKAROUND_3`, CVE-2017-5715 and CVE-2022-23960.
+    Three,
+}
+
+impl Workaround {
+    /// The workaround the function identifier `function` names, if one
+    /// does.
+    const fn of(function: u32) -> Option<Self> {
+        match function {
+            smccc::ARCH_WORKAROUND_1 => Some(Self::One),
+            smccc::ARCH_WORKAROUND_2 => Some(Self::Two),
+            smccc::ARCH_WORKAROUND_3 => Some(Self::Three),
+            _ => None,
+        }
+    }
+}
+
+impl Default for SpectreReport {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The answer's [`SpectreReport::name`].
+impl core::fmt::Display for SpectreReport {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl core::str::FromStr for SpectreReport {
+    type Err = UnknownSpectreReport;
+
+    /// The answer whose [`SpectreReport::name`] is `name`.
+    fn from_str(name: &str) -> Result<Self, UnknownSpectreReport> {
+        Self::ALL
+            .into_iter()
+            .find(|report| report.name() == name)
+            .ok_or(UnknownSpectreReport)
+    }
+}
+
+/// A name no [`SpectreReport`] has. It prints the names there are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnknownSpectreReport;
+
+impl core::fmt::Display for UnknownSpectreReport {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("no speculation report has that name; the reports are")?;
+        for (i, report) in SpectreReport::ALL.iter().enumerate() {
+            let separator = if i == 0 { " " } else { ", " };
+            write!(f, "{separator}\"{}\"", report.name())?;
+        }
+        Ok(())
+    }
+}
+
+impl core::error::Error for UnknownSpectreReport {}
 
 impl<L: Levels> Cpu<L> {
     /// Whether the two-bit `CPACR_EL1` enable `field` ([`CPACR_FPEN`],
@@ -747,9 +935,12 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
-    /// The PSCI 1.1 firmware interface (Arm DEN 0022D) for a single
-    /// processor, with the functions QEMU's `virt` provides
-    /// (target/arm/tcg/psci.c `arm_handle_psci_call`).
+    /// The PSCI 1.2 firmware interface (Arm DEN 0022E) for a single
+    /// processor, with QEMU's `virt`'s function set (target/arm/tcg/psci.c
+    /// `arm_handle_psci_call`): DEN 0022E Table 17's mandatory functions and
+    /// `MIGRATE_INFO_TYPE`; and SMCCC 1.5's Arm Architecture Calls (Arm DEN
+    /// 0028F §7): `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES` and the
+    /// workarounds the board's [`SpectreReport`] implements.
     ///
     /// The SMC Calling Convention passes the function identifier in W0 in
     /// both conventions, and an SMC32/HVC32 call's arguments in W1-W3 (Arm
@@ -763,7 +954,7 @@ impl<L: Levels> Cpu<L> {
     /// (`power_state`, `lowest_affinity_level`, `psci_func_id`) is its
     /// register's low 32 bits in either convention.
     fn psci_call(&mut self) -> ExecResult {
-        let function = self.x[0] as u32;
+        let function = smccc::identify(self.x[0] as u32);
         let (arg1, arg2) = if function & psci::SMC64 != 0 {
             (self.x[1], self.x[2])
         } else {
@@ -771,12 +962,25 @@ impl<L: Levels> Cpu<L> {
         };
         let result = match function {
             psci::VERSION => psci::IMPLEMENTED_VERSION,
+            // DEN 0022E §5.15.2: `PSCI_FEATURES` "should report the presence
+            // of SMCCC_VERSION", which DEN 0028F §7.2.2 discovers through it.
             psci::FEATURES => {
-                if psci_supported(arg1 as u32) {
+                let asked = smccc::identify(arg1 as u32);
+                if psci_supported(asked) || asked == smccc::VERSION {
                     psci::SUCCESS
                 } else {
                     psci::NOT_SUPPORTED
                 }
+            }
+            smccc::VERSION => smccc::IMPLEMENTED_VERSION,
+            smccc::ARCH_FEATURES => self.smccc_arch_features(smccc::identify(arg1 as u32)),
+            // A workaround the firmware implements has no effect: no result,
+            // every register as it was (DEN 0028F §7.5.4, §7.6.4, §7.7.4:
+            // "an implementation that has no effect" on a PE that needs no
+            // mitigation; X0 to X3 are result registers, which a call
+            // without results leaves to the implementation).
+            _ if Workaround::of(function).is_some_and(|w| self.spectre.implements(w)) => {
+                return Ok(Flow::Next);
             }
             psci::CPU_SUSPEND_32 | psci::CPU_SUSPEND_64 => {
                 // `power_state` is in the original format, as `PSCI_FEATURES`
@@ -833,6 +1037,19 @@ impl<L: Levels> Cpu<L> {
         self.x[0] = result;
         Ok(Flow::Next)
     }
+
+    /// `SMCCC_ARCH_FEATURES` of `arch_func_id` (DEN 0028F §7.3): SUCCESS
+    /// for itself and `SMCCC_VERSION` (§7.3.6), the workarounds as the
+    /// board's [`SpectreReport`] answers them, and NOT_SUPPORTED for every
+    /// other Arm Architecture or Standard Hypervisor Service function and
+    /// for an ID outside those ranges (§7.3.3).
+    fn smccc_arch_features(&self, arch_func_id: u32) -> u64 {
+        match (arch_func_id, Workaround::of(arch_func_id)) {
+            (smccc::VERSION | smccc::ARCH_FEATURES, _) => psci::SUCCESS,
+            (_, Some(workaround)) => self.spectre.discovery(workaround),
+            (_, None) => psci::NOT_SUPPORTED,
+        }
+    }
 }
 
 /// The instruction the board's PSCI firmware answers.
@@ -873,7 +1090,7 @@ impl PsciConduit {
 
 /// The device tree's `/psci` `compatible`, its strings each NUL-terminated:
 /// PSCI 1.0 and 0.2 (the `arm,psci-1.0` binding covers 1.0 and later, and
-/// the firmware answers 1.1). A caller of PSCI 0.2 or later finds every
+/// the firmware answers 1.2). A caller of PSCI 0.2 or later finds every
 /// function by its standard identifier (DEN 0022), so the node gives
 /// neither the 0.1 binding nor its function identifiers, which a firmware
 /// of 0.1 alone would name.

@@ -398,7 +398,8 @@ height = 768
 | `vm.machine` | `"pc"` or `"arm-virt"` | `"pc"` | none |
 | `virt.memory_mib` | Guest memory, MiB | `256` (QEMU's) | `--memory-mib` |
 | `virt.ips` | The rate guest time counts instructions at | `50000000` | `--ips` |
-| `virt.cpu` | The processor: `"cortex-a57"`, QEMU's Cortex-A57 cut down to EL0 and EL1, or `"armv9.2"`, an Armv9.2 processor with SME and SME2 (no SVE) and a 1 GHz system counter; any other name is refused | `"cortex-a57"` | none |
+| `virt.cpu` | The processor: `"cortex-a57"`, QEMU's Cortex-A57 cut down to EL0 and EL1, or `"armv9.2"`, an Armv9.2 processor with SME and SME2 (no SVE); both have a 1 GHz system counter; any other name is refused | `"cortex-a57"` | none |
+| `virt.spectre` | What the firmware tells the guest of the speculative-execution workarounds (SMCCC `SMCCC_ARCH_FEATURES`): `"not-required"`, true of the interpreter, which executes nothing speculatively; `"mitigated"`, required and provided by the firmware, so the guest takes its firmware mitigation paths; or `"unreported"`, no information, as SMCCC 1.0 firmware gives; any other name is refused. The Processor page's Speculation list | `"not-required"` | none |
 | `virt.firmware` | UEFI firmware for flash bank 0, as QEMU's `-bios` (EDK2 `ArmVirtQemu`); not with `virt.kernel` | none | none |
 | `virt.builtin_firmware` | `true` boots the EDK2 `ArmVirtQemu` built into the front end (licence in `THIRD-PARTY-LICENSES`); not with `virt.firmware` or `virt.kernel` | none | none |
 | `virt.firmware_vars` | Its variable store, flash bank 1; written back when the firmware changes it | none | none |

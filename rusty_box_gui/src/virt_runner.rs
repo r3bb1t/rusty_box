@@ -189,6 +189,7 @@ fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Virt, RunError> {
     let virt_config = VirtConfig {
         ips: ClockHz::new(u64::from(config.ips)).ok_or(RunError::ZeroValue { field: "virt.ips" })?,
         cpu: config.cpu,
+        spectre: config.spectre,
         rtc_epoch_seconds: host_epoch_seconds(),
         ..VirtConfig::DEFAULT
     };
@@ -1181,6 +1182,42 @@ mod tests {
                 rusty_box_aarch64::CpuModel::Armv9p2 => (0x000F_0520, 1_000_000_000),
             };
             assert_eq!((midr, cntfrq), (Ok(want.0), Ok(want.1)), "{model:?}");
+        }
+    }
+
+    /// The board's firmware answers the speculation workarounds as the VM
+    /// names: a guest's `SMCCC_ARCH_FEATURES` of `SMCCC_ARCH_WORKAROUND_1`
+    /// reads 1 (not required), 0 (mitigated) or NOT_SUPPORTED (unreported).
+    #[test]
+    fn the_board_answers_the_speculation_report_the_vm_names() {
+        const HVC: u32 = 0xD400_0002;
+        const ARCH_FEATURES: u64 = 0x8000_0001;
+        const ARCH_WORKAROUND_1: u64 = 0x8000_8000;
+        const NOT_SUPPORTED: u64 = u64::MAX;
+        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        for (report, answer) in [
+            (rusty_box_aarch64::SpectreReport::NotRequired, 1),
+            (rusty_box_aarch64::SpectreReport::Mitigated, 0),
+            (rusty_box_aarch64::SpectreReport::Unreported, NOT_SUPPORTED),
+        ] {
+            let config = ArmVirtConfig {
+                spectre: report,
+                ..kernel_board(&kernel)
+            };
+            let files = BootFiles::read(&config).expect("the kernel");
+            let mut machine = build(&config, &files).expect("the machine");
+            let at = rusty_box_aarch64::board::RAM_BASE;
+            machine.mem_write(at, &HVC.to_le_bytes()).expect("in RAM");
+            machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
+            machine.reg_write(rusty_box_aarch64::Reg::X0, ARCH_FEATURES);
+            machine.reg_write(rusty_box_aarch64::Reg::X1, ARCH_WORKAROUND_1);
+            let stepped = machine.step(rusty_box_aarch64::RunBudget::Instructions(1));
+            assert_eq!(
+                stepped.stop,
+                rusty_box_aarch64::StopReason::BudgetExhausted,
+                "{report:?}: the call returns"
+            );
+            assert_eq!(machine.reg_read(rusty_box_aarch64::Reg::X0), answer, "{report:?}");
         }
     }
 

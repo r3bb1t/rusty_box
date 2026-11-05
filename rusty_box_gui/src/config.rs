@@ -99,6 +99,9 @@ impl std::fmt::Display for MachineKind {
 /// The `[virt]` table: the Arm `virt` board's hardware.
 ///
 /// `cpu` names its processor (`"cortex-a57"`, the default, or `"armv9.2"`).
+/// `spectre` names what its firmware tells the guest of the
+/// speculative-execution workarounds (`"not-required"`, the default,
+/// `"mitigated"` or `"unreported"`).
 /// It boots UEFI firmware from flash (`firmware`, or the EDK2 built into
 /// the front end with `builtin_firmware = true`, either with
 /// `firmware_vars` for its variable store) or a Linux kernel directly
@@ -113,7 +116,7 @@ impl std::fmt::Display for MachineKind {
 pub struct VirtToml {
     pub memory_mib: Option<u32>,
     pub ips: Option<u32>,
-    pub cpu: Option<VirtCpuToml>,
+    pub cpu: Option<NamedToml<rusty_box_aarch64::CpuModel>>,
     pub firmware: Option<PathBuf>,
     pub builtin_firmware: Option<bool>,
     pub firmware_vars: Option<PathBuf>,
@@ -125,17 +128,24 @@ pub struct VirtToml {
     pub tablet: Option<bool>,
     pub disk: Option<PathBuf>,
     pub disk_read_only: Option<bool>,
+    pub spectre: Option<NamedToml<rusty_box_aarch64::SpectreReport>>,
     pub display: Option<VirtDisplayToml>,
 }
 
-/// `virt.cpu`: a processor model, by the name
-/// [`rusty_box_aarch64::CpuModel::name`] gives it. A name no model has is
-/// refused when the file is read, with the names there are.
+/// A `[virt]` key holding one of a closed set of board choices by its name
+/// (`virt.cpu`, `virt.spectre`): the name the choice displays as, which
+/// [`str::parse`] reads back. A name no choice has is refused when the file
+/// is read, with the names there are, as the choice's parse error gives
+/// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct VirtCpuToml(pub rusty_box_aarch64::CpuModel);
+#[serde(
+    try_from = "String",
+    into = "String",
+    bound = "T: Copy + core::str::FromStr<Err: core::fmt::Display> + core::fmt::Display"
+)]
+pub struct NamedToml<T>(pub T);
 
-impl TryFrom<String> for VirtCpuToml {
+impl<T: core::str::FromStr<Err: core::fmt::Display>> TryFrom<String> for NamedToml<T> {
     type Error = String;
 
     fn try_from(name: String) -> Result<Self, String> {
@@ -143,9 +153,9 @@ impl TryFrom<String> for VirtCpuToml {
     }
 }
 
-impl From<VirtCpuToml> for String {
-    fn from(cpu: VirtCpuToml) -> Self {
-        cpu.0.name().to_owned()
+impl<T: core::fmt::Display> From<NamedToml<T>> for String {
+    fn from(choice: NamedToml<T>) -> Self {
+        choice.0.to_string()
     }
 }
 
@@ -559,6 +569,9 @@ pub struct ArmVirtConfig {
     pub ips: u32,
     /// The processor.
     pub cpu: rusty_box_aarch64::CpuModel,
+    /// What the firmware tells the guest of the speculative-execution
+    /// workarounds.
+    pub spectre: rusty_box_aarch64::SpectreReport,
     pub boot: ArmBoot,
     /// The virtio-gpu, by the size it asks the guest for; `None` for none.
     pub display: Option<VirtioDisplaySize>,
@@ -756,6 +769,7 @@ impl ArmVirtConfig {
             memory_mib: DEFAULT_VIRT_MEMORY_MIB,
             ips: DEFAULT_VIRT_IPS,
             cpu: rusty_box_aarch64::CpuModel::default(),
+            spectre: rusty_box_aarch64::SpectreReport::DEFAULT,
             boot: ArmBoot::Unset,
             display: None,
             keyboard: false,
@@ -953,6 +967,9 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
         memory_mib,
         ips,
         cpu: virt.cpu.map_or_else(rusty_box_aarch64::CpuModel::default, |cpu| cpu.0),
+        spectre: virt
+            .spectre
+            .map_or(rusty_box_aarch64::SpectreReport::DEFAULT, |report| report.0),
         boot,
         display,
         keyboard: virt.keyboard.unwrap_or(false),
@@ -1244,7 +1261,8 @@ impl ArmVirtConfig {
         let mut virt = VirtToml {
             memory_mib: Some(self.memory_mib),
             ips: Some(self.ips),
-            cpu: Some(VirtCpuToml(self.cpu)),
+            cpu: Some(NamedToml(self.cpu)),
+            spectre: Some(NamedToml(self.spectre)),
             keyboard: Some(self.keyboard),
             tablet: Some(self.tablet),
             disk: self.disk.as_ref().map(|disk| disk.path.clone()),
@@ -3041,7 +3059,8 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
     }
 
     /// An Arm board read back from what the library writes for it is the
-    /// board it wrote, for each way it boots, each processor and each disk.
+    /// board it wrote, for each way it boots, each processor, each
+    /// speculation report and each disk.
     #[test]
     fn an_arm_virt_vm_round_trips_through_its_file() {
         let boots = [
@@ -3062,6 +3081,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             },
         ];
         let processors = rusty_box_aarch64::CpuModel::ALL.into_iter().cycle();
+        let mut reports = rusty_box_aarch64::SpectreReport::ALL.into_iter().cycle();
         let disks = [
             None,
             Some(VirtDisk {
@@ -3079,6 +3099,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
                     memory_mib: 1024,
                     ips: 75_000_000,
                     cpu,
+                    spectre: reports.next().unwrap_or_default(),
                     boot,
                     display: Some(VirtioDisplaySize {
                         width: 1024,
@@ -3112,6 +3133,29 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         assert_eq!(resolved.arm_virt(), Some(&ArmVirtConfig::blank()));
         assert_eq!(ArmVirtConfig::blank().memory_mib, 256, "QEMU virt's default RAM");
         assert_eq!(ArmVirtConfig::blank().cpu, rusty_box_aarch64::CpuModel::CortexA57);
+        assert_eq!(
+            ArmVirtConfig::blank().spectre,
+            rusty_box_aarch64::SpectreReport::NotRequired
+        );
+    }
+
+    /// `virt.spectre` is read by its answers' names; one no answer has is
+    /// refused when the file is read, naming the answers there are.
+    #[test]
+    fn virt_spectre_takes_a_report_by_name_and_refuses_others() {
+        let board = |report: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\nspectre = \"{report}\"\n");
+        for report in rusty_box_aarch64::SpectreReport::ALL {
+            let file: FileConfig = toml::from_str(&board(report.name())).unwrap();
+            let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+            assert_eq!(resolved.arm_virt().map(|virt| virt.spectre), Some(report));
+        }
+        let refused = toml::from_str::<FileConfig>(&board("vulnerable"))
+            .expect_err("no report is named so")
+            .to_string();
+        assert!(
+            refused.contains("\"vulnerable\"") && refused.contains("\"not-required\""),
+            "{refused}"
+        );
     }
 
     /// `virt.cpu` names the processor by its model's name; a name no model

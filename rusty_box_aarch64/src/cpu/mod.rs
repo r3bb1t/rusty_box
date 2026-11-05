@@ -103,6 +103,7 @@ pub use mmu::{Ipa, LeafLevel, Level, NoTranslation, Tlb, TranslationFault, Trans
 pub use regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, SysReg, SysRegRefusal, VReg};
 pub(crate) use sysreg::WriteEffect;
 pub(crate) use system::{PsciConduit, PSCI_COMPATIBLE};
+pub use system::{SpectreReport, UnknownSpectreReport};
 pub use timer::{TimerLines, VirtualCount};
 pub use wait::Wait;
 
@@ -628,6 +629,9 @@ pub struct Cpu<L: Levels> {
     pub(crate) irq_line: bool,
     pub(crate) fiq_line: bool,
     pub(crate) debug_stops: DebugStops,
+    /// What the board's firmware answers of the speculative-execution
+    /// workarounds ([`Cpu::set_spectre_report`]).
+    pub(crate) spectre: SpectreReport,
     /// Where the last [`PC_HISTORY`] instructions ran. Every write of `pc`
     /// other than the step to the next sequential instruction tells it.
     pub(crate) history: history::PcHistory,
@@ -690,6 +694,7 @@ impl<L: Levels> Cpu<L> {
                 on_undefined: false,
                 on_bus_fault: false,
             },
+            spectre: SpectreReport::DEFAULT,
             history: history::PcHistory::new(config.reset_pc, 0),
         }
     }

@@ -40,8 +40,8 @@ use crate::boot::{
 use crate::bus::{load_le, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
 use crate::cpu::{
     Activity, Cpu, CpuConfig, CpuModel, CpuState, DebugStops, El2Unavailable, Levels, NoEl2,
-    NoTranslation, PsciConduit, Pstate, PstateRefusal, Reg, Step, StopCause, SysReg, PSCI_COMPATIBLE,
-    SysRegRefusal, UndefinedInsn, VReg, WithEl2, WriteEffect,
+    NoTranslation, PsciConduit, Pstate, PstateRefusal, Reg, SpectreReport, Step, StopCause, SysReg,
+    PSCI_COMPATIBLE, SysRegRefusal, UndefinedInsn, VReg, WithEl2, WriteEffect,
 };
 use crate::devices::gicv2::GicExtensions;
 use crate::devices::pl011::TX_CAPACITY;
@@ -89,6 +89,9 @@ pub struct VirtConfig {
     /// Faults that stop the machine instead of reaching the guest.
     pub debug_stops: DebugStops,
     pub on_reset_request: OnResetRequest,
+    /// What the board's firmware tells the guest of the speculative-execution
+    /// workarounds (SMCCC `SMCCC_ARCH_FEATURES`).
+    pub spectre: SpectreReport,
 }
 
 impl VirtConfig {
@@ -104,6 +107,7 @@ impl VirtConfig {
             on_bus_fault: false,
         },
         on_reset_request: OnResetRequest::Reset,
+        spectre: SpectreReport::DEFAULT,
     };
 }
 
@@ -963,6 +967,7 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
         config.cpu.implementation(),
     );
     cpu.set_debug_stops(config.debug_stops);
+    cpu.set_spectre_report(config.spectre);
     #[cfg(feature = "alloc")]
     cpu.cover_code_memory(storage.ram().len() as u64);
     let devices = plugs.devices;
@@ -2052,6 +2057,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             devices: self.devices.mask(),
             disk: self.disk_sectors(),
             virtualization: u8::from(L::EL2),
+            spectre: self.config.spectre.tag(),
         }
     }
 
@@ -2207,11 +2213,11 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// what Software Step stepped, each TLB entry's stage 2 permissions and
 /// level beside stage 1's and the memory each stage and both together map
 /// it to, the TLB's kept stage 2 translations, its tables of EL1&0 and
-/// stage 2 contexts, the shape's identity fingerprint, and the board's
-/// devices: the GIC with its Virtualization Extensions where it has them,
+/// stage 2 contexts, the shape's identity fingerprint and the firmware's
+/// speculation report, and the board's devices: the GIC with its Virtualization Extensions where it has them,
 /// the PL011, the PL031, the PL061, both flash banks and every virtio-mmio
 /// transport.
-const SNAPSHOT_VERSION: u32 = 21;
+const SNAPSHOT_VERSION: u32 = 22;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2237,6 +2243,10 @@ struct Shape {
     disk: Option<u64>,
     /// Whether the processor has EL2 ([`Levels::EL2`]): 1 with, 0 without.
     virtualization: u8,
+    /// What the firmware tells the guest of the speculative-execution
+    /// workarounds ([`SpectreReport::tag`]), which the guest may have read
+    /// and acted on.
+    spectre: u8,
 }
 
 impl Shape {
@@ -2259,7 +2269,8 @@ impl Shape {
         w.write_u8(self.devices)?;
         w.write_bool(self.disk.is_some())?;
         w.write_u64(self.disk.unwrap_or(0))?;
-        w.write_u8(self.virtualization)
+        w.write_u8(self.virtualization)?;
+        w.write_u8(self.spectre)
     }
 
     fn restore<R: SnapRead>(r: &mut R) -> SnapResult<Self> {
@@ -2288,6 +2299,7 @@ impl Shape {
                 present.then_some(sectors)
             },
             virtualization: r.read_u8()?,
+            spectre: r.read_u8()?,
         })
     }
 }
