@@ -26,7 +26,6 @@ mod psci {
     pub(super) const CPU_ON_64: u32 = 0xC400_0003;
     pub(super) const AFFINITY_INFO_32: u32 = 0x8400_0004;
     pub(super) const AFFINITY_INFO_64: u32 = 0xC400_0004;
-    pub(super) const MIGRATE_64: u32 = 0xC400_0005;
     pub(super) const MIGRATE_INFO_TYPE: u32 = 0x8400_0006;
     pub(super) const SYSTEM_OFF: u32 = 0x8400_0008;
     pub(super) const SYSTEM_RESET: u32 = 0x8400_0009;
@@ -872,22 +871,13 @@ impl PsciConduit {
     }
 }
 
-/// The device tree's `/psci` node besides its `method`, as QEMU's
-/// `fdt_add_psci_node` writes it for an AArch64 processor with PSCI 1.0 or
-/// later: `compatible` naming PSCI 1.0, 0.2 and the 0.1 binding, and the
-/// PSCI 0.1 binding's function identifiers, the SMC64 `CPU_SUSPEND`,
-/// `CPU_ON` and `MIGRATE` and `CPU_OFF`. A caller of PSCI 0.2 or later
-/// finds every function by its standard identifier instead.
-pub(crate) struct PsciNode;
-
-impl PsciNode {
-    /// `compatible`, its strings each NUL-terminated.
-    pub(crate) const COMPATIBLE: &'static [u8] = b"arm,psci-1.0\0arm,psci-0.2\0arm,psci\0";
-    pub(crate) const CPU_SUSPEND: u32 = psci::CPU_SUSPEND_64;
-    pub(crate) const CPU_OFF: u32 = psci::CPU_OFF;
-    pub(crate) const CPU_ON: u32 = psci::CPU_ON_64;
-    pub(crate) const MIGRATE: u32 = psci::MIGRATE_64;
-}
+/// The device tree's `/psci` `compatible`, its strings each NUL-terminated:
+/// PSCI 1.0 and 0.2 (the `arm,psci-1.0` binding covers 1.0 and later, and
+/// the firmware answers 1.1). A caller of PSCI 0.2 or later finds every
+/// function by its standard identifier (DEN 0022), so the node gives
+/// neither the 0.1 binding nor its function identifiers, which a firmware
+/// of 0.1 alone would name.
+pub(crate) const PSCI_COMPATIBLE: &[u8] = b"arm,psci-1.0\0arm,psci-0.2\0";
 
 /// The PSCI functions `psci_call` implements, for `PSCI_FEATURES`.
 fn psci_supported(id: u32) -> bool {

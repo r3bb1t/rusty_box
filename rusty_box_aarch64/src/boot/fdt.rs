@@ -27,12 +27,17 @@
 //! changes.
 
 const FDT_MAGIC: u32 = 0xD00D_FEED;
-const FDT_BEGIN_NODE: u32 = 1;
-const FDT_END_NODE: u32 = 2;
+pub(super) const FDT_BEGIN_NODE: u32 = 1;
+pub(super) const FDT_END_NODE: u32 = 2;
 const FDT_PROP: u32 = 3;
 const FDT_NOP: u32 = 4;
-const FDT_END: u32 = 9;
-const HEADER_LEN: usize = 40;
+pub(super) const FDT_END: u32 = 9;
+/// The header (5.2), before the memory reservation block.
+pub(super) const HEADER_LEN: usize = 40;
+/// The version a written tree is (5.2), and the oldest it is compatible
+/// with.
+const VERSION: u32 = 17;
+const LAST_COMPATIBLE_VERSION: u32 = 16;
 
 /// How far below the root a node may sit: Linux's `unflatten_dt_nodes`
 /// skips every node at a depth of `FDT_MAX_DEPTH - 1` (63) or more, the
@@ -230,14 +235,47 @@ fn find_string(strings: &[u8], name: &str) -> Option<usize> {
 }
 
 /// A destination that measures when it has no buffer.
-struct Out<'a> {
+pub(super) struct Out<'a> {
     buf: &'a mut [u8],
     measuring: bool,
     pos: usize,
 }
 
+/// Where a tree's blocks lie and how long they are: its header's fields
+/// but the magic, the versions and the memory reservation block's offset,
+/// which is right after the header (5.2).
+pub(super) struct Header {
+    pub(super) total: usize,
+    pub(super) struct_at: usize,
+    pub(super) strings_at: usize,
+    pub(super) boot_cpuid: u32,
+    pub(super) strings_len: usize,
+    pub(super) struct_len: usize,
+}
+
+impl<'a> Out<'a> {
+    /// Writing into `buf` from `pos`.
+    pub(super) fn writing_at(buf: &'a mut [u8], pos: usize) -> Self {
+        Self {
+            buf,
+            measuring: false,
+            pos,
+        }
+    }
+}
+
 impl Out<'_> {
-    fn put(&mut self, bytes: &[u8]) -> Result<(), DeviceTreeError> {
+    /// Where the next byte goes.
+    pub(super) fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Go on writing from `pos`.
+    pub(super) fn seek(&mut self, pos: usize) {
+        self.pos = pos;
+    }
+
+    pub(super) fn put(&mut self, bytes: &[u8]) -> Result<(), DeviceTreeError> {
         let end = self
             .pos
             .checked_add(bytes.len())
@@ -252,15 +290,42 @@ impl Out<'_> {
         Ok(())
     }
 
-    fn put_u32(&mut self, v: u32) -> Result<(), DeviceTreeError> {
+    pub(super) fn put_u32(&mut self, v: u32) -> Result<(), DeviceTreeError> {
         self.put(&v.to_be_bytes())
     }
 
-    fn pad4(&mut self) -> Result<(), DeviceTreeError> {
+    /// A count or an offset as a header or token field, which is 32 bits.
+    fn put_len(&mut self, n: usize) -> Result<(), DeviceTreeError> {
+        self.put_u32(u32::try_from(n).map_err(|_| DeviceTreeError::TooLarge)?)
+    }
+
+    pub(super) fn pad4(&mut self) -> Result<(), DeviceTreeError> {
         while !self.pos.is_multiple_of(4) {
             self.put(&[0])?;
         }
         Ok(())
+    }
+
+    /// An `FDT_PROP` token's head (5.4.1): a value of `len` bytes follows,
+    /// its name at `name_off` in the strings block.
+    pub(super) fn put_prop_head(&mut self, len: usize, name_off: usize) -> Result<(), DeviceTreeError> {
+        self.put_u32(FDT_PROP)?;
+        self.put_len(len)?;
+        self.put_len(name_off)
+    }
+
+    /// The header (5.2), version 17 compatible back to 16.
+    pub(super) fn put_header(&mut self, header: &Header) -> Result<(), DeviceTreeError> {
+        self.put_u32(FDT_MAGIC)?;
+        self.put_len(header.total)?;
+        self.put_len(header.struct_at)?;
+        self.put_len(header.strings_at)?;
+        self.put_len(HEADER_LEN)?;
+        self.put_u32(VERSION)?;
+        self.put_u32(LAST_COMPATIBLE_VERSION)?;
+        self.put_u32(header.boot_cpuid)?;
+        self.put_len(header.strings_len)?;
+        self.put_len(header.struct_len)
     }
 }
 
@@ -342,9 +407,7 @@ fn put_prop(
     padding: &[u8],
 ) -> Result<(), DeviceTreeError> {
     let len = set.value.len();
-    out.put_u32(FDT_PROP)?;
-    out.put_u32(u32::try_from(len).map_err(|_| DeviceTreeError::TooLarge)?)?;
-    out.put_u32(u32::try_from(name_off).map_err(|_| DeviceTreeError::TooLarge)?)?;
+    out.put_prop_head(len, name_off)?;
     match set.value {
         Value::Bytes(b) => out.put(b)?,
         Value::String(s) => {
@@ -778,26 +841,15 @@ pub(crate) fn rebuild(
         return Err(DeviceTreeError::TooLarge);
     }
 
-    let mut out = Out {
-        buf: dst,
-        measuring: false,
-        pos: 0,
-    };
-    let header = [
-        FDT_MAGIC,
-        total as u32,
-        struct_at as u32,
-        strings_at as u32,
-        HEADER_LEN as u32,
-        17,
-        16,
+    let mut out = Out::writing_at(dst, 0);
+    out.put_header(&Header {
+        total,
+        struct_at,
+        strings_at,
         boot_cpuid,
-        new_strings_len as u32,
-        new_struct_len as u32,
-    ];
-    for field in header {
-        out.put_u32(field)?;
-    }
+        strings_len: new_strings_len,
+        struct_len: new_struct_len,
+    })?;
     out.put(rsvmap)?;
     structure(structure_src, strings, &names, &mut out)?;
     out.put(strings)?;
@@ -1101,7 +1153,8 @@ mod tests {
     }
 
     /// The edits land where libfdt's `fdt_setprop` and `fdt_add_subnode`
-    /// put them, so the board's tree is laid out as QEMU's: QEMU 11.1.2,
+    /// put them, so a host's tree is laid out as QEMU lays out a `-dtb`
+    /// tree it edits: QEMU 11.1.2,
     /// `-M virt,dumpdtb -cpu cortex-a57 -kernel -initrd -append`, gives
     /// `/chosen` as `linux,initrd-end`, `linux,initrd-start`, `bootargs`,
     /// then the properties it had, having set them (`arm_load_dtb`) in

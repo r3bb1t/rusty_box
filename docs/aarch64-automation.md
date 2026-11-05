@@ -79,16 +79,21 @@ let mut machine = MachineBuilder::new(VirtConfig::default())
 Or nothing at all: a bare machine starts at the base of RAM, for a host that
 writes its own code there (section 5).
 
-The device tree is QEMU's own for this board, its processor node made the
-processor's, unless `device_tree(..)` gives another, which keeps its own
-processor node, as QEMU's `-dtb` does. Either way, as QEMU's
-`arm_load_dtb` edits a tree, its memory nodes are replaced by one for the
-RAM the machine has, `/chosen` is added where it has none, and its `/psci`
-node is replaced by QEMU's, whose `method` names the conduit the firmware
-answers on. Either way its `/model` and root `compatible` are the machine's
-identity's (below), and it has no `fw-cfg` or `platform-bus` node, as the
-board has neither device; `machine.device_tree()` returns what the guest
-was given. `boot::fdt::property` reads a property back out of it.
+The device tree is the board's own, written from the board
+(`src/boot/tree.rs`): generic node names (`serial@9000000`,
+`interrupt-controller@8000000`, `virtio@a000000`, `clock`, ...), the
+processor's caches as `CCSIDR_EL1` reports them, `/psci` for PSCI 1.0 and
+0.2 on the conduit the firmware answers on, and `/chosen` with its console,
+command line and initrd but no boot entropy, which a deterministic machine
+would repeat on every boot. `device_tree(..)` gives another,
+which keeps its own processor and GIC nodes, as QEMU's `-dtb` does, and is
+edited as QEMU's `arm_load_dtb` edits a tree: its memory nodes are replaced
+by one for the RAM the machine has, `/chosen` is added where it has none,
+and its `/psci` node is replaced by the board's. Either way its `/model`
+and root `compatible` are the machine's identity's (below), and it has no
+`fw-cfg` or `platform-bus` node, as the board has neither device;
+`machine.device_tree()` returns what the guest was given.
+`boot::fdt::property` reads a property back out of it.
 
 **The machine's name.** Everything a guest reads that says who made the
 machine — the device tree's `/model` and root `compatible`, every

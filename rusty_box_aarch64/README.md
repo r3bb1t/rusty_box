@@ -296,10 +296,10 @@ is) must reproduce, are:
 | Part | Model |
 |---|---|
 | Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, with QEMU's 62.5 MHz system counter. `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, an MMU with the 4 KiB granule and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB and 64 KiB granules too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
-| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0803_0000, the common base and processor 0's at 0x0803_1000, 4 KiB each) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0804_0000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as QEMU's `virtualization=on` board names them |
+| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0803_0000, the common base and processor 0's at 0x0803_1000, 4 KiB each) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0804_0000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
 | Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), no `fw_cfg` (see "Where the references differ"), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
-| Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two QEMU bugs fixed, see "Where the references differ"; its `rng-seed` and `kaslr-seed` fixed, see below), its memory node replaced by one for the machine's RAM, `/chosen` set per machine, its `/psci` node replaced by QEMU's for the conduit the firmware answers on (`fdt_add_psci_node`), its processor's `compatible` set to the model's, and its `/model` and root `compatible` set to the board's identity's, where libfdt puts them, so a kernel boot's tree is QEMU's property for property but for the names; with EL2, its GIC node's `reg` named QEMU's four windows and an `interrupts` property for the maintenance interrupt added, as QEMU's `virtualization=on` gives them (`fdt_add_gic_node`), the one difference that `interrupts` stands before `phandle` where QEMU's, set before QEMU sets `phandle`, stands after it (libfdt puts a new property first; the Devicetree Specification gives property order no meaning); neither the `fw-cfg` node nor QEMU's platform bus, which the board does not have (see "Where the references differ"); a host's own tree gets the same, its names the identity's too, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does |
+| Board | QEMU `virt` memory map and IRQ wiring; the board's own device tree, written from the board (`src/boot/tree.rs`): generic node names (Devicetree Specification 2.2.2), each node as its binding describes it, the GIC with each frame the size it decodes, `dma-coherent` on each device that makes DMA, the processor's caches down to the L2 as `CCSIDR_EL1` reports them, `/psci` for PSCI 1.0 and 0.2 on the conduit the firmware answers on, `/chosen` with EBBR's `stdout-path` and no boot entropy (see "Where the references differ"), and the identity's `/model` and root `compatible`; no PMU, `fw-cfg` or platform bus node, which the board does not have; with EL2, the virtual interface's two frames and its maintenance interrupt in the GIC node; a host's own tree gets its names the identity's, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves, and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
 Provenance: Arm's documents decide wherever they speak — the Arm ARM (DDI
@@ -1031,10 +1031,10 @@ integration tests of the public API.
   does not (AArch32, the PMU, its IMPLEMENTATION DEFINED registers) and
   DBGPRCR_EL1, which QEMU lacks. `tests/virtualization.rs` runs the board
   with virtualization: firmware entered at EL2, the device tree's PSCI
-  method, a host's tree given QEMU's `/psci` node and an empty `/chosen`
-  where it has none (and `tests/unit/machine.rs` one whose `/psci` node is
-  another PSCI 0.1 node, and another memory node, coming out as QEMU's own
-  tree does), a hypervisor taking the EL2 timer's PPI 10 and powering off with
+  method, a host's tree given the board's `/psci` node and an empty
+  `/chosen` where it has none (and `tests/unit/machine.rs` one whose `/psci`
+  node is a PSCI 0.1 node and which has another memory node, both
+  replaced), a hypervisor taking the EL2 timer's PPI 10 and powering off with
   `SMC`, the virtual timer's PPI 11 taken within two turns of the guest's
   two-instruction loop after the `CNTVOFF_EL2` write that moves the
   virtual count past `CVAL`, and a
@@ -1378,11 +1378,11 @@ one open.
   0488C, 6.1) gives a 32 KiB 2-way set-associative data cache with 64-byte
   lines, which `CCSIDR_EL1` reports here (0x701F_E00A, 256 sets). QEMU 9.2
   and later report 4 ways and 128 sets, in `CCSIDR_EL1` and in the `virt`
-  device tree's `d-cache-sets`. The device tree in `assets/` is the one
-  QEMU 11.1.2 generates with that fixed and with no `next-level-cache` (QEMU
-  writes phandle 0 when it makes no L2 node): [docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md)
-  has both patches. `src/boot.rs` checks the device tree against
-  `CCSIDR_EL1`.
+  device tree's `d-cache-sets`, and name a `next-level-cache` of phandle 0
+  when they make no L2 node: [docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md)
+  has both patches. The board's own tree describes the caches from
+  `CCSIDR_EL1`, the L2 among them, and `tests/unit/board_tree.rs` checks
+  them against it.
 - **The Armv9.2 model is a software model in its device tree too.** Its
   `MIDR_EL1` names implementer 0, reserved for software use, as QEMU's
   `max` does (`aarch64_max_tcg_initfn`), with part 0x052 where QEMU's is
@@ -1944,14 +1944,46 @@ one open.
   entered as standby and returns SUCCESS at the next instruction once an
   interrupt is pending; §5.4.5 permits downgrading a powerdown request
   so.
-- **The device tree's seeds and L1 data cache.** The tree in `assets/` is
-  QEMU 11.1.2's `dumpdtb` output with two values replaced in place. QEMU
-  draws a fresh `/chosen` `rng-seed` and `kaslr-seed` on every run; this
-  board's are fixed, so runs are deterministic. QEMU 11's `cortex-a57`
-  (`aarch64_aa32_a57_init` in `target/arm/cpu-max.c`) makes the L1 data
-  cache 4-way, where the Cortex-A57 MPCore TRM, and QEMU 8.2, make it 2-way;
-  this model's `CCSIDR_EL1` is the TRM's, and the tree's `d-cache-sets` is
-  `0x100` to agree with it.
+- **The device tree's seeds and L1 data cache.** QEMU draws a fresh
+  `/chosen` `rng-seed` and `kaslr-seed` from the host on every boot and
+  every reset (`qemu_fdt_randomize_seeds`). This board writes neither:
+  Linux credits an `rng-seed` as entropy (`random.trust_bootloader`), and
+  a deterministic machine would give the same bytes to every boot of the
+  same configuration and again after each reset, so a guest's keys would
+  be computable from its configuration. The guest gathers its own
+  entropy, and a directly booted kernel, finding no `kaslr-seed`, leaves
+  its base where it loaded. A host's own tree keeps whatever `/chosen`
+  seeds the host wrote into it, which then repeat as the host wrote them.
+  QEMU 11's
+  `cortex-a57` (`aarch64_aa32_a57_init` in `target/arm/cpu-max.c`) makes
+  the L1 data cache 4-way, where the Cortex-A57 MPCore TRM, and QEMU 8.2,
+  make it 2-way; this model's `CCSIDR_EL1` is the TRM's, and the tree's
+  `d-cache-sets` is `0x100` to agree with it.
+- **The device tree describes what the board has, as it has it.** Each
+  virtio-mmio transport's interrupt is level-high, the line being held
+  while its `InterruptStatus` is not zero; QEMU's `virtio_mmio_update_irq`
+  drives the same level but its tree calls it rising-edge
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 53).
+  The GIC node's regions are the 4 KiB distributor and 8 KiB CPU
+  interface the GIC decodes (and with EL2 the 8 KiB virtual interface
+  frames, as the GIC-400 has them, DDI 0471B), where QEMU's give the
+  64 KiB windows `virt` reserves. A hypervisor built for 64 KiB pages
+  cannot map an 8 KiB `GICV_*` frame into its guest page for page, so
+  Linux's KVM then traps the guest's CPU interface accesses ("GICV region
+  size/alignment is unsafe, using trapping"), as it does on hardware
+  whose GIC is not aliased across 64 KiB; with 4 KiB pages it maps the
+  frame. `/psci`
+  names PSCI 1.0 and 0.2, whose callers find every function by its
+  standard identifier (DEN 0022); QEMU's adds the 0.1 binding and its
+  function identifiers, so a guest that knows the 0.1 binding alone
+  (Linux before 3.16) finds PSCI on QEMU and not here, in the board's tree
+  or in a host's, whose `/psci` node is replaced by the board's. `dma-coherent` is on each device that makes DMA,
+  the property being a device's (Devicetree Specification 2.3), not on
+  the root as well. There is no PMU node, `ID_AA64DFR0_EL1.PMUVer` being 0;
+  QEMU writes one only for a processor with a PMU. The PCIe host names the
+  GICv2m frame as its `msi-parent`, the frame taking no MSI specifier;
+  QEMU's gives it an `msi-map` entry whose specifier cell the frame does
+  not have.
 - **virtio DMA reaches RAM only.** QEMU's `dma_memory_map` maps a ring or
   buffer wherever the address space has a region (`address_space_map`):
   RAM and, for reading, a flash bank in read-array mode directly, anything
@@ -1997,7 +2029,7 @@ one open.
   architecture of the implementation" (§4.3.18), Arm's GICv2. Linux's GIC
   driver keys on Arm's code in `GICC_IIDR` to recognise a GIC-400 behind
   a CPU interface a device tree gives as 4 KiB (`gic_check_gicv2`); this
-  board's tree gives 64 KiB. And no device tree
+  board's tree gives 8 KiB, the region the CPU interface decodes. And no device tree
   has QEMU's platform bus, on which the board puts no device. A tree the
   host gives is named the same way: QEMU's
   `-dtb` keeps a tree's own names, but a tree dumped from QEMU would then
@@ -2570,6 +2602,70 @@ one open.
   driver that waits for `BUSY` after every character, as Linux's
   `pl011_putc` does, spin for each frame's time, and a guest that
   programs no divisor unable to transmit, as on hardware.
+
+## QEMU fingerprints left
+
+The board never names QEMU to a guest ("The board names itself" above),
+and it is to show no value a guest can read that came from QEMU's own
+choices where Arm's, virtio's or VESA's documents leave the choice
+open. The device tree is the board's own (`src/boot/tree.rs`). A survey
+of 2026-11-05 counted 135 such values; what is left of them:
+
+**Kept for stock firmware.** Stock EDK2 `ArmVirtQemu` is built around
+these as fixed PCDs or fixed code, so changing one stops it booting; each
+waits for a firmware build of the board's own:
+
+- RAM at 0x4000_0000 and, for a firmware boot, the device tree at its
+  base (`PcdSystemMemoryBase`, `PcdDeviceTreeInitialBaseAddress`,
+  `PcdCPUCoresStackBase` in `ArmVirtQemu.dsc`).
+- The flash: banks at 0 and 0x0400_0000 of 64 MiB, the firmware volume at
+  0 with its jump at the reset vector (`ArmVirtQemu.fdf`), 256 KiB sectors
+  (`FdtNorFlashQemuLib.c`, `VarStore.fdf.inc`), each bank two 16-bit
+  devices side by side (`VirtNorFlashDeviceLib.h`), and its device-ID
+  query reading every block unlocked, which EDK2 reads at offset 2.
+- The PL011's 24 MHz `UARTCLK` (`PL011UartClkInHz`, which EDK2 works the
+  baud divisor out from).
+- `arm,cortex-a15-gic` as the GIC node's `compatible`, the string
+  EDK2's GIC discovery looks for (`ArmVirtGicPlatformDxe` on its master
+  branch, `ArmVirtGicArchLib` in releases before it). The GICv2 binding names no
+  generic GICv2, only products, and every product it names has the
+  Security Extensions this GIC lacks, so no string fits better.
+- Not a fingerprint but a risk: EDK2 master's `QemuVirtMemInfoLib` asks
+  for a `qemu,fw-cfg-mmio` node and stops without one, so a current build
+  of `ArmVirtQemu` does not boot this board, which has no `fw_cfg`; the
+  builds tested here (Ubuntu's, UEFI 2.70) do.
+
+**Still to replace**, each with a value from a specification or one of
+the board's own:
+
+- The rest of the memory map and interrupt wiring: the GIC, PrimeCell,
+  virtio and PCIe windows, the SPIs (the UART's 1, the RTC's 2, the PCIe
+  host's 3 to 6, the GPIO's 7, the virtio transports' 16 to 47, the
+  GICv2m frame's 80 to 143), and 32 virtio transports filled from
+  the last down.
+- The processor and timer: the Cortex-A57's 62.5 MHz counter, its L2 of
+  2 MiB and 16 ways (QEMU's pick of the TRM's 512 KiB to 2 MiB), which
+  `CCSIDR_EL1` and the device tree give, the Armv9.2 model's A57 caches,
+  and choices QEMU made where Arm leaves them
+  IMPLEMENTATION DEFINED or UNKNOWN (pointer-authentication keys at reset,
+  unimplemented `CSSELR_EL1` selections, the order virtual interrupts are
+  taken).
+- The GIC's 256 SPIs, its eight priority bits, the GICv2m frame's SPI
+  base and count.
+- PrimeCell behaviour where the TRMs are silent (the UART's empty-FIFO
+  read, FIFO flush, loopback; the RTC's alarm at a match already passed).
+- The power button on the PL061's line 3, the line QEMU's `virt` wires
+  it to, which the device tree's `gpio-keys` node names.
+- The flash's CFI identity: manufacturer 0x89 (Intel), device 0x18, and
+  QEMU's CFI table values.
+- The PSCI and SMCCC function set, PSCI 1.1 and SMCCC 1.0 alone.
+- virtio values: queue sizes, the block device's limits and geometry, the
+  GPU's resource and backing limits, the 20-byte GPU configuration.
+- The EDID's layout, which is `qemu_edid_generate`'s: its mode list,
+  timings, rate, density and extension blocks.
+- virtio-input's key and button sets, the tablet's 0 to 0x7FFF range.
+- The direct boot's placement of the kernel, initrd and device tree, and
+  `x4` holding the entry, left from QEMU's boot stub.
 
 ## Not implemented
 

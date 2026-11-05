@@ -75,7 +75,7 @@ struct Started {
 }
 
 /// [`Started`] of a machine of `kind`, given its device tree from `source`
-/// or, without one, from QEMU's.
+/// or, without one, the board's own.
 fn started(kind: Kind, source: Option<&[u8]>) -> Started {
     fn observe<L: Levels>(m: &VirtMachine<LentStorage<'_>, L>) -> Started {
         Started {
@@ -103,19 +103,20 @@ fn started(kind: Kind, source: Option<&[u8]>) -> Started {
     }
 }
 
-/// The GIC node's `reg` with the Virtualization Extensions, as QEMU's
-/// `fdt_add_gic_node` writes it under `virtualization=on`: the distributor's, CPU
-/// interface's, virtual interface control registers' and virtual CPU
-/// interface's 64 KiB windows.
+/// The GIC node's `reg` with the Virtualization Extensions: the
+/// distributor's, CPU interface's, virtual interface control registers' and
+/// virtual CPU interface's frames, each the size it decodes (the
+/// GIC binding's regions, IHI 0048B's 4 KiB distributor and 8 KiB
+/// interfaces).
 const GIC_REG_WITH_EL2: [u64; 8] = [
     0x0800_0000,
-    0x1_0000,
+    0x1000,
     0x0801_0000,
-    0x1_0000,
+    0x2000,
     0x0803_0000,
-    0x1_0000,
+    0x2000,
     0x0804_0000,
-    0x1_0000,
+    0x2000,
 ];
 
 fn be_cells(cells: &[u64]) -> Vec<u8> {
@@ -123,20 +124,20 @@ fn be_cells(cells: &[u64]) -> Vec<u8> {
 }
 
 /// The GIC node's `interrupts` with the Virtualization Extensions: the
-/// maintenance interrupt, PPI 9 (INTID 25), level-high.
+/// maintenance interrupt, PPI 9 (INTID 25), level-high, to the one
+/// processor.
 fn maintenance_interrupt() -> Vec<u8> {
-    [1u32, 9, 4].iter().flat_map(|c| c.to_be_bytes()).collect()
+    [1u32, 9, 0x104].iter().flat_map(|c| c.to_be_bytes()).collect()
 }
 
 /// With virtualization, firmware starts at EL2 with `SP_EL2` selected (Arm
 /// `AArch64_TakeReset`: the highest implemented level, there being no
-/// EL3), and the device tree's `/psci` node names `smc` as its method, as
-/// QEMU's `fdt_add_psci_node` writes it for a processor with EL2 and no
-/// EL3; without, the firmware starts at EL1 and the method is `hvc`. With
-/// virtualization the GIC node also names the virtual interface's two
-/// windows and its maintenance interrupt, PPI 9 (INTID 25) level-high, as
-/// QEMU's `fdt_add_gic_node` does under `virtualization=on`. Nothing else in the
-/// tree differs.
+/// EL3), and the device tree's `/psci` node names `smc` as its method, the
+/// conduit to a firmware at EL2 when there is no EL3; without, the firmware
+/// starts at EL1 and the method is `hvc`. With virtualization the GIC node
+/// also names the virtual interface's two frames and its maintenance
+/// interrupt, PPI 9 (INTID 25) level-high (the GIC binding).
+/// Nothing else in the tree differs.
 #[test]
 fn virtualization_starts_at_el2_and_calls_psci_with_smc() {
     let gic_reg_without = be_cells(&GIC_REG_WITH_EL2[..4]);
@@ -172,15 +173,15 @@ fn virtualization_starts_at_el2_and_calls_psci_with_smc() {
         );
         assert_eq!(
             fdt::property(&tree, "psci", "compatible"),
-            Ok(Some(&b"arm,psci-1.0\0arm,psci-0.2\0arm,psci\0"[..]))
+            Ok(Some(&b"arm,psci-1.0\0arm,psci-0.2\0"[..]))
         );
         assert_eq!(
-            fdt::property(&tree, "intc@8000000", "reg"),
+            fdt::property(&tree, "interrupt-controller@8000000", "reg"),
             Ok(Some(gic_reg)),
             "{kind:?}"
         );
         assert_eq!(
-            fdt::property(&tree, "intc@8000000", "interrupts"),
+            fdt::property(&tree, "interrupt-controller@8000000", "interrupts"),
             Ok(gic_interrupts),
             "{kind:?}"
         );
@@ -191,8 +192,8 @@ fn virtualization_starts_at_el2_and_calls_psci_with_smc() {
     // properties holding the same bytes.
     let differing = [
         ("/psci", "method"),
-        ("/intc@8000000", "reg"),
-        ("/intc@8000000", "interrupts"),
+        ("/interrupt-controller@8000000", "reg"),
+        ("/interrupt-controller@8000000", "interrupts"),
     ];
     // Each differing property is there at most once in each tree: one that
     // an edit added twice is not hidden by the comparison.
@@ -214,13 +215,13 @@ fn virtualization_starts_at_el2_and_calls_psci_with_smc() {
     assert_eq!(without_differing(&trees[0]), without_differing(&trees[1]));
 }
 
-/// A host's own device tree with no `/psci` node gains QEMU's, as QEMU's
-/// `fdt_add_psci_node` adds it to every tree it hands a guest, with the
-/// machine's method; and an empty `/chosen`, which `arm_load_dtb` adds
-/// where a tree has none, with the memory node every tree is given. The
-/// node added last comes first, as libfdt adds a node.
+/// A host's own device tree with no `/psci` node gains the board's, as
+/// QEMU's `fdt_add_psci_node` adds its own to every tree it hands a guest,
+/// with the machine's method; and an empty `/chosen`, which `arm_load_dtb`
+/// adds where a tree has none, with the memory node every tree is given.
+/// The node added last comes first, as libfdt adds a node.
 #[test]
-fn a_tree_without_psci_gains_qemu_s_psci_node() {
+fn a_tree_without_psci_gains_the_boards_psci_node() {
     // A flattened device tree holding an empty root node: the header, the
     // memory reservation block's terminator, the structure block, and no
     // strings.
@@ -741,19 +742,13 @@ fn a_reset_keeps_the_virtual_interface() {
 }
 
 /// A kernel booted directly with EL2, a command line and an initrd is
-/// entered at EL2, and its device tree gets every edit the board makes: the
-/// processor's `compatible`, the identity's names, the memory node,
-/// `/chosen` with the command line and the initrd, the `/psci` node for
-/// `SMC`, and the GIC node's virtual interface.
+/// entered at EL2, and its device tree says all of it: the identity's
+/// names, `/chosen` with the command line and the initrd, the `/psci` node
+/// for `SMC`, and the GIC node's virtual interface.
 #[test]
-fn a_kernel_booted_with_el2_gets_every_device_tree_edit() {
+fn a_kernel_booted_with_el2_finds_all_of_it_in_its_device_tree() {
     const MIB: u64 = 1 << 20;
-    // A 64-byte arm64 `Image` header (text_offset 0) and `b .` as the kernel.
-    let mut kernel = vec![0u8; 68];
-    kernel[16..24].copy_from_slice(&0x18_0000u64.to_le_bytes());
-    kernel[56..60].copy_from_slice(b"ARM\x64");
-    kernel[0..4].copy_from_slice(&SPIN.to_le_bytes());
-    let initrd = vec![0x5Au8; 3000];
+    let (kernel, initrd) = kernel_and_initrd();
     let image = LinuxImage::parse(&kernel).expect("an Image");
     // Room for the kernel at 2 MiB, the initrd above it and the tree.
     let ram_len = 6 * MIB;
@@ -788,11 +783,11 @@ fn a_kernel_booted_with_el2_gets_every_device_tree_edit() {
     assert_eq!(end - start, 3000);
     assert_eq!(prop("psci", "method"), Some(b"smc\0".to_vec()));
     assert_eq!(
-        prop("intc@8000000", "reg"),
+        prop("interrupt-controller@8000000", "reg"),
         Some(be_cells(&GIC_REG_WITH_EL2))
     );
     assert_eq!(
-        prop("intc@8000000", "interrupts"),
+        prop("interrupt-controller@8000000", "interrupts"),
         Some(maintenance_interrupt())
     );
     assert_eq!(
@@ -800,6 +795,74 @@ fn a_kernel_booted_with_el2_gets_every_device_tree_edit() {
         Some(b"Rusty Box virt\0".to_vec()),
         "the identity's"
     );
+    // No entropy a guest would credit, the same bytes every boot.
+    assert_eq!(prop("chosen", "rng-seed"), None);
+    assert_eq!(prop("chosen", "kaslr-seed"), None);
+}
+
+/// A kernel and its initrd: a 64-byte arm64 `Image` header (text_offset 0)
+/// with `b .` as the kernel, and 3000 bytes of initrd.
+fn kernel_and_initrd() -> (Vec<u8>, Vec<u8>) {
+    let mut kernel = vec![0u8; 68];
+    kernel[16..24].copy_from_slice(&0x18_0000u64.to_le_bytes());
+    kernel[56..60].copy_from_slice(b"ARM\x64");
+    kernel[0..4].copy_from_slice(&SPIN.to_le_bytes());
+    (kernel, vec![0x5Au8; 3000])
+}
+
+/// A host's tree booting a kernel with a command line and an initrd gets
+/// every edit a host's tree is given: the identity's names, the memory
+/// node, `/chosen` with the command line and both initrd properties, and
+/// the board's `/psci` node. What else its `/chosen` holds is the host's.
+#[test]
+fn a_host_tree_booting_a_kernel_gets_every_edit() {
+    const MIB: u64 = 1 << 20;
+    const HOST_TREE: &[u8] = include_bytes!("../assets/qemu-virt-a57-256m.dtb");
+    let (kernel, initrd) = kernel_and_initrd();
+    let image = LinuxImage::parse(&kernel).expect("an Image");
+    let ram_len = 6 * MIB;
+    let mut ram = vec![0u8; ram_len as usize];
+    let m = MachineBuilder::new(VirtConfig::DEFAULT)
+        .ram(RamSize::bytes(ram_len).expect("a valid size"))
+        .device_tree(HOST_TREE)
+        .linux(image)
+        .initrd(&initrd)
+        .command_line("console=ttyAMA0 quiet")
+        .with_el2()
+        .build_in(MemoryLoan {
+            ram: &mut ram,
+            vars: &mut [],
+        })
+        .expect("builds");
+    let tree = m.device_tree();
+    let prop = |node: &str, name: &str| {
+        fdt::property(tree, node, name)
+            .expect("well formed")
+            .map(<[u8]>::to_vec)
+    };
+    assert_eq!(prop("", "model"), Some(b"Rusty Box virt\0".to_vec()));
+    assert_eq!(prop("", "compatible"), Some(b"rusty-box,virt\0".to_vec()));
+    assert_eq!(
+        prop("memory@40000000", "reg"),
+        Some(be_cells(&[RAM_BASE, ram_len]))
+    );
+    assert_eq!(
+        prop("chosen", "bootargs"),
+        Some(b"console=ttyAMA0 quiet\0".to_vec())
+    );
+    let start = prop("chosen", "linux,initrd-start").expect("an initrd");
+    let end = prop("chosen", "linux,initrd-end").expect("an initrd");
+    let span = |b: Vec<u8>| u64::from_be_bytes(b.try_into().expect("two cells"));
+    assert_eq!(span(end) - span(start), 3000);
+    assert_eq!(
+        prop("psci", "compatible"),
+        Some(b"arm,psci-1.0\0arm,psci-0.2\0".to_vec())
+    );
+    assert_eq!(prop("psci", "method"), Some(b"smc\0".to_vec()));
+    // QEMU's dump carries its own run's seeds, which the host's tree keeps
+    // as the host gave them.
+    let dumped = |name| fdt::property(HOST_TREE, "chosen", name).expect("well formed");
+    assert_eq!(prop("chosen", "rng-seed").as_deref(), dumped("rng-seed"));
 }
 
 /// Without virtualization the virtual interface's windows are unassigned:

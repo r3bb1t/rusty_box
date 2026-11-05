@@ -48,11 +48,10 @@ use crate::storage::GuestStorage;
 pub const FLASH0_BASE: u64 = 0x0000_0000;
 pub const FLASH_BANK_SIZE: u64 = 0x0400_0000;
 pub const FLASH1_BASE: u64 = FLASH0_BASE + FLASH_BANK_SIZE;
-/// The window `virt` reserves for each of the GIC's frames, and which the
-/// device tree's GIC node gives as each one's size (QEMU `virt`'s
-/// `memmap`: `VIRT_GIC_DIST`, `VIRT_GIC_CPU`, `VIRT_GIC_HYP`,
-/// `VIRT_GIC_VCPU`); the frame decodes less of it (`GIC_*_SIZE`).
-pub const GIC_WINDOW: u64 = 0x1_0000;
+/// The GIC's frames sit 64 KiB apart (QEMU `virt`'s `memmap`:
+/// `VIRT_GIC_DIST`, `VIRT_GIC_CPU`, `VIRT_GIC_HYP`, `VIRT_GIC_VCPU`); each
+/// decodes the region its `GIC_*_SIZE` gives, which the device tree's GIC
+/// node names, and the rest of its 64 KiB is unassigned.
 pub const GIC_DIST_BASE: u64 = 0x0800_0000;
 /// The distributor's region (QEMU `gic_init_irqs_and_mmio`'s `gic_dist`).
 /// `virt` reserves 64 KiB for it; the rest of that window is unassigned.
@@ -108,10 +107,22 @@ pub const PPI_PHYSICAL_TIMER: u32 = 16 + 14;
 /// The EL2 physical timer's PPI (QEMU `ARCH_TIMER_NS_EL2_IRQ`), which the
 /// device tree's `timer` node lists whether or not the processor has EL2.
 pub const PPI_HYPERVISOR_TIMER: u32 = 16 + 10;
+/// The Secure EL1 physical timer's PPI (BSA DEN0094C RB_PPI_01's), which the
+/// device tree's `timer` node lists first, as its binding orders them,
+/// though a board with no EL3 never raises it.
+pub const PPI_SECURE_PHYSICAL_TIMER: u32 = 16 + 13;
+/// The PCIe host bridge's INTA to INTD, SPIs 3 to 6 (QEMU `a15irqmap`
+/// `VIRT_PCIE`), which the device tree's `interrupt-map` swizzles per
+/// device slot as the PCI-to-PCI bridge specification's routing does. No
+/// device sits on the bus to raise them.
+pub const IRQ_PCIE_INTX_BASE: u32 = 32 + 3;
 
-/// The PL011's reference clock, `UARTCLK`: the device tree's `/apb-pclk`
-/// fixed clock, 24 MHz, which its `pl011@9000000` node names as `uartclk`
-/// (QEMU `hw/arm/virt.c` `create_fdt`).
+/// The PL011's reference clock, `UARTCLK`: the device tree's `/clock`
+/// fixed clock, 24 MHz, which its `serial@9000000` node names as `uartclk`.
+/// The rate is QEMU `hw/arm/virt.c` `create_fdt`'s, which stock EDK2 is
+/// built for (`PL011UartClkInHz`, a fixed PCD it works the baud divisor
+/// out from), so it stays though the clock is the board's to choose
+/// (README, "QEMU fingerprints left").
 pub const UART_CLOCK: ClockHz = match ClockHz::new(24_000_000) {
     Some(hz) => hz,
     None => unreachable!(),

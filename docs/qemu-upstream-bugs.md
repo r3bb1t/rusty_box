@@ -1960,6 +1960,38 @@ disabled device. `rusty_box_aarch64` notifies only after taking a report
 (`src/devices/virtio/input.rs`, `Input::handle_output`) and a broken
 device uses no buffer (`src/devices/virtio/mod.rs`, `Vdev::push`).
 
+### 53. `virt`'s device tree calls the virtio-mmio interrupts edge-triggered; the line is a level
+
+**Impact**: small. A guest that trusts the tree configures each
+transport's SPI as edge-triggered (`GICD_ICFGR`), so the GIC latches an
+interrupt on the line's rising edge only; a device that sets a second
+`InterruptStatus` bit while the first is still set raises no edge, and
+the guest hears of it only because its handler reads the whole
+register. Linux's `vm_interrupt` does, so nothing is lost there.
+
+**Location**: `hw/arm/virt.c`, `create_virtio_devices`, which writes each
+transport's `interrupts` with `GIC_FDT_IRQ_FLAGS_EDGE_LO_HI`;
+`hw/virtio/virtio-mmio.c`, `virtio_mmio_update_irq`, which drives the
+line with `level = (vdev->isr != 0)`.
+
+**What the specification says**: the GIC binding's third interrupt cell
+is the trigger type of the line as wired; virtio 1.2 4.2.2.1 has the
+device present each event in `InterruptStatus` until the driver
+acknowledges it, which is what a level line holds.
+
+**Reproduce**: the flag is in QEMU 11.1.2's dumped tree, and the level
+in its source; no guest run on QEMU has yet shown an interrupt lost.
+
+    qemu-system-aarch64 -M virt,dumpdtb=virt.dtb; dtc -I dtb virt.dtb
+    virtio_mmio@a000000: interrupts = <0x00 0x10 0x01>   (edge, rising)
+    the line: qemu_set_irq(proxy->irq, isr != 0)          (a level)
+
+Found on QEMU 11.1.2; master not yet checked.
+
+**Fix**: not yet written: `GIC_FDT_IRQ_FLAGS_LEVEL_HI` in
+`create_virtio_devices`. `rusty_box_aarch64`'s tree gives each transport
+level-high (`src/boot/tree.rs`).
+
 ---
 
 ## Deliberate QEMU omissions

@@ -13,7 +13,7 @@
 //! ```
 //!
 //! The command line defaults to the serial console with early messages;
-//! `--append` replaces it. The device tree is QEMU's for this board unless
+//! `--append` replaces it. The device tree is the board's own unless
 //! `--dtb` names another, and `--dump-dtb` writes the one the kernel was
 //! given.
 

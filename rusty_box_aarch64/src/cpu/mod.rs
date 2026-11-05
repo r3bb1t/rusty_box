@@ -104,7 +104,7 @@ pub use history::RecentPcs;
 pub use mmu::{Ipa, LeafLevel, Level, NoTranslation, Tlb, TranslationFault, TranslationStage};
 pub use regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, SysReg, SysRegRefusal, VReg};
 pub(crate) use sysreg::WriteEffect;
-pub(crate) use system::{PsciConduit, PsciNode};
+pub(crate) use system::{PsciConduit, PSCI_COMPATIBLE};
 pub use timer::{TimerLines, VirtualCount};
 pub use wait::Wait;
 

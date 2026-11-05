@@ -30,21 +30,20 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{ClockHz, Progress, RunBudget, SnapError, VmClock, VmInstant};
 
 use crate::board::{
-    Plugged, Plugs, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE, GIC_CPU_BASE,
-    GIC_DIST_BASE, GIC_HYP_BASE, GIC_VCPU_BASE, GIC_WINDOW, RAM_BASE, RAM_LIMIT,
+    Plugged, Plugs, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE, RAM_BASE, RAM_LIMIT,
 };
 use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
+use crate::boot::tree::{BoardTree, Chosen, InitrdRange};
 use crate::boot::{
     self, DeviceTreeError, KernelLayout, LinuxImage, PlacementError, DEVICE_TREE_CAPACITY,
 };
 use crate::bus::{load_le, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
 use crate::cpu::{
     Activity, Cpu, CpuConfig, CpuModel, CpuState, DebugStops, El2Unavailable, Levels, NoEl2,
-    NoTranslation, PsciConduit, PsciNode, Pstate, PstateRefusal, Reg, Step, StopCause, SysReg,
+    NoTranslation, PsciConduit, Pstate, PstateRefusal, Reg, Step, StopCause, SysReg, PSCI_COMPATIBLE,
     SysRegRefusal, UndefinedInsn, VReg, WithEl2, WriteEffect,
 };
 use crate::devices::gicv2::GicExtensions;
-use crate::devices::gicv2_virt::MAINTENANCE_INTID;
 use crate::devices::pl011::TX_CAPACITY;
 use crate::devices::virtio::input::InputKind;
 #[cfg(feature = "alloc")]
@@ -119,10 +118,10 @@ impl Default for VirtConfig {
 pub struct RamSize(u64);
 
 impl RamSize {
-    /// The RAM the bundled device tree describes (QEMU's `-m 256`). QEMU's
-    /// own default for `virt` is 128 MiB (`machine_class_init`
-    /// `default_ram_size` in `hw/core/machine.c`); a machine of that size is
-    /// `RamSize::mib(128)`.
+    /// The RAM a machine has when its host names none: 256 MiB, room for a
+    /// distribution's installer kernel and initramfs. QEMU's default for
+    /// `virt` is 128 MiB (`machine_class_init` `default_ram_size` in
+    /// `hw/core/machine.c`); a machine of that size is `RamSize::mib(128)`.
     pub const DEFAULT: Self = Self(256 << 20);
     /// The least a machine can have: room for the device tree.
     pub const MIN: Self = Self(DEVICE_TREE_CAPACITY as u64);
@@ -294,10 +293,8 @@ pub struct MachineBuilder<'i, B = NoBoot, L: Levels = NoEl2, I = NoInstrumentati
 /// Closed (R5): the board's own, or one the host gives.
 #[derive(Debug, Clone, Copy)]
 enum TreeSource<'i> {
-    /// QEMU's for this board ([`boot::QEMU_VIRT_DEVICE_TREE`]), its
-    /// processor node made the processor's, as QEMU's `virt` writes the node
-    /// from the processor it is given (`fdt_add_cpu_nodes`), and edited as
-    /// [`describe`] edits every tree.
+    /// The board's own, written from what the board is
+    /// (`crate::boot::tree`).
     Board,
     /// The host's, which describes the processor as the host wrote it, as
     /// QEMU takes a `-dtb` tree.
@@ -305,10 +302,9 @@ enum TreeSource<'i> {
 }
 
 impl<'i> MachineBuilder<'i, NoBoot, NoEl2, NoInstrumentation> {
-    /// A builder with [`RamSize::DEFAULT`] of RAM, the board's device tree
-    /// (QEMU's for this board, edited to describe it:
-    /// [`boot::QEMU_VIRT_DEVICE_TREE`]), a processor without EL2, and the
-    /// identity [`BoardIdentity::RUSTY_BOX`].
+    /// A builder with [`RamSize::DEFAULT`] of RAM, the board's own device
+    /// tree, a processor without EL2, and the identity
+    /// [`BoardIdentity::RUSTY_BOX`].
     pub fn new(config: VirtConfig) -> Self {
         Self {
             config,
@@ -354,15 +350,15 @@ impl<'i, B, L: Levels, I> MachineBuilder<'i, B, L, I> {
         self
     }
 
-    /// Describe the board with this device tree instead of QEMU's. As QEMU
+    /// Describe the board with this device tree instead of its own. As QEMU
     /// edits a `-dtb` tree (`arm_load_dtb`), its memory nodes are replaced by
     /// one for the RAM, `/chosen` is added where it has none and for a
     /// kernel given its command line and initrd, and its `/psci` node is
-    /// replaced by QEMU's, whose method names the conduit the levels `L`
-    /// give PSCI; its processor node stays as given. Its `/model` and root
-    /// `compatible` are the machine's identity's
-    /// ([`MachineBuilder::identity`]), and its `fw-cfg` and `platform-bus`
-    /// nodes go, as the board has neither.
+    /// replaced by the board's, for PSCI 1.0 and 0.2, whose method names the
+    /// conduit the levels `L` give PSCI; its processor and GIC nodes stay as
+    /// given. Its `/model` and root `compatible` are the machine's
+    /// identity's ([`MachineBuilder::identity`]), and its `fw-cfg` and
+    /// `platform-bus` nodes go, as the board has neither.
     pub fn device_tree(mut self, tree: &'i [u8]) -> Self {
         self.device_tree = TreeSource::Host(tree);
         self
@@ -764,113 +760,99 @@ struct Description<'i> {
     levels: TreeLevels,
 }
 
-/// Edit the tree `source` names to describe the machine `machine` names,
-/// into `out`, as QEMU does (`arm_load_dtb`), in its order: every memory
-/// node replaced by one for the RAM; `/chosen` added where the tree lacks
-/// it, and its command line and initrd set; and the `/psci` node replaced
-/// by QEMU's (`fdt_add_psci_node`, which deletes the node a tree has, as
-/// its function identifiers may not be QEMU's), whose `method` names the
-/// conduit the processor's firmware answers on ([`PsciConduit::of`]). The
-/// board has neither QEMU's `fw_cfg` nor its platform bus
-/// (`qemu,platform`), so a `fw-cfg` or `platform-bus` node that is a child
-/// of the root, where QEMU's `virt` puts them, goes too; a node of either
-/// name deeper in a host's tree is the host's own and stays.
-///
-/// The board's own tree, QEMU's for this board, gets the processor's
-/// `compatible` first, as QEMU's `virt` writes the processor node from the
-/// processor it is given (`fdt_add_cpu_nodes`), which in QEMU's tree for
-/// the Cortex-A57 is the value it has; and with the GIC's Virtualization
-/// Extensions, the GIC node's `reg` naming the virtual interface's two
-/// frames too and an `interrupts` naming its maintenance interrupt, as
-/// QEMU's `fdt_add_gic_node` writes them under `virtualization=on`. A
-/// host's tree keeps its own GIC node. Every tree, the board's or a host's,
-/// names the board `identity`'s way, its `/model` and root `compatible`
-/// replacing the tree's own (QEMU's `linux,dummy-virt`, whose binding is
-/// "QEMU virt machine").
+impl<'i> Description<'i> {
+    /// What `/chosen` says of the boot: the kernel's command line and
+    /// where its initrd lies, when it has them.
+    fn chosen(&self) -> Chosen<'i> {
+        let initrd = match (self.choice, self.layout.and_then(|l| l.initrd_offset)) {
+            (BootChoice::Kernel(k), Some(offset)) => {
+                let start = RAM_BASE + offset;
+                Some(InitrdRange {
+                    start: PhysAddr::new(start),
+                    end: PhysAddr::new(start + k.initrd.len() as u64),
+                })
+            }
+            (BootChoice::Kernel(_), None) | (BootChoice::Firmware(_) | BootChoice::Bare, _) => {
+                None
+            }
+        };
+        let bootargs = match self.choice {
+            BootChoice::Kernel(k) if !k.command_line.is_empty() => Some(k.command_line),
+            BootChoice::Kernel(_) | BootChoice::Firmware(_) | BootChoice::Bare => None,
+        };
+        Chosen { bootargs, initrd }
+    }
+}
+
+/// The device tree describing the machine `machine` names, into `out`:
+/// the board's own, written whole (`crate::boot::tree`), or a host's,
+/// edited ([`edit_host_tree`]). Either names the board `identity`'s way.
 fn describe(
     source: TreeSource<'_>,
     machine: Description<'_>,
     identity: &BoardIdentity,
     out: &mut DeviceTree,
 ) -> Result<(), DeviceTreeError> {
+    out.len = match source {
+        TreeSource::Board => {
+            let TreeLevels { psci, gic } = machine.levels;
+            let board = BoardTree {
+                identity,
+                ram_len: machine.ram_len,
+                cpu: machine.cpu,
+                psci,
+                gic,
+                chosen: machine.chosen(),
+            };
+            boot::tree::write(&board, &mut out.bytes)?
+        }
+        TreeSource::Host(tree) => edit_host_tree(tree, &machine, identity, &mut out.bytes)?,
+    };
+    Ok(())
+}
+
+/// A host's tree edited as QEMU edits a `-dtb` tree (`arm_load_dtb`), in
+/// its order, into `out`, returning its length: every memory node replaced
+/// by one for the RAM; `/chosen` added where the tree lacks it, and its
+/// command line and initrd set; and the `/psci` node replaced by the
+/// board's (as `fdt_add_psci_node` deletes the node a tree has, its
+/// function identifiers being the firmware's to name), whose `method`
+/// names the conduit the processor's firmware answers on
+/// ([`PsciConduit::of`]). The board has no `fw_cfg` and no platform bus,
+/// so a `fw-cfg` or `platform-bus` node that is a child of the root, where
+/// QEMU's `virt` puts them, goes too; a node of either name deeper in the
+/// tree is the host's own and stays. The rest of the tree, its processor
+/// and GIC nodes among it, is the host's, but for `/model` and the root
+/// `compatible`, which are `identity`'s.
+fn edit_host_tree(
+    tree: &[u8],
+    machine: &Description<'_>,
+    identity: &BoardIdentity,
+    out: &mut [u8],
+) -> Result<usize, DeviceTreeError> {
     const ROOT: NodePath<'static> = NodePath::of("");
-    const PROCESSOR: NodePath<'static> = NodePath::of("cpus/cpu@0");
     const MEMORY: NodePath<'static> = NodePath::of("memory@40000000");
     const CHOSEN: NodePath<'static> = NodePath::of("chosen");
     const PSCI: NodePath<'static> = NodePath::of("psci");
-    const GIC: NodePath<'static> = NodePath::of("intc@8000000");
     const REMOVALS: [Removal<'static>; 4] = [
         Removal::Named("memory"),
         Removal::At(PSCI),
         Removal::RootChild("fw-cfg"),
         Removal::RootChild("platform-bus"),
     ];
-    let Description {
-        ram_len,
-        cpu,
-        choice,
-        layout,
-        levels: TreeLevels { psci, gic },
-    } = machine;
-    /// QEMU `fdt_add_gic_node`'s GIC node `reg` with `virtualization=on`: the
-    /// distributor's, the CPU interface's, the virtual interface control
-    /// registers' and the virtual CPU interface's windows.
-    const GIC_REG: [u8; 64] = big_endian_cells(
-        &[
-            GIC_DIST_BASE,
-            GIC_WINDOW,
-            GIC_CPU_BASE,
-            GIC_WINDOW,
-            GIC_HYP_BASE,
-            GIC_WINDOW,
-            GIC_VCPU_BASE,
-            GIC_WINDOW,
-        ],
-        8,
-    );
-    /// Its `interrupts`: the maintenance interrupt, PPI 9 (INTID 25),
-    /// level-high.
-    const GIC_INTERRUPTS: [u8; 12] =
-        big_endian_cells(&[1, (MAINTENANCE_INTID - 16) as u64, 4], 4);
-    let reg: [u8; 16] = big_endian_cells(&[RAM_BASE, ram_len], 8);
-    let initrd = match (choice, layout.and_then(|l| l.initrd_offset)) {
-        (BootChoice::Kernel(k), Some(offset)) => {
-            let start = RAM_BASE + offset;
-            Some((
-                start.to_be_bytes(),
-                (start + k.initrd.len() as u64).to_be_bytes(),
-            ))
-        }
-        (BootChoice::Kernel(_), None) | (BootChoice::Firmware(_) | BootChoice::Bare, _) => None,
-    };
-    let cpu_suspend = PsciNode::CPU_SUSPEND.to_be_bytes();
-    let cpu_off = PsciNode::CPU_OFF.to_be_bytes();
-    let cpu_on = PsciNode::CPU_ON.to_be_bytes();
-    let migrate = PsciNode::MIGRATE.to_be_bytes();
-    /// The most edits a description makes: the processor's `compatible`
-    /// (the board's tree), the board's two names, the memory node's two
-    /// properties, `/chosen` and its command line, the initrd's two
-    /// properties, the `/psci` node's six, and with the Virtualization
-    /// Extensions the GIC node's two (the board's tree). A kernel boot of
-    /// the board's tree with EL2, a command line and an initrd makes them
-    /// all (`tests/virtualization.rs`,
-    /// `a_kernel_booted_with_el2_gets_every_device_tree_edit`).
-    const MOST_EDITS: usize = 1 + 2 + 2 + 2 + 2 + 6 + 2;
+    /// The most edits a host's tree gets: the board's two names, the memory
+    /// node's two properties, `/chosen` and its command line, the initrd's
+    /// two properties, and the `/psci` node's two. A kernel boot with a
+    /// command line and an initrd makes them all (`tests/virtualization.rs`,
+    /// `a_host_tree_booting_a_kernel_gets_every_edit`).
+    const MOST_EDITS: usize = 2 + 2 + 2 + 2 + 2;
+    let chosen = machine.chosen();
+    let reg: [u8; 16] = big_endian_cells(&[RAM_BASE, machine.ram_len], 8);
+    let initrd = chosen
+        .initrd
+        .map(|r| (r.start.get().to_be_bytes(), r.end.get().to_be_bytes()));
     let mut edits = [Edit::node(CHOSEN); MOST_EDITS];
-    let (tree, mut count) = match source {
-        TreeSource::Board => {
-            edits[0] = Edit::set(PROCESSOR, "compatible", Value::String(cpu.compatible()));
-            match gic {
-                GicExtensions::Virtualization => {
-                    edits[1] = Edit::set(GIC, "reg", Value::Bytes(&GIC_REG));
-                    edits[2] = Edit::set(GIC, "interrupts", Value::Bytes(&GIC_INTERRUPTS));
-                    (boot::QEMU_VIRT_DEVICE_TREE, 3)
-                }
-                GicExtensions::Absent => (boot::QEMU_VIRT_DEVICE_TREE, 1),
-            }
-        }
-        TreeSource::Host(tree) => (tree, 0),
-    };
+    let mut count = 0;
     let mut push = |edit| {
         edits[count] = edit;
         count += 1;
@@ -886,28 +868,25 @@ fn describe(
     push(Edit::set(MEMORY, "reg", Value::Bytes(&reg)));
     // `/chosen`, added where the tree lacks it.
     push(Edit::node(CHOSEN));
-    if let BootChoice::Kernel(k) = choice {
-        if !k.command_line.is_empty() {
-            push(Edit::set(CHOSEN, "bootargs", Value::String(k.command_line)));
-        }
+    if let Some(bootargs) = chosen.bootargs {
+        push(Edit::set(CHOSEN, "bootargs", Value::String(bootargs)));
     }
     if let Some((start, end)) = &initrd {
         push(Edit::set(CHOSEN, "linux,initrd-start", Value::Bytes(start)));
         push(Edit::set(CHOSEN, "linux,initrd-end", Value::Bytes(end)));
     }
-    // `fdt_add_psci_node`.
+    // The board's `/psci` node, as `fdt_add_psci_node` writes its own.
     push(Edit::set(
         PSCI,
         "compatible",
-        Value::Bytes(PsciNode::COMPATIBLE),
+        Value::Bytes(PSCI_COMPATIBLE),
     ));
-    push(Edit::set(PSCI, "method", Value::String(psci.method())));
-    push(Edit::set(PSCI, "cpu_suspend", Value::Bytes(&cpu_suspend)));
-    push(Edit::set(PSCI, "cpu_off", Value::Bytes(&cpu_off)));
-    push(Edit::set(PSCI, "cpu_on", Value::Bytes(&cpu_on)));
-    push(Edit::set(PSCI, "migrate", Value::Bytes(&migrate)));
-    out.len = fdt::rebuild(tree, &REMOVALS, &edits[..count], &mut out.bytes)?;
-    Ok(())
+    push(Edit::set(
+        PSCI,
+        "method",
+        Value::String(machine.levels.psci.method()),
+    ));
+    fdt::rebuild(tree, &REMOVALS, &edits[..count], out)
 }
 
 /// What a build works out before it touches any memory: where the boot's

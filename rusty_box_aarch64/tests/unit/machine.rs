@@ -17,7 +17,6 @@ use rusty_box_core::VmInstant;
 
 use super::VirtMachine;
 use crate::board::{GIC_CPU_BASE, GIC_DIST_BASE, RAM_BASE};
-use crate::devices::gicv2::GicExtensions;
 use crate::{
     LentStorage, MachineBuilder, MemoryLoan, NoEl2, Progress, RamSize, Reg, RunBudget, StopReason,
     SysReg, VirtConfig,
@@ -265,41 +264,35 @@ fn a_waiting_processor_sleeps_past_a_stuck_deadline_to_the_timer() {
     }
 }
 
+/// A device tree QEMU 11.1.2 generated for `-M virt -cpu cortex-a57 -m 256`
+/// (`-machine dumpdtb=`): a host's tree to hand the machine, as a host may
+/// hand it any tree.
+const HOST_TREE: &[u8] = include_bytes!("../../assets/qemu-virt-a57-256m.dtb");
+
 /// A host's device tree gets what QEMU's `arm_load_dtb` gives one: every
 /// memory node replaced by one for the RAM, and the `/psci` node replaced
-/// whole by QEMU's (`fdt_add_psci_node`), whatever compatible, method or
-/// function identifiers its own named. QEMU's tree for this board with a
-/// PSCI 0.1 node of other identifiers in place of its own and a second
-/// memory node, named as the board names itself, comes out as the board's
-/// own tree does, byte for byte, with EL2 or without, but for the GIC node
-/// the board gives the virtual interface in its own tree.
+/// whole by the board's, whatever compatible, method or function
+/// identifiers its own named. The rest of the tree, its GIC node among it,
+/// is the host's, with EL2 or without.
 #[test]
-fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
+fn a_host_tree_gets_the_boards_memory_and_psci_nodes() {
     use super::{
         describe, BootChoice, Description, DeviceTree, PsciConduit, TreeLevels, TreeSource,
     };
-    use crate::cpu::{NoEl2, WithEl2};
     use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
-    use crate::boot::QEMU_VIRT_DEVICE_TREE;
+    use crate::cpu::{NoEl2, WithEl2};
     use crate::identity::BoardIdentity;
     use crate::CpuModel;
 
     let psci = NodePath::of("psci");
-    let root = NodePath::of("");
     let identity = BoardIdentity::RUSTY_BOX;
-    // A host's tree that names the board as its identity does, the edit the
-    // board makes to its own tree alone.
+    // A host's tree with a PSCI 0.1 node of other identifiers in place of
+    // its own and a second memory node.
     let mut foreign = vec![0u8; 64 * 1024];
     let len = fdt::rebuild(
-        QEMU_VIRT_DEVICE_TREE,
+        HOST_TREE,
         &[Removal::At(psci)],
         &[
-            Edit::set(root, "model", Value::String(identity.model())),
-            Edit::set(
-                root,
-                "compatible",
-                Value::Bytes(identity.compatible().property()),
-            ),
             Edit::set(
                 NodePath::of("memory@80000000"),
                 "device_type",
@@ -318,21 +311,18 @@ fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
         fdt::property(foreign, "psci", "cpu_on"),
         Ok(Some(&0x95C1_BA60u32.to_be_bytes()[..]))
     );
-    let gic = NodePath::of("intc@8000000");
     for (levels, conduit) in [
         (TreeLevels::of::<NoEl2>(), PsciConduit::Hvc),
         (TreeLevels::of::<WithEl2>(), PsciConduit::Smc),
     ] {
         assert_eq!(levels.psci, conduit);
         let machine = Description {
-            ram_len: 256 << 20,
+            ram_len: 512 << 20,
             cpu: CpuModel::CortexA57,
             choice: BootChoice::Bare,
             layout: None,
             levels,
         };
-        let mut from_board = std::boxed::Box::new(DeviceTree::EMPTY);
-        describe(TreeSource::Board, machine, &identity, &mut from_board).expect("describes");
         let mut from_host = std::boxed::Box::new(DeviceTree::EMPTY);
         describe(
             TreeSource::Host(foreign),
@@ -341,89 +331,35 @@ fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
             &mut from_host,
         )
         .expect("describes");
-        // A host's GIC node is the host's: with EL2 the board names the
-        // virtual interface's windows and maintenance interrupt in its own
-        // tree alone, as QEMU's `-dtb` leaves a tree's GIC node as it is.
-        let board_gic = |name| {
-            fdt::property(from_board.as_slice(), "intc@8000000", name)
-                .expect("parses")
-                .expect("present")
-                .to_vec()
-        };
-        let host_gic = |name| {
-            fdt::property(from_host.as_slice(), "intc@8000000", name)
-                .expect("parses")
-                .map(<[u8]>::to_vec)
-        };
-        match levels.gic {
-            GicExtensions::Absent => {
-                assert_eq!(from_host.as_slice(), from_board.as_slice(), "{conduit:?}");
-            }
-            GicExtensions::Virtualization => {
-                let (reg, interrupts) = (board_gic("reg"), board_gic("interrupts"));
-                assert_eq!(reg.len(), 64, "four windows");
-                assert_eq!(host_gic("reg").map(|r| r.len()), Some(32), "the host's two");
-                assert_eq!(host_gic("interrupts"), None, "the host's has none");
-                let mut renamed = vec![0u8; 64 * 1024];
-                let len = fdt::rebuild(
-                    from_host.as_slice(),
-                    &[],
-                    &[
-                        Edit::set(gic, "reg", Value::Bytes(&reg)),
-                        Edit::set(gic, "interrupts", Value::Bytes(&interrupts)),
-                    ],
-                    &mut renamed,
-                )
-                .expect("rebuild");
-                assert_eq!(&renamed[..len], from_board.as_slice(), "all but the GIC node");
-            }
-        }
+        let tree = from_host.as_slice();
+        let get = |path, name| fdt::property(tree, path, name).expect("parses");
         assert_eq!(
-            fdt::property(from_host.as_slice(), "psci", "cpu_on"),
-            Ok(Some(&0xC400_0003u32.to_be_bytes()[..])),
-            "{conduit:?}: QEMU's identifier"
-        );
-        assert_eq!(
-            fdt::property(from_host.as_slice(), "memory@80000000", "device_type"),
-            Ok(None),
+            get("psci", "compatible"),
+            Some(&b"arm,psci-1.0\0arm,psci-0.2\0"[..]),
             "{conduit:?}"
         );
+        let method: &[u8] = match conduit {
+            PsciConduit::Hvc => b"hvc\0",
+            PsciConduit::Smc => b"smc\0",
+        };
+        assert_eq!(get("psci", "method"), Some(method));
+        for gone in ["cpu_on", "cpu_off"] {
+            assert_eq!(get("psci", gone), None, "{conduit:?}: the host's {gone}");
+        }
+        assert_eq!(get("memory@80000000", "device_type"), None, "{conduit:?}");
+        assert_eq!(
+            get("memory@40000000", "reg"),
+            Some(&[0, 0, 0, 0, 0x40, 0, 0, 0, 0, 0, 0, 0, 0x20, 0, 0, 0][..])
+        );
+        // The host's GIC node, as the host wrote it: two frames, whatever
+        // levels the machine has.
+        assert_eq!(
+            get("intc@8000000", "reg").map(<[u8]>::len),
+            Some(32),
+            "{conduit:?}"
+        );
+        assert_eq!(get("intc@8000000", "interrupts"), None);
     }
-    // Without EL2, and with the RAM QEMU's tree describes, the board's tree
-    // is QEMU's own but for the identity: the same tokens in the same
-    // order, the strings block the same, once QEMU's tree is given the
-    // identity's `/model` and root `compatible` and loses its `fw-cfg` and
-    // platform bus nodes. Only the padding after a value may differ: libfdt
-    // leaves whatever bytes were there (`fdt_setprop` copies the value
-    // alone), and a property written anew here is padded with zeros.
-    let machine = Description {
-        ram_len: 256 << 20,
-        cpu: CpuModel::CortexA57,
-        choice: BootChoice::Bare,
-        layout: None,
-        levels: TreeLevels::of::<NoEl2>(),
-    };
-    let mut from_board = std::boxed::Box::new(DeviceTree::EMPTY);
-    describe(TreeSource::Board, machine, &identity, &mut from_board).expect("describes");
-    let mut qemus_renamed = vec![0u8; 64 * 1024];
-    let len = fdt::rebuild(
-        QEMU_VIRT_DEVICE_TREE,
-        &[
-            Removal::RootChild("fw-cfg"),
-            Removal::RootChild("platform-bus"),
-        ],
-        &[
-            Edit::set(root, "model", Value::String(identity.model())),
-            Edit::set(
-                root,
-                "compatible",
-                Value::Bytes(identity.compatible().property()),
-            ),
-        ],
-        &mut qemus_renamed,
-    )
-    .expect("rebuild");
-    assert_eq!(tokens(from_board.as_slice()), tokens(&qemus_renamed[..len]));
 }
 
 /// Every tree, the board's or a host's, names the board as its identity
@@ -433,7 +369,6 @@ fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
 fn the_device_tree_names_the_board_by_its_identity() {
     use super::{describe, BootChoice, Description, DeviceTree, TreeLevels, TreeSource};
     use crate::boot::fdt;
-    use crate::boot::QEMU_VIRT_DEVICE_TREE;
     use crate::cpu::NoEl2;
     use crate::identity::{BoardIdentity, IdentityNames};
     use crate::CpuModel;
@@ -476,7 +411,7 @@ fn the_device_tree_names_the_board_by_its_identity() {
     // the identity too.
     let mut tree = std::boxed::Box::new(DeviceTree::EMPTY);
     describe(
-        TreeSource::Host(QEMU_VIRT_DEVICE_TREE),
+        TreeSource::Host(HOST_TREE),
         machine,
         &host,
         &mut tree,
@@ -496,59 +431,3 @@ fn the_device_tree_names_the_board_by_its_identity() {
     }
 }
 
-/// A token of a flattened device tree's structure block, as a guest reads
-/// it: the padding after a name or a value is not part of it.
-#[derive(Debug, PartialEq)]
-enum Token {
-    Begin(vec::Vec<u8>),
-    End,
-    Property {
-        name: vec::Vec<u8>,
-        value: vec::Vec<u8>,
-    },
-}
-
-/// What a flattened device tree holds, as a guest reads it: its structure
-/// block token by token (`FDT_NOP` left out), and its strings block.
-#[derive(Debug, PartialEq)]
-struct Tokens {
-    structure: vec::Vec<Token>,
-    strings: vec::Vec<u8>,
-}
-
-fn tokens(tree: &[u8]) -> Tokens {
-    let word = |at: usize| u32::from_be_bytes(tree[at..at + 4].try_into().expect("four bytes"));
-    let c_string = |at: usize| {
-        let len = tree[at..].iter().position(|&b| b == 0).expect("a NUL");
-        tree[at..at + len].to_vec()
-    };
-    let (structure, strings) = (word(8) as usize, word(12) as usize);
-    let mut read = Tokens {
-        structure: vec![],
-        strings: tree[strings..strings + word(32) as usize].to_vec(),
-    };
-    let mut at = structure;
-    loop {
-        match word(at) {
-            1 => {
-                let name = c_string(at + 4);
-                at += 4 + (name.len() + 4) / 4 * 4;
-                read.structure.push(Token::Begin(name));
-            }
-            2 => {
-                read.structure.push(Token::End);
-                at += 4;
-            }
-            3 => {
-                let len = word(at + 4) as usize;
-                read.structure.push(Token::Property {
-                    name: c_string(strings + word(at + 8) as usize),
-                    value: tree[at + 12..at + 12 + len].to_vec(),
-                });
-                at += 12 + len.div_ceil(4) * 4;
-            }
-            4 => at += 4,
-            _ => return read,
-        }
-    }
-}

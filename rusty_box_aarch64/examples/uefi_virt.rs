@@ -15,8 +15,8 @@
 //! `--type-serial` always types on the serial console's terminal.
 //!
 //! The variable store is copied, never written back, unless `--persist-vars`
-//! names a file to save it to. The device tree is QEMU's for this board
-//! unless `--dtb` names another; either way its memory node is set to
+//! names a file to save it to. The device tree is the board's own unless
+//! `--dtb` names another; either way its memory node describes
 //! `--ram-mib`.
 
 #[path = "common/mod.rs"]
