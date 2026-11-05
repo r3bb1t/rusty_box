@@ -12,7 +12,7 @@
 //! - `fnv`: FNV-1a over 64 KiB, a byte (`ldrb`, `eor`, `mul`) at a time;
 //! - `fp`: a double-precision `fmadd`/`fmul`/`fadd`/`fsub` chain;
 //! - `mmio`: the `alu` chain run from a device's registers (the GIC
-//!   distributor's priority bytes), whose fetches cannot be cached: every
+//!   distributor's group bits), whose fetches cannot be cached: every
 //!   instruction by the per-instruction path.
 //!
 //! Each ends with PSCI `SYSTEM_OFF`, and each runs twice: as is, and with an
@@ -160,10 +160,12 @@ const FP: &[u32] = &[
     0x54FF_FF41,
 ];
 
-/// Where `mmio` runs the `alu` chain: the GIC distributor's priority bytes
-/// of interrupts 32 onwards (`GICD_IPRIORITYR8`), which read back what is
-/// written to them and change nothing else.
-const DEVICE_CODE: u64 = GIC_DIST_BASE + 0x420;
+/// Where `mmio` runs the `alu` chain: the GIC distributor's group bits of
+/// SPIs 32 onwards (`GICD_IGROUPR1` to `GICD_IGROUPR13`), a bit an SPI, all
+/// of which exist, so each word reads back what is written to it, and with
+/// no interrupt pending the groups change nothing else. (A priority byte
+/// does not: of its eight bits, five exist.)
+const DEVICE_CODE: u64 = GIC_DIST_BASE + 0x084;
 
 /// `mov x2, #13; 1: ldr w3, [x11], #4; str w3, [x12], #4; subs x2, x2, #1;
 /// b.ne 1b; br x13` — copy the 13 words after it (the `alu` chain and the

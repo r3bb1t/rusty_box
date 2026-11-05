@@ -2211,7 +2211,7 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// devices: the GIC with its Virtualization Extensions where it has them,
 /// the PL011, the PL031, the PL061, both flash banks and every virtio-mmio
 /// transport.
-const SNAPSHOT_VERSION: u32 = 20;
+const SNAPSHOT_VERSION: u32 = 21;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
