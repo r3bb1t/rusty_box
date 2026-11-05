@@ -350,7 +350,7 @@ impl TreeContents {
 ///         mov w2, #(1 << 26)    ; str w2, [x1, #0x100]      // ISENABLER0
 ///         ldr x3, =0x08010000   ; mov w2, #1 ; str w2, [x3] // GICC_CTLR
 ///         mov w2, #0xff         ; str w2, [x3, #4]          // GICC_PMR
-///         mov x4, #1000         ; msr cnthp_tval_el2, x4
+///         mov x4, #16000        ; msr cnthp_tval_el2, x4
 ///         mov x4, #1            ; msr cnthp_ctl_el2, x4
 ///         mov x20, #0           ; msr daifclr, #2
 /// 1:      wfi                   ; cmp x20, #3 ; b.lt 1b
@@ -358,7 +358,7 @@ impl TreeContents {
 /// 2:      b 2b
 ///         .org 0x1280                                       // IRQ, EL2 with SP_EL2
 ///         ldr w5, [x3, #0xc]    ; add x20, x20, #1          // GICC_IAR
-///         mov x4, #1000         ; msr cnthp_tval_el2, x4
+///         mov x4, #16000        ; msr cnthp_tval_el2, x4
 ///         str w5, [x3, #0x10]   ; eret                      // GICC_EOIR
 /// ```
 #[test]
@@ -378,7 +378,7 @@ fn the_el2_timer_interrupts_on_ppi_10() {
         (0x2C, 0xB900_0062),
         (0x30, 0x5280_1FE2),
         (0x34, 0xB900_0462),
-        (0x38, 0xD280_7D04),
+        (0x38, 0xD287_D004),
         (0x3C, 0xD51C_E204),
         (0x40, 0xD280_0024),
         (0x44, 0xD51C_E224),
@@ -399,7 +399,7 @@ fn the_el2_timer_interrupts_on_ppi_10() {
         (0x80, 0x8400_0008),
         (0x1280, 0xB940_0C65),
         (0x1284, 0x9100_0694),
-        (0x1288, 0xD280_7D04),
+        (0x1288, 0xD287_D004),
         (0x128C, 0xD51C_E204),
         (0x1290, 0xB900_1065),
         (0x1294, 0xD69F_03E0),

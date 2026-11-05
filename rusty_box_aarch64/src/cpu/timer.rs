@@ -540,6 +540,18 @@ mod tests {
         processor(ips, counter_hz)
     }
 
+    /// `CNTFRQ_EL0` reads the implementation's counter rate at reset, and
+    /// the counter counts at that rate, at rates neither model has.
+    #[test]
+    fn the_counter_runs_at_the_rate_its_implementation_names() {
+        for counter_hz in [24_000_000, 62_500_000] {
+            let mut c = cpu(50_000_000, counter_hz);
+            assert_eq!(c.sysreg(SysReg::CNTFRQ_EL0), Ok(counter_hz));
+            c.icount = 50_000_000;
+            assert_eq!(c.counter(), Count(counter_hz));
+        }
+    }
+
     /// The deadline is the first tick at which the guest would read a count
     /// at or past CVAL, never one tick early or late — at a rate where the
     /// counter does not advance every tick.

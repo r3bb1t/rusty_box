@@ -1036,7 +1036,7 @@ mod tests {
                 ..IMP
             },
             Implementation {
-                counter_hz: super::super::ARMV8P6_COUNTER_HZ,
+                counter_hz: super::super::SYSTEM_COUNTER_HZ,
                 ..IMP
             },
         ];

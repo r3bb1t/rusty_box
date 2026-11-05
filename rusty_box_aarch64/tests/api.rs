@@ -893,15 +893,16 @@ const STREAM_WFE: [u32; 3] = [0xD518_E100, 0xD503_205F, SPIN];
 
 /// A guest that turns on the timer's event stream and sleeps in `WFE` is
 /// woken by the stream's next event, which the machine schedules: with
-/// `CNTKCTL_EL1.EVNTEN` and `EVNTI` = 4, bit 4 of the count first rises at
-/// count 16, the first tick at which the 62.5 MHz count reaches it at 50 M
-/// ticks/s being 13. Without the stream nothing can end the wait.
+/// `CNTKCTL_EL1.EVNTEN` and `EVNTI` = 8, bit 8 of the count first rises at
+/// count 256, the first tick at which the 1 GHz count reaches it at 50 M
+/// ticks/s (20 counts a tick) being 13. Without the stream nothing can end
+/// the wait.
 #[test]
 fn the_event_stream_ends_a_wfe() {
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
     load(&mut m, RAM_BASE, &STREAM_WFE);
-    m.reg_write(Reg::X0, (1 << 2) | (4 << 4));
+    m.reg_write(Reg::X0, (1 << 2) | (8 << 4));
     let out = m.step(RunBudget::Ticks(2));
     assert_eq!(
         (out.stop, out.progress),
@@ -1516,7 +1517,7 @@ fn the_processor_is_the_model_the_configuration_names() {
         (
             CpuModel::CortexA57,
             0x411F_D070,
-            62_500_000,
+            1_000_000_000,
             0,
             b"arm,cortex-a57\0",
         ),

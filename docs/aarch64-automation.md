@@ -146,9 +146,9 @@ default, QEMU's `cortex-a57` cut down to EL0 and EL1 (and EL2 with
 `with_el2()`); or
 `CpuModel::Armv9p2`, an Armv9.2 processor with SME and SME2 (and no SVE)
 that reports itself as a software model. The model decides what the ID
-registers advertise, `MIDR_EL1`, the system counter's frequency (62.5 MHz,
-as QEMU runs the Cortex-A57's, or 1 GHz, as Armv8.6 and later require) and
-the device tree's `compatible` for the processor. `CpuModel::name` spells
+registers advertise, `MIDR_EL1` and the device tree's `compatible` for the
+processor; the system counter runs at 1 GHz for both, the rate Armv8.6 and
+later require and the board's choice for the Cortex-A57. `CpuModel::name` spells
 a model for a command line or a file (`"cortex-a57"`, `"armv9.2"`), and
 `str::parse` reads one back, or an `UnknownCpuModel` that names the models
 there are.

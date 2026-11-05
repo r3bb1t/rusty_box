@@ -97,9 +97,7 @@ use el2::El2Storage;
 pub use el2::{Levels, NoEl2, VirtualLines, WithEl2};
 pub use exception::ExceptionClass;
 pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
-pub use features::{
-    CpuModel, El2Unavailable, UnknownCpuModel, ARMV8P6_COUNTER_HZ, QEMU_BACKCOMPAT_COUNTER_HZ,
-};
+pub use features::{CpuModel, El2Unavailable, UnknownCpuModel, SYSTEM_COUNTER_HZ};
 pub use history::RecentPcs;
 pub use mmu::{Ipa, LeafLevel, Level, NoTranslation, Tlb, TranslationFault, TranslationStage};
 pub use regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, SysReg, SysRegRefusal, VReg};

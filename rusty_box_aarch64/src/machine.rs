@@ -2198,7 +2198,10 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, WithEl2, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-/// The image layout's version: 18 holds the processor's level set (the
+/// The image's version, which changes with its layout and with any value a
+/// processor model fixes that a restore checks the image against (the
+/// system counter's rate): an image of another version is refused as one,
+/// never as one of another processor. It holds the processor's level set (the
 /// shape's `virtualization`, the EL2 registers, `CNTPOFF_EL2` among them), a
 /// feature set of 128 bits, `RVBAR_ELx` and `RMR_ELx` of the highest level,
 /// what Software Step stepped, each TLB entry's stage 2 permissions and
@@ -2208,7 +2211,7 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// devices: the GIC with its Virtualization Extensions where it has them,
 /// the PL011, the PL031, the PL061, both flash banks and every virtio-mmio
 /// transport.
-const SNAPSHOT_VERSION: u32 = 19;
+const SNAPSHOT_VERSION: u32 = 20;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

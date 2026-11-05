@@ -13,7 +13,7 @@
 //!         mov w2, #(1 << 27)       ; str w2, [x1, #0x100]                      // ISENABLER0
 //!         ldr x3, =0x08010000      ; mov w2, #1        ; str w2, [x3]          // GICC_CTLR
 //!         mov w2, #0xff            ; str w2, [x3, #4]                          // GICC_PMR
-//!         mov x4, #1000            ; msr cntv_tval_el0, x4
+//!         mov x4, #16000           ; msr cntv_tval_el0, x4
 //!         mov x4, #1               ; msr cntv_ctl_el0, x4
 //!         mov x20, #0              ; msr daifclr, #2
 //! 1:      wfi                      ; cmp x20, #10      ; b.lt 1b
@@ -21,7 +21,7 @@
 //! 2:      b 2b
 //!         .org 0x1280              // IRQ, current EL with SP_ELx
 //!         ldr w5, [x3, #0xc]       ; add x20, x20, #1  // GICC_IAR
-//!         mov x4, #1000            ; msr cntv_tval_el0, x4
+//!         mov x4, #16000           ; msr cntv_tval_el0, x4
 //!         str w5, [x3, #0x10]      ; eret              // GICC_EOIR
 //! ```
 //!
@@ -50,7 +50,7 @@ const PROGRAM: &[(usize, u32)] = &[
     (0x2C, 0xB900_0062),
     (0x30, 0x5280_1FE2),
     (0x34, 0xB900_0462),
-    (0x38, 0xD280_7D04),
+    (0x38, 0xD287_D004),
     (0x3C, 0xD51B_E304),
     (0x40, 0xD280_0024),
     (0x44, 0xD51B_E324),
@@ -73,13 +73,14 @@ const PROGRAM: &[(usize, u32)] = &[
     (0x88, 0x8400_0008),
     (0x1280, 0xB940_0C65),
     (0x1284, 0x9100_0694),
-    (0x1288, 0xD280_7D04),
+    (0x1288, 0xD287_D004),
     (0x128C, 0xD51B_E304),
     (0x1290, 0xB900_1065),
     (0x1294, 0xD69F_03E0),
 ];
 
-/// Ticks per re-arm: 1000 counter ticks at 62.5 MHz, at 50 M ticks/s.
+/// Ticks per re-arm: 16000 counts of the 1 GHz counter, at 50 M ticks/s
+/// (20 counts a tick).
 const TICKS_PER_PERIOD: u64 = 800;
 /// Far more than ten periods and the code around them.
 const GIVE_UP_AFTER: u64 = 1_000_000;

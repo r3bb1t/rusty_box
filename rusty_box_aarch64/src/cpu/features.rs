@@ -746,19 +746,19 @@ pub(crate) struct Implementation {
     pub(crate) max_svl: VecLen,
     /// The system counter's frequency: what `CNTPCT_EL0` counts at and
     /// `CNTFRQ_EL0` reads at reset. The system's choice before Armv8.6,
-    /// [`ARMV8P6_COUNTER_HZ`] from it.
+    /// 1 GHz from it; [`SYSTEM_COUNTER_HZ`] on both models.
     pub(crate) counter_hz: ClockHz,
 }
 
 impl Implementation {
     /// The Cortex-A57 shape: [`Features::CORTEX_A57`] and the Cortex-A57's
-    /// `MIDR_EL1`, with no streaming vector length to choose, and QEMU's
-    /// counter for it.
+    /// `MIDR_EL1`, with no streaming vector length to choose, and the
+    /// board's 1 GHz counter.
     pub(crate) const CORTEX_A57: Self = Self {
         features: Features::CORTEX_A57,
         midr: id::MIDR_CORTEX_A57,
         max_svl: VecLen::MIN,
-        counter_hz: QEMU_BACKCOMPAT_COUNTER_HZ,
+        counter_hz: SYSTEM_COUNTER_HZ,
     };
 
     /// The Armv9.2 processor model: [`Features::ARMV9P2`], a software
@@ -768,7 +768,7 @@ impl Implementation {
         features: Features::ARMV9P2,
         midr: id::MIDR_SOFTWARE_MODEL,
         max_svl: VecLen(512),
-        counter_hz: ARMV8P6_COUNTER_HZ,
+        counter_hz: SYSTEM_COUNTER_HZ,
     };
 
     /// This implementation as a processor of the level set `L` has it, with
@@ -887,17 +887,11 @@ impl Implementation {
     }
 }
 
-/// The system counter frequency QEMU gives the processor types it had
-/// before it standardized on 1 GHz, the Cortex-A57 among them
-/// (`GTIMER_BACKCOMPAT_HZ`, a 16 ns tick).
-pub const QEMU_BACKCOMPAT_COUNTER_HZ: ClockHz = match ClockHz::new(62_500_000) {
-    Some(hz) => hz,
-    None => panic!("62.5 MHz is a rate"),
-};
-
-/// The system counter frequency of Armv8.6 and later, which fix it at 1 GHz
-/// (Arm ARM, "The system counter"; QEMU `GTIMER_DEFAULT_HZ`).
-pub const ARMV8P6_COUNTER_HZ: ClockHz = match ClockHz::new(1_000_000_000) {
+/// The system counter frequency the board gives every processor model:
+/// 1 GHz, which Armv8.6 and later fix (Arm ARM, "The system counter").
+/// Before Armv8.6 the rate is the system's to choose, at least 10 MHz (BSA
+/// DEN0094C, RB_TIME_02), so the Cortex-A57 takes the architecture's own.
+pub const SYSTEM_COUNTER_HZ: ClockHz = match ClockHz::new(1_000_000_000) {
     Some(hz) => hz,
     None => panic!("1 GHz is a rate"),
 };
@@ -913,7 +907,8 @@ pub const ARMV8P6_COUNTER_HZ: ClockHz = match ClockHz::new(1_000_000_000) {
 pub enum CpuModel {
     /// A Cortex-A57 r1p0 as QEMU's `cortex-a57` is one: Armv8.0 with FP,
     /// Advanced SIMD, the Cryptographic Extension and CRC32, cut down to
-    /// AArch64 at EL0 and EL1, with a 62.5 MHz system counter.
+    /// AArch64 at EL0 and EL1; its system counter is the board's 1 GHz
+    /// [`SYSTEM_COUNTER_HZ`], where QEMU's runs at 62.5 MHz.
     #[default]
     CortexA57,
     /// An Armv9.2 processor with FEAT_SME and FEAT_SME2 and no FEAT_SVE:
@@ -942,9 +937,9 @@ impl CpuModel {
 
     /// The frequency of the system counter a board pairs with this
     /// processor: what `CNTPCT_EL0` counts at and `CNTFRQ_EL0` reads at
-    /// reset. QEMU runs the Cortex-A57's at [`QEMU_BACKCOMPAT_COUNTER_HZ`]
-    /// (`ARM_FEATURE_BACKCOMPAT_CNTFRQ`); the Armv9.2 model's is
-    /// [`ARMV8P6_COUNTER_HZ`].
+    /// reset: [`SYSTEM_COUNTER_HZ`] for both models. QEMU runs the
+    /// Cortex-A57's at 62.5 MHz (`GTIMER_BACKCOMPAT_HZ`,
+    /// `ARM_FEATURE_BACKCOMPAT_CNTFRQ`).
     pub const fn counter_hz(self) -> ClockHz {
         self.implementation().counter_hz
     }
@@ -1168,9 +1163,8 @@ mod tests {
 
     /// Each model has a name of its own, which names it back; its
     /// identity, counter and device tree `compatible` are its part's, or a
-    /// software model's: the Cortex-A57 is Arm's part 0xD07 with QEMU's
-    /// 62.5 MHz counter, the Armv9.2 model implementer 0 with Armv8.6's
-    /// 1 GHz.
+    /// software model's: the Cortex-A57 is Arm's part 0xD07, the Armv9.2
+    /// model implementer 0, both with the board's 1 GHz counter.
     #[test]
     fn each_model_is_named_and_identified() {
         let mut listed = 0;
@@ -1207,7 +1201,7 @@ mod tests {
             ),
             (0x41, 0xD07)
         );
-        assert_eq!(a57.counter_hz().get(), 62_500_000);
+        assert_eq!(a57.counter_hz().get(), 1_000_000_000);
         assert_eq!(a57.compatible(), "arm,cortex-a57");
 
         let v92 = CpuModel::Armv9p2;

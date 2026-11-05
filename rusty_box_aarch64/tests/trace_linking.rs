@@ -204,7 +204,8 @@ const REWRITTEN_LOOP: &[(u64, u32)] = &[
     (0x40, 0x9100_0800),
 ];
 
-/// The virtual timer interrupts every 1000 counts while a loop of two
+/// The virtual timer interrupts every 16000 counts (800 instructions at the
+/// 1 GHz counter and 50 M instructions a second) while a loop of two
 /// linked traces runs 0x3000 times; the IRQ handler counts the interrupts
 /// in `x20` and sums the addresses they interrupted in `x21`, and the guest
 /// powers off at the end.
@@ -216,7 +217,7 @@ const REWRITTEN_LOOP: &[(u64, u32)] = &[
 ///         mov w2, #(1 << 27)  ; str w2, [x1, #0x100]                      // ISENABLER0
 ///         ldr x3, =0x08010000 ; mov w2, #1        ; str w2, [x3]          // GICC_CTLR
 ///         mov w2, #0xff       ; str w2, [x3, #4]                          // GICC_PMR
-///         mov x4, #1000       ; msr cntv_tval_el0, x4
+///         mov x4, #16000      ; msr cntv_tval_el0, x4
 ///         mov x4, #1          ; msr cntv_ctl_el0, x4
 ///         mov x20, #0         ; mov x21, #0       ; msr daifclr, #2
 ///         mov x1, #0x3000
@@ -227,7 +228,7 @@ const REWRITTEN_LOOP: &[(u64, u32)] = &[
 ///         .org 0x1280         // IRQ, current EL with SP_ELx
 ///         ldr w5, [x3, #0xc]  ; add x20, x20, #1  // GICC_IAR
 ///         mrs x6, elr_el1     ; add x21, x21, x6
-///         mov x4, #1000       ; msr cntv_tval_el0, x4
+///         mov x4, #16000      ; msr cntv_tval_el0, x4
 ///         str w5, [x3, #0x10] ; eret              // GICC_EOIR
 /// ```
 const INTERRUPTED_LOOP: &[(u64, u32)] = &[
@@ -245,7 +246,7 @@ const INTERRUPTED_LOOP: &[(u64, u32)] = &[
     (0x2C, 0xB900_0062),
     (0x30, 0x5280_1FE2),
     (0x34, 0xB900_0462),
-    (0x38, 0xD280_7D04),
+    (0x38, 0xD287_D004),
     (0x3C, 0xD51B_E304),
     (0x40, 0xD280_0024),
     (0x44, 0xD51B_E324),
@@ -274,7 +275,7 @@ const INTERRUPTED_LOOP: &[(u64, u32)] = &[
     (0x1284, 0x9100_0694),
     (0x1288, 0xD538_4026),
     (0x128C, 0x8B06_02B5),
-    (0x1290, 0xD280_7D04),
+    (0x1290, 0xD287_D004),
     (0x1294, 0xD51B_E304),
     (0x1298, 0xB900_1065),
     (0x129C, 0xD69F_03E0),

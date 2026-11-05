@@ -22,8 +22,8 @@
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::machine::Bare;
 use rusty_box_aarch64::{
-    Execution, Instrumentation, LentStorage, Levels, MachineBuilder, MemoryLoan, NoEl2, RamSize,
-    Reg, RunBudget, StopReason, SysReg, VirtConfig, VirtMachine, WithEl2,
+    ClockHz, Execution, Instrumentation, LentStorage, Levels, MachineBuilder, MemoryLoan, NoEl2,
+    RamSize, Reg, RunBudget, StopReason, SysReg, VirtConfig, VirtMachine, WithEl2,
 };
 
 /// Lets the machine fast-forward; counts the branches it hears of.
@@ -163,9 +163,9 @@ const STORE: &[(u64, u32)] = &[
 ];
 
 /// `tests/timer_interrupts.rs`'s guest with its `WFI` wait replaced by a
-/// poll: the virtual timer interrupts every 1000 counts, and the IRQ
+/// poll: the virtual timer interrupts every 16000 counts, and the IRQ
 /// handler counts the interrupts in `x20`, while the main line polls the
-/// counter for 0x3000 counts and then powers off.
+/// counter for 0x30000 counts and then powers off.
 ///
 /// ```text
 /// _start: ldr x0, =0x40001000      ; msr vbar_el1, x0
@@ -174,16 +174,16 @@ const STORE: &[(u64, u32)] = &[
 ///         mov w2, #(1 << 27)       ; str w2, [x1, #0x100]                      // ISENABLER0
 ///         ldr x3, =0x08010000      ; mov w2, #1        ; str w2, [x3]          // GICC_CTLR
 ///         mov w2, #0xff            ; str w2, [x3, #4]                          // GICC_PMR
-///         mov x4, #1000            ; msr cntv_tval_el0, x4
+///         mov x4, #16000           ; msr cntv_tval_el0, x4
 ///         mov x4, #1               ; msr cntv_ctl_el0, x4
 ///         mov x20, #0              ; msr daifclr, #2
-///         mrs x1, cntvct_el0       ; add x19, x1, #0x3, lsl #12
+///         mrs x1, cntvct_el0       ; add x19, x1, #0x30, lsl #12
 /// 1:      mrs x0, cntvct_el0       ; cmp x19, x0       ; b.hi 1b
 ///         ldr x0, =0x84000008      ; hvc #0            // PSCI SYSTEM_OFF
 /// 2:      b 2b
 ///         .org 0x1280              // IRQ, current EL with SP_ELx
 ///         ldr w5, [x3, #0xc]       ; add x20, x20, #1  // GICC_IAR
-///         mov x4, #1000            ; msr cntv_tval_el0, x4
+///         mov x4, #16000           ; msr cntv_tval_el0, x4
 ///         str w5, [x3, #0x10]      ; eret              // GICC_EOIR
 /// ```
 const IRQ_POLL: &[(u64, u32)] = &[
@@ -201,14 +201,14 @@ const IRQ_POLL: &[(u64, u32)] = &[
     (0x2C, 0xB900_0062),
     (0x30, 0x5280_1FE2),
     (0x34, 0xB900_0462),
-    (0x38, 0xD280_7D04),
+    (0x38, 0xD287_D004),
     (0x3C, 0xD51B_E304),
     (0x40, 0xD280_0024),
     (0x44, 0xD51B_E324),
     (0x48, 0xD280_0014),
     (0x4C, 0xD503_42FF),
     (0x50, 0xD53B_E041),
-    (0x54, 0x9140_0C33),
+    (0x54, 0x9140_C033),
     (0x58, 0xD53B_E040),
     (0x5C, 0xEB00_027F),
     (0x60, 0x54FF_FFC8),
@@ -226,7 +226,7 @@ const IRQ_POLL: &[(u64, u32)] = &[
     (0x90, 0x8400_0008),
     (0x1280, 0xB940_0C65),
     (0x1284, 0x9100_0694),
-    (0x1288, 0xD280_7D04),
+    (0x1288, 0xD287_D004),
     (0x128C, 0xD51B_E304),
     (0x1290, 0xB900_1065),
     (0x1294, 0xD69F_03E0),
@@ -525,7 +525,19 @@ fn machine<'r, L: TestLevels, I: Instrumentation>(
     regs: &[(Reg, u64)],
     sysregs: &[(SysReg, u64)],
 ) -> VirtMachine<LentStorage<'r>, L, I> {
-    let builder = MachineBuilder::new(VirtConfig::DEFAULT)
+    machine_with::<L, I>(VirtConfig::DEFAULT, ram, observer, program, regs, sysregs)
+}
+
+/// [`machine`] built with `config`.
+fn machine_with<'r, L: TestLevels, I: Instrumentation>(
+    config: VirtConfig,
+    ram: &'r mut [u8],
+    observer: I,
+    program: &[(u64, u32)],
+    regs: &[(Reg, u64)],
+    sysregs: &[(SysReg, u64)],
+) -> VirtMachine<LentStorage<'r>, L, I> {
+    let builder = MachineBuilder::new(config)
         .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
         .bare()
         .instrumentation(observer);
@@ -585,10 +597,36 @@ fn run_both_on<L: TestLevels>(
     slice: u64,
     done: Option<u64>,
 ) -> Both {
+    run_both_with::<L>(VirtConfig::DEFAULT, program, regs, sysregs, slice, done)
+}
+
+/// [`run_both_on`] on machines built with `config`.
+fn run_both_with<L: TestLevels>(
+    config: VirtConfig,
+    program: &[(u64, u32)],
+    regs: &[(Reg, u64)],
+    sysregs: &[(SysReg, u64)],
+    slice: u64,
+    done: Option<u64>,
+) -> Both {
     let mut ram_a = vec![0u8; RAM_LEN];
     let mut ram_b = vec![0u8; RAM_LEN];
-    let mut a = machine::<L, _>(&mut ram_a, Skipping::default(), program, regs, sysregs);
-    let mut b = machine::<L, _>(&mut ram_b, Watching::default(), program, regs, sysregs);
+    let mut a = machine_with::<L, _>(
+        config,
+        &mut ram_a,
+        Skipping::default(),
+        program,
+        regs,
+        sysregs,
+    );
+    let mut b = machine_with::<L, _>(
+        config,
+        &mut ram_b,
+        Watching::default(),
+        program,
+        regs,
+        sysregs,
+    );
     if let Some(offset) = done {
         a.set_exits(&[RAM_BASE + offset]).expect("one exit");
         b.set_exits(&[RAM_BASE + offset]).expect("one exit");
@@ -723,6 +761,64 @@ fn timer_interrupts_during_a_poll_arrive_at_the_same_instruction() {
                 both.skipping.branches,
                 both.watching.branches
             );
+        }
+    }
+}
+
+/// At clock rates where the counter does not advance a whole number of
+/// counts a tick (10/3 at 300 M instructions a second, 1/3 at 3 G), a
+/// direct poll and a poll interrupted by the timer still end as running
+/// every instruction ends them, and the skip still happens.
+#[test]
+fn polls_at_a_fractional_counter_rate_end_as_running_every_instruction_ends_them() {
+    for ips in [300_000_000, 3_000_000_000] {
+        let config = VirtConfig {
+            ips: ClockHz::new(ips).expect("a rate"),
+            ..VirtConfig::DEFAULT
+        };
+        for slice in [97, 997, 1 << 24] {
+            let both = run_both_with::<NoEl2>(config, DIRECT, &[], &[], slice, Some(0x18));
+            assert!(both.finished, "{ips} ips, slice {slice}");
+            assert_eq!(
+                both.stop,
+                StopReason::ExitReached,
+                "{ips} ips, slice {slice}"
+            );
+            assert_eq!(both.x2, 1, "{ips} ips, slice {slice}");
+            if slice == 1 << 24 {
+                assert!(
+                    both.skipping.branches * 10 < both.watching.branches,
+                    "{ips} ips, slice {slice}: {} of {} branches run",
+                    both.skipping.branches,
+                    both.watching.branches
+                );
+            }
+        }
+        for slice in [997, 1 << 24] {
+            let both = run_both_with::<NoEl2>(config, IRQ_POLL, &[], &[], slice, None);
+            assert!(both.finished, "{ips} ips, slice {slice}");
+            assert_eq!(
+                both.stop,
+                StopReason::PoweredOff,
+                "{ips} ips, slice {slice}"
+            );
+            assert_eq!(
+                both.skipping_x20, both.watching_x20,
+                "{ips} ips, slice {slice}"
+            );
+            assert!(
+                both.watching_x20 >= 10,
+                "{ips} ips, slice {slice}: {} interrupts",
+                both.watching_x20
+            );
+            if slice == 1 << 24 {
+                assert!(
+                    both.skipping.branches < both.watching.branches,
+                    "{ips} ips, slice {slice}: {} of {} branches run",
+                    both.skipping.branches,
+                    both.watching.branches
+                );
+            }
         }
     }
 }
