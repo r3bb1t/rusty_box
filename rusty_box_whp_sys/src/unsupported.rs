@@ -12,8 +12,8 @@
 
 use crate::error::{WhpError, WhpResult};
 use crate::{
-    CapabilityCode, CounterSet, FeatureBanks, GpaPerms, GvaTranslation, PropertyCode,
-    RawPartition, RegisterValue, VpStateType,
+    CapabilityCode, CounterSet, DeadlineWake, FeatureBanks, GpaPerms, GvaTranslation,
+    PropertyCode, RawDeadline, RawPartition, RegisterValue, VpStateType,
 };
 use crate::vcpu::{Exit, InterruptRequest, Reg, SegmentRegister, TableRegister};
 
