@@ -42,6 +42,8 @@ pub const QUEUE_DEVICE_HIGH: u64 = 0x0A4;
 pub const SHM_LEN_LOW: u64 = 0x0B0;
 pub const SHM_LEN_HIGH: u64 = 0x0B4;
 pub const SHM_BASE_LOW: u64 = 0x0B8;
+pub const SHM_BASE_HIGH: u64 = 0x0BC;
+pub const QUEUE_RESET: u64 = 0x0C0;
 pub const CONFIG_GENERATION: u64 = 0x0FC;
 pub const CONFIG: u64 = 0x100;
 
@@ -56,6 +58,7 @@ pub const NEEDS_RESET: u32 = 0x40;
 pub const F_INDIRECT_DESC: u64 = 1 << 28;
 pub const F_EVENT_IDX: u64 = 1 << 29;
 pub const F_VERSION_1: u64 = 1 << 32;
+pub const F_RING_RESET: u64 = 1 << 40;
 
 // Descriptor flags.
 pub const DESC_NEXT: u16 = 1;
@@ -176,12 +179,14 @@ impl Driver {
     }
 
     /// Linux's `vm_setup_vq` for queue `q` at its largest size, rings at a
-    /// region of their own.
+    /// region of their own, zeroed as `vring_alloc_queue`'s
+    /// `dma_alloc_coherent` gives them.
     pub fn setup_queue(&mut self, q: usize) {
         self.write(QUEUE_SEL, q as u32);
         let size = self.read(QUEUE_NUM_MAX) as u16;
         let area = RAM_BASE + 0x1_0000 * (q as u64 + 1);
         let (desc, avail, used) = (area, area + 0x4000, area + 0x5000);
+        self.put(area, &[0; 0x6000]);
         self.queues[q] = DriverQueue {
             size,
             desc,
@@ -250,10 +255,11 @@ impl Driver {
     /// Write descriptor `index` of queue `q`'s table.
     pub fn put_desc(&mut self, q: usize, index: u16, addr: u64, len: u32, flags: u16, next: u16) {
         let at = self.queues[q].desc + 16 * u64::from(index);
-        Self::put_desc_at(self, at, addr, len, flags, next);
+        self.put_desc_at(at, addr, len, flags, next);
     }
 
-    fn put_desc_at(&mut self, at: u64, addr: u64, len: u32, flags: u16, next: u16) {
+    /// Write a descriptor at `at`, in a queue's table or an indirect one.
+    pub fn put_desc_at(&mut self, at: u64, addr: u64, len: u32, flags: u16, next: u16) {
         let mut raw = [0u8; 16];
         raw[..8].copy_from_slice(&addr.to_le_bytes());
         raw[8..12].copy_from_slice(&len.to_le_bytes());
@@ -290,17 +296,30 @@ impl Driver {
     /// Make `buffers` available on queue `q` through one indirect
     /// descriptor; returns its head.
     pub fn offer_indirect(&mut self, q: usize, buffers: &[Buf]) -> u16 {
-        let table = self.alloc(16 * buffers.len() as u64);
-        for (i, b) in buffers.iter().enumerate() {
-            let last = i + 1 == buffers.len();
+        self.offer_ending_indirect(q, &[], buffers)
+    }
+
+    /// Make a chain available on queue `q`: `direct` as descriptors of the
+    /// queue's table, then one descriptor naming an indirect table of
+    /// `indirect` (virtio 1.2 2.7.5.3.2); returns its head.
+    pub fn offer_ending_indirect(&mut self, q: usize, direct: &[Buf], indirect: &[Buf]) -> u16 {
+        let table = self.alloc(16 * indirect.len() as u64);
+        for (i, b) in indirect.iter().enumerate() {
+            let last = i + 1 == indirect.len();
             let flags =
                 if last { 0 } else { DESC_NEXT } | if b.device_writes { DESC_WRITE } else { 0 };
             self.put_desc_at(table + 16 * i as u64, b.addr, b.len, flags, i as u16 + 1);
         }
         let size = self.queues[q].size;
         let head = self.queues[q].next_desc;
-        self.put_desc(q, head, table, 16 * buffers.len() as u32, DESC_INDIRECT, 0);
-        self.queues[q].next_desc = (head + 1) % size;
+        for (i, b) in direct.iter().enumerate() {
+            let index = (head + i as u16) % size;
+            let flags = DESC_NEXT | if b.device_writes { DESC_WRITE } else { 0 };
+            self.put_desc(q, index, b.addr, b.len, flags, (index + 1) % size);
+        }
+        let last = (head + direct.len() as u16) % size;
+        self.put_desc(q, last, table, 16 * indirect.len() as u32, DESC_INDIRECT, 0);
+        self.queues[q].next_desc = (last + 1) % size;
         self.publish(q, head);
         head
     }
@@ -388,6 +407,13 @@ impl Driver {
             Ok(()) => out.0,
             Err(e) => panic!("saving a transport: {e:?}"),
         }
+    }
+
+    /// Whether a transport over `device` refuses `saved`, and why.
+    pub fn restore_refusal(device: Device, saved: &[u8]) -> Option<rusty_box_core::snap::SnapError> {
+        let mut transport = Transport::new(31, device);
+        let mut r: &[u8] = saved;
+        transport.restore(&mut r).err()
     }
 
     /// This guest again, its transport restored from `saved` onto `device`

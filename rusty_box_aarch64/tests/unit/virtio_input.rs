@@ -107,8 +107,11 @@ fn the_keyboard_configuration_is_qemus_with_the_boards_name() {
         "EV_LED: NumLock, CapsLock, ScrollLock"
     );
     assert_eq!(entry(&mut d, 0x11, 0x02), (0, Vec::new()), "no EV_REL");
-    // The configuration is the header and the largest entry.
-    assert_eq!(d.read_width(CONFIG + 37, AccessWidth::Byte), 0xFF);
+    // The configuration is `struct virtio_input_config`, the union's bytes
+    // past the entry zero.
+    assert_eq!(d.read_width(CONFIG + 37, AccessWidth::Byte), 0);
+    assert_eq!(d.read_width(CONFIG + 135, AccessWidth::Byte), 0);
+    assert_eq!(d.read_width(CONFIG + 136, AccessWidth::Byte), 0xFF);
 }
 
 /// A host's identity names its input devices: the driver reads the
@@ -209,21 +212,38 @@ fn the_tablet_configuration_is_qemus_with_the_boards_name() {
         );
         assert!(info[8..].iter().all(|&b| b == 0));
     }
-    assert_eq!(d.read_width(CONFIG + 50, AccessWidth::Byte), 0);
-    assert_eq!(d.read_width(CONFIG + 51, AccessWidth::Byte), 0xFF);
+    assert_eq!(d.read_width(CONFIG + 51, AccessWidth::Byte), 0);
+    assert_eq!(d.read_width(CONFIG + 136, AccessWidth::Byte), 0xFF);
 }
 
+/// A selector naming no entry reads `size` 0 and no data (virtio 1.2
+/// 5.8.5.2), and `select` and `subsel` as written.
 #[test]
-fn a_selector_with_no_entry_reads_all_zeros() {
+fn a_selector_with_no_entry_reads_size_zero() {
     let mut d = device(InputKind::Keyboard);
     entry(&mut d, 0x11, 0x04);
-    for off in 0..37 {
-        assert_eq!(
-            d.read_width(CONFIG + off, AccessWidth::Byte),
-            0,
-            "byte {off}, select and subsel included"
-        );
+    assert_eq!(d.read_width(CONFIG, AccessWidth::Byte), 0x11, "select");
+    assert_eq!(d.read_width(CONFIG + 1, AccessWidth::Byte), 0x04, "subsel");
+    for off in 2..136 {
+        assert_eq!(d.read_width(CONFIG + off, AccessWidth::Byte), 0, "byte {off}");
     }
+}
+
+/// The driver may write `select` and `subsel` in either order (5.8.5.1),
+/// reading between them: the first written stays, though what it and the
+/// old `subsel` name has no entry.
+#[test]
+fn select_and_subsel_may_be_written_in_either_order() {
+    let mut d = device(InputKind::Keyboard);
+    entry(&mut d, 0x01, 0);
+    d.write_width(CONFIG + 1, AccessWidth::Byte, 0x01);
+    assert_eq!(d.read_width(CONFIG + 2, AccessWidth::Byte), 0, "(0x01, 0x01): none");
+    d.write_width(CONFIG, AccessWidth::Byte, 0x11);
+    assert_eq!(
+        d.read_width(CONFIG + 2, AccessWidth::Byte),
+        29,
+        "(0x11, 0x01): EV_KEY's bitmap"
+    );
 }
 
 #[test]
@@ -370,18 +390,62 @@ fn each_device_takes_only_its_own_events() {
         .keys(vdev, &[(Key::A, KeyAction::Press)])));
 }
 
+/// An event queue whose `QueueReady` is 0 takes no host event (virtio 1.2
+/// 4.2.2.1): its buffers, which the driver may have freed, stay untouched,
+/// and the host may offer the event again once it is ready.
 #[test]
-fn status_reports_are_taken_with_their_length() {
+fn a_host_event_waits_while_the_event_queue_is_not_ready() {
+    let mut d = device(InputKind::Keyboard);
+    d.start(LINUX_FEATURES);
+    let bufs = event_buffers(&mut d, 4);
+    d.write(QUEUE_SEL, 0);
+    d.write(QUEUE_READY, 0);
+    assert!(!send(&mut d, |input, vdev| input
+        .keys(vdev, &[(Key::A, KeyAction::Press)])));
+    assert!(d.used(0).is_empty());
+    assert_eq!(d.mem(bufs[0], 8), [0; 8], "untouched");
+    d.write(QUEUE_READY, 1);
+    assert!(send(&mut d, |input, vdev| input
+        .keys(vdev, &[(Key::A, KeyAction::Press)])));
+    assert_eq!(d.used(0).len(), 2, "the key and its sync");
+}
+
+/// A status report is device-readable, so it comes back with nothing
+/// written (virtio 1.2 2.7.8.2), and the driver is interrupted for it; a
+/// notification that finds no report interrupts nothing.
+#[test]
+fn status_reports_are_taken_with_nothing_written() {
     let mut d = device(InputKind::Keyboard);
     d.start(LINUX_FEATURES);
     let led = d.alloc_with(&[0x11, 0, 1, 0, 1, 0, 0, 0]);
     let head = d.offer(1, &[Buf::readable(led, 8)]);
     d.notify(1);
-    assert_eq!(d.used(1), [(u32::from(head), 8)]);
+    assert_eq!(d.used(1), [(u32::from(head), 0)]);
+    assert_eq!(d.take_interrupt(), 1);
     let short = d.alloc_with(&[0x11, 0, 1, 0]);
     let head = d.offer(1, &[Buf::readable(short, 4)]);
     d.notify(1);
-    assert_eq!(d.used(1), [(u32::from(head), 4)]);
+    assert_eq!(d.used(1), [(u32::from(head), 0)]);
+    d.take_interrupt();
+    d.notify(1);
+    assert_eq!(d.read(INTERRUPT_STATUS), 0, "nothing taken, no interrupt");
+}
+
+/// A report given back before a later one in the same notification breaks
+/// the device is still notified: `InterruptStatus` shows the used buffer
+/// and the configuration change, each an event that took place (virtio 1.2
+/// 4.2.2.1).
+#[test]
+fn a_report_given_back_before_the_device_breaks_is_notified() {
+    let mut d = device(InputKind::Keyboard);
+    d.start(LINUX_FEATURES);
+    let led = d.alloc_with(&[0x11, 0, 1, 0, 1, 0, 0, 0]);
+    let head = d.offer(1, &[Buf::readable(led, 8)]);
+    d.offer(1, &[Buf::readable(UNASSIGNED, 8)]);
+    d.notify(1);
+    assert_eq!(d.used(1), [(u32::from(head), 0)]);
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, NEEDS_RESET);
+    assert_eq!(d.read(INTERRUPT_STATUS), 0b11);
 }
 
 #[test]

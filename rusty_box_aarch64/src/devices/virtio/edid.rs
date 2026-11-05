@@ -20,6 +20,19 @@ use crate::identity::DisplayIdentity;
 /// virtio_gpu_resp_edid`'s `edid`).
 pub const EDID_LEN: usize = 1024;
 
+/// An EDID block (VESA E-EDID 1.4 section 2.2): the base block and each
+/// extension block.
+pub const BLOCK_LEN: usize = 128;
+
+/// Where in the base block the count of extension blocks that follow it
+/// is kept (E-EDID 1.4, byte 7Eh).
+pub const EXTENSION_COUNT_AT: usize = 126;
+
+/// How many of a block's bytes come before its checksum byte, its last
+/// (E-EDID 1.4, byte 7Fh): the bytes the checksum covers, which
+/// [`checksum`] stores right after them, and the room for descriptors.
+const BLOCK_SUMMED_LEN: usize = BLOCK_LEN - 1;
+
 /// `modes[]`: the standard modes, by where each is advertised.
 struct Mode {
     xres: u32,
@@ -176,14 +189,17 @@ fn checksum(edid: &mut [u8], at: usize, len: usize) {
 /// and then the CTA extension, or `None` when both are full.
 fn desc_next(edid: &[u8], dta: Option<usize>, desc: Option<usize>) -> Option<usize> {
     let desc = desc?;
-    if desc + 18 + 18 < 127 {
+    // The next descriptor is placed only where its last byte comes at least
+    // two before the block's checksum byte, QEMU's bound: one ending right
+    // before the checksum, which E-EDID allows, is not placed.
+    if desc + 18 + 18 < BLOCK_SUMMED_LEN {
         return Some(desc + 18);
     }
     let dta = dta?;
-    if desc < 127 {
+    if desc < BLOCK_SUMMED_LEN {
         return Some(dta + usize::from(edid[dta + 2]));
     }
-    if desc + 18 + 18 < dta + 127 {
+    if desc + 18 + 18 < dta + BLOCK_SUMMED_LEN {
         return Some(desc + 18);
     }
     None
@@ -318,12 +334,12 @@ pub(crate) fn generate(prefx: u32, prefy: u32, display: &DisplayIdentity) -> [u8
 
     // Extensions: a CTA block always fits, a DisplayID block for a large
     // screen.
-    let dta = 128;
-    edid[126] += 1;
+    let dta = BLOCK_LEN;
+    edid[EXTENSION_COUNT_AT] += 1;
     edid[dta..dta + 5].copy_from_slice(&[0x02, 0x03, 0x05, 0x00, 0x40]);
-    let did = large_screen.then_some(256);
+    let did = large_screen.then_some(2 * BLOCK_LEN);
     if let Some(did) = did {
-        edid[126] += 1;
+        edid[EXTENSION_COUNT_AT] += 1;
         init_displayid(&mut edid, did);
     }
 
@@ -379,10 +395,10 @@ pub(crate) fn generate(prefx: u32, prefy: u32, display: &DisplayIdentity) -> [u8
         displayid_generate(&mut edid, did, &timings, prefx, prefy);
     }
 
-    checksum(&mut edid, 0, 127);
-    checksum(&mut edid, dta, 127);
+    checksum(&mut edid, 0, BLOCK_SUMMED_LEN);
+    checksum(&mut edid, dta, BLOCK_SUMMED_LEN);
     if let Some(did) = did {
-        checksum(&mut edid, did, 127);
+        checksum(&mut edid, did, BLOCK_SUMMED_LEN);
     }
     edid
 }

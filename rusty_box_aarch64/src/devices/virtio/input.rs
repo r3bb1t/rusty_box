@@ -9,13 +9,13 @@
 //!   the driver is not active, and when it has not queued a buffer for each
 //!   (the buffers taken so far are put back);
 //! - `virtio_input_handle_sts`: the driver's status events (the keyboard
-//!   LEDs) are taken and given back with the length read;
+//!   LEDs) are taken;
 //! - `virtio_input_get_config` and `virtio_input_set_config`: the
-//!   configuration space shows the entry `select`/`subsel` name, header
-//!   included, or all zeros when there is none; writing it chooses the entry
-//!   and notifies a configuration change;
+//!   configuration space shows the entry `select`/`subsel` name; writing it
+//!   chooses the entry and notifies a configuration change;
 //! - `virtio_input_set_status` and `virtio_input_reset`: the device is
-//!   active from `DRIVER_OK` until reset;
+//!   active from `DRIVER_OK` until reset, which the transport's status
+//!   holds;
 //! - `virtio_keyboard_config` and `virtio_keyboard_init` (every key code
 //!   from `KEY_ESC` up to `KEY_REPLY`), `virtio_tablet_config` and
 //!   `virtio_input_extend_config` over `keymap_button`;
@@ -30,6 +30,14 @@
 //! `ui/sdl2.c`): a key, then a sync; a position as both axes, then a sync; a
 //! button, then a sync; a wheel detent as the wheel button pressed, a sync,
 //! released, a sync.
+//!
+//! Where it follows the specification over QEMU (README, "Where the
+//! references differ"): a status event comes back with nothing written
+//! (2.7.8.2), where QEMU's gives the length it read; the configuration is
+//! `struct virtio_input_config`'s 136 bytes, `select` and `subsel` as the
+//! driver wrote them and `size` 0 when they name no entry (5.8.4, 5.8.5),
+//! where QEMU's ends after the largest entry and reads all zeros, its
+//! header included, when there is none.
 //!
 //! The host offers its events whole: when the driver has not queued enough
 //! buffers for all of an offer, the device takes none of it, so the host can
@@ -46,7 +54,7 @@ use rusty_box_core::input::{Key, KeyAction};
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::queue::Chain;
-use super::{Core, Vdev, STATUS_DRIVER_OK};
+use super::{Core, Vdev};
 use crate::identity::{BoardIdentity, InputDeviceId, InputVendorId, Text, INPUT_NAME_CAPACITY};
 
 /// Which input device.
@@ -106,10 +114,14 @@ pub const QUEUE_SIZE: u16 = 64;
 
 /// The configuration's header: `select`, `subsel`, `size` and padding.
 const CONFIG_HEADER_LEN: usize = 8;
-/// The largest entry each device has besides its name: the keyboard's key
-/// bitmap of 29 bytes, the tablet's button bitmap of 43.
-const KEYBOARD_LARGEST_ENTRY: usize = (KEY_REPLY as usize).div_ceil(8);
-const TABLET_LARGEST_ENTRY: usize = BTN_GEAR_UP as usize / 8 + 1;
+/// The configuration's union `u` (5.8.4): its largest member, `bitmap`,
+/// of 128 bytes.
+const CONFIG_UNION_LEN: usize = 128;
+/// Bytes of configuration space: the whole `struct virtio_input_config`
+/// (5.8.4), its union's bytes past the selected entry zero. QEMU's
+/// `virtio_input_device_realize` ends it after the largest entry, past
+/// which the transport reads all ones.
+pub const CONFIG_LEN: usize = CONFIG_HEADER_LEN + CONFIG_UNION_LEN;
 
 /// The most events one batch has: both axes of a position and the sync.
 const MAX_BATCH: usize = 3;
@@ -313,14 +325,14 @@ const fn linux_button_code(button: PointerButton) -> u16 {
 /// header): its size and bytes.
 struct ConfigEntry {
     size: u8,
-    data: [u8; 128],
+    data: [u8; CONFIG_UNION_LEN],
 }
 
 impl ConfigEntry {
     fn from_bytes(bytes: &[u8]) -> Self {
         let mut entry = Self {
             size: bytes.len() as u8,
-            data: [0; 128],
+            data: [0; CONFIG_UNION_LEN],
         };
         entry.data[..bytes.len()].copy_from_slice(bytes);
         entry
@@ -337,7 +349,7 @@ impl ConfigEntry {
     fn bitmap<I: Iterator<Item = u16>>(codes: I) -> Self {
         let mut entry = Self {
             size: 0,
-            data: [0; 128],
+            data: [0; CONFIG_UNION_LEN],
         };
         for code in codes {
             let byte = usize::from(code / 8);
@@ -357,8 +369,6 @@ pub struct Input {
     vendor: InputVendorId,
     /// The product and version `VIRTIO_INPUT_CFG_ID_DEVIDS` reads.
     id: InputDeviceId,
-    /// The driver set `DRIVER_OK` since the last reset.
-    active: bool,
     select: u8,
     subsel: u8,
 }
@@ -372,7 +382,6 @@ impl Input {
             name: identity.input_name(kind),
             vendor: identity.input_vendor(),
             id: identity.input_id(kind),
-            active: false,
             select: 0,
             subsel: 0,
         }
@@ -380,29 +389,6 @@ impl Input {
 
     pub fn kind(&self) -> InputKind {
         self.kind
-    }
-
-    /// QEMU `virtio_input_reset`.
-    pub fn reset(&mut self) {
-        self.active = false;
-    }
-
-    /// QEMU `virtio_input_set_status`.
-    pub fn set_status(&mut self, status: u8) {
-        if status & STATUS_DRIVER_OK != 0 {
-            self.active = true;
-        }
-    }
-
-    /// Bytes of configuration space: the header and the largest entry
-    /// (QEMU `virtio_input_device_realize`'s `cfg_size`), the name where
-    /// that is the largest.
-    pub fn config_len(&self) -> usize {
-        let largest = match self.kind {
-            InputKind::Keyboard => KEYBOARD_LARGEST_ENTRY,
-            InputKind::Tablet => TABLET_LARGEST_ENTRY,
-        };
-        CONFIG_HEADER_LEN + largest.max(self.name.as_bytes().len())
     }
 
     /// The configuration entry `select`/`subsel` names, if the device has
@@ -447,15 +433,19 @@ impl Input {
         })
     }
 
-    /// QEMU `virtio_input_get_config`.
+    /// QEMU `virtio_input_get_config`: `select` and `subsel` as the driver
+    /// wrote them, which it may do in either order (5.8.5.1), and the entry
+    /// they name, `size` 0 and no data where there is none (5.8.5.2). QEMU
+    /// zeroes `select` and `subsel` too then, so a driver that writes one,
+    /// reads, then writes the other finds the first gone.
     pub fn get_config(&self, config: &mut [u8]) {
         config.fill(0);
+        config[0] = self.select;
+        config[1] = self.subsel;
         if let Some(entry) = self.entry(self.select, self.subsel) {
-            config[0] = self.select;
-            config[1] = self.subsel;
             config[2] = entry.size;
-            let payload = config.len() - 8;
-            config[8..].copy_from_slice(&entry.data[..payload]);
+            let payload = config.len() - CONFIG_HEADER_LEN;
+            config[CONFIG_HEADER_LEN..].copy_from_slice(&entry.data[..payload]);
         }
     }
 
@@ -467,18 +457,21 @@ impl Input {
     }
 
     /// The driver notified a queue: the status queue's reports are taken
-    /// (QEMU `virtio_input_handle_sts`); the event queue has nothing to do
-    /// until the host sends an event.
+    /// (QEMU `virtio_input_handle_sts`), each given back with no byte
+    /// written (2.7.8.2: the used length counts what the device wrote, and
+    /// a report is device-readable), and the driver interrupted for each
+    /// as it is given back, so a later report that breaks the device does
+    /// not hide those before it; the event queue has nothing to do until
+    /// the host sends an event. QEMU gives a report back with the bytes it
+    /// read, and interrupts once whether or not it took one.
     pub fn handle_output(&mut self, vdev: &mut Vdev<'_, '_>, q: usize) {
         if q != STATUS_QUEUE {
             return;
         }
         while let Some(chain) = vdev.pop(STATUS_QUEUE) {
-            let mut report = [0u8; 8];
-            let len = vdev.read(&chain, 0, &mut report);
-            vdev.push(STATUS_QUEUE, &chain, len as u32);
+            vdev.push(STATUS_QUEUE, &chain, 0);
+            vdev.notify(STATUS_QUEUE);
         }
-        vdev.notify(STATUS_QUEUE);
     }
 
     /// Hand `batches` to the guest, each as `virtio_input_send` does once
@@ -491,7 +484,7 @@ impl Input {
         vdev: &mut Vdev<'_, '_>,
         batches: I,
     ) -> bool {
-        if !self.active {
+        if !vdev.driver_ok() {
             return false;
         }
         let needed: usize = batches.clone().map(|b| b.len).sum();
@@ -595,13 +588,11 @@ impl Input {
     }
 
     pub fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
-        w.write_bool(self.active)?;
         w.write_u8(self.select)?;
         w.write_u8(self.subsel)
     }
 
     pub fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
-        self.active = r.read_bool()?;
         self.select = r.read_u8()?;
         self.subsel = r.read_u8()?;
         Ok(())

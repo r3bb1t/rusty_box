@@ -1,12 +1,15 @@
 //! Unit tests of `src/devices/virtio/mod.rs` and `queue.rs`: the
 //! non-legacy virtio-mmio transport and the split ring, driven through the
-//! registers and guest memory as a driver drives them, against what QEMU's
+//! registers and guest memory as a driver drives them, against virtio 1.2
+//! (sections 2 and 4.2) and, where it leaves the choice open, what QEMU's
 //! `virtio-mmio.c` and `virtio.c` do. The device behind the transport is the
-//! keyboard, whose status queue takes any report a driver offers.
+//! keyboard, whose status queue takes any report a driver offers and gives
+//! it back with nothing written.
 
 use super::input::{Input, InputKind};
 use super::test_driver::*;
 use super::Device;
+use crate::board::RAM_BASE;
 use crate::bus::AccessWidth;
 use crate::identity::BoardIdentity;
 
@@ -41,16 +44,19 @@ fn the_registers_identify_a_non_legacy_transport_of_the_boards_vendor() {
     assert_eq!(d.read(VERSION), 2);
     assert_eq!(d.read(DEVICE_ID), 18);
     assert_eq!(d.read(VENDOR_ID).to_le_bytes(), *b"RBOX");
-    // No shared memory regions: their length is all ones, their base 0.
-    assert_eq!(d.read(SHM_LEN_LOW), u32::MAX);
-    assert_eq!(d.read(SHM_LEN_HIGH), u32::MAX);
-    assert_eq!(d.read(SHM_BASE_LOW), 0);
+    // No shared memory regions: their length and base are all ones (Table
+    // 4.1).
+    for off in [SHM_LEN_LOW, SHM_LEN_HIGH, SHM_BASE_LOW, SHM_BASE_HIGH] {
+        assert_eq!(d.read(off), u32::MAX, "{off:#x}");
+    }
     for q in 0..2 {
         d.write(QUEUE_SEL, q);
         assert_eq!(d.read(QUEUE_NUM_MAX), 64, "queue {q}");
     }
-    d.write(QUEUE_SEL, 2);
-    assert_eq!(d.read(QUEUE_NUM_MAX), 0, "a queue the device does not have");
+    for q in [2, 1024, 0xFFFF_FFFF] {
+        d.write(QUEUE_SEL, q);
+        assert_eq!(d.read(QUEUE_NUM_MAX), 0, "queue {q}, which the device does not have");
+    }
 }
 
 #[test]
@@ -92,22 +98,182 @@ fn registers_take_four_byte_accesses_and_eight_byte_ones_split() {
     assert_eq!(d.read(STATUS), ACKNOWLEDGE);
 }
 
+/// Every device offers indirect descriptors, event indices, `VERSION_1`
+/// and queue reset: QEMU's common features less its legacy notify-on-empty
+/// and any-layout.
 #[test]
-fn the_device_offers_qemus_common_features() {
+fn the_device_offers_the_common_features() {
     let mut d = keyboard();
-    // Indirect descriptors, event index, VERSION_1 and queue reset; QEMU's
-    // notify-on-empty and any-layout are legacy, so not shown.
     assert_eq!(
         d.device_features(),
-        F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1 | (1 << 40)
+        F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1 | F_RING_RESET
     );
+    // The words past the second, of bits 64 to 127, are all zero.
+    for sel in [2, 3, 0x8000_0000] {
+        d.write(DEVICE_FEATURES_SEL, sel);
+        assert_eq!(d.read(DEVICE_FEATURES), 0, "word {sel}");
+    }
 }
 
+/// A driver that accepts a feature the device did not offer finds
+/// `FEATURES_OK` clear (virtio 1.2 2.2.2), here QEMU's legacy
+/// notify-on-empty, which QEMU offers but keeps out of `DeviceFeatures`;
+/// one that accepts what was offered finds it set.
 #[test]
-fn features_ok_stays_set_when_the_driver_accepts_too_much() {
+fn features_ok_is_refused_when_the_driver_accepts_what_was_not_offered() {
     let mut d = keyboard();
     d.negotiate(u64::MAX);
+    assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER);
+    d.negotiate(LINUX_FEATURES | (1 << 24));
+    assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER);
+    d.negotiate(LINUX_FEATURES | F_RING_RESET);
     assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER | FEATURES_OK);
+}
+
+/// A bit accepted in a word past the second, of bits 64 to 127, none of
+/// which the device offers, is refused like any other.
+#[test]
+fn features_ok_is_refused_for_a_bit_past_the_second_word() {
+    // Bit 64, in a word the transport keeps, and bit 128 and past it, which
+    // virtio 1.2 2.2 reserves too ("128 and above").
+    for sel in [2, 4, 0x8000_0000] {
+        let mut d = keyboard();
+        d.write(STATUS, ACKNOWLEDGE | DRIVER);
+        d.accept(LINUX_FEATURES);
+        d.write(DRIVER_FEATURES_SEL, sel);
+        d.write(DRIVER_FEATURES, 1);
+        d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK);
+        assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER, "word {sel}");
+        // A reset forgets it: the next driver, writing words 0 and 1 only,
+        // is not refused for it.
+        d.negotiate(LINUX_FEATURES);
+        assert_eq!(
+            d.read(STATUS),
+            ACKNOWLEDGE | DRIVER | FEATURES_OK,
+            "word {sel}"
+        );
+    }
+}
+
+/// A refused `FEATURES_OK` written with `DRIVER_OK` sets neither: the
+/// device does not start on features it did not take.
+#[test]
+fn a_refused_features_ok_takes_driver_ok_with_it() {
+    let mut d = keyboard();
+    d.write(STATUS, ACKNOWLEDGE | DRIVER);
+    d.accept(LINUX_FEATURES | (1 << 24));
+    d.setup_queue(0);
+    d.setup_queue(1);
+    report(&mut d);
+    d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER);
+    d.notify(1);
+    assert!(d.used(1).is_empty(), "the queues do not run");
+}
+
+/// `DRIVER_OK` counts only once `FEATURES_OK` holds: a driver that goes on
+/// to it after its features were refused does not start the device.
+#[test]
+fn driver_ok_needs_features_ok() {
+    let mut d = keyboard();
+    d.write(STATUS, ACKNOWLEDGE | DRIVER);
+    d.accept(LINUX_FEATURES | (1 << 24));
+    d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK);
+    d.setup_queue(0);
+    d.setup_queue(1);
+    d.write(STATUS, ACKNOWLEDGE | DRIVER | DRIVER_OK);
+    assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER);
+    report(&mut d);
+    assert!(d.used(1).is_empty());
+}
+
+/// A non-zero `Status` write that keeps nothing, `DEVICE_NEEDS_RESET`
+/// alone, changes nothing: it is not the reset a write of 0 is.
+#[test]
+fn a_status_write_of_device_needs_reset_alone_changes_nothing() {
+    let mut d = keyboard();
+    d.start(LINUX_FEATURES);
+    d.write(STATUS, NEEDS_RESET);
+    assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    d.write(QUEUE_SEL, 1);
+    assert_eq!(d.read(QUEUE_READY), 1, "no reset");
+    report(&mut d);
+    assert_eq!(d.used(1).len(), 1);
+}
+
+/// `DEVICE_NEEDS_RESET` is the device's: a working device written it by
+/// its driver does not keep it.
+#[test]
+fn the_driver_cannot_set_device_needs_reset() {
+    let mut d = keyboard();
+    d.start(LINUX_FEATURES);
+    d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK | NEEDS_RESET);
+    assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    report(&mut d);
+    assert_eq!(d.used(1).len(), 1);
+}
+
+/// A queue enabled before `FEATURES_OK` whose used ring has no room for
+/// `avail_event` breaks the device when the driver accepts event indices;
+/// `Status` then says so, the `FEATURES_OK` write that broke it included.
+#[test]
+fn a_device_broken_by_its_features_says_so() {
+    let mut d = keyboard();
+    d.write(STATUS, ACKNOWLEDGE | DRIVER);
+    d.write(QUEUE_SEL, 1);
+    d.write(QUEUE_NUM, 64);
+    let (desc, avail) = (RAM_BASE + 0x1_0000, RAM_BASE + 0x1_4000);
+    // The used ring ends at the last byte of RAM: 4 + 8 * 64 bytes.
+    let used = UNASSIGNED - (4 + 8 * 64);
+    for (off, addr) in [
+        (QUEUE_DESC_LOW, desc),
+        (QUEUE_DRIVER_LOW, avail),
+        (QUEUE_DEVICE_LOW, used),
+    ] {
+        d.write(off, addr as u32);
+        d.write(off + 4, (addr >> 32) as u32);
+    }
+    d.write(QUEUE_READY, 1);
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, 0, "the rings fit without event indices");
+    d.accept(LINUX_FEATURES);
+    d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK);
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, NEEDS_RESET);
+    assert_eq!(d.read(INTERRUPT_STATUS), 0, "no notification before DRIVER_OK");
+    // The driver goes on to DRIVER_OK, and is told then (2.1.2).
+    d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    assert_eq!(d.read(INTERRUPT_STATUS), 2);
+    assert!(d.irq());
+}
+
+/// A `Status` write clears no bit, which the driver may not do (2.1.1):
+/// `FEATURES_OK` and `DRIVER_OK` stay, the device keeps running.
+#[test]
+fn a_status_write_clears_no_bit() {
+    let mut d = keyboard();
+    d.start(LINUX_FEATURES);
+    d.write(STATUS, ACKNOWLEDGE | DRIVER);
+    assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    report(&mut d);
+    assert_eq!(d.used(1).len(), 1);
+}
+
+/// `DriverFeaturesSel` selects any word: writing the third leaves the first
+/// two's bits as they were.
+#[test]
+fn a_driver_features_word_past_the_second_leaves_the_others() {
+    let mut d = keyboard();
+    d.write(STATUS, ACKNOWLEDGE | DRIVER);
+    d.accept(LINUX_FEATURES);
+    d.write(DRIVER_FEATURES_SEL, 2);
+    d.write(DRIVER_FEATURES, 0);
+    d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK);
+    assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER | FEATURES_OK);
+    d.setup_queue(0);
+    d.setup_queue(1);
+    d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    report(&mut d);
+    report(&mut d);
+    assert_eq!(d.avail_event(1), 2, "event index, a first-word feature, kept");
 }
 
 #[test]
@@ -115,14 +281,14 @@ fn the_device_publishes_avail_event_only_under_event_idx() {
     let mut d = keyboard();
     d.start(F_VERSION_1);
     report(&mut d);
-    assert_eq!(d.used(1), [(0, 8)]);
+    assert_eq!(d.used(1), [(0, 0)]);
     assert_eq!(d.avail_event(1), 0);
 
     let mut d = keyboard();
     d.start(LINUX_FEATURES);
     report(&mut d);
     report(&mut d);
-    assert_eq!(d.used(1), [(0, 8), (1, 8)]);
+    assert_eq!(d.used(1), [(0, 0), (1, 0)]);
     assert_eq!(d.avail_event(1), 2);
 }
 
@@ -150,13 +316,122 @@ fn queue_ready_is_kept_for_every_queue_index() {
     d.write(QUEUE_READY, 1);
     assert_eq!(d.read(QUEUE_READY), 1);
     d.write(QUEUE_SEL, 1024);
-    assert_eq!(
-        d.read(QUEUE_READY),
-        1,
-        "a selector past VIRTIO_QUEUE_MAX is ignored"
-    );
+    assert_eq!(d.read(QUEUE_READY), 0, "past VIRTIO_QUEUE_MAX: no queue");
+    d.write(QUEUE_READY, 1);
+    assert_eq!(d.read(QUEUE_READY), 0, "and none to enable");
+    d.write(QUEUE_SEL, 700);
+    assert_eq!(d.read(QUEUE_READY), 1, "untouched by the selector past it");
     d.write(QUEUE_READY, 0);
     assert_eq!(d.read(QUEUE_READY), 0);
+}
+
+/// A queue whose `QueueReady` is 0 is not touched (4.2.2.1): a chain made
+/// available and notified is left, and nothing interrupts; once the queue
+/// is ready again it goes on from where it stopped, and the device takes
+/// what it holds at once.
+#[test]
+fn a_queue_not_ready_is_left_alone() {
+    let mut d = keyboard();
+    d.start(LINUX_FEATURES);
+    d.write(QUEUE_SEL, 1);
+    d.write(QUEUE_READY, 0);
+    report(&mut d);
+    assert!(d.used(1).is_empty());
+    assert_eq!(d.read(INTERRUPT_STATUS), 0);
+    d.write(QUEUE_READY, 1);
+    assert_eq!(d.used(1), [(0, 0)], "ready again, it takes what it holds");
+    report(&mut d);
+    assert_eq!(d.used(1), [(1, 0)]);
+}
+
+/// `QueueNotify` names a queue by all 32 bits: 0x1_0001 is no 16-bit
+/// virtqueue index (4.2.3.3), so no queue, not queue 1.
+#[test]
+fn a_notification_names_its_queue_by_all_32_bits() {
+    let mut d = keyboard();
+    d.start(LINUX_FEATURES);
+    let at = d.alloc_with(&[0x11, 0, 0, 0, 1, 0, 0, 0]);
+    d.offer(1, &[Buf::readable(at, 8)]);
+    d.write(QUEUE_NOTIFY, 0x1_0001);
+    assert!(d.used(1).is_empty());
+    d.notify(1);
+    assert_eq!(d.used(1), [(0, 0)]);
+}
+
+/// No queue is used before `DRIVER_OK` (2.1.2): what the driver made
+/// available before is taken once it sets it.
+#[test]
+fn nothing_is_used_before_driver_ok() {
+    let mut d = keyboard();
+    d.negotiate(LINUX_FEATURES);
+    d.setup_queue(0);
+    d.setup_queue(1);
+    report(&mut d);
+    assert!(d.used(1).is_empty());
+    assert_eq!(d.read(INTERRUPT_STATUS), 0);
+    d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    assert_eq!(d.used(1), [(0, 0)]);
+    assert_eq!(d.take_interrupt(), 1);
+}
+
+/// Writing 1 to `QueueReset` resets the selected queue (4.2.2.1, a device
+/// requirement with no condition on what was negotiated): `QueueReset` and
+/// `QueueReady` read 0, the device takes nothing from it, and the driver
+/// sets it up again from the start of its rings.
+#[test]
+fn queue_reset_resets_the_selected_queue() {
+    let mut d = keyboard();
+    d.start(LINUX_FEATURES);
+    d.write(QUEUE_SEL, 1);
+    d.write(QUEUE_RESET, 1);
+    assert_eq!(d.read(QUEUE_READY), 0, "not negotiated: reset all the same");
+    report(&mut d);
+    assert!(d.used(1).is_empty());
+
+    let mut d = keyboard();
+    d.start(LINUX_FEATURES | F_RING_RESET);
+    report(&mut d);
+    assert_eq!(d.used(1), [(0, 0)]);
+    d.take_interrupt();
+    d.write(QUEUE_SEL, 1);
+    d.write(QUEUE_RESET, 1);
+    assert_eq!(d.read(QUEUE_RESET), 0);
+    assert_eq!(d.read(QUEUE_READY), 0);
+    report(&mut d);
+    assert!(d.used(1).is_empty(), "a reset queue is not used");
+    assert_eq!(d.read(INTERRUPT_STATUS), 0);
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, 0);
+
+    // The driver's rings start again from nothing.
+    d.ram.fill(0);
+    d.setup_queue(1);
+    report(&mut d);
+    assert_eq!(d.used(1), [(0, 0)], "the used ring from its first entry");
+    assert_eq!(d.avail_event(1), 1);
+}
+
+/// A chain of normal descriptors may end in one naming an indirect table
+/// (2.7.5.3.2); a table naming another breaks the device.
+#[test]
+fn a_chain_may_end_in_an_indirect_table() {
+    let mut d = keyboard();
+    d.start(LINUX_FEATURES);
+    let (a, b) = (d.alloc_with(&[0x11, 0, 0, 0]), d.alloc_with(&[1, 0, 0, 0]));
+    d.offer_ending_indirect(1, &[Buf::readable(a, 4)], &[Buf::readable(b, 4)]);
+    d.notify(1);
+    assert_eq!(d.used(1), [(0, 0)]);
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, 0);
+
+    breaks_the_device(|d| {
+        let inner = d.alloc(16);
+        let at = d.alloc(8);
+        let outer = d.alloc(16);
+        d.put_desc_at(outer, inner, 16, DESC_INDIRECT, 0);
+        d.put_desc_at(inner, at, 8, 0, 0);
+        d.put_desc(1, 0, outer, 16, DESC_INDIRECT, 0);
+        d.publish(1, 0);
+        d.notify(1);
+    });
 }
 
 #[test]
@@ -221,14 +496,21 @@ fn a_queue_larger_than_the_devices_breaks_it() {
     assert_eq!(d.read(STATUS) & NEEDS_RESET, NEEDS_RESET);
     assert!(!d.irq(), "no configuration interrupt before DRIVER_OK");
 
+    // Without VERSION_1, and before any features at all: told all the same,
+    // the transport being non-legacy (virtio 1.2 2.1.2).
     let mut d = keyboard();
     d.negotiate(0);
     d.write(QUEUE_SEL, 0);
     d.write(QUEUE_NUM, 65);
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, NEEDS_RESET);
+    let mut d = keyboard();
+    d.write(STATUS, ACKNOWLEDGE | DRIVER);
+    d.write(QUEUE_SEL, 0);
+    d.write(QUEUE_NUM, 65);
     assert_eq!(
         d.read(STATUS) & NEEDS_RESET,
-        0,
-        "only a VERSION_1 driver is told"
+        NEEDS_RESET,
+        "before FEATURES_OK too"
     );
 }
 
@@ -240,9 +522,16 @@ fn breaks_the_device<F: FnOnce(&mut Driver)>(bad: F) {
     d.start(LINUX_FEATURES);
     bad(&mut d);
     assert_eq!(d.read(STATUS) & NEEDS_RESET, NEEDS_RESET);
-    assert_eq!(d.read(INTERRUPT_STATUS), 3, "a configuration change");
+    assert_eq!(
+        d.read(INTERRUPT_STATUS),
+        2,
+        "a configuration change, and no used buffer"
+    );
     assert!(d.irq());
     assert!(d.used(1).is_empty());
+    // The driver's status writes leave DEVICE_NEEDS_RESET set.
+    d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, NEEDS_RESET);
 
     d.start(LINUX_FEATURES);
     assert_eq!(d.read(STATUS) & NEEDS_RESET, 0);
@@ -250,13 +539,16 @@ fn breaks_the_device<F: FnOnce(&mut Driver)>(bad: F) {
     assert_eq!(d.used(1).len(), 1);
 }
 
+/// A buffer of no bytes is a buffer: section 2.7 does not forbid one, and
+/// it maps nothing, wherever it says it is.
 #[test]
-fn a_buffer_of_no_bytes_breaks_the_device() {
-    breaks_the_device(|d| {
-        let at = d.alloc(8);
-        d.offer(1, &[Buf::readable(at, 0)]);
-        d.notify(1);
-    });
+fn a_buffer_of_no_bytes_is_a_buffer() {
+    let mut d = keyboard();
+    d.start(LINUX_FEATURES);
+    d.offer(1, &[Buf::readable(UNASSIGNED, 0)]);
+    d.notify(1);
+    assert_eq!(d.used(1), [(0, 0)]);
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, 0);
 }
 
 /// QEMU's `virtqueue_split_pop` asks only whether the queue is empty, so an
@@ -273,7 +565,7 @@ fn an_available_index_past_the_queue_size_is_popped_to_its_end() {
     d.put_u16(ring + 2, 100);
     d.notify(1);
     assert_eq!(d.read(STATUS) & NEEDS_RESET, 0);
-    assert_eq!(d.used(1), std::vec![(0, 8); 100]);
+    assert_eq!(d.used(1), std::vec![(0, 0); 100]);
 }
 
 #[test]
@@ -323,15 +615,6 @@ fn a_head_past_the_table_breaks_the_device() {
 }
 
 #[test]
-fn an_available_index_moved_past_the_queue_breaks_the_device() {
-    breaks_the_device(|d| {
-        let avail = d.avail_ring(1);
-        d.put_u16(avail + 2, 65);
-        d.notify(1);
-    });
-}
-
-#[test]
 fn an_indirect_table_of_no_entries_breaks_the_device() {
     breaks_the_device(|d| {
         let table = d.alloc(16);
@@ -367,22 +650,21 @@ fn an_indirect_chain_is_read_across_its_buffers() {
     let (a, b) = (d.alloc_with(&[0x11, 0, 0, 0]), d.alloc_with(&[1, 0, 0, 0]));
     d.offer_indirect(1, &[Buf::readable(a, 4), Buf::readable(b, 4)]);
     d.notify(1);
-    assert_eq!(d.used(1), [(0, 8)]);
+    assert_eq!(d.used(1), [(0, 0)]);
 }
 
+/// A broken device's interrupt line follows `InterruptStatus`, which the
+/// driver acknowledges as on a working one (4.2.3.4).
 #[test]
-fn a_broken_device_keeps_its_interrupt_line_until_reset() {
+fn a_broken_devices_line_follows_its_interrupt_status() {
     let mut d = keyboard();
     d.start(LINUX_FEATURES);
     d.offer(1, &[Buf::readable(UNASSIGNED, 8)]);
     d.notify(1);
     assert!(d.irq());
-    assert_eq!(d.take_interrupt(), 3);
+    assert_eq!(d.take_interrupt(), 2);
     assert_eq!(d.read(INTERRUPT_STATUS), 0);
-    assert!(
-        d.irq(),
-        "QEMU's virtio_notify_vector leaves a broken device's line alone"
-    );
+    assert!(!d.irq());
     report(&mut d);
     assert!(d.used(1).is_empty(), "a broken device ignores its queues");
     d.write(STATUS, 0);
@@ -418,13 +700,13 @@ fn used_event_decides_the_interrupt_under_event_idx() {
 #[test]
 fn configuration_past_its_end_reads_all_ones() {
     let mut d = keyboard();
-    // The keyboard's configuration is 37 bytes: the header and its 29-byte
-    // key bitmap.
-    assert_eq!(d.read_width(CONFIG + 37, AccessWidth::Byte), 0xFF);
-    assert_eq!(d.read_width(CONFIG + 36, AccessWidth::Half), 0xFFFF);
-    assert_eq!(d.read_width(CONFIG + 34, AccessWidth::Word), 0xFFFF_FFFF);
+    // The keyboard's configuration is `struct virtio_input_config`'s 136
+    // bytes: the header and the 128-byte union.
+    assert_eq!(d.read_width(CONFIG + 136, AccessWidth::Byte), 0xFF);
+    assert_eq!(d.read_width(CONFIG + 135, AccessWidth::Half), 0xFFFF);
+    assert_eq!(d.read_width(CONFIG + 133, AccessWidth::Word), 0xFFFF_FFFF);
     assert_eq!(
-        d.read_width(CONFIG + 36, AccessWidth::Byte),
+        d.read_width(CONFIG + 135, AccessWidth::Byte),
         0,
         "the last byte is inside"
     );
@@ -441,10 +723,39 @@ fn a_configuration_write_is_a_change_only_once_the_driver_is_ready() {
     d.start(LINUX_FEATURES);
     d.write_width(CONFIG, AccessWidth::Byte, 1);
     assert_eq!(d.read(CONFIG_GENERATION), 1);
-    assert_eq!(d.read(INTERRUPT_STATUS), 3);
+    assert_eq!(d.read(INTERRUPT_STATUS), 2, "the configuration bit alone");
     assert!(d.irq());
     d.take_interrupt();
     assert!(!d.irq());
+}
+
+/// A snapshot whose `Status` no register writes could have made is refused:
+/// `DRIVER_OK` without `FEATURES_OK`, or `DEVICE_NEEDS_RESET` on a device
+/// that is not broken.
+#[test]
+fn a_snapshot_of_a_status_no_driver_could_make_is_refused() {
+    let mut d = keyboard();
+    d.negotiate(LINUX_FEATURES);
+    let negotiated = d.save();
+    let mut started = keyboard();
+    started.negotiate(LINUX_FEATURES);
+    started.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    // The status byte is where the two first differ.
+    let at = negotiated
+        .iter()
+        .zip(&started.save())
+        .position(|(a, b)| a != b)
+        .expect("the snapshots differ");
+    assert_eq!(negotiated[at], ACKNOWLEDGE as u8 | DRIVER as u8 | FEATURES_OK as u8);
+    assert!(Driver::restore_refusal(keyboard_device(), &negotiated).is_none());
+    for status in [ACKNOWLEDGE | DRIVER | DRIVER_OK, ACKNOWLEDGE | DRIVER | FEATURES_OK | NEEDS_RESET] {
+        let mut bad = negotiated.clone();
+        bad[at] = status as u8;
+        assert!(
+            Driver::restore_refusal(keyboard_device(), &bad).is_some(),
+            "status {status:#x}"
+        );
+    }
 }
 
 #[test]

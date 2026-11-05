@@ -15,12 +15,15 @@ QEMU takes changes as patches mailed to `qemu-devel@nongnu.org` (and, for
 Arm, `qemu-arm@nongnu.org`), with the maintainers
 `scripts/get_maintainer.pl` names in copy, each patch carrying a
 `Signed-off-by:` line (see QEMU's `docs/devel/submitting-a-patch.rst`). It
-does not take GitHub or GitLab pull requests. The patches here apply to
-`v11.1.2`, each on its own and all of them together, and were built and
-tested there, but for those whose entry says otherwise (entries 22 and
-23: written against master as of 2026-10-28 and checked to apply there,
-not yet built or tested); they are diffs, to be committed with a message
-and sign-off of the submitter's own.
+does not take GitHub or GitLab pull requests. Each entry's **Fix** names
+its patch, or says it has none yet (entries 3, the first of the two
+numbered 17, 20, 21 and 24 onward). The patches apply to `v11.1.2`, each on its own and all
+of them together, and were built and tested there, but for entries 22 and
+23, written against master as of 2026-10-28 and checked to apply there,
+not yet built or tested; they are diffs, to be committed with a message
+and sign-off of the submitter's own. An entry whose **Reproduce** says it
+was found by reading the source has not been run on QEMU; each says which
+master it was checked against.
 
 Reproducers:
 - `docs/qemu-aarch64-probe.S`: a bare-metal EL1 program for
@@ -1584,6 +1587,378 @@ Found on QEMU 11.1.2; master (2026-11-05) has the same `gic_cpu_write`.
 GIC_VIRT_MIN_ABPR : GIC_MIN_ABPR`, as case 0x08 does for the binary
 point. `rusty_box_aarch64` does (`src/devices/gicv2_virt.rs`,
 `VirtInterface::vcpu_write`).
+
+### 42. virtio-mmio offers `VIRTIO_F_RING_RESET` and has no `QueueReset` register
+
+**Impact**: small today, as Linux's `virtio_mmio` does not reset single
+queues. A driver that does writes 1 to `QueueReset`, reads back 0 and
+takes the queue as reset; the device keeps its indices and `QueueReady`
+and goes on running the queue from memory the driver may now reuse.
+
+**Location**: `hw/virtio/virtio-mmio.c`, `virtio_mmio_read` and
+`virtio_mmio_write`, which have no case for offset 0x0C0 (a guest error,
+read as 0); `include/hw/virtio/virtio.h`, `DEFINE_VIRTIO_COMMON_FEATURES`,
+which offers `queue_reset` (`VIRTIO_F_RING_RESET`) on every transport.
+
+**What the specification says**: virtio 1.2 Table 4.1, `QueueReset`
+(0x0C0); 4.2.2.1: "The device MUST reset the queue when 1 is written to
+QueueReset. The device MUST continue to present 1 in QueueReset as long
+as the queue reset is ongoing. The device MUST present 0 in both
+QueueReset and QueueReady when queue reset has completed"; 2.6.1.1.1:
+"After the queue has been reset by the driver, the device MUST NOT
+execute any requests from that virtqueue".
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    accept VIRTIO_F_RING_RESET; QueueSel 1, QueueReset 1; read QueueReady
+    virtio 1.2: 0, and the queue's state reset
+    QEMU:       1, the queue running
+
+Found on QEMU 11.1.2; master (2026-11-05) has the same `virtio_mmio_write`.
+
+**Fix**: not yet written: either a `VIRTIO_MMIO_QUEUE_RESET` case calling
+`virtio_queue_reset` and clearing the queue's latched registers, as
+`virtio-pci`'s `VIRTIO_PCI_COMMON_Q_RESET` does, or virtio-mmio clearing
+`VIRTIO_F_RING_RESET`. `rusty_box_aarch64` implements the register
+(`src/devices/virtio/mod.rs`, `Transport::reset_queue`).
+
+### 43. A virtio configuration change sets the used-buffer bit of `InterruptStatus` too
+
+**Impact**: small. On virtio-mmio a driver that reads `InterruptStatus`
+after a configuration change finds bit 0 set too, and looks through its
+queues for used buffers there are none of.
+
+**Location**: `hw/virtio/virtio.c`, `virtio_notify_config`, which calls
+`virtio_set_isr(vdev, 0x3)`.
+
+**What the specification says**: virtio 1.2 Table 4.1, `InterruptStatus`:
+bit 0 is "Used Buffer Notification", bit 1 "Configuration Change
+Notification"; 4.2.2.1: "The device MUST present each event by setting
+the corresponding bit in InterruptStatus from the moment it takes place,
+until the driver acknowledges the interrupt by writing a corresponding
+bit mask to the InterruptACK register. Bits which do not represent
+events which took place MUST be zero."
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    virtio-gpu, a display resize from the host; read InterruptStatus
+    virtio 1.2: 2
+    QEMU:       3
+
+Found on QEMU 11.1.2; master (2026-11-05) has the same `virtio_notify_config`.
+
+**Fix**: not yet written: `virtio_set_isr(vdev, 0x2)`; virtio-pci's ISR
+reads would need checking against legacy drivers that expect bit 0.
+`rusty_box_aarch64` sets bit 1 alone (`src/devices/virtio/mod.rs`,
+`Core::notify_config`).
+
+### 44. A virtio device keeps using a queue whose `QueueReady` is 0, and uses queues before `DRIVER_OK`
+
+**Impact**: a driver that stops a queue by writing 0 to `QueueReady` and
+frees its rings has the device go on reading the old available ring and
+writing the old used ring: virtio-input, for one, writes the next host
+event into the freed memory.
+
+**Location**: `hw/virtio/virtio-mmio.c`, `virtio_mmio_write`
+(`VIRTIO_MMIO_QUEUE_READY` with 0 only clears `proxy->vqs[].enabled`),
+and `hw/virtio/virtio.c`, `virtio_queue_notify` and `virtqueue_pop`, which
+look at neither that bit nor the device status.
+
+**What the specification says**: virtio 1.2 4.2.2.1: "The device MUST NOT
+access virtual queue contents when QueueReady is zero (0x0)"; 2.1.2: "The
+device MUST NOT consume buffers or send any used buffer notifications to
+the driver before DRIVER_OK".
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    virtio-keyboard running; QueueSel 0, QueueReady 0; a host key press
+    virtio 1.2: nothing written to guest memory
+    QEMU:       the event written through the old rings
+
+Found on QEMU 11.1.2; master (2026-11-05) has the same code.
+
+**Fix**: not yet written: on `QueueReady` 0, a disabled flag that
+`virtqueue_pop` and `virtio_queue_notify` check, and the status checked
+there for `DRIVER_OK`. `rusty_box_aarch64` gates every queue access on both
+(`src/devices/virtio/mod.rs`, `Vdev::usable`).
+
+### 45. virtio-mmio's selectors and its `SHMBase` differ from Table 4.1
+
+**Impact**: small: none bites Linux. A driver that writes
+`DriverFeaturesSel` 2 and then `DriverFeatures` 0, clearing the third
+word of features it accepts, clears the second instead, losing
+`VIRTIO_F_VERSION_1`; one that probes with `QueueSel` past 1023 reads the
+previous queue's `QueueNumMax`, and its next queue writes change that
+queue; one that reads `SHMBase` for a region that does not exist reads 0.
+
+**Location**: `hw/virtio/virtio-mmio.c`, `virtio_mmio_write`
+(`VIRTIO_MMIO_DEVICE_FEATURES_SEL` and `VIRTIO_MMIO_DRIVER_FEATURES_SEL`
+store `value ? 1 : 0`; `VIRTIO_MMIO_QUEUE_SEL` ignores a value of
+`VIRTIO_QUEUE_MAX` or more) and `virtio_mmio_read` (no case for
+`VIRTIO_MMIO_SHM_BASE_LOW` and `_HIGH`).
+
+**What the specification says**: virtio 1.2 Table 4.1: `DeviceFeatures`
+gives "bits DeviceFeaturesSel∗32 to (DeviceFeaturesSel∗32)+31", and
+`DriverFeatures` likewise; `QueueNumMax` reads "zero (0x0) if the queue is
+not available"; `SHMBase`: "Reading from a non-existent region (i.e.
+where the ID written to SHMSel is unused) results in a base address of
+0xffffffffffffffff".
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    DeviceFeaturesSel 2; read DeviceFeatures      virtio 1.2: 0   QEMU: bits 32-63
+    QueueSel 0, then 0xFFFF; read QueueNumMax      virtio 1.2: 0   QEMU: queue 0's
+    read SHMBaseLow                                virtio 1.2: 0xFFFFFFFF   QEMU: 0
+
+Found on QEMU 11.1.2; master (2026-11-05) has the same code.
+
+**Fix**: not yet written. `rusty_box_aarch64` keeps each selector whole and
+reads `SHMBase` as all ones (`src/devices/virtio/mod.rs`).
+
+### 46. virtio sets `FEATURES_OK` for a driver that accepts features the device did not offer
+
+**Impact**: small: a driver that accepts an unoffered feature, a bug of
+its own, is not told; it then runs believing it negotiated a packed ring
+or another feature the device never gave.
+
+**Location**: `hw/virtio/virtio.c`, `virtio_set_features_ex`, which masks
+the driver's features with the device's and returns success, and
+`virtio_mmio_write` (`VIRTIO_MMIO_STATUS`), which stores the status
+whatever it returned.
+
+**What the specification says**: virtio 1.2 2.2.2: "The device SHOULD
+accept any valid subset of features the driver accepts, otherwise it MUST
+fail to set the FEATURES_OK device status bit when the driver writes
+it"; 3.1.1: the driver re-reads the status "to ensure the FEATURES_OK bit
+is still set: otherwise, the device does not support our subset of
+features".
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    accept VIRTIO_F_RING_PACKED (not offered); Status |= FEATURES_OK; read Status
+    virtio 1.2: FEATURES_OK clear
+    QEMU:       FEATURES_OK set
+
+Found on QEMU 11.1.2; master (2026-11-05) has the same code.
+
+**Fix**: not yet written: `virtio_set_features_ex` would fail for a bit
+outside `host_features`, and the transports would then not store
+`FEATURES_OK`, as they already do when it fails for other reasons.
+`rusty_box_aarch64` refuses the bit (`src/devices/virtio/mod.rs`,
+`Transport::write_status`).
+
+### 47. The split virtqueue takes an indirect table only at the head of a chain
+
+**Impact**: small: Linux never builds such a chain. A driver that chains
+a block request's header to an indirect table holding its data and
+status has the table's descriptors read as data and, when the
+descriptor naming the table has `WRITE` set, the status byte written into
+the table itself.
+
+**Location**: `hw/virtio/virtio.c`, `virtqueue_split_pop`, which tests
+`VRING_DESC_F_INDIRECT` on the head descriptor only and maps every later
+descriptor through `virtqueue_map_desc` as a buffer.
+
+**What the specification says**: virtio 1.2 2.7.5.3.2: "The device MUST
+handle the case of zero or more normal chained descriptors followed by a
+single descriptor with flags&VIRTQ_DESC_F_INDIRECT"; 2.7.5.1: "A device
+MUST NOT write to a device-readable buffer", and the table is the
+driver's.
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    virtio-blk: header (readable) NEXT-> descriptor INDIRECT naming
+    [data (writable, 512), status (writable, 1)]; a read
+    virtio 1.2: the data read into the table's buffers, the status OK
+    QEMU:       "virtio-blk missing headers" or the status in the table
+
+Found on QEMU 11.1.2; master (2026-11-05) has the same `virtqueue_split_pop`.
+
+**Fix**: not yet written: move the indirect test into the loop over the
+chain, allowed once and only outside an indirect table. `rusty_box_aarch64`
+does (`src/devices/virtio/queue.rs`, `Queue::pop`).
+
+### 48. virtio-blk and virtio-input give back a used length larger than what they wrote
+
+**Impact**: small: Linux's drivers ignore these lengths. A driver that
+trusts the used length, as 2.7.8 describes for untrusted buffers, takes a
+failed read's buffer, or a 20-byte `GET_ID` buffer of which QEMU wrote
+one byte, as written, and hands its stale contents on.
+
+**Location**: `hw/block/virtio-blk.c`, `virtio_blk_req_complete`, which
+pushes `req->in_len`, every device-writable byte; `hw/input/virtio-input.c`,
+`virtio_input_handle_sts`, which pushes the bytes it read from a
+device-readable buffer.
+
+**What the specification says**: virtio 1.2 2.7.8.2: "The device MUST
+write at least len bytes to descriptor, beginning at the first
+device-writable buffer, prior to updating the used idx"; `len` is "The
+number of bytes written into the device writable portion of the buffer".
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    virtio-blk read past the disk, 1024-byte data buffer: used len 1025
+      virtio 1.2: at most the bytes written from the first writable one
+      QEMU:       1025, of which it wrote only the status byte
+    virtio-input status report of 8 bytes: used len
+      virtio 1.2: 0                                          QEMU: 8
+
+Found on QEMU 11.1.2; master (2026-11-05) has the same code.
+
+**Fix**: not yet written. For virtio-blk the used length cannot simply
+shrink to what was written: the status byte is the chain's last, and
+2.7.8.3 has the driver not look past the used length, so a length short
+of it hides the status. Zeroing the bytes a request does not write keeps
+the length whole and true, which `rusty_box_aarch64` does
+(`src/devices/virtio/block.rs`, `Block::complete`); virtio-input's status
+queue would push 0 (`src/devices/virtio/input.rs`, `Input::handle_output`).
+
+### 49. virtio-blk breaks three device requirements of section 5.2
+
+**Impact**: small. A driver that accepts `VIRTIO_BLK_F_CONFIG_WCE` without
+`VIRTIO_BLK_F_FLUSH` reads `writeback` 1 and gets a write-back cache it
+cannot flush; one that reads the configuration's `unused1` padding reads
+all ones; a discard with `unmap` set over sectors past the disk is told
+`VIRTIO_BLK_S_IOERR`, not `VIRTIO_BLK_S_UNSUPP`.
+
+**Location**: `hw/block/virtio-blk.c`: `virtio_blk_set_status` (the cache
+mode set at `DRIVER_OK`, only without `VIRTIO_BLK_F_CONFIG_WCE`);
+`virtio_blk_cfg_size_params` (the configuration ends after
+`write_zeroes_may_unmap`, so the transport reads `unused1` as all ones);
+`virtio_blk_handle_discard_write_zeroes` (`virtio_blk_sect_range_ok`
+before the flag checks).
+
+**What the specification says**: virtio 1.2 5.2.5.2: "If
+VIRTIO_BLK_F_CONFIG_WCE is negotiated but VIRTIO_BLK_F_FLUSH is not, the
+device MUST initialize writeback to 0", and "The device MUST initialize
+padding bytes unused0 and unused1 to 0"; 5.2.6.2: "The device MUST set
+the status byte to VIRTIO_BLK_S_UNSUPP for discard, secure erase and
+write zeroes commands if any unknown flag is set. Furthermore, the device
+MUST set the status byte to VIRTIO_BLK_S_UNSUPP for discard commands if
+the unmap flag is set."
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    accept CONFIG_WCE, not FLUSH; FEATURES_OK; read writeback   virtio 1.2: 0     QEMU: 1
+    read config byte 57 (unused1)                               virtio 1.2: 0     QEMU: 0xFF
+    discard, unmap set, sector past the disk                    virtio 1.2: UNSUPP  QEMU: IOERR
+
+Found on QEMU 11.1.2; master (2026-11-05) has the same code.
+
+**Fix**: not yet written. `rusty_box_aarch64` sets the cache mode at
+`FEATURES_OK`, ends its configuration after `unused1`, and checks the
+flags first (`src/devices/virtio/block.rs`).
+
+### 50. virtio-gpu takes a 2D transfer's offset modulo 2^32
+
+**Impact**: small: a guest's backing is rarely 4 GiB long. A transfer
+whose offset is 4 GiB or more into a resource's backing copies from the
+offset's low 32 bits instead, pixels from the wrong place.
+
+**Location**: `hw/display/virtio-gpu.c`, `virtio_gpu_transfer_to_host_2d`,
+whose `uint32_t src_offset` takes `t2d.offset`, the whole of it on a
+full-width transfer and `t2d.offset + stride * h` for each row of a
+partial one.
+
+**What the specification says**: virtio 1.2 5.7.6.8,
+`struct virtio_gpu_transfer_to_host_2d`: `le64 offset`.
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    a 32x16 resource backed by one buffer; TRANSFER_TO_HOST_2D, offset
+    (1 << 32) + 272, rectangle (4, 2, 8, 4)
+    virtio 1.2: nothing copied, the offset lies past the backing
+    QEMU:       the rectangle copied from offset 272
+
+Found on QEMU 11.1.2; master (2026-11-05) has the same
+`virtio_gpu_transfer_to_host_2d`.
+
+**Fix**: not yet written: `src_offset` as `uint64_t` (and `iov_to_buf`'s
+offset is a `size_t`). `rusty_box_aarch64` keeps the 64 bits
+(`src/devices/virtio/gpu.rs`, `Gpu::transfer`).
+
+### 51. virtio-gpu answers no cursor-queue command
+
+**Impact**: small: Linux's driver gives its cursor commands no response
+buffer, and sends a move with the resource it last set. A driver that
+gives a response buffer, and waits for `VIRTIO_GPU_RESP_OK_NODATA` as
+5.7.6.10 gives it, finds it untouched and the used length 0; a command of
+another type on the cursor queue is taken as a cursor update; a move
+whose `resource_id` is 0, a field the device is to ignore, hides the
+cursor.
+
+**Location**: `hw/display/virtio-gpu.c`, `virtio_gpu_handle_cursor`, which
+pushes every chain with length 0, and `update_cursor`, which takes any
+type but `VIRTIO_GPU_CMD_MOVE_CURSOR` as `VIRTIO_GPU_CMD_UPDATE_CURSOR`
+and passes `qemu_console_set_mouse` the command's `resource_id` as the
+cursor's visibility on a move too.
+
+**What the specification says**: virtio 1.2 5.7.6.10:
+`VIRTIO_GPU_CMD_UPDATE_CURSOR` and `VIRTIO_GPU_CMD_MOVE_CURSOR`:
+"Response type is VIRTIO_GPU_RESP_OK_NODATA"; of the move: "Move cursor
+to the place specified in pos. The other fields are not used and will be
+ignored by the device"; 5.7.6.7, the response header and the error
+types.
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    cursor queue: MOVE_CURSOR (56 bytes) with a 24-byte response buffer
+    virtio 1.2: response OK_NODATA, used length 24
+    QEMU:       response untouched, used length 0
+
+Found on QEMU 11.1.2; master (2026-11-05) has the same
+`virtio_gpu_handle_cursor`.
+
+**Fix**: not yet written: `virtio_gpu_handle_cursor` would fill the
+response header as `virtio_gpu_ctrl_response_nodata` does on the control
+queue. `rusty_box_aarch64` answers each command (`src/devices/virtio/gpu.rs`,
+`Gpu::handle_cursor`).
+
+### 52. virtio-input sets the used-buffer bit for a status-queue notification that used no buffer
+
+**Impact**: small. A driver that notifies the status queue with no report
+available, or notifies a broken device, finds bit 0 of `InterruptStatus`
+set and looks through its queues for used buffers there are none of; a
+working device also raises its interrupt for it.
+
+**Location**: `hw/input/virtio-input.c`, `virtio_input_handle_sts`, which
+calls `virtio_notify` after its pop loop whether or not it took a
+report; `hw/virtio/virtio.c`, `virtio_irq`, which calls
+`virtio_set_isr(vdev, 0x1)` before `virtio_notify_vector` returns early
+for a broken device (`virtio_device_disabled`).
+
+**What the specification says**: virtio 1.2 4.2.2.1: "The device MUST
+present each event by setting the corresponding bit in InterruptStatus
+from the moment it takes place ... Bits which do not represent events
+which took place MUST be zero"; Table 4.1, bit 0 is "Used Buffer
+Notification".
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    virtio-keyboard, no event index, nothing on the status queue;
+    QueueNotify 1, then read InterruptStatus
+    virtio 1.2: 0
+    QEMU:       1
+
+Found on QEMU 11.1.2; master (2026-11-05) has the same
+`virtio_input_handle_sts` and `virtio_irq`.
+
+**Fix**: not yet written: `virtio_input_handle_sts` would notify only when
+it pushed a report, and `virtio_irq` would leave the ISR alone for a
+disabled device. `rusty_box_aarch64` notifies only after taking a report
+(`src/devices/virtio/input.rs`, `Input::handle_output`) and a broken
+device uses no buffer (`src/devices/virtio/mod.rs`, `Vdev::push`).
 
 ---
 

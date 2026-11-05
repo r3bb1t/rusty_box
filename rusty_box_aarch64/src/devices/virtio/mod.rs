@@ -12,20 +12,64 @@
 //!   `VIRTIO_QUEUE_MAX`), `virtio_mmio_soft_reset` and `virtio_mmio_reset`;
 //!   its accesses go through QEMU's memory core four bytes at most, so an
 //!   eight-byte access is two, low half first;
-//! - `hw/virtio/virtio.c`: `virtio_set_status`, `virtio_set_features_ex`
-//!   (features the device does not offer are dropped, and `FEATURES_OK`
-//!   stays set), `virtio_reset`, `virtio_error` (`DEVICE_NEEDS_RESET` and a
-//!   device that ignores its queues until reset), `virtio_notify`,
-//!   `virtio_notify_config` and `virtio_notify_vector` (a broken device
-//!   leaves its interrupt line where it was), `virtio_queue_notify`, and the
-//!   features every device offers (`DEFINE_VIRTIO_COMMON_FEATURES`:
-//!   indirect descriptors, event index, notify-on-empty, any-layout and
-//!   queue reset, the transport adding `VIRTIO_F_VERSION_1`, and the legacy
-//!   ones hidden from `DeviceFeatures`);
+//! - `hw/virtio/virtio.c`: `virtio_set_status`, `virtio_set_features_ex`,
+//!   `virtio_reset`, `virtio_error` (`DEVICE_NEEDS_RESET` and a device that
+//!   ignores its queues until reset), `virtio_notify`, `virtio_queue_notify`,
+//!   `virtio_queue_reset`, and the features every device offers
+//!   (`DEFINE_VIRTIO_COMMON_FEATURES`: indirect descriptors, event index and
+//!   queue reset, the transport adding `VIRTIO_F_VERSION_1`);
 //! - `hw/virtio/virtio-config-io.c`: `virtio_config_modern_read*` and
 //!   `_write*` (the device's configuration refreshed into a buffer on every
 //!   read, a write stored into that buffer and handed to the device; an
 //!   access past the configuration reads all ones and writes nothing).
+//!
+//! Where it follows the specification over QEMU (README, "Where the
+//! references differ"):
+//!
+//! - `QueueReset` (0x0C0) resets the selected queue (4.2.2.1: "The device
+//!   MUST reset the queue when 1 is written to QueueReset"), which QEMU's
+//!   transport offers `VIRTIO_F_RING_RESET` for and has no register for.
+//! - A queue whose `QueueReady` is 0 is not touched (4.2.2.1: "The device
+//!   MUST NOT access virtual queue contents when QueueReady is zero"), and
+//!   no queue is before `DRIVER_OK` (2.1.2); QEMU keeps using the rings it
+//!   was given, and runs the device whatever the status. A queue's buffers
+//!   made available before `DRIVER_OK` are taken when the driver sets it,
+//!   and a queue's made ready again after it when it is (2.6.1.2).
+//! - `DeviceFeaturesSel` and `DriverFeaturesSel` select any 32-bit word of
+//!   the 128 feature bits (Table 4.1), the words past the second all zero;
+//!   QEMU takes every selector but 0 for the second word.
+//! - A driver that accepts a feature the device did not offer finds
+//!   `FEATURES_OK` clear (2.2.2: the device "MUST fail to set the
+//!   FEATURES_OK device status bit" for a subset it does not accept); QEMU
+//!   drops the feature and sets the bit. The legacy features QEMU offers
+//!   but keeps out of `DeviceFeatures` (notify-on-empty, any-layout) are
+//!   therefore not offered at all. A `Status` write clears no bit (2.1.1),
+//!   `DRIVER_OK` counts only once `FEATURES_OK` holds (3.1.1), and a
+//!   driver's reset forgets the features it wrote, which QEMU keeps until a
+//!   system reset.
+//! - A `QueueNotify` value past 16 bits is no virtqueue index (4.2.3.3) and
+//!   notifies nothing; QEMU keeps its low 16 bits.
+//! - `QueueSel` takes any value, and a queue the device does not have
+//!   reads `QueueNumMax` 0 (Table 4.1); QEMU ignores a selector past its
+//!   1024 queues, leaving the previous one selected.
+//! - `SHMBase` reads all ones, as `SHMLen` does, for the shared memory
+//!   region the device does not have (Table 4.1); QEMU reads it as 0.
+//! - A configuration change raises only the configuration bit of
+//!   `InterruptStatus` (4.2.2.1: "Bits which do not represent events
+//!   which took place MUST be zero"); QEMU's `virtio_notify_config` sets
+//!   the used-buffer bit too.
+//! - The interrupt line follows `InterruptStatus` on a broken device too,
+//!   and `DEVICE_NEEDS_RESET`, the device's alone to set (2.1), is set
+//!   however far negotiation has gone and stays set until a reset whatever
+//!   the driver writes to `Status`, a device broken before `DRIVER_OK`
+//!   notifying the configuration change when the driver sets it (2.1.2);
+//!   QEMU's `virtio_error` sets the bit only once `VIRTIO_F_VERSION_1` is
+//!   negotiated, its `virtio_notify_vector` leaves a broken device's line
+//!   where it was, and its `Status` takes what is written. A broken device
+//!   gives no buffer back, so it sets no used-buffer bit; QEMU's
+//!   `virtio_irq` sets the bit before `virtio_notify_vector` looks at
+//!   whether the device is broken, which a virtio-input status-queue
+//!   notification reaches with no buffer taken.
 //!
 //! A device is plugged into the transports from the last down, the order
 //! QEMU's `virt` hands `-device` options their bus (`hw/arm/virt.c`
@@ -64,33 +108,35 @@ use queue::{Chain, GuestRam, Queue, QueueFault, RingFeatures};
 pub const MAGIC: u32 = 0x7472_6976;
 /// `Version` of a non-legacy transport.
 pub const MODERN_VERSION: u32 = 2;
-/// `VIRTIO_QUEUE_MAX`: the queue indices `QueueSel` and `QueueNotify`
-/// accept.
+/// `VIRTIO_QUEUE_MAX`: the queue indices whose `QueueReady` the transport
+/// keeps.
 const VIRTIO_QUEUE_MAX: u32 = 1024;
+/// The 32-bit words of `DriverFeatures` the transport keeps as the driver
+/// wrote them: bits 0 to 127. Feature bits go on past them (2.2: "128 and
+/// above" are reserved for future extensions); of a later word the
+/// transport keeps only whether the driver ever set a bit in one
+/// ([`Transport::guest_features_beyond`]).
+const FEATURE_WORDS: usize = 4;
 /// Where the device's configuration starts in a transport's registers.
 const CONFIG_OFFSET: u64 = 0x100;
 /// The largest configuration a device here has: `struct
 /// virtio_input_config`.
-const CONFIG_CAPACITY: usize = 136;
+const CONFIG_CAPACITY: usize = input::CONFIG_LEN;
+#[cfg(feature = "alloc")]
+const _: () = assert!(
+    gpu::CONFIG_LEN <= CONFIG_CAPACITY && block::CONFIG_LEN <= CONFIG_CAPACITY,
+    "every device's configuration fits the transport's copy of it"
+);
 
-const VIRTIO_F_NOTIFY_ON_EMPTY: u64 = 1 << 24;
-const VIRTIO_F_ANY_LAYOUT: u64 = 1 << 27;
 const VIRTIO_RING_F_INDIRECT_DESC: u64 = 1 << 28;
 const VIRTIO_RING_F_EVENT_IDX: u64 = 1 << 29;
-const VIRTIO_F_BAD_FEATURE: u64 = 1 << 30;
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 const VIRTIO_F_RING_RESET: u64 = 1 << 40;
 
-/// The features QEMU gives every device on a non-legacy virtio-mmio
+/// The features every device here offers on a non-legacy virtio-mmio
 /// transport, before the device adds its own.
-const COMMON_FEATURES: u64 = VIRTIO_RING_F_INDIRECT_DESC
-    | VIRTIO_RING_F_EVENT_IDX
-    | VIRTIO_F_NOTIFY_ON_EMPTY
-    | VIRTIO_F_ANY_LAYOUT
-    | VIRTIO_F_RING_RESET
-    | VIRTIO_F_VERSION_1;
-/// `VIRTIO_LEGACY_FEATURES`: offered but kept out of `DeviceFeatures`.
-const LEGACY_FEATURES: u64 = VIRTIO_F_BAD_FEATURE | VIRTIO_F_NOTIFY_ON_EMPTY | VIRTIO_F_ANY_LAYOUT;
+const COMMON_FEATURES: u64 =
+    VIRTIO_RING_F_INDIRECT_DESC | VIRTIO_RING_F_EVENT_IDX | VIRTIO_F_RING_RESET | VIRTIO_F_VERSION_1;
 
 pub const STATUS_DRIVER_OK: u8 = 0x04;
 const STATUS_FEATURES_OK: u8 = 0x08;
@@ -112,16 +158,13 @@ pub const QUEUES: usize = 2;
 pub(crate) struct Core {
     status: u8,
     isr: u8,
-    queue_sel: u16,
+    queue_sel: u32,
     host_features: u64,
     guest_features: u64,
     generation: u32,
     /// The rule the driver broke, if it broke one: the device ignores its
     /// queues until reset.
     broken: Option<QueueFault>,
-    /// The interrupt line as the transport last drove it
-    /// (`virtio_mmio_update_irq`).
-    irq_level: bool,
 }
 
 impl Core {
@@ -134,7 +177,6 @@ impl Core {
             guest_features: 0,
             generation: 0,
             broken: None,
-            irq_level: false,
         }
     }
 
@@ -146,7 +188,6 @@ impl Core {
     fn ring_features(&self) -> RingFeatures {
         RingFeatures {
             event_idx: self.has_feature(VIRTIO_RING_F_EVENT_IDX),
-            notify_on_empty: self.has_feature(VIRTIO_F_NOTIFY_ON_EMPTY),
         }
     }
 
@@ -155,31 +196,31 @@ impl Core {
         self.broken.is_some()
     }
 
-    /// QEMU `virtio_notify_vector`: drive the line from `InterruptStatus`,
-    /// unless the device is disabled.
-    fn update_irq(&mut self) {
-        if !self.disabled() {
-            self.irq_level = self.isr != 0;
-        }
+    /// Whether the driver has set `DRIVER_OK`, before which the device
+    /// uses no buffer (2.1.2).
+    fn driver_ok(&self) -> bool {
+        self.status & STATUS_DRIVER_OK != 0
     }
 
-    /// QEMU `virtio_notify_config`: the configuration changed. Nothing
+    /// QEMU `virtio_notify_config`: the configuration changed, the one
+    /// event the configuration bit of `InterruptStatus` stands for. Nothing
     /// happens before the driver is ready.
     pub(crate) fn notify_config(&mut self) {
-        if self.status & STATUS_DRIVER_OK == 0 {
+        if !self.driver_ok() {
             return;
         }
-        self.isr |= ISR_VRING | ISR_CONFIG;
+        self.isr |= ISR_CONFIG;
         self.generation = self.generation.wrapping_add(1);
-        self.update_irq();
     }
 
-    /// QEMU `virtio_error`.
+    /// QEMU `virtio_error`, `DEVICE_NEEDS_RESET` set whatever the driver
+    /// has negotiated (2.1.2: the device "SHOULD set DEVICE_NEEDS_RESET
+    /// when it enters an error state that a reset is needed"): QEMU sets it
+    /// only once `VIRTIO_F_VERSION_1` is, a legacy device having no such
+    /// bit, and this transport is never legacy.
     fn error(&mut self, fault: QueueFault) {
-        if self.has_feature(VIRTIO_F_VERSION_1) {
-            self.status |= STATUS_NEEDS_RESET;
-            self.notify_config();
-        }
+        self.status |= STATUS_NEEDS_RESET;
+        self.notify_config();
         self.broken = Some(fault);
     }
 }
@@ -188,23 +229,41 @@ impl Core {
 /// the core it shares with its transport (QEMU's `VirtIODevice`, as a
 /// device's handlers see it). A queue's errors are QEMU's `virtio_error`:
 /// the device is broken, and the call that met the error finds nothing.
+///
+/// A queue the device may not use, because its `QueueReady` is 0 or the
+/// driver has not set `DRIVER_OK`, has nothing available, takes nothing
+/// back and raises no interrupt.
 pub(crate) struct Vdev<'a, 'r> {
     ram: &'a mut GuestRam<'r>,
     queues: &'a mut [Queue; QUEUES],
     core: &'a mut Core,
+    ready: &'a QueueReady,
 }
 
 impl Vdev<'_, '_> {
-    /// QEMU `virtio_queue_ready`.
+    /// Whether the device may touch queue `q`'s contents: it is not broken,
+    /// and the queue is live ([`queue_live`]).
+    fn usable(&self, q: usize) -> bool {
+        queue_usable(self.ready, self.core, q)
+    }
+
+    /// Whether the driver has set `DRIVER_OK` since the last reset, the
+    /// device live (QEMU's `vinput->active` for virtio-input).
+    pub(crate) fn driver_ok(&self) -> bool {
+        self.core.driver_ok()
+    }
+
+    /// QEMU `virtio_queue_ready`, the driver having given queue `q` an
+    /// available ring, and the device allowed to use it ([`Vdev::usable`]).
     #[cfg(feature = "alloc")]
     pub(crate) fn queue_ready(&self, q: usize) -> bool {
-        self.queues[q].is_ready()
+        self.usable(q) && self.queues[q].is_ready()
     }
 
     /// How many chains queue `q` has ready for the device: how many pops
     /// would find one.
     pub(crate) fn available(&mut self, q: usize) -> u16 {
-        if self.core.disabled() {
+        if !self.usable(q) {
             return 0;
         }
         self.queues[q].available(self.ram)
@@ -212,7 +271,7 @@ impl Vdev<'_, '_> {
 
     /// QEMU `virtqueue_pop`.
     pub(crate) fn pop(&mut self, q: usize) -> Option<Chain> {
-        if self.core.disabled() {
+        if !self.usable(q) {
             return None;
         }
         let features = self.core.ring_features();
@@ -236,9 +295,14 @@ impl Vdev<'_, '_> {
         self.queues[q].detach();
     }
 
-    /// QEMU `virtio_queue_set_notification`.
+    /// QEMU `virtio_queue_set_notification`, on a ready queue of a driver
+    /// past `DRIVER_OK`: a device broken while it worked through the queue
+    /// still turns the driver's notifications back on, as QEMU's does.
     #[cfg(feature = "alloc")]
     pub(crate) fn set_notification(&mut self, q: usize, enable: bool) {
+        if !queue_live(self.ready, self.core, q) {
+            return;
+        }
         let features = self.core.ring_features();
         self.queues[q].set_notification(self.ram, features, enable);
     }
@@ -251,7 +315,7 @@ impl Vdev<'_, '_> {
 
     /// QEMU `virtqueue_push`.
     pub(crate) fn push(&mut self, q: usize, chain: &Chain, len: u32) {
-        let disabled = self.core.disabled();
+        let disabled = !self.usable(q);
         self.queues[q].push(self.ram, chain.head, len, disabled);
     }
 
@@ -259,14 +323,14 @@ impl Vdev<'_, '_> {
     /// what queue `q` used.
     pub(crate) fn notify(&mut self, q: usize) {
         let features = self.core.ring_features();
-        let disabled = self.core.disabled();
+        let disabled = !self.usable(q);
         if self.queues[q].should_notify(self.ram, features, disabled) {
             self.core.isr |= ISR_VRING;
-            self.core.update_irq();
         }
     }
 
     /// The device-readable bytes of `chain`, from `offset`.
+    #[cfg(feature = "alloc")]
     pub(crate) fn read(&self, chain: &Chain, offset: usize, out: &mut [u8]) -> usize {
         chain.read(self.ram, offset, out)
     }
@@ -332,7 +396,7 @@ impl Device {
     /// Bytes of configuration space (`virtio_init`'s `config_size`).
     fn config_len(&self) -> usize {
         match self {
-            Self::Input(d) => d.config_len(),
+            Self::Input(_) => input::CONFIG_LEN,
             #[cfg(feature = "alloc")]
             Self::Gpu(_) => gpu::CONFIG_LEN,
             #[cfg(feature = "alloc")]
@@ -356,26 +420,29 @@ impl Device {
             #[cfg(feature = "alloc")]
             Self::Gpu(d) => d.set_config(config),
             #[cfg(feature = "alloc")]
-            Self::Block(d) => d.set_config(config),
+            Self::Block(d) => d.set_config(config, core),
         }
     }
 
-    /// The device's `set_status`, before the core takes `status`. Only the
-    /// block device reads the features the driver accepted.
+    /// The driver set `FEATURES_OK`, and the device took the features it
+    /// accepted (QEMU's `set_features` hook). Only the block device reads
+    /// them.
     #[cfg_attr(not(feature = "alloc"), allow(unused_variables))]
-    fn set_status(&mut self, status: u8, core: &Core) {
+    fn features_ok(&mut self, core: &Core) {
         match self {
-            Self::Input(d) => d.set_status(status),
+            Self::Input(_) => {}
             #[cfg(feature = "alloc")]
             Self::Gpu(_) => {}
             #[cfg(feature = "alloc")]
-            Self::Block(d) => d.set_status(status, core),
+            Self::Block(d) => d.features_ok(core),
         }
     }
 
     fn reset(&mut self) {
         match self {
-            Self::Input(d) => d.reset(),
+            // Its only state past the configuration selector, whether the
+            // driver has set `DRIVER_OK`, is the transport's.
+            Self::Input(_) => {}
             #[cfg(feature = "alloc")]
             Self::Gpu(d) => d.reset(),
             #[cfg(feature = "alloc")]
@@ -415,6 +482,46 @@ impl Device {
     }
 }
 
+/// Whether queue `q`'s contents are the device's to use, broken or not:
+/// its `QueueReady` is 1 (4.2.2.1: "The device MUST NOT access virtual
+/// queue contents when QueueReady is zero") and the driver has set
+/// `DRIVER_OK` (2.1.2).
+fn queue_live(ready: &QueueReady, core: &Core, q: usize) -> bool {
+    ready.get(q as u32) && core.driver_ok()
+}
+
+/// Whether the device may take from and give back to queue `q`: it is
+/// live ([`queue_live`]) and the device is not broken.
+fn queue_usable(ready: &QueueReady, core: &Core, q: usize) -> bool {
+    !core.disabled() && queue_live(ready, core, q)
+}
+
+/// `QueueReady` of every queue index below `VIRTIO_QUEUE_MAX`, a bit each
+/// (QEMU `VirtIOMMIOQueue`'s `enabled`); past them it reads 0 and takes no
+/// write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueueReady([u64; (VIRTIO_QUEUE_MAX / 64) as usize]);
+
+impl QueueReady {
+    const NONE: Self = Self([0; (VIRTIO_QUEUE_MAX / 64) as usize]);
+
+    fn get(&self, index: u32) -> bool {
+        index < VIRTIO_QUEUE_MAX && self.0[(index / 64) as usize] & (1 << (index % 64)) != 0
+    }
+
+    fn set(&mut self, index: u32, on: bool) {
+        if index >= VIRTIO_QUEUE_MAX {
+            return;
+        }
+        let word = &mut self.0[(index / 64) as usize];
+        if on {
+            *word |= 1 << (index % 64);
+        } else {
+            *word &= !(1 << (index % 64));
+        }
+    }
+}
+
 /// The queue registers the driver writes, latched until it sets
 /// `QueueReady` (QEMU `VirtIOMMIOQueue`).
 #[derive(Debug, Clone, Copy, Default)]
@@ -439,11 +546,17 @@ pub(crate) struct Transport {
     core: Core,
     queues: [Queue; QUEUES],
     proxy: [ProxyQueue; QUEUES],
-    /// `QueueReady` for every queue index, a bit each.
-    enabled: [u64; (VIRTIO_QUEUE_MAX / 64) as usize],
+    enabled: QueueReady,
     host_features_sel: u32,
     guest_features_sel: u32,
-    guest_features: [u32; 2],
+    /// `DriverFeatures`, each word as the driver last wrote it.
+    guest_features: [u32; FEATURE_WORDS],
+    /// Whether the driver has set a bit in a word past
+    /// [`FEATURE_WORDS`] since the last reset, a bit no device here offers.
+    /// It stays set even if the driver writes that word 0 again, which
+    /// refuses a driver that rewrites such a word as well as one that keeps
+    /// it.
+    guest_features_beyond: bool,
     /// The configuration space as the device last filled it, with what the
     /// driver wrote since (QEMU `vdev->config`).
     config: [u8; CONFIG_CAPACITY],
@@ -458,10 +571,11 @@ impl Transport {
             device,
             queues: [Queue::new(a), Queue::new(b)],
             proxy: [ProxyQueue::default(); QUEUES],
-            enabled: [0; (VIRTIO_QUEUE_MAX / 64) as usize],
+            enabled: QueueReady::NONE,
             host_features_sel: 0,
             guest_features_sel: 0,
-            guest_features: [0; 2],
+            guest_features: [0; FEATURE_WORDS],
+            guest_features_beyond: false,
             config: [0; CONFIG_CAPACITY],
         }
     }
@@ -479,9 +593,10 @@ impl Transport {
         }
     }
 
-    /// The interrupt line.
+    /// The interrupt line, asserted while a bit of `InterruptStatus` is set
+    /// (4.2.3.4).
     pub(crate) fn irq(&self) -> bool {
-        self.core.irq_level
+        self.core.isr != 0
     }
 
     /// Run `f` on the device with what it works with: guest memory, its
@@ -495,6 +610,7 @@ impl Transport {
             ram,
             queues: &mut self.queues,
             core: &mut self.core,
+            ready: &self.enabled,
         };
         f(&mut self.device, &mut vdev)
     }
@@ -509,23 +625,25 @@ impl Transport {
     /// QEMU `virtio_reset`, as a driver's write of 0 to `Status` or a
     /// system reset runs it.
     fn reset_device(&mut self) {
-        self.device.set_status(0, &self.core);
         self.device.reset();
         self.core.broken = None;
         self.core.guest_features = 0;
         self.core.queue_sel = 0;
         self.core.status = 0;
         self.core.isr = 0;
-        self.core.update_irq();
         for q in &mut self.queues {
             q.reset();
         }
     }
 
-    /// QEMU `virtio_mmio_soft_reset`.
+    /// QEMU `virtio_mmio_soft_reset`, and the driver's features forgotten:
+    /// `DriverFeatures` is write-only, so only the next negotiation, which
+    /// they must not refuse, could see them.
     fn soft_reset(&mut self) {
         self.reset_device();
-        self.enabled = [0; (VIRTIO_QUEUE_MAX / 64) as usize];
+        self.enabled = QueueReady::NONE;
+        self.guest_features = [0; FEATURE_WORDS];
+        self.guest_features_beyond = false;
     }
 
     /// QEMU `virtio_mmio_reset`: the system reset.
@@ -533,26 +651,28 @@ impl Transport {
         self.soft_reset();
         self.host_features_sel = 0;
         self.guest_features_sel = 0;
-        self.guest_features = [0; 2];
         self.proxy = [ProxyQueue::default(); QUEUES];
     }
 
+    /// The selected queue, if the device has it.
     fn selected(&self) -> Option<usize> {
-        let q = usize::from(self.core.queue_sel);
+        let q = self.core.queue_sel as usize;
         (q < QUEUES).then_some(q)
     }
 
-    fn queue_enabled(&self, index: u16) -> bool {
-        self.enabled[usize::from(index / 64)] & (1 << (index % 64)) != 0
-    }
-
-    fn set_queue_enabled(&mut self, index: u16, on: bool) {
-        let word = &mut self.enabled[usize::from(index / 64)];
-        if on {
-            *word |= 1 << (index % 64);
-        } else {
-            *word &= !(1 << (index % 64));
+    /// `QueueReset` written 1 (QEMU `virtio_queue_reset`): the selected
+    /// queue back to how the device made it, its latched registers cleared
+    /// and `QueueReady` 0 (2.6.1.1.1). 4.2.2.1 puts no condition on it ("The
+    /// device MUST reset the queue when 1 is written to QueueReset"), where
+    /// Table 4.1 describes the register for a driver that accepted
+    /// `VIRTIO_F_RING_RESET`; the device requirement is followed. The reset
+    /// is done when the write is, so `QueueReset` always reads 0.
+    fn reset_queue(&mut self) {
+        if let Some(q) = self.selected() {
+            self.queues[q].reset();
+            self.proxy[q] = ProxyQueue::default();
         }
+        self.enabled.set(self.core.queue_sel, false);
     }
 
     /// A read of `width` at `offset` of a transport on a board whose
@@ -586,21 +706,31 @@ impl Transport {
             0x004 => MODERN_VERSION,
             0x008 => self.device.id(),
             0x00C => vendor.get(),
-            0x010 => {
-                ((self.core.host_features & !LEGACY_FEATURES) >> (32 * self.host_features_sel))
-                    as u32
-            }
+            0x010 => Self::feature_word(self.core.host_features, self.host_features_sel),
             0x034 => self
                 .selected()
                 .map_or(0, |q| u32::from(self.queues[q].num_default())),
-            0x044 => u32::from(self.queue_enabled(self.core.queue_sel)),
+            0x044 => u32::from(self.enabled.get(self.core.queue_sel)),
             0x060 => u32::from(self.core.isr),
             0x070 => u32::from(self.core.status),
-            // No shared memory regions: their length reads as all ones.
-            0x0B0 | 0x0B4 => u32::MAX,
+            // No shared memory regions: their length and base read as all
+            // ones.
+            0x0B0 | 0x0B4 | 0x0B8 | 0x0BC => u32::MAX,
+            // QueueReset: a reset is done when its write is.
+            0x0C0 => 0,
             0x0FC => self.core.generation,
             _ => 0,
         })
+    }
+
+    /// Word `sel` of `features`: bits `32 * sel` to `32 * sel + 31`, zero
+    /// past the 64 bits the board's devices have.
+    fn feature_word(features: u64, sel: u32) -> u32 {
+        match sel {
+            0 => features as u32,
+            1 => (features >> 32) as u32,
+            _ => 0,
+        }
     }
 
     /// QEMU `virtio_config_modern_read*`.
@@ -656,14 +786,13 @@ impl Transport {
         }
         let v = value as u32;
         match off {
-            0x014 => self.host_features_sel = u32::from(v != 0),
-            0x020 => self.guest_features[self.guest_features_sel as usize] = v,
-            0x024 => self.guest_features_sel = u32::from(v != 0),
-            0x030 => {
-                if v < VIRTIO_QUEUE_MAX {
-                    self.core.queue_sel = v as u16;
-                }
-            }
+            0x014 => self.host_features_sel = v,
+            0x020 => match self.guest_features.get_mut(self.guest_features_sel as usize) {
+                Some(word) => *word = v,
+                None => self.guest_features_beyond |= v != 0,
+            },
+            0x024 => self.guest_features_sel = v,
+            0x030 => self.core.queue_sel = v,
             0x038 => {
                 if let Some(q) = self.selected() {
                     if let Err(fault) = self.queues[q].set_num(v as i32) {
@@ -676,12 +805,14 @@ impl Transport {
                 }
             }
             0x044 => self.write_queue_ready(ram, v),
-            0x050 => self.queue_notify(ram, v as u16),
-            0x064 => {
-                self.core.isr &= !(v as u8);
-                self.core.update_irq();
-            }
+            0x050 => self.queue_notify(ram, v),
+            0x064 => self.core.isr &= !(v as u8),
             0x070 => self.write_status(ram, v as u8),
+            0x0C0 => {
+                if v == 1 {
+                    self.reset_queue();
+                }
+            }
             0x080 | 0x084 | 0x090 | 0x094 | 0x0A0 | 0x0A4 => {
                 if let Some(q) = self.selected() {
                     let half = usize::from(off & 4 != 0);
@@ -699,10 +830,17 @@ impl Transport {
 
     /// `QueueReady`: setting it hands the latched size and rings to the
     /// queue.
-    fn write_queue_ready(&mut self, ram: &GuestRam<'_>, v: u32) {
+    ///
+    /// A queue made ready once the driver has set `DRIVER_OK` has what it
+    /// already holds taken at once, as at `DRIVER_OK`. After a queue reset
+    /// it starts from nothing, as at initialisation (2.6.1.2); made ready
+    /// again without one, it goes on from where it stopped, the driver
+    /// having been forbidden to alter the buffers it had made available
+    /// ("A driver MUST NOT alter virtqueue entries for exposed buffers").
+    fn write_queue_ready(&mut self, ram: &mut GuestRam<'_>, v: u32) {
         let index = self.core.queue_sel;
         if v == 0 {
-            self.set_queue_enabled(index, false);
+            self.enabled.set(index, false);
             return;
         }
         if let Some(q) = self.selected() {
@@ -721,42 +859,86 @@ impl Transport {
                 self.core.error(fault);
             }
         }
-        self.set_queue_enabled(index, true);
+        let was_ready = self.enabled.get(index);
+        self.enabled.set(index, true);
+        if !was_ready {
+            self.queue_notify(ram, index);
+        }
     }
 
     /// QEMU `virtio_queue_notify`: run the device for queue `index`.
-    fn queue_notify(&mut self, ram: &mut GuestRam<'_>, index: u16) {
-        let q = usize::from(index);
-        if q >= QUEUES || !self.queues[q].has_descriptors() || self.core.disabled() {
+    /// The index is `QueueNotify`'s whole 32 bits: without
+    /// `VIRTIO_F_NOTIFICATION_DATA`, which is not offered, the driver
+    /// writes "the 16-bit virtqueue index" (4.2.3.3), so a value past 16
+    /// bits names no queue and runs nothing, where QEMU keeps its low 16.
+    fn queue_notify(&mut self, ram: &mut GuestRam<'_>, index: u32) {
+        let q = index as usize;
+        if q >= QUEUES
+            || !self.queues[q].has_descriptors()
+            || !queue_usable(&self.enabled, &self.core, q)
+        {
             return;
         }
         self.with_device(ram, |device, vdev| device.handle_output(vdev, q));
     }
 
-    /// `Status`: QEMU `virtio_set_features` when the driver sets
-    /// `FEATURES_OK`, then `virtio_set_status`, and a reset when the status
-    /// is 0.
-    fn write_status(&mut self, ram: &GuestRam<'_>, status: u8) {
-        if status & STATUS_FEATURES_OK != 0 {
-            self.set_features(
-                ram,
-                (u64::from(self.guest_features[1]) << 32) | u64::from(self.guest_features[0]),
-            );
-        }
-        self.device.set_status(status, &self.core);
-        self.core.status = status;
-        if self.core.status == 0 {
+    /// `Status`: a reset when the driver writes 0; else the features the
+    /// driver accepted taken when it sets `FEATURES_OK`, unless the device
+    /// does not offer them all, then QEMU `virtio_set_status`. Once the
+    /// driver sets `DRIVER_OK`, the device takes what each queue already
+    /// holds, as a notification of it would have it do.
+    ///
+    /// A write adds bits to `Status` and clears none, which the driver may
+    /// not do (2.1.1). Of what it writes, `DEVICE_NEEDS_RESET` is not
+    /// kept, being the device's to set for an error it cannot recover from
+    /// (2.1), nor `DRIVER_OK` while `FEATURES_OK` does not hold (3.1.1: the
+    /// driver sets it only after `FEATURES_OK` has held), so a device whose
+    /// features were refused does not start. QEMU stores what is written.
+    fn write_status(&mut self, ram: &mut GuestRam<'_>, status: u8) {
+        if status == 0 {
             self.soft_reset();
+            return;
+        }
+        // A bit, once set, stays until a reset: the driver "MUST NOT clear a
+        // device status bit" (2.1.1), and the features FEATURES_OK stands
+        // for are taken once.
+        let mut status = (status & !STATUS_NEEDS_RESET) | self.core.status;
+        if status & STATUS_FEATURES_OK != 0 && self.core.status & STATUS_FEATURES_OK == 0 {
+            let [low, high, rest @ ..] = self.guest_features;
+            let accepted = (u64::from(high) << 32) | u64::from(low);
+            if accepted & !self.core.host_features != 0
+                || rest.iter().any(|&w| w != 0)
+                || self.guest_features_beyond
+            {
+                status &= !STATUS_FEATURES_OK;
+            } else {
+                self.set_features(ram, accepted);
+            }
+        }
+        if status & STATUS_FEATURES_OK == 0 {
+            status &= !STATUS_DRIVER_OK;
+        }
+        // Taking the features may have broken the device.
+        let status = status | (self.core.status & STATUS_NEEDS_RESET);
+        let was_ok = self.core.driver_ok();
+        self.core.status = status;
+        if !was_ok && self.core.driver_ok() {
+            // A device broken before DRIVER_OK says so now, as it would
+            // have when it broke had DRIVER_OK been set (2.1.2).
+            if status & STATUS_NEEDS_RESET != 0 {
+                self.core.notify_config();
+            }
+            for q in 0..QUEUES {
+                self.queue_notify(ram, q as u32);
+            }
         }
     }
 
-    /// QEMU `virtio_set_features_ex`: keep what the device offers of what
-    /// the driver accepted, once.
+    /// QEMU `virtio_set_features_ex`: the driver's features, a subset of
+    /// what the device offers, then the device's hook on them.
     fn set_features(&mut self, ram: &GuestRam<'_>, features: u64) {
-        if self.core.status & STATUS_FEATURES_OK != 0 {
-            return;
-        }
-        self.core.guest_features = features & self.core.host_features;
+        self.core.guest_features = features;
+        self.device.features_ok(&self.core);
         if self.core.has_feature(VIRTIO_RING_F_EVENT_IDX) {
             let ring = self.core.ring_features();
             for i in 0..QUEUES {
@@ -777,20 +959,21 @@ impl Transport {
                 w.write_u32(*v)?;
             }
         }
-        for word in &self.enabled {
+        for word in &self.enabled.0 {
             w.write_u64(*word)?;
         }
         w.write_u8(self.core.status)?;
         w.write_u8(self.core.isr)?;
-        w.write_u16(self.core.queue_sel)?;
+        w.write_u32(self.core.queue_sel)?;
         w.write_u64(self.core.guest_features)?;
         w.write_u32(self.core.generation)?;
         w.write_u8(self.core.broken.map_or(0, QueueFault::code))?;
-        w.write_bool(self.core.irq_level)?;
         w.write_u32(self.host_features_sel)?;
         w.write_u32(self.guest_features_sel)?;
-        w.write_u32(self.guest_features[0])?;
-        w.write_u32(self.guest_features[1])?;
+        for word in &self.guest_features {
+            w.write_u32(*word)?;
+        }
+        w.write_bool(self.guest_features_beyond)?;
         w.write_bytes(&self.config)?;
         self.device.save(w)
     }
@@ -805,17 +988,12 @@ impl Transport {
                 *v = r.read_u32()?;
             }
         }
-        for word in &mut self.enabled {
+        for word in &mut self.enabled.0 {
             *word = r.read_u64()?;
         }
         self.core.status = r.read_u8()?;
         self.core.isr = r.read_u8()?;
-        self.core.queue_sel = r.read_u16()?;
-        if u32::from(self.core.queue_sel) >= VIRTIO_QUEUE_MAX {
-            return Err(SnapError::Invalid(
-                "virtio queue selector past the last queue index",
-            ));
-        }
+        self.core.queue_sel = r.read_u32()?;
         let guest_features = r.read_u64()?;
         if guest_features & !self.core.host_features != 0 {
             return Err(SnapError::Invalid(
@@ -830,16 +1008,24 @@ impl Transport {
                 "virtio device broken by an unknown fault",
             ))?),
         };
-        self.core.irq_level = r.read_bool()?;
-        self.host_features_sel = r.read_u32()?;
-        self.guest_features_sel = r.read_u32()?;
-        if self.host_features_sel > 1 || self.guest_features_sel > 1 {
+        // What `write_status` and `Core::error` hold of every status.
+        let status = self.core.status;
+        if status & STATUS_DRIVER_OK != 0 && status & STATUS_FEATURES_OK == 0 {
             return Err(SnapError::Invalid(
-                "virtio feature selector past the second word",
+                "virtio DRIVER_OK without FEATURES_OK",
             ));
         }
-        self.guest_features[0] = r.read_u32()?;
-        self.guest_features[1] = r.read_u32()?;
+        if (status & STATUS_NEEDS_RESET != 0) != self.core.broken.is_some() {
+            return Err(SnapError::Invalid(
+                "virtio DEVICE_NEEDS_RESET apart from a broken device",
+            ));
+        }
+        self.host_features_sel = r.read_u32()?;
+        self.guest_features_sel = r.read_u32()?;
+        for word in &mut self.guest_features {
+            *word = r.read_u32()?;
+        }
+        self.guest_features_beyond = r.read_bool()?;
         r.read_bytes(&mut self.config)?;
         self.device.restore(r)
     }

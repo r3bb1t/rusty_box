@@ -1166,16 +1166,19 @@ integration tests of the public API.
 - The virtio devices are driven register by register and ring by ring, as a
   driver drives them, by a test driver laid out like Linux's
   (`tests/unit/virtio_driver.rs`): the transport's registers, feature
-  negotiation, resets, interrupt and configuration-change behaviour and
-  every rule whose breach QEMU reports with `virtio_error`
-  (`tests/unit/virtio_transport.rs`); QEMU's keyboard and tablet
-  configuration byte for byte but for the names, vendor, products and
-  versions, the board's identity's, and the events each host action becomes
+  negotiation, resets, a queue's reset, `QueueReady` and `DRIVER_OK`,
+  interrupt and configuration-change behaviour, chains ending in an
+  indirect table, and every rule whose breach breaks the device
+  (`tests/unit/virtio_transport.rs`); the keyboard's and tablet's
+  configuration entries, QEMU's but for the names, vendor, products and
+  versions, the board's identity's, in a configuration of virtio 1.2's
+  layout, and the events each host action becomes
   (`tests/unit/virtio_input.rs`); every 2D GPU command and its errors in
-  QEMU's order, frames and the cursor as the host receives them
-  (`tests/unit/virtio_gpu.rs`); the block device's configuration and
-  geometry, every request type and its errors, the cache mode, read-only
-  and file-backed disks and snapshots (`tests/unit/virtio_block.rs`). The
+  QEMU's order, the cursor queue's answers, frames and the cursor as the
+  host receives them (`tests/unit/virtio_gpu.rs`); the block device's
+  configuration and geometry, every request type and its errors, the used
+  lengths, the cache mode, read-only and file-backed disks and snapshots
+  (`tests/unit/virtio_block.rs`). The
   EDID generator, given QEMU's names for its display, matches QEMU's own
   byte for byte at nine sizes (`tests/vectors/qemu_edid.txt`, from
   `tests/vectors/gen_qemu_edid.sh`, which builds `edid-generate.c` from a
@@ -2079,7 +2082,8 @@ one open.
 - **virtio-blk completes a request before its notification returns.**
   QEMU hands reads, writes and flushes to its block layer, which completes
   them later, in an order and at a time the host decides; here each
-  completes at the notification, with the same results, always at the
+  completes at the notification, or at the `Status` write of `DRIVER_OK`
+  for one made available before it, with the same results, always at the
   same instruction. A host error is reported to the guest as
   `VIRTIO_BLK_S_IOERR`, QEMU's default except for a write that finds the
   host's disk full, where QEMU stops the machine until the user resumes
@@ -2094,6 +2098,146 @@ one open.
   drops what does not fit; this one takes none of the batch and the host
   offers it again later. The guest sees each batch whole or not at all
   either way (`src/devices/virtio/input.rs`).
+- **The virtio-mmio transport keeps virtio 1.2's register rules.** QEMU
+  11.1.2's `virtio-mmio.c` and `virtio.c` depart from section 4.2 and 2 in
+  ways a driver that follows the specification can see; this transport
+  does as the specification says (`src/devices/virtio/mod.rs`):
+  - `QueueReset` (0x0C0) resets the selected queue, whatever was
+    negotiated (4.2.2.1: "The device MUST reset the queue when 1 is
+    written to QueueReset", which Table 4.1 describes for a driver that
+    accepted `VIRTIO_F_RING_RESET`); QEMU offers the feature and has no
+    such register, so a reset it never does reads as done
+    (`docs/qemu-upstream-bugs.md` entry 42).
+  - A queue whose `QueueReady` is 0 is not touched ("The device MUST NOT
+    access virtual queue contents when QueueReady is zero"), and no queue
+    is before `DRIVER_OK` (2.1.2); QEMU keeps using the rings it was given,
+    and runs a notified queue whatever the status (entry 44). What a
+    driver made available before `DRIVER_OK` is taken when it sets it, and
+    what a queue holds when it is made ready again after `DRIVER_OK`, as
+    after a queue reset, is taken then (2.6.1.2: as at initialisation).
+  - A configuration change sets only the configuration bit of
+    `InterruptStatus` ("Bits which do not represent events which took place
+    MUST be zero"); QEMU's `virtio_notify_config` sets the used-buffer bit
+    too (entry 43).
+  - `DeviceFeaturesSel` and `DriverFeaturesSel` select any word of the
+    feature bits, the words past the second all zero, and `QueueSel` any
+    queue, one the device does not have reading `QueueNumMax` 0 (Table
+    4.1); QEMU takes every feature selector but 0 for the second word, so
+    a driver writing word 2 overwrites its acceptance of `VERSION_1`, and
+    ignores a queue selector past 1023, leaving the last one selected
+    (entry 45). A `QueueNotify` value past 16 bits, which is no
+    virtqueue index (4.2.3.3: the driver writes "the 16-bit virtqueue
+    index"), notifies nothing; QEMU's `uint16_t vq_idx` keeps its low 16
+    bits, taking 0x1_0001 for queue 1. The specification leaves the choice
+    to the device.
+  - A driver's reset, `Status` 0, forgets the features it wrote, which only
+    the next negotiation would otherwise read; QEMU keeps them until a
+    system reset, so a driver that then writes only `DriverFeatures` word 0
+    negotiates with the last driver's word 1.
+  - `SHMBase` reads all ones, as `SHMLen` does, for the shared memory
+    region the device does not have (Table 4.1); QEMU's reads 0 (entry
+    45).
+  - A `Status` write adds bits and clears none, which the driver may not
+    do (2.1.1), and `DRIVER_OK` counts only once `FEATURES_OK` holds
+    (3.1.1); QEMU stores what is written. A driver accepting a feature that
+    was not offered, in any word, bits past 127 included (2.2 reserves
+    "128 and above"; a bit set in a word past the fourth is remembered
+    until a reset even if the driver writes that word 0 again, the
+    transport keeping four words, where 2.2.2 says only that the device
+    "SHOULD accept any valid subset"), finds `FEATURES_OK` clear (2.2.2), so its device does
+    not start; QEMU drops the feature and sets it (entry 46). QEMU's legacy
+    notify-on-empty and any-layout, which it offers but keeps out of
+    `DeviceFeatures`, are not offered.
+  - The interrupt line follows `InterruptStatus` on a broken device as on a
+    working one, and `DEVICE_NEEDS_RESET`, the device's alone to set
+    (2.1), is set however far negotiation has gone (2.1.2: the device
+    "SHOULD set DEVICE_NEEDS_RESET when it enters an error state") and
+    stays set until a reset, a device broken before `DRIVER_OK` telling
+    the driver with a configuration change when it sets it (2.1.2).
+    QEMU's `virtio_error` sets the bit only once `VIRTIO_F_VERSION_1` is
+    negotiated, for a legacy device's sake, so a device broken before
+    `FEATURES_OK` never says so; its `virtio_notify_vector` leaves a broken
+    device's line where it was, and its `Status` takes the bit as the
+    driver writes it, clearing or setting it. A broken device gives no
+    buffer back, so it sets no used-buffer bit; QEMU's `virtio_irq` sets
+    the bit before `virtio_notify_vector` looks at whether the device is
+    broken, and its virtio-input status queue notifies whether or not it
+    took a report, so a notification there sets the bit with no buffer used,
+    on a broken device or a working one (entry 52).
+- **The split virtqueue takes every chain section 2.7 allows.** A chain of
+  normal descriptors may end in one naming an indirect table
+  (2.7.5.3.2: "The device MUST handle the case of zero or more normal
+  chained descriptors followed by a single descriptor with
+  flags&VIRTQ_DESC_F_INDIRECT"), and a buffer may have no bytes; QEMU's
+  `virtqueue_split_pop` takes an indirect table only at a chain's head,
+  reading a later one's table as data, and breaks the device for a buffer
+  of no bytes (`docs/qemu-upstream-bugs.md` entry 47). An indirect table
+  naming another, which 2.7.5.3.1 forbids the driver, breaks the device
+  (`src/devices/virtio/queue.rs`).
+- **A used length counts the bytes written.** virtio 1.2 2.7.8.2: "The
+  device MUST write at least len bytes ... beginning at the first
+  device-writable buffer". The block device writes every device-writable
+  byte, zeroing those a failed read, an unsupported request or a
+  `VIRTIO_BLK_T_GET_ID` into a buffer longer than 20 bytes leaves, so the
+  used length, every device-writable byte, is true and takes in the status
+  byte, which a driver may not read past it (2.7.8.3). Buffers that
+  overlap are zeroed once over the memory they cover, so a chain naming
+  the same bytes many times costs no more than the RAM it covers. virtio-input's
+  status queue gives a report back with 0, nothing of a device-readable
+  report being written. QEMU's `virtio_blk_req_complete` counts every
+  device-writable byte though it wrote only the status, and
+  `virtio_input_handle_sts` the bytes it read
+  (`docs/qemu-upstream-bugs.md` entry 48; `src/devices/virtio/block.rs`,
+  `input.rs`).
+- **virtio-blk is virtio 1.2's.** Its configuration runs to the end of
+  `unused1`, which reads 0 (5.2.5.2: "The device MUST initialize padding
+  bytes unused0 and unused1 to 0"), where QEMU's ends a byte after
+  `write_zeroes_may_unmap`. The cache mode is set when the driver sets
+  `FEATURES_OK`, the first time it may read `writeback` (5.2.5.1): write
+  through without `VIRTIO_BLK_F_FLUSH` (case 1 of 5.2.6.2, and 5.2.5.2's
+  "MUST initialize writeback to 0" with `VIRTIO_BLK_F_CONFIG_WCE`),
+  write-back with it but without `VIRTIO_BLK_F_CONFIG_WCE`; QEMU sets it
+  at `DRIVER_OK`, and only without `VIRTIO_BLK_F_CONFIG_WCE`, so a driver
+  that accepts that feature without `VIRTIO_BLK_F_FLUSH` reads 1. A
+  `writeback` write takes effect only with `VIRTIO_BLK_F_CONFIG_WCE`
+  negotiated. A discard or write-zeroes range with a flag it may not have
+  is `VIRTIO_BLK_S_UNSUPP` whether or not its sectors are on the disk
+  (5.2.6.2); QEMU answers `VIRTIO_BLK_S_IOERR` for sectors past the disk
+  first. These three are `docs/qemu-upstream-bugs.md` entry 49.
+  `VIRTIO_BLK_T_GET_ID` writes the identifier NUL-padded to 20
+  bytes (5.2.6); QEMU writes one NUL. The request types are 1.2's
+  exactly, any other `VIRTIO_BLK_S_UNSUPP`: QEMU takes legacy SCSI
+  requests apart, masks the barrier and output bits off a type (so the
+  legacy `VIRTIO_BLK_T_FLUSH_OUT` flushes and a read with the barrier bit
+  reads), and answers zone commands, which 1.2 does not have, as a device
+  that is not zoned would, a short zone report breaking the device
+  (`src/devices/virtio/block.rs`).
+- **virtio-input's configuration is `struct virtio_input_config` whole.**
+  It is 136 bytes, the union's bytes past the selected entry 0, and
+  `select` and `subsel` read as the driver wrote them, which it may do in
+  either order (5.8.5.1). QEMU's ends after the largest entry, past which
+  the transport reads all ones, and zeroes `select` and `subsel` while
+  they name no entry, so a driver that writes `select`, reads, then
+  writes `subsel` has `select` 0. A status-queue notification that takes
+  no report interrupts nothing; QEMU's interrupts anyway
+  (`src/devices/virtio/input.rs`).
+- **virtio-gpu answers on its cursor queue, and keeps offsets whole.**
+  Both cursor commands answer `VIRTIO_GPU_RESP_OK_NODATA` (5.7.6.10) to a
+  chain with room for it, a command shorter than `struct
+  virtio_gpu_update_cursor` `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER`, any
+  other command `VIRTIO_GPU_RESP_ERR_UNSPEC`, and a scanout or resource the
+  device does not have, or a cursor image not 64 by 64, the error the
+  control queue gives it, each changing nothing; a move takes only its
+  position ("The other fields are not used and will
+  be ignored by the device"); QEMU writes no answer, takes any command but
+  a move as an update, and shows or hides the cursor by a move's
+  `resource_id` (`docs/qemu-upstream-bugs.md` entry 51). Linux sends its cursor commands
+  with no room for an answer. `VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D` takes
+  its 64-bit `offset` whole (5.7.6.8), where QEMU computes each row's
+  offset in 32 bits (entry 50). `VIRTIO_GPU_CMD_GET_EDID`'s `size` is the EDID's own length,
+  its base block and the extension blocks byte 7Eh counts (VESA E-EDID
+  1.4), where QEMU gives the whole 1024-byte field
+  (`src/devices/virtio/gpu.rs`).
 - **The GICv2's Group 1 aliases exist.** IHI 0048B's CPU interface map
   (Table 4-2) has `GICC_AIAR`, `GICC_AEOIR` and `GICC_AHPPIR` in every
   GICv2, and with `GICC_CTLR.AckCtl` clear, the setting Arm recommends

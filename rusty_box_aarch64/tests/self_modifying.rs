@@ -336,10 +336,14 @@ fn code_a_disk_read_puts_over_code_that_ran_runs_as_read() {
         .expect("RAM");
     m.mem_write(HEADER, &[0u8; 16]).expect("RAM"); // VIRTIO_BLK_T_IN, sector 0
     m.mem_write(STATUS_BYTE, &[0xFF]).expect("RAM");
-    m.mem_write(AVAIL, &[0, 0, 1, 0, 0, 0]).expect("RAM"); // flags 0, idx 1, ring[0] = 0
+    m.mem_write(AVAIL, &[0; 6]).expect("RAM"); // flags 0, idx 0: nothing yet
 
-    // Linux's virtio_dev_probe and vm_setup_vq, then the notification.
-    let registers: [(u32, u32); 20] = [
+    // Linux's virtio_dev_probe and vm_setup_vq; then the request made
+    // available (the ring's first word: flags 0, idx 1, stored through the
+    // same transport-relative writes as the registers, aligned as Device
+    // memory needs with the MMU off) and the notification.
+    let publish = (AVAIL - TRANSPORT) as u32;
+    let registers: [(u32, u32); 21] = [
         (0x070, 0),
         (0x070, 1),
         (0x070, 3),
@@ -358,6 +362,7 @@ fn code_a_disk_read_puts_over_code_that_ran_runs_as_read() {
         (0x0A4, 0),
         (0x044, 1),
         (0x070, 15),
+        (publish, 1 << 16),
         (0x050, 0),
         (u32::MAX, 0),
     ];

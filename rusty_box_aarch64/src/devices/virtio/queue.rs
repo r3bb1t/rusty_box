@@ -20,6 +20,19 @@
 //! changing descriptors it has made available until the device has used
 //! them; they differ only when a driver has the device write over such
 //! descriptors itself.
+//!
+//! Where it follows the specification over QEMU (README, "Where the
+//! references differ"):
+//!
+//! - An indirect descriptor may end a chain of normal ones, not only head
+//!   it (2.7.5.3.2: "The device MUST handle the case of zero or more normal
+//!   chained descriptors followed by a single descriptor with
+//!   flags&VIRTQ_DESC_F_INDIRECT"); QEMU's `virtqueue_split_pop` looks for
+//!   one at the head only. Its `NEXT` is ignored, as at the head, and an
+//!   indirect descriptor inside an indirect table, which 2.7.5.3.1 forbids
+//!   the driver, breaks the device.
+//! - A buffer of no bytes is a buffer, which section 2.7 does not forbid;
+//!   QEMU's `virtqueue_map_desc` breaks the device for one.
 
 use rusty_box_core::snap::{SnapError, SnapRead, SnapResult, SnapWrite};
 
@@ -31,7 +44,8 @@ use crate::bus::{PhysAddr, Writes};
 /// `DEVICE_NEEDS_RESET`).
 ///
 /// Closed (R5): the errors QEMU's split ring and transport raise for the
-/// features these devices offer, and the block device's own.
+/// features these devices offer, the one nested indirect tables raise, and
+/// the block device's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueFault {
     /// `QueueNum` larger than the device's queue ("queue size exceeds max
@@ -54,8 +68,10 @@ pub enum QueueFault {
     /// An indirect table outside guest memory ("Cannot map indirect
     /// buffer").
     UnmappableIndirect,
-    /// A buffer of no bytes ("zero sized buffers are not allowed").
-    ZeroSized,
+    /// An indirect descriptor inside an indirect table (2.7.5.3.1: "The
+    /// driver MUST NOT set the VIRTQ_DESC_F_INDIRECT flag within an
+    /// indirect descriptor").
+    NestedIndirect,
     /// More than `VIRTQUEUE_MAX_SIZE` buffers in one chain ("too many write
     /// descriptors in indirect table").
     TooManyBuffers,
@@ -78,9 +94,6 @@ pub enum QueueFault {
     /// A discard or write-zeroes request without a whole range
     /// ("virtio-blk discard/write_zeroes header too short").
     BlockRangeShort,
-    /// A zone report without room for one zone ("in buffer too small for
-    /// zone report").
-    BlockZoneReportShort,
 }
 
 impl QueueFault {
@@ -94,7 +107,7 @@ impl QueueFault {
             Self::NoRings => 5,
             Self::BadIndirectSize => 6,
             Self::UnmappableIndirect => 7,
-            Self::ZeroSized => 8,
+            Self::NestedIndirect => 8,
             Self::TooManyBuffers => 9,
             Self::UnmappableBuffer => 10,
             Self::OutOfOrder => 11,
@@ -103,7 +116,6 @@ impl QueueFault {
             Self::BlockMissingHeaders => 14,
             Self::BlockHeaderShort => 15,
             Self::BlockRangeShort => 16,
-            Self::BlockZoneReportShort => 17,
         }
     }
 
@@ -116,7 +128,7 @@ impl QueueFault {
             5 => Self::NoRings,
             6 => Self::BadIndirectSize,
             7 => Self::UnmappableIndirect,
-            8 => Self::ZeroSized,
+            8 => Self::NestedIndirect,
             9 => Self::TooManyBuffers,
             10 => Self::UnmappableBuffer,
             11 => Self::OutOfOrder,
@@ -125,7 +137,6 @@ impl QueueFault {
             14 => Self::BlockMissingHeaders,
             15 => Self::BlockHeaderShort,
             16 => Self::BlockRangeShort,
-            17 => Self::BlockZoneReportShort,
             _ => return None,
         })
     }
@@ -255,25 +266,30 @@ impl Descriptor {
 pub struct RingFeatures {
     /// `VIRTIO_RING_F_EVENT_IDX`.
     pub event_idx: bool,
-    /// `VIRTIO_F_NOTIFY_ON_EMPTY`.
-    pub notify_on_empty: bool,
+}
+
+/// A descriptor table: where it is and how many entries it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Table {
+    addr: u64,
+    len: u32,
 }
 
 /// A descriptor chain the device took from the available ring: where its
 /// descriptors are, for walking its buffers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chain {
-    /// The head descriptor's index, which identifies the chain in the used
-    /// ring.
+    /// The head descriptor's index in the queue's table, which also
+    /// identifies the chain in the used ring.
     pub head: u16,
-    /// The descriptor table the chain is in: the queue's, or an indirect one.
-    table: u64,
-    /// Entries in `table`.
-    table_len: u32,
-    /// The chain's first descriptor in `table`.
-    first: u32,
+    /// The queue's descriptor table.
+    table: Table,
+    /// The indirect table the chain's last descriptor in the queue's table
+    /// refers to, if it ends in one.
+    indirect: Option<Table>,
     /// How many device-readable and device-writable buffers it has (QEMU
-    /// `out_num` and `in_num`).
+    /// `out_num` and `in_num`), buffers of no bytes among them, which a walk
+    /// of its buffers passes over.
     pub readable: u32,
     pub writable: u32,
     /// The total length of each (QEMU `iov_size` of `out_sg` and `in_sg`).
@@ -281,10 +297,121 @@ pub struct Chain {
     pub writable_len: u64,
 }
 
-/// Where a walk of a chain has got to.
+/// Where a walk of a chain has got to: the table it is in, the indirect
+/// table it has yet to enter, the next entry, and how many entries of the
+/// table it has read.
 struct Walk {
+    table: Table,
+    pending_indirect: Option<Table>,
     next: Option<u32>,
     steps: u32,
+}
+
+impl Walk {
+    /// The next buffer's descriptor, each table's entries bounded by its
+    /// length; the descriptor naming the indirect table moves the walk to
+    /// that table's first entry. A descriptor naming an indirect table where
+    /// the chain has none left to enter, which [`Queue::pop`] refused, ends
+    /// the walk. A buffer of no bytes is passed over: it holds nothing to
+    /// read or write, and its address, which `Queue::pop` does not check,
+    /// need not be in RAM.
+    fn step(&mut self, ram: &GuestRam<'_>) -> Option<Descriptor> {
+        loop {
+            let index = self.next?;
+            if self.steps == self.table.len {
+                return None;
+            }
+            self.steps += 1;
+            let desc = Descriptor::read(ram, self.table.addr, index)?;
+            if desc.flags & VRING_DESC_F_INDIRECT != 0 {
+                self.table = self.pending_indirect.take()?;
+                self.next = Some(0);
+                self.steps = 0;
+                continue;
+            }
+            self.next = (desc.flags & VRING_DESC_F_NEXT != 0
+                && u32::from(desc.next) < self.table.len)
+                .then_some(u32::from(desc.next));
+            if desc.len != 0 {
+                return Some(desc);
+            }
+        }
+    }
+}
+
+/// Guest memory one buffer's bytes cover, or part of them.
+#[derive(Debug, Clone, Copy)]
+struct Span {
+    addr: u64,
+    len: u64,
+}
+
+/// Which of a chain's buffers a walk of spans covers: the device-readable
+/// ones, which come first, or the device-writable ones after them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    /// Walked only by `Chain::read`, which the devices built with `alloc`
+    /// call.
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    Readable,
+    Writable,
+}
+
+/// A span, and how far into the bytes a walk of spans covers it starts.
+#[derive(Debug, Clone, Copy)]
+struct Placed {
+    span: Span,
+    at: u64,
+}
+
+/// A walk over one side of a chain, `left` bytes from an offset, a span per
+/// buffer. Like `Buffers` it holds no borrow of guest memory between
+/// steps, so a device can fill one span before it looks at the next.
+///
+/// Lengths are `u64`: a chain's buffers may hold more than a 32-bit host's
+/// `usize` counts.
+struct Spans {
+    walk: Walk,
+    side: Side,
+    skip: u64,
+    left: u64,
+    /// How many bytes the spans so far held.
+    done: u64,
+}
+
+impl Spans {
+    /// The next span, or `None` past the last of its side, the bytes asked
+    /// for, or a buffer whose bytes are not all RAM.
+    fn next(&mut self, ram: &GuestRam<'_>) -> Option<Placed> {
+        while self.left > 0 {
+            let desc = self.walk.step(ram)?;
+            match (self.side, desc.device_writes()) {
+                (Side::Readable, false) | (Side::Writable, true) => {}
+                // The readable buffers end where the writable ones begin.
+                (Side::Readable, true) => return None,
+                (Side::Writable, false) => continue,
+            }
+            let len = u64::from(desc.len);
+            if self.skip >= len {
+                self.skip -= len;
+                continue;
+            }
+            let n = (len - self.skip).min(self.left);
+            let addr = desc.addr.checked_add(self.skip)?;
+            if !ram.contains(addr, n) {
+                return None;
+            }
+            let placed = Placed {
+                span: Span { addr, len: n },
+                at: self.done,
+            };
+            self.skip = 0;
+            self.left -= n;
+            self.done += n;
+            return Some(placed);
+        }
+        None
+    }
 }
 
 /// One buffer of a chain, as the driver described it.
@@ -301,15 +428,14 @@ pub struct Buffer {
 /// the next.
 #[cfg(feature = "alloc")]
 pub struct Buffers {
-    chain: Chain,
     walk: Walk,
 }
 
 #[cfg(feature = "alloc")]
 impl Buffers {
-    /// The next buffer, or `None` past the last.
+    /// The next buffer that has bytes, or `None` past the last.
     pub fn next_buffer(&mut self, ram: &GuestRam<'_>) -> Option<Buffer> {
-        let desc = self.chain.step(ram, &mut self.walk)?;
+        let desc = self.walk.step(ram)?;
         Some(Buffer {
             addr: desc.addr,
             len: desc.len,
@@ -321,7 +447,9 @@ impl Buffers {
 impl Chain {
     fn walk(&self) -> Walk {
         Walk {
-            next: Some(self.first),
+            table: self.table,
+            pending_indirect: self.indirect,
+            next: Some(u32::from(self.head)),
             steps: 0,
         }
     }
@@ -329,83 +457,106 @@ impl Chain {
     /// Its buffers, one at a time.
     #[cfg(feature = "alloc")]
     pub fn buffers(&self) -> Buffers {
-        Buffers {
-            chain: *self,
-            walk: self.walk(),
-        }
+        Buffers { walk: self.walk() }
     }
 
-    /// The next descriptor of a walk, bounded by the table's length.
-    fn step(&self, ram: &GuestRam<'_>, walk: &mut Walk) -> Option<Descriptor> {
-        let index = walk.next?;
-        if walk.steps == self.table_len {
-            return None;
+    /// The `side` buffers' bytes from `offset` in, `len` of them at most.
+    fn spans(&self, side: Side, offset: u64, len: u64) -> Spans {
+        Spans {
+            walk: self.walk(),
+            side,
+            skip: offset,
+            left: len,
+            done: 0,
         }
-        walk.steps += 1;
-        let desc = Descriptor::read(ram, self.table, index)?;
-        walk.next = (desc.flags & VRING_DESC_F_NEXT != 0 && u32::from(desc.next) < self.table_len)
-            .then_some(u32::from(desc.next));
-        Some(desc)
     }
 
     /// QEMU `iov_to_buf` over the device-readable buffers: copy what lies
     /// `offset` bytes in into `out`, returning how many bytes there were.
+    #[cfg(feature = "alloc")]
     pub fn read(&self, ram: &GuestRam<'_>, offset: usize, out: &mut [u8]) -> usize {
-        let mut skip = offset as u64;
-        let mut done = 0;
-        let mut walk = self.walk();
-        while done < out.len() {
-            let Some(desc) = self.step(ram, &mut walk) else {
-                break;
+        let mut spans = self.spans(Side::Readable, offset as u64, out.len() as u64);
+        while let Some(placed) = spans.next(ram) {
+            // Both are within `out`, whose length is a `usize`.
+            let (at, n) = (placed.at as usize, placed.span.len as usize);
+            if ram.read(placed.span.addr, &mut out[at..at + n]).is_none() {
+                return at;
+            }
+        }
+        spans.done as usize
+    }
+
+    /// Zero `len` bytes of the device-writable buffers starting `offset`
+    /// bytes in, returning how many there were: [`Chain::write`] of zeros,
+    /// with no buffer of them.
+    ///
+    /// Buffers may overlap, and zeroing a byte twice leaves what zeroing it
+    /// once does, so the memory they cover is zeroed once: the cost is
+    /// bounded by guest RAM, not by how often a chain names the same bytes.
+    #[cfg(feature = "alloc")]
+    pub fn zero(&self, ram: &mut GuestRam<'_>, offset: u64, len: u64) -> u64 {
+        // One span, the usual case, is zeroed as it is; only a second one
+        // has the spans gathered to be merged.
+        let mut first = None;
+        let mut spans = alloc::vec::Vec::new();
+        let mut walk = self.spans(Side::Writable, offset, len);
+        while let Some(placed) = walk.next(ram) {
+            match first {
+                None => first = Some(placed.span),
+                Some(_) => spans.push(placed.span),
+            }
+        }
+        let done = walk.done;
+        let Some(first) = first else {
+            return done;
+        };
+        if spans.is_empty() {
+            Self::fill_zero(ram, first);
+            return done;
+        }
+        spans.push(first);
+        spans.sort_unstable_by_key(|span| span.addr);
+        let mut run: Option<Span> = None;
+        for span in spans {
+            run = match run {
+                // Each span lies in RAM, so neither end overflows.
+                Some(r) if span.addr <= r.addr + r.len => Some(Span {
+                    addr: r.addr,
+                    len: (span.addr + span.len).max(r.addr + r.len) - r.addr,
+                }),
+                Some(r) => {
+                    Self::fill_zero(ram, r);
+                    Some(span)
+                }
+                None => Some(span),
             };
-            if desc.device_writes() {
-                break;
-            }
-            let len = u64::from(desc.len);
-            if skip >= len {
-                skip -= len;
-                continue;
-            }
-            let n = ((len - skip) as usize).min(out.len() - done);
-            let Some(at) = desc.addr.checked_add(skip) else {
-                break;
-            };
-            if ram.read(at, &mut out[done..done + n]).is_none() {
-                break;
-            }
-            done += n;
-            skip = 0;
+        }
+        if let Some(r) = run {
+            Self::fill_zero(ram, r);
         }
         done
+    }
+
+    /// Zero a run of touching spans a walk of [`Spans`] found in RAM.
+    /// Guest RAM is one range, so a run of ranges in it with no gap between
+    /// them is in it too, and the run is always zeroed.
+    #[cfg(feature = "alloc")]
+    fn fill_zero(ram: &mut GuestRam<'_>, run: Span) {
+        if let Some(bytes) = ram.bytes_mut(run.addr, run.len) {
+            bytes.fill(0);
+        }
     }
 
     /// QEMU `iov_from_buf` over the device-writable buffers: store `data`
     /// starting `offset` bytes in, returning how many bytes fitted.
     pub fn write(&self, ram: &mut GuestRam<'_>, offset: usize, data: &[u8]) -> usize {
-        let mut skip = offset as u64;
-        let mut done = 0;
-        let mut walk = self.walk();
-        while done < data.len() {
-            let Some(desc) = self.step(ram, &mut walk) else {
-                break;
-            };
-            if !desc.device_writes() {
-                continue;
-            }
-            let len = u64::from(desc.len);
-            if skip >= len {
-                skip -= len;
-                continue;
-            }
-            let n = ((len - skip) as usize).min(data.len() - done);
-            let Some(at) = desc.addr.checked_add(skip) else {
-                break;
-            };
-            ram.store(at, &data[done..done + n]);
-            done += n;
-            skip = 0;
+        let mut spans = self.spans(Side::Writable, offset as u64, data.len() as u64);
+        while let Some(placed) = spans.next(ram) {
+            // Both are within `data`, whose length is a `usize`.
+            let (at, n) = (placed.at as usize, placed.span.len as usize);
+            ram.store(placed.span.addr, &data[at..at + n]);
         }
-        done
+        spans.done as usize
     }
 }
 
@@ -577,8 +728,8 @@ impl Queue {
     }
 
     /// QEMU `virtio_queue_split_empty`.
-    fn is_empty(&mut self, ram: &GuestRam<'_>, disabled: bool) -> bool {
-        if disabled || self.avail == 0 {
+    fn is_empty(&mut self, ram: &GuestRam<'_>) -> bool {
+        if self.avail == 0 {
             return true;
         }
         if self.shadow_avail_idx != self.last_avail_idx {
@@ -595,7 +746,7 @@ impl Queue {
         ram: &mut GuestRam<'_>,
         features: RingFeatures,
     ) -> Result<Option<Chain>, QueueFault> {
-        if self.num == 0 || self.is_empty(ram, false) {
+        if self.num == 0 || self.is_empty(ram) {
             return Ok(None);
         }
         if self.inuse >= self.num {
@@ -613,28 +764,45 @@ impl Queue {
             return Err(QueueFault::NoRings);
         }
 
-        let mut table = self.desc;
-        let mut max = u32::from(self.num);
-        let mut index = u32::from(head);
-        let mut desc = Descriptor::read(ram, table, index).ok_or(QueueFault::UnmappableRing)?;
-        if desc.flags & VRING_DESC_F_INDIRECT != 0 {
-            if desc.len == 0 || u64::from(desc.len) % DESC_SIZE != 0 {
-                return Err(QueueFault::BadIndirectSize);
-            }
-            if !ram.contains(desc.addr, u64::from(desc.len)) {
-                return Err(QueueFault::UnmappableIndirect);
-            }
-            table = desc.addr;
-            max = desc.len / DESC_SIZE as u32;
-            index = 0;
-            desc = Descriptor::read(ram, table, index).ok_or(QueueFault::UnmappableIndirect)?;
-        }
-        let first = index;
+        let ring = Table {
+            addr: self.desc,
+            len: u32::from(self.num),
+        };
+        let mut table = ring;
+        let mut indirect = None;
+        let mut desc =
+            Descriptor::read(ram, table.addr, u32::from(head)).ok_or(QueueFault::UnmappableRing)?;
 
         let max_buffers = u32::from(VIRTQUEUE_MAX_SIZE);
         let (mut readable, mut writable, mut entries) = (0u32, 0u32, 0u32);
         let (mut readable_len, mut writable_len) = (0u64, 0u64);
         loop {
+            if desc.flags & VRING_DESC_F_INDIRECT != 0 {
+                if indirect.is_some() {
+                    return Err(QueueFault::NestedIndirect);
+                }
+                // An entry of the queue's table like any other.
+                entries += 1;
+                if entries > table.len {
+                    return Err(QueueFault::Looped);
+                }
+                // Its WRITE and NEXT flags are ignored (2.7.5.3.2): the
+                // chain goes on in the table, and ends there.
+                if desc.len == 0 || u64::from(desc.len) % DESC_SIZE != 0 {
+                    return Err(QueueFault::BadIndirectSize);
+                }
+                if !ram.contains(desc.addr, u64::from(desc.len)) {
+                    return Err(QueueFault::UnmappableIndirect);
+                }
+                table = Table {
+                    addr: desc.addr,
+                    len: desc.len / DESC_SIZE as u32,
+                };
+                indirect = Some(table);
+                entries = 0;
+                desc = Descriptor::read(ram, table.addr, 0).ok_or(QueueFault::UnmappableIndirect)?;
+                continue;
+            }
             if desc.device_writes() {
                 Self::map_buffer(ram, &desc, readable + writable, max_buffers)?;
                 writable += 1;
@@ -647,25 +815,26 @@ impl Queue {
                 readable += 1;
                 readable_len += u64::from(desc.len);
             }
+            // After the buffer is mapped, as QEMU's `virtqueue_split_pop`
+            // counts `elem_entries`.
             entries += 1;
-            if entries > max {
+            if entries > table.len {
                 return Err(QueueFault::Looped);
             }
             if desc.flags & VRING_DESC_F_NEXT == 0 {
                 break;
             }
-            if u32::from(desc.next) >= max {
+            if u32::from(desc.next) >= table.len {
                 return Err(QueueFault::BadNext);
             }
-            index = u32::from(desc.next);
-            desc = Descriptor::read(ram, table, index).ok_or(QueueFault::UnmappableBuffer)?;
+            desc = Descriptor::read(ram, table.addr, u32::from(desc.next))
+                .ok_or(QueueFault::UnmappableBuffer)?;
         }
         self.inuse += 1;
         Ok(Some(Chain {
             head,
-            table,
-            table_len: max,
-            first,
+            table: ring,
+            indirect,
             readable,
             writable,
             readable_len,
@@ -718,20 +887,18 @@ impl Queue {
     }
 
     /// QEMU `virtqueue_map_desc` for one buffer, `mapped` buffers already
-    /// mapped of at most `limit`.
+    /// mapped of at most `limit`. A buffer of no bytes maps nothing, so it
+    /// may be anywhere.
     fn map_buffer(
         ram: &GuestRam<'_>,
         desc: &Descriptor,
         mapped: u32,
         limit: u32,
     ) -> Result<(), QueueFault> {
-        if desc.len == 0 {
-            return Err(QueueFault::ZeroSized);
-        }
         if mapped == limit {
             return Err(QueueFault::TooManyBuffers);
         }
-        if !ram.contains(desc.addr, u64::from(desc.len)) {
+        if desc.len != 0 && !ram.contains(desc.addr, u64::from(desc.len)) {
             return Err(QueueFault::UnmappableBuffer);
         }
         Ok(())
@@ -782,8 +949,8 @@ impl Queue {
         features: RingFeatures,
         disabled: bool,
     ) -> bool {
-        if features.notify_on_empty && self.inuse == 0 && self.is_empty(ram, disabled) {
-            return true;
+        if disabled {
+            return false;
         }
         if !features.event_idx {
             return self.avail_u16(ram, 0) & VRING_AVAIL_F_NO_INTERRUPT == 0;

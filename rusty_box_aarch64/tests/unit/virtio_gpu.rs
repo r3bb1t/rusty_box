@@ -423,7 +423,14 @@ fn get_edid_answers_with_the_displays_edid() {
     let resp = command(&mut d, &cmd(GET_EDID, &[0, 0]), 2048);
     assert_eq!(resp.len(), 1056);
     assert_eq!(le32(&resp, 0), OK_EDID);
-    assert_eq!(le32(&resp, 24), 1024, "size");
+    assert_eq!(
+        le32(&resp, 24),
+        256,
+        "size: the base block and its one CTA extension (E-EDID 1.4 byte 7Eh)"
+    );
+    let mut large = gpu(3840, 2160);
+    let large_resp = command(&mut large, &cmd(GET_EDID, &[0, 0]), 2048);
+    assert_eq!(le32(&large_resp, 24), 384, "size: a DisplayID block too");
     assert_eq!(
         resp[32..].to_vec(),
         edid::generate(1280, 800, &boards_display()).to_vec()
@@ -584,6 +591,39 @@ fn a_partial_transfer_updates_only_its_rectangle() {
     assert_eq!(screen.pixel(4, 6), [0, 0, 0, 0xFF], "below it");
 }
 
+/// A transfer's `offset` is all 64 bits of it (virtio 1.2 5.7.6.8): one
+/// 4 GiB past the place the low half names lies past the backing, so
+/// nothing is read, where QEMU's 32-bit row offsets would read that place.
+#[test]
+fn a_transfer_offset_is_64_bits() {
+    let mut d = gpu(640, 480);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 32, 16])),
+        OK_NODATA
+    );
+    attach(&mut d, 1, &picture(32, 16));
+    assert_eq!(
+        status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 32, 16, 0, 1])),
+        OK_NODATA
+    );
+    // Row by row (part of the width), then whole rows at once (the whole
+    // width), each with 2^32 added to the offset its rectangle starts at.
+    let part = 2 * 32 * 4 + 4 * 4;
+    let whole = 8 * 32 * 4;
+    for args in [[4, 2, 8, 4, part, 1, 1, 0], [0, 8, 32, 4, whole, 1, 1, 0]] {
+        assert_eq!(status(&mut d, &cmd(TRANSFER_TO_HOST_2D, &args)), OK_NODATA);
+    }
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_FLUSH, &[0, 0, 32, 16, 1, 0])),
+        OK_NODATA
+    );
+    let mut screen = Screen::default();
+    refresh(&mut d, &mut screen);
+    for (x, y) in [(4, 2), (11, 5), (0, 8), (31, 11)] {
+        assert_eq!(screen.pixel(x, y), [0, 0, 0, 0xFF], "nothing transferred at ({x}, {y})");
+    }
+}
+
 #[test]
 fn backing_is_checked_as_qemu_maps_it() {
     let mut d = gpu(640, 480);
@@ -714,7 +754,7 @@ fn a_new_display_size_is_a_display_event() {
     assert!(changed);
     d.transport.notify_config();
     assert_eq!(d.read(CONFIG), 1, "VIRTIO_GPU_EVENT_DISPLAY");
-    assert_eq!(d.read(INTERRUPT_STATUS), 3);
+    assert_eq!(d.read(INTERRUPT_STATUS), 2, "a configuration change alone");
     assert_eq!(d.read(CONFIG_GENERATION), 1);
     let resp = command(&mut d, &cmd(GET_DISPLAY_INFO, &[]), 408);
     assert_eq!((le32(&resp, 32), le32(&resp, 36)), (800, 600));
@@ -783,12 +823,65 @@ fn a_reset_drops_resources_and_keeps_the_display() {
     );
 }
 
-/// Send a cursor command on the cursor queue.
+/// Send a cursor command on the cursor queue as Linux sends it, with no
+/// room for a response.
 fn cursor(d: &mut Driver, kind: u32, x: u32, y: u32, resource: u32) {
     let req = d.alloc_with(&cmd(kind, &[0, x, y, 0, resource, 0, 0, 0]));
-    d.offer(1, &[Buf::readable(req, 56)]);
+    let head = d.offer(1, &[Buf::readable(req, 56)]);
+    d.notify(1);
+    assert_eq!(d.used(1), [(u32::from(head), 0)]);
+}
+
+/// Both cursor commands answer `VIRTIO_GPU_RESP_OK_NODATA` (virtio 1.2
+/// 5.7.6.10) to a chain with room for it, its fence echoed.
+#[test]
+fn a_cursor_command_answers_ok_nodata() {
+    let mut d = gpu(640, 480);
+    for kind in [UPDATE_CURSOR, MOVE_CURSOR] {
+        let mut request = cmd(kind, &[0, 1, 2, 0, 0, 0, 0, 0]);
+        request[4..8].copy_from_slice(&1u32.to_le_bytes()); // VIRTIO_GPU_FLAG_FENCE
+        request[8..16].copy_from_slice(&77u64.to_le_bytes());
+        let req = d.alloc_with(&request);
+        let resp = d.alloc(24);
+        let head = d.offer(1, &[Buf::readable(req, 56), Buf::writable(resp, 24)]);
+        d.notify(1);
+        assert_eq!(d.used(1), [(u32::from(head), 24)], "command {kind:#x}");
+        let resp = d.mem(resp, 24).to_vec();
+        assert_eq!(le32(&resp, 0), OK_NODATA, "command {kind:#x}");
+        assert_eq!(le32(&resp, 4), 1, "the fence flag, echoed");
+        assert_eq!(resp[8..16], 77u64.to_le_bytes(), "the fence id, echoed");
+    }
+    // A command too short for a cursor's, a command no cursor's, a scanout
+    // the device does not have, a resource it does not have, and one that
+    // is not 64 by 64, each answered as the control queue answers it.
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[3, B8G8R8A8, 32, 32])),
+        OK_NODATA
+    );
+    for (request, len, answer) in [
+        (cmd(UPDATE_CURSOR, &[]), 24, ERR_INVALID_PARAMETER),
+        (cmd(GET_DISPLAY_INFO, &[0, 1, 2, 0, 0, 0, 0, 0]), 56, ERR_UNSPEC),
+        (cmd(MOVE_CURSOR, &[3, 1, 2, 0, 0, 0, 0, 0]), 56, ERR_INVALID_SCANOUT_ID),
+        (cmd(UPDATE_CURSOR, &[0, 1, 2, 0, 99, 0, 0, 0]), 56, ERR_INVALID_RESOURCE_ID),
+        (cmd(UPDATE_CURSOR, &[0, 1, 2, 0, 3, 0, 0, 0]), 56, ERR_INVALID_PARAMETER),
+    ] {
+        let req = d.alloc_with(&request);
+        let resp = d.alloc(24);
+        let head = d.offer(1, &[Buf::readable(req, len), Buf::writable(resp, 24)]);
+        d.notify(1);
+        assert_eq!(d.used(1), [(u32::from(head), 24)]);
+        assert_eq!(le32(d.mem(resp, 24), 0), answer);
+    }
+    // A header the driver did not give whole echoes no fence.
+    let mut request = cmd(UPDATE_CURSOR, &[]);
+    request[4..8].copy_from_slice(&1u32.to_le_bytes());
+    let req = d.alloc_with(&request);
+    let resp = d.alloc(24);
+    d.offer(1, &[Buf::readable(req, 8), Buf::writable(resp, 24)]);
     d.notify(1);
     assert_eq!(d.used(1).len(), 1);
+    assert_eq!(le32(d.mem(resp, 24), 0), ERR_INVALID_PARAMETER);
+    assert_eq!(le32(d.mem(resp, 24), 4), 0, "no fence flag");
 }
 
 #[test]
@@ -833,11 +926,17 @@ fn the_cursor_is_drawn_where_the_guest_puts_it() {
         "where it was is redrawn"
     );
 
-    // A command naming no resource hides it.
-    cursor(&mut d, MOVE_CURSOR, 7, 6, 0);
+    // A move's resource is not used (virtio 1.2 5.7.6.10): it moves the
+    // cursor still shown.
+    cursor(&mut d, MOVE_CURSOR, 8, 6, 0);
     refresh(&mut d, &mut screen);
-    let p = bgrx(7, 6);
-    assert_eq!(screen.pixel(7, 6), [p[2], p[1], p[0], 0xFF]);
+    assert_eq!(screen.pixel(8, 6), [0xFF, 0xFF, 0xFF, 0xFF]);
+
+    // An update naming no resource hides it.
+    cursor(&mut d, UPDATE_CURSOR, 8, 6, 0);
+    refresh(&mut d, &mut screen);
+    let p = bgrx(8, 6);
+    assert_eq!(screen.pixel(8, 6), [p[2], p[1], p[0], 0xFF]);
 }
 
 /// The image sits with its hot spot on the pointer, so a pointer nearer the

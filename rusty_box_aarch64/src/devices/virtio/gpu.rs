@@ -27,6 +27,13 @@
 //!   scanout go, the requested size, pending events and the cursor stay;
 //! - `virtio_gpu_get_config` and `virtio_gpu_set_config`.
 //!
+//! Where it follows the specification over QEMU (README, "Where the
+//! references differ"): the cursor queue answers each command (5.7.6.10),
+//! a transfer's offset is its 64 bits (5.7.6.8), and `GET_EDID`'s `size`
+//! is the EDID's own length (VESA E-EDID 1.4); QEMU answers no cursor
+//! command, computes offsets in 32 bits and gives the 1024-byte field's
+//! size.
+//!
 //! Resources live in host memory, as QEMU's pixman images do (it maps them
 //! from a memfd, so a resource of no bytes cannot be made). How the picture
 //! reaches a host window is the front end's business in QEMU; here
@@ -81,6 +88,7 @@ const CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
 const CMD_GET_EDID: u32 = 0x010A;
 const CMD_RESOURCE_CREATE_BLOB: u32 = 0x010C;
 const CMD_SET_SCANOUT_BLOB: u32 = 0x010D;
+const CMD_UPDATE_CURSOR: u32 = 0x0300;
 const CMD_MOVE_CURSOR: u32 = 0x0301;
 
 const RESP_OK_NODATA: u32 = 0x1100;
@@ -515,54 +523,97 @@ impl Gpu {
         self.cmdq = cmdq;
     }
 
-    /// QEMU `virtio_gpu_handle_cursor`.
+    /// QEMU `virtio_gpu_handle_cursor`, each command answered as 5.7.6.10
+    /// and 5.7.6.7 have it, to as much of the chain's device-writable
+    /// buffers as there is: `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER` for one
+    /// shorter than `struct virtio_gpu_update_cursor`,
+    /// `VIRTIO_GPU_RESP_ERR_UNSPEC` for a command that is neither cursor
+    /// command, and for a cursor command what [`Gpu::update_cursor`] gives.
+    /// A command answered with an error changes nothing. QEMU answers none,
+    /// and takes every command but a move as an update. Linux's driver
+    /// sends its cursor commands with no device-writable buffer, so it gets
+    /// no answer either way.
     fn handle_cursor(&mut self, vdev: &mut Vdev<'_, '_>) {
         if !vdev.queue_ready(CURSOR_QUEUE) {
             return;
         }
         while let Some(chain) = vdev.pop(CURSOR_QUEUE) {
             let mut command = [0u8; CURSOR_COMMAND_LEN];
-            if vdev.read(&chain, 0, &mut command) == CURSOR_COMMAND_LEN {
-                self.update_cursor(&command);
+            let read = vdev.read(&chain, 0, &mut command);
+            let reply = if read != CURSOR_COMMAND_LEN {
+                Reply::Error(RESP_ERR_INVALID_PARAMETER)
+            } else {
+                match le32(&command, 0) {
+                    CMD_UPDATE_CURSOR | CMD_MOVE_CURSOR => self.update_cursor(&command),
+                    _ => Reply::Error(RESP_ERR_UNSPEC),
+                }
+            };
+            // A header the driver did not give whole is answered with none
+            // of it, no fence echoed, as on the control queue.
+            let mut hdr = [0u8; HDR_LEN];
+            if read >= HDR_LEN {
+                hdr.copy_from_slice(&command[..HDR_LEN]);
             }
-            vdev.push(CURSOR_QUEUE, &chain, 0);
-            vdev.notify(CURSOR_QUEUE);
+            Self::reply(vdev, CURSOR_QUEUE, &chain, &hdr, reply);
         }
     }
 
-    /// QEMU `update_cursor`: any command but a move defines the cursor.
-    fn update_cursor(&mut self, b: &[u8; CURSOR_COMMAND_LEN]) {
+    /// QEMU `update_cursor`, for `VIRTIO_GPU_CMD_UPDATE_CURSOR`, which
+    /// defines the cursor and shows it unless its resource is 0, and
+    /// `VIRTIO_GPU_CMD_MOVE_CURSOR`, which moves it. A scanout the device
+    /// does not have is `ERR_INVALID_SCANOUT_ID`, and an update naming a
+    /// resource it does not have `ERR_INVALID_RESOURCE_ID` or one not of the
+    /// cursor's 64 by 64 `ERR_INVALID_PARAMETER`, as the control queue
+    /// answers the same faults; QEMU ignores the first and leaves the image
+    /// as it was for the others.
+    fn update_cursor(&mut self, b: &[u8; CURSOR_COMMAND_LEN]) -> Reply {
         // virtio_gpu_cursor_pos at 24: scanout_id, x, y; then resource_id,
         // hot_x, hot_y.
         let (scanout_id, x, y) = (le32(b, 24), le32(b, 28), le32(b, 32));
         let (resource_id, hot_x, hot_y) = (le32(b, 40), le32(b, 44), le32(b, 48));
         if scanout_id != 0 {
-            return;
+            return Reply::Error(RESP_ERR_INVALID_SCANOUT_ID);
         }
+        // A move takes only the position: "The other fields are not used
+        // and will be ignored by the device" (5.7.6.10). QEMU's shows or
+        // hides the cursor by a move's resource too.
+        let update = le32(b, 0) != CMD_MOVE_CURSOR;
+        let image = match update.then_some(resource_id).filter(|&id| id != 0) {
+            None => None,
+            Some(id) => match self.resource_index(id) {
+                None => return Reply::Error(RESP_ERR_INVALID_RESOURCE_ID),
+                Some(index) => {
+                    let res = &self.resources[index];
+                    if res.width != CURSOR_SIZE || res.height != CURSOR_SIZE {
+                        return Reply::Error(RESP_ERR_INVALID_PARAMETER);
+                    }
+                    Some(index)
+                }
+            },
+        };
         let before = self.cursor_rect();
-        if le32(b, 0) != CMD_MOVE_CURSOR {
+        if update {
+            self.cursor.shown = resource_id != 0;
             if self.cursor.image.is_empty() {
                 self.cursor.image = vec![[0; 4]; CURSOR_PIXELS];
             }
             self.cursor.hot_x = hot_x;
             self.cursor.hot_y = hot_y;
-            if resource_id > 0 {
-                // virtio_gpu_update_cursor_data: only a 64 by 64 resource.
-                let res = self.resources.iter().find(|r| r.id == resource_id);
-                if let Some(res) = res.filter(|r| r.width == CURSOR_SIZE && r.height == CURSOR_SIZE)
-                {
-                    let pixels = res.pixels.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]);
-                    for (dst, src) in self.cursor.image.iter_mut().zip(pixels) {
-                        *dst = src;
-                    }
+            if let Some(index) = image {
+                let pixels = self.resources[index]
+                    .pixels
+                    .chunks_exact(4)
+                    .map(|p| [p[0], p[1], p[2], p[3]]);
+                for (dst, src) in self.cursor.image.iter_mut().zip(pixels) {
+                    *dst = src;
                 }
             }
         }
         self.cursor.x = x;
         self.cursor.y = y;
-        self.cursor.shown = resource_id != 0;
         let after = self.cursor_rect();
         self.dirty = self.dirty.union(before).union(after);
+        Reply::Done
     }
 
     /// Where the cursor covers the screen, empty while it is not shown.
@@ -607,7 +658,13 @@ impl Gpu {
     /// QEMU `virtio_gpu_simple_process_cmd`.
     fn process_cmd(&mut self, vdev: &mut Vdev<'_, '_>, chain: &Chain) {
         let Some(hdr) = Self::fill::<HDR_LEN>(vdev, chain) else {
-            Self::respond_nodata(vdev, chain, &[0; HDR_LEN], RESP_ERR_INVALID_PARAMETER);
+            Self::respond_nodata(
+                vdev,
+                CONTROL_QUEUE,
+                chain,
+                &[0; HDR_LEN],
+                RESP_ERR_INVALID_PARAMETER,
+            );
             return;
         };
         let short = Reply::Error(RESP_ERR_INVALID_PARAMETER);
@@ -660,31 +717,51 @@ impl Gpu {
             CMD_RESOURCE_CREATE_BLOB | CMD_SET_SCANOUT_BLOB => short,
             _ => Reply::Error(RESP_ERR_UNSPEC),
         };
+        Self::reply(vdev, CONTROL_QUEUE, chain, &hdr, reply);
+    }
+
+    /// How a command on queue `q` that ended in `reply` is answered: a
+    /// response of no data unless the command wrote its own.
+    fn reply(vdev: &mut Vdev<'_, '_>, q: usize, chain: &Chain, cmd: &[u8; HDR_LEN], reply: Reply) {
         match reply {
-            Reply::Done => Self::respond_nodata(vdev, chain, &hdr, RESP_OK_NODATA),
-            Reply::Error(code) => Self::respond_nodata(vdev, chain, &hdr, code),
+            Reply::Done => Self::respond_nodata(vdev, q, chain, cmd, RESP_OK_NODATA),
+            Reply::Error(code) => Self::respond_nodata(vdev, q, chain, cmd, code),
             Reply::Answered => {}
         }
     }
 
     /// QEMU `virtio_gpu_ctrl_response`: echo the command's fence into
-    /// `resp`, write it, hand the chain back and notify.
-    fn respond(vdev: &mut Vdev<'_, '_>, chain: &Chain, cmd: &[u8; HDR_LEN], resp: &mut [u8]) {
+    /// `resp`, write it, hand the chain back on queue `q` with the bytes of
+    /// it that fitted, and notify.
+    fn respond(
+        vdev: &mut Vdev<'_, '_>,
+        q: usize,
+        chain: &Chain,
+        cmd: &[u8; HDR_LEN],
+        resp: &mut [u8],
+    ) {
         if le32(cmd, 4) & FLAG_FENCE != 0 {
             let flags = le32(resp, 4) | FLAG_FENCE;
             resp[4..8].copy_from_slice(&flags.to_le_bytes());
             resp[8..20].copy_from_slice(&cmd[8..20]);
         }
         let written = vdev.write(chain, 0, resp);
-        vdev.push(CONTROL_QUEUE, chain, written as u32);
-        vdev.notify(CONTROL_QUEUE);
+        vdev.push(q, chain, written as u32);
+        vdev.notify(q);
     }
 
-    /// QEMU `virtio_gpu_ctrl_response_nodata`.
-    fn respond_nodata(vdev: &mut Vdev<'_, '_>, chain: &Chain, cmd: &[u8; HDR_LEN], kind: u32) {
+    /// QEMU `virtio_gpu_ctrl_response_nodata`: a response of no data, of
+    /// type `kind`, to `cmd` on queue `q`.
+    fn respond_nodata(
+        vdev: &mut Vdev<'_, '_>,
+        q: usize,
+        chain: &Chain,
+        cmd: &[u8; HDR_LEN],
+        kind: u32,
+    ) {
         let mut resp = [0u8; HDR_LEN];
         resp[..4].copy_from_slice(&kind.to_le_bytes());
-        Self::respond(vdev, chain, cmd, &mut resp);
+        Self::respond(vdev, q, chain, cmd, &mut resp);
     }
 
     /// QEMU `virtio_gpu_get_display_info`: scanout 0 at the requested size
@@ -703,20 +780,22 @@ impl Gpu {
             }
             Output::Disabled => {}
         }
-        Self::respond(vdev, chain, cmd, &mut resp);
+        Self::respond(vdev, CONTROL_QUEUE, chain, cmd, &mut resp);
     }
 
-    /// QEMU `virtio_gpu_get_edid` for scanout 0.
+    /// QEMU `virtio_gpu_get_edid` for scanout 0, `size` the EDID's own
+    /// length: its base block and the extension blocks it counts (VESA
+    /// E-EDID 1.4, byte 7Eh). QEMU gives the whole 1024-byte field.
     fn respond_edid(&self, vdev: &mut Vdev<'_, '_>, chain: &Chain, cmd: &[u8; HDR_LEN]) {
         let mut resp = [0u8; EDID_RESPONSE_LEN];
+        let blob = edid::generate(self.preferred.width, self.preferred.height, &self.display);
+        // No more than the field holds, whatever the blob counts.
+        let size = (edid::BLOCK_LEN * (1 + usize::from(blob[edid::EXTENSION_COUNT_AT])))
+            .min(edid::EDID_LEN);
         resp[..4].copy_from_slice(&RESP_OK_EDID.to_le_bytes());
-        resp[HDR_LEN..HDR_LEN + 4].copy_from_slice(&(edid::EDID_LEN as u32).to_le_bytes());
-        resp[HDR_LEN + 8..].copy_from_slice(&edid::generate(
-            self.preferred.width,
-            self.preferred.height,
-            &self.display,
-        ));
-        Self::respond(vdev, chain, cmd, &mut resp);
+        resp[HDR_LEN..HDR_LEN + 4].copy_from_slice(&(size as u32).to_le_bytes());
+        resp[HDR_LEN + 8..].copy_from_slice(&blob);
+        Self::respond(vdev, CONTROL_QUEUE, chain, cmd, &mut resp);
     }
 
     /// QEMU `virtio_gpu_resource_create_2d`.
@@ -820,8 +899,9 @@ impl Gpu {
         Reply::Done
     }
 
-    /// QEMU `virtio_gpu_transfer_to_host_2d`, its offsets 32-bit as QEMU
-    /// computes them.
+    /// QEMU `virtio_gpu_transfer_to_host_2d`, its offsets the 64 bits of
+    /// `struct virtio_gpu_transfer_to_host_2d`'s `offset` (5.7.6.8); QEMU
+    /// takes each row's offset modulo 2^32.
     fn transfer(&mut self, ram: &GuestRam<'_>, rect: Rect, offset: u64, resource_id: u32) -> Reply {
         let index = match self.backed_resource_index(resource_id) {
             Ok(index) => index,
@@ -837,14 +917,17 @@ impl Gpu {
         if rect.x != 0 || rect.width != res.width {
             let row = rect.width as usize * 4;
             for h in 0..rect.height {
-                let src = (offset as u32).wrapping_add(stride.wrapping_mul(h));
                 let dst = ((rect.y + h) * stride + rect.x * 4) as usize;
-                res.read_backing(ram, u64::from(src), &mut pixels[dst..dst + row]);
+                // A row starting past the last byte a 64-bit offset names
+                // lies past every backing, so nothing of it is read.
+                if let Some(src) = offset.checked_add(u64::from(stride) * u64::from(h)) {
+                    res.read_backing(ram, src, &mut pixels[dst..dst + row]);
+                }
             }
         } else {
             let dst = (rect.y * stride) as usize;
             let len = (stride * rect.height) as usize;
-            res.read_backing(ram, u64::from(offset as u32), &mut pixels[dst..dst + len]);
+            res.read_backing(ram, offset, &mut pixels[dst..dst + len]);
         }
         self.resources[index].pixels = pixels;
         Reply::Done

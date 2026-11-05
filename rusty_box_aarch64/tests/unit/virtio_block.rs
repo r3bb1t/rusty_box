@@ -1,7 +1,8 @@
-//! Unit tests of `src/devices/virtio/block.rs` and `src/disk.rs`: QEMU's
-//! `virtio-blk-device` over a raw image (`hw/block/virtio-blk.c`,
-//! `hw/block/hd-geometry.c`), driven through its registers and queue the
-//! way Linux's `virtio_blk` drives it.
+//! Unit tests of `src/devices/virtio/block.rs` and `src/disk.rs`: virtio
+//! 1.2's block device (section 5.2) as QEMU's `virtio-blk-device` over a
+//! raw image (`hw/block/virtio-blk.c`, `hw/block/hd-geometry.c`) gives it
+//! where the specification leaves the choice open, driven through its
+//! registers and queue the way Linux's `virtio_blk` drives it.
 
 #[cfg(feature = "std")]
 use std::format;
@@ -39,6 +40,7 @@ const T_OUT: u32 = 1;
 const T_SCSI_CMD: u32 = 2;
 const T_FLUSH: u32 = 4;
 const T_GET_ID: u32 = 8;
+const T_GET_LIFETIME: u32 = 10;
 const T_DISCARD: u32 = 11;
 const T_WRITE_ZEROES: u32 = 13;
 const T_SECURE_ERASE: u32 = 14;
@@ -50,7 +52,6 @@ const T_BARRIER: u32 = 0x8000_0000;
 const S_OK: u8 = 0;
 const S_IOERR: u8 = 1;
 const S_UNSUPP: u8 = 2;
-const S_ZONE_INVALID_CMD: u8 = 3;
 
 const UNMAP: u32 = 1;
 
@@ -200,8 +201,11 @@ fn the_configuration_describes_the_disk() {
     );
     assert_eq!(config_u32(&mut d, 52), 1, "max_write_zeroes_seg");
     assert_eq!(config_byte(&mut d, 56), 1, "write_zeroes_may_unmap");
+    for off in 57..60 {
+        assert_eq!(config_byte(&mut d, off), 0, "unused1, padding the device zeroes");
+    }
     assert_eq!(
-        config_byte(&mut d, 57),
+        config_byte(&mut d, 60),
         0xFF,
         "the configuration ends there"
     );
@@ -241,10 +245,49 @@ fn a_read_fills_the_buffers_from_the_disk() {
         &[Buf::writable(a, 512), Buf::writable(b, 1024)],
     );
     assert_eq!(done.status, S_OK);
-    // Every writable byte counts as used, the status byte too.
+    // Every writable byte was written, the status byte too.
     assert_eq!(done.used, [(u32::from(done.head), 512 + 1024 + 1)]);
     assert_eq!(d.mem(a, 512), &disk[3 * 512..4 * 512]);
     assert_eq!(d.mem(b, 1024), &disk[4 * 512..6 * 512]);
+}
+
+/// A device-writable buffer of no bytes, wherever it says it is, holds
+/// nothing of a read: the data goes on into the next.
+#[test]
+fn a_read_skips_a_buffer_of_no_bytes() {
+    let disk = image(64);
+    let mut d = blk(disk.clone());
+    let buf = fresh(&mut d, 512);
+    let done = submit(
+        &mut d,
+        T_IN,
+        2,
+        &[Buf::writable(UNASSIGNED, 0), Buf::writable(buf, 512)],
+    );
+    assert_eq!(done.status, S_OK);
+    assert_eq!(done.used, [(u32::from(done.head), 513)]);
+    assert_eq!(d.mem(buf, 512), &disk[2 * 512..3 * 512]);
+}
+
+/// A request whose chain goes on in an indirect table after its header
+/// (virtio 1.2 2.7.5.3.2) reads into the table's buffers, the status byte
+/// the table's last.
+#[test]
+fn a_request_ending_in_an_indirect_table_is_served() {
+    let disk = image(64);
+    let mut d = blk(disk.clone());
+    let hdr = d.alloc_with(&header(T_IN, 5));
+    let (data, status) = (fresh(&mut d, 512), fresh(&mut d, 1));
+    let head = d.offer_ending_indirect(
+        0,
+        &[Buf::readable(hdr, 16)],
+        &[Buf::writable(data, 512), Buf::writable(status, 1)],
+    );
+    d.notify(0);
+    assert_eq!(d.used(0), [(u32::from(head), 513)]);
+    assert_eq!(d.mem(status, 1), [S_OK]);
+    assert_eq!(d.mem(data, 512), &disk[5 * 512..6 * 512]);
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, 0);
 }
 
 #[test]
@@ -284,14 +327,21 @@ fn a_header_split_across_buffers_is_read_whole() {
     assert_eq!(&disk_bytes(&mut d)[7 * 512..8 * 512], &[0xA5; 512]);
 }
 
+/// The legacy request variants are types the device does not support
+/// (virtio 1.2 5.2.6, 5.2.6.3): a read with the barrier bit, the legacy
+/// `VIRTIO_BLK_T_FLUSH_OUT`, `VIRTIO_BLK_T_GET_ID` with the output bit. The
+/// data buffer is zeroed, nothing of the disk in it, so the used length
+/// counts every device-writable byte, the status included.
 #[test]
-fn a_barrier_flag_is_ignored() {
-    let disk = image(8);
-    let mut d = blk(disk.clone());
-    let buf = fresh(&mut d, 512);
-    let done = submit(&mut d, T_IN | T_BARRIER, 1, &[Buf::writable(buf, 512)]);
-    assert_eq!(done.status, S_OK);
-    assert_eq!(d.mem(buf, 512), &disk[512..1024]);
+fn the_legacy_variants_of_a_type_are_unsupported() {
+    let mut d = blk(image(8));
+    for kind in [T_IN | T_BARRIER, T_FLUSH | T_OUT, T_GET_ID | T_OUT] {
+        let buf = fresh(&mut d, 512);
+        let done = submit(&mut d, kind, 1, &[Buf::writable(buf, 512)]);
+        assert_eq!(done.status, S_UNSUPP, "type {kind:#x}");
+        assert_eq!(d.mem(buf, 512), &[0; 512], "type {kind:#x}");
+        assert_eq!(done.used, [(u32::from(done.head), 513)], "type {kind:#x}");
+    }
 }
 
 #[test]
@@ -301,8 +351,12 @@ fn a_request_past_the_disk_or_of_part_of_a_sector_fails() {
     let buf = fresh(&mut d, 1024);
     let past = submit(&mut d, T_IN, 63, &[Buf::writable(buf, 1024)]);
     assert_eq!(past.status, S_IOERR);
-    assert_eq!(past.used, [(u32::from(past.head), 1025)]);
-    assert_eq!(d.mem(buf, 1024), &[0xEE; 1024], "nothing was read");
+    assert_eq!(
+        past.used,
+        [(u32::from(past.head), 1025)],
+        "every device-writable byte written, the status within"
+    );
+    assert_eq!(d.mem(buf, 1024), &[0; 1024], "nothing was read: zeros");
     let partial = submit(&mut d, T_IN, 0, &[Buf::writable(buf, 513)]);
     assert_eq!(partial.status, S_IOERR);
     let at = d.alloc_with(&[0x11; 1024]);
@@ -323,29 +377,66 @@ fn a_flush_succeeds() {
     assert_eq!(done.used, [(u32::from(done.head), 1)]);
 }
 
+/// The identifier, QEMU's empty serial, is NUL-padded to 20 bytes (virtio
+/// 1.2 5.2.6); a larger buffer is zeroed past it, every byte of it
+/// counted.
 #[test]
-fn get_id_gives_qemus_empty_serial() {
+fn get_id_gives_qemus_empty_serial_padded() {
     let mut d = blk(image(8));
     let id = fresh(&mut d, 20);
     let done = submit(&mut d, T_GET_ID, 0, &[Buf::writable(id, 20)]);
     assert_eq!(done.status, S_OK);
     assert_eq!(done.used, [(u32::from(done.head), 21)]);
-    let mut expected = [0xEE; 20];
-    expected[0] = 0;
-    assert_eq!(d.mem(id, 20), expected, "only the terminator is written");
+    assert_eq!(d.mem(id, 20), [0; 20]);
+
+    let id = fresh(&mut d, 32);
+    let done = submit(&mut d, T_GET_ID, 0, &[Buf::writable(id, 32)]);
+    assert_eq!(done.status, S_OK);
+    assert_eq!(done.used, [(u32::from(done.head), 33)]);
+    assert_eq!(d.mem(id, 32), [0; 32]);
 }
 
+/// Every type virtio 1.2 does not give this device is unsupported: the
+/// legacy SCSI command, the lifetime and secure-erase commands it does not
+/// offer, and the zone commands 1.2 does not have, whatever buffers they
+/// come with.
 #[test]
 fn types_the_device_does_not_handle_are_unsupported() {
     let mut d = blk(image(8));
-    for kind in [0x99, T_ZONE_OPEN, T_ZONE_APPEND, T_SECURE_ERASE] {
-        assert_eq!(submit(&mut d, kind, 0, &[]).status, S_UNSUPP, "type {kind}");
+    for kind in [
+        0x99,
+        T_SCSI_CMD,
+        T_GET_LIFETIME,
+        T_SECURE_ERASE,
+        T_ZONE_APPEND,
+        T_ZONE_OPEN,
+    ] {
+        let done = submit(&mut d, kind, 0, &[]);
+        assert_eq!(done.status, S_UNSUPP, "type {kind}");
+        assert_eq!(done.used, [(u32::from(done.head), 1)], "type {kind}: the status alone");
     }
-    let report = fresh(&mut d, 256);
-    assert_eq!(
-        submit(&mut d, T_ZONE_REPORT, 0, &[Buf::writable(report, 256)]).status,
-        S_UNSUPP
+    for len in [64, 256] {
+        let report = fresh(&mut d, len);
+        let done = submit(&mut d, T_ZONE_REPORT, 0, &[Buf::writable(report, len)]);
+        assert_eq!(done.status, S_UNSUPP);
+        assert_eq!(done.used, [(u32::from(done.head), len + 1)]);
+        assert!(d.mem(report, len as usize).iter().all(|&b| b == 0), "zeroed");
+    }
+    let cdb = d.alloc_with(&[0x12; 6]);
+    let (sense, scsi) = (fresh(&mut d, 96), fresh(&mut d, 16));
+    let done = submit(
+        &mut d,
+        T_SCSI_CMD,
+        0,
+        &[
+            Buf::readable(cdb, 6),
+            Buf::writable(sense, 96),
+            Buf::writable(scsi, 16),
+        ],
     );
+    assert_eq!(done.status, S_UNSUPP);
+    assert_eq!(d.mem(scsi, 16), [0; 16], "zeroed, no SCSI header's errors");
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, 0);
 }
 
 #[test]
@@ -364,12 +455,14 @@ fn write_zeroes_clears_the_range_and_may_unmap() {
     assert_eq!(&bytes[20 * 512..23 * 512], &[0; 3 * 512]);
     assert_eq!(&bytes[5 * 512..20 * 512], &disk[5 * 512..20 * 512]);
 
-    let r = d.alloc_with(&range(0, 1, 2));
-    assert_eq!(
-        submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status,
-        S_UNSUPP,
-        "an unknown flag"
-    );
+    for sector in [0, 63] {
+        let r = d.alloc_with(&range(sector, 2, 2));
+        assert_eq!(
+            submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status,
+            S_UNSUPP,
+            "an unknown flag, at sector {sector}, inside the disk or not"
+        );
+    }
     let r = d.alloc_with(&range(63, 2, 0));
     assert_eq!(
         submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status,
@@ -398,11 +491,14 @@ fn a_discard_is_ignored_and_refuses_unmap() {
         disk,
         "a drive without discard=unmap keeps its data"
     );
-    let r = d.alloc_with(&range(4, 8, UNMAP));
-    assert_eq!(
-        submit(&mut d, T_DISCARD, 0, &[Buf::readable(r, 16)]).status,
-        S_UNSUPP
-    );
+    for sector in [4, 63] {
+        let r = d.alloc_with(&range(sector, 8, UNMAP));
+        assert_eq!(
+            submit(&mut d, T_DISCARD, 0, &[Buf::readable(r, 16)]).status,
+            S_UNSUPP,
+            "unmap, at sector {sector}, inside the disk or not"
+        );
+    }
     let r = d.alloc_with(&range(4, 8, 0));
     assert_eq!(
         submit(&mut d, T_DISCARD & !T_OUT, 0, &[Buf::readable(r, 16)]).status,
@@ -425,6 +521,131 @@ fn assert_broken(d: &mut Driver) {
     d.start_queues(LINUX_FEATURES, 1);
     assert_eq!(d.read(STATUS) & NEEDS_RESET, 0);
     assert_eq!(submit(d, T_FLUSH, 0, &[]).status, S_OK);
+}
+
+/// A request made available before `DRIVER_OK` is served when the driver
+/// sets it: the device uses no buffer before (virtio 1.2 2.1.2), and takes
+/// what the queue holds then.
+#[test]
+fn a_request_before_driver_ok_is_served_at_it() {
+    let disk = image(8);
+    let mut d = Driver::new(Device::Block(Block::new(Disk::memory(disk.clone()))));
+    d.negotiate(LINUX_FEATURES);
+    d.setup_queue(0);
+    let hdr = d.alloc_with(&header(T_IN, 1));
+    let (data, status) = (fresh(&mut d, 512), fresh(&mut d, 1));
+    d.offer(
+        0,
+        &[
+            Buf::readable(hdr, 16),
+            Buf::writable(data, 512),
+            Buf::writable(status, 1),
+        ],
+    );
+    d.notify(0);
+    assert!(d.used(0).is_empty(), "not before DRIVER_OK");
+    d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    assert_eq!(d.used(0), [(0, 513)]);
+    assert_eq!(d.mem(status, 1), [S_OK]);
+    assert_eq!(d.mem(data, 512), &disk[512..1024]);
+}
+
+/// A request whose data buffers all name the same bytes, far more of them
+/// than the disk holds, is a read past the disk: an I/O error, every
+/// device-writable byte written and counted, the overlapping buffers'
+/// memory zeroed.
+#[test]
+fn overlapping_buffers_past_the_disk_are_zeroed_and_counted() {
+    let mut d = blk(image(256));
+    let span = fresh(&mut d, 4096);
+    let after = d.alloc_with(&[0xEE; 16]);
+    // 1000 writable buffers over the same 4 KiB: 4000 KiB, past the
+    // 128 KiB disk.
+    let hdr = d.alloc_with(&header(T_IN, 0));
+    let status = d.alloc_with(&[0xEE]);
+    let mut buffers = vec![Buf::readable(hdr, 16)];
+    buffers.extend((0..1000).map(|_| Buf::writable(span, 4096)));
+    buffers.push(Buf::writable(status, 1));
+    let head = d.offer_indirect(0, &buffers);
+    d.notify(0);
+    assert_eq!(d.used(0), [(u32::from(head), 1000 * 4096 + 1)]);
+    assert_eq!(d.mem(status, 1), [S_IOERR]);
+    assert_eq!(d.mem(span, 4096), &[0; 4096][..]);
+    assert_eq!(d.mem(after, 16), &[0xEE; 16][..], "nothing past them");
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, 0, "the device still works");
+
+    // A disk of no sectors still answers GET_ID.
+    let mut d = blk(Vec::new());
+    let id = fresh(&mut d, 20);
+    assert_eq!(submit(&mut d, T_GET_ID, 0, &[Buf::writable(id, 20)]).status, S_OK);
+}
+
+/// The descriptor naming an indirect table after a normal one has its WRITE
+/// and NEXT flags ignored (virtio 1.2 2.7.5.3.2: "The device MUST ignore
+/// the write-only flag (flags&VIRTQ_DESC_F_WRITE) in the descriptor that
+/// refers to an indirect table"): it is no buffer, and the chain ends in its
+/// table, not at the descriptor its `next` names.
+#[test]
+fn an_indirect_descriptors_write_and_next_flags_are_ignored() {
+    let disk = image(8);
+    let mut d = blk(disk.clone());
+    let hdr = d.alloc_with(&header(T_IN, 2));
+    let (data, status, stray) = (fresh(&mut d, 512), fresh(&mut d, 1), fresh(&mut d, 1));
+    let table = d.alloc(2 * 16);
+    d.put_desc_at(table, data, 512, DESC_WRITE | DESC_NEXT, 1);
+    d.put_desc_at(table + 16, status, 1, DESC_WRITE, 0);
+    d.put_desc(0, 0, hdr, 16, DESC_NEXT, 1);
+    d.put_desc(0, 1, table, 2 * 16, DESC_INDIRECT | DESC_WRITE | DESC_NEXT, 2);
+    d.put_desc(0, 2, stray, 1, DESC_WRITE, 0);
+    d.publish(0, 0);
+    d.notify(0);
+    assert_eq!(d.used(0), [(0, 513)]);
+    assert_eq!(d.mem(status, 1), [S_OK]);
+    assert_eq!(d.mem(data, 512), &disk[1024..1536]);
+    assert_eq!(d.mem(stray, 1), [0xEE], "the descriptor `next` names");
+}
+
+/// A request whose own writes rewrite its descriptors is given back with
+/// the bytes written from the start, as the chain walked again has them,
+/// and its status where the chain had it when it was taken.
+#[test]
+fn a_request_that_rewrites_its_descriptors_counts_what_it_wrote() {
+    let mut d = blk(image(8));
+    let hdr = d.alloc_with(&header(T_GET_ID, 0));
+    let more = fresh(&mut d, 100);
+    let status = d.alloc_with(&[0xEE]);
+    let table = d.alloc(4 * 16);
+    // The identifier's 20 bytes, all NULs, land on descriptor 2 and the
+    // start of descriptor 3, ending the chain at descriptor 2.
+    d.put_desc_at(table, hdr, 16, DESC_NEXT, 1);
+    d.put_desc_at(table + 16, table + 32, 20, DESC_WRITE | DESC_NEXT, 2);
+    d.put_desc_at(table + 32, more, 100, DESC_WRITE | DESC_NEXT, 3);
+    d.put_desc_at(table + 48, status, 1, DESC_WRITE, 0);
+    d.put_desc(0, 0, table, 4 * 16, DESC_INDIRECT, 0);
+    d.publish(0, 0);
+    d.notify(0);
+    assert_eq!(d.used(0), [(0, 20)]);
+    assert_eq!(d.mem(table + 32, 20), &[0; 20][..]);
+    assert_eq!(d.mem(status, 1), [S_OK]);
+    assert_eq!(
+        d.mem(more, 100),
+        &[0xEE; 100][..],
+        "a buffer the chain no longer reaches"
+    );
+}
+
+/// A request that breaks the device part way through its queue still
+/// leaves the driver's notifications on, as QEMU's `virtio_blk_handle_vq`
+/// does: without event indices, `VRING_USED_F_NO_NOTIFY` is clear again.
+#[test]
+fn a_request_that_breaks_the_device_leaves_notifications_on() {
+    let mut d = blk_over(Disk::memory(image(8)), LINUX_FEATURES & !F_EVENT_IDX);
+    let hdr = d.alloc_with(&header(T_FLUSH, 0));
+    let status = d.alloc_with(&[0xEE]);
+    d.offer(0, &[Buf::readable(hdr, 12), Buf::writable(status, 1)]);
+    d.notify(0);
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, NEEDS_RESET);
+    assert_eq!(d.used_flags(0), 0);
 }
 
 #[test]
@@ -466,60 +687,6 @@ fn a_short_discard_range_breaks_the_device() {
 }
 
 #[test]
-fn a_zone_report_without_room_for_a_zone_breaks_the_device_and_answers_it() {
-    let mut d = blk(image(8));
-    let report = fresh(&mut d, 64);
-    let done = submit(&mut d, T_ZONE_REPORT, 0, &[Buf::writable(report, 64)]);
-    assert_eq!(done.status, S_ZONE_INVALID_CMD, "the status is written");
-    assert_broken(&mut d);
-}
-
-#[test]
-fn the_legacy_scsi_command_is_refused_through_its_header() {
-    let mut d = blk(image(8));
-    let cdb = d.alloc_with(&[0x12; 6]);
-    let (sense, scsi) = (fresh(&mut d, 96), fresh(&mut d, 16));
-    let done = submit(
-        &mut d,
-        T_SCSI_CMD,
-        0,
-        &[
-            Buf::readable(cdb, 6),
-            Buf::writable(sense, 96),
-            Buf::writable(scsi, 16),
-        ],
-    );
-    assert_eq!(done.status, S_UNSUPP);
-    assert_eq!(d.mem(scsi, 4), 255u32.to_le_bytes(), "errors");
-    assert_eq!(done.used, [(u32::from(done.head), 96 + 16 + 1)]);
-
-    let scsi = fresh(&mut d, 16);
-    assert_eq!(
-        submit(
-            &mut d,
-            T_SCSI_CMD,
-            0,
-            &[Buf::readable(cdb, 6), Buf::writable(scsi, 16)]
-        )
-        .status,
-        S_IOERR,
-        "no sense buffer"
-    );
-    let (sense, scsi) = (fresh(&mut d, 96), fresh(&mut d, 12));
-    let done = submit(
-        &mut d,
-        T_SCSI_CMD,
-        0,
-        &[
-            Buf::readable(cdb, 6),
-            Buf::writable(sense, 96),
-            Buf::writable(scsi, 12),
-        ],
-    );
-    assert_eq!(done.status, S_IOERR, "a SCSI header of the wrong size");
-}
-
-#[test]
 fn the_driver_chooses_write_through_through_wce() {
     let mut d = blk(image(8));
     d.write_width(CONFIG + 32, AccessWidth::Byte, 0);
@@ -545,6 +712,23 @@ fn without_config_wce_the_accepted_features_choose_the_cache() {
     assert_eq!(config_byte(&mut d, 32), 0, "write-through");
     let mut d = blk_over(Disk::memory(image(8)), LINUX_FEATURES & !F_CONFIG_WCE);
     assert_eq!(config_byte(&mut d, 32), 1, "write-back");
+    // Without CONFIG_WCE, `writeback` is not the driver's to change.
+    d.write_width(CONFIG + 32, AccessWidth::Byte, 0);
+    assert_eq!(config_byte(&mut d, 32), 1, "still write-back");
+}
+
+/// With `VIRTIO_BLK_F_CONFIG_WCE` but not `VIRTIO_BLK_F_FLUSH` negotiated,
+/// `writeback` starts at 0 (virtio 1.2 5.2.5.2), from `FEATURES_OK`, when
+/// the driver may first read it; the driver may still turn the cache on.
+#[test]
+fn config_wce_without_flush_starts_write_through() {
+    let mut d = Driver::new(Device::Block(Block::new(Disk::memory(image(8)))));
+    d.negotiate(LINUX_FEATURES & !F_WCE);
+    assert_eq!(config_byte(&mut d, 32), 0);
+    d.write_width(CONFIG + 32, AccessWidth::Byte, 1);
+    assert_eq!(config_byte(&mut d, 32), 1);
+    d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    assert_eq!(config_byte(&mut d, 32), 1, "DRIVER_OK keeps the driver's choice");
 }
 
 #[test]
@@ -767,4 +951,31 @@ fn a_host_error_is_an_io_error_the_host_can_take() {
         Device::Input(_) | Device::Gpu(_) => false,
     });
     assert!(again, "once");
+}
+
+/// A read the host fails leaves zeros from the buffer it failed in on, not
+/// what the buffers held, and counts every device-writable byte.
+#[cfg(feature = "std")]
+#[test]
+fn a_failed_host_read_zeroes_from_the_buffer_it_failed_in() {
+    let file = TempFile::new("write_only", &image(4));
+    let write_only = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&file.0)
+        .expect("the temporary file opens");
+    let mut d = blk_over(
+        Disk::file(write_only).expect("the file's length reads"),
+        LINUX_FEATURES,
+    );
+    let (first, second) = (fresh(&mut d, 512), fresh(&mut d, 1024));
+    let done = submit(
+        &mut d,
+        T_IN,
+        0,
+        &[Buf::writable(first, 512), Buf::writable(second, 1024)],
+    );
+    assert_eq!(done.status, S_IOERR);
+    assert_eq!(done.used, [(u32::from(done.head), 512 + 1024 + 1)]);
+    assert_eq!(d.mem(first, 512), &[0; 512][..], "the buffer it failed in");
+    assert_eq!(d.mem(second, 1024), &[0; 1024][..], "and the one after");
 }

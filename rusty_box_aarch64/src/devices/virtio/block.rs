@@ -6,38 +6,68 @@
 //! virtio-blk-device,drive=hd0`: one queue of 256 entries, a write-back
 //! cache, discard requests ignored, no serial number, not zoned):
 //!
-//! - `virtio_blk_get_features`, `virtio_blk_device_realize` and
-//!   `virtio_blk_cfg_size_params`: the features offered (`VIRTIO_BLK_F_RO`
-//!   too over a drive given `readonly=on`, whose writes QEMU's block layer
-//!   refuses), and a configuration that ends after `write_zeroes_may_unmap`;
+//! - `virtio_blk_get_features` and `virtio_blk_device_realize`: the
+//!   features offered (`VIRTIO_BLK_F_RO` too over a drive given
+//!   `readonly=on`, whose writes QEMU's block layer refuses);
 //! - `virtio_blk_update_config`: the capacity, `seg_max` two less than the
 //!   queue, the geometry `hd_geometry_guess` (`hw/block/hd-geometry.c`)
 //!   chose when the device was made, 512-byte logical and physical blocks
 //!   (`blkconf_blocksizes`, which finds no block sizes to probe in a regular
 //!   file), the cache mode, one queue, and the discard and write-zeroes
 //!   limits;
-//! - `virtio_blk_set_config`, `virtio_blk_set_status` and `virtio_blk_reset`:
-//!   the driver chooses the cache mode through `wce`, or, when it did not
-//!   accept `VIRTIO_BLK_F_CONFIG_WCE`, through whether it accepted
-//!   `VIRTIO_BLK_F_WCE`; a reset brings back the write-back cache;
+//! - `virtio_blk_set_config` and `virtio_blk_reset`: the driver chooses the
+//!   cache mode through `writeback`; a reset brings back the write-back
+//!   cache;
 //! - `virtio_blk_handle_vq` and `virtio_blk_handle_request`: the headers
 //!   every request must have (a `virtio_error` when it has not), reads and
 //!   writes checked by `virtio_blk_sect_range_ok`, a write-through cache
-//!   syncing each write, flushes, `VIRTIO_BLK_T_GET_ID`, discard and
-//!   write-zeroes (`virtio_blk_handle_discard_write_zeroes`), the legacy SCSI
-//!   command (`virtio_blk_handle_scsi`), zone commands to a device that is
-//!   not zoned, and `VIRTIO_BLK_S_UNSUPP` for any other type;
+//!   syncing each write, flushes, `VIRTIO_BLK_T_GET_ID`, and discard and
+//!   write-zeroes (`virtio_blk_handle_discard_write_zeroes`);
 //! - `virtio_blk_req_complete`: the status in the last byte of the last
-//!   device-writable buffer, and every device-writable byte counted as used.
+//!   device-writable buffer.
 //!
-//! Where it differs from QEMU:
+//! Where it follows the specification over QEMU (README, "Where the
+//! references differ"):
 //!
-//! - A request completes before the driver's notification returns. QEMU
-//!   gives reads, writes and flushes to its block layer, which completes
-//!   them afterwards, in an order and at a time the host decides; the guest
-//!   sees the same results, sooner and always at the same instruction. A
-//!   notification takes the requests available when it was made, the ones
-//!   QEMU takes (see [`Block::handle_output`]).
+//! - Every device-writable byte is written, those a request leaves zeroed,
+//!   so the used length that counts them all is true (2.7.8.2: "The device
+//!   MUST write at least len bytes ... beginning at the first
+//!   device-writable buffer") and reaches the status byte; QEMU counts
+//!   every device-writable byte and leaves those a failed or unsupported
+//!   request did not write as they were.
+//! - The cache mode is set when the driver sets `FEATURES_OK` (5.2.5.2:
+//!   with `VIRTIO_BLK_F_CONFIG_WCE` but not `VIRTIO_BLK_F_FLUSH`
+//!   negotiated, `writeback` is initialised to 0; without either, writes
+//!   are stable), and `writeback` changes it only once
+//!   `VIRTIO_BLK_F_CONFIG_WCE` is negotiated (5.2.6.1); QEMU's
+//!   `virtio_blk_set_status` sets it at `DRIVER_OK` and only without
+//!   `VIRTIO_BLK_F_CONFIG_WCE`.
+//! - The configuration runs to the end of `unused1`, which reads 0
+//!   (5.2.5.2: "The device MUST initialize padding bytes unused0 and
+//!   unused1 to 0"); QEMU's ends after `write_zeroes_may_unmap`, past
+//!   which the transport reads all ones.
+//! - A discard or write-zeroes range with a flag the request does not take
+//!   is `VIRTIO_BLK_S_UNSUPP` whether or not its sectors lie on the disk
+//!   (5.2.6.2); QEMU checks the sectors first.
+//! - `VIRTIO_BLK_T_GET_ID` writes the identifier NUL-padded to 20 bytes
+//!   (5.2.6); QEMU writes it with one NUL.
+//! - The request types are 1.2's (5.2.6) exactly: the legacy SCSI command,
+//!   the legacy flush and barrier variants and the zone commands 1.2 does
+//!   not have are each `VIRTIO_BLK_S_UNSUPP`, as any type the device does
+//!   not support is; QEMU also takes SCSI requests apart, masks the barrier
+//!   and output bits off the type, and answers zone commands as a device
+//!   that is not zoned.
+//!
+//! Where it differs from QEMU otherwise:
+//!
+//! - A request completes before the driver's notification returns, or its
+//!   `Status` write of `DRIVER_OK`, which takes what the queue already holds
+//!   (`super`'s `Transport::write_status`). QEMU gives reads, writes and
+//!   flushes to its block layer, which completes them afterwards, in an
+//!   order and at a time the host decides; the guest sees the same results,
+//!   sooner and always at the same instruction. A notification takes the
+//!   requests available when it was made, the ones QEMU takes (see
+//!   [`Block::handle_output`]).
 //! - A host error is reported to the guest as `VIRTIO_BLK_S_IOERR`. That is
 //!   QEMU's default for every failed read and for every failed write but
 //!   one: a write that finds the host's disk full stops QEMU's machine
@@ -46,7 +76,7 @@
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::queue::{Chain, QueueFault};
-use super::{Core, Vdev, STATUS_DRIVER_OK};
+use super::{Core, Vdev};
 use crate::disk::{Access, Disk, DiskOffset, SECTOR_SIZE};
 
 /// The device's one queue.
@@ -77,8 +107,9 @@ pub const FEATURES: u64 = F_SEG_MAX
     | F_DISCARD
     | F_WRITE_ZEROES;
 
-/// `struct virtio_blk_config` up to the end of `write_zeroes_may_unmap`.
-pub const CONFIG_LEN: usize = 57;
+/// `struct virtio_blk_config` up to the end of `unused1`: the secure erase
+/// fields after it exist only with `VIRTIO_BLK_F_SECURE_ERASE`.
+pub const CONFIG_LEN: usize = 60;
 
 /// `logical_block_size` (and `physical_block_size`).
 const BLOCK_SIZE: u64 = 512;
@@ -96,46 +127,40 @@ const SERIAL: &[u8] = b"";
 const OUT_HEADER_LEN: usize = 16;
 /// `struct virtio_blk_discard_write_zeroes`: sector, sectors, flags.
 const RANGE_LEN: usize = 16;
-/// `struct virtio_scsi_inhdr`.
-const SCSI_INHDR_LEN: u32 = 16;
-/// The status byte, a `struct virtio_blk_zone_report` and one
-/// `struct virtio_blk_zone_descriptor`.
-const ZONE_REPORT_MIN: u64 = 1 + 64 + 64;
 
-const T_OUT: u32 = 1;
-const T_BARRIER: u32 = 0x8000_0000;
 const T_IN: u32 = 0;
-const T_SCSI_CMD: u32 = 2;
+const T_OUT: u32 = 1;
 const T_FLUSH: u32 = 4;
 const T_GET_ID: u32 = 8;
 const T_DISCARD: u32 = 11;
 const T_WRITE_ZEROES: u32 = 13;
-const T_ZONE_APPEND: u32 = 15;
-const T_ZONE_REPORT: u32 = 16;
-const T_ZONE_OPEN: u32 = 18;
-const T_ZONE_CLOSE: u32 = 20;
-const T_ZONE_FINISH: u32 = 22;
-const T_ZONE_RESET: u32 = 24;
-const T_ZONE_RESET_ALL: u32 = 26;
-
-/// The codes the request types share once `VIRTIO_BLK_T_OUT` is masked
-/// off: QEMU tells the direction from that bit.
-const ZONE_APPEND_CODE: u32 = T_ZONE_APPEND & !T_OUT;
-const DISCARD_CODE: u32 = T_DISCARD & !T_OUT;
-const WRITE_ZEROES_CODE: u32 = T_WRITE_ZEROES & !T_OUT;
 
 const WRITE_ZEROES_FLAG_UNMAP: u32 = 1;
 
 /// A request's outcome, written to its status byte.
 ///
-/// Closed (R5): the statuses a device that is not zoned gives, and the one
-/// a zone report too short to answer gets.
+/// Closed (R5): virtio 1.2's three (5.2.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
     Ok = 0,
     IoError = 1,
     Unsupported = 2,
-    ZoneInvalidCommand = 3,
+}
+
+/// What a request did: its status, and how many bytes it wrote from the
+/// first device-writable byte on before the status (`data`), past which
+/// [`Block::complete`] zeroes the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Outcome {
+    status: Status,
+    data: u64,
+}
+
+impl Outcome {
+    /// A request that wrote nothing but its status.
+    const fn status(status: Status) -> Self {
+        Self { status, data: 0 }
+    }
 }
 
 /// Whether the host may hold a write before it reaches the disk (QEMU
@@ -266,8 +291,12 @@ impl Block {
         config.copy_from_slice(&c[..config.len()]);
     }
 
-    /// QEMU `virtio_blk_set_config`: `wce` chooses the cache mode.
-    pub fn set_config(&mut self, config: &[u8]) {
+    /// QEMU `virtio_blk_set_config`: `writeback` chooses the cache mode once
+    /// the driver has accepted `VIRTIO_BLK_F_CONFIG_WCE` (5.2.6.1).
+    pub fn set_config(&mut self, config: &[u8], core: &Core) {
+        if !core.has_feature(F_CONFIG_WCE) {
+            return;
+        }
         self.cache = if config[32] != 0 {
             Cache::WriteBack
         } else {
@@ -275,18 +304,20 @@ impl Block {
         };
     }
 
-    /// QEMU `virtio_blk_set_status`.
-    pub fn set_status(&mut self, status: u8, core: &Core) {
-        if status & STATUS_DRIVER_OK == 0 {
-            return;
-        }
-        if !core.has_feature(F_CONFIG_WCE) {
-            self.cache = if core.has_feature(F_WCE) {
-                Cache::WriteBack
-            } else {
-                Cache::WriteThrough
-            };
-        }
+    /// The cache mode once the driver sets `FEATURES_OK`, the first time
+    /// it may read `writeback` (5.2.5.1). Without `VIRTIO_BLK_F_FLUSH`,
+    /// which this device offers, writes are stable (5.2.6.2, case 1) and
+    /// `writeback` is 0 (5.2.5.2); with it but without
+    /// `VIRTIO_BLK_F_CONFIG_WCE` the cache is write-back, as the driver
+    /// should assume (5.2.5.1); with both, the specification leaves the
+    /// starting mode to the device, and it is write-back, the driver free
+    /// to change it through `writeback`.
+    pub fn features_ok(&mut self, core: &Core) {
+        self.cache = if core.has_feature(F_WCE) {
+            Cache::WriteBack
+        } else {
+            Cache::WriteThrough
+        };
     }
 
     /// QEMU `virtio_blk_reset`: no request is ever left in flight, so only
@@ -304,7 +335,8 @@ impl Block {
         }
     }
 
-    /// QEMU `virtio_blk_handle_output` and `virtio_blk_handle_vq`.
+    /// QEMU `virtio_blk_handle_output` and `virtio_blk_handle_vq`, for a
+    /// notification or the driver's setting `DRIVER_OK`.
     ///
     /// QEMU's vCPU stays in the notifying write while the device works
     /// through the queue, and its block layer writes guest memory only after
@@ -351,58 +383,51 @@ impl Block {
             header[8], header[9], header[10], header[11], header[12], header[13], header[14],
             header[15],
         ]);
-        let status = match kind & !(T_OUT | T_BARRIER) {
-            T_IN if kind & T_OUT != 0 => self.write(vdev, chain, sector),
+        let outcome = match kind {
             T_IN => self.read(vdev, chain, sector),
-            T_FLUSH => self.sync(),
-            T_ZONE_REPORT => {
-                if chain.writable_len < ZONE_REPORT_MIN {
-                    vdev.error(QueueFault::BlockZoneReportShort);
-                    Status::ZoneInvalidCommand
-                } else {
-                    Status::Unsupported
-                }
-            }
-            T_ZONE_OPEN | T_ZONE_CLOSE | T_ZONE_FINISH | T_ZONE_RESET | T_ZONE_RESET_ALL => {
-                Status::Unsupported
-            }
-            T_SCSI_CMD => Self::scsi(vdev, chain),
-            T_GET_ID => {
-                let room = (chain.writable_len - 1).min(ID_BYTES);
-                let len = (SERIAL.len() as u64 + 1).min(room) as usize;
-                let mut id = [0u8; ID_BYTES as usize];
-                id[..SERIAL.len()].copy_from_slice(SERIAL);
-                // `len` leaves the status byte free, so the whole identifier
-                // fits the chain that was just checked.
-                if vdev.write(chain, 0, &id[..len]) == len {
-                    Status::Ok
-                } else {
-                    Status::IoError
-                }
-            }
-            // VIRTIO_BLK_T_SECURE_ERASE shares this code.
-            ZONE_APPEND_CODE => Status::Unsupported,
-            DISCARD_CODE | WRITE_ZEROES_CODE => {
+            T_OUT => Outcome::status(self.write(vdev, chain, sector)),
+            T_FLUSH => Outcome::status(self.sync()),
+            T_GET_ID => Self::get_id(vdev, chain),
+            T_DISCARD | T_WRITE_ZEROES => {
                 let range_room = chain.readable_len - OUT_HEADER_LEN as u64;
-                if kind & T_OUT == 0 || range_room > RANGE_LEN as u64 {
-                    Status::Unsupported
+                if range_room > RANGE_LEN as u64 {
+                    Outcome::status(Status::Unsupported)
                 } else {
                     let mut range = [0u8; RANGE_LEN];
                     if vdev.read(chain, OUT_HEADER_LEN, &mut range) != RANGE_LEN {
                         return Err(QueueFault::BlockRangeShort);
                     }
-                    self.discard_write_zeroes(&range, kind & !T_BARRIER == T_WRITE_ZEROES)
+                    Outcome::status(self.discard_write_zeroes(&range, kind == T_WRITE_ZEROES))
                 }
             }
-            _ => Status::Unsupported,
+            _ => Outcome::status(Status::Unsupported),
         };
-        Self::complete(vdev, chain, status_at, status);
+        Self::complete(vdev, chain, status_at, outcome);
         Ok(())
     }
 
-    /// The last byte of the chain's last device-writable buffer, the
-    /// status byte's place (`struct virtio_blk_inhdr`); `None` for a chain
-    /// with no device-writable buffer.
+    /// `VIRTIO_BLK_T_GET_ID`: the identifier, NUL-padded to 20 bytes (5.2.6),
+    /// as much of it as the buffers before the status byte hold.
+    fn get_id(vdev: &mut Vdev<'_, '_>, chain: &Chain) -> Outcome {
+        let mut id = [0u8; ID_BYTES as usize];
+        id[..SERIAL.len()].copy_from_slice(SERIAL);
+        let len = (chain.writable_len - 1).min(ID_BYTES) as usize;
+        // `len` leaves the status byte free, so the whole identifier fits
+        // the chain that was just checked.
+        let written = vdev.write(chain, 0, &id[..len]);
+        Outcome {
+            status: if written == len {
+                Status::Ok
+            } else {
+                Status::IoError
+            },
+            data: written as u64,
+        }
+    }
+
+    /// The last byte of the chain's last device-writable buffer with bytes,
+    /// the status byte's place (`struct virtio_blk_inhdr`); `None` for a
+    /// chain with no device-writable byte.
     fn status_byte(vdev: &Vdev<'_, '_>, chain: &Chain) -> Option<u64> {
         let mut buffers = chain.buffers();
         let mut last = None;
@@ -414,11 +439,35 @@ impl Block {
         last
     }
 
-    /// QEMU `virtio_blk_req_complete`: the status, then the chain back with
-    /// every device-writable byte counted.
-    fn complete(vdev: &mut Vdev<'_, '_>, chain: &Chain, status_at: u64, status: Status) {
-        vdev.ram.store(status_at, &[status as u8]);
-        vdev.push(QUEUE, chain, chain.writable_len as u32);
+    /// QEMU `virtio_blk_req_complete`: the device-writable bytes the request
+    /// did not write before the status zeroed, the status, then the chain
+    /// back with every device-writable byte counted, all of them now written
+    /// (2.7.8.2: "The device MUST write at least len bytes ... beginning at
+    /// the first device-writable buffer"). The status byte is then within
+    /// the used length, which a driver may not look past (2.7.8.3), and a
+    /// failed read leaves zeros, not what the buffers held. Zeroing costs
+    /// no more than the RAM the buffers cover ([`Chain::zero`]).
+    ///
+    /// The request's own writes may have rewritten its descriptors, so the
+    /// chain walked again can end sooner; the used length is then the
+    /// bytes written from the start, the status byte past them. A used
+    /// length is 32 bits, and a chain with more device-writable bytes is
+    /// given back with the most it can say, all of them written.
+    fn complete(vdev: &mut Vdev<'_, '_>, chain: &Chain, status_at: u64, outcome: Outcome) {
+        let data_len = chain.writable_len - 1;
+        let written = if outcome.data < data_len {
+            let rest = data_len - outcome.data;
+            let zeroed = chain.zero(vdev.ram, outcome.data, rest);
+            if zeroed == rest {
+                chain.writable_len
+            } else {
+                outcome.data + zeroed
+            }
+        } else {
+            chain.writable_len
+        };
+        vdev.ram.store(status_at, &[outcome.status as u8]);
+        vdev.push(QUEUE, chain, u32::try_from(written).unwrap_or(u32::MAX));
         vdev.notify(QUEUE);
     }
 
@@ -434,11 +483,12 @@ impl Block {
     }
 
     /// A read: the disk into the device-writable buffers, all but the
-    /// status byte.
-    fn read(&mut self, vdev: &mut Vdev<'_, '_>, chain: &Chain, sector: u64) -> Status {
+    /// status byte. A buffer the host fails to fill counts as not written,
+    /// and is zeroed with what follows it.
+    fn read(&mut self, vdev: &mut Vdev<'_, '_>, chain: &Chain, sector: u64) -> Outcome {
         let size = chain.writable_len - 1;
         if !self.range_ok(sector, size) {
-            return Status::IoError;
+            return Outcome::status(Status::IoError);
         }
         let mut at = DiskOffset::of_sector(sector);
         let mut left = size;
@@ -455,16 +505,24 @@ impl Block {
                 break;
             };
             if self.disk.read_at(at, dst).is_err() {
-                return Status::IoError;
+                return Outcome {
+                    status: Status::IoError,
+                    data: size - left,
+                };
             }
             at = at.after(n);
             left -= n;
         }
         // Every buffer was checked to lie in RAM when the chain was taken.
-        if left > 0 {
-            return Status::IoError;
+        let status = if left > 0 {
+            Status::IoError
+        } else {
+            Status::Ok
+        };
+        Outcome {
+            status,
+            data: size - left,
         }
-        Status::Ok
     }
 
     /// A write: the device-readable buffers after the header onto the disk.
@@ -526,23 +584,27 @@ impl Block {
         }
     }
 
-    /// QEMU `virtio_blk_handle_discard_write_zeroes`. Discarding is ignored,
-    /// as QEMU's drives ignore it unless given `discard=unmap`.
+    /// QEMU `virtio_blk_handle_discard_write_zeroes`, the flags checked
+    /// before the sectors (5.2.6.2: an unknown flag, or `unmap` on a
+    /// discard, is `VIRTIO_BLK_S_UNSUPP`). Discarding is ignored, as QEMU's
+    /// drives ignore it unless given `discard=unmap`.
     fn discard_write_zeroes(&mut self, range: &[u8; RANGE_LEN], write_zeroes: bool) -> Status {
         let sector = u64::from_le_bytes([
             range[0], range[1], range[2], range[3], range[4], range[5], range[6], range[7],
         ]);
         let sectors = u32::from_le_bytes([range[8], range[9], range[10], range[11]]);
         let flags = u32::from_le_bytes([range[12], range[13], range[14], range[15]]);
+        if flags & !WRITE_ZEROES_FLAG_UNMAP != 0
+            || (!write_zeroes && flags & WRITE_ZEROES_FLAG_UNMAP != 0)
+        {
+            return Status::Unsupported;
+        }
         if u64::from(sectors) > REQUEST_MAX_SECTORS {
             return Status::IoError;
         }
         let bytes = u64::from(sectors) * SECTOR_SIZE;
         if !self.range_ok(sector, bytes) {
             return Status::IoError;
-        }
-        if flags & !WRITE_ZEROES_FLAG_UNMAP != 0 {
-            return Status::Unsupported;
         }
         if write_zeroes {
             if self.disk.access() == Access::ReadOnly
@@ -555,35 +617,7 @@ impl Block {
             }
             return self.written();
         }
-        if flags & WRITE_ZEROES_FLAG_UNMAP != 0 {
-            return Status::Unsupported;
-        }
         Status::Ok
-    }
-
-    /// QEMU `virtio_blk_handle_scsi`: refused, with the SCSI header's
-    /// `errors` set so the guest's ioctl fails, when the request has one in
-    /// the device-writable buffer before the status.
-    fn scsi(vdev: &mut Vdev<'_, '_>, chain: &Chain) -> Status {
-        if chain.readable < 2 || chain.writable < 3 {
-            return Status::IoError;
-        }
-        let mut buffers = chain.buffers();
-        let mut writable = 0;
-        while let Some(buffer) = buffers.next_buffer(vdev.ram) {
-            if !buffer.device_writes {
-                continue;
-            }
-            if writable == chain.writable - 2 {
-                if buffer.len != SCSI_INHDR_LEN {
-                    return Status::IoError;
-                }
-                vdev.ram.store(buffer.addr, &255u32.to_le_bytes());
-                return Status::Unsupported;
-            }
-            writable += 1;
-        }
-        Status::IoError
     }
 
     pub fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
