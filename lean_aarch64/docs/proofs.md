@@ -10,7 +10,7 @@ the way a test is written before the code. Each entry is marked **proved**
 The type doctrine (`type-doctrine.md`) makes wrong programs unwritable,
 and `semantics.md` is the method the theorems share (a specification, an
 abstraction function, a commuting square per instruction);
-this page proves that the written program is right.
+this page lists the statements that will show the written program right.
 
 ## P1. The fast machine is the slow machine
 
