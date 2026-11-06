@@ -61,13 +61,13 @@ def Cond.check : (p : Cond) → (s : State) → Option (p.Witness s)
 
 inductive Effect | observe | intervene deriving DecidableEq
 
-/-- What a hook's run returns, by its effect. An observing hook returns only its
-event. An intervening hook also returns a new state, which may differ from the
-old one only in its registers: the type forbids it to change the exception
-level, the PC or memory. -/
-def Effect.Out : Effect → State → Type → Type
-  | .observe, _, E => E
-  | .intervene, s, E => E × { s' : State // s'.el = s.el ∧ s'.pc = s.pc ∧ s'.read = s.read }
+/-- What a hook hands back. An observing hook returns its event; an intervening
+one also returns new values for the registers. Registers are all it can
+return, so a hook cannot change the exception level, the PC or memory: there is
+no way to write that, so there is nothing to forbid. -/
+def Reply : Effect → Type → Type
+  | .observe, E => E
+  | .intervene, E => E × (Fin 31 → UInt64)
 
 structure Hook where
   name : String
@@ -78,7 +78,8 @@ structure Hook where
   /-- this hook's own kind of event -/
   Event : Type
   effect : Effect
-  run : (s : State) → cond.Witness s → effect.Out s Event
+  /-- Called with the state and what the condition found in it. -/
+  handle : (s : State) → cond.Witness s → Reply effect Event
 
 /-- Which hook of a list: an index that is data, not a proof, so a log can be
 looked up by it. -/
@@ -129,9 +130,9 @@ def Emulator.create (program : Array Instr) (start : State) (hs : List Hook) : E
 def fireOne (s : State) (logs : Logs hs) : (h : Hook) → Member h hs → State × Logs hs
   | h, m => match h.cond.check s with
     | none => (s, logs)
-    | some w => match h.effect, h.run s w with
+    | some w => match h.effect, h.handle s w with
       | .observe, e => (s, logs.push m e)
-      | .intervene, (e, ⟨s', _⟩) => (s', logs.push m e)
+      | .intervene, (e, x) => ({ s with x }, logs.push m e)
 
 /-- One instruction: its selected hooks see the state before it, then it runs. -/
 def Emulator.step (e : Emulator hs) : Option (Emulator hs) :=
@@ -172,7 +173,7 @@ def paths : Hook where
   cond := .and .userMode (.regPointsToCStr 1)
   Event := String
   effect := .observe
-  run := fun _ (_, p) => str p.val
+  handle := fun _ (_, p) => str p.val
 
 /-- The number in x8 of every system call from user mode. -/
 def numbers : Hook where
@@ -181,17 +182,17 @@ def numbers : Hook where
   cond := .userMode
   Event := UInt64
   effect := .observe
-  run := fun s _ => s.x 8
+  handle := fun s _ => s.x 8
 
-/-- Point an `openat` of anything at /tmp/decoy instead (0x4000). It may set
-registers; its type gives it no way to change the level, the PC or memory. -/
+/-- Point an `openat` of anything at /tmp/decoy instead (0x4000): it returns
+the registers, with x1 changed. -/
 def redirect : Hook where
   name := "redirect"
   on := .svc
   cond := .and .userMode (.regIs 8 56)
   Event := Unit
   effect := .intervene
-  run := fun s _ => ((), ⟨{ s with x := fun r => if r = 1 then 0x4000 else s.x r }, rfl, rfl, rfl⟩)
+  handle := fun s _ => ((), fun r => if r = 1 then 0x4000 else s.x r)
 
 /-- Memory: "/etc/passwd" at 0x2000, "/etc/hosts" at 0x3000, "/tmp/decoy" at 0x4000. -/
 def mem (a : UInt64) : Option UInt8 :=
@@ -229,16 +230,17 @@ is false -/
 #guard_msgs in
 #eval lockstep redirected (by decide)
 
--- an intervening hook cannot change the exception level: the proof does not exist
+-- an intervening hook cannot change the exception level: it returns registers,
+-- and a state is not registers
 /-- error: Application type mismatch: The argument
-  rfl
+  { el := El.el1, pc := s.pc, x := s.x, read := s.read }
 has type
-  ?m.10 = ?m.10
+  State
 but is expected to have type
-  { el := El.el1, pc := s.pc, x := s.x, read := s.read }.el = s.el
+  Fin 31 → UInt64
 in the application
-  And.intro rfl -/
+  ((), { el := El.el1, pc := s.pc, x := s.x, read := s.read }) -/
 #guard_msgs in
 example : Hook where
   name := "escalate"; on := .svc; cond := .userMode; Event := Unit; effect := .intervene
-  run := fun s _ => ((), ⟨{ s with el := .el1 }, rfl, rfl, rfl⟩)
+  handle := fun s _ => ((), { s with el := .el1 })

@@ -210,12 +210,17 @@ lockstep observed (by decide)                    -- exact: no hook intervened
 - **The static half is decided at creation.** `Emulator.create` computes,
   per instruction, the hooks whose mnemonic selects it. A run checks the
   dynamic half only for those.
-- **What a hook may do is in its type.** `Effect.Out .intervene s E` is
-  `E × { s' // s'.el = s.el ∧ s'.pc = s.pc ∧ s'.read = s.read }`: an
-  intervening hook may set registers (`redirect` points every `openat` at
-  `/tmp/decoy`) but cannot change the exception level, the PC or memory. A
-  hook that raises itself to EL1 has no proof to give, and is rejected (a
-  lock, with `redirect` as its twin).
+- **A hook is a handler with a dependent type.**
+  `handle : (s : State) → cond.Witness s → Reply effect Event`: it is called
+  with the state and what its condition found *in that state*, and what it
+  returns depends on its effect. An observer returns its `Event`. An
+  intervener returns its `Event` and new register values (`redirect` points
+  every `openat` at `/tmp/decoy`). Registers are all it can return, so
+  changing the exception level, the PC or memory cannot be written: a hook
+  that hands back a state raised to EL1 is a type error (a lock, with
+  `redirect` as its twin). A guarantee carried by the shape of a type needs
+  no proof, so shape is preferred, and a proof field is used where shape
+  cannot say it.
 - **Exactness is computed from the hook list.** `lockstep` takes the proof
   `exact hs = true`, which `decide` finds for a list that only observes. With
   `redirect` installed the proposition is false, so `lockstep redirected` is
