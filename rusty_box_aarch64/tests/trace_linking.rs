@@ -213,9 +213,9 @@ const REWRITTEN_LOOP: &[(u64, u32)] = &[
 /// ```text
 /// _start: ldr x0, =0x40001000 ; msr vbar_el1, x0
 ///         ldr x0, =0x40010000 ; mov sp, x0
-///         ldr x1, =0x08000000 ; mov w2, #1        ; str w2, [x1]          // GICD_CTLR
+///         ldr x1, =0x08001000 ; mov w2, #1        ; str w2, [x1]          // GICD_CTLR
 ///         mov w2, #(1 << 27)  ; str w2, [x1, #0x100]                      // ISENABLER0
-///         ldr x3, =0x08010000 ; mov w2, #1        ; str w2, [x3]          // GICC_CTLR
+///         ldr x3, =0x08002000 ; mov w2, #1        ; str w2, [x3]          // GICC_CTLR
 ///         mov w2, #0xff       ; str w2, [x3, #4]                          // GICC_PMR
 ///         mov x4, #16000      ; msr cntv_tval_el0, x4
 ///         mov x4, #1          ; msr cntv_ctl_el0, x4
@@ -266,9 +266,9 @@ const INTERRUPTED_LOOP: &[(u64, u32)] = &[
     (0x7C, 0x0000_0000),
     (0x80, 0x4001_0000),
     (0x84, 0x0000_0000),
-    (0x88, 0x0800_0000),
+    (0x88, 0x0800_1000),
     (0x8C, 0x0000_0000),
-    (0x90, 0x0801_0000),
+    (0x90, 0x0800_2000),
     (0x94, 0x0000_0000),
     (0x98, 0x8400_0008),
     (0x1280, 0xB940_0C65),

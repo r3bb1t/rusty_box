@@ -795,9 +795,9 @@ fn every_slicing_of_a_run_ends_in_the_same_state() {
 ///
 /// ```text
 /// _start: ldr x0, =0x40001000 ; msr vbar_el1, x0
-///         ldr x1, =0x08000000 ; mov w2, #1        ; str w2, [x1]          // GICD_CTLR
+///         ldr x1, =0x08001000 ; mov w2, #1        ; str w2, [x1]          // GICD_CTLR
 ///         mov w2, #(1 << 8)   ; str w2, [x1, #0x104]                      // ISENABLER1
-///         ldr x3, =0x08010000 ; mov w4, #1        ; str w4, [x3]          // GICC_CTLR
+///         ldr x3, =0x08002000 ; mov w4, #1        ; str w4, [x3]          // GICC_CTLR
 ///         mov w4, #0xff       ; str w4, [x3, #4]                          // GICC_PMR
 ///         mov x20, #0         ; msr daifclr, #2
 ///         str w2, [x1, #0x204]                                            // ISPENDR1
@@ -826,8 +826,8 @@ const PEND_THEN_COUNT: &[(u64, u32)] = &[
     (0x44, 0x9100_0694),
     (0x48, SPIN),
     (0x50, 0x4000_1000),
-    (0x58, 0x0800_0000),
-    (0x60, 0x0801_0000),
+    (0x58, 0x0800_1000),
+    (0x60, 0x0800_2000),
     (0x1280, 0xAA14_03F5),
     (0x1284, 0xD538_4036),
     (0x1288, SPIN),
@@ -1046,14 +1046,14 @@ fn a_directly_booted_kernel_is_entered_as_qemu_enters_it() {
 /// and `TXFF` set, and goes out when the guest enables the UART:
 ///
 /// ```text
-/// movz x0, #0x0900, lsl #16 ; mov w5, #0x4b ; str w5, [x0]
+/// movz x0, #0x0802, lsl #16 ; mov w5, #0x4b ; str w5, [x0]
 /// ldr w6, [x0, #0x18] ; mov w1, #0x301 ; str w1, [x0, #0x30]
 /// ldr w7, [x0, #0x18] ; b .
 /// ```
 #[test]
 fn a_bare_guest_transmits_nothing_until_it_enables_the_uart() {
     const PROBE: [u32; 8] = [
-        0xD2A1_2000,
+        0xD2A1_0040,
         0x5280_0965,
         0xB900_0005,
         0xB940_1806,
@@ -1094,7 +1094,7 @@ fn a_bare_guest_transmits_nothing_until_it_enables_the_uart() {
 /// branches over its `Image` header to:
 ///
 /// ```text
-/// movz x0, #0x0900, lsl #16 ; ldr w1, [x0, #0x30] ; ldr w2, [x0, #0x24]
+/// movz x0, #0x0802, lsl #16 ; ldr w1, [x0, #0x30] ; ldr w2, [x0, #0x24]
 /// ldr w3, [x0, #0x28] ; ldr w4, [x0, #0x2c] ; mov w5, #0x4b
 /// str w5, [x0] ; ldr w6, [x0, #0x18] ; b .
 /// ```
@@ -1102,7 +1102,7 @@ fn a_bare_guest_transmits_nothing_until_it_enables_the_uart() {
 fn a_directly_booted_kernel_finds_the_console_set_up() {
     const MIB: u64 = 1 << 20;
     const PROBE: [u32; 9] = [
-        0xD2A1_2000,
+        0xD2A1_0040,
         0xB940_3001,
         0xB940_2402,
         0xB940_2803,
@@ -1181,7 +1181,7 @@ fn a_directly_booted_kernel_finds_the_console_set_up() {
 /// `RTIM` and polls:
 ///
 /// ```text
-/// movz x0, #0x0900, lsl #16 ; mov w1, #13 ; str w1, [x0, #0x24]
+/// movz x0, #0x0802, lsl #16 ; mov w1, #13 ; str w1, [x0, #0x24]
 /// mov w1, #1 ; str w1, [x0, #0x28] ; mov w1, #0x70 ; str w1, [x0, #0x2c]
 /// mov w1, #0x40 ; str w1, [x0, #0x38] ; mov w1, #0x301 ; str w1, [x0, #0x30]
 /// 1: ldr w2, [x0, #0x3c] ; tbz w2, #6, 1b ; b .
@@ -1189,7 +1189,7 @@ fn a_directly_booted_kernel_finds_the_console_set_up() {
 #[test]
 fn the_receive_timeout_comes_32_bit_periods_after_the_last_character() {
     const PROBE: [u32; 14] = [
-        0xD2A1_2000,
+        0xD2A1_0040,
         0x5280_01A1,
         0xB900_2401,
         0x5280_0021,
@@ -1248,7 +1248,7 @@ fn the_receive_timeout_comes_32_bit_periods_after_the_last_character() {
 /// clear, waits for a character, then sets `RTIM` and polls:
 ///
 /// ```text
-/// movz x0, #0x0900, lsl #16 ; mov w1, #13 ; str w1, [x0, #0x24]
+/// movz x0, #0x0802, lsl #16 ; mov w1, #13 ; str w1, [x0, #0x24]
 /// mov w1, #1 ; str w1, [x0, #0x28] ; mov w1, #0x70 ; str w1, [x0, #0x2c]
 /// mov w1, #0x301 ; str w1, [x0, #0x30]
 /// 1: ldr w2, [x0, #0x18] ; tbnz w2, #4, 1b
@@ -1258,7 +1258,7 @@ fn the_receive_timeout_comes_32_bit_periods_after_the_last_character() {
 #[test]
 fn the_receive_timeout_counts_from_the_write_that_sets_rtim() {
     const PROBE: [u32; 16] = [
-        0xD2A1_2000,
+        0xD2A1_0040,
         0x5280_01A1,
         0xB900_2401,
         0x5280_0021,
@@ -1325,7 +1325,7 @@ fn the_receive_timeout_counts_from_the_write_that_sets_rtim() {
 /// writes `UARTIBRD` and `UARTFBRD` from w3 and w4, latches them and polls:
 ///
 /// ```text
-/// movz x0, #0x0900, lsl #16 ; mov w1, #13 ; str w1, [x0, #0x24]
+/// movz x0, #0x0802, lsl #16 ; mov w1, #13 ; str w1, [x0, #0x24]
 /// mov w1, #1 ; str w1, [x0, #0x28] ; mov w1, #0x70 ; str w1, [x0, #0x2c]
 /// mov w1, #0x40 ; str w1, [x0, #0x38] ; mov w1, #0x301 ; str w1, [x0, #0x30]
 /// 1: ldr w2, [x0, #0x18] ; tbnz w2, #4, 1b
@@ -1335,7 +1335,7 @@ fn the_receive_timeout_counts_from_the_write_that_sets_rtim() {
 #[test]
 fn a_receive_timeout_left_without_a_baud_clock_survives_a_snapshot() {
     const PROBE: [u32; 20] = [
-        0xD2A1_2000,
+        0xD2A1_0040,
         0x5280_01A1,
         0xB900_2401,
         0x5280_0021,
@@ -1583,17 +1583,20 @@ fn the_board_has_the_counter_and_gic_its_configuration_names() {
 /// transports', the first transport's 16 again. On the map it was written
 /// for it builds, and the guest's tree names the SPIs the devices drive; a
 /// map moving only the PCIe host's INTA to INTD, which no device drives,
-/// builds too.
+/// builds too. Each on QEMU's layout, where the tree puts the devices: on
+/// the board's own, the tree is refused for its addresses.
 #[cfg(feature = "alloc")]
 #[test]
 fn a_host_tree_must_name_the_interrupts_the_map_wires() {
-    use rusty_box_aarch64::machine::HostTreeInterrupt;
-    use rusty_box_aarch64::{InterruptMap, InterruptSource, Spi};
+    use rusty_box_aarch64::board::VIRTIO_MMIO_BASE;
+    use rusty_box_aarch64::machine::{HostTreeAddress, HostTreeInterrupt, TreeDevice};
+    use rusty_box_aarch64::{DeviceLayout, InterruptMap, InterruptSource, PhysAddr, Spi};
     const HOST_TREE: &[u8] = include_bytes!("../assets/qemu-virt-a57-256m.dtb");
     let spi = |n| Spi::new(n).expect("an SPI");
-    let build = |interrupts| {
+    let build_in = |layout, interrupts| {
         MachineBuilder::new(VirtConfig {
             interrupts,
+            layout,
             ..VirtConfig::DEFAULT
         })
         .ram(ram_size())
@@ -1601,6 +1604,7 @@ fn a_host_tree_must_name_the_interrupts_the_map_wires() {
         .firmware(&SPIN.to_le_bytes())
         .build()
     };
+    let build = |interrupts| build_in(DeviceLayout::QemuVirt, interrupts);
     let qemu = qemu_virt_interrupts();
     let other_virtio = InterruptMap {
         virtio: spi(200),
@@ -1642,6 +1646,21 @@ fn a_host_tree_must_name_the_interrupts_the_map_wires() {
         ..qemu
     };
     assert!(build(other_pcie).is_ok());
+
+    // On the board's own layout, QEMU's tree puts the devices where the
+    // board has none: its first node, a virtio transport, at 0x0A00_0000.
+    match build_in(DeviceLayout::Board, qemu) {
+        Err(BuildError::HostTreeAddress(refused)) => assert_eq!(
+            refused,
+            HostTreeAddress {
+                device: TreeDevice::Virtio,
+                named: PhysAddr::new(0x0A00_0000),
+                board: PhysAddr::new(VIRTIO_MMIO_BASE),
+            }
+        ),
+        Err(e) => panic!("refused otherwise: {e}"),
+        Ok(_) => panic!("QEMU's tree names QEMU's addresses"),
+    }
 }
 
 /// The devices drive the SPIs the configuration's interrupt map gives
@@ -1853,11 +1872,9 @@ fn the_processor_is_the_model_the_configuration_names() {
         }
 
         // A host's tree describes the processor as the host wrote it, as
-        // QEMU takes a `-dtb` tree; QEMU's wires the devices as QEMU does.
-        let qemu_wired = VirtConfig {
-            interrupts: qemu_virt_interrupts(),
-            ..config
-        };
+        // QEMU takes a `-dtb` tree; QEMU's places and wires the devices as
+        // QEMU does.
+        let qemu_wired = qemu_virt::qemu_virt(config);
         let hosted = MachineBuilder::new(qemu_wired)
             .ram(ram_size())
             .device_tree(HOST_TREE)
@@ -1880,7 +1897,7 @@ fn the_processor_is_the_model_the_configuration_names() {
 #[cfg(feature = "alloc")]
 #[test]
 fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
-    use rusty_box_aarch64::board::VIRTIO_MMIO_BASE;
+    use rusty_box_aarch64::board::{VIRTIO_MMIO_BASE, VIRTIO_MMIO_STRIDE};
     use rusty_box_aarch64::{Disk, OwnedStorage, TransportOrder};
 
     /// The virtio device ID the guest reads at transport `slot`: `ldr w0,
@@ -1891,7 +1908,7 @@ fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
         m.mem_write(RAM_BASE + 4, &SPIN.to_le_bytes())
             .expect("code is in RAM");
         m.reg_write(Reg::Pc, RAM_BASE);
-        m.reg_write(Reg::X1, VIRTIO_MMIO_BASE + 0x200 * slot + 8);
+        m.reg_write(Reg::X1, VIRTIO_MMIO_BASE + VIRTIO_MMIO_STRIDE * slot + 8);
         let out = m.step(RunBudget::Instructions(2));
         assert_eq!(
             out.progress,
@@ -1972,4 +1989,127 @@ fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
         bare(TransportOrder::LastFree).restore_snapshot(&mut bare_image.as_slice()),
         Ok(())
     );
+}
+
+/// Each device layout puts the devices where the guest's tree names them:
+/// the PrimeCells' `PeriphID0` (PL011 0x11, PL031 0x31, PL061 0x61), every
+/// virtio transport's `MagicValue`, the distributor's `GICD_TYPER` and the
+/// virtual interface's `GICH_VTR` each read at the address the node's unit
+/// address and `reg` give, and nothing answers where the other layout has
+/// its first transport. A snapshot of one layout is refused by a machine of
+/// the other.
+/// The guest's loads run from RAM's base, over the tree firmware is given,
+/// which the machine keeps its own copy of.
+#[cfg(feature = "alloc")]
+#[test]
+fn each_device_layout_puts_the_devices_where_the_tree_names_them() {
+    use rusty_box_aarch64::layout::{DeviceWindows, Window};
+    use rusty_box_aarch64::{DeviceLayout, OwnedStorage, PhysAddr, WithEl2};
+    /// `ldr w2, [x1]; b .`
+    const LOAD: [u32; 2] = [0xB940_0022, SPIN];
+    let build = |layout| {
+        MachineBuilder::new(VirtConfig {
+            layout,
+            ..VirtConfig::DEFAULT
+        })
+        .ram(ram_size())
+        .firmware(&SPIN.to_le_bytes())
+        .with_el2()
+        .build()
+        .expect("a machine booting firmware builds")
+    };
+    // What the guest's load at `addr` reads, or `None` for an abort.
+    let read = |m: &mut VirtMachine<OwnedStorage, WithEl2>, addr: u64| {
+        for (i, word) in LOAD.iter().enumerate() {
+            m.mem_write(RAM_BASE + 4 * i as u64, &word.to_le_bytes())
+                .expect("code is in RAM");
+        }
+        m.reg_write(Reg::Pc, RAM_BASE);
+        m.reg_write(Reg::X1, addr);
+        m.reg_write(Reg::X2, 0x5555);
+        assert_eq!(
+            m.step(RunBudget::Instructions(1)).stop,
+            StopReason::BudgetExhausted
+        );
+        (m.reg_read(Reg::Pc) == RAM_BASE + 4).then(|| m.reg_read(Reg::X2))
+    };
+    // The node's `reg`, as two-cell address and size pairs.
+    let reg = |m: &VirtMachine<OwnedStorage, WithEl2>, node: &str| {
+        let bytes = fdt::property(m.device_tree(), node, "reg")
+            .expect("well formed")
+            .unwrap_or_else(|| panic!("{node} has a reg"));
+        bytes
+            .chunks_exact(16)
+            .map(|pair| {
+                let cell = |at: usize| {
+                    u64::from_be_bytes(pair[at..at + 8].try_into().expect("two cells"))
+                };
+                Window::new(PhysAddr::new(cell(0)), cell(8))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut images = Vec::new();
+    for layout in DeviceLayout::ALL {
+        let w = layout.windows();
+        let mut m = build(layout);
+        for (name, window, id) in [
+            ("serial", w.uart_window(), 0x11),
+            ("rtc", w.rtc_window(), 0x31),
+            ("gpio", w.gpio_window(), 0x61),
+        ] {
+            let node = std::format!("{name}@{:x}", window.base.get());
+            assert_eq!(reg(&m, &node), [window], "{layout}: {node}");
+            assert_eq!(
+                read(&mut m, window.base.get() + 0xFE0),
+                Some(id),
+                "{layout}: {node}"
+            );
+        }
+        for slot in [0, 31] {
+            let transport = w.virtio.transport(slot);
+            let node = std::format!("virtio@{:x}", transport.base.get());
+            assert_eq!(reg(&m, &node), [transport], "{layout}: {node}");
+            assert_eq!(
+                read(&mut m, transport.base.get()),
+                Some(0x7472_6976),
+                "{layout}: {node}"
+            );
+        }
+        let gic = std::format!("interrupt-controller@{:x}", w.gic.dist.get());
+        assert_eq!(
+            reg(&m, &gic),
+            [
+                w.gic.dist_window(),
+                w.gic.cpu_window(),
+                w.gic.hyp_window(),
+                w.gic.vcpu_window()
+            ],
+            "{layout}"
+        );
+        assert_eq!(
+            read(&mut m, w.gic.dist.get() + 4).map(|typer| typer & 0x1F),
+            Some(15),
+            "{layout}: GICD_TYPER"
+        );
+        assert_eq!(
+            read(&mut m, w.gic.hyp.get() + 4),
+            Some(0x9000_0003),
+            "{layout}: GICH_VTR"
+        );
+        let pcie = std::format!("pcie@{:x}", w.pcie.ecam.base.get());
+        assert_eq!(reg(&m, &pcie), [w.pcie.ecam], "{layout}");
+        let mut image = Vec::new();
+        m.save_snapshot(&mut image).expect("a snapshot saves");
+        images.push((layout, image));
+    }
+    let [board, qemu] = DeviceLayout::ALL.map(DeviceLayout::windows);
+    let first = |w: DeviceWindows| w.virtio.first.get();
+    assert_eq!(read(&mut build(DeviceLayout::Board), first(qemu)), None);
+    assert_eq!(read(&mut build(DeviceLayout::QemuVirt), first(board)), None);
+    for (layout, image) in &images {
+        for other in DeviceLayout::ALL {
+            let restored = build(other).restore_snapshot(&mut image.as_slice());
+            assert_eq!(restored.is_ok(), other == *layout, "{layout} into {other}");
+        }
+    }
 }

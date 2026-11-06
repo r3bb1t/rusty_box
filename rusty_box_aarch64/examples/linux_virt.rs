@@ -125,6 +125,7 @@ fn boot() -> ExitCode {
         debug_stops: args.run.debug_stops(),
         interrupts: args.run.interrupts,
         transport_order: args.run.transport_order,
+        layout: args.run.layout,
         ..VirtConfig::DEFAULT
     };
     let builder = MachineBuilder::new(config)

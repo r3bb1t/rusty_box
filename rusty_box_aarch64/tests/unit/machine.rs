@@ -325,6 +325,7 @@ fn a_host_tree_gets_the_boards_memory_and_psci_nodes() {
             wiring: crate::interrupt_map::InterruptMap::DEFAULT
                 .wire(crate::SpiCount::DEFAULT)
                 .expect("the default fits"),
+            windows: crate::DeviceLayout::DEFAULT.windows(),
         };
         let mut from_host = std::boxed::Box::new(DeviceTree::EMPTY);
         describe(
@@ -385,6 +386,7 @@ fn the_device_tree_names_the_board_by_its_identity() {
         wiring: crate::interrupt_map::InterruptMap::DEFAULT
             .wire(crate::SpiCount::DEFAULT)
             .expect("the default fits"),
+        windows: crate::DeviceLayout::DEFAULT.windows(),
     };
     let host = BoardIdentity::new(IdentityNames {
         model: "Acme Board",
@@ -458,12 +460,87 @@ fn qemu_wiring() -> crate::interrupt_map::Wiring {
     .expect("fits")
 }
 
+/// The host-tree check of `tree` on QEMU's layout, where its devices are,
+/// and `wiring`.
+fn check_qemu_tree(
+    tree: &[u8],
+    wiring: crate::interrupt_map::Wiring,
+) -> Result<(), super::BuildError> {
+    super::check_host_tree(tree, wiring, crate::DeviceLayout::QemuVirt.windows())
+}
+
 /// QEMU's tree edited by `edits`.
 fn edited_host_tree(edits: &[crate::boot::fdt::Edit<'_>]) -> std::vec::Vec<u8> {
     let mut tree = vec![0u8; 64 * 1024];
     let len = crate::boot::fdt::rebuild(HOST_TREE, &[], edits, &mut tree).expect("rebuild");
     tree.truncate(len);
     tree
+}
+
+/// Each of the GIC node's `reg` regions is checked against the layout, in
+/// the GICv2 binding's order, as many as the node names: QEMU's tree with
+/// its CPU interface moved, or with the virtual interface's frames added
+/// and its virtual CPU interface moved, is refused for that frame, and
+/// with both frames where QEMU's layout has them it is not.
+#[test]
+fn every_region_of_the_gic_is_where_the_layout_has_it() {
+    use super::{BuildError, HostTreeAddress, TreeDevice};
+    use crate::boot::fdt::{Edit, NodePath, Value};
+    let intc = NodePath::of("intc@8000000");
+    // Each address and size two cells, as QEMU's root has them.
+    let with_reg = |frames: &[u64]| {
+        let bytes: std::vec::Vec<u8> = frames.iter().flat_map(|c| c.to_be_bytes()).collect();
+        edited_host_tree(&[Edit::set(intc, "reg", Value::Bytes(&bytes))])
+    };
+    let refused = |device, named: u64, board: u64| {
+        Err(BuildError::HostTreeAddress(HostTreeAddress {
+            device,
+            named: crate::bus::PhysAddr::new(named),
+            board: crate::bus::PhysAddr::new(board),
+        }))
+    };
+    let qemu = qemu_wiring();
+    let moved_cpu = with_reg(&[0x0800_0000, 0x1_0000, 0x0801_8000, 0x1_0000]);
+    assert_eq!(
+        check_qemu_tree(&moved_cpu, qemu),
+        refused(TreeDevice::GicCpuInterface, 0x0801_8000, 0x0801_0000)
+    );
+    let virtual_frames = |vcpu| {
+        with_reg(&[
+            0x0800_0000,
+            0x1_0000,
+            0x0801_0000,
+            0x1_0000,
+            0x0803_0000,
+            0x1_0000,
+            vcpu,
+            0x1_0000,
+        ])
+    };
+    assert_eq!(check_qemu_tree(&virtual_frames(0x0804_0000), qemu), Ok(()));
+    assert_eq!(
+        check_qemu_tree(&virtual_frames(0x0805_0000), qemu),
+        refused(TreeDevice::GicVirtualCpu, 0x0805_0000, 0x0804_0000)
+    );
+}
+
+/// A root whose cell counts no `reg` could hold names no region: the check
+/// finds no device's address in such a tree, rather than overflowing.
+#[test]
+fn cell_counts_no_reg_holds_name_no_region() {
+    use crate::boot::fdt::{Edit, NodePath, Value};
+    let root = NodePath::of("");
+    let huge = u32::MAX.to_be_bytes();
+    let tree = edited_host_tree(&[
+        Edit::set(root, "#address-cells", Value::Bytes(&huge)),
+        Edit::set(root, "#size-cells", Value::Bytes(&huge)),
+    ]);
+    assert_eq!(check_qemu_tree(&tree, qemu_wiring()), Ok(()));
+    let cells = super::RegCells {
+        address: u32::MAX,
+        size: 1,
+    };
+    assert_eq!(super::reg_address(&[0; 16], cells, 1), None);
 }
 
 /// A device's interrupt is the first its `interrupts-extended` names, which
@@ -474,7 +551,7 @@ fn edited_host_tree(edits: &[crate::boot::fdt::Edit<'_>]) -> std::vec::Vec<u8> {
 /// phandle no node has is a malformed tree.
 #[test]
 fn a_devices_interrupts_extended_is_the_interrupt_it_names() {
-    use super::{check_host_interrupts, BuildError, HostTreeInterrupt};
+    use super::{BuildError, HostTreeInterrupt};
     use crate::boot::fdt::{DeviceTreeError, Edit, NodePath, Value};
     use crate::interrupt_map::{InterruptMap, InterruptSource, Spi};
     let qemu = qemu_wiring();
@@ -494,8 +571,8 @@ fn a_devices_interrupts_extended_is_the_interrupt_it_names() {
         Edit::set(uart, "interrupts", Value::Bytes(&gic_spi9)),
         Edit::set(uart, "interrupts-extended", Value::Bytes(&gic_spi1)),
     ]);
-    assert_eq!(check_host_interrupts(&extended, qemu), Ok(()));
-    match check_host_interrupts(&extended, own) {
+    assert_eq!(check_qemu_tree(&extended, qemu), Ok(()));
+    match check_qemu_tree(&extended, own) {
         Err(BuildError::HostTreeInterrupt(HostTreeInterrupt { source, named, wired })) => {
             assert_eq!(
                 (source, named, wired),
@@ -508,7 +585,7 @@ fn a_devices_interrupts_extended_is_the_interrupt_it_names() {
     // The GPIO controller (phandle 0x8004 in QEMU's tree) is no GIC.
     let via_gpio = edited_host_tree(&[Edit::set(uart, "interrupts-extended", Value::Bytes(&other_spi1))]);
     assert_eq!(
-        check_host_interrupts(&via_gpio, qemu),
+        check_qemu_tree(&via_gpio, qemu),
         Err(BuildError::HostTreeInterrupt(HostTreeInterrupt {
             source: InterruptSource::Uart,
             named: None,
@@ -521,7 +598,7 @@ fn a_devices_interrupts_extended_is_the_interrupt_it_names() {
         Edit::set(intc, "phandle", Value::Bytes(&unused)),
         Edit::set(intc, "linux,phandle", Value::Bytes(&gic)),
     ]);
-    assert_eq!(check_host_interrupts(&linux_phandle, qemu), Ok(()));
+    assert_eq!(check_qemu_tree(&linux_phandle, qemu), Ok(()));
     let nested = NodePath::of("soc/gic");
     let three = be(&[3]);
     let nested_parent = edited_host_tree(&[
@@ -532,13 +609,13 @@ fn a_devices_interrupts_extended_is_the_interrupt_it_names() {
         Edit::set(nested, "interrupt-controller", Value::Bytes(&[])),
         Edit::set(nested, "#interrupt-cells", Value::Bytes(&three)),
     ]);
-    assert_eq!(check_host_interrupts(&nested_parent, qemu), Ok(()));
+    assert_eq!(check_qemu_tree(&nested_parent, qemu), Ok(()));
     let orphaned = edited_host_tree(&[
         Edit::set(uart, "interrupts-extended", Value::Bytes(&gic_spi1)),
         Edit::set(intc, "phandle", Value::Bytes(&unused)),
     ]);
     assert_eq!(
-        check_host_interrupts(&orphaned, qemu),
+        check_qemu_tree(&orphaned, qemu),
         Err(BuildError::DeviceTree(DeviceTreeError::Malformed))
     );
 }
@@ -550,7 +627,7 @@ fn a_devices_interrupts_extended_is_the_interrupt_it_names() {
 /// address is none of the board's devices, and the tree keeps it.
 #[test]
 fn a_devices_interrupts_follow_its_interrupt_parent() {
-    use super::{check_host_interrupts, BuildError, HostTreeInterrupt};
+    use super::{BuildError, HostTreeInterrupt};
     use crate::boot::fdt::{Edit, NodePath, Value};
     use crate::interrupt_map::{InterruptSource, Spi};
     let qemu = qemu_wiring();
@@ -558,7 +635,7 @@ fn a_devices_interrupts_follow_its_interrupt_parent() {
     let gpio = 0x8004u32.to_be_bytes();
     let via_gpio = edited_host_tree(&[Edit::set(uart, "interrupt-parent", Value::Bytes(&gpio))]);
     assert_eq!(
-        check_host_interrupts(&via_gpio, qemu),
+        check_qemu_tree(&via_gpio, qemu),
         Err(BuildError::HostTreeInterrupt(HostTreeInterrupt {
             source: InterruptSource::Uart,
             named: None,
@@ -571,7 +648,7 @@ fn a_devices_interrupts_follow_its_interrupt_parent() {
         Edit::node(odd),
         Edit::set(odd, "reg", Value::Bytes(&one_cell)),
     ]);
-    assert_eq!(check_host_interrupts(&short_reg, qemu), Ok(()));
+    assert_eq!(check_qemu_tree(&short_reg, qemu), Ok(()));
 }
 
 /// A disabled device node is no device a guest drives, so what it names
@@ -580,7 +657,6 @@ fn a_devices_interrupts_follow_its_interrupt_parent() {
 /// frame being no device's.
 #[test]
 fn a_disabled_device_node_is_left_to_the_tree() {
-    use super::check_host_interrupts;
     use crate::boot::fdt::{Edit, NodePath, Value};
     use crate::interrupt_map::InterruptMap;
     let own = InterruptMap::DEFAULT
@@ -594,5 +670,5 @@ fn a_disabled_device_node_is_left_to_the_tree() {
         .iter()
         .map(|name| Edit::set(NodePath::of(name), "status", Value::String("disabled")))
         .collect();
-    assert_eq!(check_host_interrupts(&edited_host_tree(&edits), own), Ok(()));
+    assert_eq!(check_qemu_tree(&edited_host_tree(&edits), own), Ok(()));
 }

@@ -2,11 +2,13 @@
 //! would have, as the guest sees them (R9: each test asserts a loaded value
 //! or a syndrome).
 //!
-//! QEMU 11.1.2's `virt` reserves 64 KiB windows for the GIC distributor and
-//! CPU interface (`base_memmap`), but the GICv2 decodes only 0x1000 bytes of
-//! the first and 0x2000 of the second (hw/intc/arm_gic_common.c
-//! `gic_init_irqs_and_mmio`). The rest of each window is unassigned, so an
-//! access there is a decode error, which target/arm reports as a
+//! The GICv2 distributor decodes 0x1000 bytes and the CPU interface 0x2000
+//! (IHI 0048B 4.1, hw/intc/arm_gic_common.c `gic_init_irqs_and_mmio`). The
+//! board's own layout puts them in one 64 KiB block at the GIC-400's offsets
+//! (DDI 0471B Table 3-1), whose first 4 KiB is reserved; QEMU 11.1.2's
+//! `virt`, in a 64 KiB window each (`base_memmap`). Whatever a frame does
+//! not decode is unassigned, so an access there is a decode error, which
+//! target/arm reports as a
 //! synchronous external abort, with the syndrome Arm's
 //! `AArch64_FaultSyndrome` gives one taken to EL1 without a second stage:
 //! exception class 0x25, `ISV` 0 (`AArch64_InstructionSyndromeValid` holds
@@ -20,8 +22,8 @@
 
 use rusty_box_aarch64::board::{GIC_CPU_BASE, GIC_DIST_BASE, RAM_BASE};
 use rusty_box_aarch64::{
-    GuestStorage, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, NoEl2, RamSize, Reg,
-    RunBudget, StopReason, SysReg, VirtConfig, VirtMachine,
+    DeviceLayout, GuestStorage, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, NoEl2,
+    RamSize, Reg, RunBudget, StopReason, SysReg, VirtConfig, VirtMachine,
 };
 
 const RAM_LEN: usize = 4 << 20;
@@ -42,11 +44,18 @@ const DFSC_SYNC_EXTERNAL: u64 = 0x10;
 const UNTOUCHED: u64 = 0x5555_5555_5555_5555;
 
 fn bare(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>, NoEl2> {
-    MachineBuilder::new(VirtConfig::DEFAULT)
-        .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
-        .bare()
-        .build_in(MemoryLoan { ram, vars: &mut [] })
-        .expect("a bare machine builds")
+    bare_in(DeviceLayout::DEFAULT, ram)
+}
+
+fn bare_in(layout: DeviceLayout, ram: &mut [u8]) -> VirtMachine<LentStorage<'_>, NoEl2> {
+    MachineBuilder::new(VirtConfig {
+        layout,
+        ..VirtConfig::DEFAULT
+    })
+    .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
+    .bare()
+    .build_in(MemoryLoan { ram, vars: &mut [] })
+    .expect("a bare machine builds")
 }
 
 /// Run one access of `code` at `address` with the MMU off.
@@ -108,6 +117,9 @@ fn assert_external_abort<S: GuestStorage, I: Instrumentation>(
     }
 }
 
+/// On the board's layout the distributor answers at its 4 KiB and the page
+/// before it, the GIC-400 block's reserved first 4 KiB, is unassigned; on
+/// QEMU's, the rest of its 64 KiB window past the 4 KiB is.
 #[test]
 fn the_distributor_decodes_its_first_4_kib_only() {
     let mut ram = vec![0u8; RAM_LEN];
@@ -119,8 +131,19 @@ fn the_distributor_decodes_its_first_4_kib_only() {
 
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram);
-    access(&mut m, &LOAD, GIC_DIST_BASE + 0x1000);
-    assert_external_abort(&m, GIC_DIST_BASE + 0x1000, false);
+    access(&mut m, &LOAD, GIC_DIST_BASE - 4);
+    assert_external_abort(&m, GIC_DIST_BASE - 4, false);
+
+    /// QEMU's distributor window (`base_memmap`, `VIRT_GIC_DIST`).
+    const QEMU_GIC_DIST: u64 = 0x0800_0000;
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare_in(DeviceLayout::QemuVirt, &mut ram);
+    access(&mut m, &LOAD, QEMU_GIC_DIST + 0x004);
+    assert_eq!(m.reg_read(Reg::X2), 15);
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare_in(DeviceLayout::QemuVirt, &mut ram);
+    access(&mut m, &LOAD, QEMU_GIC_DIST + 0x1000);
+    assert_external_abort(&m, QEMU_GIC_DIST + 0x1000, false);
 }
 
 #[test]

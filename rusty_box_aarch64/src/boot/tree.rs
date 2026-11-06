@@ -41,12 +41,8 @@
 
 use super::fdt::{DeviceTreeError, Header, Out, FDT_BEGIN_NODE, FDT_END, FDT_END_NODE, HEADER_LEN};
 use crate::board::{
-    FLASH0_BASE, FLASH1_BASE, FLASH_BANK_SIZE, GIC_CPU_BASE, GIC_CPU_SIZE, GIC_DIST_BASE,
-    GIC_DIST_SIZE, GIC_HYP_BASE, GIC_HYP_SIZE, GIC_V2M_BASE, GIC_V2M_SIZE, GIC_VCPU_BASE,
-    GIC_VCPU_SIZE, GPIO_BASE, PCIE_ECAM_BASE, PCIE_ECAM_SIZE, PCIE_MMIO_BASE, PCIE_MMIO_HIGH_BASE,
-    PCIE_MMIO_HIGH_SIZE, PCIE_MMIO_SIZE, PCIE_PIO_BASE, PCIE_PIO_SIZE, PPI_HYPERVISOR_TIMER,
-    PPI_PHYSICAL_TIMER, PPI_SECURE_PHYSICAL_TIMER, PPI_VIRTUAL_TIMER, PRIMECELL_SIZE, RAM_BASE,
-    RTC_BASE, UART0_BASE, UART_CLOCK, VIRTIO_MMIO_BASE,
+    FLASH0_BASE, FLASH1_BASE, FLASH_BANK_SIZE, PPI_HYPERVISOR_TIMER, PPI_PHYSICAL_TIMER,
+    PPI_SECURE_PHYSICAL_TIMER, PPI_VIRTUAL_TIMER, RAM_BASE, UART_CLOCK,
 };
 use crate::bus::PhysAddr;
 use crate::cpu::id::{CCSIDR_L1D, CCSIDR_L1I, CCSIDR_L2};
@@ -54,7 +50,8 @@ use crate::cpu::{PsciConduit, PSCI_COMPATIBLE};
 use crate::devices::gicv2::GicExtensions;
 use crate::devices::gicv2_virt::MAINTENANCE_INTID;
 use crate::devices::pl061::POWER_BUTTON_LINE;
-use crate::devices::virtio_mmio::{TRANSPORT_COUNT, TRANSPORT_SIZE};
+use crate::devices::virtio_mmio::TRANSPORT_COUNT;
+use crate::layout::{DeviceWindows, GicWindows, Window};
 use crate::identity::BoardIdentity;
 use crate::interrupt_map::{Spi, Wiring};
 use crate::CpuModel;
@@ -120,6 +117,8 @@ pub(crate) struct BoardTree<'a> {
     pub(crate) chosen: Chosen<'a>,
     /// The SPIs the devices drive.
     pub(crate) wiring: Wiring,
+    /// Where the devices sit.
+    pub(crate) windows: DeviceWindows,
 }
 
 /// The most property names a tree may use: the strings block the writer
@@ -322,6 +321,23 @@ impl<'o> Writer<'o> {
         Ok(())
     }
 
+    /// A `reg` naming `windows`, each as its address and size, two cells
+    /// each.
+    fn windows(&mut self, name: &'static str, windows: &[Window]) -> Result<(), DeviceTreeError> {
+        self.head(name, windows.len() * 16)?;
+        for window in windows {
+            for cell in cells_of(window.base.get()).into_iter().chain(cells_of(window.size)) {
+                self.out.put_u32(cell)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A `reg` naming `window` alone ([`Writer::windows`]).
+    fn window(&mut self, name: &'static str, window: Window) -> Result<(), DeviceTreeError> {
+        self.windows(name, &[window])
+    }
+
     /// `FDT_END`, the strings block after the structure block, then the
     /// header and the empty reservation block in front: the tree's length.
     fn finish(mut self) -> Result<usize, DeviceTreeError> {
@@ -384,8 +400,9 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
 
     chosen(&mut w, &tree.chosen)?;
 
+    let windows = tree.windows;
     w.begin("aliases")?;
-    w.path_at(SERIAL_ALIAS, SERIAL_NODE, UART0_BASE)?;
+    w.path_at(SERIAL_ALIAS, SERIAL_NODE, windows.uart.get())?;
     w.end()?;
 
     w.begin_at("memory", RAM_BASE)?;
@@ -415,7 +432,7 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     w.flag("always-on")?;
     w.end()?;
 
-    gic(&mut w, tree.gic)?;
+    gic(&mut w, tree.gic, windows.gic)?;
 
     w.begin("clock")?;
     w.string("compatible", "fixed-clock")?;
@@ -424,25 +441,25 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     w.cell("phandle", PHANDLE_CLOCK)?;
     w.end()?;
 
-    w.begin_at(SERIAL_NODE, UART0_BASE)?;
+    w.begin_at(SERIAL_NODE, windows.uart.get())?;
     w.strings("compatible", &["arm,pl011", "arm,primecell"])?;
-    w.pairs("reg", &[UART0_BASE, PRIMECELL_SIZE])?;
+    w.window("reg", windows.uart_window())?;
     w.cells("interrupts", &spi(tree.wiring.uart()))?;
     w.cells("clocks", &[PHANDLE_CLOCK, PHANDLE_CLOCK])?;
     w.strings("clock-names", &["uartclk", "apb_pclk"])?;
     w.end()?;
 
-    w.begin_at("rtc", RTC_BASE)?;
+    w.begin_at("rtc", windows.rtc.get())?;
     w.strings("compatible", &["arm,pl031", "arm,primecell"])?;
-    w.pairs("reg", &[RTC_BASE, PRIMECELL_SIZE])?;
+    w.window("reg", windows.rtc_window())?;
     w.cells("interrupts", &spi(tree.wiring.rtc()))?;
     w.cell("clocks", PHANDLE_CLOCK)?;
     w.string("clock-names", "apb_pclk")?;
     w.end()?;
 
-    w.begin_at("gpio", GPIO_BASE)?;
+    w.begin_at("gpio", windows.gpio.get())?;
     w.strings("compatible", &["arm,pl061", "arm,primecell"])?;
-    w.pairs("reg", &[GPIO_BASE, PRIMECELL_SIZE])?;
+    w.window("reg", windows.gpio_window())?;
     w.cells("interrupts", &spi(tree.wiring.gpio()))?;
     w.flag("gpio-controller")?;
     w.cell("#gpio-cells", 2)?;
@@ -470,13 +487,13 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     w.cell("bank-width", 4)?;
     w.end()?;
 
-    pcie(&mut w, tree.wiring)?;
+    pcie(&mut w, tree.wiring, windows)?;
 
     for n in 0..TRANSPORT_COUNT {
-        let base = VIRTIO_MMIO_BASE + n * TRANSPORT_SIZE;
-        w.begin_at("virtio", base)?;
+        let transport = windows.virtio.transport(n);
+        w.begin_at("virtio", transport.base.get())?;
         w.string("compatible", "virtio,mmio")?;
-        w.pairs("reg", &[base, TRANSPORT_SIZE])?;
+        w.window("reg", transport)?;
         // A transport's line is asserted while its InterruptStatus has a
         // bit set (`Transport::irq`): a level.
         w.cells("interrupts", &spi(tree.wiring.virtio(n as u8)))?;
@@ -552,8 +569,12 @@ fn cpus(w: &mut Writer<'_>, cpu: CpuModel) -> Result<(), DeviceTreeError> {
 /// virtual interface's two frames after the distributor's and the CPU
 /// interface's, and its maintenance interrupt (the GIC binding). Each
 /// `reg` region is the size the frame decodes.
-fn gic(w: &mut Writer<'_>, extensions: GicExtensions) -> Result<(), DeviceTreeError> {
-    w.begin_at("interrupt-controller", GIC_DIST_BASE)?;
+fn gic(
+    w: &mut Writer<'_>,
+    extensions: GicExtensions,
+    gic: GicWindows,
+) -> Result<(), DeviceTreeError> {
+    w.begin_at("interrupt-controller", gic.dist.get())?;
     w.string("compatible", "arm,cortex-a15-gic")?;
     w.flag("interrupt-controller")?;
     w.cell("#interrupt-cells", 3)?;
@@ -562,23 +583,16 @@ fn gic(w: &mut Writer<'_>, extensions: GicExtensions) -> Result<(), DeviceTreeEr
     w.flag("ranges")?;
     match extensions {
         GicExtensions::Absent => {
-            w.pairs(
-                "reg",
-                &[GIC_DIST_BASE, GIC_DIST_SIZE, GIC_CPU_BASE, GIC_CPU_SIZE],
-            )?;
+            w.windows("reg", &[gic.dist_window(), gic.cpu_window()])?;
         }
         GicExtensions::Virtualization => {
-            w.pairs(
+            w.windows(
                 "reg",
                 &[
-                    GIC_DIST_BASE,
-                    GIC_DIST_SIZE,
-                    GIC_CPU_BASE,
-                    GIC_CPU_SIZE,
-                    GIC_HYP_BASE,
-                    GIC_HYP_SIZE,
-                    GIC_VCPU_BASE,
-                    GIC_VCPU_SIZE,
+                    gic.dist_window(),
+                    gic.cpu_window(),
+                    gic.hyp_window(),
+                    gic.vcpu_window(),
                 ],
             )?;
             w.cells(
@@ -592,10 +606,10 @@ fn gic(w: &mut Writer<'_>, extensions: GicExtensions) -> Result<(), DeviceTreeEr
         }
     }
     w.cell("phandle", PHANDLE_GIC)?;
-    w.begin_at("msi-controller", GIC_V2M_BASE)?;
+    w.begin_at("msi-controller", gic.v2m.get())?;
     w.string("compatible", "arm,gic-v2m-frame")?;
     w.flag("msi-controller")?;
-    w.pairs("reg", &[GIC_V2M_BASE, GIC_V2M_SIZE])?;
+    w.window("reg", gic.v2m_window())?;
     w.cell("phandle", PHANDLE_MSI)?;
     w.end()?;
     w.end()
@@ -608,7 +622,11 @@ fn gic(w: &mut Writer<'_>, extensions: GicExtensions) -> Result<(), DeviceTreeEr
 /// bridge's four SPIs, which `wiring` gives, as the PCI-to-PCI bridge
 /// specification routes a device's pins; and MSIs through the GIC's MSI
 /// frame.
-fn pcie(w: &mut Writer<'_>, wiring: Wiring) -> Result<(), DeviceTreeError> {
+fn pcie(
+    w: &mut Writer<'_>,
+    wiring: Wiring,
+    windows: DeviceWindows,
+) -> Result<(), DeviceTreeError> {
     /// `ranges` space codes in the first child address cell (PCI bus
     /// binding: `ss` in phys.hi).
     const SPACE_IO: u32 = 0x0100_0000;
@@ -618,36 +636,33 @@ fn pcie(w: &mut Writer<'_>, wiring: Wiring) -> Result<(), DeviceTreeError> {
     /// and its pin, the GIC's phandle, its two address cells and its three
     /// interrupt cells.
     const ENTRY: usize = 10;
-    /// One `ranges` entry: its space code and the child address, the parent
-    /// address and the size, each 64-bit value two cells ([`cells_of`]).
-    const fn range(space: u32, child: u64, parent: u64, size: u64) -> [u32; 7] {
+    /// One `ranges` entry: its space code and the child address, then the
+    /// window's address and size, each 64-bit value two cells
+    /// ([`cells_of`]).
+    const fn range(space: u32, child: u64, window: Window) -> [u32; 7] {
         let [ch, cl] = cells_of(child);
-        let [ph, pl] = cells_of(parent);
-        let [sh, sl] = cells_of(size);
+        let [ph, pl] = cells_of(window.base.get());
+        let [sh, sl] = cells_of(window.size);
         [space, ch, cl, ph, pl, sh, sl]
     }
+    let pcie = windows.pcie;
     // The unit address is the first `reg` address (2.2.1), the ECAM
     // window's.
-    w.begin_at("pcie", PCIE_ECAM_BASE)?;
+    w.begin_at("pcie", pcie.ecam.base.get())?;
     w.string("compatible", "pci-host-ecam-generic")?;
     w.string("device_type", "pci")?;
     w.cell("#address-cells", 3)?;
     w.cell("#size-cells", 2)?;
     w.cell("#interrupt-cells", 1)?;
-    w.pairs("reg", &[PCIE_ECAM_BASE, PCIE_ECAM_SIZE])?;
-    let last_bus = (PCIE_ECAM_SIZE >> 20) as u32 - 1;
+    w.window("reg", pcie.ecam)?;
+    let last_bus = (pcie.ecam.size >> 20) as u32 - 1;
     w.cells("bus-range", &[0, last_bus])?;
     // I/O space from 0, and both memory windows at the addresses they have
     // on the bus.
     let ranges = [
-        range(SPACE_IO, 0, PCIE_PIO_BASE, PCIE_PIO_SIZE),
-        range(SPACE_MEM32, PCIE_MMIO_BASE, PCIE_MMIO_BASE, PCIE_MMIO_SIZE),
-        range(
-            SPACE_MEM64,
-            PCIE_MMIO_HIGH_BASE,
-            PCIE_MMIO_HIGH_BASE,
-            PCIE_MMIO_HIGH_SIZE,
-        ),
+        range(SPACE_IO, 0, pcie.pio),
+        range(SPACE_MEM32, pcie.mmio32.base.get(), pcie.mmio32),
+        range(SPACE_MEM64, pcie.mmio64.base.get(), pcie.mmio64),
     ];
     w.cells("ranges", ranges.as_flattened())?;
     // Device numbers 0 to 3 (phys.hi bits 12:11) by pins INTA to INTD.

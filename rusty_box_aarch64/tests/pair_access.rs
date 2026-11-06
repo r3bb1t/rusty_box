@@ -16,7 +16,7 @@
 //! Guest code is hand-assembled (GNU as for aarch64); each snippet's source
 //! is beside its words.
 
-use rusty_box_aarch64::board::{GIC_DIST_BASE, RAM_BASE};
+use rusty_box_aarch64::board::{GIC_CPU_BASE, RAM_BASE};
 use rusty_box_aarch64::instrumentation::{Direction, MemoryAccess};
 use rusty_box_aarch64::{
     AccessWidth, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, NoEl2, PhysAddr,
@@ -182,17 +182,18 @@ fn a_load_pair_within_a_page_reads_both_words() {
     assert_eq!(m.reg_read(Reg::X4), SECOND);
 }
 
-// A hole after a device register: the GIC distributor decodes one page
-// (QEMU 11.1.2 hw/intc/arm_gic.c, a 0x1000 region in `virt`'s 64 KiB
-// slot), its last word `GICD_CIDR3`, read-only, and the page after it is
-// unassigned. A word pair at `GIC_DIST_BASE + 0xFFC`, which is on Device
-// memory with stage 1 disabled and aligned there, reaches the register
-// with its first element and the hole with its second.
+// A hole after a device register: the GIC CPU interface decodes two pages
+// (IHI 0048B 4.1.3), its last word reserved, which ignores a write, and
+// on a machine without the Virtualization Extensions the page after it,
+// where the virtual interface control frame would be, is unassigned. A
+// word pair at `GIC_CPU_BASE + 0x1FFC`, which is on Device memory with
+// stage 1 disabled and aligned there, reaches the register with its first
+// element and the hole with its second.
 
 /// Where `x1` points: 20 bytes below the pair.
-const PAIR_BASE: u64 = GIC_DIST_BASE + 0xFE8;
+const PAIR_BASE: u64 = GIC_CPU_BASE + 0x1FE8;
 /// The second element's address, the hole's first byte.
-const HOLE: u64 = GIC_DIST_BASE + 0x1000;
+const HOLE: u64 = GIC_CPU_BASE + 0x2000;
 
 /// `ldp w3, w4, [x1, #20]!; b .`
 const LOAD_PAIR_INTO_HOLE: [u32; 2] = [0x29C2_9023, 0x1400_0000];
@@ -266,8 +267,8 @@ impl Instrumentation for BusLog {
 
 #[test]
 fn a_store_pair_whose_second_word_alone_reaches_a_hole_writes_its_first_word_only() {
-    // The first word lands on `GICD_CIDR3`, which ignores a write, so the
-    // bus is where the first element is seen to land.
+    // The first word lands on a reserved `GICC` word, which ignores a
+    // write, so the bus is where the first element is seen to land.
     const FIRST: u32 = 0x1234_5678;
     const SECOND: u32 = 0x9ABC_DEF0;
     let mut ram = vec![0u8; RAM_LEN];
@@ -278,7 +279,7 @@ fn a_store_pair_whose_second_word_alone_reaches_a_hole_writes_its_first_word_onl
     m.reg_write(Reg::X3, u64::from(SECOND));
     second_element_aborts(&mut m, true);
     let first_store = MemoryAccess {
-        address: PhysAddr::new(GIC_DIST_BASE + 0xFFC),
+        address: PhysAddr::new(GIC_CPU_BASE + 0x1FFC),
         width: AccessWidth::Word,
         direction: Direction::Write,
         value: u64::from(FIRST),

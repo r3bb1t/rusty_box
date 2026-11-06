@@ -106,7 +106,9 @@ impl std::fmt::Display for MachineKind {
 /// `gic_spis` and `gic_priority_bits` its GIC's SPIs (480 by default) and
 /// priority bits (5); `interrupts` which SPIs its devices drive
 /// ([`VirtInterruptsToml`]); `transport_order` which free virtio transport
-/// each device takes (`"first-free"`, the default, or `"last-free"`).
+/// each device takes (`"first-free"`, the default, or `"last-free"`);
+/// `layout` where the devices sit (`"board"`, the board's own, the default,
+/// or `"qemu-virt"`, QEMU `virt`'s, which a tree QEMU wrote names).
 /// It boots UEFI firmware from flash (`firmware`, or the EDK2 built into
 /// the front end with `builtin_firmware = true`, either with
 /// `firmware_vars` for its variable store) or a Linux kernel directly
@@ -135,6 +137,7 @@ pub struct VirtToml {
     pub disk_read_only: Option<bool>,
     pub spectre: Option<NamedToml<rusty_box_aarch64::SpectreReport>>,
     pub transport_order: Option<NamedToml<rusty_box_aarch64::TransportOrder>>,
+    pub layout: Option<NamedToml<rusty_box_aarch64::DeviceLayout>>,
     pub counter_hz: Option<NumberToml<rusty_box_aarch64::CounterRate>>,
     pub gic_spis: Option<NumberToml<rusty_box_aarch64::SpiCount>>,
     pub gic_priority_bits: Option<NumberToml<rusty_box_aarch64::PriorityBits>>,
@@ -777,6 +780,8 @@ pub struct ArmVirtConfig {
     pub interrupts: rusty_box_aarch64::InterruptMap,
     /// Which free virtio transport each device takes.
     pub transport_order: rusty_box_aarch64::TransportOrder,
+    /// Where the devices sit (a `device_tree` must name the same).
+    pub layout: rusty_box_aarch64::DeviceLayout,
     pub boot: ArmBoot,
     /// The virtio-gpu, by the size it asks the guest for; `None` for none.
     pub display: Option<VirtioDisplaySize>,
@@ -966,6 +971,15 @@ const DEFAULT_VIRT_IPS: u32 = {
     ips as u32
 };
 
+/// The serial-console command line for QEMU's layout, naming its UART's
+/// address, 0x0900_0000, for `earlycon`. A VM on another layout whose
+/// command line is exactly this takes the serial-console line that finds
+/// the UART wherever it is
+/// ([`rusty_box_aarch64::boot::SERIAL_CONSOLE_COMMAND_LINE`]) instead: its
+/// kernel would otherwise write its first messages where that layout has
+/// no UART, and stop there, before it has a console to say so.
+const QEMU_LAYOUT_SERIAL_CONSOLE_COMMAND_LINE: &str = "console=ttyAMA0 earlycon=pl011,0x9000000";
+
 impl ArmVirtConfig {
     /// An Arm `virt` board with nothing chosen yet: what an empty `[virt]`
     /// table resolves to, with nothing to boot.
@@ -979,6 +993,7 @@ impl ArmVirtConfig {
             gic: rusty_box_aarch64::GicShape::DEFAULT,
             interrupts: rusty_box_aarch64::InterruptMap::DEFAULT,
             transport_order: rusty_box_aarch64::TransportOrder::DEFAULT,
+            layout: rusty_box_aarch64::DeviceLayout::DEFAULT,
             boot: ArmBoot::Unset,
             display: None,
             keyboard: false,
@@ -1083,6 +1098,9 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
     let ips = args.ips.or(virt.ips).unwrap_or(DEFAULT_VIRT_IPS);
     ensure_nonzero("ips", ips)?;
 
+    let layout = virt
+        .layout
+        .map_or(rusty_box_aarch64::DeviceLayout::DEFAULT, |layout| layout.0);
     let path = |p: &Option<PathBuf>| p.clone().map(|p| resolve_toml_path(config_dir, p));
     if virt.builtin_firmware == Some(true) {
         for (name, set) in [
@@ -1122,10 +1140,16 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
             ArmBoot::Linux {
                 kernel,
                 initrd: path(&virt.initrd),
-                command_line: virt
-                    .command_line
-                    .clone()
-                    .unwrap_or_else(|| rusty_box_aarch64::boot::SERIAL_CONSOLE_COMMAND_LINE.to_owned()),
+                command_line: match virt.command_line.clone() {
+                    Some(line)
+                        if line == QEMU_LAYOUT_SERIAL_CONSOLE_COMMAND_LINE
+                            && layout != rusty_box_aarch64::DeviceLayout::QemuVirt =>
+                    {
+                        rusty_box_aarch64::boot::SERIAL_CONSOLE_COMMAND_LINE.to_owned()
+                    }
+                    Some(line) => line,
+                    None => rusty_box_aarch64::boot::SERIAL_CONSOLE_COMMAND_LINE.to_owned(),
+                },
                 device_tree: path(&virt.device_tree),
             }
         }
@@ -1212,6 +1236,7 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
         transport_order: virt
             .transport_order
             .map_or(rusty_box_aarch64::TransportOrder::DEFAULT, |order| order.0),
+        layout,
         boot,
         display,
         keyboard: virt.keyboard.unwrap_or(false),
@@ -1506,6 +1531,7 @@ impl ArmVirtConfig {
             cpu: Some(NamedToml(self.cpu)),
             spectre: Some(NamedToml(self.spectre)),
             transport_order: Some(NamedToml(self.transport_order)),
+            layout: Some(NamedToml(self.layout)),
             counter_hz: Some(NumberToml(self.counter)),
             gic_spis: Some(NumberToml(self.gic.spis)),
             gic_priority_bits: Some(NumberToml(self.gic.priority_bits)),
@@ -3349,6 +3375,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             .into_iter()
             .cycle();
         let mut orders = rusty_box_aarch64::TransportOrder::ALL.into_iter().cycle();
+        let mut layouts = rusty_box_aarch64::DeviceLayout::ALL.into_iter().cycle();
         let disks = [
             None,
             Some(VirtDisk {
@@ -3368,6 +3395,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
                     cpu,
                     spectre: reports.next().unwrap_or_default(),
                     transport_order: orders.next().unwrap_or_default(),
+                    layout: layouts.next().unwrap_or_default(),
                     counter: if cpu.counter_rate_fixed() {
                         rusty_box_aarch64::CounterRate::DEFAULT
                     } else {
@@ -3419,6 +3447,11 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             ArmVirtConfig::blank().transport_order,
             rusty_box_aarch64::TransportOrder::FirstFree,
             "the board's own order, the first device at the first transport"
+        );
+        assert_eq!(
+            ArmVirtConfig::blank().layout,
+            rusty_box_aarch64::DeviceLayout::Board,
+            "the board's own layout"
         );
         assert_eq!(
             ArmVirtConfig::blank().interrupts,
@@ -3542,6 +3575,57 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             .to_string();
         assert!(
             refused.contains("\"middle\"") && refused.contains("\"first-free\""),
+            "{refused}"
+        );
+    }
+
+    /// A kernel's command line that is the serial-console line for QEMU's
+    /// layout, its `earlycon` at QEMU's UART, is the board's own
+    /// serial-console line on a layout whose UART is elsewhere, and stays
+    /// itself on QEMU's; any other command line, and a missing one, read as
+    /// they do on every layout.
+    #[test]
+    fn the_qemu_layouts_serial_console_line_follows_the_uart() {
+        let own = rusty_box_aarch64::boot::SERIAL_CONSOLE_COMMAND_LINE;
+        let vm = |layout: &str, line: Option<&str>| {
+            let line = line.map_or(String::new(), |line| format!("command_line = \"{line}\"\n"));
+            let file: FileConfig = toml::from_str(&format!(
+                "[vm]\nmachine = \"arm-virt\"\n[virt]\nkernel = \"Image\"\nlayout = \"{layout}\"\n{line}"
+            ))
+            .unwrap();
+            match resolve_config(file, &args(["rusty_box_gui"])).unwrap().arm_virt() {
+                Some(ArmVirtConfig {
+                    boot: ArmBoot::Linux { command_line, .. },
+                    ..
+                }) => command_line.clone(),
+                other => panic!("a kernel boot: {other:?}"),
+            }
+        };
+        let qemus = QEMU_LAYOUT_SERIAL_CONSOLE_COMMAND_LINE;
+        assert_eq!(vm("board", Some(qemus)), own);
+        assert_eq!(vm("qemu-virt", Some(qemus)), qemus);
+        for layout in ["board", "qemu-virt"] {
+            assert_eq!(vm(layout, None), own, "{layout}");
+            assert_eq!(vm(layout, Some("console=ttyAMA0 quiet")), "console=ttyAMA0 quiet", "{layout}");
+        }
+    }
+
+    /// `virt.layout` is read by its layouts' names; one no layout has is
+    /// refused when the file is read, naming the layouts there are.
+    #[test]
+    fn virt_layout_takes_a_layout_by_name_and_refuses_others() {
+        let board =
+            |layout: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\nlayout = \"{layout}\"\n");
+        for layout in rusty_box_aarch64::DeviceLayout::ALL {
+            let file: FileConfig = toml::from_str(&board(layout.name())).unwrap();
+            let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+            assert_eq!(resolved.arm_virt().map(|virt| virt.layout), Some(layout));
+        }
+        let refused = toml::from_str::<FileConfig>(&board("sbsa"))
+            .expect_err("no layout is named so")
+            .to_string();
+        assert!(
+            refused.contains("\"sbsa\"") && refused.contains("\"qemu-virt\""),
             "{refused}"
         );
     }

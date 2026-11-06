@@ -660,6 +660,16 @@ fn transport_order_label(order: rusty_box_aarch64::TransportOrder) -> &'static s
     }
 }
 
+/// What the Processor page's Device addresses list shows for each
+/// [`rusty_box_aarch64::DeviceLayout`].
+#[cfg(not(target_arch = "wasm32"))]
+fn device_layout_label(layout: rusty_box_aarch64::DeviceLayout) -> &'static str {
+    match layout {
+        rusty_box_aarch64::DeviceLayout::Board => "The board's own",
+        rusty_box_aarch64::DeviceLayout::QemuVirt => "QEMU virt's",
+    }
+}
+
 /// A Processor page row editing `spi`, by its number among the SPIs, within
 /// the ones a GICv2 has. Returns whether it changed.
 #[cfg(not(target_arch = "wasm32"))]
@@ -809,6 +819,7 @@ struct VirtSettings {
     /// GIC's.
     interrupts: rusty_box_aarch64::InterruptMap,
     transport_order: rusty_box_aarch64::TransportOrder,
+    layout: rusty_box_aarch64::DeviceLayout,
     boot: VirtBootChoice,
     firmware_path: String,
     vars_path: String,
@@ -870,6 +881,7 @@ impl VirtSettings {
             gic_priority_bits: config.gic.priority_bits,
             interrupts: config.interrupts,
             transport_order: config.transport_order,
+            layout: config.layout,
             boot: VirtBootChoice::Nothing,
             firmware_path: String::new(),
             vars_path: String::new(),
@@ -982,6 +994,7 @@ impl VirtSettings {
             },
             interrupts,
             transport_order: self.transport_order,
+            layout: self.layout,
             boot,
             display,
             keyboard: self.keyboard,
@@ -3753,6 +3766,19 @@ impl NativeShellApp {
                                             order,
                                             transport_order_label(order),
                                         )
+                                        .changed();
+                                }
+                            });
+                    });
+                    // Where the devices sit: the board's own layout, or QEMU
+                    // `virt`'s, which a device tree QEMU wrote names.
+                    field_row(ui, "Device addresses", |ui| {
+                        egui::ComboBox::from_id_salt("virt device layout")
+                            .selected_text(device_layout_label(virt.layout))
+                            .show_ui(ui, |ui| {
+                                for layout in rusty_box_aarch64::DeviceLayout::ALL {
+                                    changed |= ui
+                                        .selectable_value(&mut virt.layout, layout, device_layout_label(layout))
                                         .changed();
                                 }
                             });
@@ -8150,6 +8176,7 @@ mod tests {
                     ..rusty_box_aarch64::InterruptMap::DEFAULT
                 },
                 transport_order: rusty_box_aarch64::TransportOrder::LastFree,
+                layout: rusty_box_aarch64::DeviceLayout::QemuVirt,
                 boot: crate::config::ArmBoot::Linux {
                     kernel: std::path::PathBuf::from("Image"),
                     initrd: Some(std::path::PathBuf::from("initramfs.cpio.gz")),

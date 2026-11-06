@@ -80,8 +80,8 @@ Or nothing at all: a bare machine starts at the base of RAM, for a host that
 writes its own code there (section 5).
 
 The device tree is the board's own, written from the board
-(`src/boot/tree.rs`): generic node names (`serial@9000000`,
-`interrupt-controller@8000000`, `virtio@a000000`, `clock`, ...), the
+(`src/boot/tree.rs`): generic node names (`serial@8020000`,
+`interrupt-controller@8001000`, `virtio@8050000`, `clock`, ...), the
 processor's caches as `CCSIDR_EL1` reports them, `/psci` for PSCI 1.0 and
 0.2 on the conduit the firmware answers on, and `/chosen` with its console,
 command line and initrd but no boot entropy, which a deterministic machine
@@ -187,6 +187,18 @@ they allow, its default the board's:
 - `transport_order`, a `TransportOrder`: which free virtio-mmio transport
   each device plugged in takes, `FirstFree` (the default, the first device
   at the lowest address) or `LastFree`.
+- `layout`, a `DeviceLayout`: where the devices sit. `Board`, the default,
+  is the board's own: the GIC's frames in one 64 KiB block at the
+  GIC-400's offsets from 0x0800_0000 (the distributor at 0x0800_1000, the
+  CPU interface at 0x0800_2000, with EL2 the virtual interface's at
+  0x0800_4000 and 0x0800_6000), the GICv2m frame at 0x0801_0000, then a
+  64 KiB page each for the UART (0x0802_0000), the RTC, the GPIO and the
+  32 virtio transports (from 0x0805_0000), and the PCIe host's I/O window;
+  its 32-bit window at 0x2000_0000 and its ECAM and 64-bit window above
+  256 GiB. `QemuVirt` is QEMU `virt`'s, which a tree QEMU wrote names. A
+  tree given with `device_tree(..)` that puts the GIC, a PrimeCell, a
+  virtio transport or the PCIe host anywhere but where the layout has it
+  fails the build with `BuildError::HostTreeAddress`.
 - `spectre`, a `SpectreReport`: what the firmware's `SMCCC_ARCH_FEATURES`
   says of the speculation workarounds, `NotRequired` (the default, true of
   an interpreter), `Mitigated` or `Unreported`.

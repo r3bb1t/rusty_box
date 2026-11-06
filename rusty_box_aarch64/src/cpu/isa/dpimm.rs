@@ -66,6 +66,9 @@ pub(crate) enum Extract {
     Extr64,
 }
 
+/// Kept out of [`super::decode`], as each group is: inlined, its registers
+/// would be saved on every decode, whichever group the word is in.
+#[inline(never)]
 pub(super) fn dpimm(word: u32) -> Option<Encoding> {
     let op1 = bits(word, 25, 22);
     match op1 {

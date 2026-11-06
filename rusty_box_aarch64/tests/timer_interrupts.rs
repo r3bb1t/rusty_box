@@ -9,9 +9,9 @@
 //! ```text
 //! _start: ldr x0, =0x40001000      ; msr vbar_el1, x0
 //!         ldr x0, =0x40010000      ; mov sp, x0
-//!         ldr x1, =0x08000000      ; mov w2, #1        ; str w2, [x1]          // GICD_CTLR
+//!         ldr x1, =0x08001000      ; mov w2, #1        ; str w2, [x1]          // GICD_CTLR
 //!         mov w2, #(1 << 27)       ; str w2, [x1, #0x100]                      // ISENABLER0
-//!         ldr x3, =0x08010000      ; mov w2, #1        ; str w2, [x3]          // GICC_CTLR
+//!         ldr x3, =0x08002000      ; mov w2, #1        ; str w2, [x3]          // GICC_CTLR
 //!         mov w2, #0xff            ; str w2, [x3, #4]                          // GICC_PMR
 //!         mov x4, #16000           ; msr cntv_tval_el0, x4
 //!         mov x4, #1               ; msr cntv_ctl_el0, x4
@@ -66,9 +66,9 @@ const PROGRAM: &[(usize, u32)] = &[
     (0x6C, 0x0000_0000),
     (0x70, 0x4001_0000),
     (0x74, 0x0000_0000),
-    (0x78, 0x0800_0000),
+    (0x78, 0x0800_1000),
     (0x7C, 0x0000_0000),
-    (0x80, 0x0801_0000),
+    (0x80, 0x0800_2000),
     (0x84, 0x0000_0000),
     (0x88, 0x8400_0008),
     (0x1280, 0xB940_0C65),
@@ -336,7 +336,7 @@ fn slicing_the_run_changes_nothing_the_guest_can_see() {
 ///
 /// ```text
 /// _start: ldr x0, =0x40001000      ; msr vbar_el1, x0
-///         ldr x1, =0x08000000      ; ldr x3, =0x08010000
+///         ldr x1, =0x08001000      ; ldr x3, =0x08002000
 ///         str w6, [x1]             ; str w7, [x1, #0x80]   // GICD_CTLR, GICD_IGROUPR0
 ///         str w8, [x3]                                     // GICC_CTLR
 ///         mov w2, #0xff            ; str w2, [x3, #4]      // GICC_PMR
@@ -368,9 +368,9 @@ const ROUTING: &[(usize, u32)] = &[
     (0x34, 0x1400_0000),
     (0x38, 0x4000_1000),
     (0x3C, 0x0000_0000),
-    (0x40, 0x0800_0000),
+    (0x40, 0x0800_1000),
     (0x44, 0x0000_0000),
-    (0x48, 0x0801_0000),
+    (0x48, 0x0800_2000),
     (0x4C, 0x0000_0000),
     (0x1280, 0xD280_500B),
     (0x1284, 0xB940_0C6C),
@@ -473,8 +473,8 @@ fn fiqen_signals_group_0_as_fiq_and_group_1_as_irq() {
 ///
 /// ```text
 /// _start: ldr x0, =0x40001000      ; msr vbar_el1, x0
-///         ldr x1, =0x08000000      ; ldr x3, =0x08010000
-///         ldr x0, =0x09000000
+///         ldr x1, =0x08001000      ; ldr x3, =0x08002000
+///         ldr x0, =0x08020000
 ///         mov w2, #1               ; str w2, [x1]           // GICD_CTLR: EnableGrp0
 ///         strb w2, [x1, #0x820]                             // GICD_ITARGETSR8, byte 0: INTID 32 to CPU 0
 ///         mov w2, #1               ; str w2, [x1, #0x104]   // GICD_ISENABLER1: INTID 32
@@ -536,11 +536,11 @@ const UART_INPUT: &[(usize, u32)] = &[
     (0x7C, 0x1400_0000),
     (0x80, 0x4000_1000),
     (0x84, 0x0000_0000),
-    (0x88, 0x0800_0000),
+    (0x88, 0x0800_1000),
     (0x8C, 0x0000_0000),
-    (0x90, 0x0801_0000),
+    (0x90, 0x0800_2000),
     (0x94, 0x0000_0000),
-    (0x98, 0x0900_0000),
+    (0x98, 0x0802_0000),
     (0x9C, 0x0000_0000),
     (0xA0, 0x4000_2000),
     (0x1280, 0xB940_0C75),

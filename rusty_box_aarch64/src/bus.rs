@@ -23,11 +23,17 @@ impl PhysAddr {
     }
 
     /// The offset of this address into a window starting at `base`, if it is
-    /// inside a window of `len` bytes.
+    /// inside a window of `len` bytes, the window ending at or below 2^64.
+    ///
+    /// One unsigned compare decides it: an address below `base` wraps to an
+    /// offset of more than 2^64 − `base`, which is at least `len`. Kept to
+    /// one compare, a chain of windows stays a chain of single tests in
+    /// each, whatever the windows' order.
     #[inline]
     pub const fn offset_in(self, base: u64, len: u64) -> Option<RegOffset> {
-        if self.0 >= base && self.0 - base < len {
-            Some(RegOffset(self.0 - base))
+        let offset = self.0.wrapping_sub(base);
+        if offset < len {
+            Some(RegOffset(offset))
         } else {
             None
         }

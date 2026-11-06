@@ -110,15 +110,15 @@ fn started(kind: Kind, source: Option<&[u8]>) -> Started {
 /// distributor's, CPU interface's, virtual interface control registers' and
 /// virtual CPU interface's frames, each the size it decodes (the
 /// GIC binding's regions, IHI 0048B's 4 KiB distributor and 8 KiB
-/// interfaces).
+/// interfaces), at the GIC-400's offsets in its block (DDI 0471B Table 3-1).
 const GIC_REG_WITH_EL2: [u64; 8] = [
-    0x0800_0000,
+    0x0800_1000,
     0x1000,
-    0x0801_0000,
+    0x0800_2000,
     0x2000,
-    0x0803_0000,
+    0x0800_4000,
     0x2000,
-    0x0804_0000,
+    0x0800_6000,
     0x2000,
 ];
 
@@ -179,12 +179,12 @@ fn virtualization_starts_at_el2_and_calls_psci_with_smc() {
             Ok(Some(&b"arm,psci-1.0\0arm,psci-0.2\0"[..]))
         );
         assert_eq!(
-            fdt::property(&tree, "interrupt-controller@8000000", "reg"),
+            fdt::property(&tree, "interrupt-controller@8001000", "reg"),
             Ok(Some(gic_reg)),
             "{kind:?}"
         );
         assert_eq!(
-            fdt::property(&tree, "interrupt-controller@8000000", "interrupts"),
+            fdt::property(&tree, "interrupt-controller@8001000", "interrupts"),
             Ok(gic_interrupts),
             "{kind:?}"
         );
@@ -195,8 +195,8 @@ fn virtualization_starts_at_el2_and_calls_psci_with_smc() {
     // properties holding the same bytes.
     let differing = [
         ("/psci", "method"),
-        ("/interrupt-controller@8000000", "reg"),
-        ("/interrupt-controller@8000000", "interrupts"),
+        ("/interrupt-controller@8001000", "reg"),
+        ("/interrupt-controller@8001000", "interrupts"),
     ];
     // Each differing property is there at most once in each tree: one that
     // an edit added twice is not hidden by the comparison.
@@ -349,9 +349,9 @@ impl TreeContents {
 /// ```text
 /// _start: ldr x0, =0x40001000   ; msr vbar_el2, x0
 ///         mov x0, #(1 << 4)     ; msr hcr_el2, x0          // IMO
-///         ldr x1, =0x08000000   ; mov w2, #1 ; str w2, [x1] // GICD_CTLR
+///         ldr x1, =0x08001000  ; mov w2, #1 ; str w2, [x1] // GICD_CTLR
 ///         mov w2, #(1 << 26)    ; str w2, [x1, #0x100]      // ISENABLER0
-///         ldr x3, =0x08010000   ; mov w2, #1 ; str w2, [x3] // GICC_CTLR
+///         ldr x3, =0x08002000  ; mov w2, #1 ; str w2, [x3] // GICC_CTLR
 ///         mov w2, #0xff         ; str w2, [x3, #4]          // GICC_PMR
 ///         mov x4, #16000        ; msr cnthp_tval_el2, x4
 ///         mov x4, #1            ; msr cnthp_ctl_el2, x4
@@ -395,9 +395,9 @@ fn the_el2_timer_interrupts_on_ppi_10() {
         (0x64, 0x1400_0000),
         (0x68, 0x4000_1000),
         (0x6C, 0x0000_0000),
-        (0x70, 0x0800_0000),
+        (0x70, 0x0800_1000),
         (0x74, 0x0000_0000),
-        (0x78, 0x0801_0000),
+        (0x78, 0x0800_2000),
         (0x7C, 0x0000_0000),
         (0x80, 0x8400_0008),
         (0x1280, 0xB940_0C65),
@@ -427,9 +427,9 @@ fn the_el2_timer_interrupts_on_ppi_10() {
 /// ```text
 /// _start: ldr x0, =0x40001000   ; msr vbar_el2, x0
 ///         mov x0, #(1 << 4)     ; msr hcr_el2, x0          // IMO
-///         ldr x1, =0x08000000   ; mov w2, #1 ; str w2, [x1] // GICD_CTLR
+///         ldr x1, =0x08001000  ; mov w2, #1 ; str w2, [x1] // GICD_CTLR
 ///         mov w2, #(1 << 27)    ; str w2, [x1, #0x100]      // ISENABLER0
-///         ldr x3, =0x08010000   ; mov w2, #1 ; str w2, [x3] // GICC_CTLR
+///         ldr x3, =0x08002000  ; mov w2, #1 ; str w2, [x3] // GICC_CTLR
 ///         mov w2, #0xff         ; str w2, [x3, #4]          // GICC_PMR
 ///         msr cntvoff_el2, xzr
 ///         mrs x4, cntvct_el0    ; mov x5, #(1 << 40) ; add x4, x4, x5
@@ -476,9 +476,9 @@ fn moving_cntvoff_el2_past_cval_interrupts_at_once() {
         (0x6C, 0x0000_0000),
         (0x70, 0x4000_1000),
         (0x74, 0x0000_0000),
-        (0x78, 0x0800_0000),
+        (0x78, 0x0800_1000),
         (0x7C, 0x0000_0000),
-        (0x80, 0x0801_0000),
+        (0x80, 0x0800_2000),
         (0x84, 0x0000_0000),
         (0x88, 0x0000_0000),
         (0x8C, 0xFFFF_FE00),
@@ -511,18 +511,18 @@ fn moving_cntvoff_el2_past_cval_interrupts_at_once() {
 /// _start: ldr x0, =0x40001000   ; msr vbar_el2, x0
 ///         mov x0, #(1 << 31)    ; orr x0, x0, #(1 << 4)     // RW, IMO
 ///         msr hcr_el2, x0
-///         ldr x1, =0x08000000   ; mov w2, #1 ; str w2, [x1] // GICD_CTLR
+///         ldr x1, =0x08001000  ; mov w2, #1 ; str w2, [x1] // GICD_CTLR
 ///         mov w2, #(1 << 25)    ; str w2, [x1, #0x100]      // ISENABLER0
-///         ldr x3, =0x08010000   ; mov w2, #1 ; str w2, [x3] // GICC_CTLR
+///         ldr x3, =0x08002000  ; mov w2, #1 ; str w2, [x3] // GICC_CTLR
 ///         mov w2, #0xff         ; str w2, [x3, #4]          // GICC_PMR
-///         ldr x10, =0x08030000
+///         ldr x10, =0x08004000
 ///         ldr w2, =0x10080028   ; str w2, [x10, #0x100]     // GICH_LR0
 ///         mov w2, #1            ; str w2, [x10]             // GICH_HCR.En
 ///         ldr x0, =0x40002000   ; msr vbar_el1, x0
 ///         mov x0, #5            ; msr spsr_el2, x0          // EL1h
 ///         adr x0, el1           ; msr elr_el2, x0
 ///         mov x21, #0           ; eret
-/// el1:    ldr x11, =0x08040000  ; mov w2, #1 ; str w2, [x11] // GICV_CTLR
+/// el1:    ldr x11, =0x08006000 ; mov w2, #1 ; str w2, [x11] // GICV_CTLR
 ///         mov w2, #0xf8         ; str w2, [x11, #4]         // GICV_PMR
 ///         msr daifclr, #2
 /// 1:      add x21, x21, #1      ; b 1b
@@ -586,15 +586,15 @@ fn a_virtual_interrupt_reaches_el1_and_its_eoi_reaches_el2() {
         (0x149C, 0x1008_0028),
         (0x14A0, 0x4000_1000),
         (0x14A4, 0x0000_0000),
-        (0x14A8, 0x0800_0000),
+        (0x14A8, 0x0800_1000),
         (0x14AC, 0x0000_0000),
-        (0x14B0, 0x0801_0000),
+        (0x14B0, 0x0800_2000),
         (0x14B4, 0x0000_0000),
-        (0x14B8, 0x0803_0000),
+        (0x14B8, 0x0800_4000),
         (0x14BC, 0x0000_0000),
         (0x14C0, 0x4000_2000),
         (0x14C4, 0x0000_0000),
-        (0x14C8, 0x0804_0000),
+        (0x14C8, 0x0800_6000),
         (0x14CC, 0x0000_0000),
         (0x14D0, 0x8400_0008),
         (0x2280, 0xB940_0D66),
@@ -626,14 +626,14 @@ fn a_virtual_interrupt_reaches_el1_and_its_eoi_reaches_el2() {
 /// ```text
 /// _start: mov x0, #(1 << 31)    ; orr x0, x0, #(1 << 4)     // RW, IMO
 ///         msr hcr_el2, x0
-///         ldr x10, =0x08030000
+///         ldr x10, =0x08004000
 ///         ldr w2, =0x10000028   ; str w2, [x10, #0x100]     // GICH_LR0
 ///         mov w2, #1            ; str w2, [x10]             // GICH_HCR.En
 ///         ldr x0, =0x40002000   ; msr vbar_el1, x0
 ///         mov x0, #0x3c5        ; msr spsr_el2, x0          // EL1h, DAIF masked
 ///         adr x0, el1           ; msr elr_el2, x0
 ///         eret
-/// el1:    ldr x11, =0x08040000  ; mov w2, #1 ; str w2, [x11] // GICV_CTLR
+/// el1:    ldr x11, =0x08006000 ; mov w2, #1 ; str w2, [x11] // GICV_CTLR
 ///         mov w2, #0xf8         ; str w2, [x11, #4]         // GICV_PMR
 ///         mrs x7, isr_el1
 ///         wfi
@@ -676,11 +676,11 @@ fn a_virtual_irq_input_wakes_wfi_shows_in_isr_and_survives_a_snapshot() {
         (0x64, 0x1400_0000),
         (0x68, 0x1000_0028),
         (0x6C, 0x0000_0000),
-        (0x70, 0x0803_0000),
+        (0x70, 0x0800_4000),
         (0x74, 0x0000_0000),
         (0x78, 0x4000_2000),
         (0x7C, 0x0000_0000),
-        (0x80, 0x0804_0000),
+        (0x80, 0x0800_6000),
         (0x2280, 0xB940_0D66),
         (0x2284, 0x1400_0000),
     ];
@@ -728,7 +728,7 @@ fn a_reset_keeps_the_virtual_interface() {
     };
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram);
-    let (gich_hcr, gich_vtr, gicv_iidr) = (0x0803_0000, 0x0803_0004, 0x0804_00FC);
+    let (gich_hcr, gich_vtr, gicv_iidr) = (0x0800_4000, 0x0800_4004, 0x0800_60FC);
     // `str w2, [x1]` with GICH_HCR.En.
     load(&mut m, &[(0x00, 0xB900_0022), (0x04, 0x1400_0000)]);
     m.reg_write(Reg::X1, gich_hcr);
@@ -786,11 +786,11 @@ fn a_kernel_booted_with_el2_finds_all_of_it_in_its_device_tree() {
     assert_eq!(end - start, 3000);
     assert_eq!(prop("psci", "method"), Some(b"smc\0".to_vec()));
     assert_eq!(
-        prop("interrupt-controller@8000000", "reg"),
+        prop("interrupt-controller@8001000", "reg"),
         Some(be_cells(&GIC_REG_WITH_EL2))
     );
     assert_eq!(
-        prop("interrupt-controller@8000000", "interrupts"),
+        prop("interrupt-controller@8001000", "interrupts"),
         Some(maintenance_interrupt())
     );
     assert_eq!(
@@ -825,12 +825,9 @@ fn a_host_tree_booting_a_kernel_gets_every_edit() {
     let image = LinuxImage::parse(&kernel).expect("an Image");
     let ram_len = 6 * MIB;
     let mut ram = vec![0u8; ram_len as usize];
-    // QEMU's tree names the devices' interrupts as QEMU's `virt` wires them,
-    // which the board takes as its map.
-    let qemu_wired = VirtConfig {
-        interrupts: qemu_virt::qemu_virt_interrupts(),
-        ..VirtConfig::DEFAULT
-    };
+    // QEMU's tree names the devices' addresses and interrupts as QEMU's
+    // `virt` has them, which the board takes as its own.
+    let qemu_wired = qemu_virt::qemu_virt(VirtConfig::DEFAULT);
     let m = MachineBuilder::new(qemu_wired)
         .ram(RamSize::bytes(ram_len).expect("a valid size"))
         .device_tree(HOST_TREE)
@@ -882,8 +879,8 @@ fn a_host_tree_booting_a_kernel_gets_every_edit() {
 /// ```text
 /// _start: ldr x0, =0x40001000   ; msr vbar_el1, x0
 ///         mov x20, #0           ; mov x2, #0x5a
-///         ldr x1, =0x08030004   ; ldr w2, [x1]              // GICH_VTR
-///         ldr x1, =0x080400fc   ; ldr w2, [x1]              // GICV_IIDR
+///         ldr x1, =0x08004004   ; ldr w2, [x1]              // GICH_VTR
+///         ldr x1, =0x080060fc   ; ldr w2, [x1]              // GICV_IIDR
 /// 1:      b 1b
 ///         .org 0x1200                                       // sync, EL1h
 ///         mrs x3, esr_el1       ; mrs x5, far_el1
@@ -906,9 +903,9 @@ fn without_virtualization_the_virtual_interface_is_not_there() {
         (0x24, 0x0000_0000),
         (0x28, 0x4000_1000),
         (0x2C, 0x0000_0000),
-        (0x30, 0x0803_0004),
+        (0x30, 0x0800_4004),
         (0x34, 0x0000_0000),
-        (0x38, 0x0804_00FC),
+        (0x38, 0x0800_60FC),
         (0x1200, 0xD538_5203),
         (0x1204, 0xD538_6005),
         (0x1208, 0x9100_0694),
@@ -926,29 +923,29 @@ fn without_virtualization_the_virtual_interface_is_not_there() {
     let esr = m.reg_read(Reg::X3);
     assert_eq!(esr >> 26, 0x25, "a data abort from the current level: {esr:#x}");
     assert_eq!(esr & 0x3F, 0x10, "a synchronous external abort: {esr:#x}");
-    assert_eq!(m.reg_read(Reg::X5), 0x0804_00FC, "FAR_EL1: GICV_IIDR");
+    assert_eq!(m.reg_read(Reg::X5), 0x0800_60FC, "FAR_EL1: GICV_IIDR");
     assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 0x20);
 }
 
-/// With virtualization each frame of the virtual interface decodes its
-/// first 8 KiB (GIC-400 DDI 0471B Table 3-1: `GICH` at 0x4000 and its
-/// processor-specific alias at 0x5000, `GICV` at 0x6000 to 0x7FFF; QEMU
-/// `virt` `VIRT_GIC_HYP` and `VIRT_GIC_VCPU`): the reserved last word of
-/// each reads 0, `GICV_DIR` at the start of the `GICV` frame's second page
-/// deactivates (with `GICV_CTLR.EOImode`, an ID no List register holds
-/// counts in `GICH_HCR.EOICount`, §5.5.14), and a load just past either
-/// frame is a synchronous external abort, taken to EL2.
+/// With virtualization each frame of the virtual interface decodes 8 KiB
+/// at the GIC-400's offsets in its block (DDI 0471B Table 3-1: `GICH` at
+/// 0x4000 and its processor-specific alias at 0x5000, `GICV` at 0x6000 to
+/// 0x7FFF): the reserved last word of each reads 0, `GICV_DIR` at the start
+/// of the `GICV` frame's second page deactivates (with `GICV_CTLR.EOImode`,
+/// an ID no List register holds counts in `GICH_HCR.EOICount`, §5.5.14),
+/// and a load from the block's reserved first page or just past `GICV`, the
+/// block's last frame, is a synchronous external abort, taken to EL2.
 ///
 /// ```text
 /// _start: ldr x0, =0x40001000   ; msr vbar_el2, x0
 ///         mov x20, #0
-///         ldr x1, =0x08031ffc   ; mov x2, #0x5a ; ldr w2, [x1] ; mov x3, x2
-///         ldr x1, =0x08041ffc   ; mov x2, #0x5a ; ldr w2, [x1] ; mov x9, x2
-///         ldr x1, =0x08040000   ; mov x2, #0x200 ; str w2, [x1]  // GICV_CTLR.EOImode
-///         ldr x1, =0x08041000   ; mov x2, #5 ; str w2, [x1]      // GICV_DIR
-///         ldr x1, =0x08030000   ; ldr w4, [x1]                   // GICH_HCR
-///         ldr x1, =0x08032000   ; ldr w2, [x1] ; mov x6, x5
-///         ldr x1, =0x08042000   ; ldr w2, [x1]
+///         ldr x1, =0x08005ffc   ; mov x2, #0x5a ; ldr w2, [x1] ; mov x3, x2
+///         ldr x1, =0x08007ffc   ; mov x2, #0x5a ; ldr w2, [x1] ; mov x9, x2
+///         ldr x1, =0x08006000   ; mov x2, #0x200 ; str w2, [x1]  // GICV_CTLR.EOImode
+///         ldr x1, =0x08007000   ; mov x2, #5 ; str w2, [x1]      // GICV_DIR
+///         ldr x1, =0x08004000   ; ldr w4, [x1]                   // GICH_HCR
+///         ldr x1, =0x08000000   ; ldr w2, [x1] ; mov x6, x5
+///         ldr x1, =0x08008000   ; ldr w2, [x1]
 /// 1:      b 1b
 ///         .org 0x1200                                            // sync, EL2h
 ///         mrs x7, esr_el2       ; mrs x5, far_el2
@@ -985,13 +982,13 @@ fn each_virtual_interface_frame_decodes_8_kib() {
         (0x5C, 0xB940_0022),
         (0x60, 0x1400_0000),
         (0x68, 0x4000_1000),
-        (0x70, 0x0803_1FFC),
-        (0x78, 0x0804_1FFC),
-        (0x80, 0x0804_0000),
-        (0x88, 0x0804_1000),
-        (0x90, 0x0803_0000),
-        (0x98, 0x0803_2000),
-        (0xA0, 0x0804_2000),
+        (0x70, 0x0800_5FFC),
+        (0x78, 0x0800_7FFC),
+        (0x80, 0x0800_6000),
+        (0x88, 0x0800_7000),
+        (0x90, 0x0800_4000),
+        (0x98, 0x0800_0000),
+        (0xA0, 0x0800_8000),
         (0x1200, 0xD53C_5207),
         (0x1204, 0xD53C_6005),
         (0x1208, 0x9100_0694),
@@ -1008,9 +1005,9 @@ fn each_virtual_interface_frame_decodes_8_kib() {
     assert_eq!(m.reg_read(Reg::X3), 0, "GICH's last word: reserved");
     assert_eq!(m.reg_read(Reg::X9), 0, "GICV's last word: reserved");
     assert_eq!(m.reg_read(Reg::X4), 1 << 27, "GICH_HCR.EOICount: GICV_DIR counted");
-    assert_eq!(m.reg_read(Reg::X20), 2, "both loads past the frames aborted");
-    assert_eq!(m.reg_read(Reg::X6), 0x0803_2000, "FAR_EL2: past GICH");
-    assert_eq!(m.reg_read(Reg::X5), 0x0804_2000, "FAR_EL2: past GICV");
+    assert_eq!(m.reg_read(Reg::X20), 2, "both loads outside the frames aborted");
+    assert_eq!(m.reg_read(Reg::X6), 0x0800_0000, "FAR_EL2: the block's reserved page");
+    assert_eq!(m.reg_read(Reg::X5), 0x0800_8000, "FAR_EL2: past GICV");
     let esr = m.reg_read(Reg::X7);
     assert_eq!(esr >> 26, 0x25, "a data abort from the current level: {esr:#x}");
     assert_eq!(esr & 0x3F, 0x10, "a synchronous external abort: {esr:#x}");

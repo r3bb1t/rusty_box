@@ -23,7 +23,6 @@
 pub mod fdt;
 pub(crate) mod tree;
 
-use crate::board::UART0_BASE;
 use crate::devices::pl011::BaudRate;
 pub use fdt::DeviceTreeError;
 
@@ -33,12 +32,10 @@ pub use fdt::DeviceTreeError;
 pub const DEVICE_TREE_CAPACITY: usize = 64 * 1024;
 
 /// A command line that sends the kernel's console, and its earliest
-/// messages, to the board's UART.
-pub const SERIAL_CONSOLE_COMMAND_LINE: &str = "console=ttyAMA0 earlycon=pl011,0x9000000";
-const _: () = assert!(
-    UART0_BASE == 0x0900_0000,
-    "the earlycon address names the UART"
-);
+/// messages, to the board's UART: `earlycon` with no options finds it
+/// through `/chosen/stdout-path` (Linux `param_setup_earlycon`), which every
+/// layout's tree names, as EBBR requires.
+pub const SERIAL_CONSOLE_COMMAND_LINE: &str = "console=ttyAMA0 earlycon";
 
 /// The rate at which a directly booted kernel finds the UART's console set
 /// up, eight data bits, no parity, one stop bit, FIFOs enabled: the state

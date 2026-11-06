@@ -10,7 +10,8 @@ use std::time::Instant;
 
 use rusty_box_aarch64::cpu::DebugStops;
 use rusty_box_aarch64::{
-    CpuModel, CursorPos, Dimensions, Disk, DisplaySink, GuestStorage, InterruptMap, KeyboardInput,
+    CpuModel, CursorPos, DeviceLayout, Dimensions, Disk, DisplaySink, GuestStorage, InterruptMap,
+    KeyboardInput,
     Levels, MachineBuilder, MsiCount, MsiExtent, Redraw, Refreshed, Reg, Resolution, Rgb,
     RunBudget, Spi, StopReason, SysReg, TilePos, TransportOrder, Typed, VgaTextModeInfo,
     VirtMachine,
@@ -113,6 +114,9 @@ pub struct RunArgs {
     /// Which free virtio transport each device takes, the board's own
     /// unless `--transport-order` names another.
     pub transport_order: TransportOrder,
+    /// Where the devices sit, the board's own layout unless `--layout`
+    /// names another (a tree given with `--dtb` must name the same).
+    pub layout: DeviceLayout,
 }
 
 /// How a run ended.
@@ -128,7 +132,7 @@ pub const RUN_USAGE: &str = "[--cpu cortex-a57|armv9.2] [--ips N] [--max-ticks N
      \x20      [--display WIDTHxHEIGHT] [--virtio-keyboard] [--virtio-tablet] [--disk <raw image>]\n\
      \x20      [--screenshot <file.ppm>] [--virtualization]\n\
      \x20      [--interrupts uart=N,rtc=N,gpio=N,virtio=N,pcie-intx=N,msi-first=N,msi-count=N]\n\
-     \x20      [--transport-order first-free|last-free]";
+     \x20      [--transport-order first-free|last-free] [--layout board|qemu-virt]";
 
 /// The display's frames, kept as the host would show them.
 #[derive(Default)]
@@ -291,6 +295,7 @@ impl RunArgs {
             virtualization: Virtualization::Off,
             interrupts: InterruptMap::DEFAULT,
             transport_order: TransportOrder::DEFAULT,
+            layout: DeviceLayout::DEFAULT,
         }
     }
 
@@ -348,6 +353,10 @@ impl RunArgs {
                 self.transport_order = name
                     .parse()
                     .map_err(|e| format!("--transport-order {name}: {e}"))?;
+            }
+            "--layout" => {
+                let name = value(flag)?;
+                self.layout = name.parse().map_err(|e| format!("--layout {name}: {e}"))?;
             }
             _ => return Ok(Parsed::NotMine),
         }

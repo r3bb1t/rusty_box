@@ -58,6 +58,7 @@ pub mod disk;
 pub mod identity;
 pub mod instrumentation;
 pub mod interrupt_map;
+pub mod layout;
 pub mod machine;
 mod softfloat;
 pub mod storage;
@@ -83,13 +84,15 @@ pub use instrumentation::{Execution, Instrumentation, NoInstrumentation};
 pub use interrupt_map::{
     InterruptMap, InterruptMapError, InterruptSource, MsiCount, MsiExtent, MsiSpis, Spi,
 };
+pub use layout::{DeviceLayout, UnknownDeviceLayout};
 #[cfg(feature = "alloc")]
 pub use machine::Display;
 #[cfg(feature = "alloc")]
 pub use machine::StopHandle;
 pub use machine::{
-    BatchOutcome, BuildError, HostTreeInterrupt, MachineBuilder, MemoryError, MemoryLoan,
-    OnResetRequest, PowerState, RamSize, StopReason, VirtConfig, VirtMachine,
+    BatchOutcome, BuildError, HostTreeAddress, HostTreeInterrupt, MachineBuilder, MemoryError,
+    MemoryLoan, OnResetRequest, PowerState, RamSize, StopReason, TreeDevice, VirtConfig,
+    VirtMachine,
 };
 pub use machine::{Keyboard, Pointer};
 pub use rusty_box_core::input::pointer::{PointerButton, PointerInput, PointerPos, WheelSteps};

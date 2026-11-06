@@ -14,6 +14,7 @@ use crate::cpu::PsciConduit;
 use crate::devices::gicv2::{GicExtensions, SpiCount};
 use crate::identity::{BoardIdentity, IdentityNames};
 use crate::interrupt_map::{InterruptMap, MsiCount, MsiExtent, MsiSpis, Spi, Wiring};
+use crate::layout::{DeviceLayout, DeviceWindows};
 use crate::CpuModel;
 
 const RAM: u64 = 256 << 20;
@@ -27,12 +28,16 @@ fn board(identity: &BoardIdentity, gic: GicExtensions, chosen: Chosen<'static>) 
         gic,
         chosen,
         wiring: default_wiring(),
+        windows: OWN,
     };
     let mut out = vec![0u8; 64 * 1024];
     let len = write(&tree, &mut out).expect("fits");
     out.truncate(len);
     out
 }
+
+/// The board's own layout.
+const OWN: DeviceWindows = DeviceLayout::Board.windows();
 
 /// The board's own interrupt map on the GIC-400's 480 SPIs.
 fn default_wiring() -> Wiring {
@@ -99,10 +104,10 @@ fn the_root_memory_and_console_are_the_boards() {
     );
     assert_eq!(
         prop(&tree, "aliases", "serial0"),
-        Some(&b"/serial@9000000\0"[..])
+        Some(&b"/serial@8020000\0"[..])
     );
     assert_eq!(
-        prop(&tree, "serial@9000000", "compatible"),
+        prop(&tree, "serial@8020000", "compatible"),
         Some(&b"arm,pl011\0arm,primecell\0"[..])
     );
 
@@ -167,10 +172,12 @@ fn the_caches_are_those_ccsidr_reports() {
 
 /// The GIC is described by the GICv2 binding, each frame by the region it
 /// decodes; with the Virtualization Extensions, the virtual interface's
-/// two frames follow and the maintenance interrupt, PPI 9, is named.
+/// two frames follow and the maintenance interrupt, PPI 9, is named. The
+/// frames sit in one 64 KiB block at the GIC-400's offsets (DDI 0471B
+/// Table 3-1), the MSI frame in the page after it.
 #[test]
 fn the_gic_names_the_frames_it_decodes() {
-    let gic = "interrupt-controller@8000000";
+    let gic = "interrupt-controller@8001000";
     let tree = plain();
     assert_eq!(
         prop(&tree, gic, "compatible"),
@@ -178,7 +185,7 @@ fn the_gic_names_the_frames_it_decodes() {
     );
     assert_eq!(
         prop(&tree, gic, "reg").map(cells),
-        Some(vec![0, 0x0800_0000, 0, 0x1000, 0, 0x0801_0000, 0, 0x2000])
+        Some(vec![0, 0x0800_1000, 0, 0x1000, 0, 0x0800_2000, 0, 0x2000])
     );
     assert_eq!(prop(&tree, gic, "interrupts"), None);
     let tree = board(
@@ -190,19 +197,19 @@ fn the_gic_names_the_frames_it_decodes() {
         prop(&tree, gic, "reg").map(cells),
         Some(vec![
             0,
-            0x0800_0000,
+            0x0800_1000,
             0,
             0x1000,
             0,
-            0x0801_0000,
+            0x0800_2000,
             0,
             0x2000,
             0,
-            0x0803_0000,
+            0x0800_4000,
             0,
             0x2000,
             0,
-            0x0804_0000,
+            0x0800_6000,
             0,
             0x2000
         ])
@@ -212,7 +219,11 @@ fn the_gic_names_the_frames_it_decodes() {
         Some(vec![1, 9, 0x104])
     );
     assert_eq!(
-        prop(&tree, &std::format!("{gic}/msi-controller@8020000"), "compatible"),
+        prop(&tree, &std::format!("{gic}/msi-controller@8010000"), "reg").map(cells),
+        Some(vec![0, 0x0801_0000, 0, 0x1000])
+    );
+    assert_eq!(
+        prop(&tree, &std::format!("{gic}/msi-controller@8010000"), "compatible"),
         Some(&b"arm,gic-v2m-frame\0"[..])
     );
 }
@@ -305,22 +316,35 @@ fn chosen_carries_the_boot_and_no_entropy() {
 /// banks, every virtio transport by level, and the PCIe host whose node is
 /// named for its ECAM window, its INTx swizzled across the bridge's SPIs.
 /// The SPIs are the board's own map's: the devices' from SPI 0 by address.
+/// The addresses are the board's own layout's: a 64 KiB page each after the
+/// GIC's (DEN0001C P29), the PCIe windows in the 40-bit map's mapped I/O.
 #[test]
 fn the_devices_are_described_where_they_are() {
     let tree = plain();
+    for (node, base) in [
+        ("serial@8020000", 0x0802_0000),
+        ("rtc@8030000", 0x0803_0000),
+        ("gpio@8040000", 0x0804_0000),
+    ] {
+        assert_eq!(
+            prop(&tree, node, "reg").map(cells),
+            Some(vec![0, base, 0, 0x1000]),
+            "{node}"
+        );
+    }
     assert_eq!(
-        prop(&tree, "serial@9000000", "interrupts").map(cells),
+        prop(&tree, "serial@8020000", "interrupts").map(cells),
         Some(vec![0, 0, 4])
     );
     assert_eq!(
-        prop(&tree, "rtc@9010000", "interrupts").map(cells),
+        prop(&tree, "rtc@8030000", "interrupts").map(cells),
         Some(vec![0, 1, 4])
     );
     assert_eq!(
-        prop(&tree, "gpio@9030000", "interrupts").map(cells),
+        prop(&tree, "gpio@8040000", "interrupts").map(cells),
         Some(vec![0, 2, 4])
     );
-    let gpio = prop(&tree, "gpio@9030000", "phandle").map(cells).expect("phandle");
+    let gpio = prop(&tree, "gpio@8040000", "phandle").map(cells).expect("phandle");
     assert_eq!(
         prop(&tree, "gpio-keys/key-power", "gpios").map(cells),
         Some(vec![gpio[0], 3, 0])
@@ -333,10 +357,15 @@ fn the_devices_are_described_where_they_are() {
         prop(&tree, "flash@0", "reg").map(cells),
         Some(vec![0, 0, 0, 0x0400_0000, 0, 0x0400_0000, 0, 0x0400_0000])
     );
-    for (n, node) in [(0, "virtio@a000000"), (31, "virtio@a003e00")] {
+    for (n, node) in [(0, "virtio@8050000"), (31, "virtio@8240000")] {
         assert_eq!(
             prop(&tree, node, "interrupts").map(cells),
             Some(vec![0, 3 + n, 4]),
+            "{node}"
+        );
+        assert_eq!(
+            prop(&tree, node, "reg").map(cells),
+            Some(vec![0, 0x0805_0000 + n * 0x1_0000, 0, 0x200]),
             "{node}"
         );
         assert_eq!(prop(&tree, node, "dma-coherent"), Some(&[][..]), "{node}");
@@ -344,25 +373,25 @@ fn the_devices_are_described_where_they_are() {
     // Coherence is each device's own (Devicetree Specification 2.3), so
     // the root does not say it for them.
     assert_eq!(prop(&tree, "", "dma-coherent"), None);
-    assert_eq!(prop(&tree, "serial@9000000", "dma-coherent"), None);
-    let pcie = "pcie@4010000000";
+    assert_eq!(prop(&tree, "serial@8020000", "dma-coherent"), None);
+    let pcie = "pcie@4000000000";
     assert_eq!(
         prop(&tree, pcie, "reg").map(cells),
-        Some(vec![0x40, 0x1000_0000, 0, 0x1000_0000])
+        Some(vec![0x40, 0, 0, 0x1000_0000])
     );
     assert_eq!(prop(&tree, pcie, "bus-range").map(cells), Some(vec![0, 255]));
-    // I/O space from 0 at 0x3EFF_0000, 64 KiB; 32-bit memory at
-    // 0x1000_0000; 64-bit memory at 512 GiB, 512 GiB of it.
+    // I/O space from 0 at 0x0825_0000, 64 KiB; 32-bit memory at 512 MiB,
+    // 512 MiB of it; 64-bit memory at 384 GiB, 128 GiB of it.
     assert_eq!(
         prop(&tree, pcie, "ranges").map(cells),
         Some(vec![
-            0x0100_0000, 0, 0, 0, 0x3EFF_0000, 0, 0x1_0000, //
-            0x0200_0000, 0, 0x1000_0000, 0, 0x1000_0000, 0, 0x2EFF_0000, //
-            0x0300_0000, 0x80, 0, 0x80, 0, 0x80, 0,
+            0x0100_0000, 0, 0, 0, 0x0825_0000, 0, 0x1_0000, //
+            0x0200_0000, 0, 0x2000_0000, 0, 0x2000_0000, 0, 0x2000_0000, //
+            0x0300_0000, 0x60, 0, 0x60, 0, 0x20, 0,
         ])
     );
     assert_eq!(prop(&tree, pcie, "dma-coherent"), Some(&[][..]));
-    let msi = prop(&tree, "interrupt-controller@8000000/msi-controller@8020000", "phandle");
+    let msi = prop(&tree, "interrupt-controller@8001000/msi-controller@8010000", "phandle");
     assert_eq!(prop(&tree, pcie, "msi-parent"), msi, "the GICv2m frame");
     assert_eq!(prop(&tree, pcie, "msi-map"), None);
     let map = prop(&tree, pcie, "interrupt-map").map(cells).expect("a map");
@@ -400,16 +429,17 @@ fn the_tree_describes_the_interrupt_map_it_is_given() {
         gic: GicExtensions::Absent,
         chosen: PLAIN,
         wiring: map.wire(SpiCount::DEFAULT).expect("fits"),
+        windows: OWN,
     };
     let mut out = vec![0u8; 64 * 1024];
     let len = write(&tree, &mut out).expect("fits");
     let tree = &out[..len];
     for (node, spi) in [
-        ("serial@9000000", 100),
-        ("rtc@9010000", 7),
-        ("gpio@9030000", 300),
-        ("virtio@a000000", 200),
-        ("virtio@a003e00", 231),
+        ("serial@8020000", 100),
+        ("rtc@8030000", 7),
+        ("gpio@8040000", 300),
+        ("virtio@8050000", 200),
+        ("virtio@8240000", 231),
     ] {
         assert_eq!(
             prop(tree, node, "interrupts").map(cells),
@@ -417,11 +447,65 @@ fn the_tree_describes_the_interrupt_map_it_is_given() {
             "{node}"
         );
     }
-    let pcie = prop(tree, "pcie@4010000000", "interrupt-map")
+    let pcie = prop(tree, "pcie@4000000000", "interrupt-map")
         .map(cells)
         .expect("a map");
     let pins: Vec<u32> = (0..4).map(|pin| pcie[pin * 10 + 8]).collect();
     assert_eq!(pins, [40, 41, 42, 43], "device 0's INTA to INTD");
+}
+
+/// QEMU's layout is the one the tree describes when it is chosen: each node
+/// named for, and its `reg` at, the address QEMU's `virt` gives the device
+/// (`hw/arm/virt.c` `base_memmap`, `extended_memmap`), the console's alias
+/// following the UART, and the PCIe host's windows QEMU's.
+#[test]
+fn the_tree_describes_the_layout_it_is_given() {
+    let tree = BoardTree {
+        identity: &BoardIdentity::RUSTY_BOX,
+        ram_len: RAM,
+        cpu: CpuModel::CortexA57,
+        psci: PsciConduit::Hvc,
+        gic: GicExtensions::Virtualization,
+        chosen: PLAIN,
+        wiring: default_wiring(),
+        windows: DeviceLayout::QemuVirt.windows(),
+    };
+    let mut out = vec![0u8; 64 * 1024];
+    let len = write(&tree, &mut out).expect("fits");
+    let tree = &out[..len];
+    assert_eq!(
+        prop(tree, "aliases", "serial0"),
+        Some(&b"/serial@9000000\0"[..])
+    );
+    for (node, reg) in [
+        ("serial@9000000", vec![0, 0x0900_0000, 0, 0x1000]),
+        ("rtc@9010000", vec![0, 0x0901_0000, 0, 0x1000]),
+        ("gpio@9030000", vec![0, 0x0903_0000, 0, 0x1000]),
+        ("virtio@a000000", vec![0, 0x0A00_0000, 0, 0x200]),
+        ("virtio@a003e00", vec![0, 0x0A00_3E00, 0, 0x200]),
+        ("pcie@4010000000", vec![0x40, 0x1000_0000, 0, 0x1000_0000]),
+        (
+            "interrupt-controller@8000000",
+            vec![
+                0, 0x0800_0000, 0, 0x1000, 0, 0x0801_0000, 0, 0x2000, //
+                0, 0x0803_0000, 0, 0x2000, 0, 0x0804_0000, 0, 0x2000,
+            ],
+        ),
+        (
+            "interrupt-controller@8000000/msi-controller@8020000",
+            vec![0, 0x0802_0000, 0, 0x1000],
+        ),
+    ] {
+        assert_eq!(prop(tree, node, "reg").map(cells), Some(reg), "{node}");
+    }
+    assert_eq!(
+        prop(tree, "pcie@4010000000", "ranges").map(cells),
+        Some(vec![
+            0x0100_0000, 0, 0, 0, 0x3EFF_0000, 0, 0x1_0000, //
+            0x0200_0000, 0, 0x1000_0000, 0, 0x1000_0000, 0, 0x2EFF_0000, //
+            0x0300_0000, 0x80, 0, 0x80, 0, 0x80, 0,
+        ])
+    );
 }
 
 /// The board's tree, with EL2 its largest, uses its property names well
@@ -463,6 +547,7 @@ fn a_tree_that_does_not_fit_is_refused() {
         gic: GicExtensions::Absent,
         chosen: PLAIN,
         wiring: default_wiring(),
+        windows: OWN,
     };
     let mut short = vec![0u8; len - 1];
     assert_eq!(

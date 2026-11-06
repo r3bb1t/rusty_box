@@ -31,7 +31,7 @@ use rusty_box_core::{ClockHz, Progress, RunBudget, SnapError, VmClock, VmInstant
 
 use crate::board::{
     Plugged, Plugs, TransportOrder, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE,
-    GPIO_BASE, RAM_BASE, RAM_LIMIT, RTC_BASE, UART0_BASE, VIRTIO_MMIO_BASE,
+    RAM_BASE, RAM_LIMIT,
 };
 use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
 use crate::boot::tree::{BoardTree, Chosen, InitrdRange};
@@ -52,8 +52,8 @@ use crate::devices::virtio::input::InputKind;
 use crate::disk::Disk;
 use crate::identity::BoardIdentity;
 use crate::instrumentation::{Instrumentation, NoInstrumentation};
-use crate::devices::virtio_mmio::{TRANSPORT_COUNT, TRANSPORT_SIZE};
 use crate::interrupt_map::{InterruptMap, InterruptMapError, InterruptSource, Spi, Wiring};
+use crate::layout::{DeviceLayout, DeviceWindows, TransportRegister};
 #[cfg(feature = "alloc")]
 use crate::storage::OwnedStorage;
 use crate::storage::{GuestStorage, LentStorage};
@@ -109,6 +109,10 @@ pub struct VirtConfig {
     pub interrupts: InterruptMap,
     /// Which free virtio-mmio transport each device plugged in takes.
     pub transport_order: TransportOrder,
+    /// Where the devices sit. A host's device tree
+    /// ([`MachineBuilder::device_tree`]) names their addresses itself, and
+    /// is refused where it names others ([`BuildError::HostTreeAddress`]).
+    pub layout: DeviceLayout,
 }
 
 impl VirtConfig {
@@ -129,6 +133,7 @@ impl VirtConfig {
         gic: GicShape::DEFAULT,
         interrupts: InterruptMap::DEFAULT,
         transport_order: TransportOrder::DEFAULT,
+        layout: DeviceLayout::DEFAULT,
     };
 }
 
@@ -207,6 +212,9 @@ pub enum BuildError {
     /// one of the board's devices, an interrupt the configuration's
     /// interrupt map does not wire it to.
     HostTreeInterrupt(HostTreeInterrupt),
+    /// A host's device tree puts one of the board's devices where the
+    /// configuration's layout does not.
+    HostTreeAddress(HostTreeAddress),
 }
 
 /// One of the board's devices for which a host's device tree names an
@@ -265,6 +273,7 @@ impl core::fmt::Display for BuildError {
             Self::FixedCounterRate(e) => write!(f, "{e}"),
             Self::InterruptMap(e) => write!(f, "interrupt map: {e}"),
             Self::HostTreeInterrupt(e) => write!(f, "{e}"),
+            Self::HostTreeAddress(e) => write!(f, "{e}"),
         }
     }
 }
@@ -278,6 +287,7 @@ impl core::error::Error for BuildError {
             Self::FixedCounterRate(e) => Some(e),
             Self::InterruptMap(e) => Some(e),
             Self::HostTreeInterrupt(e) => Some(e),
+            Self::HostTreeAddress(e) => Some(e),
             Self::FirmwareTooLarge | Self::VariablesTooLarge | Self::LentRamSize { .. } => None,
         }
     }
@@ -838,6 +848,7 @@ struct Description<'i> {
     layout: Option<KernelLayout>,
     levels: TreeLevels,
     wiring: Wiring,
+    windows: DeviceWindows,
 }
 
 impl<'i> Description<'i> {
@@ -884,6 +895,7 @@ fn describe(
                 gic,
                 chosen: machine.chosen(),
                 wiring: machine.wiring,
+                windows: machine.windows,
             };
             boot::tree::write(&board, &mut out.bytes)?
         }
@@ -892,21 +904,29 @@ fn describe(
     Ok(())
 }
 
-/// Refuse a host's `tree` that names, for one of the board's devices that
-/// drive an interrupt line — the UART, the RTC, the GPIO and the virtio
-/// transports — an interrupt `wiring` does not give it: QEMU's
-/// `arm_load_dtb` takes such a tree, and its guest waits on a line the
-/// device does not drive. The PCIe host's INTA to INTD and the GICv2m
-/// frame's SPIs no device of the board drives, the bus having none, so how
-/// the tree describes them is its own.
+/// Refuse a host's `tree` that puts one of the board's devices where the
+/// layout `windows` does not, or names, for one of them that drives an
+/// interrupt line — the UART, the RTC, the GPIO and the virtio transports —
+/// an interrupt `wiring` does not give it: QEMU's `arm_load_dtb` takes such
+/// a tree, and its guest drives registers nothing answers at or waits on a
+/// line the device does not drive. The PCIe host's INTA to INTD and the
+/// GICv2m frame's SPIs no device of the board drives, the bus having none,
+/// so how the tree describes them is its own.
 ///
 /// The tree is read as the board's tree and QEMU's are written: the devices
 /// are children of the root, and their interrupts go to an interrupt
-/// controller of three-cell specifiers, as the GIC's are. A device is the
-/// enabled child ([`fdt::TreeNode::is_enabled`]) whose first `reg` address,
-/// in the root's `#address-cells` (Devicetree Specification 2.3.5, two when
-/// absent), is its registers'; a child whose `reg` holds no such address is
-/// none of the board's. Its interrupt is the first its `interrupts-extended`
+/// controller of three-cell specifiers, as the GIC's are. Each enabled child
+/// ([`fdt::TreeNode::is_enabled`]) that is one of the board's devices
+/// ([`TreeDevice::regions_of`]) must have each `reg` region the device has, in the
+/// root's `#address-cells` and `#size-cells` (Devicetree Specification
+/// 2.3.5, two and one when absent), where the layout has it
+/// ([`BuildError::HostTreeAddress`]): the GIC's distributor, CPU interface,
+/// virtual interface control and virtual CPU interface in that order, as the
+/// GICv2 binding lists them, as many of them as the node names; every other
+/// device's first region. A child whose `reg` holds no such address is none
+/// of the board's. The GICv2m frame, which no device of the board's empty
+/// bus sends an MSI to, the tree places as it likes. A device's
+/// interrupt is the first its `interrupts-extended`
 /// names (2.4.1.3), which Linux reads before `interrupts`
 /// (`of_irq_parse_one`), or else its `interrupts` first specifier, whose
 /// parent is its `interrupt-parent`, or the root's (2.4.1.1); either is
@@ -914,13 +934,20 @@ fn describe(
 /// then the SPI's number), and one whose parent is no such controller names
 /// no SPI of the GIC's. A device the tree leaves out, or gives no
 /// interrupt, the tree leaves alone.
-fn check_host_interrupts(tree: &[u8], wiring: Wiring) -> Result<(), BuildError> {
-    let mut address_cells = 2;
+fn check_host_tree(
+    tree: &[u8],
+    wiring: Wiring,
+    windows: DeviceWindows,
+) -> Result<(), BuildError> {
+    let mut cells = RegCells::DEFAULT;
     let mut root_parent = None;
     let mut parents = ParentCache::EMPTY;
     fdt::each_node(tree, |node| {
         if node.depth() == 0 {
-            address_cells = node.cell_or("#address-cells", 2)?;
+            cells = RegCells {
+                address: node.cell_or("#address-cells", RegCells::DEFAULT.address)?,
+                size: node.cell_or("#size-cells", RegCells::DEFAULT.size)?,
+            };
             root_parent = node
                 .property("interrupt-parent")?
                 .map(|p| fdt::cell(p, 0))
@@ -930,11 +957,27 @@ fn check_host_interrupts(tree: &[u8], wiring: Wiring) -> Result<(), BuildError> 
         if node.depth() != 1 || !node.is_enabled()? {
             return Ok(());
         }
-        let Some(wired) = node
-            .property("reg")?
-            .and_then(|reg| reg_address(reg, address_cells))
-            .and_then(|address| device_at(address, wiring))
-        else {
+        let Some(reg) = node.property("reg")? else {
+            return Ok(());
+        };
+        let Some(address) = reg_address(reg, cells, 0) else {
+            return Ok(());
+        };
+        if let Some(regions) = TreeDevice::regions_of(node)? {
+            for (region, &frame) in regions.iter().enumerate() {
+                let Some(named) = reg_address(reg, cells, region) else {
+                    break;
+                };
+                if !frame.is_at(named, windows) {
+                    return Err(BuildError::HostTreeAddress(HostTreeAddress {
+                        device: frame,
+                        named,
+                        board: frame.board_address(windows),
+                    }));
+                }
+            }
+        }
+        let Some(wired) = device_at(address, wiring, windows) else {
             return Ok(());
         };
         // An empty property names no interrupt (2.4.1.1, 2.4.1.3).
@@ -970,11 +1013,40 @@ fn check_host_interrupts(tree: &[u8], wiring: Wiring) -> Result<(), BuildError> 
     })
 }
 
-/// The interrupt parent last looked up, by its phandle, and whether it is
-/// an interrupt controller of three-cell specifiers: the devices of a tree
-/// share one, so each build looks it up once.
+/// What kind of interrupt parent a node is.
+///
+/// Closed (R5).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParentKind {
+    /// An interrupt controller of three-cell specifiers, as the GIC is.
+    GicLike,
+    /// Any other node.
+    Other,
+}
+
+impl ParentKind {
+    /// What kind `node` is.
+    fn of(node: fdt::TreeNode<'_>) -> Result<Self, DeviceTreeError> {
+        let controller = node.property("interrupt-controller")?.is_some();
+        Ok(if controller && node.cell_or("#interrupt-cells", 0)? == 3 {
+            Self::GicLike
+        } else {
+            Self::Other
+        })
+    }
+}
+
+/// An interrupt parent looked up, by its phandle.
+#[derive(Clone, Copy)]
+struct KnownParent {
+    phandle: u32,
+    kind: ParentKind,
+}
+
+/// The interrupt parent last looked up: the devices of a tree share one, so
+/// each build looks it up once.
 struct ParentCache {
-    last: Option<(u32, bool)>,
+    last: Option<KnownParent>,
 }
 
 impl ParentCache {
@@ -990,19 +1062,21 @@ fn gic_spi(
     parent: u32,
     specifier: Option<&[u8]>,
 ) -> Result<Option<Spi>, DeviceTreeError> {
-    let gic_like = match parents.last {
-        Some((known, gic_like)) if known == parent => gic_like,
+    let kind = match parents.last {
+        Some(known) if known.phandle == parent => known.kind,
         Some(_) | None => {
             let node = fdt::node_with_phandle(tree, parent)?.ok_or(DeviceTreeError::Malformed)?;
-            let gic_like = node.property("interrupt-controller")?.is_some()
-                && node.cell_or("#interrupt-cells", 0)? == 3;
-            parents.last = Some((parent, gic_like));
-            gic_like
+            let kind = ParentKind::of(node)?;
+            parents.last = Some(KnownParent {
+                phandle: parent,
+                kind,
+            });
+            kind
         }
     };
-    Ok(match specifier {
-        Some(specifier) if gic_like => specifier_spi(specifier),
-        Some(_) | None => None,
+    Ok(match (specifier, kind) {
+        (Some(specifier), ParentKind::GicLike) => specifier_spi(specifier),
+        (Some(_), ParentKind::Other) | (None, _) => None,
     })
 }
 
@@ -1012,26 +1086,165 @@ struct WiredDevice {
     spi: Spi,
 }
 
-/// The device whose registers are at `address`, if one of the board's
-/// devices with an interrupt line is: the UART, the RTC, the GPIO or a
-/// virtio transport.
-fn device_at(address: u64, wiring: Wiring) -> Option<WiredDevice> {
+/// The device whose registers are at `address` in the layout `windows`, if
+/// one of the board's devices with an interrupt line is: the UART, the RTC,
+/// the GPIO or a virtio transport.
+fn device_at(address: PhysAddr, wiring: Wiring, windows: DeviceWindows) -> Option<WiredDevice> {
     let wired = |source, spi| Some(WiredDevice { source, spi });
-    match address {
-        UART0_BASE => wired(InterruptSource::Uart, wiring.uart()),
-        RTC_BASE => wired(InterruptSource::Rtc, wiring.rtc()),
-        GPIO_BASE => wired(InterruptSource::Gpio, wiring.gpio()),
-        _ => {
-            let offset = address.checked_sub(VIRTIO_MMIO_BASE)?;
-            let slot = offset / TRANSPORT_SIZE;
-            if offset % TRANSPORT_SIZE == 0 && slot < TRANSPORT_COUNT {
+    if address == windows.uart {
+        wired(InterruptSource::Uart, wiring.uart())
+    } else if address == windows.rtc {
+        wired(InterruptSource::Rtc, wiring.rtc())
+    } else if address == windows.gpio {
+        wired(InterruptSource::Gpio, wiring.gpio())
+    } else {
+        match windows.virtio.slot_of(address) {
+            Some(TransportRegister { slot, reg }) if reg.get() == 0 => {
                 wired(InterruptSource::Virtio, wiring.virtio(slot as u8))
-            } else {
-                None
             }
+            Some(_) | None => None,
         }
     }
 }
+
+/// One of the board's devices a host's tree describes by its registers.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TreeDevice {
+    /// The GIC's distributor, the GIC node's first `reg` region.
+    GicDistributor,
+    /// The GIC's CPU interface, its second.
+    GicCpuInterface,
+    /// The GIC's virtual interface control registers (`GICH`), its third.
+    GicVirtualControl,
+    /// The GIC's virtual CPU interface (`GICV`), its fourth.
+    GicVirtualCpu,
+    Uart,
+    Rtc,
+    Gpio,
+    /// A virtio-mmio transport.
+    Virtio,
+    /// The PCIe host bridge, by its configuration space.
+    PcieHost,
+}
+
+impl TreeDevice {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::GicDistributor => "the GIC's distributor",
+            Self::GicCpuInterface => "the GIC's CPU interface",
+            Self::GicVirtualControl => "the GIC's virtual interface control",
+            Self::GicVirtualCpu => "the GIC's virtual CPU interface",
+            Self::Uart => "the UART",
+            Self::Rtc => "the RTC",
+            Self::Gpio => "the GPIO",
+            Self::Virtio => "a virtio transport",
+            Self::PcieHost => "the PCIe host",
+        }
+    }
+
+    /// What a node's `reg` regions are, in order, if it is one of the
+    /// board's devices: by its being an interrupt controller of three-cell
+    /// specifiers, the GIC's frames as the GICv2 binding lists them; by its
+    /// `compatible` (each one's binding), any other device's one.
+    fn regions_of(node: fdt::TreeNode<'_>) -> Result<Option<&'static [Self]>, DeviceTreeError> {
+        if ParentKind::of(node)? == ParentKind::GicLike {
+            return Ok(Some(&[
+                Self::GicDistributor,
+                Self::GicCpuInterface,
+                Self::GicVirtualControl,
+                Self::GicVirtualCpu,
+            ]));
+        }
+        let Some(compatible) = node.property("compatible")? else {
+            return Ok(None);
+        };
+        let names = |name: &[u8]| compatible.split(|&b| b == 0).any(|c| c == name);
+        Ok(if names(b"arm,pl011") {
+            Some(&[Self::Uart])
+        } else if names(b"arm,pl031") {
+            Some(&[Self::Rtc])
+        } else if names(b"arm,pl061") {
+            Some(&[Self::Gpio])
+        } else if names(b"virtio,mmio") {
+            Some(&[Self::Virtio])
+        } else if names(b"pci-host-ecam-generic") {
+            Some(&[Self::PcieHost])
+        } else {
+            None
+        })
+    }
+
+    /// Whether `address` is where the layout `windows` has the device: for
+    /// a virtio transport, any transport's registers.
+    fn is_at(self, address: PhysAddr, windows: DeviceWindows) -> bool {
+        match self {
+            Self::GicDistributor
+            | Self::GicCpuInterface
+            | Self::GicVirtualControl
+            | Self::GicVirtualCpu
+            | Self::Uart
+            | Self::Rtc
+            | Self::Gpio
+            | Self::PcieHost => address == self.board_address(windows),
+            Self::Virtio => matches!(
+                windows.virtio.slot_of(address),
+                Some(TransportRegister { reg, .. }) if reg.get() == 0
+            ),
+        }
+    }
+
+    /// Where the layout `windows` has the device: for the virtio
+    /// transports, the first.
+    fn board_address(self, windows: DeviceWindows) -> PhysAddr {
+        match self {
+            Self::GicDistributor => windows.gic.dist,
+            Self::GicCpuInterface => windows.gic.cpu,
+            Self::GicVirtualControl => windows.gic.hyp,
+            Self::GicVirtualCpu => windows.gic.vcpu,
+            Self::Uart => windows.uart,
+            Self::Rtc => windows.rtc,
+            Self::Gpio => windows.gpio,
+            Self::Virtio => windows.virtio.first,
+            Self::PcieHost => windows.pcie.ecam.base,
+        }
+    }
+}
+
+impl core::fmt::Display for TreeDevice {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// One of the board's devices a host's device tree puts at an address the
+/// configuration's layout ([`VirtConfig::layout`]) does not: a guest
+/// following the tree would drive registers no device answers at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HostTreeAddress {
+    pub device: TreeDevice,
+    /// Where the tree puts it.
+    pub named: PhysAddr,
+    /// Where the layout has it; for the virtio transports, the first.
+    pub board: PhysAddr,
+}
+
+impl core::fmt::Display for HostTreeAddress {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "the device tree puts {} at {:#x}, where the device layout has it at {:#x}; \
+             the board has its devices where its layout puts them, so a tree describing \
+             them there, or a layout that has them where the tree does, boots",
+            self.device,
+            self.named.get(),
+            self.board.get()
+        )
+    }
+}
+
+impl core::error::Error for HostTreeAddress {}
 
 /// The SPI an interrupt specifier of the GIC binding names: its type cell
 /// 0, then the SPI's number; `None` for any other.
@@ -1042,17 +1255,37 @@ fn specifier_spi(specifier: &[u8]) -> Option<Spi> {
     }
 }
 
-/// The first address of a `reg` of `address_cells` cells an address, if it
-/// has one that 64 bits hold.
-fn reg_address(reg: &[u8], address_cells: u32) -> Option<u64> {
+/// The address of a `reg`'s region `region` (from 0), its regions `cells`
+/// long, if it has that region and 64 bits hold its address.
+fn reg_address(reg: &[u8], cells: RegCells, region: usize) -> Option<PhysAddr> {
+    // The cell counts are the tree's, so a count no `reg` could hold names
+    // no region rather than overflowing.
+    let per_region = usize::try_from(cells.address.checked_add(cells.size)?).ok()?;
+    let first = region.checked_mul(per_region)?;
     let mut address = 0u64;
-    for i in 0..address_cells as usize {
+    for i in 0..cells.address as usize {
         if address >> 32 != 0 {
             return None;
         }
-        address = address << 32 | u64::from(fdt::cell(reg, i).ok()?);
+        address = address << 32 | u64::from(fdt::cell(reg, first.checked_add(i)?).ok()?);
     }
-    Some(address)
+    Some(PhysAddr::new(address))
+}
+
+/// How many cells a `reg` region's address and size take, its parent's
+/// `#address-cells` and `#size-cells` (Devicetree Specification 2.3.5,
+/// two and one when absent).
+#[derive(Clone, Copy)]
+struct RegCells {
+    address: u32,
+    size: u32,
+}
+
+impl RegCells {
+    const DEFAULT: Self = Self {
+        address: 2,
+        size: 1,
+    };
 }
 
 /// A host's tree edited as QEMU edits a `-dtb` tree (`arm_load_dtb`), in
@@ -1164,7 +1397,7 @@ fn plan<L: Levels>(
         .wire(config.gic.spis)
         .map_err(BuildError::InterruptMap)?;
     if let TreeSource::Host(tree) = source_tree {
-        check_host_interrupts(tree, wiring)?;
+        check_host_tree(tree, wiring, config.layout.windows())?;
     }
     let ram_len = ram.get();
     let boot = match choice {
@@ -1187,6 +1420,7 @@ fn plan<L: Levels>(
             layout,
             levels: TreeLevels::of::<L>(),
             wiring,
+            windows: config.layout.windows(),
         };
         describe(source_tree, machine, identity, &mut device_tree)?;
         let tree_len = device_tree.len as u64;
@@ -1245,6 +1479,7 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
             config.gic,
             wiring,
             config.transport_order,
+            config.layout,
         ),
         identity_hash: identity_hash(&identity),
         observer,
@@ -2326,6 +2561,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             virtualization: u8::from(L::EL2),
             spectre: self.config.spectre.tag(),
             transports: self.board.occupied_transports(),
+            layout: self.config.layout.tag(),
             gic_spis: self.config.gic.spis.get(),
             gic_priority_bits: self.config.gic.priority_bits.count(),
             wiring: self.board.wiring,
@@ -2477,8 +2713,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, WithEl2, I> {
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// The image's version, which changes with its layout: an image of another
 /// version is refused as one. What a machine was built with (its counter
-/// rate, its GIC's shape, its interrupt map, the transports its devices
-/// sit behind, its firmware's speculation report) the shape records, and a
+/// rate, its GIC's shape, its interrupt map, its device layout, the
+/// transports its devices sit behind, its firmware's speculation report)
+/// the shape records, and a
 /// machine built otherwise refuses the
 /// image as one built differently. It holds the processor's level set (the
 /// shape's `virtualization`, the EL2 registers, `CNTPOFF_EL2` among them), a
@@ -2487,11 +2724,11 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// level beside stage 1's and the memory each stage and both together map
 /// it to, the TLB's kept stage 2 translations, its tables of EL1&0 and
 /// stage 2 contexts, the shape's identity fingerprint, counter rate,
-/// firmware speculation report, GIC shape, interrupt map and occupied
-/// transports, and the board's devices: the GIC with its Virtualization
-/// Extensions where it has them, the PL011, the PL031, the PL061, both
-/// flash banks and every virtio-mmio transport.
-const SNAPSHOT_VERSION: u32 = 25;
+/// firmware speculation report, GIC shape, interrupt map, device layout and
+/// occupied transports, and the board's devices: the GIC with its
+/// Virtualization Extensions where it has them, the PL011, the PL031, the
+/// PL061, both flash banks and every virtio-mmio transport.
+const SNAPSHOT_VERSION: u32 = 26;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2527,6 +2764,9 @@ struct Shape {
     /// the devices at; the transport order a machine without devices was
     /// built with changes nothing and is not recorded.
     transports: u32,
+    /// Where the devices sit ([`DeviceLayout::tag`]), which the guest's
+    /// drivers were told.
+    layout: u8,
     /// The GIC's SPIs ([`SpiCount::get`]) and priority bits
     /// ([`PriorityBits::count`]), the GIC's section of the image having the
     /// banks of the most a GIC has.
@@ -2561,6 +2801,7 @@ impl Shape {
         w.write_u8(self.virtualization)?;
         w.write_u8(self.spectre)?;
         w.write_u32(self.transports)?;
+        w.write_u8(self.layout)?;
         w.write_u32(self.gic_spis)?;
         w.write_u8(self.gic_priority_bits)?;
         self.wiring.save(w)
@@ -2595,6 +2836,7 @@ impl Shape {
             virtualization: r.read_u8()?,
             spectre: r.read_u8()?,
             transports: r.read_u32()?,
+            layout: r.read_u8()?,
             gic_spis: r.read_u32()?,
             gic_priority_bits: r.read_u8()?,
             wiring: Wiring::restore(r)?,
