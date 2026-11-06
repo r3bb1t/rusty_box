@@ -482,7 +482,11 @@ def maintenance (st : St) (va : UInt64) (need : UInt8) : St × Option Fault :=
         (st, some (dataAbort sys va ⟨fscPermission ((e >>> ATTR_LEVEL_SHIFT) &&& 3), true⟩ true))
       else (st, none)
 
-/-- mmu.rs `dc_zva`: 64 bytes of zeros. -/
+/-- The 64 zero bytes `DC ZVA` writes. -/
+def zeroBlock : ByteArray := zeros 64
+
+/-- mmu.rs `dc_zva`: 64 bytes of zeros, one copy when the block is in RAM,
+eight doubleword bus writes otherwise. -/
 def dcZva (st : St) (va : UInt64) : St × Option Fault :=
   let base := va &&& ~~~63
   let (sys, r) := translate st.sys st.mem base st.icnt AK_WRITE st.sys.el true
@@ -491,6 +495,9 @@ def dcZva (st : St) (va : UInt64) : St × Option Fault :=
   | .error a => (st, some (dataAbort st.sys va a))
   | .ok (pa, _) =>
     let st := noteStore st pa 64
+    if inRam pa 64 then
+      ({ st with mem := zeroBlock.copySlice 0 st.mem (pa - RAM_BASE).toNat 64 }, none)
+    else
     let rec go (st : St) (i : Nat) : St × Option Fault :=
       if i ≥ 8 then (st, none) else
       let at_ := pa + 8 * i.toUInt64

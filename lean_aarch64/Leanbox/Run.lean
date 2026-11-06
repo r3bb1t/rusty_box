@@ -195,15 +195,36 @@ memory). -/
   let bits : UInt64 := 8 <<< size.toUInt64
   if opc == 2 then sext v bits else sext v bits &&& 0xFFFF_FFFF
 
+/-- The micro-TLBs `run` keeps from op to op: the code page (`cv` its VA
+page, `cp` its PA page), two read pages and one write page (`dv*` the VA
+page, `dp*` the RAM offset of the page). One object, so the loop carries one
+value for all eight, updated in place while `run` holds the only reference. -/
+structure MicroTlb where
+  cv : UInt64
+  cp : UInt64
+  dvr : UInt64
+  dpr : UInt64
+  dvw : UInt64
+  dpw : UInt64
+  dvr2 : UInt64
+  dpr2 : UInt64
+
+/-- Every entry empty. -/
+def MicroTlb.empty : MicroTlb := ⟨MISS, MISS, MISS, MISS, MISS, MISS, MISS, MISS⟩
+
+/-- A read page refilled: the new page first, the one it displaces second. -/
+@[inline] def MicroTlb.refillRead (u : MicroTlb) (vp pg : UInt64) : MicroTlb :=
+  { u with dvr := vp, dpr := pg, dvr2 := u.dvr, dpr2 := u.dpr }
+
 set_option hygiene false in
 /-- Run the op at `i` through the reference executor and go on as it says. -/
 macro "slowpath!" : term => `(
     let st := execOp { rf, mem, sys, pc, nzcv, icnt, flow := 0 } pc op
     if st.flow == 2 || st.sys.board.touched || st.sys.timerDirty then
       { rf := st.rf, mem := st.mem, sys := st.sys, pc := st.pc, nzcv := st.nzcv, icnt := st.icnt, why := 2 }
-    else if st.flow == 0 then run st.rf st.mem st.sys tr (i+1) tpc st.nzcv st.icnt lim cv cp dvr dpr dvw dpw dvr2 dpr2
-    else if st.flow == 1 then run st.rf st.mem st.sys DISPATCH 0 st.pc st.nzcv st.icnt lim cv cp dvr dpr dvw dpw dvr2 dpr2
-    else run st.rf st.mem st.sys DISPATCH 0 st.pc st.nzcv st.icnt lim MISS MISS MISS MISS MISS MISS MISS MISS)
+    else if st.flow == 0 then run st.rf st.mem st.sys tr (i+1) tpc st.nzcv st.icnt lim mt
+    else if st.flow == 1 then run st.rf st.mem st.sys DISPATCH 0 st.pc st.nzcv st.icnt lim mt
+    else run st.rf st.mem st.sys DISPATCH 0 st.pc st.nzcv st.icnt lim MicroTlb.empty)
 
 set_option hygiene false in
 /-- A load of `bytes` at `va` through the read micro-TLB: on a hit, `hit o`
@@ -211,29 +232,29 @@ with the RAM offset; on a miss, a refill and the op again; else the slow
 path. -/
 macro "loadAt!" va:term "," bytes:term "," hit:term : term => `(
     if fastAligned sys $va $bytes then
-      if $va >>> 12 == dvr then $hit (dpr ||| ($va &&& 0xFFF))
-      else if $va >>> 12 == dvr2 then $hit (dpr2 ||| ($va &&& 0xFFF))
+      if $va >>> 12 == mt.dvr then $hit (mt.dpr ||| ($va &&& 0xFFF))
+      else if $va >>> 12 == mt.dvr2 then $hit (mt.dpr2 ||| ($va &&& 0xFFF))
       else
         let pg := microProbe sys $va AK_READ
-        if pg != MISS then run rf mem sys tr i tpc nzcv icnt lim cv cp ($va >>> 12) pg dvw dpw dvr dpr
+        if pg != MISS then run rf mem sys tr i tpc nzcv icnt lim (mt.refillRead ($va >>> 12) pg)
         else
         let (sys', pg) := microFill sys mem $va icnt AK_READ
-        if pg != MISS then run rf mem sys' tr i tpc nzcv icnt lim cv cp ($va >>> 12) pg dvw dpw dvr dpr
+        if pg != MISS then run rf mem sys' tr i tpc nzcv icnt lim (mt.refillRead ($va >>> 12) pg)
         else let sys := sys'; slowpath!
     else slowpath!)
 
 set_option hygiene false in
 macro "storeAt!" va:term "," bytes:term "," hit:term : term => `(
     if fastAligned sys $va $bytes then
-      if $va >>> 12 == dvw then
-        let o := dpw ||| ($va &&& 0xFFF)
+      if $va >>> 12 == mt.dvw then
+        let o := mt.dpw ||| ($va &&& 0xFFF)
         if plainStore sys o $bytes then $hit o else slowpath!
       else
         let pg := microProbe sys $va AK_WRITE
-        if pg != MISS then run rf mem sys tr i tpc nzcv icnt lim cv cp dvr dpr ($va >>> 12) pg dvr2 dpr2
+        if pg != MISS then run rf mem sys tr i tpc nzcv icnt lim { mt with dvw := $va >>> 12, dpw := pg }
         else
         let (sys', pg) := microFill sys mem $va icnt AK_WRITE
-        if pg != MISS then run rf mem sys' tr i tpc nzcv icnt lim cv cp dvr dpr ($va >>> 12) pg dvr2 dpr2
+        if pg != MISS then run rf mem sys' tr i tpc nzcv icnt lim { mt with dvw := $va >>> 12, dpw := pg }
         else let sys := sys'; slowpath!
     else slowpath!)
 
@@ -243,103 +264,103 @@ end; (`cv`,`cp`) the code micro-TLB (VA page, PA page); (`dvr`,`dpr`) and
 page). Every handler ends in a tail call of `run`, compiled to a jump; the
 helpers it calls return. -/
 partial def run (rf mem : ByteArray) (sys : Sys) (tr : Array Op) (i : USize)
-    (tpc nzcv icnt lim cv cp dvr dpr dvw dpw dvr2 dpr2 : UInt64) : Res :=
+    (tpc nzcv icnt lim : UInt64) (mt : MicroTlb) : Res :=
   let op := agu tr i .endTrace
   let pc := tpc + 4 * i.toUInt64
   match op with
   | .addR64 d n m =>
-    run (wr rf d (rr rf n + rr rf m)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (rr rf n + rr rf m)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .subR64 d n m =>
-    run (wr rf d (rr rf n - rr rf m)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (rr rf n - rr rf m)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .addR32 d n m =>
-    run (wr rf d ((rr rf n + rr rf m) &&& 0xFFFFFFFF)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d ((rr rf n + rr rf m) &&& 0xFFFFFFFF)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .logR64 opc sh d n m amt =>
-    run (wr rf d (logic opc (rr rf n) (shift64 (rr rf m) sh amt))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (logic opc (rr rf n) (shift64 (rr rf m) sh amt))) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .movR d m =>
-    run (wr rf d (rr rf m)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (rr rf m)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .subsI64 d n imm =>
     let x := rr rf n
-    run (wr rf d (x - imm)) mem sys tr (i+1) tpc (awcFlags true x (~~~imm) 1) (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (x - imm)) mem sys tr (i+1) tpc (awcFlags true x (~~~imm) 1) (icnt+1) lim mt
   | .addI64 d n imm =>
-    run (wr rf d (rr rf n + imm)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (rr rf n + imm)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .logI64 opc d n mask =>
-    run (wr rf d (logic opc (rr rf n) mask)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (logic opc (rr rf n) mask)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .movc d v =>
-    run (wr rf d v) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d v) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .madd64 d n m a =>
-    run (wr rf d (rr rf a + rr rf n * rr rf m)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (rr rf a + rr rf n * rr rf m)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .bcond cond off =>
     if conditionHolds cond nzcv then
-      run rf mem sys DISPATCH 0 (branchAddr sys (pc + off)) nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-    else run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+      run rf mem sys DISPATCH 0 (branchAddr sys (pc + off)) nzcv (icnt+1) lim mt
+    else run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .b link off =>
     let rf := if link then wr rf 30 (pc + 4) else rf
-    run rf mem sys DISPATCH 0 (branchAddr sys (pc + off)) nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run rf mem sys DISPATCH 0 (branchAddr sys (pc + off)) nzcv (icnt+1) lim mt
   | .cbz sf nz t off =>
     if (mask32 sf (rr rf t) == 0) != nz then
-      run rf mem sys DISPATCH 0 (branchAddr sys (pc + off)) nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-    else run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+      run rf mem sys DISPATCH 0 (branchAddr sys (pc + off)) nzcv (icnt+1) lim mt
+    else run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .tbz nz t bit off =>
     if ((rr rf t >>> bit) &&& 1 == 1) == nz then
-      run rf mem sys DISPATCH 0 (branchAddr sys (pc + off)) nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-    else run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+      run rf mem sys DISPATCH 0 (branchAddr sys (pc + off)) nzcv (icnt+1) lim mt
+    else run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .br kind n =>
     let target := rr rf n
     let rf := if kind == 1 then wr rf 30 (pc + 4) else rf
-    run rf mem sys DISPATCH 0 (branchAddr sys target) nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run rf mem sys DISPATCH 0 (branchAddr sys target) nzcv (icnt+1) lim mt
   | .adr page d off =>
-    run (wr rf d (if page then (pc &&& ~~~0xFFF) + off else pc + off)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (if page then (pc &&& ~~~0xFFF) + off else pc + off)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .addsubI sf sub setf d n imm =>
     let x := mask32 sf (rr rf n)
-    run (wr rf d (asRes sf sub x imm)) mem sys tr (i+1) tpc (if setf then asFlags sf sub x imm else nzcv) (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (asRes sf sub x imm)) mem sys tr (i+1) tpc (if setf then asFlags sf sub x imm else nzcv) (icnt+1) lim mt
   | .logI sf opc d n mask =>
     let res := mask32 sf (logic opc (mask32 sf (rr rf n)) mask)
-    run (wr rf d res) mem sys tr (i+1) tpc (if opc == 3 then logicFlags sf res else nzcv) (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d res) mem sys tr (i+1) tpc (if opc == 3 then logicFlags sf res else nzcv) (icnt+1) lim mt
   | .movk sf d imm pos =>
-    run (wr rf d (mask32 sf ((rr rf d &&& ~~~((0xFFFF : UInt64) <<< pos)) ||| (imm <<< pos)))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (mask32 sf ((rr rf d &&& ~~~((0xFFFF : UInt64) <<< pos)) ||| (imm <<< pos)))) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .bfm sf opc d n r s wmask tmask =>
-    run (wr rf d (bfmVal sf opc (rr rf n) (rr rf d) r s wmask tmask)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (bfmVal sf opc (rr rf n) (rr rf d) r s wmask tmask)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .extr sf d n m lsb =>
-    run (wr rf d (extrVal sf (rr rf n) (rr rf m) lsb)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (extrVal sf (rr rf n) (rr rf m) lsb)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .alu sf sub setf d n m sh amt =>
     let x := mask32 sf (rr rf n)
     let y := mask32 sf (shiftReg sf (rr rf m) sh amt)
-    run (wr rf d (asRes sf sub x y)) mem sys tr (i+1) tpc (if setf then asFlags sf sub x y else nzcv) (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (asRes sf sub x y)) mem sys tr (i+1) tpc (if setf then asFlags sf sub x y else nzcv) (icnt+1) lim mt
   | .aluX sf sub setf d n m opt amt =>
     let x := mask32 sf (rr rf n)
     let y := extendReg (rr rf m) opt amt (if sf then 64 else 32)
-    run (wr rf d (asRes sf sub x y)) mem sys tr (i+1) tpc (if setf then asFlags sf sub x y else nzcv) (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (asRes sf sub x y)) mem sys tr (i+1) tpc (if setf then asFlags sf sub x y else nzcv) (icnt+1) lim mt
   | .adc sf sub setf d n m =>
     let x := mask32 sf (rr rf n)
     let y := mask32 sf (rr rf m)
     let c := (nzcv >>> 1) &&& 1
-    run (wr rf d (adcRes sf sub x y c)) mem sys tr (i+1) tpc (if setf then adcFlags sf sub x y c else nzcv) (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (adcRes sf sub x y c)) mem sys tr (i+1) tpc (if setf then adcFlags sf sub x y c else nzcv) (icnt+1) lim mt
   | .logR sf opc inv d n m sh amt =>
     let res := logVal sf opc inv (rr rf n) (shiftReg sf (rr rf m) sh amt)
-    run (wr rf d res) mem sys tr (i+1) tpc (if opc == 3 then logicFlags sf res else nzcv) (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d res) mem sys tr (i+1) tpc (if opc == 3 then logicFlags sf res else nzcv) (icnt+1) lim mt
   | .ccmp sf sub isImm n m imm cond flags =>
-    run rf mem sys tr (i+1) tpc (ccmpFlags sf sub cond flags nzcv (rr rf n) (if isImm then imm else rr rf m)) (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run rf mem sys tr (i+1) tpc (ccmpFlags sf sub cond flags nzcv (rr rf n) (if isImm then imm else rr rf m)) (icnt+1) lim mt
   | .csel sf inv inc d n m cond =>
-    run (wr rf d (cselVal sf inv inc cond nzcv (rr rf n) (rr rf m))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-  | .dp1 sf opc d n => run (wr rf d (dp1Val sf opc (rr rf n))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-  | .dp2 sf opc d n m => run (wr rf d (dp2Val sf opc (rr rf n) (rr rf m))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (cselVal sf inv inc cond nzcv (rr rf n) (rr rf m))) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
+  | .dp1 sf opc d n => run (wr rf d (dp1Val sf opc (rr rf n))) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
+  | .dp2 sf opc d n m => run (wr rf d (dp2Val sf opc (rr rf n) (rr rf m))) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .madd sf sub d n m a =>
     let p := rr rf n * rr rf m
-    run (wr rf d (mask32 sf (if sub then rr rf a - p else rr rf a + p))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-  | .mull u sub d n m a => run (wr rf d (mullVal u sub (rr rf n) (rr rf m) (rr rf a))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-  | .mulh u d n m => run (wr rf d (mulHigh (rr rf n) (rr rf m) (!u))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    run (wr rf d (mask32 sf (if sub then rr rf a - p else rr rf a + p))) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
+  | .mull u sub d n m a => run (wr rf d (mullVal u sub (rr rf n) (rr rf m) (rr rf a))) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
+  | .mulh u d n m => run (wr rf d (mulHigh (rr rf n) (rr rf m) (!u))) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .mrs _ k t =>
     -- the reads at EL1 with no side effect and nothing to check
     if sys.el != 1 then slowpath! else
-    if k == K_SP_EL0 && sys.spsel then run (wr rf t sys.sp0) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-    else if k == K_TPIDR_EL1 then run (wr rf t sys.tpidr1) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-    else if k == K_DAIF then run (wr rf t sys.daif) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-    else if k == K_NZCV then run (wr rf t (nzcv <<< 28)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-    else if k == K_TPIDR_EL0 then run (wr rf t sys.tpidr0) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-    else if k == K_DCZID then run (wr rf t DCZID_BLOCK_LOG2_WORDS) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-    else if k == K_CURRENT_EL then run (wr rf t 4) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    if k == K_SP_EL0 && sys.spsel then run (wr rf t sys.sp0) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
+    else if k == K_TPIDR_EL1 then run (wr rf t sys.tpidr1) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
+    else if k == K_DAIF then run (wr rf t sys.daif) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
+    else if k == K_NZCV then run (wr rf t (nzcv <<< 28)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
+    else if k == K_TPIDR_EL0 then run (wr rf t sys.tpidr0) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
+    else if k == K_DCZID then run (wr rf t DCZID_BLOCK_LOG2_WORDS) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
+    else if k == K_CURRENT_EL then run (wr rf t 4) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
     else slowpath!
-  | .nop => run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+  | .nop => run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   | .readCounter virt t =>
     if sys.el == 0 then slowpath! else
     -- a counter poll's whole iterations, fast-forwarded (Cpu/Poll.lean)
@@ -347,12 +368,12 @@ partial def run (rf mem : ByteArray) (sys : Sys) (tr : Array Op) (i : USize)
     match (if i == 0 && pollShape (agu tr 1 .endTrace) && !knownNoPoll sys key then pollSkip sys rf mem pc t virt icnt (lim - icnt) else .notNow) with
     | .skip ticks count flags =>
       let sys := { sys with noPoll := clearNoPoll sys.noPoll key }
-      run (wr rf t count) mem sys DISPATCH 0 pc flags (icnt + ticks) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+      run (wr rf t count) mem sys DISPATCH 0 pc flags (icnt + ticks) lim mt
     | .notPoll =>
       let sys := { sys with noPoll := noteNoPoll sys.noPoll key }
-      run (wr rf t (counterAt icnt)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+      run (wr rf t (counterAt icnt)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
     | .notNow =>
-      run (wr rf t (counterAt icnt)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+      run (wr rf t (counterAt icnt)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
   -- loads and stores of general-purpose registers through the micro-TLBs
   | .ldst size opc wb post kind t n off =>
     let base := rr rf n
@@ -363,17 +384,17 @@ partial def run (rf mem : ByteArray) (sys : Sys) (tr : Array Op) (i : USize)
       storeAt! addr, bytes, (fun o =>
         let mem := stN mem o.toUSize size (rr rf t)
         let rf := if wb then wr rf n (base + off) else rf
-        run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2)
+        run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim mt)
     else
       loadAt! addr, bytes, (fun o =>
         let rf := wr rf t (extendLoad (ldN mem o.toUSize size) size opc)
         let rf := if wb then wr rf n (base + off) else rf
-        run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2)
+        run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim mt)
   | .ldrbPost t n off =>
     let base := rr rf n
     if spAlignFault sys n base then slowpath! else
     loadAt! base, 1, (fun o =>
-      run (wr (wr rf t (gb mem o.toUSize)) n (base + off)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2)
+      run (wr (wr rf t (gb mem o.toUSize)) n (base + off)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt)
   | .ldstR size opc t n m opt shift =>
     let base := rr rf n
     if spAlignFault sys n base then slowpath! else
@@ -381,10 +402,10 @@ partial def run (rf mem : ByteArray) (sys : Sys) (tr : Array Op) (i : USize)
     let bytes : UInt64 := 1 <<< size.toUInt64
     if opc == 0 then
       storeAt! addr, bytes, (fun o =>
-        run rf (stN mem o.toUSize size (rr rf t)) sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2)
+        run rf (stN mem o.toUSize size (rr rf t)) sys tr (i+1) tpc nzcv (icnt+1) lim mt)
     else
       loadAt! addr, bytes, (fun o =>
-        run (wr rf t (extendLoad (ldN mem o.toUSize size) size opc)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2)
+        run (wr rf t (extendLoad (ldN mem o.toUSize size) size opc)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt)
   | .ldstPair kind load wb post t t2 n off =>
     let base := rr rf n
     if spAlignFault sys n base then slowpath! else
@@ -400,39 +421,39 @@ partial def run (rf mem : ByteArray) (sys : Sys) (tr : Array Op) (i : USize)
         let (a, b2) := if kind == 1 then (sext a 32, sext b2 32) else (a, b2)
         let rf := if log2 == 2 then wr (wr rf t2 b2) t a else wr (wr rf t a) t2 b2
         let rf := if wb then wr rf n (base + off) else rf
-        run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2)
+        run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim mt)
     else
       storeAt! addr, 2 * eb, (fun o =>
         let mem := stN (stN mem o.toUSize log2 (rr rf t)) (o + eb).toUSize log2 (rr rf t2)
         let rf := if wb then wr rf n (base + off) else rf
-        run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2)
+        run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim mt)
   | .ldpPost64 t t2 n off =>
     let base := rr rf n
     if spAlignFault sys n base || base &&& 7 != 0 then slowpath! else
     loadAt! base, 16, (fun o =>
       let rf := wr (wr rf t (ld64 mem o.toUSize)) t2 (ld64 mem (o + 8).toUSize)
-      run (wr rf n (base + off)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2)
+      run (wr rf n (base + off)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt)
   | .stpPost64 t t2 n off =>
     let base := rr rf n
     if spAlignFault sys n base || base &&& 7 != 0 then slowpath! else
     storeAt! base, 16, (fun o =>
       let mem := st64 (st64 mem o.toUSize (rr rf t)) (o + 8).toUSize (rr rf t2)
-      run (wr rf n (base + off)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2)
+      run (wr rf n (base + off)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt)
   | .endTrace =>
     if icnt >= lim then { rf, mem, sys, pc, nzcv, icnt, why := 0 } else
     -- the common case inline: no interrupt, the same code page, a cached
     -- trace in RAM that fits in the burst
-    let pa := cp ||| (pc &&& 0xFFF)
+    let pa := mt.cp ||| (pc &&& 0xFFF)
     let idx := ((pa >>> 2) &&& (CACHE.toUInt64 - 1)).toUSize
     let t := agu sys.ctr idx DISPATCH
-    if pc >>> 12 == cv && deliverable sys == 0 && !sys.il && agu sys.ctag idx MISS == pa
+    if pc >>> 12 == mt.cv && deliverable sys == 0 && !sys.il && agu sys.ctag idx MISS == pa
         && inRam pa 4 && (t.size - 1).toUInt64 <= lim - icnt then
-      run rf mem sys t 0 pc nzcv icnt lim cv cp dvr dpr dvw dpw dvr2 dpr2
+      run rf mem sys t 0 pc nzcv icnt lim mt
     else
-    let n := lookup rf mem sys pc nzcv icnt lim cv cp
+    let n := lookup rf mem sys pc nzcv icnt lim mt.cv mt.cp
     if n.cv == MISS then
-      run n.rf n.mem n.sys n.tr 0 n.pc n.nzcv n.icnt lim n.cv n.cp MISS MISS MISS MISS MISS MISS
-    else run n.rf n.mem n.sys n.tr 0 n.pc n.nzcv n.icnt lim n.cv n.cp dvr dpr dvw dpw dvr2 dpr2
+      run n.rf n.mem n.sys n.tr 0 n.pc n.nzcv n.icnt lim { MicroTlb.empty with cv := n.cv, cp := n.cp }
+    else run n.rf n.mem n.sys n.tr 0 n.pc n.nzcv n.icnt lim { mt with cv := n.cv, cp := n.cp }
   | _ => slowpath!
 
 -- ── the run loop: machine.rs ───────────────────────────────────────────
@@ -516,7 +537,7 @@ partial def drive (m : Mach) (instrEnd : UInt64) : Mach :=
   if retired >= instrEnd then m else
   let toEvent := if m.sys.nextEvent > m.icnt then m.sys.nextEvent - m.icnt else 0
   let burst := min (max toEvent 1) (instrEnd - retired)
-  let r := run m.rf m.mem m.sys DISPATCH 0 m.pc m.nzcv m.icnt (m.icnt + burst) MISS MISS MISS MISS MISS MISS MISS MISS
+  let r := run m.rf m.mem m.sys DISPATCH 0 m.pc m.nzcv m.icnt (m.icnt + burst) MicroTlb.empty
   let sys := if r.why == 2 then afterDeviceAccess r.sys r.icnt else r.sys
   drive { rf := r.rf, mem := r.mem, sys := sys, pc := r.pc, nzcv := r.nzcv, icnt := r.icnt } instrEnd
 

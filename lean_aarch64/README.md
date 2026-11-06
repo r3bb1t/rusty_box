@@ -140,6 +140,7 @@ callgrind (Alpine to its first 40M instructions):
 | a word in bounds read under one check, its bytes proven in bounds (`ByteArray.WordIn`) | 300 | | |
 | CLZ, CLS, RBIT, REV16, REV32, REV computed loop-free, proven equal to their pseudocode (`@[csimp]`, `bv_decide`) | 283 | | |
 | the TLB hit and the translation inline in their callers, so their pairs and `Except`s are never built (the walk stays out of line) | 246 | | |
+| `DC ZVA` to RAM one `copySlice` of a zero block; the eight micro-TLB words one `MicroTlb` structure in the loop | 242 | | |
 
 The last step, measured on a slower 4-core VM, best of three, the timed loop
 only: Alpine to its root shell 23.3 → 30.2 M instructions/s, EDK2 to `Shell>`
@@ -172,6 +173,15 @@ went to none, 283 → 246 host instructions per guest instruction, and,
 interleaved runs on the same VM, Alpine 29.5–31.4 → 34.9–36.1 M
 instructions/s and EDK2 60.4–63.5 → 66.7–67.9 M (rusty_box 91–95 M and
 219–227 M).
+
+What remains in `run` is mostly the C compiler's: `run` is one function with
+a value for each loop parameter live across every op, and calls in its slow
+arms, so most of those values live in its stack frame and each op reloads
+them: about 28% of the instructions `run` executes are loads and stores to
+its frame. Folding the eight micro-TLB words into one structure took that
+from 32%. Inlining `lookup` into `run` (to drop its `Next`) made `run`'s code
+much worse, 9.84G → 15.3G host instructions over the window, and was not
+kept.
 
 A register file of `FloatArray` words (one unboxed element per register,
 `Float.ofBits`/`toBits` as the casts) was tried and dropped: Lean canonicalizes
