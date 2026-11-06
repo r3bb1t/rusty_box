@@ -202,6 +202,8 @@ a NaN's payload through `Float.ofBits`, so a register holding a NaN-shaped bit
 pattern changes, and the boot diverged at once. The register file stays a
 `ByteArray`: an 8-byte read is one bounds check and one load, an 8-byte store
 one bounds check and eight byte stores, each after an exclusivity check.
+Lean has no wider write; `docs/bytearray-word-access.md` is the proposal for
+one in Lean core, and the pure-Lean work that does not wait on it.
 
 ### What decided the speed of the perfbench loops
 
