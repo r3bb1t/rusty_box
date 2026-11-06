@@ -229,7 +229,7 @@ register and RAM access.
 
 The library reads in the order of `Leanbox.lean`'s imports, each part resting
 only on the parts before it; that module's documentation is the table of
-contents. `docs/type-doctrine.md` is the type doctrine (L1–L13) every module is written to.
+contents. `docs/type-doctrine.md` is the type doctrine (L0–L18) every module is written to; `docs/proofs.md` lists what is proved, checked and open.
 
 | path | what |
 |---|---|
