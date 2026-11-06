@@ -156,6 +156,35 @@ execve("/bin/ls", [ls, -l])
 exit_group(0)
 ```
 
+### What an enum cannot say
+
+A Rust enum can name the calls and a `match` can tell them apart. These
+parts of the sketch are what only dependent types give:
+- **A field that exists only when a flag is set.** `mode : if flags.creat
+  then UInt32 else Unit`: Linux reads the mode only with `O_CREAT`, so
+  without it there is no mode to read. Matching on the flag refines the
+  field's type, and `strace` prints `0o644` only where it exists.
+- **A result typed by the call's own arguments.** `Syscall.Result s s' cap
+  sc args` is computed from the call *and the values it was made with*:
+  - `read` returns `n ≤ count` together with exactly `n` bytes of the
+    buffer the call named, read in the state the kernel returns in (`read
+    6 bytes: "hello\n"`). A return of 100 for a 64-byte read is not a
+    result of that call, and gives no witness.
+  - `write` returns at most the x2 it was asked to write.
+  - `exit_group`'s result type is `Empty`, so `exitGroup_never_returns`
+    proves there is no return to hook.
+  - `execve`'s is `Errno`: it returns only when it fails.
+- **A condition whose witness is the proof the hook relies on.** `under pre
+  path` gives the rest of the path with the proof `pre ++ rest = path`, so
+  a hook on paths under `/etc/` strips the prefix with no check that could
+  fail (`/etc/ + passwd`).
+- **Theorems about the hook**, with only the standard axioms:
+  - `opens_is_memory`: the path an `openat` hook reports *is* the string in
+    the program's memory at x1, through `CStrAt.unique`;
+  - `openat_fires`: the hook cannot miss one. Every user-mode `openat` whose
+    path the program can read and whose access mode is valid produces a
+    witness carrying that path.
+
 The same `openat` made at EL1 is not a system call and gives `none`. In the
 real machine the `svc` is the hook's static half, decided when the trace is
 built, so only `svc` instructions ever run the decoding.

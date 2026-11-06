@@ -116,7 +116,8 @@ structure OpenatArgs (s : State) where
   dirfd : Dirfd
   path : CStr s (s.x 1) PATH_MAX            -- the string x1 points to, with its proof
   flags : OpenFlags
-  mode : UInt32
+  /-- Linux reads the mode only with O_CREAT: without it there is no mode to read. -/
+  mode : if flags.creat then UInt32 else Unit
 
 structure WriteArgs (s : State) (cap : Nat) where
   fd : UInt32
@@ -145,7 +146,9 @@ def Syscall.decode (s : State) (cap : Nat) : (sc : Syscall) → Option (sc.Args 
   | .openat => do
       let path ← scan s PATH_MAX (s.x 1)
       let flags ← OpenFlags.ofReg (s.x 2)
-      pure { dirfd := .ofReg (s.x 0), path, flags, mode := (s.x 3).toUInt32 }
+      pure { dirfd := .ofReg (s.x 0), path, flags,
+             mode := if h : flags.creat then cast (by simp [h]) (s.x 3).toUInt32
+                     else cast (by simp [h]) () }
   | .close => some (s.x 0).toUInt32
   | .read => some { fd := (s.x 0).toUInt32, buf := s.x 1, count := s.x 2 }
   | .write => (readBytes s _ (s.x 1)).map fun buf => { fd := (s.x 0).toUInt32, buf }
@@ -188,7 +191,11 @@ def strace (s : State) : SyscallAt s 64 → String
     let dir := match a.dirfd with | .cwd => "AT_FDCWD" | .fd n => toString n
     let acc := match a.flags.access with | .rdonly => "O_RDONLY" | .wronly => "O_WRONLY" | .rdwr => "O_RDWR"
     let more := (if a.flags.creat then "|O_CREAT" else "") ++ (if a.flags.trunc then "|O_TRUNC" else "")
-    s!"openat({dir}, {quote a.path.val}, {acc}{more})"
+    -- matching on the flag refines the mode's type: a UInt32 only where O_CREAT is set
+    let mode := match a.flags.creat, a.mode with
+      | true, (m : UInt32) => s!", 0o{String.ofList (Nat.toDigits 8 m.toNat)}"
+      | false, () => ""
+    s!"openat({dir}, {quote a.path.val}, {acc}{more}{mode})"
   | ⟨.close, w⟩ => s!"close({show UInt32 from w.args})"
   | ⟨.read, w⟩ => s!"read({w.args.fd}, {hex w.args.buf}, {w.args.count})"
   | ⟨.write, w⟩ => s!"write({w.args.fd}, {quote w.args.buf.val}, {s.x 2})"
@@ -203,6 +210,110 @@ def opens (s : State) (w : CallAt s 64 .openat) : String := str w.args.path.val
 could itself read, and x8 is 56. -/
 example (s : State) (w : CallAt s 64 .openat) : s.x 8 = 56 := w.named
 example (s : State) (w : CallAt s 64 .openat) : CStrAt s (s.x 1) w.args.path.val := w.args.path.property.1
+
+/-! ## Returns: a result's type depends on the call and its arguments -/
+
+/-- The kernel's error returns, -4095..-1 in x0 (include/uapi/asm-generic/errno-base.h). -/
+inductive Errno | enoent | ebadf | eacces | efault | other (n : Nat)
+def Errno.ofNeg (n : Nat) : Errno :=
+  match n with | 2 => .enoent | 9 => .ebadf | 13 => .eacces | 14 => .efault | n => .other n
+
+/-- What a call can return, as a type computed from the call and the arguments
+it was made with. `s'` is the state the kernel returns to the program in. -/
+def Syscall.Result (s s' : State) (cap : Nat) : (sc : Syscall) → sc.Args s cap → Type
+  | .openat, _ => Errno ⊕ UInt32                        -- a new descriptor
+  | .close, _ => Errno ⊕ Unit
+  | .read, a => Errno ⊕ ((n : Nat) × PLift (n ≤ a.count.toNat) × Bytes s' a.buf n)
+      -- at most `count` bytes, and then exactly the `n` bytes the kernel wrote
+  | .write, a => Errno ⊕ { n : Nat // n ≤ (s.x 2).toNat }   -- at most what was asked
+  | .exitGroup, _ => Empty                              -- never returns
+  | .execve, _ => Errno                                 -- returns only when it fails
+
+/-- `exit_group` has no return to hook: its result type has no values. -/
+theorem exitGroup_never_returns {s s' : State} {cap a} :
+    Syscall.Result s s' cap .exitGroup a → False := fun r => nomatch r
+
+/-- Read x0 in the return state as the call's result. -/
+def Syscall.result (s s' : State) (cap : Nat) : (sc : Syscall) → (a : sc.Args s cap) →
+    Option (sc.Result s s' cap a)
+  | sc, a =>
+    let x := s'.x 0
+    let err : Option Errno := if x ≥ 0xFFFF_FFFF_FFFF_F001 then some (.ofNeg (0 - x).toNat) else none
+    match sc, a with
+    | .openat, _ => some (match err with | some e => .inl e | none => .inr x.toUInt32)
+    | .close, _ => some (match err with | some e => .inl e | none => .inr ())
+    | .read, a => match err with
+      | some e => some (.inl e)
+      | none => if h : x.toNat ≤ a.count.toNat then
+          (readBytes s' x.toNat a.buf).map fun b => .inr ⟨x.toNat, ⟨h⟩, b⟩ else none
+    | .write, _ => match err with
+      | some e => some (.inl e)
+      | none => if h : x.toNat ≤ (s.x 2).toNat then some (.inr ⟨x.toNat, h⟩) else none
+    | .exitGroup, _ => none
+    | .execve, _ => err
+
+/-- A hook on a read's return gets the bytes the kernel delivered: a list whose
+length is the returned count, read from the buffer the call named. -/
+def readDone (s s' : State) (w : CallAt s 64 .read) : Syscall.Result s s' 64 .read w.args → String
+  | .inl _ => "read failed"
+  | .inr ⟨n, ⟨_⟩, b⟩ => s!"read {n} bytes: {quote b.val}"
+
+/-! ## Conditions whose witness is a proof the hook relies on -/
+
+/-- Paths under a prefix: the witness is the rest of the path *and* the proof
+that prefix ++ rest is the path, so the hook strips the prefix without a check. -/
+def under (pre : List UInt8) (path : List UInt8) : Option { rest // pre ++ rest = path } :=
+  if h : pre.isPrefixOf path then some ⟨path.drop pre.length, by
+      have := (List.isPrefixOf_iff_prefix.mp h); obtain ⟨t, ht⟩ := this
+      subst ht; simp⟩
+  else none
+
+def etcOpens (s : State) (w : CallAt s 64 .openat) : Option String :=
+  (under "/etc/".toUTF8.toList w.args.path.val).map fun r => s!"/etc/ + {str r.val}"
+
+/-! ## Theorems about the hooks themselves -/
+
+theorem CStrAt.unique {s : State} : ∀ {a bs bs'}, CStrAt s a bs → CStrAt s a bs' → bs = bs'
+  | _, _, _, .nil _, .nil _ => rfl
+  | _, _, _, .nil h, .cons h' hb _ => by rw [h] at h'; cases h'; exact absurd rfl hb
+  | _, _, _, .cons h hb _, .nil h' => by rw [h] at h'; cases h'; exact absurd rfl hb
+  | _, _, _, .cons h _ t, .cons h' _ t' => by rw [h] at h'; cases h'; rw [CStrAt.unique t t']
+
+/-- The path an openat hook reports is the string in the program's memory at x1:
+not a copy that could differ, not a guess. -/
+theorem opens_is_memory (s : State) (w : CallAt s 64 .openat) (bs : List UInt8)
+    (h : CStrAt s (s.x 1) bs) : opens s w = str bs := by
+  unfold opens; rw [CStrAt.unique w.args.path.property.1 h]
+
+theorem scan_complete {s : State} : ∀ {a bs} (max : Nat), CStrAt s a bs → bs.length < max →
+    ∃ c, scan s max a = some c ∧ c.val = bs
+  | _, _, 0, _, hl => absurd hl (Nat.not_lt_zero _)
+  | a, _, max + 1, .nil h, _ => by
+      refine ⟨⟨[], .nil h, by simp⟩, ?_, rfl⟩
+      unfold scan; split
+      · simp_all
+      · rename_i b' h'; rw [h] at h'; cases h'; simp
+  | a, b :: bs, max + 1, .cons h hb t, hl => by
+      obtain ⟨c, hc, hv⟩ := scan_complete max t (by simp at hl; omega)
+      refine ⟨⟨b :: bs, .cons h hb t, hl⟩, ?_, rfl⟩
+      unfold scan; split
+      · simp_all
+      · rename_i b' h'; rw [h] at h'; cases h'
+        simp only [hb, dite_false, hc]
+        obtain ⟨cv, _, _⟩ := c; subst hv; rfl
+
+/-- The hook cannot miss one: every user-mode openat whose path is a string the
+program can read and whose access mode is valid produces a witness, with that path. -/
+theorem openat_fires (s : State) (cap : Nat) (bs : List UInt8) (hu : s.el = .el0)
+    (h8 : s.x 8 = 56) (hp : CStrAt s (s.x 1) bs) (hl : bs.length < PATH_MAX)
+    (hf : (OpenFlags.ofReg (s.x 2)).isSome) :
+    ∃ w, syscallAt s cap = some ⟨.openat, w⟩ ∧ w.args.path.val = bs := by
+  obtain ⟨c, hc, hv⟩ := scan_complete PATH_MAX hp hl
+  obtain ⟨fl, hfl⟩ := Option.isSome_iff_exists.mp hf
+  have hn : Syscall.ofNumber (s.x 8) = some ⟨.openat, h8.symm⟩ := by
+    simp [Syscall.ofNumber, h8, Syscall.number]
+  simp only [syscallAt, hu, dite_true, hn, Syscall.decode, hc, hfl, bind, Option.bind, pure]
+  exact ⟨_, rfl, hv⟩
 
 /-! ## A user program's calls -/
 
@@ -231,12 +342,28 @@ def call (el : El) (n : UInt64) (args : List UInt64) : State where
 -- the one-call hook, given only openat witnesses
 #eval match syscallAt (call .el0 56 [0xFFFFFFFFFFFFFF9C, 0x2000, 0]) 64 with
   | some ⟨.openat, w⟩ => some (opens _ w) | _ => none
+-- O_CREAT|O_WRONLY with mode 0644: the mode exists, so it is printed
+#eval (syscallAt (call .el0 56 [0xFFFFFFFFFFFFFF9C, 0x2000, 0o101, 0o644]) 64).map (strace _)
+-- paths under /etc/, the prefix stripped by its proof
+#eval match syscallAt (call .el0 56 [0xFFFFFFFFFFFFFF9C, 0x2000, 0]) 64 with
+  | some ⟨.openat, w⟩ => etcOpens _ w | _ => none
+-- a read's return: the program asked for 64 bytes at 0x3000, the kernel returned 6
+#eval match syscallAt (call .el0 63 [3, 0x3000, 64]) 64 with
+  | some ⟨.read, w⟩ => (Syscall.result _ (call .el0 0 [6]) 64 .read w.args).map (readDone _ _ w)
+  | _ => none
+-- returning 100 for a 64-byte read is not a result of that call: no witness
+#eval match syscallAt (call .el0 63 [3, 0x3000, 64]) 64 with
+  | some ⟨.read, w⟩ => (Syscall.result _ (call .el0 0 [100]) 64 .read w.args).map (readDone _ _ w)
+  | _ => none
 -- the same openat from the kernel (EL1) is not a system call
 #eval (syscallAt (call .el1 56 [0xFFFFFFFFFFFFFF9C, 0x2000, 0]) 64).map (strace _)
 -- an access mode of 3 is not an open flag set: no witness
 #eval (syscallAt (call .el0 56 [0xFFFFFFFFFFFFFF9C, 0x2000, 3]) 64).map (strace _)
 
 #print axioms syscallAt
+#print axioms opens_is_memory
+#print axioms openat_fires
+#print axioms exitGroup_never_returns
 
 -- a hook on openat cannot be handed a write
 /-- error: Application type mismatch: The argument
