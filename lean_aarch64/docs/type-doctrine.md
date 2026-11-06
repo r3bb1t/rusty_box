@@ -303,6 +303,9 @@ their conjunctions, disjunctions and negations. The selector computes the
 type the hook receives, and the hook gets a proof that its condition holds,
 so it cannot be handed an instruction its selector rules out. A hook on LDR
 receives the LDR's fields, not an `Instr` it would have to take apart.
+Conditions on the machine state (user mode, a register pointing to a C
+string, a typed structure in guest memory) and their certified checks are
+in `hooks.md`.
 
 ```lean
 def Selector.Matches : Selector → Instr → Prop

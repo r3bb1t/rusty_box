@@ -44,7 +44,7 @@ The two refinements:
 
 ## The first square, proved
 
-Sketched on Lean 4.35 (2026-11-06) and kernel-checked: `#print axioms`
+In `docs/sketches/Refinement.lean`, checked on Lean 4.35 (2026-11-06) and kernel-checked: `#print axioms`
 reports `propext` and `Quot.sound` only, so no `bv_decide`, no
 `native_decide` and no `sorry`. The emulator's representation is the real
 one: 34 slots, the zero register a slot whose value is zero by the type,
