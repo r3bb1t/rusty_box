@@ -56,15 +56,20 @@ Where Arm's documents allow a guest more than one answer, the answer is
 the host's to choose, as a field of `VirtConfig` of a type that holds only
 the answers the document allows, and the board takes the one in the table
 unless told otherwise. A snapshot records each, and is refused by a
-machine built with another (the guest may have read and acted on it).
+machine built with another (the guest may have read and acted on it). No
+default is QEMU's; a host may still choose a value QEMU also has (256
+SPIs, eight priority bits, a 62.5 MHz counter), and the choice is its own.
 
 | Setting | Type | Answers (default first) | Specification |
 |---|---|---|---|
 | `spectre` | `SpectreReport` | `NotRequired`, `Mitigated`, `Unreported` | DEN 0028F §7.5 to §7.7 |
+| `counter` | `CounterRate` | 1 GHz; any rate from BSA's 10 MHz to what `CNTFRQ_EL0`'s 32 bits hold, on a processor whose architecture leaves it open (the Cortex-A57; Armv8.6 and later fix 1 GHz, and the build refuses another, `BuildError::FixedCounterRate`) | Arm ARM "The system counter"; BSA DEN0094C RB_TIME_02 |
+| `gic` | `GicShape { spis: SpiCount, priority_bits: PriorityBits }` | 480 SPIs, five priority bits (the GIC-400's); SPIs in 32s from the 128 the board wires, priority bits `Four` to `Eight`, the binary points and active priority registers following | IHI 0048B §4.3.2, Table 3-1, Table 4-47; DDI 0471B §2.3.3 |
 
 The front end takes them as its `[virt]` table's keys (`spectre =
-"mitigated"`, by each answer's `name`), refusing a name none has with the
-names there are.
+"mitigated"`, by each answer's `name`; `counter_hz`, `gic_spis` and
+`gic_priority_bits` as numbers), refusing a name or number none has with
+the ones there are.
 
 [docs/aarch64-automation.md](../docs/aarch64-automation.md) is the guide:
 building (firmware, direct kernel or bare; owned or lent memory), the serial
@@ -310,7 +315,7 @@ is) must reproduce, are:
 | Part | Model |
 |---|---|
 | Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, an MMU with the 4 KiB granule and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB and 64 KiB granules too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
-| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (480 SPIs, PPIs 25 to 31, level-sensitive; five priority bits, minimum binary points 2 and 3, one active priority register a group; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0803_0000, the common base and processor 0's at 0x0803_1000, 4 KiB each) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0804_0000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
+| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0803_0000, the common base and processor 0's at 0x0803_1000, 4 KiB each) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0804_0000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
 | Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), no `fw_cfg` (see "Where the references differ"), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
 | Board | QEMU `virt` memory map and IRQ wiring; the board's own device tree, written from the board (`src/boot/tree.rs`): generic node names (Devicetree Specification 2.2.2), each node as its binding describes it, the GIC with each frame the size it decodes, `dma-coherent` on each device that makes DMA, the processor's caches down to the L2 as `CCSIDR_EL1` reports them, `/psci` for PSCI 1.0 and 0.2 on the conduit the firmware answers on, `/chosen` with EBBR's `stdout-path` and no boot entropy (see "Where the references differ"), and the identity's `/model` and root `compatible`; no PMU, `fw-cfg` or platform bus node, which the board does not have; with EL2, the virtual interface's two frames and its maintenance interrupt in the GIC node; a host's own tree gets its names the identity's, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does |
@@ -1996,14 +2001,17 @@ one open.
   make it 2-way; this model's `CCSIDR_EL1` is the TRM's, and the tree's
   `d-cache-sets` is `0x100` to agree with it.
 - **The GIC makes the GIC-400's choices where IHI 0048B leaves them to
-  the implementation.** It has 480 SPIs, the GIC-400's largest
+  the implementation.** By default (the host's `VirtConfig::gic` may
+  choose fewer SPIs, from the 128 the board wires, and four to eight
+  priority bits) it has 480 SPIs, the GIC-400's largest
   configuration (DDI 0471B §2.3.3), so `GICD_TYPER.ITLinesNumber` reads
   15. Its PPIs are 25 to 31, PPIs 16 to 24 not existing and so RAZ/WI in
   every register (§3.3), and they are level-sensitive and cannot be made
   edge-triggered (Table 3-2, `GICD_ICFGR1` RO). It has five priority bits,
-  32 levels (§2.6, Secure state: this GIC has no Non-secure view), as its
-  virtual interface's `GICH_VTR.PRIbits` says, so every priority field's
-  bits [2:0] are RAZ/WI (IHI 0048B Table 3-1). The minimum binary points
+  32 levels (§2.6, Secure state: this GIC has no Non-secure view), so
+  every priority field's bits [2:0] are RAZ/WI (IHI 0048B Table 3-1); its
+  virtual interface's five (`GICH_VTR.PRIbits`) are the architecture's,
+  whatever the physical GIC's are. The minimum binary points
   are then 2 for `GICC_BPR` and 3 for `GICC_ABPR`, raised to on a lower
   write and set on reset, and the 32 preemption levels are bits of
   `GICC_APR0` and `GICC_NSAPR0` alone (Table 4-47; DDI 0471B Table 3-6).
@@ -2012,7 +2020,7 @@ one open.
   and 1, and four of each active priority register. The GIC-400's legacy
   `Int_config[0]` bits (DDI 0471B §3.4.2) are not taken: IHI 0048B
   reserves them, and they read as zero.
-- **The system counter runs at 1 GHz on both processors.** Before
+- **The system counter runs at 1 GHz on both processors by default.** Before
   Armv8.6 the Arm ARM leaves the counter's frequency to the system, BSA
   asking at least 10 MHz (DEN0094C RB_TIME_02); from Armv8.6 it is 1 GHz.
   QEMU runs the Cortex-A57's at 62.5 MHz (`GTIMER_BACKCOMPAT_HZ`) on
@@ -2020,7 +2028,8 @@ one open.
   rate (`ARM_FEATURE_BACKCOMPAT_CNTFRQ`), as it does every processor on
   `virt-9.0` and older; this board gives the Cortex-A57 the same 1 GHz
   as the Armv9.2 model, which `CNTFRQ_EL0` reads at reset and firmware
-  and Linux take from it.
+  and Linux take from it. A host may give the Cortex-A57 another rate
+  BSA allows (`VirtConfig::counter`); the Armv9.2 model takes 1 GHz alone.
 - **The device tree describes what the board has, as it has it.** Each
   virtio-mmio transport's interrupt is level-high, the line being held
   while its `InterruptStatus` is not zero; QEMU's `virtio_mmio_update_irq`

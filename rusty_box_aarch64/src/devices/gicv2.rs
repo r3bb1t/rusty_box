@@ -6,8 +6,10 @@
 //! Provenance (R7): the ARM Generic Interrupt Controller Architecture
 //! Specification, GIC architecture version 2.0 (IHI 0048B.b), first, with
 //! the GIC-400's choices where it leaves them to the implementation (DDI
-//! 0471B: 480 SPIs, PPIs 25 to 31, five priority bits, the minimum binary
-//! points and active priority registers of five, level-sensitive PPIs);
+//! 0471B: PPIs 25 to 31, level-sensitive), and its SPIs and priority bits
+//! the board's to choose ([`GicShape`]: by default the GIC-400's 480 SPIs
+//! and five bits), the minimum binary points and active priority registers
+//! following from the priority bits (IHI 0048B Table 4-47);
 //! QEMU 11.1.2 `hw/intc/arm_gic.c` for a revision-2, single-CPU GIC second,
 //! whose structure this model keeps —
 //! `gic_update_internal` and `gic_get_best_irq` (the signalled interrupt),
@@ -85,11 +87,10 @@ use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
 use crate::cpu::VirtualLines;
 use crate::identity::{GicIdentity, MsiFrameIidr};
 
-/// SGIs, PPIs and 480 SPIs, the most the GIC-400 is configured with
-/// ("permitted values are 0-480, in steps of 32", DDI 0471B §2.3.3), so
-/// `GICD_TYPER.ITLinesNumber` reads 15 (§3.3, "NUM_SPIS/32").
-pub const NUM_IRQ: usize = 32 + 480;
-const WORDS: usize = NUM_IRQ / 32;
+/// SGIs, PPIs and the most SPIs a GIC has, [`SpiCount::MAX`]: the size of
+/// every per-interrupt bank, whatever the GIC's [`GicShape`] implements.
+pub const MAX_IRQ: usize = 32 + SpiCount::MAX.get() as usize;
+const WORDS: usize = MAX_IRQ / 32;
 /// QEMU `GIC_NR_SGIS`.
 const NR_SGIS: usize = 16;
 /// The first PPI the GIC implements: PPIs 25 to 31 exist, 16 to 24 do not,
@@ -97,46 +98,220 @@ const NR_SGIS: usize = 16;
 /// PPIs, IDs 16-24", DDI 0471B §3.3). Every field of an interrupt that does
 /// not exist is RAZ/WI (IHI 0048B §4.3.13 and the other registers').
 const FIRST_PPI: usize = 25;
-/// The priority bits implemented, [7:3]: five, 32 priority levels, as the
-/// GIC-400 has them where it has no Non-secure view of them (DDI 0471B §2.6,
-/// "32 priority levels in Secure state"). The others are RAZ/WI in every
-/// priority field (IHI 0048B §3.3, Table 3-1; Table 4-32). This is the
-/// implementation's choice, which IHI 0048B leaves open from four bits to
-/// eight; the virtual interface's five ([`super::gicv2_virt`]) are the
-/// architecture's own (§5.5.2, §5.5.3), whatever the physical GIC has.
-const PRIORITY_MASK: u8 = 0xF8;
 
-/// Whether interrupt `irq` exists: an SGI, a PPI from [`FIRST_PPI`], or an
-/// SPI below [`NUM_IRQ`].
-const fn implemented(irq: usize) -> bool {
-    irq < NR_SGIS || (irq >= FIRST_PPI && irq < NUM_IRQ)
-}
+/// How many SPIs a GIC has: a multiple of 32 (`GICD_TYPER.ITLinesNumber`
+/// counts them in 32s, IHI 0048B §4.3.2), at most 480, the GIC-400's
+/// largest configuration ("permitted values are 0-480, in steps of 32",
+/// DDI 0471B §2.3.3), and at least [`SpiCount::MIN`], the SPIs the board
+/// wires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SpiCount(u16);
 
-/// Interrupt ID `intid` as an index into the GIC's state, if the interrupt
-/// exists: the one gate of every path that takes an ID from a register
-/// (`GICC_EOIR`, `GICC_DIR`, a hardware List register) or an input line,
-/// so none reaches the state of an interrupt that does not exist.
-const fn existing(intid: u32) -> Option<usize> {
-    let i = intid as usize;
-    if implemented(i) {
-        Some(i)
-    } else {
-        None
-    }
-}
+impl SpiCount {
+    /// The GIC-400's largest configuration.
+    pub const MAX: Self = Self(480);
+    /// The fewest that hold every SPI the board wires: the GICv2m frame's,
+    /// the highest, end at INTID [`V2M_BASE_SPI`] + [`V2M_NUM_SPI`] − 1,
+    /// rounded up to the next multiple of 32.
+    pub const MIN: Self = Self(((V2M_BASE_SPI + V2M_NUM_SPI - 32).div_ceil(32) * 32) as u16);
+    /// The count a board's GIC has unless its host chooses another: the
+    /// GIC-400's largest.
+    pub const DEFAULT: Self = Self::MAX;
 
-/// The interrupts of word `w` of a bank that exist, a bit each
-/// ([`implemented`]).
-const fn implemented_word(w: usize) -> u32 {
-    let mut word = 0;
-    let mut k = 0;
-    while k < 32 {
-        if implemented(w * 32 + k) {
-            word |= 1 << k;
+    /// `spis`, if it is a multiple of 32 from [`SpiCount::MIN`] to
+    /// [`SpiCount::MAX`].
+    pub const fn new(spis: u32) -> Option<Self> {
+        if spis.is_multiple_of(32) && spis >= Self::MIN.0 as u32 && spis <= Self::MAX.0 as u32 {
+            Some(Self(spis as u16))
+        } else {
+            None
         }
-        k += 1;
     }
-    word
+
+    /// The count.
+    pub const fn get(self) -> u32 {
+        self.0 as u32
+    }
+
+    /// The interrupt IDs below the first that does not exist: the SGIs and
+    /// PPIs, and these SPIs.
+    const fn irq_end(self) -> usize {
+        32 + self.0 as usize
+    }
+}
+
+impl Default for SpiCount {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// How many priority bits a GIC implements, the top ones of each priority
+/// field, the others RAZ/WI (IHI 0048B §3.3, Table 3-1: "IMPLEMENTATION
+/// DEFINED in the range 4-8"). They decide the minimum binary points and
+/// how many preemption levels the active priority registers hold (Table
+/// 4-47). The physical GIC's are this choice; the virtual interface's five
+/// ([`super::gicv2_virt`]) are the architecture's own (§5.5.2, §5.5.3).
+///
+/// Closed (R5): the five counts Table 3-1 allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PriorityBits {
+    Four,
+    /// The GIC-400's, where it has no Non-secure view of them (DDI 0471B
+    /// §2.6, "32 priority levels in Secure state").
+    Five,
+    Six,
+    Seven,
+    Eight,
+}
+
+impl PriorityBits {
+    /// Every count, fewest first.
+    pub const ALL: [Self; 5] = [Self::Four, Self::Five, Self::Six, Self::Seven, Self::Eight];
+    /// The count a board's GIC has unless its host chooses another: the
+    /// GIC-400's.
+    pub const DEFAULT: Self = Self::Five;
+
+    /// The count, 4 to 8.
+    pub const fn count(self) -> u8 {
+        match self {
+            Self::Four => 4,
+            Self::Five => 5,
+            Self::Six => 6,
+            Self::Seven => 7,
+            Self::Eight => 8,
+        }
+    }
+
+    /// The count `bits` names, if Table 3-1 allows it.
+    pub const fn new(bits: u8) -> Option<Self> {
+        match bits {
+            4 => Some(Self::Four),
+            5 => Some(Self::Five),
+            6 => Some(Self::Six),
+            7 => Some(Self::Seven),
+            8 => Some(Self::Eight),
+            _ => None,
+        }
+    }
+
+    /// The priority bits that exist (Table 3-1, Table 4-32).
+    const fn mask(self) -> u8 {
+        (0xFF00_u16 >> self.count()) as u8
+    }
+
+    /// The bits of a group priority: the priority bits, but for the lowest
+    /// of eight, which the least binary point, 0, leaves to the
+    /// subpriority (§3.3.3, Table 3-2).
+    const fn group_bits(self) -> u32 {
+        let count = self.count() as u32;
+        if count < 7 {
+            count
+        } else {
+            7
+        }
+    }
+
+    /// `GICC_BPR`'s minimum binary point: the one whose group priority is
+    /// every group bit (Table 4-47: 3 with four bits, 2 with five, 1 with
+    /// six, 0 with seven), and 0 with eight, the least there is (§4.4.3).
+    /// A write below it sets it (§4.4.3), and a reset sets it.
+    const fn min_bpr(self) -> u8 {
+        (7 - self.group_bits()) as u8
+    }
+
+    /// `GICC_ABPR`'s minimum binary point, one above `GICC_BPR`'s (§3.3.3).
+    const fn min_abpr(self) -> u8 {
+        self.min_bpr() + 1
+    }
+
+    /// The preemption levels, a bit each of the active priority registers
+    /// (Table 4-47: 16, 32, 64, 128).
+    const fn preemption_levels(self) -> u32 {
+        1 << self.group_bits()
+    }
+
+    /// The bits of `GICC_APRn` and `GICC_NSAPRn` word `n` that hold a
+    /// preemption level, in Table 4-47's layout (`GICC_APR0[15:0]` with
+    /// four bits, `GICC_APR0` with five, `GICC_APR0` and `GICC_APR1` with
+    /// six, all four from seven); the other bits and words are reserved.
+    const fn apr_bits(self, n: usize) -> u32 {
+        let levels = self.preemption_levels() as usize;
+        if levels >= 32 * (n + 1) {
+            u32::MAX
+        } else if levels > 32 * n {
+            (1 << (levels - 32 * n)) - 1
+        } else {
+            0
+        }
+    }
+}
+
+impl Default for PriorityBits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The shape of a GIC that IHI 0048B leaves to the implementation and a
+/// board chooses: how many SPIs it has and how many priority bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GicShape {
+    pub spis: SpiCount,
+    pub priority_bits: PriorityBits,
+}
+
+impl GicShape {
+    /// The GIC-400's: 480 SPIs and five priority bits.
+    pub const DEFAULT: Self = Self {
+        spis: SpiCount::DEFAULT,
+        priority_bits: PriorityBits::DEFAULT,
+    };
+
+    /// Whether interrupt `irq` exists: an SGI, a PPI from [`FIRST_PPI`], or
+    /// one of the GIC's SPIs.
+    const fn implemented(self, irq: usize) -> bool {
+        irq < NR_SGIS || (irq >= FIRST_PPI && irq < self.spis.irq_end())
+    }
+
+    /// Interrupt ID `intid` as an index into the GIC's state, if the
+    /// interrupt exists: the one gate of every path that takes an ID from a
+    /// register (`GICC_EOIR`, `GICC_DIR`, a hardware List register) or an
+    /// input line, so none reaches the state of an interrupt that does not
+    /// exist.
+    const fn existing(self, intid: u32) -> Option<usize> {
+        let i = intid as usize;
+        if self.implemented(i) {
+            Some(i)
+        } else {
+            None
+        }
+    }
+
+    /// The interrupts of word `w` of a bank that exist, a bit each
+    /// ([`GicShape::implemented`]).
+    const fn implemented_word(self, w: usize) -> u32 {
+        let mut word = 0;
+        let mut k = 0;
+        while k < 32 {
+            if self.implemented(w * 32 + k) {
+                word |= 1 << k;
+            }
+            k += 1;
+        }
+        word
+    }
+
+    /// The words of a bank that hold an interrupt that exists.
+    const fn words(self) -> usize {
+        self.spis.irq_end() / 32
+    }
+}
+
+impl Default for GicShape {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// The SGIs' bits in word 0 of a bank.
@@ -147,17 +322,9 @@ pub(super) const SPURIOUS: u32 = 1023;
 pub(super) const SPURIOUS_GROUP1: u32 = 1022;
 /// QEMU `running_priority` while nothing is active: above every priority.
 pub(super) const IDLE_PRIORITY: u16 = 0x100;
-/// The active priority registers of five priority bits: 32 preemption
-/// levels, all in `GICC_APR0` and `GICC_NSAPR0` (IHI 0048B §4.4.12, Table
-/// 4-47's recommended layout); `GICC_APR1` to `GICC_APR3` and their
-/// `GICC_NSAPRn` are reserved, as in the GIC-400 (DDI 0471B Table 3-6).
-const NR_APRS: usize = 1;
-/// The minimum binary points of five priority bits (IHI 0048B Table 4-47):
-/// `GICC_BPR` 2 and `GICC_ABPR` one more (§3.3.3), as in the GIC-400 (DDI
-/// 0471B Table 3-6). A write below the minimum sets it (§4.4.3), and a
-/// reset sets the minimum.
-const MIN_BPR: u8 = 2;
-const MIN_ABPR: u8 = MIN_BPR + 1;
+/// The most active priority registers of a group: four, of 128 preemption
+/// levels (IHI 0048B §4.4.12, Table 4-47).
+const MAX_APRS: usize = 4;
 
 /// `GICD_CTLR`'s and `GICC_CTLR`'s group enables, the same bits in both.
 pub(super) const GICD_CTLR_EN_GRP0: u32 = 1 << 0;
@@ -306,7 +473,7 @@ pub struct GicV2 {
     level: Bits,
     /// Edge-triggered (`GICD_ICFGR` bit 2n+1).
     edge: Bits,
-    priority: [u8; NUM_IRQ],
+    priority: [u8; MAX_IRQ],
     /// `GICC_CTLR`.
     cpu_ctlr: u32,
     pmr: u8,
@@ -315,10 +482,12 @@ pub struct GicV2 {
     /// QEMU `running_priority`: the group priority of the highest-priority
     /// active interrupt, or [`IDLE_PRIORITY`].
     running_priority: u16,
-    /// QEMU `apr`: one bit per active Group 0 preemption level.
-    apr: [u32; NR_APRS],
+    /// QEMU `apr`: one bit per active Group 0 preemption level, in the
+    /// words and bits the shape's priority bits have
+    /// ([`PriorityBits::apr_bits`]).
+    apr: [u32; MAX_APRS],
     /// QEMU `nsapr`: one bit per active Group 1 preemption level.
-    nsapr: [u32; NR_APRS],
+    nsapr: [u32; MAX_APRS],
     /// QEMU `current_pending`, recomputed by [`GicV2::update`].
     current_pending: u32,
     /// The interrupt the CPU interface signals and `GICC_IAR` would
@@ -331,6 +500,9 @@ pub struct GicV2 {
     /// Who the GIC says made it, and its GICv2m frame: the board's
     /// identity, kept across a reset and a restore.
     names: GicNames,
+    /// The SPIs and priority bits it has, the board's choice, kept across
+    /// a reset and a restore.
+    shape: GicShape,
 }
 
 /// What the GIC's identification registers read: `GICD_IIDR`, `GICC_IIDR`
@@ -356,13 +528,9 @@ impl Default for GicV2 {
 }
 
 impl GicV2 {
-    /// A GIC out of reset with `extensions`.
+    /// A GIC out of reset with `extensions`, of the GIC-400's shape.
     pub fn with_extensions(extensions: GicExtensions) -> Self {
-        let virt = match extensions {
-            GicExtensions::Absent => None,
-            GicExtensions::Virtualization => Some(VirtInterface::new()),
-        };
-        Self { virt, ..Self::new() }
+        Self::out_of_reset(extensions, GicShape::DEFAULT, GicNames::NONE)
     }
 
     /// This GIC with its identification registers reading as `names` says.
@@ -370,10 +538,23 @@ impl GicV2 {
         Self { names, ..self }
     }
 
-    /// A reset: the GIC out of reset with the extensions and the identity
-    /// it has.
+    /// A GIC out of reset with this one's extensions and identity and the
+    /// SPIs and priority bits `shape` gives it. It is a new GIC, not this
+    /// one changed: nothing of this one's state is kept, so no state of
+    /// another shape can outlive it.
+    pub fn shaped(self, shape: GicShape) -> Self {
+        Self::out_of_reset(self.extensions(), shape, self.names)
+    }
+
+    /// The SPIs and priority bits this GIC has.
+    pub fn shape(&self) -> GicShape {
+        self.shape
+    }
+
+    /// A reset: the GIC out of reset with the extensions, the shape and the
+    /// identity it has.
     pub fn reset(&mut self) {
-        *self = Self::with_extensions(self.extensions()).identified_as(self.names);
+        *self = Self::out_of_reset(self.extensions(), self.shape, self.names);
     }
 
     /// The extensions this GIC implements.
@@ -385,12 +566,25 @@ impl GicV2 {
         }
     }
 
-    /// QEMU `arm_gic_common_reset_hold`: SGIs enabled and edge-triggered,
-    /// every other interrupt disabled, level-sensitive, Group 0 and at
-    /// priority 0. No Virtualization Extensions ([`GicV2::with_extensions`]),
-    /// and CPU interfaces of no product or implementer
-    /// ([`GicV2::identified_as`]).
+    /// A GIC out of reset with no Virtualization Extensions
+    /// ([`GicV2::with_extensions`]), CPU interfaces of no product or
+    /// implementer ([`GicV2::identified_as`]), and the GIC-400's shape
+    /// ([`GicV2::shaped`]).
     pub fn new() -> Self {
+        Self::with_extensions(GicExtensions::Absent)
+    }
+
+    /// The one constructor of a GIC out of reset, QEMU
+    /// `arm_gic_common_reset_hold`: SGIs enabled and edge-triggered, every
+    /// other interrupt disabled, level-sensitive, Group 0 and at priority 0,
+    /// with `extensions`, of `shape`, named `names`, its binary points at
+    /// their reset values, the minimum the priority bits allow (IHI 0048B
+    /// §4.4.3).
+    fn out_of_reset(extensions: GicExtensions, shape: GicShape, names: GicNames) -> Self {
+        let virt = match extensions {
+            GicExtensions::Absent => None,
+            GicExtensions::Virtualization => Some(VirtInterface::new()),
+        };
         let mut enabled = Bits::new();
         let mut edge = Bits::new();
         for sgi in 0..NR_SGIS {
@@ -405,20 +599,21 @@ impl GicV2 {
             group1: Bits::new(),
             level: Bits::new(),
             edge,
-            priority: [0; NUM_IRQ],
+            priority: [0; MAX_IRQ],
             cpu_ctlr: 0,
             pmr: 0,
-            bpr: MIN_BPR,
-            abpr: MIN_ABPR,
+            bpr: shape.priority_bits.min_bpr(),
+            abpr: shape.priority_bits.min_abpr(),
             running_priority: IDLE_PRIORITY,
-            apr: [0; NR_APRS],
-            nsapr: [0; NR_APRS],
+            apr: [0; MAX_APRS],
+            nsapr: [0; MAX_APRS],
             current_pending: SPURIOUS,
             signalled: SPURIOUS,
             irq_out: false,
             fiq_out: false,
-            virt: None,
-            names: GicNames::NONE,
+            virt,
+            names,
+            shape,
         }
     }
 
@@ -502,8 +697,8 @@ impl GicV2 {
         r.read_bytes(&mut points)?;
         let [pmr, bpr, abpr] = points;
         let running_priority = r.read_u16()?;
-        let mut apr = [0u32; NR_APRS];
-        let mut nsapr = [0u32; NR_APRS];
+        let mut apr = [0u32; MAX_APRS];
+        let mut nsapr = [0u32; MAX_APRS];
         for word in apr.iter_mut().chain(nsapr.iter_mut()) {
             *word = r.read_u32()?;
         }
@@ -514,7 +709,7 @@ impl GicV2 {
             }
         }
         let [enabled, pending, active, group1, level, edge] = sets;
-        let mut priority = [0u8; NUM_IRQ];
+        let mut priority = [0u8; MAX_IRQ];
         r.read_bytes(&mut priority)?;
         let mut sgi_sources = [0u8; NR_SGIS];
         r.read_bytes(&mut sgi_sources)?;
@@ -550,6 +745,7 @@ impl GicV2 {
             fiq_out: false,
             virt,
             names: self.names,
+            shape: self.shape,
         };
         restored.check_restored(&sgi_sources)?;
         *self = restored;
@@ -560,7 +756,8 @@ impl GicV2 {
 
     /// The one check of a restored image, made before it replaces anything:
     /// refuses binary points the registers cannot hold, a priority or a
-    /// priority mask with an unimplemented bit set, state of an interrupt
+    /// priority mask with an unimplemented bit set, an active priority of a
+    /// preemption level the priority bits do not give, state of an interrupt
     /// that does not exist, an SGI that is disabled, not edge-triggered or
     /// with its line high, a PPI that is not level-sensitive, a running
     /// priority other than the one its active priority registers give (the
@@ -571,25 +768,35 @@ impl GicV2 {
     /// maintenance interrupt line whose level is not the one the virtual
     /// interface gives.
     fn check_restored(&self, sgi_sources: &[u8; NR_SGIS]) -> SnapResult {
-        if !(MIN_BPR..=7).contains(&self.bpr) || !(MIN_ABPR..=7).contains(&self.abpr) {
+        let shape = self.shape;
+        let bits = shape.priority_bits;
+        if !(bits.min_bpr()..=7).contains(&self.bpr) || !(bits.min_abpr()..=7).contains(&self.abpr)
+        {
             return Err(SnapError::Invalid(
                 "GIC binary point outside its register's range",
             ));
         }
-        if self.pmr & !PRIORITY_MASK != 0 || self.priority.iter().any(|p| p & !PRIORITY_MASK != 0) {
+        let mask = bits.mask();
+        if self.pmr & !mask != 0 || self.priority.iter().any(|p| p & !mask != 0) {
             return Err(SnapError::Invalid("GIC priority with an unimplemented bit"));
         }
-        let absent = |bits: &Bits| (0..WORDS).any(|w| bits.0[w] & !implemented_word(w) != 0);
+        if (0..MAX_APRS).any(|n| (self.apr[n] | self.nsapr[n]) & !bits.apr_bits(n) != 0) {
+            return Err(SnapError::Invalid(
+                "GIC active priority of a preemption level that does not exist",
+            ));
+        }
+        let absent = |bits: &Bits| (0..WORDS).any(|w| bits.0[w] & !shape.implemented_word(w) != 0);
         if [
             &self.enabled,
             &self.pending,
             &self.active,
             &self.group1,
             &self.level,
+            &self.edge,
         ]
         .into_iter()
         .any(absent)
-            || self.priority[NR_SGIS..FIRST_PPI].iter().any(|&p| p != 0)
+            || (0..MAX_IRQ).any(|i| !shape.implemented(i) && self.priority[i] != 0)
         {
             return Err(SnapError::Invalid(
                 "GIC state of an interrupt that does not exist",
@@ -637,7 +844,7 @@ impl GicV2 {
     /// Drive input line `intid` (a PPI or SPI that exists) to `level`: QEMU
     /// `gic_set_irq` with `gic_set_irq_generic`.
     pub fn set_line(&mut self, intid: u32, level: bool) {
-        let Some(i) = existing(intid) else {
+        let Some(i) = self.shape.existing(intid) else {
             return;
         };
         if i < NR_SGIS || self.level.get(i) == level {
@@ -673,7 +880,7 @@ impl GicV2 {
         };
         let mut best: Option<usize> = None;
         let mut best_prio = IDLE_PRIORITY;
-        for w in 0..WORDS {
+        for w in 0..self.shape.words() {
             let pending = self.pending.0[w] | (self.level.0[w] & !self.edge.0[w]);
             let in_groups = (self.group1.0[w] & group1) | (!self.group1.0[w] & group0);
             let mut candidates = self.enabled.0[w] & pending & !self.active.0[w] & in_groups;
@@ -792,7 +999,7 @@ impl GicV2 {
     /// if it exists.
     fn bank_irq(off: u64, base: u64) -> Option<usize> {
         let irq = ((off - base) * 8) as usize;
-        (irq < NUM_IRQ).then_some(irq)
+        (irq < MAX_IRQ).then_some(irq)
     }
 
     /// Byte `n` of `GICD_IIDR`, the board's identity's.
@@ -805,7 +1012,7 @@ impl GicV2 {
     fn dist_readb(&self, off: u64) -> u8 {
         match off {
             0x000 => self.dist_ctlr as u8,
-            0x004 => ((NUM_IRQ / 32) - 1) as u8,
+            0x004 => (self.shape.words() - 1) as u8,
             // GICD_IIDR, the board's identity's where QEMU's reads Arm's
             // JEP106 code, 0x43B. An arm per byte keeps the offsets below
             // 0x00C one jump table, which every other register's read skips
@@ -822,7 +1029,7 @@ impl GicV2 {
                 Self::bank_irq(off, base).map_or(0, |irq| {
                     let mut b = 0u8;
                     for k in 0..8 {
-                        if irq + k < NUM_IRQ && self.test_pending(irq + k) {
+                        if irq + k < MAX_IRQ && self.test_pending(irq + k) {
                             b |= 1 << k;
                         }
                     }
@@ -844,7 +1051,7 @@ impl GicV2 {
                 let first = ((off - 0xC00) * 4) as usize;
                 let mut b = 0u8;
                 for k in 0..4 {
-                    if first + k < NUM_IRQ && self.edge.get(first + k) {
+                    if first + k < MAX_IRQ && self.edge.get(first + k) {
                         b |= 2 << (2 * k);
                     }
                 }
@@ -887,10 +1094,10 @@ impl GicV2 {
     }
 
     /// For each bit set in `v`, set or clear interrupt `first + k`, if it
-    /// exists.
-    fn set_each(bits: &mut Bits, first: usize, v: u8, value: bool) {
+    /// exists in `shape`.
+    fn set_each(shape: GicShape, bits: &mut Bits, first: usize, v: u8, value: bool) {
         for k in 0..8 {
-            if v & (1 << k) != 0 && implemented(first + k) {
+            if v & (1 << k) != 0 && shape.implemented(first + k) {
                 bits.set(first + k, value);
             }
         }
@@ -903,7 +1110,7 @@ impl GicV2 {
             0x080..=0x0FF => {
                 if let Some(irq) = Self::bank_irq(off, 0x080) {
                     for k in 0..8 {
-                        if implemented(irq + k) {
+                        if self.shape.implemented(irq + k) {
                             self.group1.set(irq + k, v & (1 << k) != 0);
                         }
                     }
@@ -913,13 +1120,13 @@ impl GicV2 {
                 if let Some(irq) = Self::bank_irq(off, 0x100) {
                     // SGIs cannot be disabled: any write enables them.
                     let v = if irq < NR_SGIS { 0xFF } else { v };
-                    Self::set_each(&mut self.enabled, irq, v, true);
+                    Self::set_each(self.shape, &mut self.enabled, irq, v, true);
                 }
             }
             0x180..=0x1FF => {
                 if let Some(irq) = Self::bank_irq(off, 0x180) {
                     let v = if irq < NR_SGIS { 0 } else { v };
-                    Self::set_each(&mut self.enabled, irq, v, false);
+                    Self::set_each(self.shape, &mut self.enabled, irq, v, false);
                 }
             }
             0x200..=0x27F => {
@@ -927,31 +1134,31 @@ impl GicV2 {
                 // GICD_SPENDSGIR.
                 if let Some(irq) = Self::bank_irq(off, 0x200) {
                     let v = if irq < NR_SGIS { 0 } else { v };
-                    Self::set_each(&mut self.pending, irq, v, true);
+                    Self::set_each(self.shape, &mut self.pending, irq, v, true);
                 }
             }
             0x280..=0x2FF => {
                 if let Some(irq) = Self::bank_irq(off, 0x280) {
                     let v = if irq < NR_SGIS { 0 } else { v };
-                    Self::set_each(&mut self.pending, irq, v, false);
+                    Self::set_each(self.shape, &mut self.pending, irq, v, false);
                 }
             }
             0x300..=0x37F => {
                 if let Some(irq) = Self::bank_irq(off, 0x300) {
-                    Self::set_each(&mut self.active, irq, v, true);
+                    Self::set_each(self.shape, &mut self.active, irq, v, true);
                 }
             }
             0x380..=0x3FF => {
                 if let Some(irq) = Self::bank_irq(off, 0x380) {
-                    Self::set_each(&mut self.active, irq, v, false);
+                    Self::set_each(self.shape, &mut self.active, irq, v, false);
                 }
             }
             // QEMU `gic_dist_set_priority`: the unimplemented priority bits
             // and an interrupt that does not exist are WI.
             0x400..=0x7FF => {
                 let irq = (off - 0x400) as usize;
-                if implemented(irq) {
-                    self.priority[irq] = v & PRIORITY_MASK;
+                if self.shape.implemented(irq) {
+                    self.priority[irq] = v & self.shape.priority_bits.mask();
                 }
             }
             // Only an SPI's Int_config[1] is programmable: an SGI's is RAO/WI
@@ -961,7 +1168,7 @@ impl GicV2 {
             0xC08..=0xEFF => {
                 let first = ((off - 0xC00) * 4) as usize;
                 for k in 0..4 {
-                    if first + k < NUM_IRQ {
+                    if self.shape.implemented(first + k) {
                         self.edge.set(first + k, v & (2 << (2 * k)) != 0);
                     }
                 }
@@ -1042,10 +1249,17 @@ impl GicV2 {
         group_priority(self.priority[irq], self.group_mask(irq))
     }
 
+    /// The shift from a group priority to its preemption level: the bits at
+    /// and below the least binary point, which no group priority has
+    /// (IHI 0048B Table 4-47).
+    fn level_shift(&self) -> u32 {
+        u32::from(self.shape.priority_bits.min_bpr()) + 1
+    }
+
     /// QEMU `gic_activate_irq`.
     fn activate(&mut self, irq: usize) {
         let prio = self.group_priority(irq);
-        let level = usize::from(prio >> (MIN_BPR + 1));
+        let level = usize::from(prio >> self.level_shift());
         let bank = if self.group1.get(irq) {
             &mut self.nsapr
         } else {
@@ -1058,10 +1272,10 @@ impl GicV2 {
 
     /// QEMU `gic_get_prio_from_apr_bits`.
     fn prio_from_apr_bits(&self) -> u16 {
-        for i in 0..NR_APRS {
+        for i in 0..MAX_APRS {
             let apr = self.apr[i] | self.nsapr[i];
             if apr != 0 {
-                return ((i as u32 * 32 + apr.trailing_zeros()) << (MIN_BPR + 1)) as u16;
+                return ((i as u32 * 32 + apr.trailing_zeros()) << self.level_shift()) as u16;
             }
         }
         IDLE_PRIORITY
@@ -1118,7 +1332,7 @@ impl GicV2 {
     /// interrupt deactivates. A Group 1 interrupt through `GICC_EOIR` while
     /// `AckCtl` is clear is UNPREDICTABLE, and completes as if it were set.
     fn complete(&mut self, irq: u32, view: CpuView) {
-        let Some(i) = existing(irq) else {
+        let Some(i) = self.shape.existing(irq) else {
             return;
         };
         if self.running_priority == IDLE_PRIORITY {
@@ -1137,7 +1351,7 @@ impl GicV2 {
     /// QEMU `gic_deactivate_irq` (`GICC_DIR`): ignored unless `EOImode` is
     /// set, and for an interrupt that does not exist.
     fn deactivate(&mut self, irq: u32) {
-        match existing(irq) {
+        match self.shape.existing(irq) {
             Some(i) if self.eoi_split() => self.active.set(i, false),
             Some(_) | None => {}
         }
@@ -1163,8 +1377,8 @@ impl GicV2 {
             0x1C => u32::from(self.abpr),
             0x20 => self.acknowledge(CpuView::Group1Alias),
             0x28 => self.highest_pending_irq(CpuView::Group1Alias),
-            0xD0 => self.apr[0],
-            0xE0 => self.nsapr[0],
+            0xD0 | 0xD4 | 0xD8 | 0xDC => self.apr[((off - 0xD0) / 4) as usize],
+            0xE0 | 0xE4 | 0xE8 | 0xEC => self.nsapr[((off - 0xE0) / 4) as usize],
             0xFC => self.names.gic.cpu_interface.get(),
             _ => 0,
         }
@@ -1182,17 +1396,22 @@ impl GicV2 {
     fn cpu_write_register(&mut self, off: u64, v: u32) {
         match off {
             0x00 => self.cpu_ctlr = v & GICC_CTLR_V2_MASK,
-            0x04 => self.pmr = v as u8 & PRIORITY_MASK,
-            0x08 => self.bpr = (v as u8 & 7).max(MIN_BPR),
+            0x04 => self.pmr = v as u8 & self.shape.priority_bits.mask(),
+            0x08 => self.bpr = (v as u8 & 7).max(self.shape.priority_bits.min_bpr()),
             0x10 => self.complete(v & 0x3FF, CpuView::Primary),
-            0x1C => self.abpr = (v as u8 & 7).max(MIN_ABPR),
+            0x1C => self.abpr = (v as u8 & 7).max(self.shape.priority_bits.min_abpr()),
             0x24 => self.complete(v & 0x3FF, CpuView::Group1Alias),
-            0xD0 => {
-                self.apr[0] = v;
+            // The bits of the preemption levels the priority bits give; the
+            // other bits, and the registers past them, are reserved (Table
+            // 4-47).
+            0xD0 | 0xD4 | 0xD8 | 0xDC => {
+                let n = ((off - 0xD0) / 4) as usize;
+                self.apr[n] = v & self.shape.priority_bits.apr_bits(n);
                 self.running_priority = self.prio_from_apr_bits();
             }
-            0xE0 => {
-                self.nsapr[0] = v;
+            0xE0 | 0xE4 | 0xE8 | 0xEC => {
+                let n = ((off - 0xE0) / 4) as usize;
+                self.nsapr[n] = v & self.shape.priority_bits.apr_bits(n);
                 self.running_priority = self.prio_from_apr_bits();
             }
             0x1000 => self.deactivate(v & 0x3FF),
@@ -1280,7 +1499,7 @@ impl GicV2 {
         // `deactivate_lr` gives a PPI's or an SPI's ID; one this GIC does
         // not implement names none of its interrupts.
         if let HwDeactivation(Some(id)) = retired {
-            if let Some(i) = existing(id) {
+            if let Some(i) = self.shape.existing(id) {
                 self.active.set(i, false);
                 self.update();
             }
@@ -1393,7 +1612,12 @@ pub(super) mod tests {
     /// Both groups enabled at the distributor and the CPU interface, no
     /// priority masked.
     fn enabled() -> GicV2 {
-        let mut g = GicV2::new();
+        enabled_shaped(GicShape::DEFAULT)
+    }
+
+    /// [`enabled`], of `shape`.
+    fn enabled_shaped(shape: GicShape) -> GicV2 {
+        let mut g = GicV2::new().shaped(shape);
         dist(&mut g, 0x000, 3);
         cpu(&mut g, CTLR, 3);
         cpu(&mut g, PMR, 0xFF);
@@ -1632,6 +1856,111 @@ pub(super) mod tests {
         g.set_line(512, true);
         assert!(!g.irq_out());
         assert_eq!(cpu_get(&mut g, HPPIR), 1023);
+    }
+
+    /// Each count of priority bits has IHI 0048B Table 4-47's binary points
+    /// and active priority registers: `GICC_BPR` resets to, and is raised
+    /// to, 3, 2, 1, 0 and 0, `GICC_ABPR` to one more; `GICC_PMR` keeps the
+    /// bits that exist; an interrupt at priority 0x80 activates the
+    /// preemption level 0x80 has, its bit in the word that holds it; and the
+    /// bits and words past the levels that exist are reserved.
+    #[test]
+    fn each_count_of_priority_bits_has_its_binary_points_and_active_priorities() {
+        for (bits, min_bpr, levels, mask) in [
+            (PriorityBits::Four, 3, 16, 0xF0),
+            (PriorityBits::Five, 2, 32, 0xF8),
+            (PriorityBits::Six, 1, 64, 0xFC),
+            (PriorityBits::Seven, 0, 128, 0xFE),
+            (PriorityBits::Eight, 0, 128, 0xFF),
+        ] {
+            let shape = GicShape {
+                priority_bits: bits,
+                ..GicShape::DEFAULT
+            };
+            let mut g = enabled_shaped(shape);
+            assert_eq!(cpu_get(&mut g, BPR), min_bpr, "{bits:?}: reset");
+            assert_eq!(cpu_get(&mut g, ABPR), min_bpr + 1, "{bits:?}: reset");
+            cpu(&mut g, BPR, 0);
+            cpu(&mut g, ABPR, 0);
+            assert_eq!(cpu_get(&mut g, BPR), min_bpr, "{bits:?}: raised");
+            assert_eq!(cpu_get(&mut g, ABPR), min_bpr + 1, "{bits:?}: raised");
+            assert_eq!(cpu_get(&mut g, PMR), mask, "{bits:?}: the bits that exist");
+
+            raise(&mut g, 40, 0x80);
+            assert_eq!(cpu_get(&mut g, IAR), 40, "{bits:?}");
+            let level = 0x80 * levels / 256;
+            for word in 0..4 {
+                let want = if word == level / 32 {
+                    1 << (level % 32)
+                } else {
+                    0
+                };
+                assert_eq!(
+                    cpu_get(&mut g, APR0 + 4 * word as u64),
+                    want,
+                    "{bits:?}: GICC_APR{word}"
+                );
+            }
+            assert_eq!(cpu_get(&mut g, RPR), 0x80, "{bits:?}");
+            g.set_line(40, false);
+            cpu(&mut g, EOIR, 40);
+
+            for word in 0..4u32 {
+                cpu(&mut g, NSAPR0 + 4 * u64::from(word), u32::MAX);
+                let held = (levels as u32).saturating_sub(32 * word).min(32);
+                let want = if held == 32 {
+                    u32::MAX
+                } else {
+                    (1u32 << held) - 1
+                };
+                assert_eq!(
+                    cpu_get(&mut g, NSAPR0 + 4 * u64::from(word)),
+                    want,
+                    "{bits:?}: GICC_NSAPR{word} keeps its levels' bits"
+                );
+            }
+        }
+        assert_eq!(PriorityBits::new(3), None);
+        assert_eq!(PriorityBits::new(9), None);
+        for bits in PriorityBits::ALL {
+            assert_eq!(PriorityBits::new(bits.count()), Some(bits));
+        }
+    }
+
+    /// A GIC of fewer SPIs reports them in `GICD_TYPER.ITLinesNumber` and has
+    /// none past them: the last one is signalled, the next one's line raises
+    /// nothing and its enable is RAZ/WI. The fewest it may have hold the
+    /// board's highest SPI, its GICv2m frame's last.
+    #[test]
+    fn a_gic_of_fewer_spis_has_none_past_them() {
+        for count in [128, 160, 256, 480] {
+            let spis = SpiCount::new(count).expect("a count the GIC-400 allows");
+            let mut g = enabled_shaped(GicShape {
+                spis,
+                ..GicShape::DEFAULT
+            });
+            assert_eq!(dist_get(&mut g, 0x004) & 0x1F, count / 32, "{count}");
+            let last = 32 + count - 1;
+            raise(&mut g, last, 0x80);
+            assert_eq!(cpu_get(&mut g, IAR), last, "{count}");
+            g.set_line(last, false);
+            cpu(&mut g, EOIR, last);
+            if count < SpiCount::MAX.get() {
+                let past = last + 1;
+                raise(&mut g, past, 0x80);
+                assert!(!g.irq_out(), "{count}: INTID {past} does not exist");
+                assert_eq!(
+                    dist_get(&mut g, 0x100 + u64::from(past / 32) * 4) & (1 << (past % 32)),
+                    0,
+                    "{count}: its enable is RAZ/WI"
+                );
+            }
+        }
+        assert_eq!(SpiCount::MIN.get(), 128);
+        assert!(32 + SpiCount::MIN.get() > V2M_BASE_SPI + V2M_NUM_SPI - 1);
+        for refused in [0, 96, 130, 512] {
+            assert_eq!(SpiCount::new(refused), None, "{refused}");
+        }
     }
 
     /// An EOI or a deactivation naming an interrupt that does not exist, PPI
@@ -2076,16 +2405,18 @@ pub(super) mod tests {
         const BPR_AT: usize = 9;
         const ABPR_AT: usize = 10;
         const RUNNING_AT: usize = 11;
+        const APR_AT: usize = RUNNING_AT + 2;
         const BANK: usize = WORDS * 4;
-        const ENABLED_AT: usize = 21;
+        const ENABLED_AT: usize = APR_AT + 2 * MAX_APRS * 4;
         const PENDING_AT: usize = ENABLED_AT + BANK;
         const ACTIVE_AT: usize = ENABLED_AT + 2 * BANK;
         const GROUP_AT: usize = ENABLED_AT + 3 * BANK;
         const LEVEL_AT: usize = ENABLED_AT + 4 * BANK;
         const EDGE_AT: usize = ENABLED_AT + 5 * BANK;
         const PRIORITY_AT: usize = ENABLED_AT + 6 * BANK;
-        let refused: [(&[(usize, u8)], &str); 15] = [
+        let refused: [(&[(usize, u8)], &str); 16] = [
             (&[(PMR_AT, 0x81)], "a priority mask with bit 0"),
+            (&[(APR_AT + 4, 0x01)], "GICC_APR1, reserved with five bits"),
             (&[(PRIORITY_AT + 40, 0x44)], "a priority with bit 2"),
             (&[(BPR_AT, 1)], "a binary point below 2"),
             (&[(ABPR_AT, 2)], "an aliased binary point below 3"),

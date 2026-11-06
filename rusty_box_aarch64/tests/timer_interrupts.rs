@@ -144,7 +144,8 @@ fn the_guest_counts_ten_timer_interrupts_then_powers_off() {
 /// future: the restored machine powers off at the same tick with the same
 /// count as the one that kept going, and an image is refused by a machine
 /// built differently (its RAM, its processor, its firmware's speculation
-/// report) without changing it.
+/// report, its counter rate, its GIC's SPIs or priority bits) without
+/// changing it.
 #[test]
 fn a_snapshot_restores_the_same_future() {
     let mut ram = vec![0u8; RAM_LEN];
@@ -239,29 +240,49 @@ fn a_snapshot_restores_the_same_future() {
     );
 
     // And so is firmware that answers the speculation workarounds otherwise,
-    // which the guest may have asked and acted on.
-    for spectre in rusty_box_aarch64::SpectreReport::ALL
+    // a counter of another rate and a GIC of another shape, which the guest
+    // may have read and acted on.
+    let spectre = rusty_box_aarch64::SpectreReport::ALL
         .into_iter()
         .filter(|&report| report != VirtConfig::DEFAULT.spectre)
-    {
-        let mut other_ram = vec![0u8; RAM_LEN];
-        let mut other = MachineBuilder::new(VirtConfig {
+        .map(|spectre| VirtConfig {
             spectre,
             ..VirtConfig::DEFAULT
-        })
-        .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
-        .bare()
-        .build_in(MemoryLoan {
-            ram: &mut other_ram,
-            vars: &mut [],
-        })
-        .expect("builds");
+        });
+    let counter = VirtConfig {
+        counter: rusty_box_aarch64::CounterRate::new(24_000_000).expect("a rate"),
+        ..VirtConfig::DEFAULT
+    };
+    let spis = VirtConfig {
+        gic: rusty_box_aarch64::GicShape {
+            spis: rusty_box_aarch64::SpiCount::MIN,
+            ..rusty_box_aarch64::GicShape::DEFAULT
+        },
+        ..VirtConfig::DEFAULT
+    };
+    let priority_bits = VirtConfig {
+        gic: rusty_box_aarch64::GicShape {
+            priority_bits: rusty_box_aarch64::PriorityBits::Eight,
+            ..rusty_box_aarch64::GicShape::DEFAULT
+        },
+        ..VirtConfig::DEFAULT
+    };
+    for config in spectre.chain([counter, spis, priority_bits]) {
+        let mut other_ram = vec![0u8; RAM_LEN];
+        let mut other = MachineBuilder::new(config)
+            .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
+            .bare()
+            .build_in(MemoryLoan {
+                ram: &mut other_ram,
+                vars: &mut [],
+            })
+            .expect("builds");
         assert_eq!(
             other.restore_snapshot(&mut image.as_slice()),
             Err(rusty_box_core::snap::SnapError::Invalid(
                 "snapshot is of a machine built differently"
             )),
-            "{spectre:?}"
+            "{config:?}"
         );
     }
 

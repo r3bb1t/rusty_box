@@ -290,18 +290,18 @@ fn reads(word: u32) -> bool {
 
 /// The outcome QEMU recorded for `v`, but where the board departs from QEMU
 /// (README "Where the references differ"): a firmware call of
-/// `PSCI_VERSION`, an `HVC` or `SMC` with W0 naming it, reads PSCI 1.2
-/// (DEN 0022E), where QEMU's reads 1.1.
+/// `PSCI_VERSION`, an `HVC` or `SMC` with W0 naming it, reads the version
+/// the board's firmware implements, where QEMU's reads 1.1.
 fn the_boards_outcome(v: &Vector) -> Outcome {
+    use super::system::psci;
     const PSCI_VERSION: u64 = 0x8400_0000;
     const QEMU_PSCI_1_1: u64 = 0x0001_0001;
-    const PSCI_1_2: u64 = 0x0001_0002;
     // `HVC #imm16` and `SMC #imm16` (Arm ARM C6.2: `opc` 000, `LL` 10 and
     // 11), whatever their immediates.
     let firmware_call = v.word & 0xFFE0_001F == 0xD400_0002 || v.word & 0xFFE0_001F == 0xD400_0003;
     let mut want = v.outcome;
     if firmware_call && want.kind == 0 && v.x0 == PSCI_VERSION && want.x0 == QEMU_PSCI_1_1 {
-        want.x0 = PSCI_1_2;
+        want.x0 = psci::IMPLEMENTED_VERSION;
     }
     want
 }

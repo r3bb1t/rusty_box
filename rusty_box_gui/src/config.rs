@@ -101,7 +101,10 @@ impl std::fmt::Display for MachineKind {
 /// `cpu` names its processor (`"cortex-a57"`, the default, or `"armv9.2"`).
 /// `spectre` names what its firmware tells the guest of the
 /// speculative-execution workarounds (`"not-required"`, the default,
-/// `"mitigated"` or `"unreported"`).
+/// `"mitigated"` or `"unreported"`). `counter_hz` is its system counter's
+/// rate (1 GHz by default, the one rate an Armv9.2 processor takes);
+/// `gic_spis` and `gic_priority_bits` its GIC's SPIs (480 by default) and
+/// priority bits (5).
 /// It boots UEFI firmware from flash (`firmware`, or the EDK2 built into
 /// the front end with `builtin_firmware = true`, either with
 /// `firmware_vars` for its variable store) or a Linux kernel directly
@@ -129,7 +132,93 @@ pub struct VirtToml {
     pub disk: Option<PathBuf>,
     pub disk_read_only: Option<bool>,
     pub spectre: Option<NamedToml<rusty_box_aarch64::SpectreReport>>,
+    pub counter_hz: Option<NumberToml<rusty_box_aarch64::CounterRate>>,
+    pub gic_spis: Option<NumberToml<rusty_box_aarch64::SpiCount>>,
+    pub gic_priority_bits: Option<NumberToml<rusty_box_aarch64::PriorityBits>>,
     pub display: Option<VirtDisplayToml>,
+}
+
+/// A board choice a `[virt]` key holds as a number, which the choice's
+/// type checks: a number it does not take is refused when the file is
+/// read, with the numbers it does.
+pub trait NumberedChoice: Copy {
+    /// The choice of `number`, if it is one.
+    fn from_number(number: u64) -> Option<Self>;
+    /// The choice's number.
+    fn number(self) -> u64;
+    /// The numbers there are, for the refusal, from the type's own bounds.
+    fn numbers() -> String;
+}
+
+impl NumberedChoice for rusty_box_aarch64::CounterRate {
+    fn from_number(hz: u64) -> Option<Self> {
+        Self::new(hz)
+    }
+    fn number(self) -> u64 {
+        self.hz().get()
+    }
+    fn numbers() -> String {
+        format!(
+            "{} to {} Hz (at least BSA's 10 MHz, at most CNTFRQ_EL0 holds)",
+            Self::MIN_HZ,
+            Self::MAX_HZ
+        )
+    }
+}
+
+impl NumberedChoice for rusty_box_aarch64::SpiCount {
+    fn from_number(spis: u64) -> Option<Self> {
+        u32::try_from(spis).ok().and_then(Self::new)
+    }
+    fn number(self) -> u64 {
+        u64::from(self.get())
+    }
+    fn numbers() -> String {
+        format!(
+            "a multiple of 32 from the board's {} to the GIC-400's {}",
+            Self::MIN.get(),
+            Self::MAX.get()
+        )
+    }
+}
+
+impl NumberedChoice for rusty_box_aarch64::PriorityBits {
+    fn from_number(bits: u64) -> Option<Self> {
+        u8::try_from(bits).ok().and_then(Self::new)
+    }
+    fn number(self) -> u64 {
+        u64::from(self.count())
+    }
+    fn numbers() -> String {
+        let all = Self::ALL;
+        format!(
+            "{} to {} (IHI 0048B Table 3-1)",
+            all[0].count(),
+            all[all.len() - 1].count()
+        )
+    }
+}
+
+/// A `[virt]` key holding a [`NumberedChoice`] by its number
+/// (`virt.counter_hz`, `virt.gic_spis`, `virt.gic_priority_bits`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(try_from = "u64", into = "u64", bound = "T: NumberedChoice")]
+pub struct NumberToml<T>(pub T);
+
+impl<T: NumberedChoice> TryFrom<u64> for NumberToml<T> {
+    type Error = String;
+
+    fn try_from(number: u64) -> Result<Self, String> {
+        T::from_number(number)
+            .map(Self)
+            .ok_or_else(|| format!("{number}: not one of {}", T::numbers()))
+    }
+}
+
+impl<T: NumberedChoice> From<NumberToml<T>> for u64 {
+    fn from(choice: NumberToml<T>) -> Self {
+        choice.0.number()
+    }
 }
 
 /// A `[virt]` key holding one of a closed set of board choices by its name
@@ -572,6 +661,11 @@ pub struct ArmVirtConfig {
     /// What the firmware tells the guest of the speculative-execution
     /// workarounds.
     pub spectre: rusty_box_aarch64::SpectreReport,
+    /// The system counter's rate, which the processor allows
+    /// ([`rusty_box_aarch64::CpuModel::check_counter_rate`]).
+    pub counter: rusty_box_aarch64::CounterRate,
+    /// The GIC's SPIs and priority bits.
+    pub gic: rusty_box_aarch64::GicShape,
     pub boot: ArmBoot,
     /// The virtio-gpu, by the size it asks the guest for; `None` for none.
     pub display: Option<VirtioDisplaySize>,
@@ -770,6 +864,8 @@ impl ArmVirtConfig {
             ips: DEFAULT_VIRT_IPS,
             cpu: rusty_box_aarch64::CpuModel::default(),
             spectre: rusty_box_aarch64::SpectreReport::DEFAULT,
+            counter: rusty_box_aarch64::CounterRate::DEFAULT,
+            gic: rusty_box_aarch64::GicShape::DEFAULT,
             boot: ArmBoot::Unset,
             display: None,
             keyboard: false,
@@ -826,6 +922,18 @@ fn resolve_config_with_base(
         console_stretch,
         pointer_speed,
     })
+}
+
+/// `rate`, if a processor of `cpu` counts at it: the one check of a
+/// board's counter rate against its processor wherever it is chosen (a
+/// `[virt]` table, the Processor page).
+pub(crate) fn virt_counter_rate(
+    cpu: rusty_box_aarch64::CpuModel,
+    rate: rusty_box_aarch64::CounterRate,
+) -> Result<rusty_box_aarch64::CounterRate, RunError> {
+    cpu.check_counter_rate(rate)
+        .map_err(RunError::FixedCounterRate)?;
+    Ok(rate)
 }
 
 /// The Arm `virt` board `file`'s `[virt]` table and `args` describe. Every
@@ -963,13 +1071,29 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
         }
         None => None,
     };
+    let cpu = virt.cpu.map_or_else(rusty_box_aarch64::CpuModel::default, |cpu| cpu.0);
+    let counter = virt_counter_rate(
+        cpu,
+        virt.counter_hz
+            .map_or(rusty_box_aarch64::CounterRate::DEFAULT, |rate| rate.0),
+    )?;
+    let gic = rusty_box_aarch64::GicShape {
+        spis: virt
+            .gic_spis
+            .map_or(rusty_box_aarch64::SpiCount::DEFAULT, |spis| spis.0),
+        priority_bits: virt
+            .gic_priority_bits
+            .map_or(rusty_box_aarch64::PriorityBits::DEFAULT, |bits| bits.0),
+    };
     Ok(ArmVirtConfig {
         memory_mib,
         ips,
-        cpu: virt.cpu.map_or_else(rusty_box_aarch64::CpuModel::default, |cpu| cpu.0),
+        cpu,
         spectre: virt
             .spectre
             .map_or(rusty_box_aarch64::SpectreReport::DEFAULT, |report| report.0),
+        counter,
+        gic,
         boot,
         display,
         keyboard: virt.keyboard.unwrap_or(false),
@@ -1263,6 +1387,9 @@ impl ArmVirtConfig {
             ips: Some(self.ips),
             cpu: Some(NamedToml(self.cpu)),
             spectre: Some(NamedToml(self.spectre)),
+            counter_hz: Some(NumberToml(self.counter)),
+            gic_spis: Some(NumberToml(self.gic.spis)),
+            gic_priority_bits: Some(NumberToml(self.gic.priority_bits)),
             keyboard: Some(self.keyboard),
             tablet: Some(self.tablet),
             disk: self.disk.as_ref().map(|disk| disk.path.clone()),
@@ -3060,7 +3187,8 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
 
     /// An Arm board read back from what the library writes for it is the
     /// board it wrote, for each way it boots, each processor, each
-    /// speculation report and each disk.
+    /// speculation report, a counter rate and GIC shape of its own, and
+    /// each disk.
     #[test]
     fn an_arm_virt_vm_round_trips_through_its_file() {
         let boots = [
@@ -3082,6 +3210,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         ];
         let processors = rusty_box_aarch64::CpuModel::ALL.into_iter().cycle();
         let mut reports = rusty_box_aarch64::SpectreReport::ALL.into_iter().cycle();
+        let mut priority_bits = rusty_box_aarch64::PriorityBits::ALL.into_iter().cycle();
         let disks = [
             None,
             Some(VirtDisk {
@@ -3100,6 +3229,15 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
                     ips: 75_000_000,
                     cpu,
                     spectre: reports.next().unwrap_or_default(),
+                    counter: if cpu.counter_rate_fixed() {
+                        rusty_box_aarch64::CounterRate::DEFAULT
+                    } else {
+                        rusty_box_aarch64::CounterRate::new(24_000_000).expect("a rate")
+                    },
+                    gic: rusty_box_aarch64::GicShape {
+                        spis: rusty_box_aarch64::SpiCount::MIN,
+                        priority_bits: priority_bits.next().unwrap_or_default(),
+                    },
                     boot,
                     display: Some(VirtioDisplaySize {
                         width: 1024,
@@ -3137,6 +3275,41 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             ArmVirtConfig::blank().spectre,
             rusty_box_aarch64::SpectreReport::NotRequired
         );
+    }
+
+    /// `virt.counter_hz`, `virt.gic_spis` and `virt.gic_priority_bits` are
+    /// read as numbers their types check: one a type does not take is
+    /// refused when the file is read, naming the numbers it does, and a
+    /// counter rate other than 1 GHz is refused for an Armv9.2 processor,
+    /// whose architecture fixes it.
+    #[test]
+    fn virt_numbers_are_the_numbers_their_settings_take() {
+        let board = |keys: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\n{keys}\n");
+        let file: FileConfig =
+            toml::from_str(&board("counter_hz = 24000000\ngic_spis = 256\ngic_priority_bits = 7")).unwrap();
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+        let virt = resolved.arm_virt().expect("an Arm board");
+        assert_eq!(virt.counter.hz().get(), 24_000_000);
+        assert_eq!(virt.gic.spis.get(), 256);
+        assert_eq!(virt.gic.priority_bits, rusty_box_aarch64::PriorityBits::Seven);
+
+        for (keys, named) in [
+            ("counter_hz = 1000", "10000000"),
+            ("gic_spis = 100", "multiple of 32"),
+            ("gic_spis = 96", "multiple of 32"),
+            ("gic_priority_bits = 3", "4 to 8"),
+        ] {
+            let refused = toml::from_str::<FileConfig>(&board(keys))
+                .expect_err("not a number the setting takes")
+                .to_string();
+            assert!(refused.contains(named), "{keys}: {refused}");
+        }
+
+        let file: FileConfig = toml::from_str(&board("cpu = \"armv9.2\"\ncounter_hz = 24000000")).unwrap();
+        assert!(matches!(
+            resolve_config(file, &args(["rusty_box_gui"])),
+            Err(RunError::FixedCounterRate(_))
+        ));
     }
 
     /// `virt.spectre` is read by its answers' names; one no answer has is

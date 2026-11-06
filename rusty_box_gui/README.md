@@ -398,7 +398,10 @@ height = 768
 | `vm.machine` | `"pc"` or `"arm-virt"` | `"pc"` | none |
 | `virt.memory_mib` | Guest memory, MiB | `256` (QEMU's) | `--memory-mib` |
 | `virt.ips` | The rate guest time counts instructions at | `50000000` | `--ips` |
-| `virt.cpu` | The processor: `"cortex-a57"`, QEMU's Cortex-A57 cut down to EL0 and EL1, or `"armv9.2"`, an Armv9.2 processor with SME and SME2 (no SVE); both have a 1 GHz system counter; any other name is refused | `"cortex-a57"` | none |
+| `virt.cpu` | The processor: `"cortex-a57"`, QEMU's Cortex-A57 cut down to EL0 and EL1, or `"armv9.2"`, an Armv9.2 processor with SME and SME2 (no SVE); `virt.counter_hz` sets their counter's rate; any other name is refused | `"cortex-a57"` | none |
+| `virt.counter_hz` | The system counter's rate in Hz, which `CNTFRQ_EL0` reads: 10000000 (BSA's floor) to 4294967295 (what `CNTFRQ_EL0` holds); an Armv9.2 processor takes 1000000000 alone, and any other is refused. The Processor page's Counter frequency | `1000000000` | none |
+| `virt.gic_spis` | The GIC's SPIs: a multiple of 32 from 128 (the board's highest SPI) to 480 (the GIC-400's most); any other number is refused. The Processor page's GIC SPIs list | `480` | none |
+| `virt.gic_priority_bits` | The GIC's priority bits, 4 to 8, which set its binary points and active priority registers (IHI 0048B Table 4-47); any other number is refused. The Processor page's GIC priority bits list | `5` | none |
 | `virt.spectre` | What the firmware tells the guest of the speculative-execution workarounds (SMCCC `SMCCC_ARCH_FEATURES`): `"not-required"`, true of the interpreter, which executes nothing speculatively; `"mitigated"`, required and provided by the firmware, so the guest takes its firmware mitigation paths; or `"unreported"`, no information, as SMCCC 1.0 firmware gives; any other name is refused. The Processor page's Speculation list | `"not-required"` | none |
 | `virt.firmware` | UEFI firmware for flash bank 0, as QEMU's `-bios` (EDK2 `ArmVirtQemu`); not with `virt.kernel` | none | none |
 | `virt.builtin_firmware` | `true` boots the EDK2 `ArmVirtQemu` built into the front end (licence in `THIRD-PARTY-LICENSES`); not with `virt.firmware` or `virt.kernel` | none | none |

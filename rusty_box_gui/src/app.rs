@@ -713,6 +713,10 @@ struct VirtSettings {
     ips: u32,
     cpu: rusty_box_aarch64::CpuModel,
     spectre: rusty_box_aarch64::SpectreReport,
+    /// The counter rate as typed, in Hz, which `to_config` checks.
+    counter_hz: u64,
+    gic_spis: rusty_box_aarch64::SpiCount,
+    gic_priority_bits: rusty_box_aarch64::PriorityBits,
     boot: VirtBootChoice,
     firmware_path: String,
     vars_path: String,
@@ -769,6 +773,9 @@ impl VirtSettings {
             ips: config.ips,
             cpu: config.cpu,
             spectre: config.spectre,
+            counter_hz: config.counter.hz().get(),
+            gic_spis: config.gic.spis,
+            gic_priority_bits: config.gic.priority_bits,
             boot: VirtBootChoice::Nothing,
             firmware_path: String::new(),
             vars_path: String::new(),
@@ -857,11 +864,26 @@ impl VirtSettings {
         };
         let refresh = crate::config::RefreshHz::new(self.refresh_hz)
             .ok_or_else(|| crate::error::RunError::InvalidRefreshRate { hz: self.refresh_hz }.to_string())?;
+        // The Processor page shows 1 GHz, not the typed rate, while the
+        // model fixes it; the typed rate is kept for a model that does not.
+        let counter = if self.cpu.counter_rate_fixed() {
+            rusty_box_aarch64::CounterRate::DEFAULT
+        } else {
+            rusty_box_aarch64::CounterRate::new(self.counter_hz)
+                .ok_or(crate::error::RunError::InvalidCounterRate { hz: self.counter_hz })
+                .and_then(|rate| crate::config::virt_counter_rate(self.cpu, rate))
+                .map_err(|refused| refused.to_string())?
+        };
         Ok(crate::config::ArmVirtConfig {
             memory_mib: self.memory_mib,
             ips: self.ips.max(1),
             cpu: self.cpu,
             spectre: self.spectre,
+            counter,
+            gic: rusty_box_aarch64::GicShape {
+                spis: self.gic_spis,
+                priority_bits: self.gic_priority_bits,
+            },
             boot,
             display,
             keyboard: self.keyboard,
@@ -3547,6 +3569,60 @@ impl NativeShellApp {
                                 for report in rusty_box_aarch64::SpectreReport::ALL {
                                     changed |= ui
                                         .selectable_value(&mut virt.spectre, report, spectre_report_label(report))
+                                        .changed();
+                                }
+                            });
+                    });
+                    // The system counter's rate (CNTFRQ_EL0): BSA's 10 MHz up
+                    // to what CNTFRQ_EL0 holds, where the processor's
+                    // architecture leaves it open; an Armv9.2 processor's is
+                    // 1 GHz, shown and not edited.
+                    if virt.cpu.counter_rate_fixed() {
+                        // The typed rate is kept in the draft for a model
+                        // that takes one; this model's is shown.
+                        let fixed = format!(
+                            "{} Hz (Armv8.6 and later fix it)",
+                            rusty_box_aarch64::CounterRate::DEFAULT.hz().get()
+                        );
+                        detail_row(ui, "Counter frequency", &fixed);
+                    } else {
+                        changed |= field_row(ui, "Counter frequency", |ui| {
+                            draw_u64_field(
+                                ui,
+                                &mut virt.counter_hz,
+                                rusty_box_aarch64::CounterRate::MIN_HZ,
+                                rusty_box_aarch64::CounterRate::MAX_HZ,
+                                " Hz",
+                                editable,
+                                1_000_000,
+                                Some(1_000_000.0),
+                            )
+                        });
+                    }
+                    // The GIC's shape: its SPIs, in the GIC-400's steps of 32,
+                    // and its priority bits.
+                    field_row(ui, "GIC SPIs", |ui| {
+                        egui::ComboBox::from_id_salt("virt GIC SPIs")
+                            .selected_text(virt.gic_spis.get().to_string())
+                            .show_ui(ui, |ui| {
+                                let counts = (rusty_box_aarch64::SpiCount::MIN.get()
+                                    ..=rusty_box_aarch64::SpiCount::MAX.get())
+                                    .step_by(32)
+                                    .filter_map(rusty_box_aarch64::SpiCount::new);
+                                for spis in counts {
+                                    changed |= ui
+                                        .selectable_value(&mut virt.gic_spis, spis, spis.get().to_string())
+                                        .changed();
+                                }
+                            });
+                    });
+                    field_row(ui, "GIC priority bits", |ui| {
+                        egui::ComboBox::from_id_salt("virt GIC priority bits")
+                            .selected_text(virt.gic_priority_bits.count().to_string())
+                            .show_ui(ui, |ui| {
+                                for bits in rusty_box_aarch64::PriorityBits::ALL {
+                                    changed |= ui
+                                        .selectable_value(&mut virt.gic_priority_bits, bits, bits.count().to_string())
                                         .changed();
                                 }
                             });
@@ -7928,6 +8004,11 @@ mod tests {
                 ips: 50_000_000,
                 cpu: rusty_box_aarch64::CpuModel::Armv9p2,
                 spectre: rusty_box_aarch64::SpectreReport::Mitigated,
+                counter: rusty_box_aarch64::CounterRate::DEFAULT,
+                gic: rusty_box_aarch64::GicShape {
+                    spis: rusty_box_aarch64::SpiCount::MIN,
+                    priority_bits: rusty_box_aarch64::PriorityBits::Eight,
+                },
                 boot: crate::config::ArmBoot::Linux {
                     kernel: std::path::PathBuf::from("Image"),
                     initrd: Some(std::path::PathBuf::from("initramfs.cpio.gz")),

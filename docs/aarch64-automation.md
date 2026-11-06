@@ -147,11 +147,29 @@ default, QEMU's `cortex-a57` cut down to EL0 and EL1 (and EL2 with
 `CpuModel::Armv9p2`, an Armv9.2 processor with SME and SME2 (and no SVE)
 that reports itself as a software model. The model decides what the ID
 registers advertise, `MIDR_EL1` and the device tree's `compatible` for the
-processor; the system counter runs at 1 GHz for both, the rate Armv8.6 and
-later require and the board's choice for the Cortex-A57. `CpuModel::name` spells
+processor; the system counter runs at 1 GHz for both by default, the rate
+Armv8.6 and later require. `CpuModel::name` spells
 a model for a command line or a file (`"cortex-a57"`, `"armv9.2"`), and
 `str::parse` reads one back, or an `UnknownCpuModel` that names the models
 there are.
+
+**The board's other choices.** Where Arm's documents leave a value to the
+implementation, `VirtConfig` holds it in a type that takes only the values
+they allow, its default the board's:
+
+- `counter`, a `CounterRate`: 1 GHz, or for the Cortex-A57 any rate from
+  BSA's 10 MHz (`CounterRate::MIN_HZ`) to what `CNTFRQ_EL0` holds
+  (`CounterRate::MAX_HZ`); the Armv9.2 model counts at 1 GHz alone, and a
+  build that asks it for another fails with `BuildError::FixedCounterRate`.
+- `gic`, a `GicShape`: its `SpiCount`, a multiple of 32 from the 128 the
+  board wires (`SpiCount::MIN`) to the GIC-400's 480 (the default), and its
+  `PriorityBits`, `Four` to `Eight` (`Five`, the GIC-400's, by default),
+  from which the binary points and active priority registers follow.
+- `spectre`, a `SpectreReport`: what the firmware's `SMCCC_ARCH_FEATURES`
+  says of the speculation workarounds, `NotRequired` (the default, true of
+  an interpreter), `Mitigated` or `Unreported`.
+
+A snapshot records each, and a machine built with another refuses it.
 
 ```rust
 # std::thread::Builder::new().stack_size(16 << 20).spawn(|| {

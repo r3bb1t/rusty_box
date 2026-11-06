@@ -83,6 +83,18 @@ pub enum RunError {
     )]
     InvalidVirtMemory { memory_mib: u32 },
 
+    /// `virt.counter_hz` with a processor whose architecture fixes its
+    /// counter's rate.
+    #[error("virt.counter_hz: {0}")]
+    FixedCounterRate(rusty_box_aarch64::FixedCounterRate),
+
+    #[error(
+        "virt.counter_hz = {hz} is outside the rates a counter runs at: {min} to {max} Hz",
+        min = rusty_box_aarch64::CounterRate::MIN_HZ,
+        max = rusty_box_aarch64::CounterRate::MAX_HZ
+    )]
+    InvalidCounterRate { hz: u64 },
+
     #[error("virt.firmware and virt.kernel cannot both be set: the board boots one or the other")]
     ConflictingVirtBoot,
 

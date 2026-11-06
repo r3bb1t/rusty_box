@@ -39,11 +39,12 @@ use crate::boot::{
 };
 use crate::bus::{load_le, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
 use crate::cpu::{
-    Activity, Cpu, CpuConfig, CpuModel, CpuState, DebugStops, El2Unavailable, Levels, NoEl2,
+    Activity, CounterRate, Cpu, CpuConfig, CpuModel, CpuState, DebugStops, El2Unavailable,
+    FixedCounterRate, Levels, NoEl2,
     NoTranslation, PsciConduit, Pstate, PstateRefusal, Reg, SpectreReport, Step, StopCause, SysReg,
     PSCI_COMPATIBLE, SysRegRefusal, UndefinedInsn, VReg, WithEl2, WriteEffect,
 };
-use crate::devices::gicv2::GicExtensions;
+use crate::devices::gicv2::{GicExtensions, GicShape};
 use crate::devices::pl011::TX_CAPACITY;
 use crate::devices::virtio::input::InputKind;
 #[cfg(feature = "alloc")]
@@ -80,9 +81,12 @@ pub struct VirtConfig {
     /// Emulated instructions per second: the rate of the tick count, and so
     /// of every clock the guest can read.
     pub ips: ClockHz,
-    /// The processor, which sets the system counter's frequency too
-    /// ([`CpuModel::counter_hz`]).
+    /// The processor.
     pub cpu: CpuModel,
+    /// The system counter's frequency, which `CNTFRQ_EL0` reads at reset.
+    /// A processor whose architecture fixes it takes [`CounterRate::DEFAULT`]
+    /// alone ([`CpuModel::counter_rate_fixed`]).
+    pub counter: CounterRate,
     /// What the RTC reads at power-on, in seconds since the Unix epoch
     /// modulo 2^32. It stays there until the guest starts the RTC.
     pub rtc_epoch_seconds: u64,
@@ -92,6 +96,8 @@ pub struct VirtConfig {
     /// What the board's firmware tells the guest of the speculative-execution
     /// workarounds (SMCCC `SMCCC_ARCH_FEATURES`).
     pub spectre: SpectreReport,
+    /// The GIC's SPIs and priority bits.
+    pub gic: GicShape,
 }
 
 impl VirtConfig {
@@ -101,6 +107,7 @@ impl VirtConfig {
     pub const DEFAULT: Self = Self {
         ips: ClockHz::BOCHS_DEFAULT,
         cpu: CpuModel::CortexA57,
+        counter: CounterRate::DEFAULT,
         rtc_epoch_seconds: Self::DEFAULT_RTC_EPOCH,
         debug_stops: DebugStops {
             on_undefined: false,
@@ -108,6 +115,7 @@ impl VirtConfig {
         },
         on_reset_request: OnResetRequest::Reset,
         spectre: SpectreReport::DEFAULT,
+        gic: GicShape::DEFAULT,
     };
 }
 
@@ -176,6 +184,9 @@ pub enum BuildError {
     /// processor model that cannot have it yet
     /// ([`CpuModel::el2_available`]).
     El2Unavailable(El2Unavailable),
+    /// The configuration asked for a counter rate the processor model
+    /// cannot count at ([`CpuModel::counter_rate_fixed`]).
+    FixedCounterRate(FixedCounterRate),
 }
 
 impl core::fmt::Display for BuildError {
@@ -196,6 +207,7 @@ impl core::fmt::Display for BuildError {
             Self::DeviceTree(e) => write!(f, "device tree: {e}"),
             Self::Placement(e) => write!(f, "{e}"),
             Self::El2Unavailable(e) => write!(f, "{e}"),
+            Self::FixedCounterRate(e) => write!(f, "{e}"),
         }
     }
 }
@@ -206,6 +218,7 @@ impl core::error::Error for BuildError {
             Self::DeviceTree(e) => Some(e),
             Self::Placement(e) => Some(e),
             Self::El2Unavailable(e) => Some(e),
+            Self::FixedCounterRate(e) => Some(e),
             Self::FirmwareTooLarge | Self::VariablesTooLarge | Self::LentRamSize { .. } => None,
         }
     }
@@ -557,6 +570,7 @@ macro_rules! build_methods {
                     choice,
                     self.ram,
                     self.config.cpu,
+                    self.config.counter,
                     &self.identity,
                 )?;
                 let storage = owned_storage(self.ram, choice)?;
@@ -592,6 +606,7 @@ macro_rules! build_methods {
                     choice,
                     self.ram,
                     self.config.cpu,
+                    self.config.counter,
                     &self.identity,
                 )?;
                 let storage = lent_storage(self.ram, choice, loan)?;
@@ -909,10 +924,13 @@ fn plan<L: Levels>(
     choice: BootChoice<'_>,
     ram: RamSize,
     cpu: CpuModel,
+    counter: CounterRate,
     identity: &BoardIdentity,
 ) -> Result<Plan, BuildError> {
     cpu.check_levels::<L>()
         .map_err(BuildError::El2Unavailable)?;
+    cpu.check_counter_rate(counter)
+        .map_err(BuildError::FixedCounterRate)?;
     let ram_len = ram.get();
     let boot = match choice {
         BootChoice::Firmware(_) => BootRecord::Firmware,
@@ -958,13 +976,14 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
     identity: BoardIdentity,
 ) -> VirtMachine<S, L, I> {
     let Plan { boot, device_tree } = plan;
-    // The plan checked the model's levels (`CpuModel::check_levels`).
+    // The plan checked the model's levels (`CpuModel::check_levels`) and
+    // counter rate (`CpuModel::check_counter_rate`).
     let mut cpu = Cpu::<L>::implementing(
         CpuConfig {
             ips: config.ips,
             reset_pc: FLASH0_BASE,
         },
-        config.cpu.implementation(),
+        config.cpu.implementation().counting_at(config.counter),
     );
     cpu.set_debug_stops(config.debug_stops);
     cpu.set_spectre_report(config.spectre);
@@ -979,6 +998,7 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
             plugs,
             &identity,
             gic_extensions::<L>(),
+            config.gic,
         ),
         identity_hash: identity_hash(&identity),
         observer,
@@ -2051,6 +2071,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             identity_hash: self.identity_hash,
             ips: self.config.ips.get(),
             cpu: self.config.cpu.tag(),
+            counter_hz: self.config.counter.hz().get(),
             boot: self.boot.tag(),
             kernel_offset,
             initrd_offset,
@@ -2058,6 +2079,8 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             disk: self.disk_sectors(),
             virtualization: u8::from(L::EL2),
             spectre: self.config.spectre.tag(),
+            gic_spis: self.config.gic.spis.get(),
+            gic_priority_bits: self.config.gic.priority_bits.count(),
         }
     }
 
@@ -2204,20 +2227,21 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, WithEl2, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-/// The image's version, which changes with its layout and with any value a
-/// processor model fixes that a restore checks the image against (the
-/// system counter's rate): an image of another version is refused as one,
-/// never as one of another processor. It holds the processor's level set (the
+/// The image's version, which changes with its layout: an image of another
+/// version is refused as one. What a machine was built with (its counter
+/// rate, its GIC's shape, its firmware's speculation report) the shape
+/// records, and a machine built otherwise refuses the image as one built
+/// differently. It holds the processor's level set (the
 /// shape's `virtualization`, the EL2 registers, `CNTPOFF_EL2` among them), a
 /// feature set of 128 bits, `RVBAR_ELx` and `RMR_ELx` of the highest level,
 /// what Software Step stepped, each TLB entry's stage 2 permissions and
 /// level beside stage 1's and the memory each stage and both together map
 /// it to, the TLB's kept stage 2 translations, its tables of EL1&0 and
-/// stage 2 contexts, the shape's identity fingerprint and the firmware's
-/// speculation report, and the board's devices: the GIC with its Virtualization Extensions where it has them,
+/// stage 2 contexts, the shape's identity fingerprint, counter rate,
+/// firmware speculation report and GIC shape, and the board's devices: the GIC with its Virtualization Extensions where it has them,
 /// the PL011, the PL031, the PL061, both flash banks and every virtio-mmio
 /// transport.
-const SNAPSHOT_VERSION: u32 = 22;
+const SNAPSHOT_VERSION: u32 = 23;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2230,9 +2254,10 @@ struct Shape {
     /// What the guest is told the machine is ([`identity_hash`]).
     identity_hash: u64,
     ips: u64,
-    /// The processor model ([`CpuModel::tag`]), which sets the system
-    /// counter's frequency too.
+    /// The processor model ([`CpuModel::tag`]).
     cpu: u8,
+    /// The system counter's frequency in Hz ([`VirtConfig::counter`]).
+    counter_hz: u64,
     boot: u8,
     kernel_offset: u64,
     initrd_offset: u64,
@@ -2247,6 +2272,11 @@ struct Shape {
     /// workarounds ([`SpectreReport::tag`]), which the guest may have read
     /// and acted on.
     spectre: u8,
+    /// The GIC's SPIs ([`SpiCount::get`]) and priority bits
+    /// ([`PriorityBits::count`]), the GIC's section of the image having the
+    /// banks of the most a GIC has.
+    gic_spis: u32,
+    gic_priority_bits: u8,
 }
 
 impl Shape {
@@ -2259,6 +2289,7 @@ impl Shape {
             self.initrd_hash,
             self.identity_hash,
             self.ips,
+            self.counter_hz,
             self.kernel_offset,
             self.initrd_offset,
         ] {
@@ -2270,15 +2301,17 @@ impl Shape {
         w.write_bool(self.disk.is_some())?;
         w.write_u64(self.disk.unwrap_or(0))?;
         w.write_u8(self.virtualization)?;
-        w.write_u8(self.spectre)
+        w.write_u8(self.spectre)?;
+        w.write_u32(self.gic_spis)?;
+        w.write_u8(self.gic_priority_bits)
     }
 
     fn restore<R: SnapRead>(r: &mut R) -> SnapResult<Self> {
-        let mut v = [0u64; 9];
+        let mut v = [0u64; 10];
         for value in v.iter_mut() {
             *value = r.read_u64()?;
         }
-        let [ram_len, vars_len, code_hash, kernel_hash, initrd_hash, identity_hash, ips, kernel_offset, initrd_offset] =
+        let [ram_len, vars_len, code_hash, kernel_hash, initrd_hash, identity_hash, ips, counter_hz, kernel_offset, initrd_offset] =
             v;
         Ok(Self {
             ram_len,
@@ -2288,6 +2321,7 @@ impl Shape {
             initrd_hash,
             identity_hash,
             ips,
+            counter_hz,
             cpu: r.read_u8()?,
             boot: r.read_u8()?,
             kernel_offset,
@@ -2300,6 +2334,8 @@ impl Shape {
             },
             virtualization: r.read_u8()?,
             spectre: r.read_u8()?,
+            gic_spis: r.read_u32()?,
+            gic_priority_bits: r.read_u8()?,
         })
     }
 }

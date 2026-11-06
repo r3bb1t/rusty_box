@@ -17,7 +17,7 @@ use super::{sctlr, Cpu, El, Levels};
 use crate::bus::PhysBus;
 
 /// PSCI function identifiers and return codes (Arm DEN 0022D §5.1, Table 6).
-mod psci {
+pub(super) mod psci {
     pub(super) const VERSION: u32 = 0x8400_0000;
     pub(super) const CPU_SUSPEND_32: u32 = 0x8400_0001;
     pub(super) const CPU_SUSPEND_64: u32 = 0xC400_0001;
@@ -47,7 +47,7 @@ mod psci {
     /// PSCI 1.2, the version DEN 0022E specifies: every function Table 17
     /// makes mandatory for it, and `MIGRATE_INFO_TYPE`, of the optional
     /// ones.
-    pub(super) const IMPLEMENTED_VERSION: u64 = 0x0001_0002;
+    pub(crate) const IMPLEMENTED_VERSION: u64 = 0x0001_0002;
     /// "Trusted OS is not present or does not require migration".
     pub(super) const MIGRATE_NOT_REQUIRED: u64 = 2;
 

@@ -746,7 +746,8 @@ pub(crate) struct Implementation {
     pub(crate) max_svl: VecLen,
     /// The system counter's frequency: what `CNTPCT_EL0` counts at and
     /// `CNTFRQ_EL0` reads at reset. The system's choice before Armv8.6,
-    /// 1 GHz from it; [`SYSTEM_COUNTER_HZ`] on both models.
+    /// 1 GHz from it; [`SYSTEM_COUNTER_HZ`] on both models, and on a board
+    /// its configuration's rate ([`Implementation::counting_at`]).
     pub(crate) counter_hz: ClockHz,
 }
 
@@ -760,6 +761,16 @@ impl Implementation {
         max_svl: VecLen::MIN,
         counter_hz: SYSTEM_COUNTER_HZ,
     };
+
+    /// This implementation with its system counter at `rate`, which the
+    /// board's configuration chose and the model allowed
+    /// ([`CpuModel::check_counter_rate`]).
+    pub(crate) const fn counting_at(self, rate: CounterRate) -> Self {
+        Self {
+            counter_hz: rate.hz(),
+            ..self
+        }
+    }
 
     /// The Armv9.2 processor model: [`Features::ARMV9P2`], a software
     /// model's `MIDR_EL1`, Streaming SVE vectors of up to 512 bits, and the
@@ -896,6 +907,47 @@ pub const SYSTEM_COUNTER_HZ: ClockHz = match ClockHz::new(1_000_000_000) {
     None => panic!("1 GHz is a rate"),
 };
 
+/// The frequency a board's system counter runs at, which `CNTPCT_EL0`
+/// counts at and `CNTFRQ_EL0` reads at reset: at least 10 MHz, BSA's floor
+/// (DEN0094C RB_TIME_02), and no more than `CNTFRQ_EL0`'s 32 bits hold. A
+/// processor of Armv8.6 or later counts at 1 GHz alone
+/// ([`CpuModel::counter_rate_fixed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CounterRate(ClockHz);
+
+impl CounterRate {
+    /// BSA's least rate (DEN0094C RB_TIME_02: "at least 10MHz").
+    pub const MIN_HZ: u64 = 10_000_000;
+    /// The most `CNTFRQ_EL0`, a 32-bit field, can report.
+    pub const MAX_HZ: u64 = u32::MAX as u64;
+    /// 1 GHz ([`SYSTEM_COUNTER_HZ`]): the rate of Armv8.6 and later, which
+    /// a board gives every processor unless its host chooses another.
+    pub const DEFAULT: Self = Self(SYSTEM_COUNTER_HZ);
+
+    /// `hz`, if it is from [`CounterRate::MIN_HZ`] to
+    /// [`CounterRate::MAX_HZ`].
+    pub const fn new(hz: u64) -> Option<Self> {
+        if hz < Self::MIN_HZ || hz > Self::MAX_HZ {
+            return None;
+        }
+        match ClockHz::new(hz) {
+            Some(rate) => Some(Self(rate)),
+            None => None,
+        }
+    }
+
+    /// The rate.
+    pub const fn hz(self) -> ClockHz {
+        self.0
+    }
+}
+
+impl Default for CounterRate {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// A processor a machine can be built with.
 ///
 /// Closed (R5): each variant is one processor, its features, identity and
@@ -907,8 +959,9 @@ pub const SYSTEM_COUNTER_HZ: ClockHz = match ClockHz::new(1_000_000_000) {
 pub enum CpuModel {
     /// A Cortex-A57 r1p0 as QEMU's `cortex-a57` is one: Armv8.0 with FP,
     /// Advanced SIMD, the Cryptographic Extension and CRC32, cut down to
-    /// AArch64 at EL0 and EL1; its system counter is the board's 1 GHz
-    /// [`SYSTEM_COUNTER_HZ`], where QEMU's runs at 62.5 MHz.
+    /// AArch64 at EL0 and EL1; its system counter runs at 1 GHz,
+    /// [`SYSTEM_COUNTER_HZ`], unless the board chooses another rate, where
+    /// QEMU's runs at 62.5 MHz.
     #[default]
     CortexA57,
     /// An Armv9.2 processor with FEAT_SME and FEAT_SME2 and no FEAT_SVE:
@@ -935,11 +988,12 @@ impl CpuModel {
         }
     }
 
-    /// The frequency of the system counter a board pairs with this
-    /// processor: what `CNTPCT_EL0` counts at and `CNTFRQ_EL0` reads at
-    /// reset: [`SYSTEM_COUNTER_HZ`] for both models. QEMU runs the
-    /// Cortex-A57's at 62.5 MHz (`GTIMER_BACKCOMPAT_HZ`,
-    /// `ARM_FEATURE_BACKCOMPAT_CNTFRQ`).
+    /// The frequency of the system counter a processor of this model built
+    /// on its own ([`super::Cpu::new`]) counts at: [`SYSTEM_COUNTER_HZ`] for
+    /// both models. A board's counter runs at the rate its configuration
+    /// names (`VirtConfig::counter`), which this model must allow
+    /// ([`CpuModel::check_counter_rate`]). QEMU runs the Cortex-A57's at
+    /// 62.5 MHz (`GTIMER_BACKCOMPAT_HZ`, `ARM_FEATURE_BACKCOMPAT_CNTFRQ`).
     pub const fn counter_hz(self) -> ClockHz {
         self.implementation().counter_hz
     }
@@ -973,6 +1027,29 @@ impl CpuModel {
     pub const fn check_levels<L: Levels>(self) -> Result<(), El2Unavailable> {
         if L::EL2 && !self.el2_available() {
             Err(El2Unavailable { model: self })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Whether the architecture fixes this model's counter at 1 GHz: from
+    /// Armv8.6 it does (Arm ARM, "The system counter"), so the Armv9.2
+    /// model counts at [`CounterRate::DEFAULT`] alone; before it the rate is
+    /// the system's to choose.
+    pub const fn counter_rate_fixed(self) -> bool {
+        match self {
+            Self::CortexA57 => false,
+            Self::Armv9p2 => true,
+        }
+    }
+
+    /// `rate`, if this model can count at it ([`CpuModel::counter_rate_fixed`]).
+    pub const fn check_counter_rate(self, rate: CounterRate) -> Result<(), FixedCounterRate> {
+        if self.counter_rate_fixed() && rate.hz().get() != CounterRate::DEFAULT.hz().get() {
+            Err(FixedCounterRate {
+                model: self,
+                asked: rate,
+            })
         } else {
             Ok(())
         }
@@ -1067,6 +1144,30 @@ impl core::fmt::Display for El2Unavailable {
 }
 
 impl core::error::Error for El2Unavailable {}
+
+/// A processor of a model whose architecture fixes its counter at 1 GHz,
+/// asked to count at another rate ([`CpuModel::counter_rate_fixed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FixedCounterRate {
+    /// The model refused the rate.
+    pub model: CpuModel,
+    /// The rate asked for.
+    pub asked: CounterRate,
+}
+
+impl core::fmt::Display for FixedCounterRate {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "the {} processor model's counter runs at {} Hz alone, as Armv8.6 and later fix it, not {} Hz",
+            self.model.name(),
+            CounterRate::DEFAULT.hz().get(),
+            self.asked.hz().get()
+        )
+    }
+}
+
+impl core::error::Error for FixedCounterRate {}
 
 #[cfg(test)]
 mod tests {

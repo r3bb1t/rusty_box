@@ -28,7 +28,7 @@ use crate::bus::{
 };
 use crate::cpu::TimerLines;
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
-use crate::devices::gicv2::{GicExtensions, GicNames, GicV2};
+use crate::devices::gicv2::{GicExtensions, GicNames, GicShape, GicV2};
 use crate::devices::pl011::{BaudRate, Pl011, Received, UartClocks};
 use crate::devices::pl031::Pl031;
 use crate::devices::pl061::{Pl061, POWER_BUTTON_LINE};
@@ -254,14 +254,15 @@ pub struct VirtBoard<S> {
 impl<S: GuestStorage> VirtBoard<S> {
     /// A board over `storage` whose RTC starts at `rtc_epoch_seconds`, with
     /// the devices `plugs` names, each naming itself as `identity` says, and
-    /// a GIC with `gic` (the Virtualization Extensions for a processor with
-    /// EL2), whose frames it maps.
+    /// a GIC of `gic_shape` with `gic` (the Virtualization Extensions for a
+    /// processor with EL2), whose frames it maps.
     pub(crate) fn new(
         storage: S,
         rtc_epoch_seconds: u64,
         plugs: Plugs,
         identity: &BoardIdentity,
         gic: GicExtensions,
+        gic_shape: GicShape,
     ) -> Self {
         let devices = plugs.devices;
         let virtio_vendor = identity.virtio_vendor();
@@ -298,10 +299,12 @@ impl<S: GuestStorage> VirtBoard<S> {
             storage,
             flash0: CfiFlash::new(FLASH_BANK_SIZE),
             flash1: CfiFlash::new(FLASH_BANK_SIZE),
-            gic: GicV2::with_extensions(gic).identified_as(GicNames {
-                gic: identity.gic(),
-                msi_frame: identity.msi_frame_iidr(),
-            }),
+            gic: GicV2::with_extensions(gic)
+                .shaped(gic_shape)
+                .identified_as(GicNames {
+                    gic: identity.gic(),
+                    msi_frame: identity.msi_frame_iidr(),
+                }),
             uart: Pl011::new(),
             rtc: Pl031::new(rtc_epoch_seconds),
             gpio: Pl061::new(),

@@ -64,10 +64,11 @@ pub mod storage;
 pub use board::{Plugged, VirtioDevices};
 pub use bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 pub use cpu::{
-    Btype, Cpu, CpuConfig, CpuModel, CpuState, CpuStateEl2, El, El2Unavailable, Levels, NoEl2,
-    Pstate, PstateRefusal, Reg, SpectreReport, SysReg, SysRegRefusal, UnknownCpuModel,
-    UnknownSpectreReport, VReg, WithEl2,
+    Btype, CounterRate, Cpu, CpuConfig, CpuModel, CpuState, CpuStateEl2, El, El2Unavailable,
+    FixedCounterRate, Levels, NoEl2, Pstate, PstateRefusal, Reg, SpectreReport, SysReg,
+    SysRegRefusal, UnknownCpuModel, UnknownSpectreReport, VReg, WithEl2,
 };
+pub use devices::gicv2::{GicShape, PriorityBits, SpiCount};
 #[cfg(feature = "alloc")]
 pub use disk::{Access, Disk};
 pub use identity::{

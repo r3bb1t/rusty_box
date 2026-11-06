@@ -190,6 +190,8 @@ fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Virt, RunError> {
         ips: ClockHz::new(u64::from(config.ips)).ok_or(RunError::ZeroValue { field: "virt.ips" })?,
         cpu: config.cpu,
         spectre: config.spectre,
+        counter: config.counter,
+        gic: config.gic,
         rtc_epoch_seconds: host_epoch_seconds(),
         ..VirtConfig::DEFAULT
     };
@@ -1219,6 +1221,39 @@ mod tests {
             );
             assert_eq!(machine.reg_read(rusty_box_aarch64::Reg::X0), answer, "{report:?}");
         }
+    }
+
+    /// The board has the counter rate and the GIC the VM names: `CNTFRQ_EL0`
+    /// reads the rate, and a guest's load of `GICD_TYPER` the SPIs.
+    #[test]
+    fn the_board_has_the_counter_and_gic_the_vm_names() {
+        const LDR_W0_X1: u32 = 0xB940_0020;
+        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        let config = ArmVirtConfig {
+            counter: rusty_box_aarch64::CounterRate::new(24_000_000).expect("a rate"),
+            gic: rusty_box_aarch64::GicShape {
+                spis: rusty_box_aarch64::SpiCount::MIN,
+                priority_bits: rusty_box_aarch64::PriorityBits::Four,
+            },
+            ..kernel_board(&kernel)
+        };
+        let files = BootFiles::read(&config).expect("the kernel");
+        let mut machine = build(&config, &files).expect("the machine");
+        assert_eq!(
+            machine.sysreg_read(rusty_box_aarch64::SysReg::CNTFRQ_EL0),
+            Ok(24_000_000)
+        );
+        let at = rusty_box_aarch64::board::RAM_BASE;
+        machine.mem_write(at, &LDR_W0_X1.to_le_bytes()).expect("in RAM");
+        machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
+        machine.reg_write(rusty_box_aarch64::Reg::X1, rusty_box_aarch64::board::GIC_DIST_BASE + 4);
+        let stepped = machine.step(rusty_box_aarch64::RunBudget::Instructions(1));
+        assert_eq!(stepped.stop, rusty_box_aarch64::StopReason::BudgetExhausted);
+        assert_eq!(
+            machine.reg_read(rusty_box_aarch64::Reg::X0) & 0x1F,
+            u64::from(rusty_box_aarch64::SpiCount::MIN.get() / 32),
+            "GICD_TYPER.ITLinesNumber"
+        );
     }
 
     /// The board's virtio-blk is over the file the VM names: the guest sees

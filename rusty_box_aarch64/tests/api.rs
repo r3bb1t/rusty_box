@@ -1502,6 +1502,74 @@ fn a_machine_can_move_to_another_thread() {
     moves::<VirtMachine<rusty_box_aarch64::OwnedStorage, WithEl2>>();
 }
 
+/// The board has the counter rate and the GIC its configuration names: a
+/// guest reads the rate in `CNTFRQ_EL0` and the SPIs in
+/// `GICD_TYPER.ITLinesNumber`, and the priority bits as the bits of
+/// `GICC_PMR` that exist. A processor whose architecture fixes its rate at
+/// 1 GHz refuses another, and a rate out of range is no rate at all.
+#[cfg(feature = "alloc")]
+#[test]
+fn the_board_has_the_counter_and_gic_its_configuration_names() {
+    use rusty_box_aarch64::board::{GIC_CPU_BASE, GIC_DIST_BASE};
+    use rusty_box_aarch64::{CounterRate, CpuModel, GicShape, PriorityBits, SpiCount};
+    // ldr w2, [x1]; str w3, [x4]; ldr w5, [x4]
+    const PROGRAM: [u32; 3] = [0xB940_0022, 0xB900_0083, 0xB940_0085];
+    let config = VirtConfig {
+        counter: CounterRate::new(24_000_000).expect("a rate BSA allows"),
+        gic: GicShape {
+            spis: SpiCount::new(256).expect("a count the GIC-400 allows"),
+            priority_bits: PriorityBits::Seven,
+        },
+        ..VirtConfig::DEFAULT
+    };
+    let mut ram = vec![0u8; ram_size().get() as usize];
+    let mut m = MachineBuilder::new(config)
+        .ram(ram_size())
+        .bare()
+        .build_in(MemoryLoan {
+            ram: &mut ram,
+            vars: &mut [],
+        })
+        .expect("a Cortex-A57 counts at any rate BSA allows");
+    assert_eq!(m.sysreg_read(SysReg::CNTFRQ_EL0), Ok(24_000_000));
+    for (offset, word) in PROGRAM.iter().enumerate() {
+        m.mem_write(RAM_BASE + 4 * offset as u64, &word.to_le_bytes())
+            .expect("in RAM");
+    }
+    m.reg_write(Reg::X1, GIC_DIST_BASE + 4);
+    m.reg_write(Reg::X3, 0xFF);
+    m.reg_write(Reg::X4, GIC_CPU_BASE + 4);
+    assert_eq!(
+        m.step(RunBudget::Instructions(3)).stop,
+        StopReason::BudgetExhausted
+    );
+    assert_eq!(
+        m.reg_read(Reg::X2) & 0x1F,
+        256 / 32,
+        "GICD_TYPER.ITLinesNumber"
+    );
+    assert_eq!(m.reg_read(Reg::X5), 0xFE, "GICC_PMR: seven priority bits");
+
+    let armv9 = VirtConfig {
+        cpu: CpuModel::Armv9p2,
+        ..config
+    };
+    match MachineBuilder::new(armv9).ram(ram_size()).bare().build() {
+        Err(BuildError::FixedCounterRate(refused)) => {
+            assert_eq!(
+                (refused.model, refused.asked),
+                (CpuModel::Armv9p2, config.counter)
+            );
+        }
+        Err(e) => panic!("refused otherwise: {e}"),
+        Ok(_) => panic!("an Armv9.2 processor counts at 1 GHz alone"),
+    }
+    for refused in [0, CounterRate::MIN_HZ - 1, CounterRate::MAX_HZ + 1] {
+        assert_eq!(CounterRate::new(refused), None, "{refused} Hz");
+    }
+    assert_eq!(CounterRate::DEFAULT.hz().get(), 1_000_000_000);
+}
+
 /// The processor is the model the configuration names: its ID registers
 /// (FEAT_SME2 is `ID_AA64PFR1_EL1.SME` = 2), its `MIDR_EL1`, the system
 /// counter's frequency, which `CNTPCT_EL0` counts at, and the device tree's

@@ -97,7 +97,9 @@ use el2::El2Storage;
 pub use el2::{Levels, NoEl2, VirtualLines, WithEl2};
 pub use exception::ExceptionClass;
 pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
-pub use features::{CpuModel, El2Unavailable, UnknownCpuModel, SYSTEM_COUNTER_HZ};
+pub use features::{
+    CounterRate, CpuModel, El2Unavailable, FixedCounterRate, UnknownCpuModel, SYSTEM_COUNTER_HZ,
+};
 pub use history::RecentPcs;
 pub use mmu::{Ipa, LeafLevel, Level, NoTranslation, Tlb, TranslationFault, TranslationStage};
 pub use regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, SysReg, SysRegRefusal, VReg};
@@ -389,8 +391,10 @@ impl Pstate {
     }
 }
 
-/// Construction parameters for a processor, beyond its model, which sets
-/// the system counter's frequency ([`CpuModel::counter_hz`]).
+/// Construction parameters for a processor, beyond its model, whose
+/// system counter's frequency is the model's own ([`CpuModel::counter_hz`])
+/// for a processor built on its own, and the board's
+/// (`VirtConfig::counter`) for a machine's.
 #[derive(Debug, Clone, Copy)]
 pub struct CpuConfig {
     /// Emulated instructions per second: the rate of the tick count, and so
