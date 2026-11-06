@@ -189,6 +189,45 @@ The same `openat` made at EL1 is not a system call and gives `none`. In the
 real machine the `svc` is the hook's static half, decided when the trace is
 built, so only `svc` instructions ever run the decoding.
 
+## Creating an emulator and running hooks
+
+`docs/sketches/Emulator.lean`, checked on Lean 4.35 (2026-11-06), is the API
+on a toy machine (`mov`, `svc`, `eret`), small enough to show the types:
+
+```lean
+def observed := (Emulator.create program start [paths, numbers]).run 100
+
+observed.logs.get .here          : List String   -- ["/etc/passwd", "/etc/hosts"]
+observed.logs.get (.there .here) : List UInt64   -- [56, 56]
+lockstep observed (by decide)                    -- exact: no hook intervened
+```
+
+- **The emulator is indexed by its hooks**, `Emulator hs`. Each hook declares
+  its own `Event` type, and the logs are `Logs hs`, one list per hook at that
+  hook's type. A log is looked up by `Member h hs`, so `paths`' log is a
+  `List String` and `numbers`' a `List UInt64`, with no casts and no lookup
+  that can fail.
+- **The static half is decided at creation.** `Emulator.create` computes,
+  per instruction, the hooks whose mnemonic selects it. A run checks the
+  dynamic half only for those.
+- **What a hook may do is in its type.** `Effect.Out .intervene s E` is
+  `E × { s' // s'.el = s.el ∧ s'.pc = s.pc ∧ s'.read = s.read }`: an
+  intervening hook may set registers (`redirect` points every `openat` at
+  `/tmp/decoy`) but cannot change the exception level, the PC or memory. A
+  hook that raises itself to EL1 has no proof to give, and is rejected (a
+  lock, with `redirect` as its twin).
+- **Exactness is computed from the hook list.** `lockstep` takes the proof
+  `exact hs = true`, which `decide` finds for a list that only observes. With
+  `redirect` installed the proposition is false, so `lockstep redirected` is
+  a compile-time error (a lock, with `lockstep observed` as its twin).
+- **`runUntil c` stops with `c`'s witness**: the state it stopped in and the
+  evidence, so "run until a user-mode call names a path" returns the path
+  (`stopped at pc 2 with /etc/passwd`).
+
+Hooks carry a type (`Event`), so `Hook`, `Member`, `Logs` and `Emulator`
+live in `Type 1`. That is free at run time, but it means `do`-notation over
+`Option (Emulator hs)` cannot bind an `Option Instr`, which is in `Type 0`.
+
 ## Further conditions, by the same construction
 
 None of these is built yet.
