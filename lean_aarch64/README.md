@@ -138,7 +138,7 @@ callgrind (Alpine to its first 40M instructions):
 | the common trace lookup inline in `run` (no `Next` allocated) | 394 | 15.2 s | 20.9 s |
 | counter polls fast-forwarded exactly (`Engine/Poll.lean`, poll.rs's rule) | | 11.5 s | 20.9 s |
 | a word in bounds read under one check, its bytes proven in bounds (`ByteArray.WordIn`) | 300 | | |
-| CLZ, CLS, RBIT, REV16, REV32, REV computed loop-free, proven equal to their pseudocode (`@[csimp]`, `bv_decide`) | 283 | | |
+| CLZ, CLS, RBIT, REV16, REV32, REV computed loop-free, proven equal to their pseudocode (`@[csimp]`, `bv_decide`: proofs that trust the compiler, `docs/type-doctrine.md` L0) | 283 | | |
 | the TLB hit and the translation inline in their callers, so their pairs and `Except`s are never built (the walk stays out of line) | 246 | | |
 | `DC ZVA` to RAM one `copySlice` of a zero block; the eight micro-TLB words one `MicroTlb` structure in the loop | 242 | | |
 | the op read and matched in the branch that proves its index, so it is a borrow of the trace (no reference count per op) | 232 | | |

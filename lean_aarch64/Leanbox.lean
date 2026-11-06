@@ -47,7 +47,8 @@ resting only on the parts before it:
   (`Isa.Pseudocode`), instructions as data (`Isa.Op`), the decoder from a
   32-bit word to one (`Isa.Decode`), and the values of arithmetic and logic
   (`Isa.Alu`), where the fast forms of bit operations are proven equal to
-  their definitions.
+  their definitions (by `bv_decide`, whose proofs trust Lean's compiler
+  rather than its kernel; `docs/type-doctrine.md`, L0).
 * **The board** (`Leanbox.Dev`, `Leanbox.Board`). The devices around the
   processor, each a pure state machine with its registers (`Dev`), and the
   board that places them at addresses and wires their interrupts (`Board`).
@@ -65,7 +66,9 @@ resting only on the parts before it:
   line, with rusty_box's.
 
 Everything is pure Lean: no `@[extern]`, `implemented_by`, `unsafe` or
-`sorry`, so every function is either proved or part of Lean's own runtime.
+`sorry`, so the code that runs is the code written here or Lean's own
+runtime. `docs/type-doctrine.md` is how the library is typed so that a
+wrong program is one Lean rejects, and what is audited to keep it so.
 Importing this module imports the whole library, so `lake build` checks
 every proof in it; `lake test` runs the devices' tests (`LeanboxTest`).
 -/
