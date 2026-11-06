@@ -7,7 +7,9 @@ the way a test is written before the code. Each entry is marked **proved**
 (a theorem in the library, kernel-checked, passing the L0 audit), **checked**
 (tested in lockstep or by `#guard`, not yet proved) or **open**.
 
-The type doctrine (`type-doctrine.md`) makes wrong programs unwritable;
+The type doctrine (`type-doctrine.md`) makes wrong programs unwritable,
+and `semantics.md` is the method the theorems share (a specification, an
+abstraction function, a commuting square per instruction);
 this page proves that the written program is right.
 
 ## P1. The fast machine is the slow machine
