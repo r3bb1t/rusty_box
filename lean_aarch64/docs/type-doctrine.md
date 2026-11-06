@@ -4,7 +4,7 @@ Leanbox is written so that a wrong program is a program Lean rejects. A
 test shows that one run went right; a type shows that no run can go wrong
 in that way. These rules say how, adapted to dependent types from
 llvmkit's type-safety doctrine (D1–D11) and rusty_box's safety doctrine
-(R0–R9). Cite them by id (`L0`–`L17`) in commits and reviews.
+(R0–R9). Cite them by id (`L0`–`L18`) in commits and reviews.
 
 The bar is adversarial: a guarantee holds against someone trying to break
 it, not only against mistakes. So a guarantee rests on something Lean's
@@ -178,6 +178,11 @@ until the forbidden program compiles, `lake test` fails. Tests are ported,
 not invented: a `#guard`'s expected value comes from a rusty_box unit test
 or an Arm document, cited by symbol.
 
+A lock comes with an accepted twin, a program that differs from it only in
+the forbidden part and compiles. Without the twin, a lock can pass for an
+unrelated error (a typo, a wrong return type) and prove nothing about the
+rule.
+
 ```lean
 /-- error: Application type mismatch: The argument
   rfl
@@ -288,6 +293,67 @@ Armv9.3-A models generated from Arm's ASL, and work on a Lean backend for
 Sail was presented in 2025, RISC-V first. With it, `Cpu.Step` would be
 proved to refine the ASL itself.
 
+## Hooks
+
+**L18. A hook's condition is its type.** An instrumentation hook (after
+rusty_box's `Instrumentation`, whose empty hook mask makes the processor
+skip every dispatch) names what it wants with a `Selector`: a mnemonic, an
+encoding group or class, a PC range, an exception level, an access kind, and
+their conjunctions, disjunctions and negations. The selector computes the
+type the hook receives, and the hook gets a proof that its condition holds,
+so it cannot be handed an instruction its selector rules out. A hook on LDR
+receives the LDR's fields, not an `Instr` it would have to take apart.
+
+```lean
+def Selector.Matches : Selector → Instr → Prop
+def Selector.Payload : Selector → Type          -- .mnemonic .ldr ↦ LdrFields
+def Selector.payload : (s : Selector) → (i : Instr) → s.Matches i → s.Payload
+  -- total: every instruction the selector rules out is eliminated by the proof
+
+structure Hook where
+  sel : Selector
+  run : sel.Payload → View → Event
+
+inductive Op where                              -- decided when the trace is built
+  | …
+  | hooked (h : Hook) (i : Instr) (ok : h.sel.Matches i)
+```
+
+The lock and its twin, checked on Lean 4.35 (2026-11-06):
+
+```lean
+-- rejected: "fun f x => toString f.d has type AddFields → UInt64 → String
+-- but is expected to have type (Selector.mnemonic Mnemonic.ldr).Payload → …"
+#guard_msgs (drop info) in
+example : Hook := { sel := .mnemonic .ldr, run := fun (f : AddFields) _ => toString f.d }
+-- accepted
+example : Hook := { sel := .mnemonic .ldr, run := fun (f : LdrFields) _ => toString f.t }
+```
+
+How hooks run:
+- **Selectivity is paid once.** The parts of a selector fixed by the
+  instruction word and its address (mnemonic, class, PC range) are decided
+  when the trace is built, and a matching instruction is lowered to
+  `Op.hooked` with its proof. With no hooks installed no trace holds a
+  `hooked` op, so the engine runs exactly as without hooks (L13 measures
+  it). The parts that depend on the machine state (the exception level, a
+  register's value, the address of an access) are checked only when a
+  hooked op runs.
+- **A hooked op runs the reference step.** `Op.hooked` goes to the slow
+  path, so a hook sees `execOp`'s view of the instruction, before and after.
+- **Observing is not intervening.** An observing hook receives a read-only
+  `View` and returns an `Event`, and its type gives it no machine state to
+  return. That makes the theorem that observing hooks leave the machine's
+  run unchanged a matter of definition. An intervening hook (setting a
+  register, injecting a fault) returns a state, and the machine it runs on
+  is `Mach .instrumented`. Lockstep's checks take only a `Mach .exact`, so
+  an altered run cannot be reported as matching rusty_box (llvmkit D8's
+  verified typestate).
+- **The hook set indexes the trace cache.** The decode-time decisions belong
+  to one hook set, so the cache is `TraceCache hooks`. Installing a
+  different set gives a cache of a different type, and a stale trace cannot
+  be run under it.
+
 ## What stays a runtime check
 
 The rules make wrong programs unwritable; they cannot make the guest's
@@ -328,5 +394,7 @@ Each step is one commit, gated by L13:
    and `Cpu.Timer`.
 7. **L6**: `Granted`, `InRam` and `Trace`.
 8. **L11**: `run`, `drive` and `checkLoop` made total.
+9. **L18**: selectors, typed payloads, `Op.hooked`, observing and
+   intervening hooks, and the hook-indexed trace cache.
 
 L12's locks land with the rule they lock, in the same commit.
