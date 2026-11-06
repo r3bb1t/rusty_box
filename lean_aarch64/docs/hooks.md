@@ -233,6 +233,45 @@ Hooks carry a type (`Event`), so `Hook`, `Member`, `Logs` and `Emulator`
 live in `Type 1`. That is free at run time, but it means `do`-notation over
 `Option (Emulator hs)` cannot bind an `Option Instr`, which is in `Type 0`.
 
+## Complicated hooks, still guaranteed
+
+`docs/sketches/HookAlgebra.lean`, checked on Lean 4.35 (2026-11-06). A hook
+is complicated along independent axes, and each axis keeps its guarantee in
+the types, so combining them keeps all of them:
+
+| axis | in the type |
+|---|---|
+| where it attaches (`Point`: exec, store, frame) | `Point.Ctx p s i`, computed from the point, the state and the instruction. Exec gets `{ post // post = i.exec s }`, store the byte before and after with the proof of each, frame the framebuffer with the proof that it is the one in memory. A point that does not apply has the context `Empty` and cannot fire |
+| which machine (`Model`) | `State m`, `Instr m` and `Cond m` are indexed by the CPU model. PSTATE.SM is `if m.hasSME then Bool else Unit`, `smstart` takes the proof `m.hasSME = true`, and so does the condition `streaming`. SMSTART in a Cortex-A57 program is a type error (a lock, with the Armv9.2 twin) |
+| its own state (`σ`, `init`) | each hook has a private state type, threaded by the run. Nothing in it reaches the machine |
+| its own events (`Event`) | the run's `Track hs` keeps each hook's state and events at that hook's types |
+| what it may change (`Caps`) | `writes`, the registers it declares, and `draws`. A reply gives values only on `r ∈ writes`, and an overlay only if it draws. `apply_frame` proves an undeclared register keeps its value, and `apply_rest` that the level, PC and memory are untouched |
+| the screen | `Frame` is `Vector (Vector UInt8 W) H` and an `Overlay` has exactly the same size, so a pixel outside the frame cannot be named. The overlay is the GUI's state, not the machine's |
+| installing several (`Compatible`) | `Emulator.create` takes the proof that no two hooks declare the same register. `decide` finds it, or proves it false: two hooks writing x0 cannot be installed together (a lock, with its twin) |
+
+The guarantee that ties it together is a theorem, with only the standard
+axioms:
+
+```lean
+theorem observers_transparent {hs : List (Hook m)} (hw : ∀ h ∈ hs, h.caps.writes = []) :
+    ∀ (n : Nat) (e : Emulator m hs), (e.run n).state = bareRun e.program e.state n
+```
+
+Any number of hooks that declare no register writes, at any points, with any
+state of their own, drawing or not, leave the machine's run exactly the
+run of the machine with no hooks (`bareRun`).
+
+Its output, a Cortex-A57 program storing `A` twice into the framebuffer
+with a stateful store hook, a trace hook and a drawing hook, and an Armv9.2
+program in streaming mode:
+
+```
+stores:  [(0, 0, 65), (1, 0, 65)]       -- (count, before, after)
+trace:   [1, 2, 3, 4]                   -- the PC after each, from the proved post-state
+display: [[255, 0, 0, 0], [0, 65, 0, 0]] -- the frame, with the marker on top
+sme:     x0 = 1                          -- set by the streaming-mode hook, its one declared register
+```
+
 ## Further conditions, by the same construction
 
 None of these is built yet.
