@@ -124,6 +124,42 @@ about together:
   evidence. Observing hooks return only an `Event`, so a run with them is
   the same run (L18).
 
+## Linux system calls
+
+`docs/sketches/Syscalls.lean`, checked on Lean 4.35 (2026-11-06), is a typed
+strace, kept as an opt-in guest module (the board itself is guest-neutral):
+- **The call table is a type.** `Syscall` has `openat`, `close`, `read`,
+  `write`, `exit_group` and `execve`, with arm64's asm-generic numbers, and
+  `Syscall.ofNumber` returns the call together with the proof that x8 names
+  it.
+- **Each call's arguments are a type computed from the call and the state**,
+  `Syscall.Args s cap sc`:
+  - `openat`'s path is the C string x1 points to, with its proof, and its
+    flags are decoded, so an access mode of 3 (not one) gives no witness;
+  - `write`'s buffer is exactly x2 bytes at x1, up to the hook's cap;
+  - `execve`'s argv is every string, read through every guest pointer of the
+    NULL-terminated array.
+- **A hook on one call takes that call's witness**, `CallAt s cap .openat`,
+  so it has nothing to take apart. A lock with its twin pins that a `write`
+  witness is rejected where an `openat` one is expected.
+- **A hook on any call takes the dependent pair** `(sc : Syscall) × CallAt s
+  cap sc`. Matching on it gives each case its own argument types, and the
+  match is exhaustive, so adding a call breaks the strace until it prints
+  it.
+
+Its output on a user program's calls:
+
+```
+openat(AT_FDCWD, "/etc/passwd", O_RDONLY)
+write(1, "hello\n", 6)
+execve("/bin/ls", [ls, -l])
+exit_group(0)
+```
+
+The same `openat` made at EL1 is not a system call and gives `none`. In the
+real machine the `svc` is the hook's static half, decided when the trace is
+built, so only `svc` instructions ever run the decoding.
+
 ## Further conditions, by the same construction
 
 None of these is built yet.
@@ -148,11 +184,6 @@ None of these is built yet.
   field that sizes a later array is a dependent layout,
   `Layout.dep (f : UInt64 → Layout)`, the shape real file-system and network
   structures have.
-- **Guest ABIs as types.** On top of layouts, an opt-in module per guest
-  (`Leanbox.Guest.Linux`, kept out of the guest-neutral board) types a
-  system call by its number: a hook on `openat` gets `(dirfd : Int32)
-  (path : CStr) (flags : UInt32)`, decoded from x0–x2 when `svc` runs with
-  `x8 = 56`.
 - **Conditions over time.** A condition can be an automaton over events:
   "the first `svc` after x0 pointed to a string". Its states are types, so
   the witness carries the path that reached the accepting state.
