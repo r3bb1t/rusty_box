@@ -57,6 +57,7 @@ pub mod devices;
 pub mod disk;
 pub mod identity;
 pub mod instrumentation;
+pub mod interrupt_map;
 pub mod machine;
 mod softfloat;
 pub mod storage;
@@ -68,7 +69,7 @@ pub use cpu::{
     FixedCounterRate, Levels, NoEl2, Pstate, PstateRefusal, Reg, SpectreReport, SysReg,
     SysRegRefusal, UnknownCpuModel, UnknownSpectreReport, VReg, WithEl2,
 };
-pub use devices::gicv2::{GicShape, PriorityBits, SpiCount};
+pub use devices::gicv2::{GicShape, MsiFrame, MsiFrameOutsideGic, PriorityBits, SpiCount};
 #[cfg(feature = "alloc")]
 pub use disk::{Access, Disk};
 pub use identity::{
@@ -79,13 +80,16 @@ pub use identity::{
     VirtioVendorId,
 };
 pub use instrumentation::{Execution, Instrumentation, NoInstrumentation};
+pub use interrupt_map::{
+    InterruptMap, InterruptMapError, InterruptSource, MsiCount, MsiExtent, MsiSpis, Spi,
+};
 #[cfg(feature = "alloc")]
 pub use machine::Display;
 #[cfg(feature = "alloc")]
 pub use machine::StopHandle;
 pub use machine::{
-    BatchOutcome, BuildError, MachineBuilder, MemoryError, MemoryLoan, OnResetRequest, PowerState,
-    RamSize, StopReason, VirtConfig, VirtMachine,
+    BatchOutcome, BuildError, HostTreeInterrupt, MachineBuilder, MemoryError, MemoryLoan,
+    OnResetRequest, PowerState, RamSize, StopReason, VirtConfig, VirtMachine,
 };
 pub use machine::{Keyboard, Pointer};
 pub use rusty_box_core::input::pointer::{PointerButton, PointerInput, PointerPos, WheelSteps};

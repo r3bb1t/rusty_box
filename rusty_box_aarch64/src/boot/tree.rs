@@ -43,11 +43,10 @@ use super::fdt::{DeviceTreeError, Header, Out, FDT_BEGIN_NODE, FDT_END, FDT_END_
 use crate::board::{
     FLASH0_BASE, FLASH1_BASE, FLASH_BANK_SIZE, GIC_CPU_BASE, GIC_CPU_SIZE, GIC_DIST_BASE,
     GIC_DIST_SIZE, GIC_HYP_BASE, GIC_HYP_SIZE, GIC_V2M_BASE, GIC_V2M_SIZE, GIC_VCPU_BASE,
-    GIC_VCPU_SIZE, GPIO_BASE, IRQ_GPIO, IRQ_PCIE_INTX_BASE, IRQ_RTC, IRQ_UART0, IRQ_VIRTIO_BASE,
-    PCIE_ECAM_BASE, PCIE_ECAM_SIZE, PCIE_MMIO_BASE, PCIE_MMIO_HIGH_BASE, PCIE_MMIO_HIGH_SIZE,
-    PCIE_MMIO_SIZE, PCIE_PIO_BASE, PCIE_PIO_SIZE, PPI_HYPERVISOR_TIMER, PPI_PHYSICAL_TIMER,
-    PPI_SECURE_PHYSICAL_TIMER, PPI_VIRTUAL_TIMER, PRIMECELL_SIZE, RAM_BASE, RTC_BASE, UART0_BASE,
-    UART_CLOCK, VIRTIO_MMIO_BASE,
+    GIC_VCPU_SIZE, GPIO_BASE, PCIE_ECAM_BASE, PCIE_ECAM_SIZE, PCIE_MMIO_BASE, PCIE_MMIO_HIGH_BASE,
+    PCIE_MMIO_HIGH_SIZE, PCIE_MMIO_SIZE, PCIE_PIO_BASE, PCIE_PIO_SIZE, PPI_HYPERVISOR_TIMER,
+    PPI_PHYSICAL_TIMER, PPI_SECURE_PHYSICAL_TIMER, PPI_VIRTUAL_TIMER, PRIMECELL_SIZE, RAM_BASE,
+    RTC_BASE, UART0_BASE, UART_CLOCK, VIRTIO_MMIO_BASE,
 };
 use crate::bus::PhysAddr;
 use crate::cpu::id::{CCSIDR_L1D, CCSIDR_L1I, CCSIDR_L2};
@@ -57,6 +56,7 @@ use crate::devices::gicv2_virt::MAINTENANCE_INTID;
 use crate::devices::pl061::POWER_BUTTON_LINE;
 use crate::devices::virtio_mmio::{TRANSPORT_COUNT, TRANSPORT_SIZE};
 use crate::identity::BoardIdentity;
+use crate::interrupt_map::{Spi, Wiring};
 use crate::CpuModel;
 
 /// An empty memory reservation block, its terminating entry alone (5.3),
@@ -118,6 +118,8 @@ pub(crate) struct BoardTree<'a> {
     pub(crate) psci: PsciConduit,
     pub(crate) gic: GicExtensions,
     pub(crate) chosen: Chosen<'a>,
+    /// The SPIs the devices drive.
+    pub(crate) wiring: Wiring,
 }
 
 /// The most property names a tree may use: the strings block the writer
@@ -425,7 +427,7 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     w.begin_at(SERIAL_NODE, UART0_BASE)?;
     w.strings("compatible", &["arm,pl011", "arm,primecell"])?;
     w.pairs("reg", &[UART0_BASE, PRIMECELL_SIZE])?;
-    w.cells("interrupts", &spi(IRQ_UART0))?;
+    w.cells("interrupts", &spi(tree.wiring.uart()))?;
     w.cells("clocks", &[PHANDLE_CLOCK, PHANDLE_CLOCK])?;
     w.strings("clock-names", &["uartclk", "apb_pclk"])?;
     w.end()?;
@@ -433,7 +435,7 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     w.begin_at("rtc", RTC_BASE)?;
     w.strings("compatible", &["arm,pl031", "arm,primecell"])?;
     w.pairs("reg", &[RTC_BASE, PRIMECELL_SIZE])?;
-    w.cells("interrupts", &spi(IRQ_RTC))?;
+    w.cells("interrupts", &spi(tree.wiring.rtc()))?;
     w.cell("clocks", PHANDLE_CLOCK)?;
     w.string("clock-names", "apb_pclk")?;
     w.end()?;
@@ -441,7 +443,7 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     w.begin_at("gpio", GPIO_BASE)?;
     w.strings("compatible", &["arm,pl061", "arm,primecell"])?;
     w.pairs("reg", &[GPIO_BASE, PRIMECELL_SIZE])?;
-    w.cells("interrupts", &spi(IRQ_GPIO))?;
+    w.cells("interrupts", &spi(tree.wiring.gpio()))?;
     w.flag("gpio-controller")?;
     w.cell("#gpio-cells", 2)?;
     w.cell("clocks", PHANDLE_CLOCK)?;
@@ -468,7 +470,7 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     w.cell("bank-width", 4)?;
     w.end()?;
 
-    pcie(&mut w)?;
+    pcie(&mut w, tree.wiring)?;
 
     for n in 0..TRANSPORT_COUNT {
         let base = VIRTIO_MMIO_BASE + n * TRANSPORT_SIZE;
@@ -477,7 +479,7 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
         w.pairs("reg", &[base, TRANSPORT_SIZE])?;
         // A transport's line is asserted while its InterruptStatus has a
         // bit set (`Transport::irq`): a level.
-        w.cells("interrupts", &spi(IRQ_VIRTIO_BASE + n as u32))?;
+        w.cells("interrupts", &spi(tree.wiring.virtio(n as u8)))?;
         w.flag("dma-coherent")?;
         w.end()?;
     }
@@ -486,9 +488,10 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     w.finish()
 }
 
-/// A shared peripheral interrupt's specifier, level-high.
-const fn spi(intid: u32) -> [u32; 3] {
-    [GIC_SPI, intid - 32, IRQ_LEVEL_HIGH]
+/// A shared peripheral interrupt's specifier, level-high: the GIC binding
+/// names an SPI by its number among the SPIs.
+const fn spi(spi: Spi) -> [u32; 3] {
+    [GIC_SPI, spi.number(), IRQ_LEVEL_HIGH]
 }
 
 fn chosen(w: &mut Writer<'_>, chosen: &Chosen<'_>) -> Result<(), DeviceTreeError> {
@@ -602,9 +605,10 @@ fn gic(w: &mut Writer<'_>, extensions: GicExtensions) -> Result<(), DeviceTreeEr
 /// for `ranges`, `bus-range` and the interrupt map): configuration space
 /// over the ECAM window, one bus per MiB of it; I/O, 32-bit and 64-bit
 /// memory windows; INTA to INTD of each device slot swizzled onto the
-/// bridge's four SPIs, as the PCI-to-PCI bridge specification routes a
-/// device's pins; and MSIs through the GIC's MSI frame.
-fn pcie(w: &mut Writer<'_>) -> Result<(), DeviceTreeError> {
+/// bridge's four SPIs, which `wiring` gives, as the PCI-to-PCI bridge
+/// specification routes a device's pins; and MSIs through the GIC's MSI
+/// frame.
+fn pcie(w: &mut Writer<'_>, wiring: Wiring) -> Result<(), DeviceTreeError> {
     /// `ranges` space codes in the first child address cell (PCI bus
     /// binding: `ss` in phys.hi).
     const SPACE_IO: u32 = 0x0100_0000;
@@ -660,7 +664,7 @@ fn pcie(w: &mut Writer<'_>) -> Result<(), DeviceTreeError> {
             0,
             0,
             GIC_SPI,
-            IRQ_PCIE_INTX_BASE - 32 + swizzled,
+            wiring.pcie_intx(swizzled).number(),
             IRQ_LEVEL_HIGH,
         ]);
     }

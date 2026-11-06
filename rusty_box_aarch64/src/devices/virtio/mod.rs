@@ -73,7 +73,8 @@
 //!
 //! A device is plugged into the transports from the last down, the order
 //! QEMU's `virt` hands `-device` options their bus (`hw/arm/virt.c`
-//! `create_virtio_devices`), and transport `n` raises SPI `16 + n`. A board
+//! `create_virtio_devices`), and transport `n` raises the `n`th of the
+//! SPIs the board's interrupt map gives them ([`crate::interrupt_map`]). A board
 //! with devices is QEMU's `virt` given `-global virtio-mmio.force-legacy=false`,
 //! which every transport then follows ([`super::virtio_mmio`]): the devices
 //! here are virtio 1.0 devices, which Linux's drivers refuse on a legacy

@@ -123,6 +123,7 @@ fn boot() -> ExitCode {
         ips,
         cpu: args.run.cpu,
         debug_stops: args.run.debug_stops(),
+        interrupts: args.run.interrupts,
         ..VirtConfig::DEFAULT
     };
     let builder = MachineBuilder::new(config)

@@ -192,6 +192,7 @@ fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Virt, RunError> {
         spectre: config.spectre,
         counter: config.counter,
         gic: config.gic,
+        interrupts: config.interrupts,
         rtc_epoch_seconds: host_epoch_seconds(),
         ..VirtConfig::DEFAULT
     };
@@ -1223,8 +1224,9 @@ mod tests {
         }
     }
 
-    /// The board has the counter rate and the GIC the VM names: `CNTFRQ_EL0`
-    /// reads the rate, and a guest's load of `GICD_TYPER` the SPIs.
+    /// The board has the counter rate, the GIC and the interrupt map the VM
+    /// names: `CNTFRQ_EL0` reads the rate, a guest's load of `GICD_TYPER`
+    /// the SPIs, and one of `MSI_TYPER` the GICv2m frame's.
     #[test]
     fn the_board_has_the_counter_and_gic_the_vm_names() {
         const LDR_W0_X1: u32 = 0xB940_0020;
@@ -1234,6 +1236,15 @@ mod tests {
             gic: rusty_box_aarch64::GicShape {
                 spis: rusty_box_aarch64::SpiCount::MIN,
                 priority_bits: rusty_box_aarch64::PriorityBits::Four,
+            },
+            interrupts: rusty_box_aarch64::InterruptMap {
+                msi: rusty_box_aarch64::MsiSpis {
+                    first: rusty_box_aarch64::Spi::new(40).expect("an SPI"),
+                    count: rusty_box_aarch64::MsiExtent::Count(
+                        rusty_box_aarch64::MsiCount::new(20).expect("a count"),
+                    ),
+                },
+                ..rusty_box_aarch64::InterruptMap::DEFAULT
             },
             ..kernel_board(&kernel)
         };
@@ -1253,6 +1264,15 @@ mod tests {
             machine.reg_read(rusty_box_aarch64::Reg::X0) & 0x1F,
             u64::from(rusty_box_aarch64::SpiCount::MIN.get() / 32),
             "GICD_TYPER.ITLinesNumber"
+        );
+        machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
+        machine.reg_write(rusty_box_aarch64::Reg::X1, rusty_box_aarch64::board::GIC_V2M_BASE + 8);
+        let stepped = machine.step(rusty_box_aarch64::RunBudget::Instructions(1));
+        assert_eq!(stepped.stop, rusty_box_aarch64::StopReason::BudgetExhausted);
+        assert_eq!(
+            machine.reg_read(rusty_box_aarch64::Reg::X0),
+            (72 << 16) | 20,
+            "MSI_TYPER: 20 SPIs from INTID 72"
         );
     }
 

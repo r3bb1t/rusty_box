@@ -24,6 +24,9 @@ use rusty_box_aarch64::{
 };
 use rusty_box_core::{ClockHz, SnapError};
 
+#[path = "support/qemu_virt.rs"]
+mod qemu_virt;
+
 const RAM_LEN: usize = 4 << 20;
 /// `b .`
 const SPIN: u32 = 0x1400_0000;
@@ -822,7 +825,13 @@ fn a_host_tree_booting_a_kernel_gets_every_edit() {
     let image = LinuxImage::parse(&kernel).expect("an Image");
     let ram_len = 6 * MIB;
     let mut ram = vec![0u8; ram_len as usize];
-    let m = MachineBuilder::new(VirtConfig::DEFAULT)
+    // QEMU's tree names the devices' interrupts as QEMU's `virt` wires them,
+    // which the board takes as its map.
+    let qemu_wired = VirtConfig {
+        interrupts: qemu_virt::qemu_virt_interrupts(),
+        ..VirtConfig::DEFAULT
+    };
+    let m = MachineBuilder::new(qemu_wired)
         .ram(RamSize::bytes(ram_len).expect("a valid size"))
         .device_tree(HOST_TREE)
         .linux(image)

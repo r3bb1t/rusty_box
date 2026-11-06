@@ -720,9 +720,15 @@ fn create(
     out.put_u32(FDT_END_NODE)
 }
 
-/// Whether the source node `node` has a property named `name` before its
-/// first child, where libfdt looks (`nextprop_`).
+/// Whether the source node `node` has a property named `name`
+/// ([`property_of`]).
 fn has_property(node: SourceNode<'_>, name: &str) -> Result<bool, DeviceTreeError> {
+    property_of(node, name).map(|value| value.is_some())
+}
+
+/// The value of the source node `node`'s property `name`, which is found
+/// before its first child, where libfdt looks (`nextprop_`).
+fn property_of<'s>(node: SourceNode<'s>, name: &str) -> Result<Option<&'s [u8]>, DeviceTreeError> {
     let mut at = node.body;
     loop {
         match be32(node.structure, at)? {
@@ -730,12 +736,16 @@ fn has_property(node: SourceNode<'_>, name: &str) -> Result<bool, DeviceTreeErro
                 let len = be32(node.structure, at + 4)? as usize;
                 if name_at(node.strings, be32(node.structure, at + 8)? as usize)? == name.as_bytes()
                 {
-                    return Ok(true);
+                    return node
+                        .structure
+                        .get(at + 12..at + 12 + len)
+                        .map(Some)
+                        .ok_or(DeviceTreeError::Malformed);
                 }
                 at += 12 + align4(len);
             }
             FDT_NOP => at += 4,
-            FDT_BEGIN_NODE | FDT_END_NODE => return Ok(false),
+            FDT_BEGIN_NODE | FDT_END_NODE => return Ok(None),
             _ => return Err(DeviceTreeError::Malformed),
         }
     }
@@ -782,31 +792,12 @@ pub(crate) fn rebuild(
     edits: &[Edit<'_>],
     dst: &mut [u8],
 ) -> Result<usize, DeviceTreeError> {
-    if be32(source, 0).ok() != Some(FDT_MAGIC) {
-        return Err(DeviceTreeError::NotADeviceTree);
-    }
-    let off_struct = be32(source, 8)? as usize;
-    let off_strings = be32(source, 12)? as usize;
+    let Blocks {
+        structure: structure_src,
+        strings,
+    } = blocks(source)?;
     let off_rsvmap = be32(source, 16)? as usize;
     let boot_cpuid = be32(source, 28)?;
-    let size_strings = be32(source, 32)? as usize;
-    let size_struct = be32(source, 36)? as usize;
-    let structure_src = source
-        .get(
-            off_struct
-                ..off_struct
-                    .checked_add(size_struct)
-                    .ok_or(DeviceTreeError::Malformed)?,
-        )
-        .ok_or(DeviceTreeError::Malformed)?;
-    let strings = source
-        .get(
-            off_strings
-                ..off_strings
-                    .checked_add(size_strings)
-                    .ok_or(DeviceTreeError::Malformed)?,
-        )
-        .ok_or(DeviceTreeError::Malformed)?;
     // The reservation block runs to its all-zero terminating entry.
     let mut rsv_end = off_rsvmap;
     loop {
@@ -860,6 +851,138 @@ pub(crate) fn rebuild(
     Ok(total)
 }
 
+/// A flattened tree's structure and strings blocks (5.4, 5.5), as its
+/// header (5.2) places them.
+struct Blocks<'t> {
+    structure: &'t [u8],
+    strings: &'t [u8],
+}
+
+/// `source`'s blocks, refused when it is not a device tree or its header
+/// places them outside it.
+fn blocks(source: &[u8]) -> Result<Blocks<'_>, DeviceTreeError> {
+    if be32(source, 0).ok() != Some(FDT_MAGIC) {
+        return Err(DeviceTreeError::NotADeviceTree);
+    }
+    let block = |offset: usize, size: usize| {
+        offset
+            .checked_add(size)
+            .and_then(|end| source.get(offset..end))
+            .ok_or(DeviceTreeError::Malformed)
+    };
+    Ok(Blocks {
+        structure: block(be32(source, 8)? as usize, be32(source, 36)? as usize)?,
+        strings: block(be32(source, 12)? as usize, be32(source, 32)? as usize)?,
+    })
+}
+
+/// A node of a tree: how deep it is, the root 0 and its children 1, and the
+/// properties it has before its own children.
+#[derive(Clone, Copy)]
+pub(crate) struct TreeNode<'t> {
+    depth: usize,
+    node: SourceNode<'t>,
+}
+
+impl<'t> TreeNode<'t> {
+    pub(crate) fn depth(&self) -> usize {
+        self.depth
+    }
+
+    /// The value of its property `name` ([`property_of`]).
+    pub(crate) fn property(&self, name: &str) -> Result<Option<&'t [u8]>, DeviceTreeError> {
+        property_of(self.node, name)
+    }
+
+    /// Its property `name`'s first cell, or `absent` when it has none.
+    pub(crate) fn cell_or(&self, name: &str, absent: u32) -> Result<u32, DeviceTreeError> {
+        self.property(name)?.map_or(Ok(absent), |value| cell(value, 0))
+    }
+
+    /// Whether it is enabled: no `status`, or `"okay"` (Devicetree
+    /// Specification 2.3.4, Table 2.4).
+    pub(crate) fn is_enabled(&self) -> Result<bool, DeviceTreeError> {
+        Ok(match self.property("status")? {
+            None => true,
+            Some(status) => status == b"okay\0",
+        })
+    }
+}
+
+/// Cell `i` of a property's value, big-endian (Devicetree Specification
+/// 2.2.4).
+pub(crate) fn cell(value: &[u8], i: usize) -> Result<u32, DeviceTreeError> {
+    be32(value, i * 4)
+}
+
+/// The node of `tree`, at any depth, whose `phandle`, or `linux,phandle`
+/// (which older trees carry alone), is `phandle` (Devicetree Specification
+/// 2.3.3), if one is.
+pub(crate) fn node_with_phandle(
+    tree: &[u8],
+    phandle: u32,
+) -> Result<Option<TreeNode<'_>>, DeviceTreeError> {
+    let mut found = None;
+    each_node(tree, |node| {
+        if found.is_none() {
+            for name in ["phandle", "linux,phandle"] {
+                if node.property(name)?.map(|p| cell(p, 0)).transpose()? == Some(phandle) {
+                    found = Some(node);
+                }
+            }
+        }
+        Ok::<(), DeviceTreeError>(())
+    })?;
+    Ok(found)
+}
+
+/// Hand each node of `tree` to `each`, the root first and each node before
+/// its children, in the tree's order, stopping at the first error `each`
+/// returns.
+///
+/// # Errors
+///
+/// [`DeviceTreeError`] when `tree` is not a well-formed device tree, or
+/// what `each` returns.
+pub(crate) fn each_node<'t, E, F>(tree: &'t [u8], mut each: F) -> Result<(), E>
+where
+    E: From<DeviceTreeError>,
+    F: FnMut(TreeNode<'t>) -> Result<(), E>,
+{
+    let Blocks { structure, strings } = blocks(tree)?;
+    // Nodes open around the token at `at`.
+    let mut depth = 0usize;
+    let mut at = skip_nops(structure, 0)?;
+    if be32(structure, at)? != FDT_BEGIN_NODE {
+        return Err(DeviceTreeError::Malformed.into());
+    }
+    loop {
+        match be32(structure, at)? {
+            FDT_BEGIN_NODE => {
+                let body = at + 4 + align4(name_at(structure, at + 4)?.len() + 1);
+                let node = SourceNode {
+                    structure,
+                    strings,
+                    body,
+                };
+                each(TreeNode { depth, node })?;
+                depth += 1;
+                at = body;
+            }
+            FDT_END_NODE => {
+                depth = depth.checked_sub(1).ok_or(DeviceTreeError::Malformed)?;
+                if depth == 0 {
+                    return Ok(());
+                }
+                at += 4;
+            }
+            FDT_PROP => at += 12 + align4(be32(structure, at + 4)? as usize),
+            FDT_NOP => at += 4,
+            _ => return Err(DeviceTreeError::Malformed.into()),
+        }
+    }
+}
+
 /// The value of `property` of the node at `path` in `tree`, if both exist —
 /// for a host that wants to check what a machine was given
 /// ([`VirtMachine::device_tree`](crate::machine::VirtMachine::device_tree)).
@@ -874,12 +997,7 @@ pub fn property<'t>(
     path: &str,
     property: &str,
 ) -> Result<Option<&'t [u8]>, DeviceTreeError> {
-    if be32(tree, 0).ok() != Some(FDT_MAGIC) {
-        return Err(DeviceTreeError::NotADeviceTree);
-    }
-    let off_struct = be32(tree, 8)? as usize;
-    let off_strings = be32(tree, 12)? as usize;
-    let strings = tree.get(off_strings..).ok_or(DeviceTreeError::Malformed)?;
+    let Blocks { structure, strings } = blocks(tree)?;
     let want = if path.is_empty() {
         0
     } else {
@@ -890,11 +1008,11 @@ pub fn property<'t>(
     // are always the outermost ones below the root.
     let mut depth = 0usize;
     let mut matched = 0usize;
-    let mut at = off_struct;
+    let mut at = 0;
     loop {
-        match be32(tree, at)? {
+        match be32(structure, at)? {
             FDT_BEGIN_NODE => {
-                let name = name_at(tree, at + 4)?;
+                let name = name_at(structure, at + 4)?;
                 depth += 1;
                 if depth >= 2
                     && matched == depth - 2
@@ -917,11 +1035,12 @@ pub fn property<'t>(
                 at += 4;
             }
             FDT_PROP => {
-                let len = be32(tree, at + 4)? as usize;
-                let name = name_at(strings, be32(tree, at + 8)? as usize)?;
+                let len = be32(structure, at + 4)? as usize;
+                let name = name_at(strings, be32(structure, at + 8)? as usize)?;
                 if matched == want && depth == want + 1 && name == property.as_bytes() {
                     return Ok(Some(
-                        tree.get(at + 12..at + 12 + len)
+                        structure
+                            .get(at + 12..at + 12 + len)
                             .ok_or(DeviceTreeError::Malformed)?,
                     ));
                 }

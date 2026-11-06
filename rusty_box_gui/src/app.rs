@@ -650,6 +650,84 @@ fn spectre_report_label(report: rusty_box_aarch64::SpectreReport) -> &'static st
     }
 }
 
+/// A Processor page row editing `spi`, by its number among the SPIs, within
+/// the ones a GICv2 has. Returns whether it changed.
+#[cfg(not(target_arch = "wasm32"))]
+fn spi_field(ui: &mut egui::Ui, label: &str, spi: &mut rusty_box_aarch64::Spi, editable: bool) -> bool {
+    let mut number = spi.number();
+    let edited = field_row(ui, label, |ui| {
+        draw_u32_field(
+            ui,
+            &mut number,
+            rusty_box_aarch64::Spi::FIRST.number(),
+            rusty_box_aarch64::Spi::LAST.number(),
+            "",
+            editable,
+            1,
+            None,
+        )
+    });
+    // The field keeps to the SPIs a GICv2 has, so the number it gives is
+    // always one.
+    match rusty_box_aarch64::Spi::new(number) {
+        Some(new) if edited && new != *spi => {
+            *spi = new;
+            true
+        }
+        Some(_) | None => false,
+    }
+}
+
+/// The Processor page rows for how far the GICv2m frame's SPIs, from
+/// `first`, run: to the last of the GIC's `spis`, or a count `MSI_TYPER`
+/// can report, which starts at the count running to the last gives.
+/// Returns whether it changed.
+#[cfg(not(target_arch = "wasm32"))]
+fn msi_count_field(
+    ui: &mut egui::Ui,
+    extent: &mut rusty_box_aarch64::MsiExtent,
+    first: rusty_box_aarch64::Spi,
+    spis: rusty_box_aarch64::SpiCount,
+    editable: bool,
+) -> bool {
+    use rusty_box_aarch64::{MsiCount, MsiExtent};
+    let mut to_the_last = matches!(extent, MsiExtent::ToTheLast);
+    let mut changed = field_row(ui, "MSI frame SPIs", |ui| {
+        ui.add_enabled(editable, egui::Checkbox::new(&mut to_the_last, "To the GIC's last"))
+            .changed()
+    });
+    let mut count = match *extent {
+        MsiExtent::ToTheLast => spis
+            .get()
+            .saturating_sub(first.number())
+            .clamp(MsiCount::MIN.get(), MsiCount::MAX.get()),
+        MsiExtent::Count(count) => count.get(),
+    };
+    if !to_the_last {
+        changed |= field_row(ui, "MSI frame SPI count", |ui| {
+            draw_u32_field(
+                ui,
+                &mut count,
+                MsiCount::MIN.get(),
+                MsiCount::MAX.get(),
+                "",
+                editable,
+                1,
+                None,
+            )
+        });
+    }
+    let edited = match (to_the_last, MsiCount::new(count)) {
+        (true, _) => MsiExtent::ToTheLast,
+        (false, Some(count)) => MsiExtent::Count(count),
+        // The field keeps to the counts MSI_TYPER holds.
+        (false, None) => *extent,
+    };
+    let differs = edited != *extent;
+    *extent = edited;
+    changed && differs
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeVmSettings {
@@ -717,6 +795,9 @@ struct VirtSettings {
     counter_hz: u64,
     gic_spis: rusty_box_aarch64::SpiCount,
     gic_priority_bits: rusty_box_aarch64::PriorityBits,
+    /// The SPIs the devices drive, which `to_config` checks against the
+    /// GIC's.
+    interrupts: rusty_box_aarch64::InterruptMap,
     boot: VirtBootChoice,
     firmware_path: String,
     vars_path: String,
@@ -776,6 +857,7 @@ impl VirtSettings {
             counter_hz: config.counter.hz().get(),
             gic_spis: config.gic.spis,
             gic_priority_bits: config.gic.priority_bits,
+            interrupts: config.interrupts,
             boot: VirtBootChoice::Nothing,
             firmware_path: String::new(),
             vars_path: String::new(),
@@ -874,6 +956,8 @@ impl VirtSettings {
                 .and_then(|rate| crate::config::virt_counter_rate(self.cpu, rate))
                 .map_err(|refused| refused.to_string())?
         };
+        let interrupts = crate::config::virt_interrupt_map(self.interrupts, self.gic_spis)
+            .map_err(|refused| refused.to_string())?;
         Ok(crate::config::ArmVirtConfig {
             memory_mib: self.memory_mib,
             ips: self.ips.max(1),
@@ -884,6 +968,7 @@ impl VirtSettings {
                 spis: self.gic_spis,
                 priority_bits: self.gic_priority_bits,
             },
+            interrupts,
             boot,
             display,
             keyboard: self.keyboard,
@@ -3600,15 +3685,18 @@ impl NativeShellApp {
                         });
                     }
                     // The GIC's shape: its SPIs, in the GIC-400's steps of 32,
-                    // and its priority bits.
+                    // those the draft's interrupt map fits, and its priority
+                    // bits.
                     field_row(ui, "GIC SPIs", |ui| {
+                        let map = virt.interrupts;
                         egui::ComboBox::from_id_salt("virt GIC SPIs")
                             .selected_text(virt.gic_spis.get().to_string())
                             .show_ui(ui, |ui| {
                                 let counts = (rusty_box_aarch64::SpiCount::MIN.get()
                                     ..=rusty_box_aarch64::SpiCount::MAX.get())
                                     .step_by(32)
-                                    .filter_map(rusty_box_aarch64::SpiCount::new);
+                                    .filter_map(rusty_box_aarch64::SpiCount::new)
+                                    .filter(|&spis| map.check(spis).is_ok());
                                 for spis in counts {
                                     changed |= ui
                                         .selectable_value(&mut virt.gic_spis, spis, spis.get().to_string())
@@ -3627,6 +3715,17 @@ impl NativeShellApp {
                                 }
                             });
                     });
+                    // Which SPIs the devices drive, numbered from 0 (INTID
+                    // 32), and the GICv2m frame's; the draft is checked
+                    // against the GIC's SPIs when it is applied.
+                    let map = &mut virt.interrupts;
+                    changed |= spi_field(ui, "UART SPI", &mut map.uart, editable);
+                    changed |= spi_field(ui, "RTC SPI", &mut map.rtc, editable);
+                    changed |= spi_field(ui, "GPIO SPI", &mut map.gpio, editable);
+                    changed |= spi_field(ui, "Virtio first SPI (32)", &mut map.virtio, editable);
+                    changed |= spi_field(ui, "PCIe INTA-INTD first SPI (4)", &mut map.pcie_intx, editable);
+                    changed |= spi_field(ui, "MSI frame first SPI", &mut map.msi.first, editable);
+                    changed |= msi_count_field(ui, &mut map.msi.count, map.msi.first, virt.gic_spis, editable);
                     changed |= field_row(ui, "IPS target", |ui| {
                         draw_u32_field(
                             ui,
@@ -8009,6 +8108,16 @@ mod tests {
                     spis: rusty_box_aarch64::SpiCount::MIN,
                     priority_bits: rusty_box_aarch64::PriorityBits::Eight,
                 },
+                interrupts: rusty_box_aarch64::InterruptMap {
+                    uart: rusty_box_aarch64::Spi::new(63).expect("an SPI"),
+                    msi: rusty_box_aarch64::MsiSpis {
+                        first: rusty_box_aarch64::Spi::new(39).expect("an SPI"),
+                        count: rusty_box_aarch64::MsiExtent::Count(
+                            rusty_box_aarch64::MsiCount::new(24).expect("a count"),
+                        ),
+                    },
+                    ..rusty_box_aarch64::InterruptMap::DEFAULT
+                },
                 boot: crate::config::ArmBoot::Linux {
                     kernel: std::path::PathBuf::from("Image"),
                     initrd: Some(std::path::PathBuf::from("initramfs.cpio.gz")),
@@ -9405,6 +9514,24 @@ mod tests {
         settings.machine = crate::config::MachineKind::ArmVirt;
         settings.apply_to_config(&mut applied).expect("applies as the board again");
         assert_eq!(applied, original);
+    }
+
+    /// The Processor page's interrupt rows are checked against the GIC's
+    /// SPIs when the draft is applied: a UART past the GIC's last SPI, or
+    /// on one of the virtio transports', is refused naming why, and the VM
+    /// keeps the board it had.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_interrupt_map_the_gic_cannot_hold_is_refused() {
+        let original = test_virt_config();
+        for (uart, why) in [(100, "past the last"), (10, "would both drive")] {
+            let mut settings = NativeVmSettings::from_config(&original);
+            settings.virt.interrupts.uart = rusty_box_aarch64::Spi::new(uart).expect("an SPI");
+            let mut applied = original.clone();
+            let refused = settings.apply_to_config(&mut applied).expect_err("does not fit");
+            assert!(refused.contains(why), "SPI {uart}: {refused}");
+            assert_eq!(applied, original, "SPI {uart}");
+        }
     }
 
     /// A PC switched to an Arm board is set up as a computer is: it boots

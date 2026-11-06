@@ -32,7 +32,7 @@
 
 use rusty_box_aarch64::board::{RAM_BASE, UART_CLOCK};
 use rusty_box_aarch64::{
-    MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason, VirtConfig,
+    InterruptMap, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason, VirtConfig,
 };
 
 const PROGRAM: &[(usize, u32)] = &[
@@ -240,8 +240,8 @@ fn a_snapshot_restores_the_same_future() {
     );
 
     // And so is firmware that answers the speculation workarounds otherwise,
-    // a counter of another rate and a GIC of another shape, which the guest
-    // may have read and acted on.
+    // a counter of another rate, a GIC of another shape and another
+    // interrupt map, which the guest may have read and acted on.
     let spectre = rusty_box_aarch64::SpectreReport::ALL
         .into_iter()
         .filter(|&report| report != VirtConfig::DEFAULT.spectre)
@@ -255,7 +255,7 @@ fn a_snapshot_restores_the_same_future() {
     };
     let spis = VirtConfig {
         gic: rusty_box_aarch64::GicShape {
-            spis: rusty_box_aarch64::SpiCount::MIN,
+            spis: rusty_box_aarch64::SpiCount::new(96).expect("a count the board's map fits"),
             ..rusty_box_aarch64::GicShape::DEFAULT
         },
         ..VirtConfig::DEFAULT
@@ -267,7 +267,18 @@ fn a_snapshot_restores_the_same_future() {
         },
         ..VirtConfig::DEFAULT
     };
-    for config in spectre.chain([counter, spis, priority_bits]) {
+    let interrupts = VirtConfig {
+        interrupts: InterruptMap {
+            uart: rusty_box_aarch64::Spi::new(39).expect("an SPI"),
+            msi: rusty_box_aarch64::MsiSpis {
+                first: rusty_box_aarch64::Spi::new(40).expect("an SPI"),
+                count: rusty_box_aarch64::MsiExtent::ToTheLast,
+            },
+            ..InterruptMap::DEFAULT
+        },
+        ..VirtConfig::DEFAULT
+    };
+    for config in spectre.chain([counter, spis, priority_bits, interrupts]) {
         let mut other_ram = vec![0u8; RAM_LEN];
         let mut other = MachineBuilder::new(config)
             .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
@@ -453,7 +464,7 @@ fn fiqen_signals_group_0_as_fiq_and_group_1_as_irq() {
     );
 }
 
-/// The guest sets up the GIC for the UART's SPI (INTID 33) and the PL011
+/// The guest sets up the GIC for the UART's SPI (INTID 32) and the PL011
 /// as Linux's driver does — 115200 baud, FIFOs on, the receive interrupt at
 /// half full and the receive timeout interrupt unmasked — then waits in
 /// `WFI`. Its IRQ handler acknowledges through `GICC_IAR`, records
@@ -465,8 +476,8 @@ fn fiqen_signals_group_0_as_fiq_and_group_1_as_irq() {
 ///         ldr x1, =0x08000000      ; ldr x3, =0x08010000
 ///         ldr x0, =0x09000000
 ///         mov w2, #1               ; str w2, [x1]           // GICD_CTLR: EnableGrp0
-///         strb w2, [x1, #0x821]                             // GICD_ITARGETSR8, byte 1: INTID 33 to CPU 0
-///         mov w2, #2               ; str w2, [x1, #0x104]   // GICD_ISENABLER1: INTID 33
+///         strb w2, [x1, #0x820]                             // GICD_ITARGETSR8, byte 0: INTID 32 to CPU 0
+///         mov w2, #1               ; str w2, [x1, #0x104]   // GICD_ISENABLER1: INTID 32
 ///         mov w2, #1               ; str w2, [x3]           // GICC_CTLR: EnableGrp0
 ///         mov w2, #0xff            ; str w2, [x3, #4]       // GICC_PMR
 ///         mov w2, #13              ; str w2, [x0, #0x24]    // UARTIBRD
@@ -498,8 +509,8 @@ const UART_INPUT: &[(usize, u32)] = &[
     (0x10, 0x5800_0440),
     (0x14, 0x5280_0022),
     (0x18, 0xB900_0022),
-    (0x1C, 0x3920_8422),
-    (0x20, 0x5280_0042),
+    (0x1C, 0x3920_8022),
+    (0x20, 0x5280_0022),
     (0x24, 0xB901_0422),
     (0x28, 0x5280_0022),
     (0x2C, 0xB900_0062),
@@ -557,8 +568,9 @@ const UART_BUFFER: u64 = RAM_BASE + 0x2000;
 /// raise the receive interrupt at half full, so only the receive timeout
 /// tells the guest they are there.
 const TYPED: &[u8] = b"root\r";
-/// The UART's SPI: QEMU `virt`'s `VIRT_UART` line 1, INTID 32 + 1.
-const INTID_UART0: u64 = 33;
+/// The UART's SPI in the board's own interrupt map, SPI 0, INTID 32.
+const INTID_UART0: u64 = InterruptMap::DEFAULT.uart.intid() as u64;
+const _: () = assert!(INTID_UART0 == 32);
 /// `UARTMIS.RTMIS` (DDI 0183F Table 3-17).
 const RTMIS: u64 = 1 << 6;
 /// 32 bit periods (DDI 0183F §3.4.4) at the divisor the guest programs,
@@ -659,8 +671,8 @@ fn type_at_a_waiting_guest(slice: u64) -> TypedInput {
 /// The path a Linux shell's input takes when a line is shorter than the
 /// receive interrupt's level: the PL011's receive timeout (DDI 0183F
 /// §3.4.4) expires 32 bit periods after the last character, its
-/// `UARTINTR` drives the GIC's SPI 33, the GIC signals IRQ, and the
-/// processor leaves `WFI` and takes it. The guest acknowledges INTID 33,
+/// `UARTINTR` drives the GIC's INTID 32, the GIC signals IRQ, and the
+/// processor leaves `WFI` and takes it. The guest acknowledges INTID 32,
 /// sees `RTMIS` alone in `UARTMIS`, and reads the five characters, after
 /// which `RTRIS` has gone with them — and the interrupt is taken at the
 /// timeout's deadline, at the same tick however the run is sliced.

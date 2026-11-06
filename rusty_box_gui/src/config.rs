@@ -104,7 +104,8 @@ impl std::fmt::Display for MachineKind {
 /// `"mitigated"` or `"unreported"`). `counter_hz` is its system counter's
 /// rate (1 GHz by default, the one rate an Armv9.2 processor takes);
 /// `gic_spis` and `gic_priority_bits` its GIC's SPIs (480 by default) and
-/// priority bits (5).
+/// priority bits (5); `interrupts` which SPIs its devices drive
+/// ([`VirtInterruptsToml`]).
 /// It boots UEFI firmware from flash (`firmware`, or the EDK2 built into
 /// the front end with `builtin_firmware = true`, either with
 /// `firmware_vars` for its variable store) or a Linux kernel directly
@@ -136,6 +137,7 @@ pub struct VirtToml {
     pub gic_spis: Option<NumberToml<rusty_box_aarch64::SpiCount>>,
     pub gic_priority_bits: Option<NumberToml<rusty_box_aarch64::PriorityBits>>,
     pub display: Option<VirtDisplayToml>,
+    pub interrupts: Option<VirtInterruptsToml>,
 }
 
 /// A board choice a `[virt]` key holds as a number, which the choice's
@@ -199,8 +201,110 @@ impl NumberedChoice for rusty_box_aarch64::PriorityBits {
     }
 }
 
+impl NumberedChoice for rusty_box_aarch64::Spi {
+    fn from_number(spi: u64) -> Option<Self> {
+        u32::try_from(spi).ok().and_then(Self::new)
+    }
+    fn number(self) -> u64 {
+        u64::from(self.number())
+    }
+    fn numbers() -> String {
+        format!(
+            "an SPI from {} to {}, INTIDs {} to {} (IHI 0048B §2.2.1)",
+            Self::FIRST.number(),
+            Self::LAST.number(),
+            Self::FIRST.intid(),
+            Self::LAST.intid()
+        )
+    }
+}
+
+impl NumberedChoice for rusty_box_aarch64::MsiCount {
+    fn from_number(count: u64) -> Option<Self> {
+        u32::try_from(count).ok().and_then(Self::new)
+    }
+    fn number(self) -> u64 {
+        u64::from(self.get())
+    }
+    fn numbers() -> String {
+        format!(
+            "{} to {} SPIs, what MSI_TYPER counts (BSA DEN0094C I.9.1)",
+            Self::MIN.get(),
+            Self::MAX.get()
+        )
+    }
+}
+
+/// The `[virt.interrupts]` table: which of the GIC's SPIs, numbered from 0
+/// (INTID 32), each of the board's interrupt sources drives. `uart`, `rtc`
+/// and `gpio` take one each, `virtio` is the first of the 32 virtio
+/// transports' and `pcie_intx` the first of the PCIe host's INTA to INTD;
+/// the GICv2m frame has `msi_count` SPIs from `msi_first`, or every SPI
+/// from it to the GIC's last without `msi_count`. A key left out keeps the
+/// board's own choice ([`rusty_box_aarch64::InterruptMap::DEFAULT`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VirtInterruptsToml {
+    pub uart: Option<NumberToml<rusty_box_aarch64::Spi>>,
+    pub rtc: Option<NumberToml<rusty_box_aarch64::Spi>>,
+    pub gpio: Option<NumberToml<rusty_box_aarch64::Spi>>,
+    pub virtio: Option<NumberToml<rusty_box_aarch64::Spi>>,
+    pub pcie_intx: Option<NumberToml<rusty_box_aarch64::Spi>>,
+    pub msi_first: Option<NumberToml<rusty_box_aarch64::Spi>>,
+    pub msi_count: Option<NumberToml<rusty_box_aarch64::MsiCount>>,
+}
+
+impl VirtInterruptsToml {
+    /// The map these keys give, each one left out the board's own.
+    fn map(&self) -> rusty_box_aarch64::InterruptMap {
+        let own = rusty_box_aarch64::InterruptMap::DEFAULT;
+        let spi = |key: Option<NumberToml<rusty_box_aarch64::Spi>>, own| key.map_or(own, |spi| spi.0);
+        rusty_box_aarch64::InterruptMap {
+            uart: spi(self.uart, own.uart),
+            rtc: spi(self.rtc, own.rtc),
+            gpio: spi(self.gpio, own.gpio),
+            virtio: spi(self.virtio, own.virtio),
+            pcie_intx: spi(self.pcie_intx, own.pcie_intx),
+            msi: rusty_box_aarch64::MsiSpis {
+                first: spi(self.msi_first, own.msi.first),
+                count: self.msi_count.map_or(rusty_box_aarch64::MsiExtent::ToTheLast, |count| {
+                    rusty_box_aarch64::MsiExtent::Count(count.0)
+                }),
+            },
+        }
+    }
+
+    /// The keys that give `map`.
+    fn of(map: rusty_box_aarch64::InterruptMap) -> Self {
+        Self {
+            uart: Some(NumberToml(map.uart)),
+            rtc: Some(NumberToml(map.rtc)),
+            gpio: Some(NumberToml(map.gpio)),
+            virtio: Some(NumberToml(map.virtio)),
+            pcie_intx: Some(NumberToml(map.pcie_intx)),
+            msi_first: Some(NumberToml(map.msi.first)),
+            msi_count: match map.msi.count {
+                rusty_box_aarch64::MsiExtent::ToTheLast => None,
+                rusty_box_aarch64::MsiExtent::Count(count) => Some(NumberToml(count)),
+            },
+        }
+    }
+}
+
+/// The interrupt map `map` on a GIC of `spis`, refused when it does not fit
+/// ([`rusty_box_aarch64::InterruptMap::check`]): the one check the file and
+/// the Processor page make.
+pub(crate) fn virt_interrupt_map(
+    map: rusty_box_aarch64::InterruptMap,
+    spis: rusty_box_aarch64::SpiCount,
+) -> Result<rusty_box_aarch64::InterruptMap, RunError> {
+    map.check(spis).map_err(RunError::InterruptMap)?;
+    Ok(map)
+}
+
 /// A `[virt]` key holding a [`NumberedChoice`] by its number
-/// (`virt.counter_hz`, `virt.gic_spis`, `virt.gic_priority_bits`).
+/// (`virt.counter_hz`, `virt.gic_spis`, `virt.gic_priority_bits`, and the
+/// `[virt.interrupts]` keys).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(try_from = "u64", into = "u64", bound = "T: NumberedChoice")]
 pub struct NumberToml<T>(pub T);
@@ -666,6 +770,9 @@ pub struct ArmVirtConfig {
     pub counter: rusty_box_aarch64::CounterRate,
     /// The GIC's SPIs and priority bits.
     pub gic: rusty_box_aarch64::GicShape,
+    /// The SPIs the devices drive and the GICv2m frame's, which fit the GIC
+    /// ([`virt_interrupt_map`]).
+    pub interrupts: rusty_box_aarch64::InterruptMap,
     pub boot: ArmBoot,
     /// The virtio-gpu, by the size it asks the guest for; `None` for none.
     pub display: Option<VirtioDisplaySize>,
@@ -866,6 +973,7 @@ impl ArmVirtConfig {
             spectre: rusty_box_aarch64::SpectreReport::DEFAULT,
             counter: rusty_box_aarch64::CounterRate::DEFAULT,
             gic: rusty_box_aarch64::GicShape::DEFAULT,
+            interrupts: rusty_box_aarch64::InterruptMap::DEFAULT,
             boot: ArmBoot::Unset,
             display: None,
             keyboard: false,
@@ -1085,6 +1193,7 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
             .gic_priority_bits
             .map_or(rusty_box_aarch64::PriorityBits::DEFAULT, |bits| bits.0),
     };
+    let interrupts = virt_interrupt_map(virt.interrupts.unwrap_or_default().map(), gic.spis)?;
     Ok(ArmVirtConfig {
         memory_mib,
         ips,
@@ -1094,6 +1203,7 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
             .map_or(rusty_box_aarch64::SpectreReport::DEFAULT, |report| report.0),
         counter,
         gic,
+        interrupts,
         boot,
         display,
         keyboard: virt.keyboard.unwrap_or(false),
@@ -1399,6 +1509,7 @@ impl ArmVirtConfig {
                 height: Some(size.height),
                 refresh_hz: Some(self.refresh.get()),
             }),
+            interrupts: Some(VirtInterruptsToml::of(self.interrupts)),
             ..VirtToml::default()
         };
         match &self.boot {
@@ -3211,6 +3322,23 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         let processors = rusty_box_aarch64::CpuModel::ALL.into_iter().cycle();
         let mut reports = rusty_box_aarch64::SpectreReport::ALL.into_iter().cycle();
         let mut priority_bits = rusty_box_aarch64::PriorityBits::ALL.into_iter().cycle();
+        // The board's own map, and one of every key's own on the smallest
+        // GIC, its frame of a count.
+        let spi = |n| rusty_box_aarch64::Spi::new(n).expect("an SPI");
+        let own_map = rusty_box_aarch64::InterruptMap {
+            uart: spi(63),
+            rtc: spi(0),
+            gpio: spi(1),
+            virtio: spi(2),
+            pcie_intx: spi(34),
+            msi: rusty_box_aarch64::MsiSpis {
+                first: spi(38),
+                count: rusty_box_aarch64::MsiExtent::Count(rusty_box_aarch64::MsiCount::new(25).expect("a count")),
+            },
+        };
+        let mut maps = [rusty_box_aarch64::InterruptMap::DEFAULT, own_map]
+            .into_iter()
+            .cycle();
         let disks = [
             None,
             Some(VirtDisk {
@@ -3235,9 +3363,10 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
                         rusty_box_aarch64::CounterRate::new(24_000_000).expect("a rate")
                     },
                     gic: rusty_box_aarch64::GicShape {
-                        spis: rusty_box_aarch64::SpiCount::MIN,
+                        spis: rusty_box_aarch64::SpiCount::new(96).expect("a count both maps fit"),
                         priority_bits: priority_bits.next().unwrap_or_default(),
                     },
+                    interrupts: maps.next().unwrap_or_default(),
                     boot,
                     display: Some(VirtioDisplaySize {
                         width: 1024,
@@ -3296,7 +3425,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         for (keys, named) in [
             ("counter_hz = 1000", "10000000"),
             ("gic_spis = 100", "multiple of 32"),
-            ("gic_spis = 96", "multiple of 32"),
+            ("gic_spis = 32", "multiple of 32"),
             ("gic_priority_bits = 3", "4 to 8"),
         ] {
             let refused = toml::from_str::<FileConfig>(&board(keys))
@@ -3310,6 +3439,52 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             resolve_config(file, &args(["rusty_box_gui"])),
             Err(RunError::FixedCounterRate(_))
         ));
+    }
+
+    /// `[virt.interrupts]` moves the sources it names, each other one
+    /// keeping the board's own SPI, and its frame runs to the GIC's last SPI
+    /// without `msi_count`. A number no SPI or count has is refused when the
+    /// file is read, and a map the GIC cannot hold when it is resolved.
+    #[test]
+    fn virt_interrupts_name_the_spis_the_devices_drive() {
+        let board = |keys: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\ngic_spis = 256\n[virt.interrupts]\n{keys}\n");
+        let file: FileConfig = toml::from_str(&board("uart = 200\nmsi_first = 39\nmsi_count = 100")).unwrap();
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+        let virt = resolved.arm_virt().expect("an Arm board");
+        let own = rusty_box_aarch64::InterruptMap::DEFAULT;
+        assert_eq!(virt.interrupts.uart.number(), 200);
+        assert_eq!(virt.interrupts.rtc, own.rtc);
+        assert_eq!(virt.interrupts.msi.first.number(), 39);
+        assert_eq!(
+            virt.interrupts.msi.count,
+            rusty_box_aarch64::MsiExtent::Count(rusty_box_aarch64::MsiCount::new(100).expect("a count"))
+        );
+        let file: FileConfig = toml::from_str(&board("")).unwrap();
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+        assert_eq!(resolved.arm_virt().expect("an Arm board").interrupts, own);
+
+        for (keys, named) in [
+            ("uart = 988", "an SPI from 0 to 987"),
+            ("msi_count = 0", "1 to 1023"),
+            ("msi_count = 1024", "1 to 1023"),
+            ("irq = 3", "unknown field"),
+        ] {
+            let refused = toml::from_str::<FileConfig>(&board(keys))
+                .expect_err("not a number the key takes")
+                .to_string();
+            assert!(refused.contains(named), "{keys}: {refused}");
+        }
+
+        for keys in ["uart = 300", "rtc = 10", "msi_first = 200\nmsi_count = 57"] {
+            let file: FileConfig = toml::from_str(&board(keys)).unwrap();
+            assert!(
+                matches!(
+                    resolve_config(file, &args(["rusty_box_gui"])),
+                    Err(RunError::InterruptMap(_))
+                ),
+                "{keys}"
+            );
+        }
     }
 
     /// `virt.spectre` is read by its answers' names; one no answer has is

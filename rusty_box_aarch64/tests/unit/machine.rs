@@ -322,6 +322,9 @@ fn a_host_tree_gets_the_boards_memory_and_psci_nodes() {
             choice: BootChoice::Bare,
             layout: None,
             levels,
+            wiring: crate::interrupt_map::InterruptMap::DEFAULT
+                .wire(crate::SpiCount::DEFAULT)
+                .expect("the default fits"),
         };
         let mut from_host = std::boxed::Box::new(DeviceTree::EMPTY);
         describe(
@@ -379,6 +382,9 @@ fn the_device_tree_names_the_board_by_its_identity() {
         choice: BootChoice::Bare,
         layout: None,
         levels: TreeLevels::of::<NoEl2>(),
+        wiring: crate::interrupt_map::InterruptMap::DEFAULT
+            .wire(crate::SpiCount::DEFAULT)
+            .expect("the default fits"),
     };
     let host = BoardIdentity::new(IdentityNames {
         model: "Acme Board",
@@ -431,3 +437,162 @@ fn the_device_tree_names_the_board_by_its_identity() {
     }
 }
 
+
+/// The interrupt map QEMU's `virt` wires (`a15irqmap`), which its tree
+/// names.
+fn qemu_wiring() -> crate::interrupt_map::Wiring {
+    use crate::interrupt_map::{InterruptMap, MsiCount, MsiExtent, MsiSpis, Spi};
+    let spi = |n| Spi::new(n).expect("an SPI");
+    InterruptMap {
+        uart: spi(1),
+        rtc: spi(2),
+        gpio: spi(7),
+        virtio: spi(16),
+        pcie_intx: spi(3),
+        msi: MsiSpis {
+            first: spi(48),
+            count: MsiExtent::Count(MsiCount::new(64).expect("a count")),
+        },
+    }
+    .wire(crate::SpiCount::DEFAULT)
+    .expect("fits")
+}
+
+/// QEMU's tree edited by `edits`.
+fn edited_host_tree(edits: &[crate::boot::fdt::Edit<'_>]) -> std::vec::Vec<u8> {
+    let mut tree = vec![0u8; 64 * 1024];
+    let len = crate::boot::fdt::rebuild(HOST_TREE, &[], edits, &mut tree).expect("rebuild");
+    tree.truncate(len);
+    tree
+}
+
+/// A device's interrupt is the first its `interrupts-extended` names, which
+/// Linux reads before `interrupts`: the UART's naming the GIC's SPI 1 by
+/// it, whatever its `interrupts` says, fits QEMU's map and not the board's
+/// own; one naming another controller names no SPI of the GIC's. Its
+/// parent is found wherever it is, by `phandle` or `linux,phandle`, and a
+/// phandle no node has is a malformed tree.
+#[test]
+fn a_devices_interrupts_extended_is_the_interrupt_it_names() {
+    use super::{check_host_interrupts, BuildError, HostTreeInterrupt};
+    use crate::boot::fdt::{DeviceTreeError, Edit, NodePath, Value};
+    use crate::interrupt_map::{InterruptMap, InterruptSource, Spi};
+    let qemu = qemu_wiring();
+    let own = InterruptMap::DEFAULT
+        .wire(crate::SpiCount::DEFAULT)
+        .expect("fits");
+    let uart = NodePath::of("pl011@9000000");
+    let intc = NodePath::of("intc@8000000");
+    let spi = |n| Spi::new(n).expect("an SPI");
+    let be = |cells: &[u32]| -> std::vec::Vec<u8> { cells.iter().flat_map(|c| c.to_be_bytes()).collect() };
+    let (gic_spi1, gic_spi9, other_spi1) = (
+        be(&[0x8002, 0, 1, 4]),
+        be(&[0, 9, 4]),
+        be(&[0x8004, 0, 1, 4]),
+    );
+    let extended = edited_host_tree(&[
+        Edit::set(uart, "interrupts", Value::Bytes(&gic_spi9)),
+        Edit::set(uart, "interrupts-extended", Value::Bytes(&gic_spi1)),
+    ]);
+    assert_eq!(check_host_interrupts(&extended, qemu), Ok(()));
+    match check_host_interrupts(&extended, own) {
+        Err(BuildError::HostTreeInterrupt(HostTreeInterrupt { source, named, wired })) => {
+            assert_eq!(
+                (source, named, wired),
+                (InterruptSource::Virtio, Some(spi(16)), spi(3)),
+                "the first device the tree names otherwise is refused"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    // The GPIO controller (phandle 0x8004 in QEMU's tree) is no GIC.
+    let via_gpio = edited_host_tree(&[Edit::set(uart, "interrupts-extended", Value::Bytes(&other_spi1))]);
+    assert_eq!(
+        check_host_interrupts(&via_gpio, qemu),
+        Err(BuildError::HostTreeInterrupt(HostTreeInterrupt {
+            source: InterruptSource::Uart,
+            named: None,
+            wired: spi(1),
+        }))
+    );
+    let (unused, gic) = (be(&[0x7777]), be(&[0x8002]));
+    let linux_phandle = edited_host_tree(&[
+        Edit::set(uart, "interrupts-extended", Value::Bytes(&gic_spi1)),
+        Edit::set(intc, "phandle", Value::Bytes(&unused)),
+        Edit::set(intc, "linux,phandle", Value::Bytes(&gic)),
+    ]);
+    assert_eq!(check_host_interrupts(&linux_phandle, qemu), Ok(()));
+    let nested = NodePath::of("soc/gic");
+    let three = be(&[3]);
+    let nested_parent = edited_host_tree(&[
+        Edit::set(uart, "interrupts-extended", Value::Bytes(&gic_spi1)),
+        Edit::set(intc, "phandle", Value::Bytes(&unused)),
+        Edit::node(nested),
+        Edit::set(nested, "phandle", Value::Bytes(&gic)),
+        Edit::set(nested, "interrupt-controller", Value::Bytes(&[])),
+        Edit::set(nested, "#interrupt-cells", Value::Bytes(&three)),
+    ]);
+    assert_eq!(check_host_interrupts(&nested_parent, qemu), Ok(()));
+    let orphaned = edited_host_tree(&[
+        Edit::set(uart, "interrupts-extended", Value::Bytes(&gic_spi1)),
+        Edit::set(intc, "phandle", Value::Bytes(&unused)),
+    ]);
+    assert_eq!(
+        check_host_interrupts(&orphaned, qemu),
+        Err(BuildError::DeviceTree(DeviceTreeError::Malformed))
+    );
+}
+
+/// A device's `interrupts` go to its `interrupt-parent`, or the root's: the
+/// UART's routed to the GPIO controller names no SPI of the GIC's,
+/// whatever its specifier says, and is refused as its
+/// `interrupts-extended` would be. A child of the root whose `reg` holds no
+/// address is none of the board's devices, and the tree keeps it.
+#[test]
+fn a_devices_interrupts_follow_its_interrupt_parent() {
+    use super::{check_host_interrupts, BuildError, HostTreeInterrupt};
+    use crate::boot::fdt::{Edit, NodePath, Value};
+    use crate::interrupt_map::{InterruptSource, Spi};
+    let qemu = qemu_wiring();
+    let uart = NodePath::of("pl011@9000000");
+    let gpio = 0x8004u32.to_be_bytes();
+    let via_gpio = edited_host_tree(&[Edit::set(uart, "interrupt-parent", Value::Bytes(&gpio))]);
+    assert_eq!(
+        check_host_interrupts(&via_gpio, qemu),
+        Err(BuildError::HostTreeInterrupt(HostTreeInterrupt {
+            source: InterruptSource::Uart,
+            named: None,
+            wired: Spi::new(1).expect("an SPI"),
+        }))
+    );
+    let odd = NodePath::of("odd");
+    let one_cell = 1u32.to_be_bytes();
+    let short_reg = edited_host_tree(&[
+        Edit::node(odd),
+        Edit::set(odd, "reg", Value::Bytes(&one_cell)),
+    ]);
+    assert_eq!(check_host_interrupts(&short_reg, qemu), Ok(()));
+}
+
+/// A disabled device node is no device a guest drives, so what it names
+/// is the tree's: QEMU's tree with its virtio transports and its PrimeCells
+/// disabled fits the board's own map, the PCIe host's lines and the GICv2m
+/// frame being no device's.
+#[test]
+fn a_disabled_device_node_is_left_to_the_tree() {
+    use super::check_host_interrupts;
+    use crate::boot::fdt::{Edit, NodePath, Value};
+    use crate::interrupt_map::InterruptMap;
+    let own = InterruptMap::DEFAULT
+        .wire(crate::SpiCount::DEFAULT)
+        .expect("fits");
+    let names: std::vec::Vec<std::string::String> = (0..32u64)
+        .map(|n| std::format!("virtio_mmio@{:x}", 0xa00_0000 + n * 0x200))
+        .chain(["pl011@9000000", "pl031@9010000", "pl061@9030000"].map(std::string::String::from))
+        .collect();
+    let edits: std::vec::Vec<Edit<'_>> = names
+        .iter()
+        .map(|name| Edit::set(NodePath::of(name), "status", Value::String("disabled")))
+        .collect();
+    assert_eq!(check_host_interrupts(&edited_host_tree(&edits), own), Ok(()));
+}

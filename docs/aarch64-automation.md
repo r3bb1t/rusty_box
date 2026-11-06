@@ -161,10 +161,29 @@ they allow, its default the board's:
   BSA's 10 MHz (`CounterRate::MIN_HZ`) to what `CNTFRQ_EL0` holds
   (`CounterRate::MAX_HZ`); the Armv9.2 model counts at 1 GHz alone, and a
   build that asks it for another fails with `BuildError::FixedCounterRate`.
-- `gic`, a `GicShape`: its `SpiCount`, a multiple of 32 from the 128 the
-  board wires (`SpiCount::MIN`) to the GIC-400's 480 (the default), and its
-  `PriorityBits`, `Four` to `Eight` (`Five`, the GIC-400's, by default),
-  from which the binary points and active priority registers follow.
+- `gic`, a `GicShape`: its `SpiCount`, a multiple of 32 from 64
+  (`SpiCount::MIN`, the fewest any interrupt map fits; the board's own
+  needs 96) to the
+  GIC-400's 480 (the default), and its `PriorityBits`, `Four` to `Eight`
+  (`Five`, the GIC-400's, by default), from which the binary points and
+  active priority registers follow.
+- `interrupts`, an `InterruptMap`: the `Spi` each device drives (the UART,
+  the RTC, the GPIO; the first of the 32 virtio transports' and of the PCIe
+  host's INTA to INTD), and the GICv2m frame's `MsiSpis`, its first SPI and
+  how far they run (`MsiExtent::ToTheLast` or a `MsiCount` of 1 to 1023),
+  which `MSI_TYPER` reports. By default the devices take SPIs from 0 in the
+  order of their registers' addresses (the UART 0, the RTC 1, the GPIO 2,
+  the transports 3 to 34, the PCIe host 35 to 38) and the frame every SPI
+  from SPI 64, INTID 96, the first after them whose interrupt ID is a
+  multiple of the 32 vectors a PCI function may send. A map whose SPIs run
+  past the GIC's, whose frame has none, or that gives one SPI to two
+  sources fails the build with `BuildError::InterruptMap`, and
+  `InterruptMap::check` tells a host so beforehand. A tree given with
+  `device_tree(..)` names the devices' interrupts itself; one that names
+  another SPI for the UART, the RTC, the GPIO or a virtio transport than
+  the map wires fails the build with `BuildError::HostTreeInterrupt`. The
+  PCIe host's INTA to INTD and the frame's SPIs no device drives, the bus
+  having none, so a tree's description of them is its own.
 - `spectre`, a `SpectreReport`: what the firmware's `SMCCC_ARCH_FEATURES`
   says of the speculation workarounds, `NotRequired` (the default, true of
   an interpreter), `Mitigated` or `Unreported`.

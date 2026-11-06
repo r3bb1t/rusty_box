@@ -1,8 +1,8 @@
 //! The `virt` board: QEMU's memory map, its devices, and the wiring of their
-//! interrupt lines into the GIC.
+//! interrupt lines into the GIC, which [`crate::interrupt_map`] decides.
 //!
-//! Provenance (R7): QEMU `hw/arm/virt.c`, `base_memmap`, `extended_memmap`
-//! and `a15irqmap`, for a machine with `highmem` on (so the PCIe ECAM sits at
+//! Provenance (R7): QEMU `hw/arm/virt.c`, `base_memmap` and
+//! `extended_memmap`, for a machine with `highmem` on (so the PCIe ECAM sits at
 //! 0x40_1000_0000, as the device tree this board is built with says). The
 //! PCIe host bridge has no devices on it here — QEMU puts its own host-bridge
 //! function at 00:00.0 — so configuration reads find nothing and the I/O and
@@ -43,6 +43,7 @@ use crate::devices::virtio_mmio::{self, Layout};
 #[cfg(feature = "alloc")]
 use crate::disk::Disk;
 use crate::identity::{BoardIdentity, VirtioVendorId};
+use crate::interrupt_map::Wiring;
 use crate::storage::GuestStorage;
 
 pub const FLASH0_BASE: u64 = 0x0000_0000;
@@ -94,14 +95,9 @@ pub const PCIE_MMIO_HIGH_SIZE: u64 = 0x80_0000_0000;
 /// the PCIe configuration window above it.
 pub const RAM_LIMIT: u64 = PCIE_ECAM_BASE - RAM_BASE;
 
-/// GIC interrupt IDs of the board's devices (SPI number + 32, QEMU
-/// `a15irqmap`) and of the timer PPIs (the device tree's `timer` node).
-pub const IRQ_UART0: u32 = 32 + 1;
-pub const IRQ_RTC: u32 = 32 + 2;
-pub const IRQ_GPIO: u32 = 32 + 7;
-/// Virtio-mmio transport `n` raises SPI `16 + n` (QEMU `a15irqmap`
-/// `VIRT_MMIO`).
-pub const IRQ_VIRTIO_BASE: u32 = 32 + 16;
+/// GIC interrupt IDs of the timer PPIs (the device tree's `timer` node);
+/// the devices' SPIs are the board's
+/// [`InterruptMap`](crate::interrupt_map::InterruptMap)'s.
 pub const PPI_VIRTUAL_TIMER: u32 = 16 + 11;
 pub const PPI_PHYSICAL_TIMER: u32 = 16 + 14;
 /// The EL2 physical timer's PPI (QEMU `ARCH_TIMER_NS_EL2_IRQ`), which the
@@ -111,11 +107,6 @@ pub const PPI_HYPERVISOR_TIMER: u32 = 16 + 10;
 /// device tree's `timer` node lists first, as its binding orders them,
 /// though a board with no EL3 never raises it.
 pub const PPI_SECURE_PHYSICAL_TIMER: u32 = 16 + 13;
-/// The PCIe host bridge's INTA to INTD, SPIs 3 to 6 (QEMU `a15irqmap`
-/// `VIRT_PCIE`), which the device tree's `interrupt-map` swizzles per
-/// device slot as the PCI-to-PCI bridge specification's routing does. No
-/// device sits on the bus to raise them.
-pub const IRQ_PCIE_INTX_BASE: u32 = 32 + 3;
 
 /// The PL011's reference clock, `UARTCLK`: the device tree's `/clock`
 /// fixed clock, 24 MHz, which its `serial@9000000` node names as `uartclk`.
@@ -216,6 +207,8 @@ pub struct VirtBoard<S> {
     pub(crate) uart: Pl011,
     pub(crate) rtc: Pl031,
     pub(crate) gpio: Pl061,
+    /// The SPIs the devices drive.
+    pub(crate) wiring: Wiring,
     /// What every virtio-mmio transport's `VendorID` reads, the board's
     /// identity's ([`BoardIdentity::virtio_vendor`]).
     pub(crate) virtio_vendor: VirtioVendorId,
@@ -255,7 +248,9 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// A board over `storage` whose RTC starts at `rtc_epoch_seconds`, with
     /// the devices `plugs` names, each naming itself as `identity` says, and
     /// a GIC of `gic_shape` with `gic` (the Virtualization Extensions for a
-    /// processor with EL2), whose frames it maps.
+    /// processor with EL2), whose frames it maps, the devices driving the
+    /// SPIs `wiring` gives them and its GICv2m frame having the rest it
+    /// gives.
     pub(crate) fn new(
         storage: S,
         rtc_epoch_seconds: u64,
@@ -263,6 +258,7 @@ impl<S: GuestStorage> VirtBoard<S> {
         identity: &BoardIdentity,
         gic: GicExtensions,
         gic_shape: GicShape,
+        wiring: Wiring,
     ) -> Self {
         let devices = plugs.devices;
         let virtio_vendor = identity.virtio_vendor();
@@ -304,10 +300,12 @@ impl<S: GuestStorage> VirtBoard<S> {
                 .identified_as(GicNames {
                     gic: identity.gic(),
                     msi_frame: identity.msi_frame_iidr(),
-                }),
+                })
+                .with_checked_msi_frame(wiring.msi()),
             uart: Pl011::new(),
             rtc: Pl031::new(rtc_epoch_seconds),
             gpio: Pl061::new(),
+            wiring,
             virtio_vendor,
             serial_input: RingBuffer::new(),
             power_button_release: None,
@@ -453,14 +451,13 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// Re-drive the devices' interrupt lines into the GIC.
     pub(crate) fn sync_device_lines(&mut self) {
         let (uart, rtc, gpio) = (self.uart.irq(), self.rtc.irq(), self.gpio.irq());
-        self.gic.set_line(IRQ_UART0, uart);
-        self.gic.set_line(IRQ_RTC, rtc);
-        self.gic.set_line(IRQ_GPIO, gpio);
+        let wiring = self.wiring;
+        self.gic.set_line(wiring.uart().intid(), uart);
+        self.gic.set_line(wiring.rtc().intid(), rtc);
+        self.gic.set_line(wiring.gpio().intid(), gpio);
         for transport in self.virtio.iter().flatten() {
-            self.gic.set_line(
-                IRQ_VIRTIO_BASE + u32::from(transport.slot()),
-                transport.irq(),
-            );
+            self.gic
+                .set_line(wiring.virtio(transport.slot()).intid(), transport.irq());
         }
     }
 

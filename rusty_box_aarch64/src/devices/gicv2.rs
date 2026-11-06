@@ -9,7 +9,8 @@
 //! 0471B: PPIs 25 to 31, level-sensitive), and its SPIs and priority bits
 //! the board's to choose ([`GicShape`]: by default the GIC-400's 480 SPIs
 //! and five bits), the minimum binary points and active priority registers
-//! following from the priority bits (IHI 0048B Table 4-47);
+//! following from the priority bits (IHI 0048B Table 4-47), and its GICv2m
+//! frame's SPIs the board's too ([`MsiFrame`], BSA DEN0094C I.5);
 //! QEMU 11.1.2 `hw/intc/arm_gic.c` for a revision-2, single-CPU GIC second,
 //! whose structure this model keeps —
 //! `gic_update_internal` and `gic_get_best_irq` (the signalled interrupt),
@@ -86,6 +87,7 @@ use super::gicv2_virt::{HwDeactivation, ReadEffect, VirtInterface, MAINTENANCE_I
 use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
 use crate::cpu::VirtualLines;
 use crate::identity::{GicIdentity, MsiFrameIidr};
+use crate::interrupt_map::{InterruptMap, MsiCount, Spi};
 
 /// SGIs, PPIs and the most SPIs a GIC has, [`SpiCount::MAX`]: the size of
 /// every per-interrupt bank, whatever the GIC's [`GicShape`] implements.
@@ -102,18 +104,21 @@ const FIRST_PPI: usize = 25;
 /// How many SPIs a GIC has: a multiple of 32 (`GICD_TYPER.ITLinesNumber`
 /// counts them in 32s, IHI 0048B §4.3.2), at most 480, the GIC-400's
 /// largest configuration ("permitted values are 0-480, in steps of 32",
-/// DDI 0471B §2.3.3), and at least [`SpiCount::MIN`], the SPIs the board
-/// wires.
+/// DDI 0471B §2.3.3), and at least [`SpiCount::MIN`], room for the board's
+/// interrupt sources; whether a particular map fits is
+/// [`InterruptMap::check`]'s to say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SpiCount(u16);
 
 impl SpiCount {
     /// The GIC-400's largest configuration.
     pub const MAX: Self = Self(480);
-    /// The fewest that hold every SPI the board wires: the GICv2m frame's,
-    /// the highest, end at INTID [`V2M_BASE_SPI`] + [`V2M_NUM_SPI`] − 1,
-    /// rounded up to the next multiple of 32.
-    pub const MIN: Self = Self(((V2M_BASE_SPI + V2M_NUM_SPI - 32).div_ceil(32) * 32) as u16);
+    /// The fewest any interrupt map fits: an SPI for each of the board's
+    /// device lines ([`InterruptMap::DEVICE_LINES`]) and one for its GICv2m
+    /// frame, rounded up to the next multiple of 32. The board's own map
+    /// ([`InterruptMap::DEFAULT`]) starts its frame at SPI 64, so it needs
+    /// 96.
+    pub const MIN: Self = Self(((InterruptMap::DEVICE_LINES + 1).div_ceil(32) * 32) as u16);
     /// The count a board's GIC has unless its host chooses another: the
     /// GIC-400's largest.
     pub const DEFAULT: Self = Self::MAX;
@@ -421,9 +426,52 @@ const PERIPHERAL_ID: [u8; 12] = [
     0x04, 0x00, 0x00, 0x00, 0x90, 0xB4, 0x2B, 0x00, 0x0D, 0xF0, 0x05, 0xB1,
 ];
 
-/// The GICv2m frame QEMU's `virt` places at 0x08020000: 64 SPIs from 80.
-pub const V2M_BASE_SPI: u32 = 80;
-pub const V2M_NUM_SPI: u32 = 64;
+/// The SPIs a GICv2m frame is given (BSA DEN0094C I.5): `count`
+/// contiguous ones from `first`, which `MSI_TYPER` reports (I.9.1) and an
+/// `MSI_SETSPI_NS` write must name (I.9.2). The board's [`InterruptMap`]
+/// decides them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MsiFrame {
+    pub first: Spi,
+    pub count: MsiCount,
+}
+
+impl MsiFrame {
+    /// `MSI_TYPER`: the first SPI's interrupt ID in bits [25:16], the count
+    /// in [9:0], both of which fit ([`Spi::LAST`], [`MsiCount::MAX`]).
+    const fn typer(self) -> u32 {
+        (self.first.intid() << 16) | self.count.get()
+    }
+
+    /// Whether interrupt `intid` is one of the frame's.
+    const fn holds(self, intid: u32) -> bool {
+        let first = self.first.intid();
+        intid >= first && intid - first < self.count.get()
+    }
+}
+
+/// A GICv2m frame whose SPIs are not all a GIC's
+/// ([`GicV2::with_msi_frame`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MsiFrameOutsideGic {
+    pub frame: MsiFrame,
+    pub spis: SpiCount,
+}
+
+impl core::fmt::Display for MsiFrameOutsideGic {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "a GICv2m frame of {} SPIs from {} runs past the last of a GIC of {} SPIs",
+            self.frame.count.get(),
+            self.frame.first,
+            self.spis.get()
+        )
+    }
+}
+
+impl core::error::Error for MsiFrameOutsideGic {}
+
 const V2M_MSI_TYPER: u64 = 0x008;
 const V2M_MSI_SETSPI_NS: u64 = 0x040;
 const V2M_MSI_IIDR: u64 = 0xFCC;
@@ -503,6 +551,11 @@ pub struct GicV2 {
     /// The SPIs and priority bits it has, the board's choice, kept across
     /// a reset and a restore.
     shape: GicShape,
+    /// The GICv2m frame's SPIs, the board's choice, kept across a reset, a
+    /// change of shape and a restore; none until a board gives it some
+    /// ([`GicV2::with_msi_frame`]), so `MSI_TYPER` reads zero and every
+    /// `MSI_SETSPI_NS` write is ignored.
+    msi: Option<MsiFrame>,
 }
 
 /// What the GIC's identification registers read: `GICD_IIDR`, `GICC_IIDR`
@@ -530,7 +583,7 @@ impl Default for GicV2 {
 impl GicV2 {
     /// A GIC out of reset with `extensions`, of the GIC-400's shape.
     pub fn with_extensions(extensions: GicExtensions) -> Self {
-        Self::out_of_reset(extensions, GicShape::DEFAULT, GicNames::NONE)
+        Self::out_of_reset(extensions, GicShape::DEFAULT, GicNames::NONE, None)
     }
 
     /// This GIC with its identification registers reading as `names` says.
@@ -538,12 +591,42 @@ impl GicV2 {
         Self { names, ..self }
     }
 
+    /// This GIC with `msi` its GICv2m frame's SPIs, refused when they are
+    /// not all the GIC's.
+    pub fn with_msi_frame(self, msi: MsiFrame) -> Result<Self, MsiFrameOutsideGic> {
+        let last = msi.first.intid() + msi.count.get() - 1;
+        if (last as usize) < self.shape.spis.irq_end() {
+            Ok(self.with_checked_msi_frame(msi))
+        } else {
+            Err(MsiFrameOutsideGic {
+                frame: msi,
+                spis: self.shape.spis,
+            })
+        }
+    }
+
+    /// This GIC with `msi` its GICv2m frame's SPIs, which the caller has
+    /// found all the GIC's: the board, whose interrupt map was checked
+    /// against the GIC's SPIs (`InterruptMap::wire`).
+    pub(crate) fn with_checked_msi_frame(self, msi: MsiFrame) -> Self {
+        Self {
+            msi: Some(msi),
+            ..self
+        }
+    }
+
+    /// The GICv2m frame's SPIs, if it has any.
+    pub fn msi_frame(&self) -> Option<MsiFrame> {
+        self.msi
+    }
+
     /// A GIC out of reset with this one's extensions and identity and the
     /// SPIs and priority bits `shape` gives it. It is a new GIC, not this
     /// one changed: nothing of this one's state is kept, so no state of
-    /// another shape can outlive it.
+    /// another shape can outlive it — its GICv2m frame, chosen for the
+    /// shape it had, among it ([`GicV2::with_msi_frame`] gives it one).
     pub fn shaped(self, shape: GicShape) -> Self {
-        Self::out_of_reset(self.extensions(), shape, self.names)
+        Self::out_of_reset(self.extensions(), shape, self.names, None)
     }
 
     /// The SPIs and priority bits this GIC has.
@@ -551,10 +634,10 @@ impl GicV2 {
         self.shape
     }
 
-    /// A reset: the GIC out of reset with the extensions, the shape and the
-    /// identity it has.
+    /// A reset: the GIC out of reset with the extensions, the shape, the
+    /// identity and the GICv2m frame it has.
     pub fn reset(&mut self) {
-        *self = Self::out_of_reset(self.extensions(), self.shape, self.names);
+        *self = Self::out_of_reset(self.extensions(), self.shape, self.names, self.msi);
     }
 
     /// The extensions this GIC implements.
@@ -577,10 +660,15 @@ impl GicV2 {
     /// The one constructor of a GIC out of reset, QEMU
     /// `arm_gic_common_reset_hold`: SGIs enabled and edge-triggered, every
     /// other interrupt disabled, level-sensitive, Group 0 and at priority 0,
-    /// with `extensions`, of `shape`, named `names`, its binary points at
-    /// their reset values, the minimum the priority bits allow (IHI 0048B
-    /// §4.4.3).
-    fn out_of_reset(extensions: GicExtensions, shape: GicShape, names: GicNames) -> Self {
+    /// with `extensions`, of `shape`, named `names`, its GICv2m frame's
+    /// SPIs `msi`, its binary points at their reset values, the minimum the
+    /// priority bits allow (IHI 0048B §4.4.3).
+    fn out_of_reset(
+        extensions: GicExtensions,
+        shape: GicShape,
+        names: GicNames,
+        msi: Option<MsiFrame>,
+    ) -> Self {
         let virt = match extensions {
             GicExtensions::Absent => None,
             GicExtensions::Virtualization => Some(VirtInterface::new()),
@@ -614,6 +702,7 @@ impl GicV2 {
             virt,
             names,
             shape,
+            msi,
         }
     }
 
@@ -746,6 +835,7 @@ impl GicV2 {
             virt,
             names: self.names,
             shape: self.shape,
+            msi: self.msi,
         };
         restored.check_restored(&sgi_sources)?;
         *self = restored;
@@ -1519,27 +1609,28 @@ impl GicV2 {
 
     // ----- GICv2m MSI frame -----
 
-    /// A read of the frame, whose `MSI_IIDR` the GIC's names give
-    /// ([`GicNames::msi_frame`]).
+    /// A read of the frame, whose `MSI_TYPER` its SPIs give and whose
+    /// `MSI_IIDR` the GIC's names give ([`GicNames::msi_frame`]).
     pub fn v2m_read(&mut self, offset: RegOffset, width: AccessWidth) -> u64 {
         let off = offset.get();
-        let iidr = self.names.msi_frame;
+        let (msi, iidr) = (self.msi, self.names.msi_frame);
         match width {
             AccessWidth::Byte | AccessWidth::Half => 0,
-            AccessWidth::Word => u64::from(Self::v2m_register(off, iidr)),
+            AccessWidth::Word => u64::from(Self::v2m_register(off, msi, iidr)),
             AccessWidth::Dword => {
-                u64::from(Self::v2m_register(off, iidr))
-                    | u64::from(Self::v2m_register(off + 4, iidr)) << 32
+                u64::from(Self::v2m_register(off, msi, iidr))
+                    | u64::from(Self::v2m_register(off + 4, msi, iidr)) << 32
             }
         }
     }
 
     /// QEMU `gicv2m_read` for a 4-byte access (any other size reads as
-    /// zero), but for `MSI_IIDR`, which is the board's identity's where
-    /// QEMU's names QEMU (`PRODUCT_ID_QEMU`, 'Q').
-    fn v2m_register(off: u64, iidr: MsiFrameIidr) -> u32 {
+    /// zero), but for `MSI_TYPER`, which reports the board's choice of SPIs
+    /// ([`MsiFrame`]), and `MSI_IIDR`, which is the board's identity's
+    /// where QEMU's names QEMU (`PRODUCT_ID_QEMU`, 'Q').
+    fn v2m_register(off: u64, msi: Option<MsiFrame>, iidr: MsiFrameIidr) -> u32 {
         match off {
-            V2M_MSI_TYPER => (V2M_BASE_SPI << 16) | V2M_NUM_SPI,
+            V2M_MSI_TYPER => msi.map_or(0, MsiFrame::typer),
             V2M_MSI_IIDR => iidr.get(),
             _ => 0,
         }
@@ -1559,11 +1650,12 @@ impl GicV2 {
 
     /// QEMU `gicv2m_write` for a 2- or 4-byte access: `MSI_SETSPI_NS`
     /// pulses the SPI's input line (`gicv2m_set_irq`), which latches it
-    /// pending only if it is configured edge-triggered.
+    /// pending only if it is configured edge-triggered; one that is not the
+    /// frame's has no effect (BSA DEN0094C I.9.2).
     fn v2m_write_register(&mut self, off: u64, v: u32) {
         if off == V2M_MSI_SETSPI_NS {
             let spi = v & 0x3FF;
-            if (V2M_BASE_SPI..V2M_BASE_SPI + V2M_NUM_SPI).contains(&spi) {
+            if self.msi.is_some_and(|msi| msi.holds(spi)) {
                 self.set_line(spi, true);
                 self.set_line(spi, false);
             }
@@ -1929,11 +2021,11 @@ pub(super) mod tests {
 
     /// A GIC of fewer SPIs reports them in `GICD_TYPER.ITLinesNumber` and has
     /// none past them: the last one is signalled, the next one's line raises
-    /// nothing and its enable is RAZ/WI. The fewest it may have hold the
-    /// board's highest SPI, its GICv2m frame's last.
+    /// nothing and its enable is RAZ/WI. The fewest it may have hold an SPI
+    /// for each of the board's device lines and one for its GICv2m frame.
     #[test]
     fn a_gic_of_fewer_spis_has_none_past_them() {
-        for count in [128, 160, 256, 480] {
+        for count in [64, 96, 160, 256, 480] {
             let spis = SpiCount::new(count).expect("a count the GIC-400 allows");
             let mut g = enabled_shaped(GicShape {
                 spis,
@@ -1956,9 +2048,9 @@ pub(super) mod tests {
                 );
             }
         }
-        assert_eq!(SpiCount::MIN.get(), 128);
-        assert!(32 + SpiCount::MIN.get() > V2M_BASE_SPI + V2M_NUM_SPI - 1);
-        for refused in [0, 96, 130, 512] {
+        assert_eq!(SpiCount::MIN.get(), 64);
+        assert!(SpiCount::MIN.get() > InterruptMap::DEVICE_LINES);
+        for refused in [0, 32, 100, 130, 512] {
             assert_eq!(SpiCount::new(refused), None, "{refused}");
         }
     }
@@ -2302,7 +2394,9 @@ pub(super) mod tests {
 
     #[test]
     fn an_msi_latches_only_an_edge_triggered_spi() {
-        let mut g = enabled();
+        let mut g = enabled()
+            .with_msi_frame(frame(80, 64))
+            .expect("the GIC's SPIs");
         dist(&mut g, 0x100 + 80 / 32 * 4, 1 << (80 % 32));
         g.v2m_write(RegOffset::new(V2M_MSI_SETSPI_NS), AccessWidth::Word, 80);
         assert!(!g.irq_out(), "a level-sensitive SPI forgets the pulse");
@@ -2315,10 +2409,85 @@ pub(super) mod tests {
             g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Byte),
             0
         );
+    }
+
+    /// `MSI_TYPER` reports the frame's SPIs, and only a write naming one of
+    /// them raises it (BSA DEN0094C I.9.1, I.9.2); a GIC whose frame has
+    /// none reports none and raises nothing.
+    #[test]
+    fn the_msi_frame_reports_and_raises_only_its_own_spis() {
+        let mut g = enabled()
+            .with_msi_frame(frame(71, 441))
+            .expect("the GIC's SPIs");
+        assert_eq!(g.msi_frame(), Some(frame(71, 441)));
         assert_eq!(
             g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Word),
-            u64::from((80u32 << 16) | 64)
+            u64::from((71u32 << 16) | 441)
         );
+        for spi in [70, 71, 511, 512] {
+            edge_triggered(&mut g, spi);
+            raise_msi_enabled(&mut g, spi);
+            let ours = (71..512).contains(&spi);
+            assert_eq!(g.irq_out(), ours, "INTID {spi}");
+            if ours {
+                assert_eq!(cpu_get(&mut g, IAR), spi);
+                cpu(&mut g, EOIR, spi);
+            }
+        }
+        g.reset();
+        assert_eq!(
+            g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Word),
+            u64::from((71u32 << 16) | 441),
+            "a reset keeps the frame"
+        );
+        let mut none = enabled();
+        assert_eq!(none.msi_frame(), None);
+        assert_eq!(
+            none.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Word),
+            0
+        );
+        edge_triggered(&mut none, 80);
+        raise_msi_enabled(&mut none, 80);
+        assert!(!none.irq_out());
+    }
+
+    /// A frame whose SPIs are not all the GIC's is refused, and a GIC
+    /// given another shape keeps no frame chosen for the one it had.
+    #[test]
+    fn a_frame_is_the_gics_own_spis() {
+        let small = GicShape {
+            spis: SpiCount::new(256).expect("a count"),
+            ..GicShape::DEFAULT
+        };
+        let gic = GicV2::new().shaped(small);
+        assert_eq!(
+            gic.with_msi_frame(frame(272, 17)).map(|g| g.msi_frame()),
+            Err(MsiFrameOutsideGic {
+                frame: frame(272, 17),
+                spis: small.spis
+            }),
+            "INTID 288 is past the last, 287"
+        );
+        let fits = GicV2::new()
+            .shaped(small)
+            .with_msi_frame(frame(272, 16))
+            .expect("INTIDs 272 to 287");
+        assert_eq!(fits.msi_frame(), Some(frame(272, 16)));
+        assert_eq!(fits.shaped(GicShape::DEFAULT).msi_frame(), None);
+    }
+
+    /// A frame of `count` SPIs from INTID `first`.
+    fn frame(first: u32, count: u32) -> MsiFrame {
+        MsiFrame {
+            first: Spi::new(first - 32).expect("an SPI"),
+            count: MsiCount::new(count).expect("a count"),
+        }
+    }
+
+    /// Enable interrupt `spi` and write it to `MSI_SETSPI_NS`.
+    fn raise_msi_enabled(g: &mut GicV2, spi: u32) {
+        dist(g, 0x100 + u64::from(spi / 32) * 4, 1 << (spi % 32));
+        g.v2m_write(RegOffset::new(V2M_MSI_SETSPI_NS), AccessWidth::Word, u64::from(spi));
     }
 
     #[test]

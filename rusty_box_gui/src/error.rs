@@ -95,6 +95,10 @@ pub enum RunError {
     )]
     InvalidCounterRate { hz: u64 },
 
+    /// `[virt.interrupts]` a GIC of `virt.gic_spis` cannot hold.
+    #[error("virt.interrupts: {0}")]
+    InterruptMap(rusty_box_aarch64::InterruptMapError),
+
     #[error("virt.firmware and virt.kernel cannot both be set: the board boots one or the other")]
     ConflictingVirtBoot,
 

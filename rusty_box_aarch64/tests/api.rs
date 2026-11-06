@@ -4,6 +4,12 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(feature = "alloc")]
+#[path = "support/qemu_virt.rs"]
+mod qemu_virt;
+#[cfg(feature = "alloc")]
+use qemu_virt::qemu_virt_interrupts;
+
 use rusty_box_aarch64::board::{GPIO_BASE, RAM_BASE, RTC_BASE, UART0_BASE};
 use rusty_box_aarch64::boot::{fdt, LinuxImage, PlacementError};
 use rusty_box_aarch64::cpu::{
@@ -1570,6 +1576,201 @@ fn the_board_has_the_counter_and_gic_its_configuration_names() {
     assert_eq!(CounterRate::DEFAULT.hz().get(), 1_000_000_000);
 }
 
+/// A host's tree is refused where it names an interrupt for one of the
+/// board's devices other than the one the interrupt map wires it to: QEMU's
+/// own tree, on the board's own map, names its first virtio transport's
+/// SPI 16 where the map has SPI 3, and on QEMU's map but for the
+/// transports', the first transport's 16 again. On the map it was written
+/// for it builds, and the guest's tree names the SPIs the devices drive; a
+/// map moving only the PCIe host's INTA to INTD, which no device drives,
+/// builds too.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_host_tree_must_name_the_interrupts_the_map_wires() {
+    use rusty_box_aarch64::machine::HostTreeInterrupt;
+    use rusty_box_aarch64::{InterruptMap, InterruptSource, Spi};
+    const HOST_TREE: &[u8] = include_bytes!("../assets/qemu-virt-a57-256m.dtb");
+    let spi = |n| Spi::new(n).expect("an SPI");
+    let build = |interrupts| {
+        MachineBuilder::new(VirtConfig {
+            interrupts,
+            ..VirtConfig::DEFAULT
+        })
+        .ram(ram_size())
+        .device_tree(HOST_TREE)
+        .firmware(&SPIN.to_le_bytes())
+        .build()
+    };
+    let qemu = qemu_virt_interrupts();
+    let other_virtio = InterruptMap {
+        virtio: spi(200),
+        ..qemu
+    };
+    for (map, refused) in [
+        (
+            InterruptMap::DEFAULT,
+            HostTreeInterrupt {
+                source: InterruptSource::Virtio,
+                named: Some(spi(16)),
+                wired: spi(3),
+            },
+        ),
+        (
+            other_virtio,
+            HostTreeInterrupt {
+                source: InterruptSource::Virtio,
+                named: Some(spi(16)),
+                wired: spi(200),
+            },
+        ),
+    ] {
+        match build(map) {
+            Err(BuildError::HostTreeInterrupt(e)) => assert_eq!(e, refused, "{map:?}"),
+            Err(e) => panic!("refused otherwise: {e}"),
+            Ok(_) => panic!("{map:?}: the tree names other interrupts"),
+        }
+    }
+    let m = build(qemu).expect("the map the tree was written for");
+    assert_eq!(
+        fdt::property(m.device_tree(), "pl011@9000000", "interrupts"),
+        Ok(Some(&[0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 4][..]))
+    );
+    // The PCIe host's INTA to INTD no device drives, the bus having none,
+    // so its `interrupt-map` is the tree's own.
+    let other_pcie = InterruptMap {
+        pcie_intx: spi(8),
+        ..qemu
+    };
+    assert!(build(other_pcie).is_ok());
+}
+
+/// The devices drive the SPIs the configuration's interrupt map gives
+/// them, and the GICv2m frame reports its own in `MSI_TYPER` (BSA DEN0094C
+/// I.9.1). A guest arms the GPIO for a rising edge on the power button's
+/// line; the host presses it; the guest then reads the GPIO's SPI pending
+/// in `GICD_ISPENDRn` where the map puts it, and not where the board's own
+/// map would. A map the GIC cannot hold is refused.
+#[cfg(feature = "alloc")]
+#[test]
+fn the_board_wires_the_interrupt_map_its_configuration_names() {
+    use rusty_box_aarch64::board::{GIC_DIST_BASE, GIC_V2M_BASE};
+    use rusty_box_aarch64::{
+        GicShape, InterruptMap, InterruptMapError, InterruptSource, MsiCount, MsiExtent,
+        MsiSpis, Spi, SpiCount,
+    };
+    // str w3, [x1, #0x40c]   (GPIOIEV: rising)
+    // str w3, [x1, #0x410]   (GPIOIE)
+    // ldr w5, [x4]           (GICD_ISPENDRn of the map's GPIO SPI)
+    // ldr w6, [x7]           (GICD_ISPENDRn of the default's)
+    // ldr w8, [x9]           (MSI_TYPER)
+    const PROGRAM: [u32; 5] = [
+        0xB904_0C23,
+        0xB904_1023,
+        0xB940_0085,
+        0xB940_00E6,
+        0xB940_0128,
+    ];
+    let ispendr = |intid: u32| GIC_DIST_BASE + 0x200 + 4 * u64::from(intid / 32);
+    let spi = |n| Spi::new(n).expect("an SPI");
+    let map = InterruptMap {
+        gpio: spi(300),
+        msi: MsiSpis {
+            first: spi(400),
+            count: MsiExtent::Count(MsiCount::new(48).expect("a count")),
+        },
+        ..InterruptMap::DEFAULT
+    };
+    let config = VirtConfig {
+        interrupts: map,
+        ..VirtConfig::DEFAULT
+    };
+    let mut ram = vec![0u8; ram_size().get() as usize];
+    let mut m = MachineBuilder::new(config)
+        .ram(ram_size())
+        .bare()
+        .build_in(MemoryLoan {
+            ram: &mut ram,
+            vars: &mut [],
+        })
+        .expect("the map fits the GIC");
+    for (offset, word) in PROGRAM.iter().enumerate() {
+        m.mem_write(RAM_BASE + 4 * offset as u64, &word.to_le_bytes())
+            .expect("in RAM");
+    }
+    let default_gpio = InterruptMap::DEFAULT.gpio.intid();
+    m.reg_write(Reg::X1, GPIO_BASE);
+    m.reg_write(Reg::X3, 1 << 3);
+    m.reg_write(Reg::X4, ispendr(332));
+    m.reg_write(Reg::X7, ispendr(default_gpio));
+    m.reg_write(Reg::X9, GIC_V2M_BASE + 8);
+    assert_eq!(
+        m.step(RunBudget::Instructions(2)).stop,
+        StopReason::BudgetExhausted
+    );
+    m.power().press_power_button();
+    assert_eq!(
+        m.step(RunBudget::Instructions(3)).stop,
+        StopReason::BudgetExhausted
+    );
+    assert_eq!(m.reg_read(Reg::X5), 1 << (332 % 32), "SPI 300, INTID 332");
+    assert_eq!(
+        m.reg_read(Reg::X6) & (1 << (default_gpio % 32)),
+        0,
+        "nothing at the board's own GPIO SPI"
+    );
+    assert_eq!(m.reg_read(Reg::X8), (432 << 16) | 48, "MSI_TYPER");
+
+    // The board's own map gives the frame every SPI from INTID 96, however
+    // many the GIC has.
+    let fewest_for_the_default = SpiCount::new(96).expect("a count");
+    for (spis, count) in [(SpiCount::DEFAULT, 416), (fewest_for_the_default, 32)] {
+        let config = VirtConfig {
+            gic: GicShape {
+                spis,
+                ..GicShape::DEFAULT
+            },
+            ..VirtConfig::DEFAULT
+        };
+        let mut ram = vec![0u8; ram_size().get() as usize];
+        let mut m = MachineBuilder::new(config)
+            .ram(ram_size())
+            .bare()
+            .build_in(MemoryLoan {
+                ram: &mut ram,
+                vars: &mut [],
+            })
+            .expect("the default map fits");
+        m.mem_write(RAM_BASE, &PROGRAM[4].to_le_bytes())
+            .expect("in RAM");
+        m.reg_write(Reg::X9, GIC_V2M_BASE + 8);
+        assert_eq!(
+            m.step(RunBudget::Instructions(1)).stop,
+            StopReason::BudgetExhausted
+        );
+        assert_eq!(m.reg_read(Reg::X8), (96 << 16) | count, "{spis:?}");
+    }
+
+    let small = SpiCount::new(256).expect("a count");
+    let past = VirtConfig {
+        gic: GicShape {
+            spis: small,
+            ..GicShape::DEFAULT
+        },
+        ..config
+    };
+    match MachineBuilder::new(past).ram(ram_size()).bare().build() {
+        Err(BuildError::InterruptMap(refused)) => assert_eq!(
+            refused,
+            InterruptMapError::OutsideGic {
+                source: InterruptSource::Gpio,
+                spis: small
+            }
+        ),
+        Err(e) => panic!("refused otherwise: {e}"),
+        Ok(_) => panic!("a GIC of 256 SPIs has no SPI 300"),
+    }
+}
+
 /// The processor is the model the configuration names: its ID registers
 /// (FEAT_SME2 is `ID_AA64PFR1_EL1.SME` = 2), its `MIDR_EL1`, the system
 /// counter's frequency, which `CNTPCT_EL0` counts at, and the device tree's
@@ -1652,8 +1853,12 @@ fn the_processor_is_the_model_the_configuration_names() {
         }
 
         // A host's tree describes the processor as the host wrote it, as
-        // QEMU takes a `-dtb` tree.
-        let hosted = MachineBuilder::new(config)
+        // QEMU takes a `-dtb` tree; QEMU's wires the devices as QEMU does.
+        let qemu_wired = VirtConfig {
+            interrupts: qemu_virt_interrupts(),
+            ..config
+        };
+        let hosted = MachineBuilder::new(qemu_wired)
             .ram(ram_size())
             .device_tree(HOST_TREE)
             .firmware(&SPIN.to_le_bytes())

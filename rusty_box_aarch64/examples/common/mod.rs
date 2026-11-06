@@ -10,9 +10,9 @@ use std::time::Instant;
 
 use rusty_box_aarch64::cpu::DebugStops;
 use rusty_box_aarch64::{
-    CpuModel, CursorPos, Dimensions, Disk, DisplaySink, GuestStorage, KeyboardInput, Levels,
-    MachineBuilder, Redraw, Refreshed, Reg, Resolution, Rgb, RunBudget, StopReason, SysReg,
-    TilePos, Typed, VgaTextModeInfo, VirtMachine,
+    CpuModel, CursorPos, Dimensions, Disk, DisplaySink, GuestStorage, InterruptMap, KeyboardInput,
+    Levels, MachineBuilder, MsiCount, MsiExtent, Redraw, Refreshed, Reg, Resolution, Rgb,
+    RunBudget, Spi, StopReason, SysReg, TilePos, Typed, VgaTextModeInfo, VirtMachine,
 };
 use rusty_box_core::ClockHz;
 
@@ -106,6 +106,9 @@ pub struct RunArgs {
     pub screenshot: Option<String>,
     /// Whether the processor has EL2 (QEMU `virtualization=on`).
     pub virtualization: Virtualization,
+    /// The SPIs the devices drive, the board's own unless `--interrupts`
+    /// names others (a tree given with `--dtb` must name the same).
+    pub interrupts: InterruptMap,
 }
 
 /// How a run ended.
@@ -119,7 +122,8 @@ pub const RUN_USAGE: &str = "[--cpu cortex-a57|armv9.2] [--ips N] [--max-ticks N
      \x20      [--until <console text>]... [--type <keys>]... [--type-serial <keys>]...\n\
      \x20      [--stop-on-undefined] [--stop-on-bus-fault]\n\
      \x20      [--display WIDTHxHEIGHT] [--virtio-keyboard] [--virtio-tablet] [--disk <raw image>]\n\
-     \x20      [--screenshot <file.ppm>] [--virtualization]";
+     \x20      [--screenshot <file.ppm>] [--virtualization]\n\
+     \x20      [--interrupts uart=N,rtc=N,gpio=N,virtio=N,pcie-intx=N,msi-first=N,msi-count=N]";
 
 /// The display's frames, kept as the host would show them.
 #[derive(Default)]
@@ -280,6 +284,7 @@ impl RunArgs {
             disk: None,
             screenshot: None,
             virtualization: Virtualization::Off,
+            interrupts: InterruptMap::DEFAULT,
         }
     }
 
@@ -331,6 +336,7 @@ impl RunArgs {
             "--disk" => self.disk = Some(value(flag)?),
             "--screenshot" => self.screenshot = Some(value(flag)?),
             "--virtualization" => self.virtualization = Virtualization::On,
+            "--interrupts" => self.interrupts = interrupt_map(&value(flag)?)?,
             _ => return Ok(Parsed::NotMine),
         }
         Ok(Parsed::Consumed)
@@ -346,6 +352,39 @@ impl RunArgs {
     pub fn ips(&self) -> Result<ClockHz, String> {
         ClockHz::new(self.ips).ok_or_else(|| String::from("--ips must be non-zero"))
     }
+}
+
+/// The interrupt map `--interrupts` names: comma-separated `key=N`, each
+/// key one of the map's sources by its SPI number, the GICv2m frame's
+/// `msi-count` its count (left out, the frame runs to the GIC's last SPI);
+/// a key left out keeps the board's own.
+fn interrupt_map(text: &str) -> Result<InterruptMap, String> {
+    let mut map = InterruptMap::DEFAULT;
+    for pair in text.split(',') {
+        let (key, number) = pair
+            .split_once('=')
+            .ok_or_else(|| format!("--interrupts: {pair} is not key=N"))?;
+        let number: u32 = number
+            .parse()
+            .map_err(|e| format!("--interrupts {key}: {e}"))?;
+        let spi = || Spi::new(number).ok_or_else(|| format!("--interrupts {key}: {number} is no SPI"));
+        match key {
+            "uart" => map.uart = spi()?,
+            "rtc" => map.rtc = spi()?,
+            "gpio" => map.gpio = spi()?,
+            "virtio" => map.virtio = spi()?,
+            "pcie-intx" => map.pcie_intx = spi()?,
+            "msi-first" => map.msi.first = spi()?,
+            "msi-count" => {
+                map.msi.count = MsiExtent::Count(
+                    MsiCount::new(number)
+                        .ok_or_else(|| format!("--interrupts msi-count: {number} is not 1 to 1023"))?,
+                )
+            }
+            other => return Err(format!("--interrupts: {other} is no interrupt source")),
+        }
+    }
+    Ok(map)
 }
 
 /// Type as much of `pending`, in order, as its keyboards take now, leaving
