@@ -32,7 +32,9 @@ const LOAD_WORD: [u32; 2] = [0xB940_0022, 0x1400_0000];
 const MSI_IIDR: u64 = 0xFCC;
 /// `VendorID`'s offset in a virtio-mmio transport.
 const VENDOR_ID: u64 = 0x00C;
-/// The highest transport, which the first device plugged in takes.
+/// The first transport, which the first device plugged in takes.
+const FIRST_TRANSPORT: u64 = VIRTIO_MMIO_BASE;
+/// The last transport, which none of the test's devices takes.
 const LAST_TRANSPORT: u64 = VIRTIO_MMIO_BASE + 31 * 0x200;
 
 fn acme() -> BoardIdentity {
@@ -70,11 +72,11 @@ fn bare(
 enum Devices {
     /// Nothing: every transport empty, of the legacy layout.
     None,
-    /// A virtio keyboard in the last transport, every transport of the
+    /// A virtio keyboard in the first transport, every transport of the
     /// non-legacy layout.
     Keyboard,
-    /// A virtio keyboard in the last transport and a tablet in the one
-    /// before it.
+    /// A virtio keyboard in the first transport and a tablet in the one
+    /// after it.
     KeyboardAndTablet,
 }
 
@@ -157,10 +159,10 @@ fn the_input_devices_name_themselves_by_the_identity() {
     for (identity, keyboard, keyboard_ids, tablet, tablet_ids) in cases {
         let mut ram = vec![0u8; RAM_LEN];
         let mut m = bare(&mut ram, identity, Devices::KeyboardAndTablet);
-        let tablet_transport = LAST_TRANSPORT - 0x200;
-        assert_eq!(input_entry(&mut m, LAST_TRANSPORT, CFG_ID_NAME), keyboard);
+        let tablet_transport = FIRST_TRANSPORT + 0x200;
+        assert_eq!(input_entry(&mut m, FIRST_TRANSPORT, CFG_ID_NAME), keyboard);
         assert_eq!(
-            input_entry(&mut m, LAST_TRANSPORT, CFG_ID_DEVIDS),
+            input_entry(&mut m, FIRST_TRANSPORT, CFG_ID_DEVIDS),
             keyboard_ids
         );
         assert_eq!(input_entry(&mut m, tablet_transport, CFG_ID_NAME), tablet);
@@ -197,14 +199,14 @@ fn a_virtio_transport_reads_the_identitys_vendor() {
             let mut m = bare(&mut ram, identity, devices);
             let register = u64::from(vendor.get());
             assert_eq!(
-                guest_load(&mut m, VIRTIO_MMIO_BASE + VENDOR_ID),
+                guest_load(&mut m, FIRST_TRANSPORT + VENDOR_ID),
                 register,
-                "an empty transport, {devices:?}"
+                "the first transport, {devices:?}"
             );
             assert_eq!(
                 guest_load(&mut m, LAST_TRANSPORT + VENDOR_ID),
                 register,
-                "the last transport, {devices:?}"
+                "an empty transport, {devices:?}"
             );
         }
     }

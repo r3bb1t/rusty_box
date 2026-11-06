@@ -115,6 +115,7 @@ fn boot() -> ExitCode {
         cpu: args.run.cpu,
         debug_stops: args.run.debug_stops(),
         interrupts: args.run.interrupts,
+        transport_order: args.run.transport_order,
         ..VirtConfig::DEFAULT
     };
     let builder = MachineBuilder::new(config).ram(ram).firmware(&code);

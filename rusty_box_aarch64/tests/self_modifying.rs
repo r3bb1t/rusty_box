@@ -298,8 +298,8 @@ fn code_a_disk_read_puts_over_code_that_ran_runs_as_read() {
     const HEADER: u64 = RAM_BASE + 0x1_3000;
     const STATUS_BYTE: u64 = RAM_BASE + 0x1_3100;
     const TABLE: u64 = RAM_BASE + 0x1_4000;
-    // The only device takes the highest transport.
-    const TRANSPORT: u64 = VIRTIO_MMIO_BASE + 31 * 0x200;
+    // The only device takes the first transport.
+    const TRANSPORT: u64 = VIRTIO_MMIO_BASE;
     const NEXT: u16 = 1;
     const WRITE: u16 = 2;
 

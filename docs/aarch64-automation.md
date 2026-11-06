@@ -184,6 +184,9 @@ they allow, its default the board's:
   the map wires fails the build with `BuildError::HostTreeInterrupt`. The
   PCIe host's INTA to INTD and the frame's SPIs no device drives, the bus
   having none, so a tree's description of them is its own.
+- `transport_order`, a `TransportOrder`: which free virtio-mmio transport
+  each device plugged in takes, `FirstFree` (the default, the first device
+  at the lowest address) or `LastFree`.
 - `spectre`, a `SpectreReport`: what the firmware's `SMCCC_ARCH_FEATURES`
   says of the speculation workarounds, `NotRequired` (the default, true of
   an interpreter), `Mitigated` or `Unreported`.
@@ -671,7 +674,9 @@ QEMU's `virt` takes a display and input devices as `-device` options. The
 builder takes the three QEMU's display front ends drive — `virtio-gpu-device`
 (2D, with an EDID made as QEMU's generator makes it, naming the display by
 the board's identity), `virtio-keyboard-device` and `virtio-tablet-device`
-— and plugs each into the highest free virtio-mmio transport, as QEMU does.
+— and plugs each into the first free virtio-mmio transport. With
+`VirtConfig::transport_order` set to `TransportOrder::LastFree` it plugs
+each into the last free one instead, as QEMU does.
 A board with them has non-legacy transports (QEMU's
 `-global virtio-mmio.force-legacy=false`): these are virtio 1.0 devices,
 which Linux's drivers refuse on a legacy transport.
@@ -735,8 +740,9 @@ needs `alloc`.
 
 `virtio_disk` plugs in QEMU's `virtio-blk-device` over a raw image, as
 `-drive file=disk.img,format=raw,if=none,id=hd0 -device
-virtio-blk-device,drive=hd0` does; it takes the next transport down after
-the display and input devices, and Linux sees it as `/dev/vda`. The image is
+virtio-blk-device,drive=hd0` does; it takes the next transport after the
+display and input devices (up from the first, or down from the last with
+`TransportOrder::LastFree`), and Linux sees it as `/dev/vda`. The image is
 host memory (`Disk::memory`) or a host file read and written in place
 (`Disk::file`, with `std`), and the machine keeps it.
 

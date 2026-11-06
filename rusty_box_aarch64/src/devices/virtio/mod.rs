@@ -71,9 +71,8 @@
 //!   whether the device is broken, which a virtio-input status-queue
 //!   notification reaches with no buffer taken.
 //!
-//! A device is plugged into the transports from the last down, the order
-//! QEMU's `virt` hands `-device` options their bus (`hw/arm/virt.c`
-//! `create_virtio_devices`), and transport `n` raises the `n`th of the
+//! A device is plugged into the transport the board's transport order gives
+//! it (`crate::board::TransportOrder`), and transport `n` raises the `n`th of the
 //! SPIs the board's interrupt map gives them ([`crate::interrupt_map`]). A board
 //! with devices is QEMU's `virt` given `-global virtio-mmio.force-legacy=false`,
 //! which every transport then follows ([`super::virtio_mmio`]): the devices

@@ -1872,15 +1872,16 @@ fn the_processor_is_the_model_the_configuration_names() {
     }
 }
 
-/// The guest finds the disk where QEMU's `virt` puts the device given last:
-/// below the ones before it, so on its own at the top transport and under
-/// the keyboard with one. The machine keeps the disk, and a snapshot names
-/// its size.
+/// The guest finds the disk, the device given last, where the board's
+/// transport order puts it: by default after the ones before it, so on its
+/// own at the first transport and above the keyboard with one; in the
+/// order of the last free, at the top transport and under the keyboard. The
+/// machine keeps the disk, and a snapshot names its size.
 #[cfg(feature = "alloc")]
 #[test]
 fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
     use rusty_box_aarch64::board::VIRTIO_MMIO_BASE;
-    use rusty_box_aarch64::{Disk, OwnedStorage};
+    use rusty_box_aarch64::{Disk, OwnedStorage, TransportOrder};
 
     /// The virtio device ID the guest reads at transport `slot`: `ldr w0,
     /// [x1]; b .` with x1 at its `DeviceID` register.
@@ -1899,10 +1900,12 @@ fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
         );
         m.reg_read(Reg::X0)
     }
-    let build = |sectors: usize, keyboard: bool| {
-        let builder = MachineBuilder::new(VirtConfig::DEFAULT)
-            .ram(ram_size())
-            .bare();
+    let build_in = |transport_order, sectors: usize, keyboard: bool| {
+        let config = VirtConfig {
+            transport_order,
+            ..VirtConfig::DEFAULT
+        };
+        let builder = MachineBuilder::new(config).ram(ram_size()).bare();
         let builder = if keyboard {
             builder.virtio_keyboard()
         } else {
@@ -1913,12 +1916,18 @@ fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
             .build()
             .expect("a machine with a disk builds")
     };
+    let build = |sectors, keyboard| build_in(TransportOrder::DEFAULT, sectors, keyboard);
 
     let mut m = build(8, false);
-    assert_eq!(device_id(&mut m, 31), 2, "virtio-blk at the top transport");
+    assert_eq!(device_id(&mut m, 0), 2, "virtio-blk at the first transport");
+    assert_eq!(device_id(&mut m, 31), 0, "nothing at the last");
     let mut with_keyboard = build(8, true);
-    assert_eq!(device_id(&mut with_keyboard, 31), 18, "the keyboard first");
-    assert_eq!(device_id(&mut with_keyboard, 30), 2, "then the disk");
+    assert_eq!(device_id(&mut with_keyboard, 0), 18, "the keyboard first");
+    assert_eq!(device_id(&mut with_keyboard, 1), 2, "then the disk");
+    let mut from_the_top = build_in(TransportOrder::LastFree, 8, true);
+    assert_eq!(device_id(&mut from_the_top, 31), 18, "the keyboard at the top");
+    assert_eq!(device_id(&mut from_the_top, 30), 2, "then the disk under it");
+    assert_eq!(device_id(&mut from_the_top, 0), 0, "nothing at the first");
 
     assert_eq!(m.disk().map(Disk::sectors), Some(8));
     assert_eq!(
@@ -1933,8 +1942,34 @@ fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
             .is_err(),
         "a disk of another size"
     );
+    assert!(
+        build_in(TransportOrder::LastFree, 8, false)
+            .restore_snapshot(&mut image.as_slice())
+            .is_err(),
+        "the disk behind another transport"
+    );
     assert_eq!(
         build(8, false).restore_snapshot(&mut image.as_slice()),
+        Ok(())
+    );
+    // Without devices the order changes nothing, so a machine of the other
+    // order takes the image.
+    let bare = |transport_order| {
+        MachineBuilder::new(VirtConfig {
+            transport_order,
+            ..VirtConfig::DEFAULT
+        })
+        .ram(ram_size())
+        .bare()
+        .build()
+        .expect("a bare machine builds")
+    };
+    let mut bare_image = Vec::new();
+    bare(TransportOrder::FirstFree)
+        .save_snapshot(&mut bare_image)
+        .expect("a snapshot saves");
+    assert_eq!(
+        bare(TransportOrder::LastFree).restore_snapshot(&mut bare_image.as_slice()),
         Ok(())
     );
 }

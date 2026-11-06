@@ -105,7 +105,8 @@ impl std::fmt::Display for MachineKind {
 /// rate (1 GHz by default, the one rate an Armv9.2 processor takes);
 /// `gic_spis` and `gic_priority_bits` its GIC's SPIs (480 by default) and
 /// priority bits (5); `interrupts` which SPIs its devices drive
-/// ([`VirtInterruptsToml`]).
+/// ([`VirtInterruptsToml`]); `transport_order` which free virtio transport
+/// each device takes (`"first-free"`, the default, or `"last-free"`).
 /// It boots UEFI firmware from flash (`firmware`, or the EDK2 built into
 /// the front end with `builtin_firmware = true`, either with
 /// `firmware_vars` for its variable store) or a Linux kernel directly
@@ -133,6 +134,7 @@ pub struct VirtToml {
     pub disk: Option<PathBuf>,
     pub disk_read_only: Option<bool>,
     pub spectre: Option<NamedToml<rusty_box_aarch64::SpectreReport>>,
+    pub transport_order: Option<NamedToml<rusty_box_aarch64::TransportOrder>>,
     pub counter_hz: Option<NumberToml<rusty_box_aarch64::CounterRate>>,
     pub gic_spis: Option<NumberToml<rusty_box_aarch64::SpiCount>>,
     pub gic_priority_bits: Option<NumberToml<rusty_box_aarch64::PriorityBits>>,
@@ -773,6 +775,8 @@ pub struct ArmVirtConfig {
     /// The SPIs the devices drive and the GICv2m frame's, which fit the GIC
     /// ([`virt_interrupt_map`]).
     pub interrupts: rusty_box_aarch64::InterruptMap,
+    /// Which free virtio transport each device takes.
+    pub transport_order: rusty_box_aarch64::TransportOrder,
     pub boot: ArmBoot,
     /// The virtio-gpu, by the size it asks the guest for; `None` for none.
     pub display: Option<VirtioDisplaySize>,
@@ -974,6 +978,7 @@ impl ArmVirtConfig {
             counter: rusty_box_aarch64::CounterRate::DEFAULT,
             gic: rusty_box_aarch64::GicShape::DEFAULT,
             interrupts: rusty_box_aarch64::InterruptMap::DEFAULT,
+            transport_order: rusty_box_aarch64::TransportOrder::DEFAULT,
             boot: ArmBoot::Unset,
             display: None,
             keyboard: false,
@@ -1204,6 +1209,9 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
         counter,
         gic,
         interrupts,
+        transport_order: virt
+            .transport_order
+            .map_or(rusty_box_aarch64::TransportOrder::DEFAULT, |order| order.0),
         boot,
         display,
         keyboard: virt.keyboard.unwrap_or(false),
@@ -1497,6 +1505,7 @@ impl ArmVirtConfig {
             ips: Some(self.ips),
             cpu: Some(NamedToml(self.cpu)),
             spectre: Some(NamedToml(self.spectre)),
+            transport_order: Some(NamedToml(self.transport_order)),
             counter_hz: Some(NumberToml(self.counter)),
             gic_spis: Some(NumberToml(self.gic.spis)),
             gic_priority_bits: Some(NumberToml(self.gic.priority_bits)),
@@ -3339,6 +3348,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         let mut maps = [rusty_box_aarch64::InterruptMap::DEFAULT, own_map]
             .into_iter()
             .cycle();
+        let mut orders = rusty_box_aarch64::TransportOrder::ALL.into_iter().cycle();
         let disks = [
             None,
             Some(VirtDisk {
@@ -3357,6 +3367,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
                     ips: 75_000_000,
                     cpu,
                     spectre: reports.next().unwrap_or_default(),
+                    transport_order: orders.next().unwrap_or_default(),
                     counter: if cpu.counter_rate_fixed() {
                         rusty_box_aarch64::CounterRate::DEFAULT
                     } else {
@@ -3393,7 +3404,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
     }
 
     #[test]
-    fn an_empty_virt_table_is_a_board_with_nothing_to_boot_at_qemu_defaults() {
+    fn an_empty_virt_table_is_a_board_with_nothing_to_boot_at_its_defaults() {
         let file: FileConfig = toml::from_str("[vm]\nmachine = \"arm-virt\"\n").unwrap();
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
 
@@ -3403,6 +3414,15 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         assert_eq!(
             ArmVirtConfig::blank().spectre,
             rusty_box_aarch64::SpectreReport::NotRequired
+        );
+        assert_eq!(
+            ArmVirtConfig::blank().transport_order,
+            rusty_box_aarch64::TransportOrder::FirstFree,
+            "the board's own order, the first device at the first transport"
+        );
+        assert_eq!(
+            ArmVirtConfig::blank().interrupts,
+            rusty_box_aarch64::InterruptMap::DEFAULT
         );
     }
 
@@ -3502,6 +3522,26 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             .to_string();
         assert!(
             refused.contains("\"vulnerable\"") && refused.contains("\"not-required\""),
+            "{refused}"
+        );
+    }
+
+    /// `virt.transport_order` is read by its orders' names; one no order has
+    /// is refused when the file is read, naming the orders there are.
+    #[test]
+    fn virt_transport_order_takes_an_order_by_name_and_refuses_others() {
+        let board =
+            |order: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\ntransport_order = \"{order}\"\n");
+        for order in rusty_box_aarch64::TransportOrder::ALL {
+            let file: FileConfig = toml::from_str(&board(order.name())).unwrap();
+            let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+            assert_eq!(resolved.arm_virt().map(|virt| virt.transport_order), Some(order));
+        }
+        let refused = toml::from_str::<FileConfig>(&board("middle"))
+            .expect_err("no order is named so")
+            .to_string();
+        assert!(
+            refused.contains("\"middle\"") && refused.contains("\"first-free\""),
             "{refused}"
         );
     }

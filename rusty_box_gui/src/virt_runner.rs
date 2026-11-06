@@ -193,6 +193,7 @@ fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Virt, RunError> {
         counter: config.counter,
         gic: config.gic,
         interrupts: config.interrupts,
+        transport_order: config.transport_order,
         rtc_epoch_seconds: host_epoch_seconds(),
         ..VirtConfig::DEFAULT
     };
@@ -1274,6 +1275,45 @@ mod tests {
             (72 << 16) | 20,
             "MSI_TYPER: 20 SPIs from INTID 72"
         );
+    }
+
+    /// The disk sits behind the transport the VM's transport order gives it:
+    /// the guest reads its `DeviceID`, 2, at the first transport by default
+    /// and at the last in the order of the last free.
+    #[test]
+    fn the_disk_sits_where_the_vms_transport_order_puts_it() {
+        const LDR_W0_X1: u32 = 0xB940_0020;
+        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        let image = ScratchFile::new("order.img", &[0; 512]);
+        let device_id = |machine: &mut Virt, slot: u64| {
+            let at = rusty_box_aarch64::board::RAM_BASE;
+            machine.mem_write(at, &LDR_W0_X1.to_le_bytes()).expect("in RAM");
+            machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
+            machine.reg_write(
+                rusty_box_aarch64::Reg::X1,
+                rusty_box_aarch64::board::VIRTIO_MMIO_BASE + 0x200 * slot + 8,
+            );
+            let stepped = machine.step(rusty_box_aarch64::RunBudget::Instructions(1));
+            assert_eq!(stepped.stop, rusty_box_aarch64::StopReason::BudgetExhausted);
+            machine.reg_read(rusty_box_aarch64::Reg::X0)
+        };
+        for (order, disk_slot, empty_slot) in [
+            (rusty_box_aarch64::TransportOrder::FirstFree, 0, 31),
+            (rusty_box_aarch64::TransportOrder::LastFree, 31, 0),
+        ] {
+            let config = ArmVirtConfig {
+                transport_order: order,
+                disk: Some(VirtDisk {
+                    path: image.0.clone(),
+                    access: DiskAccess::ReadWrite,
+                }),
+                ..kernel_board(&kernel)
+            };
+            let files = BootFiles::read(&config).expect("the kernel");
+            let mut machine = build(&config, &files).expect("the machine");
+            assert_eq!(device_id(&mut machine, disk_slot), 2, "{order:?}: the disk");
+            assert_eq!(device_id(&mut machine, empty_slot), 0, "{order:?}: nothing");
+        }
     }
 
     /// The board's virtio-blk is over the file the VM names: the guest sees

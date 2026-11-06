@@ -30,8 +30,8 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{ClockHz, Progress, RunBudget, SnapError, VmClock, VmInstant};
 
 use crate::board::{
-    Plugged, Plugs, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE, GPIO_BASE, RAM_BASE,
-    RAM_LIMIT, RTC_BASE, UART0_BASE, VIRTIO_MMIO_BASE,
+    Plugged, Plugs, TransportOrder, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE,
+    GPIO_BASE, RAM_BASE, RAM_LIMIT, RTC_BASE, UART0_BASE, VIRTIO_MMIO_BASE,
 };
 use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
 use crate::boot::tree::{BoardTree, Chosen, InitrdRange};
@@ -107,6 +107,8 @@ pub struct VirtConfig {
     /// itself, and is refused where it names others
     /// ([`BuildError::HostTreeInterrupt`]).
     pub interrupts: InterruptMap,
+    /// Which free virtio-mmio transport each device plugged in takes.
+    pub transport_order: TransportOrder,
 }
 
 impl VirtConfig {
@@ -126,6 +128,7 @@ impl VirtConfig {
         spectre: SpectreReport::DEFAULT,
         gic: GicShape::DEFAULT,
         interrupts: InterruptMap::DEFAULT,
+        transport_order: TransportOrder::DEFAULT,
     };
 }
 
@@ -1241,6 +1244,7 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
             gic_extensions::<L>(),
             config.gic,
             wiring,
+            config.transport_order,
         ),
         identity_hash: identity_hash(&identity),
         observer,
@@ -2321,6 +2325,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             disk: self.disk_sectors(),
             virtualization: u8::from(L::EL2),
             spectre: self.config.spectre.tag(),
+            transports: self.board.occupied_transports(),
             gic_spis: self.config.gic.spis.get(),
             gic_priority_bits: self.config.gic.priority_bits.count(),
             wiring: self.board.wiring,
@@ -2472,8 +2477,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, WithEl2, I> {
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// The image's version, which changes with its layout: an image of another
 /// version is refused as one. What a machine was built with (its counter
-/// rate, its GIC's shape, its interrupt map, its firmware's speculation
-/// report) the shape records, and a machine built otherwise refuses the
+/// rate, its GIC's shape, its interrupt map, the transports its devices
+/// sit behind, its firmware's speculation report) the shape records, and a
+/// machine built otherwise refuses the
 /// image as one built differently. It holds the processor's level set (the
 /// shape's `virtualization`, the EL2 registers, `CNTPOFF_EL2` among them), a
 /// feature set of 128 bits, `RVBAR_ELx` and `RMR_ELx` of the highest level,
@@ -2481,11 +2487,11 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// level beside stage 1's and the memory each stage and both together map
 /// it to, the TLB's kept stage 2 translations, its tables of EL1&0 and
 /// stage 2 contexts, the shape's identity fingerprint, counter rate,
-/// firmware speculation report, GIC shape and interrupt map, and the
-/// board's devices: the GIC with its Virtualization Extensions where it has
-/// them, the PL011, the PL031, the PL061, both flash banks and every
-/// virtio-mmio transport.
-const SNAPSHOT_VERSION: u32 = 24;
+/// firmware speculation report, GIC shape, interrupt map and occupied
+/// transports, and the board's devices: the GIC with its Virtualization
+/// Extensions where it has them, the PL011, the PL031, the PL061, both
+/// flash banks and every virtio-mmio transport.
+const SNAPSHOT_VERSION: u32 = 25;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2516,6 +2522,11 @@ struct Shape {
     /// workarounds ([`SpectreReport::tag`]), which the guest may have read
     /// and acted on.
     spectre: u8,
+    /// The transports a device sits behind ([`VirtBoard::occupied_transports`]),
+    /// whose state the image holds by transport and which the guest found
+    /// the devices at; the transport order a machine without devices was
+    /// built with changes nothing and is not recorded.
+    transports: u32,
     /// The GIC's SPIs ([`SpiCount::get`]) and priority bits
     /// ([`PriorityBits::count`]), the GIC's section of the image having the
     /// banks of the most a GIC has.
@@ -2549,6 +2560,7 @@ impl Shape {
         w.write_u64(self.disk.unwrap_or(0))?;
         w.write_u8(self.virtualization)?;
         w.write_u8(self.spectre)?;
+        w.write_u32(self.transports)?;
         w.write_u32(self.gic_spis)?;
         w.write_u8(self.gic_priority_bits)?;
         self.wiring.save(w)
@@ -2582,6 +2594,7 @@ impl Shape {
             },
             virtualization: r.read_u8()?,
             spectre: r.read_u8()?,
+            transports: r.read_u32()?,
             gic_spis: r.read_u32()?,
             gic_priority_bits: r.read_u8()?,
             wiring: Wiring::restore(r)?,

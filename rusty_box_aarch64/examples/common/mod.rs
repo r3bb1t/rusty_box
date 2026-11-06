@@ -12,7 +12,8 @@ use rusty_box_aarch64::cpu::DebugStops;
 use rusty_box_aarch64::{
     CpuModel, CursorPos, Dimensions, Disk, DisplaySink, GuestStorage, InterruptMap, KeyboardInput,
     Levels, MachineBuilder, MsiCount, MsiExtent, Redraw, Refreshed, Reg, Resolution, Rgb,
-    RunBudget, Spi, StopReason, SysReg, TilePos, Typed, VgaTextModeInfo, VirtMachine,
+    RunBudget, Spi, StopReason, SysReg, TilePos, TransportOrder, Typed, VgaTextModeInfo,
+    VirtMachine,
 };
 use rusty_box_core::ClockHz;
 
@@ -109,6 +110,9 @@ pub struct RunArgs {
     /// The SPIs the devices drive, the board's own unless `--interrupts`
     /// names others (a tree given with `--dtb` must name the same).
     pub interrupts: InterruptMap,
+    /// Which free virtio transport each device takes, the board's own
+    /// unless `--transport-order` names another.
+    pub transport_order: TransportOrder,
 }
 
 /// How a run ended.
@@ -123,7 +127,8 @@ pub const RUN_USAGE: &str = "[--cpu cortex-a57|armv9.2] [--ips N] [--max-ticks N
      \x20      [--stop-on-undefined] [--stop-on-bus-fault]\n\
      \x20      [--display WIDTHxHEIGHT] [--virtio-keyboard] [--virtio-tablet] [--disk <raw image>]\n\
      \x20      [--screenshot <file.ppm>] [--virtualization]\n\
-     \x20      [--interrupts uart=N,rtc=N,gpio=N,virtio=N,pcie-intx=N,msi-first=N,msi-count=N]";
+     \x20      [--interrupts uart=N,rtc=N,gpio=N,virtio=N,pcie-intx=N,msi-first=N,msi-count=N]\n\
+     \x20      [--transport-order first-free|last-free]";
 
 /// The display's frames, kept as the host would show them.
 #[derive(Default)]
@@ -285,6 +290,7 @@ impl RunArgs {
             screenshot: None,
             virtualization: Virtualization::Off,
             interrupts: InterruptMap::DEFAULT,
+            transport_order: TransportOrder::DEFAULT,
         }
     }
 
@@ -337,6 +343,12 @@ impl RunArgs {
             "--screenshot" => self.screenshot = Some(value(flag)?),
             "--virtualization" => self.virtualization = Virtualization::On,
             "--interrupts" => self.interrupts = interrupt_map(&value(flag)?)?,
+            "--transport-order" => {
+                let name = value(flag)?;
+                self.transport_order = name
+                    .parse()
+                    .map_err(|e| format!("--transport-order {name}: {e}"))?;
+            }
             _ => return Ok(Parsed::NotMine),
         }
         Ok(Parsed::Consumed)

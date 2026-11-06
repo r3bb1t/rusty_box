@@ -139,9 +139,94 @@ const POWER_BUTTON_HOLD_MICROS: u64 = 100_000;
 /// the run loop's tests a device double whose deadline is never cleared.
 const DEADLINE_SOURCES: usize = if cfg!(test) { 4 } else { 3 };
 
+/// Which free virtio-mmio transport each device plugged in takes, the
+/// devices taken in the order [`VirtioDevices`] gives. The virtio
+/// specification (OASIS virtio 1.2 §4.2) leaves where a device sits to the
+/// platform, and a guest finds it by the transport's registers and the
+/// device tree's node, so the order is the board's choice.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransportOrder {
+    /// The first transport the devices before it left free: the first
+    /// device plugged in at the lowest address, the first the device tree
+    /// lists.
+    FirstFree,
+    /// The last transport the devices before it left free, as QEMU's
+    /// `virt` hands `-device` options their bus (`hw/arm/virt.c`
+    /// `create_virtio_devices`).
+    LastFree,
+}
+
+impl TransportOrder {
+    /// Every order, in the order a list of them shows.
+    pub const ALL: [Self; 2] = [Self::FirstFree, Self::LastFree];
+
+    /// The order a board takes unless its host chooses another.
+    pub const DEFAULT: Self = Self::FirstFree;
+
+    /// The order's name for a command line or a configuration file, which
+    /// [`str::parse`] reads back.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::FirstFree => "first-free",
+            Self::LastFree => "last-free",
+        }
+    }
+
+    /// The transport the `n`th device plugged in takes.
+    const fn slot(self, n: u8) -> u8 {
+        match self {
+            Self::FirstFree => n,
+            Self::LastFree => (virtio_mmio::TRANSPORT_COUNT - 1) as u8 - n,
+        }
+    }
+}
+
+impl Default for TransportOrder {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl core::fmt::Display for TransportOrder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl core::str::FromStr for TransportOrder {
+    type Err = UnknownTransportOrder;
+
+    /// The order whose [`TransportOrder::name`] is `name`.
+    fn from_str(name: &str) -> Result<Self, UnknownTransportOrder> {
+        Self::ALL
+            .into_iter()
+            .find(|order| order.name() == name)
+            .ok_or(UnknownTransportOrder)
+    }
+}
+
+/// A name no [`TransportOrder`] has. It prints the names there are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnknownTransportOrder;
+
+impl core::fmt::Display for UnknownTransportOrder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("no transport order has that name; the orders are")?;
+        for (i, order) in TransportOrder::ALL.iter().enumerate() {
+            let separator = if i == 0 { " " } else { ", " };
+            write!(f, "{separator}\"{}\"", order.name())?;
+        }
+        Ok(())
+    }
+}
+
+impl core::error::Error for UnknownTransportOrder {}
+
 /// The display and input devices plugged into the board, in the order QEMU
 /// would be given them as `-device` options: the display, the keyboard, the
-/// tablet. Each takes the highest transport the ones before it left free.
+/// tablet. Each takes the transport the board's [`TransportOrder`] gives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct VirtioDevices {
     /// A virtio-gpu, asking the guest for this size.
@@ -250,7 +335,7 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// a GIC of `gic_shape` with `gic` (the Virtualization Extensions for a
     /// processor with EL2), whose frames it maps, the devices driving the
     /// SPIs `wiring` gives them and its GICv2m frame having the rest it
-    /// gives.
+    /// gives, and each virtio device in the transport `order` gives it.
     pub(crate) fn new(
         storage: S,
         rtc_epoch_seconds: u64,
@@ -259,15 +344,16 @@ impl<S: GuestStorage> VirtBoard<S> {
         gic: GicExtensions,
         gic_shape: GicShape,
         wiring: Wiring,
+        order: TransportOrder,
     ) -> Self {
         let devices = plugs.devices;
         let virtio_vendor = identity.virtio_vendor();
         let mut virtio: [Option<Transport>; MAX_DEVICES] = [None, None, None, None];
-        let mut next_slot = (virtio_mmio::TRANSPORT_COUNT - 1) as u8;
-        let mut plug = |device: Device, virtio: &mut [Option<Transport>; MAX_DEVICES]| {
-            if let Some(free) = virtio.iter_mut().find(|t| t.is_none()) {
-                *free = Some(Transport::new(next_slot, device));
-                next_slot -= 1;
+        // The `n`th device plugged in fills the `n`th entry and sits behind
+        // the transport the order gives the `n`th.
+        let plug = |device: Device, virtio: &mut [Option<Transport>; MAX_DEVICES]| {
+            if let Some(n) = virtio.iter().position(Option::is_none) {
+                virtio[n] = Some(Transport::new(order.slot(n as u8), device));
             }
         };
         #[cfg(feature = "alloc")]
@@ -318,6 +404,17 @@ impl<S: GuestStorage> VirtBoard<S> {
             #[cfg(test)]
             stuck_deadline: None,
         }
+    }
+
+    /// A bit per transport a device is plugged into, transport `n` bit `n`,
+    /// for a snapshot's record of how a machine was built; 32 bits hold
+    /// every transport.
+    pub(crate) fn occupied_transports(&self) -> u32 {
+        const _: () = assert!(virtio_mmio::TRANSPORT_COUNT <= u32::BITS as u64);
+        self.virtio
+            .iter()
+            .flatten()
+            .fold(0, |mask, t| mask | 1 << t.slot())
     }
 
     /// The transport at `slot`, if a device is plugged into it.

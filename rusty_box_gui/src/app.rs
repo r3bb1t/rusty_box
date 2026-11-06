@@ -650,6 +650,16 @@ fn spectre_report_label(report: rusty_box_aarch64::SpectreReport) -> &'static st
     }
 }
 
+/// What the Processor page's Virtio transports list shows for each
+/// [`rusty_box_aarch64::TransportOrder`].
+#[cfg(not(target_arch = "wasm32"))]
+fn transport_order_label(order: rusty_box_aarch64::TransportOrder) -> &'static str {
+    match order {
+        rusty_box_aarch64::TransportOrder::FirstFree => "From the first",
+        rusty_box_aarch64::TransportOrder::LastFree => "From the last",
+    }
+}
+
 /// A Processor page row editing `spi`, by its number among the SPIs, within
 /// the ones a GICv2 has. Returns whether it changed.
 #[cfg(not(target_arch = "wasm32"))]
@@ -798,6 +808,7 @@ struct VirtSettings {
     /// The SPIs the devices drive, which `to_config` checks against the
     /// GIC's.
     interrupts: rusty_box_aarch64::InterruptMap,
+    transport_order: rusty_box_aarch64::TransportOrder,
     boot: VirtBootChoice,
     firmware_path: String,
     vars_path: String,
@@ -858,6 +869,7 @@ impl VirtSettings {
             gic_spis: config.gic.spis,
             gic_priority_bits: config.gic.priority_bits,
             interrupts: config.interrupts,
+            transport_order: config.transport_order,
             boot: VirtBootChoice::Nothing,
             firmware_path: String::new(),
             vars_path: String::new(),
@@ -969,6 +981,7 @@ impl VirtSettings {
                 priority_bits: self.gic_priority_bits,
             },
             interrupts,
+            transport_order: self.transport_order,
             boot,
             display,
             keyboard: self.keyboard,
@@ -3726,6 +3739,24 @@ impl NativeShellApp {
                     changed |= spi_field(ui, "PCIe INTA-INTD first SPI (4)", &mut map.pcie_intx, editable);
                     changed |= spi_field(ui, "MSI frame first SPI", &mut map.msi.first, editable);
                     changed |= msi_count_field(ui, &mut map.msi.count, map.msi.first, virt.gic_spis, editable);
+                    // Which free virtio transport each device (the display,
+                    // the keyboard, the tablet, the disk, in that order)
+                    // takes.
+                    field_row(ui, "Virtio transports (display, input, disk)", |ui| {
+                        egui::ComboBox::from_id_salt("virt transport order")
+                            .selected_text(transport_order_label(virt.transport_order))
+                            .show_ui(ui, |ui| {
+                                for order in rusty_box_aarch64::TransportOrder::ALL {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut virt.transport_order,
+                                            order,
+                                            transport_order_label(order),
+                                        )
+                                        .changed();
+                                }
+                            });
+                    });
                     changed |= field_row(ui, "IPS target", |ui| {
                         draw_u32_field(
                             ui,
@@ -8118,6 +8149,7 @@ mod tests {
                     },
                     ..rusty_box_aarch64::InterruptMap::DEFAULT
                 },
+                transport_order: rusty_box_aarch64::TransportOrder::LastFree,
                 boot: crate::config::ArmBoot::Linux {
                     kernel: std::path::PathBuf::from("Image"),
                     initrd: Some(std::path::PathBuf::from("initramfs.cpio.gz")),

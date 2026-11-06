@@ -62,7 +62,7 @@ pub mod machine;
 mod softfloat;
 pub mod storage;
 
-pub use board::{Plugged, VirtioDevices};
+pub use board::{Plugged, TransportOrder, UnknownTransportOrder, VirtioDevices};
 pub use bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 pub use cpu::{
     Btype, CounterRate, Cpu, CpuConfig, CpuModel, CpuState, CpuStateEl2, El, El2Unavailable,
