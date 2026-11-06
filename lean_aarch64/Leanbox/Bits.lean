@@ -1,21 +1,22 @@
 /-
 Byte access with `USize` indices and the Arm ARM's shared bit pseudocode.
 
-Every access to a `ByteArray` goes through `gb`/`sb` with a `USize` index
-and the bounds lemma, so no access carries a `Nat` (bignum) fallback. A
-2-, 4- or 8-byte word wholly in bounds is checked once: `ByteArray.word_lt`
-proves each of its bytes in bounds from that check, so the bytes are read
-with no check of their own and the C compiler joins the reads into one load
-(the stores stay separate, each with the runtime's exclusivity check).
+Indices are `USize`, so no access carries a `Nat` (bignum) fallback, and
+every access is written `m[i]` or `m.uset i v`: the bounds proofs come from
+`get_elem_tactic`, extended below with the facts this file's checks put in
+context. A 2-, 4- or 8-byte word is checked once (`ByteArray.WordIn`); each
+of its bytes is proven in bounds from that one check, so the byte reads are
+straight-line and the C compiler joins them into one load (the byte stores
+stay separate, each after the runtime's exclusivity check).
 -/
 
+theorem ByteArray.usize_toNat_le (m : ByteArray) : m.usize.toNat ≤ m.size := by
+  simp only [ByteArray.usize, USize.toNat_ofNat']
+  exact Nat.mod_le _ _
+
 theorem ByteArray.lt_size_of_lt_usize {m : ByteArray} {i : USize} (h : i < m.usize) :
-    i.toNat < m.size := by
-  have h1 : i.toNat < m.usize.toNat := USize.lt_iff_toNat_lt.mp h
-  have h2 : m.usize.toNat ≤ m.size := by
-    simp only [ByteArray.usize, USize.toNat_ofNat']
-    exact Nat.mod_le _ _
-  omega
+    i.toNat < m.size :=
+  Nat.lt_of_lt_of_le (USize.lt_iff_toNat_lt.mp h) m.usize_toNat_le
 
 theorem Array.lt_size_of_lt_usize {α} {a : Array α} {i : USize} (h : i < a.usize) :
     i.toNat < a.size := by
@@ -25,107 +26,95 @@ theorem Array.lt_size_of_lt_usize {α} {a : Array α} {i : USize} (h : i < a.usi
     exact Nat.mod_le _ _
   omega
 
-theorem ByteArray.usize_toNat_le (m : ByteArray) : m.usize.toNat ≤ m.size := by
-  simp only [ByteArray.usize, USize.toNat_ofNat']
-  exact Nat.mod_le _ _
+/-- A `w`-byte word at `i` lies inside `m`: one check, which cannot overflow
+(`i + w` could). -/
+abbrev ByteArray.WordIn (m : ByteArray) (i w : USize) : Prop := w ≤ m.usize ∧ i ≤ m.usize - w
 
-/-- Byte `k` of a `w`-byte word at `i` is in bounds once the whole word is:
-one check stands for all `w` bytes, so their reads carry no check of their
-own. -/
-theorem ByteArray.word_lt {m : ByteArray} {i k w : USize} (h : w ≤ m.usize ∧ i ≤ m.usize - w)
+/-- Byte `k` of a word inside `m` is inside `m`. -/
+theorem ByteArray.WordIn.lt {m : ByteArray} {i k w : USize} (h : m.WordIn i w)
     (hk : k.toNat < w.toNat) : (i + k).toNat < m.size := by
   have h1 := USize.le_iff_toNat_le.mp h.1
   have h2 := USize.le_iff_toNat_le.mp h.2
   rw [USize.toNat_sub_of_le _ _ h.1] at h2
-  have h3 := m.usize_toNat_le
-  have h4 := USize.toNat_lt_size m.usize
-  have h5 := USize.size_eq_two_pow
+  have := m.usize_toNat_le
+  have := USize.toNat_lt_size m.usize
+  have := USize.size_eq_two_pow
   rw [USize.toNat_add, Nat.mod_eq_of_lt (by omega)]
   omega
 
-/-- Literal indices compare as their values (each below 2^32, so on every
-platform). -/
-theorem USize.lit_lt {a b : Nat} (hb : b < 4294967296) (h : a < b) :
-    (USize.ofNat a).toNat < (USize.ofNat b).toNat := by
-  rw [USize.toNat_ofNat_of_lt_32 (by omega), USize.toNat_ofNat_of_lt_32 hb]; exact h
+theorem ByteArray.WordIn.lt_zero {m : ByteArray} {i w : USize} (h : m.WordIn i w)
+    (hw : 0 < w.toNat) : i.toNat < m.size := by
+  simpa using h.lt (k := 0) (by simpa using hw)
 
-theorem ByteArray.size_uset' (m : ByteArray) (i : USize) (v : UInt8) (h : i.toNat < m.size) :
-    (m.uset i v h).size = m.size := by
+@[simp] theorem ByteArray.size_uset (m : ByteArray) (i : USize) (v : UInt8)
+    (h : i.toNat < m.size) : (m.uset i v h).size = m.size := by
   cases m; exact Array.size_uset ..
+
+/- The bounds of `m[i]`, `m[i + k]` and `m.uset i v` from what is in context:
+`i < m.usize`, or a `WordIn` that holds `i` (a store leaves the size alone,
+so a `WordIn` of the array before a chain of stores serves every store in
+it). -/
+macro_rules
+  | `(tactic| get_elem_tactic_extensible) =>
+    `(tactic| first
+      | exact ByteArray.lt_size_of_lt_usize ‹_›
+      | exact Array.lt_size_of_lt_usize ‹_›
+      | ((try simp only [ByteArray.size_uset]);
+         first
+         | exact ByteArray.WordIn.lt ‹_› (by simp [USize.toNat_ofNat_of_lt_32])
+         | exact ByteArray.WordIn.lt_zero ‹_› (by simp [USize.toNat_ofNat_of_lt_32])))
 
 namespace Leanbox
 
+/-- Byte `i`, or 0 past the end. -/
 @[inline] def gb (m : ByteArray) (i : USize) : UInt64 :=
-  if h : i < m.usize then (m.uget i (ByteArray.lt_size_of_lt_usize h)).toUInt64 else 0
+  if _ : i < m.usize then m[i].toUInt64 else 0
 
-/-- Byte `k` of a word whose bounds `h` proved, read with no check. -/
-@[inline] def gw (m : ByteArray) {i w : USize} (h : w ≤ m.usize ∧ i ≤ m.usize - w) (k : USize)
-    (hk : k.toNat < w.toNat) : UInt64 :=
-  (m.uget (i + k) (ByteArray.word_lt h hk)).toUInt64
-
-/-- A store of one byte that keeps the array's size `n` in its type, so the
-next byte's bounds proof carries over. -/
-@[inline] def putw (m : ByteArray) (n : Nat) (hn : m.size = n) (j : USize) (hj : j.toNat < n)
-    (v : UInt64) : { r : ByteArray // r.size = n } :=
-  ⟨m.uset j v.toUInt8 (hn ▸ hj), by rw [ByteArray.size_uset']; exact hn⟩
-
-/- A word wholly in bounds is read (written) under one check, its bytes
-straight-line, which the C compiler joins into one load; a word reaching past
-the end is read (written) byte by byte, each byte outside reading 0 (left
-unwritten). -/
-@[inline] def ld16 (m : ByteArray) (i : USize) : UInt64 :=
-  if h : 2 ≤ m.usize ∧ i ≤ m.usize - 2 then
-    gw m h 0 (USize.lit_lt (by decide) (by decide)) ||| (gw m h 1 (USize.lit_lt (by decide) (by decide)) <<< 8)
-  else gb m i ||| (gb m (i+1) <<< 8)
-@[inline] def ld32 (m : ByteArray) (i : USize) : UInt64 :=
-  if h : 4 ≤ m.usize ∧ i ≤ m.usize - 4 then
-    gw m h 0 (USize.lit_lt (by decide) (by decide)) ||| (gw m h 1 (USize.lit_lt (by decide) (by decide)) <<< 8) ||| (gw m h 2 (USize.lit_lt (by decide) (by decide)) <<< 16)
-      ||| (gw m h 3 (USize.lit_lt (by decide) (by decide)) <<< 24)
-  else gb m i ||| (gb m (i+1) <<< 8) ||| (gb m (i+2) <<< 16) ||| (gb m (i+3) <<< 24)
-@[inline] def ld64 (m : ByteArray) (i : USize) : UInt64 :=
-  if h : 8 ≤ m.usize ∧ i ≤ m.usize - 8 then
-    gw m h 0 (USize.lit_lt (by decide) (by decide)) ||| (gw m h 1 (USize.lit_lt (by decide) (by decide)) <<< 8) ||| (gw m h 2 (USize.lit_lt (by decide) (by decide)) <<< 16)
-      ||| (gw m h 3 (USize.lit_lt (by decide) (by decide)) <<< 24) ||| (gw m h 4 (USize.lit_lt (by decide) (by decide)) <<< 32)
-      ||| (gw m h 5 (USize.lit_lt (by decide) (by decide)) <<< 40) ||| (gw m h 6 (USize.lit_lt (by decide) (by decide)) <<< 48)
-      ||| (gw m h 7 (USize.lit_lt (by decide) (by decide)) <<< 56)
-  else
-    let lo := gb m i ||| (gb m (i+1) <<< 8) ||| (gb m (i+2) <<< 16) ||| (gb m (i+3) <<< 24)
-    let hi := gb m (i+4) ||| (gb m (i+5) <<< 8) ||| (gb m (i+6) <<< 16) ||| (gb m (i+7) <<< 24)
-    lo ||| (hi <<< 32)
-
+/-- Byte `i` set to `v`'s low byte, or `m` unchanged past the end. -/
 @[inline] def sb (m : ByteArray) (i : USize) (v : UInt64) : ByteArray :=
-  if h : i < m.usize then m.uset i v.toUInt8 (ByteArray.lt_size_of_lt_usize h) else m
-@[inline] def st16 (m : ByteArray) (i : USize) (v : UInt64) : ByteArray :=
-  if h : 2 ≤ m.usize ∧ i ≤ m.usize - 2 then
-    let n := m.size
-    have p (k : USize) (hk : k.toNat < (2 : USize).toNat) : (i + k).toNat < n := ByteArray.word_lt h hk
-    let r := putw m n rfl (i+0) (p 0 (USize.lit_lt (by decide) (by decide))) v
-    (putw r.1 n r.2 (i+1) (p 1 (USize.lit_lt (by decide) (by decide))) (v >>> 8)).1
-  else sb (sb m i v) (i+1) (v >>> 8)
-@[inline] def st32 (m : ByteArray) (i : USize) (v : UInt64) : ByteArray :=
-  if h : 4 ≤ m.usize ∧ i ≤ m.usize - 4 then
-    let n := m.size
-    have p (k : USize) (hk : k.toNat < (4 : USize).toNat) : (i + k).toNat < n := ByteArray.word_lt h hk
-    let r := putw m n rfl (i+0) (p 0 (USize.lit_lt (by decide) (by decide))) v
-    let r := putw r.1 n r.2 (i+1) (p 1 (USize.lit_lt (by decide) (by decide))) (v >>> 8)
-    let r := putw r.1 n r.2 (i+2) (p 2 (USize.lit_lt (by decide) (by decide))) (v >>> 16)
-    (putw r.1 n r.2 (i+3) (p 3 (USize.lit_lt (by decide) (by decide))) (v >>> 24)).1
-  else sb (sb (sb (sb m i v) (i+1) (v >>> 8)) (i+2) (v >>> 16)) (i+3) (v >>> 24)
-@[inline] def st64 (m : ByteArray) (i : USize) (v : UInt64) : ByteArray :=
-  if h : 8 ≤ m.usize ∧ i ≤ m.usize - 8 then
-    let n := m.size
-    have p (k : USize) (hk : k.toNat < (8 : USize).toNat) : (i + k).toNat < n := ByteArray.word_lt h hk
-    let r := putw m n rfl (i+0) (p 0 (USize.lit_lt (by decide) (by decide))) v
-    let r := putw r.1 n r.2 (i+1) (p 1 (USize.lit_lt (by decide) (by decide))) (v >>> 8)
-    let r := putw r.1 n r.2 (i+2) (p 2 (USize.lit_lt (by decide) (by decide))) (v >>> 16)
-    let r := putw r.1 n r.2 (i+3) (p 3 (USize.lit_lt (by decide) (by decide))) (v >>> 24)
-    let r := putw r.1 n r.2 (i+4) (p 4 (USize.lit_lt (by decide) (by decide))) (v >>> 32)
-    let r := putw r.1 n r.2 (i+5) (p 5 (USize.lit_lt (by decide) (by decide))) (v >>> 40)
-    let r := putw r.1 n r.2 (i+6) (p 6 (USize.lit_lt (by decide) (by decide))) (v >>> 48)
-    (putw r.1 n r.2 (i+7) (p 7 (USize.lit_lt (by decide) (by decide))) (v >>> 56)).1
+  if _ : i < m.usize then m.uset i v.toUInt8 else m
+
+/- Little-endian words. A word inside `m` is read (written) under its one
+`WordIn` check; a word reaching past the end byte by byte, each byte outside
+reading 0 (left unwritten). -/
+@[inline] def ld16 (m : ByteArray) (i : USize) : UInt64 :=
+  if _ : m.WordIn i 2 then m[i].toUInt64 ||| m[i+1].toUInt64 <<< 8
+  else gb m i ||| gb m (i+1) <<< 8
+
+@[inline] def ld32 (m : ByteArray) (i : USize) : UInt64 :=
+  if _ : m.WordIn i 4 then
+    m[i].toUInt64 ||| m[i+1].toUInt64 <<< 8 ||| m[i+2].toUInt64 <<< 16 ||| m[i+3].toUInt64 <<< 24
+  else gb m i ||| gb m (i+1) <<< 8 ||| gb m (i+2) <<< 16 ||| gb m (i+3) <<< 24
+
+@[inline] def ld64 (m : ByteArray) (i : USize) : UInt64 :=
+  if _ : m.WordIn i 8 then
+    m[i].toUInt64 ||| m[i+1].toUInt64 <<< 8 ||| m[i+2].toUInt64 <<< 16 ||| m[i+3].toUInt64 <<< 24
+      ||| m[i+4].toUInt64 <<< 32 ||| m[i+5].toUInt64 <<< 40 ||| m[i+6].toUInt64 <<< 48
+      ||| m[i+7].toUInt64 <<< 56
   else
-    let m := sb (sb (sb (sb m i v) (i+1) (v >>> 8)) (i+2) (v >>> 16)) (i+3) (v >>> 24)
-    sb (sb (sb (sb m (i+4) (v >>> 32)) (i+5) (v >>> 40)) (i+6) (v >>> 48)) (i+7) (v >>> 56)
+    gb m i ||| gb m (i+1) <<< 8 ||| gb m (i+2) <<< 16 ||| gb m (i+3) <<< 24
+      ||| gb m (i+4) <<< 32 ||| gb m (i+5) <<< 40 ||| gb m (i+6) <<< 48 ||| gb m (i+7) <<< 56
+
+@[inline] def st16 (m : ByteArray) (i : USize) (v : UInt64) : ByteArray :=
+  if _ : m.WordIn i 2 then m |>.uset i v.toUInt8 |>.uset (i+1) (v >>> 8).toUInt8
+  else m |> (sb · i v) |> (sb · (i+1) (v >>> 8))
+
+@[inline] def st32 (m : ByteArray) (i : USize) (v : UInt64) : ByteArray :=
+  if _ : m.WordIn i 4 then
+    m |>.uset i v.toUInt8 |>.uset (i+1) (v >>> 8).toUInt8
+      |>.uset (i+2) (v >>> 16).toUInt8 |>.uset (i+3) (v >>> 24).toUInt8
+  else m |> (sb · i v) |> (sb · (i+1) (v >>> 8)) |> (sb · (i+2) (v >>> 16)) |> (sb · (i+3) (v >>> 24))
+
+@[inline] def st64 (m : ByteArray) (i : USize) (v : UInt64) : ByteArray :=
+  if _ : m.WordIn i 8 then
+    m |>.uset i v.toUInt8 |>.uset (i+1) (v >>> 8).toUInt8
+      |>.uset (i+2) (v >>> 16).toUInt8 |>.uset (i+3) (v >>> 24).toUInt8
+      |>.uset (i+4) (v >>> 32).toUInt8 |>.uset (i+5) (v >>> 40).toUInt8
+      |>.uset (i+6) (v >>> 48).toUInt8 |>.uset (i+7) (v >>> 56).toUInt8
+  else
+    m |> (sb · i v) |> (sb · (i+1) (v >>> 8)) |> (sb · (i+2) (v >>> 16)) |> (sb · (i+3) (v >>> 24))
+      |> (sb · (i+4) (v >>> 32)) |> (sb · (i+5) (v >>> 40)) |> (sb · (i+6) (v >>> 48))
+      |> (sb · (i+7) (v >>> 56))
 /-- Load `1 << size` bytes, little-endian. -/
 @[inline] def ldN (m : ByteArray) (i : USize) (size : UInt8) : UInt64 :=
   match size with | 0 => gb m i | 1 => ld16 m i | 2 => ld32 m i | _ => ld64 m i
@@ -133,9 +122,9 @@ unwritten). -/
   match size with | 0 => sb m i v | 1 => st16 m i v | 2 => st32 m i v | _ => st64 m i v
 
 @[inline] def agu {α} (a : Array α) (i : USize) (dflt : α) : α :=
-  if h : i < a.usize then a.uget i (Array.lt_size_of_lt_usize h) else dflt
+  if _ : i < a.usize then a[i] else dflt
 @[inline] def asu {α} (a : Array α) (i : USize) (v : α) : Array α :=
-  if h : i < a.usize then a.uset i v (Array.lt_size_of_lt_usize h) else a
+  if _ : i < a.usize then a.uset i v (by get_elem_tactic) else a
 
 /-- `n` zero bytes, built by doubling (each step one copy). -/
 def zeros (n : Nat) : ByteArray := Id.run do

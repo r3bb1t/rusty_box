@@ -137,7 +137,8 @@ callgrind (Alpine to its first 40M instructions):
 | every pure ALU op in `run` (`Cpu/Alu.lean`, shared with `execOp`) | | 24.6 s | 23.6 s |
 | the common trace lookup inline in `run` (no `Next` allocated) | 394 | 15.2 s | 20.9 s |
 | counter polls fast-forwarded exactly (`Cpu/Poll.lean`, poll.rs's rule) | | 11.5 s | 20.9 s |
-| a word in bounds read under one check, its bytes proven in bounds (`ByteArray.word_lt`) | 300 | | |
+| a word in bounds read under one check, its bytes proven in bounds (`ByteArray.WordIn`) | 300 | | |
+| CLZ, CLS, RBIT, REV16, REV32, REV computed loop-free, proven equal to their pseudocode (`@[csimp]`, `bv_decide`) | 283 | | |
 
 The last step, measured on a slower 4-core VM, best of three, the timed loop
 only: Alpine to its root shell 23.3 → 30.2 M instructions/s, EDK2 to `Shell>`
@@ -147,6 +148,18 @@ access per word through a C helper, tried to measure the ceiling and not kept
 instruction, 33.5 M and 68.1 M: the proof recovers about 70% of that, the
 rest being the stores, whose bytes the C compiler cannot join because the
 runtime checks the array's exclusivity before each.
+
+The accesses are written as Lean writes array indexing, `m[i]`, `m[i+7]`,
+`m.uset i v`, with no proof terms in the code: `get_elem_tactic`, Lean's
+tactic for those side conditions, is extended (`macro_rules` on
+`get_elem_tactic_extensible`, `Bits.lean`) to find them from the check in
+context. The bit-counting and byte-reversing ops are defined as the Arm
+ARM's pseudocode loops (structural recursion over the bits, which a proof
+can unfold, where a `while` loop is opaque) and run as their loop-free forms:
+a `@[csimp]` theorem per op, proved by `bv_decide` for all 2^64 inputs of
+both widths, makes the compiler substitute the fast form. Over Alpine's first
+40M instructions, where the kernel counts bits often, that is 6% of the host
+instructions; over a whole boot it is within the timing noise.
 
 A register file of `FloatArray` words (one unboxed element per register,
 `Float.ofBits`/`toBits` as the casts) was tried and dropped: Lean canonicalizes

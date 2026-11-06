@@ -353,33 +353,6 @@ def extendReg (x : UInt64) (opt : UInt8) (shift : UInt64) (n : UInt64) : UInt64 
 
 def spAlignF : Fault := { ec := EC_SP_ALIGN }
 
-def clz64 (x : UInt64) (width : UInt64) : UInt64 := Id.run do
-  let mut n : UInt64 := 0
-  let mut i := width
-  while i > 0 do
-    if (x >>> (i - 1)) &&& 1 == 1 then return n
-    n := n + 1
-    i := i - 1
-  return n
-
-def rbit (x : UInt64) (width : UInt64) : UInt64 := Id.run do
-  let mut r : UInt64 := 0
-  for i in [0:width.toNat] do
-    if (x >>> i.toUInt64) &&& 1 == 1 then r := r ||| ((1 : UInt64) <<< (width - 1 - i.toUInt64))
-  return r
-
-/-- Reverse the bytes within each `cont`-byte container of the low `width`
-bits. -/
-def revBytes (x : UInt64) (width cont : UInt64) : UInt64 := Id.run do
-  let mut r : UInt64 := 0
-  let mut base : UInt64 := 0
-  while base < width do
-    for j in [0:cont.toNat] do
-      let b := (x >>> (base + 8 * j.toUInt64)) &&& 0xFF
-      r := r ||| (b <<< (base + 8 * (cont - 1 - j.toUInt64)))
-    base := base + 8 * cont
-  return r
-
 /-- CRC-32 or CRC-32C of `bytes` bytes of `data` into `acc`, bit-reflected. -/
 def crc32 (acc data bytes : UInt64) (castagnoli : Bool) : UInt64 := Id.run do
   let poly : UInt64 := if castagnoli then 0x82F6_3B78 else 0xEDB8_8320
