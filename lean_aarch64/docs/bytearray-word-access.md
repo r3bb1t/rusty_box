@@ -20,7 +20,7 @@ def uset : (a : ByteArray) → (i : USize) → UInt8 → (h : i.toNat < a.size) 
 A write keeps value semantics by checking that the array is not shared
 (reference count 1) and copying it first if it is (Ullrich and de Moura,
 *Counting Immutable Beans*). Lean has no write wider than one byte, so a
-64-bit store (`st64` in `Leanbox/Bits.lean`, used by every register write
+64-bit store (`st64` in `Leanbox/Bytes.lean`, used by every register write
 and every guest store) is eight writes, each after its own check. The C
 compiler cannot merge them: each byte store may alias the reference count
 it checked. In `run` that is 1,207 cold copy paths, a large part of why
@@ -61,7 +61,7 @@ Probably also the 16- and 32-bit forms, and big-endian ones.
 Nothing provable changes: the definitions are the models the emulator's
 proofs use now, and the C joins the runtime Lean's maintainers already
 review. Once released, `ld64`/`st64` (and the 16/32-bit forms) in
-`Bits.lean` call them, and the project stays pure Lean.
+`Bytes.lean` call them, and the project stays pure Lean.
 
 ## The way there
 
@@ -80,12 +80,12 @@ review. Once released, `ld64`/`st64` (and the 16/32-bit forms) in
 ## Pure-Lean work that does not wait on it
 
 - **Invariants in types**: the register file as
-  `{ b : ByteArray // b.size = RF_BYTES }` (`Cpu/Decode.lean`) and register
+  `{ b : ByteArray // b.size = RF_BYTES }` (`Isa/Op.lean`) and register
   slots a `Fin`, so the
   remaining bounds check on each register access becomes an erased proof.
 - **Less loop state in `run`**: the instruction count as the trace's start
   count plus the op index rather than a separate loop parameter.
 - **Longer or linked traces**, so fewer ops pass through `endTrace`.
-- **`run` total rather than `partial`** (with `drive` in `Run.lean` and
-  `checkLoop` in `Main.lean`): a `partial` function is opaque to proofs, which limits
+- **`run` total rather than `partial`** (with `drive` in `Engine/Machine.lean` and
+  `checkLoop` in `Lockstep.lean`): a `partial` function is opaque to proofs, which limits
   verification more than anything above.

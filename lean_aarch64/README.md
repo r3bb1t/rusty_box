@@ -45,7 +45,7 @@ GICv2, PL011, PL031, PL061, both CFI flash banks, the empty virtio-mmio
 transports and the PCI windows. The run loop is machine.rs `run_slice`'s:
 bursts to the next event, `sync_events`, `after_device_access`, interrupts
 between traces, WFI sleeping to the next event; and poll.rs's exact
-fast-forward of counter polls (`Cpu/Poll.lean`): at a counter read that
+fast-forward of counter polls (`Engine/Poll.lean`): at a counter read that
 starts a trace, one iteration is walked (only NOPs, one 64-bit compare of the
 counter register, ordering B.conds, B/BL/BR/BLR/RET, all fetched from TLB
 hits on stable memory, x30 periodic) and the iterations that take its path
@@ -134,9 +134,9 @@ callgrind (Alpine to its first 40M instructions):
 |---|---|---|---|
 | every op but a few ALU ones through `execOp` (an `St` allocated per op) | 535 | 40.6 s | 33.4 s |
 | loads and stores on data micro-TLBs, refilled from the TLB without allocating | | 34.6 s | 30.9 s |
-| every pure ALU op in `run` (`Cpu/Alu.lean`, shared with `execOp`) | | 24.6 s | 23.6 s |
+| every pure ALU op in `run` (`Isa/Alu.lean`, shared with `execOp`) | | 24.6 s | 23.6 s |
 | the common trace lookup inline in `run` (no `Next` allocated) | 394 | 15.2 s | 20.9 s |
-| counter polls fast-forwarded exactly (`Cpu/Poll.lean`, poll.rs's rule) | | 11.5 s | 20.9 s |
+| counter polls fast-forwarded exactly (`Engine/Poll.lean`, poll.rs's rule) | | 11.5 s | 20.9 s |
 | a word in bounds read under one check, its bytes proven in bounds (`ByteArray.WordIn`) | 300 | | |
 | CLZ, CLS, RBIT, REV16, REV32, REV computed loop-free, proven equal to their pseudocode (`@[csimp]`, `bv_decide`) | 283 | | |
 | the TLB hit and the translation inline in their callers, so their pairs and `Except`s are never built (the walk stays out of line) | 246 | | |
@@ -156,7 +156,7 @@ runtime checks the array's exclusivity before each.
 The accesses are written as Lean writes array indexing, `m[i]`, `m[i+7]`,
 `m.uset i v`, with no proof terms in the code: `get_elem_tactic`, Lean's
 tactic for those side conditions, is extended (`macro_rules` on
-`get_elem_tactic_extensible`, `Bits.lean`) to find them from the check in
+`get_elem_tactic_extensible`, `Bytes.lean`) to find them from the check in
 context. The bit-counting and byte-reversing ops are defined as the Arm
 ARM's pseudocode loops (structural recursion over the bits, which a proof
 can unfold, where a `while` loop is opaque) and run as their loop-free forms:
@@ -227,20 +227,23 @@ register and RAM access.
 
 ## Layout
 
+The library reads in the order of `Leanbox.lean`'s imports, each part resting
+only on the parts before it; that module's documentation is the table of
+contents.
+
 | path | what |
 |---|---|
-| `Main.lean` | `leanbox edk2|linux check K MAX [script]` / `detail FROM COUNT` / `bare TESTS`: the oracle's checkpoint, per-instruction and single-instruction lines |
-| `Leanbox/Run.lean` | the chained interpreter `run`, the trace lookup, and the run loop (`drive`, `syncEvents`, `afterDeviceAccess`) |
-| `Leanbox/Cpu/Decode.lean` | the A64 decoder to `Op`, register-31 meanings resolved to slots |
-| `Leanbox/Cpu/Step.lean` | `execOp`: every op, completely (the reference the fast paths agree with) |
-| `Leanbox/Cpu/Exec.lean` | exceptions, ERET, the data access paths, PSCI, the system instructions |
-| `Leanbox/Cpu/Simd.lean` | structure loads/stores and the SIMD&FP data processing modelled so far |
-| `Leanbox/Cpu/Mmu.lean` | stage 1 walk, TLB, permissions |
-| `Leanbox/Cpu/Poll.lean` | the exact fast-forward of counter polls |
-| `Leanbox/Cpu/Alu.lean` | the values of the pure data-processing ops, shared by `execOp` and `run` |
-| `Leanbox/Cpu/Sysreg.lean` | the generic timer, the event register, `MRS`/`MSR` |
-| `Leanbox/Cpu/State.lean`, `Bus.lean` | the machine state and the board's bus |
-| `Leanbox/Dev/` | GICv2, PL011, PL031, PL061, CFI flash, the empty virtio-mmio transport, each with `#guard`s from its Rust tests |
+| `Leanbox.lean` | the whole library, in reading order, with its table of contents |
+| `Leanbox/Bytes.lean` | words read from and written to a `ByteArray`, every index proven in bounds |
+| `Leanbox/Isa/` | the instruction set before any machine: the Arm ARM's shared pseudocode (`Pseudocode`), `Op` (`Op`), the decoder (`Decode`), the data-processing values shared by `execOp` and `run`, with the fast bit operations proven equal to their definitions (`Alu`) |
+| `Leanbox/Dev/` | GICv2, PL011, PL031, PL061, CFI flash, the empty virtio-mmio transport |
+| `Leanbox/Board/` | the memory map (`Map`), the board and its bus outside RAM (`Basic`) |
+| `Leanbox/Cpu/` | the processor: its state (`State`), the generic timer and event register (`Timer`), stage 1 translation (`Mmu`), exceptions and retiring (`Exception`), data accesses (`Memory`), `MRS`/`MSR` (`Sysreg`), PSCI and the system instructions (`System`), SIMD&FP (`Simd`), and `execOp`, every op completely, the reference the fast paths agree with (`Step`) |
+| `Leanbox/Engine/` | the fast engine: traces and their lookup (`Trace`), the exact fast-forward of counter polls (`Poll`), the chained interpreter `run` (`Run`), the run loop (`Machine`) |
+| `Leanbox/Boot.lean` | the start states: the firmware boot and the direct kernel boot |
+| `Leanbox/Lockstep.lean` | the oracle's checkpoint, per-instruction and single-instruction lines, and the console script |
+| `Main.lean` | `leanbox edk2|linux check K MAX [script]` / `detail FROM COUNT` / `bare TESTS` |
+| `LeanboxTest/` | each device's Rust unit tests as `#guard`s (`lake test`) |
 | `bench/Chain.lean` | the chained interpreter's prototype on the perfbench loops |
 | `bench/Burst.lean` | `Chain.lean` with the per-trace burst limit `lim` |
 | `bench/history/` | the structure-threading design it replaced (`Arm3.lean.tmpl`, generated per register-file variant by `gen.py`) |
@@ -255,7 +258,8 @@ register and RAM access.
 
 ```bash
 # Lean 4.35 (lean, leanc and lake on PATH)
-cd lean_aarch64 && lake build          # leanc -O3 -DNDEBUG, from lakefile.lean
+cd lean_aarch64 && lake build          # leanc -O3 -DNDEBUG, from lakefile.toml
+lake test                              # every device's #guard checks
 ./.lake/build/bin/leanbox edk2 check 1000000 700000000 > lean.txt   # to Shell>, writes console.txt
 diff oracle/ref/ref_1M.txt lean.txt
 ./.lake/build/bin/leanbox edk2 detail 5000000 20   # registers after each of 20 instructions
@@ -281,7 +285,6 @@ cd bench
 lean -c Chain.c Chain.lean && leanc -O3 -DNDEBUG -o chain Chain.c
 ./chain alu 1        # also: memcpy, fnv; a scale of 0 runs a short version
 
-lean ../Leanbox/Dev/Pl011.lean   # compiles and runs its #guard checks
 
 # the oracles (standalone crates, outside the workspace)
 cd ../loops_oracle && cargo run --release -- alu 1   # also: memcpy, fnv

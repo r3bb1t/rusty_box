@@ -1,5 +1,8 @@
-import Leanbox.Cpu.Sysreg
-/-
+import Leanbox.Cpu.Timer
+import Leanbox.Isa.Pseudocode
+/-!
+# Address translation
+
 Stage 1 translation of the EL1&0 regime (cpu/mmu.rs, cpu/regime.rs,
 cpu/memattr.rs) for a Cortex-A57 without EL2: the 4 KiB granule alone (a
 TGx naming another reads as 4 KiB, regime.rs `Granule::decoded`), 44-bit

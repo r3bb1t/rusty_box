@@ -1,0 +1,17 @@
+name = "leanbox"
+defaultTargets = ["Leanbox", "leanbox"]
+testDriver = "LeanboxTest"
+moreLeancArgs = ["-O3", "-DNDEBUG"]
+
+# The emulator: every module, in reading order, from `Leanbox.lean`.
+[[lean_lib]]
+name = "Leanbox"
+
+# The devices' unit tests as `#guard`s: `lake test` builds it.
+[[lean_lib]]
+name = "LeanboxTest"
+
+[[lean_exe]]
+name = "leanbox"
+root = "Main"
+moreLeancArgs = ["-O3", "-DNDEBUG"]

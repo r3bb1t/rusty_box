@@ -1,5 +1,9 @@
-import Leanbox.Cpu.Exec
-/-
+import Leanbox.Cpu.Memory
+import Leanbox.Cpu.Sysreg
+import Leanbox.Isa.Decode
+/-!
+# SIMD and floating point
+
 SIMD&FP: the structure loads and stores (ldst.rs `exec_ldst_multiple`,
 `exec_ldst_single_structure`) and the Advanced SIMD and FP data processing
 this machine executes so far (cpu/simd.rs, cpu/simd_arith.rs, cpu/fp.rs).

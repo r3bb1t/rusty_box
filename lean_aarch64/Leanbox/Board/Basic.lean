@@ -1,11 +1,56 @@
-import Leanbox.Cpu.State
-/-
+import Leanbox.Bytes
+import Leanbox.Board.Map
+import Leanbox.Dev.Pl011
+import Leanbox.Dev.Gic
+import Leanbox.Dev.Flash
+import Leanbox.Dev.Pl031
+import Leanbox.Dev.Pl061
+import Leanbox.Dev.VirtioMmio
+/-!
+# The board
+
+`Board` holds the devices around the processor (board.rs `VirtBoard`).
+
 The board's bus outside RAM: board.rs `read_outside_ram`,
 `write_outside_ram`, `sync_device_lines`, `set_timer_lines`,
 `advance_devices`, `next_deadline`, for a board with no virtio device and no
 host serial input.
 -/
 namespace Leanbox
+
+/-- board.rs `VirtBoard`, with the flash banks' arrays, without the virtio
+devices (none plugged: every transport is empty, `Layout::Legacy`). -/
+structure Board where
+  flash0 : Dev.Flash.State
+  flash1 : Dev.Flash.State
+  gic : Dev.Gic.State
+  uart : Dev.Pl011.State
+  rtc : Dev.Pl031.State
+  gpio : Dev.Pl061.State
+  /-- The code bank's array (`FlashArray::ReadOnly`) and the variable
+  store's (`FlashArray::Writable`). -/
+  code : ByteArray
+  vars : ByteArray
+  /-- board.rs `deadline_moved`. -/
+  deadlineMoved : Bool
+  /-- board.rs `touched`. -/
+  touched : Bool
+  /-- board.rs `serial_input`: host bytes waiting for room in the UART's
+  receive FIFO, oldest first. -/
+  serialIn : ByteArray
+  deriving Inhabited
+
+def Board.new (code vars : ByteArray) : Board :=
+  { code := code, vars := vars
+    flash0 := Dev.Flash.State.new FLASH_BANK_SIZE
+    flash1 := Dev.Flash.State.new FLASH_BANK_SIZE
+    gic := Dev.Gic.State.new
+    uart := Dev.Pl011.State.new
+    rtc := Dev.Pl031.State.new Dev.Pl031.DEFAULT_RTC_EPOCH
+    gpio := Dev.Pl061.State.new
+    deadlineMoved := false
+    touched := false
+    serialIn := ByteArray.empty }
 
 @[inline] def valueMask (log2 : UInt8) : UInt64 :=
   match log2 with | 0 => 0xFF | 1 => 0xFFFF | 2 => 0xFFFF_FFFF | _ => MISS

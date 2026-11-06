@@ -1,6 +1,8 @@
-import Leanbox.Cpu.Exec
+import Leanbox.Isa.Pseudocode
 import Std.Tactic.BVDecide
-/-
+/-!
+# Data-processing values
+
 The values of the pure data-processing ops (cpu/dp.rs), shared by the
 reference executor (`execOp`) and the hot loop's handlers, so both compute
 each op the one way.
@@ -196,5 +198,32 @@ def dp2Val (sf : Bool) (opc : UInt8) (xn xm : UInt64) : UInt64 :=
   let y := if u then xm &&& 0xFFFF_FFFF else sext (xm &&& 0xFFFF_FFFF) 32
   let p := x * y
   if sub then xa - p else xa + p
+
+/-- Arm `ExtendReg(reg, type, shift, N)`. -/
+def extendReg (x : UInt64) (opt : UInt8) (shift : UInt64) (n : UInt64) : UInt64 :=
+  let unsigned := opt &&& 4 == 0
+  let len0 : UInt64 := 8 <<< (opt &&& 3).toUInt64
+  let len := min len0 (n - shift)
+  let v := x &&& ones len
+  let v := if unsigned then v else sext v len
+  mask32 (n == 64) (v <<< shift)
+
+/-- CRC-32 or CRC-32C of `bytes` bytes of `data` into `acc`, bit-reflected. -/
+def crc32 (acc data bytes : UInt64) (castagnoli : Bool) : UInt64 := Id.run do
+  let poly : UInt64 := if castagnoli then 0x82F6_3B78 else 0xEDB8_8320
+  let mut c := acc &&& 0xFFFF_FFFF
+  for i in [0:(8 * bytes).toNat] do
+    let bit := (data >>> i.toUInt64) &&& 1
+    let lsb := (c ^^^ bit) &&& 1
+    c := c >>> 1
+    if lsb == 1 then c := c ^^^ poly
+  return c
+
+/-- The high 64 bits of a 128-bit product. -/
+def mulHigh (a b : UInt64) (signed : Bool) : UInt64 :=
+  if signed then
+    let p : Int := a.toInt64.toInt * b.toInt64.toInt
+    (p >>> 64).toInt64.toUInt64
+  else ((a.toNat * b.toNat) >>> 64).toUInt64
 
 end Leanbox

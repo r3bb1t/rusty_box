@@ -1,78 +1,14 @@
-import Leanbox.Cpu.Decode
-import Leanbox.Dev.Pl011
-import Leanbox.Dev.Gic
-import Leanbox.Dev.Flash
-import Leanbox.Dev.Pl031
-import Leanbox.Dev.Pl061
-import Leanbox.Dev.VirtioMmio
-/-
-The machine's state: the board (board.rs `VirtBoard`) and the processor's
-rarely changing state (cpu/mod.rs `Cpu`, `SysRegs`, `Pstate` but NZCV), for
-a Cortex-A57 without EL2 (`NoEl2`) on the default `virt` board.
+import Leanbox.Board.Basic
+import Leanbox.Isa.Op
+/-!
+# The processor's state
+
+The processor's rarely changing state (cpu/mod.rs `Cpu`, `SysRegs`,
+`Pstate` but NZCV) for a Cortex-A57 without EL2 (`NoEl2`), with the
+machine's tables; the state a slow-path step works on (`St`); and the
+register file.
 -/
 namespace Leanbox
-
--- board.rs memory map
-def FLASH0_BASE : UInt64 := 0x0000_0000
-def FLASH_BANK_SIZE : UInt64 := 0x0400_0000
-def FLASH1_BASE : UInt64 := FLASH0_BASE + FLASH_BANK_SIZE
-def GIC_DIST_BASE : UInt64 := 0x0800_0000
-def GIC_DIST_SIZE : UInt64 := 0x1000
-def GIC_CPU_BASE : UInt64 := 0x0801_0000
-def GIC_CPU_SIZE : UInt64 := 0x2000
-def GIC_V2M_BASE : UInt64 := 0x0802_0000
-def GIC_V2M_SIZE : UInt64 := 0x1000
-def UART0_BASE : UInt64 := 0x0900_0000
-def RTC_BASE : UInt64 := 0x0901_0000
-def GPIO_BASE : UInt64 := 0x0903_0000
-def PRIMECELL_SIZE : UInt64 := 0x1000
-def VIRTIO_MMIO_BASE : UInt64 := 0x0A00_0000
-def PCIE_MMIO_BASE : UInt64 := 0x1000_0000
-def PCIE_MMIO_SIZE : UInt64 := 0x2EFF_0000
-def PCIE_PIO_BASE : UInt64 := 0x3EFF_0000
-def PCIE_PIO_SIZE : UInt64 := 0x1_0000
-def RAM_BASE : UInt64 := 0x4000_0000
-def PCIE_ECAM_BASE : UInt64 := 0x40_1000_0000
-def PCIE_ECAM_SIZE : UInt64 := 0x1000_0000
-def PCIE_MMIO_HIGH_BASE : UInt64 := 0x80_0000_0000
-def PCIE_MMIO_HIGH_SIZE : UInt64 := 0x80_0000_0000
--- board.rs IRQ_* / PPI_*
-def IRQ_UART0 : Nat := 32 + 1
-def IRQ_RTC : Nat := 32 + 2
-def IRQ_GPIO : Nat := 32 + 7
-def PPI_VIRTUAL_TIMER : Nat := 16 + 11
-def PPI_PHYSICAL_TIMER : Nat := 16 + 14
-def PPI_HYPERVISOR_TIMER : Nat := 16 + 10
-
-/-- machine.rs `RamSize::DEFAULT`. -/
-def RAM_SIZE : UInt64 := 256 * 1024 * 1024
-
-/-- rusty_box_core `ClockHz::BOCHS_DEFAULT`, and features.rs
-`QEMU_BACKCOMPAT_COUNTER_HZ`. -/
-def IPS : Nat := 50_000_000
-def COUNTER_HZ : Nat := 62_500_000
-
-/-- board.rs `VirtBoard`, with the flash banks' arrays, without the virtio
-devices (none plugged: every transport is empty, `Layout::Legacy`). -/
-structure Board where
-  flash0 : Dev.Flash.State
-  flash1 : Dev.Flash.State
-  gic : Dev.Gic.State
-  uart : Dev.Pl011.State
-  rtc : Dev.Pl031.State
-  gpio : Dev.Pl061.State
-  /-- The code bank's array (`FlashArray::ReadOnly`) and the variable
-  store's (`FlashArray::Writable`). -/
-  code : ByteArray
-  vars : ByteArray
-  /-- board.rs `deadline_moved`. -/
-  deadlineMoved : Bool
-  /-- board.rs `touched`. -/
-  touched : Bool
-  /-- board.rs `serial_input`: host bytes waiting for room in the UART's
-  receive FIFO, oldest first. -/
-  serialIn : ByteArray
-  deriving Inhabited
 
 /-- The trace cache's entries (a power of two). -/
 def CACHE : Nat := 16384
@@ -171,7 +107,7 @@ structure Sys where
   ctr : Array (Array Op)
   /-- Per 128-byte line of RAM, whether a cached trace holds code from it. -/
   cmark : ByteArray
-  /-- Counter reads whose poll walk failed (Cpu/Poll.lean), by PC. -/
+  /-- Counter reads whose poll walk failed (Engine/Poll.lean), by PC. -/
   noPoll : Array UInt64
   board : Board
   deriving Inhabited
@@ -221,18 +157,6 @@ def SCTLR_NTWI : UInt64 := (1 : UInt64) <<< 16
 def SCTLR_NTWE : UInt64 := (1 : UInt64) <<< 18
 def SCTLR_WXN : UInt64 := (1 : UInt64) <<< 19
 def SCTLR_UCI : UInt64 := (1 : UInt64) <<< 26
-
-def Board.new (code vars : ByteArray) : Board :=
-  { code := code, vars := vars
-    flash0 := Dev.Flash.State.new FLASH_BANK_SIZE
-    flash1 := Dev.Flash.State.new FLASH_BANK_SIZE
-    gic := Dev.Gic.State.new
-    uart := Dev.Pl011.State.new
-    rtc := Dev.Pl031.State.new Dev.Pl031.DEFAULT_RTC_EPOCH
-    gpio := Dev.Pl061.State.new
-    deadlineMoved := false
-    touched := false
-    serialIn := ByteArray.empty }
 
 /-- state.rs `reset_keeping_time` with mod.rs `SysRegs::reset` and
 `Pstate::reset::<NoEl2>`, at tick `icount`. -/

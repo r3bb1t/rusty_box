@@ -1,5 +1,7 @@
-import Leanbox.Cpu.Alu
-/-
+import Leanbox.Cpu.Step
+/-!
+# Counter polls
+
 Exact fast-forward of counter polls (cpu/poll.rs): a loop that only waits
 for the system counter to pass a value is moved straight to the end of its
 last iteration that goes the same way as the current one, leaving exactly
