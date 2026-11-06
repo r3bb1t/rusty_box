@@ -141,6 +141,8 @@ callgrind (Alpine to its first 40M instructions):
 | CLZ, CLS, RBIT, REV16, REV32, REV computed loop-free, proven equal to their pseudocode (`@[csimp]`, `bv_decide`) | 283 | | |
 | the TLB hit and the translation inline in their callers, so their pairs and `Except`s are never built (the walk stays out of line) | 246 | | |
 | `DC ZVA` to RAM one `copySlice` of a zero block; the eight micro-TLB words one `MicroTlb` structure in the loop | 242 | | |
+| the op read and matched in the branch that proves its index, so it is a borrow of the trace (no reference count per op) | 232 | | |
+| a second code page in the micro-TLB, so a branch back to the page it came from stays on the inline trace lookup | 191 | | |
 
 The last step, measured on a slower 4-core VM, best of three, the timed loop
 only: Alpine to its root shell 23.3 → 30.2 M instructions/s, EDK2 to `Shell>`
@@ -173,6 +175,17 @@ went to none, 283 → 246 host instructions per guest instruction, and,
 interleaved runs on the same VM, Alpine 29.5–31.4 → 34.9–36.1 M
 instructions/s and EDK2 60.4–63.5 → 66.7–67.9 M (rusty_box 91–95 M and
 219–227 M).
+
+An element read from an array is a borrow, with no reference count taken,
+as long as the array outlives it (LCNF's `ExplicitRC` derived borrows). `run`
+read its op with a default for an index past the end (`agu`), and the two
+values met at a join point whose parameter is owned, so every op was
+incremented and decremented; matched where `i < tr.usize` is in context, the
+op is `tr[i]` and stays a borrow. The kernel's calls and returns cross pages
+constantly, and with one code page cached each crossing missed the inline
+lookup: with two, the out-of-line `lookup` (and the `Next` it allocates) ran
+for 1.6M of the window's traces before and a fifth of that after,
+232 → 191 host instructions per guest instruction.
 
 What remains in `run` is mostly the C compiler's: `run` is one function with
 a value for each loop parameter live across every op, and calls in its slow

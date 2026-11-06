@@ -195,10 +195,12 @@ memory). -/
   let bits : UInt64 := 8 <<< size.toUInt64
   if opc == 2 then sext v bits else sext v bits &&& 0xFFFF_FFFF
 
-/-- The micro-TLBs `run` keeps from op to op: the code page (`cv` its VA
-page, `cp` its PA page), two read pages and one write page (`dv*` the VA
-page, `dp*` the RAM offset of the page). One object, so the loop carries one
-value for all eight, updated in place while `run` holds the only reference. -/
+/-- The micro-TLBs `run` keeps from op to op: two code pages (`cv*` the VA
+page, `cp*` its PA page; the newest first, the one it displaced second), two
+read pages and one write page (`dv*` the VA page, `dp*` the RAM offset of the
+page). One object, so the loop carries one value for all ten, updated in
+place while `run` holds the only reference. Every change of translation
+regime or exception level empties all of them together (flow 3). -/
 structure MicroTlb where
   cv : UInt64
   cp : UInt64
@@ -208,9 +210,11 @@ structure MicroTlb where
   dpw : UInt64
   dvr2 : UInt64
   dpr2 : UInt64
+  cv2 : UInt64
+  cp2 : UInt64
 
 /-- Every entry empty. -/
-def MicroTlb.empty : MicroTlb := ⟨MISS, MISS, MISS, MISS, MISS, MISS, MISS, MISS⟩
+def MicroTlb.empty : MicroTlb := ⟨MISS, MISS, MISS, MISS, MISS, MISS, MISS, MISS, MISS, MISS⟩
 
 /-- A read page refilled: the new page first, the one it displaces second. -/
 @[inline] def MicroTlb.refillRead (u : MicroTlb) (vp pg : UInt64) : MicroTlb :=
@@ -259,14 +263,17 @@ macro "storeAt!" va:term "," bytes:term "," hit:term : term => `(
     else slowpath!)
 
 /-- `tr[i]` is the next op; `tpc` the trace's first PC; `lim` the burst's
-end; (`cv`,`cp`) the code micro-TLB (VA page, PA page); (`dvr`,`dpr`) and
-(`dvw`,`dpw`) the data micro-TLBs for reads and writes (VA page, RAM offset
-page). Every handler ends in a tail call of `run`, compiled to a jump; the
+end; `mt` the code and data micro-TLBs (`MicroTlb`). Every handler ends in a tail call of `run`, compiled to a jump; the
 helpers it calls return. -/
 partial def run (rf mem : ByteArray) (sys : Sys) (tr : Array Op) (i : USize)
     (tpc nzcv icnt lim : UInt64) (mt : MicroTlb) : Res :=
-  let op := agu tr i .endTrace
   let pc := tpc + 4 * i.toUInt64
+  -- Every trace ends in `endTrace`, so `i` is always in range; the index
+  -- past the end goes to `DISPATCH`, which is `endTrace` at the same PC.
+  -- The op is read in the proven branch and matched there, so it is a
+  -- borrow of `tr` (no reference count taken per op).
+  if h : i < tr.usize then
+  let op := tr[i]
   match op with
   | .addR64 d n m =>
     run (wr rf d (rr rf n + rr rf m)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt
@@ -441,20 +448,27 @@ partial def run (rf mem : ByteArray) (sys : Sys) (tr : Array Op) (i : USize)
       run (wr rf n (base + off)) mem sys tr (i+1) tpc nzcv (icnt+1) lim mt)
   | .endTrace =>
     if icnt >= lim then { rf, mem, sys, pc, nzcv, icnt, why := 0 } else
-    -- the common case inline: no interrupt, the same code page, a cached
-    -- trace in RAM that fits in the burst
-    let pa := mt.cp ||| (pc &&& 0xFFF)
+    -- the common case inline: no interrupt, a code page in the micro-TLB, a
+    -- cached trace in RAM that fits in the burst
+    let vp := pc >>> 12
+    let second := vp != mt.cv && vp == mt.cv2
+    let cv := if second then mt.cv2 else mt.cv
+    let cp := if second then mt.cp2 else mt.cp
+    let pa := cp ||| (pc &&& 0xFFF)
     let idx := ((pa >>> 2) &&& (CACHE.toUInt64 - 1)).toUSize
     let t := agu sys.ctr idx DISPATCH
-    if pc >>> 12 == mt.cv && deliverable sys == 0 && !sys.il && agu sys.ctag idx MISS == pa
+    if vp == cv && deliverable sys == 0 && !sys.il && agu sys.ctag idx MISS == pa
         && inRam pa 4 && (t.size - 1).toUInt64 <= lim - icnt then
       run rf mem sys t 0 pc nzcv icnt lim mt
     else
-    let n := lookup rf mem sys pc nzcv icnt lim mt.cv mt.cp
-    if n.cv == MISS then
-      run n.rf n.mem n.sys n.tr 0 n.pc n.nzcv n.icnt lim { MicroTlb.empty with cv := n.cv, cp := n.cp }
-    else run n.rf n.mem n.sys n.tr 0 n.pc n.nzcv n.icnt lim { mt with cv := n.cv, cp := n.cp }
+    let n := lookup rf mem sys pc nzcv icnt lim cv cp
+    if n.cv == MISS then run n.rf n.mem n.sys n.tr 0 n.pc n.nzcv n.icnt lim MicroTlb.empty
+    else if n.cv == cv then run n.rf n.mem n.sys n.tr 0 n.pc n.nzcv n.icnt lim mt
+    else
+      run n.rf n.mem n.sys n.tr 0 n.pc n.nzcv n.icnt lim
+        { mt with cv := n.cv, cp := n.cp, cv2 := mt.cv, cp2 := mt.cp }
   | _ => slowpath!
+  else run rf mem sys DISPATCH 0 pc nzcv icnt lim mt
 
 -- ── the run loop: machine.rs ───────────────────────────────────────────
 /-- machine.rs `sync_events`. -/
