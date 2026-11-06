@@ -139,6 +139,7 @@ callgrind (Alpine to its first 40M instructions):
 | counter polls fast-forwarded exactly (`Cpu/Poll.lean`, poll.rs's rule) | | 11.5 s | 20.9 s |
 | a word in bounds read under one check, its bytes proven in bounds (`ByteArray.WordIn`) | 300 | | |
 | CLZ, CLS, RBIT, REV16, REV32, REV computed loop-free, proven equal to their pseudocode (`@[csimp]`, `bv_decide`) | 283 | | |
+| the TLB hit and the translation inline in their callers, so their pairs and `Except`s are never built (the walk stays out of line) | 246 | | |
 
 The last step, measured on a slower 4-core VM, best of three, the timed loop
 only: Alpine to its root shell 23.3 → 30.2 M instructions/s, EDK2 to `Shell>`
@@ -160,6 +161,17 @@ a `@[csimp]` theorem per op, proved by `bv_decide` for all 2^64 inputs of
 both widths, makes the compiler substitute the fast form. Over Alpine's first
 40M instructions, where the kernel counts bits often, that is 6% of the host
 instructions; over a whole boot it is within the timing noise.
+
+A function returning a pair or an `Except` allocates both when it is called
+out of line; inlined, the compiler's simplifier takes each apart where it is
+built (a `match` on a constructor it can see, and LCNF's `JpCases` for one
+reaching a join point), and nothing is allocated. `tlbEntry`, `translate`
+and `fetchTranslate` keep those types and are inline, with the walk on a miss
+(`tlbFill`) out of line: about 11M allocations in the 40M-instruction window
+went to none, 283 → 246 host instructions per guest instruction, and,
+interleaved runs on the same VM, Alpine 29.5–31.4 → 34.9–36.1 M
+instructions/s and EDK2 60.4–63.5 → 66.7–67.9 M (rusty_box 91–95 M and
+219–227 M).
 
 A register file of `FloatArray` words (one unboxed element per register,
 `Float.ofBits`/`toBits` as the casts) was tried and dropped: Lean canonicalizes

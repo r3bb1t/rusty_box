@@ -61,8 +61,9 @@ without EL2): its vector offset, FIQ first. -/
   else 0
 
 /-- The instruction fetch at `pc` for a trace lookup: its physical address,
-or the instruction abort (or PC alignment fault) it raises. -/
-def fetchTranslate (sys : Sys) (mem : ByteArray) (pc icnt : UInt64) : Sys × Except Fault UInt64 :=
+or the instruction abort (or PC alignment fault) it raises. Inline, as
+`translate` is. -/
+@[inline] def fetchTranslate (sys : Sys) (mem : ByteArray) (pc icnt : UInt64) : Sys × Except Fault UInt64 :=
   if pc &&& 3 != 0 then (sys, .error { ec := EC_PC_ALIGN, far := some pc }) else
   let (sys, r) := translate sys mem pc icnt AK_FETCH sys.el false
   match r with

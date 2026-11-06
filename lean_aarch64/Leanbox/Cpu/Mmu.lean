@@ -134,27 +134,35 @@ needs. -/
 
 def flushTlb (sys : Sys) : Sys := { sys with tlb := Array.replicate (2 * TLB_SETS) MISS }
 
-/-- The TLB entry for `va`'s page, walking on a miss and keeping what the
-walk found (mmu.rs `translate_needs`, `translate_miss`, `cache`). -/
-def tlbEntry (sys : Sys) (mem : ByteArray) (va now : UInt64) (fetch : Bool) :
+/-- A TLB miss at `va`: the walk, and the TLB keeping what it found
+(mmu.rs `translate_miss`, `cache`). -/
+def tlbFill (sys : Sys) (mem : ByteArray) (va now : UInt64) (fetch : Bool) :
+    Sys × Except UInt32 UInt64 :=
+  let vp := va >>> 12
+  let i := ((vp &&& (TLB_SETS.toUInt64 - 1)) * 2).toUSize
+  let board := sys.board
+  let sys := { sys with board := default }
+  let (board, r) := walk sys mem board va now fetch
+  let sys := { sys with board := board }
+  match r with
+  | .ok e => ({ sys with tlb := asu (asu sys.tlb i vp) (i + 1) e }, .ok e)
+  | .error f => (sys, .error f)
+
+/-- The TLB entry for `va`'s page (mmu.rs `translate_needs`). Inline, so that
+on a hit the pair and the `Except` are taken apart where they are built and
+never allocated; the miss is `tlbFill`'s. -/
+@[inline] def tlbEntry (sys : Sys) (mem : ByteArray) (va now : UInt64) (fetch : Bool) :
     Sys × Except UInt32 UInt64 :=
   let vp := va >>> 12
   let i := ((vp &&& (TLB_SETS.toUInt64 - 1)) * 2).toUSize
   if agu sys.tlb i MISS == vp then (sys, .ok (agu sys.tlb (i + 1) 0))
-  else
-    let board := sys.board
-    let sys := { sys with board := default }
-    let (board, r) := walk sys mem board va now fetch
-    let sys := { sys with board := board }
-    match r with
-    | .ok e => ({ sys with tlb := asu (asu sys.tlb i vp) (i + 1) e }, .ok e)
-    | .error f => (sys, .error f)
+  else tlbFill sys mem va now fetch
 
 /-- mmu.rs `translate_needs` for an access of `kind` checked at `el`:
 the physical address and whether it is Device memory, or the abort.
 `refuseDevice` is `OnDevice::Refused` (a misaligned access, where Device
-memory takes an alignment fault). -/
-def translate (sys : Sys) (mem : ByteArray) (va now : UInt64) (kind el : UInt8) (refuseDevice : Bool) :
+memory takes an alignment fault). Inline, as `tlbEntry` is. -/
+@[inline] def translate (sys : Sys) (mem : ByteArray) (va now : UInt64) (kind el : UInt8) (refuseDevice : Bool) :
     Sys × Except Abort (UInt64 × Bool) :=
   let write := kind == AK_WRITE
   if !mmuOn sys then
