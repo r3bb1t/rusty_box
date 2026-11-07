@@ -13,6 +13,7 @@ use rusty_box_devices::display::vga::VgaTextModeInfo;
 use rusty_box_devices::display::Resolution;
 
 use super::Gpu;
+use crate::board::RAM_BASE;
 use crate::bus::AccessWidth;
 use crate::devices::virtio::edid;
 use crate::devices::virtio::test_driver::*;
@@ -981,6 +982,200 @@ fn a_snapshot_shows_the_same_picture() {
     // And with what they took of the budget: the picture's pixels and its
     // one backing entry.
     let left = RAM_SIZE as u32 - 32 * 16 * 4 - 16;
+    assert_eq!(
+        status(
+            &mut resumed,
+            &cmd(RESOURCE_CREATE_2D, &[2, B8G8R8X8, left / 4, 1])
+        ),
+        OK_NODATA
+    );
+    assert_eq!(
+        status(&mut resumed, &cmd(RESOURCE_CREATE_2D, &[3, B8G8R8X8, 1, 1])),
+        ERR_OUT_OF_MEMORY
+    );
+}
+
+/// Send the request in `buffers` on the control queue, room for a bare
+/// header at `resp` after them; the response type.
+fn status_of_chain(d: &mut Driver, buffers: &[Buf], resp: u64) -> u32 {
+    let mut chain = buffers.to_vec();
+    chain.push(Buf::writable(resp, 24));
+    d.offer(0, &chain);
+    d.notify(0);
+    assert_eq!(d.used(0).len(), 1, "one command, one answer");
+    le32(d.mem(resp, 4), 0)
+}
+
+/// As many resources as the budget holds survive a snapshot, past any
+/// count but the budget's: 65,537 resources of a pixel each, the last of
+/// which the resumed device still answers for.
+#[test]
+fn a_snapshot_keeps_every_resource_the_budget_holds() {
+    const COUNT: u32 = (1 << 16) + 1;
+    let mut d = gpu(640, 480);
+    // One request buffer and one response buffer for every command, so the
+    // driver's memory holds them all.
+    let req = d.alloc(40);
+    let resp = d.alloc(24);
+    for id in 1..=COUNT {
+        d.put(req, &cmd(RESOURCE_CREATE_2D, &[id, B8G8R8X8, 1, 1]));
+        assert_eq!(
+            status_of_chain(&mut d, &[Buf::readable(req, 40)], resp),
+            OK_NODATA,
+            "resource {id}"
+        );
+    }
+    let saved = d.save();
+    let mut resumed = d.restored(Device::Gpu(display(Resolution::new(1, 1))), &saved);
+    assert_eq!(resumed.save(), saved);
+    assert_eq!(
+        status(&mut resumed, &cmd(RESOURCE_FLUSH, &[0, 0, 1, 1, COUNT, 0])),
+        OK_NODATA,
+        "the last resource is still there"
+    );
+    assert_eq!(
+        status(
+            &mut resumed,
+            &cmd(RESOURCE_CREATE_2D, &[COUNT, B8G8R8X8, 1, 1])
+        ),
+        ERR_INVALID_RESOURCE_ID,
+        "and its id still taken"
+    );
+    // And every one still takes its pixel of the budget.
+    let left = RAM_SIZE as u32 - COUNT * 4;
+    assert_eq!(
+        status(
+            &mut resumed,
+            &cmd(RESOURCE_CREATE_2D, &[COUNT + 1, B8G8R8X8, left / 4, 1])
+        ),
+        OK_NODATA
+    );
+    assert_eq!(
+        status(
+            &mut resumed,
+            &cmd(RESOURCE_CREATE_2D, &[COUNT + 2, B8G8R8X8, 1, 1])
+        ),
+        ERR_OUT_OF_MEMORY
+    );
+}
+
+/// The start of a device's state as `Gpu::save` lays it out: a display of
+/// 640 by 480, enabled, `count` resources, and then `resources`, each its
+/// id, 1 by 1, its pixel and `entries` backing entries of 4 bytes.
+fn saved_resources(count: u32, resources: &[(u32, u32)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for v in [640u32, 480] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.push(1);
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    for &(id, entries) in resources {
+        for v in [id, B8G8R8X8, 1, 1, 0, entries] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for _ in 0..entries {
+            out.extend_from_slice(&RAM_BASE.to_le_bytes());
+            out.extend_from_slice(&4u32.to_le_bytes());
+        }
+    }
+    out
+}
+
+/// What restoring `saved` onto a fresh device says, which reads it to its
+/// end or refuses it.
+fn restore_error(saved: &[u8]) -> Option<rusty_box_core::snap::SnapError> {
+    let mut r: &[u8] = saved;
+    display(Resolution::new(1, 1)).restore(&mut r).err()
+}
+
+/// A restore refuses a count of resources or of backing entries past what
+/// the budget holds, before reading any of them; up to that, it reads on
+/// until the image runs out. Two resources of one id are refused too.
+#[test]
+fn a_snapshot_past_the_budget_is_refused() {
+    use rusty_box_core::snap::SnapError;
+    let most = (RAM_SIZE / 4) as u32;
+    assert_eq!(
+        restore_error(&saved_resources(most, &[])),
+        Some(SnapError::Truncated),
+        "as many resources as the budget holds"
+    );
+    for count in [most + 1, u32::MAX] {
+        assert_eq!(
+            restore_error(&saved_resources(count, &[])),
+            Some(SnapError::Invalid(
+                "virtio-gpu resources past what the budget holds"
+            ))
+        );
+    }
+    let room = ((RAM_SIZE - 4) / 16) as u32;
+    let mut short = saved_resources(1, &[(1, 0)]);
+    let at = short.len() - 4;
+    short[at..].copy_from_slice(&room.to_le_bytes());
+    assert_eq!(
+        restore_error(&short),
+        Some(SnapError::Truncated),
+        "as many entries as the budget has left room for"
+    );
+    for entries in [room + 1, u32::MAX] {
+        short[at..].copy_from_slice(&entries.to_le_bytes());
+        assert_eq!(
+            restore_error(&short),
+            Some(SnapError::Invalid(
+                "virtio-gpu backing list past what the budget has left"
+            ))
+        );
+    }
+    assert_eq!(
+        restore_error(&saved_resources(2, &[(7, 1), (7, 1)])),
+        Some(SnapError::Invalid(
+            "virtio-gpu resource the device could not have made"
+        ))
+    );
+}
+
+/// As long a backing list as the budget has room for survives a snapshot,
+/// past any count but the budget's: 2^20 + 1 entries, on a device whose
+/// guest has 32 MiB of RAM. The list repeats one buffer in the test
+/// driver's RAM, as a guest may.
+#[test]
+fn a_snapshot_keeps_every_backing_entry_the_budget_holds() {
+    const RAM: usize = 32 << 20;
+    const BLOCK_ENTRIES: u32 = 1 << 16;
+    const ENTRIES: u32 = 16 * BLOCK_ENTRIES + 1;
+    let device = |preferred| Device::Gpu(Gpu::new(preferred, boards_display(), RAM));
+    let mut d = Driver::new(device(Resolution::new(640, 480)));
+    d.start(LINUX_FEATURES);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 1, 1])),
+        OK_NODATA
+    );
+    let pixel = d.alloc_with(&[1, 2, 3, 4]);
+    let mut entry = pixel.to_le_bytes().to_vec();
+    entry.extend_from_slice(&4u32.to_le_bytes());
+    entry.extend_from_slice(&0u32.to_le_bytes());
+    let block = d.alloc_with(&entry.repeat(BLOCK_ENTRIES as usize));
+    let header = d.alloc_with(&cmd(RESOURCE_ATTACH_BACKING, &[1, ENTRIES]));
+    let resp = d.alloc(24);
+    let mut request = vec![Buf::readable(header, 32)];
+    request.extend([Buf::readable(block, BLOCK_ENTRIES * 16); 16]);
+    request.push(Buf::readable(block, 16));
+    assert_eq!(status_of_chain(&mut d, &request, resp), OK_NODATA);
+
+    let saved = d.save();
+    let mut resumed = d.restored(device(Resolution::new(1, 1)), &saved);
+    assert_eq!(resumed.save(), saved);
+    assert_eq!(
+        status(
+            &mut resumed,
+            &cmd(TRANSFER_TO_HOST_2D, &[0, 0, 1, 1, 0, 0, 1, 0])
+        ),
+        OK_NODATA,
+        "the resource still has its backing"
+    );
+    // And the list still takes 16 bytes an entry of the budget.
+    let left = RAM as u32 - 4 - ENTRIES * 16;
     assert_eq!(
         status(
             &mut resumed,

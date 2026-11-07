@@ -1945,7 +1945,12 @@ one open.
   answered like `#0`.
 - **The firmware is PSCI 1.2 and SMCCC 1.5.** It reports PSCI 1.2 (DEN
   0022E), where QEMU 11.1.2 reports 1.1, with the same functions: every
-  one DEN 0022E Table 17 makes mandatory, and `MIGRATE_INFO_TYPE`. It
+  one DEN 0022E Table 17 makes mandatory, and `MIGRATE_INFO_TYPE`, which
+  answers 2, the answer §5.9 gives "a system that does not use a Trusted
+  OS", as this board has none: the call by which the firmware says so,
+  where `NOT_SUPPORTED` would leave the OS to infer it (§5.1.7). The rest
+  of Table 17's optional functions are features the board does not have
+  (suspend, a second reset, residency statistics, memory protection). It
   implements SMCCC 1.5 (DEN 0028F), where QEMU's firmware has no SMCCC
   call and so reads as SMCCC 1.0: `SMCCC_VERSION`, which `PSCI_FEATURES`
   reports (DEN 0022E §5.15.2), `SMCCC_ARCH_FEATURES`, and the three
@@ -2967,8 +2972,6 @@ the board's own:
   it to, which the device tree's `gpio-keys` node names.
 - The flash's CFI identity: manufacturer 0x89 (Intel), device 0x18, and
   QEMU's CFI table values.
-- PSCI's optional functions: `MIGRATE_INFO_TYPE` alone of DEN 0022E
-  Table 17's, QEMU's set, which `PSCI_FEATURES` reports.
 - virtio values: the queue sizes.
 - The direct boot's placement of the kernel, initrd and device tree, and
   `x4` holding the entry, left from QEMU's boot stub.

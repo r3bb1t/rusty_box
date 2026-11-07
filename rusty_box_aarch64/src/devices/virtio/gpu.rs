@@ -31,9 +31,10 @@
 //!   run (`virtio_gpu_simple_process_cmd`) and answered in turn, a fence
 //!   echoed (`virtio_gpu_ctrl_response`);
 //! - `virtio_gpu_get_display_info` and `virtio_gpu_get_edid` from the
-//!   requested display size (`virtio_gpu_base_fill_display_info`,
-//!   `virtio_gpu_base_generate_edid`), which the host changes with a display
-//!   event (`virtio_gpu_ui_info`, `virtio_gpu_notify_event`);
+//!   requested display size (`virtio_gpu_base_fill_display_info`), which the
+//!   host changes with a display event (`virtio_gpu_ui_info`,
+//!   `virtio_gpu_notify_event`); the EDID's contents are `edid.rs`'s, laid
+//!   out by VESA's documents;
 //! - `virtio_gpu_resource_create_2d`, `_unref`, `virtio_gpu_set_scanout`,
 //!   `virtio_gpu_resource_flush`, `virtio_gpu_transfer_to_host_2d`,
 //!   `virtio_gpu_resource_attach_backing` (`virtio_gpu_create_mapping_iov`)
@@ -86,6 +87,9 @@ pub const CONFIG_LEN: usize = 16;
 /// 16).
 const NUM_SCANOUTS: u32 = 1;
 
+/// The bytes of a pixel: 32 bits, the size of every format. A resource of
+/// one pixel takes this much of the budget, the least any resource takes.
+const PIXEL_LEN: u64 = 4;
 /// `sizeof(struct virtio_gpu_mem_entry)` (5.7.6.8): what one backing entry
 /// takes of the guest's request, and what the device charges for keeping
 /// it.
@@ -855,8 +859,7 @@ impl Gpu {
         let Some(format) = Format::from_wire(format) else {
             return Reply::Error(RESP_ERR_INVALID_PARAMETER);
         };
-        // 32 bits a pixel, the size of every format.
-        let bytes = u64::from(height) * u64::from(width) * 4;
+        let bytes = u64::from(height) * u64::from(width) * PIXEL_LEN;
         if bytes == 0 {
             return Reply::Error(RESP_ERR_INVALID_PARAMETER);
         }
@@ -1204,7 +1207,21 @@ impl Gpu {
             Output::Disabled
         };
         self.events_read = r.read_u32()?;
-        let count = r.read_count(1 << 16)?;
+        // The device's own limits bound both counts below, not
+        // `read_count`'s format-wide `MAX_COUNT`: a guest reaches more
+        // resources, and longer backing lists, than that. Neither list is
+        // allocated ahead of its items: each item is read from the image
+        // before the list grows for the next, so a corrupt count ends where
+        // the image does, never in an allocation the count asks for.
+        //
+        // As many resources as the budget holds of the smallest, a pixel
+        // each (`create_2d`).
+        let count = r.read_u32()?;
+        if u64::from(count) > self.budget / PIXEL_LEN {
+            return Err(SnapError::Invalid(
+                "virtio-gpu resources past what the budget holds",
+            ));
+        }
         self.resources.clear();
         self.hostmem = 0;
         for _ in 0..count {
@@ -1214,8 +1231,8 @@ impl Gpu {
             ))?;
             let width = r.read_u32()?;
             let height = r.read_u32()?;
-            let bytes = u64::from(width) * u64::from(height) * 4;
-            if id == 0 || self.resource(id).is_some() || bytes == 0 || bytes > self.budget_left() {
+            let bytes = u64::from(height) * u64::from(width) * PIXEL_LEN;
+            if id == 0 || bytes == 0 || bytes > self.budget_left() {
                 return Err(SnapError::Invalid(
                     "virtio-gpu resource the device could not have made",
                 ));
@@ -1223,10 +1240,16 @@ impl Gpu {
             // No more than the budget, a `usize` (`create_2d`).
             let mut pixels = vec![0u8; bytes as usize];
             r.read_bytes(&mut pixels)?;
-            // As many entries as the budget has left room for, a `usize`.
+            // As many entries as the budget has left room for
+            // (`attach_backing`).
             let room = (self.budget_left() - bytes) / MEM_ENTRY_LEN;
-            let entries = r.read_count(room as usize)?;
-            let mut backing = Vec::with_capacity(entries);
+            let entries = r.read_u32()?;
+            if u64::from(entries) > room {
+                return Err(SnapError::Invalid(
+                    "virtio-gpu backing list past what the budget has left",
+                ));
+            }
+            let mut backing = Vec::new();
             for _ in 0..entries {
                 let addr = r.read_u64()?;
                 let len = r.read_u32()?;
@@ -1245,6 +1268,16 @@ impl Gpu {
             };
             self.hostmem += res.charge();
             self.resources.push(res);
+        }
+        // No two resources share an id (`create_2d`), checked over the ids
+        // in order rather than resource by resource, so that a restore takes
+        // no time quadratic in the count.
+        let mut ids: Vec<u32> = self.resources.iter().map(|res| res.id).collect();
+        ids.sort_unstable();
+        if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(SnapError::Invalid(
+                "virtio-gpu resource the device could not have made",
+            ));
         }
         self.scanout.resource_id = r.read_u32()?;
         self.scanout.rect = Rect {

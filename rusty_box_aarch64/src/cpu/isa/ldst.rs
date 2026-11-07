@@ -507,6 +507,8 @@ pub(crate) enum LdstPac {
     Ldrab64w,
 }
 
+/// Kept out of [`super::decode`], as each group is (`dpimm`).
+#[inline(never)]
 pub(super) fn ldst(word: u32) -> Option<Encoding> {
     let op1 = bits(word, 26, 26);
     // op0<1:0>, then op2<14:13>.

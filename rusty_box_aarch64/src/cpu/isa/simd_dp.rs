@@ -9,6 +9,8 @@ use super::float;
 use super::Encoding;
 use crate::cpu::exec::bits;
 
+/// Kept out of [`super::decode`], as each group is (`dpimm`).
+#[inline(never)]
 pub(super) fn simd_dp(word: u32) -> Option<Encoding> {
     let op0 = bits(word, 31, 28);
     match op0 {

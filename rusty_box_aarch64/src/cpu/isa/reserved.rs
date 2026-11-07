@@ -10,6 +10,8 @@ pub(crate) enum PermUndef {
     Udf,
 }
 
+/// Kept out of [`super::decode`], as each group is (`dpimm`).
+#[inline(never)]
 pub(super) fn reserved(word: u32) -> Option<Encoding> {
     let op0 = bits(word, 30, 29);
     let op1 = bits(word, 24, 16);

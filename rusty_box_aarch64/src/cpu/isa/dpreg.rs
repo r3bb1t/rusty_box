@@ -184,6 +184,8 @@ pub(crate) enum Dp3src {
     Umulh64,
 }
 
+/// Kept out of [`super::decode`], as each group is (`dpimm`).
+#[inline(never)]
 pub(super) fn dpreg(word: u32) -> Option<Encoding> {
     let op0 = bits(word, 30, 30);
     let op1 = bits(word, 28, 28);

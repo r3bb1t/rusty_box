@@ -170,6 +170,8 @@ pub(crate) enum Testbranch {
     Tbnz,
 }
 
+/// Kept out of [`super::decode`], as each group is (`dpimm`).
+#[inline(never)]
 pub(super) fn control(word: u32) -> Option<Encoding> {
     let op0 = bits(word, 31, 29);
     match op0 {

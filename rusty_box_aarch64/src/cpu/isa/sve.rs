@@ -29,6 +29,8 @@ use super::Encoding;
 use super::Feature;
 use crate::cpu::exec::bits;
 
+/// Kept out of [`super::decode`], as each group is (`dpimm`).
+#[inline(never)]
 pub(super) fn sve(word: u32) -> Option<Encoding> {
     let op0 = bits(word, 31, 29);
     match op0 {
