@@ -66,7 +66,7 @@ pub const DESC_WRITE: u16 = 2;
 pub const DESC_INDIRECT: u16 = 4;
 
 /// Guest RAM the tests give the device.
-const RAM_SIZE: usize = 4 << 20;
+pub const RAM_SIZE: usize = 4 << 20;
 /// An address in no memory region: past the end of RAM, which QEMU's
 /// `virt` leaves unassigned, so `dma_memory_map` cannot map it.
 pub const UNASSIGNED: u64 = RAM_BASE + RAM_SIZE as u64;

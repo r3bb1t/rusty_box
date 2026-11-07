@@ -356,7 +356,8 @@ impl<S: GuestStorage> VirtBoard<S> {
         };
         #[cfg(feature = "alloc")]
         if let Some(size) = devices.display {
-            plug(Device::Gpu(Gpu::new(size, identity.display())), &mut virtio);
+            let gpu = Gpu::new(size, identity.display(), storage.ram().len());
+            plug(Device::Gpu(gpu), &mut virtio);
         }
         if devices.keyboard == Plugged::Yes {
             let keyboard = Input::for_board(InputKind::Keyboard, identity);

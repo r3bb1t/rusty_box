@@ -1204,9 +1204,10 @@ integration tests of the public API.
   configuration entries, QEMU's but for the names, vendor, products and
   versions, the board's identity's, in a configuration of virtio 1.2's
   layout, and the events each host action becomes
-  (`tests/unit/virtio_input.rs`); every 2D GPU command and its errors in
-  QEMU's order, the cursor queue's answers, frames and the cursor as the
-  host receives them (`tests/unit/virtio_gpu.rs`); the block device's
+  (`tests/unit/virtio_input.rs`); the GPU's 16-byte configuration, every
+  2D GPU command and its errors in QEMU's order, the host-memory budget
+  of the guest's RAM, the cursor queue's answers, frames and the cursor as
+  the host receives them (`tests/unit/virtio_gpu.rs`); the block device's
   configuration, its want of a geometry and of a request limit, every
   request type and its errors, the used
   lengths, the cache mode, read-only and file-backed disks and snapshots
@@ -2431,6 +2432,36 @@ one open.
   its base block and the extension blocks byte 7Eh counts (VESA E-EDID
   1.4), where QEMU gives the whole 1024-byte field
   (`src/devices/virtio/gpu.rs`).
+- **virtio-gpu's configuration is virtio 1.2's, and its limits and error
+  codes the board's own.** The configuration is `struct
+  virtio_gpu_config` of §5.7.4, 16 bytes, past which the transport reads
+  all ones; QEMU 11.1.2's is 20, a fifth field, `blob_alignment`, coming
+  from its copy of a later Linux header, for a blob feature virtio 1.2
+  does not have and QEMU's 2D device does not offer. Virtio leaves the device's limits open, so they
+  are the board's: the host memory a guest makes the device hold for it,
+  its resources' pixels and 16 bytes for each `struct
+  virtio_gpu_mem_entry` of their backing, is at most as many bytes as the
+  guest has RAM, past which a resource or an attachment is
+  `VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY`, and nothing else limits a resource
+  or a backing list. QEMU allows 256 MiB of pixels (`max_hostmem`), no
+  resource of 4 GiB or more, and 16384 backing entries
+  (`virtio_gpu_create_mapping_iov`), and a scanout rectangle no smaller
+  than 16 by 16, where here one pixel is enough (§5.7.6.8 asks only that
+  the resource cover it). Virtio leaves which error answers which fault
+  open too; here it is the one whose name says what is wrong, so where
+  QEMU picks another: a resource of no pixels is
+  `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER` (QEMU's `ERR_OUT_OF_MEMORY`, its
+  pixman image having no bytes to map), as are backing entries the
+  request does not carry and an entry outside guest RAM or of no bytes
+  (QEMU's `ERR_UNSPEC`); `VIRTIO_GPU_CMD_GET_EDID` for a scanout the
+  device does not have is `VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID`, as
+  `SET_SCANOUT` answers it (QEMU's `ERR_INVALID_PARAMETER`); and the blob
+  commands, of a feature the device does not offer, are
+  `VIRTIO_GPU_RESP_ERR_UNSPEC`, as every other such command is (QEMU's
+  `ERR_INVALID_PARAMETER`). A driver reads `blob_alignment` only with
+  its feature, and one that backs each resource with its own guest memory,
+  as Linux's driver and EDK2's `VirtioGpuDxe` do, holds less than the
+  budget (`src/devices/virtio/gpu.rs`).
 - **The GICv2's Group 1 aliases exist.** IHI 0048B's CPU interface map
   (Table 4-2) has `GICC_AIAR`, `GICC_AEOIR` and `GICC_AHPPIR` in every
   GICv2, and with `GICC_CTLR.AckCtl` clear, the setting Arm recommends
@@ -2834,8 +2865,7 @@ the board's own:
   QEMU's CFI table values.
 - PSCI's optional functions: `MIGRATE_INFO_TYPE` alone of DEN 0022E
   Table 17's, QEMU's set, which `PSCI_FEATURES` reports.
-- virtio values: queue sizes, the GPU's resource and backing limits, the
-  20-byte GPU configuration.
+- virtio values: the queue sizes.
 - The EDID's layout, which is `qemu_edid_generate`'s: its mode list,
   timings, rate, density and extension blocks.
 - virtio-input's key and button sets, the tablet's 0 to 0x7FFF range.

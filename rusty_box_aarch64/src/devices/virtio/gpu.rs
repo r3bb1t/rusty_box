@@ -1,18 +1,35 @@
-//! virtio-gpu, 2D: QEMU's `virtio-gpu-device` with its default properties.
+//! virtio-gpu, 2D.
 //!
-//! Provenance (R7): the virtio 1.2 specification, section 5.7, as QEMU
-//! implements it in `hw/display/virtio-gpu.c` and
-//! `hw/display/virtio-gpu-base.c`:
+//! Provenance (R7): the virtio 1.2 specification, section 5.7, first; QEMU's
+//! `virtio-gpu-device` (`hw/display/virtio-gpu.c`,
+//! `hw/display/virtio-gpu-base.c`) for the behaviour the specification
+//! leaves to the device; the board's own values for the limits and error
+//! codes it leaves open (README, "Where the references differ"):
 //!
-//! - one scanout, `VIRTIO_GPU_F_EDID` and nothing else (`edid` on; no virgl,
-//!   blob, UUID or context features), a control queue of 64 entries and a
-//!   cursor queue of 16 (`virtio_gpu_base_device_realize`), `max_hostmem`
-//!   256 MiB;
+//! - `VIRTIO_GPU_F_EDID` and no other feature (5.7.3): the device has the
+//!   display's EDID, and none of the 3D, blob, UUID or context features;
+//!   so its configuration is `struct virtio_gpu_config`'s 16 bytes
+//!   (5.7.4), with `num_capsets` 0, there being no 3D protocol to describe,
+//!   and `num_scanouts` 1, the one display the board drives;
+//! - a control queue of 64 entries and a cursor queue of 16 (QEMU's,
+//!   `virtio_gpu_base_device_realize`);
+//! - the host memory a guest makes the device hold for it, its resources'
+//!   pixels and the `struct virtio_gpu_mem_entry` lists of their backing,
+//!   is at most the guest's own RAM: a resource or an attachment past that
+//!   is `ERR_OUT_OF_MEMORY`, and nothing else limits how big a resource or
+//!   how long a backing list is;
+//! - each error is the code whose name says what is wrong: a field naming
+//!   a resource or scanout the device does not have is
+//!   `ERR_INVALID_RESOURCE_ID` or `ERR_INVALID_SCANOUT_ID`, a field of a
+//!   value the command cannot take (a resource of no pixels, a scanout
+//!   rectangle of none, a backing entry outside guest RAM or of no bytes),
+//!   or a command shorter than its structure, `ERR_INVALID_PARAMETER`; a
+//!   command the device does not offer, and one its resource's state does
+//!   not allow (backing attached twice, none to transfer from), no code
+//!   names, so they are `ERR_UNSPEC`;
 //! - `virtio_gpu_handle_ctrl`: every available command is taken, then each is
 //!   run (`virtio_gpu_simple_process_cmd`) and answered in turn, a fence
-//!   echoed (`virtio_gpu_ctrl_response`); a command shorter than its
-//!   structure is answered `ERR_INVALID_PARAMETER` (`VIRTIO_GPU_FILL_CMD`),
-//!   an unknown one `ERR_UNSPEC`, a blob command `ERR_INVALID_PARAMETER`;
+//!   echoed (`virtio_gpu_ctrl_response`);
 //! - `virtio_gpu_get_display_info` and `virtio_gpu_get_edid` from the
 //!   requested display size (`virtio_gpu_base_fill_display_info`,
 //!   `virtio_gpu_base_generate_edid`), which the host changes with a display
@@ -28,14 +45,14 @@
 //! - `virtio_gpu_get_config` and `virtio_gpu_set_config`.
 //!
 //! Where it follows the specification over QEMU (README, "Where the
-//! references differ"): the cursor queue answers each command (5.7.6.10),
-//! a transfer's offset is its 64 bits (5.7.6.8), and `GET_EDID`'s `size`
-//! is the EDID's own length (VESA E-EDID 1.4); QEMU answers no cursor
-//! command, computes offsets in 32 bits and gives the 1024-byte field's
-//! size.
+//! references differ"): the configuration is 16 bytes (5.7.4), the cursor
+//! queue answers each command (5.7.6.10), a transfer's offset is its 64
+//! bits (5.7.6.8), and `GET_EDID`'s `size` is the EDID's own length (VESA
+//! E-EDID 1.4); QEMU's configuration has a fifth field, `blob_alignment`,
+//! of a feature virtio 1.2 does not have, it answers no cursor command,
+//! computes offsets in 32 bits and gives the 1024-byte field's size.
 //!
-//! Resources live in host memory, as QEMU's pixman images do (it maps them
-//! from a memfd, so a resource of no bytes cannot be made). How the picture
+//! Resources live in host memory, as QEMU's pixman images do. How the picture
 //! reaches a host window is the front end's business in QEMU; here
 //! [`Gpu::refresh`] pushes the scanout's changed rectangles into a
 //! [`DisplaySink`], with the guest's cursor drawn over them.
@@ -62,18 +79,23 @@ pub const CURSOR_QUEUE_SIZE: u16 = 16;
 
 /// `VIRTIO_GPU_F_EDID`.
 pub const FEATURES: u64 = 1 << 1;
-/// `sizeof(struct virtio_gpu_config)` in QEMU 11.1.2's copy of the Linux
-/// header: `events_read`, `events_clear`, `num_scanouts`, `num_capsets`,
-/// `blob_alignment`.
-pub const CONFIG_LEN: usize = 20;
+/// `sizeof(struct virtio_gpu_config)` (5.7.4): `events_read`,
+/// `events_clear`, `num_scanouts`, `num_capsets`.
+pub const CONFIG_LEN: usize = 16;
+/// `num_scanouts`: the one display the board drives (5.7.4.1 allows 1 to
+/// 16).
+const NUM_SCANOUTS: u32 = 1;
 
-/// QEMU `virtio-gpu`'s default `max_hostmem`: the guest's resources must
-/// stay below it.
-const MAX_HOSTMEM: u64 = 256 << 20;
-/// The most backing entries one resource may have (QEMU
-/// `virtio_gpu_create_mapping_iov`).
-const MAX_BACKING_ENTRIES: u32 = 16384;
-/// The cursor image: 64 by 64 (QEMU `cursor_alloc(64, 64)`).
+/// `sizeof(struct virtio_gpu_mem_entry)` (5.7.6.8): what one backing entry
+/// takes of the guest's request, and what the device charges for keeping
+/// it.
+const MEM_ENTRY_LEN: u64 = 16;
+/// `sizeof(struct virtio_gpu_resource_attach_backing)`, after which its
+/// entries follow.
+const ATTACH_BACKING_LEN: usize = 32;
+/// The backing entries read from a request at a time.
+const ENTRY_BATCH: usize = 64;
+/// The cursor image: 64 by 64 (5.7.6.6).
 const CURSOR_SIZE: u32 = 64;
 const CURSOR_PIXELS: usize = (CURSOR_SIZE * CURSOR_SIZE) as usize;
 
@@ -86,8 +108,6 @@ const CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 const CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
 const CMD_GET_EDID: u32 = 0x010A;
-const CMD_RESOURCE_CREATE_BLOB: u32 = 0x010C;
-const CMD_SET_SCANOUT_BLOB: u32 = 0x010D;
 const CMD_UPDATE_CURSOR: u32 = 0x0300;
 const CMD_MOVE_CURSOR: u32 = 0x0301;
 
@@ -286,8 +306,15 @@ struct Resource {
 }
 
 impl Resource {
-    fn stride(&self) -> u32 {
-        self.width * 4
+    /// The bytes of a row. A resource's pixels fit host memory, so a row's
+    /// do.
+    fn stride(&self) -> usize {
+        self.width as usize * 4
+    }
+
+    /// The host memory charged for it: its pixels and its backing list.
+    fn charge(&self) -> u64 {
+        self.pixels.len() as u64 + self.backing.len() as u64 * MEM_ENTRY_LEN
     }
 
     /// QEMU `iov_to_buf` over the backing: fill `out` from `offset` bytes
@@ -377,7 +404,12 @@ pub struct Gpu {
     /// `virtio_config.events_read`.
     events_read: u32,
     resources: Vec<Resource>,
+    /// The host memory the guest's resources take ([`Resource::charge`]),
+    /// never more than `budget`.
     hostmem: u64,
+    /// The most host memory the guest may make the device hold for it: as
+    /// many bytes as the guest has RAM.
+    budget: u64,
     scanout: Scanout,
     cursor: Cursor,
     /// Commands taken from the control queue and not yet run (QEMU
@@ -393,8 +425,9 @@ pub struct Gpu {
 
 impl Gpu {
     /// A device asking for `preferred`, its output enabled whatever the size
-    /// (`virtio_gpu_base_device_realize`), whose EDID gives `display`.
-    pub(crate) fn new(preferred: Resolution, display: DisplayIdentity) -> Self {
+    /// (`virtio_gpu_base_device_realize`), whose EDID gives `display`, on a
+    /// board whose guest has `ram_len` bytes of RAM.
+    pub(crate) fn new(preferred: Resolution, display: DisplayIdentity, ram_len: usize) -> Self {
         Self {
             preferred,
             display,
@@ -402,6 +435,7 @@ impl Gpu {
             events_read: 0,
             resources: Vec::new(),
             hostmem: 0,
+            budget: ram_len as u64,
             scanout: Scanout::default(),
             cursor: Cursor {
                 image: Vec::new(),
@@ -452,13 +486,13 @@ impl Gpu {
         true
     }
 
-    /// QEMU `virtio_gpu_get_config`: `events_clear` is never kept, one
-    /// scanout, no capability sets, and no blob alignment (a 2D device has
-    /// no blobs).
+    /// `struct virtio_gpu_config` (5.7.4): the pending events, `events_clear`
+    /// never kept (QEMU `virtio_gpu_get_config`), one scanout, and no
+    /// capability sets.
     pub fn get_config(&self, config: &mut [u8]) {
         config[..4].copy_from_slice(&self.events_read.to_le_bytes());
         config[4..8].fill(0);
-        config[8..12].copy_from_slice(&1u32.to_le_bytes());
+        config[8..12].copy_from_slice(&NUM_SCANOUTS.to_le_bytes());
         config[12..CONFIG_LEN].fill(0);
     }
 
@@ -673,12 +707,16 @@ impl Gpu {
                 self.respond_display_info(vdev, chain, &hdr);
                 Reply::Answered
             }
+            // A scanout the device does not have is
+            // `ERR_INVALID_SCANOUT_ID`, as `SET_SCANOUT` answers it; QEMU
+            // answers `ERR_INVALID_PARAMETER`.
             CMD_GET_EDID => match Self::fill::<32>(vdev, chain) {
                 Some(b) if le32(&b, 24) == 0 => {
                     self.respond_edid(vdev, chain, &hdr);
                     Reply::Answered
                 }
-                Some(_) | None => short,
+                Some(_) => Reply::Error(RESP_ERR_INVALID_SCANOUT_ID),
+                None => short,
             },
             CMD_RESOURCE_CREATE_2D => match Self::fill::<40>(vdev, chain) {
                 Some(b) => self.create_2d(le32(&b, 24), le32(&b, 28), le32(&b, 32), le32(&b, 36)),
@@ -713,8 +751,10 @@ impl Gpu {
                 Some(b) => self.detach_backing(le32(&b, 24)),
                 None => short,
             },
-            // Blob resources are off.
-            CMD_RESOURCE_CREATE_BLOB | CMD_SET_SCANOUT_BLOB => short,
+            // Every command of a feature the device does not offer (the 3D
+            // and capability-set commands, `RESOURCE_ASSIGN_UUID`, the blob
+            // commands) is one it does not have; QEMU answers a blob command
+            // `ERR_INVALID_PARAMETER`.
             _ => Reply::Error(RESP_ERR_UNSPEC),
         };
         Self::reply(vdev, CONTROL_QUEUE, chain, &hdr, reply);
@@ -798,7 +838,16 @@ impl Gpu {
         Self::respond(vdev, CONTROL_QUEUE, chain, cmd, &mut resp);
     }
 
-    /// QEMU `virtio_gpu_resource_create_2d`.
+    /// The host memory the guest may still make the device hold.
+    fn budget_left(&self) -> u64 {
+        self.budget - self.hostmem
+    }
+
+    /// QEMU `virtio_gpu_resource_create_2d`, in its order of checks: the
+    /// id, the format, then the size. A resource of no pixels is
+    /// `ERR_INVALID_PARAMETER`, one past what the budget has left
+    /// `ERR_OUT_OF_MEMORY`; QEMU answers both `ERR_OUT_OF_MEMORY`, and has
+    /// a budget of 256 MiB and no resource of 4 GiB or more.
     fn create_2d(&mut self, id: u32, format: u32, width: u32, height: u32) -> Reply {
         if id == 0 || self.resource(id).is_some() {
             return Reply::Error(RESP_ERR_INVALID_RESOURCE_ID);
@@ -806,9 +855,12 @@ impl Gpu {
         let Some(format) = Format::from_wire(format) else {
             return Reply::Error(RESP_ERR_INVALID_PARAMETER);
         };
-        // calc_image_hostmem: 32 bits a pixel, rows of whole words.
+        // 32 bits a pixel, the size of every format.
         let bytes = u64::from(height) * u64::from(width) * 4;
-        if bytes > u64::from(u32::MAX) || bytes + self.hostmem >= MAX_HOSTMEM || bytes == 0 {
+        if bytes == 0 {
+            return Reply::Error(RESP_ERR_INVALID_PARAMETER);
+        }
+        if bytes > self.budget_left() {
             return Reply::Error(RESP_ERR_OUT_OF_MEMORY);
         }
         self.hostmem += bytes;
@@ -817,6 +869,8 @@ impl Gpu {
             format,
             width,
             height,
+            // No more than the budget, which is the length of the guest's
+            // RAM in host memory: a `usize`.
             pixels: vec![0; bytes as usize],
             backing: Vec::new(),
         });
@@ -840,8 +894,13 @@ impl Gpu {
             self.disable_scanout();
         }
         let res = self.resources.swap_remove(index);
-        self.hostmem -= res.pixels.len() as u64;
+        self.hostmem -= res.charge();
         Reply::Done
+    }
+
+    /// Whether a scanout can show `rect` of `res`.
+    fn showable(rect: Rect, res: &Resource) -> bool {
+        !rect.is_empty() && rect.within(res.width, res.height)
     }
 
     /// QEMU `virtio_gpu_set_scanout` and `virtio_gpu_do_set_scanout`.
@@ -857,8 +916,10 @@ impl Gpu {
             Ok(index) => &self.resources[index],
             Err(reply) => return reply,
         };
-        // virtio_gpu_check_scanout_bounds.
-        if rect.width < 16 || rect.height < 16 || !rect.within(res.width, res.height) {
+        // The resource covers the rectangle (5.7.6.8), which shows at least
+        // a pixel: resource 0 is how a driver shows none. QEMU also wants
+        // it 16 by 16 at least.
+        if !Self::showable(rect, res) {
             return Reply::Error(RESP_ERR_INVALID_PARAMETER);
         }
         let s = self.scanout;
@@ -911,22 +972,24 @@ impl Gpu {
         if !rect.within(res.width, res.height) {
             return Reply::Error(RESP_ERR_INVALID_PARAMETER);
         }
+        // The rectangle lies inside the resource, whose pixels fit host
+        // memory: every index below is a `usize`.
         let stride = res.stride();
         let mut pixels = core::mem::take(&mut self.resources[index].pixels);
         let res = &self.resources[index];
         if rect.x != 0 || rect.width != res.width {
             let row = rect.width as usize * 4;
             for h in 0..rect.height {
-                let dst = ((rect.y + h) * stride + rect.x * 4) as usize;
+                let dst = (rect.y + h) as usize * stride + rect.x as usize * 4;
                 // A row starting past the last byte a 64-bit offset names
                 // lies past every backing, so nothing of it is read.
-                if let Some(src) = offset.checked_add(u64::from(stride) * u64::from(h)) {
+                if let Some(src) = offset.checked_add(stride as u64 * u64::from(h)) {
                     res.read_backing(ram, src, &mut pixels[dst..dst + row]);
                 }
             }
         } else {
-            let dst = (rect.y * stride) as usize;
-            let len = (stride * rect.height) as usize;
+            let dst = rect.y as usize * stride;
+            let len = stride * rect.height as usize;
             res.read_backing(ram, offset, &mut pixels[dst..dst + len]);
         }
         self.resources[index].pixels = pixels;
@@ -935,7 +998,12 @@ impl Gpu {
 
     /// QEMU `virtio_gpu_resource_attach_backing` and
     /// `virtio_gpu_create_mapping_iov`: the entries follow the command in
-    /// the driver's buffers, and each must lie in guest RAM.
+    /// the driver's buffers, and each must lie in guest RAM. Backing
+    /// already attached is `ERR_UNSPEC`, as QEMU has it; a list past what
+    /// the budget has left is `ERR_OUT_OF_MEMORY`, and entries the request
+    /// does not carry, or one outside guest RAM or of no bytes,
+    /// `ERR_INVALID_PARAMETER`. QEMU answers a list of more than 16384
+    /// entries, and each of those faults, `ERR_UNSPEC`.
     fn attach_backing(
         &mut self,
         vdev: &Vdev<'_, '_>,
@@ -946,21 +1014,33 @@ impl Gpu {
         let Some(index) = self.resource_index(resource_id) else {
             return Reply::Error(RESP_ERR_INVALID_RESOURCE_ID);
         };
-        if !self.resources[index].backing.is_empty() || entries > MAX_BACKING_ENTRIES {
+        if !self.resources[index].backing.is_empty() {
             return Reply::Error(RESP_ERR_UNSPEC);
         }
-        let mut raw = vec![0u8; entries as usize * 16];
-        if vdev.read(chain, 32, &mut raw) != raw.len() {
-            return Reply::Error(RESP_ERR_UNSPEC);
+        let charge = u64::from(entries) * MEM_ENTRY_LEN;
+        if charge > self.budget_left() {
+            return Reply::Error(RESP_ERR_OUT_OF_MEMORY);
         }
-        let mut backing = Vec::with_capacity(entries as usize);
-        for entry in raw.chunks_exact(16) {
-            let (addr, len) = (le64(entry, 0), le32(entry, 8));
-            if len == 0 || !vdev.ram().contains(addr, u64::from(len)) {
-                return Reply::Error(RESP_ERR_UNSPEC);
+        let entries = entries as usize;
+        let mut backing = Vec::with_capacity(entries);
+        let mut batch = [0u8; ENTRY_BATCH * MEM_ENTRY_LEN as usize];
+        let mut at = ATTACH_BACKING_LEN;
+        while backing.len() < entries {
+            let n = (entries - backing.len()).min(ENTRY_BATCH) * MEM_ENTRY_LEN as usize;
+            let raw = &mut batch[..n];
+            if vdev.read(chain, at, raw) != n {
+                return Reply::Error(RESP_ERR_INVALID_PARAMETER);
             }
-            backing.push(BackingEntry { addr, len });
+            for entry in raw.chunks_exact(MEM_ENTRY_LEN as usize) {
+                let (addr, len) = (le64(entry, 0), le32(entry, 8));
+                if len == 0 || !vdev.ram().contains(addr, u64::from(len)) {
+                    return Reply::Error(RESP_ERR_INVALID_PARAMETER);
+                }
+                backing.push(BackingEntry { addr, len });
+            }
+            at += n;
         }
+        self.hostmem += charge;
         self.resources[index].backing = backing;
         Reply::Done
     }
@@ -971,7 +1051,9 @@ impl Gpu {
             Ok(index) => index,
             Err(reply) => return reply,
         };
-        self.resources[index].backing.clear();
+        let backing = &mut self.resources[index].backing;
+        self.hostmem -= backing.len() as u64 * MEM_ENTRY_LEN;
+        backing.clear();
         Reply::Done
     }
 
@@ -1023,7 +1105,7 @@ impl Gpu {
             return Refreshed::Unchanged;
         }
         let res = &self.resources[res_index];
-        let stride = res.stride() as usize;
+        let stride = res.stride();
         let cursor = self.cursor_rect();
         let origin = self.cursor_origin();
         self.frame.clear();
@@ -1133,18 +1215,17 @@ impl Gpu {
             let width = r.read_u32()?;
             let height = r.read_u32()?;
             let bytes = u64::from(width) * u64::from(height) * 4;
-            if id == 0
-                || self.resource(id).is_some()
-                || bytes == 0
-                || self.hostmem + bytes >= MAX_HOSTMEM
-            {
+            if id == 0 || self.resource(id).is_some() || bytes == 0 || bytes > self.budget_left() {
                 return Err(SnapError::Invalid(
                     "virtio-gpu resource the device could not have made",
                 ));
             }
+            // No more than the budget, a `usize` (`create_2d`).
             let mut pixels = vec![0u8; bytes as usize];
             r.read_bytes(&mut pixels)?;
-            let entries = r.read_count(MAX_BACKING_ENTRIES as usize)?;
+            // As many entries as the budget has left room for, a `usize`.
+            let room = (self.budget_left() - bytes) / MEM_ENTRY_LEN;
+            let entries = r.read_count(room as usize)?;
             let mut backing = Vec::with_capacity(entries);
             for _ in 0..entries {
                 let addr = r.read_u64()?;
@@ -1154,15 +1235,16 @@ impl Gpu {
                 }
                 backing.push(BackingEntry { addr, len });
             }
-            self.hostmem += bytes;
-            self.resources.push(Resource {
+            let res = Resource {
                 id,
                 format,
                 width,
                 height,
                 pixels,
                 backing,
-            });
+            };
+            self.hostmem += res.charge();
+            self.resources.push(res);
         }
         self.scanout.resource_id = r.read_u32()?;
         self.scanout.rect = Rect {
@@ -1189,10 +1271,9 @@ impl Gpu {
         self.cursor.y = r.read_u32()?;
         self.cursor.shown = r.read_bool()?;
         let shown = self.scanout.resource_id == 0
-            || self.resource(self.scanout.resource_id).is_some_and(|res| {
-                let rect = self.scanout.rect;
-                rect.width >= 16 && rect.height >= 16 && rect.within(res.width, res.height)
-            });
+            || self
+                .resource(self.scanout.resource_id)
+                .is_some_and(|res| Self::showable(self.scanout.rect, res));
         if !shown {
             return Err(SnapError::Invalid(
                 "virtio-gpu scanout the device could not have set",

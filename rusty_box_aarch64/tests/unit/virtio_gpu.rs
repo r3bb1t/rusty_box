@@ -1,6 +1,8 @@
-//! Unit tests of `src/devices/virtio/gpu.rs` and `edid.rs`: QEMU's 2D
-//! virtio-gpu as a driver commands it and as the host sees its picture
-//! (`hw/display/virtio-gpu.c`, `virtio-gpu-base.c`, `edid-generate.c`).
+//! Unit tests of `src/devices/virtio/gpu.rs` and `edid.rs`: the 2D
+//! virtio-gpu of virtio 1.2 section 5.7, as a driver commands it and as the
+//! host sees its picture, with QEMU's behaviour where the specification
+//! leaves it to the device (`hw/display/virtio-gpu.c`, `virtio-gpu-base.c`,
+//! `edid-generate.c`) and the board's own limits and error codes.
 
 use std::vec;
 use std::vec::Vec;
@@ -19,9 +21,10 @@ use crate::identity::{
     IdentityNames, PnpId,
 };
 
-/// The display a board with the default identity plugs in.
+/// The display a board with the default identity plugs in, for a guest with
+/// the test driver's RAM.
 fn display(preferred: Resolution) -> Gpu {
-    Gpu::new(preferred, boards_display())
+    Gpu::new(preferred, boards_display(), RAM_SIZE)
 }
 
 /// What the default identity's EDID says of its display.
@@ -59,7 +62,9 @@ const RESOURCE_FLUSH: u32 = 0x0104;
 const TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 const RESOURCE_DETACH_BACKING: u32 = 0x0107;
+const GET_CAPSET_INFO: u32 = 0x0108;
 const GET_EDID: u32 = 0x010A;
+const RESOURCE_ASSIGN_UUID: u32 = 0x010B;
 const RESOURCE_CREATE_BLOB: u32 = 0x010C;
 const SET_SCANOUT_BLOB: u32 = 0x010D;
 const CTX_CREATE: u32 = 0x0200;
@@ -248,13 +253,16 @@ fn the_device_offers_edid_and_one_scanout() {
         d.device_features(),
         F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1 | (1 << 40) | (1 << 1)
     );
-    let config: Vec<u32> = (0..5).map(|i| d.read(CONFIG + 4 * i)).collect();
+    let config: Vec<u32> = (0..4).map(|i| d.read(CONFIG + 4 * i)).collect();
     assert_eq!(
         config,
-        [0, 0, 1, 0, 0],
-        "events_read, events_clear, num_scanouts, num_capsets, blob_alignment"
+        [0, 0, 1, 0],
+        "events_read, events_clear, num_scanouts, num_capsets"
     );
-    assert_eq!(d.read_width(CONFIG + 20, AccessWidth::Byte), 0xFF);
+    // struct virtio_gpu_config is 16 bytes (5.7.4): QEMU's fifth field,
+    // blob_alignment, is not there.
+    assert_eq!(d.read_width(CONFIG + 16, AccessWidth::Byte), 0xFF);
+    assert_eq!(d.read(CONFIG + 16), 0xFFFF_FFFF);
     d.write(QUEUE_SEL, 0);
     assert_eq!(d.read(QUEUE_NUM_MAX), 64);
     d.write(QUEUE_SEL, 1);
@@ -437,7 +445,7 @@ fn get_edid_answers_with_the_displays_edid() {
     );
     assert_eq!(
         status(&mut d, &cmd(GET_EDID, &[1, 0])),
-        ERR_INVALID_PARAMETER,
+        ERR_INVALID_SCANOUT_ID,
         "no scanout 1"
     );
 }
@@ -465,17 +473,19 @@ fn a_short_command_is_an_invalid_parameter() {
 }
 
 #[test]
-fn unknown_and_blob_commands_are_refused() {
+fn commands_of_features_not_offered_are_unspecified_errors() {
     let mut d = gpu(640, 480);
     assert_eq!(status(&mut d, &cmd(CTX_CREATE, &[0; 24])), ERR_UNSPEC);
+    assert_eq!(status(&mut d, &cmd(GET_CAPSET_INFO, &[0, 0])), ERR_UNSPEC);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_ASSIGN_UUID, &[0, 0])),
+        ERR_UNSPEC
+    );
     assert_eq!(
         status(&mut d, &cmd(RESOURCE_CREATE_BLOB, &[0; 8])),
-        ERR_INVALID_PARAMETER
+        ERR_UNSPEC
     );
-    assert_eq!(
-        status(&mut d, &cmd(SET_SCANOUT_BLOB, &[0; 20])),
-        ERR_INVALID_PARAMETER
-    );
+    assert_eq!(status(&mut d, &cmd(SET_SCANOUT_BLOB, &[0; 20])), ERR_UNSPEC);
 }
 
 #[test]
@@ -506,12 +516,18 @@ fn resource_creation_checks_in_qemus_order() {
     );
     assert_eq!(
         status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 0, 64])),
-        ERR_OUT_OF_MEMORY
+        ERR_INVALID_PARAMETER,
+        "a resource of no pixels"
     );
-    // Exactly max_hostmem is too much: QEMU wants the total below it.
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 64, 0])),
+        ERR_INVALID_PARAMETER,
+        "a resource of no rows"
+    );
     assert_eq!(
         status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 8192, 8192])),
-        ERR_OUT_OF_MEMORY
+        ERR_OUT_OF_MEMORY,
+        "more than the guest's RAM"
     );
     assert_eq!(
         status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 64, 64])),
@@ -525,6 +541,89 @@ fn resource_creation_checks_in_qemus_order() {
     assert_eq!(
         status(&mut d, &cmd(RESOURCE_UNREF, &[1, 0])),
         ERR_INVALID_RESOURCE_ID
+    );
+}
+
+/// An attachment request for resource `id` of `entries`, each `len` bytes
+/// at `addr`.
+fn attach_request(id: u32, entries: u32, addr: u64, len: u32) -> Vec<u8> {
+    let mut req = cmd(RESOURCE_ATTACH_BACKING, &[id, entries]);
+    for _ in 0..entries {
+        req.extend_from_slice(&addr.to_le_bytes());
+        req.extend_from_slice(&len.to_le_bytes());
+        req.extend_from_slice(&0u32.to_le_bytes());
+    }
+    req
+}
+
+/// The device holds for the guest as much host memory as the guest has RAM,
+/// its resources' pixels and 16 bytes for each backing entry, and nothing
+/// else limits a resource or a backing list.
+#[test]
+fn the_guests_ram_is_the_devices_budget() {
+    let ram = RAM_SIZE as u32;
+    let mut d = gpu(640, 480);
+    // A resource of every byte of it fits; one more pixel does not.
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, ram / 4, 1])),
+        OK_NODATA,
+        "exactly the guest's RAM"
+    );
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[2, B8G8R8X8, 1, 1])),
+        ERR_OUT_OF_MEMORY
+    );
+    assert_eq!(status(&mut d, &cmd(RESOURCE_UNREF, &[1, 0])), OK_NODATA);
+
+    // A backing list longer than QEMU's 16384 entries, charged 16 bytes an
+    // entry.
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 16, 16])),
+        OK_NODATA
+    );
+    let buffer = d.alloc(64);
+    let entries = 16385;
+    assert_eq!(
+        status(&mut d, &attach_request(1, entries, buffer, 64)),
+        OK_NODATA,
+        "more entries than QEMU takes"
+    );
+    let left = ram - 16 * 16 * 4 - entries * 16;
+    assert_eq!(
+        status(
+            &mut d,
+            &cmd(RESOURCE_CREATE_2D, &[2, B8G8R8X8, left / 4, 1])
+        ),
+        OK_NODATA,
+        "what the pixels and the entries left"
+    );
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[3, B8G8R8X8, 1, 1])),
+        ERR_OUT_OF_MEMORY
+    );
+    // Detaching gives the entries' bytes back.
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_DETACH_BACKING, &[1, 0])),
+        OK_NODATA
+    );
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[3, B8G8R8X8, 1, 1])),
+        OK_NODATA
+    );
+    // A list past what is left is refused before its entries are read.
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_ATTACH_BACKING, &[1, u32::MAX])),
+        ERR_OUT_OF_MEMORY
+    );
+    // Unreferencing a resource gives its pixels and its entries back.
+    attach(&mut d, 1, &picture(16, 16));
+    for id in [1, 2, 3] {
+        assert_eq!(status(&mut d, &cmd(RESOURCE_UNREF, &[id, 0])), OK_NODATA);
+    }
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, ram / 4, 1])),
+        OK_NODATA,
+        "the whole budget again"
     );
 }
 
@@ -646,17 +745,26 @@ fn backing_is_checked_as_qemu_maps_it() {
     );
     assert_eq!(status(&mut d, &transfer), ERR_UNSPEC);
     for (addr, len) in [(UNASSIGNED, 64u32), (0x4010_0000, 0)] {
-        let mut req = cmd(RESOURCE_ATTACH_BACKING, &[1, 1]);
-        req.extend_from_slice(&addr.to_le_bytes());
-        req.extend_from_slice(&len.to_le_bytes());
-        req.extend_from_slice(&0u32.to_le_bytes());
-        assert_eq!(status(&mut d, &req), ERR_UNSPEC, "entry {addr:#x}+{len}");
+        assert_eq!(
+            status(&mut d, &attach_request(1, 1, addr, len)),
+            ERR_INVALID_PARAMETER,
+            "entry {addr:#x}+{len}"
+        );
     }
     assert_eq!(
         status(&mut d, &cmd(RESOURCE_ATTACH_BACKING, &[1, 2])),
-        ERR_UNSPEC,
+        ERR_INVALID_PARAMETER,
         "entries missing"
     );
+    // The request carries the first 64 entries and not the 65th.
+    let mut short = attach_request(1, 64, 0x4010_0000, 64);
+    short[28..32].copy_from_slice(&65u32.to_le_bytes());
+    assert_eq!(
+        status(&mut d, &short),
+        ERR_INVALID_PARAMETER,
+        "the 65th entry missing"
+    );
+    assert_eq!(status(&mut d, &transfer), ERR_UNSPEC, "nothing attached");
     attach(&mut d, 1, &picture(16, 16));
     assert_eq!(
         status(&mut d, &cmd(RESOURCE_ATTACH_BACKING, &[1, 0])),
@@ -704,19 +812,36 @@ fn the_scanout_and_flush_are_checked() {
     );
     // A scanout needs backing, checked before the rectangle.
     assert_eq!(
-        status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 15, 32, 0, 1])),
+        status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 0, 32, 0, 1])),
         ERR_UNSPEC
     );
     attach(&mut d, 1, &picture(32, 32));
-    assert_eq!(
-        status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 15, 32, 0, 1])),
-        ERR_INVALID_PARAMETER,
-        "narrower than 16"
-    );
+    for rect in [[0, 0, 0, 32], [0, 0, 32, 0]] {
+        assert_eq!(
+            status(
+                &mut d,
+                &cmd(SET_SCANOUT, &[rect[0], rect[1], rect[2], rect[3], 0, 1])
+            ),
+            ERR_INVALID_PARAMETER,
+            "no pixels: {rect:?}"
+        );
+    }
     assert_eq!(
         status(&mut d, &cmd(SET_SCANOUT, &[17, 0, 16, 16, 0, 1])),
         ERR_INVALID_PARAMETER,
         "past the resource"
+    );
+    assert_eq!(
+        status(&mut d, &cmd(SET_SCANOUT, &[31, 31, 1, 1, 0, 1])),
+        OK_NODATA,
+        "one pixel, smaller than QEMU's 16 by 16"
+    );
+    assert_eq!(
+        d.host(|device, _| match device {
+            Device::Gpu(g) => g.resolution(),
+            Device::Input(_) | Device::Block(_) => None,
+        }),
+        Some(Resolution::new(1, 1))
     );
     assert_eq!(
         status(&mut d, &cmd(SET_SCANOUT, &[16, 16, 16, 16, 0, 1])),
@@ -1005,5 +1130,19 @@ fn a_snapshot_shows_the_same_picture() {
     assert_eq!(
         status(&mut resumed, &cmd(RESOURCE_FLUSH, &[0, 0, 32, 16, 1, 0])),
         OK_NODATA
+    );
+    // And with what they took of the budget: the picture's pixels and its
+    // one backing entry.
+    let left = RAM_SIZE as u32 - 32 * 16 * 4 - 16;
+    assert_eq!(
+        status(
+            &mut resumed,
+            &cmd(RESOURCE_CREATE_2D, &[2, B8G8R8X8, left / 4, 1])
+        ),
+        OK_NODATA
+    );
+    assert_eq!(
+        status(&mut resumed, &cmd(RESOURCE_CREATE_2D, &[3, B8G8R8X8, 1, 1])),
+        ERR_OUT_OF_MEMORY
     );
 }
