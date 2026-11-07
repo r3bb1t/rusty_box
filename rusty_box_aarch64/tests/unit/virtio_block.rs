@@ -1,8 +1,9 @@
 //! Unit tests of `src/devices/virtio/block.rs` and `src/disk.rs`: virtio
 //! 1.2's block device (section 5.2) as QEMU's `virtio-blk-device` over a
-//! raw image (`hw/block/virtio-blk.c`, `hw/block/hd-geometry.c`) gives it
-//! where the specification leaves the choice open, driven through its
-//! registers and queue the way Linux's `virtio_blk` drives it.
+//! raw image (`hw/block/virtio-blk.c`) gives it where the specification
+//! leaves the choice open, but for the geometry and request limits QEMU
+//! makes up, driven through its registers and queue the way Linux's
+//! `virtio_blk` drives it.
 
 #[cfg(feature = "std")]
 use std::format;
@@ -23,15 +24,10 @@ const F_TOPOLOGY: u64 = 1 << 10;
 const F_CONFIG_WCE: u64 = 1 << 11;
 const F_DISCARD: u64 = 1 << 13;
 const F_WRITE_ZEROES: u64 = 1 << 14;
-/// Every feature of the device's own, all of which Linux's driver knows.
-const BLK_FEATURES: u64 = F_SEG_MAX
-    | F_GEOMETRY
-    | F_BLK_SIZE
-    | F_WCE
-    | F_TOPOLOGY
-    | F_CONFIG_WCE
-    | F_DISCARD
-    | F_WRITE_ZEROES;
+/// Every feature of the device's own, all of which Linux's driver knows:
+/// not the legacy geometry.
+const BLK_FEATURES: u64 =
+    F_SEG_MAX | F_BLK_SIZE | F_WCE | F_TOPOLOGY | F_CONFIG_WCE | F_DISCARD | F_WRITE_ZEROES;
 /// What Linux accepts of what the device offers.
 const LINUX_FEATURES: u64 = F_VERSION_1 | F_INDIRECT_DESC | F_EVENT_IDX | BLK_FEATURES;
 
@@ -146,18 +142,6 @@ fn config_u64(d: &mut Driver, off: u64) -> u64 {
     u64::from(config_u32(d, off)) | (u64::from(config_u32(d, off + 4)) << 32)
 }
 
-/// A sector 0 holding a DOS partition table whose first partition ends at
-/// `end_head` and `end_sector`.
-fn with_partition(mut image: Vec<u8>, end_head: u8, end_sector: u8) -> Vec<u8> {
-    let p = 0x1BE;
-    image[p + 5] = end_head;
-    image[p + 6] = end_sector;
-    image[p + 12..p + 16].copy_from_slice(&2048u32.to_le_bytes());
-    image[510] = 0x55;
-    image[511] = 0xAA;
-    image
-}
-
 #[test]
 fn the_device_is_qemus_virtio_blk_with_one_queue() {
     let mut d = Driver::new(Device::Block(Block::new(Disk::memory(image(8)))));
@@ -168,6 +152,7 @@ fn the_device_is_qemus_virtio_blk_with_one_queue() {
         d.device_features(),
         F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1 | (1 << 40) | BLK_FEATURES
     );
+    assert_eq!(d.device_features() & F_GEOMETRY, 0, "no legacy geometry");
     d.write(QUEUE_SEL, 0);
     assert_eq!(d.read(QUEUE_NUM_MAX), 256);
     d.write(QUEUE_SEL, 1);
@@ -180,10 +165,9 @@ fn the_configuration_describes_the_disk() {
     assert_eq!(config_u64(&mut d, 0), 8192, "capacity in sectors");
     assert_eq!(config_u32(&mut d, 8), 0, "size_max");
     assert_eq!(config_u32(&mut d, 12), 254, "seg_max, the queue less two");
-    // 16 heads of 63 sectors, as many cylinders as fit.
-    assert_eq!(config_u16(&mut d, 16), 8);
-    assert_eq!(config_byte(&mut d, 18), 16);
-    assert_eq!(config_byte(&mut d, 19), 63);
+    assert_eq!(config_u16(&mut d, 16), 0, "no geometry: cylinders");
+    assert_eq!(config_byte(&mut d, 18), 0, "no geometry: heads");
+    assert_eq!(config_byte(&mut d, 19), 0, "no geometry: sectors");
     assert_eq!(config_u32(&mut d, 20), 512, "blk_size");
     assert_eq!(config_byte(&mut d, 24), 0, "physical_block_exp");
     assert_eq!(config_byte(&mut d, 25), 0, "alignment_offset");
@@ -191,12 +175,12 @@ fn the_configuration_describes_the_disk() {
     assert_eq!(config_u32(&mut d, 28), 0, "opt_io_size");
     assert_eq!(config_byte(&mut d, 32), 1, "a write-back cache");
     assert_eq!(config_u16(&mut d, 34), 1, "num_queues");
-    assert_eq!(config_u32(&mut d, 36), 0x3F_FFFF, "max_discard_sectors");
+    assert_eq!(config_u32(&mut d, 36), u32::MAX, "max_discard_sectors");
     assert_eq!(config_u32(&mut d, 40), 1, "max_discard_seg");
     assert_eq!(config_u32(&mut d, 44), 1, "discard_sector_alignment");
     assert_eq!(
         config_u32(&mut d, 48),
-        0x3F_FFFF,
+        u32::MAX,
         "max_write_zeroes_sectors"
     );
     assert_eq!(config_u32(&mut d, 52), 1, "max_write_zeroes_seg");
@@ -209,28 +193,6 @@ fn the_configuration_describes_the_disk() {
         0xFF,
         "the configuration ends there"
     );
-}
-
-#[test]
-fn a_tiny_disk_still_has_two_cylinders() {
-    let mut d = blk(image(100));
-    assert_eq!(config_u16(&mut d, 16), 2);
-}
-
-#[test]
-fn a_partition_table_with_at_most_16_heads_is_the_geometry() {
-    let mut d = blk(with_partition(image(8192), 15, 32));
-    assert_eq!(config_u16(&mut d, 16), 8192 / (16 * 32));
-    assert_eq!(config_byte(&mut d, 18), 16);
-    assert_eq!(config_byte(&mut d, 19), 32);
-}
-
-#[test]
-fn a_partition_table_with_more_heads_leaves_the_standard_geometry() {
-    let mut d = blk(with_partition(image(8192), 254, 63));
-    assert_eq!(config_u16(&mut d, 16), 8);
-    assert_eq!(config_byte(&mut d, 18), 16);
-    assert_eq!(config_byte(&mut d, 19), 63);
 }
 
 #[test]
@@ -469,12 +431,13 @@ fn write_zeroes_clears_the_range_and_may_unmap() {
         S_IOERR,
         "past the disk"
     );
-    let r = d.alloc_with(&range(0, 0x40_0000, 0));
+    let r = d.alloc_with(&range(0, u32::MAX, 0));
     assert_eq!(
         submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status,
         S_IOERR,
-        "past the limit"
+        "the most sectors a range holds, past the disk"
     );
+    assert_eq!(disk_bytes(&mut d), bytes, "nothing was zeroed");
 }
 
 #[test]
@@ -951,6 +914,37 @@ fn a_host_error_is_an_io_error_the_host_can_take() {
         Device::Input(_) | Device::Gpu(_) => false,
     });
     assert!(again, "once");
+}
+
+/// A range of more sectors than QEMU's `BDRV_REQUEST_MAX_SECTORS` (0x3F_FFFF)
+/// is served when it lies in the disk: the device has no limit of its own.
+/// The disk is a sparse file of 0x40_0000 sectors, which a discard does not
+/// touch; a range one sector longer is past it.
+#[cfg(feature = "std")]
+#[test]
+fn a_discard_past_qemus_request_limit_is_served() {
+    const SECTORS: u32 = 0x40_0000;
+    let file = TempFile::new("large", &[]);
+    let handle = file.open();
+    handle
+        .set_len(u64::from(SECTORS) * 512)
+        .expect("the temporary file grows");
+    let mut d = blk_over(
+        Disk::file(handle).expect("the file's length reads"),
+        LINUX_FEATURES,
+    );
+    assert_eq!(config_u64(&mut d, 0), u64::from(SECTORS));
+    let r = d.alloc_with(&range(0, SECTORS, 0));
+    assert_eq!(
+        submit(&mut d, T_DISCARD, 0, &[Buf::readable(r, 16)]).status,
+        S_OK
+    );
+    let r = d.alloc_with(&range(0, SECTORS + 1, 0));
+    assert_eq!(
+        submit(&mut d, T_DISCARD, 0, &[Buf::readable(r, 16)]).status,
+        S_IOERR,
+        "past the disk"
+    );
 }
 
 /// A read the host fails leaves zeros from the buffer it failed in on, not

@@ -10,11 +10,9 @@
 //!   features offered (`VIRTIO_BLK_F_RO` too over a drive given
 //!   `readonly=on`, whose writes QEMU's block layer refuses);
 //! - `virtio_blk_update_config`: the capacity, `seg_max` two less than the
-//!   queue, the geometry `hd_geometry_guess` (`hw/block/hd-geometry.c`)
-//!   chose when the device was made, 512-byte logical and physical blocks
-//!   (`blkconf_blocksizes`, which finds no block sizes to probe in a regular
-//!   file), the cache mode, one queue, and the discard and write-zeroes
-//!   limits;
+//!   queue, 512-byte logical and physical blocks (`blkconf_blocksizes`,
+//!   which finds no block sizes to probe in a regular file), the cache
+//!   mode, one queue, and one range per discard and write-zeroes request;
 //! - `virtio_blk_set_config` and `virtio_blk_reset`: the driver chooses the
 //!   cache mode through `writeback`; a reset brings back the write-back
 //!   cache;
@@ -60,6 +58,15 @@
 //!
 //! Where it differs from QEMU otherwise:
 //!
+//! - The device offers no legacy geometry (`VIRTIO_BLK_F_GEOMETRY`, optional
+//!   in 5.2.3), so `geometry` reads 0, valid only with the feature (5.2.4);
+//!   QEMU offers the cylinders, heads and sectors `hd_geometry_guess`
+//!   (`hw/block/hd-geometry.c`) makes up from the image.
+//! - A request has no length limit of the device's own: one moves as many
+//!   sectors as lie in the disk, and `max_discard_sectors` and
+//!   `max_write_zeroes_sectors` are the most their le32 fields hold; QEMU
+//!   refuses a request of more than `BDRV_REQUEST_MAX_SECTORS` (2³¹ − 1
+//!   bytes, in sectors) and reports that as both limits.
 //! - A request completes before the driver's notification returns, or its
 //!   `Status` write of `DRIVER_OK`, which takes what the queue already holds
 //!   (`super`'s `Transport::write_status`). QEMU gives reads, writes and
@@ -85,7 +92,6 @@ pub const QUEUE: usize = 0;
 pub const QUEUE_SIZE: u16 = 256;
 
 const F_SEG_MAX: u64 = 1 << 2;
-const F_GEOMETRY: u64 = 1 << 4;
 /// Offered over a read-only disk.
 const F_RO: u64 = 1 << 5;
 const F_BLK_SIZE: u64 = 1 << 6;
@@ -99,7 +105,6 @@ const F_WRITE_ZEROES: u64 = 1 << 14;
 
 /// The device's own feature bits over a disk the guest may write.
 pub const FEATURES: u64 = F_SEG_MAX
-    | F_GEOMETRY
     | F_BLK_SIZE
     | F_WCE
     | F_TOPOLOGY
@@ -113,10 +118,14 @@ pub const CONFIG_LEN: usize = 60;
 
 /// `logical_block_size` (and `physical_block_size`).
 const BLOCK_SIZE: u64 = 512;
-/// `BDRV_REQUEST_MAX_SECTORS`: the most sectors one request moves, and the
-/// default discard and write-zeroes limits.
-const REQUEST_MAX_SECTORS: u64 = (i32::MAX as u64) >> 9;
-/// `seg_max` with `seg-max-adjust`.
+/// `max_discard_sectors` and `max_write_zeroes_sectors`: the most the le32
+/// fields hold, the device having no limit of its own.
+const RANGE_MAX_SECTORS: u32 = u32::MAX;
+/// `seg_max`: the most data buffers a request can have. A descriptor chain
+/// is at most the queue size long (virtio 1.2 2.7.5: "this is the maximum
+/// possible descriptor chain length"; 2.7.5.3.1: "A driver MUST NOT create
+/// a descriptor chain longer than the Queue Size of the device"), and every
+/// request spends one descriptor on its header and one on its status.
 const SEG_MAX: u32 = QUEUE_SIZE as u32 - 2;
 /// `VIRTIO_BLK_ID_BYTES`.
 const ID_BYTES: u64 = 20;
@@ -175,85 +184,17 @@ enum Cache {
     WriteThrough,
 }
 
-/// The legacy geometry the configuration reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Geometry {
-    cylinders: u32,
-    heads: u32,
-    sectors: u32,
-}
-
-impl Geometry {
-    /// QEMU `hd_geometry_guess` with no geometry given and none to probe: the
-    /// one a DOS partition table implies, if it implies one with no more than
-    /// 16 heads, else the standard one for the disk's size.
-    fn guess(disk: &mut Disk) -> Self {
-        let sectors = disk.sectors();
-        match Self::from_partition_table(disk, sectors) {
-            Some(lchs) if lchs.heads <= 16 => lchs,
-            Some(_) | None => Self::for_size(sectors),
-        }
-    }
-
-    /// QEMU `guess_disk_lchs`: the first partition with sectors and an end
-    /// head names the heads and sectors per track, if the cylinders they
-    /// leave are between 1 and 16383.
-    fn from_partition_table(disk: &mut Disk, total: u64) -> Option<Self> {
-        let mut mbr = [0u8; SECTOR_SIZE as usize];
-        disk.read_at(DiskOffset::of_sector(0), &mut mbr).ok()?;
-        if mbr[510] != 0x55 || mbr[511] != 0xAA {
-            return None;
-        }
-        mbr[0x1BE..0x1FE].chunks_exact(16).find_map(|p| {
-            let (end_head, end_sector) = (p[5], p[6]);
-            let nr_sects = u32::from_le_bytes([p[12], p[13], p[14], p[15]]);
-            if nr_sects == 0 || end_head == 0 {
-                return None;
-            }
-            let heads = u32::from(end_head) + 1;
-            let sectors = u32::from(end_sector & 63);
-            if sectors == 0 {
-                return None;
-            }
-            // QEMU keeps the quotient in an int.
-            let cylinders = (total / u64::from(heads * sectors)) as i32;
-            (1..=16383).contains(&cylinders).then_some(Self {
-                cylinders: cylinders as u32,
-                heads,
-                sectors,
-            })
-        })
-    }
-
-    /// QEMU `guess_chs_for_size`: 16 heads of 63 sectors, the cylinders
-    /// between 2 and 16383.
-    fn for_size(total: u64) -> Self {
-        // QEMU keeps the quotient in an int.
-        let cylinders = (total / (16 * 63)) as i32;
-        Self {
-            cylinders: cylinders.clamp(2, 16383) as u32,
-            heads: 16,
-            sectors: 63,
-        }
-    }
-}
-
 /// QEMU's `VirtIOBlock` over its disk.
 pub struct Block {
     disk: Disk,
-    geometry: Geometry,
     cache: Cache,
 }
 
 impl Block {
-    /// A device over `disk`, its geometry guessed from it as QEMU does when
-    /// it realizes the device.
+    /// A device over `disk`, its cache write-back.
     pub fn new(disk: Disk) -> Self {
-        let mut disk = disk;
-        let geometry = Geometry::guess(&mut disk);
         Self {
             disk,
-            geometry,
             cache: Cache::WriteBack,
         }
     }
@@ -270,22 +211,19 @@ impl Block {
     pub fn get_config(&self, config: &mut [u8]) {
         let mut c = [0u8; CONFIG_LEN];
         c[0..8].copy_from_slice(&self.disk.sectors().to_le_bytes());
-        // size_max stays 0.
+        // size_max stays 0, and so does the geometry, which is not offered.
         c[12..16].copy_from_slice(&SEG_MAX.to_le_bytes());
-        c[16..18].copy_from_slice(&(self.geometry.cylinders as u16).to_le_bytes());
-        c[18] = self.geometry.heads as u8;
-        c[19] = self.geometry.sectors as u8;
         c[20..24].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
         // physical_block_exp, alignment_offset, min_io_size and opt_io_size
         // stay 0: the physical block is the logical one.
         c[32] = u8::from(self.cache == Cache::WriteBack);
         c[34..36].copy_from_slice(&1u16.to_le_bytes());
-        c[36..40].copy_from_slice(&(REQUEST_MAX_SECTORS as u32).to_le_bytes());
+        c[36..40].copy_from_slice(&RANGE_MAX_SECTORS.to_le_bytes());
         c[40..44].copy_from_slice(&1u32.to_le_bytes());
         // discard_sector_alignment: the discard granularity, the block size,
         // in sectors.
         c[44..48].copy_from_slice(&((BLOCK_SIZE / SECTOR_SIZE) as u32).to_le_bytes());
-        c[48..52].copy_from_slice(&(REQUEST_MAX_SECTORS as u32).to_le_bytes());
+        c[48..52].copy_from_slice(&RANGE_MAX_SECTORS.to_le_bytes());
         c[52..56].copy_from_slice(&1u32.to_le_bytes());
         c[56] = 1;
         config.copy_from_slice(&c[..config.len()]);
@@ -471,15 +409,12 @@ impl Block {
         vdev.notify(QUEUE);
     }
 
-    /// QEMU `virtio_blk_sect_range_ok`: `size` bytes from `sector` are
-    /// whole blocks, a request's worth at most, inside the disk.
+    /// QEMU `virtio_blk_sect_range_ok`, without its request limit: `size`
+    /// bytes from `sector` are whole blocks inside the disk.
     fn range_ok(&self, sector: u64, size: u64) -> bool {
         let count = size / SECTOR_SIZE;
         let total = self.disk.sectors();
-        count <= REQUEST_MAX_SECTORS
-            && size.is_multiple_of(BLOCK_SIZE)
-            && sector <= total
-            && count <= total - sector
+        size.is_multiple_of(BLOCK_SIZE) && sector <= total && count <= total - sector
     }
 
     /// A read: the disk into the device-writable buffers, all but the
@@ -599,9 +534,7 @@ impl Block {
         {
             return Status::Unsupported;
         }
-        if u64::from(sectors) > REQUEST_MAX_SECTORS {
-            return Status::IoError;
-        }
+        // A le32 count of sectors is under 2⁴¹ bytes.
         let bytes = u64::from(sectors) * SECTOR_SIZE;
         if !self.range_ok(sector, bytes) {
             return Status::IoError;

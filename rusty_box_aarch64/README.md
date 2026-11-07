@@ -1207,7 +1207,8 @@ integration tests of the public API.
   (`tests/unit/virtio_input.rs`); every 2D GPU command and its errors in
   QEMU's order, the cursor queue's answers, frames and the cursor as the
   host receives them (`tests/unit/virtio_gpu.rs`); the block device's
-  configuration and geometry, every request type and its errors, the used
+  configuration, its want of a geometry and of a request limit, every
+  request type and its errors, the used
   lengths, the cache mode, read-only and file-backed disks and snapshots
   (`tests/unit/virtio_block.rs`). The
   EDID generator, given QEMU's names for its display, matches QEMU's own
@@ -2394,6 +2395,16 @@ one open.
   reads), and answers zone commands, which 1.2 does not have, as a device
   that is not zoned would, a short zone report breaking the device
   (`src/devices/virtio/block.rs`).
+- **virtio-blk offers no geometry and no request limit.** It does not
+  offer `VIRTIO_BLK_F_GEOMETRY`, optional in 5.2.3 and meaningless to a
+  virtio disk, so the configuration's `geometry` reads 0 (5.2.4: valid only
+  with the feature); QEMU offers the cylinders, heads and sectors
+  `hd_geometry_guess` makes up from the image's partition table or size.
+  A request moves as many sectors as lie in the disk, and
+  `max_discard_sectors` and `max_write_zeroes_sectors` are 0xFFFF_FFFF, the
+  most their le32 fields hold; QEMU refuses a request of more than its
+  block layer's `BDRV_REQUEST_MAX_SECTORS` (0x3F_FFFF sectors) and reports
+  that as both limits (`src/devices/virtio/block.rs`).
 - **virtio-input's configuration is `struct virtio_input_config` whole.**
   It is 136 bytes, the union's bytes past the selected entry 0, and
   `select` and `subsel` read as the driver wrote them, which it may do in
@@ -2823,8 +2834,8 @@ the board's own:
   QEMU's CFI table values.
 - PSCI's optional functions: `MIGRATE_INFO_TYPE` alone of DEN 0022E
   Table 17's, QEMU's set, which `PSCI_FEATURES` reports.
-- virtio values: queue sizes, the block device's limits and geometry, the
-  GPU's resource and backing limits, the 20-byte GPU configuration.
+- virtio values: queue sizes, the GPU's resource and backing limits, the
+  20-byte GPU configuration.
 - The EDID's layout, which is `qemu_edid_generate`'s: its mode list,
   timings, rate, density and extension blocks.
 - virtio-input's key and button sets, the tablet's 0 to 0x7FFF range.
