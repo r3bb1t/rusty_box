@@ -178,8 +178,8 @@ pub(super) struct Residency {
     /// Round-robin victim cursor, in guest blocks.
     next_swapout: usize,
     /// Cached "the block table is an identity map" verdict, consumed by
-    /// `identity_guest_base` on every cpu-loop entry (per SMP slice — the
-    /// O(num_blocks) table walk it replaces dominated the SMP hot path).
+    /// `identity_guest_base` on every cpu-loop entry (per SMP slice), where an
+    /// O(num_blocks) table walk would dominate the SMP scheduling path.
     /// Maintained at every block-table mutation.
     identity_map: bool,
     /// Monotonic count of guest-block relocations — the residency epoch.

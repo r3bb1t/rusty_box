@@ -87,9 +87,9 @@ impl CpuMemoryPolicy {
 
 /// The three SMRAM control bits, read back together.
 ///
-/// A named struct rather than the `(bool, bool, bool)` this replaces (doctrine
-/// R0): all three are booleans, so nothing but position told them apart, and
-/// position is exactly what an assertion gets wrong silently.
+/// A named struct, not a tuple (doctrine R0): all three are booleans, so in a
+/// tuple nothing but position would tell them apart, and position is exactly
+/// what an assertion gets wrong silently.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SmramState {
@@ -179,11 +179,9 @@ pub struct BxMemoryStubC {
 
 }
 
-// `Send` is derived, not promised: every field is owned or borrowed data. The
-// hand-written `unsafe impl` this replaces asserted that the raw backing
-// pointer was never aliased — true, but a claim the compiler could not check.
-// The `Drop` that freed that pointer is gone too; `Box<[GuestPage]>` frees
-// itself with the alignment it was allocated with.
+// `Send` is derived, not promised (R6): every field is owned or exclusively
+// borrowed data, so the compiler checks it. `Box<[GuestPage]>` frees itself
+// with the alignment it was allocated with, so the stub needs no `Drop`.
 const _: () = {
     const fn assert_send<T: Send>() {}
     assert_send::<BxMemoryStubC>();
@@ -609,8 +607,8 @@ impl BxMemC {
     /// guest RAM as a guest-wide host slice.
     ///
     /// Consumes the cached `identity_map` verdict: this runs on every
-    /// cpu-loop entry (per SMP slice), where the previous O(num_blocks)
-    /// table walk dominated the whole SMP scheduling path.
+    /// cpu-loop entry (per SMP slice), where an O(num_blocks) table walk
+    /// would dominate the whole SMP scheduling path.
     pub(crate) fn identity_guest_base(&mut self) -> (*mut u8, usize) {
         let stub = &self.inherited_memory_stub;
         debug_assert_eq!(
@@ -623,8 +621,8 @@ impl BxMemC {
         }
         let (guest_len, vector_offset) = (stub.guest_len(), stub.vector_offset);
         let stub = &mut self.inherited_memory_stub;
-        // A returned pointer is fine — it is a FIELD holding one that would
-        // block `Send`, and there is no longer any such field.
+        // Returning a pointer leaves `Send` derived: only a field holding one
+        // would block it, and the stub holds none.
         let ptr = stub.backing.as_mut_slice()[vector_offset..].as_mut_ptr();
         (ptr, guest_len)
     }
@@ -764,10 +762,10 @@ impl BxMemC {
 #[cfg(all(test, feature = "std"))]
 mod phase1_tests {
 
-/// Emulator construction needs more than the default 2 MiB test stack, but
-/// far less than the 256 MiB previously reserved here: `Emulator` is ~4 MiB.
-/// Oversized reservations across many parallel tests intermittently exhausted
-/// the process and failed unrelated tests with STATUS_STACK_OVERFLOW.
+/// Emulator construction needs more than the default 2 MiB test stack:
+/// `Emulator` is ~4 MiB. 64 MiB is ample and stays small, because many
+/// parallel tests each reserve it, and oversized reservations exhaust the
+/// process and fail unrelated tests with STATUS_STACK_OVERFLOW.
 const TEST_STACK_SIZE: usize = 64 * MIB;
     use super::{
         memory_rusty_box::*, BxMemC, BxMemoryStubC, CpuMemoryPolicy, MemoryError,
@@ -1189,19 +1187,16 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
 
     /// The residency epoch advances exactly when a guest block changes slots.
     ///
-    /// This is the contract 4c relies on to retire the pin sidecar: pins stop
-    /// eviction from stranding a cached RAM offset, an epoch instead lets
-    /// eviction happen and tells the holder its offset died. If a relocation
+    /// A CPU holding a cached RAM offset relies on this: eviction may happen
+    /// at any time, and the epoch tells the holder its offset died. If a relocation
     /// could ever go unannounced, a stale offset would silently read another
     /// block's bytes.
     /// A block may be evicted even while a CPU still references it.
     ///
-    /// The pin sidecar used to veto exactly this: if any CPU held a direct
-    /// reference into the candidate block, the allocator skipped it, and a
-    /// machine whose live references covered every slot could not make progress
-    /// at all — it returned `InsufficientRam` instead. The epoch replaces the
-    /// veto with an announcement, so eviction always succeeds and the holder
-    /// discards its cached offset at the next instruction fetch.
+    /// Eviction never waits on a reference: it always succeeds, and the
+    /// holder learns of it through the residency epoch and discards its cached
+    /// offset at the next instruction fetch. A machine whose live references
+    /// cover every slot still makes progress.
     ///
     /// Asserted as a guest-visible property (doctrine R9): the access that
     /// forces the eviction must SUCCEED and return the right bytes.
@@ -1291,12 +1286,10 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
 
     /// Guest bytes survive a full eviction round-trip through the swap file.
     ///
-    /// The swap file used to be reached through an `UnsafeCell`, so the paths
-    /// that write a victim out and read a block back in aliased it rather than
-    /// borrowing it. This asserts the guest-visible consequence (doctrine R9) —
-    /// what a block holds after being swapped out and back — instead of how the
-    /// file happens to be borrowed, so it stays meaningful as that seam moves
-    /// into `Residency`.
+    /// Asserted as a guest-visible property (doctrine R9): what a block holds
+    /// after being swapped out and back, not how the swap file is borrowed,
+    /// so the test holds whichever code writes a victim out and reads a block
+    /// back in.
     #[test]
     fn evicted_blocks_keep_their_bytes_across_the_swap_file() {
         // Guest 4 MiB over 1 MiB of host RAM: one resident block, so touching a

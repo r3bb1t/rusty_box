@@ -1005,9 +1005,9 @@ mod handler_tests {
 
 /// Emulator construction needs a bigger stack than the default 2 MiB test
 /// thread: `Emulator` is ~4 MiB and the debug build materialises a few
-/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
-/// enough concurrent reservations to intermittently exhaust the process
-/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+/// copies while boxing it. 64 MiB is ample and stays small, because many
+/// concurrent tests each reserve it, and oversized reservations exhaust the
+/// process and fail unrelated tests with STATUS_STACK_OVERFLOW.
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::*;
 

@@ -54,9 +54,9 @@ pub struct MmioHit {
 ///
 /// The PC machine maps five (the VGA text/graphics window, the VGA LFB and MMIO
 /// apertures, the I/O APIC, and the HPET); the rest is headroom. A fixed bound
-/// is deliberate: region bases come from PCI BARs, which the guest programs, and
-/// the previous table was grown to `(end >> 20) + 1` entries on registration —
-/// so a guest that parked a BAR high could size a host allocation.
+/// is deliberate: region bases come from PCI BARs, which the guest programs, so
+/// a table grown to fit each registered region would let a guest that parked a
+/// BAR high size a host allocation.
 const MAX_DEVICE_MMIO_REGIONS: usize = 16;
 
 /// Megabytes covered by the occupancy bitmap — the low 4 GiB, which is where

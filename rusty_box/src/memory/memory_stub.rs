@@ -32,16 +32,14 @@ fn guest_block_index(guest_block: u32) -> SnapResult<usize> {
 
 /// One page of guest RAM, carrying the allocation's alignment in its type.
 ///
-/// The backing must be `BX_MEM_VECTOR_ALIGN`-aligned. Expressing that as an
-/// alignment on the element type rather than on a hand-built `Layout` is what
-/// lets the owned case be an ordinary `Box<[GuestPage]>`: it is `Send`, it
-/// frees itself, and it cannot be deallocated with the wrong alignment — the
-/// hazard that forced the previous hand-rolled buffer and its manual `Drop`.
+/// The backing is `BX_MEM_VECTOR_ALIGN`-aligned (Bochs memory_stub.cc
+/// `alloc_vector_aligned`). The alignment is the element type's, so the owned
+/// case is an ordinary `Box<[GuestPage]>`: it is `Send`, it frees itself, and
+/// it is freed with the alignment it was allocated with.
 ///
-/// It also keeps `vector_offset` at zero. Were alignment instead absorbed as
-/// leading padding, `rom()` (which indexes by `rom_offset` alone) and the
-/// construction path (which computes `vector_offset + rom_offset`) would stop
-/// agreeing; they coincide today only because the offset is zero.
+/// The allocation starts aligned, so `vector_offset` is zero, which `rom()`
+/// (indexing by `rom_offset` alone) and the construction path (computing
+/// `vector_offset + rom_offset`) both rely on.
 #[cfg(feature = "alloc")]
 #[repr(C, align(4096))]
 #[derive(Clone, Copy)]
