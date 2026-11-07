@@ -1201,9 +1201,10 @@ integration tests of the public API.
   interrupt and configuration-change behaviour, chains ending in an
   indirect table, and every rule whose breach breaks the device
   (`tests/unit/virtio_transport.rs`); the keyboard's and tablet's
-  configuration entries, QEMU's but for the names, vendor, products and
-  versions, the board's identity's, in a configuration of virtio 1.2's
-  layout, and the events each host action becomes
+  configuration entries, the board's own: the names, vendor, products and
+  versions its identity's, and exactly the keys, buttons and axes the host
+  sends, in a configuration of virtio 1.2's layout, and the events each
+  host action becomes
   (`tests/unit/virtio_input.rs`); the GPU's 16-byte configuration, every
   2D GPU command and its errors in QEMU's order, the host-memory budget
   of the guest's RAM, the cursor queue's answers, frames and the cursor as
@@ -2415,6 +2416,46 @@ one open.
   writes `subsel` has `select` 0. A status-queue notification that takes
   no report interrupts nothing; QEMU's interrupts anyway
   (`src/devices/virtio/input.rs`).
+- **virtio-input offers what the host can send, and nothing else.** virtio
+  1.2 (5.8.4) leaves a device's event codes to it ("implementation-defined
+  input event codes"); QEMU's are its own, and this board derives each set
+  from its own vocabulary (`src/devices/virtio/input.rs`):
+  - The keyboard's `EV_KEY` codes are the Linux code of every key the host
+    can press (`rusty_box_core`'s `Key::ALL`), 117 codes up to `KEY_SEARCH`
+    (217), a 28-byte bitmap; QEMU offers every code of its qcode table
+    (`qemu_input_map_qcode_to_linux`), many of which no front end of this
+    board can press. Every code from `KEY_ESC` to `KEY_S` is there, which udev's
+    `input_id` requires of a keyboard (`ID_INPUT_KEYBOARD`). Its LEDs are
+    one for each lock key among those (`LED_NUML`, `LED_CAPSL`,
+    `LED_SCROLLL`, as QEMU's), and `EV_REP` is offered with no codes, as
+    the device never sends a repeat and Linux repeats a held key itself.
+  - The tablet's buttons are `BTN_LEFT`, `BTN_RIGHT`, `BTN_MIDDLE`,
+    `BTN_SIDE` and `BTN_EXTRA`, the host's `PointerButton::ALL`. QEMU's add
+    `BTN_TOUCH` (its `keymap_button`), which this board's host has no
+    button to send, and `BTN_GEAR_UP` and `BTN_GEAR_DOWN`, which QEMU sends
+    as a release after each wheel detent, of a key never pressed; Linux
+    drops those releases.
+    Linux still calls the tablet a mouse with absolute axes (udev's
+    `ID_INPUT_MOUSE`), which it decides by `BTN_LEFT` before it looks for
+    `BTN_TOUCH`.
+  - A turn of the wheel is one `REL_WHEEL` event of its detents and its
+    sync (`Documentation/input/event-codes.rst`: the value "is the number
+    of detents moved"), so a turn of any length fits two buffers; QEMU
+    sends each detent as its own event, sync, gear release and sync.
+  - The axes `ABS_X` and `ABS_Y` run from 0 to 0xFFFF, the whole 16-bit
+    coordinate a position carries (`PointerPos::MAX`), where QEMU's run to
+    0x7FFF (`INPUT_EVENT_ABS_MAX`). Fuzz, flat and resolution are 0, as
+    QEMU's: a position is exact ("precise", in Linux's
+    `input-programming.rst`), and is a fraction of a screen whose size in
+    millimetres the device does not know. A Windows guest's virtio-win
+    `vioinput` driver carries an axis in a 16-bit report field, which the
+    whole 16-bit range fills and does not overflow.
+  - Neither device sets an input property, as QEMU's do not: where none is
+    set, Linux deduces a device's kind from its events (`event-codes.rst`,
+    "Device properties"), and its guidelines set `INPUT_PROP_DIRECT` for
+    touchscreens and pen tablets and `INPUT_PROP_POINTER` for touchpads and
+    pen tablets, none of which a pointer with mouse buttons and absolute
+    axes is.
 - **virtio-gpu answers on its cursor queue, and keeps offsets whole.**
   Both cursor commands answer `VIRTIO_GPU_RESP_OK_NODATA` (5.7.6.10) to a
   chain with room for it, a command shorter than `struct
@@ -2868,7 +2909,6 @@ the board's own:
 - virtio values: the queue sizes.
 - The EDID's layout, which is `qemu_edid_generate`'s: its mode list,
   timings, rate, density and extension blocks.
-- virtio-input's key and button sets, the tablet's 0 to 0x7FFF range.
 - The direct boot's placement of the kernel, initrd and device tree, and
   `x4` holding the entry, left from QEMU's boot stub.
 

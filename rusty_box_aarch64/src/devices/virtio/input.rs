@@ -16,20 +16,47 @@
 //! - `virtio_input_set_status` and `virtio_input_reset`: the device is
 //!   active from `DRIVER_OK` until reset, which the transport's status
 //!   holds;
-//! - `virtio_keyboard_config` and `virtio_keyboard_init` (every key code
-//!   from `KEY_ESC` up to `KEY_REPLY`), `virtio_tablet_config` and
-//!   `virtio_input_extend_config` over `keymap_button`;
-//! - `virtio_input_handle_event`: a key or button is `EV_KEY`, a pointer
-//!   position `EV_ABS` on `INPUT_EVENT_ABS_MAX`'s scale, and a wheel button
-//!   press one `REL_WHEEL` step, its release the `BTN_GEAR_UP` or
-//!   `BTN_GEAR_DOWN` key going up.
+//! - `virtio_keyboard_config` and `virtio_tablet_config`: the keyboard
+//!   offers `EV_KEY`, `EV_REP` and `EV_LED`, the tablet `EV_KEY`, `EV_REL`
+//!   and `EV_ABS`, each with its bitmap built as
+//!   `virtio_input_extend_config` builds one, sized to its highest set
+//!   byte;
+//! - `virtio_input_handle_event`: a key or button is `EV_KEY` and a pointer
+//!   position `EV_ABS`.
 //!
 //! Event and key codes are Linux's (`include/uapi/linux/input-event-codes.h`),
-//! which QEMU's `qemu_input_map_qcode_to_linux` table produces. The host's
-//! events arrive as QEMU's display front ends send them (`ui/gtk.c`,
-//! `ui/sdl2.c`): a key, then a sync; a position as both axes, then a sync; a
-//! button, then a sync; a wheel detent as the wheel button pressed, a sync,
-//! released, a sync.
+//! whose evdev events virtio 1.2 carries (5.8, 5.8.6). The host's events
+//! arrive as QEMU's display front ends send them (`ui/gtk.c`, `ui/sdl2.c`):
+//! a key, then a sync; a position as both axes, then a sync; a button, then
+//! a sync.
+//!
+//! What the devices offer is the board's own, which virtio 1.2 leaves to
+//! the device (5.8.4: the codes are "implementation-defined"), each set
+//! derived from the board's own vocabulary so that it names exactly what
+//! the host can send (README, "Where the references differ"):
+//!
+//! - the keyboard's keys are the Linux code of each [`Key`], and its LEDs
+//!   one for each lock key among them (`LED_NUML`, `LED_CAPSL`,
+//!   `LED_SCROLLL`); `EV_REP` with no codes, as the device sends a key's
+//!   presses and releases and never a repeat (value 2), so a Linux driver
+//!   repeats a held key itself (`Documentation/input/input-programming.rst`,
+//!   "Key autorepeat");
+//! - the tablet's buttons are the Linux code of each [`PointerButton`]; its
+//!   axes `ABS_X` and `ABS_Y`, each from 0 to [`PointerPos::MAX`], the whole
+//!   16-bit coordinate a position carries, with no fuzz or flat, as a
+//!   position is exact (`input-programming.rst`: zero "means that the thing
+//!   is precise"), and resolution 0, as a position is a fraction of a
+//!   screen whose size in millimetres the device does not know; its wheel
+//!   `REL_WHEEL`, whose value is "the number of detents moved"
+//!   (`event-codes.rst`), so a turn of the wheel is one event and its
+//!   sync, and no `REL_WHEEL_HI_RES`, as the host reports whole detents
+//!   ([`WheelSteps`]);
+//! - no input properties: Linux deduces the device's kind from the events
+//!   it emits where no property is set (`Documentation/input/event-codes.rst`,
+//!   "Device properties"), and its "Guidelines" set `INPUT_PROP_DIRECT`
+//!   for touchscreens and pen tablets and `INPUT_PROP_POINTER` for
+//!   touchpads and pen tablets, none of which a pointer with mouse buttons
+//!   and absolute axes is.
 //!
 //! Where it follows the specification over QEMU (README, "Where the
 //! references differ"): a status event comes back with nothing written
@@ -77,29 +104,15 @@ const ABS_Y: u16 = 0x01;
 const LED_NUML: u8 = 0;
 const LED_CAPSL: u8 = 1;
 const LED_SCROLLL: u8 = 2;
-const KEY_ESC: u16 = 1;
-const KEY_REPLY: u16 = 232;
+const KEY_CAPSLOCK: u16 = 58;
+const KEY_NUMLOCK: u16 = 69;
+const KEY_SCROLLLOCK: u16 = 70;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 const BTN_MIDDLE: u16 = 0x112;
 const BTN_SIDE: u16 = 0x113;
 const BTN_EXTRA: u16 = 0x114;
-const BTN_TOUCH: u16 = 0x14A;
-const BTN_GEAR_DOWN: u16 = 0x150;
-const BTN_GEAR_UP: u16 = 0x151;
 const BUS_VIRTUAL: u16 = 0x06;
-
-/// `keymap_button`'s codes: the buttons a QEMU pointer reports.
-const BUTTON_CODES: [u16; 8] = [
-    BTN_LEFT,
-    BTN_RIGHT,
-    BTN_MIDDLE,
-    BTN_GEAR_UP,
-    BTN_GEAR_DOWN,
-    BTN_SIDE,
-    BTN_EXTRA,
-    BTN_TOUCH,
-];
 
 const CFG_ID_NAME: u8 = 0x01;
 const CFG_ID_DEVIDS: u8 = 0x03;
@@ -182,8 +195,8 @@ fn key_value(action: KeyAction) -> u32 {
     }
 }
 
-/// The Linux key code QEMU reports for `key` (QEMU
-/// `qemu_input_map_qcode_to_linux`, by way of the qcode each Bochs key is).
+/// The Linux key code (`input-event-codes.h`) of the key `key` is, as QEMU's
+/// `qemu_input_map_qcode_to_linux` gives it for the qcode of each Bochs key.
 pub const fn linux_key_code(key: Key) -> u16 {
     match key {
         Key::CtrlL => 29,
@@ -310,7 +323,20 @@ pub const fn linux_key_code(key: Key) -> u16 {
     }
 }
 
-/// Linux `BTN_LEFT` and the buttons after it, as QEMU's `keymap_button`.
+/// The LED of the lock key whose Linux key code is `code`, if it is one: a
+/// keyboard has an LED for each of its lock keys (Linux
+/// `drivers/tty/vt/keyboard.c` lights `LED_NUML`, `LED_CAPSL` and
+/// `LED_SCROLLL` for the Num, Caps and Scroll Lock states).
+const fn lock_led(code: u16) -> Option<u8> {
+    match code {
+        KEY_NUMLOCK => Some(LED_NUML),
+        KEY_CAPSLOCK => Some(LED_CAPSL),
+        KEY_SCROLLLOCK => Some(LED_SCROLLL),
+        _ => None,
+    }
+}
+
+/// The Linux code of `button`, from `BTN_LEFT` to `BTN_EXTRA`.
 const fn linux_button_code(button: PointerButton) -> u16 {
     match button {
         PointerButton::Left => BTN_LEFT,
@@ -405,30 +431,40 @@ impl Input {
                 ids[6..].copy_from_slice(&self.id.version.get().to_le_bytes());
                 ConfigEntry::from_bytes(&ids)
             }
+            // Every key the board's keyboard has.
             (InputKind::Keyboard, CFG_EV_BITS) if subsel == EV_KEY => {
-                ConfigEntry::bitmap(KEY_ESC..KEY_REPLY)
+                ConfigEntry::bitmap(Key::ALL.into_iter().map(linux_key_code))
             }
+            // Supported, with no codes: the device never sends a repeat, so
+            // the driver repeats a held key.
             (InputKind::Keyboard, CFG_EV_BITS) if subsel == EV_REP => ConfigEntry::from_bytes(&[0]),
-            (InputKind::Keyboard, CFG_EV_BITS) if subsel == EV_LED => {
-                ConfigEntry::from_bytes(&[(1 << LED_NUML) | (1 << LED_CAPSL) | (1 << LED_SCROLLL)])
-            }
+            // An LED for each lock key among them.
+            (InputKind::Keyboard, CFG_EV_BITS) if subsel == EV_LED => ConfigEntry::bitmap(
+                Key::ALL
+                    .into_iter()
+                    .filter_map(|key| lock_led(linux_key_code(key)))
+                    .map(u16::from),
+            ),
+            // Every button the board's pointer has.
             (InputKind::Tablet, CFG_EV_BITS) if subsel == EV_KEY => {
-                ConfigEntry::bitmap(BUTTON_CODES.into_iter())
+                ConfigEntry::bitmap(PointerButton::ALL.into_iter().map(linux_button_code))
             }
             (InputKind::Tablet, CFG_EV_BITS) if subsel == EV_REL => {
-                ConfigEntry::from_bytes(&[0, 1 << (REL_WHEEL - 8)])
+                ConfigEntry::bitmap(core::iter::once(REL_WHEEL))
             }
             (InputKind::Tablet, CFG_EV_BITS) if subsel == EV_ABS => {
-                ConfigEntry::from_bytes(&[(1 << ABS_X) | (1 << ABS_Y)])
+                ConfigEntry::bitmap([ABS_X, ABS_Y].into_iter())
             }
             (InputKind::Tablet, CFG_ABS_INFO) if subsel == ABS_X || subsel == ABS_Y => {
-                // min, max, fuzz, flat, res.
+                // min 0 and max `PointerPos::MAX`, a position's whole range;
+                // fuzz, flat and res 0: a position is exact, and a fraction
+                // of a screen of no known physical size.
                 let mut info = [0u8; 20];
                 info[4..8].copy_from_slice(&u32::from(PointerPos::MAX).to_le_bytes());
                 ConfigEntry::from_bytes(&info)
             }
-            // No serial number (QEMU gives one only when told `serial=`), no
-            // input properties, and nothing for any other selector.
+            // No serial number, no input properties, and nothing for any
+            // other selector.
             _ => return None,
         })
     }
@@ -560,28 +596,17 @@ impl Input {
         }
     }
 
-    /// Wheel detents, for the tablet: each the wheel button pressed and
-    /// released. A turn needing more events than the event queue holds can
-    /// never find a buffer for each, and is refused at once.
+    /// A turn of the wheel, for the tablet: one `REL_WHEEL` event of its
+    /// detents, positive away from the user, and its sync. A turn of no
+    /// detents moves nothing and sends nothing.
     pub fn wheel(&mut self, vdev: &mut Vdev<'_, '_>, steps: WheelSteps) -> bool {
         match self.kind {
             InputKind::Tablet => {
-                let (step, gear) = if steps.0 > 0 {
-                    (1u32, BTN_GEAR_UP)
-                } else {
-                    (u32::MAX, BTN_GEAR_DOWN)
-                };
-                let detent = [
-                    Batch::of(&[Event::new(EV_REL, REL_WHEEL, step)]),
-                    Batch::of(&[Event::new(EV_KEY, gear, 0)]),
-                ];
-                let per_detent: usize = detent.iter().map(|b| b.len).sum();
-                let count = steps.0.unsigned_abs() as usize;
-                if count > usize::from(QUEUE_SIZE) / per_detent {
-                    return false;
-                }
-                let detents = core::iter::repeat_n(detent, count).flatten();
-                self.deliver(vdev, detents)
+                // `struct virtio_input_event`'s `value` is evdev's signed
+                // value in its 32 bits.
+                let turn = (steps.0 != 0)
+                    .then(|| Batch::of(&[Event::new(EV_REL, REL_WHEEL, steps.0 as u32)]));
+                self.deliver(vdev, turn.into_iter())
             }
             InputKind::Keyboard => false,
         }

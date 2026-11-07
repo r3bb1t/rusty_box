@@ -735,7 +735,7 @@ the guest's hardware cursor drawn over it. `keyboard()` on such a machine is
 the virtio keyboard: keys reach the guest as Linux input events, each
 followed by a sync, as QEMU's front ends send them; `terminal_keyboard()`
 still types on the serial console. `pointer()` is the tablet: positions on
-`PointerPos`'s 0 to `0x7FFF` scale (`from_pixel` scales a pixel of the
+`PointerPos`'s 0 to `0xFFFF` scale (`from_pixel` scales a pixel of the
 picture), buttons, and wheel detents, through `PointerInput`.
 
 **Limits.** An input device takes nothing until its driver is ready, and an

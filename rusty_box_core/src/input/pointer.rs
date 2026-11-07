@@ -24,8 +24,9 @@ impl PointerButton {
 
 /// A point on the guest's screen as a fraction of its width and height,
 /// independent of its resolution: `0` is the left or top edge and
-/// [`PointerPos::MAX`] the right or bottom one, as an absolute pointing
-/// device reports it (QEMU `INPUT_EVENT_ABS_MAX`).
+/// [`PointerPos::MAX`] the right or bottom one, each axis the whole of a
+/// 16-bit coordinate, so a position resolves to 1/65535 of the screen
+/// whatever size the guest's picture is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PointerPos {
     x: u16,
@@ -33,21 +34,19 @@ pub struct PointerPos {
 }
 
 impl PointerPos {
-    /// The largest coordinate on either axis.
-    pub const MAX: u16 = 0x7FFF;
+    /// The largest coordinate on either axis: every 16-bit value is a
+    /// coordinate.
+    pub const MAX: u16 = u16::MAX;
 
-    /// The point `x`, `y`, each clamped to [`PointerPos::MAX`].
+    /// The point `x`, `y`.
     pub const fn new(x: u16, y: u16) -> Self {
-        Self {
-            x: if x > Self::MAX { Self::MAX } else { x },
-            y: if y > Self::MAX { Self::MAX } else { y },
-        }
+        Self { x, y }
     }
 
     /// Pixel (`px`, `py`) of a `width` by `height` picture, scaled the way
     /// QEMU's `qemu_input_scale_axis` scales a window position (input range
-    /// `0..=size`, an empty one landing in the middle); past the edge
-    /// clamps to it.
+    /// `0..=size`, an empty one landing in the middle) onto the range
+    /// `0..=`[`PointerPos::MAX`]; past the edge clamps to it.
     pub fn from_pixel(px: u32, py: u32, width: u32, height: u32) -> Self {
         let scale = |p: u32, size: u32| -> u16 {
             if size == 0 {
@@ -98,14 +97,14 @@ mod tests {
     /// The top-left pixel is the origin, a picture's far edge the far edge
     /// of the coordinate space, the middle the middle, past the edge clamps,
     /// and an empty picture lands in the middle (QEMU
-    /// `qemu_input_scale_axis`).
+    /// `qemu_input_scale_axis`), on the whole 16-bit range.
     #[test]
     fn pixels_scale_as_qemu_scales_them() {
         assert_eq!(PointerPos::from_pixel(0, 0, 1280, 800), PointerPos::new(0, 0));
-        assert_eq!(PointerPos::from_pixel(1280, 800, 1280, 800), PointerPos::new(0x7FFF, 0x7FFF));
-        assert_eq!(PointerPos::from_pixel(640, 400, 1280, 800), PointerPos::new(0x3FFF, 0x3FFF));
-        assert_eq!(PointerPos::from_pixel(5000, 5000, 1280, 800), PointerPos::new(0x7FFF, 0x7FFF));
-        assert_eq!(PointerPos::from_pixel(3, 3, 0, 0), PointerPos::new(0x3FFF, 0x3FFF));
+        assert_eq!(PointerPos::from_pixel(1280, 800, 1280, 800), PointerPos::new(0xFFFF, 0xFFFF));
+        assert_eq!(PointerPos::from_pixel(640, 400, 1280, 800), PointerPos::new(0x7FFF, 0x7FFF));
+        assert_eq!(PointerPos::from_pixel(5000, 5000, 1280, 800), PointerPos::new(0xFFFF, 0xFFFF));
+        assert_eq!(PointerPos::from_pixel(3, 3, 0, 0), PointerPos::new(0x7FFF, 0x7FFF));
         assert_eq!(PointerPos::new(0xFFFF, 1).x(), PointerPos::MAX);
     }
 }
