@@ -684,8 +684,8 @@ fails part-way through an image leaves the machine switched off until
 
 QEMU's `virt` takes a display and input devices as `-device` options. The
 builder takes the three QEMU's display front ends drive — `virtio-gpu-device`
-(2D, with an EDID made as QEMU's generator makes it, naming the display by
-the board's identity), `virtio-keyboard-device` and `virtio-tablet-device`
+(2D, with a VESA E-EDID 1.4 EDID of the board's own, its preferred mode
+the display's size, naming the display by the board's identity), `virtio-keyboard-device` and `virtio-tablet-device`
 — and plugs each into the first free virtio-mmio transport. With
 `VirtConfig::transport_order` set to `TransportOrder::LastFree` it plugs
 each into the last free one instead, as QEMU does.

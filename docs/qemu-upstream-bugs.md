@@ -1992,6 +1992,82 @@ Found on QEMU 11.1.2; master not yet checked.
 `create_virtio_devices`. `rusty_box_aarch64`'s tree gives each transport
 level-high (`src/boot/tree.rs`).
 
+### 54. The EDID's DisplayID timing reads a pixel clock 10 kHz fast
+
+**Impact**: small. A guest takes the display's preferred mode, on a
+display large enough to need the DisplayID block, at a pixel clock one
+10 kHz unit above the one QEMU meant, and so a refresh rate a little
+above it.
+
+**Location**: `hw/display/edid-generate.c`, `qemu_displayid_generate`,
+which stores `timings->clock` as it is in the Type I timing's three clock
+bytes, and every other field `- 1`.
+
+**What the specification says**: VESA DisplayID 1.3's Type I detailed
+timing (4.4.1) stores each field, the pixel clock (in 10 kHz units)
+among them, less one. Linux (`drm_mode_displayid_detailed`) and
+edid-decode add one to the clock as to the other fields.
+
+**Reproduce**: found by reading the source of QEMU 11.1.2; master not yet
+checked. A 3840 by 2160 display (`-device virtio-gpu,xres=3840,yres=2160`)
+gets the DisplayID block; its clock bytes are QEMU's `clock` and Linux's
+mode reads `(clock + 1) * 10` kHz.
+
+**Fix**: not yet written: store `timings->clock - 1`.
+`rusty_box_aarch64` stores the clock less one
+(`src/devices/virtio/edid.rs`, `displayid_block`).
+
+### 55. A large display's EDID has no preferred timing in its base block
+
+**Impact**: small. A guest that follows E-EDID 1.4 takes the base block's
+first 18-byte descriptor as the preferred timing; for a display 4096
+pixels or more either way, or whose preferred clock is 655.36 MHz or more,
+QEMU's is the Established Timings III descriptor, so there is none, while
+feature bit 1 still says the preferred timing is the native one. Linux
+finds the native mode in the DisplayID block, which marks it preferred.
+
+**Location**: `hw/display/edid-generate.c`, `qemu_edid_generate`, which
+skips `edid_desc_timing` for a `large_screen` and starts the descriptors
+with `edid_desc_type(xtra3, 0xf7)`.
+
+**What the specification says**: VESA E-EDID 1.4, 3.10.1 and Table 3.20
+note 4: the first 18-byte descriptor "shall contain the preferred timing
+mode", a required element in EDID 1.4; 3.6.4 note 4: feature bit 1 clear
+says that timing is not the display's native one.
+
+**Reproduce**: found by reading the source of QEMU 11.1.2; master not yet
+checked. With `xres=3840,yres=2160`, bytes 36h to 3Ah of the EDID read
+`00 00 00 F7 00`.
+
+**Fix**: not yet written: a detailed timing of a mode the display lists
+first, and feature bit 1 clear, for a `large_screen`. `rusty_box_aarch64`
+puts the largest listed DMT mode there (`src/devices/virtio/edid.rs`).
+
+### 56. The EDID's range limits leave out its own preferred mode on a tall display
+
+**Impact**: small. A guest that checks a mode against the Display Range
+Limits finds QEMU's own preferred mode outside them on a display 2062
+lines tall or more, whose line rate passes the descriptor's 160 kHz.
+
+**Location**: `hw/display/edid-generate.c`, `edid_desc_ranges` (50 to
+125 Hz, 30 to 160 kHz, 2550 MHz, whatever the display) and
+`generate_timings` (a vertical total of `yres + yres * 35 / 1000` lines at
+the refresh rate, 75 Hz by default).
+
+**What the specification says**: VESA E-EDID 1.4, Table 3.26 note 7:
+"All video timing modes (listed in BASE EDID or timing extensions) shall
+be supported by the display and the frequencies for the listed video
+timing modes shall fall within the minimum and maximum horizontal and
+vertical frequency range limits."
+
+**Reproduce**: found by reading the source of QEMU 11.1.2; master not yet
+checked. At `yres=2160` the preferred mode's vertical total is 2235 lines
+at 75 Hz, a line rate of 167.6 kHz.
+
+**Fix**: not yet written: work the limits out from the modes listed.
+`rusty_box_aarch64` gives the listed modes' own bounds
+(`src/devices/virtio/edid.rs`, `range_limits`).
+
 ---
 
 ## Deliberate QEMU omissions

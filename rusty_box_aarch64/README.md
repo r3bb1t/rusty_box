@@ -1213,10 +1213,13 @@ integration tests of the public API.
   request type and its errors, the used
   lengths, the cache mode, read-only and file-backed disks and snapshots
   (`tests/unit/virtio_block.rs`). The
-  EDID generator, given QEMU's names for its display, matches QEMU's own
-  byte for byte at nine sizes (`tests/vectors/qemu_edid.txt`, from
-  `tests/vectors/gen_qemu_edid.sh`, which builds `edid-generate.c` from a
-  QEMU checkout); the board gives it its identity's. `tests/identity.rs`
+  EDID, read as a guest's parser reads it, at sizes from none to more than
+  DisplayID holds: a valid E-EDID 1.4 structure in every block, the
+  display's own size as its preferred mode with VESA CVT 1.2's
+  reduced-blanking timing, the DMT modes that fit, sRGB, 96 pixels an
+  inch, range limits holding every listed mode, a DisplayID 1.3 block
+  only for a mode the base block cannot hold, and the board's names
+  (`tests/unit/virtio_edid.rs`). `tests/identity.rs`
   reads, as a guest, the board's names: the device tree's, every
   transport's `VendorID`, the input devices' names and vendor. Alpine with the
   three devices binds `virtio_gpu` (`+edid`), shows its console in the
@@ -2210,6 +2213,66 @@ one open.
   driver may keep less of a name than its field holds (Linux's virtio
   input driver keeps 64 bytes); that is the guest's to decide, and the
   board does not narrow its names to suit one guest.
+- **The display's EDID is laid out by VESA's documents.** QEMU's
+  generator (`qemu_edid_generate` in `hw/display/edid-generate.c`, with
+  the inputs `virtio_gpu_base_generate_edid` gives it) fills what VESA
+  E-EDID 1.4 leaves to a display's maker with choices of its own, and in
+  places breaks E-EDID; this board's (`src/devices/virtio/edid.rs`) takes
+  each such value from a published standard instead:
+  - Rate: QEMU's preferred mode is at 75 Hz; every mode here is at
+    60 Hz, the base video mode's rate (E-EDID 3.8) and the one VESA CVT
+    1.2 defines reduced blanking for.
+  - Preferred timing: QEMU blanks a share of each direction of its own
+    (`generate_timings`: 35% of the width, 3.5% of the height) with both
+    syncs negative; here it is CVT 1.2 reduced blanking (160 pixels, a
+    positive horizontal sync, at least 460 µs of vertical blank, a
+    negative vertical sync of 4 to 10 lines by the aspect ratio, the
+    clock in 0.25 MHz steps), at the display's exact width, not rounded
+    down to CVT's 8-pixel cell, so the preferred mode is the display's
+    size.
+  - Mode list: QEMU lists the same modes whatever the display's size —
+    640 by 480, 800 by 600 and 1024 by 768, eight standard timings from
+    1280 by 960 to 2048 by 1152, Established Timings III from 1280 by 768
+    to 1920 by 1440, and in a
+    CTA-861 block television VICs at 50 Hz up to 5120 by 2160 and 3840 by
+    2160 at 60 Hz. Here the list is VESA DMT's 60 Hz modes that fit
+    within the display, each by its E-EDID code (Established Timings I &
+    II, then III, then a standard timing), and the base video mode
+    always; the display has no television timings, so there is no CTA-861
+    block.
+  - Density: QEMU's is 100 dpi, its sizes truncated; here it is 96 pixels
+    an inch, CSS's reference pixel, each size rounded to the nearest, as
+    E-EDID 3.6.2 says. A screen past 255 cm gives its aspect ratio instead
+    (Table 3.12), and a display of no pixels no size.
+  - Input: QEMU says DisplayPort; here no interface is named (Table 3.11,
+    0000b), as a virtual display is attached through none, at the 8 bits a
+    primary of every virtio-gpu format.
+  - Range limits: QEMU gives 50 to 125 Hz, 30 to 160 kHz and 2550 MHz
+    whatever it lists, which leaves out its own preferred mode on a
+    display 2062 lines tall or more (`docs/qemu-upstream-bugs.md` entry
+    56); here they are the listed modes' own bounds, the preferred mode's
+    included, and there is no range descriptor where one cannot hold them
+    (it is optional in EDID 1.4).
+  - The first descriptor: for a display 4096 pixels or more either way, or
+    whose preferred clock is 655.36 MHz or more, QEMU puts no detailed
+    timing in the base block, where E-EDID 1.4 requires the preferred
+    timing first (3.10.1; entry 55). Here the base block always starts
+    with one: the display's own mode where a detailed timing holds it,
+    else the largest listed mode, with feature bit 1 clear to say it is
+    not the native one (3.6.4 note 4).
+  - DisplayID: both give a mode the base block cannot hold as a DisplayID
+    1.3 Type I timing. QEMU stores its pixel clock as it is, where every
+    Type I field, the clock among them, is stored less one, so a guest
+    reads a clock 10 kHz fast (entry 54); here it is stored less one, the
+    horizontal sync positive as CVT's, and the aspect ratio coded where
+    DisplayID has a code for it.
+  - Extension blocks: QEMU always adds the CTA-861 block; here the only
+    extension is the DisplayID block, and only when it is needed.
+  - A display of no pixels (its output off): QEMU describes a display of
+    1280 by 800; here the EDID lists the base video mode first, gives no
+    screen size and no native mode.
+  Linux's `drm_edid` reads every field either generator writes; with this
+  one it finds the display's size preferred, as with QEMU's.
 - **No `fw_cfg`.** QEMU's `virt` has `fw_cfg` at 0x09020000, whose
   signature reads "QEMU" and whose device tree node is `qemu,fw-cfg-mmio`;
   it gives a guest ACPI tables, SMBIOS and the boot order as files. This
@@ -2907,8 +2970,6 @@ the board's own:
 - PSCI's optional functions: `MIGRATE_INFO_TYPE` alone of DEN 0022E
   Table 17's, QEMU's set, which `PSCI_FEATURES` reports.
 - virtio values: the queue sizes.
-- The EDID's layout, which is `qemu_edid_generate`'s: its mode list,
-  timings, rate, density and extension blocks.
 - The direct boot's placement of the kernel, initrd and device tree, and
   `x4` holding the entry, left from QEMU's boot stub.
 
