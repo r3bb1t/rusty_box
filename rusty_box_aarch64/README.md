@@ -323,7 +323,7 @@ is) must reproduce, are:
 
 | Part | Model |
 |---|---|
-| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, an MMU with the 4 KiB granule and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB and 64 KiB granules too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
+| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB granule and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB and 64 KiB granules too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0800_4000, the common base and processor 0's at 0x0800_5000, 4 KiB each, on the board's own layout) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0800_6000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
 | Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), no `fw_cfg` (see "Where the references differ"), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the first free ones, or the last free with `VirtConfig::transport_order`), an empty PCIe ECAM/windows |
@@ -1426,6 +1426,35 @@ one open.
   has both patches. The board's own tree describes the caches from
   `CCSIDR_EL1`, the L2 among them, and `tests/unit/board_tree.rs` checks
   them against it.
+- **Each model's L2, and the Armv9.2 model's caches, are the board's
+  own.** The Cortex-A57's L2 is a configuration option of the design,
+  512 KiB, 1 MiB or 2 MiB, 16-way with 64-byte lines whichever it is
+  (DDI 0488H, 1.5 Table 1-1, 7.1, 7.2); QEMU's `cortex-a57` takes 2 MiB.
+  The board takes 512 KiB, `CCSIDR_EL1` 0x703F_E07A for `CSSELR_EL1` 2
+  (Table 4-37): it models no cache, so a size buys a guest nothing, and
+  cleaning a whole cache by set/way, which walks every set and way of
+  each level to the PoC (the Arm ARM's example, DDI 0487M.d,
+  D7.5.9.16.1), costs an instruction a line, 8,192 at L2 where 2 MiB
+  takes 32,768.
+  The Armv9.2 model is no Arm part, and no Arm document gives a generic
+  Armv9.2 processor caches: the Arm ARM leaves each cache's geometry
+  IMPLEMENTATION DEFINED and says `CCSIDR_EL1` describes only what
+  maintenance by set/way needs (DDI 0487M.d, D24.2.31). QEMU's `max`
+  (`aarch64_max_tcg_initfn`) reports 64 KiB 4-way L1 caches, a 1 MiB
+  8-way L2 and a 2 MiB 8-way L3, `CLIDR_EL1.LoUU` and `LoUIS` 0, and
+  `CTR_EL0.IDC` and `DIC` set. The
+  model reports 32 KiB 4-way L1 data and instruction caches and a
+  256 KiB 8-way unified L2 (`CCSIDR_EL1` 0x000F_E01A, 0x000F_E01A,
+  0x003F_E03A), in the format without FEAT_CCIDX, which it does not
+  implement, with bits [31:28], UNKNOWN in that format, 0; every line 64
+  bytes, the size the Arm ARM gives generic software as
+  `hardware_constructive_interference_size` (D24.2.31), so the
+  Cortex-A57's `CTR_EL0` (64-byte lines and writeback granule, IDC and
+  DIC 0) and `CLIDR_EL1` (LoUIS 1, LoC 2, LoUU 1) hold for it as they
+  stand. The device tree's cache nodes give each model's sizes, and
+  `tests/unit/board_tree.rs`, `tests/unit/sysreg.rs`
+  (`ccsidr_reports_the_cache_csselr_selects`) and `tests/api.rs` check
+  what a guest reads.
 - **The Armv9.2 model is a software model in its device tree too.** Its
   `MIDR_EL1` names implementer 0, reserved for software use, as QEMU's
   `max` does (`aarch64_max_tcg_initfn`), with part 0x052 where QEMU's is
@@ -2959,10 +2988,7 @@ the board's own:
 - `DeviceLayout::QemuVirt`, QEMU's device addresses, for a guest booted
   with a device tree QEMU wrote or a firmware variable store whose boot
   entries name QEMU's device paths.
-- The processor: the Cortex-A57's L2 of 2 MiB and 16 ways (QEMU's pick
-  of the TRM's 512 KiB to 2 MiB), which `CCSIDR_EL1` and the device tree
-  give, the Armv9.2 model's A57 caches, and choices QEMU made where Arm
-  leaves them
+- The processor: choices QEMU made where Arm leaves them
   IMPLEMENTATION DEFINED or UNKNOWN (pointer-authentication keys at reset,
   unimplemented `CSSELR_EL1` selections, the order virtual interrupts are
   taken).

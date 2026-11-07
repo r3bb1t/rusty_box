@@ -45,7 +45,6 @@ use crate::board::{
     PPI_SECURE_PHYSICAL_TIMER, PPI_VIRTUAL_TIMER, RAM_BASE, UART_CLOCK,
 };
 use crate::bus::PhysAddr;
-use crate::cpu::id::{CCSIDR_L1D, CCSIDR_L1I, CCSIDR_L2};
 use crate::cpu::{PsciConduit, PSCI_COMPATIBLE};
 use crate::devices::gicv2::GicExtensions;
 use crate::devices::gicv2_virt::MAINTENANCE_INTID;
@@ -529,14 +528,15 @@ fn chosen(w: &mut Writer<'_>, chosen: &Chosen<'_>) -> Result<(), DeviceTreeError
     w.end()
 }
 
-/// The processor and the caches `CCSIDR_EL1` reports: an L1 data and
+/// The processor and the caches its `CCSIDR_EL1` reports: an L1 data and
 /// instruction cache each, and the unified L2 they share (`CLIDR_EL1`),
-/// which both processor models report alike.
+/// the hierarchy of both processor models, each with its own sizes.
 fn cpus(w: &mut Writer<'_>, cpu: CpuModel) -> Result<(), DeviceTreeError> {
+    let caches = cpu.implementation().caches;
     let (l1d, l1i, l2) = (
-        CacheGeometry::of(CCSIDR_L1D),
-        CacheGeometry::of(CCSIDR_L1I),
-        CacheGeometry::of(CCSIDR_L2),
+        CacheGeometry::of(caches.l1_data),
+        CacheGeometry::of(caches.l1_instruction),
+        CacheGeometry::of(caches.l2),
     );
     w.begin("cpus")?;
     w.cell("#address-cells", 1)?;

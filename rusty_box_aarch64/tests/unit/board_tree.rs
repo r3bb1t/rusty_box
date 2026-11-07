@@ -9,7 +9,6 @@ use std::vec::Vec;
 use super::{write, BoardTree, Chosen, InitrdRange};
 use crate::boot::fdt;
 use crate::bus::PhysAddr;
-use crate::cpu::id::{CCSIDR_L1D, CCSIDR_L1I, CCSIDR_L2};
 use crate::cpu::PsciConduit;
 use crate::devices::gicv2::{GicExtensions, SpiCount};
 use crate::identity::{BoardIdentity, IdentityNames};
@@ -20,10 +19,19 @@ use crate::CpuModel;
 const RAM: u64 = 256 << 20;
 
 fn board(identity: &BoardIdentity, gic: GicExtensions, chosen: Chosen<'static>) -> Vec<u8> {
+    board_of(CpuModel::CortexA57, identity, gic, chosen)
+}
+
+fn board_of(
+    cpu: CpuModel,
+    identity: &BoardIdentity,
+    gic: GicExtensions,
+    chosen: Chosen<'static>,
+) -> Vec<u8> {
     let tree = BoardTree {
         identity,
         ram_len: RAM,
-        cpu: CpuModel::CortexA57,
+        cpu,
         psci: PsciConduit::Hvc,
         gic,
         chosen,
@@ -127,47 +135,53 @@ fn the_root_memory_and_console_are_the_boards() {
 
 /// The processor node's L1 cache properties and the L2 node it names
 /// (Devicetree Specification v0.4, 3.7.3 and 3.8) describe the caches
-/// `CCSIDR_EL1` reports, the Cortex-A57's (TRM DDI 0488C, 6.1: a 32 KiB
-/// 2-way data cache and a 48 KiB 3-way instruction cache, 64-byte lines;
-/// a 2 MiB 16-way L2 of the sizes the TRM allows).
+/// that model's `CCSIDR_EL1` reports. The Cortex-A57's are its TRM's (DDI
+/// 0488H, 6.1 and 7.1: a 32 KiB 2-way data cache and a 48 KiB 3-way
+/// instruction cache, a 16-way L2 of 512 KiB, the smallest of the sizes
+/// the TRM allows); the Armv9.2 model's the board's own (32 KiB 4-way
+/// data and instruction caches, a 256 KiB 8-way L2). Every line is 64
+/// bytes.
 #[test]
 fn the_caches_are_those_ccsidr_reports() {
-    let tree = plain();
-    let cell = |path: &str, name: &str| -> u64 {
-        let bytes = prop(&tree, path, name).unwrap_or_else(|| panic!("{path} {name}"));
-        u64::from(u32::from_be_bytes(bytes.try_into().expect("one cell")))
-    };
-    // CCSIDR_EL1 without FEAT_CCIDX: LineSize [2:0] is log2(bytes) - 4,
-    // Associativity [12:3] ways - 1, NumSets [27:13] sets - 1.
-    let caches = [
-        (CCSIDR_L1D, 2, 32 * 1024, "cpus/cpu@0", ["d-cache-block-size", "d-cache-sets", "d-cache-size"]),
-        (CCSIDR_L1I, 3, 48 * 1024, "cpus/cpu@0", ["i-cache-block-size", "i-cache-sets", "i-cache-size"]),
-        (CCSIDR_L2, 16, 2 * 1024 * 1024, "cpus/l2-cache", ["cache-block-size", "cache-sets", "cache-size"]),
-    ];
-    for (ccsidr, ways, size, path, [block_size, set_count, total]) in caches {
-        let line = 1u64 << ((ccsidr & 7) + 4);
-        let associativity = ((ccsidr >> 3) & 0x3FF) + 1;
-        let sets = ((ccsidr >> 13) & 0x7FFF) + 1;
+    const KIB: u64 = 1024;
+    for (cpu, compatible, [l1d, l1i, l2]) in [
+        (CpuModel::CortexA57, &b"arm,cortex-a57\0"[..], [(2, 32 * KIB), (3, 48 * KIB), (16, 512 * KIB)]),
+        (CpuModel::Armv9p2, &b"arm,armv8\0"[..], [(4, 32 * KIB), (4, 32 * KIB), (8, 256 * KIB)]),
+    ] {
+        let tree = board_of(cpu, &BoardIdentity::RUSTY_BOX, GicExtensions::Absent, PLAIN);
+        let cell = |path: &str, name: &str| -> u64 {
+            let bytes = prop(&tree, path, name).unwrap_or_else(|| panic!("{cpu:?}: {path} {name}"));
+            u64::from(u32::from_be_bytes(bytes.try_into().expect("one cell")))
+        };
+        let caches = cpu.implementation().caches;
+        // CCSIDR_EL1 without FEAT_CCIDX: LineSize [2:0] is log2(bytes) - 4,
+        // Associativity [12:3] ways - 1, NumSets [27:13] sets - 1.
+        for (ccsidr, (ways, size), path, [block_size, set_count, total]) in [
+            (caches.l1_data, l1d, "cpus/cpu@0", ["d-cache-block-size", "d-cache-sets", "d-cache-size"]),
+            (caches.l1_instruction, l1i, "cpus/cpu@0", ["i-cache-block-size", "i-cache-sets", "i-cache-size"]),
+            (caches.l2, l2, "cpus/l2-cache", ["cache-block-size", "cache-sets", "cache-size"]),
+        ] {
+            let line = 1u64 << ((ccsidr & 7) + 4);
+            let associativity = ((ccsidr >> 3) & 0x3FF) + 1;
+            let sets = ((ccsidr >> 13) & 0x7FFF) + 1;
+            assert_eq!(
+                (line, associativity, line * associativity * sets),
+                (64, ways, size),
+                "{cpu:?}: {total}"
+            );
+            assert_eq!(cell(path, block_size), line, "{cpu:?}");
+            assert_eq!(cell(path, set_count), sets, "{cpu:?}");
+            assert_eq!(cell(path, total), size, "{cpu:?}");
+        }
         assert_eq!(
-            (line, associativity, line * associativity * sets),
-            (64, ways, size),
-            "{total}"
+            cell("cpus/cpu@0", "next-level-cache"),
+            cell("cpus/l2-cache", "phandle"),
+            "{cpu:?}: the L1 caches' next level is the L2"
         );
-        assert_eq!(cell(path, block_size), line);
-        assert_eq!(cell(path, set_count), sets);
-        assert_eq!(cell(path, total), size);
+        assert_eq!(cell("cpus/l2-cache", "cache-level"), 2, "{cpu:?}");
+        assert_eq!(prop(&tree, "cpus/l2-cache", "cache-unified"), Some(&[][..]));
+        assert_eq!(prop(&tree, "cpus/cpu@0", "compatible"), Some(compatible));
     }
-    assert_eq!(
-        cell("cpus/cpu@0", "next-level-cache"),
-        cell("cpus/l2-cache", "phandle"),
-        "the L1 caches' next level is the L2"
-    );
-    assert_eq!(cell("cpus/l2-cache", "cache-level"), 2);
-    assert_eq!(prop(&tree, "cpus/l2-cache", "cache-unified"), Some(&[][..]));
-    assert_eq!(
-        prop(&tree, "cpus/cpu@0", "compatible"),
-        Some(&b"arm,cortex-a57\0"[..])
-    );
 }
 
 /// The GIC is described by the GICv2 binding, each frame by the region it

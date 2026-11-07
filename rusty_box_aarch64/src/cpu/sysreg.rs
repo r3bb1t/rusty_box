@@ -769,14 +769,10 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
-    /// The `CCSIDR_EL1` value for the cache `CSSELR_EL1` selects.
+    /// The `CCSIDR_EL1` value for the cache `CSSELR_EL1` selects, from
+    /// this processor's caches.
     fn ccsidr(&self) -> u64 {
-        match self.sys.csselr_el1 & 0xF {
-            0 => id::CCSIDR_L1D,
-            1 => id::CCSIDR_L1I,
-            2 => id::CCSIDR_L2,
-            _ => 0,
-        }
+        self.imp.caches.ccsidr(self.sys.csselr_el1)
     }
 
     /// The `CNTKCTL_EL1` bits this core keeps: bits 9:0, and `EVNTIS` with

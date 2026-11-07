@@ -15,8 +15,9 @@
 //! Cryptographic Extension's AES, PMULL, SHA-1 and SHA-256 and CRC32 (the
 //! Cortex-A57's optional extensions, all of them, as QEMU's `cortex-a57`
 //! has them); the Armv9.2 model has those and the rest of its feature set
-//! (`Features::ARMV9P2`), and reports itself as a software model. Both
-//! describe the Cortex-A57's caches. Every value here is consistent with
+//! (`Features::ARMV9P2`), and reports itself as a software model. Each
+//! describes its own caches ([`Caches`]), both with 64-byte lines in an L1
+//! data and instruction cache and a unified L2. Every value here is consistent with
 //! that cut — an ID register that advertised a feature the executor rejects
 //! would make the feature unreachable (or worse, reachable and wrong), so
 //! the two change together. The registers that report instruction-set
@@ -364,8 +365,11 @@ pub(crate) const MAX_PA_BITS: u32 = pa_bits(Features::EVERY);
 /// `TCR_ELx.PS`/`IPS` encode, each at its encoding.
 pub(crate) const ADDRESS_SIZES: [u32; 8] = [32, 36, 40, 42, 44, 48, 52, 56];
 
-/// `CTR_EL0`: as the Cortex-A57 — 64-byte minimum I and D lines, PIPT
-/// instruction cache, ERG and CWG of 64 bytes, bit 31 RES1.
+/// `CTR_EL0` of both models: the Cortex-A57's (TRM DDI 0488H, 4.3.26,
+/// Table 4-40) — IminLine and DminLine 64 bytes, a PIPT L1 instruction
+/// cache (L1Ip 0b11), ERG and CWG of 64 bytes, IDC and DIC 0, bit 31
+/// RES1. Every cache of both models has 64-byte lines ([`Caches`]), so the
+/// smallest line and the writeback granule are 64 bytes on each.
 pub const CTR_EL0: u64 = 0x8444_C004;
 
 /// The data cache line `CTR_EL0.DminLine` names, in bytes.
@@ -377,19 +381,81 @@ pub const DCZID_BLOCK_LOG2_WORDS: u64 = 4;
 /// Bytes zeroed by one `DC ZVA`.
 pub const DC_ZVA_BYTES: u64 = 4 << DCZID_BLOCK_LOG2_WORDS;
 
-/// `CLIDR_EL1`: L1 separate I and D, L2 unified, LoUIS = 1, LoC = 2, LoUU = 1
-/// — the Cortex-A57 hierarchy QEMU reports.
+/// `CLIDR_EL1` of both models: the Cortex-A57's (TRM DDI 0488H, 4.3.23,
+/// Table 4-38) — Ctype1 0b011, separate L1 instruction and data caches;
+/// Ctype2 0b100, a unified L2; LoUIS 1, LoC 2, LoUU 1; bits 63:30 RES0.
+/// The Armv9.2 model's hierarchy has the same shape
+/// ([`Caches::ARMV9P2`]); on it bits 32:30 are ICB, 0b000 for an inner
+/// cache boundary not disclosed (Arm ARM, DDI 0487M.d, D24.2.32), and it
+/// has no FEAT_MTE2 to add the Ttype fields.
 pub const CLIDR_EL1: u64 = 0x0A20_0023;
 
-/// `CCSIDR_EL1` for each `CSSELR_EL1` selection the Cortex-A57 answers: L1
-/// data (32 KiB, 2-way, 64-byte lines), L1 instruction (48 KiB, 3-way), L2
-/// unified (2 MiB, 16-way). The L1 geometry is the TRM's (DDI 0488C, 6.1);
-/// QEMU 9.2 and later report a 4-way L1 data cache (README, "Where the
-/// references differ"), and the board's device tree carries the TRM's 256
-/// sets to match these values. Any other selection reads as zero.
-pub const CCSIDR_L1D: u64 = 0x701F_E00A;
-pub const CCSIDR_L1I: u64 = 0x201F_E012;
-pub const CCSIDR_L2: u64 = 0x70FF_E07A;
+/// The caches a processor reports: `CCSIDR_EL1` for each `CSSELR_EL1`
+/// selection `CLIDR_EL1` names, in the format without FEAT_CCIDX, which
+/// neither model implements (`ID_AA64MMFR2_EL1.CCIDX` 0): LineSize, bits
+/// 2:0, log2(bytes) - 4; Associativity, bits 12:3, ways - 1; NumSets, bits
+/// 27:13, sets - 1. The board models no cache, so these values describe what
+/// maintenance by set/way walks and nothing a guest can measure (Arm ARM,
+/// DDI 0487M.d, D24.2.31: "You cannot make any inference about the actual
+/// sizes of caches based on these parameters"); the board's device tree
+/// describes the caches from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caches {
+    /// `CSSELR_EL1` 0 (Level 1, InD 0): the L1 data cache.
+    pub l1_data: u64,
+    /// `CSSELR_EL1` 1 (Level 1, InD 1): the L1 instruction cache.
+    pub l1_instruction: u64,
+    /// `CSSELR_EL1` 2 (Level 2, InD 0): the unified L2.
+    pub l2: u64,
+}
+
+impl Caches {
+    /// The Cortex-A57's, the CCSIDR_EL1 encodings of the TRM (DDI 0488H,
+    /// 4.3.22, Table 4-37): a 32 KiB 2-way L1 data cache and a 48 KiB
+    /// 3-way L1 instruction cache, the sizes the design fixes (6.1), and a
+    /// 512 KiB 16-way L2. The L2's size is a configuration option of the
+    /// design, 512 KiB, 1 MiB or 2 MiB (1.5, Table 1-1; 7.2), its 16 ways
+    /// and 64-byte lines fixed (7.1). The board takes the smallest: with no
+    /// cache modelled the size buys a guest nothing, and cleaning a whole
+    /// cache by set/way, which walks every set and way of each level to the
+    /// PoC (the Arm ARM's example, DDI 0487M.d, D7.5.9.16.1), costs one
+    /// instruction a line, 8,192 at L2 here where 2 MiB would take 32,768.
+    pub const CORTEX_A57: Self = Self {
+        l1_data: 0x701F_E00A,
+        l1_instruction: 0x201F_E012,
+        l2: 0x703F_E07A,
+    };
+
+    /// The Armv9.2 model's: a 32 KiB 4-way L1 data cache, a 32 KiB 4-way
+    /// L1 instruction cache and a 256 KiB 8-way unified L2, every line 64
+    /// bytes. The model is no Arm part and no Arm document gives a generic
+    /// Armv9.2 processor caches — the architecture leaves each cache's
+    /// size, associativity and line IMPLEMENTATION DEFINED — so the
+    /// geometry is the board's own: lines of 64 bytes, the size the Arm ARM
+    /// gives generic software as `hardware_constructive_interference_size`
+    /// (D24.2.31) and the one `CTR_EL0` reports; round sizes kept as small
+    /// as the Cortex-A57's L2 for the same reason, the cost of a
+    /// whole-cache clean by set/way (4,096 lines at L2). Bits 31:28,
+    /// UNKNOWN without FEAT_CCIDX, read 0.
+    pub const ARMV9P2: Self = Self {
+        l1_data: 0x000F_E01A,
+        l1_instruction: 0x000F_E01A,
+        l2: 0x003F_E03A,
+    };
+
+    /// `CCSIDR_EL1` for the cache `csselr` (`CSSELR_EL1`'s Level and InD)
+    /// selects. A selection of no cache here reads 0, one of the values a
+    /// CONSTRAINED UNPREDICTABLE read of it may return (an UNKNOWN value,
+    /// D24.2.31, "Accessing CCSIDR_EL1").
+    pub const fn ccsidr(self, csselr: u64) -> u64 {
+        match csselr & 0xF {
+            0 => self.l1_data,
+            1 => self.l1_instruction,
+            2 => self.l2,
+            _ => 0,
+        }
+    }
+}
 
 /// `SCTLR_EL1` at reset, as QEMU's Cortex-A57 (`reset_sctlr`): MMU and caches
 /// off, SP alignment checks on, `WFI`/`WFE` not trapped from EL0.

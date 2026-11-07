@@ -1793,7 +1793,9 @@ fn the_board_wires_the_interrupt_map_its_configuration_names() {
 /// The processor is the model the configuration names: its ID registers
 /// (FEAT_SME2 is `ID_AA64PFR1_EL1.SME` = 2), its `MIDR_EL1`, the system
 /// counter's frequency, which `CNTPCT_EL0` counts at, and the device tree's
-/// processor node, whose caches are the ones both models report.
+/// processor node and L2 node, whose caches are the ones that model
+/// reports: the Cortex-A57's 48 KiB instruction cache and 512 KiB L2, the
+/// Armv9.2 model's 32 KiB and 256 KiB.
 #[cfg(feature = "alloc")]
 #[test]
 fn the_processor_is_the_model_the_configuration_names() {
@@ -1801,13 +1803,14 @@ fn the_processor_is_the_model_the_configuration_names() {
     /// A tree QEMU 11.1.2 generated for its `virt`, as a host may hand one.
     const HOST_TREE: &[u8] = include_bytes!("../assets/qemu-virt-a57-256m.dtb");
 
-    let cases: [(CpuModel, u64, u64, u64, &[u8]); 2] = [
+    let cases: [(CpuModel, u64, u64, u64, &[u8], [u32; 2]); 2] = [
         (
             CpuModel::CortexA57,
             0x411F_D070,
             1_000_000_000,
             0,
             b"arm,cortex-a57\0",
+            [48 * 1024, 512 * 1024],
         ),
         (
             CpuModel::Armv9p2,
@@ -1815,9 +1818,10 @@ fn the_processor_is_the_model_the_configuration_names() {
             1_000_000_000,
             2,
             b"arm,armv8\0",
+            [32 * 1024, 256 * 1024],
         ),
     ];
-    for (model, midr, counter_hz, sme, compatible) in cases {
+    for (model, midr, counter_hz, sme, compatible, [i_cache, l2_cache]) in cases {
         let config = VirtConfig {
             cpu: model,
             ..VirtConfig::DEFAULT
@@ -1862,7 +1866,7 @@ fn the_processor_is_the_model_the_configuration_names() {
             ("reg", &[0u8, 0, 0, 0][..]),
             ("device_type", b"cpu\0"),
             ("d-cache-size", &(32u32 * 1024).to_be_bytes()),
-            ("i-cache-size", &(48u32 * 1024).to_be_bytes()),
+            ("i-cache-size", &i_cache.to_be_bytes()),
         ] {
             assert_eq!(
                 cpu_node(m.device_tree(), property),
@@ -1870,6 +1874,11 @@ fn the_processor_is_the_model_the_configuration_names() {
                 "{model:?}: {property}"
             );
         }
+        assert_eq!(
+            fdt::property(m.device_tree(), "cpus/l2-cache", "cache-size"),
+            Ok(Some(&l2_cache.to_be_bytes()[..])),
+            "{model:?}: the L2"
+        );
 
         // A host's tree describes the processor as the host wrote it, as
         // QEMU takes a `-dtb` tree; QEMU's places and wires the devices as

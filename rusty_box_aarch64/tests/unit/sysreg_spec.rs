@@ -161,7 +161,7 @@ const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 23] = [
     (
         "When DC is treated as NOP, data cache maintenance operations are trapped",
         true,
-        "no DC is a NOP here: CLIDR_EL1 reports the Cortex-A57's caches",
+        "no DC is a NOP here: both models' CLIDR_EL1 names caches to the PoU and the PoC",
     ),
     (
         "When IC is treated as NOP, data cache maintenance operations are trapped",

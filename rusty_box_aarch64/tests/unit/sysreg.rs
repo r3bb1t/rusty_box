@@ -53,6 +53,10 @@ const MRS_OSDLR: u32 = 0xD530_1380; // mrs x0, osdlr_el1
 const MSR_OSDLR: u32 = 0xD510_1380;
 const MRS_ID_AA64DFR0: u32 = 0xD538_0500; // mrs x0, id_aa64dfr0_el1
 const LDR: u32 = 0xF940_0020; // ldr x0, [x1]
+const MSR_CSSELR: u32 = 0xD51A_0000; // msr csselr_el1, x0
+const MRS_CSSELR: u32 = 0xD53A_0000; // mrs x0, csselr_el1
+const MRS_CCSIDR: u32 = 0xD539_0000; // mrs x0, ccsidr_el1
+const MRS_CLIDR: u32 = 0xD539_0020; // mrs x0, clidr_el1
 
 /// `SCTLR_EL1.UCT` and `EnRCTX`; `CNTKCTL_EL1.EL0PCTEN` and `EL0VCTEN`.
 const UCT: u64 = 1 << 15;
@@ -507,5 +511,54 @@ fn only_the_cortex_a57_has_the_os_double_lock() {
         assert_eq!(exec(&mut cpu, MSR_OSDLR), None);
         assert_eq!(exec(&mut cpu, MRS_OSDLR), None);
         assert_eq!(cpu.x[0], u64::from(double_lock), "{imp:?}: DLK");
+    }
+}
+
+/// What a guest finds walking each model's caches (Arm ARM, D7.5.2,
+/// "Cache identification"): `CLIDR_EL1` names split L1 instruction and
+/// data caches and a unified L2, and `CCSIDR_EL1` reads, for each
+/// `CSSELR_EL1` selection, the cache it names, in the format without
+/// FEAT_CCIDX: on the Cortex-A57 the encodings of its TRM (DDI 0488H,
+/// Table 4-37), a 512 KiB L2 among them; on the Armv9.2 model the board's
+/// own, 32 KiB 4-way L1 caches and a 256 KiB 8-way L2. A selection of no
+/// cache reads 0. Each line is the one `CTR_EL0` names for its kind of
+/// cache, 64 bytes.
+#[test]
+fn ccsidr_reports_the_cache_csselr_selects() {
+    const A57: [u64; 3] = [0x701F_E00A, 0x201F_E012, 0x703F_E07A];
+    const ARMV9P2: [u64; 3] = [0x000F_E01A, 0x000F_E01A, 0x003F_E03A];
+    for (imp, ccsidr) in [
+        (Implementation::CORTEX_A57, A57),
+        (Implementation::ARMV9P2, ARMV9P2),
+    ] {
+        let mut cpu = processor(imp);
+        assert_eq!(exec(&mut cpu, MRS_CLIDR), None);
+        assert_eq!(cpu.x[0], 0x0A20_0023, "{imp:?}: CLIDR_EL1");
+        let clidr = cpu.x[0];
+        assert_eq!(
+            [clidr & 7, (clidr >> 3) & 7, (clidr >> 6) & 7],
+            [0b011, 0b100, 0],
+            "{imp:?}: separate L1, unified L2, nothing beyond"
+        );
+        assert_eq!(exec(&mut cpu, MRS_CTR), None);
+        let ctr = cpu.x[0];
+        let (imin_line, dmin_line) = (4u64 << (ctr & 0xF), 4u64 << ((ctr >> 16) & 0xF));
+        // CSSELR_EL1.Level [3:1] and InD [0]: the L1 data, L1 instruction
+        // and L2 unified caches are 0, 1 and 2.
+        for csselr in 0..16u64 {
+            cpu.x[0] = csselr;
+            assert_eq!(exec(&mut cpu, MSR_CSSELR), None);
+            assert_eq!(exec(&mut cpu, MRS_CSSELR), None);
+            assert_eq!(cpu.x[0], csselr, "{imp:?}: CSSELR_EL1 keeps {csselr}");
+            assert_eq!(exec(&mut cpu, MRS_CCSIDR), None);
+            let read = cpu.x[0];
+            let expected = ccsidr.get(csselr as usize).copied().unwrap_or(0);
+            assert_eq!(read, expected, "{imp:?}: CCSIDR_EL1 at CSSELR_EL1 {csselr}");
+            if expected != 0 {
+                let line = 16u64 << (read & 7);
+                let min_line = if csselr == 1 { imin_line } else { dmin_line };
+                assert_eq!(line, min_line, "{imp:?}: CSSELR_EL1 {csselr}");
+            }
+        }
     }
 }

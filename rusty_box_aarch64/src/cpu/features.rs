@@ -20,7 +20,7 @@
 //! [`Implementation`]: a feature set, the processor's identity, and the
 //! IMPLEMENTATION DEFINED choices its features leave open.
 
-use super::id;
+use super::id::{self, Caches};
 use rusty_box_core::ClockHz;
 
 use super::el2::Levels;
@@ -749,17 +749,20 @@ pub(crate) struct Implementation {
     /// 1 GHz from it; [`SYSTEM_COUNTER_HZ`] on both models, and on a board
     /// its configuration's rate ([`Implementation::counting_at`]).
     pub(crate) counter_hz: ClockHz,
+    /// The caches `CCSIDR_EL1` reports, and the device tree with it.
+    pub(crate) caches: Caches,
 }
 
 impl Implementation {
     /// The Cortex-A57 shape: [`Features::CORTEX_A57`] and the Cortex-A57's
-    /// `MIDR_EL1`, with no streaming vector length to choose, and the
-    /// board's 1 GHz counter.
+    /// `MIDR_EL1`, with no streaming vector length to choose, the board's
+    /// 1 GHz counter, and the Cortex-A57's caches.
     pub(crate) const CORTEX_A57: Self = Self {
         features: Features::CORTEX_A57,
         midr: id::MIDR_CORTEX_A57,
         max_svl: VecLen::MIN,
         counter_hz: SYSTEM_COUNTER_HZ,
+        caches: Caches::CORTEX_A57,
     };
 
     /// This implementation with its system counter at `rate`, which the
@@ -773,13 +776,14 @@ impl Implementation {
     }
 
     /// The Armv9.2 processor model: [`Features::ARMV9P2`], a software
-    /// model's `MIDR_EL1`, Streaming SVE vectors of up to 512 bits, and the
-    /// counter Armv8.6 and later require.
+    /// model's `MIDR_EL1`, Streaming SVE vectors of up to 512 bits, the
+    /// counter Armv8.6 and later require, and caches of the board's own.
     pub(crate) const ARMV9P2: Self = Self {
         features: Features::ARMV9P2,
         midr: id::MIDR_SOFTWARE_MODEL,
         max_svl: VecLen(512),
         counter_hz: SYSTEM_COUNTER_HZ,
+        caches: Caches::ARMV9P2,
     };
 
     /// This implementation as a processor of the level set `L` has it, with
@@ -968,8 +972,9 @@ pub enum CpuModel {
     /// AArch64 at EL0 and EL1, every feature Armv9.2 requires of it, the
     /// options listed for its feature set, and Streaming SVE vectors of up
     /// to 512 bits. It reports itself as a software model (`MIDR_EL1`
-    /// implementer 0), as no Arm part has its features, and runs with a
-    /// 1 GHz system counter, as Armv8.6 and later require.
+    /// implementer 0), as no Arm part has its features, reports caches of
+    /// the board's own ([`id::Caches::ARMV9P2`]), and runs with a 1 GHz
+    /// system counter, as Armv8.6 and later require.
     Armv9p2,
 }
 
