@@ -52,10 +52,17 @@ assert_eq!(machine.ticks(), 0);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-A Linux kernel, loaded the way QEMU's `-kernel` loads one without firmware:
-the `Image` at its load offset, the initramfs above it, the device tree with
-`/chosen` filled in at the 2 MiB boundary after the initramfs, and the
-processor at the kernel's entry with `x0` pointing at the tree. The UART is
+A Linux kernel, loaded without firmware as Linux's arm64 boot protocol
+(`Documentation/arch/arm64/booting.rst`) asks: the `Image` at its
+`text_offset` above the base of RAM; the device tree, with `/chosen` filled
+in, in the 2 MiB block at the first 2 MiB boundary after the kernel's
+`image_size`; the initramfs at the next 2 MiB boundary; and the processor at
+the kernel's entry with `x0` pointing at the tree and every other
+general-purpose register zero. An `Image` too old to give its size (before
+v3.17) loads at 0x80000, with the tree in the last 2 MiB block below the end
+of RAM or 512 MiB, whichever is lower, and the initramfs just below it,
+leaving the kernel the most room. `BuildError::Placement` names what does
+not fit. The UART is
 left as firmware leaves a console it has set up — 115200 baud, eight data
 bits, no parity, one stop bit, FIFOs on, transmitter and receiver enabled
 (`boot::DIRECT_BOOT_CONSOLE_BAUD`) — where QEMU leaves it at reset: a PL011
@@ -195,10 +202,13 @@ they allow, its default the board's:
   64 KiB page each for the UART (0x0802_0000), the RTC, the GPIO and the
   32 virtio transports (from 0x0805_0000), and the PCIe host's I/O window;
   its 32-bit window at 0x2000_0000 and its ECAM and 64-bit window above
-  256 GiB. `QemuVirt` is QEMU `virt`'s, which a tree QEMU wrote names. A
+  256 GiB; the power button on the GPIO's line 0. `QemuVirt` is QEMU
+  `virt`'s, which a tree QEMU wrote names, its power button on line 3. A
   tree given with `device_tree(..)` that puts the GIC, a PrimeCell, a
   virtio transport or the PCIe host anywhere but where the layout has it
-  fails the build with `BuildError::HostTreeAddress`.
+  fails the build with `BuildError::HostTreeAddress`, and one whose
+  `gpio-keys` puts a key on another line of the board's GPIO with
+  `BuildError::HostTreePowerButton`.
 - `spectre`, a `SpectreReport`: what the firmware's `SMCCC_ARCH_FEATURES`
   says of the speculation workarounds, `NotRequired` (the default, true of
   an interpreter), `Mitigated` or `Unreported`.
@@ -465,7 +475,8 @@ use rusty_box_aarch64::PowerState;
 #     .ram(RamSize::mib(16).unwrap()).bare()
 #     .build_in(MemoryLoan { ram: &mut ram, vars: &mut [] })?;
 assert_eq!(machine.power().state(), PowerState::Running);
-// QEMU's gpio-key on GPIO line 3, held for 100 ms of guest time. A guest
+// A gpio-key on the GPIO's first line (line 3, QEMU's, with
+// `DeviceLayout::QemuVirt`), held for 100 ms of guest time. A guest
 // that handles KEY_POWER shuts down; one that does not keeps running.
 machine.power().press_power_button();
 // A system reset: firmware from its reset vector, or a direct kernel loaded

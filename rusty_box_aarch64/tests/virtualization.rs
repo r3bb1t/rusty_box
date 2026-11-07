@@ -753,7 +753,8 @@ fn a_kernel_booted_with_el2_finds_all_of_it_in_its_device_tree() {
     const MIB: u64 = 1 << 20;
     let (kernel, initrd) = kernel_and_initrd();
     let image = LinuxImage::parse(&kernel).expect("an Image");
-    // Room for the kernel at 2 MiB, the initrd above it and the tree.
+    // Room for the kernel at the base of RAM, the tree and the initrd
+    // above it.
     let ram_len = 6 * MIB;
     let mut ram = vec![0u8; ram_len as usize];
     let m = MachineBuilder::new(VirtConfig::DEFAULT)
@@ -768,7 +769,9 @@ fn a_kernel_booted_with_el2_finds_all_of_it_in_its_device_tree() {
         })
         .expect("builds");
     assert_eq!(m.pstate().el, El::El2);
-    assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 2 * MIB);
+    assert_eq!(m.reg_read(Reg::Pc), RAM_BASE, "text_offset 0 from the base of RAM");
+    assert_eq!(m.reg_read(Reg::X0), RAM_BASE + 2 * MIB, "the tree after the kernel");
+    assert_eq!(m.reg_read(Reg::X4), 0);
     let tree = m.device_tree();
     let prop = |node: &str, name: &str| {
         fdt::property(tree, node, name)

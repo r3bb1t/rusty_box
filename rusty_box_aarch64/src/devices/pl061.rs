@@ -34,9 +34,10 @@
 //!   narrower than a word reaches the register that holds it; this board's
 //!   bridge hands over the register value unshifted, as for the PL011.
 //!
-//! From QEMU where DDI 0190B leaves the choice to the system: on `virt`
-//! only line 3 is wired, to the power button (`gpio-keys`, `KEY_POWER`);
-//! the other lines read low. Reserved locations read as zero and ignore
+//! Where DDI 0190B leaves the choice to the system: one line is wired, to
+//! the power button (`gpio-keys`, `KEY_POWER`), the one
+//! [`DeviceLayout::power_button_line`](crate::layout::DeviceLayout::power_button_line)
+//! names; the other lines read low. Reserved locations read as zero and ignore
 //! writes. QEMU differs from DDI 0190B where README's "Where the references
 //! differ" says.
 
@@ -62,9 +63,6 @@ const GPIOPCELLID3: u64 = 0xFFC;
 
 /// DDI 0190B Table 3-1.
 const PL061_ID: [u8; 8] = [0x61, 0x10, 0x04, 0x00, 0x0D, 0xF0, 0x05, 0xB1];
-
-/// The GPIO line QEMU's `virt` wires its power button to.
-pub const POWER_BUTTON_LINE: u8 = 3;
 
 /// The register an access at `offset` reaches: the interface decodes
 /// `PADDR[11:2]` (DDI 0190B Figure 2-1).
@@ -231,7 +229,9 @@ impl Pl061 {
 mod tests {
     use super::*;
 
-    const LINE: u8 = 1 << POWER_BUTTON_LINE;
+    /// The line the board's power button drives, and its bit.
+    const BUTTON: u8 = crate::layout::DeviceLayout::DEFAULT.power_button_line();
+    const LINE: u8 = 1 << BUTTON;
 
     fn write(gpio: &mut Pl061, off: u64, v: u8) {
         gpio.write(RegOffset::new(off), AccessWidth::Word, u64::from(v));
@@ -262,12 +262,12 @@ mod tests {
         write(&mut gpio, GPIOIBE, LINE);
         write(&mut gpio, GPIOIE, LINE);
         assert!(!gpio.irq());
-        gpio.set_input(POWER_BUTTON_LINE, true);
+        gpio.set_input(BUTTON,true);
         assert!(gpio.irq(), "the press is an edge");
         assert_eq!(read(&mut gpio, GPIODATA_LAST) & LINE, LINE);
         write(&mut gpio, GPIOIC, LINE);
         assert!(!gpio.irq());
-        gpio.set_input(POWER_BUTTON_LINE, false);
+        gpio.set_input(BUTTON,false);
         assert!(gpio.irq(), "so is the release");
     }
 
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn an_output_reads_what_it_drives_and_an_input_what_the_outside_drives() {
         let mut gpio = Pl061::new();
-        gpio.set_input(POWER_BUTTON_LINE, true);
+        gpio.set_input(BUTTON,true);
         write(&mut gpio, GPIODIR, LINE);
         write(&mut gpio, GPIODATA_LAST, 0);
         assert_eq!(read(&mut gpio, GPIODATA_LAST), 0);
@@ -332,11 +332,11 @@ mod tests {
         write(&mut gpio, GPIOIS, LINE);
         write(&mut gpio, GPIOIEV, LINE);
         write(&mut gpio, GPIOIE, LINE);
-        gpio.set_input(POWER_BUTTON_LINE, true);
+        gpio.set_input(BUTTON,true);
         assert!(gpio.irq());
         write(&mut gpio, GPIOIC, LINE);
         assert!(gpio.irq(), "still held high");
-        gpio.set_input(POWER_BUTTON_LINE, false);
+        gpio.set_input(BUTTON,false);
         assert!(!gpio.irq(), "the level went");
         assert_eq!(read(&mut gpio, GPIORIS), 0);
     }
@@ -346,7 +346,7 @@ mod tests {
     fn a_masked_edge_shows_in_the_raw_status_only() {
         let mut gpio = Pl061::new();
         write(&mut gpio, GPIOIEV, LINE);
-        gpio.set_input(POWER_BUTTON_LINE, true);
+        gpio.set_input(BUTTON,true);
         assert_eq!(read(&mut gpio, GPIORIS), LINE);
         assert_eq!(read(&mut gpio, GPIOMIS), 0);
         assert!(!gpio.irq());
@@ -361,7 +361,7 @@ mod tests {
         write(&mut gpio, GPIODATA_LAST, LINE);
         write(&mut gpio, GPIOAFSEL, LINE);
         assert_eq!(read(&mut gpio, GPIODATA_LAST), 0);
-        gpio.set_input(POWER_BUTTON_LINE, true);
+        gpio.set_input(BUTTON,true);
         assert_eq!(read(&mut gpio, GPIODATA_LAST), LINE);
     }
 
@@ -371,7 +371,7 @@ mod tests {
         let mut gpio = Pl061::new();
         write(&mut gpio, GPIOIBE, LINE);
         write(&mut gpio, GPIOIE, LINE);
-        gpio.set_input(POWER_BUTTON_LINE, true);
+        gpio.set_input(BUTTON,true);
         assert!(gpio.irq());
         gpio.reset();
         assert!(!gpio.irq());

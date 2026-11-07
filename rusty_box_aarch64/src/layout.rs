@@ -16,8 +16,9 @@
 //! 1 GiB to 2 GiB where this board has RAM, in the top half of the I/O
 //! region below RAM, each window aligned to its size. QEMU's `virt` layout
 //! ([`DeviceLayout::QemuVirt`], `hw/arm/virt.c` `base_memmap` and
-//! `extended_memmap` with `highmem`) is a host's choice, for a guest whose
-//! device tree or firmware variable store was made for QEMU's addresses.
+//! `extended_memmap` with `highmem`, and the GPIO line of its power button)
+//! is a host's choice, for a guest whose device tree or firmware variable
+//! store was made for QEMU's machine.
 
 use core::fmt;
 
@@ -332,7 +333,8 @@ const QEMU_VIRT: DeviceWindows = DeviceWindows {
     },
 };
 
-/// Where the board's devices sit, RAM and the flash aside.
+/// Where the board's devices sit, RAM and the flash aside, and the GPIO
+/// line its power button drives.
 ///
 /// Closed (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -356,6 +358,19 @@ impl DeviceLayout {
         match self {
             Self::Board => BOARD,
             Self::QemuVirt => QEMU_VIRT,
+        }
+    }
+
+    /// The PL061 line the power button drives, which the device tree's
+    /// `gpio-keys` node names. DDI 0190B leaves what each line is wired to
+    /// to the system: on the board's own layout the button takes the first
+    /// line, 0; on QEMU's, line 3, where QEMU's `virt` wires its `gpio-key`
+    /// (`create_gpio_keys`), so a tree QEMU wrote names the line the button
+    /// drives.
+    pub const fn power_button_line(self) -> u8 {
+        match self {
+            Self::Board => 0,
+            Self::QemuVirt => 3,
         }
     }
 

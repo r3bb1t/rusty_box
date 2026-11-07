@@ -13,7 +13,7 @@ use crate::cpu::PsciConduit;
 use crate::devices::gicv2::{GicExtensions, SpiCount};
 use crate::identity::{BoardIdentity, IdentityNames};
 use crate::interrupt_map::{InterruptMap, MsiCount, MsiExtent, MsiSpis, Spi, Wiring};
-use crate::layout::{DeviceLayout, DeviceWindows};
+use crate::layout::DeviceLayout;
 use crate::CpuModel;
 
 const RAM: u64 = 256 << 20;
@@ -36,7 +36,7 @@ fn board_of(
         gic,
         chosen,
         wiring: default_wiring(),
-        windows: OWN,
+        layout: OWN,
     };
     let mut out = vec![0u8; 64 * 1024];
     let len = write(&tree, &mut out).expect("fits");
@@ -45,7 +45,7 @@ fn board_of(
 }
 
 /// The board's own layout.
-const OWN: DeviceWindows = DeviceLayout::Board.windows();
+const OWN: DeviceLayout = DeviceLayout::Board;
 
 /// The board's own interrupt map on the GIC-400's 480 SPIs.
 fn default_wiring() -> Wiring {
@@ -326,7 +326,7 @@ fn chosen_carries_the_boot_and_no_entropy() {
 }
 
 /// Each device the board has is where its node says, raising what its
-/// node says: the PrimeCells, the power button on GPIO line 3, the flash
+/// node says: the PrimeCells, the power button on GPIO line 0, the flash
 /// banks, every virtio transport by level, and the PCIe host whose node is
 /// named for its ECAM window, its INTx swizzled across the bridge's SPIs.
 /// The SPIs are the board's own map's: the devices' from SPI 0 by address.
@@ -361,7 +361,8 @@ fn the_devices_are_described_where_they_are() {
     let gpio = prop(&tree, "gpio@8040000", "phandle").map(cells).expect("phandle");
     assert_eq!(
         prop(&tree, "gpio-keys/key-power", "gpios").map(cells),
-        Some(vec![gpio[0], 3, 0])
+        Some(vec![gpio[0], 0, 0]),
+        "the first line, active high"
     );
     assert_eq!(
         prop(&tree, "gpio-keys/key-power", "linux,code").map(cells),
@@ -443,7 +444,7 @@ fn the_tree_describes_the_interrupt_map_it_is_given() {
         gic: GicExtensions::Absent,
         chosen: PLAIN,
         wiring: map.wire(SpiCount::DEFAULT).expect("fits"),
-        windows: OWN,
+        layout: OWN,
     };
     let mut out = vec![0u8; 64 * 1024];
     let len = write(&tree, &mut out).expect("fits");
@@ -471,7 +472,8 @@ fn the_tree_describes_the_interrupt_map_it_is_given() {
 /// QEMU's layout is the one the tree describes when it is chosen: each node
 /// named for, and its `reg` at, the address QEMU's `virt` gives the device
 /// (`hw/arm/virt.c` `base_memmap`, `extended_memmap`), the console's alias
-/// following the UART, and the PCIe host's windows QEMU's.
+/// following the UART, the PCIe host's windows QEMU's, and the power button
+/// on the GPIO line QEMU wires it to (`create_gpio_keys`).
 #[test]
 fn the_tree_describes_the_layout_it_is_given() {
     let tree = BoardTree {
@@ -482,7 +484,7 @@ fn the_tree_describes_the_layout_it_is_given() {
         gic: GicExtensions::Virtualization,
         chosen: PLAIN,
         wiring: default_wiring(),
-        windows: DeviceLayout::QemuVirt.windows(),
+        layout: DeviceLayout::QemuVirt,
     };
     let mut out = vec![0u8; 64 * 1024];
     let len = write(&tree, &mut out).expect("fits");
@@ -519,6 +521,12 @@ fn the_tree_describes_the_layout_it_is_given() {
             0x0200_0000, 0, 0x1000_0000, 0, 0x1000_0000, 0, 0x2EFF_0000, //
             0x0300_0000, 0x80, 0, 0x80, 0, 0x80, 0,
         ])
+    );
+    let gpio = prop(tree, "gpio@9030000", "phandle").map(cells).expect("phandle");
+    assert_eq!(
+        prop(tree, "gpio-keys/key-power", "gpios").map(cells),
+        Some(vec![gpio[0], 3, 0]),
+        "the power button on line 3, as QEMU's `virt` wires it"
     );
 }
 
@@ -561,7 +569,7 @@ fn a_tree_that_does_not_fit_is_refused() {
         gic: GicExtensions::Absent,
         chosen: PLAIN,
         wiring: default_wiring(),
-        windows: OWN,
+        layout: OWN,
     };
     let mut short = vec![0u8; len - 1];
     assert_eq!(

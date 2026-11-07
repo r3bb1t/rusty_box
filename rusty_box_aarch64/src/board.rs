@@ -14,9 +14,10 @@
 //! a 2 MiB firmware image needs no padding and a directly booted kernel
 //! needs no flash images at all.
 //!
-//! The power button is QEMU's `gpio-key` on GPIO line 3: a press drives the
-//! line high and a timer releases it 100 ms of guest time later
-//! (`hw/gpio/gpio_key.c`, `GPIO_KEY_LATENCY`).
+//! The power button is QEMU's `gpio-key` on the GPIO line the layout names
+//! ([`DeviceLayout::power_button_line`]: line 0 on the board's own, line 3
+//! on QEMU's): a press drives the line high and a timer releases it 100 ms
+//! of guest time later (`hw/gpio/gpio_key.c`, `GPIO_KEY_LATENCY`).
 
 use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 use rusty_box_devices::display::Resolution;
@@ -29,7 +30,7 @@ use crate::devices::cfi_flash::{CfiFlash, FlashArray};
 use crate::devices::gicv2::{GicExtensions, GicNames, GicShape, GicV2};
 use crate::devices::pl011::{BaudRate, Pl011, Received, UartClocks};
 use crate::devices::pl031::Pl031;
-use crate::devices::pl061::{Pl061, POWER_BUTTON_LINE};
+use crate::devices::pl061::Pl061;
 #[cfg(feature = "alloc")]
 use crate::devices::virtio::block::Block;
 #[cfg(feature = "alloc")]
@@ -525,7 +526,8 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.uart.reset();
         self.rtc.reset(clock);
         if self.power_button_release.take().is_some() {
-            self.gpio.set_input(POWER_BUTTON_LINE, false);
+            self.gpio
+                .set_input(self.layout.power_button_line(), false);
         }
         self.gpio.reset();
         for transport in self.virtio.iter_mut().flatten() {
@@ -573,7 +575,8 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.uart.update(clock);
         if let Some(release) = self.power_button_release {
             if clock.now() >= release {
-                self.gpio.set_input(POWER_BUTTON_LINE, false);
+                self.gpio
+                    .set_input(self.layout.power_button_line(), false);
                 self.power_button_release = None;
             }
         }
@@ -613,7 +616,7 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// QEMU `gpio_key_set_irq`: press the power button now; it releases on
     /// its own. A press while it is held restarts the hold.
     pub(crate) fn press_power_button(&mut self, clock: VmClock) {
-        self.gpio.set_input(POWER_BUTTON_LINE, true);
+        self.gpio.set_input(self.layout.power_button_line(), true);
         self.power_button_release = Some(clock.after_micros(POWER_BUTTON_HOLD_MICROS));
         self.sync_device_lines();
     }

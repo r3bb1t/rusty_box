@@ -70,7 +70,7 @@ SPIs, eight priority bits, a 62.5 MHz counter), and the choice is its own.
 | `gic` | `GicShape { spis: SpiCount, priority_bits: PriorityBits }` | 480 SPIs, five priority bits (the GIC-400's); SPIs in 32s from 64 (the fewest any interrupt map fits, the devices' 39 lines and an MSI; the board's own map needs 96), priority bits `Four` to `Eight`, the binary points and active priority registers following | IHI 0048B §4.3.2, Table 3-1, Table 4-47; DDI 0471B §2.3.3 |
 | `interrupts` | `InterruptMap { uart, rtc, gpio, virtio, pcie_intx: Spi, msi: MsiSpis }` | the devices' lines from SPI 0 in the order of their registers' addresses (UART 0, RTC 1, GPIO 2, the 32 virtio transports 3 to 34, the PCIe host's INTA to INTD 35 to 38) and the GICv2m frame every SPI from the first after them whose interrupt ID is a multiple of 32 (`MsiExtent::ToTheLast` from SPI 64, INTID 96, so 64 to 479 on 480); any map whose SPIs the GIC has, the frame at least one, and no two sources share (`BuildError::InterruptMap`), the frame's count 1 to 1023 | IHI 0048B §2.2.1; BSA DEN0094C I.5, I.9.1; PCI Local Bus 3.0 §6.8.1.6 |
 | `transport_order` | `TransportOrder` | `FirstFree`, each virtio device (the display, the keyboard, the tablet, the disk, in that order) in the first transport the ones before it left free, so the first at the lowest address and first in the device tree; `LastFree`, from the last down | OASIS virtio 1.2 §4.2 (left to the platform) |
-| `layout` | `DeviceLayout` | `Board`, the board's own (the GIC-400's block at 0x0800_0000, the GICv2m frame, the PrimeCells and the 32 virtio transports in a 64 KiB page each from 0x0801_0000, the PCIe host's 32-bit window at 0x2000_0000 and its ECAM and 64-bit window from 256 GiB); `QemuVirt`, QEMU `virt`'s, for a tree QEMU wrote; RAM at 0x4000_0000 and the flash at 0 in both (see "QEMU fingerprints left"). A host's tree naming another address for a device fails the build (`BuildError::HostTreeAddress`) | DEN0001C 4.1.2, 4.3.2, P29; DDI 0471B Table 3-1 |
+| `layout` | `DeviceLayout` | `Board`, the board's own (the GIC-400's block at 0x0800_0000, the GICv2m frame, the PrimeCells and the 32 virtio transports in a 64 KiB page each from 0x0801_0000, the PCIe host's 32-bit window at 0x2000_0000 and its ECAM and 64-bit window from 256 GiB); `QemuVirt`, QEMU `virt`'s, for a tree QEMU wrote; RAM at 0x4000_0000 and the flash at 0 in both (see "QEMU fingerprints left"); the power button on the GPIO's line 0 on `Board`, line 3 on `QemuVirt`. A host's tree naming another address for a device fails the build (`BuildError::HostTreeAddress`), as does one putting a `gpio-keys` key on another line of the board's GPIO (`BuildError::HostTreePowerButton`) | DEN0001C 4.1.2, 4.3.2, P29; DDI 0471B Table 3-1 |
 
 The front end takes them as its `[virt]` table's keys (`spectre =
 "mitigated"`, `transport_order = "last-free"` and `layout = "qemu-virt"`, by each answer's
@@ -326,9 +326,9 @@ is) must reproduce, are:
 | Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB granule and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB and 64 KiB granules too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0800_4000, the common base and processor 0's at 0x0800_5000, 4 KiB each, on the board's own layout) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0800_6000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
-| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), no `fw_cfg` (see "Where the references differ"), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the first free ones, or the last free with `VirtConfig::transport_order`), an empty PCIe ECAM/windows |
+| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with a `gpio-key` power button on its first line, 0 (line 3, QEMU's, on QEMU's layout), CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), no `fw_cfg` (see "Where the references differ"), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the first free ones, or the last free with `VirtConfig::transport_order`), an empty PCIe ECAM/windows |
 | Board | the board's own device layout after Arm's memory map principles, or QEMU `virt`'s (`VirtConfig::layout`, see "Where the references differ"), RAM and the flash where QEMU's `virt` has them in both; the board's own interrupt wiring (`VirtConfig::interrupts`, see "Where the references differ"); the board's own device tree, written from the board (`src/boot/tree.rs`): generic node names (Devicetree Specification 2.2.2), each node as its binding describes it, the GIC with each frame the size it decodes, `dma-coherent` on each device that makes DMA, the processor's caches down to the L2 as `CCSIDR_EL1` reports them, `/psci` for PSCI 1.0 and 0.2 on the conduit the firmware answers on, `/chosen` with EBBR's `stdout-path` and no boot entropy (see "Where the references differ"), and the identity's `/model` and root `compatible`; no PMU, `fw-cfg` or platform bus node, which the board does not have; with EL2, the virtual interface's two frames and its maintenance interrupt in the GIC node; a host's own tree gets its names the identity's, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does, and is refused where it puts a device anywhere but where the layout has it (`BuildError::HostTreeAddress`) or names a device's interrupt other than the one the board's interrupt map wires it to (`BuildError::HostTreeInterrupt`) |
-| Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves, and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
+| Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed and entered as Linux's arm64 boot protocol (`Documentation/arch/arm64/booting.rst`) asks — the kernel at the base of RAM, the device tree in the 2 MiB block after its `image_size`, the initramfs in the next, `x0` the tree and every other general-purpose register zero — and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
 Provenance: Arm's documents decide wherever they speak — the Arm ARM (DDI
 0487) and its machine-readable data (AARCHMRS) for the processor, IHI 0048B
@@ -1232,7 +1232,8 @@ integration tests of the public API.
   bytes reaching a polling guest once it has switched the UART's receiver on
   (and waiting until then), a guest's character leaving the UART only once
   it has enabled it, PSCI power-off and reset, the power button's 100 ms on
-  GPIO line 3, an observer's view, direct kernel placement, its device tree
+  its layout's GPIO line, an observer's view, direct kernel placement and
+  the registers it is entered with, its device tree
   and the console it finds set up, the receive timeout a polling guest sees
   32 bit periods after a character, or after it sets `RTIM` with one
   waiting, at the same tick however the run is sliced, and at the same
@@ -2139,6 +2140,51 @@ one open.
   PrimeCell, a virtio transport or the PCIe host anywhere but where the
   layout has it is refused (`BuildError::HostTreeAddress`), as the board
   would decode nothing where the guest looks.
+- **The power button is on the GPIO's first line.** DDI 0190B leaves what
+  each PL061 line is wired to to the system. On the board's own layout
+  the power button drives line 0, the first, which the device tree's
+  `gpio-keys` key names (`gpios = <&gpio 0 0>`), where Linux's
+  `gpio-keys` driver takes it from. QEMU's `virt` wires its `gpio-key` to line
+  3 (`create_gpio_keys`); `DeviceLayout::QemuVirt` keeps that line with
+  QEMU's addresses, so a tree QEMU wrote names the line the button drives
+  (`DeviceLayout::power_button_line`). A host's tree whose `gpio-keys`
+  puts an enabled key, by its `gpios`, on another line of the board's
+  GPIO is refused (`BuildError::HostTreePowerButton`): nothing drives the
+  board's other lines, so its guest would wait on one that never changes.
+  `tests/api.rs` reads the line rise and fall in `GPIODATA` and its
+  interrupt pending at the GPIO's SPI.
+- **A directly booted kernel is placed and entered as Linux's boot
+  protocol asks, and the protocol's open choices are the board's.**
+  Linux's arm64 `Documentation/arch/arm64/booting.rst` fixes the entry
+  state — `x0` the device tree's physical address, `x1` to `x3` zero
+  (§4) — and names no other register; every other general-purpose
+  register here holds its reset value, zero. QEMU enters through a boot
+  stub of its own at the base of RAM (`bootloader_aarch64` in
+  `hw/arm/boot.c`), which leaves the kernel's entry in `x4`. The protocol
+  places the kernel `text_offset` above a 2 MiB-aligned base, asks for
+  `image_size` bytes free from its start, keeps the device tree 8-byte
+  aligned, at most 2 MiB and out of any 2 MiB block mapped with
+  attributes of its own (§2; within 512 MiB of the base before v4.2),
+  and the initrd in a 1 GiB-aligned window of at most 32 GiB that covers
+  the kernel (§4). Here the base is the base of RAM, which an `Image`
+  with flags bit 3 clear asks to be "as close as possible to"; the device
+  tree takes the 2 MiB block at the first 2 MiB boundary after the
+  kernel's `image_size`, and the initrd starts at the next, leaving RAM
+  above it one free run; an initrd that would end beyond the 32 GiB
+  window is refused (`PlacementError::InitrdOutOfReach`). QEMU moves a
+  kernel whose `text_offset` is below 4 KiB up 2 MiB to clear its stub
+  (`BOOTLOADER_MAX_SIZE`), so a kernel of `text_offset` 0, as recent
+  kernels' is, is entered 2 MiB higher there; puts the initrd at half of RAM up to
+  128 MiB, or above the kernel when that is higher; and the device tree at
+  the 2 MiB boundary after the initrd (`arm_setup_direct_kernel_boot`).
+  For an `Image` too old to give its size (before v3.17) both load it at
+  0x80000, as §4 says to assume; the protocol asks a boot loader to "keep
+  as much memory as possible free for use by the kernel immediately after
+  the end of the kernel image", so the tree here takes the last 2 MiB
+  block below the end of RAM or of the 512 MiB such a kernel searches,
+  whichever is lower, and the initrd ends where that block starts.
+  `tests/api.rs` and `src/boot.rs` check where each piece lands and the
+  registers the kernel finds.
 - **The system counter runs at 1 GHz on both processors by default.** Before
   Armv8.6 the Arm ARM leaves the counter's frequency to the system, BSA
   asking at least 10 MHz (DEN0094C RB_TIME_02); from Armv8.6 it is 1 GHz.
@@ -2985,22 +3031,19 @@ the board's own:
 - `TransportOrder::LastFree`, QEMU's order of filling the transports, for
   a VM whose firmware variable store names its devices where that order
   put them.
-- `DeviceLayout::QemuVirt`, QEMU's device addresses, for a guest booted
-  with a device tree QEMU wrote or a firmware variable store whose boot
-  entries name QEMU's device paths.
+- `DeviceLayout::QemuVirt`, QEMU's device addresses and its power
+  button's PL061 line, 3, for a guest booted with a device tree QEMU wrote
+  or a firmware variable store whose boot entries name QEMU's device
+  paths.
 - The processor: choices QEMU made where Arm leaves them
   IMPLEMENTATION DEFINED or UNKNOWN (pointer-authentication keys at reset,
   unimplemented `CSSELR_EL1` selections, the order virtual interrupts are
   taken).
 - PrimeCell behaviour where the TRMs are silent (the UART's empty-FIFO
   read, FIFO flush, loopback; the RTC's alarm at a match already passed).
-- The power button on the PL061's line 3, the line QEMU's `virt` wires
-  it to, which the device tree's `gpio-keys` node names.
 - The flash's CFI identity: manufacturer 0x89 (Intel), device 0x18, and
   QEMU's CFI table values.
 - virtio values: the queue sizes.
-- The direct boot's placement of the kernel, initrd and device tree, and
-  `x4` holding the entry, left from QEMU's boot stub.
 
 ## Not implemented
 

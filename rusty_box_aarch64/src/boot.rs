@@ -1,28 +1,33 @@
 //! Getting a guest started on the board: the device tree it describes
-//! itself with, and loading a Linux kernel the way QEMU does when it is
-//! given `-kernel` and no firmware.
+//! itself with, and loading a Linux kernel with no firmware, as QEMU's
+//! `-kernel` does.
 //!
-//! Provenance (R7): QEMU `hw/arm/boot.c` — `load_aarch64_image` (where an
-//! arm64 `Image` goes), `arm_setup_direct_kernel_boot` (where the initrd and
-//! the device tree go), `arm_load_dtb` (the `/chosen` properties), and
-//! `bootloader_aarch64`, whose effect this reproduces directly: the processor
-//! starts at the kernel's entry with `x0` holding the device tree's address,
-//! `x1`–`x3` zero and `x4` the entry, at the processor's reset level (EL2
-//! with FEAT_EL2, as on QEMU with no EL3; EL1 without) with the MMU off and
-//! interrupts masked — the register state Linux's
-//! `Documentation/arch/arm64/booting.rst` asks for and QEMU's
-//! six-instruction stub leaves.
+//! Provenance (R7): Linux's arm64 boot protocol,
+//! `Documentation/arch/arm64/booting.rst`, which is the contract between a
+//! boot loader and the kernel: the `Image` header (§4), where the kernel,
+//! its device tree (§2) and its initrd (§4) may go, and the processor's
+//! state at the kernel's entry (§4) — `x0` the device tree's physical
+//! address and `x1` to `x3` zero, at the processor's reset level (EL2 with
+//! FEAT_EL2, EL1 without) with the MMU off and interrupts masked. Every
+//! other general-purpose register is zero, its reset value. QEMU's
+//! `hw/arm/boot.c` (`arm_load_dtb`) for the `/chosen` properties.
 //!
-//! Firmware finds the device tree at the base of RAM, where QEMU's `virt`
-//! puts it for `-bios` and `-pflash`. A directly booted kernel finds it where
-//! QEMU puts it for an `Image`: after the initrd (or where the initrd would
-//! start), aligned up to 2 MiB, since an early arm64 kernel maps the 2 MiB
-//! around it. Nothing else shares that region, whatever the kernel's load
-//! offset.
+//! Where booting.rst leaves the placement open, the rule is the board's own
+//! (`layout`): the kernel at the base of RAM, the device tree in the
+//! 2 MiB block after the kernel's footprint, the initrd in the next; an
+//! `Image` too old to state its size gets the most room the protocol lets
+//! a boot loader leave it. QEMU's choices (a boot stub at the base of RAM,
+//! with the kernel above it and the entry in `x4`, the initrd at up to
+//! 128 MiB, the tree after it) are recorded in the README, "Where the
+//! references differ".
+//!
+//! Firmware finds the device tree at the base of RAM, where stock EDK2 is
+//! built to look for it (README, "QEMU fingerprints left").
 
 pub mod fdt;
 pub(crate) mod tree;
 
+use crate::board::RAM_BASE;
 use crate::devices::pl011::BaudRate;
 pub use fdt::DeviceTreeError;
 
@@ -50,15 +55,30 @@ pub const DIRECT_BOOT_CONSOLE_BAUD: BaudRate = match BaudRate::new(115_200) {
 };
 
 const MIB: u64 = 1 << 20;
-/// QEMU `KERNEL64_LOAD_ADDR`: where a kernel too old to say goes.
-const LEGACY_LOAD_OFFSET: u64 = 0x0008_0000;
-/// QEMU `BOOTLOADER_MAX_SIZE`: a requested offset below this would overlap
-/// QEMU's stub, so QEMU moves the kernel up by 2 MiB; this board does the
-/// same so the two load a kernel at the same address.
-const BOOTLOADER_MAX_SIZE: u64 = 0x1000;
+const GIB: u64 = 1 << 30;
+/// booting.rst §4: the load offset of an `Image` whose header gives no
+/// size (a kernel before v3.17), whose `text_offset` "can be assumed to be
+/// 0x80000".
+const UNSIZED_TEXT_OFFSET: u64 = 0x0008_0000;
+/// booting.rst §4: the kernel is placed `text_offset` bytes from a base
+/// aligned to 2 MiB. §2: a device tree is at most 2 MiB, and the kernel
+/// maps it cacheable in blocks of up to 2 MiB, so the board gives it a
+/// 2 MiB block of its own.
+const BLOCK: u64 = 2 * MIB;
+/// booting.rst §2, NOTE: a kernel before v4.2 looks for its device tree
+/// only within the 512 MiB from its base.
+const EARLY_DEVICE_TREE_REACH: u64 = 512 * MIB;
+/// booting.rst §4: an initrd lies "entirely within a 1 GB aligned physical
+/// memory window of up to 32 GB in size that fully covers the kernel Image
+/// as well".
+const INITRD_WINDOW_MAX: u64 = 32 * GIB;
 const PAGE: u64 = 4096;
 /// The arm64 `Image` header (booting.rst §4).
 const HEADER_LEN: usize = 64;
+
+// RAM's base is the kernel's base, and an offset into RAM is as aligned
+// as the address it names, to 2 MiB and to 1 GiB.
+const _: () = assert!(RAM_BASE.is_multiple_of(BLOCK) && RAM_BASE.is_multiple_of(GIB));
 
 /// Why bytes are not an arm64 kernel `Image`.
 ///
@@ -91,7 +111,7 @@ impl core::error::Error for ImageError {}
 pub struct LinuxImage<'a> {
     bytes: &'a [u8],
     load_offset: u64,
-    footprint: u64,
+    footprint: Option<u64>,
 }
 
 impl<'a> LinuxImage<'a> {
@@ -114,14 +134,13 @@ impl<'a> LinuxImage<'a> {
         };
         let text_offset = field(8);
         let image_size = field(16);
-        // QEMU `load_aarch64_image`: text_offset means something only when
-        // image_size is non-zero (kernels from v3.17 on).
+        // booting.rst §4: a non-zero image_size "must be respected", and
+        // text_offset is little-endian with it; a zero image_size marks a
+        // kernel before v3.17, loaded at 0x80000 whatever its header says.
         let (load_offset, footprint) = if image_size == 0 {
-            (LEGACY_LOAD_OFFSET, bytes.len() as u64)
-        } else if text_offset < BOOTLOADER_MAX_SIZE {
-            (text_offset + 2 * MIB, image_size.max(bytes.len() as u64))
+            (UNSIZED_TEXT_OFFSET, None)
         } else {
-            (text_offset, image_size.max(bytes.len() as u64))
+            (text_offset, Some(image_size.max(bytes.len() as u64)))
         };
         Ok(Self {
             bytes,
@@ -135,14 +154,17 @@ impl<'a> LinuxImage<'a> {
         self.bytes
     }
 
-    /// Where the image loads, as an offset from the base of RAM.
+    /// Where the image loads, as an offset from the base of RAM: its
+    /// `text_offset` from that base, which is aligned to 2 MiB (booting.rst
+    /// §4).
     pub fn load_offset(&self) -> u64 {
         self.load_offset
     }
 
     /// How many bytes from its load address the kernel occupies, BSS
-    /// included.
-    pub fn footprint(&self) -> u64 {
+    /// included, when its header says (`image_size`, from v3.17); `None`
+    /// for an older image, whose header gives no size.
+    pub fn footprint(&self) -> Option<u64> {
         self.footprint
     }
 }
@@ -179,10 +201,15 @@ impl KernelLayout {
 pub enum PlacementError {
     /// The kernel, BSS included, runs past the end of RAM.
     KernelDoesNotFit,
-    /// The initrd runs past the end of RAM.
+    /// The initrd runs past the end of RAM, or, after a kernel whose
+    /// header gives no size, into the kernel.
     InitrdDoesNotFit,
-    /// No room is left for the device tree at the 2 MiB boundary after the
-    /// initrd.
+    /// The initrd would run past the 32 GiB window, aligned to 1 GiB and
+    /// covering the kernel, that the kernel reaches it in (booting.rst §4).
+    InitrdOutOfReach,
+    /// No room is left for the device tree in RAM after the kernel, within
+    /// the 512 MiB from its base where a kernel whose header gives no size
+    /// looks for it.
     DeviceTreeDoesNotFit,
 }
 
@@ -190,9 +217,12 @@ impl core::fmt::Display for PlacementError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             Self::KernelDoesNotFit => "the kernel does not fit in RAM",
-            Self::InitrdDoesNotFit => "the initrd does not fit in RAM",
+            Self::InitrdDoesNotFit => "the initrd does not fit in RAM after the kernel",
+            Self::InitrdOutOfReach => {
+                "the initrd would end beyond the 32 GiB window the kernel reaches it in"
+            }
             Self::DeviceTreeDoesNotFit => {
-                "no room is left in RAM for the device tree after the initrd"
+                "no room is left in RAM for the device tree after the kernel"
             }
         })
     }
@@ -200,42 +230,95 @@ impl core::fmt::Display for PlacementError {
 
 impl core::error::Error for PlacementError {}
 
-/// QEMU's placement (`arm_setup_direct_kernel_boot`): the kernel at its load
-/// offset; the initrd at min(RAM / 2, 128 MiB), or above the kernel's
-/// footprint if that is higher, page-aligned; the device tree at the first
-/// 2 MiB boundary after the initrd, or after where it would start when there
-/// is none.
+/// The board's placement of a directly booted kernel's pieces in RAM of
+/// `ram_len` bytes, which booting.rst constrains and leaves open beyond
+/// that.
+///
+/// The kernel's base is the base of RAM, and the kernel sits its load
+/// offset above it (§4): an `Image` with flags bit 3 clear asks for a base
+/// "as close as possible to the base of DRAM", one with it set for any base
+/// below 2^48, and a kernel before v4.6 uses no memory below its base.
+///
+/// An `Image` whose header gives its footprint needs that much free from
+/// its start and nothing more (§4). The device tree takes the 2 MiB block
+/// at the first 2 MiB boundary at or after the footprint's end: 8-byte
+/// aligned, never crossing a 2 MiB boundary, in no 2 MiB block the kernel
+/// maps with attributes of its own (§2), and, for a footprint under
+/// 510 MiB, within the 512 MiB from the base that a kernel before v4.2
+/// searches. The initrd starts at the next 2 MiB boundary, so it lies in the window
+/// of up to 32 GiB, aligned to 1 GiB and covering the kernel, that §4
+/// requires whenever it ends within 32 GiB of the kernel's 1 GiB block
+/// ([`PlacementError::InitrdOutOfReach`] otherwise). RAM above the initrd
+/// stays one free run.
+///
+/// An `Image` whose header gives no size (a kernel before v3.17) has a
+/// footprint that "is effectively unbound", and a boot loader "should
+/// attempt to keep as much memory as possible free for use by the kernel
+/// immediately after the end of the kernel image" (§4); kernels that old
+/// look for the tree within the 512 MiB from the base (§2). So the device
+/// tree takes the last 2 MiB block that starts below the end of RAM or of
+/// those 512 MiB, whichever comes first, and the initrd ends where that
+/// block starts, page-aligned, each above the image's bytes.
 pub(crate) fn layout(
     ram_len: u64,
     image: &LinuxImage<'_>,
     initrd_len: u64,
 ) -> Result<KernelLayout, PlacementError> {
-    let kernel_end = image
-        .load_offset
-        .checked_add(image.footprint)
+    let kernel_offset = image.load_offset;
+    let footprint = image.footprint.unwrap_or(image.bytes.len() as u64);
+    let kernel_end = kernel_offset
+        .checked_add(footprint)
+        .filter(|&end| end <= ram_len)
         .ok_or(PlacementError::KernelDoesNotFit)?;
-    if kernel_end > ram_len {
-        return Err(PlacementError::KernelDoesNotFit);
-    }
-    let initrd_at = (ram_len / 2)
-        .min(128 * MIB)
-        .max(kernel_end)
-        .next_multiple_of(PAGE);
-    let initrd_end = initrd_at
-        .checked_add(initrd_len)
-        .ok_or(PlacementError::InitrdDoesNotFit)?;
-    if initrd_len != 0 && initrd_end > ram_len {
-        return Err(PlacementError::InitrdDoesNotFit);
-    }
-    let device_tree_offset = initrd_end
-        .checked_next_multiple_of(2 * MIB)
-        .ok_or(PlacementError::DeviceTreeDoesNotFit)?;
-    if device_tree_offset >= ram_len {
-        return Err(PlacementError::DeviceTreeDoesNotFit);
-    }
+    let (device_tree_offset, initrd_offset) = match image.footprint {
+        Some(_) => {
+            let tree = kernel_end
+                .checked_next_multiple_of(BLOCK)
+                .filter(|&at| at < ram_len)
+                .ok_or(PlacementError::DeviceTreeDoesNotFit)?;
+            let initrd = if initrd_len == 0 {
+                None
+            } else {
+                // `tree` is below `ram_len`, so one block more cannot
+                // overflow.
+                let at = tree + BLOCK;
+                let end = at
+                    .checked_add(initrd_len)
+                    .filter(|&end| end <= ram_len)
+                    .ok_or(PlacementError::InitrdDoesNotFit)?;
+                let window = end
+                    .checked_next_multiple_of(GIB)
+                    .map(|top| top - kernel_offset / GIB * GIB);
+                if !window.is_some_and(|len| len <= INITRD_WINDOW_MAX) {
+                    return Err(PlacementError::InitrdOutOfReach);
+                }
+                Some(at)
+            };
+            (tree, initrd)
+        }
+        None => {
+            let tree = ram_len
+                .min(EARLY_DEVICE_TREE_REACH)
+                .checked_sub(1)
+                .map(|last| last / BLOCK * BLOCK)
+                .filter(|&at| at >= kernel_end)
+                .ok_or(PlacementError::DeviceTreeDoesNotFit)?;
+            let initrd = if initrd_len == 0 {
+                None
+            } else {
+                let at = tree
+                    .checked_sub(initrd_len)
+                    .map(|start| start / PAGE * PAGE)
+                    .filter(|&start| start >= kernel_end)
+                    .ok_or(PlacementError::InitrdDoesNotFit)?;
+                Some(at)
+            };
+            (tree, initrd)
+        }
+    };
     Ok(KernelLayout {
-        kernel_offset: image.load_offset,
-        initrd_offset: (initrd_len != 0).then_some(initrd_at),
+        kernel_offset,
+        initrd_offset,
         device_tree_offset,
     })
 }
@@ -252,22 +335,26 @@ mod tests {
         h
     }
 
+    /// booting.rst §4: an image loads `text_offset` above a 2 MiB-aligned
+    /// base, the base of RAM here, and one whose header gives no size at
+    /// 0x80000 whatever its `text_offset` reads.
     #[test]
-    fn qemu_loads_a_modern_image_two_mib_up_and_an_old_one_at_512_kib() {
+    fn an_image_loads_its_text_offset_above_the_base_of_ram() {
         let modern = header(0, 0x0200_0000);
         let image = LinuxImage::parse(&modern).expect("an Image");
-        assert_eq!(image.load_offset(), 2 * MIB);
-        assert_eq!(image.footprint(), 0x0200_0000);
-        let old = header(0x8_0000, 0);
-        assert_eq!(
-            LinuxImage::parse(&old).expect("an Image").load_offset(),
-            LEGACY_LOAD_OFFSET
-        );
-        let high = header(0x10_0000, 0x1000);
-        assert_eq!(
-            LinuxImage::parse(&high).expect("an Image").load_offset(),
-            0x10_0000
-        );
+        assert_eq!(image.load_offset(), 0, "at the base of RAM, no stub below");
+        assert_eq!(image.footprint(), Some(0x0200_0000));
+        let old = header(0x1234, 0);
+        let old = LinuxImage::parse(&old).expect("an Image");
+        assert_eq!(old.load_offset(), 0x8_0000);
+        assert_eq!(old.footprint(), None, "the header gives no size");
+        for text_offset in [0x1000, 0x8_0000, 0x10_0000] {
+            let h = header(text_offset, 0x1000);
+            assert_eq!(
+                LinuxImage::parse(&h).expect("an Image").load_offset(),
+                text_offset
+            );
+        }
         assert_eq!(
             LinuxImage::parse(&[0u8; 64]).err(),
             Some(ImageError::NotArm64Image)
@@ -287,61 +374,111 @@ mod tests {
         );
     }
 
+    /// After an image whose header gives its footprint, the device tree
+    /// takes the 2 MiB block at the first 2 MiB boundary at or after the
+    /// footprint's end, and the initrd starts at the next; whatever does
+    /// not fit is refused, as is an initrd ending past the 32 GiB window
+    /// booting.rst §4 lets the kernel reach it in.
     #[test]
-    fn the_initrd_goes_at_half_of_ram_capped_at_128_mib_and_above_the_kernel() {
+    fn the_device_tree_and_the_initrd_follow_the_kernels_footprint() {
         let h = header(0, 0x0300_0000);
         let image = LinuxImage::parse(&h).expect("an Image");
-        let small = layout(128 * MIB, &image, 0x10_0000).expect("fits");
-        assert_eq!(small.initrd_offset, Some(64 * MIB));
-        let big = layout(1024 * MIB, &image, 0x10_0000).expect("fits");
-        assert_eq!(big.initrd_offset, Some(128 * MIB));
-        let tight = layout(64 * MIB, &image, 0x10_0000).expect("fits");
+        let placed = layout(128 * MIB, &image, 0x10_0001).expect("fits");
         assert_eq!(
-            tight.initrd_offset,
-            Some(2 * MIB + 0x0300_0000),
-            "above the kernel's footprint"
+            placed,
+            KernelLayout {
+                kernel_offset: 0,
+                device_tree_offset: 48 * MIB,
+                initrd_offset: Some(50 * MIB),
+            }
         );
+        let without = layout(128 * MIB, &image, 0).expect("fits");
+        assert_eq!(without.initrd_offset, None);
+        assert_eq!(without.device_tree_offset, 48 * MIB);
+        assert_eq!(without.fit_device_tree(128 * MIB, 8 * 1024), Ok(()));
+
+        // A footprint ending inside a block: the tree takes the next one.
+        let odd = header(0x8_0000, 0x0123_4567);
+        let odd = LinuxImage::parse(&odd).expect("an Image");
+        let placed = layout(128 * MIB, &odd, 0x1000).expect("fits");
+        assert_eq!(placed.kernel_offset, 0x8_0000);
+        assert_eq!(placed.device_tree_offset, 20 * MIB, "after 0x12B_4567");
+        assert_eq!(placed.initrd_offset, Some(22 * MIB));
+
         assert_eq!(
             layout(32 * MIB, &image, 0),
             Err(PlacementError::KernelDoesNotFit)
         );
         assert_eq!(
-            layout(54 * MIB, &image, 8 * MIB),
+            layout(54 * MIB, &image, 4 * MIB).map(|l| l.initrd_offset),
+            Ok(Some(50 * MIB)),
+            "an initrd ending at the end of RAM"
+        );
+        assert_eq!(
+            layout(54 * MIB, &image, 4 * MIB + 1),
             Err(PlacementError::InitrdDoesNotFit)
         );
-    }
-
-    /// The device tree follows the initrd at a 2 MiB boundary, or the place
-    /// the initrd would start when there is none — clear of a kernel loaded
-    /// low, which the base of RAM would not be.
-    #[test]
-    fn the_device_tree_goes_at_the_2_mib_boundary_after_the_initrd() {
-        let h = header(0, 0x0300_0000);
-        let image = LinuxImage::parse(&h).expect("an Image");
-        let with_initrd = layout(128 * MIB, &image, 0x10_0001).expect("fits");
-        assert_eq!(with_initrd.device_tree_offset, 66 * MIB);
-        let without = layout(128 * MIB, &image, 0).expect("fits");
-        assert_eq!(without.initrd_offset, None);
-        assert_eq!(without.device_tree_offset, 64 * MIB);
-        assert_eq!(without.fit_device_tree(128 * MIB, 8 * 1024), Ok(()));
         assert_eq!(
-            layout(128 * MIB, &image, 64 * MIB - 1).err(),
-            Some(PlacementError::DeviceTreeDoesNotFit),
-            "the boundary after the initrd is the end of RAM"
+            layout(48 * MIB, &image, 0),
+            Err(PlacementError::DeviceTreeDoesNotFit),
+            "the kernel ends at the end of RAM"
         );
         assert_eq!(
-            without.fit_device_tree(64 * MIB + 0x1000, 0x2000),
+            without.fit_device_tree(48 * MIB + 0x1000, 0x2000),
             Err(PlacementError::DeviceTreeDoesNotFit)
         );
 
-        let low = header(0x1000, 0x1000);
-        let low = LinuxImage::parse(&low).expect("an Image");
+        let within = 32 * GIB - 50 * MIB;
         assert_eq!(
-            low.load_offset(),
-            0x1000,
-            "a kernel may ask to load just above the stub"
+            layout(64 * GIB, &image, within).map(|l| l.initrd_offset),
+            Ok(Some(50 * MIB)),
+            "the initrd ends where the window does"
         );
-        let placed = layout(128 * MIB, &low, 0).expect("fits");
-        assert!(placed.device_tree_offset >= placed.kernel_offset + low.footprint());
+        assert_eq!(
+            layout(64 * GIB, &image, within + 1),
+            Err(PlacementError::InitrdOutOfReach)
+        );
+    }
+
+    /// An image whose header gives no size is followed by as much free RAM
+    /// as booting.rst lets a boot loader leave: the device tree in the last
+    /// 2 MiB block that starts below the end of RAM or of the 512 MiB from
+    /// the base, whichever is lower, and the initrd just below it.
+    #[test]
+    fn the_device_tree_and_the_initrd_leave_an_unsized_kernel_the_most_room() {
+        let h = header(0, 0);
+        let image = LinuxImage::parse(&h).expect("an Image");
+        let placed = layout(128 * MIB, &image, 0x10_0001).expect("fits");
+        assert_eq!(
+            placed,
+            KernelLayout {
+                kernel_offset: 0x8_0000,
+                device_tree_offset: 126 * MIB,
+                initrd_offset: Some(0x07CF_F000),
+            },
+            "the initrd page-aligned below the tree's block"
+        );
+        assert_eq!(
+            layout(1024 * MIB, &image, 0).map(|l| l.device_tree_offset),
+            Ok(510 * MIB),
+            "within the 512 MiB a kernel before v4.2 searches"
+        );
+        let short = layout(3 * MIB, &image, 0).expect("fits");
+        assert_eq!(short.device_tree_offset, 2 * MIB, "a block RAM ends inside");
+        assert_eq!(short.fit_device_tree(3 * MIB, 8 * 1024), Ok(()));
+        assert_eq!(
+            layout(MIB, &image, 0),
+            Err(PlacementError::DeviceTreeDoesNotFit),
+            "the last block starts below the kernel's end"
+        );
+        assert_eq!(
+            layout(4 * MIB, &image, 2 * MIB - 0x8_1000).map(|l| l.initrd_offset),
+            Ok(Some(0x8_1000))
+        );
+        assert_eq!(
+            layout(4 * MIB, &image, 2 * MIB - 0x8_0000),
+            Err(PlacementError::InitrdDoesNotFit),
+            "it would start in the image's bytes"
+        );
     }
 }

@@ -215,7 +215,36 @@ pub enum BuildError {
     /// A host's device tree puts one of the board's devices where the
     /// configuration's layout does not.
     HostTreeAddress(HostTreeAddress),
+    /// A host's device tree puts a key on a line of the board's GPIO other
+    /// than the one the configuration's layout has the power button on.
+    HostTreePowerButton(HostTreePowerButton),
 }
+
+/// A host's device tree whose `gpio-keys` names a line of the board's GPIO
+/// that the power button does not drive
+/// ([`DeviceLayout::power_button_line`]): a guest following the tree would
+/// wait on a line that never changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HostTreePowerButton {
+    /// The line the tree names.
+    pub named: u32,
+    /// The line the layout has the power button on.
+    pub wired: u8,
+}
+
+impl core::fmt::Display for HostTreePowerButton {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let Self { named, wired } = self;
+        write!(
+            f,
+            "the device tree puts a key on GPIO line {named}, where the layout has \
+             the power button on line {wired}; the layout the tree was written for \
+             boots it"
+        )
+    }
+}
+
+impl core::error::Error for HostTreePowerButton {}
 
 /// One of the board's devices for which a host's device tree names an
 /// interrupt other than the one the configuration's interrupt map wires it
@@ -274,6 +303,7 @@ impl core::fmt::Display for BuildError {
             Self::InterruptMap(e) => write!(f, "interrupt map: {e}"),
             Self::HostTreeInterrupt(e) => write!(f, "{e}"),
             Self::HostTreeAddress(e) => write!(f, "{e}"),
+            Self::HostTreePowerButton(e) => write!(f, "{e}"),
         }
     }
 }
@@ -288,6 +318,7 @@ impl core::error::Error for BuildError {
             Self::InterruptMap(e) => Some(e),
             Self::HostTreeInterrupt(e) => Some(e),
             Self::HostTreeAddress(e) => Some(e),
+            Self::HostTreePowerButton(e) => Some(e),
             Self::FirmwareTooLarge | Self::VariablesTooLarge | Self::LentRamSize { .. } => None,
         }
     }
@@ -848,7 +879,7 @@ struct Description<'i> {
     layout: Option<KernelLayout>,
     levels: TreeLevels,
     wiring: Wiring,
-    windows: DeviceWindows,
+    devices: DeviceLayout,
 }
 
 impl<'i> Description<'i> {
@@ -895,7 +926,7 @@ fn describe(
                 gic,
                 chosen: machine.chosen(),
                 wiring: machine.wiring,
-                windows: machine.windows,
+                layout: machine.devices,
             };
             boot::tree::write(&board, &mut out.bytes)?
         }
@@ -905,7 +936,7 @@ fn describe(
 }
 
 /// Refuse a host's `tree` that puts one of the board's devices where the
-/// layout `windows` does not, or names, for one of them that drives an
+/// layout `devices` does not, or names, for one of them that drives an
 /// interrupt line — the UART, the RTC, the GPIO and the virtio transports —
 /// an interrupt `wiring` does not give it: QEMU's `arm_load_dtb` takes such
 /// a tree, and its guest drives registers nothing answers at or waits on a
@@ -933,28 +964,40 @@ fn describe(
 /// read as the GIC binding reads a specifier (a type cell, 0 for an SPI,
 /// then the SPI's number), and one whose parent is no such controller names
 /// no SPI of the GIC's. A device the tree leaves out, or gives no
-/// interrupt, the tree leaves alone.
+/// interrupt, the tree leaves alone. The keys of an enabled `gpio-keys`
+/// child of the root are checked as [`check_key`] says.
 fn check_host_tree(
     tree: &[u8],
     wiring: Wiring,
-    windows: DeviceWindows,
+    devices: DeviceLayout,
 ) -> Result<(), BuildError> {
+    let windows = devices.windows();
     let mut cells = RegCells::DEFAULT;
     let mut root_parent = None;
     let mut parents = ParentCache::EMPTY;
+    // Whether the child of the root last met is an enabled `gpio-keys`,
+    // whose own children are its keys.
+    let mut in_keys = false;
     fdt::each_node(tree, |node| {
-        if node.depth() == 0 {
-            cells = RegCells {
-                address: node.cell_or("#address-cells", RegCells::DEFAULT.address)?,
-                size: node.cell_or("#size-cells", RegCells::DEFAULT.size)?,
-            };
-            root_parent = node
-                .property("interrupt-parent")?
-                .map(|p| fdt::cell(p, 0))
-                .transpose()?;
-            return Ok(());
+        match node.depth() {
+            0 => {
+                cells = RegCells {
+                    address: node.cell_or("#address-cells", RegCells::DEFAULT.address)?,
+                    size: node.cell_or("#size-cells", RegCells::DEFAULT.size)?,
+                };
+                root_parent = node
+                    .property("interrupt-parent")?
+                    .map(|p| fdt::cell(p, 0))
+                    .transpose()?;
+                return Ok(());
+            }
+            1 => {}
+            2 if in_keys => return check_key(tree, node, cells, devices),
+            _ => return Ok(()),
         }
-        if node.depth() != 1 || !node.is_enabled()? {
+        let enabled = node.is_enabled()?;
+        in_keys = enabled && compatible_names(node, b"gpio-keys")?;
+        if !enabled {
             return Ok(());
         }
         let Some(reg) = node.property("reg")? else {
@@ -1011,6 +1054,56 @@ fn check_host_tree(
             }))
         }
     })
+}
+
+/// Refuse a host tree's `gpio-keys` key on the board's GPIO that names a
+/// line other than the one the power button drives
+/// ([`DeviceLayout::power_button_line`]), which is the only line of the
+/// board's that anything outside drives: a guest following the tree would
+/// wait on a line that never changes ([`BuildError::HostTreePowerButton`]).
+/// A key is an enabled child of `gpio-keys` whose `gpios` names a GPIO
+/// controller's phandle and then the line (the `gpio-keys` and PL061
+/// bindings, `#gpio-cells` 2: the line, then its flags); the controller is
+/// the board's GPIO when it is a child of the root whose first `reg` region,
+/// in the root's `cells`, is where the layout has the GPIO, and a phandle no
+/// node has is a malformed tree. A key named only by its `interrupts`, or on
+/// another controller, the tree describes as it likes.
+fn check_key(
+    tree: &[u8],
+    key: fdt::TreeNode<'_>,
+    cells: RegCells,
+    devices: DeviceLayout,
+) -> Result<(), BuildError> {
+    if !key.is_enabled()? {
+        return Ok(());
+    }
+    let Some(gpios) = key.property("gpios")?.filter(|v| !v.is_empty()) else {
+        return Ok(());
+    };
+    let named = fdt::cell(gpios, 1)?;
+    let controller = fdt::node_with_phandle(tree, fdt::cell(gpios, 0)?)?
+        .ok_or(DeviceTreeError::Malformed)?;
+    let address = match controller.property("reg")? {
+        Some(reg) if controller.depth() == 1 => reg_address(reg, cells, 0),
+        Some(_) | None => None,
+    };
+    let wired = devices.power_button_line();
+    if address != Some(devices.windows().gpio) || named == u32::from(wired) {
+        Ok(())
+    } else {
+        Err(BuildError::HostTreePowerButton(HostTreePowerButton {
+            named,
+            wired,
+        }))
+    }
+}
+
+/// Whether `node`'s `compatible` list holds `name` (Devicetree
+/// Specification 2.3.1).
+fn compatible_names(node: fdt::TreeNode<'_>, name: &[u8]) -> Result<bool, DeviceTreeError> {
+    Ok(node
+        .property("compatible")?
+        .is_some_and(|list| list.split(|&b| b == 0).any(|c| c == name)))
 }
 
 /// What kind of interrupt parent a node is.
@@ -1397,7 +1490,7 @@ fn plan<L: Levels>(
         .wire(config.gic.spis)
         .map_err(BuildError::InterruptMap)?;
     if let TreeSource::Host(tree) = source_tree {
-        check_host_tree(tree, wiring, config.layout.windows())?;
+        check_host_tree(tree, wiring, config.layout)?;
     }
     let ram_len = ram.get();
     let boot = match choice {
@@ -1420,7 +1513,7 @@ fn plan<L: Levels>(
             layout,
             levels: TreeLevels::of::<L>(),
             wiring,
-            windows: config.layout.windows(),
+            devices: config.layout,
         };
         describe(source_tree, machine, identity, &mut device_tree)?;
         let tree_len = device_tree.len as u64;
@@ -1844,11 +1937,11 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
                 if let Some(offset) = layout.initrd_offset {
                     place(parts.ram, offset, parts.initrd);
                 }
-                // What QEMU's bootloader_aarch64 leaves: x0 the device tree,
-                // x4 the entry it branched through, x1-x3 zero from reset.
+                // booting.rst §4: x0 the device tree's physical address,
+                // x1 to x3 zero; every other register keeps its reset
+                // value, zero.
                 self.cpu
                     .set_reg(Reg::X0, RAM_BASE + layout.device_tree_offset);
-                self.cpu.set_reg(Reg::X4, reset_pc);
                 // And the console set up, as firmware would leave it.
                 self.board
                     .set_up_console(boot::DIRECT_BOOT_CONSOLE_BAUD, self.cpu.clock());
@@ -2728,7 +2821,7 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// occupied transports, and the board's devices: the GIC with its
 /// Virtualization Extensions where it has them, the PL011, the PL031, the
 /// PL061, both flash banks and every virtio-mmio transport.
-const SNAPSHOT_VERSION: u32 = 26;
+const SNAPSHOT_VERSION: u32 = 27;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3185,8 +3278,9 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> Power<'_, S, L, I> {
         self.machine.start();
     }
 
-    /// Press the power button (QEMU's `gpio-key` on GPIO line 3), for 100 ms
-    /// of guest time. This is a request to the guest, not an order: a guest
+    /// Press the power button (a `gpio-key` on the GPIO line the layout
+    /// gives it, [`DeviceLayout::power_button_line`]), for 100 ms of guest
+    /// time. This is a request to the guest, not an order: a guest
     /// that handles `KEY_POWER` shuts itself down, at which point a run
     /// reports [`StopReason::PoweredOff`]; one that does not keeps running,
     /// as it would on the real board.

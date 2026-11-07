@@ -325,7 +325,7 @@ fn a_host_tree_gets_the_boards_memory_and_psci_nodes() {
             wiring: crate::interrupt_map::InterruptMap::DEFAULT
                 .wire(crate::SpiCount::DEFAULT)
                 .expect("the default fits"),
-            windows: crate::DeviceLayout::DEFAULT.windows(),
+            devices: crate::DeviceLayout::DEFAULT,
         };
         let mut from_host = std::boxed::Box::new(DeviceTree::EMPTY);
         describe(
@@ -386,7 +386,7 @@ fn the_device_tree_names_the_board_by_its_identity() {
         wiring: crate::interrupt_map::InterruptMap::DEFAULT
             .wire(crate::SpiCount::DEFAULT)
             .expect("the default fits"),
-        windows: crate::DeviceLayout::DEFAULT.windows(),
+        devices: crate::DeviceLayout::DEFAULT,
     };
     let host = BoardIdentity::new(IdentityNames {
         model: "Acme Board",
@@ -466,7 +466,7 @@ fn check_qemu_tree(
     tree: &[u8],
     wiring: crate::interrupt_map::Wiring,
 ) -> Result<(), super::BuildError> {
-    super::check_host_tree(tree, wiring, crate::DeviceLayout::QemuVirt.windows())
+    super::check_host_tree(tree, wiring, crate::DeviceLayout::QemuVirt)
 }
 
 /// QEMU's tree edited by `edits`.
@@ -541,6 +541,62 @@ fn cell_counts_no_reg_holds_name_no_region() {
         size: 1,
     };
     assert_eq!(super::reg_address(&[0; 16], cells, 1), None);
+}
+
+/// A `gpio-keys` key on the board's GPIO names the line the power button
+/// drives on the layout: QEMU's tree, whose key is on line 3, passes on
+/// QEMU's layout and is refused with its key moved to line 0, the board's
+/// own layout's line; a disabled key, a key on another controller, and a
+/// `gpio-keys` node that is disabled are the tree's own; a phandle no node
+/// has is a malformed tree.
+#[test]
+fn a_host_trees_power_key_names_the_line_the_button_drives() {
+    use super::{BuildError, HostTreePowerButton};
+    use crate::boot::fdt::{DeviceTreeError, Edit, NodePath, Value};
+    let key = NodePath::of("gpio-keys/poweroff");
+    let gpios = |phandle: u32, line: u32| {
+        [phandle, line, 0]
+            .iter()
+            .flat_map(|c| c.to_be_bytes())
+            .collect::<std::vec::Vec<u8>>()
+    };
+    let qemu = qemu_wiring();
+    assert_eq!(check_qemu_tree(HOST_TREE, qemu), Ok(()));
+    let on_line_0 = gpios(0x8004, 0);
+    let moved = edited_host_tree(&[Edit::set(key, "gpios", Value::Bytes(&on_line_0))]);
+    assert_eq!(
+        check_qemu_tree(&moved, qemu),
+        Err(BuildError::HostTreePowerButton(HostTreePowerButton {
+            named: 0,
+            wired: 3,
+        }))
+    );
+    for left_alone in [
+        edited_host_tree(&[
+            Edit::set(key, "gpios", Value::Bytes(&on_line_0)),
+            Edit::set(key, "status", Value::String("disabled")),
+        ]),
+        edited_host_tree(&[
+            Edit::set(key, "gpios", Value::Bytes(&on_line_0)),
+            Edit::set(NodePath::of("gpio-keys"), "status", Value::String("disabled")),
+        ]),
+        // The key on the RTC, which is no GPIO controller of the board's.
+        edited_host_tree(&[
+            Edit::set(
+                NodePath::of("pl031@9010000"),
+                "phandle",
+                Value::Bytes(&0x8100u32.to_be_bytes()),
+            ),
+            Edit::set(key, "gpios", Value::Bytes(&gpios(0x8100, 0))),
+        ]),
+    ] {
+        assert_eq!(check_qemu_tree(&left_alone, qemu), Ok(()));
+    }
+    let nowhere = edited_host_tree(&[Edit::set(key, "gpios", Value::Bytes(&gpios(0x9999, 3)))]);
+    assert_eq!(
+        check_qemu_tree(&nowhere, qemu),
+        Err(BuildError::DeviceTree(DeviceTreeError::Malformed))
+    );
 }
 
 /// A device's interrupt is the first its `interrupts-extended` names, which

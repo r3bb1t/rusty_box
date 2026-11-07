@@ -29,7 +29,8 @@
 //! interface and timer, its interrupt controller, the clock its PrimeCells
 //! run on, the PrimeCells by address, the power button on one of them, the
 //! flash, the PCIe host, then the virtio transports by address; the cache
-//! hierarchy described down to the L2; the power button named `Power`;
+//! hierarchy described down to the L2; the power button named `Power`, on
+//! the GPIO line the layout gives it (the first, on the board's own);
 //! and every interrupt by the level its line holds.
 //!
 //! `/chosen` carries no `rng-seed` or `kaslr-seed`. Linux credits an
@@ -48,9 +49,8 @@ use crate::bus::PhysAddr;
 use crate::cpu::{PsciConduit, PSCI_COMPATIBLE};
 use crate::devices::gicv2::GicExtensions;
 use crate::devices::gicv2_virt::MAINTENANCE_INTID;
-use crate::devices::pl061::POWER_BUTTON_LINE;
 use crate::devices::virtio_mmio::TRANSPORT_COUNT;
-use crate::layout::{DeviceWindows, GicWindows, Window};
+use crate::layout::{DeviceLayout, DeviceWindows, GicWindows, Window};
 use crate::identity::BoardIdentity;
 use crate::interrupt_map::{Spi, Wiring};
 use crate::CpuModel;
@@ -116,8 +116,8 @@ pub(crate) struct BoardTree<'a> {
     pub(crate) chosen: Chosen<'a>,
     /// The SPIs the devices drive.
     pub(crate) wiring: Wiring,
-    /// Where the devices sit.
-    pub(crate) windows: DeviceWindows,
+    /// Where the devices sit, and the line the power button drives.
+    pub(crate) layout: DeviceLayout,
 }
 
 /// The most property names a tree may use: the strings block the writer
@@ -399,7 +399,7 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
 
     chosen(&mut w, &tree.chosen)?;
 
-    let windows = tree.windows;
+    let windows = tree.layout.windows();
     w.begin("aliases")?;
     w.path_at(SERIAL_ALIAS, SERIAL_NODE, windows.uart.get())?;
     w.end()?;
@@ -473,7 +473,8 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     w.string("label", "Power")?;
     w.cell("linux,code", KEY_POWER)?;
     // The line, active high (the binding's flags 0).
-    w.cells("gpios", &[PHANDLE_GPIO, u32::from(POWER_BUTTON_LINE), 0])?;
+    let line = u32::from(tree.layout.power_button_line());
+    w.cells("gpios", &[PHANDLE_GPIO, line, 0])?;
     w.end()?;
     w.end()?;
 

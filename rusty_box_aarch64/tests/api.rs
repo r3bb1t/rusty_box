@@ -542,33 +542,57 @@ fn a_reset_request_is_the_hosts_when_asked() {
 /// `ldr w1, [x0]; b .`
 const LOAD: [u32; 2] = [0xB940_0001, SPIN];
 
+/// The power button holds its GPIO line high for 100 ms of guest time: on
+/// the board's own layout the first line, 0, alone; on QEMU's, line 3,
+/// where QEMU's `virt` wires it, alone. `GPIODATA` at offset 0x3FC reads
+/// every line.
 #[test]
-fn the_power_button_holds_gpio_line_three_for_100_ms() {
-    let mut ram = vec![0u8; RAM_LEN];
-    let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
-    load(&mut m, RAM_BASE, &LOAD);
-    let gpio_data = GPIO_BASE + 0x3FC;
-    m.power().press_power_button();
-    let hold = m
-        .ticks_to_next_timer_deadline()
-        .expect("the release is scheduled");
-    assert_eq!(
-        hold,
-        VirtConfig::DEFAULT.ips.get() / 10,
-        "100 ms of guest time"
-    );
-    m.reg_write(Reg::X0, gpio_data);
-    let read = m.emu_start(RAM_BASE, Some(RAM_BASE + 4), None);
-    assert_eq!(read.stop, StopReason::ExitReached);
-    assert_eq!(m.reg_read(Reg::X1) & 0x8, 0x8, "line 3 is high while held");
-    assert_eq!(
-        m.step(RunBudget::Ticks(hold)).stop,
-        StopReason::BudgetExhausted
-    );
-    let read = m.emu_start(RAM_BASE, Some(RAM_BASE + 4), None);
-    assert_eq!(read.stop, StopReason::ExitReached);
-    assert_eq!(m.reg_read(Reg::X1) & 0x8, 0, "and low once released");
-    assert_eq!(m.ticks_to_next_timer_deadline(), None);
+fn the_power_button_holds_its_gpio_line_for_100_ms() {
+    use rusty_box_aarch64::DeviceLayout;
+    for (layout, line) in [(DeviceLayout::Board, 0x01), (DeviceLayout::QemuVirt, 0x08)] {
+        let mut ram = vec![0u8; RAM_LEN];
+        let mut m = MachineBuilder::new(VirtConfig {
+            layout,
+            ..VirtConfig::DEFAULT
+        })
+        .ram(ram_size())
+        .bare()
+        .build_in(MemoryLoan {
+            ram: &mut ram,
+            vars: &mut [],
+        })
+        .expect("builds");
+        load(&mut m, RAM_BASE, &LOAD);
+        let gpio_data = layout.windows().gpio.get() + 0x3FC;
+        m.reg_write(Reg::X0, gpio_data);
+        let read = m.emu_start(RAM_BASE, Some(RAM_BASE + 4), None);
+        assert_eq!(read.stop, StopReason::ExitReached);
+        assert_eq!(m.reg_read(Reg::X1), 0, "{layout}: every line low");
+        m.power().press_power_button();
+        let hold = m
+            .ticks_to_next_timer_deadline()
+            .expect("the release is scheduled");
+        assert_eq!(
+            hold,
+            VirtConfig::DEFAULT.ips.get() / 10,
+            "100 ms of guest time"
+        );
+        let read = m.emu_start(RAM_BASE, Some(RAM_BASE + 4), None);
+        assert_eq!(read.stop, StopReason::ExitReached);
+        assert_eq!(
+            m.reg_read(Reg::X1),
+            line,
+            "{layout}: the button's line alone is high while held"
+        );
+        assert_eq!(
+            m.step(RunBudget::Ticks(hold)).stop,
+            StopReason::BudgetExhausted
+        );
+        let read = m.emu_start(RAM_BASE, Some(RAM_BASE + 4), None);
+        assert_eq!(read.stop, StopReason::ExitReached);
+        assert_eq!(m.reg_read(Reg::X1), 0, "{layout}: and low once released");
+        assert_eq!(m.ticks_to_next_timer_deadline(), None);
+    }
 }
 
 /// `str w3, [x0, #0xc]` (RTCCR) to start the RTC, `str w1, [x0, #4]`
@@ -943,8 +967,8 @@ fn the_event_stream_ends_a_wfe() {
     );
 }
 
-/// A 64-byte arm64 `Image` header (text_offset 0, so it loads 2 MiB up),
-/// followed by `b .` as the kernel.
+/// A 64-byte arm64 `Image` header (text_offset 0, so it loads at the base
+/// of RAM), followed by `b .` as the kernel.
 fn fake_kernel(image_size: u64) -> Vec<u8> {
     let mut k = vec![0u8; 68];
     k[16..24].copy_from_slice(&image_size.to_le_bytes());
@@ -953,8 +977,13 @@ fn fake_kernel(image_size: u64) -> Vec<u8> {
     k
 }
 
+/// A directly booted kernel is entered as Linux's arm64 boot protocol asks
+/// (booting.rst §4): at its `text_offset` above the base of RAM, with `x0`
+/// the device tree's address and `x1` to `x3` zero, and every other
+/// general-purpose register zero too. Its device tree takes the 2 MiB block
+/// after its footprint, `image_size`, and its initrd the next block.
 #[test]
-fn a_directly_booted_kernel_is_entered_as_qemu_enters_it() {
+fn a_directly_booted_kernel_is_entered_as_the_boot_protocol_asks() {
     const MIB: u64 = 1 << 20;
     let kernel = fake_kernel(0x18_0000);
     let initrd = vec![0x5Au8; 3000];
@@ -971,16 +1000,21 @@ fn a_directly_booted_kernel_is_entered_as_qemu_enters_it() {
             vars: &mut [],
         })
         .expect("builds");
-    let entry = RAM_BASE + 2 * MIB;
-    // QEMU's arm_setup_direct_kernel_boot: RAM / 2 (3 MiB) is below the
-    // kernel's 1.5 MiB footprint at 2 MiB, so the initrd goes above it, at
-    // 3.5 MiB, and the device tree at the next 2 MiB boundary, 4 MiB.
-    let initrd_start = RAM_BASE + 3 * MIB + MIB / 2;
-    let tree_at = RAM_BASE + 4 * MIB;
-    assert_eq!(m.reg_read(Reg::Pc), entry);
-    assert_eq!(m.reg_read(Reg::X0), tree_at, "x0 holds the device tree");
-    assert_eq!((m.reg_read(Reg::X1), m.reg_read(Reg::X4)), (0, entry));
-    assert_eq!(m.pstate().el, rusty_box_aarch64::El::El1);
+    // The kernel's 1.5 MiB footprint from the base of RAM, the device
+    // tree at the 2 MiB boundary after it, the initrd at the next.
+    let entry = RAM_BASE;
+    let tree_at = RAM_BASE + 2 * MIB;
+    let initrd_start = RAM_BASE + 4 * MIB;
+    let entered = |m: &VirtMachine<LentStorage<'_>, NoEl2, rusty_box_aarch64::NoInstrumentation>| {
+        assert_eq!(m.reg_read(Reg::Pc), entry);
+        assert_eq!(m.reg_read(Reg::X0), tree_at, "x0 holds the device tree");
+        for n in 1..=30 {
+            let x = Reg::x(n).expect("a general-purpose register");
+            assert_eq!(m.reg_read(x), 0, "x{n}");
+        }
+        assert_eq!(m.pstate().el, rusty_box_aarch64::El::El1);
+    };
+    entered(&m);
 
     let tree = m.device_tree().to_vec();
     let mut placed = vec![0u8; tree.len()];
@@ -1011,20 +1045,22 @@ fn a_directly_booted_kernel_is_entered_as_qemu_enters_it() {
     m.mem_read(initrd_start, &mut first).expect("RAM");
     assert_eq!(first, [0x5A; 4]);
 
-    // The kernel scribbles over itself; a reset loads it afresh.
+    // The kernel scribbles over itself and its registers; a reset loads it
+    // afresh and enters it as before.
     m.mem_write(entry, &[0; 4]).expect("RAM");
     m.mem_write(tree_at, &[0; 16]).expect("RAM");
     let ran = m.step(RunBudget::Instructions(3));
     assert_eq!(ran.progress, Progress::Instructions(3));
+    m.reg_write(Reg::X4, 0x1234);
     m.power().reset();
     m.mem_read(entry, &mut first).expect("RAM");
     assert_eq!(u32::from_le_bytes(first), SPIN);
     m.mem_read(tree_at, &mut placed).expect("RAM");
     assert_eq!(placed, tree, "and the device tree with it");
-    assert_eq!(m.reg_read(Reg::Pc), entry);
+    entered(&m);
 
-    // In 4 MiB the 2 MiB boundary after the initrd is the end of RAM, and
-    // QEMU refuses the same machine ("Not enough space for DTB").
+    // In 4 MiB the initrd's block, after the tree's, is the end of RAM;
+    // in 2 MiB the tree's is.
     let mut small = vec![0u8; RAM_LEN];
     let refused = MachineBuilder::new(VirtConfig::DEFAULT)
         .ram(ram_size())
@@ -1032,6 +1068,18 @@ fn a_directly_booted_kernel_is_entered_as_qemu_enters_it() {
         .initrd(&initrd)
         .build_in(MemoryLoan {
             ram: &mut small,
+            vars: &mut [],
+        });
+    assert_eq!(
+        refused.err(),
+        Some(BuildError::Placement(PlacementError::InitrdDoesNotFit))
+    );
+    let mut smaller = vec![0u8; 2 * MIB as usize];
+    let refused = MachineBuilder::new(VirtConfig::DEFAULT)
+        .ram(RamSize::bytes(2 * MIB).expect("a valid size"))
+        .linux(image)
+        .build_in(MemoryLoan {
+            ram: &mut smaller,
             vars: &mut [],
         });
     assert_eq!(
@@ -1718,7 +1766,8 @@ fn the_board_wires_the_interrupt_map_its_configuration_names() {
     }
     let default_gpio = InterruptMap::DEFAULT.gpio.intid();
     m.reg_write(Reg::X1, GPIO_BASE);
-    m.reg_write(Reg::X3, 1 << 3);
+    // The power button's line on the board's own layout, the first.
+    m.reg_write(Reg::X3, 1 << 0);
     m.reg_write(Reg::X4, ispendr(332));
     m.reg_write(Reg::X7, ispendr(default_gpio));
     m.reg_write(Reg::X9, GIC_V2M_BASE + 8);
