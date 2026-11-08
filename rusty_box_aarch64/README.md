@@ -30,6 +30,14 @@ A device tree given with `--dtb` must name the SPIs the board wires; one
 QEMU wrote needs QEMU's, `--interrupts
 uart=1,rtc=2,gpio=7,virtio=16,pcie-intx=3,msi-first=48,msi-count=64`.
 
+`--interactive` hands the console to the terminal once the script is done:
+stdin goes to the UART byte for byte (put the terminal in raw mode), and
+Ctrl-] ends the run. `scripts/nested_kvm.sh` puts it all together for a
+nested KVM guest: it downloads Alpine's aarch64 ISO and QEMU's packages
+(checking the ISO's SHA-512 and the packages' signed index), builds the
+disk and the runner, and boots the Cortex-A57 with virtualization to the
+nested guest's own `login:`, then leaves the terminal to you.
+
 ## Driving it from Rust
 
 ```rust,no_run

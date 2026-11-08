@@ -4,8 +4,9 @@
 //! report.
 
 use std::collections::VecDeque;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::ExitCode;
+use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 
 use rusty_box_aarch64::cpu::DebugStops;
@@ -82,6 +83,21 @@ pub enum Virtualization {
     On,
 }
 
+/// What types on the guest's console besides the script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleInput {
+    /// The script alone; the run ends when the script completes.
+    Script,
+    /// The script, then the host terminal (`--interactive`): what is typed
+    /// there goes to the UART's terminal byte for byte, and the run goes on
+    /// until the machine stops or [`QUIT_BYTE`] is typed.
+    Terminal,
+}
+
+/// The byte that ends an interactive run: Ctrl-], which the guest's own
+/// escapes (a shell's Ctrl-C, a nested QEMU's Ctrl-A) leave free.
+pub const QUIT_BYTE: u8 = 0x1D;
+
 /// Whether [`RunArgs::parse_flag`] consumed a flag.
 pub enum Parsed {
     Consumed,
@@ -119,6 +135,9 @@ pub struct RunArgs {
     /// Where the devices sit, the board's own layout unless `--layout`
     /// names another (a tree given with `--dtb` must name the same).
     pub layout: DeviceLayout,
+    /// Whether the host terminal types on the console once the script is
+    /// done.
+    pub console_input: ConsoleInput,
 }
 
 /// How a run ended.
@@ -134,7 +153,8 @@ pub const RUN_USAGE: &str = "[--cpu cortex-a57|armv9.2] [--ips N] [--max-ticks N
      \x20      [--display WIDTHxHEIGHT] [--virtio-keyboard] [--virtio-tablet] [--disk <raw image>]\n\
      \x20      [--screenshot <file.ppm>] [--virtualization]\n\
      \x20      [--interrupts uart=N,rtc=N,gpio=N,virtio=N,pcie-intx=N,msi-first=N,msi-count=N]\n\
-     \x20      [--transport-order first-free|last-free] [--layout board|qemu-virt]";
+     \x20      [--transport-order first-free|last-free] [--layout board|qemu-virt]\n\
+     \x20      [--interactive]   (after the script, stdin types on the console; Ctrl-] quits)";
 
 /// The display's frames, kept as the host would show them.
 #[derive(Default)]
@@ -298,6 +318,7 @@ impl RunArgs {
             interrupt_keys: None,
             transport_order: TransportOrder::DEFAULT,
             layout: DeviceLayout::DEFAULT,
+            console_input: ConsoleInput::Script,
         }
     }
 
@@ -349,6 +370,7 @@ impl RunArgs {
             "--disk" => self.disk = Some(value(flag)?),
             "--screenshot" => self.screenshot = Some(value(flag)?),
             "--virtualization" => self.virtualization = Virtualization::On,
+            "--interactive" => self.console_input = ConsoleInput::Terminal,
             "--interrupts" => {
                 let keys = value(flag)?;
                 // Read now, so a malformed key stops the command line here.
@@ -538,6 +560,57 @@ impl ConsoleWindow {
     }
 }
 
+/// The host terminal's bytes as they are read, from a thread of their own
+/// so that the machine never waits on them; the channel closes when stdin
+/// ends or cannot be read.
+fn terminal_bytes() -> Result<Receiver<Vec<u8>>, std::io::Error> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("terminal".to_owned())
+        .spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            let mut buf = [0u8; 256];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => return,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        eprintln!("stdin: {e}");
+                        return;
+                    }
+                }
+            }
+        })?;
+    Ok(rx)
+}
+
+/// What the host terminal has typed since the last look.
+enum TerminalTyped {
+    /// Bytes for the console, possibly none.
+    Keys,
+    /// [`QUIT_BYTE`]: what came before it is in `typed`, the rest dropped.
+    Quit,
+}
+
+/// Move what the terminal has sent into `typed`, up to a [`QUIT_BYTE`].
+fn take_terminal(terminal: &Receiver<Vec<u8>>, typed: &mut VecDeque<u8>) -> TerminalTyped {
+    while let Ok(chunk) = terminal.try_recv() {
+        match chunk.iter().position(|&b| b == QUIT_BYTE) {
+            Some(at) => {
+                typed.extend(&chunk[..at]);
+                return TerminalTyped::Quit;
+            }
+            None => typed.extend(chunk),
+        }
+    }
+    TerminalTyped::Keys
+}
+
 fn run_with_screen<S: GuestStorage, L: Levels>(
     machine: &mut VirtMachine<S, L>,
     args: &RunArgs,
@@ -548,6 +621,22 @@ fn run_with_screen<S: GuestStorage, L: Levels>(
     let mut current = script.next();
     let mut window = ConsoleWindow::default();
     let mut pending: VecDeque<(Keys, String)> = VecDeque::new();
+    let terminal = match args.console_input {
+        ConsoleInput::Script => None,
+        ConsoleInput::Terminal => match terminal_bytes() {
+            Ok(rx) => Some(rx),
+            Err(e) => {
+                eprintln!("cannot read the terminal: {e}");
+                return Outcome {
+                    reason: StopReason::StopRequested,
+                    script_completed: false,
+                };
+            }
+        },
+    };
+    // Bytes from the terminal not yet taken by the UART's terminal; they
+    // wait while the script still has keys to type.
+    let mut typed: VecDeque<u8> = VecDeque::new();
     loop {
         // Run every Type step that is now current; stop at the next Until.
         while let Some(Action::Type(keys, text)) = current {
@@ -555,6 +644,23 @@ fn run_with_screen<S: GuestStorage, L: Levels>(
             current = script.next();
         }
         type_pending(machine, &mut pending);
+        if let Some(rx) = &terminal {
+            match take_terminal(rx, &mut typed) {
+                TerminalTyped::Keys => {}
+                TerminalTyped::Quit => {
+                    return Outcome {
+                        reason: StopReason::StopRequested,
+                        script_completed: current.is_none()
+                            && pending.is_empty()
+                            && !args.script.is_empty(),
+                    };
+                }
+            }
+            if pending.is_empty() && !typed.is_empty() {
+                let taken = machine.terminal_keyboard().bytes(typed.make_contiguous());
+                typed.drain(..taken);
+            }
+        }
         let remaining = args.max_ticks.saturating_sub(machine.ticks());
         if remaining == 0 {
             return Outcome {
@@ -591,7 +697,7 @@ fn run_with_screen<S: GuestStorage, L: Levels>(
         if let Some(Action::Until(text)) = current {
             if window.take_through(text) {
                 current = script.next();
-                if current.is_none() {
+                if current.is_none() && args.console_input == ConsoleInput::Script {
                     return Outcome {
                         reason: outcome.stop,
                         script_completed: true,
@@ -709,7 +815,8 @@ pub fn report<S: GuestStorage, L: Levels>(
 }
 
 /// Success when the script completed, or with no script when the machine
-/// ran out its budget, powered off or halted.
+/// ran out its budget, powered off or halted, or an interactive run was
+/// quit from the terminal.
 pub fn exit_code(args: &RunArgs, outcome: &Outcome) -> ExitCode {
     if !args.script.is_empty() {
         return if outcome.script_completed {
@@ -722,8 +829,11 @@ pub fn exit_code(args: &RunArgs, outcome: &Outcome) -> ExitCode {
         StopReason::PoweredOff | StopReason::BudgetExhausted | StopReason::Halted => {
             ExitCode::SUCCESS
         }
-        StopReason::StopRequested
-        | StopReason::ExitReached
+        StopReason::StopRequested => match args.console_input {
+            ConsoleInput::Terminal => ExitCode::SUCCESS,
+            ConsoleInput::Script => ExitCode::from(1),
+        },
+        StopReason::ExitReached
         | StopReason::ResetRequested
         | StopReason::ProcessorOff
         | StopReason::Undefined(_)
