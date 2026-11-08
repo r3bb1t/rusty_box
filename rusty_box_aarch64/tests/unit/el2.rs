@@ -1844,20 +1844,23 @@ fn dc_and_tge_turn_off_el1_and_0_stage_1() {
     assert_eq!(m.cpu.x[2], PHYSICAL >> 8, "the Normal read");
 }
 
-/// `ID_AA64MMFR0_EL1` offers each model's granules at both stages on a
-/// processor with EL2: `TGran4_2` reads 2 (supported), and `TGran16_2` and
-/// `TGran64_2` 2 where the model has the granule at stage 2, else 1 (not),
-/// which is FEAT_GTG (`Features.json` makes it hold exactly when all three
-/// are non-zero); on the Armv9.2 model, which has FEAT_LPA2, `TGran4_2`
-/// and `TGran16_2` read 3, the granules' 52-bit addresses. Without EL2 all
-/// three read 0. Either way stage 1 offers the 4 KiB granule (`TGran4` 0)
-/// on the Cortex-A57 and the 16 KiB and 64 KiB ones on the Armv9.2 model
-/// alone (`TGran64` 0, where the Cortex-A57 reads 0xF), where `TGran4`
-/// reads 1 and `TGran16` 2 for FEAT_LPA2 (the Cortex-A57's `TGran16` reads
-/// 0); `ID_AA64MMFR2_EL1.ST` reads 1 where FEAT_TTST is. Each reports its
-/// address sizes: `PARange` 52 bits (6) on the Armv9.2 model, which has
-/// FEAT_LPA, and 44 (4) on the Cortex-A57; `ID_AA64MMFR2_EL1.VARange` 1
-/// (FEAT_LVA) on the Armv9.2 model, 0 on the Cortex-A57.
+/// `ID_AA64MMFR0_EL1` offers each model's granules at both stages. With
+/// EL2 the Armv9.2 model says its stage 2 granules itself, FEAT_GTG
+/// (`Features.json` makes it hold exactly when all three fields are
+/// non-zero): `TGran4_2` and `TGran16_2` 3 (supported, with FEAT_LPA2's
+/// 52-bit addresses) and `TGran64_2` 2 (supported); the Cortex-A57 reads 0
+/// in all three, stage 2 having the granules stage 1 has, as its TRM's
+/// RES0 bits 63:32 read (DDI 0488H, 4.3.21). Without EL2 all three read 0.
+/// Either way stage 1 offers the 4 KiB and 64 KiB granules on the
+/// Cortex-A57 (`TGran4` 0, `TGran64` 0, `TGran16` 0, not supported), the
+/// TRM's, and all three on the Armv9.2 model, where `TGran4` reads 1 and
+/// `TGran16` 2 for FEAT_LPA2; `ID_AA64MMFR2_EL1.ST` reads 1 where
+/// FEAT_TTST is. Each reports its address sizes: `PARange` 52 bits (6) on
+/// the Armv9.2 model, which has FEAT_LPA, and 44 (4) on the Cortex-A57;
+/// `ID_AA64MMFR2_EL1.VARange` 1 (FEAT_LVA) on the Armv9.2 model, 0 on the
+/// Cortex-A57. The Cortex-A57's whole register reads 0x24 with EL2 and
+/// without: its TRM's 0x1124 but `BigEnd` and `SNSMem`, the model having
+/// neither big-endian data accesses nor Secure state.
 #[test]
 fn the_id_registers_offer_each_models_granules_at_both_stages() {
     const MRS_MMFR0: u32 = 0xD538_0700; // mrs x0, id_aa64mmfr0_el1
@@ -1876,13 +1879,16 @@ fn the_id_registers_offer_each_models_granules_at_both_stages() {
     let a57 = Implementation::CORTEX_A57;
     let v9 = Implementation::ARMV9P2;
     for (model, [mmfr0, mmfr2], want, st) in [
-        ("A57 with", read::<WithEl2>(a57), [2, 1, 1, 0, 0, 0xF], 0),
-        ("A57 without", read::<NoEl2>(a57), [0, 0, 0, 0, 0, 0xF], 0),
+        ("A57 with", read::<WithEl2>(a57), [0, 0, 0, 0, 0, 0], 0),
+        ("A57 without", read::<NoEl2>(a57), [0, 0, 0, 0, 0, 0], 0),
         ("v9.2 with", read::<WithEl2>(v9), [3, 3, 2, 1, 2, 0], 1),
         ("v9.2 without", read::<NoEl2>(v9), [0, 0, 0, 1, 2, 0], 1),
     ] {
         assert_eq!(granules(mmfr0), want, "{model} EL2");
         assert_eq!((mmfr2 >> 28) & 0xF, st, "{model} EL2: ST");
+    }
+    for [mmfr0, _] in [read::<WithEl2>(a57), read::<NoEl2>(a57)] {
+        assert_eq!(mmfr0, 0x24, "the Cortex-A57's ID_AA64MMFR0_EL1");
     }
     // `PARange` encodes the size `CpuModel::physical_address_bits` gives:
     // the field's encodings as the Arm ARM lists them, written out here

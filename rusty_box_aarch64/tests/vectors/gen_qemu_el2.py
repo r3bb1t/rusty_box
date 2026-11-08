@@ -193,11 +193,10 @@ EL1_REGISTERS = {
     "ID_AA64PFR1_EL1": R((3, 0, 0, 4, 1), None, True),
     "ID_AA64ISAR0_EL1": R((3, 0, 0, 6, 0), None, True),
     "ID_AA64ISAR1_EL1": R((3, 0, 0, 6, 1), None, True),
-    # This core's Cortex-A57 offers the 4 KiB granule alone, and neither
-    # mixed endianness nor Secure state, as its ID_AA64MMFR0_EL1 says, and
-    # with EL2 it states its stage 2 granules (FEAT_GTG); QEMU's Cortex-A57
-    # has the 64 KiB granule, mixed endianness and Secure state, and reads
-    # 0, "as stage 1", in the stage 2 granule fields.
+    # This core's Cortex-A57 offers the granules its TRM gives (4 KiB and
+    # 64 KiB, and the same at stage 2), as QEMU's does, but neither mixed
+    # endianness nor Secure state, as its ID_AA64MMFR0_EL1 says (0x24);
+    # QEMU's Cortex-A57 has mixed endianness and Secure state (0x1124).
     "ID_AA64MMFR0_EL1": R((3, 0, 0, 7, 0), None, False),
     "ID_AA64MMFR1_EL1": R((3, 0, 0, 7, 1), None, True),
     "ID_AA64MMFR2_EL1": R((3, 0, 0, 7, 2), None, True),

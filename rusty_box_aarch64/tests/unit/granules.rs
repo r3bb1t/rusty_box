@@ -46,8 +46,9 @@ const XPACI: u32 = 0xDAC1_43E0; // xpaci x0
 const MSR_HPFAR: u32 = 0xD51C_6080; // msr hpfar_el2, x0
 const MRS_HPFAR: u32 = 0xD53C_6080; // mrs x0, hpfar_el2
 
-/// The processor models: the Cortex-A57, with the 4 KiB granule alone and
-/// no FEAT_TTST, and the Armv9.2 one, with every granule and FEAT_TTST.
+/// The processor models: the Cortex-A57, with the 4 KiB and 64 KiB
+/// granules at both stages and no FEAT_TTST, and the Armv9.2 one, with
+/// every granule and FEAT_TTST.
 const A57: Implementation = Implementation::CORTEX_A57;
 const V9: Implementation = Implementation::ARMV9P2;
 
@@ -612,10 +613,11 @@ fn the_upper_range_walks_with_the_granule_tg1_names() {
 }
 
 /// A `TG0` or `TG1` naming a granule the processor lacks, or `TG0`'s
-/// reserved 0b11, names the 4 KiB granule (`AArch64_S1DecodeTG0` and
-/// `TG1` with the IMPLEMENTATION DEFINED "TG0 encoded granule size" and
-/// "TG1 encoded granule size"): the walk reads 4 KiB tables. The Cortex-A57
-/// has the 4 KiB granule alone.
+/// reserved 0b11 or `TG1`'s 0b00, names the 4 KiB granule
+/// (`AArch64_S1DecodeTG0` and `TG1` with the IMPLEMENTATION DEFINED "TG0
+/// encoded granule size" and "TG1 encoded granule size"): the walk reads
+/// 4 KiB tables, in the EL1&0 regime and the EL2 regime alike. The
+/// Cortex-A57 lacks the 16 KiB granule (`ID_AA64MMFR0_EL1.TGran16` 0).
 #[test]
 fn a_granule_the_processor_lacks_is_the_4k_one() {
     let no_16k = Implementation::every_feature_but(&[Feature::TGran16K, Feature::S2TGran16K]);
@@ -625,7 +627,6 @@ fn a_granule_the_processor_lacks_is_the_4k_one() {
         ("no 16K", no_16k, TG0_16K, 12, 1),
         ("no 64K", no_64k, TG0_64K, 12, 1),
         ("A57", A57, TG0_16K, 12, 1),
-        ("A57", A57, TG0_64K, 12, 1),
         ("A57", A57, TG0_RESERVED, 12, 1),
         ("no 64K", no_64k, TG0_16K, 14, 1),
         ("no 16K", no_16k, TG0_64K, 16, 2),
@@ -641,11 +642,68 @@ fn a_granule_the_processor_lacks_is_the_4k_one() {
         ("no 16K", no_16k, TG1_16K, 12, 1),
         ("no 64K", no_64k, TG1_64K, 12, 1),
         ("A57", A57, TG1_16K, 12, 1),
-        ("A57", A57, TG1_64K, 12, 1),
+        ("A57", A57, TG1_RESERVED, 12, 1),
     ];
     for (name, imp, tg1, page_bits, start) in upper_cases {
         let (mut m, tables) = upper_range(imp, tg1, page_bits, start);
         let case = std::format!("{name}: TG1 {tg1:#b}");
+        walks_to_its_page(&mut m, tables, UPPER_VA, &case);
+    }
+    for tg0 in [TG0_16K, TG0_RESERVED] {
+        let case = std::format!("A57: TCR_EL2.TG0 {tg0:#b}");
+        el2_regime_reads_its_page(el2_range(A57, tg0, 12, 25, 1), &case);
+    }
+}
+
+/// A load at EL2 through `range`'s EL2-regime tables of `va` mapped by a
+/// page to the page at [`DATA`] reads there, and its neighbouring page,
+/// unmapped, takes a Translation fault at level 3.
+fn el2_regime_reads_its_page(range: (Machine, Tables), case: &str) {
+    let (mut m, tables) = range;
+    let va = PATTERN & ((1 << tables.ia_bits) - 1);
+    let offset = va & (tables.page() - 1);
+    m.map(tables, va, 3, s1_leaf(DATA, TABLE));
+    m.ram.put64(DATA + offset, marker(va));
+    assert_eq!(m.load(va), Ok(marker(va)), "{case}: load");
+    let neighbour = va ^ tables.page();
+    let fault = Err(Taken {
+        to: El::El2,
+        ec: EC_DATA_ABORT_SAME_EL,
+        fsc: translation(3),
+    });
+    assert_eq!(m.load(neighbour), fault, "{case}: the next page");
+}
+
+/// The Cortex-A57 walks the 64 KiB granule its `ID_AA64MMFR0_EL1.TGran64`
+/// offers (0, supported; DDI 0488H, 4.3.21), as it walks the 4 KiB one:
+/// with `TCR_EL1.TG0` and `TG1` at stage 1 of the EL1&0 regime, a load and
+/// `AT S1E1R` reaching the page each input address size's walk leads to,
+/// from level 1 for 48 bits (the largest without FEAT_LVA), level 2 for 39
+/// and level 3 for 25 (the smallest without FEAT_TTST); and with
+/// `TCR_EL2.TG0` in the EL2 regime. Stage 2's 64 KiB walks are
+/// [`stage_2_starts_where_sl0_and_its_granule_say`]'s.
+#[test]
+fn the_cortex_a57_walks_the_64k_granule_at_stage_1() {
+    let cases = [
+        // (TG0, page bits, T0SZ, start level)
+        (TG0_4K, 12, 16, 0),
+        (TG0_4K, 12, 25, 1),
+        (TG0_64K, 16, 16, 1),
+        (TG0_64K, 16, 25, 2),
+        (TG0_64K, 16, 39, 3),
+    ];
+    for (tg0, page_bits, t0sz, start) in cases {
+        let case = std::format!("A57: TG0 {tg0:#b}, T0SZ {t0sz}");
+        let (mut m, tables) = lower_range(A57, tg0, page_bits, t0sz, start);
+        let va = PATTERN & ((1 << tables.ia_bits) - 1);
+        assert_ne!(va / tables.page(), CODE / tables.page(), "{case}");
+        walks_to_its_page(&mut m, tables, va, &case);
+        let case = std::format!("A57: TCR_EL2.TG0 {tg0:#b}, T0SZ {t0sz}");
+        el2_regime_reads_its_page(el2_range(A57, tg0, page_bits, t0sz, start), &case);
+    }
+    for (tg1, page_bits, start) in [(TG1_4K, 12, 1), (TG1_64K, 16, 2)] {
+        let (mut m, tables) = upper_range(A57, tg1, page_bits, start);
+        let case = std::format!("A57: TG1 {tg1:#b}");
         walks_to_its_page(&mut m, tables, UPPER_VA, &case);
     }
 }
@@ -902,7 +960,10 @@ fn a_pointer_authentication_code_ends_where_its_granules_txsz_range_does() {
 /// is 52 bits (FEAT_LPA) it is 12 with the 64 KiB granule and 16 with the
 /// others. Where the walk translates, a load reads the page it leads to,
 /// up to a 52-bit IPA, and the next page faults at level 3 with
-/// `HPFAR_EL2` holding its IPA. (A `T0SZ` taken as its limit is
+/// `HPFAR_EL2` holding its IPA. The Cortex-A57, without FEAT_GTG, has at
+/// stage 2 the granules its stage 1 has (`AArch64_HaveS2TG`): the 64 KiB
+/// one walks, and the 16 KiB one and the reserved encoding name the 4 KiB
+/// one. (A `T0SZ` taken as its limit is
 /// [`t0sz_beyond_its_range_walks_as_the_limit_at_stage_2`]'s.)
 #[test]
 fn stage_2_starts_where_sl0_and_its_granule_say() {
@@ -953,7 +1014,11 @@ fn stage_2_starts_where_sl0_and_its_granule_say() {
         ("A57", A57, TG0_4K, 12, 40, 0b01, None),
         ("A57", A57, TG0_16K, 12, 24, 0b01, Some(1)),
         ("A57", A57, TG0_RESERVED, 12, 24, 0b01, Some(1)),
-        ("A57", A57, TG0_64K, 12, 24, 0b01, Some(1)),
+        ("A57", A57, TG0_64K, 16, 24, 0b01, Some(2)),
+        ("A57", A57, TG0_64K, 16, 24, 0b10, None),
+        ("A57", A57, TG0_64K, 16, 20, 0b10, Some(1)),
+        ("A57", A57, TG0_64K, 16, 39, 0b00, Some(3)),
+        ("A57", A57, TG0_64K, 16, 30, 0b00, None),
     ];
     for (name, imp, tg0, page_bits, t0sz, sl0, start) in cases {
         let case = std::format!("{name}: TG0 {tg0:#b}, T0SZ {t0sz}, SL0 {sl0:#b}");

@@ -320,9 +320,12 @@ impl Granule {
     }
 
     /// Whether a processor implementing `features` has the granule at
-    /// `stage` (Arm `AArch64_HaveS1TG`; `AArch64_HaveS2TG` with FEAT_GTG,
-    /// which every processor here with EL2 has). Every processor here has
-    /// the 4 KiB one at both.
+    /// `stage` (Arm `AArch64_HaveS1TG`, `AArch64_HaveS2TG`). A processor
+    /// with EL2 and without FEAT_GTG, the Cortex-A57, holds FEAT_S2TGran16K
+    /// and FEAT_S2TGran64K exactly where it holds the stage 1 granule, which
+    /// is what `AArch64_HaveS2TG` reads without FEAT_GTG
+    /// (`isa::tests` checks the set against `ID_AA64MMFR0_EL1`). Every
+    /// processor here has the 4 KiB one at both.
     #[inline(always)]
     const fn at(self, stage: GranuleStage, features: Features) -> bool {
         let (k16, k64) = match stage {
@@ -340,9 +343,15 @@ impl Granule {
     /// `features` (`AArch64_S1DecodeTG0`, `AArch64_S1DecodeTG1`,
     /// `AArch64_S2DecodeTG0`): a reserved encoding, or one naming a granule
     /// the processor lacks there, names the IMPLEMENTATION DEFINED "TG0
-    /// encoded granule size" or "TG1 encoded granule size", here the 4 KiB
-    /// granule at either stage, the smallest, as QEMU's
-    /// (`sanitize_gran_size`).
+    /// encoded granule size" or "TG1 encoded granule size", one granule
+    /// whatever the encoding, here the 4 KiB granule at either stage: the
+    /// one granule every processor model of the board implements at both
+    /// stages, so the encoded granule is always one the processor walks,
+    /// whichever model it is. The Cortex-A57's TRM
+    /// does not decide it: it gives `TG0` as bit 14 alone, bit 15 RES0, and
+    /// `TG1` as bit 30 alone, bit 31 RES1 (DDI 0488H, 4.3.41 to 4.3.43,
+    /// `TCR_EL1`, `TCR_EL2` and `VTCR_EL2`), so every encoding naming the
+    /// 16 KiB granule, and each reserved one, sets a reserved bit.
     #[inline(always)]
     const fn decoded(named: Option<Self>, stage: GranuleStage, features: Features) -> Self {
         match named {

@@ -252,6 +252,15 @@ pub(crate) enum Feature {
     /// `TCR`, and a table base register's bits 5:2 address bits 51:48. It
     /// needs FEAT_LVA (`FEAT_LPA2 ==> FEAT_LVA`). No encoding of its own.
     Lpa2,
+    /// FEAT_GTG: the stage 2 granules said in `ID_AA64MMFR0_EL1`'s own
+    /// `TGran4_2`, `TGran16_2` and `TGran64_2` fields (`FEAT_GTG <=>
+    /// UInt(TGran4_2) >= 1`, and the same of the others), which
+    /// `AArch64_HaveS2TG` then reads; without it those fields read 0 and
+    /// stage 2 has the granules stage 1 has. The fields read 0 on a
+    /// processor without EL2 (Arm ARM D24.2, `ID_AA64MMFR0_EL1`: "If EL2 is
+    /// not implemented, this field is 0b0000"), so it comes with EL2 alone.
+    /// No encoding of its own.
+    Gtg,
 }
 
 // `Feature::ALL` is in declaration order, and each feature has a bit of a
@@ -276,7 +285,7 @@ const _: () = {
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 75] = [
+    pub(crate) const ALL: [Feature; 76] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -352,6 +361,7 @@ impl Feature {
         Feature::Lpa,
         Feature::Lva,
         Feature::Lpa2,
+        Feature::Gtg,
     ];
 }
 
@@ -437,6 +447,7 @@ impl Feature {
             Self::Lpa => Some("FEAT_LPA"),
             Self::Lva => Some("FEAT_LVA"),
             Self::Lpa2 => Some("FEAT_LPA2"),
+            Self::Gtg => Some("FEAT_GTG"),
         }
     }
 
@@ -490,6 +501,7 @@ impl Feature {
                 | Self::Lpa
                 | Self::Lva
                 | Self::Lpa2
+                | Self::Gtg
         )
     }
 
@@ -518,15 +530,17 @@ pub(crate) struct Features(u128);
 
 impl Features {
     /// What the Cortex-A57 this crate's processor is shaped like implements,
-    /// as QEMU's `cortex-a57` has it: ARMv8.0 with FP, Advanced SIMD, the
-    /// whole Cryptographic Extension (AES with the 64-bit PMULL, SHA-1 and
-    /// SHA-256), CRC32 and the OS Double Lock (`ID_AA64DFR0_EL1.DoubleLock`
-    /// 0, as the Cortex-A57 and QEMU report it); and of the translation
-    /// granules, the 4 KiB one every processor has alone. Which others the
-    /// core has is the Cortex-A57 TRM's (DDI 0488) to say, which is not on
-    /// disk, and Arm's documents decide over QEMU, whose `cortex-a57`
-    /// reports the 64 KiB one too (`ID_AA64MMFR0_EL1` 0x1124). The identity
-    /// and extensions above are QEMU's report of the core.
+    /// as its TRM (DDI 0488H, 4.3.18 to 4.3.21) reports it: ARMv8.0 with
+    /// FP, Advanced SIMD, CRC32 and the optional Cryptographic Extension,
+    /// all of it (AES with the 64-bit PMULL, SHA-1 and SHA-256:
+    /// `ID_AA64ISAR0_EL1` 0x11120), the OS Double Lock
+    /// (`ID_AA64DFR0_EL1.DoubleLock` 0, its bits 63:32 being RES0), and the
+    /// 4 KiB and 64 KiB translation granules, not the 16 KiB one
+    /// (`ID_AA64MMFR0_EL1` `TGran4` 0, `TGran64` 0 and `TGran16` 0). With
+    /// EL2, stage 2 has the granules stage 1 has, there being no FEAT_GTG
+    /// (`TGran4_2`, `TGran16_2` and `TGran64_2` RES0 in the TRM, 0 being
+    /// "as stage 1"): FEAT_S2TGran64K, which a processor without EL2 drops
+    /// ([`Features::NEED_EL2`]).
     pub(crate) const CORTEX_A57: Self = Self::of(&[
         Feature::Base,
         Feature::Fp,
@@ -537,6 +551,8 @@ impl Features {
         Feature::Sha256,
         Feature::Crc32,
         Feature::DoubleLock,
+        Feature::TGran64K,
+        Feature::S2TGran64K,
     ]);
 
     /// Every feature: a set no processor implements (FEAT_DoubleLock with
@@ -551,18 +567,24 @@ impl Features {
 
     /// The features only a processor with EL2 has, which one of the level
     /// set [`NoEl2`](super::NoEl2) drops with EL2: FEAT_ECV_POFF
-    /// (`(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`), and the stage 2
-    /// granules (`FEAT_S2TGran16K ==> (FEAT_AA64EL2 && FEAT_TGran16K)`).
-    const NEED_EL2: Self =
-        Self(Feature::EcvPoff.bit() | Feature::S2TGran16K.bit() | Feature::S2TGran64K.bit());
+    /// (`(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`), the stage 2
+    /// granules (`FEAT_S2TGran16K ==> (FEAT_AA64EL2 && FEAT_TGran16K)`), and
+    /// FEAT_GTG, whose `ID_AA64MMFR0_EL1` fields read 0 without EL2.
+    const NEED_EL2: Self = Self(
+        Feature::EcvPoff.bit()
+            | Feature::S2TGran16K.bit()
+            | Feature::S2TGran64K.bit()
+            | Feature::Gtg.bit(),
+    );
 
     /// What the Armv9.2 processor model implements: every feature Arm's
     /// `Features.json` requires of an Armv9.2 processor that has FP and
     /// Advanced SIMD and AArch64 at EL0 and EL1 alone (`v9Ap2 ==> (v9Ap1 &&
     /// v8Ap7)` down the versions, with what a version requires of a
     /// processor with FP or Advanced SIMD, such as `(v8Ap6 && FEAT_FP) ==>
-    /// FEAT_BF16`, and what those features imply); FEAT_SME and FEAT_SME2;
-    /// and these options: the Cryptographic Extension's AES, PMULL, SHA-1
+    /// FEAT_BF16`, and what those features imply); FEAT_GTG, which Armv8.5
+    /// requires with EL2 and a processor without EL2 drops; FEAT_SME and
+    /// FEAT_SME2; and these options: the Cryptographic Extension's AES, PMULL, SHA-1
     /// and SHA-256, QARMA5 as the pointer authentication algorithm,
     /// FEAT_FPAC and FEAT_FPACCOMBINE, FEAT_SSBS and FEAT_SSBS2,
     /// FEAT_RPRES, every translation granule at both stages, FEAT_TTST, and
@@ -619,6 +641,8 @@ impl Features {
         Feature::Csv2,
         Feature::Csv3,
         Feature::Dpb2,
+        // With EL2 (`(v8Ap5 && FEAT_AA64EL2) ==> FEAT_GTG`).
+        Feature::Gtg,
         // Required from Armv8.6
         Feature::I8mm,
         Feature::Bf16,

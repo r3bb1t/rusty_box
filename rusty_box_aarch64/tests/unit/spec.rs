@@ -1860,7 +1860,9 @@ fn implied_by(feature: Feature, implications: &[(Feature, Feature)]) -> Vec<Feat
 /// features a processor without EL2 drops are exactly those Arm gives only
 /// to a processor with EL2, alone or with AArch64 at EL0 and EL1, which
 /// every processor here has: FEAT_ECV_POFF by `(FEAT_AA64 &&
-/// FEAT_ECV_POFF) ==> FEAT_AA64EL2`.
+/// FEAT_ECV_POFF) ==> FEAT_AA64EL2`; and FEAT_GTG, which no identifier
+/// ties to EL2 but its fields do: `FEAT_GTG <=> UInt(TGran4_2) >= 1`, a
+/// field that reads 0 without EL2 (Arm ARM D24.2, `ID_AA64MMFR0_EL1`).
 #[test]
 #[cfg_attr(
     not(aarchmrs),
@@ -1900,8 +1902,9 @@ fn every_implementation_has_what_its_features_imply() {
         }
     }
 
-    // The identifiers Arm gives only to a processor with EL2: FEAT_EL2 and
-    // FEAT_AA64EL2, and each that implies one of those, alone or with what
+    // The identifiers Arm gives only to a processor with EL2: FEAT_EL2,
+    // FEAT_AA64EL2, FEAT_GTG (by its fields, as above), and each that
+    // implies one of those, alone or with what
     // every processor here has (`(FEAT_AA64 && FEAT_ECV_POFF) ==>
     // FEAT_AA64EL2`), directly or through other identifiers, until no more
     // are found.
@@ -1914,7 +1917,7 @@ fn every_implementation_has_what_its_features_imply() {
     ];
     let edges = identifier_edges(&root);
     let conjunctive = conjunctive_implications(&root);
-    let mut need_el2: BTreeSet<&str> = BTreeSet::from(["FEAT_EL2", "FEAT_AA64EL2"]);
+    let mut need_el2: BTreeSet<&str> = BTreeSet::from(["FEAT_EL2", "FEAT_AA64EL2", "FEAT_GTG"]);
     loop {
         let found = need_el2.len();
         for (a, implied) in &edges {
@@ -1998,11 +2001,8 @@ fn constraint_value(ast: &Value, holding: &BTreeSet<&str>) -> Option<bool> {
 /// instruction cache (`FEAT_IVIPT`: `CTR_EL0.L1Ip` is 0b11), the
 /// Cryptographic Extension (`FEAT_Crypto`), from Armv8.2 its assembler
 /// aliases (`FEAT_ASMv8p2`, BFC and the 64-bit REV64), and with EL2 that
-/// granule at stage 2 (`FEAT_S2TGran4K`) and FEAT_GTG
-/// (`ID_AA64MMFR0_EL1`'s `TGran4_2` reads 2, and `TGran16_2` and
-/// `TGran64_2` 2 where the model has that granule at stage 2 and 1 where
-/// it does not, FEAT_LPA2 making `TGran4_2` and `TGran16_2`'s 2 a 3, all
-/// non-zero, which `Features.json` makes FEAT_GTG) — and
+/// granule at stage 2 (`FEAT_S2TGran4K`: with FEAT_GTG `TGran4_2` reads
+/// 2, or 3 with FEAT_LPA2, and without it 0, the granule at stage 1) — and
 /// every other identifier is false: no FEAT_SVE, no AArch32, no PMU.
 ///
 /// A model that cannot have EL2 ([`CpuModel::el2_available`], whose build
@@ -2056,7 +2056,6 @@ fn each_model_is_a_processor_arms_feature_model_permits() {
         }
         let el2 = imp.has(Feature::El2);
         if el2 {
-            holding.insert("FEAT_GTG");
             holding.insert("FEAT_S2TGran4K");
         }
         let (mut decided, mut broken) = (0, Vec::new());

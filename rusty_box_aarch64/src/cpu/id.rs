@@ -4,7 +4,7 @@
 //! this interpreter implements: AArch64 at EL0 and EL1, and at EL2 where the
 //! machine asks for it (FEAT_EL2), no PMU. Of the translation granules, the
 //! interpreter walks all three; the Armv9.2 model offers them all, and the
-//! Cortex-A57 the 4 KiB one alone, the others its TRM's to say
+//! Cortex-A57 the 4 KiB and 64 KiB ones, its TRM's (DDI 0488H, 4.3.21)
 //! (`Features::CORTEX_A57`). The Armv9.2 model's physical addresses are 52
 //! bits (FEAT_LPA), the Cortex-A57's 44
 //! ([`CpuModel::physical_address_bits`](super::CpuModel::physical_address_bits));
@@ -23,6 +23,23 @@
 //! the two change together. The registers that report instruction-set
 //! features are functions of the processor's feature set, which the
 //! decoder reads too.
+//!
+//! The Cortex-A57's ID registers read its TRM's values (DDI 0488H, Table
+//! 4-1 and 4.3.18 to 4.3.21, with the Cryptography engine and
+//! `GICCDISABLE` HIGH) in every field whose feature the model has:
+//! `ID_AA64ISAR0_EL1` 0x11120, `ID_AA64MMFR0_EL1`'s `PARange`, `ASIDBits`
+//! and granules, `ID_AA64PFR0_EL1`'s FP, AdvSIMD and GIC fields,
+//! `ID_AA64DFR0_EL1`'s `DebugVer` and `TraceVer`, and the RES0 of
+//! `ID_AA64PFR1_EL1`, `ID_AA64DFR1_EL1`, `ID_AA64ISAR1_EL1` and
+//! `ID_AA64MMFR1_EL1`. Where it lacks a part of the core the field says
+//! so: no AArch32 (`ID_AA64PFR0_EL1` EL0, EL1 and EL2 1, where the TRM's
+//! 2 adds AArch32, and the AArch32 ID registers, UNKNOWN without AArch32,
+//! read 0), no EL3 (EL3 0), EL2 only where the machine asks for it, no PMU
+//! (`ID_AA64DFR0_EL1.PMUVer` 0), two breakpoints, one of them
+//! context-aware, and two watchpoints where the TRM has six, two and four
+//! (`BRPs`, `CTX_CMPs`, `WRPs`), no big-endian data accesses
+//! (`ID_AA64MMFR0_EL1.BigEnd` 0: `SCTLR_ELx.EE` and `E0E` change nothing),
+//! and no Secure state (`SNSMem` 0, which Arm permits without EL3).
 
 use super::features::{Feature, Features};
 
@@ -65,7 +82,10 @@ pub(crate) const AIDR_EL1: u64 = 0;
 /// as well (which `Features.json` makes imply FEAT_RAS; with no EL3, 2
 /// promises no FEAT_DoubleFault), DIT (51:48) = 1 with FEAT_DIT, CSV2
 /// (59:56) = 1 with FEAT_CSV2 (2 would be FEAT_CSV2_2, which has the
-/// `SCXTNUM_ELx` registers), CSV3 (63:60) = 1 with FEAT_CSV3.
+/// `SCXTNUM_ELx` registers), CSV3 (63:60) = 1 with FEAT_CSV3. The
+/// Cortex-A57's reads 0x11, or 0x111 with EL2, where its TRM's 0x2222
+/// (DDI 0488H, 4.3.18) has AArch32 at EL0 to EL2 and an EL3; its FP,
+/// AdvSIMD and GIC fields are the TRM's.
 pub(crate) const fn id_aa64pfr0(features: Features) -> u64 {
     let ras = chain_level(features, &[Feature::Ras, Feature::RasV1p1]);
     0x11 | field(features, Feature::El2, 8, 1)
@@ -124,7 +144,11 @@ pub(crate) const SMIDR_EL1: u64 = 0b10 << 13;
 /// one before), BRPs = 1 and WRPs = 1 (two of each, the architectural
 /// minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU), and DoubleLock (39:36) 0
 /// with FEAT_DoubleLock and 0b1111 without (`FEAT_DoubleLock <=>
-/// SInt(ID_AA64DFR0_EL1.DoubleLock) >= 0`).
+/// SInt(ID_AA64DFR0_EL1.DoubleLock) >= 0`). The Cortex-A57's reads
+/// 0x101006 where its TRM's 0x10305106 (DDI 0488H, 4.3.19) has six
+/// breakpoints, two of them context-aware, four watchpoints and PMUv3:
+/// the model has the debug registers `src/cpu/debug.rs` implements and no
+/// PMU.
 pub(crate) const fn id_aa64dfr0(features: Features) -> u64 {
     let debug = chain_level(
         features,
@@ -164,9 +188,8 @@ pub(crate) const ERRIDR_EL1: u64 = 0;
 /// with FEAT_FlagM2 as well (which `Features.json` makes imply FEAT_FlagM),
 /// and TLB (59:56) = 1 with FEAT_TLBIOS and 2 with FEAT_TLBIRANGE as well
 /// (which `Features.json` makes imply FEAT_TLBIOS); no SHA-512, SHA3, SM3,
-/// SM4 or other field. The Cortex-A57's is 0x11120, as QEMU sets it in
-/// `aarch64_aa32_a57_init` (target/arm/cpu-max.c), which
-/// `aarch64_a57_initfn` calls.
+/// SM4 or other field. The Cortex-A57's is 0x11120, its TRM's with the
+/// Cryptography engine (DDI 0488H, Table 4-1 and 4.3.20).
 pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
     let aes = chain_level(features, &[Feature::Aes, Feature::Pmull]);
     let ts = chain_level(features, &[Feature::FlagM, Feature::FlagM2]);
@@ -316,29 +339,37 @@ const fn field(features: Features, feature: Feature, lsb: u32, value: u64) -> u6
 /// `ID_AA64MMFR0_EL1` of a processor implementing `features`: PARange
 /// (3:0) the encoding of its physical address size ([`pa_range`]), 6 for 52
 /// bits with FEAT_LPA and 4 for 44 bits without, ASIDBits = 2 (16-bit
-/// ASIDs), mixed endianness not supported. The stage 1 granules: TGran4
-/// (31:28) = 0, the 4 KiB one every processor here has, 1 with FEAT_LPA2
-/// (the granule's 52-bit addresses); TGran16 (23:20) = 1 with
+/// ASIDs), BigEnd (11:8) and BigEndEL0 (19:16) 0, mixed endianness not
+/// supported, SNSMem (15:12) 0, no Secure state. The stage 1 granules:
+/// TGran4 (31:28) = 0, the 4 KiB one every processor here has, 1 with
+/// FEAT_LPA2 (the granule's 52-bit addresses); TGran16 (23:20) = 1 with
 /// FEAT_TGran16K, 2 with FEAT_LPA2 too, else 0; TGran64 (27:24) = 0 with
 /// FEAT_TGran64K, else 0xF (each field's own encoding of "supported").
-/// With FEAT_EL2, the stage 2 granules said explicitly: TGran4_2 (43:40) =
-/// 2, the 4 KiB granule (FEAT_S2TGran4K), and TGran16_2 (35:32) and
-/// TGran64_2 (39:36) = 2 with FEAT_S2TGran16K and FEAT_S2TGran64K, else 1,
-/// not supported. That is
-/// FEAT_GTG, which `Features.json` makes hold exactly when all three fields
-/// are non-zero, and permits a processor before ARMv8.5;
-/// `AArch64_HaveS2TG` then reads the stage 2 fields. With FEAT_LPA2,
-/// TGran4_2 and, where the granule is there, TGran16_2 are 3, the
-/// granule's 52-bit addresses at stage 2. Each field's FEAT_LPA2 value
+/// With FEAT_GTG, which needs EL2, the stage 2 granules said explicitly:
+/// TGran4_2 (43:40) = 2, the 4 KiB granule (FEAT_S2TGran4K), and TGran16_2
+/// (35:32) and TGran64_2 (39:36) = 2 with FEAT_S2TGran16K and
+/// FEAT_S2TGran64K, else 1, not supported (`Features.json` makes FEAT_GTG
+/// hold exactly when all three fields are non-zero); `AArch64_HaveS2TG`
+/// then reads the stage 2 fields. With FEAT_LPA2, TGran4_2 and, where the
+/// granule is there, TGran16_2 are 3, the granule's 52-bit addresses at
+/// stage 2. Without FEAT_GTG the three read 0, stage 2 having the granules
+/// stage 1 has (`AArch64_HaveS2TG` reads `AArch64_HaveS1TG`): the
+/// Cortex-A57's, whose TRM makes bits 63:32 RES0 (DDI 0488H, 4.3.21), and
+/// every processor's without EL2. Each field's FEAT_LPA2 value
 /// implies the feature (`(SInt(TGran4) >= 1) ==> FEAT_LPA2`,
 /// `(UInt(TGran16) >= 2) ==> FEAT_LPA2`, and `>= 3` for the stage 2
 /// fields), the fields being how software finds it. ECV (63:60) = 1 with
 /// FEAT_ECV, 2 with FEAT_ECV_POFF too (`FEAT_ECV_POFF <=>
 /// UInt(ID_AA64MMFR0_EL1.ECV) >= 2`).
+///
+/// The Cortex-A57's reads 0x24 with EL2 and without, where its TRM's is
+/// 0x1124 (Table 4-1): the same granules, physical address size and ASIDs,
+/// without the TRM's BigEnd and SNSMem, as the model has neither
+/// big-endian data accesses nor Secure state.
 pub(crate) const fn id_aa64mmfr0(features: Features) -> u64 {
     // FEAT_LPA2's step up from each granule field's "supported".
     let lpa2 = field(features, Feature::Lpa2, 0, 1);
-    let stage_2 = if features.has(Feature::El2) {
+    let stage_2 = if features.has(Feature::Gtg) {
         ((2 + lpa2) << 40)
             | ((1 + field(features, Feature::S2TGran64K, 0, 1)) << 36)
             | ((1 + field(features, Feature::S2TGran16K, 0, 1 + lpa2)) << 32)

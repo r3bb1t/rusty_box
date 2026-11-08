@@ -2186,6 +2186,9 @@ mod tests {
                     // 0b0001 to 0b0111, the field software finds it by; the
                     // other granule fields' values are checked below.
                     Feature::Lpa2 => (1..8).contains(&field(mmfr0, 28)),
+                    // `Features.json`: `FEAT_GTG <=> UInt(TGran4_2) >= 1`,
+                    // and the same of `TGran16_2` and `TGran64_2`.
+                    Feature::Gtg => field(mmfr0, 40) >= 1,
                     Feature::WfxT => field(isar2, 0) >= 2,
                     Feature::Ras => field(pfr0, 28) >= 1,
                     // `Features.json`: `FEAT_RASv1p1 <=> RAS >= 2 || (RAS == 1
@@ -2244,8 +2247,8 @@ mod tests {
             // and XS alone (no API or GPI: no IMPLEMENTATION DEFINED
             // algorithm, and APA is never 2, FEAT_EPAC), ISAR2 WFxT = 2
             // alone, MMFR0 PARange (44 or 52 bits), the granules' fields
-            // (FEAT_LPA2's values with it alone; with EL2 all three stage 2
-            // fields non-zero, FEAT_GTG) and ECV = 1, or 2
+            // (FEAT_LPA2's values with it alone; with FEAT_GTG all three
+            // stage 2 fields non-zero, without it all zero) and ECV = 1, or 2
             // with FEAT_ECV_POFF, MMFR1 HPDS = 1 (no FEAT_HPDS2), LO and PAN
             // alone, MMFR2 CnP, UAO, VARange, ST, AT, IDS, TTL and E0PD
             // alone. MMFR1 AFP and ISAR2 RPRES are each 1 or 0.
@@ -2281,12 +2284,13 @@ mod tests {
             // The granule fields, whose meaning the per-feature checks above
             // test against `Features.json`, each within the values this core
             // gives: TGran4 0, 1 with FEAT_LPA2; TGran16 0 or 1, 2 with
-            // FEAT_LPA2; TGran64 0 or 0xF; with EL2 TGran4_2 2, 3 with
+            // FEAT_LPA2; TGran64 0 or 0xF; with FEAT_GTG TGran4_2 2, 3 with
             // FEAT_LPA2, TGran16_2 1 or 2, 3 with FEAT_LPA2, and TGran64_2 1
-            // or 2; without EL2 all 0. FEAT_LPA2's values come with the
-            // feature (`(UInt(TGran16) >= 2) ==> FEAT_LPA2`, `(UInt(TGran4_2)
-            // >= 3) ==> FEAT_LPA2`, `(UInt(TGran16_2) >= 3) ==> FEAT_LPA2`)
-            // and with every granule the processor has.
+            // or 2; without it all 0, as without EL2, which FEAT_GTG needs.
+            // FEAT_LPA2's values come with the feature (`(UInt(TGran16) >=
+            // 2) ==> FEAT_LPA2`, `(UInt(TGran4_2) >= 3) ==> FEAT_LPA2`,
+            // `(UInt(TGran16_2) >= 3) ==> FEAT_LPA2`) and with every granule
+            // the processor has.
             let granule_fields = [20, 24, 28, 32, 36, 40]
                 .into_iter()
                 .fold(0, |acc, lsb| acc | (0xF << lsb));
@@ -2304,12 +2308,13 @@ mod tests {
             let tgran16 = field(mmfr0, 20);
             assert_eq!(tgran16, if tgran16 == 0 { 0 } else { 1 + lpa2 }, "TGran16");
             assert!(matches!(field(mmfr0, 24), 0 | 0xF), "TGran64");
-            let el2 = imp.has(Feature::El2);
-            assert_eq!(field(mmfr0, 40), if el2 { 2 + lpa2 } else { 0 }, "TGran4_2");
+            let gtg = imp.has(Feature::Gtg);
+            assert!(!gtg || imp.has(Feature::El2), "FEAT_GTG without EL2");
+            assert_eq!(field(mmfr0, 40), if gtg { 2 + lpa2 } else { 0 }, "TGran4_2");
             for lsb in [32, 36] {
                 let stage_2 = field(mmfr0, lsb);
                 let supported = if lsb == 32 { 2 + lpa2 } else { 2 };
-                let domain = if el2 {
+                let domain = if gtg {
                     stage_2 == 1 || stage_2 == supported
                 } else {
                     stage_2 == 0

@@ -324,7 +324,7 @@ is) must reproduce, are:
 
 | Part | Model |
 |---|---|
-| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, of revision r1p3 (`MIDR_EL1` 0x411F_D073, the revision its TRM, DDI 0488H, describes; see "Where the references differ"), the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB granule and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB and 64 KiB granules too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
+| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, of revision r1p3 (`MIDR_EL1` 0x411F_D073, the revision its TRM, DDI 0488H, describes; see "Where the references differ"), the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB and 64 KiB granules, the Cortex-A57's (DDI 0488H, 4.3.21), and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB granule too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0800_4000, the common base and processor 0's at 0x0800_5000, 4 KiB each, on the board's own layout) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0800_6000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
 | Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with a `gpio-key` power button on its first line, 0 (line 3, QEMU's, on QEMU's layout), CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded; the identity's manufacturer and device codes, by default none, and a CFI query table of the board's own; see "Where the references differ"), no `fw_cfg` (see "Where the references differ"), virtio-mmio transports, 4 on the board's own layout and 32 on QEMU's (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the first free ones, or the last free with `VirtConfig::transport_order`; every queue 256 entries), an empty PCIe ECAM/windows, the 32-bit memory window non-prefetchable and the 64-bit one prefetchable |
@@ -370,10 +370,10 @@ SETF16, XAFLAG, AXFLAG) and FEAT_SB; FEAT_PAN, FEAT_PAN2 and FEAT_PAN3
 SCTLR_EL1.SPAN and EPAN, AT S1E1RP and AT S1E1WP), FEAT_UAO (LDTR and STTR
 with EL1's permissions), FEAT_DIT, and FEAT_SSBS with FEAT_SSBS2, each
 PSTATE field with its MSR forms, register, SPSR bit and exception-entry
-rule; FEAT_TGran16K and FEAT_TGran64K (the 16 KiB and 64 KiB granules,
-beside the 4 KiB one both models have) and FEAT_TTST (input addresses
-down to 16 bits, 17 with the 64 KiB granule), each at stage 1, and built
-for stage 2 too — FEAT_S2TGran16K and FEAT_S2TGran64K, and FEAT_TTST's
+rule; FEAT_TGran16K (the 16 KiB granule, beside the 4 KiB and 64 KiB
+ones both models have) and FEAT_TTST (input addresses down to 16 bits, 17
+with the 64 KiB granule), each at stage 1, and built for stage 2 too —
+FEAT_S2TGran16K, FEAT_GTG's stage 2 granule fields, and FEAT_TTST's
 small stage 2 tables and stage 2 walk starting at level 3 with the 4 KiB
 granule — which no guest reaches yet: this model cannot have EL2
 (`CpuModel::el2_available`); FEAT_LPA and FEAT_LVA (a 52-bit physical
@@ -508,8 +508,9 @@ away from it.
 Under `HCR_EL2.VM` or `DC`, stage 2 translates the EL1&0 regime's
 intermediate physical addresses as Arm's `AArch64_S2Translate` and
 `AArch64_S2Walk` define it: `VTCR_EL2`'s `T0SZ`, `SL0`, `TG0` and `PS`,
-with each granule `ID_AA64MMFR0_EL1`'s `TGran4_2`, `TGran16_2` and
-`TGran64_2` offer, `SL0` naming the start level as each granule decodes it,
+with each granule `ID_AA64MMFR0_EL1` offers at stage 2 (on the Cortex-A57
+the 4 KiB and 64 KiB ones, `TGran4_2`, `TGran16_2` and `TGran64_2` reading
+0, "as stage 1"), `SL0` naming the start level as each granule decodes it,
 up to 16 concatenated start tables, the configurations Arm refuses taking a
 level 0 Translation fault; `S2AP`, `XN` and the access flag; and `MemAttr`
 combined with stage 1's attributes by `S2CombineS1MemAttrs`, so that
@@ -725,14 +726,17 @@ integration tests of the public API.
   start level and page offset the granule's, the next page faulting at
   level 3 and the address above the range at level 0; a block a leaf only
   at the levels its granule has blocks at; the upper range walking with
-  `TG1`'s granule; a granule the processor lacks, and each reserved
-  encoding, walking as the 4 KiB one; a `TxSZ` beyond its granule's range
+  `TG1`'s granule; a granule the processor lacks (the Cortex-A57's 16 KiB
+  one in both regimes), and each reserved encoding, walking as the 4 KiB
+  one; the Cortex-A57's 64 KiB granule walking in both ranges of the
+  EL1&0 regime and in EL2's; a `TxSZ` beyond its granule's range
   walking as the limit it passes, the first and last page of the limit's
   range translating and the address above it faulting at level 0, with
   FEAT_TTST and without, but below the minimum with FEAT_LVA faulting at
   level 0; `XPACI` ending the code
   where its granule's range does; and through stage 2 tables, each
-  granule's `SL0` decode, concatenated start tables, every invalid or
+  granule's `SL0` decode (the Cortex-A57's 64 KiB one among them),
+  concatenated start tables, every invalid or
   inconsistent `SL0`, and a `T0SZ` below the minimum with FEAT_LPA, refusing the instruction fetch
   at level 0 with its IPA in `HPFAR_EL2`, and any other out-of-range `T0SZ`
   walking as its limit; each 4 KiB piece of a 64 KiB
@@ -769,7 +773,8 @@ integration tests of the public API.
   no level; and a leaf's shareability from `TCR_EL1.SH0` or `SH1`,
   `TCR_EL2.SH0` and `VTCR_EL2.SH0`, as `PAR_EL1.SH` reports it.
   `tests/unit/el2.rs` checks each model's `PARange`, `VARange`, granule
-  fields and `CpuModel::physical_address_bits`.
+  fields (the Cortex-A57's whole `ID_AA64MMFR0_EL1`, 0x24) and
+  `CpuModel::physical_address_bits`.
 - `tests/unit/load_store.rs` checks, over a bus that logs every access,
   what Arm's `Mem` and the load and store pages decide and the vectors
   cannot show: PRFM, PRFUM and PRFM (register) checking no SP alignment
@@ -1845,14 +1850,37 @@ one open.
   ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md), "Deliberate
   QEMU omissions"); the EL2 vectors leave them out. `MDRAR_EL1` reports no
   ROM table (`Valid` 0b00), as QEMU's does.
-- **The Cortex-A57 has the 4 KiB granule alone.** Its
-  `ID_AA64MMFR0_EL1.TGran64` reads 0xF and `TGran16` 0, where QEMU's
-  `cortex-a57` reports the 64 KiB granule too (0x1124). The core's
-  granules are the Cortex-A57 TRM's (DDI 0488) to say, which is not on
-  disk, and Arm's documents decide over QEMU, so this model adds none on
-  QEMU's word; its extensions are QEMU's report of the core, its revision
-  the TRM's (below). The walk has the 64 KiB granule, which the Armv9.2
-  model offers.
+- **The Cortex-A57's ID registers are its TRM's, cut to what the model
+  has.** Every field whose feature the model implements reads the value
+  of DDI 0488H (Table 4-1, 4.3.18 to 4.3.21, with the Cryptography engine
+  and `GICCDISABLE` HIGH, the board's GIC being memory-mapped):
+  `ID_AA64ISAR0_EL1` 0x11120; `ID_AA64MMFR0_EL1`'s `PARange` (44 bits),
+  `ASIDBits` (16) and granules — the 4 KiB and 64 KiB ones, not the 16
+  KiB one, and with EL2 the same at stage 2, the stage 2 fields reading
+  0, "as stage 1" (no FEAT_GTG), where the TRM's bits 63:32 are RES0;
+  `ID_AA64PFR0_EL1`'s FP, AdvSIMD and GIC; `ID_AA64DFR0_EL1`'s `DebugVer`
+  (v8.0) and `TraceVer` (0); and `ID_AA64PFR1_EL1`, `ID_AA64DFR1_EL1`,
+  `ID_AA64ISAR1_EL1` and `ID_AA64MMFR1_EL1` 0, the TRM's RES0 (10.7,
+  Table 10-10). Where the model lacks a part of the core, the field says
+  so, and differs from the TRM's: `ID_AA64PFR0_EL1` reads 0x11 (0x111
+  with EL2) where the TRM's 0x2222 has AArch32 at EL0 to EL2 and an EL3,
+  neither of which the model has; `ID_AA64DFR0_EL1` reads 0x101006 where
+  the TRM's 0x10305106 has six breakpoints (`BRPs` 5), two of them
+  context-aware (`CTX_CMPs` 1), four watchpoints (`WRPs` 3) and PMUv3
+  (`PMUVer` 1), the model having two breakpoints, one of them
+  context-aware, two watchpoints and no PMU (`src/cpu/debug.rs`, "Not
+  implemented"); `ID_AA64MMFR0_EL1` reads 0x24 where the TRM's 0x1124
+  has `BigEnd` 1 (mixed endianness: `SCTLR_ELx.EE` and `SCTLR_EL1.E0E`
+  configurable) and `SNSMem` 1 (Secure and Non-secure memory told apart),
+  the model's accesses being little-endian whatever `EE` and `E0E` hold
+  and its processor having no Secure state (Arm forbids `SNSMem` 0 only
+  with EL3); and the AArch32 ID registers (`ID_PFR0_EL1` to
+  `ID_ISAR5_EL1`, `MVFR0_EL1` to `MVFR2_EL1`), UNKNOWN on a processor
+  without AArch32 (Arm ARM D24.2.113 and the others), read 0, where the
+  TRM's describe its AArch32 state. QEMU's `cortex-a57` reads the TRM's
+  `ID_AA64MMFR0_EL1` and r1p0's `MIDR_EL1` (below); a guest reads the
+  same granules from both. The board also has the TRM's `MIDR_EL1`,
+  `REVIDR_EL1`, `AIDR_EL1`, `CTR_EL0`, `CLIDR_EL1` and `DCZID_EL0`.
 - **The Cortex-A57 is r1p3, the revision its TRM describes.** Its
   `MIDR_EL1` reads 0x411F_D073 (DDI 0488H, Table 4-1), where QEMU's
   `cortex-a57` reads r1p0's 0x411F_D070 (`aarch64_a57_initfn`). Of what
@@ -1883,13 +1911,11 @@ one open.
   no error, is none of them, so the processor reports no syndrome rather
   than a source that did not err. QEMU's reads the same. Under FEAT_RAS
   the syndrome is `VSESR_EL2`'s.
-- **The stage 2 granules are offered at stage 2.** With EL2,
-  `ID_AA64MMFR0_EL1.TGran4_2` reads 2 (supported) and `TGran16_2` and
-  `TGran64_2` 1 (not supported) on the Cortex-A57 (2 and 2 on the Armv9.2
-  model, which no machine builds with EL2 yet): FEAT_GTG, saying at stage
-  2 what stage 1's fields say, which Arm's data permits before ARMv8.5.
-  QEMU's Cortex-A57 reads 0 in all three, each meaning "as stage 1"; a
-  hypervisor reads the same granules either way.
+- **The Armv9.2 model offers its stage 2 granules at stage 2.** With EL2
+  it would have FEAT_GTG, which Arm requires of an Armv8.5 processor with
+  EL2: `ID_AA64MMFR0_EL1.TGran4_2` and `TGran16_2` 3 and `TGran64_2` 2.
+  The Cortex-A57, an ARMv8.0 core without it, reads 0 in all three, "as
+  stage 1", its TRM's RES0, as QEMU's does.
 - **Both stages make the same IMPLEMENTATION DEFINED choices.** The
   pseudocode asks both stages the same questions: a `TxSZ` below its
   minimum (at stage 1 16, or 12 with FEAT_LVA and the 64 KiB granule or
@@ -1913,8 +1939,16 @@ one open.
   Translation fault (`tests/translation_and_firmware.rs`,
   `tests/unit/granules.rs`). A `TG0` or
   `TG1` naming a granule the processor lacks, or its reserved encoding, is
-  the 4 KiB one ("TG0 encoded granule size", "TG1 encoded granule size"),
-  the smallest granule, QEMU's choice (`sanitize_gran_size`); with the 64
+  the 4 KiB one ("TG0 encoded granule size", "TG1 encoded granule size",
+  one granule whatever the encoding), the one granule both processor
+  models implement at both stages, so the encoded granule is always one
+  the processor walks (QEMU's `sanitize_gran_size` takes the same): so on
+  the Cortex-A57 a `TG0` or `TG1` naming the
+  16 KiB granule walks 4 KiB tables, at stage 1 and, through
+  `VTCR_EL2.TG0`, at stage 2. Its TRM does not decide it: it gives `TG0`
+  as bit 14 alone, bit 15 RES0, and `TG1` as bit 30 alone, bit 31 RES1
+  (DDI 0488H, 4.3.41 to 4.3.43), so every 16 KiB and reserved encoding
+  sets a reserved bit; with the 64
   KiB granule where `PAMax` is under 52 bits, neither a descriptor's bits
   15:12 nor a table base register's bits 5:2 are address bits 51:48
   ("descriptor[15:12] for 64KB granule are OA[51:48]" and "BADDR
@@ -2392,8 +2426,8 @@ one open.
   which the driver reads in `QueueNumMax` as the most it may use (Table
   4.1, 4.2.3.2).
   The board gives every queue of its devices 256 (`queue::QUEUE_SIZE`): a
-  descriptor table, 16 bytes an entry, of one 4 KiB page, the translation
-  granule every processor here has and UEFI's page, with the available
+  descriptor table, 16 bytes an entry, of one 4 KiB page, the smallest
+  translation granule every processor here has and UEFI's page, with the available
   and used rings (518 and 2054 bytes) fitting a second. The devices take
   and complete every chain when the driver notifies them, so a queue's
   depth costs a device nothing; it bounds what a driver makes available
@@ -3350,7 +3384,9 @@ the board's own:
 - Floating-point exception traps: FPCR's trap-enable bits read as zero, as on
   a Cortex-A57, so exceptions only accumulate in FPSR.
 - Debug: Software Step, and two breakpoints and two watchpoints, as
-  `ID_AA64DFR0_EL1` advertises, raise their exceptions (`src/cpu/debug.rs`);
+  `ID_AA64DFR0_EL1` advertises, raise their exceptions (`src/cpu/debug.rs`),
+  where the Cortex-A57 has six breakpoints, two of them context-aware, and
+  four watchpoints (DDI 0488H, 4.3.19; see "Where the references differ");
   there is no Debug state, no halting debug, no Vector Catch and no PMU. The
   Debug Communications Channel's interrupt requests (COMMRX and COMMTX, which
   `MDCCINT_EL1` enables) reach no interrupt controller: where they connect
