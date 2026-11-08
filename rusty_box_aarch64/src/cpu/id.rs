@@ -277,14 +277,16 @@ pub(crate) const fn id_aa64zfr0(features: Features) -> u64 {
     }
 }
 
-/// `ID_AA64MMFR1_EL1` of a processor implementing `features`: HPDS (15:12)
-/// = 1 with FEAT_HPDS (2 would be FEAT_HPDS2), LO (19:16) = 1 with
-/// FEAT_LOR, PAN (23:20) names the newest of FEAT_PAN (1), FEAT_PAN2 (2)
-/// and FEAT_PAN3 (3) the processor implements, each of which
-/// `Features.json` makes imply the one before, and AFP (47:44) = 1 with
-/// FEAT_AFP; nothing else from v8.1+.
+/// `ID_AA64MMFR1_EL1` of a processor implementing `features`: HAFDBS (3:0)
+/// names the newest of FEAT_HAF (1) and FEAT_HAFDBS (2) the processor
+/// implements (3 would be FEAT_HAFT), HPDS (15:12) = 1 with FEAT_HPDS (2
+/// would be FEAT_HPDS2), LO (19:16) = 1 with FEAT_LOR, PAN (23:20) names
+/// the newest of FEAT_PAN (1), FEAT_PAN2 (2) and FEAT_PAN3 (3) the
+/// processor implements, each of which `Features.json` makes imply the one
+/// before, and AFP (47:44) = 1 with FEAT_AFP; nothing else from v8.1+.
 pub(crate) const fn id_aa64mmfr1(features: Features) -> u64 {
-    field(features, Feature::Hpds, 12, 1)
+    chain_level(features, &[Feature::Haf, Feature::Hafdbs])
+        | field(features, Feature::Hpds, 12, 1)
         | field(features, Feature::Lor, 16, 1)
         | (chain_level(features, &[Feature::Pan, Feature::Pan2, Feature::Pan3]) << 20)
         | field(features, Feature::Afp, 44, 1)

@@ -392,7 +392,21 @@ register's bits 5:2 whatever the output size, blocks at level 0 with the
 4 KiB granule and level 1 with the 16 KiB one, and the shareability of
 a leaf from the `TCR` or `VTCR_EL2`; `ID_AA64MMFR0_EL1.TGran4` 1,
 `TGran16` 2, and with EL2 `TGran4_2` and `TGran16_2` 3), at stage 1 and
-built for stage 2; FEAT_HPDS
+built for stage 2; FEAT_HAF and FEAT_HAFDBS (`ID_AA64MMFR1_EL1.HAFDBS`
+2: with `TCR_EL1.HA` the walk sets a Block or Page descriptor's clear
+Access flag rather than faulting on it, and with `HD` too a write to a
+writable-clean descriptor, `DBM` and `AP[2]` set, clears `AP[2]` rather
+than faulting, each an atomic swap of the descriptor in memory once the
+access's checks pass, the translation made again where the descriptor
+changed under it, and the TLB keeping no descriptor whose flag is clear
+and a writable-clean one without its write permission, so that a write
+always reaches the update; an access its checks refuse updates nothing,
+nor does an address translation instruction's leaf, while cache
+maintenance, which faults on a clear flag here, sets it), at stage 1 and
+built for the EL2 regime (`TCR_EL2.HA`, `HD`) and stage 2 (`VTCR_EL2.HA`,
+`HD`, `S2AP[1]` set on a write, and stage 1's update of its own
+descriptor needing stage 2's write permission, which stage 2's own
+update of a writable-clean table page gives); FEAT_HPDS
 (TCR_EL1.HPD0 and HPD1), FEAT_TTCNP (TTBRn_EL1.CnP),
 FEAT_E0PD (TCR_EL1.E0PD0 and E0PD1) with the FEAT_CSV3 it requires,
 FEAT_TLBIOS, FEAT_TLBIRANGE and FEAT_TTL (the Outer Shareable and range
@@ -513,7 +527,10 @@ with each granule `ID_AA64MMFR0_EL1` offers at stage 2 (on the Cortex-A57
 the 4 KiB and 64 KiB ones, `TGran4_2`, `TGran16_2` and `TGran64_2` reading
 0, "as stage 1"), `SL0` naming the start level as each granule decodes it,
 up to 16 concatenated start tables, the configurations Arm refuses taking a
-level 0 Translation fault; `S2AP`, `XN` and the access flag; and `MemAttr`
+level 0 Translation fault; `S2AP`, `XN` and the access flag (which with
+FEAT_HAF's `VTCR_EL2.HA`, on a processor that has it, the walk sets, and
+with FEAT_HAFDBS's `HD` a write to a leaf whose `DBM` is set makes
+writable, as stage 1's are); and `MemAttr`
 combined with stage 1's attributes by `S2CombineS1MemAttrs`, so that
 Device memory at either stage refuses a misaligned access. Stage 1's walk
 reads its descriptors through stage 2 too, `HCR_EL2.PTW` refusing it
@@ -1361,6 +1378,16 @@ integration tests of the public API.
   `PSCI_FEATURES`, `SMCCC_ARCH_FEATURES`, the SVE hint bit taken as 0) and
   each `SpectreReport`'s answers and workaround calls, and a
   store-exclusive to an unmonitored address failing without a fault.
+- `tests/hardware_updates.rs`: FEAT_HAF and FEAT_HAFDBS at stage 1 as a
+  guest reads its own descriptor back — `ID_AA64MMFR1_EL1.HAFDBS` 2 on the
+  Armv9.2 model and 0 on the Cortex-A57; with `TCR_EL1.HA` a load and
+  cache maintenance set a clear Access flag, which without it faults;
+  with `HD` too a store makes a writable-clean page dirty, and after a
+  load that leaves it clean and in the TLB; without `HD`, or with `HD`
+  and not `HA`, `DBM` gives no write; an access its permissions refuse
+  and an `AT` update nothing; and the Cortex-A57 ignoring both bits.
+  `tests/unit/el2.rs` checks stage 2's and the EL2 regime's on a
+  processor with every feature.
 - `tests/device_regions.rs`: the GIC distributor and CPU interface answer
   in their 4 KiB and 8 KiB regions, and an access to the rest of their 64
   KiB windows is a synchronous external abort.
@@ -1656,7 +1683,24 @@ one open.
   can is IMPLEMENTATION DEFINED (Arm ARM D8.15.3, RTRTWX). These
   instructions are not NOPs here and share the walk of every other access,
   so `DC` and `IC` by address on a page with AF 0 fault, with CM and WnR
-  set; `tests/unit/memory_system.rs` checks it.
+  set; `tests/unit/memory_system.rs` checks it. Where FEAT_HAF's `HA`
+  manages the flag they set it instead, as an access does
+  (`AArch64_SetAccessFlag` asks the same IMPLEMENTATION DEFINED question);
+  `tests/hardware_updates.rs` checks it.
+- **A descriptor's hardware update is made only for an access its checks
+  permit.** Whether an access that takes an Alignment or Permission fault
+  sets the Access flag or the dirty state is CONSTRAINED UNPREDICTABLE
+  (Arm ARM D8.5.1.2 RQSPMS, D8.5.2.1 RDYCFD; `Unpredictable_AFUPDATE`,
+  `Unpredictable_DBUPDATE`): this core updates nothing, and so caches no
+  leaf whose flag is still clear. An address translation instruction
+  updates neither the flag nor the dirty state of the leaf it reports
+  (RXQSMX; "AT updates AF" FALSE) and reports a leaf whose managed flag
+  is clear as translating. A descriptor in memory that is not Write-Back
+  Shareable is updated like any other
+  (`Unpredictable_Unsupported_Atomic_HW_Update` FALSE), the bus swapping
+  every descriptor atomically. QEMU's `get_phys_addr_lpae` makes the same
+  choices (no update under `in_at`, and the update only after the
+  permission check). `tests/hardware_updates.rs` checks the first two.
 - **Self-hosted debug takes Arm's listed default in every open case.** An
   SME access, a contiguous SVE access and a SIMD&FP access in Streaming SVE
   mode (`IsRelaxedWatchpointAccess`) are watched out to the 16-byte
@@ -3494,8 +3538,9 @@ or kept as a host's choice (below).
   FEAT_SME_FA64, …), on the Armv9.2 model: none is an Armv9.2
   requirement, and the SVE instructions it has are the ones FEAT_SME makes
   legal in Streaming SVE mode.
-- Of the translation regime: FEAT_HAF and FEAT_HAFDBS (the access flag
-  and dirty state set by the walk). TLB maintenance empties the whole TLB,
+- Of the translation regime: FEAT_HAFT (the walk setting the Access flag
+  of Table descriptors) and FEAT_HDBSS (a log of the pages stage 2 makes
+  dirty), beside FEAT_HAF and FEAT_HAFDBS. TLB maintenance empties the whole TLB,
   whatever FEAT_LPA2 makes of a `TLBI` operand's address, an
   over-invalidation Arm permits, and a 16 KiB or 64 KiB page, or a block,
   is walked once for each 4 KiB piece the processor touches.

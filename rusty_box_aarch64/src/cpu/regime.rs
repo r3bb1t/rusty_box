@@ -25,10 +25,13 @@
 //! itself, the TLB and the access paths are `mmu.rs`'s.
 
 use super::dp::ones;
-use super::el2::{HCR_DC, HCR_TGE, HCR_VM, TCR_EL2_DS, TCR_EL2_HPD, TCR_EL2_TBI, TCR_EL2_TBID};
+use super::el2::{
+    HCR_DC, HCR_TGE, HCR_VM, TCR_EL2_DS, TCR_EL2_HA, TCR_EL2_HD, TCR_EL2_HPD, TCR_EL2_TBI,
+    TCR_EL2_TBID,
+};
 use super::exec::sext;
 use super::features::{Feature, Features};
-use super::mmu::{LeafLevel, Level};
+use super::mmu::{HwUpdate, LeafLevel, Level};
 use super::{id, sctlr, Cpu, El, Levels};
 
 /// A stage 1 translation regime.
@@ -456,6 +459,9 @@ const TCR_EL1_TG1: u32 = 30;
 const TCR_EL1_IPS: u32 = 32;
 const TCR_EL1_TBI0: u32 = 37;
 const TCR_EL1_HPD0: u32 = 41;
+/// `TCR_EL1.HA` (FEAT_HAF) and `HD` (FEAT_HAFDBS), for both ranges.
+const TCR_EL1_HA: u64 = 1 << 39;
+const TCR_EL1_HD: u64 = 1 << 40;
 const TCR_EL1_TBID0: u32 = 51;
 /// `TCR_EL1.DS` (FEAT_LPA2), for both ranges.
 const TCR_EL1_DS: u32 = 59;
@@ -843,6 +849,9 @@ pub(crate) struct S1Params {
     pub(crate) hpd: bool,
     pub(crate) mair: u64,
     pub(crate) wxn: bool,
+    /// The hardware updates the regime's walks make of their leaves
+    /// (`TCR_ELx.HA` and `HD`).
+    pub(crate) hw: HwUpdate,
 }
 
 impl<L: Levels> Cpu<L> {
@@ -937,6 +946,7 @@ impl<L: Levels> Cpu<L> {
     /// whatever the bit).
     pub(crate) fn s1_params(&self, regime: Regime, va: u64) -> S1Params {
         let hpds = self.implements(Feature::Hpds);
+        let features = self.imp.features;
         match regime {
             Regime::El10 => {
                 let tcr = self.sys.tcr_el1;
@@ -954,6 +964,7 @@ impl<L: Levels> Cpu<L> {
                     hpd: hpds && (tcr >> (TCR_EL1_HPD0 + up)) & 1 == 1,
                     mair: self.sys.mair_el1,
                     wxn: self.sys.sctlr_el1 & sctlr::WXN != 0,
+                    hw: HwUpdate::of(tcr, TCR_EL1_HA, TCR_EL1_HD, features),
                 }
             }
             Regime::El2 => {
@@ -965,6 +976,7 @@ impl<L: Levels> Cpu<L> {
                     hpd: hpds && el2.tcr & TCR_EL2_HPD != 0,
                     mair: el2.mair,
                     wxn: el2.sctlr & sctlr::WXN != 0,
+                    hw: HwUpdate::of(el2.tcr, TCR_EL2_HA, TCR_EL2_HD, features),
                 }
             }
         }

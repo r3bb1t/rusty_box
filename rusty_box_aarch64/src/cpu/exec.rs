@@ -22,7 +22,7 @@ use super::ldst::SingleForm;
 use super::op::predecode;
 use super::za::ZaMove;
 use super::{Activity, Btype, Cpu, Levels};
-use crate::bus::{AccessWidth, BusFault, FetchSource, PhysAddr, PhysBus};
+use crate::bus::{AccessWidth, BusFault, DescriptorSwap, FetchSource, PhysAddr, PhysBus};
 use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
 
 /// The bus one step executes against: the machine's own, with the observer
@@ -78,6 +78,17 @@ impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
     #[inline(always)]
     fn read_descriptor(&mut self, addr: PhysAddr, clock: VmClock) -> Result<u64, BusFault> {
         self.bus.read_descriptor(addr, clock)
+    }
+
+    #[inline(always)]
+    fn swap_descriptor(
+        &mut self,
+        addr: PhysAddr,
+        expected: u64,
+        new: u64,
+        clock: VmClock,
+    ) -> Result<DescriptorSwap, BusFault> {
+        self.bus.swap_descriptor(addr, expected, new, clock)
     }
 
     #[inline(always)]

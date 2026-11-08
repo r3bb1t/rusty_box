@@ -270,10 +270,12 @@ impl PhysSpan {
 /// How many spans [`Writes`] keeps apart.
 const WRITE_SPANS: usize = 4;
 
-/// Memory something other than the processor wrote — a device, by DMA —
-/// for the processor to forget the code it decoded there
-/// (`Cpu::forget_code`). Spans beyond what it keeps apart merge into their
-/// hull, which only ever covers more.
+/// Memory written that the processor has yet to account for: what
+/// something other than the processor wrote — a device, by DMA — for the
+/// processor to forget the code it decoded there (`Cpu::forget_code`), and
+/// the descriptors the processor's own walks updated, which it notes as its
+/// stores once the walks return. Spans beyond what it keeps apart merge
+/// into their hull, which only ever covers more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Writes {
     spans: [PhysSpan; WRITE_SPANS],
@@ -365,6 +367,18 @@ pub enum FetchSource {
     Volatile,
 }
 
+/// What a swap of a translation table descriptor found
+/// ([`PhysBus::swap_descriptor`]).
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DescriptorSwap {
+    /// The descriptor was the one expected, and the new one replaced it.
+    Swapped,
+    /// The descriptor was another, and was left as it was.
+    Changed,
+}
+
 /// The guest-physical address space as the processor sees it.
 ///
 /// Static dispatch only (R8): a machine names its bus type. `clock` is the
@@ -372,10 +386,11 @@ pub enum FetchSource {
 /// of a counter or arm a deadline.
 ///
 /// The processor reaches the bus for three purposes — data, instruction
-/// fetch, and translation table walks — and names the latter two with their
-/// own methods. Both default to an ordinary read, which is what the board
-/// does; a bus that tells the purposes apart (an observer reporting data
-/// accesses only) overrides them.
+/// fetch, and translation table walks, which read descriptors and, with
+/// FEAT_HAF, swap them — and names the latter two with their own methods.
+/// They default to ordinary reads and writes, which is what the board does;
+/// a bus that tells the purposes apart (an observer reporting data accesses
+/// only) overrides them.
 pub trait PhysBus {
     /// Read `width` bytes at `addr`, little-endian, zero-extended to 64 bits.
     fn read(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock)
@@ -401,6 +416,29 @@ pub trait PhysBus {
     #[inline]
     fn read_descriptor(&mut self, addr: PhysAddr, clock: VmClock) -> Result<u64, BusFault> {
         self.read(addr, AccessWidth::Dword, clock)
+    }
+
+    /// Replace the translation table descriptor at `addr` with `new` if it
+    /// is `expected`, as one atomic read-modify-write (Arm
+    /// `AArch64_MemSwapTableDesc`): the read, and where it found `expected`
+    /// the write, each refused as the bus refuses any. Atomic by the
+    /// borrow: the processor holds the bus exclusively for the whole swap,
+    /// and every other writer of guest memory — a device's DMA, a host —
+    /// reaches it only through the same exclusive borrow, between the
+    /// processor's accesses.
+    #[inline]
+    fn swap_descriptor(
+        &mut self,
+        addr: PhysAddr,
+        expected: u64,
+        new: u64,
+        clock: VmClock,
+    ) -> Result<DescriptorSwap, BusFault> {
+        if self.read_descriptor(addr, clock)? != expected {
+            return Ok(DescriptorSwap::Changed);
+        }
+        self.write(addr, AccessWidth::Dword, new, clock)?;
+        Ok(DescriptorSwap::Swapped)
     }
 
     /// Whether the instructions fetched from an address may be kept. The

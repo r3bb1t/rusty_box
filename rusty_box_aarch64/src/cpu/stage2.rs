@@ -23,16 +23,21 @@
 //! processor lacks is the 4 KiB one ("TG0 encoded granule size"), the
 //! Contiguous bit is treated as 0 ("Treat Contiguous bit as 0"), and a
 //! descriptor with its access flag clear faults for every access, cache
-//! maintenance included ("Generate access flag fault on IC/DC operations").
+//! maintenance included ("Generate access flag fault on IC/DC operations"),
+//! unless `VTCR_EL2.HA` (FEAT_HAF) has the walk set it, as it does for the
+//! same accesses; with `VTCR_EL2.HD` (FEAT_HAFDBS) a write to a leaf whose
+//! `DBM` is set makes it writable-dirty, `S2AP[1]` set, as stage 1's
+//! hardware update of its own descriptors does to the stage 2 leaf that
+//! maps them (`mmu.rs`, `Cpu::s1_update`).
 
 use core::convert::Infallible;
 
-use super::el2::{HCR_PTW, HCR_TGE, VTCR_EL2_DS, VTCR_EL2_SL2};
+use super::el2::{HCR_PTW, HCR_TGE, VTCR_EL2_DS, VTCR_EL2_HA, VTCR_EL2_HD, VTCR_EL2_SL2};
 use super::features::{Feature, Features};
 use super::memattr::MemAttrs;
 use super::mmu::{
-    Ipa, LeafLevel, Level, TranslationFault, WalkStart, WalkStop, PERM_EL0_R, PERM_EL0_W,
-    PERM_EL0_X, PERM_EL1_R, PERM_EL1_W, PERM_EL1_X,
+    HwUpdate, Ipa, LeafDescriptor, LeafLevel, Level, TranslationFault, WalkStart, WalkStop,
+    PERM_EL0_R, PERM_EL0_W, PERM_EL0_X, PERM_EL1_R, PERM_EL1_W, PERM_EL1_X,
 };
 use super::regime::{el10_stage2_enabled, sh0, txsz_taken, Ds, Granule, OaLayout, Regime, TCR_TG0};
 use super::{id, Cpu, Levels};
@@ -80,6 +85,9 @@ struct S2Params {
     /// Where the walk starts and how its addresses are held ([`s2_start`]).
     start: Option<S2Start>,
     vttbr: u64,
+    /// The hardware updates stage 2 makes of its leaves (`VTCR_EL2.HA` and
+    /// `HD`).
+    hw: HwUpdate,
 }
 
 /// Where a stage 2 walk starts: its granule (`VTCR_EL2.TG0`,
@@ -180,9 +188,14 @@ pub(crate) struct S2Walked {
     pub(crate) pa: PhysAddr,
     /// The permissions stage 2 gives, as the stage 1 permission bits they
     /// leave an access (`AArch64_S2DirectBasePermissions`): read and write
-    /// at EL1 and EL0 alike, and execute as `XN` gives each.
+    /// at EL1 and EL0 alike, a writable-clean leaf's write included, and
+    /// execute as `XN` gives each.
     pub(crate) perms: u8,
     pub(crate) level: LeafLevel,
+    /// The leaf descriptor as the walk read it, at its physical address,
+    /// and the hardware updates stage 2 makes of it.
+    pub(crate) leaf: LeafDescriptor<PhysAddr>,
+    pub(crate) hw: HwUpdate,
     /// The descriptor's `MemAttr` and `FnXS` (false without FEAT_XS), and
     /// the leaf's shareability — the descriptor's `SH`, or under FEAT_LPA2's
     /// `DS` `VTCR_EL2.SH0` ([`OaLayout::shareability`]) — as they are,
@@ -200,15 +213,17 @@ impl S2Walked {
 }
 
 /// The stage 2 permissions a descriptor gives (`AArch64_S2ApplyOutputPerms`
-/// and `AArch64_S2DirectBasePermissions` without FEAT_S2PIE, FEAT_HAFDBS or
-/// FEAT_XNX): `S2AP[0]` (bit 6) read, `S2AP[1]` (bit 7) write, and `XN`
-/// (bit 54) execute-never at EL1 and EL0 alike.
-const fn s2_permissions(desc: u64) -> u8 {
+/// and `AArch64_S2DirectBasePermissions` without FEAT_S2PIE, FEAT_HDBSS or
+/// FEAT_XNX): `S2AP[0]` (bit 6) read, `S2AP[1]` (bit 7) write — or, where
+/// stage 2 manages dirty state (`hw`), `DBM` (bit 51) write too, the
+/// writable-clean leaf's — and `XN` (bit 54) execute-never at EL1 and EL0
+/// alike.
+const fn s2_permissions(desc: u64, hw: HwUpdate) -> u8 {
     let mut perms = 0;
     if (desc >> 6) & 1 == 1 {
         perms |= PERM_EL1_R | PERM_EL0_R;
     }
-    if (desc >> 7) & 1 == 1 {
+    if (desc >> 7) & 1 == 1 || (hw.dirty() && (desc >> 51) & 1 == 1) {
         perms |= PERM_EL1_W | PERM_EL0_W;
     }
     if (desc >> 54) & 1 == 0 {
@@ -230,9 +245,11 @@ impl<L: Levels> Cpu<L> {
     /// Arm `AArch64_NSS2TTWParams`, as far as this processor has them.
     fn s2_params(&self) -> S2Params {
         let el2 = self.el2();
+        let features = self.imp.features;
         S2Params {
-            start: s2_start(el2.vtcr, self.imp.features),
+            start: s2_start(el2.vtcr, features),
             vttbr: el2.vttbr,
+            hw: HwUpdate::of(el2.vtcr, VTCR_EL2_HA, VTCR_EL2_HD, features),
         }
     }
 
@@ -251,7 +268,10 @@ impl<L: Levels> Cpu<L> {
     /// output size `PS` gives, else an address size fault, at level 0 for
     /// the first descriptor and at the level of the descriptor holding the
     /// address for the others ([`Cpu::walk_tables`], whose descriptors'
-    /// addresses are physical).
+    /// addresses are physical); and a leaf whose Access flag is clear
+    /// faults unless `VTCR_EL2.HA` has stage 2 manage it, the leaf then
+    /// going back as read for its translation to update
+    /// (`AArch64_S2Translate`, `Cpu::s2_leaf`).
     pub(crate) fn s2_walk<B: PhysBus>(
         &self,
         bus: &mut B,
@@ -274,16 +294,18 @@ impl<L: Levels> Cpu<L> {
         } = s2_start;
         let start = WalkStart::<PhysAddr>::of_base(params.vttbr, granule, level, ia_bits, oa)?;
         let physical = &mut |_: &mut B, address: PhysAddr| Ok::<PhysAddr, Infallible>(address);
-        let leaf = match self.walk_tables(bus, ipa, start, physical) {
+        let leaf = match self.walk_tables(bus, ipa, start, params.hw, physical) {
             Ok(leaf) => leaf,
             Err(WalkStop::Fault(fault)) => return Err(fault),
             Err(WalkStop::Descriptor(never)) => match never {},
         };
-        let desc = leaf.desc;
+        let desc = leaf.desc.value;
         Ok(S2Walked {
             pa: leaf.out,
-            perms: s2_permissions(desc),
+            perms: s2_permissions(desc, params.hw),
             level: leaf.level,
+            leaf: leaf.desc,
+            hw: params.hw,
             memattr: ((desc >> 2) & 0xF) as u8,
             sh: oa.shareability(desc),
             fnxs: self.implements(Feature::Xs) && (desc >> 11) & 1 == 1,

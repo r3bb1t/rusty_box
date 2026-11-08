@@ -262,6 +262,15 @@ pub(crate) enum Feature {
     /// not implemented, this field is 0b0000"), so it comes with EL2 alone.
     /// No encoding of its own.
     Gtg,
+    /// FEAT_HAF: the walk sets a Block or Page descriptor's Access flag
+    /// where `TCR_ELx.HA` or `VTCR_EL2.HA` is set, rather than faulting on
+    /// it. No encoding of its own.
+    Haf,
+    /// FEAT_HAFDBS: with FEAT_HAF, which it needs (`FEAT_HAFDBS ==>
+    /// FEAT_HAF`), the walk makes a writable-clean descriptor (`DBM` set)
+    /// writable-dirty on a write where `TCR_ELx.HD` or `VTCR_EL2.HD` is set,
+    /// rather than faulting on it. No encoding of its own.
+    Hafdbs,
 }
 
 // `Feature::ALL` is in declaration order, and each feature has a bit of a
@@ -286,7 +295,7 @@ const _: () = {
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 76] = [
+    pub(crate) const ALL: [Feature; 78] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -363,6 +372,8 @@ impl Feature {
         Feature::Lva,
         Feature::Lpa2,
         Feature::Gtg,
+        Feature::Haf,
+        Feature::Hafdbs,
     ];
 }
 
@@ -449,6 +460,8 @@ impl Feature {
             Self::Lva => Some("FEAT_LVA"),
             Self::Lpa2 => Some("FEAT_LPA2"),
             Self::Gtg => Some("FEAT_GTG"),
+            Self::Haf => Some("FEAT_HAF"),
+            Self::Hafdbs => Some("FEAT_HAFDBS"),
         }
     }
 
@@ -503,6 +516,8 @@ impl Feature {
                 | Self::Lva
                 | Self::Lpa2
                 | Self::Gtg
+                | Self::Haf
+                | Self::Hafdbs
         )
     }
 
@@ -588,9 +603,11 @@ impl Features {
     /// FEAT_SME2; and these options: the Cryptographic Extension's AES, PMULL, SHA-1
     /// and SHA-256, QARMA5 as the pointer authentication algorithm,
     /// FEAT_FPAC and FEAT_FPACCOMBINE, FEAT_SSBS and FEAT_SSBS2,
-    /// FEAT_RPRES, every translation granule at both stages, FEAT_TTST, and
+    /// FEAT_RPRES, every translation granule at both stages, FEAT_TTST,
     /// 52-bit physical and virtual addresses with every granule (FEAT_LPA,
-    /// FEAT_LVA, FEAT_LPA2). Not FEAT_SVE: Streaming SVE mode is its only
+    /// FEAT_LVA, FEAT_LPA2), and the hardware update of the Access flag and
+    /// of dirty state (FEAT_HAF, FEAT_HAFDBS) without the Table descriptor
+    /// Access flag (FEAT_HAFT). Not FEAT_SVE: Streaming SVE mode is its only
     /// SVE. Not FEAT_DoubleLock, the one Cortex-A57 feature Armv9.0
     /// forbids.
     pub(crate) const ARMV9P2: Self = Self::of(&[
@@ -675,6 +692,8 @@ impl Features {
         Feature::Lpa,
         Feature::Lva,
         Feature::Lpa2,
+        Feature::Haf,
+        Feature::Hafdbs,
     ]);
 
     /// The set of `features`.

@@ -4346,3 +4346,200 @@ fn a_host_reaches_cntpoff_el2_by_its_name() {
         assert_eq!(cpu.sysreg(SysReg::CNTPOFF_EL2), Err(SysRegRefusal::Absent));
     }
 }
+
+// ----- FEAT_HAF and FEAT_HAFDBS at stage 2 and in the EL2 regime -----
+//
+// Arm `AArch64_S2Translate` with `AArch64_SetAccessFlag`,
+// `AArch64_SetDirtyState` and `AArch64_MemSwapTableDesc`,
+// `AArch64_S2DirectBasePermissions` (`DBM`), `AArch64_NSS2TTWParams`
+// (`VTCR_EL2.HA` and `HD`), `AArch64_S1TTWParamsEL2` (`TCR_EL2.HA` and
+// `HD`), and `AArch64_S1Translate`'s update of a stage 1 descriptor, whose
+// stage 2 translation needs write permission (`CreateAccDescTTEUpdate`,
+// Arm ARM D8.5.2.1 RBDJJL). No processor model has both EL2 and the
+// features, so these run on one implementing every feature, and on the
+// Cortex-A57, which has EL2 and neither.
+
+/// A Block or Page descriptor's `DBM`.
+const DBM: u64 = 1 << 51;
+/// `VTCR_EL2.HA` and `HD`, and `TCR_EL2`'s at the same bits.
+const VTCR_HA: u64 = 1 << 21;
+const VTCR_HD: u64 = 1 << 22;
+/// `TCR_EL1.HA` and `HD`.
+const TCR_EL1_HA: u64 = 1 << 39;
+const TCR_EL1_HD: u64 = 1 << 40;
+const MSR_VTCR: u32 = 0xD51C_2140; // msr vtcr_el2, x0
+const MRS_VTCR: u32 = 0xD53C_2140; // mrs x0, vtcr_el2
+const MSR_TCR_EL2: u32 = 0xD51C_2040; // msr tcr_el2, x0
+const MRS_TCR_EL2: u32 = 0xD53C_2040; // mrs x0, tcr_el2
+/// The stage 2 descriptor of `EL1_DATA`'s IPA, which stage 2 maps to
+/// `GUEST_DATA`, and its bits but the ones each test sets.
+const S2_DATA_ENTRY: u64 = S2_L2 + 8 * (EL1_DATA >> 21);
+const S2_DATA: u64 = GUEST_DATA | INNER_SHAREABLE | S2_NORMAL | BLOCK;
+/// The stage 2 descriptor of the first 2 MiB of IPAs, which hold the code
+/// and the EL1&0 regime's tables, and its bits but `S2AP` and `DBM`.
+const S2_TABLES_ENTRY: u64 = S2_L2;
+const S2_TABLES: u64 = AF | INNER_SHAREABLE | S2_NORMAL | BLOCK;
+/// The EL1&0 regime's stage 1 descriptor of `SHARED`, and its bits.
+const S1_SHARED_ENTRY: u64 = EL1_L2 + 8 * (SHARED >> 21);
+const S1_SHARED: u64 = EL1_DATA | AF | INNER_SHAREABLE | BLOCK;
+/// The instruction syndrome a stage 2 abort on `LDR` or `STR` of `x2`
+/// reports.
+const X2_SYNDROME: u64 = ISV | sas(3) | srt(2) | SF;
+
+/// [`stage2_on`] a processor implementing every feature, with `VTCR_EL2`'s
+/// `HA` and `HD` as `hw` holds them, written by an `MSR` at EL2, which
+/// keeps them.
+fn stage2_updating(hw: u64) -> Machine<WithEl2> {
+    let mut m = stage2_on(Implementation::EVERY_FEATURE);
+    m.at(El::El2);
+    m.cpu.x[0] = VTCR_IDENTITY | hw;
+    assert_eq!(m.run(MSR_VTCR), None);
+    assert_eq!(m.run(MRS_VTCR), None);
+    assert_eq!(m.cpu.x[0] & (VTCR_HA | VTCR_HD), hw, "VTCR_EL2 keeps them");
+    m
+}
+
+/// With `VTCR_EL2.HA` an EL1 load through a stage 2 leaf whose Access flag
+/// is clear completes and sets the flag, the rest of the descriptor as it
+/// was; without it the load takes a stage 2 Access flag fault to EL2,
+/// reporting the IPA, and the descriptor stays as it was.
+#[test]
+fn vtcr_ha_has_stage_2_set_a_clear_access_flag() {
+    let unflagged = S2_DATA | S2AP_R | S2AP_W;
+    let mut m = stage2_updating(VTCR_HA);
+    m.ram.put64(S2_DATA_ENTRY, unflagged);
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x3333);
+    assert_eq!(m.ram.get64(S2_DATA_ENTRY), unflagged | AF);
+
+    let mut m = stage2_updating(0);
+    m.ram.put64(S2_DATA_ENTRY, unflagged);
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), stage2_abort(X2_SYNDROME | ACCESS_FLAG_L2));
+    assert_eq!(m.cpu.el2().hpfar, fipa(EL1_DATA));
+    assert_eq!(m.ram.get64(S2_DATA_ENTRY), unflagged);
+}
+
+/// With `VTCR_EL2.HA` and `HD` a stage 2 leaf whose `DBM` is set and
+/// `S2AP[1]` clear is writable-clean: a load leaves it clean, and the
+/// store after it — past the TLB entry the load left — completes and sets
+/// `S2AP[1]`. Without `HD`, or with `HD` but not `HA`, the store takes a
+/// stage 2 Permission fault and the leaf stays clean.
+#[test]
+fn vtcr_hd_has_a_store_make_a_writable_clean_stage_2_leaf_dirty() {
+    let clean = S2_DATA | AF | S2AP_R | DBM;
+    let mut m = stage2_updating(VTCR_HA | VTCR_HD);
+    m.ram.put64(S2_DATA_ENTRY, clean);
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), None, "a load");
+    assert_eq!(m.ram.get64(S2_DATA_ENTRY), clean, "leaves the leaf clean");
+    m.cpu.x[2] = 0x5555;
+    assert_eq!(m.run(STR), None, "a store");
+    assert_eq!(m.ram.get64(GUEST_DATA), 0x5555);
+    assert_eq!(m.ram.get64(S2_DATA_ENTRY), clean | S2AP_W, "makes it dirty");
+
+    for hw in [VTCR_HA, VTCR_HD, 0] {
+        let mut m = stage2_updating(hw);
+        m.ram.put64(S2_DATA_ENTRY, clean);
+        m.at(El::El1);
+        m.cpu.x[1] = SHARED;
+        m.cpu.x[2] = 0x5555;
+        assert_eq!(
+            m.run(STR),
+            stage2_abort(X2_SYNDROME | WNR | PERMISSION_L2),
+            "VTCR_EL2 HA/HD {hw:#x}"
+        );
+        assert_eq!(m.ram.get64(S2_DATA_ENTRY), clean, "{hw:#x}");
+        assert_eq!(m.ram.get64(GUEST_DATA), 0x3333, "{hw:#x}");
+    }
+}
+
+/// Stage 1's hardware update of its own descriptor is a write of the
+/// descriptor, which stage 2 translates for writing: with stage 1's `HD`
+/// and stage 2's, a store to a writable-clean stage 1 leaf whose table's
+/// page stage 2 maps writable-clean makes both dirty. Without stage 2's
+/// `HD` the table's page refuses the update its write, a stage 2
+/// Permission fault on stage 1's walk (`S1PTW`) reporting the table's IPA,
+/// and stage 1's leaf stays clean.
+#[test]
+fn stage_1s_update_of_its_descriptor_needs_stage_2s_write() {
+    let s1_clean = S1_SHARED | AP2 | DBM;
+    let s2_clean = S2_TABLES | S2AP_R | DBM;
+    let set_up = |hw: u64| {
+        let mut m = stage2_updating(hw);
+        m.ram.put64(S1_SHARED_ENTRY, s1_clean);
+        m.ram.put64(S2_TABLES_ENTRY, s2_clean);
+        m.cpu.sys.tcr_el1 |= TCR_EL1_HA | TCR_EL1_HD;
+        m.cpu.el10_context_changed();
+        m.at(El::El1);
+        m.cpu.x[1] = SHARED;
+        m.cpu.x[2] = 0x6666;
+        m
+    };
+    let mut m = set_up(VTCR_HA | VTCR_HD);
+    assert_eq!(m.run(STR), None);
+    assert_eq!(m.ram.get64(GUEST_DATA), 0x6666);
+    assert_eq!(m.ram.get64(S1_SHARED_ENTRY), S1_SHARED | DBM, "AP[2] clear");
+    assert_eq!(
+        m.ram.get64(S2_TABLES_ENTRY),
+        s2_clean | S2AP_W,
+        "S2AP[1] set"
+    );
+
+    let mut m = set_up(VTCR_HA);
+    assert_eq!(m.run(STR), stage2_abort(S1PTW | WNR | PERMISSION_L2));
+    assert_eq!((m.cpu.el2().far, m.cpu.el2().hpfar), (SHARED, fipa(EL1_L2)));
+    assert_eq!(m.ram.get64(S1_SHARED_ENTRY), s1_clean);
+    assert_eq!(m.ram.get64(S2_TABLES_ENTRY), s2_clean);
+    assert_eq!(m.ram.get64(GUEST_DATA), 0x3333);
+}
+
+/// The EL2 regime's walks with `TCR_EL2.HA` set a clear Access flag, and
+/// with `HD` too make a writable-clean block (`AP[2]` and `DBM` set)
+/// writable-dirty on a store, as the EL1&0 regime's do.
+#[test]
+fn tcr_el2_ha_and_hd_update_the_el2_regimes_leaves() {
+    let read_only = EL2_L2 + 8 * (READ_ONLY >> 21);
+    let shared = EL2_L2 + 8 * (SHARED >> 21);
+    let mut m = translating_on(Implementation::EVERY_FEATURE);
+    m.ram.put64(shared, EL2_DATA | INNER_SHAREABLE | BLOCK);
+    let clean = READ_ONLY | AF | INNER_SHAREABLE | BLOCK | AP2 | AP1 | DBM;
+    m.ram.put64(read_only, clean);
+    m.cpu.x[0] = m.cpu.el2().tcr | VTCR_HA | VTCR_HD;
+    assert_eq!(m.run(MSR_TCR_EL2), None);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x2222);
+    assert_eq!(m.ram.get64(shared), EL2_DATA | AF | INNER_SHAREABLE | BLOCK);
+    m.cpu.x[1] = READ_ONLY;
+    m.cpu.x[2] = 0x7777;
+    assert_eq!(m.run(STR), None);
+    assert_eq!(m.ram.get64(READ_ONLY), 0x7777);
+    assert_eq!(m.ram.get64(read_only), clean & !AP2);
+}
+
+/// On the Cortex-A57, which has neither FEAT_HAF nor FEAT_HAFDBS, `HA`
+/// and `HD` are RES0 in `VTCR_EL2` and `TCR_EL2`: an `MSR` keeps neither,
+/// and a stage 2 leaf whose Access flag is clear faults.
+#[test]
+fn the_cortex_a57_keeps_no_ha_or_hd_at_el2() {
+    let mut m = stage2();
+    for (msr, mrs, value) in [
+        (MSR_VTCR, MRS_VTCR, m.cpu.el2().vtcr),
+        (MSR_TCR_EL2, MRS_TCR_EL2, m.cpu.el2().tcr),
+    ] {
+        m.at(El::El2);
+        m.cpu.x[0] = value | VTCR_HA | VTCR_HD;
+        assert_eq!(m.run(msr), None);
+        assert_eq!(m.run(mrs), None);
+        assert_eq!(m.cpu.x[0], value, "{msr:#010x}");
+    }
+    m.ram.put64(S2_DATA_ENTRY, S2_DATA | S2AP_R | S2AP_W);
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), stage2_abort(X2_SYNDROME | ACCESS_FLAG_L2));
+}

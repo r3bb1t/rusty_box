@@ -39,6 +39,17 @@
 //! than the architecture requires: an entry is never used under register
 //! values other than those it was made under, so neither ASIDs nor VMIDs
 //! need tagging.
+//!
+//! With FEAT_HAF and FEAT_HAFDBS a stage whose `TCR_ELx` or `VTCR_EL2`
+//! sets `HA` has its walks set a leaf's clear Access flag, and with `HD`
+//! too make a writable-clean leaf (`DBM` set) writable-dirty on a write,
+//! each an atomic swap of the descriptor in memory once the access's checks
+//! at that stage pass, the translation made again where the descriptor
+//! changed under the swap (`AArch64_S1Translate`, `AArch64_S2Translate`,
+//! `AArch64_MemSwapTableDesc`). The TLB keeps no leaf whose flag is clear,
+//! and a writable-clean one without its write permission, so that a write
+//! that hits it walks and updates it; a hit that permits its access never
+//! needs an update, and so costs nothing more.
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
@@ -58,7 +69,7 @@ use super::regime::{
 };
 use super::stage2::{s2_start, S2Start, S2Walked};
 use super::{id, sctlr, Cpu, El, Levels, SysRegs};
-use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
+use crate::bus::{AccessWidth, BusFault, DescriptorSwap, PhysAddr, PhysBus, PhysSpan, Writes};
 
 /// What an access does, for permission checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -777,6 +788,61 @@ impl Needs {
     const fn writes(self) -> bool {
         matches!(self, Self::Access(AccessKind::Write))
     }
+
+    /// What the access is to the hardware updates of the descriptors that
+    /// translate it: one that writes (`accdesc.write`, an atomic
+    /// read-modify-write's too) sets the dirty state; every other, cache
+    /// maintenance included, the Access flag alone.
+    const fn updating(self) -> Updating {
+        match self {
+            Self::Access(AccessKind::Write) | Self::ReadWrite => Updating::AccessFlagAndDirty,
+            Self::Access(AccessKind::Read | AccessKind::Fetch) | Self::Maintenance(_) => {
+                Updating::AccessFlag
+            }
+        }
+    }
+}
+
+/// What a stage 2 translation is made for, which decides the permissions
+/// its checks need and the hardware updates it makes.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum S2For {
+    /// A stage 1 descriptor (`AccessType_TTW`), read by its walk or
+    /// updated by the hardware ([`DescriptorAccess`]).
+    Descriptor(DescriptorAccess),
+    /// The access itself, needing `needs` checked against `el`'s
+    /// permissions, with Device memory's alignment check as `on_device`
+    /// asks.
+    Access {
+        needs: Needs,
+        el: El,
+        on_device: OnDevice,
+    },
+}
+
+impl S2For {
+    /// What the translation is to the hardware updates of its leaf.
+    const fn updating(self) -> Updating {
+        match self {
+            Self::Descriptor(DescriptorAccess::Read) => Updating::AccessFlag,
+            Self::Descriptor(DescriptorAccess::Update) => Updating::AccessFlagAndDirty,
+            Self::Access { needs, .. } => needs.updating(),
+        }
+    }
+}
+
+/// What stage 1 does with a descriptor whose address stage 2 translates.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DescriptorAccess {
+    /// Its walk reads it (`CreateAccDescS1TTW`).
+    Read,
+    /// Its hardware update reads and writes it (`CreateAccDescTTEUpdate`),
+    /// which needs stage 2's write permission as well.
+    Update,
 }
 
 /// The permission an access needs to maintain the cache at `va` by `op`
@@ -856,11 +922,21 @@ impl Stage2Made {
             .copied()
     }
 
-    /// Record `entry`, a page this translation had not yet made: there is
-    /// room for every page one translation reads ([`MADE`]). The record is
-    /// a cache, as the TLB's kept translations are: a translation it could
-    /// not hold would only be walked again when next needed.
+    /// Record `entry`, in place of the translation of its page this
+    /// translation made before, which a walk made again because it refused
+    /// an access (a write to a writable-clean leaf); else in a free slot:
+    /// there is room for every page one translation reads ([`MADE`]). The
+    /// record is a cache, as the TLB's kept translations are: a translation
+    /// it could not hold would only be walked again when next needed.
     fn record(&mut self, entry: IpaEntry) {
+        let same = self
+            .made
+            .iter_mut()
+            .find(|slot| slot.is_some_and(|made| made.key == entry.key));
+        if let Some(slot) = same {
+            *slot = Some(entry);
+            return;
+        }
         let free = self.made.iter_mut().find(|slot| slot.is_none());
         debug_assert!(free.is_some(), "a translation reads at most MADE IPA pages");
         if let Some(slot) = free {
@@ -919,12 +995,14 @@ enum Stage2At {
 }
 
 /// What stage 2 gives an IPA, as far as its checks (Arm
-/// `AArch64_S2Translate` before them): the physical address, and the leaf
-/// the checks read.
+/// `AArch64_S2Translate` before them): the physical address, the leaf the
+/// checks read, and the leaf as the TLB may keep it once its hardware
+/// update is made ([`kept_perms`]; `None` where it may not).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Stage2Output {
     pa: PhysAddr,
     leaf: Stage2Leaf,
+    kept: Option<Stage2Leaf>,
 }
 
 /// The permissions of the regime's privileged level: EL1's in EL1&0, EL2's
@@ -1170,6 +1248,10 @@ pub(crate) struct QuadwordPair {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Walked {
     ipa: Ipa,
+    /// The permissions the leaf gives, its `AP[2]` taken as clear where
+    /// dirty state is managed and its `DBM` is set
+    /// (`AArch64_S1DirectBasePermissions`): a writable-clean leaf permits
+    /// the writes that make it writable-dirty.
     perms: u8,
     level: LeafLevel,
     /// The regime's `MAIR_ELx` attribute the descriptor's `AttrIndx`
@@ -1179,6 +1261,10 @@ struct Walked {
     /// [`Walked::attrs`].
     attr: u8,
     sh: u8,
+    /// The leaf descriptor as the walk read it, at its IPA, and the
+    /// hardware updates the regime makes of it.
+    leaf: LeafDescriptor<Ipa>,
+    hw: HwUpdate,
 }
 
 impl Walked {
@@ -1186,6 +1272,226 @@ impl Walked {
     const fn attrs(&self, features: Features) -> MemAttrs {
         MemAttrs::stage1(self.attr, self.sh, features)
     }
+}
+
+/// A Block or Page descriptor's Access flag, bit 10.
+const DESC_AF: u64 = 1 << 10;
+/// A Block or Page descriptor's `DBM`, bit 51: with dirty state managed
+/// (FEAT_HAFDBS), the descriptor is writable-clean or writable-dirty by its
+/// bit 7 ([`DIRTY_BIT`]).
+const DESC_DBM: u64 = 1 << 51;
+/// Bit 7 of a Block or Page descriptor: stage 1's `AP[2]`, set for
+/// read-only, and stage 2's `S2AP[1]`, set for writable — the bit dirty
+/// state is held in, with opposite senses ([`DescriptorStage`]).
+const DIRTY_BIT: u64 = 1 << 7;
+/// Every write permission a leaf can give.
+const PERMS_W: u8 = PERM_EL1_W | PERM_EL0_W;
+
+/// Which hardware updates of its Block and Page descriptors a translation
+/// stage makes (Arm `S1TTWParams` and `S2TTWParams` `ha` and `hd`, from
+/// `TCR_ELx.HA` and `HD` or `VTCR_EL2.HA` and `HD`): none, so that a leaf
+/// whose Access flag is clear faults; the Access flag's (FEAT_HAF); or the
+/// Access flag's and the dirty state's of a leaf whose `DBM` is set
+/// (FEAT_HAFDBS). `HD` has no effect without `HA` (`AArch64_S1TTWParamsEL10`
+/// and its siblings), and no FEAT_HAFT here updates a Table descriptor.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HwUpdate {
+    None,
+    AccessFlag,
+    AccessFlagAndDirty,
+}
+
+impl HwUpdate {
+    /// What a stage whose register holds `reg` makes, its `HA` and `HD` the
+    /// bits `ha` and `hd`, on a processor implementing `features`: `HA` is
+    /// RES0 without FEAT_HAF, and `HD` without FEAT_HAFDBS.
+    #[inline]
+    pub(crate) const fn of(reg: u64, ha: u64, hd: u64, features: Features) -> Self {
+        if !features.has(Feature::Haf) || reg & ha == 0 {
+            Self::None
+        } else if features.has(Feature::Hafdbs) && reg & hd != 0 {
+            Self::AccessFlagAndDirty
+        } else {
+            Self::AccessFlag
+        }
+    }
+
+    /// Whether the Access flag is managed: a leaf whose flag is clear is
+    /// updated rather than faulted on.
+    #[inline]
+    pub(super) const fn access_flag(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Whether dirty state is managed: a leaf whose `DBM` is set is
+    /// writable, and a write to it while it is clean makes it dirty.
+    #[inline]
+    pub(super) const fn dirty(self) -> bool {
+        matches!(self, Self::AccessFlagAndDirty)
+    }
+}
+
+/// The stage a Block or Page descriptor translates at, which gives its bit
+/// 7 ([`DIRTY_BIT`]) its sense.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DescriptorStage {
+    /// `AP[2]`: set is read-only, so writable-clean.
+    One,
+    /// `S2AP[1]`: clear is not writable, so writable-clean.
+    Two,
+}
+
+/// What an access is to the hardware updates of a descriptor that
+/// translates it (Arm `AArch64_SetAccessFlag`, `AArch64_SetDirtyState`).
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Updating {
+    /// It sets the Access flag: a read, a fetch, a walk's read of a
+    /// descriptor, and cache maintenance by address, which this core
+    /// faults on a clear flag for ("Generate access flag fault on IC/DC
+    /// operations" TRUE) and so updates it for.
+    AccessFlag,
+    /// It sets the Access flag and the dirty state: a write, an atomic
+    /// read-modify-write, and a descriptor's own hardware update
+    /// (`CreateAccDescTTEUpdate`).
+    AccessFlagAndDirty,
+}
+
+/// A Block or Page descriptor a walk ended at: its value as read, and its
+/// address in the walk's output address space `A` ([`WalkOutput`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LeafDescriptor<A> {
+    pub(crate) value: u64,
+    pub(crate) at: A,
+}
+
+impl<A> LeafDescriptor<A> {
+    /// The descriptor an access the stage's checks permit makes of this one
+    /// under `hw` (Arm `AArch64_SetAccessFlag` and `AArch64_SetDirtyState`,
+    /// for an access with no fault): its Access flag set where `hw` manages
+    /// it, and where `hw` manages dirty state and `updating` sets it, a
+    /// leaf whose `DBM` is set made writable-dirty. An access a check
+    /// refuses makes no update: of the outcomes the Arm ARM leaves
+    /// CONSTRAINED UNPREDICTABLE after an Alignment or Permission fault
+    /// (`Unpredictable_AFUPDATE`, `Unpredictable_DBUPDATE`; D8.5.1.2
+    /// RQSPMS), this core takes "no update", and caches no leaf whose flag
+    /// is still clear ([`kept_perms`]).
+    pub(super) const fn updated(
+        &self,
+        hw: HwUpdate,
+        updating: Updating,
+        stage: DescriptorStage,
+    ) -> u64 {
+        let desc = self.value;
+        let mut new = desc;
+        if hw.access_flag() {
+            new |= DESC_AF;
+        }
+        if hw.dirty() && matches!(updating, Updating::AccessFlagAndDirty) && desc & DESC_DBM != 0 {
+            new = match stage {
+                DescriptorStage::One => new & !DIRTY_BIT,
+                DescriptorStage::Two => new | DIRTY_BIT,
+            };
+        }
+        new
+    }
+}
+
+/// Whether the descriptor `desc` of `stage` is writable-clean under `hw`
+/// (Arm ARM D8.5.2.1, RXZFQH): dirty state managed, its `DBM` set, and its
+/// bit 7 the sense that does not permit a write.
+const fn writable_clean(desc: u64, hw: HwUpdate, stage: DescriptorStage) -> bool {
+    let not_writable = match stage {
+        DescriptorStage::One => desc & DIRTY_BIT != 0,
+        DescriptorStage::Two => desc & DIRTY_BIT == 0,
+    };
+    hw.dirty() && desc & DESC_DBM != 0 && not_writable
+}
+
+/// The permissions `perms` a walk gave its leaf as the TLB keeps them, the
+/// descriptor `desc` now in memory under `hw`, or `None` where the TLB may
+/// not keep the leaf at all: its Access flag clear, which only a managed
+/// flag the access did not update leaves to be walked past (Arm ARM
+/// D8.5.1, RDWZCQ). A writable-clean leaf's write permissions are left
+/// out, so that a write that hits it walks and makes it dirty
+/// (RSGJBL): only a read, a fetch or an access to a dirty leaf is answered
+/// by the TLB.
+const fn kept_perms(perms: u8, desc: u64, hw: HwUpdate, stage: DescriptorStage) -> Option<u8> {
+    if desc & DESC_AF == 0 {
+        None
+    } else if writable_clean(desc, hw, stage) {
+        Some(perms & !PERMS_W)
+    } else {
+        Some(perms)
+    }
+}
+
+/// Whether a translation's walks make the hardware updates their stages'
+/// registers enable: an access's and an address translation instruction's
+/// do, recording in their [`Writes`] each descriptor they wrote, for the
+/// processor to note as its stores once the walks return
+/// ([`Cpu::note_written`]); a debugger's write nothing, and translate as
+/// though each update had been made.
+///
+/// Closed (R5).
+pub(super) enum Updates<'a> {
+    Made(&'a mut Writes),
+    Withheld,
+}
+
+/// What a translation's walks draw on and leave: where their stage 2
+/// translations come from, and whether they make their hardware updates.
+pub(super) struct Walks<'a> {
+    stage2: Stage2Source<'a>,
+    updates: Updates<'a>,
+}
+
+impl<'a> Walks<'a> {
+    /// The walks of an access's or an address translation instruction's
+    /// translation: their stage 2 translations from and recorded in
+    /// `stage2` (walked where it is `None`, as an address translation
+    /// instruction's are, and as there are none to make in a regime stage
+    /// 2 does not translate), their hardware updates made and the
+    /// descriptors they wrote recorded in `written`.
+    fn made(stage2: Option<&'a mut Stage2Made>, written: &'a mut Writes) -> Self {
+        let stage2 = match stage2 {
+            Some(made) => Stage2Source::Cached(made),
+            None => Stage2Source::Walked,
+        };
+        Self {
+            stage2,
+            updates: Updates::Made(written),
+        }
+    }
+
+    /// A debugger's walks: every stage 2 translation walked, and no
+    /// hardware update written.
+    fn withheld() -> Self {
+        Self {
+            stage2: Stage2Source::Walked,
+            updates: Updates::Withheld,
+        }
+    }
+}
+
+/// The descriptor a translation goes on with after its hardware update
+/// ([`Cpu::swap_leaf`]): Arm `AArch64_MemSwapTableDesc`'s outcome as
+/// `AArch64_S1Translate` and `AArch64_S2Translate` read it.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Swapped {
+    /// The descriptor the walk read, as updated: the one memory holds, or
+    /// for a debugger's walk the one it would.
+    Holds(u64),
+    /// Memory held another descriptor than the walk read, which the update
+    /// left as it was: the translation is made again from its walk.
+    Changed,
 }
 
 /// The address space a table walk outputs into, which its tables lie in
@@ -1269,12 +1575,12 @@ impl<A: WalkOutput> WalkStart<A> {
     }
 }
 
-/// The leaf a table walk ends at: its descriptor and level, the output
-/// address of the input address, and the OR of every table descriptor's
-/// bits 63:59.
+/// The leaf a table walk ends at: its descriptor, where it is and its
+/// level, the output address of the input address, and the OR of every
+/// table descriptor's bits 63:59.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WalkLeaf<A> {
-    pub(super) desc: u64,
+    pub(super) desc: LeafDescriptor<A>,
     pub(super) level: LeafLevel,
     pub(super) out: A,
     pub(super) tables: u64,
@@ -2979,12 +3285,15 @@ impl<L: Levels> Cpu<L> {
 
     /// A TLB miss: Arm `AArch64_FullTranslate` for an access needing `needs`
     /// checked against `el`'s permissions, cached under `key`
-    /// ([`Cpu::found_tlb_key`]). Stage 1 ([`Cpu::stage1`]) and its checks
-    /// ([`Cpu::s1_refusal`]); then under stage 2 the translation of the
-    /// output address ([`Cpu::s2_leaf`]) and its checks
-    /// ([`Cpu::s2_refusal`]). What stage 1's walk found is cached as soon
-    /// as it is known without stage 2, and with stage 2 once both stages
-    /// have translated, so an access stage 1 refuses leaves no entry there;
+    /// ([`Cpu::found_tlb_key`]). Stage 1 ([`Cpu::stage1`]), its checks
+    /// ([`Cpu::s1_refusal`]) and the hardware update of its leaf
+    /// ([`Cpu::s1_update`]), the translation made again from its walk where
+    /// the leaf changed under the update; then under stage 2 the translation
+    /// of the output address with its hardware update ([`Cpu::s2_leaf`]) and
+    /// its checks ([`Cpu::s2_refusal`]). What stage 1's walk found is cached
+    /// as soon as it is known without stage 2, and with stage 2 once both
+    /// stages have translated, so an access stage 1 refuses leaves no entry
+    /// there, each stage's leaf as the TLB may keep it ([`kept_perms`]);
     /// the stage 2 translations made, in stage 2's current context
     /// ([`Cpu::found_stage2_tag`]), are kept whatever the outcome.
     #[inline(never)]
@@ -3027,22 +3336,43 @@ impl<L: Levels> Cpu<L> {
         let regime = self.regime();
         let kind = needs.kind();
         let write = needs.writes();
-        let mut source = match stage2.as_deref_mut() {
-            Some(made) => Stage2Source::Cached(made),
-            // No descriptor address for stage 2 to translate.
-            None => Stage2Source::Walked,
+        let (ipa, s1, s1_kept) = loop {
+            let out = self
+                .stage1_made(bus, regime, va, kind, el, stage2.as_deref_mut())
+                .map_err(|f| f.abort(write))?;
+            let s1 = self.stage1_leaf(regime, &out);
+            let refusal = self.s1_refusal(&s1, needs, el, on_device);
+            let walked = match out {
+                Stage1Output::Walked(walked) => walked,
+                // Stage 1 disabled, which only stage 2 translates here: no
+                // leaf to update, and nothing the TLB may not keep.
+                Stage1Output::Disabled(ipa) => match refusal {
+                    Some(abort) => return Err(abort),
+                    None => break (ipa, s1, Some(s1)),
+                },
+            };
+            let held = match refusal {
+                Some(_) => walked.leaf.value,
+                None => {
+                    let updated = self
+                        .s1_update(bus, &walked, needs.updating(), stage2.as_deref_mut())
+                        .map_err(|f| f.abort(write))?;
+                    match updated {
+                        Swapped::Holds(desc) => desc,
+                        Swapped::Changed => continue,
+                    }
+                }
+            };
+            let kept = kept_perms(s1.perms, held, walked.hw, DescriptorStage::One)
+                .map(|perms| Stage1Leaf { perms, ..s1 });
+            if let (None, Some(kept)) = (&stage2, kept) {
+                self.cache(key, va, kind, kept, None, walked.ipa.untranslated());
+            }
+            match refusal {
+                Some(abort) => return Err(abort),
+                None => break (walked.ipa, s1, kept),
+            }
         };
-        let out = self
-            .stage1(bus, regime, va, kind, el, &mut source)
-            .map_err(|f| f.abort(write))?;
-        let s1 = self.stage1_leaf(regime, &out);
-        let ipa = out.ipa();
-        if let (Stage1Output::Walked(_), None) = (&out, &stage2) {
-            self.cache(key, va, kind, s1, None, ipa.untranslated());
-        }
-        if let Some(abort) = self.s1_refusal(&s1, needs, el, on_device) {
-            return Err(abort);
-        }
         let guarded = s1.perms & GUARDED != 0;
         let Some(made) = stage2 else {
             return Ok(Mapping {
@@ -3051,13 +3381,24 @@ impl<L: Levels> Cpu<L> {
                 memory: s1.memory,
             });
         };
-        let s2 = self
-            .s2_leaf(bus, ipa, &mut Stage2Source::Cached(made))
-            .map_err(|fault| {
-                let stage = TranslationStage::Two { ipa };
-                NoTranslation { stage, fault }.abort(write)
-            })?;
-        self.cache(key, va, kind, s1, Some(s2.leaf), s2.pa);
+        let mut written = Writes::NONE;
+        let s2 = {
+            let mut walks = Walks::made(Some(made), &mut written);
+            let purpose = S2For::Access {
+                needs,
+                el,
+                on_device,
+            };
+            self.s2_leaf(bus, ipa, purpose, &mut walks)
+        };
+        self.note_written(&written);
+        let s2 = s2.map_err(|fault| {
+            let stage = TranslationStage::Two { ipa };
+            NoTranslation { stage, fault }.abort(write)
+        })?;
+        if let (Some(s1_kept), Some(s2_kept)) = (s1_kept, s2.kept) {
+            self.cache(key, va, kind, s1_kept, Some(s2_kept), s2.pa);
+        }
         if let Some(abort) = self.s2_refusal(s2.leaf, needs, el, on_device, write) {
             return Err(abort);
         }
@@ -3067,6 +3408,113 @@ impl<L: Levels> Cpu<L> {
             guarded,
             memory: entry_memory(s1.memory, Some(s2.leaf.memory), cd),
         })
+    }
+
+    /// Stage 1 of `regime` for an access of `kind` at `va` checked against
+    /// `el`'s permissions ([`Cpu::stage1`]), its descriptors' stage 2
+    /// translations from and recorded in `stage2` where stage 2 translates
+    /// the regime, and the hardware updates its walk makes of them noted as
+    /// the processor's stores ([`Cpu::note_written`]).
+    fn stage1_made<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        regime: Regime,
+        va: u64,
+        kind: AccessKind,
+        el: El,
+        stage2: Option<&mut Stage2Made>,
+    ) -> Result<Stage1Output, NoTranslation> {
+        let mut written = Writes::NONE;
+        let out = {
+            let mut walks = Walks::made(stage2, &mut written);
+            self.stage1(bus, regime, va, kind, el, &mut walks)
+        };
+        self.note_written(&written);
+        out
+    }
+
+    /// Arm `AArch64_S1Translate`'s hardware update of the leaf `walked`
+    /// found, for an access its checks permit that makes `updating`: the
+    /// descriptor made of it ([`LeafDescriptor::updated`]) swapped in for
+    /// it where the two differ ([`Cpu::swap_leaf`]), at its IPA, which
+    /// stage 2 translates for the update first where it translates the
+    /// regime (`AArch64_S2Translate` with `CreateAccDescTTEUpdate`: read
+    /// and write permission, and the hardware updates of stage 2's own
+    /// leaf, [`DescriptorAccess::Update`]), from and into `stage2`. A
+    /// fault of stage 2 there is stage 2's on stage 1's walk, and a bus
+    /// that refuses the swap a synchronous External abort on stage 1's
+    /// walk at the leaf's level. The descriptors written are noted as the
+    /// processor's stores. The update is made whatever memory type the
+    /// descriptor is in: of the outcomes the Arm ARM leaves CONSTRAINED
+    /// UNPREDICTABLE for one not Write-Back Shareable
+    /// (`Unpredictable_Unsupported_Atomic_HW_Update`), this core takes the
+    /// update, the bus swapping any descriptor atomically
+    /// ([`PhysBus::swap_descriptor`]).
+    fn s1_update<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        walked: &Walked,
+        updating: Updating,
+        stage2: Option<&mut Stage2Made>,
+    ) -> Result<Swapped, NoTranslation> {
+        let old = walked.leaf.value;
+        let new = walked
+            .leaf
+            .updated(walked.hw, updating, DescriptorStage::One);
+        if new == old {
+            return Ok(Swapped::Holds(old));
+        }
+        let at = walked.leaf.at;
+        let mut written = Writes::NONE;
+        let swapped = {
+            let mut walks = Walks::made(stage2, &mut written);
+            let pa = if self.stage2_enabled(self.regime()) {
+                self.s2_descriptor(bus, at, DescriptorAccess::Update, &mut walks)
+            } else {
+                Ok(at.untranslated())
+            };
+            pa.and_then(|pa| {
+                self.swap_leaf(bus, pa, old, new, walked.level, &mut walks.updates)
+                    .map_err(NoTranslation::stage1)
+            })
+        };
+        self.note_written(&written);
+        swapped
+    }
+
+    /// Arm `AArch64_MemSwapTableDesc` of the leaf descriptor a walk read as
+    /// `old` at the physical address `at`, at `level`, for `new`, which an
+    /// update that is due makes of it: as `updates` says, swapped on the
+    /// bus and recorded as written, or for a debugger's walk taken as made
+    /// and left unwritten. Where `new` is `old` nothing is due, and nothing
+    /// is read or written. A bus that refuses the read or the write is a
+    /// synchronous External abort on the walk at the leaf's level
+    /// (`HandleExternalTTWAbort`).
+    fn swap_leaf<B: PhysBus>(
+        &self,
+        bus: &mut B,
+        at: PhysAddr,
+        old: u64,
+        new: u64,
+        level: LeafLevel,
+        updates: &mut Updates<'_>,
+    ) -> Result<Swapped, TranslationFault> {
+        if new == old {
+            return Ok(Swapped::Holds(old));
+        }
+        let Updates::Made(written) = updates else {
+            return Ok(Swapped::Holds(new));
+        };
+        match bus.swap_descriptor(at, old, new, self.clock()) {
+            Ok(DescriptorSwap::Swapped) => {
+                written.add(at, 8);
+                Ok(Swapped::Holds(new))
+            }
+            Ok(DescriptorSwap::Changed) => Ok(Swapped::Changed),
+            Err(BusFault::Unmapped) => Err(TranslationFault::ExternalAbortOnWalk {
+                level: level.level(),
+            }),
+        }
     }
 
     /// Cache in the TLB, under `key` ([`Cpu::found_tlb_key`]), the
@@ -3144,10 +3592,10 @@ impl<L: Levels> Cpu<L> {
 
     /// Stage 1 of `regime` for an access of `kind` at `va` checked against
     /// `el`'s permissions, as far as its output: with stage 1 enabled its
-    /// walk ([`Cpu::s1_walk`]), its descriptors' stage 2 translations from
-    /// `source`; disabled, its output address ([`Cpu::s1_disabled`]). The
-    /// one stage 1 an access's translation, an address translation
-    /// instruction's and a debugger's make (R5).
+    /// walk ([`Cpu::s1_walk`]), its descriptors' stage 2 translations and
+    /// their hardware updates as `walks` says; disabled, its output address
+    /// ([`Cpu::s1_disabled`]). The one stage 1 an access's translation, an
+    /// address translation instruction's and a debugger's make (R5).
     fn stage1<B: PhysBus>(
         &self,
         bus: &mut B,
@@ -3155,10 +3603,10 @@ impl<L: Levels> Cpu<L> {
         va: u64,
         kind: AccessKind,
         el: El,
-        source: &mut Stage2Source<'_>,
+        walks: &mut Walks<'_>,
     ) -> Result<Stage1Output, NoTranslation> {
         if self.s1_enabled(regime) {
-            self.s1_walk(bus, regime, va, kind, el, source)
+            self.s1_walk(bus, regime, va, kind, el, walks)
                 .map(Stage1Output::Walked)
         } else {
             self.s1_disabled(regime, va, kind)
@@ -3207,7 +3655,7 @@ impl<L: Levels> Cpu<L> {
     /// Arm `AArch64_S1Translate` with stage 1 enabled, as far as the walk:
     /// FEAT_E0PD's refusal of an access checked against `el`'s permissions,
     /// then the walk of `regime` for an access of `kind` at `va`, its
-    /// descriptors' stage 2 translations from `source`.
+    /// descriptors' stage 2 translations as `walks` says.
     fn s1_walk<B: PhysBus>(
         &self,
         bus: &mut B,
@@ -3215,14 +3663,14 @@ impl<L: Levels> Cpu<L> {
         va: u64,
         kind: AccessKind,
         el: El,
-        source: &mut Stage2Source<'_>,
+        walks: &mut Walks<'_>,
     ) -> Result<Walked, NoTranslation> {
         if self.e0pd_refuses(va, el) {
             return Err(NoTranslation::stage1(TranslationFault::Translation {
                 level: Level::Zero,
             }));
         }
-        self.walk(bus, self.s1_params(regime, va), va, kind, source)
+        self.walk(bus, self.s1_params(regime, va), va, kind, walks)
     }
 
     /// Whether an access of `kind` checked against `el`'s permissions may
@@ -3277,9 +3725,11 @@ impl<L: Levels> Cpu<L> {
 
     /// The translation table walk of one regime (Arm `AArch64_S1Walk`, with
     /// the level 0 faults `AArch64_S1Translate` takes ahead of it,
-    /// [`S1Range::start_for`]), with no hardware access-flag management,
-    /// under the parameters `params` the regime's registers give the range
-    /// `va` is in, its granule among them.
+    /// [`S1Range::start_for`]), under the parameters `params` the regime's
+    /// registers give the range `va` is in, its granule and its hardware
+    /// updates among them: a leaf whose Access flag is clear faults only
+    /// where the regime leaves the flag unmanaged, its update being
+    /// [`Cpu::s1_update`]'s once the access's checks pass.
     ///
     /// The start level's descriptor address, every next-level table address
     /// and the output address must fit the output size the regime's
@@ -3296,18 +3746,21 @@ impl<L: Levels> Cpu<L> {
     /// in EL1&0 `AP[2:1]`, `UXN`, `PXN`, `APTable`, `UXNTable` and
     /// `PXNTable`; in EL2, which has one privilege level, `AP[2]`, `XN` (bit
     /// 54), `APTable[1]` and `XNTable` (bit 60), the descriptor's other
-    /// permission bits ignored.
+    /// permission bits ignored. Where the regime manages dirty state, a leaf
+    /// whose `DBM` is set has its `AP[2]` taken as clear: a writable-clean
+    /// leaf gives every permission a writable-dirty one would, its
+    /// execute permissions under `WXN` and EL0's write included.
     ///
     /// Under stage 2 every descriptor's address is an IPA, which stage 2
     /// translates before the descriptor is read ([`Cpu::s2_descriptor`]),
-    /// from `source`.
+    /// as `walks` says.
     fn walk<B: PhysBus>(
         &self,
         bus: &mut B,
         params: S1Params,
         va: u64,
         kind: AccessKind,
-        source: &mut Stage2Source<'_>,
+        walks: &mut Walks<'_>,
     ) -> Result<Walked, NoTranslation> {
         let s1 = NoTranslation::stage1;
         let range = params.range;
@@ -3324,17 +3777,17 @@ impl<L: Levels> Cpu<L> {
         // it translates the regime and is the physical address otherwise.
         let mut descriptor_address = |bus: &mut B, ipa: Ipa| {
             if stage2 {
-                self.s2_descriptor(bus, ipa, source)
+                self.s2_descriptor(bus, ipa, DescriptorAccess::Read, walks)
             } else {
                 Ok(ipa.untranslated())
             }
         };
-        let leaf = match self.walk_tables(bus, va, start, &mut descriptor_address) {
+        let leaf = match self.walk_tables(bus, va, start, params.hw, &mut descriptor_address) {
             Ok(leaf) => leaf,
             Err(WalkStop::Fault(fault)) => return Err(s1(fault)),
             Err(WalkStop::Descriptor(failure)) => return Err(failure),
         };
-        let desc = leaf.desc;
+        let desc = leaf.desc.value;
         // `APTable`, `UXNTable` (`XNTable`, the same bit, in EL2) and
         // `PXNTable` of every table descriptor, bits 62:61, 60 and 59.
         let (ap_table, uxn_table, pxn_table) = if params.hpd {
@@ -3347,7 +3800,14 @@ impl<L: Levels> Cpu<L> {
             )
         };
 
+        // `AP[2:1]`, `AP[2]` taken as clear in a leaf whose `DBM` is set
+        // where dirty state is managed (`AArch64_S1DirectBasePermissions`).
         let ap = (desc >> 6) & 3;
+        let ap = if params.hw.dirty() && desc & DESC_DBM != 0 {
+            ap & 1
+        } else {
+            ap
+        };
         let mut perms = if params.regime.has_unprivileged() {
             let mut el1_w = ap & 2 == 0;
             let mut el0_r = ap & 1 == 1;
@@ -3406,12 +3866,15 @@ impl<L: Levels> Cpu<L> {
             level: leaf.level,
             attr: ((params.mair >> (((desc >> 2) & 7) * 8)) & 0xFF) as u8,
             sh: params.range.oa.shareability(desc),
+            leaf: leaf.desc,
+            hw: params.hw,
         })
     }
 
     /// The walk of translation tables from `start` for input address
     /// `input`, the part Arm's `AArch64_S1Walk` and `AArch64_S2Walk` share
-    /// with no FEAT_D128 or hardware update, with the start's granule and
+    /// with no FEAT_D128 and no FEAT_HAFT, which would update Table
+    /// descriptors, with the start's granule and
     /// `DS`: each level's descriptor, from the start's (-1 to 3), read at
     /// the physical address `descriptor_address` gives the address of its
     /// table entry, in the walk's output address space `A` (an IPA for stage
@@ -3426,14 +3889,17 @@ impl<L: Levels> Cpu<L> {
     /// granule has none at on this processor, level -1 among them
     /// (`AArch64_DecodeDescriptorType`, [`Granule::block_at`]); and the
     /// leaf's output address (`AArch64_S1LeafBase`, `AArch64_S2LeafBase`)
-    /// must fit the output size and its access flag be set. The leaf's
-    /// `tables` is the OR of every table descriptor's bits 63:59, stage 1's
-    /// hierarchical attributes.
+    /// must fit the output size and its access flag be set, unless the
+    /// stage manages it (`hw`), the leaf then going back with its flag as
+    /// read, for its translation to update. The leaf's `tables` is the OR of
+    /// every table descriptor's bits 63:59, stage 1's hierarchical
+    /// attributes.
     pub(super) fn walk_tables<B: PhysBus, A: WalkOutput, E, F>(
         &self,
         bus: &mut B,
         input: u64,
         start: WalkStart<A>,
+        hw: HwUpdate,
         descriptor_address: &mut F,
     ) -> Result<WalkLeaf<A>, WalkStop<E>>
     where
@@ -3453,8 +3919,8 @@ impl<L: Levels> Cpu<L> {
             };
             let index = (input >> shift) & ones(index_bits);
             let fault = |fault| Err(WalkStop::Fault(fault));
-            let address =
-                descriptor_address(bus, A::new(table + index * 8)).map_err(WalkStop::Descriptor)?;
+            let at = A::new(table + index * 8);
+            let address = descriptor_address(bus, at).map_err(WalkStop::Descriptor)?;
             let desc = match bus.read_descriptor(address, clock) {
                 Ok(d) => d,
                 Err(BusFault::Unmapped) => {
@@ -3490,11 +3956,11 @@ impl<L: Levels> Cpu<L> {
             if !start.oa.fits(out) {
                 return fault(TranslationFault::AddressSize { level });
             }
-            if (desc >> 10) & 1 == 0 {
+            if desc & DESC_AF == 0 && !hw.access_flag() {
                 return fault(TranslationFault::AccessFlag { level: leaf_level });
             }
             return Ok(WalkLeaf {
-                desc,
+                desc: LeafDescriptor { value: desc, at },
                 level: leaf_level,
                 out: A::new(out | (input & ones(shift))),
                 tables,
@@ -3502,90 +3968,165 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
-    /// Stage 2's translation of `ipa` (`AArch64_S2Translate`'s walk): the
-    /// output address and the leaf, where `source` lets it from the stage 2
-    /// translations the same translation made or the TLB keeps, else from
-    /// the walk, which `source` records.
+    /// Stage 2's translation of `ipa` for `purpose` (`AArch64_S2Translate`
+    /// as far as its checks): the output address, the leaf, and the leaf as
+    /// the TLB may keep it. Where `walks` lets it, from a stage 2
+    /// translation the same translation made or the TLB keeps, if that
+    /// permits `purpose` ([`Cpu::s2_refuses`]); else from the walk, which
+    /// `walks` records. A walked leaf `purpose`'s checks permit has the
+    /// hardware updates `purpose` makes ([`LeafDescriptor::updated`]),
+    /// swapped in as `walks` says ([`Cpu::swap_leaf`]), the walk made again
+    /// where the leaf changed under the swap; a leaf they refuse has none.
+    /// What `walks` records, and the TLB keeps, is the leaf as memory then
+    /// holds it ([`kept_perms`]): none whose Access flag is still clear,
+    /// and a writable-clean one without its write permission.
     fn s2_leaf<B: PhysBus>(
         &self,
         bus: &mut B,
         ipa: Ipa,
-        source: &mut Stage2Source<'_>,
+        purpose: S2For,
+        walks: &mut Walks<'_>,
     ) -> Result<Stage2Output, TranslationFault> {
-        if let Stage2Source::Cached(made) = source {
+        if let Stage2Source::Cached(made) = &walks.stage2 {
             let key = made.key(ipa);
             if let Some(kept) = made.find(key).or_else(|| self.tlb.ipa_hit(key)) {
-                return Ok(Stage2Output {
-                    pa: PhysAddr::new(in_page(kept.pa_page.get(), ipa.get())),
-                    leaf: kept.leaf,
-                });
+                if !self.s2_refuses(kept.leaf, purpose) {
+                    return Ok(Stage2Output {
+                        pa: PhysAddr::new(in_page(kept.pa_page.get(), ipa.get())),
+                        leaf: kept.leaf,
+                        kept: Some(kept.leaf),
+                    });
+                }
             }
         }
-        let walked = self.s2_walk(bus, ipa)?;
-        let leaf = Stage2Leaf::of(&walked);
-        if let Stage2Source::Cached(made) = source {
-            made.record(IpaEntry {
-                key: made.key(ipa),
-                pa_page: PhysAddr::new(walked.pa.get() & !0xFFF),
+        loop {
+            let walked = self.s2_walk(bus, ipa)?;
+            let leaf = Stage2Leaf::of(&walked);
+            let read = walked.leaf;
+            let held = if self.s2_refuses(leaf, purpose) {
+                read.value
+            } else {
+                let new = read.updated(walked.hw, purpose.updating(), DescriptorStage::Two);
+                match self.swap_leaf(
+                    bus,
+                    read.at,
+                    read.value,
+                    new,
+                    walked.level,
+                    &mut walks.updates,
+                )? {
+                    Swapped::Holds(desc) => desc,
+                    Swapped::Changed => continue,
+                }
+            };
+            let kept = kept_perms(leaf.perms, held, walked.hw, DescriptorStage::Two)
+                .map(|perms| Stage2Leaf { perms, ..leaf });
+            if let (Stage2Source::Cached(made), Some(kept)) = (&mut walks.stage2, kept) {
+                made.record(IpaEntry {
+                    key: made.key(ipa),
+                    pa_page: PhysAddr::new(walked.pa.get() & !0xFFF),
+                    leaf: kept,
+                });
+            }
+            return Ok(Stage2Output {
+                pa: walked.pa,
                 leaf,
+                kept,
             });
         }
-        Ok(Stage2Output {
-            pa: walked.pa,
-            leaf,
-        })
     }
 
-    /// The physical address of the stage 1 descriptor at `ipa` (Arm
+    /// Whether stage 2's checks for `purpose` refuse the leaf `leaf` (Arm
+    /// `AArch64_S2CheckPermissions`, and for the access itself
+    /// `AArch64_S2HasAlignmentFaultDueToMemType` before it): the one test
+    /// that decides both whether a kept translation serves and whether a
+    /// walked leaf is updated.
+    fn s2_refuses(&self, leaf: Stage2Leaf, purpose: S2For) -> bool {
+        match purpose {
+            S2For::Descriptor(access) => self.s2_descriptor_refusal(leaf, access).is_some(),
+            S2For::Access {
+                needs,
+                el,
+                on_device,
+            } => self
+                .s2_refusal(leaf, needs, el, on_device, needs.writes())
+                .is_some(),
+        }
+    }
+
+    /// Stage 2's permission checks of `leaf` for a stage 1 descriptor's
+    /// `access` (`AArch64_S2CheckPermissions` for `AccessType_TTW`):
+    /// `HCR_EL2.PTW` refuses Device memory, the descriptor needs read
+    /// permission, and its hardware update write permission too. The
+    /// fault is a Permission fault at the leaf's level.
+    fn s2_descriptor_refusal(
+        &self,
+        leaf: Stage2Leaf,
+        access: DescriptorAccess,
+    ) -> Option<TranslationFault> {
+        let writes = match access {
+            DescriptorAccess::Read => false,
+            DescriptorAccess::Update => leaf.perms & PERM_EL1_W == 0,
+        };
+        let refused =
+            (self.s2_ptw() && leaf.memory.is_device()) || leaf.perms & PERM_EL1_R == 0 || writes;
+        refused.then_some(TranslationFault::Permission { level: leaf.level })
+    }
+
+    /// The physical address of the stage 1 descriptor at `ipa`, for its
+    /// walk to read or its hardware update to swap (`access`; Arm
     /// `AArch64_S2Translate` for `AccessType_TTW`): stage 2's translation
-    /// (from `source`), then its permission checks for a walk
-    /// (`AArch64_S2CheckPermissions`): `HCR_EL2.PTW` refuses Device memory,
-    /// and the descriptor needs read permission. A fault is stage 2's on
+    /// as `walks` says ([`Cpu::s2_leaf`]), then its permission checks for
+    /// the access ([`Cpu::s2_descriptor_refusal`]). A fault is stage 2's on
     /// stage 1's walk (`S1PTW`), and reports `ipa`.
     fn s2_descriptor<B: PhysBus>(
         &self,
         bus: &mut B,
         ipa: Ipa,
-        source: &mut Stage2Source<'_>,
+        access: DescriptorAccess,
+        walks: &mut Walks<'_>,
     ) -> Result<PhysAddr, NoTranslation> {
         let on_walk = |fault| NoTranslation {
             stage: TranslationStage::TwoOnWalk { ipa },
             fault,
         };
-        let Stage2Output { pa, leaf } = self.s2_leaf(bus, ipa, source).map_err(on_walk)?;
-        if (self.s2_ptw() && leaf.memory.is_device()) || leaf.perms & PERM_EL1_R == 0 {
-            return Err(on_walk(TranslationFault::Permission { level: leaf.level }));
+        let purpose = S2For::Descriptor(access);
+        let s2 = self.s2_leaf(bus, ipa, purpose, walks).map_err(on_walk)?;
+        if let Some(fault) = self.s2_descriptor_refusal(s2.leaf, access) {
+            return Err(on_walk(fault));
         }
-        Ok(pa)
+        Ok(s2.pa)
     }
 
     /// Where data address `va` translates to now in the current regime, for
     /// a debugger: the walks a data access would make, stage 2's included,
     /// with no check of the access's permissions, no TLB lookup or fill,
     /// and descriptors read through `bus` — which a caller makes a view that
-    /// cannot disturb a device. Nothing in the processor changes.
+    /// cannot disturb a device — and none written: a leaf whose Access flag
+    /// a stage manages translates as though the access had set it
+    /// ([`Updates::Withheld`]). Nothing in the processor or in memory
+    /// changes.
     pub(crate) fn debug_translate<B: PhysBus>(
         &self,
         bus: &mut B,
         va: u64,
     ) -> Result<PhysAddr, NoTranslation> {
         let regime = self.regime();
+        let mut walks = Walks::withheld();
         // Checked against EL1's permissions, a privileged level's, which
         // FEAT_E0PD leaves alone.
         let ipa = self
-            .stage1(
-                bus,
-                regime,
-                va,
-                AccessKind::Read,
-                El::El1,
-                &mut Stage2Source::Walked,
-            )?
+            .stage1(bus, regime, va, AccessKind::Read, El::El1, &mut walks)?
             .ipa();
         if !self.stage2_enabled(regime) {
             return Ok(ipa.untranslated());
         }
-        self.s2_leaf(bus, ipa, &mut Stage2Source::Walked)
+        let purpose = S2For::Access {
+            needs: Needs::Access(AccessKind::Read),
+            el: El::El1,
+            on_device: OnDevice::Permitted,
+        };
+        self.s2_leaf(bus, ipa, purpose, &mut walks)
             .map(|s2| s2.pa)
             .map_err(|fault| NoTranslation {
                 stage: TranslationStage::Two { ipa },
@@ -3617,6 +4158,15 @@ impl<L: Levels> Cpu<L> {
     /// differ in is that of Device and Non-cacheable memory, which
     /// `PAREncodeShareability` and `S2CombineS1MemAttrs` make Outer
     /// Shareable either way.
+    ///
+    /// Neither leaf the instruction reports is updated by the hardware: of
+    /// the choices the Arm ARM leaves an address translation instruction
+    /// (D8.5.1.2 RXQSMX; IMPLEMENTATION DEFINED "AT updates AF", and
+    /// `AArch64_SetDirtyState` never for one), this core takes none, and a
+    /// leaf whose Access flag its stage manages reports its translation as
+    /// though the flag were set. Its walk's reads of stage 1 descriptors
+    /// are walk accesses, whose stage 2 translations make their own updates
+    /// ([`Cpu::s2_descriptor`]).
     pub(crate) fn address_translate<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -3646,7 +4196,13 @@ impl<L: Levels> Cpu<L> {
             AtCheck::El0 | AtCheck::El1 | AtCheck::El2 => permitted(perms, kind, el),
             AtCheck::El1Pan => cpu.permits(perms, kind, el),
         };
-        let stage1 = match self.stage1(bus, regime, va, kind, el, &mut Stage2Source::Walked) {
+        let mut written = Writes::NONE;
+        let walked = {
+            let mut walks = Walks::made(None, &mut written);
+            self.stage1(bus, regime, va, kind, el, &mut walks)
+        };
+        self.note_written(&written);
+        let stage1 = match walked {
             Ok(Stage1Output::Walked(w)) if permits(self, w.perms) => {
                 let non_cacheable = self.regime_sctlr(regime) & sctlr::C == 0;
                 let attrs = w
@@ -4751,18 +5307,41 @@ impl<L: Levels> Cpu<L> {
     /// elsewhere leaves it), and it forgets every trace holding an
     /// instruction it may overwrite. Every store the processor makes comes
     /// through here (R5: the one choke point for self-modifying code),
-    /// before the bus sees it.
+    /// before the bus sees it, but its walks' hardware updates of
+    /// descriptors, which [`Cpu::note_written`] notes with the same two
+    /// checks once the walks that made them return.
     #[inline]
     fn note_store(&mut self, pa: PhysAddr, bytes: u64) {
-        let m = self.monitor;
         let at = pa.get();
-        if m.armed && at < m.addr + m.bytes && m.addr < at + bytes {
-            self.monitor.armed = false;
-        }
+        self.monitor_sees_store(at, bytes);
         if self.traces.holds_code(at) {
             if let Some(span) = PhysSpan::new(pa, bytes) {
                 self.forget_code(span);
             }
+        }
+    }
+
+    /// The exclusive monitor's part of a store of `bytes` at `at`
+    /// ([`Cpu::note_store`]): cleared where the store overlaps the
+    /// monitored granule.
+    #[inline(always)]
+    fn monitor_sees_store(&mut self, at: u64, bytes: u64) {
+        let m = self.monitor;
+        if m.armed && at < m.addr + m.bytes && m.addr < at + bytes {
+            self.monitor.armed = false;
+        }
+    }
+
+    /// Note the descriptors a translation's walks wrote, `written`, as this
+    /// processor's stores, which hardware updates are (`AArch64_MemSwapTableDesc`'s
+    /// `PhysMemWrite`): what [`Cpu::note_store`] does for each, the spans
+    /// [`Writes`] keeps checked page by page for code
+    /// ([`Cpu::forget_code`]), as one may cross a page where it holds two
+    /// descriptors' tables side by side.
+    fn note_written(&mut self, written: &Writes) {
+        for &span in written.spans() {
+            self.monitor_sees_store(span.start.get(), span.len());
+            self.forget_code(span);
         }
     }
 

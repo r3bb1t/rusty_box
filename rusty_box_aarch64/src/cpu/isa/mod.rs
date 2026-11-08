@@ -2189,6 +2189,10 @@ mod tests {
                     // `Features.json`: `FEAT_GTG <=> UInt(TGran4_2) >= 1`,
                     // and the same of `TGran16_2` and `TGran64_2`.
                     Feature::Gtg => field(mmfr0, 40) >= 1,
+                    // `Features.json`: `FEAT_HAF <=> UInt(HAFDBS) >= 1`,
+                    // `FEAT_HAFDBS <=> UInt(HAFDBS) >= 2`.
+                    Feature::Haf => field(mmfr1, 0) >= 1,
+                    Feature::Hafdbs => field(mmfr1, 0) >= 2,
                     Feature::WfxT => field(isar2, 0) >= 2,
                     Feature::Ras => field(pfr0, 28) >= 1,
                     // `Features.json`: `FEAT_RASv1p1 <=> RAS >= 2 || (RAS == 1
@@ -2254,7 +2258,8 @@ mod tests {
             // alone, MMFR0 PARange (44 or 52 bits), the granules' fields
             // (FEAT_LPA2's values with it alone; with FEAT_GTG all three
             // stage 2 fields non-zero, without it all zero) and ECV = 1, or 2
-            // with FEAT_ECV_POFF, MMFR1 HPDS = 1 (no FEAT_HPDS2), LO and PAN
+            // with FEAT_ECV_POFF, MMFR1 HAFDBS at most 2 (no FEAT_HAFT), HPDS
+            // = 1 (no FEAT_HPDS2), LO and PAN
             // alone, MMFR2 CnP, UAO, VARange, ST, AT, IDS, TTL and E0PD
             // alone. MMFR1 AFP and ISAR2 RPRES are each 1 or 0.
             let at = |feature: Feature, lsb: u32, value: u64| {
@@ -2338,9 +2343,13 @@ mod tests {
                 at(Feature::Ecv, 0, 1) + at(Feature::EcvPoff, 0, 1),
                 "ECV = 1: FEAT_ECV; 2: FEAT_ECV_POFF too"
             );
+            assert!(
+                field(mmfr1, 0) <= 2,
+                "HAFDBS = 2: FEAT_HAFDBS, not FEAT_HAFT"
+            );
             assert!(field(mmfr1, 12) <= 1, "HPDS = 1: FEAT_HPDS, not FEAT_HPDS2");
             assert_eq!(
-                mmfr1 & !((0xF << 12) | (0xF << 16) | (0xF << 20)),
+                mmfr1 & !(0xF | (0xF << 12) | (0xF << 16) | (0xF << 20)),
                 at(Feature::Afp, 44, 1)
             );
             assert_eq!(

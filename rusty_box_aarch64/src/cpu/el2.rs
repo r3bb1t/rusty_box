@@ -460,12 +460,35 @@ pub(crate) const TCR_EL2_TBID: u64 = 1 << 29;
 /// `TCR_EL2.DS` (FEAT_LPA2): 52-bit addresses with the 4 KiB and 16 KiB
 /// granules.
 pub(crate) const TCR_EL2_DS: u64 = 1 << 32;
+/// `TCR_EL2.HA` (FEAT_HAF) and `TCR_EL2.HD` (FEAT_HAFDBS) with `E2H` = 0,
+/// and `VTCR_EL2.HA` and `VTCR_EL2.HD` at the same bits: the hardware update
+/// of the Access flag and of dirty state.
+pub(crate) const TCR_EL2_HA: u64 = 1 << 21;
+pub(crate) const TCR_EL2_HD: u64 = 1 << 22;
+pub(crate) const VTCR_EL2_HA: u64 = TCR_EL2_HA;
+pub(crate) const VTCR_EL2_HD: u64 = TCR_EL2_HD;
 /// `TCR_EL2`'s RES1 bits: 23 and 31.
 pub(crate) const TCR_EL2_RES1: u64 = 0x8080_0000;
 
+/// `HA` with FEAT_HAF and `HD` with FEAT_HAFDBS, the bits of `TCR_EL2` and
+/// `VTCR_EL2` alike that a processor implementing `features` keeps of them.
+const fn hw_update_mask(features: Features) -> u64 {
+    let ha = if features.has(Feature::Haf) {
+        TCR_EL2_HA
+    } else {
+        0
+    };
+    let hd = if features.has(Feature::Hafdbs) {
+        TCR_EL2_HD
+    } else {
+        0
+    };
+    ha | hd
+}
+
 /// The `TCR_EL2` bits a processor implementing `features` keeps.
 pub(crate) const fn tcr_el2_mask(features: Features) -> u64 {
-    let mut mask = TCR_EL2_BASE;
+    let mut mask = TCR_EL2_BASE | hw_update_mask(features);
     if features.has(Feature::Hpds) {
         mask |= TCR_EL2_HPD;
     }
@@ -496,11 +519,12 @@ pub(crate) const VTCR_EL2_SL2: u64 = 1 << 33;
 
 /// The `VTCR_EL2` bits a processor implementing `features` keeps.
 const fn vtcr_el2_mask(features: Features) -> u64 {
-    if features.has(Feature::Lpa2) {
-        VTCR_EL2_BASE | VTCR_EL2_DS | VTCR_EL2_SL2
+    let lpa2 = if features.has(Feature::Lpa2) {
+        VTCR_EL2_DS | VTCR_EL2_SL2
     } else {
-        VTCR_EL2_BASE
-    }
+        0
+    };
+    VTCR_EL2_BASE | lpa2 | hw_update_mask(features)
 }
 
 /// `VTCR_EL2`'s RES1 bit: 31.
@@ -1048,6 +1072,20 @@ mod tests {
             .features;
         assert_eq!(tcr_el2_mask(every) & TCR_EL2_RES1, 0);
         assert_eq!(vtcr_el2_mask(every) & VTCR_EL2_RES1, 0);
+        // HA and HD are RES0 on the Cortex-A57, which has neither FEAT_HAF
+        // nor FEAT_HAFDBS, and kept where the processor has both.
+        let hw = TCR_EL2_HA | TCR_EL2_HD;
+        assert_eq!(tcr_el2_mask(a57) & hw, 0);
+        assert_eq!(vtcr_el2_mask(a57) & (VTCR_EL2_HA | VTCR_EL2_HD), 0);
+        assert_eq!(tcr_el2_mask(every) & hw, hw);
+        assert_eq!(
+            vtcr_el2_mask(every) & (VTCR_EL2_HA | VTCR_EL2_HD),
+            VTCR_EL2_HA | VTCR_EL2_HD
+        );
+        let haf_alone = Implementation::every_feature_but(&[Feature::Hafdbs])
+            .with_levels::<WithEl2>()
+            .features;
+        assert_eq!(tcr_el2_mask(haf_alone) & hw, TCR_EL2_HA);
         assert_eq!(VMPIDR_MASK & VMPIDR_RES1, 0);
     }
 }
