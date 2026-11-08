@@ -216,7 +216,8 @@ fn el2_reads(spsr_mask: u64) -> Vec<(&'static str, Read, u64)> {
         ("SCTLR_EL2", Read::Mrs(SysReg::SCTLR_EL2), 0x30C5_0838),
         ("HCR_EL2", Read::Mrs(SysReg::HCR_EL2), 1 << 31),
         ("CPTR_EL2", Read::Mrs(SysReg::CPTR_EL2), 0x33FF),
-        ("MDCR_EL2", Read::Mrs(SysReg::MDCR_EL2), 0),
+        // HPMN: the PMU's six event counters.
+        ("MDCR_EL2", Read::Mrs(SysReg::MDCR_EL2), 6),
         ("ESR_EL2", Read::Mrs(SysReg::ESR_EL2), 0),
         ("HPFAR_EL2", Read::Mrs(SysReg::HPFAR_EL2), 0),
         ("TCR_EL2", Read::Mrs(SysReg::TCR_EL2), 0x8080_0000),
@@ -269,6 +270,7 @@ fn a_guest_finds_the_trm_s_values_zero_controls_and_the_fill_elsewhere() {
             reads.push(("TPIDR2_EL0", Read::Mrs(tpidr2), value(tpidr2)));
             reads.push(("DISR_EL1", Read::Mrs(sysreg(3, 0, 12, 1, 1)), 0));
         }
+        reads.extend(pmu_reads(cpu));
         let got = guest_reads(&mut m, &reads);
         check_reads(model, &reads, &got);
     }
@@ -286,8 +288,49 @@ fn a_guest_finds_the_trm_s_values_zero_controls_and_the_fill_elsewhere() {
     check_register_file("Cortex-A57 with EL2", &m);
     let mut reads = el1_reads(A57_SPSR);
     reads.extend(el2_reads(A57_SPSR));
+    reads.extend(pmu_reads(CpuModel::CortexA57));
     let got = guest_reads(&mut m, &reads);
     check_reads("Cortex-A57 with EL2", &reads, &got);
+}
+
+/// The PMU of `model` out of reset: `PMCR_EL0` the Cortex-A57 TRM's
+/// 0x4101_3000 (Table 4-10) with `LC` RES1 (no AArch32), or the Armv9.2
+/// model's `N` alone with it; the enables, the overflow flags, the filters
+/// and `PMUSERENR_EL0` zero (controls and status flags); the counters the
+/// fill, the event counters 32 bits wide on the Cortex-A57 (PMUv3) and 64
+/// on the Armv9.2 model (FEAT_PMUv3p5).
+fn pmu_reads(model: CpuModel) -> Vec<(&'static str, Read, u64)> {
+    let pmevcntr0 = sysreg(3, 3, 14, 8, 0);
+    let pmevcntr5 = sysreg(3, 3, 14, 8, 5);
+    let pmevtyper0 = sysreg(3, 3, 14, 12, 0);
+    let (pmcr, counter) = match model {
+        CpuModel::CortexA57 => (0x4101_3040, 0xFFFF_FFFF),
+        CpuModel::Armv9p2 => (0x3040, u64::MAX),
+    };
+    vec![
+        ("PMCR_EL0", Read::Mrs(SysReg::PMCR_EL0), pmcr),
+        ("PMCNTENSET_EL0", Read::Mrs(SysReg::PMCNTENSET_EL0), 0),
+        ("PMINTENSET_EL1", Read::Mrs(SysReg::PMINTENSET_EL1), 0),
+        ("PMOVSSET_EL0", Read::Mrs(SysReg::PMOVSSET_EL0), 0),
+        ("PMUSERENR_EL0", Read::Mrs(SysReg::PMUSERENR_EL0), 0),
+        ("PMCCFILTR_EL0", Read::Mrs(SysReg::PMCCFILTR_EL0), 0),
+        ("PMEVTYPER0_EL0", Read::Mrs(pmevtyper0), 0),
+        (
+            "PMCCNTR_EL0",
+            Read::Mrs(SysReg::PMCCNTR_EL0),
+            value(SysReg::PMCCNTR_EL0),
+        ),
+        (
+            "PMEVCNTR0_EL0",
+            Read::Mrs(pmevcntr0),
+            value(pmevcntr0) & counter,
+        ),
+        (
+            "PMEVCNTR5_EL0",
+            Read::Mrs(pmevcntr5),
+            value(pmevcntr5) & counter,
+        ),
+    ]
 }
 
 /// A guest that branches through a register it never wrote takes an

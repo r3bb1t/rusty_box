@@ -22,6 +22,7 @@
 
 use super::debug::DebugPoints;
 use super::id::{self, Caches};
+use super::pmu::PmuShape;
 use rusty_box_core::ClockHz;
 
 use super::el2::Levels;
@@ -271,6 +272,25 @@ pub(crate) enum Feature {
     /// writable-dirty on a write where `TCR_ELx.HD` or `VTCR_EL2.HD` is set,
     /// rather than faulting on it. No encoding of its own.
     Hafdbs,
+    /// FEAT_PMUv3: the Performance Monitors Extension, the cycle counter,
+    /// the event counters, their controls and traps, and the overflow
+    /// interrupt request (`src/cpu/pmu.rs`). No encoding of its own: its
+    /// registers are System registers.
+    PmuV3,
+    /// FEAT_PMUv3p1: 16-bit event numbers, the upper halves of
+    /// `PMCEID0_EL0` and `PMCEID1_EL0`, `MDCR_EL2.HPMD`, and `PMCR_EL0.DP`
+    /// with EL2. No encoding of its own.
+    PmuV3p1,
+    /// FEAT_PMUv3p4: `PMMIR_EL1`. No encoding of its own.
+    PmuV3p4,
+    /// FEAT_PMUv3p5: 64-bit event counters, their overflow at bit 31 or 63
+    /// by `PMCR_EL0.LP` and `MDCR_EL2.HLP`, and `MDCR_EL2.HCCD`. No encoding
+    /// of its own.
+    PmuV3p5,
+    /// FEAT_PMUv3p7: freezing the event counters on overflow
+    /// (`PMCR_EL0.FZO`, `MDCR_EL2.HPMFZO`), `PMCR_EL0.DP` without EL2, and
+    /// `PMCR_EL0.IMP` reading as zero. No encoding of its own.
+    PmuV3p7,
 }
 
 // `Feature::ALL` is in declaration order, and each feature has a bit of a
@@ -295,7 +315,7 @@ const _: () = {
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 78] = [
+    pub(crate) const ALL: [Feature; 83] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -374,6 +394,11 @@ impl Feature {
         Feature::Gtg,
         Feature::Haf,
         Feature::Hafdbs,
+        Feature::PmuV3,
+        Feature::PmuV3p1,
+        Feature::PmuV3p4,
+        Feature::PmuV3p5,
+        Feature::PmuV3p7,
     ];
 }
 
@@ -462,6 +487,11 @@ impl Feature {
             Self::Gtg => Some("FEAT_GTG"),
             Self::Haf => Some("FEAT_HAF"),
             Self::Hafdbs => Some("FEAT_HAFDBS"),
+            Self::PmuV3 => Some("FEAT_PMUv3"),
+            Self::PmuV3p1 => Some("FEAT_PMUv3p1"),
+            Self::PmuV3p4 => Some("FEAT_PMUv3p4"),
+            Self::PmuV3p5 => Some("FEAT_PMUv3p5"),
+            Self::PmuV3p7 => Some("FEAT_PMUv3p7"),
         }
     }
 
@@ -518,6 +548,11 @@ impl Feature {
                 | Self::Gtg
                 | Self::Haf
                 | Self::Hafdbs
+                | Self::PmuV3
+                | Self::PmuV3p1
+                | Self::PmuV3p4
+                | Self::PmuV3p5
+                | Self::PmuV3p7
         )
     }
 
@@ -556,7 +591,8 @@ impl Features {
     /// EL2, stage 2 has the granules stage 1 has, there being no FEAT_GTG
     /// (`TGran4_2`, `TGran16_2` and `TGran64_2` RES0 in the TRM, 0 being
     /// "as stage 1"): FEAT_S2TGran64K, which a processor without EL2 drops
-    /// ([`Features::NEED_EL2`]).
+    /// ([`Features::NEED_EL2`]). Its PMU is PMUv3 (`ID_AA64DFR0_EL1.PMUVer`
+    /// 1, 4.3.19; chapter 11).
     pub(crate) const CORTEX_A57: Self = Self::of(&[
         Feature::Base,
         Feature::Fp,
@@ -569,6 +605,7 @@ impl Features {
         Feature::DoubleLock,
         Feature::TGran64K,
         Feature::S2TGran64K,
+        Feature::PmuV3,
     ]);
 
     /// Every feature: a set no processor implements (FEAT_DoubleLock with
@@ -607,9 +644,13 @@ impl Features {
     /// 52-bit physical and virtual addresses with every granule (FEAT_LPA,
     /// FEAT_LVA, FEAT_LPA2), and the hardware update of the Access flag and
     /// of dirty state (FEAT_HAF, FEAT_HAFDBS) without the Table descriptor
-    /// Access flag (FEAT_HAFT). Not FEAT_SVE: Streaming SVE mode is its only
-    /// SVE. Not FEAT_DoubleLock, the one Cortex-A57 feature Armv9.0
-    /// forbids.
+    /// Access flag (FEAT_HAFT), and a PMU (FEAT_PMUv3) with the revisions
+    /// Arm requires of one on an Armv8.7 and later processor
+    /// (`(v8Ap7 && FEAT_PMUv3) ==> FEAT_PMUv3p7`, which implies
+    /// FEAT_PMUv3p5, FEAT_PMUv3p4 and FEAT_PMUv3p1, as `(v8Ap5 &&
+    /// FEAT_PMUv3) ==> FEAT_PMUv3p5` and their siblings require them too).
+    /// Not FEAT_SVE: Streaming SVE mode is its only SVE. Not
+    /// FEAT_DoubleLock, the one Cortex-A57 feature Armv9.0 forbids.
     pub(crate) const ARMV9P2: Self = Self::of(&[
         Feature::Base,
         Feature::Fp,
@@ -694,6 +735,12 @@ impl Features {
         Feature::Lpa2,
         Feature::Haf,
         Feature::Hafdbs,
+        // A PMU, and the revisions of it each version requires of one.
+        Feature::PmuV3,
+        Feature::PmuV3p1,
+        Feature::PmuV3p4,
+        Feature::PmuV3p5,
+        Feature::PmuV3p7,
     ]);
 
     /// The set of `features`.
@@ -797,13 +844,16 @@ pub(crate) struct Implementation {
     pub(crate) caches: Caches,
     /// The breakpoints and watchpoints, which `ID_AA64DFR0_EL1` reports.
     pub(crate) debug: DebugPoints,
+    /// The PMU's IMPLEMENTATION DEFINED choices, which
+    /// [`Feature::PmuV3`] reads and nothing else does.
+    pub(crate) pmu: PmuShape,
 }
 
 impl Implementation {
     /// The Cortex-A57 shape: [`Features::CORTEX_A57`] and the Cortex-A57's
     /// `MIDR_EL1`, with no streaming vector length to choose, the board's
-    /// 1 GHz counter, and the Cortex-A57's caches, breakpoints and
-    /// watchpoints.
+    /// 1 GHz counter, and the Cortex-A57's caches, breakpoints, watchpoints
+    /// and PMU.
     pub(crate) const CORTEX_A57: Self = Self {
         features: Features::CORTEX_A57,
         midr: id::MIDR_CORTEX_A57,
@@ -811,6 +861,7 @@ impl Implementation {
         counter_hz: SYSTEM_COUNTER_HZ,
         caches: Caches::CORTEX_A57,
         debug: DebugPoints::CORTEX_A57,
+        pmu: PmuShape::CORTEX_A57,
     };
 
     /// This implementation with its system counter at `rate`, which the
@@ -825,8 +876,9 @@ impl Implementation {
 
     /// The Armv9.2 processor model: [`Features::ARMV9P2`], a software
     /// model's `MIDR_EL1`, Streaming SVE vectors of up to 512 bits, the
-    /// counter Armv8.6 and later require, caches of the board's own, and
-    /// the fewest breakpoints and watchpoints Arm permits.
+    /// counter Armv8.6 and later require, caches of the board's own, the
+    /// fewest breakpoints and watchpoints Arm permits, and a PMU of the
+    /// board's own.
     pub(crate) const ARMV9P2: Self = Self {
         features: Features::ARMV9P2,
         midr: id::MIDR_SOFTWARE_MODEL,
@@ -834,6 +886,7 @@ impl Implementation {
         counter_hz: SYSTEM_COUNTER_HZ,
         caches: Caches::ARMV9P2,
         debug: DebugPoints::ARMV9P2,
+        pmu: PmuShape::ARMV9P2,
     };
 
     /// This implementation as a processor of the level set `L` has it, with
@@ -1130,6 +1183,17 @@ impl CpuModel {
         match self {
             Self::CortexA57 => "arm,cortex-a57",
             Self::Armv9p2 => "arm,armv8",
+        }
+    }
+
+    /// The `compatible` of the PMU's device tree node (Linux
+    /// `Documentation/devicetree/bindings/arm/pmu.yaml`): the part's own
+    /// PMU, or `arm,armv8-pmuv3`, the binding's generic PMUv3, for a
+    /// processor with none of its own.
+    pub(crate) const fn pmu_compatible(self) -> &'static str {
+        match self {
+            Self::CortexA57 => "arm,cortex-a57-pmu",
+            Self::Armv9p2 => "arm,armv8-pmuv3",
         }
     }
 }

@@ -1367,10 +1367,10 @@ fn unmasking_d_arms_the_step() {
 // ----- How many there are -----
 
 /// The Cortex-A57's `ID_AA64DFR0_EL1` is its TRM's 0x10305106 (DDI 0488H,
-/// 4.3.19) but for `PMUVer`, 0, the model having no PMU: six breakpoints
-/// (`BRPs` 5), two of them context-aware (`CTX_CMPs` 1), four watchpoints
-/// (`WRPs` 3), Armv8.0 debug and no trace. The Armv9.2 model's has two
-/// breakpoints, one of them context-aware, two watchpoints and no PMU.
+/// 4.3.19): six breakpoints (`BRPs` 5), two of them context-aware
+/// (`CTX_CMPs` 1), four watchpoints (`WRPs` 3), PMUv3 (`PMUVer` 1), Armv8.0
+/// debug and no trace. The Armv9.2 model's has two breakpoints, one of them
+/// context-aware, two watchpoints and PMUv3p7 (`PMUVer` 7).
 #[test]
 fn id_aa64dfr0_reports_the_breakpoints_and_watchpoints() {
     let field = |value: u64, at: u32| (value >> at) & 0xF;
@@ -1378,12 +1378,12 @@ fn id_aa64dfr0_reports_the_breakpoints_and_watchpoints() {
     let counts = |value| [12, 20, 28, 8].map(|at| field(value, at));
     let mut m = v8();
     assert_eq!(m.exec(mrs_x0(ID_AA64DFR0_EL1)), None);
-    assert_eq!(m.cpu.x[0], 0x1030_5006);
-    assert_eq!(counts(m.cpu.x[0]), [5, 3, 1, 0], "Cortex-A57");
+    assert_eq!(m.cpu.x[0], 0x1030_5106);
+    assert_eq!(counts(m.cpu.x[0]), [5, 3, 1, 1], "Cortex-A57");
 
     let mut m = v9();
     assert_eq!(m.exec(mrs_x0(ID_AA64DFR0_EL1)), None);
-    assert_eq!(counts(m.cpu.x[0]), [1, 1, 0, 0], "Armv9.2");
+    assert_eq!(counts(m.cpu.x[0]), [1, 1, 0, 7], "Armv9.2");
 }
 
 /// Each of the Cortex-A57's six breakpoints fires on its address, the last

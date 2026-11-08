@@ -8,6 +8,7 @@ use super::debug::Stepped;
 use super::el2::{El2State, El2Storage};
 use super::features::{Feature, Features, LeveledImplementation};
 use super::mmu::{El10Context, El2RegimeContext, TlbContext};
+use super::pmu::Pmu;
 use super::regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, RegClass, VReg};
 use super::sysreg::{
     DBGBCR_FIELDS, DBGCLAIM_TAGS, DBGPRCR_CORENPDRQ, DBGWCR_FIELDS, MDSCR_FIELDS, OSDLR_DLK,
@@ -280,6 +281,7 @@ impl<L: Levels> Cpu<L> {
             pac_keys,
             imp,
             sys,
+            pmu,
             monitor,
             event,
             tlb,
@@ -314,6 +316,7 @@ impl<L: Levels> Cpu<L> {
         *scalable = sme::ScalableRegs::ZERO;
         *pac_keys = pauth::PacKeys::RESET;
         *sys = SysRegs::reset(imp.get(), reset_pc);
+        *pmu = Pmu::reset(imp.features, imp.pmu, *retired);
         *monitor = ExclusiveMonitor::CLEAR;
         *event = EventRegister::at(false, count);
         tlb.reset();
@@ -384,6 +387,8 @@ impl<L: Levels> Cpu<L> {
         if pstate.el > self.highest_el() {
             return Err(PstateRefusal::AbsentLevel);
         }
+        // The instructions so far are counted at the level they ran at.
+        self.pmu_settle(self.retired);
         self.pstate = self.held(pstate);
         Ok(())
     }
@@ -511,7 +516,8 @@ impl<L: Levels> Cpu<L> {
             w.write_u64(pc)?;
         }
         self.save_sme(w)?;
-        self.save_pauth(w)
+        self.save_pauth(w)?;
+        self.save_pmu(w)
     }
 
     /// The inverse of [`Cpu::save`]. The interrupt inputs are not part of
@@ -729,7 +735,8 @@ impl<L: Levels> Cpu<L> {
         // The image's memory replaces the memory the traces were read from.
         self.flush_traces();
         self.restore_sme(r)?;
-        self.restore_pauth(r)
+        self.restore_pauth(r)?;
+        self.restore_pmu(r)
     }
 }
 
@@ -826,6 +833,21 @@ mod tests {
         fresh.retired = 400;
         assert_eq!(c.state(), fresh.state());
         assert_eq!(c.sys.to_array(), fresh.sys.to_array());
+        assert_eq!(
+            (
+                c.pmu.controls,
+                c.pmu.counts.ccntr,
+                c.pmu.counts.evcntr,
+                c.pmu.counts.ovs
+            ),
+            (
+                fresh.pmu.controls,
+                fresh.pmu.counts.ccntr,
+                fresh.pmu.counts.evcntr,
+                fresh.pmu.counts.ovs
+            )
+        );
+        assert_eq!(c.pmu.counts.settled, 400, "counted from the reset on");
         assert_eq!(c.monitor, fresh.monitor);
         assert_eq!(
             (c.irq_line, c.fiq_line, c.outputs_dirty),

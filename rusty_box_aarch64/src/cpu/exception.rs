@@ -17,6 +17,7 @@ use super::el2::{
 use super::features::Feature;
 use super::mmu::{Fsc, Ipa};
 use super::op::Extend;
+use super::pmu::Cycle;
 use super::sysreg::{DBGPRCR_CORENPDRQ, MDSCR_KDE, MDSCR_SS, OSDLR_DLK, OSLSR_OSLK};
 use super::{sctlr, Activity, Btype, Cpu, El, Levels, Pstate, SysRegs};
 use crate::instrumentation::{ExceptionKind, ExceptionTaken};
@@ -844,6 +845,14 @@ impl<L: Levels> Cpu<L> {
     /// FEAT_LPA bits 51:12 in bits 43:4, `NS` 0 with no Secure EL2) where
     /// `IPAValid`, and leaves it as it was where it is ARBITRARY.
     pub(crate) fn take_sync_exception(&mut self, e: Exception, pc: u64) -> ExceptionTaken {
+        // A call's exception completes it (the at-retirement events count
+        // `SVC` and `HVC`, Arm ARM D14.1); any other takes the place of its
+        // instruction, whose cycle is all the PMU counts of it.
+        self.pmu_synchronous_exception(if e.returns_to_next() {
+            Cycle::Executed
+        } else {
+            Cycle::Faulted
+        });
         let from = self.pstate.el;
         let target = self.exception_target(&e);
         let to = target.el();
@@ -1203,6 +1212,7 @@ impl<L: Levels> Cpu<L> {
         spsr: u64,
         record: EntryRecord,
     ) -> u64 {
+        self.pmu_exception_taken();
         let to = target.el();
         self.maybe_zero_sve_uppers(to);
         let from = self.pstate.el;
@@ -1347,6 +1357,7 @@ impl<L: Levels> Cpu<L> {
     /// the local exclusive monitor and sets the Event Register
     /// (`ClearExclusiveLocal`, `SendEventLocal`).
     pub(crate) fn exception_return(&mut self, target: u64) -> u64 {
+        self.pmu_exception_return();
         let spsr = self.return_regs().spsr;
         self.monitor.armed = false;
         let legal_target = self.exception_return_target(spsr);

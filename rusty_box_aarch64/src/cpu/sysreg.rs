@@ -30,6 +30,7 @@ use super::features::{Feature, Features};
 use super::id;
 use super::mmu::{El10Context, El2RegimeContext};
 use super::pauth::KeyHalf;
+use super::pmu::PmuEvent;
 use super::regs::{SysReg, SysRegRefusal};
 use super::timer::{GenericTimer, Tval};
 use super::{sctlr, Cpu, El, Levels, Pstate, SysRegs};
@@ -72,19 +73,19 @@ impl SysRegKey {
         Self(reg.encoding() as u32)
     }
 
-    const fn op0(self) -> u32 {
+    pub(super) const fn op0(self) -> u32 {
         self.0 >> 14
     }
-    const fn op1(self) -> u32 {
+    pub(super) const fn op1(self) -> u32 {
         (self.0 >> 11) & 7
     }
-    const fn crn(self) -> u32 {
+    pub(super) const fn crn(self) -> u32 {
         (self.0 >> 7) & 15
     }
-    const fn crm(self) -> u32 {
+    pub(super) const fn crm(self) -> u32 {
         (self.0 >> 3) & 15
     }
-    const fn op2(self) -> u32 {
+    pub(super) const fn op2(self) -> u32 {
         self.0 & 7
     }
 
@@ -513,6 +514,10 @@ pub(crate) enum WriteEffect {
     /// A control of Software Step, a breakpoint or a watchpoint changed:
     /// [`Cpu::debug_controls_changed`].
     Debug,
+    /// A PMU register that decides what counts, a counter or an overflow
+    /// flag changed: PMUIRQ and the next overflow are sampled again
+    /// ([`Cpu::pmu_outputs`]).
+    Pmu,
 }
 
 /// The regime whose translations a register is part of: the one list of
@@ -591,7 +596,7 @@ enum TranslationContext {
 /// The trap to EL1 an EL0 control raises (`AArch64_SystemAccessTraptoEL1orEL2`)
 /// when `trapped`.
 #[inline]
-const fn trap_to_el1(trapped: bool) -> Result<(), SysRegError> {
+pub(super) const fn trap_to_el1(trapped: bool) -> Result<(), SysRegError> {
     if trapped {
         Err(SysRegError::Trap(Route::Class))
     } else {
@@ -602,7 +607,7 @@ const fn trap_to_el1(trapped: bool) -> Result<(), SysRegError> {
 /// The trap to EL2 an EL2 control raises (`AArch64_SystemAccessTrap(EL2,
 /// 0x18)`) when `trapped`.
 #[inline]
-const fn trap_to_el2(trapped: bool) -> Result<(), SysRegError> {
+pub(super) const fn trap_to_el2(trapped: bool) -> Result<(), SysRegError> {
     if trapped {
         Err(SysRegError::Trap(Route::El2))
     } else {
@@ -1090,6 +1095,11 @@ impl<L: Levels> Cpu<L> {
             _ => {}
         }
 
+        // The PMU's registers, EL0's under `PMUSERENR_EL0` (FEAT_PMUv3).
+        if let Some(reg) = self.pmu_register(key) {
+            return self.pmu_read(reg, el);
+        }
+
         if el0 {
             return Err(SysRegError::Undefined);
         }
@@ -1139,7 +1149,7 @@ impl<L: Levels> Cpu<L> {
             ID_AA64PFR1_EL1 => id::id_aa64pfr1(self.imp.features),
             ID_AA64ZFR0_EL1 => id::id_aa64zfr0(self.imp.features),
             ID_AA64SMFR0_EL1 => id::id_aa64smfr0(self.imp.features),
-            ID_AA64DFR0_EL1 => id::id_aa64dfr0(self.imp.features, self.imp.debug),
+            ID_AA64DFR0_EL1 => id::id_aa64dfr0(self.imp.features, self.imp.debug, self.imp.pmu),
             ID_AA64ISAR0_EL1 => id::id_aa64isar0(self.imp.features),
             ID_AA64ISAR1_EL1 => id::id_aa64isar1(self.imp.features),
             ID_AA64ISAR2_EL1 => id::id_aa64isar2(self.imp.features),
@@ -1545,6 +1555,11 @@ impl<L: Levels> Cpu<L> {
             _ => {}
         }
 
+        // The PMU's registers, EL0's under `PMUSERENR_EL0` (FEAT_PMUv3).
+        if let Some(reg) = self.pmu_register(key) {
+            return self.pmu_write(reg, el, value);
+        }
+
         if el0 {
             return Err(SysRegError::Undefined);
         }
@@ -1601,14 +1616,18 @@ impl<L: Levels> Cpu<L> {
                 WriteEffect::None
             }
             SMPRI_EL1 if self.implements(Feature::Sme) => WriteEffect::None,
-            TTBR0_EL1 => {
+            // An `MSR` to either is a `TTBR_WRITE_RETIRED` event; a host's
+            // write is no instruction.
+            TTBR0_EL1 | TTBR1_EL1 => {
                 self.tvm_check(el)?;
-                self.sys.ttbr0_el1 = value;
-                WriteEffect::None
-            }
-            TTBR1_EL1 => {
-                self.tvm_check(el)?;
-                self.sys.ttbr1_el1 = value;
+                if k == TTBR0_EL1 {
+                    self.sys.ttbr0_el1 = value;
+                } else {
+                    self.sys.ttbr1_el1 = value;
+                }
+                if accessor == Accessor::Guest {
+                    self.pmu_register_written(PmuEvent::TtbrWriteRetired);
+                }
                 WriteEffect::None
             }
             TCR_EL1 => {
@@ -1710,9 +1729,13 @@ impl<L: Levels> Cpu<L> {
                 self.sys.rmr = value & RMR_RR;
                 WriteEffect::None
             }
+            // An `MSR` to it is a `CID_WRITE_RETIRED` event.
             CONTEXTIDR_EL1 => {
                 self.tvm_check(el)?;
                 self.sys.contextidr_el1 = value & 0xFFFF_FFFF;
+                if accessor == Accessor::Guest {
+                    self.pmu_register_written(PmuEvent::CidWriteRetired);
+                }
                 WriteEffect::None
             }
             TPIDR_EL1 => {
@@ -1877,6 +1900,9 @@ impl<L: Levels> Cpu<L> {
                 // The event streams' events so far are judged by the
                 // controls and the offset that generated them.
                 El2Reg::Cnthctl | El2Reg::Cntvoff => self.fold_event_stream(),
+                // The instructions so far are counted under the PMU
+                // controls `MDCR_EL2` held while they ran.
+                El2Reg::Mdcr => self.pmu_settle(self.retired),
                 _ => {}
             }
             // A translation register's write is judged by the context of
@@ -1891,6 +1917,9 @@ impl<L: Levels> Cpu<L> {
             // again.
             let inputs = reg.feeds_timers().then(|| self.el2_timer_inputs());
             self.el2_write(reg, value);
+            if reg == El2Reg::Mdcr {
+                self.pmu_controls_changed();
+            }
             let timers = inputs.is_some_and(|inputs| inputs != self.el2_timer_inputs());
             let effect = self.translation_effect(before, WriteEffect::None);
             return Ok(match (timers, effect) {
@@ -1903,7 +1932,8 @@ impl<L: Levels> Cpu<L> {
                     | WriteEffect::El10Context
                     | WriteEffect::Timer
                     | WriteEffect::Dcc
-                    | WriteEffect::Debug,
+                    | WriteEffect::Debug
+                    | WriteEffect::Pmu,
                 ) => {
                     self.apply_write_effect(WriteEffect::Timer);
                     effect
@@ -2002,6 +2032,7 @@ impl<L: Levels> Cpu<L> {
                     (WriteEffect::Timer, None | Some(_)) => WriteEffect::Timer,
                     (WriteEffect::Dcc, None | Some(_)) => WriteEffect::Dcc,
                     (WriteEffect::Debug, None | Some(_)) => WriteEffect::Debug,
+                    (WriteEffect::Pmu, None | Some(_)) => WriteEffect::Pmu,
                 };
                 self.apply_write_effect(applied);
                 Ok(applied)
@@ -2032,14 +2063,15 @@ impl<L: Levels> Cpu<L> {
 
     /// What the processor itself does after a write with `effect`: a TLB
     /// flush for an EL2 regime translation control, a change of context for
-    /// an EL1&0 one, and for a timer register or one COMMIRQ depends on the
-    /// flag that has the machine re-evaluate the processor's outputs.
+    /// an EL1&0 one, and for a timer register, one COMMIRQ depends on or a
+    /// PMU register the flag that has the machine re-evaluate the
+    /// processor's outputs.
     pub(crate) fn apply_write_effect(&mut self, effect: WriteEffect) {
         match effect {
             WriteEffect::None => {}
             WriteEffect::FlushTlb => self.flush_tlb(),
             WriteEffect::El10Context => self.el10_context_changed(),
-            WriteEffect::Timer | WriteEffect::Dcc => self.outputs_dirty = true,
+            WriteEffect::Timer | WriteEffect::Dcc | WriteEffect::Pmu => self.outputs_dirty = true,
             WriteEffect::Debug => self.debug_controls_changed(),
         }
     }

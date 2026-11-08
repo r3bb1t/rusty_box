@@ -651,11 +651,17 @@ impl<L: Levels> Cpu<L> {
                 match self.retire(pc, Some(word), flow, observed.observer) {
                     Done::Next => {}
                     Done::Elsewhere if exits.is_empty() => {
-                        debug_assert!(
-                            !self.trace_break && !self.outputs_dirty && !observed.devices_touched()
-                        );
                         match self.linked_trace(i, pc, pa.get(), epoch) {
                             Some(next) => {
+                                // A direct branch changes nothing the
+                                // caller looks at between traces; an
+                                // exception return, which may count a PMU
+                                // event, links nowhere.
+                                debug_assert!(
+                                    !self.trace_break
+                                        && !self.outputs_dirty
+                                        && !observed.devices_touched()
+                                );
                                 slots = next.start..next.start + next.len;
                                 pc = self.pc;
                                 continue 'linked;

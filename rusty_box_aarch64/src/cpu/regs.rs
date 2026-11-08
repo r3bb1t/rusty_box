@@ -239,6 +239,14 @@ sysregs! {
     /// Write-only: reading it is UNDEFINED.
     OSLAR_EL1 = (2, 0, 1, 0, 4);
     OSLSR_EL1 = (2, 0, 1, 1, 4);
+    // The PMU's (FEAT_PMUv3), absent without it.
+    PMCR_EL0 = (3, 3, 9, 12, 0);
+    PMCNTENSET_EL0 = (3, 3, 9, 12, 1);
+    PMOVSSET_EL0 = (3, 3, 9, 14, 3);
+    PMINTENSET_EL1 = (3, 0, 9, 14, 1);
+    PMUSERENR_EL0 = (3, 3, 9, 14, 0);
+    PMCCNTR_EL0 = (3, 3, 9, 13, 0);
+    PMCCFILTR_EL0 = (3, 3, 14, 15, 7);
     // The EL2 registers (FEAT_EL2), absent without it.
     SCTLR_EL2 = (3, 4, 1, 0, 0);
     HCR_EL2 = (3, 4, 1, 1, 0);

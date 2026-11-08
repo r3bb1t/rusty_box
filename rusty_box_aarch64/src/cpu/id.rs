@@ -2,7 +2,8 @@
 //!
 //! Each processor model ([`CpuModel`](super::CpuModel)) is cut down to what
 //! this interpreter implements: AArch64 at EL0 and EL1, and at EL2 where the
-//! machine asks for it (FEAT_EL2), no PMU. Of the translation granules, the
+//! machine asks for it (FEAT_EL2), and a PMU (FEAT_PMUv3) whose events are
+//! the ones it counts (`src/cpu/pmu.rs`). Of the translation granules, the
 //! interpreter walks all three; the Armv9.2 model offers them all, and the
 //! Cortex-A57 the 4 KiB and 64 KiB ones, its TRM's (DDI 0488H, 4.3.21)
 //! (`Features::CORTEX_A57`). The Armv9.2 model's physical addresses are 52
@@ -29,20 +30,21 @@
 //! `GICCDISABLE` HIGH) in every field whose feature the model has:
 //! `ID_AA64ISAR0_EL1` 0x11120, `ID_AA64MMFR0_EL1`'s `PARange`, `ASIDBits`
 //! and granules, `ID_AA64PFR0_EL1`'s FP, AdvSIMD and GIC fields,
-//! `ID_AA64DFR0_EL1`'s `DebugVer`, `TraceVer`, `BRPs`, `WRPs` and
-//! `CTX_CMPs` (six breakpoints, two of them context-aware, and four
-//! watchpoints), and the RES0 of
+//! `ID_AA64DFR0_EL1`'s `DebugVer`, `TraceVer`, `PMUVer` (PMUv3), `BRPs`,
+//! `WRPs` and `CTX_CMPs` (six breakpoints, two of them context-aware, and
+//! four watchpoints), and the RES0 of
 //! `ID_AA64PFR1_EL1`, `ID_AA64DFR1_EL1`, `ID_AA64ISAR1_EL1` and
 //! `ID_AA64MMFR1_EL1`. Where it lacks a part of the core the field says
 //! so: no AArch32 (`ID_AA64PFR0_EL1` EL0, EL1 and EL2 1, where the TRM's
 //! 2 adds AArch32, and the AArch32 ID registers, UNKNOWN without AArch32,
-//! read 0), no EL3 (EL3 0), EL2 only where the machine asks for it, no PMU
-//! (`ID_AA64DFR0_EL1.PMUVer` 0), no big-endian data accesses
+//! read 0), no EL3 (EL3 0), EL2 only where the machine asks for it, no
+//! big-endian data accesses
 //! (`ID_AA64MMFR0_EL1.BigEnd` 0: `SCTLR_ELx.EE` and `E0E` change nothing),
 //! and no Secure state (`SNSMem` 0, which Arm permits without EL3).
 
 use super::debug::DebugPoints;
 use super::features::{Feature, Features};
+use super::pmu::PmuShape;
 
 /// The Cortex-A57's `MIDR_EL1`: Arm Ltd, variant 1, architecture 0xF, part
 /// 0xD07 (Cortex-A57), revision 3 — r1p3, the revision the TRM describes
@@ -145,13 +147,17 @@ pub(crate) const SMIDR_EL1: u64 = 0b10 << 13;
 /// FEAT_Debugv8p4 (each of which `Features.json` makes imply the one
 /// before), BRPs (15:12), WRPs (23:20) and CTX_CMPs (31:28) the number of
 /// breakpoints, watchpoints and context-aware breakpoints, each less one,
-/// PMUVer = 0 (no PMU), and DoubleLock (39:36) 0 with
-/// FEAT_DoubleLock and 0b1111 without (`FEAT_DoubleLock <=>
+/// PMUVer (11:8) 0 without a PMU, 1 with FEAT_PMUv3, 4 with FEAT_PMUv3p1,
+/// 5 with FEAT_PMUv3p4, 6 with FEAT_PMUv3p5 and 7 with FEAT_PMUv3p7
+/// (`Features.json`: `FEAT_PMUv3p7 <=> UInt(PMUVer) >= 7`, and each the
+/// same of its own value), MTPMU (51:48) as the PMU reports it
+/// ([`MtpmuReport`](super::pmu::MtpmuReport)), and DoubleLock (39:36) 0
+/// with FEAT_DoubleLock and 0b1111 without (`FEAT_DoubleLock <=>
 /// SInt(ID_AA64DFR0_EL1.DoubleLock) >= 0`). The Cortex-A57's reads
-/// 0x10305006, its TRM's 0x10305106 (DDI 0488H, 4.3.19) but for PMUv3,
-/// which the model does not have; the Armv9.2 model's has two breakpoints,
-/// one of them context-aware, and two watchpoints.
-pub(crate) const fn id_aa64dfr0(features: Features, points: DebugPoints) -> u64 {
+/// 0x10305106, its TRM's (DDI 0488H, 4.3.19); the Armv9.2 model's has two
+/// breakpoints, one of them context-aware, and two watchpoints, PMUv3p7,
+/// and MTPMU 0b1111.
+pub(crate) const fn id_aa64dfr0(features: Features, points: DebugPoints, pmu: PmuShape) -> u64 {
     let debug = chain_level(
         features,
         &[Feature::Debugv8p1, Feature::Debugv8p2, Feature::Debugv8p4],
@@ -164,7 +170,29 @@ pub(crate) const fn id_aa64dfr0(features: Features, points: DebugPoints) -> u64 
     let brps = (points.breakpoints() as u64 - 1) << 12;
     let wrps = (points.watchpoints() as u64 - 1) << 20;
     let ctx_cmps = (points.context_aware() as u64 - 1) << 28;
-    ctx_cmps | wrps | brps | double_lock | (6 + debug)
+    let pmu_ver = match chain_level(
+        features,
+        &[
+            Feature::PmuV3,
+            Feature::PmuV3p1,
+            Feature::PmuV3p4,
+            Feature::PmuV3p5,
+            Feature::PmuV3p7,
+        ],
+    ) {
+        0 => 0,
+        1 => 1,
+        2 => 4,
+        3 => 5,
+        4 => 6,
+        _ => 7,
+    };
+    let mtpmu = if features.has(Feature::PmuV3) {
+        pmu.mtpmu.field() << 48
+    } else {
+        0
+    };
+    mtpmu | ctx_cmps | wrps | brps | double_lock | (pmu_ver << 8) | (6 + debug)
 }
 
 /// `DBGAUTHSTATUS_EL1` of a processor implementing `features`, as Arm's

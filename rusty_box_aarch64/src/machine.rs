@@ -5,8 +5,8 @@
 //!
 //! - interrupts are taken only at instruction boundaries, from line levels
 //!   that change only at instructions (an MMIO access, a timer register
-//!   write), at a precomputed tick (`next_event`), or at a host action
-//!   between runs;
+//!   write), at a precomputed tick (`next_event`) or instruction count (the
+//!   PMU's next overflow, `pmu_event`), or at a host action between runs;
 //! - a waiting processor (`WFI`, `WFE`, `WFIT`, `WFET`) jumps time straight
 //!   to the next event or to the tick its wait ends by itself, and stays in
 //!   the waiting state across calls, so a run that is cut into budgets
@@ -1583,6 +1583,7 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
         devices,
         device_tree,
         next_event: 0,
+        pmu_event: u64::MAX,
         power: PowerState::Running,
         terminal: TerminalKeyboard::new(),
         exits: Exits::EMPTY,
@@ -1835,6 +1836,11 @@ pub struct VirtMachine<S, L: Levels, I = NoInstrumentation> {
     device_tree: DeviceTree,
     /// The next tick at which a timer or device output changes by itself.
     next_event: u64,
+    /// The instruction count at which a PMU counter can next overflow, at
+    /// the soonest (`Cpu::pmu_outputs`): the PMU counts only while the
+    /// processor runs, so its next event is an instruction count, not a
+    /// tick.
+    pmu_event: u64,
     power: PowerState,
     observer: I,
     board: VirtBoard<S>,
@@ -1958,13 +1964,17 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     }
 
     /// Re-evaluate everything that changes with time or with a timer
-    /// register: the timer PPIs and the DCC's, the time-driven devices, the
-    /// processor's interrupt inputs, and the next tick at which any of them
-    /// changes.
+    /// register: the timer PPIs, the DCC's and the PMU's, the time-driven
+    /// devices, the processor's interrupt inputs, and the next tick at which
+    /// any of them changes, and the next instruction at which a PMU counter
+    /// can overflow.
     fn sync_events(&mut self) {
         self.cpu.take_outputs_dirty();
         self.board.set_timer_lines(self.cpu.timer_lines());
         self.board.set_dcc_line(self.cpu.dcc_interrupt());
+        let pmu = self.cpu.pmu_outputs();
+        self.board.set_pmu_line(pmu.interrupt);
+        self.pmu_event = pmu.next_overflow.map_or(u64::MAX, |at| at.get());
         let device_deadline = self.board.advance_devices(self.cpu.clock());
         let timer_deadline = self.cpu.next_timer_deadline();
         self.next_event = timer_deadline
@@ -2109,7 +2119,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
         instruction_end: u64,
     ) -> Slice {
         'slice: loop {
-            if self.cpu.icount >= self.next_event {
+            if self.cpu.icount >= self.next_event || self.cpu.retired >= self.pmu_event {
                 self.sync_events();
             }
             if matches!(self.cpu.activity, Activity::Waiting(_)) && !self.cpu.wake_if_pending() {
@@ -2140,12 +2150,15 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             }
             // At least one instruction: a next event already due is worked
             // out again before every instruction until it is in the future.
+            // The PMU's next overflow, worked out above once due, is past
+            // the instructions retired so far.
             let burst = self
                 .next_event
                 .saturating_sub(self.cpu.icount)
                 .max(1)
                 .min(slice_end - self.cpu.icount)
-                .min(instruction_end - self.cpu.retired);
+                .min(instruction_end - self.cpu.retired)
+                .min(self.pmu_event - self.cpu.retired);
             let mut left = burst;
             // A burst is at most a slice, fewer than 2^32 instructions.
             self.cpu.bound_run(burst);
@@ -2561,9 +2574,9 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     /// (EL2 with FEAT_EL2, EL1 without) would, with none of the controls
     /// that trap a guest and the effects included: a translation register
     /// empties the TLB, whatever the value written, so writing one makes a
-    /// changed translation table seen; a timer register, or one COMMIRQ
-    /// depends on, re-evaluates the processor's outputs before the next
-    /// instruction.
+    /// changed translation table seen; a timer register, one COMMIRQ
+    /// depends on, or a PMU register re-evaluates the processor's outputs
+    /// before the next instruction.
     ///
     /// # Errors
     ///
@@ -2579,7 +2592,8 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             | WriteEffect::El10Context
             | WriteEffect::Timer
             | WriteEffect::Dcc
-            | WriteEffect::Debug => Ok(()),
+            | WriteEffect::Debug
+            | WriteEffect::Pmu => Ok(()),
         }
     }
 
@@ -2825,7 +2839,9 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// feature set of 128 bits, its counts of breakpoints, context-aware
 /// breakpoints and watchpoints and the registers of six breakpoints and four
 /// watchpoints (the most a model has, those beyond the processor's held
-/// zero), `RVBAR_ELx` and `RMR_ELx` of the highest level,
+/// zero), the PMU's registers with FEAT_PMUv3 (six event counters and
+/// their types, the most a model has, the counters as the instructions
+/// retired leave them), `RVBAR_ELx` and `RMR_ELx` of the highest level,
 /// what Software Step stepped, each TLB entry's stage 2 permissions and
 /// level beside stage 1's and the memory each stage and both together map
 /// it to, the TLB's kept stage 2 translations, its tables of EL1&0 and
@@ -2845,8 +2861,9 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// processor's `SMIDR_EL1` and `ID_AA64DFR0_EL1`, the walk a `TxSZ`
 /// out of its range takes (the limit, `regime::txsz_taken`), which the
 /// TLB's entries were made under, the PL011's revision and the depth of
-/// its FIFOs, which its image holds, and the GIC's PPIs.
-const SNAPSHOT_VERSION: u32 = 33;
+/// its FIFOs, which its image holds, the GIC's PPIs, and the PMU the
+/// processor's `ID_AA64DFR0_EL1` and device tree name.
+const SNAPSHOT_VERSION: u32 = 34;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

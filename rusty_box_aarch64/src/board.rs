@@ -111,6 +111,11 @@ pub const PPI_SECURE_PHYSICAL_TIMER: u32 = 16 + 13;
 /// RV_L1PP_00), and Arm ARM H4.6 recommends a level-sensitive PPI for.
 /// No device tree binding names it.
 pub const PPI_DCC: u32 = 16 + 6;
+/// PMUIRQ, the PMU's overflow interrupt request, on the PPI BSA recommends
+/// for it, INTID 23 (DEN0094C RB_PPI_01), which the Arm ARM recommends too
+/// (D13.3.1: a PPI, from GICv3 ID 23), level-sensitive. The device tree's
+/// `pmu` node names it.
+pub const PPI_PMU: u32 = 16 + 7;
 
 /// The PL011's reference clock, `UARTCLK`: the device tree's `/clock`
 /// fixed clock, 24 MHz, which its `serial` node names as `uartclk`.
@@ -577,6 +582,11 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// Drive the DCC's PPI with COMMIRQ ([`PPI_DCC`]).
     pub(crate) fn set_dcc_line(&mut self, commirq: bool) {
         self.gic.set_line(PPI_DCC, commirq);
+    }
+
+    /// Drive the PMU's PPI with PMUIRQ ([`PPI_PMU`]).
+    pub(crate) fn set_pmu_line(&mut self, pmuirq: bool) {
+        self.gic.set_line(PPI_PMU, pmuirq);
     }
 
     /// Let time-driven devices catch up to `clock` and report the next

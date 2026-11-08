@@ -6,11 +6,14 @@
 //! Provenance (R7): the Devicetree Specification v0.4 — chapter 5 for the
 //! flattened format, 2.2.2 for the generic node names (`serial`, `rtc`,
 //! `gpio`, `interrupt-controller`, `msi-controller`, `clock`, `flash`,
-//! `pcie`, `memory`, `cpus`, `timer`), 2.3 for `dma-coherent` on each
+//! `pcie`, `memory`, `cpus`, `timer`, `pmu`), 2.3 for `dma-coherent` on each
 //! device that makes coherent DMA, 3.7 and 3.8 for the processor and cache
 //! nodes, whose geometry is what `CCSIDR_EL1` reports ([`crate::cpu::id`])
 //! — and, for each node, the binding its `compatible` names (Linux
-//! `Documentation/devicetree/bindings`): `arm,cortex-a15-gic` (the GICv2
+//! `Documentation/devicetree/bindings`): `arm,cortex-a57-pmu` or
+//! `arm,armv8-pmuv3` (the PMU binding, `arm/pmu.yaml`: the processor's own
+//! PMU, or the generic PMUv3 a processor with no entry of its own takes),
+//! `arm,cortex-a15-gic` (the GICv2
 //! binding's; the board's GIC has no Security Extensions, which every
 //! product the binding names otherwise has, and this one is the string
 //! EDK2's GIC discovery looks for, `ArmVirtGicPlatformDxe` on its master
@@ -42,7 +45,7 @@
 
 use super::fdt::{DeviceTreeError, Header, Out, FDT_BEGIN_NODE, FDT_END, FDT_END_NODE, HEADER_LEN};
 use crate::board::{
-    FLASH0_BASE, FLASH1_BASE, FLASH_BANK_SIZE, PPI_HYPERVISOR_TIMER, PPI_PHYSICAL_TIMER,
+    FLASH0_BASE, FLASH1_BASE, FLASH_BANK_SIZE, PPI_HYPERVISOR_TIMER, PPI_PHYSICAL_TIMER, PPI_PMU,
     PPI_SECURE_PHYSICAL_TIMER, PPI_VIRTUAL_TIMER, RAM_BASE, UART_CLOCK,
 };
 use crate::bus::PhysAddr;
@@ -428,6 +431,15 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     .map(|intid| [GIC_PPI, intid - 16, PPI_ONE_PROCESSOR | IRQ_LEVEL_HIGH]);
     w.cells("interrupts", interrupts.as_flattened())?;
     w.flag("always-on")?;
+    w.end()?;
+
+    // The PMU binding's: the processor's own compatible, and PMUIRQ, a PPI.
+    w.begin("pmu")?;
+    w.string("compatible", tree.cpu.pmu_compatible())?;
+    w.cells(
+        "interrupts",
+        &[GIC_PPI, PPI_PMU - 16, PPI_ONE_PROCESSOR | IRQ_LEVEL_HIGH],
+    )?;
     w.end()?;
 
     gic(&mut w, tree.gic, windows.gic)?;

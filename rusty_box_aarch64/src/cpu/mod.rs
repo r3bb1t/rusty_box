@@ -57,6 +57,7 @@ mod memory_system;
 mod mmu;
 mod op;
 mod pauth;
+mod pmu;
 #[cfg(test)]
 #[path = "../../tests/unit/pointer_auth.rs"]
 mod pointer_auth;
@@ -608,6 +609,9 @@ pub struct Cpu<L: Levels> {
     /// it.
     pub(crate) imp: features::LeveledImplementation<L>,
     pub(crate) sys: SysRegs,
+    /// The Performance Monitors Extension's registers and counters
+    /// (FEAT_PMUv3), all zero on a processor without it.
+    pub(crate) pmu: pmu::Pmu,
     pub(crate) monitor: ExclusiveMonitor,
     pub(crate) event: wait::EventRegister,
     pub(crate) tlb: Tlb<L>,
@@ -649,9 +653,10 @@ pub struct Cpu<L: Levels> {
     pub(crate) retired: u64,
     pub(crate) ips: ClockHz,
     /// Set when a register access may have changed one of the processor's
-    /// outputs to its PPIs: a timer's line or next deadline, or the DCC's
-    /// COMMIRQ ([`Cpu::dcc_interrupt`]); the machine re-evaluates and
-    /// clears it.
+    /// outputs to its PPIs: a timer's line or next deadline, the DCC's
+    /// COMMIRQ ([`Cpu::dcc_interrupt`]), or PMUIRQ or the PMU's next
+    /// overflow ([`Cpu::pmu_outputs`]); the machine re-evaluates and clears
+    /// it.
     pub(crate) outputs_dirty: bool,
     /// The interrupt controller's IRQ and FIQ outputs, as the machine last
     /// sampled them. `ISR_EL1` reads them and `WFI` wakes on them.
@@ -702,6 +707,7 @@ impl<L: Levels> Cpu<L> {
             pac_keys: pauth::PacKeys::RESET,
             imp,
             sys: SysRegs::reset(imp.get(), config.reset_pc),
+            pmu: pmu::Pmu::reset(imp.features, imp.pmu, 0),
             monitor: ExclusiveMonitor::CLEAR,
             event: wait::EventRegister::at(false, timer::Count::new(0)),
             tlb: Tlb::new(),

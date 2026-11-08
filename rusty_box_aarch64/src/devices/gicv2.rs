@@ -6,8 +6,8 @@
 //! Provenance (R7): the ARM Generic Interrupt Controller Architecture
 //! Specification, GIC architecture version 2.0 (IHI 0048B.b), first, with
 //! the GIC-400's choices where it leaves them to the implementation (DDI
-//! 0471B: PPIs 25 to 31, level-sensitive; and PPI 22, COMMIRQ's, which
-//! BSA's PPI assignments add), and its SPIs and priority bits
+//! 0471B: PPIs 25 to 31, level-sensitive; and PPI 22, COMMIRQ's, and 23,
+//! PMUIRQ's, which BSA's PPI assignments add), and its SPIs and priority bits
 //! the board's to choose ([`GicShape`]: by default the GIC-400's 480 SPIs
 //! and five bits), the minimum binary points and active priority registers
 //! following from the priority bits (IHI 0048B Table 4-47), and its GICv2m
@@ -99,12 +99,13 @@ const WORDS: usize = MAX_IRQ / 32;
 const NR_SGIS: usize = 16;
 /// The PPIs the GIC implements, a bit each in the word of IDs 0 to 31:
 /// 25 to 31, the GIC-400's ("all interrupts are implemented except for the
-/// unused PPIs, IDs 16-24", DDI 0471B §3.3), and 22, the PPI of the DCC's
+/// unused PPIs, IDs 16-24", DDI 0471B §3.3); 22, the PPI of the DCC's
 /// COMMIRQ, which BSA recommends (DEN0094C RB_PPI_01) and V-BSA requires
-/// to be a PPI (DEN0150 RV_L1PP_00), where the GIC-400 has none for it.
-/// Every field of an interrupt that does not exist is RAZ/WI (IHI 0048B
-/// §4.3.13 and the other registers').
-const IMPLEMENTED_PPIS: u32 = 0xFE00_0000 | (1 << 22);
+/// to be a PPI (DEN0150 RV_L1PP_00); and 23, the PMU's PMUIRQ, which BSA
+/// recommends (RB_PPI_01) for the PMU V-BSA requires (RV_L1PE_02) — the
+/// GIC-400 has neither. Every field of an interrupt that does not exist is
+/// RAZ/WI (IHI 0048B §4.3.13 and the other registers').
+const IMPLEMENTED_PPIS: u32 = 0xFE00_0000 | (1 << 22) | (1 << 23);
 
 /// How many SPIs a GIC has: a multiple of 32 (`GICD_TYPER.ITLinesNumber`
 /// counts them in 32s, IHI 0048B §4.3.2), at most 480, the GIC-400's
@@ -2089,16 +2090,17 @@ pub(super) mod tests {
         assert_eq!(cpu_get(&mut g, RPR), 0xFF);
     }
 
-    /// PPIs 16 to 21, 23 and 24 do not exist, as PPIs 16 to 24 do not in
-    /// the GIC-400 (DDI 0471B §3.3): their fields are RAZ/WI and their lines
-    /// raise nothing. PPIs 25 to 31 do, and PPI 22, COMMIRQ's (BSA DEN0094C
-    /// RB_PPI_01), and their trigger mode reads level-sensitive and cannot
-    /// be changed (IHI 0048B Table 4-18), while an SPI's can.
+    /// PPIs 16 to 21 and 24 do not exist, as PPIs 16 to 24 do not in the
+    /// GIC-400 (DDI 0471B §3.3): their fields are RAZ/WI and their lines
+    /// raise nothing. PPIs 25 to 31 do, and PPIs 22 and 23, COMMIRQ's and
+    /// PMUIRQ's (BSA DEN0094C RB_PPI_01), and their trigger mode reads
+    /// level-sensitive and cannot be changed (IHI 0048B Table 4-18), while
+    /// an SPI's can.
     #[test]
-    fn only_ppi_22_and_ppis_25_to_31_exist_and_ppis_stay_level_sensitive() {
+    fn only_ppis_22_23_and_25_to_31_exist_and_ppis_stay_level_sensitive() {
         let mut g = enabled();
-        let absent = 0x01BF_0000;
-        let present = 0xFE40_0000;
+        let absent = 0x013F_0000;
+        let present = 0xFEC0_0000;
         dist(&mut g, 0x080, 0xFFFF_FFFF);
         dist(&mut g, 0x100, 0xFFFF_FFFF);
         dist(&mut g, 0x200, 0xFFFF_FFFF);
@@ -2108,7 +2110,7 @@ pub(super) mod tests {
             assert_eq!(
                 dist_get(&mut g, bank) & present,
                 present,
-                "bank {bank:#x}: PPIs 22 and 25 to 31"
+                "bank {bank:#x}: PPIs 22, 23 and 25 to 31"
             );
         }
         dist(&mut g, 0x400 + 16, 0x8080_8080);
@@ -2116,8 +2118,8 @@ pub(super) mod tests {
         dist(&mut g, 0x400 + 20, 0x8080_8080);
         assert_eq!(
             dist_get(&mut g, 0x400 + 20),
-            0x0080_0000,
-            "PPI 22 alone of 20 to 23"
+            0x8080_0000,
+            "PPIs 22 and 23 alone of 20 to 23"
         );
         assert_eq!(dist_get(&mut g, 0x400 + 24) & 0xFF, 0, "PPI 24");
 
@@ -2131,6 +2133,12 @@ pub(super) mod tests {
         assert!(g.irq_out(), "PPI 22's line raises it");
         assert_eq!(cpu_get(&mut g, HPPIR), 22);
         g.set_line(22, false);
+        assert!(!g.irq_out(), "and lowering the line withdraws it");
+        dist(&mut g, 0x100, 1 << 23);
+        g.set_line(23, true);
+        assert!(g.irq_out(), "PPI 23's line raises it");
+        assert_eq!(cpu_get(&mut g, HPPIR), 23);
+        g.set_line(23, false);
         assert!(!g.irq_out(), "and lowering the line withdraws it");
         dist(&mut g, 0xC04, 0xFFFF_FFFF);
         assert_eq!(dist_get(&mut g, 0xC04), 0, "PPIs stay level-sensitive");
@@ -2628,7 +2636,7 @@ pub(super) mod tests {
             (&[(PENDING_AT + 2, 0x10)], "PPI 20 pending"),
             (&[(ACTIVE_AT + 3, 0x01)], "PPI 24 active"),
             (&[(GROUP_AT + 2, 0x01)], "PPI 16 in Group 1"),
-            (&[(LEVEL_AT + 2, 0x80)], "PPI 23's line high"),
+            (&[(LEVEL_AT + 2, 0x20)], "PPI 21's line high"),
             (&[(PRIORITY_AT + 20, 0x80)], "PPI 20 with a priority"),
         ];
 

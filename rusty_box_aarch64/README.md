@@ -324,11 +324,11 @@ is) must reproduce, are:
 
 | Part | Model |
 |---|---|
-| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, of revision r1p3 (`MIDR_EL1` 0x411F_D073, the revision its TRM, DDI 0488H, describes; see "Where the references differ"), the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB and 64 KiB granules, the Cortex-A57's (DDI 0488H, 4.3.21), and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB granule too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
-| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive, and BSA's PPI 22 for the DCC's COMMIRQ; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0800_4000, the common base and processor 0's at 0x0800_5000, 4 KiB each, on the board's own layout) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0800_6000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
+| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, of revision r1p3 (`MIDR_EL1` 0x411F_D073, the revision its TRM, DDI 0488H, describes; see "Where the references differ"), the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB and 64 KiB granules, the Cortex-A57's (DDI 0488H, 4.3.21), and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB granule too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ"); a PMU (`src/cpu/pmu.rs`) with the cycle counter and six event counters, the Cortex-A57's its TRM's PMUv3 (DDI 0488H chapter 11: `PMCR_EL0.IMP` 0x41, `IDCODE` 0x01, 32-bit event counters) and the Armv9.2 model's FEAT_PMUv3p7 with FEAT_PMUv3p5's 64-bit event counters and FEAT_PMUv3p4's `PMMIR_EL1`, with `PMUSERENR_EL0`'s EL0 access and `MDCR_EL2`'s traps, `HPMN`, `HPME`, `HPMD`, `HCCD`, `HLP` and `HPMFZO`, the `P`, `U` and `NSH` filters, `CHAIN`, freezing on overflow (FEAT_PMUv3p7), and PMUIRQ on PPI 23; it counts the events it advertises in `PMCEID0_EL0` and `PMCEID1_EL0` — `SW_INCR`, `INST_RETIRED`, `EXC_TAKEN`, `EXC_RETURN`, `CID_WRITE_RETIRED`, `CPU_CYCLES`, `TTBR_WRITE_RETIRED` and `CHAIN`, and on the Armv9.2 model the stall events, which count nothing — with the processor's clock the instruction clock: one cycle per instruction, stopped while the processor waits (see "Where the references differ") |
+| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive, and BSA's PPI 22 for the DCC's COMMIRQ and PPI 23 for the PMU's PMUIRQ; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0800_4000, the common base and processor 0's at 0x0800_5000, 4 KiB each, on the board's own layout) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0800_6000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
 | Devices | PL011 UART r1p5 (`UARTPeriphID2` revision 3, DDI 0183G; BSA's Generic UART: a 32-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 32-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with a `gpio-key` power button on its first line, 0 (line 3, QEMU's, on QEMU's layout), CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded; the identity's manufacturer and device codes, by default none, and a CFI query table of the board's own; see "Where the references differ"), no `fw_cfg` (see "Where the references differ"), virtio-mmio transports, 4 on the board's own layout and 32 on QEMU's (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the first free ones, or the last free with `VirtConfig::transport_order`; every queue 256 entries), an empty PCIe ECAM/windows, the 32-bit memory window non-prefetchable and the 64-bit one prefetchable |
-| Board | the board's own device layout after Arm's memory map principles, or QEMU `virt`'s (`VirtConfig::layout`, see "Where the references differ"), RAM and the flash where QEMU's `virt` has them in both; the board's own interrupt wiring (`VirtConfig::interrupts`, see "Where the references differ"); the board's own device tree, written from the board (`src/boot/tree.rs`): generic node names (Devicetree Specification 2.2.2), each node as its binding describes it, the GIC with each frame the size it decodes, `dma-coherent` on each device that makes DMA, the processor's caches down to the L2 as `CCSIDR_EL1` reports them, `/psci` for PSCI 1.0 and 0.2 on the conduit the firmware answers on, `/chosen` with EBBR's `stdout-path` and no boot entropy (see "Where the references differ"), and the identity's `/model` and root `compatible`; no PMU, `fw-cfg` or platform bus node, which the board does not have; with EL2, the virtual interface's two frames and its maintenance interrupt in the GIC node; a host's own tree gets its names the identity's, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does, and is refused where it puts a device anywhere but where the layout has it (`BuildError::HostTreeAddress`) or names a device's interrupt other than the one the board's interrupt map wires it to (`BuildError::HostTreeInterrupt`) |
+| Board | the board's own device layout after Arm's memory map principles, or QEMU `virt`'s (`VirtConfig::layout`, see "Where the references differ"), RAM and the flash where QEMU's `virt` has them in both; the board's own interrupt wiring (`VirtConfig::interrupts`, see "Where the references differ"); the board's own device tree, written from the board (`src/boot/tree.rs`): generic node names (Devicetree Specification 2.2.2), each node as its binding describes it, the GIC with each frame the size it decodes, `dma-coherent` on each device that makes DMA, the processor's caches down to the L2 as `CCSIDR_EL1` reports them, `/psci` for PSCI 1.0 and 0.2 on the conduit the firmware answers on, `/chosen` with EBBR's `stdout-path` and no boot entropy (see "Where the references differ"), and the identity's `/model` and root `compatible`; a `pmu` node of the PMU binding, the processor's own (`arm,cortex-a57-pmu`) or the generic PMUv3's (`arm,armv8-pmuv3`) with PMUIRQ on PPI 23; no `fw-cfg` or platform bus node, which the board does not have; with EL2, the virtual interface's two frames and its maintenance interrupt in the GIC node; a host's own tree gets its names the identity's, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does, and is refused where it puts a device anywhere but where the layout has it (`BuildError::HostTreeAddress`) or names a device's interrupt other than the one the board's interrupt map wires it to (`BuildError::HostTreeInterrupt`) |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed and entered as Linux's arm64 boot protocol (`Documentation/arch/arm64/booting.rst`) asks — the kernel at the base of RAM, the device tree in the 2 MiB block after its `image_size`, the initramfs in the next, `x0` the tree and every other general-purpose register zero — and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
 Provenance: Arm's documents decide wherever they speak — the Arm ARM (DDI
@@ -422,12 +422,20 @@ synchronous external abort reports), and FEAT_Debugv8p1, FEAT_Debugv8p2
 and FEAT_Debugv8p4 (`DebugVer`, DBGAUTHSTATUS_EL1's always-enabled
 non-invasive debug, a breakpoint type that matches `CONTEXTIDR_EL1` and the
 watchpoint number in a Watchpoint exception's syndrome; what else they
-change is halting and external debug and the PMU, which this model does
-not have); FEAT_AFP (FPCR.FIZ, FPCR.AH's alternate
+change is halting and external debug and the PMU's counting in Secure
+state, which this model, with neither and no Secure state, does not
+have); FEAT_AFP (FPCR.FIZ, FPCR.AH's alternate
 floating-point behaviours in every scalar, Advanced SIMD and BFloat16
 instruction, and FPCR.NEP's merging of scalar results into the source
 register each instruction names) and FEAT_RPRES (12-bit single-precision
-FRECPE and FRSQRTE under FPCR.AH);
+FRECPE and FRSQRTE under FPCR.AH); FEAT_PMUv3 with FEAT_PMUv3p1 (16-bit
+event numbers, `MDCR_EL2.HPMD`), FEAT_PMUv3p4 (`PMMIR_EL1`), FEAT_PMUv3p5
+(64-bit event counters overflowing at bit 31 or 63 by `PMCR_EL0.LP` and
+`MDCR_EL2.HLP`, `MDCR_EL2.HCCD`) and FEAT_PMUv3p7 (`PMCR_EL0.FZO` and
+`MDCR_EL2.HPMFZO`, freezing the counters on overflow, and `PMCR_EL0.IMP`
+reading as zero), the PMU revisions Arm requires of an Armv8.7 and later
+processor with a PMU, and `ID_AA64DFR0_EL1.MTPMU` 0b1111, which Armv8.6
+and later require without FEAT_MTPMU;
 and FEAT_SME and FEAT_SME2 (FEAT_SME's state, registers, SMSTART
 and SMSTOP, RDSVL, ADDSVL and ADDSPL, and the SVE and SVE2 integer,
 element count, immediate, permute, compare, predicate and WHILE
@@ -1094,7 +1102,9 @@ integration tests of the public API.
   agree, but for the firmware's `PSCI_VERSION`, which the replay expects
   as the board's PSCI 1.2 where QEMU recorded 1.1 (see "Where the
   references differ"); the generator leaves out what QEMU's Cortex-A57 has and this core
-  does not (AArch32, the PMU, its IMPLEMENTATION DEFINED registers) and
+  does not (AArch32, its IMPLEMENTATION DEFINED registers), the PMU, whose
+  cycles QEMU counts on its virtual clock where this core counts
+  instructions ("The PMU's clock is the instruction clock"), and
   DBGPRCR_EL1, which QEMU lacks. `tests/virtualization.rs` runs the board
   with virtualization: firmware entered at EL2, the device tree's PSCI
   method, a host's tree given the board's `/psci` node and an empty
@@ -1396,6 +1406,19 @@ integration tests of the public API.
   reading revision 3 and its transmit FIFO taking 32 characters before
   `TXFF`, and COMMIRQ pending on PPI 22 once `MDCCINT_EL1.TX` asks for it,
   acknowledged as INTID 22, and withdrawn once DTRTX is full.
+- `tests/pmu.rs`: the PMU as a guest on either processor sees it —
+  `PMCR_EL0`, `PMCEIDn_EL0` and `PMUVer` naming it, the cycle counter,
+  `INST_RETIRED`, `CPU_CYCLES`, `EXC_TAKEN` and `EXC_RETURN` counting the
+  instructions run around a `UDF` and its handler, the filters counting
+  only the levels they leave, an overflow pending on PPI 23 and
+  acknowledged as INTID 23, the cycle counter stopping through a `WFI`
+  while the generic timer runs on, and EL0's access as `PMUSERENR_EL0`
+  allows. `tests/unit/pmu.rs` checks `PMUSERENR_EL0`'s and `MDCR_EL2`'s
+  traps, `HPMN`'s ranges and each processor's choice for the counters
+  out of reach, `SW_INCR`, `CHAIN` with 32-bit and 64-bit counters,
+  freezing on overflow, `HPMD` and `HCCD`, the register-write events and
+  a snapshot; `tests/unit/sysreg_spec.rs` holds every PMU accessor to
+  Arm's on each processor.
 
 ## Where the references differ
 
@@ -1977,15 +2000,14 @@ one open.
   (v8.0), `TraceVer` (0), `BRPs` (5), `WRPs` (3) and `CTX_CMPs` (1) — six
   breakpoints, the highest two, 4 and 5, context-aware, and four
   watchpoints, whose registers past them (`DBGBVR6_EL1`, `DBGWVR4_EL1` and
-  on) are UNDEFINED (`src/cpu/debug.rs`); and `ID_AA64PFR1_EL1`,
+  on) are UNDEFINED (`src/cpu/debug.rs`) — and `PMUVer` (1, PMUv3), the
+  whole register reading the TRM's 0x10305106; and `ID_AA64PFR1_EL1`,
   `ID_AA64DFR1_EL1`, `ID_AA64ISAR1_EL1` and `ID_AA64MMFR1_EL1` 0, the
   TRM's RES0 (10.7,
   Table 10-10). Where the model lacks a part of the core, the field says
   so, and differs from the TRM's: `ID_AA64PFR0_EL1` reads 0x11 (0x111
   with EL2) where the TRM's 0x2222 has AArch32 at EL0 to EL2 and an EL3,
-  neither of which the model has; `ID_AA64DFR0_EL1` reads 0x10305006
-  where the TRM's 0x10305106 has PMUv3 (`PMUVer` 1), the model having no
-  PMU ("Not implemented"); `ID_AA64MMFR0_EL1` reads 0x24 where the TRM's
+  neither of which the model has; `ID_AA64MMFR0_EL1` reads 0x24 where the TRM's
   0x1124
   has `BigEnd` 1 (mixed endianness: `SCTLR_ELx.EE` and `SCTLR_EL1.E0E`
   configurable) and `SNSMem` 1 (Secure and Non-secure memory told apart),
@@ -2340,11 +2362,13 @@ one open.
   choose fewer SPIs, from 64, and four to eight
   priority bits) it has 480 SPIs, the GIC-400's largest
   configuration (DDI 0471B §2.3.3), so `GICD_TYPER.ITLinesNumber` reads
-  15. Its PPIs are the GIC-400's 25 to 31 (§3.3) and PPI 22, on which the
+  15. Its PPIs are the GIC-400's 25 to 31 (§3.3), PPI 22, on which the
   board drives the DCC's COMMIRQ, the PPI BSA recommends for it (DEN0094C
   RB_PPI_01), which V-BSA makes a PPI of in every virtual environment
-  (DEN0150 RV_L1PP_00) and which the GIC-400 does not have; PPIs 16 to 21,
-  23 and 24 do not exist and so are RAZ/WI in every register, and every
+  (DEN0150 RV_L1PP_00), and PPI 23, on which it drives the PMU's PMUIRQ,
+  the PPI BSA recommends for that (RB_PPI_01) and the Arm ARM too (D13.3.1),
+  neither of which the GIC-400 has; PPIs 16 to 21 and 24 do not exist and
+  so are RAZ/WI in every register, and every
   PPI is level-sensitive and cannot be made edge-triggered (Table 3-2,
   `GICD_ICFGR1` RO). It has five priority bits,
   32 levels (§2.6, Secure state: this GIC has no Non-secure view), so
@@ -2531,8 +2555,10 @@ one open.
   (Linux before 3.16) finds PSCI on QEMU and not here, in the board's tree
   or in a host's, whose `/psci` node is replaced by the board's. `dma-coherent` is on each device that makes DMA,
   the property being a device's (Devicetree Specification 2.3), not on
-  the root as well. There is no PMU node, `ID_AA64DFR0_EL1.PMUVer` being 0;
-  QEMU writes one only for a processor with a PMU. The PCIe host names the
+  the root as well. The `pmu` node names the Cortex-A57's own PMU,
+  `arm,cortex-a57-pmu`, which the PMU binding lists, where QEMU names every
+  processor's `arm,armv8-pmuv3`; the Armv9.2 model, a software model with
+  no entry of its own, takes that generic one. The PCIe host names the
   GICv2m frame as its `msi-parent`, the frame taking no MSI specifier;
   QEMU's gives it an `msi-map` entry whose specifier cell the frame does
   not have.
@@ -3214,6 +3240,74 @@ one open.
   the GIC maintenance interrupt alone), so its `MDCCINT_EL1` raises
   nothing. The legacy COMMRX and COMMTX signals, which Arm calls optional
   and not recommended for new designs, are not modelled.
+- **The PMU's PMUIRQ is PPI 23.** Arm recommends a PPI for it, ID 23 from
+  GICv3 (D13.3.1), BSA assigns it INTID 23 (DEN0094C RB_PPI_01), and
+  V-BSA requires a PMU of a virtual environment's processing element
+  (DEN0150 RV_L1PE_02). The board drives PPI 23 with Arm
+  `CheckForPMUOverflow`'s request, level-sensitive, sampled after every
+  access that can change it and at the instruction a counter can next
+  overflow at, which the machine runs to; the device tree's `pmu` node
+  names it. The GIC-400 has no PPI 23, so the GIC departs from it there
+  (the GIC entry above). QEMU 11.1.2 wires its PMU to the same PPI
+  (`VIRTUAL_PMU_IRQ`).
+- **The PMU's clock is the instruction clock.** Arm leaves how the cycle
+  counter relates to real time IMPLEMENTATION DEFINED (D14.4.2), and
+  whether it and `CPU_CYCLES` count while the processor waits in `WFI` or
+  `WFE` IMPLEMENTATION SPECIFIC (D14.4). The board's processor runs one
+  instruction a cycle of its clock, whose rate is the machine's
+  instruction rate (`VirtConfig::ips`, 50M a second by default), and the
+  clock stops while it waits (`WFI`, `WFE`, their timed forms, PSCI
+  `CPU_SUSPEND`). So `PMCCNTR_EL0` and `CPU_CYCLES` advance by one for
+  each instruction run, an instruction that took a synchronous exception
+  in its place included; `INST_RETIRED` by one for each instruction
+  executed, which leaves those out but for `SVC` and `HVC`, whose
+  exceptions complete them (the at-retirement events, D14.1); and the
+  generic timer's count, which goes on through a wait, by `CNTFRQ_EL0` /
+  `ips` for each tick. Every cycle sends an instruction for execution, so
+  `STALL_FRONTEND`, `STALL_BACKEND` and `STALL`, which count the cycles in
+  which none is, count nothing. QEMU 11.1.2 counts its cycles on its
+  virtual clock at a fixed 1 GHz (`target/arm/cpregs-pmu.c`,
+  `ARM_CPU_FREQ`, `cycles_get_count`), whatever its processor executes,
+  and counts `INST_RETIRED` only under precise icount.
+- **The PMU counts only the events the model knows.** Each event
+  `PMCEID0_EL0` and `PMCEID1_EL0` advertise is counted as its description
+  (D14.3) says: `SW_INCR`, `INST_RETIRED`, `EXC_TAKEN` and `EXC_RETURN`
+  (each at the level the exception is taken from or the return executes
+  at, D13.7.3.1), `CID_WRITE_RETIRED` (`MSR`s to `CONTEXTIDR_EL1`),
+  `CPU_CYCLES`, `TTBR_WRITE_RETIRED` (`MSR`s to `TTBR0_EL1` and
+  `TTBR1_EL1`) and `CHAIN`, and on the Armv9.2 model the stall events,
+  which never occur. The model has no cache, no TLB timing, no branch
+  predictor and no bus to count, so the Cortex-A57's `PMCEID0_EL0` reads
+  0x5002_0F01, its TRM's 0x7FFF_0F3F (DDI 0488H Table 11-5) less the
+  cache, TLB, branch prediction, memory access, bus, memory error and
+  speculation events; and the events D14.6 requires of a processor with a
+  level 1 data cache (`L1D_CACHE`, `L1D_CACHE_REFILL`, with FEAT_PMUv3p4
+  `L1D_CACHE_RD`, `L1D_CACHE_LMISS_RD` and `L1I_CACHE_LMISS`) or with
+  FEAT_SME (`SVE_INST_RETIRED` or `SVE_INST_SPEC`, `SME_INST_RETIRED` or
+  `SME_INST_SPEC`, `SME_RETIRED` or `SME_SPEC`), which the Armv9.2 model
+  is, are not implemented: an event number not advertised counts
+  nothing. The Armv9.2 model's `PMCEID1_EL0`, 0x1000_0018, is QEMU's too,
+  both being the three stall events FEAT_PMUv3p1 and FEAT_PMUv3p4
+  require. QEMU 11.1.2 implements `SW_INCR`, `INST_RETIRED` (with precise
+  icount), `CPU_CYCLES` and the stall events (`pm_events`), not
+  `EXC_TAKEN`, `EXC_RETURN`, `CID_WRITE_RETIRED`, `TTBR_WRITE_RETIRED` or
+  `CHAIN`.
+- **The Cortex-A57's PMU is its TRM's, without AArch32.** `PMCR_EL0`
+  reads 0x4101_3040 out of reset, the TRM's 0x4101_3000 (Table 4-10) with
+  `LC` set: with no AArch32 Arm makes `LC` RES1 (the cycle counter
+  overflows at bit 63) and `D` RES0, which the TRM's processor, having
+  AArch32, implements; `DP`, which Arm gives a processor only with EL3,
+  with FEAT_PMUv3p1 and EL2, or with FEAT_PMUv3p7, is RES0. Where Arm
+  leaves an access CONSTRAINED UNPREDICTABLE (K1.2.6.2, K1.2.6.3), the
+  Cortex-A57 makes the TRM's choices (B.2.20 to B.2.25): `MDCR_EL2.HPMN`
+  above six counts as six and zero as none, reading back as written; an
+  event counter EL0 or EL1 cannot reach is RES0 through `PMEVCNTR<n>_EL0`,
+  `PMEVTYPER<n>_EL0`, `PMXEVCNTR_EL0` and `PMXEVTYPER_EL0`, and one it does
+  not have UNDEFINED through the first two. The Armv9.2 model takes Arm's
+  own refinement of those accesses (`ConstrainUnpredictableProcedure`:
+  UNDEFINED) and the Cortex-A57's answer for `HPMN`. Its six event
+  counters are the Cortex-A57's count, the board's choice, so the two
+  models' PMUs are one size.
 - **The PL011 is an r1p5, BSA's Generic UART.** BSA's UART must be its
   Generic UART or a 16550 (DEN0094C RB_PER_05), and V-BSA requires that of
   a virtual environment (DEN0150 RV_L1PR_01); the Generic UART is a subset
@@ -3456,11 +3550,11 @@ either processor, audited 2026-11-08 against its Level 1 rules:
 | Rule | What it asks | Verdict |
 |---|---|---|
 | RV_L1PE_01 | BSA B_PE_01–08, 10, 13, 14 | Conforms: one PE (Armv8.0 Cortex-A57 or Armv9.2), FP and Advanced SIMD, the 4 KiB granule, AES, SHA-1, SHA-256 and CRC32 on both, little-endian, AArch64 EL0 and EL1, no SVE; B_PE_10 is GICv3's |
-| RV_L1PE_02 | FEAT_PMUv3 and `PMCCNTR_EL0` | **Does not conform**: neither processor has a PMU (`ID_AA64DFR0_EL1.PMUVer` 0, "Not implemented"). The fix is a feature of its own, not a value: the PMU's registers and their EL0 and `MDCR_EL2` traps, the overflow interrupt on PPI 23 with its device tree node, the Cortex-A57's six counters and events (DDI 0488H chapter 11), and on the Armv9.2 model the PMU revisions `Features.json` ties to Armv8.7 and later (`FEAT_PMUv3p7`) |
+| RV_L1PE_02 | FEAT_PMUv3 and `PMCCNTR_EL0` | **Fixed**: both processors have a PMU with the cycle counter and six event counters, the Cortex-A57's PMUv3 (`ID_AA64DFR0_EL1.PMUVer` 1, DDI 0488H chapter 11) and the Armv9.2 model's FEAT_PMUv3p7 (`PMUVer` 7), which `Features.json` requires of an Armv8.7 and later processor with a PMU; their registers with `PMUSERENR_EL0`'s and `MDCR_EL2`'s traps, PMUIRQ on PPI 23 with the device tree's `pmu` node ("The PMU's PMUIRQ is PPI 23"), counting on the instruction clock ("The PMU's clock is the instruction clock") the events the model knows ("The PMU counts only the events the model knows") |
 | RV_L1MM_01 | BSA B_MEM_01, 02, 04, 05, 07 | Conforms: every access completes; an unassigned address takes a synchronous External abort; every window and RAM lie within the 44-bit (52-bit) physical address space; no SMMU |
 | RV_L1MM_02 | DMA reaches all Non-secure space | Conforms: the virtio devices take 64-bit addresses (virtio 1.2 4.2.2) and are coherent |
 | RV_L1GI_01 | BSA B_GIC_01–03, 05 | Conforms: GICv2 with GICv2m for MSIs, one PE, 16 SGIs; B_GIC_03 is GICv3's |
-| RV_L1PP_00 | BSA B_PPI_01's PPIs | **Fixed**: COMMIRQ is PPI 22, where QEMU connects it nowhere ("The DCC's COMMIRQ is PPI 22"); the timers are on BSA's 30 and 27; there is no CTI or SPE, and no PMU (RV_L1PE_02) |
+| RV_L1PP_00 | BSA B_PPI_01's PPIs | **Fixed**: COMMIRQ is PPI 22, where QEMU connects it nowhere ("The DCC's COMMIRQ is PPI 22"); the timers are on BSA's 30 and 27, PMUIRQ on its 23; there is no CTI or SPE |
 | RV_L1SM_01–03 | SMMU | Conforms: no SMMU, so nothing blocks a boot device |
 | RV_L1TM_01–04 | Counters, at least 10 MHz, one rate, 56–64 bits, never backwards | Conforms: physical and virtual counters at 1 GHz by default (`CounterRate` refuses below 10 MHz), the virtual one the physical less `CNTVOFF_EL2`, 64 bits wide, a function of the instruction count |
 | RV_L1WK_01–04 | Wake-up | Conforms: the PE's only low-power state is standby (`WFI`, and PSCI `CPU_SUSPEND` for every power state, as DEN 0022E §5.4.5 permits), which any interrupt the GIC signals ends whatever `PSTATE.A`, `I` and `F`; the interrupt stays pending in the GIC (the GIC's own priority masking, IHI 0048B §3.7, applies to its wake-up signals as well) |
@@ -3470,9 +3564,12 @@ either processor, audited 2026-11-08 against its Level 1 rules:
 
 Level 1's recommendations (six breakpoints, two context-aware, and four
 watchpoints) are met by the Cortex-A57, not by the Armv9.2 model, which
-has Arm's minimum of two, one and two. Of the future levels' rules, none
-is met: RV_L2PE_01 and RV_L2PE_02 need the PMU, and RV_L2WD_01 a
-watchdog, which the board does not have.
+has Arm's minimum of two, one and two. Of the future levels' rules,
+RV_L2PE_01 (at least two event counters beside the cycle counter) and
+RV_L2PE_02 (each PE's PMU overflow on an interrupt of its own, with no
+logic between) are met by both processors' six counters and PMUIRQ, PPI
+23; RV_L2WD_01 is not: it asks for a watchdog, which the board does not
+have.
 
 ## QEMU fingerprints left
 
@@ -3511,7 +3608,11 @@ waits for a firmware build of the board's own:
 **Still to replace**, each with a value from a specification or one of
 the board's own: none. Every guest-readable value the 2026-11-05 survey
 found QEMU had chosen is either replaced, kept for stock firmware (above)
-or kept as a host's choice (below).
+or kept as a host's choice (below). The PMU's values are none of QEMU's
+choosing: those a guest finds on QEMU too — PMUIRQ on INTID 23,
+`arm,armv8-pmuv3` for the Armv9.2 model and its `PMCEID1_EL0`
+0x1000_0018 — are BSA's (RB_PPI_01), the PMU binding's, and the stall
+events D14.6 requires.
 
 **Kept as a host's choice**, each off by default, for a VM made on QEMU's
 `virt` or on this board before it had its own answer:
@@ -3558,11 +3659,21 @@ or kept as a host's choice (below).
   `ID_AA64DFR0_EL1` advertises — the Cortex-A57's six breakpoints, two of
   them context-aware, and four watchpoints (DDI 0488H, 4.3.19), the Armv9.2
   model's two, one and two — raise their exceptions (`src/cpu/debug.rs`);
-  there is no Debug state, no halting debug, no Vector Catch and no PMU
-  (see "Where the references differ" and "V-BSA conformance"). The
+  there is no Debug state, no halting debug and no Vector Catch (see
+  "Where the references differ"). The
   Debug Communications Channel's COMMIRQ, which `MDCCINT_EL1` enables,
   drives PPI 22 (see "Where the references differ"); the legacy COMMRX and
   COMMTX signals are not modelled.
+- Of the PMU: the events of what the model does not have — caches, TLB
+  timing, branch prediction, a bus, speculation — and the per-instruction
+  class events (`LD_RETIRED`, `BR_RETIRED` and their kind, `SVE_INST_RETIRED`,
+  `SME_INST_RETIRED`), which leaves out events D14.6 requires of the
+  Armv9.2 model ("The PMU counts only the events the model knows"); the
+  external debug and memory-mapped interface to the PMU registers (DDI
+  0488H 11.6, optional in Arm's, D13.1), with no external debugger to use
+  it; and FEAT_PMUv3_TH, FEAT_PMUv3_EDGE, FEAT_PMUv3_ICNTR, FEAT_PMUv3_SS,
+  FEAT_PMUv3p8, FEAT_PMUv3p9, FEAT_EBEP, FEAT_MTPMU and FEAT_HPMN0, none of
+  which Armv9.2 requires.
 - No data cache model, and no instruction cache a guest can see: the
   decoded traces are kept coherent with every write. Cache maintenance by
   address translates its address, with the faults Arm's `AArch64_DC` and

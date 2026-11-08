@@ -2209,6 +2209,14 @@ mod tests {
                     // `Features.json`: `FEAT_EL2 <=> EL2 >= 1`, and
                     // `FEAT_AA64EL2` the same field's AArch64 support.
                     Feature::El2 | Feature::Aa64El2 => field(pfr0, 8) >= 1,
+                    // `Features.json`: `FEAT_PMUv3 <=> UInt(PMUVer) >= 1
+                    // && UInt(PMUVer) < 15`, and each revision the same of
+                    // its own value.
+                    Feature::PmuV3 => (1..15).contains(&field(dfr0, 8)),
+                    Feature::PmuV3p1 => (4..15).contains(&field(dfr0, 8)),
+                    Feature::PmuV3p4 => (5..15).contains(&field(dfr0, 8)),
+                    Feature::PmuV3p5 => (6..15).contains(&field(dfr0, 8)),
+                    Feature::PmuV3p7 => (7..15).contains(&field(dfr0, 8)),
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -2235,14 +2243,28 @@ mod tests {
                 0x11
             );
             // DFR0: DebugVer, the processor's breakpoints, context-aware
-            // breakpoints and watchpoints, no PMU, and DoubleLock 0 or
-            // 0b1111.
+            // breakpoints and watchpoints, PMUVer, MTPMU, and DoubleLock 0
+            // or 0b1111.
             let points = imp.debug;
             let counts = ((points.context_aware() as u64 - 1) << 28)
                 | ((points.watchpoints() as u64 - 1) << 20)
                 | ((points.breakpoints() as u64 - 1) << 12);
-            assert_eq!(dfr0 & !0xF & !(0xF << 36), counts);
+            assert_eq!(
+                dfr0 & !0xF & !(0xF << 36) & !(0xF << 8) & !(0xF << 48),
+                counts
+            );
             assert!(matches!(field(dfr0, 36), 0 | 0xF), "DoubleLock");
+            assert!(
+                matches!(field(dfr0, 8), 0 | 1 | 4 | 5 | 6 | 7),
+                "PMUVer: none, or PMUv3 to PMUv3p7"
+            );
+            // MTPMU: no FEAT_MTPMU, so 0 or 0b1111, and 0b1111 where a PMU
+            // of Armv8.6 or later has it (FEAT_PMUv3p7 here).
+            assert_eq!(
+                field(dfr0, 48),
+                if imp.has(Feature::PmuV3p7) { 0xF } else { 0 },
+                "MTPMU"
+            );
             assert!(
                 (6..=9).contains(&field(dfr0, 0)),
                 "DebugVer: Armv8.0 to FEAT_Debugv8p4"

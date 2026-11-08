@@ -10,6 +10,8 @@
 //!   PPI, INTID 22: enabled by `MDCCINT_EL1.TX` while DTRTX is empty, it is
 //!   pending at the distributor and acknowledged as 22, and filling DTRTX
 //!   withdraws it.
+//! - RV_L1PE_02: the PMU, with its cycle counter and PMUIRQ on BSA's PPI
+//!   23, has its own guest tests (`tests/pmu.rs`).
 //!
 //! Each guest is a few instructions at the base of RAM, where a bare
 //! machine starts, encoded by hand; the comments give their assembly.

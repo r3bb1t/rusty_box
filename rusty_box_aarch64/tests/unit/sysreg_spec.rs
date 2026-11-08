@@ -38,6 +38,7 @@ use serde_json::Value;
 
 use super::features::{Feature, Implementation, LeveledImplementation};
 use super::pauth::PacKeys;
+use super::pmu::Pmu;
 use super::wait::EventRegister;
 use super::{
     id, sme, Activity, Cpu, CpuConfig, El, ExclusiveMonitor, Levels, NoEl2, Pstate, Step, SysRegs,
@@ -465,6 +466,20 @@ fn spec() -> &'static Spec {
             }
             let name = text(entry, "name");
             registers.insert(name, entry);
+            // The indexes an indexed register has (`PMEVTYPER<n>_EL0`'s 0
+            // to 30): an encoding of an index past them is another
+            // register's (`PMCCFILTR_EL0`'s), or none.
+            let indexes: Vec<(i128, i128)> = list(entry, "indexes")
+                .iter()
+                .map(|r| {
+                    let start = i128::from(r["start"].as_u64().unwrap_or(0));
+                    (start, start + i128::from(r["width"].as_u64().unwrap_or(0)))
+                })
+                .collect();
+            let indexed = |vars: &[(&str, i128)]| match (vars, indexes.is_empty()) {
+                ([(_, index)], false) => indexes.iter().any(|&(lo, hi)| (lo..hi).contains(index)),
+                _ => true,
+            };
             for accessor in list(entry, "accessors") {
                 // The `MSR` (immediate) forms have no accessor body: what
                 // they do is the instruction's own pseudocode, which the
@@ -477,6 +492,9 @@ fn spec() -> &'static Spec {
                 let instr = text(accessor, "name");
                 for encoding in list(accessor, "encoding") {
                     for (word, vars) in expand(instr, encoding) {
+                        if !indexed(&vars) {
+                            continue;
+                        }
                         sites.push(Site {
                             register: name,
                             instr,
@@ -490,10 +508,11 @@ fn spec() -> &'static Spec {
                 }
             }
         }
-        // `AArch64_CanTrapDC` and `AArch64_CanTrapIC` read these, and
+        // `AArch64_CanTrapDC` and `AArch64_CanTrapIC` read these,
         // `GetSPSR_EL1_M4` and `GetSPSR_EL2_M4`, which choose the SPSRs'
-        // fieldsets, these.
-        inputs.extend(["CLIDR_EL1", "CTR_EL0", "SPSR_EL1", "SPSR_EL2"]);
+        // fieldsets, these, and `GetNumEventCountersSelfHosted` the count of
+        // event counters `PMCR_EL0.N` reports.
+        inputs.extend(["CLIDR_EL1", "CTR_EL0", "SPSR_EL1", "SPSR_EL2", "PMCR_EL0"]);
         // The conditions choosing the fields of the registers read.
         loop {
             let mut more = BTreeSet::new();
@@ -643,7 +662,49 @@ impl Eval<'_> {
 
     /// `ID_AA64DFR0_EL1`, as the processor advertises it.
     fn dfr0(&self) -> u64 {
-        id::id_aa64dfr0(self.imp.features, self.imp.debug)
+        id::id_aa64dfr0(self.imp.features, self.imp.debug, self.imp.pmu)
+    }
+
+    /// Arm `NUM_PMU_COUNTERS`, `GetNumEventCountersSelfHosted` with no
+    /// FEAT_PMUv3_EXTPMN: the processor's event counters, as `PMCR_EL0.N`
+    /// reports them at its highest level.
+    fn pmu_counters(&self) -> i128 {
+        if self.feature("FEAT_PMUv3") {
+            ((self.register("PMCR_EL0") >> 11) & 0x1F).into()
+        } else {
+            0
+        }
+    }
+
+    /// Arm `GetNumEventCountersAccessible`: at EL0 and EL1 with EL2 enabled
+    /// the Effective `MDCR_EL2.HPMN`, every counter otherwise. `HPMN` above
+    /// the counters or zero, which Arm leaves CONSTRAINED UNPREDICTABLE
+    /// without FEAT_HPMN0 (K1.2.6.3), is the counters or none, the
+    /// Cortex-A57's answers (DDI 0488H B.2.20), which every processor here
+    /// gives.
+    fn pmu_accessible(&self) -> i128 {
+        let counters = self.pmu_counters();
+        if self.el < 2 && self.have_el2() {
+            i128::from(self.register("MDCR_EL2") & 0x1F).min(counters)
+        } else {
+            counters
+        }
+    }
+
+    /// `ConstrainUnpredictableProcedure(Unpredictable_PMUEVENTCOUNTER)`,
+    /// reached by an access to an event counter beyond the accessor's
+    /// reach, as the processor's PMU refines it: Arm's own refinement,
+    /// UNDEFINED; or the Cortex-A57's (DDI 0488H B.2.22 to B.2.25), RES0
+    /// but for a direct access (`m`) to a counter the processor does not
+    /// implement, which is UNALLOCATED.
+    fn pmu_event_counter_unpredictable(&self) -> Outcome {
+        use super::pmu::CounterBeyondReach;
+        let direct = self.vars.iter().find(|(n, _)| *n == "m").map(|(_, v)| *v);
+        match (self.imp.pmu.beyond_reach, direct) {
+            (CounterBeyondReach::Undefined, _) => Outcome::Undefined,
+            (CounterBeyondReach::Res0, Some(m)) if m >= self.pmu_counters() => Outcome::Undefined,
+            (CounterBeyondReach::Res0, Some(_) | None) => Outcome::Access,
+        }
     }
 
     fn feature(&self, name: &str) -> bool {
@@ -991,6 +1052,8 @@ impl Eval<'_> {
             }
             "UInt" => V::Int(self.eval(&args[0]).int()),
             "IsZero" => V::Bool(self.eval(&args[0]).int() == 0),
+            "GetNumEventCountersSelfHosted" => V::Int(self.pmu_counters()),
+            "GetNumEventCountersAccessible" => V::Int(self.pmu_accessible()),
             "X" => V::bits(0, 64),
             "ImpDefBool" => V::Bool(self.imp_def(text(&args[0], "value"))),
             "EffectiveHCR_EL2_TERR" => {
@@ -1110,6 +1173,11 @@ impl Eval<'_> {
             | "AArch64_ImpDefSysInstr"
             | "AArch64_ImpDefSysInstrWithResult"
             | "AArch64_ImpDefSysInstr128" => Outcome::ImplementationDefined,
+            "ConstrainUnpredictableProcedure"
+                if text(&args[0], "value") == "Unpredictable_PMUEVENTCOUNTER" =>
+            {
+                self.pmu_event_counter_unpredictable()
+            }
             "AArch64_FGDTSystemAccessTrap"
             | "Halt"
             | "EXLOCKException"
@@ -1179,6 +1247,7 @@ struct Saved<L: Levels> {
     svcr: sme::Svcr,
     pac_keys: PacKeys,
     sys: SysRegs,
+    pmu: Pmu,
     monitor: ExclusiveMonitor,
     event: EventRegister,
     activity: Activity,
@@ -1196,6 +1265,7 @@ fn save<L: Levels>(cpu: &Cpu<L>) -> Saved<L> {
         svcr: cpu.svcr,
         pac_keys: cpu.pac_keys,
         sys: cpu.sys.clone(),
+        pmu: cpu.pmu.clone(),
         monitor: cpu.monitor,
         event: cpu.event,
         activity: cpu.activity,
@@ -1213,6 +1283,7 @@ fn restore<L: Levels>(cpu: &mut Cpu<L>, s: &Saved<L>) {
     cpu.svcr = s.svcr;
     cpu.pac_keys = s.pac_keys;
     cpu.sys = s.sys.clone();
+    cpu.pmu = s.pmu.clone();
     cpu.monitor = s.monitor;
     cpu.event = s.event;
     cpu.activity = s.activity;
@@ -1374,8 +1445,10 @@ fn write_register<L: Levels>(cpu: &mut Cpu<L>, ram: &mut Ram, name: &str, value:
 /// The registers whose fields decide accesses, which the configurations
 /// set, and the bits they leave clear: the stage 1 MMU enables (an EL1 or
 /// EL2 fetch would translate), `HCR_EL2.VM` and `DC` (stage 2), and
-/// `MDSCR_EL1.SS` (software step).
-const CONTROLS: [(&str, u64); 10] = [
+/// `MDSCR_EL1.SS` (software step). `PMUSERENR_EL0` gives EL0 the PMU, and
+/// `PMSELR_EL0` selects the counter `PMXEVCNTR_EL0` and `PMXEVTYPER_EL0`
+/// reach.
+const CONTROLS: [(&str, u64); 12] = [
     ("HCR_EL2", (1 << 0) | (1 << 12)),
     ("CPTR_EL2", 0),
     ("MDCR_EL2", 0),
@@ -1386,6 +1459,8 @@ const CONTROLS: [(&str, u64); 10] = [
     ("SCTLR_EL1", 1),
     ("CNTKCTL_EL1", 0),
     ("MDSCR_EL1", 1),
+    ("PMUSERENR_EL0", 0),
+    ("PMSELR_EL0", 0),
 ];
 
 /// The value of every register the accessors' conditions read

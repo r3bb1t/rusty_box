@@ -244,9 +244,8 @@ fn the_gic_names_the_frames_it_decodes() {
 
 /// Nothing a guest reads names QEMU or describes what the board lacks: no
 /// `qemu,` compatible, no `fw-cfg` or platform bus, no `linux,dummy-virt`,
-/// no PMU node (`ID_AA64DFR0_EL1.PMUVer` is 0), no PSCI 0.1 binding or
-/// its function identifiers, and no node named after QEMU's
-/// (`pl011@`, `intc@`, `virtio_mmio@`, `apb-pclk`).
+/// no PSCI 0.1 binding or its function identifiers, and no node named
+/// after QEMU's (`pl011@`, `intc@`, `virtio_mmio@`, `apb-pclk`).
 #[test]
 fn nothing_in_the_tree_is_qemus() {
     for gic in [GicExtensions::Absent, GicExtensions::Virtualization] {
@@ -257,7 +256,6 @@ fn nothing_in_the_tree_is_qemus() {
             b"fw-cfg",
             b"platform",
             b"dummy-virt",
-            b"pmu",
             b"pl011@",
             b"pl031@",
             b"pl061@",
@@ -284,6 +282,26 @@ fn nothing_in_the_tree_is_qemus() {
             Some(&b"arm,psci-1.0\0arm,psci-0.2\0"[..])
         );
         assert_eq!(prop(&tree, "psci", "method"), Some(&b"hvc\0"[..]));
+    }
+}
+
+/// The PMU's node is the PMU binding's (`arm/pmu.yaml`): the Cortex-A57's
+/// own `compatible`, or the generic PMUv3's for the Armv9.2 model, a
+/// software model with none of its own; and PMUIRQ, PPI 7 (INTID 23, BSA's
+/// RB_PPI_01), level-sensitive, on the one processor.
+#[test]
+fn the_pmu_node_names_the_processor_s_pmu_and_ppi_23() {
+    for (cpu, compatible) in [
+        (CpuModel::CortexA57, &b"arm,cortex-a57-pmu\0"[..]),
+        (CpuModel::Armv9p2, &b"arm,armv8-pmuv3\0"[..]),
+    ] {
+        let tree = board_of(cpu, &BoardIdentity::RUSTY_BOX, GicExtensions::Absent, PLAIN);
+        assert_eq!(prop(&tree, "pmu", "compatible"), Some(compatible), "{cpu:?}");
+        assert_eq!(
+            prop(&tree, "pmu", "interrupts").map(cells),
+            Some(vec![1, 7, (1 << 8) | 4]),
+            "{cpu:?}: GIC_PPI 7, one processor, level high"
+        );
     }
 }
 

@@ -187,7 +187,10 @@ impl El2Regs {
     /// reads the processor's own identity until EL2 programs another, and
     /// `CNTHCTL_EL2` with `EL1PCTEN` and `EL1PCEN` set (Table 9-2), so EL1's
     /// accesses to the physical counter and timer do not trap until EL2
-    /// asks; the controls zero beside their RES1 bits; and the values the
+    /// asks, and `MDCR_EL2` 0x6, `HPMN` the PMU's six event counters
+    /// (Table 4-13), so EL1 reaches every one; with another PMU `HPMN` its
+    /// count, and without one zero; the controls zero beside their RES1
+    /// bits; and the values the
     /// board's fill, bits 63:32 of `TTBR0_EL2`, `VTTBR_EL2`, `FAR_EL2` and
     /// `VBAR_EL2` zero as the TRM has them. Each is what an `MSR` keeps of
     /// it ([`El2Reg::kept`]): which bits are RES1 depends on the features
@@ -204,7 +207,7 @@ impl El2Regs {
             cptr: cptr_el2_res1(features),
             hstr: 0,
             hacr: 0,
-            mdcr: 0,
+            mdcr: El2Reg::Mdcr.kept(features, spsr_mask, imp.pmu.counters.get() as u64),
             tcr: TCR_EL2_RES1,
             ttbr0: El2Reg::Ttbr0.kept(
                 features,
@@ -442,9 +445,52 @@ pub(crate) const MDCR_TDOSA: u64 = 1 << 10;
 /// `MDCR_EL2.TDRA`: EL1's accesses to the debug ROM address register,
 /// `MDRAR_EL1`, trap (EL0 has no access to it).
 pub(crate) const MDCR_TDRA: u64 = 1 << 11;
-/// The `MDCR_EL2` bits a processor without a PMU, SPE, trace or FEAT_FGT
-/// keeps: the four debug controls.
-pub(crate) const MDCR_EL2_MASK: u64 = MDCR_TDE | MDCR_TDA | MDCR_TDOSA | MDCR_TDRA;
+/// `MDCR_EL2.HPMN` (FEAT_PMUv3): EL0 and EL1 reach the event counters
+/// below it; the rest are reserved for EL2.
+pub(crate) const MDCR_HPMN: u64 = 0x1F;
+/// `MDCR_EL2.TPMCR` (FEAT_PMUv3): EL0's and EL1's accesses to `PMCR_EL0`
+/// trap.
+pub(crate) const MDCR_TPMCR: u64 = 1 << 5;
+/// `MDCR_EL2.TPM` (FEAT_PMUv3): EL0's and EL1's accesses to the PMU
+/// registers trap.
+pub(crate) const MDCR_TPM: u64 = 1 << 6;
+/// `MDCR_EL2.HPME` (FEAT_PMUv3): the global enable of the event counters
+/// reserved for EL2.
+pub(crate) const MDCR_HPME: u64 = 1 << 7;
+/// `MDCR_EL2.HPMD` (FEAT_PMUv3p1): the event counters not reserved for
+/// EL2 do not count at EL2.
+pub(crate) const MDCR_HPMD: u64 = 1 << 17;
+/// `MDCR_EL2.HCCD` (FEAT_PMUv3p5): the cycle counter does not count at
+/// EL2.
+pub(crate) const MDCR_HCCD: u64 = 1 << 23;
+/// `MDCR_EL2.HLP` (FEAT_PMUv3p5): the event counters reserved for EL2
+/// overflow at bit 63 rather than 31.
+pub(crate) const MDCR_HLP: u64 = 1 << 26;
+/// `MDCR_EL2.HPMFZO` (FEAT_PMUv3p7): the event counters reserved for EL2
+/// stop while one of them has overflowed.
+pub(crate) const MDCR_HPMFZO: u64 = 1 << 29;
+
+/// The `MDCR_EL2` bits a processor implementing `features` keeps (Arm's
+/// `MDCR_EL2` fieldset, with no SPE, trace, FEAT_FGT, FEAT_MTPMU or
+/// FEAT_EBEP): the four debug controls, and with FEAT_PMUv3 `HPMN`,
+/// `TPMCR`, `TPM` and `HPME`, with FEAT_PMUv3p1 `HPMD`, with FEAT_PMUv3p5
+/// `HCCD` and `HLP`, and with FEAT_PMUv3p7 `HPMFZO`.
+pub(crate) const fn mdcr_el2_mask(features: Features) -> u64 {
+    let mut mask = MDCR_TDE | MDCR_TDA | MDCR_TDOSA | MDCR_TDRA;
+    if features.has(Feature::PmuV3) {
+        mask |= MDCR_HPMN | MDCR_TPMCR | MDCR_TPM | MDCR_HPME;
+    }
+    if features.has(Feature::PmuV3p1) {
+        mask |= MDCR_HPMD;
+    }
+    if features.has(Feature::PmuV3p5) {
+        mask |= MDCR_HCCD | MDCR_HLP;
+    }
+    if features.has(Feature::PmuV3p7) {
+        mask |= MDCR_HPMFZO;
+    }
+    mask
+}
 
 // ----- the EL2 translation regime and stage 2 -----
 
@@ -734,7 +780,7 @@ impl El2Reg {
             // Every field of `HSTR_EL2` traps an AArch32 access, so with no
             // AArch32 the register is RES0.
             Self::Hstr => 0,
-            Self::Mdcr => value & MDCR_EL2_MASK,
+            Self::Mdcr => value & mdcr_el2_mask(features),
             Self::Tcr => (value & tcr_el2_mask(features)) | TCR_EL2_RES1,
             Self::Ttbr0 => value & ttbr_baddr_mask(features),
             Self::Vtcr => (value & vtcr_el2_mask(features)) | VTCR_EL2_RES1,

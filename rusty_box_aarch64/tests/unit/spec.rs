@@ -2003,7 +2003,8 @@ fn constraint_value(ast: &Value, holding: &BTreeSet<&str>) -> Option<bool> {
 /// aliases (`FEAT_ASMv8p2`, BFC and the 64-bit REV64), and with EL2 that
 /// granule at stage 2 (`FEAT_S2TGran4K`: with FEAT_GTG `TGran4_2` reads
 /// 2, or 3 with FEAT_LPA2, and without it 0, the granule at stage 1) — and
-/// every other identifier is false: no FEAT_SVE, no AArch32, no PMU.
+/// every other identifier is false: no FEAT_SVE, no AArch32, no PMU
+/// revision past the model's.
 ///
 /// A model that cannot have EL2 ([`CpuModel::el2_available`], whose build
 /// with EL2 is refused) breaks, with EL2, exactly the constraints that say
