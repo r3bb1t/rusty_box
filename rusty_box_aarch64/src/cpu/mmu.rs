@@ -54,7 +54,7 @@ use super::features::{Feature, Features};
 use super::memattr::{MemAttrs, Shareability};
 use super::regime::{
     el10_s1_disabled_data_normal, el10_stage1_enabled, el10_stage2_enabled, Granule, OaLayout,
-    Regime, S1Params, S1Range,
+    Regime, S1Params, S1Range, S1Start,
 };
 use super::stage2::{s2_start, S2Start, S2Walked};
 use super::{id, sctlr, Cpu, El, Levels, SysRegs};
@@ -3312,12 +3312,12 @@ impl<L: Levels> Cpu<L> {
         let s1 = NoTranslation::stage1;
         let range = params.range;
         let tbi = range.tbi(kind == AccessKind::Fetch);
-        let Some(start_level) = range.start_for(va, tbi, self.imp.features) else {
+        let Some(walk_start) = range.start_for(va, tbi, self.imp.features) else {
             return Err(s1(TranslationFault::Translation { level: Level::Zero }));
         };
         let granule = range.granule;
-        let ia_bits = 64 - range.txsz;
-        let start = WalkStart::<Ipa>::of_base(params.ttbr, granule, start_level, ia_bits, range.oa)
+        let S1Start { ia_bits, level } = walk_start;
+        let start = WalkStart::<Ipa>::of_base(params.ttbr, granule, level, ia_bits, range.oa)
             .map_err(s1)?;
         let stage2 = self.stage2_enabled(params.regime);
         // The descriptor's address is an IPA, which stage 2 translates where

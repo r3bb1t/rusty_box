@@ -722,44 +722,49 @@ fn a_granule_at_stage_1_alone_is_the_4k_one_at_stage_2() {
 }
 
 /// `TxSZ` above `AArch64_MaxTxSZ` — 39 without FEAT_TTST, with it 48, or 47
-/// with the 64 KiB granule — or below `AArch64_S1MinTxSZ` — 16, but 12 with
-/// FEAT_LVA and the 64 KiB granule — takes a level 0 Translation fault for
-/// every address (the IMPLEMENTATION DEFINED "Fault on TxSZ value above
-/// maximum" and "... below minimum", which FEAT_LVA makes no choice),
-/// which `AT S1E1R` at EL2 reports in `PAR_EL1`; within them the walk
-/// translates.
+/// with the 64 KiB granule — is taken as that maximum, and below
+/// `AArch64_S1MinTxSZ` — 16, but 12 with FEAT_LVA and the 64 KiB granule —
+/// as that minimum (the IMPLEMENTATION DEFINED "Fault on TxSZ value above
+/// maximum" and "... below minimum" FALSE), the walk translating the input
+/// address of the limit; but with FEAT_LVA, which leaves no choice, a
+/// `TxSZ` below the minimum takes a level 0 Translation fault for every
+/// address. `AT S1E1R` at EL2 reports each in `PAR_EL1`.
 #[test]
-fn txsz_beyond_its_granules_range_faults_at_level_0() {
+fn txsz_beyond_its_granules_range_walks_as_the_limit() {
     let no_ttst = Implementation::every_feature_but(&[Feature::Ttst]);
     let no_lva = Implementation::every_feature_but(&[Feature::Lva, Feature::Lpa2]);
     let cases = [
-        // (processor, TG0, T0SZ, translates)
-        ("TTST", V9, TG0_4K, 48, true),
-        ("TTST", V9, TG0_4K, 49, false),
-        ("TTST", V9, TG0_16K, 48, true),
-        ("TTST", V9, TG0_16K, 49, false),
-        ("TTST", V9, TG0_64K, 47, true),
-        ("TTST", V9, TG0_64K, 48, false),
-        ("TTST", V9, TG0_4K, 16, true),
-        ("TTST", V9, TG0_4K, 15, false),
-        ("LVA", V9, TG0_64K, 12, true),
-        ("LVA", V9, TG0_64K, 11, false),
-        ("LVA", V9, TG0_4K, 12, false),
-        ("LVA", V9, TG0_16K, 15, false),
-        ("no LVA", no_lva, TG0_64K, 16, true),
-        ("no LVA", no_lva, TG0_64K, 15, false),
-        ("no TTST", no_ttst, TG0_4K, 39, true),
-        ("no TTST", no_ttst, TG0_4K, 40, false),
-        ("no TTST", no_ttst, TG0_16K, 40, false),
-        ("no TTST", no_ttst, TG0_64K, 39, true),
-        ("no TTST", no_ttst, TG0_64K, 40, false),
-        ("A57", A57, TG0_4K, 39, true),
-        ("A57", A57, TG0_4K, 40, false),
-        ("A57", A57, TG0_64K, 40, false),
+        // (processor, TG0, T0SZ, the T0SZ the walk takes or a fault)
+        ("TTST", V9, TG0_4K, 48, Some(48)),
+        ("TTST", V9, TG0_4K, 49, Some(48)),
+        ("TTST", V9, TG0_4K, 63, Some(48)),
+        ("TTST", V9, TG0_16K, 48, Some(48)),
+        ("TTST", V9, TG0_16K, 49, Some(48)),
+        ("TTST", V9, TG0_64K, 47, Some(47)),
+        ("TTST", V9, TG0_64K, 48, Some(47)),
+        ("TTST", V9, TG0_4K, 16, Some(16)),
+        ("TTST", V9, TG0_4K, 15, None),
+        ("LVA", V9, TG0_64K, 12, Some(12)),
+        ("LVA", V9, TG0_64K, 11, None),
+        ("LVA", V9, TG0_4K, 12, None),
+        ("LVA", V9, TG0_16K, 15, None),
+        ("no LVA", no_lva, TG0_64K, 16, Some(16)),
+        ("no LVA", no_lva, TG0_64K, 15, Some(16)),
+        ("no LVA", no_lva, TG0_64K, 0, Some(16)),
+        ("no TTST", no_ttst, TG0_4K, 39, Some(39)),
+        ("no TTST", no_ttst, TG0_4K, 40, Some(39)),
+        ("no TTST", no_ttst, TG0_16K, 40, Some(39)),
+        ("no TTST", no_ttst, TG0_64K, 39, Some(39)),
+        ("no TTST", no_ttst, TG0_64K, 40, Some(39)),
+        ("A57", A57, TG0_4K, 39, Some(39)),
+        ("A57", A57, TG0_4K, 40, Some(39)),
+        ("A57", A57, TG0_4K, 16, Some(16)),
+        ("A57", A57, TG0_4K, 15, Some(16)),
+        ("A57", A57, TG0_4K, 0, Some(16)),
     ];
-    for (name, imp, tg0, t0sz, translates) in cases {
+    for (name, imp, tg0, t0sz, taken) in cases {
         let case = std::format!("{name}: TG0 {tg0:#b}, T0SZ {t0sz}");
-        assert_eq!(at_txsz(imp, tg0, t0sz, 0), translates, "{case}");
+        at_txsz(imp, tg0, t0sz, 0, taken, &case);
     }
 }
 
@@ -771,53 +776,66 @@ fn txsz_beyond_its_granules_range_faults_at_level_0() {
 fn ds_takes_txsz_down_to_12_with_the_4k_and_16k_granules() {
     let no_lpa2 = Implementation::every_feature_but(&[Feature::Lpa2]);
     let cases = [
-        // (processor, TG0, DS, T0SZ, translates)
-        ("LPA2", V9, TG0_4K, DS_EL1, 12, true),
-        ("LPA2", V9, TG0_4K, DS_EL1, 11, false),
-        ("LPA2", V9, TG0_16K, DS_EL1, 12, true),
-        ("LPA2", V9, TG0_16K, DS_EL1, 11, false),
-        ("LPA2", V9, TG0_4K, 0, 15, false),
-        ("LPA2", V9, TG0_16K, 0, 15, false),
-        ("no LPA2", no_lpa2, TG0_4K, DS_EL1, 16, true),
-        ("no LPA2", no_lpa2, TG0_4K, DS_EL1, 15, false),
-        ("no LPA2", no_lpa2, TG0_16K, DS_EL1, 15, false),
+        // (processor, TG0, DS, T0SZ, the T0SZ the walk takes or a fault)
+        ("LPA2", V9, TG0_4K, DS_EL1, 12, Some(12)),
+        ("LPA2", V9, TG0_4K, DS_EL1, 11, None),
+        ("LPA2", V9, TG0_16K, DS_EL1, 12, Some(12)),
+        ("LPA2", V9, TG0_16K, DS_EL1, 11, None),
+        ("LPA2", V9, TG0_4K, 0, 15, None),
+        ("LPA2", V9, TG0_16K, 0, 15, None),
+        ("no LPA2", no_lpa2, TG0_4K, DS_EL1, 16, Some(16)),
+        ("no LPA2", no_lpa2, TG0_4K, DS_EL1, 15, None),
+        ("no LPA2", no_lpa2, TG0_16K, DS_EL1, 15, None),
     ];
-    for (name, imp, tg0, ds, t0sz, translates) in cases {
+    for (name, imp, tg0, ds, t0sz, taken) in cases {
         let case = std::format!("{name}: TG0 {tg0:#b}, DS {ds:#x}, T0SZ {t0sz}");
-        assert_eq!(at_txsz(imp, tg0, t0sz, ds), translates, "{case}");
+        at_txsz(imp, tg0, t0sz, ds, taken, &case);
     }
 }
 
-/// Whether `AT S1E1R` at EL2 of an address in the smallest range of the
-/// lower range of the EL1&0 regime, under `TCR_EL1` with `TG0` `tg0`,
-/// `T0SZ` `t0sz` and the bits `tcr`, on a processor implementing `imp`,
-/// translates it to where its page leads; otherwise `PAR_EL1` must report a
-/// level 0 Translation fault.
-fn at_txsz(imp: Implementation, tg0: u64, t0sz: u32, tcr: u64) -> bool {
+/// That `AT S1E1R` at EL2, in the lower range of the EL1&0 regime under
+/// `TCR_EL1` with `TG0` `tg0`, `T0SZ` `t0sz` and the bits `tcr`, on a
+/// processor implementing `imp`, translates as a walk of `T0SZ` `taken`
+/// does — the first and the last page of its input address each to where
+/// its page leads, the address just above it a level 0 Translation fault —
+/// or for `None` that every address, the first page's, is a level 0
+/// Translation fault, which `PAR_EL1` reports.
+fn at_txsz(imp: Implementation, tg0: u64, t0sz: u32, tcr: u64, taken: Option<u32>, case: &str) {
     let mut m = Machine::new(imp);
-    // Every address of the smallest range translates to itself: a page at
-    // a level 3 table, under tables made for whichever level the walk
-    // starts at.
     let page_bits = match tg0 {
         TG0_16K => 14,
         TG0_64K => 16,
         _ => 12,
     };
-    // Wider than a page, as every `TxSZ` the walk takes gives, and no wider
-    // than the granule's level -1, 0 or 1 table resolves.
-    let ia_bits = (64 - t0sz).clamp(page_bits + 1, 52);
+    // Tables for the input address the walk takes; for a fault, one wider
+    // than a page and no wider than the granule's level -1, 0 or 1 table
+    // resolves, which would translate were there a walk.
+    let ia_bits = match taken {
+        Some(taken) => 64 - taken,
+        None => (64 - t0sz).clamp(page_bits + 1, 52),
+    };
     let stride = page_bits - 3;
     let start = 3 - ((ia_bits - 1 - page_bits) / stride) as i32;
     let tables = m.tables(page_bits, ia_bits, start);
+    let last = (1 << ia_bits) - tables.page();
     m.map(tables, 0, 3, s1_leaf(DATA, TABLE));
+    m.map(tables, last, 3, s1_leaf(DATA + tables.page(), TABLE));
     m.stage1(u64::from(t0sz) | (tg0 << TG0) | EPD1 | tcr, tables.root, 0);
     m.at(El::El2);
-    let par = m.at_s1e1r(0x468) & (PAR_PA | PAR_FST | PAR_F);
-    if par == DATA {
-        return true;
+    let mut par = |va: u64| m.at_s1e1r(va) & (PAR_PA | PAR_FST | PAR_F);
+    let level_0_fault = PAR_F | (translation(0) << 1);
+    if taken.is_none() {
+        assert_eq!(par(0x468), level_0_fault, "{case}: a level 0 fault");
+        return;
     }
-    assert_eq!(par, PAR_F | (translation(0) << 1), "a level 0 fault");
-    false
+    assert_eq!(par(0x468), DATA, "{case}: the first page");
+    assert_eq!(
+        par(last | 0x468),
+        DATA + tables.page(),
+        "{case}: the last page"
+    );
+    let beyond = (1 << ia_bits) | 0x468;
+    assert_eq!(par(beyond), level_0_fault, "{case}: beyond the range");
 }
 
 /// The bottom bit of a pointer authentication code is `64 - TxSZ`, `TxSZ`
@@ -876,15 +894,16 @@ fn a_pointer_authentication_code_ends_where_its_granules_txsz_range_does() {
 /// `AArch64_S2InvalidSL` refuses (with the 4 KiB granule 0b11 without
 /// FEAT_TTST, with the 16 KiB granule 0b11 without FEAT_LPA2's `DS`, with
 /// the 64 KiB granule 0b11), a start level that resolves no bit of the
-/// input address or more than a stride and four, and a `T0SZ` outside
-/// `AArch64_S2MinTxSZ` and `AArch64_MaxTxSZ` of the granule take a level 0
+/// input address or more than a stride and four, and a `T0SZ` below
+/// `AArch64_S2MinTxSZ` where FEAT_LPA leaves no choice take a level 0
 /// Translation fault at stage 2 for every access — here the instruction
 /// fetch, taken to EL2 with `HPFAR_EL2` holding its IPA. The smallest
 /// `T0SZ` is `64 - PAMax`, 20 for the Cortex-A57's 44 bits; where `PAMax`
 /// is 52 bits (FEAT_LPA) it is 12 with the 64 KiB granule and 16 with the
 /// others. Where the walk translates, a load reads the page it leads to,
 /// up to a 52-bit IPA, and the next page faults at level 3 with
-/// `HPFAR_EL2` holding its IPA.
+/// `HPFAR_EL2` holding its IPA. (A `T0SZ` taken as its limit is
+/// [`t0sz_beyond_its_range_walks_as_the_limit_at_stage_2`]'s.)
 #[test]
 fn stage_2_starts_where_sl0_and_its_granule_say() {
     let no_lpa = Implementation::every_feature_but(&[Feature::Lpa]);
@@ -896,7 +915,6 @@ fn stage_2_starts_where_sl0_and_its_granule_say() {
         ("v9.2", V9, TG0_4K, 12, 39, 0b11, Some(3)),
         ("v9.2", V9, TG0_4K, 12, 40, 0b11, Some(3)),
         ("v9.2", V9, TG0_4K, 12, 48, 0b11, Some(3)),
-        ("v9.2", V9, TG0_4K, 12, 49, 0b11, None),
         ("v9.2", V9, TG0_4K, 12, 38, 0b11, None),
         ("v9.2", V9, TG0_4K, 12, 30, 0b00, Some(2)),
         ("v9.2", V9, TG0_4K, 12, 29, 0b00, None),
@@ -923,15 +941,12 @@ fn stage_2_starts_where_sl0_and_its_granule_say() {
         ("v9.2", V9, TG0_64K, 16, 24, 0b11, None),
         ("v9.2", V9, TG0_64K, 16, 20, 0b10, Some(1)),
         ("v9.2", V9, TG0_64K, 16, 47, 0b00, Some(3)),
-        ("v9.2", V9, TG0_64K, 16, 48, 0b00, None),
         ("v9.2", V9, TG0_64K, 16, 31, 0b00, Some(3)),
         ("v9.2", V9, TG0_64K, 16, 30, 0b00, None),
         ("v9.2", V9, TG0_64K, 16, 12, 0b10, Some(1)),
         ("v9.2", V9, TG0_64K, 16, 11, 0b10, None),
         ("no LPA", no_lpa, TG0_64K, 16, 20, 0b10, Some(1)),
-        ("no LPA", no_lpa, TG0_64K, 16, 19, 0b10, None),
         ("A57", A57, TG0_4K, 12, 20, 0b10, Some(0)),
-        ("A57", A57, TG0_4K, 12, 19, 0b10, None),
         ("A57", A57, TG0_4K, 12, 39, 0b11, None),
         ("A57", A57, TG0_4K, 12, 39, 0b00, Some(2)),
         ("A57", A57, TG0_4K, 12, 39, 0b01, None),
@@ -947,6 +962,36 @@ fn stage_2_starts_where_sl0_and_its_granule_say() {
     }
 }
 
+/// A stage 2 `T0SZ` above `AArch64_MaxTxSZ` is taken as that maximum, and
+/// one below `AArch64_S2MinTxSZ` as that minimum where FEAT_LPA does not
+/// make it a fault (the IMPLEMENTATION DEFINED "Fault on TxSZ value above
+/// maximum" and "... below minimum" FALSE, as at stage 1): the walk starts
+/// where `SL0` says for the input address of the limit, which
+/// `AArch64_S2InconsistentSL` then checks, and a load reads the page it
+/// leads to — on the Armv9.2 model at an IPA above the input address the
+/// `T0SZ` written would give.
+#[test]
+fn t0sz_beyond_its_range_walks_as_the_limit_at_stage_2() {
+    let no_lpa = Implementation::every_feature_but(&[Feature::Lpa]);
+    let cases = [
+        // (processor, TG0, page bits, T0SZ, the T0SZ taken, SL0, start level or refused)
+        ("v9.2", V9, TG0_4K, 12, 49, 48, 0b11, Some(3)),
+        ("v9.2", V9, TG0_4K, 12, 63, 48, 0b11, Some(3)),
+        ("v9.2", V9, TG0_64K, 16, 48, 47, 0b00, Some(3)),
+        ("no LPA", no_lpa, TG0_64K, 16, 19, 20, 0b10, Some(1)),
+        ("A57", A57, TG0_4K, 12, 19, 20, 0b10, Some(0)),
+        ("A57", A57, TG0_4K, 12, 0, 20, 0b10, Some(0)),
+        ("A57", A57, TG0_4K, 12, 40, 39, 0b00, Some(2)),
+        ("A57", A57, TG0_4K, 12, 40, 39, 0b01, None),
+        ("A57", A57, TG0_4K, 12, 19, 20, 0b01, None),
+    ];
+    for (name, imp, tg0, page_bits, t0sz, taken, sl0, start) in cases {
+        let case = std::format!("{name}: TG0 {tg0:#b}, T0SZ {t0sz}, SL0 {sl0:#b}");
+        let vtcr = t0sz | (sl0 << SL0) | (tg0 << TG0);
+        stage_2_walks_as(&case, imp, page_bits, vtcr, taken, start);
+    }
+}
+
 /// That a stage 2 walk under `VTCR_EL2` `vtcr` (`PS` 44 bits added), with
 /// the granule of `2^page_bits`-byte pages its `TG0` names, on a processor
 /// implementing `imp`, starts at level `start`, or for `None` that it is
@@ -955,8 +1000,22 @@ fn stage_2_starts_where_sl0_and_its_granule_say() {
 /// the walk translates, a load reads the page it leads to, and the next
 /// page faults at level 3 with `HPFAR_EL2` holding its IPA.
 fn stage_2_starts(case: &str, imp: Implementation, page_bits: u32, vtcr: u64, start: Option<i32>) {
+    let t0sz = (vtcr & 0x3F) as u32;
+    stage_2_walks_as(case, imp, page_bits, vtcr, t0sz, start);
+}
+
+/// [`stage_2_starts`] for a walk that takes `T0SZ` `taken`, which its tables
+/// are made for.
+fn stage_2_walks_as(
+    case: &str,
+    imp: Implementation,
+    page_bits: u32,
+    vtcr: u64,
+    taken: u32,
+    start: Option<i32>,
+) {
     let mut m = Machine::new(imp);
-    let ia_bits = 64 - (vtcr & 0x3F) as u32;
+    let ia_bits = 64 - taken;
     let Some(start) = start else {
         // No walk is made. Where `SL0` names a level the input address
         // fits, tables from it translate the fetch, so the refusal is what

@@ -584,7 +584,7 @@ use rusty_box_aarch64::{Reg, SysReg, SysRegRefusal, VReg};
 #     .build_in(MemoryLoan { ram: &mut ram, vars: &mut [] })?;
 machine.reg_write(Reg::X1, 0x1234);
 machine.vreg_write(VReg::new(0).expect("V0"), 1 << 100);
-assert_eq!(machine.sysreg_read(SysReg::MIDR_EL1), Ok(0x411F_D070));
+assert_eq!(machine.sysreg_read(SysReg::MIDR_EL1), Ok(0x411F_D073));
 
 match machine.sysreg_write(SysReg::MIDR_EL1, 0) {
     Ok(()) => {}

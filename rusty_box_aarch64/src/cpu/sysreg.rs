@@ -1133,7 +1133,7 @@ impl<L: Levels> Cpu<L> {
             }
             AIDR_EL1 => {
                 trap_to_el2(el1 && self.hcr_any(HCR_TID1))?;
-                0
+                id::AIDR_EL1
             }
             CSSELR_EL1 => {
                 trap_to_el2(el1 && self.hcr_any(HCR_TID2))?;

@@ -609,6 +609,20 @@ enum Masking {
 /// `ESR_ELx.EC` of an SError exception.
 const EC_SERROR: u64 = 0x2F;
 
+/// The `ISS` a virtual SError reports on a processor without FEAT_RAS,
+/// which has no `VSESR_EL2` to give one: `IDS` clear, no IMPLEMENTATION
+/// DEFINED syndrome, so bits 23:0 are RES0 (the ESR's "ISS encoding for an
+/// SError exception"). Arm's `AArch64_TakeVirtualSErrorException` leaves
+/// the syndrome IMPLEMENTATION DEFINED ("Virtual SError syndrome"), and
+/// only one whose bit 24, `IDS`, is set is reported. The Cortex-A57's
+/// IMPLEMENTATION DEFINED SError syndrome (DDI 0488H, Tables 4-61 and 4-66)
+/// describes an error in the memory system — attributable or not,
+/// containable or not, and its source, a decode, ECC or slave error — and a
+/// virtual SError is none of them: `HCR_EL2.VSE` raises it, carrying no
+/// error, so the processor reports no syndrome rather than a source that
+/// did not err.
+const VIRTUAL_SERROR_ISS_WITHOUT_RAS: u64 = 0;
+
 /// A level's exception registers: those an exception taken to it writes
 /// (`ESR_ELx`, `FAR_ELx`, `SPSR_ELx`, `ELR_ELx`) and reads (`SCTLR_ELx`,
 /// `VBAR_ELx`), and an `ERET` from it reads (`SPSR_ELx`, `ELR_ELx`).
@@ -1121,8 +1135,8 @@ impl<L: Levels> Cpu<L> {
     /// Take the pending, unmasked virtual `interrupt` to EL1 (Arm
     /// `AArch64_TakeVirtualIRQException` and its FIQ and SError siblings).
     /// A virtual SError reports EC 0x2F with, under FEAT_RAS, `VSESR_EL2`'s
-    /// `IDS` and `ISS`; without it, the syndrome is IMPLEMENTATION DEFINED
-    /// and none is chosen here (`ISS` 0). Taking it clears `HCR_EL2.VSE`
+    /// `IDS` and `ISS`; without it, [`VIRTUAL_SERROR_ISS_WITHOUT_RAS`].
+    /// Taking it clears `HCR_EL2.VSE`
     /// (`ClearPendingVirtualSError`); a virtual IRQ or FIQ stays pending until
     /// EL2 clears `VI` or `VF` and the interrupt controller lowers its input.
     fn take_virtual_interrupt(&mut self, interrupt: VirtualInterrupt) -> ExceptionTaken {
@@ -1141,7 +1155,7 @@ impl<L: Levels> Cpu<L> {
                 let iss = if self.implements(Feature::Ras) {
                     self.el2().vsesr & VSESR_MASK
                 } else {
-                    0
+                    VIRTUAL_SERROR_ISS_WITHOUT_RAS
                 };
                 if let Some(el2) = self.el2_mut() {
                     el2.hcr &= !HCR_VSE;

@@ -17,13 +17,13 @@
 //! `AArch64_S2DirectBasePermissions` and `AArch64_S2CheckPermissions`.
 //!
 //! The IMPLEMENTATION DEFINED choices are stage 1's, the pseudocode asking
-//! the same questions of both stages: a `T0SZ` outside the range takes a
-//! level 0 Translation fault ("Fault on TxSZ value above maximum", "... below
-//! minimum"), `TG0` naming a granule this processor lacks is the 4 KiB one
-//! ("TG0 encoded granule size"), the Contiguous bit is treated as 0 ("Treat
-//! Contiguous bit as 0"), and a descriptor with its access flag clear faults
-//! for every access, cache maintenance included ("Generate access flag fault
-//! on IC/DC operations").
+//! the same questions of both stages: a `T0SZ` outside the range is taken
+//! as the nearer limit ("Fault on TxSZ value above maximum", "... below
+//! minimum" FALSE; `regime::txsz_taken`), `TG0` naming a granule this
+//! processor lacks is the 4 KiB one ("TG0 encoded granule size"), the
+//! Contiguous bit is treated as 0 ("Treat Contiguous bit as 0"), and a
+//! descriptor with its access flag clear faults for every access, cache
+//! maintenance included ("Generate access flag fault on IC/DC operations").
 
 use core::convert::Infallible;
 
@@ -34,7 +34,7 @@ use super::mmu::{
     Ipa, LeafLevel, Level, TranslationFault, WalkStart, WalkStop, PERM_EL0_R, PERM_EL0_W,
     PERM_EL0_X, PERM_EL1_R, PERM_EL1_W, PERM_EL1_X,
 };
-use super::regime::{el10_stage2_enabled, sh0, Ds, Granule, OaLayout, Regime, TCR_TG0};
+use super::regime::{el10_stage2_enabled, sh0, txsz_taken, Ds, Granule, OaLayout, Regime, TCR_TG0};
 use super::{id, Cpu, Levels};
 use crate::bus::{PhysAddr, PhysBus};
 
@@ -140,23 +140,24 @@ const fn s2_start_level(granule: Granule, vtcr: u64, ds: Ds, features: Features)
 /// Where a stage 2 walk under `VTCR_EL2` `vtcr` starts on a processor
 /// implementing `features`, or `None` where `AArch64_S2Translate` refuses
 /// the configuration before any walk, every translation a level 0
-/// Translation fault: a `T0SZ` outside [`s2_min_txsz`] and
-/// `AArch64_MaxTxSZ` of the granule (`AArch64_S2TxSZFaults`, with the
-/// IMPLEMENTATION DEFINED "Fault on TxSZ value above maximum" and "...
-/// below minimum" TRUE, as stage 1's; with FEAT_LPA the second is no
-/// choice), an `SL0` or `SL2:SL0` `AArch64_S2InvalidSL` refuses
-/// ([`s2_start_level`]), or one whose start level does not resolve at least
-/// one bit of the input address and at most a full level's stride and four
-/// more, the index into 16 concatenated tables
-/// (`AArch64_S2InconsistentSL`). The one test the walk and a snapshot's TLB
-/// both make (R5).
+/// Translation fault. Its `T0SZ` is taken as the nearer of [`s2_min_txsz`]
+/// and `AArch64_MaxTxSZ` of the granule outside them, as stage 1's
+/// ([`txsz_taken`]), but below the first with FEAT_LPA, which leaves
+/// `AArch64_S2TxSZFaults` no choice, is refused; so is an `SL0` or
+/// `SL2:SL0` `AArch64_S2InvalidSL` refuses ([`s2_start_level`]), or one
+/// whose start level does not resolve at least one bit of the input
+/// address the walk takes and at most a full level's stride and four more,
+/// the index into 16 concatenated tables (`AArch64_S2InconsistentSL`). The
+/// one test the walk and a snapshot's TLB both make (R5).
 pub(crate) const fn s2_start(vtcr: u64, features: Features) -> Option<S2Start> {
     let granule = Granule::stage2(vtcr >> TCR_TG0, features);
     let ds = granule.effective_ds(vtcr & VTCR_EL2_DS != 0, features);
-    let txsz = (vtcr & VTCR_T0SZ) as u32;
-    if txsz < s2_min_txsz(granule, ds, features) || txsz > granule.max_txsz(features) {
+    let min = s2_min_txsz(granule, ds, features);
+    let max = granule.max_txsz(features);
+    let below_min_faults = features.has(Feature::Lpa);
+    let Some(txsz) = txsz_taken((vtcr & VTCR_T0SZ) as u32, min, max, below_min_faults) else {
         return None;
-    }
+    };
     let Some(level) = s2_start_level(granule, vtcr, ds, features) else {
         return None;
     };

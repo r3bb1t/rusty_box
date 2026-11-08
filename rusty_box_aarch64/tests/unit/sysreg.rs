@@ -218,6 +218,36 @@ fn idst_traps_the_reads_of_the_id_space_that_would_be_undefined() {
     }
 }
 
+/// What each model tells a guest of itself at EL1. The Cortex-A57 is
+/// r1p3, its TRM's revision (DDI 0488H, Table 4-1: `MIDR_EL1` 0x411FD073),
+/// with the TRM's `REVIDR_EL1` and `AIDR_EL1`, zero; it has no FEAT_SME,
+/// so no `SMIDR_EL1`. The Armv9.2 model is a software model (`MIDR_EL1`
+/// implementer 0, part 0x052, revision 0), and its `SMIDR_EL1` names the
+/// same implementer and revision, its Streaming SVE mode its own (`SH`
+/// 0b10, not shared) and no streaming execution priority (`SMPS` 0).
+#[test]
+fn each_model_identifies_itself() {
+    const MRS_REVIDR: u32 = 0xD538_00C0; // mrs x0, revidr_el1
+    const MRS_AIDR: u32 = 0xD539_00E0; // mrs x0, aidr_el1
+    const MRS_SMIDR: u32 = 0xD539_00C0; // mrs x0, smidr_el1
+    let cases = [
+        (Implementation::CORTEX_A57, 0x411F_D073, None),
+        (Implementation::ARMV9P2, 0x000F_0520, Some(0b10 << 13)),
+    ];
+    for (imp, midr, smidr) in cases {
+        let mut cpu = processor(imp);
+        let mut read = |insn: u32| {
+            cpu.x[0] = 0xDEAD;
+            exec(&mut cpu, insn).map_or(Ok(cpu.x[0]), Err)
+        };
+        assert_eq!(read(MRS_MIDR), Ok(midr), "MIDR_EL1");
+        assert_eq!(read(MRS_REVIDR), Ok(0), "REVIDR_EL1 of {midr:#x}");
+        assert_eq!(read(MRS_AIDR), Ok(0), "AIDR_EL1 of {midr:#x}");
+        let want_smidr = smidr.ok_or(UNDEFINED);
+        assert_eq!(read(MRS_SMIDR), want_smidr, "SMIDR_EL1 of {midr:#x}");
+    }
+}
+
 /// FEAT_SPECRES: `CFP`, `DVP` and `CPP RCTX` complete at EL1 and, with
 /// `SCTLR_EL1.EnRCTX`, at EL0; without it EL0's trap with EC 0x18, the ISS
 /// naming the operation as a write. Without FEAT_SPECRES they are

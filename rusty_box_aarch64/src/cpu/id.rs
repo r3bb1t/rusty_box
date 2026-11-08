@@ -10,8 +10,8 @@
 //! ([`CpuModel::physical_address_bits`](super::CpuModel::physical_address_bits));
 //! its virtual addresses are 52 bits with the 64 KiB granule (FEAT_LVA), 48
 //! otherwise and on the Cortex-A57.
-//! The Cortex-A57 r1p0 (the value QEMU's `cortex-a57` model reports in
-//! `MIDR_EL1`) has FP and Advanced SIMD, the
+//! The Cortex-A57 r1p3 (its TRM's revision, DDI 0488H, in `MIDR_EL1`) has
+//! FP and Advanced SIMD, the
 //! Cryptographic Extension's AES, PMULL, SHA-1 and SHA-256 and CRC32 (the
 //! Cortex-A57's optional extensions, all of them, as QEMU's `cortex-a57`
 //! has them); the Armv9.2 model has those and the rest of its feature set
@@ -27,8 +27,13 @@
 use super::features::{Feature, Features};
 
 /// The Cortex-A57's `MIDR_EL1`: Arm Ltd, variant 1, architecture 0xF, part
-/// 0xD07 (Cortex-A57), revision 0. QEMU `aarch64_a57_initfn` sets the same.
-pub const MIDR_CORTEX_A57: u64 = 0x411F_D070;
+/// 0xD07 (Cortex-A57), revision 3 — r1p3, the revision the TRM describes
+/// (DDI 0488H, Table 4-1 and 4.3.1). Of the registers the TRM's product
+/// revisions (1.8) change from r1p0 to r1p3, `MIDR_EL1` is the only one
+/// this model has: `TRCIDR1`, the Peripheral ID registers and
+/// `CPUACTLR_EL1` are the trace unit's, the external debug interface's and
+/// the IMPLEMENTATION DEFINED space's, none of which it implements.
+pub const MIDR_CORTEX_A57: u64 = 0x411F_D073;
 
 /// A software model's `MIDR_EL1`: implementer 0 (reserved for software
 /// use), variant 0, architecture 0xF (the ID registers identify each
@@ -41,8 +46,15 @@ pub const MIDR_SOFTWARE_MODEL: u64 = 0x000F_0520;
 /// `MPIDR_EL1`: bit 31 RES1, uniprocessor bit clear, affinity 0.0.0.0.
 pub const MPIDR_EL1: u64 = 0x8000_0000;
 
-/// `REVIDR_EL1`: no revision-specific fixes to report.
+/// `REVIDR_EL1`: no revision-specific fixes to report, the Cortex-A57's
+/// reset value (DDI 0488H, Table 4-1), which the TRM leaves to each
+/// implementation of the core (4.3.3); the Armv9.2 model's the same.
 pub const REVIDR_EL1: u64 = 0;
+
+/// `AIDR_EL1`: zero, the Cortex-A57's, which does not implement it (DDI
+/// 0488H, 4.3.24: RES0); the Armv9.2 model, a software model, has no
+/// auxiliary identification to give either.
+pub(crate) const AIDR_EL1: u64 = 0;
 
 /// `ID_AA64PFR0_EL1` of a processor implementing `features`: EL0 = 1 and
 /// EL1 = 1 (AArch64 only), EL2 (11:8) = 1 with FEAT_EL2 (AArch64 only) and
@@ -94,11 +106,17 @@ pub(crate) const fn id_aa64smfr0(features: Features) -> u64 {
     }
 }
 
-/// `SMIDR_EL1`, as QEMU reports it (`target/arm/helper.c`, `sme_reginfo`):
-/// implementer 0 (software), revision 0, no streaming execution priority
-/// (`SMPS` = 0, so `SMPRI_EL1` is RES0), no affinity with another
-/// processor's Streaming SVE mode.
-pub(crate) const SMIDR_EL1: u64 = 0;
+/// `SMIDR_EL1` (FEAT_SME), each field the board's own choice of those the
+/// register's description (Arm ARM D24.2.186) leaves IMPLEMENTATION
+/// DEFINED: `SH` (14:13) 0b10, the processor's Streaming SVE mode not
+/// shared with another — said in its own field, the processor executing
+/// streaming instructions itself, where 0b00 would leave `Affinity` to say
+/// it; `Affinity` and `Affinity2` 0 and `NSMC` 0, as an unshared
+/// implementation has them; `Implementer` (31:24) 0, reserved for software
+/// use, and `Revision` (23:16) 0, those of the model's `MIDR_EL1`
+/// ([`MIDR_SOFTWARE_MODEL`]); `SMPS` (15) 0, no streaming execution
+/// priority, so `SMPRI_EL1` is RES0 and `HIP` RES0.
+pub(crate) const SMIDR_EL1: u64 = 0b10 << 13;
 
 /// `ID_AA64DFR0_EL1` of a processor implementing `features`: DebugVer
 /// (3:0) = 6 (Armv8.0 debug), 7 with FEAT_Debugv8p1, 8 with FEAT_Debugv8p2
@@ -262,8 +280,16 @@ pub(crate) const fn id_aa64mmfr2(features: Features) -> u64 {
 }
 
 /// `LORID_EL1` with FEAT_LOR: no LORegions (LR = 0) and no LORegion
-/// descriptors (LD = 0), as QEMU's `lor_reginfo` has it, so `LORSA_EL1`,
-/// `LOREA_EL1`, `LORN_EL1` and `LORC_EL1` hold nothing.
+/// descriptors (LD = 0), the board's choice of the counts the register's
+/// description (Arm ARM D24.2.120) leaves IMPLEMENTATION DEFINED, so
+/// `LORSA_EL1`, `LOREA_EL1`, `LORN_EL1` and `LORC_EL1` are RES0. A
+/// LORegion narrows the accesses a `LDLAR` or `STLLR` orders to those in
+/// its region (B2.4.3); this board's one processor completes each access
+/// before the next, in program order for every observer, the devices' DMA
+/// included, which no narrowing could weaken, so a region would promise a
+/// guest nothing it could observe, where with none the
+/// instructions are the acquire and release accesses the Arm ARM makes
+/// them (D24.2.120's note).
 pub(crate) const LORID_EL1: u64 = 0;
 
 /// The ID register field of a chain of features each of which

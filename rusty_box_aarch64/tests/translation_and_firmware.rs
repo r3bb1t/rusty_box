@@ -5,11 +5,12 @@
 //!
 //! The references are the Arm documents first and QEMU 11.1.2 second:
 //!
-//! - an out-of-range T0SZ/T1SZ takes a level 0 Translation fault, one of
-//!   the two outcomes the Arm ARM leaves IMPLEMENTATION DEFINED
-//!   (`AArch64.S1InvalidTxSZ`; `AArch64.GetS1TTWParams`, the ImpDef
-//!   booleans "Fault on TxSZ value above maximum" and "... below
-//!   minimum"), and the walk's output addresses must fit the size
+//! - an out-of-range T0SZ/T1SZ is taken as the limit it passes, one of
+//!   the two outcomes the Arm ARM leaves IMPLEMENTATION DEFINED (D8.1.9;
+//!   `AArch64_S1TxSZFaults`, the ImpDef booleans "Fault on TxSZ value
+//!   above maximum" and "... below minimum" FALSE), except below the
+//!   minimum with FEAT_LVA, a level 0 Translation fault; and the walk's
+//!   output addresses must fit the size
 //!   `TCR_EL1.IPS` selects, bounded by PARange (both in target/arm/ptw.c
 //!   `get_phys_addr_lpae`);
 //! - `AT` takes a synchronous external abort on its walk as a Data Abort
@@ -35,14 +36,16 @@
 
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::{
-    GuestStorage, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, NoEl2, RamSize, Reg,
-    RunBudget, SpectreReport, StopReason, SysReg, VirtConfig, VirtMachine,
+    CpuModel, GuestStorage, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, NoEl2,
+    RamSize, Reg, RunBudget, SpectreReport, StopReason, SysReg, VirtConfig, VirtMachine,
 };
 
 const RAM_LEN: usize = 4 << 20;
 
 /// `at s1e1r, x1; b .`
 const AT_S1E1R: [u32; 2] = [0xD508_7801, 0x1400_0000];
+/// `at s1e1r, x1; at s1e1r, x2; b .`
+const AT_S1E1R_TWICE: [u32; 3] = [0xD508_7801, 0xD508_7802, 0x1400_0000];
 /// `hvc #0; b .`
 const HVC: [u32; 2] = [0xD400_0002, 0x1400_0000];
 /// `stxr w3, x2, [x1]; b .`
@@ -54,9 +57,11 @@ const LDXR_STXR: [u32; 3] = [0xC85F_7C22, 0xC803_7C22, 0x1400_0000];
 const UPPER_VA: u64 = 0xFFFF_FF80_0000_0000;
 const AF: u64 = 1 << 10;
 const BLOCK: u64 = 0b01;
-/// PAR_EL1: F, and bit 11 RES1.
+const TABLE: u64 = 0b11;
+/// PAR_EL1: F, bit 11 RES1, and PA (47:12).
 const PAR_F: u64 = 1;
 const PAR_RES1: u64 = 1 << 11;
+const PAR_PA: u64 = 0x0000_FFFF_FFFF_F000;
 
 /// ESR_EL1 for a Data Abort at the same EL.
 const EC_DATA_ABORT_SAME_EL: u64 = 0x25;
@@ -123,17 +128,71 @@ const fn par_fault(fst: u64) -> u64 {
     PAR_RES1 | (fst << 1) | PAR_F
 }
 
+/// A `T1SZ` above 39, the Cortex-A57's maximum, is taken as 39, a 25-bit
+/// upper range whose walk starts at level 2: through an empty table there
+/// `AT` reports a level 2 Translation fault, and once the guest puts a
+/// block there, the address translates through it — an address a 24-bit
+/// range, `T1SZ` 40's, would not hold.
 #[test]
-fn a_t1sz_above_39_is_a_level_0_translation_fault() {
+fn a_t1sz_above_39_walks_as_39() {
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram);
-    load(&mut m, &AT_S1E1R);
-    // An empty table: a walk with T1SZ taken as 39 would start at level 2,
-    // where this address (in range for 39) would fault.
-    mmu_on(&mut m, 40, 4, RAM_BASE + 0x2_0000);
-    m.reg_write(Reg::X1, 0xFFFF_FFFF_FE00_0000);
+    load(&mut m, &AT_S1E1R_TWICE);
+    let l2 = RAM_BASE + 0x2_0000;
+    mmu_on(&mut m, 40, 4, l2);
+    let va = 0xFFFF_FFFF_FE01_2345;
+    m.reg_write(Reg::X1, va);
+    m.reg_write(Reg::X2, va);
+    step1(&mut m);
+    assert_eq!(par(&m), par_fault(0x06), "Translation fault, level 2");
+    let block = RAM_BASE + 0x20_0000;
+    write_desc(&mut m, l2, block | AF | BLOCK);
+    step1(&mut m);
+    assert_eq!(par(&m) & (PAR_PA | PAR_F), block + 0x1_2000);
+}
+
+/// A `T1SZ` below 16, the least the Cortex-A57 takes (it has no FEAT_LVA),
+/// is taken as 16, a 48-bit upper range whose walk starts at level 0: an
+/// address of it translates, and one a 56-bit range, `T1SZ` 8's, would
+/// hold is a level 0 Translation fault. On the Armv9.2 model, with
+/// FEAT_LVA, the same `T1SZ` is a level 0 Translation fault for every
+/// address, as the Arm ARM requires.
+#[test]
+fn a_t1sz_below_16_walks_as_16_without_feat_lva() {
+    const IN_48: u64 = 0xFFFF_0000_4000_1000;
+    const IN_56: u64 = 0xFF80_0000_4000_1000;
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &AT_S1E1R_TWICE);
+    let l0 = RAM_BASE + 0x2_0000;
+    let l1 = RAM_BASE + 0x3_0000;
+    write_desc(&mut m, l0, l1 | TABLE);
+    write_desc(&mut m, l1 + 8, RAM_BASE | AF | BLOCK);
+    mmu_on(&mut m, 8, 4, l0);
+    m.reg_write(Reg::X1, IN_48);
+    m.reg_write(Reg::X2, IN_56);
+    step1(&mut m);
+    assert_eq!(par(&m) & (PAR_PA | PAR_F), RAM_BASE + 0x1000);
     step1(&mut m);
     assert_eq!(par(&m), par_fault(0x04), "Translation fault, level 0");
+
+    let mut ram = vec![0u8; RAM_LEN];
+    let armv9 = VirtConfig {
+        cpu: CpuModel::Armv9p2,
+        ..VirtConfig::DEFAULT
+    };
+    let mut m = bare_with(armv9, &mut ram);
+    load(&mut m, &AT_S1E1R_TWICE);
+    write_desc(&mut m, l0, l1 | TABLE);
+    write_desc(&mut m, l1 + 8, RAM_BASE | AF | BLOCK);
+    mmu_on(&mut m, 8, 4, l0);
+    m.reg_write(Reg::X1, IN_48);
+    step1(&mut m);
+    assert_eq!(
+        par(&m),
+        par_fault(0x04),
+        "FEAT_LVA: Translation fault, level 0"
+    );
 }
 
 #[test]

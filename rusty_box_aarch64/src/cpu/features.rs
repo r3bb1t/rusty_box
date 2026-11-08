@@ -961,9 +961,10 @@ impl Default for CounterRate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 pub enum CpuModel {
-    /// A Cortex-A57 r1p0 as QEMU's `cortex-a57` is one: Armv8.0 with FP,
-    /// Advanced SIMD, the Cryptographic Extension and CRC32, cut down to
-    /// AArch64 at EL0 and EL1; its system counter runs at 1 GHz,
+    /// A Cortex-A57 r1p3, the revision of its TRM (DDI 0488H): Armv8.0
+    /// with FP, Advanced SIMD, the Cryptographic Extension and CRC32, as
+    /// QEMU's `cortex-a57` has them, cut down to AArch64 at EL0 and EL1;
+    /// its system counter runs at 1 GHz,
     /// [`SYSTEM_COUNTER_HZ`], unless the board chooses another rate, where
     /// QEMU's runs at 62.5 MHz.
     #[default]

@@ -2922,12 +2922,11 @@ fn at_translates_through_both_stages() {
 }
 
 /// The stage 2 configurations `AArch64_S2Translate` refuses each take a
-/// level 0 Translation fault, reporting the IPA: `T0SZ` below 64 - PAMax
-/// (20, the Cortex-A57's 44 bits) or above 39 (the IMPLEMENTATION DEFINED
-/// faults, as stage 1's),
-/// `SL0` = 3 without FEAT_TTST, a start level that cannot resolve the
-/// input size (`AArch64_S2InconsistentSL`), and an IPA wider than `T0SZ`
-/// gives.
+/// level 0 Translation fault, reporting the IPA: `SL0` = 3 without
+/// FEAT_TTST, a start level that cannot resolve the input size
+/// (`AArch64_S2InconsistentSL`) — a `T0SZ` above 39 taken as 39 first, as
+/// `granules.rs`'s `t0sz_beyond_its_range_walks_as_the_limit_at_stage_2`
+/// checks — and an IPA wider than `T0SZ` gives.
 #[test]
 fn stage_2_configurations_arm_refuses_take_a_level_0_translation_fault() {
     const PS_40: u64 = 0b010 << 16;
@@ -2935,7 +2934,6 @@ fn stage_2_configurations_arm_refuses_take_a_level_0_translation_fault() {
     m.cpu.sys.sctlr_el1 &= !1;
     let features = m.cpu.imp.features;
     for vtcr in [
-        19 | (2 << 6) | PS_40,
         40 | (2 << 6) | PS_40,
         25 | (3 << 6) | PS_40,
         25 | (2 << 6) | PS_40,

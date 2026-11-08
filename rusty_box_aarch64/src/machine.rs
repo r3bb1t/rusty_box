@@ -2830,8 +2830,11 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// told of the board, which the version keeps apart: the GPIO line the
 /// power button drives on each layout
 /// ([`DeviceLayout::power_button_line`]), the virtio transports each layout
-/// has, the size of every virtio queue, and the flash's CFI query table.
-const SNAPSHOT_VERSION: u32 = 30;
+/// has, the size of every virtio queue, the flash's CFI query table, the
+/// processor's `SMIDR_EL1`, and the walk a `TxSZ` out of its range takes
+/// (the limit, `regime::txsz_taken`),
+/// which the TLB's entries were made under.
+const SNAPSHOT_VERSION: u32 = 31;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

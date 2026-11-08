@@ -115,8 +115,8 @@ fn registers_and_system_registers_by_name() {
 
     assert_eq!(
         m.sysreg_read(SysReg::MIDR_EL1),
-        Ok(0x411F_D070),
-        "a Cortex-A57 r1p0"
+        Ok(0x411F_D073),
+        "a Cortex-A57 r1p3"
     );
     assert_eq!(
         m.sysreg_write(SysReg::MIDR_EL1, 0),
@@ -1873,7 +1873,7 @@ fn the_processor_is_the_model_the_configuration_names() {
     let cases: [(CpuModel, u64, u64, u64, &[u8], [u32; 2]); 2] = [
         (
             CpuModel::CortexA57,
-            0x411F_D070,
+            0x411F_D073,
             1_000_000_000,
             0,
             b"arm,cortex-a57\0",

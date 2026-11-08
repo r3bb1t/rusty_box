@@ -291,7 +291,9 @@ fn reads(word: u32) -> bool {
 /// The outcome QEMU recorded for `v`, but where the board departs from QEMU
 /// (README "Where the references differ"): a firmware call of
 /// `PSCI_VERSION`, an `HVC` or `SMC` with W0 naming it, reads the version
-/// the board's firmware implements, where QEMU's reads 1.1.
+/// the board's firmware implements, where QEMU's reads 1.1; and `MIDR_EL1`,
+/// or `VPIDR_EL2` out of reset, reads the Cortex-A57 r1p3 its TRM
+/// describes, where QEMU's reads r1p0.
 fn the_boards_outcome(v: &Vector) -> Outcome {
     use super::system::psci;
     const PSCI_VERSION: u64 = 0x8400_0000;
@@ -302,6 +304,14 @@ fn the_boards_outcome(v: &Vector) -> Outcome {
     let mut want = v.outcome;
     if firmware_call && want.kind == 0 && v.x0 == PSCI_VERSION && want.x0 == QEMU_PSCI_1_1 {
         want.x0 = psci::IMPLEMENTED_VERSION;
+    }
+    // `MRS X0, MIDR_EL1` and `MRS X0, VPIDR_EL2`, which resets to it.
+    const MRS_X0_MIDR: u32 = 0xD538_0000;
+    const MRS_X0_VPIDR: u32 = 0xD53C_0000;
+    const QEMU_CORTEX_A57_R1P0: u64 = 0x411F_D070;
+    let reads_midr = v.word == MRS_X0_MIDR || v.word == MRS_X0_VPIDR;
+    if reads_midr && want.kind == 0 && want.x0 == QEMU_CORTEX_A57_R1P0 {
+        want.x0 = super::id::MIDR_CORTEX_A57;
     }
     want
 }

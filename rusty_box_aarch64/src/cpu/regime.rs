@@ -8,6 +8,8 @@
 //! `AArch64_BranchAddr`, `HasUnprivileged`, `AArch64_PACEffectiveTxSZ`;
 //! for the granules `TGxGranuleBits`, `TranslationSize`,
 //! `AArch64_S1StartLevel`, `AArch64_MaxTxSZ`, `AArch64_S1MinTxSZ`,
+//! `AArch64_S1TxSZFaults` and `AArch64_S2TxSZFaults` (with the Arm ARM's
+//! D8.1.9 for the IMPLEMENTATION DEFINED choice, [`txsz_taken`]),
 //! `AArch64_BlockDescSupported`, `AArch64_S1DecodeTG0`,
 //! `AArch64_S1DecodeTG1`, `AArch64_S2DecodeTG0`, `AArch64_HaveS1TG` and
 //! `AArch64_HaveS2TG`; for where a walk's addresses are held and how wide
@@ -155,21 +157,25 @@ impl Granule {
         }
     }
 
-    /// The level a stage 1 walk with the granule for `TxSZ` `txsz`, under
-    /// FEAT_LPA2's `ds` or not, starts at ([`Granule::start_level`]) on a
-    /// processor implementing `features`, or `None` where every translation
-    /// takes a level 0 Translation fault: a `TxSZ` outside
-    /// [`Granule::s1_min_txsz`] and [`Granule::max_txsz`]
-    /// (`AArch64_S1TxSZFaults`, with the IMPLEMENTATION DEFINED "Fault on
-    /// TxSZ value above maximum" and "... below minimum" TRUE, as QEMU's
-    /// `param.tsz_oob`; with FEAT_LVA the second is no choice). The one test
-    /// the walk and a snapshot's TLB both make (R5).
+    /// Where a stage 1 walk with the granule for `TxSZ` `txsz`, under
+    /// FEAT_LPA2's `ds` or not, starts on a processor implementing
+    /// `features` (`AArch64_S1Translate`): the input address of the `TxSZ`
+    /// the walk takes ([`txsz_taken`], between [`Granule::s1_min_txsz`] and
+    /// [`Granule::max_txsz`]) and its start level
+    /// ([`Granule::start_level`]); or `None` where every translation takes a
+    /// level 0 Translation fault, a `TxSZ` below the minimum with FEAT_LVA,
+    /// which leaves `AArch64_S1TxSZFaults` no choice. The one test the walk
+    /// and a snapshot's TLB both make (R5).
     #[inline(always)]
-    pub(crate) const fn s1_start(self, txsz: u32, ds: Ds, features: Features) -> Option<Level> {
-        if txsz >= self.s1_min_txsz(ds, features) && txsz <= self.max_txsz(features) {
-            Some(self.start_level(64 - txsz))
-        } else {
-            None
+    pub(crate) const fn s1_start(self, txsz: u32, ds: Ds, features: Features) -> Option<S1Start> {
+        let min = self.s1_min_txsz(ds, features);
+        let max = self.max_txsz(features);
+        match txsz_taken(txsz, min, max, features.has(Feature::Lva)) {
+            Some(taken) => Some(S1Start {
+                ia_bits: 64 - taken,
+                level: self.start_level(64 - taken),
+            }),
+            None => None,
         }
     }
 
@@ -382,6 +388,55 @@ enum GranuleStage {
 /// 25-bit input address. With FEAT_TTST every granule's is larger.
 const MAX_TXSZ: u32 = 39;
 
+/// Where a stage 1 walk starts ([`Granule::s1_start`]): the size of the
+/// input address it translates, `64 -` the `TxSZ` it takes, and the level
+/// of its first table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct S1Start {
+    pub(crate) ia_bits: u32,
+    pub(crate) level: Level,
+}
+
+/// The `TxSZ` a walk of either stage takes for `txsz`, its least and
+/// greatest being `min` and `max` (`AArch64_S1MinTxSZ` or
+/// `AArch64_S2MinTxSZ`, and `AArch64_MaxTxSZ`): `txsz` between them, the
+/// nearer of them outside; or `None`, a level 0 Translation fault for
+/// every translation, below `min` where a feature leaves no choice
+/// (`below_min_faults`: FEAT_LVA at stage 1, FEAT_LPA at stage 2;
+/// `AArch64_S1TxSZFaults`, `AArch64_S2TxSZFaults`).
+///
+/// The IMPLEMENTATION DEFINED "Fault on TxSZ value above maximum" and
+/// "Fault on TxSZ value below minimum" are FALSE, on both models and at both
+/// stages: the processor behaves as if the field held the limit for every
+/// purpose other than reading it back, the first behaviour the Arm ARM
+/// permits (D8.1.9, R_YXNYW and R_SXWGM). The Cortex-A57's TRM (DDI 0488H,
+/// `TCR_EL1`, `TCR_EL2` and `VTCR_EL2`) does not say which its core makes.
+/// The limit is the value the architecture gives an out-of-range `TxSZ`
+/// wherever it decides one itself: `AArch64_PACEffectiveTxSZ` takes it for
+/// the bottom bit of a pointer authentication code, by the
+/// `Unpredictable_RESTnSZ` that `ConstrainUnpredictable` resolves to
+/// `Constraint_FORCE` ("Map to the limit value"), and D8.10.1 (R_FCMCH)
+/// makes a processor that translates with the limit take it for that bit
+/// too; so one rule holds for the walk and the code
+/// ([`Cpu::pac_effective_txsz`]).
+#[inline(always)]
+pub(crate) const fn txsz_taken(
+    txsz: u32,
+    min: u32,
+    max: u32,
+    below_min_faults: bool,
+) -> Option<u32> {
+    if txsz > max {
+        Some(max)
+    } else if txsz >= min {
+        Some(txsz)
+    } else if below_min_faults {
+        None
+    } else {
+        Some(min)
+    }
+}
+
 /// `TCR_EL1` fields of the lower range (`TTBR0_EL1`'s); each upper-range
 /// field sits at the offset its constant names from it.
 const TCR_EL1_T0SZ: u32 = 0;
@@ -491,9 +546,9 @@ pub(crate) struct S1Range {
     /// The range's granule, from `TG0` or `TG1` ([`Granule::el10`],
     /// [`Granule::el2`]).
     pub(crate) granule: Granule,
-    /// `TxSZ` as its register holds it, which the walk faults outside
-    /// [`Granule::s1_min_txsz`]`..=`[`Granule::max_txsz`]
-    /// ([`Granule::s1_start`]).
+    /// `TxSZ` as its register holds it, which the walk takes as the nearer
+    /// of [`Granule::s1_min_txsz`] and [`Granule::max_txsz`] outside them,
+    /// or faults below the first with FEAT_LVA ([`Granule::s1_start`]).
     pub(crate) txsz: u32,
     /// How the range's walks hold their addresses, and the output address
     /// size: `IPS` or `PS` with the granule, FEAT_LPA2's `DS`
@@ -555,16 +610,17 @@ impl S1Range {
         }
     }
 
-    /// The level a walk of `va` starts at, under top-byte-ignore `tbi`, on a
+    /// Where a walk of `va` starts, under top-byte-ignore `tbi`, on a
     /// processor implementing `features` ([`Granule::s1_start`]); `None`
     /// where `AArch64_S1Translate` takes a level 0 Translation fault ahead
-    /// of the walk: for a `TxSZ` out of range, for `va` outside the range
-    /// ([`va_in_range`]), or for the range's walks disabled (`EPD`) — the one
-    /// fault whichever of them it is.
+    /// of the walk: for a `TxSZ` below the minimum with FEAT_LVA, for `va`
+    /// outside the input address the walk takes ([`va_in_range`]), or for
+    /// the range's walks disabled (`EPD`) — the one fault whichever of them
+    /// it is.
     #[inline(always)]
-    pub(crate) const fn start_for(self, va: u64, tbi: bool, features: Features) -> Option<Level> {
+    pub(crate) const fn start_for(self, va: u64, tbi: bool, features: Features) -> Option<S1Start> {
         match self.granule.s1_start(self.txsz, self.oa.ds(), features) {
-            Some(start) if !self.epd && va_in_range(va, self.upper, 64 - self.txsz, tbi) => {
+            Some(start) if !self.epd && va_in_range(va, self.upper, start.ia_bits, tbi) => {
                 Some(start)
             }
             Some(_) | None => None,
@@ -579,7 +635,9 @@ impl S1Range {
     /// meet.
     pub(crate) const fn reaches(self, va: u64, features: Features, level: LeafLevel) -> bool {
         match self.start_for(va, self.tbi_instruction, features) {
-            Some(start) => self.granule.ends_at(start, level, self.oa.ds(), features),
+            Some(start) => self
+                .granule
+                .ends_at(start.level, level, self.oa.ds(), features),
             None => false,
         }
     }
@@ -850,11 +908,12 @@ impl<L: Levels> Cpu<L> {
     /// that `upper` names held within [`Granule::s1_min_txsz`]`..=`
     /// [`Granule::max_txsz`] of the range's granule (`AArch64_S1MinTxSZ`,
     /// `AArch64_MaxTxSZ`), a value outside them counting as the nearest, as
-    /// it sets the bottom bit of a pointer authentication code: for the
-    /// walk's faulting values the CONSTRAINED UNPREDICTABLE
-    /// `Unpredictable_RESTnSZ` taken as `Constraint_FORCE`, the pseudocode's
-    /// own `ConstrainUnpredictable` choice ("Map to the limit value"). The
-    /// walk does not hold it so ([`S1Range::txsz`]).
+    /// it sets the bottom bit of a pointer authentication code: the limit
+    /// the walk takes too ([`txsz_taken`]), and for the values the walk
+    /// faults on, below the minimum with FEAT_LVA, the CONSTRAINED
+    /// UNPREDICTABLE `Unpredictable_RESTnSZ` taken as `Constraint_FORCE`,
+    /// the pseudocode's own `ConstrainUnpredictable` choice ("Map to the
+    /// limit value").
     #[inline]
     pub(crate) fn pac_effective_txsz(&self, regime: Regime, upper: bool) -> u32 {
         let features = self.imp.features;

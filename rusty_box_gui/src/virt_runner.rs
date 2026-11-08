@@ -1183,7 +1183,7 @@ mod tests {
             let midr = machine.sysreg_read(rusty_box_aarch64::SysReg::MIDR_EL1);
             let cntfrq = machine.sysreg_read(rusty_box_aarch64::SysReg::CNTFRQ_EL0);
             let want = match model {
-                rusty_box_aarch64::CpuModel::CortexA57 => (0x411F_D070, 1_000_000_000),
+                rusty_box_aarch64::CpuModel::CortexA57 => (0x411F_D073, 1_000_000_000),
                 rusty_box_aarch64::CpuModel::Armv9p2 => (0x000F_0520, 1_000_000_000),
             };
             assert_eq!((midr, cntfrq), (Ok(want.0), Ok(want.1)), "{model:?}");
