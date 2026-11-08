@@ -91,10 +91,11 @@ fn codes_the_keyboard_sends() -> Vec<u16> {
     let mut d = device(InputKind::Keyboard);
     d.start(LINUX_FEATURES);
     let mut sent = Vec::new();
-    // A key is two events; each round fills the 64-entry event queue
-    // afresh, so a buffer's descriptor index is its place in the round.
-    for keys in Key::ALL.chunks(32) {
-        let buffers = event_buffers(&mut d, 64);
+    // A key is two events; each round fills the event queue afresh, so a
+    // buffer's descriptor index is its place in the round.
+    let queue = usize::from(super::QUEUE_SIZE);
+    for keys in Key::ALL.chunks(queue / 2) {
+        let buffers = event_buffers(&mut d, queue);
         let presses: Vec<(Key, KeyAction)> =
             keys.iter().map(|&key| (key, KeyAction::Press)).collect();
         assert!(send(&mut d, |input, vdev| input.keys(vdev, &presses)));

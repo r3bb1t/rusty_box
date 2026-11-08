@@ -88,6 +88,7 @@ use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
 use crate::cpu::VirtualLines;
 use crate::identity::{GicIdentity, MsiFrameIidr};
 use crate::interrupt_map::{InterruptMap, MsiCount, Spi};
+use crate::layout::DeviceLayout;
 
 /// SGIs, PPIs and the most SPIs a GIC has, [`SpiCount::MAX`]: the size of
 /// every per-interrupt bank, whatever the GIC's [`GicShape`] implements.
@@ -114,11 +115,15 @@ impl SpiCount {
     /// The GIC-400's largest configuration.
     pub const MAX: Self = Self(480);
     /// The fewest any interrupt map fits: an SPI for each of the board's
-    /// device lines ([`InterruptMap::DEVICE_LINES`]) and one for its GICv2m
-    /// frame, rounded up to the next multiple of 32. The board's own map
-    /// ([`InterruptMap::DEFAULT`]) starts its frame at SPI 64, so it needs
-    /// 96.
-    pub const MIN: Self = Self(((InterruptMap::DEVICE_LINES + 1).div_ceil(32) * 32) as u16);
+    /// device lines on the layout of the fewest virtio transports
+    /// ([`InterruptMap::device_lines`]) and one for its GICv2m frame,
+    /// rounded up to the next multiple of 32. The board's own map
+    /// ([`InterruptMap::DEFAULT`]) starts its frame at SPI 32, so it needs
+    /// 64.
+    pub const MIN: Self = Self(
+        ((InterruptMap::device_lines(DeviceLayout::fewest_transports()) + 1).div_ceil(32) * 32)
+            as u16,
+    );
     /// The count a board's GIC has unless its host chooses another: the
     /// GIC-400's largest.
     pub const DEFAULT: Self = Self::MAX;
@@ -2025,7 +2030,7 @@ pub(super) mod tests {
     /// for each of the board's device lines and one for its GICv2m frame.
     #[test]
     fn a_gic_of_fewer_spis_has_none_past_them() {
-        for count in [64, 96, 160, 256, 480] {
+        for count in [32, 64, 96, 160, 256, 480] {
             let spis = SpiCount::new(count).expect("a count the GIC-400 allows");
             let mut g = enabled_shaped(GicShape {
                 spis,
@@ -2048,9 +2053,12 @@ pub(super) mod tests {
                 );
             }
         }
-        assert_eq!(SpiCount::MIN.get(), 64);
-        assert!(SpiCount::MIN.get() > InterruptMap::DEVICE_LINES);
-        for refused in [0, 32, 100, 130, 512] {
+        assert_eq!(SpiCount::MIN.get(), 32);
+        assert!(
+            SpiCount::MIN.get()
+                > InterruptMap::device_lines(DeviceLayout::Board.windows().virtio.count)
+        );
+        for refused in [0, 16, 100, 130, 512] {
             assert_eq!(SpiCount::new(refused), None, "{refused}");
         }
     }

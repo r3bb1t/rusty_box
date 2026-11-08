@@ -548,11 +548,12 @@ const LOAD: [u32; 2] = [0xB940_0001, SPIN];
 /// every line.
 #[test]
 fn the_power_button_holds_its_gpio_line_for_100_ms() {
-    use rusty_box_aarch64::DeviceLayout;
+    use rusty_box_aarch64::{DeviceLayout, InterruptMap};
     for (layout, line) in [(DeviceLayout::Board, 0x01), (DeviceLayout::QemuVirt, 0x08)] {
         let mut ram = vec![0u8; RAM_LEN];
         let mut m = MachineBuilder::new(VirtConfig {
             layout,
+            interrupts: InterruptMap::own(layout),
             ..VirtConfig::DEFAULT
         })
         .ram(ram_size())
@@ -1626,19 +1627,24 @@ fn the_board_has_the_counter_and_gic_its_configuration_names() {
 
 /// A host's tree is refused where it names an interrupt for one of the
 /// board's devices other than the one the interrupt map wires it to: QEMU's
-/// own tree, on the board's own map, names its first virtio transport's
-/// SPI 16 where the map has SPI 3, and on QEMU's map but for the
-/// transports', the first transport's 16 again. On the map it was written
-/// for it builds, and the guest's tree names the SPIs the devices drive; a
-/// map moving only the PCIe host's INTA to INTD, which no device drives,
-/// builds too. Each on QEMU's layout, where the tree puts the devices: on
-/// the board's own, the tree is refused for its addresses.
+/// own tree, on the board's own map for QEMU's layout, names its first
+/// virtio transport's SPI 16 where the map has SPI 3, and on QEMU's map but
+/// for the transports', the first transport's 16 again. On the map it was
+/// written for it builds, and the guest's tree names the SPIs the devices
+/// drive; a map moving only the PCIe host's INTA to INTD, which no device
+/// drives, builds too. Each on QEMU's layout, where the tree puts the
+/// devices: on the board's own, the tree is refused for its addresses. The
+/// board's own map for its own layout wires four transports before the
+/// PCIe host's lines, so on QEMU's layout, of 32 transports, it is refused
+/// before any tree is read.
 #[cfg(feature = "alloc")]
 #[test]
 fn a_host_tree_must_name_the_interrupts_the_map_wires() {
     use rusty_box_aarch64::board::VIRTIO_MMIO_BASE;
     use rusty_box_aarch64::machine::{HostTreeAddress, HostTreeInterrupt, TreeDevice};
-    use rusty_box_aarch64::{DeviceLayout, InterruptMap, InterruptSource, PhysAddr, Spi};
+    use rusty_box_aarch64::{
+        DeviceLayout, InterruptMap, InterruptMapError, InterruptSource, PhysAddr, Spi,
+    };
     const HOST_TREE: &[u8] = include_bytes!("../assets/qemu-virt-a57-256m.dtb");
     let spi = |n| Spi::new(n).expect("an SPI");
     let build_in = |layout, interrupts| {
@@ -1660,7 +1666,7 @@ fn a_host_tree_must_name_the_interrupts_the_map_wires() {
     };
     for (map, refused) in [
         (
-            InterruptMap::DEFAULT,
+            InterruptMap::own(DeviceLayout::QemuVirt),
             HostTreeInterrupt {
                 source: InterruptSource::Virtio,
                 named: Some(spi(16)),
@@ -1681,6 +1687,18 @@ fn a_host_tree_must_name_the_interrupts_the_map_wires() {
             Err(e) => panic!("refused otherwise: {e}"),
             Ok(_) => panic!("{map:?}: the tree names other interrupts"),
         }
+    }
+    match build(InterruptMap::DEFAULT) {
+        Err(BuildError::InterruptMap(refused)) => assert_eq!(
+            refused,
+            InterruptMapError::Shared {
+                first: InterruptSource::Virtio,
+                second: InterruptSource::PcieIntx,
+                spi: spi(7),
+            }
+        ),
+        Err(e) => panic!("refused otherwise: {e}"),
+        Ok(_) => panic!("the board's own layout's map wires 4 transports, not 32"),
     }
     let m = build(qemu).expect("the map the tree was written for");
     assert_eq!(
@@ -1788,10 +1806,10 @@ fn the_board_wires_the_interrupt_map_its_configuration_names() {
     );
     assert_eq!(m.reg_read(Reg::X8), (432 << 16) | 48, "MSI_TYPER");
 
-    // The board's own map gives the frame every SPI from INTID 96, however
-    // many the GIC has.
-    let fewest_for_the_default = SpiCount::new(96).expect("a count");
-    for (spis, count) in [(SpiCount::DEFAULT, 416), (fewest_for_the_default, 32)] {
+    // The board's own map gives the frame every SPI from INTID 64, after
+    // the devices' 11 lines, however many the GIC has.
+    let fewest_for_the_default = SpiCount::new(64).expect("a count");
+    for (spis, count) in [(SpiCount::DEFAULT, 448), (fewest_for_the_default, 32)] {
         let config = VirtConfig {
             gic: GicShape {
                 spis,
@@ -1815,7 +1833,7 @@ fn the_board_wires_the_interrupt_map_its_configuration_names() {
             m.step(RunBudget::Instructions(1)).stop,
             StopReason::BudgetExhausted
         );
-        assert_eq!(m.reg_read(Reg::X8), (96 << 16) | count, "{spis:?}");
+        assert_eq!(m.reg_read(Reg::X8), (64 << 16) | count, "{spis:?}");
     }
 
     let small = SpiCount::new(256).expect("a count");
@@ -1955,7 +1973,7 @@ fn the_processor_is_the_model_the_configuration_names() {
 #[cfg(feature = "alloc")]
 #[test]
 fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
-    use rusty_box_aarch64::board::{VIRTIO_MMIO_BASE, VIRTIO_MMIO_STRIDE};
+    use rusty_box_aarch64::board::{VIRTIO_MMIO_BASE, VIRTIO_MMIO_COUNT, VIRTIO_MMIO_STRIDE};
     use rusty_box_aarch64::{Disk, OwnedStorage, TransportOrder};
 
     /// The virtio device ID the guest reads at transport `slot`: `ldr w0,
@@ -1993,15 +2011,18 @@ fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
     };
     let build = |sectors, keyboard| build_in(TransportOrder::DEFAULT, sectors, keyboard);
 
+    // The board's four transports, one for each device it can plug in.
+    let top = u64::from(VIRTIO_MMIO_COUNT) - 1;
+    assert_eq!(top, 3);
     let mut m = build(8, false);
     assert_eq!(device_id(&mut m, 0), 2, "virtio-blk at the first transport");
-    assert_eq!(device_id(&mut m, 31), 0, "nothing at the last");
+    assert_eq!(device_id(&mut m, top), 0, "nothing at the last");
     let mut with_keyboard = build(8, true);
     assert_eq!(device_id(&mut with_keyboard, 0), 18, "the keyboard first");
     assert_eq!(device_id(&mut with_keyboard, 1), 2, "then the disk");
     let mut from_the_top = build_in(TransportOrder::LastFree, 8, true);
-    assert_eq!(device_id(&mut from_the_top, 31), 18, "the keyboard at the top");
-    assert_eq!(device_id(&mut from_the_top, 30), 2, "then the disk under it");
+    assert_eq!(device_id(&mut from_the_top, top), 18, "the keyboard at the top");
+    assert_eq!(device_id(&mut from_the_top, top - 1), 2, "then the disk under it");
     assert_eq!(device_id(&mut from_the_top, 0), 0, "nothing at the first");
 
     assert_eq!(m.disk().map(Disk::sectors), Some(8));
@@ -2062,12 +2083,13 @@ fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
 #[test]
 fn each_device_layout_puts_the_devices_where_the_tree_names_them() {
     use rusty_box_aarch64::layout::{DeviceWindows, Window};
-    use rusty_box_aarch64::{DeviceLayout, OwnedStorage, PhysAddr, WithEl2};
+    use rusty_box_aarch64::{DeviceLayout, InterruptMap, OwnedStorage, PhysAddr, WithEl2};
     /// `ldr w2, [x1]; b .`
     const LOAD: [u32; 2] = [0xB940_0022, SPIN];
     let build = |layout| {
         MachineBuilder::new(VirtConfig {
             layout,
+            interrupts: InterruptMap::own(layout),
             ..VirtConfig::DEFAULT
         })
         .ram(ram_size())
@@ -2123,7 +2145,8 @@ fn each_device_layout_puts_the_devices_where_the_tree_names_them() {
                 "{layout}: {node}"
             );
         }
-        for slot in [0, 31] {
+        let last = w.virtio.count.get() - 1;
+        for slot in [0, last] {
             let transport = w.virtio.transport(slot);
             let node = std::format!("virtio@{:x}", transport.base.get());
             assert_eq!(reg(&m, &node), [transport], "{layout}: {node}");
@@ -2132,7 +2155,21 @@ fn each_device_layout_puts_the_devices_where_the_tree_names_them() {
                 Some(0x7472_6976),
                 "{layout}: {node}"
             );
+            // The window's last word answers too: the transport decodes
+            // all of its `reg`, its 64 KiB page on the board's own layout.
+            assert_eq!(
+                read(&mut m, transport.end().get() - 4),
+                Some(0),
+                "{layout}: {node}'s last word"
+            );
         }
+        let past = w.virtio.transport(last).end();
+        let named = std::format!("virtio@{:x}", past.get());
+        assert_eq!(
+            fdt::property(m.device_tree(), &named, "reg"),
+            Ok(None),
+            "{layout}: no transport past the last"
+        );
         let gic = std::format!("interrupt-controller@{:x}", w.gic.dist.get());
         assert_eq!(
             reg(&m, &gic),

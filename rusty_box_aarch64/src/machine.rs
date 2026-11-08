@@ -102,14 +102,16 @@ pub struct VirtConfig {
     /// The GIC's SPIs and priority bits.
     pub gic: GicShape,
     /// The SPIs the devices drive, and the GICv2m frame's, which the GIC
-    /// must have ([`InterruptMap::check`]). A host's device tree
-    /// ([`MachineBuilder::device_tree`]) names the devices' interrupts
-    /// itself, and is refused where it names others
-    /// ([`BuildError::HostTreeInterrupt`]).
+    /// must have for the layout's virtio transports
+    /// ([`InterruptMap::check`]); [`InterruptMap::own`] gives a layout the
+    /// board's own. A host's device tree ([`MachineBuilder::device_tree`])
+    /// names the devices' interrupts itself, and is refused where it names
+    /// others ([`BuildError::HostTreeInterrupt`]).
     pub interrupts: InterruptMap,
     /// Which free virtio-mmio transport each device plugged in takes.
     pub transport_order: TransportOrder,
-    /// Where the devices sit. A host's device tree
+    /// Where the devices sit, and how many virtio transports there are,
+    /// which `interrupts` gives a run of SPIs. A host's device tree
     /// ([`MachineBuilder::device_tree`]) names their addresses itself, and
     /// is refused where it names others ([`BuildError::HostTreeAddress`]).
     pub layout: DeviceLayout,
@@ -1193,7 +1195,7 @@ fn device_at(address: PhysAddr, wiring: Wiring, windows: DeviceWindows) -> Optio
     } else {
         match windows.virtio.slot_of(address) {
             Some(TransportRegister { slot, reg }) if reg.get() == 0 => {
-                wired(InterruptSource::Virtio, wiring.virtio(slot as u8))
+                wired(InterruptSource::Virtio, wiring.virtio(slot))
             }
             Some(_) | None => None,
         }
@@ -1487,7 +1489,7 @@ fn plan<L: Levels>(
         .map_err(BuildError::FixedCounterRate)?;
     let wiring = config
         .interrupts
-        .wire(config.gic.spis)
+        .wire(config.gic.spis, config.layout)
         .map_err(BuildError::InterruptMap)?;
     if let TreeSource::Host(tree) = source_tree {
         check_host_tree(tree, wiring, config.layout)?;
@@ -2817,11 +2819,17 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// level beside stage 1's and the memory each stage and both together map
 /// it to, the TLB's kept stage 2 translations, its tables of EL1&0 and
 /// stage 2 contexts, the shape's identity fingerprint, counter rate,
-/// firmware speculation report, GIC shape, interrupt map, device layout and
-/// occupied transports, and the board's devices: the GIC with its
-/// Virtualization Extensions where it has them, the PL011, the PL031, the
-/// PL061, both flash banks and every virtio-mmio transport.
-const SNAPSHOT_VERSION: u32 = 27;
+/// firmware speculation report, GIC shape, interrupt map with the count of
+/// transports it wires, device layout and occupied transports, and the
+/// board's devices: the GIC with its Virtualization Extensions where it has
+/// them, the PL011, the PL031, the PL061, both flash banks and every
+/// virtio-mmio transport, each queue's state checked against the size its
+/// device gives it (`QueueNumMax`). An image also holds what the guest was
+/// told of the board, which the version keeps apart: the GPIO line the
+/// power button drives on each layout
+/// ([`DeviceLayout::power_button_line`]), the virtio transports each layout
+/// has, and the size of every virtio queue.
+const SNAPSHOT_VERSION: u32 = 28;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

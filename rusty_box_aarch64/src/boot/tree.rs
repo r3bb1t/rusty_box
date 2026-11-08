@@ -49,7 +49,6 @@ use crate::bus::PhysAddr;
 use crate::cpu::{PsciConduit, PSCI_COMPATIBLE};
 use crate::devices::gicv2::GicExtensions;
 use crate::devices::gicv2_virt::MAINTENANCE_INTID;
-use crate::devices::virtio_mmio::TRANSPORT_COUNT;
 use crate::layout::{DeviceLayout, DeviceWindows, GicWindows, Window};
 use crate::identity::BoardIdentity;
 use crate::interrupt_map::{Spi, Wiring};
@@ -489,14 +488,15 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
 
     pcie(&mut w, tree.wiring, windows)?;
 
-    for n in 0..TRANSPORT_COUNT {
+    for n in 0..windows.virtio.count.get() {
+        // Its `reg` is the window it decodes, its layout's stride.
         let transport = windows.virtio.transport(n);
         w.begin_at("virtio", transport.base.get())?;
         w.string("compatible", "virtio,mmio")?;
         w.window("reg", transport)?;
         // A transport's line is asserted while its InterruptStatus has a
         // bit set (`Transport::irq`): a level.
-        w.cells("interrupts", &spi(tree.wiring.virtio(n as u8)))?;
+        w.cells("interrupts", &spi(tree.wiring.virtio(n)))?;
         w.flag("dma-coherent")?;
         w.end()?;
     }

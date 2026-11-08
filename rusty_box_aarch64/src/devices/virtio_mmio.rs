@@ -1,7 +1,9 @@
 //! A virtio-mmio transport with no device behind it.
 //!
 //! Provenance (R7): QEMU `hw/virtio/virtio-mmio.c` as `virt` instantiates its
-//! 32 transports. Their register layout is the `force-legacy` property:
+//! transports; how many the board has and the window each decodes are its
+//! layout's ([`crate::layout::VirtioWindows`]). Their register layout is the
+//! `force-legacy` property:
 //! legacy (QEMU's default, `Version` 1) on a board without virtio devices,
 //! non-legacy (`Version` 2) on one with them (the `virtio` module says why).
 //! With no backend plugged in, `virtio_mmio_read` answers the magic value,
@@ -18,11 +20,6 @@ use crate::identity::VirtioVendorId;
 use super::virtio::{MAGIC, MODERN_VERSION};
 
 const LEGACY_VERSION: u32 = 1;
-
-/// Bytes of register space each transport occupies on `virt`.
-pub const TRANSPORT_SIZE: u64 = 0x200;
-/// Transports `virt` creates.
-pub const TRANSPORT_COUNT: u64 = 32;
 
 /// The register layout of every transport on the board: QEMU's
 /// `virtio-mmio.force-legacy`.

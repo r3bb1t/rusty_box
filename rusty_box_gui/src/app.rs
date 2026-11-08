@@ -980,7 +980,7 @@ impl VirtSettings {
                 .and_then(|rate| crate::config::virt_counter_rate(self.cpu, rate))
                 .map_err(|refused| refused.to_string())?
         };
-        let interrupts = crate::config::virt_interrupt_map(self.interrupts, self.gic_spis)
+        let interrupts = crate::config::virt_interrupt_map(self.interrupts, self.gic_spis, self.layout)
             .map_err(|refused| refused.to_string())?;
         Ok(crate::config::ArmVirtConfig {
             memory_mib: self.memory_mib,
@@ -3714,7 +3714,7 @@ impl NativeShellApp {
                     // those the draft's interrupt map fits, and its priority
                     // bits.
                     field_row(ui, "GIC SPIs", |ui| {
-                        let map = virt.interrupts;
+                        let (map, layout) = (virt.interrupts, virt.layout);
                         egui::ComboBox::from_id_salt("virt GIC SPIs")
                             .selected_text(virt.gic_spis.get().to_string())
                             .show_ui(ui, |ui| {
@@ -3722,7 +3722,7 @@ impl NativeShellApp {
                                     ..=rusty_box_aarch64::SpiCount::MAX.get())
                                     .step_by(32)
                                     .filter_map(rusty_box_aarch64::SpiCount::new)
-                                    .filter(|&spis| map.check(spis).is_ok());
+                                    .filter(|&spis| map.check(spis, layout).is_ok());
                                 for spis in counts {
                                     changed |= ui
                                         .selectable_value(&mut virt.gic_spis, spis, spis.get().to_string())
@@ -3748,7 +3748,13 @@ impl NativeShellApp {
                     changed |= spi_field(ui, "UART SPI", &mut map.uart, editable);
                     changed |= spi_field(ui, "RTC SPI", &mut map.rtc, editable);
                     changed |= spi_field(ui, "GPIO SPI", &mut map.gpio, editable);
-                    changed |= spi_field(ui, "Virtio first SPI (32)", &mut map.virtio, editable);
+                    let transports = virt.layout.windows().virtio.count.get();
+                    changed |= spi_field(
+                        ui,
+                        &format!("Virtio first SPI ({transports})"),
+                        &mut map.virtio,
+                        editable,
+                    );
                     changed |= spi_field(ui, "PCIe INTA-INTD first SPI (4)", &mut map.pcie_intx, editable);
                     changed |= spi_field(ui, "MSI frame first SPI", &mut map.msi.first, editable);
                     changed |= msi_count_field(ui, &mut map.msi.count, map.msi.first, virt.gic_spis, editable);
@@ -3771,7 +3777,12 @@ impl NativeShellApp {
                             });
                     });
                     // Where the devices sit: the board's own layout, or QEMU
-                    // `virt`'s, which a device tree QEMU wrote names.
+                    // `virt`'s, which a device tree QEMU wrote names. Each has
+                    // its own count of virtio transports, so an interrupt map
+                    // that is the board's own for the layout left becomes the
+                    // board's own for the layout chosen; one edited by hand
+                    // stays as it is.
+                    let was = virt.layout;
                     field_row(ui, "Device addresses", |ui| {
                         egui::ComboBox::from_id_salt("virt device layout")
                             .selected_text(device_layout_label(virt.layout))
@@ -3783,6 +3794,9 @@ impl NativeShellApp {
                                 }
                             });
                     });
+                    if virt.layout != was && virt.interrupts == rusty_box_aarch64::InterruptMap::own(was) {
+                        virt.interrupts = rusty_box_aarch64::InterruptMap::own(virt.layout);
+                    }
                     changed |= field_row(ui, "IPS target", |ui| {
                         draw_u32_field(
                             ui,
@@ -8162,9 +8176,11 @@ mod tests {
                 spectre: rusty_box_aarch64::SpectreReport::Mitigated,
                 counter: rusty_box_aarch64::CounterRate::DEFAULT,
                 gic: rusty_box_aarch64::GicShape {
-                    spis: rusty_box_aarch64::SpiCount::MIN,
+                    spis: rusty_box_aarch64::SpiCount::new(64).expect("a count"),
                     priority_bits: rusty_box_aarch64::PriorityBits::Eight,
                 },
+                // The board's own map for QEMU's layout, its 32 transports
+                // from SPI 3, the UART and the frame moved.
                 interrupts: rusty_box_aarch64::InterruptMap {
                     uart: rusty_box_aarch64::Spi::new(63).expect("an SPI"),
                     msi: rusty_box_aarch64::MsiSpis {
@@ -8173,7 +8189,7 @@ mod tests {
                             rusty_box_aarch64::MsiCount::new(24).expect("a count"),
                         ),
                     },
-                    ..rusty_box_aarch64::InterruptMap::DEFAULT
+                    ..rusty_box_aarch64::InterruptMap::own(rusty_box_aarch64::DeviceLayout::QemuVirt)
                 },
                 transport_order: rusty_box_aarch64::TransportOrder::LastFree,
                 layout: rusty_box_aarch64::DeviceLayout::QemuVirt,

@@ -103,9 +103,9 @@ fn boot() -> ExitCode {
         let initrd = args.initrd.as_deref().map(read).transpose()?;
         let dtb = args.dtb.as_deref().map(read).transpose()?;
         let ram = RamSize::mib(args.ram_mib).ok_or("--ram-mib is not a size the board can map")?;
-        Ok((kernel, initrd, dtb, ram, args.run.ips()?))
+        Ok((kernel, initrd, dtb, ram, args.run.ips()?, args.run.interrupts()?))
     })();
-    let (kernel, initrd, dtb, ram, ips) = match loaded {
+    let (kernel, initrd, dtb, ram, ips, interrupts) = match loaded {
         Ok(l) => l,
         Err(e) => {
             eprintln!("{e}");
@@ -123,7 +123,7 @@ fn boot() -> ExitCode {
         ips,
         cpu: args.run.cpu,
         debug_stops: args.run.debug_stops(),
-        interrupts: args.run.interrupts,
+        interrupts,
         transport_order: args.run.transport_order,
         layout: args.run.layout,
         ..VirtConfig::DEFAULT

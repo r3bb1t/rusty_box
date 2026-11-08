@@ -4,12 +4,13 @@
 //! 1019 and leaves which source drives which to the system. BSA DEN0094C
 //! I.5 gives the GICv2m frame "an IMPLEMENTATION DEFINED number of
 //! contiguous SPIs", which "other interrupt sources must not share", and
-//! I.9.1 reports them in `MSI_TYPER`. The board's own choice
-//! ([`InterruptMap::DEFAULT`]) numbers its devices' lines from SPI 0 in
-//! the order of their registers' addresses — the UART, the RTC, the GPIO,
-//! the virtio transports, the PCIe host's INTA to INTD — and gives the
-//! frame every SPI from the first after them whose interrupt ID is a
-//! multiple of 32. A function sending multiple messages sets the low bits
+//! I.9.1 reports them in `MSI_TYPER`. The board's own choice for a layout
+//! ([`InterruptMap::own`], [`InterruptMap::DEFAULT`] for the board's own
+//! layout) numbers its devices' lines from SPI 0 in the order of their
+//! registers' addresses — the UART, the RTC, the GPIO, the layout's virtio
+//! transports, the PCIe host's INTA to INTD — and gives the frame every SPI
+//! from the first after them whose interrupt ID is a multiple of 32. A
+//! function sending multiple messages sets the low bits
 //! of the message data to the vector it sends, up to 32 of them (PCI Local
 //! Bus Specification 3.0 §6.8.1.6), and the data is the SPI's interrupt ID
 //! (I.9.2), so a frame starting there gives any block of vectors a guest
@@ -21,12 +22,10 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
 use crate::devices::gicv2::{MsiFrame, SpiCount};
-use crate::devices::virtio_mmio::TRANSPORT_COUNT;
+use crate::layout::{DeviceLayout, TransportCount};
 
 /// The PCIe host bridge's interrupt pins, INTA to INTD.
 pub const PCIE_INTX_LINES: u32 = 4;
-/// The virtio transports' lines, one each.
-const VIRTIO_LINES: u32 = TRANSPORT_COUNT as u32;
 /// The most vectors a function sending multiple messages has (PCI Local
 /// Bus Specification 3.0 §6.8.1.3, Multiple Message Capable).
 const MSI_BLOCK: u32 = 32;
@@ -132,7 +131,7 @@ pub struct InterruptMap {
     /// The PL061.
     pub gpio: Spi,
     /// Virtio-mmio transport `n` drives SPI `virtio + n`, for each of the
-    /// 32 transports.
+    /// layout's transports.
     pub virtio: Spi,
     /// The PCIe host bridge's INTA to INTD drive four SPIs from this one.
     pub pcie_intx: Spi,
@@ -141,34 +140,52 @@ pub struct InterruptMap {
 }
 
 impl InterruptMap {
-    /// The SPIs the devices drive: the UART's, the RTC's and the GPIO's
-    /// one each, the virtio transports' and the PCIe host's INTA to INTD.
-    pub const DEVICE_LINES: u32 = 3 + VIRTIO_LINES + PCIE_INTX_LINES;
-
-    /// The board's own: the devices' lines from SPI 0 in the order of their
-    /// registers' addresses, and the GICv2m frame every SPI from the first
-    /// after them whose interrupt ID is a multiple of 32, SPI 64 (INTID 96).
-    pub const DEFAULT: Self = Self {
-        uart: Spi(0),
-        rtc: Spi(1),
-        gpio: Spi(2),
-        virtio: Spi(3),
-        pcie_intx: Spi(3 + VIRTIO_LINES as u16),
-        msi: MsiSpis {
-            first: Spi(((32 + Self::DEVICE_LINES).div_ceil(MSI_BLOCK) * MSI_BLOCK - 32) as u16),
-            count: MsiExtent::ToTheLast,
-        },
-    };
-
-    /// Whether the map fits a GIC of `spis`: every source's SPIs the GIC's,
-    /// the frame's at least one, and none shared ([`InterruptMapError`]).
-    pub fn check(&self, spis: SpiCount) -> Result<(), InterruptMapError> {
-        self.wire(spis).map(|_| ())
+    /// The SPIs the devices drive on a board of `transports` virtio
+    /// transports: the UART's, the RTC's and the GPIO's one each, a
+    /// transport's each, and the PCIe host's INTA to INTD.
+    pub const fn device_lines(transports: TransportCount) -> u32 {
+        3 + transports.get() as u32 + PCIE_INTX_LINES
     }
 
-    /// The map on a GIC of `spis`, refused when it does not fit
-    /// ([`InterruptMap::check`]).
-    pub(crate) fn wire(&self, spis: SpiCount) -> Result<Wiring, InterruptMapError> {
+    /// The board's own for `layout`: the devices' lines from SPI 0 in the
+    /// order of their registers' addresses, and the GICv2m frame every SPI
+    /// from the first after them whose interrupt ID is a multiple of 32.
+    /// On the board's own layout, with its four transports, that is SPI 32
+    /// (INTID 64); on QEMU's, with its 32, SPI 64 (INTID 96).
+    pub const fn own(layout: DeviceLayout) -> Self {
+        let transports = layout.windows().virtio.count;
+        let lines = Self::device_lines(transports);
+        Self {
+            uart: Spi(0),
+            rtc: Spi(1),
+            gpio: Spi(2),
+            virtio: Spi(3),
+            pcie_intx: Spi(3 + transports.get() as u16),
+            msi: MsiSpis {
+                first: Spi(((32 + lines).div_ceil(MSI_BLOCK) * MSI_BLOCK - 32) as u16),
+                count: MsiExtent::ToTheLast,
+            },
+        }
+    }
+
+    /// The board's own for its own layout ([`DeviceLayout::DEFAULT`]).
+    pub const DEFAULT: Self = Self::own(DeviceLayout::DEFAULT);
+
+    /// Whether the map fits a GIC of `spis` on a board of `layout`: every
+    /// source's SPIs the GIC's, the frame's at least one, and none shared
+    /// ([`InterruptMapError`]).
+    pub fn check(&self, spis: SpiCount, layout: DeviceLayout) -> Result<(), InterruptMapError> {
+        self.wire(spis, layout).map(|_| ())
+    }
+
+    /// The map on a GIC of `spis` on a board of `layout`, refused when it
+    /// does not fit ([`InterruptMap::check`]).
+    pub(crate) fn wire(
+        &self,
+        spis: SpiCount,
+        layout: DeviceLayout,
+    ) -> Result<Wiring, InterruptMapError> {
+        let transports = layout.windows().virtio.count;
         let first = self.msi.first;
         let count = match self.msi.count {
             MsiExtent::ToTheLast => MsiCount::new(spis.get().saturating_sub(first.number()))
@@ -179,7 +196,7 @@ impl InterruptMap {
             Block::of(InterruptSource::Uart, self.uart, 1),
             Block::of(InterruptSource::Rtc, self.rtc, 1),
             Block::of(InterruptSource::Gpio, self.gpio, 1),
-            Block::of(InterruptSource::Virtio, self.virtio, VIRTIO_LINES),
+            Block::of(InterruptSource::Virtio, self.virtio, u32::from(transports.get())),
             Block::of(InterruptSource::PcieIntx, self.pcie_intx, PCIE_INTX_LINES),
             Block::of(InterruptSource::MsiFrame, first, count.get()),
         ];
@@ -208,6 +225,7 @@ impl InterruptMap {
             rtc: self.rtc,
             gpio: self.gpio,
             virtio: self.virtio,
+            transports,
             pcie_intx: self.pcie_intx,
             msi: MsiFrame { first, count },
         })
@@ -320,6 +338,8 @@ pub(crate) struct Wiring {
     rtc: Spi,
     gpio: Spi,
     virtio: Spi,
+    /// How many transports drive SPIs from `virtio`.
+    transports: TransportCount,
     pcie_intx: Spi,
     msi: MsiFrame,
 }
@@ -337,9 +357,9 @@ impl Wiring {
         self.gpio
     }
 
-    /// Virtio-mmio transport `slot`'s, one of the [`TRANSPORT_COUNT`].
+    /// Virtio-mmio transport `slot`'s, one of the layout's transports.
     pub(crate) const fn virtio(&self, slot: u8) -> Spi {
-        debug_assert!((slot as u64) < TRANSPORT_COUNT);
+        debug_assert!(slot < self.transports.get());
         self.virtio.within(slot as u32)
     }
 
@@ -354,12 +374,14 @@ impl Wiring {
     }
 
     /// Save it, for a snapshot's record of how a machine was built: the
-    /// devices' SPIs, then the frame's first and count.
+    /// devices' SPIs, then the frame's first and count, then how many
+    /// transports there are.
     pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
         for spi in [self.uart, self.rtc, self.gpio, self.virtio, self.pcie_intx, self.msi.first] {
             w.write_u16(spi.0)?;
         }
-        w.write_u16(self.msi.count.0)
+        w.write_u16(self.msi.count.0)?;
+        w.write_u8(self.transports.get())
     }
 
     /// What [`Wiring::save`] saved, refused when a number is no SPI or no
@@ -375,11 +397,14 @@ impl Wiring {
         let first = spi()?;
         let count = MsiCount::new(u32::from(r.read_u16()?))
             .ok_or(SnapError::Invalid("wiring MSI count out of range"))?;
+        let transports = TransportCount::new(r.read_u8()?)
+            .ok_or(SnapError::Invalid("wiring transport count out of range"))?;
         Ok(Self {
             uart,
             rtc,
             gpio,
             virtio,
+            transports,
             pcie_intx,
             msi: MsiFrame { first, count },
         })
@@ -401,25 +426,55 @@ mod tests {
         }
     }
 
-    /// The default numbers the devices from SPI 0 by address and gives the
-    /// frame the rest of the GIC from SPI 64, INTID 96, a multiple of the
-    /// 32 vectors a function may send: on the GIC-400's 480, INTIDs 96 to
-    /// 511.
+    /// The board's own layout.
+    const BOARD: DeviceLayout = DeviceLayout::Board;
+
+    /// The default numbers the devices from SPI 0 by address, the board's
+    /// four transports among them, and gives the frame the rest of the GIC
+    /// from SPI 32, INTID 64, a multiple of the 32 vectors a function may
+    /// send: on the GIC-400's 480, INTIDs 64 to 511.
     #[test]
     fn the_default_numbers_the_devices_by_address_and_the_frame_takes_the_rest() {
         let wiring = InterruptMap::DEFAULT
-            .wire(SpiCount::DEFAULT)
+            .wire(SpiCount::DEFAULT, BOARD)
             .expect("the default fits the default GIC");
         assert_eq!(wiring.uart().intid(), 32);
         assert_eq!(wiring.rtc().intid(), 33);
         assert_eq!(wiring.gpio().intid(), 34);
         assert_eq!(wiring.virtio(0).intid(), 35);
+        assert_eq!(wiring.virtio(3).intid(), 38);
+        assert_eq!(wiring.pcie_intx(0).intid(), 39);
+        assert_eq!(wiring.pcie_intx(3).intid(), 42);
+        assert_eq!(wiring.msi(), frame(32, 480 - 32));
+        assert_eq!(wiring.msi().first.intid() % MSI_BLOCK, 0);
+        assert_eq!(InterruptMap::device_lines(BOARD.windows().virtio.count), 11);
+    }
+
+    /// The board's own map for QEMU's layout numbers the devices the same
+    /// way around its 32 transports, so its frame starts at SPI 64, INTID
+    /// 96; the map for one layout is checked against that layout's
+    /// transports, so the board's own layout's crosses the PCIe host's
+    /// lines on QEMU's.
+    #[test]
+    fn a_map_is_checked_against_its_layouts_transports() {
+        let qemu = DeviceLayout::QemuVirt;
+        let wiring = InterruptMap::own(qemu)
+            .wire(SpiCount::DEFAULT, qemu)
+            .expect("QEMU's layout's own map fits");
         assert_eq!(wiring.virtio(31).intid(), 66);
         assert_eq!(wiring.pcie_intx(0).intid(), 67);
         assert_eq!(wiring.pcie_intx(3).intid(), 70);
         assert_eq!(wiring.msi(), frame(64, 480 - 64));
-        assert_eq!(wiring.msi().first.intid() % MSI_BLOCK, 0);
-        assert_eq!(InterruptMap::DEVICE_LINES, 39);
+        assert_eq!(InterruptMap::device_lines(qemu.windows().virtio.count), 39);
+        assert_eq!(
+            InterruptMap::DEFAULT.check(SpiCount::DEFAULT, qemu),
+            Err(InterruptMapError::Shared {
+                first: InterruptSource::Virtio,
+                second: InterruptSource::PcieIntx,
+                spi: spi(7)
+            })
+        );
+        assert_eq!(InterruptMap::own(BOARD), InterruptMap::DEFAULT);
     }
 
     /// The frame's SPIs follow the GIC's size when they run to its last;
@@ -427,27 +482,27 @@ mod tests {
     /// refused.
     #[test]
     fn the_frame_runs_to_the_gics_last_spi() {
-        let small = SpiCount::new(96).expect("a count");
-        let wiring = InterruptMap::DEFAULT.wire(small).expect("fits");
-        assert_eq!(wiring.msi(), frame(64, 32));
+        let small = SpiCount::new(64).expect("a count");
+        let wiring = InterruptMap::DEFAULT.wire(small, BOARD).expect("fits");
+        assert_eq!(wiring.msi(), frame(32, 32));
         assert_eq!(
-            InterruptMap::DEFAULT.wire(SpiCount::MIN),
+            InterruptMap::DEFAULT.wire(SpiCount::MIN, BOARD),
             Err(InterruptMapError::NoMsiSpis {
-                first: spi(64),
+                first: spi(32),
                 spis: SpiCount::MIN
             }),
             "the board's own frame starts past the fewest SPIs a GIC may have"
         );
         let packed = InterruptMap {
             msi: MsiSpis {
-                first: spi(InterruptMap::DEVICE_LINES),
+                first: spi(InterruptMap::device_lines(BOARD.windows().virtio.count)),
                 count: MsiExtent::ToTheLast,
             },
             ..InterruptMap::DEFAULT
         };
         assert_eq!(
-            packed.wire(SpiCount::MIN).map(|w| w.msi()),
-            Ok(frame(39, 25)),
+            packed.wire(SpiCount::MIN, BOARD).map(|w| w.msi()),
+            Ok(frame(11, 21)),
             "a map packed after the devices fits the fewest"
         );
         let counted = InterruptMap {
@@ -458,7 +513,7 @@ mod tests {
             ..InterruptMap::DEFAULT
         };
         let spis = SpiCount::new(128).expect("a count");
-        assert_eq!(counted.wire(spis).map(|w| w.msi()), Ok(frame(100, 28)));
+        assert_eq!(counted.wire(spis, BOARD).map(|w| w.msi()), Ok(frame(100, 28)));
         let past = InterruptMap {
             msi: MsiSpis {
                 first: spi(100),
@@ -467,7 +522,7 @@ mod tests {
             ..InterruptMap::DEFAULT
         };
         assert_eq!(
-            past.wire(spis),
+            past.wire(spis, BOARD),
             Err(InterruptMapError::OutsideGic {
                 source: InterruptSource::MsiFrame,
                 spis
@@ -482,7 +537,7 @@ mod tests {
                 ..InterruptMap::DEFAULT
             };
             assert_eq!(
-                none_left.wire(spis),
+                none_left.wire(spis, BOARD),
                 Err(InterruptMapError::NoMsiSpis {
                     first: spi(first),
                     spis
@@ -494,7 +549,7 @@ mod tests {
             ..InterruptMap::DEFAULT
         };
         assert_eq!(
-            uart_past.wire(spis),
+            uart_past.wire(spis, BOARD),
             Err(InterruptMapError::OutsideGic {
                 source: InterruptSource::Uart,
                 spis
@@ -510,27 +565,27 @@ mod tests {
     fn no_two_sources_share_an_spi() {
         let spis = SpiCount::DEFAULT;
         let rtc_on_virtio = InterruptMap {
-            rtc: spi(10),
+            rtc: spi(5),
             ..InterruptMap::DEFAULT
         };
         assert_eq!(
-            rtc_on_virtio.wire(spis),
+            rtc_on_virtio.wire(spis, BOARD),
             Err(InterruptMapError::Shared {
                 first: InterruptSource::Rtc,
                 second: InterruptSource::Virtio,
-                spi: spi(10)
+                spi: spi(5)
             })
         );
         let overlapping = InterruptMap {
-            pcie_intx: spi(34),
+            pcie_intx: spi(6),
             ..InterruptMap::DEFAULT
         };
         assert_eq!(
-            overlapping.wire(spis),
+            overlapping.wire(spis, BOARD),
             Err(InterruptMapError::Shared {
                 first: InterruptSource::Virtio,
                 second: InterruptSource::PcieIntx,
-                spi: spi(34)
+                spi: spi(6)
             })
         );
         let frame_over_uart = InterruptMap {
@@ -538,7 +593,7 @@ mod tests {
             ..InterruptMap::DEFAULT
         };
         assert_eq!(
-            frame_over_uart.wire(spis),
+            frame_over_uart.wire(spis, BOARD),
             Err(InterruptMapError::Shared {
                 first: InterruptSource::Uart,
                 second: InterruptSource::MsiFrame,
@@ -546,26 +601,26 @@ mod tests {
             })
         );
         let in_the_gap = InterruptMap {
-            uart: spi(63),
+            uart: spi(31),
             ..InterruptMap::DEFAULT
         };
-        assert!(in_the_gap.wire(spis).is_ok(), "blocks that touch share none");
+        assert!(in_the_gap.wire(spis, BOARD).is_ok(), "blocks that touch share none");
     }
 
-    /// A wiring saved is restored as it was; a number no SPI or count has
-    /// is refused.
+    /// A wiring saved is restored as it was; a number no SPI, count or
+    /// transport count has is refused.
     #[test]
     fn a_wiring_round_trips_and_refuses_what_is_no_spi() {
-        let wiring = InterruptMap::DEFAULT.wire(SpiCount::DEFAULT).expect("fits");
+        let wiring = InterruptMap::DEFAULT.wire(SpiCount::DEFAULT, BOARD).expect("fits");
         let counted = InterruptMap {
             msi: MsiSpis {
-                first: spi(64),
-                count: MsiExtent::Count(MsiCount::new(416).expect("a count")),
+                first: spi(32),
+                count: MsiExtent::Count(MsiCount::new(448).expect("a count")),
             },
             ..InterruptMap::DEFAULT
         };
         assert_eq!(
-            counted.wire(SpiCount::DEFAULT),
+            counted.wire(SpiCount::DEFAULT, BOARD),
             Ok(wiring),
             "a frame to the last and one of the count it comes to wire alike"
         );
@@ -575,10 +630,16 @@ mod tests {
         let mut bad = image.clone();
         bad[0..2].copy_from_slice(&988u16.to_le_bytes());
         assert!(Wiring::restore(&mut bad.as_slice()).is_err());
-        let mut zero = image;
-        let at = zero.len() - 2;
-        zero[at..].copy_from_slice(&0u16.to_le_bytes());
+        // The frame's count, then the transports'.
+        let count_at = image.len() - 3;
+        let mut zero = image.clone();
+        zero[count_at..count_at + 2].copy_from_slice(&0u16.to_le_bytes());
         assert!(Wiring::restore(&mut zero.as_slice()).is_err());
+        for transports in [3, 33] {
+            let mut odd = image.clone();
+            odd[count_at + 2] = transports;
+            assert!(Wiring::restore(&mut odd.as_slice()).is_err(), "{transports}");
+        }
     }
 
     #[test]

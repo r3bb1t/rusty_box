@@ -11,8 +11,9 @@
 //!   so its configuration is `struct virtio_gpu_config`'s 16 bytes
 //!   (5.7.4), with `num_capsets` 0, there being no 3D protocol to describe,
 //!   and `num_scanouts` 1, the one display the board drives;
-//! - a control queue of 64 entries and a cursor queue of 16 (QEMU's,
-//!   `virtio_gpu_base_device_realize`);
+//! - a control queue and a cursor queue of the board's queue size
+//!   ([`super::queue::QUEUE_SIZE`]), where QEMU's
+//!   `virtio_gpu_base_device_realize` gives them 64 and 16 entries;
 //! - the host memory a guest makes the device hold for it, its resources'
 //!   pixels and the `struct virtio_gpu_mem_entry` lists of their backing,
 //!   is at most the guest's own RAM: a resource or an attachment past that
@@ -69,14 +70,14 @@ use rusty_box_devices::display::sink::{Dimensions, DisplaySink, Refreshed, TileP
 use rusty_box_devices::display::Resolution;
 
 use super::edid;
-use super::queue::{Chain, GuestRam};
+use super::queue::{self, Chain, GuestRam};
 use super::Vdev;
 use crate::identity::DisplayIdentity;
 
 pub const CONTROL_QUEUE: usize = 0;
 pub const CURSOR_QUEUE: usize = 1;
-pub const CONTROL_QUEUE_SIZE: u16 = 64;
-pub const CURSOR_QUEUE_SIZE: u16 = 16;
+pub const CONTROL_QUEUE_SIZE: u16 = queue::QUEUE_SIZE;
+pub const CURSOR_QUEUE_SIZE: u16 = queue::QUEUE_SIZE;
 
 /// `VIRTIO_GPU_F_EDID`.
 pub const FEATURES: u64 = 1 << 1;

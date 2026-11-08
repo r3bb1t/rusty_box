@@ -1233,10 +1233,11 @@ mod tests {
     fn the_board_has_the_counter_and_gic_the_vm_names() {
         const LDR_W0_X1: u32 = 0xB940_0020;
         let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        let spis = rusty_box_aarch64::SpiCount::new(64).expect("a count");
         let config = ArmVirtConfig {
             counter: rusty_box_aarch64::CounterRate::new(24_000_000).expect("a rate"),
             gic: rusty_box_aarch64::GicShape {
-                spis: rusty_box_aarch64::SpiCount::MIN,
+                spis,
                 priority_bits: rusty_box_aarch64::PriorityBits::Four,
             },
             interrupts: rusty_box_aarch64::InterruptMap {
@@ -1264,7 +1265,7 @@ mod tests {
         assert_eq!(stepped.stop, rusty_box_aarch64::StopReason::BudgetExhausted);
         assert_eq!(
             machine.reg_read(rusty_box_aarch64::Reg::X0) & 0x1F,
-            u64::from(rusty_box_aarch64::SpiCount::MIN.get() / 32),
+            u64::from(spis.get() / 32),
             "GICD_TYPER.ITLinesNumber"
         );
         machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
@@ -1287,7 +1288,7 @@ mod tests {
         const LDR_W0_X1: u32 = 0xB940_0020;
         let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
         let image = ScratchFile::new("order.img", &[0; 512]);
-        let device_id = |machine: &mut Virt, layout: rusty_box_aarch64::DeviceLayout, slot: u64| {
+        let device_id = |machine: &mut Virt, layout: rusty_box_aarch64::DeviceLayout, slot: u8| {
             let at = rusty_box_aarch64::board::RAM_BASE;
             machine.mem_write(at, &LDR_W0_X1.to_le_bytes()).expect("in RAM");
             machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
@@ -1300,13 +1301,16 @@ mod tests {
             machine.reg_read(rusty_box_aarch64::Reg::X0)
         };
         for layout in rusty_box_aarch64::DeviceLayout::ALL {
+            // The board's own layout's 4 transports, QEMU's 32.
+            let last = layout.windows().virtio.count.get() - 1;
             for (order, disk_slot, empty_slot) in [
-                (rusty_box_aarch64::TransportOrder::FirstFree, 0, 31),
-                (rusty_box_aarch64::TransportOrder::LastFree, 31, 0),
+                (rusty_box_aarch64::TransportOrder::FirstFree, 0, last),
+                (rusty_box_aarch64::TransportOrder::LastFree, last, 0),
             ] {
                 let config = ArmVirtConfig {
                     transport_order: order,
                     layout,
+                    interrupts: rusty_box_aarch64::InterruptMap::own(layout),
                     disk: Some(VirtDisk {
                         path: image.0.clone(),
                         access: DiskAccess::ReadWrite,

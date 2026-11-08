@@ -323,7 +323,7 @@ fn a_host_tree_gets_the_boards_memory_and_psci_nodes() {
             layout: None,
             levels,
             wiring: crate::interrupt_map::InterruptMap::DEFAULT
-                .wire(crate::SpiCount::DEFAULT)
+                .wire(crate::SpiCount::DEFAULT, crate::DeviceLayout::DEFAULT)
                 .expect("the default fits"),
             devices: crate::DeviceLayout::DEFAULT,
         };
@@ -384,7 +384,7 @@ fn the_device_tree_names_the_board_by_its_identity() {
         layout: None,
         levels: TreeLevels::of::<NoEl2>(),
         wiring: crate::interrupt_map::InterruptMap::DEFAULT
-            .wire(crate::SpiCount::DEFAULT)
+            .wire(crate::SpiCount::DEFAULT, crate::DeviceLayout::DEFAULT)
             .expect("the default fits"),
         devices: crate::DeviceLayout::DEFAULT,
     };
@@ -456,8 +456,17 @@ fn qemu_wiring() -> crate::interrupt_map::Wiring {
             count: MsiExtent::Count(MsiCount::new(64).expect("a count")),
         },
     }
-    .wire(crate::SpiCount::DEFAULT)
+    .wire(crate::SpiCount::DEFAULT, crate::DeviceLayout::QemuVirt)
     .expect("fits")
+}
+
+/// The board's own interrupt map for QEMU's layout, its 32 transports
+/// from SPI 3.
+fn own_qemu_layout_wiring() -> crate::interrupt_map::Wiring {
+    let layout = crate::DeviceLayout::QemuVirt;
+    crate::interrupt_map::InterruptMap::own(layout)
+        .wire(crate::SpiCount::DEFAULT, layout)
+        .expect("fits")
 }
 
 /// The host-tree check of `tree` on QEMU's layout, where its devices are,
@@ -609,11 +618,9 @@ fn a_host_trees_power_key_names_the_line_the_button_drives() {
 fn a_devices_interrupts_extended_is_the_interrupt_it_names() {
     use super::{BuildError, HostTreeInterrupt};
     use crate::boot::fdt::{DeviceTreeError, Edit, NodePath, Value};
-    use crate::interrupt_map::{InterruptMap, InterruptSource, Spi};
+    use crate::interrupt_map::{InterruptSource, Spi};
     let qemu = qemu_wiring();
-    let own = InterruptMap::DEFAULT
-        .wire(crate::SpiCount::DEFAULT)
-        .expect("fits");
+    let own = own_qemu_layout_wiring();
     let uart = NodePath::of("pl011@9000000");
     let intc = NodePath::of("intc@8000000");
     let spi = |n| Spi::new(n).expect("an SPI");
@@ -714,10 +721,7 @@ fn a_devices_interrupts_follow_its_interrupt_parent() {
 #[test]
 fn a_disabled_device_node_is_left_to_the_tree() {
     use crate::boot::fdt::{Edit, NodePath, Value};
-    use crate::interrupt_map::InterruptMap;
-    let own = InterruptMap::DEFAULT
-        .wire(crate::SpiCount::DEFAULT)
-        .expect("fits");
+    let own = own_qemu_layout_wiring();
     let names: std::vec::Vec<std::string::String> = (0..32u64)
         .map(|n| std::format!("virtio_mmio@{:x}", 0xa00_0000 + n * 0x200))
         .chain(["pl011@9000000", "pl031@9010000", "pl061@9030000"].map(std::string::String::from))

@@ -108,9 +108,11 @@ pub struct RunArgs {
     pub screenshot: Option<String>,
     /// Whether the processor has EL2 (QEMU `virtualization=on`).
     pub virtualization: Virtualization,
-    /// The SPIs the devices drive, the board's own unless `--interrupts`
-    /// names others (a tree given with `--dtb` must name the same).
-    pub interrupts: InterruptMap,
+    /// `--interrupts`' sources and SPIs, if it was given: the SPIs the
+    /// devices drive are the board's own for the layout but these
+    /// ([`RunArgs::interrupts`]; a tree given with `--dtb` must name the
+    /// same).
+    pub interrupt_keys: Option<String>,
     /// Which free virtio transport each device takes, the board's own
     /// unless `--transport-order` names another.
     pub transport_order: TransportOrder,
@@ -293,7 +295,7 @@ impl RunArgs {
             disk: None,
             screenshot: None,
             virtualization: Virtualization::Off,
-            interrupts: InterruptMap::DEFAULT,
+            interrupt_keys: None,
             transport_order: TransportOrder::DEFAULT,
             layout: DeviceLayout::DEFAULT,
         }
@@ -347,7 +349,12 @@ impl RunArgs {
             "--disk" => self.disk = Some(value(flag)?),
             "--screenshot" => self.screenshot = Some(value(flag)?),
             "--virtualization" => self.virtualization = Virtualization::On,
-            "--interrupts" => self.interrupts = interrupt_map(&value(flag)?)?,
+            "--interrupts" => {
+                let keys = value(flag)?;
+                // Read now, so a malformed key stops the command line here.
+                interrupt_map(&keys, InterruptMap::DEFAULT)?;
+                self.interrupt_keys = Some(keys);
+            }
             "--transport-order" => {
                 let name = value(flag)?;
                 self.transport_order = name
@@ -373,14 +380,25 @@ impl RunArgs {
     pub fn ips(&self) -> Result<ClockHz, String> {
         ClockHz::new(self.ips).ok_or_else(|| String::from("--ips must be non-zero"))
     }
+
+    /// The SPIs the devices drive: the board's own for `--layout`'s
+    /// transports ([`InterruptMap::own`]), but for what `--interrupts`
+    /// names.
+    pub fn interrupts(&self) -> Result<InterruptMap, String> {
+        let own = InterruptMap::own(self.layout);
+        match &self.interrupt_keys {
+            Some(keys) => interrupt_map(keys, own),
+            None => Ok(own),
+        }
+    }
 }
 
 /// The interrupt map `--interrupts` names: comma-separated `key=N`, each
 /// key one of the map's sources by its SPI number, the GICv2m frame's
 /// `msi-count` its count (left out, the frame runs to the GIC's last SPI);
-/// a key left out keeps the board's own.
-fn interrupt_map(text: &str) -> Result<InterruptMap, String> {
-    let mut map = InterruptMap::DEFAULT;
+/// a key left out keeps `own`'s.
+fn interrupt_map(text: &str, own: InterruptMap) -> Result<InterruptMap, String> {
+    let mut map = own;
     for pair in text.split(',') {
         let (key, number) = pair
             .split_once('=')

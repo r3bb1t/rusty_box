@@ -50,7 +50,7 @@ const OWN: DeviceLayout = DeviceLayout::Board;
 /// The board's own interrupt map on the GIC-400's 480 SPIs.
 fn default_wiring() -> Wiring {
     InterruptMap::DEFAULT
-        .wire(SpiCount::DEFAULT)
+        .wire(SpiCount::DEFAULT, DeviceLayout::Board)
         .expect("the default fits")
 }
 
@@ -372,7 +372,9 @@ fn the_devices_are_described_where_they_are() {
         prop(&tree, "flash@0", "reg").map(cells),
         Some(vec![0, 0, 0, 0x0400_0000, 0, 0x0400_0000, 0, 0x0400_0000])
     );
-    for (n, node) in [(0, "virtio@8050000"), (31, "virtio@8240000")] {
+    // A transport for each of the four devices the board can plug in, each
+    // decoding its 64 KiB page, and no fifth.
+    for (n, node) in [(0, "virtio@8050000"), (3, "virtio@8080000")] {
         assert_eq!(
             prop(&tree, node, "interrupts").map(cells),
             Some(vec![0, 3 + n, 4]),
@@ -380,11 +382,19 @@ fn the_devices_are_described_where_they_are() {
         );
         assert_eq!(
             prop(&tree, node, "reg").map(cells),
-            Some(vec![0, 0x0805_0000 + n * 0x1_0000, 0, 0x200]),
+            Some(vec![0, 0x0805_0000 + n * 0x1_0000, 0, 0x1_0000]),
             "{node}"
         );
         assert_eq!(prop(&tree, node, "dma-coherent"), Some(&[][..]), "{node}");
     }
+    assert_eq!(prop(&tree, "virtio@8090000", "reg"), None);
+    let transports = (0..)
+        .take_while(|n| {
+            let node = std::format!("virtio@{:x}", 0x0805_0000 + n * 0x1_0000);
+            prop(&tree, &node, "compatible").is_some()
+        })
+        .count();
+    assert_eq!(transports, 4);
     // Coherence is each device's own (Devicetree Specification 2.3), so
     // the root does not say it for them.
     assert_eq!(prop(&tree, "", "dma-coherent"), None);
@@ -395,12 +405,13 @@ fn the_devices_are_described_where_they_are() {
         Some(vec![0x40, 0, 0, 0x1000_0000])
     );
     assert_eq!(prop(&tree, pcie, "bus-range").map(cells), Some(vec![0, 255]));
-    // I/O space from 0 at 0x0825_0000, 64 KiB; 32-bit memory at 512 MiB,
-    // 512 MiB of it; 64-bit memory at 384 GiB, 128 GiB of it.
+    // I/O space from 0 at 0x0809_0000, the page after the transports,
+    // 64 KiB; 32-bit memory at 512 MiB, 512 MiB of it; 64-bit memory at
+    // 384 GiB, 128 GiB of it.
     assert_eq!(
         prop(&tree, pcie, "ranges").map(cells),
         Some(vec![
-            0x0100_0000, 0, 0, 0, 0x0825_0000, 0, 0x1_0000, //
+            0x0100_0000, 0, 0, 0, 0x0809_0000, 0, 0x1_0000, //
             0x0200_0000, 0, 0x2000_0000, 0, 0x2000_0000, 0, 0x2000_0000, //
             0x0300_0000, 0x60, 0, 0x60, 0, 0x20, 0,
         ])
@@ -416,7 +427,7 @@ fn the_devices_are_described_where_they_are() {
     let spi = |device: u32, pin: u32| map[((device * 4 + pin - 1) * 10 + 8) as usize];
     assert_eq!(
         [spi(0, 1), spi(1, 1), spi(3, 4), spi(2, 3)],
-        [35, 36, 37, 35]
+        [7, 8, 9, 7]
     );
 }
 
@@ -443,7 +454,7 @@ fn the_tree_describes_the_interrupt_map_it_is_given() {
         psci: PsciConduit::Hvc,
         gic: GicExtensions::Absent,
         chosen: PLAIN,
-        wiring: map.wire(SpiCount::DEFAULT).expect("fits"),
+        wiring: map.wire(SpiCount::DEFAULT, OWN).expect("fits"),
         layout: OWN,
     };
     let mut out = vec![0u8; 64 * 1024];
@@ -454,7 +465,7 @@ fn the_tree_describes_the_interrupt_map_it_is_given() {
         ("rtc@8030000", 7),
         ("gpio@8040000", 300),
         ("virtio@8050000", 200),
-        ("virtio@8240000", 231),
+        ("virtio@8080000", 203),
     ] {
         assert_eq!(
             prop(tree, node, "interrupts").map(cells),
@@ -483,7 +494,9 @@ fn the_tree_describes_the_layout_it_is_given() {
         psci: PsciConduit::Hvc,
         gic: GicExtensions::Virtualization,
         chosen: PLAIN,
-        wiring: default_wiring(),
+        wiring: InterruptMap::own(DeviceLayout::QemuVirt)
+            .wire(SpiCount::DEFAULT, DeviceLayout::QemuVirt)
+            .expect("QEMU's layout's own map fits"),
         layout: DeviceLayout::QemuVirt,
     };
     let mut out = vec![0u8; 64 * 1024];
@@ -514,6 +527,12 @@ fn the_tree_describes_the_layout_it_is_given() {
     ] {
         assert_eq!(prop(tree, node, "reg").map(cells), Some(reg), "{node}");
     }
+    // QEMU's 32 transports, the last at 0x0A00_3E00, and no 33rd.
+    assert_eq!(prop(tree, "virtio@a004000", "reg"), None);
+    assert_eq!(
+        prop(tree, "virtio@a003e00", "interrupts").map(cells),
+        Some(vec![0, 3 + 31, 4])
+    );
     assert_eq!(
         prop(tree, "pcie@4010000000", "ranges").map(cells),
         Some(vec![

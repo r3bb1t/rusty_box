@@ -244,10 +244,11 @@ fn the_device_offers_edid_and_one_scanout() {
     // blob_alignment, is not there.
     assert_eq!(d.read_width(CONFIG + 16, AccessWidth::Byte), 0xFF);
     assert_eq!(d.read(CONFIG + 16), 0xFFFF_FFFF);
+    // The control and cursor queues are the board's 256 entries each.
     d.write(QUEUE_SEL, 0);
-    assert_eq!(d.read(QUEUE_NUM_MAX), 64);
+    assert_eq!(d.read(QUEUE_NUM_MAX), 256);
     d.write(QUEUE_SEL, 1);
-    assert_eq!(d.read(QUEUE_NUM_MAX), 16);
+    assert_eq!(d.read(QUEUE_NUM_MAX), 256);
 }
 
 #[test]

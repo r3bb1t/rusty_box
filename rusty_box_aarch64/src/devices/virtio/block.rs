@@ -3,8 +3,9 @@
 //! Provenance (R7): the virtio 1.2 specification, section 5.2, as QEMU
 //! implements it in `hw/block/virtio-blk.c` for a raw image given with every
 //! default (`-drive file=…,format=raw,if=none,id=hd0 -device
-//! virtio-blk-device,drive=hd0`: one queue of 256 entries, a write-back
-//! cache, discard requests ignored, no serial number, not zoned):
+//! virtio-blk-device,drive=hd0`: one queue, a write-back cache, discard
+//! requests ignored, no serial number, not zoned), the queue of the board's
+//! own size ([`QUEUE_SIZE`]):
 //!
 //! - `virtio_blk_get_features` and `virtio_blk_device_realize`: the
 //!   features offered (`VIRTIO_BLK_F_RO` too over a drive given
@@ -82,14 +83,16 @@
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
-use super::queue::{Chain, QueueFault};
+use super::queue::{self, Chain, QueueFault};
 use super::{Core, Vdev};
 use crate::disk::{Access, Disk, DiskOffset, SECTOR_SIZE};
 
 /// The device's one queue.
 pub const QUEUE: usize = 0;
-/// QEMU's `queue-size` default.
-pub const QUEUE_SIZE: u16 = 256;
+/// The board's queue size ([`queue::QUEUE_SIZE`]), which makes `seg_max`
+/// 254: a request whose buffers are whole 4 KiB pages, none next to
+/// another, moves up to 1016 KiB.
+pub const QUEUE_SIZE: u16 = queue::QUEUE_SIZE;
 
 const F_SEG_MAX: u64 = 1 << 2;
 /// Offered over a read-only disk.

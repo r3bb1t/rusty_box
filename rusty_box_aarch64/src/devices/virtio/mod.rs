@@ -127,6 +127,11 @@ const _: () = assert!(
     gpu::CONFIG_LEN <= CONFIG_CAPACITY && block::CONFIG_LEN <= CONFIG_CAPACITY,
     "every device's configuration fits the transport's copy of it"
 );
+/// The bytes a transport's registers and its device's configuration take
+/// (virtio 1.2 4.2.2): the registers to the configuration's offset, then
+/// the largest configuration a device here has. Every transport window
+/// holds them ([`crate::layout::TransportStride`]).
+pub const REGISTERS_AND_CONFIG: u64 = CONFIG_OFFSET + CONFIG_CAPACITY as u64;
 
 const VIRTIO_RING_F_INDIRECT_DESC: u64 = 1 << 28;
 const VIRTIO_RING_F_EVENT_IDX: u64 = 1 << 29;
@@ -371,7 +376,8 @@ impl Device {
         }
     }
 
-    /// The size QEMU gives each queue when it adds it (`virtio_add_queue`).
+    /// The size of each queue (`virtio_add_queue`'s), 0 for one the device
+    /// does not have.
     fn queue_sizes(&self) -> [u16; QUEUES] {
         match self {
             Self::Input(_) => [input::QUEUE_SIZE, input::QUEUE_SIZE],

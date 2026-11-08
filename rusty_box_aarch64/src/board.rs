@@ -43,7 +43,7 @@ use crate::devices::virtio_mmio::{self, Layout};
 use crate::disk::Disk;
 use crate::identity::{BoardIdentity, VirtioVendorId};
 use crate::interrupt_map::Wiring;
-use crate::layout::{DeviceLayout, DeviceWindows, GicWindows, TransportRegister};
+use crate::layout::{DeviceLayout, DeviceWindows, GicWindows, TransportCount, TransportRegister};
 use crate::storage::GuestStorage;
 
 pub const FLASH0_BASE: u64 = 0x0000_0000;
@@ -74,8 +74,11 @@ pub const RTC_BASE: u64 = OWN.rtc.get();
 pub const GPIO_BASE: u64 = OWN.gpio.get();
 pub const PRIMECELL_SIZE: u64 = DeviceWindows::PRIMECELL_SIZE;
 pub const VIRTIO_MMIO_BASE: u64 = OWN.virtio.first.get();
-/// The distance from one virtio-mmio transport to the next.
+/// The distance from one virtio-mmio transport to the next, which is the
+/// window each decodes.
 pub const VIRTIO_MMIO_STRIDE: u64 = OWN.virtio.stride.bytes();
+/// How many virtio-mmio transports there are.
+pub const VIRTIO_MMIO_COUNT: u8 = OWN.virtio.count.get();
 pub const PCIE_MMIO_BASE: u64 = OWN.pcie.mmio32.base.get();
 pub const PCIE_MMIO_SIZE: u64 = OWN.pcie.mmio32.size;
 pub const PCIE_PIO_BASE: u64 = OWN.pcie.pio.base.get();
@@ -169,11 +172,11 @@ impl TransportOrder {
         }
     }
 
-    /// The transport the `n`th device plugged in takes.
-    const fn slot(self, n: u8) -> u8 {
+    /// The transport the `n`th device plugged in takes, of `count`.
+    const fn slot(self, n: u8, count: TransportCount) -> u8 {
         match self {
             Self::FirstFree => n,
-            Self::LastFree => (virtio_mmio::TRANSPORT_COUNT - 1) as u8 - n,
+            Self::LastFree => count.get() - 1 - n,
         }
     }
 }
@@ -350,9 +353,10 @@ impl<S: GuestStorage> VirtBoard<S> {
         let mut virtio: [Option<Transport>; MAX_DEVICES] = [None, None, None, None];
         // The `n`th device plugged in fills the `n`th entry and sits behind
         // the transport the order gives the `n`th.
+        let count = layout.windows().virtio.count;
         let plug = |device: Device, virtio: &mut [Option<Transport>; MAX_DEVICES]| {
             if let Some(n) = virtio.iter().position(Option::is_none) {
-                virtio[n] = Some(Transport::new(order.slot(n as u8), device));
+                virtio[n] = Some(Transport::new(order.slot(n as u8, count), device));
             }
         };
         #[cfg(feature = "alloc")]
@@ -409,9 +413,9 @@ impl<S: GuestStorage> VirtBoard<S> {
 
     /// A bit per transport a device is plugged into, transport `n` bit `n`,
     /// for a snapshot's record of how a machine was built; 32 bits hold
-    /// every transport.
+    /// every transport a layout can have.
     pub(crate) fn occupied_transports(&self) -> u32 {
-        const _: () = assert!(virtio_mmio::TRANSPORT_COUNT <= u32::BITS as u64);
+        const _: () = assert!(TransportCount::MAX.get() as u32 <= u32::BITS);
         self.virtio
             .iter()
             .flatten()
@@ -419,11 +423,8 @@ impl<S: GuestStorage> VirtBoard<S> {
     }
 
     /// The transport at `slot`, if a device is plugged into it.
-    fn transport_mut(&mut self, slot: u64) -> Option<&mut Transport> {
-        self.virtio
-            .iter_mut()
-            .flatten()
-            .find(|t| u64::from(t.slot()) == slot)
+    fn transport_mut(&mut self, slot: u8) -> Option<&mut Transport> {
+        self.virtio.iter_mut().flatten().find(|t| t.slot() == slot)
     }
 
     /// The virtio input device of `kind`, if one is plugged in.
@@ -955,12 +956,7 @@ impl<S: GuestStorage> VirtBoard<S> {
             return Ok(());
         }
         if let Some(TransportRegister { slot, reg }) = w.virtio.slot_of(addr) {
-            if let Some(transport) = self
-                .virtio
-                .iter_mut()
-                .flatten()
-                .find(|t| u64::from(t.slot()) == slot)
-            {
+            if let Some(transport) = self.virtio.iter_mut().flatten().find(|t| t.slot() == slot) {
                 let mut ram = GuestRam::new(self.storage.ram_mut());
                 transport.write(&mut ram, reg, width, value);
                 self.dma.merge(&ram.written());

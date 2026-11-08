@@ -50,6 +50,7 @@ fn bare(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>, NoEl2> {
 fn bare_in(layout: DeviceLayout, ram: &mut [u8]) -> VirtMachine<LentStorage<'_>, NoEl2> {
     MachineBuilder::new(VirtConfig {
         layout,
+        interrupts: rusty_box_aarch64::InterruptMap::own(layout),
         ..VirtConfig::DEFAULT
     })
     .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))

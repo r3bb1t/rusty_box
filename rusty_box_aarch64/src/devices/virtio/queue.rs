@@ -224,6 +224,28 @@ impl<'a> GuestRam<'a> {
 /// most buffers one chain may map to.
 pub const VIRTQUEUE_MAX_SIZE: u16 = 1024;
 
+/// The size of every queue of the board's devices, which `QueueNumMax`
+/// reads: 256 entries, whose descriptor table, 16 bytes an entry (virtio
+/// 1.2 2.7), is one 4 KiB page, the translation granule every processor
+/// here has (`ID_AA64MMFR0_EL1.TGran4`) and UEFI's page, the unit drivers
+/// allocate a queue in; its available and used rings, 518 and 2054 bytes,
+/// fit a second page together. A split queue's size is a power of two of
+/// at most 32768 (2.7), which a page of descriptors is. The devices take
+/// and complete every chain when the driver notifies them, so a queue
+/// holds no request across the driver's next instruction and its depth
+/// costs a device nothing: it bounds only what a driver makes available
+/// between notifications and, for virtio-blk, a request's buffers
+/// (`seg_max`).
+pub const QUEUE_SIZE: u16 = 256;
+const _: () = assert!(
+    QUEUE_SIZE.is_power_of_two()
+        && QUEUE_SIZE <= VIRTQUEUE_MAX_SIZE
+        && DESC_SIZE * QUEUE_SIZE as u64 == 4096
+        && (4 + 2 * QUEUE_SIZE as u64 + 2).next_multiple_of(4) + 4 + 8 * QUEUE_SIZE as u64 + 2
+            <= 4096,
+    "a page of descriptors, and the rings in a second page"
+);
+
 const DESC_SIZE: u64 = 16;
 const VRING_DESC_F_NEXT: u16 = 1;
 const VRING_DESC_F_WRITE: u16 = 2;
@@ -564,9 +586,7 @@ impl Chain {
 #[derive(Debug, Clone, Copy)]
 pub struct Queue {
     /// `vring.num_default`: the size the device gave the queue, which
-    /// `QueueNumMax` reports and a driver may not exceed. This is QEMU
-    /// 11.1.2's `virt-11.1` machine; `hw_compat_11_0` overrides every
-    /// virtio-mmio queue to 1024 on `virt-11.0` and older.
+    /// `QueueNumMax` reports and a driver may not exceed.
     num_default: u16,
     /// `vring.num`.
     num: u16,

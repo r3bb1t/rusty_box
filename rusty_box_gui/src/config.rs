@@ -242,11 +242,12 @@ impl NumberedChoice for rusty_box_aarch64::MsiCount {
 
 /// The `[virt.interrupts]` table: which of the GIC's SPIs, numbered from 0
 /// (INTID 32), each of the board's interrupt sources drives. `uart`, `rtc`
-/// and `gpio` take one each, `virtio` is the first of the 32 virtio
-/// transports' and `pcie_intx` the first of the PCIe host's INTA to INTD;
-/// the GICv2m frame has `msi_count` SPIs from `msi_first`, or every SPI
-/// from it to the GIC's last without `msi_count`. A key left out keeps the
-/// board's own choice ([`rusty_box_aarch64::InterruptMap::DEFAULT`]).
+/// and `gpio` take one each, `virtio` is the first of the layout's virtio
+/// transports' (4 on the board's own layout, 32 on QEMU's) and `pcie_intx`
+/// the first of the PCIe host's INTA to INTD; the GICv2m frame has
+/// `msi_count` SPIs from `msi_first`, or every SPI from it to the GIC's
+/// last without `msi_count`. A key left out keeps the board's own choice
+/// for the layout ([`rusty_box_aarch64::InterruptMap::own`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VirtInterruptsToml {
@@ -260,9 +261,10 @@ pub struct VirtInterruptsToml {
 }
 
 impl VirtInterruptsToml {
-    /// The map these keys give, each one left out the board's own.
-    fn map(&self) -> rusty_box_aarch64::InterruptMap {
-        let own = rusty_box_aarch64::InterruptMap::DEFAULT;
+    /// The map these keys give, each one left out the board's own for
+    /// `layout`.
+    fn map(&self, layout: rusty_box_aarch64::DeviceLayout) -> rusty_box_aarch64::InterruptMap {
+        let own = rusty_box_aarch64::InterruptMap::own(layout);
         let spi = |key: Option<NumberToml<rusty_box_aarch64::Spi>>, own| key.map_or(own, |spi| spi.0);
         rusty_box_aarch64::InterruptMap {
             uart: spi(self.uart, own.uart),
@@ -296,14 +298,16 @@ impl VirtInterruptsToml {
     }
 }
 
-/// The interrupt map `map` on a GIC of `spis`, refused when it does not fit
+/// The interrupt map `map` on a GIC of `spis` with `layout`'s virtio
+/// transports, refused when it does not fit
 /// ([`rusty_box_aarch64::InterruptMap::check`]): the one check the file and
 /// the Processor page make.
 pub(crate) fn virt_interrupt_map(
     map: rusty_box_aarch64::InterruptMap,
     spis: rusty_box_aarch64::SpiCount,
+    layout: rusty_box_aarch64::DeviceLayout,
 ) -> Result<rusty_box_aarch64::InterruptMap, RunError> {
-    map.check(spis).map_err(RunError::InterruptMap)?;
+    map.check(spis, layout).map_err(RunError::InterruptMap)?;
     Ok(map)
 }
 
@@ -1222,7 +1226,11 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
             .gic_priority_bits
             .map_or(rusty_box_aarch64::PriorityBits::DEFAULT, |bits| bits.0),
     };
-    let interrupts = virt_interrupt_map(virt.interrupts.unwrap_or_default().map(), gic.spis)?;
+    let interrupts = virt_interrupt_map(
+        virt.interrupts.unwrap_or_default().map(layout),
+        gic.spis,
+        layout,
+    )?;
     Ok(ArmVirtConfig {
         memory_mib,
         ips,
@@ -3478,7 +3486,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         for (keys, named) in [
             ("counter_hz = 1000", "10000000"),
             ("gic_spis = 100", "multiple of 32"),
-            ("gic_spis = 32", "multiple of 32"),
+            ("gic_spis = 0", "multiple of 32"),
             ("gic_priority_bits = 3", "4 to 8"),
         ] {
             let refused = toml::from_str::<FileConfig>(&board(keys))

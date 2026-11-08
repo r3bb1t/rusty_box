@@ -12,7 +12,7 @@
 
 use rusty_box_aarch64::board::{
     GIC_CPU_BASE, GIC_DIST_BASE, GIC_V2M_BASE, GIC_VCPU_BASE, RAM_BASE, VIRTIO_MMIO_BASE,
-    VIRTIO_MMIO_STRIDE,
+    VIRTIO_MMIO_COUNT, VIRTIO_MMIO_STRIDE,
 };
 use rusty_box_aarch64::boot::fdt;
 use rusty_box_aarch64::{
@@ -36,7 +36,7 @@ const VENDOR_ID: u64 = 0x00C;
 /// The first transport, which the first device plugged in takes.
 const FIRST_TRANSPORT: u64 = VIRTIO_MMIO_BASE;
 /// The last transport, which none of the test's devices takes.
-const LAST_TRANSPORT: u64 = VIRTIO_MMIO_BASE + 31 * VIRTIO_MMIO_STRIDE;
+const LAST_TRANSPORT: u64 = VIRTIO_MMIO_BASE + (VIRTIO_MMIO_COUNT as u64 - 1) * VIRTIO_MMIO_STRIDE;
 
 fn acme() -> BoardIdentity {
     BoardIdentity::new(IdentityNames {

@@ -10,7 +10,8 @@
 //! first page after the flash; the GIC's frames as the GIC-400 lays them
 //! out in one block (DDI 0471B Table 3-1), the GIC-400 being one
 //! peripheral, behind its one AXI4 slave interface (DDI 0471B 1.3), whose
-//! 32 KiB block takes one page; the PCIe host's configuration
+//! 32 KiB block takes one page; a virtio-mmio transport for each device the
+//! board can plug in, each decoding its page; the PCIe host's configuration
 //! space and 64-bit window in the 40-bit map's mapped I/O, from 256 GiB
 //! (DEN0001C 4.3.2), and its 32-bit window, which the 32-bit map would put in
 //! 1 GiB to 2 GiB where this board has RAM, in the top half of the I/O
@@ -23,7 +24,7 @@
 use core::fmt;
 
 use crate::bus::{PhysAddr, RegOffset};
-use crate::devices::virtio_mmio::{TRANSPORT_COUNT, TRANSPORT_SIZE};
+use crate::devices::virtio::{MAX_DEVICES, REGISTERS_AND_CONFIG};
 
 /// A device's register window: `size` bytes from `base`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -121,9 +122,11 @@ impl GicWindows {
     }
 }
 
-/// How far apart the virtio-mmio transports are: a power of two no smaller
-/// than a transport's [`TRANSPORT_SIZE`] registers, so that an address's
-/// transport and register are its offset's high and low bits.
+/// How far apart the virtio-mmio transports are, which is the window each
+/// decodes: a power of two that holds a transport's registers and the
+/// largest device configuration after them ([`REGISTERS_AND_CONFIG`]), so
+/// that an address's transport and offset are its offset's high and low
+/// bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TransportStride {
     shift: u8,
@@ -131,9 +134,9 @@ pub struct TransportStride {
 
 impl TransportStride {
     /// The stride of `bytes`, if it is a power of two of at least
-    /// [`TRANSPORT_SIZE`].
+    /// [`REGISTERS_AND_CONFIG`].
     pub const fn new(bytes: u64) -> Option<Self> {
-        if bytes.is_power_of_two() && bytes >= TRANSPORT_SIZE {
+        if bytes.is_power_of_two() && bytes >= REGISTERS_AND_CONFIG {
             Some(Self {
                 shift: bytes.trailing_zeros() as u8,
             })
@@ -151,25 +154,61 @@ impl TransportStride {
 const fn stride(bytes: u64) -> TransportStride {
     match TransportStride::new(bytes) {
         Some(stride) => stride,
-        None => panic!("a transport stride is a power of two of a transport at least"),
+        None => panic!("a transport stride is a power of two that holds a transport"),
     }
 }
 
-/// The virtio-mmio transports: transport `n`'s registers at `first + n ×
-/// stride`, each [`TRANSPORT_SIZE`] bytes, the rest of its stride
-/// unassigned.
+/// How many virtio-mmio transports a layout has: at least one for each
+/// device the board can plug in ([`MAX_DEVICES`]), so every device finds
+/// one, and at most [`TransportCount::MAX`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TransportCount(u8);
+
+impl TransportCount {
+    /// One for each device the board can plug in.
+    pub const MIN: Self = Self(MAX_DEVICES as u8);
+    /// 32: a snapshot records the transports devices occupy as a bit each
+    /// of a 32-bit word.
+    pub const MAX: Self = Self(32);
+
+    /// `count` transports, if it is from [`TransportCount::MIN`] to
+    /// [`TransportCount::MAX`].
+    pub const fn new(count: u8) -> Option<Self> {
+        if count >= Self::MIN.0 && count <= Self::MAX.0 {
+            Some(Self(count))
+        } else {
+            None
+        }
+    }
+
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// A count known to be one at compile time.
+const fn transports(count: u8) -> TransportCount {
+    match TransportCount::new(count) {
+        Some(count) => count,
+        None => panic!("a layout has a transport for each device and at most 32"),
+    }
+}
+
+/// The virtio-mmio transports: `count` of them, transport `n` decoding the
+/// `stride` bytes from `first + n × stride`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VirtioWindows {
     pub first: PhysAddr,
     pub stride: TransportStride,
+    pub count: TransportCount,
 }
 
 impl VirtioWindows {
-    /// Transport `slot`'s registers.
-    pub const fn transport(self, slot: u64) -> Window {
+    /// Transport `slot`'s window.
+    pub const fn transport(self, slot: u8) -> Window {
         Window {
-            base: PhysAddr::new(self.first.get() + (slot << self.stride.shift)),
-            size: TRANSPORT_SIZE,
+            base: PhysAddr::new(self.first.get() + ((slot as u64) << self.stride.shift)),
+            size: self.stride.bytes(),
         }
     }
 
@@ -177,27 +216,20 @@ impl VirtioWindows {
     pub const fn span(self) -> Window {
         Window {
             base: self.first,
-            size: TRANSPORT_COUNT << self.stride.shift,
+            size: (self.count.get() as u64) << self.stride.shift,
         }
     }
 
     /// The transport `addr` is in and its offset in the transport's
-    /// registers, if it is in one; an address in the rest of a stride is in
-    /// none.
+    /// window, if it is in one.
     #[inline]
     pub const fn slot_of(self, addr: PhysAddr) -> Option<TransportRegister> {
         match self.span().offset_of(addr) {
-            Some(off) => {
-                let reg = off.get() & (self.stride.bytes() - 1);
-                if reg < TRANSPORT_SIZE {
-                    Some(TransportRegister {
-                        slot: off.get() >> self.stride.shift,
-                        reg: RegOffset::new(reg),
-                    })
-                } else {
-                    None
-                }
-            }
+            Some(off) => Some(TransportRegister {
+                // Below the count, which a `u8` holds.
+                slot: (off.get() >> self.stride.shift) as u8,
+                reg: RegOffset::new(off.get() & (self.stride.bytes() - 1)),
+            }),
             None => None,
         }
     }
@@ -206,7 +238,7 @@ impl VirtioWindows {
 /// A register of a virtio-mmio transport, by the transport and the offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TransportRegister {
-    pub slot: u64,
+    pub slot: u8,
     pub reg: RegOffset,
 }
 
@@ -284,6 +316,19 @@ const DEVICES: u64 = 0x0800_0000;
 /// CPU interfaces at 0x2000, the virtual interface control at 0x4000 and
 /// 0x5000, the virtual CPU interfaces at 0x6000).
 const GIC_BLOCK: u64 = DEVICES;
+/// Its virtio-mmio transports: one for each device the board can plug in
+/// (the display, the keyboard, the tablet, the disk), so none is there
+/// that no device could fill, each decoding the whole 64 KiB page it has
+/// (DEN0001C P29): its registers to 0x100 and its device's configuration
+/// after them (virtio 1.2 4.2.2), what lies past the configuration reading
+/// as past a configuration does.
+const BOARD_TRANSPORTS: TransportCount = transports(MAX_DEVICES as u8);
+const BOARD_TRANSPORT_PAGES: u64 = BOARD_TRANSPORTS.get() as u64;
+/// QEMU `virt`'s transports: `NUM_VIRTIO_TRANSPORTS` of them, 512 bytes
+/// apart (`base_memmap`'s `VIRT_MMIO` size), each decoding its 512 bytes
+/// (`virtio_mmio_realizefn`).
+const QEMU_TRANSPORTS: TransportCount = transports(32);
+const QEMU_TRANSPORT_SIZE: u64 = 0x200;
 
 /// The board's own layout.
 const BOARD: DeviceWindows = DeviceWindows {
@@ -300,10 +345,14 @@ const BOARD: DeviceWindows = DeviceWindows {
     virtio: VirtioWindows {
         first: PhysAddr::new(DEVICES + 5 * PAGE),
         stride: stride(PAGE),
+        count: BOARD_TRANSPORTS,
     },
     pcie: PcieWindows {
         ecam: Window::new(PhysAddr::new(0x40_0000_0000), 0x1000_0000),
-        pio: Window::new(PhysAddr::new(DEVICES + (5 + TRANSPORT_COUNT) * PAGE), PAGE),
+        pio: Window::new(
+            PhysAddr::new(DEVICES + (5 + BOARD_TRANSPORT_PAGES) * PAGE),
+            PAGE,
+        ),
         mmio32: Window::new(PhysAddr::new(0x2000_0000), 0x2000_0000),
         mmio64: Window::new(PhysAddr::new(0x60_0000_0000), 0x20_0000_0000),
     },
@@ -323,7 +372,8 @@ const QEMU_VIRT: DeviceWindows = DeviceWindows {
     gpio: PhysAddr::new(0x0903_0000),
     virtio: VirtioWindows {
         first: PhysAddr::new(0x0A00_0000),
-        stride: stride(TRANSPORT_SIZE),
+        stride: stride(QEMU_TRANSPORT_SIZE),
+        count: QEMU_TRANSPORTS,
     },
     pcie: PcieWindows {
         ecam: Window::new(PhysAddr::new(0x40_1000_0000), 0x1000_0000),
@@ -408,6 +458,20 @@ impl DeviceLayout {
             i += 1;
         }
         PhysAddr::new(lowest)
+    }
+
+    /// The fewest virtio transports any layout has.
+    pub const fn fewest_transports() -> TransportCount {
+        let mut fewest = TransportCount::MAX;
+        let mut i = 0;
+        while i < Self::ALL.len() {
+            let count = Self::ALL[i].windows().virtio.count;
+            if count.get() < fewest.get() {
+                fewest = count;
+            }
+            i += 1;
+        }
+        fewest
     }
 }
 
@@ -526,6 +590,7 @@ mod tests {
             assert_eq!(page.get() % PAGE, 0, "{page:?}");
         }
         assert_eq!(w.virtio.stride.bytes(), PAGE);
+        assert_eq!(w.virtio.transport(0).size, PAGE, "a transport decodes its page");
         assert_eq!(w.virtio.first.get() % PAGE, 0);
         for window in [w.pcie.ecam, w.pcie.mmio32, w.pcie.mmio64] {
             assert_eq!(window.base.get() % window.size, 0, "{window:?}");
@@ -536,13 +601,30 @@ mod tests {
         assert!(w.pcie.mmio32.end() <= PhysAddr::new(0x4000_0000), "below RAM");
     }
 
-    /// An address of a transport's registers names the transport and the
-    /// register; one in the rest of its stride names none.
+    /// The board's own layout has a transport for each device it can plug
+    /// in, each decoding its 64 KiB page; QEMU's has its 32, each decoding
+    /// its 512 bytes, 512 bytes apart.
     #[test]
-    fn a_transports_registers_are_its_first_bytes() {
+    fn each_layout_has_its_own_transports() {
+        let board = DeviceLayout::Board.windows().virtio;
+        assert_eq!(board.count.get(), 4);
+        assert_eq!(board.count, TransportCount::MIN);
+        assert_eq!(board.transport(3), Window::new(PhysAddr::new(0x0808_0000), PAGE));
+        let qemu = DeviceLayout::QemuVirt.windows().virtio;
+        assert_eq!(qemu.count.get(), 32);
+        assert_eq!(qemu.transport(31), Window::new(PhysAddr::new(0x0A00_3E00), 0x200));
+        assert_eq!(DeviceLayout::fewest_transports(), board.count);
+    }
+
+    /// An address in a transport's window names the transport and the
+    /// offset, to the window's last byte; one past the last transport names
+    /// none.
+    #[test]
+    fn a_transport_decodes_its_whole_stride() {
         for layout in DeviceLayout::ALL {
             let v = layout.windows().virtio;
             let stride = v.stride.bytes();
+            let last = v.count.get() - 1;
             let at = |offset| PhysAddr::new(v.first.get() + offset);
             assert_eq!(
                 v.slot_of(at(3 * stride + 0x70)),
@@ -553,23 +635,39 @@ mod tests {
                 "{layout}"
             );
             assert_eq!(
-                v.transport(31),
-                Window::new(PhysAddr::new(v.first.get() + 31 * stride), TRANSPORT_SIZE),
+                v.transport(last),
+                Window::new(PhysAddr::new(v.first.get() + u64::from(last) * stride), stride),
                 "{layout}"
             );
-            assert_eq!(v.slot_of(at(stride * TRANSPORT_COUNT)), None, "{layout}");
+            assert_eq!(v.span().end(), v.transport(last).end(), "{layout}");
+            assert_eq!(v.slot_of(at(stride * u64::from(v.count.get()))), None, "{layout}");
             assert_eq!(
-                v.slot_of(at(31 * stride + TRANSPORT_SIZE - 4)),
+                v.slot_of(at(u64::from(last) * stride + stride - 4)),
                 Some(TransportRegister {
-                    slot: 31,
-                    reg: RegOffset::new(TRANSPORT_SIZE - 4)
+                    slot: last,
+                    reg: RegOffset::new(stride - 4)
                 }),
-                "{layout}: the last transport's last register"
+                "{layout}: the last transport's last word"
             );
-            if stride > TRANSPORT_SIZE {
-                assert_eq!(v.slot_of(at(TRANSPORT_SIZE)), None, "{layout}");
-            }
+            assert_eq!(
+                v.slot_of(at(REGISTERS_AND_CONFIG)),
+                Some(TransportRegister {
+                    slot: 0,
+                    reg: RegOffset::new(REGISTERS_AND_CONFIG)
+                }),
+                "{layout}: past the largest configuration"
+            );
         }
+    }
+
+    /// A count of transports has one for each device the board can plug in
+    /// and at most 32.
+    #[test]
+    fn a_transport_count_holds_every_device_and_at_most_32() {
+        assert_eq!(TransportCount::new(MAX_DEVICES as u8), Some(TransportCount::MIN));
+        assert_eq!(TransportCount::new(32), Some(TransportCount::MAX));
+        assert_eq!(TransportCount::new(MAX_DEVICES as u8 - 1), None);
+        assert_eq!(TransportCount::new(33), None);
     }
 
     /// A window holds its first byte to its last and nothing either side,
@@ -589,13 +687,15 @@ mod tests {
         }
     }
 
-    /// A stride is a power of two no smaller than a transport.
+    /// A stride is a power of two that holds a transport's registers and
+    /// the largest configuration: 0x188 bytes, so 512 at the least.
     #[test]
-    fn a_transport_stride_is_a_power_of_two_of_a_transport_at_least() {
-        for bytes in [TRANSPORT_SIZE, 0x400, PAGE] {
+    fn a_transport_stride_is_a_power_of_two_that_holds_a_transport() {
+        assert_eq!(REGISTERS_AND_CONFIG, 0x188);
+        for bytes in [0x200, 0x400, PAGE] {
             assert_eq!(TransportStride::new(bytes).map(TransportStride::bytes), Some(bytes));
         }
-        for bytes in [0, TRANSPORT_SIZE / 2, 0x300, PAGE + TRANSPORT_SIZE] {
+        for bytes in [0, 0x100, 0x188, 0x300, PAGE + 0x200] {
             assert_eq!(TransportStride::new(bytes), None, "{bytes:#x}");
         }
     }

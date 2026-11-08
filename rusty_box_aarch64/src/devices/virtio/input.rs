@@ -80,7 +80,7 @@ use rusty_box_core::input::pointer::{PointerButton, PointerPos, WheelSteps};
 use rusty_box_core::input::{Key, KeyAction};
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
-use super::queue::Chain;
+use super::queue::{self, Chain};
 use super::{Core, Vdev};
 use crate::identity::{BoardIdentity, InputDeviceId, InputVendorId, Text, INPUT_NAME_CAPACITY};
 
@@ -119,11 +119,15 @@ const CFG_ID_DEVIDS: u8 = 0x03;
 const CFG_EV_BITS: u8 = 0x11;
 const CFG_ABS_INFO: u8 = 0x12;
 
-/// The event queue and the status queue (virtio 1.2 5.8.2), each of
-/// QEMU's 64 entries.
+/// The event queue and the status queue (virtio 1.2 5.8.2), each of the
+/// board's queue size ([`queue::QUEUE_SIZE`]): events wait in the event
+/// queue's buffers until the guest takes them, so its size is how many the
+/// guest can fall behind by before the host has to hold its offers. A
+/// guest may keep fewer buffers there than the queue holds (Linux's driver
+/// keeps 64, `struct virtio_input`'s `evts`).
 pub const EVENT_QUEUE: usize = 0;
 pub const STATUS_QUEUE: usize = 1;
-pub const QUEUE_SIZE: u16 = 64;
+pub const QUEUE_SIZE: u16 = queue::QUEUE_SIZE;
 
 /// The configuration's header: `select`, `subsel`, `size` and padding.
 const CONFIG_HEADER_LEN: usize = 8;

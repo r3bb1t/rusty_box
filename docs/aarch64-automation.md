@@ -168,24 +168,30 @@ they allow, its default the board's:
   BSA's 10 MHz (`CounterRate::MIN_HZ`) to what `CNTFRQ_EL0` holds
   (`CounterRate::MAX_HZ`); the Armv9.2 model counts at 1 GHz alone, and a
   build that asks it for another fails with `BuildError::FixedCounterRate`.
-- `gic`, a `GicShape`: its `SpiCount`, a multiple of 32 from 64
+- `gic`, a `GicShape`: its `SpiCount`, a multiple of 32 from 32
   (`SpiCount::MIN`, the fewest any interrupt map fits; the board's own
-  needs 96) to the
+  needs 64) to the
   GIC-400's 480 (the default), and its `PriorityBits`, `Four` to `Eight`
   (`Five`, the GIC-400's, by default), from which the binary points and
   active priority registers follow.
 - `interrupts`, an `InterruptMap`: the `Spi` each device drives (the UART,
-  the RTC, the GPIO; the first of the 32 virtio transports' and of the PCIe
-  host's INTA to INTD), and the GICv2m frame's `MsiSpis`, its first SPI and
-  how far they run (`MsiExtent::ToTheLast` or a `MsiCount` of 1 to 1023),
-  which `MSI_TYPER` reports. By default the devices take SPIs from 0 in the
-  order of their registers' addresses (the UART 0, the RTC 1, the GPIO 2,
-  the transports 3 to 34, the PCIe host 35 to 38) and the frame every SPI
-  from SPI 64, INTID 96, the first after them whose interrupt ID is a
-  multiple of the 32 vectors a PCI function may send. A map whose SPIs run
-  past the GIC's, whose frame has none, or that gives one SPI to two
-  sources fails the build with `BuildError::InterruptMap`, and
-  `InterruptMap::check` tells a host so beforehand. A tree given with
+  the RTC, the GPIO; the first of the layout's virtio transports' and of
+  the PCIe host's INTA to INTD), and the GICv2m frame's `MsiSpis`, its
+  first SPI and how far they run (`MsiExtent::ToTheLast` or a `MsiCount`
+  of 1 to 1023), which `MSI_TYPER` reports. The board's own for a layout,
+  `InterruptMap::own(layout)`, gives the devices SPIs from 0 in the order
+  of their registers' addresses and the frame every SPI from the first
+  after them whose interrupt ID is a multiple of the 32 vectors a PCI
+  function may send: by default (`InterruptMap::DEFAULT`, the board's own
+  layout) the UART 0, the RTC 1, the GPIO 2, the 4 transports 3 to 6, the
+  PCIe host 7 to 10 and the frame from SPI 32, INTID 64; on QEMU's layout
+  the 32 transports 3 to 34, the PCIe host 35 to 38 and the frame from SPI
+  64, INTID 96. A map whose SPIs run past the GIC's, whose frame has none,
+  or that gives one SPI to two sources, the layout's transports taking a
+  run of SPIs, fails the build with `BuildError::InterruptMap`, and
+  `InterruptMap::check` tells a host so beforehand; a host that chooses
+  QEMU's layout gives it a map for it, `InterruptMap::own` or QEMU's own
+  wiring. A tree given with
   `device_tree(..)` names the devices' interrupts itself; one that names
   another SPI for the UART, the RTC, the GPIO or a virtio transport than
   the map wires fails the build with `BuildError::HostTreeInterrupt`. The
@@ -200,10 +206,12 @@ they allow, its default the board's:
   CPU interface at 0x0800_2000, with EL2 the virtual interface's at
   0x0800_4000 and 0x0800_6000), the GICv2m frame at 0x0801_0000, then a
   64 KiB page each for the UART (0x0802_0000), the RTC, the GPIO and the
-  32 virtio transports (from 0x0805_0000), and the PCIe host's I/O window;
-  its 32-bit window at 0x2000_0000 and its ECAM and 64-bit window above
-  256 GiB; the power button on the GPIO's line 0. `QemuVirt` is QEMU
-  `virt`'s, which a tree QEMU wrote names, its power button on line 3. A
+  4 virtio transports, one for each device the board can plug in (from
+  0x0805_0000, each decoding its whole page), and the PCIe host's I/O
+  window (0x0809_0000); its 32-bit window at 0x2000_0000 and its ECAM and
+  64-bit window above 256 GiB; the power button on the GPIO's line 0.
+  `QemuVirt` is QEMU `virt`'s, with its 32 transports 512 bytes apart,
+  which a tree QEMU wrote names, its power button on line 3. A
   tree given with `device_tree(..)` that puts the GIC, a PrimeCell, a
   virtio transport or the PCIe host anywhere but where the layout has it
   fails the build with `BuildError::HostTreeAddress`, and one whose

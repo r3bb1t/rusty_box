@@ -49,9 +49,10 @@ fn the_registers_identify_a_non_legacy_transport_of_the_boards_vendor() {
     for off in [SHM_LEN_LOW, SHM_LEN_HIGH, SHM_BASE_LOW, SHM_BASE_HIGH] {
         assert_eq!(d.read(off), u32::MAX, "{off:#x}");
     }
+    // Each queue is the board's 256 entries, a 4 KiB page of descriptors.
     for q in 0..2 {
         d.write(QUEUE_SEL, q);
-        assert_eq!(d.read(QUEUE_NUM_MAX), 64, "queue {q}");
+        assert_eq!(d.read(QUEUE_NUM_MAX), 256, "queue {q}");
     }
     for q in [2, 1024, 0xFFFF_FFFF] {
         d.write(QUEUE_SEL, q);
@@ -492,7 +493,7 @@ fn a_queue_larger_than_the_devices_breaks_it() {
     let mut d = keyboard();
     d.negotiate(F_VERSION_1);
     d.write(QUEUE_SEL, 0);
-    d.write(QUEUE_NUM, 65);
+    d.write(QUEUE_NUM, 257);
     assert_eq!(d.read(STATUS) & NEEDS_RESET, NEEDS_RESET);
     assert!(!d.irq(), "no configuration interrupt before DRIVER_OK");
 
@@ -501,12 +502,12 @@ fn a_queue_larger_than_the_devices_breaks_it() {
     let mut d = keyboard();
     d.negotiate(0);
     d.write(QUEUE_SEL, 0);
-    d.write(QUEUE_NUM, 65);
+    d.write(QUEUE_NUM, 257);
     assert_eq!(d.read(STATUS) & NEEDS_RESET, NEEDS_RESET);
     let mut d = keyboard();
     d.write(STATUS, ACKNOWLEDGE | DRIVER);
     d.write(QUEUE_SEL, 0);
-    d.write(QUEUE_NUM, 65);
+    d.write(QUEUE_NUM, 257);
     assert_eq!(
         d.read(STATUS) & NEEDS_RESET,
         NEEDS_RESET,
@@ -600,7 +601,7 @@ fn a_looped_chain_breaks_the_device() {
 fn a_next_past_the_table_breaks_the_device() {
     breaks_the_device(|d| {
         let at = d.alloc(8);
-        d.put_desc(1, 0, at, 8, DESC_NEXT, 64);
+        d.put_desc(1, 0, at, 8, DESC_NEXT, 256);
         d.publish(1, 0);
         d.notify(1);
     });
@@ -609,7 +610,7 @@ fn a_next_past_the_table_breaks_the_device() {
 #[test]
 fn a_head_past_the_table_breaks_the_device() {
     breaks_the_device(|d| {
-        d.publish(1, 64);
+        d.publish(1, 256);
         d.notify(1);
     });
 }
