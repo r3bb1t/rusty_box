@@ -788,7 +788,10 @@ integration tests of the public API.
   set up by the guest's own `MSR` and `ERET`: Software Step's states, its
   syndrome, what an SVC, another exception or an interrupt saves in
   `SPSR_EL1.SS`, and stepping code a machine runs from traces, across a
-  snapshot; breakpoints by address and by `CONTEXTIDR_EL1`, linked and
+  snapshot; each model's count of breakpoints and watchpoints, as
+  `ID_AA64DFR0_EL1` reports it, every one of them firing, the registers
+  past them UNDEFINED, and the highest numbered the context-aware ones;
+  breakpoints by address and by `CONTEXTIDR_EL1`, linked and
   linking, their enables and reserved values, inside a trace; and watchpoints
   by byte, word and masked range, at the level of the access (LDTR), on
   pairs, across pages and through the TLB, after a permission fault, on
@@ -1920,17 +1923,19 @@ one open.
   KiB one, and with EL2 the same at stage 2, the stage 2 fields reading
   0, "as stage 1" (no FEAT_GTG), where the TRM's bits 63:32 are RES0;
   `ID_AA64PFR0_EL1`'s FP, AdvSIMD and GIC; `ID_AA64DFR0_EL1`'s `DebugVer`
-  (v8.0) and `TraceVer` (0); and `ID_AA64PFR1_EL1`, `ID_AA64DFR1_EL1`,
-  `ID_AA64ISAR1_EL1` and `ID_AA64MMFR1_EL1` 0, the TRM's RES0 (10.7,
+  (v8.0), `TraceVer` (0), `BRPs` (5), `WRPs` (3) and `CTX_CMPs` (1) — six
+  breakpoints, the highest two, 4 and 5, context-aware, and four
+  watchpoints, whose registers past them (`DBGBVR6_EL1`, `DBGWVR4_EL1` and
+  on) are UNDEFINED (`src/cpu/debug.rs`); and `ID_AA64PFR1_EL1`,
+  `ID_AA64DFR1_EL1`, `ID_AA64ISAR1_EL1` and `ID_AA64MMFR1_EL1` 0, the
+  TRM's RES0 (10.7,
   Table 10-10). Where the model lacks a part of the core, the field says
   so, and differs from the TRM's: `ID_AA64PFR0_EL1` reads 0x11 (0x111
   with EL2) where the TRM's 0x2222 has AArch32 at EL0 to EL2 and an EL3,
-  neither of which the model has; `ID_AA64DFR0_EL1` reads 0x101006 where
-  the TRM's 0x10305106 has six breakpoints (`BRPs` 5), two of them
-  context-aware (`CTX_CMPs` 1), four watchpoints (`WRPs` 3) and PMUv3
-  (`PMUVer` 1), the model having two breakpoints, one of them
-  context-aware, two watchpoints and no PMU (`src/cpu/debug.rs`, "Not
-  implemented"); `ID_AA64MMFR0_EL1` reads 0x24 where the TRM's 0x1124
+  neither of which the model has; `ID_AA64DFR0_EL1` reads 0x10305006
+  where the TRM's 0x10305106 has PMUv3 (`PMUVer` 1), the model having no
+  PMU ("Not implemented"); `ID_AA64MMFR0_EL1` reads 0x24 where the TRM's
+  0x1124
   has `BigEnd` 1 (mixed endianness: `SCTLR_ELx.EE` and `SCTLR_EL1.E0E`
   configurable) and `SNSMem` 1 (Secure and Non-secure memory told apart),
   the model's accesses being little-endian whatever `EE` and `E0E` hold
@@ -3439,11 +3444,12 @@ or kept as a host's choice (below).
   one this core can be.
 - Floating-point exception traps: FPCR's trap-enable bits read as zero, as on
   a Cortex-A57, so exceptions only accumulate in FPSR.
-- Debug: Software Step, and two breakpoints and two watchpoints, as
-  `ID_AA64DFR0_EL1` advertises, raise their exceptions (`src/cpu/debug.rs`),
-  where the Cortex-A57 has six breakpoints, two of them context-aware, and
-  four watchpoints (DDI 0488H, 4.3.19; see "Where the references differ");
-  there is no Debug state, no halting debug, no Vector Catch and no PMU. The
+- Debug: Software Step, and the breakpoints and watchpoints
+  `ID_AA64DFR0_EL1` advertises — the Cortex-A57's six breakpoints, two of
+  them context-aware, and four watchpoints (DDI 0488H, 4.3.19), the Armv9.2
+  model's two, one and two — raise their exceptions (`src/cpu/debug.rs`);
+  there is no Debug state, no halting debug, no Vector Catch and no PMU
+  (see "Where the references differ"). The
   Debug Communications Channel's interrupt requests (COMMRX and COMMTX, which
   `MDCCINT_EL1` enables) reach no interrupt controller: where they connect
   is the system's choice, and QEMU's `virt` connects them nowhere, so

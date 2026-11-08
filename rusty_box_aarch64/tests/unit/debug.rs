@@ -82,6 +82,18 @@ const fn dbgwvr(n: u32) -> Key {
 const fn dbgwcr(n: u32) -> Key {
     (2, 0, 0, n, 7)
 }
+const ID_AA64DFR0_EL1: Key = (3, 0, 0, 5, 0);
+
+/// `msr <key>, x0`.
+const fn msr_x0(key: Key) -> u32 {
+    let (op0, op1, crn, crm, op2) = key;
+    0xD500_0000 | (op0 << 19) | (op1 << 16) | (crn << 12) | (crm << 8) | (op2 << 5)
+}
+
+/// `mrs x0, <key>`.
+const fn mrs_x0(key: Key) -> u32 {
+    msr_x0(key) | (1 << 21)
+}
 
 /// `MDSCR_EL1.SS`, `KDE` and `MDE`.
 const SS: u64 = 1;
@@ -276,8 +288,7 @@ impl Machine {
 
     /// `MSR` at EL1 of `value` to the register `key` names.
     fn msr(&mut self, key: Key, value: u64) {
-        let (op0, op1, crn, crm, op2) = key;
-        let word = 0xD500_0000 | (op0 << 19) | (op1 << 16) | (crn << 12) | (crm << 8) | (op2 << 5);
+        let word = msr_x0(key);
         let saved = (self.cpu.pc, self.cpu.x[0]);
         let pstate = self.cpu.pstate;
         self.cpu.pstate.el = El::El1;
@@ -702,60 +713,88 @@ fn a_disabled_or_reserved_breakpoint_is_silent() {
     }
 }
 
-/// Breakpoint 1 is the context-aware one (`ID_AA64DFR0_EL1.CTX_CMPs` 0): it
-/// matches `CONTEXTIDR_EL1`, where the same type on breakpoint 0 is
-/// reserved.
+/// The context-aware breakpoints are the highest numbered, `CTX_CMPs` + 1
+/// of them (Arm `IsContextAwareBreakpoint`): the Cortex-A57's 4 and 5, the
+/// Armv9.2 model's 1. Each of them matches `CONTEXTIDR_EL1`, where the same
+/// type on any other breakpoint is reserved.
 #[test]
-fn only_the_highest_breakpoint_matches_a_context() {
-    let mut m = v8();
-    m.msr(CONTEXTIDR_EL1, 0x1234);
-    m.at_el1_debuggable(MDE);
-    m.msr(dbgbvr(1), 0x1234);
-    m.msr(dbgbcr(1), breakpoint(CONTEXT, 0, BOTH_ELS));
-    assert_eq!(m.exec(NOP).map(|t| t.ec), Some(BREAKPOINT_SAME));
-    m.msr(dbgbvr(1), 0x1235);
-    assert_eq!(m.exec(NOP), None, "another context");
-    m.msr(dbgbcr(1), 0);
-    m.msr(dbgbvr(0), 0x1234);
-    m.msr(dbgbcr(0), breakpoint(CONTEXT, 0, BOTH_ELS));
-    assert_eq!(m.exec(NOP), None, "breakpoint 0 is not context-aware");
+fn only_the_highest_breakpoints_match_a_context() {
+    for (model, machine, breakpoints, context_aware) in [
+        ("Cortex-A57", v8 as fn() -> Machine, 6, 4..6),
+        ("Armv9.2", v9, 2, 1..2),
+    ] {
+        for n in 0..breakpoints {
+            let mut m = machine();
+            m.msr(CONTEXTIDR_EL1, 0x1234);
+            m.at_el1_debuggable(MDE);
+            m.msr(dbgbvr(n), 0x1234);
+            m.msr(dbgbcr(n), breakpoint(CONTEXT, 0, BOTH_ELS));
+            let fires = context_aware.contains(&n).then_some(BREAKPOINT_SAME);
+            assert_eq!(m.exec(NOP).map(|t| t.ec), fires, "{model}: {n}");
+            m.msr(dbgbvr(n), 0x1235);
+            assert_eq!(m.exec(NOP), None, "{model}: {n} in another context");
+        }
+    }
 }
 
 /// A linked address breakpoint fires only in the context of the breakpoint
 /// it links to, and that breakpoint, with linking enabled, never fires on
-/// its own.
+/// its own. On the Cortex-A57 either context-aware breakpoint, 4 or 5, can
+/// be linked to, by an address breakpoint below them or by the other.
 #[test]
 fn a_linked_breakpoint_needs_its_context() {
-    let mut m = v8();
-    m.msr(CONTEXTIDR_EL1, 0x55);
-    m.at_el1_debuggable(MDE);
-    m.msr(dbgbvr(1), 0x55);
-    m.msr(dbgbcr(1), breakpoint(LINKING_CONTEXT, 0, BOTH_ELS));
-    assert_eq!(m.exec(NOP), None, "linking enabled fires on no event");
-    m.msr(dbgbvr(0), CODE);
-    m.msr(dbgbcr(0), breakpoint(LINKED_ADDRESS, 1, BOTH_ELS));
-    assert_eq!(m.exec(NOP).map(|t| t.ec), Some(BREAKPOINT_SAME));
-    m.msr(CONTEXTIDR_EL1, 0x56);
-    assert_eq!(m.exec(NOP), None, "another context");
-    m.msr(CONTEXTIDR_EL1, 0x55);
-    m.msr(dbgbcr(1), breakpoint(CONTEXT, 0, BOTH_ELS) & !1);
-    assert_eq!(m.exec(NOP), None, "the linked breakpoint is disabled");
+    for (context, linked) in [(5, 0), (4, 3), (4, 5), (5, 4)] {
+        let mut m = v8();
+        m.msr(CONTEXTIDR_EL1, 0x55);
+        m.at_el1_debuggable(MDE);
+        m.msr(dbgbvr(context), 0x55);
+        m.msr(dbgbcr(context), breakpoint(LINKING_CONTEXT, 0, BOTH_ELS));
+        assert_eq!(m.exec(NOP), None, "linking enabled fires on no event");
+        m.msr(dbgbvr(linked), CODE);
+        let lbn = u64::from(context);
+        m.msr(dbgbcr(linked), breakpoint(LINKED_ADDRESS, lbn, BOTH_ELS));
+        let case = std::format!("{linked} linked to {context}");
+        assert_eq!(m.exec(NOP).map(|t| t.ec), Some(BREAKPOINT_SAME), "{case}");
+        m.msr(CONTEXTIDR_EL1, 0x56);
+        assert_eq!(m.exec(NOP), None, "{case}: another context");
+        m.msr(CONTEXTIDR_EL1, 0x55);
+        m.msr(dbgbcr(context), breakpoint(CONTEXT, 0, BOTH_ELS) & !1);
+        assert_eq!(
+            m.exec(NOP),
+            None,
+            "{case}: the linked breakpoint is disabled"
+        );
+    }
 }
 
 /// A link to anything but a context-aware breakpoint with linking enabled
 /// matches nothing, Arm's `Unpredictable_BPNOTLINKING` and
-/// `Unpredictable_BPLINKEDADDRMATCH` defaults: itself, an address
-/// breakpoint, or a breakpoint this processor does not have.
+/// `Unpredictable_BPLINKEDADDRMATCH` defaults: itself, a breakpoint that is
+/// not context-aware, one that is but compares an address, or a breakpoint
+/// this processor does not have — on the Cortex-A57 breakpoint 3, linking
+/// enabled, below its context-aware ones, and 6 and 15, past its six; on
+/// the Armv9.2 model 2, past its two.
 #[test]
 fn a_link_to_anything_else_matches_nothing() {
     let mut m = v8();
+    m.msr(CONTEXTIDR_EL1, 0x55);
     m.msr(dbgbvr(0), CODE);
-    m.msr(dbgbvr(1), CODE);
+    m.msr(dbgbvr(3), 0x55);
+    m.msr(dbgbvr(5), CODE);
     m.at_el1_debuggable(MDE);
-    m.msr(dbgbcr(1), breakpoint(ADDRESS, 0, EL0_ONLY));
-    for lbn in [0, 1, 2] {
+    m.msr(dbgbcr(3), breakpoint(LINKING_CONTEXT, 0, BOTH_ELS));
+    m.msr(dbgbcr(5), breakpoint(ADDRESS, 0, EL0_ONLY));
+    for lbn in [0, 3, 5, 6, 15] {
         m.msr(dbgbcr(0), breakpoint(LINKED_ADDRESS, lbn, BOTH_ELS));
-        assert_eq!(m.exec(NOP), None, "LBN {lbn}");
+        assert_eq!(m.exec(NOP), None, "Cortex-A57: LBN {lbn}");
+    }
+
+    let mut m = v9();
+    m.msr(dbgbvr(0), CODE);
+    m.at_el1_debuggable(MDE);
+    for lbn in [0, 2] {
+        m.msr(dbgbcr(0), breakpoint(LINKED_ADDRESS, lbn, BOTH_ELS));
+        assert_eq!(m.exec(NOP), None, "Armv9.2: LBN {lbn}");
     }
 }
 
@@ -839,10 +878,16 @@ fn feat_debugv8p2_adds_two_context_types() {
 
     let mut m = v8();
     m.msr(CONTEXTIDR_EL1, 0x1234);
-    m.msr(dbgbvr(1), 0x1234);
+    m.msr(dbgbvr(5), 0x1234);
     m.at_el1_debuggable(MDE);
-    m.msr(dbgbcr(1), breakpoint(CONTEXT_EL1, 0, BOTH_ELS));
+    m.msr(dbgbcr(5), breakpoint(CONTEXT_EL1, 0, BOTH_ELS));
     assert_eq!(m.exec(NOP), None, "reserved without FEAT_Debugv8p2");
+    m.msr(dbgbcr(5), breakpoint(CONTEXT, 0, BOTH_ELS));
+    assert_eq!(
+        m.exec(NOP).map(|t| t.ec),
+        Some(BREAKPOINT_SAME),
+        "where 0b0010 matches"
+    );
 }
 
 // ----- Watchpoints -----
@@ -1150,19 +1195,32 @@ fn the_syndrome_names_the_watchpoint_with_debugv8p2() {
     assert_eq!(m.exec(LDR).map(|t| t.iss), Some(DEBUG));
 }
 
-/// A linked watchpoint fires only in the context of its breakpoint.
+/// A linked watchpoint fires only in the context of its breakpoint, one of
+/// the Cortex-A57's context-aware 4 and 5; a link to breakpoint 3, which
+/// is not, matches nothing.
 #[test]
 fn a_linked_watchpoint_needs_its_context() {
     const WT: u64 = 1 << 20;
-    const LBN_1: u64 = 1 << 16;
+    const LBN_SHIFT: u32 = 16;
+    for context in [4, 5] {
+        let mut m = watching(v8(), ALL);
+        m.msr(CONTEXTIDR_EL1, 7);
+        m.msr(dbgbvr(context), 7);
+        m.msr(dbgbcr(context), breakpoint(LINKING_CONTEXT, 0, BOTH_ELS));
+        let link = WT | (u64::from(context) << LBN_SHIFT);
+        m.msr(dbgwcr(0), watchpoint(ALL, ALL_BYTES, BOTH_ELS) | link);
+        assert!(m.exec(LDR).is_some(), "linked to {context}");
+        m.msr(CONTEXTIDR_EL1, 8);
+        assert_eq!(m.exec(LDR), None, "linked to {context}, another context");
+    }
+
     let mut m = watching(v8(), ALL);
     m.msr(CONTEXTIDR_EL1, 7);
-    m.msr(dbgbvr(1), 7);
-    m.msr(dbgbcr(1), breakpoint(LINKING_CONTEXT, 0, BOTH_ELS));
-    m.msr(dbgwcr(0), watchpoint(ALL, ALL_BYTES, BOTH_ELS) | WT | LBN_1);
-    assert!(m.exec(LDR).is_some());
-    m.msr(CONTEXTIDR_EL1, 8);
-    assert_eq!(m.exec(LDR), None);
+    m.msr(dbgbvr(3), 7);
+    m.msr(dbgbcr(3), breakpoint(LINKING_CONTEXT, 0, BOTH_ELS));
+    let link = WT | (3 << LBN_SHIFT);
+    m.msr(dbgwcr(0), watchpoint(ALL, ALL_BYTES, BOTH_ELS) | link);
+    assert_eq!(m.exec(LDR), None, "linked to 3");
 }
 
 /// A Store-Exclusive the monitor would pass is watched as a store. One that
@@ -1303,5 +1361,148 @@ fn unmasking_d_arms_the_step() {
             ec: STEP_SAME,
             iss: DEBUG,
         })
+    );
+}
+
+// ----- How many there are -----
+
+/// The Cortex-A57's `ID_AA64DFR0_EL1` is its TRM's 0x10305106 (DDI 0488H,
+/// 4.3.19) but for `PMUVer`, 0, the model having no PMU: six breakpoints
+/// (`BRPs` 5), two of them context-aware (`CTX_CMPs` 1), four watchpoints
+/// (`WRPs` 3), Armv8.0 debug and no trace. The Armv9.2 model's has two
+/// breakpoints, one of them context-aware, two watchpoints and no PMU.
+#[test]
+fn id_aa64dfr0_reports_the_breakpoints_and_watchpoints() {
+    let field = |value: u64, at: u32| (value >> at) & 0xF;
+    // BRPs, WRPs, CTX_CMPs and PMUVer.
+    let counts = |value| [12, 20, 28, 8].map(|at| field(value, at));
+    let mut m = v8();
+    assert_eq!(m.exec(mrs_x0(ID_AA64DFR0_EL1)), None);
+    assert_eq!(m.cpu.x[0], 0x1030_5006);
+    assert_eq!(counts(m.cpu.x[0]), [5, 3, 1, 0], "Cortex-A57");
+
+    let mut m = v9();
+    assert_eq!(m.exec(mrs_x0(ID_AA64DFR0_EL1)), None);
+    assert_eq!(counts(m.cpu.x[0]), [1, 1, 0, 0], "Armv9.2");
+}
+
+/// Each of the Cortex-A57's six breakpoints fires on its address, the last
+/// of them, 5, among them, before the instruction runs.
+#[test]
+fn every_breakpoint_of_the_cortex_a57_fires() {
+    for n in 0..6 {
+        let mut m = v8();
+        m.msr(dbgbvr(n), CODE);
+        m.msr(dbgbcr(n), breakpoint(ADDRESS, 0, EL0_ONLY));
+        m.msr(MDSCR_EL1, MDE);
+        m.at_el0();
+        assert_eq!(
+            m.exec(ADD_X0),
+            Some(Taken {
+                ec: BREAKPOINT_LOWER,
+                iss: DEBUG,
+            }),
+            "breakpoint {n}"
+        );
+        assert_eq!(m.cpu.x[0], 0, "breakpoint {n}");
+        assert_eq!(m.cpu.sys.elr_el1, CODE, "breakpoint {n}");
+    }
+}
+
+/// Each of the Cortex-A57's four watchpoints fires on its address, the last
+/// of them, 3, among them, with `FAR_EL1` the address. Without
+/// FEAT_Debugv8p2 the syndrome does not name which.
+#[test]
+fn every_watchpoint_of_the_cortex_a57_fires() {
+    for n in 0..4 {
+        let mut m = v8();
+        m.msr(dbgwvr(n), DATA);
+        m.msr(dbgwcr(n), watchpoint(ALL, ALL_BYTES, BOTH_ELS));
+        m.at_el1_debuggable(MDE);
+        m.cpu.x[1] = DATA;
+        m.cpu.x[2] = 0x1111;
+        assert_eq!(
+            m.exec(STR),
+            Some(Taken {
+                ec: WATCHPOINT_SAME,
+                iss: WNR | DEBUG,
+            }),
+            "watchpoint {n}"
+        );
+        assert_eq!(m.cpu.sys.far_el1, DATA, "watchpoint {n}");
+        assert_eq!(m.ram.0[DATA as usize], 0, "watchpoint {n}: nothing stored");
+    }
+}
+
+/// The registers of a breakpoint or watchpoint the processor does not have
+/// are UNDEFINED, read or written (Arm's accessors: `m >=
+/// NUM_BREAKPOINTS`, `m >= NUM_WATCHPOINTS`): on the Cortex-A57
+/// `DBGBVR6_EL1` and `DBGWVR4_EL1` and the rest past its six and four, on
+/// the Armv9.2 model those past its two and two. The last of each it has
+/// reads back what was written.
+#[test]
+fn registers_past_the_breakpoints_and_watchpoints_are_undefined() {
+    const UNDEFINED: Option<Taken> = Some(Taken {
+        ec: UNDEFINED_CLASS,
+        iss: 0,
+    });
+    for (model, machine, breakpoints, watchpoints) in [
+        ("Cortex-A57", v8 as fn() -> Machine, 6, 4),
+        ("Armv9.2", v9, 2, 2),
+    ] {
+        let registers = [
+            (dbgbvr as fn(u32) -> Key, breakpoints),
+            (dbgbcr, breakpoints),
+            (dbgwvr, watchpoints),
+            (dbgwcr, watchpoints),
+        ];
+        for (register, count) in registers {
+            for n in count..16 {
+                let key = register(n);
+                let mut m = machine();
+                assert_eq!(m.exec(mrs_x0(key)), UNDEFINED, "{model}: MRS {key:?}");
+                m.cpu.x[0] = 1;
+                assert_eq!(m.exec(msr_x0(key)), UNDEFINED, "{model}: MSR {key:?}");
+            }
+            let last = register(count - 1);
+            let mut m = machine();
+            m.msr(last, 0x4000);
+            m.cpu.x[0] = 0;
+            assert_eq!(m.exec(mrs_x0(last)), None, "{model}: {last:?}");
+            assert_eq!(m.cpu.x[0], 0x4000, "{model}: {last:?} reads back");
+        }
+    }
+}
+
+/// A snapshot keeps every breakpoint and watchpoint of the Cortex-A57,
+/// breakpoint 5 and watchpoint 3 among them.
+#[test]
+fn a_snapshot_carries_the_last_breakpoint_and_watchpoint() {
+    let mut m = v8();
+    m.msr(dbgbvr(5), CODE);
+    m.msr(dbgbcr(5), breakpoint(ADDRESS, 0, EL1_ONLY));
+    m.msr(dbgwvr(3), DATA);
+    m.msr(dbgwcr(3), watchpoint(ALL, ALL_BYTES, BOTH_ELS));
+    m.at_el1_debuggable(MDE);
+    let mut image = Vec::new();
+    assert!(m.cpu.save(&mut image).is_ok());
+
+    let mut restored = v8();
+    let mut bytes = image.as_slice();
+    assert!(restored.cpu.restore(&mut bytes).is_ok());
+    assert_eq!(
+        restored.exec(NOP).map(|t| t.ec),
+        Some(BREAKPOINT_SAME),
+        "breakpoint 5"
+    );
+    restored.cpu.x[1] = DATA;
+    restored.put(CODE + 4, LDR);
+    restored.cpu.pc = CODE + 4;
+    restored.cpu.sys.esr_el1 = 0x3F << 26;
+    restored.step();
+    assert_eq!(
+        restored.taken().map(|t| t.ec),
+        Some(WATCHPOINT_SAME),
+        "watchpoint 3"
     );
 }

@@ -85,6 +85,7 @@
 //! kernel's `x0` to `x3` are what Linux's boot protocol sets
 //! (`booting.rst` §4); every other register is as reset leaves it.
 
+use super::debug::{DebugPoints, MAX_BREAKPOINTS, MAX_WATCHPOINTS};
 use super::regs::SysReg;
 
 /// The board's fill, with no register's name in it: bits that alternate
@@ -156,6 +157,31 @@ pub(crate) const fn dbgwvr(n: u8) -> SysReg {
     SysReg::encode(2, 0, 0, n, 6)
 }
 
+/// `DBGBVR<n>_EL1` of each breakpoint of `points` out of reset, and zero in
+/// the registers of the breakpoints beyond them, which the processor does
+/// not have.
+pub(crate) const fn breakpoint_values(points: DebugPoints) -> [u64; MAX_BREAKPOINTS] {
+    let mut values = [0; MAX_BREAKPOINTS];
+    let mut n = 0;
+    while n < points.breakpoints() {
+        values[n] = value_of(dbgbvr(n as u8));
+        n += 1;
+    }
+    values
+}
+
+/// `DBGWVR<n>_EL1` of each watchpoint of `points` out of reset, bits 1:0
+/// RES0, and zero in the registers of the watchpoints beyond them.
+pub(crate) const fn watchpoint_values(points: DebugPoints) -> [u64; MAX_WATCHPOINTS] {
+    let mut values = [0; MAX_WATCHPOINTS];
+    let mut n = 0;
+    while n < points.watchpoints() {
+        values[n] = value_of(dbgwvr(n as u8)) & !3;
+        n += 1;
+    }
+    values
+}
+
 /// PSTATE's N, Z, C and V in their `NZCV` layout: the fill's bits 31:28.
 pub(crate) const NZCV: u64 = FILL & 0xF000_0000;
 
@@ -194,8 +220,8 @@ impl<L: super::Levels> super::Cpu<L> {
         ] {
             *value = 0;
         }
-        s.dbgbvr = [0; 2];
-        s.dbgwvr = [0; 2];
+        s.dbgbvr = [0; MAX_BREAKPOINTS];
+        s.dbgwvr = [0; MAX_WATCHPOINTS];
         s.dtrrx = 0;
         s.dtrtx = 0;
         if let Some(el2) = self.el2_state.get_mut() {

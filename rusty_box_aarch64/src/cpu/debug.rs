@@ -9,6 +9,15 @@
 //! `VTTBR_EL2.VMID`, and the `CONTEXTIDR_EL2` types, which need FEAT_VHE or
 //! FEAT_Debugv8p2 as well, compare `CONTEXTIDR_EL2`.
 //!
+//! How many breakpoints and watchpoints there are, and which breakpoints are
+//! context-aware, is the processor model's ([`DebugPoints`]): the
+//! Cortex-A57 has its TRM's six breakpoints, two of them context-aware, and
+//! four watchpoints (DDI 0488H, 4.3.19), the Armv9.2 model the least the
+//! architecture permits, two breakpoints, one of them context-aware, and two
+//! watchpoints. The registers of a breakpoint or watchpoint a model does not
+//! have are UNDEFINED (Arm's `DBGBVR<n>_EL1` and the other accessors: `m >=
+//! NUM_BREAKPOINTS`).
+//!
 //! None of this costs an instruction that no debugger watches: a trace runs
 //! its instructions unchecked while [`Cpu::step_each`] is clear, and a data
 //! access that hits the TLB is unchecked while [`Cpu::watch_armed`] is clear.
@@ -21,14 +30,99 @@ use super::exec::Fault;
 use super::features::{Feature, Features};
 use super::mmu::DataDirection;
 use super::sysreg::{MDSCR_MDE, MDSCR_SS};
-use super::{Cpu, El, Levels};
+use super::{Cpu, El, Levels, SysRegs};
 
-/// `ID_AA64DFR0_EL1.BRPs` + 1.
-const BREAKPOINTS: usize = 2;
+/// The breakpoints a processor here can have at most, which every
+/// processor's registers are sized for: the Cortex-A57's six.
+pub(crate) const MAX_BREAKPOINTS: usize = 6;
 
-/// The context-aware breakpoint: `CTX_CMPs` + 1 of them, the highest
-/// numbered (Arm `IsContextAwareBreakpoint`).
-const CONTEXT_AWARE_BREAKPOINT: usize = BREAKPOINTS - 1;
+/// The watchpoints a processor here can have at most: the Cortex-A57's
+/// four.
+pub(crate) const MAX_WATCHPOINTS: usize = 4;
+
+/// The breakpoints and watchpoints a processor implements: Arm's
+/// `NumBreakpointsImplemented`, `NumContextAwareBreakpointsImplemented` and
+/// `NumWatchpointsImplemented`, which `ID_AA64DFR0_EL1` reports each less
+/// one, as `BRPs`, `CTX_CMPs` and `WRPs`. Each is IMPLEMENTATION DEFINED
+/// within what those fields can say without FEAT_Debugv8p9: 2 to 16
+/// breakpoints, 1 to all of them context-aware, and 2 to 16 watchpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DebugPoints {
+    breakpoints: u8,
+    context_aware: u8,
+    watchpoints: u8,
+}
+
+impl DebugPoints {
+    /// The Cortex-A57's: six breakpoints, two of them context-aware, and
+    /// four watchpoints (DDI 0488H, 4.3.19: `BRPs` 5, `CTX_CMPs` 1, `WRPs`
+    /// 3).
+    pub(crate) const CORTEX_A57: Self = Self {
+        breakpoints: 6,
+        context_aware: 2,
+        watchpoints: 4,
+    };
+
+    /// The Armv9.2 model's, the least the architecture permits: two
+    /// breakpoints, one of them context-aware, and two watchpoints.
+    pub(crate) const ARMV9P2: Self = Self {
+        breakpoints: 2,
+        context_aware: 1,
+        watchpoints: 2,
+    };
+
+    /// Arm `NumBreakpointsImplemented`.
+    #[inline(always)]
+    pub(crate) const fn breakpoints(self) -> usize {
+        self.breakpoints as usize
+    }
+
+    /// Arm `NumContextAwareBreakpointsImplemented`.
+    #[inline(always)]
+    pub(crate) const fn context_aware(self) -> usize {
+        self.context_aware as usize
+    }
+
+    /// Arm `NumWatchpointsImplemented`.
+    #[inline(always)]
+    pub(crate) const fn watchpoints(self) -> usize {
+        self.watchpoints as usize
+    }
+
+    /// Arm `IsContextAwareBreakpoint`: whether breakpoint `n` is one of the
+    /// context-aware ones, which with 16 breakpoints or fewer are the
+    /// highest numbered (`ContextAwareBreakpointRange`). A breakpoint the
+    /// processor does not have is not.
+    #[inline]
+    pub(crate) const fn is_context_aware(self, n: usize) -> bool {
+        n < self.breakpoints() && n >= self.breakpoints() - self.context_aware()
+    }
+
+    /// Whether these are counts the architecture permits (`BRPs` and `WRPs`
+    /// 0b0001 to 0b1111, `CTX_CMPs` at most `BRPs`) that the registers are
+    /// sized for.
+    const fn permitted(self) -> bool {
+        self.breakpoints >= 2
+            && self.breakpoints() <= MAX_BREAKPOINTS
+            && self.context_aware >= 1
+            && self.context_aware <= self.breakpoints
+            && self.watchpoints >= 2
+            && self.watchpoints() <= MAX_WATCHPOINTS
+    }
+
+    /// Whether these cover every breakpoint and watchpoint register `sys`
+    /// holds a value in: those beyond them, which no write reaches and
+    /// reset leaves zero, are zero.
+    pub(crate) fn cover(self, sys: &SysRegs) -> bool {
+        let unheld = |regs: &[u64], count: usize| regs[count..].iter().all(|&value| value == 0);
+        unheld(&sys.dbgbvr, self.breakpoints())
+            && unheld(&sys.dbgbcr, self.breakpoints())
+            && unheld(&sys.dbgwvr, self.watchpoints())
+            && unheld(&sys.dbgwcr, self.watchpoints())
+    }
+}
+
+const _: () = assert!(DebugPoints::CORTEX_A57.permitted() && DebugPoints::ARMV9P2.permitted());
 
 /// The fields `DBGBCR<n>` and `DBGWCR<n>` share.
 const ENABLE: u64 = 1;
@@ -148,9 +242,6 @@ impl WatchedRange {
         }
     }
 }
-
-/// `ID_AA64DFR0_EL1.WRPs` + 1.
-const WATCHPOINTS: usize = 2;
 
 /// The instruction that took Software Step from active-not-pending to
 /// active-pending, whose exception's syndrome reports it (D2.11.9.1).
@@ -380,7 +471,7 @@ impl<L: Levels> Cpu<L> {
     pub(crate) fn check_breakpoints(&self, pc: u64) -> Result<(), Fault> {
         if self.sys.mdscr_el1 & MDSCR_MDE != 0
             && self.debug_exceptions_enabled()
-            && (0..BREAKPOINTS).any(|n| self.breakpoint_fires(n, pc))
+            && (0..self.imp.debug.breakpoints()).any(|n| self.breakpoint_fires(n, pc))
         {
             return Err(Exception::new(SyndromeClass::Breakpoint, DEBUG_EXCEPTION).into());
         }
@@ -404,14 +495,15 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// `DBGBCR<n>.BT` of breakpoint `n`: the address types for every
-    /// breakpoint, the context types for the context-aware one alone —
-    /// 0b0110 and 0b0111 with FEAT_Debugv8p2 (or FEAT_VHE, which no
-    /// processor here has), the VMID types 0b1000 to 0b1011 with EL2, and
+    /// breakpoint, the context types for the context-aware ones alone
+    /// ([`DebugPoints::is_context_aware`]) — 0b0110 and 0b0111 with
+    /// FEAT_Debugv8p2 (or FEAT_VHE, which no processor here has), the VMID
+    /// types 0b1000 to 0b1011 with EL2, and
     /// the `CONTEXTIDR_EL2` types 0b1100 to 0b1111 with EL2 and either
     /// feature, where `CONTEXTIDR_EL2` exists. The address mismatch types
     /// need FEAT_BWE or AArch32, so they are reserved.
     fn breakpoint_type(&self, n: usize) -> BreakpointType {
-        let context_aware = n == CONTEXT_AWARE_BREAKPOINT;
+        let context_aware = self.imp.debug.is_context_aware(n);
         let v8p2 = self.implements(Feature::Debugv8p2);
         let el2_context = L::EL2 && has_contextidr_el2(self.imp.features);
         match (self.sys.dbgbcr[n] >> 20) & 0xF {
@@ -479,11 +571,12 @@ impl<L: Levels> Cpu<L> {
 
     /// The linking half of Arm `AArch64_StateMatch`, for the breakpoint or
     /// watchpoint with `control`: it needs an enabled context-aware
-    /// breakpoint, with linking enabled, in its context. Any other is no
-    /// match, Arm's `Unpredictable_BPNOTLINKING` default.
+    /// breakpoint, with linking enabled, in its context. Any other — one
+    /// that is not context-aware, or that the processor does not have — is
+    /// no match, Arm's `Unpredictable_BPNOTLINKING` default.
     fn linked_context_matches(&self, control: u64) -> bool {
         let n = linked_breakpoint(control);
-        if n != CONTEXT_AWARE_BREAKPOINT || self.sys.dbgbcr[n] & ENABLE == 0 {
+        if !self.imp.debug.is_context_aware(n) || self.sys.dbgbcr[n] & ENABLE == 0 {
             return false;
         }
         match self.breakpoint_type(n) {
@@ -515,7 +608,7 @@ impl<L: Levels> Cpu<L> {
         let first = range.first(va);
         let length = range.end(va.wrapping_add(bytes)).wrapping_sub(first);
         let mut raised = None;
-        for n in 0..WATCHPOINTS {
+        for n in 0..self.imp.debug.watchpoints() {
             if let Some(address) = self.watchpoint_match(n, first, length, kind, el) {
                 let lsc = (self.sys.dbgwcr[n] >> 3) & 3;
                 let number = if self.implements(Feature::Debugv8p2) {

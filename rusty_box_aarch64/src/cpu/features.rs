@@ -20,6 +20,7 @@
 //! [`Implementation`]: a feature set, the processor's identity, and the
 //! IMPLEMENTATION DEFINED choices its features leave open.
 
+use super::debug::DebugPoints;
 use super::id::{self, Caches};
 use rusty_box_core::ClockHz;
 
@@ -775,18 +776,22 @@ pub(crate) struct Implementation {
     pub(crate) counter_hz: ClockHz,
     /// The caches `CCSIDR_EL1` reports, and the device tree with it.
     pub(crate) caches: Caches,
+    /// The breakpoints and watchpoints, which `ID_AA64DFR0_EL1` reports.
+    pub(crate) debug: DebugPoints,
 }
 
 impl Implementation {
     /// The Cortex-A57 shape: [`Features::CORTEX_A57`] and the Cortex-A57's
     /// `MIDR_EL1`, with no streaming vector length to choose, the board's
-    /// 1 GHz counter, and the Cortex-A57's caches.
+    /// 1 GHz counter, and the Cortex-A57's caches, breakpoints and
+    /// watchpoints.
     pub(crate) const CORTEX_A57: Self = Self {
         features: Features::CORTEX_A57,
         midr: id::MIDR_CORTEX_A57,
         max_svl: VecLen::MIN,
         counter_hz: SYSTEM_COUNTER_HZ,
         caches: Caches::CORTEX_A57,
+        debug: DebugPoints::CORTEX_A57,
     };
 
     /// This implementation with its system counter at `rate`, which the
@@ -801,13 +806,15 @@ impl Implementation {
 
     /// The Armv9.2 processor model: [`Features::ARMV9P2`], a software
     /// model's `MIDR_EL1`, Streaming SVE vectors of up to 512 bits, the
-    /// counter Armv8.6 and later require, and caches of the board's own.
+    /// counter Armv8.6 and later require, caches of the board's own, and
+    /// the fewest breakpoints and watchpoints Arm permits.
     pub(crate) const ARMV9P2: Self = Self {
         features: Features::ARMV9P2,
         midr: id::MIDR_SOFTWARE_MODEL,
         max_svl: VecLen(512),
         counter_hz: SYSTEM_COUNTER_HZ,
         caches: Caches::ARMV9P2,
+        debug: DebugPoints::ARMV9P2,
     };
 
     /// This implementation as a processor of the level set `L` has it, with

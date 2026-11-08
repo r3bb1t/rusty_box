@@ -2230,9 +2230,14 @@ mod tests {
                     | (0xF << 60)),
                 0x11
             );
-            // DFR0: DebugVer, two breakpoints and two watchpoints, no PMU,
-            // and DoubleLock 0 or 0b1111.
-            assert_eq!(dfr0 & !0xF & !(0xF << 36), 0x0010_1000);
+            // DFR0: DebugVer, the processor's breakpoints, context-aware
+            // breakpoints and watchpoints, no PMU, and DoubleLock 0 or
+            // 0b1111.
+            let points = imp.debug;
+            let counts = ((points.context_aware() as u64 - 1) << 28)
+                | ((points.watchpoints() as u64 - 1) << 20)
+                | ((points.breakpoints() as u64 - 1) << 12);
+            assert_eq!(dfr0 & !0xF & !(0xF << 36), counts);
             assert!(matches!(field(dfr0, 36), 0 | 0xF), "DoubleLock");
             assert!(
                 (6..=9).contains(&field(dfr0, 0)),

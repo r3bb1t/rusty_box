@@ -182,11 +182,10 @@ const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 23] = [
     ),
 ];
 
-/// IMPLEMENTATION DEFINED constants the accessors read.
-const CONSTANTS: [(&str, i128); 3] = [
-    // Two breakpoints and two watchpoints, as ID_AA64DFR0_EL1 reports.
-    ("NUM_BREAKPOINTS", 2),
-    ("NUM_WATCHPOINTS", 2),
+/// IMPLEMENTATION DEFINED constants the accessors read, the same on every
+/// processor. `NUM_BREAKPOINTS` and `NUM_WATCHPOINTS` are each processor's
+/// own, as its `ID_AA64DFR0_EL1` reports them ([`Eval::identifier`]).
+const CONSTANTS: [(&str, i128); 1] = [
     // ERRIDR_EL1.NUM.
     ("NUM_ERROR_RECORDS", 0),
 ];
@@ -642,6 +641,11 @@ impl Eval<'_> {
         self.imp.has(Feature::El2)
     }
 
+    /// `ID_AA64DFR0_EL1`, as the processor advertises it.
+    fn dfr0(&self) -> u64 {
+        id::id_aa64dfr0(self.imp.features, self.imp.debug)
+    }
+
     fn feature(&self, name: &str) -> bool {
         match name {
             "FEAT_AA64" | "FEAT_AA64EL0" | "FEAT_AA64EL1" | "FEAT_EL0" | "FEAT_EL1" | "v8Ap0" => {
@@ -650,7 +654,7 @@ impl Eval<'_> {
             "FEAT_AA64EL3" | "FEAT_EL3" => false,
             // As the processor advertises it: `ID_AA64DFR0_EL1.DoubleLock`
             // 0b0000 is the OS Double Lock implemented.
-            "FEAT_DoubleLock" => (id::id_aa64dfr0(self.imp.features) >> 36) & 0xF == 0,
+            "FEAT_DoubleLock" => (self.dfr0() >> 36) & 0xF == 0,
             _ => Feature::ALL
                 .into_iter()
                 .find(|f| f.arm_name() == Some(name))
@@ -863,6 +867,10 @@ impl Eval<'_> {
             "FALSE" => V::Bool(false),
             "t" | "t2" => V::Int(i128::from(RT)),
             "ARBITRARY" => V::Open,
+            // `ID_AA64DFR0_EL1.BRPs` and `WRPs`, each one less than the
+            // count.
+            "NUM_BREAKPOINTS" => V::Int(i128::from((self.dfr0() >> 12) & 0xF) + 1),
+            "NUM_WATCHPOINTS" => V::Int(i128::from((self.dfr0() >> 20) & 0xF) + 1),
             _ => {
                 if let Some((_, v)) = self.vars.iter().find(|(n, _)| *n == name) {
                     return V::Int(*v);

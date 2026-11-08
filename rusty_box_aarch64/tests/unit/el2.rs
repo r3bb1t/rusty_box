@@ -898,24 +898,24 @@ fn a_breakpoint_reaches_el2_by_hmc() {
     }
 }
 
-/// The VMID breakpoint types, `BT` 0b1000 to 0b1011 on the context-aware
-/// breakpoint (Arm `AArch64_BreakpointValueMatch`'s `match_vmid`), which only
-/// a processor with EL2 has: 0b1000 fires at EL0 and EL1 while
-/// `VTTBR_EL2.VMID` is `DBGBVR1_EL1` bits 39:32, 0b1010 while
-/// `CONTEXTIDR_EL1` is its bits 31:0 too; neither, nor a `CONTEXTIDR_EL1`
-/// breakpoint, fires at EL2, where no context matches. An address breakpoint
-/// linked to 0b1001 fires only in that VMID. Without EL2 the types are
-/// reserved.
+/// The VMID breakpoint types, `BT` 0b1000 to 0b1011 on a context-aware
+/// breakpoint (Arm `AArch64_BreakpointValueMatch`'s `match_vmid`), the
+/// Cortex-A57's breakpoint 5, which only a processor with EL2 has: 0b1000
+/// fires at EL0 and EL1 while `VTTBR_EL2.VMID` is `DBGBVR5_EL1` bits 39:32,
+/// 0b1010 while `CONTEXTIDR_EL1` is its bits 31:0 too; neither, nor a
+/// `CONTEXTIDR_EL1` breakpoint, fires at EL2, where no context matches. An
+/// address breakpoint linked to 0b1001 fires only in that VMID. Without EL2
+/// the types are reserved.
 #[test]
 fn a_vmid_breakpoint_fires_in_its_virtual_machine() {
-    const CONTEXT_AWARE: usize = 1;
+    const CONTEXT_AWARE: usize = 5;
     const ID: u64 = 0x77;
     let at_el1 = sync(El::El1, CURRENT_SPX, EC_BREAKPOINT_SAME_EL, IFSC_DEBUG);
     let vmid = bcr_bt(0b1000) | bcr_pxc(0b11);
     let vmid_and_id = bcr_bt(0b1010) | bcr_pxc(0b11);
     let at_el2 = BCR_HMC | bcr_pxc(0b11);
     let cases = [
-        // (EL, DBGBCR1_EL1, DBGBVR1_EL1, MDCR_EL2, VMID, CONTEXTIDR_EL1, the exception)
+        // (EL, DBGBCR5_EL1, DBGBVR5_EL1, MDCR_EL2, VMID, CONTEXTIDR_EL1, the exception)
         (El::El1, vmid, 5 << 32, 0, 5, 0, at_el1),
         (El::El1, vmid, 5 << 32, 0, 6, 0, None),
         (El::El2, vmid | BCR_HMC, 5 << 32, MDCR_TDE, 5, 0, None),
@@ -954,15 +954,17 @@ fn a_vmid_breakpoint_fires_in_its_virtual_machine() {
 /// The `CONTEXTIDR_EL2` breakpoint types, `BT` 0b1100 to 0b1111 on the
 /// context-aware breakpoint (Arm `AArch64_BreakpointValueMatch`'s
 /// `match_cid2`), valid on a processor with EL2 and FEAT_VHE or
-/// FEAT_Debugv8p2 (`AArch64_ReservedBreakpointType`): 0b1100 fires at EL1
+/// FEAT_Debugv8p2 (`AArch64_ReservedBreakpointType`), on the Armv9.2
+/// model's context-aware breakpoint 1: 0b1100 fires at EL1
 /// and at EL2 while `CONTEXTIDR_EL2` is `DBGBVR1_EL1` bits 63:32; 0b1110
 /// fires at EL1 while `CONTEXTIDR_EL1` is its bits 31:0 too, and not at
 /// EL2, where `CONTEXTIDR_EL1` matches nothing. An address breakpoint
 /// linked to 0b1101 fires only under that `CONTEXTIDR_EL2`. The Cortex-A57,
-/// with neither feature, reserves them.
+/// with neither feature, reserves them on its context-aware breakpoint 5.
 #[test]
 fn a_contextidr_el2_breakpoint_matches_with_debugv8p2() {
     const CONTEXT_AWARE: usize = 1;
+    const A57_CONTEXT_AWARE: usize = 5;
     const ID: u64 = 0x77;
     const HOST_ID: u64 = 0x1234_5678;
     let at_el1 = sync(El::El1, CURRENT_SPX, EC_BREAKPOINT_SAME_EL, IFSC_DEBUG);
@@ -1005,7 +1007,7 @@ fn a_contextidr_el2_breakpoint_matches_with_debugv8p2() {
     }
 
     let mut m = Machine::with_el2();
-    m.breakpoint(CONTEXT_AWARE, host_id, 0, 0, 0, El::El1);
+    m.breakpoint(A57_CONTEXT_AWARE, host_id, 0, 0, 0, El::El1);
     assert_eq!(m.run(NOP), None, "reserved on the Cortex-A57");
 }
 

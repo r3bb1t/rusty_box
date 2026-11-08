@@ -2817,7 +2817,10 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// machine built otherwise refuses the
 /// image as one built differently. It holds the processor's level set (the
 /// shape's `virtualization`, the EL2 registers, `CNTPOFF_EL2` among them), a
-/// feature set of 128 bits, `RVBAR_ELx` and `RMR_ELx` of the highest level,
+/// feature set of 128 bits, its counts of breakpoints, context-aware
+/// breakpoints and watchpoints and the registers of six breakpoints and four
+/// watchpoints (the most a model has, those beyond the processor's held
+/// zero), `RVBAR_ELx` and `RMR_ELx` of the highest level,
 /// what Software Step stepped, each TLB entry's stage 2 permissions and
 /// level beside stage 1's and the memory each stage and both together map
 /// it to, the TLB's kept stage 2 translations, its tables of EL1&0 and
@@ -2834,10 +2837,10 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// power button drives on each layout
 /// ([`DeviceLayout::power_button_line`]), the virtio transports each layout
 /// has, the size of every virtio queue, the flash's CFI query table, the
-/// processor's `SMIDR_EL1`, and the walk a `TxSZ` out of its range takes
-/// (the limit, `regime::txsz_taken`),
-/// which the TLB's entries were made under.
-const SNAPSHOT_VERSION: u32 = 31;
+/// processor's `SMIDR_EL1` and `ID_AA64DFR0_EL1`, and the walk a `TxSZ`
+/// out of its range takes (the limit, `regime::txsz_taken`), which the
+/// TLB's entries were made under.
+const SNAPSHOT_VERSION: u32 = 32;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -29,18 +29,19 @@
 //! `GICCDISABLE` HIGH) in every field whose feature the model has:
 //! `ID_AA64ISAR0_EL1` 0x11120, `ID_AA64MMFR0_EL1`'s `PARange`, `ASIDBits`
 //! and granules, `ID_AA64PFR0_EL1`'s FP, AdvSIMD and GIC fields,
-//! `ID_AA64DFR0_EL1`'s `DebugVer` and `TraceVer`, and the RES0 of
+//! `ID_AA64DFR0_EL1`'s `DebugVer`, `TraceVer`, `BRPs`, `WRPs` and
+//! `CTX_CMPs` (six breakpoints, two of them context-aware, and four
+//! watchpoints), and the RES0 of
 //! `ID_AA64PFR1_EL1`, `ID_AA64DFR1_EL1`, `ID_AA64ISAR1_EL1` and
 //! `ID_AA64MMFR1_EL1`. Where it lacks a part of the core the field says
 //! so: no AArch32 (`ID_AA64PFR0_EL1` EL0, EL1 and EL2 1, where the TRM's
 //! 2 adds AArch32, and the AArch32 ID registers, UNKNOWN without AArch32,
 //! read 0), no EL3 (EL3 0), EL2 only where the machine asks for it, no PMU
-//! (`ID_AA64DFR0_EL1.PMUVer` 0), two breakpoints, one of them
-//! context-aware, and two watchpoints where the TRM has six, two and four
-//! (`BRPs`, `CTX_CMPs`, `WRPs`), no big-endian data accesses
+//! (`ID_AA64DFR0_EL1.PMUVer` 0), no big-endian data accesses
 //! (`ID_AA64MMFR0_EL1.BigEnd` 0: `SCTLR_ELx.EE` and `E0E` change nothing),
 //! and no Secure state (`SNSMem` 0, which Arm permits without EL3).
 
+use super::debug::DebugPoints;
 use super::features::{Feature, Features};
 
 /// The Cortex-A57's `MIDR_EL1`: Arm Ltd, variant 1, architecture 0xF, part
@@ -138,18 +139,19 @@ pub(crate) const fn id_aa64smfr0(features: Features) -> u64 {
 /// priority, so `SMPRI_EL1` is RES0 and `HIP` RES0.
 pub(crate) const SMIDR_EL1: u64 = 0b10 << 13;
 
-/// `ID_AA64DFR0_EL1` of a processor implementing `features`: DebugVer
-/// (3:0) = 6 (Armv8.0 debug), 7 with FEAT_Debugv8p1, 8 with FEAT_Debugv8p2
-/// and 9 with FEAT_Debugv8p4 (each of which `Features.json` makes imply the
-/// one before), BRPs = 1 and WRPs = 1 (two of each, the architectural
-/// minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU), and DoubleLock (39:36) 0
-/// with FEAT_DoubleLock and 0b1111 without (`FEAT_DoubleLock <=>
+/// `ID_AA64DFR0_EL1` of a processor implementing `features` with the
+/// breakpoints and watchpoints `points`: DebugVer (3:0) = 6 (Armv8.0
+/// debug), 7 with FEAT_Debugv8p1, 8 with FEAT_Debugv8p2 and 9 with
+/// FEAT_Debugv8p4 (each of which `Features.json` makes imply the one
+/// before), BRPs (15:12), WRPs (23:20) and CTX_CMPs (31:28) the number of
+/// breakpoints, watchpoints and context-aware breakpoints, each less one,
+/// PMUVer = 0 (no PMU), and DoubleLock (39:36) 0 with
+/// FEAT_DoubleLock and 0b1111 without (`FEAT_DoubleLock <=>
 /// SInt(ID_AA64DFR0_EL1.DoubleLock) >= 0`). The Cortex-A57's reads
-/// 0x101006 where its TRM's 0x10305106 (DDI 0488H, 4.3.19) has six
-/// breakpoints, two of them context-aware, four watchpoints and PMUv3:
-/// the model has the debug registers `src/cpu/debug.rs` implements and no
-/// PMU.
-pub(crate) const fn id_aa64dfr0(features: Features) -> u64 {
+/// 0x10305006, its TRM's 0x10305106 (DDI 0488H, 4.3.19) but for PMUv3,
+/// which the model does not have; the Armv9.2 model's has two breakpoints,
+/// one of them context-aware, and two watchpoints.
+pub(crate) const fn id_aa64dfr0(features: Features, points: DebugPoints) -> u64 {
     let debug = chain_level(
         features,
         &[Feature::Debugv8p1, Feature::Debugv8p2, Feature::Debugv8p4],
@@ -159,7 +161,10 @@ pub(crate) const fn id_aa64dfr0(features: Features) -> u64 {
     } else {
         0xF << 36
     };
-    0x0000_0000_0010_1000 | double_lock | (6 + debug)
+    let brps = (points.breakpoints() as u64 - 1) << 12;
+    let wrps = (points.watchpoints() as u64 - 1) << 20;
+    let ctx_cmps = (points.context_aware() as u64 - 1) << 28;
+    ctx_cmps | wrps | brps | double_lock | (6 + debug)
 }
 
 /// `DBGAUTHSTATUS_EL1` of a processor implementing `features`, as Arm's

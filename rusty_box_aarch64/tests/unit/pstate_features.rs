@@ -692,14 +692,15 @@ fn spsr_holds_the_fields_only_with_their_features() {
 
     // The Cortex-A57's own image, with the fields set in SPSR_EL1: after
     // the feature set (16 bytes), the streaming vector length (4), MIDR_EL1
-    // and the counter frequency (8 each), X0-X30, SP_EL0, SP_EL1, the PC
-    // and PSTATE (8 each), V0-V31 (16 each), FPCR and FPSR (8 each), the
-    // seventh system register.
+    // and the counter frequency (8 each), the counts of breakpoints,
+    // context-aware breakpoints and watchpoints (1 each), X0-X30, SP_EL0,
+    // SP_EL1, the PC and PSTATE (8 each), V0-V31 (16 each), FPCR and FPSR
+    // (8 each), the seventh system register.
     let mut a57 = Machine::new(Implementation::CORTEX_A57);
     a57.cpu.sys.spsr_el1 = 0x3C5;
     let mut image = Vec::new();
     assert!(a57.cpu.save(&mut image).is_ok());
-    let at = 16 + 4 + 2 * 8 + 35 * 8 + 32 * 16 + 2 * 8 + 6 * 8;
+    let at = 16 + 4 + 2 * 8 + 3 + 35 * 8 + 32 * 16 + 2 * 8 + 6 * 8;
     let mut spsr = [0u8; 8];
     spsr.copy_from_slice(&image[at..at + 8]);
     assert_eq!(
@@ -748,12 +749,13 @@ fn a_snapshot_carries_the_fields() {
 
     // The Cortex-A57's own image, with SPSR's PAN bit set in its PSTATE:
     // after the feature set (16 bytes), the streaming vector length (4),
-    // MIDR_EL1 and the counter frequency (8 each), X0-X30, SP_EL0, SP_EL1
-    // and the PC (8 each).
+    // MIDR_EL1 and the counter frequency (8 each), the counts of
+    // breakpoints, context-aware breakpoints and watchpoints (1 each),
+    // X0-X30, SP_EL0, SP_EL1 and the PC (8 each).
     let a57 = Machine::new(Implementation::CORTEX_A57);
     let mut image = Vec::new();
     assert!(a57.cpu.save(&mut image).is_ok());
-    let at = 16 + 4 + 2 * 8 + 34 * 8;
+    let at = 16 + 4 + 2 * 8 + 3 + 34 * 8;
     let mut spsr = [0u8; 8];
     spsr.copy_from_slice(&image[at..at + 8]);
     assert_eq!(

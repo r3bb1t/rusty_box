@@ -77,7 +77,7 @@ pub(crate) const fn spsr_mask_of(features: Features) -> u64 {
 
 /// How many system register values a snapshot carries, in
 /// [`SysRegs::to_array`] order.
-const SYSREG_COUNT: usize = 49;
+const SYSREG_COUNT: usize = 61;
 
 impl SysRegs {
     pub(super) fn to_array(&self) -> [u64; SYSREG_COUNT] {
@@ -120,12 +120,24 @@ impl SysRegs {
             self.dbgclaim,
             self.dbgbvr[0],
             self.dbgbvr[1],
+            self.dbgbvr[2],
+            self.dbgbvr[3],
+            self.dbgbvr[4],
+            self.dbgbvr[5],
             self.dbgbcr[0],
             self.dbgbcr[1],
+            self.dbgbcr[2],
+            self.dbgbcr[3],
+            self.dbgbcr[4],
+            self.dbgbcr[5],
             self.dbgwvr[0],
             self.dbgwvr[1],
+            self.dbgwvr[2],
+            self.dbgwvr[3],
             self.dbgwcr[0],
             self.dbgwcr[1],
+            self.dbgwcr[2],
+            self.dbgwcr[3],
             self.disr_el1,
             u64::from(self.dtrrx),
             u64::from(self.dtrtx),
@@ -138,8 +150,12 @@ impl SysRegs {
     /// Channel data register wider than its 32 bits, and any of the debug
     /// registers or `RMR_ELx` with a bit set that no write stores.
     fn from_array(a: [u64; SYSREG_COUNT]) -> SnapResult<Self> {
-        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1, disr_el1, dtrrx, dtrtx, rvbar, rmr] =
+        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bvr2, bvr3, bvr4, bvr5, bcr0, bcr1, bcr2, bcr3, bcr4, bcr5, wvr0, wvr1, wvr2, wvr3, wcr0, wcr1, wcr2, wcr3, disr_el1, dtrrx, dtrtx, rvbar, rmr] =
             a;
+        let dbgbvr = [bvr0, bvr1, bvr2, bvr3, bvr4, bvr5];
+        let dbgbcr = [bcr0, bcr1, bcr2, bcr3, bcr4, bcr5];
+        let dbgwvr = [wvr0, wvr1, wvr2, wvr3];
+        let dbgwcr = [wcr0, wcr1, wcr2, wcr3];
         if rmr & !RMR_RR != 0 {
             return Err(SnapError::Invalid("RMR_ELx with a bit other than RR set"));
         }
@@ -152,10 +168,12 @@ impl SysRegs {
         if mdscr_el1 & !MDSCR_FIELDS != 0 {
             return Err(SnapError::Invalid("MDSCR_EL1 with a RES0 bit set"));
         }
-        if (bcr0 | bcr1) & !DBGBCR_FIELDS != 0 {
+        if dbgbcr.iter().any(|control| control & !DBGBCR_FIELDS != 0) {
             return Err(SnapError::Invalid("DBGBCR_EL1 with a RES0 bit set"));
         }
-        if (wcr0 | wcr1) & !DBGWCR_FIELDS != 0 || (wvr0 | wvr1) & 3 != 0 {
+        if dbgwcr.iter().any(|control| control & !DBGWCR_FIELDS != 0)
+            || dbgwvr.iter().any(|value| value & 3 != 0)
+        {
             return Err(SnapError::Invalid(
                 "a watchpoint register with a RES0 bit set",
             ));
@@ -211,10 +229,10 @@ impl SysRegs {
             oseccr_el1,
             dbgprcr_el1,
             dbgclaim,
-            dbgbvr: [bvr0, bvr1],
-            dbgbcr: [bcr0, bcr1],
-            dbgwvr: [wvr0, wvr1],
-            dbgwcr: [wcr0, wcr1],
+            dbgbvr,
+            dbgbcr,
+            dbgwvr,
+            dbgwcr,
             dtrrx,
             dtrtx,
             disr_el1,
@@ -295,7 +313,7 @@ impl<L: Levels> Cpu<L> {
         *svcr = sme::Svcr::RESET;
         *scalable = sme::ScalableRegs::ZERO;
         *pac_keys = pauth::PacKeys::RESET;
-        *sys = SysRegs::reset(imp.features, imp.counter_hz, reset_pc);
+        *sys = SysRegs::reset(imp.get(), reset_pc);
         *monitor = ExclusiveMonitor::CLEAR;
         *event = EventRegister::at(false, count);
         tlb.reset();
@@ -447,6 +465,9 @@ impl<L: Levels> Cpu<L> {
         w.write_u32(self.imp.max_svl.bits())?;
         w.write_u64(self.imp.midr)?;
         w.write_u64(self.imp.counter_hz.get())?;
+        w.write_u8(self.imp.debug.breakpoints() as u8)?;
+        w.write_u8(self.imp.debug.context_aware() as u8)?;
+        w.write_u8(self.imp.debug.watchpoints() as u8)?;
         for x in self.x {
             w.write_u64(x)?;
         }
@@ -496,8 +517,9 @@ impl<L: Levels> Cpu<L> {
     /// The inverse of [`Cpu::save`]. The interrupt inputs are not part of
     /// the image: the machine drives them from its interrupt controller.
     /// An image of another implementation — other features, another
-    /// streaming vector length, another `MIDR_EL1` or another system
-    /// counter — is refused before anything changes. An image refused
+    /// streaming vector length, another `MIDR_EL1`, another system counter
+    /// or other breakpoints and watchpoints — is refused before anything
+    /// changes. An image refused
     /// later leaves the TLB as out of reset, so that it holds nothing made
     /// under registers the processor may not hold.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
@@ -516,6 +538,9 @@ impl<L: Levels> Cpu<L> {
         let max_svl = r.read_u32()?;
         let midr = r.read_u64()?;
         let counter_hz = r.read_u64()?;
+        let breakpoints = usize::from(r.read_u8()?);
+        let context_aware = usize::from(r.read_u8()?);
+        let watchpoints = usize::from(r.read_u8()?);
         if features != self.imp.features.bits() || max_svl != self.imp.max_svl.bits() {
             return Err(SnapError::Invalid(
                 "snapshot of a processor implementing other features",
@@ -523,6 +548,15 @@ impl<L: Levels> Cpu<L> {
         }
         if midr != self.imp.midr || counter_hz != self.imp.counter_hz.get() {
             return Err(SnapError::Invalid("snapshot of another processor"));
+        }
+        let points = self.imp.debug;
+        if breakpoints != points.breakpoints()
+            || context_aware != points.context_aware()
+            || watchpoints != points.watchpoints()
+        {
+            return Err(SnapError::Invalid(
+                "snapshot of a processor with other breakpoints or watchpoints",
+            ));
         }
         Ok(())
     }
@@ -564,6 +598,11 @@ impl<L: Levels> Cpu<L> {
         }
         let el2 = self.read_el2(r)?;
         let sys = SysRegs::from_array(sys)?;
+        if !self.imp.debug.cover(&sys) {
+            return Err(SnapError::Invalid(
+                "snapshot holds a breakpoint or watchpoint this processor does not have",
+            ));
+        }
         if !self.sme_registers_restorable(&sys) {
             return Err(SnapError::Invalid(
                 "snapshot holds SME register bits this processor cannot set",
@@ -697,6 +736,7 @@ impl<L: Levels> Cpu<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::debug::DebugPoints;
     use crate::cpu::features::Implementation;
     use crate::cpu::{CpuConfig, NoEl2};
     use rusty_box_core::ClockHz;
@@ -818,9 +858,16 @@ mod tests {
 
     /// Where an image's system registers start: after the implementation's
     /// identity (its features, two words; its streaming vector length,
-    /// `MIDR_EL1` and counter frequency), X0-X30, SP_EL0, SP_EL1, PC,
-    /// PSTATE, V0-V31, FPCR and FPSR.
-    const SYSREGS_AT: usize = 16 + 4 + 8 + 8 + (31 + 4) * 8 + 32 * 16 + 2 * 8;
+    /// `MIDR_EL1`, counter frequency, and its counts of breakpoints,
+    /// context-aware breakpoints and watchpoints, a byte each), X0-X30,
+    /// SP_EL0, SP_EL1, PC, PSTATE, V0-V31, FPCR and FPSR.
+    const SYSREGS_AT: usize = 16 + 4 + 8 + 8 + 3 + (31 + 4) * 8 + 32 * 16 + 2 * 8;
+
+    /// Where an image's `DBGBVR<n>_EL1` start: after the 36 system
+    /// registers before them, `DBGCLAIMCLR_EL1`'s tags the last. Six of
+    /// them, then six `DBGBCR<n>_EL1`, four `DBGWVR<n>_EL1` and four
+    /// `DBGWCR<n>_EL1`.
+    const BREAKPOINTS_AT: usize = SYSREGS_AT + 36 * 8;
 
     /// Where an image's exclusive monitor starts on a processor without
     /// EL2, whose image holds no EL2 registers: its armed flag, then its
@@ -1073,5 +1120,89 @@ mod tests {
             );
             assert_eq!(other.state(), before);
         }
+    }
+
+    /// An image is refused by a processor with other breakpoints or
+    /// watchpoints, the rest of its implementation the same, before
+    /// anything changes.
+    #[test]
+    fn an_image_of_a_processor_with_other_debug_points_is_refused() {
+        let mut image = std::vec::Vec::new();
+        cpu().save(&mut image).expect("save");
+        let mut other = Cpu::<NoEl2>::implementing(
+            CpuConfig {
+                ips: ClockHz::BOCHS_DEFAULT,
+                reset_pc: 0x1000,
+            },
+            Implementation {
+                debug: DebugPoints::ARMV9P2,
+                ..IMP
+            },
+        );
+        let before = other.state();
+        assert_eq!(
+            other.restore(&mut image.as_slice()),
+            Err(SnapError::Invalid(
+                "snapshot of a processor with other breakpoints or watchpoints"
+            ))
+        );
+        assert_eq!(other.state(), before);
+    }
+
+    /// An image holding a value in a register of a breakpoint or watchpoint
+    /// the processor does not have is refused: the Armv9.2 model's third
+    /// breakpoint or watchpoint, which the Cortex-A57 has and restores.
+    #[test]
+    fn a_processor_snapshot_holding_a_debug_point_beyond_its_own_is_refused() {
+        let armv9 = || {
+            Cpu::<NoEl2>::implementing(
+                CpuConfig {
+                    ips: ClockHz::BOCHS_DEFAULT,
+                    reset_pc: 0x1000,
+                },
+                Implementation {
+                    counter_hz: ClockHz::BOCHS_DEFAULT,
+                    ..Implementation::ARMV9P2
+                },
+            )
+        };
+        // (index past BREAKPOINTS_AT, a value the register stores): DBGBVR2,
+        // DBGBCR2 enabled, DBGWVR2, DBGWCR2 enabled.
+        let slots = [(2, 0x4000), (6 + 2, 1), (12 + 2, 0x4000), (16 + 2, 1)];
+        let mut image = std::vec::Vec::new();
+        armv9().save(&mut image).expect("save");
+        for (index, value) in slots {
+            let at = BREAKPOINTS_AT + index * 8;
+            assert_eq!(&image[at..at + 8], &[0; 8], "slot {index} out of reset");
+            let mut beyond = image.clone();
+            beyond[at..at + 8].copy_from_slice(&u64::to_le_bytes(value));
+            let mut restored = armv9();
+            assert_eq!(
+                restored.restore(&mut beyond.as_slice()),
+                Err(SnapError::Invalid(
+                    "snapshot holds a breakpoint or watchpoint this processor does not have"
+                )),
+                "slot {index}"
+            );
+            assert_eq!(
+                restored.sys.to_array(),
+                armv9().sys.to_array(),
+                "a refused image changes nothing"
+            );
+        }
+
+        let mut image = std::vec::Vec::new();
+        cpu().save(&mut image).expect("save");
+        for (index, value) in slots {
+            let at = BREAKPOINTS_AT + index * 8;
+            image[at..at + 8].copy_from_slice(&u64::to_le_bytes(value));
+        }
+        let mut restored = cpu();
+        restored.restore(&mut image.as_slice()).expect("restore");
+        let s = &restored.sys;
+        assert_eq!(
+            [s.dbgbvr[2], s.dbgbcr[2], s.dbgwvr[2], s.dbgwcr[2]],
+            [0x4000, 1, 0x4000, 1]
+        );
     }
 }

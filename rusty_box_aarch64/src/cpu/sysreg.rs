@@ -19,6 +19,7 @@
 //! from EL0, which `HCR_EL2.TGE` takes to EL2), a trap an EL2 control raises
 //! [`Route::El2`] (`AArch64_SystemAccessTrap(EL2, ..)`).
 
+use super::debug::DebugPoints;
 use super::el2::{
     has_contextidr_el2, El2Reg, CNTHCTL_EL1PCEN, CNTHCTL_EL1PCTEN, CNTHCTL_EL1TVCT, CNTHCTL_EL1TVT,
     CPTR_TCPAC, HCR_AMO, HCR_APK, HCR_FIEN, HCR_TACR, HCR_TERR, HCR_TID1, HCR_TID2, HCR_TID3,
@@ -201,12 +202,12 @@ const fn key_half(k: u32) -> Option<KeyHalf> {
     })
 }
 
-/// A breakpoint or watchpoint register, of the two of each that
-/// `ID_AA64DFR0_EL1` advertises.
+/// A breakpoint or watchpoint register, of the breakpoints and watchpoints
+/// the processor has and `ID_AA64DFR0_EL1` advertises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DebugPoint {
     reg: DebugPointReg,
-    /// Which breakpoint or watchpoint: 0 or 1.
+    /// Which breakpoint or watchpoint: below the processor's count of them.
     n: usize,
 }
 
@@ -221,23 +222,25 @@ enum DebugPointReg {
 }
 
 impl DebugPoint {
-    /// The register `key` names, if it names one (`op0=2, op1=0, CRn=0,
-    /// CRm=n, op2=4..7`): the one decoding of these encodings.
-    fn of(key: SysRegKey) -> Option<Self> {
-        if key.op0() != 2 || key.op1() != 0 || key.crn() != 0 || key.crm() > 1 {
+    /// The register `key` names (`op0=2, op1=0, CRn=0, CRm=n, op2=4..7`),
+    /// if it is one of a breakpoint or watchpoint of `points`: the one
+    /// decoding of these encodings. Those of a breakpoint or watchpoint
+    /// beyond them are UNDEFINED, ahead of every trap (Arm's accessors of
+    /// `DBGBVR<n>_EL1` and the others: `m >= NUM_BREAKPOINTS`, `m >=
+    /// NUM_WATCHPOINTS`).
+    fn of(key: SysRegKey, points: DebugPoints) -> Option<Self> {
+        if key.op0() != 2 || key.op1() != 0 || key.crn() != 0 {
             return None;
         }
-        let reg = match key.op2() {
-            4 => DebugPointReg::Bvr,
-            5 => DebugPointReg::Bcr,
-            6 => DebugPointReg::Wvr,
-            7 => DebugPointReg::Wcr,
+        let (reg, count) = match key.op2() {
+            4 => (DebugPointReg::Bvr, points.breakpoints()),
+            5 => (DebugPointReg::Bcr, points.breakpoints()),
+            6 => (DebugPointReg::Wvr, points.watchpoints()),
+            7 => (DebugPointReg::Wcr, points.watchpoints()),
             _ => return None,
         };
-        Some(Self {
-            reg,
-            n: key.crm() as usize,
-        })
+        let n = key.crm() as usize;
+        (n < count).then_some(Self { reg, n })
     }
 }
 const SPSR_EL1: u32 = key!(3, 0, 4, 0, 0);
@@ -1112,7 +1115,7 @@ impl<L: Levels> Cpu<L> {
             ID_AA64PFR1_EL1 => id::id_aa64pfr1(self.imp.features),
             ID_AA64ZFR0_EL1 => id::id_aa64zfr0(self.imp.features),
             ID_AA64SMFR0_EL1 => id::id_aa64smfr0(self.imp.features),
-            ID_AA64DFR0_EL1 => id::id_aa64dfr0(self.imp.features),
+            ID_AA64DFR0_EL1 => id::id_aa64dfr0(self.imp.features, self.imp.debug),
             ID_AA64ISAR0_EL1 => id::id_aa64isar0(self.imp.features),
             ID_AA64ISAR1_EL1 => id::id_aa64isar1(self.imp.features),
             ID_AA64ISAR2_EL1 => id::id_aa64isar2(self.imp.features),
@@ -1328,7 +1331,7 @@ impl<L: Levels> Cpu<L> {
                 }
             }
             _ => {
-                if let Some(point) = DebugPoint::of(key) {
+                if let Some(point) = DebugPoint::of(key, self.imp.debug) {
                     self.debug_check(el, MDCR_TDA)?;
                     self.debug_point(point)
                 } else if key.in_id_group3() {
@@ -1373,7 +1376,7 @@ impl<L: Levels> Cpu<L> {
 
     /// The value of breakpoint or watchpoint register `point`.
     fn debug_point(&self, point: DebugPoint) -> u64 {
-        let regs = match point.reg {
+        let regs: &[u64] = match point.reg {
             DebugPointReg::Bvr => &self.sys.dbgbvr,
             DebugPointReg::Bcr => &self.sys.dbgbcr,
             DebugPointReg::Wvr => &self.sys.dbgwvr,
@@ -1786,7 +1789,7 @@ impl<L: Levels> Cpu<L> {
                 WriteEffect::None
             }
             _ => {
-                let Some(point) = DebugPoint::of(key) else {
+                let Some(point) = DebugPoint::of(key, self.imp.debug) else {
                     return Err(SysRegError::Undefined);
                 };
                 self.debug_check(el, MDCR_TDA)?;

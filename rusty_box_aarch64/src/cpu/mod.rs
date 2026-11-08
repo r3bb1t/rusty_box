@@ -485,10 +485,14 @@ pub(crate) struct SysRegs {
     pub(crate) oseccr_el1: u64,
     pub(crate) dbgprcr_el1: u64,
     pub(crate) dbgclaim: u64,
-    pub(crate) dbgbvr: [u64; 2],
-    pub(crate) dbgbcr: [u64; 2],
-    pub(crate) dbgwvr: [u64; 2],
-    pub(crate) dbgwcr: [u64; 2],
+    /// `DBGBVR<n>_EL1` and `DBGBCR<n>_EL1`, and `DBGWVR<n>_EL1` and
+    /// `DBGWCR<n>_EL1`, sized for the model with the most; those of a
+    /// breakpoint or watchpoint beyond the processor's
+    /// ([`debug::DebugPoints`]) stay zero.
+    pub(crate) dbgbvr: [u64; debug::MAX_BREAKPOINTS],
+    pub(crate) dbgbcr: [u64; debug::MAX_BREAKPOINTS],
+    pub(crate) dbgwvr: [u64; debug::MAX_WATCHPOINTS],
+    pub(crate) dbgwcr: [u64; debug::MAX_WATCHPOINTS],
     /// The Debug Communications Channel's data registers, DTRRX and DTRTX,
     /// 32 bits each; their flags, RXfull and TXfull, are in `mdscr_el1`.
     pub(crate) dtrrx: u32,
@@ -509,13 +513,13 @@ pub(crate) struct SysRegs {
 }
 
 impl SysRegs {
-    /// The registers out of reset on a processor implementing `features`
-    /// whose counter runs at `counter_hz`, started at `reset_pc`: the
-    /// Cortex-A57 TRM's values, a control zero and a value the board's fill
-    /// ([`reset`] says which is which, and why), each kept to the bits an
-    /// `MSR` keeps.
-    fn reset(features: features::Features, counter_hz: ClockHz, reset_pc: u64) -> Self {
+    /// The registers out of reset on a processor of `imp`, started at
+    /// `reset_pc`: the Cortex-A57 TRM's values, a control zero and a value
+    /// the board's fill ([`reset`] says which is which, and why), each kept
+    /// to the bits an `MSR` keeps.
+    fn reset(imp: features::Implementation, reset_pc: u64) -> Self {
         use regs::SysReg;
+        let features = imp.features;
         Self {
             sctlr_el1: id::SCTLR_EL1_RESET,
             actlr_el1: 0,
@@ -546,7 +550,7 @@ impl SysRegs {
             smcr_el1: 0,
             csselr_el1: 0,
             cntkctl_el1: 0,
-            cntfrq_el0: counter_hz.get(),
+            cntfrq_el0: imp.counter_hz.get(),
             cntp_ctl_el0: 0,
             cntp_cval_el0: reset::value_of(SysReg::CNTP_CVAL_EL0),
             cntv_ctl_el0: 0,
@@ -558,16 +562,10 @@ impl SysRegs {
             oseccr_el1: 0,
             dbgprcr_el1: 0,
             dbgclaim: 0,
-            dbgbvr: [
-                reset::value_of(reset::dbgbvr(0)),
-                reset::value_of(reset::dbgbvr(1)),
-            ],
-            dbgbcr: [0; 2],
-            dbgwvr: [
-                reset::value_of(reset::dbgwvr(0)) & !3,
-                reset::value_of(reset::dbgwvr(1)) & !3,
-            ],
-            dbgwcr: [0; 2],
+            dbgbvr: reset::breakpoint_values(imp.debug),
+            dbgbcr: [0; debug::MAX_BREAKPOINTS],
+            dbgwvr: reset::watchpoint_values(imp.debug),
+            dbgwcr: [0; debug::MAX_WATCHPOINTS],
             dtrrx: reset::low_word_of(reset::DBGDTR_RXTX) as u32,
             dtrtx: reset::low_word_of(reset::DBGDTR_RXTX) as u32,
             disr_el1: 0,
@@ -701,7 +699,7 @@ impl<L: Levels> Cpu<L> {
             scalable: sme::ScalableRegs::ZERO,
             pac_keys: pauth::PacKeys::RESET,
             imp,
-            sys: SysRegs::reset(imp.features, imp.counter_hz, config.reset_pc),
+            sys: SysRegs::reset(imp.get(), config.reset_pc),
             monitor: ExclusiveMonitor::CLEAR,
             event: wait::EventRegister::at(false, timer::Count::new(0)),
             tlb: Tlb::new(),

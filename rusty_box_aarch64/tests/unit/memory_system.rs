@@ -722,8 +722,9 @@ fn a_snapshot_of_another_processor_is_refused_with_nothing_changed() {
     const EL0_READ_WRITE: u64 = 0b01 << 6;
     const XN_BOTH: u64 = (1 << 54) | (1 << 53);
     /// The implementation a snapshot opens with: its features, streaming
-    /// vector length, `MIDR_EL1` and system counter.
-    const IMPLEMENTATION_BYTES: usize = 16 + 4 + 8 + 8;
+    /// vector length, `MIDR_EL1`, system counter, and counts of
+    /// breakpoints, context-aware breakpoints and watchpoints.
+    const IMPLEMENTATION_BYTES: usize = 16 + 4 + 8 + 8 + 3;
     let mut m = Machine::new(Implementation::CORTEX_A57);
     let put = |m: &mut Machine, at: u64, value: u64| {
         let at = at as usize;
