@@ -2516,11 +2516,12 @@ fn a_stage_2_fault_is_taken_to_el2_with_the_ipa() {
     let mut m = stage2();
     m.at(El::El1);
     m.cpu.x[1] = S2_UNMAPPED;
+    let el1_syndrome = (m.cpu.sys.esr_el1, m.cpu.sys.far_el1);
     let syndrome = ISV | sas(3) | srt(2) | SF;
     assert_eq!(m.run(LDR), stage2_abort(syndrome | TRANSLATION_L2));
     let el2 = m.cpu.el2();
     assert_eq!((el2.far, el2.hpfar), (S2_UNMAPPED, fipa(S2_UNMAPPED)));
-    assert_eq!((m.cpu.sys.esr_el1, m.cpu.sys.far_el1), (0, 0));
+    assert_eq!((m.cpu.sys.esr_el1, m.cpu.sys.far_el1), el1_syndrome);
 
     let entry = S2_L2 + 8 * (S2_UNMAPPED >> 21);
     let rw = INNER_SHAREABLE | S2AP_R | S2AP_W | S2_NORMAL | BLOCK;

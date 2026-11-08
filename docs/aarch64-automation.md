@@ -57,8 +57,10 @@ A Linux kernel, loaded without firmware as Linux's arm64 boot protocol
 `text_offset` above the base of RAM; the device tree, with `/chosen` filled
 in, in the 2 MiB block at the first 2 MiB boundary after the kernel's
 `image_size`; the initramfs at the next 2 MiB boundary; and the processor at
-the kernel's entry with `x0` pointing at the tree and every other
-general-purpose register zero. An `Image` too old to give its size (before
+the kernel's entry with `x0` pointing at the tree, `x1` to `x3` zero, and
+every other register as reset leaves it: `xn` holds the board's fill,
+0xA5A5_A5A5_A5A5_00nn, where the protocol leaves the value open. An `Image`
+too old to give its size (before
 v3.17) loads at 0x80000, with the tree in the last 2 MiB block below the end
 of RAM or 512 MiB, whichever is lower, and the initramfs just below it,
 leaving the kernel the most room. `BuildError::Placement` names what does

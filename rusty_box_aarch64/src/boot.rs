@@ -9,7 +9,9 @@
 //! state at the kernel's entry (§4) — `x0` the device tree's physical
 //! address and `x1` to `x3` zero, at the processor's reset level (EL2 with
 //! FEAT_EL2, EL1 without) with the MMU off and interrupts masked. Every
-//! other general-purpose register is zero, its reset value. QEMU's
+//! other register holds its reset value, which for the general-purpose
+//! registers and the stack pointer is the board's fill (`cpu::reset`), as
+//! the protocol names no value for them. QEMU's
 //! `hw/arm/boot.c` (`arm_load_dtb`) for the `/chosen` properties.
 //!
 //! Where booting.rst leaves the placement open, the rule is the board's own

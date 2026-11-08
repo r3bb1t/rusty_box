@@ -3,10 +3,32 @@
 //! Ordering of side effects follows the pseudocode: the address is formed
 //! from the base before the access, the access happens (and may fault, in
 //! which case nothing is written back), then the base is written back.
-//! Where the architecture leaves a combination CONSTRAINED UNPREDICTABLE
-//! (writeback into the transfer register, a load pair into one register),
-//! the choice made is the one QEMU makes, so the reference and this
-//! interpreter agree: loaded registers are written first, the base last.
+//!
+//! Where the registers an encoding names overlap, Arm's decode pseudocode
+//! makes it CONSTRAINED UNPREDICTABLE and lists what the processor may do;
+//! UNDEFINED is on every list, and it is this processor's choice for every
+//! one ([`registers_overlap`]): `Unpredictable_WBOVERLAPLD` (a load with
+//! writeback whose base, not SP, is a transfer register: the writeback
+//! suppressed, an UNKNOWN base, UNDEFINED or a NOP), `WBOVERLAPST` (the
+//! same for a store: the original value stored, an UNKNOWN value,
+//! UNDEFINED or a NOP), `LDPOVERLAP` (a load pair, of general-purpose or
+//! SIMD&FP registers, or a load-exclusive pair, into one register: an
+//! UNKNOWN value, UNDEFINED or a NOP), and a store-exclusive's
+//! `DATAOVERLAP` (its status register a transfer register) and
+//! `BASEOVERLAP` (its status register the base, not SP), each an UNKNOWN
+//! value or address, UNDEFINED or a NOP (`ldr_imm_gen.xml`,
+//! `str_imm_gen.xml`, `ldp_gen.xml`, `stp_gen.xml`, `ldpsw.xml`,
+//! `ldnp_gen.xml`, `ldp_fpsimd.xml`, `ldnp_fpsimd.xml`, `ldxp.xml`,
+//! `stxr.xml`, `stxp.xml` and their siblings; `ldra.xml` for LDRAA and
+//! LDRAB). The Cortex-A57 TRM (DDI 0488H) states the A57's choice for
+//! none of them (its Appendix B covers AArch32 alone), so both models take
+//! the board's: UNDEFINED is the one choice that tells the guest at the
+//! instruction, before any access, that it asked for something the
+//! architecture does not define, where each other leaves a register
+//! silently holding a value the program did not mean. Assemblers refuse
+//! or warn on these encodings, so compiled code has none. The check is
+//! part of decode (`EndOfDecode(Decode_UNDEF)`), so it comes before any
+//! trap of the SIMD&FP registers, SP alignment check or authentication.
 
 use super::dp::extend_reg;
 use super::exception::AccessSyndrome;
@@ -27,6 +49,35 @@ pub(crate) enum SingleForm {
     Immediate9,
     /// Load/store register (register offset).
     RegisterOffset,
+}
+
+/// Whether a load or store of general-purpose registers whose encoding
+/// names the registers below is one this processor takes as UNDEFINED, its
+/// registers overlapping where Arm's decode makes the instruction
+/// CONSTRAINED UNPREDICTABLE (module documentation): with `writeback`, a
+/// base `rn` other than SP that is `rt` or, for a pair, `rt2`; a load
+/// `pair` into one register, `rt` = `rt2`. A pair of SIMD&FP registers
+/// passes `writeback` false, its base being a general-purpose register
+/// that none of them is.
+pub(crate) const fn registers_overlap(
+    load: bool,
+    pair: bool,
+    writeback: bool,
+    rn: u32,
+    rt: u32,
+    rt2: u32,
+) -> bool {
+    let base_transferred = writeback && rn != 31 && (rn == rt || (pair && rn == rt2));
+    let one_destination = load && pair && rt == rt2;
+    base_transferred || one_destination
+}
+
+/// Whether a store-exclusive is one this processor takes as UNDEFINED: its
+/// status register `rs` is a transfer register, `rt` or for a pair `rt2`
+/// (`Unpredictable_DATAOVERLAP`), or its base `rn` other than SP
+/// (`Unpredictable_BASEOVERLAP`).
+const fn status_overlaps(pair: bool, rs: u32, rn: u32, rt: u32, rt2: u32) -> bool {
+    rs == rt || (pair && rs == rt2) || (rs == rn && rn != 31)
 }
 
 /// Where a single-register access goes and what happens to the base after.
@@ -74,9 +125,12 @@ impl<L: Levels> Cpu<L> {
         // `option<1>` (`ldr_reg_fpsimd.xml`, `ldr_reg_gen.xml`: "sub-word
         // index").
         let unprivileged = form == SingleForm::Immediate9 && bits(insn, 11, 10) == 0b10;
+        // Post-indexed (01) and pre-indexed (11) write the base back.
+        let writeback = form == SingleForm::Immediate9 && bit(insn, 10);
         if (vector && (scale > 4 || unprivileged))
             || (!vector && opc == 3 && size >= 2)
             || (form == SingleForm::RegisterOffset && bits(insn, 15, 13) & 2 == 0)
+            || (!vector && registers_overlap(opc != 0, false, writeback, rn, rt, rt))
         {
             return self.undefined(pc, insn);
         }
@@ -282,6 +336,11 @@ impl<L: Levels> Cpu<L> {
             (true, 2) => (4, false),
             _ => return self.undefined(pc, insn),
         };
+        // Post-indexed (01) and pre-indexed (11) write the base back.
+        let writeback = index & 1 == 1;
+        if registers_overlap(load, true, writeback && !vector, rn, rt, rt2) {
+            return self.undefined(pc, insn);
+        }
         if vector {
             self.fp_check()?;
         }
@@ -338,18 +397,8 @@ impl<L: Levels> Cpu<L> {
                 } else {
                     (a, b)
                 };
-                // With Rt == Rt2 the result is CONSTRAINED UNPREDICTABLE.
-                // QEMU (translate-a64.c `trans_LDP`) loads a 32-bit pair as
-                // one 64-bit value and writes Rt2 then Rt, but splits a
-                // 64-bit pair writing Rt then Rt2; the same order is kept
-                // here.
-                if scale == 2 {
-                    self.set_x_or_zr(rt2, b);
-                    self.set_x_or_zr(rt, a);
-                } else {
-                    self.set_x_or_zr(rt, a);
-                    self.set_x_or_zr(rt2, b);
-                }
+                self.set_x_or_zr(rt, a);
+                self.set_x_or_zr(rt2, b);
             } else {
                 let value = ElementPair {
                     first: self.x_or_zr(rt),
@@ -412,8 +461,15 @@ impl<L: Levels> Cpu<L> {
             return Ok(Flow::Next);
         }
 
-        // Pairs exist only for 32- and 64-bit registers.
-        if pair && size < 2 {
+        // Pairs exist only for 32- and 64-bit registers; a load pair into
+        // one register, and a store whose status register is a transfer
+        // register or the base, are UNDEFINED here.
+        let overlap = if load {
+            registers_overlap(true, pair, false, rn, rt, rt2)
+        } else {
+            status_overlaps(pair, rs, rn, rt, rt2)
+        };
+        if (pair && size < 2) || overlap {
             return self.undefined(pc, insn);
         }
         let address = self.base_register(rn)?;

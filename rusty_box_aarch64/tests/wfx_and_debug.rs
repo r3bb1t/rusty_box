@@ -244,6 +244,10 @@ fn run(ram: &mut [u8], setup: Setup, instructions: u64) -> VirtMachine<LentStora
     m.sysreg_write(SysReg::SCTLR_EL1, sctlr & !(SCTLR_NTWI | SCTLR_NTWE))
         .expect("SCTLR");
     m.sysreg_write(SysReg::VBAR_EL1, VBAR).expect("VBAR");
+    // x5 and x6, the flags each program sets as it gets past a step, start
+    // clear.
+    m.reg_write(Reg::X5, 0);
+    m.reg_write(Reg::X6, 0);
     m.reg_write(Reg::X10, u64::from(setup.raise_irq));
     m.reg_write(Reg::X11, setup.cntkctl);
     m.reg_write(Reg::X12, setup.mdscr);
@@ -271,6 +275,7 @@ fn run_el1<'a>(
             .expect("the program is in RAM");
     }
     m.reg_write(Reg::Pc, RAM_BASE + code);
+    m.reg_write(Reg::X5, 0);
     for &(reg, value) in regs {
         m.reg_write(reg, value);
     }
@@ -375,7 +380,12 @@ fn with_no_debugger_the_channel_receives_nothing_and_its_transmit_stays_full() {
         TXFULL,
         "MDCCSR_EL0 after a write: TXfull, and RXfull clear"
     );
-    assert_eq!(m.reg_read(Reg::X3), 0, "OSDTRRX_EL1");
+    assert_eq!(
+        m.reg_read(Reg::X3),
+        0xA5A5_9828,
+        "OSDTRRX_EL1: DTRRX as reset leaves it, the board's fill naming \
+         DBGDTRRX_EL0"
+    );
 }
 
 /// Linux's `hvc_dcc_check` (drivers/tty/hvc/hvc_dcc.c): write a character,

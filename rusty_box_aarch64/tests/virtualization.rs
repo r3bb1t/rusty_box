@@ -771,7 +771,14 @@ fn a_kernel_booted_with_el2_finds_all_of_it_in_its_device_tree() {
     assert_eq!(m.pstate().el, El::El2);
     assert_eq!(m.reg_read(Reg::Pc), RAM_BASE, "text_offset 0 from the base of RAM");
     assert_eq!(m.reg_read(Reg::X0), RAM_BASE + 2 * MIB, "the tree after the kernel");
-    assert_eq!(m.reg_read(Reg::X4), 0);
+    for reserved in [Reg::X1, Reg::X2, Reg::X3] {
+        assert_eq!(m.reg_read(reserved), 0, "booting.rst §4: {reserved:?}");
+    }
+    assert_eq!(
+        m.reg_read(Reg::X4),
+        0xA5A5_A5A5_A5A5_0004,
+        "x4 as reset leaves it, the board's fill, not an entry address"
+    );
     let tree = m.device_tree();
     let prop = |node: &str, name: &str| {
         fdt::property(tree, node, name)

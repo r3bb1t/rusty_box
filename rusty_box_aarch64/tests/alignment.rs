@@ -212,11 +212,12 @@ fn a_q_register_load_from_device_memory_needs_16_byte_alignment() {
     // With the MMU off, data accesses are to Device memory.
     let at = RAM_BASE + 0x1008;
     m.reg_write(Reg::X1, at);
+    let q0 = m.vreg_read(v(0));
     let (esr, far) = fault(&mut m);
     assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");
     assert_eq!(esr & WNR, 0);
     assert_eq!(far, at);
-    assert_eq!(m.vreg_read(v(0)), 0, "Q0 is not loaded");
+    assert_eq!(m.vreg_read(v(0)), q0, "Q0 is not loaded");
 }
 
 #[test]

@@ -66,6 +66,7 @@ mod poll;
 mod pstate_features;
 mod regime;
 mod regs;
+mod reset;
 mod sctlr;
 mod simd;
 mod simd_arith;
@@ -234,12 +235,14 @@ impl Pstate {
     /// is EL1 (Arm `AArch64_TakeReset`): EL1 with `SP_EL1`, every interrupt
     /// masked, DIT clear. PAN and UAO, which reset leaves UNKNOWN, and SSBS,
     /// which it sets to an IMPLEMENTATION DEFINED value, are clear: this
-    /// processor's choice for each.
+    /// processor's choice for each, as for every control (`cpu::reset`).
+    /// N, Z, C and V, which reset leaves ARBITRARY, are the board's fill's
+    /// (`reset::NZCV`): N and C set.
     pub const RESET: Self = Self {
-        n: false,
-        z: false,
-        c: false,
-        v: false,
+        n: reset::NZCV & (1 << 31) != 0,
+        z: reset::NZCV & (1 << 30) != 0,
+        c: reset::NZCV & (1 << 29) != 0,
+        v: reset::NZCV & (1 << 28) != 0,
         d: true,
         a: true,
         i: true,
@@ -466,7 +469,8 @@ pub(crate) struct SysRegs {
     pub(crate) smcr_el1: u64,
     /// `CSSELR_EL1`'s Level and InD as last written, which a read maps
     /// onto a cache the processor has (`id::Caches::selection`); 0, the L1
-    /// data cache, at reset, where Arm leaves them UNKNOWN.
+    /// data cache, at reset, where Arm and the Cortex-A57 TRM leave them
+    /// UNKNOWN: the board's choice for a selector (`reset`).
     pub(crate) csselr_el1: u64,
     pub(crate) cntkctl_el1: u64,
     pub(crate) cntfrq_el0: u64,
@@ -505,37 +509,48 @@ pub(crate) struct SysRegs {
 }
 
 impl SysRegs {
-    fn reset(counter_hz: ClockHz, reset_pc: u64) -> Self {
+    /// The registers out of reset on a processor implementing `features`
+    /// whose counter runs at `counter_hz`, started at `reset_pc`: the
+    /// Cortex-A57 TRM's values, a control zero and a value the board's fill
+    /// ([`reset`] says which is which, and why), each kept to the bits an
+    /// `MSR` keeps.
+    fn reset(features: features::Features, counter_hz: ClockHz, reset_pc: u64) -> Self {
+        use regs::SysReg;
         Self {
             sctlr_el1: id::SCTLR_EL1_RESET,
             actlr_el1: 0,
             cpacr_el1: 0,
-            ttbr0_el1: 0,
-            ttbr1_el1: 0,
+            ttbr0_el1: reset::low_word_of(SysReg::TTBR0_EL1),
+            ttbr1_el1: reset::low_word_of(SysReg::TTBR1_EL1),
             tcr_el1: 0,
-            spsr_el1: 0,
-            elr_el1: 0,
-            esr_el1: 0,
-            far_el1: 0,
+            spsr_el1: reset::value_of(SysReg::SPSR_EL1) & state::spsr_mask_of(features),
+            elr_el1: reset::value_of(SysReg::ELR_EL1),
+            esr_el1: reset::low_word_of(SysReg::ESR_EL1),
+            far_el1: reset::low_word_of(SysReg::FAR_EL1),
             afsr0_el1: 0,
             afsr1_el1: 0,
-            par_el1: 0,
+            par_el1: reset::low_word_of(SysReg::PAR_EL1),
             mair_el1: 0,
             amair_el1: 0,
-            vbar_el1: 0,
-            contextidr_el1: 0,
-            tpidr_el0: 0,
-            tpidrro_el0: 0,
-            tpidr_el1: 0,
-            tpidr2_el0: 0,
+            // Bits 10:0 are RES0.
+            vbar_el1: reset::low_word_of(SysReg::VBAR_EL1) & !0x7FF,
+            contextidr_el1: reset::low_word_of(SysReg::CONTEXTIDR_EL1),
+            tpidr_el0: reset::value_of(SysReg::TPIDR_EL0),
+            tpidrro_el0: reset::value_of(SysReg::TPIDRRO_EL0),
+            tpidr_el1: reset::value_of(SysReg::TPIDR_EL1),
+            tpidr2_el0: if features.has(features::Feature::Sme) {
+                reset::value_of(reset::TPIDR2_EL0)
+            } else {
+                0
+            },
             smcr_el1: 0,
             csselr_el1: 0,
             cntkctl_el1: 0,
             cntfrq_el0: counter_hz.get(),
             cntp_ctl_el0: 0,
-            cntp_cval_el0: 0,
+            cntp_cval_el0: reset::value_of(SysReg::CNTP_CVAL_EL0),
             cntv_ctl_el0: 0,
-            cntv_cval_el0: 0,
+            cntv_cval_el0: reset::value_of(SysReg::CNTV_CVAL_EL0),
             mdscr_el1: 0,
             mdccint_el1: 0,
             oslsr_el1: id::OSLSR_EL1_RESET,
@@ -543,12 +558,18 @@ impl SysRegs {
             oseccr_el1: 0,
             dbgprcr_el1: 0,
             dbgclaim: 0,
-            dbgbvr: [0; 2],
+            dbgbvr: [
+                reset::value_of(reset::dbgbvr(0)),
+                reset::value_of(reset::dbgbvr(1)),
+            ],
             dbgbcr: [0; 2],
-            dbgwvr: [0; 2],
+            dbgwvr: [
+                reset::value_of(reset::dbgwvr(0)) & !3,
+                reset::value_of(reset::dbgwvr(1)) & !3,
+            ],
             dbgwcr: [0; 2],
-            dtrrx: 0,
-            dtrtx: 0,
+            dtrrx: reset::low_word_of(reset::DBGDTR_RXTX) as u32,
+            dtrtx: reset::low_word_of(reset::DBGDTR_RXTX) as u32,
             disr_el1: 0,
             rvbar: reset_pc,
             rmr: 0,
@@ -667,20 +688,20 @@ impl<L: Levels> Cpu<L> {
     /// reset state.
     pub(crate) fn leveled(config: CpuConfig, imp: features::LeveledImplementation<L>) -> Self {
         Self {
-            x: [0; 31],
-            sp_el0: 0,
-            sp_el1: 0,
+            x: reset::GENERAL,
+            sp_el0: reset::SP_EL0,
+            sp_el1: reset::SP_EL1,
             el2_state: L::State::keep(el2::El2State::reset(imp)),
             pc: config.reset_pc,
             pstate: Pstate::reset::<L>(),
-            v: [0; 32],
+            v: reset::SIMD_FP,
             fpcr: 0,
             fpsr: 0,
             svcr: sme::Svcr::RESET,
             scalable: sme::ScalableRegs::ZERO,
             pac_keys: pauth::PacKeys::RESET,
             imp,
-            sys: SysRegs::reset(imp.counter_hz, config.reset_pc),
+            sys: SysRegs::reset(imp.features, imp.counter_hz, config.reset_pc),
             monitor: ExclusiveMonitor::CLEAR,
             event: wait::EventRegister::at(false, timer::Count::new(0)),
             tlb: Tlb::new(),

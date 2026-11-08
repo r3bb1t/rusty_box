@@ -19,7 +19,8 @@
 //! data byte equal the reference's.
 //!
 //! A word the reference executed may be UNDEFINED here. Such a vector is
-//! skipped only for the reason [`should_be_field_set`] names; any other
+//! skipped only for the reasons [`should_be_field_set`] and
+//! [`registers_overlap`] name; any other
 //! UNDEFINED word, and any step that stops the machine, fails the test.
 //! Failure messages show disarm64's disassembly of the word.
 //!
@@ -1050,6 +1051,7 @@ fn add_and_sub_immediate_with_shift_1x_are_undefined() {
         )
         .expect("a processor without EL2");
         cpu.x[1] = 41;
+        let x0 = cpu.x[0];
         let mut bus = TestBus {
             insn,
             data: std::vec![0; DATA_SIZE],
@@ -1060,7 +1062,7 @@ fn add_and_sub_immediate_with_shift_1x_are_undefined() {
             "{text}"
         );
         assert_eq!(cpu.sys.esr_el1 >> 26, 0x00, "{text}: UNDEFINED");
-        assert_eq!(cpu.x[0], 0, "{text}: nothing written");
+        assert_eq!(cpu.x[0], x0, "{text}: nothing written");
     }
 }
 
@@ -1413,8 +1415,9 @@ fn disassemble(insn: u32) -> String {
         .unwrap_or_default()
 }
 
-/// Whether `insn` sets a should-be field otherwise, the one reason a word
-/// Unicorn executed may be UNDEFINED on this core: `Ra != 11111` in SMULH and
+/// Whether `insn` sets a should-be field otherwise, one of the two reasons a
+/// word the reference executed may be UNDEFINED on this core (the other is
+/// [`registers_overlap`]): `Ra != 11111` in SMULH and
 /// UMULH, `Rm != 00000` in FCMP and FCMPE with zero. UNDEFINED is one of the
 /// CONSTRAINED UNPREDICTABLE behaviours the Arm ARM permits, and the one
 /// Arm's encodings give (they fix the field); Unicorn's QEMU executes the
@@ -1424,6 +1427,37 @@ fn should_be_field_set(insn: u32) -> bool {
     let compare_with_zero_rm_set =
         insn & 0xFF20_FC0F == 0x1E20_2008 && (insn >> 22) & 0b11 < 0b10 && (insn >> 16) & 0x1F != 0;
     mul_high_ra_set || compare_with_zero_rm_set
+}
+
+/// Whether `insn` is a load or store whose registers overlap where Arm's
+/// decode makes it CONSTRAINED UNPREDICTABLE, which this core takes as
+/// UNDEFINED and QEMU executes (README, "Where the references differ"):
+/// a single general-purpose register load or store with writeback whose
+/// base, not SP, is `Rt`; a pair with writeback whose base, not SP, is `Rt`
+/// or `Rt2`; a load pair, of general-purpose or SIMD&FP registers, with
+/// `Rt` = `Rt2`; a load-exclusive pair with `Rt` = `Rt2`; a store-exclusive
+/// whose `Rs` is `Rt`, a pair's `Rt2`, or the base other than SP; and
+/// LDRAA or LDRAB with writeback whose base, not SP, is `Rt`.
+fn registers_overlap(insn: u32) -> bool {
+    let field = |lo: u32| (insn >> lo) & 0x1F;
+    let (rt, rn, rt2, rs) = (field(0), field(5), field(10), field(16));
+    let base_is = |r: u32| rn != 31 && rn == r;
+    let bit = |n: u32| insn & (1 << n) != 0;
+    // size 111 0 00 opc 0 imm9 x1 Rn Rt: post- and pre-indexed.
+    let single = insn & 0x3F20_0400 == 0x3800_0400 && base_is(rt);
+    // opc 101 V 0 index L imm7 Rt2 Rn Rt.
+    let pair = insn & 0x3A00_0000 == 0x2800_0000
+        && ((!bit(26) && bit(23) && (base_is(rt) || base_is(rt2))) || (bit(22) && rt == rt2));
+    // size 001000 0 L o1 Rs o0 Rt2 Rn Rt: the exclusives.
+    let exclusive = insn & 0x3F80_0000 == 0x0800_0000
+        && if bit(22) {
+            bit(21) && rt == rt2
+        } else {
+            rs == rt || (bit(21) && rs == rt2) || base_is(rs)
+        };
+    // 11 111 0 00 M S 1 imm9 W 1 Rn Rt.
+    let load_auth = insn & 0xFF20_0C00 == 0xF820_0C00 && base_is(rt);
+    single || pair || exclusive || load_auth
 }
 
 #[test]
@@ -1520,7 +1554,7 @@ fn replay<L: Levels>(vectors: &str, imp: Implementation) {
             Step::Retired | Step::Waiting => {}
         }
         if cpu.sys.esr_el1 >> 26 == 0x00 {
-            if should_be_field_set(insn) {
+            if should_be_field_set(insn) || registers_overlap(insn) {
                 tally.skipped += 1;
             } else {
                 tally.mismatched += 1;

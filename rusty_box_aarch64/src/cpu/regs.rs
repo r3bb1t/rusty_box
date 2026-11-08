@@ -265,7 +265,7 @@ sysregs! {
 }
 
 impl SysReg {
-    const fn encode(op0: u8, op1: u8, crn: u8, crm: u8, op2: u8) -> Self {
+    pub(crate) const fn encode(op0: u8, op1: u8, crn: u8, crm: u8, op2: u8) -> Self {
         Self(
             ((op0 as u16 & 3) << 14)
                 | ((op1 as u16 & 7) << 11)

@@ -24,8 +24,10 @@ use rusty_box_core::SnapError;
 use super::features::{Feature, Features, LeveledImplementation};
 use super::mmu::{ContextStorage, NoContexts, TlbContexts};
 use super::regime::TTB_BADDR;
+use super::regs::SysReg;
+use super::state::spsr_mask_of;
 use super::sysreg::{smcr_mask, DISR_MASK};
-use super::{id, Cpu, El};
+use super::{id, reset, sctlr, Cpu, El};
 
 // ----- The levels a processor implements -----
 
@@ -176,45 +178,56 @@ impl El2Storage for El2State {
 }
 
 impl El2Regs {
-    /// The EL2 registers out of reset. Arm `AArch64_TakeReset` leaves every
-    /// register its pseudocode does not reset UNKNOWN, and the fields the
-    /// Arm ARM gives a reset value when the PE resets into EL2 (such as
-    /// `SCTLR_EL2.M`, `C` and `I`) reset to zero; this processor's choice for
-    /// the UNKNOWN rest is zero too, but for the RES1 bits each register
-    /// hardwires, `VPIDR_EL2` and `VMPIDR_EL2`, which reset to the
-    /// `MIDR_EL1` and `MPIDR_EL1` they stand in for, so EL1 reads the
-    /// processor's own identity until EL2 programs another, and
-    /// `CNTHCTL_EL2`, whose `EL1PCTEN` and `EL1PCEN` reset to 1, so EL1's
+    /// The EL2 registers out of reset ([`reset`] says why each takes its
+    /// value). The Cortex-A57 TRM's (DDI 0488H, Table 4-13): `SCTLR_EL2`
+    /// its RES1 bits and `SA`, `CPTR_EL2` its RES1 bits, `HCR_EL2`,
+    /// `ACTLR_EL2`, `HSTR_EL2`, `HACR_EL2`, `ESR_EL2` and `HPFAR_EL2` zero
+    /// (`HCR_EL2.RW` RES1, there being no AArch32), `VPIDR_EL2` and
+    /// `VMPIDR_EL2` the `MIDR_EL1` and `MPIDR_EL1` they stand in for, so EL1
+    /// reads the processor's own identity until EL2 programs another, and
+    /// `CNTHCTL_EL2` with `EL1PCTEN` and `EL1PCEN` set (Table 9-2), so EL1's
     /// accesses to the physical counter and timer do not trap until EL2
-    /// asks. Which bits are RES1 depends on the features `imp` implements:
-    /// the RES1 bits of a feature the processor implements are that
-    /// feature's field, zero out of reset.
+    /// asks; the controls zero beside their RES1 bits; and the values the
+    /// board's fill, bits 63:32 of `TTBR0_EL2`, `VTTBR_EL2`, `FAR_EL2` and
+    /// `VBAR_EL2` zero as the TRM has them. Each is what an `MSR` keeps of
+    /// it ([`El2Reg::kept`]): which bits are RES1 depends on the features
+    /// `imp` implements, the RES1 bits of a feature the processor implements
+    /// being that feature's field, zero out of reset.
     pub(crate) const fn reset<L: Levels>(imp: LeveledImplementation<L>) -> Self {
         let imp = imp.get();
         let features = imp.features;
+        let spsr_mask = spsr_mask_of(features);
         Self {
             hcr: HCR_RES1,
-            sctlr: SCTLR_EL2_RES1,
+            sctlr: SCTLR_EL2_RES1 | sctlr::SA,
             actlr: 0,
             cptr: cptr_el2_res1(features),
             hstr: 0,
             hacr: 0,
             mdcr: 0,
             tcr: TCR_EL2_RES1,
-            ttbr0: 0,
+            ttbr0: El2Reg::Ttbr0.kept(
+                features,
+                spsr_mask,
+                reset::low_word_of(SysReg::TTBR0_EL2),
+            ),
             vtcr: VTCR_EL2_RES1,
-            vttbr: 0,
+            vttbr: El2Reg::Vttbr.kept(
+                features,
+                spsr_mask,
+                reset::low_word_of(SysReg::VTTBR_EL2),
+            ),
             mair: 0,
             amair: 0,
-            vbar: 0,
+            vbar: El2Reg::Vbar.kept(features, spsr_mask, reset::low_word_of(SysReg::VBAR_EL2)),
             esr: 0,
-            far: 0,
+            far: reset::low_word_of(SysReg::FAR_EL2),
             hpfar: 0,
-            elr: 0,
-            spsr: 0,
+            elr: reset::value_of(SysReg::ELR_EL2),
+            spsr: El2Reg::Spsr.kept(features, spsr_mask, reset::value_of(SysReg::SPSR_EL2)),
             afsr0: 0,
             afsr1: 0,
-            tpidr: 0,
+            tpidr: reset::value_of(SysReg::TPIDR_EL2),
             vpidr: imp.midr,
             vmpidr: id::MPIDR_EL1,
             smcr: 0,
@@ -222,8 +235,12 @@ impl El2Regs {
             cntvoff: 0,
             cntpoff: 0,
             cnthp_ctl: 0,
-            cnthp_cval: 0,
-            contextidr: 0,
+            cnthp_cval: reset::value_of(SysReg::CNTHP_CVAL_EL2),
+            contextidr: El2Reg::Contextidr.kept(
+                features,
+                spsr_mask,
+                reset::low_word_of(reset::CONTEXTIDR_EL2),
+            ),
             vdisr: 0,
             vsesr: 0,
         }
@@ -841,11 +858,11 @@ impl VirtualLines {
 
 impl El2State {
     /// The state out of reset on a processor implementing `imp`: `SP_EL2`
-    /// zero, the registers as [`El2Regs::reset`] leaves them and neither
-    /// virtual input asserted.
+    /// the board's fill ([`reset::SP_EL2`]), the registers as
+    /// [`El2Regs::reset`] leaves them and neither virtual input asserted.
     pub(crate) const fn reset<L: Levels>(imp: LeveledImplementation<L>) -> Self {
         Self {
-            sp_el2: 0,
+            sp_el2: reset::SP_EL2,
             regs: El2Regs::reset(imp),
             virtual_lines: VirtualLines::NONE,
         }

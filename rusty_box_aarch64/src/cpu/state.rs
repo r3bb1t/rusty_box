@@ -6,7 +6,7 @@ use rusty_box_core::SnapError;
 
 use super::debug::Stepped;
 use super::el2::{El2State, El2Storage};
-use super::features::{Feature, LeveledImplementation};
+use super::features::{Feature, Features, LeveledImplementation};
 use super::mmu::{El10Context, El2RegimeContext, TlbContext};
 use super::regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, RegClass, VReg};
 use super::sysreg::{
@@ -16,7 +16,8 @@ use super::sysreg::{
 use super::timer::VirtualCount;
 use super::wait::{EventRegister, Wait};
 use super::{
-    id, pauth, sme, Activity, Btype, Cpu, El, ExclusiveMonitor, Levels, Pstate, SysRegs, PC_HISTORY,
+    id, pauth, reset, sme, Activity, Btype, Cpu, El, ExclusiveMonitor, Levels, Pstate, SysRegs,
+    PC_HISTORY,
 };
 
 /// How a snapshot names the processor's activity.
@@ -50,12 +51,36 @@ pub(crate) const fn fpcr_mask<L: Levels>(imp: LeveledImplementation<L>) -> u64 {
 pub(crate) const FPSR_MASK: u64 =
     0xF000_0000 | super::simd_arith::FPSR_QC | crate::softfloat::FPSR_CUMULATIVE_MASK;
 
+/// The `SPSR_ELx` bits that hold a field of the `PSTATE` of a processor
+/// implementing `features`: [`Pstate::BASE`], and those of the fields
+/// [`Cpu::held`] keeps there (`BTYPE` with FEAT_BTI, `PAN`, `UAO`, `DIT`
+/// and `SSBS` with theirs). The rest are RES0.
+pub(crate) const fn spsr_mask_of(features: Features) -> u64 {
+    let mut mask = Pstate::BASE;
+    if features.has(Feature::Bti) {
+        mask |= Btype::Jump.bits() << 10;
+    }
+    if features.has(Feature::Pan) {
+        mask |= Pstate::PAN;
+    }
+    if features.has(Feature::Uao) {
+        mask |= Pstate::UAO;
+    }
+    if features.has(Feature::Dit) {
+        mask |= Pstate::DIT;
+    }
+    if features.has(Feature::Ssbs) {
+        mask |= Pstate::SSBS;
+    }
+    mask
+}
+
 /// How many system register values a snapshot carries, in
 /// [`SysRegs::to_array`] order.
 const SYSREG_COUNT: usize = 49;
 
 impl SysRegs {
-    fn to_array(&self) -> [u64; SYSREG_COUNT] {
+    pub(super) fn to_array(&self) -> [u64; SYSREG_COUNT] {
         [
             self.sctlr_el1,
             self.actlr_el1,
@@ -258,19 +283,19 @@ impl<L: Levels> Cpu<L> {
             spectre: _,
             history,
         } = self;
-        *x = [0; 31];
-        *sp_el0 = 0;
-        *sp_el1 = 0;
+        *x = reset::GENERAL;
+        *sp_el0 = reset::SP_EL0;
+        *sp_el1 = reset::SP_EL1;
         *el2_state = L::State::keep(El2State::reset(*imp));
         *pc = reset_pc;
         *pstate = Pstate::reset::<L>();
-        *v = [0; 32];
+        *v = reset::SIMD_FP;
         *fpcr = 0;
         *fpsr = 0;
         *svcr = sme::Svcr::RESET;
         *scalable = sme::ScalableRegs::ZERO;
         *pac_keys = pauth::PacKeys::RESET;
-        *sys = SysRegs::reset(imp.counter_hz, reset_pc);
+        *sys = SysRegs::reset(imp.features, imp.counter_hz, reset_pc);
         *monitor = ExclusiveMonitor::CLEAR;
         *event = EventRegister::at(false, count);
         tlb.reset();
@@ -366,19 +391,10 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
-    /// The `SPSR_EL1` bits that hold a field of this processor's `PSTATE`:
-    /// [`Pstate::BASE`], and those of the fields [`Cpu::held`] keeps. The
-    /// rest are RES0.
+    /// The `SPSR_EL1` bits that hold a field of this processor's `PSTATE`
+    /// ([`spsr_mask_of`]).
     pub(crate) fn spsr_mask(&self) -> u64 {
-        let every = Pstate {
-            btype: Btype::Jump,
-            pan: true,
-            uao: true,
-            dit: true,
-            ssbs: true,
-            ..Pstate::RESET
-        };
-        Pstate::BASE | self.held(every).to_spsr()
+        spsr_mask_of(self.imp.features)
     }
 
     /// A copy of the architectural state now.

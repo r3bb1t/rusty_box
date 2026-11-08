@@ -1013,6 +1013,7 @@ fn mova_moves_a_group_to_and_from_the_selected_vector_of_each_stride() {
     assert_eq!(za_words(&cpu, 9), [2; 4]);
     set_z(&mut cpu, 4, Esize::S, &[0]);
     set_z(&mut cpu, 5, Esize::S, &[0]);
+    cpu.x[10] = 0;
     assert_eq!(exec(&mut cpu, MOVA_FROM_ARRAY_2), None);
     assert_eq!(z_words(&cpu, 4), [1; 4]);
     assert_eq!(z_words(&cpu, 5), [2; 4]);

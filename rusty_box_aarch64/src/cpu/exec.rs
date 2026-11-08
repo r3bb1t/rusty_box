@@ -480,7 +480,7 @@ impl<L: Levels> Cpu<L> {
             Class::LoadStoreRegisterOffset => {
                 self.exec_ldst_single(bus, pc, insn, SingleForm::RegisterOffset)
             }
-            Class::LoadAuthenticated => self.exec_load_auth(bus, insn),
+            Class::LoadAuthenticated => self.exec_load_auth(bus, pc, insn),
             Class::LoadLiteral => self.exec_load_literal(bus, pc, insn),
             Class::LoadStorePairOffset
             | Class::LoadStorePairIndexed

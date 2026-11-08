@@ -546,6 +546,8 @@ fn machine_with<'r, L: TestLevels, I: Instrumentation>(
         m.mem_write(RAM_BASE + offset, &word.to_le_bytes())
             .expect("the program is in RAM");
     }
+    // x2, the flag a program sets once its poll ends, starts clear.
+    m.reg_write(Reg::X2, 0);
     for &(reg, value) in regs {
         m.reg_write(reg, value);
     }

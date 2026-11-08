@@ -690,14 +690,23 @@ impl<L: Levels> Cpu<L> {
     /// LDRAA, LDRAB: `11 111 0 00 M S 1 imm9 W 1 Rn Rt`. The base (`Rn`,
     /// 31 being SP) is authenticated with data key A or B as `M` says and
     /// a zero modifier, then offset by `S:imm9` doublewords; `W` writes the
-    /// address back after the load, the loaded register first where the
-    /// two are one (as [`super::ldst`] orders every writeback). Without
-    /// writeback the load reports its syndrome with a stage 2 Data Abort on
-    /// its access.
-    pub(crate) fn exec_load_auth<B: PhysBus>(&mut self, bus: &mut B, insn: u32) -> ExecResult {
+    /// address back after the load. With `W` and a base other than SP that
+    /// is `Rt` it is UNDEFINED, before the authentication, as
+    /// [`super::ldst`] takes every such overlap (`ldra.xml`:
+    /// `Unpredictable_WBOVERLAPLD`). Without writeback the load reports its
+    /// syndrome with a stage 2 Data Abort on its access.
+    pub(crate) fn exec_load_auth<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+    ) -> ExecResult {
         let key = PacKey::data_key(bit(insn, 23));
         let rn = bits(insn, 9, 5);
         let rt = bits(insn, 4, 0);
+        if super::ldst::registers_overlap(true, false, bit(insn, 11), rn, rt, rt) {
+            return self.undefined(pc, insn);
+        }
         let base = self.x_or_sp(rn);
         let authenticated = self.auth(base, 0, key, AuthUse::Combined)?;
         self.check_sp_alignment(rn == 31, base)?;

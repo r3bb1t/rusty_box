@@ -84,6 +84,11 @@ fn run(cpu: CpuModel, code: &[(u64, u32)]) -> Outcome {
     m.sysreg_write(SysReg::VBAR_EL1, VBAR).expect("VBAR");
     let sctlr = m.sysreg_read(SysReg::SCTLR_EL1).expect("SCTLR");
     m.sysreg_write(SysReg::SCTLR_EL1, sctlr | 1).expect("SCTLR");
+    // The count and the handler's registers start at zero, so a run that
+    // takes no exception leaves the handler's zero.
+    for reg in [Reg::X0, Reg::X2, Reg::X3] {
+        m.reg_write(reg, 0);
+    }
     let out = m.emu_start(RAM_BASE, None, Some(200));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
     Outcome {

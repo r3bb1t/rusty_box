@@ -192,6 +192,9 @@ fn replay(v: &Vector<'_>, ram: &mut Ram) -> Outcome {
             ..Implementation::CORTEX_A57
         },
     );
+    // The runner starts from QEMU's reset, which zeroes what this board's
+    // fills.
+    cpu.zero_the_fill();
     cpu.el2_state.regs.vbar = EL2_VECTORS;
     cpu.sys.vbar_el1 = EL1_VECTORS;
     for (word, value) in CONTROL_WRITES.iter().zip(v.controls) {

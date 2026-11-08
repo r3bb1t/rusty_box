@@ -483,6 +483,7 @@ fn psci_power_off_sticks_until_the_host_resets() {
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
     load(&mut m, RAM_BASE, &HVC);
+    let reset_x0 = m.reg_read(Reg::X0);
     m.reg_write(Reg::X0, PSCI_SYSTEM_OFF);
     assert_eq!(
         m.step(RunBudget::Instructions(10)).stop,
@@ -504,7 +505,7 @@ fn psci_power_off_sticks_until_the_host_resets() {
     );
     assert_eq!(
         m.reg_read(Reg::X0),
-        0,
+        reset_x0,
         "registers are back at their reset values"
     );
     assert_eq!(m.ticks(), ticks, "guest time carries on across a reset");
@@ -792,6 +793,10 @@ fn every_slicing_of_a_run_ends_in_the_same_state() {
         let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
         load(&mut m, RAM_BASE, &SLICED_LOOP);
         m.reg_write(Reg::X10, RAM_BASE + 0x8000);
+        // The loop's accumulators start at zero.
+        for reg in [Reg::X0, Reg::X1, Reg::X3] {
+            m.reg_write(reg, 0);
+        }
         let mut done = 0;
         while done < TOTAL {
             let out = m.step(RunBudget::Instructions(slice.min(TOTAL - done)));
@@ -1009,9 +1014,16 @@ fn a_directly_booted_kernel_is_entered_as_the_boot_protocol_asks() {
     let entered = |m: &VirtMachine<LentStorage<'_>, NoEl2, rusty_box_aarch64::NoInstrumentation>| {
         assert_eq!(m.reg_read(Reg::Pc), entry);
         assert_eq!(m.reg_read(Reg::X0), tree_at, "x0 holds the device tree");
-        for n in 1..=30 {
+        // x1 to x3 zero as the protocol asks; the rest as reset leaves
+        // them, the board's fill naming each.
+        for n in 1..=30u8 {
             let x = Reg::x(n).expect("a general-purpose register");
-            assert_eq!(m.reg_read(x), 0, "x{n}");
+            let want = if n <= 3 {
+                0
+            } else {
+                0xA5A5_A5A5_A5A5_0000 | u64::from(n)
+            };
+            assert_eq!(m.reg_read(x), want, "x{n}");
         }
         assert_eq!(m.pstate().el, rusty_box_aarch64::El::El1);
     };

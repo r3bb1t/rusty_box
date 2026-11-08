@@ -102,6 +102,9 @@ fn machine<'r, I: Instrumentation>(
         m.mem_write(RAM_BASE + offset, &word.to_le_bytes())
             .expect("the program is in RAM");
     }
+    // x2, the flag `REWRITTEN_LOOP` tests to tell its passes apart, starts
+    // clear.
+    m.reg_write(Reg::X2, 0);
     m
 }
 

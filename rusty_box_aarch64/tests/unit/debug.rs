@@ -196,7 +196,8 @@ struct Machine {
 
 impl Machine {
     /// A processor implementing `imp` at EL1 with the MMU off, every debug
-    /// exception masked by PSTATE.D, and the OS Lock unlocked.
+    /// exception masked by PSTATE.D, the OS Lock unlocked, and the
+    /// general-purpose registers zero, from which the programs here count.
     fn new(imp: Implementation) -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
         let cpu = Cpu::implementing(
@@ -214,6 +215,7 @@ impl Machine {
             ram: Ram(std::vec![0; RAM_BYTES]),
         };
         m.cpu.sys.vbar_el1 = VBAR;
+        m.cpu.x = [0; 31];
         m.msr(OSLAR_EL1, 0);
         m
     }

@@ -1941,9 +1941,12 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
                 }
                 // booting.rst §4: x0 the device tree's physical address,
                 // x1 to x3 zero; every other register keeps its reset
-                // value, zero.
+                // value (`cpu::reset`).
                 self.cpu
                     .set_reg(Reg::X0, RAM_BASE + layout.device_tree_offset);
+                for reserved in [Reg::X1, Reg::X2, Reg::X3] {
+                    self.cpu.set_reg(reserved, 0);
+                }
                 // And the console set up, as firmware would leave it.
                 self.board
                     .set_up_console(boot::DIRECT_BOOT_CONSOLE_BAUD, self.cpu.clock());

@@ -41,6 +41,41 @@ const STP_W: u32 = 0x2900_0C22; // stp w2, w3, [x1]
 const LDP_W_PRE: u32 = 0x29C2_9023; // ldp w3, w4, [x1, #20]!
 const STP_W_PRE: u32 = 0x2982_8C22; // stp w2, w3, [x1, #20]!
 
+/// The encodings whose registers overlap where Arm's decode makes them
+/// CONSTRAINED UNPREDICTABLE, each UNDEFINED here.
+const OVERLAPPING: [(u32, &str); 18] = [
+    (0xF840_8421, "ldr x1, [x1], #8"),
+    (0xF840_8C21, "ldr x1, [x1, #8]!"),
+    (0x3840_1421, "ldrb w1, [x1], #1"),
+    (0xF800_8421, "str x1, [x1], #8"),
+    (0xF800_8C21, "str x1, [x1, #8]!"),
+    (0xA8C1_0821, "ldp x1, x2, [x1], #16"),
+    (0xA9C1_0841, "ldp x1, x2, [x2, #16]!"),
+    (0xA981_0821, "stp x1, x2, [x1, #16]!"),
+    (0xA940_0401, "ldp x1, x1, [x0]"),
+    (0x2940_0401, "ldp w1, w1, [x0]"),
+    (0xA840_0401, "ldnp x1, x1, [x0]"),
+    (0x6940_0401, "ldpsw x1, x1, [x0]"),
+    (0xAD40_0401, "ldp q1, q1, [x0]"),
+    (0xC87F_0401, "ldxp x1, x1, [x0]"),
+    (0xC87F_8401, "ldaxp x1, x1, [x0]"),
+    (0xC801_7C01, "stxr w1, x1, [x0]"),
+    (0xC800_7C01, "stxr w0, x1, [x0]"),
+    (0xC822_0801, "stxp w2, x1, x2, [x0]"),
+];
+
+/// Their neighbours, whose registers overlap nowhere Arm's decode asks
+/// about: each retires.
+const NOT_OVERLAPPING: [(u32, &str); 7] = [
+    (0xF840_8422, "ldr x2, [x1], #8"),
+    (0xF940_0421, "ldr x1, [x1, #8]"),
+    (0xF840_87FF, "ldr xzr, [sp], #8"),
+    (0xA8C1_0BE1, "ldp x1, x2, [sp], #16"),
+    (0xA900_0401, "stp x1, x1, [x0]"),
+    (0xAD00_0401, "stp q1, q1, [x0]"),
+    (0xC802_7C01, "stxr w2, x1, [x0]"),
+];
+
 /// `SCTLR_EL1.A`: every misaligned data access faults.
 const SCTLR_A: u64 = 1 << 1;
 
@@ -520,4 +555,65 @@ fn a_pair_within_a_page_whose_second_word_alone_is_refused_aborts_on_it() {
     let (first, hole) = (FIRST as usize, HOLE as usize);
     assert_eq!(ram.bytes[first..first + 4], 0x1234_5678u32.to_le_bytes());
     assert_eq!(ram.bytes[hole..hole + 4], untouched[hole..hole + 4]);
+}
+
+/// A processor of `imp` with x0, x1 and SP at [`DATA`] and x2 16 bytes
+/// above it, every one 16-byte aligned.
+fn at_data(imp: Implementation) -> Cpu<NoEl2> {
+    let mut cpu = processor(imp);
+    cpu.x[0] = DATA;
+    cpu.x[1] = DATA;
+    cpu.x[2] = DATA + 16;
+    cpu.sp_el1 = DATA;
+    cpu
+}
+
+/// On both models, every load or store whose registers overlap where
+/// Arm's decode makes it CONSTRAINED UNPREDICTABLE — writeback into a
+/// transfer register (`Unpredictable_WBOVERLAPLD`, `WBOVERLAPST`), a load
+/// pair or load-exclusive pair into one register (`LDPOVERLAP`), a
+/// store-exclusive's status register a transfer register or the base
+/// (`DATAOVERLAP`, `BASEOVERLAP`) — is UNDEFINED: it accesses nothing and
+/// changes no register. The check is at decode, so with SIMD&FP disabled
+/// `ldp q1, q1` is UNDEFINED, not trapped. Each neighbour that overlaps
+/// nowhere Arm asks about retires.
+#[test]
+fn overlapping_load_and_store_registers_are_undefined() {
+    for imp in [Implementation::CORTEX_A57, Implementation::ARMV9P2] {
+        let mut ram = LoggedRam::new();
+        for (insn, text) in OVERLAPPING {
+            let mut cpu = at_data(imp);
+            cpu.sys.cpacr_el1 = 0;
+            let (x, v) = (cpu.x, cpu.v);
+            assert_eq!(step(&mut cpu, &mut ram, insn), Some(UNDEFINED), "{text}");
+            assert_eq!(ram.log, [], "{text} accesses nothing");
+            assert_eq!((cpu.x, cpu.v), (x, v), "{text} writes no register");
+        }
+        for (insn, text) in NOT_OVERLAPPING {
+            let mut cpu = at_data(imp);
+            assert_eq!(step(&mut cpu, &mut ram, insn), None, "{text}");
+        }
+    }
+}
+
+/// LDRAA and LDRAB with writeback whose base, not SP, is `Rt` are UNDEFINED
+/// (`ldra.xml`: `Unpredictable_WBOVERLAPLD`) before the base is
+/// authenticated, where the same load into another register authenticates
+/// and loads. The Cortex-A57, without FEAT_PAuth, has neither.
+#[test]
+fn ldraa_with_writeback_into_its_base_is_undefined() {
+    const LDRAA_X1_X1: u32 = 0xF820_1C21; // ldraa x1, [x1, #8]!
+    const LDRAB_X1_X1: u32 = 0xF8A0_1C21; // ldrab x1, [x1, #8]!
+    const LDRAA_X2_X1: u32 = 0xF820_1C22; // ldraa x2, [x1, #8]!
+    let mut ram = LoggedRam::new();
+    let mut cpu = at_data(Implementation::ARMV9P2);
+    let x = cpu.x;
+    for insn in [LDRAA_X1_X1, LDRAB_X1_X1] {
+        assert_eq!(step(&mut cpu, &mut ram, insn), Some(UNDEFINED), "{insn:#010x}");
+        assert_eq!(ram.log, [], "{insn:#010x} accesses nothing");
+        assert_eq!(cpu.x, x, "{insn:#010x} writes no register");
+    }
+    assert_ne!(step(&mut cpu, &mut ram, LDRAA_X2_X1), Some(UNDEFINED));
+    let mut a57 = at_data(Implementation::CORTEX_A57);
+    assert_eq!(step(&mut a57, &mut ram, LDRAA_X2_X1), Some(UNDEFINED));
 }

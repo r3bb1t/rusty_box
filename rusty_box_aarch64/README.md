@@ -1434,6 +1434,67 @@ one open.
   (`the_keys_reset_to_the_boards_fixed_values`) checks what an `MRS` of
   each reads, built and after a system reset, against √2 worked out in the
   test.
+- **Registers Arm leaves UNKNOWN at reset take the Cortex-A57 TRM's value
+  or the board's own.** Arm's `AArch64_TakeReset` (DDI 0487M.d, J1.2.2.30)
+  leaves the general-purpose and SIMD&FP registers, the stack pointers,
+  `ELR_ELx`, `SPSR_ELx`, NZCV and every register field it does not reset
+  ARBITRARY; QEMU zeroes them all. Where the Cortex-A57 TRM (DDI 0488H,
+  4.2, Tables 9-2 and 14-2) gives a value, both models take it:
+  `SCTLR_EL2` 0x30C5_0838 (its RES1 bits and `SA`), `CPTR_EL2` its RES1
+  bits, `HCR_EL2`, `ESR_EL2`,
+  `HPFAR_EL2`, `CPACR_EL1`, `FPCR` and `FPSR` zero, and bits 63:32 of
+  `FAR_ELx`, `VBAR_ELx`, `TTBRn_ELx`, `VTTBR_EL2` and `PAR_EL1` zero.
+  The rest is the board's own, by what each register holds
+  (`src/cpu/reset.rs`): a control — `TCR_ELx`, `VTCR_EL2`, `MAIR_ELx`,
+  `MDSCR_EL1`, the breakpoint and watchpoint controls, `CNTVOFF_EL2`,
+  `SMCR_ELx`, the timers' `IMASK` — zero, its off state, so nothing acts
+  that software did not ask for and software that read-modify-writes a
+  control (Linux its `CNTKCTL_EL1`, EDK2 its `CPACR_EL1` and `CPTR_EL2`)
+  finds the fields it leaves alone off; `CSSELR_EL1` the L1 data cache,
+  so a `CCSIDR_EL1` read before any selection describes a cache that
+  exists; `DISR_EL1.A` and the Event Register clear; and a value — the
+  general-purpose and SIMD&FP registers, the stack pointers, `ELR_ELx`,
+  `SPSR_ELx`, `ESR_EL1`, `FAR_ELx`, `PAR_EL1`, `VBAR_ELx`, the table
+  base registers, `CONTEXTIDR_ELx`, the thread pointers, the timers'
+  compare values, `DBGBVRn_EL1` and `DBGWVRn_EL1`, the DCC's data
+  registers — the board's fill, 0xA5A5_A5A5_A5A5_0000 with the
+  register's name in bits 15:0 (`n` for `Xn`, 0x100 + `n` in each half
+  of `Vn`, the `MRS` encoding for the rest), kept to the bits the
+  register holds; NZCV 0b1010. A guest that reads a register it never
+  wrote finds a value it did not put there, which names its source, and
+  one that dereferences or branches through such a register faults there:
+  bits 55:52 are 0b1010, outside both halves of the address space for
+  any VA size and top-byte-ignore, and above every physical address. The
+  bits of Z above V, P, FFR, ZA and ZT0 stay zero: only Streaming SVE
+  mode or ZA storage reaches them, and entering either zeroes them. A
+  directly booted kernel's `x1` to `x3` are zero as `booting.rst` §4
+  asks. `tests/reset_state.rs` reads each register with `MRS` on both
+  models and the Cortex-A57 with EL2, and a branch through an unwritten
+  register taking its Address size fault; the vector replays, whose
+  references start from QEMU's zeroes, zero the fill first
+  (`Cpu::zero_the_fill`).
+- **Overlapping load and store registers are UNDEFINED.** Arm's decode
+  pseudocode makes a load or store CONSTRAINED UNPREDICTABLE where its
+  registers overlap: writeback into a transfer register
+  (`Unpredictable_WBOVERLAPLD`, `WBOVERLAPST`: LDR, STR and their byte,
+  halfword and signed forms, LDP, STP, LDPSW, LDRAA and LDRAB), a load
+  pair or load-exclusive pair into one register (`LDPOVERLAP`: LDP,
+  LDNP, LDPSW, the SIMD&FP LDP and LDNP, LDXP, LDAXP), and a
+  store-exclusive's status register among its transfer registers or its
+  base (`DATAOVERLAP`, `BASEOVERLAP`). UNDEFINED is among the permitted
+  behaviours of each, and the Cortex-A57 TRM states no choice of the
+  A57's (its Appendix B covers AArch32), so both models take UNDEFINED,
+  at decode, before any SIMD&FP trap, SP alignment check or
+  authentication: the one choice that stops the guest at the instruction
+  rather than leaving a register silently holding what the program did
+  not mean. QEMU 11.1.2 (`target/arm/tcg/translate-a64.c`) executes each:
+  a load writes the loaded value and then the written-back base, a store
+  stores the original value, `ldp w1, w1` writes Rt2 then Rt and
+  `ldp x1, x1` Rt then Rt2, and a store-exclusive stores the value and
+  writes its status. `tests/unit/load_store.rs` checks every case on both
+  models; the Unicorn, QEMU `max` and pointer authentication replays
+  skip their vectors of these words (`registers_overlap`,
+  `writes_back_into_its_base`).
 - **An atomic reports only a refused write as a write.** Arm's
   `CreateAccDescAtomicOp` makes an atomic access a read and a write;
   `NoFault`, whose record an alignment or translation fault starts from,
@@ -2331,8 +2392,9 @@ one open.
   protocol asks, and the protocol's open choices are the board's.**
   Linux's arm64 `Documentation/arch/arm64/booting.rst` fixes the entry
   state — `x0` the device tree's physical address, `x1` to `x3` zero
-  (§4) — and names no other register; every other general-purpose
-  register here holds its reset value, zero. QEMU enters through a boot
+  (§4) — and names no other register; every other register here holds
+  its reset value, for `x4` to `x30` and the stack pointer the board's
+  fill ("Registers Arm leaves UNKNOWN at reset" below). QEMU enters through a boot
   stub of its own at the base of RAM (`bootloader_aarch64` in
   `hw/arm/boot.c`), which leaves the kernel's entry in `x4`. The protocol
   places the kernel `text_offset` above a 2 MiB-aligned base, asks for
@@ -3333,16 +3395,9 @@ waits for a firmware build of the board's own:
   builds tested here (Ubuntu's, UEFI 2.70) do.
 
 **Still to replace**, each with a value from a specification or one of
-the board's own:
-
-- The processor's remaining choices of QEMU's where Arm leaves one open:
-  the registers Arm leaves UNKNOWN at
-  reset that read zero as QEMU's do (the general-purpose and SIMD&FP
-  registers, the stack pointers, `CSSELR_EL1` and the rest of the
-  zeroed system registers), outside what the Linux boot protocol sets;
-  and the CONSTRAINED UNPREDICTABLE load and store cases taken as QEMU takes
-  them (`src/cpu/ldst.rs`: writeback into a transfer register, a load
-  pair into one register).
+the board's own: none. Every guest-readable value the 2026-11-05 survey
+found QEMU had chosen is either replaced, kept for stock firmware (above)
+or kept as a host's choice (below).
 
 **Kept as a host's choice**, each off by default, for a VM made on QEMU's
 `virt` or on this board before it had its own answer:
@@ -3362,8 +3417,9 @@ the board's own:
   every post-v8.0 feature (LSE atomics, PAuth, SME, …): absent from its ID
   registers, so UNDEFINED, as on a real ARMv8.0 core (the PAuth hints,
   NOPs). With no EL3, nothing but `HCR_EL2.API` and `APK` traps a key or a
-  pointer authentication instruction, and the keys reset to zero, as
-  QEMU's do, where Arm leaves them UNKNOWN.
+  pointer authentication instruction, and the keys reset to the board's
+  own values ("The pointer authentication keys reset to the board's own
+  values"), where Arm leaves them UNKNOWN.
 - FEAT_SVE, and the SVE2.1 and later features (FEAT_SVE2p1, FEAT_SME2p1,
   FEAT_SME_FA64, …), on the Armv9.2 model: none is an Armv9.2
   requirement, and the SVE instructions it has are the ones FEAT_SME makes

@@ -29,6 +29,7 @@ use super::exception::AccessSyndrome;
 use super::exec::{bit, bits, keep_fault, sext, Fault, Flow, OpResult};
 use super::fp::{dp2_operation, dp3_form, scalar_type, FpBinary, FpDp3Regs, FpType};
 use super::isa::Class;
+use super::ldst::registers_overlap;
 use super::mmu::{DataAccess, ElementPair};
 use super::{Cpu, Levels};
 use crate::bus::{AccessWidth, PhysBus};
@@ -232,7 +233,10 @@ pub(crate) enum Op {
         rn: u8,
         rm: u8,
     },
-    /// LDP/LDNP of 32- or 64-bit general registers (`size` 2 or 3).
+    /// LDP/LDNP of 32- or 64-bit general registers (`size` 2 or 3). Like
+    /// the single-register forms and `StorePair`, never one whose registers
+    /// overlap ([`registers_overlap`]): that word stays on its class
+    /// handler, which raises UNDEFINED.
     LoadPair {
         size: u8,
         index: Index,
@@ -630,7 +634,13 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
             };
             let imm = sext(u64::from(bits(word, 21, 15)), 7) << size;
             let (rt, rt2) = (rd, reg(word, 10));
-            if bit(word, 22) {
+            let writeback = !matches!(index, Index::Offset);
+            let load = bit(word, 22);
+            if registers_overlap(load, true, writeback, rn.into(), rt.into(), rt2.into()) {
+                // UNDEFINED here: the class handler raises it.
+                return generic;
+            }
+            if load {
                 Op::LoadPair {
                     size,
                     index,
@@ -874,7 +884,13 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
 /// rejects (LDRS* to a 32-bit register of a word or doubleword).
 fn single_immediate(word: u32, size: u32, index: Index, imm: u64) -> Option<Op> {
     let (rt, rn, size8) = (reg(word, 0), reg(word, 5), size as u8);
-    match bits(word, 23, 22) {
+    let opc = bits(word, 23, 22);
+    let writeback = !matches!(index, Index::Offset);
+    if registers_overlap(opc != 0, false, writeback, rn.into(), rt.into(), rt.into()) {
+        // UNDEFINED here: the class handler raises it.
+        return None;
+    }
+    match opc {
         0 => Some(Op::StoreImm {
             size: size8,
             index,
@@ -1622,15 +1638,8 @@ impl<L: Levels> Cpu<L> {
                     first: a,
                     second: b,
                 } = completed!(self.read_pair(bus, address, width, DataAccess::NORMAL));
-                // The order `exec_ldst_pair` writes them in, which decides
-                // the CONSTRAINED UNPREDICTABLE Rt == Rt2 case.
-                if width == AccessWidth::Word {
-                    self.set_x_or_zr(u32::from(rt2), b);
-                    self.set_x_or_zr(u32::from(rt), a);
-                } else {
-                    self.set_x_or_zr(u32::from(rt), a);
-                    self.set_x_or_zr(u32::from(rt2), b);
-                }
+                self.set_x_or_zr(u32::from(rt), a);
+                self.set_x_or_zr(u32::from(rt2), b);
                 if let Some(wb) = writeback {
                     self.set_x_or_sp(u32::from(rn), wb);
                 }

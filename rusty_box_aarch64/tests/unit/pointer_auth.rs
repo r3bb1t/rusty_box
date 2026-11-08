@@ -160,6 +160,18 @@ fn registers(cpu: &Cpu<NoEl2>) -> [u64; 33] {
     })
 }
 
+/// Whether `insn` is LDRAA or LDRAB with writeback (`W`) whose base, not
+/// SP, is `Rt`: CONSTRAINED UNPREDICTABLE (`Unpredictable_WBOVERLAPLD`),
+/// UNDEFINED on this core and executed by QEMU, so its vectors are left
+/// out of the replay (`ldraa_with_writeback_into_its_base_is_undefined` in
+/// `load_store.rs` checks it).
+fn writes_back_into_its_base(insn: u32) -> bool {
+    let (rt, rn) = (insn & 0x1F, (insn >> 5) & 0x1F);
+    insn & 0xFF20_0C00 == 0xF820_0C00 && rn != 31 && rn == rt
+}
+
+/// Every vector but those [`writes_back_into_its_base`] leaves out ends as
+/// on QEMU.
 #[test]
 fn every_qemu_pauth_vector_matches_after_one_step() {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
@@ -169,6 +181,9 @@ fn every_qemu_pauth_vector_matches_after_one_step() {
         count += 1;
         let fields: Vec<&str> = line.split(' ').collect();
         let (name, insn) = (fields[0], hex(fields[1]) as u32);
+        if writes_back_into_its_base(insn) {
+            continue;
+        }
         let seeded = Seeded::new(hex(fields[2]));
 
         let mut cpu = Cpu::implementing(
