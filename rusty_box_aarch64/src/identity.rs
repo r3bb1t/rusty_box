@@ -3,7 +3,8 @@
 //! A guest reads who made its machine from a handful of names and numbers:
 //! the device tree's `/model` and root `compatible`, the virtio-mmio
 //! `VendorID`, the GIC's `GICD_IIDR`, `GICC_IIDR` and `GICV_IIDR`, the GICv2m frame's
-//! `MSI_IIDR`, the virtio input devices'
+//! `MSI_IIDR`, the flash's manufacturer and device codes, the virtio input
+//! devices'
 //! names (`VIRTIO_INPUT_CFG_ID_NAME`) and vendor, products and versions
 //! (`VIRTIO_INPUT_CFG_ID_DEVIDS`), and the maker, product code, name and
 //! date in the virtio-gpu display's EDID. Software keys on them —
@@ -566,6 +567,101 @@ impl GicIdentity {
     };
 }
 
+/// The manufacturer code a CFI flash device of the Intel/Sharp command set
+/// (0001, JEDEC JEP137) gives at offset 0 of its Read Identifier space: a
+/// JEDEC JEP106 manufacturer code of bank 1, the manufacturer's number in
+/// bits [6:0] and odd parity in bit 7, or none. The space has one byte for
+/// it, so a manufacturer of a later bank, whose code needs continuation
+/// codes ahead of it, has no code the space can give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlashManufacturer(u8);
+
+/// A JEP106 number outside a bank's manufacturers, 1 to 126: 0 numbers
+/// none and 127 is the continuation code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotJep106Number {
+    pub number: u8,
+}
+
+impl core::fmt::Display for NotJep106Number {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{} is not a JEP106 manufacturer number, 1 to 126",
+            self.number
+        )
+    }
+}
+
+impl core::error::Error for NotJep106Number {}
+
+impl FlashManufacturer {
+    /// No manufacturer: 0x00, whose parity is even, so no JEP106 code
+    /// reads as it.
+    pub const NONE: Self = Self(0);
+
+    /// The manufacturer numbered `number` in JEP106's bank 1, whose code
+    /// is the number with the parity bit that makes its ones odd (Intel,
+    /// 9, is 0x89).
+    ///
+    /// # Errors
+    ///
+    /// [`NotJep106Number`] for a number outside 1 to 126.
+    pub const fn jep106(number: u8) -> Result<Self, NotJep106Number> {
+        if number == 0 || number >= 0x7F {
+            return Err(NotJep106Number { number });
+        }
+        let parity = if number.count_ones().is_multiple_of(2) {
+            0x80
+        } else {
+            0
+        };
+        Ok(Self(number | parity))
+    }
+
+    /// The code, as offset 0 of the Read Identifier space gives it.
+    pub const fn code(self) -> u8 {
+        self.0
+    }
+}
+
+/// The device code a CFI flash device gives at offset 1 of its Read
+/// Identifier space: its manufacturer's number for the part, 16 bits on a
+/// device 16 bits wide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlashDeviceCode(u16);
+
+impl FlashDeviceCode {
+    /// No part: 0.
+    pub const NONE: Self = Self(0);
+
+    /// The code `code`.
+    pub const fn new(code: u16) -> Self {
+        Self(code)
+    }
+
+    /// The code as the Read Identifier space gives it.
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+/// Who the flash devices say made them: the manufacturer and device codes
+/// of their Read Identifier space, the same in every device of both banks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlashIdentity {
+    pub manufacturer: FlashManufacturer,
+    pub device: FlashDeviceCode,
+}
+
+impl FlashIdentity {
+    /// A device of no manufacturer and no part.
+    pub const NONE: Self = Self {
+        manufacturer: FlashManufacturer::NONE,
+        device: FlashDeviceCode::NONE,
+    };
+}
+
 /// What a virtio input device reports of its model beside the vendor
 /// ([`InputVendorId`]): its product and version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -756,6 +852,8 @@ pub struct IdentityNames<'a> {
     pub gic: GicIdentity,
     /// What the GICv2m frame's `MSI_IIDR` reads.
     pub msi_frame_iidr: MsiFrameIidr,
+    /// What the flash devices' Read Identifier space gives.
+    pub flash: FlashIdentity,
     /// The virtio input devices' vendor.
     pub input_vendor: InputVendorId,
     /// The virtio keyboard's name, printable ASCII.
@@ -785,12 +883,15 @@ impl IdentityNames<'static> {
     /// nor its GICv2m frame names a product or an implementer: their
     /// identification registers ask for the implementer's JEP106 code (IHI
     /// 0048B §4.3.3 and §4.4.15, BSA I.9.3), and the project holds none.
+    /// For the same reason the flash names no manufacturer, its code 0x00,
+    /// which no JEP106 code reads as, and so no part, its device code 0.
     pub const RUSTY_BOX: Self = Self {
         model: "Rusty Box virt",
         compatible: &["rusty-box,virt"],
         virtio_vendor: VirtioVendorId::from_ascii(*b"RBOX"),
         gic: GicIdentity::NONE,
         msi_frame_iidr: MsiFrameIidr::NONE,
+        flash: FlashIdentity::NONE,
         input_vendor: InputVendorId::new(u16::from_be_bytes(*b"RB")),
         keyboard: "Rusty Box Virtio Keyboard",
         keyboard_id: InputDeviceId {
@@ -826,6 +927,7 @@ pub struct BoardIdentity {
     virtio_vendor: VirtioVendorId,
     gic: GicIdentity,
     msi_frame_iidr: MsiFrameIidr,
+    flash: FlashIdentity,
     input_vendor: InputVendorId,
     keyboard: Text<INPUT_NAME_CAPACITY>,
     keyboard_id: InputDeviceId,
@@ -958,6 +1060,7 @@ impl BoardIdentity {
             virtio_vendor: names.virtio_vendor,
             gic: names.gic,
             msi_frame_iidr: names.msi_frame_iidr,
+            flash: names.flash,
             input_vendor: names.input_vendor,
             keyboard,
             keyboard_id: names.keyboard_id,
@@ -996,6 +1099,11 @@ impl BoardIdentity {
     /// What the GICv2m frame's `MSI_IIDR` reads.
     pub const fn msi_frame_iidr(&self) -> MsiFrameIidr {
         self.msi_frame_iidr
+    }
+
+    /// What the flash devices' Read Identifier space gives.
+    pub const fn flash(&self) -> FlashIdentity {
+        self.flash
     }
 
     /// The virtio input devices' vendor.
@@ -1087,6 +1195,11 @@ impl BoardIdentity {
                     cpu_interface,
                 },
             msi_frame_iidr,
+            flash:
+                FlashIdentity {
+                    manufacturer,
+                    device,
+                },
             input_vendor,
             keyboard,
             keyboard_id,
@@ -1114,6 +1227,8 @@ impl BoardIdentity {
         part(&distributor.get().to_le_bytes());
         part(&cpu_interface.get().to_le_bytes());
         part(&msi_frame_iidr.get().to_le_bytes());
+        part(&[manufacturer.code()]);
+        part(&device.get().to_le_bytes());
         part(&input_vendor.get().to_le_bytes());
         for InputDeviceId { product, version } in [keyboard_id, tablet_id] {
             part(&product.get().to_le_bytes());

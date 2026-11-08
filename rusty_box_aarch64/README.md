@@ -327,7 +327,7 @@ is) must reproduce, are:
 | Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB granule and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB and 64 KiB granules too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0800_4000, the common base and processor 0's at 0x0800_5000, 4 KiB each, on the board's own layout) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0800_6000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
-| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with a `gpio-key` power button on its first line, 0 (line 3, QEMU's, on QEMU's layout), CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), no `fw_cfg` (see "Where the references differ"), virtio-mmio transports, 4 on the board's own layout and 32 on QEMU's (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the first free ones, or the last free with `VirtConfig::transport_order`; every queue 256 entries), an empty PCIe ECAM/windows |
+| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with a `gpio-key` power button on its first line, 0 (line 3, QEMU's, on QEMU's layout), CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded; the identity's manufacturer and device codes, by default none, and a CFI query table of the board's own; see "Where the references differ"), no `fw_cfg` (see "Where the references differ"), virtio-mmio transports, 4 on the board's own layout and 32 on QEMU's (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the first free ones, or the last free with `VirtConfig::transport_order`; every queue 256 entries), an empty PCIe ECAM/windows, the 32-bit memory window non-prefetchable and the 64-bit one prefetchable |
 | Board | the board's own device layout after Arm's memory map principles, or QEMU `virt`'s (`VirtConfig::layout`, see "Where the references differ"), RAM and the flash where QEMU's `virt` has them in both; the board's own interrupt wiring (`VirtConfig::interrupts`, see "Where the references differ"); the board's own device tree, written from the board (`src/boot/tree.rs`): generic node names (Devicetree Specification 2.2.2), each node as its binding describes it, the GIC with each frame the size it decodes, `dma-coherent` on each device that makes DMA, the processor's caches down to the L2 as `CCSIDR_EL1` reports them, `/psci` for PSCI 1.0 and 0.2 on the conduit the firmware answers on, `/chosen` with EBBR's `stdout-path` and no boot entropy (see "Where the references differ"), and the identity's `/model` and root `compatible`; no PMU, `fw-cfg` or platform bus node, which the board does not have; with EL2, the virtual interface's two frames and its maintenance interrupt in the GIC node; a host's own tree gets its names the identity's, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does, and is refused where it puts a device anywhere but where the layout has it (`BuildError::HostTreeAddress`) or names a device's interrupt other than the one the board's interrupt map wires it to (`BuildError::HostTreeInterrupt`) |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed and entered as Linux's arm64 boot protocol (`Documentation/arch/arm64/booting.rst`) asks — the kernel at the base of RAM, the device tree in the 2 MiB block after its `image_size`, the initramfs in the next, `x0` the tree and every other general-purpose register zero — and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
@@ -1228,7 +1228,8 @@ integration tests of the public API.
   only for a mode the base block cannot hold, and the board's names
   (`tests/unit/virtio_edid.rs`). `tests/identity.rs`
   reads, as a guest, the board's names: the device tree's, every
-  transport's `VendorID`, the input devices' names and vendor. Alpine with the
+  transport's `VendorID`, the input devices' names and vendor, the flash
+  devices' manufacturer and device codes. Alpine with the
   three devices binds `virtio_gpu` (`+edid`), shows its console in the
   framebuffer at the requested size, and receives a key typed on the virtio
   keyboard in its evdev; a snapshot taken after the drivers bound, restored
@@ -2380,7 +2381,10 @@ one open.
   architecture of the implementation" (§4.3.18), Arm's GICv2. Linux's GIC
   driver keys on Arm's code in `GICC_IIDR` to recognise a GIC-400 behind
   a CPU interface a device tree gives as 4 KiB (`gic_check_gicv2`); this
-  board's tree gives 8 KiB, the region the CPU interface decodes. And no device tree
+  board's tree gives 8 KiB, the region the CPU interface decodes. The
+  flash devices' manufacturer and device codes are the identity's
+  (`FlashIdentity`), by default no manufacturer and no part, where QEMU's
+  give Intel's ("The flash names no manufacturer", below). And no device tree
   has QEMU's platform bus, on which the board puts no device. A tree the
   host gives is named the same way: QEMU's
   `-dtb` keeps a tree's own names, but a tree dumped from QEMU would then
@@ -2481,6 +2485,60 @@ one open.
   function at 00:00.0; this board has no function there, so configuration
   reads find nothing and the I/O and memory windows answer like an empty
   bus, all ones, with writes ignored (`src/board.rs`).
+- **The PCIe host's 64-bit window is prefetchable memory.** The PCI bus
+  binding marks a `ranges` entry prefetchable by phys.hi's `p` bit, bit 30,
+  and leaves which windows are to the platform. Arm's Base System
+  Architecture (DEN0094C, E.2) puts non-prefetchable memory below 4 GiB, as
+  a PCI Type 1 header holds only 32-bit addresses for it (RPCI_MM_04,
+  method 1: one to one with the bus); what a bridge forwards above 4 GiB
+  is its prefetchable window. So the board's tree, on both layouts, gives
+  the 32-bit window as non-prefetchable 32-bit memory (0x0200_0000) and the
+  64-bit window as prefetchable 64-bit memory (0x4300_0000); the windows
+  read all ones and ignore writes, so no read there has a side effect.
+  QEMU's `create_pcie` gives the 64-bit window non-prefetchable
+  (0x0300_0000), which Linux warns of ("Memory resource size exceeds max
+  for 32 bits", `pci_parse_request_of_pci_ranges` in `drivers/pci/of.c`,
+  for a non-prefetchable window of 4 GiB or more). Stock EDK2's
+  `FdtPciHostBridgeLib` (`ArmVirtQemu`) reads only `ranges` entries
+  whose `p` bit is clear (`DTB_PCI_HOST_RANGE_TYPEMASK` holds it), so it
+  passes over the 64-bit window and gives its PCI bus the 32-bit one
+  alone; the board's bus has no function for it to place, and Linux takes
+  both windows from the tree and assigns them itself.
+- **The flash names no manufacturer, and its query table describes the
+  board's device.** QEMU's `virt` flash is `pflash_cfi01` with Intel's
+  JEP106 manufacturer code, 0x89, device code 0x18, and a CFI table of
+  QEMU's values. A JEP106 code names a company, and JEP106 has none a
+  maker may take without being assigned it; but every code carries odd
+  parity in bit 7, so 0x00 is no company's. The board's flash devices give the
+  identity's codes (`BoardIdentity`'s `flash`, `FlashIdentity`),
+  by default manufacturer 0x00 and device 0x0000, as the GIC's and the
+  GICv2m frame's identification registers name no implementer; a host with
+  a JEP106 code of bank 1 gives its own. No stock firmware reads them:
+  EDK2's NOR flash driver reads only Read Identifier offset 2, a block's
+  lock status (`NorFlashBlockIsLocked`), and Linux's `cfi_probe` finds the
+  device by the query table's "QRY", reading the codes only to apply
+  quirks of named makers' parts, and a device of no maker is none of
+  them. The CFI
+  query table (JESD68.01; `src/devices/cfi_flash.rs`, `CfiFlash::new`)
+  keeps what the specification and the command set fix — "QRY", command
+  set 0001 (JEP137), no alternate command set, no chip erase (the command
+  set has none), no Vpp pin — and derives the rest from the board: the
+  device size, a 16-bit interface (0x0001, the devices' width, where QEMU
+  says 8- or 16-bit, 0x0002), one erase block region of the banks' 256 KiB
+  sectors, the extended query table straight after it, and a write buffer
+  of 4 KiB a bank, the 4 KB translation granule's page. The device has no
+  supply and finishes every operation within the access that starts it,
+  so its Vcc range is every voltage the fields can state, 0.0 V to 9.9 V
+  (QEMU's 4.5 V to 5.5 V), and each typical time is the shortest its field
+  can state, 1 µs to program a word, 2 µs a buffer and 1 ms to erase a
+  block, each also the longest (QEMU's 128 µs, 128 µs and 1 s, each up
+  to 16 times that). The extended query table, version 1.0, reports none
+  of the optional features, no suspend, no block status bits and a Vcc
+  optimum of 0.0 V, and ends with its Vpp optimum; QEMU's sets one
+  protection register field after it, for a device that has no protection
+  register. Linux takes a typical word-program or block-erase time field of
+  0 as unstated and waits by its own defaults (50 ms and 2 s), which a
+  device that is ready on the first status read never reaches.
 - **A flash bank holds an image of any length.** QEMU insists on a drive
   of exactly the bank's 64 MiB. Each bank here decodes its whole window,
   as QEMU maps it (`virt_flash_map`), and reads the part an image does not
@@ -3159,7 +3217,9 @@ waits for a firmware build of the board's own:
   0 with its jump at the reset vector (`ArmVirtQemu.fdf`), 256 KiB sectors
   (`FdtNorFlashQemuLib.c`, `VarStore.fdf.inc`), each bank two 16-bit
   devices side by side (`VirtNorFlashDeviceLib.h`), and its device-ID
-  query reading every block unlocked, which EDK2 reads at offset 2.
+  query reading every block unlocked, which EDK2 reads at offset 2. The
+  CFI query table's geometry (each device's size, its 16-bit interface,
+  the erase block region) follows from these.
 - The PL011's 24 MHz `UARTCLK` (`PL011UartClkInHz`, which EDK2 works the
   baud divisor out from).
 - `arm,cortex-a15-gic` as the GIC node's `compatible`, the string
@@ -3175,10 +3235,6 @@ waits for a firmware build of the board's own:
 **Still to replace**, each with a value from a specification or one of
 the board's own:
 
-- The PCIe host's 64-bit window as non-prefetchable 64-bit memory (space
-  code 0x0300_0000 in its `ranges`, QEMU's `create_pcie`), which the PCI
-  bus binding leaves to the platform and Linux warns of ("Memory resource
-  size exceeds max for 32 bits").
 - The processor's remaining choices of QEMU's where Arm leaves one open:
   the Cortex-A57's revision, r1p0 as QEMU's `cortex-a57` reports it
   (`MIDR_EL1` 0x411F_D070), where the TRM on disk (DDI 0488H) is r1p3's
@@ -3194,8 +3250,6 @@ the board's own:
   `LORID_EL1` 0 as QEMU's `sme_reginfo` and `lor_reginfo`; and a virtual
   SError's syndrome without FEAT_RAS, `ISS` 0 where Arm leaves it
   IMPLEMENTATION DEFINED.
-- The flash's CFI identity: manufacturer 0x89 (Intel), device 0x18, and
-  QEMU's CFI table values.
 
 **Kept as a host's choice**, each off by default, for a VM made on QEMU's
 `virt` or on this board before it had its own answer:

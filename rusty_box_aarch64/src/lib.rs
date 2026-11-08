@@ -75,10 +75,11 @@ pub use devices::gicv2::{GicShape, MsiFrame, MsiFrameOutsideGic, PriorityBits, S
 pub use disk::{Access, Disk};
 pub use identity::{
     BoardIdentity, CompatibleList, CompatibleStrings, EdidDate, EdidProductCode, EdidWeek,
-    EdidWeekNumber, EdidYear, GicCpuIidr, GicDistFields, GicDistIidr, GicIdentity, IdentityError,
+    EdidWeekNumber, EdidYear, FlashDeviceCode, FlashIdentity, FlashManufacturer, GicCpuIidr,
+    GicDistFields, GicDistIidr, GicIdentity, IdentityError,
     IdentityField, IdentityNames, IdentityProblem, Iidr, IidrField, IidrFields, InputDeviceId, InputProductId, InputVendorId,
-    InputVersion, MsiFrameIidr, NotAnEdidWeek, NotAnEdidYear, NotIidrFields, NotPnpId, PnpId,
-    VirtioVendorId,
+    InputVersion, MsiFrameIidr, NotAnEdidWeek, NotAnEdidYear, NotIidrFields, NotJep106Number,
+    NotPnpId, PnpId, VirtioVendorId,
 };
 pub use instrumentation::{Execution, Instrumentation, NoInstrumentation};
 pub use interrupt_map::{

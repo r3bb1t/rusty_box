@@ -618,8 +618,9 @@ fn gic(
 
 /// The PCIe host bridge (`pci-host-ecam-generic`, and the PCI bus binding
 /// for `ranges`, `bus-range` and the interrupt map): configuration space
-/// over the ECAM window, one bus per MiB of it; I/O, 32-bit and 64-bit
-/// memory windows; INTA to INTD of each device slot swizzled onto the
+/// over the ECAM window, one bus per MiB of it; I/O, 32-bit
+/// non-prefetchable and 64-bit prefetchable memory windows; INTA to INTD
+/// of each device slot swizzled onto the
 /// bridge's four SPIs, which `wiring` gives, as the PCI-to-PCI bridge
 /// specification routes a device's pins; and MSIs through the GIC's MSI
 /// frame.
@@ -629,10 +630,12 @@ fn pcie(
     windows: DeviceWindows,
 ) -> Result<(), DeviceTreeError> {
     /// `ranges` space codes in the first child address cell (PCI bus
-    /// binding: `ss` in phys.hi).
+    /// binding: `ss` in phys.hi), and its `p` bit, bit 30, for memory that
+    /// is prefetchable.
     const SPACE_IO: u32 = 0x0100_0000;
     const SPACE_MEM32: u32 = 0x0200_0000;
     const SPACE_MEM64: u32 = 0x0300_0000;
+    const PREFETCHABLE: u32 = 0x4000_0000;
     /// An `interrupt-map` entry's cells: the device's three address cells
     /// and its pin, the GIC's phandle, its two address cells and its three
     /// interrupt cells.
@@ -659,11 +662,21 @@ fn pcie(
     let last_bus = (pcie.ecam.size >> 20) as u32 - 1;
     w.cells("bus-range", &[0, last_bus])?;
     // I/O space from 0, and both memory windows at the addresses they have
-    // on the bus.
+    // on the bus. Non-prefetchable memory is the 32-bit window's: a PCI
+    // Type 1 header holds only 32-bit addresses for it, so the platform
+    // keeps it below 4 GiB, at the same addresses on the bus (BSA 1.0C E.2,
+    // RPCI_MM_04, method 1). What a bridge forwards above 4 GiB is its
+    // prefetchable window, so the 64-bit window is prefetchable memory; the
+    // windows read all ones and ignore writes, so a read has no side
+    // effect there.
     let ranges = [
         range(SPACE_IO, 0, pcie.pio),
         range(SPACE_MEM32, pcie.mmio32.base.get(), pcie.mmio32),
-        range(SPACE_MEM64, pcie.mmio64.base.get(), pcie.mmio64),
+        range(
+            SPACE_MEM64 | PREFETCHABLE,
+            pcie.mmio64.base.get(),
+            pcie.mmio64,
+        ),
     ];
     w.cells("ranges", ranges.as_flattened())?;
     // Device numbers 0 to 3 (phys.hi bits 12:11) by pins INTA to INTD.

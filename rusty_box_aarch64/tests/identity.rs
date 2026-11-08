@@ -1,7 +1,8 @@
 //! What a guest reads of who made its machine (R9: each test asserts what
 //! the guest sees): the device tree's `/model` and root `compatible`, the
 //! virtio-mmio `VendorID`, the GIC's `GICD_IIDR`, `GICC_IIDR` and `GICV_IIDR`, the
-//! GICv2m frame's `MSI_IIDR`, and the input
+//! GICv2m frame's `MSI_IIDR`, the flash's manufacturer and device codes,
+//! and the input
 //! devices' names, vendor, products and versions are the board's
 //! identity's, the default [`BoardIdentity::RUSTY_BOX`] or one a host gives;
 //! nothing names QEMU, and the tree has no `fw-cfg` node.
@@ -11,17 +12,17 @@
 //! is beside its words.
 
 use rusty_box_aarch64::board::{
-    GIC_CPU_BASE, GIC_DIST_BASE, GIC_V2M_BASE, GIC_VCPU_BASE, RAM_BASE, VIRTIO_MMIO_BASE,
-    VIRTIO_MMIO_COUNT, VIRTIO_MMIO_STRIDE,
+    FLASH0_BASE, FLASH1_BASE, GIC_CPU_BASE, GIC_DIST_BASE, GIC_V2M_BASE, GIC_VCPU_BASE, RAM_BASE,
+    VIRTIO_MMIO_BASE, VIRTIO_MMIO_COUNT, VIRTIO_MMIO_STRIDE,
 };
 use rusty_box_aarch64::boot::fdt;
 use rusty_box_aarch64::{
-    BoardIdentity, EdidDate, EdidWeek, EdidWeekNumber, EdidYear, GicCpuIidr, GicDistFields,
-    GicDistIidr, GicIdentity, IdentityError,
+    BoardIdentity, EdidDate, EdidWeek, EdidWeekNumber, EdidYear, FlashDeviceCode, FlashIdentity,
+    FlashManufacturer, GicCpuIidr, GicDistFields, GicDistIidr, GicIdentity, IdentityError,
     IdentityField, IdentityNames, IdentityProblem, IidrField, IidrFields, InputDeviceId,
     InputProductId, InputVendorId, InputVersion, LentStorage, Levels, MachineBuilder, MemoryLoan,
-    MsiFrameIidr, NoEl2, NotAnEdidWeek, NotAnEdidYear, NotIidrFields, NotPnpId, PnpId, RamSize,
-    Reg, RunBudget, StopReason, VirtConfig, VirtMachine, VirtioVendorId,
+    MsiFrameIidr, NoEl2, NotAnEdidWeek, NotAnEdidYear, NotIidrFields, NotJep106Number, NotPnpId,
+    PnpId, RamSize, Reg, RunBudget, StopReason, VirtConfig, VirtMachine, VirtioVendorId,
 };
 
 const RAM_LEN: usize = 4 << 20;
@@ -342,6 +343,78 @@ fn the_gic_reads_the_identitys_iidrs() {
     );
 }
 
+/// `str w3, [x1, #8]; ldr w2, [x1]; ldr w4, [x1, #4]; ldr w5, [x1, #8];
+/// str w6, [x1]; ldr w7, [x1]; b .`: Read Identifier at the block's
+/// offset 2, as EDK2's `NorFlashBlockIsLocked` gives it, the manufacturer,
+/// device and block status codes, then Read Array and the array.
+const READ_FLASH_IDENTIFIER: [u32; 7] = [
+    0xB900_0823,
+    0xB940_0022,
+    0xB940_0424,
+    0xB940_0825,
+    0xB900_0026,
+    0xB940_0027,
+    0x1400_0000,
+];
+
+/// Both flash banks' devices give the identity's manufacturer and device
+/// codes in their Read Identifier space, each of the bank's two 16-bit
+/// devices in its half of the word, and every block unlocked. By default
+/// they name no manufacturer, 0x00, which has even parity and so is no
+/// JEP106 code, and no part, where QEMU's give Intel's code, 0x89, and
+/// device 0x18 (`pflash_cfi01` as `virt_flash_create1` makes it); a host's
+/// codes where it gives them.
+#[test]
+fn the_flash_reads_the_identitys_codes() {
+    let maker = FlashManufacturer::jep106(0x2A).unwrap_or_else(|e| panic!("{e}"));
+    let hosts = BoardIdentity::new(IdentityNames {
+        flash: FlashIdentity {
+            manufacturer: maker,
+            device: FlashDeviceCode::new(0x1234),
+        },
+        ..IdentityNames::RUSTY_BOX
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    // Number 0x2A has three ones, so no parity bit.
+    for (identity, manufacturer, device) in [
+        (BoardIdentity::RUSTY_BOX, 0, 0),
+        (hosts, 0x002A_002A, 0x1234_1234),
+    ] {
+        for bank in [FLASH0_BASE, FLASH1_BASE] {
+            let mut ram = vec![0u8; RAM_LEN];
+            let mut m = bare(&mut ram, identity, Devices::None);
+            for (i, word) in READ_FLASH_IDENTIFIER.iter().enumerate() {
+                m.mem_write(RAM_BASE + 4 * i as u64, &word.to_le_bytes())
+                    .expect("code is in RAM");
+            }
+            m.reg_write(Reg::Pc, RAM_BASE);
+            m.reg_write(Reg::X1, bank);
+            m.reg_write(Reg::X3, 0x0090_0090);
+            m.reg_write(Reg::X6, 0x00FF_00FF);
+            let out = m.step(RunBudget::Instructions(6));
+            assert_eq!(out.stop, StopReason::BudgetExhausted);
+            assert_eq!(m.reg_read(Reg::X2), manufacturer, "{bank:#x}");
+            assert_eq!(m.reg_read(Reg::X4), device, "{bank:#x}");
+            assert_eq!(m.reg_read(Reg::X5), 0, "no block locked, {bank:#x}");
+            assert_eq!(m.reg_read(Reg::X7), 0xFFFF_FFFF, "erased, {bank:#x}");
+        }
+    }
+    // A JEP106 code carries odd parity in bit 7; 0 numbers no
+    // manufacturer and 127 is the continuation code.
+    for (number, code) in [(1, 0x01), (3, 0x83), (126, 0xFE)] {
+        assert_eq!(
+            FlashManufacturer::jep106(number).map(FlashManufacturer::code),
+            Ok(code)
+        );
+    }
+    for number in [0, 127, 128, 255] {
+        assert_eq!(
+            FlashManufacturer::jep106(number),
+            Err(NotJep106Number { number })
+        );
+    }
+}
+
 /// The tree the firmware is handed names the board by its identity, and
 /// holds no string of QEMU's: no `qemu,` compatible, no `fw-cfg` node and
 /// not QEMU's `linux,dummy-virt`.
@@ -409,11 +482,20 @@ fn a_snapshot_restores_only_under_its_identity() {
         year: EdidYear::new(2027).unwrap_or_else(|e| panic!("{e}")),
     });
     let model_year = differing(EdidDate::ModelYear(year));
+    let flash_part = BoardIdentity::new(IdentityNames {
+        flash: FlashIdentity {
+            device: FlashDeviceCode::new(1),
+            ..FlashIdentity::NONE
+        },
+        ..IdentityNames::RUSTY_BOX
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
     for (identity, restores) in [
         (BoardIdentity::RUSTY_BOX, true),
         (acme(), false),
         (later, false),
         (model_year, false),
+        (flash_part, false),
     ] {
         let mut ram = vec![0u8; RAM_LEN];
         let mut other = bare(&mut ram, identity, Devices::None);

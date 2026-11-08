@@ -406,14 +406,15 @@ fn the_devices_are_described_where_they_are() {
     );
     assert_eq!(prop(&tree, pcie, "bus-range").map(cells), Some(vec![0, 255]));
     // I/O space from 0 at 0x0809_0000, the page after the transports,
-    // 64 KiB; 32-bit memory at 512 MiB, 512 MiB of it; 64-bit memory at
+    // 64 KiB; non-prefetchable 32-bit memory at 512 MiB, 512 MiB of it;
+    // prefetchable 64-bit memory (phys.hi's `p` bit, 0x4000_0000) at
     // 384 GiB, 128 GiB of it.
     assert_eq!(
         prop(&tree, pcie, "ranges").map(cells),
         Some(vec![
             0x0100_0000, 0, 0, 0, 0x0809_0000, 0, 0x1_0000, //
             0x0200_0000, 0, 0x2000_0000, 0, 0x2000_0000, 0, 0x2000_0000, //
-            0x0300_0000, 0x60, 0, 0x60, 0, 0x20, 0,
+            0x4300_0000, 0x60, 0, 0x60, 0, 0x20, 0,
         ])
     );
     assert_eq!(prop(&tree, pcie, "dma-coherent"), Some(&[][..]));
@@ -533,12 +534,14 @@ fn the_tree_describes_the_layout_it_is_given() {
         prop(tree, "virtio@a003e00", "interrupts").map(cells),
         Some(vec![0, 3 + 31, 4])
     );
+    // QEMU's windows, the 64-bit one prefetchable as on the board's own
+    // layout, where QEMU's `create_pcie` has it non-prefetchable.
     assert_eq!(
         prop(tree, "pcie@4010000000", "ranges").map(cells),
         Some(vec![
             0x0100_0000, 0, 0, 0, 0x3EFF_0000, 0, 0x1_0000, //
             0x0200_0000, 0, 0x1000_0000, 0, 0x1000_0000, 0, 0x2EFF_0000, //
-            0x0300_0000, 0x80, 0, 0x80, 0, 0x80, 0,
+            0x4300_0000, 0x80, 0, 0x80, 0, 0x80, 0,
         ])
     );
     let gpio = prop(tree, "gpio@9030000", "phandle").map(cells).expect("phandle");

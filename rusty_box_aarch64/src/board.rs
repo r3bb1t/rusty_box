@@ -383,8 +383,8 @@ impl<S: GuestStorage> VirtBoard<S> {
         };
         Self {
             storage,
-            flash0: CfiFlash::new(FLASH_BANK_SIZE),
-            flash1: CfiFlash::new(FLASH_BANK_SIZE),
+            flash0: CfiFlash::new(FLASH_BANK_SIZE, identity.flash()),
+            flash1: CfiFlash::new(FLASH_BANK_SIZE, identity.flash()),
             gic: GicV2::with_extensions(gic)
                 .shaped(gic_shape)
                 .identified_as(GicNames {

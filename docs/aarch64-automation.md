@@ -105,7 +105,10 @@ and root `compatible` are the machine's identity's (below), and it has no
 **The machine's name.** Everything a guest reads that says who made the
 machine — the device tree's `/model` and root `compatible`, every
 virtio-mmio transport's `VendorID`, the GIC's `GICD_IIDR` and `GICC_IIDR`
-(which `GICV_IIDR` repeats), the GICv2m frame's `MSI_IIDR`, the
+(which `GICV_IIDR` repeats), the GICv2m frame's `MSI_IIDR`, the flash
+devices' manufacturer and device codes (`FlashIdentity`; a manufacturer
+as `FlashManufacturer::jep106`, a JEP106 number of bank 1, by default
+`FlashManufacturer::NONE`), the
 virtio keyboard's and tablet's names, vendor, products and versions, and
 the virtio display's EDID maker, product, name and date — comes from a
 `BoardIdentity`, by default
