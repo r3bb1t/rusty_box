@@ -32,7 +32,8 @@
 # the downloads and the disk; HOST_RAM_MIB (1024), NESTED_RAM_MIB (256).
 #
 # Needs: cargo, curl, python3 (with venv, unless bsdtar is installed),
-# openssl, mke2fs (e2fsprogs 1.43 or later), sha512sum. Tested on Linux.
+# openssl, mke2fs (e2fsprogs 1.43 or later), sha512sum, stty. On Termux:
+#   pkg install rust openssl-tool e2fsprogs python bsdtar
 set -euo pipefail
 
 ALPINE_VERSION=3.23.7
@@ -55,21 +56,33 @@ while [ $# -gt 0 ]; do
     --host-only) NESTED=no; shift ;;
     --rebuild) REBUILD=yes; shift ;;
     --no-build) BUILD=no; shift ;;
-    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
 
 say() { printf '\033[1m== %s\033[0m\n' "$*" >&2; }
-need() {
-  command -v "$1" >/dev/null 2>&1 || { echo "missing: $1 ($2)" >&2; exit 1; }
-}
-need cargo "https://rustup.rs"
-need curl "your package manager"
-need python3 "your package manager"
-need openssl "your package manager"
-need mke2fs "e2fsprogs"
-need sha512sum "coreutils"
+# Every missing tool at once, with the package that has it: Termux's
+# package names where `pkg` is Termux's, else the usual ones.
+if [ -n "${TERMUX_VERSION:-}" ] || [ -d /data/data/com.termux ]; then
+  TOOLS="cargo:rust curl:curl python3:python openssl:openssl-tool mke2fs:e2fsprogs sha512sum:coreutils stty:coreutils"
+  INSTALL="pkg install"
+else
+  TOOLS="cargo:rustup.rs curl:curl python3:python3 openssl:openssl mke2fs:e2fsprogs sha512sum:coreutils stty:coreutils"
+  INSTALL="install with your package manager:"
+fi
+MISSING=
+for entry in $TOOLS; do
+  tool=${entry%%:*}
+  package=${entry#*:}
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    MISSING="$MISSING $package"
+  fi
+done
+if [ -n "$MISSING" ]; then
+  echo "missing tools; $INSTALL$MISSING" >&2
+  exit 1
+fi
 
 ASSETS="python3 -I $REPO/scripts/nested_kvm_assets.py"
 mkdir -p "$WORK"
