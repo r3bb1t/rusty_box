@@ -314,9 +314,9 @@ impl Machine {
     /// Turn stage 2 on (`HCR_EL2.VM`) with `VTCR_EL2` `vtcr` (`PS` 44 bits
     /// added, its RES1 bit with the write) and `VTTBR_EL2` `vttbr`.
     fn stage2(&mut self, vtcr: u64, vttbr: u64) {
-        let features = self.cpu.imp.features;
+        let imp = self.cpu.imp.get();
         let el2 = &mut self.cpu.el2_state.regs;
-        el2.write(El2Reg::Vtcr, features, 0, vtcr | PS_44);
+        el2.write(El2Reg::Vtcr, imp, 0, vtcr | PS_44);
         el2.vttbr = vttbr;
         el2.hcr |= HCR_VM;
         self.cpu.el10_context_changed();
@@ -421,10 +421,10 @@ fn el2_range(
     let tables = m.tables(page_bits, 64 - t0sz, start);
     let code_page = CODE & !(tables.page() - 1);
     m.map(tables, code_page, 3, s1_leaf(code_page, TABLE));
-    let features = m.cpu.imp.features;
+    let imp = m.cpu.imp.get();
     let tcr = u64::from(t0sz) | (tg0 << TG0) | PS_44;
     let regs = &mut m.cpu.el2_state.regs;
-    regs.write(El2Reg::Tcr, features, 0, tcr);
+    regs.write(El2Reg::Tcr, imp, 0, tcr);
     regs.ttbr0 = tables.root;
     regs.mair = 0xFF;
     regs.sctlr |= 1;
@@ -1685,9 +1685,9 @@ fn ds_walks_52_bit_input_addresses_from_level_minus_1_with_the_4k_granule() {
 
     for ds in [DS_EL2, 0] {
         let (mut m, tables) = el2_range(V9, TG0_4K, 12, 12, -1);
-        let features = m.cpu.imp.features;
+        let imp = m.cpu.imp.get();
         let tcr = m.cpu.el2().tcr | ds | PS_52;
-        m.cpu.el2_state.regs.write(El2Reg::Tcr, features, 0, tcr);
+        m.cpu.el2_state.regs.write(El2Reg::Tcr, imp, 0, tcr);
         m.map(tables, PATTERN, 3, s1_leaf(DATA, TABLE));
         m.ram.put64(DATA + (PATTERN & 0xFFF), marker(PATTERN));
         if ds == 0 {
@@ -2118,9 +2118,9 @@ fn a_ds_leaf_takes_its_shareability_from_the_tcr() {
 
     let (mut m, tables) = el2_range(V9, TG0_4K, 12, 25, 1);
     m.map(tables, va, 3, s1_leaf(DATA, TABLE));
-    let features = m.cpu.imp.features;
+    let imp = m.cpu.imp.get();
     let tcr = m.cpu.el2().tcr | DS_EL2 | (OUTER << SH0);
-    m.cpu.el2_state.regs.write(El2Reg::Tcr, features, 0, tcr);
+    m.cpu.el2_state.regs.write(El2Reg::Tcr, imp, 0, tcr);
     m.cpu.el2_state.regs.sctlr |= sctlr::C;
     m.cpu.x[1] = va;
     assert_eq!(m.run(AT_S1E2R), None, "AT S1E2R");

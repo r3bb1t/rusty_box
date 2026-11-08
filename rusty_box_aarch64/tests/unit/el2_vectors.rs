@@ -294,9 +294,10 @@ fn reads(word: u32) -> bool {
 /// The outcome QEMU recorded for `v`, but where the board departs from QEMU
 /// (README "Where the references differ"): a firmware call of
 /// `PSCI_VERSION`, an `HVC` or `SMC` with W0 naming it, reads the version
-/// the board's firmware implements, where QEMU's reads 1.1; and `MIDR_EL1`,
+/// the board's firmware implements, where QEMU's reads 1.1; `MIDR_EL1`,
 /// or `VPIDR_EL2` out of reset, reads the Cortex-A57 r1p3 its TRM
-/// describes, where QEMU's reads r1p0.
+/// describes, where QEMU's reads r1p0; and the TRM's `IL1DATA0_EL1`, which
+/// QEMU's lacks, is there.
 fn the_boards_outcome(v: &Vector) -> Outcome {
     use super::system::psci;
     const PSCI_VERSION: u64 = 0x8400_0000;
@@ -315,6 +316,25 @@ fn the_boards_outcome(v: &Vector) -> Outcome {
     let reads_midr = v.word == MRS_X0_MIDR || v.word == MRS_X0_VPIDR;
     if reads_midr && want.kind == 0 && want.x0 == QEMU_CORTEX_A57_R1P0 {
         want.x0 = super::id::MIDR_CORTEX_A57;
+    }
+    // `MRS X0, S3_0_C15_C0_0` and `MSR S3_0_C15_C0_0, X0`: the Cortex-A57's
+    // `IL1DATA0_EL1` (DDI 0488H, 4.3.62), which QEMU's lacks. Where QEMU's
+    // access at EL1 or EL2 was UNDEFINED, the board's completes: the read
+    // returns the register as reset leaves it, which the runner's start
+    // zeroes (`zero_the_fill`), and the write leaves X0 as it was.
+    const MRS_X0_IL1DATA0: u32 = 0xD538_F000;
+    const MSR_IL1DATA0_X0: u32 = 0xD518_F000;
+    const UNDEFINED: u64 = 0x0200_0000;
+    let il1data0 = v.word == MRS_X0_IL1DATA0 || v.word == MSR_IL1DATA0_X0;
+    if il1data0 && v.target != 0 && want.kind != 0 && want.esr == UNDEFINED {
+        want = Outcome {
+            kind: 0,
+            x0: if v.word == MRS_X0_IL1DATA0 { 0 } else { v.x0 },
+            esr: 0,
+            far: 0,
+            elr: 0,
+            spsr: 0,
+        };
     }
     want
 }

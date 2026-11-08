@@ -49,10 +49,11 @@ use super::pmu::PmuShape;
 /// The Cortex-A57's `MIDR_EL1`: Arm Ltd, variant 1, architecture 0xF, part
 /// 0xD07 (Cortex-A57), revision 3 — r1p3, the revision the TRM describes
 /// (DDI 0488H, Table 4-1 and 4.3.1). Of the registers the TRM's product
-/// revisions (1.8) change from r1p0 to r1p3, `MIDR_EL1` is the only one
-/// this model has: `TRCIDR1`, the Peripheral ID registers and
-/// `CPUACTLR_EL1` are the trace unit's, the external debug interface's and
-/// the IMPLEMENTATION DEFINED space's, none of which it implements.
+/// revisions (1.8) change from r1p0 to r1p3, this model has `MIDR_EL1` and
+/// `CPUACTLR_EL1`, whose fields are r1p3's, its TRM's
+/// (`impdef::CPUACTLR_FIELDS`); `TRCIDR1` and the Peripheral ID registers
+/// are the trace unit's and the external debug interface's, which it does
+/// not implement.
 pub const MIDR_CORTEX_A57: u64 = 0x411F_D073;
 
 /// A software model's `MIDR_EL1`: implementer 0 (reserved for software

@@ -7,6 +7,7 @@ use rusty_box_core::SnapError;
 use super::debug::Stepped;
 use super::el2::{El2State, El2Storage};
 use super::features::{Feature, Features, LeveledImplementation};
+use super::impdef::ImpdefRegs;
 use super::mmu::{El10Context, El2RegimeContext, TlbContext};
 use super::pmu::Pmu;
 use super::regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, RegClass, VReg};
@@ -281,6 +282,7 @@ impl<L: Levels> Cpu<L> {
             pac_keys,
             imp,
             sys,
+            impdef,
             pmu,
             monitor,
             event,
@@ -316,6 +318,7 @@ impl<L: Levels> Cpu<L> {
         *scalable = sme::ScalableRegs::ZERO;
         *pac_keys = pauth::PacKeys::RESET;
         *sys = SysRegs::reset(imp.get(), reset_pc);
+        *impdef = ImpdefRegs::reset(imp.impdef);
         *pmu = Pmu::reset(imp.features, imp.pmu, *retired);
         *monitor = ExclusiveMonitor::CLEAR;
         *event = EventRegister::at(false, count);
@@ -517,7 +520,8 @@ impl<L: Levels> Cpu<L> {
         }
         self.save_sme(w)?;
         self.save_pauth(w)?;
-        self.save_pmu(w)
+        self.save_pmu(w)?;
+        self.save_impdef(w)
     }
 
     /// The inverse of [`Cpu::save`]. The interrupt inputs are not part of
@@ -607,6 +611,11 @@ impl<L: Levels> Cpu<L> {
         if !self.imp.debug.cover(&sys) {
             return Err(SnapError::Invalid(
                 "snapshot holds a breakpoint or watchpoint this processor does not have",
+            ));
+        }
+        if !self.auxiliary_restorable(&sys) {
+            return Err(SnapError::Invalid(
+                "snapshot holds auxiliary register bits this processor cannot set",
             ));
         }
         if !self.sme_registers_restorable(&sys) {
@@ -736,7 +745,8 @@ impl<L: Levels> Cpu<L> {
         self.flush_traces();
         self.restore_sme(r)?;
         self.restore_pauth(r)?;
-        self.restore_pmu(r)
+        self.restore_pmu(r)?;
+        self.restore_impdef(r)
     }
 }
 

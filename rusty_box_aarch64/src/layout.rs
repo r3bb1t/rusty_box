@@ -67,6 +67,12 @@ pub struct GicWindows {
     pub hyp: PhysAddr,
     /// The virtual CPU interface, with EL2.
     pub vcpu: PhysAddr,
+    /// The GIC's base address as the Cortex-A57's PERIPHBASE[43:18] input
+    /// carries it, which reset samples into `CBAR_EL1` "to permit software
+    /// to read the location of the GIC if it exists in the system external
+    /// to the Cortex-A57 processor" (DDI 0488H, 8.2.4, GICCDISABLE bypass
+    /// mode, and 4.3.70): 256 KiB aligned, below 2^44.
+    pub periphbase: PhysAddr,
 }
 
 impl GicWindows {
@@ -338,6 +344,8 @@ const BOARD: DeviceWindows = DeviceWindows {
         v2m: PhysAddr::new(DEVICES + PAGE),
         hyp: PhysAddr::new(GIC_BLOCK + 0x4000),
         vcpu: PhysAddr::new(GIC_BLOCK + 0x6000),
+        // The GIC-400's own base, the block its frames are offsets in.
+        periphbase: PhysAddr::new(GIC_BLOCK),
     },
     uart: PhysAddr::new(DEVICES + 2 * PAGE),
     rtc: PhysAddr::new(DEVICES + 3 * PAGE),
@@ -366,6 +374,10 @@ const QEMU_VIRT: DeviceWindows = DeviceWindows {
         v2m: PhysAddr::new(0x0802_0000),
         hyp: PhysAddr::new(0x0803_0000),
         vcpu: PhysAddr::new(0x0804_0000),
+        // `VIRT_CPUPERIPHS`, the region QEMU's map gives the processors'
+        // peripherals and passes to its processor as `reset-cbar`
+        // (`machvirt_init`); its distributor starts it.
+        periphbase: PhysAddr::new(0x0800_0000),
     },
     uart: PhysAddr::new(0x0900_0000),
     rtc: PhysAddr::new(0x0901_0000),
@@ -576,6 +588,7 @@ mod tests {
         let w = DeviceLayout::Board.windows();
         let block = w.gic.dist.get() - 0x1000;
         assert_eq!(block % PAGE, 0);
+        assert_eq!(w.gic.periphbase.get(), block, "PERIPHBASE is the GIC-400's base");
         assert_eq!(
             [
                 w.gic.dist.get(),
@@ -604,6 +617,23 @@ mod tests {
     /// The board's own layout has a transport for each device it can plug
     /// in, each decoding its 64 KiB page; QEMU's has its 32, each decoding
     /// its 512 bytes, 512 bytes apart.
+    /// Each layout's PERIPHBASE is one PERIPHBASE[43:18] can carry (DDI
+    /// 0488H, 4.3.70) and starts the 256 KiB below the GIC's distributor
+    /// and CPU interface, where the GIC is.
+    #[test]
+    fn each_layouts_periphbase_is_where_its_gic_is() {
+        const CBAR_GRANULE: u64 = 1 << 18;
+        for layout in DeviceLayout::ALL {
+            let gic = layout.windows().gic;
+            let base = gic.periphbase.get();
+            assert_eq!(base % CBAR_GRANULE, 0, "{layout}");
+            assert!(base < 1 << 44, "{layout}");
+            for frame in [gic.dist, gic.cpu] {
+                assert_eq!(frame.get() & !(CBAR_GRANULE - 1), base, "{layout}: {frame:?}");
+            }
+        }
+    }
+
     #[test]
     fn each_layout_has_its_own_transports() {
         let board = DeviceLayout::Board.windows().virtio;

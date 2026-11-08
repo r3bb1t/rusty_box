@@ -22,7 +22,10 @@
 
 use super::debug::DebugPoints;
 use super::id::{self, Caches};
+use super::impdef::ImpdefSpace;
 use super::pmu::PmuShape;
+use crate::bus::PhysAddr;
+use crate::layout::DeviceLayout;
 use rusty_box_core::ClockHz;
 
 use super::el2::Levels;
@@ -847,13 +850,16 @@ pub(crate) struct Implementation {
     /// The PMU's IMPLEMENTATION DEFINED choices, which
     /// [`Feature::PmuV3`] reads and nothing else does.
     pub(crate) pmu: PmuShape,
+    /// The IMPLEMENTATION DEFINED registers, with the inputs they report.
+    pub(crate) impdef: ImpdefSpace,
 }
 
 impl Implementation {
     /// The Cortex-A57 shape: [`Features::CORTEX_A57`] and the Cortex-A57's
     /// `MIDR_EL1`, with no streaming vector length to choose, the board's
-    /// 1 GHz counter, and the Cortex-A57's caches, breakpoints, watchpoints
-    /// and PMU.
+    /// 1 GHz counter, and the Cortex-A57's caches, breakpoints, watchpoints,
+    /// PMU and IMPLEMENTATION DEFINED registers, its PERIPHBASE where the
+    /// board's default layout has its GIC ([`Implementation::with_periphbase`]).
     pub(crate) const CORTEX_A57: Self = Self {
         features: Features::CORTEX_A57,
         midr: id::MIDR_CORTEX_A57,
@@ -862,7 +868,20 @@ impl Implementation {
         caches: Caches::CORTEX_A57,
         debug: DebugPoints::CORTEX_A57,
         pmu: PmuShape::CORTEX_A57,
+        impdef: ImpdefSpace::CortexA57 {
+            periphbase: DeviceLayout::DEFAULT.windows().gic.periphbase,
+        },
     };
+
+    /// This implementation with its PERIPHBASE input tied to `periphbase`,
+    /// where the board's layout has its GIC: what the Cortex-A57's
+    /// `CBAR_EL1` reports. A processor without the input is unchanged.
+    pub(crate) const fn with_periphbase(self, periphbase: PhysAddr) -> Self {
+        Self {
+            impdef: self.impdef.with_periphbase(periphbase),
+            ..self
+        }
+    }
 
     /// This implementation with its system counter at `rate`, which the
     /// board's configuration chose and the model allowed
@@ -877,8 +896,8 @@ impl Implementation {
     /// The Armv9.2 processor model: [`Features::ARMV9P2`], a software
     /// model's `MIDR_EL1`, Streaming SVE vectors of up to 512 bits, the
     /// counter Armv8.6 and later require, caches of the board's own, the
-    /// fewest breakpoints and watchpoints Arm permits, and a PMU of the
-    /// board's own.
+    /// fewest breakpoints and watchpoints Arm permits, a PMU of the
+    /// board's own, and no IMPLEMENTATION DEFINED registers.
     pub(crate) const ARMV9P2: Self = Self {
         features: Features::ARMV9P2,
         midr: id::MIDR_SOFTWARE_MODEL,
@@ -887,6 +906,7 @@ impl Implementation {
         caches: Caches::ARMV9P2,
         debug: DebugPoints::ARMV9P2,
         pmu: PmuShape::ARMV9P2,
+        impdef: ImpdefSpace::Empty,
     };
 
     /// This implementation as a processor of the level set `L` has it, with

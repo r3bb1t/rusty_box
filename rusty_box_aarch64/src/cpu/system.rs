@@ -624,7 +624,9 @@ impl<L: Levels> Cpu<L> {
     /// `SYS`: cache maintenance, address translation and TLB maintenance,
     /// with each instruction's EL0 control (a trap to EL1, which
     /// `HCR_EL2.TGE` takes to EL2) checked before its `HCR_EL2` trap to EL2,
-    /// as its accessor in Arm's `Registers.json` orders them.
+    /// as its accessor in Arm's `Registers.json` orders them; and in the
+    /// IMPLEMENTATION DEFINED space the Cortex-A57's `RAMINDEX`
+    /// ([`Cpu::impdef_instruction`]).
     #[allow(clippy::too_many_arguments)]
     fn exec_sys<B: PhysBus>(
         &mut self,
@@ -643,7 +645,11 @@ impl<L: Levels> Cpu<L> {
         let below_el2 = el != El::El2;
         let key = SysRegKey::from_insn(insn);
         if key.in_impdef_space() {
-            return self.sysreg_fault(pc, insn, self.impdef_space_access(el), key, rt, false);
+            let operand = self.x_or_zr(rt);
+            return match self.impdef_instruction(key, el, operand) {
+                Ok(()) => Ok(Flow::Next),
+                Err(err) => self.sysreg_fault(pc, insn, err, key, rt, false),
+            };
         }
         match (op1, crn, crm, op2) {
             // IC IALLUIS, IC IALLU: the processor's decoded traces are its

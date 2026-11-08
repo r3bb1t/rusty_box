@@ -283,8 +283,12 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
-    /// Arm `Hint_WFE`.
+    /// Arm `Hint_WFE`; a NOP, leaving the Event Register as it is, while
+    /// the Cortex-A57's `CPUACTLR_EL1` bit 7 says so (DDI 0488H, 4.3.66).
     pub(crate) fn exec_wfe(&mut self) -> ExecResult {
+        if self.impdef.wfe_is_nop() {
+            return Ok(Flow::Next);
+        }
         if self.take_event() {
             return Ok(Flow::Next);
         }
@@ -293,8 +297,12 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// Arm `Hint_WFI`: a pending interrupt completes it before the trap
-    /// check.
+    /// check. A NOP while the Cortex-A57's `CPUACTLR_EL1` bit 8 says so
+    /// (DDI 0488H, 4.3.66).
     pub(crate) fn exec_wfi(&mut self) -> ExecResult {
+        if self.impdef.wfi_is_nop() {
+            return Ok(Flow::Next);
+        }
         if self.interrupt_pending() {
             return Ok(Flow::Next);
         }

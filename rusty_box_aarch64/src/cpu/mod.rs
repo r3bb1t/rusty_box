@@ -45,6 +45,7 @@ mod fp_extensions;
 #[path = "../../tests/unit/granules.rs"]
 mod granules;
 mod history;
+mod impdef;
 mod isa;
 mod ldst;
 #[cfg(test)]
@@ -609,6 +610,9 @@ pub struct Cpu<L: Levels> {
     /// it.
     pub(crate) imp: features::LeveledImplementation<L>,
     pub(crate) sys: SysRegs,
+    /// The IMPLEMENTATION DEFINED registers the processor's
+    /// [`impdef::ImpdefSpace`] gives it: the Cortex-A57's, or none.
+    pub(crate) impdef: impdef::ImpdefRegs,
     /// The Performance Monitors Extension's registers and counters
     /// (FEAT_PMUv3), all zero on a processor without it.
     pub(crate) pmu: pmu::Pmu,
@@ -673,8 +677,9 @@ pub struct Cpu<L: Levels> {
 
 impl<L: Levels> Cpu<L> {
     /// A processor of `model` in its reset state, with EL2 where its level
-    /// set has it; refused for a model that cannot have EL2 when the level
-    /// set does ([`CpuModel::check_levels`]).
+    /// set has it, and on the Cortex-A57 its PERIPHBASE where the board's
+    /// default layout has the GIC; refused for a model that cannot have EL2
+    /// when the level set does ([`CpuModel::check_levels`]).
     pub fn new(model: CpuModel, config: CpuConfig) -> Result<Self, El2Unavailable> {
         model.check_levels::<L>()?;
         Ok(Self::implementing(config, model.implementation()))
@@ -707,6 +712,7 @@ impl<L: Levels> Cpu<L> {
             pac_keys: pauth::PacKeys::RESET,
             imp,
             sys: SysRegs::reset(imp.get(), config.reset_pc),
+            impdef: impdef::ImpdefRegs::reset(imp.impdef),
             pmu: pmu::Pmu::reset(imp.features, imp.pmu, 0),
             monitor: ExclusiveMonitor::CLEAR,
             event: wait::EventRegister::at(false, timer::Count::new(0)),

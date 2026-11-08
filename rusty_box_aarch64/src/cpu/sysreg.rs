@@ -106,8 +106,10 @@ impl SysRegKey {
     /// Whether the encoding is in the IMPLEMENTATION DEFINED space: the
     /// instructions `S1_<op1>_C11_*` and `S1_<op1>_C15_*` (`SYS`, `SYSL`)
     /// and the registers `S3_<op1>_C11_*` and `S3_<op1>_C15_*` (`MSR`,
-    /// `MRS`), none of which exists on this processor
-    /// ([`Cpu::impdef_space_access`] says what an access does).
+    /// `MRS`): the Cortex-A57's registers and `RAMINDEX`
+    /// ([`Cpu::impdef_register_read`] and its siblings), and on every
+    /// encoding a processor gives nothing what
+    /// [`Cpu::impdef_space_access`] says.
     pub(crate) const fn in_impdef_space(self) -> bool {
         (self.op0() == 1 || self.op0() == 3) && (self.crn() == 11 || self.crn() == 15)
     }
@@ -913,10 +915,11 @@ impl<L: Levels> Cpu<L> {
         el == El::El1 && self.hcr_lacks(HCR_APK)
     }
 
-    /// The outcome of an access to the IMPLEMENTATION DEFINED space
-    /// ([`SysRegKey::in_impdef_space`]), as the `S1_<op1>_<Cn>_<Cm>_<op2>`
-    /// and `S3_<op1>_<Cn>_<Cm>_<op2>` accessors of Arm's `Registers.json`
-    /// make it with nothing implemented there, for an access at `el`: EL1's
+    /// The outcome of an access to an encoding of the IMPLEMENTATION
+    /// DEFINED space ([`SysRegKey::in_impdef_space`]) the processor gives
+    /// nothing, as the `S1_<op1>_<Cn>_<Cm>_<op2>` and
+    /// `S3_<op1>_<Cn>_<Cm>_<op2>` accessors of Arm's `Registers.json` make
+    /// it with nothing implemented there, for an access at `el`: EL1's
     /// traps to EL2 under `HCR_EL2.TIDCP`, and every other is UNDEFINED.
     pub(crate) fn impdef_space_access(&self, el: El) -> SysRegError {
         if el == El::El1 && self.hcr_any(HCR_TIDCP) {
@@ -1105,7 +1108,7 @@ impl<L: Levels> Cpu<L> {
         }
 
         if key.in_impdef_space() {
-            return Err(self.impdef_space_access(el));
+            return self.impdef_register_read(key, el);
         }
         if key.is_el2() {
             return if el == El::El2 {
@@ -1400,7 +1403,7 @@ impl<L: Levels> Cpu<L> {
         })
     }
 
-    /// The EL2 register held as written (through its [`El2Reg::kept`]
+    /// The EL2 register held as written (through its [`El2Reg::held`]
     /// mask) that `key` names, if this processor implements it
     /// ([`el2_encoding`]).
     fn el2_storage(&self, key: SysRegKey) -> Option<El2Reg> {
@@ -1565,7 +1568,8 @@ impl<L: Levels> Cpu<L> {
         }
 
         if key.in_impdef_space() {
-            return Err(self.impdef_space_access(el));
+            self.impdef_register_write(key, el, value)?;
+            return Ok(WriteEffect::None);
         }
         if key.is_el2() {
             return if el == El::El2 {
@@ -1600,9 +1604,11 @@ impl<L: Levels> Cpu<L> {
                 self.sys.sctlr_el1 = value & !SCTLR_MTE;
                 WriteEffect::None
             }
+            // The auxiliary registers keep what the implementation gives them
+            // (`ImpdefSpace::auxiliary_kept`).
             ACTLR_EL1 => {
                 trap_to_el2(el1 && self.hcr_any(HCR_TACR))?;
-                self.sys.actlr_el1 = value;
+                self.sys.actlr_el1 = self.imp.impdef.auxiliary_kept(value);
                 WriteEffect::None
             }
             CPACR_EL1 => {
@@ -1668,12 +1674,12 @@ impl<L: Levels> Cpu<L> {
             }
             AFSR0_EL1 => {
                 self.tvm_check(el)?;
-                self.sys.afsr0_el1 = value;
+                self.sys.afsr0_el1 = self.imp.impdef.auxiliary_kept(value);
                 WriteEffect::None
             }
             AFSR1_EL1 => {
                 self.tvm_check(el)?;
-                self.sys.afsr1_el1 = value;
+                self.sys.afsr1_el1 = self.imp.impdef.auxiliary_kept(value);
                 WriteEffect::None
             }
             ESR_EL1 => {
@@ -1697,7 +1703,7 @@ impl<L: Levels> Cpu<L> {
             }
             AMAIR_EL1 => {
                 self.tvm_check(el)?;
-                self.sys.amair_el1 = value;
+                self.sys.amair_el1 = self.imp.impdef.auxiliary_kept(value);
                 WriteEffect::None
             }
             LORSA_EL1 | LOREA_EL1 | LORN_EL1 | LORC_EL1 if self.implements(Feature::Lor) => {
@@ -1967,14 +1973,14 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// An `MSR` of `value` to the EL2 register `reg`, keeping what
-    /// [`El2Reg::kept`] keeps. Only a processor with EL2 reaches one: an
+    /// [`El2Reg::held`] keeps. Only a processor with EL2 reaches one: an
     /// access below EL2 to an EL2 register is UNDEFINED or trapped first,
     /// and a processor without EL2, which has no EL2 registers, never runs
     /// at EL2, so there the write changes nothing.
     fn el2_write(&mut self, reg: El2Reg, value: u64) {
-        let (features, spsr_mask) = (self.imp.features, self.spsr_mask());
+        let (imp, spsr_mask) = (self.imp.get(), self.spsr_mask());
         if let Some(el2) = self.el2_mut() {
-            el2.write(reg, features, spsr_mask, value);
+            el2.write(reg, imp, spsr_mask, value);
         }
     }
 }

@@ -1706,14 +1706,14 @@ fn translating_on(imp: Implementation) -> Machine<WithEl2> {
         S2_L1,
         AF | INNER_SHAREABLE | S2AP_R | S2AP_W | S2_NORMAL | BLOCK,
     );
-    let features = m.cpu.imp.features;
+    let imp = m.cpu.imp.get();
     let el2 = &mut m.cpu.el2_state.regs;
     // TCR_EL2: T0SZ 25, PS 40 bits; its RES1 bits come with the write.
-    el2.write(El2Reg::Tcr, features, 0, 25 | (0b010 << 16));
+    el2.write(El2Reg::Tcr, imp, 0, 25 | (0b010 << 16));
     el2.ttbr0 = EL2_L1;
     el2.mair = 0xFF;
     el2.sctlr |= 1;
-    el2.write(El2Reg::Vtcr, features, 0, VTCR_IDENTITY);
+    el2.write(El2Reg::Vtcr, imp, 0, VTCR_IDENTITY);
     el2.vttbr = S2_L1;
     let sys = &mut m.cpu.sys;
     sys.tcr_el1 = 25 | (1 << 23);
@@ -2941,14 +2941,14 @@ fn stage_2_configurations_arm_refuses_take_a_level_0_translation_fault() {
     const PS_40: u64 = 0b010 << 16;
     let mut m = stage2();
     m.cpu.sys.sctlr_el1 &= !1;
-    let features = m.cpu.imp.features;
+    let imp = m.cpu.imp.get();
     for vtcr in [
         40 | (2 << 6) | PS_40,
         25 | (3 << 6) | PS_40,
         25 | (2 << 6) | PS_40,
         34 | (1 << 6) | PS_40,
     ] {
-        m.cpu.el2_state.regs.write(El2Reg::Vtcr, features, 0, vtcr);
+        m.cpu.el2_state.regs.write(El2Reg::Vtcr, imp, 0, vtcr);
         m.cpu.flush_tlb();
         m.cpu.el2_state.regs.hpfar = HPFAR_UNTOUCHED;
         m.at(El::El1);
@@ -2969,7 +2969,7 @@ fn stage_2_configurations_arm_refuses_take_a_level_0_translation_fault() {
     m.cpu
         .el2_state
         .regs
-        .write(El2Reg::Vtcr, features, 0, 34 | PS_40);
+        .write(El2Reg::Vtcr, imp, 0, 34 | PS_40);
     m.cpu.el2_state.regs.vttbr = S2_L2;
     m.cpu.flush_tlb();
     m.at(El::El1);
@@ -2992,11 +2992,11 @@ fn stage_2_starts_in_concatenated_tables() {
     let block = AF | INNER_SHAREABLE | S2AP_R | S2AP_W | S2_NORMAL | BLOCK;
     m.ram.put64(CONCATENATED, block);
     m.ram.put64(CONCATENATED + 0x1000, block);
-    let features = m.cpu.imp.features;
+    let imp = m.cpu.imp.get();
     m.cpu
         .el2_state
         .regs
-        .write(El2Reg::Vtcr, features, 0, 24 | (1 << 6) | (0b010 << 16));
+        .write(El2Reg::Vtcr, imp, 0, 24 | (1 << 6) | (0b010 << 16));
     m.cpu.sys.sctlr_el1 &= !1;
     for vttbr in [CONCATENATED, CONCATENATED + 0x1000] {
         m.cpu.el2_state.regs.vttbr = vttbr;
@@ -4066,11 +4066,11 @@ fn the_machine_holds_the_timers_where_an_el2_write_moves_them() {
 #[test]
 fn only_the_registers_the_timers_read_move_them() {
     let mut m = with_physical_offset(1_000, true);
-    let features = m.cpu.imp.features;
+    let imp = m.cpu.imp.get();
     for reg in El2Reg::ALL.into_iter().filter(|reg| !reg.feeds_timers()) {
         for value in [u64::MAX, 0, 0x5A5A_5A5A_5A5A_5A5A] {
             let before = m.cpu.el2_timer_inputs();
-            m.cpu.el2_state.regs.write(reg, features, u64::MAX, value);
+            m.cpu.el2_state.regs.write(reg, imp, u64::MAX, value);
             assert_eq!(
                 m.cpu.el2_timer_inputs(),
                 before,

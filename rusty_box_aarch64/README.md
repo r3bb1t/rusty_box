@@ -324,7 +324,7 @@ is) must reproduce, are:
 
 | Part | Model |
 |---|---|
-| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, of revision r1p3 (`MIDR_EL1` 0x411F_D073, the revision its TRM, DDI 0488H, describes; see "Where the references differ"), the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB and 64 KiB granules, the Cortex-A57's (DDI 0488H, 4.3.21), and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB granule too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ"); a PMU (`src/cpu/pmu.rs`) with the cycle counter and six event counters, the Cortex-A57's its TRM's PMUv3 (DDI 0488H chapter 11: `PMCR_EL0.IMP` 0x41, `IDCODE` 0x01, 32-bit event counters) and the Armv9.2 model's FEAT_PMUv3p7 with FEAT_PMUv3p5's 64-bit event counters and FEAT_PMUv3p4's `PMMIR_EL1`, with `PMUSERENR_EL0`'s EL0 access and `MDCR_EL2`'s traps, `HPMN`, `HPME`, `HPMD`, `HCCD`, `HLP` and `HPMFZO`, the `P`, `U` and `NSH` filters, `CHAIN`, freezing on overflow (FEAT_PMUv3p7), and PMUIRQ on PPI 23; it counts the events it advertises in `PMCEID0_EL0` and `PMCEID1_EL0` — `SW_INCR`, `INST_RETIRED`, `EXC_TAKEN`, `EXC_RETURN`, `CID_WRITE_RETIRED`, `CPU_CYCLES`, `TTBR_WRITE_RETIRED` and `CHAIN`, and on the Armv9.2 model the stall events, which count nothing — with the processor's clock the instruction clock: one cycle per instruction, stopped while the processor waits (see "Where the references differ") |
+| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, of revision r1p3 (`MIDR_EL1` 0x411F_D073, the revision its TRM, DDI 0488H, describes; see "Where the references differ"), the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), on the Cortex-A57 its TRM's IMPLEMENTATION DEFINED registers (`CPUACTLR_EL1`, `CPUECTLR_EL1`, `L2CTLR_EL1`, `L2ECTLR_EL1`, `L2ACTLR_EL1`, the memory error syndrome registers, `CBAR_EL1` reading where the layout has the GIC, `RAMINDEX` and its data registers, and `ACTLR_EL2`'s access controls; see "Where the references differ") and none on the Armv9.2 model, each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB and 64 KiB granules, the Cortex-A57's (DDI 0488H, 4.3.21), and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB granule too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ"); a PMU (`src/cpu/pmu.rs`) with the cycle counter and six event counters, the Cortex-A57's its TRM's PMUv3 (DDI 0488H chapter 11: `PMCR_EL0.IMP` 0x41, `IDCODE` 0x01, 32-bit event counters) and the Armv9.2 model's FEAT_PMUv3p7 with FEAT_PMUv3p5's 64-bit event counters and FEAT_PMUv3p4's `PMMIR_EL1`, with `PMUSERENR_EL0`'s EL0 access and `MDCR_EL2`'s traps, `HPMN`, `HPME`, `HPMD`, `HCCD`, `HLP` and `HPMFZO`, the `P`, `U` and `NSH` filters, `CHAIN`, freezing on overflow (FEAT_PMUv3p7), and PMUIRQ on PPI 23; it counts the events it advertises in `PMCEID0_EL0` and `PMCEID1_EL0` — `SW_INCR`, `INST_RETIRED`, `EXC_TAKEN`, `EXC_RETURN`, `CID_WRITE_RETIRED`, `CPU_CYCLES`, `TTBR_WRITE_RETIRED` and `CHAIN`, and on the Armv9.2 model the stall events, which count nothing — with the processor's clock the instruction clock: one cycle per instruction, stopped while the processor waits (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive, and BSA's PPI 22 for the DCC's COMMIRQ and PPI 23 for the PMU's PMUIRQ; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0800_4000, the common base and processor 0's at 0x0800_5000, 4 KiB each, on the board's own layout) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0800_6000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
 | Devices | PL011 UART r1p5 (`UARTPeriphID2` revision 3, DDI 0183G; BSA's Generic UART: a 32-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 32-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with a `gpio-key` power button on its first line, 0 (line 3, QEMU's, on QEMU's layout), CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded; the identity's manufacturer and device codes, by default none, and a CFI query table of the board's own; see "Where the references differ"), no `fw_cfg` (see "Where the references differ"), virtio-mmio transports, 4 on the board's own layout and 32 on QEMU's (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the first free ones, or the last free with `VirtConfig::transport_order`; every queue 256 entries), an empty PCIe ECAM/windows, the 32-bit memory window non-prefetchable and the 64-bit one prefetchable |
@@ -1049,6 +1049,12 @@ integration tests of the public API.
   UNDEFINED but where the Arm ARM's prose on the ID register space says
   otherwise: 12.2 million steps, 0 disagreements, about 4 s. Its table of
   IMPLEMENTATION DEFINED choices is this model's, each with its reason.
+  Where an accessor hands an EL1 or EL2 access to the implementation
+  (`AArch64_ImpDefSysRegRead` and the like) and the processor gives the
+  encoding a register or an instruction of its own — the Cortex-A57's
+  IMPLEMENTATION DEFINED registers and `RAMINDEX` — the TRM decides, and
+  `tests/unit/impdef.rs` checks it; `HCR_EL2.TIDCP`'s trap of the same
+  accesses, and every encoding the processor gives nothing, stay Arm's.
   The same file checks every EL2 register's
   fieldset: written at EL2 with all ones and all zeros, each field bit
   reads back as written, each RES0 bit as 0, each RES1 bit as 1 (115
@@ -1056,6 +1062,21 @@ integration tests of the public API.
   does not carry (CNTHP_CTL_EL2.ISTATUS read-only, TCR_EL2.DS RES0 without
   FEAT_LPA2, SMPRIMAP_EL2 RES0 when `SMIDR_EL1.SMPS` is 0) named with their
   source.
+- `tests/unit/impdef.rs` checks the Cortex-A57's IMPLEMENTATION DEFINED
+  registers against the values worked out from its TRM's tables: each
+  register's reset value at EL1 and EL2 and through a host's read; what
+  a write of all ones and of all zeros keeps, `L2CTLR_EL1`'s read-only
+  fields left, the syndrome registers zeroed and `CBAR_EL1`'s `MSR`
+  UNDEFINED; EL0's accesses UNDEFINED; `HCR_EL2.TIDCP`'s trap of EL1's
+  (EC 0x18, the ISS naming the encoding), `RAMINDEX`'s and an
+  unimplemented encoding's included; `ACTLR_EL2` deciding EL1's writes of
+  the five registers it controls; `ACTLR_EL2`'s kept bits and the RES0
+  auxiliary registers; what `RAMINDEX` fills for every `RAMID`;
+  `CPUACTLR_EL1`'s WFI and WFE NOPs; a snapshot of the registers, and one
+  refused; and the Armv9.2 model, which has none of them.
+  `tests/impdef.rs` runs a guest on the board that reads `CBAR_EL1` and
+  `L2CTLR_EL1` on both layouts, with and without EL2, and finds them
+  UNDEFINED on the Armv9.2 model.
 - `tests/unit/el2.rs` checks FEAT_EL2 against Arm's pseudocode where the
   accessors do not reach: reset at EL2, `HVC` and `HCR_EL2.HCD`, `SMC`
   under `HCR_EL2.TSC` and as the PSCI call, `ERET` from EL2 to each level
@@ -1101,8 +1122,13 @@ integration tests of the public API.
   took with its level, ESR, ELR, SPSR and FAR, or X0 after it. All of them
   agree, but for the firmware's `PSCI_VERSION`, which the replay expects
   as the board's PSCI 1.2 where QEMU recorded 1.1 (see "Where the
-  references differ"); the generator leaves out what QEMU's Cortex-A57 has and this core
-  does not (AArch32, its IMPLEMENTATION DEFINED registers), the PMU, whose
+  references differ"), and for `IL1DATA0_EL1`, the Cortex-A57's
+  IMPLEMENTATION DEFINED register QEMU's lacks, whose `MRS` and `MSR` at
+  EL1 and EL2 the replay expects to complete where QEMU's were UNDEFINED
+  ("The Cortex-A57's IMPLEMENTATION DEFINED registers are its TRM's");
+  the generator leaves out what QEMU's Cortex-A57 has and this core
+  does not (AArch32), the rest of the IMPLEMENTATION DEFINED registers,
+  which QEMU's read as constants and whose writes it ignores, the PMU, whose
   cycles QEMU counts on its virtual clock where this core counts
   instructions ("The PMU's clock is the instruction clock"), and
   DBGPRCR_EL1, which QEMU lacks. `tests/virtualization.rs` runs the board
@@ -2024,9 +2050,10 @@ one open.
   `MIDR_EL1` reads 0x411F_D073 (DDI 0488H, Table 4-1), where QEMU's
   `cortex-a57` reads r1p0's 0x411F_D070 (`aarch64_a57_initfn`). Of what
   the TRM's product revisions (1.8) change from r1p0 to r1p3, the model
-  has `MIDR_EL1` alone (the others are the trace unit's, the external
-  debug interface's and the IMPLEMENTATION DEFINED `CPUACTLR_EL1`), and
-  `REVIDR_EL1` and `AIDR_EL1` read the TRM's zeros. A guest applies the
+  has `MIDR_EL1` and the IMPLEMENTATION DEFINED `CPUACTLR_EL1`, whose
+  fields are r1p3's (the others are the trace unit's and the external
+  debug interface's), and `REVIDR_EL1` and `AIDR_EL1` read the TRM's
+  zeros. A guest applies the
   errata of the revision it reads: Linux 6.18 (`cpu_errata.c`) applies
   832075 and 834220 to r0p0 to r1p2 only, so on r1p3 it reads device
   memory with LDR, not LDAR (`ARM64_WORKAROUND_DEVICE_LOAD_ACQUIRE`), and
@@ -2037,6 +2064,65 @@ one open.
   1742098 (r0p1 on) apply on both, as do the Spectre mitigations and the
   KPTI exemption, which name every revision. A KVM host gives its guests
   its own `MIDR_EL1` through `VPIDR_EL2`, so a nested guest is r1p3 too.
+- **The Cortex-A57's IMPLEMENTATION DEFINED registers are its TRM's.**
+  `src/cpu/impdef.rs` gives the Cortex-A57 every AArch64 register of its
+  TRM's IMPLEMENTATION DEFINED summary that a processor without EL3 has
+  (DDI 0488H, 4.2.15, Table 4-15; the descriptions in 4.3), at EL1 and
+  EL2, UNDEFINED at EL0:
+  `L2CTLR_EL1` (`S3_1_C11_C0_2`, reset 0), `L2ECTLR_EL1` (`S3_1_C11_C0_3`,
+  0), `L2ACTLR_EL1` (`S3_1_C15_C0_0`, 0x10, the ACE interface's),
+  `CPUACTLR_EL1` (`S3_1_C15_C2_0`, 0), `CPUECTLR_EL1` (`S3_1_C15_C2_1`,
+  0x1B_0000_0000), `CPUMERRSR_EL1` and `L2MERRSR_EL1` (`S3_1_C15_C2_2`
+  and `_3`, 0), `CBAR_EL1` (`S3_1_C15_C3_0`, read-only), `IL1DATA0_EL1`
+  to `IL1DATA3_EL1` (`S3_0_C15_C0_n`) and `DL1DATA0_EL1` to
+  `DL1DATA4_EL1` (`S3_0_C15_C1_n`), 32-bit, UNKNOWN at reset and so the
+  board's fill, and `RAMINDEX` (`SYS #0, C15, C4, #0`). Each write keeps
+  its register's fields, the RES0 bits zero and the read-only fields as
+  they are; `CBAR_EL1`'s `MSR` is UNDEFINED. The architectural registers
+  whose contents Arm leaves to the implementation are the TRM's too:
+  `ACTLR_EL2` keeps its five access controls (bits 6:4 and 1:0),
+  and `ACTLR_EL1`, `AFSR0_EL1`, `AFSR1_EL1`, `AMAIR_EL1`, `HACR_EL2`,
+  `AFSR0_EL2`, `AFSR1_EL2` and `AMAIR_EL2` are RES0. `HCR_EL2.TIDCP` traps
+  every EL1 access of the space to EL2 (EC 0x18), as Arm's accessors do.
+  Writes of `L2CTLR_EL1`, `L2ECTLR_EL1`, `L2ACTLR_EL1`, `CPUACTLR_EL1` and
+  `CPUECTLR_EL1` need their `ACTLR_EL3` bit and, from EL1, their
+  `ACTLR_EL2` bit (the TRM's footnotes to each); with no EL3 each
+  `ACTLR_EL3` bit is 1, and without EL2 each `ACTLR_EL2` bit, the
+  Effective value of a control that would take an exception to an absent
+  level (Arm ARM D1.1.3, RHRDVX). The TRM does not say what a write it
+  does not permit does: here it traps to EL2 with the syndrome
+  `HCR_EL2.TIDCP` gives the same access, and changes nothing. The values
+  that describe the board are the board's: `CBAR_EL1` reads the
+  PERIPHBASE the layout ties to its GIC (`GicWindows::periphbase`: the
+  GIC-400's base, 0x0800_0000, on the board's own layout, and QEMU's
+  `VIRT_CPUPERIPHS`, 0x0800_0000 too, on QEMU's), and `L2CTLR_EL1`'s
+  read-only fields one processor, ECC in the L2 only and no register
+  slices (Table 1-1; the L2's 512 KiB is `CCSIDR_EL1`'s, L2CTLR having no
+  size field). The board's documented behaviour: no memory error occurs,
+  so the syndrome registers read zero and `L2ECTLR_EL1`'s error flags stay
+  clear; `CPUACTLR_EL1` bit 8 makes `WFI` a NOP and bit 7 `WFE`, which
+  then neither waits nor traps and leaves the Event Register alone; every
+  other field — latencies, prefetchers, clock gating, dynamic retention,
+  ECC enables, the barrier, coherency and streaming optimisations,
+  `SMPEN` — is kept and read back and changes nothing, the model having no
+  caches, timing, bus or other processor for it to act on (bit 5, `PLD`
+  as a NOP, is what `PRFM` already is here); and `RAMINDEX` finds every
+  cache and TLB RAM entry invalid, the model holding none, so in the
+  Non-secure EL1 and EL2 that are this processor's only states it fills
+  the data registers of the RAM's side with zeros (4.3.64), and with a
+  reserved `RAMID`, which the TRM says corrupts them, both sides'.
+  QEMU's `cortex-a57` (`cortex_a72_a57_a53_cp_reginfo` in
+  `target/arm/cortex-regs.c`, and `ACTLR_EL2` in `helper.c`) reads all of
+  its IMPLEMENTATION DEFINED registers as constants and ignores writes —
+  `L2ACTLR_EL1` 0 where the TRM resets 0x10, `CPUECTLR_EL1` 0 where it
+  resets 0x1B_0000_0000, `ACTLR_EL2` 0 whatever is written — lets EL1
+  write them whatever `ACTLR_EL2` holds, and lacks `IL1DATAn_EL1`,
+  `DL1DATAn_EL1` and `RAMINDEX`, which are UNDEFINED there
+  (docs/qemu-upstream-bugs.md, entry 57). The Armv9.2 model, which no
+  document gives such registers, has none: the space's every access is
+  UNDEFINED or `HCR_EL2.TIDCP`'s trap, and its architectural
+  IMPLEMENTATION DEFINED registers keep all 64 bits. A snapshot carries
+  the Cortex-A57's registers.
 - **A virtual SError reports no syndrome without FEAT_RAS.** On the
   Cortex-A57 with EL2, `HCR_EL2.VSE`'s SError reaches EL1 with `ESR_EL1`
   EC 0x2F, IL set and `ISS` 0: `IDS` clear, so bits 23:0 are RES0 (the
@@ -3620,7 +3706,8 @@ events D14.6 requires.
 - `TransportOrder::LastFree`, QEMU's order of filling the transports, for
   a VM whose firmware variable store names its devices where that order
   put them.
-- `DeviceLayout::QemuVirt`, QEMU's device addresses, its 32 virtio
+- `DeviceLayout::QemuVirt`, QEMU's device addresses (with the Cortex-A57's
+  `CBAR_EL1` reading QEMU's `VIRT_CPUPERIPHS`), its 32 virtio
   transports of 512 bytes (`NUM_VIRTIO_TRANSPORTS`, `VIRT_MMIO`) and its
   power button's PL061 line, 3, for a guest booted with a device tree QEMU
   wrote or a firmware variable store whose boot entries name QEMU's device
@@ -3631,7 +3718,10 @@ events D14.6 requires.
 - EL3, AArch32, EL2 unless the machine asks for it, and on the Cortex-A57
   every post-v8.0 feature (LSE atomics, PAuth, SME, …): absent from its ID
   registers, so UNDEFINED, as on a real ARMv8.0 core (the PAuth hints,
-  NOPs). With no EL3, nothing but `HCR_EL2.API` and `APK` traps a key or a
+  NOPs). Of the Cortex-A57's IMPLEMENTATION DEFINED registers, those of
+  EL3 (`ACTLR_EL3`, `AFSR0_EL3`, `AFSR1_EL3`, `AMAIR_EL3`) and AArch32
+  go with them; its AArch64 ones are the TRM's ("The Cortex-A57's
+  IMPLEMENTATION DEFINED registers are its TRM's"). With no EL3, nothing but `HCR_EL2.API` and `APK` traps a key or a
   pointer authentication instruction, and the keys reset to the board's
   own values ("The pointer authentication keys reset to the board's own
   values"), where Arm leaves them UNKNOWN.
@@ -3678,7 +3768,10 @@ events D14.6 requires.
   decoded traces are kept coherent with every write. Cache maintenance by
   address translates its address, with the faults Arm's `AArch64_DC` and
   `AArch64_IC` take, and has nothing else to act on; by set and way, or the
-  whole instruction cache, it has nothing to act on at all.
+  whole instruction cache, it has nothing to act on at all. The
+  Cortex-A57's `RAMINDEX` finds no cache or TLB RAM entry valid, and the
+  controls of caches, prefetchers and timing in its IMPLEMENTATION DEFINED
+  registers are kept and act on nothing.
 - PL011 features (DDI 0183F §1.1.1) beyond its FIFOs, interrupts,
   loopback and receive timeout: DMA (§2.7; `UARTDMACR` keeps what is
   written and requests nothing); the IrDA SIR ENDEC (§2.3; `UARTCR.SIREN`

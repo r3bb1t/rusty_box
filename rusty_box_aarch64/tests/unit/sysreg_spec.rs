@@ -568,8 +568,9 @@ enum Outcome {
     /// `AArch64_SystemAccessTrap(el, ec)`.
     Trap { el: u8, ec: u64 },
     /// An IMPLEMENTATION DEFINED register or instruction
-    /// (`AArch64_ImpDefSysRegRead` and the like): this processor implements
-    /// none, so the access is UNDEFINED.
+    /// (`AArch64_ImpDefSysRegRead` and the like): UNDEFINED where the
+    /// processor gives the encoding nothing; the one it gives a register or
+    /// an instruction, its TRM's, is not checked here ([`check`]).
     ImplementationDefined,
 }
 
@@ -1719,6 +1720,14 @@ fn check<L: Levels>(
             continue;
         }
         let outcome = eval.run(site.access);
+        // Where Arm's accessor hands EL1's or EL2's access to the
+        // implementation and the processor gives the encoding a register or
+        // an instruction of its own (the Cortex-A57's), its TRM decides what
+        // the access does: `impdef.rs`, checked by `tests/unit/impdef.rs`.
+        let own = imp.impdef.implements(super::sysreg::SysRegKey::from_insn(site.word));
+        if outcome == Outcome::ImplementationDefined && el != 0 && own {
+            continue;
+        }
         match want.get(&site.word) {
             Some((earlier, other)) if *earlier != outcome => panic!(
                 "{name}, EL{el}, {}: {} ({}) and {} ({}) give {:#010x} different outcomes: {earlier:?}, {outcome:?}",

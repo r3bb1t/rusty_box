@@ -13,15 +13,19 @@
 //! changes. A bit that is RES0 or RES1 for the features a processor
 //! implements is hardwired to that value, reads returning it and writes
 //! ignoring it, one of the two behaviours Arm permits for a reserved bit
-//! (the other keeps what is written); the
+//! (the other keeps what is written). The
 //! IMPLEMENTATION DEFINED registers (`ACTLR_EL2`, `HACR_EL2`, `AFSR0_EL2`,
-//! `AFSR1_EL2`, `AMAIR_EL2`) hold all 64 bits and control nothing, as their
-//! EL1 counterparts do here.
+//! `AFSR1_EL2`, `AMAIR_EL2`) are the implementation's
+//! ([`ImpdefSpace::el2_kept`](super::impdef::ImpdefSpace::el2_kept)): on
+//! the Cortex-A57 its TRM's, `ACTLR_EL2`
+//! holding the controls of EL1's writes of its own IMPLEMENTATION DEFINED
+//! registers and the rest RES0; on the Armv9.2 model all 64 bits,
+//! controlling nothing, as their EL1 counterparts do there.
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
-use super::features::{Feature, Features, LeveledImplementation};
+use super::features::{Feature, Features, Implementation, LeveledImplementation};
 use super::mmu::{ContextStorage, NoContexts, TlbContexts};
 use super::regime::TTB_BADDR;
 use super::regs::SysReg;
@@ -829,8 +833,9 @@ impl El2Reg {
                     0
                 }
             }
-            // The IMPLEMENTATION DEFINED registers, and those whose every bit
-            // is a field: all 64 bits.
+            // The IMPLEMENTATION DEFINED registers, whose bits the
+            // implementation decides (`El2Reg::held`), and those whose every
+            // bit is a field: all 64 bits.
             Self::Actlr
             | Self::Hacr
             | Self::Mair
@@ -887,11 +892,22 @@ impl El2Reg {
     }
 }
 
+impl El2Reg {
+    /// What of `value` an `MSR` to the register keeps on a processor
+    /// implementing `imp`, whose `SPSR_ELx` bits are `spsr_mask`: what the
+    /// architecture keeps ([`El2Reg::kept`]), of an IMPLEMENTATION DEFINED
+    /// register what the implementation keeps of that
+    /// ([`ImpdefSpace::el2_kept`](super::impdef::ImpdefSpace::el2_kept)).
+    pub(crate) const fn held(self, imp: Implementation, spsr_mask: u64, value: u64) -> u64 {
+        imp.impdef.el2_kept(self, self.kept(imp.features, spsr_mask, value))
+    }
+}
+
 impl El2Regs {
-    /// An `MSR` of `value` to `reg` on a processor implementing `features`
-    /// whose `SPSR_ELx` bits are `spsr_mask`: what [`El2Reg::kept`] keeps.
-    pub(crate) fn write(&mut self, reg: El2Reg, features: Features, spsr_mask: u64, value: u64) {
-        *self.slot(reg) = reg.kept(features, spsr_mask, value);
+    /// An `MSR` of `value` to `reg` on a processor implementing `imp` whose
+    /// `SPSR_ELx` bits are `spsr_mask`: what [`El2Reg::held`] keeps.
+    pub(crate) fn write(&mut self, reg: El2Reg, imp: Implementation, spsr_mask: u64, value: u64) {
+        *self.slot(reg) = reg.held(imp, spsr_mask, value);
     }
 }
 
@@ -966,7 +982,7 @@ impl<L: Levels> Cpu<L> {
         let spsr_mask = self.spsr_mask();
         for reg in El2Reg::ALL {
             let value = r.read_u64()?;
-            if reg.kept(self.imp.features, spsr_mask, value) != value {
+            if reg.held(self.imp.get(), spsr_mask, value) != value {
                 return Err(SnapError::Invalid(
                     "snapshot's EL2 register holds bits this processor cannot set",
                 ));

@@ -34,8 +34,9 @@ The cases keep to what both implementations model the same way, each
 exclusion for a reason the families' comments give: no HCR_EL2.HCD (the
 runner returns from EL1 with HVC), no HCR_EL2.TGE for a word at EL1 (EL1
 cannot execute under it), HCR_EL2.RW set (QEMU's Cortex-A57 has AArch32 at
-EL1, this core has no AArch32), no return to AArch32, no PMU, trace,
-IMPLEMENTATION DEFINED or breakpoint-beyond-the-second register, no read
+EL1, this core has no AArch32), no return to AArch32, no PMU, trace or
+breakpoint-beyond-the-second register, of the IMPLEMENTATION DEFINED
+registers only IL1DATA0_EL1, for HCR_EL2.TIDCP's trap of it, no read
 whose value depends on time or on an earlier case, and no value of a bit
 the two may legitimately hold differently (a stateful RES0 or RES1 bit,
 an AArch32 trap). DBGPRCR_EL1 is left out: QEMU does not have it
@@ -234,9 +235,11 @@ EL1_REGISTERS = {
     "DBGCLAIMSET_EL1": R((2, 0, 7, 8, 6), 0, False),
     "DBGCLAIMCLR_EL1": R((2, 0, 7, 9, 6), 0, False),
     "MDRAR_EL1": R((2, 0, 1, 0, 0), None, True),
-    # An IMPLEMENTATION DEFINED encoding neither implementation gives a
-    # register: QEMU's Cortex-A57 has its L2CTLR_EL1, CPUACTLR_EL1 and the
-    # rest at S3_1_C11_* and S3_1_C15_*, which this core does not model.
+    # An IMPLEMENTATION DEFINED encoding: the Cortex-A57's IL1DATA0_EL1
+    # (DDI 0488H, 4.3.62), which QEMU's Cortex-A57 lacks and this core has,
+    # so that HCR_EL2.TIDCP's trap of it is compared; where QEMU's access is
+    # UNDEFINED the replay expects the TRM's register
+    # (tests/unit/el2_vectors.rs, the_boards_outcome).
     "S3_0_C15_C0_0": R((3, 0, 15, 0, 0), 0, True),
     "HCR_EL2": R((3, 4, 1, 1, 0), "case:hcr", True),
     "VBAR_EL2": R((3, 4, 12, 0, 0), EL2_VECTORS, True),

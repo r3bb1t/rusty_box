@@ -2070,6 +2070,52 @@ at 75 Hz, a line rate of 167.6 kHz.
 
 ---
 
+### 57. The Cortex-A57's IMPLEMENTATION DEFINED registers read constants, ignore `ACTLR_EL2`, and three are missing
+
+**Impact**: small. Software that reads its Cortex-A57's auxiliary
+controls finds values the part never resets to, a write it makes is
+lost, a hypervisor's `ACTLR_EL2` does not stop its guest's writes, and a
+diagnostic that reads the cache RAMs takes an UNDEFINED exception.
+
+**Location**: `target/arm/cortex-regs.c`, `cortex_a72_a57_a53_cp_reginfo`
+(L2CTLR_EL1 read by `l2ctlr_read`, writes ignored; L2ECTLR_EL1,
+L2ACTLR_EL1, CPUACTLR_EL1, CPUECTLR_EL1, CPUMERRSR_EL1 and L2MERRSR_EL1
+`ARM_CP_CONST` 0, each `PL1_RW`); `target/arm/helper.c`, ACTLR_EL2
+`ARM_CP_CONST` 0. Nothing defines IL1DATA0_EL1 to IL1DATA3_EL1,
+DL1DATA0_EL1 to DL1DATA4_EL1 or RAMINDEX.
+
+**What the TRM says**: the Cortex-A57 MPCore TRM, DDI 0488H, Table 4-15
+and 4.3.58 to 4.3.69: L2ACTLR_EL1 resets to 0x10 with an ACE interface,
+CPUECTLR_EL1 to 0x0000_001B_0000_0000 (both L2 prefetch distances 0b11),
+and each register keeps the fields its table gives; a write of one of
+the five auxiliary controls from Non-secure EL1 needs its ACTLR_EL2 bit
+(4.3.33, Table 4-46: bits 6:4 and 1:0, which ACTLR_EL2 holds); IL1DATAn
+and DL1DATAn (`S3_0_C15_C0_n`, `S3_0_C15_C1_n`) are read/write at EL1 and
+above, and RAMINDEX (`SYS #0, C15, C4, #0`) fills them (4.3.62 to 4.3.64).
+
+**Reproduce**: `rusty_box_aarch64/tests/vectors/gen_qemu_el2.py`, family
+`sysreg_el1`, under `qemu-system-aarch64 -M virt,virtualization=on -cpu
+cortex-a57`: an `MRS X0, S3_0_C15_C0_0` (`0xd538f000`) at EL1 with
+`HCR_EL2.TIDCP` clear.
+
+    TRM:          completes, X0 = IL1DATA0_EL1
+    QEMU 11.1.2:  an exception to EL1, ESR 0x02000000 (UNDEFINED)
+
+The reset values and lost writes were found by reading the source of
+QEMU 11.1.2; master not yet checked: `MRS X0, S3_1_C15_C2_1`
+(CPUECTLR_EL1) reads 0 out of reset, and `MRS X0, S3_1_C15_C0_0`
+(L2ACTLR_EL1) 0.
+
+**Fix**: no patch yet: per-CPU storage for the five auxiliary controls
+with each part's reset value and fields (the Cortex-A53's and
+Cortex-A72's TRMs give theirs), an access function checking ACTLR_EL2's
+(and ACTLR_EL3's) bit for a lower level's write, ACTLR_EL2 keeping those
+bits, and the IL1DATAn and DL1DATAn registers with RAMINDEX filling them
+as invalid entries read in Non-secure state, zeros. `rusty_box_aarch64`
+has them (`src/cpu/impdef.rs`).
+
+---
+
 ## Deliberate QEMU omissions
 
 Not bugs: QEMU's comments say these are chosen. Each is a possible

@@ -58,8 +58,9 @@
 //! - **A value** — data, an address, a return state, a thread pointer, a
 //!   syndrome, a comparison value — is the board's fill ([`fill`]):
 //!   0xA5A5_A5A5_A5A5_0000 with the register's name in bits 15:0, kept
-//!   to the bits the register holds (32 for `ESR_EL1`, `CONTEXTIDR_ELx`
-//!   and the DCC's data registers, the low word under the TRM's rule above,
+//!   to the bits the register holds (32 for `ESR_EL1`, `CONTEXTIDR_ELx`,
+//!   the DCC's data registers and the Cortex-A57's `IL1DATAn_EL1` and
+//!   `DL1DATAn_EL1`, the low word under the TRM's rule above,
 //!   and the bits an `MSR` keeps). It is a value no software writes for
 //!   itself, so a guest that reads a register it never wrote finds one it
 //!   did not put there rather than an empty-looking zero, and the name says
@@ -224,6 +225,10 @@ impl<L: super::Levels> super::Cpu<L> {
         s.dbgwvr = [0; MAX_WATCHPOINTS];
         s.dtrrx = 0;
         s.dtrtx = 0;
+        if let super::impdef::ImpdefRegs::CortexA57(regs) = &mut self.impdef {
+            regs.il1data = [0; super::impdef::IL1DATA_COUNT];
+            regs.dl1data = [0; super::impdef::DL1DATA_COUNT];
+        }
         if let Some(el2) = self.el2_state.get_mut() {
             el2.sp_el2 = 0;
             let r = &mut el2.regs;
@@ -250,6 +255,7 @@ mod tests {
 
     use super::super::el2::{El2Reg, El2Storage};
     use super::super::features::Implementation;
+    use super::super::impdef::ImpdefRegs;
     use super::super::{Cpu, CpuConfig, Levels, NoEl2, WithEl2};
 
     fn processor<L: Levels>(imp: Implementation) -> Cpu<L> {
@@ -281,6 +287,20 @@ mod tests {
             assert_eq!(cpu.pstate.nzcv(), 0);
             for (i, value) in cpu.sys.to_array().into_iter().enumerate() {
                 assert!(!filled(value), "{model}: system register {i}: {value:#x}");
+            }
+            if let ImpdefRegs::CortexA57(regs) = cpu.impdef {
+                let words = regs.il1data.iter().chain(regs.dl1data.iter());
+                assert!(words.clone().all(|&w| w == 0), "{model}: {regs:x?}");
+                for value in [
+                    regs.l2ctlr,
+                    regs.l2ectlr,
+                    regs.l2actlr,
+                    regs.cpuactlr,
+                    regs.cpuectlr,
+                    regs.cbar,
+                ] {
+                    assert!(!filled(value), "{model}: {regs:x?}");
+                }
             }
             if let Some(el2) = cpu.el2_state.get() {
                 assert_eq!(el2.sp_el2, 0);

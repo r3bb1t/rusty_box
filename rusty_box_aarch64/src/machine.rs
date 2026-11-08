@@ -1550,13 +1550,18 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
         wiring,
     } = plan;
     // The plan checked the model's levels (`CpuModel::check_levels`) and
-    // counter rate (`CpuModel::check_counter_rate`).
+    // counter rate (`CpuModel::check_counter_rate`). The processor's
+    // PERIPHBASE input is tied to where the layout has the GIC.
     let mut cpu = Cpu::<L>::implementing(
         CpuConfig {
             ips: config.ips,
             reset_pc: FLASH0_BASE,
         },
-        config.cpu.implementation().counting_at(config.counter),
+        config
+            .cpu
+            .implementation()
+            .counting_at(config.counter)
+            .with_periphbase(config.layout.windows().gic.periphbase),
     );
     cpu.set_debug_stops(config.debug_stops);
     cpu.set_spectre_report(config.spectre);
@@ -2841,7 +2846,11 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// watchpoints (the most a model has, those beyond the processor's held
 /// zero), the PMU's registers with FEAT_PMUv3 (six event counters and
 /// their types, the most a model has, the counters as the instructions
-/// retired leave them), `RVBAR_ELx` and `RMR_ELx` of the highest level,
+/// retired leave them), the Cortex-A57's IMPLEMENTATION DEFINED registers
+/// (`L2CTLR_EL1`, `L2ECTLR_EL1`, `L2ACTLR_EL1`, `CPUACTLR_EL1`,
+/// `CPUECTLR_EL1` and the `RAMINDEX` data registers `IL1DATAn_EL1` and
+/// `DL1DATAn_EL1`; its `CBAR_EL1` is the layout's), `RVBAR_ELx` and
+/// `RMR_ELx` of the highest level,
 /// what Software Step stepped, each TLB entry's stage 2 permissions and
 /// level beside stage 1's and the memory each stage and both together map
 /// it to, the TLB's kept stage 2 translations, its tables of EL1&0 and
@@ -2863,7 +2872,7 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// TLB's entries were made under, the PL011's revision and the depth of
 /// its FIFOs, which its image holds, the GIC's PPIs, and the PMU the
 /// processor's `ID_AA64DFR0_EL1` and device tree name.
-const SNAPSHOT_VERSION: u32 = 34;
+const SNAPSHOT_VERSION: u32 = 35;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
