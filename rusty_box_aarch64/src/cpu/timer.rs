@@ -503,10 +503,10 @@ impl<L: Levels> Cpu<L> {
             .min()
     }
 
-    /// Whether a timer register changed since the machine last sampled the
-    /// outputs; clears the flag.
-    pub fn take_timer_dirty(&mut self) -> bool {
-        core::mem::replace(&mut self.timer_dirty, false)
+    /// Whether a timer register, or a register COMMIRQ depends on, changed
+    /// since the machine last sampled the outputs; clears the flag.
+    pub fn take_outputs_dirty(&mut self) -> bool {
+        core::mem::replace(&mut self.outputs_dirty, false)
     }
 }
 

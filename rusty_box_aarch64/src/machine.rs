@@ -1958,11 +1958,13 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     }
 
     /// Re-evaluate everything that changes with time or with a timer
-    /// register: the timer PPIs, the time-driven devices, the processor's
-    /// interrupt inputs, and the next tick at which any of them changes.
+    /// register: the timer PPIs and the DCC's, the time-driven devices, the
+    /// processor's interrupt inputs, and the next tick at which any of them
+    /// changes.
     fn sync_events(&mut self) {
-        self.cpu.take_timer_dirty();
+        self.cpu.take_outputs_dirty();
         self.board.set_timer_lines(self.cpu.timer_lines());
+        self.board.set_dcc_line(self.cpu.dcc_interrupt());
         let device_deadline = self.board.advance_devices(self.cpu.clock());
         let timer_deadline = self.cpu.next_timer_deadline();
         self.next_event = timer_deadline
@@ -2186,7 +2188,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
                 left -= self.cpu.retired - retired;
                 // A burst was counted to the next event: one worked out
                 // again ends it.
-                if (self.cpu.timer_dirty || self.board.touched)
+                if (self.cpu.outputs_dirty || self.board.touched)
                     && self.after_device_access() == NextEvent::WorkedOutAgain
                 {
                     continue 'slice;
@@ -2214,11 +2216,12 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
         }
     }
 
-    /// Whether a timer register write or a device access has moved the next
-    /// event, so it has to be worked out again.
+    /// Whether a register access that moves the processor's outputs (a
+    /// timer's, or COMMIRQ) or a device access has moved the next event, so
+    /// it has to be worked out again.
     #[inline(always)]
     fn events_moved(&self) -> bool {
-        self.cpu.timer_dirty || self.board.deadline_moved
+        self.cpu.outputs_dirty || self.board.deadline_moved
     }
 
     /// The tick a waiting processor sleeps to, unless its wait ends by
@@ -2558,8 +2561,9 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     /// (EL2 with FEAT_EL2, EL1 without) would, with none of the controls
     /// that trap a guest and the effects included: a translation register
     /// empties the TLB, whatever the value written, so writing one makes a
-    /// changed translation table seen; a timer register re-evaluates the
-    /// timer lines before the next instruction.
+    /// changed translation table seen; a timer register, or one COMMIRQ
+    /// depends on, re-evaluates the processor's outputs before the next
+    /// instruction.
     ///
     /// # Errors
     ///
@@ -2567,13 +2571,14 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     /// written; nothing changes.
     pub fn sysreg_write(&mut self, reg: SysReg, value: u64) -> Result<(), SysRegRefusal> {
         match self.cpu.host_sysreg_write(reg, value)? {
-            // The processor applied each itself: the TLB's, the timer
-            // lines' re-evaluation before the next instruction, and the
-            // debug controls'.
+            // The processor applied each itself: the TLB's, the outputs'
+            // re-evaluation before the next instruction, and the debug
+            // controls'.
             WriteEffect::None
             | WriteEffect::FlushTlb
             | WriteEffect::El10Context
             | WriteEffect::Timer
+            | WriteEffect::Dcc
             | WriteEffect::Debug => Ok(()),
         }
     }
@@ -2837,10 +2842,11 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// power button drives on each layout
 /// ([`DeviceLayout::power_button_line`]), the virtio transports each layout
 /// has, the size of every virtio queue, the flash's CFI query table, the
-/// processor's `SMIDR_EL1` and `ID_AA64DFR0_EL1`, and the walk a `TxSZ`
+/// processor's `SMIDR_EL1` and `ID_AA64DFR0_EL1`, the walk a `TxSZ`
 /// out of its range takes (the limit, `regime::txsz_taken`), which the
-/// TLB's entries were made under.
-const SNAPSHOT_VERSION: u32 = 32;
+/// TLB's entries were made under, the PL011's revision and the depth of
+/// its FIFOs, which its image holds, and the GIC's PPIs.
+const SNAPSHOT_VERSION: u32 = 33;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -506,6 +506,10 @@ pub(crate) enum WriteEffect {
     /// ([`El2Reg::feeds_timers`]) that changed what they read of the EL2
     /// registers ([`Cpu::el2_timer_inputs`]). Re-evaluate the timer outputs.
     Timer,
+    /// A write that may change COMMIRQ ([`Cpu::dcc_interrupt`]): of
+    /// `MDCCINT_EL1`, or of DTRTX, which fills it. Re-evaluate the
+    /// processor's outputs.
+    Dcc,
     /// A control of Software Step, a breakpoint or a watchpoint changed:
     /// [`Cpu::debug_controls_changed`].
     Debug,
@@ -676,6 +680,11 @@ pub(super) const RMR_RR: u64 = 1 << 1;
 const DCC_TXFULL: u64 = 1 << 29;
 const DCC_RXFULL: u64 = 1 << 30;
 const DCC_FLAGS: u64 = DCC_TXFULL | DCC_RXFULL;
+
+/// `MDCCINT_EL1.RX` and `TX`: COMMIRQ's requests on DTRRX full and on
+/// DTRTX empty (Arm ARM, DDI 0487, the `MDCCINT_EL1` description).
+const MDCCINT_RX: u64 = 1 << 30;
+const MDCCINT_TX: u64 = 1 << 29;
 
 /// The `MDSCR_EL1` fields that are the OS Lock save/restore view of `EDSCR`:
 /// RXfull (30), TXfull (29), RXO (27), TXU (26), INTdis (23:22), TDA (21),
@@ -930,15 +939,30 @@ impl<L: Levels> Cpu<L> {
     /// `MRS`: read the register `key` names at the current EL, with the
     /// read's side effect. A read of `DBGDTRRX_EL0` or `DBGDTR_EL0` empties
     /// DTRRX: RXfull is cleared to 0 after the read (Arm ARM, DDI 0487, the
-    /// `DBGDTRRX_EL0` and `DBGDTR_EL0` register descriptions). A read that
-    /// traps has no effect.
+    /// `DBGDTRRX_EL0` and `DBGDTR_EL0` register descriptions), which may
+    /// lower COMMIRQ. A read that traps has no effect.
     #[inline]
     pub(crate) fn sysreg_mrs(&mut self, key: SysRegKey) -> Result<u64, SysRegError> {
         let value = self.sysreg_read(key)?;
         if let DBGDTR_EL0 | DBGDTRTX_EL0 = key.0 {
-            self.sys.mdscr_el1 &= !DCC_RXFULL;
+            if self.sys.mdscr_el1 & DCC_RXFULL != 0 {
+                self.sys.mdscr_el1 &= !DCC_RXFULL;
+                self.apply_write_effect(WriteEffect::Dcc);
+            }
         }
         Ok(value)
+    }
+
+    /// COMMIRQ, the Debug Communications Channel's interrupt request (Arm
+    /// `CheckForDCCInterrupts`): DTRRX full (`RXfull`, COMMRX) with
+    /// `MDCCINT_EL1.RX` set, or DTRTX empty (`TXfull` clear, COMMTX) with
+    /// `MDCCINT_EL1.TX` set. Level-sensitive, as Arm ARM H4.6 recommends;
+    /// the board wires it to a PPI of its own.
+    pub(crate) fn dcc_interrupt(&self) -> bool {
+        let commrx = self.sys.mdscr_el1 & DCC_RXFULL != 0;
+        let commtx = self.sys.mdscr_el1 & DCC_TXFULL == 0;
+        (commrx && self.sys.mdccint_el1 & MDCCINT_RX != 0)
+            || (commtx && self.sys.mdccint_el1 & MDCCINT_TX != 0)
     }
 
     /// The exception level an accessor reads and writes at.
@@ -1516,7 +1540,7 @@ impl<L: Levels> Cpu<L> {
                     }
                 }
                 self.sys.mdscr_el1 |= DCC_TXFULL;
-                return Ok(WriteEffect::None);
+                return Ok(WriteEffect::Dcc);
             }
             _ => {}
         }
@@ -1718,14 +1742,16 @@ impl<L: Levels> Cpu<L> {
             MDCCINT_EL1 => {
                 self.debug_check(el, MDCR_TDA)?;
                 self.sys.mdccint_el1 = value;
-                WriteEffect::None
+                WriteEffect::Dcc
             }
             // The save/restore fields, the channel's TXfull and RXfull among
             // them, are read-only while the OS Lock is unlocked and written
             // through to `EDSCR` while it is locked (Arm ARM, DDI 0487,
             // `MDSCR_EL1` and `EDSCR`). Unlocked, a read of them is UNKNOWN;
             // this model's reads return what they hold at every OS Lock
-            // state. A RES0 bit is not stored.
+            // state. A RES0 bit is not stored. A write that changes TXfull or
+            // RXfull may change COMMIRQ: the debug controls' effect is
+            // returned, COMMIRQ's re-evaluation asked for here.
             MDSCR_EL1 => {
                 self.debug_check(el, MDCR_TDA)?;
                 let kept = if self.sys.oslsr_el1 & OSLSR_OSLK != 0 {
@@ -1733,7 +1759,11 @@ impl<L: Levels> Cpu<L> {
                 } else {
                     MDSCR_SAVE_RESTORE
                 };
+                let flags = self.sys.mdscr_el1 & DCC_FLAGS;
                 self.sys.mdscr_el1 = (value & MDSCR_FIELDS & !kept) | (self.sys.mdscr_el1 & kept);
+                if self.sys.mdscr_el1 & DCC_FLAGS != flags {
+                    self.apply_write_effect(WriteEffect::Dcc);
+                }
                 WriteEffect::Debug
             }
             // A write to a save/restore view sets the data register from bits
@@ -1872,6 +1902,7 @@ impl<L: Levels> Cpu<L> {
                     WriteEffect::FlushTlb
                     | WriteEffect::El10Context
                     | WriteEffect::Timer
+                    | WriteEffect::Dcc
                     | WriteEffect::Debug,
                 ) => {
                     self.apply_write_effect(WriteEffect::Timer);
@@ -1969,6 +2000,7 @@ impl<L: Levels> Cpu<L> {
                     (WriteEffect::FlushTlb, None) => WriteEffect::FlushTlb,
                     (WriteEffect::El10Context, None) => WriteEffect::El10Context,
                     (WriteEffect::Timer, None | Some(_)) => WriteEffect::Timer,
+                    (WriteEffect::Dcc, None | Some(_)) => WriteEffect::Dcc,
                     (WriteEffect::Debug, None | Some(_)) => WriteEffect::Debug,
                 };
                 self.apply_write_effect(applied);
@@ -2000,14 +2032,14 @@ impl<L: Levels> Cpu<L> {
 
     /// What the processor itself does after a write with `effect`: a TLB
     /// flush for an EL2 regime translation control, a change of context for
-    /// an EL1&0 one, and for a timer register the flag that has the machine
-    /// re-evaluate the timer lines.
+    /// an EL1&0 one, and for a timer register or one COMMIRQ depends on the
+    /// flag that has the machine re-evaluate the processor's outputs.
     pub(crate) fn apply_write_effect(&mut self, effect: WriteEffect) {
         match effect {
             WriteEffect::None => {}
             WriteEffect::FlushTlb => self.flush_tlb(),
             WriteEffect::El10Context => self.el10_context_changed(),
-            WriteEffect::Timer => self.timer_dirty = true,
+            WriteEffect::Timer | WriteEffect::Dcc => self.outputs_dirty = true,
             WriteEffect::Debug => self.debug_controls_changed(),
         }
     }

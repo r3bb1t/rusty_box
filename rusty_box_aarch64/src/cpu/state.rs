@@ -294,7 +294,7 @@ impl<L: Levels> Cpu<L> {
             icount: _,
             retired,
             ips: _,
-            timer_dirty,
+            outputs_dirty,
             irq_line,
             fiq_line,
             debug_stops: _,
@@ -325,7 +325,7 @@ impl<L: Levels> Cpu<L> {
         *stepped = Stepped::Nothing;
         *should_advance_ss = false;
         *activity = Activity::Running;
-        *timer_dirty = true;
+        *outputs_dirty = true;
         *irq_line = false;
         *fiq_line = false;
         history.jump(reset_pc, *retired);
@@ -725,7 +725,7 @@ impl<L: Levels> Cpu<L> {
         self.icount = icount;
         self.retired = retired;
         self.event = EventRegister::at(event, self.counter());
-        self.timer_dirty = true;
+        self.outputs_dirty = true;
         // The image's memory replaces the memory the traces were read from.
         self.flush_traces();
         self.restore_sme(r)?;
@@ -828,8 +828,8 @@ mod tests {
         assert_eq!(c.sys.to_array(), fresh.sys.to_array());
         assert_eq!(c.monitor, fresh.monitor);
         assert_eq!(
-            (c.irq_line, c.fiq_line, c.timer_dirty),
-            (fresh.irq_line, fresh.fiq_line, fresh.timer_dirty)
+            (c.irq_line, c.fiq_line, c.outputs_dirty),
+            (fresh.irq_line, fresh.fiq_line, fresh.outputs_dirty)
         );
         assert_eq!(c.sys.sctlr_el1, super::super::id::SCTLR_EL1_RESET);
     }

@@ -325,18 +325,19 @@ is) must reproduce, are:
 | Part | Model |
 |---|---|
 | Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, of revision r1p3 (`MIDR_EL1` 0x411F_D073, the revision its TRM, DDI 0488H, describes; see "Where the references differ"), the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB and 64 KiB granules, the Cortex-A57's (DDI 0488H, 4.3.21), and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB granule too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
-| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0800_4000, the common base and processor 0's at 0x0800_5000, 4 KiB each, on the board's own layout) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0800_6000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
+| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive, and BSA's PPI 22 for the DCC's COMMIRQ; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0800_4000, the common base and processor 0's at 0x0800_5000, 4 KiB each, on the board's own layout) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0800_6000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
-| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with a `gpio-key` power button on its first line, 0 (line 3, QEMU's, on QEMU's layout), CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded; the identity's manufacturer and device codes, by default none, and a CFI query table of the board's own; see "Where the references differ"), no `fw_cfg` (see "Where the references differ"), virtio-mmio transports, 4 on the board's own layout and 32 on QEMU's (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the first free ones, or the last free with `VirtConfig::transport_order`; every queue 256 entries), an empty PCIe ECAM/windows, the 32-bit memory window non-prefetchable and the 64-bit one prefetchable |
+| Devices | PL011 UART r1p5 (`UARTPeriphID2` revision 3, DDI 0183G; BSA's Generic UART: a 32-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 32-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with a `gpio-key` power button on its first line, 0 (line 3, QEMU's, on QEMU's layout), CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded; the identity's manufacturer and device codes, by default none, and a CFI query table of the board's own; see "Where the references differ"), no `fw_cfg` (see "Where the references differ"), virtio-mmio transports, 4 on the board's own layout and 32 on QEMU's (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the first free ones, or the last free with `VirtConfig::transport_order`; every queue 256 entries), an empty PCIe ECAM/windows, the 32-bit memory window non-prefetchable and the 64-bit one prefetchable |
 | Board | the board's own device layout after Arm's memory map principles, or QEMU `virt`'s (`VirtConfig::layout`, see "Where the references differ"), RAM and the flash where QEMU's `virt` has them in both; the board's own interrupt wiring (`VirtConfig::interrupts`, see "Where the references differ"); the board's own device tree, written from the board (`src/boot/tree.rs`): generic node names (Devicetree Specification 2.2.2), each node as its binding describes it, the GIC with each frame the size it decodes, `dma-coherent` on each device that makes DMA, the processor's caches down to the L2 as `CCSIDR_EL1` reports them, `/psci` for PSCI 1.0 and 0.2 on the conduit the firmware answers on, `/chosen` with EBBR's `stdout-path` and no boot entropy (see "Where the references differ"), and the identity's `/model` and root `compatible`; no PMU, `fw-cfg` or platform bus node, which the board does not have; with EL2, the virtual interface's two frames and its maintenance interrupt in the GIC node; a host's own tree gets its names the identity's, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does, and is refused where it puts a device anywhere but where the layout has it (`BuildError::HostTreeAddress`) or names a device's interrupt other than the one the board's interrupt map wires it to (`BuildError::HostTreeInterrupt`) |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed and entered as Linux's arm64 boot protocol (`Documentation/arch/arm64/booting.rst`) asks — the kernel at the base of RAM, the device tree in the 2 MiB block after its `image_size`, the initramfs in the next, `x0` the tree and every other general-purpose register zero — and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
 Provenance: Arm's documents decide wherever they speak — the Arm ARM (DDI
 0487) and its machine-readable data (AARCHMRS) for the processor, IHI 0048B
-for the GIC, DDI 0183F for the PL011, DDI 0224C for the PL031, DDI 0190B for
-the PL061, DEN 0022E for PSCI and DEN 0028F for the SMC Calling Convention
-(and their earlier issues D and B, whose sections the older citations
-name). QEMU's `virt` board decides what those documents
+for the GIC, DDI 0183F and its r1p5 issue DDI 0183G for the PL011, DDI
+0224C for the PL031, DDI 0190B for the PL061, DEN 0022E for PSCI and DEN
+0028F for the SMC Calling Convention (and their earlier issues D and B,
+whose sections the older citations name), and BSA (DEN0094C) and V-BSA
+(DEN0150) for what the platform as a whole provides. QEMU's `virt` board decides what those documents
 do not: the memory map, the interrupt wiring, the device tree, the choices
 Arm leaves to an implementation, and the devices Arm does not document
 (virtio, the CFI flash, `gpio-key`). A device with its own published
@@ -1363,12 +1364,18 @@ integration tests of the public API.
 - `tests/device_regions.rs`: the GIC distributor and CPU interface answer
   in their 4 KiB and 8 KiB regions, and an access to the rest of their 64
   KiB windows is a synchronous external abort.
+- `tests/vbsa.rs`: the V-BSA rules the board meets by a choice of its own,
+  as a guest on either processor sees them — the PL011's `UARTPeriphID2`
+  reading revision 3 and its transmit FIFO taking 32 characters before
+  `TXFF`, and COMMIRQ pending on PPI 22 once `MDCCINT_EL1.TX` asks for it,
+  acknowledged as INTID 22, and withdrawn once DTRTX is full.
 
 ## Where the references differ
 
 Arm's documents decide wherever they speak: the Arm ARM and AARCHMRS what
-an instruction does, IHI 0048B the GIC, DDI 0183F the PL011, DEN 0022E and
-DEN 0028F the firmware calls; OASIS virtio 1.2 the virtio devices and VESA
+an instruction does, IHI 0048B the GIC, DDI 0183F and DDI 0183G the
+PL011, DEN 0022E and DEN 0028F the firmware calls, BSA and V-BSA the
+platform; OASIS virtio 1.2 the virtio devices and VESA
 E-EDID 1.4 the display's EDID. QEMU 11.1.2's `virt` board and `cortex-a57`
 decide what they do not: the board's layout, wiring and device tree, the
 devices no specification describes, and the choices the specifications
@@ -2289,9 +2296,13 @@ one open.
   choose fewer SPIs, from 64, and four to eight
   priority bits) it has 480 SPIs, the GIC-400's largest
   configuration (DDI 0471B §2.3.3), so `GICD_TYPER.ITLinesNumber` reads
-  15. Its PPIs are 25 to 31, PPIs 16 to 24 not existing and so RAZ/WI in
-  every register (§3.3), and they are level-sensitive and cannot be made
-  edge-triggered (Table 3-2, `GICD_ICFGR1` RO). It has five priority bits,
+  15. Its PPIs are the GIC-400's 25 to 31 (§3.3) and PPI 22, on which the
+  board drives the DCC's COMMIRQ, the PPI BSA recommends for it (DEN0094C
+  RB_PPI_01), which V-BSA makes a PPI of in every virtual environment
+  (DEN0150 RV_L1PP_00) and which the GIC-400 does not have; PPIs 16 to 21,
+  23 and 24 do not exist and so are RAZ/WI in every register, and every
+  PPI is level-sensitive and cannot be made edge-triggered (Table 3-2,
+  `GICD_ICFGR1` RO). It has five priority bits,
   32 levels (§2.6, Secure state: this GIC has no Non-secure view), so
   every priority field's bits [2:0] are RAZ/WI (IHI 0048B Table 3-1); its
   virtual interface's five (`GICH_VTR.PRIbits`) are the architecture's,
@@ -3145,6 +3156,32 @@ one open.
   Two UNKNOWN cases have fixed answers: a read with RXfull clear returns
   zero, and a write while TXfull is set leaves TXfull set and both data
   registers as they were.
+- **The DCC's COMMIRQ is PPI 22.** Arm `CheckForDCCInterrupts` drives
+  COMMIRQ from the channel's flags and `MDCCINT_EL1`, and Arm ARM H4.6
+  recommends a level-sensitive PPI for it; BSA assigns it INTID 22
+  (DEN0094C RB_PPI_01), and V-BSA requires every virtual environment to
+  map it to a PPI (DEN0150 RV_L1PP_00). The board drives PPI 22 with it,
+  level-sensitive, sampled after every access that can change it (a write
+  of `MDCCINT_EL1`, of DTRTX, of `MDSCR_EL1`'s flags under the OS Lock, a
+  read that empties DTRRX), so `MDCCINT_EL1.TX` with DTRTX empty raises
+  it and the first write to DTRTX takes it away. The GIC-400 has no PPI
+  22, so the GIC departs from it there (the GIC entry above). QEMU 11.1.2
+  connects COMMIRQ nowhere (`hw/arm/virt.c` wires the timers, the PMU and
+  the GIC maintenance interrupt alone), so its `MDCCINT_EL1` raises
+  nothing. The legacy COMMRX and COMMTX signals, which Arm calls optional
+  and not recommended for new designs, are not modelled.
+- **The PL011 is an r1p5, BSA's Generic UART.** BSA's UART must be its
+  Generic UART or a 16550 (DEN0094C RB_PER_05), and V-BSA requires that of
+  a virtual environment (DEN0150 RV_L1PR_01); the Generic UART is a subset
+  of the PL011 r1p5 and needs transmit and receive FIFOs of one depth and
+  at least 32 entries (B.1). DDI 0183G §1.2 gives r1p5's two differences
+  from r1p4: FIFOs of 32 entries (§2.2.4, §2.2.5), so the `UARTIFLS`
+  trigger levels are 4, 8, 16, 24 and 28 entries, and `UARTPeriphID2`'s
+  revision field 3 (Table 3-21), which EDK2's `PL011UartLib` and Linux's
+  `amba-pl011` read to learn the FIFOs' depth. QEMU 11.1.2's PL011 is the
+  r1p1 its `pl011_id_arm` names (revision 1), with 16-entry FIFOs
+  (`PL011_FIFO_DEPTH`), the depth DDI 0183F gives every revision to r1p4,
+  so it is no Generic UART.
 - **The PL011 receives only while `UARTEN` and `RXE` are set.** The
   PrimeCell UART (PL011) TRM, ARM DDI 0183F §3.3.8 (Note to Table 3-12),
   enables reception with both bits; the reset value of `UARTCR` (0x300) has
@@ -3365,6 +3402,34 @@ one open.
   `pl011_putc` does, spin for each frame's time, and a guest that
   programs no divisor unable to transmit, as on hardware.
 
+## V-BSA conformance
+
+Arm's Virtual Base System Architecture 1.0 (DEN0150) sets what a virtual
+environment gives an operating system, mostly by naming rules of BSA 1.0C
+(DEN0094C). The board on its own layout (`DeviceLayout::Board`), with
+either processor, audited 2026-11-08 against its Level 1 rules:
+
+| Rule | What it asks | Verdict |
+|---|---|---|
+| RV_L1PE_01 | BSA B_PE_01–08, 10, 13, 14 | Conforms: one PE (Armv8.0 Cortex-A57 or Armv9.2), FP and Advanced SIMD, the 4 KiB granule, AES, SHA-1, SHA-256 and CRC32 on both, little-endian, AArch64 EL0 and EL1, no SVE; B_PE_10 is GICv3's |
+| RV_L1PE_02 | FEAT_PMUv3 and `PMCCNTR_EL0` | **Does not conform**: neither processor has a PMU (`ID_AA64DFR0_EL1.PMUVer` 0, "Not implemented"). The fix is a feature of its own, not a value: the PMU's registers and their EL0 and `MDCR_EL2` traps, the overflow interrupt on PPI 23 with its device tree node, the Cortex-A57's six counters and events (DDI 0488H chapter 11), and on the Armv9.2 model the PMU revisions `Features.json` ties to Armv8.7 and later (`FEAT_PMUv3p7`) |
+| RV_L1MM_01 | BSA B_MEM_01, 02, 04, 05, 07 | Conforms: every access completes; an unassigned address takes a synchronous External abort; every window and RAM lie within the 44-bit (52-bit) physical address space; no SMMU |
+| RV_L1MM_02 | DMA reaches all Non-secure space | Conforms: the virtio devices take 64-bit addresses (virtio 1.2 4.2.2) and are coherent |
+| RV_L1GI_01 | BSA B_GIC_01–03, 05 | Conforms: GICv2 with GICv2m for MSIs, one PE, 16 SGIs; B_GIC_03 is GICv3's |
+| RV_L1PP_00 | BSA B_PPI_01's PPIs | **Fixed**: COMMIRQ is PPI 22, where QEMU connects it nowhere ("The DCC's COMMIRQ is PPI 22"); the timers are on BSA's 30 and 27; there is no CTI or SPE, and no PMU (RV_L1PE_02) |
+| RV_L1SM_01–03 | SMMU | Conforms: no SMMU, so nothing blocks a boot device |
+| RV_L1TM_01–04 | Counters, at least 10 MHz, one rate, 56–64 bits, never backwards | Conforms: physical and virtual counters at 1 GHz by default (`CounterRate` refuses below 10 MHz), the virtual one the physical less `CNTVOFF_EL2`, 64 bits wide, a function of the instruction count |
+| RV_L1WK_01–04 | Wake-up | Conforms: the PE's only low-power state is standby (`WFI`, and PSCI `CPU_SUSPEND` for every power state, as DEN 0022E §5.4.5 permits), which any interrupt the GIC signals ends whatever `PSTATE.A`, `I` and `F`; the interrupt stays pending in the GIC (the GIC's own priority masking, IHI 0048B §3.7, applies to its wake-up signals as well) |
+| RV_L1WK_05–09 | Power state semantics | Conforms: the PE is in Run, Idle or Off; the GIC, the timers and the counter are on while it is not Off, and off with it (`CPU_OFF` and `SYSTEM_OFF` stop the machine); no tables in memory, no messaged interrupts while the GIC is off |
+| RV_L1PR_01 | BSA B_PER_01–06, 09–12 | **Fixed** B_PER_05: the PL011 is an r1p5, whose 32-entry FIFOs make it BSA's Generic UART, where QEMU's r1p1 with 16-entry FIFOs is neither that nor a 16550 ("The PL011 is an r1p5"). The rest conform: its interrupt is an SPI, DMA is coherent, and there is no USB, SATA or TPM, and no PCIe device |
+| RV_L1PR_02 | BSA section E but PCI_MM_02 | Conforms: ECAM over one window, no programming needed, unoccupied functions reading all ones at any width; the 32-bit window below 4 GiB at the same bus addresses; INTA–INTD on four SPIs, level-sensitive; MSIs through GICv2m; I/O space mapped one to one. The Root Port rules have no Root Port to apply to |
+
+Level 1's recommendations (six breakpoints, two context-aware, and four
+watchpoints) are met by the Cortex-A57, not by the Armv9.2 model, which
+has Arm's minimum of two, one and two. Of the future levels' rules, none
+is met: RV_L2PE_01 and RV_L2PE_02 need the PMU, and RV_L2WD_01 a
+watchdog, which the board does not have.
+
 ## QEMU fingerprints left
 
 The board never names QEMU to a guest ("The board names itself" above),
@@ -3449,11 +3514,10 @@ or kept as a host's choice (below).
   them context-aware, and four watchpoints (DDI 0488H, 4.3.19), the Armv9.2
   model's two, one and two — raise their exceptions (`src/cpu/debug.rs`);
   there is no Debug state, no halting debug, no Vector Catch and no PMU
-  (see "Where the references differ"). The
-  Debug Communications Channel's interrupt requests (COMMRX and COMMTX, which
-  `MDCCINT_EL1` enables) reach no interrupt controller: where they connect
-  is the system's choice, and QEMU's `virt` connects them nowhere, so
-  `MDCCINT_EL1` keeps what is written and raises nothing.
+  (see "Where the references differ" and "V-BSA conformance"). The
+  Debug Communications Channel's COMMIRQ, which `MDCCINT_EL1` enables,
+  drives PPI 22 (see "Where the references differ"); the legacy COMMRX and
+  COMMTX signals are not modelled.
 - No data cache model, and no instruction cache a guest can see: the
   decoded traces are kept coherent with every write. Cache maintenance by
   address translates its address, with the faults Arm's `AArch64_DC` and

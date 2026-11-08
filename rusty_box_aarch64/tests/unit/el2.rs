@@ -3799,7 +3799,7 @@ fn read_at(m: &mut Machine<WithEl2>, el: El, insn: u32) -> (u64, u64) {
 /// (`VirtMachine::sync_events`): the levels it drives the timer PPIs of
 /// the GIC with, and the tick it next samples them at. It samples them
 /// afresh where the processor says a register write moved them
-/// ([`Cpu::take_timer_dirty`]).
+/// ([`Cpu::take_outputs_dirty`]).
 #[derive(Debug, PartialEq, Eq)]
 struct HeldTimers {
     lines: TimerLines,
@@ -3818,7 +3818,7 @@ impl HeldTimers {
     /// Sample the timers afresh if the processor says a write since the
     /// last sample moved them: whether it did.
     fn sync(&mut self, cpu: &mut Cpu<WithEl2>) -> bool {
-        let moved = cpu.take_timer_dirty();
+        let moved = cpu.take_outputs_dirty();
         if moved {
             *self = Self::of(cpu);
         }

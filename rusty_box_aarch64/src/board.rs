@@ -105,6 +105,12 @@ pub const PPI_HYPERVISOR_TIMER: u32 = 16 + 10;
 /// device tree's `timer` node lists first, as its binding orders them,
 /// though a board with no EL3 never raises it.
 pub const PPI_SECURE_PHYSICAL_TIMER: u32 = 16 + 13;
+/// COMMIRQ, the Debug Communications Channel's interrupt request, on the
+/// PPI BSA recommends for it, INTID 22 (DEN0094C RB_PPI_01), which V-BSA
+/// makes every virtual environment map COMMIRQ to a PPI by (DEN0150
+/// RV_L1PP_00), and Arm ARM H4.6 recommends a level-sensitive PPI for.
+/// No device tree binding names it.
+pub const PPI_DCC: u32 = 16 + 6;
 
 /// The PL011's reference clock, `UARTCLK`: the device tree's `/clock`
 /// fixed clock, 24 MHz, which its `serial` node names as `uartclk`.
@@ -566,6 +572,11 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.gic.set_line(PPI_PHYSICAL_TIMER, lines.physical);
         self.gic.set_line(PPI_VIRTUAL_TIMER, lines.virtual_);
         self.gic.set_line(PPI_HYPERVISOR_TIMER, lines.hypervisor);
+    }
+
+    /// Drive the DCC's PPI with COMMIRQ ([`PPI_DCC`]).
+    pub(crate) fn set_dcc_line(&mut self, commirq: bool) {
+        self.gic.set_line(PPI_DCC, commirq);
     }
 
     /// Let time-driven devices catch up to `clock` and report the next

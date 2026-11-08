@@ -142,6 +142,46 @@ fn the_debug_communications_channel_has_no_far_end_and_tdcc_traps_el0() {
     }
 }
 
+/// COMMIRQ, the DCC's interrupt request (Arm `CheckForDCCInterrupts`),
+/// which the board drives onto PPI 22: DTRTX empty with `MDCCINT_EL1.TX`,
+/// or DTRRX full with `MDCCINT_EL1.RX`. Each access that can change it —
+/// a write of `MDCCINT_EL1`, of DTRTX, of `MDSCR_EL1`'s RXfull or TXfull
+/// under the OS Lock, and a read that empties DTRRX — has the machine
+/// sample it again.
+#[test]
+fn commirq_follows_the_dcc_flags_and_mdccint() {
+    /// `msr mdccint_el1, x0`, `msr mdscr_el1, x0`, `msr oslar_el1, x0`.
+    const MSR_MDCCINT: u32 = 0xD510_0200;
+    const MSR_MDSCR: u32 = 0xD510_0240;
+    const MSR_OSLAR: u32 = 0xD510_1080;
+    const RX: u64 = 1 << 30;
+    const TX: u64 = 1 << 29;
+    let mut cpu = processor(Implementation::CORTEX_A57);
+    let run = |cpu: &mut Cpu<NoEl2>, insn: u32, x0: u64| {
+        cpu.outputs_dirty = false;
+        cpu.x[0] = x0;
+        assert_eq!(exec(cpu, insn), None, "{insn:#010x}");
+        cpu.outputs_dirty
+    };
+    assert!(!cpu.dcc_interrupt(), "MDCCINT_EL1 resets to 0");
+    assert!(run(&mut cpu, MSR_MDCCINT, TX), "MDCCINT_EL1 is sampled");
+    assert!(cpu.dcc_interrupt(), "DTRTX empty");
+    assert!(run(&mut cpu, MSR_DBGDTRTX, 0x5A), "DTRTX filled");
+    assert!(!cpu.dcc_interrupt(), "DTRTX full");
+
+    // RXfull set through MDSCR_EL1, its save/restore view, under the OS
+    // Lock; the read of DTRRX that empties it withdraws the request.
+    assert!(!run(&mut cpu, MSR_OSLAR, 1), "the OS Lock moves no flag");
+    assert!(run(&mut cpu, MSR_MDCCINT, RX));
+    assert!(!cpu.dcc_interrupt(), "DTRRX empty");
+    assert!(run(&mut cpu, MSR_MDSCR, RX | TX), "RXfull set");
+    assert!(cpu.dcc_interrupt(), "DTRRX full");
+    assert!(!run(&mut cpu, MSR_MDSCR, RX | TX), "no flag moves");
+    assert!(run(&mut cpu, MRS_DBGDTRRX, 0), "the read empties DTRRX");
+    assert!(!cpu.dcc_interrupt());
+    assert!(!run(&mut cpu, MRS_DBGDTRRX, 0), "nothing more to empty");
+}
+
 /// FEAT_IDST: a read of the feature ID space that would be UNDEFINED traps
 /// with EC 0x18 instead, the ISS naming the register: EL0's reads of the
 /// ID registers (each accessor's `AArch64_SystemAccessTraptoEL1orEL2`), and

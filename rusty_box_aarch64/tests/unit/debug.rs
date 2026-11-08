@@ -325,7 +325,7 @@ impl Machine {
     /// timer outputs just evaluated, and how many retired.
     fn run_traces(&mut self, n: u64) -> u64 {
         let retired = self.cpu.retired;
-        self.cpu.timer_dirty = false;
+        self.cpu.outputs_dirty = false;
         self.cpu.bound_run(n);
         assert_eq!(
             self.cpu

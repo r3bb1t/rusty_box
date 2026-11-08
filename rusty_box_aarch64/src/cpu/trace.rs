@@ -652,7 +652,7 @@ impl<L: Levels> Cpu<L> {
                     Done::Next => {}
                     Done::Elsewhere if exits.is_empty() => {
                         debug_assert!(
-                            !self.trace_break && !self.timer_dirty && !observed.devices_touched()
+                            !self.trace_break && !self.outputs_dirty && !observed.devices_touched()
                         );
                         match self.linked_trace(i, pc, pa.get(), epoch) {
                             Some(next) => {
@@ -665,7 +665,7 @@ impl<L: Levels> Cpu<L> {
                     }
                     done => return done.step(),
                 }
-                if self.trace_break || self.timer_dirty || observed.devices_touched() {
+                if self.trace_break || self.outputs_dirty || observed.devices_touched() {
                     return Step::Retired;
                 }
                 pc = pc.wrapping_add(4);

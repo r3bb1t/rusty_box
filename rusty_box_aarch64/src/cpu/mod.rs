@@ -648,9 +648,11 @@ pub struct Cpu<L: Levels> {
     /// the machine was built — `icount` without the waiting.
     pub(crate) retired: u64,
     pub(crate) ips: ClockHz,
-    /// Set when a register write may have changed a timer's output line or
-    /// next deadline; the machine re-evaluates and clears it.
-    pub(crate) timer_dirty: bool,
+    /// Set when a register access may have changed one of the processor's
+    /// outputs to its PPIs: a timer's line or next deadline, or the DCC's
+    /// COMMIRQ ([`Cpu::dcc_interrupt`]); the machine re-evaluates and
+    /// clears it.
+    pub(crate) outputs_dirty: bool,
     /// The interrupt controller's IRQ and FIQ outputs, as the machine last
     /// sampled them. `ISR_EL1` reads them and `WFI` wakes on them.
     pub(crate) irq_line: bool,
@@ -714,7 +716,7 @@ impl<L: Levels> Cpu<L> {
             icount: 0,
             retired: 0,
             ips: config.ips,
-            timer_dirty: true,
+            outputs_dirty: true,
             irq_line: false,
             fiq_line: false,
             debug_stops: DebugStops {

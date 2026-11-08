@@ -1,10 +1,16 @@
 //! Arm PrimeCell PL011 UART.
 //!
 //! Provenance (R7): the PrimeCell UART (PL011) Technical Reference Manual,
-//! ARM DDI 0183F, first; QEMU 11.1.2 `hw/char/pl011.c` second. The
-//! peripheral ID is QEMU's `pl011_id_arm`, whose `UARTPeriphID2` revision
-//! field (bits [7:4]) is 1: a PL011 of the revisions DDI 0183F describes
-//! (up to r1p4), whose receive FIFO is 16 entries of 12 bits (§2.2.5).
+//! ARM DDI 0183F, and its r1p5 issue, DDI 0183G, first; QEMU 11.1.2
+//! `hw/char/pl011.c` second. The UART is an r1p5, the revision BSA's
+//! Generic UART is a subset of (DEN0094C B.1: "An instance of the PL011
+//! r1p5 UART will be compliant"), which needs transmit and receive FIFOs of
+//! the same depth and at least 32 entries: DDI 0183G §1.2 lists r1p5's two
+//! differences from r1p4, FIFOs 32 entries deep (§2.2.4, §2.2.5) and the
+//! `UARTPeriphID2` revision field (bits [7:4]) 3 (Table 3-21), so the
+//! identification registers read Arm's r1p5 values, where QEMU's
+//! `pl011_id_arm` reads revision 1. Every other behaviour is the same in
+//! both issues, and is cited by DDI 0183F's sections.
 //!
 //! From DDI 0183F:
 //!
@@ -29,7 +35,7 @@
 //!   by `BRK` set in loopback or loopback entered with `BRK` set, and
 //!   takes no other character until the input returns to the marking
 //!   state (Table 3-2, `BE`).
-//! - The receive FIFO (§2.2.5, §2.4.3): 16 entries while `UARTLCR_H.FEN` is
+//! - The receive FIFO (§2.2.5, §2.4.3): 32 entries while `UARTLCR_H.FEN` is
 //!   set, one (the holding register, "the bottom entry of the FIFOs",
 //!   §2.4.3 "Disabling the FIFOs") while it is clear. A character that
 //!   arrives while it is full is lost and sets the overrun state
@@ -64,7 +70,7 @@
 //!   line and cleared only by `UARTICR`.
 //! - Transmission needs `UARTCR.UARTEN` and `UARTCR.TXE` (§3.3.8, Note).
 //!   While either is clear, a character written to `UARTDR` waits in the
-//!   transmit FIFO (§2.2.4, §3.3.1: 16 bytes, or the one-byte holding
+//!   transmit FIFO (§2.2.4, §3.3.1: 32 bytes, or the one-byte holding
 //!   register with the FIFO disabled), and `UARTFR` reports it: `BUSY` set
 //!   "regardless of whether the UART is enabled or not", `TXFE` clear, and
 //!   `TXFF` once it is full (Table 3-4). Enabling transmission sends what
@@ -73,7 +79,7 @@
 //! - `TXRIS` (§3.4.3, §3.3.9): marks a transition of the transmit FIFO's
 //!   fill level through the trigger level, not the level itself. With the
 //!   FIFO enabled it is set when the level falls from above the
-//!   `UARTIFLS.TXIFLSEL` level (2, 4, 8, 12 or 14 of 16; 8 at reset) to it
+//!   `UARTIFLS.TXIFLSEL` level (4, 8, 16, 24 or 28 of 32; 16 at reset) to it
 //!   or below, and cleared when writes take it above; with the FIFO
 //!   disabled, set when the holding register empties and cleared by a
 //!   write that fills it. `UARTICR` clears it either way. Enabling the UART
@@ -179,7 +185,10 @@ const fn register_at(offset: RegOffset) -> RegOffset {
     RegOffset::new(offset.get() & !3)
 }
 
-const PL011_ID: [u8; 8] = [0x11, 0x10, 0x14, 0x00, 0x0D, 0xF0, 0x05, 0xB1];
+/// `UARTPeriphID0` to `UARTPCellID3` of an r1p5 (DDI 0183G Tables 3-19 to
+/// 3-26): part number 0x011, designer 0x41 (Arm), revision 3 (r1p5,
+/// Table 3-21), configuration 0, and the PrimeCell identification.
+const PL011_ID: [u8; 8] = [0x11, 0x10, 0x34, 0x00, 0x0D, 0xF0, 0x05, 0xB1];
 
 const FLAG_RI: u32 = 0x100;
 const FLAG_TXFE: u32 = 0x80;
@@ -248,16 +257,23 @@ const IFLS_MASK: u32 = 0x3F;
 const IMSC_MASK: u32 = 0x7FF;
 const DMACR_MASK: u32 = 0x7;
 
-/// The receive FIFO's depth (DDI 0183F §2.2.5; QEMU `PL011_FIFO_DEPTH`).
-pub const RX_FIFO_DEPTH: usize = 16;
+/// The receive FIFO's depth: 32 entries, an r1p5's (DDI 0183G §2.2.5),
+/// where QEMU's `PL011_FIFO_DEPTH` is r1p4's 16.
+pub const RX_FIFO_DEPTH: usize = 32;
 const _: () = assert!(
     RX_FIFO_DEPTH.is_power_of_two(),
     "slots are found by masking"
 );
 
-/// The transmit FIFO's depth (DDI 0183F §2.2.4): 16 bytes, one (the
-/// transmit holding register) while `UARTLCR_H.FEN` is clear.
-pub const TX_FIFO_DEPTH: usize = 16;
+/// The transmit FIFO's depth: 32 bytes, an r1p5's (DDI 0183G §2.2.4), one
+/// (the transmit holding register) while `UARTLCR_H.FEN` is clear. The
+/// same as the receive FIFO's, as BSA's Generic UART requires (DEN0094C
+/// B.1).
+pub const TX_FIFO_DEPTH: usize = 32;
+const _: () = assert!(
+    TX_FIFO_DEPTH == RX_FIFO_DEPTH && TX_FIFO_DEPTH >= 32,
+    "the Generic UART's FIFOs are alike and at least 32 entries deep"
+);
 
 /// The overrun state (DDI 0183F §2.4.3, "Overrun bit"): a character was
 /// lost to a full FIFO, and none has been written to it since. It is kept
@@ -448,7 +464,7 @@ impl Pl011 {
         self.tx.drain()
     }
 
-    /// Each FIFO's depth: 16 entries while `UARTLCR_H.FEN` is set, one
+    /// Each FIFO's depth: 32 entries while `UARTLCR_H.FEN` is set, one
     /// (the holding register) while it is clear (DDI 0183F §2.4.3).
     fn fifo_depth(&self) -> u32 {
         if self.lcr & LCR_FEN != 0 {
@@ -1224,8 +1240,8 @@ mod tests {
             write(&mut uart, CR, ENABLED);
             assert_eq!(
                 sent(&mut uart),
-                b"abcdefghijklmnop",
-                "UARTCR {off:#x}: all sixteen, in order; the write to the full FIFO was lost"
+                b"abcdefghijklmnopqrstuvwxyz{|}~\x7f\x80",
+                "UARTCR {off:#x}: all thirty-two, in order; the write to the full FIFO was lost"
             );
             assert_eq!(
                 read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
@@ -1243,17 +1259,17 @@ mod tests {
     /// FIFO becomes <= n/8 full"), not by a level already at or below it.
     #[test]
     fn the_transmit_interrupt_marks_the_fifo_draining_through_the_trigger_level() {
-        // TXIFLSEL: 1/8, 1/4, 1/2, 3/4 and 7/8 of 16; reserved encodings
-        // take the half-full level.
+        // TXIFLSEL: 1/8, 1/4, 1/2, 3/4 and 7/8 of 32 (DDI 0183G Table
+        // 3-13); reserved encodings take the half-full level.
         for (txiflsel, level) in [
-            (0, 2),
-            (1, 4),
-            (2, 8),
-            (3, 12),
-            (4, 14),
-            (5, 8),
-            (6, 8),
-            (7, 8),
+            (0, 4),
+            (1, 8),
+            (2, 16),
+            (3, 24),
+            (4, 28),
+            (5, 16),
+            (6, 16),
+            (7, 16),
         ] {
             for queued in [level, level + 1] {
                 let mut uart = Pl011::new();
@@ -1285,21 +1301,22 @@ mod tests {
     fn filling_the_transmit_fifo_above_the_trigger_level_clears_the_transmit_interrupt() {
         let mut uart = Pl011::new();
         write(&mut uart, LCR_H, LCR_FEN);
-        write(&mut uart, IFLS, 0); // 1/8: two entries
-        for byte in *b"abc" {
+        write(&mut uart, IFLS, 0); // 1/8: four entries
+        for byte in *b"abcde" {
             write(&mut uart, DR, u32::from(byte));
         }
         write(&mut uart, CR, ENABLED);
         assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX);
         write(&mut uart, CR, 0x300);
-        write(&mut uart, DR, u32::from(b'd'));
-        write(&mut uart, DR, u32::from(b'e'));
+        for byte in *b"fghi" {
+            write(&mut uart, DR, u32::from(byte));
+        }
         assert_eq!(
             read(&mut uart, RIS) & INT_TX,
             INT_TX,
             "at the level: still set"
         );
-        write(&mut uart, DR, u32::from(b'f'));
+        write(&mut uart, DR, u32::from(b'j'));
         assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "above the level: cleared");
         write(&mut uart, CR, ENABLED);
         assert_eq!(
@@ -1381,7 +1398,7 @@ mod tests {
     /// `TXRIS`; here the flush is a fall of the fill level like any other.
     #[test]
     fn flushing_the_transmit_fifo_is_a_fall_of_its_level() {
-        for (queued, crossed) in [(8, 0), (9, INT_TX)] {
+        for (queued, crossed) in [(16, 0), (17, INT_TX)] {
             let mut uart = Pl011::new();
             write(&mut uart, LCR_H, LCR_FEN);
             for i in 0..queued {
@@ -1487,9 +1504,9 @@ mod tests {
 
     #[test]
     fn the_receive_interrupt_rises_at_the_trigger_level_and_falls_below_it() {
-        // RXIFLSEL: 1/8, 1/4, 1/2, 3/4 and 7/8 of 16 entries; reserved
-        // encodings take the half-full level.
-        for (rxiflsel, level) in [(0, 2), (1, 4), (2, 8), (3, 12), (4, 14), (5, 8), (7, 8)] {
+        // RXIFLSEL: 1/8, 1/4, 1/2, 3/4 and 7/8 of 32 entries (DDI 0183G
+        // Table 3-13); reserved encodings take the half-full level.
+        for (rxiflsel, level) in [(0, 4), (1, 8), (2, 16), (3, 24), (4, 28), (5, 16), (7, 16)] {
             let mut uart = enabled();
             write(&mut uart, LCR_H, LCR_FEN);
             write(&mut uart, IFLS, rxiflsel << 3);
@@ -1523,13 +1540,13 @@ mod tests {
     fn the_receive_interrupt_marks_a_crossing_of_the_level() {
         let mut uart = enabled();
         write(&mut uart, LCR_H, LCR_FEN);
-        write(&mut uart, IFLS, 0); // 1/8: two entries
-        for byte in [1, 2] {
+        write(&mut uart, IFLS, 0); // 1/8: four entries
+        for byte in [1, 2, 3, 4] {
             assert!(rx(&mut uart, byte));
         }
         assert_eq!(read(&mut uart, RIS) & INT_RX, INT_RX);
         write(&mut uart, ICR, INT_RX);
-        assert!(rx(&mut uart, 3));
+        assert!(rx(&mut uart, 5));
         assert_eq!(
             read(&mut uart, RIS) & INT_RX,
             0,
@@ -1538,7 +1555,7 @@ mod tests {
         // Back below the level, then up through it again.
         assert_eq!(read(&mut uart, DR), 1);
         assert_eq!(read(&mut uart, DR), 2);
-        assert!(rx(&mut uart, 4));
+        assert!(rx(&mut uart, 6));
         assert_eq!(read(&mut uart, RIS) & INT_RX, INT_RX);
     }
 
@@ -1832,12 +1849,13 @@ mod tests {
 
     #[test]
     fn emptying_the_fifo_through_fen_clears_the_receive_interrupts() {
-        // FIFO enabled, then disabled: two entries at the 1/8 level.
+        // FIFO enabled, then disabled: four entries at the 1/8 level.
         let mut uart = timed();
         write(&mut uart, IFLS, 0);
         write(&mut uart, IMSC, INT_RT | INT_RX);
-        assert!(rx(&mut uart, 1));
-        assert!(rx(&mut uart, 2));
+        for byte in [1, 2, 3, 4] {
+            assert!(rx(&mut uart, byte));
+        }
         update(&mut uart, TIMEOUT_13_1);
         assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), INT_RT | INT_RX);
         write(&mut uart, LCR_H, 0);
@@ -2214,14 +2232,14 @@ mod tests {
     #[test]
     fn a_txiflsel_write_alone_changes_nothing() {
         for drained in [false, true] {
-            for held in [1, 5, 15] {
+            for held in [1, 9, 31] {
                 let mut uart = Pl011::new();
                 write(&mut uart, LCR_H, LCR_FEN);
-                write(&mut uart, IFLS, 0); // 1/8: two entries
+                write(&mut uart, IFLS, 0); // 1/8: four entries
                 write(&mut uart, IMSC, INT_TX);
                 if drained {
-                    // Three entries drain through the two-entry level.
-                    for byte in *b"abc" {
+                    // Five entries drain through the four-entry level.
+                    for byte in *b"abcde" {
                         write(&mut uart, DR, u32::from(byte));
                     }
                     write(&mut uart, CR, ENABLED);
@@ -2234,7 +2252,7 @@ mod tests {
                 let irq = uart.irq();
                 assert_eq!(
                     ris & INT_TX != 0,
-                    drained && held <= 2,
+                    drained && held <= 4,
                     "{held} held, drained {drained}"
                 );
                 for txiflsel in [4, 0, 2, 7, 1, 3] {
@@ -2299,11 +2317,12 @@ mod tests {
             u64::from(ENABLED),
             "UARTCR"
         );
-        // UARTPeriphID0..3 and UARTPCellID0..3, 0xFE0 to 0xFFC.
+        // UARTPeriphID0..3 and UARTPCellID0..3, 0xFE0 to 0xFFC: an r1p5's,
+        // UARTPeriphID2's revision field 3 (DDI 0183G Table 3-21).
         let id: std::vec::Vec<u64> = (0..8)
             .map(|i| uart.read(RegOffset::new(0xFE0 + 4 * i + 3), AccessWidth::Byte))
             .collect();
-        assert_eq!(id, [0x11, 0x10, 0x14, 0x00, 0x0D, 0xF0, 0x05, 0xB1]);
+        assert_eq!(id, [0x11, 0x10, 0x34, 0x00, 0x0D, 0xF0, 0x05, 0xB1]);
         assert_eq!(
             uart.read(RegOffset::new(0xFDC), AccessWidth::Word),
             0,
