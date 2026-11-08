@@ -770,7 +770,7 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// The `CCSIDR_EL1` value for the cache `CSSELR_EL1` selects, from
-    /// this processor's caches.
+    /// this processor's caches ([`id::Caches::selection`]).
     fn ccsidr(&self) -> u64 {
         self.imp.caches.ccsidr(self.sys.csselr_el1)
     }
@@ -1137,7 +1137,7 @@ impl<L: Levels> Cpu<L> {
             }
             CSSELR_EL1 => {
                 trap_to_el2(el1 && self.hcr_any(HCR_TID2))?;
-                self.sys.csselr_el1
+                self.imp.caches.selection(self.sys.csselr_el1)
             }
             SCTLR_EL1 => {
                 self.trvm_check(el)?;
@@ -1546,6 +1546,8 @@ impl<L: Levels> Cpu<L> {
         let effect = match k {
             CSSELR_EL1 => {
                 trap_to_el2(el1 && self.hcr_any(HCR_TID2))?;
+                // Level and InD as written (TnD is RES0 without FEAT_MTE2);
+                // a read gives the cache they select (`Caches::selection`).
                 self.sys.csselr_el1 = value & 0xF;
                 WriteEffect::None
             }

@@ -521,8 +521,12 @@ fn only_the_cortex_a57_has_the_os_double_lock() {
 /// FEAT_CCIDX: on the Cortex-A57 the encodings of its TRM (DDI 0488H,
 /// Table 4-37), a 512 KiB L2 among them; on the Armv9.2 model the board's
 /// own, 32 KiB 4-way L1 caches and a 256 KiB 8-way L2. A selection of no
-/// cache reads 0. Each line is the one `CTR_EL0` names for its kind of
-/// cache, 64 bytes.
+/// cache — Level 3 and beyond, the instruction cache at the unified L2, a
+/// reserved Level — reads back from `CSSELR_EL1` as the Level 1 cache of
+/// the kind its InD names, and `CCSIDR_EL1` describes that cache (the
+/// board's choice where Arm leaves both UNKNOWN; the Cortex-A57 TRM
+/// leaves only Level UNKNOWN, and InD reads as written). Each line is the
+/// one `CTR_EL0` names for its kind of cache, 64 bytes.
 #[test]
 fn ccsidr_reports_the_cache_csselr_selects() {
     const A57: [u64; 3] = [0x701F_E00A, 0x201F_E012, 0x703F_E07A];
@@ -545,20 +549,23 @@ fn ccsidr_reports_the_cache_csselr_selects() {
         let (imin_line, dmin_line) = (4u64 << (ctr & 0xF), 4u64 << ((ctr >> 16) & 0xF));
         // CSSELR_EL1.Level [3:1] and InD [0]: the L1 data, L1 instruction
         // and L2 unified caches are 0, 1 and 2.
-        for csselr in 0..16u64 {
-            cpu.x[0] = csselr;
+        // Bits above InD and Level are RES0 (TnD without FEAT_MTE2), so the
+        // high bits written are dropped.
+        for written in (0..16u64).map(|s| s | 0xFFFF_FFF0) {
+            let csselr = written & 0xF;
+            let selected = if csselr <= 2 { csselr } else { csselr & 1 };
+            cpu.x[0] = written;
             assert_eq!(exec(&mut cpu, MSR_CSSELR), None);
             assert_eq!(exec(&mut cpu, MRS_CSSELR), None);
-            assert_eq!(cpu.x[0], csselr, "{imp:?}: CSSELR_EL1 keeps {csselr}");
+            assert_eq!(cpu.x[0], selected, "{imp:?}: CSSELR_EL1 after {csselr}");
+            assert_eq!(cpu.x[0] & 1, csselr & 1, "{imp:?}: InD as written");
             assert_eq!(exec(&mut cpu, MRS_CCSIDR), None);
             let read = cpu.x[0];
-            let expected = ccsidr.get(csselr as usize).copied().unwrap_or(0);
+            let expected = ccsidr[selected as usize];
             assert_eq!(read, expected, "{imp:?}: CCSIDR_EL1 at CSSELR_EL1 {csselr}");
-            if expected != 0 {
-                let line = 16u64 << (read & 7);
-                let min_line = if csselr == 1 { imin_line } else { dmin_line };
-                assert_eq!(line, min_line, "{imp:?}: CSSELR_EL1 {csselr}");
-            }
+            let line = 16u64 << (read & 7);
+            let min_line = if selected == 1 { imin_line } else { dmin_line };
+            assert_eq!(line, min_line, "{imp:?}: CSSELR_EL1 {csselr}");
         }
     }
 }

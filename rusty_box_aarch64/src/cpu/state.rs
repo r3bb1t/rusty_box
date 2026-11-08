@@ -269,7 +269,7 @@ impl<L: Levels> Cpu<L> {
         *fpsr = 0;
         *svcr = sme::Svcr::RESET;
         *scalable = sme::ScalableRegs::ZERO;
-        *pac_keys = pauth::PacKeys::ZERO;
+        *pac_keys = pauth::PacKeys::RESET;
         *sys = SysRegs::reset(imp.counter_hz, reset_pc);
         *monitor = ExclusiveMonitor::CLEAR;
         *event = EventRegister::at(false, count);

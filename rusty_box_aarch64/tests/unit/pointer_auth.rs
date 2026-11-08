@@ -648,6 +648,100 @@ fn the_keys_are_el1_registers() {
     }
 }
 
+/// The key registers at reset, `APIAKeyLo_EL1` to `APGAKeyHi_EL1` in the
+/// order of their encodings: the first 640 bits of the fractional part of
+/// √2, 64 bits each (`PacKeys::RESET`; Arm leaves each UNKNOWN).
+const RESET_KEYS: [u64; 10] = [
+    0x6A09_E667_F3BC_C908,
+    0xB2FB_1366_EA95_7D3E,
+    0x3ADE_C175_1277_5099,
+    0xDA2F_590B_0667_322A,
+    0x95F9_0608_7571_4587,
+    0x5163_FCDF_B907_B672,
+    0x1EE9_50BC_8738_F694,
+    0xF009_0E6C_7BF4_4ED1,
+    0xA440_5D0E_855E_3E9C,
+    0xA60B_38C0_2378_66F7,
+];
+
+/// `mrs x0, <key register>` for each key register, in the order of their
+/// encodings (`S3_0_C2_C1_0` to `S3_0_C2_C3_1`).
+const MRS_KEYS: [u32; 10] = [
+    0xD538_2100,
+    0xD538_2120,
+    0xD538_2140,
+    0xD538_2160,
+    0xD538_2200,
+    0xD538_2220,
+    0xD538_2240,
+    0xD538_2260,
+    0xD538_2300,
+    0xD538_2320,
+];
+
+/// The first 640 bits of the fractional part of √2, by integer square
+/// root: ⌊√2 · 2^640⌋ - 2^640, the bits below the integer part, worked one
+/// bit at a time from the top so the test derives what it checks.
+fn sqrt2_fraction_words() -> [u64; 10] {
+    // The root is 641 bits; hold it in 11 words, most significant first.
+    // r² ≤ 2 · 2^1280 decides each bit, tested on 22-word squares.
+    const WORDS: usize = 11;
+    let square = |r: &[u64; WORDS]| -> [u64; 2 * WORDS] {
+        let mut out = [0u64; 2 * WORDS];
+        for i in (0..WORDS).rev() {
+            let mut carry = 0u128;
+            for j in (0..WORDS).rev() {
+                let k = i + j + 1;
+                let t = u128::from(r[i]) * u128::from(r[j]) + u128::from(out[k]) + carry;
+                out[k] = t as u64;
+                carry = t >> 64;
+            }
+            out[i] = carry as u64;
+        }
+        out
+    };
+    // 2 · 2^1280 = 2^1281, in 22 words most significant first: bit 1281
+    // of a 1408-bit number is bit 1 of its word 1 (bits 1343:1280).
+    let mut target = [0u64; 2 * WORDS];
+    target[1] = 1 << 1;
+    let mut root = [0u64; WORDS];
+    // The root's bit 640 is its integer part, 1; the rest follow.
+    for bit in (0..=640).rev() {
+        let (word, shift) = (WORDS - 1 - bit / 64, bit % 64);
+        root[word] |= 1 << shift;
+        if square(&root) > target {
+            root[word] &= !(1 << shift);
+        }
+    }
+    // Drop the integer bit (bit 640, word 0's bit 0); words 1..11 are the
+    // fraction's 640 bits.
+    core::array::from_fn(|i| root[i + 1])
+}
+
+/// The keys at reset are the board's fixed values, the same after a system
+/// reset as when the machine is built, whatever the guest programmed: an
+/// `MRS` of each key register reads its word of √2's fraction. The
+/// architecture leaves them UNKNOWN (Arm ARM, D24.2.27 and its siblings);
+/// none reads zero, so a guest that uses a key it never programmed is not
+/// handed what looks like an empty register.
+#[test]
+fn the_keys_reset_to_the_boards_fixed_values() {
+    assert_eq!(sqrt2_fraction_words(), RESET_KEYS);
+    let mut cpu = processor(Implementation::ARMV9P2);
+    for round in ["built", "reset"] {
+        for (insn, expected) in MRS_KEYS.into_iter().zip(RESET_KEYS) {
+            cpu.x[0] = 0;
+            assert_eq!(exec(&mut cpu, insn), None, "{round}: {insn:#010x}");
+            assert_eq!(cpu.x[0], expected, "{round}: {insn:#010x}");
+        }
+        cpu.x[0] = 0xDEAD_BEEF;
+        assert_eq!(exec(&mut cpu, MSR_APIAKEYLO), None);
+        assert_eq!(exec(&mut cpu, MSR_APGAKEYHI), None);
+        cpu.reset_keeping_time(CODE);
+        cpu.sys.vbar_el1 = super::step::VBAR;
+    }
+}
+
 /// LDRAA with SP as the base authenticates first and checks SP's
 /// alignment after (the instruction page; QEMU makes no SP alignment
 /// check): an unsigned SP fails the authentication, a signed misaligned

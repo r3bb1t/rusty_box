@@ -11,7 +11,8 @@
 //! translation regimes are EL1&0, whose pointers have upper and lower
 //! address ranges, and with EL2, EL2's, whose pointers have one (there is
 //! no FEAT_VHE); it has neither FEAT_MTE nor FEAT_LVA3, nor
-//! FEAT_CONSTPACFIELD or FEAT_PAuth_LR.
+//! FEAT_CONSTPACFIELD or FEAT_PAuth_LR. The keys, UNKNOWN at reset, reset
+//! to the board's own fixed values ([`PacKeys::RESET`]).
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
@@ -43,16 +44,32 @@ pub(crate) struct PacKeys {
 }
 
 impl PacKeys {
-    pub(crate) const ZERO: Self = {
-        let zero = Key { lo: 0, hi: 0 };
-        Self {
-            ia: zero,
-            ib: zero,
-            da: zero,
-            db: zero,
-            ga: zero,
-        }
-    };
+    /// The keys at reset. Each key register resets to an architecturally
+    /// UNKNOWN value on a Warm reset (Arm ARM, DDI 0487M.d, D24.2.27 and
+    /// its siblings, `APIAKeyLo_EL1` to `APGAKeyHi_EL1`), so any value is
+    /// the architecture's; the board is deterministic, so it fixes one. The
+    /// board's own: the ten registers, in the order of their encodings
+    /// ([`PacKeys::halves`]), take the first 640 bits of the fractional
+    /// part of √2, 64 bits each, a constant anyone can derive and that
+    /// favours no key. No two halves are equal and none is zero, so a guest
+    /// that signs or authenticates before it programs a key, or reads one
+    /// to see whether it was programmed, finds a value it did not write
+    /// rather than one that looks like an empty register. QARMA5's own
+    /// constants are digits of π (`ComputePACQARMA`'s `RC` and `Alpha`), so
+    /// these share none of them. Linux programs a key before it sets the
+    /// `SCTLR_EL1` enable that uses it, and EDK2 sets none.
+    pub(crate) const RESET: Self = Self::from_halves([
+        0x6A09_E667_F3BC_C908,
+        0xB2FB_1366_EA95_7D3E,
+        0x3ADE_C175_1277_5099,
+        0xDA2F_590B_0667_322A,
+        0x95F9_0608_7571_4587,
+        0x5163_FCDF_B907_B672,
+        0x1EE9_50BC_8738_F694,
+        0xF009_0E6C_7BF4_4ED1,
+        0xA440_5D0E_855E_3E9C,
+        0xA60B_38C0_2378_66F7,
+    ]);
 
     /// The ten key registers in the order of their encodings,
     /// `APIAKeyLo_EL1` to `APGAKeyHi_EL1`: what a snapshot holds.

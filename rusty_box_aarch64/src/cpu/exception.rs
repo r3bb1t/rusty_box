@@ -695,11 +695,24 @@ enum VirtualInterrupt {
 
 impl VirtualInterrupt {
     /// Every virtual interrupt, in the order this processor takes them when
-    /// several are deliverable, after the physical ones. Arm leaves the
-    /// prioritization of asynchronous exceptions IMPLEMENTATION DEFINED;
-    /// this order is the choice made here (QEMU's `arm_cpu_exec_interrupt`
-    /// makes the same one).
-    const ALL: [Self; 3] = [Self::Irq, Self::Fiq, Self::SError];
+    /// several are deliverable, after the physical ones
+    /// ([`Cpu::deliverable_interrupt`]): a virtual SError, then a virtual
+    /// FIQ, then a virtual IRQ. Arm leaves the prioritization of physical
+    /// and virtual asynchronous exceptions IMPLEMENTATION DEFINED (Arm ARM,
+    /// DDI 0487M.d, D1.4.6.5; the Cortex-A57 TRM gives none), so the order
+    /// is the board's own, by what each reports:
+    /// - an SError first: it reports an error, which the guest is to learn
+    ///   of before it services an interrupt on state the error may have
+    ///   touched, and EL2 raises it once (`HCR_EL2.VSE`, cleared when it
+    ///   is taken, D1.4.6.1) where an IRQ or FIQ stays pending;
+    /// - an FIQ before an IRQ, the order of the interrupt controller's
+    ///   priorities: a GICv2 CPU interface, virtual or physical, signals
+    ///   Group 0 as FIQ and Group 1 as IRQ when its `FIQEn` is set (IHI
+    ///   0048B, 3.9.2 for a GIC without the Security Extensions, as the
+    ///   board's is, and 3.9.3 for the virtual interface), and with
+    ///   `AckCtl` 0, the model Arm recommends, every Group 0 interrupt must
+    ///   have a higher priority than every Group 1 one (3.4, 5.2.3).
+    const ALL: [Self; 3] = [Self::SError, Self::Fiq, Self::Irq];
 
     /// The `HCR_EL2` bit routing the physical kind to EL2, without which
     /// the virtual kind is not pending: `IMO`, `FMO`, `AMO`.
@@ -1005,7 +1018,16 @@ impl<L: Levels> Cpu<L> {
 
     /// The asynchronous exception taken at the next instruction boundary, if
     /// any: a physical FIQ, then IRQ, then a virtual one
-    /// ([`VirtualInterrupt::ALL`]). The one test of deliverability: the run
+    /// ([`VirtualInterrupt::ALL`]). Arm leaves the order IMPLEMENTATION
+    /// DEFINED (D1.4.6.5); the board's is FIQ before IRQ for the interrupt
+    /// controller's priorities, as [`VirtualInterrupt::ALL`] gives, and a
+    /// physical interrupt before a virtual one: where both are deliverable
+    /// at EL0 or EL1 the physical one is the interrupt controller's own
+    /// request, routed to EL2 where its virtual kind exists, and EL2, once
+    /// it has serviced it, may change what is virtually pending (its
+    /// `HCR_EL2` bits, the GIC's list registers) before EL1 runs a handler
+    /// for it. No physical SError is ever pending on this board. The one
+    /// test of deliverability: the run
     /// loop asks it before every instruction, inline, and with neither
     /// input asserted and no virtual interrupt raised it reads nothing else.
     #[inline(always)]

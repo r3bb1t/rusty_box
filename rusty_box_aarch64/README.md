@@ -491,8 +491,9 @@ less it, and the EL1 physical timer compares that count at every level
 `HCR_EL2.VI`, `VF` and `VSE` raise a virtual IRQ, FIQ
 and SError for EL1 and EL0 where `IMO`, `FMO` and `AMO` route the physical
 kind to EL2: `ISR_EL1` shows them, each is taken to EL1 when its `PSTATE`
-mask is clear (after a deliverable physical interrupt, IRQ before FIQ
-before SError: Arm leaves the order IMPLEMENTATION DEFINED), a pending one
+mask is clear (after a deliverable physical interrupt, SError before FIQ
+before IRQ: Arm leaves the order IMPLEMENTATION DEFINED; see "Where the
+references differ"), a pending one
 ends `WFI` and `WFE`, a virtual SError reports `VSESR_EL2` (FEAT_RAS), and
 ESB defers a masked one into `VDISR_EL2`. The machine's PSCI firmware then
 answers `SMC`, as QEMU's does (see "Where the references differ"), and the
@@ -1394,6 +1395,25 @@ one open.
   its comment states): an `ldraa x0, [sp]` with SP 8 bytes off and
   SCTLR_EL1.SA set loads. `gen_qemu_pauth.py` keeps a base SP 16-byte
   aligned, and `tests/unit/pointer_auth.rs` checks the fault and its order.
+- **The pointer authentication keys reset to the board's own values.**
+  Each key register, `APIAKeyLo_EL1` to `APGAKeyHi_EL1`, resets to an
+  architecturally UNKNOWN value (DDI 0487M.d, D24.2.27 and its siblings);
+  QEMU's are zero. The board is
+  deterministic, so it fixes a value too, its own: the ten registers in
+  the order of their encodings take the first 640 bits of the fractional
+  part of √2, 64 bits each (`PacKeys::RESET`), from 0x6A09_E667_F3BC_C908
+  in `APIAKeyLo_EL1` to 0xA60B_38C0_2378_66F7 in `APGAKeyHi_EL1`. None is
+  zero and no two are equal, so a guest that signs or authenticates
+  before it programs a key, or reads one to see whether it was
+  programmed, finds a value it did not write rather than one that looks
+  like an empty register; and none is a digit of π, as QARMA5's own
+  constants are (`ComputePACQARMA`). Linux programs a key before it sets
+  the `SCTLR_EL1` enable that uses it, and EDK2 sets none, so neither
+  reads them. Only the Armv9.2 model has the keys, the Cortex-A57 having
+  no FEAT_PAuth. `tests/unit/pointer_auth.rs`
+  (`the_keys_reset_to_the_boards_fixed_values`) checks what an `MRS` of
+  each reads, built and after a system reset, against √2 worked out in the
+  test.
 - **An atomic reports only a refused write as a write.** Arm's
   `CreateAccDescAtomicOp` makes an atomic access a read and a write;
   `NoFault`, whose record an alignment or translation fault starts from,
@@ -1457,6 +1477,25 @@ one open.
   `tests/unit/board_tree.rs`, `tests/unit/sysreg.rs`
   (`ccsidr_reports_the_cache_csselr_selects`) and `tests/api.rs` check
   what a guest reads.
+- **A `CSSELR_EL1` selection of no cache selects a Level 1 cache.** A
+  selection `CLIDR_EL1` does not name — Level 3 or beyond, the
+  instruction cache at the unified L2, a reserved Level — leaves both
+  reads open: `CSSELR_EL1` returns UNKNOWN Level and InD (DDI 0487M.d,
+  D24.2.40, K1.2.12), and a `CCSIDR_EL1` read is CONSTRAINED
+  UNPREDICTABLE, a NOP, UNDEFINED or an UNKNOWN value (D24.2.31). The
+  Cortex-A57 TRM makes only Level UNKNOWN (DDI 0488H, 4.3.25) and has
+  `CCSIDR_EL1` return an UNKNOWN value (4.3.22). QEMU keeps the selection
+  as written and reads `CCSIDR_EL1` as 0, a cache of one set and one way
+  with 16-byte lines, which no `CLIDR_EL1` here describes. On both models
+  the board maps the selection onto the Level 1 cache of the kind its
+  InD names (`Caches::selection`), the first of the ways the Arm ARM lets
+  an unallocated field value behave (K1.2.19: it "maps onto any of the
+  allocated values"), keeping InD as the A57's TRM requires: `CSSELR_EL1`
+  reads that selection back and `CCSIDR_EL1` describes that cache, so
+  every read names a cache the guest can find in `CLIDR_EL1` and the two
+  registers agree. `tests/unit/sysreg.rs`
+  (`ccsidr_reports_the_cache_csselr_selects`) reads every selection back
+  on both models.
 - **The Armv9.2 model is a software model in its device tree too.** Its
   `MIDR_EL1` names implementer 0, reserved for software use, as QEMU's
   `max` does (`aarch64_max_tcg_initfn`), with part 0x052 where QEMU's is
@@ -1826,6 +1865,28 @@ one open.
   `HPFAR_EL2` ARBITRARY, and here it keeps its value. QEMU writes the IPA
   for every stage 2 fault, which Arm permits too; Linux's KVM finds the
   IPA of a Permission fault with `AT S1E1R`, as Arm intends.
+- **Several asynchronous exceptions deliverable at once are taken in the
+  board's order.** Arm leaves the prioritization of physical and virtual
+  asynchronous exceptions IMPLEMENTATION DEFINED (DDI 0487M.d, D1.4.6.5),
+  and the Cortex-A57 TRM gives none. QEMU's `arm_cpu_exec_interrupt`
+  takes a physical FIQ, a physical IRQ, then a virtual IRQ, FIQ and
+  SError. The board's order is a physical FIQ, a physical IRQ, then a
+  virtual SError, FIQ and IRQ. FIQ goes before IRQ, physical and virtual,
+  as the interrupt controller ranks them: a GICv2 CPU interface signals
+  Group 0 as FIQ and Group 1 as IRQ under `FIQEn` (IHI 0048B, 3.9.2 for a
+  GIC without the Security Extensions, as this board's is, 3.9.3 for the
+  virtual interface), and with `AckCtl` 0, the model Arm recommends,
+  every Group 0 interrupt must have a higher priority than every Group 1
+  one (3.4, 5.2.3). The virtual SError, an error report, goes first of
+  the virtual ones, so a guest learns of the error before it services an
+  interrupt on state the error may have touched; EL2 raises it once
+  (`HCR_EL2.VSE`, cleared when it is taken, D1.4.6.1) where a virtual IRQ
+  or FIQ stays pending. A physical interrupt goes before a virtual one:
+  where its own virtual kind exists it is routed to EL2, which once it has
+  serviced it may change what is virtually pending (its `HCR_EL2` bits,
+  the GIC's List registers) before EL1 runs a handler. No physical SError
+  is ever pending here. `tests/unit/el2.rs`
+  (`virtual_interrupts_are_taken_at_el1`) checks the order.
 - **The TLB keeps the entries of an EL1&0 context it leaves.** Arm's TLB
   tags an entry with its VMID and ASID and keeps it until a TLB
   maintenance instruction removes it, so a switch to other values and back
@@ -3067,6 +3128,21 @@ the board's own:
   code 0x0300_0000 in its `ranges`, QEMU's `create_pcie`), which the PCI
   bus binding leaves to the platform and Linux warns of ("Memory resource
   size exceeds max for 32 bits").
+- The processor's remaining choices of QEMU's where Arm leaves one open:
+  the Cortex-A57's revision, r1p0 as QEMU's `cortex-a57` reports it
+  (`MIDR_EL1` 0x411F_D070), where the TRM on disk (DDI 0488H) is r1p3's
+  and gives 0x411F_D073 — a change of the errata a guest applies, to be
+  made with a boot of each guest; the registers Arm leaves UNKNOWN at
+  reset that read zero as QEMU's do (the general-purpose and SIMD&FP
+  registers, the stack pointers, `CSSELR_EL1` and the rest of the
+  zeroed system registers), outside what the Linux boot protocol sets;
+  the CONSTRAINED UNPREDICTABLE load and store cases taken as QEMU takes
+  them (`src/cpu/ldst.rs`: writeback into a transfer register, a load
+  pair into one register); "Fault on TxSZ value above maximum" and
+  "... below minimum" TRUE as QEMU's `tsz_oob`; `SMIDR_EL1` 0 and
+  `LORID_EL1` 0 as QEMU's `sme_reginfo` and `lor_reginfo`; and a virtual
+  SError's syndrome without FEAT_RAS, `ISS` 0 where Arm leaves it
+  IMPLEMENTATION DEFINED.
 
 **Kept as a host's choice**, each off by default, for a VM made on QEMU's
 `virt` or on this board before it had its own answer:
@@ -3079,10 +3155,6 @@ the board's own:
   power button's PL061 line, 3, for a guest booted with a device tree QEMU
   wrote or a firmware variable store whose boot entries name QEMU's device
   paths.
-- The processor: choices QEMU made where Arm leaves them
-  IMPLEMENTATION DEFINED or UNKNOWN (pointer-authentication keys at reset,
-  unimplemented `CSSELR_EL1` selections, the order virtual interrupts are
-  taken).
 - PrimeCell behaviour where the TRMs are silent (the UART's empty-FIFO
   read, FIFO flush, loopback; the RTC's alarm at a match already passed).
 - The flash's CFI identity: manufacturer 0x89 (Intel), device 0x18, and

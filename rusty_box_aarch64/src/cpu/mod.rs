@@ -464,6 +464,9 @@ pub(crate) struct SysRegs {
     pub(crate) tpidr2_el0: u64,
     /// `SMCR_EL1` (FEAT_SME): the `LEN` field, and `EZT0` with FEAT_SME2.
     pub(crate) smcr_el1: u64,
+    /// `CSSELR_EL1`'s Level and InD as last written, which a read maps
+    /// onto a cache the processor has (`id::Caches::selection`); 0, the L1
+    /// data cache, at reset, where Arm leaves them UNKNOWN.
     pub(crate) csselr_el1: u64,
     pub(crate) cntkctl_el1: u64,
     pub(crate) cntfrq_el0: u64,
@@ -577,8 +580,9 @@ pub struct Cpu<L: Levels> {
     pub(crate) svcr: sme::Svcr,
     /// Z above V, the predicates and ZA (FEAT_SME).
     pub(crate) scalable: sme::ScalableRegs,
-    /// The pointer authentication keys (FEAT_PAuth), zero at reset as QEMU
-    /// sets them, where the architecture leaves them UNKNOWN.
+    /// The pointer authentication keys (FEAT_PAuth), the board's fixed
+    /// values at reset ([`pauth::PacKeys::RESET`]), where the architecture
+    /// leaves them UNKNOWN.
     pub(crate) pac_keys: pauth::PacKeys,
     /// What this processor implements, as a processor of its level set:
     /// the decoder, the ID registers and every feature's own checks read
@@ -674,7 +678,7 @@ impl<L: Levels> Cpu<L> {
             fpsr: 0,
             svcr: sme::Svcr::RESET,
             scalable: sme::ScalableRegs::ZERO,
-            pac_keys: pauth::PacKeys::ZERO,
+            pac_keys: pauth::PacKeys::RESET,
             imp,
             sys: SysRegs::reset(imp.counter_hz, config.reset_pc),
             monitor: ExclusiveMonitor::CLEAR,

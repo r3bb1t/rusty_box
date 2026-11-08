@@ -1186,8 +1186,10 @@ fn isr_shows_the_virtual_interrupts_where_el2_takes_the_physical_ones() {
 /// `HCR_EL2.VI`, `VF` and `VSE` raise a virtual IRQ, FIQ and SError for EL0
 /// and EL1 where `IMO`, `FMO` and `AMO` route the physical kind to EL2 and
 /// `TGE` is clear. Each is taken to EL1 when its `PSTATE` mask is clear and
-/// never at EL2, after a deliverable physical interrupt, IRQ before FIQ
-/// before SError (Arm leaves the order IMPLEMENTATION DEFINED). A
+/// never at EL2, after a deliverable physical interrupt, SError before FIQ
+/// before IRQ (Arm leaves the order IMPLEMENTATION DEFINED, D1.4.6.5; the
+/// board's order puts the error report first and follows the GIC's Group 0
+/// over Group 1 for FIQ over IRQ). A
 /// virtual SError reports EC 0x2F with `VSESR_EL2`'s syndrome (FEAT_RAS)
 /// and stops being pending when taken; a virtual IRQ stays pending until
 /// EL2 clears `VI`. A `WFI` with one pending, masked or not, does not wait.
@@ -1222,22 +1224,30 @@ fn virtual_interrupts_are_taken_at_el1() {
 
     for (el, offset) in [(El::El1, CURRENT_SPX), (El::El0, LOWER_A64)] {
         unmasked_at(&mut m, el, HCR_VI | HCR_IMO | HCR_VF | HCR_FMO);
-        let taken = m.cpu.deliver_interrupt().expect("a virtual IRQ");
-        let want = (ExceptionKind::VirtualIrq, El::El1, VBAR_EL1 + offset + IRQ);
-        assert_eq!((taken.kind, taken.to, taken.vector), want, "{el:?}");
-        assert_eq!(m.cpu.el2_state.regs.hcr & HCR_VI, HCR_VI, "VI stays set");
-        unmasked_at(&mut m, el, HCR_VF | HCR_FMO);
         let taken = m.cpu.deliver_interrupt().expect("a virtual FIQ");
+        let want = (ExceptionKind::VirtualFiq, El::El1, VBAR_EL1 + offset + FIQ);
+        assert_eq!((taken.kind, taken.to, taken.vector), want, "{el:?}");
+        assert_eq!(m.cpu.el2_state.regs.hcr & HCR_VF, HCR_VF, "VF stays set");
+        unmasked_at(&mut m, el, HCR_VI | HCR_IMO);
+        let taken = m.cpu.deliver_interrupt().expect("a virtual IRQ");
         assert_eq!(
             (taken.kind, taken.vector),
-            (ExceptionKind::VirtualFiq, VBAR_EL1 + offset + FIQ)
+            (ExceptionKind::VirtualIrq, VBAR_EL1 + offset + IRQ)
         );
+        assert_eq!(m.cpu.el2_state.regs.hcr & HCR_VI, HCR_VI, "VI stays set");
     }
 
-    unmasked_at(&mut m, El::El1, HCR_VI | HCR_IMO);
+    // A deliverable physical interrupt goes before every virtual one,
+    // the virtual SError, first of them, included; of the physical ones,
+    // FIQ before IRQ.
+    unmasked_at(&mut m, El::El1, HCR_VI | HCR_IMO | HCR_VSE | HCR_AMO);
     m.cpu.set_interrupt_lines(true, false);
     let taken = m.cpu.deliver_interrupt().expect("the physical IRQ first");
     assert_eq!((taken.kind, taken.to), (ExceptionKind::Irq, El::El2));
+    unmasked_at(&mut m, El::El1, HCR_IMO | HCR_FMO);
+    m.cpu.set_interrupt_lines(true, true);
+    let taken = m.cpu.deliver_interrupt().expect("the physical FIQ first");
+    assert_eq!((taken.kind, taken.to), (ExceptionKind::Fiq, El::El2));
     m.cpu.set_interrupt_lines(false, false);
 
     m.cpu.el2_state.regs.vsesr = 0x0100_0ABC;
@@ -1258,13 +1268,13 @@ fn virtual_interrupts_are_taken_at_el1() {
     );
     assert!(m.cpu.deliver_interrupt().is_none());
 
-    // All three raised and unmasked: taken in the order chosen for the
+    // All three raised and unmasked: taken in the board's order for the
     // IMPLEMENTATION DEFINED priority, each lowered once taken.
     let mut hcr = HCR_VI | HCR_IMO | HCR_VF | HCR_FMO | HCR_VSE | HCR_AMO;
     for (kind, raised) in [
-        (ExceptionKind::VirtualIrq, HCR_VI),
-        (ExceptionKind::VirtualFiq, HCR_VF),
         (ExceptionKind::VirtualSError, HCR_VSE),
+        (ExceptionKind::VirtualFiq, HCR_VF),
+        (ExceptionKind::VirtualIrq, HCR_VI),
     ] {
         unmasked_at(&mut m, El::El1, hcr);
         let taken = m.cpu.deliver_interrupt().expect("a virtual interrupt");

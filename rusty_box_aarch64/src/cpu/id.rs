@@ -443,22 +443,47 @@ impl Caches {
         l2: 0x003F_E03A,
     };
 
-    /// `CCSIDR_EL1` for the cache `csselr` (`CSSELR_EL1`'s Level and InD)
-    /// selects. A selection of no cache here reads 0, one of the values a
-    /// CONSTRAINED UNPREDICTABLE read of it may return (an UNKNOWN value,
-    /// D24.2.31, "Accessing CCSIDR_EL1").
-    pub const fn ccsidr(self, csselr: u64) -> u64 {
+    /// The cache `csselr` (`CSSELR_EL1`'s Level, bits 3:1, and InD, bit 0)
+    /// selects, as a selection of a cache this processor has: the three
+    /// `CLIDR_EL1` names (0, 1 and 2) are themselves, and any other — a
+    /// level beyond L2, an instruction cache at the unified L2, or a
+    /// reserved Level — maps onto the Level 1 cache of the kind InD names
+    /// (Level 0b000, InD kept), which both models have. A read of
+    /// `CSSELR_EL1` returns this selection and `CCSIDR_EL1` describes its
+    /// cache.
+    ///
+    /// Arm leaves both reads open for a selection of no implemented cache:
+    /// `CSSELR_EL1` returns UNKNOWN Level and InD (Arm ARM, DDI 0487M.d,
+    /// D24.2.40 and K1.2.12; the Cortex-A57 TRM, DDI 0488H, 4.3.25, makes
+    /// only Level UNKNOWN, which is why InD is kept), and `CCSIDR_EL1` is
+    /// CONSTRAINED UNPREDICTABLE, a NOP, UNDEFINED or an UNKNOWN value
+    /// (D24.2.31, "Accessing CCSIDR_EL1"; the Cortex-A57's TRM, 4.3.22,
+    /// chooses an UNKNOWN value). The mapping is the board's own, the first
+    /// of the ways the Arm ARM lets an unallocated field value behave
+    /// (K1.2.19: it "maps onto any of the allocated values"): every read
+    /// then names a cache the guest can find in `CLIDR_EL1`, and the two
+    /// registers agree on which.
+    pub const fn selection(self, csselr: u64) -> u64 {
         match csselr & 0xF {
+            selected @ 0..=2 => selected,
+            unimplemented => unimplemented & 1,
+        }
+    }
+
+    /// `CCSIDR_EL1` for the cache `csselr` selects ([`Caches::selection`]).
+    pub const fn ccsidr(self, csselr: u64) -> u64 {
+        match self.selection(csselr) {
             0 => self.l1_data,
             1 => self.l1_instruction,
-            2 => self.l2,
-            _ => 0,
+            _ => self.l2,
         }
     }
 }
 
-/// `SCTLR_EL1` at reset, as QEMU's Cortex-A57 (`reset_sctlr`): MMU and caches
-/// off, SP alignment checks on, `WFI`/`WFE` not trapped from EL0.
+/// `SCTLR_EL1` at reset, the Cortex-A57's (TRM DDI 0488H, Table 4-3 and
+/// 4.3.30): MMU and caches off, SP alignment checks on, `WFI`/`WFE` not
+/// trapped from EL0. The Armv9.2 model, whose fields the Arm ARM leaves
+/// UNKNOWN at reset, takes the same value.
 pub const SCTLR_EL1_RESET: u64 = 0x00C5_0838;
 
 /// `OSLSR_EL1` at reset: the OS lock is implemented (OSLM = 0b10) and locked.
