@@ -1188,9 +1188,14 @@ integration tests of the public API.
   written as Linux writes one, going out whole; the receive timeout's 32
   bit periods at the latched divisor, whether `RTIM` or the receiver is
   on, cleared by reading the holding register with the FIFO disabled; the
-  `FEN` flush; overruns, breaks (one lost to an overrun included), modem
-  status interrupts and reserved bits; and snapshots, with the states
-  they must refuse.
+  `FEN` flush on clearing it, and the holding registers kept on setting
+  it; an empty FIFO read as 0 with nothing changed; overruns, breaks (one
+  lost to an overrun included, and the loopback receiver's input held low
+  by one), loopback holding the host's bytes back, modem status
+  interrupts, the inputs deasserted out of loopback, and reserved bits;
+  and snapshots, with the states they must refuse. `src/devices/pl031.rs`
+  tests the RTC: started, zeroed, loaded and reset, and its match only at
+  equality, a match value already passed reached when the counter wraps.
 - `tests/unit/softfloat.rs`: the softfloat surface against the host's IEEE
   arithmetic in round-to-nearest, and Arm's rules — default NaN, NaN
   propagation order, FPCR.DN and FZ, tininess before rounding, saturating
@@ -2499,7 +2504,14 @@ one open.
   ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md), "Deliberate
   QEMU omissions"). The alarm is armed for the start of the second at
   which the RTC reaches `RTCMR`; QEMU's fires a whole number of seconds
-  after the write, up to a second late (entry 20). `RTCPeriphID2` reads
+  after the write, up to a second late (entry 20). Only equality matches
+  (§2.1, §2.2.6: a comparator asserts the interrupt "When both values are
+  equal"): a match value the RTC reads when `RTCMR` or `RTCLR` is
+  written, or when the RTC is zeroed or started, raises the raw status at
+  once, and one it has already passed is reached once the 32-bit counter
+  wraps, as in QEMU. The RTC reaches a match value again 2^32 seconds
+  after it last did, so once `RTCICR` clears the raw status the alarm is
+  armed for that; QEMU's fires once per write. `RTCPeriphID2` reads
   0x04, revision 0, which DDI 0224C
   gives r1p3; QEMU's reads 0x14. Every access reaches the register
   `PADDR[11:2]` decodes (Table A-1), where QEMU reads a byte inside a
@@ -2943,18 +2955,58 @@ one open.
   follows the TRM; the reserved encodings 0b101–0b111 select the half-full
   level. Linux waits for the receive timeout (below) for anything
   shorter than the level, as on hardware.
-- **Emptying the PL011 FIFOs through `FEN` clears the receive interrupts.**
-  DDI 0183F §3.3.8 (Note to Table 3-12) flushes the transmit FIFO by
-  clearing `UARTLCR_H.FEN`; it says nothing of the receive FIFO, or of
-  setting `FEN`. QEMU 11.1.2 (`pl011_write`, `pl011_reset_rx_fifo`,
-  `pl011_reset_tx_fifo`) empties both FIFOs on every change of `FEN`, and
-  so does this model. DDI 0183F gives no rule for the receive interrupts
-  across such a flush either: §3.4.2 clears `RXRIS` by reads and by
-  `UARTICR`, and §3.4.4 asserts `RTRIS` only while the FIFO is not empty.
-  This model's reading is that an empty FIFO is below every trigger
-  level, so it clears `RXRIS` and `RTRIS` with the FIFO. QEMU 11.1.2
-  leaves its interrupt state as it was, so `RXRIS` stays set with nothing
-  to read.
+- **Clearing the PL011's `FEN` flushes both FIFOs; setting it flushes
+  neither.** DDI 0183F §3.3.8 (Note to Table 3-12) flushes the transmit
+  FIFO by clearing `UARTLCR_H.FEN` and names no other flush; it says
+  nothing of the receive FIFO, or of setting `FEN`. `FEN` enables the two
+  FIFOs together (Table 3-10) and §2.4.3 turns both into holding registers
+  alike, so clearing it flushes the receive FIFO too. Each holding
+  register is "the bottom entry of the FIFOs" (§2.4.3, "Disabling the
+  FIFOs"), so setting `FEN` keeps the character either holds as its
+  FIFO's one entry, `UARTFR` reporting it at the new depth, with the
+  interrupts and a running receive timeout as they were. Disabling the
+  UART flushes nothing, as §3.3.8's sequence disables it and then
+  flushes through `FEN` as a step of its own, and nor does a `UARTLCR_H`
+  write that leaves `FEN` as it was. QEMU 11.1.2 (`pl011_write`,
+  `pl011_reset_rx_fifo`, `pl011_reset_tx_fifo`) empties both FIFOs on
+  every change of `FEN`, set or cleared. DDI 0183F gives no rule for the
+  receive interrupts across a flush either: §3.4.2 clears `RXRIS` by
+  reads and by `UARTICR`, and §3.4.4 asserts `RTRIS` only while the FIFO
+  is not empty. This model's reading is that an empty FIFO is below every
+  trigger level, so it clears `RXRIS` and `RTRIS` with the FIFO. QEMU
+  11.1.2 leaves its interrupt state as it was, so `RXRIS` stays set with
+  nothing to read.
+- **A PL011 read of an empty receive FIFO returns 0.** DDI 0183F does
+  not say what `UARTDR` returns with nothing received. This model returns
+  0, no data and no error bits, and changes nothing: `UARTRSR` keeps the
+  status of the character last read, which §3.3.2 says it reports. QEMU
+  11.1.2 (`pl011_read_rxdata`) returns the FIFO slot at the read
+  position, a character from up to 16 before or one a flush or reset left
+  behind, and loads `UARTRSR` from its error bits.
+- **The PL011's loopback is the TRM's.** `UARTCR.LBE` feeds the transmit
+  line to the receive line and "the modem outputs ... through to the modem
+  inputs" (Table 3-12); this model pairs each output with the input whose
+  signal it carries in DCE mode (Table 2-2: `RTS` to `CTS`, `DTR` to
+  `DSR`, `Out1` to `DCD`, `Out2` to `RI`), as QEMU 11.1.2's
+  `pl011_loopback_mdmctrl` does. Out of loopback the inputs are the
+  board's lines, which no modem drives, so they read deasserted, as at
+  reset, and leaving loopback changes back each one loopback asserted,
+  raising its interrupt (§3.4.1); QEMU leaves them where loopback put
+  them. Loopback disconnects the receiver from the host line, whose bytes
+  wait until it ends, as they wait while the receiver is off; QEMU
+  (`pl011_receive`) takes them and drops them. The transmit line still
+  carries what is sent: DDI 0183F says when it holds `UARTTXD` in the
+  marking state (`SIREN`) and says nothing of the kind for `LBE`. A break
+  holds the transmit line low (Table 3-10), so in loopback the receiver's
+  input goes low when `BRK` is set or loopback is entered with `BRK` set,
+  each time loading one break character, and the receiver takes no other
+  until the input returns to the marking state (Table 3-2, `BE`); QEMU
+  (`pl011_loopback_break`) loads one only when `BRK` is set, and goes on
+  looping characters back under the break. Characters sent under a break
+  still reach the host, whose line carries no break, where DDI 0183F
+  leaves them open ("The FIFO integrity is not guaranteed ... after the
+  BRK bit has been initiated", §3.3.7). In loopback, as everywhere, the
+  characters cross in no time (the last PL011 entry).
 - **The PL011 raises the receive timeout interrupt, 32 bit periods after
   the last character.** DDI 0183F §3.4.4: `RTRIS` is set when the FIFO is
   not empty and nothing has arrived for 32 bit periods, only while `RTIM`
@@ -3004,9 +3056,8 @@ one open.
   is set while the FIFO holds anything, "regardless of whether the UART is
   enabled or not", with `TXFE` clear and `TXFF` set once it is full (Table
   3-4); enabling transmission sends what waits, and clearing `FEN` flushes
-  it (§3.3.8, Note). Setting `FEN` flushes it too, as QEMU's `pl011_write`
-  does; DDI 0183F is silent there, and that is this model's reading (the
-  `FEN` entry above). QEMU 11.1.2 (`pl011_write_txdata`) logs such a
+  it (§3.3.8, Note); setting `FEN` keeps the character the holding
+  register holds (the `FEN` entry above). QEMU 11.1.2 (`pl011_write_txdata`) logs such a
   write and transmits the character anyway, in loopback to the receiver
   too. This model follows the TRM. The TRM does not say what a write to a
   full transmit FIFO does; here the character is lost and the FIFO keeps
@@ -3155,8 +3206,6 @@ the board's own:
   power button's PL061 line, 3, for a guest booted with a device tree QEMU
   wrote or a firmware variable store whose boot entries name QEMU's device
   paths.
-- PrimeCell behaviour where the TRMs are silent (the UART's empty-FIFO
-  read, FIFO flush, loopback; the RTC's alarm at a match already passed).
 - The flash's CFI identity: manufacturer 0x89 (Intel), device 0x18, and
   QEMU's CFI table values.
 
@@ -3207,7 +3256,7 @@ the board's own:
   line — it carries bytes, not frames, so no framing or parity error,
   break or false start bit ever arrives from it, and a break reaches the
   receiver only in loopback; modem status inputs outside loopback, which
-  no host line drives; and the integration test registers `UARTITCR`,
+  no host line drives, so they read deasserted; and the integration test registers `UARTITCR`,
   `UARTITIP`, `UARTITOP` and `UARTTDR` (chapter 4), which read as zero and
   ignore writes.
 - No network device, and nothing on the PCIe bus: storage is the initramfs

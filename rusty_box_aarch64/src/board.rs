@@ -627,9 +627,9 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// says there is room. Run after every UART access and on reset; a host
     /// send fills the FIFO itself before it queues anything. Either way,
     /// whenever the guest looks, the FIFO is full, the host buffer empty, or
-    /// the receiver off (`UARTCR.UARTEN` or `RXE` clear). In
-    /// loopback the UART consumes and drops what it is handed, as QEMU's
-    /// `pl011_receive` does. The bytes arrive at `clock`; an arrival that
+    /// the receiver off (`UARTCR.UARTEN` or `RXE` clear) or in loopback,
+    /// which disconnects it from the host line. The bytes arrive at
+    /// `clock`; an arrival that
     /// moves the UART's receive timeout moves the board's next deadline.
     pub(crate) fn pump_serial_input(&mut self, clock: VmClock) {
         let deadline = self.uart.next_deadline();

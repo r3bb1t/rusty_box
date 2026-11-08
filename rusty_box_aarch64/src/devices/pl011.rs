@@ -16,11 +16,22 @@
 //! - Reception needs `UARTCR.UARTEN` and `UARTCR.RXE` (§3.3.8, Note). The
 //!   host line is flow-controlled, as a QEMU character backend is: while
 //!   the receiver is off, or its FIFO full, the host's bytes wait for it
-//!   rather than being lost. In loopback (§2.4.3, "System and diagnostic
-//!   loopback testing", and `UARTCR.LBE`) the receiver hears the
-//!   transmitter, and a character it is off for is gone.
+//!   rather than being lost.
+//! - Loopback (§2.4.3, "System and diagnostic loopback testing", and
+//!   `UARTCR.LBE`, Table 3-12): "the UARTTXD path is fed through to the
+//!   UARTRXD path", so the receiver hears the transmitter, and a character
+//!   it is off for is gone; and "the modem outputs are also fed through to
+//!   the modem inputs", each output to the input whose signal it carries
+//!   in DCE mode (Table 2-2): `RTS` to `CTS`, `DTR` to `DSR`, `Out1` to
+//!   `DCD` and `Out2` to `RI`. A break (`UARTLCR_H.BRK`, Table 3-10) holds
+//!   the transmit line low, so in loopback it holds the receiver's input
+//!   low: the receiver loads one break character when the input goes low,
+//!   by `BRK` set in loopback or loopback entered with `BRK` set, and
+//!   takes no other character until the input returns to the marking
+//!   state (Table 3-2, `BE`).
 //! - The receive FIFO (§2.2.5, §2.4.3): 16 entries while `UARTLCR_H.FEN` is
-//!   set, one (the holding register) while it is clear. A character that
+//!   set, one (the holding register, "the bottom entry of the FIFOs",
+//!   §2.4.3 "Disabling the FIFOs") while it is clear. A character that
 //!   arrives while it is full is lost and sets the overrun state
 //!   (§2.4.3, "Overrun bit"): `UARTRSR.OE` at once (§3.3.2), `OERIS`
 //!   (§3.4.5), and `UARTDR.OE` on the next character written to the FIFO,
@@ -78,27 +89,54 @@
 //! the moment the receiver has room, as a QEMU character backend does. The
 //! receive timeout is the one interval the UART times, as above.
 //!
-//! From QEMU 11.1.2 where DDI 0183F leaves the choice to the system: the
-//! flag register QEMU keeps as state, `UARTDR` reads of an empty FIFO
-//! (`pl011_read_rxdata`: the slot at the read position), both FIFOs
-//! emptied whenever `FEN` changes, set or cleared (`pl011_write`; DDI
-//! 0183F names only the transmit FIFO's flush, on clearing), loopback
-//! driving the modem status inputs from the modem control outputs and
-//! leaving them where they were when loopback ends
-//! (`pl011_loopback_mdmctrl`), a loopback break on each setting of
-//! `UARTLCR_H.BRK` (`pl011_loopback_break`), and a host line that sends
-//! nothing in loopback (`pl011_receive`). The host side of a break has no
-//! backend here: the line neither sends nor delivers one. QEMU transmits
-//! whatever `UARTEN` and `TXE` say, and raises `TXRIS` after every write
-//! (`pl011_write_txdata`); README's "Where the references differ" has
-//! this model's differences, and the direct-boot set-up
-//! ([`Pl011::set_up_console`]) that goes with it.
+//! Where DDI 0183F is silent, the board's own choices, each with its
+//! reason:
 //!
-//! Where DDI 0183F is silent and this model does not follow QEMU, its
-//! reading: emptying the receive FIFO through `FEN` clears `RXRIS` and
-//! `RTRIS`, since an empty FIFO is below every trigger level and §3.4.4
-//! asserts `RTRIS` only while the FIFO is not empty (DDI 0183F names reads
-//! and `UARTICR` as what clears them; QEMU leaves both as they were).
+//! - A `UARTDR` read with the receive FIFO empty returns 0, no data and
+//!   no error bits, and changes nothing: there is no character to return,
+//!   so it returns none of an earlier one's data or status, and
+//!   `UARTRSR` keeps the status of the character last read (§3.3.2: the
+//!   status "corresponds to the data character read from the Data
+//!   Register, UARTDR prior to reading the UARTRSR"). QEMU returns the
+//!   FIFO slot at the read position, whatever it last held
+//!   (`pl011_read_rxdata`).
+//! - Clearing `FEN` flushes both FIFOs. §3.3.8 (Note to Table 3-12)
+//!   flushes the transmit FIFO that way and names no other flush; `FEN`
+//!   enables the two FIFOs together (Table 3-10) and §2.4.3 makes both
+//!   holding registers alike when it is clear, so nothing gives the
+//!   receive FIFO another fate. Setting `FEN` flushes neither: each holding
+//!   register is the bottom entry of its FIFO (§2.4.3, "Disabling the
+//!   FIFOs"), so a character either holds stays, the FIFO's one entry.
+//!   Neither disabling the UART nor a `UARTLCR_H` write that leaves `FEN`
+//!   as it was flushes anything: §3.3.8's sequence disables the UART and
+//!   then flushes through `FEN` as a step of its own. QEMU empties both
+//!   FIFOs on every change of `FEN`, set or cleared (`pl011_write`).
+//! - The emptied receive FIFO holds no `RXRIS` and no `RTRIS`: an empty
+//!   FIFO is below every trigger level, and §3.4.4 asserts `RTRIS` only
+//!   while the FIFO is not empty (DDI 0183F names reads and `UARTICR` as
+//!   what clears them; QEMU leaves both as they were).
+//! - The board wires nothing to the modem status inputs, so out of
+//!   loopback they are deasserted, as at reset, and leaving loopback
+//!   returns each one loopback asserted to that, raising its interrupt
+//!   (§3.4.1). QEMU leaves them where loopback left them
+//!   (`pl011_loopback_mdmctrl`).
+//! - The host line is flow-controlled in loopback as while the receiver is
+//!   off: loopback disconnects the receiver from it, so the host's bytes
+//!   wait until loopback ends. QEMU consumes and drops them
+//!   (`pl011_receive`).
+//! - In loopback the transmit line still carries what is transmitted to
+//!   the host: DDI 0183F holds `UARTTXD` in the marking state where it
+//!   means to (`SIREN`, Table 3-12) and says no such thing of `LBE`. The
+//!   host side of a break has no backend: the line neither sends nor
+//!   delivers one, and characters transmitted while `BRK` is set still
+//!   reach the host, where DDI 0183F leaves them open ("The FIFO integrity
+//!   is not guaranteed ... after the BRK bit has been initiated", §3.3.7).
+//!
+//! The flag register is kept as state, as QEMU 11.1.2 keeps it. QEMU
+//! transmits whatever `UARTEN` and `TXE` say, and raises `TXRIS` after
+//! every write (`pl011_write_txdata`); README's "Where the references
+//! differ" has this model's differences, and the direct-boot set-up
+//! ([`Pl011::set_up_console`]) that goes with it.
 //!
 //! The region takes 4-byte accesses (`pl011_ops`' `impl.min_access_size` and
 //! `impl.max_access_size`): QEMU's `access_with_adjusted_size` hands a
@@ -248,8 +286,7 @@ pub struct UartClocks {
 /// Closed (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Received {
-    /// The receive side took it: into the FIFO, or, while loopback
-    /// disconnects the host line, consumed and dropped.
+    /// The receive FIFO took it.
     Taken,
     /// There was no room; nothing changed.
     NoRoom,
@@ -328,8 +365,9 @@ pub struct Pl011 {
     /// Characters waiting: at most the FIFO's depth, and zero while
     /// transmission is on.
     tx_count: u8,
-    /// QEMU `read_fifo`: each entry is a `UARTDR` value, a received byte or
-    /// [`DR_BE`], with [`DR_OE`] when an overrun came before it.
+    /// The receive FIFO, a ring: `read_count` entries from `read_pos`, each
+    /// a `UARTDR` value, a received byte or [`DR_BE`], with [`DR_OE`] when
+    /// an overrun came before it. No read reaches a slot outside them.
     read_fifo: [u32; RX_FIFO_DEPTH],
     /// Below [`RX_FIFO_DEPTH`], and zero while the FIFO is disabled.
     read_pos: u8,
@@ -365,8 +403,8 @@ impl Default for Pl011 {
 }
 
 impl Pl011 {
-    /// QEMU `pl011_reset`, on a device whose receive FIFO has never been
-    /// written: DDI 0183F Table 3-1's reset values.
+    /// DDI 0183F Table 3-1's reset values, with both FIFOs empty and the
+    /// modem status inputs deasserted.
     pub fn new() -> Self {
         Self {
             tx: RingBuffer::new(),
@@ -391,19 +429,13 @@ impl Pl011 {
         }
     }
 
-    /// QEMU `pl011_reset`: the registers and the FIFO bookkeeping return to
-    /// their reset state; the FIFO's slots keep what they held, as QEMU's
-    /// `read_fifo` does. Bytes already transmitted stay for the host: they
-    /// left the device before the reset. Characters waiting in the transmit
-    /// FIFO never left, and the reset empties it.
+    /// The registers and both FIFOs return to their reset state. Bytes
+    /// already transmitted stay for the host: they left the device before
+    /// the reset. Characters waiting in the transmit FIFO never left, and
+    /// the reset empties it.
     pub fn reset(&mut self) {
         let tx = core::mem::take(&mut self.tx);
-        let read_fifo = self.read_fifo;
-        *self = Self {
-            tx,
-            read_fifo,
-            ..Self::new()
-        };
+        *self = Self { tx, ..Self::new() };
     }
 
     /// The interrupt line (DDI 0183F §3.4.6 `UARTINTR`).
@@ -416,7 +448,8 @@ impl Pl011 {
         self.tx.drain()
     }
 
-    /// QEMU `pl011_get_fifo_depth`.
+    /// Each FIFO's depth: 16 entries while `UARTLCR_H.FEN` is set, one
+    /// (the holding register) while it is clear (DDI 0183F §2.4.3).
     fn fifo_depth(&self) -> u32 {
         if self.lcr & LCR_FEN != 0 {
             RX_FIFO_DEPTH as u32
@@ -515,8 +548,8 @@ impl Pl011 {
 
     /// Send what the transmit FIFO holds, if transmission is enabled. With
     /// a zero bit period the whole FIFO goes at once, each character to the
-    /// host and, in loopback, to the receiver (QEMU `pl011_write_txdata`,
-    /// `pl011_loopback_tx`), and the fill level falls to zero at once:
+    /// host and, in loopback, to the receiver ([`Pl011::loopback_tx`]), and
+    /// the fill level falls to zero at once:
     /// `TXRIS` is set if that takes it through the trigger level
     /// ([`Pl011::tx_level_moved`]). While transmission is enabled every
     /// write leaves at once, so with the FIFO enabled the level never rises
@@ -620,27 +653,23 @@ impl Pl011 {
     }
 
     /// How many host bytes the receive side takes now: none while the
-    /// receiver is off (DDI 0183F §3.3.8), else the FIFO's free entries,
-    /// QEMU `pl011_can_receive`'s `fifo_depth - read_count`. Loopback
-    /// disconnects the host line, which QEMU still lets fill that room with
-    /// bytes it drops.
+    /// receiver is off (DDI 0183F §3.3.8) or loopback disconnects it from
+    /// the host line (Table 3-12, `LBE`), so that the host's bytes wait for
+    /// it, else the FIFO's free entries.
     pub fn rx_room(&self) -> usize {
-        if !self.loopback() && !self.receiving() {
+        if self.loopback() || !self.receiving() {
             return 0;
         }
         self.fifo_depth().saturating_sub(self.read_count) as usize
     }
 
-    /// QEMU `pl011_receive` for one host byte [`Pl011::can_receive`] said
-    /// there was room for: received, or consumed and dropped while loopback
-    /// disconnects the receive input.
+    /// One host byte, into the receive FIFO if [`Pl011::can_receive`] says
+    /// there is room for it.
     pub fn receive(&mut self, byte: u8, clocks: UartClocks) -> Received {
         if !self.can_receive() {
             return Received::NoRoom;
         }
-        if !self.loopback() {
-            self.receive_character(u32::from(byte), clocks);
-        }
+        self.receive_character(u32::from(byte), clocks);
         Received::Taken
     }
 
@@ -658,7 +687,7 @@ impl Pl011 {
     }
 
     /// The receive logic taking one character off the line, the receiver
-    /// enabled (DDI 0183F §2.4.3; QEMU `pl011_fifo_rx_put`). A full FIFO
+    /// enabled (DDI 0183F §2.4.3). A full FIFO
     /// keeps its entries and the character is lost to an overrun. Either
     /// way a character has been received, and while `RTIM` is set the
     /// receive timeout counts its 32 bit periods afresh from now (§3.4.4:
@@ -694,24 +723,49 @@ impl Pl011 {
         }
     }
 
-    /// QEMU `pl011_loopback_tx`: in loopback the receiver hears what is
-    /// transmitted, when it is enabled.
+    /// In loopback the receiver hears what is transmitted, when it is
+    /// enabled and no break holds its input low (DDI 0183F Table 3-2,
+    /// `BE`: after a break "the next character is only enabled after the
+    /// receive data input goes to a 1").
     fn loopback_tx(&mut self, value: u32, clocks: UartClocks) {
-        if self.loopback() && self.receiving() {
+        if self.loopback() && self.receiving() && !self.break_on_input() {
             self.receive_character(value, clocks);
         }
     }
 
-    /// QEMU `pl011_read_rxdata`. An empty FIFO returns the slot at the read
-    /// position, whatever it last held.
-    fn read_rxdata(&mut self) -> u32 {
-        let depth = self.fifo_depth();
-        self.flags &= !FLAG_RXFF;
-        let c = self.read_fifo[usize::from(self.read_pos)];
-        if self.read_count > 0 {
-            self.read_count -= 1;
-            self.read_pos = (self.read_pos + 1) & (depth as u8 - 1);
+    /// Whether a break holds the receiver's input low: in loopback that
+    /// input is the transmit line (Table 3-12, `LBE`), which
+    /// `UARTLCR_H.BRK` holds low (Table 3-10). Out of loopback it is the
+    /// host line, which carries no break.
+    fn break_on_input(&self) -> bool {
+        self.loopback() && self.lcr & LCR_BRK != 0
+    }
+
+    /// The receiver's input was held low by a break (`was_low`) before a
+    /// `UARTLCR_H` or `UARTCR` write, and is as [`Pl011::break_on_input`]
+    /// says now: an input that has gone low loads one break character into
+    /// an enabled receiver (Table 3-2: "When a break occurs, only one 0
+    /// character is loaded into the FIFO").
+    fn break_input_moved(&mut self, was_low: bool, clocks: UartClocks) {
+        if !was_low && self.break_on_input() && self.receiving() {
+            self.receive_character(DR_BE, clocks);
         }
+    }
+
+    /// A `UARTDR` read: the character at the head of the receive FIFO, its
+    /// break, parity and framing bits into `UARTRSR` (§3.3.2). With the
+    /// FIFO empty there is no character, and DDI 0183F does not say what a
+    /// read returns: here 0, no data and no error bits, with nothing
+    /// changed, `UARTRSR` keeping the status of the character last read.
+    fn read_rxdata(&mut self) -> u32 {
+        if self.read_count == 0 {
+            return 0;
+        }
+        let depth = self.fifo_depth();
+        let c = self.read_fifo[usize::from(self.read_pos)];
+        self.read_count -= 1;
+        self.read_pos = (self.read_pos + 1) & (depth as u8 - 1);
+        self.flags &= !FLAG_RXFF;
         // Emptied, the FIFO has no receive timeout (§3.4.4).
         if self.read_count == 0 {
             self.flags |= FLAG_RXFE;
@@ -725,39 +779,53 @@ impl Pl011 {
         c
     }
 
-    /// QEMU `pl011_reset_rx_fifo` and `pl011_reset_tx_fifo`, on every
-    /// change of `FEN`. DDI 0183F flushes the transmit FIFO when `FEN` is
-    /// cleared (§3.3.8, Note: "Flush the transmit FIFO by disabling bit 4
-    /// (FEN)") and is silent on the receive FIFO and on setting `FEN`;
-    /// emptying both either way is QEMU's choice. DDI 0183F gives no flush
-    /// rule for the receive interrupts either (§3.4.2 and §3.4.4 name reads
-    /// and `UARTICR`); this model's reading is that the emptied FIFO, below
-    /// every trigger level and empty, holds no `RXRIS` and no `RTRIS`,
-    /// where QEMU leaves both as they were. Nor does it say what a flush
-    /// does to `TXRIS`; here it is a fall of the fill level like any other,
-    /// judged against the trigger level of the FIFO being flushed
-    /// ([`Pl011::tx_level_moved`]).
-    fn reset_fifos(&mut self) {
+    /// Clearing `FEN` flushes both FIFOs. DDI 0183F flushes the transmit
+    /// FIFO that way (§3.3.8, Note: "Flush the transmit FIFO by disabling
+    /// bit 4 (FEN)"); `FEN` governs both FIFOs alike (Table 3-10, §2.4.3)
+    /// and DDI 0183F names no other fate for the receive FIFO, so it is
+    /// flushed with it. DDI 0183F gives no flush rule for the receive
+    /// interrupts (§3.4.2 and §3.4.4 name reads and `UARTICR`); the emptied
+    /// FIFO, below every trigger level and empty, holds no `RXRIS` and no
+    /// `RTRIS`. Nor does it say what a flush does to `TXRIS`; here it is a
+    /// fall of the fill level like any other, judged against the trigger
+    /// level of the FIFO being flushed ([`Pl011::tx_level_moved`]), so the
+    /// flush runs before `FEN` is cleared. `UARTFR`'s FIFO bits follow
+    /// from [`Pl011::fifo_flags`] once it is.
+    fn flush_fifos(&mut self) {
         self.read_count = 0;
         self.read_pos = 0;
         let before = u32::from(self.tx_count);
         self.tx_count = 0;
         self.tx_level_moved(before);
-        self.flags &= !(FLAG_RXFF | FLAG_TXFF | FLAG_BUSY);
-        self.flags |= FLAG_RXFE | FLAG_TXFE;
         self.int_level &= !(INT_RT | INT_RX);
         self.rx_timeout = None;
     }
 
-    /// QEMU `pl011_loopback_mdmctrl`: in loopback the modem control outputs
-    /// drive the modem status inputs. Each input that changes raises its
-    /// interrupt (DDI 0183F §3.4.1). Out of loopback the inputs keep
-    /// whatever loopback last set.
-    fn loopback_mdmctrl(&mut self) {
-        if !self.loopback() {
-            return;
+    /// `UARTFR`'s FIFO bits for both FIFOs as they are, at the depth
+    /// `FEN` selects (Table 3-4).
+    fn fifo_flags(&mut self) {
+        self.flags &= !(FLAG_RXFE | FLAG_RXFF | FLAG_TXFE | FLAG_TXFF | FLAG_BUSY);
+        if self.read_count == 0 {
+            self.flags |= FLAG_RXFE;
+        } else if self.read_count == self.fifo_depth() {
+            self.flags |= FLAG_RXFF;
         }
-        let cr = self.cr;
+        self.flags |= self.tx_flags();
+    }
+
+    /// The modem status inputs, as `UARTFR` reports them, that their lines
+    /// drive while `UARTCR` holds `cr`. In loopback the modem control
+    /// outputs drive them (Table 3-12, `LBE`: "the modem outputs are also
+    /// fed through to the modem inputs"), each to the input whose signal it
+    /// carries in DCE mode (Table 2-2): `RTS` to `CTS`, `DTR` to `DSR`,
+    /// `Out1` to `DCD`, `Out2` to `RI`. Both registers' bits are the
+    /// complements of their active-low lines (Tables 3-4 and 3-12), so a
+    /// control bit set reads as its input's bit set. Out of loopback the
+    /// inputs are the board's lines, which no modem drives: deasserted.
+    fn modem_inputs(cr: u32) -> u32 {
+        if cr & CR_LBE == 0 {
+            return 0;
+        }
         let mut status = 0;
         for (control, input) in [
             (CR_OUT2, FLAG_RI),
@@ -769,6 +837,14 @@ impl Pl011 {
                 status |= input;
             }
         }
+        status
+    }
+
+    /// Drive the modem status inputs from their lines after a `UARTCR`
+    /// write ([`Pl011::modem_inputs`]). Each input that changes raises its
+    /// interrupt (DDI 0183F §3.4.1), leaving loopback included.
+    fn drive_modem_inputs(&mut self) {
+        let status = Self::modem_inputs(self.cr);
         let changed = (self.flags ^ status) & FLAG_MODEM;
         for (input, int) in [
             (FLAG_DSR, INT_DSR),
@@ -803,7 +879,7 @@ impl Pl011 {
         read_by_words(offset, width, |offset| u64::from(self.read_register(offset)))
     }
 
-    /// QEMU `pl011_read`.
+    /// A read of the register at `offset` (DDI 0183F Table 3-1).
     fn read_register(&mut self, offset: RegOffset) -> u32 {
         let register = register_at(offset);
         match register {
@@ -833,7 +909,7 @@ impl Pl011 {
         });
     }
 
-    /// QEMU `pl011_write`.
+    /// A write of the register at `offset` (DDI 0183F Table 3-1).
     fn write_register(&mut self, offset: RegOffset, v: u32, clocks: UartClocks) {
         match register_at(offset) {
             UARTDR => self.write_txdata(v as u8, clocks),
@@ -843,15 +919,15 @@ impl Pl011 {
             UARTFBRD => self.fbrd = v & FBRD_MASK,
             UARTLCR_H => {
                 let v = v & LCR_MASK;
-                if (self.lcr ^ v) & LCR_FEN != 0 {
-                    self.reset_fifos();
-                }
-                // QEMU `pl011_loopback_break`; the host side of a break
-                // (`CHR_IOCTL_SERIAL_SET_BREAK`) has no backend here.
-                if (self.lcr ^ v) & LCR_BRK != 0 && v & LCR_BRK != 0 {
-                    self.loopback_tx(DR_BE, clocks);
+                let input_low = self.break_on_input();
+                if self.lcr & LCR_FEN != 0 && v & LCR_FEN == 0 {
+                    self.flush_fifos();
                 }
                 self.lcr = v;
+                // Each FIFO now has the depth `FEN` selects; setting it
+                // keeps what the holding registers hold.
+                self.fifo_flags();
+                self.break_input_moved(input_low, clocks);
                 // The write strobe that updates `UARTIBRD` and `UARTFBRD`
                 // (§3.3.7, Note). A count already running keeps the
                 // deadline it started with, even where the new divisor
@@ -859,8 +935,10 @@ impl Pl011 {
                 self.divisor = BaudDivisor::of_registers(self.ibrd, self.fbrd);
             }
             UARTCR => {
+                let input_low = self.break_on_input();
                 self.cr = v & CR_MASK;
-                self.loopback_mdmctrl();
+                self.drive_modem_inputs();
+                self.break_input_moved(input_low, clocks);
                 // Enabling transmission sends what waits in the FIFO.
                 self.transmit(clocks);
             }
@@ -915,8 +993,10 @@ impl Pl011 {
     /// `RTIM` clear. A count running with a latched divisor that makes no
     /// baud clock is a state the UART reaches (a count keeps its deadline
     /// when a divisor is latched after it started), and restores. Reserved
-    /// register bits are dropped, as a guest write drops them, and
-    /// `UARTFR`'s transmit bits are those of the transmit FIFO restored.
+    /// register bits are dropped, as a guest write drops them, `UARTFR`'s
+    /// transmit bits are those of the transmit FIFO restored, and its modem
+    /// status bits those the restored `UARTCR` drives
+    /// ([`Pl011::modem_inputs`]).
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
         let mut regs = [0u32; 11];
         for reg in regs.iter_mut() {
@@ -990,7 +1070,10 @@ impl Pl011 {
             read_count,
             divisor,
             rx_timeout,
-            flags: flags & (FR_MASK | OVERRUN_PENDING) & !(FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
+            flags: (flags
+                & (FR_MASK | OVERRUN_PENDING)
+                & !(FLAG_TXFE | FLAG_TXFF | FLAG_BUSY | FLAG_MODEM))
+                | Self::modem_inputs(cr),
             rsr: rsr & (RSR_OE | RSR_CHARACTER_ERRORS),
             ilpr: ilpr & ILPR_MASK,
             ibrd: ibrd & IBRD_MASK,
@@ -1311,14 +1394,6 @@ mod tests {
                 "{queued} flushed past the half-full level"
             );
         }
-        let mut uart = Pl011::new();
-        write(&mut uart, DR, u32::from(b'x'));
-        write(&mut uart, LCR_H, LCR_FEN);
-        assert_eq!(
-            read(&mut uart, RIS) & INT_TX,
-            INT_TX,
-            "the holding register emptied"
-        );
     }
 
     #[test]
@@ -1338,8 +1413,10 @@ mod tests {
         );
     }
 
+    /// DDI 0183F §3.3.8 (Note to Table 3-12): "Flush the transmit FIFO by
+    /// disabling bit 4 (FEN)".
     #[test]
-    fn changing_fen_flushes_the_transmit_fifo() {
+    fn clearing_fen_flushes_the_transmit_fifo() {
         let mut uart = Pl011::new();
         write(&mut uart, LCR_H, LCR_FEN);
         write(&mut uart, DR, u32::from(b'x'));
@@ -1687,14 +1764,70 @@ mod tests {
         assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT);
     }
 
+    /// Clearing `FEN` flushes the receive FIFO with the transmit FIFO:
+    /// `FEN` governs both alike (DDI 0183F Table 3-10, §2.4.3).
     #[test]
-    fn changing_fen_empties_the_receive_fifo() {
+    fn clearing_fen_empties_the_receive_fifo() {
         let mut uart = enabled();
         write(&mut uart, LCR_H, LCR_FEN);
         assert!(rx(&mut uart, 1));
         assert!(rx(&mut uart, 2));
         write(&mut uart, LCR_H, 0);
         assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
+        assert_eq!(read(&mut uart, DR), 0, "nothing left to read");
+        assert!(rx(&mut uart, 3), "the holding register is free");
+        assert_eq!(read(&mut uart, DR), 3);
+    }
+
+    /// Setting `FEN` flushes neither FIFO: each holding register is the
+    /// bottom entry of its FIFO (DDI 0183F §2.4.3, "Disabling the FIFOs"),
+    /// so the character either holds stays as the FIFO's one entry, which
+    /// `UARTFR` reports at the FIFO's depth; the interrupts and the receive
+    /// timeout stay as they were, and only a `UARTLCR_H` write that leaves
+    /// `FEN` clear changes nothing at all.
+    #[test]
+    fn setting_fen_keeps_what_the_holding_registers_hold() {
+        let mut uart = timed();
+        write(&mut uart, LCR_H, 0);
+        write(&mut uart, IMSC, INT_RT | INT_RX | INT_TX);
+        assert!(rx(&mut uart, b'r'));
+        write(&mut uart, CR, CR_UARTEN | CR_RXE);
+        write(&mut uart, DR, u32::from(b't'));
+        let fifo_flags = FLAG_RXFE | FLAG_RXFF | FLAG_TXFE | FLAG_TXFF | FLAG_BUSY;
+        assert_eq!(
+            read(&mut uart, FR) & fifo_flags,
+            FLAG_RXFF | FLAG_TXFF | FLAG_BUSY,
+            "both holding registers full"
+        );
+        let ris = read(&mut uart, RIS);
+        assert_eq!(
+            ris & (INT_RX | INT_TX),
+            INT_RX,
+            "the holding register filled"
+        );
+        let deadline = uart.next_deadline();
+        assert!(deadline.is_some(), "a receive timeout counts");
+
+        write(&mut uart, LCR_H, 0);
+        assert_eq!(
+            read(&mut uart, FR) & fifo_flags,
+            FLAG_RXFF | FLAG_TXFF | FLAG_BUSY
+        );
+        write(&mut uart, LCR_H, LCR_FEN);
+        assert_eq!(
+            read(&mut uart, FR) & fifo_flags,
+            FLAG_BUSY,
+            "one entry each, neither FIFO full or empty"
+        );
+        assert_eq!(read(&mut uart, RIS), ris, "no interrupt moves");
+        assert_eq!(uart.next_deadline(), deadline, "the count runs on");
+        assert_eq!(uart.rx_room(), RX_FIFO_DEPTH - 1);
+        assert!(rx(&mut uart, b's'));
+        assert_eq!(read(&mut uart, DR), u32::from(b'r'));
+        assert_eq!(read(&mut uart, DR), u32::from(b's'));
+        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
+        write(&mut uart, CR, ENABLED);
+        assert_eq!(sent(&mut uart), b"t", "the held character goes out");
     }
 
     #[test]
@@ -1720,36 +1853,51 @@ mod tests {
             "an empty FIFO is below the trigger level"
         );
         assert!(!uart.irq());
-        // FIFO disabled, then enabled: the holding register.
-        assert!(rx_at(&mut uart, 3, 10_000));
-        update(&mut uart, 10_000 + TIMEOUT_13_1);
-        assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), INT_RT | INT_RX);
-        write_at(&mut uart, IMSC, INT_RX, 20_000);
-        write_at(&mut uart, IMSC, INT_RT | INT_RX, 20_000);
-        assert!(
-            uart.next_deadline().is_some(),
-            "RTIM set again with the holding register full"
-        );
+        // The holding register, with the FIFO enabled and disabled again.
         write(&mut uart, LCR_H, LCR_FEN);
+        assert!(rx_at(&mut uart, 3, 10_000));
+        write(&mut uart, LCR_H, 0);
         assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
         assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), 0);
         assert_eq!(uart.next_deadline(), None, "and stops the count");
         assert!(!uart.irq());
     }
 
+    /// DDI 0183F does not say what a `UARTDR` read of an empty receive FIFO
+    /// returns. Here it is 0, no data and no error bits, and it changes
+    /// nothing: `UARTRSR` keeps the status of the character last read, and
+    /// the flags and interrupts stay as they were. No earlier character
+    /// shows through, whatever the FIFO held before it emptied, was
+    /// flushed or was reset.
     #[test]
-    fn an_empty_fifo_reads_the_slot_at_the_read_position() {
+    fn an_empty_fifo_reads_zero_and_changes_nothing() {
         let mut uart = enabled();
         write(&mut uart, LCR_H, LCR_FEN);
-        assert!(rx(&mut uart, b'p'));
+        write(&mut uart, IMSC, INT_BE | INT_RX);
+        write(&mut uart, CR, ENABLED | CR_LBE);
+        write(&mut uart, DR, u32::from(b'p'));
+        write(&mut uart, LCR_H, LCR_FEN | LCR_BRK);
+        write(&mut uart, LCR_H, LCR_FEN);
         assert_eq!(read(&mut uart, DR), u32::from(b'p'));
+        assert_eq!(read(&mut uart, DR), DR_BE);
+        let state = |uart: &mut Pl011| [RSR, FR, RIS].map(|n| read(&mut *uart, n));
+        let emptied = state(&mut uart);
+        assert_eq!(emptied[0], DR_BE >> 8, "UARTRSR has the break");
+        for _ in 0..RX_FIFO_DEPTH + 1 {
+            assert_eq!(read(&mut uart, DR), 0);
+            assert_eq!(state(&mut uart), emptied);
+        }
+
+        write(&mut uart, CR, ENABLED);
         assert!(rx(&mut uart, b'q'));
-        assert_eq!(read(&mut uart, DR), u32::from(b'q'));
-        // The read position is now slot 2, which nothing has written.
-        assert_eq!(read(&mut uart, DR), 0);
         write(&mut uart, LCR_H, 0);
-        // FIFO off: one slot, slot 0, which still holds the first byte.
-        assert_eq!(read(&mut uart, DR), u32::from(b'p'));
+        assert_eq!(read(&mut uart, DR), 0, "flushed");
+        assert!(rx(&mut uart, b'w'));
+        assert_eq!(read(&mut uart, DR), u32::from(b'w'));
+        uart.reset();
+        write(&mut uart, CR, ENABLED);
+        assert_eq!(read(&mut uart, DR), 0, "reset");
+        assert_eq!(read(&mut uart, RSR), 0);
     }
 
     #[test]
@@ -1788,21 +1936,24 @@ mod tests {
         );
     }
 
+    /// In loopback the receiver hears the transmitter and not the host
+    /// line (DDI 0183F Table 3-12, `LBE`), whose bytes wait for it as they
+    /// wait while the receiver is off; the transmit line still carries
+    /// what is sent.
     #[test]
-    fn loopback_returns_transmitted_bytes_and_drops_host_input() {
+    fn loopback_returns_transmitted_bytes_and_holds_host_input_back() {
         let mut uart = enabled();
         write(&mut uart, LCR_H, LCR_FEN);
         write(&mut uart, CR, ENABLED | CR_LBE);
         write(&mut uart, DR, u32::from(b'L'));
-        assert_eq!(
-            uart.drain_tx().collect::<std::vec::Vec<u8>>(),
-            b"L",
-            "the byte still leaves"
-        );
-        assert!(rx(&mut uart, b'h'), "host input is consumed");
+        assert_eq!(sent(&mut uart), b"L", "the byte still leaves");
+        assert!(!uart.can_receive());
+        assert_eq!(uart.rx_room(), 0);
+        assert!(!rx(&mut uart, b'h'), "the host's byte waits");
         assert_eq!(read(&mut uart, DR), u32::from(b'L'));
-        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE, "and dropped");
+        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
         write(&mut uart, CR, ENABLED);
+        assert_eq!(uart.rx_room(), RX_FIFO_DEPTH, "loopback over");
         assert!(rx(&mut uart, b'h'));
         assert_eq!(read(&mut uart, DR), u32::from(b'h'));
     }
@@ -1903,11 +2054,18 @@ mod tests {
         write(&mut uart, ICR, ints);
         assert!(!uart.irq(), "UARTICR clears what the level would not");
         write(&mut uart, CR, 0x300 | CR_LBE | CR_RTS);
-        write(&mut uart, CR, 0x300);
+        assert_eq!(read(&mut uart, FR) & modem, FLAG_CTS);
+        write(&mut uart, ICR, ints);
+        write(&mut uart, CR, 0x300 | CR_RTS);
         assert_eq!(
             read(&mut uart, FR) & modem,
-            FLAG_CTS,
-            "leaving loopback keeps the status"
+            0,
+            "out of loopback the inputs are the board's lines, deasserted"
+        );
+        assert_eq!(
+            read(&mut uart, RIS) & ints,
+            INT_CTS,
+            "leaving loopback changed CTS"
         );
     }
 
@@ -1941,6 +2099,46 @@ mod tests {
             0,
             "a receiver that is off hears no break"
         );
+    }
+
+    /// A break holds the transmit line low (DDI 0183F Table 3-10), so in
+    /// loopback the receiver's input goes low when `BRK` is set or when
+    /// loopback is entered with `BRK` already set, each time loading one
+    /// break character; while the input stays low the receiver takes no
+    /// other character (Table 3-2, `BE`), though the host line still
+    /// carries it, and once `BRK` clears it hears the transmitter again.
+    #[test]
+    fn a_break_holds_the_loopback_receivers_input_low() {
+        let mut uart = enabled();
+        write(&mut uart, LCR_H, LCR_FEN | LCR_BRK);
+        assert_eq!(
+            read(&mut uart, FR) & FLAG_RXFE,
+            FLAG_RXFE,
+            "out of loopback the receiver hears the host line"
+        );
+        write(&mut uart, CR, ENABLED | CR_LBE);
+        assert_eq!(
+            read(&mut uart, RIS) & INT_BE,
+            INT_BE,
+            "loopback entered with BRK set"
+        );
+        write(&mut uart, DR, u32::from(b'a'));
+        assert_eq!(sent(&mut uart), b"a");
+        assert_eq!(read(&mut uart, DR), DR_BE, "one break character");
+        assert_eq!(
+            read(&mut uart, FR) & FLAG_RXFE,
+            FLAG_RXFE,
+            "and nothing while the input is low"
+        );
+        write(&mut uart, LCR_H, LCR_FEN);
+        write(&mut uart, DR, u32::from(b'b'));
+        assert_eq!(read(&mut uart, DR), u32::from(b'b'), "marking again");
+        write(&mut uart, LCR_H, LCR_FEN | LCR_BRK);
+        assert_eq!(read(&mut uart, DR), DR_BE, "BRK set in loopback");
+        write(&mut uart, CR, ENABLED);
+        write(&mut uart, CR, ENABLED | CR_LBE);
+        assert_eq!(read(&mut uart, DR), DR_BE, "loopback entered again");
+        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
     }
 
     /// DDI 0183F §3.4.5: the error interrupts are asserted when the error
@@ -2132,13 +2330,34 @@ mod tests {
             source.is_empty(),
             "the restore consumed exactly what the save wrote"
         );
-        assert_eq!(read(&mut restored, FR) & FLAG_CTS, FLAG_CTS);
+        assert_eq!(read(&mut restored, FR) & FLAG_MODEM, FLAG_CTS);
         assert_eq!(read(&mut restored, DR), u32::from(b'x'));
         assert_eq!(read(&mut restored, DR), u32::from(b'y'));
+        assert_eq!(read(&mut restored, DR), 0, "and nothing after them");
         assert_eq!(read(&mut restored, IMSC), 0x50);
-        // The slot before the read position kept its byte too.
-        write(&mut restored, LCR_H, 0);
-        assert_eq!(read(&mut restored, DR), u32::from(b'w'));
+    }
+
+    /// The modem status inputs restore as the restored `UARTCR` drives
+    /// them: from the modem control outputs in loopback, deasserted out of
+    /// it, whatever the image's flag word says.
+    #[test]
+    fn a_snapshot_restores_the_modem_inputs_its_control_register_drives() {
+        let mut uart = Pl011::new();
+        write(&mut uart, CR, 0x300 | CR_LBE | CR_DTR | CR_OUT1);
+        let mut image = std::vec::Vec::new();
+        uart.save(&mut image).expect("save");
+        let mut restored = Pl011::new();
+        restored.restore(&mut &image[..]).expect("restore");
+        assert_eq!(read(&mut restored, FR) & FLAG_MODEM, FLAG_DSR | FLAG_DCD);
+
+        // The flag word leads the image: claim every input asserted with
+        // loopback off.
+        write(&mut uart, CR, 0x300);
+        let mut image = std::vec::Vec::new();
+        uart.save(&mut image).expect("save");
+        image[..4].copy_from_slice(&(FLAG_MODEM | FLAG_RXFE | FLAG_TXFE).to_le_bytes());
+        restored.restore(&mut &image[..]).expect("restore");
+        assert_eq!(read(&mut restored, FR) & FLAG_MODEM, 0);
     }
 
     #[test]

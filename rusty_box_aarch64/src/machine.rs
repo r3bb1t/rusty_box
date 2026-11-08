@@ -2822,14 +2822,16 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// firmware speculation report, GIC shape, interrupt map with the count of
 /// transports it wires, device layout and occupied transports, and the
 /// board's devices: the GIC with its Virtualization Extensions where it has
-/// them, the PL011, the PL031, the PL061, both flash banks and every
+/// them, the PL011 (its modem status inputs those its `UARTCR` drives),
+/// the PL031 (its alarm armed while its raw status is clear), the PL061,
+/// both flash banks and every
 /// virtio-mmio transport, each queue's state checked against the size its
 /// device gives it (`QueueNumMax`). An image also holds what the guest was
 /// told of the board, which the version keeps apart: the GPIO line the
 /// power button drives on each layout
 /// ([`DeviceLayout::power_button_line`]), the virtio transports each layout
 /// has, and the size of every virtio queue.
-const SNAPSHOT_VERSION: u32 = 28;
+const SNAPSHOT_VERSION: u32 = 29;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

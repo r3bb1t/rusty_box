@@ -257,13 +257,13 @@ changed together. The patch covers the C model only: building QEMU's Rust
 needs `bindgen-cli`, which this environment could not install, so a Rust
 change could not be built or tested here.
 
-**To check against the TRM before sending**: `pl011_loopback_mdmctrl()`
-sets a modem status interrupt (UARTRIS.RIRMIS, DCDRMIS, CTSRMIS, DSRRMIS)
-while the looped line is asserted and clears it when the line drops. The
-PL011's modem status interrupt, as this author recalls the TRM's
-description of UARTMSINTR, is asserted when a modem status line changes,
-either way, and cleared only through UARTICR. `rusty_box_aarch64` follows
-QEMU here until the TRM settles it.
+**A second departure from the TRM, for a patch of its own**:
+`pl011_loopback_mdmctrl()` sets a modem status interrupt (UARTRIS.RIRMIS,
+DCDRMIS, CTSRMIS, DSRRMIS) while the looped line is asserted and clears it
+when the line drops. DDI 0183F §3.4.1 asserts UARTMSINTR "if any of the
+modem status lines (nUARTCTS, nUARTDCD, nUARTDSR, and nUARTRI) change",
+either way, and clears it only through UARTICR; `rusty_box_aarch64`
+follows the TRM.
 
 ### 7. DC CVAP and DC CVADP fault as loads
 

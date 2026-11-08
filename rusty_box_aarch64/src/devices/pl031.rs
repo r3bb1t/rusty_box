@@ -18,9 +18,15 @@
 //!   is stopped.
 //! - `RTCLR` (§2.2.4, §3.3.3): a write makes the RTC value the written one,
 //!   counting or not; a read returns the last value written.
-//! - The match interrupt (§2.1, §3.6): the raw status is set when the RTC
-//!   value equals `RTCMR` and stays set until a 1 is written to bit 0 of
-//!   `RTCICR` (Table 3-9); `RTCIMSC` bit 0 unmasks it.
+//! - The match interrupt (§2.1, §2.2.6, §3.6): a comparator asserts it when
+//!   the RTC value and `RTCMR` are equal, and the raw status stays set
+//!   until a 1 is written to bit 0 of `RTCICR` (Table 3-9); `RTCIMSC` bit 0
+//!   unmasks it. Only equality matches, so a match value already passed
+//!   when `RTCMR` or `RTCLR` is written, or when the RTC is zeroed or
+//!   started, is reached only once the 32-bit counter wraps (§2.2.6), and
+//!   one the RTC reads then is equal at once and raises the raw status
+//!   there. Each match raises it once: the RTC reaches the same value again
+//!   2^32 seconds later.
 //! - Reset (§2.3.1, §3.1, Table A-2): a system reset (`PRESETn`) clears
 //!   `RTCCR`, `RTCLR`, `RTCIMSC` and `RTCRIS`. The RTC stops and keeps its
 //!   value, which only the power-on `nRTCRST` loses; `RTCMR` and the offset
@@ -30,11 +36,9 @@
 //!   lane it returns is the bridge's: this board's hands over the register
 //!   value unshifted, as for the PL011.
 //!
-//! From QEMU where DDI 0224C leaves the choice to the system: a match value
-//! the RTC already reads when `RTCMR` or `RTCLR` is written, or when the
-//! RTC is zeroed or started, raises the raw status at once
-//! (`pl031_set_alarm`). Reserved and test locations read as zero and ignore
-//! writes. QEMU starts the RTC from the host's wall clock, counting, and
+//! Where DDI 0224C leaves the choice to the system: reserved and test
+//! locations read as zero and ignore writes, as in QEMU. QEMU starts the
+//! RTC from the host's wall clock, counting, and
 //! never stops or zeroes it; README's "Where the references differ" has
 //! this model's differences. Here the RTC reads a configured value at power-on,
 //! stopped until the guest starts it, so the guest sees the same date on
@@ -193,32 +197,54 @@ impl Pl031 {
         self.is & self.im & 1 != 0
     }
 
-    /// Compare the RTC value with the match value now: equal raises the raw
-    /// status at once (QEMU `pl031_set_alarm`); otherwise, while the RTC
-    /// counts, arm the alarm for the second it reaches the match value, up
-    /// to 2^32 - 1 seconds ahead, the counter wrapping as it does.
+    /// Compare the RTC value with the match value after a write changed
+    /// either: the comparator asserts the interrupt when they are equal
+    /// (DDI 0224C §2.1, §2.2.6), so equal now raises the raw status at once.
+    /// Then arm the alarm for the next time they are equal.
     fn set_alarm(&mut self, clock: VmClock) {
-        self.alarm = None;
-        let seconds = self.mr.wrapping_sub(self.value(clock));
-        if seconds == 0 {
+        if self.mr == self.value(clock) {
             self.is = 1;
-        } else if let Counting::Running { .. } = self.counting {
+        }
+        self.arm(clock);
+    }
+
+    /// Arm the alarm for the start of the next second, after the one
+    /// running now, at which the counting RTC reads the match value: only
+    /// equality matches (DDI 0224C §2.1: "When both values are equal"), so
+    /// a match value the RTC has already passed is reached only once the
+    /// 32-bit counter wraps (§2.2.6), up to 2^32 - 1 seconds ahead, and the
+    /// value it reads now 2^32 seconds ahead. A stopped RTC reaches none.
+    /// The alarm is armed only while the raw status is clear: a match while
+    /// it is set changes nothing a guest can read, and `RTCICR` clearing it
+    /// arms the alarm again.
+    fn arm(&mut self, clock: VmClock) {
+        self.alarm = None;
+        if self.is != 0 {
+            return;
+        }
+        if let Counting::Running { .. } = self.counting {
+            let seconds = match self.mr.wrapping_sub(self.value(clock)) {
+                0 => 1u64 << 32,
+                ahead => u64::from(ahead),
+            };
             let second_now = clock.micros() / MICROS_PER_SECOND;
-            let at_micros = (second_now + u64::from(seconds)) * MICROS_PER_SECOND;
+            let at_micros = (second_now + seconds) * MICROS_PER_SECOND;
             self.alarm = Some(clock.after_micros(at_micros - clock.micros()));
         }
     }
 
-    /// Raise the raw status if the RTC has reached the match value.
+    /// Raise the raw status if the RTC has reached the match value. The
+    /// alarm stays unarmed until `RTCICR` clears the status.
     pub fn update(&mut self, clock: VmClock) {
         if self.alarm.is_some_and(|at| clock.now() >= at) {
-            self.alarm = None;
             self.is = 1;
+            self.alarm = None;
         }
     }
 
-    /// When the RTC reaches the match value, if it counts towards it. The
-    /// raw status records the match whether or not the interrupt is masked.
+    /// When the RTC next reaches the match value, if it counts and the raw
+    /// status is clear. The raw status records the match whether or not the
+    /// interrupt is masked.
     pub fn next_deadline(&self) -> Option<VmInstant> {
         self.alarm
     }
@@ -295,10 +321,12 @@ impl Pl031 {
                 self.im = v & 1;
                 false
             }
-            RTCICR => {
-                self.is &= !(v & 1);
-                false
+            RTCICR if v & 1 != 0 && self.is != 0 => {
+                self.is = 0;
+                self.arm(clock);
+                true
             }
+            RTCICR => false,
             _ => false,
         }
     }
@@ -313,7 +341,9 @@ mod tests {
 
     fn at_micros(micros: u64) -> VmClock {
         let rate = ClockHz::new(HZ).expect("a non-zero rate");
-        VmClock::new(VmInstant::from_ticks(micros * HZ / 1_000_000), rate)
+        let ticks = u128::from(micros) * u128::from(HZ) / 1_000_000;
+        let ticks = u64::try_from(ticks).expect("an instant the tick count holds");
+        VmClock::new(VmInstant::from_ticks(ticks), rate)
     }
 
     fn at_second(seconds: u64) -> VmClock {
@@ -422,14 +452,68 @@ mod tests {
         assert_eq!(read(&mut rtc, RTCDR, at_second(10)), 110);
         assert_eq!(read(&mut rtc, RTCRIS, at_second(10)), 1);
         assert!(!rtc.irq(), "masked: only the raw status records it");
-        assert_eq!(rtc.next_deadline(), None, "the alarm is one-shot");
+        assert_eq!(rtc.next_deadline(), None, "nothing to raise while it is set");
 
         assert!(!write(&mut rtc, RTCIMSC, 1, at_second(10)));
         assert!(rtc.irq());
         assert!(!write(&mut rtc, RTCICR, 0, at_second(10)), "a 0 clears nothing");
         assert!(rtc.irq());
-        assert!(!write(&mut rtc, RTCICR, 1, at_second(10)));
+        assert!(
+            write(&mut rtc, RTCICR, 1, at_micros(10_500_000)),
+            "clearing it re-arms the alarm"
+        );
         assert!(!rtc.irq());
+        assert_eq!(read(&mut rtc, RTCRIS, at_micros(10_500_000)), 0);
+        assert_eq!(
+            rtc.next_deadline(),
+            Some(VmInstant::from_ticks((10 + (1 << 32)) * HZ)),
+            "the RTC reads 110 again once the counter has wrapped"
+        );
+        assert!(!write(&mut rtc, RTCICR, 1, at_second(11)), "already clear");
+    }
+
+    /// Only equality matches (DDI 0224C §2.1): a match value the counting
+    /// RTC has already passed raises nothing when written, and is reached
+    /// once the 32-bit counter wraps (§2.2.6), where the raw status rises.
+    #[test]
+    fn a_match_value_already_passed_is_reached_when_the_counter_wraps() {
+        let mut rtc = started(100, at_second(0));
+        assert!(write(&mut rtc, RTCMR, 90, at_micros(5_250_000)));
+        assert_eq!(read(&mut rtc, RTCDR, at_micros(5_250_000)), 105);
+        assert_eq!(read(&mut rtc, RTCRIS, at_micros(5_250_000)), 0, "not at once");
+        // 90 - 105 modulo 2^32 seconds after second 5.
+        let wrap = 5 + (1u64 << 32) - 15;
+        assert_eq!(
+            rtc.next_deadline(),
+            Some(VmInstant::from_ticks(wrap * HZ))
+        );
+        rtc.update(at_micros(wrap * 1_000_000 - 1));
+        assert_eq!(read(&mut rtc, RTCRIS, at_micros(wrap * 1_000_000 - 1)), 0);
+        assert_eq!(
+            read(&mut rtc, RTCDR, at_micros(wrap * 1_000_000 - 1)),
+            89,
+            "the counter has wrapped"
+        );
+        rtc.update(at_second(wrap));
+        assert_eq!(read(&mut rtc, RTCDR, at_second(wrap)), 90);
+        assert_eq!(read(&mut rtc, RTCRIS, at_second(wrap)), 1);
+    }
+
+    /// A match value the counting RTC reads when it is written is equal at
+    /// once, and the comparator raises the raw status there (DDI 0224C
+    /// §2.2.6); the next match is 2^32 seconds on.
+    #[test]
+    fn a_match_value_the_rtc_reads_raises_the_status_at_once() {
+        let mut rtc = started(100, at_second(0));
+        assert!(write(&mut rtc, RTCMR, 103, at_micros(3_700_000)));
+        assert_eq!(read(&mut rtc, RTCRIS, at_micros(3_700_000)), 1);
+        assert_eq!(rtc.next_deadline(), None);
+        assert!(write(&mut rtc, RTCICR, 1, at_micros(3_800_000)));
+        assert_eq!(read(&mut rtc, RTCRIS, at_micros(3_800_000)), 0);
+        assert_eq!(
+            rtc.next_deadline(),
+            Some(VmInstant::from_ticks((3 + (1 << 32)) * HZ))
+        );
     }
 
     /// A stopped RTC never reaches a match value ahead of it, and one it
