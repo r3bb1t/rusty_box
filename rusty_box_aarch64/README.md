@@ -3194,6 +3194,8 @@ the board's own:
   `LORID_EL1` 0 as QEMU's `sme_reginfo` and `lor_reginfo`; and a virtual
   SError's syndrome without FEAT_RAS, `ISS` 0 where Arm leaves it
   IMPLEMENTATION DEFINED.
+- The flash's CFI identity: manufacturer 0x89 (Intel), device 0x18, and
+  QEMU's CFI table values.
 
 **Kept as a host's choice**, each off by default, for a VM made on QEMU's
 `virt` or on this board before it had its own answer:
@@ -3206,8 +3208,6 @@ the board's own:
   power button's PL061 line, 3, for a guest booted with a device tree QEMU
   wrote or a firmware variable store whose boot entries name QEMU's device
   paths.
-- The flash's CFI identity: manufacturer 0x89 (Intel), device 0x18, and
-  QEMU's CFI table values.
 
 ## Not implemented
 
