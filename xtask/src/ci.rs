@@ -936,7 +936,7 @@ fn collect_sources(
     Ok(())
 }
 
-fn repo_root() -> Result<PathBuf, String> {
+pub(crate) fn repo_root() -> Result<PathBuf, String> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map(|p| p.to_path_buf())

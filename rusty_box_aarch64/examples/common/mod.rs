@@ -4,9 +4,11 @@
 //! report.
 
 use std::collections::VecDeque;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Once;
 use std::time::Instant;
 
 use rusty_box_aarch64::cpu::DebugStops;
@@ -90,7 +92,8 @@ pub enum ConsoleInput {
     Script,
     /// The script, then the host terminal (`--interactive`): what is typed
     /// there goes to the UART's terminal byte for byte, and the run goes on
-    /// until the machine stops or [`QUIT_BYTE`] is typed.
+    /// until the machine stops or [`QUIT_BYTE`] is typed. When stdin is a
+    /// terminal it is in raw mode for the run ([`TerminalGuard`]).
     Terminal,
 }
 
@@ -560,6 +563,80 @@ impl ConsoleWindow {
     }
 }
 
+/// Whether this process holds the host terminal in raw mode: set by
+/// [`TerminalGuard::raw`], cleared by [`restore_terminal`], whichever of the
+/// guard's drop and the panic hook comes first.
+static TERMINAL_RAW: AtomicBool = AtomicBool::new(false);
+
+/// The panic hook that restores the terminal is installed once a process.
+static RESTORE_ON_PANIC: Once = Once::new();
+
+/// What an interactive run did to the host terminal's mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalMode {
+    /// Raw: every byte typed reaches the reader at once, unechoed, Ctrl-C
+    /// and Ctrl-Z among them; restored when the run ends.
+    Raw,
+    /// Left as it was: stdin is a pipe or a file, or no terminal reads it.
+    Unchanged,
+}
+
+/// The host terminal's mode for the length of a run, restored when the guard
+/// drops. The release profile aborts on panic, which drops nothing, so a
+/// panic hook restores it as well, before the abort.
+struct TerminalGuard {
+    mode: TerminalMode,
+}
+
+impl TerminalGuard {
+    /// Raw mode when stdin is a terminal, the mode left alone otherwise.
+    fn raw() -> Result<Self, std::io::Error> {
+        if !std::io::stdin().is_terminal() {
+            return Ok(Self {
+                mode: TerminalMode::Unchanged,
+            });
+        }
+        RESTORE_ON_PANIC.call_once(|| {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                restore_terminal();
+                previous(info);
+            }));
+        });
+        crossterm::terminal::enable_raw_mode()?;
+        TERMINAL_RAW.store(true, Ordering::SeqCst);
+        Ok(Self {
+            mode: TerminalMode::Raw,
+        })
+    }
+
+    /// The guard of a run that leaves the terminal alone.
+    fn unchanged() -> Self {
+        Self {
+            mode: TerminalMode::Unchanged,
+        }
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        match self.mode {
+            TerminalMode::Raw => restore_terminal(),
+            TerminalMode::Unchanged => {}
+        }
+    }
+}
+
+/// Take the host terminal out of raw mode, if this process put it there and
+/// it is not yet restored.
+fn restore_terminal() {
+    if TERMINAL_RAW.swap(false, Ordering::SeqCst) {
+        if let Err(e) = crossterm::terminal::disable_raw_mode() {
+            eprintln!("cannot restore the terminal: {e}");
+        }
+    }
+}
+
 /// The host terminal's bytes as they are read, from a thread of their own
 /// so that the machine never waits on them; the channel closes when stdin
 /// ends or cannot be read.
@@ -621,6 +698,21 @@ fn run_with_screen<S: GuestStorage, L: Levels>(
     let mut current = script.next();
     let mut window = ConsoleWindow::default();
     let mut pending: VecDeque<(Keys, String)> = VecDeque::new();
+    // Held to the end of this function, so the terminal is itself again
+    // before the caller prints its report.
+    let _terminal_mode = match args.console_input {
+        ConsoleInput::Script => TerminalGuard::unchanged(),
+        ConsoleInput::Terminal => match TerminalGuard::raw() {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("cannot put the terminal in raw mode: {e}");
+                return Outcome {
+                    reason: StopReason::StopRequested,
+                    script_completed: false,
+                };
+            }
+        },
+    };
     let terminal = match args.console_input {
         ConsoleInput::Script => None,
         ConsoleInput::Terminal => match terminal_bytes() {

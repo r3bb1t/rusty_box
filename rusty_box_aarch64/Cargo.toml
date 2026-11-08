@@ -29,6 +29,8 @@ disarm64_defn = { version = "0.2", default-features = false }
 # (serde_json) for the conformance tests in tests/unit/spec.rs.
 syn = { version = "2", default-features = false, features = ["full", "parsing"] }
 serde_json = "1"
+# The example runners' `--interactive` puts the host terminal in raw mode.
+crossterm = "0.29"
 
 [features]
 default = []

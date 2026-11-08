@@ -8,6 +8,7 @@ cargo xtask ci --skip-boot       # the same, without the DLX boot gate
 cargo xtask ci --skip-aarchmrs   # the same, without Arm's AARCHMRS (its conformance tests ignored)
 cargo xtask ci --full            # also the full rusty_box test suite and a GUI release build
 cargo xtask perf-baseline        # archive the release perfbench binaries for A/B runs
+cargo xtask nested-kvm           # a nested KVM guest on the Arm board, in this terminal
 cargo xtask android build        # Android APK, see "Android commands"
 cargo xtask --help               # usage for every subcommand
 ```
@@ -157,6 +158,29 @@ The two benchmarks:
 The AArch64 example is named apart from `perfbench` because both would build to `target/release/examples/perfbench`.
 
 Use them for interleaved A/B runs: alternate the baseline and candidate binaries for at least 10 pairs and compare the medians.
+
+## `cargo xtask nested-kvm`
+
+Boots a nested KVM guest on the Arm board, in your terminal, with nothing installed beyond cargo (`xtask/src/nested_kvm.rs`). Alpine Linux 3.23 runs on the board's Cortex-A57 with EL2; its KVM runs QEMU, and QEMU runs a second Alpine under KVM. Once the console script has logged in, installed QEMU and started the nested guest, what you type goes to the guest: Ctrl-A x quits the nested QEMU, back to the host Alpine's shell, and Ctrl-] quits the emulator. The command exits with the runner's status.
+
+Each step is skipped when its result is already in the work directory:
+
+1. Downloads Alpine's `alpine-virt-3.23.7-aarch64.iso` and checks its SHA-512 against the one Alpine publishes.
+2. Reads `boot/vmlinuz-virt` and `boot/initramfs-virt` out of the ISO (an ISO 9660 reader of its own, Rock Ridge names), and takes the arm64 `Image` out of the EFI zboot kernel.
+3. Downloads `qemu-system-aarch64` and its dependencies from Alpine's `main` and `community` repositories: each index's RSA signature is checked against the apk keys in the ISO's initramfs, and each package's control section against the checksum its signed index gives it.
+4. Builds `disk.img`: the ISO, zero-padded to a whole MiB, then an uncompressed tar of the packages under `qemu/`. The host Alpine boots from the ISO part and unpacks the tar from that offset itself; the nested guest boots from the same disk.
+5. Builds the runner, `cargo build --release -p rusty_box_aarch64 --features std --example linux_virt`.
+6. Boots it. The runner puts the terminal in raw mode when stdin is one.
+
+| Option | Default | |
+|---|---|---|
+| `--ips N` | 1000000000 | Emulated instructions a second. The board's own 50M makes the nested guest crawl: a nested tick costs tens of thousands of instructions of exits. |
+| `--host-only` | | Stop at the host Alpine's shell with QEMU installed. |
+| `--rebuild` | | Run every download and build again. |
+| `--no-build` | | Use the runner already built. |
+| `--dir PATH` | `target/nested-kvm` | Where the downloads and the disk are kept. |
+| `--host-ram-mib N` | 1024 | The board's RAM. |
+| `--nested-ram-mib N` | 256 | The nested guest's RAM. |
 
 ## Android commands
 

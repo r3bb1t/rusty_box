@@ -31,12 +31,17 @@ QEMU wrote needs QEMU's, `--interrupts
 uart=1,rtc=2,gpio=7,virtio=16,pcie-intx=3,msi-first=48,msi-count=64`.
 
 `--interactive` hands the console to the terminal once the script is done:
-stdin goes to the UART byte for byte (put the terminal in raw mode), and
-Ctrl-] ends the run. `scripts/nested_kvm.sh` puts it all together for a
-nested KVM guest: it downloads Alpine's aarch64 ISO and QEMU's packages
-(checking the ISO's SHA-512 and the packages' signed index), builds the
-disk and the runner, and boots the Cortex-A57 with virtualization to the
-nested guest's own `login:`, then leaves the terminal to you.
+stdin goes to the UART byte for byte (the runner puts a terminal in raw
+mode for the run and restores it however the run ends), and Ctrl-] ends
+the run. `cargo xtask nested-kvm` puts it all together for a nested KVM
+guest, with nothing installed beyond cargo: it downloads Alpine's aarch64
+ISO and QEMU's packages (checking the ISO's SHA-512, each repository
+index's signature against the keys in the ISO's initramfs, and each
+package's checksum against its index), builds a disk of the ISO followed
+by a tar of the packages and the runner, and boots the Cortex-A57 with
+virtualization to the nested guest's own `login:`, then leaves the terminal
+to you (Ctrl-A x quits the nested QEMU). Its steps are kept in
+`target/nested-kvm` and skipped when done; `--help` lists its options.
 
 ## Driving it from Rust
 

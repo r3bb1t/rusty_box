@@ -14,6 +14,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 
 pub mod ci;
 pub mod hot_loop;
+pub mod nested_kvm;
 pub mod shape;
 pub mod shell_writes;
 pub mod tier_p;
@@ -103,6 +104,8 @@ pub enum XtaskCommand {
     /// the baseline the ci step holds them to.
     HotLoopBaseline,
     CheckShellCommand,
+    /// Boot a nested KVM guest on the Arm board, in this terminal.
+    NestedKvm(nested_kvm::NestedKvmCommand),
 }
 
 struct AndroidContext {
@@ -255,6 +258,7 @@ where
         "perf-baseline" => Ok(XtaskCommand::PerfBaseline(ci::PerfBaselineCommand::default())),
         "hot-loop-baseline" => Ok(XtaskCommand::HotLoopBaseline),
         "check-shell-command" => Ok(XtaskCommand::CheckShellCommand),
+        "nested-kvm" => nested_kvm::parse_nested_kvm_args(&args[1..]).map(XtaskCommand::NestedKvm),
         _ => Err(format!("unknown xtask command {:?}\n{}", args[0], usage())),
     }
 }
@@ -352,6 +356,7 @@ fn execute(command: XtaskCommand) -> Result<(), String> {
         XtaskCommand::PerfBaseline(command) => ci::execute_perf_baseline(command),
         XtaskCommand::HotLoopBaseline => ci::execute_hot_loop_baseline(),
         XtaskCommand::CheckShellCommand => shell_writes::execute_check_shell_command(),
+        XtaskCommand::NestedKvm(command) => nested_kvm::execute_nested_kvm(command),
     }
 }
 
@@ -1248,7 +1253,7 @@ fn jdk_program(host: HostOs, tool: &str) -> PathBuf {
 
 fn usage() -> String {
     format!(
-        "Usage:\n  cargo xtask android build [--sdk PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]\n  cargo xtask ci [--full] [--skip-boot]\n  cargo xtask perf-baseline\n  cargo xtask hot-loop-baseline\n  cargo xtask check-shell-command   (a Claude Code hook; reads its event on stdin)"
+        "Usage:\n  cargo xtask android build [--sdk PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]\n  cargo xtask ci [--full] [--skip-boot]\n  cargo xtask perf-baseline\n  cargo xtask hot-loop-baseline\n  cargo xtask check-shell-command   (a Claude Code hook; reads its event on stdin)\n  cargo xtask nested-kvm [--ips N] [--host-only] [--rebuild] [--no-build] [--dir PATH]\n                         [--host-ram-mib N] [--nested-ram-mib N]   (see nested-kvm --help)"
     )
 }
 
