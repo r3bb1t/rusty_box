@@ -136,7 +136,7 @@ fn a_store_through_a_second_mapping_of_the_code_is_seen() {
     );
 }
 
-/// At VA 0x8000_0000: `str x2, [x1]; ldr x4, [x3]; mov x0, #1; b .` — the
+/// At VA 0x8000_1000: `str x2, [x1]; ldr x4, [x3]; mov x0, #1; b .` — the
 /// store points the code page's own descriptor at another page, without a
 /// TLBI, and the load, through an address in the same TLB slot, evicts the
 /// code page's entry. The next fetch walks the tables again and finds the
@@ -153,18 +153,26 @@ fn code_whose_mapping_changed_runs_from_the_new_page_once_its_tlb_entry_is_gone(
     load(&mut m, RAM_BASE, &REMAP_SELF);
     load(&mut m, RAM_BASE + 0x2008, &REMAPPED);
     map_code_twice(&mut m);
-    // VA 0x8040_0000, in the same slot of the direct-mapped TLB as VA
-    // 0x8000_0000, maps 2 MiB of RAM.
+    // VA 0x8000_1000 maps the RAM's first page too, its entry in slot 1 of
+    // the direct-mapped TLB, apart from slot 0, where the first pages of
+    // the blocks below go (the TLB holds a block whole by its first page's
+    // entry). VA 0x8040_1000, in the same slot, is in a 2 MiB block of RAM.
     let l2 = RAM_BASE + 0x1_1000;
+    let l3 = RAM_BASE + 0x1_2000;
+    m.mem_write(
+        l3 + 8,
+        &(RAM_BASE | AF | INNER_SHAREABLE | 0b11).to_le_bytes(),
+    )
+    .expect("tables are in RAM");
     m.mem_write(
         l2 + 8 * 2,
         &(RAM_BASE | AF | INNER_SHAREABLE | 0b01).to_le_bytes(),
     )
     .expect("tables are in RAM");
-    m.reg_write(Reg::X1, RAM_BASE + 0x1_2000);
+    m.reg_write(Reg::X1, l3 + 8);
     m.reg_write(Reg::X2, (RAM_BASE + 0x2000) | AF | INNER_SHAREABLE | 0b11);
-    m.reg_write(Reg::X3, 0x8040_0000);
-    m.reg_write(Reg::Pc, 0x8000_0000);
+    m.reg_write(Reg::X3, 0x8040_1000);
+    m.reg_write(Reg::Pc, 0x8000_1000);
     let out = m.step(RunBudget::Instructions(10));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
     assert_eq!(

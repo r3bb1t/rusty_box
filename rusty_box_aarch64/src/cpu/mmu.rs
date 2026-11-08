@@ -9,13 +9,18 @@
 //! permission checks, and the external abort when the bus has nothing at
 //! an address.
 //!
-//! The TLB is direct-mapped and holds one 4 KiB page per entry, whatever the
-//! size of the page or block that mapped it, tagged with the regime that
-//! translated it (Arm `TLBContext`), so an access hits only an entry of its
-//! own regime. A walk fills the one entry of the 4 KiB page it translated,
-//! whatever its granule: each 4 KiB piece of a 16 KiB or 64 KiB page is
-//! walked for, as each piece of a block is, so an entry never takes a slot
-//! from more than the translation that was needed.
+//! The TLB is direct-mapped and an access looks up one 4 KiB entry, its
+//! page's, tagged with the regime that translated it (Arm `TLBContext`), so
+//! an access hits only an entry of its own regime. A translation larger
+//! than 4 KiB — a 16 KiB or 64 KiB page, a block, at each stage — is held
+//! whole: a walk fills the entry of the page it translated and the entry of
+//! the translation's first 4 KiB page, which stands for all of it, and an
+//! access that misses its own page's entry finds that one and fills its
+//! page's from it, without a walk (`Cpu::block_fragment`). The size held
+//! is the one both stages map alike, the smaller of their leaves, read from
+//! the entry's levels and its context's granules ([`WalkGranules`]), so
+//! the lookup an access makes on a hit is a 4 KiB one whatever the
+//! translation's size. Stage 2's translations of IPAs are held the same way.
 //! An entry of the EL1&0 regime under stage 2 holds both stages' results:
 //! each stage's permissions and level apart, and whether stage 1 maps
 //! Device memory beside whether either does, so a hit raises each stage's
@@ -24,9 +29,17 @@
 //! it holds only translations stage 1's walk made: with stage 1 disabled
 //! and no stage 2 an address translates to itself, which no entry holds.
 //!
-//! Every TLB maintenance instruction empties the TLB whole. A write that
-//! changes a register the EL2 regime's walk reads empties it too
-//! (`SCTLR_EL2`, `TCR_EL2`, `TTBR0_EL2`, `MAIR_EL2`). A write that changes
+//! A TLB maintenance instruction removes the entries it names
+//! (`tlbi.rs`, Arm `TLBIMatch`): by regime, VMID and ASID — with each
+//! entry's `nG`, so that a global translation outlives an ASID's
+//! invalidation — and by address, an entry matching an address anywhere in
+//! the leaf whose information it holds (stage 1's where it holds stage 1's,
+//! as every entry split from one translation holds it, Arm ARM D8.17
+//! RLGSCG), at the level and in the granule a `TTL` hint or a range names.
+//! An entry made with stage 1 disabled holds stage 2's information alone,
+//! for the IPA its address is; the kept stage 2 translations likewise. A
+//! write that changes a register the EL2 regime's walk reads empties the
+//! TLB (`SCTLR_EL2`, `TCR_EL2`, `TTBR0_EL2`, `MAIR_EL2`). A write that changes
 //! what the EL1&0 regime's translations read of its registers (`SCTLR_EL1`,
 //! `TCR_EL1`, `TTBR0/1_EL1`, `MAIR_EL1`, and with EL2 `VTTBR_EL2`,
 //! `VTCR_EL2` and `HCR_EL2`'s `VM`, `PTW`, `DC` and `TGE`) empties it
@@ -35,10 +48,10 @@
 //! registers' values its own, so no entry made under other values is used
 //! and a hypervisor's return to a guest's registers finds the entries it
 //! had; stage 2's translations of IPAs are kept apart, under `VTTBR_EL2`
-//! and `VTCR_EL2` alone ([`Stage2Context`]). Invalidation is never narrower
-//! than the architecture requires: an entry is never used under register
-//! values other than those it was made under, so neither ASIDs nor VMIDs
-//! need tagging.
+//! and `VTCR_EL2` alone ([`Stage2Context`]). An entry is never used under
+//! register values other than those it was made under; a TLB maintenance
+//! instruction reads the VMID, the ASID and the granules an entry was made
+//! with from its context.
 //!
 //! With FEAT_HAF and FEAT_HAFDBS a stage whose `TCR_ELx` or `VTCR_EL2`
 //! sets `HA` has its walks set a leaf's clear Access flag, and with `HD`
@@ -67,7 +80,8 @@ use super::regime::{
     el10_s1_disabled_data_normal, el10_stage1_enabled, el10_stage2_enabled, Granule, OaLayout,
     Regime, S1Params, S1Range, S1Start,
 };
-use super::stage2::{s2_start, S2Start, S2Walked};
+use super::stage2::{s2_granule, s2_start, S2Start, S2Walked};
+use super::tlbi::{Asid, Holds, Invalidation, TlbRecord, TranslationScope, Vmid};
 use super::{id, sctlr, Cpu, El, Levels, SysRegs};
 use crate::bus::{AccessWidth, BusFault, DescriptorSwap, PhysAddr, PhysBus, PhysSpan, Writes};
 
@@ -870,17 +884,46 @@ enum Pan {
     Absent,
 }
 
-/// Whether stage 1's walk made a TLB entry, or the entry is of an access
-/// stage 1 left as it was, being disabled (`AArch64_S1DisabledOutput`),
-/// which only stage 2 translates and whose permissions stage 1 does not
-/// check.
+/// Whether stage 1's walk made a TLB entry, from a leaf global or not
+/// (its `nG`, which a TLB maintenance instruction by ASID reads), or the
+/// entry is of an access stage 1 left as it was, being disabled
+/// (`AArch64_S1DisabledOutput`), which only stage 2 translates and whose
+/// permissions stage 1 does not check.
 ///
 /// Closed (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 enum Stage1 {
-    Walked = 0,
-    Disabled = 1,
+    Walked(TranslationScope),
+    Disabled,
+}
+
+impl Stage1 {
+    /// Whether stage 1's walk made the entry: the one thing an access's
+    /// checks read of this.
+    #[inline(always)]
+    const fn walked(self) -> bool {
+        matches!(self, Self::Walked(_))
+    }
+
+    /// The byte a snapshot holds of this: 0 for a walked leaf that is not
+    /// global, 1 for stage 1 disabled, 2 for a walked global leaf.
+    const fn code(self) -> u8 {
+        match self {
+            Self::Walked(TranslationScope::NonGlobal) => 0,
+            Self::Disabled => 1,
+            Self::Walked(TranslationScope::Global) => 2,
+        }
+    }
+
+    /// The inverse of [`Stage1::code`].
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Walked(TranslationScope::NonGlobal)),
+            1 => Some(Self::Disabled),
+            2 => Some(Self::Walked(TranslationScope::Global)),
+            _ => None,
+        }
+    }
 }
 
 /// The stage 2 translations one translation made, under stage 2's context
@@ -1254,6 +1297,10 @@ struct Walked {
     /// the writes that make it writable-dirty.
     perms: u8,
     level: LeafLevel,
+    /// The leaf's `nG`, bit 11, in a regime with ASIDs
+    /// (`AArch64_S1NextWalkStateLeaf`); every leaf of one without is
+    /// global.
+    scope: TranslationScope,
     /// The regime's `MAIR_ELx` attribute the descriptor's `AttrIndx`
     /// selects, and the leaf's shareability — the descriptor's `SH`, or
     /// under FEAT_LPA2's `DS` the range's `SH0` or `SH1`
@@ -1276,6 +1323,8 @@ impl Walked {
 
 /// A Block or Page descriptor's Access flag, bit 10.
 const DESC_AF: u64 = 1 << 10;
+/// A stage 1 Block or Page descriptor's `nG`, bit 11.
+const DESC_NG: u64 = 1 << 11;
 /// A Block or Page descriptor's `DBM`, bit 51: with dirty state managed
 /// (FEAT_HAFDBS), the descriptor is writable-clean or writable-dirty by its
 /// bit 7 ([`DIRTY_BIT`]).
@@ -1893,6 +1942,29 @@ impl Stage2Context {
     const fn start(&self, features: Features) -> Option<S2Start> {
         s2_start(self.vtcr_el2, features)
     }
+
+    /// The granule this context's walks are made with on a processor
+    /// implementing `features` ([`s2_granule`]).
+    const fn granule(&self, features: Features) -> Granule {
+        s2_granule(self.vtcr_el2, features)
+    }
+
+    /// What a TLB maintenance instruction reads of the context its kept
+    /// translations were made in: its VMID and its granule.
+    fn made_under(&self, features: Features) -> Stage2MadeUnder {
+        Stage2MadeUnder {
+            vmid: Vmid::of(self.vttbr_el2),
+            granule: self.granule(features),
+        }
+    }
+}
+
+/// What a TLB maintenance instruction reads of the stage 2 context a kept
+/// stage 2 translation was made in ([`Stage2Context::made_under`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stage2MadeUnder {
+    vmid: Vmid,
+    granule: Granule,
 }
 
 impl TaggedContext for Stage2Context {
@@ -1931,6 +2003,107 @@ impl TlbContext {
     /// `AArch64_S1Enabled` of the EL2 regime.
     const fn el2_stage1(&self) -> bool {
         self.features.has(Feature::El2) && self.el2.sctlr_el2 & sctlr::M != 0
+    }
+}
+
+/// The granules the walks of one context are made with (Arm `TGx`, from
+/// `TCR_ELx` and `VTCR_EL2` as the walks decode them): stage 1's of each
+/// range of its regime, and stage 2's where stage 2 translates the regime.
+/// With a TLB entry's levels they give the size of each leaf it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalkGranules {
+    lower: Granule,
+    upper: Granule,
+    stage2: Option<Granule>,
+}
+
+impl WalkGranules {
+    /// The granules of the EL1&0 regime's context `context` on a processor
+    /// implementing `features`.
+    fn el10(context: &El10Context, features: Features) -> Self {
+        Self {
+            lower: Granule::el10(context.tcr_el1, false, features),
+            upper: Granule::el10(context.tcr_el1, true, features),
+            stage2: context
+                .stage2_context()
+                .map(|stage2| stage2.granule(features)),
+        }
+    }
+
+    /// The granule of the EL2 regime under `TCR_EL2` `tcr`, its one range's.
+    fn el2(tcr: u64, features: Features) -> Self {
+        let granule = Granule::el2(tcr, features);
+        Self {
+            lower: granule,
+            upper: granule,
+            stage2: None,
+        }
+    }
+
+    /// The granule of stage 1's walk of `va` in `regime`.
+    fn stage1(&self, regime: Regime, va: u64) -> Granule {
+        if regime.upper(va) {
+            self.upper
+        } else {
+            self.lower
+        }
+    }
+
+    /// How many low bits of an address a translation of `va` in `regime`
+    /// maps alike, stage 1 having given it `s1` and stage 2 `s2` (where
+    /// stage 2 translates the regime): the smaller of the two leaves' sizes
+    /// (Arm `TranslationSize`), and with stage 1 disabled stage 2's alone.
+    /// The one size the TLB holds a translation as, finds it by and checks
+    /// a snapshot's entry against (R5).
+    fn entry_bits(&self, regime: Regime, va: u64, s1: &Stage1Leaf, s2: &Stage2Leaf) -> u32 {
+        let stage2 = self
+            .stage2
+            .map(|granule| granule.translation_size(s2.level.level()));
+        match s1.stage1 {
+            Stage1::Walked(_) => {
+                let stage1 = self.stage1(regime, va).translation_size(s1.level.level());
+                stage2.map_or(stage1, |stage2| stage1.min(stage2))
+            }
+            Stage1::Disabled => stage2.unwrap_or(PAGE_SHIFT),
+        }
+    }
+}
+
+/// What a TLB maintenance instruction reads of the context an entry was
+/// made in (Arm `TLBContext`): the VMID of an EL1&0 one where the processor
+/// has EL2, its ASID, and its granules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MadeUnder {
+    vmid: Option<Vmid>,
+    asid: Option<Asid>,
+    granules: WalkGranules,
+}
+
+impl MadeUnder {
+    /// The EL1&0 regime's context `context`, on a processor implementing
+    /// `features`.
+    fn el10(context: &El10Context, features: Features) -> Self {
+        Self {
+            vmid: features
+                .has(Feature::El2)
+                .then(|| Vmid::of(context.vttbr_el2)),
+            asid: Some(Asid::el10(
+                context.tcr_el1,
+                context.ttbr0_el1,
+                context.ttbr1_el1,
+            )),
+            granules: WalkGranules::el10(context, features),
+        }
+    }
+
+    /// The EL2 regime's under `TCR_EL2` `tcr`, which carries no VMID and no
+    /// ASID.
+    fn el2(tcr: u64, features: Features) -> Self {
+        Self {
+            vmid: None,
+            asid: None,
+            granules: WalkGranules::el2(tcr, features),
+        }
     }
 }
 
@@ -1975,6 +2148,11 @@ const NOT_WALKED: SnapError = SnapError::Invalid("TLB entry is not one a walk ca
 const NO_CONTEXT: SnapError = SnapError::Invalid("TLB entry's context is not one the TLB holds");
 /// A virtual page number's bits: `va >> 12` of a 64-bit address.
 const PAGE_BITS: u32 = 52;
+/// The bits of a key that hold its page number.
+const PAGE_NUMBER: u64 = (1 << PAGE_BITS) - 1;
+/// The bits of an address within its 4 KiB page, the smallest translation
+/// an entry holds.
+const PAGE_SHIFT: u32 = 12;
 /// The bit of a TLB key that names the EL2 regime, above every page number.
 const KEY_EL2: u64 = 1 << 63;
 /// How many contexts of each kind a processor with EL2 keeps entries of at
@@ -2100,18 +2278,82 @@ impl TlbEntry {
 
     /// What stage 1 gave, on a processor of the levels `L`: without EL2
     /// every entry is stage 1's walk's, only stage 2 keeping a translation
-    /// stage 1 left alone.
+    /// stage 1 left alone, and the result says so whatever the entry holds,
+    /// so that an access's checks on such a processor know it as a
+    /// constant.
     #[inline(always)]
     const fn stage1_leaf<L: Levels>(&self) -> Stage1Leaf {
         Stage1Leaf {
-            stage1: if L::EL2 {
-                self.s1.stage1
-            } else {
-                Stage1::Walked
+            stage1: match (L::EL2, self.s1.stage1) {
+                (true, stage1) | (false, stage1 @ Stage1::Walked(_)) => stage1,
+                (false, Stage1::Disabled) => Stage1::Walked(TranslationScope::NonGlobal),
             },
             ..self.s1
         }
     }
+
+    /// The virtual address of the page this entry translates: its key's
+    /// page number, the top byte a tagged address keeps included.
+    const fn va(&self) -> u64 {
+        (self.key & PAGE_NUMBER) << PAGE_SHIFT
+    }
+
+    /// This entry as a TLB maintenance instruction matches it, made in a
+    /// context `made` describes: stage 1's information where stage 1's walk
+    /// made it, of its virtual address's leaf; else stage 2's alone, of the
+    /// IPA its address is (`AArch64_S1DisabledOutput`, whose translation
+    /// is non-global), where its context has stage 2, as every context
+    /// whose entries stage 1 left alone has. `None` for an entry of neither.
+    fn record(&self, made: &MadeUnder) -> Option<TlbRecord> {
+        let regime = key_regime(self.key);
+        let va = self.va();
+        match self.s1.stage1 {
+            Stage1::Walked(scope) => Some(TlbRecord {
+                regime,
+                vmid: made.vmid,
+                asid: made.asid,
+                scope,
+                holds: Holds::Stage1,
+                input: va,
+                granule: made.granules.stage1(regime, va),
+                level: self.s1.level,
+            }),
+            Stage1::Disabled => made.granules.stage2.map(|granule| TlbRecord {
+                regime,
+                vmid: made.vmid,
+                asid: None,
+                scope: TranslationScope::NonGlobal,
+                holds: Holds::Stage2,
+                input: va,
+                granule,
+                level: self.s2.level,
+            }),
+        }
+    }
+}
+
+impl IpaEntry {
+    /// This kept stage 2 translation as a TLB maintenance instruction
+    /// matches it, made in a stage 2 context `made` describes: stage 2's
+    /// information alone, of its IPA's leaf.
+    fn record(&self, made: &Stage2MadeUnder) -> TlbRecord {
+        TlbRecord {
+            regime: Regime::El10,
+            vmid: Some(made.vmid),
+            asid: None,
+            scope: TranslationScope::NonGlobal,
+            holds: Holds::Stage2,
+            input: (self.key & PAGE_NUMBER) << PAGE_SHIFT,
+            granule: made.granule,
+            level: self.leaf.level,
+        }
+    }
+}
+
+/// The page-number bits of a key below a translation of `bits` address
+/// bits: where in the translation its page lies.
+const fn pages_within(bits: u32) -> u64 {
+    (1 << (bits - PAGE_SHIFT)) - 1
 }
 
 const EMPTY_ENTRY: TlbEntry = TlbEntry {
@@ -2122,7 +2364,7 @@ const EMPTY_ENTRY: TlbEntry = TlbEntry {
         perms: 0,
         memory: Memory::Normal,
         level: LeafLevel::Zero,
-        stage1: Stage1::Walked,
+        stage1: Stage1::Walked(TranslationScope::NonGlobal),
     },
     s2: Stage2Leaf {
         perms: 0,
@@ -2137,6 +2379,14 @@ const _: () = assert!(core::mem::size_of::<TlbEntry>() == 24);
 /// virtual addresses by every stage, and beside them stage 2 translations
 /// of IPAs, which the stage 1 walks under stage 2 read their tables
 /// through.
+///
+/// A translation larger than 4 KiB is held whole: beside the entry of the
+/// page a walk translated, the entry of the translation's first page, which
+/// a miss elsewhere in the translation finds ([`Cpu::block_fragment`],
+/// [`Cpu::ipa_block_fragment`]). `spans` and `ipa_spans` say which sizes
+/// such translations have been made in since the TLB was last emptied, a
+/// bit for each size's address bits, so that a miss looks for the first
+/// pages of those sizes alone.
 ///
 /// With EL2 the EL1&0 regime's entries are tagged with the context they
 /// were made under — the values of the registers that regime's
@@ -2158,6 +2408,11 @@ pub struct Tlb<L: Levels> {
     filled: [u16; FILL_LOG],
     /// How many fills since the last flush, stopping past [`FILL_LOG`].
     fills: usize,
+    /// A bit for the address bits of each size larger than 4 KiB an entry
+    /// has been filled with since the last flush ([`WalkGranules::entry_bits`]).
+    spans: u64,
+    /// The same of the kept stage 2 translations.
+    ipa_spans: u64,
 }
 
 /// Where a TLB keeps its tables of contexts: [`TlbContexts`] on a processor
@@ -2453,6 +2708,8 @@ impl<L: Levels> Tlb<L> {
             contexts: <L::Contexts as ContextStorage>::NONE,
             filled: [0; FILL_LOG],
             fills: 0,
+            spans: 0,
+            ipa_spans: 0,
         }
     }
 
@@ -2464,6 +2721,50 @@ impl<L: Levels> Tlb<L> {
             self.filled[self.fills] = slot as u16;
         }
         self.fills = (self.fills + 1).min(FILL_LOG + 1);
+    }
+
+    /// Fill `entry`, a translation of `bits` address bits ([`WalkGranules::entry_bits`]):
+    /// where it is larger than its page, the entry of its first page as
+    /// well, which stands for all of it ([`Cpu::block_fragment`]), and
+    /// then `entry`'s own, which a slot both share keeps.
+    fn fill_held(&mut self, entry: TlbEntry, bits: u32) {
+        if bits > PAGE_SHIFT {
+            self.spans |= 1 << bits;
+            let within = entry.key & pages_within(bits);
+            if within != 0 {
+                let first = TlbEntry {
+                    key: entry.key - within,
+                    pa_page: entry.pa_page - (within << PAGE_SHIFT),
+                    ..entry
+                };
+                self.fill(Self::slot(first.key), first);
+            }
+        }
+        self.fill(Self::slot(entry.key), entry);
+    }
+
+    /// The entry of the translation larger than 4 KiB that holds `key`'s
+    /// page, if the TLB holds one, as the entry of `key`'s page: the entry
+    /// of the first page of a translation of each size in `spans` that
+    /// holds the page, where its size, as `bits_of` gives it, is that one.
+    fn held<F: Fn(&TlbEntry) -> u32>(&self, key: u64, bits_of: F) -> Option<TlbEntry> {
+        let mut spans = self.spans;
+        while spans != 0 {
+            let bits = spans.trailing_zeros();
+            spans &= spans - 1;
+            let within = key & pages_within(bits);
+            let Some(first) = self.hit(key - within) else {
+                continue;
+            };
+            if bits_of(&first) == bits {
+                return Some(TlbEntry {
+                    key,
+                    pa_page: first.pa_page + (within << PAGE_SHIFT),
+                    ..first
+                });
+            }
+        }
+        None
     }
 
     /// Empty every context's entries and kept stage 2 translations, the
@@ -2480,6 +2781,8 @@ impl<L: Levels> Tlb<L> {
             self.entries = [EMPTY_ENTRY; TLB_ENTRIES];
         }
         self.fills = 0;
+        self.spans = 0;
+        self.ipa_spans = 0;
         debug_assert!(
             L::EL2 || self.ipa.iter().all(|kept| kept.key == INVALID_KEY),
             "a kept stage 2 translation without EL2"
@@ -2542,10 +2845,113 @@ impl<L: Levels> Tlb<L> {
         (entry.key == key).then_some(entry)
     }
 
-    /// Keep the stage 2 translations a translation made.
-    fn keep(&mut self, made: &Stage2Made) {
+    /// Keep the stage 2 translations a translation made with stage 2's
+    /// granule `granule`: each one larger than its page whole, as
+    /// [`Tlb::fill_held`] fills an entry.
+    fn keep(&mut self, made: &Stage2Made, granule: Granule) {
         for entry in made.made.iter().flatten() {
+            let bits = granule.translation_size(entry.leaf.level.level());
+            if bits > PAGE_SHIFT {
+                self.ipa_spans |= 1 << bits;
+                let within = entry.key & pages_within(bits);
+                if within != 0 {
+                    let first = IpaEntry {
+                        key: entry.key - within,
+                        pa_page: PhysAddr::new(entry.pa_page.get() - (within << PAGE_SHIFT)),
+                        ..*entry
+                    };
+                    self.ipa[Self::ipa_slot(first.key)] = first;
+                }
+            }
             self.ipa[Self::ipa_slot(entry.key)] = *entry;
+        }
+    }
+
+    /// The kept stage 2 translation larger than 4 KiB that holds `key`'s
+    /// IPA page, if the TLB keeps one, as the translation of that page: as
+    /// [`Tlb::held`] finds an entry, of the sizes in `ipa_spans`, under
+    /// stage 2's granule `granule`.
+    fn ipa_held(&self, key: u64, granule: Granule) -> Option<IpaEntry> {
+        let mut spans = self.ipa_spans;
+        while spans != 0 {
+            let bits = spans.trailing_zeros();
+            spans &= spans - 1;
+            let within = key & pages_within(bits);
+            let Some(first) = self.ipa_hit(key - within) else {
+                continue;
+            };
+            if granule.translation_size(first.leaf.level.level()) == bits {
+                return Some(IpaEntry {
+                    key,
+                    pa_page: PhysAddr::new(first.pa_page.get() + (within << PAGE_SHIFT)),
+                    leaf: first.leaf,
+                });
+            }
+        }
+        None
+    }
+
+    /// Remove every entry and kept stage 2 translation `op` matches
+    /// ([`Invalidation::matches`]), each as the context it was made in
+    /// describes it: with EL2 an EL1&0 entry's by the place its tag names
+    /// in the table of EL1&0 contexts and a kept translation's by its place
+    /// in the table of stage 2 contexts; without EL2 an EL1&0 entry's by
+    /// `el10`, the registers' now, as every write that changes them empties
+    /// the TLB; an EL2 entry's by `el2`, likewise. An entry whose place
+    /// holds no context, which no lookup finds, goes too.
+    fn invalidate(
+        &mut self,
+        op: &Invalidation,
+        el10: MadeUnder,
+        el2: MadeUnder,
+        features: Features,
+    ) {
+        let pa_bits = id::pa_bits(features);
+        let (el10_places, stage2_places) = match self.contexts.get() {
+            Some(contexts) => (
+                contexts
+                    .el10
+                    .table
+                    .map(|held| held.map(|context| MadeUnder::el10(&context, features))),
+                contexts
+                    .stage2
+                    .table
+                    .map(|held| held.map(|context| context.made_under(features))),
+            ),
+            None => ([None; CONTEXTS], [None; CONTEXTS]),
+        };
+        for entry in &mut self.entries {
+            if entry.key == INVALID_KEY {
+                continue;
+            }
+            let made = match (key_regime(entry.key), tag_place(entry.key)) {
+                (Regime::El2, _) => Some(el2),
+                (Regime::El10, Some(place)) => el10_places[place.index],
+                (Regime::El10, None) => Some(el10),
+            };
+            let removed = match made.and_then(|made| entry.record(&made)) {
+                Some(record) => op.matches(&record, pa_bits),
+                None => true,
+            };
+            if removed {
+                *entry = EMPTY_ENTRY;
+            }
+        }
+        if !L::EL2 {
+            return;
+        }
+        for kept in &mut self.ipa {
+            if kept.key == INVALID_KEY {
+                continue;
+            }
+            let made = tag_place(kept.key).and_then(|place| stage2_places[place.index]);
+            let removed = match made {
+                Some(made) => op.matches(&kept.record(&made), pa_bits),
+                None => true,
+            };
+            if removed {
+                *kept = EMPTY_IPA_ENTRY;
+            }
         }
     }
 
@@ -2617,9 +3023,10 @@ impl<L: Levels> Tlb<L> {
     /// contexts ([`Contexts::save`]); then the entries that can match, each
     /// one's virtual page number with its context's tag and its output
     /// page, then stage 1's permissions, memory ([`Memory::code`]) and
-    /// level, its regime's byte, whether stage 1 was disabled, stage 2's
-    /// permissions, memory and level, and the memory of both stages
-    /// combined; then the kept stage 2 translations that can match, each
+    /// level, its regime's byte, whether stage 1 was disabled or its walk's
+    /// leaf global ([`Stage1::code`]), stage 2's permissions, memory and
+    /// level, and the memory of both stages combined; then the kept stage 2
+    /// translations that can match, each
     /// one's IPA page number with its stage 2 context's tag and output
     /// page, then its permissions, memory and level. An entry of an
     /// older generation than its place's, which nothing matches, is left
@@ -2644,7 +3051,7 @@ impl<L: Levels> Tlb<L> {
                 e.s1.memory.code(),
                 e.s1.level.number(),
                 key_regime(e.key) as u8,
-                e.s1.stage1 as u8,
+                e.s1.stage1.code(),
                 e.s2.perms,
                 e.s2.memory.code(),
                 e.s2.level.number(),
@@ -2768,10 +3175,8 @@ impl<L: Levels> Tlb<L> {
                 Some(Regime::El2) => Regime::El2,
                 None => return Err(SnapError::Invalid("TLB entry names no translation regime")),
             };
-            let stage1 = match stage1 {
-                0 => Stage1::Walked,
-                1 => Stage1::Disabled,
-                _ => return Err(NOT_WALKED),
+            let Some(stage1) = Stage1::from_code(stage1) else {
+                return Err(NOT_WALKED);
             };
             let made_in = match regime {
                 Regime::El10 => Some(context_of(page)?),
@@ -2802,7 +3207,7 @@ impl<L: Levels> Tlb<L> {
             let s1_walked_memory =
                 |sctlr: u64| s1_memory == s1_memory.normal_as_non_cacheable(sctlr & sctlr::C == 0);
             let stage1_valid = match (made_in, stage1) {
-                (Some(made_in), Stage1::Walked) => {
+                (Some(made_in), Stage1::Walked(_)) => {
                     made_in.stage1()
                         && range.reaches(va, features, level)
                         && perms & !(PERMS | guarded) == 0
@@ -2822,14 +3227,16 @@ impl<L: Levels> Tlb<L> {
                         && s1_memory
                             == Memory::s1_disabled(el10_s1_disabled_data_normal(made_in.hcr_el2))
                 }
-                (None, Stage1::Walked) => {
+                // The EL2 regime has no ASIDs: every one of its leaves is
+                // global.
+                (None, Stage1::Walked(TranslationScope::Global)) => {
                     context.el2_stage1()
                         && range.reaches(va, features, level)
                         && perms & !(PERMS | guarded) == 0
                         && perms & PERMS_EL0 == 0
                         && s1_walked_memory(context.el2.sctlr_el2)
                 }
-                (None, Stage1::Disabled) => false,
+                (None, Stage1::Walked(TranslationScope::NonGlobal) | Stage1::Disabled) => false,
             };
             // An entry stage 2 takes no part in holds `Stage2Leaf::NONE`; one
             // it does, a stage 2 leaf its walk can end at.
@@ -2850,17 +3257,13 @@ impl<L: Levels> Tlb<L> {
             }
             let e0pd_refused =
                 made_in.is_some_and(|made_in| e0pd_set(features, made_in.tcr_el1, va));
-            if stage1 == Stage1::Walked && perms & PERMS_EL0 != 0 && e0pd_refused {
+            if stage1.walked() && perms & PERMS_EL0 != 0 && e0pd_refused {
                 return Err(SnapError::Invalid(
                     "TLB entry gives EL0 a page FEAT_E0PD refuses it",
                 ));
             }
             let key = page | ((regime as u64) << 63);
-            let slot = &mut self.entries[Self::slot(key)];
-            if slot.key != INVALID_KEY {
-                return Err(SnapError::Invalid("two TLB entries claim one slot"));
-            }
-            *slot = TlbEntry {
+            let entry = TlbEntry {
                 key,
                 pa_page,
                 memory,
@@ -2872,6 +3275,26 @@ impl<L: Levels> Tlb<L> {
                 },
                 s2,
             };
+            // The walks map the bits of a translation's size alike from
+            // address to output, as every page of a larger one held whole
+            // ([`Tlb::fill_held`]) does: the size a miss reads it as
+            // ([`Tlb::held`]).
+            let granules = match made_in {
+                Some(made_in) => WalkGranules::el10(&made_in, features),
+                None => WalkGranules::el2(context.el2.tcr_el2, features),
+            };
+            let bits = granules.entry_bits(regime, va, &entry.s1, &entry.s2);
+            if (pa_page ^ va) & ((1 << bits) - 1) != 0 {
+                return Err(NOT_WALKED);
+            }
+            if bits > PAGE_SHIFT {
+                self.spans |= 1 << bits;
+            }
+            let slot = &mut self.entries[Self::slot(key)];
+            if slot.key != INVALID_KEY {
+                return Err(SnapError::Invalid("two TLB entries claim one slot"));
+            }
+            *slot = entry;
         }
         // Stage 2 translations of IPAs, which only stage 2 keeps: an IPA its
         // context's walks translate, in a stage 2 context the table holds.
@@ -2897,15 +3320,22 @@ impl<L: Levels> Tlb<L> {
                 return Err(NOT_WALKED);
             };
             // The key below its tag is an IPA page number alone, which the
-            // context's walks translate.
+            // context's walks translate; the leaf maps the bits of its size
+            // alike from IPA to output, as every page of a translation
+            // kept whole does ([`Tlb::keep`]).
             let ipa_page = key & !TAG_MASK;
+            let bits = made_in.granule(features).translation_size(level.level());
             if ipa_page >> PAGE_BITS != 0
                 || !start.translates(Ipa::new(ipa_page << 12))
                 || pa_page & 0xFFF != 0
                 || pa_page >> id::pa_bits(features) != 0
                 || !Stage2Leaf::walked(perms, level, start, features)
+                || (pa_page ^ (ipa_page << PAGE_SHIFT)) & ((1 << bits) - 1) != 0
             {
                 return Err(NOT_WALKED);
+            }
+            if bits > PAGE_SHIFT {
+                self.ipa_spans |= 1 << bits;
             }
             let slot = &mut self.ipa[Self::ipa_slot(key)];
             if slot.key != INVALID_KEY {
@@ -2935,15 +3365,77 @@ const fn alignment_enforced(control: u64) -> bool {
 
 impl<L: Levels> Cpu<L> {
     /// Empty the TLB. The running trace ends, whatever the caller: its
-    /// fetches translate again. (The guest's TLBI and translation-register
-    /// MSRs end their trace by `Op::ends_trace` as well;
-    /// this does not rely on it.)
+    /// fetches translate again. (The guest's translation-register MSRs end
+    /// their trace by `Op::ends_trace` as well; this does not rely on it.)
     /// The current contexts then are found again by the next translation,
     /// from the registers as they are then: a register written without a
     /// write's effect, as a host may, is seen ([`Tlb::flush`]).
     pub(crate) fn flush_tlb(&mut self) {
         self.tlb.flush();
         self.trace_break = true;
+    }
+
+    /// A TLB maintenance instruction's effect: remove what `op` matches
+    /// ([`Tlb::invalidate`]), each entry as the context it was made in
+    /// describes it. The running trace ends, whatever the caller, as for
+    /// [`Cpu::flush_tlb`] (a TLBI ends its trace by `Op::ends_trace` too):
+    /// the next fetch translates again, and nothing a trace took from a
+    /// translation the instruction removed outlives it.
+    pub(crate) fn invalidate_tlb(&mut self, op: &Invalidation) {
+        let features = self.imp.features;
+        let el10 = MadeUnder::el10(&self.el10_context(), features);
+        let el2 = MadeUnder::el2(self.el2().tcr, features);
+        self.tlb.invalidate(op, el10, el2, features);
+        self.trace_break = true;
+    }
+
+    /// The granules the walks of `regime` are made with now
+    /// ([`WalkGranules`]): those of the context every entry a lookup can
+    /// find now was made in.
+    fn walk_granules(&self, regime: Regime) -> WalkGranules {
+        let features = self.imp.features;
+        match regime {
+            Regime::El10 => WalkGranules::el10(&self.el10_context(), features),
+            Regime::El2 => WalkGranules::el2(self.el2().tcr, features),
+        }
+    }
+
+    /// On a miss of `key`'s entry, the entry of the translation larger than
+    /// 4 KiB that holds its page, if the TLB holds one ([`Tlb::held`]),
+    /// made the entry of its page, which the TLB is filled with: one walk
+    /// serves a whole block or page of 16 KiB or 64 KiB. The translation's
+    /// size is read as [`Cpu::cache`] gave it, from its levels and the
+    /// granules now, which are those it was made with. The fill may evict
+    /// the entry the running trace's fetches hit, so the trace ends, as a
+    /// fill from a walk ends it.
+    fn block_fragment(&mut self, key: u64, regime: Regime) -> Option<TlbEntry> {
+        if self.tlb.spans == 0 {
+            return None;
+        }
+        let granules = self.walk_granules(regime);
+        let entry = self.tlb.held(key, |first: &TlbEntry| {
+            granules.entry_bits(regime, first.va(), &first.s1, &first.s2)
+        })?;
+        self.tlb.fill(Tlb::<L>::slot(key), entry);
+        self.trace_break = true;
+        Some(entry)
+    }
+
+    /// The kept stage 2 translation of the IPA page `key` names
+    /// ([`Stage2Made::key`]) from one larger than 4 KiB that holds it, if
+    /// the TLB keeps one ([`Tlb::ipa_held`]), under stage 2's granule now,
+    /// which the current stage 2 context's translations were made with.
+    fn ipa_block_fragment(&self, key: u64) -> Option<IpaEntry> {
+        if self.tlb.ipa_spans == 0 {
+            return None;
+        }
+        self.tlb.ipa_held(key, self.stage2_granule())
+    }
+
+    /// Stage 2's granule now (`VTCR_EL2.TG0`, [`Stage2Context::granule`]).
+    fn stage2_granule(&self) -> Granule {
+        let el2 = self.el2();
+        Stage2Context::of(el2.vttbr, el2.vtcr).granule(self.imp.features)
     }
 
     /// The tag of the EL1&0 regime's current context: 0 without EL2, and
@@ -3171,7 +3663,7 @@ impl<L: Levels> Cpu<L> {
         if on_device == OnDevice::Refused && s1.memory.is_device() {
             return Some(Abort::first(Fsc::Alignment, needs.writes()));
         }
-        if s1.stage1 == Stage1::Walked {
+        if s1.stage1.walked() {
             if let Some(refused) = self.first_refused(s1.perms, needs, el, Pan::Checked) {
                 let fault = Fsc::Permission(s1.level);
                 return Some(Abort::first(fault, refused == AccessKind::Write));
@@ -3231,8 +3723,9 @@ impl<L: Levels> Cpu<L> {
     /// The translation of `va` for an access needing `needs` checked
     /// against `el`'s permissions, the one way every translation but the
     /// inline hit ([`Cpu::permitted_hit`]) goes: where the TLB is used
-    /// ([`Cpu::tlb_used`]), the entry it holds where that entry's checks
-    /// pass ([`Cpu::entry_refusal`]); else the walks
+    /// ([`Cpu::tlb_used`]), the entry it holds for the page, or makes of a
+    /// larger translation holding it ([`Cpu::block_fragment`]), where that
+    /// entry's checks pass ([`Cpu::entry_refusal`]); else the walks
     /// ([`Cpu::translate_miss`]), which a TLB may always make, so that
     /// every fault is the walk's and raised in its order in one place.
     fn translate_needs<B: PhysBus>(
@@ -3248,7 +3741,11 @@ impl<L: Levels> Cpu<L> {
             return self.untranslated(va, needs, el, on_device);
         }
         let key = self.found_tlb_key(va, regime);
-        if let Some(entry) = self.tlb.hit(key) {
+        let cached = match self.tlb.hit(key) {
+            Some(entry) => Some(entry),
+            None => self.block_fragment(key, regime),
+        };
+        if let Some(entry) = cached {
             if self.entry_refusal(&entry, needs, el, on_device).is_none() {
                 return Ok(entry.mapping(va));
             }
@@ -3313,7 +3810,8 @@ impl<L: Levels> Cpu<L> {
         };
         let translated = self.translate_walks(bus, va, key, needs, el, on_device, made.as_mut());
         if let Some(made) = &made {
-            self.tlb.keep(made);
+            let granule = self.stage2_granule();
+            self.tlb.keep(made, granule);
         }
         translated
     }
@@ -3521,7 +4019,11 @@ impl<L: Levels> Cpu<L> {
     /// translation of `va` in the current regime to `pa` that stage 1
     /// (`s1`) and stage 2 (`s2`, `None` where it takes no part) gave an
     /// access of `kind`, with the memory both map it to
-    /// ([`entry_memory`]).
+    /// ([`entry_memory`]), and a translation larger than 4 KiB whole
+    /// ([`Tlb::fill_held`]), of the size both stages map alike
+    /// ([`WalkGranules::entry_bits`]). Every page of it lies in the same
+    /// half of the address space, with the same tag, so whatever this
+    /// refuses to cache for `va` it refuses for each.
     ///
     /// A tagged address keeps its tag in the entry's tag, so it hits only
     /// itself; no entry made before a TCR write, which can change what the
@@ -3554,9 +4056,8 @@ impl<L: Levels> Cpu<L> {
         let fetch_faults = kind != AccessKind::Fetch
             && regime.canonical(va) != va
             && !self.regime_tbi(regime, regime.upper(va), true);
-        let e0pd_refuses_permitted = s1.stage1 == Stage1::Walked
-            && s1.perms & PERMS_EL0 != 0
-            && self.e0pd_refuses(va, El::El0);
+        let e0pd_refuses_permitted =
+            s1.stage1.walked() && s1.perms & PERMS_EL0 != 0 && self.e0pd_refuses(va, El::El0);
         if fetch_faults || e0pd_refuses_permitted {
             return;
         }
@@ -3565,16 +4066,17 @@ impl<L: Levels> Cpu<L> {
         self.trace_break = true;
         let cd = s2.is_some() && self.hcr_any(HCR_CD);
         let memory = entry_memory(s1.memory, s2.map(|leaf| leaf.memory), cd);
-        self.tlb.fill(
-            Tlb::<L>::slot(key),
-            TlbEntry {
-                key,
-                pa_page: pa.get() & !0xFFF,
-                memory,
-                s1,
-                s2: s2.unwrap_or(Stage2Leaf::NONE),
-            },
-        );
+        let entry = TlbEntry {
+            key,
+            pa_page: pa.get() & !0xFFF,
+            memory,
+            s1,
+            s2: s2.unwrap_or(Stage2Leaf::NONE),
+        };
+        let bits = self
+            .walk_granules(regime)
+            .entry_bits(regime, va, &entry.s1, &entry.s2);
+        self.tlb.fill_held(entry, bits);
     }
 
     /// The E0PD rule of Arm `AArch64_S1Translate` (FEAT_E0PD): with
@@ -3640,7 +4142,7 @@ impl<L: Levels> Cpu<L> {
                     perms: walked.perms,
                     memory: memory.normal_as_non_cacheable(non_cacheable),
                     level: walked.level,
-                    stage1: Stage1::Walked,
+                    stage1: Stage1::Walked(walked.scope),
                 }
             }
             Stage1Output::Disabled(_) => Stage1Leaf {
@@ -3860,10 +4362,16 @@ impl<L: Levels> Cpu<L> {
         if (desc >> 50) & 1 == 1 && self.implements(Feature::Bti) {
             perms |= GUARDED;
         }
+        let scope = if params.regime.has_unprivileged() && desc & DESC_NG != 0 {
+            TranslationScope::NonGlobal
+        } else {
+            TranslationScope::Global
+        };
         Ok(Walked {
             ipa: leaf.out,
             perms,
             level: leaf.level,
+            scope,
             attr: ((params.mair >> (((desc >> 2) & 7) * 8)) & 0xFF) as u8,
             sh: params.range.oa.shareability(desc),
             leaf: leaf.desc,
@@ -3971,9 +4479,11 @@ impl<L: Levels> Cpu<L> {
     /// Stage 2's translation of `ipa` for `purpose` (`AArch64_S2Translate`
     /// as far as its checks): the output address, the leaf, and the leaf as
     /// the TLB may keep it. Where `walks` lets it, from a stage 2
-    /// translation the same translation made or the TLB keeps, if that
-    /// permits `purpose` ([`Cpu::s2_refuses`]); else from the walk, which
-    /// `walks` records. A walked leaf `purpose`'s checks permit has the
+    /// translation the same translation made or the TLB keeps — of the
+    /// page, or of a larger translation holding it, which `walks` records
+    /// as the page's ([`Cpu::ipa_block_fragment`]) — if that permits
+    /// `purpose` ([`Cpu::s2_refuses`]); else from the walk, which `walks`
+    /// records. A walked leaf `purpose`'s checks permit has the
     /// hardware updates `purpose` makes ([`LeafDescriptor::updated`]),
     /// swapped in as `walks` says ([`Cpu::swap_leaf`]), the walk made again
     /// where the leaf changed under the swap; a leaf they refuse has none.
@@ -3987,9 +4497,15 @@ impl<L: Levels> Cpu<L> {
         purpose: S2For,
         walks: &mut Walks<'_>,
     ) -> Result<Stage2Output, TranslationFault> {
-        if let Stage2Source::Cached(made) = &walks.stage2 {
+        if let Stage2Source::Cached(made) = &mut walks.stage2 {
             let key = made.key(ipa);
-            if let Some(kept) = made.find(key).or_else(|| self.tlb.ipa_hit(key)) {
+            let kept = match made.find(key).or_else(|| self.tlb.ipa_hit(key)) {
+                Some(kept) => Some(kept),
+                None => self
+                    .ipa_block_fragment(key)
+                    .inspect(|&kept| made.record(kept)),
+            };
+            if let Some(kept) = kept {
                 if !self.s2_refuses(kept.leaf, purpose) {
                     return Ok(Stage2Output {
                         pa: PhysAddr::new(in_page(kept.pa_page.get(), ipa.get())),
@@ -5417,14 +5933,16 @@ pub(crate) mod saved_layout {
     pub(crate) const CONTEXT_VTCR: usize = 7 * 8;
     /// An entry: its page with its tag, its output page, then its nine
     /// bytes — stage 1's permissions, memory and level, the regime, whether
-    /// stage 1's walk made it, stage 2's permissions, memory and level, and
-    /// the memory of both stages combined.
+    /// stage 1's walk made it and from a global leaf or not, stage 2's
+    /// permissions, memory and level, and the memory of both stages
+    /// combined.
     pub(crate) const ENTRY_BYTES: usize = 8 + 8 + 9;
     /// The byte of an entry that holds stage 1's memory.
     pub(crate) const ENTRY_MEMORY: usize = 8 + 8 + 1;
     /// The byte of an entry that holds stage 1's level.
     pub(crate) const ENTRY_LEVEL: usize = 8 + 8 + 2;
-    /// The byte of an entry that says whether stage 1's walk made it.
+    /// The byte of an entry that says whether stage 1's walk made it, from
+    /// a global leaf or not (`Stage1::code`).
     pub(crate) const ENTRY_STAGE1: usize = 8 + 8 + 4;
     /// The bytes of an entry that hold stage 2's permissions, memory and
     /// level.

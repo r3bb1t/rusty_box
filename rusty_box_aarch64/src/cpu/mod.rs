@@ -87,6 +87,10 @@ mod sysreg;
 mod sysreg_spec;
 mod system;
 mod timer;
+mod tlbi;
+#[cfg(test)]
+#[path = "../../tests/unit/tlb_maintenance.rs"]
+mod tlb_maintenance;
 mod trace;
 mod wait;
 mod za;

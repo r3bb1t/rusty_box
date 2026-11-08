@@ -142,8 +142,8 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   `tests/bti_traces.rs`). A trace runs only as far as the
   instruction-at-a-time loop would without looking outside the processor —
   the budget, the next timed event, the exits — and stops early after an
-  instruction that reached a device, wrote a timer register, filled or
-  flushed the TLB, or wrote over cached code. Code stays coherent with
+  instruction that reached a device, wrote a timer register, filled the
+  TLB or removed any of it, or wrote over cached code. Code stays coherent with
   memory without the guest's help: each page's 128-byte lines that hold
   cached instructions are marked (Bochs's page write stamps), and every
   store the processor makes, every device DMA write and every host write
@@ -549,8 +549,23 @@ the instruction syndrome (`ISV`, `SAS`, `SSE`, `SRT`, `SF`, `AR`) a
 hypervisor's emulation of MMIO reads. `AT S12E*` translates by both
 stages and reports the combined attributes, `AT S1E*` the IPA, and a
 debugger's `virt_to_phys` walks both stages. The TLB holds both stages'
-results, each stage's permissions and memory type apart, and is emptied by
-every TLB maintenance instruction. Its EL1&0 entries are tagged with the
+results, each stage's permissions and memory type apart. A translation
+larger than 4 KiB — a block, a 16 KiB or 64 KiB page, at either stage —
+is held whole, of the size both stages map alike: one walk serves every
+page of it, an access that misses its own page's entry finding the
+translation by its first page's, while the lookup an access makes on a
+hit stays a 4 KiB one. A TLB maintenance instruction removes what Arm's
+`TLBIMatch` says it names and nothing else (`src/cpu/tlbi.rs`): by
+regime, VMID and ASID, a global translation (`nG` clear) outliving a
+`TLBI ASIDE1`; by address, a translation matching any address in the
+leaf whose information it holds, the whole of a block a `TLBI VAE1`
+anywhere in it names (Arm ARM D8.17 RLGSCG); by the level and granule a
+FEAT_TTL hint names; by a FEAT_TLBIRANGE range, its base address in
+FEAT_LPA2's form under `DS`; and by stage, `TLBI IPAS2E1` removing the
+translations of stage 2 alone — the kept stage 2 translations of IPAs,
+and those made with stage 1 disabled — and `TLBI VMALLE1` those holding
+stage 1's, so that a hypervisor's change of stage 2 takes both, as Linux
+KVM issues them. Its EL1&0 entries are tagged with the
 context they were made in — the values of the EL1 translation registers,
 `VTTBR_EL2`, `VTCR_EL2` and the `HCR_EL2` bits that decide which walks
 are made (`VM`, `DC`, `PTW`, `TGE`) — up to fifteen contexts at once, so
@@ -741,6 +756,27 @@ integration tests of the public API.
   stale translation with them; DSB nXS; LDLAR and STLLR as ordered
   accesses PAN applies to; the LORegion registers; and each feature's
   bits RES0 or its encodings UNDEFINED without it.
+- `tests/unit/tlb_maintenance.rs` checks TLB maintenance against Arm's
+  `TLBIMatch` and `TLBIRange`, by guest loads that read which page each
+  reaches after its descriptor changed with no maintenance — the old one
+  while the TLB holds the translation, the new one once a `TLBI` removed
+  it: `VAE1` removing its page and leaving the pages beside it; a block
+  and a 64 KiB page held whole, a page of them no access touched reaching
+  the old output, and removed whole by a `TLBI` of any address in them;
+  `ASIDE1` sparing the global pages and other ASIDs', `VAE1` of another
+  ASID removing a global page alone; FEAT_TTL hints of the right and wrong
+  level and granule, and a reserved one; FEAT_TLBIRANGE ranges, `TG`
+  0b00 and another granule's invalidating nothing; `IPAS2E1` removing
+  stage 2's translations alone, a stage 2 block whole, and with
+  `VMALLE1` the translations of both stages, as KVM issues them;
+  `VMALLS12E1` sparing another VMID's and `ALLE1` not; stage 2's
+  translations of the tables stage 1 walks through held whole; each
+  regime's maintenance keeping to its regime; FEAT_HAFDBS's updates
+  reached through a block held whole; and a snapshot keeping what the
+  TLB held, an entry whose output no walk of its level gives refused.
+  Making every TLBI empty the TLB, holding blocks as 4 KiB pieces at
+  either stage, ignoring `nG`, the TTL hint or the VMID each fails a
+  test.
 - `tests/unit/granules.rs` checks the translation granules and FEAT_TTST
   against Arm's pseudocode (`AArch64_S1StartLevel`,
   `AArch64_TTEntryAddressBounds`, `AArch64_BlockDescSupported`,
@@ -1709,7 +1745,7 @@ one open.
   nibble of zero is Device memory, and anything else Normal. Shareability
   0b01 is Outer Shareable (`DecodeShareability`, Constraint_OSH). The
   Contiguous bit changes nothing, as `AArch64_ContiguousBit` allows ("Treat
-  Contiguous bit as 0"), so an entry here always maps one page. A fetch
+  Contiguous bit as 0"), so an entry here always maps one leaf. A fetch
   from Device memory that is not execute-never runs
   (`Unpredictable_INSTRDEVICE`, Constraint_NONE); Arm ARM B2.10.2 allows a
   Permission fault instead. Every misaligned access to Device memory
@@ -2230,6 +2266,15 @@ one open.
   (`target/arm/helper.c` `vttbr_write`, `vmsa_ttbr_write`), so a guest that
   rewrites a table without the `TLBI` and then returns to it sees the new
   mapping there, and the old one here, as Arm permits.
+- **A `TLBI RIPAS2E1` range's base address is in FEAT_LPA2's form under
+  `VTCR_EL2.DS`.** Arm's two descriptions disagree: the `TLBI RIPAS2E1`
+  page of `Registers.json` gives `BaseADDR` FEAT_LPA2's form where
+  `VTCR_EL2.DS` is 1, while `AArch64_TLBI_RIPAS2` hands `TLBIRange` the
+  EL1&0 regime, whose `HasLargeAddress` reads `TCR_EL1.DS`. The range is
+  of IPAs, which stage 2's walk, under `VTCR_EL2`, translates, so the
+  register page is followed (`src/cpu/tlbi.rs`). No processor here meets
+  the case yet: the Armv9.2 model, the one with FEAT_TLBIRANGE and
+  FEAT_LPA2, has no EL2.
 - **`LDLAR` and `STLLR` report `AR` 1 with a stage 2 Data Abort.** The
   Arm ARM's `ESR_ELx.AR` is 1 for an instruction with acquire or release
   semantics, and the LORegion forms have them (Arm `CreateAccDescLOR`:
@@ -3731,10 +3776,15 @@ events D14.6 requires.
   legal in Streaming SVE mode.
 - Of the translation regime: FEAT_HAFT (the walk setting the Access flag
   of Table descriptors) and FEAT_HDBSS (a log of the pages stage 2 makes
-  dirty), beside FEAT_HAF and FEAT_HAFDBS. TLB maintenance empties the whole TLB,
-  whatever FEAT_LPA2 makes of a `TLBI` operand's address, an
-  over-invalidation Arm permits, and a 16 KiB or 64 KiB page, or a block,
-  is walked once for each 4 KiB piece the processor touches.
+  dirty), beside FEAT_HAF and FEAT_HAFDBS. Two invalidations go further
+  than Arm requires, as it permits: the `TLBI` nXS forms (FEAT_XS) remove
+  the translations of memory with the XS attribute too, which `TLBIMatch`
+  lets them leave; and without EL2 a write that changes what the EL1&0
+  regime's translations read of its registers — a `TTBR0_EL1` or
+  `TTBR1_EL1` write switching ASIDs among them — empties the TLB, where
+  the ASID tag would let it keep the translations of the ASID it leaves
+  (with EL2 the entries of each set of those registers' values are kept,
+  above).
 - Of EL2: FEAT_VHE and the later EL2 features; and EL2 on the Armv9.2 model, which Arm requires FEAT_VHE and
   others of there, so the EL2 features built for it — FEAT_S2TGran16K,
   FEAT_S2TGran64K, FEAT_TTST's stage 2 rules, FEAT_ECV_POFF — reach no

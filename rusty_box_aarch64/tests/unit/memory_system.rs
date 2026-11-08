@@ -925,22 +925,29 @@ fn dc_cvap_and_cvadp_need_their_features() {
 
 /// The TLB maintenance instructions of FEAT_TLBIOS, FEAT_TLBIRANGE and
 /// FEAT_XS invalidate as the ARMv8.0 ones do, and are UNDEFINED on a
-/// processor without their features, and at EL0.
+/// processor without their features, and at EL0. A by-address form names
+/// the read-only block's page (`Xt[43:0]`, VA 55:12), a range form the two
+/// pages from it (`TG` 4 KiB, `NUM` and `SCALE` 0, `BaseADDR` its page).
 #[test]
 fn the_later_tlbi_forms_need_their_features_and_invalidate() {
-    /// Each TLBI, and what it needs besides the ARMv8.0 set.
-    const FORMS: [(u32, &[Feature]); 10] = [
-        (TLBI_VAE1, &[]),
-        (TLBI_VAE1IS, &[]),
-        (TLBI_VMALLE1OS, &[Feature::TlbiOs]),
-        (TLBI_VAE1OS, &[Feature::TlbiOs]),
-        (TLBI_RVAE1, &[Feature::TlbiRange]),
-        (TLBI_RVAE1IS, &[Feature::TlbiRange]),
-        (TLBI_RVAE1OS, &[Feature::TlbiOs, Feature::TlbiRange]),
-        (TLBI_VMALLE1NXS, &[Feature::Xs]),
-        (TLBI_VAE1OSNXS, &[Feature::TlbiOs, Feature::Xs]),
+    /// A by-address operand naming the read-only block's page.
+    const PAGE: u64 = READ_ONLY >> 12;
+    /// A range operand naming it: `TG` (47:46) 4 KiB.
+    const RANGE: u64 = (0b01 << 46) | PAGE;
+    /// Each TLBI, its operand, and what it needs besides the ARMv8.0 set.
+    const FORMS: [(u32, u64, &[Feature]); 10] = [
+        (TLBI_VAE1, PAGE, &[]),
+        (TLBI_VAE1IS, PAGE, &[]),
+        (TLBI_VMALLE1OS, 0, &[Feature::TlbiOs]),
+        (TLBI_VAE1OS, PAGE, &[Feature::TlbiOs]),
+        (TLBI_RVAE1, RANGE, &[Feature::TlbiRange]),
+        (TLBI_RVAE1IS, RANGE, &[Feature::TlbiRange]),
+        (TLBI_RVAE1OS, RANGE, &[Feature::TlbiOs, Feature::TlbiRange]),
+        (TLBI_VMALLE1NXS, 0, &[Feature::Xs]),
+        (TLBI_VAE1OSNXS, PAGE, &[Feature::TlbiOs, Feature::Xs]),
         (
             TLBI_RVAE1OSNXS,
+            RANGE,
             &[Feature::TlbiOs, Feature::TlbiRange, Feature::Xs],
         ),
     ];
@@ -952,7 +959,7 @@ fn the_later_tlbi_forms_need_their_features_and_invalidate() {
         &[Feature::TlbiOs, Feature::TlbiRange, Feature::Xs],
     ];
     for extra in offered {
-        for (insn, needs) in FORMS {
+        for (insn, operand, needs) in FORMS {
             let mut m = Machine::new(a57_with(extra));
             let implemented = needs.iter().all(|f| extra.contains(f));
             // Load through the read-only block, so the TLB holds it, then
@@ -968,7 +975,7 @@ fn the_later_tlbi_forms_need_their_features_and_invalidate() {
             m.at_el0();
             assert_eq!(m.run(insn), undefined(&m), "{insn:#010x} at EL0");
             m.cpu.pstate.el = El::El1;
-            m.cpu.x[1] = READ_ONLY >> 12;
+            m.cpu.x[1] = operand;
             assert_eq!(m.run(insn), None, "{insn:#010x} with {extra:?}");
             m.cpu.x[1] = READ_ONLY;
             assert_eq!(

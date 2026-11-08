@@ -12,6 +12,7 @@ use super::features::Feature;
 use super::mmu::{AtCheck, AtStages, CacheMaintenance};
 use super::sme::SmeTrap;
 use super::sysreg::{SysRegError, SysRegKey, CPACR_FPEN};
+use super::tlbi::TlbiForm;
 use super::wait::Wait;
 use super::{sctlr, Cpu, El, Levels};
 use crate::bus::PhysBus;
@@ -793,29 +794,42 @@ impl<L: Levels> Cpu<L> {
             }
             // The EL1 TLB maintenance instructions (CRn 8), and their nXS
             // forms (CRn 9, FEAT_XS), at EL1 and EL2; `HCR_EL2.TTLB` traps
-            // EL1's. Each invalidates at least what it names, whatever its
-            // TTL hint (FEAT_TTL) or range, so flushing everything satisfies
-            // all of them.
+            // EL1's. Each removes what it names (`tlbi.rs`).
             (0, 8 | 9, _, _) => {
-                if el0 || !self.implements_tlbi(crn, crm, op2) {
+                let form = TlbiForm::el1(crm, op2);
+                let Some(form) = form.filter(|_| !el0 && self.implements_tlbi(crn, crm, op2))
+                else {
                     return self.undefined(pc, insn);
-                }
+                };
                 Self::sys_el2_trap(el1 && self.hcr_any(HCR_TTLB), insn, rt)?;
-                self.flush_tlb();
+                self.tlb_maintenance(form, self.x_or_zr(rt));
                 Ok(Flow::Next)
             }
             // The EL2 TLB maintenance instructions, at EL2 only: of the EL2
-            // regime, of the whole EL1&0 regime, and of stage 2 by IPA. Each
-            // invalidates at least what it names, so flushing everything
-            // satisfies all of them.
+            // regime, of the whole EL1&0 regime, and of stage 2 by IPA.
             (4, 8 | 9, _, _) => {
-                if el != El::El2 || !self.implements_tlbi_el2(crn, crm, op2) {
+                let form = TlbiForm::el2(crm, op2);
+                let Some(form) =
+                    form.filter(|_| el == El::El2 && self.implements_tlbi_el2(crn, crm, op2))
+                else {
                     return self.undefined(pc, insn);
-                }
-                self.flush_tlb();
+                };
+                self.tlb_maintenance(form, self.x_or_zr(rt));
                 Ok(Flow::Next)
             }
             _ => self.undefined(pc, insn),
+        }
+    }
+
+    /// A TLB maintenance instruction of `form` with operand `xt`: what it
+    /// names removed ([`Cpu::tlbi_invalidation`], [`Cpu::invalidate_tlb`]),
+    /// nothing for a range form whose `TG` names no granule, which
+    /// `TLBIRange` makes invalid. The trace ends either way, as at every
+    /// TLBI (`Op::ends_trace`).
+    fn tlb_maintenance(&mut self, form: TlbiForm, xt: u64) {
+        match self.tlbi_invalidation(form, xt) {
+            Some(op) => self.invalidate_tlb(&op),
+            None => self.trace_break = true,
         }
     }
 

@@ -356,6 +356,21 @@ impl Machine {
         image[at] = level;
         self.refuses(&image)
     }
+
+    /// [`Machine::refuses`] of `saved` with the stage 1 level of the entry
+    /// that translates `va`, walked with `2^page_bits`-byte pages, set to
+    /// `level`, and its output page moved to where a leaf at that level
+    /// from physical address 0 puts `va`, as a walk ending there would: a
+    /// leaf maps the bits of its size alike from address to output.
+    fn refuses_stage1_level(&self, saved: &SavedTlb, va: u64, page_bits: u32, level: u8) -> bool {
+        let entry = saved.entry_at(va);
+        let mut image = saved.0.clone();
+        image[entry + ENTRY_LEVEL] = level;
+        let leaf_bits = page_bits + (page_bits - 3) * (3 - u32::from(level));
+        let output = va & ((1 << leaf_bits) - 1) & !0xFFF;
+        image[entry + 8..entry + 16].copy_from_slice(&output.to_le_bytes());
+        self.refuses(&image)
+    }
 }
 
 /// `PAR_EL1`'s `F`, its `PA` (47:12), with FEAT_LPA's bits 51:48 too, a
@@ -1206,9 +1221,8 @@ fn a_snapshot_entry_holds_a_level_its_stage_1_walk_ends_at() {
             m.ram.put64(DATA + offset, marker(va));
             assert_eq!(m.load(va), Ok(marker(va)), "{case}");
             let saved = m.saved_tlb();
-            let at = saved.entry_at(va) + ENTRY_LEVEL;
             assert_eq!(
-                [3, 2, 1, 0].map(|level| !m.refuses_level(&saved, at, level)),
+                [3, 2, 1, 0].map(|level| !m.refuses_stage1_level(&saved, va, page_bits, level)),
                 leaf_levels(page_bits, start),
                 "{case}: levels 3 to 0"
             );

@@ -280,7 +280,7 @@ impl Granule {
     /// `TCR_EL1` `tcr`, on a processor implementing `features`: `TG1`'s
     /// or `TG0`'s ([`Granule::decoded`]).
     #[inline(always)]
-    const fn el10(tcr: u64, upper: bool, features: Features) -> Self {
+    pub(crate) const fn el10(tcr: u64, upper: bool, features: Features) -> Self {
         let named = if upper {
             Self::of_tg1(tcr >> TCR_EL1_TG1)
         } else {
@@ -292,7 +292,7 @@ impl Granule {
     /// The granule of the EL2 regime under `TCR_EL2` `tcr`, on a processor
     /// implementing `features`: `TG0`'s ([`Granule::decoded`]).
     #[inline(always)]
-    const fn el2(tcr: u64, features: Features) -> Self {
+    pub(crate) const fn el2(tcr: u64, features: Features) -> Self {
         Self::decoded(Self::of_tg0(tcr >> TCR_TG0), GranuleStage::One, features)
     }
 

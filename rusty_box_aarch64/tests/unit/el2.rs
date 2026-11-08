@@ -2003,9 +2003,11 @@ fn a_snapshot_el2_tlb_entry_is_refused_where_no_walk_makes_it() {
     );
     let saved = m.saved_tlb();
     // No EL1&0 context, the EL2 regime's entries carrying none; then the
-    // entries; then no stage 2 translations kept, none without stage 2.
+    // entries — the fetch's page, the first page of its block, which holds
+    // the block whole, and `SHARED`'s, the first of its own — then no stage
+    // 2 translations kept, none without stage 2.
     assert!(saved.contexts().is_empty());
-    assert_eq!(saved.entry_tags(), [0, 0]);
+    assert_eq!(saved.entry_tags(), [0, 0, 0]);
     assert_eq!(saved.0.len(), saved.kept_at() + 4);
     let image = saved.0.clone();
     let context = m.tlb_context();

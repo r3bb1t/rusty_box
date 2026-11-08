@@ -2853,7 +2853,8 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// `RMR_ELx` of the highest level,
 /// what Software Step stepped, each TLB entry's stage 2 permissions and
 /// level beside stage 1's and the memory each stage and both together map
-/// it to, the TLB's kept stage 2 translations, its tables of EL1&0 and
+/// it to, whether a walked entry's leaf is global (its `nG`, which TLB
+/// maintenance by ASID reads), the TLB's kept stage 2 translations, its tables of EL1&0 and
 /// stage 2 contexts, the shape's identity fingerprint, counter rate,
 /// firmware speculation report, GIC shape, interrupt map with the count of
 /// transports it wires, device layout and occupied transports, and the
@@ -2870,9 +2871,10 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// processor's `SMIDR_EL1` and `ID_AA64DFR0_EL1`, the walk a `TxSZ`
 /// out of its range takes (the limit, `regime::txsz_taken`), which the
 /// TLB's entries were made under, the PL011's revision and the depth of
-/// its FIFOs, which its image holds, the GIC's PPIs, and the PMU the
-/// processor's `ID_AA64DFR0_EL1` and device tree name.
-const SNAPSHOT_VERSION: u32 = 35;
+/// its FIFOs, which its image holds, the GIC's PPIs, the PMU the
+/// processor's `ID_AA64DFR0_EL1` and device tree name, the Cortex-A57's
+/// IMPLEMENTATION DEFINED registers, and each walked TLB entry's nG.
+const SNAPSHOT_VERSION: u32 = 36;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

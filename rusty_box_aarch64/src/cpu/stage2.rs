@@ -145,6 +145,13 @@ const fn s2_start_level(granule: Granule, vtcr: u64, ds: Ds, features: Features)
     }
 }
 
+/// The granule of stage 2's walks under `VTCR_EL2` `vtcr` on a processor
+/// implementing `features` (`TG0`, [`Granule::stage2`]): the one the walks
+/// and the TLB's sizes of their translations read (R5).
+pub(crate) const fn s2_granule(vtcr: u64, features: Features) -> Granule {
+    Granule::stage2(vtcr >> TCR_TG0, features)
+}
+
 /// Where a stage 2 walk under `VTCR_EL2` `vtcr` starts on a processor
 /// implementing `features`, or `None` where `AArch64_S2Translate` refuses
 /// the configuration before any walk, every translation a level 0
@@ -158,7 +165,7 @@ const fn s2_start_level(granule: Granule, vtcr: u64, ds: Ds, features: Features)
 /// the index into 16 concatenated tables (`AArch64_S2InconsistentSL`). The
 /// one test the walk and a snapshot's TLB both make (R5).
 pub(crate) const fn s2_start(vtcr: u64, features: Features) -> Option<S2Start> {
-    let granule = Granule::stage2(vtcr >> TCR_TG0, features);
+    let granule = s2_granule(vtcr, features);
     let ds = granule.effective_ds(vtcr & VTCR_EL2_DS != 0, features);
     let min = s2_min_txsz(granule, ds, features);
     let max = granule.max_txsz(features);
