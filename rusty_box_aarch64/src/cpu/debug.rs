@@ -7,7 +7,9 @@
 //! processor with no EL3, no Secure state and no AArch32: with EL2, `HMC`
 //! and `SSC` 0b11 reach EL2, the VMID breakpoint types compare
 //! `VTTBR_EL2.VMID`, and the `CONTEXTIDR_EL2` types, which need FEAT_VHE or
-//! FEAT_Debugv8p2 as well, compare `CONTEXTIDR_EL2`.
+//! FEAT_Debugv8p2 as well, compare `CONTEXTIDR_EL2`; in the host (FEAT_VHE:
+//! EL2 under `HCR_EL2.E2H`, EL0 under `E2H` and `TGE`) the Context ID type
+//! compares `CONTEXTIDR_EL2` and the VMID types match nothing.
 //!
 //! How many breakpoints and watchpoints there are, and which breakpoints are
 //! context-aware, is the processor model's ([`DebugPoints`]): the
@@ -308,17 +310,21 @@ enum BreakpointType {
 }
 
 /// What a context breakpoint compares (Arm `AArch64_BreakpointValueMatch`'s
-/// `match_cid` and `match_cid1`, `match_vmid`, `match_cid2`):
-/// `CONTEXTIDR_EL1` with `DBGBVR<n>` bits 31:0, which matches only at EL0
-/// and EL1; the current VMID with bits 39:32 (8-bit VMIDs: no
-/// FEAT_VMID16), which matches only at EL0 and EL1 with EL2;
-/// `CONTEXTIDR_EL2` with bits 63:32, which matches at every level with
-/// EL2; or the VMID or `CONTEXTIDR_EL2` together with `CONTEXTIDR_EL1`.
+/// `match_cid`, `match_cid1`, `match_vmid` and `match_cid2`): the Context ID
+/// with `DBGBVR<n>` bits 31:0 — `CONTEXTIDR_EL1` at EL0 and EL1 outside the
+/// host, `CONTEXTIDR_EL2` in the host (`match_cid`, BT 0b001x), or
+/// `CONTEXTIDR_EL1` at EL0 and EL1 outside the host alone (`match_cid1`,
+/// BT 0b011x, and with the VMID or `CONTEXTIDR_EL2`); the current VMID with
+/// bits 39:32 (8-bit VMIDs: no FEAT_VMID16), which matches only at EL0 and
+/// EL1 outside the host with EL2; `CONTEXTIDR_EL2` with bits 63:32, which
+/// matches at every level with EL2; or the VMID or `CONTEXTIDR_EL2`
+/// together with `CONTEXTIDR_EL1`.
 ///
 /// Closed (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContextMatch {
     ContextId,
+    ContextId1,
     Vmid,
     VmidAndContextId,
     El2ContextId,
@@ -497,23 +503,22 @@ impl<L: Levels> Cpu<L> {
     /// `DBGBCR<n>.BT` of breakpoint `n`: the address types for every
     /// breakpoint, the context types for the context-aware ones alone
     /// ([`DebugPoints::is_context_aware`]) — 0b0110 and 0b0111 with
-    /// FEAT_Debugv8p2 (or FEAT_VHE, which no processor here has), the VMID
-    /// types 0b1000 to 0b1011 with EL2, and
-    /// the `CONTEXTIDR_EL2` types 0b1100 to 0b1111 with EL2 and either
+    /// FEAT_Debugv8p2 or FEAT_VHE, the VMID types 0b1000 to 0b1011 with EL2,
+    /// and the `CONTEXTIDR_EL2` types 0b1100 to 0b1111 with EL2 and either
     /// feature, where `CONTEXTIDR_EL2` exists. The address mismatch types
     /// need FEAT_BWE or AArch32, so they are reserved.
     fn breakpoint_type(&self, n: usize) -> BreakpointType {
         let context_aware = self.imp.debug.is_context_aware(n);
-        let v8p2 = self.implements(Feature::Debugv8p2);
+        let cid1 = self.implements(Feature::Debugv8p2) || self.implements(Feature::Vhe);
         let el2_context = L::EL2 && has_contextidr_el2(self.imp.features);
         match (self.sys.dbgbcr[n] >> 20) & 0xF {
             0b0000 => BreakpointType::Address,
             0b0001 => BreakpointType::LinkedAddress,
             0b0010 if context_aware => BreakpointType::Context(ContextMatch::ContextId),
             0b0011 if context_aware => BreakpointType::LinkingContext(ContextMatch::ContextId),
-            0b0110 if context_aware && v8p2 => BreakpointType::Context(ContextMatch::ContextId),
-            0b0111 if context_aware && v8p2 => {
-                BreakpointType::LinkingContext(ContextMatch::ContextId)
+            0b0110 if context_aware && cid1 => BreakpointType::Context(ContextMatch::ContextId1),
+            0b0111 if context_aware && cid1 => {
+                BreakpointType::LinkingContext(ContextMatch::ContextId1)
             }
             0b1000 if context_aware && L::EL2 => BreakpointType::Context(ContextMatch::Vmid),
             0b1001 if context_aware && L::EL2 => BreakpointType::LinkingContext(ContextMatch::Vmid),
@@ -547,25 +552,35 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// Arm `AArch64_BreakpointValueMatch` of a context breakpoint `n`
-    /// comparing `context` (no FEAT_VHE, so never in the host):
-    /// `CONTEXTIDR_EL1` with `DBGBVR<n>` bits 31:0 and `VTTBR_EL2.VMID`
-    /// with bits 39:32 at EL0 or EL1 alone, `CONTEXTIDR_EL2` with bits
-    /// 63:32 at any level, the last two with EL2 (`EL2Enabled`, which with
-    /// no EL3 is having it).
+    /// comparing `context`: outside the host `CONTEXTIDR_EL1` with
+    /// `DBGBVR<n>` bits 31:0 and `VTTBR_EL2.VMID` with bits 39:32 at EL0 or
+    /// EL1 alone, in the host (FEAT_VHE, `IsInHost()`) `CONTEXTIDR_EL2` with
+    /// bits 31:0 for `match_cid` and nothing else of these, and
+    /// `CONTEXTIDR_EL2` with bits 63:32 at any level, the last two with EL2
+    /// (`EL2Enabled`, which with no EL3 is having it).
     fn context_matches(&self, n: usize, context: ContextMatch) -> bool {
         let value = self.sys.dbgbvr[n];
-        let below_el2 = matches!(self.pstate.el, El::El0 | El::El1);
-        let context_id = || below_el2 && self.sys.contextidr_el1 as u32 == value as u32;
+        let in_host = self.in_host();
+        let below_el2 = matches!(self.pstate.el, El::El0 | El::El1) && !in_host;
+        let context_id1 = || below_el2 && self.sys.contextidr_el1 as u32 == value as u32;
+        let context_id = || {
+            if in_host {
+                self.el2().contextidr as u32 == value as u32
+            } else {
+                context_id1()
+            }
+        };
         let vmid = || {
             below_el2 && L::EL2 && (self.el2().vttbr & VTTBR_VMID8) >> 48 == (value >> 32) & 0xFF
         };
         let el2_context_id = || L::EL2 && self.el2().contextidr as u32 == (value >> 32) as u32;
         match context {
             ContextMatch::ContextId => context_id(),
+            ContextMatch::ContextId1 => context_id1(),
             ContextMatch::Vmid => vmid(),
-            ContextMatch::VmidAndContextId => vmid() && context_id(),
+            ContextMatch::VmidAndContextId => vmid() && context_id1(),
             ContextMatch::El2ContextId => el2_context_id(),
-            ContextMatch::El2ContextIdAndContextId => el2_context_id() && context_id(),
+            ContextMatch::El2ContextIdAndContextId => el2_context_id() && context_id1(),
         }
     }
 

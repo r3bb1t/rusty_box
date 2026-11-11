@@ -917,15 +917,17 @@ impl<L: Levels> Cpu<L> {
     /// (Arm ARM, "Asynchronous exception masking", the physical interrupt
     /// masking table for a PE with EL2 and no EL3): one that targets EL1 is
     /// never taken at EL2, the level above it; one routed to EL2 is taken at
-    /// EL0 and EL1 whatever `PSTATE` masks; and otherwise its `PSTATE` mask
-    /// (`I`, `F`) decides. The one reading of the table. A processor
-    /// without EL2 is never at EL2 and routes nothing there, so for one
-    /// every case is `ByPstate` and the run loop's test before each
+    /// EL0 and EL1 whatever `PSTATE` masks, but at EL0 in the host (FEAT_VHE,
+    /// `HCR_EL2.{E2H, TGE}` {1, 1}: D8.13.1, RHGWKR); and otherwise its
+    /// `PSTATE` mask (`I`, `F`) decides. The one reading of the table. A
+    /// processor without EL2 is never at EL2 and routes nothing there, so
+    /// for one every case is `ByPstate` and the run loop's test before each
     /// instruction reads no level.
     #[inline(always)]
     fn interrupt_masking(&self, interrupt: Interrupt) -> Masking {
         match (self.pstate.el, self.interrupt_routed_to_el2(interrupt)) {
             (El::El2, false) if L::EL2 => Masking::Never,
+            (El::El0, true) if self.el0_in_host() => Masking::ByPstate,
             (El::El0 | El::El1, true) => Masking::Unmasked,
             (El::El2, _) | (El::El0 | El::El1, false) => Masking::ByPstate,
         }
@@ -1236,12 +1238,19 @@ impl<L: Levels> Cpu<L> {
             }
         }
         let (sctlr, vbar) = (regs.sctlr, regs.vbar);
-        // With FEAT_PAN, PAN is set on taking an exception to EL1 when the
-        // target's SPAN is 0 (to EL2 only in the EL2&0 regime, which needs
-        // FEAT_VHE) and otherwise kept; UAO is cleared; SSBS becomes the
-        // target's DSSBS; DIT is kept.
+        // With FEAT_PAN, PAN is set on taking an exception when the target's
+        // SPAN is 0 — to EL1, and to EL2 in the host (FEAT_VHE,
+        // `HCR_EL2.{E2H, TGE}` {1, 1}, where `SCTLR_EL2.SPAN` exists; the
+        // IMPLEMENTATION DEFINED "Set PAN as 1 when E2H,TGE is '10'" is FALSE
+        // here, Arm requiring it only of FEAT_NV3) — and otherwise kept; UAO
+        // is cleared; SSBS becomes the target's DSSBS; DIT is kept.
+        let span_applies = match to {
+            El::El1 => true,
+            El::El2 => self.el0_in_host(),
+            El::El0 => false,
+        };
         let pan = self.pstate.pan
-            || (to == El::El1 && self.implements(Feature::Pan) && sctlr & sctlr::SPAN == 0);
+            || (span_applies && self.implements(Feature::Pan) && sctlr & sctlr::SPAN == 0);
         let ssbs = self.implements(Feature::Ssbs) && sctlr & sctlr::DSSBS != 0;
         self.pstate = Pstate {
             n: self.pstate.n,

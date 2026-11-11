@@ -70,7 +70,7 @@ use rusty_box_core::SnapError;
 use super::debug::{WatchedAccess, WatchedRange};
 use super::dp::ones;
 use super::el2::{
-    El2Reg, El2Regs, El2Storage, HCR_CD, HCR_DC, HCR_PTW, HCR_TGE, HCR_VM, VTTBR_VMID8,
+    E2hLayout, El2Reg, El2Regs, El2Storage, HCR_CD, HCR_DC, HCR_PTW, HCR_TGE, HCR_VM, VTTBR_VMID8,
 };
 use super::exception::{AccessSyndrome, AddressedClass, Exception, SyndromeClass, SyndromeSlot};
 use super::exec::{Fault, StopCause};
@@ -1850,36 +1850,77 @@ impl TaggedContext for El10Context {
     }
 }
 
-/// What the EL2 regime's translations read of its registers: of
-/// `SCTLR_EL2` what [`walk_sctlr`] keeps; `TCR_EL2`; and with
-/// stage 1 enabled `TTBR0_EL2` and `MAIR_EL2`. Its entries carry no context:
-/// a write that changes this empties the TLB, and one that leaves it as it
-/// was changes nothing, as for [`El10Context`] without EL2.
+/// What the translations of EL2's regime read of its registers: which
+/// regime it is, EL2 or with FEAT_VHE's `HCR_EL2.E2H` EL2&0 (whose
+/// entries EL0 in the host hits too); of `SCTLR_EL2` what [`walk_sctlr`]
+/// keeps; `TCR_EL2`; and with stage 1 enabled `TTBR0_EL2`, `TTBR1_EL2`
+/// (EL2&0's alone) and `MAIR_EL2`. Its entries carry no context: a write
+/// that changes this empties the TLB, and one that leaves it as it was
+/// changes nothing, as for [`El10Context`] without EL2. So every EL2&0
+/// entry was made under the ASID the registers give now, and `E2H` changes
+/// the regime only with an empty TLB, as Arm permits a TLB to cache `E2H`
+/// (D8.13.1, ISTSYY).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct El2RegimeContext {
+    layout: E2hLayout,
     sctlr_el2: u64,
     tcr_el2: u64,
     ttbr0_el2: u64,
+    ttbr1_el2: u64,
     mair_el2: u64,
 }
 
 impl El2RegimeContext {
     /// The context of a processor without EL2, which has no EL2 regime.
     pub(crate) const NONE: Self = Self {
+        layout: E2hLayout::E2h0,
         sctlr_el2: 0,
         tcr_el2: 0,
         ttbr0_el2: 0,
+        ttbr1_el2: 0,
         mair_el2: 0,
     };
 
     /// The context the EL2 registers `regs` make.
     pub(crate) const fn of(regs: &El2Regs) -> Self {
         let stage1 = regs.sctlr & sctlr::M != 0;
+        let layout = regs.layout();
+        let two_ranges = matches!(layout, E2hLayout::E2h1);
         Self {
+            layout,
             sctlr_el2: walk_sctlr(regs.sctlr, stage1),
             tcr_el2: regs.tcr,
             ttbr0_el2: walk_only(regs.ttbr0, stage1),
+            ttbr1_el2: walk_only(regs.ttbr1, stage1 && two_ranges),
             mair_el2: walk_only(regs.mair, stage1),
+        }
+    }
+
+    /// EL2's regime, which every entry of EL2's was made in: EL2&0 under
+    /// `E2H`, EL2 otherwise.
+    const fn regime(&self) -> Regime {
+        match self.layout {
+            E2hLayout::E2h0 => Regime::El2,
+            E2hLayout::E2h1 => Regime::El20,
+        }
+    }
+
+    /// What a TLB maintenance instruction reads of the context the entries
+    /// of EL2's regime were made in, on a processor implementing
+    /// `features`: the EL2&0 regime's ASID and granules
+    /// ([`MadeUnder::el20`]), or the EL2 regime's granule.
+    fn made_under(&self, features: Features) -> MadeUnder {
+        match self.layout {
+            E2hLayout::E2h0 => MadeUnder::el2(self.tcr_el2, features),
+            E2hLayout::E2h1 => MadeUnder::el20(self, features),
+        }
+    }
+
+    /// The granules the walks of this context are made with.
+    fn granules(&self, features: Features) -> WalkGranules {
+        match self.layout {
+            E2hLayout::E2h0 => WalkGranules::el2(self.tcr_el2, features),
+            E2hLayout::E2h1 => WalkGranules::two_ranges(self.tcr_el2, None, features),
         }
     }
 }
@@ -1931,10 +1972,12 @@ impl Stage2Context {
     /// Whether `VTTBR_EL2` and `VTCR_EL2` can hold this context's values on
     /// a processor implementing `features`: each what an `MSR` keeps of
     /// itself ([`El2Reg::kept`], which reads its SPSR mask for `SPSR_EL2`
-    /// alone).
+    /// alone, and the layout `HCR_EL2.E2H` selects for the registers it
+    /// redefines alone, which these are not).
     const fn held_by(&self, features: Features) -> bool {
-        El2Reg::Vttbr.kept(features, 0, self.vttbr_el2) == self.vttbr_el2
-            && El2Reg::Vtcr.kept(features, 0, self.vtcr_el2) == self.vtcr_el2
+        let layout = E2hLayout::E2h0;
+        El2Reg::Vttbr.kept(features, 0, layout, self.vttbr_el2) == self.vttbr_el2
+            && El2Reg::Vtcr.kept(features, 0, layout, self.vtcr_el2) == self.vtcr_el2
     }
 
     /// Where this context's walks start on a processor implementing
@@ -2021,12 +2064,20 @@ impl WalkGranules {
     /// The granules of the EL1&0 regime's context `context` on a processor
     /// implementing `features`.
     fn el10(context: &El10Context, features: Features) -> Self {
+        let stage2 = context
+            .stage2_context()
+            .map(|stage2| stage2.granule(features));
+        Self::two_ranges(context.tcr_el1, stage2, features)
+    }
+
+    /// The granules of a regime with two ranges under `tcr` in `TCR_EL1`'s
+    /// layout — `TCR_EL1` of EL1&0, `TCR_EL2` of EL2&0 — with stage 2's
+    /// granule `stage2` where stage 2 translates it.
+    fn two_ranges(tcr: u64, stage2: Option<Granule>, features: Features) -> Self {
         Self {
-            lower: Granule::el10(context.tcr_el1, false, features),
-            upper: Granule::el10(context.tcr_el1, true, features),
-            stage2: context
-                .stage2_context()
-                .map(|stage2| stage2.granule(features)),
+            lower: Granule::el10(tcr, false, features),
+            upper: Granule::el10(tcr, true, features),
+            stage2,
         }
     }
 
@@ -2105,6 +2156,23 @@ impl MadeUnder {
             granules: WalkGranules::el2(tcr, features),
         }
     }
+
+    /// The EL2&0 regime's context `context`, which carries no VMID (Arm
+    /// `UseVMID`) and the ASID `TCR_EL2.A1` chooses of `TTBR0_EL2`'s and
+    /// `TTBR1_EL2`'s (`AArch64_TLBContextEL20`). The context holds both
+    /// whole with stage 1 enabled, the one state its entries are made in:
+    /// with stage 1 disabled the EL2&0 regime uses no TLB entry.
+    fn el20(context: &El2RegimeContext, features: Features) -> Self {
+        Self {
+            vmid: None,
+            asid: Some(Asid::el10(
+                context.tcr_el2,
+                context.ttbr0_el2,
+                context.ttbr1_el2,
+            )),
+            granules: context.granules(features),
+        }
+    }
 }
 
 /// The two pages of a store that crosses a page boundary, both translated.
@@ -2153,8 +2221,13 @@ const PAGE_NUMBER: u64 = (1 << PAGE_BITS) - 1;
 /// The bits of an address within its 4 KiB page, the smallest translation
 /// an entry holds.
 const PAGE_SHIFT: u32 = 12;
-/// The bit of a TLB key that names the EL2 regime, above every page number.
+/// The bit of a TLB key that names a regime of EL2's, EL2 or EL2&0, above
+/// every page number.
 const KEY_EL2: u64 = 1 << 63;
+/// The bit of a key with [`KEY_EL2`] set that names the EL2&0 regime: the
+/// top bit of the context tag, which no entry of EL2's carries
+/// ([`regime_bits`]).
+const KEY_EL20: u64 = 1 << 62;
 /// How many contexts of each kind a processor with EL2 keeps entries of at
 /// once: EL1&0 contexts ([`El10Context`]) and stage 2 contexts
 /// ([`Stage2Context`]).
@@ -2181,15 +2254,29 @@ const _: () = assert!(TAG_SHIFT + PLACE_BITS + 7 == 63);
 /// The key a translation of `va` in `regime` is cached under, without its
 /// context's tag ([`Cpu::tlb_key`] adds it): its virtual page number, with
 /// what it belongs to beyond it (Arm `TLBContext`,
-/// `AArch64_GetS1TLBContext`), the regime, in bit 63. An access hits only
-/// an entry of its own regime, so a page EL1 and EL2 both map at one
-/// address is two entries, never one taken for the other.
+/// `AArch64_GetS1TLBContext`), the regime ([`regime_bits`]). An access
+/// hits only an entry of its own regime, so a page EL1 and EL2 both map at
+/// one address is two entries, never one taken for the other.
 #[inline(always)]
 const fn page_key(va: u64, regime: Regime) -> u64 {
-    (va >> 12) | ((regime as u64) << 63)
+    (va >> 12) | regime_bits(regime)
 }
 
-const _: () = assert!((Regime::El10 as u64) << 63 == 0 && (Regime::El2 as u64) << 63 == KEY_EL2);
+/// The bits of a key that name `regime`: none for EL1&0, whose entries
+/// carry their context's tag with EL2; [`KEY_EL2`] for EL2's; and
+/// [`KEY_EL2`] with [`KEY_EL20`] for EL2&0's. Entries of EL2's two regimes
+/// carry no tag: a write that changes what their walks read, `HCR_EL2.E2H`
+/// among it, empties the TLB.
+#[inline(always)]
+const fn regime_bits(regime: Regime) -> u64 {
+    match regime {
+        Regime::El10 => 0,
+        Regime::El2 => KEY_EL2,
+        Regime::El20 => KEY_EL2 | KEY_EL20,
+    }
+}
+
+const _: () = assert!(KEY_EL20 & TAG_MASK != 0 && KEY_EL2 & (TAG_MASK | PAGE_NUMBER) == 0);
 
 /// The tag in a key of the context at `index` in one of the TLB's tables,
 /// in the place's generation `generation`.
@@ -2223,12 +2310,14 @@ struct TagPlace {
     generation: u8,
 }
 
-/// The regime an entry's key names.
+/// The regime an entry's key names ([`regime_bits`]).
 const fn key_regime(key: u64) -> Regime {
-    if key & KEY_EL2 != 0 {
-        Regime::El2
-    } else {
+    if key & KEY_EL2 == 0 {
         Regime::El10
+    } else if key & KEY_EL20 != 0 {
+        Regime::El20
+    } else {
+        Regime::El2
     }
 }
 
@@ -2237,6 +2326,7 @@ const fn byte_regime(byte: u8) -> Option<Regime> {
     match byte {
         b if b == Regime::El10 as u8 => Some(Regime::El10),
         b if b == Regime::El2 as u8 => Some(Regime::El2),
+        b if b == Regime::El20 as u8 => Some(Regime::El20),
         _ => None,
     }
 }
@@ -2897,8 +2987,9 @@ impl<L: Levels> Tlb<L> {
     /// in the table of EL1&0 contexts and a kept translation's by its place
     /// in the table of stage 2 contexts; without EL2 an EL1&0 entry's by
     /// `el10`, the registers' now, as every write that changes them empties
-    /// the TLB; an EL2 entry's by `el2`, likewise. An entry whose place
-    /// holds no context, which no lookup finds, goes too.
+    /// the TLB; an entry of EL2's regime, EL2 or EL2&0, by `el2`, likewise.
+    /// An entry whose place holds no context, which no lookup finds, goes
+    /// too.
     fn invalidate(
         &mut self,
         op: &Invalidation,
@@ -2925,7 +3016,7 @@ impl<L: Levels> Tlb<L> {
                 continue;
             }
             let made = match (key_regime(entry.key), tag_place(entry.key)) {
-                (Regime::El2, _) => Some(el2),
+                (Regime::El2 | Regime::El20, _) => Some(el2),
                 (Regime::El10, Some(place)) => el10_places[place.index],
                 (Regime::El10, None) => Some(el10),
             };
@@ -3044,7 +3135,7 @@ impl<L: Levels> Tlb<L> {
         let valid = self.entries.iter().filter(|e| can_match(e.key)).count();
         w.write_u32(valid as u32)?;
         for e in self.entries.iter().filter(|e| can_match(e.key)) {
-            w.write_u64(e.key & !KEY_EL2)?;
+            w.write_u64(e.key & !regime_bits(key_regime(e.key)))?;
             w.write_u64(e.pa_page)?;
             w.write_bytes(&[
                 e.s1.perms,
@@ -3164,15 +3255,21 @@ impl<L: Levels> Tlb<L> {
                 memory: s2_memory,
                 level: s2_level,
             };
+            // An entry of EL2's carries no tag, and is of the regime EL2's
+            // registers make now, every entry of EL2's having been made in
+            // it ([`El2RegimeContext`]).
             let regime = match byte_regime(regime) {
                 Some(Regime::El10) => Regime::El10,
-                Some(Regime::El2) if !el2 => {
+                Some(Regime::El2 | Regime::El20) if !el2 => {
                     return Err(SnapError::Invalid(
                         "TLB entry is of a regime this processor lacks",
                     ));
                 }
-                Some(Regime::El2) if page & TAG_MASK != 0 => return Err(NO_CONTEXT),
-                Some(Regime::El2) => Regime::El2,
+                Some(Regime::El2 | Regime::El20) if page & TAG_MASK != 0 => return Err(NO_CONTEXT),
+                Some(regime @ (Regime::El2 | Regime::El20)) if regime != context.el2.regime() => {
+                    return Err(NO_CONTEXT)
+                }
+                Some(regime @ (Regime::El2 | Regime::El20)) => regime,
                 None => return Err(SnapError::Invalid("TLB entry names no translation regime")),
             };
             let Some(stage1) = Stage1::from_code(stage1) else {
@@ -3180,7 +3277,7 @@ impl<L: Levels> Tlb<L> {
             };
             let made_in = match regime {
                 Regime::El10 => Some(context_of(page)?),
-                Regime::El2 => None,
+                Regime::El2 | Regime::El20 => None,
             };
             let va = (page & !TAG_MASK) << 12;
             let stage2 = match made_in.and_then(|made_in| made_in.stage2_context()) {
@@ -3198,9 +3295,12 @@ impl<L: Levels> Tlb<L> {
             // an output address stage 2 translates.
             // The range of the entry's address in its regime, as the
             // context it was made in describes it.
-            let range = match made_in {
-                Some(made_in) => S1Range::el10(made_in.tcr_el1, regime.upper(va), features),
-                None => S1Range::el2(context.el2.tcr_el2, features),
+            let range = match (made_in, regime) {
+                (Some(made_in), _) => S1Range::el10(made_in.tcr_el1, regime.upper(va), features),
+                (None, Regime::El20) => {
+                    S1Range::el10(context.el2.tcr_el2, regime.upper(va), features)
+                }
+                (None, Regime::El10 | Regime::El2) => S1Range::el2(context.el2.tcr_el2, features),
             };
             // Stage 1's walk gives Normal memory Non-cacheable under its
             // regime's `SCTLR_ELx.C` clear (`AArch64_S1TreatAsNormalNC`).
@@ -3227,16 +3327,19 @@ impl<L: Levels> Tlb<L> {
                         && s1_memory
                             == Memory::s1_disabled(el10_s1_disabled_data_normal(made_in.hcr_el2))
                 }
-                // The EL2 regime has no ASIDs: every one of its leaves is
-                // global.
-                (None, Stage1::Walked(TranslationScope::Global)) => {
+                // The EL2 regime has no ASIDs and no EL0: every one of its
+                // leaves is global, and gives EL0 nothing. The EL2&0
+                // regime's are as the EL1&0 regime's walks give them.
+                (None, Stage1::Walked(scope)) => {
+                    let unprivileged = regime.has_unprivileged();
                     context.el2_stage1()
                         && range.reaches(va, features, level)
                         && perms & !(PERMS | guarded) == 0
-                        && perms & PERMS_EL0 == 0
+                        && (unprivileged || perms & PERMS_EL0 == 0)
+                        && (unprivileged || scope == TranslationScope::Global)
                         && s1_walked_memory(context.el2.sctlr_el2)
                 }
-                (None, Stage1::Walked(TranslationScope::NonGlobal) | Stage1::Disabled) => false,
+                (None, Stage1::Disabled) => false,
             };
             // An entry stage 2 takes no part in holds `Stage2Leaf::NONE`; one
             // it does, a stage 2 leaf its walk can end at.
@@ -3255,14 +3358,17 @@ impl<L: Levels> Tlb<L> {
             if !stage1_valid || !stage2_valid || memory != entry_memory(s1_memory, s2_memory, cd) {
                 return Err(NOT_WALKED);
             }
-            let e0pd_refused =
-                made_in.is_some_and(|made_in| e0pd_set(features, made_in.tcr_el1, va));
+            let e0pd_refused = match (made_in, regime) {
+                (Some(made_in), _) => e0pd_set(features, made_in.tcr_el1, va),
+                (None, Regime::El20) => e0pd_set(features, context.el2.tcr_el2, va),
+                (None, Regime::El10 | Regime::El2) => false,
+            };
             if stage1.walked() && perms & PERMS_EL0 != 0 && e0pd_refused {
                 return Err(SnapError::Invalid(
                     "TLB entry gives EL0 a page FEAT_E0PD refuses it",
                 ));
             }
-            let key = page | ((regime as u64) << 63);
+            let key = page | regime_bits(regime);
             let entry = TlbEntry {
                 key,
                 pa_page,
@@ -3281,7 +3387,7 @@ impl<L: Levels> Tlb<L> {
             // ([`Tlb::held`]).
             let granules = match made_in {
                 Some(made_in) => WalkGranules::el10(&made_in, features),
-                None => WalkGranules::el2(context.el2.tcr_el2, features),
+                None => context.el2.granules(features),
             };
             let bits = granules.entry_bits(regime, va, &entry.s1, &entry.s2);
             if (pa_page ^ va) & ((1 << bits) - 1) != 0 {
@@ -3384,7 +3490,7 @@ impl<L: Levels> Cpu<L> {
     pub(crate) fn invalidate_tlb(&mut self, op: &Invalidation) {
         let features = self.imp.features;
         let el10 = MadeUnder::el10(&self.el10_context(), features);
-        let el2 = MadeUnder::el2(self.el2().tcr, features);
+        let el2 = El2RegimeContext::of(self.el2()).made_under(features);
         self.tlb.invalidate(op, el10, el2, features);
         self.trace_break = true;
     }
@@ -3397,6 +3503,7 @@ impl<L: Levels> Cpu<L> {
         match regime {
             Regime::El10 => WalkGranules::el10(&self.el10_context(), features),
             Regime::El2 => WalkGranules::el2(self.el2().tcr, features),
+            Regime::El20 => WalkGranules::two_ranges(self.el2().tcr, None, features),
         }
     }
 
@@ -4050,14 +4157,15 @@ impl<L: Levels> Cpu<L> {
     ) {
         let regime = key_regime(key);
         debug_assert!(
-            !L::EL2 || regime == Regime::El2 || key & TAG_MASK != 0,
+            !L::EL2 || regime != Regime::El10 || key & TAG_MASK != 0,
             "an EL1&0 entry is made in a found context"
         );
         let fetch_faults = kind != AccessKind::Fetch
             && regime.canonical(va) != va
             && !self.regime_tbi(regime, regime.upper(va), true);
-        let e0pd_refuses_permitted =
-            s1.stage1.walked() && s1.perms & PERMS_EL0 != 0 && self.e0pd_refuses(va, El::El0);
+        let e0pd_refuses_permitted = s1.stage1.walked()
+            && s1.perms & PERMS_EL0 != 0
+            && self.e0pd_refuses(regime, va, El::El0);
         if fetch_faults || e0pd_refuses_permitted {
             return;
         }
@@ -4079,17 +4187,23 @@ impl<L: Levels> Cpu<L> {
         self.tlb.fill_held(entry, bits);
     }
 
-    /// The E0PD rule of Arm `AArch64_S1Translate` (FEAT_E0PD): with
-    /// `TCR_EL1.E0PD0` or `E0PD1` set, an access at `va` checked against
-    /// EL0's permissions (`accdesc.el`, EL0's for LDTR and STTR at EL1
-    /// without PSTATE.UAO), which only the EL1&0 regime has, takes a level 0
-    /// translation fault, ahead of the walk. Every such access walks
-    /// ([`Cpu::s1_walk`]), as the TLB holds no page E0PD refuses EL0 that
-    /// EL0 has a permission for ([`Cpu::cache`]), so a hit refuses it and a
-    /// refused hit walks; or is [`Cpu::cache_maintenance`]'s, whose
-    /// accesses can need no permission.
-    fn e0pd_refuses(&self, va: u64, el: El) -> bool {
-        el == El::El0 && e0pd_set(self.imp.features, self.sys.tcr_el1, va)
+    /// The E0PD rule of Arm `AArch64_S1Translate` (FEAT_E0PD): with the
+    /// `E0PD0` or `E0PD1` of `regime`'s `TCR_ELx` set — `TCR_EL1`'s in
+    /// EL1&0, `TCR_EL2`'s in EL2&0, at the same bits — an access at `va`
+    /// checked against EL0's permissions (`accdesc.el`, EL0's for LDTR and
+    /// STTR at EL1 without PSTATE.UAO, and at EL2 in the host), which only a
+    /// regime with EL0 has, takes a level 0 translation fault, ahead of the
+    /// walk. Every such access walks ([`Cpu::s1_walk`]), as the TLB holds no
+    /// page E0PD refuses EL0 that EL0 has a permission for ([`Cpu::cache`]),
+    /// so a hit refuses it and a refused hit walks; or is
+    /// [`Cpu::cache_maintenance`]'s, whose accesses can need no permission.
+    fn e0pd_refuses(&self, regime: Regime, va: u64, el: El) -> bool {
+        let tcr = match regime {
+            Regime::El10 => self.sys.tcr_el1,
+            Regime::El20 => self.el2().tcr,
+            Regime::El2 => return false,
+        };
+        el == El::El0 && e0pd_set(self.imp.features, tcr, va)
     }
 
     /// Stage 1 of `regime` for an access of `kind` at `va` checked against
@@ -4167,7 +4281,7 @@ impl<L: Levels> Cpu<L> {
         el: El,
         walks: &mut Walks<'_>,
     ) -> Result<Walked, NoTranslation> {
-        if self.e0pd_refuses(va, el) {
+        if self.e0pd_refuses(regime, va, el) {
             return Err(NoTranslation::stage1(TranslationFault::Translation {
                 level: Level::Zero,
             }));
@@ -4186,20 +4300,34 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// The PAN rule of Arm `AArch64_S1DirectBasePermissions` (FEAT_PAN):
-    /// while PSTATE.PAN is set, an EL1 access subject to it has no access
-    /// to memory EL0 can read or write, nor, with FEAT_PAN3 and
-    /// `SCTLR_EL1.EPAN` set, to memory EL0 can execute. EL0's execute
-    /// permission in `perms` is after WXN, which differs from the rule's
-    /// `ux` only where EL0 can write, which the rule refuses anyway.
+    /// while PSTATE.PAN is set, a privileged access subject to it, in a
+    /// regime with EL0 (`HasUnprivileged`), has no access to memory EL0 can
+    /// read or write, nor, with FEAT_PAN3 and the regime's `SCTLR_ELx.EPAN`
+    /// set, to memory EL0 can execute: an EL1 access in EL1&0, and an EL2
+    /// one in EL2&0 (FEAT_VHE; Arm ARM D8.13.1: "The Privileged Access Never
+    /// mechanism applies to data accesses from EL2"). An entry of the EL2
+    /// regime gives EL0 no permission, so an EL2 access is tested whatever
+    /// its regime. EL0's execute permission in `perms` is after WXN, which
+    /// differs from the rule's `ux` only where EL0 can write, which the rule
+    /// refuses anyway.
     #[inline(always)]
     fn pan_refuses(&self, perms: u8, el: El) -> bool {
-        // `PSTATE.PAN` set and `el` EL1, as one test of every data access:
-        // PAN is 0 or 1 and EL1's is the one odd index (asserted beside
-        // `permitted`).
-        if el.index() & u64::from(self.pstate.pan) == 0 {
+        // Without EL2, `PSTATE.PAN` set and `el` EL1 as one test of every
+        // data access: PAN is 0 or 1 and EL1's is the one odd index
+        // (asserted beside `permitted`).
+        let applies = if L::EL2 {
+            self.pstate.pan && el != El::El0
+        } else {
+            el.index() & u64::from(self.pstate.pan) != 0
+        };
+        if !applies {
             return false;
         }
-        let epan = self.implements(Feature::Pan3) && self.sys.sctlr_el1 & sctlr::EPAN != 0;
+        let control = match el {
+            El::El2 => self.el2().sctlr,
+            El::El0 | El::El1 => self.sys.sctlr_el1,
+        };
+        let epan = self.implements(Feature::Pan3) && control & sctlr::EPAN != 0;
         let reachable = PERM_EL0_R | PERM_EL0_W | if epan { PERM_EL0_X } else { 0 };
         perms & reachable != 0
     }
@@ -4703,11 +4831,20 @@ impl<L: Levels> Cpu<L> {
         } else {
             AccessKind::Read
         };
-        let (regime, el) = match check {
-            AtCheck::El0 => (Regime::El10, El::El0),
-            AtCheck::El1 | AtCheck::El1Pan => (Regime::El10, El::El1),
-            AtCheck::El2 => (Regime::El2, El::El2),
+        // Arm `AArch64_AT`: in the host (`ELIsInHost(EL0)`, FEAT_VHE) a stage
+        // 1 translation as EL1 is EL2's, and each level's regime is
+        // `TranslationRegime(el)`: `AT S1E0*` and `AT S1E1*` in EL2&0 there,
+        // `AT S1E2*` in EL2&0 under `HCR_EL2.E2H`.
+        let named = match check {
+            AtCheck::El0 => El::El0,
+            AtCheck::El1 | AtCheck::El1Pan => El::El1,
+            AtCheck::El2 => El::El2,
         };
+        let el = match (named, stages) {
+            (El::El1, AtStages::One) if self.el0_in_host() => El::El2,
+            (named, AtStages::One | AtStages::OneAndTwo) => named,
+        };
+        let regime = self.regime_at(el);
         let permits = |cpu: &Self, perms: u8| match check {
             AtCheck::El0 | AtCheck::El1 | AtCheck::El2 => permitted(perms, kind, el),
             AtCheck::El1Pan => cpu.permits(perms, kind, el),
@@ -4982,14 +5119,14 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// The EL whose permissions a data access is checked against: EL0's for
-    /// LDTR and STTR at EL1 unless PSTATE.UAO is set, the current EL's for
-    /// every other access (Arm `AArch64_IsUnprivAccessPriv`: with no FEAT_NV
-    /// and no FEAT_VHE they are privileged at EL2, whose regime has no EL0).
-    /// At EL0 they are EL0's either way, so only a processor with EL2 tests
-    /// the level.
+    /// LDTR and STTR at EL1, and at EL2 in the host (`HCR_EL2.{E2H, TGE}`
+    /// {1, 1}, FEAT_VHE), unless PSTATE.UAO is set, the current EL's for
+    /// every other access (Arm `AArch64_IsUnprivAccessPriv`: with no
+    /// FEAT_NV they are privileged at EL2 otherwise). At EL0 they are EL0's
+    /// either way, so only a processor with EL2 tests the level.
     #[inline]
     fn access_el(&self, acc: DataAccess) -> El {
-        let below_el2 = !L::EL2 || self.pstate.el != El::El2;
+        let below_el2 = !L::EL2 || self.pstate.el != El::El2 || self.el0_in_host();
         if acc.unprivileged && below_el2 && !self.pstate.uao {
             El::El0
         } else {
@@ -5786,7 +5923,7 @@ impl<L: Levels> Cpu<L> {
         let needs = Needs::Maintenance(op);
         // Ahead of the TLB as well as the walk: an operation that needs no
         // permission would pass a hit E0PD refuses.
-        if self.s1_enabled(regime) && self.e0pd_refuses(va, el) {
+        if self.s1_enabled(regime) && self.e0pd_refuses(regime, va, el) {
             let refused = Abort::first(Fsc::Translation(Level::Zero), true);
             return Err(Self::maintenance_abort(va, refused));
         }
@@ -5903,10 +6040,11 @@ impl<L: Levels> Cpu<L> {
         if !base_is_sp || base & 0xF == 0 {
             return Ok(());
         }
+        // `SA0` of EL0's `SCTLR_ELx`: `SCTLR_EL2`'s in the host (FEAT_VHE).
         let enabled = match self.pstate.el {
             El::El2 => self.el2().sctlr & sctlr::SA != 0,
             El::El1 => self.sys.sctlr_el1 & sctlr::SA != 0,
-            El::El0 => self.sys.sctlr_el1 & sctlr::SA0 != 0,
+            El::El0 => self.el0_sctlr() & sctlr::SA0 != 0,
         };
         if enabled {
             Err(Exception::new(SyndromeClass::SpAlignment, 0).into())

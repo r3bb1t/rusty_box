@@ -58,7 +58,9 @@ impl Asid {
     /// The ASID the EL1&0 regime's translations carry under `TCR_EL1`
     /// `tcr`, `TTBR0_EL1` `ttbr0` and `TTBR1_EL1` `ttbr1`
     /// (`AArch64_TLBContextEL10` without FEAT_ASID2): `TTBR1_EL1`'s under
-    /// `A1`, else `TTBR0_EL1`'s, its top eight bits zero without `AS`.
+    /// `A1`, else `TTBR0_EL1`'s, its top eight bits zero without `AS`; and
+    /// the EL2&0 regime's alike, of `TCR_EL2` in its `E2H` 1 layout,
+    /// `TTBR0_EL2` and `TTBR1_EL2` (`AArch64_TLBContextEL20`).
     pub(crate) const fn el10(tcr: u64, ttbr0: u64, ttbr1: u64) -> Self {
         let ttbr = if tcr & TCR_A1 != 0 { ttbr1 } else { ttbr0 };
         let asid = (ttbr >> 48) as u16;
@@ -79,7 +81,7 @@ impl Asid {
 pub(crate) enum TranslationScope {
     /// `nG` clear, and every translation of a regime without ASIDs.
     Global,
-    /// `nG` set in the EL1&0 regime.
+    /// `nG` set in a regime with ASIDs, EL1&0 or EL2&0.
     NonGlobal,
 }
 
@@ -201,20 +203,30 @@ pub(crate) enum Asids {
 
 /// What one TLBI invalidates: the `TLBIRecord` its operation makes, as
 /// `TLBIMatch` reads it. Every operation of the EL1&0 regime carries the
-/// current VMID where the processor has EL2 (`UseVMID`).
+/// current VMID where the processor has EL2 (`UseVMID`); one of EL2's
+/// regimes, none. The operations by stage 1 name their regime: the EL1&0
+/// regime's forms reach EL2&0 in the host, and the EL2 regime's forms
+/// EL2&0 under `HCR_EL2.E2H` (FEAT_VHE; `AArch64_TLBI_VMALL`,
+/// `AArch64_TLBI_ASID`, `AArch64_TLBI_VA` and their siblings).
 ///
 /// Closed (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Invalidation {
-    /// `VMALLE1` (`TLBIOp_VMALL`): every translation of the EL1&0 regime
-    /// holding stage 1's information, of the VMID.
-    El10Stage1 { vmid: Option<Vmid> },
-    /// `ASIDE1` (`TLBIOp_ASID`): the non-global ones of the ASID.
-    El10Asid { vmid: Option<Vmid>, asid: Asid },
-    /// `VAE1`, `VAAE1`, `RVAE1`, `RVAAE1` and their Last-level forms
-    /// (`TLBIOp_VA`, `TLBIOp_VAA`, `TLBIOp_RVA`, `TLBIOp_RVAA`): those of
-    /// the addresses, of the ASIDs.
-    El10Va {
+    /// `VMALLE1` (`TLBIOp_VMALL`): every translation of the regime holding
+    /// stage 1's information, of the VMID.
+    Stage1 { regime: Regime, vmid: Option<Vmid> },
+    /// `ASIDE1` (`TLBIOp_ASID`): the regime's non-global ones of the ASID.
+    Asid {
+        regime: Regime,
+        vmid: Option<Vmid>,
+        asid: Asid,
+    },
+    /// `VAE1`, `VAAE1`, `RVAE1`, `RVAAE1`, `VAE2`, `RVAE2` and their
+    /// Last-level forms (`TLBIOp_VA`, `TLBIOp_VAA`, `TLBIOp_RVA`,
+    /// `TLBIOp_RVAA`): the regime's of the addresses, of the ASIDs; every
+    /// translation of the EL2 regime, which has no ASIDs, is global.
+    Va {
+        regime: Regime,
         vmid: Option<Vmid>,
         asids: Asids,
         addresses: Addresses,
@@ -231,30 +243,33 @@ pub(crate) enum Invalidation {
         vmid: Option<Vmid>,
         addresses: Addresses,
     },
-    /// `ALLE2` (`TLBIOp_ALL`): every translation of the EL2 regime.
+    /// `ALLE2` (`TLBIOp_ALL`): every translation of the EL2 regime and of
+    /// the EL2&0 regime, which `TLBIMatch` takes alike for an AArch64
+    /// `ALLE2` (`relax_regime`).
     El2Every,
-    /// `VAE2`, `RVAE2` and their Last-level forms: the EL2 regime's of the
-    /// addresses, which carry no ASID.
-    El2Va { addresses: Addresses },
 }
 
 impl Invalidation {
     /// Arm `TLBIMatch`: whether this removes `record`, of a processor
     /// whose physical addresses are `pa_bits` wide (`NUM_PABITS`, the bits
     /// of an IPA it compares). VMIDs agree as `use_vmid` and `vmid` are
-    /// compared: both absent without EL2, else equal.
+    /// compared: both absent without EL2 and outside EL1&0, else equal.
     pub(crate) fn matches(&self, record: &TlbRecord, pa_bits: u32) -> bool {
         let el10 = record.regime == Regime::El10;
         let stage1 = record.holds == Holds::Stage1;
         match *self {
-            Self::El10Stage1 { vmid } => el10 && stage1 && vmid == record.vmid,
-            Self::El10Asid { vmid, asid } => {
-                el10 && stage1
+            Self::Stage1 { regime, vmid } => {
+                record.regime == regime && stage1 && vmid == record.vmid
+            }
+            Self::Asid { regime, vmid, asid } => {
+                record.regime == regime
+                    && stage1
                     && vmid == record.vmid
                     && record.scope == TranslationScope::NonGlobal
                     && record.asid == Some(asid)
             }
-            Self::El10Va {
+            Self::Va {
+                regime,
                 vmid,
                 asids,
                 addresses,
@@ -265,7 +280,8 @@ impl Invalidation {
                     }
                     Asids::All => true,
                 };
-                el10 && stage1
+                record.regime == regime
+                    && stage1
                     && vmid == record.vmid
                     && asid_matches
                     && addresses.match_input(record, VA_BITS)
@@ -275,8 +291,7 @@ impl Invalidation {
             Self::Ipa { vmid, addresses } => {
                 el10 && !stage1 && vmid == record.vmid && addresses.match_input(record, pa_bits)
             }
-            Self::El2Every => !el10,
-            Self::El2Va { addresses } => !el10 && stage1 && addresses.match_input(record, VA_BITS),
+            Self::El2Every => matches!(record.regime, Regime::El2 | Regime::El20),
         }
     }
 }
@@ -356,38 +371,70 @@ impl<L: Levels> Cpu<L> {
     /// invalidates nothing (`TLBIRange`'s `valid`).
     pub(crate) fn tlbi_invalidation(&self, form: TlbiForm, xt: u64) -> Option<Invalidation> {
         let vmid = self.current_vmid();
-        let el1_large = self.sys.tcr_el1 & TCR_EL1_DS != 0;
-        let el2_large = self.el2().tcr & TCR_EL2_DS != 0;
+        // The EL1&0 regime's forms, executed at EL2 in the host (FEAT_VHE,
+        // `ELIsInHost(EL0)`), invalidate the EL2&0 regime's translations,
+        // which carry no VMID; the EL2 regime's forms under `HCR_EL2.E2H`
+        // too, by ASID where the operation names one.
+        let (el1_regime, el1_vmid) = if self.el0_in_host() {
+            (Regime::El20, None)
+        } else {
+            (Regime::El10, vmid)
+        };
+        let el2_regime = if self.e2h() {
+            Regime::El20
+        } else {
+            Regime::El2
+        };
+        let large = |regime: Regime| match regime {
+            Regime::El10 => self.sys.tcr_el1 & TCR_EL1_DS != 0,
+            Regime::El2 => self.el2().tcr & TCR_EL2_DS != 0,
+            Regime::El20 => self.el2().tcr & TCR_EL1_DS != 0,
+        };
         let ipa_large = self.el2().vtcr & VTCR_EL2_DS != 0;
         let va = Addresses::At {
             address: (xt & ((1 << 44) - 1)) << 12,
             hint: self.level_hint(xt),
         };
+        // `TLBIMatch` compares an ASID only for a regime with them
+        // (`UseASID`): an EL2 regime's operation reaches every one of its
+        // translations, each of which is global.
+        let el2_asids = match el2_regime {
+            Regime::El20 => Asids::Named(Asid::named(xt)),
+            Regime::El10 | Regime::El2 => Asids::All,
+        };
         let invalidation = match form {
-            TlbiForm::VmallE1 => Invalidation::El10Stage1 { vmid },
-            TlbiForm::AsidE1 => Invalidation::El10Asid {
-                vmid,
+            TlbiForm::VmallE1 => Invalidation::Stage1 {
+                regime: el1_regime,
+                vmid: el1_vmid,
+            },
+            TlbiForm::AsidE1 => Invalidation::Asid {
+                regime: el1_regime,
+                vmid: el1_vmid,
                 asid: Asid::named(xt),
             },
-            TlbiForm::VaE1 => Invalidation::El10Va {
-                vmid,
+            TlbiForm::VaE1 => Invalidation::Va {
+                regime: el1_regime,
+                vmid: el1_vmid,
                 asids: Asids::Named(Asid::named(xt)),
                 addresses: va,
             },
-            TlbiForm::VaaE1 => Invalidation::El10Va {
-                vmid,
+            TlbiForm::VaaE1 => Invalidation::Va {
+                regime: el1_regime,
+                vmid: el1_vmid,
                 asids: Asids::All,
                 addresses: va,
             },
-            TlbiForm::RvaE1 => Invalidation::El10Va {
-                vmid,
+            TlbiForm::RvaE1 => Invalidation::Va {
+                regime: el1_regime,
+                vmid: el1_vmid,
                 asids: Asids::Named(Asid::named(xt)),
-                addresses: Addresses::Range(self.tlbi_range(xt, el1_large)?),
+                addresses: Addresses::Range(self.tlbi_range(xt, large(el1_regime))?),
             },
-            TlbiForm::RvaaE1 => Invalidation::El10Va {
-                vmid,
+            TlbiForm::RvaaE1 => Invalidation::Va {
+                regime: el1_regime,
+                vmid: el1_vmid,
                 asids: Asids::All,
-                addresses: Addresses::Range(self.tlbi_range(xt, el1_large)?),
+                addresses: Addresses::Range(self.tlbi_range(xt, large(el1_regime))?),
             },
             TlbiForm::VmallS12E1 => Invalidation::El10Stage12 { vmid },
             TlbiForm::AllE1 => Invalidation::El10Every,
@@ -409,9 +456,17 @@ impl<L: Levels> Cpu<L> {
                 addresses: Addresses::Range(self.tlbi_range(xt, ipa_large)?),
             },
             TlbiForm::AllE2 => Invalidation::El2Every,
-            TlbiForm::VaE2 => Invalidation::El2Va { addresses: va },
-            TlbiForm::RvaE2 => Invalidation::El2Va {
-                addresses: Addresses::Range(self.tlbi_range(xt, el2_large)?),
+            TlbiForm::VaE2 => Invalidation::Va {
+                regime: el2_regime,
+                vmid: None,
+                asids: el2_asids,
+                addresses: va,
+            },
+            TlbiForm::RvaE2 => Invalidation::Va {
+                regime: el2_regime,
+                vmid: None,
+                asids: el2_asids,
+                addresses: Addresses::Range(self.tlbi_range(xt, large(el2_regime))?),
             },
         };
         Some(invalidation)

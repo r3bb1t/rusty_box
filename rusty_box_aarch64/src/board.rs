@@ -101,6 +101,11 @@ pub const PPI_PHYSICAL_TIMER: u32 = 16 + 14;
 /// The EL2 physical timer's PPI (QEMU `ARCH_TIMER_NS_EL2_IRQ`), which the
 /// device tree's `timer` node lists whether or not the processor has EL2.
 pub const PPI_HYPERVISOR_TIMER: u32 = 16 + 10;
+/// The EL2 virtual timer's PPI (FEAT_VHE), BSA's INTID 28 (DEN0094C
+/// RB_PPI_02, "Non-secure EL2 virtual timer interrupt (if PEs are Armv8.1
+/// or greater)"), which the device tree's `timer` node lists where the
+/// processor has FEAT_VHE.
+pub const PPI_HYPERVISOR_VIRTUAL_TIMER: u32 = 16 + 12;
 /// The Secure EL1 physical timer's PPI (BSA DEN0094C RB_PPI_01's), which the
 /// device tree's `timer` node lists first, as its binding orders them,
 /// though a board with no EL3 never raises it.
@@ -577,6 +582,8 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.gic.set_line(PPI_PHYSICAL_TIMER, lines.physical);
         self.gic.set_line(PPI_VIRTUAL_TIMER, lines.virtual_);
         self.gic.set_line(PPI_HYPERVISOR_TIMER, lines.hypervisor);
+        self.gic
+            .set_line(PPI_HYPERVISOR_VIRTUAL_TIMER, lines.hypervisor_virtual);
     }
 
     /// Drive the DCC's PPI with COMMIRQ ([`PPI_DCC`]).

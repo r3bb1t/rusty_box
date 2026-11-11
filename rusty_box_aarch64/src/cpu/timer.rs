@@ -1,20 +1,22 @@
 //! The generic timer's EL1 physical and virtual timers and, with FEAT_EL2,
-//! the EL2 physical timer (Arm ARM D11; pseudocode
-//! `AArch64_CheckTimerConditions`, `IsTimerConditionMet`,
+//! the EL2 physical timer, and with FEAT_VHE the EL2 virtual timer (Arm ARM
+//! D11; pseudocode `AArch64_CheckTimerConditions`, `IsTimerConditionMet`,
 //! `VirtualCounterTimer`).
 //!
 //! The system counter is a pure function of the tick count:
 //! `CNTPCT = floor(icount * counter_hz / ips)`, computed in `u128` so no
 //! rounding is lost and no host clock is read. The virtual count is the
 //! physical count less `CNTVOFF_EL2`, which a core without EL2 does not have,
-//! so there the two are equal. With FEAT_ECV_POFF and `CNTHCTL_EL2.ECV` set,
-//! EL0 and EL1 read the physical count less `CNTPOFF_EL2`, and the EL1
-//! physical timer compares that count.
+//! so there the two are equal; in the host (FEAT_VHE: EL2 under
+//! `HCR_EL2.E2H`, EL0 under `E2H` and `TGE`) it is the physical count
+//! (Arm ARM D8.13.1). With FEAT_ECV_POFF and `CNTHCTL_EL2.ECV` set, EL0 and
+//! EL1 outside the host read the physical count less `CNTPOFF_EL2`, and the
+//! EL1 physical timer compares that count.
 //!
 //! A timer condition is met when `CNTx_CTL.ENABLE` is set and the timer's
 //! count — the physical count less the timer's offset: `CNTVOFF_EL2` for the
 //! virtual timer, the physical offset for the EL1 physical timer, none for
-//! the EL2 timer — has reached `CNTx_CVAL`; its output line is the condition
+//! the EL2 timers — has reached `CNTx_CVAL`; its output line is the condition
 //! with `IMASK` clear. The machine samples the lines whenever a timer
 //! register changes and at the next tick a line can change, which this
 //! module computes exactly: the first tick whose count reaches `CVAL`, or
@@ -132,13 +134,15 @@ impl CountOffset {
 /// What the timers read of the EL2 registers held as written: the offsets
 /// of the counts the EL1 timers compare (`CNTVOFF_EL2` the virtual
 /// timer's, the physical offset, [`Cpu::physical_offset`], the physical
-/// timer's) and the EL2 timer's `CNTHP_CVAL_EL2`. A write of one of those
-/// registers that changes it may move a timer: an enabled one.
+/// timer's) and the EL2 timers' `CNTHP_CVAL_EL2` and `CNTHV_CVAL_EL2`. A
+/// write of one of those registers that changes it may move a timer: an
+/// enabled one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct El2TimerInputs {
     virtual_offset: CountOffset,
     physical_offset: CountOffset,
     hypervisor_cval: TimerCount,
+    hypervisor_virtual_cval: TimerCount,
 }
 
 /// A value of the count a `TVAL` access is made against
@@ -172,12 +176,14 @@ pub struct TimerLines {
     /// EL2 physical timer (`CNTHP_*`, FEAT_EL2), the hypervisor PPI. Low on
     /// a processor without EL2.
     pub hypervisor: bool,
+    /// EL2 virtual timer (`CNTHV_*`, FEAT_VHE), the hypervisor virtual PPI.
+    /// Low on a processor without FEAT_VHE.
+    pub hypervisor_virtual: bool,
 }
 
 /// One of this processor's generic timers.
 ///
-/// Closed (R5): the timers of a processor with no EL3, no FEAT_SEL2 and no
-/// FEAT_VHE.
+/// Closed (R5): the timers of a processor with no EL3 and no FEAT_SEL2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum GenericTimer {
     /// The EL1 physical timer, `CNTP_*_EL0`.
@@ -186,11 +192,19 @@ pub(crate) enum GenericTimer {
     Virtual,
     /// The EL2 physical timer, `CNTHP_*_EL2` (FEAT_EL2).
     Hypervisor,
+    /// The EL2 virtual timer, `CNTHV_*_EL2` (FEAT_VHE), which compares the
+    /// physical count, as `AArch64_CheckTimerConditions` passes it no offset.
+    HypervisorVirtual,
 }
 
 impl GenericTimer {
     /// Every timer, in the order [`Cpu::timer_lines`] reports them.
-    pub(crate) const ALL: [Self; 3] = [Self::Physical, Self::Virtual, Self::Hypervisor];
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Physical,
+        Self::Virtual,
+        Self::Hypervisor,
+        Self::HypervisorVirtual,
+    ];
 }
 
 /// A timer's `TVAL` as an access reaches it. Each is read and written
@@ -206,6 +220,8 @@ pub(crate) enum Tval {
     Virtual,
     /// `CNTHP_TVAL_EL2`.
     Hypervisor,
+    /// `CNTHV_TVAL_EL2`.
+    HypervisorVirtual,
 }
 
 impl Tval {
@@ -215,6 +231,17 @@ impl Tval {
             Self::Physical(_) => GenericTimer::Physical,
             Self::Virtual => GenericTimer::Virtual,
             Self::Hypervisor => GenericTimer::Hypervisor,
+            Self::HypervisorVirtual => GenericTimer::HypervisorVirtual,
+        }
+    }
+
+    /// The `TVAL` of `timer`, as an access at `el` reaches it.
+    pub(crate) const fn of(timer: GenericTimer, el: El) -> Self {
+        match timer {
+            GenericTimer::Physical => Self::Physical(el),
+            GenericTimer::Virtual => Self::Virtual,
+            GenericTimer::Hypervisor => Self::Hypervisor,
+            GenericTimer::HypervisorVirtual => Self::HypervisorVirtual,
         }
     }
 }
@@ -256,13 +283,17 @@ impl<L: Levels> Cpu<L> {
 
     /// The physical count's offset in EL0's and EL1's view of it, which the
     /// EL1 physical timer compares too (Arm `PhysicalOffsetIsValid`, and
-    /// `AArch64_CheckTimerConditions`'s offset, with no EL3 and no
-    /// FEAT_VHE): `CNTPOFF_EL2` on a processor with FEAT_ECV_POFF, which
-    /// has EL2, while `CNTHCTL_EL2.ECV` is set; otherwise 0.
+    /// `AArch64_CheckTimerConditions`'s offset, with no EL3):
+    /// `CNTPOFF_EL2` on a processor with FEAT_ECV_POFF, which has EL2,
+    /// while `CNTHCTL_EL2.ECV` is set and EL0 is not in the host
+    /// (`!ELIsInHost(EL0)`, FEAT_VHE); otherwise 0.
     #[inline]
     pub(crate) fn physical_offset(&self) -> CountOffset {
         let el2 = self.el2();
-        if self.implements(Feature::EcvPoff) && el2.cnthctl & CNTHCTL_ECV_POFF != 0 {
+        if self.implements(Feature::EcvPoff)
+            && el2.cnthctl & CNTHCTL_ECV_POFF != 0
+            && !self.el0_in_host()
+        {
             CountOffset(el2.cntpoff)
         } else {
             CountOffset::NONE
@@ -275,6 +306,7 @@ impl<L: Levels> Cpu<L> {
             virtual_offset: self.virtual_offset(),
             physical_offset: self.physical_offset(),
             hypervisor_cval: TimerCount(self.el2().cnthp_cval),
+            hypervisor_virtual_cval: TimerCount(self.el2().cnthv_cval),
         }
     }
 
@@ -305,19 +337,40 @@ impl<L: Levels> Cpu<L> {
         self.physical_count_at(el, self.icount)
     }
 
-    /// `CNTVCT_EL0` at the tick `icount` (Arm `VirtualCounterTimer`, at
-    /// EL0, EL1 and EL2 of a processor without FEAT_VHE): the physical count
-    /// less `CNTVOFF_EL2`, modulo 2^64. Non-decreasing in `icount` but where
-    /// it wraps to 0.
+    /// The offset of `CNTVCT_EL0` from the physical count as an access at
+    /// `el` reads it (Arm `VirtualCounterTimer`): `CNTVOFF_EL2`, but none in
+    /// the host (`ELIsInHost(el)`, FEAT_VHE; Arm ARM D8.13.1: "the virtual
+    /// offset is treated as 0").
     #[inline]
-    pub(crate) fn virtual_count_at(&self, icount: u64) -> VirtualCount {
-        VirtualCount(self.virtual_offset().from(self.counter_at(icount)))
+    fn virtual_view_offset(&self, el: El) -> CountOffset {
+        if self.el_is_in_host(el) {
+            CountOffset::NONE
+        } else {
+            self.virtual_offset()
+        }
     }
 
-    /// `CNTVCT_EL0` now ([`Cpu::virtual_count_at`]).
+    /// `CNTVCT_EL0` as an access at `el` reads it at the tick `icount` (Arm
+    /// `VirtualCounterTimer`): the physical count less its offset
+    /// ([`Cpu::virtual_view_offset`]), modulo 2^64. Non-decreasing in
+    /// `icount` but where it wraps to 0.
+    #[inline]
+    pub(crate) fn virtual_count_at(&self, el: El, icount: u64) -> VirtualCount {
+        VirtualCount(self.virtual_view_offset(el).from(self.counter_at(icount)))
+    }
+
+    /// `CNTVCT_EL0` as an access at `el` reads it now
+    /// ([`Cpu::virtual_count_at`]).
+    #[inline]
+    pub(crate) fn virtual_count_read(&self, el: El) -> VirtualCount {
+        self.virtual_count_at(el, self.icount)
+    }
+
+    /// `CNTVCT_EL0` as the current level reads it now, which `WFIT` and
+    /// `WFET` wait for ([`Cpu::virtual_count_read`]).
     #[inline]
     pub(crate) fn virtual_count(&self) -> VirtualCount {
-        self.virtual_count_at(self.icount)
+        self.virtual_count_read(self.pstate.el)
     }
 
     /// The first tick at which the counter reaches `count`: the ticks that
@@ -349,12 +402,12 @@ impl<L: Levels> Cpu<L> {
         self.tick_reaching(Count(now.0.checked_add(distance)?))
     }
 
-    /// The first tick at which the virtual count, below `target` now,
-    /// reaches it ([`Cpu::tick_reaching_count`]: the virtual count is the
-    /// virtual timer's count).
+    /// The first tick at which the virtual count as the current level reads
+    /// it ([`Cpu::virtual_count`]), below `target` now, reaches it
+    /// ([`Cpu::tick_reaching_count`]).
     pub(super) fn tick_reaching_virtual(&self, target: VirtualCount) -> Option<VmInstant> {
         let now = self.counter();
-        let count = self.timer_count_at(GenericTimer::Virtual, now);
+        let count = TimerCount(self.virtual_view_offset(self.pstate.el).from(now));
         self.tick_reaching_count(now, count, TimerCount(target.0))
     }
 
@@ -372,19 +425,23 @@ impl<L: Levels> Cpu<L> {
                 ctl: self.el2().cnthp_ctl,
                 cval: self.el2().cnthp_cval,
             },
+            GenericTimer::HypervisorVirtual => TimerRegs {
+                ctl: self.el2().cnthv_ctl,
+                cval: self.el2().cnthv_cval,
+            },
         }
     }
 
     /// The offset of the count `timer` compares with its `CVAL` from the
     /// physical count (the `offset` `AArch64_CheckTimerConditions` passes
     /// `IsTimerConditionMet`): `CNTVOFF_EL2` for the virtual timer, the
-    /// physical offset for the EL1 physical timer, none for the EL2 timer.
+    /// physical offset for the EL1 physical timer, none for the EL2 timers.
     #[inline]
     fn timer_offset(&self, timer: GenericTimer) -> CountOffset {
         match timer {
             GenericTimer::Virtual => self.virtual_offset(),
             GenericTimer::Physical => self.physical_offset(),
-            GenericTimer::Hypervisor => CountOffset::NONE,
+            GenericTimer::Hypervisor | GenericTimer::HypervisorVirtual => CountOffset::NONE,
         }
     }
 
@@ -411,7 +468,9 @@ impl<L: Levels> Cpu<L> {
     fn tval_count(&self, tval: Tval) -> TvalCount {
         TvalCount(match tval {
             Tval::Physical(el) => self.physical_count_read(el).get(),
-            Tval::Virtual | Tval::Hypervisor => self.timer_count(tval.timer()).0,
+            Tval::Virtual | Tval::Hypervisor | Tval::HypervisorVirtual => {
+                self.timer_count(tval.timer()).0
+            }
         })
     }
 
@@ -421,6 +480,11 @@ impl<L: Levels> Cpu<L> {
     fn condition_met(&self, timer: GenericTimer) -> bool {
         let regs = self.timer_regs(timer);
         regs.ctl & CTL_ENABLE != 0 && self.timer_count(timer).reached(regs.cval)
+    }
+
+    /// `CNTx_CVAL` of `timer`.
+    pub(crate) fn timer_cval(&self, timer: GenericTimer) -> u64 {
+        self.timer_regs(timer).cval
     }
 
     /// `CNTx_CTL` of `timer` as read: `ISTATUS` reports the condition,
@@ -451,8 +515,10 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// Whether `timer`'s output line is high: its condition met with
-    /// `IMASK` clear. The EL2 timer's is low for good on a processor
-    /// without EL2, its `CTL` 0 ([`El2Regs`](super::el2::El2Regs)).
+    /// `IMASK` clear. The EL2 timers' are low for good on a processor
+    /// without EL2, their `CTL` 0 ([`El2Regs`](super::el2::El2Regs)), and
+    /// the EL2 virtual timer's on one without FEAT_VHE, whose `CTL` no write
+    /// sets ([`El2Reg::kept`](super::el2::El2Reg::kept)).
     fn timer_line(&self, timer: GenericTimer) -> bool {
         self.timer_regs(timer).ctl & CTL_IMASK == 0 && self.condition_met(timer)
     }
@@ -463,6 +529,7 @@ impl<L: Levels> Cpu<L> {
             physical: self.timer_line(GenericTimer::Physical),
             virtual_: self.timer_line(GenericTimer::Virtual),
             hypervisor: self.timer_line(GenericTimer::Hypervisor),
+            hypervisor_virtual: self.timer_line(GenericTimer::HypervisorVirtual),
         }
     }
 
@@ -665,6 +732,7 @@ mod tests {
                 physical: false,
                 virtual_: false,
                 hypervisor: true,
+                hypervisor_virtual: false,
             }
         );
         let mut plain = cpu(1_000, 1_000);

@@ -9,8 +9,9 @@
 //! `CalculateBottomPACBit`. This core has no EL3, so only `HCR_EL2.API`
 //! and `APK` trap a key use, on a processor with EL2 (`TrapPACUse`); its
 //! translation regimes are EL1&0, whose pointers have upper and lower
-//! address ranges, and with EL2, EL2's, whose pointers have one (there is
-//! no FEAT_VHE); it has neither FEAT_MTE nor FEAT_LVA3, nor
+//! address ranges, with EL2, EL2's, whose pointers have one, and with
+//! FEAT_VHE under `HCR_EL2.E2H`, EL2&0, whose pointers have two; it has
+//! neither FEAT_MTE nor FEAT_LVA3, nor
 //! FEAT_CONSTPACFIELD or FEAT_PAuth_LR. The keys, UNKNOWN at reset, reset
 //! to the board's own fixed values ([`PacKeys::RESET`]).
 
@@ -390,9 +391,11 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// Whether `key` is enabled (Arm IsAPIAKeyEnabled and its siblings):
-    /// the bit of `SCTLR_EL1` at EL0 and EL1, of `SCTLR_EL2` at EL2. An
-    /// enabled key used at EL0 or EL1 while `HCR_EL2.API` is clear traps to
-    /// EL2 instead ([`Cpu::pac_trap_to_el2`]); a disabled one never does.
+    /// the bit of the current regime's `SCTLR_ELx`, `SCTLR_EL1` at EL0 and
+    /// EL1, `SCTLR_EL2` at EL2 and at EL0 in the host (FEAT_VHE). An enabled
+    /// key used at EL0 or EL1 outside the host while `HCR_EL2.API` is clear
+    /// traps to EL2 instead ([`Cpu::pac_trap_to_el2`]); a disabled one never
+    /// does.
     fn pac_key_enabled(&self, key: PacKey) -> Result<bool, Exception> {
         if (self.regime_sctlr(self.regime()) >> key.enable_bit()) & 1 == 0 {
             return Ok(false);
@@ -402,10 +405,10 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// Arm `TrapPACUse(EL2)`, raised where `TrapEL2` holds: at EL0 or EL1
-    /// with EL2 enabled and `HCR_EL2.API` clear. EC 0x09, ISS 0, the
-    /// instruction's own address the preferred return.
+    /// with EL2 enabled and `HCR_EL2.API` clear, but at EL0 in the host. EC
+    /// 0x09, ISS 0, the instruction's own address the preferred return.
     fn pac_trap_to_el2(&self) -> Result<(), Exception> {
-        if self.pstate.el != El::El2 && self.hcr_lacks(HCR_API) {
+        if self.pstate.el != El::El2 && !self.in_host() && self.hcr_lacks(HCR_API) {
             Err(Exception::to_el2(SyndromeClass::PacTrap, 0))
         } else {
             Ok(())

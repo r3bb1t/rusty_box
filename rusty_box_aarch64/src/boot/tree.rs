@@ -45,8 +45,9 @@
 
 use super::fdt::{DeviceTreeError, Header, Out, FDT_BEGIN_NODE, FDT_END, FDT_END_NODE, HEADER_LEN};
 use crate::board::{
-    FLASH0_BASE, FLASH1_BASE, FLASH_BANK_SIZE, PPI_HYPERVISOR_TIMER, PPI_PHYSICAL_TIMER, PPI_PMU,
-    PPI_SECURE_PHYSICAL_TIMER, PPI_VIRTUAL_TIMER, RAM_BASE, UART_CLOCK,
+    FLASH0_BASE, FLASH1_BASE, FLASH_BANK_SIZE, PPI_HYPERVISOR_TIMER, PPI_HYPERVISOR_VIRTUAL_TIMER,
+    PPI_PHYSICAL_TIMER, PPI_PMU, PPI_SECURE_PHYSICAL_TIMER, PPI_VIRTUAL_TIMER, RAM_BASE,
+    UART_CLOCK,
 };
 use crate::bus::PhysAddr;
 use crate::cpu::{PsciConduit, PSCI_COMPATIBLE};
@@ -107,6 +108,18 @@ pub(crate) struct InitrdRange {
     pub(crate) end: PhysAddr,
 }
 
+/// The EL2 timers the `timer` node names, after the EL1 ones (the
+/// `arm,armv8-timer` binding's interrupts, in its order): the EL2 physical
+/// timer's PPI, whether or not the processor has EL2, and the EL2 virtual
+/// timer's where it has FEAT_VHE.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum El2Timers {
+    Physical,
+    PhysicalAndVirtual,
+}
+
 /// Everything the board's tree describes that is not fixed by the board.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BoardTree<'a> {
@@ -115,6 +128,7 @@ pub(crate) struct BoardTree<'a> {
     pub(crate) cpu: CpuModel,
     pub(crate) psci: PsciConduit,
     pub(crate) gic: GicExtensions,
+    pub(crate) el2_timers: El2Timers,
     pub(crate) chosen: Chosen<'a>,
     /// The SPIs the devices drive.
     pub(crate) wiring: Wiring,
@@ -419,7 +433,7 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     w.end()?;
 
     // The binding's order: Secure physical, Non-secure physical, virtual,
-    // hypervisor.
+    // hypervisor physical, and with FEAT_VHE hypervisor virtual.
     w.begin("timer")?;
     w.string("compatible", "arm,armv8-timer")?;
     let interrupts = [
@@ -427,9 +441,14 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
         PPI_PHYSICAL_TIMER,
         PPI_VIRTUAL_TIMER,
         PPI_HYPERVISOR_TIMER,
+        PPI_HYPERVISOR_VIRTUAL_TIMER,
     ]
     .map(|intid| [GIC_PPI, intid - 16, PPI_ONE_PROCESSOR | IRQ_LEVEL_HIGH]);
-    w.cells("interrupts", interrupts.as_flattened())?;
+    let named = match tree.el2_timers {
+        El2Timers::Physical => &interrupts[..4],
+        El2Timers::PhysicalAndVirtual => &interrupts[..],
+    };
+    w.cells("interrupts", named.as_flattened())?;
     w.flag("always-on")?;
     w.end()?;
 

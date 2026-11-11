@@ -22,7 +22,7 @@ use rusty_box_core::SnapError;
 #[path = "../../tests/unit/sme.rs"]
 mod tests;
 
-use super::el2::CPTR_TSM;
+use super::el2::{CPTR_SMEN, CPTR_TSM};
 use super::exception::{Exception, Route, SyndromeClass};
 use super::exec::{bits, ExecResult, Fault, Flow};
 use super::features::{Feature, VecLen};
@@ -210,16 +210,22 @@ impl<L: Levels> Cpu<L> {
         self.cpacr_enabled_at(CPACR_SMEN, el)
     }
 
-    /// Whether `CPTR_EL2.TSM` (with `HCR_EL2.E2H` 0, the only layout here)
-    /// disables SME at EL0, EL1 and EL2.
-    pub(crate) fn cptr_el2_traps_sme(&self) -> bool {
-        self.cptr_any(CPTR_TSM)
+    /// Whether `CPTR_EL2` disables SME at `el`: `TSM` with `HCR_EL2.E2H`
+    /// 0, `SMEN` with `E2H` 1 ([`Cpu::cptr_el2_disables`]).
+    pub(crate) fn cptr_el2_traps_sme_at(&self, el: El) -> bool {
+        self.cptr_el2_disables(el, CPTR_TSM, CPTR_SMEN)
     }
 
-    /// Arm `IsSMEEnabled(el)`: `CPACR_EL1.SMEN` at EL0 and EL1, then
-    /// `CPTR_EL2.TSM` at EL0, EL1 and EL2.
+    /// Whether `CPTR_EL2` disables SME at the current level
+    /// ([`Cpu::cptr_el2_traps_sme_at`]).
+    pub(crate) fn cptr_el2_traps_sme(&self) -> bool {
+        self.cptr_el2_traps_sme_at(self.pstate.el)
+    }
+
+    /// Arm `IsSMEEnabled(el)`: `CPACR_EL1.SMEN` at EL0 and EL1 outside the
+    /// host, then `CPTR_EL2` at EL0, EL1 and EL2.
     pub(crate) fn sme_enabled_at(&self, el: El) -> bool {
-        self.cpacr_sme_enabled_at(el) && !self.cptr_el2_traps_sme()
+        self.cpacr_sme_enabled_at(el) && !self.cptr_el2_traps_sme_at(el)
     }
 
     /// Arm `IsSVEEnabled(el)` on a processor without FEAT_SVE: SVE
@@ -319,15 +325,15 @@ impl<L: Levels> Cpu<L> {
 
     /// Arm `CheckSMEZT0Enabled` on this processor, which has no EL3: the SME
     /// trap to the current level when ZA storage is disabled; then at EL0
-    /// and EL1, `SMCR_EL1.EZT0`, trapping to EL1 (EL2 from EL0 under
-    /// `HCR_EL2.TGE`); then at EL0, EL1 and EL2 with EL2 enabled,
+    /// and EL1 outside the host, `SMCR_EL1.EZT0`, trapping to EL1 (EL2 from
+    /// EL0 under `HCR_EL2.TGE`); then at EL0, EL1 and EL2 with EL2 enabled,
     /// `SMCR_EL2.EZT0`, trapping to EL2. The instructions on ZT0 take it
     /// after `CheckSMEEnabled`.
     pub(crate) fn check_sme_zt0_enabled(&self) -> Result<(), Fault> {
         if !self.svcr.za {
             return Err(self.sme_trap(SmeTrap::InactiveZa, Route::Class));
         }
-        if self.pstate.el != El::El2 && self.sys.smcr_el1 & SMCR_EZT0 == 0 {
+        if self.pstate.el != El::El2 && !self.in_host() && self.sys.smcr_el1 & SMCR_EZT0 == 0 {
             return Err(self.sme_trap(SmeTrap::InaccessibleZt0, Route::Class));
         }
         if self.el2_enabled() && self.el2().smcr & SMCR_EZT0 == 0 {
@@ -375,12 +381,13 @@ impl<L: Levels> Cpu<L> {
 
     /// Arm `CurrentSVL`: the `LEN` of `SMCR_EL1` at EL0 and EL1, held to the
     /// `LEN` of `SMCR_EL2` with EL2 enabled, and the `LEN` of `SMCR_EL2` at
-    /// EL2, reduced to a supported length.
+    /// EL2 and at EL0 in the host (FEAT_VHE), reduced to a supported length.
     pub(crate) fn current_svl(&self) -> VecLen {
         let el1 = self.sys.smcr_el1 & SMCR_LEN;
         let el2 = self.el2().smcr & SMCR_LEN;
         let len = match self.pstate.el {
             El::El2 => el2,
+            El::El0 if self.el0_in_host() => el2,
             El::El0 | El::El1 if self.el2_enabled() => el1.min(el2),
             El::El0 | El::El1 => el1,
         };

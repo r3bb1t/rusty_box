@@ -6,7 +6,7 @@
 use std::vec;
 use std::vec::Vec;
 
-use super::{write, BoardTree, Chosen, InitrdRange};
+use super::{write, BoardTree, Chosen, El2Timers, InitrdRange};
 use crate::boot::fdt;
 use crate::bus::PhysAddr;
 use crate::cpu::PsciConduit;
@@ -28,12 +28,23 @@ fn board_of(
     gic: GicExtensions,
     chosen: Chosen<'static>,
 ) -> Vec<u8> {
+    board_with_timers(cpu, identity, gic, chosen, El2Timers::Physical)
+}
+
+fn board_with_timers(
+    cpu: CpuModel,
+    identity: &BoardIdentity,
+    gic: GicExtensions,
+    chosen: Chosen<'static>,
+    el2_timers: El2Timers,
+) -> Vec<u8> {
     let tree = BoardTree {
         identity,
         ram_len: RAM,
         cpu,
         psci: PsciConduit::Hvc,
         gic,
+        el2_timers,
         chosen,
         wiring: default_wiring(),
         layout: OWN,
@@ -305,6 +316,46 @@ fn the_pmu_node_names_the_processor_s_pmu_and_ppi_23() {
     }
 }
 
+/// The `timer` node names the binding's four timers, Secure physical (PPI
+/// 13), Non-secure physical (14), virtual (11) and EL2 physical (10), and
+/// with FEAT_VHE the fifth, the EL2 virtual timer, on PPI 12 (INTID 28,
+/// BSA's RB_PPI_02), each level-sensitive on the one processor.
+#[test]
+fn the_timer_node_names_the_el2_virtual_timer_with_vhe() {
+    let flags = (1 << 8) | 4;
+    let four = [13, 14, 11, 10].map(|ppi| [1, ppi, flags]).concat();
+    let five = [13, 14, 11, 10, 12].map(|ppi| [1, ppi, flags]).concat();
+    for (timers, expected) in [
+        (El2Timers::Physical, four),
+        (El2Timers::PhysicalAndVirtual, five),
+    ] {
+        let tree = board_with_timers(
+            CpuModel::Armv9p2,
+            &BoardIdentity::RUSTY_BOX,
+            GicExtensions::Virtualization,
+            PLAIN,
+            timers,
+        );
+        assert_eq!(
+            prop(&tree, "timer", "interrupts").map(cells),
+            Some(expected),
+            "{timers:?}"
+        );
+    }
+    // No model's processor has FEAT_VHE with EL2 yet: every machine names
+    // the four.
+    for model in CpuModel::ALL {
+        assert!(
+            !model.has_el2_virtual_timer::<crate::cpu::WithEl2>(),
+            "{model:?}"
+        );
+        assert!(
+            !model.has_el2_virtual_timer::<crate::cpu::NoEl2>(),
+            "{model:?}"
+        );
+    }
+}
+
 /// `/chosen` carries the command line and the initrd's range when there
 /// are any, and never an `rng-seed` or `kaslr-seed`, which a guest would
 /// credit as entropy though a deterministic machine gives every boot the
@@ -472,6 +523,7 @@ fn the_tree_describes_the_interrupt_map_it_is_given() {
         cpu: CpuModel::CortexA57,
         psci: PsciConduit::Hvc,
         gic: GicExtensions::Absent,
+        el2_timers: El2Timers::Physical,
         chosen: PLAIN,
         wiring: map.wire(SpiCount::DEFAULT, OWN).expect("fits"),
         layout: OWN,
@@ -512,6 +564,7 @@ fn the_tree_describes_the_layout_it_is_given() {
         cpu: CpuModel::CortexA57,
         psci: PsciConduit::Hvc,
         gic: GicExtensions::Virtualization,
+        el2_timers: El2Timers::Physical,
         chosen: PLAIN,
         wiring: InterruptMap::own(DeviceLayout::QemuVirt)
             .wire(SpiCount::DEFAULT, DeviceLayout::QemuVirt)
@@ -607,6 +660,7 @@ fn a_tree_that_does_not_fit_is_refused() {
         cpu: CpuModel::CortexA57,
         psci: PsciConduit::Hvc,
         gic: GicExtensions::Absent,
+        el2_timers: El2Timers::Physical,
         chosen: PLAIN,
         wiring: default_wiring(),
         layout: OWN,

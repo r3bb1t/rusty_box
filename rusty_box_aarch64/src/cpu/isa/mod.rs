@@ -2217,6 +2217,8 @@ mod tests {
                     Feature::PmuV3p4 => (5..15).contains(&field(dfr0, 8)),
                     Feature::PmuV3p5 => (6..15).contains(&field(dfr0, 8)),
                     Feature::PmuV3p7 => (7..15).contains(&field(dfr0, 8)),
+                    // `Features.json`: `FEAT_VHE <=> UInt(VH) >= 1`.
+                    Feature::Vhe => field(mmfr1, 8) >= 1,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -2372,7 +2374,8 @@ mod tests {
             assert!(field(mmfr1, 12) <= 1, "HPDS = 1: FEAT_HPDS, not FEAT_HPDS2");
             assert_eq!(
                 mmfr1 & !(0xF | (0xF << 12) | (0xF << 16) | (0xF << 20)),
-                at(Feature::Afp, 44, 1)
+                at(Feature::Afp, 44, 1) | at(Feature::Vhe, 8, 1),
+                "AFP and VH beside HAFDBS, HPDS, LO and PAN; VMIDBits 0"
             );
             assert_eq!(
                 mmfr2

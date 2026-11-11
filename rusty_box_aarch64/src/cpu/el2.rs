@@ -8,12 +8,16 @@
 //! functions named where they are used. With no EL3 and no Secure state,
 //! `EL2Enabled()` is `HaveEL(EL2)`.
 //!
-//! Every EL2 register here is in its `HCR_EL2.E2H == 0` layout: this
-//! processor has no FEAT_VHE, so `E2H` is RES0 and the layout never
-//! changes. A bit that is RES0 or RES1 for the features a processor
-//! implements is hardwired to that value, reads returning it and writes
-//! ignoring it, one of the two behaviours Arm permits for a reserved bit
-//! (the other keeps what is written). The
+//! `HCR_EL2.E2H` (FEAT_VHE) redefines four registers, `SCTLR_EL2`,
+//! `CPTR_EL2`, `TCR_EL2` and `CNTHCTL_EL2` (Arm ARM D8.13.1), each of
+//! which has a layout for `E2H` 0 and one for `E2H` 1 ([`E2hLayout`]):
+//! a register holds what a write in the layout of its time keeps, and a
+//! write of `HCR_EL2` that changes `E2H` makes each hold what the new
+//! layout keeps of it. Without FEAT_VHE `E2H` is RES0 and the layout is
+//! always the `E2H` 0 one. A bit that is RES0 or RES1 for the features a
+//! processor implements, in its layout, is hardwired to that value, reads
+//! returning it and writes ignoring it, one of the two behaviours Arm
+//! permits for a reserved bit (the other keeps what is written). The
 //! IMPLEMENTATION DEFINED registers (`ACTLR_EL2`, `HACR_EL2`, `AFSR0_EL2`,
 //! `AFSR1_EL2`, `AMAIR_EL2`) are the implementation's
 //! ([`ImpdefSpace::el2_kept`](super::impdef::ImpdefSpace::el2_kept)): on
@@ -204,34 +208,49 @@ impl El2Regs {
         let imp = imp.get();
         let features = imp.features;
         let spsr_mask = spsr_mask_of(features);
+        // `HCR_EL2.E2H` resets to 0: the registers it redefines take their
+        // `E2H` 0 layout.
+        let layout = E2hLayout::E2h0;
         Self {
             hcr: HCR_RES1,
             sctlr: SCTLR_EL2_RES1 | sctlr::SA,
             actlr: 0,
-            cptr: cptr_el2_res1(features),
+            cptr: cptr_el2_res1(features, layout),
             hstr: 0,
             hacr: 0,
-            mdcr: El2Reg::Mdcr.kept(features, spsr_mask, imp.pmu.counters.get() as u64),
+            mdcr: El2Reg::Mdcr.kept(features, spsr_mask, layout, imp.pmu.counters.get() as u64),
             tcr: TCR_EL2_RES1,
             ttbr0: El2Reg::Ttbr0.kept(
                 features,
                 spsr_mask,
+                layout,
                 reset::low_word_of(SysReg::TTBR0_EL2),
             ),
             vtcr: VTCR_EL2_RES1,
             vttbr: El2Reg::Vttbr.kept(
                 features,
                 spsr_mask,
+                layout,
                 reset::low_word_of(SysReg::VTTBR_EL2),
             ),
             mair: 0,
             amair: 0,
-            vbar: El2Reg::Vbar.kept(features, spsr_mask, reset::low_word_of(SysReg::VBAR_EL2)),
+            vbar: El2Reg::Vbar.kept(
+                features,
+                spsr_mask,
+                layout,
+                reset::low_word_of(SysReg::VBAR_EL2),
+            ),
             esr: 0,
             far: reset::low_word_of(SysReg::FAR_EL2),
             hpfar: 0,
             elr: reset::value_of(SysReg::ELR_EL2),
-            spsr: El2Reg::Spsr.kept(features, spsr_mask, reset::value_of(SysReg::SPSR_EL2)),
+            spsr: El2Reg::Spsr.kept(
+                features,
+                spsr_mask,
+                layout,
+                reset::value_of(SysReg::SPSR_EL2),
+            ),
             afsr0: 0,
             afsr1: 0,
             tpidr: reset::value_of(SysReg::TPIDR_EL2),
@@ -246,10 +265,24 @@ impl El2Regs {
             contextidr: El2Reg::Contextidr.kept(
                 features,
                 spsr_mask,
+                layout,
                 reset::low_word_of(reset::CONTEXTIDR_EL2),
             ),
             vdisr: 0,
             vsesr: 0,
+            ttbr1: El2Reg::Ttbr1.kept(
+                features,
+                spsr_mask,
+                layout,
+                reset::low_word_of(SysReg::TTBR1_EL2),
+            ),
+            cnthv_ctl: 0,
+            cnthv_cval: El2Reg::CnthvCval.kept(
+                features,
+                spsr_mask,
+                layout,
+                reset::value_of(SysReg::CNTHV_CVAL_EL2),
+            ),
         }
     }
 }
@@ -333,6 +366,11 @@ pub(crate) const HCR_APK: u64 = 1 << 40;
 /// `HCR_EL2.API` (FEAT_PAuth): 0 traps the pointer authentication
 /// instructions at EL0 and EL1.
 pub(crate) const HCR_API: u64 = 1 << 41;
+/// `HCR_EL2.E2H` (FEAT_VHE): EL2 runs in the EL2&0 translation regime, its
+/// registers take their `E2H` 1 layouts ([`E2hLayout`]), and the EL1
+/// register names reach EL2's at EL2 (Arm `EffectiveHCR_EL2_E2H`, writable
+/// as the processor has FEAT_E2H0).
+pub(crate) const HCR_E2H: u64 = 1 << 34;
 /// `HCR_EL2.FIEN` (FEAT_RASv1p1): EL1's accesses to the error injection
 /// registers do not trap.
 pub(crate) const HCR_FIEN: u64 = 1 << 47;
@@ -361,7 +399,38 @@ pub(crate) const fn hcr_mask(features: Features) -> u64 {
     if features.has(Feature::PAuth) {
         mask |= HCR_APK | HCR_API;
     }
+    if features.has(Feature::Vhe) {
+        mask |= HCR_E2H;
+    }
     mask
+}
+
+/// Which layout a register `HCR_EL2.E2H` redefines has (the `E2H0` and
+/// `E2H1` fieldsets of Arm's register data): `SCTLR_EL2`, `CPTR_EL2`,
+/// `TCR_EL2` and `CNTHCTL_EL2` (Arm ARM D8.13.1).
+///
+/// Closed (R5): `E2H`'s two values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum E2hLayout {
+    /// `EffectiveHCR_EL2_E2H()` 0: the EL2 regime's, and every processor
+    /// without FEAT_VHE.
+    E2h0,
+    /// `EffectiveHCR_EL2_E2H()` 1 (FEAT_VHE): the EL2&0 regime's, each
+    /// register in the layout of its EL1 counterpart.
+    E2h1,
+}
+
+impl E2hLayout {
+    /// The layout `HCR_EL2` `hcr` selects: `E2H`, which only a processor
+    /// with FEAT_VHE keeps.
+    #[inline(always)]
+    pub(crate) const fn of(hcr: u64) -> Self {
+        if hcr & HCR_E2H != 0 {
+            Self::E2h1
+        } else {
+            Self::E2h0
+        }
+    }
 }
 
 // ----- SCTLR_EL2 -----
@@ -385,9 +454,30 @@ const SCTLR_EL2_BASE: u64 = 0x0008_100F;
 /// (`CP15BEN`), 11 (`EOS`), 16 (`nTWI`), 18 (`nTWE`), 22 (`EIS`), 23
 /// (`SPAN`), 28 (`nTLSMD`), 29 (`LSMAOE`).
 pub(crate) const SCTLR_EL2_RES1: u64 = 0x30C5_0830;
+/// `SCTLR_EL2.BT0` (FEAT_BTI, `E2H` 1): `PACIASP` and `PACIBSP` are not a
+/// branch target for `BR` from a guarded page at EL0 in the EL2&0 regime.
+pub(crate) const SCTLR_EL2_BT0: u64 = 1 << 35;
+/// The fields `E2H` 1 gives `SCTLR_EL2` on every processor with FEAT_VHE,
+/// at `SCTLR_EL1`'s bits, which apply to EL0 under `HCR_EL2.TGE`: `SA0`,
+/// `CP15BEN` and `SED` (fields Arm's data gives the layout without
+/// AArch32 at EL0 too), `DZE`, `UCT`, `nTWI`, `nTWE`, `SPAN` and `UCI`.
+const SCTLR_EL2_E2H1: u64 = sctlr::SA0
+    | (1 << 5)
+    | (1 << 8)
+    | sctlr::DZE
+    | sctlr::UCT
+    | sctlr::NTWI
+    | sctlr::NTWE
+    | sctlr::SPAN
+    | sctlr::UCI;
+/// `SCTLR_EL2`'s RES1 bits with `E2H` 1, no FEAT_ExS, no AArch32 at EL0, no
+/// FEAT_CSV2_2 and no FEAT_LSMAOC: 7 (`ITD`), 11 (`EOS`), 20 (`TSCXT`), 22
+/// (`EIS`), 28 (`nTLSMD`), 29 (`LSMAOE`).
+pub(crate) const SCTLR_EL2_E2H1_RES1: u64 = 0x3050_0880;
 
-/// The `SCTLR_EL2` bits a processor implementing `features` keeps.
-pub(crate) const fn sctlr_el2_mask(features: Features) -> u64 {
+/// The `SCTLR_EL2` bits a processor implementing `features` keeps in
+/// `layout`.
+pub(crate) const fn sctlr_el2_mask(features: Features, layout: E2hLayout) -> u64 {
     let mut mask = SCTLR_EL2_BASE;
     if features.has(Feature::Lse2) {
         mask |= SCTLR_EL2_NAA;
@@ -401,7 +491,30 @@ pub(crate) const fn sctlr_el2_mask(features: Features) -> u64 {
     if features.has(Feature::Ssbs) {
         mask |= SCTLR_EL2_DSSBS;
     }
+    if let E2hLayout::E2h1 = layout {
+        mask |= SCTLR_EL2_E2H1;
+        if features.has(Feature::SpecRes) {
+            mask |= sctlr::ENRCTX;
+        }
+        if features.has(Feature::Bti) {
+            mask |= SCTLR_EL2_BT0;
+        }
+        if features.has(Feature::Pan3) {
+            mask |= sctlr::EPAN;
+        }
+        if features.has(Feature::Sme) {
+            mask |= sctlr::ENTP2;
+        }
+    }
     mask
+}
+
+/// `SCTLR_EL2`'s RES1 bits in `layout`.
+pub(crate) const fn sctlr_el2_res1(layout: E2hLayout) -> u64 {
+    match layout {
+        E2hLayout::E2h0 => SCTLR_EL2_RES1,
+        E2hLayout::E2h1 => SCTLR_EL2_E2H1_RES1,
+    }
 }
 
 // ----- CPTR_EL2 -----
@@ -417,24 +530,36 @@ pub(crate) const CPTR_TCPAC: u64 = 1 << 31;
 /// (`TZ`, RES1 without FEAT_SVE, which this processor never has).
 const CPTR_EL2_RES1_BASE: u64 = 0x23FF;
 
-/// The `CPTR_EL2` bits a processor implementing `features` keeps.
-pub(crate) const fn cptr_el2_mask(features: Features) -> u64 {
-    if features.has(Feature::Sme) {
-        CPTR_TCPAC | CPTR_TFP | CPTR_TSM
-    } else {
-        CPTR_TCPAC | CPTR_TFP
+/// `CPTR_EL2.FPEN` (`E2H` 1): SIMD&FP at EL0 in the EL2&0 regime and at EL2
+/// traps to EL2 but where it is 0b11, at EL0 under `HCR_EL2.TGE` where it
+/// is 0b01 too (Arm `AArch64_CheckFPAdvSIMDTrap`). `CPACR_EL1.FPEN`'s bits.
+pub(crate) const CPTR_FPEN: u64 = 3 << 20;
+/// `CPTR_EL2.SMEN` (FEAT_SME, `E2H` 1): SME, as `FPEN` SIMD&FP (Arm
+/// `CheckSMEAccess`). `CPACR_EL1.SMEN`'s bits.
+pub(crate) const CPTR_SMEN: u64 = 3 << 24;
+
+/// The `CPTR_EL2` bits a processor implementing `features` keeps in
+/// `layout`: `TCPAC` in both, with `E2H` 0 `TFP` and with FEAT_SME `TSM`,
+/// with `E2H` 1 `FPEN` and with FEAT_SME `SMEN`.
+pub(crate) const fn cptr_el2_mask(features: Features, layout: E2hLayout) -> u64 {
+    let sme = features.has(Feature::Sme);
+    match layout {
+        E2hLayout::E2h0 if sme => CPTR_TCPAC | CPTR_TFP | CPTR_TSM,
+        E2hLayout::E2h0 => CPTR_TCPAC | CPTR_TFP,
+        E2hLayout::E2h1 if sme => CPTR_TCPAC | CPTR_FPEN | CPTR_SMEN,
+        E2hLayout::E2h1 => CPTR_TCPAC | CPTR_FPEN,
     }
 }
 
-/// `CPTR_EL2`'s RES1 bits on a processor implementing `features`: the bits
-/// every processor has, and `TSM` without FEAT_SME.
-pub(crate) const fn cptr_el2_res1(features: Features) -> u64 {
-    CPTR_EL2_RES1_BASE
-        | if features.has(Feature::Sme) {
-            0
-        } else {
-            CPTR_TSM
-        }
+/// `CPTR_EL2`'s RES1 bits on a processor implementing `features` in
+/// `layout`: with `E2H` 0 the bits every processor has, and `TSM` without
+/// FEAT_SME; with `E2H` 1 none.
+pub(crate) const fn cptr_el2_res1(features: Features, layout: E2hLayout) -> u64 {
+    match layout {
+        E2hLayout::E2h0 if features.has(Feature::Sme) => CPTR_EL2_RES1_BASE,
+        E2hLayout::E2h0 => CPTR_EL2_RES1_BASE | CPTR_TSM,
+        E2hLayout::E2h1 => 0,
+    }
 }
 
 // ----- MDCR_EL2 -----
@@ -536,25 +661,84 @@ const fn hw_update_mask(features: Features) -> u64 {
     ha | hd
 }
 
-/// The `TCR_EL2` bits a processor implementing `features` keeps.
-pub(crate) const fn tcr_el2_mask(features: Features) -> u64 {
-    let mut mask = TCR_EL2_BASE | hw_update_mask(features);
-    if features.has(Feature::Hpds) {
-        mask |= TCR_EL2_HPD;
+/// `TCR_EL2`'s bits for `E2H` 1, `TCR_EL1`'s layout, every processor with
+/// FEAT_VHE keeps: `T0SZ`, `EPD0`, `IRGN0`, `ORGN0`, `SH0`, `TG0`, `T1SZ`,
+/// `A1`, `EPD1`, `IRGN1`, `ORGN1`, `SH1`, `TG1`, `IPS`, `AS` (FEAT_ASID16:
+/// `ID_AA64MMFR0_EL1.ASIDBits` is 16 bits on every processor here),
+/// `TBI0` and `TBI1`.
+const TCR_EL2_E2H1_BASE: u64 = 0x0000_0077_FFFF_FFBF;
+/// `TCR_EL2`'s `E2H` 1 fields of the features: `HA` (FEAT_HAF), `HD`
+/// (FEAT_HAFDBS), `HPD0` and `HPD1` (FEAT_HPDS), `TBID0` and `TBID1`
+/// (FEAT_PAuth), `E0PD0` and `E0PD1` (FEAT_E0PD), `DS` (FEAT_LPA2), each
+/// at `TCR_EL1`'s bit.
+const TCR_EL2_E2H1_HA: u64 = 1 << 39;
+const TCR_EL2_E2H1_HD: u64 = 1 << 40;
+const TCR_EL2_E2H1_HPD: u64 = (1 << 41) | (1 << 42);
+const TCR_EL2_E2H1_TBID: u64 = (1 << 51) | (1 << 52);
+const TCR_EL2_E2H1_E0PD: u64 = (1 << 55) | (1 << 56);
+const TCR_EL2_E2H1_DS: u64 = 1 << 59;
+
+/// The `TCR_EL2` bits a processor implementing `features` keeps in
+/// `layout`.
+pub(crate) const fn tcr_el2_mask(features: Features, layout: E2hLayout) -> u64 {
+    /// `bits` where `features` holds `feature`.
+    const fn with(features: Features, feature: Feature, bits: u64) -> u64 {
+        if features.has(feature) {
+            bits
+        } else {
+            0
+        }
     }
-    if features.has(Feature::PAuth) {
-        mask |= TCR_EL2_TBID;
+    match layout {
+        E2hLayout::E2h0 => {
+            TCR_EL2_BASE
+                | hw_update_mask(features)
+                | with(features, Feature::Hpds, TCR_EL2_HPD)
+                | with(features, Feature::PAuth, TCR_EL2_TBID)
+                | with(features, Feature::Lpa2, TCR_EL2_DS)
+        }
+        E2hLayout::E2h1 => {
+            TCR_EL2_E2H1_BASE
+                | with(features, Feature::Haf, TCR_EL2_E2H1_HA)
+                | with(features, Feature::Hafdbs, TCR_EL2_E2H1_HD)
+                | with(features, Feature::Hpds, TCR_EL2_E2H1_HPD)
+                | with(features, Feature::PAuth, TCR_EL2_E2H1_TBID)
+                | with(features, Feature::E0pd, TCR_EL2_E2H1_E0PD)
+                | with(features, Feature::Lpa2, TCR_EL2_E2H1_DS)
+        }
     }
-    if features.has(Feature::Lpa2) {
-        mask |= TCR_EL2_DS;
+}
+
+/// `TCR_EL2`'s RES1 bits in `layout`: 23 and 31 with `E2H` 0, none with
+/// `E2H` 1.
+pub(crate) const fn tcr_el2_res1(layout: E2hLayout) -> u64 {
+    match layout {
+        E2hLayout::E2h0 => TCR_EL2_RES1,
+        E2hLayout::E2h1 => 0,
     }
-    mask
 }
 
 /// A translation table base register's `BADDR` (bits 47:1) and, with
 /// FEAT_TTCNP, `CnP` (bit 0).
 pub(crate) const fn ttbr_baddr_mask(features: Features) -> u64 {
     TTB_BADDR | if features.has(Feature::Ttcnp) { 1 } else { 0 }
+}
+
+/// A translation table base register's `ASID`, bits 63:48: `TTBR0_EL2`'s
+/// and `TTBR1_EL2`'s with FEAT_VHE.
+pub(crate) const TTBR_ASID: u64 = 0xFFFF_0000_0000_0000;
+
+/// The `TTBR0_EL2` and `TTBR1_EL2` bits a processor implementing
+/// `features` keeps: [`ttbr_baddr_mask`], and with FEAT_VHE `ASID`, in
+/// either layout of `HCR_EL2.E2H` (the register's fieldsets turn on the
+/// feature alone).
+pub(crate) const fn ttbr_el2_mask(features: Features) -> u64 {
+    ttbr_baddr_mask(features)
+        | if features.has(Feature::Vhe) {
+            TTBR_ASID
+        } else {
+            0
+        }
 }
 
 /// `VTCR_EL2`'s bits every processor with EL2 keeps: `T0SZ`, `SL0`,
@@ -624,6 +808,15 @@ pub(crate) const CNTHCTL_EL1TVCT: u64 = 1 << 14;
 /// `EL1PCTEN`, `EL1PCEN`, and the physical count's event stream `EVNTEN`,
 /// `EVNTDIR` and `EVNTI` (Arm `TestEventCNTP`), at `CNTKCTL_EL1`'s bits.
 const CNTHCTL_BASE: u64 = 0xFF;
+/// `CNTHCTL_EL2.EL1PCTEN` and `EL1PTEN` with `E2H` 1: as `EL1PCTEN` and
+/// `EL1PCEN` with `E2H` 0, at bits 10 and 11.
+pub(crate) const CNTHCTL_E2H1_EL1PCTEN: u64 = 1 << 10;
+pub(crate) const CNTHCTL_E2H1_EL1PTEN: u64 = 1 << 11;
+/// `CNTHCTL_EL2`'s fields every processor with FEAT_VHE has with `E2H` 1:
+/// the event stream's, the EL1 enables, and `EL0PCTEN`, `EL0VCTEN`,
+/// `EL0VTEN` and `EL0PTEN`, whose 0 traps EL0's accesses in the host to the
+/// counters and timers to EL2, at `CNTKCTL_EL1`'s bits; bits 11:0.
+const CNTHCTL_E2H1_BASE: u64 = 0xFFF;
 /// `CNTHCTL_EL2`'s FEAT_ECV fields: `EL1TVT`, `EL1TVCT`, `EL1NVPCT`,
 /// `EL1NVVCT` (whose traps act only with FEAT_NV, which this processor
 /// lacks), `EVNTIS`.
@@ -633,7 +826,8 @@ const CNTHCTL_ECV_FIELDS: u64 = 0x3_E000;
 /// (Arm `PhysicalOffsetIsValid`, `AArch64_CheckTimerConditions`). Only a
 /// processor with FEAT_ECV_POFF keeps it.
 pub(crate) const CNTHCTL_ECV_POFF: u64 = 1 << 12;
-/// `CNTHP_CTL_EL2.ENABLE` and `IMASK`, the fields a write keeps.
+/// `CNTHP_CTL_EL2.ENABLE` and `IMASK`, the fields a write keeps, and
+/// `CNTHV_CTL_EL2`'s alike.
 const CNTHP_CTL_MASK: u64 = 0b11;
 /// `CONTEXTIDR_EL2.PROCID`.
 const CONTEXTIDR_MASK: u64 = 0xFFFF_FFFF;
@@ -641,8 +835,10 @@ const CONTEXTIDR_MASK: u64 = 0xFFFF_FFFF;
 /// SError reports.
 pub(crate) const VSESR_MASK: u64 = (1 << 24) | 0x00FF_FFFF;
 
-/// The `CNTHCTL_EL2` bits a processor implementing `features` keeps.
-pub(crate) const fn cnthctl_mask(features: Features) -> u64 {
+/// The `CNTHCTL_EL2` bits a processor implementing `features` keeps in
+/// `layout`: bits 7:0 with `E2H` 0, 11:0 with `E2H` 1, and FEAT_ECV's and
+/// FEAT_ECV_POFF's in both.
+pub(crate) const fn cnthctl_mask(features: Features, layout: E2hLayout) -> u64 {
     let ecv = if features.has(Feature::Ecv) {
         CNTHCTL_ECV_FIELDS
     } else {
@@ -653,13 +849,17 @@ pub(crate) const fn cnthctl_mask(features: Features) -> u64 {
     } else {
         0
     };
-    CNTHCTL_BASE | ecv | poff
+    let base = match layout {
+        E2hLayout::E2h0 => CNTHCTL_BASE,
+        E2hLayout::E2h1 => CNTHCTL_E2H1_BASE,
+    };
+    base | ecv | poff
 }
 
-/// Whether a processor implementing `features` has `CONTEXTIDR_EL2`:
-/// FEAT_VHE or FEAT_Debugv8p2 brings it.
+/// Whether a processor implementing `features` has `CONTEXTIDR_EL2`: Arm's
+/// data gives it to one with FEAT_Debugv8p1, which FEAT_VHE needs.
 pub(crate) const fn has_contextidr_el2(features: Features) -> bool {
-    features.has(Feature::Debugv8p2)
+    features.has(Feature::Debugv8p1)
 }
 
 /// Declares [`El2Regs`] with [`El2Regs::ABSENT`], [`El2Regs::get`] and
@@ -763,30 +963,53 @@ el2_registers! {
     /// `CNTHP_CVAL_EL2`: the EL2 physical timer.
     CnthpCtl => cnthp_ctl,
     CnthpCval => cnthp_cval,
-    /// `CONTEXTIDR_EL2` (FEAT_Debugv8p2 here, where FEAT_VHE is absent).
+    /// `CONTEXTIDR_EL2` (FEAT_Debugv8p1, which FEAT_VHE needs).
     Contextidr => contextidr,
     /// `VDISR_EL2` and `VSESR_EL2` (FEAT_RAS): the virtual SError's deferred
     /// syndrome and the syndrome it is taken with.
     Vdisr => vdisr,
     Vsesr => vsesr,
+    /// `TTBR1_EL2` (FEAT_VHE): the upper range's table base and ASID in the
+    /// EL2&0 regime.
+    Ttbr1 => ttbr1,
+    /// `CNTHV_CTL_EL2` (`ENABLE` and `IMASK`; `ISTATUS` is computed) and
+    /// `CNTHV_CVAL_EL2` (FEAT_VHE): the EL2 virtual timer.
+    CnthvCtl => cnthv_ctl,
+    CnthvCval => cnthv_cval,
 }
 
 impl El2Reg {
     /// What of `value` an `MSR` to the register keeps on a processor
-    /// implementing `features`, whose `SPSR_ELx` bits are `spsr_mask`: the
+    /// implementing `features`, whose `SPSR_ELx` bits are `spsr_mask`, in
+    /// `layout` (which only the registers `HCR_EL2.E2H` redefines read): the
     /// bits of the fields the register has there, its RES1 bits set and its
     /// RES0 bits clear.
-    pub(crate) const fn kept(self, features: Features, spsr_mask: u64, value: u64) -> u64 {
+    pub(crate) const fn kept(
+        self,
+        features: Features,
+        spsr_mask: u64,
+        layout: E2hLayout,
+        value: u64,
+    ) -> u64 {
         match self {
             Self::Hcr => (value & hcr_mask(features)) | HCR_RES1,
-            Self::Sctlr => (value & sctlr_el2_mask(features)) | SCTLR_EL2_RES1,
-            Self::Cptr => (value & cptr_el2_mask(features)) | cptr_el2_res1(features),
+            Self::Sctlr => (value & sctlr_el2_mask(features, layout)) | sctlr_el2_res1(layout),
+            Self::Cptr => {
+                (value & cptr_el2_mask(features, layout)) | cptr_el2_res1(features, layout)
+            }
             // Every field of `HSTR_EL2` traps an AArch32 access, so with no
             // AArch32 the register is RES0.
             Self::Hstr => 0,
             Self::Mdcr => value & mdcr_el2_mask(features),
-            Self::Tcr => (value & tcr_el2_mask(features)) | TCR_EL2_RES1,
-            Self::Ttbr0 => value & ttbr_baddr_mask(features),
+            Self::Tcr => (value & tcr_el2_mask(features, layout)) | tcr_el2_res1(layout),
+            Self::Ttbr0 => value & ttbr_el2_mask(features),
+            Self::Ttbr1 => {
+                if features.has(Feature::Vhe) {
+                    value & ttbr_el2_mask(features)
+                } else {
+                    0
+                }
+            }
             Self::Vtcr => (value & vtcr_el2_mask(features)) | VTCR_EL2_RES1,
             Self::Vttbr => value & (ttbr_baddr_mask(features) | VTTBR_VMID8),
             Self::Vbar => value & VBAR_MASK,
@@ -802,7 +1025,7 @@ impl El2Reg {
                     0
                 }
             }
-            Self::Cnthctl => value & cnthctl_mask(features),
+            Self::Cnthctl => value & cnthctl_mask(features, layout),
             // `CNTPOFF_EL2.PO`, all 64 bits, with FEAT_ECV_POFF.
             Self::Cntpoff => {
                 if features.has(Feature::EcvPoff) {
@@ -812,6 +1035,16 @@ impl El2Reg {
                 }
             }
             Self::CnthpCtl => value & CNTHP_CTL_MASK,
+            // The EL2 virtual timer's, with FEAT_VHE.
+            Self::CnthvCtl | Self::CnthvCval => {
+                if !features.has(Feature::Vhe) {
+                    0
+                } else if let Self::CnthvCtl = self {
+                    value & CNTHP_CTL_MASK
+                } else {
+                    value
+                }
+            }
             Self::Contextidr => {
                 if has_contextidr_el2(features) {
                     value & CONTEXTIDR_MASK
@@ -851,17 +1084,23 @@ impl El2Reg {
     }
 
     /// Whether the timers read the register: what
-    /// [`Cpu::el2_timer_inputs`] gathers, and `CNTHP_CTL_EL2`, which its own
-    /// arms write. Only a write of one of these can move a timer.
+    /// [`Cpu::el2_timer_inputs`] gathers, `HCR_EL2`, whose `E2H` and `TGE`
+    /// decide whether the EL1 physical timer takes FEAT_ECV_POFF's offset
+    /// (`!ELIsInHost(EL0)`), and `CNTHP_CTL_EL2` and `CNTHV_CTL_EL2`, which
+    /// their own arms write. Only a write of one of these can move a timer.
     /// Exhaustive (R5): a register added to the list says whether it is
     /// one.
     pub(crate) const fn feeds_timers(self) -> bool {
         match self {
-            Self::Cnthctl | Self::Cntvoff | Self::Cntpoff | Self::CnthpCtl | Self::CnthpCval => {
-                true
-            }
             Self::Hcr
-            | Self::Sctlr
+            | Self::Cnthctl
+            | Self::Cntvoff
+            | Self::Cntpoff
+            | Self::CnthpCtl
+            | Self::CnthpCval
+            | Self::CnthvCtl
+            | Self::CnthvCval => true,
+            Self::Sctlr
             | Self::Actlr
             | Self::Cptr
             | Self::Hstr
@@ -887,27 +1126,59 @@ impl El2Reg {
             | Self::Smcr
             | Self::Contextidr
             | Self::Vdisr
-            | Self::Vsesr => false,
+            | Self::Vsesr
+            | Self::Ttbr1 => false,
         }
     }
+
+    /// The registers `HCR_EL2.E2H` redefines, which take the layout it
+    /// selects ([`E2hLayout`]).
+    const REDEFINED: [Self; 4] = [Self::Sctlr, Self::Cptr, Self::Tcr, Self::Cnthctl];
 }
+
+// A snapshot reads `HCR_EL2` before the registers whose layout it selects
+// ([`Cpu::read_el2`]).
+const _: () = assert!(matches!(El2Reg::ALL[0], El2Reg::Hcr));
 
 impl El2Reg {
     /// What of `value` an `MSR` to the register keeps on a processor
-    /// implementing `imp`, whose `SPSR_ELx` bits are `spsr_mask`: what the
-    /// architecture keeps ([`El2Reg::kept`]), of an IMPLEMENTATION DEFINED
-    /// register what the implementation keeps of that
+    /// implementing `imp`, whose `SPSR_ELx` bits are `spsr_mask`, in
+    /// `layout`: what the architecture keeps ([`El2Reg::kept`]), of an
+    /// IMPLEMENTATION DEFINED register what the implementation keeps of that
     /// ([`ImpdefSpace::el2_kept`](super::impdef::ImpdefSpace::el2_kept)).
-    pub(crate) const fn held(self, imp: Implementation, spsr_mask: u64, value: u64) -> u64 {
-        imp.impdef.el2_kept(self, self.kept(imp.features, spsr_mask, value))
+    pub(crate) const fn held(
+        self,
+        imp: Implementation,
+        spsr_mask: u64,
+        layout: E2hLayout,
+        value: u64,
+    ) -> u64 {
+        imp.impdef
+            .el2_kept(self, self.kept(imp.features, spsr_mask, layout, value))
     }
 }
 
 impl El2Regs {
+    /// The layout `HCR_EL2.E2H` gives the registers it redefines now.
+    #[inline(always)]
+    pub(crate) const fn layout(&self) -> E2hLayout {
+        E2hLayout::of(self.hcr)
+    }
+
     /// An `MSR` of `value` to `reg` on a processor implementing `imp` whose
-    /// `SPSR_ELx` bits are `spsr_mask`: what [`El2Reg::held`] keeps.
+    /// `SPSR_ELx` bits are `spsr_mask`: what [`El2Reg::held`] keeps in the
+    /// layout of the time. A write of `HCR_EL2` that changes `E2H` leaves
+    /// each register it redefines holding what the new layout keeps of it.
     pub(crate) fn write(&mut self, reg: El2Reg, imp: Implementation, spsr_mask: u64, value: u64) {
-        *self.slot(reg) = reg.held(imp, spsr_mask, value);
+        let layout = self.layout();
+        *self.slot(reg) = reg.held(imp, spsr_mask, layout, value);
+        let now = self.layout();
+        if now != layout {
+            for redefined in El2Reg::REDEFINED {
+                let held = redefined.held(imp, spsr_mask, now, self.get(redefined));
+                *self.slot(redefined) = held;
+            }
+        }
     }
 }
 
@@ -972,7 +1243,9 @@ impl<L: Levels> Cpu<L> {
 
     /// The inverse of [`Cpu::save_el2`], changing nothing: the state read,
     /// or for a processor without FEAT_EL2 the nothing it holds. A register
-    /// holding a value no `MSR` on this processor leaves is refused.
+    /// holding a value no `MSR` on this processor leaves is refused, each
+    /// register `HCR_EL2.E2H` redefines in the layout of the `HCR_EL2` read
+    /// before it ([`El2Reg::ALL`] holds `HCR_EL2` first).
     pub(crate) fn read_el2<R: SnapRead>(&self, r: &mut R) -> Result<L::State, SnapError> {
         let mut state = L::State::keep(El2State::reset(self.imp));
         let Some(read) = state.get_mut() else {
@@ -982,7 +1255,7 @@ impl<L: Levels> Cpu<L> {
         let spsr_mask = self.spsr_mask();
         for reg in El2Reg::ALL {
             let value = r.read_u64()?;
-            if reg.held(self.imp.get(), spsr_mask, value) != value {
+            if reg.held(self.imp.get(), spsr_mask, read.regs.layout(), value) != value {
                 return Err(SnapError::Invalid(
                     "snapshot's EL2 register holds bits this processor cannot set",
                 ));
@@ -1072,6 +1345,39 @@ impl<L: Levels> Cpu<L> {
         self.hcr_any(HCR_TGE)
     }
 
+    /// Arm `ELIsInHost(EL2)`: `EL2Enabled()` and `EffectiveHCR_EL2_E2H()`
+    /// 1, which only a processor with FEAT_VHE keeps. A constant false
+    /// without EL2.
+    #[inline(always)]
+    pub(crate) fn e2h(&self) -> bool {
+        self.hcr_any(HCR_E2H)
+    }
+
+    /// Arm `ELIsInHost(EL0)`: `EL2Enabled()` and `HCR_EL2.{E2H, TGE}`
+    /// {1, 1}, under which EL0 runs in the EL2&0 regime. A constant false
+    /// without EL2.
+    #[inline(always)]
+    pub(crate) fn el0_in_host(&self) -> bool {
+        L::EL2 && self.el2().hcr & (HCR_E2H | HCR_TGE) == HCR_E2H | HCR_TGE
+    }
+
+    /// Arm `ELIsInHost(el)`: EL2 under `E2H` ([`Cpu::e2h`]), EL0 under
+    /// `E2H` and `TGE` ([`Cpu::el0_in_host`]), and EL1 never.
+    #[inline(always)]
+    pub(crate) fn el_is_in_host(&self, el: El) -> bool {
+        match el {
+            El::El2 => self.e2h(),
+            El::El0 => self.el0_in_host(),
+            El::El1 => false,
+        }
+    }
+
+    /// Arm `IsInHost()`: [`Cpu::el_is_in_host`] of the current level.
+    #[inline(always)]
+    pub(crate) fn in_host(&self) -> bool {
+        self.el_is_in_host(self.pstate.el)
+    }
+
     /// Arm `HighestEL()`: EL2 with FEAT_EL2, EL1 without (no EL3 here).
     #[inline]
     pub(crate) fn highest_el(&self) -> El {
@@ -1115,31 +1421,62 @@ mod tests {
     use super::*;
 
     /// Each mask names the fields Arm gives the features, and only those,
-    /// and the RES1 constants are disjoint from them.
+    /// and the RES1 constants are disjoint from them, in each layout of
+    /// `HCR_EL2.E2H`.
     #[test]
     fn the_masks_keep_exactly_their_features_fields() {
+        use E2hLayout::{E2h0, E2h1};
         let a57 = Implementation::CORTEX_A57.with_levels::<WithEl2>().features;
         assert_eq!(hcr_mask(a57), 0x0000_0003_7FFF_7FFF);
         assert_eq!(
-            hcr_mask(a57) & (HCR_RES1 | (1 << 15)),
+            hcr_mask(a57) & (HCR_RES1 | (1 << 15) | HCR_E2H),
             0,
-            "RW and TID0 are not writable"
+            "RW, TID0 and, without FEAT_VHE, E2H are not writable"
         );
-        assert_eq!(sctlr_el2_mask(a57) & SCTLR_EL2_RES1, 0);
-        assert_eq!(cptr_el2_mask(a57) & cptr_el2_res1(a57), 0);
-        assert_eq!(cptr_el2_res1(a57), 0x33FF, "TSM is RES1 without FEAT_SME");
-        assert_eq!(tcr_el2_mask(a57) & TCR_EL2_RES1, 0);
+        assert_eq!(sctlr_el2_mask(a57, E2h0) & SCTLR_EL2_RES1, 0);
+        assert_eq!(cptr_el2_mask(a57, E2h0) & cptr_el2_res1(a57, E2h0), 0);
+        assert_eq!(
+            cptr_el2_res1(a57, E2h0),
+            0x33FF,
+            "TSM is RES1 without FEAT_SME"
+        );
+        assert_eq!(tcr_el2_mask(a57, E2h0) & TCR_EL2_RES1, 0);
         let every = Implementation::EVERY_FEATURE
             .with_levels::<WithEl2>()
             .features;
-        assert_eq!(tcr_el2_mask(every) & TCR_EL2_RES1, 0);
+        assert_eq!(hcr_mask(every) & HCR_E2H, HCR_E2H, "E2H with FEAT_VHE");
+        for layout in [E2h0, E2h1] {
+            assert_eq!(
+                sctlr_el2_mask(every, layout) & sctlr_el2_res1(layout),
+                0,
+                "{layout:?}"
+            );
+            assert_eq!(
+                cptr_el2_mask(every, layout) & cptr_el2_res1(every, layout),
+                0,
+                "{layout:?}"
+            );
+            assert_eq!(
+                tcr_el2_mask(every, layout) & tcr_el2_res1(layout),
+                0,
+                "{layout:?}"
+            );
+        }
+        // `E2H` 1 moves the controls of `CPTR_EL2` and `CNTHCTL_EL2` to
+        // `CPACR_EL1`'s and `CNTKCTL_EL1`'s bits.
+        assert_eq!(
+            cptr_el2_mask(every, E2h1),
+            CPTR_TCPAC | CPTR_FPEN | CPTR_SMEN
+        );
+        assert_eq!(cnthctl_mask(every, E2h1) & 0xFFF, 0xFFF);
+        assert_eq!(cnthctl_mask(every, E2h0) & 0xF00, 0);
         assert_eq!(vtcr_el2_mask(every) & VTCR_EL2_RES1, 0);
         // HA and HD are RES0 on the Cortex-A57, which has neither FEAT_HAF
         // nor FEAT_HAFDBS, and kept where the processor has both.
         let hw = TCR_EL2_HA | TCR_EL2_HD;
-        assert_eq!(tcr_el2_mask(a57) & hw, 0);
+        assert_eq!(tcr_el2_mask(a57, E2h0) & hw, 0);
         assert_eq!(vtcr_el2_mask(a57) & (VTCR_EL2_HA | VTCR_EL2_HD), 0);
-        assert_eq!(tcr_el2_mask(every) & hw, hw);
+        assert_eq!(tcr_el2_mask(every, E2h0) & hw, hw);
         assert_eq!(
             vtcr_el2_mask(every) & (VTCR_EL2_HA | VTCR_EL2_HD),
             VTCR_EL2_HA | VTCR_EL2_HD
@@ -1147,7 +1484,39 @@ mod tests {
         let haf_alone = Implementation::every_feature_but(&[Feature::Hafdbs])
             .with_levels::<WithEl2>()
             .features;
-        assert_eq!(tcr_el2_mask(haf_alone) & hw, TCR_EL2_HA);
+        assert_eq!(tcr_el2_mask(haf_alone, E2h0) & hw, TCR_EL2_HA);
         assert_eq!(VMPIDR_MASK & VMPIDR_RES1, 0);
+        assert_eq!(
+            ttbr_el2_mask(a57) & TTBR_ASID,
+            0,
+            "no ASID without FEAT_VHE"
+        );
+        assert_eq!(ttbr_el2_mask(every) & TTBR_ASID, TTBR_ASID);
+    }
+
+    /// A write of `HCR_EL2` that changes `E2H` leaves each register it
+    /// redefines holding what its new layout keeps: `CPTR_EL2`'s RES1 bits
+    /// of the `E2H` 0 layout are clear with `E2H` 1, and set again with
+    /// `E2H` 0; `TCR_EL2`'s `T1SZ`, a field of the `E2H` 1 layout, is the
+    /// `E2H` 0 layout's `PS` and `TBI` where they overlap.
+    #[test]
+    fn a_change_of_e2h_relays_the_registers_it_redefines() {
+        let imp = Implementation::EVERY_FEATURE.with_levels::<WithEl2>().get();
+        let spsr_mask = spsr_mask_of(imp.features);
+        let mut regs = El2Regs::reset(imp.with_levels::<WithEl2>());
+        assert_eq!(regs.layout(), E2hLayout::E2h0);
+        assert_eq!(regs.cptr & CPTR_EL2_RES1_BASE, CPTR_EL2_RES1_BASE);
+        regs.write(El2Reg::Hcr, imp, spsr_mask, HCR_E2H);
+        assert_eq!(regs.layout(), E2hLayout::E2h1);
+        assert_eq!(regs.cptr, 0, "every E2H 0 RES1 bit is RES0 with E2H 1");
+        regs.write(El2Reg::Tcr, imp, spsr_mask, 0x3F << 16);
+        assert_eq!(regs.tcr, 0x3F << 16, "T1SZ");
+        regs.write(El2Reg::Hcr, imp, spsr_mask, 0);
+        assert_eq!(regs.cptr, cptr_el2_res1(imp.features, E2hLayout::E2h0));
+        assert_eq!(
+            regs.tcr,
+            (0x37 << 16) | TCR_EL2_RES1,
+            "PS, TBI and HA of the E2H 0 layout; bit 19 is RES0 there"
+        );
     }
 }

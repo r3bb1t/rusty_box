@@ -36,8 +36,8 @@ use super::{id, sctlr, Cpu, El, Levels};
 
 /// A stage 1 translation regime.
 ///
-/// Closed (R5): the regimes of a processor with no EL3 and no FEAT_VHE.
-/// The discriminants are the bit a TLB key holds for each (`mmu.rs`).
+/// Closed (R5): the regimes of a processor with no EL3. The discriminants
+/// are the byte a snapshot names each by (`mmu.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub(crate) enum Regime {
@@ -46,6 +46,12 @@ pub(crate) enum Regime {
     /// EL2 (FEAT_EL2, `HCR_EL2.E2H` = 0): `TTBR0_EL2`, one privilege level
     /// and one virtual address range.
     El2 = 1,
+    /// EL2&0 (FEAT_VHE, `HCR_EL2.E2H` = 1): `TTBR0_EL2` and `TTBR1_EL2`
+    /// under `TCR_EL2` in `TCR_EL1`'s layout, two privilege levels, EL2's
+    /// and, under `HCR_EL2.TGE`, EL0's (Arm ARM D8.13.1: "behaves the same
+    /// as stage 1 in the EL1&0 translation regime"), with ASIDs and no
+    /// VMID and no stage 2.
+    El20 = 2,
 }
 
 /// Arm `AArch64_S1Enabled(Regime_EL10)` with `SCTLR_EL1` `sctlr` and
@@ -78,7 +84,7 @@ impl Regime {
     /// permissions as well as its own, and two virtual address ranges.
     #[inline(always)]
     pub(crate) const fn has_unprivileged(self) -> bool {
-        matches!(self, Self::El10)
+        matches!(self, Self::El10 | Self::El20)
     }
 
     /// Whether `va` is in the upper of the regime's ranges, which bit 55
@@ -856,14 +862,27 @@ pub(crate) struct S1Params {
 
 impl<L: Levels> Cpu<L> {
     /// Arm `TranslationRegime(PSTATE.EL)`: the regime the current level's
-    /// accesses are translated in. Without EL2 it is always EL1&0, a
-    /// constant every regime test folds into.
+    /// accesses are translated in ([`Cpu::regime_at`]). Without EL2 it is
+    /// always EL1&0, a constant every regime test folds into.
     #[inline(always)]
     pub(crate) fn regime(&self) -> Regime {
-        if L::EL2 && self.pstate.el == El::El2 {
-            Regime::El2
-        } else {
-            Regime::El10
+        self.regime_at(self.pstate.el)
+    }
+
+    /// Arm `TranslationRegime(el)`: at EL2 the EL2&0 regime under
+    /// `HCR_EL2.E2H` and the EL2 regime otherwise, at EL0 the EL2&0 regime
+    /// under `E2H` and `TGE` (`ELIsInHost(EL0)`), and at EL1, and at EL0
+    /// otherwise, EL1&0.
+    #[inline(always)]
+    pub(crate) fn regime_at(&self, el: El) -> Regime {
+        if !L::EL2 {
+            return Regime::El10;
+        }
+        match el {
+            El::El2 if self.e2h() => Regime::El20,
+            El::El2 => Regime::El2,
+            El::El0 if self.el0_in_host() => Regime::El20,
+            El::El0 | El::El1 => Regime::El10,
         }
     }
 
@@ -873,7 +892,7 @@ impl<L: Levels> Cpu<L> {
     pub(crate) fn regime_sctlr(&self, regime: Regime) -> u64 {
         match regime {
             Regime::El10 => self.sys.sctlr_el1,
-            Regime::El2 => self.el2().sctlr,
+            Regime::El2 | Regime::El20 => self.el2().sctlr,
         }
     }
 
@@ -883,7 +902,7 @@ impl<L: Levels> Cpu<L> {
     pub(crate) fn s1_enabled(&self, regime: Regime) -> bool {
         match regime {
             Regime::El10 => el10_stage1_enabled(self.sys.sctlr_el1, self.hcr_el2()),
-            Regime::El2 => self.el2().sctlr & sctlr::M != 0,
+            Regime::El2 | Regime::El20 => self.el2().sctlr & sctlr::M != 0,
         }
     }
 
@@ -899,7 +918,8 @@ impl<L: Levels> Cpu<L> {
     /// Whether top-byte-ignore applies to the instruction or data addresses
     /// of the range of `regime` that `upper` names (Arm `AArch64_AddrTop`
     /// with the regime's `TBI` and `TBID`): EL1&0's `TCR_EL1.TBI1` or
-    /// `TBI0`, EL2's `TCR_EL2.TBI`, and with FEAT_PAuth not for an
+    /// `TBI0`, EL2's `TCR_EL2.TBI`, EL2&0's `TCR_EL2.TBI1` or `TBI0` (its
+    /// `E2H` 1 layout, `TCR_EL1`'s), and with FEAT_PAuth not for an
     /// instruction address the matching `TBID` takes out of it.
     #[inline]
     pub(crate) fn regime_tbi(&self, regime: Regime, upper: bool, instruction: bool) -> bool {
@@ -907,18 +927,21 @@ impl<L: Levels> Cpu<L> {
         match regime {
             Regime::El10 => el10_tbi(self.sys.tcr_el1, upper, instruction, pauth),
             Regime::El2 => el2_tbi(self.el2().tcr, instruction, pauth),
+            Regime::El20 => el10_tbi(self.el2().tcr, upper, instruction, pauth),
         }
     }
 
     /// The range of `regime` that `upper` names as its registers describe
     /// it: EL1&0's from `TCR_EL1` ([`S1Range::el10`]), EL2's from
-    /// `TCR_EL2` ([`S1Range::el2`]).
+    /// `TCR_EL2` ([`S1Range::el2`]), and EL2&0's from `TCR_EL2` in
+    /// `TCR_EL1`'s layout (`AArch64_S1TTWParamsEL20`, [`S1Range::el10`]).
     #[inline]
     fn s1_range(&self, regime: Regime, upper: bool) -> S1Range {
         let features = self.imp.features;
         match regime {
             Regime::El10 => S1Range::el10(self.sys.tcr_el1, upper, features),
             Regime::El2 => S1Range::el2(self.el2().tcr, features),
+            Regime::El20 => S1Range::el10(self.el2().tcr, upper, features),
         }
     }
 
@@ -943,29 +966,38 @@ impl<L: Levels> Cpu<L> {
 
     /// Arm `AArch64_GetS1TTWParams(regime, ..., va)`: the walk parameters
     /// of the range of `regime` that `va`'s bit 55 selects (EL2's one range
-    /// whatever the bit).
+    /// whatever the bit). The EL2&0 regime's are the EL1&0 regime's, read
+    /// from the EL2 registers (`AArch64_S1TTWParamsEL20`).
     pub(crate) fn s1_params(&self, regime: Regime, va: u64) -> S1Params {
         let hpds = self.implements(Feature::Hpds);
         let features = self.imp.features;
+        let two_ranges = |tcr: u64, ttbr0: u64, ttbr1: u64, mair: u64, control: u64| {
+            let upper = regime.upper(va);
+            let up = u32::from(upper);
+            S1Params {
+                regime,
+                range: self.s1_range(regime, upper),
+                ttbr: if upper { ttbr1 } else { ttbr0 },
+                hpd: hpds && (tcr >> (TCR_EL1_HPD0 + up)) & 1 == 1,
+                mair,
+                wxn: control & sctlr::WXN != 0,
+                hw: HwUpdate::of(tcr, TCR_EL1_HA, TCR_EL1_HD, features),
+            }
+        };
         match regime {
             Regime::El10 => {
-                let tcr = self.sys.tcr_el1;
-                let upper = regime.upper(va);
-                let ttbr = if upper {
-                    self.sys.ttbr1_el1
-                } else {
-                    self.sys.ttbr0_el1
-                };
-                let up = u32::from(upper);
-                S1Params {
-                    regime,
-                    range: self.s1_range(regime, upper),
-                    ttbr,
-                    hpd: hpds && (tcr >> (TCR_EL1_HPD0 + up)) & 1 == 1,
-                    mair: self.sys.mair_el1,
-                    wxn: self.sys.sctlr_el1 & sctlr::WXN != 0,
-                    hw: HwUpdate::of(tcr, TCR_EL1_HA, TCR_EL1_HD, features),
-                }
+                let sys = &self.sys;
+                two_ranges(
+                    sys.tcr_el1,
+                    sys.ttbr0_el1,
+                    sys.ttbr1_el1,
+                    sys.mair_el1,
+                    sys.sctlr_el1,
+                )
+            }
+            Regime::El20 => {
+                let el2 = self.el2();
+                two_ranges(el2.tcr, el2.ttbr0, el2.ttbr1, el2.mair, el2.sctlr)
             }
             Regime::El2 => {
                 let el2 = self.el2();

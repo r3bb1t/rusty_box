@@ -253,6 +253,8 @@ sysregs! {
     MDCR_EL2 = (3, 4, 1, 1, 1);
     CPTR_EL2 = (3, 4, 1, 1, 2);
     TTBR0_EL2 = (3, 4, 2, 0, 0);
+    /// FEAT_VHE's, absent without it.
+    TTBR1_EL2 = (3, 4, 2, 0, 1);
     TCR_EL2 = (3, 4, 2, 0, 2);
     VTTBR_EL2 = (3, 4, 2, 1, 0);
     VTCR_EL2 = (3, 4, 2, 1, 2);
@@ -270,6 +272,9 @@ sysregs! {
     CNTHCTL_EL2 = (3, 4, 14, 1, 0);
     CNTHP_CTL_EL2 = (3, 4, 14, 2, 1);
     CNTHP_CVAL_EL2 = (3, 4, 14, 2, 2);
+    /// The EL2 virtual timer's (FEAT_VHE), absent without it.
+    CNTHV_CTL_EL2 = (3, 4, 14, 3, 1);
+    CNTHV_CVAL_EL2 = (3, 4, 14, 3, 2);
 }
 
 impl SysReg {

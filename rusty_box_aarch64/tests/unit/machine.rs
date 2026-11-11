@@ -312,8 +312,14 @@ fn a_host_tree_gets_the_boards_memory_and_psci_nodes() {
         Ok(Some(&0x95C1_BA60u32.to_be_bytes()[..]))
     );
     for (levels, conduit) in [
-        (TreeLevels::of::<NoEl2>(), PsciConduit::Hvc),
-        (TreeLevels::of::<WithEl2>(), PsciConduit::Smc),
+        (
+            TreeLevels::of::<NoEl2>(CpuModel::CortexA57),
+            PsciConduit::Hvc,
+        ),
+        (
+            TreeLevels::of::<WithEl2>(CpuModel::CortexA57),
+            PsciConduit::Smc,
+        ),
     ] {
         assert_eq!(levels.psci, conduit);
         let machine = Description {
@@ -382,7 +388,7 @@ fn the_device_tree_names_the_board_by_its_identity() {
         cpu: CpuModel::CortexA57,
         choice: BootChoice::Bare,
         layout: None,
-        levels: TreeLevels::of::<NoEl2>(),
+        levels: TreeLevels::of::<NoEl2>(CpuModel::CortexA57),
         wiring: crate::interrupt_map::InterruptMap::DEFAULT
             .wire(crate::SpiCount::DEFAULT, crate::DeviceLayout::DEFAULT)
             .expect("the default fits"),
@@ -731,4 +737,36 @@ fn a_disabled_device_node_is_left_to_the_tree() {
         .map(|name| Edit::set(NodePath::of(name), "status", Value::String("disabled")))
         .collect();
     assert_eq!(check_qemu_tree(&edited_host_tree(&edits), own), Ok(()));
+}
+
+/// The board drives the EL2 virtual timer's line (`CNTHV_*_EL2`,
+/// FEAT_VHE) onto PPI 12, INTID 28, BSA's (DEN0094C RB_PPI_02): a guest
+/// finds it pending in `GICD_ISPENDR0` while the line is high, and not once
+/// it falls, as for every level-sensitive PPI.
+#[test]
+fn the_el2_virtual_timer_drives_intid_28() {
+    use crate::bus::{AccessWidth, RegOffset};
+    use crate::cpu::TimerLines;
+    const GICD_ISPENDR0: u64 = 0x200;
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = MachineBuilder::new(VirtConfig::DEFAULT)
+        .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
+        .bare()
+        .with_el2()
+        .build_in(MemoryLoan {
+            ram: &mut ram,
+            vars: &mut [],
+        })
+        .expect("a bare machine with EL2 builds");
+    for (high, bit) in [(true, 1 << 28), (false, 0)] {
+        m.board.set_timer_lines(TimerLines {
+            hypervisor_virtual: high,
+            ..TimerLines::default()
+        });
+        let pending = m
+            .board
+            .gic
+            .dist_read(RegOffset::new(GICD_ISPENDR0), AccessWidth::Word);
+        assert_eq!(pending & (1 << 28), bit, "line {high}");
+    }
 }

@@ -47,7 +47,8 @@
 //!   (`Cpu::counter_at`, `CNTPCT = floor(icount * counter_hz / ips)`), less
 //!   `CNTPOFF_EL2` at EL0 and EL1 under `CNTHCTL_EL2.ECV`
 //!   (`Cpu::physical_count_at`), and the virtual count, the physical count
-//!   less `CNTVOFF_EL2` (`Cpu::virtual_count_at`), but where an offset count
+//!   less `CNTVOFF_EL2` outside the host (`Cpu::virtual_count_at`), but
+//!   where an offset count
 //!   wraps to 0, which a skip whose last count is below its first would
 //!   cross and is refused. Iteration `i` reads it at tick
 //!   `icount + i * len`. So when iterations 0 and `i` take the same path,
@@ -330,7 +331,7 @@ impl<L: Levels> Cpu<L> {
     fn poll_count_at(&self, count: PollCount, icount: u64) -> u64 {
         match count {
             PollCount::Physical => self.physical_count_at(self.pstate.el, icount).get(),
-            PollCount::Virtual => self.virtual_count_at(icount).get(),
+            PollCount::Virtual => self.virtual_count_at(self.pstate.el, icount).get(),
         }
     }
 

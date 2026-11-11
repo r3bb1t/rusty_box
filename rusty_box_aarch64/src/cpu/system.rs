@@ -5,7 +5,9 @@
 //! 0028F) that the board's firmware answers on `HVC` without EL2 and on
 //! `SMC` with it, as QEMU's `virt` does (its device tree's `method`).
 
-use super::el2::{CPTR_TFP, HCR_HCD, HCR_TDZ, HCR_TPCP, HCR_TPU, HCR_TSC, HCR_TSW, HCR_TTLB};
+use super::el2::{
+    CPTR_FPEN, CPTR_TFP, HCR_HCD, HCR_TDZ, HCR_TPCP, HCR_TPU, HCR_TSC, HCR_TSW, HCR_TTLB,
+};
 use super::exception::{Exception, Route, SyndromeClass};
 use super::exec::{bit, bits, ExecResult, Fault, Flow, StopCause};
 use super::features::Feature;
@@ -271,12 +273,15 @@ impl<L: Levels> Cpu<L> {
     /// Whether the two-bit `CPACR_EL1` enable `field` ([`CPACR_FPEN`],
     /// [`CPACR_SMEN`](super::sysreg::CPACR_SMEN)) allows its instructions
     /// at `el`: `11` at EL0 and EL1, `01` at EL1 alone, `x0` at neither;
-    /// EL2 is not subject to it. A processor without EL2 is never at EL2,
-    /// so for one the EL2 arm is not compiled and no level is tested first.
+    /// EL2 is not subject to it, nor EL0 in the host (FEAT_VHE; Arm
+    /// `AArch64_CheckFPEnabled`: `!IsInHost()`). A processor without EL2 is
+    /// never at EL2 nor in the host, so for one those arms are not compiled
+    /// and no level is tested first.
     #[inline]
     pub(crate) fn cpacr_enabled_at(&self, field: u64, el: El) -> bool {
         match el {
             El::El2 if L::EL2 => true,
+            El::El0 if L::EL2 && self.el0_in_host() => true,
             El::El0 | El::El1 | El::El2 => {
                 match (self.sys.cpacr_el1 & field) >> field.trailing_zeros() {
                     0b11 => true,
@@ -293,18 +298,43 @@ impl<L: Levels> Cpu<L> {
         self.cpacr_enabled_at(CPACR_FPEN, el)
     }
 
-    /// Whether `CPTR_EL2.TFP` (with `HCR_EL2.E2H` 0, the only layout here)
-    /// disables SIMD&FP at EL0, EL1 and EL2.
+    /// Whether `CPTR_EL2` disables, at `el` (EL0, EL1 or EL2), what its
+    /// control `e2h0_trap` (with `HCR_EL2.E2H` 0, a trap bit) or its two-bit
+    /// enable `e2h1_enable` (with `E2H` 1, FEAT_VHE) governs: with `E2H` 1,
+    /// `x0` everywhere, `01` at EL0 under `HCR_EL2.TGE`, `11` nowhere (Arm
+    /// `AArch64_CheckFPAdvSIMDTrap`, `CheckSMEAccess`, `AArch64_IsFPEnabled`,
+    /// `IsSMEEnabled`).
     #[inline]
-    pub(crate) fn cptr_el2_traps_fp(&self) -> bool {
-        self.cptr_any(CPTR_TFP)
+    pub(crate) fn cptr_el2_disables(&self, el: El, e2h0_trap: u64, e2h1_enable: u64) -> bool {
+        if !self.e2h() {
+            return self.cptr_any(e2h0_trap);
+        }
+        match (self.el2().cptr & e2h1_enable) >> e2h1_enable.trailing_zeros() {
+            0b11 => false,
+            0b01 => el == El::El0 && self.tge(),
+            _ => true,
+        }
     }
 
-    /// Arm `AArch64_IsFPEnabled(el)`: `CPACR_EL1.FPEN` at EL0 and EL1, then
-    /// `CPTR_EL2.TFP` at EL0, EL1 and EL2.
+    /// Whether `CPTR_EL2` disables SIMD&FP at `el`: `TFP` with
+    /// `HCR_EL2.E2H` 0, `FPEN` with `E2H` 1 ([`Cpu::cptr_el2_disables`]).
+    #[inline]
+    pub(crate) fn cptr_el2_traps_fp_at(&self, el: El) -> bool {
+        self.cptr_el2_disables(el, CPTR_TFP, CPTR_FPEN)
+    }
+
+    /// Whether `CPTR_EL2` disables SIMD&FP at the current level
+    /// ([`Cpu::cptr_el2_traps_fp_at`]).
+    #[inline]
+    pub(crate) fn cptr_el2_traps_fp(&self) -> bool {
+        self.cptr_el2_traps_fp_at(self.pstate.el)
+    }
+
+    /// Arm `AArch64_IsFPEnabled(el)`: `CPACR_EL1.FPEN` at EL0 and EL1
+    /// outside the host, then `CPTR_EL2` at EL0, EL1 and EL2.
     #[inline]
     pub(crate) fn fp_enabled_at(&self, el: El) -> bool {
-        self.cpacr_fp_enabled_at(el) && !self.cptr_el2_traps_fp()
+        self.cpacr_fp_enabled_at(el) && !self.cptr_el2_traps_fp_at(el)
     }
 
     /// The trap a disabled SIMD&FP access raises (Arm
@@ -553,9 +583,10 @@ impl<L: Levels> Cpu<L> {
                     self.pstate.dit = operand;
                     Ok(Flow::Next)
                 }
-                // DAIFSet / DAIFClr
+                // DAIFSet / DAIFClr: EL0 needs `UMA` of its `SCTLR_ELx`,
+                // which in the host is `SCTLR_EL2`'s, RES0 there.
                 (3, 6) | (3, 7) => {
-                    if self.pstate.el == El::El0 && self.sys.sctlr_el1 & sctlr::UMA == 0 {
+                    if self.pstate.el == El::El0 && self.el0_sctlr() & sctlr::UMA == 0 {
                         return self.sys_trap(pc, insn, rt, Route::Class);
                     }
                     let bits = u64::from(crm) << 6;
@@ -643,7 +674,11 @@ impl<L: Levels> Cpu<L> {
         let el = self.pstate.el;
         let el0 = el == El::El0;
         let el1 = el == El::El1;
-        let below_el2 = el != El::El2;
+        // Where `HCR_EL2`'s traps of EL0 and EL1 act: at those levels
+        // outside the host (FEAT_VHE), where `HCR_EL2.TGE` gives EL0 to EL2.
+        let below_el2 = el != El::El2 && !self.in_host();
+        // EL0's controls: those of the `SCTLR_ELx` of EL0's regime.
+        let el0_control = self.el0_sctlr();
         let key = SysRegKey::from_insn(insn);
         if key.in_impdef_space() {
             let operand = self.x_or_zr(rt);
@@ -672,7 +707,8 @@ impl<L: Levels> Cpu<L> {
                 Ok(Flow::Next)
             }
             // IC IVAU, DC CVAC, DC CVAU, DC CIVAC, and DC CVAP (FEAT_DPB)
-            // and DC CVADP (FEAT_DPB2): EL0 needs SCTLR_EL1.UCI. CLIDR_EL1
+            // and DC CVADP (FEAT_DPB2): EL0 needs `UCI` of its `SCTLR_ELx`
+            // (`SCTLR_EL1`, or `SCTLR_EL2` in the host). CLIDR_EL1
             // names caches to the PoU and the PoC and CTR_EL0.DIC is 0, so
             // none is executed as a NOP (`AArch64_TreatDCAsNOP`,
             // `AArch64_TreatICAsNOP`); a memory system with no PoP or PoDP
@@ -686,11 +722,11 @@ impl<L: Levels> Cpu<L> {
                 if !implemented {
                     return self.undefined(pc, insn);
                 }
-                if el0 && self.sys.sctlr_el1 & sctlr::UCI == 0 {
+                if el0 && el0_control & sctlr::UCI == 0 {
                     return self.sys_trap(pc, insn, rt, Route::Class);
                 }
                 // To the PoU (`IC IVAU`, `DC CVAU`) `HCR_EL2.TPU`, the others
-                // `TPCP`, trap EL0's and EL1's.
+                // `TPCP`, trap EL0's and EL1's outside the host.
                 let el2_control = if crm == 5 || crm == 11 {
                     HCR_TPU
                 } else {
@@ -706,23 +742,23 @@ impl<L: Levels> Cpu<L> {
                 self.cache_maintenance(bus, va, op)?;
                 Ok(Flow::Next)
             }
-            // CFP, DVP and CPP RCTX (FEAT_SPECRES): EL0 needs
-            // SCTLR_EL1.EnRCTX. Each restricts predictions
+            // CFP, DVP and CPP RCTX (FEAT_SPECRES): EL0 needs `EnRCTX` of its
+            // `SCTLR_ELx`. Each restricts predictions
             // (`AArch64_RestrictPrediction`), which a processor that never
             // speculates does not make.
             (3, 7, 3, 4 | 5 | 7) => {
                 if !self.implements(Feature::SpecRes) {
                     return self.undefined(pc, insn);
                 }
-                if el0 && self.sys.sctlr_el1 & sctlr::ENRCTX == 0 {
+                if el0 && el0_control & sctlr::ENRCTX == 0 {
                     return self.sys_trap(pc, insn, rt, Route::Class);
                 }
                 Ok(Flow::Next)
             }
-            // DC ZVA: EL0 needs SCTLR_EL1.DZE; `HCR_EL2.TDZ` traps EL0's and
-            // EL1's.
+            // DC ZVA: EL0 needs `DZE` of its `SCTLR_ELx`; `HCR_EL2.TDZ`
+            // traps EL0's and EL1's outside the host.
             (3, 7, 4, 1) => {
-                if el0 && self.sys.sctlr_el1 & sctlr::DZE == 0 {
+                if el0 && el0_control & sctlr::DZE == 0 {
                     return self.sys_trap(pc, insn, rt, Route::Class);
                 }
                 Self::sys_el2_trap(below_el2 && self.hcr_any(HCR_TDZ), insn, rt)?;

@@ -170,7 +170,10 @@ impl ImpdefSpace {
                 | El2Reg::CnthpCval
                 | El2Reg::Contextidr
                 | El2Reg::Vdisr
-                | El2Reg::Vsesr => value,
+                | El2Reg::Vsesr
+                | El2Reg::Ttbr1
+                | El2Reg::CnthvCtl
+                | El2Reg::CnthvCval => value,
             },
         }
     }

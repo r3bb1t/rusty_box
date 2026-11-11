@@ -92,6 +92,9 @@ mod tlbi;
 #[path = "../../tests/unit/tlb_maintenance.rs"]
 mod tlb_maintenance;
 mod trace;
+#[cfg(test)]
+#[path = "../../tests/unit/vhe.rs"]
+mod vhe;
 mod wait;
 mod za;
 mod za_array;

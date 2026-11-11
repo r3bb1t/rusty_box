@@ -14,16 +14,22 @@
 //! register's accessor checks them. Provenance (R7): Arm's machine-readable
 //! register data (AARCHMRS `Registers.json`, release 2026-09), each
 //! register's `MRS` and `MSR` accessor at each level, read for a processor
-//! with no EL3, `HCR_EL2.E2H` = 0 (no FEAT_VHE) and no FEAT_NV or FEAT_FGT.
+//! with no EL3 and no FEAT_NV or FEAT_FGT. With FEAT_VHE and `HCR_EL2.E2H`
+//! set, EL2's accesses to an EL1 register reach its EL2 counterpart
+//! (`SCTLR_EL1` reaches `SCTLR_EL2`), the `*_EL12` and `*_EL02` encodings
+//! reach the EL1 and EL0 registers themselves, and EL0 in the host
+//! (`HCR_EL2.{E2H, TGE}` {1, 1}) is checked against EL2's controls where
+//! the accessor checks EL1's.
 //! A trap to EL1 is [`Route::Class`] (`AArch64_SystemAccessTraptoEL1orEL2`
 //! from EL0, which `HCR_EL2.TGE` takes to EL2), a trap an EL2 control raises
 //! [`Route::El2`] (`AArch64_SystemAccessTrap(EL2, ..)`).
 
 use super::debug::DebugPoints;
 use super::el2::{
-    has_contextidr_el2, El2Reg, CNTHCTL_EL1PCEN, CNTHCTL_EL1PCTEN, CNTHCTL_EL1TVCT, CNTHCTL_EL1TVT,
-    CPTR_TCPAC, HCR_AMO, HCR_APK, HCR_FIEN, HCR_TACR, HCR_TERR, HCR_TID1, HCR_TID2, HCR_TID3,
-    HCR_TIDCP, HCR_TLOR, HCR_TRVM, HCR_TVM, MDCR_TDA, MDCR_TDE, MDCR_TDOSA, MDCR_TDRA,
+    has_contextidr_el2, El2Reg, CNTHCTL_E2H1_EL1PCTEN, CNTHCTL_E2H1_EL1PTEN, CNTHCTL_EL1PCEN,
+    CNTHCTL_EL1PCTEN, CNTHCTL_EL1TVCT, CNTHCTL_EL1TVT, CPTR_TCPAC, HCR_AMO, HCR_APK, HCR_FIEN,
+    HCR_TACR, HCR_TERR, HCR_TID1, HCR_TID2, HCR_TID3, HCR_TIDCP, HCR_TLOR, HCR_TRVM, HCR_TVM,
+    MDCR_TDA, MDCR_TDE, MDCR_TDOSA, MDCR_TDRA,
 };
 use super::exception::Route;
 use super::features::{Feature, Features};
@@ -372,6 +378,84 @@ const CNTHCTL_EL2: u32 = key!(3, 4, 14, 1, 0);
 const CNTHP_TVAL_EL2: u32 = key!(3, 4, 14, 2, 0);
 const CNTHP_CTL_EL2: u32 = key!(3, 4, 14, 2, 1);
 const CNTHP_CVAL_EL2: u32 = key!(3, 4, 14, 2, 2);
+// FEAT_VHE's EL2 registers.
+const TTBR1_EL2: u32 = key!(3, 4, 2, 0, 1);
+const CNTHV_TVAL_EL2: u32 = key!(3, 4, 14, 3, 0);
+const CNTHV_CTL_EL2: u32 = key!(3, 4, 14, 3, 1);
+const CNTHV_CVAL_EL2: u32 = key!(3, 4, 14, 3, 2);
+
+/// The EL1 and EL0 register names an access at EL2 under `HCR_EL2.E2H`
+/// reaches an EL2 register by, and the EL2 register's (FEAT_VHE; Arm ARM
+/// D8.13.2, Tables D8-113, D8-114 and D8-116, for the registers this
+/// processor has): the one map of the redirection.
+const REDIRECTED: [(u32, u32); 23] = [
+    (SCTLR_EL1, SCTLR_EL2),
+    (CPACR_EL1, CPTR_EL2),
+    (SMCR_EL1, SMCR_EL2),
+    (TTBR0_EL1, TTBR0_EL2),
+    (TTBR1_EL1, TTBR1_EL2),
+    (TCR_EL1, TCR_EL2),
+    (SPSR_EL1, SPSR_EL2),
+    (ELR_EL1, ELR_EL2),
+    (AFSR0_EL1, AFSR0_EL2),
+    (AFSR1_EL1, AFSR1_EL2),
+    (ESR_EL1, ESR_EL2),
+    (FAR_EL1, FAR_EL2),
+    (MAIR_EL1, MAIR_EL2),
+    (AMAIR_EL1, AMAIR_EL2),
+    (VBAR_EL1, VBAR_EL2),
+    (CONTEXTIDR_EL1, CONTEXTIDR_EL2),
+    (CNTKCTL_EL1, CNTHCTL_EL2),
+    (CNTP_TVAL_EL0, CNTHP_TVAL_EL2),
+    (CNTP_CTL_EL0, CNTHP_CTL_EL2),
+    (CNTP_CVAL_EL0, CNTHP_CVAL_EL2),
+    (CNTV_TVAL_EL0, CNTHV_TVAL_EL2),
+    (CNTV_CTL_EL0, CNTHV_CTL_EL2),
+    (CNTV_CVAL_EL0, CNTHV_CVAL_EL2),
+];
+
+/// The `*_EL12` and `*_EL02` names an access at EL2 under `HCR_EL2.E2H`
+/// reaches an EL1 or EL0 register by, and that register's own name
+/// (FEAT_VHE; Arm ARM D8.13.3, Tables D8-118 and D8-119, for the registers
+/// this processor has); UNDEFINED anywhere else. The one map of the
+/// aliases.
+const ALIASES: [(u32, u32); 23] = [
+    (key!(3, 5, 1, 0, 0), SCTLR_EL1),
+    (key!(3, 5, 1, 0, 2), CPACR_EL1),
+    (key!(3, 5, 1, 2, 6), SMCR_EL1),
+    (key!(3, 5, 2, 0, 0), TTBR0_EL1),
+    (key!(3, 5, 2, 0, 1), TTBR1_EL1),
+    (key!(3, 5, 2, 0, 2), TCR_EL1),
+    (key!(3, 5, 4, 0, 0), SPSR_EL1),
+    (key!(3, 5, 4, 0, 1), ELR_EL1),
+    (key!(3, 5, 5, 1, 0), AFSR0_EL1),
+    (key!(3, 5, 5, 1, 1), AFSR1_EL1),
+    (key!(3, 5, 5, 2, 0), ESR_EL1),
+    (key!(3, 5, 6, 0, 0), FAR_EL1),
+    (key!(3, 5, 10, 2, 0), MAIR_EL1),
+    (key!(3, 5, 10, 3, 0), AMAIR_EL1),
+    (key!(3, 5, 12, 0, 0), VBAR_EL1),
+    (key!(3, 5, 13, 0, 1), CONTEXTIDR_EL1),
+    (key!(3, 5, 14, 1, 0), CNTKCTL_EL1),
+    (key!(3, 5, 14, 2, 0), CNTP_TVAL_EL0),
+    (key!(3, 5, 14, 2, 1), CNTP_CTL_EL0),
+    (key!(3, 5, 14, 2, 2), CNTP_CVAL_EL0),
+    (key!(3, 5, 14, 3, 0), CNTV_TVAL_EL0),
+    (key!(3, 5, 14, 3, 1), CNTV_CTL_EL0),
+    (key!(3, 5, 14, 3, 2), CNTV_CVAL_EL0),
+];
+
+/// The name `k` is in `map`'s first column, mapped to its second.
+const fn mapped(map: &[(u32, u32)], k: u32) -> Option<u32> {
+    let mut i = 0;
+    while i < map.len() {
+        if map[i].0 == k {
+            return Some(map[i].1);
+        }
+        i += 1;
+    }
+    None
+}
 
 /// The encoding an `MRS` and an `MSR` reach EL2 register `reg` by, held as
 /// written, on a processor implementing `features`: `None` where the
@@ -423,6 +507,10 @@ const fn el2_encoding(reg: El2Reg, features: Features) -> Option<u32> {
         El2Reg::Contextidr => present(CONTEXTIDR_EL2, has_contextidr_el2(features)),
         El2Reg::Vdisr => present(VDISR_EL2, features.has(Feature::Ras)),
         El2Reg::Vsesr => present(VSESR_EL2, features.has(Feature::Ras)),
+        El2Reg::Ttbr1 => present(TTBR1_EL2, features.has(Feature::Vhe)),
+        // `ISTATUS` is computed, as `CNTHP_CTL_EL2`'s.
+        El2Reg::CnthvCtl => None,
+        El2Reg::CnthvCval => present(CNTHV_CVAL_EL2, features.has(Feature::Vhe)),
     }
 }
 
@@ -529,14 +617,16 @@ pub(crate) enum WriteEffect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TranslationRegister {
     /// The EL1&0 regime's ([`El10Context`]): its stage 1 registers
-    /// (`SCTLR_EL1`, `TCR_EL1`, `TTBR0_EL1`, `TTBR1_EL1`, `MAIR_EL1`),
-    /// stage 2's (`VTTBR_EL2`, `VTCR_EL2`), and `HCR_EL2`, whose `VM`, `DC`,
-    /// `PTW` and `TGE` decide which walks are made and whose `CD` what
-    /// memory they make.
+    /// (`SCTLR_EL1`, `TCR_EL1`, `TTBR0_EL1`, `TTBR1_EL1`, `MAIR_EL1`) and
+    /// stage 2's (`VTTBR_EL2`, `VTCR_EL2`).
     El10,
-    /// The EL2 regime's ([`El2RegimeContext`]): `SCTLR_EL2`, `TCR_EL2`,
-    /// `TTBR0_EL2` and `MAIR_EL2`.
+    /// The regime of EL2's ([`El2RegimeContext`]): `SCTLR_EL2`, `TCR_EL2`,
+    /// `TTBR0_EL2`, `TTBR1_EL2` and `MAIR_EL2`.
     El2,
+    /// Both: `HCR_EL2`, whose `VM`, `DC`, `PTW` and `TGE` decide which of
+    /// the EL1&0 regime's walks are made and whose `CD` what memory they
+    /// make, and whose `E2H` (FEAT_VHE) which regime EL2's is.
+    Both,
 }
 
 impl TranslationRegister {
@@ -553,8 +643,11 @@ impl TranslationRegister {
     /// translation register.
     const fn of_el2(reg: El2Reg) -> Option<Self> {
         match reg {
-            El2Reg::Sctlr | El2Reg::Tcr | El2Reg::Ttbr0 | El2Reg::Mair => Some(Self::El2),
-            El2Reg::Hcr | El2Reg::Vtcr | El2Reg::Vttbr => Some(Self::El10),
+            El2Reg::Sctlr | El2Reg::Tcr | El2Reg::Ttbr0 | El2Reg::Ttbr1 | El2Reg::Mair => {
+                Some(Self::El2)
+            }
+            El2Reg::Vtcr | El2Reg::Vttbr => Some(Self::El10),
+            El2Reg::Hcr => Some(Self::Both),
             El2Reg::Actlr
             | El2Reg::Cptr
             | El2Reg::Hstr
@@ -580,19 +673,22 @@ impl TranslationRegister {
             | El2Reg::CnthpCval
             | El2Reg::Contextidr
             | El2Reg::Vdisr
-            | El2Reg::Vsesr => None,
+            | El2Reg::Vsesr
+            | El2Reg::CnthvCtl
+            | El2Reg::CnthvCval => None,
         }
     }
 }
 
-/// What a translation reads of one regime's registers, taken before a
-/// write of one of them to compare with after it.
+/// What a translation reads of one regime's registers, or of both, taken
+/// before a write of one of them to compare with after it.
 ///
 /// Closed (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TranslationContext {
     El10(El10Context),
     El2(El2RegimeContext),
+    Both(El10Context, El2RegimeContext),
 }
 
 /// The trap to EL1 an EL0 control raises (`AArch64_SystemAccessTraptoEL1orEL2`)
@@ -814,42 +910,87 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
-    /// An EL0 access to a counter or timer register whose `CNTKCTL_EL1`
-    /// enable (`enable_bits`, any of them) is clear traps to EL1.
+    /// An EL0 access to a counter or timer register whose EL0 enable
+    /// (`enable_bits`, any of them) is clear traps: outside the host
+    /// `CNTKCTL_EL1`'s, to EL1 (EL2 under `HCR_EL2.TGE`); in the host
+    /// (FEAT_VHE, `HCR_EL2.{E2H, TGE}` {1, 1}) `CNTHCTL_EL2`'s, its `E2H` 1
+    /// layout holding them at `CNTKCTL_EL1`'s bits, to EL2.
     fn el0_timer_check(&self, el: El, enable_bits: u64) -> Result<(), SysRegError> {
-        trap_to_el1(el == El::El0 && self.sys.cntkctl_el1 & enable_bits == 0)
+        if el != El::El0 {
+            Ok(())
+        } else if self.el0_in_host() {
+            trap_to_el2(self.el2().cnthctl & enable_bits == 0)
+        } else {
+            trap_to_el1(self.sys.cntkctl_el1 & enable_bits == 0)
+        }
     }
 
-    /// The accessor checks of `CNTPCT_EL0` and `CNTPCTSS_EL0`:
-    /// `CNTKCTL_EL1.EL0PCTEN` at EL0, then `CNTHCTL_EL2.EL1PCTEN` at EL0 and
-    /// EL1.
+    /// Whether `CNTHCTL_EL2`'s EL1 enable of a counter or timer traps an
+    /// access at `el` to EL2: at EL0 and EL1 with `HCR_EL2.E2H` clear its
+    /// `E2H` 0 layout's `e2h0_enable` clear, with `E2H` set (FEAT_VHE) and
+    /// `TGE` clear its `E2H` 1 layout's `e2h1_enable` clear; never at EL2,
+    /// nor in the host, where [`Cpu::el0_timer_check`] checks EL0's.
+    fn el1_timer_traps(&self, el: El, e2h0_enable: u64, e2h1_enable: u64) -> bool {
+        match el {
+            El::El2 => false,
+            El::El0 | El::El1 if !self.e2h() => self.cnthctl_lacks(e2h0_enable),
+            El::El0 | El::El1 => !self.tge() && self.cnthctl_lacks(e2h1_enable),
+        }
+    }
+
+    /// The accessor checks of `CNTPCT_EL0` and `CNTPCTSS_EL0`: EL0's enable
+    /// `EL0PCTEN` ([`Cpu::el0_timer_check`]), then `CNTHCTL_EL2.EL1PCTEN`
+    /// at EL0 and EL1 ([`Cpu::el1_timer_traps`]).
     fn physical_count_check(&self, el: El) -> Result<(), SysRegError> {
         self.el0_timer_check(el, EL0PCTEN)?;
-        trap_to_el2(el != El::El2 && self.cnthctl_lacks(CNTHCTL_EL1PCTEN))
+        trap_to_el2(self.el1_timer_traps(el, CNTHCTL_EL1PCTEN, CNTHCTL_E2H1_EL1PCTEN))
     }
 
-    /// The accessor checks of `CNTVCT_EL0` and `CNTVCTSS_EL0`:
-    /// `CNTKCTL_EL1.EL0VCTEN` at EL0, then `CNTHCTL_EL2.EL1TVCT` (FEAT_ECV) at
-    /// EL0 and EL1.
+    /// The accessor checks of `CNTVCT_EL0` and `CNTVCTSS_EL0`: EL0's enable
+    /// `EL0VCTEN`, then `CNTHCTL_EL2.EL1TVCT` (FEAT_ECV) at EL0 and EL1
+    /// outside the host.
     fn virtual_count_check(&self, el: El) -> Result<(), SysRegError> {
         self.el0_timer_check(el, EL0VCTEN)?;
-        trap_to_el2(el != El::El2 && self.cnthctl_any(CNTHCTL_EL1TVCT))
+        trap_to_el2(el != El::El2 && !self.el_is_in_host(el) && self.cnthctl_any(CNTHCTL_EL1TVCT))
     }
 
     /// The accessor checks of `CNTP_CTL_EL0`, `CNTP_CVAL_EL0` and
-    /// `CNTP_TVAL_EL0`: `CNTKCTL_EL1.EL0PTEN` at EL0, then
-    /// `CNTHCTL_EL2.EL1PCEN` at EL0 and EL1.
+    /// `CNTP_TVAL_EL0`: EL0's enable `EL0PTEN`, then `CNTHCTL_EL2.EL1PCEN`
+    /// (`EL1PTEN` in the `E2H` 1 layout) at EL0 and EL1.
     fn physical_timer_check(&self, el: El) -> Result<(), SysRegError> {
         self.el0_timer_check(el, EL0PTEN)?;
-        trap_to_el2(el != El::El2 && self.cnthctl_lacks(CNTHCTL_EL1PCEN))
+        trap_to_el2(self.el1_timer_traps(el, CNTHCTL_EL1PCEN, CNTHCTL_E2H1_EL1PTEN))
     }
 
     /// The accessor checks of `CNTV_CTL_EL0`, `CNTV_CVAL_EL0` and
-    /// `CNTV_TVAL_EL0`: `CNTKCTL_EL1.EL0VTEN` at EL0, then
-    /// `CNTHCTL_EL2.EL1TVT` (FEAT_ECV) at EL0 and EL1.
+    /// `CNTV_TVAL_EL0`: EL0's enable `EL0VTEN`, then `CNTHCTL_EL2.EL1TVT`
+    /// (FEAT_ECV) at EL0 and EL1 outside the host.
     fn virtual_timer_check(&self, el: El) -> Result<(), SysRegError> {
         self.el0_timer_check(el, EL0VTEN)?;
-        trap_to_el2(el != El::El2 && self.cnthctl_any(CNTHCTL_EL1TVT))
+        trap_to_el2(el != El::El2 && !self.el_is_in_host(el) && self.cnthctl_any(CNTHCTL_EL1TVT))
+    }
+
+    /// The timer a `CNTP_*_EL0` access at `el` reaches: in the host the EL2
+    /// physical timer (Arm ARM D8.13.1, RVMWQQ), the EL1 physical timer
+    /// otherwise. At EL2 under `E2H` the name is `CNTHP_*_EL2`'s already
+    /// ([`Cpu::named`]), and `CNTP_*_EL02` reaches the EL1 timer.
+    fn physical_timer_at(&self, el: El) -> GenericTimer {
+        if el == El::El0 && self.el0_in_host() {
+            GenericTimer::Hypervisor
+        } else {
+            GenericTimer::Physical
+        }
+    }
+
+    /// The timer a `CNTV_*_EL0` access at `el` reaches: in the host the EL2
+    /// virtual timer, the virtual timer otherwise, as
+    /// [`Cpu::physical_timer_at`].
+    fn virtual_timer_at(&self, el: El) -> GenericTimer {
+        if el == El::El0 && self.el0_in_host() {
+            GenericTimer::HypervisorVirtual
+        } else {
+            GenericTimer::Virtual
+        }
     }
 
     /// The accessor checks of `MDCCSR_EL0`, `DBGDTR_EL0`, `DBGDTRRX_EL0` and
@@ -981,11 +1122,38 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
+    /// The register an access at `el` names by `key` (FEAT_VHE, Arm ARM
+    /// D8.13.2 and D8.13.3): at EL2 under `HCR_EL2.E2H`, an EL1 or EL0
+    /// name of [`REDIRECTED`] names its EL2 register and an alias of
+    /// [`ALIASES`] its EL1 or EL0 register; anywhere else, and on a
+    /// processor without FEAT_VHE, `key` names what it names, an alias
+    /// nothing (UNDEFINED, as an encoding of no register).
+    #[inline]
+    fn named(&self, key: SysRegKey, el: El) -> SysRegKey {
+        if el != El::El2 || !self.e2h() {
+            return key;
+        }
+        match (mapped(&REDIRECTED, key.0), mapped(&ALIASES, key.0)) {
+            (Some(el2), _) => SysRegKey(el2),
+            (None, Some(own)) => SysRegKey(own),
+            (None, None) => key,
+        }
+    }
+
+    /// The `SCTLR_ELx` whose EL0 controls apply at EL0 (Arm `SCTLR_ELx()`
+    /// at EL0): `SCTLR_EL2` in the host (FEAT_VHE, `HCR_EL2.{E2H, TGE}`
+    /// {1, 1}), `SCTLR_EL1` otherwise.
+    #[inline]
+    pub(crate) fn el0_sctlr(&self) -> u64 {
+        self.regime_sctlr(self.regime_at(El::El0))
+    }
+
     /// The value of the register `key` names, as `accessor` reads it. This
     /// read has no side effect; an `MRS`'s side effect is
     /// [`Cpu::sysreg_mrs`]'s.
     fn sysreg_read_as(&self, key: SysRegKey, accessor: Accessor) -> Result<u64, SysRegError> {
         let el = self.access_level(accessor);
+        let key = self.named(key, el);
         let el0 = el == El::El0;
         let below_el2 = el != El::El2;
         let k = key.0;
@@ -994,7 +1162,7 @@ impl<L: Levels> Cpu<L> {
         match k {
             NZCV => return Ok(self.pstate.nzcv()),
             DAIF => {
-                trap_to_el1(el0 && self.sys.sctlr_el1 & sctlr::UMA == 0)?;
+                trap_to_el1(el0 && self.el0_sctlr() & sctlr::UMA == 0)?;
                 return Ok(self.pstate.daif());
             }
             FPCR | FPSR => {
@@ -1002,15 +1170,16 @@ impl<L: Levels> Cpu<L> {
                 return Ok(if k == FPCR { self.fpcr } else { self.fpsr });
             }
             CTR_EL0 => {
-                trap_to_el1(el0 && self.sys.sctlr_el1 & sctlr::UCT == 0)?;
-                trap_to_el2(below_el2 && self.hcr_any(HCR_TID2))?;
+                trap_to_el1(el0 && self.el0_sctlr() & sctlr::UCT == 0)?;
+                trap_to_el2(below_el2 && !self.el_is_in_host(el) && self.hcr_any(HCR_TID2))?;
                 return Ok(id::CTR_EL0);
             }
-            // `DZP` reads 1 where `DC ZVA` would trap: at EL0 under
-            // `SCTLR_EL1.DZE` clear, at EL0 and EL1 under `HCR_EL2.TDZ`.
+            // `DZP` reads 1 where `DC ZVA` would trap: at EL0 under the
+            // `DZE` of EL0's `SCTLR_ELx` clear, at EL0 and EL1 outside the
+            // host under `HCR_EL2.TDZ`.
             DCZID_EL0 => {
-                let prohibited = (el0 && self.sys.sctlr_el1 & sctlr::DZE == 0)
-                    || (below_el2 && self.hcr_any(super::el2::HCR_TDZ));
+                let prohibited = (el0 && self.el0_sctlr() & sctlr::DZE == 0)
+                    || (below_el2 && !self.el_is_in_host(el) && self.hcr_any(super::el2::HCR_TDZ));
                 return Ok(id::DCZID_BLOCK_LOG2_WORDS | if prohibited { DCZID_DZP } else { 0 });
             }
             TPIDR_EL0 => return Ok(self.sys.tpidr_el0),
@@ -1026,7 +1195,7 @@ impl<L: Levels> Cpu<L> {
                 return Ok(self.svcr.bits());
             }
             TPIDR2_EL0 if self.implements(Feature::Sme) => {
-                trap_to_el1(el0 && self.sys.sctlr_el1 & sctlr::ENTP2 == 0)?;
+                trap_to_el1(el0 && self.el0_sctlr() & sctlr::ENTP2 == 0)?;
                 return Ok(self.sys.tpidr2_el0);
             }
             CNTFRQ_EL0 => {
@@ -1039,7 +1208,7 @@ impl<L: Levels> Cpu<L> {
             }
             CNTVCT_EL0 => {
                 self.virtual_count_check(el)?;
-                return Ok(self.virtual_count().get());
+                return Ok(self.virtual_count_read(el).get());
             }
             // The self-synchronized views of the counters (FEAT_ECV): every
             // read here is in program order already.
@@ -1049,22 +1218,24 @@ impl<L: Levels> Cpu<L> {
             }
             CNTVCTSS_EL0 if self.implements(Feature::Ecv) => {
                 self.virtual_count_check(el)?;
-                return Ok(self.virtual_count().get());
+                return Ok(self.virtual_count_read(el).get());
             }
             CNTP_CTL_EL0 | CNTP_CVAL_EL0 | CNTP_TVAL_EL0 => {
                 self.physical_timer_check(el)?;
+                let timer = self.physical_timer_at(el);
                 return Ok(match k {
-                    CNTP_CTL_EL0 => self.timer_ctl_read(GenericTimer::Physical),
-                    CNTP_CVAL_EL0 => self.sys.cntp_cval_el0,
-                    _ => self.timer_tval_read(Tval::Physical(el)),
+                    CNTP_CTL_EL0 => self.timer_ctl_read(timer),
+                    CNTP_CVAL_EL0 => self.timer_cval(timer),
+                    _ => self.timer_tval_read(Tval::of(timer, el)),
                 });
             }
             CNTV_CTL_EL0 | CNTV_CVAL_EL0 | CNTV_TVAL_EL0 => {
                 self.virtual_timer_check(el)?;
+                let timer = self.virtual_timer_at(el);
                 return Ok(match k {
-                    CNTV_CTL_EL0 => self.timer_ctl_read(GenericTimer::Virtual),
-                    CNTV_CVAL_EL0 => self.sys.cntv_cval_el0,
-                    _ => self.timer_tval_read(Tval::Virtual),
+                    CNTV_CTL_EL0 => self.timer_ctl_read(timer),
+                    CNTV_CVAL_EL0 => self.timer_cval(timer),
+                    _ => self.timer_tval_read(Tval::of(timer, el)),
                 });
             }
             // The Debug Communications Channel with no external debugger on
@@ -1397,6 +1568,12 @@ impl<L: Levels> Cpu<L> {
             RMR_EL2 => RMR_AA64 | self.sys.rmr,
             CNTHP_CTL_EL2 => self.timer_ctl_read(GenericTimer::Hypervisor),
             CNTHP_TVAL_EL2 => self.timer_tval_read(Tval::Hypervisor),
+            CNTHV_CTL_EL2 if self.implements(Feature::Vhe) => {
+                self.timer_ctl_read(GenericTimer::HypervisorVirtual)
+            }
+            CNTHV_TVAL_EL2 if self.implements(Feature::Vhe) => {
+                self.timer_tval_read(Tval::HypervisorVirtual)
+            }
             // RES0, as `SMPRI_EL1` is: no streaming execution priorities.
             SMPRIMAP_EL2 if self.implements(Feature::Sme) => 0,
             _ => return Err(SysRegError::Undefined),
@@ -1449,13 +1626,25 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// `MSR`: write `value` to the register `key` names at the current EL.
+    /// A write by the name `TTBR0_EL1` or `TTBR1_EL1` is a
+    /// `TTBR_WRITE_RETIRED` event and one by `CONTEXTIDR_EL1` a
+    /// `CID_WRITE_RETIRED` event, whichever register the name reaches (at
+    /// EL2 under `HCR_EL2.E2H`, EL2's), and one by an `*_EL12` alias or an
+    /// EL2 name neither (Arm ARM D14.3, the events' descriptions); a host's
+    /// write is no instruction.
     #[inline]
     pub(crate) fn sysreg_write(
         &mut self,
         key: SysRegKey,
         value: u64,
     ) -> Result<WriteEffect, SysRegError> {
-        self.sysreg_write_as(key, value, Accessor::Guest)
+        let effect = self.sysreg_write_as(key, value, Accessor::Guest)?;
+        match key.0 {
+            TTBR0_EL1 | TTBR1_EL1 => self.pmu_register_written(PmuEvent::TtbrWriteRetired),
+            CONTEXTIDR_EL1 => self.pmu_register_written(PmuEvent::CidWriteRetired),
+            _ => {}
+        }
+        Ok(effect)
     }
 
     /// Write `value` to the register `key` names, as `accessor` writes it.
@@ -1466,6 +1655,7 @@ impl<L: Levels> Cpu<L> {
         accessor: Accessor,
     ) -> Result<WriteEffect, SysRegError> {
         let el = self.access_level(accessor);
+        let key = self.named(key, el);
         let el0 = el == El::El0;
         let k = key.0;
 
@@ -1475,7 +1665,7 @@ impl<L: Levels> Cpu<L> {
                 return Ok(WriteEffect::None);
             }
             DAIF => {
-                trap_to_el1(el0 && self.sys.sctlr_el1 & sctlr::UMA == 0)?;
+                trap_to_el1(el0 && self.el0_sctlr() & sctlr::UMA == 0)?;
                 self.pstate.set_daif(value);
                 return Ok(WriteEffect::None);
             }
@@ -1511,28 +1701,33 @@ impl<L: Levels> Cpu<L> {
                 return Ok(WriteEffect::None);
             }
             TPIDR2_EL0 if self.implements(Feature::Sme) => {
-                trap_to_el1(el0 && self.sys.sctlr_el1 & sctlr::ENTP2 == 0)?;
+                trap_to_el1(el0 && self.el0_sctlr() & sctlr::ENTP2 == 0)?;
                 self.sys.tpidr2_el0 = value;
                 return Ok(WriteEffect::None);
             }
             CNTP_CTL_EL0 | CNTP_CVAL_EL0 | CNTP_TVAL_EL0 => {
                 self.physical_timer_check(el)?;
+                let timer = self.physical_timer_at(el);
                 match k {
-                    CNTP_CTL_EL0 => self.sys.cntp_ctl_el0 = value & 3,
-                    CNTP_CVAL_EL0 => self.sys.cntp_cval_el0 = value,
+                    CNTP_CTL_EL0 => self.timer_ctl_write(timer, value),
+                    CNTP_CVAL_EL0 => self.timer_cval_write(timer, value),
                     _ => {
-                        self.sys.cntp_cval_el0 =
-                            self.timer_cval_from_tval(Tval::Physical(el), value)
+                        let cval = self.timer_cval_from_tval(Tval::of(timer, el), value);
+                        self.timer_cval_write(timer, cval);
                     }
                 }
                 return Ok(WriteEffect::Timer);
             }
             CNTV_CTL_EL0 | CNTV_CVAL_EL0 | CNTV_TVAL_EL0 => {
                 self.virtual_timer_check(el)?;
+                let timer = self.virtual_timer_at(el);
                 match k {
-                    CNTV_CTL_EL0 => self.sys.cntv_ctl_el0 = value & 3,
-                    CNTV_CVAL_EL0 => self.sys.cntv_cval_el0 = value,
-                    _ => self.sys.cntv_cval_el0 = self.timer_cval_from_tval(Tval::Virtual, value),
+                    CNTV_CTL_EL0 => self.timer_ctl_write(timer, value),
+                    CNTV_CVAL_EL0 => self.timer_cval_write(timer, value),
+                    _ => {
+                        let cval = self.timer_cval_from_tval(Tval::of(timer, el), value);
+                        self.timer_cval_write(timer, cval);
+                    }
                 }
                 return Ok(WriteEffect::Timer);
             }
@@ -1630,9 +1825,6 @@ impl<L: Levels> Cpu<L> {
                     self.sys.ttbr0_el1 = value;
                 } else {
                     self.sys.ttbr1_el1 = value;
-                }
-                if accessor == Accessor::Guest {
-                    self.pmu_register_written(PmuEvent::TtbrWriteRetired);
                 }
                 WriteEffect::None
             }
@@ -1735,13 +1927,9 @@ impl<L: Levels> Cpu<L> {
                 self.sys.rmr = value & RMR_RR;
                 WriteEffect::None
             }
-            // An `MSR` to it is a `CID_WRITE_RETIRED` event.
             CONTEXTIDR_EL1 => {
                 self.tvm_check(el)?;
                 self.sys.contextidr_el1 = value & 0xFFFF_FFFF;
-                if accessor == Accessor::Guest {
-                    self.pmu_register_written(PmuEvent::CidWriteRetired);
-                }
                 WriteEffect::None
             }
             TPIDR_EL1 => {
@@ -1861,34 +2049,44 @@ impl<L: Levels> Cpu<L> {
     /// What a translation reads now of the registers of `register`'s
     /// regime.
     fn translation_context(&self, register: TranslationRegister) -> TranslationContext {
+        let el2 = || El2RegimeContext::of(self.el2());
         match register {
             TranslationRegister::El10 => TranslationContext::El10(self.el10_context()),
-            TranslationRegister::El2 => TranslationContext::El2(El2RegimeContext::of(self.el2())),
+            TranslationRegister::El2 => TranslationContext::El2(el2()),
+            TranslationRegister::Both => TranslationContext::Both(self.el10_context(), el2()),
         }
     }
 
     /// The effect of a write whose own is `effect`, of a translation
     /// register whose regime's context was `before`, if it is one: a write
-    /// that changes the EL1&0 regime's context changes the context
-    /// ([`WriteEffect::El10Context`]), one that changes what the EL2
-    /// regime's walk reads empties the TLB ([`WriteEffect::FlushTlb`]), and
-    /// one that leaves the context as it was changes nothing of the TLB,
-    /// whose entries depend on the context alone.
+    /// that changes what the walks of EL2's regime read empties the TLB
+    /// ([`WriteEffect::FlushTlb`]), one that changes the EL1&0 regime's
+    /// context changes the context ([`WriteEffect::El10Context`]), and one
+    /// that leaves the context as it was changes nothing of the TLB, whose
+    /// entries depend on the context alone.
     fn translation_effect(
         &self,
         before: Option<TranslationContext>,
         effect: WriteEffect,
     ) -> WriteEffect {
+        let el2_changed = |context: El2RegimeContext| context != El2RegimeContext::of(self.el2());
         match before {
-            Some(TranslationContext::El10(context)) if context != self.el10_context() => {
-                WriteEffect::El10Context
-            }
-            Some(TranslationContext::El2(context))
-                if context != El2RegimeContext::of(self.el2()) =>
+            Some(TranslationContext::El2(el2) | TranslationContext::Both(_, el2))
+                if el2_changed(el2) =>
             {
                 WriteEffect::FlushTlb
             }
-            Some(TranslationContext::El10(_) | TranslationContext::El2(_)) | None => effect,
+            Some(TranslationContext::El10(el10) | TranslationContext::Both(el10, _))
+                if el10 != self.el10_context() =>
+            {
+                WriteEffect::El10Context
+            }
+            Some(
+                TranslationContext::El10(_)
+                | TranslationContext::El2(_)
+                | TranslationContext::Both(..),
+            )
+            | None => effect,
         }
     }
 
@@ -1904,8 +2102,9 @@ impl<L: Levels> Cpu<L> {
             match reg {
                 El2Reg::Smcr => self.sme_register_check(accessor)?,
                 // The event streams' events so far are judged by the
-                // controls and the offset that generated them.
-                El2Reg::Cnthctl | El2Reg::Cntvoff => self.fold_event_stream(),
+                // controls and the offset that generated them, and by the
+                // `E2H` and `TGE` that disable `CNTKCTL_EL1`'s in the host.
+                El2Reg::Hcr | El2Reg::Cnthctl | El2Reg::Cntvoff => self.fold_event_stream(),
                 // The instructions so far are counted under the PMU
                 // controls `MDCR_EL2` held while they ran.
                 El2Reg::Mdcr => self.pmu_settle(self.retired),
@@ -1967,6 +2166,15 @@ impl<L: Levels> Cpu<L> {
                 self.el2_write(El2Reg::CnthpCval, cval);
                 WriteEffect::Timer
             }
+            CNTHV_CTL_EL2 if self.implements(Feature::Vhe) => {
+                self.el2_write(El2Reg::CnthvCtl, value);
+                WriteEffect::Timer
+            }
+            CNTHV_TVAL_EL2 if self.implements(Feature::Vhe) => {
+                let cval = self.timer_cval_from_tval(Tval::HypervisorVirtual, value);
+                self.el2_write(El2Reg::CnthvCval, cval);
+                WriteEffect::Timer
+            }
             SMPRIMAP_EL2 if self.implements(Feature::Sme) => WriteEffect::None,
             _ => return Err(SysRegError::Undefined),
         })
@@ -1981,6 +2189,27 @@ impl<L: Levels> Cpu<L> {
         let (imp, spsr_mask) = (self.imp.get(), self.spsr_mask());
         if let Some(el2) = self.el2_mut() {
             el2.write(reg, imp, spsr_mask, value);
+        }
+    }
+
+    /// An `MSR` of `value` to `timer`'s `CNTx_CTL`, which keeps `ENABLE`
+    /// and `IMASK`.
+    fn timer_ctl_write(&mut self, timer: GenericTimer, value: u64) {
+        match timer {
+            GenericTimer::Physical => self.sys.cntp_ctl_el0 = value & 3,
+            GenericTimer::Virtual => self.sys.cntv_ctl_el0 = value & 3,
+            GenericTimer::Hypervisor => self.el2_write(El2Reg::CnthpCtl, value),
+            GenericTimer::HypervisorVirtual => self.el2_write(El2Reg::CnthvCtl, value),
+        }
+    }
+
+    /// An `MSR` of `value` to `timer`'s `CNTx_CVAL`.
+    fn timer_cval_write(&mut self, timer: GenericTimer, value: u64) {
+        match timer {
+            GenericTimer::Physical => self.sys.cntp_cval_el0 = value,
+            GenericTimer::Virtual => self.sys.cntv_cval_el0 = value,
+            GenericTimer::Hypervisor => self.el2_write(El2Reg::CnthpCval, value),
+            GenericTimer::HypervisorVirtual => self.el2_write(El2Reg::CnthvCval, value),
         }
     }
 }
@@ -2030,7 +2259,11 @@ impl<L: Levels> Cpu<L> {
                     // be, and more.
                     (
                         WriteEffect::None | WriteEffect::FlushTlb | WriteEffect::El10Context,
-                        Some(TranslationRegister::El10 | TranslationRegister::El2),
+                        Some(
+                            TranslationRegister::El10
+                            | TranslationRegister::El2
+                            | TranslationRegister::Both,
+                        ),
                     ) => WriteEffect::FlushTlb,
                     (WriteEffect::None, None) => WriteEffect::None,
                     (WriteEffect::FlushTlb, None) => WriteEffect::FlushTlb,

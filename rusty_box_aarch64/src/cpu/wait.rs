@@ -163,11 +163,16 @@ impl<L: Levels> Cpu<L> {
 
     /// The first physical count after `after` at which an event stream
     /// generates an event: `CNTKCTL_EL1`'s over the virtual count (the
-    /// physical count less `CNTVOFF_EL2`, which is zero with no EL2), and
-    /// with EL2 `CNTHCTL_EL2`'s over the physical count, whichever comes
-    /// first.
+    /// physical count less `CNTVOFF_EL2`, which is zero with no EL2), but
+    /// in the host, where it is disabled (Arm `TestEventCNTV`:
+    /// `HCR_EL2.{E2H, TGE}` {1, 1}), and with EL2 `CNTHCTL_EL2`'s over the
+    /// physical count, whichever comes first.
     fn stream_event_after(&self, after: Count) -> Option<Count> {
-        let virtual_stream = stream_edge_after(self.sys.cntkctl_el1, self.virtual_offset(), after);
+        let virtual_stream = if self.el0_in_host() {
+            None
+        } else {
+            stream_edge_after(self.sys.cntkctl_el1, self.virtual_offset(), after)
+        };
         let physical_stream = if self.have_el2() {
             stream_edge_after(self.el2().cnthctl, CountOffset::NONE, after)
         } else {
@@ -234,10 +239,12 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
-    /// Arm `AArch64_CheckForWFxTrap` with no EL3: at EL0, `SCTLR_EL1.nTWE`
+    /// Arm `AArch64_CheckForWFxTrap` with no EL3: at EL0, `SCTLR_ELx.nTWE`
     /// (`WFE`, `WFET`) or `nTWI` (`WFI`, `WFIT`) clear traps the wait to EL1
-    /// (to EL2 under `HCR_EL2.TGE`, `AArch64_WFxTrap`); failing that, at EL0
-    /// and EL1, `HCR_EL2.TWE` or `TWI` set traps it to EL2. The syndrome is
+    /// (to EL2 under `HCR_EL2.TGE`, `AArch64_WFxTrap`), `SCTLR_ELx` being
+    /// EL0's regime's: `SCTLR_EL2` in the host (FEAT_VHE), `SCTLR_EL1`
+    /// otherwise; failing that, at EL0 and EL1 outside the host,
+    /// `HCR_EL2.TWE` or `TWI` set traps it to EL2. The syndrome is
     /// `AArch64_WFxTrap`'s: CV = 1 and COND = 0xE (`ConditionSyndrome`), TI
     /// the form, and for the timed forms RV = 1 and RN their register.
     fn wfx_trap_check(&self, form: WfxType) -> Result<(), Fault> {
@@ -245,9 +252,10 @@ impl<L: Levels> Cpu<L> {
             WfxType::Wfe | WfxType::Wfet { .. } => (sctlr::NTWE, HCR_TWE),
             WfxType::Wfi | WfxType::Wfit { .. } => (sctlr::NTWI, HCR_TWI),
         };
-        let route = if self.pstate.el == El::El0 && self.sys.sctlr_el1 & allowed == 0 {
+        let el0_control = self.regime_sctlr(self.regime_at(El::El0));
+        let route = if self.pstate.el == El::El0 && el0_control & allowed == 0 {
             Route::Class
-        } else if self.pstate.el != El::El2 && self.hcr_any(el2_trap) {
+        } else if self.pstate.el != El::El2 && !self.in_host() && self.hcr_any(el2_trap) {
             Route::El2
         } else {
             return Ok(());

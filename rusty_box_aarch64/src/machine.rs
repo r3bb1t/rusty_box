@@ -34,7 +34,7 @@ use crate::board::{
     RAM_BASE, RAM_LIMIT,
 };
 use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
-use crate::boot::tree::{BoardTree, Chosen, InitrdRange};
+use crate::boot::tree::{BoardTree, Chosen, El2Timers, InitrdRange};
 use crate::boot::{
     self, DeviceTreeError, KernelLayout, LinuxImage, PlacementError, DEVICE_TREE_CAPACITY,
 };
@@ -853,20 +853,28 @@ const fn big_endian_cells<const N: usize>(values: &[u64], width: usize) -> [u8; 
     cells
 }
 
-/// What a machine's level set decides of its device tree, both from the one
-/// `L` ([`TreeLevels::of`]): the conduit the processor's firmware answers
-/// on, and whether the GIC has the Virtualization Extensions.
+/// What a machine's level set decides of its device tree, all from the one
+/// `L` with its processor `model` ([`TreeLevels::of`]): the conduit the
+/// processor's firmware answers on, whether the GIC has the Virtualization
+/// Extensions, and whether the timer node names the EL2 virtual timer,
+/// which a processor of `L` has with FEAT_VHE.
 #[derive(Clone, Copy)]
 struct TreeLevels {
     psci: PsciConduit,
     gic: GicExtensions,
+    el2_timers: El2Timers,
 }
 
 impl TreeLevels {
-    const fn of<L: Levels>() -> Self {
+    const fn of<L: Levels>(model: CpuModel) -> Self {
         Self {
             psci: PsciConduit::of::<L>(),
             gic: gic_extensions::<L>(),
+            el2_timers: if model.has_el2_virtual_timer::<L>() {
+                El2Timers::PhysicalAndVirtual
+            } else {
+                El2Timers::Physical
+            },
         }
     }
 }
@@ -919,13 +927,18 @@ fn describe(
 ) -> Result<(), DeviceTreeError> {
     out.len = match source {
         TreeSource::Board => {
-            let TreeLevels { psci, gic } = machine.levels;
+            let TreeLevels {
+                psci,
+                gic,
+                el2_timers,
+            } = machine.levels;
             let board = BoardTree {
                 identity,
                 ram_len: machine.ram_len,
                 cpu: machine.cpu,
                 psci,
                 gic,
+                el2_timers,
                 chosen: machine.chosen(),
                 wiring: machine.wiring,
                 layout: machine.devices,
@@ -1513,7 +1526,7 @@ fn plan<L: Levels>(
             cpu,
             choice,
             layout,
-            levels: TreeLevels::of::<L>(),
+            levels: TreeLevels::of::<L>(cpu),
             wiring,
             devices: config.layout,
         };
@@ -2873,8 +2886,10 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// TLB's entries were made under, the PL011's revision and the depth of
 /// its FIFOs, which its image holds, the GIC's PPIs, the PMU the
 /// processor's `ID_AA64DFR0_EL1` and device tree name, the Cortex-A57's
-/// IMPLEMENTATION DEFINED registers, and each walked TLB entry's nG.
-const SNAPSHOT_VERSION: u32 = 36;
+/// IMPLEMENTATION DEFINED registers, each walked TLB entry's nG, and with
+/// EL2 the FEAT_VHE registers (`TTBR1_EL2`, `CNTHV_CTL_EL2`,
+/// `CNTHV_CVAL_EL2`) and the EL2&0 regime's TLB entries.
+const SNAPSHOT_VERSION: u32 = 37;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

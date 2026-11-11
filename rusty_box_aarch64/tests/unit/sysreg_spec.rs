@@ -248,6 +248,11 @@ struct Spec {
     /// Each register's `MRS` and `MSR` (register) word of its own encoding,
     /// naming X0, by name and whether it writes.
     own: BTreeMap<(&'static str, bool), u32>,
+    /// The `MRS` and `MSR` word of each EL1 or EL0 register's `*_EL12` or
+    /// `*_EL02` alias (FEAT_VHE), naming X0, by the register's name and
+    /// whether it writes: what reaches the register at EL2 under
+    /// `HCR_EL2.E2H`, where its own name reaches EL2's.
+    alias: BTreeMap<(&'static str, bool), u32>,
 }
 
 /// Add the registers condition `e` reads to `out`.
@@ -536,6 +541,7 @@ fn spec() -> &'static Spec {
         }
         inputs.retain(|name| registers.contains_key(name));
         let mut own = BTreeMap::new();
+        let mut alias = BTreeMap::new();
         for s in &sites {
             let write = match s.instr {
                 "A64.MRS" => false,
@@ -544,6 +550,10 @@ fn spec() -> &'static Spec {
             };
             if s.asm == s.register {
                 own.entry((s.register, write)).or_insert(s.word & !0x1F);
+            } else if s.asm.strip_suffix('2') == Some(s.register)
+                && (s.register.ends_with("_EL1") || s.register.ends_with("_EL0"))
+            {
+                alias.entry((s.register, write)).or_insert(s.word & !0x1F);
             }
         }
         Spec {
@@ -552,6 +562,7 @@ fn spec() -> &'static Spec {
             registers,
             inputs,
             own,
+            alias,
         }
     })
 }
@@ -717,6 +728,13 @@ impl Eval<'_> {
             // As the processor advertises it: `ID_AA64DFR0_EL1.DoubleLock`
             // 0b0000 is the OS Double Lock implemented.
             "FEAT_DoubleLock" => (self.dfr0() >> 36) & 0xF == 0,
+            // `ID_AA64MMFR0_EL1.ASIDBits` 0b0010: 16-bit ASIDs.
+            "FEAT_ASID16" => (id::id_aa64mmfr0(self.imp.features) >> 4) & 0xF == 2,
+            // `ID_AA64MMFR4_EL1` reads as zero, its `E2H0` 0b0000: with
+            // FEAT_VHE, `HCR_EL2.E2H` is programmable (`Features.json`:
+            // `(FEAT_VHE && FEAT_AA64EL1) ==> (FEAT_E2H0 <=>
+            // SInt(ID_AA64MMFR4_EL1.E2H0) >= 0)`).
+            "FEAT_E2H0" => self.feature("FEAT_VHE"),
             _ => Feature::ALL
                 .into_iter()
                 .find(|f| f.arm_name() == Some(name))
@@ -1407,12 +1425,31 @@ fn processor<L: Levels>(imp: LeveledImplementation<L>) -> (Cpu<L>, Ram) {
     (cpu, Ram(vec![0; RAM_BYTES]))
 }
 
-/// The `MRS` (`write` false) or `MSR` word of register `name`'s own
-/// encoding, naming X0.
-fn sysreg_word(name: &str, write: bool) -> u32 {
+/// `HCR_EL2.E2H`.
+const HCR_E2H: u64 = 1 << 34;
+
+/// The `MRS` word of register `name`'s own encoding, naming X0.
+fn sysreg_word_own(name: &str) -> u32 {
     *spec()
         .own
-        .get(&(name, write))
+        .get(&(name, false))
+        .unwrap_or_else(|| panic!("no MRS of {name}"))
+}
+
+/// The `MRS` (`write` false) or `MSR` word that reaches register `name` at
+/// the highest exception level of `cpu`: its own encoding, naming X0, but
+/// at EL2 under `HCR_EL2.E2H` its `*_EL12` or `*_EL02` alias where it has
+/// one, its own name reaching EL2's register there (FEAT_VHE).
+fn sysreg_word<L: Levels>(cpu: &Cpu<L>, name: &str, write: bool) -> u32 {
+    let spec = spec();
+    let e2h = L::EL2 && cpu.el2().hcr & HCR_E2H != 0;
+    let aliased = if e2h {
+        spec.alias.get(&(name, write))
+    } else {
+        None
+    };
+    *aliased
+        .or_else(|| spec.own.get(&(name, write)))
         .unwrap_or_else(|| panic!("no {} of {name}", if write { "MSR" } else { "MRS" }))
 }
 
@@ -1422,7 +1459,8 @@ fn read_register<L: Levels>(cpu: &mut Cpu<L>, ram: &mut Ram, name: &str) -> Opti
     let saved = save(cpu);
     cpu.pstate.el = if L::EL2 { El::El2 } else { El::El1 };
     cpu.pstate.sp_sel = true;
-    let value = match step(cpu, ram, sysreg_word(name, false)) {
+    let word = sysreg_word(cpu, name, false);
+    let value = match step(cpu, ram, word) {
         Observed::Completed => Some(cpu.x[0]),
         Observed::Exception { .. } => None,
     };
@@ -1437,7 +1475,8 @@ fn write_register<L: Levels>(cpu: &mut Cpu<L>, ram: &mut Ram, name: &str, value:
     cpu.pstate.el = if L::EL2 { El::El2 } else { El::El1 };
     cpu.pstate.sp_sel = true;
     cpu.x[0] = value;
-    let observed = step(cpu, ram, sysreg_word(name, true));
+    let word = sysreg_word(cpu, name, true);
+    let observed = step(cpu, ram, word);
     assert_eq!(observed, Observed::Completed, "writing {name}");
     cpu.pstate.el = saved_el;
     cpu.pstate.sp_sel = saved_sp;
@@ -1518,21 +1557,46 @@ fn splitmix(state: &mut u64) -> u64 {
 fn configs<L: Levels>(imp: LeveledImplementation<L>) -> Vec<Config> {
     let (mut cpu, mut ram) = processor::<L>(imp);
     let mut variable = Vec::new();
+    // Each control's bits that a write sets and clears, in each layout
+    // `HCR_EL2.E2H` gives it where the processor has FEAT_VHE: a state
+    // writes `HCR_EL2` first (`CONTROLS`), and the others in its layout.
+    let layouts: &[u64] = if imp.has(Feature::Vhe) {
+        &[0, HCR_E2H]
+    } else {
+        &[0]
+    };
     for (name, never) in CONTROLS {
         let Some(_) = read_register(&mut cpu, &mut ram, name) else {
             continue;
         };
-        write_register(&mut cpu, &mut ram, name, !never);
-        let ones = read_register(&mut cpu, &mut ram, name).unwrap_or(0);
-        write_register(&mut cpu, &mut ram, name, 0);
-        let zeros = read_register(&mut cpu, &mut ram, name).unwrap_or(0);
-        variable.push((name, (ones ^ zeros) & !never));
+        let mut bits = 0;
+        for &hcr in layouts {
+            if L::EL2 && name != "HCR_EL2" {
+                write_register(&mut cpu, &mut ram, "HCR_EL2", hcr);
+            }
+            write_register(&mut cpu, &mut ram, name, !never);
+            let ones = read_register(&mut cpu, &mut ram, name).unwrap_or(0);
+            write_register(&mut cpu, &mut ram, name, 0);
+            let zeros = read_register(&mut cpu, &mut ram, name).unwrap_or(0);
+            bits |= (ones ^ zeros) & !never;
+        }
+        if L::EL2 {
+            write_register(&mut cpu, &mut ram, "HCR_EL2", 0);
+        }
+        variable.push((name, bits));
     }
+    // Open: SIMD&FP, SVE and SME enabled at EL0 and EL1 by `CPACR_EL1`, and
+    // with `HCR_EL2.E2H` by `CPTR_EL2`'s enables at the same bits, which
+    // its other layout keeps none of.
+    let open_value = |name: &str| match name {
+        "CPACR_EL1" | "CPTR_EL2" => CPACR_OPEN,
+        _ => 0,
+    };
     let open = |label: String| Config {
         label,
         writes: variable
             .iter()
-            .map(|&(name, _)| (name, if name == "CPACR_EL1" { CPACR_OPEN } else { 0 }))
+            .map(|&(name, _)| (name, open_value(name)))
             .collect(),
         os_lock: false,
         sp: true,
@@ -1570,6 +1634,34 @@ fn configs<L: Levels>(imp: LeveledImplementation<L>) -> Vec<Config> {
             }
             c.sweep = name == "HCR_EL2" && 1u64 << bit == HCR_TIDCP;
             out.push(c);
+        }
+    }
+    // With FEAT_VHE, the same open states under `HCR_EL2.E2H`, and in the
+    // host (`E2H` and `TGE`), with each bit of another control set alone:
+    // the layouts `E2H` gives `CPTR_EL2`, `CNTHCTL_EL2` and `SCTLR_EL2`,
+    // and the controls of EL0 in the host.
+    if imp.has(Feature::Vhe) {
+        for (label, hcr) in [("E2H", HCR_E2H), ("host", HCR_E2H | HCR_TGE)] {
+            let under = |label: String| {
+                let mut c = open(label);
+                for w in c.writes.iter_mut().filter(|w| w.0 == "HCR_EL2") {
+                    w.1 = hcr;
+                }
+                c
+            };
+            out.push(Config {
+                sweep: true,
+                ..under(format!("{label}, open"))
+            });
+            for &(name, mask) in variable.iter().filter(|&&(name, _)| name != "HCR_EL2") {
+                for bit in (0..64).filter(|bit| mask & (1 << bit) != 0) {
+                    let mut c = under(format!("{label}, open, {name} bit {bit}"));
+                    for w in c.writes.iter_mut().filter(|w| w.0 == name) {
+                        w.1 ^= 1 << bit;
+                    }
+                    out.push(c);
+                }
+            }
         }
     }
     let features = imp.features.bits();
@@ -1921,11 +2013,17 @@ struct FieldRule {
 /// The fields of the EL2 registers whose whole rule the data does not
 /// give, each with where its rule comes from. Every processor with EL2 has
 /// `SMIDR_EL1.SMPS` = 0.
-const FIELD_RULES: [FieldRule; 3] = [
+const FIELD_RULES: [FieldRule; 4] = [
     // Read-only: whether the timer condition is met
     // (AArch64_CheckTimerConditions).
     FieldRule {
         register: "CNTHP_CTL_EL2",
+        field: "ISTATUS",
+        rule: BitRule::Open,
+        unless: None,
+    },
+    FieldRule {
+        register: "CNTHV_CTL_EL2",
         field: "ISTATUS",
         rule: BitRule::Open,
         unless: None,
@@ -2060,7 +2158,9 @@ fn reserved_rule(kind: &str) -> BitRule {
 /// Every EL2 register of each processor with EL2, written at EL2 with all
 /// ones and then all zeros, reads back each bit of its fields as written,
 /// each RES0 bit as 0 and each RES1 bit as 1, and its constant fields
-/// unchanged, by the fieldset Arm's data gives the processor's features.
+/// unchanged, by the fieldset Arm's data gives the processor's features:
+/// with `HCR_EL2.E2H` clear, and with FEAT_VHE set too, which gives the
+/// registers it redefines their other layout.
 #[test]
 #[cfg_attr(
     not(aarchmrs),
@@ -2072,8 +2172,25 @@ fn each_el2_register_keeps_the_bits_its_fieldset_gives_it() {
     let spec = spec();
     let mut failures = Vec::new();
     let mut checked = 0;
-    for (name, imp) in WITH_EL2 {
+    let hcr_key = SysRegKey::from_insn(sysreg_word_own("HCR_EL2"));
+    let with_hcr = WITH_EL2.into_iter().flat_map(|(name, imp)| {
+        let layouts: &[u64] = if imp.has(Feature::Vhe) {
+            &[0, HCR_E2H]
+        } else {
+            &[0]
+        };
+        layouts.iter().map(move |&hcr| (name, imp, hcr))
+    });
+    for (name, imp, hcr) in with_hcr {
+        let set_hcr = |cpu: &mut Cpu<WithEl2>| {
+            cpu.pstate.el = El::El2;
+            match cpu.sysreg_write(hcr_key, hcr) {
+                Ok(effect) => cpu.apply_write_effect(effect),
+                Err(e) => panic!("{name}: writing HCR_EL2: {e:?}"),
+            }
+        };
         let (mut reader, mut ram) = processor::<WithEl2>(imp);
+        set_hcr(&mut reader);
         let values = input_values(&mut reader, &mut ram);
         let eval = Eval {
             spec,
@@ -2088,8 +2205,13 @@ fn each_el2_register_keeps_the_bits_its_fieldset_gives_it() {
             if write || (word >> 16) & 0x1F != 0b11_100 || !spec.own.contains_key(&(reg, true)) {
                 continue;
             }
+            // `HCR_EL2` itself, whose all-ones write would change the layout
+            // the evaluation reads, is checked in the first pass alone.
+            if hcr != 0 && reg == "HCR_EL2" {
+                continue;
+            }
             let (mut cpu, _) = processor::<WithEl2>(imp);
-            cpu.pstate.el = El::El2;
+            set_hcr(&mut cpu);
             let key = SysRegKey::from_insn(word);
             if cpu.sysreg_read(key).is_err() {
                 continue;
@@ -2117,7 +2239,7 @@ fn each_el2_register_keeps_the_bits_its_fieldset_gives_it() {
                 };
                 if !good {
                     failures.push(format!(
-                        "{name}: {reg} bit {bit} is {rule:?} but reads {one} after all ones, {zero} after all zeros"
+                        "{name}, HCR_EL2 {hcr:#x}: {reg} bit {bit} is {rule:?} but reads {one} after all ones, {zero} after all zeros"
                     ));
                 }
             }
