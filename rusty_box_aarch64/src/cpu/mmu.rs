@@ -70,7 +70,8 @@ use rusty_box_core::SnapError;
 use super::debug::{WatchedAccess, WatchedRange};
 use super::dp::ones;
 use super::el2::{
-    E2hLayout, El2Reg, El2Regs, El2Storage, HCR_CD, HCR_DC, HCR_PTW, HCR_TGE, HCR_VM, VTTBR_VMID8,
+    hcr_mask, E2hLayout, El2Reg, El2Regs, El2Storage, HCR_CD, HCR_DC, HCR_FWB, HCR_PTW, HCR_TGE,
+    HCR_VM, VTTBR_VMID8,
 };
 use super::exception::{AccessSyndrome, AddressedClass, Exception, SyndromeClass, SyndromeSlot};
 use super::exec::{Fault, StopCause};
@@ -80,7 +81,7 @@ use super::regime::{
     el10_s1_disabled_data_normal, el10_stage1_enabled, el10_stage2_enabled, Granule, OaLayout,
     Regime, S1Params, S1Range, S1Start,
 };
-use super::stage2::{s2_granule, s2_start, S2Start, S2Walked};
+use super::stage2::{s2_granule, s2_start, S2AttrRule, S2Start, S2Walked};
 use super::tlbi::{Asid, Holds, Invalidation, TlbRecord, TranslationScope, Vmid};
 use super::{id, sctlr, Cpu, El, Levels, SysRegs};
 use crate::bus::{AccessWidth, BusFault, DescriptorSwap, PhysAddr, PhysBus, PhysSpan, Writes};
@@ -1166,14 +1167,12 @@ impl Memory {
         }
     }
 
-    /// The memory a data access is to with stage 1 disabled
-    /// (`AArch64_S1DisabledOutput`): Device-nGnRnE, or with `HCR_EL2.DC`
-    /// (`normal`) Normal Write-Back Non-shareable.
-    const fn s1_disabled(normal: bool) -> Self {
-        if normal {
-            Self::of(MemAttrs::NORMAL_WRITE_BACK)
+    /// Write-Back memory, Shareable where `shareable` holds.
+    const fn write_back(shareable: bool) -> Self {
+        if shareable {
+            Self::WriteBackShareable
         } else {
-            Self::Device
+            Self::WriteBack
         }
     }
 
@@ -1205,14 +1204,275 @@ impl Memory {
     }
 }
 
+/// What stage 1 maps a data access to, as its leaf holds it: [`Memory`],
+/// with Normal memory that is not Write-Back told apart by whether it is
+/// Shareable, its effective shareability (`EffectiveShareability`, which
+/// stage 1 applies here: the IMPLEMENTATION DEFINED "Apply effective
+/// shareability at stage 1" is TRUE) — what stage 2's forced Write-Back
+/// (FEAT_S2FWB) makes Shareable or not ([`S2Memory::combined`]). Device and
+/// Normal Non-cacheable memory are Outer Shareable, so only Write-Through
+/// memory can be Normal and Non-shareable.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum S1Memory {
+    Device,
+    /// Normal memory with a level that is not Write-Back, Shareable.
+    Normal,
+    /// Normal memory with a level that is not Write-Back, Non-shareable.
+    NormalNonShareable,
+    WriteBack,
+    WriteBackShareable,
+}
+
+impl S1Memory {
+    /// The memory stage 1's attributes `attrs` describe.
+    const fn of(attrs: MemAttrs) -> Self {
+        match Memory::of(attrs) {
+            Memory::Device => Self::Device,
+            Memory::WriteBack => Self::WriteBack,
+            Memory::WriteBackShareable => Self::WriteBackShareable,
+            Memory::Normal => match attrs.effective_shareability().shareability {
+                Shareability::Non => Self::NormalNonShareable,
+                Shareability::Inner | Shareability::Outer => Self::Normal,
+            },
+        }
+    }
+
+    /// The memory a data access is to with stage 1 disabled
+    /// (`AArch64_S1DisabledOutput`): Device-nGnRnE, or with `HCR_EL2.DC`
+    /// (`normal`) Normal Write-Back Non-shareable.
+    const fn s1_disabled(normal: bool) -> Self {
+        if normal {
+            Self::of(MemAttrs::NORMAL_WRITE_BACK)
+        } else {
+            Self::Device
+        }
+    }
+
+    /// The memory, as an access through stage 1 alone is to it.
+    const fn memory(self) -> Memory {
+        match self {
+            Self::Device => Memory::Device,
+            Self::Normal | Self::NormalNonShareable => Memory::Normal,
+            Self::WriteBack => Memory::WriteBack,
+            Self::WriteBackShareable => Memory::WriteBackShareable,
+        }
+    }
+
+    /// Whether it is Shareable (Inner or Outer).
+    const fn shareable(self) -> bool {
+        match self {
+            Self::Device | Self::Normal | Self::WriteBackShareable => true,
+            Self::NormalNonShareable | Self::WriteBack => false,
+        }
+    }
+
+    /// Whether it is Device memory ([`Memory::is_device`]).
+    #[inline(always)]
+    const fn is_device(self) -> bool {
+        matches!(self, Self::Device)
+    }
+
+    /// `self`, Normal memory taken as Non-cacheable, and so Outer
+    /// Shareable (`NormalNCMemAttr`), where `treat` holds.
+    const fn normal_as_non_cacheable(self, treat: bool) -> Self {
+        match self {
+            Self::WriteBack | Self::WriteBackShareable | Self::NormalNonShareable if treat => {
+                Self::Normal
+            }
+            Self::Device
+            | Self::Normal
+            | Self::NormalNonShareable
+            | Self::WriteBack
+            | Self::WriteBackShareable => self,
+        }
+    }
+
+    /// The value a snapshot holds for it.
+    const fn code(self) -> u8 {
+        match self {
+            Self::Normal => 0,
+            Self::Device => 1,
+            Self::WriteBack => 2,
+            Self::WriteBackShareable => 3,
+            Self::NormalNonShareable => 4,
+        }
+    }
+
+    /// The memory a snapshot's `code` names.
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Normal),
+            1 => Some(Self::Device),
+            2 => Some(Self::WriteBack),
+            3 => Some(Self::WriteBackShareable),
+            4 => Some(Self::NormalNonShareable),
+            _ => None,
+        }
+    }
+}
+
+/// What a stage 2 leaf makes of the memory an access is to, as the TLB
+/// holds it, by the rule `HCR_EL2.FWB` gives its `MemAttr`
+/// ([`S2AttrRule`]): under `FWB` clear, the memory it decodes to
+/// (`S2DecodeMemAttrs`), which combines with stage 1's; under `FWB` set
+/// (FEAT_S2FWB), which of `AArch64_S2ApplyFWBMemAttrs`'s cases it is, with
+/// its own shareability where stage 1's is carried through.
+///
+/// Closed (R5). One byte, as each of a TLB entry's fields is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum S2Memory {
+    /// `FWB` clear.
+    Decoded(Memory),
+    /// `FWB` set, `MemAttr[2]` 0: Device memory, whatever stage 1 gives.
+    ForcedDevice,
+    /// `FWB` set, `MemAttr[1:0]` 0b11: stage 1's memory, its shareability
+    /// widened by a Non-shareable stage 2.
+    ForcedStage1,
+    /// As `ForcedStage1`, by a Shareable stage 2.
+    ForcedStage1Shareable,
+    /// `FWB` set, `MemAttr[1:0]` 0b10: Normal Write-Back, whatever stage 1
+    /// gives, stage 2 Non-shareable.
+    ForcedWriteBack,
+    /// As `ForcedWriteBack`, stage 2 Shareable.
+    ForcedWriteBackShareable,
+    /// `FWB` set, `MemAttr[1:0]` 0b01 or 0b00: Normal Non-cacheable, unless
+    /// stage 1 gives Device memory.
+    ForcedNonCacheable,
+}
+
+impl S2Memory {
+    /// What the leaf `walked` makes of memory, by its rule.
+    const fn of(walked: &S2Walked) -> Self {
+        Self::of_leaf(walked.rule, walked.decoded(), walked.memattr, walked.sh)
+    }
+
+    /// What a leaf makes of memory by `rule`, its `MemAttr` `memattr` and
+    /// shareability `sh` (the descriptor's `SH`, or `VTCR_EL2.SH0` under
+    /// `DS`), which under `FWB` clear decode to `decoded`
+    /// ([`S2Walked::decoded`]).
+    const fn of_leaf(rule: S2AttrRule, decoded: MemAttrs, memattr: u8, sh: u8) -> Self {
+        let shareable = !matches!(Shareability::decode(sh), Shareability::Non);
+        match rule {
+            S2AttrRule::Combined => Self::Decoded(Memory::of(decoded)),
+            S2AttrRule::Forced if memattr & 0b0100 == 0 => Self::ForcedDevice,
+            S2AttrRule::Forced => match (memattr & 0b11, shareable) {
+                (0b11, false) => Self::ForcedStage1,
+                (0b11, true) => Self::ForcedStage1Shareable,
+                (0b10, false) => Self::ForcedWriteBack,
+                (0b10, true) => Self::ForcedWriteBackShareable,
+                _ => Self::ForcedNonCacheable,
+            },
+        }
+    }
+
+    /// The rule the memory was made by.
+    const fn rule(self) -> S2AttrRule {
+        match self {
+            Self::Decoded(_) => S2AttrRule::Combined,
+            Self::ForcedDevice
+            | Self::ForcedStage1
+            | Self::ForcedStage1Shareable
+            | Self::ForcedWriteBack
+            | Self::ForcedWriteBackShareable
+            | Self::ForcedNonCacheable => S2AttrRule::Forced,
+        }
+    }
+
+    /// Whether stage 2's own walk state is Device memory, which its
+    /// alignment check (`AArch64_S2HasAlignmentFaultDueToMemType`) and
+    /// `HCR_EL2.PTW` read: under `FWB` set the forced memory, which is
+    /// Device where `MemAttr[2]` is 0, and where stage 1's is otherwise —
+    /// which stage 1's own alignment check refuses first, and which a
+    /// stage 1 walk, whose descriptors are Normal memory, never is.
+    #[inline(always)]
+    const fn is_device(self) -> bool {
+        match self {
+            Self::Decoded(memory) => memory.is_device(),
+            Self::ForcedDevice => true,
+            Self::ForcedStage1
+            | Self::ForcedStage1Shareable
+            | Self::ForcedWriteBack
+            | Self::ForcedWriteBackShareable
+            | Self::ForcedNonCacheable => false,
+        }
+    }
+
+    /// The memory of an access stage 1 maps to `s1` and this leaf to
+    /// itself, `HCR_EL2.CD` (`cd`) making Normal memory Non-cacheable
+    /// (`AArch64_S2TreatAsNormalNC`): under `FWB` clear stage 2's made so
+    /// and combined with stage 1's (`S2CombineS1MemAttrs`), under `FWB`
+    /// set the forced memory made so (`AArch64_S2ApplyFWBMemAttrs`, whose
+    /// shareability is the wider of the stages').
+    const fn combined(self, s1: S1Memory, cd: bool) -> Memory {
+        let forced = match self {
+            Self::Decoded(s2) => {
+                return Memory::combined(s1.memory(), s2.normal_as_non_cacheable(cd))
+            }
+            Self::ForcedDevice => Memory::Device,
+            Self::ForcedStage1 | Self::ForcedStage1Shareable => match s1 {
+                S1Memory::WriteBack | S1Memory::WriteBackShareable => Memory::write_back(
+                    s1.shareable() || matches!(self, Self::ForcedStage1Shareable),
+                ),
+                S1Memory::Device | S1Memory::Normal | S1Memory::NormalNonShareable => s1.memory(),
+            },
+            Self::ForcedWriteBack | Self::ForcedWriteBackShareable => {
+                Memory::write_back(s1.shareable() || matches!(self, Self::ForcedWriteBackShareable))
+            }
+            Self::ForcedNonCacheable => match s1 {
+                S1Memory::Device => Memory::Device,
+                S1Memory::Normal
+                | S1Memory::NormalNonShareable
+                | S1Memory::WriteBack
+                | S1Memory::WriteBackShareable => Memory::Normal,
+            },
+        };
+        forced.normal_as_non_cacheable(cd)
+    }
+
+    /// The value a snapshot holds for it: a decoded memory's
+    /// ([`Memory::code`]), or 4 to 9 for the forced ones.
+    const fn code(self) -> u8 {
+        match self {
+            Self::Decoded(memory) => memory.code(),
+            Self::ForcedDevice => 4,
+            Self::ForcedStage1 => 5,
+            Self::ForcedStage1Shareable => 6,
+            Self::ForcedWriteBack => 7,
+            Self::ForcedWriteBackShareable => 8,
+            Self::ForcedNonCacheable => 9,
+        }
+    }
+
+    /// The memory a snapshot's `code` names.
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            4 => Some(Self::ForcedDevice),
+            5 => Some(Self::ForcedStage1),
+            6 => Some(Self::ForcedStage1Shareable),
+            7 => Some(Self::ForcedWriteBack),
+            8 => Some(Self::ForcedWriteBackShareable),
+            9 => Some(Self::ForcedNonCacheable),
+            code => match Memory::from_code(code) {
+                Some(memory) => Some(Self::Decoded(memory)),
+                None => None,
+            },
+        }
+    }
+}
+
+// A TLB entry holds each stage's memory in a byte.
+const _: () = assert!(core::mem::size_of::<S2Memory>() == 1);
+
 /// The memory a translation's data accesses are to: stage 1's `s1`, and
-/// where stage 2 takes part, combined with its `s2`, which `HCR_EL2.CD`
-/// (`cd`) makes Non-cacheable (`AArch64_S2TreatAsNormalNC`). The one rule
-/// a fill and a snapshot's entry both meet (R5).
-const fn entry_memory(s1: Memory, s2: Option<Memory>, cd: bool) -> Memory {
+/// where stage 2 takes part, what its `s2` makes of it, under `HCR_EL2.CD`
+/// (`cd`) ([`S2Memory::combined`]). The one rule a fill and a snapshot's
+/// entry both meet (R5).
+const fn entry_memory(s1: S1Memory, s2: Option<S2Memory>, cd: bool) -> Memory {
     match s2 {
-        Some(s2) => Memory::combined(s1, s2.normal_as_non_cacheable(cd)),
-        None => s1,
+        Some(s2) => s2.combined(s1, cd),
+        None => s1.memory(),
     }
 }
 
@@ -1653,24 +1913,25 @@ pub(super) enum WalkStop<E> {
 /// applied (`AArch64_S1TreatAsNormalNC`); its walk's level; and whether its
 /// walk made it. With stage 1 disabled, every permission, no guarded page,
 /// Device memory unless `HCR_EL2.DC` makes a data access Normal
-/// ([`Memory::s1_disabled`]), and level 0.
+/// ([`S1Memory::s1_disabled`]), and level 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Stage1Leaf {
     perms: u8,
-    memory: Memory,
+    memory: S1Memory,
     level: LeafLevel,
     stage1: Stage1,
 }
 
 /// What a TLB entry holds of stage 2: its permissions, as the stage 1
-/// permission bits they leave ([`S2Walked::perms`]), the memory its
-/// descriptor maps the access to (`HCR_EL2.CD` applied where the stages
-/// combine, [`entry_memory`]), and its walk's level. Without stage 2, every
-/// permission, Normal memory and level 0, which refuse nothing.
+/// permission bits they leave ([`S2Walked::perms`]), what its descriptor
+/// makes of the access's memory by `HCR_EL2.FWB`'s rule ([`S2Memory`],
+/// `HCR_EL2.CD` applied where the stages combine, [`entry_memory`]), and
+/// its walk's level. Without stage 2, every permission, Normal memory and
+/// level 0, which refuse nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Stage2Leaf {
     perms: u8,
-    memory: Memory,
+    memory: S2Memory,
     level: LeafLevel,
 }
 
@@ -1678,30 +1939,40 @@ impl Stage2Leaf {
     /// The entry of a translation stage 2 takes no part in.
     const NONE: Self = Self {
         perms: PERMS,
-        memory: Memory::Normal,
+        memory: S2Memory::Decoded(Memory::Normal),
         level: LeafLevel::Zero,
     };
 
     const fn of(walked: &S2Walked) -> Self {
         Self {
             perms: walked.perms,
-            memory: Memory::of(walked.attrs()),
+            memory: S2Memory::of(walked),
             level: walked.level,
         }
     }
 
-    /// Whether `perms` and `level` are those of a stage 2 descriptor a walk
-    /// from `start` ends at on a processor implementing `features`
-    /// (`AArch64_S2DirectBasePermissions` without FEAT_XNX): read, write and
-    /// execute alike at EL1 and EL0, at a level the walk can end at
-    /// ([`S2Start::ends_at`]).
-    fn walked(perms: u8, level: LeafLevel, start: S2Start, features: Features) -> bool {
+    /// Whether `perms`, `memory` and `level` are those of a stage 2
+    /// descriptor a walk from `start` under the rule `rule` (`HCR_EL2.FWB`)
+    /// ends at on a processor implementing `features`
+    /// (`AArch64_S2DirectBasePermissions`): read and write alike at EL1 and
+    /// EL0, execute alike too without FEAT_XNX, whose `XN[1:0]` gives each
+    /// level its own; memory of the rule's kind; at a level the walk can
+    /// end at ([`S2Start::ends_at`]).
+    fn walked(
+        perms: u8,
+        memory: S2Memory,
+        level: LeafLevel,
+        start: S2Start,
+        rule: S2AttrRule,
+        features: Features,
+    ) -> bool {
         let same_at_both = |el1: u8, el0: u8| (perms & el1 == 0) == (perms & el0 == 0);
         start.ends_at(level, features)
             && perms & !PERMS == 0
+            && memory.rule() == rule
             && same_at_both(PERM_EL1_R, PERM_EL0_R)
             && same_at_both(PERM_EL1_W, PERM_EL0_W)
-            && same_at_both(PERM_EL1_X, PERM_EL0_X)
+            && (features.has(Feature::Xnx) || same_at_both(PERM_EL1_X, PERM_EL0_X))
     }
 }
 
@@ -1735,7 +2006,8 @@ const _: () = assert!(IPA_ENTRIES == 1 << 8 && id::MAX_PA_BITS - 12 <= 40);
 /// (`SCTLR_EL1`, `TCR_EL1`, `TTBR0_EL1`, `TTBR1_EL1`, `MAIR_EL1`), and with
 /// EL2 stage 2's (`VTTBR_EL2`, `VTCR_EL2`) and the `HCR_EL2` bits that
 /// decide which walks are made (`VM`, `PTW`, `DC`, `TGE`) and what memory
-/// they make (`CD`); 0 for each EL2 register without EL2. Every entry of
+/// they make (`CD`, and with FEAT_S2FWB `FWB`); 0 for each EL2 register
+/// without EL2. Every entry of
 /// the regime the TLB holds was made
 /// under one such set, its context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1751,7 +2023,7 @@ pub(crate) struct El10Context {
 }
 
 /// The `HCR_EL2` bits an [`El10Context`] holds.
-const HCR_TRANSLATION: u64 = HCR_VM | HCR_PTW | HCR_DC | HCR_TGE | HCR_CD;
+const HCR_TRANSLATION: u64 = HCR_VM | HCR_PTW | HCR_DC | HCR_TGE | HCR_CD | HCR_FWB;
 
 impl El10Context {
     /// The context the EL1&0 regime's registers in `sys` and, with EL2,
@@ -1777,8 +2049,9 @@ impl El10Context {
     /// `TBI` bits judge the addresses stage 1 then leaves); and with stage 2
     /// disabled of `VTTBR_EL2` only its VMID, which tags the regime's
     /// translations whenever EL2 is enabled (Arm `AArch64_TLBContextEL10`,
-    /// `VMID()`), and no `VTCR_EL2`, `HCR_EL2.PTW` or `HCR_EL2.CD`
-    /// (`AArch64_S2TreatAsNormalNC`). Register values that translate alike
+    /// `VMID()`), and no `VTCR_EL2`, `HCR_EL2.PTW`, `HCR_EL2.CD`
+    /// (`AArch64_S2TreatAsNormalNC`) or `HCR_EL2.FWB` (stage 2's
+    /// `walkparams.fwb`). Register values that translate alike
     /// and carry one VMID make one context.
     pub(crate) const fn normalized(self) -> Self {
         let hcr_el2 = self.hcr_el2 & HCR_TRANSLATION;
@@ -1792,7 +2065,7 @@ impl El10Context {
             ..self
         };
         if !context.stage2() {
-            context.hcr_el2 &= !(HCR_PTW | HCR_CD);
+            context.hcr_el2 &= !(HCR_PTW | HCR_CD | HCR_FWB);
             context.vttbr_el2 &= VTTBR_VMID8;
             context.vtcr_el2 = 0;
         }
@@ -1812,7 +2085,11 @@ impl El10Context {
     /// Stage 2's context of this one, where stage 2 translates the regime.
     const fn stage2_context(&self) -> Option<Stage2Context> {
         if self.stage2() {
-            Some(Stage2Context::of(self.vttbr_el2, self.vtcr_el2))
+            Some(Stage2Context::of(
+                self.vttbr_el2,
+                self.vtcr_el2,
+                self.hcr_el2,
+            ))
         } else {
             None
         }
@@ -1947,37 +2224,50 @@ const fn walk_only(value: u64, stage1: bool) -> u64 {
 }
 
 /// The registers stage 2's translations of IPAs depend on: `VTTBR_EL2`, its
-/// table base and VMID, and `VTCR_EL2`. Every stage 2 translation the TLB
-/// keeps was made under one such pair, its context, whatever stage 1's
-/// registers were, as Arm tags a stage 2 translation with its VMID alone:
-/// a guest's switch between its processes keeps them. `HCR_EL2.VM` and
-/// `DC`, which enable stage 2, leave its translations as they are; the
-/// checks `HCR_EL2.PTW` adds are made on each use.
+/// table base and VMID, `VTCR_EL2`, and of `HCR_EL2` the `FWB` bit
+/// (FEAT_S2FWB), which decides what their leaves make of memory (Arm
+/// `walkparams.fwb`). Every stage 2 translation the TLB keeps was made
+/// under one such set, its context, whatever stage 1's registers were, as
+/// Arm tags a stage 2 translation with its VMID alone: a guest's switch
+/// between its processes keeps them. `HCR_EL2.VM` and `DC`, which enable
+/// stage 2, leave its translations as they are; the checks `HCR_EL2.PTW`
+/// adds are made on each use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Stage2Context {
     pub(crate) vttbr_el2: u64,
     pub(crate) vtcr_el2: u64,
+    /// `HCR_EL2.FWB`, at its bit; every other bit clear.
+    pub(crate) hcr_el2: u64,
 }
 
 impl Stage2Context {
-    /// The context `VTTBR_EL2` = `vttbr_el2` and `VTCR_EL2` = `vtcr_el2`
-    /// make: the one way a stage 2 context is made from registers.
-    pub(crate) const fn of(vttbr_el2: u64, vtcr_el2: u64) -> Self {
+    /// The context `VTTBR_EL2` = `vttbr_el2`, `VTCR_EL2` = `vtcr_el2` and
+    /// `HCR_EL2` = `hcr_el2` make: the one way a stage 2 context is made
+    /// from registers.
+    pub(crate) const fn of(vttbr_el2: u64, vtcr_el2: u64, hcr_el2: u64) -> Self {
         Self {
             vttbr_el2,
             vtcr_el2,
+            hcr_el2: hcr_el2 & HCR_FWB,
         }
     }
 
-    /// Whether `VTTBR_EL2` and `VTCR_EL2` can hold this context's values on
-    /// a processor implementing `features`: each what an `MSR` keeps of
-    /// itself ([`El2Reg::kept`], which reads its SPSR mask for `SPSR_EL2`
-    /// alone, and the layout `HCR_EL2.E2H` selects for the registers it
-    /// redefines alone, which these are not).
+    /// Whether `VTTBR_EL2`, `VTCR_EL2` and `HCR_EL2` can hold this
+    /// context's values on a processor implementing `features`: each what
+    /// an `MSR` keeps of itself ([`El2Reg::kept`], which reads its SPSR mask
+    /// for `SPSR_EL2` alone, and the layout `HCR_EL2.E2H` selects for the
+    /// registers it redefines alone, which these are not), `HCR_EL2` no bit
+    /// but `FWB`.
     const fn held_by(&self, features: Features) -> bool {
         let layout = E2hLayout::E2h0;
         El2Reg::Vttbr.kept(features, 0, layout, self.vttbr_el2) == self.vttbr_el2
             && El2Reg::Vtcr.kept(features, 0, layout, self.vtcr_el2) == self.vtcr_el2
+            && self.hcr_el2 & !(hcr_mask(features) & HCR_FWB) == 0
+    }
+
+    /// The rule this context's leaves make memory by (`HCR_EL2.FWB`).
+    const fn rule(&self) -> S2AttrRule {
+        S2AttrRule::of(self.hcr_el2)
     }
 
     /// Where this context's walks start on a processor implementing
@@ -2013,13 +2303,15 @@ struct Stage2MadeUnder {
 impl TaggedContext for Stage2Context {
     fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
         w.write_u64(self.vttbr_el2)?;
-        w.write_u64(self.vtcr_el2)
+        w.write_u64(self.vtcr_el2)?;
+        w.write_u64(self.hcr_el2)
     }
 
     fn restore<R: SnapRead>(r: &mut R) -> Result<Self, SnapError> {
         Ok(Self {
             vttbr_el2: r.read_u64()?,
             vtcr_el2: r.read_u64()?,
+            hcr_el2: r.read_u64()?,
         })
     }
 }
@@ -2452,13 +2744,13 @@ const EMPTY_ENTRY: TlbEntry = TlbEntry {
     memory: Memory::Normal,
     s1: Stage1Leaf {
         perms: 0,
-        memory: Memory::Normal,
+        memory: S1Memory::Normal,
         level: LeafLevel::Zero,
         stage1: Stage1::Walked(TranslationScope::NonGlobal),
     },
     s2: Stage2Leaf {
         perms: 0,
-        memory: Memory::Normal,
+        memory: S2Memory::Decoded(Memory::Normal),
         level: LeafLevel::Zero,
     },
 };
@@ -3238,8 +3530,8 @@ impl<L: Levels> Tlb<L> {
                 return Err(NOT_WALKED);
             };
             let (Some(s1_memory), Some(s2_memory), Some(memory)) = (
-                Memory::from_code(s1_memory),
-                Memory::from_code(s2_memory),
+                S1Memory::from_code(s1_memory),
+                S2Memory::from_code(s2_memory),
                 Memory::from_code(memory),
             ) else {
                 return Err(NOT_WALKED);
@@ -3325,7 +3617,7 @@ impl<L: Levels> Tlb<L> {
                         && level == LeafLevel::Zero
                         && perms == PERMS
                         && s1_memory
-                            == Memory::s1_disabled(el10_s1_disabled_data_normal(made_in.hcr_el2))
+                            == S1Memory::s1_disabled(el10_s1_disabled_data_normal(made_in.hcr_el2))
                 }
                 // The EL2 regime has no ASIDs and no EL0: every one of its
                 // leaves is global, and gives EL0 nothing. The EL2&0
@@ -3342,9 +3634,15 @@ impl<L: Levels> Tlb<L> {
                 (None, Stage1::Disabled) => false,
             };
             // An entry stage 2 takes no part in holds `Stage2Leaf::NONE`; one
-            // it does, a stage 2 leaf its walk can end at.
+            // it does, a stage 2 leaf its walk can end at, its memory by the
+            // rule of the context the entry was made in.
+            let rule = made_in.map_or(S2AttrRule::Combined, |made_in| {
+                S2AttrRule::of(made_in.hcr_el2)
+            });
             let stage2_valid = match stage2 {
-                Stage2At::Starts(start) => Stage2Leaf::walked(s2.perms, s2.level, start, features),
+                Stage2At::Starts(start) => {
+                    Stage2Leaf::walked(s2.perms, s2.memory, s2.level, start, rule, features)
+                }
                 Stage2At::Refuses => false,
                 Stage2At::Off => s2 == Stage2Leaf::NONE,
             };
@@ -3421,7 +3719,7 @@ impl<L: Levels> Tlb<L> {
             let (Some(start), Some(level), Some(memory)) = (
                 made_in.start(features),
                 LeafLevel::of(level),
-                Memory::from_code(memory),
+                S2Memory::from_code(memory),
             ) else {
                 return Err(NOT_WALKED);
             };
@@ -3435,7 +3733,7 @@ impl<L: Levels> Tlb<L> {
                 || !start.translates(Ipa::new(ipa_page << 12))
                 || pa_page & 0xFFF != 0
                 || pa_page >> id::pa_bits(features) != 0
-                || !Stage2Leaf::walked(perms, level, start, features)
+                || !Stage2Leaf::walked(perms, memory, level, start, made_in.rule(), features)
                 || (pa_page ^ (ipa_page << PAGE_SHIFT)) & ((1 << bits) - 1) != 0
             {
                 return Err(NOT_WALKED);
@@ -3542,7 +3840,7 @@ impl<L: Levels> Cpu<L> {
     /// Stage 2's granule now (`VTCR_EL2.TG0`, [`Stage2Context::granule`]).
     fn stage2_granule(&self) -> Granule {
         let el2 = self.el2();
-        Stage2Context::of(el2.vttbr, el2.vtcr).granule(self.imp.features)
+        Stage2Context::of(el2.vttbr, el2.vtcr, el2.hcr).granule(self.imp.features)
     }
 
     /// The tag of the EL1&0 regime's current context: 0 without EL2, and
@@ -3612,7 +3910,8 @@ impl<L: Levels> Cpu<L> {
             return current;
         }
         let el2 = self.el2();
-        self.tlb.find_stage2(Stage2Context::of(el2.vttbr, el2.vtcr))
+        self.tlb
+            .find_stage2(Stage2Context::of(el2.vttbr, el2.vtcr, el2.hcr))
     }
 
     /// Whether the TLB's current contexts are the ones the registers make
@@ -3883,7 +4182,7 @@ impl<L: Levels> Cpu<L> {
         Ok(Mapping {
             pa: ipa.untranslated(),
             guarded: false,
-            memory: s1.memory,
+            memory: s1.memory.memory(),
         })
     }
 
@@ -3983,7 +4282,7 @@ impl<L: Levels> Cpu<L> {
             return Ok(Mapping {
                 pa: ipa.untranslated(),
                 guarded,
-                memory: s1.memory,
+                memory: s1.memory.memory(),
             });
         };
         let mut written = Writes::NONE;
@@ -4251,17 +4550,19 @@ impl<L: Levels> Cpu<L> {
         match out {
             Stage1Output::Walked(walked) => {
                 let non_cacheable = self.regime_sctlr(regime) & sctlr::C == 0;
-                let memory = Memory::of(walked.attrs(self.imp.features));
+                let attrs = walked
+                    .attrs(self.imp.features)
+                    .normal_as_non_cacheable(non_cacheable);
                 Stage1Leaf {
                     perms: walked.perms,
-                    memory: memory.normal_as_non_cacheable(non_cacheable),
+                    memory: S1Memory::of(attrs),
                     level: walked.level,
                     stage1: Stage1::Walked(walked.scope),
                 }
             }
             Stage1Output::Disabled(_) => Stage1Leaf {
                 perms: PERMS,
-                memory: Memory::s1_disabled(self.s1_disabled_data_normal(regime)),
+                memory: S1Memory::s1_disabled(self.s1_disabled_data_normal(regime)),
                 level: LeafLevel::Zero,
                 stage1: Stage1::Disabled,
             },
@@ -4889,8 +5190,7 @@ impl<L: Levels> Cpu<L> {
                             Some(abort) => Err(abort),
                             None => {
                                 let cd = self.hcr_any(HCR_CD);
-                                let s2_attrs = s2.attrs().normal_as_non_cacheable(cd);
-                                Ok((s2.pa.get(), MemAttrs::combined(s1_attrs, s2_attrs)))
+                                Ok((s2.pa.get(), s2.combined_with(s1_attrs, cd)))
                             }
                         }
                     }
@@ -6063,8 +6363,8 @@ pub(crate) mod saved_layout {
     /// order, `SCTLR_EL1`, `TCR_EL1`, `TTBR0_EL1`, `TTBR1_EL1`, `MAIR_EL1`,
     /// `HCR_EL2`'s translation bits, `VTTBR_EL2` and `VTCR_EL2`.
     pub(crate) const CONTEXT_BYTES: usize = 8 * 8;
-    /// A held stage 2 context: `VTTBR_EL2` and `VTCR_EL2`.
-    pub(crate) const STAGE2_CONTEXT_BYTES: usize = 2 * 8;
+    /// A held stage 2 context: `VTTBR_EL2`, `VTCR_EL2` and `HCR_EL2.FWB`.
+    pub(crate) const STAGE2_CONTEXT_BYTES: usize = 3 * 8;
     pub(crate) const CONTEXT_SCTLR: usize = 0;
     pub(crate) const CONTEXT_HCR: usize = 5 * 8;
     pub(crate) const CONTEXT_VTTBR: usize = 6 * 8;
@@ -6101,6 +6401,51 @@ pub(crate) mod saved_layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The memory the TLB holds of a translation by both stages
+    /// ([`entry_memory`], from what it holds of each stage) is the memory
+    /// of the attributes the stages make whole (`S2CombineS1MemAttrs` under
+    /// `HCR_EL2.FWB` clear, `AArch64_S2ApplyFWBMemAttrs` under it set, with
+    /// `HCR_EL2.CD`), for every allocated `MAIR_ELx` attribute and
+    /// shareability stage 1 gives, under `SCTLR_ELx.C` set and clear, and
+    /// every stage 2 `MemAttr` and shareability.
+    #[test]
+    fn the_tlbs_memory_of_both_stages_is_their_attributes() {
+        let features = Features::EVERY;
+        for mair in 0..=255u8 {
+            for (s1_sh, c_clear, s2_sh, cd) in
+                (0..64u8).map(|i| (i & 3, i & 4 != 0, (i >> 3) & 3, i & 32 != 0))
+            {
+                let s1 = MemAttrs::stage1(mair, s1_sh, features)
+                    .normal_as_non_cacheable(c_clear)
+                    .effective_shareability();
+                for memattr in 0..16u8 {
+                    let decoded = MemAttrs::stage2(memattr, s2_sh, false);
+                    for rule in [S2AttrRule::Combined, S2AttrRule::Forced] {
+                        let whole = match rule {
+                            S2AttrRule::Combined => {
+                                MemAttrs::combined(s1, decoded.normal_as_non_cacheable(cd))
+                            }
+                            S2AttrRule::Forced => {
+                                MemAttrs::forced_write_back(s1, memattr, s2_sh, false)
+                                    .normal_as_non_cacheable(cd)
+                            }
+                        };
+                        let s2 = S2Memory::of_leaf(rule, decoded, memattr, s2_sh);
+                        assert_eq!(
+                            entry_memory(S1Memory::of(s1), Some(s2), cd),
+                            Memory::of(whole),
+                            "MAIR {mair:#04x} SH {s1_sh:#b}, MemAttr {memattr:#06b} \
+                             SH {s2_sh:#b}, {rule:?}, CD {cd}"
+                        );
+                        assert_eq!(S2Memory::from_code(s2.code()), Some(s2));
+                    }
+                }
+                let s1_memory = S1Memory::of(s1);
+                assert_eq!(S1Memory::from_code(s1_memory.code()), Some(s1_memory));
+            }
+        }
+    }
 
     /// Arm `EncodeLDFSC` gives each fault and level a code of its own, and
     /// [`Fsc::is_external`] reads back exactly the synchronous External

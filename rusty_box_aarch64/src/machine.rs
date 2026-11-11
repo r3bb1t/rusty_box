@@ -2888,8 +2888,11 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// processor's `ID_AA64DFR0_EL1` and device tree name, the Cortex-A57's
 /// IMPLEMENTATION DEFINED registers, each walked TLB entry's nG, and with
 /// EL2 the FEAT_VHE registers (`TTBR1_EL2`, `CNTHV_CTL_EL2`,
-/// `CNTHV_CVAL_EL2`) and the EL2&0 regime's TLB entries.
-const SNAPSHOT_VERSION: u32 = 37;
+/// `CNTHV_CVAL_EL2`) and the EL2&0 regime's TLB entries, the fine-grained
+/// trap registers (FEAT_FGT), `HCRX_EL2` (FEAT_HCX), and the TLB's stage 1
+/// memory told apart by shareability and stage 2 memory by `HCR_EL2.FWB`'s
+/// rule (FEAT_S2FWB), whose stage 2 contexts hold `FWB`.
+const SNAPSHOT_VERSION: u32 = 38;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

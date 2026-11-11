@@ -1,8 +1,10 @@
 //! Stage 2 translation (VMSAv8-64, FEAT_EL2): the walk of the tables
 //! `VTTBR_EL2` and `VTCR_EL2` describe, which translates the EL1&0 regime's
 //! intermediate physical addresses (IPAs) while `HCR_EL2.VM` or `DC` is set,
-//! with each granule the processor has at stage 2; and the permissions it
-//! gives.
+//! with each granule the processor has at stage 2; the permissions it
+//! gives, EL1's and EL0's execute permission apart with FEAT_XNX; and the
+//! memory attributes its leaves make, by `HCR_EL2.FWB`'s rule with
+//! FEAT_S2FWB.
 //!
 //! Provenance (R7): the shared pseudocode of the A64 ISA XML (release
 //! 2026-09): `AArch64_S2Translate` (its checks before the walk),
@@ -14,7 +16,8 @@
 //! `AArch64_S2Walk`, `AArch64_S2NextWalkStateTable`,
 //! `AArch64_S2NextWalkStateLeaf`, `AArch64_S2LeafBase`, `Stage2OA`,
 //! `AArch64_S2OAOutOfRange`, `AArch64_S2ApplyOutputPerms`,
-//! `AArch64_S2DirectBasePermissions` and `AArch64_S2CheckPermissions`.
+//! `AArch64_S2DirectBasePermissions`, `AArch64_S2CheckPermissions`,
+//! `AArch64_S2NextWalkStateLeaf` and `AArch64_S2ApplyFWBMemAttrs`.
 //!
 //! The IMPLEMENTATION DEFINED choices are stage 1's, the pseudocode asking
 //! the same questions of both stages: a `T0SZ` outside the range is taken
@@ -32,7 +35,7 @@
 
 use core::convert::Infallible;
 
-use super::el2::{HCR_PTW, HCR_TGE, VTCR_EL2_DS, VTCR_EL2_HA, VTCR_EL2_HD, VTCR_EL2_SL2};
+use super::el2::{HCR_FWB, HCR_PTW, HCR_TGE, VTCR_EL2_DS, VTCR_EL2_HA, VTCR_EL2_HD, VTCR_EL2_SL2};
 use super::features::{Feature, Features};
 use super::memattr::MemAttrs;
 use super::mmu::{
@@ -78,8 +81,8 @@ const _: () = assert!(
 );
 
 /// What a stage 2 walk reads from its registers (Arm `S2TTWParams`, from
-/// `AArch64_NSS2TTWParams`): what `VTCR_EL2` says of it, and `VTTBR_EL2`'s
-/// base.
+/// `AArch64_NSS2TTWParams`): what `VTCR_EL2` says of it, `VTTBR_EL2`'s
+/// base, and `HCR_EL2.FWB`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct S2Params {
     /// Where the walk starts and how its addresses are held ([`s2_start`]).
@@ -88,6 +91,34 @@ struct S2Params {
     /// The hardware updates stage 2 makes of its leaves (`VTCR_EL2.HA` and
     /// `HD`).
     hw: HwUpdate,
+    /// How its leaves' `MemAttr` make memory attributes (`walkparams.fwb`).
+    rule: S2AttrRule,
+}
+
+/// How a stage 2 leaf's `MemAttr` makes the memory attributes of an access
+/// stage 1 gives attributes of its own (Arm `walkparams.fwb`, `HCR_EL2.FWB`,
+/// which only a processor with FEAT_S2FWB keeps).
+///
+/// Closed (R5): `FWB`'s two values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum S2AttrRule {
+    /// `FWB` 0: stage 2's attributes (`S2DecodeMemAttrs`), combined with
+    /// stage 1's (`S2CombineS1MemAttrs`).
+    Combined,
+    /// `FWB` 1: stage 1's attributes as stage 2 forces them
+    /// (`AArch64_S2ApplyFWBMemAttrs`).
+    Forced,
+}
+
+impl S2AttrRule {
+    /// The rule `HCR_EL2` `hcr` selects.
+    pub(crate) const fn of(hcr: u64) -> Self {
+        if hcr & HCR_FWB != 0 {
+            Self::Forced
+        } else {
+            Self::Combined
+        }
+    }
 }
 
 /// Where a stage 2 walk starts: its granule (`VTCR_EL2.TG0`,
@@ -196,36 +227,62 @@ pub(crate) struct S2Walked {
     /// The permissions stage 2 gives, as the stage 1 permission bits they
     /// leave an access (`AArch64_S2DirectBasePermissions`): read and write
     /// at EL1 and EL0 alike, a writable-clean leaf's write included, and
-    /// execute as `XN` gives each.
+    /// execute as `XN` (with FEAT_XNX, `XN[1:0]`) gives each.
     pub(crate) perms: u8,
     pub(crate) level: LeafLevel,
     /// The leaf descriptor as the walk read it, at its physical address,
     /// and the hardware updates stage 2 makes of it.
     pub(crate) leaf: LeafDescriptor<PhysAddr>,
     pub(crate) hw: HwUpdate,
+    /// How its `MemAttr` makes the access's attributes (`HCR_EL2.FWB`).
+    pub(crate) rule: S2AttrRule,
     /// The descriptor's `MemAttr` and `FnXS` (false without FEAT_XS), and
     /// the leaf's shareability — the descriptor's `SH`, or under FEAT_LPA2's
     /// `DS` `VTCR_EL2.SH0` ([`OaLayout::shareability`]) — as they are,
-    /// decoded by [`S2Walked::attrs`].
-    memattr: u8,
-    sh: u8,
+    /// read by [`S2Walked::decoded`] and [`S2Walked::forced`].
+    pub(crate) memattr: u8,
+    pub(crate) sh: u8,
     fnxs: bool,
 }
 
 impl S2Walked {
-    /// The attributes stage 2 gives (`S2DecodeMemAttrs`).
-    pub(crate) const fn attrs(&self) -> MemAttrs {
+    /// The attributes stage 2 gives under `HCR_EL2.FWB` clear
+    /// (`S2DecodeMemAttrs`), which combine with stage 1's.
+    pub(crate) const fn decoded(&self) -> MemAttrs {
         MemAttrs::stage2(self.memattr, self.sh, self.fnxs)
+    }
+
+    /// The attributes of an access stage 1 gives `s1` under `HCR_EL2.FWB`
+    /// set (`AArch64_S2ApplyFWBMemAttrs`).
+    pub(crate) const fn forced(&self, s1: MemAttrs) -> MemAttrs {
+        MemAttrs::forced_write_back(s1, self.memattr, self.sh, self.fnxs)
+    }
+
+    /// The attributes of an access stage 1 gives `s1` and this leaf maps,
+    /// with `HCR_EL2.CD` (`cd`) making Normal memory Non-cacheable
+    /// (`AArch64_S2TreatAsNormalNC`): under `FWB` clear stage 2's own made
+    /// so and then combined with stage 1's (`S2CombineS1MemAttrs`), under
+    /// `FWB` set the forced ones made so.
+    pub(crate) const fn combined_with(&self, s1: MemAttrs, cd: bool) -> MemAttrs {
+        match self.rule {
+            S2AttrRule::Combined => {
+                MemAttrs::combined(s1, self.decoded().normal_as_non_cacheable(cd))
+            }
+            S2AttrRule::Forced => self.forced(s1).normal_as_non_cacheable(cd),
+        }
     }
 }
 
-/// The stage 2 permissions a descriptor gives (`AArch64_S2ApplyOutputPerms`
-/// and `AArch64_S2DirectBasePermissions` without FEAT_S2PIE, FEAT_HDBSS or
-/// FEAT_XNX): `S2AP[0]` (bit 6) read, `S2AP[1]` (bit 7) write — or, where
-/// stage 2 manages dirty state (`hw`), `DBM` (bit 51) write too, the
-/// writable-clean leaf's — and `XN` (bit 54) execute-never at EL1 and EL0
-/// alike.
-const fn s2_permissions(desc: u64, hw: HwUpdate) -> u8 {
+/// The stage 2 permissions a descriptor gives on a processor implementing
+/// `features` (`AArch64_S2ApplyOutputPerms` and
+/// `AArch64_S2DirectBasePermissions` without FEAT_S2PIE or FEAT_HDBSS):
+/// `S2AP[0]` (bit 6) read, `S2AP[1]` (bit 7) write — or, where stage 2
+/// manages dirty state (`hw`), `DBM` (bit 51) write too, the writable-clean
+/// leaf's — at EL1 and EL0 alike; and execute as `XN` (bit 54) and, with
+/// FEAT_XNX, `XNX` (bit 53, `XN[0]`; 0 without) give it: `XN[1:0]` 0b00
+/// executable at both, 0b01 at EL0 alone, 0b10 at neither, 0b11 at EL1
+/// alone.
+const fn s2_permissions(desc: u64, hw: HwUpdate, features: Features) -> u8 {
     let mut perms = 0;
     if (desc >> 6) & 1 == 1 {
         perms |= PERM_EL1_R | PERM_EL0_R;
@@ -233,8 +290,19 @@ const fn s2_permissions(desc: u64, hw: HwUpdate) -> u8 {
     if (desc >> 7) & 1 == 1 || (hw.dirty() && (desc >> 51) & 1 == 1) {
         perms |= PERM_EL1_W | PERM_EL0_W;
     }
-    if (desc >> 54) & 1 == 0 {
-        perms |= PERM_EL1_X | PERM_EL0_X;
+    let xn = (desc >> 54) & 1 == 1;
+    let xnx = features.has(Feature::Xnx) && (desc >> 53) & 1 == 1;
+    let (el1, el0) = match (xn, xnx) {
+        (false, false) => (true, true),
+        (false, true) => (false, true),
+        (true, false) => (false, false),
+        (true, true) => (true, false),
+    };
+    if el1 {
+        perms |= PERM_EL1_X;
+    }
+    if el0 {
+        perms |= PERM_EL0_X;
     }
     perms
 }
@@ -257,6 +325,7 @@ impl<L: Levels> Cpu<L> {
             start: s2_start(el2.vtcr, features),
             vttbr: el2.vttbr,
             hw: HwUpdate::of(el2.vtcr, VTCR_EL2_HA, VTCR_EL2_HD, features),
+            rule: S2AttrRule::of(el2.hcr),
         }
     }
 
@@ -309,10 +378,11 @@ impl<L: Levels> Cpu<L> {
         let desc = leaf.desc.value;
         Ok(S2Walked {
             pa: leaf.out,
-            perms: s2_permissions(desc, params.hw),
+            perms: s2_permissions(desc, params.hw, self.imp.features),
             level: leaf.level,
             leaf: leaf.desc,
             hw: params.hw,
+            rule: params.rule,
             memattr: ((desc >> 2) & 0xF) as u8,
             sh: oa.shareability(desc),
             fnxs: self.implements(Feature::Xs) && (desc >> 11) & 1 == 1,

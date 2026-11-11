@@ -305,6 +305,42 @@ pub(crate) enum Feature {
     /// implements FEAT_E2H0 too (`ID_AA64MMFR4_EL1.E2H0` reads 0). No
     /// encoding of its own: its registers are System registers.
     Vhe,
+    /// FEAT_XNX: stage 2's execute-never as two bits, `XN[1:0]` (descriptor
+    /// bits 54:53), which give EL1 and EL0 execute permission apart
+    /// (`AArch64_S2DirectBasePermissions`). Only a processor with EL2 has it
+    /// (`FEAT_XNX ==> FEAT_EL2`). No encoding of its own.
+    Xnx,
+    /// FEAT_S2FWB: `HCR_EL2.FWB`, under which a stage 2 descriptor's
+    /// `MemAttr` combines with stage 1's attributes by
+    /// `AArch64_S2ApplyFWBMemAttrs`, forcing Write-Back where it says so.
+    /// Only a processor with EL2 has it (`FEAT_S2FWB ==> FEAT_AA64EL2`),
+    /// and one whose `CLIDR_EL1` names no level of cache to clean to the
+    /// Point of Unification (`LoUU` and `LoUIS` 0). No encoding of its own.
+    S2Fwb,
+    /// FEAT_EVT: `HCR_EL2.TOCU`, `TICAB` and `TID4`, traps of the cache
+    /// maintenance to the PoU, of `IC IALLUIS`, and of the cache
+    /// identification registers apart from `CTR_EL0`. Only a processor with
+    /// EL2 has it (its `ID_AA64MMFR2_EL1.EVT` reads 0 without, Arm ARM
+    /// D24.2). No encoding of its own.
+    Evt,
+    /// FEAT_EVT2: with FEAT_EVT, which it needs (`FEAT_EVT2 ==> FEAT_EVT`),
+    /// `HCR_EL2.TTLBIS` and `TTLBOS`, traps of the Inner and Outer Shareable
+    /// TLB maintenance instructions. Only with EL2, as FEAT_EVT. No
+    /// encoding of its own.
+    Evt2,
+    /// FEAT_FGT: the fine-grained traps of `HFGRTR_EL2`, `HFGWTR_EL2`,
+    /// `HFGITR_EL2`, `HDFGRTR_EL2` and `HDFGWTR_EL2` (with no EL3 there is
+    /// no `SCR_EL3.FGTEn` to turn them off), and `MDCR_EL2.TDCC`. Only a
+    /// processor with EL2 has it here (`FEAT_FGT ==> (FEAT_EL2 ||
+    /// FEAT_EL3)`, and there is no EL3). No encoding of its own: its
+    /// registers are System registers, and the instructions it traps
+    /// (`SVC`, `ERET`) are base ones.
+    Fgt,
+    /// FEAT_HCX: `HCRX_EL2`, the extended hypervisor configuration, whose
+    /// controls of the features this processor has it holds. Only a
+    /// processor with EL2 has it (`(FEAT_AA64 && FEAT_HCX) ==>
+    /// FEAT_AA64EL2`). No encoding of its own.
+    Hcx,
 }
 
 // `Feature::ALL` is in declaration order, and each feature has a bit of a
@@ -329,7 +365,7 @@ const _: () = {
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 84] = [
+    pub(crate) const ALL: [Feature; 90] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -414,6 +450,12 @@ impl Feature {
         Feature::PmuV3p5,
         Feature::PmuV3p7,
         Feature::Vhe,
+        Feature::Xnx,
+        Feature::S2Fwb,
+        Feature::Evt,
+        Feature::Evt2,
+        Feature::Fgt,
+        Feature::Hcx,
     ];
 }
 
@@ -508,6 +550,12 @@ impl Feature {
             Self::PmuV3p5 => Some("FEAT_PMUv3p5"),
             Self::PmuV3p7 => Some("FEAT_PMUv3p7"),
             Self::Vhe => Some("FEAT_VHE"),
+            Self::Xnx => Some("FEAT_XNX"),
+            Self::S2Fwb => Some("FEAT_S2FWB"),
+            Self::Evt => Some("FEAT_EVT"),
+            Self::Evt2 => Some("FEAT_EVT2"),
+            Self::Fgt => Some("FEAT_FGT"),
+            Self::Hcx => Some("FEAT_HCX"),
         }
     }
 
@@ -570,6 +618,12 @@ impl Feature {
                 | Self::PmuV3p5
                 | Self::PmuV3p7
                 | Self::Vhe
+                | Self::Xnx
+                | Self::S2Fwb
+                | Self::Evt
+                | Self::Evt2
+                | Self::Fgt
+                | Self::Hcx
         )
     }
 
@@ -639,14 +693,27 @@ impl Features {
     /// set [`NoEl2`](super::NoEl2) drops with EL2: FEAT_ECV_POFF
     /// (`(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`), the stage 2
     /// granules (`FEAT_S2TGran16K ==> (FEAT_AA64EL2 && FEAT_TGran16K)`),
-    /// FEAT_GTG, whose `ID_AA64MMFR0_EL1` fields read 0 without EL2, and
-    /// FEAT_VHE (`FEAT_VHE ==> (... && FEAT_AA64EL2)`).
+    /// FEAT_GTG, whose `ID_AA64MMFR0_EL1` fields read 0 without EL2,
+    /// FEAT_VHE (`FEAT_VHE ==> (... && FEAT_AA64EL2)`), FEAT_XNX
+    /// (`FEAT_XNX ==> FEAT_EL2`), FEAT_S2FWB (`FEAT_S2FWB ==>
+    /// FEAT_AA64EL2`), FEAT_EVT and FEAT_EVT2, whose
+    /// `ID_AA64MMFR2_EL1.EVT` is 0 without EL2 (Arm ARM D24.2: "If EL2 is
+    /// not implemented, the only permitted value is 0b0000"), FEAT_FGT,
+    /// which needs EL2 or EL3 (`FEAT_FGT ==> (FEAT_EL2 || FEAT_EL3)`) and
+    /// this processor has no EL3, and FEAT_HCX (`(FEAT_AA64 && FEAT_HCX)
+    /// ==> FEAT_AA64EL2`).
     const NEED_EL2: Self = Self(
         Feature::EcvPoff.bit()
             | Feature::S2TGran16K.bit()
             | Feature::S2TGran64K.bit()
             | Feature::Gtg.bit()
-            | Feature::Vhe.bit(),
+            | Feature::Vhe.bit()
+            | Feature::Xnx.bit()
+            | Feature::S2Fwb.bit()
+            | Feature::Evt.bit()
+            | Feature::Evt2.bit()
+            | Feature::Fgt.bit()
+            | Feature::Hcx.bit(),
     );
 
     /// What the Armv9.2 processor model implements: every feature Arm's
@@ -1016,8 +1083,9 @@ impl Implementation {
     /// The Armv9.2 model with every feature the decoder knows, which is
     /// today the model's own set, FEAT_DoubleLock (a set no processor may
     /// have, Armv9.0 forbidding FEAT_DoubleLock, and none is built with),
-    /// FEAT_ECV_POFF and FEAT_VHE, which it keeps only with EL2 and no model
-    /// lists yet:
+    /// and FEAT_ECV_POFF, FEAT_VHE, FEAT_XNX, FEAT_S2FWB, FEAT_EVT,
+    /// FEAT_EVT2, FEAT_FGT and FEAT_HCX, which it keeps only with EL2 and no
+    /// model lists yet:
     /// a feature's tests run on it before any
     /// model implements the feature, and each exercises that feature's own
     /// rules. EL2 comes with the processor's level set, as it does for
@@ -1154,11 +1222,12 @@ impl CpuModel {
     /// Whether a machine of this model can be built with EL2
     /// ([`MachineBuilder::with_el2`](crate::machine::MachineBuilder::with_el2)).
     /// The Cortex-A57 can, as QEMU's `-M virt,virtualization=on` gives its
-    /// `cortex-a57` EL2. The Armv9.2 model cannot yet: Arm's feature model
+    /// `cortex-a57` EL2. The Armv9.2 model cannot: Arm's feature model
     /// (`Features.json`) requires of an Armv9.2 processor with EL2 FEAT_VHE,
-    /// which this core implements, and FEAT_FGT, FEAT_HCX, FEAT_EVT,
-    /// FEAT_EVT2, FEAT_S2FWB and FEAT_XNX, which it does not, and a
-    /// processor without them is not one Arm permits.
+    /// FEAT_XNX, FEAT_S2FWB, FEAT_EVT, FEAT_EVT2, FEAT_FGT and FEAT_HCX,
+    /// which this core implements and the test processor with every feature
+    /// has, but which the model's feature set ([`Features::ARMV9P2`]) does
+    /// not list, and a processor without them is not one Arm permits.
     pub const fn el2_available(self) -> bool {
         match self {
             Self::CortexA57 => true,
@@ -1304,7 +1373,7 @@ impl core::fmt::Display for El2Unavailable {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "the {} processor model cannot have EL2: Arm requires features of it with EL2 that this core does not implement",
+            "the {} processor model cannot have EL2: Arm requires features of it with EL2 that its feature set does not list",
             self.model.name()
         )
     }

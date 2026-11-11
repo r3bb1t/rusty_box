@@ -5,6 +5,7 @@
 //! it follows.
 
 use super::exec::{bit, bits, sext, ExecResult, Flow, Nzcv};
+use super::fgt::EretForm;
 use super::{Cpu, Levels};
 
 /// `AddWithCarry` result: the value and the flags it would set.
@@ -536,6 +537,7 @@ impl<L: Levels> Cpu<L> {
                 if self.pstate.el == super::El::El0 {
                     return self.undefined(pc, insn);
                 }
+                self.check_eret_trap(EretForm::Plain)?;
                 Ok(Flow::Jump(self.exception_return(self.elr_current())))
             }
             // DRPS is UNDEFINED outside Debug state; nothing else is defined.

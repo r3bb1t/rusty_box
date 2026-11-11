@@ -252,6 +252,14 @@ sysregs! {
     HCR_EL2 = (3, 4, 1, 1, 0);
     MDCR_EL2 = (3, 4, 1, 1, 1);
     CPTR_EL2 = (3, 4, 1, 1, 2);
+    /// The fine-grained trap registers (FEAT_FGT), absent without it.
+    HFGRTR_EL2 = (3, 4, 1, 1, 4);
+    HFGWTR_EL2 = (3, 4, 1, 1, 5);
+    HFGITR_EL2 = (3, 4, 1, 1, 6);
+    HDFGRTR_EL2 = (3, 4, 3, 1, 4);
+    HDFGWTR_EL2 = (3, 4, 3, 1, 5);
+    /// FEAT_HCX's, absent without it.
+    HCRX_EL2 = (3, 4, 1, 2, 2);
     TTBR0_EL2 = (3, 4, 2, 0, 0);
     /// FEAT_VHE's, absent without it.
     TTBR1_EL2 = (3, 4, 2, 0, 1);

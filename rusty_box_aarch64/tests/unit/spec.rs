@@ -1738,6 +1738,44 @@ fn conjuncts(side: Option<&Value>, out: &mut Vec<String>) -> Option<()> {
     Some(())
 }
 
+/// The identifiers a disjunction names (`FEAT_EL2 || FEAT_EL3`), any one of
+/// which may hold; `None` for any other shape.
+fn disjuncts(side: Option<&Value>, out: &mut Vec<String>) -> Option<()> {
+    let side = side?;
+    match side.get("_type").and_then(Value::as_str) {
+        Some("AST.Identifier") => out.push(side.get("value").and_then(Value::as_str)?.to_string()),
+        Some("AST.BinaryOp") if side.get("op").and_then(Value::as_str) == Some("||") => {
+            disjuncts(side.get("left"), out)?;
+            disjuncts(side.get("right"), out)?;
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
+/// Every implication of `Features.json` (`root`) from one identifier to a
+/// disjunction of two or more, `FEAT_FGT ==> (FEAT_EL2 || FEAT_EL3)`: the
+/// identifier, and the ones of which at least one holds where it does.
+fn disjunctive_implications(root: &Value) -> Vec<(String, Vec<String>)> {
+    let mut found = Vec::new();
+    for c in feature_constraints(root) {
+        let is_implication = c.get("_type").and_then(Value::as_str) == Some("AST.BinaryOp")
+            && c.get("op").and_then(Value::as_str) == Some("==>");
+        let left = c.get("left");
+        let identifier = left
+            .filter(|l| l.get("_type").and_then(Value::as_str) == Some("AST.Identifier"))
+            .and_then(|l| l.get("value").and_then(Value::as_str));
+        let (true, Some(a)) = (is_implication, identifier) else {
+            continue;
+        };
+        let mut any = Vec::new();
+        if disjuncts(c.get("right"), &mut any).is_some() && any.len() > 1 {
+            found.push((a.to_string(), any));
+        }
+    }
+    found
+}
+
 /// An implication of `Features.json` whose left side is a conjunction of
 /// identifiers, `(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`: where
 /// every identifier of `when` holds, every identifier of `then` does.
@@ -1860,9 +1898,13 @@ fn implied_by(feature: Feature, implications: &[(Feature, Feature)]) -> Vec<Feat
 /// features a processor without EL2 drops are exactly those Arm gives only
 /// to a processor with EL2, alone or with AArch64 at EL0 and EL1, which
 /// every processor here has: FEAT_ECV_POFF by `(FEAT_AA64 &&
-/// FEAT_ECV_POFF) ==> FEAT_AA64EL2`; and FEAT_GTG, which no identifier
-/// ties to EL2 but its fields do: `FEAT_GTG <=> UInt(TGran4_2) >= 1`, a
-/// field that reads 0 without EL2 (Arm ARM D24.2, `ID_AA64MMFR0_EL1`).
+/// FEAT_ECV_POFF) ==> FEAT_AA64EL2`; FEAT_FGT by `FEAT_FGT ==> (FEAT_EL2
+/// || FEAT_EL3)`, no processor here having EL3; and FEAT_GTG, FEAT_EVT and
+/// FEAT_EVT2, which no identifier ties to EL2 but their fields do:
+/// `FEAT_GTG <=> UInt(TGran4_2) >= 1`, a field that reads 0 without EL2
+/// (Arm ARM D24.2, `ID_AA64MMFR0_EL1`), and `FEAT_EVT <=> UInt(EVT) >= 1`,
+/// of a field whose "only permitted value" without EL2 is 0
+/// (`ID_AA64MMFR2_EL1`).
 #[test]
 #[cfg_attr(
     not(aarchmrs),
@@ -1903,11 +1945,12 @@ fn every_implementation_has_what_its_features_imply() {
     }
 
     // The identifiers Arm gives only to a processor with EL2: FEAT_EL2,
-    // FEAT_AA64EL2, FEAT_GTG (by its fields, as above), and each that
-    // implies one of those, alone or with what
+    // FEAT_AA64EL2, FEAT_GTG, FEAT_EVT and FEAT_EVT2 (by their fields, as
+    // above), and each that implies one of those, alone or with what
     // every processor here has (`(FEAT_AA64 && FEAT_ECV_POFF) ==>
-    // FEAT_AA64EL2`), directly or through other identifiers, until no more
-    // are found.
+    // FEAT_AA64EL2`), or one of them or what no processor here has
+    // (`FEAT_FGT ==> (FEAT_EL2 || FEAT_EL3)`), directly or through other
+    // identifiers, until no more are found.
     const EVERY_PROCESSOR: [&str; 5] = [
         "FEAT_AA64",
         "FEAT_EL0",
@@ -1915,14 +1958,30 @@ fn every_implementation_has_what_its_features_imply() {
         "FEAT_AA64EL0",
         "FEAT_AA64EL1",
     ];
+    const NO_PROCESSOR: [&str; 4] = ["FEAT_EL3", "FEAT_AA64EL3", "FEAT_AA32EL2", "FEAT_AA32EL3"];
     let edges = identifier_edges(&root);
     let conjunctive = conjunctive_implications(&root);
-    let mut need_el2: BTreeSet<&str> = BTreeSet::from(["FEAT_EL2", "FEAT_AA64EL2", "FEAT_GTG"]);
+    let disjunctive = disjunctive_implications(&root);
+    let mut need_el2: BTreeSet<&str> = BTreeSet::from([
+        "FEAT_EL2",
+        "FEAT_AA64EL2",
+        "FEAT_GTG",
+        "FEAT_EVT",
+        "FEAT_EVT2",
+    ]);
     loop {
         let found = need_el2.len();
         for (a, implied) in &edges {
             if implied.iter().any(|b| need_el2.contains(b.as_str())) {
                 need_el2.insert(a);
+            }
+        }
+        for (a, any) in &disjunctive {
+            let mut possible = any.iter().filter(|n| !NO_PROCESSOR.contains(&n.as_str()));
+            if let (Some(only), None) = (possible.next(), possible.next()) {
+                if need_el2.contains(only.as_str()) {
+                    need_el2.insert(a);
+                }
             }
         }
         for c in &conjunctive {
@@ -2008,7 +2067,8 @@ fn constraint_value(ast: &Value, holding: &BTreeSet<&str>) -> Option<bool> {
 ///
 /// A model that cannot have EL2 ([`CpuModel::el2_available`], whose build
 /// with EL2 is refused) breaks, with EL2, exactly the constraints that say
-/// why: the features Arm requires of it with EL2 that this core lacks.
+/// why: the features Arm requires of it with EL2 that its feature set does
+/// not list, which the processor with every feature has.
 #[test]
 #[cfg_attr(
     not(aarchmrs),

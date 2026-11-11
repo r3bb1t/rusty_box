@@ -41,8 +41,10 @@ use rusty_box_core::SnapError;
 use super::el2::{
     MDCR_HCCD, MDCR_HLP, MDCR_HPMD, MDCR_HPME, MDCR_HPMFZO, MDCR_HPMN, MDCR_TPM, MDCR_TPMCR,
 };
+use super::exception::Route;
 use super::features::{Feature, Features};
-use super::sysreg::{trap_to_el1, trap_to_el2, SysRegError, SysRegKey, WriteEffect};
+use super::fgt::{FgtReg, FineGrainedTrap};
+use super::sysreg::{trap_to_el1, trap_to_el2, Direction, SysRegError, SysRegKey, WriteEffect};
 use super::{Cpu, El, Levels};
 
 /// The most event counters a processor here has: the Cortex-A57's six
@@ -970,13 +972,6 @@ impl PmuReg {
     }
 }
 
-/// Which way an access goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Direction {
-    Read,
-    Write,
-}
-
 /// What `PMUSERENR_EL0` lets EL0 do with a register, by its accessor (no
 /// FEAT_PMUv3p9): which of its enables, any one set, lets the access
 /// through, or whether EL0 has no access at all (UNDEFINED).
@@ -1061,6 +1056,40 @@ impl PmuReg {
             )
             | (Self::Ccntr | Self::Xevcntr | Self::Evcntr(_), Write) => El0Access::En,
         })
+    }
+
+    /// The `HDFGRTR_EL2` (a read) or `HDFGWTR_EL2` (a write) field
+    /// (FEAT_FGT) that traps an access to the register in direction `dir`,
+    /// by its accessor: `PMEVCNTRn_EL0` for `PMEVCNTR<n>_EL0` and
+    /// `PMXEVCNTR_EL0`, `PMEVTYPERn_EL0` for `PMEVTYPER<n>_EL0` and
+    /// `PMXEVTYPER_EL0` whatever `PMSELR_EL0` selects, one field for each
+    /// pair of set and clear registers, and none for a read of `PMCR_EL0`
+    /// or for an access the register has no accessor of.
+    pub(crate) const fn fine_grained(self, dir: Direction) -> Option<FineGrainedTrap> {
+        use Direction::{Read, Write};
+        let bit = match (self, dir) {
+            (Self::Evcntr(_) | Self::Xevcntr, Read | Write) => 12,
+            (Self::Evtyper(_) | Self::Xevtyper, Read | Write) => 13,
+            (Self::Ccfiltr, Read | Write) => 14,
+            (Self::Ccntr, Read | Write) => 15,
+            (Self::CntenSet | Self::CntenClr, Read | Write) => 16,
+            (Self::IntenSet | Self::IntenClr, Read | Write) => 17,
+            (Self::OvsSet | Self::OvsClr, Read | Write) => 18,
+            (Self::Selr, Read | Write) => 19,
+            (Self::Swinc, Write) => 20,
+            (Self::Pmcr, Write) => 21,
+            (Self::Mmir, Read) => 22,
+            (Self::Userenr, Read | Write) => 57,
+            (Self::Ceid(_), Read) => 58,
+            (Self::Pmcr, Read) | (Self::Swinc, Read) | (Self::Mmir | Self::Ceid(_), Write) => {
+                return None
+            }
+        };
+        let reg = match dir {
+            Read => FgtReg::Hdfgrtr,
+            Write => FgtReg::Hdfgwtr,
+        };
+        Some(FineGrainedTrap::set(reg, bit))
     }
 }
 
@@ -1217,9 +1246,13 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// What an access to `counter`, which the processor does not implement,
-    /// does ([`CounterBeyondReach`]): the RES0 the Cortex-A57 makes of a
-    /// selected counter is the whole access, before any trap is checked.
+    /// does: with FEAT_FGT UNDEFINED, as each accessor makes it; without,
+    /// [`CounterBeyondReach`]'s choice, the RES0 the Cortex-A57 makes of a
+    /// selected counter being the whole access, before any trap is checked.
     fn pmu_unimplemented_counter(&self, counter: Counter) -> Result<Reach, SysRegError> {
+        if self.implements(Feature::Fgt) {
+            return Err(SysRegError::Undefined);
+        }
         match (self.imp.pmu.beyond_reach, counter) {
             (CounterBeyondReach::Undefined, _) | (CounterBeyondReach::Res0, Counter::Direct(_)) => {
                 Err(SysRegError::Undefined)
@@ -1231,8 +1264,12 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// What an access from EL0 or EL1 to a counter the processor implements
-    /// and reserves for EL2 does ([`CounterBeyondReach`]).
+    /// and reserves for EL2 does: with FEAT_FGT a trap to EL2, as each
+    /// accessor makes it; without, [`CounterBeyondReach`]'s choice.
     fn pmu_reserved_counter(&self) -> Result<Reach, SysRegError> {
+        if self.implements(Feature::Fgt) {
+            return Err(SysRegError::Trap(Route::El2));
+        }
         match self.imp.pmu.beyond_reach {
             CounterBeyondReach::Undefined => Err(SysRegError::Undefined),
             CounterBeyondReach::Res0 => Ok(Reach::Res0),
@@ -1241,10 +1278,12 @@ impl<L: Levels> Cpu<L> {
 
     /// The checks an access to `reg` in direction `dir` at `el` makes, in
     /// the order its accessor makes them (Arm's `Registers.json`, with no
-    /// EL3, FEAT_FGT or FEAT_PMUv3p9): a counter the processor does not
-    /// implement; at EL0 `PMUSERENR_EL0`, trapping to EL1; at EL0 and EL1
-    /// `MDCR_EL2.TPM`, for `PMCR_EL0` `MDCR_EL2.TPMCR`, each to EL2, and a
-    /// counter reserved for EL2.
+    /// EL3 or FEAT_PMUv3p9): a counter the processor does not implement; at
+    /// EL0 `PMUSERENR_EL0`, trapping to EL1; at EL0 outside the host and at
+    /// EL1 the register's fine-grained trap (FEAT_FGT,
+    /// [`PmuReg::fine_grained`]), at EL0 and EL1 `MDCR_EL2.TPM`, for
+    /// `PMCR_EL0` `MDCR_EL2.TPMCR`, each to EL2, and a counter reserved for
+    /// EL2.
     fn pmu_check(&self, reg: PmuReg, dir: Direction, el: El) -> Result<Reach, SysRegError> {
         let access = reg.el0_access(dir).ok_or(SysRegError::Undefined)?;
         let ctx = Context {
@@ -1266,6 +1305,7 @@ impl<L: Levels> Cpu<L> {
         if el == El::El2 {
             return Ok(Reach::Register);
         }
+        trap_to_el2(self.fine_grained_traps_any(reg.fine_grained(dir), el))?;
         trap_to_el2(self.mdcr_any(MDCR_TPM))?;
         if reg == PmuReg::Pmcr {
             trap_to_el2(self.mdcr_any(MDCR_TPMCR))?;

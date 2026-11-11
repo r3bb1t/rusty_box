@@ -6,11 +6,13 @@
 //! `SMC` with it, as QEMU's `virt` does (its device tree's `method`).
 
 use super::el2::{
-    CPTR_FPEN, CPTR_TFP, HCR_HCD, HCR_TDZ, HCR_TPCP, HCR_TPU, HCR_TSC, HCR_TSW, HCR_TTLB,
+    CPTR_FPEN, CPTR_TFP, HCR_HCD, HCR_TDZ, HCR_TICAB, HCR_TOCU, HCR_TPCP, HCR_TPU, HCR_TSC,
+    HCR_TSW, HCR_TTLB, HCR_TTLBIS, HCR_TTLBOS,
 };
 use super::exception::{Exception, Route, SyndromeClass};
 use super::exec::{bit, bits, ExecResult, Fault, Flow, StopCause};
 use super::features::Feature;
+use super::fgt::{HFGITR_SVC_EL0, HFGITR_SVC_EL1};
 use super::mmu::{AtCheck, AtStages, CacheMaintenance};
 use super::sme::SmeTrap;
 use super::sysreg::{SysRegError, SysRegKey, CPACR_FPEN};
@@ -687,6 +689,9 @@ impl<L: Levels> Cpu<L> {
                 Err(err) => self.sysreg_fault(pc, insn, err, key, rt, false),
             };
         }
+        // The instruction's fine-grained trap (FEAT_FGT, `HFGITR_EL2`), which
+        // each accessor checks last of its traps to EL2.
+        let fine_grained = self.fine_grained_instruction(op1, crn, crm, op2, el);
         match (op1, crn, crm, op2) {
             // IC IALLUIS, IC IALLU: the processor's decoded traces are its
             // instruction cache, and they are never stale. Every write that
@@ -698,20 +703,27 @@ impl<L: Levels> Cpu<L> {
             // `v8_cp_reginfo`: IC_IALLUIS and IC_IALLU are ARM_CP_NOP).
             // IC IVAU (below) invalidates nothing either, but translates
             // the address it names, as Arm `AArch64_IC` does. `HCR_EL2.TPU`
-            // traps EL1's.
+            // traps EL1's, and with FEAT_EVT `TICAB` EL1's `IC IALLUIS` and
+            // `TOCU` its `IC IALLU`.
             (0, 7, 1, 0) | (0, 7, 5, 0) => {
                 if el0 {
                     return self.undefined(pc, insn);
                 }
-                Self::sys_el2_trap(el1 && self.hcr_any(HCR_TPU), insn, rt)?;
+                let evt = if crm == 1 { HCR_TICAB } else { HCR_TOCU };
+                Self::sys_el2_trap(el1 && self.hcr_any(HCR_TPU | evt), insn, rt)?;
+                Self::sys_el2_trap(fine_grained, insn, rt)?;
                 Ok(Flow::Next)
             }
             // IC IVAU, DC CVAC, DC CVAU, DC CIVAC, and DC CVAP (FEAT_DPB)
             // and DC CVADP (FEAT_DPB2): EL0 needs `UCI` of its `SCTLR_ELx`
             // (`SCTLR_EL1`, or `SCTLR_EL2` in the host). CLIDR_EL1
-            // names caches to the PoU and the PoC and CTR_EL0.DIC is 0, so
-            // none is executed as a NOP (`AArch64_TreatDCAsNOP`,
-            // `AArch64_TreatICAsNOP`); a memory system with no PoP or PoDP
+            // names caches to the PoC and CTR_EL0.DIC is 0, so none is
+            // executed as a NOP (`AArch64_TreatDCAsNOP`,
+            // `AArch64_TreatICAsNOP`): with FEAT_S2FWB, whose `CLIDR_EL1`
+            // names no cache to the PoU, `DC CVAU` is not one either, the
+            // IMPLEMENTATION DEFINED "DC to PoU is treated as a NOP" being
+            // FALSE here, so it translates its address and takes its
+            // faults as without. A memory system with no PoP or PoDP
             // cleans DC CVAP and DC CVADP to the PoC (`AArch64_DC`).
             (3, 7, 5 | 10 | 11 | 12 | 13 | 14, 1) => {
                 let implemented = match crm {
@@ -725,14 +737,16 @@ impl<L: Levels> Cpu<L> {
                 if el0 && el0_control & sctlr::UCI == 0 {
                     return self.sys_trap(pc, insn, rt, Route::Class);
                 }
-                // To the PoU (`IC IVAU`, `DC CVAU`) `HCR_EL2.TPU`, the others
-                // `TPCP`, trap EL0's and EL1's outside the host.
+                // To the PoU (`IC IVAU`, `DC CVAU`) `HCR_EL2.TPU`, and with
+                // FEAT_EVT `TOCU`, the others `TPCP`, trap EL0's and EL1's
+                // outside the host.
                 let el2_control = if crm == 5 || crm == 11 {
-                    HCR_TPU
+                    HCR_TPU | HCR_TOCU
                 } else {
                     HCR_TPCP
                 };
                 Self::sys_el2_trap(below_el2 && self.hcr_any(el2_control), insn, rt)?;
+                Self::sys_el2_trap(fine_grained, insn, rt)?;
                 let op = if crm == 5 {
                     CacheMaintenance::InstructionInvalidate
                 } else {
@@ -753,6 +767,7 @@ impl<L: Levels> Cpu<L> {
                 if el0 && el0_control & sctlr::ENRCTX == 0 {
                     return self.sys_trap(pc, insn, rt, Route::Class);
                 }
+                Self::sys_el2_trap(fine_grained, insn, rt)?;
                 Ok(Flow::Next)
             }
             // DC ZVA: EL0 needs `DZE` of its `SCTLR_ELx`; `HCR_EL2.TDZ`
@@ -762,6 +777,7 @@ impl<L: Levels> Cpu<L> {
                     return self.sys_trap(pc, insn, rt, Route::Class);
                 }
                 Self::sys_el2_trap(below_el2 && self.hcr_any(HCR_TDZ), insn, rt)?;
+                Self::sys_el2_trap(fine_grained, insn, rt)?;
                 let va = self.x_or_zr(rt);
                 self.dc_zva(bus, va)?;
                 Ok(Flow::Next)
@@ -776,6 +792,7 @@ impl<L: Levels> Cpu<L> {
                     return self.undefined(pc, insn);
                 }
                 Self::sys_el2_trap(el1 && self.hcr_any(HCR_TPCP), insn, rt)?;
+                Self::sys_el2_trap(fine_grained, insn, rt)?;
                 let va = self.x_or_zr(rt);
                 self.cache_maintenance(bus, va, CacheMaintenance::Invalidate)?;
                 Ok(Flow::Next)
@@ -788,6 +805,7 @@ impl<L: Levels> Cpu<L> {
                     return self.undefined(pc, insn);
                 }
                 Self::sys_el2_trap(el1 && self.hcr_any(HCR_TSW), insn, rt)?;
+                Self::sys_el2_trap(fine_grained, insn, rt)?;
                 Ok(Flow::Next)
             }
             // AT S1E1R, S1E1W, S1E0R, S1E0W, and with FEAT_PAN2 AT S1E1RP
@@ -797,6 +815,7 @@ impl<L: Levels> Cpu<L> {
                 if el0 || (crm == 9 && !self.implements(Feature::Pan2)) {
                     return self.undefined(pc, insn);
                 }
+                Self::sys_el2_trap(fine_grained, insn, rt)?;
                 let va = self.x_or_zr(rt);
                 let checked = match (crm, op2 >> 1) {
                     (9, _) => AtCheck::El1Pan,
@@ -830,14 +849,26 @@ impl<L: Levels> Cpu<L> {
             }
             // The EL1 TLB maintenance instructions (CRn 8), and their nXS
             // forms (CRn 9, FEAT_XS), at EL1 and EL2; `HCR_EL2.TTLB` traps
-            // EL1's. Each removes what it names (`tlbi.rs`).
+            // EL1's, and with FEAT_EVT2 `TTLBIS` its Inner Shareable forms
+            // (`CRm` 3, and 2 for the range forms) and `TTLBOS` its Outer
+            // Shareable ones (`CRm` 1 and 5). Each removes what it names
+            // (`tlbi.rs`), the forms without nXS at EL1 under
+            // `HCRX_EL2.FnXS` (Arm `ExcludeXS`) as much as those with it,
+            // which here remove the translations of memory with the XS
+            // attribute too.
             (0, 8 | 9, _, _) => {
                 let form = TlbiForm::el1(crm, op2);
                 let Some(form) = form.filter(|_| !el0 && self.implements_tlbi(crn, crm, op2))
                 else {
                     return self.undefined(pc, insn);
                 };
-                Self::sys_el2_trap(el1 && self.hcr_any(HCR_TTLB), insn, rt)?;
+                let shareable = match crm {
+                    3 | 2 => HCR_TTLBIS,
+                    1 | 5 => HCR_TTLBOS,
+                    _ => 0,
+                };
+                Self::sys_el2_trap(el1 && self.hcr_any(HCR_TTLB | shareable), insn, rt)?;
+                Self::sys_el2_trap(fine_grained, insn, rt)?;
                 self.tlb_maintenance(form, self.x_or_zr(rt));
                 Ok(Flow::Next)
             }
@@ -931,13 +962,33 @@ impl<L: Levels> Cpu<L> {
             return self.undefined(pc, insn);
         }
         match (opc, bits(insn, 1, 0)) {
-            (0, 1) => Err(Exception::new(SyndromeClass::Svc, imm16).into()),
+            (0, 1) => Err(self.svc_exception(imm16).into()),
             (0, 2) => self.exec_hvc(pc, insn, imm16),
             (0, 3) => self.exec_smc(pc, insn, imm16),
             (1, 0) => Err(Exception::new(SyndromeClass::Brk, imm16).into()),
             // HLT with halting debug disabled, and DCPS outside Debug state,
             // are UNDEFINED.
             _ => self.undefined(pc, insn),
+        }
+    }
+
+    /// The exception `SVC #imm16` takes: with FEAT_FGT, where
+    /// `HFGITR_EL2.SVC_EL0` (at EL0 outside the host) or `SVC_EL1` (at EL1)
+    /// traps it, to EL2, returning to the `SVC` itself and leaving Software
+    /// Step as it was (`AArch64_CheckForSVCTrap`); otherwise the call
+    /// (`AArch64_CallSupervisor`), to EL1, or to EL2 from EL0 under
+    /// `HCR_EL2.TGE` or at EL2, returning to the next instruction.
+    fn svc_exception(&self, imm16: u32) -> Exception {
+        let el = self.pstate.el;
+        let trap = match el {
+            El::El0 => Some(HFGITR_SVC_EL0),
+            El::El1 => Some(HFGITR_SVC_EL1),
+            El::El2 => None,
+        };
+        if self.fine_grained_traps_any(trap, el) {
+            Exception::to_el2(SyndromeClass::Svc, imm16)
+        } else {
+            Exception::new(SyndromeClass::Svc, imm16)
         }
     }
 

@@ -619,16 +619,49 @@ translates in EL2&0 under `E2H`, `AT S1E0*` in the host. The EL2 and
 EL2&0 regimes' entries carry no context tag: a write that changes what
 their walks read — `E2H` among it, as Arm ARM D8.13.1 lets a TLB cache
 `E2H` (ISTSYY), and a `TTBR0_EL2` or `TTBR1_EL2` write switching ASIDs —
-empties the TLB (see "Not implemented"). The Armv9.2 model is refused
-EL2 (`BuildError::El2Unavailable`): `Features.json` requires of an
-Armv9.2 processor with EL2 FEAT_VHE, which is built, and FEAT_FGT,
-FEAT_HCX, FEAT_EVT, FEAT_EVT2, FEAT_S2FWB and FEAT_XNX, which are not
-(see "Not implemented"), and an Armv9.2 processor without them is not
-one Arm permits; the Cortex-A57, an ARMv8.0 processor, has no FEAT_VHE
-(`ID_AA64MMFR1_EL1.VH` 0, the `*_EL12` encodings UNDEFINED). So FEAT_VHE
-is tested on the test processor with every feature and reaches a guest
-with EL2 on the Armv9.2 model (plan item F3), where Linux's KVM runs in
-VHE mode.
+empties the TLB (see "Not implemented").
+The other EL2 features `Features.json` requires of an Armv9.2
+processor with EL2 are built beside it. FEAT_FGT (`src/cpu/fgt.rs`):
+`HFGRTR_EL2`, `HFGWTR_EL2`, `HFGITR_EL2`, `HDFGRTR_EL2` and
+`HDFGWTR_EL2`, each with the fields of the registers and instructions
+the processor has (the others RES0), trap EL1's accesses, and EL0's
+outside the host, to EL2 where each accessor checks them — among its
+traps to EL2, after EL0's own traps to EL1, ahead of every other
+outcome — with the access's EC 0x18 syndrome; `HFGITR_EL2.SVC_EL0` and
+`SVC_EL1` take an `SVC` to EL2 returning to it, and `ERET` takes EL1's
+`ERET`, `ERETAA` and `ERETAB` to EL2 with EC 0x1A; `MDCR_EL2.TDCC`
+traps the Debug Communications Channel; and the PMU's accesses to a
+counter `MDCR_EL2.HPMN` reserves trap to EL2, to one the PMU lacks are
+UNDEFINED, as the accessors make them with FEAT_FGT. FEAT_HCX:
+`HCRX_EL2` with `FnXS` and `FGTnXS` (FEAT_XS), under which the
+fine-grained traps of the TLB maintenance instructions spare their nXS
+forms, and `FNB`, which Arm's data gives every processor with FEAT_HCX;
+`SMPME` is RES0 with `SMIDR_EL1.SMPS` 0, and the controls of features the
+processor lacks are RES0. FEAT_EVT and FEAT_EVT2 (`ID_AA64MMFR2_EL1.EVT`
+2): `HCR_EL2.TID4` traps `CCSIDR_EL1`, `CLIDR_EL1` and `CSSELR_EL1`,
+`TICAB` `IC IALLUIS`, `TOCU` the maintenance to the PoU (`IC IALLU`, `IC
+IVAU`, `DC CVAU`), `TTLBIS` and `TTLBOS` the Inner and Outer Shareable
+TLB maintenance. FEAT_XNX (`src/cpu/stage2.rs`): a stage 2 descriptor's
+`XN[1:0]` gives EL1 and EL0 their own execute permission. FEAT_S2FWB:
+under `HCR_EL2.FWB` a stage 2 `MemAttr` makes the access's attributes
+from stage 1's by `AArch64_S2ApplyFWBMemAttrs` — Device where its bit 2
+is clear, stage 1's own, forced Write-Back, or Non-cacheable — which the
+TLB holds by `FWB`'s rule, each stage 2 context and TLB context carrying
+`FWB`, and `AT S12E*` reports in `PAR_EL1`; the processor's `CLIDR_EL1`
+names no cache to the PoU. The Armv9.2 model is refused EL2
+(`BuildError::El2Unavailable`): its feature set (`Features::ARMV9P2`)
+lists none of FEAT_VHE, FEAT_XNX, FEAT_S2FWB, FEAT_EVT, FEAT_EVT2,
+FEAT_FGT and FEAT_HCX, which `Features.json` requires of an Armv9.2
+processor with EL2, and an Armv9.2 processor without them is not one Arm
+permits; the Cortex-A57, an ARMv8.0 processor, has none of them
+(`ID_AA64MMFR1_EL1.VH` 0, the `*_EL12` encodings UNDEFINED, the
+fine-grained trap registers and `HCRX_EL2` UNDEFINED, its `ID_AA64MMFR0_EL1`
+to `ID_AA64MMFR2_EL1` and `CLIDR_EL1` as before). So these features are
+tested on the test processor with every feature
+(`tests/unit/vhe.rs`, `tests/unit/el2_features.rs`, and
+`tests/unit/sysreg_spec.rs` over every state of the trap registers) and
+reach a guest with EL2 on the Armv9.2 model, where Linux's KVM runs in
+VHE mode, once the model is given EL2 and them (plan item F3).
 
 ## Verification
 
@@ -1115,17 +1148,20 @@ integration tests of the public API.
   and the Armv9.2 model, each with and without EL2 (the Armv9.2 model with
   EL2 a processor no machine builds, see "What is modelled"), and the
   test-only processors with every feature with and without it, at EL0,
-  EL1 and EL2, in 94 to 165 states (per processor) of the registers that
+  EL1 and EL2, in 103 to 1,090 states (per processor) of the registers that
   control access (everything clear; SIMD&FP,
   SVE and SME enabled; that with each bit `HCR_EL2`, `CPTR_EL2`,
-  `MDCR_EL2`, `HSTR_EL2`, `CNTHCTL_EL2`, `SCTLR_EL2`, `CPACR_EL1`,
-  `SCTLR_EL1`, `CNTKCTL_EL1` or `MDSCR_EL1` keeps set alone; the OS lock;
+  `MDCR_EL2`, `HSTR_EL2`, `CNTHCTL_EL2`, the fine-grained trap registers
+  (`HFGRTR_EL2`, `HFGWTR_EL2`, `HFGITR_EL2`, `HDFGRTR_EL2`, `HDFGWTR_EL2`),
+  `HCRX_EL2`, `SCTLR_EL2`, `CPACR_EL1`,
+  `SCTLR_EL1`, `CNTKCTL_EL1` or `MDSCR_EL1` keeps set alone, with
+  FEAT_VHE again under `HCR_EL2.E2H` and in the host; the OS lock;
   `SP_EL0` selected; random states): the access, an UNDEFINED exception
   or a trap to a level with a class. The processor must take the same
   exception with the syndrome `AArch64_SystemAccessTrapSyndrome` gives, or
-  none, and an encoding no accessor names (87,010 of them) must be
+  none, and an encoding no accessor names (87,054 of them) must be
   UNDEFINED but where the Arm ARM's prose on the ID register space says
-  otherwise: 12.2 million steps, 0 disagreements, about 4 s. Its table of
+  otherwise: 20.9 million steps, 0 disagreements, about a minute. Its table of
   IMPLEMENTATION DEFINED choices is this model's, each with its reason.
   Where an accessor hands an EL1 or EL2 access to the implementation
   (`AArch64_ImpDefSysRegRead` and the like) and the processor gives the
@@ -1135,11 +1171,29 @@ integration tests of the public API.
   accesses, and every encoding the processor gives nothing, stay Arm's.
   The same file checks every EL2 register's
   fieldset: written at EL2 with all ones and all zeros, each field bit
-  reads back as written, each RES0 bit as 0, each RES1 bit as 1 (115
-  registers over the three processors with EL2), the three rules the data
-  does not carry (CNTHP_CTL_EL2.ISTATUS read-only, TCR_EL2.DS RES0 without
-  FEAT_LPA2, SMPRIMAP_EL2 RES0 when `SMIDR_EL1.SMPS` is 0) named with their
-  source.
+  reads back as written, each RES0 bit as 0, each RES1 bit as 1 (175
+  registers over the three processors with EL2, in each layout of
+  `HCR_EL2.E2H`), the rules the data does not carry
+  (CNTHP_CTL_EL2.ISTATUS and CNTHV_CTL_EL2.ISTATUS read-only, TCR_EL2.DS
+  RES0 without FEAT_LPA2, SMPRIMAP_EL2 and HCRX_EL2.SMPME RES0 when
+  `SMIDR_EL1.SMPS` is 0) named with their source.
+- `tests/unit/el2_features.rs` runs guests on the processor with every
+  feature and EL2 through FEAT_FGT, FEAT_HCX, FEAT_EVT, FEAT_EVT2,
+  FEAT_XNX and FEAT_S2FWB: an `MRS` and an `MSR` each trapped by its own
+  fine-grained field with EC 0x18 and its syndrome, EL0's outside the
+  host and not in it, a negative field trapping where clear, the debug
+  and PMU fields and `MDCR_EL2.TDCC`, a counter `HPMN` reserves trapping
+  and one the PMU lacks UNDEFINED, `TLBI`, `DC ZVA`, `SVC` (returning to
+  itself) and `ERET`, `ERETAA`, `ERETAB` (EC 0x1A) trapped, `FGTnXS`
+  sparing a TLBI's nXS form; each EVT trap and what it leaves alone;
+  `HCRX_EL2`'s kept fields; stage 2's `XN[1:0]` refusing EL1 and EL0
+  their fetches apart; `HCR_EL2.FWB` as `AT S12E1R` reports it in
+  `PAR_EL1` and as a misaligned load meets stage 2's Device memory, the
+  TLB round-tripping a snapshot; the trap registers in a snapshot; and
+  the ID registers and `CLIDR_EL1` with EL2, without, and on the
+  Cortex-A57, unchanged. `src/cpu/mmu.rs` checks the TLB's memory of
+  both stages against the attributes they make whole for every stage 1
+  attribute and stage 2 `MemAttr`, under `FWB` and without.
 - `tests/unit/impdef.rs` checks the Cortex-A57's IMPLEMENTATION DEFINED
   registers against the values worked out from its TRM's tables: each
   register's reset value at EL1 and EL2 and through a host's read; what
@@ -1718,7 +1772,11 @@ one open.
   `hardware_constructive_interference_size` (D24.2.31), so the
   Cortex-A57's `CTR_EL0` (64-byte lines and writeback granule, IDC and
   DIC 0) and `CLIDR_EL1` (LoUIS 1, LoC 2, LoUU 1) hold for it as they
-  stand. The device tree's cache nodes give each model's sizes, and
+  stand; a processor with FEAT_S2FWB, which `Features.json` requires to
+  name no cache to the Point of Unification (`FEAT_S2FWB ==>
+  (UInt(CLIDR_EL1.LoUU) == 0)`, and `LoUIS` alike), reads `LoUU` and
+  `LoUIS` 0 in the same hierarchy (`id::clidr_el1`), `CTR_EL0.IDC` 0
+  saying no more than that then. The device tree's cache nodes give each model's sizes, and
   `tests/unit/board_tree.rs`, `tests/unit/sysreg.rs`
   (`ccsidr_reports_the_cache_csselr_selects`) and `tests/api.rs` check
   what a guest reads.
@@ -3836,21 +3894,22 @@ events D14.6 requires.
   - FEAT_VHE (`(v8Ap1 && FEAT_AA64EL2) ==> FEAT_VHE`): built, with
     FEAT_E2H0 (`HCR_EL2.E2H` writable), tested on the test processor with
     every feature.
-  - FEAT_XNX (`(v8Ap2 && FEAT_EL2) ==> FEAT_XNX`): to do — stage 2's
-    `XN` as two bits, separating EL1's and EL0's execute permission.
-  - FEAT_S2FWB (`(v8Ap4 && FEAT_AA64EL2) ==> FEAT_S2FWB`): to do —
-    `HCR_EL2.FWB`, stage 2's `MemAttr` forcing write-back.
+  - FEAT_XNX (`(v8Ap2 && FEAT_EL2) ==> FEAT_XNX`): built — stage 2's
+    `XN[1:0]`, EL1's and EL0's execute permission apart.
+  - FEAT_S2FWB (`(v8Ap4 && FEAT_AA64EL2) ==> FEAT_S2FWB`): built —
+    `HCR_EL2.FWB`, stage 2's `MemAttr` forcing write-back, and
+    `CLIDR_EL1` with no cache to the PoU.
   - FEAT_EVT and FEAT_EVT2 (`(v8Ap5 && FEAT_EL2) ==> FEAT_EVT`, and
-    `FEAT_EVT2` alike): to do — the enhanced virtualization traps of
+    `FEAT_EVT2` alike): built — the enhanced virtualization traps of
     `HCR_EL2` (`TOCU`, `TICAB`, `TID4`, `TTLBIS`, `TTLBOS`), with
     `ID_AA64MMFR2_EL1.EVT` 2.
   - FEAT_FGT (`(v8Ap6 && (FEAT_AA64EL2 || FEAT_AA64EL3)) ==> FEAT_FGT`,
-    and `(FEAT_SME && FEAT_EL2) ==> (FEAT_FGT && FEAT_HCX)`): to do — the
+    and `(FEAT_SME && FEAT_EL2) ==> (FEAT_FGT && FEAT_HCX)`): built — the
     fine-grained trap registers `HFGRTR_EL2`, `HFGWTR_EL2`, `HFGITR_EL2`,
-    `HDFGRTR_EL2` and `HDFGWTR_EL2`.
+    `HDFGRTR_EL2` and `HDFGWTR_EL2`, and `MDCR_EL2.TDCC`.
   - FEAT_HCX (`(v8Ap7 && FEAT_AA64EL2) ==> FEAT_HCX`, and the SME
-    constraint above): to do — `HCRX_EL2`, with the SME controls it holds
-    (`SMPME`).
+    constraint above): built — `HCRX_EL2`, with `FnXS`, `FGTnXS` and
+    `FNB`, and `SMPME` RES0 as `SMIDR_EL1.SMPS` is 0.
   - FEAT_GTG (`(v8Ap5 && FEAT_AA64EL2) ==> FEAT_GTG`), FEAT_S2TGran16K and
     FEAT_S2TGran64K (`((v8Ap5 && FEAT_AA64EL2) && FEAT_TGran16K) ==>
     FEAT_S2TGran16K`, and 64K alike): built — stage 2's granules as
@@ -3863,9 +3922,9 @@ events D14.6 requires.
   model has already; FEAT_VMID16, FEAT_TWED, FEAT_NV and FEAT_NV2 are
   optional at Armv9.2 (FEAT_NV is plan item H7); and FEAT_HPMN0 is
   required from Armv8.8 (`(v8Ap8 && (FEAT_PMUv3 && FEAT_EL2)) ==>
-  FEAT_HPMN0`). The EL2 features built for the model reach no guest until
-  the six to-do features above are (plan item H5) and the model is given
-  EL2 (F3).
+  FEAT_HPMN0`). Every one of these is built and tested on the test
+  processor with every feature; they reach a guest once the model's
+  feature set lists them and the model is given EL2 (plan item F3).
 - SHA-512, SHA-3, SM3 and SM4 (Armv8.2 options) on any processor: every
   QEMU CPU model that has them also has features the core does not
   implement yet (SVE), so no model to take their ID values from matches

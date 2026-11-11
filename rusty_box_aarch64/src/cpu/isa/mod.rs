@@ -2219,6 +2219,17 @@ mod tests {
                     Feature::PmuV3p7 => (7..15).contains(&field(dfr0, 8)),
                     // `Features.json`: `FEAT_VHE <=> UInt(VH) >= 1`.
                     Feature::Vhe => field(mmfr1, 8) >= 1,
+                    // `Features.json`: `FEAT_XNX <=> UInt(XNX) >= 1`,
+                    // `FEAT_S2FWB <=> UInt(FWB) >= 1`, `FEAT_EVT <=>
+                    // UInt(EVT) >= 1`, `FEAT_EVT2 <=> UInt(EVT) >= 2`,
+                    // `FEAT_FGT <=> UInt(FGT) >= 1`, `FEAT_HCX <=>
+                    // UInt(HCX) >= 1`.
+                    Feature::Xnx => field(mmfr1, 28) >= 1,
+                    Feature::S2Fwb => field(mmfr2, 40) >= 1,
+                    Feature::Evt => field(mmfr2, 56) >= 1,
+                    Feature::Evt2 => field(mmfr2, 56) >= 2,
+                    Feature::Fgt => field(mmfr0, 56) >= 1,
+                    Feature::Hcx => field(mmfr1, 40) >= 1,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -2281,11 +2292,11 @@ mod tests {
             // algorithm, and APA is never 2, FEAT_EPAC), ISAR2 WFxT = 2
             // alone, MMFR0 PARange (44 or 52 bits), the granules' fields
             // (FEAT_LPA2's values with it alone; with FEAT_GTG all three
-            // stage 2 fields non-zero, without it all zero) and ECV = 1, or 2
-            // with FEAT_ECV_POFF, MMFR1 HAFDBS at most 2 (no FEAT_HAFT), HPDS
-            // = 1 (no FEAT_HPDS2), LO and PAN
-            // alone, MMFR2 CnP, UAO, VARange, ST, AT, IDS, TTL and E0PD
-            // alone. MMFR1 AFP and ISAR2 RPRES are each 1 or 0.
+            // stage 2 fields non-zero, without it all zero), FGT and ECV = 1,
+            // or 2 with FEAT_ECV_POFF, MMFR1 HAFDBS at most 2 (no FEAT_HAFT),
+            // HPDS = 1 (no FEAT_HPDS2), LO, PAN, VH, XNX and HCX alone, MMFR2
+            // CnP, UAO, VARange, ST, AT, IDS, FWB, TTL, EVT and E0PD alone.
+            // MMFR1 AFP and ISAR2 RPRES are each 1 or 0.
             let at = |feature: Feature, lsb: u32, value: u64| {
                 if imp.has(feature) {
                     value << lsb
@@ -2330,8 +2341,8 @@ mod tests {
                 .fold(0, |acc, lsb| acc | (0xF << lsb));
             assert_eq!(
                 mmfr0 & !(granule_fields | (0xF << 60) | 0xF),
-                0x20,
-                "16-bit ASIDs, nothing else"
+                0x20 | at(Feature::Fgt, 56, 1),
+                "16-bit ASIDs and FGT = 1 (FEAT_FGT, not FEAT_FGT2), nothing else"
             );
             assert!(
                 matches!(field(mmfr0, 0), 4 | 6),
@@ -2374,8 +2385,11 @@ mod tests {
             assert!(field(mmfr1, 12) <= 1, "HPDS = 1: FEAT_HPDS, not FEAT_HPDS2");
             assert_eq!(
                 mmfr1 & !(0xF | (0xF << 12) | (0xF << 16) | (0xF << 20)),
-                at(Feature::Afp, 44, 1) | at(Feature::Vhe, 8, 1),
-                "AFP and VH beside HAFDBS, HPDS, LO and PAN; VMIDBits 0"
+                at(Feature::Afp, 44, 1)
+                    | at(Feature::Vhe, 8, 1)
+                    | at(Feature::Xnx, 28, 1)
+                    | at(Feature::Hcx, 40, 1),
+                "AFP, VH, XNX and HCX beside HAFDBS, HPDS, LO and PAN; VMIDBits 0"
             );
             assert_eq!(
                 mmfr2
@@ -2386,8 +2400,15 @@ mod tests {
                         | (0xF << 32)
                         | (0xF << 36)
                         | (0xF << 48)
+                        | (0xF << 56)
                         | (0xF << 60)),
-                0
+                at(Feature::S2Fwb, 40, 1),
+                "FWB beside CnP, UAO, VARange, ST, AT, IDS, TTL, EVT and E0PD"
+            );
+            assert_eq!(
+                field(mmfr2, 56),
+                at(Feature::Evt, 0, 1) + at(Feature::Evt2, 0, 1),
+                "EVT = 2: FEAT_EVT2, which Armv8.5 and later require of FEAT_EVT"
             );
             assert!(field(mmfr2, 28) <= 1, "ST = 1: FEAT_TTST");
             assert!(

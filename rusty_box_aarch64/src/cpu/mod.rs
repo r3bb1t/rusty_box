@@ -31,11 +31,15 @@ mod el2;
 #[path = "../../tests/unit/el2.rs"]
 mod el2_tests;
 #[cfg(test)]
+#[path = "../../tests/unit/el2_features.rs"]
+mod el2_features;
+#[cfg(test)]
 #[path = "../../tests/unit/el2_vectors.rs"]
 mod el2_vectors;
 mod exception;
 mod exec;
 mod features;
+mod fgt;
 mod fp;
 mod fp_estimate;
 #[cfg(test)]

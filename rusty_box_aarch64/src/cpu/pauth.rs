@@ -21,6 +21,7 @@ use super::el2::HCR_API;
 use super::exception::{AccessSyndrome, Exception, SyndromeClass};
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::features::Feature;
+use super::fgt::EretForm;
 use super::mmu::DataAccess;
 use super::op::Extend;
 use super::{Cpu, El, Levels};
@@ -670,6 +671,11 @@ impl<L: Levels> Cpu<L> {
                 if self.pstate.el == El::El0 {
                     return self.undefined(pc, insn);
                 }
+                self.check_eret_trap(if bit(insn, 10) {
+                    EretForm::KeyB
+                } else {
+                    EretForm::KeyA
+                })?;
                 let sp = self.x_or_sp(31);
                 let target = self.auth(self.elr_current(), sp, key, AuthUse::Combined)?;
                 Ok(Flow::Jump(self.exception_return(target)))

@@ -56,6 +56,10 @@ pub enum ExceptionClass {
     Smc,
     /// EC 0x18: `MSR`/`MRS`/`SYS` trapped.
     SysRegTrap,
+    /// EC 0x1A: `ERET`, `ERETAA` or `ERETAB` at EL1 trapped to EL2 by
+    /// `HCR_EL2`'s fine-grained `HFGITR_EL2.ERET` (FEAT_FGT); `ISS[1]` says
+    /// whether it authenticates and `ISS[0]` with which key.
+    ERetTrap,
     /// EC 0x1C: a pointer authentication that failed, with FEAT_FPAC;
     /// `ISS[1:0]` says whether the key was a data key and which.
     PacFail,
@@ -98,6 +102,7 @@ impl ExceptionClass {
             Self::Hvc => 0x16,
             Self::Smc => 0x17,
             Self::SysRegTrap => 0x18,
+            Self::ERetTrap => 0x1A,
             Self::PacFail => 0x1C,
             Self::SmeAccess => 0x1D,
             Self::InstructionAbort => {
@@ -162,6 +167,7 @@ impl ExceptionClass {
             | Self::Hvc
             | Self::Smc
             | Self::SysRegTrap
+            | Self::ERetTrap
             | Self::PacFail
             | Self::SmeAccess
             | Self::DataAbort
@@ -214,6 +220,7 @@ pub(crate) enum SyndromeClass {
     Hvc,
     Smc,
     SysRegTrap,
+    ERetTrap,
     PacFail,
     SmeAccess,
     SpAlignment,
@@ -235,6 +242,7 @@ impl SyndromeClass {
             Self::Hvc => ExceptionClass::Hvc,
             Self::Smc => ExceptionClass::Smc,
             Self::SysRegTrap => ExceptionClass::SysRegTrap,
+            Self::ERetTrap => ExceptionClass::ERetTrap,
             Self::PacFail => ExceptionClass::PacFail,
             Self::SmeAccess => ExceptionClass::SmeAccess,
             Self::SpAlignment => ExceptionClass::SpAlignment,
@@ -513,7 +521,9 @@ impl Exception {
     /// Whether the preferred return address is the next instruction rather
     /// than the one that raised the exception: `SVC` (`AArch64_CallSupervisor`)
     /// and `HVC` (`AArch64_CallHypervisor`), each `NextInstrAddr`. A trapped
-    /// `SMC` returns to itself (`AArch64_CheckForSMCUndefOrTrap`).
+    /// `SMC` returns to itself (`AArch64_CheckForSMCUndefOrTrap`), as does an
+    /// `SVC` `HFGITR_EL2` traps to EL2 (`AArch64_CheckForSVCTrap`), which
+    /// takes the class's exception routed to EL2.
     const fn returns_to_next(self) -> bool {
         matches!(
             (self.class, self.route),
@@ -778,8 +788,8 @@ impl<L: Levels> Cpu<L> {
     /// - `AArch64_InstructionAbort`, `AArch64_DataAbort`: a synchronous
     ///   External abort where `SyncExternalAbortTarget` says (`HCR_EL2.TEA`,
     ///   or `TGE` from EL0), any other abort under `TGE`;
-    /// - `AArch64_CallHypervisor`, a trapped `SMC` and `TrapPACUse` name EL2
-    ///   themselves.
+    /// - `AArch64_CallHypervisor`, a trapped `SMC`, `TrapPACUse` and
+    ///   `AArch64_CheckForERetTrap` name EL2 themselves.
     fn class_routes_to_el2(&self, e: &Exception) -> bool {
         let from_el0 = self.pstate.el == El::El0;
         let tge = self.tge();
@@ -806,7 +816,10 @@ impl<L: Levels> Cpu<L> {
                     tge
                 }
             }
-            ExceptionClass::Hvc | ExceptionClass::Smc | ExceptionClass::PacTrap => true,
+            ExceptionClass::Hvc
+            | ExceptionClass::Smc
+            | ExceptionClass::PacTrap
+            | ExceptionClass::ERetTrap => true,
         }
     }
 

@@ -313,14 +313,17 @@ pub(crate) const fn id_aa64zfr0(features: Features) -> u64 {
 /// would be FEAT_HPDS2), LO (19:16) = 1 with FEAT_LOR, PAN (23:20) names
 /// the newest of FEAT_PAN (1), FEAT_PAN2 (2) and FEAT_PAN3 (3) the
 /// processor implements, each of which `Features.json` makes imply the one
-/// before, and AFP (47:44) = 1 with FEAT_AFP; nothing else from v8.1+:
-/// VMIDBits (7:4) 0, 8-bit VMIDs.
+/// before, XNX (31:28) = 1 with FEAT_XNX, HCX (43:40) = 1 with FEAT_HCX,
+/// and AFP (47:44) = 1 with FEAT_AFP; nothing else from v8.1+: VMIDBits
+/// (7:4) 0, 8-bit VMIDs.
 pub(crate) const fn id_aa64mmfr1(features: Features) -> u64 {
     chain_level(features, &[Feature::Haf, Feature::Hafdbs])
         | field(features, Feature::Vhe, 8, 1)
         | field(features, Feature::Hpds, 12, 1)
         | field(features, Feature::Lor, 16, 1)
         | (chain_level(features, &[Feature::Pan, Feature::Pan2, Feature::Pan3]) << 20)
+        | field(features, Feature::Xnx, 28, 1)
+        | field(features, Feature::Hcx, 40, 1)
         | field(features, Feature::Afp, 44, 1)
 }
 
@@ -329,7 +332,9 @@ pub(crate) const fn id_aa64mmfr1(features: Features) -> u64 {
 /// FEAT_LSE2, IDS (39:36) = 1 with FEAT_IDST, TTL (51:48) = 1 with
 /// FEAT_TTL, E0PD (63:60) = 1 with FEAT_E0PD, ST (31:28) = 1 with
 /// FEAT_TTST, VARange (19:16) = 1 with FEAT_LVA (`FEAT_LVA <=>
-/// UInt(VARange) >= 1`); nothing else from v8.1+.
+/// UInt(VARange) >= 1`), FWB (43:40) = 1 with FEAT_S2FWB, EVT (59:56)
+/// names the newest of FEAT_EVT (1) and FEAT_EVT2 (2) the processor
+/// implements (`FEAT_EVT2 ==> FEAT_EVT`); nothing else from v8.1+.
 pub(crate) const fn id_aa64mmfr2(features: Features) -> u64 {
     field(features, Feature::Ttcnp, 0, 1)
         | field(features, Feature::Uao, 4, 1)
@@ -337,7 +342,9 @@ pub(crate) const fn id_aa64mmfr2(features: Features) -> u64 {
         | field(features, Feature::Ttst, 28, 1)
         | field(features, Feature::Lse2, 32, 1)
         | field(features, Feature::Idst, 36, 1)
+        | field(features, Feature::S2Fwb, 40, 1)
         | field(features, Feature::Ttl, 48, 1)
+        | (chain_level(features, &[Feature::Evt, Feature::Evt2]) << 56)
         | field(features, Feature::E0pd, 60, 1)
 }
 
@@ -397,7 +404,8 @@ const fn field(features: Features, feature: Feature, lsb: u32, value: u64) -> u6
 /// every processor's without EL2. Each field's FEAT_LPA2 value
 /// implies the feature (`(SInt(TGran4) >= 1) ==> FEAT_LPA2`,
 /// `(UInt(TGran16) >= 2) ==> FEAT_LPA2`, and `>= 3` for the stage 2
-/// fields), the fields being how software finds it. ECV (63:60) = 1 with
+/// fields), the fields being how software finds it. FGT (59:56) = 1 with
+/// FEAT_FGT (2 would be FEAT_FGT2). ECV (63:60) = 1 with
 /// FEAT_ECV, 2 with FEAT_ECV_POFF too (`FEAT_ECV_POFF <=>
 /// UInt(ID_AA64MMFR0_EL1.ECV) >= 2`).
 ///
@@ -428,6 +436,7 @@ pub(crate) const fn id_aa64mmfr0(features: Features) -> u64 {
         | tgran64
         | field(features, Feature::TGran16K, 20, 1 + lpa2)
         | stage_2
+        | field(features, Feature::Fgt, 56, 1)
         | ecv
 }
 
@@ -483,8 +492,27 @@ pub const DC_ZVA_BYTES: u64 = 4 << DCZID_BLOCK_LOG2_WORDS;
 /// The Armv9.2 model's hierarchy has the same shape
 /// ([`Caches::ARMV9P2`]); on it bits 32:30 are ICB, 0b000 for an inner
 /// cache boundary not disclosed (Arm ARM, DDI 0487M.d, D24.2.32), and it
-/// has no FEAT_MTE2 to add the Ttype fields.
+/// has no FEAT_MTE2 to add the Ttype fields. A processor with FEAT_S2FWB
+/// reads [`clidr_el1`]'s value instead.
 pub const CLIDR_EL1: u64 = 0x0A20_0023;
+
+/// `CLIDR_EL1.LoUU` (bits 29:27) and `LoUIS` (bits 23:21).
+const CLIDR_LOU: u64 = (7 << 27) | (7 << 21);
+
+/// `CLIDR_EL1` of a processor implementing `features`: [`CLIDR_EL1`], and
+/// with FEAT_S2FWB the same hierarchy with `LoUU` and `LoUIS` 0, no level
+/// of cache to clean to the Point of Unification for instruction and data
+/// coherence, which FEAT_S2FWB requires (`Features.json`: `FEAT_S2FWB ==>
+/// (UInt(CLIDR_EL1.LoUU) == 0)`, and `LoUIS` alike) so that a guest whose
+/// stage 2 forces Write-Back needs no clean to the PoU. `CTR_EL0.IDC` 0
+/// says as much where both are 0 (Arm ARM D24.2, `CTR_EL0`).
+pub(crate) const fn clidr_el1(features: Features) -> u64 {
+    if features.has(Feature::S2Fwb) {
+        CLIDR_EL1 & !CLIDR_LOU
+    } else {
+        CLIDR_EL1
+    }
+}
 
 /// The caches a processor reports: `CCSIDR_EL1` for each `CSSELR_EL1`
 /// selection `CLIDR_EL1` names, in the format without FEAT_CCIDX, which

@@ -1,14 +1,16 @@
 //! Memory attributes (Arm `MemoryAttributes`): stage 1's, decoded from a
 //! `MAIR_ELx` attribute and a descriptor's `SH`; stage 2's, from a stage 2
 //! descriptor's `MemAttr`, `SH` and `FnXS`; the attributes of an access both
-//! stages translate, combined; and how `PAR_EL1` reports them.
+//! stages translate, combined, or under `HCR_EL2.FWB` (FEAT_S2FWB) forced as
+//! stage 2 says; and how `PAR_EL1` reports them.
 //!
 //! Provenance (R7): the shared pseudocode of the A64 ISA XML (release
 //! 2026-09): `S1DecodeMemAttrs`, `S1ConstrainUnpredictableRESMAIR`,
 //! `DecodeLDFAttr`, `DecodeDevice`, `DecodeShareability`,
 //! `S2DecodeMemAttrs`, `S2ResMemAttr`, `S2DecodeCacheability`,
 //! `S2CombineS1MemAttrs`, `S2CombineS1AttrHints`, `S2CombineS1Device`,
-//! `S2CombineS1Shareability`, `NormalNCMemAttr`, `EffectiveShareability`,
+//! `S2CombineS1Shareability`, `AArch64_S2ApplyFWBMemAttrs` (FEAT_S2FWB),
+//! `NormalNCMemAttr`, `EffectiveShareability`,
 //! `EncodePARAttrs` and `PAREncodeShareability`, and the choices the
 //! pseudocode's own `ConstrainUnpredictable` makes for
 //! `Unpredictable_RESMAIR` (an UNKNOWN allocated value, zeros: Device-nGnRnE),
@@ -456,6 +458,70 @@ impl MemAttrs {
         .effective_shareability()
     }
 
+    /// Arm `AArch64_S2ApplyFWBMemAttrs`, under `HCR_EL2.FWB` (FEAT_S2FWB):
+    /// the attributes of an access stage 1 gives `s1` and a stage 2
+    /// descriptor with `MemAttr` `memattr` (bits 5:2), shareability `sh`
+    /// (its `SH`, or `VTCR_EL2.SH0` under `DS`) and `FnXS` `fnxs` maps.
+    /// `MemAttr[2]` clear is Device, the more restrictive type where stage
+    /// 1's is Device too; `MemAttr[1:0]` 0b11 is stage 1's attributes; 0b10
+    /// forces Normal Inner and Outer Write-Back, with stage 1's hints of a
+    /// cacheable level and read- and write-allocate otherwise; 0b01 and 0b00
+    /// are Normal Non-cacheable, or stage 1's Device. The shareability is
+    /// the wider of the two stages', made effective, and `FnXS` clears `XS`.
+    /// No encoding is reserved: FEAT_MTE_PERM's `NoTagAccess`, which this
+    /// processor lacks, reads only bits 3:1.
+    pub(crate) const fn forced_write_back(s1: Self, memattr: u8, sh: u8, fnxs: bool) -> Self {
+        let attr = memattr & 0xF;
+        let (memtype, xs) = if attr & 0b0100 == 0 {
+            let s2_device = DeviceType::decode(attr);
+            let device = match s1.memtype {
+                MemType::Device(s1_device) => s1_device.stronger(s2_device),
+                MemType::Normal { .. } => s2_device,
+            };
+            (MemType::Device(device), s1.xs)
+        } else if attr & 0b11 == 0b11 {
+            (s1.memtype, s1.xs)
+        } else if attr & 0b11 == 0b10 {
+            const RWA: AttrHints = AttrHints {
+                attrs: Cacheability::WriteBack,
+                hints: HINT_RWA,
+                transient: false,
+            };
+            /// Write-Back, with `level`'s hints where it is cacheable.
+            const fn forced(level: AttrHints) -> AttrHints {
+                match level.attrs {
+                    Cacheability::NonCacheable => RWA,
+                    Cacheability::WriteThrough | Cacheability::WriteBack => AttrHints {
+                        attrs: Cacheability::WriteBack,
+                        ..level
+                    },
+                }
+            }
+            let (inner, outer) = match s1.memtype {
+                MemType::Normal { inner, outer } => (forced(inner), forced(outer)),
+                MemType::Device(_) => (RWA, RWA),
+            };
+            (MemType::Normal { inner, outer }, false)
+        } else {
+            match s1.memtype {
+                MemType::Device(_) => (s1.memtype, s1.xs),
+                MemType::Normal { .. } => (
+                    MemType::Normal {
+                        inner: NON_CACHEABLE,
+                        outer: NON_CACHEABLE,
+                    },
+                    s1.xs,
+                ),
+            }
+        };
+        Self {
+            memtype,
+            shareability: s1.shareability.wider(Shareability::decode(sh)),
+            xs: xs && !fnxs,
+        }
+        .effective_shareability()
+    }
+
     /// `PAR_EL1.ATTR` (Arm `EncodePARAttrs`, with no FEAT_MTE) on a
     /// processor implementing `features`: the `MAIR_ELx` encoding of the
     /// attributes. `PAR_EL1.ATTR` takes `MAIR_ELx`'s encodings, among which
@@ -573,6 +639,42 @@ mod tests {
             MemAttrs::combined(s1_wb, s2_dev_ngre).par_shareability(),
             0b10
         );
+    }
+
+    /// `AArch64_S2ApplyFWBMemAttrs`: forced Write-Back keeps the hints of
+    /// each cacheable level of stage 1 (Write-Through read-allocate, 0xAA,
+    /// becomes Write-Back read-allocate, 0xEE) and gives a Non-cacheable or
+    /// Device level read- and write-allocate; 0b11 is stage 1's own; 0b01
+    /// Normal Non-cacheable but over Device; bit 2 clear Device, the more
+    /// restrictive type. Shareability is the wider of the two, made
+    /// effective, and `FnXS` clears `XS`. Stage 1's attributes come with
+    /// their effective shareability, as stage 1 gives them here.
+    #[test]
+    fn forced_write_back_makes_stage_1s_attributes_as_stage_2_says() {
+        let s1_wt = MemAttrs::stage1(0xAA, 0b00, XS).effective_shareability();
+        let s1_nc = MemAttrs::stage1(0x44, 0b00, XS).effective_shareability();
+        let s1_device = MemAttrs::stage1(0x04, 0b00, XS).effective_shareability();
+        let forced = |s1: MemAttrs, memattr: u8, sh: u8| {
+            let attrs = MemAttrs::forced_write_back(s1, memattr, sh, false);
+            (attrs.par_attr(XS), attrs.par_shareability())
+        };
+        let cases = [
+            (s1_wt, 0b0110, 0b00, (0xEE, 0b00), "hints kept"),
+            (s1_wt, 0b0110, 0b11, (0xEE, 0b11), "Inner by stage 2"),
+            (s1_nc, 0b0110, 0b00, (0xFF, 0b10), "RWA, Outer as stage 1's"),
+            (s1_device, 0b0110, 0b00, (0xFF, 0b10), "Device's Outer"),
+            (s1_wt, 0b0111, 0b11, (0xAA, 0b11), "stage 1's own"),
+            (s1_wt, 0b0101, 0b00, (0x44, 0b10), "Non-cacheable"),
+            (s1_device, 0b0101, 0b00, (0x04, 0b10), "Device stays"),
+            (s1_wt, 0b0011, 0b00, (0x0C, 0b10), "Device-GRE"),
+            (s1_device, 0b0011, 0b00, (0x04, 0b10), "nGnRE, the stronger"),
+        ];
+        for (s1, memattr, sh, want, why) in cases {
+            assert_eq!(forced(s1, memattr, sh), want, "{why}");
+        }
+        let no_xs = MemAttrs::forced_write_back(s1_wt, 0b0111, 0b00, true);
+        assert!(s1_wt.xs && !no_xs.xs, "FnXS");
+        assert_eq!(no_xs.par_attr(XS), 0xA0, "Write-Through RA with XS 0");
     }
 
     /// The reserved stage 2 encodings are Normal Non-cacheable.

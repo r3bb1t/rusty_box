@@ -30,6 +30,7 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
 use super::features::{Feature, Features, Implementation, LeveledImplementation};
+use super::fgt::FgtReg;
 use super::mmu::{ContextStorage, NoContexts, TlbContexts};
 use super::regime::TTB_BADDR;
 use super::regs::SysReg;
@@ -198,7 +199,10 @@ impl El2Regs {
     /// asks, and `MDCR_EL2` 0x6, `HPMN` the PMU's six event counters
     /// (Table 4-13), so EL1 reaches every one; with another PMU `HPMN` its
     /// count, and without one zero; the controls zero beside their RES1
-    /// bits; and the values the
+    /// bits, the fine-grained trap registers (FEAT_FGT) and `HCRX_EL2`
+    /// (FEAT_HCX) among them, whose every field Arm resets to 0 where EL2
+    /// is the highest implemented level (Arm ARM D24.2, each field's reset
+    /// behaviour); and the values the
     /// board's fill, bits 63:32 of `TTBR0_EL2`, `VTTBR_EL2`, `FAR_EL2` and
     /// `VBAR_EL2` zero as the TRM has them. Each is what an `MSR` keeps of
     /// it ([`El2Reg::kept`]): which bits are RES1 depends on the features
@@ -283,6 +287,12 @@ impl El2Regs {
                 layout,
                 reset::value_of(SysReg::CNTHV_CVAL_EL2),
             ),
+            hfgrtr: 0,
+            hfgwtr: 0,
+            hfgitr: 0,
+            hdfgrtr: 0,
+            hdfgwtr: 0,
+            hcrx: 0,
         }
     }
 }
@@ -374,6 +384,25 @@ pub(crate) const HCR_E2H: u64 = 1 << 34;
 /// `HCR_EL2.FIEN` (FEAT_RASv1p1): EL1's accesses to the error injection
 /// registers do not trap.
 pub(crate) const HCR_FIEN: u64 = 1 << 47;
+/// `HCR_EL2.FWB` (FEAT_S2FWB): stage 2's `MemAttr` combines with stage 1's
+/// attributes by `AArch64_S2ApplyFWBMemAttrs`, where it can force
+/// Write-Back, instead of `S2CombineS1MemAttrs`.
+pub(crate) const HCR_FWB: u64 = 1 << 46;
+/// `HCR_EL2.TID4` (FEAT_EVT): EL1's accesses to `CCSIDR_EL1`, `CLIDR_EL1`
+/// and `CSSELR_EL1` trap (`CCSIDR2_EL1` too, which a processor without
+/// FEAT_CCIDX does not have).
+pub(crate) const HCR_TID4: u64 = 1 << 49;
+/// `HCR_EL2.TICAB` (FEAT_EVT): EL1's `IC IALLUIS` traps.
+pub(crate) const HCR_TICAB: u64 = 1 << 50;
+/// `HCR_EL2.TOCU` (FEAT_EVT): EL0's and EL1's cache maintenance to the
+/// Point of Unification (`IC IVAU`, `IC IALLU`, `DC CVAU`) traps.
+pub(crate) const HCR_TOCU: u64 = 1 << 52;
+/// `HCR_EL2.TTLBIS` (FEAT_EVT2): EL1's Inner Shareable TLB maintenance
+/// instructions trap.
+pub(crate) const HCR_TTLBIS: u64 = 1 << 54;
+/// `HCR_EL2.TTLBOS` (FEAT_EVT2): EL1's Outer Shareable TLB maintenance
+/// instructions trap.
+pub(crate) const HCR_TTLBOS: u64 = 1 << 55;
 
 /// The `HCR_EL2` bits every processor with EL2 keeps (ARMv8.0: bits 33:0
 /// but `TID0`, which is RES0 with no AArch32, and `RW`, RAO/WI): `VM`,
@@ -402,7 +431,49 @@ pub(crate) const fn hcr_mask(features: Features) -> u64 {
     if features.has(Feature::Vhe) {
         mask |= HCR_E2H;
     }
+    if features.has(Feature::S2Fwb) {
+        mask |= HCR_FWB;
+    }
+    if features.has(Feature::Evt) {
+        mask |= HCR_TID4 | HCR_TICAB | HCR_TOCU;
+    }
+    if features.has(Feature::Evt2) {
+        mask |= HCR_TTLBIS | HCR_TTLBOS;
+    }
     mask
+}
+
+// ----- HCRX_EL2 -----
+
+/// `HCRX_EL2.FnXS` (FEAT_XS): EL1's TLB maintenance instructions without
+/// the nXS qualifier behave as with it (Arm `ExcludeXS`), which removes
+/// the translations of memory with the XS attribute too here, as the nXS
+/// forms do (`tlbi.rs`).
+pub(crate) const HCRX_FNXS: u64 = 1 << 3;
+/// `HCRX_EL2.FGTnXS` (FEAT_XS): the `HFGITR_EL2` traps of the EL1 TLB
+/// maintenance instructions do not trap their nXS forms.
+pub(crate) const HCRX_FGTNXS: u64 = 1 << 4;
+/// `HCRX_EL2.FNB`, bit 36, which Arm's data gives every processor with
+/// FEAT_HCX and only `AArch64_EffectiveOpScope` and
+/// `AArch64_EffectiveBroadcast` read, with FEAT_TLBID, which this
+/// processor lacks: kept, and acting on nothing.
+const HCRX_FNB: u64 = 1 << 36;
+
+/// The `HCRX_EL2` bits a processor implementing `features` (with
+/// FEAT_HCX) keeps: `FNB`, and with FEAT_XS `FnXS` and `FGTnXS`. Its other
+/// fields belong to features this processor lacks, and `SMPME`, FEAT_SME's,
+/// is RES0 where `SMIDR_EL1.SMPS` is 0, as here (no streaming execution
+/// priorities).
+pub(crate) const fn hcrx_mask(features: Features) -> u64 {
+    if !features.has(Feature::Hcx) {
+        return 0;
+    }
+    let xs = if features.has(Feature::Xs) {
+        HCRX_FNXS | HCRX_FGTNXS
+    } else {
+        0
+    };
+    HCRX_FNB | xs
 }
 
 /// Which layout a register `HCR_EL2.E2H` redefines has (the `E2H0` and
@@ -598,14 +669,20 @@ pub(crate) const MDCR_HLP: u64 = 1 << 26;
 /// `MDCR_EL2.HPMFZO` (FEAT_PMUv3p7): the event counters reserved for EL2
 /// stop while one of them has overflowed.
 pub(crate) const MDCR_HPMFZO: u64 = 1 << 29;
+/// `MDCR_EL2.TDCC` (FEAT_FGT): EL0's and EL1's accesses to the Debug
+/// Communications Channel registers trap.
+pub(crate) const MDCR_TDCC: u64 = 1 << 27;
 
 /// The `MDCR_EL2` bits a processor implementing `features` keeps (Arm's
-/// `MDCR_EL2` fieldset, with no SPE, trace, FEAT_FGT, FEAT_MTPMU or
-/// FEAT_EBEP): the four debug controls, and with FEAT_PMUv3 `HPMN`,
+/// `MDCR_EL2` fieldset, with no SPE, trace, FEAT_MTPMU or FEAT_EBEP): the
+/// four debug controls, with FEAT_FGT `TDCC`, and with FEAT_PMUv3 `HPMN`,
 /// `TPMCR`, `TPM` and `HPME`, with FEAT_PMUv3p1 `HPMD`, with FEAT_PMUv3p5
 /// `HCCD` and `HLP`, and with FEAT_PMUv3p7 `HPMFZO`.
 pub(crate) const fn mdcr_el2_mask(features: Features) -> u64 {
     let mut mask = MDCR_TDE | MDCR_TDA | MDCR_TDOSA | MDCR_TDRA;
+    if features.has(Feature::Fgt) {
+        mask |= MDCR_TDCC;
+    }
     if features.has(Feature::PmuV3) {
         mask |= MDCR_HPMN | MDCR_TPMCR | MDCR_TPM | MDCR_HPME;
     }
@@ -976,6 +1053,15 @@ el2_registers! {
     /// `CNTHV_CVAL_EL2` (FEAT_VHE): the EL2 virtual timer.
     CnthvCtl => cnthv_ctl,
     CnthvCval => cnthv_cval,
+    /// `HFGRTR_EL2`, `HFGWTR_EL2`, `HFGITR_EL2`, `HDFGRTR_EL2` and
+    /// `HDFGWTR_EL2` (FEAT_FGT): the fine-grained traps (`fgt.rs`).
+    Hfgrtr => hfgrtr,
+    Hfgwtr => hfgwtr,
+    Hfgitr => hfgitr,
+    Hdfgrtr => hdfgrtr,
+    Hdfgwtr => hdfgwtr,
+    /// `HCRX_EL2` (FEAT_HCX): the extended hypervisor configuration.
+    Hcrx => hcrx,
 }
 
 impl El2Reg {
@@ -1066,6 +1152,12 @@ impl El2Reg {
                     0
                 }
             }
+            Self::Hfgrtr => value & FgtReg::Hfgrtr.mask(features),
+            Self::Hfgwtr => value & FgtReg::Hfgwtr.mask(features),
+            Self::Hfgitr => value & FgtReg::Hfgitr.mask(features),
+            Self::Hdfgrtr => value & FgtReg::Hdfgrtr.mask(features),
+            Self::Hdfgwtr => value & FgtReg::Hdfgwtr.mask(features),
+            Self::Hcrx => value & hcrx_mask(features),
             // The IMPLEMENTATION DEFINED registers, whose bits the
             // implementation decides (`El2Reg::held`), and those whose every
             // bit is a field: all 64 bits.
@@ -1127,7 +1219,13 @@ impl El2Reg {
             | Self::Contextidr
             | Self::Vdisr
             | Self::Vsesr
-            | Self::Ttbr1 => false,
+            | Self::Ttbr1
+            | Self::Hfgrtr
+            | Self::Hfgwtr
+            | Self::Hfgitr
+            | Self::Hdfgrtr
+            | Self::Hdfgwtr
+            | Self::Hcrx => false,
         }
     }
 

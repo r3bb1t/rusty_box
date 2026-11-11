@@ -66,7 +66,7 @@ const RT_PAIR: u32 = 0;
 /// The choices Arm leaves to an implementation (`ImpDefBool`) that the
 /// accessors this processor reaches ask about, with this processor's
 /// answer and why.
-const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 23] = [
+const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 24] = [
     (
         "Implementation can reset into AArch32 state",
         false,
@@ -162,7 +162,14 @@ const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 23] = [
     (
         "When DC is treated as NOP, data cache maintenance operations are trapped",
         true,
-        "no DC is a NOP here: both models' CLIDR_EL1 names caches to the PoU and the PoC",
+        "no DC is a NOP here: CLIDR_EL1 names caches to the PoC, and to the PoU but with \
+         FEAT_S2FWB, where DC to the PoU is not a NOP either",
+    ),
+    (
+        "DC to PoU is treated as a NOP",
+        false,
+        "DC CVAU translates its address and takes its faults where CLIDR_EL1 names no cache \
+         to the PoU (FEAT_S2FWB) as where it names one",
     ),
     (
         "When IC is treated as NOP, data cache maintenance operations are trapped",
@@ -1021,16 +1028,15 @@ impl Eval<'_> {
                 );
                 V::bits(0, 3)
             }
-            "EffectiveHCRX_EL2_NVTGE" | "IsHCRXEL2Enabled" => {
+            // With no EL3 there is no `SCR_EL3.HXEn`.
+            "IsHCRXEL2Enabled" => V::Bool(self.feature("FEAT_HCX") && self.have_el2()),
+            // `HCRX_EL2.NVTGE` is FEAT_NV3's.
+            "EffectiveHCRX_EL2_NVTGE" => {
                 assert!(
-                    !self.feature("FEAT_HCX"),
-                    "FEAT_HCX is not modelled by the test"
+                    !self.feature("FEAT_NV3"),
+                    "FEAT_NV3 is not modelled by the test"
                 );
-                if name == "IsHCRXEL2Enabled" {
-                    V::Bool(false)
-                } else {
-                    V::bits(0, 1)
-                }
+                V::bits(0, 1)
             }
             "EL3SDDUndef" | "EL3SDDUndefPriority" | "Halted" | "HaltingAllowed" => V::Bool(false),
             "ELUsingAArch32" => V::Bool(false),
@@ -1121,7 +1127,9 @@ impl Eval<'_> {
             "Allocation tag maintenance is not modelled by the test"
         );
         match scope {
-            "CacheOpScope_PoU" => louu == 0 && louis == 0,
+            "CacheOpScope_PoU" => {
+                louu == 0 && louis == 0 && self.imp_def("DC to PoU is treated as a NOP")
+            }
             "CacheOpScope_PoC" | "CacheOpScope_PoP" | "CacheOpScope_PoDP" => {
                 assert!(
                     loc != 0,
@@ -1487,13 +1495,20 @@ fn write_register<L: Levels>(cpu: &mut Cpu<L>, ram: &mut Ram, name: &str, value:
 /// EL2 fetch would translate), `HCR_EL2.VM` and `DC` (stage 2), and
 /// `MDSCR_EL1.SS` (software step). `PMUSERENR_EL0` gives EL0 the PMU, and
 /// `PMSELR_EL0` selects the counter `PMXEVCNTR_EL0` and `PMXEVTYPER_EL0`
-/// reach.
-const CONTROLS: [(&str, u64); 12] = [
+/// reach. The fine-grained trap registers (FEAT_FGT) and `HCRX_EL2`
+/// (FEAT_HCX) each hold traps of single accesses.
+const CONTROLS: [(&str, u64); 18] = [
     ("HCR_EL2", (1 << 0) | (1 << 12)),
     ("CPTR_EL2", 0),
     ("MDCR_EL2", 0),
     ("HSTR_EL2", 0),
     ("CNTHCTL_EL2", 0),
+    ("HFGRTR_EL2", 0),
+    ("HFGWTR_EL2", 0),
+    ("HFGITR_EL2", 0),
+    ("HDFGRTR_EL2", 0),
+    ("HDFGWTR_EL2", 0),
+    ("HCRX_EL2", 0),
     ("SCTLR_EL2", 1),
     ("CPACR_EL1", 0),
     ("SCTLR_EL1", 1),
@@ -2013,7 +2028,7 @@ struct FieldRule {
 /// The fields of the EL2 registers whose whole rule the data does not
 /// give, each with where its rule comes from. Every processor with EL2 has
 /// `SMIDR_EL1.SMPS` = 0.
-const FIELD_RULES: [FieldRule; 4] = [
+const FIELD_RULES: [FieldRule; 5] = [
     // Read-only: whether the timer condition is met
     // (AArch64_CheckTimerConditions).
     FieldRule {
@@ -2041,6 +2056,14 @@ const FIELD_RULES: [FieldRule; 4] = [
     FieldRule {
         register: "SMPRIMAP_EL2",
         field: "*",
+        rule: BitRule::Zero,
+        unless: None,
+    },
+    // The field's description (Arm ARM D24.2, `HCRX_EL2`): when
+    // SMIDR_EL1.SMPS is 0, this field is RES0.
+    FieldRule {
+        register: "HCRX_EL2",
+        field: "SMPME",
         rule: BitRule::Zero,
         unless: None,
     },

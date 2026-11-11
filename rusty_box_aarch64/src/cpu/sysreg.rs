@@ -14,7 +14,11 @@
 //! register's accessor checks them. Provenance (R7): Arm's machine-readable
 //! register data (AARCHMRS `Registers.json`, release 2026-09), each
 //! register's `MRS` and `MSR` accessor at each level, read for a processor
-//! with no EL3 and no FEAT_NV or FEAT_FGT. With FEAT_VHE and `HCR_EL2.E2H`
+//! with no EL3 and no FEAT_NV. With FEAT_FGT each register's fine-grained
+//! trap (`fgt.rs`) is checked where its accessor checks it: among the
+//! traps to EL2, after EL0's own traps to EL1, and ahead of every other
+//! outcome; with FEAT_EVT `HCR_EL2.TID4` traps the cache identification
+//! registers `TID2` does but `CTR_EL0`. With FEAT_VHE and `HCR_EL2.E2H`
 //! set, EL2's accesses to an EL1 register reach its EL2 counterpart
 //! (`SCTLR_EL1` reaches `SCTLR_EL2`), the `*_EL12` and `*_EL02` encodings
 //! reach the EL1 and EL0 registers themselves, and EL0 in the host
@@ -28,11 +32,12 @@ use super::debug::DebugPoints;
 use super::el2::{
     has_contextidr_el2, El2Reg, CNTHCTL_E2H1_EL1PCTEN, CNTHCTL_E2H1_EL1PTEN, CNTHCTL_EL1PCEN,
     CNTHCTL_EL1PCTEN, CNTHCTL_EL1TVCT, CNTHCTL_EL1TVT, CPTR_TCPAC, HCR_AMO, HCR_APK, HCR_FIEN,
-    HCR_TACR, HCR_TERR, HCR_TID1, HCR_TID2, HCR_TID3, HCR_TIDCP, HCR_TLOR, HCR_TRVM, HCR_TVM,
-    MDCR_TDA, MDCR_TDE, MDCR_TDOSA, MDCR_TDRA,
+    HCR_TACR, HCR_TERR, HCR_TID1, HCR_TID2, HCR_TID3, HCR_TID4, HCR_TIDCP, HCR_TLOR, HCR_TRVM,
+    HCR_TVM, MDCR_TDA, MDCR_TDCC, MDCR_TDE, MDCR_TDOSA, MDCR_TDRA,
 };
 use super::exception::Route;
 use super::features::{Feature, Features};
+use super::fgt::{FgtReg, FineGrainedTrap};
 use super::id;
 use super::mmu::{El10Context, El2RegimeContext};
 use super::pauth::KeyHalf;
@@ -52,6 +57,16 @@ pub(crate) enum Accessor {
     /// guest — `CPACR_EL1.FPEN`, `CPTR_EL2`, the EL0 enables, and the rule
     /// that `SP_EL0` cannot be named while it is the stack pointer in use.
     Host,
+}
+
+/// Which way an access to a System register goes: an `MRS` reads, an
+/// `MSR` writes.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Direction {
+    Read,
+    Write,
 }
 
 /// A system register encoding.
@@ -378,6 +393,13 @@ const CNTHCTL_EL2: u32 = key!(3, 4, 14, 1, 0);
 const CNTHP_TVAL_EL2: u32 = key!(3, 4, 14, 2, 0);
 const CNTHP_CTL_EL2: u32 = key!(3, 4, 14, 2, 1);
 const CNTHP_CVAL_EL2: u32 = key!(3, 4, 14, 2, 2);
+// FEAT_FGT's and FEAT_HCX's EL2 registers.
+const HFGRTR_EL2: u32 = key!(3, 4, 1, 1, 4);
+const HFGWTR_EL2: u32 = key!(3, 4, 1, 1, 5);
+const HFGITR_EL2: u32 = key!(3, 4, 1, 1, 6);
+const HDFGRTR_EL2: u32 = key!(3, 4, 3, 1, 4);
+const HDFGWTR_EL2: u32 = key!(3, 4, 3, 1, 5);
+const HCRX_EL2: u32 = key!(3, 4, 1, 2, 2);
 // FEAT_VHE's EL2 registers.
 const TTBR1_EL2: u32 = key!(3, 4, 2, 0, 1);
 const CNTHV_TVAL_EL2: u32 = key!(3, 4, 14, 3, 0);
@@ -511,6 +533,12 @@ const fn el2_encoding(reg: El2Reg, features: Features) -> Option<u32> {
         // `ISTATUS` is computed, as `CNTHP_CTL_EL2`'s.
         El2Reg::CnthvCtl => None,
         El2Reg::CnthvCval => present(CNTHV_CVAL_EL2, features.has(Feature::Vhe)),
+        El2Reg::Hfgrtr => present(HFGRTR_EL2, features.has(Feature::Fgt)),
+        El2Reg::Hfgwtr => present(HFGWTR_EL2, features.has(Feature::Fgt)),
+        El2Reg::Hfgitr => present(HFGITR_EL2, features.has(Feature::Fgt)),
+        El2Reg::Hdfgrtr => present(HDFGRTR_EL2, features.has(Feature::Fgt)),
+        El2Reg::Hdfgwtr => present(HDFGWTR_EL2, features.has(Feature::Fgt)),
+        El2Reg::Hcrx => present(HCRX_EL2, features.has(Feature::Hcx)),
     }
 }
 
@@ -624,8 +652,9 @@ enum TranslationRegister {
     /// `TTBR0_EL2`, `TTBR1_EL2` and `MAIR_EL2`.
     El2,
     /// Both: `HCR_EL2`, whose `VM`, `DC`, `PTW` and `TGE` decide which of
-    /// the EL1&0 regime's walks are made and whose `CD` what memory they
-    /// make, and whose `E2H` (FEAT_VHE) which regime EL2's is.
+    /// the EL1&0 regime's walks are made and whose `CD` and `FWB`
+    /// (FEAT_S2FWB) what memory they make, and whose `E2H` (FEAT_VHE) which
+    /// regime EL2's is.
     Both,
 }
 
@@ -675,7 +704,13 @@ impl TranslationRegister {
             | El2Reg::Vdisr
             | El2Reg::Vsesr
             | El2Reg::CnthvCtl
-            | El2Reg::CnthvCval => None,
+            | El2Reg::CnthvCval
+            | El2Reg::Hfgrtr
+            | El2Reg::Hfgwtr
+            | El2Reg::Hfgitr
+            | El2Reg::Hdfgrtr
+            | El2Reg::Hdfgwtr
+            | El2Reg::Hcrx => None,
         }
     }
 }
@@ -997,12 +1032,20 @@ impl<L: Levels> Cpu<L> {
     /// `DBGDTRTX_EL0`, made before the access has any effect (Arm ARM, DDI
     /// 0487, their accessibility pseudocode; QEMU target/arm/debug_helper.c
     /// `access_tdcc`): `MDSCR_EL1.TDCC` traps EL0's to EL1; then
-    /// `MDCR_EL2.TDE` or `TDA` traps EL0's and EL1's to EL2, as `HCR_EL2.TGE`
-    /// does EL0's.
+    /// `MDCR_EL2.TDCC` (FEAT_FGT), `TDE` or `TDA` traps EL0's and EL1's to
+    /// EL2, as `HCR_EL2.TGE` does EL0's.
     fn dcc_check(&self, el: El) -> Result<(), SysRegError> {
         trap_to_el1(el == El::El0 && self.sys.mdscr_el1 & MDSCR_TDCC != 0)?;
         let tge = el == El::El0 && self.tge();
-        trap_to_el2(el != El::El2 && (tge || self.mdcr_any(MDCR_TDE | MDCR_TDA)))
+        trap_to_el2(el != El::El2 && (tge || self.mdcr_any(MDCR_TDCC | MDCR_TDE | MDCR_TDA)))
+    }
+
+    /// The check of an EL1 access to the Debug Communications Channel
+    /// registers EL0 cannot reach (`MDCCINT_EL1`, `OSDTRRX_EL1`,
+    /// `OSDTRTX_EL1`): `MDCR_EL2.TDCC` (FEAT_FGT), `TDE` or `TDA` traps it
+    /// to EL2.
+    fn dcc_el1_check(&self, el: El) -> Result<(), SysRegError> {
+        self.debug_check(el, MDCR_TDA | MDCR_TDCC)
     }
 
     /// The check of an EL1 debug register access: `MDCR_EL2.TDE`, or the
@@ -1048,6 +1091,141 @@ impl<L: Levels> Cpu<L> {
             _ => self.hcr_any(HCR_TERR),
         };
         trap_to_el2(el == El::El1 && trapped)
+    }
+
+    /// The fine-grained trap (FEAT_FGT) of an access in direction `dir` to
+    /// the register `key` names, if it has one: its `HFGRTR_EL2` (a read)
+    /// or `HFGWTR_EL2` (a write) field, or for a debug register its
+    /// `HDFGRTR_EL2` or `HDFGWTR_EL2` field, by its accessor in Arm's
+    /// `Registers.json`; none for an access the register has no accessor
+    /// of (an `MSR` of a register only read) or no field for. A field the
+    /// processor lacks traps nothing ([`FgtReg::mask`]); `ERXMISC2_EL1` and
+    /// `ERXMISC3_EL1`, which share FEAT_RAS's `ERXMISCn_EL1` field, have it
+    /// only where FEAT_RASv1p1 gives the processor the registers. The PMU's
+    /// registers are [`PmuReg::fine_grained`]'s.
+    ///
+    /// [`PmuReg::fine_grained`]: super::pmu::PmuReg::fine_grained
+    fn fine_grained_register(&self, key: SysRegKey, dir: Direction) -> Option<FineGrainedTrap> {
+        use Direction::{Read, Write};
+        // (`HFGRTR_EL2`'s field, whether `HFGWTR_EL2` has it too).
+        let (bit, written) = match key.0 {
+            AFSR0_EL1 => (0, true),
+            AFSR1_EL1 => (1, true),
+            AIDR_EL1 => (2, false),
+            AMAIR_EL1 => (3, true),
+            APDAKEYLO_EL1 | APDAKEYHI_EL1 => (4, true),
+            APDBKEYLO_EL1 | APDBKEYHI_EL1 => (5, true),
+            APGAKEYLO_EL1 | APGAKEYHI_EL1 => (6, true),
+            APIAKEYLO_EL1 | APIAKEYHI_EL1 => (7, true),
+            APIBKEYLO_EL1 | APIBKEYHI_EL1 => (8, true),
+            CCSIDR_EL1 => (9, false),
+            CLIDR_EL1 => (10, false),
+            CONTEXTIDR_EL1 => (11, true),
+            CPACR_EL1 => (12, true),
+            CSSELR_EL1 => (13, true),
+            CTR_EL0 => (14, false),
+            DCZID_EL0 => (15, false),
+            ESR_EL1 => (16, true),
+            FAR_EL1 => (17, true),
+            ISR_EL1 => (18, false),
+            LORC_EL1 => (19, true),
+            LOREA_EL1 => (20, true),
+            LORID_EL1 => (21, false),
+            LORN_EL1 => (22, true),
+            LORSA_EL1 => (23, true),
+            MAIR_EL1 => (24, true),
+            MIDR_EL1 => (25, false),
+            MPIDR_EL1 => (26, false),
+            PAR_EL1 => (27, true),
+            REVIDR_EL1 => (28, false),
+            SCTLR_EL1 => (29, true),
+            TCR_EL1 => (32, true),
+            TPIDR_EL1 => (33, true),
+            TPIDRRO_EL0 => (34, true),
+            TPIDR_EL0 => (35, true),
+            TTBR0_EL1 => (36, true),
+            TTBR1_EL1 => (37, true),
+            VBAR_EL1 => (38, true),
+            ERRIDR_EL1 => (40, false),
+            ERRSELR_EL1 => (41, true),
+            ERXFR_EL1 => (42, false),
+            ERXCTLR_EL1 => (43, true),
+            ERXSTATUS_EL1 => (44, true),
+            ERXMISC0_EL1 | ERXMISC1_EL1 => (45, true),
+            ERXMISC2_EL1 | ERXMISC3_EL1 if self.implements(Feature::RasV1p1) => (45, true),
+            ERXPFGF_EL1 => (46, false),
+            ERXPFGCTL_EL1 => (47, true),
+            ERXPFGCDN_EL1 => (48, true),
+            ERXADDR_EL1 => (49, true),
+            SMPRI_EL1 => {
+                let reg = match dir {
+                    Read => FgtReg::Hfgrtr,
+                    Write => FgtReg::Hfgwtr,
+                };
+                return Some(FineGrainedTrap::clear(reg, 54));
+            }
+            TPIDR2_EL0 => {
+                let reg = match dir {
+                    Read => FgtReg::Hfgrtr,
+                    Write => FgtReg::Hfgwtr,
+                };
+                return Some(FineGrainedTrap::clear(reg, 55));
+            }
+            _ => return self.fine_grained_debug_register(key, dir),
+        };
+        match dir {
+            Read => Some(FineGrainedTrap::set(FgtReg::Hfgrtr, bit)),
+            Write if written => Some(FineGrainedTrap::set(FgtReg::Hfgwtr, bit)),
+            Write => None,
+        }
+    }
+
+    /// [`Cpu::fine_grained_register`] of the debug registers: their
+    /// `HDFGRTR_EL2` (a read) or `HDFGWTR_EL2` (a write) field, the
+    /// breakpoints and watchpoints the processor has by their kind of
+    /// register.
+    fn fine_grained_debug_register(
+        &self,
+        key: SysRegKey,
+        dir: Direction,
+    ) -> Option<FineGrainedTrap> {
+        use Direction::{Read, Write};
+        let bit = match (key.0, dir) {
+            (MDSCR_EL1, Read | Write) => 4,
+            (DBGCLAIMSET_EL1 | DBGCLAIMCLR_EL1, Read | Write) => 5,
+            (DBGAUTHSTATUS_EL1, Read) => 6,
+            (DBGPRCR_EL1, Read | Write) => 7,
+            (OSLAR_EL1, Write) => 8,
+            (OSLSR_EL1, Read) => 9,
+            (OSECCR_EL1, Read | Write) => 10,
+            (OSDLR_EL1, Read | Write) => 11,
+            _ => match DebugPoint::of(key, self.imp.debug)?.reg {
+                DebugPointReg::Bcr => 0,
+                DebugPointReg::Bvr => 1,
+                DebugPointReg::Wcr => 2,
+                DebugPointReg::Wvr => 3,
+            },
+        };
+        let reg = match dir {
+            Read => FgtReg::Hdfgrtr,
+            Write => FgtReg::Hdfgwtr,
+        };
+        Some(FineGrainedTrap::set(reg, bit))
+    }
+
+    /// The fine-grained trap check of an access in direction `dir` at `el`
+    /// to the register `key` names ([`Cpu::fine_grained_register`]): a trap
+    /// to EL2 where its field traps.
+    fn fine_grained_check(
+        &self,
+        key: SysRegKey,
+        dir: Direction,
+        el: El,
+    ) -> Result<(), SysRegError> {
+        if !L::EL2 || el == El::El2 {
+            return Ok(());
+        }
+        trap_to_el2(self.fine_grained_traps_any(self.fine_grained_register(key, dir), el))
     }
 
     /// Whether an access at `el` to a pointer authentication key register
@@ -1172,18 +1350,26 @@ impl<L: Levels> Cpu<L> {
             CTR_EL0 => {
                 trap_to_el1(el0 && self.el0_sctlr() & sctlr::UCT == 0)?;
                 trap_to_el2(below_el2 && !self.el_is_in_host(el) && self.hcr_any(HCR_TID2))?;
+                self.fine_grained_check(key, Direction::Read, el)?;
                 return Ok(id::CTR_EL0);
             }
             // `DZP` reads 1 where `DC ZVA` would trap: at EL0 under the
             // `DZE` of EL0's `SCTLR_ELx` clear, at EL0 and EL1 outside the
             // host under `HCR_EL2.TDZ`.
             DCZID_EL0 => {
+                self.fine_grained_check(key, Direction::Read, el)?;
                 let prohibited = (el0 && self.el0_sctlr() & sctlr::DZE == 0)
                     || (below_el2 && !self.el_is_in_host(el) && self.hcr_any(super::el2::HCR_TDZ));
                 return Ok(id::DCZID_BLOCK_LOG2_WORDS | if prohibited { DCZID_DZP } else { 0 });
             }
-            TPIDR_EL0 => return Ok(self.sys.tpidr_el0),
-            TPIDRRO_EL0 => return Ok(self.sys.tpidrro_el0),
+            TPIDR_EL0 | TPIDRRO_EL0 => {
+                self.fine_grained_check(key, Direction::Read, el)?;
+                return Ok(if k == TPIDR_EL0 {
+                    self.sys.tpidr_el0
+                } else {
+                    self.sys.tpidrro_el0
+                });
+            }
             DIT if self.implements(Feature::Dit) => {
                 return Ok(if self.pstate.dit { Pstate::DIT } else { 0 })
             }
@@ -1196,6 +1382,7 @@ impl<L: Levels> Cpu<L> {
             }
             TPIDR2_EL0 if self.implements(Feature::Sme) => {
                 trap_to_el1(el0 && self.el0_sctlr() & sctlr::ENTP2 == 0)?;
+                self.fine_grained_check(key, Direction::Read, el)?;
                 return Ok(self.sys.tpidr2_el0);
             }
             CNTFRQ_EL0 => {
@@ -1277,6 +1464,10 @@ impl<L: Levels> Cpu<L> {
         if el0 {
             return Err(SysRegError::Undefined);
         }
+        // The registers of EL1 that EL0 cannot reach: each accessor tests
+        // its fine-grained trap among its traps to EL2 with the same
+        // syndrome, ahead of every outcome but those.
+        self.fine_grained_check(key, Direction::Read, el)?;
 
         if key.in_impdef_space() {
             return self.impdef_register_read(key, el);
@@ -1330,13 +1521,15 @@ impl<L: Levels> Cpu<L> {
             ID_AA64MMFR0_EL1 => id::id_aa64mmfr0(self.imp.features),
             ID_AA64MMFR1_EL1 => id::id_aa64mmfr1(self.imp.features),
             ID_AA64MMFR2_EL1 => id::id_aa64mmfr2(self.imp.features),
+            // `HCR_EL2.TID2`, and `TID4` with FEAT_EVT, trap EL1's accesses
+            // to the cache identification registers but `CTR_EL0`.
             CCSIDR_EL1 => {
-                trap_to_el2(el1 && self.hcr_any(HCR_TID2))?;
+                trap_to_el2(el1 && self.hcr_any(HCR_TID2 | HCR_TID4))?;
                 self.ccsidr()
             }
             CLIDR_EL1 => {
-                trap_to_el2(el1 && self.hcr_any(HCR_TID2))?;
-                id::CLIDR_EL1
+                trap_to_el2(el1 && self.hcr_any(HCR_TID2 | HCR_TID4))?;
+                id::clidr_el1(self.imp.features)
             }
             SMIDR_EL1 if self.implements(Feature::Sme) => {
                 trap_to_el2(el1 && self.hcr_any(HCR_TID1))?;
@@ -1347,7 +1540,7 @@ impl<L: Levels> Cpu<L> {
                 id::AIDR_EL1
             }
             CSSELR_EL1 => {
-                trap_to_el2(el1 && self.hcr_any(HCR_TID2))?;
+                trap_to_el2(el1 && self.hcr_any(HCR_TID2 | HCR_TID4))?;
                 self.imp.caches.selection(self.sys.csselr_el1)
             }
             SCTLR_EL1 => {
@@ -1456,7 +1649,7 @@ impl<L: Levels> Cpu<L> {
             TPIDR_EL1 => self.sys.tpidr_el1,
             CNTKCTL_EL1 => self.sys.cntkctl_el1,
             MDCCINT_EL1 => {
-                self.debug_check(el, MDCR_TDA)?;
+                self.dcc_el1_check(el)?;
                 self.sys.mdccint_el1
             }
             MDSCR_EL1 => {
@@ -1470,7 +1663,7 @@ impl<L: Levels> Cpu<L> {
             // their use while the OS Lock is unlocked). Bits [63:32] are
             // RES0.
             OSDTRRX_EL1 | OSDTRTX_EL1 => {
-                self.debug_check(el, MDCR_TDA)?;
+                self.dcc_el1_check(el)?;
                 u64::from(if k == OSDTRRX_EL1 {
                     self.sys.dtrrx
                 } else {
@@ -1681,6 +1874,7 @@ impl<L: Levels> Cpu<L> {
                 return Ok(WriteEffect::None);
             }
             TPIDR_EL0 => {
+                self.fine_grained_check(key, Direction::Write, el)?;
                 self.sys.tpidr_el0 = value;
                 return Ok(WriteEffect::None);
             }
@@ -1702,6 +1896,7 @@ impl<L: Levels> Cpu<L> {
             }
             TPIDR2_EL0 if self.implements(Feature::Sme) => {
                 trap_to_el1(el0 && self.el0_sctlr() & sctlr::ENTP2 == 0)?;
+                self.fine_grained_check(key, Direction::Write, el)?;
                 self.sys.tpidr2_el0 = value;
                 return Ok(WriteEffect::None);
             }
@@ -1761,6 +1956,9 @@ impl<L: Levels> Cpu<L> {
         if el0 {
             return Err(SysRegError::Undefined);
         }
+        // As a read's ([`Cpu::sysreg_read_as`]), before the write has any
+        // effect.
+        self.fine_grained_check(key, Direction::Write, el)?;
 
         if key.in_impdef_space() {
             self.impdef_register_write(key, el, value)?;
@@ -1786,7 +1984,7 @@ impl<L: Levels> Cpu<L> {
             TranslationRegister::of_el1(k).map(|register| self.translation_context(register));
         let effect = match k {
             CSSELR_EL1 => {
-                trap_to_el2(el1 && self.hcr_any(HCR_TID2))?;
+                trap_to_el2(el1 && self.hcr_any(HCR_TID2 | HCR_TID4))?;
                 // Level and InD as written (TnD is RES0 without FEAT_MTE2);
                 // a read gives the cache they select (`Caches::selection`).
                 self.sys.csselr_el1 = value & 0xF;
@@ -1957,7 +2155,7 @@ impl<L: Levels> Cpu<L> {
                 WriteEffect::None
             }
             MDCCINT_EL1 => {
-                self.debug_check(el, MDCR_TDA)?;
+                self.dcc_el1_check(el)?;
                 self.sys.mdccint_el1 = value;
                 WriteEffect::Dcc
             }
@@ -1987,7 +2185,7 @@ impl<L: Levels> Cpu<L> {
             // [31:0] and leaves its flag as it is, at either state of the OS
             // Lock (the `OSDTRRX_EL1` and `OSDTRTX_EL1` descriptions).
             OSDTRRX_EL1 | OSDTRTX_EL1 => {
-                self.debug_check(el, MDCR_TDA)?;
+                self.dcc_el1_check(el)?;
                 if k == OSDTRRX_EL1 {
                     self.sys.dtrrx = value as u32;
                 } else {
