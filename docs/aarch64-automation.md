@@ -184,7 +184,9 @@ they allow, its default the board's:
   `ICC_*_EL1` System registers (`ID_AA64PFR0_EL1.GIC` 1), its
   distributor at 0x0800_0000 and its Redistributor at 0x080A_0000 on
   both layouts, with the GICv2m frame for MSIs and no ITS. A processor
-  with EL2 cannot have one yet (`BuildError::GicV3WithEl2`), and the
+  with EL2 has its CPU interface's virtualization support too
+  (`ICH_*_EL2`, the `ICV_*_EL1` registers under `HCR_EL2.IMO`/`FMO`,
+  `ICC_SRE_EL2`, the maintenance interrupt on PPI 25), and the
   Cortex-A57's CPU interface has five priority bits, so a GICv3 of other
   `gic.priority_bits` on it fails with `BuildError::GicCpuInterface`.
 - `interrupts`, an `InterruptMap`: the `Spi` each device drives (the UART,

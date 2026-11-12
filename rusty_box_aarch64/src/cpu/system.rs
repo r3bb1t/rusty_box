@@ -13,13 +13,15 @@ use super::exception::{Exception, Route, SyndromeClass};
 use super::exec::{bit, bits, ExecResult, Fault, Flow, StopCause};
 use super::features::Feature;
 use super::fgt::{HFGITR_SVC_EL0, HFGITR_SVC_EL1};
+use super::gic::GicAccess;
 use super::mmu::{AtCheck, AtStages, CacheMaintenance};
+use super::nv::VncrOffset;
 use super::sme::SmeTrap;
 use super::sysreg::{Direction, SysRegError, SysRegKey, CPACR_FPEN};
 use super::tlbi::TlbiForm;
 use super::wait::Wait;
 use super::{sctlr, Cpu, El, Levels};
-use crate::bus::{IccRegister, NoGicSystemRegisters, PhysBus};
+use crate::bus::{NoGicSystemRegisters, PhysBus};
 
 /// PSCI function identifiers and return codes (Arm DEN 0022D §5.1, Table 6).
 pub(super) mod psci {
@@ -437,12 +439,12 @@ impl<L: Levels> Cpu<L> {
     /// completing as an access to its register or instruction: the exception
     /// it takes, its syndrome from `key`, `rt` and the direction (`read`);
     /// or, transformed by FEAT_NV2, the load into `Rt` (`read`) or the
-    /// store of `Rt` it is instead ([`Cpu::nv2_load`], [`Cpu::nv2_store`]),
-    /// which completes it unless the access faults; or, for a register of
-    /// the GIC CPU interface, the access the bus completes, UNDEFINED where
-    /// the bus has no such GIC. The one place these are carried out, out
-    /// of line: an `MRS` or `MSR` of the processor's own registers that
-    /// completes never reaches it.
+    /// store of `Rt` it is instead ([`Cpu::nv2_transfer`]); or, for a
+    /// register of the GIC CPU interface, what [`Cpu::gic_access`] decides:
+    /// the access the bus completes (UNDEFINED where the bus has no such
+    /// GIC), a trap to EL2, or FEAT_NV2's load or store. The one place these
+    /// are carried out, out of line: an `MRS` or `MSR` of the processor's
+    /// own registers that completes never reaches it.
     #[allow(clippy::too_many_arguments)]
     #[cold]
     #[inline(never)]
@@ -457,21 +459,30 @@ impl<L: Levels> Cpu<L> {
         read: bool,
     ) -> ExecResult {
         match err {
-            SysRegError::Undefined => match self.gic_register(key, read) {
-                Some(reg) => {
-                    let done = if read {
-                        bus.gic_register_read(reg)
-                            .map(|value| self.set_x_or_zr(rt, value))
-                    } else {
-                        bus.gic_register_write(reg, self.x_or_zr(rt))
-                    };
-                    match done {
-                        Ok(()) => Ok(Flow::Next),
-                        Err(NoGicSystemRegisters) => self.undefined(pc, insn),
+            SysRegError::Undefined => {
+                let dir = if read {
+                    Direction::Read
+                } else {
+                    Direction::Write
+                };
+                match self.gic_access(bus, key, dir) {
+                    GicAccess::Register(reg) => {
+                        let done = if read {
+                            bus.gic_register_read(reg)
+                                .map(|value| self.set_x_or_zr(rt, value))
+                        } else {
+                            bus.gic_register_write(reg, self.x_or_zr(rt))
+                        };
+                        match done {
+                            Ok(()) => Ok(Flow::Next),
+                            Err(NoGicSystemRegisters) => self.undefined(pc, insn),
+                        }
                     }
+                    GicAccess::TrapToEl2 => Err(Self::sysreg_trap(key, rt, read, Route::El2)),
+                    GicAccess::Vncr(at) => self.nv2_transfer(bus, at, rt, read),
+                    GicAccess::Undefined => self.undefined(pc, insn),
                 }
-                None => self.undefined(pc, insn),
-            },
+            }
             SysRegError::Trap(route) => Err(Self::sysreg_trap(key, rt, read, route)),
             SysRegError::FpTrap(route) => Err(self.fp_trap(route)),
             SysRegError::SmeTrap(route) => Err(self.sme_trap(SmeTrap::AccessTrap, route)),
@@ -479,38 +490,29 @@ impl<L: Levels> Cpu<L> {
             // processor without it is transformed: there it is UNDEFINED,
             // and no memory access is compiled into the path.
             SysRegError::Vncr(_) if !L::EL2 => self.undefined(pc, insn),
-            SysRegError::Vncr(at) => {
-                if read {
-                    let value = self.nv2_load(bus, at)?;
-                    self.set_x_or_zr(rt, value);
-                } else {
-                    let value = self.x_or_zr(rt);
-                    self.nv2_store(bus, at, value)?;
-                }
-                Ok(Flow::Next)
-            }
+            SysRegError::Vncr(at) => self.nv2_transfer(bus, at, rt, read),
         }
     }
 
-    /// The GIC CPU interface's register an `MRS` (`read`) or `MSR` by `key`
-    /// reaches, at the current EL, if the processor has the interface: none
-    /// at EL0, where every `ICC_*` register is UNDEFINED (AARCHMRS
-    /// `Registers.json`, each `ICC_*_EL1` accessor), and at EL1 the
-    /// register the encoding names in that direction ([`GicCpuInterface`]).
-    /// The processor's own register decode finds these encodings
-    /// UNDEFINED, so the check is made only on that cold path.
-    ///
-    /// [`GicCpuInterface`]: super::GicCpuInterface
-    fn gic_register(&self, key: SysRegKey, read: bool) -> Option<IccRegister> {
-        let dir = if read {
-            Direction::Read
+    /// FEAT_NV2's transformation of an access: the load into `Rt` (`read`)
+    /// from, or the store of `Rt` to, offset `at` of the `VNCR_EL2` page
+    /// ([`Cpu::nv2_load`], [`Cpu::nv2_store`]), which completes the
+    /// instruction unless the access faults.
+    fn nv2_transfer<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        at: VncrOffset,
+        rt: u32,
+        read: bool,
+    ) -> ExecResult {
+        if read {
+            let value = self.nv2_load(bus, at)?;
+            self.set_x_or_zr(rt, value);
         } else {
-            Direction::Write
-        };
-        match self.pstate.el {
-            El::El0 => None,
-            El::El1 | El::El2 => self.imp.gic.register(key, dir),
+            let value = self.x_or_zr(rt);
+            self.nv2_store(bus, at, value)?;
         }
+        Ok(Flow::Next)
     }
 
     /// The HINT space: NOP, YIELD, WFE, WFI, SEV, SEVL, ESB; every other

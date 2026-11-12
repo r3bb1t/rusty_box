@@ -120,7 +120,7 @@ pub use features::{CounterRate, CpuModel, FixedCounterRate, UnknownCpuModel, SYS
 pub use history::RecentPcs;
 pub use mmu::{Ipa, LeafLevel, Level, NoTranslation, Tlb, TranslationFault, TranslationStage};
 pub use regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, SysReg, SysRegRefusal, VReg};
-pub(crate) use gic::GicCpuInterface;
+pub(crate) use gic::{GicCpuInterface, SystemRegisterInterface};
 pub(crate) use sysreg::WriteEffect;
 pub(crate) use system::{PsciConduit, PSCI_COMPATIBLE};
 pub use system::{SpectreReport, UnknownSpectreReport};

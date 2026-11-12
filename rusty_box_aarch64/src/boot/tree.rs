@@ -465,7 +465,7 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
 
     match tree.gic_version {
         GicVersion::V2 => gic(&mut w, tree.gic, windows.gic)?,
-        GicVersion::V3 => gic_v3(&mut w, windows.gic_v3, windows.gic)?,
+        GicVersion::V3 => gic_v3(&mut w, tree.gic, windows.gic_v3, windows.gic)?,
     }
 
     w.begin("clock")?;
@@ -649,10 +649,16 @@ fn gic(
 
 /// A GICv3 (the `arm,gic-v3` binding): its distributor's frame and its one
 /// Redistributor region (`#redistributor-regions` 1), and the GICv2m MSI
-/// frame. No `GICC`, `GICH` or `GICV` frame: its CPU interface has no
-/// memory-mapped form, and its processor no EL2, so no maintenance
-/// interrupt either.
-fn gic_v3(w: &mut Writer<'_>, gic: GicV3Windows, v2: GicWindows) -> Result<(), DeviceTreeError> {
+/// frame; with the CPU interface's virtualization support (a processor
+/// with EL2), its maintenance interrupt, PPI 9 (INTID 25), level-high in
+/// the binding's GICv3 form. No `GICC`, `GICH` or `GICV` frame: its CPU
+/// interface has no memory-mapped form.
+fn gic_v3(
+    w: &mut Writer<'_>,
+    extensions: GicExtensions,
+    gic: GicV3Windows,
+    v2: GicWindows,
+) -> Result<(), DeviceTreeError> {
     w.begin_at("interrupt-controller", gic.dist.get())?;
     w.string("compatible", "arm,gic-v3")?;
     w.flag("interrupt-controller")?;
@@ -662,6 +668,12 @@ fn gic_v3(w: &mut Writer<'_>, gic: GicV3Windows, v2: GicWindows) -> Result<(), D
     w.flag("ranges")?;
     w.cell("#redistributor-regions", 1)?;
     w.windows("reg", &[gic.dist_window(), gic.redist_window()])?;
+    match extensions {
+        GicExtensions::Absent => {}
+        GicExtensions::Virtualization => {
+            w.cells("interrupts", &ppi(GicVersion::V3, MAINTENANCE_INTID))?;
+        }
+    }
     w.cell("phandle", PHANDLE_GIC)?;
     msi_frame(w, v2)?;
     w.end()

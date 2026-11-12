@@ -416,13 +416,34 @@ impl ApIndex {
     }
 }
 
-/// One of the GIC CPU interface's System registers of EL1 (`ICC_*_EL1`,
-/// IHI 0069G 12.2), which the board's GIC holds: what an `MRS` or `MSR` of
-/// a processor with FEAT_GICv3 reaches through its bus
-/// ([`PhysBus::gic_register_read`], [`PhysBus::gic_register_write`]).
+/// One of the GIC CPU interface's System registers, which the board's GIC
+/// holds: what an `MRS` or `MSR` of a processor with FEAT_GICv3 reaches
+/// through its bus ([`PhysBus::gic_register_read`],
+/// [`PhysBus::gic_register_write`]), once the processor's checks of the
+/// access let it through.
 ///
-/// Closed (R5): the registers a processor with no EL2 and no EL3 has, of a
-/// GICv3 without FEAT_GICv3_NMI.
+/// Closed (R5): the four register files of a GICv3 CPU interface with no
+/// EL3 (IHI 0069G 12.2 to 12.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GicRegister {
+    /// A register of the physical CPU interface, `ICC_*_EL1`.
+    Physical(IccRegister),
+    /// A register of the virtual CPU interface, `ICV_*_EL1`: what an
+    /// `ICC_*_EL1` encoding reaches at EL1 while `HCR_EL2.FMO` (a Group 0
+    /// register's) or `HCR_EL2.IMO` (a Group 1 register's; either, a common
+    /// one's) virtualizes it.
+    Virtual(IcvRegister),
+    /// A virtual interface control register, `ICH_*_EL2`.
+    Control(IchRegister),
+    /// `ICC_SRE_EL2`, EL2's System register enable.
+    SreEl2,
+}
+
+/// One of the GIC CPU interface's System registers of EL1 (`ICC_*_EL1`,
+/// IHI 0069G 12.2).
+///
+/// Closed (R5): the registers a processor with no EL3 has, of a GICv3
+/// without FEAT_GICv3_NMI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IccRegister {
     /// `ICC_PMR_EL1`, the priority mask.
@@ -465,6 +486,157 @@ pub enum IccRegister {
     Igrpen0,
     /// `ICC_IGRPEN1_EL1`, Group 1's enable.
     Igrpen1,
+}
+
+/// One of the virtual CPU interface's registers (`ICV_*_EL1`, IHI 0069G
+/// 12.3), which share their encodings with the `ICC_*_EL1` registers of the
+/// same name.
+///
+/// Closed (R5): the `ICC_*_EL1` registers that have a virtual form, which
+/// are all but `ICC_SRE_EL1` and the SGI generation registers, of a GICv3
+/// without FEAT_GICv3_NMI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IcvRegister {
+    /// `ICV_PMR_EL1`, the virtual priority mask (`ICH_VMCR_EL2.VPMR`).
+    Pmr,
+    /// `ICV_IAR0_EL1`, which acknowledges a virtual Group 0 interrupt.
+    Iar0,
+    /// `ICV_EOIR0_EL1`, a virtual Group 0 interrupt's end.
+    Eoir0,
+    /// `ICV_HPPIR0_EL1`, the highest pending virtual Group 0 interrupt.
+    Hppir0,
+    /// `ICV_BPR0_EL1`, virtual Group 0's binary point.
+    Bpr0,
+    /// `ICV_AP0R<n>_EL1`, virtual Group 0's active priorities
+    /// (`ICH_AP0R<n>_EL2`).
+    Ap0r(ApIndex),
+    /// `ICV_AP1R<n>_EL1`, virtual Group 1's active priorities
+    /// (`ICH_AP1R<n>_EL2`).
+    Ap1r(ApIndex),
+    /// `ICV_DIR_EL1`, which deactivates a virtual interrupt.
+    Dir,
+    /// `ICV_RPR_EL1`, the virtual running priority.
+    Rpr,
+    /// `ICV_IAR1_EL1`, which acknowledges a virtual Group 1 interrupt.
+    Iar1,
+    /// `ICV_EOIR1_EL1`, a virtual Group 1 interrupt's end.
+    Eoir1,
+    /// `ICV_HPPIR1_EL1`, the highest pending virtual Group 1 interrupt.
+    Hppir1,
+    /// `ICV_BPR1_EL1`, virtual Group 1's binary point.
+    Bpr1,
+    /// `ICV_CTLR_EL1`, the virtual CPU interface's control.
+    Ctlr,
+    /// `ICV_IGRPEN0_EL1`, virtual Group 0's enable.
+    Igrpen0,
+    /// `ICV_IGRPEN1_EL1`, virtual Group 1's enable.
+    Igrpen1,
+}
+
+/// Which List register an `ICH_LR<n>_EL2` names: `n` is 0 to 15 (IHI
+/// 0069G 12.4.6), from the encoding's `CRm<0>:op2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LrIndex(u8);
+
+impl LrIndex {
+    /// The most List registers a CPU interface has (`ICH_VTR_EL2.ListRegs`
+    /// 0b01111).
+    pub const COUNT: usize = 16;
+
+    /// The index the four bits `n` name.
+    pub const fn of(n: u32) -> Self {
+        Self((n & 0xF) as u8)
+    }
+
+    /// `n`.
+    pub const fn get(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// One of the virtual interface control registers (`ICH_*_EL2`, IHI 0069G
+/// 12.4).
+///
+/// Closed (R5): the registers of a GICv3 virtual interface, with no
+/// GICv4.1 or GICv5 additions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IchRegister {
+    /// `ICH_AP0R<n>_EL2`, virtual Group 0's active priorities.
+    Ap0r(ApIndex),
+    /// `ICH_AP1R<n>_EL2`, virtual Group 1's active priorities.
+    Ap1r(ApIndex),
+    /// `ICH_HCR_EL2`, the virtual interface's control.
+    Hcr,
+    /// `ICH_VTR_EL2`, what the virtual interface implements.
+    Vtr,
+    /// `ICH_MISR_EL2`, the maintenance interrupts asserted.
+    Misr,
+    /// `ICH_EISR_EL2`, the List registers with an EOI maintenance interrupt.
+    Eisr,
+    /// `ICH_ELRSR_EL2`, the empty List registers.
+    Elrsr,
+    /// `ICH_VMCR_EL2`, the virtual machine's view of its CPU interface.
+    Vmcr,
+    /// `ICH_LR<n>_EL2`, a List register.
+    Lr(LrIndex),
+}
+
+/// One of the controls of EL2 that trap an EL1 access to the GIC CPU
+/// interface's System registers to EL2 (IHI 0069G 12.4.5, 12.2.23).
+///
+/// Closed (R5): the controls of a CPU interface with no SEIs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GicTrap {
+    /// `ICH_HCR_EL2.TC`: the registers common to both groups.
+    Common,
+    /// `ICH_HCR_EL2.TALL0`: Group 0's registers.
+    Group0,
+    /// `ICH_HCR_EL2.TALL1`: Group 1's registers.
+    Group1,
+    /// `ICH_HCR_EL2.TDIR`: writes of `ICC_DIR_EL1` and `ICV_DIR_EL1`.
+    Deactivate,
+    /// `ICC_SRE_EL2.Enable` clear: `ICC_SRE_EL1`.
+    SreEl1,
+}
+
+/// The state of the trap controls of [`GicTrap`] an EL1 access meets: the
+/// trap bits of `ICH_HCR_EL2` and `ICC_SRE_EL2.Enable`
+/// ([`PhysBus::gic_el1_traps`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GicEl1Traps {
+    ich_hcr: u64,
+    icc_sre_el2: u64,
+}
+
+/// `ICH_HCR_EL2`'s trap bits: `TC` (10), `TALL0` (11), `TALL1` (12) and
+/// `TDIR` (14).
+const ICH_HCR_TC: u64 = 1 << 10;
+const ICH_HCR_TALL0: u64 = 1 << 11;
+const ICH_HCR_TALL1: u64 = 1 << 12;
+const ICH_HCR_TDIR: u64 = 1 << 14;
+/// `ICC_SRE_EL2.Enable`.
+const ICC_SRE_EL2_ENABLE: u64 = 1 << 3;
+
+impl GicEl1Traps {
+    /// The controls of a CPU interface whose `ICH_HCR_EL2` is `ich_hcr` and
+    /// whose `ICC_SRE_EL2` is `icc_sre_el2`.
+    pub const fn of(ich_hcr: u64, icc_sre_el2: u64) -> Self {
+        Self {
+            ich_hcr,
+            icc_sre_el2,
+        }
+    }
+
+    /// Whether `trap` traps.
+    pub const fn traps(self, trap: GicTrap) -> bool {
+        match trap {
+            GicTrap::Common => self.ich_hcr & ICH_HCR_TC != 0,
+            GicTrap::Group0 => self.ich_hcr & ICH_HCR_TALL0 != 0,
+            GicTrap::Group1 => self.ich_hcr & ICH_HCR_TALL1 != 0,
+            GicTrap::Deactivate => self.ich_hcr & ICH_HCR_TDIR != 0,
+            GicTrap::SreEl1 => self.icc_sre_el2 & ICC_SRE_EL2_ENABLE == 0,
+        }
+    }
 }
 
 /// A bus with no GIC whose CPU interface has System registers: an access to
@@ -561,7 +733,7 @@ pub trait PhysBus {
     /// [`NoGicSystemRegisters`] where the bus has no GIC with a System
     /// register interface.
     #[inline]
-    fn gic_register_read(&mut self, _reg: IccRegister) -> Result<u64, NoGicSystemRegisters> {
+    fn gic_register_read(&mut self, _reg: GicRegister) -> Result<u64, NoGicSystemRegisters> {
         Err(NoGicSystemRegisters)
     }
 
@@ -575,9 +747,23 @@ pub trait PhysBus {
     #[inline]
     fn gic_register_write(
         &mut self,
-        _reg: IccRegister,
+        _reg: GicRegister,
         _value: u64,
     ) -> Result<(), NoGicSystemRegisters> {
+        Err(NoGicSystemRegisters)
+    }
+
+    /// The GIC CPU interface's controls that trap an EL1 access to its
+    /// System registers ([`GicEl1Traps`]), which the processor reads
+    /// before it lets such an access through. The default is a bus with no
+    /// such GIC.
+    ///
+    /// # Errors
+    ///
+    /// [`NoGicSystemRegisters`] where the bus has no GIC with a System
+    /// register interface.
+    #[inline]
+    fn gic_el1_traps(&self) -> Result<GicEl1Traps, NoGicSystemRegisters> {
         Err(NoGicSystemRegisters)
     }
 }

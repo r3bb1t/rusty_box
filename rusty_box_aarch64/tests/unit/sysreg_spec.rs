@@ -46,10 +46,14 @@ use super::pmu::Pmu;
 use super::wait::EventRegister;
 use super::{
     id, sme, Activity, Cpu, CpuConfig, El, ExclusiveMonitor, GicCpuInterface, Levels, NoEl2,
-    Pstate, Step, SysRegs, WithEl2,
+    Pstate, Step, SysRegs, SystemRegisterInterface, WithEl2,
 };
-use crate::bus::{AccessWidth, BusFault, IccRegister, NoGicSystemRegisters, PhysAddr, PhysBus};
-use crate::devices::gicv2::PriorityBits;
+use crate::bus::{
+    AccessWidth, BusFault, GicEl1Traps, GicRegister, NoGicSystemRegisters, PhysAddr, PhysBus,
+};
+use crate::devices::gicv2::{GicNames, GicShape, PriorityBits};
+use crate::devices::gicv3::GicV3;
+use crate::devices::gicv3_virt::VirtualInterfaceShape;
 use crate::instrumentation::NoInstrumentation;
 
 /// The environment variable naming the unpacked AARCHMRS directory.
@@ -71,7 +75,17 @@ const RT_PAIR: u32 = 0;
 /// The choices Arm leaves to an implementation (`ImpDefBool`) that the
 /// accessors this processor reaches ask about, with this processor's
 /// answer and why.
-const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 25] = [
+const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 27] = [
+    (
+        "Treat ICC_SRE_EL2.SRE as RAO/WI",
+        true,
+        "the GIC CPU interface has its System registers only",
+    ),
+    (
+        "Treat ICC_SRE_EL2.Enable as RAO/WI",
+        false,
+        "ICC_SRE_EL2.Enable is a field, which traps ICC_SRE_EL1 while clear",
+    ),
     (
         "Implementation can reset into AArch32 state",
         false,
@@ -203,7 +217,9 @@ const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 25] = [
 
 /// IMPLEMENTATION DEFINED constants the accessors read, the same on every
 /// processor. `NUM_BREAKPOINTS` and `NUM_WATCHPOINTS` are each processor's
-/// own, as its `ID_AA64DFR0_EL1` reports them ([`Eval::identifier`]).
+/// own, as its `ID_AA64DFR0_EL1` reports them, and the GIC CPU
+/// interface's counts its `ICC_CTLR_EL1` and `ICH_VTR_EL2` report
+/// ([`Eval::identifier`]).
 const CONSTANTS: [(&str, i128); 1] = [
     // ERRIDR_EL1.NUM.
     ("NUM_ERROR_RECORDS", 0),
@@ -760,6 +776,14 @@ impl Eval<'_> {
             // `ID_AA64PFR0_EL1.GIC` 1, the processor's interface to a
             // GICv3's CPU interface, which its board gives it.
             "FEAT_GICv3" => self.imp.gic != GicCpuInterface::Absent,
+            // `ICH_HCR_EL2.TDIR`, which `ICH_VTR_EL2.TDS` reports, of the
+            // processor's virtual interface.
+            "FEAT_GICv3_TDIR" => match self.imp.gic {
+                GicCpuInterface::SystemRegisters(interface) => {
+                    interface.virtual_interface.vtr() & (1 << 19) != 0
+                }
+                GicCpuInterface::Absent => false,
+            },
             _ => Feature::ALL
                 .into_iter()
                 .find(|f| f.arm_name() == Some(name))
@@ -998,7 +1022,23 @@ impl Eval<'_> {
             // CPU interface's System registers; the accessors read it only
             // past their FEAT_GICv3 check.
             "NUM_GIC_PRIORITY_BITS" => match self.imp.gic {
-                GicCpuInterface::SystemRegisters(bits) => V::Int(i128::from(bits.count())),
+                GicCpuInterface::SystemRegisters(interface) => {
+                    V::Int(i128::from(interface.priority_bits.count()))
+                }
+                GicCpuInterface::Absent => V::Open,
+            },
+            // `ICH_VTR_EL2.PREbits` plus one and `ListRegs` plus one, of the
+            // virtual interface; read past the same check.
+            "NUM_GIC_PREEMPTION_BITS" => match self.imp.gic {
+                GicCpuInterface::SystemRegisters(interface) => {
+                    V::Int(i128::from((interface.virtual_interface.vtr() >> 26) & 7) + 1)
+                }
+                GicCpuInterface::Absent => V::Open,
+            },
+            "NUM_GIC_LIST_REGS" => match self.imp.gic {
+                GicCpuInterface::SystemRegisters(interface) => {
+                    V::Int(i128::from(interface.virtual_interface.vtr() & 0x1F) + 1)
+                }
                 GicCpuInterface::Absent => V::Open,
             },
             _ => {
@@ -1103,6 +1143,14 @@ impl Eval<'_> {
                 V::bits(0, 1)
             }
             "EffectiveHCR_EL2_E2H" => V::bits(u64::from(self.e2h()), 1),
+            // The shared pseudocode's, with no FEAT_GCIE: `Enable` but
+            // where both RAO/WI choices hold or `SRE` reads 0.
+            "EffectiveICC_SRE_EL2_Enable" => {
+                let rao = self.imp_def("Treat ICC_SRE_EL2.SRE as RAO/WI")
+                    && self.imp_def("Treat ICC_SRE_EL2.Enable as RAO/WI");
+                let sre = self.register("ICC_SRE_EL2");
+                V::bits(u64::from(rao || sre & 1 == 0 || sre & (1 << 3) != 0), 1)
+            }
             "GetSPSR_EL1_M4" => V::bits((self.register("SPSR_EL1") >> 4) & 1, 1),
             "GetSPSR_EL2_M4" => V::bits((self.register("SPSR_EL2") >> 4) & 1, 1),
             "IsSCTLR2EL1Enabled" | "IsSCTLR2EL2Enabled" => {
@@ -1286,7 +1334,11 @@ impl Eval<'_> {
 
 // ----- the processor -----
 
-struct Ram(Vec<u8>);
+/// The processor's RAM, and on a processor with FEAT_GICv3 the board's
+/// GICv3, whose CPU interface its System registers reach: its EL2 trap
+/// controls (`ICH_HCR_EL2`, `ICC_SRE_EL2.Enable`) are among the states the
+/// accessors read.
+struct Ram(Vec<u8>, Option<GicV3>);
 
 impl PhysBus for Ram {
     fn read(
@@ -1317,19 +1369,32 @@ impl PhysBus for Ram {
         Ok(())
     }
 
-    /// A GICv3's CPU interface as the board's has it, System registers
-    /// only: `ICC_SRE_EL1` reads `SRE`, `DFB` and `DIB` set, which the
-    /// accessors read; every other register reads zero.
-    fn gic_register_read(&mut self, reg: IccRegister) -> Result<u64, NoGicSystemRegisters> {
-        Ok(if reg == IccRegister::Sre { 0b111 } else { 0 })
+    fn gic_register_read(&mut self, reg: GicRegister) -> Result<u64, NoGicSystemRegisters> {
+        match &mut self.1 {
+            Some(gic) => Ok(gic.register_read(reg)),
+            None => Err(NoGicSystemRegisters),
+        }
     }
 
     fn gic_register_write(
         &mut self,
-        _reg: IccRegister,
-        _value: u64,
+        reg: GicRegister,
+        value: u64,
     ) -> Result<(), NoGicSystemRegisters> {
-        Ok(())
+        match &mut self.1 {
+            Some(gic) => {
+                gic.register_write(reg, value);
+                Ok(())
+            }
+            None => Err(NoGicSystemRegisters),
+        }
+    }
+
+    fn gic_el1_traps(&self) -> Result<GicEl1Traps, NoGicSystemRegisters> {
+        match &self.1 {
+            Some(gic) => Ok(gic.el1_traps()),
+            None => Err(NoGicSystemRegisters),
+        }
     }
 }
 
@@ -1425,7 +1490,8 @@ fn observe<L: Levels>(cpu: &mut Cpu<L>, ram: &mut Ram, word: u32, memory: Outcom
     }
 }
 
-/// Everything an access can change, to put back after each step.
+/// Everything an access can change, to put back after each step: the
+/// processor's state and the GIC's.
 struct Saved<L: Levels> {
     x: [u64; 31],
     sp: [u64; 2],
@@ -1441,10 +1507,12 @@ struct Saved<L: Levels> {
     monitor: ExclusiveMonitor,
     event: EventRegister,
     activity: Activity,
+    gic: Option<GicV3>,
 }
 
-fn save<L: Levels>(cpu: &Cpu<L>) -> Saved<L> {
+fn save<L: Levels>(cpu: &Cpu<L>, ram: &Ram) -> Saved<L> {
     Saved {
+        gic: ram.1.clone(),
         x: cpu.x,
         sp: [cpu.sp_el0, cpu.sp_el1],
         el2: cpu.el2_state.clone(),
@@ -1462,7 +1530,8 @@ fn save<L: Levels>(cpu: &Cpu<L>) -> Saved<L> {
     }
 }
 
-fn restore<L: Levels>(cpu: &mut Cpu<L>, s: &Saved<L>) {
+fn restore<L: Levels>(cpu: &mut Cpu<L>, ram: &mut Ram, s: &Saved<L>) {
+    ram.1.clone_from(&s.gic);
     cpu.x = s.x;
     [cpu.sp_el0, cpu.sp_el1] = s.sp;
     cpu.el2_state = s.el2.clone();
@@ -1598,7 +1667,23 @@ fn processor<L: Levels>(imp: LeveledImplementation<L>) -> (Cpu<L>, Ram) {
             el2.vncr = VNCR_PAGE;
         }
     }
-    let mut ram = Ram(vec![0; RAM_BYTES]);
+    // The board's GICv3, with the virtual interface of the processor's
+    // shape where it has EL2, its Redistributor awake as the board's
+    // firmware leaves it.
+    let gic = match imp.gic {
+        GicCpuInterface::SystemRegisters(interface) => {
+            let el2 = L::EL2.then_some(interface.virtual_interface);
+            let shape = GicShape {
+                spis: GicShape::DEFAULT.spis,
+                priority_bits: interface.priority_bits,
+            };
+            let mut gic = GicV3::with_el2(shape, GicNames::NONE, None, el2);
+            gic.power_on_processor();
+            Some(gic)
+        }
+        GicCpuInterface::Absent => None,
+    };
+    let mut ram = Ram(vec![0; RAM_BYTES], gic);
     vncr_page_of(&mut ram).copy_from_slice(&vncr_page());
     (cpu, ram)
 }
@@ -1634,7 +1719,7 @@ fn sysreg_word<L: Levels>(cpu: &Cpu<L>, name: &str, write: bool) -> u32 {
 /// Read `name` at the processor's highest exception level, if it has the
 /// register; the processor is left as it was.
 fn read_register<L: Levels>(cpu: &mut Cpu<L>, ram: &mut Ram, name: &str) -> Option<u64> {
-    let saved = save(cpu);
+    let saved = save(cpu, ram);
     cpu.pstate.el = if L::EL2 { El::El2 } else { El::El1 };
     cpu.pstate.sp_sel = true;
     let word = sysreg_word(cpu, name, false);
@@ -1644,7 +1729,7 @@ fn read_register<L: Levels>(cpu: &mut Cpu<L>, ram: &mut Ram, name: &str) -> Opti
         Observed::Completed => Some(cpu.x[0]),
         Observed::Exception { .. } | Observed::Memory { .. } => None,
     };
-    restore(cpu, &saved);
+    restore(cpu, ram, &saved);
     value
 }
 
@@ -1668,8 +1753,12 @@ fn write_register<L: Levels>(cpu: &mut Cpu<L>, ram: &mut Ram, name: &str, value:
 /// `MDSCR_EL1.SS` (software step). `PMUSERENR_EL0` gives EL0 the PMU, and
 /// `PMSELR_EL0` selects the counter `PMXEVCNTR_EL0` and `PMXEVTYPER_EL0`
 /// reach. The fine-grained trap registers (FEAT_FGT) and `HCRX_EL2`
-/// (FEAT_HCX) each hold traps of single accesses.
-const CONTROLS: [(&str, u64); 18] = [
+/// (FEAT_HCX) each hold traps of single accesses. With FEAT_GICv3 and EL2,
+/// `ICH_HCR_EL2`'s `TC`, `TALL0`, `TALL1` and `TDIR` and `ICC_SRE_EL2`'s
+/// `Enable` trap EL1's accesses to the GIC CPU interface; the virtual
+/// interface's enable, maintenance controls and `EOIcount` trap nothing,
+/// and `ICC_SRE_EL2`'s other bits are RAO/WI.
+const CONTROLS: [(&str, u64); 20] = [
     ("HCR_EL2", (1 << 0) | (1 << 12)),
     ("CPTR_EL2", 0),
     ("MDCR_EL2", 0),
@@ -1688,6 +1777,8 @@ const CONTROLS: [(&str, u64); 18] = [
     ("MDSCR_EL1", 1),
     ("PMUSERENR_EL0", 0),
     ("PMSELR_EL0", 0),
+    ("ICH_HCR_EL2", (0x1F << 27) | 0xFF),
+    ("ICC_SRE_EL2", 0b111),
 ];
 
 /// The value of every register the accessors' conditions read
@@ -1965,19 +2056,38 @@ const WITHOUT_EL2: [(&str, LeveledImplementation<NoEl2>); 5] = [
     (
         "Cortex-A57 with a GICv3",
         Implementation::CORTEX_A57
-            .with_gic(GicCpuInterface::SystemRegisters(PriorityBits::Five))
+            .with_gic(A57_GIC)
             .with_levels::<NoEl2>(),
     ),
     (
         "Armv9.2 with a GICv3",
         Implementation::ARMV9P2
-            .with_gic(GicCpuInterface::SystemRegisters(PriorityBits::Eight))
+            .with_gic(ARMV9P2_GIC)
             .with_levels::<NoEl2>(),
     ),
 ];
 
-/// The processors with EL2, as [`WITHOUT_EL2`].
-const WITH_EL2: [(&str, LeveledImplementation<WithEl2>); 3] = [
+/// The Cortex-A57's GIC CPU interface: five priority bits, and its virtual
+/// interface (DDI 0488H Table 8-13).
+const A57_GIC: GicCpuInterface = GicCpuInterface::SystemRegisters(SystemRegisterInterface {
+    priority_bits: PriorityBits::Five,
+    virtual_interface: VirtualInterfaceShape::CORTEX_A57,
+});
+
+/// The Armv9.2 model's on a board whose GIC has eight priority bits, every
+/// active priority register its own, and the model's virtual interface of
+/// seven priority bits.
+const ARMV9P2_GIC: GicCpuInterface = GicCpuInterface::SystemRegisters(SystemRegisterInterface {
+    priority_bits: PriorityBits::Eight,
+    virtual_interface: VirtualInterfaceShape::armv9p2(PriorityBits::Eight),
+});
+
+/// The processors with EL2, as [`WITHOUT_EL2`]: each model with its GIC
+/// CPU interface's virtualization support too, the Cortex-A57's
+/// `ICH_HCR_EL2` without `TDIR` and four List registers, the Armv9.2
+/// model's with `TDIR`, sixteen List registers and every active priority
+/// register.
+const WITH_EL2: [(&str, LeveledImplementation<WithEl2>); 5] = [
     (
         "Cortex-A57 with EL2",
         Implementation::CORTEX_A57.with_levels::<WithEl2>(),
@@ -1989,6 +2099,18 @@ const WITH_EL2: [(&str, LeveledImplementation<WithEl2>); 3] = [
     (
         "every feature with EL2",
         Implementation::EVERY_FEATURE.with_levels::<WithEl2>(),
+    ),
+    (
+        "Cortex-A57 with EL2 and a GICv3",
+        Implementation::CORTEX_A57
+            .with_gic(A57_GIC)
+            .with_levels::<WithEl2>(),
+    ),
+    (
+        "Armv9.2 with EL2 and a GICv3",
+        Implementation::ARMV9P2
+            .with_gic(ARMV9P2_GIC)
+            .with_levels::<WithEl2>(),
     ),
 ];
 
@@ -2056,7 +2178,7 @@ fn check<L: Levels>(
         _ => El::El2,
     };
     cpu.pstate.sp_sel = el != 0 && config.sp;
-    let saved = save(&cpu);
+    let saved = save(&cpu, &ram);
     // The outcome each word's applicable accessors give it.
     let mut want: BTreeMap<u32, (Outcome, &Site)> = BTreeMap::new();
     for site in &spec.sites {
@@ -2097,7 +2219,7 @@ fn check<L: Levels>(
     let mut stepped = 0;
     for (&word, &(outcome, site)) in &want {
         let got = observe(&mut cpu, &mut ram, word, outcome);
-        restore(&mut cpu, &saved);
+        restore(&mut cpu, &mut ram, &saved);
         stepped += 1;
         let w = expected(outcome, el, tge, word, writes_memory(site));
         if got != w {
@@ -2125,7 +2247,7 @@ fn check<L: Levels>(
         };
         for &word in unnamed {
             let got = observe(&mut cpu, &mut ram, word, Outcome::Undefined);
-            restore(&mut cpu, &saved);
+            restore(&mut cpu, &mut ram, &saved);
             stepped += 1;
             let want = expected(unnamed_outcome(&eval, word), el, tge, word, false);
             if got != want {

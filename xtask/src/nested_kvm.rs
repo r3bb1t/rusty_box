@@ -4,8 +4,10 @@
 //! Alpine Linux runs on the board's processor with EL2 (virtualization
 //! on): on the Cortex-A57, the default, its KVM comes up in nVHE mode, and
 //! on the Armv9.2 model (`--cpu armv9.2`), which has FEAT_VHE, in VHE mode,
-//! each with the in-kernel vGIC; QEMU inside it runs a second Alpine under
-//! KVM, on the host's processor as KVM presents it. The serial console is the
+//! each with the in-kernel vGIC on the board's GIC, a GICv2 by default or a
+//! GICv3 (`--gic v3`); QEMU inside it runs a second Alpine under KVM, on the
+//! host's processor as KVM presents it, with a GIC of the same version. The
+//! serial console is the
 //! terminal: once the runner's script has started the nested guest, what is
 //! typed goes to the guest. Ctrl-] quits the emulator, Ctrl-A x the nested
 //! QEMU.
@@ -109,6 +111,46 @@ impl HostCpu {
     }
 }
 
+/// The board's GIC, by the runner's `--gic` name: the host's KVM drives
+/// its virtualization support, and gives the nested guest a GIC of the
+/// same version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostGic {
+    /// A GICv2 with the Virtualization Extensions (`GICH_*`, `GICV_*`).
+    V2,
+    /// A GICv3 with its CPU interface's virtualization support
+    /// (`ICH_*_EL2`, `ICV_*_EL1`).
+    V3,
+}
+
+impl HostGic {
+    const ALL: [Self; 2] = [Self::V2, Self::V3];
+
+    /// The name the runner's `--gic` takes.
+    fn name(self) -> &'static str {
+        match self {
+            Self::V2 => "v2",
+            Self::V3 => "v3",
+        }
+    }
+
+    /// QEMU's `gic-version` for the nested guest.
+    fn qemu_version(self) -> u32 {
+        match self {
+            Self::V2 => 2,
+            Self::V3 => 3,
+        }
+    }
+
+    /// The version named `name`.
+    fn parse(name: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|gic| gic.name() == name)
+            .ok_or_else(|| format!("--gic {name:?}: the versions are v2, v3"))
+    }
+}
+
 /// Whether a step whose result exists runs again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Assets {
@@ -132,6 +174,7 @@ pub struct NestedKvmCommand {
     /// nested tick costs tens of thousands of instructions of exits.
     pub ips: InstructionsPerSecond,
     pub cpu: HostCpu,
+    pub gic: HostGic,
     pub target: BootTarget,
     pub assets: Assets,
     pub runner: RunnerBuild,
@@ -147,6 +190,7 @@ impl Default for NestedKvmCommand {
         Self {
             ips: InstructionsPerSecond(1_000_000_000),
             cpu: HostCpu::CortexA57,
+            gic: HostGic::V2,
             target: BootTarget::NestedGuest,
             assets: Assets::Reuse,
             runner: RunnerBuild::Build,
@@ -158,10 +202,12 @@ impl Default for NestedKvmCommand {
 }
 
 pub fn nested_kvm_usage() -> String {
-    "usage: cargo xtask nested-kvm [--cpu cortex-a57|armv9.2] [--ips N] [--host-only] [--rebuild]\n\
-     \x20                            [--no-build] [--dir PATH] [--host-ram-mib N] [--nested-ram-mib N]\n\
+    "usage: cargo xtask nested-kvm [--cpu cortex-a57|armv9.2] [--gic v2|v3] [--ips N] [--host-only]\n\
+     \x20                            [--rebuild] [--no-build] [--dir PATH] [--host-ram-mib N]\n\
+     \x20                            [--nested-ram-mib N]\n\
      \x20 --cpu MODEL          the board's processor: cortex-a57 (default; KVM in nVHE mode)\n\
      \x20                      or armv9.2 (KVM in VHE mode)\n\
+     \x20 --gic VERSION        the board's GIC: v2 (default) or v3; the nested guest's is the same\n\
      \x20 --ips N              emulated instructions a second (default 1000000000)\n\
      \x20 --host-only          stop at the host Alpine's shell, QEMU installed\n\
      \x20 --rebuild            download and build every asset again\n\
@@ -185,6 +231,7 @@ pub fn parse_nested_kvm_args(args: &[String]) -> Result<NestedKvmCommand, String
         match flag {
             "--ips" => command.ips = InstructionsPerSecond(positive(flag, value()?)?),
             "--cpu" => command.cpu = HostCpu::parse(value()?)?,
+            "--gic" => command.gic = HostGic::parse(value()?)?,
             "--host-only" => command.target = BootTarget::HostShell,
             "--rebuild" => command.assets = Assets::Rebuild,
             "--no-build" => command.runner = RunnerBuild::Prebuilt,
@@ -597,6 +644,8 @@ fn runner_args(work: &WorkDir, command: &NestedKvmCommand, tar_offset: u64) -> V
     let mut args: Vec<OsString> = vec![
         "--cpu".into(),
         command.cpu.name().into(),
+        "--gic".into(),
+        command.gic.name().into(),
         "--virtualization".into(),
         "--ips".into(),
         command.ips.0.to_string().into(),
@@ -627,11 +676,12 @@ fn runner_args(work: &WorkDir, command: &NestedKvmCommand, tar_offset: u64) -> V
     match command.target {
         BootTarget::NestedGuest => {
             let nested = format!(
-                "qemu-system-aarch64 -M virt,gic-version=2 -accel kvm -cpu host -m {} \
+                "qemu-system-aarch64 -M virt,gic-version={} -accel kvm -cpu host -m {} \
                  -nographic -no-reboot -kernel /media/vda/{KERNEL_IN_ISO} \
                  -initrd /media/vda/{INITRAMFS_IN_ISO} \
                  -drive if=virtio,format=raw,readonly=on,file=/dev/vda \
                  -append '{KERNEL_COMMAND_LINE}'\\r",
+                command.gic.qemu_version(),
                 command.nested_ram.0
             );
             args.push("--type-serial".into());
@@ -754,6 +804,8 @@ mod tests {
             "300000000",
             "--cpu",
             "armv9.2",
+            "--gic",
+            "v3",
             "--host-only",
             "--rebuild",
             "--no-build",
@@ -770,6 +822,7 @@ mod tests {
             NestedKvmCommand {
                 ips: InstructionsPerSecond(300_000_000),
                 cpu: HostCpu::Armv9p2,
+                gic: HostGic::V3,
                 target: BootTarget::HostShell,
                 assets: Assets::Rebuild,
                 runner: RunnerBuild::Prebuilt,
@@ -788,6 +841,30 @@ mod tests {
         assert!(parse_nested_kvm_args(&args(&["--nested"])).is_err());
         assert!(parse_nested_kvm_args(&args(&["--cpu"])).is_err());
         assert!(parse_nested_kvm_args(&args(&["--cpu", "max"])).is_err());
+        assert!(parse_nested_kvm_args(&args(&["--gic", "v4"])).is_err());
+    }
+
+    /// The runner gets the GIC `--gic` names, and the nested guest's QEMU a
+    /// GIC of the same version.
+    #[test]
+    fn the_board_and_the_nested_guest_have_the_gic_asked_for() {
+        let work = WorkDir {
+            root: PathBuf::from("w"),
+        };
+        for (gic, name, qemu) in [
+            (HostGic::V2, "v2", "gic-version=2"),
+            (HostGic::V3, "v3", "gic-version=3"),
+        ] {
+            let command = NestedKvmCommand {
+                gic,
+                ..NestedKvmCommand::default()
+            };
+            let args = joined(&runner_args(&work, &command, 77));
+            let at = args.iter().position(|a| a == "--gic").expect("--gic");
+            assert_eq!(args[at + 1], name);
+            assert!(args.iter().any(|a| a.contains(qemu)), "{qemu}");
+            assert_eq!(HostGic::parse(name), Ok(gic));
+        }
     }
 
     /// The runner gets the processor `--cpu` names, with EL2.

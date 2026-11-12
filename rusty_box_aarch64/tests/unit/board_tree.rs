@@ -687,14 +687,14 @@ fn a_tree_that_does_not_fit_is_refused() {
 }
 
 /// The tree of a board with a GICv3 in `layout`.
-fn gic_v3_board(layout: DeviceLayout) -> Vec<u8> {
+fn gic_v3_board(layout: DeviceLayout, gic: GicExtensions) -> Vec<u8> {
     let tree = BoardTree {
         identity: &BoardIdentity::RUSTY_BOX,
         ram_len: RAM,
         cpu: CpuModel::CortexA57,
         psci: PsciConduit::Hvc,
         gic_version: GicVersion::V3,
-        gic: GicExtensions::Absent,
+        gic,
         el2_timers: El2Timers::Physical,
         chosen: PLAIN,
         wiring: InterruptMap::own(layout)
@@ -724,7 +724,7 @@ fn a_gicv3_is_described_by_its_binding() {
             0x0802_0000,
         ),
     ] {
-        let tree = gic_v3_board(layout);
+        let tree = gic_v3_board(layout, GicExtensions::Absent);
         let node = format!("interrupt-controller@{gic:x}");
         assert_eq!(
             prop(&tree, &node, "compatible"),
@@ -778,5 +778,27 @@ fn a_gicv3_is_described_by_its_binding() {
         let (at, len) = (word(12) as usize, word(32) as usize);
         let names = tree[at..at + len].iter().filter(|&&b| b == 0).count();
         assert!(names + 8 <= super::MAX_NAMES, "{names} names");
+    }
+}
+
+/// With the CPU interface's virtualization support (a processor with EL2),
+/// the `arm,gic-v3` node names its maintenance interrupt: PPI 9, INTID 25,
+/// level-high, in the binding's GICv3 form, with no CPU mask; and still no
+/// `GICC`, `GICH` or `GICV` frame.
+#[test]
+fn a_gicv3_with_el2_names_its_maintenance_interrupt() {
+    for layout in DeviceLayout::ALL {
+        let tree = gic_v3_board(layout, GicExtensions::Virtualization);
+        let node = "interrupt-controller@8000000";
+        assert_eq!(
+            prop(&tree, node, "interrupts").map(cells),
+            Some(vec![1, 9, 4]),
+            "{layout}"
+        );
+        assert_eq!(
+            prop(&tree, node, "reg").map(cells).map(|reg| reg.len()),
+            Some(8),
+            "{layout}: the distributor and the Redistributor region alone"
+        );
     }
 }

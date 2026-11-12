@@ -23,8 +23,8 @@ use super::op::predecode;
 use super::za::ZaMove;
 use super::{Activity, Btype, Cpu, Levels};
 use crate::bus::{
-    AccessWidth, BusFault, DescriptorSwap, FetchSource, IccRegister, NoGicSystemRegisters,
-    PhysAddr, PhysBus,
+    AccessWidth, BusFault, DescriptorSwap, FetchSource, GicEl1Traps, GicRegister,
+    NoGicSystemRegisters, PhysAddr, PhysBus,
 };
 use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
 
@@ -107,17 +107,22 @@ impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
     /// A System register access, not a memory access: passed through
     /// unreported.
     #[inline(always)]
-    fn gic_register_read(&mut self, reg: IccRegister) -> Result<u64, NoGicSystemRegisters> {
+    fn gic_register_read(&mut self, reg: GicRegister) -> Result<u64, NoGicSystemRegisters> {
         self.bus.gic_register_read(reg)
     }
 
     #[inline(always)]
     fn gic_register_write(
         &mut self,
-        reg: IccRegister,
+        reg: GicRegister,
         value: u64,
     ) -> Result<(), NoGicSystemRegisters> {
         self.bus.gic_register_write(reg, value)
+    }
+
+    #[inline(always)]
+    fn gic_el1_traps(&self) -> Result<GicEl1Traps, NoGicSystemRegisters> {
+        self.bus.gic_el1_traps()
     }
 }
 

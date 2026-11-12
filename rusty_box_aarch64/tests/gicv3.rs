@@ -458,9 +458,10 @@ fn the_cpu_interface_follows_the_boards_gic() {
     }
 }
 
-/// A GICv3 board's processor cannot have EL2 yet, and the Cortex-A57's
-/// CPU interface has five priority bits, so a GICv3 of other bits does
-/// not match it; the Armv9.2 model takes the board's.
+/// A GICv3 board's processor may have EL2 (its CPU interface then has its
+/// virtualization support, `tests/gicv3_virtualization.rs`), and the
+/// Cortex-A57's CPU interface has five priority bits, so a GICv3 of other
+/// bits does not match it; the Armv9.2 model takes the board's.
 #[test]
 fn a_gicv3_board_refuses_what_its_processor_cannot_have() {
     let v3 = config(CpuModel::CortexA57, GicVersion::V3, DeviceLayout::Board);
@@ -473,7 +474,7 @@ fn a_gicv3_board_refuses_what_its_processor_cannot_have() {
             ram: &mut ram,
             vars: &mut [],
         });
-    assert_eq!(built.err(), Some(BuildError::GicV3WithEl2));
+    assert!(built.is_ok(), "a GICv3 board with EL2 builds");
     let six = GicShape {
         priority_bits: PriorityBits::Six,
         ..GicShape::DEFAULT

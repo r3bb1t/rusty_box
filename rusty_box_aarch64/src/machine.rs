@@ -30,7 +30,7 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{ClockHz, Progress, RunBudget, SnapError, VmClock, VmInstant};
 
 use crate::board::{
-    GicVersion, Plugged, Plugs, TransportOrder, VirtBoard, VirtioDevices, WithGicV3, FLASH0_BASE,
+    BoardGic, GicVersion, Plugged, Plugs, TransportOrder, VirtBoard, VirtioDevices, WithGicV3, FLASH0_BASE,
     FLASH_BANK_SIZE, RAM_BASE, RAM_LIMIT,
 };
 use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
@@ -42,8 +42,8 @@ use crate::bus::{load_le, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
 use crate::cpu::{
     Activity, CounterRate, Cpu, CpuConfig, CpuModel, CpuState, DebugStops, FixedCounterRate,
     GicCpuInterface, Levels, NoEl2, NoTranslation, PsciConduit, Pstate, PstateRefusal, Reg,
-    SpectreReport, Step, StopCause, SysReg, SysRegRefusal, UndefinedInsn, VReg, VirtualLines,
-    WithEl2, WriteEffect, PSCI_COMPATIBLE,
+    SpectreReport, Step, StopCause, SysReg, SysRegRefusal, SystemRegisterInterface, UndefinedInsn,
+    VReg, WithEl2, WriteEffect, PSCI_COMPATIBLE,
 };
 use crate::devices::gicv2::{GicExtensions, GicShape, PriorityBits};
 use crate::devices::pl011::TX_CAPACITY;
@@ -101,9 +101,9 @@ pub struct VirtConfig {
     pub spectre: SpectreReport,
     /// The GIC's SPIs and priority bits.
     pub gic: GicShape,
-    /// Which GIC the board has: a GICv2, or a GICv3 whose CPU interface
-    /// the processor reaches through its System registers, which a
-    /// processor with EL2 cannot have yet ([`BuildError::GicV3WithEl2`]).
+    /// Which GIC the board has: a GICv2, or a GICv3 whose CPU interface,
+    /// with its virtualization support where the processor has EL2, the
+    /// processor reaches through its System registers.
     pub gic_version: GicVersion,
     /// The SPIs the devices drive, and the GICv2m frame's, which the GIC
     /// must have for the layout's virtio transports
@@ -221,12 +221,6 @@ pub enum BuildError {
     /// A host's device tree puts a key on a line of the board's GPIO other
     /// than the one the configuration's layout has the power button on.
     HostTreePowerButton(HostTreePowerButton),
-    /// The configuration asks for a GICv3 ([`GicVersion::V3`]) on a
-    /// processor with EL2. A processor with FEAT_GICv3 and EL2 has the GIC
-    /// CPU interface's virtualization registers (Arm's register data:
-    /// `ICH_HCR_EL2` and the other `ICH_*_EL2` exist wherever FEAT_GICv3
-    /// and EL2 do), which the board's GICv3 does not implement yet.
-    GicV3WithEl2,
     /// The configuration gives a GICv3 board's CPU interface priority bits
     /// the processor's own CPU interface does not have.
     GicCpuInterface(GicCpuInterfaceBits),
@@ -348,10 +342,6 @@ impl core::fmt::Display for BuildError {
             Self::HostTreeInterrupt(e) => write!(f, "{e}"),
             Self::HostTreeAddress(e) => write!(f, "{e}"),
             Self::HostTreePowerButton(e) => write!(f, "{e}"),
-            Self::GicV3WithEl2 => f.write_str(
-                "a GICv3 board's processor cannot have EL2 yet: its GIC CPU interface \
-                 has no virtualization registers; a GICv2 board's can",
-            ),
             Self::GicCpuInterface(e) => write!(f, "{e}"),
         }
     }
@@ -368,10 +358,7 @@ impl core::error::Error for BuildError {
             Self::HostTreeAddress(e) => Some(e),
             Self::HostTreePowerButton(e) => Some(e),
             Self::GicCpuInterface(e) => Some(e),
-            Self::FirmwareTooLarge
-            | Self::VariablesTooLarge
-            | Self::LentRamSize { .. }
-            | Self::GicV3WithEl2 => None,
+            Self::FirmwareTooLarge | Self::VariablesTooLarge | Self::LentRamSize { .. } => None,
         }
     }
 }
@@ -876,7 +863,9 @@ impl DeviceTree {
 
 /// The GIC of a machine whose processor implements `L`: with the
 /// Virtualization Extensions where it has EL2, as QEMU's `virt` builds its
-/// GICv2 under `virtualization=on`.
+/// GICv2 under `virtualization=on`; a GICv3's CPU interface, with its
+/// virtualization support there (Arm's register data: `ICH_HCR_EL2` and
+/// the other `ICH_*_EL2` exist wherever FEAT_GICv3 and EL2 do).
 const fn gic_extensions<L: Levels>() -> GicExtensions {
     if L::EL2 {
         GicExtensions::Virtualization
@@ -915,8 +904,8 @@ impl GicPath for ThroughGicV2 {
 }
 
 /// The path of a board with a GICv3 ([`GicVersion::V3`]): the board as
-/// [`WithGicV3`] decodes it, and the GICv3 drives the physical inputs. Its
-/// processor has no EL2, so no virtual ones.
+/// [`WithGicV3`] decodes it, and the GICv3 drives the inputs, the virtual
+/// ones from its virtual CPU interface where the processor has EL2.
 enum ThroughGicV3 {}
 
 impl GicPath for ThroughGicV3 {
@@ -926,7 +915,7 @@ impl GicPath for ThroughGicV3 {
     fn drive<S: GuestStorage, L: Levels>(cpu: &mut Cpu<L>, board: &VirtBoard<S>) {
         let lines = board.gic_v3_lines();
         cpu.set_interrupt_lines(lines.irq, lines.fiq);
-        cpu.set_virtual_interrupt_lines(VirtualLines::NONE);
+        cpu.set_virtual_interrupt_lines(board.gic_v3_virtual_lines());
     }
 }
 
@@ -1613,7 +1602,7 @@ fn plan<L: Levels>(
     let cpu = config.cpu;
     cpu.check_counter_rate(config.counter)
         .map_err(BuildError::FixedCounterRate)?;
-    check_gic::<L>(config)?;
+    check_gic(config)?;
     let wiring = config
         .interrupts
         .wire(config.gic.spis, config.layout)
@@ -1662,14 +1651,12 @@ fn plan<L: Levels>(
     })
 }
 
-/// Refuse a GIC the configuration's processor of the levels `L` cannot
-/// have: a GICv3 on a processor with EL2 ([`BuildError::GicV3WithEl2`]),
-/// or one whose priority bits are not those of the CPU interface the
-/// processor implements ([`BuildError::GicCpuInterface`]).
-fn check_gic<L: Levels>(config: &VirtConfig) -> Result<(), BuildError> {
+/// Refuse a GIC the configuration's processor cannot have: a GICv3 whose
+/// priority bits are not those of the CPU interface the processor
+/// implements ([`BuildError::GicCpuInterface`]).
+fn check_gic(config: &VirtConfig) -> Result<(), BuildError> {
     match config.gic_version {
         GicVersion::V2 => Ok(()),
-        GicVersion::V3 if L::EL2 => Err(BuildError::GicV3WithEl2),
         GicVersion::V3 => match config.cpu.gic_cpu_interface_bits() {
             Some(interface) if interface != config.gic.priority_bits => {
                 Err(BuildError::GicCpuInterface(GicCpuInterfaceBits {
@@ -1684,11 +1671,15 @@ fn check_gic<L: Levels>(config: &VirtConfig) -> Result<(), BuildError> {
 }
 
 /// The processor's System register interface to the GIC CPU interface: a
-/// GICv3's, of its priority bits, or none with a GICv2.
+/// GICv3's, of its priority bits and the processor's virtual interface, or
+/// none with a GICv2.
 const fn gic_cpu_interface(config: &VirtConfig) -> GicCpuInterface {
     match config.gic_version {
         GicVersion::V2 => GicCpuInterface::Absent,
-        GicVersion::V3 => GicCpuInterface::SystemRegisters(config.gic.priority_bits),
+        GicVersion::V3 => GicCpuInterface::SystemRegisters(SystemRegisterInterface {
+            priority_bits: config.gic.priority_bits,
+            virtual_interface: config.cpu.gic_virtual_interface(config.gic.priority_bits),
+        }),
     }
 }
 
@@ -1734,9 +1725,12 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
             config.rtc_epoch_seconds,
             plugs,
             &identity,
-            config.gic_version,
-            gic_extensions::<L>(),
-            config.gic,
+            BoardGic {
+                version: config.gic_version,
+                extensions: gic_extensions::<L>(),
+                virtual_interface: config.cpu.gic_virtual_interface(config.gic.priority_bits),
+                shape: config.gic,
+            },
             wiring,
             config.transport_order,
             config.layout,
@@ -3046,7 +3040,10 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// the count of transports it wires, device layout and occupied transports,
 /// and the board's devices: the GIC — a GICv2 with its Virtualization
 /// Extensions where it has them, or a GICv3 with its Redistributor and CPU
-/// interface — the PL011 (its modem status inputs those its `UARTCR` drives),
+/// interface, and where the processor has EL2 the CPU interface's
+/// virtualization support (`ICH_HCR_EL2`, `ICH_VMCR_EL2`, the active
+/// priority registers, the List registers of the processor's virtual
+/// interface and `ICC_SRE_EL2`) — the PL011 (its modem status inputs those its `UARTCR` drives),
 /// the PL031 (its alarm armed while its raw status is clear), the PL061,
 /// both flash banks and every
 /// virtio-mmio transport, each queue's state checked against the size its
@@ -3066,8 +3063,10 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// trap registers (FEAT_FGT), `HCRX_EL2` (FEAT_HCX), and the TLB's stage 1
 /// memory told apart by shareability and stage 2 memory by `HCR_EL2.FWB`'s
 /// rule (FEAT_S2FWB), whose stage 2 contexts hold `FWB`, and `VNCR_EL2`
-/// (FEAT_NV2) with the EL1&0 contexts' `HCR_EL2.NV` and `NV1` (FEAT_NV).
-const SNAPSHOT_VERSION: u32 = 40;
+/// (FEAT_NV2) with the EL1&0 contexts' `HCR_EL2.NV` and `NV1` (FEAT_NV),
+/// and on a GICv3 board with EL2 the CPU interface's virtualization
+/// support and `HFGRTR_EL2` and `HFGWTR_EL2` with `ICC_IGRPENn_EL1`.
+const SNAPSHOT_VERSION: u32 = 41;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

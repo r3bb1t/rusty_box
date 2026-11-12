@@ -69,7 +69,8 @@ pub use board::{
     GicVersion, Plugged, TransportOrder, UnknownGicVersion, UnknownTransportOrder, VirtioDevices,
 };
 pub use bus::{
-    AccessWidth, ApIndex, BusFault, IccRegister, NoGicSystemRegisters, PhysAddr, PhysBus,
+    AccessWidth, ApIndex, BusFault, GicEl1Traps, GicRegister, GicTrap, IccRegister, IchRegister,
+    IcvRegister, LrIndex, NoGicSystemRegisters, PhysAddr, PhysBus,
 };
 pub use cpu::{
     Btype, CounterRate, Cpu, CpuConfig, CpuModel, CpuState, CpuStateEl2, El, FixedCounterRate,

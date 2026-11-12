@@ -85,9 +85,17 @@
 //! priority is below `ICC_PMR_EL1` and its group priority, under its own
 //! group's binary point, above the running priority's.
 //!
+//! For a processor with EL2 the CPU interface has its virtualization
+//! support too ([`super::gicv3_virt`]): the virtual interface control
+//! registers, the virtual CPU interface and `ICC_SRE_EL2`. Its maintenance
+//! interrupt drives PPI 25 as a level-sensitive line of this
+//! Redistributor's, and a hardware List register's deactivation
+//! deactivates its physical interrupt here (IHI 0069G 12.4.6 `HW`), as an
+//! `ICC_DIR_EL1` write would, whatever `EOImode` says.
+//!
 //! Interrupt state is recomputed after every register access and every
-//! input line change; the machine reads [`GicV3::irq_out`] and
-//! [`GicV3::fiq_out`] between instructions.
+//! input line change; the machine reads [`GicV3::irq_out`],
+//! [`GicV3::fiq_out`] and [`GicV3::virtual_lines`] between instructions.
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
@@ -97,7 +105,11 @@ use super::gicv2::{
     GICD_CTLR_EN_GRP1, IDLE_PRIORITY, MAXIRQ, MAX_APRS, MAX_IRQ, NR_SGIS, SGI_BITS, SPURIOUS,
     V2M_MSI_SETSPI_NS, WORDS,
 };
-use crate::bus::{AccessWidth, IccRegister, RegOffset};
+use super::gicv3_virt::{
+    PhysicalDeactivation, VirtualInterface, VirtualInterfaceShape, MAINTENANCE_INTID,
+};
+use crate::bus::{AccessWidth, GicEl1Traps, GicRegister, IccRegister, RegOffset};
+use crate::cpu::VirtualLines;
 
 /// `GICD_CTLR.ARE`, RAO/WI: affinity routing always.
 const GICD_CTLR_ARE: u32 = 1 << 4;
@@ -161,6 +173,7 @@ enum ProcessorSleep {
 }
 
 /// The interrupt controller.
+#[derive(Clone)]
 pub struct GicV3 {
     /// `GICD_CTLR`'s group enables.
     dist_ctlr: u32,
@@ -202,6 +215,12 @@ pub struct GicV3 {
     hppi: Option<usize>,
     irq_out: bool,
     fiq_out: bool,
+    /// The CPU interface's EL2 state, for a processor with EL2: the virtual
+    /// interface and `ICC_SRE_EL2`.
+    el2: Option<VirtualInterface>,
+    /// The virtual IRQ and FIQ the virtual CPU interface signals,
+    /// recomputed by [`GicV3::refresh_virtual`].
+    virtual_lines: VirtualLines,
     /// Who the GIC says made it: `GICD_IIDR` and `GICR_IIDR` read the
     /// distributor's identification, the GICv2m frame its own.
     names: GicNames,
@@ -211,8 +230,20 @@ pub struct GicV3 {
 
 impl GicV3 {
     /// A GIC out of reset of `shape`, named `names`, its GICv2m frame's
-    /// SPIs `msi`, which the board found all the GIC's.
+    /// SPIs `msi`, which the board found all the GIC's, for a processor
+    /// without EL2.
     pub fn new(shape: GicShape, names: GicNames, msi: Option<MsiFrame>) -> Self {
+        Self::with_el2(shape, names, msi, None)
+    }
+
+    /// [`GicV3::new`], its CPU interface with the virtualization support of
+    /// `el2` for a processor with EL2, if it is one.
+    pub(crate) fn with_el2(
+        shape: GicShape,
+        names: GicNames,
+        msi: Option<MsiFrame>,
+        el2: Option<VirtualInterfaceShape>,
+    ) -> Self {
         let mut edge = Bits::new();
         for sgi in 0..NR_SGIS {
             edge.set(sgi, true);
@@ -239,6 +270,8 @@ impl GicV3 {
             hppi: None,
             irq_out: false,
             fiq_out: false,
+            el2: el2.map(VirtualInterface::new),
+            virtual_lines: VirtualLines::NONE,
             names,
             shape,
             msi,
@@ -247,10 +280,11 @@ impl GicV3 {
         gic
     }
 
-    /// A reset: the GIC out of reset with the shape, the names and the
-    /// GICv2m frame it has.
+    /// A reset: the GIC out of reset with the shape, the names, the GICv2m
+    /// frame and the virtualization support it has.
     pub fn reset(&mut self) {
-        *self = Self::new(self.shape, self.names, self.msi);
+        let el2 = self.el2.as_ref().map(VirtualInterface::shape);
+        *self = Self::with_el2(self.shape, self.names, self.msi, el2);
     }
 
     /// What firmware does as it powers the processor on: bring its
@@ -277,6 +311,81 @@ impl GicV3 {
     #[inline]
     pub fn fiq_out(&self) -> bool {
         self.fiq_out
+    }
+
+    /// The virtual IRQ and FIQ outputs to the processor, from the virtual
+    /// CPU interface; none without one.
+    #[inline]
+    pub fn virtual_lines(&self) -> VirtualLines {
+        self.virtual_lines
+    }
+
+    /// The controls of EL2 that trap an EL1 access to the CPU interface's
+    /// System registers: `ICH_HCR_EL2`'s and `ICC_SRE_EL2.Enable`; with no
+    /// virtualization support, none, which no processor asks for (one
+    /// without EL2 meets no such trap).
+    pub(crate) fn el1_traps(&self) -> GicEl1Traps {
+        match &self.el2 {
+            Some(el2) => GicEl1Traps::of(el2.hcr(), el2.sre_el2()),
+            None => GicEl1Traps::of(0, u64::MAX),
+        }
+    }
+
+    /// An `MRS` of `reg`, the physical CPU interface's or the virtual
+    /// one's, with the read's side effect (an acknowledge). A register of
+    /// the virtualization support of a GIC without it reads as zero, which
+    /// no processor asks for.
+    pub fn register_read(&mut self, reg: GicRegister) -> u64 {
+        let value = match (reg, &mut self.el2) {
+            (GicRegister::Physical(icc), _) => return self.icc_read(icc),
+            (GicRegister::Virtual(icv), Some(el2)) => el2.virtual_read(icv),
+            (GicRegister::Control(ich), Some(el2)) => el2.control_read(ich),
+            (GicRegister::SreEl2, Some(el2)) => el2.sre_el2(),
+            (GicRegister::Virtual(_) | GicRegister::Control(_) | GicRegister::SreEl2, None) => {
+                return 0
+            }
+        };
+        self.refresh_virtual();
+        value
+    }
+
+    /// An `MSR` of `value` to `reg`: a hardware List register's
+    /// deactivation deactivates its physical interrupt. A register of the
+    /// virtualization support of a GIC without it ignores it, which no
+    /// processor asks for.
+    pub fn register_write(&mut self, reg: GicRegister, value: u64) {
+        let deactivation = match (reg, &mut self.el2) {
+            (GicRegister::Physical(icc), _) => return self.icc_write(icc, value),
+            (GicRegister::Virtual(icv), Some(el2)) => el2.virtual_write(icv, value),
+            (GicRegister::Control(ich), Some(el2)) => {
+                el2.control_write(ich, value);
+                PhysicalDeactivation(None)
+            }
+            (GicRegister::SreEl2, Some(el2)) => {
+                el2.set_sre_el2(value);
+                PhysicalDeactivation(None)
+            }
+            (GicRegister::Virtual(_) | GicRegister::Control(_) | GicRegister::SreEl2, None) => {
+                return
+            }
+        };
+        if let PhysicalDeactivation(Some(intid)) = deactivation {
+            self.deactivate(intid);
+        }
+        self.refresh_virtual();
+    }
+
+    /// Bring the virtual CPU interface's outputs up to date: the virtual
+    /// IRQ and FIQ, and the maintenance interrupt's line, PPI 25; then the
+    /// physical outputs, which that line feeds.
+    fn refresh_virtual(&mut self) {
+        let Some(el2) = &self.el2 else {
+            return;
+        };
+        self.virtual_lines = el2.outputs();
+        self.level
+            .set(MAINTENANCE_INTID as usize, el2.maintenance());
+        self.update();
     }
 
     /// Drive input line `intid` (a PPI or SPI that exists) to `level`.
@@ -1003,7 +1112,10 @@ impl GicV3 {
         for route in self.route {
             w.write_u64(route)?;
         }
-        Ok(())
+        match &self.el2 {
+            Some(el2) => el2.save(w),
+            None => Ok(()),
+        }
     }
 
     /// The banks a snapshot holds, in its order.
@@ -1055,6 +1167,10 @@ impl GicV3 {
         for entry in route.iter_mut() {
             *entry = r.read_u64()?;
         }
+        let el2 = match &self.el2 {
+            Some(el2) => Some(VirtualInterface::restore(el2.shape(), r)?),
+            None => None,
+        };
         let mut restored = Self {
             dist_ctlr,
             enabled,
@@ -1077,6 +1193,8 @@ impl GicV3 {
             hppi: None,
             irq_out: false,
             fiq_out: false,
+            el2,
+            virtual_lines: VirtualLines::NONE,
             names: self.names,
             shape: self.shape,
             msi: self.msi,
@@ -1084,6 +1202,7 @@ impl GicV3 {
         restored.check_restored()?;
         restored.route_all();
         restored.update();
+        restored.refresh_virtual();
         *self = restored;
         Ok(())
     }
@@ -1094,8 +1213,10 @@ impl GicV3 {
     /// mask with an unimplemented bit set, an active priority of a
     /// preemption level the priority bits do not give, state or a route of
     /// an interrupt that does not exist, a route with a bit no field holds,
-    /// an SGI that is not edge-triggered or has a line, and a PPI that is
-    /// not level-sensitive.
+    /// an SGI that is not edge-triggered or has a line, a PPI that is not
+    /// level-sensitive, and a maintenance interrupt line other than what
+    /// the virtual interface asserts. The virtual interface's own registers
+    /// were checked as they were read ([`VirtualInterface::restore`]).
     fn check_restored(&self) -> SnapResult {
         let groups = GICD_CTLR_EN_GRP0 | GICD_CTLR_EN_GRP1;
         if self.dist_ctlr & !groups != 0
@@ -1141,6 +1262,12 @@ impl GicV3 {
         if self.edge.0[0] != SGI_BITS || self.level.0[0] & SGI_BITS != 0 {
             return Err(SnapError::Invalid(
                 "GICv3 SGI or PPI configuration its registers cannot hold",
+            ));
+        }
+        let maintenance = self.el2.as_ref().is_some_and(VirtualInterface::maintenance);
+        if self.level.get(MAINTENANCE_INTID as usize) != maintenance {
+            return Err(SnapError::Invalid(
+                "GICv3 maintenance interrupt line disagrees with ICH_MISR_EL2",
             ));
         }
         Ok(())

@@ -26,6 +26,7 @@ use super::impdef::ImpdefSpace;
 use super::pmu::PmuShape;
 use crate::bus::PhysAddr;
 use crate::devices::gicv2::PriorityBits;
+use crate::devices::gicv3_virt::VirtualInterfaceShape;
 use crate::layout::DeviceLayout;
 use rusty_box_core::ClockHz;
 
@@ -1331,6 +1332,21 @@ impl CpuModel {
         match self {
             Self::CortexA57 => Some(PriorityBits::Five),
             Self::Armv9p2 => None,
+        }
+    }
+
+    /// The virtual interface of the GIC CPU interface the processor
+    /// implements, of `physical` priority bits, which a processor with EL2
+    /// reaches through its `ICH_*_EL2` registers ([`VirtualInterfaceShape`]):
+    /// the Cortex-A57's (DDI 0488H Table 8-13), and the Armv9.2 model's
+    /// own, its virtual priority bits following the physical ones.
+    pub(crate) const fn gic_virtual_interface(
+        self,
+        physical: PriorityBits,
+    ) -> VirtualInterfaceShape {
+        match self {
+            Self::CortexA57 => VirtualInterfaceShape::CORTEX_A57,
+            Self::Armv9p2 => VirtualInterfaceShape::armv9p2(physical),
         }
     }
 

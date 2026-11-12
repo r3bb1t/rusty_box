@@ -1286,8 +1286,10 @@ const _: () = assert!(matches!(El2Reg::ALL[0], El2Reg::Hcr));
 impl El2Reg {
     /// What of `value` an `MSR` to the register keeps on a processor
     /// implementing `imp`, whose `SPSR_ELx` bits are `spsr_mask`, in
-    /// `layout`: what the architecture keeps ([`El2Reg::kept`]), of an
-    /// IMPLEMENTATION DEFINED register what the implementation keeps of that
+    /// `layout`: what the architecture keeps ([`El2Reg::kept`]) and the
+    /// fields the processor's GIC CPU interface adds
+    /// ([`FgtReg::gic_fields`]), of an IMPLEMENTATION DEFINED register what
+    /// the implementation keeps of that
     /// ([`ImpdefSpace::el2_kept`](super::impdef::ImpdefSpace::el2_kept)).
     pub(crate) const fn held(
         self,
@@ -1296,8 +1298,61 @@ impl El2Reg {
         layout: E2hLayout,
         value: u64,
     ) -> u64 {
-        imp.impdef
-            .el2_kept(self, self.kept(imp.features, spsr_mask, layout, value))
+        let gic = match self.fine_grained() {
+            Some(fgt) => fgt.gic_fields(imp),
+            None => 0,
+        };
+        let kept = self.kept(imp.features, spsr_mask, layout, value) | (value & gic);
+        imp.impdef.el2_kept(self, kept)
+    }
+
+    /// The fine-grained trap register this is, if it is one.
+    const fn fine_grained(self) -> Option<FgtReg> {
+        match self {
+            Self::Hfgrtr => Some(FgtReg::Hfgrtr),
+            Self::Hfgwtr => Some(FgtReg::Hfgwtr),
+            Self::Hfgitr => Some(FgtReg::Hfgitr),
+            Self::Hdfgrtr => Some(FgtReg::Hdfgrtr),
+            Self::Hdfgwtr => Some(FgtReg::Hdfgwtr),
+            Self::Hcr
+            | Self::Sctlr
+            | Self::Actlr
+            | Self::Cptr
+            | Self::Hstr
+            | Self::Hacr
+            | Self::Mdcr
+            | Self::Tcr
+            | Self::Ttbr0
+            | Self::Vtcr
+            | Self::Vttbr
+            | Self::Mair
+            | Self::Amair
+            | Self::Vbar
+            | Self::Esr
+            | Self::Far
+            | Self::Hpfar
+            | Self::Elr
+            | Self::Spsr
+            | Self::Afsr0
+            | Self::Afsr1
+            | Self::Tpidr
+            | Self::Vpidr
+            | Self::Vmpidr
+            | Self::Smcr
+            | Self::Cnthctl
+            | Self::Cntvoff
+            | Self::Cntpoff
+            | Self::CnthpCtl
+            | Self::CnthpCval
+            | Self::Contextidr
+            | Self::Vdisr
+            | Self::Vsesr
+            | Self::Ttbr1
+            | Self::CnthvCtl
+            | Self::CnthvCval
+            | Self::Hcrx
+            | Self::Vncr => None,
+        }
     }
 }
 

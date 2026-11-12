@@ -6,6 +6,7 @@ pub mod cfi_flash;
 pub mod gicv2;
 pub(crate) mod gicv2_virt;
 pub mod gicv3;
+pub(crate) mod gicv3_virt;
 pub mod pl011;
 pub mod pl031;
 pub mod pl061;

@@ -20,7 +20,8 @@
 use super::el2::{El2Regs, HCRX_FGTNXS};
 use super::exception::{Exception, SyndromeClass};
 use super::exec::Fault;
-use super::features::{Feature, Features};
+use super::features::{Feature, Features, Implementation};
+use super::gic::GicCpuInterface;
 use super::{Cpu, El, Levels};
 
 /// One of the fine-grained trap registers.
@@ -63,7 +64,32 @@ impl FgtReg {
             Self::Hdfgwtr => hdfgwtr_mask(features),
         }
     }
+
+    /// The fields the System register interface to a GIC CPU interface
+    /// (FEAT_GICv3) adds to the register on a processor implementing `imp`:
+    /// `HFGRTR_EL2.ICC_IGRPENn_EL1` and `HFGWTR_EL2.ICC_IGRPENn_EL1`
+    /// (bit 39), with FEAT_FGT, which the board's GIC gives where it is a
+    /// GICv3, the processor's features where they do not.
+    pub(crate) const fn gic_fields(self, imp: Implementation) -> u64 {
+        let interface = !matches!(imp.gic, GicCpuInterface::Absent);
+        match self {
+            Self::Hfgrtr | Self::Hfgwtr if interface && imp.features.has(Feature::Fgt) => {
+                1 << FGT_ICC_IGRPEN
+            }
+            Self::Hfgrtr | Self::Hfgwtr | Self::Hfgitr | Self::Hdfgrtr | Self::Hdfgwtr => 0,
+        }
+    }
+
+    /// The register's fields on a processor implementing `imp`: its
+    /// features' and its GIC CPU interface's.
+    const fn fields(self, imp: Implementation) -> u64 {
+        self.mask(imp.features) | self.gic_fields(imp)
+    }
 }
+
+/// `HFGRTR_EL2.ICC_IGRPENn_EL1` and `HFGWTR_EL2.ICC_IGRPENn_EL1`: EL1's
+/// accesses to `ICC_IGRPEN0_EL1` and `ICC_IGRPEN1_EL1` trap to EL2.
+pub(crate) const FGT_ICC_IGRPEN: u32 = 39;
 
 /// When a fine-grained trap field traps.
 ///
@@ -105,13 +131,13 @@ impl FineGrainedTrap {
         }
     }
 
-    /// Whether the field traps on a processor implementing `features`
-    /// whose EL2 registers are `regs`: a field the processor has
-    /// ([`FgtReg::mask`]) holding the value that traps. A field the
+    /// Whether the field traps on a processor implementing `imp` whose EL2
+    /// registers are `regs`: a field the processor has ([`FgtReg::mask`],
+    /// [`FgtReg::gic_fields`]) holding the value that traps. A field the
     /// processor lacks traps nothing, whichever way Arm names it.
-    const fn traps(self, regs: &El2Regs, features: Features) -> bool {
+    const fn traps(self, regs: &El2Regs, imp: Implementation) -> bool {
         let bit = 1u64 << self.bit;
-        if self.reg.mask(features) & bit == 0 {
+        if self.reg.fields(imp) & bit == 0 {
             return false;
         }
         let set = self.reg.value(regs) & bit != 0;
@@ -394,7 +420,7 @@ impl<L: Levels> Cpu<L> {
             El::El0 => !self.el0_in_host(),
             El::El2 => false,
         };
-        L::EL2 && applies && trap.traps(self.el2(), self.imp.features)
+        L::EL2 && applies && trap.traps(self.el2(), self.imp.get())
     }
 
     /// [`Cpu::fine_grained_traps`] of `trap`, where there is one.

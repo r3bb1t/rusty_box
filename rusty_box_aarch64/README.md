@@ -40,7 +40,8 @@ index's signature against the keys in the ISO's initramfs, and each
 package's checksum against its index), builds a disk of the ISO followed
 by a tar of the packages and the runner, and boots the Cortex-A57 with
 virtualization, whose KVM runs in nVHE mode, or with `--cpu armv9.2` the
-Armv9.2 model, whose KVM runs in VHE mode, to the nested guest's own
+Armv9.2 model, whose KVM runs in VHE mode, on the board's GICv2 or with
+`--gic v3` its GICv3, to the nested guest's own
 `login:`, then leaves the terminal to you (Ctrl-A x quits the nested
 QEMU). Its steps are kept in `target/nested-kvm` and skipped when done;
 `--help` lists its options.
@@ -83,7 +84,7 @@ SPIs, eight priority bits, a 62.5 MHz counter), and the choice is its own.
 | `spectre` | `SpectreReport` | `NotRequired`, `Mitigated`, `Unreported` | DEN 0028F §7.5 to §7.7 |
 | `counter` | `CounterRate` | 1 GHz; any rate from BSA's 10 MHz to what `CNTFRQ_EL0`'s 32 bits hold, on a processor whose architecture leaves it open (the Cortex-A57; Armv8.6 and later fix 1 GHz, and the build refuses another, `BuildError::FixedCounterRate`) | Arm ARM "The system counter"; BSA DEN0094C RB_TIME_02 |
 | `gic` | `GicShape { spis: SpiCount, priority_bits: PriorityBits }` | 480 SPIs, five priority bits (the GIC-400's); SPIs in 32s from 32 (the fewest any interrupt map fits, the devices' 11 lines on the board's own layout and an MSI; the board's own map needs 64), priority bits `Four` to `Eight`, the binary points and active priority registers following | IHI 0048B §4.3.2, Table 3-1, Table 4-47; DDI 0471B §2.3.3 |
-| `gic_version` | `GicVersion` | `V2`, a GICv2 (the GIC-400's architecture); `V3`, a GICv3 whose CPU interface is the processor's `ICC_*` System registers, on a processor without EL2 (the build refuses EL2, `BuildError::GicV3WithEl2`, until the GICv3 has its virtual CPU interface; and on the Cortex-A57, whose own CPU interface has five priority bits, any other `gic.priority_bits`, `BuildError::GicCpuInterface`) | BSA DEN0094C RB_GIC_01; IHI 0069G; DDI 0488H Table 8-13 |
+| `gic_version` | `GicVersion` | `V2`, a GICv2 (the GIC-400's architecture); `V3`, a GICv3 whose CPU interface is the processor's `ICC_*` System registers, with EL2 its virtualization support too (`ICH_*_EL2`, `ICV_*_EL1`, `ICC_SRE_EL2`; the build refuses, on the Cortex-A57, whose own CPU interface has five priority bits, any other `gic.priority_bits`, `BuildError::GicCpuInterface`) | BSA DEN0094C RB_GIC_01; IHI 0069G; DDI 0488H Table 8-13 |
 | `interrupts` | `InterruptMap { uart, rtc, gpio, virtio, pcie_intx: Spi, msi: MsiSpis }` | `InterruptMap::own(layout)`: the devices' lines from SPI 0 in the order of their registers' addresses (UART 0, RTC 1, GPIO 2, the layout's virtio transports from 3, the PCIe host's INTA to INTD after them) and the GICv2m frame every SPI from the first after them whose interrupt ID is a multiple of 32 (`MsiExtent::ToTheLast`); on the board's own layout (`InterruptMap::DEFAULT`) the 4 transports 3 to 6, INTA to INTD 7 to 10 and the frame from SPI 32, INTID 64, so 32 to 479 on 480; on QEMU's the 32 transports 3 to 34, INTA to INTD 35 to 38 and the frame from SPI 64, INTID 96. Any map whose SPIs the GIC has, the frame at least one, and no two sources share, the layout's transports taking a run of SPIs (`BuildError::InterruptMap`), the frame's count 1 to 1023 | IHI 0048B §2.2.1; BSA DEN0094C I.5, I.9.1; PCI Local Bus 3.0 §6.8.1.6 |
 | `transport_order` | `TransportOrder` | `FirstFree`, each virtio device (the display, the keyboard, the tablet, the disk, in that order) in the first transport the ones before it left free, so the first at the lowest address and first in the device tree; `LastFree`, from the last down | OASIS virtio 1.2 §4.2 (left to the platform) |
 | `layout` | `DeviceLayout` | `Board`, the board's own (the GIC-400's block at 0x0800_0000, the GICv2m frame, the PrimeCells and 4 virtio transports, one for each device the board can plug in, in a 64 KiB page each from 0x0801_0000, each transport decoding its page, the PCIe host's 32-bit window at 0x2000_0000 and its ECAM and 64-bit window from 256 GiB); `QemuVirt`, QEMU `virt`'s, for a tree QEMU wrote, its 32 transports 512 bytes apart; RAM at 0x4000_0000 and the flash at 0 in both (see "QEMU fingerprints left"); the power button on the GPIO's line 0 on `Board`, line 3 on `QemuVirt`. A host's tree naming another address for a device fails the build (`BuildError::HostTreeAddress`), as does one putting a `gpio-keys` key on another line of the board's GPIO (`BuildError::HostTreePowerButton`) | DEN0001C 4.1.2, 4.3.2, P29; DDI 0471B Table 3-1; OASIS virtio 1.2 §4.2.2 |
@@ -343,10 +344,10 @@ is) must reproduce, are:
 | Part | Model |
 |---|---|
 | Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, of revision r1p3 (`MIDR_EL1` 0x411F_D073, the revision its TRM, DDI 0488H, describes; see "Where the references differ"), the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and EL2 with `MachineBuilder::with_el2` (see below; on the Armv9.2 model with FEAT_VHE and the other EL2 features Arm requires of an Armv9.2 processor with EL2, and nested virtualization, FEAT_NV with FEAT_NV2), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), on the Cortex-A57 its TRM's IMPLEMENTATION DEFINED registers (`CPUACTLR_EL1`, `CPUECTLR_EL1`, `L2CTLR_EL1`, `L2ECTLR_EL1`, `L2ACTLR_EL1`, the memory error syndrome registers, `CBAR_EL1` reading where the layout has the GIC, `RAMINDEX` and its data registers, and `ACTLR_EL2`'s access controls; see "Where the references differ") and none on the Armv9.2 model, each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB and 64 KiB granules, the Cortex-A57's (DDI 0488H, 4.3.21), and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB granule too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at both stages with EL2), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ"); a PMU (`src/cpu/pmu.rs`) with the cycle counter and six event counters, the Cortex-A57's its TRM's PMUv3 (DDI 0488H chapter 11: `PMCR_EL0.IMP` 0x41, `IDCODE` 0x01, 32-bit event counters) and the Armv9.2 model's FEAT_PMUv3p7 with FEAT_PMUv3p5's 64-bit event counters and FEAT_PMUv3p4's `PMMIR_EL1`, with `PMUSERENR_EL0`'s EL0 access and `MDCR_EL2`'s traps, `HPMN`, `HPME`, `HPMD`, `HCCD`, `HLP` and `HPMFZO`, the `P`, `U` and `NSH` filters, `CHAIN`, freezing on overflow (FEAT_PMUv3p7), and PMUIRQ on PPI 23; it counts the events it advertises in `PMCEID0_EL0` and `PMCEID1_EL0` — `SW_INCR`, `INST_RETIRED`, `EXC_TAKEN`, `EXC_RETURN`, `CID_WRITE_RETIRED`, `CPU_CYCLES`, `TTBR_WRITE_RETIRED` and `CHAIN`, and on the Armv9.2 model the stall events, which count nothing — with the processor's clock the instruction clock: one cycle per instruction, stopped while the processor waits (see "Where the references differ") |
-| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive, and BSA's PPI 22 for the DCC's COMMIRQ and PPI 23 for the PMU's PMUIRQ; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0800_4000, the common base and processor 0's at 0x0800_5000, 4 KiB each, on the board's own layout) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0800_6000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them. Or, as the board's option (`VirtConfig::gic_version`), a GICv3 (IHI 0069G, `src/devices/gicv3.rs`) in a single Security state (`GICD_CTLR.DS` RAO/WI) with affinity routing only (`ARE` RAO/WI) and no LPIs: its 64 KiB distributor (SPIs routed by `GICD_IROUTER<n>`, to processor 0 or 1 of N), one Redistributor (`RD_base` and `SGI_base`, 128 KiB, `GICR_WAKER` asleep at reset and woken by the board's firmware as it powers the processor on; the SGIs' and PPIs' registers), and the CPU interface as the processor's `ICC_*_EL1` System registers only (`ICC_SRE_EL1` 0b111 RAO/WI, no `GICC_*` frame; `ID_AA64PFR0_EL1.GIC` 1, 0 on a GICv2 board): Group 0 as FIQ and Group 1 as IRQ, acknowledge, end and `EOImode`'s split with `ICC_DIR_EL1`, the priority mask, both binary points and `CBPR`, the running priority and the active priority registers the priority bits give, SGIs to itself through `ICC_SGI0R_EL1`, `ICC_SGI1R_EL1` and `ICC_ASGI1R_EL1`, and the GICv2m frame for MSIs; the device tree names it by the `arm,gic-v3` binding (see "Where the references differ") |
+| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive, and BSA's PPI 22 for the DCC's COMMIRQ and PPI 23 for the PMU's PMUIRQ; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0800_4000, the common base and processor 0's at 0x0800_5000, 4 KiB each, on the board's own layout) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0800_6000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them. Or, as the board's option (`VirtConfig::gic_version`), a GICv3 (IHI 0069G, `src/devices/gicv3.rs`) in a single Security state (`GICD_CTLR.DS` RAO/WI) with affinity routing only (`ARE` RAO/WI) and no LPIs: its 64 KiB distributor (SPIs routed by `GICD_IROUTER<n>`, to processor 0 or 1 of N), one Redistributor (`RD_base` and `SGI_base`, 128 KiB, `GICR_WAKER` asleep at reset and woken by the board's firmware as it powers the processor on; the SGIs' and PPIs' registers), and the CPU interface as the processor's `ICC_*_EL1` System registers only (`ICC_SRE_EL1` 0b111 RAO/WI, no `GICC_*` frame; `ID_AA64PFR0_EL1.GIC` 1, 0 on a GICv2 board): Group 0 as FIQ and Group 1 as IRQ, acknowledge, end and `EOImode`'s split with `ICC_DIR_EL1`, the priority mask, both binary points and `CBPR`, the running priority and the active priority registers the priority bits give, SGIs to itself through `ICC_SGI0R_EL1`, `ICC_SGI1R_EL1` and `ICC_ASGI1R_EL1`, and the GICv2m frame for MSIs; the device tree names it by the `arm,gic-v3` binding (see "Where the references differ"). With EL2, the CPU interface's virtualization support (IHI 0069G chapter 6, 12.3, 12.4; `src/devices/gicv3_virt.rs`): the virtual interface control registers `ICH_HCR_EL2`, `ICH_VTR_EL2`, `ICH_VMCR_EL2`, `ICH_MISR_EL2`, `ICH_EISR_EL2`, `ICH_ELRSR_EL2`, the active priority registers and the List registers, of the processor's virtual interface (`ICH_VTR_EL2`: the Cortex-A57's 0x9000_0003, four List registers and five priority and preemption bits, DDI 0488H Table 8-13; the Armv9.2 model's sixteen List registers, `TDS`, and as many priority and preemption bits as the CPU interface has, from five to seven: 0x9018_000F on the default five, 0xD818_000F on seven or eight); the virtual CPU interface `ICV_*_EL1` an EL1 access reaches under `HCR_EL2.FMO` (Group 0's registers), `IMO` (Group 1's) or either (the common ones), driving the processor's virtual IRQ (Group 1) and FIQ (Group 0, `VFIQEn` RES1); hardware List registers deactivating their physical interrupt; the maintenance interrupt on PPI 25 (`EOI`, `U`, `LRENP` with `EOIcount`, `NP`, `VGrp0E`/`D`, `VGrp1E`/`D`); `ICC_SRE_EL2` (`SRE`, `DFB`, `DIB` RAO/WI, `Enable`); and the traps `ICH_HCR_EL2.TC`, `TALL0`, `TALL1` and `TDIR` (with `TDS`), `ICC_SRE_EL2.Enable`, `HFGRTR_EL2`/`HFGWTR_EL2.ICC_IGRPENn_EL1` (FEAT_FGT), `HCR_EL2.NV` (FEAT_NV) and FEAT_NV2's `VNCR_EL2` page for `ICH_LR<n>_EL2` (0x400), `ICH_AP0R<n>_EL2` (0x480), `ICH_AP1R<n>_EL2` (0x4A0), `ICH_HCR_EL2` (0x4C0) and `ICH_VMCR_EL2` (0x4C8); the device tree names the maintenance interrupt in the `arm,gic-v3` node |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_VHE too, the EL2 virtual timer (`CNTHV_*`, PPI 12, BSA's INTID 28, the fifth interrupt of the device tree's `timer` node) and `CNTHCTL_EL2`'s `E2H` layout; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built; the Armv9.2 model with EL2 has FEAT_VHE, and no model has FEAT_ECV_POFF, which Arm requires only with FEAT_RME) |
 | Devices | PL011 UART r1p5 (`UARTPeriphID2` revision 3, DDI 0183G; BSA's Generic UART: a 32-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 32-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with a `gpio-key` power button on its first line, 0 (line 3, QEMU's, on QEMU's layout), CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded; the identity's manufacturer and device codes, by default none, and a CFI query table of the board's own; see "Where the references differ"), no `fw_cfg` (see "Where the references differ"), virtio-mmio transports, 4 on the board's own layout and 32 on QEMU's (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the first free ones, or the last free with `VirtConfig::transport_order`; every queue 256 entries), an empty PCIe ECAM/windows, the 32-bit memory window non-prefetchable and the 64-bit one prefetchable |
-| Board | the board's own device layout after Arm's memory map principles, or QEMU `virt`'s (`VirtConfig::layout`, see "Where the references differ"), RAM and the flash where QEMU's `virt` has them in both; the board's own interrupt wiring (`VirtConfig::interrupts`, see "Where the references differ"); the board's own device tree, written from the board (`src/boot/tree.rs`): generic node names (Devicetree Specification 2.2.2), each node as its binding describes it, the GIC with each frame the size it decodes, `dma-coherent` on each device that makes DMA, the processor's caches down to the L2 as `CCSIDR_EL1` reports them, `/psci` for PSCI 1.0 and 0.2 on the conduit the firmware answers on, `/chosen` with EBBR's `stdout-path` and no boot entropy (see "Where the references differ"), and the identity's `/model` and root `compatible`; a `pmu` node of the PMU binding, the processor's own (`arm,cortex-a57-pmu`) or the generic PMUv3's (`arm,armv8-pmuv3`) with PMUIRQ on PPI 23; no `fw-cfg` or platform bus node, which the board does not have; with EL2, the virtual interface's two frames and its maintenance interrupt in the GIC node; with a GICv3, an `arm,gic-v3` node of its distributor and its one Redistributor region (`#redistributor-regions` 1) with the GICv2m frame its child, and every PPI specifier without the GICv2 binding's CPU mask; a host's own tree gets its names the identity's, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does, and is refused where it puts a device anywhere but where the layout has it (`BuildError::HostTreeAddress`) or names a device's interrupt other than the one the board's interrupt map wires it to (`BuildError::HostTreeInterrupt`) |
+| Board | the board's own device layout after Arm's memory map principles, or QEMU `virt`'s (`VirtConfig::layout`, see "Where the references differ"), RAM and the flash where QEMU's `virt` has them in both; the board's own interrupt wiring (`VirtConfig::interrupts`, see "Where the references differ"); the board's own device tree, written from the board (`src/boot/tree.rs`): generic node names (Devicetree Specification 2.2.2), each node as its binding describes it, the GIC with each frame the size it decodes, `dma-coherent` on each device that makes DMA, the processor's caches down to the L2 as `CCSIDR_EL1` reports them, `/psci` for PSCI 1.0 and 0.2 on the conduit the firmware answers on, `/chosen` with EBBR's `stdout-path` and no boot entropy (see "Where the references differ"), and the identity's `/model` and root `compatible`; a `pmu` node of the PMU binding, the processor's own (`arm,cortex-a57-pmu`) or the generic PMUv3's (`arm,armv8-pmuv3`) with PMUIRQ on PPI 23; no `fw-cfg` or platform bus node, which the board does not have; with EL2, the virtual interface's two frames and its maintenance interrupt in the GIC node; with a GICv3, an `arm,gic-v3` node of its distributor and its one Redistributor region (`#redistributor-regions` 1) with the GICv2m frame its child and, with EL2, its maintenance interrupt (`<1 9 4>`), and every PPI specifier without the GICv2 binding's CPU mask; a host's own tree gets its names the identity's, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does, and is refused where it puts a device anywhere but where the layout has it (`BuildError::HostTreeAddress`) or names a device's interrupt other than the one the board's interrupt map wires it to (`BuildError::HostTreeInterrupt`) |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed and entered as Linux's arm64 boot protocol (`Documentation/arch/arm64/booting.rst`) asks — the kernel at the base of RAM, the device tree in the 2 MiB block after its `image_size`, the initramfs in the next, `x0` the tree and every other general-purpose register zero — and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
 Provenance: Arm's documents decide wherever they speak — the Arm ARM (DDI
@@ -713,10 +714,13 @@ has none of it (`NV` 0, the four `HCR_EL2` bits RES0, no `VNCR_EL2`).
 `tests/unit/nested.rs` runs guest hypervisors through each rule, and
 `tests/unit/sysreg_spec.rs` holds every System register and instruction
 access to Arm's accessors under each `HCR_EL2.{NV2, NV1, NV}` a guest
-hypervisor runs with. Linux 6.18's KVM does not offer its guests nested
-virtualization on this board: it needs a GICv3 with its virtual CPU
-interface, which the board's GICv3 does not have yet (see "Not
-implemented").
+hypervisor runs with. On a GICv3 board (`--gic v3`), whose CPU interface
+has its virtualization support, Linux 6.18's KVM offers its guests nested
+virtualization (`kvm-arm.mode=nested`): a guest hypervisor's
+`ICH_LR<n>_EL2`, `ICH_AP0R<n>_EL2`, `ICH_AP1R<n>_EL2`, `ICH_HCR_EL2` and
+`ICH_VMCR_EL2` are its `VNCR_EL2` page under `NV2`, its other `ICH_*_EL2`
+and `ICC_SRE_EL2` trap, and a third-level guest reaches its shell (see
+"Verification").
 
 ## Verification
 
@@ -1452,6 +1456,35 @@ integration tests of the public API.
   and 314 s of host time; the same run on the Cortex-A57, KVM in nVHE
   mode (`Hyp nVHE mode initialized successfully`, a 44-bit IPA limit),
   465.8 s and 244 s, on a host busy with other work (2026-11-12).
+- With a GICv3 and virtualization (`--gic v3 --virtualization`,
+  `cpp_orig/work/nested_vgic3.sh`), Alpine's KVM drives the CPU
+  interface's virtual interface. On the Cortex-A57: `kvm [1]: GICv3: no
+  GICV resource entry`, `disabling GICv2 emulation`, `GIC system register
+  CPU interface enabled`, `vgic interrupt IRQ9`, `Hyp nVHE mode
+  initialized successfully`; QEMU 10.1.5 (`-M virt,gic-version=3 -accel
+  kvm -cpu host`) runs the nested Alpine, whose kernel finds KVM's
+  emulated GICv3 (`GICv3: 256 SPIs implemented`, `GICv3: CPU0: found
+  redistributor 0 region 0:0x00000000080a0000`), to its shell, its timer
+  interrupting on `GICv3 27` (1575 interrupts by then): 16.3 s emulated,
+  258 s of host time. On the Armv9.2 model the same, KVM in `VHE mode
+  initialized successfully` with a 52-bit IPA limit: 16.3 s emulated,
+  382 s of host time. The GICv2 boot (`nested_vgic.sh`'s) runs as before,
+  KVM in `Hyp nVHE mode`, the nested guest to its shell in 16.3 s
+  emulated (2026-11-12).
+- A third level (`cpp_orig/work/third_level_v3.sh`): the Armv9.2 model
+  with a GICv3, its Alpine booted with `kvm-arm.mode=nested` (`CPU
+  features: detected: Nested Virtualization Support`, `kvm [1]: VHE+NV2
+  mode initialized successfully`), runs under QEMU 10.1.5 (`-M
+  virt,gic-version=3,virtualization=on -accel kvm -cpu host -m 640`) a
+  guest hypervisor, Alpine again from the same disk read-only, which
+  boots at its virtual EL2 to its login, its own KVM up (`kvm [1]: VHE
+  mode initialized successfully`, `IPA Size Limit: 48 bits`, `vgic
+  interrupt IRQ9`); there QEMU (`-M virt,gic-version=3 -accel kvm -cpu
+  host -m 128`) runs the third-level Alpine through its kernel (`GICv3:
+  CPU0: found redistributor 0 region 0:0x00000000080a0000`) to its
+  initramfs shell, where `uname -m` answers `aarch64` at 12.95 s of its
+  uptime: 33.1 s emulated, 1255 s of host time on a host busy with the
+  gate suite (2026-11-12).
 - `tests/timer_interrupts.rs`: hand-written guests drive the interrupt path
   end to end. One runs GIC + timer + `WFI` + IRQ entry/`ERET` + PSCI; its
   outcome is identical for every budget slicing, and a snapshot taken
@@ -1480,9 +1513,9 @@ integration tests of the public API.
   lower priority pending and takes only the one of higher priority made
   pending after. One reads `ID_AA64PFR0_EL1.GIC` and `ICC_SRE_EL1` at EL1
   and `ICC_PMR_EL1` at EL0 (UNDEFINED), and on a GICv2 board finds the
-  field 0 and every `ICC_*` access UNDEFINED. The board refuses a GICv3
-  with EL2, and on the Cortex-A57 one of other than its CPU interface's
-  five priority bits; a snapshot taken mid-run restores to the same end,
+  field 0 and every `ICC_*` access UNDEFINED. The board builds a GICv3
+  with EL2, and refuses on the Cortex-A57 one of other than its CPU
+  interface's five priority bits; a snapshot taken mid-run restores to the same end,
   and a GICv2 board refuses it. `src/devices/gicv3.rs` tests the model
   register by register against IHI 0069G (`tests/unit/gicv3.rs`): reset
   values, the identification registers, the registers RAZ/WI under
@@ -1490,7 +1523,36 @@ integration tests of the public API.
   priority bits, `GICD_IROUTER<n>`'s RES0 bits and routing, and the CPU
   interface's acknowledge, end, `EOImode`, binary points, `CBPR` and SGI
   forwarding; `src/cpu/gic.rs` each `ICC_*_EL1` register's encoding and
-  directions and the active priority registers the priority bits give.
+  directions and the active priority registers the priority bits give,
+  and each `ICH_*_EL2` register's and `ICC_SRE_EL2`'s with its `VNCR_EL2`
+  offset, the List registers and active priority registers the virtual
+  interface gives.
+- `tests/gicv3_virtualization.rs`: hand-written hypervisors at EL2 and
+  their guests at EL1 on a GICv3 board, on both processors. A List
+  register's virtual interrupt is taken at EL1 through `ICC_IAR1_EL1`
+  (`ICV_IAR1_EL1` under `HCR_EL2.IMO`) and ended, and its `EOI`
+  maintenance interrupt reaches EL2 as PPI 25 with `ICH_MISR_EL2.EOI` and
+  `ICH_EISR_EL2` bit 0 set; a snapshot taken at the guest's EOI restores
+  to the same end and a machine without EL2 refuses it. Three List
+  registers' interrupts show the virtual priority mask, preemption,
+  acknowledge over an active interrupt, the running priority and the
+  groups' enables. Each EL2 control traps what it traps and no more
+  (`ICC_SRE_EL2.Enable`, `ICH_HCR_EL2.TALL1`, `TALL0`, `TC`, the SGI
+  registers under `IMO`, `TDIR` and `HFGRTR_EL2.ICC_IGRPENn_EL1` on the
+  Armv9.2 model), and the EL2 registers are UNDEFINED at EL1. On the
+  Armv9.2 model a guest hypervisor under `HCR_EL2.{NV2, NV}` reaches its
+  `ICH_LR0_EL2`, `ICH_HCR_EL2`, `ICH_VMCR_EL2` and `ICH_AP1R0_EL2` in its
+  `VNCR_EL2` page, while `ICH_VTR_EL2`, `ICC_SRE_EL2` and, under `NV`
+  alone, the rest trap. `src/devices/gicv3_virt.rs` tests the registers
+  against IHI 0069G (`tests/unit/gicv3_virt.rs`): each processor's
+  `ICH_VTR_EL2`, reset values, RES0 and RES1 bits, signalling,
+  acknowledge, EOI with and without `VEOIM`, `EOIcount`, every
+  `ICH_MISR_EL2` condition, hardware List registers, seven preemption
+  bits, snapshots, and at the GIC the maintenance PPI and a hardware
+  interrupt's deactivation. `tests/unit/sysreg_spec.rs` holds both
+  processors with EL2 and a GICv3 to Arm's accessors (164 and 3128
+  states of the controls, `ICH_HCR_EL2`'s and `ICC_SRE_EL2`'s among
+  them).
 - `src/devices/gicv2.rs` and `src/devices/pl011.rs` test the device models
   against IHI 0048B and DDI 0183F register by register. The GIC: both
   groups and the Group 1 aliases, with `AckCtl` set and clear; a group the
@@ -2779,6 +2841,34 @@ one open.
   64 KiB frames in the first two pages free after every other device's,
   0x080A_0000, which is also where QEMU's `virt` has its first
   (`VIRT_GIC_REDIST`); QEMU's layout has both where QEMU's `virt` does.
+- **The GICv3's virtualization support takes `ICH_VTR_EL2` from the
+  processor, and the Cortex-A57's says `nV4` 0.** IHI 0069G 12.4.9 says
+  of `ICH_VTR_EL2.nV4` "In GICv3, the only permitted value is 0b1"; the
+  Cortex-A57 TRM (DDI 0488H Table 8-13), written before the field was,
+  gives the register as 0x9000_0003, bit 20 among its reserved RAZ bits.
+  The Cortex-A57 follows its TRM, the processor's own document; the
+  Armv9.2 model, the board's own processor, has `nV4` 1 (0x9018_000F
+  with five priority bits). Its virtual priority bits follow the CPU
+  interface's (five to seven), because an `ICC_AP1R<n>_EL1` access is
+  UNDEFINED past the CPU interface's priority bits whether or not it
+  reaches the virtual interface (Arm's register data:
+  `NUM_GIC_PRIORITY_BITS` is checked first), so more virtual bits than
+  physical would leave a guest active priority registers it cannot
+  reach.
+  Linux reads neither (KVM takes GICv4 from the ITS, which this GIC
+  lacks). The other choices IHI 0069G leaves are in
+  `src/devices/gicv3_virt.rs`: each UNKNOWN reset value 0 but the binary
+  points' minimum and `VFIQEn` (RES1, as `VAckCtl` is RES0, the CPU
+  interface having its System registers only); a virtual EOI dropping
+  the priority before its checks, and doing nothing more where a check
+  fails or nothing is active; INTIDs with bits above the 16 implemented,
+  or an LPI to `ICV_DIR_EL1`, ignored; `ICH_HCR_EL2.TSEI` RES0, there
+  being no SEIs (12.4.5, though the register data gives the field with
+  FEAT_GICv3 alone, the GIC specification's condition decides);
+  `ICC_SRE_EL2.Enable` a field and not RAO/WI. QEMU's GICv3 CPU
+  interface (`hw/intc/arm_gicv3_cpuif.c`) reports its own
+  `ICH_VTR_EL2` (four List registers, five priority bits) on every
+  processor; this one is each processor's.
 - **The devices' SPIs and the GICv2m frame's are the board's own.** IHI
   0048B leaves which source drives which SPI to the system, and BSA gives
   the GICv2m frame "an IMPLEMENTATION DEFINED number of contiguous SPIs"
@@ -4083,32 +4173,18 @@ events D14.6 requires.
   which Arm requires from
   Armv8.8 (`(v8Ap8 && (FEAT_PMUv3 && FEAT_EL2)) ==> FEAT_HPMN0`) and which
   is not built either.
-- A nested KVM guest that is itself a hypervisor (KVM's nested
-  virtualization, `kvm-arm.mode=nested`). The Armv9.2 model with EL2 has
-  what Linux 6.18's KVM asks of the processor for it — FEAT_NV2
-  (`ARM64_HAS_NESTED_VIRT`: `ID_AA64MMFR2_EL1.NV` 2, `has_nested_virt_support`
-  in `arch/arm64/kernel/cpufeature.c`) and a VHE host (`early_kvm_mode_cfg`
-  in `arch/arm64/kvm/arm.c` accepts `nested` only with the kernel at EL2) —
-  but KVM also needs a GICv3 to emulate one for the guest hypervisor:
-  `init_subsystems` in `arch/arm64/kvm/arm.c` refuses `kvm-arm.mode=nested`
-  without one ("NV support requires GICv3 or GICv5 with legacy support,
-  giving up", leaving KVM uninitialized), the nested vGIC being
-  `vgic-v3-nested.c`'s. The board's GICv2 (GIC-400) has the
-  Virtualization Extensions, so its KVM runs guests
-  (`cargo xtask nested-kvm`'s), but none that runs KVM in turn; its GICv3
-  (`GicVersion::V3`) has no virtual CPU interface yet (`ICH_*_EL2`,
-  whose `ICH_HCR_EL2`, `ICH_VMCR_EL2` and `ICH_LR<n>_EL2` FEAT_NV2 then
-  transforms too), which is what a third level needs.
-- Of the GICv3: its virtualization — the `ICH_*_EL2` registers with their
-  List registers and maintenance interrupt, the `ICV_*` registers EL1
-  reaches under `HCR_EL2.IMO` and `FMO`, `ICC_SRE_EL2` — which every
-  processor with FEAT_GICv3 and EL2 has (Arm's register data gives
-  `ICH_HCR_EL2` wherever both are), so a GICv3 board's processor cannot
-  have EL2 (`BuildError::GicV3WithEl2`); an ITS and LPIs, MSIs coming
+- On a GICv2 board, a nested KVM guest that is itself a hypervisor:
+  Linux 6.18's KVM refuses `kvm-arm.mode=nested` without a GICv3
+  (`init_subsystems` in `arch/arm64/kvm/arm.c`: "NV support requires
+  GICv3 or GICv5 with legacy support, giving up"), its nested vGIC being
+  `vgic-v3-nested.c`'s; a GICv3 board's runs one (see "Verification").
+- Of the GICv3: an ITS and LPIs, MSIs coming
   through the GICv2m frame instead (see "Where the references differ");
   two Security states and the GICv2 legacy operation (the memory-mapped
-  `GICC_*` interface, `ARE` and `SRE` 0); and GICv3.1 and later (the
-  extended SPI and PPI ranges, `GICD_TYPER2`, NMIs) and GICv4.
+  `GICC_*` interface, `ARE` and `SRE` 0); the virtual interface's
+  locally generated SEIs (`ICH_VTR_EL2.SEIS` 0); and GICv3.1 and later
+  (the extended SPI and PPI ranges, `GICD_TYPER2`, NMIs) and GICv4
+  (direct injection of virtual LPIs).
 - SHA-512, SHA-3, SM3 and SM4 (Armv8.2 options) on any processor: every
   QEMU CPU model that has them also has features the core does not
   implement yet (SVE), so no model to take their ID values from matches

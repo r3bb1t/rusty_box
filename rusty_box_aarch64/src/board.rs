@@ -23,13 +23,14 @@ use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 use rusty_box_devices::display::Resolution;
 
 use crate::bus::{
-    load_le, store_le, AccessWidth, BusFault, CodeEpoch, FetchSource, IccRegister,
+    load_le, store_le, AccessWidth, BusFault, CodeEpoch, FetchSource, GicEl1Traps, GicRegister,
     NoGicSystemRegisters, PhysAddr, PhysBus, Writes,
 };
-use crate::cpu::TimerLines;
+use crate::cpu::{TimerLines, VirtualLines};
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
 use crate::devices::gicv2::{GicExtensions, GicNames, GicShape, GicV2};
 use crate::devices::gicv3::GicV3;
+use crate::devices::gicv3_virt::VirtualInterfaceShape;
 use crate::devices::pl011::{BaudRate, Pl011, Received, UartClocks};
 use crate::devices::pl031::Pl031;
 use crate::devices::pl061::Pl061;
@@ -252,9 +253,9 @@ pub enum GicVersion {
     V2,
     /// A GICv3 (IHI 0069G), whose CPU interface the processor reaches
     /// through its `ICC_*` System registers, with the GICv2m MSI frame
-    /// ([`crate::devices::gicv3`]). A processor with EL2 would need its
-    /// virtual CPU interface, which it does not have yet
-    /// ([`crate::BuildError::GicV3WithEl2`]).
+    /// ([`crate::devices::gicv3`]), and on a board whose processor has EL2
+    /// the virtual interface its `ICH_*_EL2` registers program
+    /// ([`crate::devices::gicv3_virt`]).
     V3,
 }
 
@@ -437,26 +438,43 @@ pub struct VirtBoard<S> {
     pub(crate) stuck_deadline: Option<VmInstant>,
 }
 
+/// The GIC a board is built with, as its configuration and its processor
+/// decide it ([`VirtBoard::new`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BoardGic {
+    pub(crate) version: GicVersion,
+    /// The virtualization support for a processor with EL2: a GICv2's
+    /// Virtualization Extensions, or a GICv3's virtual interface.
+    pub(crate) extensions: GicExtensions,
+    /// The virtual interface a GICv3 with the support has: the
+    /// processor's.
+    pub(crate) virtual_interface: VirtualInterfaceShape,
+    pub(crate) shape: GicShape,
+}
+
 impl<S: GuestStorage> VirtBoard<S> {
     /// A board over `storage` whose RTC starts at `rtc_epoch_seconds`, with
     /// the devices `plugs` names, each naming itself as `identity` says, and
-    /// a GIC of `version` and `gic_shape` — a GICv2 with `gic` (the
-    /// Virtualization Extensions for a processor with EL2) — whose frames
-    /// it maps, the devices driving the SPIs `wiring` gives them and its
-    /// GICv2m frame having the rest it gives, and each virtio device in the
-    /// transport `order` gives it, the devices where `layout` puts them.
+    /// the GIC `board_gic` describes, whose frames it maps, the devices
+    /// driving the SPIs `wiring` gives them and its GICv2m frame having the
+    /// rest it gives, and each virtio device in the transport `order` gives
+    /// it, the devices where `layout` puts them.
     pub(crate) fn new(
         storage: S,
         rtc_epoch_seconds: u64,
         plugs: Plugs,
         identity: &BoardIdentity,
-        version: GicVersion,
-        gic: GicExtensions,
-        gic_shape: GicShape,
+        board_gic: BoardGic,
         wiring: Wiring,
         order: TransportOrder,
         layout: DeviceLayout,
     ) -> Self {
+        let BoardGic {
+            version,
+            extensions: gic,
+            virtual_interface,
+            shape: gic_shape,
+        } = board_gic;
         let devices = plugs.devices;
         let virtio_vendor = identity.virtio_vendor();
         let mut virtio: [Option<Transport>; MAX_DEVICES] = [None, None, None, None];
@@ -497,7 +515,11 @@ impl<S: GuestStorage> VirtBoard<S> {
         let gic_v3 = match version {
             GicVersion::V2 => None,
             GicVersion::V3 => {
-                let mut gic = GicV3::new(gic_shape, gic_names, Some(wiring.msi()));
+                let el2 = match gic {
+                    GicExtensions::Virtualization => Some(virtual_interface),
+                    GicExtensions::Absent => None,
+                };
+                let mut gic = GicV3::with_el2(gic_shape, gic_names, Some(wiring.msi()), el2);
                 gic.power_on_processor();
                 Some(gic)
             }
@@ -718,9 +740,8 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.set_gic_line(PPI_PMU, pmuirq);
     }
 
-    /// The processor's interrupt inputs from a board with a GICv3: its IRQ
-    /// and FIQ outputs; a GICv3 board's processor has no EL2, so no virtual
-    /// ones.
+    /// The processor's physical interrupt inputs from a board with a GICv3:
+    /// its IRQ and FIQ outputs.
     pub(crate) fn gic_v3_lines(&self) -> InterruptLines {
         match &self.gic_v3 {
             Some(gic) => InterruptLines {
@@ -728,6 +749,16 @@ impl<S: GuestStorage> VirtBoard<S> {
                 fiq: gic.fiq_out(),
             },
             None => InterruptLines::NONE,
+        }
+    }
+
+    /// The processor's virtual interrupt inputs from a board with a GICv3:
+    /// its virtual CPU interface's virtual IRQ and FIQ, none for a
+    /// processor without EL2.
+    pub(crate) fn gic_v3_virtual_lines(&self) -> VirtualLines {
+        match &self.gic_v3 {
+            Some(gic) => gic.virtual_lines(),
+            None => VirtualLines::NONE,
         }
     }
 
@@ -1011,25 +1042,33 @@ impl<S: GuestStorage> PhysBus for WithGicV3<'_, S> {
 
     /// A read of the GICv3's CPU interface, which reaches a device as an
     /// access outside RAM does: the interrupt outputs may change.
-    fn gic_register_read(&mut self, reg: IccRegister) -> Result<u64, NoGicSystemRegisters> {
+    fn gic_register_read(&mut self, reg: GicRegister) -> Result<u64, NoGicSystemRegisters> {
         self.0.touched = true;
         match &mut self.0.gic_v3 {
-            Some(gic) => Ok(gic.icc_read(reg)),
+            Some(gic) => Ok(gic.register_read(reg)),
             None => Err(NoGicSystemRegisters),
         }
     }
 
     fn gic_register_write(
         &mut self,
-        reg: IccRegister,
+        reg: GicRegister,
         value: u64,
     ) -> Result<(), NoGicSystemRegisters> {
         self.0.touched = true;
         match &mut self.0.gic_v3 {
             Some(gic) => {
-                gic.icc_write(reg, value);
+                gic.register_write(reg, value);
                 Ok(())
             }
+            None => Err(NoGicSystemRegisters),
+        }
+    }
+
+    /// The GICv3's trap controls, which a read changes nothing of.
+    fn gic_el1_traps(&self) -> Result<GicEl1Traps, NoGicSystemRegisters> {
+        match &self.0.gic_v3 {
+            Some(gic) => Ok(gic.el1_traps()),
             None => Err(NoGicSystemRegisters),
         }
     }
