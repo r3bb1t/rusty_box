@@ -540,6 +540,18 @@ struct RawTerminal {
     raw: bool,
     /// Ctrl-A was pressed and the next key is the escape's.
     escaped: bool,
+    /// Whether the terminal is still read for keys.
+    input: TerminalInput,
+}
+
+/// Whether the console run still reads keys from the terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalInput {
+    /// Keys are read and sent to the guest.
+    Open,
+    /// Reading failed (stdin is no terminal, or it went away): the run goes
+    /// on with no keys, the failure reported once.
+    Closed,
 }
 
 impl RawTerminal {
@@ -551,7 +563,17 @@ impl RawTerminal {
                 false
             }
         };
-        Self { raw, escaped: false }
+        Self {
+            raw,
+            escaped: false,
+            input: TerminalInput::Open,
+        }
+    }
+
+    /// Stop reading the terminal after `error`, reporting it once.
+    fn close_input(&mut self, error: &std::io::Error) {
+        tracing::warn!("the terminal could not be read ({error}); the guest gets no keys from it for the rest of the run");
+        self.input = TerminalInput::Closed;
     }
 
     /// Sends the keys pressed since the last call to `machine`'s serial
@@ -560,6 +582,10 @@ impl RawTerminal {
     fn pump<L: Levels>(&mut self, machine: &mut Virt<L>) -> Pumped {
         use crossterm::event::{self, Event, KeyEventKind};
         loop {
+            match self.input {
+                TerminalInput::Open => {}
+                TerminalInput::Closed => return Pumped::RunOn,
+            }
             let room = machine.serial(0).map_or(0, |port| port.input_room());
             if room < LONGEST_KEY_BYTES {
                 return Pumped::RunOn;
@@ -568,7 +594,7 @@ impl RawTerminal {
                 Ok(true) => {}
                 Ok(false) => return Pumped::RunOn,
                 Err(error) => {
-                    tracing::warn!("the terminal could not be read: {error}");
+                    self.close_input(&error);
                     return Pumped::RunOn;
                 }
             }
@@ -576,7 +602,7 @@ impl RawTerminal {
                 Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => key,
                 Ok(_) => continue,
                 Err(error) => {
-                    tracing::warn!("the terminal could not be read: {error}");
+                    self.close_input(&error);
                     return Pumped::RunOn;
                 }
             };
@@ -1599,7 +1625,11 @@ mod tests {
     fn a_terminal_key_reaches_the_console_as_an_xterm_sends_it() {
         use crossterm::event::{KeyCode, KeyModifiers};
         let (mut machine, _kernel) = console_machine();
-        let mut terminal = RawTerminal { raw: false, escaped: false };
+        let mut terminal = RawTerminal {
+            raw: false,
+            escaped: false,
+            input: TerminalInput::Open,
+        };
         let empty = room(&mut machine);
 
         assert_eq!(terminal.key(&mut machine, key(KeyCode::Up, KeyModifiers::NONE)), Pumped::RunOn);
@@ -1610,13 +1640,34 @@ mod tests {
         assert_eq!(room(&mut machine), empty - 6, "é is two bytes of UTF-8");
     }
 
+    /// A terminal whose reading failed is read no more: the run goes on and
+    /// the guest's console gets nothing from it.
+    #[test]
+    fn a_closed_terminal_sends_the_guest_nothing() {
+        let (mut machine, _kernel) = console_machine();
+        let mut terminal = RawTerminal {
+            raw: false,
+            escaped: false,
+            input: TerminalInput::Closed,
+        };
+        let empty = room(&mut machine);
+
+        assert_eq!(terminal.pump(&mut machine), Pumped::RunOn);
+        assert_eq!(room(&mut machine), empty);
+        assert_eq!(terminal.input, TerminalInput::Closed);
+    }
+
     /// Ctrl-A starts QEMU's console escape: X then leaves the run, a second
     /// Ctrl-A sends one, and nothing of the escape reaches the guest.
     #[test]
     fn ctrl_a_x_leaves_the_run_and_ctrl_a_twice_sends_one() {
         use crossterm::event::{KeyCode, KeyModifiers};
         let (mut machine, _kernel) = console_machine();
-        let mut terminal = RawTerminal { raw: false, escaped: false };
+        let mut terminal = RawTerminal {
+            raw: false,
+            escaped: false,
+            input: TerminalInput::Open,
+        };
         let empty = room(&mut machine);
         let ctrl_a = key(KeyCode::Char('a'), KeyModifiers::CONTROL);
 
