@@ -1256,12 +1256,13 @@ fn bare_of(model: CpuModel, ram: &mut [u8]) -> VirtMachine<LentStorage<'_>, With
 /// that reports one of the EL2 features Arm requires of it (Features.json:
 /// FEAT_VHE, FEAT_XNX, FEAT_HCX, FEAT_S2FWB, FEAT_EVT and FEAT_EVT2,
 /// FEAT_FGT, FEAT_GTG with the stage 2 granules, and FEAT_S2FWB's
-/// `CLIDR_EL1` with no level of cache to the PoU), and its ECV field
-/// FEAT_ECV's 1, as it has no FEAT_ECV_POFF.
+/// `CLIDR_EL1` with no level of cache to the PoU), its ECV field
+/// FEAT_ECV's 1, as it has no FEAT_ECV_POFF, and its NV field FEAT_NV2's
+/// 2, the nested virtualization it has of the options.
 const ARMV9P2_PFR0_WITH_EL2: u64 = 0x1101_0000_2011_0111;
 const ARMV9P2_MMFR0_WITH_EL2: u64 = 0x1100_0323_1020_0026;
 const ARMV9P2_MMFR1_WITH_EL2: u64 = 0x0000_1100_1031_1102;
-const ARMV9P2_MMFR2_WITH_EL2: u64 = 0x1201_0111_1001_0011;
+const ARMV9P2_MMFR2_WITH_EL2: u64 = 0x1201_0111_1201_0011;
 const ARMV9P2_CLIDR_WITH_EL2: u64 = 0x0200_0023;
 
 /// A hypervisor on the Armv9.2 model, which resets at EL2, reads the ID
@@ -1434,7 +1435,7 @@ fn the_armv9p2_model_runs_a_guest_under_stage_2_and_fine_grained_traps() {
 /// and none of the features EL2 brings — `ID_AA64PFR0_EL1.EL2` 0,
 /// `ID_AA64MMFR0_EL1` without FGT and the stage 2 granule fields,
 /// `ID_AA64MMFR1_EL1` without VH, XNX and HCX, `ID_AA64MMFR2_EL1` without
-/// FWB and EVT, and `CLIDR_EL1` with its L1 the level of unification.
+/// FWB, EVT and NV, and `CLIDR_EL1` with its L1 the level of unification.
 ///
 /// ```text
 /// mrs x10, CurrentEL ; mrs x11, id_aa64pfr0_el1 ; mrs x12, id_aa64mmfr0_el1
@@ -1495,8 +1496,8 @@ fn without_virtualization_the_armv9p2_model_is_unchanged() {
     );
     assert_eq!(
         read[4] ^ ARMV9P2_MMFR2_WITH_EL2,
-        (2 << 56) | (1 << 40),
-        "EVT, FWB"
+        (2 << 56) | (1 << 40) | (2 << 24),
+        "EVT, FWB, NV"
     );
     assert_eq!(
         read[5] ^ ARMV9P2_CLIDR_WITH_EL2,

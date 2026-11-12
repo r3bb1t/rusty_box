@@ -293,6 +293,12 @@ impl El2Regs {
             hdfgrtr: 0,
             hdfgwtr: 0,
             hcrx: 0,
+            vncr: El2Reg::Vncr.kept(
+                features,
+                spsr_mask,
+                layout,
+                reset::value_of(SysReg::VNCR_EL2),
+            ),
         }
     }
 }
@@ -381,6 +387,18 @@ pub(crate) const HCR_API: u64 = 1 << 41;
 /// register names reach EL2's at EL2 (Arm `EffectiveHCR_EL2_E2H`, writable
 /// as the processor has FEAT_E2H0).
 pub(crate) const HCR_E2H: u64 = 1 << 34;
+/// `HCR_EL2.NV` (FEAT_NV): EL1 runs a guest hypervisor, whose accesses to
+/// EL2's registers and instructions trap to EL2 (`nv.rs`).
+pub(crate) const HCR_NV: u64 = 1 << 42;
+/// `HCR_EL2.NV1` (FEAT_NV): with `NV`, a guest hypervisor without FEAT_VHE's
+/// `E2H` (`nv.rs`).
+pub(crate) const HCR_NV1: u64 = 1 << 43;
+/// `HCR_EL2.AT` (FEAT_NV): EL1's `AT S1E0*` and `AT S1E1*` trap to EL2.
+pub(crate) const HCR_AT: u64 = 1 << 44;
+/// `HCR_EL2.NV2` (FEAT_NV2): with `NV`, the guest hypervisor's accesses to
+/// many System registers are loads and stores of the page `VNCR_EL2`
+/// names (`nv.rs`).
+pub(crate) const HCR_NV2: u64 = 1 << 45;
 /// `HCR_EL2.FIEN` (FEAT_RASv1p1): EL1's accesses to the error injection
 /// registers do not trap.
 pub(crate) const HCR_FIEN: u64 = 1 << 47;
@@ -439,6 +457,12 @@ pub(crate) const fn hcr_mask(features: Features) -> u64 {
     }
     if features.has(Feature::Evt2) {
         mask |= HCR_TTLBIS | HCR_TTLBOS;
+    }
+    if features.has(Feature::Nv) {
+        mask |= HCR_NV | HCR_NV1 | HCR_AT;
+    }
+    if features.has(Feature::Nv2) {
+        mask |= HCR_NV2;
     }
     mask
 }
@@ -895,9 +919,15 @@ pub(crate) const CNTHCTL_E2H1_EL1PTEN: u64 = 1 << 11;
 /// counters and timers to EL2, at `CNTKCTL_EL1`'s bits; bits 11:0.
 const CNTHCTL_E2H1_BASE: u64 = 0xFFF;
 /// `CNTHCTL_EL2`'s FEAT_ECV fields: `EL1TVT`, `EL1TVCT`, `EL1NVPCT`,
-/// `EL1NVVCT` (whose traps act only with FEAT_NV, which this processor
-/// lacks), `EVNTIS`.
+/// `EL1NVVCT` (whose traps act only with FEAT_NV2, on a guest hypervisor's
+/// `*_EL02` timer accesses), `EVNTIS`.
 const CNTHCTL_ECV_FIELDS: u64 = 0x3_E000;
+/// `CNTHCTL_EL2.EL1NVPCT` and `EL1NVVCT` (FEAT_ECV): with `HCR_EL2.{NV2,
+/// NV1, NV}` {1, 0, 1}, EL1's accesses to the EL1 physical and virtual
+/// timers by their `*_EL02` names trap to EL2, where they would otherwise
+/// be loads and stores of the `VNCR_EL2` page.
+pub(crate) const CNTHCTL_EL1NVPCT: u64 = 1 << 15;
+pub(crate) const CNTHCTL_EL1NVVCT: u64 = 1 << 16;
 /// `CNTHCTL_EL2.ECV` (FEAT_ECV_POFF), bit 12: `CNTPOFF_EL2` offsets the
 /// physical count EL0 and EL1 read and the EL1 physical timer compares
 /// (Arm `PhysicalOffsetIsValid`, `AArch64_CheckTimerConditions`). Only a
@@ -908,6 +938,10 @@ pub(crate) const CNTHCTL_ECV_POFF: u64 = 1 << 12;
 const CNTHP_CTL_MASK: u64 = 0b11;
 /// `CONTEXTIDR_EL2.PROCID`.
 const CONTEXTIDR_MASK: u64 = 0xFFFF_FFFF;
+/// `VNCR_EL2.BADDR` (FEAT_NV2), bits 63:12, every bit above the virtual
+/// address size held as written: a load or store through it sign-extends
+/// the address from the size's top bit (`EffectiveBADDR`, `nv.rs`).
+pub(crate) const VNCR_BADDR: u64 = !0xFFF;
 /// `VSESR_EL2` with EL1 in AArch64: `IDS`, `ISS`, the syndrome a virtual
 /// SError reports.
 pub(crate) const VSESR_MASK: u64 = (1 << 24) | 0x00FF_FFFF;
@@ -1062,6 +1096,9 @@ el2_registers! {
     Hdfgwtr => hdfgwtr,
     /// `HCRX_EL2` (FEAT_HCX): the extended hypervisor configuration.
     Hcrx => hcrx,
+    /// `VNCR_EL2` (FEAT_NV2): the base of the page a guest hypervisor's
+    /// transformed System register accesses load and store (`nv.rs`).
+    Vncr => vncr,
 }
 
 impl El2Reg {
@@ -1158,6 +1195,13 @@ impl El2Reg {
             Self::Hdfgrtr => value & FgtReg::Hdfgrtr.mask(features),
             Self::Hdfgwtr => value & FgtReg::Hdfgwtr.mask(features),
             Self::Hcrx => value & hcrx_mask(features),
+            Self::Vncr => {
+                if features.has(Feature::Nv2) {
+                    value & VNCR_BADDR
+                } else {
+                    0
+                }
+            }
             // The IMPLEMENTATION DEFINED registers, whose bits the
             // implementation decides (`El2Reg::held`), and those whose every
             // bit is a field: all 64 bits.
@@ -1225,7 +1269,8 @@ impl El2Reg {
             | Self::Hfgitr
             | Self::Hdfgrtr
             | Self::Hdfgwtr
-            | Self::Hcrx => false,
+            | Self::Hcrx
+            | Self::Vncr => false,
         }
     }
 

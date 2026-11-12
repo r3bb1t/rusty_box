@@ -858,6 +858,11 @@ pub(crate) struct S1Params {
     /// The hardware updates the regime's walks make of their leaves
     /// (`TCR_ELx.HA` and `HD`).
     pub(crate) hw: HwUpdate,
+    /// FEAT_NV's `walkparams.nv1`: the EL1&0 regime under `HCR_EL2.{NV,
+    /// NV1}` {1, 1}, a guest hypervisor without `E2H` running its EL2
+    /// regime's tables there, whose descriptors take the EL2 regime's
+    /// permission layout; false in every other regime.
+    pub(crate) nv1: bool,
 }
 
 impl<L: Levels> Cpu<L> {
@@ -971,7 +976,7 @@ impl<L: Levels> Cpu<L> {
     pub(crate) fn s1_params(&self, regime: Regime, va: u64) -> S1Params {
         let hpds = self.implements(Feature::Hpds);
         let features = self.imp.features;
-        let two_ranges = |tcr: u64, ttbr0: u64, ttbr1: u64, mair: u64, control: u64| {
+        let two_ranges = |tcr: u64, ttbr0: u64, ttbr1: u64, mair: u64, control: u64, nv1: bool| {
             let upper = regime.upper(va);
             let up = u32::from(upper);
             S1Params {
@@ -982,6 +987,7 @@ impl<L: Levels> Cpu<L> {
                 mair,
                 wxn: control & sctlr::WXN != 0,
                 hw: HwUpdate::of(tcr, TCR_EL1_HA, TCR_EL1_HD, features),
+                nv1,
             }
         };
         match regime {
@@ -993,11 +999,12 @@ impl<L: Levels> Cpu<L> {
                     sys.ttbr1_el1,
                     sys.mair_el1,
                     sys.sctlr_el1,
+                    self.nested().nv1(),
                 )
             }
             Regime::El20 => {
                 let el2 = self.el2();
-                two_ranges(el2.tcr, el2.ttbr0, el2.ttbr1, el2.mair, el2.sctlr)
+                two_ranges(el2.tcr, el2.ttbr0, el2.ttbr1, el2.mair, el2.sctlr, false)
             }
             Regime::El2 => {
                 let el2 = self.el2();
@@ -1009,6 +1016,7 @@ impl<L: Levels> Cpu<L> {
                     mair: el2.mair,
                     wxn: el2.sctlr & sctlr::WXN != 0,
                     hw: HwUpdate::of(el2.tcr, TCR_EL2_HA, TCR_EL2_HD, features),
+                    nv1: false,
                 }
             }
         }

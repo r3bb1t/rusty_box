@@ -6,7 +6,7 @@
 //! `SMC` with it, as QEMU's `virt` does (its device tree's `method`).
 
 use super::el2::{
-    CPTR_FPEN, CPTR_TFP, HCR_HCD, HCR_TDZ, HCR_TICAB, HCR_TOCU, HCR_TPCP, HCR_TPU, HCR_TSC,
+    CPTR_FPEN, CPTR_TFP, HCR_AT, HCR_HCD, HCR_TDZ, HCR_TICAB, HCR_TOCU, HCR_TPCP, HCR_TPU, HCR_TSC,
     HCR_TSW, HCR_TTLB, HCR_TTLBIS, HCR_TTLBOS,
 };
 use super::exception::{Exception, Route, SyndromeClass};
@@ -398,16 +398,15 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// The trap, routed as `route` says, of the System instruction `insn`
-    /// (`SYS`, which reports no read): the path an `MRS` or `MSR` trap takes.
-    fn sys_trap(&self, pc: u64, insn: u32, rt: u32, route: Route) -> ExecResult {
-        self.sysreg_fault(
-            pc,
-            insn,
-            SysRegError::Trap(route),
+    /// (`SYS`, which reports no read): the exception an `MRS` or `MSR` trap
+    /// takes ([`Cpu::sysreg_trap`]).
+    fn sys_trap(insn: u32, rt: u32, route: Route) -> ExecResult {
+        Err(Self::sysreg_trap(
             SysRegKey::from_insn(insn),
             rt,
             false,
-        )
+            route,
+        ))
     }
 
     /// The trap to EL2 of the System instruction `insn` when an `HCR_EL2`
@@ -434,10 +433,20 @@ impl<L: Levels> Cpu<L> {
         Exception::routed(SyndromeClass::SysRegTrap, key.trap_iss(rt, read), route).into()
     }
 
-    /// The exception an `MRS`, `MSR`, `SYS` or `SYSL` that `err` refuses
-    /// takes, its syndrome from `key`, `rt` and the direction.
-    fn sysreg_fault(
-        &self,
+    /// What an `MRS`, `MSR`, `SYS` or `SYSL` does that `err` keeps from
+    /// completing as an access to its register or instruction: the exception
+    /// it takes, its syndrome from `key`, `rt` and the direction (`read`);
+    /// or, transformed by FEAT_NV2, the load into `Rt` (`read`) or the
+    /// store of `Rt` it is instead ([`Cpu::nv2_load`], [`Cpu::nv2_store`]),
+    /// which completes it unless the access faults. The one place both are
+    /// carried out, out of line: an `MRS` or `MSR` that completes never
+    /// reaches it.
+    #[allow(clippy::too_many_arguments)]
+    #[cold]
+    #[inline(never)]
+    fn sysreg_fault<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
         pc: u64,
         insn: u32,
         err: SysRegError,
@@ -450,6 +459,20 @@ impl<L: Levels> Cpu<L> {
             SysRegError::Trap(route) => Err(Self::sysreg_trap(key, rt, read, route)),
             SysRegError::FpTrap(route) => Err(self.fp_trap(route)),
             SysRegError::SmeTrap(route) => Err(self.sme_trap(SmeTrap::AccessTrap, route)),
+            // FEAT_NV2 needs EL2 (`Features::NEED_EL2`), so no access on a
+            // processor without it is transformed: there it is UNDEFINED,
+            // and no memory access is compiled into the path.
+            SysRegError::Vncr(_) if !L::EL2 => self.undefined(pc, insn),
+            SysRegError::Vncr(at) => {
+                if read {
+                    let value = self.nv2_load(bus, at)?;
+                    self.set_x_or_zr(rt, value);
+                } else {
+                    let value = self.x_or_zr(rt);
+                    self.nv2_store(bus, at, value)?;
+                }
+                Ok(Flow::Next)
+            }
         }
     }
 
@@ -498,14 +521,14 @@ impl<L: Levels> Cpu<L> {
         match (l, op0) {
             (false, 0) => self.exec_pstate_or_barrier(pc, insn, op1, crn, crm, op2, rt),
             (false, 1) => self.exec_sys(bus, pc, insn, op1, crn, crm, op2, rt),
-            (true, 1) => self.exec_sysl(pc, insn, rt),
+            (true, 1) => self.exec_sysl(bus, pc, insn, rt),
             (true, 0) => self.undefined(pc, insn),
             (false, _) => {
                 let key = SysRegKey::from_insn(insn);
                 let value = self.x_or_zr(rt);
                 match self.sysreg_write(key, value) {
                     Ok(effect) => self.apply_write_effect(effect),
-                    Err(e) => return self.sysreg_fault(pc, insn, e, key, rt, false),
+                    Err(e) => return self.sysreg_fault(bus, pc, insn, e, key, rt, false),
                 }
                 Ok(Flow::Next)
             }
@@ -516,7 +539,7 @@ impl<L: Levels> Cpu<L> {
                         self.set_x_or_zr(rt, v);
                         Ok(Flow::Next)
                     }
-                    Err(e) => self.sysreg_fault(pc, insn, e, key, rt, true),
+                    Err(e) => self.sysreg_fault(bus, pc, insn, e, key, rt, true),
                 }
             }
         }
@@ -589,7 +612,7 @@ impl<L: Levels> Cpu<L> {
                 // which in the host is `SCTLR_EL2`'s, RES0 there.
                 (3, 6) | (3, 7) => {
                     if self.pstate.el == El::El0 && self.el0_sctlr() & sctlr::UMA == 0 {
-                        return self.sys_trap(pc, insn, rt, Route::Class);
+                        return Self::sys_trap(insn, rt, Route::Class);
                     }
                     let bits = u64::from(crm) << 6;
                     let daif = self.pstate.daif();
@@ -640,17 +663,11 @@ impl<L: Levels> Cpu<L> {
     /// `SYSL`: no System instruction with a result exists here, so an
     /// encoding in the IMPLEMENTATION DEFINED space does what
     /// [`Cpu::impdef_space_access`] says and every other is UNDEFINED.
-    fn exec_sysl(&mut self, pc: u64, insn: u32, rt: u32) -> ExecResult {
+    fn exec_sysl<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32, rt: u32) -> ExecResult {
         let key = SysRegKey::from_insn(insn);
         if key.in_impdef_space() {
-            return self.sysreg_fault(
-                pc,
-                insn,
-                self.impdef_space_access(self.pstate.el),
-                key,
-                rt,
-                true,
-            );
+            let err = self.impdef_space_access(self.pstate.el);
+            return self.sysreg_fault(bus, pc, insn, err, key, rt, true);
         }
         self.undefined(pc, insn)
     }
@@ -686,7 +703,7 @@ impl<L: Levels> Cpu<L> {
             let operand = self.x_or_zr(rt);
             return match self.impdef_instruction(key, el, operand) {
                 Ok(()) => Ok(Flow::Next),
-                Err(err) => self.sysreg_fault(pc, insn, err, key, rt, false),
+                Err(err) => self.sysreg_fault(bus, pc, insn, err, key, rt, false),
             };
         }
         // The instruction's fine-grained trap (FEAT_FGT, `HFGITR_EL2`), which
@@ -735,7 +752,7 @@ impl<L: Levels> Cpu<L> {
                     return self.undefined(pc, insn);
                 }
                 if el0 && el0_control & sctlr::UCI == 0 {
-                    return self.sys_trap(pc, insn, rt, Route::Class);
+                    return Self::sys_trap(insn, rt, Route::Class);
                 }
                 // To the PoU (`IC IVAU`, `DC CVAU`) `HCR_EL2.TPU`, and with
                 // FEAT_EVT `TOCU`, the others `TPCP`, trap EL0's and EL1's
@@ -757,7 +774,8 @@ impl<L: Levels> Cpu<L> {
                 Ok(Flow::Next)
             }
             // CFP, DVP and CPP RCTX (FEAT_SPECRES): EL0 needs `EnRCTX` of its
-            // `SCTLR_ELx`. Each restricts predictions
+            // `SCTLR_ELx`; a guest hypervisor's (FEAT_NV, `HCR_EL2.NV`) traps
+            // to EL2. Each restricts predictions
             // (`AArch64_RestrictPrediction`), which a processor that never
             // speculates does not make.
             (3, 7, 3, 4 | 5 | 7) => {
@@ -765,8 +783,9 @@ impl<L: Levels> Cpu<L> {
                     return self.undefined(pc, insn);
                 }
                 if el0 && el0_control & sctlr::ENRCTX == 0 {
-                    return self.sys_trap(pc, insn, rt, Route::Class);
+                    return Self::sys_trap(insn, rt, Route::Class);
                 }
+                Self::sys_el2_trap(self.nested_at(el).nv(), insn, rt)?;
                 Self::sys_el2_trap(fine_grained, insn, rt)?;
                 Ok(Flow::Next)
             }
@@ -774,7 +793,7 @@ impl<L: Levels> Cpu<L> {
             // traps EL0's and EL1's outside the host.
             (3, 7, 4, 1) => {
                 if el0 && el0_control & sctlr::DZE == 0 {
-                    return self.sys_trap(pc, insn, rt, Route::Class);
+                    return Self::sys_trap(insn, rt, Route::Class);
                 }
                 Self::sys_el2_trap(below_el2 && self.hcr_any(HCR_TDZ), insn, rt)?;
                 Self::sys_el2_trap(fine_grained, insn, rt)?;
@@ -810,11 +829,13 @@ impl<L: Levels> Cpu<L> {
             }
             // AT S1E1R, S1E1W, S1E0R, S1E0W, and with FEAT_PAN2 AT S1E1RP
             // and S1E1WP, which PSTATE.PAN takes part in: the EL1&0 regime,
-            // from EL1 or EL2.
+            // from EL1 or EL2. With FEAT_NV, `HCR_EL2.AT` traps EL1's, ahead
+            // of the fine-grained trap.
             (0, 7, 8, 0..=3) | (0, 7, 9, 0 | 1) => {
                 if el0 || (crm == 9 && !self.implements(Feature::Pan2)) {
                     return self.undefined(pc, insn);
                 }
+                Self::sys_el2_trap(el1 && self.hcr_any(HCR_AT), insn, rt)?;
                 Self::sys_el2_trap(fine_grained, insn, rt)?;
                 let va = self.x_or_zr(rt);
                 let checked = match (crm, op2 >> 1) {
@@ -825,9 +846,11 @@ impl<L: Levels> Cpu<L> {
                 self.address_translate(bus, va, op2 & 1 == 1, checked, AtStages::One)?;
                 Ok(Flow::Next)
             }
-            // AT S1E2R, S1E2W: the EL2 regime, at EL2 only.
+            // AT S1E2R, S1E2W: the EL2 regime, at EL2; a guest hypervisor's
+            // (FEAT_NV) traps to EL2, and every other is UNDEFINED.
             (4, 7, 8, 0 | 1) => {
                 if el != El::El2 {
+                    Self::sys_el2_trap(self.nested_at(el).nv(), insn, rt)?;
                     return self.undefined(pc, insn);
                 }
                 let va = self.x_or_zr(rt);
@@ -835,11 +858,12 @@ impl<L: Levels> Cpu<L> {
                 Ok(Flow::Next)
             }
             // AT S12E1R, S12E1W, S12E0R, S12E0W: the EL1&0 regime, at EL2
-            // only (EL1's are UNDEFINED without FEAT_NV), by stage 1 and then
-            // stage 2, which `AArch64_S2Translate` leaves out while
+            // (a guest hypervisor's trapping as `AT S1E2*` does), by stage 1
+            // and then stage 2, which `AArch64_S2Translate` leaves out while
             // `HCR_EL2.{DC,VM}` is {0,0}.
             (4, 7, 8, 4..=7) => {
                 if el != El::El2 {
+                    Self::sys_el2_trap(self.nested_at(el).nv(), insn, rt)?;
                     return self.undefined(pc, insn);
                 }
                 let va = self.x_or_zr(rt);
@@ -872,15 +896,18 @@ impl<L: Levels> Cpu<L> {
                 self.tlb_maintenance(form, self.x_or_zr(rt));
                 Ok(Flow::Next)
             }
-            // The EL2 TLB maintenance instructions, at EL2 only: of the EL2
-            // regime, of the whole EL1&0 regime, and of stage 2 by IPA.
+            // The EL2 TLB maintenance instructions, at EL2 (a guest
+            // hypervisor's trapping as `AT S1E2*` does): of the EL2 regime,
+            // of the whole EL1&0 regime, and of stage 2 by IPA.
             (4, 8 | 9, _, _) => {
                 let form = TlbiForm::el2(crm, op2);
-                let Some(form) =
-                    form.filter(|_| el == El::El2 && self.implements_tlbi_el2(crn, crm, op2))
-                else {
+                let Some(form) = form.filter(|_| self.implements_tlbi_el2(crn, crm, op2)) else {
                     return self.undefined(pc, insn);
                 };
+                if el != El::El2 {
+                    Self::sys_el2_trap(self.nested_at(el).nv(), insn, rt)?;
+                    return self.undefined(pc, insn);
+                }
                 self.tlb_maintenance(form, self.x_or_zr(rt));
                 Ok(Flow::Next)
             }
@@ -1027,7 +1054,8 @@ impl<L: Levels> Cpu<L> {
     /// `SMC #imm16`: UNDEFINED at EL0; at EL1 under `HCR_EL2.TSC` trapped to
     /// EL2, returning to the `SMC` itself (`AArch64_CheckForSMCUndefOrTrap`
     /// with no EL3, whose IMPLEMENTATION DEFINED "Trap SMC execution at EL1
-    /// to EL2" is TRUE here); otherwise a firmware call where the firmware's
+    /// to EL2" is TRUE here, as FEAT_NV's `HCR_EL2.NV` would make it for a
+    /// guest hypervisor's); otherwise a firmware call where the firmware's
     /// conduit is `SMC`, as for `HVC`, and UNDEFINED where it is not.
     fn exec_smc(&mut self, pc: u64, insn: u32, imm16: u32) -> ExecResult {
         if self.pstate.el == El::El0 {

@@ -341,6 +341,21 @@ pub(crate) enum Feature {
     /// processor with EL2 has it (`(FEAT_AA64 && FEAT_HCX) ==>
     /// FEAT_AA64EL2`). No encoding of its own.
     Hcx,
+    /// FEAT_NV: nested virtualization, `HCR_EL2.NV`, `NV1` and `AT`. Under
+    /// `NV` a guest hypervisor at EL1 reads `CurrentEL` as EL2, its accesses
+    /// to EL2's registers and instructions and its `ERET` trap to EL2, and
+    /// under `NV1` too its accesses to `SPSR_EL1`, `ELR_EL1` and
+    /// `VBAR_EL1`, and the EL1&0 regime's stage 1 takes the EL2 regime's
+    /// permission layout (`nv.rs`). Only a processor with EL2 has it
+    /// (`FEAT_NV ==> FEAT_EL2`). `ID_AA64MMFR4_EL1.E2H0` reading 0 makes
+    /// `NV1` writable. No encoding of its own.
+    Nv,
+    /// FEAT_NV2: with FEAT_NV, which it needs (`FEAT_NV2 ==> FEAT_NV`),
+    /// `HCR_EL2.NV2` and `VNCR_EL2`, under which a guest hypervisor's
+    /// accesses to many System registers are loads and stores of the page
+    /// `VNCR_EL2` names instead (`NVMem`), and some of EL2's reach their
+    /// EL1 counterparts. `ID_AA64MMFR2_EL1.NV` 2. No encoding of its own.
+    Nv2,
 }
 
 // `Feature::ALL` is in declaration order, and each feature has a bit of a
@@ -365,7 +380,7 @@ const _: () = {
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 90] = [
+    pub(crate) const ALL: [Feature; 92] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -456,6 +471,8 @@ impl Feature {
         Feature::Evt2,
         Feature::Fgt,
         Feature::Hcx,
+        Feature::Nv,
+        Feature::Nv2,
     ];
 }
 
@@ -556,6 +573,8 @@ impl Feature {
             Self::Evt2 => Some("FEAT_EVT2"),
             Self::Fgt => Some("FEAT_FGT"),
             Self::Hcx => Some("FEAT_HCX"),
+            Self::Nv => Some("FEAT_NV"),
+            Self::Nv2 => Some("FEAT_NV2"),
         }
     }
 
@@ -624,6 +643,8 @@ impl Feature {
                 | Self::Evt2
                 | Self::Fgt
                 | Self::Hcx
+                | Self::Nv
+                | Self::Nv2
         )
     }
 
@@ -700,8 +721,9 @@ impl Features {
     /// `ID_AA64MMFR2_EL1.EVT` is 0 without EL2 (Arm ARM D24.2: "If EL2 is
     /// not implemented, the only permitted value is 0b0000"), FEAT_FGT,
     /// which needs EL2 or EL3 (`FEAT_FGT ==> (FEAT_EL2 || FEAT_EL3)`) and
-    /// this processor has no EL3, and FEAT_HCX (`(FEAT_AA64 && FEAT_HCX)
-    /// ==> FEAT_AA64EL2`).
+    /// this processor has no EL3, FEAT_HCX (`(FEAT_AA64 && FEAT_HCX)
+    /// ==> FEAT_AA64EL2`), and FEAT_NV (`FEAT_NV ==> FEAT_EL2`) with FEAT_NV2,
+    /// which needs it.
     const NEED_EL2: Self = Self(
         Feature::EcvPoff.bit()
             | Feature::S2TGran16K.bit()
@@ -713,7 +735,9 @@ impl Features {
             | Feature::Evt.bit()
             | Feature::Evt2.bit()
             | Feature::Fgt.bit()
-            | Feature::Hcx.bit(),
+            | Feature::Hcx.bit()
+            | Feature::Nv.bit()
+            | Feature::Nv2.bit(),
     );
 
     /// What the Armv9.2 processor model implements: every feature Arm's
@@ -737,10 +761,14 @@ impl Features {
     /// FEAT_PMUv3) ==> FEAT_PMUv3p5` and their siblings require them too).
     /// Of the features only EL2 brings ([`Features::NEED_EL2`]), which a
     /// processor of the model without EL2 drops, it lists those Arm
-    /// requires with EL2 and no other: not FEAT_ECV_POFF, which
+    /// requires with EL2, and of the options nested virtualization, FEAT_NV
+    /// with FEAT_NV2 (which `NV_frac` 0 in `ID_AA64MMFR4_EL1` and `NV` 2 in
+    /// `ID_AA64MMFR2_EL1` report; FEAT_NV2p1 Arm requires only from Armv9.6,
+    /// `(v9Ap6 && FEAT_NV) ==> FEAT_NV2p1`): not FEAT_ECV_POFF, which
     /// `Features.json` makes optional (only FEAT_RME requires it); FEAT_ECV's
-    /// own EL2 controls (`CNTHCTL_EL2.EL1TVT`, `EL1TVCT`, `EVNTIS`) come with
-    /// FEAT_ECV. Not FEAT_SVE: Streaming SVE mode is its only SVE. Not
+    /// own EL2 controls (`CNTHCTL_EL2.EL1TVT`, `EL1TVCT`, `EL1NVPCT`,
+    /// `EL1NVVCT`, `EVNTIS`) come with FEAT_ECV. Not FEAT_SVE: Streaming SVE
+    /// mode is its only SVE. Not
     /// FEAT_DoubleLock, the one Cortex-A57 feature Armv9.0 forbids.
     pub(crate) const ARMV9P2: Self = Self::of(&[
         Feature::Base,
@@ -818,6 +846,9 @@ impl Features {
         Feature::Fgt,
         Feature::Hcx,
         // Options
+        // Nested virtualization, dropped without EL2 as the features above.
+        Feature::Nv,
+        Feature::Nv2,
         Feature::Sme,
         Feature::Sme2,
         Feature::Aes,

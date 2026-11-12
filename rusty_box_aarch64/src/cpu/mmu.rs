@@ -70,8 +70,8 @@ use rusty_box_core::SnapError;
 use super::debug::{WatchedAccess, WatchedRange};
 use super::dp::ones;
 use super::el2::{
-    hcr_mask, E2hLayout, El2Reg, El2Regs, El2Storage, HCR_CD, HCR_DC, HCR_FWB, HCR_PTW, HCR_TGE,
-    HCR_VM, VTTBR_VMID8,
+    hcr_mask, E2hLayout, El2Reg, El2Regs, El2Storage, HCR_CD, HCR_DC, HCR_FWB, HCR_NV, HCR_NV1,
+    HCR_PTW, HCR_TGE, HCR_VM, VTTBR_VMID8,
 };
 use super::exception::{AccessSyndrome, AddressedClass, Exception, SyndromeClass, SyndromeSlot};
 use super::exec::{Fault, StopCause};
@@ -2005,9 +2005,10 @@ const _: () = assert!(IPA_ENTRIES == 1 << 8 && id::MAX_PA_BITS - 12 <= 40);
 /// The registers the EL1&0 regime's translations depend on: stage 1's
 /// (`SCTLR_EL1`, `TCR_EL1`, `TTBR0_EL1`, `TTBR1_EL1`, `MAIR_EL1`), and with
 /// EL2 stage 2's (`VTTBR_EL2`, `VTCR_EL2`) and the `HCR_EL2` bits that
-/// decide which walks are made (`VM`, `PTW`, `DC`, `TGE`) and what memory
-/// they make (`CD`, and with FEAT_S2FWB `FWB`); 0 for each EL2 register
-/// without EL2. Every entry of
+/// decide which walks are made (`VM`, `PTW`, `DC`, `TGE`), what memory
+/// they make (`CD`, and with FEAT_S2FWB `FWB`) and, with FEAT_NV, how
+/// stage 1's descriptors give permissions (`NV` and `NV1`); 0 for each EL2
+/// register without EL2. Every entry of
 /// the regime the TLB holds was made
 /// under one such set, its context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2023,7 +2024,8 @@ pub(crate) struct El10Context {
 }
 
 /// The `HCR_EL2` bits an [`El10Context`] holds.
-const HCR_TRANSLATION: u64 = HCR_VM | HCR_PTW | HCR_DC | HCR_TGE | HCR_CD | HCR_FWB;
+const HCR_TRANSLATION: u64 =
+    HCR_VM | HCR_PTW | HCR_DC | HCR_TGE | HCR_CD | HCR_FWB | HCR_NV | HCR_NV1;
 
 impl El10Context {
     /// The context the EL1&0 regime's registers in `sys` and, with EL2,
@@ -2051,11 +2053,16 @@ impl El10Context {
     /// translations whenever EL2 is enabled (Arm `AArch64_TLBContextEL10`,
     /// `VMID()`), and no `VTCR_EL2`, `HCR_EL2.PTW`, `HCR_EL2.CD`
     /// (`AArch64_S2TreatAsNormalNC`) or `HCR_EL2.FWB` (stage 2's
-    /// `walkparams.fwb`). Register values that translate alike
+    /// `walkparams.fwb`); and `HCR_EL2.NV` and `NV1` only where both are set
+    /// and stage 1 walks, the one case they change a translation
+    /// (`walkparams.nv1`). Register values that translate alike
     /// and carry one VMID make one context.
     pub(crate) const fn normalized(self) -> Self {
-        let hcr_el2 = self.hcr_el2 & HCR_TRANSLATION;
+        let mut hcr_el2 = self.hcr_el2 & HCR_TRANSLATION;
         let stage1 = el10_stage1_enabled(self.sctlr_el1, hcr_el2);
+        if !stage1 || hcr_el2 & (HCR_NV | HCR_NV1) != HCR_NV | HCR_NV1 {
+            hcr_el2 &= !(HCR_NV | HCR_NV1);
+        }
         let mut context = Self {
             sctlr_el1: walk_sctlr(self.sctlr_el1, stage1),
             ttbr0_el1: walk_only(self.ttbr0_el1, stage1),
@@ -3488,12 +3495,14 @@ impl<L: Levels> Tlb<L> {
         // slot.
         self.fills = FILL_LOG + 1;
         // A held context is one registers this processor holds make: an
-        // EL1&0 one normalized, its stage 2 registers' values ones they can
-        // hold where it has stage 2 (without, it keeps only the VMID, which
-        // `VTTBR_EL2` holds whole).
+        // EL1&0 one normalized, with `HCR_EL2` bits the processor keeps (the
+        // `NV` and `NV1` of FEAT_NV among them), its stage 2 registers'
+        // values ones they can hold where it has stage 2 (without, it keeps
+        // only the VMID, which `VTTBR_EL2` holds whole).
         let contexts = TlbContexts {
             el10: Contexts::restore(r, el2, Some(context.el10), |held: &El10Context| {
                 *held == held.normalized()
+                    && held.hcr_el2 & !hcr_mask(features) == 0
                     && held
                         .stage2_context()
                         .is_none_or(|stage2| stage2.held_by(features))
@@ -4624,6 +4633,11 @@ impl<L: Levels> Cpu<L> {
         if !applies {
             return false;
         }
+        // The EL1&0 regime under FEAT_NV's `NV1` has no PAN
+        // (`walkparams.nv1`).
+        if L::EL2 && el == El::El1 && self.nested().nv1() {
+            return false;
+        }
         let control = match el {
             El::El2 => self.el2().sctlr,
             El::El0 | El::El1 => self.sys.sctlr_el1,
@@ -4677,7 +4691,10 @@ impl<L: Levels> Cpu<L> {
     /// in EL1&0 `AP[2:1]`, `UXN`, `PXN`, `APTable`, `UXNTable` and
     /// `PXNTable`; in EL2, which has one privilege level, `AP[2]`, `XN` (bit
     /// 54), `APTable[1]` and `XNTable` (bit 60), the descriptor's other
-    /// permission bits ignored. Where the regime manages dirty state, a leaf
+    /// permission bits ignored; and in EL1&0 under FEAT_NV's `NV1`
+    /// (`walkparams.nv1`) EL2's bits, giving EL1 what they give EL2 and EL0
+    /// no read or write, and nothing taking its execute permission away.
+    /// Where the regime manages dirty state, a leaf
     /// whose `DBM` is set has its `AP[2]` taken as clear: a writable-clean
     /// leaf gives every permission a writable-dirty one would, its
     /// execute permissions under `WXN` and EL0's write included.
@@ -4720,9 +4737,14 @@ impl<L: Levels> Cpu<L> {
         };
         let desc = leaf.desc.value;
         // `APTable`, `UXNTable` (`XNTable`, the same bit, in EL2) and
-        // `PXNTable` of every table descriptor, bits 62:61, 60 and 59.
+        // `PXNTable` of every table descriptor, bits 62:61, 60 and 59. Under
+        // FEAT_NV's `NV1` the EL1&0 regime reads them as the EL2 regime
+        // does (`AArch64_S1ApplyTablePerms`): `APTable[1]`, bit 60 its
+        // privileged execute-never, `APTable[0]` and bit 59 none.
         let (ap_table, uxn_table, pxn_table) = if params.hpd {
             (0, false, false)
+        } else if params.nv1 {
+            ((leaf.tables >> 2) & 2, false, (leaf.tables >> 1) & 1 == 1)
         } else {
             (
                 (leaf.tables >> 2) & 3,
@@ -4731,9 +4753,11 @@ impl<L: Levels> Cpu<L> {
             )
         };
 
-        // `AP[2:1]`, `AP[2]` taken as clear in a leaf whose `DBM` is set
-        // where dirty state is managed (`AArch64_S1DirectBasePermissions`).
-        let ap = (desc >> 6) & 3;
+        // `AP[2:1]`, `AP[1]` taken as 0 under `NV1`
+        // (`AArch64_S1ApplyOutputPerms`), and `AP[2]` taken as clear in a
+        // leaf whose `DBM` is set where dirty state is managed
+        // (`AArch64_S1DirectBasePermissions`).
+        let ap = (desc >> 6) & if params.nv1 { 2 } else { 3 };
         let ap = if params.hw.dirty() && desc & DESC_DBM != 0 {
             ap & 1
         } else {
@@ -4751,8 +4775,16 @@ impl<L: Levels> Cpu<L> {
                 el1_w = false;
                 el0_w = false;
             }
-            let uxn = (desc >> 54) & 1 == 1 || uxn_table;
-            let pxn = (desc >> 53) & 1 == 1 || pxn_table;
+            // Under `NV1` bit 54 is the privileged execute-never, as the
+            // EL2 regime's `XN`, and there is no unprivileged one.
+            let (uxn, pxn) = if params.nv1 {
+                (false, (desc >> 54) & 1 == 1 || pxn_table)
+            } else {
+                (
+                    (desc >> 54) & 1 == 1 || uxn_table,
+                    (desc >> 53) & 1 == 1 || pxn_table,
+                )
+            };
             // EL1 never executes memory EL0 can write, and WXN makes every
             // writable region execute-never at its own EL.
             let el1_x = !pxn && !el0_w && !(params.wxn && el1_w);
@@ -5421,17 +5453,31 @@ impl<L: Levels> Cpu<L> {
     /// The EL whose permissions a data access is checked against: EL0's for
     /// LDTR and STTR at EL1, and at EL2 in the host (`HCR_EL2.{E2H, TGE}`
     /// {1, 1}, FEAT_VHE), unless PSTATE.UAO is set, the current EL's for
-    /// every other access (Arm `AArch64_IsUnprivAccessPriv`: with no
-    /// FEAT_NV they are privileged at EL2 otherwise). At EL0 they are EL0's
-    /// either way, so only a processor with EL2 tests the level.
+    /// every other access (Arm `AArch64_IsUnprivAccessPriv`: they are
+    /// privileged at EL2 otherwise, and at EL1 under FEAT_NV's `HCR_EL2.{NV,
+    /// NV1}` {1, 1}, a guest hypervisor without `E2H` running as EL2). At
+    /// EL0 they are EL0's either way, so only a processor with EL2 tests the
+    /// level.
     #[inline]
     fn access_el(&self, acc: DataAccess) -> El {
-        let below_el2 = !L::EL2 || self.pstate.el != El::El2 || self.el0_in_host();
-        if acc.unprivileged && below_el2 && !self.pstate.uao {
+        if acc.unprivileged && !self.pstate.uao && !self.unprivileged_is_privileged() {
             El::El0
         } else {
             self.pstate.el
         }
+    }
+
+    /// Whether an `LDTR` or `STTR` at the current level is privileged: at
+    /// EL2 outside the host, and at EL1 under FEAT_NV's `HCR_EL2.{NV, NV1}`
+    /// {1, 1} ([`Cpu::access_el`]); never without EL2.
+    #[inline(always)]
+    fn unprivileged_is_privileged(&self) -> bool {
+        L::EL2
+            && match self.pstate.el {
+                El::El2 => !self.el0_in_host(),
+                El::El1 => self.nested().nv1(),
+                El::El0 => false,
+            }
     }
 
     /// Alignment checks that precede translation, then translation, with

@@ -179,7 +179,8 @@ impl ImpdefSpace {
                 | El2Reg::Hfgitr
                 | El2Reg::Hdfgrtr
                 | El2Reg::Hdfgwtr
-                | El2Reg::Hcrx => value,
+                | El2Reg::Hcrx
+                | El2Reg::Vncr => value,
             },
         }
     }

@@ -423,11 +423,15 @@ impl<L: Levels> Cpu<L> {
             && self.fine_grained_traps_any(hfgitr_field(op1, crn, crm, op2), el)
     }
 
-    /// Arm `AArch64_CheckForERetTrap` of an exception return of `form` (no
-    /// FEAT_NV): at EL1 with `HFGITR_EL2.ERET` set, a trap to EL2 with EC
-    /// 0x1A, ahead of reading `ELR_EL1` and of authenticating it.
+    /// Arm `AArch64_CheckForERetTrap` of an exception return of `form`: at
+    /// EL1 with `HFGITR_EL2.ERET` set, or under `HCR_EL2.NV` (FEAT_NV, a
+    /// guest hypervisor's return, which with no FEAT_NV3 has no
+    /// `NVHCR_EL2.TGE` to spare it), a trap to EL2 with EC 0x1A, ahead of
+    /// reading `ELR_EL1` and of authenticating it.
     pub(crate) fn check_eret_trap(&self, form: EretForm) -> Result<(), Fault> {
-        if self.pstate.el == El::El1 && self.fine_grained_traps(HFGITR_ERET, El::El1) {
+        if self.pstate.el == El::El1
+            && (self.fine_grained_traps(HFGITR_ERET, El::El1) || self.nested().nv())
+        {
             return Err(Exception::to_el2(SyndromeClass::ERetTrap, form.iss()).into());
         }
         Ok(())

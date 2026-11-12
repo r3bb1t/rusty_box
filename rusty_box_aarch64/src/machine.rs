@@ -2882,8 +2882,9 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// `CNTHV_CVAL_EL2`) and the EL2&0 regime's TLB entries, the fine-grained
 /// trap registers (FEAT_FGT), `HCRX_EL2` (FEAT_HCX), and the TLB's stage 1
 /// memory told apart by shareability and stage 2 memory by `HCR_EL2.FWB`'s
-/// rule (FEAT_S2FWB), whose stage 2 contexts hold `FWB`.
-const SNAPSHOT_VERSION: u32 = 38;
+/// rule (FEAT_S2FWB), whose stage 2 contexts hold `FWB`, and `VNCR_EL2`
+/// (FEAT_NV2) with the EL1&0 contexts' `HCR_EL2.NV` and `NV1` (FEAT_NV).
+const SNAPSHOT_VERSION: u32 = 39;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

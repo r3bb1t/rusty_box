@@ -16,10 +16,14 @@
 //!   `MSR` and System instruction encoding does on each processor this
 //!   crate builds and the test-only ones, at EL0, EL1 and (with EL2) EL2,
 //!   in each of a set of states of the registers that control access: the
-//!   access, an UNDEFINED exception, or a trap to an exception level with a
-//!   class. The processor stepping the word must take the same exception,
-//!   with the syndrome `AArch64_SystemAccessTrapSyndrome` gives it, or
-//!   none. An encoding no accessor names is UNDEFINED.
+//!   access, an UNDEFINED exception, a trap to an exception level with a
+//!   class, or with FEAT_NV2 a load or store at an offset of the page
+//!   `VNCR_EL2` names (`NVMem`). The processor stepping the word must take
+//!   the same exception, with the syndrome `AArch64_SystemAccessTrapSyndrome`
+//!   gives it, or none, loading from or storing to that offset and no other
+//!   where the accessor does. An encoding no accessor names is UNDEFINED.
+//!   With FEAT_NV the states include a guest hypervisor's at EL1, under each
+//!   `HCR_EL2.{NV2, NV1, NV}` it can run with.
 //! - [`each_el2_register_keeps_the_bits_its_fieldset_gives_it`] writes every
 //!   EL2 register at EL2 with all ones and with all zeros: each bit of a
 //!   field reads back as written, each RES0 bit reads 0 and each RES1 bit
@@ -66,7 +70,7 @@ const RT_PAIR: u32 = 0;
 /// The choices Arm leaves to an implementation (`ImpDefBool`) that the
 /// accessors this processor reaches ask about, with this processor's
 /// answer and why.
-const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 24] = [
+const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 25] = [
     (
         "Implementation can reset into AArch32 state",
         false,
@@ -81,8 +85,14 @@ const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 24] = [
     (
         "IMPLEMENTED_ACTLR_ELx accessor behavior",
         false,
-        "the ACTLR_ELx encodings reach the register they name; the choice \
-         matters only with FEAT_VHE or FEAT_NV",
+        "the ACTLR_ELx encodings reach the register they name, with no \
+         ACTLR_EL12; under FEAT_NV2 a guest hypervisor's ACTLR_EL1 is \
+         transformed whatever HCR_EL2.NV1 says",
+    ),
+    (
+        "Programming HCR_EL2.<NV,NV2> to '10' behaves as '11'",
+        false,
+        "NV2 acts only with NV",
     ),
     (
         "ID_AA64DFR2_EL1 trapped by HCR_EL2.TID3",
@@ -581,6 +591,10 @@ fn spec() -> &'static Spec {
 enum Outcome {
     /// The register is read or written, or the instruction performed.
     Access,
+    /// FEAT_NV2's `NVMem(offset)`: a load (`write` false) or store of 64
+    /// bits at `offset` in the page `VNCR_EL2` names, in place of the
+    /// register's access.
+    Memory { offset: u64, write: bool },
     /// `Undefined()`.
     Undefined,
     /// `AArch64_SystemAccessTrap(el, ec)`.
@@ -782,6 +796,24 @@ impl Eval<'_> {
     /// `EffectiveHCR_EL2_E2H()`.
     fn e2h(&self) -> bool {
         self.feature("FEAT_VHE") && (!self.feature("FEAT_E2H0") || self.hcr_bit("E2H"))
+    }
+
+    /// `EffectiveHCR_EL2_NVx()`, `NV2:NV1:NV`, on a processor whose `NV1` is
+    /// writable (FEAT_E2H0, which every one here with FEAT_NV has), with
+    /// `{NV, NV1}` `{0, 1}` as `{0, 0}`: the processor's choice of
+    /// `ConstrainUnpredictable(Unpredictable_NVNV1)`, `Constraint_NVNV1_00`.
+    fn nvx(&self) -> u64 {
+        if !self.have_el2() || !self.feature("FEAT_NV") || !self.hcr_bit("NV") {
+            return 0b000;
+        }
+        assert!(self.feature("FEAT_E2H0"), "NV1 RAZ is not modelled");
+        let nv1 = u64::from(self.hcr_bit("NV1"));
+        if !self.feature("FEAT_NV2") {
+            return (nv1 << 1) | 1;
+        }
+        let nv2 = self.hcr_bit("NV2")
+            || self.imp_def("Programming HCR_EL2.<NV,NV2> to '10' behaves as '11'");
+        (u64::from(nv2) << 2) | (nv1 << 1) | 1
     }
 
     fn imp_def(&self, name: &str) -> bool {
@@ -1021,13 +1053,7 @@ impl Eval<'_> {
             "ELIsInHost" => V::Bool(self.in_host(self.el_arg(args))),
             "EffectivelyAtEL0InHost" => V::Bool(self.el == 0 && self.in_host(0)),
             "EffectivelyAtEL0NotInHost" => V::Bool(self.el == 0 && !self.in_host(0)),
-            "EffectiveHCR_EL2_NVx" => {
-                assert!(
-                    !self.feature("FEAT_NV"),
-                    "FEAT_NV is not modelled by the test"
-                );
-                V::bits(0, 3)
-            }
+            "EffectiveHCR_EL2_NVx" => V::bits(self.nvx(), 3),
             // With no EL3 there is no `SCR_EL3.HXEn`.
             "IsHCRXEL2Enabled" => V::Bool(self.feature("FEAT_HCX") && self.have_el2()),
             // `HCRX_EL2.NVTGE` is FEAT_NV3's.
@@ -1165,9 +1191,35 @@ impl Eval<'_> {
                     self.run(&node["access"])
                 }
                 "AST.Function" => self.statement(text(node, "name"), list(node, "arguments")),
-                "AST.Assignment" | "AST.Return" => Outcome::Access,
+                "AST.Assignment" => self.assignment(node),
+                "AST.Return" => Outcome::Access,
                 other => panic!("statement of type {other:?}: {node}"),
             },
+        }
+    }
+
+    /// An assignment's outcome: a load (`X(t) = NVMem(offset)`) or store
+    /// (`NVMem(offset) = X(t)`) of the `VNCR_EL2` page, or the access of a
+    /// register, whichever register it names.
+    fn assignment(&self, node: &Value) -> Outcome {
+        let nvmem = |side: &Value| {
+            (ty(side) == "AST.Function" && text(side, "name") == "NVMem").then(|| {
+                let args = list(side, "arguments");
+                assert_eq!(args.len(), 1, "{side}");
+                self.eval(&args[0]).int() as u64
+            })
+        };
+        match (nvmem(&node["var"]), nvmem(&node["val"])) {
+            (Some(offset), None) => Outcome::Memory {
+                offset,
+                write: true,
+            },
+            (None, Some(offset)) => Outcome::Memory {
+                offset,
+                write: false,
+            },
+            (None, None) => Outcome::Access,
+            (Some(_), Some(_)) => panic!("NVMem on both sides: {node}"),
         }
     }
 
@@ -1259,7 +1311,92 @@ impl PhysBus for Ram {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Observed {
     Completed,
-    Exception { el: u8, ec: u64, iss: u64 },
+    Exception {
+        el: u8,
+        ec: u64,
+        iss: u64,
+    },
+    /// It completed by a load (`write` false) or store at `offset` in the
+    /// `VNCR_EL2` page, which [`VNCR_PAGE`] is.
+    Memory {
+        offset: u64,
+        write: bool,
+    },
+}
+
+/// Where `VNCR_EL2` points on every processor with FEAT_NV2 under test: a
+/// page of the RAM below [`CODE`], each of whose doublewords holds
+/// [`vncr_pattern`] of its offset, so a load says where it read and a
+/// store where it wrote.
+const VNCR_PAGE: u64 = 0;
+
+/// The doubleword at `offset` in the `VNCR_EL2` page: a value no register
+/// holds, naming its offset.
+const fn vncr_pattern(offset: u64) -> u64 {
+    0x5EED_0000_0000_0000 | offset
+}
+
+/// The `VNCR_EL2` page's contents, as [`processor`] fills it.
+fn vncr_page() -> Vec<u8> {
+    (0..0x1000u64)
+        .step_by(8)
+        .flat_map(|offset| vncr_pattern(offset).to_le_bytes())
+        .collect()
+}
+
+/// The `VNCR_EL2` page of `ram`.
+fn vncr_page_of(ram: &mut Ram) -> &mut [u8] {
+    &mut ram.0[VNCR_PAGE as usize..VNCR_PAGE as usize + 0x1000]
+}
+
+/// The offset of the first doubleword of the `VNCR_EL2` page of `ram` that
+/// no longer holds its pattern, if one changed, and the page put back.
+fn vncr_store(ram: &mut Ram) -> Option<u64> {
+    let fill = vncr_page();
+    let page = vncr_page_of(ram);
+    let changed = page
+        .chunks(8)
+        .zip(fill.chunks(8))
+        .position(|(now, was)| now != was)
+        .map(|slot| 8 * slot as u64);
+    page.copy_from_slice(&fill);
+    changed
+}
+
+/// Step `word`, whose accessor makes it a load or store of the `VNCR_EL2`
+/// page if `memory` is that outcome, and say what it did: the word with
+/// X1 as its register in place of XZR, so a load lands where it can be
+/// read and a store stores X1, which holds a value no doubleword of the
+/// page does; any other word as it is, with a store to the page reported
+/// as one ([`Observed::Memory`]).
+fn observe<L: Levels>(cpu: &mut Cpu<L>, ram: &mut Ram, word: u32, memory: Outcome) -> Observed {
+    const STORED: u64 = 0xC0DE_0000_0000_0000;
+    let (word, rt) = match memory {
+        Outcome::Memory { .. } => ((word & !0x1F) | 1, Some(1)),
+        _ => (word, None),
+    };
+    if let Some(rt) = rt {
+        cpu.x[rt] = STORED;
+    }
+    let got = step(cpu, ram, word);
+    let stored = vncr_store(ram);
+    match (got, stored, rt) {
+        (Observed::Completed, Some(offset), _) => Observed::Memory {
+            offset,
+            write: true,
+        },
+        (Observed::Completed, None, Some(rt)) => {
+            let loaded = cpu.x[rt];
+            match (0..0x1000).step_by(8).find(|&o| vncr_pattern(o) == loaded) {
+                Some(offset) => Observed::Memory {
+                    offset,
+                    write: false,
+                },
+                None => Observed::Completed,
+            }
+        }
+        (observed, _, _) => observed,
+    }
 }
 
 /// Everything an access can change, to put back after each step.
@@ -1406,6 +1543,7 @@ fn expected(outcome: Outcome, el: u8, tge: bool, word: u32, writes: bool) -> Obs
             iss: 0b10_0001 | (1 << 6),
         },
         Outcome::Access => Observed::Completed,
+        Outcome::Memory { offset, write } => Observed::Memory { offset, write },
         Outcome::Undefined | Outcome::ImplementationDefined => undefined,
         Outcome::Trap { el, ec } => Observed::Exception {
             el,
@@ -1427,10 +1565,16 @@ fn processor<L: Levels>(imp: LeveledImplementation<L>) -> (Cpu<L>, Ram) {
         imp,
     );
     cpu.sys.vbar_el1 = VBAR_EL1;
+    let nv2 = imp.has(Feature::Nv2);
     if let Some(el2) = cpu.el2_mut() {
         el2.vbar = VBAR_EL2;
+        if nv2 {
+            el2.vncr = VNCR_PAGE;
+        }
     }
-    (cpu, Ram(vec![0; RAM_BYTES]))
+    let mut ram = Ram(vec![0; RAM_BYTES]);
+    vncr_page_of(&mut ram).copy_from_slice(&vncr_page());
+    (cpu, ram)
 }
 
 /// `HCR_EL2.E2H`.
@@ -1468,9 +1612,11 @@ fn read_register<L: Levels>(cpu: &mut Cpu<L>, ram: &mut Ram, name: &str) -> Opti
     cpu.pstate.el = if L::EL2 { El::El2 } else { El::El1 };
     cpu.pstate.sp_sel = true;
     let word = sysreg_word(cpu, name, false);
+    // A step reports the access of a register, or an exception; at the
+    // highest level nothing is transformed into a load or store.
     let value = match step(cpu, ram, word) {
         Observed::Completed => Some(cpu.x[0]),
-        Observed::Exception { .. } => None,
+        Observed::Exception { .. } | Observed::Memory { .. } => None,
     };
     restore(cpu, &saved);
     value
@@ -1545,6 +1691,10 @@ const CPACR_OPEN: u64 = (3 << 20) | (3 << 16) | (3 << 24);
 /// `HCR_EL2.TGE` and `TIDCP`.
 const HCR_TGE: u64 = 1 << 27;
 const HCR_TIDCP: u64 = 1 << 20;
+/// `HCR_EL2.NV`, `NV1` and `NV2` (FEAT_NV, FEAT_NV2).
+const HCR_NV: u64 = 1 << 42;
+const HCR_NV1: u64 = 1 << 43;
+const HCR_NV2: u64 = 1 << 45;
 
 /// One state of the controls.
 #[derive(Debug, Clone)]
@@ -1675,6 +1825,64 @@ fn configs<L: Levels>(imp: LeveledImplementation<L>) -> Vec<Config> {
                         w.1 ^= 1 << bit;
                     }
                     out.push(c);
+                }
+            }
+        }
+    }
+    // With FEAT_NV, the open states of a guest hypervisor at EL1: under each
+    // `HCR_EL2.{NV2, NV1, NV}` it runs with, with `E2H` clear and, with
+    // FEAT_VHE, set, alone and with each other bit a control keeps set
+    // alone (`HCR_EL2`'s own among them, but `E2H`, `TGE` and the `NV`
+    // bits themselves), whose traps the accessors order around the guest
+    // hypervisor's own outcomes. The fine-grained trap registers' many
+    // bits, each trapping one register as `HCR_EL2`'s do groups of them,
+    // are set alone under the two states that transform the most: {1, 1,
+    // 1} with `E2H` clear and {1, 0, 1} with it set (without FEAT_NV2,
+    // {0, 1, 1} and {0, 0, 1}).
+    if imp.has(Feature::Nv) {
+        let nested: &[u64] = if imp.has(Feature::Nv2) {
+            &[
+                HCR_NV,
+                HCR_NV | HCR_NV1,
+                HCR_NV | HCR_NV2,
+                HCR_NV | HCR_NV1 | HCR_NV2,
+            ]
+        } else {
+            &[HCR_NV, HCR_NV | HCR_NV1]
+        };
+        let most = |hcr: u64| {
+            let deepest = nested[nested.len() - 1];
+            hcr == deepest || hcr == (deepest & !HCR_NV1) | HCR_E2H
+        };
+        let fine_grained = |name: &str| name.starts_with("HFG") || name.starts_with("HDFG");
+        let fixed = HCR_E2H | HCR_TGE | HCR_NV | HCR_NV1 | HCR_NV2;
+        for &nv in nested {
+            for &e2h in layouts {
+                let hcr = nv | e2h;
+                let under = |label: String| {
+                    let mut c = open(label);
+                    for w in c.writes.iter_mut().filter(|w| w.0 == "HCR_EL2") {
+                        w.1 = hcr;
+                    }
+                    c
+                };
+                out.push(Config {
+                    sweep: true,
+                    ..under(format!("HCR_EL2 {hcr:#x}, open"))
+                });
+                for &(name, mask) in &variable {
+                    let mask = match name {
+                        "HCR_EL2" => mask & !fixed,
+                        _ if fine_grained(name) && !most(hcr) => 0,
+                        _ => mask,
+                    };
+                    for bit in (0..64).filter(|bit| mask & (1 << bit) != 0) {
+                        let mut c = under(format!("HCR_EL2 {hcr:#x}, open, {name} bit {bit}"));
+                        for w in c.writes.iter_mut().filter(|w| w.0 == name) {
+                            w.1 ^= 1 << bit;
+                        }
+                        out.push(c);
+                    }
                 }
             }
         }
@@ -1846,7 +2054,7 @@ fn check<L: Levels>(
     }
     let mut stepped = 0;
     for (&word, &(outcome, site)) in &want {
-        let got = step(&mut cpu, &mut ram, word);
+        let got = observe(&mut cpu, &mut ram, word, outcome);
         restore(&mut cpu, &saved);
         stepped += 1;
         let w = expected(outcome, el, tge, word, writes_memory(site));
@@ -1874,7 +2082,7 @@ fn check<L: Levels>(
             vars: &[],
         };
         for &word in unnamed {
-            let got = step(&mut cpu, &mut ram, word);
+            let got = observe(&mut cpu, &mut ram, word, Outcome::Undefined);
             restore(&mut cpu, &saved);
             stepped += 1;
             let want = expected(unnamed_outcome(&eval, word), el, tge, word, false);

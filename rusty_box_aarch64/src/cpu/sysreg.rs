@@ -14,7 +14,11 @@
 //! register's accessor checks them. Provenance (R7): Arm's machine-readable
 //! register data (AARCHMRS `Registers.json`, release 2026-09), each
 //! register's `MRS` and `MSR` accessor at each level, read for a processor
-//! with no EL3 and no FEAT_NV. With FEAT_FGT each register's fine-grained
+//! with no EL3. With FEAT_NV a guest hypervisor's accesses at EL1 under
+//! `HCR_EL2.NV` trap or, with FEAT_NV2, are loads and stores of the
+//! `VNCR_EL2` page where each accessor says, its own outcomes ahead of the
+//! register's other checks ([`Cpu::nested_name`]) or after them
+//! ([`Cpu::nv2_own`], `nv.rs`). With FEAT_FGT each register's fine-grained
 //! trap (`fgt.rs`) is checked where its accessor checks it: among the
 //! traps to EL2, after EL0's own traps to EL1, and ahead of every other
 //! outcome; with FEAT_EVT `HCR_EL2.TID4` traps the cache identification
@@ -30,16 +34,21 @@
 
 use super::debug::DebugPoints;
 use super::el2::{
-    has_contextidr_el2, El2Reg, CNTHCTL_E2H1_EL1PCTEN, CNTHCTL_E2H1_EL1PTEN, CNTHCTL_EL1PCEN,
-    CNTHCTL_EL1PCTEN, CNTHCTL_EL1TVCT, CNTHCTL_EL1TVT, CPTR_TCPAC, HCR_AMO, HCR_APK, HCR_FIEN,
-    HCR_TACR, HCR_TERR, HCR_TID1, HCR_TID2, HCR_TID3, HCR_TID4, HCR_TIDCP, HCR_TLOR, HCR_TRVM,
-    HCR_TVM, MDCR_TDA, MDCR_TDCC, MDCR_TDE, MDCR_TDOSA, MDCR_TDRA,
+    has_contextidr_el2, El2Reg, CNTHCTL_E2H1_EL1PCTEN, CNTHCTL_E2H1_EL1PTEN, CNTHCTL_EL1NVPCT,
+    CNTHCTL_EL1NVVCT, CNTHCTL_EL1PCEN, CNTHCTL_EL1PCTEN, CNTHCTL_EL1TVCT, CNTHCTL_EL1TVT,
+    CPTR_TCPAC, HCR_AMO, HCR_APK, HCR_FIEN, HCR_TACR, HCR_TERR, HCR_TID1, HCR_TID2, HCR_TID3,
+    HCR_TID4, HCR_TIDCP, HCR_TLOR, HCR_TRVM, HCR_TVM, MDCR_TDA, MDCR_TDCC, MDCR_TDE, MDCR_TDOSA,
+    MDCR_TDRA,
 };
 use super::exception::Route;
 use super::features::{Feature, Features};
 use super::fgt::{FgtReg, FineGrainedTrap};
 use super::id;
 use super::mmu::{El10Context, El2RegimeContext};
+use super::nv::{
+    el2_register_at_el1, El1Counterpart, El2NameAtEl1, Nested, Nv2Own, VncrOffset,
+    VNCR_SMPRIMAP_EL2, VNCR_SP_EL1,
+};
 use super::pauth::KeyHalf;
 use super::pmu::PmuEvent;
 use super::regs::{SysReg, SysRegRefusal};
@@ -400,6 +409,8 @@ const HFGITR_EL2: u32 = key!(3, 4, 1, 1, 6);
 const HDFGRTR_EL2: u32 = key!(3, 4, 3, 1, 4);
 const HDFGWTR_EL2: u32 = key!(3, 4, 3, 1, 5);
 const HCRX_EL2: u32 = key!(3, 4, 1, 2, 2);
+// FEAT_NV2's EL2 register.
+const VNCR_EL2: u32 = key!(3, 4, 2, 2, 0);
 // FEAT_VHE's EL2 registers.
 const TTBR1_EL2: u32 = key!(3, 4, 2, 0, 1);
 const CNTHV_TVAL_EL2: u32 = key!(3, 4, 14, 3, 0);
@@ -466,6 +477,66 @@ const ALIASES: [(u32, u32); 23] = [
     (key!(3, 5, 14, 3, 1), CNTV_CTL_EL0),
     (key!(3, 5, 14, 3, 2), CNTV_CVAL_EL0),
 ];
+
+/// The EL1 and EL0 registers whose accesses FEAT_NV2 transforms at EL1
+/// into loads and stores of the page `VNCR_EL2` names, by their own
+/// encoding: each one's offset (`Registers.json`'s `NVMem(offset)`), and
+/// under which `HCR_EL2.{NV2, NV1, NV}` its own name is transformed
+/// ([`Nv2Own`]); its `*_EL12` or `*_EL02` name ([`ALIASES`]) is under
+/// {1, 0, 1}. The one map of these offsets; a register of [`ALIASES`] not
+/// in it (`CNTKCTL_EL1` and the two `TVAL`s) has its alias trapped instead.
+const EL1_VNCR: [(u32, VncrOffset, Nv2Own); 22] = {
+    use Nv2Own::{Always, WithNv1};
+    const fn at(offset: u16) -> VncrOffset {
+        VncrOffset::new(offset)
+    }
+    [
+        (CPACR_EL1, at(0x100), WithNv1),
+        (CONTEXTIDR_EL1, at(0x108), WithNv1),
+        (SCTLR_EL1, at(0x110), WithNv1),
+        (ACTLR_EL1, at(0x118), Always),
+        (TCR_EL1, at(0x120), WithNv1),
+        (AFSR0_EL1, at(0x128), WithNv1),
+        (AFSR1_EL1, at(0x130), WithNv1),
+        (ESR_EL1, at(0x138), WithNv1),
+        (MAIR_EL1, at(0x140), WithNv1),
+        (AMAIR_EL1, at(0x148), WithNv1),
+        (MDSCR_EL1, at(0x158), Always),
+        (SPSR_EL1, at(0x160), WithNv1),
+        (CNTV_CVAL_EL0, at(0x168), WithNv1),
+        (CNTV_CTL_EL0, at(0x170), WithNv1),
+        (CNTP_CVAL_EL0, at(0x178), WithNv1),
+        (CNTP_CTL_EL0, at(0x180), WithNv1),
+        (SMCR_EL1, at(0x1F0), WithNv1),
+        (TTBR0_EL1, at(0x200), WithNv1),
+        (TTBR1_EL1, at(0x210), WithNv1),
+        (FAR_EL1, at(0x220), WithNv1),
+        (ELR_EL1, at(0x230), WithNv1),
+        (VBAR_EL1, at(0x250), WithNv1),
+    ]
+};
+
+/// The offset of EL1 or EL0 register `k`'s accesses under FEAT_NV2, and
+/// when its own name is transformed, if [`EL1_VNCR`] lists it.
+const fn el1_vncr(k: u32) -> Option<(VncrOffset, Nv2Own)> {
+    let mut i = 0;
+    while i < EL1_VNCR.len() {
+        if EL1_VNCR[i].0 == k {
+            return Some((EL1_VNCR[i].1, EL1_VNCR[i].2));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether a guest hypervisor without `E2H` (`HCR_EL2.{NV2, NV1, NV}`
+/// {0, 1, 1}) has its accesses to EL1 register `k` by its own name trapped
+/// to EL2, ahead of the register's other traps: `SPSR_EL1`, `ELR_EL1` and
+/// `VBAR_EL1`, the EL1 registers an exception to EL1 uses, which it would
+/// otherwise share with its guest.
+const fn nv1_traps(k: u32) -> bool {
+    matches!(k, SPSR_EL1 | ELR_EL1 | VBAR_EL1)
+}
 
 /// The name `k` is in `map`'s first column, mapped to its second.
 const fn mapped(map: &[(u32, u32)], k: u32) -> Option<u32> {
@@ -539,6 +610,7 @@ const fn el2_encoding(reg: El2Reg, features: Features) -> Option<u32> {
         El2Reg::Hdfgrtr => present(HDFGRTR_EL2, features.has(Feature::Fgt)),
         El2Reg::Hdfgwtr => present(HDFGWTR_EL2, features.has(Feature::Fgt)),
         El2Reg::Hcrx => present(HCRX_EL2, features.has(Feature::Hcx)),
+        El2Reg::Vncr => present(VNCR_EL2, features.has(Feature::Nv2)),
     }
 }
 
@@ -589,9 +661,15 @@ static EL2_STORAGE: [Option<El2Reg>; 1 << 11] = {
     table
 };
 
-/// Why an `MRS`/`MSR` did not complete.
+/// Why an `MRS`/`MSR` did not complete as an access to the register it
+/// names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SysRegError {
+    /// Transformed (FEAT_NV2, `NVMem`): a guest hypervisor's access at EL1
+    /// that is a load or store of 64 bits at the offset in the page
+    /// `VNCR_EL2` names instead ([`Cpu::nv2_load`], [`Cpu::nv2_store`]),
+    /// made once every trap its accessor checks first has passed.
+    Vncr(VncrOffset),
     /// The encoding does not exist, or not at this EL, or not in this
     /// direction: UNDEFINED.
     Undefined,
@@ -710,7 +788,8 @@ impl TranslationRegister {
             | El2Reg::Hfgitr
             | El2Reg::Hdfgrtr
             | El2Reg::Hdfgwtr
-            | El2Reg::Hcrx => None,
+            | El2Reg::Hcrx
+            | El2Reg::Vncr => None,
         }
     }
 }
@@ -1318,6 +1397,144 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
+    /// FEAT_NV: what a guest hypervisor's access at `el` by `key` does
+    /// ahead of every other check its accessor makes, under
+    /// `HCR_EL2.{NV2, NV1, NV}` ([`Cpu::nested`]); `Ok(None)` where it does
+    /// nothing of its own, at every level but EL1 and without `NV`:
+    /// - an EL2 register's name ([`Cpu::el2_name_at_el1`]) traps to EL2,
+    ///   or with `NV2` is a load or store of the `VNCR_EL2` page or reaches
+    ///   the register's EL1 counterpart (`Ok(Some(..))`);
+    /// - a `*_EL12` or `*_EL02` name ([`Cpu::alias_of`]) traps to EL2, but
+    ///   under {1, 0, 1} is a load or store of its register's offset
+    ///   ([`EL1_VNCR`]), the EL1 timers' after `CNTHCTL_EL2.EL1NVPCT` and
+    ///   `EL1NVVCT` (FEAT_ECV) trap it;
+    /// - under {0, 1, 1} `SPSR_EL1`, `ELR_EL1` and `VBAR_EL1` trap to EL2
+    ///   ([`nv1_traps`]).
+    ///
+    /// The transformation of an EL1 register's own name under `NV2` comes
+    /// after its accessor's other traps ([`Cpu::nv2_own`]).
+    #[inline]
+    fn nested_name(
+        &self,
+        key: SysRegKey,
+        dir: Direction,
+        el: El,
+    ) -> Result<Option<El1Counterpart>, SysRegError> {
+        let nested = self.nested_at(el);
+        if !nested.nv() {
+            return Ok(None);
+        }
+        let trapped = Err(SysRegError::Trap(Route::El2));
+        let k = key.0;
+        if key.is_el2() {
+            return match (self.el2_name_at_el1(key, dir), nested.nv2()) {
+                (None, _) => Ok(None),
+                (Some(El2NameAtEl1::Memory(at)), true) => Err(SysRegError::Vncr(at)),
+                (Some(El2NameAtEl1::El1(counterpart)), true) => Ok(Some(counterpart)),
+                (
+                    Some(El2NameAtEl1::Trapped | El2NameAtEl1::Memory(_) | El2NameAtEl1::El1(_)),
+                    _,
+                ) => trapped,
+            };
+        }
+        if let Some(own) = self.alias_of(k) {
+            if nested == Nested::Nv2 {
+                let timer_trap = match own {
+                    CNTP_CTL_EL0 | CNTP_CVAL_EL0 => CNTHCTL_EL1NVPCT,
+                    CNTV_CTL_EL0 | CNTV_CVAL_EL0 => CNTHCTL_EL1NVVCT,
+                    _ => 0,
+                };
+                trap_to_el2(!self.el0_in_host() && self.cnthctl_any(timer_trap))?;
+                if let Some((at, _)) = el1_vncr(own) {
+                    return Err(SysRegError::Vncr(at));
+                }
+            }
+            return trapped;
+        }
+        if nested == Nested::NvNv1 && nv1_traps(k) {
+            return trapped;
+        }
+        Ok(None)
+    }
+
+    /// FEAT_NV2: the load or store a guest hypervisor's access at `el` to
+    /// EL1 or EL0 register `key` by its own name is instead, once the
+    /// accessor's other traps have passed, where [`EL1_VNCR`] lists the
+    /// register and `HCR_EL2.{NV2, NV1, NV}` transforms its name
+    /// ([`Nv2Own`]).
+    #[inline]
+    fn nv2_own(&self, key: SysRegKey, el: El) -> Result<(), SysRegError> {
+        let nested = self.nested_at(el);
+        if !nested.nv2() {
+            return Ok(());
+        }
+        match el1_vncr(key.0) {
+            Some((at, when)) if when.applies(nested) => Err(SysRegError::Vncr(at)),
+            Some(_) | None => Ok(()),
+        }
+    }
+
+    /// What a guest hypervisor's access at EL1 under `NV` to the name `key`
+    /// of an EL2 register this processor has, in direction `dir`, does: the
+    /// registers of [`El2Reg`] as [`el2_register_at_el1`] says, and those
+    /// held elsewhere ([`Cpu::el2_register_read`]'s): `SP_EL1` and
+    /// `SMPRIMAP_EL2` (FEAT_SME) at their offsets, the rest trapped, the
+    /// read-only `RVBAR_EL2` as it is read. `None` for a name no EL2
+    /// register of this processor has in that direction, which stays
+    /// UNDEFINED.
+    fn el2_name_at_el1(&self, key: SysRegKey, dir: Direction) -> Option<El2NameAtEl1> {
+        if let Some(reg) = self.el2_storage(key) {
+            return Some(el2_register_at_el1(reg));
+        }
+        match key.0 {
+            SP_EL1 => Some(El2NameAtEl1::Memory(VNCR_SP_EL1)),
+            SMPRIMAP_EL2 if self.implements(Feature::Sme) => {
+                Some(El2NameAtEl1::Memory(VNCR_SMPRIMAP_EL2))
+            }
+            RVBAR_EL2 if dir == Direction::Read => Some(El2NameAtEl1::Trapped),
+            SPSR_IRQ | SPSR_ABT | SPSR_UND | SPSR_FIQ | RMR_EL2 | CNTHP_CTL_EL2
+            | CNTHP_TVAL_EL2 => Some(El2NameAtEl1::Trapped),
+            CNTHV_CTL_EL2 | CNTHV_TVAL_EL2 if self.implements(Feature::Vhe) => {
+                Some(El2NameAtEl1::Trapped)
+            }
+            _ => None,
+        }
+    }
+
+    /// The EL1 or EL0 register the `*_EL12` or `*_EL02` name `k` reaches
+    /// at EL2 under `HCR_EL2.E2H` ([`ALIASES`]), if this processor has the
+    /// name: one with FEAT_VHE, `SMCR_EL12` with FEAT_SME too.
+    fn alias_of(&self, k: u32) -> Option<u32> {
+        if !self.implements(Feature::Vhe) {
+            return None;
+        }
+        let own = mapped(&ALIASES, k)?;
+        (own != SMCR_EL1 || self.implements(Feature::Sme)).then_some(own)
+    }
+
+    /// The EL1 register `counterpart`, as an `MRS` of it reads it.
+    fn el1_counterpart(&self, counterpart: El1Counterpart) -> u64 {
+        match counterpart {
+            El1Counterpart::Elr => self.sys.elr_el1,
+            El1Counterpart::Spsr => self.sys.spsr_el1,
+            El1Counterpart::Esr => self.sys.esr_el1,
+            El1Counterpart::Far => self.sys.far_el1,
+        }
+    }
+
+    /// An `MSR` of `value` to the EL1 register `counterpart`, keeping what
+    /// the register holds: `SPSR_EL1` its fields, `ESR_EL1` bits 31:0, the
+    /// others all 64 bits. The one write of each, by its own name and by
+    /// its EL2 counterpart's under `NV2`.
+    fn el1_counterpart_write(&mut self, counterpart: El1Counterpart, value: u64) {
+        match counterpart {
+            El1Counterpart::Elr => self.sys.elr_el1 = value,
+            El1Counterpart::Spsr => self.sys.spsr_el1 = value & self.spsr_mask(),
+            El1Counterpart::Esr => self.sys.esr_el1 = value & 0xFFFF_FFFF,
+            El1Counterpart::Far => self.sys.far_el1 = value,
+        }
+    }
+
     /// The `SCTLR_ELx` whose EL0 controls apply at EL0 (Arm `SCTLR_ELx()`
     /// at EL0): `SCTLR_EL2` in the host (FEAT_VHE, `HCR_EL2.{E2H, TGE}`
     /// {1, 1}), `SCTLR_EL1` otherwise.
@@ -1409,6 +1626,7 @@ impl<L: Levels> Cpu<L> {
             }
             CNTP_CTL_EL0 | CNTP_CVAL_EL0 | CNTP_TVAL_EL0 => {
                 self.physical_timer_check(el)?;
+                self.nv2_own(key, el)?;
                 let timer = self.physical_timer_at(el);
                 return Ok(match k {
                     CNTP_CTL_EL0 => self.timer_ctl_read(timer),
@@ -1418,6 +1636,7 @@ impl<L: Levels> Cpu<L> {
             }
             CNTV_CTL_EL0 | CNTV_CVAL_EL0 | CNTV_TVAL_EL0 => {
                 self.virtual_timer_check(el)?;
+                self.nv2_own(key, el)?;
                 let timer = self.virtual_timer_at(el);
                 return Ok(match k {
                     CNTV_CTL_EL0 => self.timer_ctl_read(timer),
@@ -1463,6 +1682,11 @@ impl<L: Levels> Cpu<L> {
 
         if el0 {
             return Err(SysRegError::Undefined);
+        }
+        // A guest hypervisor's accesses (FEAT_NV), ahead of every other
+        // check.
+        if let Some(counterpart) = self.nested_name(key, Direction::Read, el)? {
+            return Ok(self.el1_counterpart(counterpart));
         }
         // The registers of EL1 that EL0 cannot reach: each accessor tests
         // its fine-grained trap among its traps to EL2 with the same
@@ -1585,7 +1809,15 @@ impl<L: Levels> Cpu<L> {
                 self.sp_el0
             }
             SPSEL => u64::from(self.pstate.sp_sel),
-            CURRENT_EL => self.pstate.el.index() << 2,
+            // A guest hypervisor (FEAT_NV) reads the EL2 it runs as.
+            CURRENT_EL => {
+                let shown = if self.nested_at(el).nv() {
+                    El::El2
+                } else {
+                    self.pstate.el
+                };
+                shown.index() << 2
+            }
             PAN if self.implements(Feature::Pan) => {
                 if self.pstate.pan {
                     Pstate::PAN
@@ -1742,6 +1974,9 @@ impl<L: Levels> Cpu<L> {
                 }
             }
         };
+        // Once its traps have passed, a register FEAT_NV2 transforms is
+        // read from the `VNCR_EL2` page instead.
+        self.nv2_own(key, el)?;
         Ok(value)
     }
 
@@ -1902,6 +2137,7 @@ impl<L: Levels> Cpu<L> {
             }
             CNTP_CTL_EL0 | CNTP_CVAL_EL0 | CNTP_TVAL_EL0 => {
                 self.physical_timer_check(el)?;
+                self.nv2_own(key, el)?;
                 let timer = self.physical_timer_at(el);
                 match k {
                     CNTP_CTL_EL0 => self.timer_ctl_write(timer, value),
@@ -1915,6 +2151,7 @@ impl<L: Levels> Cpu<L> {
             }
             CNTV_CTL_EL0 | CNTV_CVAL_EL0 | CNTV_TVAL_EL0 => {
                 self.virtual_timer_check(el)?;
+                self.nv2_own(key, el)?;
                 let timer = self.virtual_timer_at(el);
                 match k {
                     CNTV_CTL_EL0 => self.timer_ctl_write(timer, value),
@@ -1958,6 +2195,10 @@ impl<L: Levels> Cpu<L> {
         }
         // As a read's ([`Cpu::sysreg_read_as`]), before the write has any
         // effect.
+        if let Some(counterpart) = self.nested_name(key, Direction::Write, el)? {
+            self.el1_counterpart_write(counterpart, value);
+            return Ok(WriteEffect::None);
+        }
         self.fine_grained_check(key, Direction::Write, el)?;
 
         if key.in_impdef_space() {
@@ -1991,9 +2232,12 @@ impl<L: Levels> Cpu<L> {
                 WriteEffect::None
             }
             // The memory-tagging controls read as zero on a core without
-            // FEAT_MTE.
+            // FEAT_MTE. Each register FEAT_NV2 transforms ([`EL1_VNCR`]) is
+            // written to the `VNCR_EL2` page instead once its traps have
+            // passed ([`Cpu::nv2_own`]).
             SCTLR_EL1 => {
                 self.tvm_check(el)?;
+                self.nv2_own(key, el)?;
                 self.sys.sctlr_el1 = value & !SCTLR_MTE;
                 WriteEffect::None
             }
@@ -2001,16 +2245,19 @@ impl<L: Levels> Cpu<L> {
             // (`ImpdefSpace::auxiliary_kept`).
             ACTLR_EL1 => {
                 trap_to_el2(el1 && self.hcr_any(HCR_TACR))?;
+                self.nv2_own(key, el)?;
                 self.sys.actlr_el1 = self.imp.impdef.auxiliary_kept(value);
                 WriteEffect::None
             }
             CPACR_EL1 => {
                 trap_to_el2(el1 && self.cptr_any(CPTR_TCPAC))?;
+                self.nv2_own(key, el)?;
                 self.sys.cpacr_el1 = value & self.cpacr_mask();
                 WriteEffect::None
             }
             SMCR_EL1 if self.implements(Feature::Sme) => {
                 self.sme_register_check(accessor)?;
+                self.nv2_own(key, el)?;
                 self.sys.smcr_el1 = value & smcr_mask(self.imp.features);
                 WriteEffect::None
             }
@@ -2019,6 +2266,7 @@ impl<L: Levels> Cpu<L> {
             // write is no instruction.
             TTBR0_EL1 | TTBR1_EL1 => {
                 self.tvm_check(el)?;
+                self.nv2_own(key, el)?;
                 if k == TTBR0_EL1 {
                     self.sys.ttbr0_el1 = value;
                 } else {
@@ -2028,15 +2276,18 @@ impl<L: Levels> Cpu<L> {
             }
             TCR_EL1 => {
                 self.tvm_check(el)?;
+                self.nv2_own(key, el)?;
                 self.sys.tcr_el1 = value;
                 WriteEffect::None
             }
             SPSR_EL1 => {
-                self.sys.spsr_el1 = value & self.spsr_mask();
+                self.nv2_own(key, el)?;
+                self.el1_counterpart_write(El1Counterpart::Spsr, value);
                 WriteEffect::None
             }
             ELR_EL1 => {
-                self.sys.elr_el1 = value;
+                self.nv2_own(key, el)?;
+                self.el1_counterpart_write(El1Counterpart::Elr, value);
                 WriteEffect::None
             }
             SP_EL0 => {
@@ -2064,22 +2315,26 @@ impl<L: Levels> Cpu<L> {
             }
             AFSR0_EL1 => {
                 self.tvm_check(el)?;
+                self.nv2_own(key, el)?;
                 self.sys.afsr0_el1 = self.imp.impdef.auxiliary_kept(value);
                 WriteEffect::None
             }
             AFSR1_EL1 => {
                 self.tvm_check(el)?;
+                self.nv2_own(key, el)?;
                 self.sys.afsr1_el1 = self.imp.impdef.auxiliary_kept(value);
                 WriteEffect::None
             }
             ESR_EL1 => {
                 self.tvm_check(el)?;
-                self.sys.esr_el1 = value & 0xFFFF_FFFF;
+                self.nv2_own(key, el)?;
+                self.el1_counterpart_write(El1Counterpart::Esr, value);
                 WriteEffect::None
             }
             FAR_EL1 => {
                 self.tvm_check(el)?;
-                self.sys.far_el1 = value;
+                self.nv2_own(key, el)?;
+                self.el1_counterpart_write(El1Counterpart::Far, value);
                 WriteEffect::None
             }
             PAR_EL1 => {
@@ -2088,11 +2343,13 @@ impl<L: Levels> Cpu<L> {
             }
             MAIR_EL1 => {
                 self.tvm_check(el)?;
+                self.nv2_own(key, el)?;
                 self.sys.mair_el1 = value;
                 WriteEffect::None
             }
             AMAIR_EL1 => {
                 self.tvm_check(el)?;
+                self.nv2_own(key, el)?;
                 self.sys.amair_el1 = self.imp.impdef.auxiliary_kept(value);
                 WriteEffect::None
             }
@@ -2114,6 +2371,7 @@ impl<L: Levels> Cpu<L> {
                 WriteEffect::None
             }
             VBAR_EL1 => {
+                self.nv2_own(key, el)?;
                 self.sys.vbar_el1 = value & !0x7FF;
                 WriteEffect::None
             }
@@ -2127,6 +2385,7 @@ impl<L: Levels> Cpu<L> {
             }
             CONTEXTIDR_EL1 => {
                 self.tvm_check(el)?;
+                self.nv2_own(key, el)?;
                 self.sys.contextidr_el1 = value & 0xFFFF_FFFF;
                 WriteEffect::None
             }
@@ -2169,6 +2428,7 @@ impl<L: Levels> Cpu<L> {
             // returned, COMMIRQ's re-evaluation asked for here.
             MDSCR_EL1 => {
                 self.debug_check(el, MDCR_TDA)?;
+                self.nv2_own(key, el)?;
                 let kept = if self.sys.oslsr_el1 & OSLSR_OSLK != 0 {
                     0
                 } else {
@@ -2427,13 +2687,14 @@ impl<L: Levels> Cpu<L> {
             Ok(value) => Ok(value),
             Err(_) if key.0 == OSLAR_EL1 => Err(SysRegRefusal::WriteOnly),
             // A host reads at the highest level past the FP and SME enables
-            // and the EL0 and EL2 controls, so only UNDEFINED is left to
-            // come back.
+            // and the EL0 and EL2 controls, where FEAT_NV2 transforms
+            // nothing, so only UNDEFINED is left to come back.
             Err(
                 SysRegError::Undefined
                 | SysRegError::Trap(_)
                 | SysRegError::FpTrap(_)
-                | SysRegError::SmeTrap(_),
+                | SysRegError::SmeTrap(_)
+                | SysRegError::Vncr(_),
             ) => Err(SysRegRefusal::Absent),
         }
     }
@@ -2480,7 +2741,8 @@ impl<L: Levels> Cpu<L> {
                 SysRegError::Undefined
                 | SysRegError::Trap(_)
                 | SysRegError::FpTrap(_)
-                | SysRegError::SmeTrap(_),
+                | SysRegError::SmeTrap(_)
+                | SysRegError::Vncr(_),
             ) => {
                 if self.sysreg_read_as(key, Accessor::Host).is_ok() {
                     Err(SysRegRefusal::ReadOnly)

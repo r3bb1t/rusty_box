@@ -2230,6 +2230,12 @@ mod tests {
                     Feature::Evt2 => field(mmfr2, 56) >= 2,
                     Feature::Fgt => field(mmfr0, 56) >= 1,
                     Feature::Hcx => field(mmfr1, 40) >= 1,
+                    // `Features.json`: with `ID_AA64MMFR4_EL1.NV_frac` 0,
+                    // which every processor here reads, `FEAT_NV <=>
+                    // UInt(ID_AA64MMFR2_EL1.NV) >= 1` and `FEAT_NV2 <=>
+                    // UInt(NV) >= 2`.
+                    Feature::Nv => field(mmfr2, 24) >= 1,
+                    Feature::Nv2 => field(mmfr2, 24) >= 2,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -2402,8 +2408,10 @@ mod tests {
                         | (0xF << 48)
                         | (0xF << 56)
                         | (0xF << 60)),
-                at(Feature::S2Fwb, 40, 1),
-                "FWB beside CnP, UAO, VARange, ST, AT, IDS, TTL, EVT and E0PD"
+                at(Feature::S2Fwb, 40, 1)
+                    | ((at(Feature::Nv, 0, 1) + at(Feature::Nv2, 0, 1)) << 24),
+                "FWB and NV beside CnP, UAO, VARange, ST, AT, IDS, TTL, EVT and E0PD: \
+                 NV = 2, FEAT_NV2, which every processor here with FEAT_NV has"
             );
             assert_eq!(
                 field(mmfr2, 56),

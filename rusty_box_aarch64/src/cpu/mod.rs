@@ -60,6 +60,10 @@ mod memattr;
 #[path = "../../tests/unit/memory_system.rs"]
 mod memory_system;
 mod mmu;
+#[cfg(test)]
+#[path = "../../tests/unit/nested.rs"]
+mod nested;
+mod nv;
 mod op;
 mod pauth;
 mod pmu;

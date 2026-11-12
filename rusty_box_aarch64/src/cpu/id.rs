@@ -332,13 +332,17 @@ pub(crate) const fn id_aa64mmfr1(features: Features) -> u64 {
 /// FEAT_LSE2, IDS (39:36) = 1 with FEAT_IDST, TTL (51:48) = 1 with
 /// FEAT_TTL, E0PD (63:60) = 1 with FEAT_E0PD, ST (31:28) = 1 with
 /// FEAT_TTST, VARange (19:16) = 1 with FEAT_LVA (`FEAT_LVA <=>
-/// UInt(VARange) >= 1`), FWB (43:40) = 1 with FEAT_S2FWB, EVT (59:56)
-/// names the newest of FEAT_EVT (1) and FEAT_EVT2 (2) the processor
-/// implements (`FEAT_EVT2 ==> FEAT_EVT`); nothing else from v8.1+.
+/// UInt(VARange) >= 1`), NV (27:24) names the newest of FEAT_NV (1) and
+/// FEAT_NV2 (2) the processor implements (`FEAT_NV2 ==> FEAT_NV`, and
+/// `ID_AA64MMFR4_EL1.NV_frac` reads 0), FWB (43:40) = 1 with FEAT_S2FWB,
+/// EVT (59:56) names the newest of FEAT_EVT (1) and FEAT_EVT2 (2) the
+/// processor implements (`FEAT_EVT2 ==> FEAT_EVT`); nothing else from
+/// v8.1+.
 pub(crate) const fn id_aa64mmfr2(features: Features) -> u64 {
     field(features, Feature::Ttcnp, 0, 1)
         | field(features, Feature::Uao, 4, 1)
         | field(features, Feature::Lva, 16, 1)
+        | (chain_level(features, &[Feature::Nv, Feature::Nv2]) << 24)
         | field(features, Feature::Ttst, 28, 1)
         | field(features, Feature::Lse2, 32, 1)
         | field(features, Feature::Idst, 36, 1)

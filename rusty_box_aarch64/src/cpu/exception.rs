@@ -16,6 +16,7 @@ use super::el2::{
 };
 use super::features::Feature;
 use super::mmu::{Fsc, Ipa};
+use super::nv::ISS_VNCR;
 use super::op::Extend;
 use super::pmu::Cycle;
 use super::sysreg::{DBGPRCR_CORENPDRQ, MDSCR_KDE, MDSCR_SS, OSDLR_DLK, OSLSR_OSLK};
@@ -56,9 +57,10 @@ pub enum ExceptionClass {
     Smc,
     /// EC 0x18: `MSR`/`MRS`/`SYS` trapped.
     SysRegTrap,
-    /// EC 0x1A: `ERET`, `ERETAA` or `ERETAB` at EL1 trapped to EL2 by
-    /// `HCR_EL2`'s fine-grained `HFGITR_EL2.ERET` (FEAT_FGT); `ISS[1]` says
-    /// whether it authenticates and `ISS[0]` with which key.
+    /// EC 0x1A: `ERET`, `ERETAA` or `ERETAB` at EL1 trapped to EL2 by the
+    /// fine-grained `HFGITR_EL2.ERET` (FEAT_FGT) or by `HCR_EL2.NV`
+    /// (FEAT_NV); `ISS[1]` says whether it authenticates and `ISS[0]` with
+    /// which key.
     ERetTrap,
     /// EC 0x1C: a pointer authentication that failed, with FEAT_FPAC;
     /// `ISS[1:0]` says whether the key was a data key and which.
@@ -73,6 +75,10 @@ pub enum ExceptionClass {
     PcAlignment,
     /// EC 0x24 / 0x25.
     DataAbort,
+    /// EC 0x25 whatever level it is taken from: a Data Abort on a load or
+    /// store `VNCR_EL2` made for a guest hypervisor at EL1 (FEAT_NV2,
+    /// `Exception_NV2DataAbort`), taken to EL2 with `ISS.VNCR` set.
+    Nv2DataAbort,
     /// EC 0x26.
     SpAlignment,
     /// EC 0x30 / 0x31: a hardware breakpoint.
@@ -81,6 +87,10 @@ pub enum ExceptionClass {
     SoftwareStep,
     /// EC 0x34 / 0x35: a hardware watchpoint.
     Watchpoint,
+    /// EC 0x35 whatever level it is taken from: a watchpoint on a load or
+    /// store `VNCR_EL2` made (FEAT_NV2, `Exception_NV2Watchpoint`), taken
+    /// to EL2 with `ISS.VNCR` set.
+    Nv2Watchpoint,
     /// EC 0x3C.
     Brk,
 }
@@ -120,6 +130,7 @@ impl ExceptionClass {
                     0x24
                 }
             }
+            Self::Nv2DataAbort => 0x25,
             Self::SpAlignment => 0x26,
             Self::Breakpoint => {
                 if same {
@@ -142,6 +153,7 @@ impl ExceptionClass {
                     0x34
                 }
             }
+            Self::Nv2Watchpoint => 0x35,
             Self::Brk => 0x3C,
         }
     }
@@ -171,8 +183,10 @@ impl ExceptionClass {
             | Self::PacFail
             | Self::SmeAccess
             | Self::DataAbort
+            | Self::Nv2DataAbort
             | Self::SpAlignment
-            | Self::Watchpoint => false,
+            | Self::Watchpoint
+            | Self::Nv2Watchpoint => false,
         }
     }
 }
@@ -497,6 +511,46 @@ impl Exception {
         }
     }
 
+    /// The exception of a load or store `VNCR_EL2` made (FEAT_NV2,
+    /// `AccessType_NV2`) whose access as a data access raised `self`: a Data
+    /// Abort is the NV2 Data Abort and a watchpoint the NV2 watchpoint, each
+    /// taken to EL2 with `ISS.VNCR` set (`AArch64_DataAbort`,
+    /// `AArch64_WatchpointException`, `AArch64_FaultSyndrome`). A data
+    /// access raises no other class.
+    pub(crate) const fn nv2(self) -> Self {
+        let class = match self.class {
+            ExceptionClass::DataAbort => ExceptionClass::Nv2DataAbort,
+            ExceptionClass::Watchpoint => ExceptionClass::Nv2Watchpoint,
+            ExceptionClass::Unknown
+            | ExceptionClass::WfxTrap
+            | ExceptionClass::FpAccess
+            | ExceptionClass::PacTrap
+            | ExceptionClass::BranchTarget
+            | ExceptionClass::IllegalState
+            | ExceptionClass::Svc
+            | ExceptionClass::Hvc
+            | ExceptionClass::Smc
+            | ExceptionClass::SysRegTrap
+            | ExceptionClass::ERetTrap
+            | ExceptionClass::PacFail
+            | ExceptionClass::SmeAccess
+            | ExceptionClass::InstructionAbort
+            | ExceptionClass::PcAlignment
+            | ExceptionClass::Nv2DataAbort
+            | ExceptionClass::SpAlignment
+            | ExceptionClass::Breakpoint
+            | ExceptionClass::SoftwareStep
+            | ExceptionClass::Nv2Watchpoint
+            | ExceptionClass::Brk => return self,
+        };
+        Self {
+            class,
+            iss: self.iss | ISS_VNCR,
+            route: Route::El2,
+            ..self
+        }
+    }
+
     /// The faulting virtual address `FAR_ELx` reports, for an exception
     /// built with one ([`Exception::at_address`],
     /// [`Exception::second_stage_abort`]); `None` for every other.
@@ -619,6 +673,9 @@ enum Masking {
 
 /// `ESR_ELx.EC` of an SError exception.
 const EC_SERROR: u64 = 0x2F;
+
+/// `SPSR_ELx.M[3:2]`, the level an exception was taken from.
+const SPSR_M_EL: u64 = 0b11 << 2;
 
 /// The `ISS` a virtual SError reports on a processor without FEAT_RAS,
 /// which has no `VSESR_EL2` to give one: `IDS` clear, no IMPLEMENTATION
@@ -789,7 +846,11 @@ impl<L: Levels> Cpu<L> {
     ///   External abort where `SyncExternalAbortTarget` says (`HCR_EL2.TEA`,
     ///   or `TGE` from EL0), any other abort under `TGE`;
     /// - `AArch64_CallHypervisor`, a trapped `SMC`, `TrapPACUse` and
-    ///   `AArch64_CheckForERetTrap` name EL2 themselves.
+    ///   `AArch64_CheckForERetTrap` name EL2 themselves, and a fault of a
+    ///   load or store `VNCR_EL2` made is taken to EL2 (`AArch64_DataAbort`
+    ///   and `SyncExternalAbortTarget` for `AccessType_NV2`, and
+    ///   `AArch64_WatchpointException`, whose debug exceptions from EL2 are
+    ///   raised only where they target EL2).
     fn class_routes_to_el2(&self, e: &Exception) -> bool {
         let from_el0 = self.pstate.el == El::El0;
         let tge = self.tge();
@@ -819,7 +880,9 @@ impl<L: Levels> Cpu<L> {
             ExceptionClass::Hvc
             | ExceptionClass::Smc
             | ExceptionClass::PacTrap
-            | ExceptionClass::ERetTrap => true,
+            | ExceptionClass::ERetTrap
+            | ExceptionClass::Nv2DataAbort
+            | ExceptionClass::Nv2Watchpoint => true,
         }
     }
 
@@ -1237,6 +1300,15 @@ impl<L: Levels> Cpu<L> {
             0x200
         } else {
             0x000
+        };
+        // FEAT_NV: a guest hypervisor's exception to EL1 under `HCR_EL2.{NV2,
+        // NV1, NV}` {x, 0, 1} or {1, 1, 1} reports EL2 as the level it was
+        // taken from, `M[3:2]` 0b10, so that it reads as an exception within
+        // the EL2 it runs as (`AArch64_TakeException`).
+        let spsr = if from == El::El1 && to == El::El1 && self.nested().reports_el2() {
+            (spsr & !SPSR_M_EL) | (El::El2.index() << 2)
+        } else {
+            spsr
         };
         let regs = self.exception_regs(target);
         *regs.spsr = spsr;

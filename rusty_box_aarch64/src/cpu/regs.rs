@@ -266,6 +266,8 @@ sysregs! {
     TCR_EL2 = (3, 4, 2, 0, 2);
     VTTBR_EL2 = (3, 4, 2, 1, 0);
     VTCR_EL2 = (3, 4, 2, 1, 2);
+    /// FEAT_NV2's, absent without it.
+    VNCR_EL2 = (3, 4, 2, 2, 0);
     SPSR_EL2 = (3, 4, 4, 0, 0);
     ELR_EL2 = (3, 4, 4, 0, 1);
     SP_EL1 = (3, 4, 4, 1, 0);

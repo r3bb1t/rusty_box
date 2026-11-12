@@ -214,6 +214,17 @@ impl Fault {
             fault @ Self::Stop(_) => fault,
         }
     }
+
+    /// The fault of a load or store `VNCR_EL2` made (FEAT_NV2), from the
+    /// fault its access raised as a data access: [`Exception::nv2`].
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn nv2(self) -> Self {
+        match self {
+            Self::Exception(e) => Self::Exception(e.nv2()),
+            fault @ Self::Stop(_) => fault,
+        }
+    }
 }
 
 pub(crate) type ExecResult = Result<Flow, Fault>;

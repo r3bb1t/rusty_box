@@ -339,7 +339,7 @@ is) must reproduce, are:
 
 | Part | Model |
 |---|---|
-| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, of revision r1p3 (`MIDR_EL1` 0x411F_D073, the revision its TRM, DDI 0488H, describes; see "Where the references differ"), the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and EL2 with `MachineBuilder::with_el2` (see below; on the Armv9.2 model with FEAT_VHE and the other EL2 features Arm requires of an Armv9.2 processor with EL2), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), on the Cortex-A57 its TRM's IMPLEMENTATION DEFINED registers (`CPUACTLR_EL1`, `CPUECTLR_EL1`, `L2CTLR_EL1`, `L2ECTLR_EL1`, `L2ACTLR_EL1`, the memory error syndrome registers, `CBAR_EL1` reading where the layout has the GIC, `RAMINDEX` and its data registers, and `ACTLR_EL2`'s access controls; see "Where the references differ") and none on the Armv9.2 model, each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB and 64 KiB granules, the Cortex-A57's (DDI 0488H, 4.3.21), and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB granule too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at both stages with EL2), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ"); a PMU (`src/cpu/pmu.rs`) with the cycle counter and six event counters, the Cortex-A57's its TRM's PMUv3 (DDI 0488H chapter 11: `PMCR_EL0.IMP` 0x41, `IDCODE` 0x01, 32-bit event counters) and the Armv9.2 model's FEAT_PMUv3p7 with FEAT_PMUv3p5's 64-bit event counters and FEAT_PMUv3p4's `PMMIR_EL1`, with `PMUSERENR_EL0`'s EL0 access and `MDCR_EL2`'s traps, `HPMN`, `HPME`, `HPMD`, `HCCD`, `HLP` and `HPMFZO`, the `P`, `U` and `NSH` filters, `CHAIN`, freezing on overflow (FEAT_PMUv3p7), and PMUIRQ on PPI 23; it counts the events it advertises in `PMCEID0_EL0` and `PMCEID1_EL0` — `SW_INCR`, `INST_RETIRED`, `EXC_TAKEN`, `EXC_RETURN`, `CID_WRITE_RETIRED`, `CPU_CYCLES`, `TTBR_WRITE_RETIRED` and `CHAIN`, and on the Armv9.2 model the stall events, which count nothing — with the processor's clock the instruction clock: one cycle per instruction, stopped while the processor waits (see "Where the references differ") |
+| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, of revision r1p3 (`MIDR_EL1` 0x411F_D073, the revision its TRM, DDI 0488H, describes; see "Where the references differ"), the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, and the board's 1 GHz system counter (QEMU's runs at 62.5 MHz; see "Where the references differ"). `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and EL2 with `MachineBuilder::with_el2` (see below; on the Armv9.2 model with FEAT_VHE and the other EL2 features Arm requires of an Armv9.2 processor with EL2, and nested virtualization, FEAT_NV with FEAT_NV2), AArch64 only, the Cortex-A57's `CTR_EL0` and `CLIDR_EL1` (64-byte lines, split L1 and a unified L2), on the Cortex-A57 its TRM's IMPLEMENTATION DEFINED registers (`CPUACTLR_EL1`, `CPUECTLR_EL1`, `L2CTLR_EL1`, `L2ECTLR_EL1`, `L2ACTLR_EL1`, the memory error syndrome registers, `CBAR_EL1` reading where the layout has the GIC, `RAMINDEX` and its data registers, and `ACTLR_EL2`'s access controls; see "Where the references differ") and none on the Armv9.2 model, each model's own caches in `CCSIDR_EL1` (the Cortex-A57's its TRM's with a 512 KiB L2, the Armv9.2 model's the board's own; see "Where the references differ"), an MMU with the 4 KiB and 64 KiB granules, the Cortex-A57's (DDI 0488H, 4.3.21), and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB granule too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at both stages with EL2), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.2 (DEN 0022E) and SMCCC 1.5's Arm Architecture Calls (DEN 0028F: `SMCCC_VERSION`, `SMCCC_ARCH_FEATURES`, and the speculation workarounds as `VirtConfig::spectre` reports them) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ"); a PMU (`src/cpu/pmu.rs`) with the cycle counter and six event counters, the Cortex-A57's its TRM's PMUv3 (DDI 0488H chapter 11: `PMCR_EL0.IMP` 0x41, `IDCODE` 0x01, 32-bit event counters) and the Armv9.2 model's FEAT_PMUv3p7 with FEAT_PMUv3p5's 64-bit event counters and FEAT_PMUv3p4's `PMMIR_EL1`, with `PMUSERENR_EL0`'s EL0 access and `MDCR_EL2`'s traps, `HPMN`, `HPME`, `HPMD`, `HCCD`, `HLP` and `HPMFZO`, the `P`, `U` and `NSH` filters, `CHAIN`, freezing on overflow (FEAT_PMUv3p7), and PMUIRQ on PPI 23; it counts the events it advertises in `PMCEID0_EL0` and `PMCEID1_EL0` — `SW_INCR`, `INST_RETIRED`, `EXC_TAKEN`, `EXC_RETURN`, `CID_WRITE_RETIRED`, `CPU_CYCLES`, `TTBR_WRITE_RETIRED` and `CHAIN`, and on the Armv9.2 model the stall events, which count nothing — with the processor's clock the instruction clock: one cycle per instruction, stopped while the processor waits (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure, with the GIC-400's implementation choices (PPIs 25 to 31, level-sensitive, and BSA's PPI 22 for the DCC's COMMIRQ and PPI 23 for the PMU's PMUIRQ; by default 480 SPIs and five priority bits, minimum binary points 2 and 3, one active priority register a group, the SPIs and priority bits a host's `VirtConfig::gic`; see "Where the references differ"): both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame; with EL2, the Virtualization Extensions (IHI 0048B chapter 5) as the GIC-400 has them: the virtual interface control registers (`GICH_*` at 0x0800_4000, the common base and processor 0's at 0x0800_5000, 4 KiB each, on the board's own layout) with four List registers, the virtual CPU interface (`GICV_*`, 8 KiB at 0x0800_6000) driving the processor's virtual IRQ and FIQ, hardware interrupts deactivated in the distributor through their List register, and the maintenance interrupt on INTID 25, all named in the device tree's GIC node as the GICv2 binding names them |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_VHE too, the EL2 virtual timer (`CNTHV_*`, PPI 12, BSA's INTID 28, the fifth interrupt of the device tree's `timer` node) and `CNTHCTL_EL2`'s `E2H` layout; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built; the Armv9.2 model with EL2 has FEAT_VHE, and no model has FEAT_ECV_POFF, which Arm requires only with FEAT_RME) |
 | Devices | PL011 UART r1p5 (`UARTPeriphID2` revision 3, DDI 0183G; BSA's Generic UART: a 32-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 32-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with a `gpio-key` power button on its first line, 0 (line 3, QEMU's, on QEMU's layout), CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded; the identity's manufacturer and device codes, by default none, and a CFI query table of the board's own; see "Where the references differ"), no `fw_cfg` (see "Where the references differ"), virtio-mmio transports, 4 on the board's own layout and 32 on QEMU's (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the first free ones, or the last free with `VirtConfig::transport_order`; every queue 256 entries), an empty PCIe ECAM/windows, the 32-bit memory window non-prefetchable and the 64-bit one prefetchable |
@@ -661,7 +661,8 @@ them (`Features::ARMV9P2`, each dropped without EL2 by
 `Features::NEED_EL2`): `ID_AA64MMFR0_EL1` 0x1100_0323_1020_0026 (`FGT`
 1, `TGran4_2` and `TGran16_2` 3, `TGran64_2` 2, `ECV` 1),
 `ID_AA64MMFR1_EL1` 0x0000_1100_1031_1102 (`VH`, `XNX` and `HCX` 1),
-`ID_AA64MMFR2_EL1` 0x1201_0111_1001_0011 (`FWB` 1, `EVT` 2), and
+`ID_AA64MMFR2_EL1` 0x1201_0111_1201_0011 (`FWB` 1, `EVT` 2, and `NV` 2
+for nested virtualization, below), and
 `CLIDR_EL1` 0x0200_0023; without EL2 it reads as it always has
 (0x1000_0000_1020_0026, 0x0000_1000_0031_1002, 0x1001_0011_1001_0011 and
 0x0A20_0023), and `tests/virtualization.rs` reads both from a guest.
@@ -675,6 +676,42 @@ before), and its KVM runs in nVHE mode. Each feature's own rules are
 tested on the test processor with every feature (`tests/unit/vhe.rs`,
 `tests/unit/el2_features.rs`, and `tests/unit/sysreg_spec.rs` over every
 state of the trap registers, on the Armv9.2 model with EL2 as well).
+
+Of the options, the Armv9.2 model with EL2 has nested virtualization,
+FEAT_NV with FEAT_NV2 (`src/cpu/nv.rs`; `ID_AA64MMFR2_EL1.NV` 2, with
+`ID_AA64MMFR4_EL1` 0 its `NV_frac` 0 and its `E2H0` 0, so `HCR_EL2.NV1`
+is writable; not FEAT_NV2p1, which Arm requires only from Armv9.6). A
+guest hypervisor runs at EL1 under `HCR_EL2.NV`: it reads `CurrentEL` as
+EL2; its accesses to EL2's registers, to the `*_EL12` and `*_EL02` names
+and to `SP_EL1`, its EL2 System instructions (`AT S1E2*`, `AT S12E*`,
+the EL2 TLB maintenance) and with FEAT_SPECRES its `CFP`, `DVP` and `CPP
+RCTX` trap to EL2 with EC 0x18, and its `ERET`, `ERETAA` and `ERETAB`
+with EC 0x1A; an exception it takes to EL1 reports EL2 in `SPSR_EL1.M`.
+Under `NV1` too, a guest hypervisor without `E2H`, its `SPSR_EL1`,
+`ELR_EL1` and `VBAR_EL1` trap, its `LDTR` and `STTR` are privileged, and
+the EL1&0 regime's stage 1 takes the EL2 regime's permission layout
+(`AP[1]` and `APTable[0]` as 0, bit 54 EL1's execute-never, no PAN), the
+TLB's EL1&0 contexts telling the two layouts apart. `HCR_EL2.AT` traps
+EL1's `AT S1E0*` and `AT S1E1*`. Under `NV2` the accesses Arm's
+accessors transform are loads and stores of 64 bits in the page
+`VNCR_EL2` names, at each register's offset as `Registers.json` gives it
+(`HCR_EL2` at 0x78, `VTTBR_EL2` at 0x20, the guest's `SCTLR_EL1` at
+0x110, `ELR_EL1` at 0x230, …): EL2 registers a guest hypervisor programs
+for its guest, the `*_EL12` and `*_EL02` names with `NV1` clear, and with
+`NV1` set the EL1 registers' own names, each after the traps its accessor
+checks first; `ELR_EL2`, `SPSR_EL2`, `ESR_EL2` and `FAR_EL2` reach their
+EL1 counterparts; and FEAT_ECV's `CNTHCTL_EL2.EL1NVPCT` and `EL1NVVCT`
+trap the EL1 timers' `*_EL02` names instead. The load or store is EL2's
+data access (`CreateAccDescNV2`): in its regime with its permissions, no
+PAN, and the watchpoints debug exceptions from EL2 raise whatever
+`PSTATE.D` says; a fault on it is taken to EL2 as the NV2 Data Abort (EC
+0x25) or NV2 watchpoint (EC 0x35) with `ISS.VNCR` set. The Cortex-A57
+has none of it (`NV` 0, the four `HCR_EL2` bits RES0, no `VNCR_EL2`).
+`tests/unit/nested.rs` runs guest hypervisors through each rule, and
+`tests/unit/sysreg_spec.rs` holds every System register and instruction
+access to Arm's accessors under each `HCR_EL2.{NV2, NV1, NV}` a guest
+hypervisor runs with. Linux 6.18's KVM does not offer its guests nested
+virtualization on this board: it needs a GICv3 (see "Not implemented").
 
 ## Verification
 
@@ -1156,24 +1193,30 @@ integration tests of the public API.
 - System register and System instruction accesses are checked against the
   same package's `Registers.json` (`tests/unit/sysreg_spec.rs`): an
   interpreter of each accessor's pseudocode decides what each `MRS`, `MSR`
-  and System instruction encoding an accessor names (17,967 of them, an
+  and System instruction encoding an accessor names (17,918 of them, an
   index or a generic encoding's fields expanded) does, on the Cortex-A57
   and the Armv9.2 model, each with and without EL2, and the
   test-only processors with every feature with and without it, at EL0,
-  EL1 and EL2, in 103 to 1,090 states (per processor) of the registers that
+  EL1 and EL2, in 103 to 3,084 states (per processor) of the registers that
   control access (everything clear; SIMD&FP,
   SVE and SME enabled; that with each bit `HCR_EL2`, `CPTR_EL2`,
   `MDCR_EL2`, `HSTR_EL2`, `CNTHCTL_EL2`, the fine-grained trap registers
   (`HFGRTR_EL2`, `HFGWTR_EL2`, `HFGITR_EL2`, `HDFGRTR_EL2`, `HDFGWTR_EL2`),
   `HCRX_EL2`, `SCTLR_EL2`, `CPACR_EL1`,
   `SCTLR_EL1`, `CNTKCTL_EL1` or `MDSCR_EL1` keeps set alone, with
-  FEAT_VHE again under `HCR_EL2.E2H` and in the host; the OS lock;
-  `SP_EL0` selected; random states): the access, an UNDEFINED exception
-  or a trap to a level with a class. The processor must take the same
-  exception with the syndrome `AArch64_SystemAccessTrapSyndrome` gives, or
-  none, and an encoding no accessor names (87,054 of them) must be
+  FEAT_VHE again under `HCR_EL2.E2H` and in the host, and with FEAT_NV
+  again under each `HCR_EL2.{NV2, NV1, NV}` a guest hypervisor runs with,
+  `E2H` clear and set, the fine-grained trap registers' bits under two of
+  them; the OS lock; `SP_EL0` selected; random states): the access, an
+  UNDEFINED exception, a trap to a level with a class, or with FEAT_NV2
+  a load or store at an offset of the `VNCR_EL2` page. The processor must
+  take the same exception with the syndrome
+  `AArch64_SystemAccessTrapSyndrome` gives, or none, loading or storing
+  at that offset and nowhere else where the accessor does (a page whose
+  every doubleword names its offset shows where), and an encoding no
+  accessor names (87,054 of them) must be
   UNDEFINED but where the Arm ARM's prose on the ID register space says
-  otherwise: 20.9 million steps, 0 disagreements, about a minute. Its table of
+  otherwise: 70.9 million steps, 0 disagreements, about five minutes. Its table of
   IMPLEMENTATION DEFINED choices is this model's, each with its reason.
   Where an accessor hands an EL1 or EL2 access to the implementation
   (`AArch64_ImpDefSysRegRead` and the like) and the processor gives the
@@ -1206,6 +1249,25 @@ integration tests of the public API.
   Cortex-A57, unchanged. `src/cpu/mmu.rs` checks the TLB's memory of
   both stages against the attributes they make whole for every stage 1
   attribute and stage 2 `MemAttr`, under `FWB` and without.
+- `tests/unit/nested.rs` runs guest hypervisors at EL1 on the Armv9.2
+  model with EL2 (FEAT_NV, FEAT_NV2): `CurrentEL` reading EL2 under
+  `HCR_EL2.NV`; its accesses to EL2 registers, `SP_EL1` and a `*_EL12`
+  name, UNDEFINED without `NV`, trapped with EC 0x18 and their syndromes,
+  `TLBI ALLE2` too, and `HCR_EL2.AT` trapping `AT S1E1R`; its `ERET` and
+  `ERETAA` trapped with EC 0x1A; its exceptions to EL1 reporting EL2h in
+  `SPSR_EL1` under each `HCR_EL2.{NV2, NV1, NV}` that does and EL1h under
+  those that do not; under `NV1` `SPSR_EL1`, `ELR_EL1` and `VBAR_EL1`
+  trapped, and the EL1&0 regime's descriptors read in the EL2 layout (no
+  PAN, a privileged `LDTR`, bit 54 EL1's execute-never); under `NV2` its
+  `MSR HCR_EL2`, `MRS VTTBR_EL2`, `MRS SP_EL1`, `MSR SCTLR_EL12` and `MSR
+  ELR_EL12` landing in the `VNCR_EL2` page at their offsets, the
+  processor's registers untouched, `MRS ELR_EL2` reading `ELR_EL1`, and
+  with `NV1` its own `SCTLR_EL1` and `ELR_EL1` in the page;
+  `CNTHCTL_EL2.EL1NVPCT` trapping `CNTP_CTL_EL02` in place of the page;
+  the NV2 Data Abort (EC 0x25, `ISS.VNCR`, `FAR_EL2`) of a page the bus
+  lacks; the NV2 watchpoint (EC 0x35) on the page with `PSTATE.D` set; and
+  the Cortex-A57 with `ID_AA64MMFR2_EL1.NV` 0, the four `HCR_EL2` bits
+  RES0 and no `VNCR_EL2`.
 - `tests/unit/impdef.rs` checks the Cortex-A57's IMPLEMENTATION DEFINED
   registers against the values worked out from its TRM's tables: each
   register's reset value at EL1 and EL2 and through a host's read; what
@@ -3929,12 +3991,32 @@ events D14.6 requires.
   of the features it has at EL1 (FEAT_TTST's, FEAT_LPA2's, FEAT_HAF's and
   FEAT_HAFDBS's stage 2, FEAT_ECV's `CNTHCTL_EL2` traps, the PMU's
   `MDCR_EL2` controls); `tests/unit/spec.rs` holds it to every constraint
-  its identifiers decide. Not FEAT_ECV_POFF (`CNTPOFF_EL2`), which only
+  its identifiers decide. Of the optional ones it has FEAT_NV and
+  FEAT_NV2 (above). Not FEAT_ECV_POFF (`CNTPOFF_EL2`), which only
   FEAT_RME requires and which is built and tested on the test processor
-  with every feature; nor FEAT_VMID16, FEAT_TWED, FEAT_NV and FEAT_NV2,
-  optional at Armv9.2 and not built (FEAT_NV is plan item H7), nor
-  FEAT_HPMN0, which Arm requires from Armv8.8 (`(v8Ap8 && (FEAT_PMUv3 &&
-  FEAT_EL2)) ==> FEAT_HPMN0`) and which is not built either.
+  with every feature; nor FEAT_VMID16 and FEAT_TWED, optional at Armv9.2
+  and not built, nor FEAT_NV2p1, which Arm requires of a processor with
+  FEAT_NV only from Armv9.6 (`(v9Ap6 && FEAT_NV) ==> FEAT_NV2p1`), nor
+  FEAT_NV3, an Armv9.3 feature (`FEAT_NV3 ==> v9Ap3`), nor FEAT_HPMN0,
+  which Arm requires from
+  Armv8.8 (`(v8Ap8 && (FEAT_PMUv3 && FEAT_EL2)) ==> FEAT_HPMN0`) and which
+  is not built either.
+- A nested KVM guest that is itself a hypervisor (KVM's nested
+  virtualization, `kvm-arm.mode=nested`). The Armv9.2 model with EL2 has
+  what Linux 6.18's KVM asks of the processor for it — FEAT_NV2
+  (`ARM64_HAS_NESTED_VIRT`: `ID_AA64MMFR2_EL1.NV` 2, `has_nested_virt_support`
+  in `arch/arm64/kernel/cpufeature.c`) and a VHE host (`early_kvm_mode_cfg`
+  in `arch/arm64/kvm/arm.c` accepts `nested` only with the kernel at EL2) —
+  but KVM also needs a GICv3 to emulate one for the guest hypervisor:
+  `init_subsystems` in `arch/arm64/kvm/arm.c` refuses `kvm-arm.mode=nested`
+  without one ("NV support requires GICv3 or GICv5 with legacy support,
+  giving up", leaving KVM uninitialized), the nested vGIC being
+  `vgic-v3-nested.c`'s. The board's interrupt controller is a GICv2
+  (GIC-400) with the Virtualization Extensions, so its KVM runs guests
+  (`cargo xtask nested-kvm`'s), but none that runs KVM in turn; a GICv3
+  model with its virtual CPU interface (`ICH_*_EL2`,
+  whose `ICH_HCR_EL2`, `ICH_VMCR_EL2` and `ICH_LR<n>_EL2` FEAT_NV2 then
+  transforms too) is what a third level needs.
 - SHA-512, SHA-3, SM3 and SM4 (Armv8.2 options) on any processor: every
   QEMU CPU model that has them also has features the core does not
   implement yet (SVE), so no model to take their ID values from matches
