@@ -18,16 +18,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusty_box_aarch64::boot::LinuxImage;
+use rusty_box_aarch64::machine::NoBoot;
 #[cfg(feature = "gui-egui")]
 use rusty_box_aarch64::{Key, KeyAction, PointerInput, Refreshed};
 use rusty_box_aarch64::{
-    BatchOutcome, ClockHz, Disk, KeyboardInput, MachineBuilder, NoEl2, OwnedStorage, RamSize, Resolution, RunBudget,
-    StopReason, VirtConfig, VirtMachine,
+    BatchOutcome, ClockHz, Disk, KeyboardInput, Levels, MachineBuilder, NoEl2, OwnedStorage, RamSize, Resolution,
+    RunBudget, StopReason, VirtConfig, VirtMachine, WithEl2,
 };
 #[cfg(feature = "gui-egui")]
 use rusty_box::gui::{host_input::AbsolutePointerEvent, shared_display::SharedDisplay};
 
-use crate::config::{ArmBoot, ArmVirtConfig, DiskAccess, VirtDisk};
+use crate::config::{ArmBoot, ArmVirtConfig, DiskAccess, VirtDisk, Virtualization};
 #[cfg(feature = "gui-egui")]
 use crate::debugger::{
     control::{AfterRun, BetweenRuns, DebugNote, RunControl, Task},
@@ -39,9 +40,22 @@ use crate::debugger::{
 use crate::error::RunError;
 use crate::runner::{read_required_file, Console, RunSummary};
 
-/// The machine every run here builds: without EL2, as QEMU's `virt` is
-/// without `virtualization=on`.
-type Virt = VirtMachine<OwnedStorage, NoEl2>;
+/// The machine a run here builds, with the exception levels `L` names: every
+/// run's code is generic over them, so each feature works the same on both.
+type Virt<L> = VirtMachine<OwnedStorage, L>;
+
+/// The machine a VM's settings build, as its `virt.virtualization` names it.
+///
+/// Closed (R5): one machine type for each [`Virtualization`]; a run matches
+/// on it once and runs the same generic code on either. Each is boxed: a
+/// machine is a quarter of a megabyte, kept on the heap rather than on the
+/// run's thread stack.
+enum Board {
+    /// Without EL2, as QEMU's `virt` is without `virtualization=on`.
+    NoEl2(Box<Virt<NoEl2>>),
+    /// With EL2, as QEMU's `-M virt,virtualization=on`.
+    WithEl2(Box<Virt<WithEl2>>),
+}
 
 /// How much guest time one slice covers.
 ///
@@ -157,7 +171,7 @@ impl BootFiles {
 
     /// Writes the variable store back to its file when the firmware changed
     /// it, as QEMU's flash keeps what is programmed into it.
-    fn persist(&self, machine: &Virt) -> Result<(), RunError> {
+    fn persist<L: Levels>(&self, machine: &Virt<L>) -> Result<(), RunError> {
         let BootImage::Firmware {
             vars: Some(store), ..
         } = &self.boot
@@ -184,8 +198,19 @@ impl BootFiles {
 /// shorter than its bank.
 const ERASED_FLASH: u8 = 0xFF;
 
-/// The machine `config` describes, booting `files`.
-fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Virt, RunError> {
+/// The machine `config` describes, booting `files`: with EL2 when its
+/// `virtualization` is on, the one place the setting picks a machine type.
+fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Board, RunError> {
+    let board = board(config)?;
+    match config.virtualization {
+        Virtualization::Off => boot(board, files).map(|machine| Board::NoEl2(Box::new(machine))),
+        Virtualization::On => boot(board.with_el2(), files).map(|machine| Board::WithEl2(Box::new(machine))),
+    }
+}
+
+/// The board `config` describes, its devices plugged in, before it is told
+/// what to boot.
+fn board<'i>(config: &ArmVirtConfig) -> Result<MachineBuilder<'i, NoBoot>, RunError> {
     let virt_config = VirtConfig {
         ips: ClockHz::new(u64::from(config.ips)).ok_or(RunError::ZeroValue { field: "virt.ips" })?,
         cpu: config.cpu,
@@ -214,6 +239,14 @@ fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Virt, RunError> {
     if let Some(disk) = &config.disk {
         builder = builder.virtio_disk(open_disk(disk)?);
     }
+    Ok(builder)
+}
+
+/// The machine `builder` makes, booting `files`.
+fn boot<'i, L: Levels>(
+    mut builder: MachineBuilder<'i, NoBoot, L>,
+    files: &'i BootFiles,
+) -> Result<Virt<L>, RunError> {
     let built = match &files.boot {
         BootImage::Firmware { code, vars } => {
             let mut builder = builder.firmware(code);
@@ -269,7 +302,7 @@ fn open_disk(disk: &VirtDisk) -> Result<Disk, RunError> {
 
 /// Logs the host error the guest's disk last met, which the guest was told
 /// of as an I/O error (QEMU's `BLOCK_IO_ERROR` event, `rerror=report`).
-fn report_disk_error(machine: &mut Virt, config: &ArmVirtConfig) {
+fn report_disk_error<L: Levels>(machine: &mut Virt<L>, config: &ArmVirtConfig) {
     let (Some(disk), Some(named)) = (machine.disk_mut(), &config.disk) else {
         return;
     };
@@ -283,7 +316,7 @@ fn report_disk_error(machine: &mut Virt, config: &ArmVirtConfig) {
 
 /// Makes what the guest wrote to its disk durable, as QEMU does when it
 /// closes a drive (block.c `bdrv_close` flushing it).
-fn close_disk(machine: &mut Virt, config: &ArmVirtConfig) -> Result<(), RunError> {
+fn close_disk<L: Levels>(machine: &mut Virt<L>, config: &ArmVirtConfig) -> Result<(), RunError> {
     report_disk_error(machine, config);
     let (Some(disk), Some(named)) = (machine.disk_mut(), &config.disk) else {
         return Ok(());
@@ -332,7 +365,7 @@ struct Pacer {
 }
 
 impl Pacer {
-    fn new(machine: &Virt, ips: u32) -> Self {
+    fn new<L: Levels>(machine: &Virt<L>, ips: u32) -> Self {
         Self {
             since: Instant::now(),
             since_ticks: machine.ticks(),
@@ -342,14 +375,14 @@ impl Pacer {
 
     /// Measures from here: after a pause, the host time the machine stood
     /// still is not owed to it.
-    fn restart(&mut self, machine: &Virt) {
+    fn restart<L: Levels>(&mut self, machine: &Virt<L>) {
         self.since = Instant::now();
         self.since_ticks = machine.ticks();
     }
 
     /// Sleeps off guest time that ran ahead of the host's; forgives a lag
     /// past [`MAX_LAG`].
-    fn keep_pace(&mut self, machine: &Virt) {
+    fn keep_pace<L: Levels>(&mut self, machine: &Virt<L>) {
         let ticks = machine.ticks().saturating_sub(self.since_ticks);
         let nanos = u128::from(ticks) * 1_000_000_000 / u128::from(self.ips);
         let guest = Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX));
@@ -387,7 +420,7 @@ fn settle(outcome: BatchOutcome) -> Result<Settled, RunError> {
 }
 
 /// The guest's serial output since the last call.
-fn take_serial_output(machine: &mut Virt) -> Vec<u8> {
+fn take_serial_output<L: Levels>(machine: &mut Virt<L>) -> Vec<u8> {
     match machine.serial(0) {
         Some(mut port) => port.take_output().collect(),
         None => Vec::new(),
@@ -411,20 +444,32 @@ fn mirror_to_stdout(bytes: &[u8]) {
 /// `-nographic` console does, on Ctrl-A then X; Ctrl-A twice sends one.
 pub(crate) fn run_on_console(config: ArmVirtConfig, console: Console) -> Result<RunSummary, RunError> {
     let files = BootFiles::read(&config)?;
-    let mut machine = build(&config, &files)?;
+    match build(&config, &files)? {
+        Board::NoEl2(mut machine) => console_run(&config, &files, &mut *machine, console),
+        Board::WithEl2(mut machine) => console_run(&config, &files, &mut *machine, console),
+    }
+}
+
+/// [`run_on_console`] on the machine it built.
+fn console_run<L: Levels>(
+    config: &ArmVirtConfig,
+    files: &BootFiles,
+    machine: &mut Virt<L>,
+    console: Console,
+) -> Result<RunSummary, RunError> {
     let mut terminal = match console {
         Console::Headless => None,
         Console::Terminal => Some(RawTerminal::enter()),
     };
-    let ran = drive_on_console(&mut machine, &config, terminal.as_mut());
+    let ran = drive_on_console(machine, config, terminal.as_mut());
     drop(terminal);
-    finish(&config, &files, &mut machine, ran)
+    finish(config, files, machine, ran)
 }
 
 /// [`run_on_console`]'s loop, until the guest switches the board off, the
 /// terminal leaves, or the board stops where no run asked it to.
-fn drive_on_console(
-    machine: &mut Virt,
+fn drive_on_console<L: Levels>(
+    machine: &mut Virt<L>,
     config: &ArmVirtConfig,
     mut terminal: Option<&mut RawTerminal>,
 ) -> Result<(), RunError> {
@@ -456,10 +501,10 @@ fn drive_on_console(
 /// whatever ends the VM. Of the failures, the run's own is the one
 /// reported, then the variable store's, then the disk's; the others are
 /// logged.
-fn finish(
+fn finish<L: Levels>(
     config: &ArmVirtConfig,
     files: &BootFiles,
-    machine: &mut Virt,
+    machine: &mut Virt<L>,
     ran: Result<(), RunError>,
 ) -> Result<RunSummary, RunError> {
     let persisted = files.persist(machine);
@@ -512,7 +557,7 @@ impl RawTerminal {
     /// Sends the keys pressed since the last call to `machine`'s serial
     /// console. Keys wait in the terminal while the console's input is too
     /// full for the longest one, so none is cut.
-    fn pump(&mut self, machine: &mut Virt) -> Pumped {
+    fn pump<L: Levels>(&mut self, machine: &mut Virt<L>) -> Pumped {
         use crossterm::event::{self, Event, KeyEventKind};
         loop {
             let room = machine.serial(0).map_or(0, |port| port.input_room());
@@ -542,7 +587,7 @@ impl RawTerminal {
         }
     }
 
-    fn key(&mut self, machine: &mut Virt, key: crossterm::event::KeyEvent) -> Pumped {
+    fn key<L: Levels>(&mut self, machine: &mut Virt<L>, key: crossterm::event::KeyEvent) -> Pumped {
         use crossterm::event::{KeyCode, KeyModifiers};
         const CTRL_A: u8 = 0x01;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -650,7 +695,7 @@ fn function_key(number: u8) -> Option<rusty_box_aarch64::Key> {
 
 /// Sends `bytes` to the serial console, which [`RawTerminal::pump`] made
 /// room for.
-fn send_bytes(machine: &mut Virt, bytes: &[u8]) {
+fn send_bytes<L: Levels>(machine: &mut Virt<L>, bytes: &[u8]) {
     let taken = machine.keyboard().bytes(bytes);
     if taken < bytes.len() {
         tracing::warn!("the serial console took {taken} of a key's {} bytes", bytes.len());
@@ -670,17 +715,31 @@ pub(crate) fn run_in_shell(
     control: &Arc<RunControl>,
 ) -> Result<RunSummary, RunError> {
     let files = BootFiles::read(config)?;
-    let mut machine = build(config, &files)?;
-    let mut window = ShellWindow::open(display, &machine, config.refresh);
-    let ran = drive_in_shell(&mut machine, config, &mut window, control);
-    finish(config, &files, &mut machine, ran)
+    match build(config, &files)? {
+        Board::NoEl2(mut machine) => shell_run(config, &files, &mut *machine, display, control),
+        Board::WithEl2(mut machine) => shell_run(config, &files, &mut *machine, display, control),
+    }
+}
+
+/// [`run_in_shell`] on the machine it built.
+#[cfg(feature = "gui-egui")]
+fn shell_run<L: Levels>(
+    config: &ArmVirtConfig,
+    files: &BootFiles,
+    machine: &mut Virt<L>,
+    display: &Arc<Mutex<SharedDisplay>>,
+    control: &RunControl,
+) -> Result<RunSummary, RunError> {
+    let mut window = ShellWindow::open(display, machine, config.refresh);
+    let ran = drive_in_shell(machine, config, &mut window, control);
+    finish(config, files, machine, ran)
 }
 
 /// [`run_in_shell`]'s loop, until the guest switches the board off, the
 /// shell ends the run, or the board stops where no run asked it to.
 #[cfg(feature = "gui-egui")]
-fn drive_in_shell(
-    machine: &mut Virt,
+fn drive_in_shell<L: Levels>(
+    machine: &mut Virt<L>,
     config: &ArmVirtConfig,
     window: &mut ShellWindow<'_>,
     control: &RunControl,
@@ -715,7 +774,11 @@ fn drive_in_shell(
 
 /// Serves the shell until it lets the machine run on or ends the run.
 #[cfg(feature = "gui-egui")]
-fn serve(machine: &mut Virt, control: &RunControl, window: &mut ShellWindow<'_>) -> Result<Next, RunError> {
+fn serve<L: Levels>(
+    machine: &mut Virt<L>,
+    control: &RunControl,
+    window: &mut ShellWindow<'_>,
+) -> Result<Next, RunError> {
     loop {
         match control.next_between_runs() {
             BetweenRuns::Perform(task) => match perform(machine, control, window, task)? {
@@ -732,8 +795,8 @@ fn serve(machine: &mut Virt, control: &RunControl, window: &mut ShellWindow<'_>)
 /// reads a PC; this machine has none of its views, so a pause publishes no
 /// snapshot and a search is answered as one with no debugger.
 #[cfg(feature = "gui-egui")]
-fn perform(
-    machine: &mut Virt,
+fn perform<L: Levels>(
+    machine: &mut Virt<L>,
     control: &RunControl,
     window: &mut ShellWindow<'_>,
     task: Task,
@@ -825,7 +888,11 @@ impl<'d> ShellWindow<'d> {
     /// Takes over `display` for a run of `machine`, showing its picture
     /// `refresh` times a second: the picture starts empty until the guest
     /// draws one.
-    fn open(display: &'d Arc<Mutex<SharedDisplay>>, machine: &Virt, refresh: crate::config::RefreshHz) -> Self {
+    fn open<L: Levels>(
+        display: &'d Arc<Mutex<SharedDisplay>>,
+        machine: &Virt<L>,
+        refresh: crate::config::RefreshHz,
+    ) -> Self {
         if let Ok(mut shown) = display.lock() {
             shown.ips = 0;
             shown.framebuffer.fill(0);
@@ -848,7 +915,7 @@ impl<'d> ShellWindow<'d> {
     /// Takes the input the shell queued and sends the guest as much as it
     /// will take, in order; the rest waits for the next slice. Input the
     /// guest has taken none of for [`STALE_INPUT`] is dropped.
-    fn pump_input(&mut self, machine: &mut Virt) {
+    fn pump_input<L: Levels>(&mut self, machine: &mut Virt<L>) {
         if let Ok(mut shown) = self.display.lock() {
             for (key, pressed) in shown.pending_keys.drain(..) {
                 let action = if pressed { KeyAction::Press } else { KeyAction::Release };
@@ -908,7 +975,7 @@ impl<'d> ShellWindow<'d> {
 
     /// Hands the window the guest's serial output, and the frame and the
     /// instruction rate when `when` says so.
-    fn present(&mut self, machine: &mut Virt, when: Presenting) {
+    fn present<L: Levels>(&mut self, machine: &mut Virt<L>, when: Presenting) {
         let output = take_serial_output(machine);
         if !output.is_empty() {
             mirror_to_stdout(&output);
@@ -941,7 +1008,7 @@ impl<'d> ShellWindow<'d> {
 
     /// Measures the instruction rate from here: the time a pause stood still
     /// is not the guest's.
-    fn restart_rate(&mut self, machine: &Virt) {
+    fn restart_rate<L: Levels>(&mut self, machine: &Virt<L>) {
         self.rate_from = machine.instructions();
         self.last_rate = Instant::now();
     }
@@ -1013,20 +1080,46 @@ fn push_bounded<T>(queue: &mut VecDeque<T>, item: T) {
 #[cfg(test)]
 pub(crate) mod test_images {
     /// An arm64 Linux `Image` whose kernel does one thing: switch the
-    /// machine off through PSCI `SYSTEM_OFF` on `virt`'s HVC conduit. Its
-    /// header is the boot protocol's (`image_size` zero: loaded at the legacy
-    /// offset), and its first word branches past the header to the code.
+    /// machine off through PSCI `SYSTEM_OFF` on `virt`'s HVC conduit, which
+    /// a board without EL2 has.
     pub(crate) fn power_off_kernel() -> Vec<u8> {
+        image_of(&[
+            0xD280_0100, // movz x0, #0x0008
+            0xF2B0_8000, // movk x0, #0x8400, lsl #16: PSCI SYSTEM_OFF
+            0xD400_0002, // hvc #0
+            0x1400_0000, // b .
+        ])
+    }
+
+    /// An arm64 Linux `Image` whose kernel reads `CurrentEL` and switches
+    /// the machine off through PSCI `SYSTEM_OFF` on the conduit the level
+    /// it entered at has: `SMC` at EL2 (a board with EL2 takes PSCI on
+    /// `SMC`, `HVC` being the guest hypervisor's), and `HVC` at EL1 after a
+    /// `NOP`, so the instructions it retires say which it entered at.
+    pub(crate) fn current_el_power_off_kernel() -> Vec<u8> {
+        image_of(&[
+            0xD538_4241, // mrs x1, CurrentEL
+            0xD280_0100, // movz x0, #0x0008
+            0xF2B0_8000, // movk x0, #0x8400, lsl #16: PSCI SYSTEM_OFF
+            0xF100_203F, // cmp x1, #8: CurrentEL.EL is 2
+            0x5400_0061, // b.ne at_el1
+            0xD400_0003, // smc #0
+            0x1400_0000, // b .
+            0xD503_201F, // at_el1: nop
+            0xD400_0002, // hvc #0
+            0x1400_0000, // b .
+        ])
+    }
+
+    /// The instructions `code`, behind the boot protocol's header
+    /// (`image_size` zero: loaded at the legacy offset), whose first word
+    /// branches past the header to them.
+    fn image_of(code: &[u32]) -> Vec<u8> {
         const HEADER_LEN: usize = 64;
         let mut image = vec![0u8; HEADER_LEN];
         image[0..4].copy_from_slice(&0x1400_0010u32.to_le_bytes()); // b #64
         image[56..60].copy_from_slice(b"ARM\x64");
-        for word in [
-            0xD280_0100u32, // movz x0, #0x0008
-            0xF2B0_8000,    // movk x0, #0x8400, lsl #16: PSCI SYSTEM_OFF
-            0xD400_0002,    // hvc #0
-            0x1400_0000,    // b .
-        ] {
+        for word in code {
             image.extend_from_slice(&word.to_le_bytes());
         }
         image
@@ -1074,6 +1167,91 @@ mod tests {
                 device_tree: None,
             },
             ..ArmVirtConfig::blank()
+        }
+    }
+
+    /// The machine `board` holds, which a VM that leaves virtualization off
+    /// builds.
+    fn no_el2(board: Board) -> Virt<NoEl2> {
+        match board {
+            Board::NoEl2(machine) => *machine,
+            Board::WithEl2(_) => panic!("a VM with virtualization off was built with EL2"),
+        }
+    }
+
+    /// `CurrentEL` as a guest reads it on `machine`, with the processor at
+    /// the level the board started it at.
+    fn current_el_a_guest_reads<L: Levels>(machine: &mut Virt<L>) -> u64 {
+        const MRS_X1_CURRENTEL: u32 = 0xD538_4241;
+        let at = rusty_box_aarch64::board::RAM_BASE;
+        machine.mem_write(at, &MRS_X1_CURRENTEL.to_le_bytes()).expect("in RAM");
+        machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
+        let stepped = machine.step(RunBudget::Instructions(1));
+        assert_eq!(stepped.stop, StopReason::BudgetExhausted);
+        machine.reg_read(rusty_box_aarch64::Reg::X1)
+    }
+
+    /// The VM's virtualization decides the machine the runner builds: with
+    /// it on, either processor has EL2 and its guest is entered there,
+    /// `CurrentEL` reading EL2 (8); off, the guest is entered at EL1 (4).
+    #[test]
+    fn the_board_starts_the_guest_at_el2_when_the_vms_virtualization_is_on() {
+        const EL1: u64 = 1 << 2;
+        const EL2: u64 = 2 << 2;
+        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        for cpu in rusty_box_aarch64::CpuModel::ALL {
+            for virtualization in Virtualization::ALL {
+                let config = ArmVirtConfig {
+                    cpu,
+                    virtualization,
+                    ..kernel_board(&kernel)
+                };
+                let files = BootFiles::read(&config).expect("the kernel");
+                let read = match (build(&config, &files).expect("the machine"), virtualization) {
+                    (Board::NoEl2(mut machine), Virtualization::Off) => current_el_a_guest_reads(&mut *machine),
+                    (Board::WithEl2(mut machine), Virtualization::On) => current_el_a_guest_reads(&mut *machine),
+                    (Board::NoEl2(_), Virtualization::On) | (Board::WithEl2(_), Virtualization::Off) => {
+                        panic!("{cpu:?}, virtualization {virtualization}: the other machine was built")
+                    }
+                };
+                let want = match virtualization {
+                    Virtualization::Off => EL1,
+                    Virtualization::On => EL2,
+                };
+                assert_eq!(read, want, "{cpu:?}, virtualization {virtualization}");
+            }
+        }
+    }
+
+    /// What a run of [`test_images::current_el_power_off_kernel`] retires
+    /// before the board is off: one instruction more when it was entered at
+    /// EL1 and called PSCI with `HVC` than at EL2 calling it with `SMC`.
+    fn current_el_kernel_instructions(virtualization: Virtualization) -> u64 {
+        match virtualization {
+            Virtualization::Off => 7,
+            Virtualization::On => 6,
+        }
+    }
+
+    /// A console run of a VM with virtualization on enters its kernel at
+    /// EL2, where the board's firmware takes PSCI on `SMC`: the kernel
+    /// switches the board off from there.
+    #[test]
+    fn a_console_run_with_virtualization_enters_the_kernel_at_el2() {
+        let kernel = ScratchFile::new("Image", &test_images::current_el_power_off_kernel());
+        for virtualization in Virtualization::ALL {
+            let config = ArmVirtConfig {
+                virtualization,
+                ..kernel_board(&kernel)
+            };
+
+            let summary = run_on_console(config, Console::Headless).expect("the run");
+
+            assert_eq!(
+                summary.instructions_executed,
+                Some(current_el_kernel_instructions(virtualization)),
+                "virtualization {virtualization}"
+            );
         }
     }
 
@@ -1179,8 +1357,8 @@ mod tests {
                 ..kernel_board(&kernel)
             };
             let files = BootFiles::read(&config).expect("the kernel");
-            let machine = build(&config, &files).expect("the machine");
-            let midr = machine.sysreg_read(rusty_box_aarch64::SysReg::MIDR_EL1);
+            let machine = no_el2(build(&config, &files).expect("the machine"));
+            let midr =machine.sysreg_read(rusty_box_aarch64::SysReg::MIDR_EL1);
             let cntfrq = machine.sysreg_read(rusty_box_aarch64::SysReg::CNTFRQ_EL0);
             let want = match model {
                 rusty_box_aarch64::CpuModel::CortexA57 => (0x411F_D073, 1_000_000_000),
@@ -1210,7 +1388,7 @@ mod tests {
                 ..kernel_board(&kernel)
             };
             let files = BootFiles::read(&config).expect("the kernel");
-            let mut machine = build(&config, &files).expect("the machine");
+            let mut machine = no_el2(build(&config, &files).expect("the machine"));
             let at = rusty_box_aarch64::board::RAM_BASE;
             machine.mem_write(at, &HVC.to_le_bytes()).expect("in RAM");
             machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
@@ -1252,7 +1430,7 @@ mod tests {
             ..kernel_board(&kernel)
         };
         let files = BootFiles::read(&config).expect("the kernel");
-        let mut machine = build(&config, &files).expect("the machine");
+        let mut machine = no_el2(build(&config, &files).expect("the machine"));
         assert_eq!(
             machine.sysreg_read(rusty_box_aarch64::SysReg::CNTFRQ_EL0),
             Ok(24_000_000)
@@ -1288,7 +1466,7 @@ mod tests {
         const LDR_W0_X1: u32 = 0xB940_0020;
         let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
         let image = ScratchFile::new("order.img", &[0; 512]);
-        let device_id = |machine: &mut Virt, layout: rusty_box_aarch64::DeviceLayout, slot: u8| {
+        let device_id = |machine: &mut Virt<NoEl2>, layout: rusty_box_aarch64::DeviceLayout, slot: u8| {
             let at = rusty_box_aarch64::board::RAM_BASE;
             machine.mem_write(at, &LDR_W0_X1.to_le_bytes()).expect("in RAM");
             machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
@@ -1318,7 +1496,7 @@ mod tests {
                     ..kernel_board(&kernel)
                 };
                 let files = BootFiles::read(&config).expect("the kernel");
-                let mut machine = build(&config, &files).expect("the machine");
+                let mut machine = no_el2(build(&config, &files).expect("the machine"));
                 assert_eq!(device_id(&mut machine, layout, disk_slot), 2, "{layout}, {order:?}: the disk");
                 assert_eq!(device_id(&mut machine, layout, empty_slot), 0, "{layout}, {order:?}: nothing");
             }
@@ -1344,7 +1522,7 @@ mod tests {
                 ..kernel_board(&kernel)
             };
             let files = BootFiles::read(&config).expect("the kernel");
-            let machine = build(&config, &files).expect("the machine");
+            let machine = no_el2(build(&config, &files).expect("the machine"));
             let disk = machine.disk().expect("a disk");
             assert_eq!((disk.sectors(), disk.access()), (4, device), "{access:?}");
         }
@@ -1370,9 +1548,13 @@ mod tests {
         };
 
         let files = BootFiles::read(&config).expect("the kernel");
-        let built = build(&config, &files).map(|machine| machine.disk().map(|disk| disk.access()));
+        let built = build(&config, &files);
         std::fs::set_permissions(&image.0, writable).expect("give the image back its permissions");
-        assert_eq!(built.expect("the machine"), Some(rusty_box_aarch64::Access::ReadOnly));
+        let machine = no_el2(built.expect("the machine"));
+        assert_eq!(
+            machine.disk().map(|disk| disk.access()),
+            Some(rusty_box_aarch64::Access::ReadOnly)
+        );
     }
 
     #[test]
@@ -1396,18 +1578,18 @@ mod tests {
     }
 
     /// A built machine whose serial console takes the terminal's keys.
-    fn console_machine() -> (Virt, ScratchFile) {
+    fn console_machine() -> (Virt<NoEl2>, ScratchFile) {
         let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
         let config = kernel_board(&kernel);
         let files = BootFiles::read(&config).expect("the kernel");
-        (build(&config, &files).expect("the machine"), kernel)
+        (no_el2(build(&config, &files).expect("the machine")), kernel)
     }
 
     fn key(code: crossterm::event::KeyCode, modifiers: crossterm::event::KeyModifiers) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, modifiers)
     }
 
-    fn room(machine: &mut Virt) -> usize {
+    fn room(machine: &mut Virt<NoEl2>) -> usize {
         machine.serial(0).expect("the UART").input_room()
     }
 
@@ -1456,26 +1638,40 @@ mod tests {
     }
 
     /// The shell's run drives the window until the guest switches the board
-    /// off.
+    /// off, with every device plugged in, on the machine the VM's
+    /// virtualization names: entered at EL2 with it on, at EL1 off.
     #[cfg(feature = "gui-egui")]
     #[test]
     fn a_shell_run_drives_the_window_until_the_guest_switches_off() {
-        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
-        let config = ArmVirtConfig {
-            display: Some(VirtioDisplaySize {
-                width: 640,
-                height: 480,
-            }),
-            tablet: true,
-            ..kernel_board(&kernel)
-        };
-        let display = Arc::new(Mutex::new(SharedDisplay::new()));
-        let control = Arc::new(RunControl::new(Arc::new(std::sync::atomic::AtomicBool::new(false))));
-        control.begin_run(crate::debugger::control::RunStart::PowerOn);
+        let kernel = ScratchFile::new("Image", &test_images::current_el_power_off_kernel());
+        let image = ScratchFile::new("shell.img", &[0; 512]);
+        for virtualization in Virtualization::ALL {
+            let config = ArmVirtConfig {
+                virtualization,
+                display: Some(VirtioDisplaySize {
+                    width: 640,
+                    height: 480,
+                }),
+                keyboard: true,
+                tablet: true,
+                disk: Some(VirtDisk {
+                    path: image.0.clone(),
+                    access: DiskAccess::ReadWrite,
+                }),
+                ..kernel_board(&kernel)
+            };
+            let display = Arc::new(Mutex::new(SharedDisplay::new()));
+            let control = Arc::new(RunControl::new(Arc::new(std::sync::atomic::AtomicBool::new(false))));
+            control.begin_run(crate::debugger::control::RunStart::PowerOn);
 
-        let summary = run_in_shell(&config, &display, &control).expect("the run");
+            let summary = run_in_shell(&config, &display, &control).expect("the run");
 
-        assert_eq!(summary.instructions_executed, Some(3));
+            assert_eq!(
+                summary.instructions_executed,
+                Some(current_el_kernel_instructions(virtualization)),
+                "virtualization {virtualization}"
+            );
+        }
     }
 
     /// A character whose bytes two slices split shows once, whole; a byte
@@ -1495,9 +1691,12 @@ mod tests {
     /// A window and a machine built from `config`, booting the power-off
     /// kernel, which never loads an input driver.
     #[cfg(feature = "gui-egui")]
-    fn window_over<'d>(config: &ArmVirtConfig, display: &'d Arc<Mutex<SharedDisplay>>) -> (Virt, ShellWindow<'d>) {
+    fn window_over<'d>(
+        config: &ArmVirtConfig,
+        display: &'d Arc<Mutex<SharedDisplay>>,
+    ) -> (Virt<NoEl2>, ShellWindow<'d>) {
         let files = BootFiles::read(config).expect("the kernel");
-        let machine = build(config, &files).expect("the machine");
+        let machine = no_el2(build(config, &files).expect("the machine"));
         let window = ShellWindow::open(display, &machine, config.refresh);
         (machine, window)
     }

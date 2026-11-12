@@ -98,8 +98,9 @@ impl std::fmt::Display for MachineKind {
 
 /// The `[virt]` table: the Arm `virt` board's hardware.
 ///
-/// `cpu` names its processor (`"cortex-a57"`, the default, or `"armv9.2"`).
-/// `spectre` names what its firmware tells the guest of the
+/// `cpu` names its processor (`"cortex-a57"`, the default, or `"armv9.2"`),
+/// and `virtualization` whether it has EL2 (`"off"`, the default, or
+/// `"on"`, [`Virtualization`]). `spectre` names what its firmware tells the guest of the
 /// speculative-execution workarounds (`"not-required"`, the default,
 /// `"mitigated"` or `"unreported"`). `counter_hz` is its system counter's
 /// rate (1 GHz by default, the one rate an Armv9.2 processor takes);
@@ -124,6 +125,7 @@ pub struct VirtToml {
     pub memory_mib: Option<u32>,
     pub ips: Option<u32>,
     pub cpu: Option<NamedToml<rusty_box_aarch64::CpuModel>>,
+    pub virtualization: Option<NamedToml<Virtualization>>,
     pub firmware: Option<PathBuf>,
     pub builtin_firmware: Option<bool>,
     pub firmware_vars: Option<PathBuf>,
@@ -335,7 +337,7 @@ impl<T: NumberedChoice> From<NumberToml<T>> for u64 {
 }
 
 /// A `[virt]` key holding one of a closed set of board choices by its name
-/// (`virt.cpu`, `virt.spectre`): the name the choice displays as, which
+/// (`virt.cpu`, `virt.virtualization`, `virt.spectre`): the name the choice displays as, which
 /// [`str::parse`] reads back. A name no choice has is refused when the file
 /// is read, with the names there are, as the choice's parse error gives
 /// them.
@@ -358,6 +360,80 @@ impl<T: core::str::FromStr<Err: core::fmt::Display>> TryFrom<String> for NamedTo
 impl<T: core::fmt::Display> From<NamedToml<T>> for String {
     fn from(choice: NamedToml<T>) -> Self {
         choice.0.to_string()
+    }
+}
+
+/// Whether the Arm `virt` board's processor has EL2, the exception level a
+/// hypervisor runs at (`virt.virtualization`), as QEMU's
+/// `-M virt,virtualization=off|on` chooses it. The board builds the two as
+/// different machine types (`rusty_box_aarch64::NoEl2` and
+/// `rusty_box_aarch64::WithEl2`); this is the choice a VM's file and its
+/// Processor page hold until the runner builds one.
+///
+/// Closed (R5): EL0 and EL1, or EL0, EL1 and EL2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Virtualization {
+    /// EL0 and EL1: the processor resets to EL1, and its firmware takes
+    /// PSCI calls on `HVC`.
+    Off,
+    /// EL0, EL1 and EL2: the processor resets to EL2, `HVC` is the guest
+    /// hypervisor's, and the firmware takes PSCI calls on `SMC`.
+    On,
+}
+
+impl Virtualization {
+    /// Every choice, in the order a list of them shows.
+    pub const ALL: [Self; 2] = [Self::Off, Self::On];
+
+    /// The board's own: without EL2, as `rusty_box_aarch64::MachineBuilder`
+    /// builds a machine unless asked for EL2.
+    pub const DEFAULT: Self = Self::Off;
+
+    /// The choice's name in a VM's file, which [`str::parse`] reads back.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+}
+
+impl Default for Virtualization {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl core::fmt::Display for Virtualization {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
+impl core::str::FromStr for Virtualization {
+    type Err = UnknownVirtualization;
+
+    /// The choice whose [`Virtualization::name`] is `name`.
+    fn from_str(name: &str) -> Result<Self, UnknownVirtualization> {
+        Self::ALL
+            .into_iter()
+            .find(|choice| choice.name() == name)
+            .ok_or(UnknownVirtualization)
+    }
+}
+
+/// A name no [`Virtualization`] has. It prints the names there are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnknownVirtualization;
+
+impl core::fmt::Display for UnknownVirtualization {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("no virtualization setting has that name; the settings are")?;
+        for (i, choice) in Virtualization::ALL.iter().enumerate() {
+            let separator = if i == 0 { " " } else { ", " };
+            write!(formatter, "{separator}\"{}\"", choice.name())?;
+        }
+        Ok(())
     }
 }
 
@@ -771,6 +847,9 @@ pub struct ArmVirtConfig {
     pub ips: u32,
     /// The processor.
     pub cpu: rusty_box_aarch64::CpuModel,
+    /// Whether the processor has EL2, which decides the machine type the
+    /// runner builds.
+    pub virtualization: Virtualization,
     /// What the firmware tells the guest of the speculative-execution
     /// workarounds.
     pub spectre: rusty_box_aarch64::SpectreReport,
@@ -992,6 +1071,7 @@ impl ArmVirtConfig {
             memory_mib: DEFAULT_VIRT_MEMORY_MIB,
             ips: DEFAULT_VIRT_IPS,
             cpu: rusty_box_aarch64::CpuModel::default(),
+            virtualization: Virtualization::DEFAULT,
             spectre: rusty_box_aarch64::SpectreReport::DEFAULT,
             counter: rusty_box_aarch64::CounterRate::DEFAULT,
             gic: rusty_box_aarch64::GicShape::DEFAULT,
@@ -1235,6 +1315,9 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
         memory_mib,
         ips,
         cpu,
+        virtualization: virt
+            .virtualization
+            .map_or(Virtualization::DEFAULT, |virtualization| virtualization.0),
         spectre: virt
             .spectre
             .map_or(rusty_box_aarch64::SpectreReport::DEFAULT, |report| report.0),
@@ -1537,6 +1620,7 @@ impl ArmVirtConfig {
             memory_mib: Some(self.memory_mib),
             ips: Some(self.ips),
             cpu: Some(NamedToml(self.cpu)),
+            virtualization: Some(NamedToml(self.virtualization)),
             spectre: Some(NamedToml(self.spectre)),
             transport_order: Some(NamedToml(self.transport_order)),
             layout: Some(NamedToml(self.layout)),
@@ -3363,6 +3447,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             },
         ];
         let processors = rusty_box_aarch64::CpuModel::ALL.into_iter().cycle();
+        let mut virtualizations = Virtualization::ALL.into_iter().cycle();
         let mut reports = rusty_box_aarch64::SpectreReport::ALL.into_iter().cycle();
         let mut priority_bits = rusty_box_aarch64::PriorityBits::ALL.into_iter().cycle();
         // The board's own map, and one of every key's own on the smallest
@@ -3401,6 +3486,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
                     memory_mib: 1024,
                     ips: 75_000_000,
                     cpu,
+                    virtualization: virtualizations.next().unwrap_or_default(),
                     spectre: reports.next().unwrap_or_default(),
                     transport_order: orders.next().unwrap_or_default(),
                     layout: layouts.next().unwrap_or_default(),
@@ -3447,6 +3533,11 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         assert_eq!(resolved.arm_virt(), Some(&ArmVirtConfig::blank()));
         assert_eq!(ArmVirtConfig::blank().memory_mib, 256, "QEMU virt's default RAM");
         assert_eq!(ArmVirtConfig::blank().cpu, rusty_box_aarch64::CpuModel::CortexA57);
+        assert_eq!(
+            ArmVirtConfig::blank().virtualization,
+            Virtualization::Off,
+            "the board's own processor, without EL2"
+        );
         assert_eq!(
             ArmVirtConfig::blank().spectre,
             rusty_box_aarch64::SpectreReport::NotRequired
@@ -3565,6 +3656,36 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             refused.contains("\"vulnerable\"") && refused.contains("\"not-required\""),
             "{refused}"
         );
+    }
+
+    /// `virt.virtualization` is read by its settings' names, and a VM saved
+    /// with it reads back the same; one no setting has is refused when the
+    /// file is read, naming the settings there are.
+    #[test]
+    fn virt_virtualization_takes_a_setting_by_name_and_refuses_others() {
+        let board = |name: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\nvirtualization = \"{name}\"\n");
+        for virtualization in Virtualization::ALL {
+            let file: FileConfig = toml::from_str(&board(virtualization.name())).unwrap();
+            let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+            assert_eq!(
+                resolved.arm_virt().map(|virt| virt.virtualization),
+                Some(virtualization)
+            );
+            let saved = toml::to_string_pretty(&resolved.to_file_config()).unwrap();
+            assert!(
+                saved.contains(&format!("virtualization = \"{virtualization}\"")),
+                "{saved}"
+            );
+        }
+        let refused = toml::from_str::<FileConfig>(&board("true"))
+            .expect_err("no setting is named so")
+            .to_string();
+        assert!(
+            refused.contains("\"true\"") && refused.contains("\"off\"") && refused.contains("\"on\""),
+            "{refused}"
+        );
+        let unquoted = toml::from_str::<FileConfig>("[vm]\nmachine = \"arm-virt\"\n[virt]\nvirtualization = true\n");
+        assert!(unquoted.is_err(), "a boolean is not a setting's name");
     }
 
     /// `virt.transport_order` is read by its orders' names; one no order has

@@ -639,6 +639,16 @@ fn cpu_model_label(model: rusty_box_aarch64::CpuModel) -> &'static str {
     }
 }
 
+/// What the Processor page's Virtualization list shows for each
+/// [`crate::config::Virtualization`].
+#[cfg(not(target_arch = "wasm32"))]
+fn virtualization_label(virtualization: crate::config::Virtualization) -> &'static str {
+    match virtualization {
+        crate::config::Virtualization::Off => "Off (the guest starts at EL1)",
+        crate::config::Virtualization::On => "On (the guest starts at EL2)",
+    }
+}
+
 /// What the Processor page's Speculation list shows for each
 /// [`rusty_box_aarch64::SpectreReport`].
 #[cfg(not(target_arch = "wasm32"))]
@@ -810,6 +820,7 @@ struct VirtSettings {
     memory_mib: u32,
     ips: u32,
     cpu: rusty_box_aarch64::CpuModel,
+    virtualization: crate::config::Virtualization,
     spectre: rusty_box_aarch64::SpectreReport,
     /// The counter rate as typed, in Hz, which `to_config` checks.
     counter_hz: u64,
@@ -875,6 +886,7 @@ impl VirtSettings {
             memory_mib: config.memory_mib,
             ips: config.ips,
             cpu: config.cpu,
+            virtualization: config.virtualization,
             spectre: config.spectre,
             counter_hz: config.counter.hz().get(),
             gic_spis: config.gic.spis,
@@ -986,6 +998,7 @@ impl VirtSettings {
             memory_mib: self.memory_mib,
             ips: self.ips.max(1),
             cpu: self.cpu,
+            virtualization: self.virtualization,
             spectre: self.spectre,
             counter,
             gic: rusty_box_aarch64::GicShape {
@@ -3654,7 +3667,8 @@ impl NativeShellApp {
                 page_header(
                     ui,
                     "Processor",
-                    "One processor: a Cortex-A57 (Armv8.0), or an Armv9.2 processor with SME2. \
+                    "One processor: a Cortex-A57 (Armv8.0), or an Armv9.2 processor with SME2, \
+                     either with EL2 for a hypervisor such as KVM when Virtualization is on. \
                      Guest time keeps to the host clock, as QEMU's does; the IPS target is the \
                      rate guest time counts instructions at.",
                 );
@@ -3667,6 +3681,23 @@ impl NativeShellApp {
                                 for model in rusty_box_aarch64::CpuModel::ALL {
                                     changed |= ui
                                         .selectable_value(&mut virt.cpu, model, cpu_model_label(model))
+                                        .changed();
+                                }
+                            });
+                    });
+                    // Whether the processor has EL2, where a hypervisor such
+                    // as KVM runs (QEMU's `virtualization=on`).
+                    field_row(ui, "Virtualization", |ui| {
+                        egui::ComboBox::from_id_salt("virt virtualization")
+                            .selected_text(virtualization_label(virt.virtualization))
+                            .show_ui(ui, |ui| {
+                                for virtualization in crate::config::Virtualization::ALL {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut virt.virtualization,
+                                            virtualization,
+                                            virtualization_label(virtualization),
+                                        )
                                         .changed();
                                 }
                             });
@@ -8173,6 +8204,7 @@ mod tests {
                 memory_mib: 512,
                 ips: 50_000_000,
                 cpu: rusty_box_aarch64::CpuModel::Armv9p2,
+                virtualization: crate::config::Virtualization::On,
                 spectre: rusty_box_aarch64::SpectreReport::Mitigated,
                 counter: rusty_box_aarch64::CounterRate::DEFAULT,
                 gic: rusty_box_aarch64::GicShape {
@@ -9589,6 +9621,25 @@ mod tests {
         settings.machine = crate::config::MachineKind::ArmVirt;
         settings.apply_to_config(&mut applied).expect("applies as the board again");
         assert_eq!(applied, original);
+    }
+
+    /// The Processor page's Virtualization list reads the board's setting
+    /// and applies each choice back to it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_processor_pages_virtualization_applies_to_the_board() {
+        let original = test_virt_config();
+        let mut settings = NativeVmSettings::from_config(&original);
+        assert_eq!(settings.virt.virtualization, crate::config::Virtualization::On);
+        for virtualization in crate::config::Virtualization::ALL {
+            settings.virt.virtualization = virtualization;
+            let mut applied = original.clone();
+            settings.apply_to_config(&mut applied).expect("applies");
+            assert_eq!(
+                applied.arm_virt().map(|board| board.virtualization),
+                Some(virtualization)
+            );
+        }
     }
 
     /// The Processor page's interrupt rows are checked against the GIC's

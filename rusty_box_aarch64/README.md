@@ -89,7 +89,7 @@ SPIs, eight priority bits, a 62.5 MHz counter), and the choice is its own.
 
 The front end takes them as its `[virt]` table's keys (`spectre =
 "mitigated"`, `transport_order = "last-free"` and `layout = "qemu-virt"`, by each answer's
-`name`; `counter_hz`, `gic_spis` and
+`name`; `virtualization = "on"` for a machine built `with_el2`; `counter_hz`, `gic_spis` and
 `gic_priority_bits` as numbers) and its `[virt.interrupts]` table's
 (`uart`, `rtc`, `gpio`, `virtio`, `pcie_intx`, `msi_first`, `msi_count`,
 each a number, a key left out the board's own for the layout), refusing a
@@ -503,7 +503,8 @@ its SME vector lengths from 16 to 64 bytes, and the 1 GHz counter, and
 boots Alpine to a shell on it.
 
 Built with `MachineBuilder::with_el2` (QEMU's
-`-M virt,virtualization=on`), either processor has FEAT_EL2 — the
+`-M virt,virtualization=on`; the front end's `[virt] virtualization =
+"on"`, the examples' `--virtualization`), either processor has FEAT_EL2 — the
 Cortex-A57 as QEMU's does, the Armv9.2 model with the EL2 features Arm
 requires of it (below) — and the core runs a hypervisor's EL2 as Arm's
 pseudocode defines it: the
