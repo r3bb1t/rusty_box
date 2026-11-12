@@ -22,7 +22,9 @@
 //! and EL2 on a machine built with `MachineBuilder::with_el2` (no EL3, no
 //! AArch32), FP and Advanced SIMD, the
 //! Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32,
-//! a 4 KiB-granule MMU, stage 1 and with EL2 stage 2, and a GICv2.
+//! a 4 KiB-granule MMU, stage 1 and with EL2 stage 2, and a GICv2 or, as the
+//! board's option, a GICv3 whose CPU interface is the processor's
+//! System registers.
 //! `cpu::id` records every identification value the guest can read, and
 //! every instruction outside the features those values advertise is
 //! UNDEFINED, as the architecture requires.
@@ -30,7 +32,7 @@
 //! Provenance (rusty_box R7): no Bochs upstream exists for any of this.
 //! Arm's documents decide wherever they speak: the instruction semantics
 //! follow the Arm Architecture Reference Manual for A-profile (DDI 0487)
-//! pseudocode, the GIC IHI 0048B, the PL011 DDI 0183F, and the firmware
+//! pseudocode, the GICs IHI 0048B and IHI 0069G, the PL011 DDI 0183F, and the firmware
 //! calls PSCI (DEN 0022E) and the SMC Calling Convention (DEN 0028F); the
 //! virtio devices follow OASIS virtio 1.2 and the display's EDID VESA
 //! E-EDID 1.4 where those speak. QEMU's `hw/arm/virt.c` and the device
@@ -63,8 +65,12 @@ pub mod machine;
 mod softfloat;
 pub mod storage;
 
-pub use board::{Plugged, TransportOrder, UnknownTransportOrder, VirtioDevices};
-pub use bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
+pub use board::{
+    GicVersion, Plugged, TransportOrder, UnknownGicVersion, UnknownTransportOrder, VirtioDevices,
+};
+pub use bus::{
+    AccessWidth, ApIndex, BusFault, IccRegister, NoGicSystemRegisters, PhysAddr, PhysBus,
+};
 pub use cpu::{
     Btype, CounterRate, Cpu, CpuConfig, CpuModel, CpuState, CpuStateEl2, El, FixedCounterRate,
     Levels, NoEl2, Pstate, PstateRefusal, Reg, SpectreReport, SysReg, SysRegRefusal,
@@ -91,9 +97,9 @@ pub use machine::Display;
 #[cfg(feature = "alloc")]
 pub use machine::StopHandle;
 pub use machine::{
-    BatchOutcome, BuildError, HostTreeAddress, HostTreeInterrupt, MachineBuilder, MemoryError,
-    MemoryLoan, OnResetRequest, PowerState, RamSize, StopReason, TreeDevice, VirtConfig,
-    VirtMachine,
+    BatchOutcome, BuildError, GicCpuInterfaceBits, HostTreeAddress, HostTreeInterrupt,
+    MachineBuilder, MemoryError, MemoryLoan, OnResetRequest, PowerState, RamSize, StopReason,
+    TreeDevice, VirtConfig, VirtMachine,
 };
 pub use machine::{Keyboard, Pointer};
 pub use rusty_box_core::input::pointer::{PointerButton, PointerInput, PointerPos, WheelSteps};

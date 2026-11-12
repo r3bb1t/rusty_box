@@ -332,6 +332,7 @@ fn a_host_tree_gets_the_boards_memory_and_psci_nodes() {
                 .wire(crate::SpiCount::DEFAULT, crate::DeviceLayout::DEFAULT)
                 .expect("the default fits"),
             devices: crate::DeviceLayout::DEFAULT,
+            gic_version: crate::GicVersion::V2,
         };
         let mut from_host = std::boxed::Box::new(DeviceTree::EMPTY);
         describe(
@@ -393,6 +394,7 @@ fn the_device_tree_names_the_board_by_its_identity() {
             .wire(crate::SpiCount::DEFAULT, crate::DeviceLayout::DEFAULT)
             .expect("the default fits"),
         devices: crate::DeviceLayout::DEFAULT,
+        gic_version: crate::GicVersion::V2,
     };
     let host = BoardIdentity::new(IdentityNames {
         model: "Acme Board",
@@ -481,7 +483,12 @@ fn check_qemu_tree(
     tree: &[u8],
     wiring: crate::interrupt_map::Wiring,
 ) -> Result<(), super::BuildError> {
-    super::check_host_tree(tree, wiring, crate::DeviceLayout::QemuVirt)
+    super::check_host_tree(
+        tree,
+        wiring,
+        crate::DeviceLayout::QemuVirt,
+        crate::GicVersion::V2,
+    )
 }
 
 /// QEMU's tree edited by `edits`.

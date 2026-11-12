@@ -670,8 +670,11 @@ pub(crate) enum SysRegError {
     /// `VNCR_EL2` names instead ([`Cpu::nv2_load`], [`Cpu::nv2_store`]),
     /// made once every trap its accessor checks first has passed.
     Vncr(VncrOffset),
-    /// The encoding does not exist, or not at this EL, or not in this
-    /// direction: UNDEFINED.
+    /// The encoding names none of the processor's own registers, or not at
+    /// this EL, or not in this direction: UNDEFINED, unless it names a
+    /// register of the GIC CPU interface the processor has (FEAT_GICv3),
+    /// whose state is the board's GIC's and whose access the fault path
+    /// hands to the bus (`Cpu::sysreg_fault`).
     Undefined,
     /// Trapped with EC 0x18 (`AArch64_SystemAccessTrap`): [`Route::Class`]
     /// for a trap to EL1, which `HCR_EL2.TGE` takes from EL0 to EL2
@@ -1734,7 +1737,7 @@ impl<L: Levels> Cpu<L> {
                 trap_to_el2(el1 && self.hcr_any(HCR_TID1))?;
                 id::REVIDR_EL1
             }
-            ID_AA64PFR0_EL1 => id::id_aa64pfr0(self.imp.features),
+            ID_AA64PFR0_EL1 => id::id_aa64pfr0(self.imp.features) | self.imp.gic.id_field(),
             ID_AA64PFR1_EL1 => id::id_aa64pfr1(self.imp.features),
             ID_AA64ZFR0_EL1 => id::id_aa64zfr0(self.imp.features),
             ID_AA64SMFR0_EL1 => id::id_aa64smfr0(self.imp.features),

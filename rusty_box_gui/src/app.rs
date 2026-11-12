@@ -649,6 +649,16 @@ fn virtualization_label(virtualization: crate::config::Virtualization) -> &'stat
     }
 }
 
+/// What the Processor page's GIC list shows for each
+/// [`rusty_box_aarch64::GicVersion`].
+#[cfg(not(target_arch = "wasm32"))]
+fn gic_version_label(version: rusty_box_aarch64::GicVersion) -> &'static str {
+    match version {
+        rusty_box_aarch64::GicVersion::V2 => "GICv2",
+        rusty_box_aarch64::GicVersion::V3 => "GICv3 (without virtualization)",
+    }
+}
+
 /// What the Processor page's Speculation list shows for each
 /// [`rusty_box_aarch64::SpectreReport`].
 #[cfg(not(target_arch = "wasm32"))]
@@ -826,6 +836,7 @@ struct VirtSettings {
     counter_hz: u64,
     gic_spis: rusty_box_aarch64::SpiCount,
     gic_priority_bits: rusty_box_aarch64::PriorityBits,
+    gic_version: rusty_box_aarch64::GicVersion,
     /// The SPIs the devices drive, which `to_config` checks against the
     /// GIC's.
     interrupts: rusty_box_aarch64::InterruptMap,
@@ -891,6 +902,7 @@ impl VirtSettings {
             counter_hz: config.counter.hz().get(),
             gic_spis: config.gic.spis,
             gic_priority_bits: config.gic.priority_bits,
+            gic_version: config.gic_version,
             interrupts: config.interrupts,
             transport_order: config.transport_order,
             layout: config.layout,
@@ -1005,6 +1017,7 @@ impl VirtSettings {
                 spis: self.gic_spis,
                 priority_bits: self.gic_priority_bits,
             },
+            gic_version: self.gic_version,
             interrupts,
             transport_order: self.transport_order,
             layout: self.layout,
@@ -3741,6 +3754,24 @@ impl NativeShellApp {
                             )
                         });
                     }
+                    // Which GIC the board has: a GICv2, or a GICv3 whose CPU
+                    // interface is the processor's System registers, which the
+                    // board refuses with a processor with EL2.
+                    field_row(ui, "GIC", |ui| {
+                        egui::ComboBox::from_id_salt("virt GIC version")
+                            .selected_text(gic_version_label(virt.gic_version))
+                            .show_ui(ui, |ui| {
+                                for version in rusty_box_aarch64::GicVersion::ALL {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut virt.gic_version,
+                                            version,
+                                            gic_version_label(version),
+                                        )
+                                        .changed();
+                                }
+                            });
+                    });
                     // The GIC's shape: its SPIs, in the GIC-400's steps of 32,
                     // those the draft's interrupt map fits, and its priority
                     // bits.
@@ -8211,6 +8242,7 @@ mod tests {
                     spis: rusty_box_aarch64::SpiCount::new(64).expect("a count"),
                     priority_bits: rusty_box_aarch64::PriorityBits::Eight,
                 },
+                gic_version: rusty_box_aarch64::GicVersion::V2,
                 // The board's own map for QEMU's layout, its 32 transports
                 // from SPI 3, the UART and the frame moved.
                 interrupts: rusty_box_aarch64::InterruptMap {
@@ -9638,6 +9670,25 @@ mod tests {
             assert_eq!(
                 applied.arm_virt().map(|board| board.virtualization),
                 Some(virtualization)
+            );
+        }
+    }
+
+    /// The Processor page shows the board's GIC version and applies each
+    /// choice back to it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_processor_pages_gic_applies_to_the_board() {
+        let original = test_virt_config();
+        let mut settings = NativeVmSettings::from_config(&original);
+        assert_eq!(settings.virt.gic_version, rusty_box_aarch64::GicVersion::V2);
+        for version in rusty_box_aarch64::GicVersion::ALL {
+            settings.virt.gic_version = version;
+            let mut applied = original.clone();
+            settings.apply_to_config(&mut applied).expect("applies");
+            assert_eq!(
+                applied.arm_virt().map(|board| board.gic_version),
+                Some(version)
             );
         }
     }

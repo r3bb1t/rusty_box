@@ -3,10 +3,12 @@
 //! that it says it the board's way rather than QEMU's, and that the tree
 //! is well formed.
 
+use std::format;
 use std::vec;
 use std::vec::Vec;
 
 use super::{write, BoardTree, Chosen, El2Timers, InitrdRange};
+use crate::board::GicVersion;
 use crate::boot::fdt;
 use crate::bus::PhysAddr;
 use crate::cpu::PsciConduit;
@@ -43,6 +45,7 @@ fn board_with_timers(
         ram_len: RAM,
         cpu,
         psci: PsciConduit::Hvc,
+        gic_version: GicVersion::V2,
         gic,
         el2_timers,
         chosen,
@@ -528,6 +531,7 @@ fn the_tree_describes_the_interrupt_map_it_is_given() {
         ram_len: RAM,
         cpu: CpuModel::CortexA57,
         psci: PsciConduit::Hvc,
+        gic_version: GicVersion::V2,
         gic: GicExtensions::Absent,
         el2_timers: El2Timers::Physical,
         chosen: PLAIN,
@@ -569,6 +573,7 @@ fn the_tree_describes_the_layout_it_is_given() {
         ram_len: RAM,
         cpu: CpuModel::CortexA57,
         psci: PsciConduit::Hvc,
+        gic_version: GicVersion::V2,
         gic: GicExtensions::Virtualization,
         el2_timers: El2Timers::Physical,
         chosen: PLAIN,
@@ -665,6 +670,7 @@ fn a_tree_that_does_not_fit_is_refused() {
         ram_len: RAM,
         cpu: CpuModel::CortexA57,
         psci: PsciConduit::Hvc,
+        gic_version: GicVersion::V2,
         gic: GicExtensions::Absent,
         el2_timers: El2Timers::Physical,
         chosen: PLAIN,
@@ -678,4 +684,99 @@ fn a_tree_that_does_not_fit_is_refused() {
     );
     let mut exact = vec![0u8; len];
     assert_eq!(write(&tree, &mut exact), Ok(len));
+}
+
+/// The tree of a board with a GICv3 in `layout`.
+fn gic_v3_board(layout: DeviceLayout) -> Vec<u8> {
+    let tree = BoardTree {
+        identity: &BoardIdentity::RUSTY_BOX,
+        ram_len: RAM,
+        cpu: CpuModel::CortexA57,
+        psci: PsciConduit::Hvc,
+        gic_version: GicVersion::V3,
+        gic: GicExtensions::Absent,
+        el2_timers: El2Timers::Physical,
+        chosen: PLAIN,
+        wiring: InterruptMap::own(layout)
+            .wire(SpiCount::DEFAULT, layout)
+            .expect("the layout's own map fits"),
+        layout,
+    };
+    let mut out = vec![0u8; 64 * 1024];
+    let len = write(&tree, &mut out).expect("fits");
+    out.truncate(len);
+    out
+}
+
+/// A board with a GICv3 describes it by the `arm,gic-v3` binding: the
+/// distributor's 64 KiB and the one Redistributor region's 128 KiB, where
+/// the layout has them, `#redistributor-regions` 1, no CPU interface frame
+/// and no maintenance interrupt (no EL2), the GICv2m frame its child; and
+/// every PPI specifier without the GICv2 binding's CPU mask.
+#[test]
+fn a_gicv3_is_described_by_its_binding() {
+    for (layout, gic, redist, msi) in [
+        (DeviceLayout::Board, 0x0800_0000, 0x080A_0000, 0x0801_0000),
+        (
+            DeviceLayout::QemuVirt,
+            0x0800_0000,
+            0x080A_0000,
+            0x0802_0000,
+        ),
+    ] {
+        let tree = gic_v3_board(layout);
+        let node = format!("interrupt-controller@{gic:x}");
+        assert_eq!(
+            prop(&tree, &node, "compatible"),
+            Some(&b"arm,gic-v3\0"[..]),
+            "{layout}"
+        );
+        assert_eq!(
+            prop(&tree, &node, "reg").map(cells),
+            Some(vec![0, gic, 0, 0x1_0000, 0, redist, 0, 0x2_0000]),
+            "{layout}"
+        );
+        assert_eq!(
+            prop(&tree, &node, "#redistributor-regions").map(cells),
+            Some(vec![1])
+        );
+        assert_eq!(
+            prop(&tree, &node, "#interrupt-cells").map(cells),
+            Some(vec![3])
+        );
+        assert!(prop(&tree, &node, "interrupt-controller").is_some());
+        assert_eq!(
+            prop(&tree, &node, "interrupts"),
+            None,
+            "no maintenance interrupt"
+        );
+        let frame = format!("{node}/msi-controller@{msi:x}");
+        assert_eq!(
+            prop(&tree, &frame, "compatible"),
+            Some(&b"arm,gic-v2m-frame\0"[..]),
+            "{layout}"
+        );
+        assert_eq!(
+            prop(&tree, &frame, "reg").map(cells),
+            Some(vec![0, msi, 0, 0x1000])
+        );
+        let phandle = prop(&tree, &node, "phandle").map(cells).expect("a phandle");
+        assert_eq!(
+            prop(&tree, "", "interrupt-parent").map(cells),
+            Some(phandle)
+        );
+        assert_eq!(
+            prop(&tree, "timer", "interrupts").map(cells),
+            Some(vec![1, 13, 4, 1, 14, 4, 1, 11, 4, 1, 10, 4]),
+            "{layout}: the Secure, Non-secure, virtual and EL2 timers' PPIs"
+        );
+        assert_eq!(
+            prop(&tree, "pmu", "interrupts").map(cells),
+            Some(vec![1, 7, 4])
+        );
+        let word = |at: usize| u32::from_be_bytes(tree[at..at + 4].try_into().expect("four bytes"));
+        let (at, len) = (word(12) as usize, word(32) as usize);
+        let names = tree[at..at + len].iter().filter(|&&b| b == 0).count();
+        assert!(names + 8 <= super::MAX_NAMES, "{names} names");
+    }
 }

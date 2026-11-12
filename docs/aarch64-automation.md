@@ -179,6 +179,14 @@ they allow, its default the board's:
   GIC-400's 480 (the default), and its `PriorityBits`, `Four` to `Eight`
   (`Five`, the GIC-400's, by default), from which the binary points and
   active priority registers follow.
+- `gic_version`, a `GicVersion`: `V2` (the default) or `V3`, a GICv3
+  (IHI 0069G) whose CPU interface the processor reaches through its
+  `ICC_*_EL1` System registers (`ID_AA64PFR0_EL1.GIC` 1), its
+  distributor at 0x0800_0000 and its Redistributor at 0x080A_0000 on
+  both layouts, with the GICv2m frame for MSIs and no ITS. A processor
+  with EL2 cannot have one yet (`BuildError::GicV3WithEl2`), and the
+  Cortex-A57's CPU interface has five priority bits, so a GICv3 of other
+  `gic.priority_bits` on it fails with `BuildError::GicCpuInterface`.
 - `interrupts`, an `InterruptMap`: the `Spi` each device drives (the UART,
   the RTC, the GPIO; the first of the layout's virtio transports' and of
   the PCIe host's INTA to INTD), and the GICv2m frame's `MsiSpis`, its

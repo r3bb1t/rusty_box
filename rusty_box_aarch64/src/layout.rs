@@ -10,14 +10,19 @@
 //! first page after the flash; the GIC's frames as the GIC-400 lays them
 //! out in one block (DDI 0471B Table 3-1), the GIC-400 being one
 //! peripheral, behind its one AXI4 slave interface (DDI 0471B 1.3), whose
-//! 32 KiB block takes one page; a virtio-mmio transport for each device the
+//! 32 KiB block takes one page; on a board with a GICv3 instead
+//! ([`crate::GicVersion::V3`]), whose frames are 64 KiB each (IHI 0069G
+//! 12.8, 12.10), its distributor in that page, where PERIPHBASE points, and
+//! its one Redistributor's two frames in the first two pages free after
+//! every other device's; a virtio-mmio transport for each device the
 //! board can plug in, each decoding its page; the PCIe host's configuration
 //! space and 64-bit window in the 40-bit map's mapped I/O, from 256 GiB
 //! (DEN0001C 4.3.2), and its 32-bit window, which the 32-bit map would put in
 //! 1 GiB to 2 GiB where this board has RAM, in the top half of the I/O
 //! region below RAM, each window aligned to its size. QEMU's `virt` layout
 //! ([`DeviceLayout::QemuVirt`], `hw/arm/virt.c` `base_memmap` and
-//! `extended_memmap` with `highmem`, and the GPIO line of its power button)
+//! `extended_memmap` with `highmem`, a GICv3's frames at `VIRT_GIC_DIST`
+//! and `VIRT_GIC_REDIST`, and the GPIO line of its power button)
 //! is a host's choice, for a guest whose device tree or firmware variable
 //! store was made for QEMU's machine.
 
@@ -124,6 +129,40 @@ impl GicWindows {
         Window {
             base: self.vcpu,
             size: Self::VCPU_SIZE,
+        }
+    }
+}
+
+/// A GICv3's frames, where a board of [`crate::GicVersion::V3`] has them in
+/// place of the GICv2's distributor, CPU interface and virtual interface
+/// frames ([`GicWindows`]); its GICv2m frame is the GICv2's
+/// ([`GicWindows::v2m`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GicV3Windows {
+    /// The distributor's 64 KiB (IHI 0069G 12.8).
+    pub dist: PhysAddr,
+    /// The Redistributors' region: the one processor's `RD_base` and
+    /// `SGI_base` frames, 64 KiB each (12.10).
+    pub redist: PhysAddr,
+}
+
+impl GicV3Windows {
+    /// The distributor's frame.
+    pub const DIST_SIZE: u64 = 0x1_0000;
+    /// One Redistributor's two frames, the one processor's.
+    pub const REDIST_SIZE: u64 = 0x2_0000;
+
+    pub const fn dist_window(self) -> Window {
+        Window {
+            base: self.dist,
+            size: Self::DIST_SIZE,
+        }
+    }
+
+    pub const fn redist_window(self) -> Window {
+        Window {
+            base: self.redist,
+            size: Self::REDIST_SIZE,
         }
     }
 }
@@ -276,6 +315,8 @@ impl PcieWindows {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DeviceWindows {
     pub gic: GicWindows,
+    /// A GICv3's frames, on a board that has one.
+    pub gic_v3: GicV3Windows,
     /// The PL011's, the PL031's and the PL061's registers, each
     /// [`DeviceWindows::PRIMECELL_SIZE`] bytes.
     pub uart: PhysAddr,
@@ -347,6 +388,14 @@ const BOARD: DeviceWindows = DeviceWindows {
         // The GIC-400's own base, the block its frames are offsets in.
         periphbase: PhysAddr::new(GIC_BLOCK),
     },
+    gic_v3: GicV3Windows {
+        // The GIC-400 block's page, which a GICv3 board has no GICv2 in,
+        // and where PERIPHBASE points.
+        dist: PhysAddr::new(GIC_BLOCK),
+        // The two pages after the PCIe host's I/O window, the first free
+        // after every other device's.
+        redist: PhysAddr::new(DEVICES + (5 + BOARD_TRANSPORT_PAGES + 1) * PAGE),
+    },
     uart: PhysAddr::new(DEVICES + 2 * PAGE),
     rtc: PhysAddr::new(DEVICES + 3 * PAGE),
     gpio: PhysAddr::new(DEVICES + 4 * PAGE),
@@ -378,6 +427,11 @@ const QEMU_VIRT: DeviceWindows = DeviceWindows {
         // peripherals and passes to its processor as `reset-cbar`
         // (`machvirt_init`); its distributor starts it.
         periphbase: PhysAddr::new(0x0800_0000),
+    },
+    // `VIRT_GIC_DIST` and `VIRT_GIC_REDIST`, as QEMU places a GICv3's.
+    gic_v3: GicV3Windows {
+        dist: PhysAddr::new(0x0800_0000),
+        redist: PhysAddr::new(0x080A_0000),
     },
     uart: PhysAddr::new(0x0900_0000),
     rtc: PhysAddr::new(0x0901_0000),
@@ -575,6 +629,41 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A GICv3's frames take the GICv2's distributor, CPU interface and
+    /// virtual interface frames' place: apart from every other window of
+    /// the layout, the flash and RAM, and from each other; each in 64 KiB
+    /// pages of its own, the distributor where PERIPHBASE points.
+    #[test]
+    fn a_gicv3s_frames_are_apart_from_the_other_devices() {
+        let ram_base = PhysAddr::new(0x4000_0000);
+        let ram = Window::new(
+            ram_base,
+            DeviceLayout::lowest_above_ram().get() - ram_base.get(),
+        );
+        let flash = Window::new(PhysAddr::new(0), 0x0800_0000);
+        for layout in DeviceLayout::ALL {
+            let w = layout.windows();
+            let v3 = [
+                ("GICD", w.gic_v3.dist_window()),
+                ("GICR", w.gic_v3.redist_window()),
+            ];
+            let others = windows(w)
+                .into_iter()
+                .filter(|(name, _)| !matches!(*name, "GICD" | "GICC" | "GICH" | "GICV"));
+            for (a, wa) in v3 {
+                for (b, wb) in others.clone().chain([("flash", flash), ("RAM", ram)]) {
+                    assert!(
+                        wa.end() <= wb.base || wb.end() <= wa.base,
+                        "{layout}: GICv3 {a} and {b} overlap"
+                    );
+                }
+                assert_eq!(wa.base.get() % PAGE, 0, "{layout}: {a}");
+            }
+            assert!(v3[0].1.end() <= v3[1].1.base || v3[1].1.end() <= v3[0].1.base);
+            assert_eq!(w.gic_v3.dist, w.gic.periphbase, "{layout}");
         }
     }
 

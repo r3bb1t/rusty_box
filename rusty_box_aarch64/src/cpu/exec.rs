@@ -22,7 +22,10 @@ use super::ldst::SingleForm;
 use super::op::predecode;
 use super::za::ZaMove;
 use super::{Activity, Btype, Cpu, Levels};
-use crate::bus::{AccessWidth, BusFault, DescriptorSwap, FetchSource, PhysAddr, PhysBus};
+use crate::bus::{
+    AccessWidth, BusFault, DescriptorSwap, FetchSource, IccRegister, NoGicSystemRegisters,
+    PhysAddr, PhysBus,
+};
 use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
 
 /// The bus one step executes against: the machine's own, with the observer
@@ -99,6 +102,22 @@ impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
     #[inline(always)]
     fn devices_touched(&self) -> bool {
         self.bus.devices_touched()
+    }
+
+    /// A System register access, not a memory access: passed through
+    /// unreported.
+    #[inline(always)]
+    fn gic_register_read(&mut self, reg: IccRegister) -> Result<u64, NoGicSystemRegisters> {
+        self.bus.gic_register_read(reg)
+    }
+
+    #[inline(always)]
+    fn gic_register_write(
+        &mut self,
+        reg: IccRegister,
+        value: u64,
+    ) -> Result<(), NoGicSystemRegisters> {
+        self.bus.gic_register_write(reg, value)
     }
 }
 

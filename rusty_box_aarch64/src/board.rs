@@ -23,11 +23,13 @@ use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 use rusty_box_devices::display::Resolution;
 
 use crate::bus::{
-    load_le, store_le, AccessWidth, BusFault, CodeEpoch, FetchSource, PhysAddr, PhysBus, Writes,
+    load_le, store_le, AccessWidth, BusFault, CodeEpoch, FetchSource, IccRegister,
+    NoGicSystemRegisters, PhysAddr, PhysBus, Writes,
 };
 use crate::cpu::TimerLines;
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
 use crate::devices::gicv2::{GicExtensions, GicNames, GicShape, GicV2};
+use crate::devices::gicv3::GicV3;
 use crate::devices::pl011::{BaudRate, Pl011, Received, UartClocks};
 use crate::devices::pl031::Pl031;
 use crate::devices::pl061::Pl061;
@@ -238,6 +240,91 @@ impl core::fmt::Display for UnknownTransportOrder {
 
 impl core::error::Error for UnknownTransportOrder {}
 
+/// Which architecture version of the GIC the board has: Arm's Base System
+/// Architecture permits either (DEN0094C RB_GIC_01).
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GicVersion {
+    /// A GICv2, the GIC-400's architecture (IHI 0048B), with a GICv2m MSI
+    /// frame, and on a board whose processor has EL2 the Virtualization
+    /// Extensions ([`crate::devices::gicv2`]).
+    V2,
+    /// A GICv3 (IHI 0069G), whose CPU interface the processor reaches
+    /// through its `ICC_*` System registers, with the GICv2m MSI frame
+    /// ([`crate::devices::gicv3`]). A processor with EL2 would need its
+    /// virtual CPU interface, which it does not have yet
+    /// ([`crate::BuildError::GicV3WithEl2`]).
+    V3,
+}
+
+impl GicVersion {
+    /// Every version, in the order a list of them shows.
+    pub const ALL: [Self; 2] = [Self::V2, Self::V3];
+
+    /// The version a board has unless its host chooses another.
+    pub const DEFAULT: Self = Self::V2;
+
+    /// The version's name for a command line or a configuration file,
+    /// which [`str::parse`] reads back.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::V2 => "v2",
+            Self::V3 => "v3",
+        }
+    }
+
+    /// The version as a snapshot's machine shape records it, fixed per
+    /// version whatever order the variants are declared in.
+    pub(crate) const fn tag(self) -> u8 {
+        match self {
+            Self::V2 => 2,
+            Self::V3 => 3,
+        }
+    }
+}
+
+impl Default for GicVersion {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl core::fmt::Display for GicVersion {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl core::str::FromStr for GicVersion {
+    type Err = UnknownGicVersion;
+
+    /// The version whose [`GicVersion::name`] is `name`.
+    fn from_str(name: &str) -> Result<Self, UnknownGicVersion> {
+        Self::ALL
+            .into_iter()
+            .find(|version| version.name() == name)
+            .ok_or(UnknownGicVersion)
+    }
+}
+
+/// A name no [`GicVersion`] has. It prints the names there are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnknownGicVersion;
+
+impl core::fmt::Display for UnknownGicVersion {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("no GIC version has that name; the versions are")?;
+        for (i, version) in GicVersion::ALL.iter().enumerate() {
+            let separator = if i == 0 { " " } else { ", " };
+            write!(f, "{separator}\"{}\"", version.name())?;
+        }
+        Ok(())
+    }
+}
+
+impl core::error::Error for UnknownGicVersion {}
+
 /// The display and input devices plugged into the board, in the order QEMU
 /// would be given them as `-device` options: the display, the keyboard, the
 /// tablet. Each takes the transport the board's [`TransportOrder`] gives it.
@@ -302,7 +389,12 @@ impl VirtioDevices {
 pub struct VirtBoard<S> {
     pub(crate) flash0: CfiFlash,
     pub(crate) flash1: CfiFlash,
+    /// The GICv2, which a board with a GICv3 keeps out of reset and never
+    /// reaches: no window decodes to it and no line drives it
+    /// ([`VirtBoard::set_gic_line`]).
     pub(crate) gic: GicV2,
+    /// The GICv3, on a board of [`GicVersion::V3`], in the GICv2's place.
+    pub(crate) gic_v3: Option<GicV3>,
     pub(crate) uart: Pl011,
     pub(crate) rtc: Pl031,
     pub(crate) gpio: Pl061,
@@ -348,16 +440,17 @@ pub struct VirtBoard<S> {
 impl<S: GuestStorage> VirtBoard<S> {
     /// A board over `storage` whose RTC starts at `rtc_epoch_seconds`, with
     /// the devices `plugs` names, each naming itself as `identity` says, and
-    /// a GIC of `gic_shape` with `gic` (the Virtualization Extensions for a
-    /// processor with EL2), whose frames it maps, the devices driving the
-    /// SPIs `wiring` gives them and its GICv2m frame having the rest it
-    /// gives, and each virtio device in the transport `order` gives it, the
-    /// devices where `layout` puts them.
+    /// a GIC of `version` and `gic_shape` — a GICv2 with `gic` (the
+    /// Virtualization Extensions for a processor with EL2) — whose frames
+    /// it maps, the devices driving the SPIs `wiring` gives them and its
+    /// GICv2m frame having the rest it gives, and each virtio device in the
+    /// transport `order` gives it, the devices where `layout` puts them.
     pub(crate) fn new(
         storage: S,
         rtc_epoch_seconds: u64,
         plugs: Plugs,
         identity: &BoardIdentity,
+        version: GicVersion,
         gic: GicExtensions,
         gic_shape: GicShape,
         wiring: Wiring,
@@ -397,17 +490,27 @@ impl<S: GuestStorage> VirtBoard<S> {
         } else {
             Layout::Legacy
         };
+        let gic_names = GicNames {
+            gic: identity.gic(),
+            msi_frame: identity.msi_frame_iidr(),
+        };
+        let gic_v3 = match version {
+            GicVersion::V2 => None,
+            GicVersion::V3 => {
+                let mut gic = GicV3::new(gic_shape, gic_names, Some(wiring.msi()));
+                gic.power_on_processor();
+                Some(gic)
+            }
+        };
         Self {
             storage,
             flash0: CfiFlash::new(FLASH_BANK_SIZE, identity.flash()),
             flash1: CfiFlash::new(FLASH_BANK_SIZE, identity.flash()),
             gic: GicV2::with_extensions(gic)
                 .shaped(gic_shape)
-                .identified_as(GicNames {
-                    gic: identity.gic(),
-                    msi_frame: identity.msi_frame_iidr(),
-                })
+                .identified_as(gic_names)
                 .with_checked_msi_frame(wiring.msi()),
+            gic_v3,
             uart: Pl011::new(),
             rtc: Pl031::new(rtc_epoch_seconds),
             gpio: Pl061::new(),
@@ -533,13 +636,21 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// empties its receive FIFO, as `pl011_reset` does;
     /// what the guest transmitted stays for the host to drain, and host bytes
     /// still waiting for the FIFO stay queued for it, which takes them once
-    /// the guest switches the receiver back on, at `clock`. Memory is
-    /// untouched.
+    /// the guest switches the receiver back on, at `clock`. A GICv3 resets
+    /// with its Redistributor asleep, and the board's firmware, which powers
+    /// the processor on (the PSCI implementation it stands in for), wakes it
+    /// as IHI 0069G 12.11.40 asks of software after powering a PE up
+    /// ([`GicV3::power_on_processor`]), the processor running before any
+    /// guest code does. Memory is untouched.
     pub(crate) fn reset_devices(&mut self, clock: VmClock) {
         self.flash0.reset();
         self.flash1.reset();
         self.flash_epoch += 1;
         self.gic.reset();
+        if let Some(gic) = &mut self.gic_v3 {
+            gic.reset();
+            gic.power_on_processor();
+        }
         self.uart.reset();
         self.rtc.reset(clock);
         if self.power_button_release.take().is_some() {
@@ -564,36 +675,60 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.sync_device_lines();
     }
 
+    /// Drive the board's GIC's input line `intid` to `level`: the GICv3's
+    /// on a board that has one, the GICv2's otherwise — the one place a
+    /// line reaches a GIC.
+    fn set_gic_line(&mut self, intid: u32, level: bool) {
+        match &mut self.gic_v3 {
+            Some(gic) => gic.set_line(intid, level),
+            None => self.gic.set_line(intid, level),
+        }
+    }
+
     /// Re-drive the devices' interrupt lines into the GIC.
     pub(crate) fn sync_device_lines(&mut self) {
         let (uart, rtc, gpio) = (self.uart.irq(), self.rtc.irq(), self.gpio.irq());
         let wiring = self.wiring;
-        self.gic.set_line(wiring.uart().intid(), uart);
-        self.gic.set_line(wiring.rtc().intid(), rtc);
-        self.gic.set_line(wiring.gpio().intid(), gpio);
-        for transport in self.virtio.iter().flatten() {
-            self.gic
-                .set_line(wiring.virtio(transport.slot()).intid(), transport.irq());
+        self.set_gic_line(wiring.uart().intid(), uart);
+        self.set_gic_line(wiring.rtc().intid(), rtc);
+        self.set_gic_line(wiring.gpio().intid(), gpio);
+        for n in 0..self.virtio.len() {
+            if let Some(transport) = &self.virtio[n] {
+                let (intid, level) = (wiring.virtio(transport.slot()).intid(), transport.irq());
+                self.set_gic_line(intid, level);
+            }
         }
     }
 
     /// Drive the timer PPIs.
     pub(crate) fn set_timer_lines(&mut self, lines: TimerLines) {
-        self.gic.set_line(PPI_PHYSICAL_TIMER, lines.physical);
-        self.gic.set_line(PPI_VIRTUAL_TIMER, lines.virtual_);
-        self.gic.set_line(PPI_HYPERVISOR_TIMER, lines.hypervisor);
-        self.gic
-            .set_line(PPI_HYPERVISOR_VIRTUAL_TIMER, lines.hypervisor_virtual);
+        self.set_gic_line(PPI_PHYSICAL_TIMER, lines.physical);
+        self.set_gic_line(PPI_VIRTUAL_TIMER, lines.virtual_);
+        self.set_gic_line(PPI_HYPERVISOR_TIMER, lines.hypervisor);
+        self.set_gic_line(PPI_HYPERVISOR_VIRTUAL_TIMER, lines.hypervisor_virtual);
     }
 
     /// Drive the DCC's PPI with COMMIRQ ([`PPI_DCC`]).
     pub(crate) fn set_dcc_line(&mut self, commirq: bool) {
-        self.gic.set_line(PPI_DCC, commirq);
+        self.set_gic_line(PPI_DCC, commirq);
     }
 
     /// Drive the PMU's PPI with PMUIRQ ([`PPI_PMU`]).
     pub(crate) fn set_pmu_line(&mut self, pmuirq: bool) {
-        self.gic.set_line(PPI_PMU, pmuirq);
+        self.set_gic_line(PPI_PMU, pmuirq);
+    }
+
+    /// The processor's interrupt inputs from a board with a GICv3: its IRQ
+    /// and FIQ outputs; a GICv3 board's processor has no EL2, so no virtual
+    /// ones.
+    pub(crate) fn gic_v3_lines(&self) -> InterruptLines {
+        match &self.gic_v3 {
+            Some(gic) => InterruptLines {
+                irq: gic.irq_out(),
+                fiq: gic.fiq_out(),
+            },
+            None => InterruptLines::NONE,
+        }
     }
 
     /// Let time-driven devices catch up to `clock` and report the next
@@ -811,6 +946,95 @@ impl<S: GuestStorage> PhysBus for VirtBoard<S> {
     }
 }
 
+/// A GIC's outputs to the processor's physical interrupt inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InterruptLines {
+    pub(crate) irq: bool,
+    pub(crate) fiq: bool,
+}
+
+impl InterruptLines {
+    /// Neither asserted.
+    pub(crate) const NONE: Self = Self {
+        irq: false,
+        fiq: false,
+    };
+}
+
+/// The board as the processor of a board with a GICv3 reaches it
+/// ([`GicVersion::V3`]): its RAM and devices where the layout has them, the
+/// GICv3's frames in place of the GICv2's, and the GICv3's CPU interface
+/// behind the processor's `ICC_*` System registers. The board's own
+/// [`PhysBus`] is a GICv2 board's, which this one leaves as it is.
+pub(crate) struct WithGicV3<'b, S>(pub(crate) &'b mut VirtBoard<S>);
+
+impl<S: GuestStorage> PhysBus for WithGicV3<'_, S> {
+    #[inline]
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        clock: VmClock,
+    ) -> Result<u64, BusFault> {
+        if let Some(value) = self.0.load_ram(addr.get(), width) {
+            return Ok(value);
+        }
+        self.0
+            .read_outside_ram_with_gic_v3(addr, width, clock)
+            .map(|value| value & width.value_mask())
+    }
+
+    #[inline]
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        clock: VmClock,
+    ) -> Result<(), BusFault> {
+        if self.0.store_ram(addr.get(), width, value).is_some() {
+            return Ok(());
+        }
+        self.0
+            .write_outside_ram_with_gic_v3(addr, width, value & width.value_mask(), clock)
+    }
+
+    #[inline]
+    fn fetch_source(&self, addr: PhysAddr) -> FetchSource {
+        self.0.fetch_source(addr)
+    }
+
+    #[inline(always)]
+    fn devices_touched(&self) -> bool {
+        self.0.touched
+    }
+
+    /// A read of the GICv3's CPU interface, which reaches a device as an
+    /// access outside RAM does: the interrupt outputs may change.
+    fn gic_register_read(&mut self, reg: IccRegister) -> Result<u64, NoGicSystemRegisters> {
+        self.0.touched = true;
+        match &mut self.0.gic_v3 {
+            Some(gic) => Ok(gic.icc_read(reg)),
+            None => Err(NoGicSystemRegisters),
+        }
+    }
+
+    fn gic_register_write(
+        &mut self,
+        reg: IccRegister,
+        value: u64,
+    ) -> Result<(), NoGicSystemRegisters> {
+        self.0.touched = true;
+        match &mut self.0.gic_v3 {
+            Some(gic) => {
+                gic.icc_write(reg, value);
+                Ok(())
+            }
+            None => Err(NoGicSystemRegisters),
+        }
+    }
+}
+
 impl<S: GuestStorage> VirtBoard<S> {
     /// A read outside RAM, the devices where the board's layout has them.
     #[inline(never)]
@@ -837,14 +1061,8 @@ impl<S: GuestStorage> VirtBoard<S> {
         width: AccessWidth,
         clock: VmClock,
     ) -> Result<u64, BusFault> {
-        // A flash read changes at most the bank's own mode, back to read
-        // array — which a fetch from the bank was not reading, or it would
-        // be in that mode already.
-        if let Some(off) = addr.offset_in(FLASH0_BASE, FLASH_BANK_SIZE) {
-            return Ok(self.flash0.read(self.storage.code(), off, width));
-        }
-        if let Some(off) = addr.offset_in(FLASH1_BASE, FLASH_BANK_SIZE) {
-            return Ok(self.flash1.read(self.storage.vars(), off, width));
+        if let Some(value) = self.read_flash(addr, width) {
+            return Ok(value);
         }
         self.touched = true;
         if let Some(off) = w.gic.dist_window().offset_of(addr) {
@@ -867,6 +1085,102 @@ impl<S: GuestStorage> VirtBoard<S> {
             }
             GicExtensions::Absent => {}
         }
+        self.read_peripheral(w, addr, width, clock)
+    }
+
+    /// A read outside RAM of a board with a GICv3, the devices where the
+    /// board's layout has them, as
+    /// [`VirtBoard::read_outside_ram_in_layout`] reads a board with a
+    /// GICv2.
+    #[inline(never)]
+    fn read_outside_ram_with_gic_v3(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        clock: VmClock,
+    ) -> Result<u64, BusFault> {
+        match self.layout {
+            DeviceLayout::Board => self.read_outside_ram_v3(BOARD_WINDOWS, addr, width, clock),
+            DeviceLayout::QemuVirt => {
+                self.read_outside_ram_v3(QEMU_VIRT_WINDOWS, addr, width, clock)
+            }
+        }
+    }
+
+    /// A read outside RAM, the devices at `w`, the GICv3's frames in place
+    /// of the GICv2's.
+    #[inline(always)]
+    fn read_outside_ram_v3(
+        &mut self,
+        w: DeviceWindows,
+        addr: PhysAddr,
+        width: AccessWidth,
+        clock: VmClock,
+    ) -> Result<u64, BusFault> {
+        if let Some(value) = self.read_flash(addr, width) {
+            return Ok(value);
+        }
+        self.touched = true;
+        if let Some(gic) = &mut self.gic_v3 {
+            if let Some(off) = w.gic_v3.dist_window().offset_of(addr) {
+                return Ok(gic.dist_read(off, width));
+            }
+            if let Some(off) = w.gic_v3.redist_window().offset_of(addr) {
+                return Ok(gic.redist_read(off, width));
+            }
+            if let Some(off) = w.gic.v2m_window().offset_of(addr) {
+                return Ok(gic.v2m_read(off, width));
+            }
+        }
+        self.read_peripheral(w, addr, width, clock)
+    }
+
+    /// A read of a flash bank, if `addr` is in one. A flash read changes at
+    /// most the bank's own mode, back to read array — which a fetch from
+    /// the bank was not reading, or it would be in that mode already.
+    #[inline(always)]
+    fn read_flash(&mut self, addr: PhysAddr, width: AccessWidth) -> Option<u64> {
+        if let Some(off) = addr.offset_in(FLASH0_BASE, FLASH_BANK_SIZE) {
+            return Some(self.flash0.read(self.storage.code(), off, width));
+        }
+        if let Some(off) = addr.offset_in(FLASH1_BASE, FLASH_BANK_SIZE) {
+            return Some(self.flash1.read(self.storage.vars(), off, width));
+        }
+        None
+    }
+
+    /// A write of a flash bank; `None`, with nothing written, unless `addr`
+    /// is in one.
+    #[inline(always)]
+    fn write_flash(&mut self, addr: PhysAddr, width: AccessWidth, value: u64) -> Option<()> {
+        if let Some(off) = addr.offset_in(FLASH0_BASE, FLASH_BANK_SIZE) {
+            self.flash0
+                .write(FlashArray::ReadOnly(self.storage.code()), off, width, value);
+            self.flash_epoch += 1;
+            return Some(());
+        }
+        if let Some(off) = addr.offset_in(FLASH1_BASE, FLASH_BANK_SIZE) {
+            self.flash1.write(
+                FlashArray::Writable(self.storage.vars_mut()),
+                off,
+                width,
+                value,
+            );
+            self.flash_epoch += 1;
+            return Some(());
+        }
+        None
+    }
+
+    /// A read of a device at `w` other than the flash and the GIC.
+    #[inline(always)]
+    fn read_peripheral(
+        &mut self,
+        w: DeviceWindows,
+        addr: PhysAddr,
+        width: AccessWidth,
+        clock: VmClock,
+    ) -> Result<u64, BusFault> {
         if let Some(off) = w.uart_window().offset_of(addr) {
             let deadline = self.uart.next_deadline();
             let v = self.uart.read(off, width);
@@ -923,20 +1237,7 @@ impl<S: GuestStorage> VirtBoard<S> {
         clock: VmClock,
     ) -> Result<(), BusFault> {
         self.touched = true;
-        if let Some(off) = addr.offset_in(FLASH0_BASE, FLASH_BANK_SIZE) {
-            self.flash0
-                .write(FlashArray::ReadOnly(self.storage.code()), off, width, value);
-            self.flash_epoch += 1;
-            return Ok(());
-        }
-        if let Some(off) = addr.offset_in(FLASH1_BASE, FLASH_BANK_SIZE) {
-            self.flash1.write(
-                FlashArray::Writable(self.storage.vars_mut()),
-                off,
-                width,
-                value,
-            );
-            self.flash_epoch += 1;
+        if self.write_flash(addr, width, value).is_some() {
             return Ok(());
         }
         if let Some(off) = w.gic.dist_window().offset_of(addr) {
@@ -964,6 +1265,71 @@ impl<S: GuestStorage> VirtBoard<S> {
             }
             GicExtensions::Absent => {}
         }
+        self.write_peripheral(w, addr, width, value, clock)
+    }
+
+    /// A write outside RAM of a board with a GICv3, as
+    /// [`VirtBoard::read_outside_ram_with_gic_v3`] reads.
+    #[inline(never)]
+    fn write_outside_ram_with_gic_v3(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        clock: VmClock,
+    ) -> Result<(), BusFault> {
+        match self.layout {
+            DeviceLayout::Board => {
+                self.write_outside_ram_v3(BOARD_WINDOWS, addr, width, value, clock)
+            }
+            DeviceLayout::QemuVirt => {
+                self.write_outside_ram_v3(QEMU_VIRT_WINDOWS, addr, width, value, clock)
+            }
+        }
+    }
+
+    /// A write outside RAM, the devices at `w`, the GICv3's frames in place
+    /// of the GICv2's.
+    #[inline(always)]
+    fn write_outside_ram_v3(
+        &mut self,
+        w: DeviceWindows,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        clock: VmClock,
+    ) -> Result<(), BusFault> {
+        self.touched = true;
+        if self.write_flash(addr, width, value).is_some() {
+            return Ok(());
+        }
+        if let Some(gic) = &mut self.gic_v3 {
+            if let Some(off) = w.gic_v3.dist_window().offset_of(addr) {
+                gic.dist_write(off, width, value);
+                return Ok(());
+            }
+            if let Some(off) = w.gic_v3.redist_window().offset_of(addr) {
+                gic.redist_write(off, width, value);
+                return Ok(());
+            }
+            if let Some(off) = w.gic.v2m_window().offset_of(addr) {
+                gic.v2m_write(off, width, value);
+                return Ok(());
+            }
+        }
+        self.write_peripheral(w, addr, width, value, clock)
+    }
+
+    /// A write of a device at `w` other than the flash and the GIC.
+    #[inline(always)]
+    fn write_peripheral(
+        &mut self,
+        w: DeviceWindows,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        clock: VmClock,
+    ) -> Result<(), BusFault> {
         if let Some(off) = w.uart_window().offset_of(addr) {
             let deadline = self.uart.next_deadline();
             self.uart.write(off, width, value, uart_clocks(clock));

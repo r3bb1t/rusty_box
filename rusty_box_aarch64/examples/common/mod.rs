@@ -13,11 +13,10 @@ use std::time::Instant;
 
 use rusty_box_aarch64::cpu::DebugStops;
 use rusty_box_aarch64::{
-    CpuModel, CursorPos, DeviceLayout, Dimensions, Disk, DisplaySink, GuestStorage, InterruptMap,
-    KeyboardInput,
-    Levels, MachineBuilder, MsiCount, MsiExtent, Redraw, Refreshed, Reg, Resolution, Rgb,
-    RunBudget, Spi, StopReason, SysReg, TilePos, TransportOrder, Typed, VgaTextModeInfo,
-    VirtMachine,
+    CpuModel, CursorPos, DeviceLayout, Dimensions, Disk, DisplaySink, GicVersion, GuestStorage,
+    InterruptMap, KeyboardInput, Levels, MachineBuilder, MsiCount, MsiExtent, Redraw, Refreshed,
+    Reg, Resolution, Rgb, RunBudget, Spi, StopReason, SysReg, TilePos, TransportOrder, Typed,
+    VgaTextModeInfo, VirtMachine,
 };
 use rusty_box_core::ClockHz;
 
@@ -138,6 +137,8 @@ pub struct RunArgs {
     /// Where the devices sit, the board's own layout unless `--layout`
     /// names another (a tree given with `--dtb` must name the same).
     pub layout: DeviceLayout,
+    /// Which GIC the board has, a GICv2 unless `--gic` names another.
+    pub gic: GicVersion,
     /// Whether the host terminal types on the console once the script is
     /// done.
     pub console_input: ConsoleInput,
@@ -156,7 +157,7 @@ pub const RUN_USAGE: &str = "[--cpu cortex-a57|armv9.2] [--ips N] [--max-ticks N
      \x20      [--display WIDTHxHEIGHT] [--virtio-keyboard] [--virtio-tablet] [--disk <raw image>]\n\
      \x20      [--screenshot <file.ppm>] [--virtualization]\n\
      \x20      [--interrupts uart=N,rtc=N,gpio=N,virtio=N,pcie-intx=N,msi-first=N,msi-count=N]\n\
-     \x20      [--transport-order first-free|last-free] [--layout board|qemu-virt]\n\
+     \x20      [--transport-order first-free|last-free] [--layout board|qemu-virt] [--gic v2|v3]\n\
      \x20      [--interactive]   (after the script, stdin types on the console; Ctrl-] quits)";
 
 /// The display's frames, kept as the host would show them.
@@ -321,6 +322,7 @@ impl RunArgs {
             interrupt_keys: None,
             transport_order: TransportOrder::DEFAULT,
             layout: DeviceLayout::DEFAULT,
+            gic: GicVersion::DEFAULT,
             console_input: ConsoleInput::Script,
         }
     }
@@ -389,6 +391,10 @@ impl RunArgs {
             "--layout" => {
                 let name = value(flag)?;
                 self.layout = name.parse().map_err(|e| format!("--layout {name}: {e}"))?;
+            }
+            "--gic" => {
+                let name = value(flag)?;
+                self.gic = name.parse().map_err(|e| format!("--gic {name}: {e}"))?;
             }
             _ => return Ok(Parsed::NotMine),
         }

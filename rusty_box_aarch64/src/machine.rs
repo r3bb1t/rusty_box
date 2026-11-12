@@ -30,8 +30,8 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{ClockHz, Progress, RunBudget, SnapError, VmClock, VmInstant};
 
 use crate::board::{
-    Plugged, Plugs, TransportOrder, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE,
-    RAM_BASE, RAM_LIMIT,
+    GicVersion, Plugged, Plugs, TransportOrder, VirtBoard, VirtioDevices, WithGicV3, FLASH0_BASE,
+    FLASH_BANK_SIZE, RAM_BASE, RAM_LIMIT,
 };
 use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
 use crate::boot::tree::{BoardTree, Chosen, El2Timers, InitrdRange};
@@ -41,10 +41,11 @@ use crate::boot::{
 use crate::bus::{load_le, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
 use crate::cpu::{
     Activity, CounterRate, Cpu, CpuConfig, CpuModel, CpuState, DebugStops, FixedCounterRate,
-    Levels, NoEl2, NoTranslation, PsciConduit, Pstate, PstateRefusal, Reg, SpectreReport, Step,
-    StopCause, SysReg, SysRegRefusal, UndefinedInsn, VReg, WithEl2, WriteEffect, PSCI_COMPATIBLE,
+    GicCpuInterface, Levels, NoEl2, NoTranslation, PsciConduit, Pstate, PstateRefusal, Reg,
+    SpectreReport, Step, StopCause, SysReg, SysRegRefusal, UndefinedInsn, VReg, VirtualLines,
+    WithEl2, WriteEffect, PSCI_COMPATIBLE,
 };
-use crate::devices::gicv2::{GicExtensions, GicShape};
+use crate::devices::gicv2::{GicExtensions, GicShape, PriorityBits};
 use crate::devices::pl011::TX_CAPACITY;
 use crate::devices::virtio::input::InputKind;
 #[cfg(feature = "alloc")]
@@ -100,6 +101,10 @@ pub struct VirtConfig {
     pub spectre: SpectreReport,
     /// The GIC's SPIs and priority bits.
     pub gic: GicShape,
+    /// Which GIC the board has: a GICv2, or a GICv3 whose CPU interface
+    /// the processor reaches through its System registers, which a
+    /// processor with EL2 cannot have yet ([`BuildError::GicV3WithEl2`]).
+    pub gic_version: GicVersion,
     /// The SPIs the devices drive, and the GICv2m frame's, which the GIC
     /// must have for the layout's virtio transports
     /// ([`InterruptMap::check`]); [`InterruptMap::own`] gives a layout the
@@ -132,6 +137,7 @@ impl VirtConfig {
         on_reset_request: OnResetRequest::Reset,
         spectre: SpectreReport::DEFAULT,
         gic: GicShape::DEFAULT,
+        gic_version: GicVersion::DEFAULT,
         interrupts: InterruptMap::DEFAULT,
         transport_order: TransportOrder::DEFAULT,
         layout: DeviceLayout::DEFAULT,
@@ -215,7 +221,49 @@ pub enum BuildError {
     /// A host's device tree puts a key on a line of the board's GPIO other
     /// than the one the configuration's layout has the power button on.
     HostTreePowerButton(HostTreePowerButton),
+    /// The configuration asks for a GICv3 ([`GicVersion::V3`]) on a
+    /// processor with EL2. A processor with FEAT_GICv3 and EL2 has the GIC
+    /// CPU interface's virtualization registers (Arm's register data:
+    /// `ICH_HCR_EL2` and the other `ICH_*_EL2` exist wherever FEAT_GICv3
+    /// and EL2 do), which the board's GICv3 does not implement yet.
+    GicV3WithEl2,
+    /// The configuration gives a GICv3 board's CPU interface priority bits
+    /// the processor's own CPU interface does not have.
+    GicCpuInterface(GicCpuInterfaceBits),
 }
+
+/// A GICv3 board whose GIC's priority bits ([`GicShape::priority_bits`])
+/// are not those of its processor's GIC CPU interface, which the processor
+/// implements itself: the Cortex-A57's has five (DDI 0488H Table 8-13,
+/// `PRIbits` 0b100).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GicCpuInterfaceBits {
+    pub cpu: CpuModel,
+    /// The bits the processor's CPU interface implements.
+    pub interface: PriorityBits,
+    /// The bits the configuration gives the GIC.
+    pub configured: PriorityBits,
+}
+
+impl core::fmt::Display for GicCpuInterfaceBits {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let Self {
+            cpu,
+            interface,
+            configured,
+        } = self;
+        write!(
+            f,
+            "the {cpu}'s GIC CPU interface has {} priority bits, and a GICv3 with {} \
+             would not match it; a GIC of {} boots",
+            interface.count(),
+            configured.count(),
+            interface.count()
+        )
+    }
+}
+
+impl core::error::Error for GicCpuInterfaceBits {}
 
 /// A host's device tree whose `gpio-keys` names a line of the board's GPIO
 /// that the power button does not drive
@@ -300,6 +348,11 @@ impl core::fmt::Display for BuildError {
             Self::HostTreeInterrupt(e) => write!(f, "{e}"),
             Self::HostTreeAddress(e) => write!(f, "{e}"),
             Self::HostTreePowerButton(e) => write!(f, "{e}"),
+            Self::GicV3WithEl2 => f.write_str(
+                "a GICv3 board's processor cannot have EL2 yet: its GIC CPU interface \
+                 has no virtualization registers; a GICv2 board's can",
+            ),
+            Self::GicCpuInterface(e) => write!(f, "{e}"),
         }
     }
 }
@@ -314,7 +367,11 @@ impl core::error::Error for BuildError {
             Self::HostTreeInterrupt(e) => Some(e),
             Self::HostTreeAddress(e) => Some(e),
             Self::HostTreePowerButton(e) => Some(e),
-            Self::FirmwareTooLarge | Self::VariablesTooLarge | Self::LentRamSize { .. } => None,
+            Self::GicCpuInterface(e) => Some(e),
+            Self::FirmwareTooLarge
+            | Self::VariablesTooLarge
+            | Self::LentRamSize { .. }
+            | Self::GicV3WithEl2 => None,
         }
     }
 }
@@ -828,6 +885,51 @@ const fn gic_extensions<L: Levels>() -> GicExtensions {
     }
 }
 
+/// How the run loop reaches the board's GIC: the processor's bus and its
+/// interrupt inputs. A run takes the board's once, at its start
+/// ([`VirtMachine::run`]), and its loop is compiled for it: a board with a
+/// GICv2 runs the loop it would with no GICv3 to choose.
+trait GicPath {
+    /// The GIC: with a GICv2 the board is the processor's bus, with a GICv3
+    /// [`WithGicV3`] is ([`VirtMachine::run_slice`]'s one trace).
+    const VERSION: GicVersion;
+
+    /// Drive `cpu`'s interrupt inputs, physical and virtual, from `board`'s
+    /// GIC.
+    fn drive<S: GuestStorage, L: Levels>(cpu: &mut Cpu<L>, board: &VirtBoard<S>);
+}
+
+/// The path of a board with a GICv2 ([`GicVersion::V2`]): the board is the
+/// processor's bus, and the GICv2 drives its inputs.
+enum ThroughGicV2 {}
+
+impl GicPath for ThroughGicV2 {
+    const VERSION: GicVersion = GicVersion::V2;
+
+    #[inline(always)]
+    fn drive<S: GuestStorage, L: Levels>(cpu: &mut Cpu<L>, board: &VirtBoard<S>) {
+        let gic = &board.gic;
+        cpu.set_interrupt_lines(gic.irq_out(), gic.fiq_out());
+        cpu.set_virtual_interrupt_lines(gic.virtual_lines());
+    }
+}
+
+/// The path of a board with a GICv3 ([`GicVersion::V3`]): the board as
+/// [`WithGicV3`] decodes it, and the GICv3 drives the physical inputs. Its
+/// processor has no EL2, so no virtual ones.
+enum ThroughGicV3 {}
+
+impl GicPath for ThroughGicV3 {
+    const VERSION: GicVersion = GicVersion::V3;
+
+    #[inline(always)]
+    fn drive<S: GuestStorage, L: Levels>(cpu: &mut Cpu<L>, board: &VirtBoard<S>) {
+        let lines = board.gic_v3_lines();
+        cpu.set_interrupt_lines(lines.irq, lines.fiq);
+        cpu.set_virtual_interrupt_lines(VirtualLines::NONE);
+    }
+}
+
 /// `values` as a device tree property's big-endian cells, each `width`
 /// bytes (4, one cell, or 8, two), into exactly `N` bytes.
 const fn big_endian_cells<const N: usize>(values: &[u64], width: usize) -> [u8; N] {
@@ -883,6 +985,7 @@ struct Description<'i> {
     levels: TreeLevels,
     wiring: Wiring,
     devices: DeviceLayout,
+    gic_version: GicVersion,
 }
 
 impl<'i> Description<'i> {
@@ -930,6 +1033,7 @@ fn describe(
                 ram_len: machine.ram_len,
                 cpu: machine.cpu,
                 psci,
+                gic_version: machine.gic_version,
                 gic,
                 el2_timers,
                 chosen: machine.chosen(),
@@ -959,10 +1063,11 @@ fn describe(
 /// ([`TreeDevice::regions_of`]) must have each `reg` region the device has, in the
 /// root's `#address-cells` and `#size-cells` (Devicetree Specification
 /// 2.3.5, two and one when absent), where the layout has it
-/// ([`BuildError::HostTreeAddress`]): the GIC's distributor, CPU interface,
-/// virtual interface control and virtual CPU interface in that order, as the
-/// GICv2 binding lists them, as many of them as the node names; every other
-/// device's first region. A child whose `reg` holds no such address is none
+/// ([`BuildError::HostTreeAddress`]): the frames of the GIC of version
+/// `gic` as its binding lists them, as many of them as the node names — a
+/// GICv2's distributor, CPU interface, virtual interface control and
+/// virtual CPU interface, a GICv3's distributor and Redistributor region;
+/// every other device's first region. A child whose `reg` holds no such address is none
 /// of the board's. The GICv2m frame, which no device of the board's empty
 /// bus sends an MSI to, the tree places as it likes. A device's
 /// interrupt is the first its `interrupts-extended`
@@ -978,6 +1083,7 @@ fn check_host_tree(
     tree: &[u8],
     wiring: Wiring,
     devices: DeviceLayout,
+    gic: GicVersion,
 ) -> Result<(), BuildError> {
     let windows = devices.windows();
     let mut cells = RegCells::DEFAULT;
@@ -1014,16 +1120,16 @@ fn check_host_tree(
         let Some(address) = reg_address(reg, cells, 0) else {
             return Ok(());
         };
-        if let Some(regions) = TreeDevice::regions_of(node)? {
+        if let Some(regions) = TreeDevice::regions_of(node, gic)? {
             for (region, &frame) in regions.iter().enumerate() {
                 let Some(named) = reg_address(reg, cells, region) else {
                     break;
                 };
-                if !frame.is_at(named, windows) {
+                if !frame.is_at(named, windows, gic) {
                     return Err(BuildError::HostTreeAddress(HostTreeAddress {
                         device: frame,
                         named,
-                        board: frame.board_address(windows),
+                        board: frame.board_address(windows, gic),
                     }));
                 }
             }
@@ -1221,6 +1327,8 @@ pub enum TreeDevice {
     GicVirtualControl,
     /// The GIC's virtual CPU interface (`GICV`), its fourth.
     GicVirtualCpu,
+    /// A GICv3's Redistributor region, the GIC node's second `reg` region.
+    GicRedistributors,
     Uart,
     Rtc,
     Gpio,
@@ -1237,6 +1345,7 @@ impl TreeDevice {
             Self::GicCpuInterface => "the GIC's CPU interface",
             Self::GicVirtualControl => "the GIC's virtual interface control",
             Self::GicVirtualCpu => "the GIC's virtual CPU interface",
+            Self::GicRedistributors => "the GIC's Redistributors",
             Self::Uart => "the UART",
             Self::Rtc => "the RTC",
             Self::Gpio => "the GPIO",
@@ -1247,16 +1356,23 @@ impl TreeDevice {
 
     /// What a node's `reg` regions are, in order, if it is one of the
     /// board's devices: by its being an interrupt controller of three-cell
-    /// specifiers, the GIC's frames as the GICv2 binding lists them; by its
-    /// `compatible` (each one's binding), any other device's one.
-    fn regions_of(node: fdt::TreeNode<'_>) -> Result<Option<&'static [Self]>, DeviceTreeError> {
+    /// specifiers, the frames of the GIC of version `gic` as its binding
+    /// lists them; by its `compatible` (each one's binding), any other
+    /// device's one.
+    fn regions_of(
+        node: fdt::TreeNode<'_>,
+        gic: GicVersion,
+    ) -> Result<Option<&'static [Self]>, DeviceTreeError> {
         if ParentKind::of(node)? == ParentKind::GicLike {
-            return Ok(Some(&[
-                Self::GicDistributor,
-                Self::GicCpuInterface,
-                Self::GicVirtualControl,
-                Self::GicVirtualCpu,
-            ]));
+            return Ok(Some(match gic {
+                GicVersion::V2 => &[
+                    Self::GicDistributor,
+                    Self::GicCpuInterface,
+                    Self::GicVirtualControl,
+                    Self::GicVirtualCpu,
+                ],
+                GicVersion::V3 => &[Self::GicDistributor, Self::GicRedistributors],
+            }));
         }
         let Some(compatible) = node.property("compatible")? else {
             return Ok(None);
@@ -1277,18 +1393,20 @@ impl TreeDevice {
         })
     }
 
-    /// Whether `address` is where the layout `windows` has the device: for
-    /// a virtio transport, any transport's registers.
-    fn is_at(self, address: PhysAddr, windows: DeviceWindows) -> bool {
+    /// Whether `address` is where the layout `windows` has the device, with
+    /// a GIC of version `gic`: for a virtio transport, any transport's
+    /// registers.
+    fn is_at(self, address: PhysAddr, windows: DeviceWindows, gic: GicVersion) -> bool {
         match self {
             Self::GicDistributor
             | Self::GicCpuInterface
             | Self::GicVirtualControl
             | Self::GicVirtualCpu
+            | Self::GicRedistributors
             | Self::Uart
             | Self::Rtc
             | Self::Gpio
-            | Self::PcieHost => address == self.board_address(windows),
+            | Self::PcieHost => address == self.board_address(windows, gic),
             Self::Virtio => matches!(
                 windows.virtio.slot_of(address),
                 Some(TransportRegister { reg, .. }) if reg.get() == 0
@@ -1296,11 +1414,15 @@ impl TreeDevice {
         }
     }
 
-    /// Where the layout `windows` has the device: for the virtio
-    /// transports, the first.
-    fn board_address(self, windows: DeviceWindows) -> PhysAddr {
+    /// Where the layout `windows` has the device, with a GIC of version
+    /// `gic`: for the virtio transports, the first.
+    fn board_address(self, windows: DeviceWindows, gic: GicVersion) -> PhysAddr {
         match self {
-            Self::GicDistributor => windows.gic.dist,
+            Self::GicDistributor => match gic {
+                GicVersion::V2 => windows.gic.dist,
+                GicVersion::V3 => windows.gic_v3.dist,
+            },
+            Self::GicRedistributors => windows.gic_v3.redist,
             Self::GicCpuInterface => windows.gic.cpu,
             Self::GicVirtualControl => windows.gic.hyp,
             Self::GicVirtualCpu => windows.gic.vcpu,
@@ -1491,12 +1613,13 @@ fn plan<L: Levels>(
     let cpu = config.cpu;
     cpu.check_counter_rate(config.counter)
         .map_err(BuildError::FixedCounterRate)?;
+    check_gic::<L>(config)?;
     let wiring = config
         .interrupts
         .wire(config.gic.spis, config.layout)
         .map_err(BuildError::InterruptMap)?;
     if let TreeSource::Host(tree) = source_tree {
-        check_host_tree(tree, wiring, config.layout)?;
+        check_host_tree(tree, wiring, config.layout, config.gic_version)?;
     }
     let ram_len = ram.get();
     let boot = match choice {
@@ -1520,6 +1643,7 @@ fn plan<L: Levels>(
             levels: TreeLevels::of::<L>(cpu),
             wiring,
             devices: config.layout,
+            gic_version: config.gic_version,
         };
         describe(source_tree, machine, identity, &mut device_tree)?;
         let tree_len = device_tree.len as u64;
@@ -1536,6 +1660,36 @@ fn plan<L: Levels>(
         device_tree,
         wiring,
     })
+}
+
+/// Refuse a GIC the configuration's processor of the levels `L` cannot
+/// have: a GICv3 on a processor with EL2 ([`BuildError::GicV3WithEl2`]),
+/// or one whose priority bits are not those of the CPU interface the
+/// processor implements ([`BuildError::GicCpuInterface`]).
+fn check_gic<L: Levels>(config: &VirtConfig) -> Result<(), BuildError> {
+    match config.gic_version {
+        GicVersion::V2 => Ok(()),
+        GicVersion::V3 if L::EL2 => Err(BuildError::GicV3WithEl2),
+        GicVersion::V3 => match config.cpu.gic_cpu_interface_bits() {
+            Some(interface) if interface != config.gic.priority_bits => {
+                Err(BuildError::GicCpuInterface(GicCpuInterfaceBits {
+                    cpu: config.cpu,
+                    interface,
+                    configured: config.gic.priority_bits,
+                }))
+            }
+            Some(_) | None => Ok(()),
+        },
+    }
+}
+
+/// The processor's System register interface to the GIC CPU interface: a
+/// GICv3's, of its priority bits, or none with a GICv2.
+const fn gic_cpu_interface(config: &VirtConfig) -> GicCpuInterface {
+    match config.gic_version {
+        GicVersion::V2 => GicCpuInterface::Absent,
+        GicVersion::V3 => GicCpuInterface::SystemRegisters(config.gic.priority_bits),
+    }
 }
 
 /// The machine `plan` describes, in `storage`, its devices named `identity`,
@@ -1565,7 +1719,8 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
             .cpu
             .implementation()
             .counting_at(config.counter)
-            .with_periphbase(config.layout.windows().gic.periphbase),
+            .with_periphbase(config.layout.windows().gic.periphbase)
+            .with_gic(gic_cpu_interface(&config)),
     );
     cpu.set_debug_stops(config.debug_stops);
     cpu.set_spectre_report(config.spectre);
@@ -1579,6 +1734,7 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
             config.rtc_epoch_seconds,
             plugs,
             &identity,
+            config.gic_version,
             gic_extensions::<L>(),
             config.gic,
             wiring,
@@ -1978,6 +2134,17 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     /// any of them changes, and the next instruction at which a PMU counter
     /// can overflow.
     fn sync_events(&mut self) {
+        match self.board.gic_v3 {
+            Some(_) => self.sync_events_through::<ThroughGicV3>(),
+            None => self.sync_events_through::<ThroughGicV2>(),
+        }
+    }
+
+    /// [`VirtMachine::sync_events`], the processor's interrupt inputs
+    /// driven from the GIC `G` reaches. Out of line: it runs at events, not
+    /// between instructions, which keeps the run loop that calls it small.
+    #[inline(never)]
+    fn sync_events_through<G: GicPath>(&mut self) {
         self.cpu.take_outputs_dirty();
         self.board.set_timer_lines(self.cpu.timer_lines());
         self.board.set_dcc_line(self.cpu.dcc_interrupt());
@@ -1991,16 +2158,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             .chain(device_deadline)
             .min()
             .map_or(u64::MAX, VmInstant::ticks);
-        self.drive_interrupt_inputs();
-    }
-
-    /// Drive the processor's interrupt inputs, physical and virtual, from
-    /// the GIC.
-    #[inline]
-    fn drive_interrupt_inputs(&mut self) {
-        let gic = &self.board.gic;
-        self.cpu.set_interrupt_lines(gic.irq_out(), gic.fiq_out());
-        self.cpu.set_virtual_interrupt_lines(gic.virtual_lines());
+        G::drive(&mut self.cpu, &self.board);
     }
 
     /// Run until `budget` is spent or something stops the machine.
@@ -2052,16 +2210,22 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
         Ok(())
     }
 
+    /// A run, its loop the one of the board's GIC ([`GicPath`]): chosen
+    /// here, once a run, so that no instruction asks which GIC the board
+    /// has.
     fn run<const WATCH: bool>(&mut self, budget: RunBudget) -> BatchOutcome {
         let started = self.cpu.retired;
-        let stop = self.run_until::<WATCH>(budget);
+        let stop = match self.board.gic_v3 {
+            Some(_) => self.run_until::<WATCH, ThroughGicV3>(budget),
+            None => self.run_until::<WATCH, ThroughGicV2>(budget),
+        };
         BatchOutcome {
             progress: Progress::Instructions(self.cpu.retired - started),
             stop,
         }
     }
 
-    fn run_until<const WATCH: bool>(&mut self, budget: RunBudget) -> StopReason {
+    fn run_until<const WATCH: bool, G: GicPath>(&mut self, budget: RunBudget) -> StopReason {
         match self.power {
             PowerState::Running => {}
             PowerState::PoweredOff => return StopReason::PoweredOff,
@@ -2071,7 +2235,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
         // register write) may have changed what the processor sees. No burst
         // is counted yet, so the run starts from the next event as it now
         // is either way.
-        match self.after_device_access() {
+        match self.after_device_access::<G>() {
             NextEvent::WorkedOutAgain | NextEvent::Unchanged => {}
         }
         let (tick_end, instruction_end) = match budget {
@@ -2086,9 +2250,9 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             }
             let slice_end = tick_end.min(self.cpu.icount.saturating_add(STOP_POLL_TICKS));
             let slice = if watch {
-                self.run_slice::<true>(slice_end, tick_end, instruction_end)
+                self.run_slice::<true, G>(slice_end, tick_end, instruction_end)
             } else {
-                self.run_slice::<false>(slice_end, tick_end, instruction_end)
+                self.run_slice::<false, G>(slice_end, tick_end, instruction_end)
             };
             match slice {
                 Slice::Done if self.cpu.icount >= tick_end => return StopReason::BudgetExhausted,
@@ -2121,7 +2285,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     /// holds, runs a block of exactly that many (accel/tcg/cpu-exec.c
     /// `cpu_loop_exec_tb`, with `CF_COUNT_MASK`).
     #[inline(always)]
-    fn run_slice<const WATCH: bool>(
+    fn run_slice<const WATCH: bool, G: GicPath>(
         &mut self,
         slice_end: u64,
         tick_end: u64,
@@ -2129,7 +2293,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     ) -> Slice {
         'slice: loop {
             if self.cpu.icount >= self.next_event || self.cpu.retired >= self.pmu_event {
-                self.sync_events();
+                self.sync_events_through::<G>();
             }
             if matches!(self.cpu.activity, Activity::Waiting(_)) && !self.cpu.wake_if_pending() {
                 // The wait's own end (its timeout, or the event stream's next
@@ -2190,15 +2354,26 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
                 // A counter poll may be fast-forwarded through the rest of
                 // the burst, but past no exit address.
                 let exits = if WATCH { self.exits.addresses() } else { &[] };
-                match self
-                    .cpu
-                    .run_trace(&mut self.board, &mut self.observer, limit, exits)
-                {
+                // The trace, against the bus of the board's GIC: `G`'s, a
+                // constant of the loop's.
+                let step = match G::VERSION {
+                    GicVersion::V2 => {
+                        self.cpu
+                            .run_trace(&mut self.board, &mut self.observer, limit, exits)
+                    }
+                    GicVersion::V3 => self.cpu.run_trace(
+                        &mut WithGicV3(&mut self.board),
+                        &mut self.observer,
+                        limit,
+                        exits,
+                    ),
+                };
+                match step {
                     Step::Retired => {}
                     Step::Waiting => {
                         // The slice starts again either way, and a waiting
                         // processor sleeps to the next event as it now is.
-                        match self.after_device_access() {
+                        match self.after_device_access::<G>() {
                             NextEvent::WorkedOutAgain | NextEvent::Unchanged => continue 'slice,
                         }
                     }
@@ -2211,7 +2386,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
                 // A burst was counted to the next event: one worked out
                 // again ends it.
                 if (self.cpu.outputs_dirty || self.board.touched)
-                    && self.after_device_access() == NextEvent::WorkedOutAgain
+                    && self.after_device_access::<G>() == NextEvent::WorkedOutAgain
                 {
                     continue 'slice;
                 }
@@ -2222,7 +2397,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     /// Bring the processor's interrupt inputs and the next event up to date
     /// after an instruction that may have changed them.
     #[inline]
-    fn after_device_access(&mut self) -> NextEvent {
+    fn after_device_access<G: GicPath>(&mut self) -> NextEvent {
         self.board.touched = false;
         // What a device wrote may be code the processor decoded.
         let written = self.board.dma.take();
@@ -2230,10 +2405,10 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             self.cpu.forget_code(span);
         }
         if self.events_moved() {
-            self.sync_events();
+            self.sync_events_through::<G>();
             NextEvent::WorkedOutAgain
         } else {
-            self.drive_interrupt_inputs();
+            G::drive(&mut self.cpu, &self.board);
             NextEvent::Unchanged
         }
     }
@@ -2690,6 +2865,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             layout: self.config.layout.tag(),
             gic_spis: self.config.gic.spis.get(),
             gic_priority_bits: self.config.gic.priority_bits.count(),
+            gic_version: self.config.gic_version.tag(),
             wiring: self.board.wiring,
         }
     }
@@ -2720,7 +2896,10 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
         w.write_u64(self.device_tree.len as u64)?;
         w.write_bytes(self.device_tree.as_slice())?;
         self.cpu.save(w)?;
-        self.board.gic.save(w)?;
+        match &self.board.gic_v3 {
+            Some(gic) => gic.save(w)?,
+            None => self.board.gic.save(w)?,
+        }
         self.board.uart.save(w)?;
         self.board.rtc.save(w)?;
         self.board.gpio.save(w)?;
@@ -2797,7 +2976,10 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
         r.read_bytes(&mut self.device_tree.bytes[..tree_len])?;
         self.device_tree.len = tree_len;
         self.cpu.restore(r)?;
-        self.board.gic.restore(r)?;
+        match &mut self.board.gic_v3 {
+            Some(gic) => gic.restore(r)?,
+            None => self.board.gic.restore(r)?,
+        }
         self.board.uart.restore(r)?;
         self.board.rtc.restore(r)?;
         self.board.gpio.restore(r)?;
@@ -2860,10 +3042,11 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// it to, whether a walked entry's leaf is global (its `nG`, which TLB
 /// maintenance by ASID reads), the TLB's kept stage 2 translations, its tables of EL1&0 and
 /// stage 2 contexts, the shape's identity fingerprint, counter rate,
-/// firmware speculation report, GIC shape, interrupt map with the count of
-/// transports it wires, device layout and occupied transports, and the
-/// board's devices: the GIC with its Virtualization Extensions where it has
-/// them, the PL011 (its modem status inputs those its `UARTCR` drives),
+/// firmware speculation report, GIC version and shape, interrupt map with
+/// the count of transports it wires, device layout and occupied transports,
+/// and the board's devices: the GIC — a GICv2 with its Virtualization
+/// Extensions where it has them, or a GICv3 with its Redistributor and CPU
+/// interface — the PL011 (its modem status inputs those its `UARTCR` drives),
 /// the PL031 (its alarm armed while its raw status is clear), the PL061,
 /// both flash banks and every
 /// virtio-mmio transport, each queue's state checked against the size its
@@ -2884,7 +3067,7 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// memory told apart by shareability and stage 2 memory by `HCR_EL2.FWB`'s
 /// rule (FEAT_S2FWB), whose stage 2 contexts hold `FWB`, and `VNCR_EL2`
 /// (FEAT_NV2) with the EL1&0 contexts' `HCR_EL2.NV` and `NV1` (FEAT_NV).
-const SNAPSHOT_VERSION: u32 = 39;
+const SNAPSHOT_VERSION: u32 = 40;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2928,6 +3111,9 @@ struct Shape {
     /// banks of the most a GIC has.
     gic_spis: u32,
     gic_priority_bits: u8,
+    /// Which GIC the board has ([`GicVersion::tag`]), whose section of the
+    /// image is that GIC's.
+    gic_version: u8,
     /// The SPIs the devices drive and the GICv2m frame's, which the guest's
     /// drivers were told.
     wiring: Wiring,
@@ -2960,6 +3146,7 @@ impl Shape {
         w.write_u8(self.layout)?;
         w.write_u32(self.gic_spis)?;
         w.write_u8(self.gic_priority_bits)?;
+        w.write_u8(self.gic_version)?;
         self.wiring.save(w)
     }
 
@@ -2995,6 +3182,7 @@ impl Shape {
             layout: r.read_u8()?,
             gic_spis: r.read_u32()?,
             gic_priority_bits: r.read_u8()?,
+            gic_version: r.read_u8()?,
             wiring: Wiring::restore(r)?,
         })
     }

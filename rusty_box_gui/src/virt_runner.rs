@@ -217,6 +217,7 @@ fn board<'i>(config: &ArmVirtConfig) -> Result<MachineBuilder<'i, NoBoot>, RunEr
         spectre: config.spectre,
         counter: config.counter,
         gic: config.gic,
+        gic_version: config.gic_version,
         interrupts: config.interrupts,
         transport_order: config.transport_order,
         layout: config.layout,

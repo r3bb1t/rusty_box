@@ -94,9 +94,9 @@ use crate::layout::DeviceLayout;
 /// SGIs, PPIs and the most SPIs a GIC has, [`SpiCount::MAX`]: the size of
 /// every per-interrupt bank, whatever the GIC's [`GicShape`] implements.
 pub const MAX_IRQ: usize = 32 + SpiCount::MAX.get() as usize;
-const WORDS: usize = MAX_IRQ / 32;
+pub(super) const WORDS: usize = MAX_IRQ / 32;
 /// QEMU `GIC_NR_SGIS`.
-const NR_SGIS: usize = 16;
+pub(super) const NR_SGIS: usize = 16;
 /// The PPIs the GIC implements, a bit each in the word of IDs 0 to 31:
 /// 25 to 31, the GIC-400's ("all interrupts are implemented except for the
 /// unused PPIs, IDs 16-24", DDI 0471B §3.3); 22, the PPI of the DCC's
@@ -150,7 +150,7 @@ impl SpiCount {
 
     /// The interrupt IDs below the first that does not exist: the SGIs and
     /// PPIs, and these SPIs.
-    const fn irq_end(self) -> usize {
+    pub(super) const fn irq_end(self) -> usize {
         32 + self.0 as usize
     }
 }
@@ -211,7 +211,7 @@ impl PriorityBits {
     }
 
     /// The priority bits that exist (Table 3-1, Table 4-32).
-    const fn mask(self) -> u8 {
+    pub(super) const fn mask(self) -> u8 {
         (0xFF00_u16 >> self.count()) as u8
     }
 
@@ -231,12 +231,12 @@ impl PriorityBits {
     /// every group bit (Table 4-47: 3 with four bits, 2 with five, 1 with
     /// six, 0 with seven), and 0 with eight, the least there is (§4.4.3).
     /// A write below it sets it (§4.4.3), and a reset sets it.
-    const fn min_bpr(self) -> u8 {
+    pub(super) const fn min_bpr(self) -> u8 {
         (7 - self.group_bits()) as u8
     }
 
     /// `GICC_ABPR`'s minimum binary point, one above `GICC_BPR`'s (§3.3.3).
-    const fn min_abpr(self) -> u8 {
+    pub(super) const fn min_abpr(self) -> u8 {
         self.min_bpr() + 1
     }
 
@@ -250,7 +250,7 @@ impl PriorityBits {
     /// preemption level, in Table 4-47's layout (`GICC_APR0[15:0]` with
     /// four bits, `GICC_APR0` with five, `GICC_APR0` and `GICC_APR1` with
     /// six, all four from seven); the other bits and words are reserved.
-    const fn apr_bits(self, n: usize) -> u32 {
+    pub(super) const fn apr_bits(self, n: usize) -> u32 {
         let levels = self.preemption_levels() as usize;
         if levels >= 32 * (n + 1) {
             u32::MAX
@@ -285,7 +285,7 @@ impl GicShape {
 
     /// Whether interrupt `irq` exists: an SGI, a PPI of
     /// [`IMPLEMENTED_PPIS`], or one of the GIC's SPIs.
-    const fn implemented(self, irq: usize) -> bool {
+    pub(super) const fn implemented(self, irq: usize) -> bool {
         if irq < 32 {
             irq < NR_SGIS || IMPLEMENTED_PPIS & (1 << irq) != 0
         } else {
@@ -298,7 +298,7 @@ impl GicShape {
     /// register (`GICC_EOIR`, `GICC_DIR`, a hardware List register) or an
     /// input line, so none reaches the state of an interrupt that does not
     /// exist.
-    const fn existing(self, intid: u32) -> Option<usize> {
+    pub(super) const fn existing(self, intid: u32) -> Option<usize> {
         let i = intid as usize;
         if self.implemented(i) {
             Some(i)
@@ -309,7 +309,7 @@ impl GicShape {
 
     /// The interrupts of word `w` of a bank that exist, a bit each
     /// ([`GicShape::implemented`]).
-    const fn implemented_word(self, w: usize) -> u32 {
+    pub(super) const fn implemented_word(self, w: usize) -> u32 {
         let mut word = 0;
         let mut k = 0;
         while k < 32 {
@@ -322,7 +322,7 @@ impl GicShape {
     }
 
     /// The words of a bank that hold an interrupt that exists.
-    const fn words(self) -> usize {
+    pub(super) const fn words(self) -> usize {
         self.spis.irq_end() / 32
     }
 }
@@ -334,7 +334,7 @@ impl Default for GicShape {
 }
 
 /// The SGIs' bits in word 0 of a bank.
-const SGI_BITS: u32 = (1 << NR_SGIS) - 1;
+pub(super) const SGI_BITS: u32 = (1 << NR_SGIS) - 1;
 /// QEMU `GIC_MAXIRQ`: interrupt IDs from here up are special.
 pub(super) const MAXIRQ: u32 = 1020;
 pub(super) const SPURIOUS: u32 = 1023;
@@ -343,7 +343,7 @@ pub(super) const SPURIOUS_GROUP1: u32 = 1022;
 pub(super) const IDLE_PRIORITY: u16 = 0x100;
 /// The most active priority registers of a group: four, of 128 preemption
 /// levels (IHI 0048B §4.4.12, Table 4-47).
-const MAX_APRS: usize = 4;
+pub(super) const MAX_APRS: usize = 4;
 
 /// `GICD_CTLR`'s and `GICC_CTLR`'s group enables, the same bits in both.
 pub(super) const GICD_CTLR_EN_GRP0: u32 = 1 << 0;
@@ -453,12 +453,12 @@ pub struct MsiFrame {
 impl MsiFrame {
     /// `MSI_TYPER`: the first SPI's interrupt ID in bits [25:16], the count
     /// in [9:0], both of which fit ([`Spi::LAST`], [`MsiCount::MAX`]).
-    const fn typer(self) -> u32 {
+    pub(super) const fn typer(self) -> u32 {
         (self.first.intid() << 16) | self.count.get()
     }
 
     /// Whether interrupt `intid` is one of the frame's.
-    const fn holds(self, intid: u32) -> bool {
+    pub(super) const fn holds(self, intid: u32) -> bool {
         let first = self.first.intid();
         intid >= first && intid - first < self.count.get()
     }
@@ -487,22 +487,23 @@ impl core::fmt::Display for MsiFrameOutsideGic {
 impl core::error::Error for MsiFrameOutsideGic {}
 
 const V2M_MSI_TYPER: u64 = 0x008;
-const V2M_MSI_SETSPI_NS: u64 = 0x040;
+pub(super) const V2M_MSI_SETSPI_NS: u64 = 0x040;
 const V2M_MSI_IIDR: u64 = 0xFCC;
 
+/// One bit per interrupt, interrupt `i` bit `i % 32` of word `i / 32`.
 #[derive(Clone, Copy)]
-struct Bits([u32; WORDS]);
+pub(super) struct Bits(pub(super) [u32; WORDS]);
 
 impl Bits {
-    const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self([0; WORDS])
     }
     #[inline]
-    fn get(&self, i: usize) -> bool {
+    pub(super) fn get(&self, i: usize) -> bool {
         self.0[i / 32] & (1 << (i % 32)) != 0
     }
     #[inline]
-    fn set(&mut self, i: usize, v: bool) {
+    pub(super) fn set(&mut self, i: usize, v: bool) {
         if v {
             self.0[i / 32] |= 1 << (i % 32);
         } else {
@@ -513,7 +514,7 @@ impl Bits {
     /// (a byte of a one-bit-per-interrupt bank); a byte past the last
     /// interrupt reads as zero.
     #[inline]
-    fn byte(&self, first: usize) -> u8 {
+    pub(super) fn byte(&self, first: usize) -> u8 {
         self.0
             .get(first / 32)
             .map_or(0, |word| (word >> (first % 32)) as u8)
@@ -1642,7 +1643,7 @@ impl GicV2 {
     /// zero), but for `MSI_TYPER`, which reports the board's choice of SPIs
     /// ([`MsiFrame`]), and `MSI_IIDR`, which is the board's identity's
     /// where QEMU's names QEMU (`PRODUCT_ID_QEMU`, 'Q').
-    fn v2m_register(off: u64, msi: Option<MsiFrame>, iidr: MsiFrameIidr) -> u32 {
+    pub(super) fn v2m_register(off: u64, msi: Option<MsiFrame>, iidr: MsiFrameIidr) -> u32 {
         match off {
             V2M_MSI_TYPER => msi.map_or(0, MsiFrame::typer),
             V2M_MSI_IIDR => iidr.get(),

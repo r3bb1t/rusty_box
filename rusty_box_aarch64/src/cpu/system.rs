@@ -15,11 +15,11 @@ use super::features::Feature;
 use super::fgt::{HFGITR_SVC_EL0, HFGITR_SVC_EL1};
 use super::mmu::{AtCheck, AtStages, CacheMaintenance};
 use super::sme::SmeTrap;
-use super::sysreg::{SysRegError, SysRegKey, CPACR_FPEN};
+use super::sysreg::{Direction, SysRegError, SysRegKey, CPACR_FPEN};
 use super::tlbi::TlbiForm;
 use super::wait::Wait;
 use super::{sctlr, Cpu, El, Levels};
-use crate::bus::PhysBus;
+use crate::bus::{IccRegister, NoGicSystemRegisters, PhysBus};
 
 /// PSCI function identifiers and return codes (Arm DEN 0022D §5.1, Table 6).
 pub(super) mod psci {
@@ -438,9 +438,11 @@ impl<L: Levels> Cpu<L> {
     /// it takes, its syndrome from `key`, `rt` and the direction (`read`);
     /// or, transformed by FEAT_NV2, the load into `Rt` (`read`) or the
     /// store of `Rt` it is instead ([`Cpu::nv2_load`], [`Cpu::nv2_store`]),
-    /// which completes it unless the access faults. The one place both are
-    /// carried out, out of line: an `MRS` or `MSR` that completes never
-    /// reaches it.
+    /// which completes it unless the access faults; or, for a register of
+    /// the GIC CPU interface, the access the bus completes, UNDEFINED where
+    /// the bus has no such GIC. The one place these are carried out, out
+    /// of line: an `MRS` or `MSR` of the processor's own registers that
+    /// completes never reaches it.
     #[allow(clippy::too_many_arguments)]
     #[cold]
     #[inline(never)]
@@ -455,7 +457,21 @@ impl<L: Levels> Cpu<L> {
         read: bool,
     ) -> ExecResult {
         match err {
-            SysRegError::Undefined => self.undefined(pc, insn),
+            SysRegError::Undefined => match self.gic_register(key, read) {
+                Some(reg) => {
+                    let done = if read {
+                        bus.gic_register_read(reg)
+                            .map(|value| self.set_x_or_zr(rt, value))
+                    } else {
+                        bus.gic_register_write(reg, self.x_or_zr(rt))
+                    };
+                    match done {
+                        Ok(()) => Ok(Flow::Next),
+                        Err(NoGicSystemRegisters) => self.undefined(pc, insn),
+                    }
+                }
+                None => self.undefined(pc, insn),
+            },
             SysRegError::Trap(route) => Err(Self::sysreg_trap(key, rt, read, route)),
             SysRegError::FpTrap(route) => Err(self.fp_trap(route)),
             SysRegError::SmeTrap(route) => Err(self.sme_trap(SmeTrap::AccessTrap, route)),
@@ -473,6 +489,27 @@ impl<L: Levels> Cpu<L> {
                 }
                 Ok(Flow::Next)
             }
+        }
+    }
+
+    /// The GIC CPU interface's register an `MRS` (`read`) or `MSR` by `key`
+    /// reaches, at the current EL, if the processor has the interface: none
+    /// at EL0, where every `ICC_*` register is UNDEFINED (AARCHMRS
+    /// `Registers.json`, each `ICC_*_EL1` accessor), and at EL1 the
+    /// register the encoding names in that direction ([`GicCpuInterface`]).
+    /// The processor's own register decode finds these encodings
+    /// UNDEFINED, so the check is made only on that cold path.
+    ///
+    /// [`GicCpuInterface`]: super::GicCpuInterface
+    fn gic_register(&self, key: SysRegKey, read: bool) -> Option<IccRegister> {
+        let dir = if read {
+            Direction::Read
+        } else {
+            Direction::Write
+        };
+        match self.pstate.el {
+            El::El0 => None,
+            El::El1 | El::El2 => self.imp.gic.register(key, dir),
         }
     }
 

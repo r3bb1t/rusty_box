@@ -379,6 +379,99 @@ pub enum DescriptorSwap {
     Changed,
 }
 
+/// Which of a group's active priority registers an `ICC_AP0R<n>_EL1` or
+/// `ICC_AP1R<n>_EL1` names: `n` is 0 to 3 (IHI 0069G 12.2.1, 12.2.2).
+///
+/// Closed (R5): the four the encoding's `op2<1:0>` can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ApIndex {
+    Zero,
+    One,
+    Two,
+    Three,
+}
+
+impl ApIndex {
+    /// Every index, in order.
+    pub const ALL: [Self; 4] = [Self::Zero, Self::One, Self::Two, Self::Three];
+
+    /// `n`.
+    pub const fn get(self) -> usize {
+        match self {
+            Self::Zero => 0,
+            Self::One => 1,
+            Self::Two => 2,
+            Self::Three => 3,
+        }
+    }
+
+    /// The index the two bits `n` name.
+    pub const fn of(n: u32) -> Self {
+        match n & 3 {
+            0 => Self::Zero,
+            1 => Self::One,
+            2 => Self::Two,
+            _ => Self::Three,
+        }
+    }
+}
+
+/// One of the GIC CPU interface's System registers of EL1 (`ICC_*_EL1`,
+/// IHI 0069G 12.2), which the board's GIC holds: what an `MRS` or `MSR` of
+/// a processor with FEAT_GICv3 reaches through its bus
+/// ([`PhysBus::gic_register_read`], [`PhysBus::gic_register_write`]).
+///
+/// Closed (R5): the registers a processor with no EL2 and no EL3 has, of a
+/// GICv3 without FEAT_GICv3_NMI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IccRegister {
+    /// `ICC_PMR_EL1`, the priority mask.
+    Pmr,
+    /// `ICC_IAR0_EL1`, which acknowledges a Group 0 interrupt.
+    Iar0,
+    /// `ICC_EOIR0_EL1`, a Group 0 interrupt's end.
+    Eoir0,
+    /// `ICC_HPPIR0_EL1`, the highest pending Group 0 interrupt.
+    Hppir0,
+    /// `ICC_BPR0_EL1`, Group 0's binary point.
+    Bpr0,
+    /// `ICC_AP0R<n>_EL1`, Group 0's active priorities.
+    Ap0r(ApIndex),
+    /// `ICC_AP1R<n>_EL1`, Group 1's active priorities.
+    Ap1r(ApIndex),
+    /// `ICC_DIR_EL1`, which deactivates an interrupt.
+    Dir,
+    /// `ICC_RPR_EL1`, the running priority.
+    Rpr,
+    /// `ICC_SGI1R_EL1`, which generates an SGI.
+    Sgi1r,
+    /// `ICC_ASGI1R_EL1`, which generates an SGI of the other group.
+    Asgi1r,
+    /// `ICC_SGI0R_EL1`, which generates a Group 0 SGI.
+    Sgi0r,
+    /// `ICC_IAR1_EL1`, which acknowledges a Group 1 interrupt.
+    Iar1,
+    /// `ICC_EOIR1_EL1`, a Group 1 interrupt's end.
+    Eoir1,
+    /// `ICC_HPPIR1_EL1`, the highest pending Group 1 interrupt.
+    Hppir1,
+    /// `ICC_BPR1_EL1`, Group 1's binary point.
+    Bpr1,
+    /// `ICC_CTLR_EL1`, the CPU interface's control.
+    Ctlr,
+    /// `ICC_SRE_EL1`, the System register enable.
+    Sre,
+    /// `ICC_IGRPEN0_EL1`, Group 0's enable.
+    Igrpen0,
+    /// `ICC_IGRPEN1_EL1`, Group 1's enable.
+    Igrpen1,
+}
+
+/// A bus with no GIC whose CPU interface has System registers: an access to
+/// one of them there is UNDEFINED.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NoGicSystemRegisters;
+
 /// The guest-physical address space as the processor sees it.
 ///
 /// Static dispatch only (R8): a machine names its bus type. `clock` is the
@@ -457,6 +550,35 @@ pub trait PhysBus {
     #[inline]
     fn devices_touched(&self) -> bool {
         true
+    }
+
+    /// An `MRS` of the GIC CPU interface's System register `reg`, which
+    /// the access's checks let through: its value, with the read's side
+    /// effect (an acknowledge). The default is a bus with no such GIC.
+    ///
+    /// # Errors
+    ///
+    /// [`NoGicSystemRegisters`] where the bus has no GIC with a System
+    /// register interface.
+    #[inline]
+    fn gic_register_read(&mut self, _reg: IccRegister) -> Result<u64, NoGicSystemRegisters> {
+        Err(NoGicSystemRegisters)
+    }
+
+    /// An `MSR` of `value` to the GIC CPU interface's System register
+    /// `reg`, as [`PhysBus::gic_register_read`] reads.
+    ///
+    /// # Errors
+    ///
+    /// [`NoGicSystemRegisters`] where the bus has no GIC with a System
+    /// register interface.
+    #[inline]
+    fn gic_register_write(
+        &mut self,
+        _reg: IccRegister,
+        _value: u64,
+    ) -> Result<(), NoGicSystemRegisters> {
+        Err(NoGicSystemRegisters)
     }
 }
 

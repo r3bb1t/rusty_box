@@ -25,10 +25,12 @@ use super::id::{self, Caches};
 use super::impdef::ImpdefSpace;
 use super::pmu::PmuShape;
 use crate::bus::PhysAddr;
+use crate::devices::gicv2::PriorityBits;
 use crate::layout::DeviceLayout;
 use rusty_box_core::ClockHz;
 
 use super::el2::Levels;
+use super::gic::GicCpuInterface;
 use core::marker::PhantomData;
 
 /// An architectural feature, by the Arm ARM's `FEAT_` name; the instruction
@@ -985,6 +987,10 @@ pub(crate) struct Implementation {
     pub(crate) pmu: PmuShape,
     /// The IMPLEMENTATION DEFINED registers, with the inputs they report.
     pub(crate) impdef: ImpdefSpace,
+    /// The System register interface to the board's GIC CPU interface
+    /// (FEAT_GICv3), which `ID_AA64PFR0_EL1.GIC` reports: none until a
+    /// board with a GICv3 gives it one ([`Implementation::with_gic`]).
+    pub(crate) gic: GicCpuInterface,
 }
 
 impl Implementation {
@@ -1004,6 +1010,7 @@ impl Implementation {
         impdef: ImpdefSpace::CortexA57 {
             periphbase: DeviceLayout::DEFAULT.windows().gic.periphbase,
         },
+        gic: GicCpuInterface::Absent,
     };
 
     /// This implementation with its PERIPHBASE input tied to `periphbase`,
@@ -1014,6 +1021,12 @@ impl Implementation {
             impdef: self.impdef.with_periphbase(periphbase),
             ..self
         }
+    }
+
+    /// This implementation with `gic` its System register interface to the
+    /// board's GIC CPU interface: the board's GIC decides it.
+    pub(crate) const fn with_gic(self, gic: GicCpuInterface) -> Self {
+        Self { gic, ..self }
     }
 
     /// This implementation with its system counter at `rate`, which the
@@ -1040,6 +1053,7 @@ impl Implementation {
         debug: DebugPoints::ARMV9P2,
         pmu: PmuShape::ARMV9P2,
         impdef: ImpdefSpace::Empty,
+        gic: GicCpuInterface::Absent,
     };
 
     /// This implementation as a processor of the level set `L` has it, with
@@ -1306,6 +1320,18 @@ impl CpuModel {
             .with_levels::<L>()
             .get()
             .has(Feature::Vhe)
+    }
+
+    /// The priority bits of the GIC CPU interface the processor implements
+    /// itself, if its documentation fixes them: the Cortex-A57's five
+    /// (DDI 0488H Table 8-13, `PRIbits` 0b100, which `ICH_VTR_EL2` and the
+    /// CPU interface share). The Armv9.2 model, a software model, takes
+    /// the board's GIC's.
+    pub(crate) const fn gic_cpu_interface_bits(self) -> Option<PriorityBits> {
+        match self {
+            Self::CortexA57 => Some(PriorityBits::Five),
+            Self::Armv9p2 => None,
+        }
     }
 
     pub(crate) const fn implementation(self) -> Implementation {

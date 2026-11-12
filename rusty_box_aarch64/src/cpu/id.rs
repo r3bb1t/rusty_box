@@ -26,8 +26,10 @@
 //! decoder reads too.
 //!
 //! The Cortex-A57's ID registers read its TRM's values (DDI 0488H, Table
-//! 4-1 and 4.3.18 to 4.3.21, with the Cryptography engine and
-//! `GICCDISABLE` HIGH) in every field whose feature the model has:
+//! 4-1 and 4.3.18 to 4.3.21, with the Cryptography engine, and
+//! `GICCDISABLE` HIGH on a board with a GICv2 and LOW on one with a GICv3,
+//! whose CPU interface is the core's) in every field whose feature the
+//! model has:
 //! `ID_AA64ISAR0_EL1` 0x11120, `ID_AA64MMFR0_EL1`'s `PARange`, `ASIDBits`
 //! and granules, `ID_AA64PFR0_EL1`'s FP, AdvSIMD and GIC fields,
 //! `ID_AA64DFR0_EL1`'s `DebugVer`, `TraceVer`, `PMUVer` (PMUv3), `BRPs`,
@@ -81,8 +83,9 @@ pub(crate) const AIDR_EL1: u64 = 0;
 /// EL1 = 1 (AArch64 only), EL2 (11:8) = 1 with FEAT_EL2 (AArch64 only) and
 /// 0 without, EL3 = 0 (not implemented), FP (19:16) and
 /// AdvSIMD (23:20) 1 with FEAT_FP16 (half-precision arithmetic) and 0
-/// without, GIC = 0 (no system-register interface: the GIC is a
-/// memory-mapped v2), RAS (31:28) = 1 with FEAT_RAS and 2 with FEAT_RASv1p1
+/// without, GIC (27:24) = 0, the board's GIC deciding it (a GICv3 gives
+/// the processor its System register interface, whose 1 the processor's
+/// `GicCpuInterface` ORs in), RAS (31:28) = 1 with FEAT_RAS and 2 with FEAT_RASv1p1
 /// as well (which `Features.json` makes imply FEAT_RAS; with no EL3, 2
 /// promises no FEAT_DoubleFault), DIT (51:48) = 1 with FEAT_DIT, CSV2
 /// (59:56) = 1 with FEAT_CSV2 (2 would be FEAT_CSV2_2, which has the

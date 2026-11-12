@@ -109,7 +109,9 @@ impl std::fmt::Display for MachineKind {
 /// ([`VirtInterruptsToml`]); `transport_order` which free virtio transport
 /// each device takes (`"first-free"`, the default, or `"last-free"`);
 /// `layout` where the devices sit (`"board"`, the board's own, the default,
-/// or `"qemu-virt"`, QEMU `virt`'s, which a tree QEMU wrote names).
+/// or `"qemu-virt"`, QEMU `virt`'s, which a tree QEMU wrote names); `gic`
+/// which GIC the board has (`"v2"`, the default, or `"v3"`, whose processor
+/// cannot have EL2 yet).
 /// It boots UEFI firmware from flash (`firmware`, or the EDK2 built into
 /// the front end with `builtin_firmware = true`, either with
 /// `firmware_vars` for its variable store) or a Linux kernel directly
@@ -140,6 +142,7 @@ pub struct VirtToml {
     pub spectre: Option<NamedToml<rusty_box_aarch64::SpectreReport>>,
     pub transport_order: Option<NamedToml<rusty_box_aarch64::TransportOrder>>,
     pub layout: Option<NamedToml<rusty_box_aarch64::DeviceLayout>>,
+    pub gic: Option<NamedToml<rusty_box_aarch64::GicVersion>>,
     pub counter_hz: Option<NumberToml<rusty_box_aarch64::CounterRate>>,
     pub gic_spis: Option<NumberToml<rusty_box_aarch64::SpiCount>>,
     pub gic_priority_bits: Option<NumberToml<rusty_box_aarch64::PriorityBits>>,
@@ -858,6 +861,8 @@ pub struct ArmVirtConfig {
     pub counter: rusty_box_aarch64::CounterRate,
     /// The GIC's SPIs and priority bits.
     pub gic: rusty_box_aarch64::GicShape,
+    /// Which GIC the board has.
+    pub gic_version: rusty_box_aarch64::GicVersion,
     /// The SPIs the devices drive and the GICv2m frame's, which fit the GIC
     /// ([`virt_interrupt_map`]).
     pub interrupts: rusty_box_aarch64::InterruptMap,
@@ -1075,6 +1080,7 @@ impl ArmVirtConfig {
             spectre: rusty_box_aarch64::SpectreReport::DEFAULT,
             counter: rusty_box_aarch64::CounterRate::DEFAULT,
             gic: rusty_box_aarch64::GicShape::DEFAULT,
+            gic_version: rusty_box_aarch64::GicVersion::DEFAULT,
             interrupts: rusty_box_aarch64::InterruptMap::DEFAULT,
             transport_order: rusty_box_aarch64::TransportOrder::DEFAULT,
             layout: rusty_box_aarch64::DeviceLayout::DEFAULT,
@@ -1323,6 +1329,9 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
             .map_or(rusty_box_aarch64::SpectreReport::DEFAULT, |report| report.0),
         counter,
         gic,
+        gic_version: virt
+            .gic
+            .map_or(rusty_box_aarch64::GicVersion::DEFAULT, |version| version.0),
         interrupts,
         transport_order: virt
             .transport_order
@@ -1624,6 +1633,7 @@ impl ArmVirtConfig {
             spectre: Some(NamedToml(self.spectre)),
             transport_order: Some(NamedToml(self.transport_order)),
             layout: Some(NamedToml(self.layout)),
+            gic: Some(NamedToml(self.gic_version)),
             counter_hz: Some(NumberToml(self.counter)),
             gic_spis: Some(NumberToml(self.gic.spis)),
             gic_priority_bits: Some(NumberToml(self.gic.priority_bits)),
@@ -3469,6 +3479,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             .cycle();
         let mut orders = rusty_box_aarch64::TransportOrder::ALL.into_iter().cycle();
         let mut layouts = rusty_box_aarch64::DeviceLayout::ALL.into_iter().cycle();
+        let mut gic_versions = rusty_box_aarch64::GicVersion::ALL.into_iter().cycle();
         let disks = [
             None,
             Some(VirtDisk {
@@ -3499,6 +3510,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
                         spis: rusty_box_aarch64::SpiCount::new(96).expect("a count both maps fit"),
                         priority_bits: priority_bits.next().unwrap_or_default(),
                     },
+                    gic_version: gic_versions.next().unwrap_or_default(),
                     interrupts: maps.next().unwrap_or_default(),
                     boot,
                     display: Some(VirtioDisplaySize {
@@ -3704,6 +3716,35 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             .to_string();
         assert!(
             refused.contains("\"middle\"") && refused.contains("\"first-free\""),
+            "{refused}"
+        );
+    }
+
+    /// `virt.gic` is read by its versions' names, `"v2"` when it is left
+    /// out; one no version has is refused when the file is read, naming
+    /// the versions there are.
+    #[test]
+    fn virt_gic_takes_a_version_by_name_and_refuses_others() {
+        let board = |gic: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\ngic = \"{gic}\"\n");
+        for version in rusty_box_aarch64::GicVersion::ALL {
+            let file: FileConfig = toml::from_str(&board(version.name())).unwrap();
+            let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+            assert_eq!(
+                resolved.arm_virt().map(|virt| virt.gic_version),
+                Some(version)
+            );
+        }
+        let file: FileConfig = toml::from_str("[vm]\nmachine = \"arm-virt\"\n").unwrap();
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+        assert_eq!(
+            resolved.arm_virt().map(|virt| virt.gic_version),
+            Some(rusty_box_aarch64::GicVersion::V2)
+        );
+        let refused = toml::from_str::<FileConfig>(&board("v4"))
+            .expect_err("no version is named so")
+            .to_string();
+        assert!(
+            refused.contains("\"v4\"") && refused.contains("\"v3\""),
             "{refused}"
         );
     }

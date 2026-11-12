@@ -45,10 +45,11 @@ use super::pauth::PacKeys;
 use super::pmu::Pmu;
 use super::wait::EventRegister;
 use super::{
-    id, sme, Activity, Cpu, CpuConfig, El, ExclusiveMonitor, Levels, NoEl2, Pstate, Step, SysRegs,
-    WithEl2,
+    id, sme, Activity, Cpu, CpuConfig, El, ExclusiveMonitor, GicCpuInterface, Levels, NoEl2,
+    Pstate, Step, SysRegs, WithEl2,
 };
-use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
+use crate::bus::{AccessWidth, BusFault, IccRegister, NoGicSystemRegisters, PhysAddr, PhysBus};
+use crate::devices::gicv2::PriorityBits;
 use crate::instrumentation::NoInstrumentation;
 
 /// The environment variable naming the unpacked AARCHMRS directory.
@@ -756,6 +757,9 @@ impl Eval<'_> {
             // `(FEAT_VHE && FEAT_AA64EL1) ==> (FEAT_E2H0 <=>
             // SInt(ID_AA64MMFR4_EL1.E2H0) >= 0)`).
             "FEAT_E2H0" => self.feature("FEAT_VHE"),
+            // `ID_AA64PFR0_EL1.GIC` 1, the processor's interface to a
+            // GICv3's CPU interface, which its board gives it.
+            "FEAT_GICv3" => self.imp.gic != GicCpuInterface::Absent,
             _ => Feature::ALL
                 .into_iter()
                 .find(|f| f.arm_name() == Some(name))
@@ -990,6 +994,13 @@ impl Eval<'_> {
             // count.
             "NUM_BREAKPOINTS" => V::Int(i128::from((self.dfr0() >> 12) & 0xF) + 1),
             "NUM_WATCHPOINTS" => V::Int(i128::from((self.dfr0() >> 20) & 0xF) + 1),
+            // `ICC_CTLR_EL1.PRIbits` plus one, of a processor with the GIC
+            // CPU interface's System registers; the accessors read it only
+            // past their FEAT_GICv3 check.
+            "NUM_GIC_PRIORITY_BITS" => match self.imp.gic {
+                GicCpuInterface::SystemRegisters(bits) => V::Int(i128::from(bits.count())),
+                GicCpuInterface::Absent => V::Open,
+            },
             _ => {
                 if let Some((_, v)) = self.vars.iter().find(|(n, _)| *n == name) {
                     return V::Int(*v);
@@ -1303,6 +1314,21 @@ impl PhysBus for Ram {
         for (i, b) in bytes.iter_mut().enumerate() {
             *b = (value >> (8 * i)) as u8;
         }
+        Ok(())
+    }
+
+    /// A GICv3's CPU interface as the board's has it, System registers
+    /// only: `ICC_SRE_EL1` reads `SRE`, `DFB` and `DIB` set, which the
+    /// accessors read; every other register reads zero.
+    fn gic_register_read(&mut self, reg: IccRegister) -> Result<u64, NoGicSystemRegisters> {
+        Ok(if reg == IccRegister::Sre { 0b111 } else { 0 })
+    }
+
+    fn gic_register_write(
+        &mut self,
+        _reg: IccRegister,
+        _value: u64,
+    ) -> Result<(), NoGicSystemRegisters> {
         Ok(())
     }
 }
@@ -1921,8 +1947,12 @@ struct Mismatch {
 
 /// The processors without EL2, each implementation with the features of
 /// that level set, which [`Eval`] reads. The Armv9.2 model lacks
-/// FEAT_DoubleLock, which every other has.
-const WITHOUT_EL2: [(&str, LeveledImplementation<NoEl2>); 3] = [
+/// FEAT_DoubleLock, which every other has. Each model is here a second
+/// time with the System register interface to a GICv3's CPU interface
+/// (FEAT_GICv3), as a board with a GICv3 builds it: the Cortex-A57's of
+/// its five priority bits, the Armv9.2 model's of eight, every active
+/// priority register its own.
+const WITHOUT_EL2: [(&str, LeveledImplementation<NoEl2>); 5] = [
     (
         "Cortex-A57",
         Implementation::CORTEX_A57.with_levels::<NoEl2>(),
@@ -1931,6 +1961,18 @@ const WITHOUT_EL2: [(&str, LeveledImplementation<NoEl2>); 3] = [
     (
         "every feature",
         Implementation::EVERY_FEATURE.with_levels::<NoEl2>(),
+    ),
+    (
+        "Cortex-A57 with a GICv3",
+        Implementation::CORTEX_A57
+            .with_gic(GicCpuInterface::SystemRegisters(PriorityBits::Five))
+            .with_levels::<NoEl2>(),
+    ),
+    (
+        "Armv9.2 with a GICv3",
+        Implementation::ARMV9P2
+            .with_gic(GicCpuInterface::SystemRegisters(PriorityBits::Eight))
+            .with_levels::<NoEl2>(),
     ),
 ];
 

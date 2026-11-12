@@ -17,7 +17,8 @@
 //! binding's; the board's GIC has no Security Extensions, which every
 //! product the binding names otherwise has, and this one is the string
 //! EDK2's GIC discovery looks for, `ArmVirtGicPlatformDxe` on its master
-//! branch and `ArmVirtGicArchLib` in releases before it),
+//! branch and `ArmVirtGicArchLib` in releases before it), or on a board
+//! with a GICv3 `arm,gic-v3`,
 //! `arm,gic-v2m-frame`,
 //! `arm,armv8-timer`, `arm,psci-1.0` and `arm,psci-0.2`
 //! ([`PSCI_COMPATIBLE`]),
@@ -44,6 +45,7 @@
 //! given none gathers its own.
 
 use super::fdt::{DeviceTreeError, Header, Out, FDT_BEGIN_NODE, FDT_END, FDT_END_NODE, HEADER_LEN};
+use crate::board::GicVersion;
 use crate::board::{
     FLASH0_BASE, FLASH1_BASE, FLASH_BANK_SIZE, PPI_HYPERVISOR_TIMER, PPI_HYPERVISOR_VIRTUAL_TIMER,
     PPI_PHYSICAL_TIMER, PPI_PMU, PPI_SECURE_PHYSICAL_TIMER, PPI_VIRTUAL_TIMER, RAM_BASE,
@@ -53,9 +55,9 @@ use crate::bus::PhysAddr;
 use crate::cpu::{PsciConduit, PSCI_COMPATIBLE};
 use crate::devices::gicv2::GicExtensions;
 use crate::devices::gicv2_virt::MAINTENANCE_INTID;
-use crate::layout::{DeviceLayout, DeviceWindows, GicWindows, Window};
 use crate::identity::BoardIdentity;
 use crate::interrupt_map::{Spi, Wiring};
+use crate::layout::{DeviceLayout, DeviceWindows, GicV3Windows, GicWindows, Window};
 use crate::CpuModel;
 
 /// An empty memory reservation block, its terminating entry alone (5.3),
@@ -127,6 +129,9 @@ pub(crate) struct BoardTree<'a> {
     pub(crate) ram_len: u64,
     pub(crate) cpu: CpuModel,
     pub(crate) psci: PsciConduit,
+    /// Which GIC the board has.
+    pub(crate) gic_version: GicVersion,
+    /// A GICv2's extensions.
     pub(crate) gic: GicExtensions,
     pub(crate) el2_timers: El2Timers,
     pub(crate) chosen: Chosen<'a>,
@@ -443,7 +448,7 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
         PPI_HYPERVISOR_TIMER,
         PPI_HYPERVISOR_VIRTUAL_TIMER,
     ]
-    .map(|intid| [GIC_PPI, intid - 16, PPI_ONE_PROCESSOR | IRQ_LEVEL_HIGH]);
+    .map(|intid| ppi(tree.gic_version, intid));
     let named = match tree.el2_timers {
         El2Timers::Physical => &interrupts[..4],
         El2Timers::PhysicalAndVirtual => &interrupts[..],
@@ -455,13 +460,13 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     // The PMU binding's: the processor's own compatible, and PMUIRQ, a PPI.
     w.begin("pmu")?;
     w.string("compatible", tree.cpu.pmu_compatible())?;
-    w.cells(
-        "interrupts",
-        &[GIC_PPI, PPI_PMU - 16, PPI_ONE_PROCESSOR | IRQ_LEVEL_HIGH],
-    )?;
+    w.cells("interrupts", &ppi(tree.gic_version, PPI_PMU))?;
     w.end()?;
 
-    gic(&mut w, tree.gic, windows.gic)?;
+    match tree.gic_version {
+        GicVersion::V2 => gic(&mut w, tree.gic, windows.gic)?,
+        GicVersion::V3 => gic_v3(&mut w, windows.gic_v3, windows.gic)?,
+    }
 
     w.begin("clock")?;
     w.string("compatible", "fixed-clock")?;
@@ -638,13 +643,50 @@ fn gic(
         }
     }
     w.cell("phandle", PHANDLE_GIC)?;
+    msi_frame(w, gic)?;
+    w.end()
+}
+
+/// A GICv3 (the `arm,gic-v3` binding): its distributor's frame and its one
+/// Redistributor region (`#redistributor-regions` 1), and the GICv2m MSI
+/// frame. No `GICC`, `GICH` or `GICV` frame: its CPU interface has no
+/// memory-mapped form, and its processor no EL2, so no maintenance
+/// interrupt either.
+fn gic_v3(w: &mut Writer<'_>, gic: GicV3Windows, v2: GicWindows) -> Result<(), DeviceTreeError> {
+    w.begin_at("interrupt-controller", gic.dist.get())?;
+    w.string("compatible", "arm,gic-v3")?;
+    w.flag("interrupt-controller")?;
+    w.cell("#interrupt-cells", 3)?;
+    w.cell("#address-cells", 2)?;
+    w.cell("#size-cells", 2)?;
+    w.flag("ranges")?;
+    w.cell("#redistributor-regions", 1)?;
+    w.windows("reg", &[gic.dist_window(), gic.redist_window()])?;
+    w.cell("phandle", PHANDLE_GIC)?;
+    msi_frame(w, v2)?;
+    w.end()
+}
+
+/// The GIC's GICv2m MSI frame, a child of its node.
+fn msi_frame(w: &mut Writer<'_>, gic: GicWindows) -> Result<(), DeviceTreeError> {
     w.begin_at("msi-controller", gic.v2m.get())?;
     w.string("compatible", "arm,gic-v2m-frame")?;
     w.flag("msi-controller")?;
     w.window("reg", gic.v2m_window())?;
     w.cell("phandle", PHANDLE_MSI)?;
-    w.end()?;
     w.end()
+}
+
+/// A private peripheral interrupt's specifier, level-high: for a GICv2 the
+/// GICv2 binding's, its flags ORed with the mask of the processors the PPI
+/// reaches (the one processor here); for a GICv3 the `arm,gic-v3`
+/// binding's, whose flags are the trigger type alone (bits [3:0]).
+const fn ppi(version: GicVersion, intid: u32) -> [u32; 3] {
+    let flags = match version {
+        GicVersion::V2 => PPI_ONE_PROCESSOR | IRQ_LEVEL_HIGH,
+        GicVersion::V3 => IRQ_LEVEL_HIGH,
+    };
+    [GIC_PPI, intid - 16, flags]
 }
 
 /// The PCIe host bridge (`pci-host-ecam-generic`, and the PCI bus binding

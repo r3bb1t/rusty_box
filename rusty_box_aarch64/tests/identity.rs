@@ -1,6 +1,7 @@
 //! What a guest reads of who made its machine (R9: each test asserts what
 //! the guest sees): the device tree's `/model` and root `compatible`, the
-//! virtio-mmio `VendorID`, the GIC's `GICD_IIDR`, `GICC_IIDR` and `GICV_IIDR`, the
+//! virtio-mmio `VendorID`, the GIC's `GICD_IIDR`, `GICC_IIDR` and `GICV_IIDR`
+//! (a GICv3's `GICD_IIDR`, `GICR_IIDR` and peripheral IDs), the
 //! GICv2m frame's `MSI_IIDR`, the flash's manufacturer and device codes,
 //! and the input
 //! devices' names, vendor, products and versions are the board's
@@ -18,11 +19,12 @@ use rusty_box_aarch64::board::{
 use rusty_box_aarch64::boot::fdt;
 use rusty_box_aarch64::{
     BoardIdentity, EdidDate, EdidWeek, EdidWeekNumber, EdidYear, FlashDeviceCode, FlashIdentity,
-    FlashManufacturer, GicCpuIidr, GicDistFields, GicDistIidr, GicIdentity, IdentityError,
-    IdentityField, IdentityNames, IdentityProblem, IidrField, IidrFields, InputDeviceId,
-    InputProductId, InputVendorId, InputVersion, LentStorage, Levels, MachineBuilder, MemoryLoan,
-    MsiFrameIidr, NoEl2, NotAnEdidWeek, NotAnEdidYear, NotIidrFields, NotJep106Number, NotPnpId,
-    PnpId, RamSize, Reg, RunBudget, StopReason, VirtConfig, VirtMachine, VirtioVendorId,
+    FlashManufacturer, GicCpuIidr, GicDistFields, GicDistIidr, GicIdentity, GicVersion,
+    IdentityError, IdentityField, IdentityNames, IdentityProblem, IidrField, IidrFields,
+    InputDeviceId, InputProductId, InputVendorId, InputVersion, LentStorage, Levels,
+    MachineBuilder, MemoryLoan, MsiFrameIidr, NoEl2, NotAnEdidWeek, NotAnEdidYear, NotIidrFields,
+    NotJep106Number, NotPnpId, PnpId, RamSize, Reg, RunBudget, StopReason, VirtConfig, VirtMachine,
+    VirtioVendorId,
 };
 
 const RAM_LEN: usize = 4 << 20;
@@ -341,6 +343,62 @@ fn the_gic_reads_the_identitys_iidrs() {
             field: IidrField::Variant
         })
     );
+}
+
+/// A GICv3's identification registers are the identity's too: its
+/// distributor's `GICD_IIDR` and its Redistributor's `GICR_IIDR` read the
+/// identity's `GICD_IIDR` (IHI 0069G 12.9.21, 12.11.16), and their
+/// `GICD_PIDR2` and `GICR_PIDR2` name its implementer in the CoreSight
+/// scheme beside `ArchRev` 3 (12.1.13) — by default no implementer, where
+/// QEMU's name Arm; and its GICv2m frame's `MSI_IIDR` is the identity's.
+#[test]
+fn a_gicv3_reads_the_identitys_iidrs() {
+    let distributor = GicDistIidr::new(GicDistFields {
+        product: 0xAB,
+        variant: 0x3,
+        revision: 0x4,
+        jep106_continuation: 0x6,
+        jep106_identity: 0x78,
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    let hosts = BoardIdentity::new(IdentityNames {
+        gic: GicIdentity {
+            distributor,
+            ..GicIdentity::NONE
+        },
+        ..IdentityNames::RUSTY_BOX
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    let v3 = VirtConfig {
+        gic_version: GicVersion::V3,
+        ..VirtConfig::DEFAULT
+    };
+    let windows = v3.layout.windows();
+    let gicd = windows.gic_v3.dist.get();
+    let gicr = windows.gic_v3.redist.get();
+    // PIDR2: ArchRev 3 in [7:4], the JEDEC bit [3] and DES_1, the identity
+    // code's bits [6:4], in [2:0]; PIDR0 the part, the product.
+    for (identity, iidr, pidr2, pidr0) in [
+        (BoardIdentity::RUSTY_BOX, 0, 0x30, 0),
+        (hosts, 0xAB03_4678, 0x3F, 0xAB),
+    ] {
+        let mut ram = vec![0u8; RAM_LEN];
+        let mut m = MachineBuilder::new(v3)
+            .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
+            .identity(identity)
+            .bare()
+            .build_in(MemoryLoan {
+                ram: &mut ram,
+                vars: &mut [],
+            })
+            .expect("a bare machine builds");
+        assert_eq!(guest_load(&mut m, gicd + 0x008), iidr, "GICD_IIDR");
+        assert_eq!(guest_load(&mut m, gicr + 0x004), iidr, "GICR_IIDR");
+        assert_eq!(guest_load(&mut m, gicd + 0xFFE8), pidr2, "GICD_PIDR2");
+        assert_eq!(guest_load(&mut m, gicr + 0xFFE8), pidr2, "GICR_PIDR2");
+        assert_eq!(guest_load(&mut m, gicd + 0xFFE0), pidr0, "GICD_PIDR0");
+        assert_eq!(guest_load(&mut m, GIC_V2M_BASE + MSI_IIDR), 0, "MSI_IIDR");
+    }
 }
 
 /// `str w3, [x1, #8]; ldr w2, [x1]; ldr w4, [x1, #4]; ldr w5, [x1, #8];
