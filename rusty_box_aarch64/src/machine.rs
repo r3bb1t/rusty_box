@@ -40,10 +40,9 @@ use crate::boot::{
 };
 use crate::bus::{load_le, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
 use crate::cpu::{
-    Activity, CounterRate, Cpu, CpuConfig, CpuModel, CpuState, DebugStops, El2Unavailable,
-    FixedCounterRate, Levels, NoEl2,
-    NoTranslation, PsciConduit, Pstate, PstateRefusal, Reg, SpectreReport, Step, StopCause, SysReg,
-    PSCI_COMPATIBLE, SysRegRefusal, UndefinedInsn, VReg, WithEl2, WriteEffect,
+    Activity, CounterRate, Cpu, CpuConfig, CpuModel, CpuState, DebugStops, FixedCounterRate,
+    Levels, NoEl2, NoTranslation, PsciConduit, Pstate, PstateRefusal, Reg, SpectreReport, Step,
+    StopCause, SysReg, SysRegRefusal, UndefinedInsn, VReg, WithEl2, WriteEffect, PSCI_COMPATIBLE,
 };
 use crate::devices::gicv2::{GicExtensions, GicShape};
 use crate::devices::pl011::TX_CAPACITY;
@@ -200,10 +199,6 @@ pub enum BuildError {
     DeviceTree(DeviceTreeError),
     /// The kernel, initrd or device tree does not fit in RAM.
     Placement(PlacementError),
-    /// The builder asked for EL2 ([`MachineBuilder::with_el2`]) with a
-    /// processor model that cannot have it yet
-    /// ([`CpuModel::el2_available`]).
-    El2Unavailable(El2Unavailable),
     /// The configuration asked for a counter rate the processor model
     /// cannot count at ([`CpuModel::counter_rate_fixed`]).
     FixedCounterRate(FixedCounterRate),
@@ -300,7 +295,6 @@ impl core::fmt::Display for BuildError {
             }
             Self::DeviceTree(e) => write!(f, "device tree: {e}"),
             Self::Placement(e) => write!(f, "{e}"),
-            Self::El2Unavailable(e) => write!(f, "{e}"),
             Self::FixedCounterRate(e) => write!(f, "{e}"),
             Self::InterruptMap(e) => write!(f, "interrupt map: {e}"),
             Self::HostTreeInterrupt(e) => write!(f, "{e}"),
@@ -315,7 +309,6 @@ impl core::error::Error for BuildError {
         match self {
             Self::DeviceTree(e) => Some(e),
             Self::Placement(e) => Some(e),
-            Self::El2Unavailable(e) => Some(e),
             Self::FixedCounterRate(e) => Some(e),
             Self::InterruptMap(e) => Some(e),
             Self::HostTreeInterrupt(e) => Some(e),
@@ -443,10 +436,10 @@ impl<'i, B, I> MachineBuilder<'i, B, NoEl2, I> {
     /// (QEMU `-M virt,virtualization=on`): it starts there (Arm
     /// `AArch64_TakeReset` starts at the highest implemented level, and there
     /// is no EL3), `HVC` belongs to the guest's hypervisor, and PSCI is
-    /// called with `SMC`, as the device tree's `/psci` `method` says. Only a
-    /// model that can have EL2 ([`CpuModel::el2_available`]) builds with it;
-    /// for any other the build is refused with
-    /// [`BuildError::El2Unavailable`].
+    /// called with `SMC`, as the device tree's `/psci` `method` says. Every
+    /// processor model has EL2 so asked: the Cortex-A57 as QEMU's
+    /// `cortex-a57` has it, the Armv9.2 model with FEAT_VHE and the other
+    /// EL2 features Arm requires of an Armv9.2 processor with EL2.
     pub fn with_el2(self) -> MachineBuilder<'i, B, WithEl2, I> {
         MachineBuilder {
             config: self.config,
@@ -1496,8 +1489,6 @@ fn plan<L: Levels>(
     identity: &BoardIdentity,
 ) -> Result<Plan, BuildError> {
     let cpu = config.cpu;
-    cpu.check_levels::<L>()
-        .map_err(BuildError::El2Unavailable)?;
     cpu.check_counter_rate(config.counter)
         .map_err(BuildError::FixedCounterRate)?;
     let wiring = config
@@ -1562,8 +1553,8 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
         device_tree,
         wiring,
     } = plan;
-    // The plan checked the model's levels (`CpuModel::check_levels`) and
-    // counter rate (`CpuModel::check_counter_rate`). The processor's
+    // The plan checked the model's counter rate
+    // (`CpuModel::check_counter_rate`). The processor's
     // PERIPHBASE input is tied to where the layout has the GIC.
     let mut cpu = Cpu::<L>::implementing(
         CpuConfig {

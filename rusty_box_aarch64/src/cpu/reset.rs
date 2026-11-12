@@ -242,6 +242,8 @@ impl<L: super::Levels> super::Cpu<L> {
                 &mut r.tpidr,
                 &mut r.cnthp_cval,
                 &mut r.contextidr,
+                &mut r.ttbr1,
+                &mut r.cnthv_cval,
             ] {
                 *value = 0;
             }

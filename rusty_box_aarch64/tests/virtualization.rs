@@ -8,19 +8,20 @@
 //! (the GIC's virtual interface is there only with the extensions), a
 //! snapshot keeps the EL2
 //! state and is refused by a machine
-//! built without the extensions, and a processor model that cannot have EL2
-//! yet is refused it.
+//! built without the extensions, and every processor model has EL2 when
+//! asked: the Armv9.2 model's with the EL2 features Arm requires of it in
+//! its ID registers and device tree, a guest under its stage 2 and
+//! fine-grained traps, and without virtualization the model unchanged.
 //!
 //! Guest code is GNU as's for aarch64 (`-march=armv8.2-a`), linked at the
 //! base of RAM; each snippet's source is beside its words.
 
 use rusty_box_aarch64::board::{FLASH0_BASE, RAM_BASE};
 use rusty_box_aarch64::boot::{fdt, LinuxImage};
-use rusty_box_aarch64::machine::BuildError;
 use rusty_box_aarch64::{
-    Cpu, CpuConfig, CpuModel, El, El2Unavailable, LentStorage, Levels, MachineBuilder, MemoryLoan,
-    NoEl2, PowerState, Pstate, PstateRefusal, RamSize, Reg, RunBudget, StopReason, SysReg,
-    VirtConfig, VirtMachine, WithEl2,
+    Cpu, CpuConfig, CpuModel, El, LentStorage, Levels, MachineBuilder, MemoryLoan, NoEl2,
+    PowerState, Pstate, PstateRefusal, RamSize, Reg, RunBudget, StopReason, SysReg, VirtConfig,
+    VirtMachine, WithEl2,
 };
 use rusty_box_core::{ClockHz, SnapError};
 
@@ -80,6 +81,11 @@ struct Started {
 /// [`Started`] of a machine of `kind`, given its device tree from `source`
 /// or, without one, the board's own.
 fn started(kind: Kind, source: Option<&[u8]>) -> Started {
+    started_on(VirtConfig::DEFAULT.cpu, kind, source)
+}
+
+/// [`started`], with a processor of `model`.
+fn started_on(model: CpuModel, kind: Kind, source: Option<&[u8]>) -> Started {
     fn observe<L: Levels>(m: &VirtMachine<LentStorage<'_>, L>) -> Started {
         Started {
             pstate: m.pstate(),
@@ -90,7 +96,11 @@ fn started(kind: Kind, source: Option<&[u8]>) -> Started {
     let code = SPIN.to_le_bytes();
     let mut ram = vec![0u8; RAM_LEN];
     let mut vars = vec![0xFFu8; 4096];
-    let builder = MachineBuilder::new(VirtConfig::DEFAULT).ram(ram_size());
+    let builder = MachineBuilder::new(VirtConfig {
+        cpu: model,
+        ..VirtConfig::DEFAULT
+    })
+    .ram(ram_size());
     let builder = match source {
         Some(tree) => builder.device_tree(tree),
         None => builder,
@@ -216,6 +226,97 @@ fn virtualization_starts_at_el2_and_calls_psci_with_smc() {
         contents
     };
     assert_eq!(without_differing(&trees[0]), without_differing(&trees[1]));
+}
+
+/// The Armv9.2 model with virtualization starts at EL2, and its device
+/// tree says what it has: `/psci` called with `SMC`, the GIC's virtual
+/// interface and maintenance interrupt, and, as it has FEAT_VHE, the EL2
+/// virtual timer's PPI 12 (INTID 28) as the `timer` node's fifth interrupt
+/// (the `arm,armv8-timer` binding's order: Secure physical, Non-secure
+/// physical, virtual, hypervisor physical, hypervisor virtual); its PMU
+/// node is the generic PMUv3's and its processor `arm,armv8`, with EL2 as
+/// without. Nothing else in the tree differs from the model's without
+/// virtualization, whose `timer` node names the first four.
+#[test]
+fn the_armv9p2_model_with_virtualization_has_its_device_tree_say_so() {
+    let ppi = |intid: u32| [1u32, intid - 16, 0x104];
+    let timer: Vec<u8> = [29, 30, 27, 26, 28]
+        .into_iter()
+        .flat_map(ppi)
+        .flat_map(u32::to_be_bytes)
+        .collect();
+    let gic_reg_without = be_cells(&GIC_REG_WITH_EL2[..4]);
+    let gic_reg_with = be_cells(&GIC_REG_WITH_EL2);
+    let maintenance = maintenance_interrupt();
+    let mut trees = Vec::new();
+    for (kind, el, method, gic_reg, gic_interrupts, timer) in [
+        (
+            Kind::WithoutEl2,
+            El::El1,
+            &b"hvc\0"[..],
+            &gic_reg_without[..],
+            None,
+            &timer[..4 * 12],
+        ),
+        (
+            Kind::WithEl2,
+            El::El2,
+            &b"smc\0"[..],
+            &gic_reg_with[..],
+            Some(&maintenance[..]),
+            &timer[..],
+        ),
+    ] {
+        let Started { pstate, pc, tree } = started_on(CpuModel::Armv9p2, kind, None);
+        assert_eq!((pstate.el, pc), (el, FLASH0_BASE), "{kind:?}");
+        let prop = |node: &str, name: &str| fdt::property(&tree, node, name).expect("well formed");
+        assert_eq!(prop("psci", "method"), Some(method), "{kind:?}");
+        assert_eq!(
+            prop("interrupt-controller@8001000", "reg"),
+            Some(gic_reg),
+            "{kind:?}"
+        );
+        assert_eq!(
+            prop("interrupt-controller@8001000", "interrupts"),
+            gic_interrupts,
+            "{kind:?}"
+        );
+        assert_eq!(prop("timer", "interrupts"), Some(timer), "{kind:?}");
+        assert_eq!(
+            prop("pmu", "compatible"),
+            Some(&b"arm,armv8-pmuv3\0"[..]),
+            "{kind:?}"
+        );
+        assert_eq!(
+            prop("pmu", "interrupts"),
+            Some(&be_u32s(&ppi(23))[..]),
+            "{kind:?}: PMUIRQ, INTID 23"
+        );
+        assert_eq!(
+            prop("cpus/cpu@0", "compatible"),
+            Some(&b"arm,armv8\0"[..]),
+            "{kind:?}"
+        );
+        trees.push(tree);
+    }
+    let differing = [
+        ("/psci", "method"),
+        ("/interrupt-controller@8001000", "reg"),
+        ("/interrupt-controller@8001000", "interrupts"),
+        ("/timer", "interrupts"),
+    ];
+    let without_differing = |tree: &[u8]| {
+        let mut contents = TreeContents::of(tree);
+        contents
+            .properties
+            .retain(|(node, name, _)| !differing.contains(&(node.as_str(), name.as_str())));
+        contents
+    };
+    assert_eq!(without_differing(&trees[0]), without_differing(&trees[1]));
+}
+
+fn be_u32s(cells: &[u32]) -> Vec<u8> {
+    cells.iter().flat_map(|c| c.to_be_bytes()).collect()
 }
 
 /// A host's own device tree with no `/psci` node gains the board's, as
@@ -1104,55 +1205,302 @@ fn a_snapshot_keeps_the_el2_state_and_needs_virtualization() {
     assert_eq!(without.pstate().el, El::El1);
 }
 
-/// A processor model that cannot have EL2 yet (`CpuModel::el2_available`:
-/// the Armv9.2 model, of which Arm requires features with EL2 this core
-/// lacks) is refused it, by a machine's build before the lent RAM is
-/// written and by `Cpu::new`; the Cortex-A57 builds with it and starts at
-/// EL2, and every model builds without it.
+/// Every processor model has EL2 when asked for it and starts there, a
+/// processor on its own (`Cpu::new`) as a machine's; without it each
+/// starts at EL1.
 #[test]
-fn a_model_that_cannot_have_el2_is_refused_it() {
-    assert!(CpuModel::CortexA57.el2_available());
-    assert!(!CpuModel::Armv9p2.el2_available());
+fn every_model_has_el2_when_asked_and_starts_there() {
     let config = CpuConfig {
         ips: ClockHz::BOCHS_DEFAULT,
         reset_pc: RAM_BASE,
     };
     for model in CpuModel::ALL {
-        assert!(Cpu::<NoEl2>::new(model, config).is_ok(), "{model:?}");
-        match Cpu::<WithEl2>::new(model, config) {
-            Ok(cpu) => {
-                assert!(model.el2_available(), "{model:?}");
-                assert_eq!(cpu.el(), El::El2, "{model:?}");
-            }
-            Err(e) => assert_eq!(e, El2Unavailable { model }),
-        }
-    }
-    for model in CpuModel::ALL {
-        let mut ram = vec![0x5A_u8; RAM_LEN];
-        let built = MachineBuilder::new(VirtConfig {
+        assert_eq!(Cpu::<NoEl2>::new(model, config).el(), El::El1, "{model:?}");
+        assert_eq!(
+            Cpu::<WithEl2>::new(model, config).el(),
+            El::El2,
+            "{model:?}"
+        );
+        let mut ram = vec![0u8; RAM_LEN];
+        assert_eq!(bare_of(model, &mut ram).pstate().el, El::El2, "{model:?}");
+        let mut ram = vec![0u8; RAM_LEN];
+        let without = MachineBuilder::new(VirtConfig {
             cpu: model,
             ..VirtConfig::DEFAULT
         })
         .ram(ram_size())
         .bare()
-        .with_el2()
         .build_in(MemoryLoan {
             ram: &mut ram,
             vars: &mut [],
-        });
-        match built {
-            Ok(m) => {
-                assert!(model.el2_available(), "{model:?}");
-                assert_eq!(m.pstate().el, El::El2, "{model:?}");
-            }
-            Err(e) => {
-                assert!(!model.el2_available(), "{model:?}");
-                assert_eq!(e, BuildError::El2Unavailable(El2Unavailable { model }));
-                assert!(
-                    ram.iter().all(|&b| b == 0x5A),
-                    "{model:?}: the loan is untouched"
-                );
-            }
-        }
+        })
+        .expect("builds");
+        assert_eq!(without.pstate().el, El::El1, "{model:?}");
     }
+}
+
+/// A bare machine of `model` with EL2.
+fn bare_of(model: CpuModel, ram: &mut [u8]) -> VirtMachine<LentStorage<'_>, WithEl2> {
+    MachineBuilder::new(VirtConfig {
+        cpu: model,
+        ..VirtConfig::DEFAULT
+    })
+    .ram(ram_size())
+    .bare()
+    .with_el2()
+    .build_in(MemoryLoan { ram, vars: &mut [] })
+    .expect("a bare machine builds")
+}
+
+/// The Armv9.2 model's ID registers as its EL2 reads them, each field
+/// that reports one of the EL2 features Arm requires of it (Features.json:
+/// FEAT_VHE, FEAT_XNX, FEAT_HCX, FEAT_S2FWB, FEAT_EVT and FEAT_EVT2,
+/// FEAT_FGT, FEAT_GTG with the stage 2 granules, and FEAT_S2FWB's
+/// `CLIDR_EL1` with no level of cache to the PoU), and its ECV field
+/// FEAT_ECV's 1, as it has no FEAT_ECV_POFF.
+const ARMV9P2_PFR0_WITH_EL2: u64 = 0x1101_0000_2011_0111;
+const ARMV9P2_MMFR0_WITH_EL2: u64 = 0x1100_0323_1020_0026;
+const ARMV9P2_MMFR1_WITH_EL2: u64 = 0x0000_1100_1031_1102;
+const ARMV9P2_MMFR2_WITH_EL2: u64 = 0x1201_0111_1001_0011;
+const ARMV9P2_CLIDR_WITH_EL2: u64 = 0x0200_0023;
+
+/// A hypervisor on the Armv9.2 model, which resets at EL2, reads the ID
+/// registers that report its EL2 features, builds a stage 2 that maps the
+/// 1 GiB at IPA 0x8000_0000 onto RAM's at PA 0x4000_0000 (one level 1
+/// block, 4 KiB granule, a 32-bit IPA) as well as RAM itself, sets
+/// `HFGRTR_EL2.MIDR_EL1` (FEAT_FGT) and `HCR_EL2.VM`, and enters EL1 with
+/// `ERET` at the alias of its own code. EL1, its MMU off, runs at IPA
+/// 0x8000_0078 through stage 2, reads through the alias the word its
+/// hypervisor stored at PA 0x4002_0000, then reads `MIDR_EL1`: the read
+/// traps to EL2 with EC 0x18 (`ESR_EL2` 0x6230_0021: `MRS`, `Op0` 3,
+/// `Rt` 1), and the hypervisor powers off with PSCI `SYSTEM_OFF` over
+/// `SMC`.
+///
+/// ```text
+/// _start: mrs x10, CurrentEL       ; mrs x11, id_aa64pfr0_el1
+///         mrs x12, id_aa64mmfr0_el1 ; mrs x13, id_aa64mmfr1_el1
+///         mrs x14, id_aa64mmfr2_el1 ; mrs x15, clidr_el1
+///         adr x0, vectors          ; msr vbar_el2, x0
+///         ldr x1, =0x40010000      ; ldr x2, =0x400007FD    // a level 1 block
+///         str x2, [x1, #8]         ; str x2, [x1, #16]      // IPA 1 GiB and 2 GiB
+///         msr vttbr_el2, x1
+///         ldr x2, =0x80003560      ; msr vtcr_el2, x2       // T0SZ 32, SL0 1, 4 KiB
+///         ldr x3, =0x40020000      ; ldr x4, =0x5EC0ED57A6E25EC0 ; str x4, [x3]
+///         mov x5, #(1 << 25)       ; msr hfgrtr_el2, x5      // MIDR_EL1
+///         ldr x6, =0x80000001      ; msr hcr_el2, x6         // RW, VM
+///         isb
+///         adr x7, el1 ; ldr x9, =0x40000000 ; add x7, x7, x9 ; msr elr_el2, x7
+///         mov x8, #0x3c5           ; msr spsr_el2, x8        // EL1h, DAIF masked
+///         eret
+/// el1:    mrs x20, CurrentEL       ; ldr x21, =0x80020000
+///         ldr x22, [x21]           ; mrs x1, midr_el1
+/// 1:      b 1b
+///         .balign 0x800
+/// vectors: .org vectors + 0x400                          // lower EL, AArch64, synchronous
+///         mrs x23, esr_el2         ; mrs x24, elr_el2
+///         ldr x0, =0x84000008      ; smc #0              // SYSTEM_OFF
+/// 2:      b 2b
+/// ```
+#[test]
+fn the_armv9p2_model_runs_a_guest_under_stage_2_and_fine_grained_traps() {
+    const PROGRAM: [(u64, u32); 58] = [
+        (0x00, 0xD538_424A),
+        (0x04, 0xD538_040B),
+        (0x08, 0xD538_070C),
+        (0x0C, 0xD538_072D),
+        (0x10, 0xD538_074E),
+        (0x14, 0xD539_002F),
+        (0x18, 0x1000_3F40),
+        (0x1C, 0xD51C_C000),
+        (0x20, 0x5800_0381),
+        (0x24, 0x5800_03A2),
+        (0x28, 0xF900_0422),
+        (0x2C, 0xF900_0822),
+        (0x30, 0xD51C_2101),
+        (0x34, 0x5800_0362),
+        (0x38, 0xD51C_2142),
+        (0x3C, 0x5800_0363),
+        (0x40, 0x5800_0384),
+        (0x44, 0xF900_0064),
+        (0x48, 0xD2A0_4005),
+        (0x4C, 0xD51C_1185),
+        (0x50, 0x5800_0346),
+        (0x54, 0xD51C_1106),
+        (0x58, 0xD503_3FDF),
+        (0x5C, 0x1000_00E7),
+        (0x60, 0x5800_0309),
+        (0x64, 0x8B09_00E7),
+        (0x68, 0xD51C_4027),
+        (0x6C, 0xD280_78A8),
+        (0x70, 0xD51C_4008),
+        (0x74, 0xD69F_03E0),
+        (0x78, 0xD538_4254),
+        (0x7C, 0x5800_0275),
+        (0x80, 0xF940_02B6),
+        (0x84, 0xD538_0001),
+        (0x88, 0x1400_0000),
+        (0x8C, 0x0000_0000),
+        (0x90, 0x4001_0000),
+        (0x94, 0x0000_0000),
+        (0x98, 0x4000_07FD),
+        (0x9C, 0x0000_0000),
+        (0xA0, 0x8000_3560),
+        (0xA4, 0x0000_0000),
+        (0xA8, 0x4002_0000),
+        (0xAC, 0x0000_0000),
+        (0xB0, 0xA6E2_5EC0),
+        (0xB4, 0x5EC0_ED57),
+        (0xB8, 0x8000_0001),
+        (0xBC, 0x0000_0000),
+        (0xC0, 0x4000_0000),
+        (0xC4, 0x0000_0000),
+        (0xC8, 0x8002_0000),
+        (0xCC, 0x0000_0000),
+        (0xC00, 0xD53C_5217),
+        (0xC04, 0xD53C_4038),
+        (0xC08, 0x5800_0080),
+        (0xC0C, 0xD400_0003),
+        (0xC10, 0x1400_0000),
+        (0xC18, 0x8400_0008),
+    ];
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare_of(CpuModel::Armv9p2, &mut ram);
+    load(&mut m, &PROGRAM);
+    let out = m.step(RunBudget::Instructions(1_000));
+    assert_eq!(out.stop, StopReason::PoweredOff);
+    assert_eq!(m.reg_read(Reg::X10), 2 << 2, "CurrentEL: EL2 out of reset");
+    let pfr0 = m.reg_read(Reg::X11);
+    assert_eq!((pfr0 >> 8) & 0xF, 1, "ID_AA64PFR0_EL1.EL2: AArch64 only");
+    let mmfr0 = m.reg_read(Reg::X12);
+    assert_eq!((mmfr0 >> 56) & 0xF, 1, "ID_AA64MMFR0_EL1.FGT");
+    assert_eq!((mmfr0 >> 60) & 0xF, 1, "ID_AA64MMFR0_EL1.ECV: no ECV_POFF");
+    assert_eq!(
+        (
+            (mmfr0 >> 40) & 0xF,
+            (mmfr0 >> 32) & 0xF,
+            (mmfr0 >> 36) & 0xF
+        ),
+        (3, 3, 2),
+        "TGran4_2 and TGran16_2 with 52-bit addresses (FEAT_LPA2), TGran64_2 (FEAT_GTG)"
+    );
+    let mmfr1 = m.reg_read(Reg::X13);
+    assert_eq!((mmfr1 >> 8) & 0xF, 1, "ID_AA64MMFR1_EL1.VH (FEAT_VHE)");
+    assert_eq!((mmfr1 >> 28) & 0xF, 1, "ID_AA64MMFR1_EL1.XNX");
+    assert_eq!((mmfr1 >> 40) & 0xF, 1, "ID_AA64MMFR1_EL1.HCX");
+    let mmfr2 = m.reg_read(Reg::X14);
+    assert_eq!((mmfr2 >> 40) & 0xF, 1, "ID_AA64MMFR2_EL1.FWB (FEAT_S2FWB)");
+    assert_eq!((mmfr2 >> 56) & 0xF, 2, "ID_AA64MMFR2_EL1.EVT (FEAT_EVT2)");
+    let clidr = m.reg_read(Reg::X15);
+    assert_eq!(
+        ((clidr >> 27) & 7, (clidr >> 21) & 7),
+        (0, 0),
+        "CLIDR_EL1.LoUU and LoUIS (FEAT_S2FWB)"
+    );
+    assert_eq!(
+        [pfr0, mmfr0, mmfr1, mmfr2, clidr],
+        [
+            ARMV9P2_PFR0_WITH_EL2,
+            ARMV9P2_MMFR0_WITH_EL2,
+            ARMV9P2_MMFR1_WITH_EL2,
+            ARMV9P2_MMFR2_WITH_EL2,
+            ARMV9P2_CLIDR_WITH_EL2,
+        ]
+    );
+    assert_eq!(
+        m.reg_read(Reg::X20),
+        1 << 2,
+        "CurrentEL: EL1 after the ERET"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X22),
+        0x5EC0_ED57_A6E2_5EC0,
+        "IPA 0x8002_0000 reads PA 0x4002_0000 through stage 2"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X23),
+        0x6230_0021,
+        "ESR_EL2: MRS MIDR_EL1 trapped"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X24),
+        0x8000_0084,
+        "ELR_EL2: the MRS, at its IPA"
+    );
+    assert_eq!(m.pstate().el, El::El2);
+}
+
+/// Without virtualization the Armv9.2 model is the processor it always
+/// was: it resets at EL1, and the ID registers its EL1 reads have no EL2
+/// and none of the features EL2 brings — `ID_AA64PFR0_EL1.EL2` 0,
+/// `ID_AA64MMFR0_EL1` without FGT and the stage 2 granule fields,
+/// `ID_AA64MMFR1_EL1` without VH, XNX and HCX, `ID_AA64MMFR2_EL1` without
+/// FWB and EVT, and `CLIDR_EL1` with its L1 the level of unification.
+///
+/// ```text
+/// mrs x10, CurrentEL ; mrs x11, id_aa64pfr0_el1 ; mrs x12, id_aa64mmfr0_el1
+/// mrs x13, id_aa64mmfr1_el1 ; mrs x14, id_aa64mmfr2_el1 ; mrs x15, clidr_el1
+/// ```
+#[test]
+fn without_virtualization_the_armv9p2_model_is_unchanged() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = MachineBuilder::new(VirtConfig {
+        cpu: CpuModel::Armv9p2,
+        ..VirtConfig::DEFAULT
+    })
+    .ram(ram_size())
+    .bare()
+    .build_in(MemoryLoan {
+        ram: &mut ram,
+        vars: &mut [],
+    })
+    .expect("builds");
+    load(
+        &mut m,
+        &[
+            (0x00, 0xD538_424A),
+            (0x04, 0xD538_040B),
+            (0x08, 0xD538_070C),
+            (0x0C, 0xD538_072D),
+            (0x10, 0xD538_074E),
+            (0x14, 0xD539_002F),
+            (0x18, SPIN),
+        ],
+    );
+    let out = m.step(RunBudget::Instructions(6));
+    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 0x18);
+    let read = [Reg::X10, Reg::X11, Reg::X12, Reg::X13, Reg::X14, Reg::X15].map(|r| m.reg_read(r));
+    assert_eq!(
+        read,
+        [
+            1 << 2,
+            0x1101_0000_2011_0011,
+            0x1000_0000_1020_0026,
+            0x0000_1000_0031_1002,
+            0x1001_0011_1001_0011,
+            0x0A20_0023,
+        ]
+    );
+    // Exactly the EL2 fields differ from the model's with EL2.
+    assert_eq!(read[1] ^ ARMV9P2_PFR0_WITH_EL2, 1 << 8, "EL2");
+    assert_eq!(
+        read[2] ^ ARMV9P2_MMFR0_WITH_EL2,
+        (1 << 56) | (3 << 40) | (2 << 36) | (3 << 32),
+        "FGT, TGran4_2, TGran64_2, TGran16_2"
+    );
+    assert_eq!(
+        read[3] ^ ARMV9P2_MMFR1_WITH_EL2,
+        (1 << 40) | (1 << 28) | (1 << 8),
+        "HCX, XNX, VH"
+    );
+    assert_eq!(
+        read[4] ^ ARMV9P2_MMFR2_WITH_EL2,
+        (2 << 56) | (1 << 40),
+        "EVT, FWB"
+    );
+    assert_eq!(
+        read[5] ^ ARMV9P2_CLIDR_WITH_EL2,
+        (1 << 27) | (1 << 21),
+        "LoUU, LoUIS"
+    );
 }

@@ -2061,14 +2061,13 @@ fn constraint_value(ast: &Value, holding: &BTreeSet<&str>) -> Option<bool> {
 /// Cryptographic Extension (`FEAT_Crypto`), from Armv8.2 its assembler
 /// aliases (`FEAT_ASMv8p2`, BFC and the 64-bit REV64), and with EL2 that
 /// granule at stage 2 (`FEAT_S2TGran4K`: with FEAT_GTG `TGran4_2` reads
-/// 2, or 3 with FEAT_LPA2, and without it 0, the granule at stage 1) — and
-/// every other identifier is false: no FEAT_SVE, no AArch32, no PMU
-/// revision past the model's.
-///
-/// A model that cannot have EL2 ([`CpuModel::el2_available`], whose build
-/// with EL2 is refused) breaks, with EL2, exactly the constraints that say
-/// why: the features Arm requires of it with EL2 that its feature set does
-/// not list, which the processor with every feature has.
+/// 2, or 3 with FEAT_LPA2, and without it 0, the granule at stage 1), and
+/// with FEAT_VHE a writable `HCR_EL2.E2H` (`FEAT_E2H0`:
+/// `ID_AA64MMFR4_EL1.E2H0` reads 0) — and every other identifier is false:
+/// no FEAT_SVE, no AArch32, no PMU revision past the model's. Each model is
+/// held to it at both level sets, the Armv9.2 model with EL2 among them:
+/// with EL2 Arm requires FEAT_VHE, FEAT_XNX, FEAT_S2FWB, FEAT_EVT,
+/// FEAT_EVT2, FEAT_GTG, FEAT_FGT, FEAT_HCX and the stage 2 granules of it.
 #[test]
 #[cfg_attr(
     not(aarchmrs),
@@ -2119,6 +2118,9 @@ fn each_model_is_a_processor_arms_feature_model_permits() {
         if el2 {
             holding.insert("FEAT_S2TGran4K");
         }
+        if imp.has(Feature::Vhe) {
+            holding.insert("FEAT_E2H0");
+        }
         let (mut decided, mut broken) = (0, Vec::new());
         for c in &constraints {
             match constraint_value(c, &holding) {
@@ -2131,28 +2133,10 @@ fn each_model_is_a_processor_arms_feature_model_permits() {
             "{model:?}, EL2 {el2}: {decided} of {} constraints decided by identifiers",
             constraints.len()
         );
-        if el2 && !model.el2_available() {
-            broken.sort();
-            assert_eq!(
-                broken,
-                [
-                    "((FEAT_SME && FEAT_EL2) ==> (FEAT_FGT && FEAT_HCX))",
-                    "((v8Ap1 && FEAT_AA64EL2) ==> FEAT_VHE)",
-                    "((v8Ap2 && FEAT_EL2) ==> FEAT_XNX)",
-                    "((v8Ap4 && FEAT_AA64EL2) ==> FEAT_S2FWB)",
-                    "((v8Ap5 && FEAT_EL2) ==> FEAT_EVT)",
-                    "((v8Ap5 && FEAT_EL2) ==> FEAT_EVT2)",
-                    "((v8Ap6 && (FEAT_AA64EL2 || FEAT_AA64EL3)) ==> FEAT_FGT)",
-                    "((v8Ap7 && FEAT_AA64EL2) ==> FEAT_HCX)",
-                ],
-                "{model:?} with EL2: what `CpuModel::el2_available` refuses it for"
-            );
-        } else {
-            assert!(
-                broken.is_empty(),
-                "{model:?}, EL2 {el2}, breaks {broken:#?}"
-            );
-        }
+        assert!(
+            broken.is_empty(),
+            "{model:?}, EL2 {el2}, breaks {broken:#?}"
+        );
         assert!(
             decided > constraints.len() / 2,
             "{model:?}: {decided} decided"

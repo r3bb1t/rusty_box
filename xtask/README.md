@@ -161,7 +161,7 @@ Use them for interleaved A/B runs: alternate the baseline and candidate binaries
 
 ## `cargo xtask nested-kvm`
 
-Boots a nested KVM guest on the Arm board, in your terminal, with nothing installed beyond cargo (`xtask/src/nested_kvm.rs`). Alpine Linux 3.23 runs on the board's Cortex-A57 with EL2; its KVM runs QEMU, and QEMU runs a second Alpine under KVM. Once the console script has logged in, installed QEMU and started the nested guest, what you type goes to the guest: Ctrl-A x quits the nested QEMU, back to the host Alpine's shell, and Ctrl-] quits the emulator. The command exits with the runner's status.
+Boots a nested KVM guest on the Arm board, in your terminal, with nothing installed beyond cargo (`xtask/src/nested_kvm.rs`). Alpine Linux 3.23 runs on the board's processor with EL2, the Cortex-A57 (its KVM in nVHE mode) or with `--cpu armv9.2` the Armv9.2 model (its KVM in VHE mode); its KVM runs QEMU, and QEMU runs a second Alpine under KVM. Once the console script has logged in, installed QEMU and started the nested guest, what you type goes to the guest: Ctrl-A x quits the nested QEMU, back to the host Alpine's shell, and Ctrl-] quits the emulator. The command exits with the runner's status.
 
 Each step is skipped when its result is already in the work directory:
 
@@ -174,6 +174,7 @@ Each step is skipped when its result is already in the work directory:
 
 | Option | Default | |
 |---|---|---|
+| `--cpu MODEL` | `cortex-a57` | The board's processor: `cortex-a57`, Armv8.0, whose KVM runs in nVHE mode, or `armv9.2`, the Armv9.2 model with FEAT_VHE, whose KVM runs in VHE mode. |
 | `--ips N` | 1000000000 | Emulated instructions a second. The board's own 50M makes the nested guest crawl: a nested tick costs tens of thousands of instructions of exits. |
 | `--host-only` | | Stop at the host Alpine's shell with QEMU installed. |
 | `--rebuild` | | Run every download and build again. |

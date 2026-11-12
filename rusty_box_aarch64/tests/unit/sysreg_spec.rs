@@ -1726,9 +1726,7 @@ const WITHOUT_EL2: [(&str, LeveledImplementation<NoEl2>); 3] = [
     ),
 ];
 
-/// The processors with EL2, as [`WITHOUT_EL2`]. The Armv9.2 model with EL2
-/// is a processor no machine builds (`CpuModel::el2_available`), held to
-/// Arm's accessors all the same.
+/// The processors with EL2, as [`WITHOUT_EL2`].
 const WITH_EL2: [(&str, LeveledImplementation<WithEl2>); 3] = [
     (
         "Cortex-A57 with EL2",

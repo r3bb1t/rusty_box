@@ -284,7 +284,7 @@ fn pre_decoded_ops_execute_as_their_class_handlers_do(model: CpuModel) {
         ips: ClockHz::BOCHS_DEFAULT,
         reset_pc: RAM,
     };
-    let new = || Cpu::<NoEl2>::new(model, config).expect("a processor without EL2");
+    let new = || Cpu::<NoEl2>::new(model, config);
     let mut by_class = new();
     let mut by_op = new();
     let mut by_pool = new();
@@ -387,8 +387,7 @@ fn a_condition_holds_on_a_flag_value_as_it_does_on_pstate() {
             ips: ClockHz::BOCHS_DEFAULT,
             reset_pc: RAM,
         },
-    )
-    .expect("a processor without EL2");
+    );
     for bits in 0..16u32 {
         let flags = Nzcv {
             n: bits & 8 != 0,

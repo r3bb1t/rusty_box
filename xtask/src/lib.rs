@@ -1253,7 +1253,7 @@ fn jdk_program(host: HostOs, tool: &str) -> PathBuf {
 
 fn usage() -> String {
     format!(
-        "Usage:\n  cargo xtask android build [--sdk PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]\n  cargo xtask ci [--full] [--skip-boot]\n  cargo xtask perf-baseline\n  cargo xtask hot-loop-baseline\n  cargo xtask check-shell-command   (a Claude Code hook; reads its event on stdin)\n  cargo xtask nested-kvm [--ips N] [--host-only] [--rebuild] [--no-build] [--dir PATH]\n                         [--host-ram-mib N] [--nested-ram-mib N]   (see nested-kvm --help)"
+        "Usage:\n  cargo xtask android build [--sdk PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]\n  cargo xtask ci [--full] [--skip-boot]\n  cargo xtask perf-baseline\n  cargo xtask hot-loop-baseline\n  cargo xtask check-shell-command   (a Claude Code hook; reads its event on stdin)\n  cargo xtask nested-kvm [--cpu cortex-a57|armv9.2] [--ips N] [--host-only] [--rebuild]\n                         [--no-build] [--dir PATH] [--host-ram-mib N] [--nested-ram-mib N]\n                         (see nested-kvm --help)"
     )
 }
 

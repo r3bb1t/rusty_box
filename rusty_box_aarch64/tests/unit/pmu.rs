@@ -174,8 +174,7 @@ fn nops<L: Levels>(cpu: &mut Cpu<L>, n: usize) {
     }
 }
 
-/// Each processor model, without EL2 and with it (the Armv9.2 model with
-/// EL2 being one no machine builds, held to the same rules).
+/// Each processor model, without EL2 and with it.
 fn models() -> [Implementation; 2] {
     [Implementation::CORTEX_A57, Implementation::ARMV9P2]
 }
@@ -295,8 +294,8 @@ fn mdcr_el2_traps_the_pmu_to_el2() {
 /// it. A value above six, or zero, reads back as written and counts as six,
 /// or as none (the Cortex-A57's answers, DDI 0488H B.2.20 and B.2.21). A
 /// counter past it is RES0 from EL0 and EL1 on the Cortex-A57 (B.2.25) and
-/// UNDEFINED on the Armv9.2 model (Arm's refinement of
-/// `Unpredictable_PMUEVENTCOUNTER`); one past the six the processor has is
+/// traps to EL2 on the Armv9.2 model, which with EL2 has FEAT_FGT (Arm's
+/// accessors); one past the six the processor has is
 /// UNDEFINED on both, at every level, but through `PMXEVCNTR_EL0` the
 /// Cortex-A57 makes it RES0 (B.2.22), even to EL0 without `PMUSERENR_EL0`.
 #[test]
@@ -337,8 +336,10 @@ fn hpmn_reserves_the_counters_above_it_for_el2() {
             assert_eq!(written, Outcome::Done(7));
             assert_eq!(get(&mut cpu, pmevcntr(4)), 0x104, "the write is ignored");
         } else {
-            assert_eq!(beyond, Outcome::El1(UNDEFINED));
-            assert_eq!(written, Outcome::El1(UNDEFINED));
+            // With FEAT_FGT, which the Armv9.2 model has with EL2, Arm's
+            // accessor traps it to EL2.
+            assert_eq!(beyond, Outcome::El2(trapped(mrs(pmevcntr(4)))));
+            assert_eq!(written, Outcome::El2(trapped(msr(pmevcntr(4)))));
         }
         for el in [El::El0, El::El1, El::El2] {
             set(&mut cpu, PMUSERENR, EN);

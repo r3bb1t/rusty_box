@@ -718,14 +718,14 @@ impl Features {
 
     /// What the Armv9.2 processor model implements: every feature Arm's
     /// `Features.json` requires of an Armv9.2 processor that has FP and
-    /// Advanced SIMD and AArch64 at EL0 and EL1 alone (`v9Ap2 ==> (v9Ap1 &&
-    /// v8Ap7)` down the versions, with what a version requires of a
-    /// processor with FP or Advanced SIMD, such as `(v8Ap6 && FEAT_FP) ==>
-    /// FEAT_BF16`, and what those features imply); FEAT_GTG, which Armv8.5
-    /// requires with EL2 and a processor without EL2 drops; FEAT_SME and
-    /// FEAT_SME2; and these options: the Cryptographic Extension's AES, PMULL, SHA-1
-    /// and SHA-256, QARMA5 as the pointer authentication algorithm,
-    /// FEAT_FPAC and FEAT_FPACCOMBINE, FEAT_SSBS and FEAT_SSBS2,
+    /// Advanced SIMD and AArch64 at EL0 and EL1, and at EL2 where it has
+    /// EL2 (`v9Ap2 ==> (v9Ap1 && v8Ap7)` down the versions, with what a
+    /// version requires of a processor with FP or Advanced SIMD, such as
+    /// `(v8Ap6 && FEAT_FP) ==> FEAT_BF16`, or with EL2, such as `(v8Ap1 &&
+    /// FEAT_AA64EL2) ==> FEAT_VHE`, and what those features imply); FEAT_SME
+    /// and FEAT_SME2; and these options: the Cryptographic Extension's AES,
+    /// PMULL, SHA-1 and SHA-256, QARMA5 as the pointer authentication
+    /// algorithm, FEAT_FPAC and FEAT_FPACCOMBINE, FEAT_SSBS and FEAT_SSBS2,
     /// FEAT_RPRES, every translation granule at both stages, FEAT_TTST,
     /// 52-bit physical and virtual addresses with every granule (FEAT_LPA,
     /// FEAT_LVA, FEAT_LPA2), and the hardware update of the Access flag and
@@ -735,7 +735,12 @@ impl Features {
     /// (`(v8Ap7 && FEAT_PMUv3) ==> FEAT_PMUv3p7`, which implies
     /// FEAT_PMUv3p5, FEAT_PMUv3p4 and FEAT_PMUv3p1, as `(v8Ap5 &&
     /// FEAT_PMUv3) ==> FEAT_PMUv3p5` and their siblings require them too).
-    /// Not FEAT_SVE: Streaming SVE mode is its only SVE. Not
+    /// Of the features only EL2 brings ([`Features::NEED_EL2`]), which a
+    /// processor of the model without EL2 drops, it lists those Arm
+    /// requires with EL2 and no other: not FEAT_ECV_POFF, which
+    /// `Features.json` makes optional (only FEAT_RME requires it); FEAT_ECV's
+    /// own EL2 controls (`CNTHCTL_EL2.EL1TVT`, `EL1TVCT`, `EVNTIS`) come with
+    /// FEAT_ECV. Not FEAT_SVE: Streaming SVE mode is its only SVE. Not
     /// FEAT_DoubleLock, the one Cortex-A57 feature Armv9.0 forbids.
     pub(crate) const ARMV9P2: Self = Self::of(&[
         Feature::Base,
@@ -786,8 +791,6 @@ impl Features {
         Feature::Csv2,
         Feature::Csv3,
         Feature::Dpb2,
-        // With EL2 (`(v8Ap5 && FEAT_AA64EL2) ==> FEAT_GTG`).
-        Feature::Gtg,
         // Required from Armv8.6
         Feature::I8mm,
         Feature::Bf16,
@@ -798,6 +801,22 @@ impl Features {
         Feature::WfxT,
         Feature::Xs,
         Feature::Afp,
+        // Required with EL2, each by the version that first requires it
+        // (`(v8Ap1 && FEAT_AA64EL2) ==> FEAT_VHE`, `(v8Ap2 && FEAT_EL2) ==>
+        // FEAT_XNX`, `(v8Ap4 && FEAT_AA64EL2) ==> FEAT_S2FWB`, `(v8Ap5 &&
+        // FEAT_EL2) ==> FEAT_EVT` and `FEAT_EVT2`, `(v8Ap5 && FEAT_AA64EL2)
+        // ==> FEAT_GTG`, `(v8Ap6 && (FEAT_AA64EL2 || FEAT_AA64EL3)) ==>
+        // FEAT_FGT`, `(v8Ap7 && FEAT_AA64EL2) ==> FEAT_HCX`, and FEAT_SME's
+        // `(FEAT_SME && FEAT_EL2) ==> (FEAT_FGT && FEAT_HCX)`), dropped
+        // without it.
+        Feature::Vhe,
+        Feature::Xnx,
+        Feature::S2Fwb,
+        Feature::Evt,
+        Feature::Evt2,
+        Feature::Gtg,
+        Feature::Fgt,
+        Feature::Hcx,
         // Options
         Feature::Sme,
         Feature::Sme2,
@@ -1083,13 +1102,11 @@ impl Implementation {
     /// The Armv9.2 model with every feature the decoder knows, which is
     /// today the model's own set, FEAT_DoubleLock (a set no processor may
     /// have, Armv9.0 forbidding FEAT_DoubleLock, and none is built with),
-    /// and FEAT_ECV_POFF, FEAT_VHE, FEAT_XNX, FEAT_S2FWB, FEAT_EVT,
-    /// FEAT_EVT2, FEAT_FGT and FEAT_HCX, which it keeps only with EL2 and no
-    /// model lists yet:
-    /// a feature's tests run on it before any
-    /// model implements the feature, and each exercises that feature's own
-    /// rules. EL2 comes with the processor's level set, as it does for
-    /// every implementation: on [`NoEl2`](super::NoEl2) it starts at EL1,
+    /// and FEAT_ECV_POFF, which it keeps only with EL2 and no model lists:
+    /// a feature's tests run on it before any model implements the
+    /// feature, and each exercises that feature's own rules. EL2 comes with
+    /// the processor's level set, as it does for every implementation: on
+    /// [`NoEl2`](super::NoEl2) it starts at EL1,
     /// which the instruction tests and the QEMU `max` vectors (taken on
     /// `virt` without virtualization) run at; on [`WithEl2`](super::WithEl2)
     /// it covers the rules where EL2 meets another feature (`CPTR_EL2`'s
@@ -1171,14 +1188,17 @@ impl Default for CounterRate {
 pub enum CpuModel {
     /// A Cortex-A57 r1p3, the revision of its TRM (DDI 0488H): Armv8.0
     /// with FP, Advanced SIMD, the Cryptographic Extension and CRC32, as
-    /// QEMU's `cortex-a57` has them, cut down to AArch64 at EL0 and EL1;
-    /// its system counter runs at 1 GHz,
+    /// QEMU's `cortex-a57` has them, cut down to AArch64 at EL0 and EL1,
+    /// and EL2 where the machine asks for it; its system counter runs at
+    /// 1 GHz,
     /// [`SYSTEM_COUNTER_HZ`], unless the board chooses another rate, where
     /// QEMU's runs at 62.5 MHz.
     #[default]
     CortexA57,
     /// An Armv9.2 processor with FEAT_SME and FEAT_SME2 and no FEAT_SVE:
-    /// AArch64 at EL0 and EL1, every feature Armv9.2 requires of it, the
+    /// AArch64 at EL0 and EL1, and EL2 where the machine asks for it, with
+    /// FEAT_VHE and the other EL2 features Armv9.2 requires with it; every
+    /// feature Armv9.2 requires of it, the
     /// options listed for its feature set, and Streaming SVE vectors of up
     /// to 512 bits. It reports itself as a software model (`MIDR_EL1`
     /// implementer 0), as no Arm part has its features, reports caches of
@@ -1217,34 +1237,6 @@ impl CpuModel {
     /// the Cortex-A57, 52 on the Armv9.2 model, which has FEAT_LPA.
     pub const fn physical_address_bits(self) -> u32 {
         id::pa_bits(self.implementation().features)
-    }
-
-    /// Whether a machine of this model can be built with EL2
-    /// ([`MachineBuilder::with_el2`](crate::machine::MachineBuilder::with_el2)).
-    /// The Cortex-A57 can, as QEMU's `-M virt,virtualization=on` gives its
-    /// `cortex-a57` EL2. The Armv9.2 model cannot: Arm's feature model
-    /// (`Features.json`) requires of an Armv9.2 processor with EL2 FEAT_VHE,
-    /// FEAT_XNX, FEAT_S2FWB, FEAT_EVT, FEAT_EVT2, FEAT_FGT and FEAT_HCX,
-    /// which this core implements and the test processor with every feature
-    /// has, but which the model's feature set ([`Features::ARMV9P2`]) does
-    /// not list, and a processor without them is not one Arm permits.
-    pub const fn el2_available(self) -> bool {
-        match self {
-            Self::CortexA57 => true,
-            Self::Armv9p2 => false,
-        }
-    }
-
-    /// Whether a processor of this model may have the levels of `L`: every
-    /// model without EL2, and with it one that [`CpuModel::el2_available`].
-    /// The one check of a model's levels, which [`Cpu::new`](super::Cpu::new)
-    /// and a machine's build both make.
-    pub const fn check_levels<L: Levels>(self) -> Result<(), El2Unavailable> {
-        if L::EL2 && !self.el2_available() {
-            Err(El2Unavailable { model: self })
-        } else {
-            Ok(())
-        }
     }
 
     /// Whether the architecture fixes this model's counter at 1 GHz: from
@@ -1360,26 +1352,6 @@ impl core::fmt::Display for UnknownCpuModel {
 }
 
 impl core::error::Error for UnknownCpuModel {}
-
-/// A processor of a model asked for with EL2, which that model cannot have
-/// ([`CpuModel::el2_available`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct El2Unavailable {
-    /// The model refused EL2.
-    pub model: CpuModel,
-}
-
-impl core::fmt::Display for El2Unavailable {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "the {} processor model cannot have EL2: Arm requires features of it with EL2 that its feature set does not list",
-            self.model.name()
-        )
-    }
-}
-
-impl core::error::Error for El2Unavailable {}
 
 /// A processor of a model whose architecture fixes its counter at 1 GHz,
 /// asked to count at another rate ([`CpuModel::counter_rate_fixed`]).

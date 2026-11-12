@@ -66,9 +66,9 @@ pub mod storage;
 pub use board::{Plugged, TransportOrder, UnknownTransportOrder, VirtioDevices};
 pub use bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 pub use cpu::{
-    Btype, CounterRate, Cpu, CpuConfig, CpuModel, CpuState, CpuStateEl2, El, El2Unavailable,
-    FixedCounterRate, Levels, NoEl2, Pstate, PstateRefusal, Reg, SpectreReport, SysReg,
-    SysRegRefusal, UnknownCpuModel, UnknownSpectreReport, VReg, WithEl2,
+    Btype, CounterRate, Cpu, CpuConfig, CpuModel, CpuState, CpuStateEl2, El, FixedCounterRate,
+    Levels, NoEl2, Pstate, PstateRefusal, Reg, SpectreReport, SysReg, SysRegRefusal,
+    UnknownCpuModel, UnknownSpectreReport, VReg, WithEl2,
 };
 pub use devices::gicv2::{GicShape, MsiFrame, MsiFrameOutsideGic, PriorityBits, SpiCount};
 #[cfg(feature = "alloc")]

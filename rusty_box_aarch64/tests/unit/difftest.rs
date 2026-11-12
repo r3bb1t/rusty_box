@@ -978,8 +978,7 @@ fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
                 ips,
                 reset_pc: CODE,
             },
-        )
-        .expect("a processor without EL2");
+        );
         let mut bus = TestBus {
             insn,
             data: std::vec![0; DATA_SIZE],
@@ -1009,8 +1008,7 @@ fn udf_takes_the_undefined_instruction_exception_whatever_its_immediate() {
                 ips,
                 reset_pc: CODE,
             },
-        )
-        .expect("a processor without EL2");
+        );
         cpu.x[0] = 0x8400_0008; // PSCI SYSTEM_OFF, had `udf #2` reached the PSCI conduit
         let mut bus = TestBus {
             insn,
@@ -1048,8 +1046,7 @@ fn add_and_sub_immediate_with_shift_1x_are_undefined() {
                 ips,
                 reset_pc: CODE,
             },
-        )
-        .expect("a processor without EL2");
+        );
         cpu.x[1] = 41;
         let x0 = cpu.x[0];
         let mut bus = TestBus {
@@ -1087,8 +1084,7 @@ impl Stepper {
                 ips,
                 reset_pc: CODE,
             },
-        )
-        .expect("a processor without EL2");
+        );
         cpu.sys.cpacr_el1 = 3 << 20;
         let mut reset = Vec::new();
         if let Err(e) = cpu.save(&mut reset) {

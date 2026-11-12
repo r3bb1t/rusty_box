@@ -1,9 +1,11 @@
 //! `cargo xtask nested-kvm`: a nested KVM guest on the Arm board, in this
 //! terminal, in one command.
 //!
-//! Alpine Linux runs on the board's Cortex-A57 with EL2 (virtualization
-//! on); its KVM comes up in nVHE mode with the in-kernel vGIC, and QEMU
-//! inside it runs a second Alpine under KVM. The serial console is the
+//! Alpine Linux runs on the board's processor with EL2 (virtualization
+//! on): on the Cortex-A57, the default, its KVM comes up in nVHE mode, and
+//! on the Armv9.2 model (`--cpu armv9.2`), which has FEAT_VHE, in VHE mode,
+//! each with the in-kernel vGIC; QEMU inside it runs a second Alpine under
+//! KVM, on the host's processor as KVM presents it. The serial console is the
 //! terminal: once the runner's script has started the nested guest, what is
 //! typed goes to the guest. Ctrl-] quits the emulator, Ctrl-A x the nested
 //! QEMU.
@@ -75,6 +77,38 @@ pub enum BootTarget {
     HostShell,
 }
 
+/// The board's processor model, by the runner's `--cpu` name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostCpu {
+    /// The Cortex-A57: Armv8.0, whose KVM runs in nVHE mode.
+    CortexA57,
+    /// The Armv9.2 model with SME2: FEAT_VHE, whose KVM runs in VHE mode.
+    Armv9p2,
+}
+
+impl HostCpu {
+    const ALL: [Self; 2] = [Self::CortexA57, Self::Armv9p2];
+
+    /// The name the runner's `--cpu` takes.
+    fn name(self) -> &'static str {
+        match self {
+            Self::CortexA57 => "cortex-a57",
+            Self::Armv9p2 => "armv9.2",
+        }
+    }
+
+    /// The model named `name`.
+    fn parse(name: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|cpu| cpu.name() == name)
+            .ok_or_else(|| {
+                let names: Vec<&str> = Self::ALL.iter().map(|cpu| cpu.name()).collect();
+                format!("--cpu {name:?}: the models are {}", names.join(", "))
+            })
+    }
+}
+
 /// Whether a step whose result exists runs again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Assets {
@@ -97,6 +131,7 @@ pub struct NestedKvmCommand {
     /// The board's clock. Its 50M default makes the nested guest crawl: a
     /// nested tick costs tens of thousands of instructions of exits.
     pub ips: InstructionsPerSecond,
+    pub cpu: HostCpu,
     pub target: BootTarget,
     pub assets: Assets,
     pub runner: RunnerBuild,
@@ -111,6 +146,7 @@ impl Default for NestedKvmCommand {
     fn default() -> Self {
         Self {
             ips: InstructionsPerSecond(1_000_000_000),
+            cpu: HostCpu::CortexA57,
             target: BootTarget::NestedGuest,
             assets: Assets::Reuse,
             runner: RunnerBuild::Build,
@@ -122,8 +158,10 @@ impl Default for NestedKvmCommand {
 }
 
 pub fn nested_kvm_usage() -> String {
-    "usage: cargo xtask nested-kvm [--ips N] [--host-only] [--rebuild] [--no-build]\n\
-     \x20                            [--dir PATH] [--host-ram-mib N] [--nested-ram-mib N]\n\
+    "usage: cargo xtask nested-kvm [--cpu cortex-a57|armv9.2] [--ips N] [--host-only] [--rebuild]\n\
+     \x20                            [--no-build] [--dir PATH] [--host-ram-mib N] [--nested-ram-mib N]\n\
+     \x20 --cpu MODEL          the board's processor: cortex-a57 (default; KVM in nVHE mode)\n\
+     \x20                      or armv9.2 (KVM in VHE mode)\n\
      \x20 --ips N              emulated instructions a second (default 1000000000)\n\
      \x20 --host-only          stop at the host Alpine's shell, QEMU installed\n\
      \x20 --rebuild            download and build every asset again\n\
@@ -146,6 +184,7 @@ pub fn parse_nested_kvm_args(args: &[String]) -> Result<NestedKvmCommand, String
         };
         match flag {
             "--ips" => command.ips = InstructionsPerSecond(positive(flag, value()?)?),
+            "--cpu" => command.cpu = HostCpu::parse(value()?)?,
             "--host-only" => command.target = BootTarget::HostShell,
             "--rebuild" => command.assets = Assets::Rebuild,
             "--no-build" => command.runner = RunnerBuild::Prebuilt,
@@ -545,10 +584,10 @@ fn runner(repo: &Path, build: RunnerBuild) -> Result<PathBuf, String> {
     }
 }
 
-/// The runner's command line: the Cortex-A57 with EL2 booting the ISO's
-/// kernel, and a console script that logs in, installs QEMU from the
-/// disk's tar and, for [`BootTarget::NestedGuest`], starts the nested
-/// guest. `\r` in a typed string is the runner's own escape.
+/// The runner's command line: the processor `command.cpu` names with EL2
+/// booting the ISO's kernel, and a console script that logs in, installs
+/// QEMU from the disk's tar and, for [`BootTarget::NestedGuest`], starts
+/// the nested guest. `\r` in a typed string is the runner's own escape.
 fn runner_args(work: &WorkDir, command: &NestedKvmCommand, tar_offset: u64) -> Vec<OsString> {
     let install = format!(
         "mkdir -p /tmp/q && dd if=/dev/vda bs=1M skip={tar_offset} 2>/dev/null | tar -x -C /tmp/q \
@@ -557,7 +596,7 @@ fn runner_args(work: &WorkDir, command: &NestedKvmCommand, tar_offset: u64) -> V
     );
     let mut args: Vec<OsString> = vec![
         "--cpu".into(),
-        "cortex-a57".into(),
+        command.cpu.name().into(),
         "--virtualization".into(),
         "--ips".into(),
         command.ips.0.to_string().into(),
@@ -702,6 +741,7 @@ mod tests {
         let command = parse_nested_kvm_args(&[]).expect("parse");
         assert_eq!(command, NestedKvmCommand::default());
         assert_eq!(command.ips, InstructionsPerSecond(1_000_000_000));
+        assert_eq!(command.cpu, HostCpu::CortexA57);
         assert_eq!(command.target, BootTarget::NestedGuest);
         assert_eq!(command.host_ram, Mebibytes(1024));
         assert_eq!(command.nested_ram, Mebibytes(256));
@@ -712,6 +752,8 @@ mod tests {
         let command = parse_nested_kvm_args(&args(&[
             "--ips",
             "300000000",
+            "--cpu",
+            "armv9.2",
             "--host-only",
             "--rebuild",
             "--no-build",
@@ -727,6 +769,7 @@ mod tests {
             command,
             NestedKvmCommand {
                 ips: InstructionsPerSecond(300_000_000),
+                cpu: HostCpu::Armv9p2,
                 target: BootTarget::HostShell,
                 assets: Assets::Rebuild,
                 runner: RunnerBuild::Prebuilt,
@@ -743,6 +786,30 @@ mod tests {
         assert!(parse_nested_kvm_args(&args(&["--ips", "0"])).is_err());
         assert!(parse_nested_kvm_args(&args(&["--host-ram-mib", "lots"])).is_err());
         assert!(parse_nested_kvm_args(&args(&["--nested"])).is_err());
+        assert!(parse_nested_kvm_args(&args(&["--cpu"])).is_err());
+        assert!(parse_nested_kvm_args(&args(&["--cpu", "max"])).is_err());
+    }
+
+    /// The runner gets the processor `--cpu` names, with EL2.
+    #[test]
+    fn the_runner_boots_the_processor_asked_for_with_virtualization() {
+        let work = WorkDir {
+            root: PathBuf::from("w"),
+        };
+        for (cpu, name) in [
+            (HostCpu::CortexA57, "cortex-a57"),
+            (HostCpu::Armv9p2, "armv9.2"),
+        ] {
+            let command = NestedKvmCommand {
+                cpu,
+                ..NestedKvmCommand::default()
+            };
+            let args = joined(&runner_args(&work, &command, 77));
+            let at = args.iter().position(|a| a == "--cpu").expect("--cpu");
+            assert_eq!(args[at + 1], name);
+            assert!(args.iter().any(|a| a == "--virtualization"));
+            assert_eq!(HostCpu::parse(name), Ok(cpu));
+        }
     }
 
     fn joined(args: &[OsString]) -> Vec<String> {

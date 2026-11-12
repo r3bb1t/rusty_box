@@ -111,9 +111,7 @@ use el2::El2Storage;
 pub use el2::{Levels, NoEl2, VirtualLines, WithEl2};
 pub use exception::ExceptionClass;
 pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
-pub use features::{
-    CounterRate, CpuModel, El2Unavailable, FixedCounterRate, UnknownCpuModel, SYSTEM_COUNTER_HZ,
-};
+pub use features::{CounterRate, CpuModel, FixedCounterRate, UnknownCpuModel, SYSTEM_COUNTER_HZ};
 pub use history::RecentPcs;
 pub use mmu::{Ipa, LeafLevel, Level, NoTranslation, Tlb, TranslationFault, TranslationStage};
 pub use regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, SysReg, SysRegRefusal, VReg};
@@ -689,11 +687,9 @@ pub struct Cpu<L: Levels> {
 impl<L: Levels> Cpu<L> {
     /// A processor of `model` in its reset state, with EL2 where its level
     /// set has it, and on the Cortex-A57 its PERIPHBASE where the board's
-    /// default layout has the GIC; refused for a model that cannot have EL2
-    /// when the level set does ([`CpuModel::check_levels`]).
-    pub fn new(model: CpuModel, config: CpuConfig) -> Result<Self, El2Unavailable> {
-        model.check_levels::<L>()?;
-        Ok(Self::implementing(config, model.implementation()))
+    /// default layout has the GIC. Every model can have EL2.
+    pub fn new(model: CpuModel, config: CpuConfig) -> Self {
+        Self::implementing(config, model.implementation())
     }
 
     /// A processor implementing `imp` and the levels `L`, in its reset

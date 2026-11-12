@@ -342,11 +342,17 @@ fn the_timer_node_names_the_el2_virtual_timer_with_vhe() {
             "{timers:?}"
         );
     }
-    // No model's processor has FEAT_VHE with EL2 yet: every machine names
-    // the four.
+    // The Armv9.2 model has FEAT_VHE with EL2, so its machine with EL2
+    // names the five; the Cortex-A57, without FEAT_VHE, and every model
+    // without EL2 name the four.
     for model in CpuModel::ALL {
-        assert!(
-            !model.has_el2_virtual_timer::<crate::cpu::WithEl2>(),
+        let vhe = match model {
+            CpuModel::CortexA57 => false,
+            CpuModel::Armv9p2 => true,
+        };
+        assert_eq!(
+            model.has_el2_virtual_timer::<crate::cpu::WithEl2>(),
+            vhe,
             "{model:?}"
         );
         assert!(
