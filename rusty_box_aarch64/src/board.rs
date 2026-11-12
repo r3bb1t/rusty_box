@@ -252,10 +252,10 @@ pub enum GicVersion {
     /// Extensions ([`crate::devices::gicv2`]).
     V2,
     /// A GICv3 (IHI 0069G), whose CPU interface the processor reaches
-    /// through its `ICC_*` System registers, with the GICv2m MSI frame
-    /// ([`crate::devices::gicv3`]), and on a board whose processor has EL2
-    /// the virtual interface its `ICH_*_EL2` registers program
-    /// ([`crate::devices::gicv3_virt`]).
+    /// through its `ICC_*` System registers, with LPIs and an ITS for MSIs
+    /// in place of a GICv2m frame ([`crate::devices::gicv3`]), and on a
+    /// board whose processor has EL2 the virtual interface its `ICH_*_EL2`
+    /// registers program ([`crate::devices::gicv3_virt`]).
     V3,
 }
 
@@ -456,8 +456,9 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// A board over `storage` whose RTC starts at `rtc_epoch_seconds`, with
     /// the devices `plugs` names, each naming itself as `identity` says, and
     /// the GIC `board_gic` describes, whose frames it maps, the devices
-    /// driving the SPIs `wiring` gives them and its GICv2m frame having the
-    /// rest it gives, and each virtio device in the transport `order` gives
+    /// driving the SPIs `wiring` gives them and a GICv2's GICv2m frame
+    /// having the rest it gives, and each virtio device in the transport
+    /// `order` gives
     /// it, the devices where `layout` puts them.
     pub(crate) fn new(
         storage: S,
@@ -519,7 +520,7 @@ impl<S: GuestStorage> VirtBoard<S> {
                     GicExtensions::Virtualization => Some(virtual_interface),
                     GicExtensions::Absent => None,
                 };
-                let mut gic = GicV3::with_el2(gic_shape, gic_names, Some(wiring.msi()), el2);
+                let mut gic = GicV3::with_el2(gic_shape, gic_names, el2);
                 gic.power_on_processor();
                 Some(gic)
             }
@@ -1167,8 +1168,8 @@ impl<S: GuestStorage> VirtBoard<S> {
             if let Some(off) = w.gic_v3.redist_window().offset_of(addr) {
                 return Ok(gic.redist_read(off, width));
             }
-            if let Some(off) = w.gic.v2m_window().offset_of(addr) {
-                return Ok(gic.v2m_read(off, width));
+            if let Some(off) = w.gic_v3.its_window().offset_of(addr) {
+                return Ok(gic.its_read(off, width));
             }
         }
         self.read_peripheral(w, addr, width, clock)
@@ -1348,11 +1349,15 @@ impl<S: GuestStorage> VirtBoard<S> {
                 return Ok(());
             }
             if let Some(off) = w.gic_v3.redist_window().offset_of(addr) {
-                gic.redist_write(off, width, value);
+                let mut ram = GuestRam::new(self.storage.ram_mut());
+                gic.redist_write(&mut ram, off, width, value);
+                self.dma.merge(&ram.written());
                 return Ok(());
             }
-            if let Some(off) = w.gic.v2m_window().offset_of(addr) {
-                gic.v2m_write(off, width, value);
+            if let Some(off) = w.gic_v3.its_window().offset_of(addr) {
+                let mut ram = GuestRam::new(self.storage.ram_mut());
+                gic.its_write(&mut ram, off, width, value);
+                self.dma.merge(&ram.written());
                 return Ok(());
             }
         }

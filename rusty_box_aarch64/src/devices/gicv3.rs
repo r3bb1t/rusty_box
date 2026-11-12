@@ -1,6 +1,6 @@
 //! GICv3 Distributor, Redistributor and CPU interface for one processor, in
 //! a single Security state, with the CPU interface reached through its
-//! System registers only, plus the GICv2m MSI frame.
+//! System registers only, and an ITS.
 //!
 //! Provenance (R7): the Arm Generic Interrupt Controller Architecture
 //! Specification, GIC architecture version 3 and version 4 (IHI 0069G),
@@ -20,13 +20,13 @@
 //!   `ICC_SRE_EL1.SRE` is RAO/WI, there is no IRQ or FIQ bypass
 //!   (`ICC_SRE_EL1.DIB` and `DFB` RAO/WI), and there is no memory-mapped
 //!   `GICC_*` frame.
-//! - No LPIs, so no ITS: `GICD_TYPER.LPIS` 0 and ten bits of INTID
-//!   (`GICD_TYPER.IDbits` 9, 2.2.2: "at least 5 bits ... and cannot
-//!   implement more than 10 bits of INTID" without LPIs), `GICR_CTLR`,
-//!   `GICR_PROPBASER` and `GICR_PENDBASER` RAZ/WI; no message-based SPIs
-//!   (`GICD_TYPER.MBIS` 0, `GICD_SETSPI_NSR` and the others reserved); MSIs
-//!   come through the GICv2m frame (BSA DEN0094C I.5), whose SPIs this GIC
-//!   takes as it takes a device's line.
+//! - LPIs (`GICD_TYPER.LPIS` 1, `GICR_TYPER.PLPIS` 1) with fourteen bits of
+//!   INTID (`GICD_TYPER.IDbits` 13, `num_LPIs` 0), the Redistributor's side
+//!   in [`super::gicv3_lpi`], and one ITS ([`super::gicv3_its`]) through
+//!   which every MSI comes, as BSA DEN0094C RB_GIC_03 asks of a GICv3 system
+//!   with PCI Express; no direct LPIs (`GICR_TYPER.DirectLPI` 0) and no
+//!   message-based SPIs (`GICD_TYPER.MBIS` 0, `GICD_SETSPI_NSR` and the
+//!   others reserved), and no GICv2m frame.
 //! - One Redistributor, for processor 0 at affinity 0.0.0.0, the last
 //!   (`GICR_TYPER.Last`), whose frames `RD_base` and `SGI_base` are the
 //!   128 KiB of its region; 1 of N distribution of SPIs
@@ -61,10 +61,18 @@
 //! - An end of interrupt that does not name the highest active priority's
 //!   group is ignored, and one that does drops that priority; an
 //!   `ICC_DIR_EL1` write while `EOImode` is 0 is ignored (both UNPREDICTABLE,
-//!   12.2.6, 12.2.9, 12.2.10).
+//!   12.2.6, 12.2.9, 12.2.10). An end of interrupt of a special INTID
+//!   (1020 to 1023) does nothing (`InterruptIdentifierValid`, 2.2.3).
 //! - Each reset value the specification leaves UNKNOWN is 0 — the groups'
-//!   enables, the groups (`GICR_IGROUPR0`), the routes and the active
-//!   priorities — but for the binary points, which reset to their minimum.
+//!   enables, the groups (`GICR_IGROUPR0`), the routes, the active
+//!   priorities and the LPI tables' base registers — but for the binary
+//!   points, which reset to their minimum.
+//! - LPIs, always Group 1 (5.1), take part in choosing the highest priority
+//!   pending interrupt as the other Group 1 interrupts do, under the same
+//!   group enables, an SGI, PPI or SPI winning a tie of priority by its
+//!   lower INTID; acknowledging one clears its pending state, and an end of
+//!   interrupt naming one drops the running priority alone, an LPI having no
+//!   active state.
 //! - `GICD_PIDR0` to `GICD_PIDR4` and `GICR_PIDR0` to `GICR_PIDR4` follow
 //!   the CoreLink and CoreSight identification scheme Arm recommends
 //!   (12.1.13): `ArchRev` 3, the designer and part from `GICD_IIDR`'s
@@ -73,9 +81,9 @@
 //!   a generic component.
 //! - Registers decode by aligned word; `GICD_IPRIORITYR<n>` and
 //!   `GICR_IPRIORITYR<n>` by byte too, and an 8-byte access is two word
-//!   accesses, the low first, which covers the 64-bit `GICD_IROUTER<n>` and
-//!   `GICR_TYPER` (12.1.3); any other access reads as zero and writes
-//!   nothing (UNPREDICTABLE there).
+//!   accesses, the low first, which covers the 64-bit `GICD_IROUTER<n>`,
+//!   `GICR_TYPER`, `GICR_PROPBASER` and `GICR_PENDBASER` (12.1.3); any
+//!   other access reads as zero and writes nothing (UNPREDICTABLE there).
 //!
 //! The highest-priority pending interrupt and its signalling follow the
 //! specification's pseudocode (B.7.2 `CanSignalInterrupt`,
@@ -101,24 +109,33 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
 use super::gicv2::{
-    group_mask, preempts, Bits, GicNames, GicShape, GicV2, MsiFrame, SpiCount, GICD_CTLR_EN_GRP0,
-    GICD_CTLR_EN_GRP1, IDLE_PRIORITY, MAXIRQ, MAX_APRS, MAX_IRQ, NR_SGIS, SGI_BITS, SPURIOUS,
-    V2M_MSI_SETSPI_NS, WORDS,
+    group_mask, preempts, Bits, GicNames, GicShape, SpiCount, GICD_CTLR_EN_GRP0,
+    GICD_CTLR_EN_GRP1, IDLE_PRIORITY, MAX_APRS, MAX_IRQ, NR_SGIS, SGI_BITS, SPURIOUS, WORDS,
 };
+use super::gicv3_its::Its;
+use super::gicv3_lpi::{Lpis, GICR_PENDBASER, GICR_PROPBASER, ID_BITS};
 use super::gicv3_virt::{
     PhysicalDeactivation, VirtualInterface, VirtualInterfaceShape, MAINTENANCE_INTID,
 };
 use crate::bus::{AccessWidth, GicEl1Traps, GicRegister, IccRegister, RegOffset};
 use crate::cpu::VirtualLines;
+use crate::devices::virtio::queue::GuestRam;
 
 /// `GICD_CTLR.ARE`, RAO/WI: affinity routing always.
 const GICD_CTLR_ARE: u32 = 1 << 4;
 /// `GICD_CTLR.DS`, RAO/WI: one Security state.
 const GICD_CTLR_DS: u32 = 1 << 6;
-/// `GICD_TYPER.IDbits`: ten bits of INTID, minus one.
-const GICD_TYPER_IDBITS: u32 = 9 << 19;
-/// `GICR_TYPER.Last`: the last Redistributor of its region.
+/// `GICD_TYPER.IDbits`: the INTID bits, minus one; and `LPIS`.
+const GICD_TYPER_IDBITS: u32 = (ID_BITS - 1) << 19;
+const GICD_TYPER_LPIS: u32 = 1 << 17;
+/// `GICR_TYPER.PLPIS`: physical LPIs; and `Last`, the last Redistributor of
+/// its region.
+const GICR_TYPER_PLPIS: u32 = 1 << 0;
 const GICR_TYPER_LAST: u32 = 1 << 4;
+/// `GICR_CTLR`, from `RD_base`.
+const GICR_CTLR: u64 = 0x0000;
+/// The INTIDs with a special meaning (2.2.1).
+const SPECIAL_INTIDS: core::ops::RangeInclusive<u32> = 1020..=1023;
 /// `GICR_WAKER.ProcessorSleep` and `ChildrenAsleep`.
 const GICR_WAKER_PROCESSOR_SLEEP: u32 = 1 << 1;
 const GICR_WAKER_CHILDREN_ASLEEP: u32 = 1 << 2;
@@ -221,19 +238,20 @@ pub struct GicV3 {
     /// The virtual IRQ and FIQ the virtual CPU interface signals,
     /// recomputed by [`GicV3::refresh_virtual`].
     virtual_lines: VirtualLines,
-    /// Who the GIC says made it: `GICD_IIDR` and `GICR_IIDR` read the
-    /// distributor's identification, the GICv2m frame its own.
+    /// Who the GIC says made it: `GICD_IIDR`, `GICR_IIDR` and `GITS_IIDR`
+    /// read the distributor's identification.
     names: GicNames,
     shape: GicShape,
-    msi: Option<MsiFrame>,
+    /// The Redistributor's LPIs.
+    lpis: Lpis,
+    its: Its,
 }
 
 impl GicV3 {
-    /// A GIC out of reset of `shape`, named `names`, its GICv2m frame's
-    /// SPIs `msi`, which the board found all the GIC's, for a processor
-    /// without EL2.
-    pub fn new(shape: GicShape, names: GicNames, msi: Option<MsiFrame>) -> Self {
-        Self::with_el2(shape, names, msi, None)
+    /// A GIC out of reset of `shape`, named `names`, for a processor without
+    /// EL2.
+    pub fn new(shape: GicShape, names: GicNames) -> Self {
+        Self::with_el2(shape, names, None)
     }
 
     /// [`GicV3::new`], its CPU interface with the virtualization support of
@@ -241,7 +259,6 @@ impl GicV3 {
     pub(crate) fn with_el2(
         shape: GicShape,
         names: GicNames,
-        msi: Option<MsiFrame>,
         el2: Option<VirtualInterfaceShape>,
     ) -> Self {
         let mut edge = Bits::new();
@@ -274,17 +291,18 @@ impl GicV3 {
             virtual_lines: VirtualLines::NONE,
             names,
             shape,
-            msi,
+            lpis: Lpis::new(),
+            its: Its::new(),
         };
         gic.route_all();
         gic
     }
 
-    /// A reset: the GIC out of reset with the shape, the names, the GICv2m
-    /// frame and the virtualization support it has.
+    /// A reset: the GIC out of reset with the shape, the names and the
+    /// virtualization support it has.
     pub fn reset(&mut self) {
         let el2 = self.el2.as_ref().map(VirtualInterface::shape);
-        *self = Self::with_el2(self.shape, self.names, self.msi, el2);
+        *self = Self::with_el2(self.shape, self.names, el2);
     }
 
     /// What firmware does as it powers the processor on: bring its
@@ -422,8 +440,24 @@ impl GicV3 {
 
     /// The enabled, pending, inactive interrupt of `groups` (group enable
     /// bits) with the numerically lowest priority, the lowest INTID among
-    /// equals; an SPI only where it is routed to processor 0.
+    /// equals; an SPI only where it is routed to processor 0; an LPI, of
+    /// Group 1, where it is pending and its configuration enables it.
     fn best_irq(&self, groups: u32) -> Option<usize> {
+        let line = self.best_line(groups);
+        if groups & GICD_CTLR_EN_GRP1 == 0 {
+            return line;
+        }
+        let Some(lpi) = self.lpis.best(self.shape.priority_bits.mask()) else {
+            return line;
+        };
+        match line {
+            Some(irq) if self.priority[irq] <= lpi.priority => line,
+            Some(_) | None => Some(lpi.intid as usize),
+        }
+    }
+
+    /// [`GicV3::best_irq`] of the SGIs, PPIs and SPIs alone.
+    fn best_line(&self, groups: u32) -> Option<usize> {
         let mask_of = |bit: u32| if groups & bit != 0 { u32::MAX } else { 0 };
         let (group0, group1) = (mask_of(GICD_CTLR_EN_GRP0), mask_of(GICD_CTLR_EN_GRP1));
         let mut best: Option<usize> = None;
@@ -447,12 +481,32 @@ impl GicV3 {
         best
     }
 
+    /// Whether interrupt `irq` is an LPI.
+    fn is_lpi(irq: usize) -> bool {
+        Lpis::is_lpi(irq as u32)
+    }
+
+    /// Interrupt `irq`'s priority: an LPI's from its cached configuration.
+    fn priority_of(&self, irq: usize) -> u8 {
+        if Self::is_lpi(irq) {
+            self.lpis
+                .priority(irq as u32, self.shape.priority_bits.mask())
+        } else {
+            self.priority[irq]
+        }
+    }
+
+    /// Whether interrupt `irq` is of Group 1, as every LPI is.
+    fn is_group1(&self, irq: usize) -> bool {
+        Self::is_lpi(irq) || self.group1.get(irq)
+    }
+
     /// The mask of interrupt `irq`'s group priority bits, under its group's
     /// binary point (4.8 `GroupBits`: Group 0's `ICC_BPR0_EL1`, Group 1's
     /// `ICC_BPR1_EL1` minus one, or with `CBPR` set `ICC_BPR0_EL1`).
     fn group_mask(&self, irq: usize) -> u8 {
         group_mask(
-            self.group1.get(irq),
+            self.is_group1(irq),
             self.icc_ctlr & ICC_CTLR_CBPR != 0,
             self.bpr0,
             self.bpr1,
@@ -496,7 +550,7 @@ impl GicV3 {
     /// with nothing active or a group priority higher than the running
     /// priority's under its group's binary point.
     fn can_signal(&self, irq: usize) -> bool {
-        let priority = self.priority[irq];
+        let priority = self.priority_of(irq);
         priority < self.pmr && preempts(priority, self.group_mask(irq), self.running_priority())
     }
 
@@ -516,7 +570,7 @@ impl GicV3 {
             return;
         };
         if self.can_signal(best) {
-            if self.group1.get(best) {
+            if self.is_group1(best) {
                 self.irq_out = true;
             } else {
                 self.fiq_out = true;
@@ -524,18 +578,23 @@ impl GicV3 {
         }
     }
 
-    /// Make interrupt `irq` active, its group's active priority register
-    /// recording its group priority's preemption level.
+    /// Acknowledge interrupt `irq`, its group's active priority register
+    /// recording its group priority's preemption level: an SGI, PPI or SPI
+    /// becomes active, an LPI is no longer pending.
     fn activate(&mut self, irq: usize) {
-        let level = usize::from(self.priority[irq] & self.group_mask(irq)) >> self.level_shift();
-        let bank = if self.group1.get(irq) {
+        let level = usize::from(self.priority_of(irq) & self.group_mask(irq)) >> self.level_shift();
+        let bank = if self.is_group1(irq) {
             &mut self.ap1r
         } else {
             &mut self.ap0r
         };
         bank[level / 32] |= 1 << (level % 32);
-        self.active.set(irq, true);
-        self.pending.set(irq, false);
+        if Self::is_lpi(irq) {
+            self.lpis.clear_pending(irq as u32);
+        } else {
+            self.active.set(irq, true);
+            self.pending.set(irq, false);
+        }
     }
 
     /// B.7.2 `PriorityDrop`: clear the highest active priority of the
@@ -658,7 +717,7 @@ impl GicV3 {
     /// (2.2.1).
     fn acknowledge(&mut self, group1: bool) -> u32 {
         match self.hppi {
-            Some(irq) if self.group1.get(irq) == group1 && self.can_signal(irq) => {
+            Some(irq) if self.is_group1(irq) == group1 && self.can_signal(irq) => {
                 self.activate(irq);
                 self.update();
                 irq as u32
@@ -673,7 +732,7 @@ impl GicV3 {
     /// 1023 otherwise.
     fn highest_pending(&self, group1: bool) -> u32 {
         match self.hppi {
-            Some(irq) if self.group1.get(irq) == group1 => irq as u32,
+            Some(irq) if self.is_group1(irq) == group1 => irq as u32,
             Some(_) | None => SPURIOUS,
         }
     }
@@ -681,10 +740,11 @@ impl GicV3 {
     /// `ICC_EOIR0_EL1` or `ICC_EOIR1_EL1` naming `value`'s INTID: a
     /// priority drop of the group's highest active priority, where it is
     /// the highest active priority, and unless `EOImode` splits the two, a
-    /// deactivation. A special INTID needs no end of interrupt (2.2.1).
+    /// deactivation, which an LPI, having no active state, does not need. A
+    /// special INTID needs no end of interrupt (2.2.1).
     fn end_of_interrupt(&mut self, group1: bool, value: u32) {
         let intid = value & 0xFF_FFFF;
-        if intid >= MAXIRQ || self.highest_active_group1() != Some(group1) {
+        if SPECIAL_INTIDS.contains(&intid) || self.highest_active_group1() != Some(group1) {
             return;
         }
         self.drop_priority(group1);
@@ -753,11 +813,12 @@ impl GicV3 {
         (n != 0 && n < self.shape.words()).then_some(n)
     }
 
-    /// `GICD_TYPER`: `ITLinesNumber` from the SPIs, ten INTID bits, and
-    /// every other field 0 (one Security state, no LPIs, no message-based
-    /// SPIs, 1 of N supported, no affinity level 3, no range selectors).
+    /// `GICD_TYPER`: `ITLinesNumber` from the SPIs, fourteen INTID bits,
+    /// LPIs, and every other field 0 (one Security state, the LPIs the INTID
+    /// bits number, no message-based SPIs, 1 of N supported, no affinity
+    /// level 3, no range selectors).
     fn dist_typer(&self) -> u32 {
-        GICD_TYPER_IDBITS | (self.shape.words() as u32 - 1)
+        GICD_TYPER_IDBITS | GICD_TYPER_LPIS | (self.shape.words() as u32 - 1)
     }
 
     fn dist_word(&self, off: u64) -> u32 {
@@ -951,15 +1012,23 @@ impl GicV3 {
         }
     }
 
-    pub fn redist_write(&mut self, offset: RegOffset, width: AccessWidth, value: u64) {
+    /// A write of the Redistributor's frames, which reach guest `ram` for
+    /// its LPI tables.
+    pub(crate) fn redist_write(
+        &mut self,
+        ram: &mut GuestRam<'_>,
+        offset: RegOffset,
+        width: AccessWidth,
+        value: u64,
+    ) {
         let off = offset.get();
         match width {
             AccessWidth::Byte => self.set_redist_priority_byte(off, value as u8),
             AccessWidth::Half => {}
-            AccessWidth::Word => self.redist_write_word(off, value as u32),
+            AccessWidth::Word => self.redist_write_word(ram, off, value as u32),
             AccessWidth::Dword => {
-                self.redist_write_word(off, value as u32);
-                self.redist_write_word(off + 4, (value >> 32) as u32);
+                self.redist_write_word(ram, off, value as u32);
+                self.redist_write_word(ram, off + 4, (value >> 32) as u32);
             }
         }
         self.update();
@@ -971,11 +1040,17 @@ impl GicV3 {
         }
         let word0 = |bits: &Bits| bits.0[0];
         match off {
+            GICR_CTLR => self.lpis.ctlr(),
             // `GICR_IIDR`.
             0x0004 => self.names.gic.distributor.get(),
-            // `GICR_TYPER`: the last Redistributor, of processor 0, at
-            // affinity 0.0.0.0 (the high word), with no LPIs.
-            0x0008 => GICR_TYPER_LAST,
+            // `GICR_TYPER`: the last Redistributor, of processor 0 (its
+            // `Processor_Number`), at affinity 0.0.0.0 (the high word), with
+            // physical LPIs, its LPI Configuration table shared with every
+            // other Redistributor (`CommonLPIAff` 0), and no direct LPIs.
+            0x0008 => GICR_TYPER_LAST | GICR_TYPER_PLPIS,
+            o if o & !7 == GICR_PROPBASER || o & !7 == GICR_PENDBASER => {
+                self.lpis.base_word(o & !7, (o >> 2) & 1)
+            }
             0x0014 => match self.sleep {
                 ProcessorSleep::Awake => 0,
                 ProcessorSleep::Asleep => GICR_WAKER_PROCESSOR_SLEEP | GICR_WAKER_CHILDREN_ASLEEP,
@@ -993,8 +1068,8 @@ impl GicV3 {
                 }),
             o if o == SGI_BASE + ICFGR => self.config_word(0, Frame::Redistributor),
             o if o == SGI_BASE + ICFGR + 4 => self.config_word(1, Frame::Redistributor),
-            // `GICR_CTLR`, `GICR_STATUSR`, the LPI registers, the group
-            // modifiers and the Non-secure access control: RAZ/WI.
+            // `GICR_STATUSR`, the direct LPI registers, the group modifiers
+            // and the Non-secure access control: RAZ/WI.
             _ => 0,
         }
     }
@@ -1017,13 +1092,17 @@ impl GicV3 {
         }
     }
 
-    fn redist_write_word(&mut self, off: u64, v: u32) {
+    fn redist_write_word(&mut self, ram: &mut GuestRam<'_>, off: u64, v: u32) {
         if !off.is_multiple_of(4) {
             return;
         }
         // The SGIs' and PPIs' bits that exist, of a bank's word.
         let ids = v & self.shape.implemented_word(0);
         match off {
+            GICR_CTLR => self.lpis.write_ctlr(ram, v),
+            o if o & !7 == GICR_PROPBASER || o & !7 == GICR_PENDBASER => {
+                self.lpis.write_base_word(o & !7, (o >> 2) & 1, v);
+            }
             0x0014 => {
                 self.sleep = if v & GICR_WAKER_PROCESSOR_SLEEP != 0 {
                     ProcessorSleep::Asleep
@@ -1049,44 +1128,25 @@ impl GicV3 {
         }
     }
 
-    // ----- the GICv2m MSI frame -----
+    // ----- the ITS -----
 
-    /// A read of the frame, as the GICv2's ([`GicV2::v2m_read`]).
-    pub fn v2m_read(&mut self, offset: RegOffset, width: AccessWidth) -> u64 {
-        let off = offset.get();
-        let (msi, iidr) = (self.msi, self.names.msi_frame);
-        match width {
-            AccessWidth::Byte | AccessWidth::Half => 0,
-            AccessWidth::Word => u64::from(GicV2::v2m_register(off, msi, iidr)),
-            AccessWidth::Dword => {
-                u64::from(GicV2::v2m_register(off, msi, iidr))
-                    | u64::from(GicV2::v2m_register(off + 4, msi, iidr)) << 32
-            }
-        }
+    /// A read of the ITS's frames.
+    pub fn its_read(&self, offset: RegOffset, width: AccessWidth) -> u64 {
+        self.its.read(self.names, offset, width)
     }
 
-    /// A write of the frame, as the GICv2's ([`GicV2::v2m_write`]):
-    /// `MSI_SETSPI_NS` pulses the SPI's line.
-    pub fn v2m_write(&mut self, offset: RegOffset, width: AccessWidth, value: u64) {
-        let off = offset.get();
-        match width {
-            AccessWidth::Byte => {}
-            AccessWidth::Half | AccessWidth::Word => self.v2m_write_register(off, value as u32),
-            AccessWidth::Dword => {
-                self.v2m_write_register(off, value as u32);
-                self.v2m_write_register(off + 4, (value >> 32) as u32);
-            }
-        }
-    }
-
-    fn v2m_write_register(&mut self, off: u64, v: u32) {
-        if off == V2M_MSI_SETSPI_NS {
-            let spi = v & 0x3FF;
-            if self.msi.is_some_and(|msi| msi.holds(spi)) {
-                self.set_line(spi, true);
-                self.set_line(spi, false);
-            }
-        }
+    /// A write of the ITS's frames: the commands it starts and the
+    /// translation it asks for, against the Redistributor and guest `ram`,
+    /// and the interrupts they make pending signalled.
+    pub(crate) fn its_write(
+        &mut self,
+        ram: &mut GuestRam<'_>,
+        offset: RegOffset,
+        width: AccessWidth,
+        value: u64,
+    ) {
+        self.its.write(&mut self.lpis, ram, offset, width, value);
+        self.update();
     }
 
     // ----- snapshots -----
@@ -1112,6 +1172,8 @@ impl GicV3 {
         for route in self.route {
             w.write_u64(route)?;
         }
+        self.lpis.save(w)?;
+        self.its.save(w)?;
         match &self.el2 {
             Some(el2) => el2.save(w),
             None => Ok(()),
@@ -1131,8 +1193,9 @@ impl GicV3 {
     }
 
     /// Reads the GIC's whole section of the image, refuses it if
-    /// [`GicV3::check_restored`] does, and only then replaces this GIC's
-    /// state: a refused or truncated section changes nothing here.
+    /// [`GicV3::check_restored`], [`Lpis::restore`] or [`Its::restore`]
+    /// does, and only then replaces this GIC's state: a refused or
+    /// truncated section changes nothing here.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
         let dist_ctlr = r.read_u32()?;
         let sleep = match r.read_u8()? {
@@ -1167,6 +1230,8 @@ impl GicV3 {
         for entry in route.iter_mut() {
             *entry = r.read_u64()?;
         }
+        let lpis = Lpis::restore(r)?;
+        let its = Its::restore(r)?;
         let el2 = match &self.el2 {
             Some(el2) => Some(VirtualInterface::restore(el2.shape(), r)?),
             None => None,
@@ -1197,7 +1262,8 @@ impl GicV3 {
             virtual_lines: VirtualLines::NONE,
             names: self.names,
             shape: self.shape,
-            msi: self.msi,
+            lpis,
+            its,
         };
         restored.check_restored()?;
         restored.route_all();
@@ -1314,7 +1380,7 @@ fn set_or_clear(bits: &mut Bits, n: usize, v: u32, set: bool) {
 /// JEDEC bit where the designer has a JEP106 code, and `ArchRev`), `PIDR3`
 /// 0, then `CIDR0` to `CIDR3`. The designer and part are `GICD_IIDR`'s
 /// implementer and product.
-fn identification(names: GicNames, index: u64, size_log2: u32) -> u32 {
+pub(super) fn identification(names: GicNames, index: u64, size_log2: u32) -> u32 {
     let iidr = names.gic.distributor.fields();
     let identity = u32::from(iidr.jep106_identity);
     let continuation = u32::from(iidr.jep106_continuation);

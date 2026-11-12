@@ -107,7 +107,9 @@ pub struct VirtConfig {
     pub gic_version: GicVersion,
     /// The SPIs the devices drive, and the GICv2m frame's, which the GIC
     /// must have for the layout's virtio transports
-    /// ([`InterruptMap::check`]); [`InterruptMap::own`] gives a layout the
+    /// ([`InterruptMap::check`]); a GICv3 board has an ITS for MSIs instead
+    /// of the frame, and its SPIs are left unused; [`InterruptMap::own`]
+    /// gives a layout the
     /// board's own. A host's device tree ([`MachineBuilder::device_tree`])
     /// names the devices' interrupts itself, and is refused where it names
     /// others ([`BuildError::HostTreeInterrupt`]).
@@ -541,7 +543,9 @@ impl<'i, B, L: Levels, I> MachineBuilder<'i, B, L, I> {
     /// [`BoardIdentity::RUSTY_BOX`]: what the device tree gives as `/model`
     /// and root `compatible`, the board's tree or one the host gives
     /// ([`MachineBuilder::device_tree`]), every virtio-mmio transport's
-    /// `VendorID`, the GICv2m frame's `MSI_IIDR`, the virtio keyboard's and
+    /// `VendorID`, the GIC's identification registers (a GICv3's ITS's
+    /// `GITS_IIDR` among them), the GICv2m frame's `MSI_IIDR`, the virtio
+    /// keyboard's and
     /// tablet's names, vendor, products and versions, and the virtio
     /// display's EDID maker, product, name and date. The identity
     /// is part of the machine's shape: a snapshot restores only into a
@@ -1057,8 +1061,9 @@ fn describe(
 /// GICv2's distributor, CPU interface, virtual interface control and
 /// virtual CPU interface, a GICv3's distributor and Redistributor region;
 /// every other device's first region. A child whose `reg` holds no such address is none
-/// of the board's. The GICv2m frame, which no device of the board's empty
-/// bus sends an MSI to, the tree places as it likes. A device's
+/// of the board's. The GICv2m frame and the ITS, children of the GIC's node
+/// to which no device of the board's empty bus sends an MSI, the tree
+/// places as it likes. A device's
 /// interrupt is the first its `interrupts-extended`
 /// names (2.4.1.3), which Linux reads before `interrupts`
 /// (`of_irq_parse_one`), or else its `interrupts` first specifier, whose
@@ -3039,7 +3044,12 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// firmware speculation report, GIC version and shape, interrupt map with
 /// the count of transports it wires, device layout and occupied transports,
 /// and the board's devices: the GIC — a GICv2 with its Virtualization
-/// Extensions where it has them, or a GICv3 with its Redistributor and CPU
+/// Extensions where it has them, or a GICv3 with its Redistributor, its
+/// LPIs (`GICR_CTLR.EnableLPIs`, `GICR_PROPBASER`, `GICR_PENDBASER`, the
+/// LPI configuration the Redistributor caches and the pending LPIs), its
+/// ITS's registers (`GITS_CTLR.Enabled`, `GITS_CBASER`, `GITS_CWRITER`,
+/// `GITS_CREADR` with `Stalled`, `GITS_BASER0` and `GITS_BASER1`; its
+/// tables are guest memory) and its CPU
 /// interface, and where the processor has EL2 the CPU interface's
 /// virtualization support (`ICH_HCR_EL2`, `ICH_VMCR_EL2`, the active
 /// priority registers, the List registers of the processor's virtual
@@ -3065,8 +3075,10 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
 /// rule (FEAT_S2FWB), whose stage 2 contexts hold `FWB`, and `VNCR_EL2`
 /// (FEAT_NV2) with the EL1&0 contexts' `HCR_EL2.NV` and `NV1` (FEAT_NV),
 /// and on a GICv3 board with EL2 the CPU interface's virtualization
-/// support and `HFGRTR_EL2` and `HFGWTR_EL2` with `ICC_IGRPENn_EL1`.
-const SNAPSHOT_VERSION: u32 = 41;
+/// support and `HFGRTR_EL2` and `HFGWTR_EL2` with `ICC_IGRPENn_EL1`, and
+/// on a GICv3 board its LPIs and its ITS, with the fourteen INTID bits of
+/// its `GICD_TYPER` and no GICv2m frame.
+const SNAPSHOT_VERSION: u32 = 42;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

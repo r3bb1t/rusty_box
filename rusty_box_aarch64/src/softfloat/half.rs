@@ -36,6 +36,13 @@
 //! The conversions from an integer, which Arm defines as FixedToFP with
 //! FPRound, round the exact value once here, since a 64-bit integer may
 //! need more bits than double precision has.
+//!
+//! The arithmetic the precision dispatchers of `cpu::fp` (`fp_binary`,
+//! `fp_mul_add`) call is kept out of line (`#[inline(never)]`): inlined
+//! into a dispatcher, a half-precision operation's unpacking and rounding
+//! bring their register saves to the dispatcher's every call, the single-
+//! and double-precision ones included, and whether LLVM inlines them
+//! otherwise turns on which codegen unit each module falls in.
 
 use super::arm_ops::clamp_scale;
 use super::f64_to_f16;
@@ -153,21 +160,25 @@ fn is_nan_f16(a: u16) -> bool {
 }
 
 /// FADD (half). Arm FPAdd.
+#[inline(never)]
 pub(crate) fn f16_add(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
     rounded(fp, |fp| super::f64_add(unpack(a, fp), unpack(b, fp), fp))
 }
 
 /// FSUB (half). Arm FPSub.
+#[inline(never)]
 pub(crate) fn f16_sub(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
     rounded(fp, |fp| super::f64_sub(unpack(a, fp), unpack(b, fp), fp))
 }
 
 /// FMUL (half). Arm FPMul.
+#[inline(never)]
 pub(crate) fn f16_mul(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
     rounded(fp, |fp| super::f64_mul(unpack(a, fp), unpack(b, fp), fp))
 }
 
 /// FDIV (half). Arm FPDiv.
+#[inline(never)]
 pub(crate) fn f16_div(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
     rounded(fp, |fp| super::f64_div(unpack(a, fp), unpack(b, fp), fp))
 }
@@ -210,6 +221,7 @@ pub(crate) fn f16_log_b(a: u16, fp: &mut ArmFpStatus) -> u16 {
 
 /// FMADD/FMSUB/FNMADD/FNMSUB (half) and FMLA/FMLS, `addend` being Ra (or
 /// Vd). Arm FPMulAdd after the form's operand negations.
+#[inline(never)]
 pub(crate) fn f16_mul_add(
     form: FusedMulAdd,
     addend: u16,
@@ -245,26 +257,31 @@ fn f16_min_max(a: u16, b: u16, extreme: Extreme, fp: &mut ArmFpStatus) -> u16 {
 }
 
 /// FMAX (half). Arm FPMax.
+#[inline(never)]
 pub(crate) fn f16_max(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
     f16_min_max(a, b, Extreme::Max, fp)
 }
 
 /// FMIN (half). Arm FPMin.
+#[inline(never)]
 pub(crate) fn f16_min(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
     f16_min_max(a, b, Extreme::Min, fp)
 }
 
 /// FMAXNM (half). Arm FPMaxNum.
+#[inline(never)]
 pub(crate) fn f16_maxnum(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
     rounded(fp, |fp| super::f64_maxnum(unpack(a, fp), unpack(b, fp), fp))
 }
 
 /// FMINNM (half). Arm FPMinNum.
+#[inline(never)]
 pub(crate) fn f16_minnum(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
     rounded(fp, |fp| super::f64_minnum(unpack(a, fp), unpack(b, fp), fp))
 }
 
 /// FMULX (half). Arm FPMulX.
+#[inline(never)]
 pub(crate) fn f16_mulx(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
     rounded(fp, |fp| super::f64_mulx(unpack(a, fp), unpack(b, fp), fp))
 }

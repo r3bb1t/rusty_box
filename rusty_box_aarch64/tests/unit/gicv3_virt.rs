@@ -9,6 +9,7 @@ use super::*;
 use crate::bus::{AccessWidth, GicRegister, GicTrap, IccRegister, RegOffset};
 use crate::devices::gicv2::{GicNames, GicShape};
 use crate::devices::gicv3::GicV3;
+use crate::devices::virtio::queue::GuestRam;
 
 const A57: VirtualInterfaceShape = VirtualInterfaceShape::CORTEX_A57;
 /// The Armv9.2 model's on a CPU interface of eight priority bits: seven
@@ -464,11 +465,13 @@ fn a_snapshot_round_trips_and_refuses_bits_no_field_holds() {
 /// controls are what the registers say.
 #[test]
 fn the_gic_wires_maintenance_hardware_deactivation_and_traps() {
-    let mut g = GicV3::with_el2(GicShape::DEFAULT, GicNames::NONE, None, Some(A57));
+    let mut g = GicV3::with_el2(GicShape::DEFAULT, GicNames::NONE, Some(A57));
     g.power_on_processor();
     const SGI_BASE: u64 = 0x1_0000;
     let redist = |g: &mut GicV3, off: u64, v: u32| {
-        g.redist_write(RegOffset::new(off), AccessWidth::Word, u64::from(v));
+        let mut no_ram: [u8; 0] = [];
+        let mut ram = GuestRam::new(&mut no_ram);
+        g.redist_write(&mut ram, RegOffset::new(off), AccessWidth::Word, u64::from(v));
     };
     let redist_get =
         |g: &mut GicV3, off: u64| g.redist_read(RegOffset::new(off), AccessWidth::Word) as u32;
@@ -548,19 +551,19 @@ fn the_gic_wires_maintenance_hardware_deactivation_and_traps() {
     // The whole GIC's snapshot, its virtual interface in it.
     let mut image = std::vec::Vec::new();
     g.save(&mut image).expect("save");
-    let mut other = GicV3::with_el2(GicShape::DEFAULT, GicNames::NONE, None, Some(A57));
+    let mut other = GicV3::with_el2(GicShape::DEFAULT, GicNames::NONE, Some(A57));
     let mut source: &[u8] = &image;
     other.restore(&mut source).expect("restore");
     assert_eq!(
         other.register_read(GicRegister::Control(IchRegister::Hcr)),
         HCR_TC | HCR_TALL1
     );
-    let plain = GicV3::new(GicShape::DEFAULT, GicNames::NONE, None);
+    let plain = GicV3::new(GicShape::DEFAULT, GicNames::NONE);
     let mut shorter = std::vec::Vec::new();
     plain.save(&mut shorter).expect("save");
     let mut source: &[u8] = &shorter;
     assert!(
-        GicV3::with_el2(GicShape::DEFAULT, GicNames::NONE, None, Some(A57))
+        GicV3::with_el2(GicShape::DEFAULT, GicNames::NONE, Some(A57))
             .restore(&mut source)
             .is_err(),
         "a GIC with the virtual interface takes no image without it"

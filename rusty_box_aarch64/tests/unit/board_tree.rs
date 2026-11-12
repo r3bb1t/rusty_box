@@ -711,17 +711,27 @@ fn gic_v3_board(layout: DeviceLayout, gic: GicExtensions) -> Vec<u8> {
 /// A board with a GICv3 describes it by the `arm,gic-v3` binding: the
 /// distributor's 64 KiB and the one Redistributor region's 128 KiB, where
 /// the layout has them, `#redistributor-regions` 1, no CPU interface frame
-/// and no maintenance interrupt (no EL2), the GICv2m frame its child; and
-/// every PPI specifier without the GICv2 binding's CPU mask.
+/// and no maintenance interrupt (no EL2), its ITS its child (an
+/// `arm,gic-v3-its` MSI controller of one specifier cell, its two frames'
+/// 128 KiB), and no GICv2m frame; the PCIe host's `msi-map` maps every
+/// requester ID to the ITS's DeviceID of the same value; and every PPI
+/// specifier is without the GICv2 binding's CPU mask.
 #[test]
 fn a_gicv3_is_described_by_its_binding() {
-    for (layout, gic, redist, msi) in [
-        (DeviceLayout::Board, 0x0800_0000, 0x080A_0000, 0x0801_0000),
+    for (layout, gic, redist, its, pcie) in [
+        (
+            DeviceLayout::Board,
+            0x0800_0000,
+            0x080A_0000,
+            0x080C_0000,
+            "pcie@4000000000",
+        ),
         (
             DeviceLayout::QemuVirt,
             0x0800_0000,
             0x080A_0000,
-            0x0802_0000,
+            0x0808_0000,
+            "pcie@4010000000",
         ),
     ] {
         let tree = gic_v3_board(layout, GicExtensions::Absent);
@@ -750,16 +760,29 @@ fn a_gicv3_is_described_by_its_binding() {
             None,
             "no maintenance interrupt"
         );
-        let frame = format!("{node}/msi-controller@{msi:x}");
+        let msi = format!("{node}/msi-controller@{its:x}");
         assert_eq!(
-            prop(&tree, &frame, "compatible"),
-            Some(&b"arm,gic-v2m-frame\0"[..]),
+            prop(&tree, &msi, "compatible"),
+            Some(&b"arm,gic-v3-its\0"[..]),
             "{layout}"
         );
         assert_eq!(
-            prop(&tree, &frame, "reg").map(cells),
-            Some(vec![0, msi, 0, 0x1000])
+            prop(&tree, &msi, "reg").map(cells),
+            Some(vec![0, its, 0, 0x2_0000])
         );
+        assert_eq!(prop(&tree, &msi, "msi-controller"), Some(&[][..]));
+        assert_eq!(prop(&tree, &msi, "#msi-cells").map(cells), Some(vec![1]));
+        assert!(
+            !tree.windows(17).any(|w| w == b"arm,gic-v2m-frame"),
+            "{layout}: no GICv2m frame"
+        );
+        let its_phandle = prop(&tree, &msi, "phandle").map(cells).expect("a phandle");
+        assert_eq!(
+            prop(&tree, pcie, "msi-map").map(cells),
+            Some(vec![0, its_phandle[0], 0, 0x1_0000]),
+            "{layout}"
+        );
+        assert_eq!(prop(&tree, pcie, "msi-parent"), None, "{layout}");
         let phandle = prop(&tree, &node, "phandle").map(cells).expect("a phandle");
         assert_eq!(
             prop(&tree, "", "interrupt-parent").map(cells),

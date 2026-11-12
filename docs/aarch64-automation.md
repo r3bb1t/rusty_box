@@ -183,7 +183,8 @@ they allow, its default the board's:
   (IHI 0069G) whose CPU interface the processor reaches through its
   `ICC_*_EL1` System registers (`ID_AA64PFR0_EL1.GIC` 1), its
   distributor at 0x0800_0000 and its Redistributor at 0x080A_0000 on
-  both layouts, with the GICv2m frame for MSIs and no ITS. A processor
+  both layouts, with LPIs and an ITS for MSIs (at 0x080C_0000 on the
+  board's own layout, 0x0808_0000 on QEMU's) and no GICv2m frame. A processor
   with EL2 has its CPU interface's virtualization support too
   (`ICH_*_EL2`, the `ICV_*_EL1` registers under `HCR_EL2.IMO`/`FMO`,
   `ICC_SRE_EL2`, the maintenance interrupt on PPI 25), and the
@@ -193,7 +194,8 @@ they allow, its default the board's:
   the RTC, the GPIO; the first of the layout's virtio transports' and of
   the PCIe host's INTA to INTD), and the GICv2m frame's `MsiSpis`, its
   first SPI and how far they run (`MsiExtent::ToTheLast` or a `MsiCount`
-  of 1 to 1023), which `MSI_TYPER` reports. The board's own for a layout,
+  of 1 to 1023), which `MSI_TYPER` reports (a GICv3 board, which has an
+  ITS instead, leaves them unused). The board's own for a layout,
   `InterruptMap::own(layout)`, gives the devices SPIs from 0 in the order
   of their registers' addresses and the frame every SPI from the first
   after them whose interrupt ID is a multiple of the 32 vectors a PCI

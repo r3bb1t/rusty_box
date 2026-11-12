@@ -1677,7 +1677,7 @@ fn processor<L: Levels>(imp: LeveledImplementation<L>) -> (Cpu<L>, Ram) {
                 spis: GicShape::DEFAULT.spis,
                 priority_bits: interface.priority_bits,
             };
-            let mut gic = GicV3::with_el2(shape, GicNames::NONE, None, el2);
+            let mut gic = GicV3::with_el2(shape, GicNames::NONE, el2);
             gic.power_on_processor();
             Some(gic)
         }

@@ -1,7 +1,7 @@
 //! What a guest reads of who made its machine (R9: each test asserts what
 //! the guest sees): the device tree's `/model` and root `compatible`, the
 //! virtio-mmio `VendorID`, the GIC's `GICD_IIDR`, `GICC_IIDR` and `GICV_IIDR`
-//! (a GICv3's `GICD_IIDR`, `GICR_IIDR` and peripheral IDs), the
+//! (a GICv3's `GICD_IIDR`, `GICR_IIDR`, `GITS_IIDR` and peripheral IDs), the
 //! GICv2m frame's `MSI_IIDR`, the flash's manufacturer and device codes,
 //! and the input
 //! devices' names, vendor, products and versions are the board's
@@ -346,11 +346,12 @@ fn the_gic_reads_the_identitys_iidrs() {
 }
 
 /// A GICv3's identification registers are the identity's too: its
-/// distributor's `GICD_IIDR` and its Redistributor's `GICR_IIDR` read the
-/// identity's `GICD_IIDR` (IHI 0069G 12.9.21, 12.11.16), and their
-/// `GICD_PIDR2` and `GICR_PIDR2` name its implementer in the CoreSight
-/// scheme beside `ArchRev` 3 (12.1.13) — by default no implementer, where
-/// QEMU's name Arm; and its GICv2m frame's `MSI_IIDR` is the identity's.
+/// distributor's `GICD_IIDR`, its Redistributor's `GICR_IIDR` and its
+/// ITS's `GITS_IIDR` read the identity's `GICD_IIDR` (IHI 0069G 12.9.21,
+/// 12.11.16, 12.19.6), and their `GICD_PIDR2`, `GICR_PIDR2` and
+/// `GITS_PIDR2` name its implementer in the CoreSight scheme beside
+/// `ArchRev` 3 (12.1.13) — by default no implementer, where QEMU's name
+/// Arm.
 #[test]
 fn a_gicv3_reads_the_identitys_iidrs() {
     let distributor = GicDistIidr::new(GicDistFields {
@@ -376,6 +377,7 @@ fn a_gicv3_reads_the_identitys_iidrs() {
     let windows = v3.layout.windows();
     let gicd = windows.gic_v3.dist.get();
     let gicr = windows.gic_v3.redist.get();
+    let gits = windows.gic_v3.its.get();
     // PIDR2: ArchRev 3 in [7:4], the JEDEC bit [3] and DES_1, the identity
     // code's bits [6:4], in [2:0]; PIDR0 the part, the product.
     for (identity, iidr, pidr2, pidr0) in [
@@ -397,7 +399,9 @@ fn a_gicv3_reads_the_identitys_iidrs() {
         assert_eq!(guest_load(&mut m, gicd + 0xFFE8), pidr2, "GICD_PIDR2");
         assert_eq!(guest_load(&mut m, gicr + 0xFFE8), pidr2, "GICR_PIDR2");
         assert_eq!(guest_load(&mut m, gicd + 0xFFE0), pidr0, "GICD_PIDR0");
-        assert_eq!(guest_load(&mut m, GIC_V2M_BASE + MSI_IIDR), 0, "MSI_IIDR");
+        assert_eq!(guest_load(&mut m, gits + 0x004), iidr, "GITS_IIDR");
+        assert_eq!(guest_load(&mut m, gits + 0xFFE8), pidr2, "GITS_PIDR2");
+        assert_eq!(guest_load(&mut m, gits + 0xFFE0), pidr0, "GITS_PIDR0");
     }
 }
 

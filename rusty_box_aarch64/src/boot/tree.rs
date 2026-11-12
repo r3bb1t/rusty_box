@@ -18,8 +18,8 @@
 //! product the binding names otherwise has, and this one is the string
 //! EDK2's GIC discovery looks for, `ArmVirtGicPlatformDxe` on its master
 //! branch and `ArmVirtGicArchLib` in releases before it), or on a board
-//! with a GICv3 `arm,gic-v3`,
-//! `arm,gic-v2m-frame`,
+//! with a GICv3 `arm,gic-v3` with its `arm,gic-v3-its`, or else
+//! `arm,gic-v2m-frame`, the PCI MSI binding's `msi-map` or `msi-parent`,
 //! `arm,armv8-timer`, `arm,psci-1.0` and `arm,psci-0.2`
 //! ([`PSCI_COMPATIBLE`]),
 //! `arm,pl011`, `arm,pl031`, `arm,pl061` with `arm,primecell`,
@@ -465,7 +465,7 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
 
     match tree.gic_version {
         GicVersion::V2 => gic(&mut w, tree.gic, windows.gic)?,
-        GicVersion::V3 => gic_v3(&mut w, tree.gic, windows.gic_v3, windows.gic)?,
+        GicVersion::V3 => gic_v3(&mut w, tree.gic, windows.gic_v3)?,
     }
 
     w.begin("clock")?;
@@ -522,7 +522,7 @@ pub(crate) fn write(tree: &BoardTree<'_>, out: &mut [u8]) -> Result<usize, Devic
     w.cell("bank-width", 4)?;
     w.end()?;
 
-    pcie(&mut w, tree.wiring, windows)?;
+    pcie(&mut w, tree.wiring, windows, tree.gic_version)?;
 
     for n in 0..windows.virtio.count.get() {
         // Its `reg` is the window it decodes, its layout's stride.
@@ -648,16 +648,15 @@ fn gic(
 }
 
 /// A GICv3 (the `arm,gic-v3` binding): its distributor's frame and its one
-/// Redistributor region (`#redistributor-regions` 1), and the GICv2m MSI
-/// frame; with the CPU interface's virtualization support (a processor
-/// with EL2), its maintenance interrupt, PPI 9 (INTID 25), level-high in
-/// the binding's GICv3 form. No `GICC`, `GICH` or `GICV` frame: its CPU
-/// interface has no memory-mapped form.
+/// Redistributor region (`#redistributor-regions` 1), and its ITS; with the
+/// CPU interface's virtualization support (a processor with EL2), its
+/// maintenance interrupt, PPI 9 (INTID 25), level-high in the binding's
+/// GICv3 form. No `GICC`, `GICH` or `GICV` frame: its CPU interface has no
+/// memory-mapped form.
 fn gic_v3(
     w: &mut Writer<'_>,
     extensions: GicExtensions,
     gic: GicV3Windows,
-    v2: GicWindows,
 ) -> Result<(), DeviceTreeError> {
     w.begin_at("interrupt-controller", gic.dist.get())?;
     w.string("compatible", "arm,gic-v3")?;
@@ -675,7 +674,20 @@ fn gic_v3(
         }
     }
     w.cell("phandle", PHANDLE_GIC)?;
-    msi_frame(w, v2)?;
+    its(w, gic)?;
+    w.end()
+}
+
+/// A GICv3's ITS, a child of its node (the `arm,gic-v3` binding's
+/// `arm,gic-v3-its`): an MSI controller whose one specifier cell is the
+/// DeviceID, its two frames its `reg`.
+fn its(w: &mut Writer<'_>, gic: GicV3Windows) -> Result<(), DeviceTreeError> {
+    w.begin_at("msi-controller", gic.its.get())?;
+    w.string("compatible", "arm,gic-v3-its")?;
+    w.flag("msi-controller")?;
+    w.cell("#msi-cells", 1)?;
+    w.window("reg", gic.its_window())?;
+    w.cell("phandle", PHANDLE_MSI)?;
     w.end()
 }
 
@@ -707,12 +719,13 @@ const fn ppi(version: GicVersion, intid: u32) -> [u32; 3] {
 /// non-prefetchable and 64-bit prefetchable memory windows; INTA to INTD
 /// of each device slot swizzled onto the
 /// bridge's four SPIs, which `wiring` gives, as the PCI-to-PCI bridge
-/// specification routes a device's pins; and MSIs through the GIC's MSI
-/// frame.
+/// specification routes a device's pins; and MSIs through a GICv2's MSI
+/// frame or a GICv3's ITS.
 fn pcie(
     w: &mut Writer<'_>,
     wiring: Wiring,
     windows: DeviceWindows,
+    gic: GicVersion,
 ) -> Result<(), DeviceTreeError> {
     /// `ranges` space codes in the first child address cell (PCI bus
     /// binding: `ss` in phys.hi), and its `p` bit, bit 30, for memory that
@@ -725,6 +738,8 @@ fn pcie(
     /// and its pin, the GIC's phandle, its two address cells and its three
     /// interrupt cells.
     const ENTRY: usize = 10;
+    /// The PCI Express Requester IDs: 16 bits of bus, device and function.
+    const REQUESTER_IDS: u32 = 1 << 16;
     /// One `ranges` entry: its space code and the child address, then the
     /// window's address and size, each 64-bit value two cells
     /// ([`cells_of`]).
@@ -784,9 +799,18 @@ fn pcie(
     }
     w.cells("interrupt-map", &map)?;
     w.cells("interrupt-map-mask", &[3 << 11, 0, 0, 7])?;
-    // The MSI frame takes no MSI specifier, so it is the bus's MSI parent
-    // for every requester ID, not a map's target.
-    w.cell("msi-parent", PHANDLE_MSI)?;
+    match gic {
+        // The MSI frame takes no MSI specifier, so it is the bus's MSI
+        // parent for every requester ID, not a map's target.
+        GicVersion::V2 => w.cell("msi-parent", PHANDLE_MSI)?,
+        // Every requester ID is the ITS's DeviceID of the same value (the
+        // PCI MSI binding's `msi-map`: requester IDs from 0, the ITS, its
+        // specifier from 0, all 65536), the identity BSA recommends
+        // (DEN0094C H.2, a DeviceID namespace from 0).
+        GicVersion::V3 => {
+            w.cells("msi-map", &[0, PHANDLE_MSI, 0, REQUESTER_IDS])?;
+        }
+    }
     w.flag("dma-coherent")?;
     w.end()
 }

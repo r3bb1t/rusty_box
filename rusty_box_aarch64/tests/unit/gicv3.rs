@@ -4,11 +4,12 @@
 //! pending, are acknowledged, preempt and end (R9: each test asserts what
 //! software reads).
 
+use std::vec;
+
 use super::*;
 use crate::bus::ApIndex;
 use crate::devices::gicv2::PriorityBits;
 use crate::identity::{GicDistFields, GicDistIidr, GicIdentity, MsiFrameIidr};
-use crate::interrupt_map::{MsiCount, Spi};
 
 const GICD_CTLR: u64 = 0x0000;
 const GICD_TYPER: u64 = 0x0004;
@@ -18,11 +19,11 @@ const GICD_ITARGETSR: u64 = 0x0800;
 const GICD_SGIR: u64 = 0x0F00;
 const GICD_SPENDSGIR: u64 = 0x0F20;
 const GICD_IGRPMODR: u64 = 0x0D00;
-const GICR_CTLR: u64 = 0x0000;
 const GICR_IIDR: u64 = 0x0004;
 const GICR_TYPER: u64 = 0x0008;
 const GICR_WAKER: u64 = 0x0014;
-const GICR_PROPBASER: u64 = 0x0070;
+const GICR_SETLPIR: u64 = 0x0040;
+const GICR_INVALLR: u64 = 0x00B0;
 const GICR_PIDR2: u64 = 0xFFE8;
 const GICR_IGROUPR0: u64 = SGI_BASE + IGROUPR;
 const GICR_ISENABLER0: u64 = SGI_BASE + ISENABLER;
@@ -37,8 +38,12 @@ const GICR_NSACR: u64 = SGI_BASE + 0x0E00;
 /// The SPI the tests drive, and its bank's word and bit.
 const SPI: u32 = 40;
 
+/// What `GICD_TYPER` reads of the default shape: 480 SPIs, fourteen INTID
+/// bits, LPIs.
+const TYPER: u32 = (13 << 19) | (1 << 17) | 15;
+
 fn gic() -> GicV3 {
-    GicV3::new(GicShape::DEFAULT, GicNames::NONE, None)
+    GicV3::new(GicShape::DEFAULT, GicNames::NONE)
 }
 
 fn dist(g: &mut GicV3, off: u64, v: u32) {
@@ -49,8 +54,11 @@ fn dist_get(g: &mut GicV3, off: u64) -> u32 {
     g.dist_read(RegOffset::new(off), AccessWidth::Word) as u32
 }
 
+/// A write of a Redistributor register that reaches no table: no RAM.
 fn redist(g: &mut GicV3, off: u64, v: u32) {
-    g.redist_write(RegOffset::new(off), AccessWidth::Word, u64::from(v));
+    let mut no_ram: [u8; 0] = [];
+    let mut ram = GuestRam::new(&mut no_ram);
+    g.redist_write(&mut ram, RegOffset::new(off), AccessWidth::Word, u64::from(v));
 }
 
 fn redist_get(g: &mut GicV3, off: u64) -> u32 {
@@ -100,17 +108,17 @@ fn make_pending(g: &mut GicV3, irq: u32) {
 
 /// The reset values IHI 0069G gives, and the board's where it leaves them
 /// UNKNOWN: `GICD_CTLR` with `ARE` and `DS` set and the groups disabled,
-/// `GICD_TYPER` of the shape's SPIs and ten INTID bits, a sleeping
-/// Redistributor, the last of its region, and the identification
-/// registers' `ArchRev` 3.
+/// `GICD_TYPER` of the shape's SPIs, fourteen INTID bits and LPIs, a
+/// sleeping Redistributor, the last of its region, of processor 0, with
+/// physical LPIs disabled, and the identification registers' `ArchRev` 3.
 #[test]
 fn registers_reset_to_their_values() {
     let mut g = gic();
     assert_eq!(dist_get(&mut g, GICD_CTLR), GICD_CTLR_ARE | GICD_CTLR_DS);
     assert_eq!(
         dist_get(&mut g, GICD_TYPER),
-        (9 << 19) | 15,
-        "480 SPIs, 10 INTID bits"
+        TYPER,
+        "480 SPIs, 14 INTID bits, LPIS"
     );
     assert_eq!(dist_get(&mut g, GICD_IIDR), 0);
     assert_eq!(dist_get(&mut g, GICD_PIDR2) >> 4, 3, "ArchRev: GICv3");
@@ -120,11 +128,17 @@ fn registers_reset_to_their_values() {
         [0x0D, 0xF0, 0x05, 0xB1],
         "the CoreSight preamble"
     );
-    assert_eq!(redist_get(&mut g, GICR_TYPER), GICR_TYPER_LAST);
+    let typer = GICR_TYPER_LAST | GICR_TYPER_PLPIS;
+    assert_eq!(redist_get(&mut g, GICR_TYPER), typer, "Last, PLPIS");
     assert_eq!(redist_get(&mut g, GICR_TYPER + 4), 0, "affinity 0.0.0.0");
     assert_eq!(
         g.redist_read(RegOffset::new(GICR_TYPER), AccessWidth::Dword),
-        u64::from(GICR_TYPER_LAST)
+        u64::from(typer)
+    );
+    assert_eq!(
+        redist_get(&mut g, GICR_CTLR),
+        0b10,
+        "CES; EnableLPIs, RWP 0"
     );
     assert_eq!(
         redist_get(&mut g, GICR_WAKER),
@@ -168,7 +182,7 @@ fn identification_follows_the_distributors_iidr() {
         },
         msi_frame: MsiFrameIidr::NONE,
     };
-    let mut g = GicV3::new(GicShape::DEFAULT, names, None);
+    let mut g = GicV3::new(GicShape::DEFAULT, names);
     assert_eq!(dist_get(&mut g, GICD_IIDR), iidr.get());
     assert_eq!(redist_get(&mut g, GICR_IIDR), iidr.get());
     let pidr = |g: &mut GicV3, n: u64| {
@@ -196,7 +210,7 @@ fn identification_follows_the_distributors_iidr() {
 
 /// `GICD_CTLR` keeps its group enables alone, `ARE` and `DS` staying set;
 /// the distributor's registers of INTIDs 0 to 31, the SGI and target
-/// registers, the group modifiers and the LPI registers are RAZ/WI.
+/// registers, the group modifiers and the direct LPI registers are RAZ/WI.
 #[test]
 fn affinity_routing_and_one_security_state_leave_registers_raz_wi() {
     let mut g = gic();
@@ -205,7 +219,7 @@ fn affinity_routing_and_one_security_state_leave_registers_raz_wi() {
     dist(&mut g, GICD_CTLR, 0);
     assert_eq!(dist_get(&mut g, GICD_CTLR), GICD_CTLR_ARE | GICD_CTLR_DS);
     dist(&mut g, GICD_TYPER, 0);
-    assert_eq!(dist_get(&mut g, GICD_TYPER), (9 << 19) | 15, "read-only");
+    assert_eq!(dist_get(&mut g, GICD_TYPER), TYPER, "read-only");
     for off in [
         IGROUPR,
         ISENABLER,
@@ -225,7 +239,7 @@ fn affinity_routing_and_one_security_state_leave_registers_raz_wi() {
     }
     dist(&mut g, GICD_SGIR, 0x0200_0001);
     assert_eq!(redist_get(&mut g, GICR_ISPENDR0), 0, "GICD_SGIR is WI");
-    for off in [GICR_CTLR, GICR_PROPBASER, GICR_IGRPMODR0, GICR_NSACR] {
+    for off in [GICR_SETLPIR, GICR_INVALLR, GICR_IGRPMODR0, GICR_NSACR] {
         redist(&mut g, off, 0xFFFF_FFFF);
         assert_eq!(redist_get(&mut g, off), 0, "GICR {off:#x}");
     }
@@ -460,28 +474,190 @@ fn lines_and_routes() {
     assert!(g.irq_out(), "1 of N");
 }
 
-/// The GICv2m frame's `MSI_SETSPI_NS` makes its SPI pending.
+/// Where the LPI tests keep their tables, in RAM from `RAM_BASE`: the LPI
+/// Configuration table 4 KiB aligned, the LPI Pending table 64 KiB aligned
+/// (12.11.30, 12.11.31).
+const PROP_TABLE: u64 = crate::board::RAM_BASE + 0x1_0000;
+const PEND_TABLE: u64 = crate::board::RAM_BASE + 0x2_0000;
+const TEST_RAM: usize = 0x4_0000;
+/// The LPI Pending table's byte of LPI 8192's bit.
+const LPI_PENDING_BYTE: usize = 0x2_0000 + 1024;
+/// `GICR_PROPBASER.IDbits` of fourteen bits.
+const ID_BITS_14: u64 = 13;
+
+/// A 64-bit write of a Redistributor register, its tables in `ram`.
+fn redist64(g: &mut GicV3, ram: &mut [u8], off: u64, v: u64) {
+    let mut ram = GuestRam::new(ram);
+    g.redist_write(&mut ram, RegOffset::new(off), AccessWidth::Dword, v);
+}
+
+fn redist64_get(g: &mut GicV3, off: u64) -> u64 {
+    g.redist_read(RegOffset::new(off), AccessWidth::Dword)
+}
+
+/// LPI `intid`'s LPI Configuration table entry in `ram`.
+fn config(ram: &mut [u8], intid: u32, entry: u8) {
+    ram[0x1_0000 + (intid as usize - 8192)] = entry;
+}
+
+/// A running GIC whose Redistributor's tables are the tests', the LPI
+/// Pending table read unless `zero` says it is zero, and LPIs enabled.
+fn with_lpis(ram: &mut [u8], zero: bool) -> GicV3 {
+    let mut g = running();
+    redist64(&mut g, ram, GICR_PROPBASER, PROP_TABLE | ID_BITS_14);
+    let ptz = if zero { 1 << 62 } else { 0 };
+    redist64(&mut g, ram, GICR_PENDBASER, PEND_TABLE | ptz);
+    redist64(&mut g, ram, GICR_CTLR, 1);
+    g
+}
+
+/// As `EnableLPIs` goes from 0 to 1 the Redistributor reads the LPI
+/// Configuration table and the pending bits of the LPI Pending table: the
+/// pending, enabled LPI of the highest priority is signalled, acknowledged
+/// (its pending state cleared, its priority the running one) and ended
+/// with a priority drop alone; one the configuration disables is pending
+/// but not signalled. As `EnableLPIs` goes back to 0 the pending state is
+/// written to the table, and nothing is pending any longer.
 #[test]
-fn the_msi_frame_sets_its_spis_pending() {
-    let frame = MsiFrame {
-        first: Spi::new(64).expect("an SPI"),
-        count: MsiCount::new(8).expect("a count"),
-    };
-    let mut g = GicV3::new(GicShape::DEFAULT, GicNames::NONE, Some(frame));
-    let spi = 64 + 32 + 3;
-    dist(
-        &mut g,
-        ICFGR + u64::from(spi / 16) * 4,
-        2 << (2 * (spi % 16)),
-    );
-    g.v2m_write(RegOffset::new(0x040), AccessWidth::Word, u64::from(spi));
-    let (ispendr, bit) = bank(ISPENDR, spi);
-    assert_eq!(dist_get(&mut g, ispendr), bit);
+fn lpis_load_and_write_back_their_tables() {
+    let mut ram = vec![0u8; TEST_RAM];
+    config(&mut ram, 8192, 0xA0 | 0b11);
+    config(&mut ram, 8193, 0x80 | 0b11);
+    config(&mut ram, 8194, 0x40 | 0b10);
+    ram[LPI_PENDING_BYTE] = 0b111;
+    let mut g = with_lpis(&mut ram, false);
+    assert_eq!(redist_get(&mut g, GICR_CTLR), 0b11, "EnableLPIs, CES");
     assert_eq!(
-        g.v2m_read(RegOffset::new(0x008), AccessWidth::Word),
-        u64::from((96u32 << 16) | 8),
-        "MSI_TYPER"
+        redist64_get(&mut g, GICR_PROPBASER),
+        PROP_TABLE | ID_BITS_14
     );
+    assert!(g.irq_out() && !g.fiq_out(), "LPIs are Group 1");
+    assert_eq!(g.icc_read(IccRegister::Hppir1), 8193, "8194 is disabled");
+    assert_eq!(g.icc_read(IccRegister::Iar1), 8193);
+    assert_eq!(g.icc_read(IccRegister::Rpr), 0x80);
+    assert_eq!(
+        g.icc_read(IccRegister::Iar1),
+        1023,
+        "8192, at 0xA0, does not preempt"
+    );
+    g.icc_write(IccRegister::Eoir1, 8193);
+    assert_eq!(g.icc_read(IccRegister::Rpr), 0xFF, "the priority dropped");
+    assert_eq!(g.icc_read(IccRegister::Hppir1), 8192);
+    // A base register keeps its value while LPIs are enabled.
+    redist64(&mut g, &mut ram, GICR_PROPBASER, 0);
+    assert_eq!(
+        redist64_get(&mut g, GICR_PROPBASER),
+        PROP_TABLE | ID_BITS_14
+    );
+    redist64(&mut g, &mut ram, GICR_CTLR, 0);
+    assert_eq!(redist_get(&mut g, GICR_CTLR), 0b10, "CES: cleared");
+    assert_eq!(
+        ram[LPI_PENDING_BYTE],
+        0b101,
+        "8192 and the disabled 8194 still pending"
+    );
+    assert_eq!(g.icc_read(IccRegister::Hppir1), 1023);
+    assert!(!g.irq_out());
+    // Enabled again, the table's pending bits come back.
+    redist64(&mut g, &mut ram, GICR_CTLR, 1);
+    assert_eq!(g.icc_read(IccRegister::Iar1), 8192);
+}
+
+/// `GICR_PENDBASER.PTZ` reads 0 and tells the Redistributor the table is
+/// zero, so it reads no pending bit from it; a `GICR_PROPBASER.IDbits`
+/// below 13 leaves every LPI out of range.
+#[test]
+fn ptz_and_idbits_leave_lpis_unread() {
+    let mut ram = vec![0u8; TEST_RAM];
+    config(&mut ram, 8192, 0xA3);
+    ram[LPI_PENDING_BYTE] = 1;
+    let mut g = with_lpis(&mut ram, true);
+    assert_eq!(redist64_get(&mut g, GICR_PENDBASER), PEND_TABLE, "PTZ reads 0");
+    assert_eq!(g.icc_read(IccRegister::Hppir1), 1023);
+    let mut g = running();
+    redist64(&mut g, &mut ram, GICR_PROPBASER, PROP_TABLE | 12);
+    redist64(&mut g, &mut ram, GICR_PENDBASER, PEND_TABLE);
+    redist64(&mut g, &mut ram, GICR_CTLR, 1);
+    assert_eq!(g.icc_read(IccRegister::Hppir1), 1023, "out of range");
+    redist64(&mut g, &mut ram, GICR_CTLR, 0);
+    assert_eq!(ram[LPI_PENDING_BYTE], 1, "nothing written back");
+}
+
+/// The base registers keep their fields and drop their RES0 bits.
+#[test]
+fn lpi_base_registers_keep_their_fields() {
+    let mut ram = vec![0u8; TEST_RAM];
+    let mut g = running();
+    redist64(&mut g, &mut ram, GICR_PROPBASER, u64::MAX);
+    assert_eq!(redist64_get(&mut g, GICR_PROPBASER), 0x070F_FFFF_FFFF_FF9F);
+    redist64(&mut g, &mut ram, GICR_PENDBASER, u64::MAX);
+    assert_eq!(
+        redist64_get(&mut g, GICR_PENDBASER),
+        0x070F_FFFF_FFFF_0F80,
+        "PTZ reads 0"
+    );
+    redist(&mut g, GICR_PROPBASER + 4, 0);
+    assert_eq!(
+        redist64_get(&mut g, GICR_PROPBASER),
+        0xFFFF_FF9F,
+        "the halves are separate"
+    );
+}
+
+/// An LPI takes part in prioritization with the other interrupts: an SPI of
+/// the same priority wins by its lower INTID, an LPI of a higher priority
+/// preempts an active SPI, and a priority mask masks it.
+#[test]
+fn lpis_are_prioritized_with_the_other_interrupts() {
+    let mut ram = vec![0u8; TEST_RAM];
+    config(&mut ram, 8200, 0x60 | 0b11);
+    ram[LPI_PENDING_BYTE + 1] = 1;
+    let mut g = with_lpis(&mut ram, false);
+    enable_spi(&mut g, SPI, true, 0x60);
+    make_pending(&mut g, SPI);
+    assert_eq!(g.icc_read(IccRegister::Iar1), u64::from(SPI), "the lower INTID");
+    assert_eq!(g.icc_read(IccRegister::Iar1), 1023, "the same group priority");
+    g.icc_write(IccRegister::Eoir1, u64::from(SPI));
+    enable_spi(&mut g, SPI + 1, true, 0x80);
+    make_pending(&mut g, SPI + 1);
+    g.icc_write(IccRegister::Pmr, 0x60);
+    assert_eq!(g.icc_read(IccRegister::Hppir1), 8200);
+    assert_eq!(g.icc_read(IccRegister::Iar1), 1023, "masked");
+    g.icc_write(IccRegister::Pmr, 0xFF);
+    assert_eq!(g.icc_read(IccRegister::Iar1), 8200);
+    g.icc_write(IccRegister::Eoir1, 8200);
+    assert_eq!(g.icc_read(IccRegister::Iar1), u64::from(SPI + 1));
+}
+
+/// A snapshot holds the LPIs' state: a pending LPI restores pending, and
+/// an image with an LPI pending while LPIs are disabled is refused.
+#[test]
+fn snapshots_hold_the_lpis() {
+    let mut ram = vec![0u8; TEST_RAM];
+    config(&mut ram, 8192, 0x40 | 0b11);
+    ram[LPI_PENDING_BYTE] = 1;
+    let g = with_lpis(&mut ram, false);
+    let mut image = std::vec::Vec::new();
+    g.save(&mut image).expect("save");
+    let mut other = gic();
+    other.restore(&mut image.as_slice()).expect("restore");
+    assert_eq!(redist_get(&mut other, GICR_CTLR), 0b11);
+    assert_eq!(other.icc_read(IccRegister::Iar1), 8192);
+    // The image ends with the LPIs' section (EnableLPIs, the two base
+    // registers, the configuration cached and the pending words) and the
+    // ITS's (its enable, its stall, CBASER, CWRITER, CREADR and two
+    // BASERs), this GIC having no virtual interface.
+    const LPI_SECTION: usize = 1 + 8 + 8 + 8192 + 8192 / 8;
+    const ITS_SECTION: usize = 1 + 1 + 8 * 3 + 8 * 2;
+    let enable_lpis = image.len() - ITS_SECTION - LPI_SECTION;
+    let mut bad = image.clone();
+    bad[enable_lpis] = 0;
+    let mut quiet = running();
+    assert!(
+        quiet.restore(&mut bad.as_slice()).is_err(),
+        "an LPI pending with LPIs disabled"
+    );
+    assert_eq!(redist_get(&mut quiet, GICR_CTLR), 0b10, "nothing changed");
 }
 
 /// A snapshot of a GIC in use restores to the same registers, and one
