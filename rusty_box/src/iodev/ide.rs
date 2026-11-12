@@ -15,6 +15,7 @@
 use super::harddrv::BxHardDriveC;
 use super::irq::IrqFabric;
 use super::pci_ide::BxPciIde;
+use super::IoPort;
 
 /// Bounce-buffer capacity for one bus-master transfer — Bochs pci_ide.cc
 /// copies through a scratch region of this size.
@@ -72,12 +73,12 @@ impl IdeSubsystem {
     }
 
     #[inline]
-    pub(crate) fn read(&mut self, port: u16, io_len: u8, irq: &mut IrqFabric) -> u32 {
+    pub(crate) fn read(&mut self, port: IoPort, io_len: u8, irq: &mut IrqFabric) -> u32 {
         self.drives.read(port, io_len, irq, &mut self.bus_master)
     }
 
     #[inline]
-    pub(crate) fn write(&mut self, port: u16, value: u32, io_len: u8, irq: &mut IrqFabric) {
+    pub(crate) fn write(&mut self, port: IoPort, value: u32, io_len: u8, irq: &mut IrqFabric) {
         self.drives
             .write(port, value, io_len, irq, &mut self.bus_master)
     }
@@ -85,7 +86,7 @@ impl IdeSubsystem {
     #[inline]
     pub(crate) fn bulk_read_data(
         &mut self,
-        port: u16,
+        port: IoPort,
         io_len: u8,
         buf: &mut [u8],
         irq: &mut IrqFabric,

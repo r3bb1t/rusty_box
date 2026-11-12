@@ -129,6 +129,10 @@ pub const fn fetch_decode32_inplace(
     let mut seg_override: u8 = 7; // 7 = none
     let mut os_32 = is_32;
     let mut as_32 = is_32;
+    // A LOCK prefix anywhere among the prefixes, which wins over a REP/REPNE
+    // in either order (Bochs fetchdecode32.cc fetchDecode32 `lock`, applied
+    // through bxInstruction_c::setLock).
+    let mut lock = false;
 
     // === Phase 1: Parse legacy prefixes ===
     while pos < max_len {
@@ -167,7 +171,7 @@ pub const fn fetch_decode32_inplace(
 
             // LOCK prefix
             0xF0 => {
-                metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_LOCK);
+                lock = true;
             }
 
             // REPNE/REPNZ
@@ -185,6 +189,9 @@ pub const fn fetch_decode32_inplace(
             _ => break,
         }
         pos += 1;
+    }
+    if lock {
+        metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_LOCK);
     }
 
     if pos >= max_len {
@@ -1761,6 +1768,20 @@ mod tests {
         let i = fetch_decode32(&[0x90], true).unwrap();
         assert_eq!(i.ilen(), 1);
         assert_eq!(i.get_ia_opcode(), Opcode::Nop);
+    }
+
+    /// LOCK wins over REP/REPNE whichever comes first: LOCK INSB (no memory
+    /// destination) is #UD, and a LOCK ADD to memory keeps its lock.
+    #[test]
+    fn lock_wins_over_rep_in_either_order() {
+        let illegal = Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+        for bytes in [[0xF0, 0xF3, 0x6C], [0xF3, 0xF0, 0x6C], [0xF0, 0xF2, 0x6C]] {
+            assert_eq!(fetch_decode32(&bytes, true).map(|i| i.get_ia_opcode()), illegal);
+        }
+        for bytes in [[0xF0, 0xF3, 0x01, 0x18], [0xF3, 0xF0, 0x01, 0x18]] {
+            let i = fetch_decode32(&bytes, true).unwrap();
+            assert_eq!(i.lock_rep_used_value(), LOCK_REP_LOCK);
+        }
     }
 
     #[test]

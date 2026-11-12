@@ -7,6 +7,7 @@ use super::cpu::Exception;
 use super::decoder::{BxSegregs, Instruction};
 use super::instrumentation::{Instrumentation, MemAccessRW};
 use super::{BxCpuC, Result};
+use crate::iodev::IoPort;
 
 // Bochs vmx.h BX_IA32_FEATURE_CONTROL_* bits.
 pub const BX_IA32_FEATURE_CONTROL_LOCK_BIT: u32 = 0x1;
@@ -7113,7 +7114,9 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// `0x8000..0xFFFF` respectively. A multi-byte access whose port range
     /// straddles the 0x8000 split must consult both bitmaps; access ranges
     /// wrapping past 0xFFFF always force a VMEXIT.
-    fn io_bitmap_says_vmexit(&mut self, port: u16, len: u32) -> bool {
+    fn io_bitmap_says_vmexit(&mut self, port: IoPort, len: u32) -> bool {
+        // The bitmaps are indexed by the port number itself.
+        let port = port.get();
         // Wrap-around forces VMEXIT (Bochs guard).
         let end = u32::from(port) + len;
         if end > 0x10000 {
@@ -7146,7 +7149,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Decide whether a guest I/O access takes a VMEXIT — Bochs vmexit.cc
     /// VMexit_IO common predicate. Bitmap path beats the unconditional
     /// `IO_VMEXIT` bit when both might apply.
-    fn io_should_vmexit(&mut self, port: u16, size: u32) -> bool {
+    fn io_should_vmexit(&mut self, port: IoPort, size: u32) -> bool {
         let ctls = self.proc_based_ctls1();
         if ctls & VMX_VM_EXEC_CTRL1_IO_BITMAPS != 0 {
             self.io_bitmap_says_vmexit(port, size)
@@ -7165,7 +7168,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     ///   [6]     operand encoding (0 = DX, 1 = immediate)
     ///   [31:16] port number          (packed value)
     fn io_qualification(
-        port: u16,
+        port: IoPort,
         size: u32,
         direction_in: bool,
         string: bool,
@@ -7179,7 +7182,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         flags.set(IoExitQual::IMMEDIATE, imm);
         let mut qual = flags.bits();
         qual |= u64::from(size.saturating_sub(1) & 0x7);
-        qual |= u64::from(port) << 16;
+        qual |= u64::from(port.get()) << 16;
         qual
     }
 
@@ -7189,7 +7192,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// variants (`IN AL, ib`, `OUT ib, AL`, …).
     pub(super) fn vmexit_check_io(
         &mut self,
-        port: u16,
+        port: IoPort,
         size: u32,
         direction_in: bool,
         imm: bool,
@@ -7206,11 +7209,12 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// `BX_IA_REP_INSx` / `BX_IA_REP_OUTSx` cases. Writes the buffer linear
     /// address into `VMCS_GUEST_LINEAR_ADDR` and a packed
     /// `(seg << 15) | (as64 ? 1<<8 : 0) | (as32 ? 1<<7 : 0)` value into
-    /// `VMCS_32BIT_VMEXIT_INSTRUCTION_INFO`. `port_in` semantics use ES:RDI;
-    /// `port_out` (OUTS) uses the prefix segment with RSI.
+    /// `VMCS_32BIT_VMEXIT_INSTRUCTION_INFO`, where `seg` is the instruction's
+    /// own segment (Bochs `i->seg()`) for INS and OUTS alike; the linear
+    /// address is ES:RDI for INS and that segment with RSI for OUTS.
     pub(super) fn vmexit_check_io_string(
         &mut self,
-        port: u16,
+        port: IoPort,
         size: u32,
         direction_in: bool,
         rep: bool,

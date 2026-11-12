@@ -36,10 +36,15 @@ use crate::snapshot::{
     bounds, checked_snapshot_len_add, checked_snapshot_len_mul,
     SnapError, SnapRead, SnapResult, SnapWrite, SNAPSHOT_SECTION_VERSION,
 };
+use super::IoPort;
 
 /// CMOS I/O port addresses
-pub const CMOS_ADDR: u16 = 0x0070;
-pub const CMOS_DATA: u16 = 0x0071;
+pub const CMOS_ADDR: IoPort = IoPort::new(0x0070);
+pub const CMOS_DATA: IoPort = IoPort::new(0x0071);
+/// The extended bank's address and data ports — Bochs cmos.cc, live only
+/// with a 256-byte `cmosimage`.
+pub const CMOS_EXT_ADDR: IoPort = IoPort::new(0x0072);
+pub const CMOS_EXT_DATA: IoPort = IoPort::new(0x0073);
 
 /// CMOS register definitions
 pub const REG_SEC: u8 = 0x00;
@@ -874,13 +879,13 @@ impl BxCmosC {
     }
 
     /// Read from CMOS I/O port (Bochs cmos.cc)
-    pub fn read(&mut self, port: u16, _io_len: u8) -> u32 {
+    pub fn read(&mut self, port: IoPort, _io_len: u8) -> u32 {
         match port {
-            CMOS_ADDR | 0x0072 => {
+            CMOS_ADDR | CMOS_EXT_ADDR => {
                 // Port 0x70/0x72 is write-only on most machines (Bochs cmos.cc)
                 0xFF
             }
-            0x0073 => {
+            CMOS_EXT_DATA => {
                 // Bochs cmos.cc — extended CMOS data port
                 self.ram[self.cmos_ext_mem_addr as usize] as u32
             }
@@ -939,7 +944,7 @@ impl BxCmosC {
     }
 
     /// Write to CMOS I/O port and return resulting fixed-owner transitions.
-    pub fn write(&mut self, port: u16, value: u32, _io_len: u8) -> CmosTimerSync {
+    pub fn write(&mut self, port: IoPort, value: u32, _io_len: u8) -> CmosTimerSync {
         let value = value as u8;
         let mut sync = CmosTimerSync::default();
         match port {
@@ -948,11 +953,11 @@ impl BxCmosC {
                 self.nmi_mask = (value & 0x80) != 0;
                 self.address = value & 0x7F;
             }
-            0x0072 => {
+            CMOS_EXT_ADDR => {
                 // Bochs cmos.cc — extended CMOS address port
                 self.cmos_ext_mem_addr = value | 0x80;
             }
-            0x0073 => {
+            CMOS_EXT_DATA => {
                 // Bochs cmos.cc — extended CMOS data port
                 self.ram[self.cmos_ext_mem_addr as usize] = value;
             }
@@ -1537,7 +1542,7 @@ fn cmos_periodic_interval_usec(stat_a: u8) -> SnapResult<u32> {
 impl rusty_box_devices::api::PioDevice for BxCmosC {
     fn pio_read(
         &mut self,
-        port: u16,
+        port: IoPort,
         len: rusty_box_devices::api::IoLen,
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) -> u32 {
@@ -1548,7 +1553,7 @@ impl rusty_box_devices::api::PioDevice for BxCmosC {
 
     fn pio_write(
         &mut self,
-        port: u16,
+        port: IoPort,
         value: u32,
         len: rusty_box_devices::api::IoLen,
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,

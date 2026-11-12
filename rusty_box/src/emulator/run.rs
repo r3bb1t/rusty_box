@@ -755,29 +755,30 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // and early init functions that call udelay()/mdelay().
         // =====================================================================
         {
+            use crate::pic::{PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA};
             let pic = self.device_manager.irq.pic_mut();
             // Initialize master PIC: ICW1-ICW4
             // ICW1: edge-triggered, cascade, ICW4 needed
-            pic.write(0x20, 0x11, 1);
+            pic.write(PIC_MASTER_CMD, 0x11, 1);
             // ICW2: master vectors 0x20-0x27 (Linux kernel expects IRQ0=0x20)
-            pic.write(0x21, 0x20, 1);
+            pic.write(PIC_MASTER_DATA, 0x20, 1);
             // ICW3: slave on IRQ2
-            pic.write(0x21, 0x04, 1);
+            pic.write(PIC_MASTER_DATA, 0x04, 1);
             // ICW4: 8086 mode, normal EOI
-            pic.write(0x21, 0x01, 1);
+            pic.write(PIC_MASTER_DATA, 0x01, 1);
             // OCW1: mask all master IRQs — kernel will unmask what it needs
-            pic.write(0x21, 0xFF, 1);
+            pic.write(PIC_MASTER_DATA, 0xFF, 1);
 
             // Initialize slave PIC: ICW1-ICW4
-            pic.write(0xA0, 0x11, 1);
+            pic.write(PIC_SLAVE_CMD, 0x11, 1);
             // ICW2: slave vectors 0x28-0x2F (Linux kernel expects IRQ8=0x28)
-            pic.write(0xA1, 0x28, 1);
+            pic.write(PIC_SLAVE_DATA, 0x28, 1);
             // ICW3: cascade identity = 2
-            pic.write(0xA1, 0x02, 1);
+            pic.write(PIC_SLAVE_DATA, 0x02, 1);
             // ICW4: 8086 mode
-            pic.write(0xA1, 0x01, 1);
+            pic.write(PIC_SLAVE_DATA, 0x01, 1);
             // OCW1: mask all slave IRQs
-            pic.write(0xA1, 0xFF, 1);
+            pic.write(PIC_SLAVE_DATA, 0xFF, 1);
 
             // Do NOT program PIT — kernel will set up its own timer via time_init().
             // quick_pit_calibrate() programs PIT C2 via port 0x43/0x42 directly.

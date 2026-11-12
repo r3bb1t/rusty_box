@@ -612,8 +612,9 @@ EL2 `HCR_EL2.E2H`, writable (FEAT_E2H0), and with it the EL2&0
 translation regime (Arm `ELIsInHost`): `TCR_EL2` in `TCR_EL1`'s layout
 with two address ranges, `TTBR1_EL2`, and the ASIDs of `TTBR0_EL2` and
 `TTBR1_EL2` tagging non-global translations; `SCTLR_EL2`, `CPTR_EL2` and
-`CNTHCTL_EL2` in their `E2H` 1 layouts, each register's value relaid
-as `E2H` changes; at EL2 the EL1 register names reaching the EL2
+`CNTHCTL_EL2` in their `E2H` 1 layouts, each register keeping every
+field of either layout as last written whatever `E2H` was then (Arm ARM
+Glossary, a bit reserved only in some contexts); at EL2 the EL1 register names reaching the EL2
 registers and the `*_EL12` and `*_EL02` encodings reaching the EL1 and
 EL0 registers; and with `HCR_EL2.TGE` too, EL0 in the host — running in
 the EL2&0 regime under `SCTLR_EL2`, its exceptions and interrupts taken

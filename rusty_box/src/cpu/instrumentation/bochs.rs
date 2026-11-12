@@ -55,7 +55,8 @@
 
 use super::ctx::HookCtx;
 use super::types::{
-    BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, InstrAction, IoHookEvent, LinAccess,
+    BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, InstrAction, IoHookEvent, IoPort,
+    LinAccess,
     MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType,
     TlbCntrl,
 };
@@ -180,7 +181,7 @@ pub trait Instrumentation: Default + 'static {
     // ── I/O ─────────────────────────────────────────────────────────────────
 
     /// I/O port read — fires BEFORE the read, value is unknown.
-    fn inp(&mut self, port: u16, size: u8) {}
+    fn inp(&mut self, port: IoPort, size: u8) {}
 
     /// I/O port read — fires AFTER the read, value is known.
     fn inp2(&mut self, ev: &IoHookEvent) {}
@@ -331,7 +332,7 @@ macro_rules! impl_instrumentation_tuple {
                 $($T.phy_access(ev);)+
             }
 
-            fn inp(&mut self, port: u16, size: u8) {
+            fn inp(&mut self, port: IoPort, size: u8) {
                 let ($($T,)+) = self;
                 $($T.inp(port, size);)+
             }

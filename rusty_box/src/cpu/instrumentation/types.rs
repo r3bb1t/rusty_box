@@ -8,6 +8,10 @@
 
 use bitflags::bitflags;
 
+/// The port an I/O hook reports, re-exported beside the events that carry it
+/// so a tracer needs no second import.
+pub use rusty_box_devices::api::IoPort;
+
 // ─────────────────────────── InstrAction ───────────────────────────
 
 /// Return value from `pre_*` hook methods. Controls whether the CPU executes
@@ -370,7 +374,7 @@ pub struct HwInterruptEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct IoHookEvent {
     /// Port number.
-    pub port: u16,
+    pub port: IoPort,
     /// Access size in bytes (1, 2, or 4).
     pub size: u8,
     /// Value (for Out: value being written; for In: value read).

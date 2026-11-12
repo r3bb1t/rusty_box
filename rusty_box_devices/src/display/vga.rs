@@ -29,7 +29,7 @@ use crate::display::card::VgaCard;
 /// Only the graphics paths place tiles, and they need a buffer to convert into.
 #[cfg(feature = "alloc")]
 use crate::display::sink::TilePos;
-use crate::api::BxPhyAddress;
+use crate::api::{BxPhyAddress, IoPort};
 use rusty_box_core::time::VmClock;
 
 #[cfg(feature = "std")]
@@ -133,31 +133,38 @@ const CCDAT: [[u8; 4]; 16] = [
 const TEXT_SNAP_SIZE: [usize; 4] = [0x20000, 0x10000, 0x8000, 0x8000];
 
 /// VGA I/O ports
-const VGA_CRTC_INDEX: u16 = 0x3D4;
-const VGA_CRTC_DATA: u16 = 0x3D5;
-const VGA_STATUS: u16 = 0x3DA;
-const VGA_CRTC_INDEX_MONO: u16 = 0x3B4;
-const VGA_CRTC_DATA_MONO: u16 = 0x3B5;
-const VGA_STATUS_MONO: u16 = 0x3BA;
-const VGA_ATTRIB_ADDR: u16 = 0x3C0;
-const VGA_ATTRIB_DATA: u16 = 0x3C1;
-const VGA_MISC_OUTPUT: u16 = 0x3CC;
-const VGA_SEQ_INDEX: u16 = 0x3C4;
-const VGA_SEQ_DATA: u16 = 0x3C5;
-const VGA_GRAPHICS_INDEX: u16 = 0x3CE;
-const VGA_GRAPHICS_DATA: u16 = 0x3CF;
+const VGA_CRTC_INDEX: IoPort = IoPort::new(0x3D4);
+const VGA_CRTC_DATA: IoPort = IoPort::new(0x3D5);
+const VGA_STATUS: IoPort = IoPort::new(0x3DA);
+const VGA_CRTC_INDEX_MONO: IoPort = IoPort::new(0x3B4);
+const VGA_CRTC_DATA_MONO: IoPort = IoPort::new(0x3B5);
+const VGA_STATUS_MONO: IoPort = IoPort::new(0x3BA);
+const VGA_ATTRIB_ADDR: IoPort = IoPort::new(0x3C0);
+const VGA_ATTRIB_DATA: IoPort = IoPort::new(0x3C1);
+const VGA_MISC_OUTPUT: IoPort = IoPort::new(0x3CC);
+const VGA_SEQ_INDEX: IoPort = IoPort::new(0x3C4);
+const VGA_SEQ_DATA: IoPort = IoPort::new(0x3C5);
+const VGA_GRAPHICS_INDEX: IoPort = IoPort::new(0x3CE);
+const VGA_GRAPHICS_DATA: IoPort = IoPort::new(0x3CF);
 
 // ---- Additional VGA I/O ports ----
-const VGA_MISC_OUTPUT_WRITE: u16 = 0x3C2;
-const VGA_ENABLE: u16 = 0x3C3;
-const VGA_PEL_MASK: u16 = 0x3C6;
-const VGA_DAC_STATE: u16 = 0x3C7;
-const VGA_PEL_ADDR_WRITE: u16 = 0x3C8;
-const VGA_PEL_DATA: u16 = 0x3C9;
+const VGA_MISC_OUTPUT_WRITE: IoPort = IoPort::new(0x3C2);
+const VGA_ENABLE: IoPort = IoPort::new(0x3C3);
+const VGA_PEL_MASK: IoPort = IoPort::new(0x3C6);
+const VGA_DAC_STATE: IoPort = IoPort::new(0x3C7);
+const VGA_PEL_ADDR_WRITE: IoPort = IoPort::new(0x3C8);
+const VGA_PEL_DATA: IoPort = IoPort::new(0x3C9);
+/// Feature Control read-back; the write side is 0x3BA/0x3DA.
+const VGA_FEATURE_CONTROL_READ: IoPort = IoPort::new(0x3CA);
+/// The two EGA compatibility ports beside it.
+const VGA_EGA_COMPAT_3CB: IoPort = IoPort::new(0x3CB);
+const VGA_EGA_COMPAT_3CD: IoPort = IoPort::new(0x3CD);
+/// Where the high byte of a word read of [`VGA_STATUS`] lands.
+const VGA_STATUS_HIGH: IoPort = IoPort::new(0x3DB);
 
 // ---- VBE (Bochs VGA Extension) I/O ports and constants ----
-const VBE_DISPI_IOPORT_INDEX: u16 = 0x01CE;
-const VBE_DISPI_IOPORT_DATA: u16 = 0x01CF;
+const VBE_DISPI_IOPORT_INDEX: IoPort = IoPort::new(0x01CE);
+const VBE_DISPI_IOPORT_DATA: IoPort = IoPort::new(0x01CF);
 
 const VBE_DISPI_INDEX_ID: u16 = 0x0;
 const VBE_DISPI_INDEX_XRES: u16 = 0x1;
@@ -1407,7 +1414,7 @@ impl VgaCore {
     /// from its own `init` would need the bus to exist before the model does.
     pub(crate) const PORTS: &'static [crate::api::PortDecl] = {
         use crate::api::PortDecl;
-        const fn p(port: u16, name: &'static str) -> PortDecl {
+        const fn p(port: IoPort, name: &'static str) -> PortDecl {
             PortDecl {
                 port,
                 name,
@@ -1436,9 +1443,9 @@ impl VgaCore {
             p(VGA_PEL_DATA, "VGA PEL Data"),
             p(VBE_DISPI_IOPORT_INDEX, "Bochs VBE Index"),
             p(VBE_DISPI_IOPORT_DATA, "Bochs VBE Data"),
-            p(0x3CA, "VGA EGA Compat"),
-            p(0x3CB, "VGA EGA Compat"),
-            p(0x3CD, "VGA EGA Compat"),
+            p(VGA_FEATURE_CONTROL_READ, "VGA EGA Compat"),
+            p(VGA_EGA_COMPAT_3CB, "VGA EGA Compat"),
+            p(VGA_EGA_COMPAT_3CD, "VGA EGA Compat"),
         ]
     };
 
@@ -1682,21 +1689,28 @@ impl VgaCore {
     }
 
     /// Read from I/O port
-    pub(crate) fn read_port(&mut self, port: u16, io_len: u8, clock: VmClock) -> u32 {
-        // Bochs vgacore.cc: port gating based on color_emulation
-        if (0x3B0..=0x3BF).contains(&port) && self.misc_color_emulation {
-            return 0xFF; // mono ports disabled in color mode
-        }
-        if (0x3D0..=0x3DF).contains(&port) && !self.misc_color_emulation {
-            return 0xFF; // color ports disabled in mono mode
-        }
+    pub(crate) fn read_port(&mut self, port: IoPort, io_len: u8, clock: VmClock) -> u32 {
         // Bochs vgacore.cc read: a 16-bit access is two byte reads combined
-        // (low | high<<8) — e.g. inw(0x3D4) returns index | data<<8. The VBE
-        // dispi ports return their full 16-bit value and must not be split.
+        // (low | high<<8) — e.g. inw(0x3D4) returns index | data<<8 — split
+        // before the colour/mono gating, so each byte is gated on its own.
+        // The VBE dispi ports return their full 16-bit value and must not be
+        // split.
         if io_len == 2 && port != VBE_DISPI_IOPORT_INDEX && port != VBE_DISPI_IOPORT_DATA {
             let lo = self.read_port(port, 1, clock);
-            let hi = self.read_port(port.wrapping_add(1), 1, clock);
+            // Past port 0xFFFF the high byte reaches no VGA register, and reads
+            // as one, the way the default arm below answers.
+            let hi = match port.checked_add(1) {
+                Some(next) => self.read_port(next, 1, clock),
+                None => 0xFF,
+            };
             return lo | (hi << 8);
+        }
+        // Bochs vgacore.cc: port gating based on color_emulation
+        if (0x3B0..=0x3BF).contains(&port.get()) && self.misc_color_emulation {
+            return 0xFF; // mono ports disabled in color mode
+        }
+        if (0x3D0..=0x3DF).contains(&port.get()) && !self.misc_color_emulation {
+            return 0xFF; // color ports disabled in mono mode
         }
         match port {
             VGA_CRTC_INDEX | VGA_CRTC_INDEX_MONO => self.crtc_index as u32,
@@ -1825,14 +1839,14 @@ impl VgaCore {
 
             // Feature Control read-back. Bochs vgacore.cc read case 0x03ca:
             // RETURN(s.feature_control).
-            0x3CA => self.feature_control as u32,
+            VGA_FEATURE_CONTROL_READ => self.feature_control as u32,
 
             // EGA compatibility ports - return 0
-            0x3CB | 0x3CD => 0x00,
+            VGA_EGA_COMPAT_3CB | VGA_EGA_COMPAT_3CD => 0x00,
 
             // Bochs vgacore.cc read case 0x03db: RETURN(0) — the high byte of a
             // 16-bit read from 0x03DA lands here and must read 0, not 0xFF.
-            0x3DB => 0x00,
+            VGA_STATUS_HIGH => 0x00,
 
             _ => 0xFF,
         }
@@ -1840,7 +1854,7 @@ impl VgaCore {
 
     /// Bochs vgacore.cc `write()` on a core with no extension: every redraw a
     /// byte asks for is the core's own `redraw_area`.
-    pub(crate) fn write_port(&mut self, port: u16, value: u32, io_len: u8) {
+    pub(crate) fn write_port(&mut self, port: IoPort, value: u32, io_len: u8) {
         self.write_port_with(port, value, io_len, |core, area| core.vga_redraw_area(area));
     }
 
@@ -1848,20 +1862,24 @@ impl VgaCore {
     /// byte at `port` first, and each byte that changed how the screen is
     /// drawn ends in its own `vga_redraw_area(0, 0, last_xres, last_yres)` —
     /// which `redraw` performs the way the card's `redraw_area` does.
-    pub(crate) fn write_port_with<F>(&mut self, port: u16, value: u32, io_len: u8, mut redraw: F)
+    pub(crate) fn write_port_with<F>(&mut self, port: IoPort, value: u32, io_len: u8, mut redraw: F)
     where
         F: FnMut(&mut Self, RedrawArea),
     {
         if io_len == 2 {
             self.write_byte_with(port, value as u8, &mut redraw);
-            self.write_byte_with(port + 1, (value >> 8) as u8, &mut redraw);
+            // Past port 0xFFFF the high byte reaches no VGA register, which
+            // takes a write as the default arm of `write_register` does.
+            if let Some(next) = port.checked_add(1) {
+                self.write_byte_with(next, (value >> 8) as u8, &mut redraw);
+            }
         } else {
             self.write_byte_with(port, value as u8, &mut redraw);
         }
     }
 
     /// One byte of [`Self::write_port_with`].
-    fn write_byte_with<F>(&mut self, port: u16, value: u8, redraw: &mut F)
+    fn write_byte_with<F>(&mut self, port: IoPort, value: u8, redraw: &mut F)
     where
         F: FnMut(&mut Self, RedrawArea),
     {
@@ -1876,12 +1894,12 @@ impl VgaCore {
 
     /// One byte written to a VGA register — Bochs vgacore.cc `write()` up to
     /// its last statement, the redraw, which the answer asks the caller for.
-    fn write_register(&mut self, port: u16, value: u8) -> ScreenUpdate {
+    fn write_register(&mut self, port: IoPort, value: u8) -> ScreenUpdate {
         // Bochs vgacore.cc: port gating based on color_emulation
-        if (0x3B0..=0x3BF).contains(&port) && self.misc_color_emulation {
+        if (0x3B0..=0x3BF).contains(&port.get()) && self.misc_color_emulation {
             return ScreenUpdate::Unchanged; // mono ports disabled in color mode
         }
-        if (0x3D0..=0x3DF).contains(&port) && !self.misc_color_emulation {
+        if (0x3D0..=0x3DF).contains(&port.get()) && !self.misc_color_emulation {
             return ScreenUpdate::Unchanged; // color ports disabled in mono mode
         }
         let mut needs_update = ScreenUpdate::Unchanged;
@@ -2248,7 +2266,7 @@ impl VgaCore {
             }
 
             // EGA compatibility ports - ignore writes
-            0x3CA | 0x3CB | 0x3CD => {
+            VGA_FEATURE_CONTROL_READ | VGA_EGA_COMPAT_3CB | VGA_EGA_COMPAT_3CD => {
                 // Ignore (EGA compatibility)
             }
 
@@ -4467,7 +4485,7 @@ mod tests {
     /// One byte to a VGA port the way a guest's `out` reaches it: through the
     /// card, which offers the access to its extension first and answers any
     /// redraw the write asks for with its own `redraw_area`.
-    fn port_out(vga: &mut VgaCard<StdVga>, port: u16, value: u8) {
+    fn port_out(vga: &mut VgaCard<StdVga>, port: IoPort, value: u8) {
         let mut irq = Unwired;
         let mut timers = Unwired;
         let mut ctx = crate::api::DeviceCtx {
@@ -5317,16 +5335,31 @@ mod tests {
         assert_eq!((word >> 8) & 0xFF, 0x5A, "high byte = data reg");
     }
 
+    /// Bochs vgacore.cc read splits a word before the colour/mono gating, so
+    /// both bytes of a word read from a disabled block read 0xFF.
+    #[test]
+    fn word_read_of_a_disabled_block_reads_ones_in_both_bytes() {
+        let mut vga = VgaCore::new();
+        vga.misc_color_emulation = true;
+        assert_eq!(vga.read_port(VGA_CRTC_INDEX_MONO, 2, clock_at(0)), 0xFFFF);
+        vga.misc_color_emulation = false;
+        assert_eq!(vga.read_port(VGA_CRTC_INDEX, 2, clock_at(0)), 0xFFFF);
+    }
+
     // Bochs vgacore.cc write cases 0x03ba/0x03da: `feature_control = value & 0x08`;
     // read case 0x03ca returns it; read case 0x03db returns 0.
     #[test]
     fn feature_control_round_trips_via_3da_and_3ca() {
         let mut vga = VgaCore::new();
-        assert_eq!(vga.read_port(0x3CA, 1, clock_at(0)), 0x00, "reset value is 0");
+        assert_eq!(
+            vga.read_port(VGA_FEATURE_CONTROL_READ, 1, clock_at(0)),
+            0x00,
+            "reset value is 0"
+        );
 
         vga.write_port(VGA_STATUS, 0xFF, 1);
         assert_eq!(
-            vga.read_port(0x3CA, 1, clock_at(0)),
+            vga.read_port(VGA_FEATURE_CONTROL_READ, 1, clock_at(0)),
             0x08,
             "only bit 3 of a 0x3DA write is retained"
         );
@@ -5336,17 +5369,17 @@ mod tests {
         // misc_output.color_emulation is set — so it must NOT clear the value.
         vga.write_port(VGA_STATUS_MONO, 0x00, 1);
         assert_eq!(
-            vga.read_port(0x3CA, 1, clock_at(0)),
+            vga.read_port(VGA_FEATURE_CONTROL_READ, 1, clock_at(0)),
             0x08,
             "mono-port write must be ignored in color emulation mode"
         );
 
         // Writing 0 through the active (color) port does clear it.
         vga.write_port(VGA_STATUS, 0x00, 1);
-        assert_eq!(vga.read_port(0x3CA, 1, clock_at(0)), 0x00);
+        assert_eq!(vga.read_port(VGA_FEATURE_CONTROL_READ, 1, clock_at(0)), 0x00);
 
         // 0x3DB is the high byte of a 16-bit read from 0x3DA: Bochs returns 0.
-        assert_eq!(vga.read_port(0x3DB, 1, clock_at(0)), 0x00);
+        assert_eq!(vga.read_port(VGA_STATUS_HIGH, 1, clock_at(0)), 0x00);
     }
 
     // Bochs vgacore.cc keeps sequencer registers as decomposed fields, so a
@@ -6077,7 +6110,7 @@ mod tests {
 impl crate::api::PioDevice for VgaCore {
     fn pio_read(
         &mut self,
-        port: u16,
+        port: IoPort,
         len: crate::api::IoLen,
         ctx: &mut crate::api::DeviceCtx<'_>,
     ) -> u32 {
@@ -6086,7 +6119,7 @@ impl crate::api::PioDevice for VgaCore {
 
     fn pio_write(
         &mut self,
-        port: u16,
+        port: IoPort,
         value: u32,
         len: crate::api::IoLen,
         _ctx: &mut crate::api::DeviceCtx<'_>,

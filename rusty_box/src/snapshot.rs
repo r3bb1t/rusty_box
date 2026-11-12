@@ -1049,11 +1049,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             {
                 let dm = &mut emu.device_manager;
                 let crate::iodev::devices::DeviceManager { ide, irq, .. } = dm;
-                ide.write(0x1f7, 0xA0, 1, irq); // PACKET
+                ide.write(crate::iodev::IoPort::new(0x1f7), 0xA0, 1, irq); // PACKET
                 let packet = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
                 for word in packet.chunks_exact(2) {
                     let value = u16::from_le_bytes([word[0], word[1]]) as u32;
-                    ide.write(0x1f0, value, 2, irq);
+                    ide.write(crate::iodev::IoPort::new(0x1f0), value, 2, irq);
                 }
             }
             // Apply the arm the way the I/O layer does after the OUT.
@@ -1130,7 +1130,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             emu.cpu_mut().lapic.write_aligned(0x80, 0x20, 0);
             emu.device_manager.dma.ext_page_reg[3] = 0x42;
             emu.device_manager.cmos.ram[0x30] = 0x99;
-            emu.device_manager.serial.write(0x3FF, 0x77, 1);
+            emu.device_manager.serial.write(crate::iodev::IoPort::new(0x3FF), 0x77, 1);
             emu.service_scheduler_boundary(0).unwrap();
 
 
@@ -1169,7 +1169,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             assert_eq!(emu.cpu().lapic.read_aligned(0x80, 0), 0x20);
             assert_eq!(emu.device_manager.dma.ext_page_reg[3], 0x42);
             assert_eq!(emu.device_manager.cmos.ram[0x30], 0x99);
-            assert_eq!(emu.device_manager.serial.read(0x3FF, 1), 0x77);
+            assert_eq!(emu.device_manager.serial.read(crate::iodev::IoPort::new(0x3FF), 1), 0x77);
 
             let mut resaved = Vec::new();
             emu.save_snapshot(&mut resaved).unwrap();

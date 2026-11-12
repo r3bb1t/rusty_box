@@ -82,6 +82,72 @@ impl WindowOffset {
     }
 }
 
+/// One of the 65 536 x86 I/O ports `IN`, `OUT`, `INS` and `OUTS` reach.
+///
+/// Its own type (R4): a port is not a memory address, not an offset into a
+/// device's register block, and not any of the other `u16`s that travel beside
+/// it — an access width, a value, a selector. A port comes into being only
+/// where one is decoded ([`IoPort::new`]): from an instruction's immediate or
+/// `DX`, from a hypervisor's port exit, from a device's own port list, or from
+/// a base address register the guest programmed. The port space has two
+/// pieces of arithmetic and the type offers exactly those: a device's base
+/// plus an offset into its range ([`IoPort::checked_add`]), and how far into
+/// its range an access landed ([`IoPort::offset_from`]), which is a distance
+/// and therefore a bare `u16`, never another port.
+///
+/// Formats as hex the way the `u16` it holds does, so `{port:#06x}` reads the
+/// same in a log as it always has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct IoPort(u16);
+
+impl IoPort {
+    /// The port numbered `port`.
+    #[inline]
+    pub const fn new(port: u16) -> Self {
+        Self(port)
+    }
+
+    /// The port number, for a device decoding which of its registers an
+    /// access named, for an encoding that carries the number (a VM exit's
+    /// qualification, a snapshot), or for a permission bitmap indexed by it.
+    #[inline]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+
+    /// How far above `base` this port is: the register an access landed on,
+    /// counted from the first port of the device's range. Modulo the port
+    /// space, as Bochs's unsigned port arithmetic is; a caller has already
+    /// decoded the port into the range that starts at `base`.
+    #[inline]
+    pub const fn offset_from(self, base: IoPort) -> u16 {
+        self.0.wrapping_sub(base.0)
+    }
+
+    /// The port `offset` above this one, or `None` when that would run past
+    /// port 0xFFFF — a range that does not fit in the port space.
+    #[inline]
+    pub const fn checked_add(self, offset: u16) -> Option<IoPort> {
+        match self.0.checked_add(offset) {
+            Some(port) => Some(Self(port)),
+            None => None,
+        }
+    }
+}
+
+impl core::fmt::LowerHex for IoPort {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+impl core::fmt::UpperHex for IoPort {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::UpperHex::fmt(&self.0, f)
+    }
+}
+
 /// A guest physical address.
 ///
 /// A plain `u64` for now. Unit J gives guest addresses a type of their own, at
@@ -97,7 +163,7 @@ pub type BxPhyAddress = u64;
 /// that owns the bus reads the declaration and does the registering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PortDecl {
-    pub port: u16,
+    pub port: IoPort,
     /// Diagnostic name, as Bochs passes to the same call.
     pub name: &'static str,
     /// Bochs's `mask`: which access widths this port decodes (1 = byte,
@@ -311,8 +377,8 @@ pub struct DeviceCtx<'a> {
 /// Mirrors the Bochs `read_handler`/`write_handler` pair, minus the
 /// `void *this_ptr` trampoline: the device is `self`.
 pub trait PioDevice {
-    fn pio_read(&mut self, port: u16, len: IoLen, ctx: &mut DeviceCtx<'_>) -> u32;
-    fn pio_write(&mut self, port: u16, value: u32, len: IoLen, ctx: &mut DeviceCtx<'_>);
+    fn pio_read(&mut self, port: IoPort, len: IoLen, ctx: &mut DeviceCtx<'_>) -> u32;
+    fn pio_write(&mut self, port: IoPort, value: u32, len: IoLen, ctx: &mut DeviceCtx<'_>);
 }
 
 /// A device that occupies a physical address range.

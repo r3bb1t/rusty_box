@@ -555,15 +555,20 @@ pub enum TranslationFault {
     AddressSize { level: Level },
     /// No valid descriptor maps it.
     Translation { level: Level },
-    /// The descriptor that maps it has its access flag clear, which this
-    /// core, with no FEAT_HAFDBS, faults on rather than sets.
+    /// The descriptor that maps it has its Access flag clear and its stage
+    /// does not manage the flag (`TCR_ELx.HA` or `VTCR_EL2.HA` clear, or no
+    /// FEAT_HAF), so the walk faults rather than setting it
+    /// (`AArch64.S1Walk`, `AArch64.S2Walk`: `descriptor[10] == '0' &&
+    /// walkparams.ha == '0'`).
     AccessFlag { level: LeafLevel },
     /// A descriptor read reached nothing on the bus.
     ExternalAbortOnWalk { level: Level },
-    /// Stage 2 refuses a stage 1 walk the descriptor it reads: its stage 2
-    /// descriptor gives no read permission, or `HCR_EL2.PTW` refuses it
-    /// Device memory (`AArch64_S2CheckPermissions` for `AccessType_TTW`).
-    /// `level` is the stage 2 walk's.
+    /// Stage 2 refuses a stage 1 walk the descriptor it reads, or the
+    /// hardware update of that descriptor: its stage 2 descriptor gives no
+    /// read permission, or for the update no write permission
+    /// (`CreateAccDescTTEUpdate`), or `HCR_EL2.PTW` refuses it Device memory
+    /// (`AArch64_S2CheckPermissions` for `AccessType_TTW`). `level` is the
+    /// stage 2 walk's.
     Permission { level: LeafLevel },
 }
 

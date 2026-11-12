@@ -2553,7 +2553,9 @@ fn reserved_rule(kind: &str) -> BitRule {
 /// each RES0 bit as 0 and each RES1 bit as 1, and its constant fields
 /// unchanged, by the fieldset Arm's data gives the processor's features:
 /// with `HCR_EL2.E2H` clear, and with FEAT_VHE set too, which gives the
-/// registers it redefines their other layout.
+/// registers it redefines their other layout. A bit of one of those that is
+/// a field in the other layout reads back as written in both (Arm ARM
+/// Glossary, a bit reserved only in some contexts).
 #[test]
 #[cfg_attr(
     not(aarchmrs),
@@ -2575,13 +2577,14 @@ fn each_el2_register_keeps_the_bits_its_fieldset_gives_it() {
         layouts.iter().map(move |&hcr| (name, imp, hcr))
     });
     for (name, imp, hcr) in with_hcr {
-        let set_hcr = |cpu: &mut Cpu<WithEl2>| {
+        let set_hcr_to = |cpu: &mut Cpu<WithEl2>, hcr: u64| {
             cpu.pstate.el = El::El2;
             match cpu.sysreg_write(hcr_key, hcr) {
                 Ok(effect) => cpu.apply_write_effect(effect),
                 Err(e) => panic!("{name}: writing HCR_EL2: {e:?}"),
             }
         };
+        let set_hcr = |cpu: &mut Cpu<WithEl2>| set_hcr_to(cpu, hcr);
         let (mut reader, mut ram) = processor::<WithEl2>(imp);
         set_hcr(&mut reader);
         let values = input_values(&mut reader, &mut ram);
@@ -2593,6 +2596,21 @@ fn each_el2_register_keeps_the_bits_its_fieldset_gives_it() {
             values: &values,
             vars: &[],
         };
+        // The other `E2H` layout, whose fields the registers it redefines
+        // keep too.
+        let other_values = imp.has(Feature::Vhe).then(|| {
+            let (mut other, mut ram) = processor::<WithEl2>(imp);
+            set_hcr_to(&mut other, hcr ^ HCR_E2H);
+            input_values(&mut other, &mut ram)
+        });
+        let other_eval = other_values.as_ref().map(|values| Eval {
+            spec,
+            imp: imp.get(),
+            el: 2,
+            sp: true,
+            values,
+            vars: &[],
+        });
         for (&(reg, write), &word) in &spec.own {
             // The EL2 registers: `op0` 3, `op1` 4.
             if write || (word >> 16) & 0x1F != 0b11_100 || !spec.own.contains_key(&(reg, true)) {
@@ -2609,7 +2627,16 @@ fn each_el2_register_keeps_the_bits_its_fieldset_gives_it() {
             if cpu.sysreg_read(key).is_err() {
                 continue;
             }
-            let rules = bit_rules(&eval, reg);
+            let mut rules = bit_rules(&eval, reg);
+            if let Some(other) = &other_eval {
+                if ["SCTLR_EL2", "CPTR_EL2", "TCR_EL2", "CNTHCTL_EL2"].contains(&reg) {
+                    for (rule, there) in rules.iter_mut().zip(bit_rules(other, reg)) {
+                        if matches!(there, BitRule::Kept) {
+                            *rule = BitRule::Kept;
+                        }
+                    }
+                }
+            }
             let mut read_after = |value: u64| {
                 match cpu.sysreg_write(key, value) {
                     Ok(effect) => cpu.apply_write_effect(effect),

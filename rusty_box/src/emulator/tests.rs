@@ -766,8 +766,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const LVT_TIMER_PERIODIC_MODE: u32 = 1 << 17;
     const TEST_LAPIC_TIMER_PERIOD_TICKS: u64 = 10;
     const TEST_LAPIC_TIMER_ELAPSED_TICKS: u32 = 50;
-    const FW_CFG_IO_BASE: u16 = 0x510;
-    const FW_CFG_DATA_PORT: u16 = 0x511;
+    const FW_CFG_IO_BASE: crate::iodev::IoPort = crate::iodev::IoPort::new(0x510);
+    const FW_CFG_DATA_PORT: crate::iodev::IoPort = crate::iodev::IoPort::new(0x511);
     const FW_CFG_NB_CPUS_KEY: u16 = 0x05;
     const FW_CFG_MAX_CPUS_KEY: u16 = 0x0F;
     const FW_CFG_SELECTOR_WRITE_BYTES: u8 = 2;
@@ -1492,7 +1492,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 // test and not just the register.
                 let ticks = emu.pc_system.time_ticks();
                 emu.devices.outp(
-                    0x0CF8,
+                    crate::iodev::pci::PCI_CONFIG_ADDR,
                     0x8000_0058,
                     4,
                     ticks,
@@ -1501,7 +1501,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     &mut emu.memory,
                 );
                 emu.devices.outp(
-                    0x0CFD,
+                    crate::iodev::IoPort::new(0x0CFD),
                     0x30,
                     1,
                     ticks,
@@ -1605,11 +1605,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 {
                     let crate::iodev::devices::DeviceManager { ide, irq, .. } =
                         &mut emu.device_manager;
-                    ide.write(0x1f7, 0xA0, 1, irq); // PACKET
+                    ide.write(crate::iodev::IoPort::new(0x1f7), 0xA0, 1, irq); // PACKET
                     let packet = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
                     for word in packet.chunks_exact(2) {
                         let value = u16::from_le_bytes([word[0], word[1]]) as u32;
-                        ide.write(0x1f0, value, 2, irq);
+                        ide.write(crate::iodev::IoPort::new(0x1f0), value, 2, irq);
                     }
                 }
                 // The I/O layer drains the arm right after the OUT dispatch
@@ -1969,12 +1969,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 assert!(emu.pc_system.is_timer_active(uip_handle));
                 assert_eq!(emu.pc_system.timer_countdown(uip_handle), 244);
                 let _ = emu.device_manager.cmos.write(
-                    0x70,
+                    crate::iodev::cmos::CMOS_ADDR,
                     crate::iodev::cmos::REG_STAT_A as u32,
                     1,
                 );
                 assert_eq!(
-                    emu.device_manager.cmos.read(0x71, 1) & 0x80,
+                    emu.device_manager.cmos.read(crate::iodev::cmos::CMOS_DATA, 1) & 0x80,
                     0,
                     "tied CMOS owners must fire in one-second-then-UIP order"
                 );
@@ -2953,7 +2953,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 assert!(emu.cpu_ref(0).dtlb.entries[0].valid());
 
                 emu.device_manager.pci_conf_addr = 0x8000_0058;
-                emu.device_manager.pci_write(0x0CFD, 0x30, 1);
+                emu.device_manager.pci_write(crate::iodev::IoPort::new(0x0CFD), 0x30, 1);
                 assert!(emu
                     .device_manager
                     .pending
@@ -5905,7 +5905,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     crate::cpu::instrumentation::MemPerms::READ,
                 );
                 emu.reg_write(X86Reg::Rip, CODE);
-                emu.reg_write(X86Reg::Rdx, u64::from(port));
+                emu.reg_write(X86Reg::Rdx, u64::from(port.get()));
                 emu.reg_write(X86Reg::Rdi, DEST);
                 emu.reg_write(X86Reg::Rcx, 1);
 
@@ -5936,7 +5936,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 emu.virt_write(CODE, code).unwrap();
                 emu.mem_write(DEST, &before).unwrap();
                 emu.reg_write(X86Reg::Rip, CODE);
-                emu.reg_write(X86Reg::Rdx, u64::from(port));
+                emu.reg_write(X86Reg::Rdx, u64::from(port.get()));
                 emu.reg_write(X86Reg::Rdi, DEST);
                 emu.reg_write(X86Reg::Rcx, 1);
                 phase6_run(&mut emu);
@@ -6186,7 +6186,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 crate::cpu::instrumentation::MemPerms::READ,
             );
             emu.reg_write(X86Reg::Rip, CODE);
-            emu.reg_write(X86Reg::Rdx, u64::from(FW_CFG_DATA_PORT));
+            emu.reg_write(X86Reg::Rdx, u64::from(FW_CFG_DATA_PORT.get()));
             emu.reg_write(X86Reg::Rdi, FIRST_PAGE_END);
             emu.reg_write(X86Reg::Rcx, 2);
             phase6_run(&mut emu);
@@ -6286,7 +6286,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             emu.reg_write(X86Reg::Rip, CODE_AND_DEST);
             emu.reg_write(
                 X86Reg::Rdx,
-                u64::from(crate::iodev::keyboard::KBD_DATA_PORT),
+                u64::from(crate::iodev::keyboard::KBD_DATA_PORT.get()),
             );
             emu.reg_write(X86Reg::Rdi, CODE_AND_DEST);
             emu.reg_write(X86Reg::Rcx, 1);
@@ -6325,7 +6325,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             emu.reg_write(X86Reg::Rip, CODE);
             emu.reg_write(
                 X86Reg::Rdx,
-                u64::from(crate::iodev::keyboard::KBD_DATA_PORT),
+                u64::from(crate::iodev::keyboard::KBD_DATA_PORT.get()),
             );
             emu.reg_write(X86Reg::Rdi, DEST);
             emu.reg_write(X86Reg::Rcx, 1);
@@ -6536,7 +6536,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             emu.mem_write(SECOND_LARGE_PAGE_PDE, &0u64.to_le_bytes())
                 .unwrap();
             emu.reg_write(X86Reg::Rip, CODE);
-            emu.reg_write(X86Reg::Rdx, FW_CFG_DATA_PORT as u64);
+            emu.reg_write(X86Reg::Rdx, u64::from(FW_CFG_DATA_PORT.get()));
             emu.reg_write(X86Reg::Rdi, DEST);
             emu.reg_write(X86Reg::Rcx, 1);
 
@@ -7065,7 +7065,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let mut source = build();
                 let ticks = source.pc_system.time_ticks();
                 source.devices.outp(
-                    0x0CF8,
+                    crate::iodev::pci::PCI_CONFIG_ADDR,
                     CONFIG_ADDRESS,
                     4,
                     ticks,
@@ -7176,8 +7176,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                const COM1_RBR: u16 = 0x03F8;
-                const COM1_LSR: u16 = 0x03FD;
+                const COM1_RBR: crate::iodev::IoPort = crate::iodev::IoPort::new(0x03F8);
+                const COM1_LSR: crate::iodev::IoPort = crate::iodev::IoPort::new(0x03FD);
 
                 let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
                 emu.initialize().unwrap();
@@ -7258,9 +7258,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                const COM1_RBR: u16 = 0x03F8;
-                const COM1_FCR: u16 = 0x03FA;
-                const COM1_LSR: u16 = 0x03FD;
+                const COM1_RBR: crate::iodev::IoPort = crate::iodev::IoPort::new(0x03F8);
+                const COM1_FCR: crate::iodev::IoPort = crate::iodev::IoPort::new(0x03FA);
+                const COM1_LSR: crate::iodev::IoPort = crate::iodev::IoPort::new(0x03FD);
 
                 let mut emu = Emulator::new(EmulatorConfig::default()).unwrap();
                 emu.init_memory_and_pc_system().unwrap();

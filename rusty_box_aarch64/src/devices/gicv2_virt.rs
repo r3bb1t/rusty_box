@@ -73,7 +73,7 @@ use super::gicv2::{
     GICC_CTLR_EOIMODE as CTLR_EOIMODE, GICC_CTLR_FIQ_EN as CTLR_FIQ_EN,
     GICC_CTLR_V2_MASK as CTLR_MASK, GICD_CTLR_EN_GRP0 as CTLR_EN_GRP0,
     GICD_CTLR_EN_GRP1 as CTLR_EN_GRP1, GicV2, IDLE_PRIORITY, MAXIRQ, SPURIOUS, group_enable,
-    group_mask, group_priority, preempts, read_through,
+    group_mask, preempts, read_through,
 };
 
 /// The List registers: four, as the GIC-400 implements (DDI 0471B
@@ -272,14 +272,9 @@ impl VirtInterface {
         )
     }
 
-    /// List register `n`'s group priority ([`group_priority`]).
-    fn group_priority(&self, n: usize) -> u8 {
-        group_priority(self.priority(n), self.group_mask(n))
-    }
-
-    /// The running priority: the highest active preemption level in
-    /// `GICH_APR`, whose bit `n` stands for group priority `n << 3`
-    /// (§5.3.7).
+    /// The running priority: the highest active priority in `GICH_APR`,
+    /// whose bit `n` stands for priority `n << 3`, a List register's five
+    /// priority bits (§5.3.7).
     fn running_priority(&self) -> u16 {
         if self.apr == 0 {
             IDLE_PRIORITY
@@ -536,7 +531,9 @@ impl VirtInterface {
         if id & 0x3FF >= MAXIRQ {
             return spurious(id);
         }
-        self.apr |= 1 << (self.group_priority(n) >> 3);
+        // §5.3.7: the bit set is the List register's five priority bits,
+        // whatever the binary points hold.
+        self.apr |= 1 << (self.priority(n) >> 3);
         self.lr[n] = (self.lr[n] & !LrState::PendingActive.bits()) | LrState::Active.bits();
         VcpuRead {
             value: id,
@@ -1153,6 +1150,19 @@ mod tests {
         assert_eq!(vcpu_get(&mut g, BPR), 2, "raised to the minimum");
         vcpu(&mut g, ABPR, 0);
         assert_eq!(vcpu_get(&mut g, ABPR), 3, "raised to the minimum");
+    }
+
+    /// Acknowledging List register n sets the `GICH_APR` bit of its five
+    /// priority bits whatever the binary point (§5.3.7), and `GICV_RPR`
+    /// reads that priority (§5.5.6).
+    #[test]
+    fn the_active_priority_bit_ignores_the_binary_point() {
+        let mut g = virtual_gic();
+        vcpu(&mut g, BPR, 4);
+        hyp(&mut g, LR0, PENDING | prio(0x38) | 40);
+        assert_eq!(vcpu_get(&mut g, IAR), 40);
+        assert_eq!(hyp_get(&mut g, APR), 1 << (0x38 >> 3));
+        assert_eq!(vcpu_get(&mut g, RPR), 0x38);
     }
 
     /// `GICV_EOIR` drops the priority and deactivates the List register;

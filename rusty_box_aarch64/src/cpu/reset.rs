@@ -24,9 +24,9 @@
 //!   9:8 and 2:0, and each timer's `ENABLE` (Table 9-2).
 //! - `CPTR_EL2` its RES1 bits, 0x33FF; `CNTHCTL_EL2` with `EL1PCTEN` and
 //!   `EL1PCEN` set (Table 9-2); `VPIDR_EL2` and `VMPIDR_EL2` the processor's
-//!   own `MIDR_EL1` and `MPIDR_EL1` (Table 4-13). `MDCR_EL2`'s 0x6 is
-//!   `HPMN`, the count of the TRM's six event counters, a field of the PMU
-//!   this processor does not have, so the register here is zero.
+//!   own `MIDR_EL1` and `MPIDR_EL1` (Table 4-13). `MDCR_EL2` 0x6: `HPMN`
+//!   the count of the PMU's event counters, six on both models, so EL0 and
+//!   EL1 reach every one.
 //! - Bits 63:32 zero in the 64-bit registers of Tables 4-2, 4-3, 4-7
 //!   (`PAR_EL1`, footnote t) and 4-13 whose other bits it leaves UNKNOWN:
 //!   `FAR_ELx`, `VBAR_ELx`, `TTBRn_ELx`, `VTTBR_EL2` and `PAR_EL1`.

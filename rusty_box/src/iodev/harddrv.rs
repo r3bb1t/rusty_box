@@ -91,7 +91,7 @@
 //!   registers on BOTH drives on the channel, supporting LBA48 addressing.
 
 use crate::ring_buffer::RingBuffer;
-use rusty_box_devices::api::IrqLine;
+use rusty_box_devices::api::{IoPort, IrqLine};
 #[cfg(feature = "alloc")]
 use alloc::format;
 #[cfg(feature = "alloc")]
@@ -137,6 +137,18 @@ pub const ATA_CYL_HIGH: u16 = 5; // Cylinder high / LBA high
 pub const ATA_DRIVE_HEAD: u16 = 6; // Drive/Head / LBA top 4 bits
 pub const ATA_STATUS: u16 = 7; // Status (R) / Command (W)
 pub const ATA_ALT_STATUS: u16 = 0x206; // Alternate status / Device control
+
+/// The primary channel's command block base, register [`ATA_DATA`] — Bochs
+/// harddrv.cc channel 0 `ioaddr1`.
+pub(crate) const ATA_PRIMARY_DATA_PORT: IoPort = IoPort::new(0x1F0);
+/// The primary channel's alternate status / device control port, Bochs
+/// channel 0 `ioaddr2 + 6`.
+pub(crate) const ATA_PRIMARY_CONTROL_PORT: IoPort = IoPort::new(0x3F6);
+/// The secondary channel's command block base — Bochs channel 1 `ioaddr1`.
+pub(crate) const ATA_SECONDARY_DATA_PORT: IoPort = IoPort::new(0x170);
+/// The secondary channel's alternate status / device control port, Bochs
+/// channel 1 `ioaddr2 + 6`.
+pub(crate) const ATA_SECONDARY_CONTROL_PORT: IoPort = IoPort::new(0x376);
 
 bitflags! {
     /// ATA Status register bits (port+7 read)
@@ -1725,9 +1737,9 @@ impl AtaDrive {
 #[derive(Debug)]
 pub struct AtaChannel {
     /// Base I/O address
-    pub(crate) ioaddr1: u16,
+    pub(crate) ioaddr1: IoPort,
     /// Control I/O address
-    pub(crate) ioaddr2: u16,
+    pub(crate) ioaddr2: IoPort,
     /// IRQ number
     pub(crate) irq: u8,
     /// Master and slave drives
@@ -1738,7 +1750,7 @@ pub struct AtaChannel {
 
 impl AtaChannel {
     /// Create a new ATA channel
-    pub fn new(ioaddr1: u16, ioaddr2: u16, irq: u8) -> Self {
+    pub fn new(ioaddr1: IoPort, ioaddr2: IoPort, irq: u8) -> Self {
         Self {
             ioaddr1,
             ioaddr2,
@@ -1789,8 +1801,8 @@ impl BxHardDriveC {
     pub fn new() -> Self {
         Self {
             channels: [
-                AtaChannel::new(0x1F0, 0x3F0, 14), // Primary
-                AtaChannel::new(0x170, 0x370, 15), // Secondary
+                AtaChannel::new(ATA_PRIMARY_DATA_PORT, IoPort::new(0x3F0), 14), // Primary
+                AtaChannel::new(ATA_SECONDARY_DATA_PORT, IoPort::new(0x370), 15), // Secondary
             ],
             cmd_history: RingBuffer::new(),
             pending_seek_arm_usec: [[None; 2]; 2],
@@ -1975,10 +1987,10 @@ impl BxHardDriveC {
     }
 
     /// Determine which channel a port belongs to
-    fn port_to_channel(&self, port: u16) -> Option<usize> {
-        if (0x1F0..=0x1F7).contains(&port) || port == 0x3F6 {
+    fn port_to_channel(&self, port: IoPort) -> Option<usize> {
+        if (0x1F0..=0x1F7).contains(&port.get()) || port == ATA_PRIMARY_CONTROL_PORT {
             Some(0) // Primary
-        } else if (0x170..=0x177).contains(&port) || port == 0x376 {
+        } else if (0x170..=0x177).contains(&port.get()) || port == ATA_SECONDARY_CONTROL_PORT {
             Some(1) // Secondary
         } else {
             None
@@ -2463,7 +2475,7 @@ impl BxHardDriveC {
     /// The buffer_size is set to `min(multiple_sectors, num_sectors) * sect_size`.
     pub fn read(
         &mut self,
-        port: u16,
+        port: IoPort,
         io_len: u8,
         irq: &mut super::irq::IrqFabric,
         pci_ide: &mut super::pci_ide::BxPciIde,
@@ -2475,10 +2487,10 @@ impl BxHardDriveC {
         let channel = &mut self.channels[channel_num];
         let base = channel.ioaddr1;
         let drive_select = channel.drive_select;
-        let offset = if port == 0x3F6 || port == 0x376 {
+        let offset = if port == ATA_PRIMARY_CONTROL_PORT || port == ATA_SECONDARY_CONTROL_PORT {
             ATA_ALT_STATUS
         } else {
-            port - base
+            port.offset_from(base)
         };
 
         // Bochs harddrv.cc read_handler distinguishes "no drive on the whole
@@ -2792,7 +2804,7 @@ impl BxHardDriveC {
     /// Handles ATAPI lazy-load, sector transitions, and DRQ completion.
     pub fn bulk_read_data(
         &mut self,
-        port: u16,
+        port: IoPort,
         io_len: u8,
         buf: &mut [u8],
         irq: &mut super::irq::IrqFabric,
@@ -3069,7 +3081,7 @@ impl BxHardDriveC {
     /// - If `num_sectors == 0`: clears DRQ, raises final completion IRQ
     pub fn write(
         &mut self,
-        port: u16,
+        port: IoPort,
         value: u32,
         io_len: u8,
         irq: &mut super::irq::IrqFabric,
@@ -3082,10 +3094,10 @@ impl BxHardDriveC {
 
         let channel = &mut self.channels[channel_num];
         let base = channel.ioaddr1;
-        let offset = if port == 0x3F6 || port == 0x376 {
+        let offset = if port == ATA_PRIMARY_CONTROL_PORT || port == ATA_SECONDARY_CONTROL_PORT {
             ATA_ALT_STATUS
         } else {
-            port - base
+            port.offset_from(base)
         };
 
         // Bochs harddrv.cc write(): "A write to any Command Block register
@@ -6165,8 +6177,8 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
             if usize::from(channel.drive_select) >= channel.drives.len() {
                 return Err(snapshot_invalid("ATA live drive selection is out of range"));
             }
-            writer.write_u16(channel.ioaddr1)?;
-            writer.write_u16(channel.ioaddr2)?;
+            writer.write_u16(channel.ioaddr1.get())?;
+            writer.write_u16(channel.ioaddr2.get())?;
             writer.write_u8(channel.irq)?;
             writer.write_u8(channel.drive_select)?;
             for drive in &channel.drives {
@@ -6199,8 +6211,8 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
             return Err(snapshot_invalid("unsupported ATA snapshot section version"));
         }
         for channel in &mut self.channels {
-            let ioaddr1 = reader.read_u16()?;
-            let ioaddr2 = reader.read_u16()?;
+            let ioaddr1 = IoPort::new(reader.read_u16()?);
+            let ioaddr2 = IoPort::new(reader.read_u16()?);
             let irq = reader.read_u8()?;
             let drive_select = reader.read_u8()?;
             if ioaddr1 != channel.ioaddr1 || ioaddr2 != channel.ioaddr2 || irq != channel.irq {
@@ -6403,12 +6415,14 @@ mod tests {
             let ptr = alloc::alloc::alloc_zeroed(layout) as *mut BxHardDriveC;
             assert!(!ptr.is_null());
             // Write channel addresses (everything else is zeroed/default).
-            core::ptr::addr_of_mut!((*ptr).channels[0]).write(AtaChannel::new(0x1F0, 0x3F0, 14));
-            core::ptr::addr_of_mut!((*ptr).channels[1]).write(AtaChannel::new(0x170, 0x370, 15));
+            core::ptr::addr_of_mut!((*ptr).channels[0])
+                .write(AtaChannel::new(ATA_PRIMARY_DATA_PORT, IoPort::new(0x3F0), 14));
+            core::ptr::addr_of_mut!((*ptr).channels[1])
+                .write(AtaChannel::new(ATA_SECONDARY_DATA_PORT, IoPort::new(0x370), 15));
             alloc::boxed::Box::from_raw(ptr)
         };
-        assert_eq!(hd.channels[0].ioaddr1, 0x1F0);
-        assert_eq!(hd.channels[1].ioaddr1, 0x170);
+        assert_eq!(hd.channels[0].ioaddr1, IoPort::new(0x1F0));
+        assert_eq!(hd.channels[1].ioaddr1, IoPort::new(0x170));
     }
 
     #[test]
@@ -6539,11 +6553,11 @@ mod tests {
                 assert_eq!(hd.channels[0].drives[0].cdrom.curr_lba, 3);
 
                 // PACKET + READ(10) at LBA 0, 1 block.
-                hd.write(0x1f7, ATA_CMD_PACKET as u32, 1, &mut irq, &mut pci_ide);
+                hd.write(IoPort::new(0x1f7), ATA_CMD_PACKET as u32, 1, &mut irq, &mut pci_ide);
                 let packet = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
                 for word in packet.chunks_exact(2) {
                     let value = u16::from_le_bytes([word[0], word[1]]) as u32;
-                    hd.write(0x1f0, value, 2, &mut irq, &mut pci_ide);
+                    hd.write(IoPort::new(0x1f0), value, 2, &mut irq, &mut pci_ide);
                 }
 
                 // Bochs harddrv.cc start_seek: fSeekTime =
@@ -6562,16 +6576,16 @@ mod tests {
 
                 // Drain the transferred block so completion commits curr_lba.
                 for _ in 0..CDROM_SECTOR_SIZE / 2 {
-                    hd.read(0x1f0, 2, &mut irq, &mut pci_ide);
+                    hd.read(IoPort::new(0x1f0), 2, &mut irq, &mut pci_ide);
                 }
                 assert_eq!(hd.channels[0].drives[0].cdrom.curr_lba, 1);
 
                 // Second read from LBA 1: distance |1 - 1 + 1| = 1 → 20000 usec.
-                hd.write(0x1f7, ATA_CMD_PACKET as u32, 1, &mut irq, &mut pci_ide);
+                hd.write(IoPort::new(0x1f7), ATA_CMD_PACKET as u32, 1, &mut irq, &mut pci_ide);
                 let packet = [0x28u8, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0];
                 for word in packet.chunks_exact(2) {
                     let value = u16::from_le_bytes([word[0], word[1]]) as u32;
-                    hd.write(0x1f0, value, 2, &mut irq, &mut pci_ide);
+                    hd.write(IoPort::new(0x1f0), value, 2, &mut irq, &mut pci_ide);
                 }
                 assert_eq!(hd.take_pending_seek_arm(0, 0), Some(20_000));
             })
@@ -6598,7 +6612,7 @@ mod tests {
             (0x1f6, 0xe0),
             (0x1f7, u32::from(ATA_CMD_READ_SECTORS)),
         ] {
-            hd.write(port, value, 1, &mut irq, &mut pci_ide);
+            hd.write(IoPort::new(port), value, 1, &mut irq, &mut pci_ide);
         }
         // Bochs harddrv.cc start_seek HD branch: fSeekTime =
         //   5000.0 * abs((int)(0 - 2 + 1)) / ((2 - 1) + 1) = 2500 usec.
@@ -6628,7 +6642,7 @@ mod tests {
             (0x1f6, 0xe0),
             (0x1f7, u32::from(ATA_CMD_READ_SECTORS)),
         ] {
-            hd.write(port, value, 1, &mut irq, &mut pci_ide);
+            hd.write(IoPort::new(port), value, 1, &mut irq, &mut pci_ide);
         }
         assert_eq!(hd.take_pending_seek_arm(0, 0), None, "failed read must clear the arm");
         let drive = &hd.channels[0].drives[0];
@@ -6742,18 +6756,18 @@ mod tests {
         // controller's value — not 0xFF (OSes probe the slave this way).
         hd.channels[0].drives[0].controller.sector_count = 0x5a;
         assert_eq!(
-            hd.read(0x1f2, 1, &mut irq, &mut pci_ide),
+            hd.read(IoPort::new(0x1f2), 1, &mut irq, &mut pci_ide),
             0x5a,
             "absent master + present slave returns the register, not 0xFF"
         );
         // Status and alternate status still read 0 for an absent selection.
-        assert_eq!(hd.read(0x1f7, 1, &mut irq, &mut pci_ide), 0);
-        assert_eq!(hd.read(0x3f6, 1, &mut irq, &mut pci_ide), 0);
+        assert_eq!(hd.read(IoPort::new(0x1f7), 1, &mut irq, &mut pci_ide), 0);
+        assert_eq!(hd.read(ATA_PRIMARY_CONTROL_PORT, 1, &mut irq, &mut pci_ide), 0);
 
         // CALIBRATE (0x10) to the absent selected master: Bochs reports track-0-
         // not-found (error 0x02, DRDY|ERR) and raises the IRQ — not a silent drop.
         hd.channels[0].drives[0].controller.interrupt_pending = false;
-        hd.write(0x1f7, 0x10, 1, &mut irq, &mut pci_ide);
+        hd.write(IoPort::new(0x1f7), 0x10, 1, &mut irq, &mut pci_ide);
         let drive = &hd.channels[0].drives[0];
         assert_eq!(drive.controller.error.bits(), 0x02, "track 0 not found");
         assert!(drive
@@ -6781,11 +6795,11 @@ mod tests {
                 }
                 hd.attach_cdrom_data(1, 0, iso);
 
-                hd.write(0x177, ATA_CMD_PACKET as u32, 1, &mut irq, &mut pci_ide);
+                hd.write(IoPort::new(0x177), ATA_CMD_PACKET as u32, 1, &mut irq, &mut pci_ide);
                 let packet = [0xbe, 0, 0, 0, 0, 0, 0, 0, 1, 0xf8, 0, 0];
                 for word in packet.chunks_exact(2) {
                     let value = u16::from_le_bytes([word[0], word[1]]) as u32;
-                    hd.write(0x170, value, 2, &mut irq, &mut pci_ide);
+                    hd.write(IoPort::new(0x170), value, 2, &mut irq, &mut pci_ide);
                 }
 
                 // Bochs harddrv.cc READ CD: start_seek latched a seek-timer
@@ -6795,7 +6809,7 @@ mod tests {
 
                 let mut out = [0u8; 32];
                 for word_index in 0..16 {
-                    let value = hd.read(0x170, 2, &mut irq, &mut pci_ide);
+                    let value = hd.read(IoPort::new(0x170), 2, &mut irq, &mut pci_ide);
                     out[word_index * 2] = value as u8;
                     out[word_index * 2 + 1] = (value >> 8) as u8;
                 }
@@ -6835,13 +6849,13 @@ mod tests {
             (0x1f6, 0xe0),
             (0x1f7, ATA_CMD_READ_SECTORS),
         ] {
-            hd.write(port, value as u32, 1, &mut irq, &mut pci_ide);
+            hd.write(IoPort::new(port), value as u32, 1, &mut irq, &mut pci_ide);
         }
         // Bochs harddrv.cc: the read command arms the seek timer; DRQ (and
         // the buffered data) is presented by seek_timer at the deadline.
         assert!(hd.take_pending_seek_arm(0, 0).is_some());
         hd.seek_timer(0b00, &mut irq, &mut pci_ide);
-        assert_eq!(hd.read(0x1f0, 2, &mut irq, &mut pci_ide), 0x3131);
+        assert_eq!(hd.read(IoPort::new(0x1f0), 2, &mut irq, &mut pci_ide), 0x3131);
 
         let saved_len = hd.snapshot_len().unwrap();
         let mut saved = Vec::with_capacity(saved_len as usize);
@@ -6868,14 +6882,14 @@ mod tests {
         assert_eq!(drive.disk_data.as_deref().unwrap()[SECTOR_SIZE], 0xa7);
 
         for _ in 0..255 {
-            assert_eq!(hd.read(0x1f0, 2, &mut irq, &mut pci_ide), 0x3131);
+            assert_eq!(hd.read(IoPort::new(0x1f0), 2, &mut irq, &mut pci_ide), 0x3131);
         }
         let drive = &hd.channels[0].drives[0];
         assert_eq!(drive.controller.current_command, ATA_CMD_READ_SECTORS);
         assert!(drive.controller.status.contains(AtaStatus::DRQ));
         assert_eq!(drive.controller.buffer_index, 0);
         assert_eq!(drive.controller.num_sectors, 0);
-        assert_eq!(hd.read(0x1f0, 2, &mut irq, &mut pci_ide), 0xa7a7);
+        assert_eq!(hd.read(IoPort::new(0x1f0), 2, &mut irq, &mut pci_ide), 0xa7a7);
     }
 
     #[test]

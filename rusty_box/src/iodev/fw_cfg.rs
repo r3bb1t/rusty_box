@@ -9,6 +9,7 @@
 //! Reference: `cpp_orig/bochs/iodev/fw_cfg.cc` (700 lines)
 
 use crate::memory::BxMemC;
+use super::IoPort;
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
@@ -17,8 +18,18 @@ use crate::snapshot::{
 
 // ─── I/O Ports ──────────────────────────────────────────────────────────
 
-const FW_CFG_IO_BASE: u16 = 0x510;
-const FW_CFG_DATA_PORT: u16 = FW_CFG_IO_BASE + 1;
+pub(crate) const FW_CFG_IO_BASE: IoPort = IoPort::new(0x510);
+pub(crate) const FW_CFG_DATA_PORT: IoPort = IoPort::new(0x511);
+/// The eight DMA address ports, 0x514-0x51B.
+pub(crate) const FW_CFG_DMA_BASE: IoPort = IoPort::new(0x514);
+pub(crate) const FW_CFG_DMA_PORT_COUNT: u16 = 8;
+
+/// Which byte of the DMA window `port` names, or `None` outside it.
+#[inline]
+fn dma_port_offset(port: IoPort) -> Option<u16> {
+    let offset = port.offset_from(FW_CFG_DMA_BASE);
+    (offset < FW_CFG_DMA_PORT_COUNT).then_some(offset)
+}
 
 // ─── Selector Keys ──────────────────────────────────────────────────────
 
@@ -474,8 +485,8 @@ impl BxFwCfg {
     /// - 0x510: selector port — returns 0
     /// - 0x511: data port — returns next byte from current entry
     /// - 0x514-0x51B: DMA signature bytes
-    pub fn read_port(&self, address: u16, _io_len: u8) -> u32 {
-        match address {
+    pub fn read_port(&self, port: IoPort, _io_len: u8) -> u32 {
+        match port {
             FW_CFG_IO_BASE => 0,
             FW_CFG_DATA_PORT => {
                 // Reads from the data port. We need &mut self for cur_offset,
@@ -485,20 +496,22 @@ impl BxFwCfg {
                 // can't mutate. The mutable path is provided via read_port_mut.
                 0
             }
-            0x514..=0x51B => {
+            _ => match dma_port_offset(port) {
                 // DMA signature: return byte at offset within the 8-byte signature
-                let offset = (address - 0x514) as u32;
-                let sig = FW_CFG_DMA_SIGNATURE;
-                ((sig >> (offset * 8)) & 0xFF) as u32
-            }
-            _ => 0,
+                Some(offset) => {
+                    let offset = u32::from(offset);
+                    let sig = FW_CFG_DMA_SIGNATURE;
+                    ((sig >> (offset * 8)) & 0xFF) as u32
+                }
+                None => 0,
+            },
         }
     }
 
     /// Mutable read from data port (0x511). Advances cur_offset.
     /// Called when the dispatch can provide &mut self.
-    pub fn read_port_mut(&mut self, address: u16, _io_len: u8) -> u32 {
-        match address {
+    pub fn read_port_mut(&mut self, port: IoPort, _io_len: u8) -> u32 {
+        match port {
             FW_CFG_IO_BASE => 0,
             FW_CFG_DATA_PORT => {
                 if self.cur_entry == FW_CFG_INVALID {
@@ -514,11 +527,13 @@ impl BxFwCfg {
                 }
                 0
             }
-            0x514..=0x51B => {
-                let offset = (address - 0x514) as u32;
-                ((FW_CFG_DMA_SIGNATURE >> (offset * 8)) & 0xFF) as u32
-            }
-            _ => 0,
+            _ => match dma_port_offset(port) {
+                Some(offset) => {
+                    let offset = u32::from(offset);
+                    ((FW_CFG_DMA_SIGNATURE >> (offset * 8)) & 0xFF) as u32
+                }
+                None => 0,
+            },
         }
     }
 
@@ -529,12 +544,12 @@ impl BxFwCfg {
     /// - 0x514-0x51B: DMA address accumulation; writing low 32 bits triggers DMA
     pub(crate) fn write_port(
         &mut self,
-        address: u16,
+        port: IoPort,
         value: u32,
         io_len: u8,
         mem: &mut BxMemC,
     ) {
-        match address {
+        match port {
             FW_CFG_IO_BASE => {
                 if io_len == 2 {
                     self.cur_entry = (value & 0xFFFF) as u16;
@@ -548,8 +563,11 @@ impl BxFwCfg {
                 // Data port write — not used by OVMF
                 tracing::debug!("fw_cfg: write to data port ignored");
             }
-            0x514..=0x51B => {
-                let offset = (address - 0x514) as usize;
+            _ => {
+                let Some(offset) = dma_port_offset(port) else {
+                    return;
+                };
+                let offset = usize::from(offset);
 
                 if io_len == 4 {
                     // OVMF sends values big-endian — swap to native
@@ -575,7 +593,6 @@ impl BxFwCfg {
                     }
                 }
             }
-            _ => {}
         }
     }
 
@@ -1214,9 +1231,9 @@ mod tests {
 
         // Write all but the triggering byte of a bytewise DMA address.  The
         // final byte must resume the descriptor after restoration.
-        source.write_port(0x518, 0, 1, &mut mem);
-        source.write_port(0x519, 0x20, 1, &mut mem);
-        source.write_port(0x51A, 0, 1, &mut mem);
+        source.write_port(IoPort::new(0x518), 0, 1, &mut mem);
+        source.write_port(IoPort::new(0x519), 0x20, 1, &mut mem);
+        source.write_port(IoPort::new(0x51A), 0, 1, &mut mem);
         assert_eq!(source.dma_addr, DESCRIPTOR);
 
         let mut saved = Vec::new();
@@ -1233,7 +1250,7 @@ mod tests {
             "the restored selector and PIO offset must resume at the next byte"
         );
         assert_eq!(restored.dma_addr, DESCRIPTOR);
-        restored.write_port(0x51B, 0, 1, &mut mem);
+        restored.write_port(IoPort::new(0x51B), 0, 1, &mut mem);
 
         let mut payload = [0u8; PAYLOAD.len()];
         assert_eq!(

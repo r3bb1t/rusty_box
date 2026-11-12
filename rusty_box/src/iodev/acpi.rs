@@ -20,7 +20,7 @@
 
 use bitflags::bitflags;
 use rusty_box_core::time::VmClock;
-
+use super::IoPort;
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
@@ -32,11 +32,11 @@ use crate::snapshot::{
 const PM_FREQ: u64 = 3_579_545;
 
 /// Debug I/O port address (Bochs acpi.cc)
-const ACPI_DBG_IO_ADDR: u16 = 0xB044;
+pub(crate) const ACPI_DBG_IO_ADDR: IoPort = IoPort::new(0xB044);
 
 /// SMI command port (ACPI spec — FADT SmiCmd field)
 /// The BIOS writes ACPI_ENABLE/ACPI_DISABLE here.
-const SMI_CMD_PORT: u16 = 0x00B2;
+const SMI_CMD_PORT: IoPort = IoPort::new(0x00B2);
 
 /// ACPI enable command value (Bochs acpi.cc)
 const ACPI_ENABLE: u8 = 0xF1;
@@ -958,7 +958,8 @@ impl BxAcpiCtrl {
 
     /// Read from PM or SMBus register space.
     /// Bochs: read_handler() / read() (acpi.cc)
-    pub fn read(&mut self, address: u16, io_len: u8, clock: VmClock) -> u32 {
+    pub fn read(&mut self, port: IoPort, io_len: u8, clock: VmClock) -> u32 {
+        let address = port.get();
         let mut value: u32 = 0xFFFF_FFFF;
 
         if self.pm_base != 0 && (address as u32 & 0xFFC0) == self.pm_base {
@@ -1055,7 +1056,8 @@ impl BxAcpiCtrl {
 
     /// Write to PM or SMBus register space.
     /// Bochs: write_handler() / write() (acpi.cc)
-    pub fn write(&mut self, address: u16, value: u32, io_len: u8, clock: VmClock) {
+    pub fn write(&mut self, port: IoPort, value: u32, io_len: u8, clock: VmClock) {
+        let address = port.get();
         if self.pm_base != 0 && (address as u32 & 0xFFC0) == self.pm_base {
             // PM register space
             if (self.pci_conf[0x80] & 0x01) == 0 {
@@ -1311,13 +1313,13 @@ impl rusty_box_devices::pci::PciDevice for BxAcpiCtrl {
 
 impl BxAcpiCtrl {
     /// Check if an I/O port address falls within the PM base range.
-    pub fn is_pm_port(&self, port: u16) -> bool {
-        self.pm_base != 0 && (port as u32 & 0xFFC0) == self.pm_base
+    pub fn is_pm_port(&self, port: IoPort) -> bool {
+        self.pm_base != 0 && (u32::from(port.get()) & 0xFFC0) == self.pm_base
     }
 
     /// Check if an I/O port address falls within the SM base range.
-    pub fn is_sm_port(&self, port: u16) -> bool {
-        self.sm_base != 0 && (port as u32 & 0xFFF0) == self.sm_base
+    pub fn is_sm_port(&self, port: IoPort) -> bool {
+        self.sm_base != 0 && (u32::from(port.get()) & 0xFFF0) == self.sm_base
     }
 
     /// Get the I/O access mask for a PM register offset.
@@ -1364,7 +1366,7 @@ fn muldiv64(a: u64, b: u32, c: u32) -> u64 {
 impl rusty_box_devices::api::PioDevice for BxAcpiCtrl {
     fn pio_read(
         &mut self,
-        port: u16,
+        port: IoPort,
         len: rusty_box_devices::api::IoLen,
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) -> u32 {
@@ -1376,7 +1378,7 @@ impl rusty_box_devices::api::PioDevice for BxAcpiCtrl {
 
     fn pio_write(
         &mut self,
-        port: u16,
+        port: IoPort,
         value: u32,
         len: rusty_box_devices::api::IoLen,
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
@@ -1411,6 +1413,20 @@ impl rusty_box_devices::api::TimedDevice for BxAcpiCtrl {
 mod tests {
     use super::*;
     use rusty_box_devices::pci::PciDevice;
+
+    /// Register `offset` of the power-management window the PM BAR names.
+    fn pm_port(acpi: &BxAcpiCtrl, offset: u16) -> IoPort {
+        IoPort::new(acpi.pm_base as u16)
+            .checked_add(offset)
+            .expect("the PM window fits in the port space")
+    }
+
+    /// Register `offset` of the SMBus window the SMBus BAR names.
+    fn sm_port(acpi: &BxAcpiCtrl, offset: u16) -> IoPort {
+        IoPort::new(acpi.sm_base as u16)
+            .checked_add(offset)
+            .expect("the SMBus window fits in the port space")
+    }
 
     /// The machine clock `usec` microseconds after power-on, on a 1 MHz clock
     /// so one tick is one microsecond.
@@ -1511,7 +1527,7 @@ mod tests {
         acpi.pm_base = 0xB000;
         acpi.pci_conf[0x80] = 0x01; // Enable PM decode
 
-        let pm_addr = acpi.pm_base as u16 + 0x08;
+        let pm_addr = pm_port(&acpi, 0x08);
         assert_eq!(acpi.read(pm_addr, 4, clock_at_usec(0)), 0);
         assert_eq!(
             acpi.read(pm_addr, 4, clock_at_usec(1_000_000)),
@@ -1531,7 +1547,7 @@ mod tests {
         let mut acpi = BxAcpiCtrl::new();
         acpi.pm_base = 0xB000;
         acpi.pci_conf[0x80] = 0x01; // PMIOSE: decode the PM block
-        let pm_timer = acpi.pm_base as u16 + 0x08;
+        let pm_timer = pm_port(&acpi, 0x08);
 
         let before = acpi.read(pm_timer, 4, clock_at_usec(10_000));
         acpi.reset();
@@ -1562,7 +1578,7 @@ mod tests {
         acpi.pmsts = PmStatus::PWRBTN_STS.bits() | PmStatus::TMROF_STS.bits();
 
         // Write 1 to PWRBTN_STS to clear it (address = pm_base + 0x00)
-        let pm_addr = acpi.pm_base as u16;
+        let pm_addr = pm_port(&acpi, 0x00);
         acpi.write(pm_addr, PmStatus::PWRBTN_STS.bits() as u32, 2, clock_at_usec(0));
 
         // PWRBTN_STS should be cleared, TMROF_STS may still be set (depends on timer)
@@ -1605,11 +1621,11 @@ mod tests {
         acpi.sm_base = 0xB100;
         acpi.pci_conf[0x04] = 0x01; // Enable I/O decode
 
-        let sm_addr = acpi.sm_base as u16;
+        let block_data = sm_port(&acpi, 0x07);
 
         // Write 33 bytes to block data register (0x07) — should wrap at 32
         for i in 0..33u32 {
-            acpi.write(sm_addr + 0x07, i, 1, clock_at_usec(0));
+            acpi.write(block_data, i, 1, clock_at_usec(0));
         }
         // Index should have wrapped: 33 mod 32 = 1
         assert_eq!(acpi.smbus.index, 1);
@@ -1679,7 +1695,7 @@ mod tests {
 
         // SUS_EN with SLP_TYP = 0.
         let value = PmControl::SUS_EN.bits() as u32;
-        acpi.write(acpi.pm_base as u16 + 0x04, value, 2, clock_at_usec(0));
+        acpi.write(pm_port(&acpi, 0x04), value, 2, clock_at_usec(0));
 
         assert!(acpi.soft_off_pending, "S5 must request emulator shutdown");
         assert!(acpi.reset_request.is_none(), "S5 stops, it does not reset");
@@ -1695,7 +1711,7 @@ mod tests {
 
         // SUS_EN with SLP_TYP = 1 (bits 10-12).
         let value = PmControl::SUS_EN.bits() as u32 | (1 << 10);
-        acpi.write(acpi.pm_base as u16 + 0x04, value, 2, clock_at_usec(0));
+        acpi.write(pm_port(&acpi, 0x04), value, 2, clock_at_usec(0));
 
         assert!(!acpi.soft_off_pending, "S3 suspends, it does not power off");
         assert_eq!(
@@ -1755,7 +1771,7 @@ mod tests {
         acpi.pci_conf[0x80] = 0x01;
 
         acpi.write(
-            acpi.pm_base as u16 + 0x02,
+            pm_port(&acpi, 0x02),
             PmEnable::TMROF_EN.bits() as u32,
             2,
             clock_at_usec(0),
@@ -1805,7 +1821,7 @@ mod tests {
         acpi.pci_conf[0x80] = 0x01; // Enable PM decode
         acpi.enable_realtime_sync();
 
-        let pm_addr = acpi.pm_base as u16 + 0x08;
+        let pm_addr = pm_port(&acpi, 0x08);
         let before = acpi.read(pm_addr, 4, clock_at_usec(1_000));
         std::thread::sleep(std::time::Duration::from_millis(10));
         let after = acpi.read(pm_addr, 4, clock_at_usec(1_000));
@@ -1826,7 +1842,7 @@ mod tests {
         acpi.pm_base = 0xB000;
         acpi.pci_conf[0x80] = 0x01; // PMIOSE: decode the PM block
         acpi.enable_realtime_sync();
-        let pm_timer = acpi.pm_base as u16 + 0x08;
+        let pm_timer = pm_port(&acpi, 0x08);
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         let before = acpi.read(pm_timer, 4, clock_at_usec(0));
@@ -1847,7 +1863,7 @@ mod tests {
         acpi.pm_base = 0xB000;
         acpi.pci_conf[0x80] = 0x01; // PMIOSE: decode the PM block
         acpi.enable_realtime_sync();
-        let pm_timer = acpi.pm_base as u16 + 0x08;
+        let pm_timer = pm_port(&acpi, 0x08);
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         let before = acpi.read(pm_timer, 4, clock_at_usec(0));

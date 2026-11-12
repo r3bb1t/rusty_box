@@ -1684,9 +1684,9 @@ mod tests {
             .unwrap();
     }
 
-    const COM1_RBR: u16 = 0x03F8;
-    const COM1_FCR: u16 = 0x03FA;
-    const COM1_LSR: u16 = 0x03FD;
+    const COM1_RBR: crate::iodev::IoPort = crate::iodev::IoPort::new(0x03F8);
+    const COM1_FCR: crate::iodev::IoPort = crate::iodev::IoPort::new(0x03FA);
+    const COM1_LSR: crate::iodev::IoPort = crate::iodev::IoPort::new(0x03FD);
     const LSR_DATA_READY: u32 = 0x01;
     const LSR_OVERRUN: u32 = 0x02;
 

@@ -579,10 +579,14 @@ impl GicV3 {
     }
 
     /// Acknowledge interrupt `irq`, its group's active priority register
-    /// recording its group priority's preemption level: an SGI, PPI or SPI
-    /// becomes active, an LPI is no longer pending.
+    /// recording its priority group at the minimum binary point (B.7
+    /// `PriorityGroup`; 12.2.19 `ICC_RPR_EL1` reads the running priority
+    /// as if the BPR were at its minimum): an SGI, PPI or SPI becomes
+    /// active, an LPI is no longer pending. Preemption masks that running
+    /// priority with the pending interrupt's own group's binary point.
     fn activate(&mut self, irq: usize) {
-        let level = usize::from(self.priority_of(irq) & self.group_mask(irq)) >> self.level_shift();
+        let level = usize::from(self.priority_of(irq) & self.shape.priority_bits.mask())
+            >> self.level_shift();
         let bank = if self.is_group1(irq) {
             &mut self.ap1r
         } else {

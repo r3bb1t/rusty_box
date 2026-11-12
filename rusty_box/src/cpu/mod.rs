@@ -8,8 +8,8 @@ pub use instrumentation::{
     DescriptorTable, LinearRange, MappingWalk, PageAccess, PageMapping, WalkStep,
     GuestPhysicalMemory, VmxGuest,
     ExitSet, HookCtx, HookMask, HwInterruptEvent, InstrAction, Instrumentation, InvEptType,
-    InvPcidType, IoHookEvent, LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemPerms,
-    MemType, MemUnmapped, MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent,
+    InvPcidType, IoHookEvent, IoPort, LinAccess, MemAccessRW, MemHookEvent, MemPermViolation,
+    MemPerms, MemType, MemUnmapped, MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent,
     PrefetchHint, ResetType, TlbCntrl, X86Reg,
 };
 

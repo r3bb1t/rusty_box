@@ -1463,20 +1463,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    /// SVM I/O intercept — Bochs svm.cc SvmInterceptIO. Checks the IOPM
-    /// bitmap for `port..port+len` and triggers a VMEXIT_IO if any bit is set.
-    /// `direction_in` = true for IN*, false for OUT*. String/REP handling is
-    /// left out of this first cut (see svm.cc for the exact qualification
-    /// bits); the VMEXIT_IO qualification encodes port+len+direction+asize,
-    /// which is enough for non-string I/O.
+    /// SVM I/O intercept — Bochs svm.cc SvmInterceptIO. Checks the IOPM bits
+    /// for `port..port+len` and, if any is set, exits with VMEXIT_IO:
+    /// EXITINFO1 = port << 16 | ASIZE (bits 9:7, from the instruction's
+    /// address size) | LEN (bits 6:4) | REP (bit 3, a string form with a
+    /// REP prefix) | STRING (bit 2) | PORTIN (bit 0), EXITINFO2 = RIP.
+    /// `direction_in` is true for IN/INS, `string` for INS/OUTS.
     pub(super) fn svm_intercept_io(
         &mut self,
-        port: u16,
+        instr: &super::decoder::Instruction,
+        port: crate::iodev::IoPort,
         len: u32,
         direction_in: bool,
         string: bool,
-        rep: bool,
-        asize_bits: u8, // 0 for non-string, 16/32/64 for string
     ) -> super::Result<()> {
         if !self.in_svm_guest {
             return Ok(());
@@ -1484,6 +1483,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.svm_intercept_check(SVM_INTERCEPT0_IO) {
             return Ok(());
         }
+        // The IOPM is indexed, and EXITINFO1 encoded, by the port number itself.
+        let port = port.get();
         // Read two IOPM bitmap bytes to cover cross-bit accesses (Bochs uses
         // single physical reads since read_physical_byte can't cross 4K).
         let iopm_base = self.vmcb.ctrls.iopm_base;
@@ -1496,7 +1497,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(());
         }
         // Qualification (EXITINFO1) layout mirrors Bochs svm.cc — port in bits
-        // 16-31, length flag bits 4-6, asize flag bits 1-3, direction bit 0.
+        // 16-31, address-size flags bits 7-9, length flags bits 4-6, REP bit
+        // 3, string bit 2, direction bit 0.
         let mut qualification: u64 = (port as u64) << 16;
         if direction_in {
             qualification |= 1; // SVM_VMEXIT_IO_PORTIN
@@ -1510,15 +1512,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if string {
             qualification |= 1 << 2; // SVM_VMEXIT_IO_INSTR_STR
         }
-        if rep {
+        if string && instr.rep_used_l() != 0 {
             qualification |= 1 << 3; // SVM_VMEXIT_IO_INSTR_REP
         }
-        match asize_bits {
-            16 => qualification |= 1 << 7, // SVM_VMEXIT_IO_INSTR_ASIZE16
-            32 => qualification |= 1 << 8, // SVM_VMEXIT_IO_INSTR_ASIZE32
-            64 => qualification |= 1 << 9, // SVM_VMEXIT_IO_INSTR_ASIZE64
-            _ => {}
-        }
+        qualification |= if instr.as64_l() != 0 {
+            1 << 9 // SVM_VMEXIT_IO_INSTR_ASIZE64
+        } else if instr.as32_l() != 0 {
+            1 << 8 // SVM_VMEXIT_IO_INSTR_ASIZE32
+        } else {
+            1 << 7 // SVM_VMEXIT_IO_INSTR_ASIZE16
+        };
         // EXITINFO2 is the next-instruction RIP. Bochs passes RIP as-is.
         let rip = self.rip();
         self.svm_vmexit(SvmVmexit::Io as i32, qualification, rip)

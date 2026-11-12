@@ -44,19 +44,20 @@ fn validate_piix3_snapshot_identity(
     Ok(())
 }
 use crate::cpu::ResetReason;
+use super::IoPort;
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
 
 /// APM command port (Bochs pci2isa.cc)
-pub const APM_CMD_PORT: u16 = 0x00B2;
+pub const APM_CMD_PORT: IoPort = IoPort::new(0x00B2);
 /// APM status port (Bochs pci2isa.cc)
-pub const APM_STS_PORT: u16 = 0x00B3;
+pub const APM_STS_PORT: IoPort = IoPort::new(0x00B3);
 /// ELCR1 — Edge/Level Control Register for master PIC (Bochs pci2isa.cc)
-pub const ELCR1_PORT: u16 = 0x04D0;
+pub const ELCR1_PORT: IoPort = IoPort::new(0x04D0);
 /// ELCR2 — Edge/Level Control Register for slave PIC (Bochs pci2isa.cc)
-pub const ELCR2_PORT: u16 = 0x04D1;
+pub const ELCR2_PORT: IoPort = IoPort::new(0x04D1);
 /// CPU reset register (Bochs pci2isa.cc)
-pub const PCI_RESET_PORT: u16 = 0x0CF9;
+pub const PCI_RESET_PORT: IoPort = IoPort::new(0x0CF9);
 
 /// Valid IRQ mask for PCI routing (Bochs pci2isa.cc)
 /// Bits set for IRQs that can be used: 3,4,5,6,7,9,10,11,12,14,15
@@ -230,23 +231,23 @@ impl BxPiix3 {
 
     /// Read from PCI-to-ISA bridge I/O ports.
     /// Bochs: bx_piix3_c::read() (pci2isa.cc)
-    pub fn read(&self, address: u16) -> u32 {
-        match address {
-            0x00B2 => self.apmc as u32,
-            0x00B3 => self.apms as u32,
-            0x04D0 => self.elcr1 as u32,
-            0x04D1 => self.elcr2 as u32,
-            0x0CF9 => self.pci_reset as u32,
+    pub fn read(&self, port: IoPort) -> u32 {
+        match port {
+            APM_CMD_PORT => self.apmc as u32,
+            APM_STS_PORT => self.apms as u32,
+            ELCR1_PORT => self.elcr1 as u32,
+            ELCR2_PORT => self.elcr2 as u32,
+            PCI_RESET_PORT => self.pci_reset as u32,
             _ => 0xFFFF_FFFF,
         }
     }
 
     /// Write to PCI-to-ISA bridge I/O ports.
     /// Bochs: bx_piix3_c::write() (pci2isa.cc)
-    pub fn write(&mut self, address: u16, value: u32, io_len: u8) {
-        match address {
+    pub fn write(&mut self, port: IoPort, value: u32, io_len: u8) {
+        match port {
             // APM command port (pci2isa.cc)
-            0x00B2 => {
+            APM_CMD_PORT => {
                 // Note: In Bochs this forwards to ACPI generate_smi()
                 // In our architecture, the ACPI device also listens on 0xB2
                 self.apmc = value as u8;
@@ -255,11 +256,11 @@ impl BxPiix3 {
                 }
             }
             // APM status port (pci2isa.cc)
-            0x00B3 => {
+            APM_STS_PORT => {
                 self.apms = value as u8;
             }
             // ELCR1 — master PIC edge/level (pci2isa.cc)
-            0x04D0 => {
+            ELCR1_PORT => {
                 let v = (value as u8) & 0xF8; // bits 0-2 always edge
                 if v != self.elcr1 {
                     self.elcr1 = v;
@@ -268,7 +269,7 @@ impl BxPiix3 {
                 }
             }
             // ELCR2 — slave PIC edge/level (pci2isa.cc)
-            0x04D1 => {
+            ELCR2_PORT => {
                 let v = (value as u8) & 0xDE; // bits 0 and 5 always edge
                 if v != self.elcr2 {
                     self.elcr2 = v;
@@ -277,7 +278,7 @@ impl BxPiix3 {
                 }
             }
             // CPU reset register (pci2isa.cc)
-            0x0CF9 => {
+            PCI_RESET_PORT => {
                 tracing::debug!("CPU reset register write: {:#04x}", value);
                 self.pci_reset = (value as u8) & 0x02;
                 if (value as u8) & 0x04 != 0 {
@@ -674,11 +675,11 @@ mod tests {
     fn test_elcr_write() {
         let mut bridge = BxPiix3::new();
         // ELCR1: bits 0-2 always edge (masked to 0xF8)
-        bridge.write(0x04D0, 0xFF, 1);
+        bridge.write(ELCR1_PORT, 0xFF, 1);
         assert_eq!(bridge.elcr1, 0xF8);
         assert!(bridge.elcr1_changed);
         // ELCR2: bits 0 and 5 always edge (masked to 0xDE)
-        bridge.write(0x04D1, 0xFF, 1);
+        bridge.write(ELCR2_PORT, 0xFF, 1);
         assert_eq!(bridge.elcr2, 0xDE);
         assert!(bridge.elcr2_changed);
     }
@@ -686,12 +687,12 @@ mod tests {
     #[test]
     fn test_apm_ports() {
         let mut bridge = BxPiix3::new();
-        bridge.write(0x00B2, 0x42, 1);
+        bridge.write(APM_CMD_PORT, 0x42, 1);
         assert_eq!(bridge.apmc, 0x42);
-        assert_eq!(bridge.read(0x00B2), 0x42);
-        bridge.write(0x00B3, 0x55, 1);
+        assert_eq!(bridge.read(APM_CMD_PORT), 0x42);
+        bridge.write(APM_STS_PORT, 0x55, 1);
         assert_eq!(bridge.apms, 0x55);
-        assert_eq!(bridge.read(0x00B3), 0x55);
+        assert_eq!(bridge.read(APM_STS_PORT), 0x55);
     }
 
     #[test]
@@ -714,10 +715,10 @@ mod tests {
     fn test_cpu_reset_register() {
         let mut bridge = BxPiix3::new();
         // Write reset type (bit 1) then trigger (bit 2)
-        bridge.write(0x0CF9, 0x02, 1); // Set reset type = hardware
+        bridge.write(PCI_RESET_PORT, 0x02, 1); // Set reset type = hardware
         assert_eq!(bridge.pci_reset, 0x02);
         assert!(bridge.reset_request.is_none());
-        bridge.write(0x0CF9, 0x06, 1); // Set type + trigger
+        bridge.write(PCI_RESET_PORT, 0x06, 1); // Set type + trigger
         assert!(bridge.reset_request.is_some());
         assert_eq!(bridge.reset_request, Some(ResetReason::Hardware));
     }

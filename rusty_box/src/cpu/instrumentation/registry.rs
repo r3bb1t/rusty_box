@@ -29,8 +29,9 @@ use crate::cpu::decoder::Instruction;
 
 use super::bochs::Instrumentation;
 use super::types::{
-    BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, IoHookEvent, LinAccess, MemPermViolation,
-    MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType, TlbCntrl,
+    BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, IoHookEvent, IoPort, LinAccess,
+    MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType,
+    TlbCntrl,
 };
 
 /// The tracer a processor carries, with the mask it declared and the stop
@@ -178,7 +179,7 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     }
 
     #[inline]
-    pub fn fire_inp(&mut self, port: u16, size: u8) {
+    pub fn fire_inp(&mut self, port: IoPort, size: u8) {
         self.tracer.inp(port, size);
     }
 

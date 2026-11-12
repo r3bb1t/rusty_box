@@ -343,6 +343,18 @@ offset. The unit types in the tree:
 - `CpuMemoryPolicy` (`rusty_box/src/memory/mod.rs`);
 - `WindowOffset`, how far into a device's window an access landed
   (`rusty_box_devices/src/api.rs`);
+- `IoPort`, one of the 65 536 x86 I/O ports (`rusty_box_devices/src/api.rs`, re-exported as
+  `rusty_box::iodev::IoPort` and beside the instrumentation hooks). Every port-side signature
+  takes it: `PioDevice::pio_read`/`pio_write`, `PortDecl::port`, `BxDevicesC::inp`/`outp` and
+  the handler registration, each device's `read`/`write`, the CPU's `IN`/`OUT`/`INS`/`OUTS`
+  path, the TSS permission bitmap, the VMX I/O bitmaps and the SVM IOPM, and the `inp` hook
+  and `IoHookEvent::port`. A port comes into being only where one is decoded — an
+  instruction's immediate or `DX`, a WHP port exit, a device's own port constants, a BAR the
+  guest programmed — and leaves as a bare `u16` (`IoPort::get`) only where a number is what
+  is wanted: a device decoding its registers, a bitmap indexed by port, a VM-exit
+  qualification, a snapshot. Its arithmetic is the port space's own two operations,
+  `checked_add` (a window's base plus an offset) and `offset_from` (how far into a window an
+  access landed, a distance and therefore a `u16`); there is no `From<u16>` and no `Add`;
 - `VmInstant`, `VmDuration`, `HostInstant` and `ClockHz` (`rusty_box_core/src/time.rs`);
 - `Ips`, the emulated instructions per second in `EmulatorConfig::ips`, defaulting to
   `Ips::BOCHS_DEFAULT` = 50_000_000 (Bochs config.cc `cpu: ips`).
@@ -351,10 +363,9 @@ Adopted from vm-memory/vm-device: position − position yields a raw *distance* 
 another position. The strongest form makes a conversion function the *only* path between unit
 domains, so an unconverted access is a compile error, not a review catch.
 
-Target design, not built: the port space gets its own `u16`-backed type (a port is a bare
-`u16` today, as in `PioDevice::pio_read(&mut self, port: u16, …)`), and SVGA banking becomes
-`MemoryWindow::translate(WindowOffset) -> Option<VramOffset>`. Neither a port type nor
-`MemoryWindow` nor `VramOffset` exists in the tree.
+Target design, not built: SVGA banking becomes
+`MemoryWindow::translate(WindowOffset) -> Option<VramOffset>`. Neither `MemoryWindow` nor
+`VramOffset` exists in the tree.
 
 **RAM offsets and allocation offsets** are the pair easiest to mix up, because both are
 `usize` byte offsets and they are equal whenever residency is full.

@@ -370,6 +370,28 @@ fn the_priority_mask_and_preemption() {
     assert!(g.irq_out(), "0x48 preempts 0x80");
 }
 
+/// The running priority keeps an acknowledged interrupt's priority at the
+/// minimum binary point (12.2.19 `ICC_RPR_EL1`, B.7 `PriorityGroup`), not
+/// its group priority under the group's current binary point; preemption
+/// still compares group priorities.
+#[test]
+fn the_running_priority_ignores_the_binary_point() {
+    let mut g = running();
+    g.icc_write(IccRegister::Pmr, 0xF8);
+    g.icc_write(IccRegister::Bpr1, 5);
+    enable_spi(&mut g, SPI, true, 0x38);
+    enable_spi(&mut g, SPI + 1, true, 0x20);
+    make_pending(&mut g, SPI);
+    assert_eq!(g.icc_read(IccRegister::Iar1), u64::from(SPI));
+    assert_eq!(g.icc_read(IccRegister::Rpr), 0x38);
+    assert_eq!(
+        g.icc_read(IccRegister::Ap1r(ApIndex::Zero)),
+        1 << (0x38 >> 3)
+    );
+    make_pending(&mut g, SPI + 1);
+    assert!(!g.irq_out(), "0x20 and 0x38 are one group priority under BPR1 5");
+}
+
 /// With `EOImode` set an end of interrupt drops the priority only, and
 /// `ICC_DIR_EL1` deactivates; with it clear `ICC_DIR_EL1` does nothing.
 #[test]

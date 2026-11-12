@@ -72,7 +72,7 @@ pub use types::{
     DescriptorTable, LinearRange, MappingWalk, PageAccess, PageMapping, WalkStep,
     GuestPhysicalMemory, VmxGuest,
     ExitSet, HookMask, HwInterruptEvent, InstrAction, InvEptType, InvPcidType, IoHookEvent,
-    LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemPerms, MemType, MemUnmapped,
+    IoPort, LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemPerms, MemType, MemUnmapped,
     MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent, PrefetchHint, ResetType,
     TlbCntrl, X86Reg,
 };

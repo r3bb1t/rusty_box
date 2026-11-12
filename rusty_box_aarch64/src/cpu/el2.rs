@@ -11,11 +11,14 @@
 //! `HCR_EL2.E2H` (FEAT_VHE) redefines four registers, `SCTLR_EL2`,
 //! `CPTR_EL2`, `TCR_EL2` and `CNTHCTL_EL2` (Arm ARM D8.13.1), each of
 //! which has a layout for `E2H` 0 and one for `E2H` 1 ([`E2hLayout`]):
-//! a register holds what a write in the layout of its time keeps, and a
-//! write of `HCR_EL2` that changes `E2H` makes each hold what the new
-//! layout keeps of it. Without FEAT_VHE `E2H` is RES0 and the layout is
-//! always the `E2H` 0 one. A bit that is RES0 or RES1 for the features a
-//! processor implements, in its layout, is hardwired to that value, reads
+//! each keeps every bit that is a field in either layout as last written,
+//! whatever `E2H` was then, as Arm requires of a bit reserved only in some
+//! contexts, and every reader takes the fields of the layout `E2H` selects
+//! now. A bit that is a field in neither layout reads as the current
+//! layout's RES1 value, a write of `HCR_EL2` that changes `E2H` setting it
+//! again. Without FEAT_VHE `E2H` is RES0 and the layout is always the
+//! `E2H` 0 one. A bit that is RES0 or RES1 in every context, for the
+//! features a processor implements, is hardwired to that value, reads
 //! returning it and writes ignoring it, one of the two behaviours Arm
 //! permits for a reserved bit (the other keeps what is written). The
 //! IMPLEMENTATION DEFINED registers (`ACTLR_EL2`, `HACR_EL2`, `AFSR0_EL2`,
@@ -1101,6 +1104,31 @@ el2_registers! {
     Vncr => vncr,
 }
 
+/// What of `value` a register `HCR_EL2.E2H` redefines keeps, `e2h0_fields`
+/// and `e2h1_fields` being its fields in each layout and `res1` the RES1
+/// bits of the layout of the time: every bit that is a field in a layout
+/// the processor has (the `E2H` 1 one only with FEAT_VHE) as written, a
+/// read returning the value last written whatever the register's use when
+/// it was written (Arm ARM Glossary, "If a bit is RES0 only in some
+/// contexts" and its RES1 twin); a bit that is a field in neither, `res1`'s
+/// value, as Arm permits for a bit reserved in every context (writes
+/// ignored, and for one RES0 in a layout and RES1 in the other the read
+/// UNKNOWN).
+const fn redefined_kept(
+    features: Features,
+    e2h0_fields: u64,
+    e2h1_fields: u64,
+    res1: u64,
+    value: u64,
+) -> u64 {
+    let fields = if features.has(Feature::Vhe) {
+        e2h0_fields | e2h1_fields
+    } else {
+        e2h0_fields
+    };
+    (value & fields) | (res1 & !fields)
+}
+
 impl El2Reg {
     /// What of `value` an `MSR` to the register keeps on a processor
     /// implementing `features`, whose `SPSR_ELx` bits are `spsr_mask`, in
@@ -1116,15 +1144,31 @@ impl El2Reg {
     ) -> u64 {
         match self {
             Self::Hcr => (value & hcr_mask(features)) | HCR_RES1,
-            Self::Sctlr => (value & sctlr_el2_mask(features, layout)) | sctlr_el2_res1(layout),
-            Self::Cptr => {
-                (value & cptr_el2_mask(features, layout)) | cptr_el2_res1(features, layout)
-            }
+            Self::Sctlr => redefined_kept(
+                features,
+                sctlr_el2_mask(features, E2hLayout::E2h0),
+                sctlr_el2_mask(features, E2hLayout::E2h1),
+                sctlr_el2_res1(layout),
+                value,
+            ),
+            Self::Cptr => redefined_kept(
+                features,
+                cptr_el2_mask(features, E2hLayout::E2h0),
+                cptr_el2_mask(features, E2hLayout::E2h1),
+                cptr_el2_res1(features, layout),
+                value,
+            ),
             // Every field of `HSTR_EL2` traps an AArch32 access, so with no
             // AArch32 the register is RES0.
             Self::Hstr => 0,
             Self::Mdcr => value & mdcr_el2_mask(features),
-            Self::Tcr => (value & tcr_el2_mask(features, layout)) | tcr_el2_res1(layout),
+            Self::Tcr => redefined_kept(
+                features,
+                tcr_el2_mask(features, E2hLayout::E2h0),
+                tcr_el2_mask(features, E2hLayout::E2h1),
+                tcr_el2_res1(layout),
+                value,
+            ),
             Self::Ttbr0 => value & ttbr_el2_mask(features),
             Self::Ttbr1 => {
                 if features.has(Feature::Vhe) {
@@ -1148,7 +1192,13 @@ impl El2Reg {
                     0
                 }
             }
-            Self::Cnthctl => value & cnthctl_mask(features, layout),
+            Self::Cnthctl => redefined_kept(
+                features,
+                cnthctl_mask(features, E2hLayout::E2h0),
+                cnthctl_mask(features, E2hLayout::E2h1),
+                0,
+                value,
+            ),
             // `CNTPOFF_EL2.PO`, all 64 bits, with FEAT_ECV_POFF.
             Self::Cntpoff => {
                 if features.has(Feature::EcvPoff) {
@@ -1365,8 +1415,9 @@ impl El2Regs {
 
     /// An `MSR` of `value` to `reg` on a processor implementing `imp` whose
     /// `SPSR_ELx` bits are `spsr_mask`: what [`El2Reg::held`] keeps in the
-    /// layout of the time. A write of `HCR_EL2` that changes `E2H` leaves
-    /// each register it redefines holding what the new layout keeps of it.
+    /// layout of the time. A write of `HCR_EL2` that changes `E2H` sets the
+    /// bits of each register it redefines that are a field in neither
+    /// layout to the new layout's RES1 value, and keeps every field.
     pub(crate) fn write(&mut self, reg: El2Reg, imp: Implementation, spsr_mask: u64, value: u64) {
         let layout = self.layout();
         *self.slot(reg) = reg.held(imp, spsr_mask, layout, value);
@@ -1698,23 +1749,36 @@ mod tests {
     /// `E2H` 0; `TCR_EL2`'s `T1SZ`, a field of the `E2H` 1 layout, is the
     /// `E2H` 0 layout's `PS` and `TBI` where they overlap.
     #[test]
-    fn a_change_of_e2h_relays_the_registers_it_redefines() {
+    fn a_change_of_e2h_keeps_the_fields_of_either_layout() {
         let imp = Implementation::EVERY_FEATURE.with_levels::<WithEl2>().get();
         let spsr_mask = spsr_mask_of(imp.features);
         let mut regs = El2Regs::reset(imp.with_levels::<WithEl2>());
         assert_eq!(regs.layout(), E2hLayout::E2h0);
         assert_eq!(regs.cptr & CPTR_EL2_RES1_BASE, CPTR_EL2_RES1_BASE);
+        // FPEN, an E2H 1 field in RES0 bits of the E2H 0 layout, written
+        // with E2H 0.
+        regs.write(El2Reg::Cptr, imp, spsr_mask, CPTR_EL2_RES1_BASE | CPTR_FPEN);
+        assert_eq!(regs.cptr & CPTR_FPEN, CPTR_FPEN, "read back as written");
         regs.write(El2Reg::Hcr, imp, spsr_mask, HCR_E2H);
         assert_eq!(regs.layout(), E2hLayout::E2h1);
-        assert_eq!(regs.cptr, 0, "every E2H 0 RES1 bit is RES0 with E2H 1");
+        assert_eq!(
+            regs.cptr,
+            CPTR_FPEN,
+            "FPEN kept; the bits that are a field in neither layout RES0 with E2H 1"
+        );
         regs.write(El2Reg::Tcr, imp, spsr_mask, 0x3F << 16);
         assert_eq!(regs.tcr, 0x3F << 16, "T1SZ");
+        // nTWI cleared with E2H 1, a RES1 bit of the E2H 0 layout.
+        regs.write(El2Reg::Sctlr, imp, spsr_mask, regs.sctlr & !sctlr::NTWI);
         regs.write(El2Reg::Hcr, imp, spsr_mask, 0);
-        assert_eq!(regs.cptr, cptr_el2_res1(imp.features, E2hLayout::E2h0));
         assert_eq!(
-            regs.tcr,
-            (0x37 << 16) | TCR_EL2_RES1,
-            "PS, TBI and HA of the E2H 0 layout; bit 19 is RES0 there"
+            regs.cptr,
+            cptr_el2_res1(imp.features, E2hLayout::E2h0) | CPTR_FPEN,
+            "the E2H 0 RES1 bits again, FPEN still kept"
         );
+        assert_eq!(regs.tcr & (0x3F << 16), 0x3F << 16, "T1SZ kept, bit 19 with it");
+        regs.write(El2Reg::Hcr, imp, spsr_mask, HCR_E2H);
+        assert_eq!(regs.sctlr & sctlr::NTWI, 0, "nTWI as written, after the round trip");
+        assert_eq!(regs.cptr, CPTR_FPEN);
     }
 }

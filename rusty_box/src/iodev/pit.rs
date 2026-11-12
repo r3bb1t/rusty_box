@@ -24,14 +24,15 @@ use crate::snapshot::{
     bounds, checked_snapshot_len_add, checked_snapshot_len_mul,
     SnapError, SnapRead, SnapResult, SnapWrite, SNAPSHOT_SECTION_VERSION,
 };
+use super::IoPort;
 
 /// PIT I/O port addresses
-pub const PIT_COUNTER0: u16 = 0x0040;
-pub const PIT_COUNTER1: u16 = 0x0041;
-pub const PIT_COUNTER2: u16 = 0x0042;
-pub const PIT_CONTROL: u16 = 0x0043;
+pub const PIT_COUNTER0: IoPort = IoPort::new(0x0040);
+pub const PIT_COUNTER1: IoPort = IoPort::new(0x0041);
+pub const PIT_COUNTER2: IoPort = IoPort::new(0x0042);
+pub const PIT_CONTROL: IoPort = IoPort::new(0x0043);
 /// System Control Port B — registered by the PIT (Bochs pit.cc init)
-pub const PIT_SYSTEM_CONTROL_B: u16 = 0x0061;
+pub const PIT_SYSTEM_CONTROL_B: IoPort = IoPort::new(0x0061);
 
 /// PIT input clock ticks per second — Bochs pit.cc TICKS_PER_SECOND
 /// ("1.193181MHz Clock"). Note: NOT 1193182; Bochs uses 1193181 and all
@@ -1254,7 +1255,7 @@ impl BxPitC {
     }
 
     /// Read from PIT I/O port — Bochs pit.cc bx_pit_c::read
-    pub fn read(&mut self, port: u16, _io_len: u8, clock: VmClock) -> u32 {
+    pub fn read(&mut self, port: IoPort, _io_len: u8, clock: VmClock) -> u32 {
         // Bochs pit.cc bx_pit_c::read runs handle_timer() (periodic to
         // "now") before reading any register, so the guest observes the
         // counter state as of the current instruction.
@@ -1290,7 +1291,7 @@ impl BxPitC {
     }
 
     /// Write to PIT I/O port — Bochs pit.cc bx_pit_c::write
-    pub fn write(&mut self, port: u16, value: u32, _io_len: u8, clock: VmClock) {
+    pub fn write(&mut self, port: IoPort, value: u32, _io_len: u8, clock: VmClock) {
         // Bochs pit.cc bx_pit_c::write: periodic(time_passed32) runs BEFORE
         // s.timer.write(...) — the counters advance to "now" under the OLD
         // programming, then the write is applied. This holds for all of
@@ -1741,7 +1742,7 @@ fn validate_pit_phase(
 impl rusty_box_devices::api::PioDevice for BxPitC {
     fn pio_read(
         &mut self,
-        port: u16,
+        port: IoPort,
         len: rusty_box_devices::api::IoLen,
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) -> u32 {
@@ -1756,7 +1757,7 @@ impl rusty_box_devices::api::PioDevice for BxPitC {
 
     fn pio_write(
         &mut self,
-        port: u16,
+        port: IoPort,
         value: u32,
         len: rusty_box_devices::api::IoLen,
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,

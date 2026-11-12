@@ -13,7 +13,7 @@ use rusty_box_core::FloatExt;
 use alloc::vec;
 use alloc::{boxed::Box, vec::Vec};
 
-use crate::api::WindowOffset;
+use crate::api::{IoPort, WindowOffset};
 use crate::display::card::{MemCtx, PortCtx, ResetCtx, TimingCtx, VgaExtension, Written};
 use crate::display::ddc::BxDdcC;
 use crate::display::vga::{VerticalPhase, VgaWindow};
@@ -35,14 +35,24 @@ const BX_ROP_PATTERN: u8 = 0x01;
 
 // The ports Bochs geforce.cc `svga_read`/`svga_write` answer before the
 // standard VGA does.
-const PORT_CRTC_INDEX_MONO: u16 = 0x03B4;
-const PORT_CRTC_DATA_MONO: u16 = 0x03B5;
-const PORT_INPUT_STATUS_0: u16 = 0x03C2;
-const PORT_VGA_ENABLE: u16 = 0x03C3;
-const PORT_RMA_LOW: u16 = 0x03D0;
-const PORT_RMA_HIGH: u16 = 0x03D2;
-const PORT_CRTC_INDEX: u16 = 0x03D4;
-const PORT_CRTC_DATA: u16 = 0x03D5;
+const PORT_CRTC_INDEX_MONO: IoPort = IoPort::new(0x03B4);
+const PORT_CRTC_DATA_MONO: IoPort = IoPort::new(0x03B5);
+const PORT_INPUT_STATUS_0: IoPort = IoPort::new(0x03C2);
+const PORT_VGA_ENABLE: IoPort = IoPort::new(0x03C3);
+/// Where the high byte of a word access to [`PORT_VGA_ENABLE`] lands — Bochs
+/// `VGA_READ(address+1, 1)`.
+const PORT_VGA_ENABLE_HIGH: IoPort = IoPort::new(0x03C4);
+const PORT_RMA_LOW: IoPort = IoPort::new(0x03D0);
+const PORT_RMA_HIGH: IoPort = IoPort::new(0x03D2);
+const PORT_CRTC_INDEX: IoPort = IoPort::new(0x03D4);
+const PORT_CRTC_DATA: IoPort = IoPort::new(0x03D5);
+
+/// The odd port of the even/odd pair a word access at an even `port` splits
+/// across — Bochs's `address+1` for an `address` whose low bit is clear.
+#[inline]
+fn odd_port_of_pair(port: IoPort) -> IoPort {
+    IoPort::new(port.get() | 1)
+}
 
 /// CRTC indices whose write changes the extended mode — Bochs geforce.cc
 /// `svga_write` sets `svga_needs_update_mode` for exactly these.
@@ -3867,7 +3877,7 @@ impl BxGeForceC {
         if port == PORT_VGA_ENABLE && io_len == 2 {
             let clock = cx.clock();
             let low = cx.core().read_port(PORT_VGA_ENABLE, 1, clock);
-            let high = cx.core().read_port(PORT_VGA_ENABLE + 1, 1, clock);
+            let high = cx.core().read_port(PORT_VGA_ENABLE_HIGH, 1, clock);
             return Some(low | (high << 8));
         }
 
@@ -3875,9 +3885,9 @@ impl BxGeForceC {
             return Some(self.rma_read(port, io_len));
         }
 
-        if io_len == 2 && (port & 1) == 0 {
+        if io_len == 2 && (port.get() & 1) == 0 {
             let low = self.svga_read_byte(cx, port);
-            let high = self.svga_read_byte(cx, port + 1);
+            let high = self.svga_read_byte(cx, odd_port_of_pair(port));
             return Some(low | (high << 8));
         }
 
@@ -3890,7 +3900,7 @@ impl BxGeForceC {
     /// One byte of a word access split at an even port — Bochs
     /// `SVGA_READ(address, 1)`: the card's answer where it has one, the
     /// core's byte otherwise.
-    fn svga_read_byte(&self, cx: &mut PortCtx<'_>, port: u16) -> u32 {
+    fn svga_read_byte(&self, cx: &mut PortCtx<'_>, port: IoPort) -> u32 {
         match self.svga_read_own(port) {
             Some(value) => u32::from(value),
             None => {
@@ -3901,7 +3911,7 @@ impl BxGeForceC {
     }
 
     /// The byte ports `svga_read`'s switch answers from the card.
-    fn svga_read_own(&self, port: u16) -> Option<u8> {
+    fn svga_read_own(&self, port: IoPort) -> Option<u8> {
         match port {
             PORT_CRTC_INDEX_MONO | PORT_CRTC_INDEX => Some(self.crtc.index),
             PORT_CRTC_DATA_MONO | PORT_CRTC_DATA
@@ -3928,9 +3938,9 @@ impl BxGeForceC {
             return Written::Done;
         }
 
-        if io_len == 2 && (port & 1) == 0 {
+        if io_len == 2 && (port.get() & 1) == 0 {
             self.svga_write_byte(cx, port, value & 0xff);
-            self.svga_write_byte(cx, port + 1, value >> 8);
+            self.svga_write_byte(cx, odd_port_of_pair(port), value >> 8);
             return Written::Done;
         }
 
@@ -3943,7 +3953,7 @@ impl BxGeForceC {
     /// One byte of a word access split at an even port — Bochs
     /// `SVGA_WRITE(address, value, 1)`, whose fall-through is the core's
     /// byte write.
-    fn svga_write_byte(&mut self, cx: &mut PortCtx<'_>, port: u16, value: u32) {
+    fn svga_write_byte(&mut self, cx: &mut PortCtx<'_>, port: IoPort, value: u32) {
         if self.svga_write_own(port, value) == Written::FallThrough {
             cx.core().write_port(port, value, 1);
         }
@@ -3955,7 +3965,7 @@ impl BxGeForceC {
     /// reaches the NV registers even though the core keeps only its low bits.
     /// An index write, and a data write at or below `VGA_CRTC_MAX`, also fall
     /// through so the core's own copy stays in step.
-    fn svga_write_own(&mut self, port: u16, value: u32) -> Written {
+    fn svga_write_own(&mut self, port: IoPort, value: u32) -> Written {
         match port {
             PORT_CRTC_INDEX_MONO | PORT_CRTC_INDEX => {
                 self.crtc.index = value as u8;
@@ -4076,7 +4086,7 @@ impl BxGeForceC {
     /// The Real Mode Access window at 0x3D0/0x3D2 — the read half of Bochs
     /// geforce.cc `svga_read`'s `RMA_ACCESS` case. CRTC 0x38 bit 0 opens the
     /// window and bits 7:1 select what it reads: 1 the address, 2 the data.
-    fn rma_read(&self, port: u16, io_len: u8) -> u32 {
+    fn rma_read(&self, port: IoPort, io_len: u8) -> u32 {
         if io_len == 1 {
             tracing::error!("port 0x3d0 access with io_len = 1");
             return 0;
@@ -4122,7 +4132,7 @@ impl BxGeForceC {
 
     /// The write half of [`Self::rma_read`]: index 1 sets the address, index 3
     /// writes the data. A 16-bit write replaces the half the port names.
-    fn rma_write(&mut self, port: u16, value: u32, io_len: u8) {
+    fn rma_write(&mut self, port: IoPort, value: u32, io_len: u8) {
         if io_len == 1 {
             tracing::debug!("port 0x3d0 access with io_len = 1");
             return;
@@ -4399,7 +4409,7 @@ mod tests {
             }
         }
 
-        fn port_in(&mut self, port: u16, len: IoLen) -> u32 {
+        fn port_in(&mut self, port: IoPort, len: IoLen) -> u32 {
             let mut ctx = DeviceCtx {
                 clock: CLOCK,
                 irq: &mut self.irq,
@@ -4408,7 +4418,7 @@ mod tests {
             PioDevice::pio_read(&mut self.card, port, len, &mut ctx)
         }
 
-        fn port_out(&mut self, port: u16, value: u32, len: IoLen) {
+        fn port_out(&mut self, port: IoPort, value: u32, len: IoLen) {
             let mut ctx = DeviceCtx {
                 clock: CLOCK,
                 irq: &mut self.irq,

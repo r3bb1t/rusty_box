@@ -943,9 +943,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     #[cfg(feature = "std")]
     pub(crate) fn finish_snapshot_restore_v3(
         &mut self,
-        live_bmdma: u16,
-        live_pm: u16,
-        live_sm: u16,
+        live_bmdma: Option<crate::iodev::IoPort>,
+        live_pm: Option<crate::iodev::IoPort>,
+        live_sm: Option<crate::iodev::IoPort>,
         live_vga: rusty_box_devices::display::vga::VgaSnapshotRestoreTarget,
         platform: crate::iodev::devices::PlatformSnapshotRestore,
         keyboard: crate::iodev::keyboard::KeyboardSnapshotRestore,

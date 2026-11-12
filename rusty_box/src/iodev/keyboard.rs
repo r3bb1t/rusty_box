@@ -156,11 +156,12 @@
 use crate::snapshot::{
     bounds, checked_snapshot_len_add, SnapError, SnapRead, SnapResult, SnapWrite, SNAPSHOT_SECTION_VERSION,
 };
+use super::IoPort;
 
 // I/O Ports
-pub const KBD_DATA_PORT: u16 = 0x0060;
-pub const KBD_STATUS_PORT: u16 = 0x0064;
-pub const KBD_COMMAND_PORT: u16 = 0x0064;
+pub const KBD_DATA_PORT: IoPort = IoPort::new(0x0060);
+pub const KBD_STATUS_PORT: IoPort = IoPort::new(0x0064);
+pub const KBD_COMMAND_PORT: IoPort = IoPort::new(0x0064);
 
 // Buffer sizes (matching Bochs)
 // Bochs iodev/iodev.h: `#define BX_KBD_ELEMENTS 16`. The keyboard ring overflows
@@ -717,7 +718,7 @@ impl BxKeyboardC {
     ///   TIM bit is cleared on each read.
     ///
     /// Port 0x61 (System Control B) is handled by the PIT (Bochs pit.cc).
-    pub fn read(&mut self, port: u16, _io_len: u8) -> u32 {
+    pub fn read(&mut self, port: IoPort, _io_len: u8) -> u32 {
         match port {
             KBD_DATA_PORT => self.read_port_60(),
             KBD_STATUS_PORT => self.read_port_64(),
@@ -835,7 +836,7 @@ impl BxKeyboardC {
     ///   to capture the next port 0x60 write as a parameter.
     ///
     /// Port 0x61 (System Control B) is handled by the PIT (Bochs pit.cc).
-    pub fn write(&mut self, port: u16, value: u32, _io_len: u8) {
+    pub fn write(&mut self, port: IoPort, value: u32, _io_len: u8) {
         let value_u8 = value as u8;
         match port {
             KBD_DATA_PORT => self.write_port_60(value_u8),
@@ -2735,7 +2736,7 @@ impl BxKeyboardC {
 impl rusty_box_devices::api::PioDevice for BxKeyboardC {
     fn pio_read(
         &mut self,
-        port: u16,
+        port: IoPort,
         len: rusty_box_devices::api::IoLen,
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) -> u32 {
@@ -2754,7 +2755,7 @@ impl rusty_box_devices::api::PioDevice for BxKeyboardC {
 
     fn pio_write(
         &mut self,
-        port: u16,
+        port: IoPort,
         value: u32,
         len: rusty_box_devices::api::IoLen,
         _ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,

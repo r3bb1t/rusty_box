@@ -13,7 +13,7 @@
 //! The host bridge is the root of the PCI bus and handles configuration
 //! space routing for all PCI devices.
 
-use rusty_box_devices::api::{ChipsetEffect, SmramControl, PAM_AREAS};
+use rusty_box_devices::api::{ChipsetEffect, IoPort, SmramControl, PAM_AREAS};
 use rusty_box_devices::pci::{pci_device, PciDevice};
 
 #[cfg(feature = "std")]
@@ -47,9 +47,11 @@ fn validate_bridge_snapshot_identity(
 const PCI_CONF_SIZE: usize = 256;
 
 /// PCI configuration address port (Bochs: devices.cc uses pci_conf_addr)
-pub const PCI_CONFIG_ADDR: u16 = 0x0CF8;
-/// PCI configuration data port (base — also 0xCF9, 0xCFA, 0xCFB)
-pub const PCI_CONFIG_DATA: u16 = 0x0CFC;
+pub const PCI_CONFIG_ADDR: IoPort = IoPort::new(0x0CF8);
+/// PCI configuration data window: [`PCI_CONFIG_DATA_PORT_COUNT`] ports from
+/// 0xCFC, each landing that many bytes into the addressed dword.
+pub const PCI_CONFIG_DATA: IoPort = IoPort::new(0x0CFC);
+pub const PCI_CONFIG_DATA_PORT_COUNT: u16 = 4;
 
 
 

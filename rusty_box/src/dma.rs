@@ -25,6 +25,7 @@
 //!    - Updates address/count; at terminal count sets TC status, re-masks
 //!      non-autoinit channels, and files the HRQ deassert (Bochs
 //!      dma.cc raise_HLDA: `bx_pc_system.set_HRQ(0)`)
+use crate::iodev::IoPort;
 use crate::memory::BxMemC;
 
 #[cfg(feature = "std")]
@@ -650,7 +651,8 @@ impl BxDmaC {
     // -----------------------------------------------------------------------
 
     /// Read from DMA I/O port (Bochs dma.cc)
-    pub fn read(&mut self, address: u16, _io_len: u8) -> u32 {
+    pub fn read(&mut self, port: IoPort, _io_len: u8) -> u32 {
+        let address = port.get();
         let ma_sl: usize = if address >= 0xC0 { 1 } else { 0 };
 
         match address {
@@ -733,15 +735,17 @@ impl BxDmaC {
     // -----------------------------------------------------------------------
 
     /// Write to DMA I/O port (Bochs dma.cc)
-    pub fn write(&mut self, address: u16, value: u32, io_len: u8) {
+    pub fn write(&mut self, port: IoPort, value: u32, io_len: u8) {
+        let address = port.get();
         // Handle multi-byte writes (Bochs dma.cc write). The 0x0B word write
-        // (master mode/mask via a 16-bit OUT) splits into two byte writes;
-        // every other wide write falls through and is processed using the LSB
-        // (Bochs: `value &= 0xff`), NOT dropped.
+        // (master mode/mask via a 16-bit OUT) splits into two byte writes, the
+        // high byte to the next port, 0x0C; every other wide write falls
+        // through and is processed using the LSB (Bochs: `value &= 0xff`), NOT
+        // dropped.
         if io_len > 1 {
             if io_len == 2 && address == 0x0B {
-                self.write(address, value & 0xFF, 1);
-                self.write(address + 1, value >> 8, 1);
+                self.write(port, value & 0xFF, 1);
+                self.write(IoPort::new(0x0C), value >> 8, 1);
                 return;
             }
             tracing::trace!(
@@ -1130,15 +1134,15 @@ mod tests {
         dma.init();
 
         // Write address for DMA1 channel 0 (port 0x00): low byte then high byte
-        dma.write(0x00, 0x34, 1); // low byte
-        dma.write(0x00, 0x12, 1); // high byte
+        dma.write(IoPort::new(0x00), 0x34, 1); // low byte
+        dma.write(IoPort::new(0x00), 0x12, 1); // high byte
         assert_eq!(dma.s[0].chan[0].base_address, 0x1234);
         assert_eq!(dma.s[0].chan[0].current_address, 0x1234);
 
         // Clear flip-flop, then read back
-        dma.write(0x0C, 0, 1); // clear flip-flop
-        let lo = dma.read(0x00, 1);
-        let hi = dma.read(0x00, 1);
+        dma.write(IoPort::new(0x0C), 0, 1); // clear flip-flop
+        let lo = dma.read(IoPort::new(0x00), 1);
+        let hi = dma.read(IoPort::new(0x00), 1);
         assert_eq!(lo, 0x34);
         assert_eq!(hi, 0x12);
     }
@@ -1155,7 +1159,7 @@ mod tests {
         // Decrement = 0 (bit 5)
         // Mode type = 1 (single, bits 6-7)
         let mode_val = 0x02 | (0x02 << 2) | (0x01 << 4) | (0x01 << 6); // 0x5A
-        dma.write(0x0B, mode_val as u32, 1);
+        dma.write(IoPort::new(0x0B), mode_val as u32, 1);
 
         assert_eq!(dma.s[0].chan[2].mode.mode_type, 1); // single
         assert_eq!(dma.s[0].chan[2].mode.transfer_type, 2); // read
@@ -1170,7 +1174,7 @@ mod tests {
 
         // Set some TC bits in status register
         dma.s[0].status_reg = 0xF5; // TC bits = 0x05, request bits = 0xF0
-        let status = dma.read(0x08, 1);
+        let status = dma.read(IoPort::new(0x08), 1);
         assert_eq!(status, 0xF5);
         // Lower 4 bits (TC) should be cleared after read
         assert_eq!(dma.s[0].status_reg, 0xF0);
@@ -1182,14 +1186,14 @@ mod tests {
         dma.init();
 
         // Write page register for DMA1 channel 2 (port 0x81)
-        dma.write(0x81, 0x56, 1);
+        dma.write(IoPort::new(0x81), 0x56, 1);
         assert_eq!(dma.s[0].chan[2].page_reg, 0x56);
-        assert_eq!(dma.read(0x81, 1), 0x56);
+        assert_eq!(dma.read(IoPort::new(0x81), 1), 0x56);
 
         // Write page register for DMA1 channel 0 (port 0x87)
-        dma.write(0x87, 0xAB, 1);
+        dma.write(IoPort::new(0x87), 0xAB, 1);
         assert_eq!(dma.s[0].chan[0].page_reg, 0xAB);
-        assert_eq!(dma.read(0x87, 1), 0xAB);
+        assert_eq!(dma.read(IoPort::new(0x87), 1), 0xAB);
     }
 
     #[test]
@@ -1198,23 +1202,23 @@ mod tests {
         dma.init();
 
         // Clear all masks
-        dma.write(0x0E, 0, 1);
+        dma.write(IoPort::new(0x0E), 0, 1);
         assert_eq!(dma.s[0].mask, [false, false, false, false]);
 
         // Set mask for channel 1
-        dma.write(0x0A, 0x05, 1); // channel 1, set mask (bit 2 set)
+        dma.write(IoPort::new(0x0A), 0x05, 1); // channel 1, set mask (bit 2 set)
         assert!(dma.s[0].mask[1]);
         assert!(!dma.s[0].mask[0]);
 
         // Write all mask bits
-        dma.write(0x0F, 0x0A, 1); // mask channels 1 and 3
+        dma.write(IoPort::new(0x0F), 0x0A, 1); // mask channels 1 and 3
         assert!(!dma.s[0].mask[0]);
         assert!(dma.s[0].mask[1]);
         assert!(!dma.s[0].mask[2]);
         assert!(dma.s[0].mask[3]);
 
         // Read all mask bits (undocumented)
-        let mask_val = dma.read(0x0F, 1);
+        let mask_val = dma.read(IoPort::new(0x0F), 1);
         assert_eq!(mask_val & 0x0F, 0x0A);
         assert_eq!(mask_val & 0xF0, 0xF0); // upper nibble always 0xF0
     }
@@ -1224,13 +1228,13 @@ mod tests {
         let mut dma = BxDmaC::new();
         dma.init();
 
-        dma.write(0x80, 0x42, 1);
+        dma.write(IoPort::new(0x80), 0x42, 1);
         assert_eq!(dma.ext_page_reg[0], 0x42);
-        assert_eq!(dma.read(0x80, 1), 0x42);
+        assert_eq!(dma.read(IoPort::new(0x80), 1), 0x42);
 
-        dma.write(0x84, 0x99, 1);
+        dma.write(IoPort::new(0x84), 0x99, 1);
         assert_eq!(dma.ext_page_reg[4], 0x99);
-        assert_eq!(dma.read(0x84, 1), 0x99);
+        assert_eq!(dma.read(IoPort::new(0x84), 1), 0x99);
     }
 
     #[test]
@@ -1245,7 +1249,7 @@ mod tests {
         // processed using its LSB, not dropped (the ports register with mask 7).
         let mut dma = BxDmaC::new();
         // 16-bit OUT to the single-mask register: LSB 0x06 => channel 2, mask set.
-        dma.write(0x0A, 0xFF06, 2);
+        dma.write(IoPort::new(0x0A), 0xFF06, 2);
         assert!(
             dma.s[0].mask[2],
             "wide write must apply the LSB (channel 2 masked), not drop it"
@@ -1254,7 +1258,7 @@ mod tests {
         // The 0x0B word write still splits into two byte writes: low byte to the
         // mode register, high byte to the flip/flop-clear (0x0C).
         let mut dma = BxDmaC::new();
-        dma.write(0x0B, 0x0058, 2);
+        dma.write(IoPort::new(0x0B), 0x0058, 2);
         // low byte 0x58 => channel 0, mode_type=(0x58>>6)&3=1.
         assert_eq!(dma.s[0].chan[0].mode.mode_type, 1);
     }

@@ -31,7 +31,7 @@
 
 use rusty_box_core::time::VmClock;
 
-use crate::api::{Declared, WindowDecls, WindowOffset};
+use crate::api::{Declared, IoPort, WindowDecls, WindowOffset};
 use crate::display::sink::{DisplaySink, Refreshed};
 use crate::display::vga::{RedrawArea, VerticalPhase, VerticalTick, VgaCore, VgaWindow};
 
@@ -214,13 +214,13 @@ impl<'a, S: DisplaySink> RefreshCtx<'a, S> {
 /// A port access the extension is offered before the core sees it.
 pub struct PortCtx<'a> {
     core: &'a mut VgaCore,
-    port: u16,
+    port: IoPort,
     len: u8,
     clock: VmClock,
 }
 
 impl<'a> PortCtx<'a> {
-    pub(crate) fn new(core: &'a mut VgaCore, port: u16, len: u8, clock: VmClock) -> Self {
+    pub(crate) fn new(core: &'a mut VgaCore, port: IoPort, len: u8, clock: VmClock) -> Self {
         Self {
             core,
             port,
@@ -229,7 +229,7 @@ impl<'a> PortCtx<'a> {
         }
     }
 
-    pub fn port(&self) -> u16 {
+    pub fn port(&self) -> IoPort {
         self.port
     }
 
@@ -834,7 +834,7 @@ impl<E: VgaExtension> VgaCard<E> {
 impl<E: VgaExtension> crate::api::PioDevice for VgaCard<E> {
     fn pio_read(
         &mut self,
-        port: u16,
+        port: IoPort,
         len: crate::api::IoLen,
         ctx: &mut crate::api::DeviceCtx<'_>,
     ) -> u32 {
@@ -847,7 +847,7 @@ impl<E: VgaExtension> crate::api::PioDevice for VgaCard<E> {
 
     fn pio_write(
         &mut self,
-        port: u16,
+        port: IoPort,
         value: u32,
         len: crate::api::IoLen,
         ctx: &mut crate::api::DeviceCtx<'_>,

@@ -118,12 +118,13 @@
 //! and forwards mode changes here via [`BxPicC::set_mode`].
 
 use crate::iodev::irq::IoApicEdge;
+use crate::iodev::IoPort;
 
 /// PIC I/O port addresses
-pub const PIC_MASTER_CMD: u16 = 0x0020;
-pub const PIC_MASTER_DATA: u16 = 0x0021;
-pub const PIC_SLAVE_CMD: u16 = 0x00A0;
-pub const PIC_SLAVE_DATA: u16 = 0x00A1;
+pub const PIC_MASTER_CMD: IoPort = IoPort::new(0x0020);
+pub const PIC_MASTER_DATA: IoPort = IoPort::new(0x0021);
+pub const PIC_SLAVE_CMD: IoPort = IoPort::new(0x00A0);
+pub const PIC_SLAVE_DATA: IoPort = IoPort::new(0x00A1);
 
 /// How many unforwarded edges a pre-fabric snapshot could carry.
 ///
@@ -541,7 +542,7 @@ impl BxPicC {
     ///
     /// Takes `&mut self` because poll mode read triggers an interrupt acknowledge
     /// which modifies PIC state (Bochs pic.cc).
-    pub fn read(&mut self, port: u16, io_len: u8) -> u32 {
+    pub fn read(&mut self, port: IoPort, io_len: u8) -> u32 {
         // Poll mode: read triggers interrupt acknowledge (Bochs pic.cc)
         if (port == PIC_MASTER_CMD || port == PIC_MASTER_DATA) && self.master.polled {
             self.master.clear_highest_interrupt();
@@ -591,7 +592,7 @@ impl BxPicC {
     /// Note: this does NOT handle 0x4D0/0x4D1 (ELCR) — those ports belong to
     /// the PIIX3 bridge, which calls [`BxPicC::set_mode`] directly. See the
     /// module-level ELCR note.
-    pub fn write(&mut self, port: u16, value: u32, _io_len: u8) {
+    pub fn write(&mut self, port: IoPort, value: u32, _io_len: u8) {
         let value = value as u8;
         match port {
             PIC_MASTER_CMD => self.write_cmd(value, true),

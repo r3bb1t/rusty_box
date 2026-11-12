@@ -5,6 +5,37 @@
 
 use super::decoder::{BxSegregs, Instruction};
 use crate::cpu::rusty_box::MemoryAccessType;
+use crate::iodev::IoPort;
+
+/// The port an `IN`/`OUT` with an immediate operand names — Bochs io.cc
+/// `i->Ib()`, zero-extended into the port space.
+#[inline]
+fn imm8_port(instr: &Instruction) -> IoPort {
+    IoPort::new(u16::from(instr.ib()))
+}
+
+/// Which I/O instruction a permission check is for, as Bochs's intercepts
+/// (svm.cc SvmInterceptIO, vmexit.cc VMexit_IO) tell them apart by opcode.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IoInstr {
+    /// `IN`/`OUT` with the port in an immediate byte.
+    Immediate,
+    /// `IN`/`OUT` with the port in DX.
+    Dx,
+    /// `INS`/`OUTS`.
+    String,
+}
+
+/// What Bochs io.cc `allow_io` decides for one I/O instruction.
+enum IoGate {
+    /// CPL above IOPL (or V8086) and the TSS I/O bitmap refuses the port:
+    /// the caller raises #GP(0).
+    Denied,
+    /// An SVM or VMX intercept took the instruction out to the hypervisor.
+    Intercepted,
+    /// The access goes ahead.
+    Allowed,
+}
 
 /// The running FastRep count, as the countdown probe wants it.
 ///
@@ -21,23 +52,72 @@ fn fastrep_budget(iterations: usize) -> u32 {
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
+    /// The port in DX, which every port instruction without an immediate
+    /// names — Bochs io.cc `DX`.
+    #[inline]
+    fn dx_port(&self) -> IoPort {
+        IoPort::new(self.dx())
+    }
+
     // ========================================================================
     // I/O Privilege Check — Bochs io.cc
     // ========================================================================
 
-    /// Check I/O port permission based on IOPL and TSS I/O permission bitmap.
-    /// Returns true if access is allowed, false if #GP(0) should be raised.
-    /// Based on Bochs io.cc allow_io().
-    fn allow_io(&mut self, port: u16, len: u32) -> super::Result<bool> {
-        // Bochs io.cc `allow_io`: with the debug console on for all rings,
-        // port 0xE9 is open to unprivileged code, before IOPL or the TSS
-        // bitmap is consulted.
-        if port == 0x00E9
+    /// Whether the I/O instruction goes ahead: false when the gate raised
+    /// #GP(0) or an intercept left to the hypervisor, so the caller returns
+    /// without touching the port.
+    fn io_permitted(
+        &mut self,
+        instr: &Instruction,
+        port: IoPort,
+        len: u32,
+        direction_in: bool,
+        form: IoInstr,
+    ) -> super::Result<bool> {
+        match self.allow_io(instr, port, len, direction_in, form)? {
+            IoGate::Allowed => Ok(true),
+            IoGate::Intercepted => Ok(false),
+            IoGate::Denied => {
+                self.exception(super::cpu::Exception::Gp, 0)?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Bochs io.cc `allow_io`, in its order: the debug console's port 0xE9
+    /// when it is open to every ring, then IOPL and the TSS I/O permission
+    /// bitmap (a refusal is #GP(0), ahead of any intercept), then the SVM
+    /// I/O intercept and the VMX I/O exit.
+    fn allow_io(
+        &mut self,
+        instr: &Instruction,
+        port: IoPort,
+        len: u32,
+        direction_in: bool,
+        form: IoInstr,
+    ) -> super::Result<IoGate> {
+        if port == crate::iodev::DEBUGCON_PORT
             && self.devices.port_e9_hack() == crate::iodev::PortE9Hack::AllRings
         {
-            return Ok(true);
+            return Ok(IoGate::Allowed);
         }
+        if !self.io_privilege_allows(port, len)? {
+            return Ok(IoGate::Denied);
+        }
+        let exited = match form {
+            IoInstr::String => self.intercept_string_io(instr, port, len, direction_in)?,
+            IoInstr::Immediate | IoInstr::Dx => {
+                self.svm_intercept_io(instr, port, len, direction_in, false)?;
+                self.in_vmx_guest
+                    && self.vmexit_check_io(port, len, direction_in, form == IoInstr::Immediate)?
+            }
+        };
+        Ok(if exited { IoGate::Intercepted } else { IoGate::Allowed })
+    }
 
+    /// IOPL and the TSS I/O permission bitmap (Bochs io.cc `allow_io`):
+    /// false when the access must raise #GP(0).
+    fn io_privilege_allows(&mut self, port: IoPort, len: u32) -> super::Result<bool> {
         // If not in protected mode, or CPL <= IOPL and not V8086, allow
         if !self.cr0.pe() {
             return Ok(true);
@@ -67,14 +147,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let tr_base = self.tr.cache.u.segment_base();
             let io_base = self.system_read_word(tr_base + 102)? as u32;
 
-            if (io_base + (port as u32) / 8) >= tr_limit {
+            // The bitmap is indexed by the port number itself.
+            let port = port.get();
+            if (io_base + u32::from(port) / 8) >= tr_limit {
                 return Ok(false);
             }
 
             let permission16 =
-                self.system_read_word(tr_base + io_base as u64 + (port as u64) / 8)?;
+                self.system_read_word(tr_base + io_base as u64 + u64::from(port) / 8)?;
 
-            let bit_index = (port & 7) as u32;
+            let bit_index = u32::from(port & 7);
             let mask = (1u32 << len) - 1;
             if ((permission16 as u32) >> bit_index) & mask != 0 {
                 return Ok(false);
@@ -87,13 +169,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// IN AL, imm8 - Input byte from immediate port to AL
     /// Bochs io.cc
     pub fn in_al_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = instr.ib() as u16;
-        self.svm_intercept_io(port, 1, true, false, false, 0)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 1, true, true)? {
+        let port = imm8_port(instr);
+        if !self.io_permitted(instr, port, 1, true, IoInstr::Immediate)? {
             return Ok(());
-        }
-        if !self.allow_io(port, 1)? {
-            return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.port_in(port, 1) as u8;
         self.set_al(value);
@@ -103,13 +181,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// IN AX, imm8 - Input word from immediate port to AX
     /// Bochs io.cc
     pub fn in_ax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = instr.ib() as u16;
-        self.svm_intercept_io(port, 2, true, false, false, 0)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 2, true, true)? {
+        let port = imm8_port(instr);
+        if !self.io_permitted(instr, port, 2, true, IoInstr::Immediate)? {
             return Ok(());
-        }
-        if !self.allow_io(port, 2)? {
-            return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.port_in(port, 2) as u16;
         self.set_ax(value);
@@ -119,13 +193,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// IN EAX, imm8 - Input dword from immediate port to EAX
     /// Bochs io.cc — writes RAX (zero-extends to 64-bit)
     pub fn in_eax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = instr.ib() as u16;
-        self.svm_intercept_io(port, 4, true, false, false, 0)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 4, true, true)? {
+        let port = imm8_port(instr);
+        if !self.io_permitted(instr, port, 4, true, IoInstr::Immediate)? {
             return Ok(());
-        }
-        if !self.allow_io(port, 4)? {
-            return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.port_in(port, 4);
         self.set_rax(value as u64);
@@ -135,13 +205,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// OUT imm8, AL - Output byte from AL to immediate port
     /// Bochs io.cc
     pub fn out_ib_al(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = instr.ib() as u16;
-        self.svm_intercept_io(port, 1, false, false, false, 0)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 1, false, true)? {
+        let port = imm8_port(instr);
+        if !self.io_permitted(instr, port, 1, false, IoInstr::Immediate)? {
             return Ok(());
-        }
-        if !self.allow_io(port, 1)? {
-            return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.al();
         self.port_out(port, value as u32, 1);
@@ -151,13 +217,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// OUT imm8, AX - Output word from AX to immediate port
     /// Bochs io.cc
     pub fn out_ib_ax(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = instr.ib() as u16;
-        self.svm_intercept_io(port, 2, false, false, false, 0)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 2, false, true)? {
+        let port = imm8_port(instr);
+        if !self.io_permitted(instr, port, 2, false, IoInstr::Immediate)? {
             return Ok(());
-        }
-        if !self.allow_io(port, 2)? {
-            return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.ax();
         self.port_out(port, value as u32, 2);
@@ -167,13 +229,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// OUT imm8, EAX - Output dword from EAX to immediate port
     /// Bochs io.cc
     pub fn out_ib_eax(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = instr.ib() as u16;
-        self.svm_intercept_io(port, 4, false, false, false, 0)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 4, false, true)? {
+        let port = imm8_port(instr);
+        if !self.io_permitted(instr, port, 4, false, IoInstr::Immediate)? {
             return Ok(());
-        }
-        if !self.allow_io(port, 4)? {
-            return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.eax();
         self.port_out(port, value, 4);
@@ -182,14 +240,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// IN AL, DX - Input byte from port DX to AL
     /// Bochs io.cc
-    pub fn in_al_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
-        self.svm_intercept_io(port, 1, true, false, false, 0)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 1, true, false)? {
+    pub fn in_al_dx(&mut self, instr: &Instruction) -> super::Result<()> {
+        let port = self.dx_port();
+        if !self.io_permitted(instr, port, 1, true, IoInstr::Dx)? {
             return Ok(());
-        }
-        if !self.allow_io(port, 1)? {
-            return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.port_in(port, 1) as u8;
         self.set_al(value);
@@ -198,14 +252,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// IN AX, DX - Input word from port DX to AX
     /// Bochs io.cc
-    pub fn in_ax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
-        self.svm_intercept_io(port, 2, true, false, false, 0)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 2, true, false)? {
+    pub fn in_ax_dx(&mut self, instr: &Instruction) -> super::Result<()> {
+        let port = self.dx_port();
+        if !self.io_permitted(instr, port, 2, true, IoInstr::Dx)? {
             return Ok(());
-        }
-        if !self.allow_io(port, 2)? {
-            return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.port_in(port, 2) as u16;
         self.set_ax(value);
@@ -214,14 +264,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// IN EAX, DX - Input dword from port DX to EAX
     /// Bochs io.cc — writes RAX (zero-extends to 64-bit)
-    pub fn in_eax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
-        self.svm_intercept_io(port, 4, true, false, false, 0)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 4, true, false)? {
+    pub fn in_eax_dx(&mut self, instr: &Instruction) -> super::Result<()> {
+        let port = self.dx_port();
+        if !self.io_permitted(instr, port, 4, true, IoInstr::Dx)? {
             return Ok(());
-        }
-        if !self.allow_io(port, 4)? {
-            return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.port_in(port, 4);
         self.set_rax(value as u64);
@@ -230,14 +276,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// OUT DX, AL - Output byte from AL to port DX
     /// Bochs io.cc
-    pub fn out_dx_al(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
-        self.svm_intercept_io(port, 1, false, false, false, 0)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 1, false, false)? {
+    pub fn out_dx_al(&mut self, instr: &Instruction) -> super::Result<()> {
+        let port = self.dx_port();
+        if !self.io_permitted(instr, port, 1, false, IoInstr::Dx)? {
             return Ok(());
-        }
-        if !self.allow_io(port, 1)? {
-            return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.al();
         self.port_out(port, value as u32, 1);
@@ -246,14 +288,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// OUT DX, AX - Output word from AX to port DX
     /// Bochs io.cc
-    pub fn out_dx_ax(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
-        self.svm_intercept_io(port, 2, false, false, false, 0)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 2, false, false)? {
+    pub fn out_dx_ax(&mut self, instr: &Instruction) -> super::Result<()> {
+        let port = self.dx_port();
+        if !self.io_permitted(instr, port, 2, false, IoInstr::Dx)? {
             return Ok(());
-        }
-        if !self.allow_io(port, 2)? {
-            return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.ax();
         self.port_out(port, value as u32, 2);
@@ -262,14 +300,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// OUT DX, EAX - Output dword from EAX to port DX
     /// Bochs io.cc
-    pub fn out_dx_eax(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
-        self.svm_intercept_io(port, 4, false, false, false, 0)?;
-        if self.in_vmx_guest && self.vmexit_check_io(port, 4, false, false)? {
+    pub fn out_dx_eax(&mut self, instr: &Instruction) -> super::Result<()> {
+        let port = self.dx_port();
+        if !self.io_permitted(instr, port, 4, false, IoInstr::Dx)? {
             return Ok(());
-        }
-        if !self.allow_io(port, 4)? {
-            return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.eax();
         self.port_out(port, value, 4);
@@ -285,7 +319,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// INSB - Input byte from port DX to ES:DI (16-bit address mode)
     fn insb16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let di = self.di() as u32;
         let laddr = self.prepare_rmw_virtual_byte(BxSegregs::Es, di)?;
         self.check_rmw_write_permissions(laddr, 1)?;
@@ -348,7 +382,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// INSW - Input word from port DX to ES:DI (16-bit address mode)
     fn insw16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let di = self.di() as u32;
         // Prepare all segment/page translations first. Instrumentation
         // permissions are checked before a potentially destructive MMIO read,
@@ -371,7 +405,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// INSD - Input dword from port DX to ES:DI (16-bit address mode)
     fn insd16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let di = self.di() as u32;
         let laddr = self.prepare_rmw_virtual_dword(BxSegregs::Es, di)?;
         self.check_rmw_write_permissions(laddr, 4)?;
@@ -394,7 +428,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// INSB - Input byte from port DX to ES:EDI (32-bit address mode)
     /// Bochs io.cc INSB32_YbDX: writes RDI = EDI ± 1 (clears upper 32 bits)
     fn insb32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let edi = self.edi();
         let laddr = self.prepare_rmw_virtual_byte(BxSegregs::Es, edi)?;
         self.check_rmw_write_permissions(laddr, 1)?;
@@ -411,10 +445,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     /// INSW - Input word from port DX to ES:EDI (32-bit address mode)
-    /// Bochs io.cc INSW32_YwDX (lines 325-373): RMW pattern triggers page faults
+    /// Bochs io.cc INSW32_YwDX: RMW pattern triggers page faults
     /// before I/O read. port_in does not touch address_xlation so RMW is safe.
     fn insw32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let edi = self.edi();
         // Translate before the physical RMW read so instrumentation faults do
         // not consume destructive MMIO state.
@@ -433,10 +467,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     /// INSD - Input dword from port DX to ES:EDI (32-bit address mode)
-    /// Bochs io.cc INSD32_YdDX (lines 436-449): RMW pattern triggers page faults
+    /// Bochs io.cc INSD32_YdDX: RMW pattern triggers page faults
     /// before I/O read. port_in does not touch address_xlation so RMW is safe.
     fn insd32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let edi = self.edi();
         let laddr = self.prepare_rmw_virtual_dword(BxSegregs::Es, edi)?;
         self.check_rmw_write_permissions(laddr, 4)?;
@@ -457,7 +491,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// OUTSB - Output byte from seg:SI to port DX (16-bit address mode)
     fn outsb16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let si = self.si() as u32;
         let value = self.v_read_byte(seg, si)?;
@@ -474,7 +508,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// OUTSW - Output word from seg:SI to port DX (16-bit address mode)
     fn outsw16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let si = self.si() as u32;
         let value = self.v_read_word(seg, si)?;
@@ -491,7 +525,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// OUTSD - Output dword from seg:SI to port DX (16-bit address mode)
     fn outsd16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let si = self.si() as u32;
         let value = self.v_read_dword(seg, si)?;
@@ -511,7 +545,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// OUTSB - Output byte from seg:ESI to port DX (32-bit address mode)
     /// Bochs io.cc OUTSB32_DXXb: writes RSI = ESI ± 1 (clears upper 32 bits)
     fn outsb32(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let esi = self.esi();
         let value = self.v_read_byte(seg, esi)?;
@@ -527,7 +561,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// OUTSW - Output word from seg:ESI to port DX (32-bit address mode)
     /// Bochs io.cc OUTSW32_DXXw: writes RSI = ESI ± 2
     fn outsw32(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let esi = self.esi();
         let value = self.v_read_word(seg, esi)?;
@@ -543,7 +577,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// OUTSD - Output dword from seg:ESI to port DX (32-bit address mode)
     /// Bochs io.cc OUTSD32_DXXd: writes RSI = ESI ± 4
     fn outsd32(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let esi = self.esi();
         let value = self.v_read_dword(seg, esi)?;
@@ -585,7 +619,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     fn rep_insw16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let mut cx = self.cx();
         // `tickn_fastrep` only probes the PC-system countdown; it does not
         // consume it. Keep one budget for this entire REP instruction, even
@@ -734,7 +768,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     fn rep_insw32(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let mut ecx = self.ecx();
         // `tickn_fastrep` only probes the PC-system countdown; it does not
         // consume it. Keep one budget for this entire REP instruction, even
@@ -1034,7 +1068,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// INSB - Input byte from port DX to ES:RDI (64-bit address mode)
     fn insb64(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let rdi = self.rdi();
         let laddr = self.prepare_rmw_virtual_byte_64(BxSegregs::Es, rdi)?;
         self.check_rmw_write_permissions(laddr, 1)?;
@@ -1052,9 +1086,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// INSW - Input word from port DX to ES:RDI (64-bit address mode)
     /// INSW - Input word from port DX to ES:RDI (64-bit address mode)
-    /// Bochs io.cc INSW64_YwDX (lines 378-391): RMW pattern with linear address.
+    /// Bochs io.cc INSW64_YwDX: RMW pattern with linear address.
     fn insw64(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let rdi = self.rdi();
         // Translate before the physical RMW read so instrumentation faults do
         // not consume destructive MMIO state.
@@ -1073,9 +1107,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     /// INSD - Input dword from port DX to ES:RDI (64-bit address mode)
-    /// Bochs io.cc INSD64_YdDX (lines 454-467): RMW pattern with linear address.
+    /// Bochs io.cc INSD64_YdDX: RMW pattern with linear address.
     fn insd64(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let rdi = self.rdi();
         let laddr = self.prepare_rmw_virtual_dword_64(BxSegregs::Es, rdi)?;
         self.check_rmw_write_permissions(laddr, 4)?;
@@ -1096,7 +1130,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// OUTSB - Output byte from seg:RSI to port DX (64-bit address mode)
     fn outsb64(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let rsi = self.rsi();
         let laddr = self.get_laddr64(seg as usize, rsi);
@@ -1112,7 +1146,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// OUTSW - Output word from seg:RSI to port DX (64-bit address mode)
     fn outsw64(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let rsi = self.rsi();
         let value = self.read_virtual_word_64(seg, rsi)?;
@@ -1127,7 +1161,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// OUTSD - Output dword from seg:RSI to port DX (64-bit address mode)
     fn outsd64(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let rsi = self.rsi();
         let value = self.read_virtual_dword_64(seg, rsi)?;
@@ -1169,7 +1203,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     fn rep_insw64(&mut self, instr: &Instruction) -> super::Result<()> {
-        let port = self.dx();
+        let port = self.dx_port();
         let mut rcx = self.rcx();
         // `tickn_fastrep` only probes the PC-system countdown; it does not
         // consume it. Keep one budget for this entire REP instruction, even
@@ -1372,28 +1406,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // Unified INS/OUTS dispatch methods
     // ========================================================================
 
-    /// SVM + VMX intercept for INS/OUTS (Bochs vmexit.cc VMexit_IO with the
-    /// `BX_IA_REP_INSx` / `BX_IA_REP_OUTSx` cases). For INS the source linear
-    /// address is `ES:rDI`; for OUTS it is the prefix-segment with `rSI`. The
-    /// effective offset is masked by the address size.
+    /// SVM + VMX intercept for INS/OUTS (Bochs svm.cc SvmInterceptIO and
+    /// vmexit.cc VMexit_IO with the `BX_IA_REP_INSx` / `BX_IA_REP_OUTSx`
+    /// cases). The guest linear address is `ES:rDI` for INS and the
+    /// instruction's segment with `rSI` for OUTS, the offset masked by the
+    /// address size; the instruction-information segment is the
+    /// instruction's own (`i->seg()`) in both directions.
     fn intercept_string_io(
         &mut self,
         instr: &Instruction,
+        port: IoPort,
         size: u32,
         direction_in: bool,
     ) -> super::Result<bool> {
-        let port = self.dx();
         let as64 = instr.as64_l() != 0;
         let as32 = instr.as32_l() != 0;
-        let rep = instr.lock_rep_used_value() != 0;
-        let asize_bits: u8 = if as64 {
-            64
-        } else if as32 {
-            32
-        } else {
-            16
-        };
-        self.svm_intercept_io(port, size, direction_in, true, rep, asize_bits)?;
+        let rep = instr.rep_used_l() != 0;
+        self.svm_intercept_io(instr, port, size, direction_in, true)?;
         if !self.in_vmx_guest {
             return Ok(false);
         }
@@ -1404,31 +1433,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             u64::from(u16::MAX)
         };
-        let (seg, offset) = if direction_in {
+        let (laddr_seg, offset) = if direction_in {
             (BxSegregs::Es as u8, self.rdi() & asize_mask)
         } else {
             (instr.seg(), self.rsi() & asize_mask)
         };
-        let laddr = self.get_laddr64(usize::from(seg), offset);
-        self.vmexit_check_io_string(port, size, direction_in, rep, laddr, seg, as64, as32)
-    }
-
-    #[inline]
-    fn require_string_io_permission(&mut self, size: u32) -> super::Result<()> {
-        if self.allow_io(self.dx(), size)? {
-            Ok(())
-        } else {
-            self.exception(super::cpu::Exception::Gp, 0)
-        }
+        let laddr = self.get_laddr64(usize::from(laddr_seg), offset);
+        self.vmexit_check_io_string(port, size, direction_in, rep, laddr, instr.seg(), as64, as32)
     }
 
     /// INSB dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     /// Bochs io.cc REP_INSB_YbDX: checks as64L, as32L, then 16-bit
     pub fn insb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.intercept_string_io(instr, 1, true)? {
+        if !self.io_permitted(instr, self.dx_port(), 1, true, IoInstr::String)? {
             return Ok(());
         }
-        self.require_string_io_permission(1)?;
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
             if rep {
@@ -1452,10 +1471,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// INSW dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn insw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.intercept_string_io(instr, 2, true)? {
+        if !self.io_permitted(instr, self.dx_port(), 2, true, IoInstr::String)? {
             return Ok(());
         }
-        self.require_string_io_permission(2)?;
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
             if rep {
@@ -1479,10 +1497,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// INSD dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn insd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.intercept_string_io(instr, 4, true)? {
+        if !self.io_permitted(instr, self.dx_port(), 4, true, IoInstr::String)? {
             return Ok(());
         }
-        self.require_string_io_permission(4)?;
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
             if rep {
@@ -1506,10 +1523,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// OUTSB dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn outsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.intercept_string_io(instr, 1, false)? {
+        if !self.io_permitted(instr, self.dx_port(), 1, false, IoInstr::String)? {
             return Ok(());
         }
-        self.require_string_io_permission(1)?;
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
             if rep {
@@ -1533,10 +1549,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// OUTSW dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn outsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.intercept_string_io(instr, 2, false)? {
+        if !self.io_permitted(instr, self.dx_port(), 2, false, IoInstr::String)? {
             return Ok(());
         }
-        self.require_string_io_permission(2)?;
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
             if rep {
@@ -1560,10 +1575,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// OUTSD dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn outsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if self.intercept_string_io(instr, 4, false)? {
+        if !self.io_permitted(instr, self.dx_port(), 4, false, IoInstr::String)? {
             return Ok(());
         }
-        self.require_string_io_permission(4)?;
         let rep = instr.lock_rep_used_value() != 0;
         if instr.as64_l() != 0 {
             if rep {
@@ -1592,7 +1606,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bulk-read whole `io_len`-byte port elements into `buf`.
     /// Returns the number of bytes actually read; 0 when the port has no bulk
     /// handler, which leaves the caller to read it one element at a time.
-    fn bulk_port_in(&mut self, port: u16, io_len: u8, buf: &mut [u8]) -> usize {
+    fn bulk_port_in(&mut self, port: IoPort, io_len: u8, buf: &mut [u8]) -> usize {
         let current_ticks = self.system_ticks();
         let bytes_read = self
             .devices
@@ -1603,7 +1617,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read from I/O port, dispatching to `BxDevicesC::inp`. An unclaimed port
     /// reads as all-ones there, matching Bochs iodev unmapped port semantics.
-    fn port_in(&mut self, port: u16, len: u8) -> u32 {
+    fn port_in(&mut self, port: IoPort, len: u8) -> u32 {
         // BOCHS BX_INSTR_INP(addr, len) — fires before the port read.
         if self.instrumentation.active.has_io() {
             self.instrumentation.fire_inp(port, len);
@@ -1630,7 +1644,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     /// Write to I/O port, dispatching to `BxDevicesC::outp`.
-    fn port_out(&mut self, port: u16, value: u32, len: u8) {
+    fn port_out(&mut self, port: IoPort, value: u32, len: u8) {
         // BOCHS BX_INSTR_OUTP(addr, len, val) — fires at the port write.
         if self.instrumentation.active.has_io() {
             let ev = super::instrumentation::IoHookEvent {
@@ -1645,7 +1659,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Log BIOS diagnostic ports at debug level so RUST_LOG=debug catches them
         // even if something goes wrong before the device handler is reached.
         // Include RIP so we can trace which BIOS function is writing.
-        if matches!(port, 0x80 | 0x84 | 0xE9 | 0x400..=0x403 | 0x500..=0x503) {
+        if matches!(port.get(), 0x80 | 0x84 | 0xE9 | 0x400..=0x403 | 0x500..=0x503) {
             tracing::trace!(
                 "port_out: port={:#06x} value={:#04x} len={} RIP={:#010x}",
                 port,
@@ -1677,7 +1691,15 @@ mod tests {
     use crate::cpu::crregs::BxCr0;
     use crate::cpu::decoder::BxSegregs;
     use crate::cpu::exec_ctx::TestMachine;
-    use crate::iodev::PortE9Hack;
+    use crate::cpu::decoder::{decode32::fetch_decode32, Instruction};
+    use crate::iodev::{IoPort, PortE9Hack};
+
+    use super::{IoGate, IoInstr};
+
+    /// `IN AL, imm8` naming `port`.
+    fn in_al_ib(port: u8) -> Instruction {
+        fetch_decode32(&[0xE4, port], true).expect("IN AL, imm8 decodes")
+    }
 
     /// Bochs io.cc `allow_io`: only the all-rings console opens port 0xE9 to
     /// code the I/O permission check would refuse. Here that is CPL 3 under
@@ -1689,23 +1711,48 @@ mod tests {
         ctx.cr0.insert(BxCr0::PE);
         ctx.sregs[BxSegregs::Cs as usize].selector.rpl = 3;
         ctx.eflags.set_iopl(0);
+        let gate = |ctx: &mut crate::cpu::exec_ctx::ExecCtx<'_, ()>, port: u8| {
+            ctx.allow_io(&in_al_ib(port), IoPort::new(u16::from(port)), 1, true, IoInstr::Immediate)
+                .unwrap()
+        };
 
         for hack in [PortE9Hack::Off, PortE9Hack::On] {
             ctx.devices.set_port_e9_hack(hack);
             assert!(
-                !ctx.allow_io(0x00E9, 1).unwrap(),
+                matches!(gate(&mut ctx, 0xE9), IoGate::Denied),
                 "{hack:?}: unprivileged code is refused port 0xE9 like any port"
             );
         }
 
         ctx.devices.set_port_e9_hack(PortE9Hack::AllRings);
         assert!(
-            ctx.allow_io(0x00E9, 1).unwrap(),
+            matches!(gate(&mut ctx, 0xE9), IoGate::Allowed),
             "the all-rings console opens port 0xE9 at any privilege"
         );
-        assert!(
-            !ctx.allow_io(0x00E8, 1).unwrap(),
-            "and opens no other port"
-        );
+        assert!(matches!(gate(&mut ctx, 0xE8), IoGate::Denied), "and opens no other port");
+    }
+
+    /// Bochs io.cc `allow_io`: IOPL and the TSS bitmap are checked before the
+    /// SVM intercept, so an SVM guest refused the port takes #GP(0) in the
+    /// guest even though its hypervisor intercepts that port.
+    #[test]
+    fn a_refused_port_faults_before_the_svm_intercept() {
+        const IOPM: u64 = 0x10000;
+        let mut machine = TestMachine::new();
+        let all_ports = [0xFFu8; 0x2000];
+        let copied = machine.memory_mut().write_ram(IOPM, &all_ports).expect("the IOPM is RAM");
+        assert_eq!(copied, all_ports.len(), "the IOPM reached RAM whole");
+        let mut ctx = machine.ctx();
+        ctx.cr0.insert(BxCr0::PE);
+        ctx.sregs[BxSegregs::Cs as usize].selector.rpl = 3;
+        ctx.eflags.set_iopl(0);
+        ctx.in_svm_guest = true;
+        ctx.vmcb.ctrls.iopm_base = IOPM;
+        ctx.vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_IO;
+
+        let gate = ctx
+            .allow_io(&in_al_ib(0x60), IoPort::new(0x60), 1, true, IoInstr::Immediate)
+            .unwrap();
+        assert!(matches!(gate, IoGate::Denied), "the permission check wins over the intercept");
     }
 }

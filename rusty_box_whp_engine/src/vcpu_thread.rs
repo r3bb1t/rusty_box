@@ -1881,7 +1881,9 @@ pub(crate) fn service_port_access<V: VpRegisters>(
     access: IoPortAccess,
 ) -> Result<()> {
     let ticks = io.pc_system.time_ticks();
-    let port = access.port;
+    // The platform's exit context carries the port as the ABI's bare 16 bits;
+    // this is where it becomes a port.
+    let port = rusty_box::iodev::IoPort::new(access.port);
     let width = access.access_size;
 
     // The platform hands back RAX WHOLE, whatever the access width, so both

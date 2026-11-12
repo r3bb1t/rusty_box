@@ -12,6 +12,7 @@
 //! - Timer-driven DMA transfers (Bochs pci_ide.cc)
 
 
+use super::IoPort;
 #[cfg(feature = "std")]
 use crate::{
     pc_system::{BxPcSystemC, TimerOwner},
@@ -451,11 +452,11 @@ impl BxPciIde {
 
     /// Read from BM-DMA register space.
     /// Bochs: bx_pci_ide_c::read() (pci_ide.cc)
-    pub fn bmdma_read(&self, address: u16, _io_len: u8) -> u32 {
+    pub fn bmdma_read(&self, port: IoPort, _io_len: u8) -> u32 {
         if self.bmdma_base == 0 {
             return 0xFFFF_FFFF;
         }
-        let offset = (address as u32).wrapping_sub(self.bmdma_base) as u8;
+        let offset = u32::from(port.get()).wrapping_sub(self.bmdma_base) as u8;
         let channel = (offset >> 3) as usize;
         let reg = offset & 0x07;
 
@@ -491,11 +492,11 @@ impl BxPciIde {
 
     /// Write to BM-DMA register space.
     /// Bochs: bx_pci_ide_c::write() (pci_ide.cc)
-    pub fn bmdma_write(&mut self, address: u16, value: u32, _io_len: u8) {
+    pub fn bmdma_write(&mut self, port: IoPort, value: u32, _io_len: u8) {
         if self.bmdma_base == 0 {
             return;
         }
-        let offset = (address as u32).wrapping_sub(self.bmdma_base) as u8;
+        let offset = u32::from(port.get()).wrapping_sub(self.bmdma_base) as u8;
         let channel = (offset >> 3) as usize;
         let reg = offset & 0x07;
 
@@ -862,7 +863,7 @@ mod tests {
         ide.bmdma[0].status = 0x05; // active + IRQ pending
 
         // Write 1 to bit 2 (IRQ) to clear it, but active (bit 0) is preserved
-        ide.bmdma_write(0xC002, 0x04, 1);
+        ide.bmdma_write(IoPort::new(0xC002), 0x04, 1);
         assert_eq!(ide.bmdma[0].status, 0x01); // active preserved, IRQ cleared
     }
 
@@ -870,7 +871,7 @@ mod tests {
     fn test_bmdma_dtpr_alignment() {
         let mut ide = BxPciIde::new();
         ide.bmdma_base = 0xC000;
-        ide.bmdma_write(0xC004, 0xDEADBEEF, 4);
+        ide.bmdma_write(IoPort::new(0xC004), 0xDEADBEEF, 4);
         // Low 2 bits should be masked
         assert_eq!(ide.bmdma[0].dtpr, 0xDEADBEEC);
     }
@@ -933,7 +934,7 @@ mod tests {
 
         // Start DMA — requests the deferred 1 us one-shot timer arm
         // (Bochs pci_ide.cc write: activate_timer(timer_index, 1, 0)).
-        ide.bmdma_write(0xC000, 0x01, 1);
+        ide.bmdma_write(IoPort::new(0xC000), 0x01, 1);
         assert!(ide.bmdma[0].cmd_ssbm);
         assert_eq!(ide.bmdma[0].status & 0x01, 0x01);
         assert_eq!(ide.bmdma[0].prd_current, 0x1000);
@@ -941,7 +942,7 @@ mod tests {
         assert_eq!(ide.take_pending_timer_arm(0), None); // drained
 
         // Stop DMA
-        ide.bmdma_write(0xC000, 0x00, 1);
+        ide.bmdma_write(IoPort::new(0xC000), 0x00, 1);
         assert!(!ide.bmdma[0].cmd_ssbm);
         assert_eq!(ide.bmdma[0].status & 0x01, 0x00);
         assert!(!ide.bmdma[0].data_ready);
@@ -951,8 +952,8 @@ mod tests {
     fn pci_ide_snapshot_resumes_mid_bmdma_transfer() {
         let mut ide = BxPciIde::new();
         assert!(ide.pci_write(0x20, 0x0000_c001, 4).bmdma_base_changed);
-        ide.bmdma_write(0xc004, 0x0000_1200, 4);
-        ide.bmdma_write(0xc000, 0x09, 1);
+        ide.bmdma_write(IoPort::new(0xc004), 0x0000_1200, 4);
+        ide.bmdma_write(IoPort::new(0xc000), 0x09, 1);
         let channel = &mut ide.bmdma[0];
         channel.status |= 0x04;
         channel.prd_current = 0x0000_1240;
@@ -987,9 +988,9 @@ mod tests {
 
         assert_eq!(topology.bmdma_base, 0xc000);
         assert_eq!(ide.bmdma_base, 0xd000);
-        assert_eq!(ide.bmdma_read(0xd000, 1), 0x09);
-        assert_eq!(ide.bmdma_read(0xd002, 1), 0x05);
-        assert_eq!(ide.bmdma_read(0xd004, 4), 0x0000_1200);
+        assert_eq!(ide.bmdma_read(IoPort::new(0xd000), 1), 0x09);
+        assert_eq!(ide.bmdma_read(IoPort::new(0xd002), 1), 0x05);
+        assert_eq!(ide.bmdma_read(IoPort::new(0xd004), 4), 0x0000_1200);
         let channel = &ide.bmdma[0];
         assert_eq!(channel.prd_current, 0x0000_1240);
         assert_eq!((channel.buffer_top, channel.buffer_idx), (64, 20));

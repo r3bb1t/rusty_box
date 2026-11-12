@@ -132,6 +132,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     let mut rex_prefix = RexPrefix::empty();
     let mut sse_prefix: u8 = SsePrefix::PrefixNone as u8;
     let mut seg_override: u8 = 7; // 7 = none
+    // A LOCK prefix anywhere among the prefixes, which wins over a REP/REPNE
+    // in either order (Bochs fetchdecode64.cc fetchDecode64 `lock`, applied
+    // through bxInstruction_c::setLock).
+    let mut lock = false;
 
     // === Phase 1: Parse legacy prefixes ===
     // Per Bochs fetchDecode64: REX prefixes do NOT break the prefix loop.
@@ -175,7 +179,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // LOCK prefix
             0xF0 => {
                 rex_prefix = RexPrefix::empty();
-                metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_LOCK);
+                lock = true;
             }
 
             // REPNE/REPNZ (also SSE prefix)
@@ -206,7 +210,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         pos += 1;
     }
 
-    // Post-prefix REX processing (matches Bochs fetchDecode64:1476-1482)
+    // Post-prefix REX processing (Bochs fetchdecode64.cc fetchDecode64)
     // Must happen AFTER prefix loop so REX.W overrides any prior 0x66 prefix
     if !rex_prefix.is_empty() {
         // assertExtend8bit: REX prefix enables extended 8-bit registers (SPL, BPL, SIL, DIL)
@@ -216,6 +220,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             metainfo1_bits |= InstructionFlags::Os64.bits();
             metainfo1_bits |= InstructionFlags::Os32.bits();
         }
+    }
+    if lock {
+        metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_LOCK);
     }
 
     if pos >= max_len {
@@ -1870,6 +1877,20 @@ mod tests {
         let i = fetch_decode64(&[0x90]).unwrap();
         assert_eq!(i.ilen(), 1);
         assert_eq!(i.get_ia_opcode(), Opcode::Nop);
+    }
+
+    /// LOCK wins over REP/REPNE whichever comes first: LOCK INSB (no memory
+    /// destination) is #UD, and a LOCK ADD to memory keeps its lock.
+    #[test]
+    fn lock_wins_over_rep_in_either_order() {
+        let illegal = Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+        for bytes in [[0xF0, 0xF3, 0x6C], [0xF3, 0xF0, 0x6C], [0xF0, 0xF2, 0x6C]] {
+            assert_eq!(fetch_decode64(&bytes).map(|i| i.get_ia_opcode()), illegal);
+        }
+        for bytes in [[0xF0, 0xF3, 0x01, 0x18], [0xF3, 0xF0, 0x01, 0x18]] {
+            let i = fetch_decode64(&bytes).unwrap();
+            assert_eq!(i.lock_rep_used_value(), LOCK_REP_LOCK);
+        }
     }
 
     #[test]

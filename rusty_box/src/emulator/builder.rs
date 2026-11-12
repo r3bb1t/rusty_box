@@ -741,8 +741,8 @@ mod tests {
     /// index port — exactly the pair of `OUT 0x70` / `IN 0x71` the BIOS issues.
     fn cmos_register<T: Instrumentation>(machine: &mut Emulator<T>, register: u8) -> u8 {
         let cmos = &mut machine.device_manager.cmos;
-        cmos.write(0x70, u32::from(register), 1);
-        cmos.read(0x71, 1) as u8
+        cmos.write(crate::iodev::cmos::CMOS_ADDR, u32::from(register), 1);
+        cmos.read(crate::iodev::cmos::CMOS_DATA, 1) as u8
     }
 
     #[test]
