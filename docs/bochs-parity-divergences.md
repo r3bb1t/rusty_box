@@ -1202,8 +1202,9 @@ VPSRLW, VPSRLD, VPSRLQ and VPSRLDQ, and VEX.256 VPSRLW, which cover every group
 and both vector lengths. The other fifteen rest on two things: the SDM, which
 lists every VEX form as register-only, and the fact that the same attribute
 omission covers all twenty rows. The opcodes' own names (`*_UdqIb`) also say
-register-only. Bochs with `docs/bochs-vex-shift-imm-memory-fix.patch` prints the
-hardware row. The upstream report is in `docs/bochs-upstream-bugs.md`.
+register-only. Bochs with
+`docs/patches/bochs/bochs-vex-shift-imm-memory-fix.patch` prints the hardware
+row. The upstream report is in `docs/bochs-upstream-bugs.md`.
 
 ### Price of closing it
 

@@ -839,7 +839,7 @@ as `int16_t` (`target/i386/tcg/emit.c.inc` `gen_RET` / `gen_RETF`), so it
 sign-extends on 32-bit stacks too.
 
 **Fix**: `Bit16u imm16 = i->Iw();` — prepared as
-`docs/bochs-retf16-imm16-fix.patch` (`git am`-ready, with a HISTORY line).
+`docs/patches/bochs/bochs-retf16-imm16-fix.patch` (`git am`-ready, with a HISTORY line).
 
 **Reproduction**: `docs/bochs-retf16-imm16-probe.S`, a 512-byte boot sector
 built with GNU binutils alone; it prints ESP after each return to port 0xE9
@@ -907,7 +907,7 @@ the processor, and `rusty_box_whp_engine` intercepts only #GP, so each #UD came
 from the CPU. The probe image was loaded by a temporary test, since deleted.
 
 **Fix**: add `| ATTR_MODC0` to all twenty rows. This is prepared as
-`docs/bochs-vex-shift-imm-memory-fix.patch` (`git am`-ready, with a HISTORY
+`docs/patches/bochs/bochs-vex-shift-imm-memory-fix.patch` (`git am`-ready, with a HISTORY
 line). The patch was built and verified against master `f87c5e226`.
 
 **Reproduction**: `docs/bochs-vex-shift-imm-memory-probe.S`, a 512-byte boot
