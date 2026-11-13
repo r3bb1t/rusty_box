@@ -2,7 +2,8 @@
 name = "rusty_box"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# A port of the Bochs x86 emulator, which is LGPL-2.1-or-later.
+license = "LGPL-2.1-or-later"
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true

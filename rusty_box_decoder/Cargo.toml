@@ -2,7 +2,8 @@
 name = "rusty_box_decoder"
 version = "0.0.2"
 edition.workspace = true
-license.workspace = true
+# A port of Bochs's instruction decoder, which is LGPL-2.1-or-later.
+license = "LGPL-2.1-or-later"
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true

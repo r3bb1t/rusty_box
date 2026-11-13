@@ -296,7 +296,30 @@ It needs the rustup targets `x86_64-unknown-none`, `x86_64-unknown-uefi` and `wa
 
 ## License
 
-This project is a derivative work of the [Bochs](https://bochs.sourceforge.io/) x86 emulator
-and is licensed under the [GNU Lesser General Public License v2.1](LICENSE) (LGPL-2.1-or-later).
+Each crate carries its own licence, set in its `Cargo.toml`.
 
-See [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES) for bundled third-party code (Berkeley SoftFloat 3e, Hauser FPU transcendentals).
+Crates written here are licensed under either of, at your option:
+
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT license](LICENSE-MIT)
+
+These are `rusty_box_core`, `rusty_box_gui`, `rusty_box_symbols`, `rusty_box_symbols_fixtures`,
+`rusty_box_whp`, `rusty_box_whp_sys`, `rusty_box_whp_engine`, `rusty_box_bximage`, `xtask` and the
+examples.
+
+Crates that hold code ported from LGPL sources are licensed under the
+[GNU Lesser General Public License v2.1](LICENSE-LGPL) or, at your option, any later version
+(LGPL-2.1-or-later):
+
+- `rusty_box` and `rusty_box_decoder`: a port of the [Bochs](https://bochs.sourceforge.io/) x86
+  emulator.
+- `rusty_box_devices`: device models ported from Bochs.
+- `rusty_box_aarch64`: its CFI flash device is ported from QEMU's `hw/block/pflash_cfi01.c`.
+
+A program that enables any of these crates takes on the LGPL's terms for them.
+
+Unless you state otherwise, any contribution you submit for inclusion in a crate is licensed as
+that crate is, without any additional terms or conditions.
+
+See [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES) for bundled third-party code (Berkeley SoftFloat 3e,
+Hauser FPU transcendentals, Arm's machine-readable pseudocode, EDK2).

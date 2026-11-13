@@ -3,7 +3,11 @@ name = "rusty_box_aarch64"
 description = "AArch64 (ARMv8.0-A) interpreter and a QEMU-virt-compatible board: deterministic, no_std and allocation-free"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# The CFI flash's command state machine is ported from QEMU's
+# hw/block/pflash_cfi01.c, which is LGPL-2.1-or-later; the rest of the
+# crate is original or derived from BSD-3-Clause sources (Berkeley
+# SoftFloat 3e, Arm's machine-readable pseudocode).
+license = "LGPL-2.1-or-later"
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
