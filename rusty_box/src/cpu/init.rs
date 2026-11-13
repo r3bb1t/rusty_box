@@ -355,7 +355,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.set_pkeys(0, 0);
 
         /* initialise MSR registers to defaults */
-        self.msr.apicbase = BX_LAPIC_BASE_ADDR;
+        self.msr.apicbase = BX_LAPIC_BASE_ADDR.get();
         self.lapic.reset(source as u8);
         self.msr.apicbase |= 0x800;
         if self.bx_cpuid == 0 {

@@ -5854,7 +5854,9 @@ mod tests {
         let memory = machine.memory_mut();
         let mut map = |at: u64, entry: u64| {
             let bytes = entry.to_le_bytes();
-            let copied = memory.write_ram(at, &bytes).expect("the page tables are RAM");
+            let copied = memory
+                .write_ram(crate::config::BxPhyAddress::new(at), &bytes)
+                .expect("the page tables are RAM");
             assert_eq!(copied, bytes.len(), "the entry at {at:#x} reached RAM whole");
         };
         map(PML4, PDPT | PRESENT_WRITABLE);

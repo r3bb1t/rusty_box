@@ -7255,7 +7255,7 @@ mod tests {
     /// datapath, not VMENTRY, so the controls are placed directly.
     fn vapic_guest(machine: &mut TestMachine) -> ExecCtx<'_, ()> {
         let mut ctx = machine.ctx();
-        ctx.memory.set_a20_mask(u64::MAX);
+        ctx.memory.set_a20_mask(crate::config::A20Mask::OPEN);
         ctx.in_vmx = true;
         ctx.in_vmx_guest = true;
         ctx.vmcs.virtual_apic_page_addr = VAPIC_PAGE;
@@ -7295,7 +7295,7 @@ mod tests {
     /// walker, not entry validation.
     fn ept_guest(machine: &mut TestMachine) -> ExecCtx<'_, ()> {
         let mut ctx = machine.ctx();
-        ctx.memory.set_a20_mask(u64::MAX);
+        ctx.memory.set_a20_mask(crate::config::A20Mask::OPEN);
         ctx.in_vmx = true;
         ctx.in_vmx_guest = true;
         ctx.vmcs.proc_based_ctls = VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS;
@@ -8613,7 +8613,7 @@ mod tests {
         let mut machine = TestMachine::new();
         let mut ctx = machine.ctx();
         ctx.reset(crate::cpu::ResetReason::Hardware);
-        ctx.memory.set_a20_mask(u64::MAX);
+        ctx.memory.set_a20_mask(crate::config::A20Mask::OPEN);
         ctx.mem_write_qword(GDT + 8, CODE_DPL3);
         ctx.mem_write_qword(GDT + 16, DATA_DPL3);
         ctx.mem_write_qword(IDT + 13 * 8, GP_GATE);

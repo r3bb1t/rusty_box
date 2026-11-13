@@ -29,6 +29,7 @@
 use super::irq::ServiceRequest;
 use crate::config::BxPhyAddress;
 use crate::memory::BxMemC;
+use rusty_box_devices::api::WindowOffset;
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
@@ -448,17 +449,24 @@ impl BxIoApic {
         (self.intin & bit != 0, self.irr & bit != 0)
     }
 
+    /// The first and last addresses of the register window at
+    /// `base_addr` (Bochs ioapic.cc: `base_addr` to `base_addr + 0xfff`).
+    fn window(&self) -> (BxPhyAddress, BxPhyAddress) {
+        let base = BxPhyAddress::new(u64::from(self.base_addr));
+        (base, base + u64::from(IOAPIC_MMIO_SIZE - 1))
+    }
+
     /// Read an aligned 32-bit register.
     ///
     /// Address is masked to 8-bit offset within the MMIO page.
     /// Offset 0x00 reads IOREGSEL; offset 0x10 reads the register selected by IOREGSEL.
     ///
     /// Bochs: `Bit32u bx_ioapic_c::read_aligned(bx_phy_address address)` (ioapic.cc)
-    pub fn read_aligned(&self, address: BxPhyAddress) -> u32 {
-        let offset = (address as u32) & 0xFF;
+    pub fn read_aligned(&self, at: WindowOffset) -> u32 {
+        let offset = (at.get() as u32) & 0xFF;
         tracing::trace!(
-            "IOAPIC: read aligned addr={:#010x} offset={:#04x}",
-            address,
+            "IOAPIC: read aligned at={:#010x} offset={:#04x}",
+            at.get(),
             offset
         );
 
@@ -527,11 +535,11 @@ impl BxIoApic {
     ///
     /// Bochs: `void bx_ioapic_c::write_aligned(bx_phy_address address, Bit32u value)`
     /// (ioapic.cc)
-    pub(crate) fn write_aligned(&mut self, address: BxPhyAddress, value: u32) -> ServiceRequest {
-        let offset = (address as u32) & 0xFF;
+    pub(crate) fn write_aligned(&mut self, at: WindowOffset, value: u32) -> ServiceRequest {
+        let offset = (at.get() as u32) & 0xFF;
         tracing::trace!(
-            "IOAPIC: write aligned addr={:#010x} offset={:#04x} data={:#010x}",
-            address,
+            "IOAPIC: write aligned at={:#010x} offset={:#04x} data={:#010x}",
+            at.get(),
             offset,
             value
         );
@@ -633,21 +641,13 @@ impl BxIoApic {
                 //        DEV_register_memory_handlers(..., base_addr, base_addr + 0xfff);
                 // (ioapic.cc)
                 self.base_addr = IOAPIC_BASE_ADDR | (base_offset as u32);
-                let base = self.base_addr as BxPhyAddress;
-                mem.register_memory_handlers(
-                    device_id,
-                    base,
-                    base + (IOAPIC_MMIO_SIZE as BxPhyAddress) - 1,
-                )?;
+                let (base, end) = self.window();
+                mem.register_memory_handlers(device_id, base, end)?;
             } else {
                 // Bochs: DEV_unregister_memory_handlers(..., base_addr, base_addr + 0xfff);
                 // (ioapic.cc)
-                let base = self.base_addr as BxPhyAddress;
-                mem.unregister_memory_handlers(
-                    device_id,
-                    base,
-                    base + (IOAPIC_MMIO_SIZE as BxPhyAddress) - 1,
-                )?;
+                let (base, end) = self.window();
+                mem.unregister_memory_handlers(device_id, base, end)?;
             }
             self.enabled = new_enabled;
             changed = true;
@@ -655,19 +655,11 @@ impl BxIoApic {
             // Base offset changed while enabled — relocate the window.
             // Bochs: DEV_unregister_memory_handlers(old); base_addr = ...;
             //        DEV_register_memory_handlers(new) (ioapic.cc)
-            let old_base = self.base_addr as BxPhyAddress;
-            mem.unregister_memory_handlers(
-                device_id,
-                old_base,
-                old_base + (IOAPIC_MMIO_SIZE as BxPhyAddress) - 1,
-            )?;
+            let (old_base, old_end) = self.window();
+            mem.unregister_memory_handlers(device_id, old_base, old_end)?;
             self.base_addr = IOAPIC_BASE_ADDR | (base_offset as u32);
-            let base = self.base_addr as BxPhyAddress;
-            mem.register_memory_handlers(
-                device_id,
-                base,
-                base + (IOAPIC_MMIO_SIZE as BxPhyAddress) - 1,
-            )?;
+            let (base, end) = self.window();
+            mem.register_memory_handlers(device_id, base, end)?;
             changed = true;
         }
 
@@ -1246,7 +1238,10 @@ fn restore_ioapic_delivery<R: SnapRead>(
 impl BxIoApic {
     /// Bochs's handler returns "claimed" unconditionally; the window is ours by
     /// the time we are called, so there is nothing for a verdict to say.
-    pub(crate) fn mem_read(&self, addr: BxPhyAddress, len: u32, data: &mut [u8]) {
+    pub(crate) fn mem_read(&self, at: WindowOffset, len: u32, data: &mut [u8]) {
+        // How far into the register window the access landed, which Bochs
+        // decodes from the low bits of the address.
+        let addr = at.get();
         // Check that access doesn't span a 32-bit boundary
         // Bochs: if((a20addr & ~0x3) != ((a20addr+len-1) & ~0x3)) (ioapic.cc)
         if (addr & !0x3) != ((addr + len as u64 - 1) & !0x3) {
@@ -1258,7 +1253,7 @@ impl BxIoApic {
             return;
         }
 
-        let value = self.read_aligned(addr & !0x3);
+        let value = self.read_aligned(WindowOffset(addr & !0x3));
 
         // Write result to caller's data buffer (Bochs ioapic.cc)
         match len {
@@ -1286,7 +1281,10 @@ impl BxIoApic {
     ///
     /// Bochs: `static bool ioapic_write(bx_phy_address a20addr, unsigned len, void *data, void *param)`
     /// (ioapic.cc)
-    pub(crate) fn mem_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) -> ServiceRequest {
+    pub(crate) fn mem_write(&mut self, at: WindowOffset, len: u32, data: &[u8]) -> ServiceRequest {
+        // How far into the register window the access landed, which Bochs
+        // decodes from the low bits of the address.
+        let addr = at.get();
         // Bochs: if(a20addr & 0xf) { BX_PANIC(...); return 1; } (ioapic.cc)
         if addr & 0xF != 0 {
             tracing::error!("IOAPIC: write at unaligned address {:#x}", addr);
@@ -1307,7 +1305,7 @@ impl BxIoApic {
                 );
                 return ServiceRequest::NotNeeded;
             };
-            self.write_aligned(addr, u32::from_ne_bytes(*bytes))
+            self.write_aligned(at, u32::from_ne_bytes(*bytes))
         } else {
             // Non-4-byte writes: only accepted at IOREGSEL offset (0x00)
             let data_offset = (addr & 0xFF) as u32;
@@ -1339,7 +1337,7 @@ impl BxIoApic {
                     return ServiceRequest::NotNeeded;
                 }
             };
-            self.write_aligned(addr, value)
+            self.write_aligned(at, value)
         }
     }
 }
@@ -1467,7 +1465,7 @@ mod tests {
         // Select APIC ID register
         let mut ioapic = ioapic;
         ioapic.ioregsel = IOREGSEL_ID;
-        let value = ioapic.read_aligned(0xFEC00010);
+        let value = ioapic.read_aligned(WindowOffset(0x10));
         // ID = 1, masked to 4 bits, shifted to bits [27:24]
         assert_eq!(value, (IOAPIC_DEFAULT_ID & APIC_ID_MASK) << 24);
     }
@@ -1476,7 +1474,7 @@ mod tests {
     fn test_ioapic_read_version() {
         let mut ioapic = BxIoApic::new();
         ioapic.ioregsel = IOREGSEL_VERSION;
-        let value = ioapic.read_aligned(0xFEC00010);
+        let value = ioapic.read_aligned(WindowOffset(0x10));
         assert_eq!(value, IOAPIC_VERSION_ID);
         assert_eq!(value, 0x00170011);
     }
@@ -1498,7 +1496,7 @@ mod tests {
 
         // Read it back
         fabric.ioapic_mut().ioregsel = 0x10;
-        let lo = fabric.ioapic().read_aligned(0xFEC00010);
+        let lo = fabric.ioapic().read_aligned(WindowOffset(0x10));
         assert_eq!(lo & 0xFF, 0x42);
         assert_eq!(lo & 0x10000, 0); // unmasked
 
@@ -1508,7 +1506,7 @@ mod tests {
 
         // Read it back
         fabric.ioapic_mut().ioregsel = 0x11;
-        let hi = fabric.ioapic().read_aligned(0xFEC00010);
+        let hi = fabric.ioapic().read_aligned(WindowOffset(0x10));
         assert_eq!(hi, 0x03000000);
     }
 

@@ -8,6 +8,7 @@
 //!
 //! Reference: `cpp_orig/bochs/iodev/fw_cfg.cc` (700 lines)
 
+use crate::config::BxPhyAddress;
 use crate::memory::BxMemC;
 use super::IoPort;
 
@@ -600,7 +601,7 @@ impl BxFwCfg {
     /// `dma_addr` so a partial re-write cannot replay it.
     fn trigger_dma(&mut self, mem: &mut BxMemC) {
         let addr = self.dma_addr;
-        self.process_dma(addr, mem);
+        self.process_dma(BxPhyAddress::new(addr), mem);
         self.dma_addr = 0;
     }
 
@@ -612,7 +613,7 @@ impl BxFwCfg {
     /// - control (4 bytes): SELECT/READ/SKIP/WRITE flags + key in upper 16 bits
     /// - length (4 bytes)
     /// - address (8 bytes): guest physical address for data transfer
-    fn process_dma(&mut self, dma_addr: u64, mem: &mut BxMemC) {
+    fn process_dma(&mut self, dma_addr: BxPhyAddress, mem: &mut BxMemC) {
         // A DMA descriptor is indivisible: do not interpret a short/hole
         // prefix, because its control word may not belong to this request.
         let mut desc = [0u8; 16];
@@ -633,9 +634,9 @@ impl BxFwCfg {
         // Parse big-endian descriptor.
         let mut control = u32::from_be_bytes([desc[0], desc[1], desc[2], desc[3]]);
         let length = u32::from_be_bytes([desc[4], desc[5], desc[6], desc[7]]);
-        let address = u64::from_be_bytes([
+        let address = BxPhyAddress::new(u64::from_be_bytes([
             desc[8], desc[9], desc[10], desc[11], desc[12], desc[13], desc[14], desc[15],
-        ]);
+        ]));
 
         tracing::debug!(
             "fw_cfg DMA: control={:#010x}, length={}, address={:#x}, cur_entry={:#06x}",
@@ -1135,15 +1136,15 @@ mod tests {
         use crate::memory::{BxMemC, BxMemoryStubC};
 
         const MIB: usize = 1024 * 1024;
-        const DESCRIPTOR: u64 = 2 * MIB as u64;
-        const DESTINATION: u64 = 3 * MIB as u64;
+        const DESCRIPTOR: BxPhyAddress = BxPhyAddress::new(2 * MIB as u64);
+        const DESTINATION: BxPhyAddress = BxPhyAddress::new(3 * MIB as u64);
         const KEY: u16 = 0x1234;
 
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("swapped memory"),
             false,
         );
-        mem.set_a20_mask(u64::MAX);
+        mem.set_a20_mask(crate::config::A20Mask::OPEN);
         let mut fw_cfg = BxFwCfg::new();
         fw_cfg.add_bytes(KEY, &[0x61, 0x62, 0x63, 0x64, 0x65]);
 
@@ -1151,7 +1152,7 @@ mod tests {
         let mut descriptor = [0u8; 16];
         descriptor[..4].copy_from_slice(&control.to_be_bytes());
         descriptor[4..8].copy_from_slice(&(5u32).to_be_bytes());
-        descriptor[8..].copy_from_slice(&DESTINATION.to_be_bytes());
+        descriptor[8..].copy_from_slice(&DESTINATION.get().to_be_bytes());
         assert_eq!(mem.write_ram(DESCRIPTOR, &descriptor).unwrap(), 16);
         mem.smc_mark_icache_mask(DESCRIPTOR, u32::MAX);
         mem.smc_mark_icache_mask(DESTINATION, u32::MAX);
@@ -1196,15 +1197,15 @@ mod tests {
         use crate::snapshot::SnapshotReader;
 
         const MIB: usize = 1024 * 1024;
-        const DESCRIPTOR: u64 = 2 * MIB as u64;
-        const DESTINATION: u64 = 3 * MIB as u64;
+        const DESCRIPTOR: BxPhyAddress = BxPhyAddress::new(2 * MIB as u64);
+        const DESTINATION: BxPhyAddress = BxPhyAddress::new(3 * MIB as u64);
         const PAYLOAD: &[u8] = b"resume";
 
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("snapshot memory"),
             false,
         );
-        mem.set_a20_mask(u64::MAX);
+        mem.set_a20_mask(crate::config::A20Mask::OPEN);
 
         let mut source = BxFwCfg::new();
         source.init(TEST_RAM_SIZE, TEST_CPU_COUNT);
@@ -1226,7 +1227,7 @@ mod tests {
         let mut descriptor = [0u8; 16];
         descriptor[..4].copy_from_slice(&control.to_be_bytes());
         descriptor[4..8].copy_from_slice(&(PAYLOAD.len() as u32).to_be_bytes());
-        descriptor[8..].copy_from_slice(&DESTINATION.to_be_bytes());
+        descriptor[8..].copy_from_slice(&DESTINATION.get().to_be_bytes());
         assert_eq!(mem.write_ram(DESCRIPTOR, &descriptor).unwrap(), descriptor.len());
 
         // Write all but the triggering byte of a bytewise DMA address.  The
@@ -1234,7 +1235,7 @@ mod tests {
         source.write_port(IoPort::new(0x518), 0, 1, &mut mem);
         source.write_port(IoPort::new(0x519), 0x20, 1, &mut mem);
         source.write_port(IoPort::new(0x51A), 0, 1, &mut mem);
-        assert_eq!(source.dma_addr, DESCRIPTOR);
+        assert_eq!(source.dma_addr, DESCRIPTOR.get());
 
         let mut saved = Vec::new();
         source.save_snapshot_v3_body(&mut saved).unwrap();
@@ -1249,7 +1250,7 @@ mod tests {
             u32::from(PAYLOAD[1]),
             "the restored selector and PIO offset must resume at the next byte"
         );
-        assert_eq!(restored.dma_addr, DESCRIPTOR);
+        assert_eq!(restored.dma_addr, DESCRIPTOR.get());
         restored.write_port(IoPort::new(0x51B), 0, 1, &mut mem);
 
         let mut payload = [0u8; PAYLOAD.len()];

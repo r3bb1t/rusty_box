@@ -18,12 +18,13 @@
 //! `RUSTY_BOX_PF_DIAG` environment variable (its value is the report path,
 //! appended per hit). Compiled only with the `std` feature.
 
+use crate::config::BxPhyAddress;
 use crate::cpu::decoder::{decode64, BX_64BIT_REG_RIP};
 use crate::cpu::instrumentation::Instrumentation;
 use std::fmt::Write as _;
 use std::io::Write as _;
 
-/// Matches icache.rs `BX_ICACHE_INVALID_PHY_ADDRESS` (`BxPhyAddress::MAX`).
+/// Matches icache.rs `BX_ICACHE_INVALID_PHY_ADDRESS` (`u64::MAX`).
 const INVALID_PHY: u64 = u64::MAX;
 
 impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
@@ -124,13 +125,13 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             "fault RIP phys={:#x} (page {:#x}); page has SMC stamps: {}",
             rip_phys,
             page,
-            self.memory.smc_range_has_stamps(page, 4096)
+            self.memory.smc_range_has_stamps(BxPhyAddress::new(page), 4096)
         );
 
         // Current guest memory around the fault RIP, and a fresh decode at it.
         let dump_start = rip_phys.saturating_sub(32).max(page);
         let mut window = [0u8; 64];
-        let got = match self.memory.read_ram(dump_start, &mut window) {
+        let got = match self.memory.read_ram(BxPhyAddress::new(dump_start), &mut window) {
             Ok(n) => n,
             Err(_) => 0,
         };
@@ -149,7 +150,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         );
 
         let mut rip_bytes = [0u8; 16];
-        let rip_got = match self.memory.read_ram(rip_phys, &mut rip_bytes) {
+        let rip_got = match self.memory.read_ram(BxPhyAddress::new(rip_phys), &mut rip_bytes) {
             Ok(n) => n,
             Err(_) => 0,
         };
@@ -204,7 +205,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                 // coexist with a borrow of the cached instruction.
                 let cached_opcode = cached.get_ia_opcode();
                 let mut bytes = [0u8; 16];
-                let n = match self.memory.read_ram(addr, &mut bytes) {
+                let n = match self.memory.read_ram(BxPhyAddress::new(addr), &mut bytes) {
                     Ok(n) => n,
                     Err(_) => 0,
                 };

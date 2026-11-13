@@ -1,9 +1,6 @@
 use thiserror::Error;
 
-use crate::{
-    config::BxPhyAddress,
-    cpu::{cpu::Exception, decoder::Opcode},
-};
+use crate::cpu::{cpu::Exception, decoder::Opcode};
 pub type Result<T> = core::result::Result<T, CpuError>;
 
 #[derive(Error, Debug)]
@@ -15,10 +12,10 @@ pub enum CpuError {
     CpuNotInitialized,
 
     #[error("prefetch: running in bogus memory, pAddr={p_addr:#x}")]
-    PrefetchBogusMemory { p_addr: BxPhyAddress },
+    PrefetchBogusMemory { p_addr: u64 },
 
     #[error("prefetch: getHostMemAddr vetoed direct read, pAddr={p_addr:#x}")]
-    VetoedDirectRead { p_addr: BxPhyAddress },
+    VetoedDirectRead { p_addr: u64 },
 
     // smm
     #[error("smram map[{index}] = {value}")]

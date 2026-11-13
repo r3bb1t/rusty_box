@@ -5,6 +5,51 @@
 /// throughout this crate's own public memory and CPU surface.
 pub use rusty_box_devices::api::BxPhyAddress;
 
+/// The A20 gate's mask (Bochs `a20_mask`, which Bochs types
+/// `bx_phy_address`): the bits of a physical address an access keeps,
+/// every one with the gate open and all but bit 20 with it closed. A mask,
+/// not an address: it only ever applies to one ([`A20Mask::apply`]).
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct A20Mask(u64);
+
+impl A20Mask {
+    /// The gate open: every address bit kept.
+    pub const OPEN: Self = Self(u64::MAX);
+    /// The gate closed: bit 20 forced to zero, as on an 8086.
+    pub const CLOSED: Self = Self(0xFFFF_FFFF_FFEF_FFFF);
+
+    /// The mask of a gate that is open where `enabled` holds.
+    #[inline(always)]
+    pub const fn of_gate(enabled: bool) -> Self {
+        if enabled {
+            Self::OPEN
+        } else {
+            Self::CLOSED
+        }
+    }
+
+    /// The mask whose bits are `bits`, as a snapshot holds it; a caller
+    /// checks it is [`A20Mask::OPEN`] or [`A20Mask::CLOSED`].
+    #[inline(always)]
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// The mask's bits: as a snapshot holds them, and as the CPU's own
+    /// address arithmetic, which keeps its addresses as `u64`, applies them.
+    #[inline(always)]
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// `addr` as the gate passes it.
+    #[inline(always)]
+    pub const fn apply(self, addr: BxPhyAddress) -> BxPhyAddress {
+        addr.masked(self.0)
+    }
+}
+
 pub type BxAddress = u64;
 
 #[cfg(target_pointer_width = "32")]

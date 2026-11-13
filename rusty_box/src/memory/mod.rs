@@ -13,7 +13,7 @@ mod residency;
 mod tests;
 
 pub use super::error::Result;
-use crate::config::BxPhyAddress;
+use crate::config::{A20Mask, BxPhyAddress};
 use residency::{Residency, ResidentParts};
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -196,7 +196,7 @@ pub(crate) fn test_ram() -> BxMemC {
         BxMemoryStubC::create_and_init(BYTES, BYTES, 1024 * 1024).expect("test guest RAM"),
         false,
     );
-    memory.set_a20_mask(u64::MAX);
+    memory.set_a20_mask(A20Mask::OPEN);
     memory
 }
 
@@ -248,7 +248,7 @@ pub struct BxMemC {
 
     /// A20 address mask - controls address line 20 gating
     /// This is synchronized from BxPcSystemC when A20 state changes
-    a20_mask: BxPhyAddress,
+    a20_mask: A20Mask,
 
 }
 
@@ -256,17 +256,17 @@ impl BxMemC {
     /// Apply A20 masking to an address
     #[inline]
     pub fn a20_addr(&self, addr: BxPhyAddress) -> BxPhyAddress {
-        addr & self.a20_mask
+        self.a20_mask.apply(addr)
     }
 
     /// Set the A20 mask (called when A20 line state changes)
-    pub fn set_a20_mask(&mut self, mask: BxPhyAddress) {
+    pub fn set_a20_mask(&mut self, mask: A20Mask) {
         self.a20_mask = mask;
     }
 
 
     /// Get the current A20 mask
-    pub fn a20_mask(&self) -> BxPhyAddress {
+    pub fn a20_mask(&self) -> A20Mask {
         self.a20_mask
     }
 
@@ -509,7 +509,7 @@ impl BxMemC {
             ) else {
                 break;
             };
-            let page_left = 0x1000usize - ((a20 as usize) & 0xfff);
+            let page_left = 0x1000usize - a20.page_offset() as usize;
             let hole_left = if a20 < memory_rusty_box::BX_PCI_HOLE_START {
                 usize::try_from(memory_rusty_box::BX_PCI_HOLE_START - a20).unwrap_or(usize::MAX)
             } else {
@@ -560,7 +560,7 @@ impl BxMemC {
             ) else {
                 break;
             };
-            let page_left = 0x1000usize - ((a20 as usize) & 0xfff);
+            let page_left = 0x1000usize - a20.page_offset() as usize;
             let hole_left = if a20 < memory_rusty_box::BX_PCI_HOLE_START {
                 usize::try_from(memory_rusty_box::BX_PCI_HOLE_START - a20).unwrap_or(usize::MAX)
             } else {
@@ -768,8 +768,8 @@ mod phase1_tests {
 /// process and fail unrelated tests with STATUS_STACK_OVERFLOW.
 const TEST_STACK_SIZE: usize = 64 * MIB;
     use super::{
-        memory_rusty_box::*, BxMemC, BxMemoryStubC, CpuMemoryPolicy, MemoryError,
-        MemorySnapshotGeometry, MemorySnapshotResidency,
+        memory_rusty_box::*, A20Mask, BxMemC, BxMemoryStubC, BxPhyAddress, CpuMemoryPolicy,
+        MemoryError, MemorySnapshotGeometry, MemorySnapshotResidency,
     };
     use std::io::{Seek, SeekFrom};
     use crate::Error;
@@ -781,7 +781,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("memory allocation"),
             false,
         );
-        memory.set_a20_mask(u64::MAX);
+        memory.set_a20_mask(A20Mask::OPEN);
         memory
     }
 
@@ -830,8 +830,12 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
 
     #[test]
     fn physical_ram_translation_hole_edges() {
-        assert_eq!(bx_guest_ram_span(BX_PCI_HOLE_START - 1, 1, 4 * MIB), None);
-        assert_eq!(bx_guest_ram_span(BX_PCI_HOLE_START, 0, usize::MAX).unwrap().start as u64, BX_PCI_HOLE_START);
+        let below_hole = BxPhyAddress::new(BX_PCI_HOLE_START.get() - 1);
+        assert_eq!(bx_guest_ram_span(below_hole, 1, 4 * MIB), None);
+        assert_eq!(
+            bx_guest_ram_span(BX_PCI_HOLE_START, 0, usize::MAX).unwrap().start as u64,
+            BX_PCI_HOLE_START.get()
+        );
         assert!(bx_guest_ram_span(BX_PCI_HOLE_START, 1, usize::MAX).is_none());
         assert_eq!(
             bx_guest_ram_span(BX_PCI_HOLE_END, 1, 3 * 1024 * 1024 * 1024 + 1)
@@ -839,7 +843,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                 .start,
             3 * 1024 * 1024 * 1024
         );
-        assert!(bx_guest_ram_span((4 * MIB - 1) as u64, 2, 4 * MIB).is_none());
+        assert!(bx_guest_ram_span(BxPhyAddress::new((4 * MIB - 1) as u64), 2, 4 * MIB).is_none());
     }
 
     #[test]
@@ -848,11 +852,11 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         assert_eq!(mem.identity_guest_base(), (core::ptr::null_mut(), 0));
         for block in 0..4usize {
             let value = [0x40 + block as u8];
-            assert_eq!(mem.write_ram((block * MIB) as u64, &value).unwrap(), 1);
+            assert_eq!(mem.write_ram(BxPhyAddress::new((block * MIB) as u64), &value).unwrap(), 1);
         }
         for block in 0..4usize {
             let mut value = [0];
-            assert_eq!(mem.read_ram((block * MIB) as u64, &mut value).unwrap(), 1);
+            assert_eq!(mem.read_ram(BxPhyAddress::new((block * MIB) as u64), &mut value).unwrap(), 1);
             assert_eq!(value, [0x40 + block as u8], "guest block {block}");
         }
     }
@@ -868,14 +872,14 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         assert_eq!(geometry.resident_capacity, 1);
         assert_eq!(geometry.used_blocks, 0);
 
-        assert_eq!(mem.write_ram(0, &[0x11]).unwrap(), 1);
-        assert_eq!(mem.write_ram((2 * MIB) as u64, &[0x22]).unwrap(), 1);
+        assert_eq!(mem.write_ram(BxPhyAddress::new(0), &[0x11]).unwrap(), 1);
+        assert_eq!(mem.write_ram(BxPhyAddress::new((2 * MIB) as u64), &[0x22]).unwrap(), 1);
 
         let mut first = [0];
         let mut second = [0];
-        assert_eq!(mem.read_ram(0, &mut first).unwrap(), 1);
+        assert_eq!(mem.read_ram(BxPhyAddress::new(0), &mut first).unwrap(), 1);
         assert_eq!(
-            mem.read_ram((2 * MIB) as u64, &mut second).unwrap(),
+            mem.read_ram(BxPhyAddress::new((2 * MIB) as u64), &mut second).unwrap(),
             1
         );
         assert_eq!((first, second), ([0x11], [0x22]));
@@ -885,7 +889,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     fn undersized_host_first_touch_reads_zero_without_eof() {
         let mut mem = swapped_memory();
         let mut bytes = [0xff; 32];
-        assert_eq!(mem.read_ram((3 * MIB) as u64, &mut bytes).unwrap(), bytes.len());
+        assert_eq!(mem.read_ram(BxPhyAddress::new((3 * MIB) as u64), &mut bytes).unwrap(), bytes.len());
         assert_eq!(bytes, [0; 32]);
     }
 
@@ -894,12 +898,12 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         let mut mem = swapped_memory();
         let source = [0x11, 0x22, 0x33, 0x44];
         assert_eq!(
-            mem.write_ram((MIB - 2) as u64, &source).unwrap(),
+            mem.write_ram(BxPhyAddress::new((MIB - 2) as u64), &source).unwrap(),
             source.len()
         );
         let mut output = [0; 4];
         assert_eq!(
-            mem.read_ram((MIB - 2) as u64, &mut output).unwrap(),
+            mem.read_ram(BxPhyAddress::new((MIB - 2) as u64), &mut output).unwrap(),
             output.len()
         );
         assert_eq!(output, source);
@@ -909,21 +913,21 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     fn ram_copy_reports_out_of_range_without_partial_overflow() {
         let mut mem = swapped_memory();
         let data = [0xaa, 0xbb];
-        assert_eq!(mem.write_ram((4 * MIB - 1) as u64, &data).unwrap(), 1);
+        assert_eq!(mem.write_ram(BxPhyAddress::new((4 * MIB - 1) as u64), &data).unwrap(), 1);
         let mut last = [0];
-        assert_eq!(mem.read_ram((4 * MIB - 1) as u64, &mut last).unwrap(), 1);
+        assert_eq!(mem.read_ram(BxPhyAddress::new((4 * MIB - 1) as u64), &mut last).unwrap(), 1);
         assert_eq!(last, [0xaa]);
     }
 
     #[test]
     fn block_aware_ram_copy_reapplies_a20_across_one_megabyte() {
         let mut mem = swapped_memory();
-        mem.set_a20_mask(0xFFFF_FFFF_FFEF_FFFF);
-        assert_eq!(mem.write_ram(0x000f_fffe, &[1, 2, 3, 4]).unwrap(), 4);
+        mem.set_a20_mask(A20Mask::CLOSED);
+        assert_eq!(mem.write_ram(BxPhyAddress::new(0x000f_fffe), &[1, 2, 3, 4]).unwrap(), 4);
         let mut low = [0; 2];
         let mut high = [0; 2];
-        assert_eq!(mem.read_ram(0, &mut low).unwrap(), 2);
-        assert_eq!(mem.read_ram(0x000f_fffe, &mut high).unwrap(), 2);
+        assert_eq!(mem.read_ram(BxPhyAddress::new(0), &mut low).unwrap(), 2);
+        assert_eq!(mem.read_ram(BxPhyAddress::new(0x000f_fffe), &mut high).unwrap(), 2);
         assert_eq!(low, [3, 4]);
         assert_eq!(high, [1, 2]);
     }
@@ -932,12 +936,12 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     fn load_ram_above_host_backing_is_complete() {
         let mut mem = swapped_memory();
         let data = [7, 8, 9];
-        mem.load_RAM(&data, (3 * MIB) as u64).unwrap();
+        mem.load_RAM(&data, BxPhyAddress::new((3 * MIB) as u64)).unwrap();
         let mut output = [0; 3];
-        assert_eq!(mem.read_ram((3 * MIB) as u64, &mut output).unwrap(), 3);
+        assert_eq!(mem.read_ram(BxPhyAddress::new((3 * MIB) as u64), &mut output).unwrap(), 3);
         assert_eq!(output, data);
         assert!(matches!(
-            mem.load_RAM(&[1, 2], (4 * MIB - 1) as u64),
+            mem.load_RAM(&[1, 2], BxPhyAddress::new((4 * MIB - 1) as u64)),
             Err(crate::Error::Memory(MemoryError::RamImageOutOfRange))
         ));
     }
@@ -947,12 +951,12 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             BxMemoryStubC::create_and_init(5 * MIB, 2 * MIB, 2 * MIB).unwrap(),
             false,
         );
-        source.set_a20_mask(u64::MAX);
-        source.write_ram(0, &[0x31]).unwrap();
-        source.write_ram((2 * MIB) as u64, &[0x42]).unwrap();
-        source.write_ram((4 * MIB - 1) as u64, &[0x43]).unwrap();
-        source.write_ram((4 * MIB) as u64, &[0x51]).unwrap();
-        source.write_ram((5 * MIB - 1) as u64, &[0x52]).unwrap();
+        source.set_a20_mask(A20Mask::OPEN);
+        source.write_ram(BxPhyAddress::new(0), &[0x31]).unwrap();
+        source.write_ram(BxPhyAddress::new((2 * MIB) as u64), &[0x42]).unwrap();
+        source.write_ram(BxPhyAddress::new((4 * MIB - 1) as u64), &[0x43]).unwrap();
+        source.write_ram(BxPhyAddress::new((4 * MIB) as u64), &[0x51]).unwrap();
+        source.write_ram(BxPhyAddress::new((5 * MIB - 1) as u64), &[0x52]).unwrap();
 
         let (geometry, residency) = snapshot_map(&source);
         assert_eq!(geometry.guest_len, (5 * MIB) as u64);
@@ -991,7 +995,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             BxMemoryStubC::create_and_init(5 * MIB, 2 * MIB, 2 * MIB).unwrap(),
             false,
         );
-        restored.set_a20_mask(u64::MAX);
+        restored.set_a20_mask(A20Mask::OPEN);
         restored
             .inherited_memory_stub
             .actual_vector_mut()[MIB..2 * MIB]
@@ -1014,28 +1018,28 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .all(|&byte| byte == 0));
 
         let mut value = [0];
-        assert_eq!(restored.read_ram(0, &mut value).unwrap(), 1);
+        assert_eq!(restored.read_ram(BxPhyAddress::new(0), &mut value).unwrap(), 1);
         assert_eq!(value, [0x31]);
         assert_eq!(
-            restored.read_ram((2 * MIB) as u64, &mut value).unwrap(),
+            restored.read_ram(BxPhyAddress::new((2 * MIB) as u64), &mut value).unwrap(),
             1
         );
         assert_eq!(value, [0x42]);
         assert_eq!(
             restored
-                .read_ram((4 * MIB - 1) as u64, &mut value)
+                .read_ram(BxPhyAddress::new((4 * MIB - 1) as u64), &mut value)
                 .unwrap(),
             1
         );
         assert_eq!(value, [0]);
         assert_eq!(
-            restored.read_ram((4 * MIB) as u64, &mut value).unwrap(),
+            restored.read_ram(BxPhyAddress::new((4 * MIB) as u64), &mut value).unwrap(),
             1
         );
         assert_eq!(value, [0x51]);
         assert_eq!(
             restored
-                .read_ram((5 * MIB - 1) as u64, &mut value)
+                .read_ram(BxPhyAddress::new((5 * MIB - 1) as u64), &mut value)
                 .unwrap(),
             1
         );
@@ -1108,7 +1112,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             BxMemoryStubC::create_and_init(4 * MIB, 3 * MIB, MIB).unwrap(),
             false,
         );
-        memory.set_a20_mask(u64::MAX);
+        memory.set_a20_mask(A20Mask::OPEN);
         let (mut geometry, before) = snapshot_map(&memory);
         geometry.used_blocks = 2;
         let sparse_map = [
@@ -1155,10 +1159,10 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                     BxMemoryStubC::create_and_init(MIB, MIB, 1024).unwrap(),
                     false,
                 );
-                mem.set_a20_mask(u64::MAX);
+                mem.set_a20_mask(A20Mask::OPEN);
                 let mut written = [0x11, 0x22, 0x33, 0x44];
                 let wrote = mem.write_physical_page(CpuMemoryPolicy::default(),
-                    1022,
+                    BxPhyAddress::new(1022),
                     written.len(),
                     &mut written,
                 )
@@ -1167,7 +1171,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
 
                 let mut read = [0; 4];
                 let got = mem.read_physical_page(CpuMemoryPolicy::default(),
-                    1022,
+                    BxPhyAddress::new(1022),
                     read.len(),
                     &mut read,
                 )
@@ -1205,16 +1209,16 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         // One resident slot, three guest blocks: serving block 1 has no choice
         // but to evict block 0, which the previous read just referenced.
         let mut mem = swapped_memory();
-        mem.write_ram(0, &[0xAA]).unwrap();
-        mem.write_ram(MIB as u64, &[0xBB]).unwrap();
+        mem.write_ram(BxPhyAddress::new(0), &[0xAA]).unwrap();
+        mem.write_ram(BxPhyAddress::new(MIB as u64), &[0xBB]).unwrap();
 
         let mut buf = [0u8; 1];
-        mem.read_ram(0, &mut buf).unwrap();
+        mem.read_ram(BxPhyAddress::new(0), &mut buf).unwrap();
         assert_eq!(buf, [0xAA]);
         let epoch_holding_block_0 = mem.swap_epoch();
 
         // Under the pin regime this could fail with InsufficientRam.
-        mem.read_ram(MIB as u64, &mut buf)
+        mem.read_ram(BxPhyAddress::new(MIB as u64), &mut buf)
             .expect("eviction must not be vetoed by an outstanding reference");
         assert_eq!(buf, [0xBB]);
         assert!(
@@ -1230,17 +1234,17 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         let mut mem = swapped_memory();
         let mut buf = [0u8; 1];
 
-        mem.read_ram(0, &mut buf).unwrap();
+        mem.read_ram(BxPhyAddress::new(0), &mut buf).unwrap();
         let after_first = mem.swap_epoch();
 
-        mem.read_ram(MIB as u64, &mut buf).unwrap();
+        mem.read_ram(BxPhyAddress::new(MIB as u64), &mut buf).unwrap();
         let after_swap = mem.swap_epoch();
         assert!(
             after_swap > after_first,
             "relocating a block must announce itself: {after_first} -> {after_swap}"
         );
 
-        mem.read_ram(2 * MIB as u64, &mut buf).unwrap();
+        mem.read_ram(BxPhyAddress::new(2 * MIB as u64), &mut buf).unwrap();
         assert!(
             mem.swap_epoch() > after_swap,
             "every relocation advances the epoch, not just the first"
@@ -1260,19 +1264,19 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             BxMemoryStubC::create_and_init(4 * MIB, 4 * MIB, MIB).expect("memory allocation"),
             false,
         );
-        mem.set_a20_mask(u64::MAX);
+        mem.set_a20_mask(A20Mask::OPEN);
         let start = mem.swap_epoch();
 
         let mut buf = [0u8; 4];
         for block in 0..4u64 {
-            let base = block * MIB as u64;
+            let base = BxPhyAddress::new(block * MIB as u64);
             mem.write_ram(base, &[1, 2, 3, 4]).unwrap();
             mem.read_ram(base, &mut buf).unwrap();
             assert_eq!(buf, [1, 2, 3, 4]);
             // Straddle the block boundary too — the split path is a separate
             // walk through the block table.
             if block + 1 < 4 {
-                mem.write_ram(base + MIB as u64 - 2, &[9, 9, 9, 9])
+                mem.write_ram(base + (MIB as u64 - 2), &[9, 9, 9, 9])
                     .unwrap();
             }
         }
@@ -1295,9 +1299,9 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         // Guest 4 MiB over 1 MiB of host RAM: one resident block, so touching a
         // second guest block must evict the first.
         let mut mem = swapped_memory();
-        const B0: u64 = 0;
-        const B1: u64 = MIB as u64;
-        const B2: u64 = 2 * MIB as u64;
+        const B0: BxPhyAddress = BxPhyAddress::new(0);
+        const B1: BxPhyAddress = BxPhyAddress::new(MIB as u64);
+        const B2: BxPhyAddress = BxPhyAddress::new(2 * MIB as u64);
 
         mem.write_ram(B0, &[0x11, 0x22]).unwrap();
         mem.write_ram(B1, &[0x33, 0x44]).unwrap();
@@ -1321,7 +1325,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     #[test]
     fn failed_reload_leaves_target_block_swapped_until_retry() {
         let mut mem = swapped_memory();
-        mem.write_ram(0, &[0x5a]).unwrap();
+        mem.write_ram(BxPhyAddress::new(0), &[0x5a]).unwrap();
         mem.inherited_memory_stub
             .residency
             .overflow_file
@@ -1329,7 +1333,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .unwrap();
 
         let mut byte = [0];
-        assert!(mem.read_ram(MIB as u64, &mut byte).is_err());
+        assert!(mem.read_ram(BxPhyAddress::new(MIB as u64), &mut byte).is_err());
         let blocks = mem.inherited_memory_stub.residency.blocks();
         assert!(matches!(blocks[1], super::Block::SwappedOut));
 
@@ -1338,7 +1342,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .overflow_file
             .set_len((2 * MIB) as u64)
             .unwrap();
-        assert_eq!(mem.read_ram(MIB as u64, &mut byte).unwrap(), 1);
+        assert_eq!(mem.read_ram(BxPhyAddress::new(MIB as u64), &mut byte).unwrap(), 1);
         assert_eq!(byte, [0]);
     }
 }

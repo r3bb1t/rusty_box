@@ -840,6 +840,7 @@ mod tests {
     use super::*;
     use crate::cpu::exec_ctx::TestMachine;
     use crate::cpu::ResetReason;
+    use crate::config::BxPhyAddress;
     use crate::memory::{BxMemC, BxMemoryStubC};
 
     const MIB: usize = 1024 * 1024;
@@ -852,7 +853,7 @@ mod tests {
                 .expect("memory allocation"),
             false,
         );
-        memory.set_a20_mask(u64::MAX);
+        memory.set_a20_mask(crate::config::A20Mask::OPEN);
         let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(ResetReason::Hardware);
         TestMachine::from_parts(cpu, memory)
@@ -974,7 +975,10 @@ mod tests {
         let mut machine = cpu_with_memory();
         let mut cpu = machine.ctx();
         let pml4e = (PDPT | XP64_PML4E_FLAGS).to_le_bytes();
-        let copied = cpu.memory.write_ram(PML4, &pml4e).expect("the PML4 is RAM");
+        let copied = cpu
+            .memory
+            .write_ram(BxPhyAddress::new(PML4), &pml4e)
+            .expect("the PML4 is RAM");
         assert_eq!(copied, pml4e.len(), "PML4[0] reached RAM whole");
 
         cpu.set_seg_for_api(X86Reg::Cs, 0x08, 0, 0xFFFF_FFFF, SegmentSize::Long64);
@@ -1016,7 +1020,10 @@ mod tests {
         let mut machine = cpu_with_memory();
         let mut cpu = machine.ctx();
         let pdpte = RESERVED_BIT_PDPTE.to_le_bytes();
-        let copied = cpu.memory.write_ram(PDPT, &pdpte).expect("the PDPT is RAM");
+        let copied = cpu
+            .memory
+            .write_ram(BxPhyAddress::new(PDPT), &pdpte)
+            .expect("the PDPT is RAM");
         assert_eq!(copied, pdpte.len(), "PDPT[0] reached RAM whole");
 
         // The image describes a 32-bit PAE guest: paging on, and the EFER
@@ -1063,7 +1070,7 @@ mod tests {
         let vga_id = crate::iodev::DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Legacy.id());
         machine
             .memory_mut()
-            .register_memory_handlers(vga_id, 0xA0000, 0xBFFFF)
+            .register_memory_handlers(vga_id, BxPhyAddress::new(0xA0000), BxPhyAddress::new(0xBFFFF))
             .expect("VGA handler registration");
         // SMRAM control 0x0a: available, not open, not restricted.
         machine.memory_mut().enable_smram(false, false);
@@ -1086,13 +1093,13 @@ mod tests {
         // The save state must be in DRAM, not in the VGA planes: read the
         // backing RAM directly, bypassing every routing decision.
         let mut raw = [0u8; 4];
-        assert_eq!(cpu.memory.read_ram(0xafefc, &mut raw).unwrap(), 4);
+        assert_eq!(cpu.memory.read_ram(BxPhyAddress::new(0xafefc), &mut raw).unwrap(), 4);
         assert_eq!(
             u32::from_le_bytes(raw),
             SMM_REVISION_ID,
             "SMM entry must write the save state to DRAM under the VGA window"
         );
-        assert_eq!(cpu.memory.read_ram(0xaffe0, &mut raw).unwrap(), 4);
+        assert_eq!(cpu.memory.read_ram(BxPhyAddress::new(0xaffe0), &mut raw).unwrap(), 4);
         assert_eq!(
             u32::from_le_bytes(raw),
             0xdead_1234,
@@ -1104,7 +1111,12 @@ mod tests {
         let mut via_vga = [0xffu8; 4];
         assert_eq!(
             cpu.memory
-                .read_physical_page(CpuMemoryPolicy::default(), 0xafefc, 4, &mut via_vga,)
+                .read_physical_page(
+                    CpuMemoryPolicy::default(),
+                    BxPhyAddress::new(0xafefc),
+                    4,
+                    &mut via_vga,
+                )
                 .expect("non-SMM read resolves"),
             crate::memory::PhysAccess::Mmio(crate::memory::mmio_map::MmioHit {
                 token: crate::iodev::DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Legacy.id()),
@@ -1127,7 +1139,12 @@ mod tests {
         let mut via_cpu = [0xffu8; 4];
         assert_eq!(
             cpu.memory
-                .read_physical_page(CpuMemoryPolicy::default(), 0xafefc, 4, &mut via_cpu)
+                .read_physical_page(
+                    CpuMemoryPolicy::default(),
+                    BxPhyAddress::new(0xafefc),
+                    4,
+                    &mut via_cpu,
+                )
                 .expect("CPU read with SMRAM open"),
             crate::memory::PhysAccess::Done,
             "with SMRAM open a CPU access is served by memory, not a device"
@@ -1140,7 +1157,12 @@ mod tests {
         let mut via_device = [0xffu8; 4];
         assert_eq!(
             cpu.memory
-                .read_physical_page(CpuMemoryPolicy::device(), 0xafefc, 4, &mut via_device)
+                .read_physical_page(
+                    CpuMemoryPolicy::device(),
+                    BxPhyAddress::new(0xafefc),
+                    4,
+                    &mut via_device,
+                )
                 .expect("device read with SMRAM open"),
             crate::memory::PhysAccess::Mmio(crate::memory::mmio_map::MmioHit {
                 token: crate::iodev::DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Legacy.id()),
@@ -1158,7 +1180,7 @@ mod tests {
         assert!(
             cpu.memory
                 .get_host_mem_addr(
-                    0xa8000,
+                    BxPhyAddress::new(0xa8000),
                     crate::cpu::rusty_box::MemoryAccessType::Execute,
                     policy,
                 )
@@ -1169,7 +1191,7 @@ mod tests {
         assert!(
             cpu.memory
                 .get_host_mem_addr(
-                    0xa8000,
+                    BxPhyAddress::new(0xa8000),
                     crate::cpu::rusty_box::MemoryAccessType::RW,
                     policy,
                 )

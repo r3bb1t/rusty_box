@@ -5357,10 +5357,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(cpu.msr.apicbase, relocated_xapic_base);
-        assert_eq!(cpu.lapic.get_base(), 0xfee1_0000);
+        assert_eq!(cpu.lapic.get_base(), crate::config::BxPhyAddress::new(0xfee1_0000));
         assert_eq!(cpu.lapic.get_mode(), crate::cpu::apic::ApicMode::XapicMode);
         assert!(
-            cpu.lapic.is_selected(0xfee1_0030),
+            cpu.lapic.is_selected(crate::config::BxPhyAddress::new(0xfee1_0030)),
             "LAPIC MMIO decode must follow MSR_APICBASE writes"
         );
 
@@ -5370,7 +5370,7 @@ mod tests {
         assert_eq!(cpu.msr.apicbase, x2apic_base);
         assert_eq!(cpu.lapic.get_mode(), crate::cpu::apic::ApicMode::X2apicMode);
         assert!(
-            !cpu.lapic.is_selected(0xfee1_0030),
+            !cpu.lapic.is_selected(crate::config::BxPhyAddress::new(0xfee1_0030)),
             "x2APIC mode must disable xAPIC MMIO decode"
         );
     }
@@ -5668,14 +5668,19 @@ mod fxsave_tests {
 
     /// Write `bytes` to RAM at `at`, all of them.
     fn write_ram(memory: &mut BxMemC, at: u64, bytes: &[u8]) {
-        let copied = memory.write_ram(at, bytes).expect("RAM");
+        let copied = memory
+            .write_ram(crate::config::BxPhyAddress::new(at), bytes)
+            .expect("RAM");
         assert_eq!(copied, bytes.len(), "the write at {at:#x} reached RAM whole");
     }
 
     /// The 512-byte image as RAM holds it.
     fn read_image(cpu: &mut ExecCtx<'_, ()>) -> [u8; IMAGE_LEN] {
         let mut image = [0u8; IMAGE_LEN];
-        let copied = cpu.memory.read_ram(IMAGE, &mut image).expect("RAM");
+        let copied = cpu
+            .memory
+            .read_ram(crate::config::BxPhyAddress::new(IMAGE), &mut image)
+            .expect("RAM");
         assert_eq!(copied, IMAGE_LEN, "the image came from RAM whole");
         image
     }

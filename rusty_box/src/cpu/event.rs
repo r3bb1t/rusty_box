@@ -1001,6 +1001,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BxPhyAddress;
     use crate::cpu::arch_state::VcpuArchState;
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::cpu::Exception;
@@ -1633,11 +1634,11 @@ mod tests {
     /// so the LAPIC will deliver it, and distinct from every 8259 vector.
     const LAPIC_VECTOR: u8 = 0x41;
     /// xAPIC spurious-vector register offset (Bochs apic.h BX_LAPIC_SPURIOUS_VECTOR).
-    const LAPIC_SVR_OFFSET: u64 = 0xF0;
+    const LAPIC_SVR_OFFSET: u32 = 0xF0;
     /// The guest-visible IRR/ISR word holding [`LAPIC_VECTOR`]'s bit:
     /// word 0x41 / 32 = 2 of the register file (Bochs apic.cc read_aligned).
-    const LAPIC_VECTOR_ISR_OFFSET: u64 = 0x120;
-    const LAPIC_VECTOR_IRR_OFFSET: u64 = 0x220;
+    const LAPIC_VECTOR_ISR_OFFSET: u32 = 0x120;
+    const LAPIC_VECTOR_IRR_OFFSET: u32 = 0x220;
     /// Bit 0x41 % 32 = 1 inside that word.
     const LAPIC_VECTOR_REG_BIT: u32 = 1 << 1;
 
@@ -1887,15 +1888,15 @@ mod tests {
     /// entry.
     fn install_real_mode_guest(bus: &mut TestBus, code: &[u8]) {
         bus.memory
-            .write_ram(u64::from(TRAP_CODE), code)
+            .write_ram(BxPhyAddress::new(u64::from(TRAP_CODE)), code)
             .expect("the guest's code is RAM");
         bus.memory
-            .write_ram(u64::from(TRAP_HANDLER), &[0xCF])
+            .write_ram(BxPhyAddress::new(u64::from(TRAP_HANDLER)), &[0xCF])
             .expect("the handler is RAM");
         let mut vector = [0u8; 4];
         vector[..2].copy_from_slice(&TRAP_HANDLER.to_le_bytes());
         bus.memory
-            .write_ram(IVT_VECTOR_1, &vector)
+            .write_ram(BxPhyAddress::new(IVT_VECTOR_1), &vector)
             .expect("the IVT is RAM");
     }
 
@@ -1931,7 +1932,7 @@ mod tests {
         let mut word = [0u8; 2];
         let read = bus
             .memory
-            .read_ram(addr, &mut word)
+            .read_ram(BxPhyAddress::new(addr), &mut word)
             .expect("the stack is RAM");
         assert_eq!(read, word.len(), "a whole word is readable at {addr:#x}");
         u16::from_le_bytes(word)
@@ -2007,7 +2008,7 @@ mod tests {
         // The word POPF pops: TF set.
         bus.memory
             .write_ram(
-                u64::from(TRAP_STACK_TOP),
+                BxPhyAddress::new(u64::from(TRAP_STACK_TOP)),
                 &((RFLAGS_RESERVED | RFLAGS_TF) as u16).to_le_bytes(),
             )
             .expect("the stack is RAM");
@@ -2086,7 +2087,7 @@ mod tests {
         install_real_mode_guest(&mut bus, &[0x8E, 0xD0, 0xF4]);
         // The handler: inc cx ; iret — its first instruction marks the wake.
         bus.memory
-            .write_ram(u64::from(TRAP_HANDLER), &[0x41, 0xCF])
+            .write_ram(BxPhyAddress::new(u64::from(TRAP_HANDLER)), &[0x41, 0xCF])
             .expect("the handler is RAM");
         reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED | RFLAGS_TF);
 
@@ -2168,7 +2169,7 @@ mod tests {
         let mut entry = [0u8; 4];
         entry[..2].copy_from_slice(&handler.to_le_bytes());
         bus.memory
-            .write_ram(u64::from(vector) * 4, &entry)
+            .write_ram(BxPhyAddress::new(u64::from(vector) * 4), &entry)
             .expect("the IVT is RAM");
     }
 

@@ -2,11 +2,10 @@ use super::{
     cpu::{BxCpuC, CpuActivityState},
     Result,
 };
-use crate::config::BxPhyAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Check if the given address range overlaps with the monitored address range
-    pub fn is_monitor(&self, begin_addr: BxPhyAddress, len: u32) -> bool {
+    pub fn is_monitor(&self, begin_addr: u64, len: u32) -> bool {
         if !self.monitor.armed() {
             return false;
         }
@@ -20,7 +19,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     }
 
     /// Check if monitor should be triggered and wake up if so
-    pub fn check_monitor(&mut self, begin_addr: BxPhyAddress, len: u32) -> Result<()> {
+    pub fn check_monitor(&mut self, begin_addr: u64, len: u32) -> Result<()> {
         if self.is_monitor(begin_addr, len) {
             self.wakeup_monitor();
         }

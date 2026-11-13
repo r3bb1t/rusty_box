@@ -331,8 +331,32 @@ impl VgaMemoryMapping {
 }
 
 // ---- VGA memory window addresses ----
-const VGA_WINDOW_GRAPHICS_BASE: BxPhyAddress = 0xA0000;
-const VGA_WINDOW_GRAPHICS_END: BxPhyAddress = 0xBFFFF;
+const VGA_WINDOW_GRAPHICS_BASE: BxPhyAddress = BxPhyAddress::new(0xA0000);
+const VGA_WINDOW_GRAPHICS_END: BxPhyAddress = BxPhyAddress::new(0xBFFFF);
+
+/// Where a byte of VGA memory is named. Bochs vgacore.cc `mem_read` and
+/// `mem_write` take both as one `bx_phy_address`, a value below 0xA0000
+/// being an offset into the planes: an address in the legacy window, which
+/// the memory map gates, or the offset a chain-4 framebuffer access reaches
+/// directly.
+#[derive(Clone, Copy)]
+enum VgaMemAt {
+    Window(BxPhyAddress),
+    /// Reached only through the linear framebuffer, which needs `alloc`.
+    #[cfg(feature = "alloc")]
+    Offset(u32),
+}
+
+impl VgaMemAt {
+    /// The value Bochs passes as `addr`.
+    const fn bochs_addr(self) -> u64 {
+        match self {
+            Self::Window(addr) => addr.get(),
+            #[cfg(feature = "alloc")]
+            Self::Offset(offset) => offset as u64,
+        }
+    }
+}
 
 /// The physical ranges this adapter answers.
 ///
@@ -576,7 +600,7 @@ impl crate::display::card::VgaExtension for StdVga {
                         self.vbe_mem_read_byte(cx.core(), addr)
                     }
                     VgaWindow::Lfb => {
-                        let addr = self.vbe.base_address as BxPhyAddress + offset;
+                        let addr = self.vbe_base() + offset;
                         self.vbe_mem_read_byte(cx.core(), addr)
                     }
                     VgaWindow::Registers => return None,
@@ -598,7 +622,7 @@ impl crate::display::card::VgaExtension for StdVga {
                 let offset = cx.offset().get();
                 let addr = match cx.window() {
                     VgaWindow::Legacy => VGA_WINDOW_GRAPHICS_BASE + offset,
-                    VgaWindow::Lfb => self.vbe.base_address as BxPhyAddress + offset,
+                    VgaWindow::Lfb => self.vbe_base() + offset,
                     VgaWindow::Registers => return crate::display::card::Written::FallThrough,
                 };
                 self.vbe_mem_write_byte(cx.core(), addr, value);
@@ -690,11 +714,11 @@ impl crate::display::card::VgaExtension for StdVga {
         // the card declares only what it can serve.
         #[cfg(feature = "alloc")]
         {
-            let base = u64::from(self.vbe.base_address);
+            let base = self.vbe_base();
             return out.push(crate::api::WindowDecl {
                 id: VgaWindow::Lfb.id(),
                 base,
-                end: base + u64::from(self.vbe_memsize) - 1,
+                end: base + (u64::from(self.vbe_memsize) - 1),
             });
         }
         #[cfg(not(feature = "alloc"))]
@@ -1454,8 +1478,8 @@ impl VgaCore {
     pub(crate) fn core_window() -> crate::api::WindowDecl {
         crate::api::WindowDecl {
             id: VgaWindow::Legacy.id(),
-            base: VGA_WINDOW_GRAPHICS_BASE as u64,
-            end: VGA_WINDOW_GRAPHICS_END as u64,
+            base: VGA_WINDOW_GRAPHICS_BASE,
+            end: VGA_WINDOW_GRAPHICS_END,
         }
     }
 
@@ -3264,7 +3288,7 @@ impl VgaCore {
     /// virtual is per byte because a card claims individual addresses. The
     /// width-aware handlers are the register blocks, not video memory.
     pub(crate) fn legacy_read_byte(&mut self, offset: u64) -> u8 {
-        vga_mem_read_byte(self, VGA_WINDOW_GRAPHICS_BASE + offset)
+        vga_mem_read_byte(self, VgaMemAt::Window(VGA_WINDOW_GRAPHICS_BASE + offset))
     }
 
     /// Read from the linear framebuffer behind BAR0.
@@ -3297,7 +3321,7 @@ impl VgaCore {
             };
             let offset = at.get() + i;
             if self.seq_chain_four && offset < 0x40000 {
-                *byte = vga_mem_read_byte(self, offset);
+                *byte = vga_mem_read_byte(self, VgaMemAt::Offset(offset as u32));
             } else {
                 *byte = 0xff;
             }
@@ -3352,7 +3376,7 @@ impl VgaCore {
     /// One byte into the legacy aperture — the write half of
     /// [`Self::legacy_read_byte`], and per byte for the same reason.
     pub(crate) fn legacy_write_byte(&mut self, offset: u64, value: u8) {
-        vga_mem_write_byte(self, VGA_WINDOW_GRAPHICS_BASE + offset, value);
+        vga_mem_write_byte(self, VgaMemAt::Window(VGA_WINDOW_GRAPHICS_BASE + offset), value);
     }
 
     /// Write to the linear framebuffer behind BAR0. Bochs vga.cc `mem_write`'s
@@ -3378,7 +3402,7 @@ impl VgaCore {
             };
             let offset = at.get() + i;
             if self.seq_chain_four && offset < 0x40000 {
-                vga_mem_write_byte(self, offset, value);
+                vga_mem_write_byte(self, VgaMemAt::Offset(offset as u32), value);
             }
         }
     }
@@ -3455,7 +3479,8 @@ fn vga_storage_set(vga: &mut VgaCore, index: usize, value: u8) {
 }
 
 /// Read a single byte from VGA memory. Matches Bochs vgacore.cc `mem_read`.
-fn vga_mem_read_byte(vga: &mut VgaCore, addr: BxPhyAddress) -> u8 {
+fn vga_mem_read_byte(vga: &mut VgaCore, at: VgaMemAt) -> u8 {
+    let addr = at.bochs_addr();
     let mut read_map_select = vga.graphics_regs[GFX_REG_READ_MAP_SELECT] & 0x03;
 
     // Window gating: compute offset from address (Bochs vgacore.cc)
@@ -3557,7 +3582,8 @@ fn vga_mem_read_byte(vga: &mut VgaCore, addr: BxPhyAddress) -> u8 {
 }
 
 /// Write a single byte to VGA memory. Matches Bochs vgacore.cc `mem_write`.
-fn vga_mem_write_byte(vga: &mut VgaCore, addr: BxPhyAddress, value: u8) {
+fn vga_mem_write_byte(vga: &mut VgaCore, at: VgaMemAt, value: u8) {
+    let addr = at.bochs_addr();
     let sequ_map_mask = vga.seq_regs[SEQ_REG_MAP_MASK] & 0x0F;
     let graphics_alpha = (vga.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
 
@@ -4363,13 +4389,16 @@ mod tests {
             VgaWindow::Legacy.id(),
             "the core's aperture is declared first, as Bochs registers it first"
         );
-        assert_eq!((declared[0].base, declared[0].end), (0xA_0000, 0xB_FFFF));
+        assert_eq!(
+            (declared[0].base, declared[0].end),
+            (BxPhyAddress::new(0xA_0000), BxPhyAddress::new(0xB_FFFF))
+        );
 
         assert_eq!(declared.len(), 2, "core aperture plus the card's framebuffer");
         assert_eq!(declared[1].id, VgaWindow::Lfb.id());
         assert_eq!(
             declared[1].base,
-            u64::from(vga.ext.vbe.base_address),
+            BxPhyAddress::new(u64::from(vga.ext.vbe.base_address)),
             "the framebuffer window follows the card's base, not a constant"
         );
         assert_eq!(
@@ -4399,8 +4428,8 @@ mod tests {
             assert_eq!(
                 decls.push(WindowDecl {
                     id: crate::api::WindowId(index as u8),
-                    base: 0,
-                    end: 0,
+                    base: BxPhyAddress::new(0),
+                    end: BxPhyAddress::new(0),
                 }),
                 Declared::Accepted
             );
@@ -4408,8 +4437,8 @@ mod tests {
         assert_eq!(
             decls.push(WindowDecl {
                 id: crate::api::WindowId(9),
-                base: 0,
-                end: 0,
+                base: BxPhyAddress::new(0),
+                end: BxPhyAddress::new(0),
             }),
             Declared::NoRoom
         );
@@ -7266,30 +7295,40 @@ impl StdVga {
         self.vbe.virtual_start = virtual_start & core.vga_mem_mask;
     }
 
+    /// Where the linear framebuffer starts in the physical address space.
+    #[cfg(feature = "alloc")]
+    fn vbe_base(&self) -> BxPhyAddress {
+        BxPhyAddress::new(u64::from(self.vbe.base_address))
+    }
+
+    /// The offset into VBE memory that `addr` reaches through the window
+    /// bank `bank` selects, or through the linear framebuffer: Bochs vga.cc
+    /// `vbe_mem_read` and `vbe_mem_write`. `None` past the banked window.
+    #[cfg(feature = "alloc")]
+    fn vbe_offset(&self, addr: BxPhyAddress, bank: u16) -> Option<u64> {
+        if addr >= self.vbe_base() {
+            Some(addr - self.vbe_base())
+        } else if addr < BxPhyAddress::new(0xB0000) {
+            Some(
+                u64::from(bank) * (u64::from(self.vbe.bank_granularity_kb) << 10)
+                    + (addr.get() & 0xffff),
+            )
+        } else {
+            None
+        }
+    }
+
     #[cfg(feature = "alloc")]
     fn vbe_mem_read_byte(&mut self, core: &mut VgaCore, addr: BxPhyAddress) -> u8 {
-        let offset = if addr >= self.vbe.base_address as BxPhyAddress {
-            addr - self.vbe.base_address as BxPhyAddress
-        } else if addr < 0xB0000 {
-            self.vbe.bank[1] as BxPhyAddress
-                * ((self.vbe.bank_granularity_kb as BxPhyAddress) << 10)
-                + (addr & 0xffff)
-        } else {
+        let Some(offset) = self.vbe_offset(addr, self.vbe.bank[1]) else {
             return 0;
         };
-
         core.vbe_memory.get(offset as usize).copied().unwrap_or(0)
     }
 
     #[cfg(feature = "alloc")]
     fn vbe_mem_write_byte(&mut self, core: &mut VgaCore, addr: BxPhyAddress, value: u8) {
-        let offset = if addr >= self.vbe.base_address as BxPhyAddress {
-            addr - self.vbe.base_address as BxPhyAddress
-        } else if addr < 0xB0000 {
-            self.vbe.bank[0] as BxPhyAddress
-                * ((self.vbe.bank_granularity_kb as BxPhyAddress) << 10)
-                + (addr & 0xffff)
-        } else {
+        let Some(offset) = self.vbe_offset(addr, self.vbe.bank[0]) else {
             return;
         };
 
@@ -7298,18 +7337,18 @@ impl StdVga {
         };
         *slot = value;
 
-        let virtual_start = self.vbe.virtual_start as BxPhyAddress;
+        let virtual_start = u64::from(self.vbe.virtual_start);
         if offset < virtual_start {
             return;
         }
         let visible_offset = offset - virtual_start;
-        if visible_offset >= self.vbe.visible_screen_size as BxPhyAddress {
+        if visible_offset >= u64::from(self.vbe.visible_screen_size) {
             return;
         }
 
-        let bpp_multiplier = self.vbe.bpp_multiplier.max(1) as BxPhyAddress;
+        let bpp_multiplier = u64::from(self.vbe.bpp_multiplier.max(1));
         let pixel_offset = visible_offset / bpp_multiplier;
-        let virtual_xres = self.vbe.virtual_xres.max(1) as BxPhyAddress;
+        let virtual_xres = u64::from(self.vbe.virtual_xres.max(1));
         let x_tile = ((pixel_offset % virtual_xres) as u32) / VGA_X_TILESIZE;
         let y_tile = ((pixel_offset / virtual_xres) as u32) / VGA_Y_TILESIZE;
         // Bochs vga.cc vbe_mem_write: an onscreen write inside the tile grid

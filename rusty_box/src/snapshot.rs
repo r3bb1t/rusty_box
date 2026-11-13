@@ -694,13 +694,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
         if !io_platform_decoded { return Err(invalid_snapshot("snapshot I/O platform state was not decoded")); }
         for index in 0..self.cpu_count() {
             let cpu = self.cpu_ref(index);
-            if cpu.snapshot_a20_mask() != self.pc_system.a20_mask() {
+            if cpu.snapshot_a20_mask() != self.pc_system.a20_mask().bits() {
                 return Err(invalid_snapshot(
                     "snapshot CPU and PC-system A20 masks disagree",
                 ));
             }
             cpu.validate_snapshot_lapic_binding(
-                cpu.lapic.get_base(),
+                cpu.lapic.get_base().get(),
                 cpu.lapic.get_mode() as u64,
             )
             .restated()?;
@@ -953,7 +953,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     #[test]
     fn same_instance_restore_does_not_lose_the_next_smc_invalidation() {
         on_large_stack(|| {
-            const CODE_PAGE: u64 = 0x1000;
+            const CODE_PAGE: crate::config::BxPhyAddress = crate::config::BxPhyAddress::new(0x1000);
             let mut emu = machine();
 
             for _ in 0..2 {
@@ -1157,12 +1157,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             assert!(emu.device_manager.keyboard.kbd_controller.outb);
             // Non-default device families made it back.
             assert_eq!(
-                emu.device_manager.irq.ioapic().read_aligned(0xFEC0_0000),
+                emu.device_manager.irq.ioapic().read_aligned(rusty_box_devices::api::WindowOffset(0x00)),
                 0x12,
                 "IOAPIC IOREGSEL did not round-trip"
             );
             assert_eq!(
-                emu.device_manager.irq.ioapic().read_aligned(0xFEC0_0010),
+                emu.device_manager.irq.ioapic().read_aligned(rusty_box_devices::api::WindowOffset(0x10)),
                 0x0001_00E5,
                 "IOAPIC redirect entry did not round-trip"
             );
@@ -1419,7 +1419,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             let routes = |base: u64, window: rusty_box_devices::display::vga::VgaWindow, at: u64| {
                 (
                     base,
-                    restored.memory.mmio.lookup(base),
+                    restored.memory.mmio.lookup(crate::config::BxPhyAddress::new(base)),
                     Some(crate::memory::mmio_map::MmioHit {
                         token: crate::iodev::DevSlot::VGA.mmio_window_token(window.id()),
                         offset: at,

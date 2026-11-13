@@ -1,6 +1,6 @@
 #![allow(private_interfaces, unused_assignments)]
 
-use crate::config::{BxAddress, BxPhyAddress, BxPtrEquiv};
+use crate::config::{BxAddress, BxPtrEquiv};
 
 pub type BxMemType = u32;
 
@@ -8,7 +8,7 @@ pub type BxHostpageaddr = BxPtrEquiv;
 
 pub const LPF_MASK: BxAddress = 0xfffffffffffff000u64;
 
-const PPF_MASK: BxPhyAddress = 0xfffffffffffff000u64;
+const PPF_MASK: u64 = 0xfffffffffffff000u64;
 
 const TLB_GLOBAL_PAGE: u32 = 0x80000000;
 
@@ -176,7 +176,7 @@ pub(crate) struct TLBEntry<P> {
     /// linear page frame
     pub(crate) lpf: BxAddress,
     // physical page frame
-    pub(crate) ppf: BxPhyAddress,
+    pub(crate) ppf: u64,
     /// Where the page backing this entry lives in host memory, or `None` when
     /// the page must take the slow path — it carries MMIO handlers, is ROM, or
     /// falls outside guest RAM.
@@ -458,7 +458,7 @@ mod flush_tests {
         let mut tlb = Tlb::<RamPage, 8>::new();
         for (slot, access_bits) in [(0usize, TLB_GLOBAL_PAGE | 0x1), (1usize, 0x1)] {
             tlb.entries[slot].lpf = (slot as u64) << 12;
-            tlb.entries[slot].ppf = (slot as BxPhyAddress) << 12;
+            tlb.entries[slot].ppf = (slot as u64) << 12;
             tlb.entries[slot].access_bits = access_bits;
         }
         tlb

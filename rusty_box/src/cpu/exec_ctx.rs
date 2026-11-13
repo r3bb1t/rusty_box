@@ -226,7 +226,7 @@ impl TestMachine {
     /// test context that skipped it would mask guest addresses differently
     /// from a real slice.
     pub(crate) fn ctx(&mut self) -> ExecCtx<'_, ()> {
-        self.cpu.a20_mask = self.memory.a20_mask();
+        self.cpu.a20_mask = self.memory.a20_mask().bits();
         ExecCtx::new(
             &mut self.cpu,
             PcIo::new(
@@ -301,7 +301,7 @@ mod tests {
 
                 // Memory and the device bus are reachable in the same scope,
                 // with no pointer stored on the CPU and nothing wired first.
-                ctx.memory.set_a20_mask(u64::MAX);
+                ctx.memory.set_a20_mask(crate::config::A20Mask::OPEN);
                 let _ = ctx.pc_system.get_enable_a20();
 
                 // Assembling the context is what takes the allocation bases —
@@ -313,7 +313,7 @@ mod tests {
                 // exactly this, and it is the combination the raw wiring
                 // existed to fake.
                 let (cpu, memory, _devices, _pc_system) = ctx.slice_parts();
-                memory.set_a20_mask(u64::MAX);
+                memory.set_a20_mask(crate::config::A20Mask::OPEN);
                 assert_eq!(cpu.rip(), rip, "deref must reach the same cpu");
             })
             .unwrap()

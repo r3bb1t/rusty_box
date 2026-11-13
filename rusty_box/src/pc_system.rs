@@ -19,7 +19,7 @@
 use bitflags::bitflags;
 use thiserror::Error;
 
-use crate::config::BxPhyAddress;
+use crate::config::{A20Mask, BxPhyAddress};
 use rusty_box_core::time::{ClockHz, VmClock, VmInstant};
 use crate::cpu::ResetReason;
 use crate::emulator::DeviceClock;
@@ -382,7 +382,7 @@ fn validate_snapshot_state_fields(
     fired_owner_counts: &[u32; BX_MAX_TIMERS],
     num_fired: usize,
     enable_a20: bool,
-    a20_mask: BxPhyAddress,
+    a20_mask: A20Mask,
 ) -> SnapResult<()> {
     if ips == 0 {
         return Err(snapshot_invalid_data("configured IPS is zero"));
@@ -411,12 +411,7 @@ fn validate_snapshot_state_fields(
         .checked_add(u64::from(curr_countdown_period))
         .ok_or_else(|| snapshot_invalid_data("next countdown event overflows"))?;
 
-    let expected_a20_mask = if enable_a20 {
-        0xFFFF_FFFF_FFFF_FFFFu64
-    } else {
-        0xFFFF_FFFF_FFEF_FFFFu64
-    };
-    if a20_mask != expected_a20_mask {
+    if a20_mask != A20Mask::of_gate(enable_a20) {
         return Err(snapshot_invalid_data("A20 state and mask disagree"));
     }
 
@@ -552,7 +547,7 @@ pub struct BxPcSystemC {
     /// Microseconds since last sync
     usec_since_last: u64,
     /// A20 address mask (controls A20 line gating)
-    pub(crate) a20_mask: BxPhyAddress,
+    pub(crate) a20_mask: A20Mask,
     /// Whether A20 line is enabled
     pub(crate) enable_a20: bool,
     /// Instructions per second (raw count, e.g. 300_000_000)
@@ -622,7 +617,7 @@ impl BxPcSystemC {
             usec_since_last: 0,
             // A20 line starts DISABLED at boot (bit 20 masked off)
             // This causes addresses like 0xFFFFFFF0 to wrap to 0x000FFFF0
-            a20_mask: 0xFFFF_FFFF_FFEF_FFFFu64,
+            a20_mask: A20Mask::CLOSED,
             enable_a20: false,
             ips: 1_000_000,
             hrq: false,
@@ -872,15 +867,8 @@ impl BxPcSystemC {
     pub fn set_enable_a20(&mut self, value: bool) {
         let old_enable_a20 = self.enable_a20;
 
-        if value {
-            self.enable_a20 = true;
-            // Full 64-bit address space when A20 is enabled
-            self.a20_mask = 0xFFFF_FFFF_FFFF_FFFFu64;
-        } else {
-            self.enable_a20 = false;
-            // Mask off A20 line (bit 20)
-            self.a20_mask = 0xFFFF_FFFF_FFEF_FFFFu64;
-        }
+        self.enable_a20 = value;
+        self.a20_mask = A20Mask::of_gate(value);
 
         tracing::trace!("A20: set() = {}", self.enable_a20);
 
@@ -900,14 +888,14 @@ impl BxPcSystemC {
     ///
     /// Apply this mask to physical addresses to implement A20 gating.
     #[inline]
-    pub fn a20_mask(&self) -> BxPhyAddress {
+    pub fn a20_mask(&self) -> A20Mask {
         self.a20_mask
     }
 
     /// Apply A20 masking to an address
     #[inline]
     pub fn a20_addr(&self, addr: BxPhyAddress) -> BxPhyAddress {
-        addr & self.a20_mask
+        self.a20_mask.apply(addr)
     }
 
     // ========================================================================
@@ -1535,7 +1523,7 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
         writer.write_u64(self.last_time_usec)?;
         writer.write_u64(self.usec_since_last)?;
         writer.write_bool(self.enable_a20)?;
-        writer.write_u64(self.a20_mask)?;
+        writer.write_u64(self.a20_mask.bits())?;
         writer.write_bool(self.hrq)?;
         writer.write_bool(self.hrq_pending)?;
         writer.write_bool(self.async_event_pending)?;
@@ -1597,7 +1585,7 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
         let last_time_usec = reader.read_u64()?;
         let usec_since_last = reader.read_u64()?;
         let enable_a20 = reader.read_bool()?;
-        let a20_mask = reader.read_u64()?;
+        let a20_mask = A20Mask::from_bits(reader.read_u64()?);
         let hrq = reader.read_bool()?;
         let hrq_pending = reader.read_bool()?;
         let async_event_pending = reader.read_bool()?;
@@ -1754,7 +1742,7 @@ mod tests {
         let pc = BxPcSystemC::new();
         // A20 starts DISABLED at boot (8086 compat)
         assert!(!pc.enable_a20);
-        assert_eq!(pc.a20_mask, 0xFFFF_FFFF_FFEF_FFFFu64);
+        assert_eq!(pc.a20_mask, A20Mask::CLOSED);
         assert_eq!(pc.num_timers, 1); // null timer
                                       // Countdown should be NULL_TIMER_INTERVAL (u32::MAX)
         assert_eq!(pc.curr_countdown, 0xFFFF_FFFF);
@@ -1769,21 +1757,21 @@ mod tests {
         assert!(!pc.get_enable_a20());
 
         // Test address masking with A20 disabled (default)
-        let addr: u64 = 0x0010_0000; // 1MB mark (bit 20 set)
+        let addr = BxPhyAddress::new(0x0010_0000); // 1MB mark (bit 20 set)
         let masked = pc.a20_addr(addr);
-        assert_eq!(masked, 0x0000_0000); // Bit 20 should be masked off
+        assert_eq!(masked, BxPhyAddress::new(0)); // Bit 20 should be masked off
 
         // Enable A20
         pc.set_enable_a20(true);
         assert!(pc.get_enable_a20());
-        assert_eq!(pc.a20_mask, 0xFFFF_FFFF_FFFF_FFFFu64);
+        assert_eq!(pc.a20_mask, A20Mask::OPEN);
         let masked = pc.a20_addr(addr);
-        assert_eq!(masked, 0x0010_0000); // No masking
+        assert_eq!(masked, addr); // No masking
 
         // Disable A20 again
         pc.set_enable_a20(false);
         assert!(!pc.get_enable_a20());
-        assert_eq!(pc.a20_mask, 0xFFFF_FFFF_FFEF_FFFFu64);
+        assert_eq!(pc.a20_mask, A20Mask::CLOSED);
     }
 
     #[test]

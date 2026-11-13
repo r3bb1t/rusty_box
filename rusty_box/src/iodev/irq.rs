@@ -284,13 +284,13 @@ impl IrqFabric {
     /// Bochs ioapic.cc `ioapic_read`.
     #[inline]
     pub(crate) fn mmio_read(&self, offset: u64, len: u32, data: &mut [u8]) {
-        self.ioapic.mem_read(offset, len, data);
+        self.ioapic.mem_read(rusty_box_devices::api::WindowOffset(offset), len, data);
     }
 
     /// Bochs ioapic.cc `ioapic_write`, then its trailing `service_ioapic()`.
     #[inline]
     pub(crate) fn mmio_write(&mut self, offset: u64, len: u32, data: &[u8]) {
-        match self.ioapic.mem_write(offset, len, data) {
+        match self.ioapic.mem_write(rusty_box_devices::api::WindowOffset(offset), len, data) {
             ServiceRequest::NotNeeded => {}
             ServiceRequest::Needed => self.service_ioapic(),
         }

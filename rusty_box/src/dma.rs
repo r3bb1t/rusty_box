@@ -25,6 +25,7 @@
 //!    - Updates address/count; at terminal count sets TC status, re-masks
 //!      non-autoinit channels, and files the HRQ deassert (Bochs
 //!      dma.cc raise_HLDA: `bx_pc_system.set_HRQ(0)`)
+use crate::config::BxPhyAddress;
 use crate::iodev::IoPort;
 use crate::memory::BxMemC;
 
@@ -525,7 +526,7 @@ impl BxDmaC {
 
                 // Short writes intentionally commit only the guest-RAM prefix.
                 // `write_ram` emits the matching SMC stamps for that prefix.
-                if let Err(error) = mem.write_ram(phy_addr as u64, &buffer[..len as usize]) {
+                if let Err(error) = mem.write_ram(BxPhyAddress::new(u64::from(phy_addr)), &buffer[..len as usize]) {
                     tracing::error!("DMA: physical write at {phy_addr:#x} failed: {error:?}");
                 }
             }
@@ -534,7 +535,7 @@ impl BxDmaC {
                 // (Bochs dma.cc)
 
                 // Preserve the 0xff fill for an unavailable guest-RAM tail.
-                if let Err(error) = mem.read_ram(phy_addr as u64, &mut buffer[..maxlen as usize]) {
+                if let Err(error) = mem.read_ram(BxPhyAddress::new(u64::from(phy_addr)), &mut buffer[..maxlen as usize]) {
                     tracing::error!("DMA: physical read at {phy_addr:#x} failed: {error:?}");
                 }
 
@@ -1367,8 +1368,8 @@ mod tests {
             BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("swapped memory"),
             false,
         );
-        memory.set_a20_mask(u64::MAX);
-        memory.smc_mark_icache_mask(2 * MIB as u64, u32::MAX);
+        memory.set_a20_mask(crate::config::A20Mask::OPEN);
+        memory.smc_mark_icache_mask(crate::config::BxPhyAddress::new(2 * MIB as u64), u32::MAX);
         let before_smc = memory.smc_seq_next();
 
         let mut dma = BxDmaC::new();
@@ -1384,7 +1385,12 @@ mod tests {
         dma.raise_hlda(&mut memory);
 
         let mut received = [0; 4];
-        assert_eq!(memory.read_ram(2 * MIB as u64, &mut received).unwrap(), 4);
+        assert_eq!(
+            memory
+                .read_ram(crate::config::BxPhyAddress::new(2 * MIB as u64), &mut received)
+                .unwrap(),
+            4
+        );
         assert_eq!(received, [0xd1, 0xa5, 0x5e, 0x33]);
         assert!(
             memory.smc_seq_next() > before_smc,

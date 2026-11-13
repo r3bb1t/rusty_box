@@ -30,7 +30,7 @@
 use rusty_box_core::{GpaPerms, GpaPlan, GpaPlanError, GpaWindow, HostOffset, GUEST_PAGE};
 
 use super::memory_rusty_box::{
-    bios_map_last128k, BIOSROMSZ, BX_PCI_HOLE_SIZE, BX_PCI_HOLE_START, EXROM_MASK,
+    bios_map_last128k, BIOSROMSZ, BX_PCI_HOLE_END, BX_PCI_HOLE_SIZE, BX_PCI_HOLE_START, EXROM_MASK,
 };
 use super::BxMemC;
 use crate::config::BxPhyAddress;
@@ -111,7 +111,7 @@ impl MemoryPlan {
         }
         for region in memory.mmio.regions() {
             // The map stores an inclusive end; a carve-out is half-open.
-            carve_outs.add(region.begin, u64::from(region.end).saturating_add(1));
+            carve_outs.add(region.begin.get(), region.end.get().saturating_add(1));
         }
 
         let mut plan = Self { windows: [EMPTY_WINDOW; MAX_PLAN_WINDOWS], len: 0 };
@@ -335,7 +335,7 @@ impl BxMemC {
         }
 
         // RAM from 1 MiB to wherever it stops, capped at the PCI hole.
-        let low_ram_end = guest_len.min(BX_PCI_HOLE_START);
+        let low_ram_end = guest_len.min(BX_PCI_HOLE_START.get());
         if low_ram_end > SHADOW_REGION.end {
             list.push(ram_between(SHADOW_REGION.end, low_ram_end, 0));
         }
@@ -429,11 +429,11 @@ fn rom_image_offset(addr: u64) -> u64 {
 /// guest-physical address by the hole's own size
 /// (`bx_translate_gpa_to_linear`).
 fn ram_above_the_hole(guest_len: u64) -> Option<Candidate> {
-    let above = guest_len.checked_sub(BX_PCI_HOLE_START)?;
+    let above = guest_len.checked_sub(BX_PCI_HOLE_START.get())?;
     if above == 0 {
         return None;
     }
-    let base = BX_PCI_HOLE_START + BX_PCI_HOLE_SIZE;
+    let base = BX_PCI_HOLE_END.get();
     Some(Candidate {
         gpa: base,
         end: base + above,
@@ -644,18 +644,18 @@ mod tests {
     fn ram_past_the_hole_starts_at_four_gigabytes_and_trails_by_one() {
         assert!(ram_above_the_hole(0).is_none());
         assert!(
-            ram_above_the_hole(BX_PCI_HOLE_START).is_none(),
+            ram_above_the_hole(BX_PCI_HOLE_START.get()).is_none(),
             "exactly three gigabytes stops at the hole and needs no second window"
         );
 
         let sixty_four_mib = 64 * 1024 * 1024;
-        let above = ram_above_the_hole(BX_PCI_HOLE_START + sixty_four_mib)
+        let above = ram_above_the_hole(BX_PCI_HOLE_START.get() + sixty_four_mib)
             .expect("memory past the hole needs its own window");
         assert_eq!(above.gpa, 0x1_0000_0000, "the guest sees it at four gigabytes");
         assert_eq!(above.end - above.gpa, sixty_four_mib);
         assert_eq!(
             above.gpa.wrapping_add(above.delta),
-            BX_PCI_HOLE_START,
+            BX_PCI_HOLE_START.get(),
             "and it lives immediately after the memory below the hole"
         );
     }
@@ -688,7 +688,7 @@ mod tests {
                 .expect("memory allocation"),
             true,
         );
-        memory.set_a20_mask(u64::MAX);
+        memory.set_a20_mask(crate::config::A20Mask::OPEN);
         // The state the firmware actually puts the chipset in, not the reset
         // one: every PAM area open for reading AND writing, which is what
         // `bios_shadow_init` does before it copies itself into the shadow
@@ -716,7 +716,7 @@ mod tests {
         const LOCAL_APIC: core::ops::Range<u64> = 0xFEE0_0000..0xFEF0_0000;
 
         assert!(
-            SHADOW_REGION.end <= LOCAL_APIC.start && BX_PCI_HOLE_START <= LOCAL_APIC.start,
+            SHADOW_REGION.end <= LOCAL_APIC.start && BX_PCI_HOLE_START.get() <= LOCAL_APIC.start,
             "RAM below the hole stops at {BX_PCI_HOLE_START:#x}, under the page"
         );
         // A machine with eight gigabytes of RAM — the case that has memory
@@ -805,7 +805,7 @@ mod tests {
                     .expect("a planned host offset must be inside the allocation")[0] = stamp;
                 let mut seen = [0u8; 1];
                 match memory
-                    .read_physical_page(policy, gpa, 1, &mut seen)
+                    .read_physical_page(policy, crate::config::BxPhyAddress::new(gpa), 1, &mut seen)
                     .expect("reading a planned page must not fault")
                 {
                     crate::memory::PhysAccess::Done => {}
@@ -840,7 +840,12 @@ mod tests {
                     // this port answering `Mmio` for the same address means
                     // the two disagree about what kind of thing lives there.
                     match memory
-                        .write_physical_page(policy, gpa, 1, &mut data)
+                        .write_physical_page(
+                            policy,
+                            crate::config::BxPhyAddress::new(gpa),
+                            1,
+                            &mut data,
+                        )
                         .expect("a planned writable page must accept a write")
                     {
                         crate::memory::PhysAccess::Done => {}

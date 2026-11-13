@@ -343,6 +343,20 @@ offset. The unit types in the tree:
 - `CpuMemoryPolicy` (`rusty_box/src/memory/mod.rs`);
 - `WindowOffset`, how far into a device's window an access landed
   (`rusty_box_devices/src/api.rs`);
+- `BxPhyAddress`, a guest-physical address (`rusty_box_devices/src/api.rs`, re-exported as
+  `rusty_box::config::BxPhyAddress`). Memory's whole surface takes it (`read_ram`/`write_ram`,
+  `load_RAM`/`load_ROM`, `read_physical_page`/`write_physical_page`, `host_mem_range`,
+  `get_host_mem_addr`, `dbg_fetch_mem`, the MMIO map and handler registration, the SMC stamp
+  table, `bx_guest_ram_span` and the PCI-hole translation), as do a device's declared windows
+  (`WindowDecl`), the local APIC's address decode (`is_selected`, `read`, `write`, its base),
+  DMA and the fw_cfg DMA descriptor. Its arithmetic is a position's: plus a distance is an
+  address, minus an address a distance; masking is by name (`page_base`, `page_offset`,
+  `masked`). Register offsets are not addresses: the local APIC's `read_aligned` and
+  `write_aligned` take a register offset (`u32`), the I/O APIC's handlers a `WindowOffset`,
+  and VGA memory names a byte by `VgaMemAt`, a window address or a plane offset;
+- `A20Mask`, the A20 gate's mask (`rusty_box/src/config.rs`): `OPEN`, `CLOSED`,
+  `of_gate`, applied to an address only through `apply`. Memory and the PC system hold it
+  typed; `bits` gives it to the CPU's own address arithmetic and to a snapshot;
 - `IoPort`, one of the 65 536 x86 I/O ports (`rusty_box_devices/src/api.rs`, re-exported as
   `rusty_box::iodev::IoPort` and beside the instrumentation hooks). Every port-side signature
   takes it: `PioDevice::pio_read`/`pio_write`, `PortDecl::port`, `BxDevicesC::inp`/`outp` and
@@ -367,11 +381,19 @@ Target design, not built: SVGA banking becomes
 `MemoryWindow::translate(WindowOffset) -> Option<VramOffset>`. Neither `MemoryWindow` nor
 `VramOffset` exists in the tree.
 
+Target design, not built: the CPU's own addresses become types too. Inside the x86 CPU —
+paging, the TLBs, the instruction cache, the routed-access helpers (`access_policy`,
+`read_physical_routed`, `write_physical_routed`), the VMCB and VMX structure pointers, the
+MONITOR address — physical addresses are still `u64`, converted to `BxPhyAddress` once where
+they reach memory or a device; linear addresses are `u64` (`BxAddress`) throughout; and the
+emulator's public memory and debugger API (`mem_read`, `mem_write`, `RamOffset::physical`,
+`DebugCpu::dbg_fetch_mem`) takes and returns `u64`.
+
 **RAM offsets and allocation offsets** are the pair easiest to mix up, because both are
 `usize` byte offsets and they are equal whenever residency is full.
 
 - A **RAM offset** counts from the start of guest RAM. `bx_guest_ram_span`
-  (`rusty_box/src/memory/memory_rusty_box.rs`) takes a guest-physical address (`u64`) and
+  (`rusty_box/src/memory/memory_rusty_box.rs`) takes a guest-physical address (`BxPhyAddress`) and
   returns a span of RAM offsets (`Option<Range<usize>>`), skipping the PCI hole.
 - An **allocation offset** counts from the start of the one allocation that holds guest RAM,
   the ROM image and the bogus page. When residency is partial a guest block may sit in a

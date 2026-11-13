@@ -224,14 +224,14 @@ fn addr_write_u64(addr: BxPtrEquiv, val: u64) {
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     #[inline(always)]
-    fn direct_ram_offset(&self, addr: u64, len: usize) -> Option<(BxPhyAddress, usize)> {
+    fn direct_ram_offset(&self, addr: u64, len: usize) -> Option<(u64, usize)> {
         let a20 = addr & self.a20_mask;
         let end = a20.checked_add(u64::try_from(len).ok()?)?;
         let plain = (a20 < 0xA0000 && end <= 0xA0000) || a20 >= 0x100000;
         if !plain || self.mem_host_base.is_null() {
             return None;
         }
-        bx_guest_ram_span(a20, len, self.mem_host_len).map(|span| (a20, span.start))
+        bx_guest_ram_span(BxPhyAddress::new(a20), len, self.mem_host_len).map(|span| (a20, span.start))
     }
     /// Slow path for mem_read_byte: MMIO/VGA/ROM through memory system handlers.
     /// Separated to keep the inlined fast path small for better icache utilization.
@@ -240,20 +240,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn mem_read_byte_slow(&mut self, addr: u64) -> u8 {
         // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
         {
-            let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
+            let a20_addr = BxPhyAddress::new(addr & self.a20_mask);
             if self.lapic.is_selected(a20_addr) {
                 // Read aligned dword, extract requested byte
-                let aligned = a20_addr & !0x3;
+                let aligned = a20_addr.masked(!0x3);
                 let dword = self.lapic.read(aligned, 4, self.cpu_ticks());
-                let byte_offset = (a20_addr & 0x3) as u32;
+                let byte_offset = (a20_addr.get() & 0x3) as u32;
                 return (dword >> (byte_offset * 8)) as u8;
             }
         }
-        let paddr: BxPhyAddress = addr as BxPhyAddress;
+        let paddr = addr;
         let policy = self.access_policy(paddr);
         if let Ok(Some(slice)) =
             self.memory
-                .get_host_mem_addr(paddr, MemoryAccessType::Read, policy)
+                .get_host_mem_addr(BxPhyAddress::new(paddr), MemoryAccessType::Read, policy)
         {
             return slice.first().copied().unwrap_or(0);
         }
@@ -277,11 +277,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn mem_write_byte_slow(&mut self, addr: u64, value: u8) {
         // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
         {
-            let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
+            let a20_addr = BxPhyAddress::new(addr & self.a20_mask);
             if self.lapic.is_selected(a20_addr) {
                 // Byte-level write to LAPIC: read-modify-write the aligned dword.
                 // In practice, LAPIC is always accessed as dword — this is a safety net.
-                let aligned = a20_addr & !0x3;
+                let aligned = a20_addr.masked(!0x3);
                 // The two halves of this RMW take DIFFERENT time domains:
                 // - LAPIC reads convert through `live_ticks(cpu_ticks)` (apic.cc
                 //   get_current_timer_count path), which subtracts the LAPIC's
@@ -293,7 +293,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 //   pc_system ticks) — `system_ticks()`, like the sibling
                 //   word/dword write paths.
                 let old = self.lapic.read(aligned, 4, self.cpu_ticks());
-                let byte_offset = (a20_addr & 0x3) as u32;
+                let byte_offset = (a20_addr.get() & 0x3) as u32;
                 let mask = !(0xFFu32 << (byte_offset * 8));
                 let new_val = (old & mask) | ((value as u32) << (byte_offset * 8));
                 let current_ticks = self.system_ticks();
@@ -302,12 +302,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 return;
             }
         }
-        let paddr: BxPhyAddress = addr as BxPhyAddress;
+        let paddr = addr;
         {
             let policy = self.access_policy(paddr);
             if let Ok(Some(slice)) =
                 self.memory
-                    .get_host_mem_addr(paddr, MemoryAccessType::Write, policy)
+                    .get_host_mem_addr(BxPhyAddress::new(paddr), MemoryAccessType::Write, policy)
             {
                 if let Some(b) = slice.get_mut(0) {
                     *b = value;
@@ -423,13 +423,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if let Some((_a20_addr, linear)) = self.direct_ram_offset(addr, 2) {
                 return read_unaligned_u16(host_offset(self.mem_host_base, linear));
             }
-            if self.lapic.is_selected(a20_addr as BxPhyAddress) {
+            if self.lapic.is_selected(BxPhyAddress::new(a20_addr)) {
                 return self
                     .lapic
-                    .read(a20_addr as BxPhyAddress, 2, self.cpu_ticks())
+                    .read(BxPhyAddress::new(a20_addr), 2, self.cpu_ticks())
                     as u16;
             }
-            let paddr = addr as BxPhyAddress;
+            let paddr = addr;
             {
                 let policy = self.access_policy(paddr);
                 let mut data = [0u8; 2];
@@ -457,14 +457,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         // LAPIC MMIO intercept: 32-bit aligned register access
         // Bochs apic.cc read() — LAPIC registers are always dword-accessed.
-        if self.lapic.is_selected(a20_addr as BxPhyAddress) {
+        if self.lapic.is_selected(BxPhyAddress::new(a20_addr)) {
             return self
                 .lapic
-                .read(a20_addr as BxPhyAddress, 4, self.cpu_ticks());
+                .read(BxPhyAddress::new(a20_addr), 4, self.cpu_ticks());
         }
         // Slow path: route through read_physical_page to hit registered MMIO handlers
         // (IOAPIC, VGA, etc.) with proper dword access width.
-        let paddr: BxPhyAddress = addr as BxPhyAddress;
+        let paddr = addr;
         {
             let policy = self.access_policy(paddr);
             let mut data = [0u8; 4];
@@ -502,14 +502,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.smc_write_check(a20_addr, 2);
                 return;
             }
-            if self.lapic.is_selected(a20_addr as BxPhyAddress) {
+            if self.lapic.is_selected(BxPhyAddress::new(a20_addr)) {
                 let current_ticks = self.system_ticks();
                 self.lapic
-                    .write(a20_addr as BxPhyAddress, u32::from(value), 2, current_ticks);
+                    .write(BxPhyAddress::new(a20_addr), u32::from(value), 2, current_ticks);
                 self.sync_lapic_events();
                 return;
             }
-            let paddr = addr as BxPhyAddress;
+            let paddr = addr;
             {
                 let policy = self.access_policy(paddr);
                 let mut data = value.to_le_bytes();
@@ -538,16 +538,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         // LAPIC MMIO intercept: 32-bit aligned register access
         // Bochs apic.cc write() — LAPIC registers are always dword-accessed.
-        if self.lapic.is_selected(a20_addr as BxPhyAddress) {
+        if self.lapic.is_selected(BxPhyAddress::new(a20_addr)) {
             let current_ticks = self.system_ticks();
             self.lapic
-                .write(a20_addr as BxPhyAddress, value, 4, current_ticks);
+                .write(BxPhyAddress::new(a20_addr), value, 4, current_ticks);
             self.sync_lapic_events();
             return;
         }
         // Slow path: route through write_physical_page to hit registered MMIO handlers
         // (IOAPIC, VGA, etc.) with proper dword access width.
-        let paddr: BxPhyAddress = addr as BxPhyAddress;
+        let paddr = addr;
         {
             let policy = self.access_policy(paddr);
             let mut data = value.to_le_bytes();
@@ -1500,7 +1500,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn get_host_write_ptr_for_bulk(
         &mut self,
         laddr: u64,
-    ) -> Result<Option<(*mut u8, usize, BxPhyAddress)>> {
+    ) -> Result<Option<(*mut u8, usize, u64)>> {
         self.resolve_host_write_ptr(laddr)
     }
 
@@ -1508,7 +1508,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn resolve_host_write_ptr(
         &mut self,
         laddr: u64,
-    ) -> Result<Option<(*mut u8, usize, BxPhyAddress)>> {
+    ) -> Result<Option<(*mut u8, usize, u64)>> {
         // A registered MMIO range may overlap otherwise host-backed RAM.
         // Without per-range clipping, direct bulk writes could bypass a
         // callback later in the page; stay scalar whenever MMIO is active.
@@ -1529,9 +1529,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 && !self.mem_host_base.is_null()
             {
                 let page_offset = (laddr & 0xFFF) as usize;
-                let paddr = tlb.ppf | page_offset as BxPhyAddress;
+                let paddr = tlb.ppf | page_offset as u64;
                 let a20_paddr = paddr & self.a20_mask;
-                let Some(span) = bx_guest_ram_span(a20_paddr, 1, self.mem_host_len) else {
+                let Some(span) = bx_guest_ram_span(BxPhyAddress::new(a20_paddr), 1, self.mem_host_len) else {
                     return Ok(None);
                 };
                 let page_remaining = 0x1000 - page_offset;
@@ -1561,9 +1561,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let paddr = laddr & self.a20_mask;
             let host_base = self.mem_host_base;
             let plain_ram = (paddr < 0xA0000 || paddr >= 0x100000)
-                && bx_guest_ram_span(paddr, 1, self.mem_host_len).is_some();
+                && bx_guest_ram_span(BxPhyAddress::new(paddr), 1, self.mem_host_len).is_some();
             if !host_base.is_null() && plain_ram {
-                let Some(span) = bx_guest_ram_span(paddr, 1, self.mem_host_len) else {
+                let Some(span) = bx_guest_ram_span(BxPhyAddress::new(paddr), 1, self.mem_host_len) else {
                     return Ok(None);
                 };
                 let linear = span.start;
@@ -1609,9 +1609,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 && !self.mem_host_base.is_null()
             {
                 let page_offset = (laddr & 0xFFF) as usize;
-                let paddr = tlb.ppf | page_offset as BxPhyAddress;
+                let paddr = tlb.ppf | page_offset as u64;
                 let a20_paddr = paddr & self.a20_mask;
-                let Some(span) = bx_guest_ram_span(a20_paddr, 1, self.mem_host_len) else {
+                let Some(span) = bx_guest_ram_span(BxPhyAddress::new(a20_paddr), 1, self.mem_host_len) else {
                     return Ok(None);
                 };
                 let page_remaining = 0x1000 - page_offset;
@@ -1637,9 +1637,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let paddr = laddr & self.a20_mask;
             let host_base = self.mem_host_base;
             let plain_ram = (paddr < 0xA0000 || paddr >= 0x100000)
-                && bx_guest_ram_span(paddr, 1, self.mem_host_len).is_some();
+                && bx_guest_ram_span(BxPhyAddress::new(paddr), 1, self.mem_host_len).is_some();
             if !host_base.is_null() && plain_ram {
-                let Some(span) = bx_guest_ram_span(paddr, 1, self.mem_host_len) else {
+                let Some(span) = bx_guest_ram_span(BxPhyAddress::new(paddr), 1, self.mem_host_len) else {
                     return Ok(None);
                 };
                 let linear = span.start;
@@ -1782,7 +1782,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as u64;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_read(laddr, paddr_hit, 1)?;
             let v = unsafe { *host_at_page_offset(host, laddr) };
@@ -1829,7 +1829,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as u64;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_read(laddr, paddr_hit, 2)?;
             let ptr = host_at_page_offset(host, laddr);
@@ -1887,7 +1887,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as u64;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_read(laddr, paddr_hit, 4)?;
             let ptr = host_at_page_offset(host, laddr);
@@ -1946,7 +1946,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as u64;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_read(laddr, paddr_hit, 8)?;
             let ptr = host_at_page_offset(host, laddr);
@@ -2004,7 +2004,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf | (laddr & 0xFFF) as u64;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_write(laddr, paddr, 1)?;
             self.smc_write_check(paddr, 1);
@@ -2058,7 +2058,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf | (laddr & 0xFFF) as u64;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_write(laddr, paddr, 2)?;
             self.smc_write_check(paddr, 2);
@@ -2151,7 +2151,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf | (laddr & 0xFFF) as u64;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_write(laddr, paddr, 4)?;
             self.smc_write_check(paddr, 4);
@@ -2219,7 +2219,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf | (laddr & 0xFFF) as u64;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_write(laddr, paddr, 8)?;
             self.smc_write_check(paddr, 8);
@@ -2327,7 +2327,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             && tlb.is_shadow_stack_write_ok(user, pkey_mask)
             && tlb.host_page.is_some()
         {
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf | (laddr & 0xFFF) as u64;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.smc_write_check(paddr, 4);
             let ptr = host_at_page_offset_mut(host, laddr);
@@ -2357,7 +2357,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             && tlb.is_shadow_stack_write_ok(user, pkey_mask)
             && tlb.host_page.is_some()
         {
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf | (laddr & 0xFFF) as u64;
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.smc_write_check(paddr, 8);
             let ptr = host_at_page_offset_mut(host, laddr);
@@ -2392,7 +2392,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
             let host_addr =
                 super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | page_offset;
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf | (laddr & 0xFFF) as u64;
             self.smc_write_check(paddr, 8);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let data = addr_read_u64(host_addr);
@@ -2457,7 +2457,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // `address_xlation` needs the context mutably.
             let pages = super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page)
                 | (laddr & 0x0fff) as BxPtrEquiv;
-            let paddress1 = tlb.ppf | (laddr & 0x0fff) as BxPhyAddress;
+            let paddress1 = tlb.ppf | (laddr & 0x0fff) as u64;
             self.address_xlation.pages = pages;
             self.address_xlation.paddress1 = paddress1;
             return Ok(());
@@ -2509,7 +2509,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
             let host_addr =
                 super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | page_offset;
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf | (laddr & 0xFFF) as u64;
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
             return Ok(());
@@ -2591,7 +2591,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // `address_xlation` needs the context mutably.
             let pages = super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page)
                 | (laddr & 0x0fff) as BxPtrEquiv;
-            let paddress1 = tlb.ppf | (laddr & 0x0fff) as BxPhyAddress;
+            let paddress1 = tlb.ppf | (laddr & 0x0fff) as u64;
             self.address_xlation.pages = pages;
             self.address_xlation.paddress1 = paddress1;
             return Ok(());

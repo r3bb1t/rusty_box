@@ -2126,13 +2126,17 @@ mod tests {
 
     /// Write `bytes` to RAM at `at`, all of them.
     fn write_ram(memory: &mut BxMemC, at: u64, bytes: &[u8]) {
-        let copied = memory.write_ram(at, bytes).expect("RAM");
+        let copied = memory
+            .write_ram(crate::config::BxPhyAddress::new(at), bytes)
+            .expect("RAM");
         assert_eq!(copied, bytes.len(), "the write at {at:#x} reached RAM whole");
     }
 
     /// Read `out.len()` bytes of RAM at `at`, all of them.
     fn read_ram(memory: &mut BxMemC, at: u64, out: &mut [u8]) {
-        let copied = memory.read_ram(at, out).expect("RAM");
+        let copied = memory
+            .read_ram(crate::config::BxPhyAddress::new(at), out)
+            .expect("RAM");
         assert_eq!(copied, out.len(), "the read at {at:#x} came from RAM whole");
     }
 

@@ -21,9 +21,9 @@ use rusty_box_core::time::{ClockHz, VmClock, VmInstant};
 use crate::snapshot::{checked_snapshot_len_add, SnapError, SnapRead, SnapResult, SnapWrite};
 
 /// Bochs hpet.cc `HPET_BASE`.
-pub(crate) const HPET_BASE: BxPhyAddress = 0xFED0_0000;
+pub(crate) const HPET_BASE: BxPhyAddress = BxPhyAddress::new(0xFED0_0000);
 /// Bochs hpet.cc `HPET_LEN`.
-pub(crate) const HPET_LEN: BxPhyAddress = 0x400;
+pub(crate) const HPET_LEN: u64 = 0x400;
 /// Bochs hpet.h `HPET_MIN_TIMERS` — the number of timers Bochs instantiates.
 pub(crate) const HPET_NUM_TIMERS: usize = 3;
 
@@ -130,7 +130,7 @@ impl HpetPending {
         Self {
             irq_ops: [(0, false); PENDING_IRQ_CAPACITY],
             irq_op_count: 0,
-            fsb_writes: [(0, 0); PENDING_FSB_CAPACITY],
+            fsb_writes: [(BxPhyAddress::new(0), 0); PENDING_FSB_CAPACITY],
             fsb_write_count: 0,
             timer_ops: [None; HPET_NUM_TIMERS],
             pit_irq_gate: None,
@@ -363,7 +363,7 @@ impl BxHpetC {
             }
             if Self::timer_enabled(&timer) {
                 if Self::timer_fsb_route(&timer) {
-                    self.push_fsb((timer.fsb >> 32) as BxPhyAddress, timer.fsb as u32);
+                    self.push_fsb(BxPhyAddress::new(timer.fsb >> 32), timer.fsb as u32);
                 } else if timer.config & HPET_TN_TYPE_LEVEL != 0 {
                     self.push_irq(route, true);
                 } else {
@@ -478,11 +478,11 @@ impl BxHpetC {
     /// Memory-system dispatch entry (Bochs static `hpet_read`).
     pub(crate) fn mem_read(&mut self, addr: BxPhyAddress, len: u32, data: &mut [u8]) {
         match len {
-            4 if addr & 0x3 == 0 => {
+            4 if addr.get() & 0x3 == 0 => {
                 let value = self.read_aligned(addr);
                 data[..4].copy_from_slice(&value.to_le_bytes());
             }
-            8 if addr & 0x7 == 0 => {
+            8 if addr.get() & 0x7 == 0 => {
                 let low = self.read_aligned(addr);
                 let high = self.read_aligned(addr + 4);
                 let value = u64::from(low) | (u64::from(high) << 32);
@@ -510,7 +510,7 @@ impl BxHpetC {
     /// actually brought, and only the second can be read.
     pub(crate) fn mem_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) {
         match len {
-            4 if addr & 0x3 == 0 => {
+            4 if addr.get() & 0x3 == 0 => {
                 let Some(bytes) = data.first_chunk::<4>() else {
                     tracing::error!(
                         "HPET: 4-byte write at {:#x} carrying only {} bytes",
@@ -521,7 +521,7 @@ impl BxHpetC {
                 };
                 self.write_aligned(addr, u32::from_le_bytes(*bytes), true);
             }
-            8 if addr & 0x7 == 0 => {
+            8 if addr.get() & 0x7 == 0 => {
                 let Some(bytes) = data.first_chunk::<8>() else {
                     tracing::error!(
                         "HPET: 8-byte write at {:#x} carrying only {} bytes",
@@ -549,7 +549,7 @@ impl BxHpetC {
 
     /// Bochs `read_aligned`.
     pub(crate) fn read_aligned(&self, address: BxPhyAddress) -> u32 {
-        let index = (address & 0x3ff) as u16;
+        let index = (address.get() & 0x3ff) as u16;
         if index < 0x100 {
             match index {
                 HPET_ID => self.capability as u32,
@@ -601,7 +601,7 @@ impl BxHpetC {
 
     /// Bochs `write_aligned`.
     pub(crate) fn write_aligned(&mut self, address: BxPhyAddress, value: u32, trailing_write: bool) {
-        let index = (address & 0x3ff) as u16;
+        let index = (address.get() & 0x3ff) as u16;
         let new_val = u64::from(value);
         let old_val = u64::from(self.read_aligned(address));
 
@@ -840,8 +840,8 @@ impl crate::snapshot::SnapshotSection for BxHpetC {
 ///
 /// One window, so the id is not consulted. The register decode masks with
 /// `& 0x3ff` and the window is the 1 KiB block at the fixed, 1 KiB-aligned
-/// [`HPET_BASE`], so the offset and the physical address agree on every bit the
-/// decode looks at.
+/// [`HPET_BASE`]: the physical address the handlers take, as Bochs's do, is
+/// that base plus the offset.
 impl rusty_box_devices::api::MmioDevice for BxHpetC {
     #[inline]
     fn mmio_read(
@@ -853,7 +853,7 @@ impl rusty_box_devices::api::MmioDevice for BxHpetC {
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         self.set_now(ctx.clock);
-        self.mem_read(at.get(), len, data);
+        self.mem_read(HPET_BASE + at.get(), len, data);
     }
 
     #[inline]
@@ -866,7 +866,7 @@ impl rusty_box_devices::api::MmioDevice for BxHpetC {
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         self.set_now(ctx.clock);
-        self.mem_write(at.get(), len, data);
+        self.mem_write(HPET_BASE + at.get(), len, data);
     }
 }
 

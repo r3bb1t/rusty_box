@@ -26,7 +26,7 @@ pub(crate) const SMC_STAMP_ENTRIES: usize = 8192;
 /// Bochs icache.h `bxPageWriteStampTable::hash` — stamp-table index of a
 /// physical address (page number, aliased into the table).
 #[inline]
-pub(crate) fn smc_page_index(p_addr: BxPhyAddress) -> usize {
+pub(crate) fn smc_page_index(p_addr: u64) -> usize {
     (((p_addr as u32) >> 12) as usize) & (SMC_STAMP_ENTRIES - 1)
 }
 
@@ -35,7 +35,7 @@ pub(crate) fn smc_page_index(p_addr: BxPhyAddress) -> usize {
 ///
 /// Callers split cross-page writes before reaching this helper.
 #[inline]
-pub(crate) fn smc_cache_line_mask(p_addr: BxPhyAddress, len: u32) -> u32 {
+pub(crate) fn smc_cache_line_mask(p_addr: u64, len: u32) -> u32 {
     if len == 0 {
         return 0;
     }
@@ -60,7 +60,7 @@ pub(crate) fn smc_cache_line_mask(p_addr: BxPhyAddress, len: u32) -> u32 {
 /// can execute before).
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct PendingSmc {
-    pub(crate) p_addr: BxPhyAddress,
+    pub(crate) p_addr: u64,
     pub(crate) mask: u32,
 }
 
@@ -69,7 +69,7 @@ pub(crate) struct PendingSmc {
 /// correct.
 pub(crate) const SMC_PENDING_CAP: usize = 64;
 
-const BX_ICACHE_INVALID_PHY_ADDRESS: BxPhyAddress = BxPhyAddress::MAX;
+const BX_ICACHE_INVALID_PHY_ADDRESS: u64 = u64::MAX;
 // Bochs icache.h: BxICacheEntries = (64 * 1024). Must be a power of 2.
 const BX_ICACHE_ENTRIES: usize = 64 * 1024;
 // Bochs icache.h: BX_ICACHE_PAGE_SPLIT_ENTRIES = 8. Must be a power of 2.
@@ -83,7 +83,7 @@ pub struct BxICacheEntry {
     /// (icache.h): a raw physical address whose invalid state is the all-ones sentinel
     /// `BX_ICACHE_INVALID_PHY_ADDRESS`, NOT a separate tag. An entry is valid iff
     /// `p_addr == pAddr` for the looked-up address (Bochs `find_entry`).
-    pub(super) p_addr: BxPhyAddress,
+    pub(super) p_addr: u64,
     pub(super) trace_mask: u32,
     pub(super) tlen: u32, // Bochs bxICacheEntry_c::tlen (Bit32u) — trace length in instructions
     /// Index of the trace's first instruction in `mpool`. This is Rust's stand-in for
@@ -189,7 +189,7 @@ impl TraceLink {
 #[derive(Clone, Debug)]
 struct PageSplitEntry {
     /// Physical address of the second page of the trace.
-    ppf: BxPhyAddress,
+    ppf: u64,
     /// Rust equivalent of Bochs's `bxICacheEntry_c *e`: an index into the
     /// primary direct-mapped entry array, never a detached entry copy.
     entry_idx: usize,
@@ -268,7 +268,7 @@ impl BxICache {
         // Here, we track it explicitly with mpindex
     }
 
-    pub fn commit_page_split_trace(&mut self, p_addr: BxPhyAddress, entry_idx: usize) {
+    pub fn commit_page_split_trace(&mut self, p_addr: u64, entry_idx: usize) {
         debug_assert!(entry_idx < BX_ICACHE_ENTRIES);
 
         // Bochs commitPageSplitTrace invalidates the entry referenced by the
@@ -283,7 +283,7 @@ impl BxICache {
         self.next_page_split_index = (split_idx + 1) % BX_ICACHE_PAGE_SPLIT_ENTRIES;
     }
 
-    pub fn get_entry(&self, p_addr: BxPhyAddress, fetch_mode_mask: u64) -> BxICacheEntry {
+    pub fn get_entry(&self, p_addr: u64, fetch_mode_mask: u64) -> BxICacheEntry {
         let index = Self::hash(p_addr, fetch_mode_mask);
         self.entry[index as usize].clone()
     }
@@ -291,14 +291,14 @@ impl BxICache {
     #[inline]
     pub fn get_entry_mut(
         &mut self,
-        p_addr: BxPhyAddress,
+        p_addr: u64,
         fetch_mode_mask: u64,
     ) -> &mut BxICacheEntry {
         let index = Self::hash(p_addr, fetch_mode_mask);
         &mut self.entry[index as usize]
     }
 
-    pub(super) fn hash(p_addr: BxPhyAddress, fetch_mode_mask: u64) -> u32 {
+    pub(super) fn hash(p_addr: u64, fetch_mode_mask: u64) -> u32 {
         // Bochs icache.h — (pAddr & (BxICacheEntries-1)) ^ fetchModeMask
         let hash = (p_addr as u32) ^ (fetch_mode_mask as u32);
         hash & ((BX_ICACHE_ENTRIES - 1) as u32)
@@ -306,7 +306,7 @@ impl BxICache {
 
     pub(super) fn find_entry(
         &self,
-        p_addr: BxPhyAddress,
+        p_addr: u64,
         fetch_mode_mask: u64,
     ) -> Option<BxICacheEntry> {
         let e = self.get_entry(p_addr, fetch_mode_mask);
@@ -327,7 +327,7 @@ impl BxICache {
         instr
     }
 
-    pub fn flush_page(&mut self, ppf: BxPhyAddress) {
+    pub fn flush_page(&mut self, ppf: u64) {
         let index = Self::hash(ppf, 0) as usize;
         let entry = &mut self.entry[index];
 
@@ -387,7 +387,7 @@ impl BxICache {
         // over-marked stamps only cause conservative extra flushes.
     }
 
-    pub fn invalidate_page(&mut self, ppf: BxPhyAddress) {
+    pub fn invalidate_page(&mut self, ppf: u64) {
         let index = Self::hash(ppf, 0) as usize;
         let entry = &mut self.entry[index];
 
@@ -434,7 +434,7 @@ impl BxICache {
     /// "pageWriteStampTable wrap — multiple physical addresses could be
     /// mapped into a single entry and all of them have to be invalidated
     /// here now").
-    pub(crate) fn handle_smc_scan(&mut self, p_addr: BxPhyAddress, mask: u32) {
+    pub(crate) fn handle_smc_scan(&mut self, p_addr: u64, mask: u32) {
         let target_page_index = smc_page_index(p_addr);
 
         // Bochs handleSMC: breakLinks() first — invalidates all page-split
@@ -723,7 +723,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
     pub(super) fn serve_icache_miss(
         &mut self,
         eip_biased: u32,
-        p_addr: BxPhyAddress,
+        p_addr: u64,
     ) -> Result<BxICacheEntry> {
         // Get entry index first to avoid borrow conflicts
         let entry_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
@@ -933,7 +933,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                                 entry.trace_mask |= trace_mask;
                                 entry.trace_mask
                             };
-                            self.memory.smc_mark_icache_mask(current_p_addr, full_mask);
+                            self.memory
+                                .smc_mark_icache_mask(BxPhyAddress::new(current_p_addr), full_mask);
                             self.i_cache.mpindex = current_mpindex + merged;
                             let merged_tlen = self.i_cache.entry[entry_idx].tlen as usize;
                             self.i_cache.commit_trace(merged_tlen);
@@ -1045,8 +1046,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                     }
 
                     let fetch_page = self.p_addr_fetch_page;
-                    self.memory.smc_mark_icache_mask(p_addr, 0x80000000);
-                    self.memory.smc_mark_icache_mask(fetch_page, 0x1);
+                    self.memory
+                        .smc_mark_icache_mask(BxPhyAddress::new(p_addr), 0x80000000);
+                    self.memory
+                        .smc_mark_icache_mask(BxPhyAddress::new(fetch_page), 0x1);
 
                     self.i_cache.mpindex = current_mpindex;
                     let entry = self.i_cache.entry[entry_idx].clone();
@@ -1061,7 +1064,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             let entry = &mut self.i_cache.entry[entry_idx];
             entry.trace_mask |= trace_mask;
         }
-        self.memory.smc_mark_icache_mask(current_p_addr, trace_mask);
+        self.memory
+            .smc_mark_icache_mask(BxPhyAddress::new(current_p_addr), trace_mask);
 
         // Update entry tlen (matching C++ line 217). Bochs entry->i points at the
         // first mpool instruction; our mpool_start_idx (set earlier) plays that role.
@@ -1205,7 +1209,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         &mut self,
         current_entry_idx: usize,
         current_mpindex: usize,
-        p_addr: BxPhyAddress,
+        p_addr: u64,
         current_tlen: usize,
     ) -> Option<usize> {
         // Bochs find_entry(pAddr): invalid entries carry the all-ones sentinel, so a real

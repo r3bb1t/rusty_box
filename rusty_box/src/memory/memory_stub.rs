@@ -9,8 +9,7 @@ use super::residency::{BlockGeometry, Residency};
 use super::{BxMemoryStubC, MemoryError, Result};
 #[cfg(feature = "std")]
 use super::{MemorySnapshotGeometry, MemorySnapshotResidency};
-use crate::config::BxPhyAddress;
-use crate::config::BxPhyAddress as A20Mask;
+use crate::config::{A20Mask, BxPhyAddress};
 use crate::memory::memory_rusty_box::{
     bx_guest_ram_span, bx_is_pci_hole_addr, BIOSROMSZ, EXROMSIZE,
 };
@@ -316,7 +315,7 @@ impl BxMemoryStubC {
     /// Bochs icache.h `bxPageWriteStampTable::markICacheMask`.
     #[inline]
     pub(crate) fn smc_mark_icache_mask(&mut self, p_addr: BxPhyAddress, mask: u32) {
-        self.smc_stamps[crate::cpu::icache::smc_page_index(p_addr)] |= mask;
+        self.smc_stamps[crate::cpu::icache::smc_page_index(p_addr.get())] |= mask;
     }
 
     /// Return whether any cached instruction line overlaps this single-page
@@ -324,8 +323,8 @@ impl BxMemoryStubC {
     /// to scalar ordering before consuming externally visible input.
     #[inline]
     pub(crate) fn smc_range_has_stamps(&self, p_addr: BxPhyAddress, len: u32) -> bool {
-        let stamps = self.smc_stamps[crate::cpu::icache::smc_page_index(p_addr)];
-        stamps != 0 && stamps & crate::cpu::icache::smc_cache_line_mask(p_addr, len) != 0
+        let stamps = self.smc_stamps[crate::cpu::icache::smc_page_index(p_addr.get())];
+        stamps != 0 && stamps & crate::cpu::icache::smc_cache_line_mask(p_addr.get(), len) != 0
     }
 
     /// Bochs icache.h `bxPageWriteStampTable::decWriteStamp(pAddr, len)`:
@@ -336,12 +335,12 @@ impl BxMemoryStubC {
     /// `smc_seq_seen` watermark).
     #[inline]
     pub(crate) fn smc_dec_write_stamp(&mut self, p_addr: BxPhyAddress, len: u32) {
-        let index = crate::cpu::icache::smc_page_index(p_addr);
+        let index = crate::cpu::icache::smc_page_index(p_addr.get());
         let stamps = self.smc_stamps[index];
         if stamps == 0 {
             return;
         }
-        let mask = crate::cpu::icache::smc_cache_line_mask(p_addr, len);
+        let mask = crate::cpu::icache::smc_cache_line_mask(p_addr.get(), len);
         if stamps & mask == 0 {
             return;
         }
@@ -354,7 +353,7 @@ impl BxMemoryStubC {
     /// with mask 0xffffffff).
     #[inline]
     pub(crate) fn smc_dec_write_stamp_page(&mut self, p_addr: BxPhyAddress) {
-        let index = crate::cpu::icache::smc_page_index(p_addr);
+        let index = crate::cpu::icache::smc_page_index(p_addr.get());
         if self.smc_stamps[index] == 0 {
             return;
         }
@@ -365,7 +364,10 @@ impl BxMemoryStubC {
     fn smc_push_pending(&mut self, p_addr: BxPhyAddress, mask: u32) {
         if self.smc_pending_len < crate::cpu::icache::SMC_PENDING_CAP {
             self.smc_pending[self.smc_pending_len] =
-                crate::cpu::icache::PendingSmc { p_addr, mask };
+                crate::cpu::icache::PendingSmc {
+                    p_addr: p_addr.get(),
+                    mask,
+                };
             self.smc_pending_len += 1;
         } else {
             // Queue full: every cpu that has not caught up past this event
@@ -589,10 +591,10 @@ impl BxMemoryStubC {
         if len == 0 {
             return Ok(());
         }
-        let a20_addr = addr & a20_mask;
+        let a20_addr = a20_mask.apply(addr);
 
         // Note: accesses should always be contained within a single page
-        if (addr >> 12) != ((addr + len as u64 - 1) >> 12) {
+        if addr.page_base() != (addr + (len as u64 - 1)).page_base() {
             return Err(MemoryError::WritePhysicalPage { addr, len }.into());
         }
 
@@ -622,7 +624,7 @@ impl BxMemoryStubC {
         data: &mut [u8],
         a20_mask: A20Mask,
     ) -> Result<()> {
-        let a20_addr = addr & a20_mask;
+        let a20_addr = a20_mask.apply(addr);
 
         if data.len() < len {
             return Err(MemoryError::ReadPhysicalPage { addr, len }.into());
@@ -631,7 +633,7 @@ impl BxMemoryStubC {
             return Ok(());
         }
         // Note: accesses should always be contained within a single page
-        if (addr >> 12) != ((addr + len as u64 - 1) >> 12) {
+        if addr.page_base() != (addr + (len as u64 - 1)).page_base() {
             return Err(MemoryError::ReadPhysicalPage { addr, len }.into());
         }
 

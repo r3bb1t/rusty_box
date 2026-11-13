@@ -1637,7 +1637,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// * `bios_data` - Raw BIOS ROM data
     /// * `address` - Load address (typically 0xfffe0000 for 128KB BIOS)
     pub(crate) fn load_bios(&mut self, bios_data: &[u8], address: u64) -> Result<()> {
-        self.memory.load_ROM(bios_data, address, 0)?;
+        self.memory
+            .load_ROM(bios_data, crate::config::BxPhyAddress::new(address), 0)?;
         tracing::debug!("Loaded BIOS ({} bytes) at {:#x}", bios_data.len(), address);
         Ok(())
     }
@@ -1648,7 +1649,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// * `rom_data` - Raw ROM data
     /// * `address` - Load address (must be in 0xC0000-0xFFFFF range)
     pub(crate) fn load_optional_rom(&mut self, rom_data: &[u8], address: u64) -> Result<()> {
-        self.memory.load_ROM(rom_data, address, 2)?;
+        self.memory
+            .load_ROM(rom_data, crate::config::BxPhyAddress::new(address), 2)?;
         tracing::debug!(
             "Loaded optional ROM ({} bytes) at {:#x}",
             rom_data.len(),
@@ -1667,7 +1669,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     #[cfg(test)]
     pub(crate) fn load_ram(&mut self, ram_data: &[u8], address: u64) -> Result<()> {
         // Stable CPU pin storage outlives this exclusive memory borrow.
-        self.memory.load_RAM(ram_data, address)?;
+        self.memory
+            .load_RAM(ram_data, crate::config::BxPhyAddress::new(address))?;
         tracing::debug!(
             "Loaded RAM image ({} bytes) at {:#x}",
             ram_data.len(),
@@ -1861,7 +1864,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     pub fn peek_ram_at(&mut self, addr: usize, len: usize) -> alloc::vec::Vec<u8> {
         let mut bytes = alloc::vec![0; len];
         // Stable emulator pin storage outlives the exclusive memory borrow.
-        let copied = self.memory.read_ram(addr as u64, &mut bytes).unwrap_or(0);
+        let copied = self
+            .memory
+            .read_ram(crate::config::BxPhyAddress::new(addr as u64), &mut bytes)
+            .unwrap_or(0);
         bytes.truncate(copied);
         bytes
     }

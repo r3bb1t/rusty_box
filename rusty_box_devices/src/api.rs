@@ -148,12 +148,119 @@ impl core::fmt::UpperHex for IoPort {
     }
 }
 
-/// A guest physical address.
+/// A guest physical address (Bochs `bx_phy_address`): where in the
+/// machine's physical address space an access lands. `rusty_box`
+/// re-exports this one rather than keeping a second definition.
 ///
-/// A plain `u64` for now. Unit J gives guest addresses a type of their own, at
-/// which point this alias is where that change lands; `rusty_box` re-exports
-/// this one rather than keeping a second definition of the same thing.
-pub type BxPhyAddress = u64;
+/// An address comes into being where one is formed — a translation's page
+/// frame and offset, a base a guest programmed into a device or a control
+/// register, a descriptor it wrote — and leaves as a bare `u64` ([`get`])
+/// only where a number is what is wanted: an offset into RAM, a value a
+/// guest reads back, a snapshot. Its arithmetic is a position's (R4): an
+/// address plus a distance is an address, an address minus an address a
+/// distance, both modulo 2^64 as Bochs's unsigned arithmetic is; masking
+/// is by name ([`page_base`], [`page_offset`], [`masked`]).
+///
+/// [`get`]: BxPhyAddress::get
+/// [`page_base`]: BxPhyAddress::page_base
+/// [`page_offset`]: BxPhyAddress::page_offset
+/// [`masked`]: BxPhyAddress::masked
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct BxPhyAddress(u64);
+
+impl BxPhyAddress {
+    /// The physical address `addr`.
+    #[inline(always)]
+    pub const fn new(addr: u64) -> Self {
+        Self(addr)
+    }
+
+    /// The address as a number.
+    #[inline(always)]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The 4 KiB page the address lies in, as the address of its first byte
+    /// (Bochs `PPFOf`).
+    #[inline(always)]
+    pub const fn page_base(self) -> Self {
+        Self(self.0 & !0xFFF)
+    }
+
+    /// How far into its 4 KiB page the address lies (Bochs `PAGE_OFFSET`).
+    #[inline(always)]
+    pub const fn page_offset(self) -> u64 {
+        self.0 & 0xFFF
+    }
+
+    /// The address with only the bits `mask` keeps: the A20 gate's mask, a
+    /// physical-address width's, an alignment.
+    #[inline(always)]
+    pub const fn masked(self, mask: u64) -> Self {
+        Self(self.0 & mask)
+    }
+
+    /// `distance` bytes past the address, modulo 2^64.
+    #[inline(always)]
+    pub const fn wrapping_add(self, distance: u64) -> Self {
+        Self(self.0.wrapping_add(distance))
+    }
+
+    /// `distance` bytes past the address, or `None` past the end of the
+    /// address space.
+    #[inline(always)]
+    pub const fn checked_add(self, distance: u64) -> Option<Self> {
+        match self.0.checked_add(distance) {
+            Some(addr) => Some(Self(addr)),
+            None => None,
+        }
+    }
+
+    /// How far past `base` the address lies, modulo 2^64.
+    #[inline(always)]
+    pub const fn offset_from(self, base: Self) -> u64 {
+        self.0.wrapping_sub(base.0)
+    }
+}
+
+impl core::ops::Add<u64> for BxPhyAddress {
+    type Output = Self;
+    /// [`BxPhyAddress::wrapping_add`].
+    #[inline(always)]
+    fn add(self, distance: u64) -> Self {
+        self.wrapping_add(distance)
+    }
+}
+
+impl core::ops::AddAssign<u64> for BxPhyAddress {
+    #[inline(always)]
+    fn add_assign(&mut self, distance: u64) {
+        *self = self.wrapping_add(distance);
+    }
+}
+
+impl core::ops::Sub for BxPhyAddress {
+    type Output = u64;
+    /// [`BxPhyAddress::offset_from`].
+    #[inline(always)]
+    fn sub(self, base: Self) -> u64 {
+        self.offset_from(base)
+    }
+}
+
+impl core::fmt::LowerHex for BxPhyAddress {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+impl core::fmt::UpperHex for BxPhyAddress {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::UpperHex::fmt(&self.0, f)
+    }
+}
 
 /// One I/O port a device answers on, as the device states it.
 ///
@@ -179,10 +286,10 @@ pub struct PortDecl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowDecl {
     pub id: WindowId,
-    pub base: u64,
+    pub base: BxPhyAddress,
     /// Last byte in the window, inclusive — Bochs `register_memory_handlers`
     /// takes `end_addr` the same way.
-    pub end: u64,
+    pub end: BxPhyAddress,
 }
 
 /// How many windows one device may declare.

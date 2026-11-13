@@ -1740,7 +1740,10 @@ mod tests {
         const IOPM: u64 = 0x10000;
         let mut machine = TestMachine::new();
         let all_ports = [0xFFu8; 0x2000];
-        let copied = machine.memory_mut().write_ram(IOPM, &all_ports).expect("the IOPM is RAM");
+        let copied = machine
+            .memory_mut()
+            .write_ram(crate::config::BxPhyAddress::new(IOPM), &all_ports)
+            .expect("the IOPM is RAM");
         assert_eq!(copied, all_ports.len(), "the IOPM reached RAM whole");
         let mut ctx = machine.ctx();
         ctx.cr0.insert(BxCr0::PE);

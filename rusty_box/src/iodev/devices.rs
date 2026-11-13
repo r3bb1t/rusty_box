@@ -17,6 +17,7 @@ use alloc::format;
 use alloc::string::String;
 
 use crate::{
+    config::BxPhyAddress,
     cpu::ResetReason,
     memory::BxMemC,
     pc_system::BxPcSystemC,
@@ -225,6 +226,13 @@ pub struct Port92State {
     pub(crate) value: u8,
 }
 
+/// The first and last addresses of a `size`-byte window a BAR places at
+/// `base`, or `None` for a BAR of zero, which places it nowhere.
+fn bar_window(base: u32, size: u64) -> Option<(BxPhyAddress, BxPhyAddress)> {
+    let first = BxPhyAddress::new(u64::from(base));
+    (base != 0).then_some((first, first + (size - 1)))
+}
+
 /// Fetch a BM-DMA PRD entry (physical address, raw size dword) from guest
 /// RAM. Reads past a hole or the configured guest length are zero-filled.
 fn read_bmdma_prd(
@@ -232,7 +240,7 @@ fn read_bmdma_prd(
     prd_addr: u32,
 ) -> (u32, u32) {
     let mut raw = [0u8; 8];
-    match mem.read_ram(prd_addr as u64, &mut raw) {
+    match mem.read_ram(BxPhyAddress::new(u64::from(prd_addr)), &mut raw) {
         Ok(_) => {}
         Err(error) => tracing::error!("BM-DMA PRD read at {prd_addr:#x} failed: {error:?}"),
     }
@@ -599,8 +607,8 @@ impl DeviceManager {
         for decl in windows.as_slice() {
             mem.register_memory_handlers(
                 DevSlot::VGA.mmio_window_token(decl.id),
-                decl.base as crate::config::BxPhyAddress,
-                decl.end as crate::config::BxPhyAddress,
+                decl.base,
+                decl.end,
             )?;
         }
         Ok(())
@@ -635,7 +643,7 @@ impl DeviceManager {
         {
             use super::hpet::{HPET_BASE, HPET_LEN};
             let device_id = DevSlot::HPET.mmio_token();
-            mem.register_memory_handlers(device_id, HPET_BASE, HPET_BASE + HPET_LEN - 1)?;
+            mem.register_memory_handlers(device_id, HPET_BASE, HPET_BASE + (HPET_LEN - 1))?;
         }
         // 9. ACPI Power Management (Bochs: pluginACPIController->init() in devices.cc)
         self.acpi.reset();
@@ -1273,10 +1281,8 @@ impl DeviceManager {
         if let Some((old_base, new_base)) = self.vga.peek_pending_lfb_relocate() {
             let device_id = DevSlot::VGA.mmio_window_token(VgaWindow::Lfb.id());
             let size = u64::from(self.vga.lfb_size());
-            let old_range =
-                (old_base != 0).then_some((u64::from(old_base), u64::from(old_base) + size - 1));
-            let new_range =
-                (new_base != 0).then_some((u64::from(new_base), u64::from(new_base) + size - 1));
+            let old_range = bar_window(old_base, size);
+            let new_range = bar_window(new_base, size);
             mem.relocate_memory_handlers(device_id, old_range, new_range)?;
             self.vga.commit_pending_lfb_relocate();
             changed = old_base != new_base;
@@ -1286,10 +1292,8 @@ impl DeviceManager {
         if let Some((old_base, new_base)) = self.vga.peek_pending_mmio_relocate() {
             let device_id = DevSlot::VGA.mmio_window_token(VgaWindow::Registers.id());
             let size = u64::from(PCI_VGA_MMIO_SIZE);
-            let old_range =
-                (old_base != 0).then_some((u64::from(old_base), u64::from(old_base) + size - 1));
-            let new_range =
-                (new_base != 0).then_some((u64::from(new_base), u64::from(new_base) + size - 1));
+            let old_range = bar_window(old_base, size);
+            let new_range = bar_window(new_base, size);
             mem.relocate_memory_handlers(device_id, old_range, new_range)?;
             self.vga.commit_pending_mmio_relocate();
             changed |= old_base != new_base;
@@ -1384,7 +1388,7 @@ impl DeviceManager {
             let idx = pci_ide.bmdma[channel].buffer_idx;
             let end = (idx + size).min(pci_ide.bmdma[channel].buffer.len());
             let payload = &pci_ide.bmdma[channel].buffer[idx..end];
-            match mem.write_ram(prd_addr as u64, payload) {
+            match mem.write_ram(BxPhyAddress::new(u64::from(prd_addr)), payload) {
                 Ok(copied) if copied == payload.len() => {
                     pci_ide.bmdma[channel].buffer_idx = end;
                 }
@@ -1409,7 +1413,7 @@ impl DeviceManager {
             let end = (top + size).min(pci_ide.bmdma[channel].buffer.len());
             let guest_buffer = &mut pci_ide.bmdma[channel].buffer[top..end];
             guest_buffer.fill(0);
-            let copied = match mem.read_ram(prd_addr as u64, guest_buffer) {
+            let copied = match mem.read_ram(BxPhyAddress::new(u64::from(prd_addr)), guest_buffer) {
                 Ok(copied) => copied,
                 Err(error) => {
                     tracing::error!("BM-DMA write ch={channel}: guest read failed: {error:?}");
@@ -2363,23 +2367,12 @@ impl DeviceManager {
         let lfb_id = DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Lfb.id());
         let registers_id = DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Registers.id());
         let lfb_size = u64::from(self.vga.lfb_size());
-        let old_lfb = (live_vga.lfb_base != 0).then_some((
-            u64::from(live_vga.lfb_base),
-            u64::from(live_vga.lfb_base) + lfb_size - 1,
-        ));
-        let new_lfb = (vga.lfb_base != 0).then_some((
-            u64::from(vga.lfb_base),
-            u64::from(vga.lfb_base) + lfb_size - 1,
-        ));
+        let old_lfb = bar_window(live_vga.lfb_base, lfb_size);
+        let new_lfb = bar_window(vga.lfb_base, lfb_size);
         mem.relocate_memory_handlers(lfb_id, old_lfb, new_lfb)?;
-        let old_mmio = (live_vga.mmio_base != 0).then_some((
-            u64::from(live_vga.mmio_base),
-            u64::from(live_vga.mmio_base) + u64::from(rusty_box_devices::display::vga::PCI_VGA_MMIO_SIZE) - 1,
-        ));
-        let new_mmio = (vga.mmio_base != 0).then_some((
-            u64::from(vga.mmio_base),
-            u64::from(vga.mmio_base) + u64::from(rusty_box_devices::display::vga::PCI_VGA_MMIO_SIZE) - 1,
-        ));
+        let mmio_size = u64::from(rusty_box_devices::display::vga::PCI_VGA_MMIO_SIZE);
+        let old_mmio = bar_window(live_vga.mmio_base, mmio_size);
+        let new_mmio = bar_window(vga.mmio_base, mmio_size);
         mem.relocate_memory_handlers(registers_id, old_mmio, new_mmio)?;
         self.vga.commit_snapshot_v3_mapping_target(vga);
         self.pending.remove(PendingPlatformWork::VGA_BARS);
@@ -2648,8 +2641,8 @@ mod tests {
                 emu.memory
                     .register_memory_handlers(
                         DevSlot::NONE.mmio_token(),
-                        u64::from(initial_lfb),
-                        u64::from(initial_lfb) + lfb_size - 1,
+                        BxPhyAddress::new(u64::from(initial_lfb)),
+                        BxPhyAddress::new(u64::from(initial_lfb) + lfb_size - 1),
                     )
                     .is_ok(),
                 "the old LFB must be free before the following guest access"
@@ -2657,28 +2650,28 @@ mod tests {
             emu.memory
                 .unregister_memory_handlers(
                     DevSlot::NONE.mmio_token(),
-                    u64::from(initial_lfb),
-                    u64::from(initial_lfb) + lfb_size - 1,
+                    BxPhyAddress::new(u64::from(initial_lfb)),
+                    BxPhyAddress::new(u64::from(initial_lfb) + lfb_size - 1),
                 )
                 .unwrap();
 
             guest_pci_bar_write(&mut emu, 0x10, 0x18, 0xF000_0000).unwrap();
             guest_memory_read(&mut emu, 0xF000_0500).unwrap();
             assert_eq!(
-                emu.memory.mmio.lookup(0xF000_0500),
+                emu.memory.mmio.lookup(BxPhyAddress::new(0xF000_0500)),
                 Some(vga_registers_at(0x500))
             );
 
             guest_pci_bar_write(&mut emu, 0x10, 0x18, 0xF100_0000).unwrap();
             guest_memory_read(&mut emu, 0xF100_0500).unwrap();
-            assert_eq!(emu.memory.mmio.lookup(0xF000_0500), None);
+            assert_eq!(emu.memory.mmio.lookup(BxPhyAddress::new(0xF000_0500)), None);
             assert_eq!(
-                emu.memory.mmio.lookup(0xF100_0500),
+                emu.memory.mmio.lookup(BxPhyAddress::new(0xF100_0500)),
                 Some(vga_registers_at(0x500))
             );
             assert!(
                 emu.memory
-                    .register_memory_handlers(DevSlot::NONE.mmio_token(), 0xF000_0000, 0xF000_0FFF)
+                    .register_memory_handlers(DevSlot::NONE.mmio_token(), BxPhyAddress::new(0xF000_0000), BxPhyAddress::new(0xF000_0FFF))
                     .is_ok(),
                 "moving BAR2 must unregister the previous MMIO window"
             );
@@ -2692,8 +2685,8 @@ mod tests {
             emu.memory
                 .register_memory_handlers(
                     DevSlot::NONE.mmio_token(),
-                    u64::from(failed_target),
-                    u64::from(failed_target) + lfb_size - 1,
+                    BxPhyAddress::new(u64::from(failed_target)),
+                    BxPhyAddress::new(u64::from(failed_target) + lfb_size - 1),
                 )
                 .unwrap();
             let error =
@@ -2711,8 +2704,8 @@ mod tests {
                 emu.memory
                     .register_memory_handlers(
                         DevSlot::NONE.mmio_token(),
-                        u64::from(committed_lfb),
-                        u64::from(committed_lfb) + lfb_size - 1,
+                        BxPhyAddress::new(u64::from(committed_lfb)),
+                        BxPhyAddress::new(u64::from(committed_lfb) + lfb_size - 1),
                     )
                     .is_err(),
                 "the old LFB handler must survive a failed relocation"
@@ -2730,7 +2723,7 @@ mod tests {
             let mut dm = DeviceManager::new();
             let stub = BxMemoryStubC::create_and_init(4 << 20, 1 << 20, 1 << 20).unwrap();
             let mut mem = BxMemC::new(stub, false);
-            mem.set_a20_mask(u64::MAX);
+            mem.set_a20_mask(crate::config::A20Mask::OPEN);
             let mut pcs = BxPcSystemC::new();
 
             // Register the channel-0 BM-DMA timer as the emulator would.
@@ -2761,8 +2754,8 @@ mod tests {
             let mut prd = [0u8; 8];
             prd[0..4].copy_from_slice(&0x0030_0000u32.to_le_bytes());
             prd[4..8].copy_from_slice(&(1024u32 | 0x8000_0000).to_le_bytes());
-            assert_eq!(mem.write_ram(0x0020_0000, &prd).unwrap(), prd.len());
-            mem.smc_mark_icache_mask(0x0030_0000, u32::MAX);
+            assert_eq!(mem.write_ram(BxPhyAddress::new(0x0020_0000), &prd).unwrap(), prd.len());
+            mem.smc_mark_icache_mask(BxPhyAddress::new(0x0030_0000), u32::MAX);
             let before_smc = mem.smc_seq_next();
 
             // Guest issues READ DMA (LBA 0, 2 sectors) via the port interface.
@@ -2810,7 +2803,7 @@ mod tests {
 
             let mut guest_payload = [0; 1024];
             assert_eq!(
-                mem.read_ram(0x0030_0000, &mut guest_payload).unwrap(),
+                mem.read_ram(BxPhyAddress::new(0x0030_0000), &mut guest_payload).unwrap(),
                 guest_payload.len()
             );
             assert_eq!(
@@ -3022,9 +3015,9 @@ mod tests {
             dm.pending.insert(PendingPlatformWork::VGA_BARS);
             dm.reregister_vga_bars(&mut mem).unwrap();
 
-            assert_eq!(mem.mmio.lookup(0xF000_0500), Some(vga_registers_at(0x500)));
+            assert_eq!(mem.mmio.lookup(BxPhyAddress::new(0xF000_0500)), Some(vga_registers_at(0x500)));
             assert!(
-                mem.register_memory_handlers(DevSlot::NONE.mmio_token(), 0xF000_0000, 0xF000_0FFF)
+                mem.register_memory_handlers(DevSlot::NONE.mmio_token(), BxPhyAddress::new(0xF000_0000), BxPhyAddress::new(0xF000_0FFF))
                     .is_err(),
                 "BAR2 MMIO window must be registered"
             );

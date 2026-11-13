@@ -287,7 +287,7 @@ pub struct SvmHostState {
     pub efer: BxEfer,
     pub cr0: BxCr0,
     pub cr4: BxCr4,
-    pub cr3: BxPhyAddress,
+    pub cr3: u64,
     pub eflags: u32,
     pub rip: u64,
     pub rsp: u64,
@@ -310,8 +310,8 @@ pub struct SvmControls {
 
     pub eventinj: u32,
 
-    pub iopm_base: BxPhyAddress,
-    pub msrpm_base: BxPhyAddress,
+    pub iopm_base: u64,
+    pub msrpm_base: u64,
 
     pub v_tpr: u8,
     pub v_intr_prio: u8,
@@ -704,7 +704,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 use super::rusty_box::MemoryAccessType;
                 match self
                     .memory
-                    .host_mem_range(vmcbptr, MemoryAccessType::RW, policy)
+                    .host_mem_range(BxPhyAddress::new(vmcbptr), MemoryAccessType::RW, policy)
                 {
                     // VMCB accessors directly offset this base through PAT.
                     // A block-backed span may end sooner, in which case the
@@ -2003,10 +2003,15 @@ mod tests {
         ctx.set_rsp(STACK_TOP);
         for vector in 0..=0xFFu16 {
             let entry = [(0x100 + vector) as u8, ((0x100 + vector) >> 8) as u8, 0, 0];
-            ctx.memory.write_ram(u64::from(vector) * 4, &entry).expect("the IVT is RAM");
+            ctx.memory
+                .write_ram(BxPhyAddress::new(u64::from(vector) * 4), &entry)
+                .expect("the IVT is RAM");
         }
         ctx.memory
-            .write_ram(VMCB + u64::from(SVM_CONTROL32_EVENT_INJECTION), &eventinj.to_le_bytes())
+            .write_ram(
+                BxPhyAddress::new(VMCB + u64::from(SVM_CONTROL32_EVENT_INJECTION)),
+                &eventinj.to_le_bytes(),
+            )
             .expect("the VMCB is RAM");
         ctx.set_vmcbptr(VMCB);
         ctx.in_svm_guest = true;
@@ -2083,7 +2088,10 @@ mod tests {
         let mut ctx = machine.ctx();
         ctx.reset(crate::cpu::ResetReason::Hardware);
         let pml4e = (PDPT | PML4E_FLAGS).to_le_bytes();
-        let copied = ctx.memory.write_ram(PML4, &pml4e).expect("the PML4 is RAM");
+        let copied = ctx
+            .memory
+            .write_ram(BxPhyAddress::new(PML4), &pml4e)
+            .expect("the PML4 is RAM");
         assert_eq!(copied, pml4e.len(), "PML4[0] reached RAM whole");
 
         // The host: 64-bit mode over that PML4, with SVM enabled, saved the

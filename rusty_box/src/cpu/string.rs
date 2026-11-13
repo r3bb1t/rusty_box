@@ -14,7 +14,6 @@ use super::{
 };
 
 use crate::{
-    config::BxPhyAddress,
     convert::usize_from_u32,
     cpu::rusty_box::MemoryAccessType,
 };
@@ -45,7 +44,7 @@ struct RepMovsChunk {
     source: *const u8,
     destination: *mut u8,
     /// Physical address of the destination, for the code-write check.
-    destination_paddr: BxPhyAddress,
+    destination_paddr: u64,
     span: BulkSpan,
 }
 
@@ -53,7 +52,7 @@ struct RepMovsChunk {
 struct RepStosChunk {
     destination: *mut u8,
     /// Physical address of the destination, for the code-write check.
-    destination_paddr: BxPhyAddress,
+    destination_paddr: u64,
     span: BulkSpan,
 }
 

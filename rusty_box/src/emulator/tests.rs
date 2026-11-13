@@ -11,7 +11,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         instrumentation::{CpuSetupMode, X86Reg},
     };
     use crate::cpu::api_bridge::SegmentSize;
-    use crate::cpu::apic::{LocalApicCpuEvent, BX_LAPIC_BASE_ADDR};
+    use crate::cpu::apic::LocalApicCpuEvent;
     use crate::cpu::event::AcknowledgedInterrupt;
     use rusty_box_devices::pci::PciDevice;
     use crate::iodev::{DeviceTimerOwner, TimerRequest};
@@ -855,8 +855,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         subleaf | (level_type << CPUID_TOPOLOGY_LEVEL_TYPE_SHIFT)
     }
 
-    const ICR_LOW: u64 = 0x300;
-    const ICR_HIGH: u64 = 0x310;
+    const ICR_LOW: u32 = 0x300;
+    const ICR_HIGH: u32 = 0x310;
     const ICR_TARGET_AP: u32 = 1;
     const ICR_LEVEL_ASSERT: u32 = 1 << 14;
     const ICR_TRIGGER_LEVEL: u32 = 1 << 15;
@@ -3240,7 +3240,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let mut received = [0u8; 4];
                 assert_eq!(
                     emu.memory
-                        .read_ram(0x20_0000, &mut received)
+                        .read_ram(crate::config::BxPhyAddress::new(0x20_0000), &mut received)
                         .unwrap(),
                     4
                 );
@@ -3855,8 +3855,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                const ICR_LOW: u64 = 0x300;
-                const ICR_HIGH: u64 = 0x310;
+                const ICR_LOW: u32 = 0x300;
+                const ICR_HIGH: u32 = 0x310;
                 const TARGET_APIC_ID: u32 = 1;
                 const ICR_LEVEL_ASSERT: u32 = 1 << 14;
                 const ICR_TRIGGER_LEVEL: u32 = 1 << 15;
@@ -5052,22 +5052,20 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
     /// Spurious interrupt vector register, and the bit that software-enables
     /// the local APIC.
-    const SVR: u64 = 0x0F0;
+    const SVR: u32 = 0x0F0;
     const SVR_ENABLED: u32 = 0x0000_01FF;
     /// LVT LINT0, and the two encodings a guest puts in it that matter to the
     /// legacy wire: unmasked ExtINT, and the mask bit that closes it.
-    const LVT_LINT0: u64 = 0x350;
+    const LVT_LINT0: u32 = 0x350;
     const VIRTUAL_WIRE: u32 = 0x0000_0700;
     const LVT_MASK_BIT: u32 = 0x0001_0000;
 
     /// Program one local APIC register the way the guest does, through the
     /// register writer, so the write is subject to every rule a guest write is
     /// — the per-entry writable mask included.
-    fn write_apic(emu: &mut Emulator, register: u64, value: u32) {
+    fn write_apic(emu: &mut Emulator, register: u32, value: u32) {
         let ticks = emu.pc_system.time_ticks();
-        emu.cpu_mut()
-            .lapic
-            .write_aligned(BX_LAPIC_BASE_ADDR + register, value, ticks);
+        emu.cpu_mut().lapic.write_aligned(register, value, ticks);
     }
 
     /// LINT0 gates the legacy wire, and masking it does not spend the line.

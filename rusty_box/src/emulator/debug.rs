@@ -27,7 +27,7 @@ pub struct RamOffset(pub u64);
 impl RamOffset {
     /// The guest-physical address this RAM byte sits at.
     pub fn physical(self) -> u64 {
-        crate::memory::memory_rusty_box::bx_translate_linear_to_gpa(self.0)
+        crate::memory::memory_rusty_box::bx_translate_linear_to_gpa(self.0).get()
     }
 
     /// The RAM byte at guest-physical `physical`, or, for an address in the
@@ -37,6 +37,7 @@ impl RamOffset {
         use crate::memory::memory_rusty_box::{
             bx_is_pci_hole_addr, bx_translate_gpa_to_linear, BX_PCI_HOLE_END,
         };
+        let physical = crate::config::BxPhyAddress::new(physical);
         if bx_is_pci_hole_addr(physical) {
             Self(bx_translate_gpa_to_linear(BX_PCI_HOLE_END))
         } else {
@@ -47,6 +48,7 @@ impl RamOffset {
     /// The RAM byte at guest-physical `physical`, or `None` in the PCI hole.
     pub fn of_physical(physical: u64) -> Option<Self> {
         use crate::memory::memory_rusty_box::{bx_is_pci_hole_addr, bx_translate_gpa_to_linear};
+        let physical = crate::config::BxPhyAddress::new(physical);
         (!bx_is_pci_hole_addr(physical)).then(|| Self(bx_translate_gpa_to_linear(physical)))
     }
 }
@@ -196,7 +198,11 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     /// A RAM block that could not be brought back into residency.
     pub fn dbg_fetch_mem(&mut self, addr: u64, buf: &mut [u8]) -> Result<Fetched> {
         let policy = CpuMemoryPolicy::new(self.machine.cpu_ref(self.index).smm_mode(), false);
-        match self.machine.memory.dbg_fetch_mem(policy, addr, buf)? {
+        match self
+            .machine
+            .memory
+            .dbg_fetch_mem(policy, crate::config::BxPhyAddress::new(addr), buf)?
+        {
             DbgFetch::Read(fetched) => Ok(fetched),
             DbgFetch::Device(hit) => {
                 let now_ticks = self.machine.pc_system.time_ticks();
