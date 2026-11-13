@@ -417,8 +417,20 @@ debugger views report is typed the same way: `SegmentBases`, `DescriptorTable::b
 `DtlbInfo::{lpf, ppf}` and `SegmentInfo::base`. A register's value stays a number there too
 (`CpuSnapshot::rip`, `kernel_gs_base`, `VmxGuest::cr3`, the EPT pointer).
 
-Target design, not built: effective addresses become a type (an offset within a segment is
-not yet told apart from other `u64`s).
+An offset within a segment — what the SDM calls the effective address — is a `BxEffAddress`
+(`rusty_box/src/config.rs`). `resolve_addr` and `resolve_addr64` return one (Bochs
+`BX_CPU_RESOLVE_ADDR`; `resolve_addr32` keeps Bochs `BxResolve32`'s `u32`), every
+`read_virtual_*`/`write_virtual_*`/`read_rmw_virtual_*` accessor and `v_*` dispatcher takes
+one with its segment, and `get_laddr`/`get_laddr32`/`get_laddr64` and `agen_read32`/
+`agen_write32` are where it becomes a `BxLinAddress`. The 32-bit accessors take the same type
+and keep its low 32 bits (`low32`), as Bochs's `Bit32u offset` parameters do; the segment
+limit checks compare that number. An address size's wrap is named (`masked`, Bochs
+`i->asize_mask()`); there is no `+`, so every advance is a `wrapping_add`. A register's value
+becomes an offset where it is used as one: a string instruction's SI/DI, a direct-offset
+`MOV`'s immediate, `XLAT`'s BX + AL, the VSIB element offsets. The stack helpers
+(`stack_read_*`/`stack_write_*`, both widths) take the stack pointer's value and are where
+it becomes an SS offset. An offset that leaves as a number is a register's or a VMCS field's:
+`LEA`'s result, the FPU data pointer, a VMX exit qualification.
 
 **RAM offsets and allocation offsets** are the pair easiest to mix up, because both are
 `usize` byte offsets and they are equal whenever residency is full.

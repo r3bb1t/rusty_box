@@ -5370,7 +5370,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BxPhyAddress;
+    use crate::config::{BxEffAddress, BxPhyAddress};
+    use crate::convert::u64_from_usize;
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::cpu::CpuMode;
     use crate::cpu::crregs::BxCr4;
@@ -5791,8 +5792,12 @@ mod tests {
         let mut rm_bytes = [0u8; 32];
         for (i, byte) in rm_bytes.iter_mut().enumerate() {
             *byte = [255, 0, 128, 127, 1, 254, 64, 192][i % 8];
-            cpu.write_virtual_byte_64(BxSegregs::Ds, 0x4000 + i as u64, *byte)
-                .unwrap();
+            cpu.write_virtual_byte_64(
+                BxSegregs::Ds,
+                BxEffAddress::new(0x4000 + u64_from_usize(i)),
+                *byte,
+            )
+            .unwrap();
             cpu.vmm[2].set_zmmubyte(i, [0, 255, 127, 128, 254, 1, 192, 64][i % 8]);
         }
         for i in 0..64 {
@@ -5893,9 +5898,9 @@ mod tests {
 
         const LOW_ADDR: u64 = 0x4000;
         const HIGH_ADDR: u64 = HIGH_DWORD_PAGE;
-        cpu.write_virtual_dword_64(BxSegregs::Ds, LOW_ADDR, 0x1234_0000)
+        cpu.write_virtual_dword_64(BxSegregs::Ds, BxEffAddress::new(LOW_ADDR), 0x1234_0000)
             .unwrap();
-        cpu.write_virtual_dword_64(BxSegregs::Ds, HIGH_ADDR, 0xABCD_0000)
+        cpu.write_virtual_dword_64(BxSegregs::Ds, BxEffAddress::new(HIGH_ADDR), 0xABCD_0000)
             .unwrap();
         cpu.set_rbx(HIGH_ADDR);
         cpu.set_r14(1);
@@ -5915,12 +5920,14 @@ mod tests {
 
         cpu.execute_instruction(&instr).unwrap();
         assert_eq!(
-            cpu.read_virtual_dword_64(BxSegregs::Ds, HIGH_ADDR).unwrap(),
+            cpu.read_virtual_dword_64(BxSegregs::Ds, BxEffAddress::new(HIGH_ADDR))
+                .unwrap(),
             0xABCD_0002,
             "BTS Ed,Gd sets the bit at its 64-bit effective address"
         );
         assert_eq!(
-            cpu.read_virtual_dword_64(BxSegregs::Ds, LOW_ADDR).unwrap(),
+            cpu.read_virtual_dword_64(BxSegregs::Ds, BxEffAddress::new(LOW_ADDR))
+                .unwrap(),
             0x1234_0000,
             "BTS Ed,Gd in 64-bit address mode must not truncate the memory address"
         );
@@ -5934,9 +5941,9 @@ mod tests {
 
         const LOW_ADDR: u64 = 0x5000;
         const HIGH_ADDR: u64 = HIGH_WORD_PAGE;
-        cpu.write_virtual_word_64(BxSegregs::Ds, LOW_ADDR, 0x1200)
+        cpu.write_virtual_word_64(BxSegregs::Ds, BxEffAddress::new(LOW_ADDR), 0x1200)
             .unwrap();
-        cpu.write_virtual_word_64(BxSegregs::Ds, HIGH_ADDR, 0xAB00)
+        cpu.write_virtual_word_64(BxSegregs::Ds, BxEffAddress::new(HIGH_ADDR), 0xAB00)
             .unwrap();
         cpu.set_rbx(HIGH_ADDR);
         cpu.set_r14(1);
@@ -5956,12 +5963,14 @@ mod tests {
 
         cpu.execute_instruction(&instr).unwrap();
         assert_eq!(
-            cpu.read_virtual_word_64(BxSegregs::Ds, HIGH_ADDR).unwrap(),
+            cpu.read_virtual_word_64(BxSegregs::Ds, BxEffAddress::new(HIGH_ADDR))
+                .unwrap(),
             0xAB02,
             "BTS Ew,Gw sets the bit at its 64-bit effective address"
         );
         assert_eq!(
-            cpu.read_virtual_word_64(BxSegregs::Ds, LOW_ADDR).unwrap(),
+            cpu.read_virtual_word_64(BxSegregs::Ds, BxEffAddress::new(LOW_ADDR))
+                .unwrap(),
             0x1200,
             "BTS Ew,Gw in 64-bit address mode must not truncate the memory address"
         );
@@ -6066,8 +6075,12 @@ mod tests {
             let src2 = 0xFEDC_BA98_7654_3210u64.rotate_right((qword * 13) as u32);
             rm_qwords[qword] = src2;
             cpu.vmm[2].set_zmm64u(qword, src1);
-            cpu.write_virtual_qword_64(BxSegregs::Ds, 0x6000 + (qword * 8) as u64, src2)
-                .unwrap();
+            cpu.write_virtual_qword_64(
+                BxSegregs::Ds,
+                BxEffAddress::new(0x6000 + u64_from_usize(qword * 8)),
+                src2,
+            )
+            .unwrap();
         }
         for qword in 0..8 {
             cpu.vmm[1].set_zmm64u(qword, 0x5A5A_5A5A_5A5A_5A5A);
@@ -6535,7 +6548,7 @@ mod tests {
             cpu.vmm[1].set_zmm64u(0, 3.0f64.to_bits());
             cpu.vmm[1].set_zmm64u(1, 0x1234_5678_9ABC_DEF0);
             cpu.vmm[2].set_zmm64u(0, 5.0f64.to_bits());
-            cpu.write_virtual_qword_64(BxSegregs::Ds, 0x7000, 7.0f64.to_bits())
+            cpu.write_virtual_qword_64(BxSegregs::Ds, BxEffAddress::new(0x7000), 7.0f64.to_bits())
                 .unwrap();
 
             cpu.execute_instruction(&instr).unwrap();

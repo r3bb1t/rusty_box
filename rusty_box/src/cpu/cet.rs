@@ -7,7 +7,7 @@
 
 use super::Result;
 use super::decoder::{BxSegregs, Instruction};
-use crate::config::BxLinAddress;
+use crate::config::{BxEffAddress, BxLinAddress};
 
 // CET control MSR bit constants — matches Bochs cet.cc
 pub(super) const CET_SHADOW_STACK_ENABLED: u64 = 1 << 0;
@@ -156,7 +156,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn legacy_endbranch_treatment(&mut self, cpl: u8) -> Result<bool> {
         let idx = usize::from(cpl == 3);
         if self.msr.ia32_cet_control[idx] & CET_LEGACY_INDIRECT_BRANCH_TREATMENT != 0 {
-            let lip = self.get_laddr(BxSegregs::Cs as usize, self.rip()).get();
+            let lip = self
+                .get_laddr(BxSegregs::Cs as usize, BxEffAddress::new(self.rip()))
+                .get();
             let bitmap_addr = BxLinAddress::new(
                 (self.msr.ia32_cet_control[idx] & !0xFFF) + ((lip & 0xFFFF_FFFF_FFFF) >> 15),
             );
@@ -548,7 +550,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
-            self.agen_read32(seg, eaddr as u32, 8)?
+            self.agen_read32(seg, eaddr, 8)?
         };
         if !laddr.is_aligned(8) {
             tracing::error!("CLRSSBSY: SSP_LA not aligned to 8 bytes boundary");
@@ -690,7 +692,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
-            self.agen_read32(seg, eaddr as u32, 8)?
+            self.agen_read32(seg, eaddr, 8)?
         };
         if !laddr.is_aligned(8) {
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -738,7 +740,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
-            self.agen_write32(seg, eaddr as u32, 4)?
+            self.agen_write32(seg, eaddr, 4)?
         };
         if !laddr.is_aligned(4) {
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -761,7 +763,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
-            self.agen_write32(seg, eaddr as u32, 8)?
+            self.agen_write32(seg, eaddr, 8)?
         };
         if !laddr.is_aligned(8) {
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -786,7 +788,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
-            self.agen_write32(seg, eaddr as u32, 4)?
+            self.agen_write32(seg, eaddr, 4)?
         };
         if !laddr.is_aligned(4) {
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -812,7 +814,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
-            self.agen_write32(seg, eaddr as u32, 8)?
+            self.agen_write32(seg, eaddr, 8)?
         };
         if !laddr.is_aligned(8) {
             return self.exception(super::cpu::Exception::Gp, 0);

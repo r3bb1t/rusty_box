@@ -613,12 +613,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let op1_32 = self.v_read_dword(seg, eaddr)?;
         let cs_raw = self.v_read_word(
             seg,
-            (eaddr.wrapping_add(4))
-                & (if instr.as32_l() == 0 {
-                    0xFFFF
-                } else {
-                    0xFFFFFFFF
-                }),
+            eaddr.wrapping_add(4).masked(if instr.as32_l() == 0 {
+                0xFFFF
+            } else {
+                0xFFFFFFFF
+            }),
         )?;
 
         self.call_far32(instr, cs_raw, op1_32)
@@ -639,12 +638,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let op1_32 = self.v_read_dword(seg, eaddr)?;
         let cs_raw = self.v_read_word(
             seg,
-            (eaddr.wrapping_add(4))
-                & (if instr.as32_l() == 0 {
-                    0xFFFF
-                } else {
-                    0xFFFFFFFF
-                }),
+            eaddr.wrapping_add(4).masked(if instr.as32_l() == 0 {
+                0xFFFF
+            } else {
+                0xFFFFFFFF
+            }),
         )?;
 
         self.jmp_far32(instr, cs_raw, op1_32)

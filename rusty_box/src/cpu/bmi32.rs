@@ -5,6 +5,7 @@
 //! for the r/m field, matching Bochs _R and _M variants.
 
 use super::decoder::{BxSegregs, Instruction};
+use crate::config::BxEffAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =====================================================================
@@ -29,7 +30,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.read_virtual_dword_64(seg, offset)
         } else {
             let seg = BxSegregs::from(instr.seg());
-            let offset = self.resolve_addr32(instr);
+            let offset = BxEffAddress::from_u32(self.resolve_addr32(instr));
             self.read_virtual_dword(seg, offset)
         }
     }

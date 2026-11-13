@@ -9,7 +9,7 @@ use super::decoder::BxSegregs;
 use super::descriptor::{BxDescriptor, BxSegmentReg, BxSelector, SystemAndGateDescriptorEnum};
 use super::eflags::EFlags;
 use super::segment_ctrl_pro::parse_selector;
-use crate::config::{BxLinAddress, BxPhyAddress};
+use crate::config::{BxEffAddress, BxLinAddress, BxPhyAddress};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Handle interrupt in protected mode via IDT
@@ -363,7 +363,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
             // Bochs exception.cc protected_mode_int \u2014 same-priv shadow-stack push.
             if self.shadow_stack_enabled(cpl) {
-                let return_lip = self.get_laddr32(BxSegregs::Cs as usize, old_eip).get();
+                let return_lip = self
+                    .get_laddr32(BxSegregs::Cs as usize, BxEffAddress::from_u32(old_eip))
+                    .get();
                 self.call_far_shadow_stack_push(old_cs, return_lip, self.ssp())?;
             }
             self.track_indirect(cpl);
@@ -455,7 +457,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // CET state for the inner-priv shadow-stack switch.
         let old_cpl_cet = self.cs_rpl();
         let old_ss_dpl_cet = self.sregs[BxSegregs::Ss as usize].cache.dpl;
-        let return_lip_cet = self.get_laddr32(BxSegregs::Cs as usize, old_eip).get();
+        let return_lip_cet = self
+            .get_laddr32(BxSegregs::Cs as usize, BxEffAddress::from_u32(old_eip))
+            .get();
         let new_ssp_cet = self.msr.ia32_pl_ssp[cs_descriptor.dpl as usize];
 
         // Get SS and ESP from TSS for the new privilege level (matches line 446)
@@ -1090,7 +1094,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs exception.cc long_mode_int \u2014 capture pre-transition CET state.
         let old_cpl_cet = cpl;
         let old_ss_dpl_cet = self.sregs[BxSegregs::Ss as usize].cache.dpl;
-        let return_lip_cet = self.get_laddr64(BxSegregs::Cs as usize, old_rip).get();
+        let return_lip_cet = self
+            .get_laddr64(BxSegregs::Cs as usize, BxEffAddress::new(old_rip))
+            .get();
         let mut new_ssp_cet: u64 = 0;
         let mut check_ss_token = true;
 

@@ -3,6 +3,7 @@
 // 16-bit data transfer operations: MOV, etc.
 // Mirrors Bochs cpp/cpu/data_xfer16.cc
 
+use crate::config::BxEffAddress;
 use crate::cpu::decoder::{BxSegregs, Instruction};
 
 /// MOV_AXOd: MOV AX, moffs16 - Load AX from memory
@@ -14,7 +15,7 @@ pub fn MOV_AXOd<T: crate::cpu::instrumentation::Instrumentation>(
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = BxSegregs::from(instr.seg());
-    let offset = instr.id();
+    let offset = BxEffAddress::from_u32(instr.id());
     let val = cpu.v_read_word(seg, offset)?;
     cpu.set_ax(val);
     Ok(())
@@ -29,7 +30,7 @@ pub fn MOV_OdAX<T: crate::cpu::instrumentation::Instrumentation>(
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = BxSegregs::from(instr.seg());
-    let offset = instr.id();
+    let offset = BxEffAddress::from_u32(instr.id());
     let ax = cpu.ax();
     cpu.v_write_word(seg, offset, ax)?;
     Ok(())

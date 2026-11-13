@@ -30,6 +30,7 @@
 
 use super::decoder::{BxSegregs, Instruction};
 use super::xmm::BxPackedZmmRegister;
+use crate::config::BxEffAddress;
 
 /// Bochs xmm.h `BYTE_ELEMENTS` — byte lanes for a vector length.
 ///
@@ -169,7 +170,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_load8(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &mut BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -201,7 +202,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_load16(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &mut BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -236,7 +237,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_load32(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &mut BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -271,7 +272,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_load64(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &mut BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -317,7 +318,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_store32(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -355,7 +356,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_store64(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -989,7 +990,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn evex_load_full_width(
         &mut self,
         _instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         seg: BxSegregs,
         vl: u8,
     ) -> super::Result<BxPackedZmmRegister> {
@@ -1005,7 +1006,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn evex_load_half_width(
         &mut self,
         _instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         seg: BxSegregs,
         vl: u8,
     ) -> super::Result<BxPackedZmmRegister> {
@@ -1027,7 +1028,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_store8(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -1063,7 +1064,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_store16(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {

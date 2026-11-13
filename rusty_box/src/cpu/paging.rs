@@ -3360,6 +3360,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BxEffAddress;
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::cpu::CpuMode;
     use crate::cpu::crregs::{BxCr0, BxCr4};
@@ -3646,12 +3647,12 @@ mod tests {
         cpu.set_segment_base(BxSegregs::Ds, BxLinAddress::new(0x2000));
         cpu.cpu_mode = CpuMode::Ia32Protected;
         assert_eq!(
-            cpu.get_laddr(BxSegregs::Ds as usize, 0xFFFF_F000),
+            cpu.get_laddr(BxSegregs::Ds as usize, BxEffAddress::new(0xFFFF_F000)),
             BxLinAddress::new(0x1000)
         );
         cpu.cpu_mode = CpuMode::Long64;
         assert_eq!(
-            cpu.get_laddr(BxSegregs::Ds as usize, 0x1_0000_0000),
+            cpu.get_laddr(BxSegregs::Ds as usize, BxEffAddress::new(0x1_0000_0000)),
             BxLinAddress::new(0x1_0000_0000)
         );
     }

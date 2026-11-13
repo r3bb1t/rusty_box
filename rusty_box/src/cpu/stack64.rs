@@ -4,6 +4,7 @@
 
 use super::decoder::{BxSegregs, Instruction};
 use super::eflags::EFlags;
+use crate::config::BxEffAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -196,10 +197,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.stack_write_qword_64(temp_rsp, frame_ptr64)?;
         }
 
-        temp_rsp = temp_rsp.wrapping_sub(instr.iw() as u64);
+        temp_rsp = temp_rsp.wrapping_sub(u64::from(instr.iw()));
 
         // Probe final stack location (Bochs: read_RMW_linear_qword touch)
-        self.read_rmw_virtual_qword_64(BxSegregs::Ss, temp_rsp)?;
+        self.read_rmw_virtual_qword_64(BxSegregs::Ss, BxEffAddress::new(temp_rsp))?;
         // Write back unchanged (no actual modification)
         // Bochs does the read but doesn't write back — it's just a probe.
         // Our RMW path sets up address_xlation but we don't call write_back.

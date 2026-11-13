@@ -1491,7 +1491,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             let paddr = if self.long64_mode() {
                 self.read_virtual_qword_64(seg, eaddr)?
             } else {
-                self.read_virtual_qword(seg, eaddr as u32)?
+                self.read_virtual_qword(seg, eaddr)?
             };
 
             // Must be 4 KiB-aligned and within the physical-address width
@@ -1594,7 +1594,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let paddr = if self.long64_mode() {
             self.read_virtual_qword_64(seg, eaddr)?
         } else {
-            self.read_virtual_qword(seg, eaddr as u32)?
+            self.read_virtual_qword(seg, eaddr)?
         };
 
         if paddr == 0 || (paddr & 0xFFF) != 0 || (paddr >> BX_PHY_ADDRESS_WIDTH) != 0 {
@@ -1648,7 +1648,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let paddr = if self.long64_mode() {
             self.read_virtual_qword_64(seg, eaddr)?
         } else {
-            self.read_virtual_qword(seg, eaddr as u32)?
+            self.read_virtual_qword(seg, eaddr)?
         };
 
         if paddr == 0 || (paddr & 0xFFF) != 0 || (paddr >> BX_PHY_ADDRESS_WIDTH) != 0 {
@@ -1705,7 +1705,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         if self.long64_mode() {
             self.write_virtual_qword_64(seg, eaddr, val)?;
         } else {
-            self.write_virtual_qword(seg, eaddr as u32, val)?;
+            self.write_virtual_qword(seg, eaddr, val)?;
         }
         self.vmsucceed();
         Ok(())
@@ -2780,7 +2780,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
-            self.write_virtual_dword(seg, eaddr as u32, val as u32)?;
+            self.write_virtual_dword(seg, eaddr, val as u32)?;
         }
         Ok(())
     }
@@ -2805,7 +2805,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
-            self.read_virtual_dword(seg, eaddr as u32)? as u64
+            u64::from(self.read_virtual_dword(seg, eaddr)?)
         };
         self.vmwrite_impl(enc, src)
     }

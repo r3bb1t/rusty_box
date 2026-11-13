@@ -18,7 +18,7 @@ use super::BxCpuC;
 use super::exec_ctx::ExecCtx;
 use super::instrumentation::Instrumentation;
 use super::paging::DbgWalk;
-use crate::config::BxLinAddress;
+use crate::config::{BxEffAddress, BxLinAddress};
 
 /// How many linear code breakpoints a machine holds: Bochs config.h
 /// `BX_DBG_MAX_LIN_BPOINTS`.
@@ -298,7 +298,10 @@ impl<T: Instrumentation> ExecCtx<'_, T> {
     fn code_breakpoint_here(&mut self) -> Option<BreakpointHere> {
         let rip = self.rip();
         let linear = self
-            .get_laddr(super::decoder::BxSegregs::Cs as usize, rip)
+            .get_laddr(
+                super::decoder::BxSegregs::Cs as usize,
+                BxEffAddress::new(rip),
+            )
             .get();
         if self.code_breakpoints.reported_at(self.icount, linear) {
             return None;

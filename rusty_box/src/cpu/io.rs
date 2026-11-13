@@ -4,7 +4,7 @@
 //! Mirrors `io.cc` from Bochs.
 
 use super::decoder::{BxSegregs, Instruction};
-use crate::config::BxLinAddress;
+use crate::config::{BxEffAddress, BxLinAddress};
 use crate::cpu::rusty_box::MemoryAccessType;
 use crate::iodev::IoPort;
 
@@ -325,7 +325,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// INSB - Input byte from port DX to ES:DI (16-bit address mode)
     fn insb16(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx_port();
-        let di = self.di() as u32;
+        let di = BxEffAddress::from_u16(self.di());
         let laddr = self.prepare_rmw_virtual_byte(BxSegregs::Es, di)?;
         self.check_rmw_write_permissions(laddr, 1)?;
         let old_value = self.read_prepared_rmw_byte();
@@ -388,7 +388,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// INSW - Input word from port DX to ES:DI (16-bit address mode)
     fn insw16(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx_port();
-        let di = self.di() as u32;
+        let di = BxEffAddress::from_u16(self.di());
         // Prepare all segment/page translations first. Instrumentation
         // permissions are checked before a potentially destructive MMIO read,
         // then the port input commits through that same RMW translation.
@@ -411,7 +411,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// INSD - Input dword from port DX to ES:DI (16-bit address mode)
     fn insd16(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx_port();
-        let di = self.di() as u32;
+        let di = BxEffAddress::from_u16(self.di());
         let laddr = self.prepare_rmw_virtual_dword(BxSegregs::Es, di)?;
         self.check_rmw_write_permissions(laddr, 4)?;
         let old_value = self.read_prepared_rmw_dword();
@@ -435,7 +435,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn insb32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx_port();
         let edi = self.edi();
-        let laddr = self.prepare_rmw_virtual_byte(BxSegregs::Es, edi)?;
+        let laddr = self.prepare_rmw_virtual_byte(BxSegregs::Es, BxEffAddress::from_u32(edi))?;
         self.check_rmw_write_permissions(laddr, 1)?;
         let old_value = self.read_prepared_rmw_byte();
         self.report_ins_rmw_access(laddr, &[old_value]);
@@ -457,7 +457,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let edi = self.edi();
         // Translate before the physical RMW read so instrumentation faults do
         // not consume destructive MMIO state.
-        let laddr = self.prepare_rmw_virtual_word(BxSegregs::Es, edi)?;
+        let laddr = self.prepare_rmw_virtual_word(BxSegregs::Es, BxEffAddress::from_u32(edi))?;
         self.check_rmw_word_write_permissions(laddr)?;
         let old_value = self.read_prepared_rmw_word();
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
@@ -477,7 +477,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn insd32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx_port();
         let edi = self.edi();
-        let laddr = self.prepare_rmw_virtual_dword(BxSegregs::Es, edi)?;
+        let laddr = self.prepare_rmw_virtual_dword(BxSegregs::Es, BxEffAddress::from_u32(edi))?;
         self.check_rmw_write_permissions(laddr, 4)?;
         let old_value = self.read_prepared_rmw_dword();
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
@@ -498,7 +498,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn outsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
-        let si = self.si() as u32;
+        let si = BxEffAddress::from_u16(self.si());
         let value = self.v_read_byte(seg, si)?;
         self.port_out(port, value as u32, 1);
         if self.get_df() {
@@ -515,7 +515,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn outsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
-        let si = self.si() as u32;
+        let si = BxEffAddress::from_u16(self.si());
         let value = self.v_read_word(seg, si)?;
         self.port_out(port, value as u32, 2);
         if self.get_df() {
@@ -532,7 +532,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn outsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
-        let si = self.si() as u32;
+        let si = BxEffAddress::from_u16(self.si());
         let value = self.v_read_dword(seg, si)?;
         self.port_out(port, value, 4);
         if self.get_df() {
@@ -553,7 +553,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let esi = self.esi();
-        let value = self.v_read_byte(seg, esi)?;
+        let value = self.v_read_byte(seg, BxEffAddress::from_u32(esi))?;
         self.port_out(port, value as u32, 1);
         if self.get_df() {
             self.set_rsi(esi.wrapping_sub(1) as u64);
@@ -569,7 +569,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let esi = self.esi();
-        let value = self.v_read_word(seg, esi)?;
+        let value = self.v_read_word(seg, BxEffAddress::from_u32(esi))?;
         self.port_out(port, value as u32, 2);
         if self.get_df() {
             self.set_rsi(esi.wrapping_sub(2) as u64);
@@ -585,7 +585,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let esi = self.esi();
-        let value = self.v_read_dword(seg, esi)?;
+        let value = self.v_read_dword(seg, BxEffAddress::from_u32(esi))?;
         self.port_out(port, value, 4);
         if self.get_df() {
             self.set_rsi(esi.wrapping_sub(4) as u64);
@@ -636,7 +636,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             while cx != 0 && event_words_remaining != 0 {
                 let di = self.di();
                 let di_u32 = u32::from(di);
-                let laddr = self.get_laddr32(BxSegregs::Es as usize, di_u32);
+                let laddr = self.get_laddr32(BxSegregs::Es as usize, BxEffAddress::from_u16(di));
                 let Some((host_ptr, host_remaining, paddr)) =
                     self.get_host_write_ptr_for_bulk(laddr)?
                 else {
@@ -788,7 +788,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.direct_rep_bulk_allowed(true) && !self.get_df() && self.async_event == 0 {
             while ecx != 0 && event_words_remaining != 0 {
                 let edi = self.edi();
-                let laddr = self.get_laddr32(BxSegregs::Es as usize, edi);
+                let laddr = self.get_laddr32(BxSegregs::Es as usize, BxEffAddress::from_u32(edi));
                 let Some((host_ptr, host_remaining, paddr)) =
                     self.get_host_write_ptr_for_bulk(laddr)?
                 else {
@@ -1077,7 +1077,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn insb64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx_port();
         let rdi = self.rdi();
-        let laddr = self.prepare_rmw_virtual_byte_64(BxSegregs::Es, rdi)?;
+        let laddr = self.prepare_rmw_virtual_byte_64(BxSegregs::Es, BxEffAddress::new(rdi))?;
         self.check_rmw_write_permissions(laddr, 1)?;
         let old_value = self.read_prepared_rmw_byte();
         self.report_ins_rmw_access(laddr, &[old_value]);
@@ -1099,7 +1099,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let rdi = self.rdi();
         // Translate before the physical RMW read so instrumentation faults do
         // not consume destructive MMIO state.
-        let laddr = self.prepare_rmw_virtual_word_64(BxSegregs::Es, rdi)?;
+        let laddr = self.prepare_rmw_virtual_word_64(BxSegregs::Es, BxEffAddress::new(rdi))?;
         self.check_rmw_word_write_permissions(laddr)?;
         let old_value = self.read_prepared_rmw_word();
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
@@ -1118,7 +1118,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn insd64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx_port();
         let rdi = self.rdi();
-        let laddr = self.prepare_rmw_virtual_dword_64(BxSegregs::Es, rdi)?;
+        let laddr = self.prepare_rmw_virtual_dword_64(BxSegregs::Es, BxEffAddress::new(rdi))?;
         self.check_rmw_write_permissions(laddr, 4)?;
         let old_value = self.read_prepared_rmw_dword();
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
@@ -1140,7 +1140,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let rsi = self.rsi();
-        let laddr = self.get_laddr64(seg as usize, rsi);
+        let laddr = self.get_laddr64(seg as usize, BxEffAddress::new(rsi));
         let value = self.read_virtual_byte_at_laddr(laddr)?;
         self.port_out(port, value as u32, 1);
         if self.get_df() {
@@ -1156,7 +1156,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let rsi = self.rsi();
-        let value = self.read_virtual_word_64(seg, rsi)?;
+        let value = self.read_virtual_word_64(seg, BxEffAddress::new(rsi))?;
         self.port_out(port, value as u32, 2);
         if self.get_df() {
             self.set_rsi(rsi.wrapping_sub(2));
@@ -1171,7 +1171,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let port = self.dx_port();
         let seg = BxSegregs::from(instr.seg());
         let rsi = self.rsi();
-        let value = self.read_virtual_dword_64(seg, rsi)?;
+        let value = self.read_virtual_dword_64(seg, BxEffAddress::new(rsi))?;
         self.port_out(port, value, 4);
         if self.get_df() {
             self.set_rsi(rsi.wrapping_sub(4));
@@ -1221,7 +1221,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.direct_rep_bulk_allowed(true) && !self.get_df() && self.async_event == 0 {
             while rcx != 0 && event_words_remaining != 0 {
                 let rdi = self.rdi();
-                let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+                let laddr = self.get_laddr64(BxSegregs::Es as usize, BxEffAddress::new(rdi));
                 let Some((host_ptr, host_remaining, paddr)) =
                     self.get_host_write_ptr_for_bulk(laddr)?
                 else {
@@ -1442,9 +1442,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             u64::from(u16::MAX)
         };
         let (laddr_seg, offset) = if direction_in {
-            (BxSegregs::Es as u8, self.rdi() & asize_mask)
+            (
+                BxSegregs::Es as u8,
+                BxEffAddress::new(self.rdi() & asize_mask),
+            )
         } else {
-            (instr.seg(), self.rsi() & asize_mask)
+            (instr.seg(), BxEffAddress::new(self.rsi() & asize_mask))
         };
         let laddr = self.get_laddr(usize::from(laddr_seg), offset);
         self.vmexit_check_io_string(

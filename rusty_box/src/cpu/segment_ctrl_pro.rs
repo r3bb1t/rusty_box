@@ -5,7 +5,7 @@ use super::descriptor::{
     BxDescriptor, BxSegmentReg, BxSelector, DescriptorGate, DescriptorSegment, DescriptorTaskGate,
     SEG_VALID_CACHE, SystemAndGateDescriptorEnum,
 };
-use crate::config::{BxAddress, BxLinAddress};
+use crate::config::{BxAddress, BxEffAddress, BxLinAddress};
 
 pub fn parse_selector(raw_selector: u16, selector: &mut BxSelector) {
     selector.value = raw_selector;
@@ -1134,7 +1134,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let qual = if instr.mod_c0() {
                 0
             } else {
-                self.resolve_addr(instr)
+                self.resolve_addr(instr).get()
             };
             if self.vmexit_check_ldtr_tr_access(qual)? {
                 return Ok(());
@@ -1251,7 +1251,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let qual = if instr.mod_c0() {
                 0
             } else {
-                self.resolve_addr(instr)
+                self.resolve_addr(instr).get()
             };
             if self.vmexit_check_ldtr_tr_access(qual)? {
                 return Ok(());
@@ -1440,7 +1440,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Bochs call_far.cc call_protected \u2014 capture old CS / linear
             // return-LIP before branch_far rewrites CS.
             let old_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
-            let temp_lip = self.get_laddr32(BxSegregs::Cs as usize, self.eip()).get();
+            let temp_lip = self
+                .get_laddr32(BxSegregs::Cs as usize, BxEffAddress::from_u32(self.eip()))
+                .get();
 
             if os32 {
                 self.write_new_stack_dword(
@@ -1657,7 +1659,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // state for the inner-priv shadow-stack switch.
             let old_ss_dpl = self.sregs[BxSegregs::Ss as usize].cache.dpl;
             let old_cpl = cpl;
-            let temp_lip = self.get_laddr32(BxSegregs::Cs as usize, return_eip).get();
+            let temp_lip = self
+                .get_laddr32(BxSegregs::Cs as usize, BxEffAddress::from_u32(return_eip))
+                .get();
 
             let is_386_gate = gate_descriptor.r#type == 0xC;
 
@@ -1864,7 +1868,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Bochs call_far.cc call_gate \u2014 CALL GATE TO SAME PRIVILEGE
             // captures old CS / linear-LIP before branch_far rewrites CS.
             let old_cs_same = self.sregs[BxSegregs::Cs as usize].selector.value;
-            let temp_lip_same = self.get_laddr32(BxSegregs::Cs as usize, new_eip).get();
+            let temp_lip_same = self
+                .get_laddr32(BxSegregs::Cs as usize, BxEffAddress::from_u32(new_eip))
+                .get();
 
             self.branch_far(
                 &mut gate_cs_selector,
@@ -2358,7 +2364,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Bochs call_far.cc call_protected (long mode) \u2014 capture old
             // CS / linear LIP before branch_far rewrites CS.
             let old_cs_norm = self.sregs[BxSegregs::Cs as usize].selector.value;
-            let temp_lip_norm = self.get_laddr64(BxSegregs::Cs as usize, self.rip()).get();
+            let temp_lip_norm = self
+                .get_laddr64(BxSegregs::Cs as usize, BxEffAddress::new(self.rip()))
+                .get();
 
             self.check_cs(&cs_descriptor, cs_raw, cs_selector.rpl, cpl)?;
 
@@ -2559,7 +2567,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         let old_rip = self.rip();
 
         // Bochs call_far.cc call_gate64 \u2014 capture pre-transition CET state.
-        let temp_lip = self.get_laddr64(BxSegregs::Cs as usize, self.rip()).get();
+        let temp_lip = self
+            .get_laddr64(BxSegregs::Cs as usize, BxEffAddress::new(self.rip()))
+            .get();
         let old_ss_dpl = self.sregs[BxSegregs::Ss as usize].cache.dpl;
         let old_cpl = cpl;
 
@@ -2750,11 +2760,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             tracing::trace!("return_protected_64: return to OUTER PRIVILEGE LEVEL");
 
             let (raw_ss_selector, return_rsp): (u16, u64) = if instr.os64_l() != 0 {
-                let ss = self
-                    .stack_read_qword_64(temp_rsp.wrapping_add(24).wrapping_add(pop_bytes as u64))?
-                    as u16;
+                let ss = self.stack_read_qword_64(
+                    temp_rsp.wrapping_add(24).wrapping_add(u64::from(pop_bytes)),
+                )? as u16;
                 let rsp = self.stack_read_qword_64(
-                    temp_rsp.wrapping_add(16).wrapping_add(pop_bytes as u64),
+                    temp_rsp.wrapping_add(16).wrapping_add(u64::from(pop_bytes)),
                 )?;
                 (ss, rsp)
             } else if instr.os32_l() != 0 {

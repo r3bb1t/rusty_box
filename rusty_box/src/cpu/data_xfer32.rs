@@ -3,6 +3,7 @@
 // 32-bit data transfer operations: MOV, etc.
 // Mirrors Bochs cpp/cpu/data_xfer32.cc
 
+use crate::config::BxEffAddress;
 use crate::cpu::decoder::{BxSegregs, Instruction};
 
 /// MOV_GdEd_R: MOV r32, r/m32 (register form)
@@ -244,7 +245,7 @@ pub fn MOV_EAXOd<T: crate::cpu::instrumentation::Instrumentation>(
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
-    let offset = instr.id();
+    let offset = BxEffAddress::from_u32(instr.id());
     let value = cpu.v_read_dword(seg, offset)?;
     cpu.set_eax(value);
     Ok(())
@@ -259,7 +260,7 @@ pub fn MOV_OdEAX<T: crate::cpu::instrumentation::Instrumentation>(
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
-    let offset = instr.id();
+    let offset = BxEffAddress::from_u32(instr.id());
     let eax_val = cpu.eax();
     cpu.v_write_dword(seg, offset, eax_val)?;
     Ok(())

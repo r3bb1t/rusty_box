@@ -18,6 +18,7 @@
 use super::decoder::{BxSegregs, Instruction};
 use super::simd_int;
 use super::xmm::BxPackedXmmRegister;
+use crate::config::BxEffAddress;
 
 // ============================================================================
 // Saturation helpers (matching Bochs sse_int.cc / mmx.cc inline functions)
@@ -1707,7 +1708,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             0xFFFF_FFFF_FFFF_FFFF,
         ];
         let asize = (instr.as32_l() != 0) as usize | (((instr.as64_l() != 0) as usize) << 1);
-        let rdi = self.rdi() & ASIZE_MASK[asize];
+        let rdi = BxEffAddress::new(self.rdi() & ASIZE_MASK[asize]);
 
         // Bochs: i->seg() — allow segment override prefixes
         let seg = BxSegregs::from(instr.seg());
@@ -1718,7 +1719,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         temp.set_xmm64u(0, self.v_read_qword(seg, rdi)?);
         temp.set_xmm64u(
             1,
-            self.v_read_qword(seg, (rdi.wrapping_add(8)) & ASIZE_MASK[asize])?,
+            self.v_read_qword(seg, rdi.wrapping_add(8).masked(ASIZE_MASK[asize]))?,
         );
 
         // No data will be written to memory if mask is all 0s (Bochs sse_move.cc)
@@ -1737,7 +1738,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Write result back to memory (Bochs sse_move.cc)
         self.v_write_qword(
             seg,
-            (rdi.wrapping_add(8)) & ASIZE_MASK[asize],
+            rdi.wrapping_add(8).masked(ASIZE_MASK[asize]),
             temp.xmm64u(1),
         )?;
         self.v_write_qword(seg, rdi, temp.xmm64u(0))?;

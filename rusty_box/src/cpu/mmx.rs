@@ -14,6 +14,7 @@
 
 use super::decoder::{BxSegregs, Instruction};
 use super::i387::BxPackedRegister;
+use crate::config::BxEffAddress;
 
 // ============================================================================
 // Saturation helpers (matching Bochs mmx.cc inline functions)
@@ -1571,7 +1572,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             0xFFFF_FFFF
         };
-        let rdi = self.rdi() & asize_mask;
+        let rdi = BxEffAddress::new(self.rdi() & asize_mask);
         let seg = BxSegregs::from(instr.seg());
 
         // Read-modify-write 8 bytes at [seg:rdi]

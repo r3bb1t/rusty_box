@@ -1,7 +1,7 @@
 #![allow(unused_variables)]
 #![allow(unused_unsafe)]
 
-use crate::config::{BxLinAddress, BxPhyAddress};
+use crate::config::{BxEffAddress, BxLinAddress, BxPhyAddress};
 use crate::convert::u64_from_usize;
 use crate::cpu::BxCpuC;
 
@@ -989,7 +989,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             0xFFFF_FFFF_FFFF_FFFF,
         ];
         let asize = (instr.as32_l() != 0) as usize | (((instr.as64_l() != 0) as usize) << 1);
-        let eaddr = self.rax() & !(CACHE_LINE_SIZE - 1) & ASIZE_MASK[asize];
+        let eaddr = BxEffAddress::new(self.rax() & !(CACHE_LINE_SIZE - 1) & ASIZE_MASK[asize]);
 
         // Bochs writes a zmmword (64 bytes) via write_virtual_zmmword.
         // Emit 8 qwords instead — segmentation + paging checks cover the
@@ -2301,7 +2301,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             xmm.set_xmm32u(2, 0);
             xmm.set_xmm32u(3, 0);
         }
-        self.v_write_xmmword(seg, eaddr.wrapping_add(16) & asize_mask, &xmm)?;
+        self.v_write_xmmword(seg, eaddr.wrapping_add(16).masked(asize_mask), &xmm)?;
 
         self.x87_save_register_file(instr, eaddr)?;
 
@@ -2342,7 +2342,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let mut restore = StagedX87::from_head(&head, os64);
 
-        let pointers = self.v_read_xmmword(seg, eaddr.wrapping_add(16) & asize_mask)?;
+        let pointers = self.v_read_xmmword(seg, eaddr.wrapping_add(16).masked(asize_mask))?;
         restore.take_data_pointer(&pointers, os64);
 
         let new_mxcsr = pointers.xmm32u(2);
@@ -2462,7 +2462,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn x87_save_register_file(
         &mut self,
         instr: &super::decoder::Instruction,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> super::Result<()> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let asize_mask = instr.asize_mask();
@@ -2471,7 +2471,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let mut xmm = super::xmm::BxPackedXmmRegister::default();
             xmm.set_xmm64u(0, fp.signif);
             xmm.set_xmm16u(4, fp.sign_exp);
-            self.v_write_xmmword(seg, offset.wrapping_add(index * 16 + 32) & asize_mask, &xmm)?;
+            self.v_write_xmmword(
+                seg,
+                offset.wrapping_add(index * 16 + 32).masked(asize_mask),
+                &xmm,
+            )?;
         }
         Ok(())
     }
@@ -2481,16 +2485,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn x87_load_register_file(
         &mut self,
         instr: &super::decoder::Instruction,
-        offset: u64,
+        offset: BxEffAddress,
         restore: &mut StagedX87,
     ) -> super::Result<()> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let asize_mask = instr.asize_mask();
         for index in 0..8u64 {
             let signif =
-                self.v_read_qword(seg, offset.wrapping_add(index * 16 + 32) & asize_mask)?;
+                self.v_read_qword(seg, offset.wrapping_add(index * 16 + 32).masked(asize_mask))?;
             let sign_exp =
-                self.v_read_word(seg, offset.wrapping_add(index * 16 + 40) & asize_mask)?;
+                self.v_read_word(seg, offset.wrapping_add(index * 16 + 40).masked(asize_mask))?;
             let reg = super::softfloat3e::softfloat_types::ExtFloat80 { signif, sign_exp };
             let tag = if self.is_tag_empty(index as i32) {
                 i32::from(super::i387::FPU_TAG_EMPTY)
@@ -3368,7 +3372,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_x87_state(
         &mut self,
         instr: &super::decoder::Instruction,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> super::Result<()> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let os64 = instr.os64_l() != 0;
@@ -3391,7 +3395,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_mxcsr_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        eaddr: u64,
+        eaddr: BxEffAddress,
     ) -> super::Result<()> {
         self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
         self.v_write_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
@@ -3403,7 +3407,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_mxcsr_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        eaddr: u64,
+        eaddr: BxEffAddress,
     ) -> super::Result<()> {
         let new_mxcsr = self.v_read_dword(seg, eaddr.wrapping_add(24))?;
         if (new_mxcsr & !self.mxcsr_mask) != 0 {
@@ -3425,14 +3429,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_sse_state(
         &mut self,
         instr: &super::decoder::Instruction,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> super::Result<()> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let asize_mask = instr.asize_mask();
         let num_regs: u8 = if self.long64_mode() { 16 } else { 8 };
         for index in 0..num_regs {
             let xmm = self.read_xmm_reg(index);
-            let at = offset.wrapping_add(u64::from(index) * 16) & asize_mask;
+            let at = offset
+                .wrapping_add(u64::from(index) * 16)
+                .masked(asize_mask);
             self.v_write_xmmword(seg, at, &xmm)?;
         }
         Ok(())
@@ -3444,7 +3450,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_x87_state(
         &mut self,
         instr: &super::decoder::Instruction,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> super::Result<()> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let os64 = instr.os64_l() != 0;
@@ -3480,13 +3486,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_sse_state(
         &mut self,
         instr: &super::decoder::Instruction,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> super::Result<()> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let asize_mask = instr.asize_mask();
         let num_regs: u8 = if self.long64_mode() { 16 } else { 8 };
         for index in 0..num_regs {
-            let at = offset.wrapping_add(u64::from(index) * 16) & asize_mask;
+            let at = offset
+                .wrapping_add(u64::from(index) * 16)
+                .masked(asize_mask);
             let xmm = self.v_read_xmmword(seg, at)?;
             self.write_xmm_reg_lo128(index, xmm);
         }
@@ -3718,7 +3726,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ========================================================================
 
     /// YMM state: upper 128 bits of YMM0-YMM15 (256 bytes max)
-    fn xsave_ymm_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xsave_ymm_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: BxEffAddress,
+    ) -> super::Result<()> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
             let offset = base.wrapping_add(i * 16);
@@ -3731,7 +3743,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    fn xrstor_ymm_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xrstor_ymm_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: BxEffAddress,
+    ) -> super::Result<()> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
             let offset = base.wrapping_add(i * 16);
@@ -3763,7 +3779,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_opmask_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         for i in 0..8u64 {
             let val = self.opmask[i as usize].rrx();
@@ -3775,7 +3791,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_opmask_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         for i in 0..8u64 {
             let val = self.v_read_qword(seg, base.wrapping_add(i * 8))?;
@@ -3794,7 +3810,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_zmm_hi256_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
@@ -3813,7 +3829,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_zmm_hi256_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
@@ -3854,7 +3870,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_hi_zmm_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         if self.long64_mode() {
             for idx in 16..32u64 {
@@ -3877,7 +3893,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_hi_zmm_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         if self.long64_mode() {
             for idx in 16..32u64 {
@@ -3911,7 +3927,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PKRU state — Bochs xsave.cc xsave_pkru_state. The PKRU component is 8
     /// bytes wide but only the low dword is architecturally defined, and Bochs
     /// writes just those 4 bytes, leaving the upper 4 untouched.
-    fn xsave_pkru_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xsave_pkru_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: BxEffAddress,
+    ) -> super::Result<()> {
         self.v_write_dword(seg, base, self.pkru)?;
         Ok(())
     }
@@ -3924,7 +3944,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_pkru_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
         pkru_tmp: &mut u32,
     ) -> super::Result<()> {
         *pkru_tmp = self.v_read_dword(seg, base)?;
@@ -3950,7 +3970,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_xtilecfg_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         let mut buf = [0u8; 64];
         if let Some(amx) = self.amx_ref() {
@@ -3980,7 +4000,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_xtilecfg_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         let mut buf = [0u8; 64];
         for i in 0..8u64 {
@@ -4021,7 +4041,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_xtiledata_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         // Snapshot the 8×16×64 = 8192 byte tile buffer up front so the
         // &mut self write loop doesn't alias the AMX struct.
@@ -4049,7 +4069,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_xtiledata_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         // Preload all rows without holding an &mut on amx.
         let mut fresh_tiles: [[u8; 1024]; 8] = [[0u8; 1024]; 8];
@@ -4089,7 +4109,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_cet_u_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         self.v_write_qword(seg, base, self.msr.ia32_cet_control[1])?;
         self.v_write_qword(seg, base.wrapping_add(8), self.msr.ia32_pl_ssp[3])?;
@@ -4102,7 +4122,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_cet_u_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         let ctrl = self.v_read_qword(seg, base)?;
         let pl3_ssp = self.v_read_qword(seg, base.wrapping_add(8))?;
@@ -4131,7 +4151,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_cet_s_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         self.v_write_qword(seg, base, self.msr.ia32_pl_ssp[0])?;
         self.v_write_qword(seg, base.wrapping_add(8), self.msr.ia32_pl_ssp[1])?;
@@ -4142,7 +4162,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_cet_s_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         let pl0_ssp = self.v_read_qword(seg, base)?;
         let pl1_ssp = self.v_read_qword(seg, base.wrapping_add(8))?;
@@ -4169,7 +4189,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_extended_component(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
         feature: u32,
     ) -> super::Result<()> {
         use super::crregs::Xcr0Component;
@@ -4192,7 +4212,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_extended_component(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
         feature: u32,
         pkru_tmp: &mut u32,
     ) -> super::Result<()> {

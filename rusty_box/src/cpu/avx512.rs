@@ -29,6 +29,7 @@ use super::softfloat3e::f64_sqrt::f64_sqrt;
 use super::softfloat3e::softfloat::{SoftFloatStatus, softfloat_get_exception_flags};
 use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::xmm::BxPackedZmmRegister;
+use crate::config::BxEffAddress;
 
 /// Width pairing of a VPMOV widening conversion, named after the mnemonic
 /// suffix: `Bw` is byte-to-word, `Dq` dword-to-qword, and so on.
@@ -178,7 +179,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn evex_check_vector_alignment(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
     ) -> super::Result<()> {
         let len_in_bytes = match instr.get_vl() {
             0 => 16u64,
@@ -942,13 +943,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             write_zmm_masked(self, instr.dst(), &result, mask, zmask, 0); // VL=0 (128-bit)
         } else {
             // Memory form — write 16 bytes
-            let laddr = self.resolve_addr(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             let mask = read_opmask_for_write(self, instr);
             for i in 0..4u64 {
                 if (mask >> i) & 1 != 0 {
                     let val = result.zmm32u(i as usize);
-                    self.v_write_dword(seg, laddr + i * 4, val)?;
+                    self.v_write_dword(seg, eaddr.wrapping_add(i * 4), val)?;
                 }
             }
         }

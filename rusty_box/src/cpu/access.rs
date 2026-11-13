@@ -18,7 +18,7 @@ use super::descriptor::{
     SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
 };
 use super::rusty_box::MemoryAccessType;
-use crate::config::{BxLinAddress, BxPhyAddress, BxPtrEquiv};
+use crate::config::{BxEffAddress, BxLinAddress, BxPhyAddress, BxPtrEquiv};
 use crate::memory::memory_rusty_box::bx_guest_ram_span;
 
 /// BX_MAX_MEM_ACCESS_LENGTH from Bochs — maximum access size for
@@ -786,7 +786,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn agen_read32(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         len: u32,
     ) -> Result<BxLinAddress> {
         let seg_idx = seg as usize;
@@ -799,19 +799,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Fast path: flat 4GB readable segment
         if (self.sregs[seg_idx].cache.valid & SEG_ACCESS_ROK4_G) != 0 {
-            return Ok(BxLinAddress::from_u32(offset));
+            return Ok(BxLinAddress::from_u32(offset.low32()));
         }
 
         // Medium path: within cached limit
         if (self.sregs[seg_idx].cache.valid & SEG_ACCESS_ROK) != 0 {
             let limit = self.sregs[seg_idx].cache.u.segment_limit_scaled();
-            if offset <= limit.wrapping_sub(len.wrapping_sub(1)) {
+            if offset.low32() <= limit.wrapping_sub(len.wrapping_sub(1)) {
                 return Ok(self.get_laddr32(seg_idx, offset));
             }
         }
 
         // Slow path: full segment checks
-        if !self.read_virtual_checks(seg_idx, offset, len) {
+        if !self.read_virtual_checks(seg_idx, offset.low32(), len) {
             self.exception(Self::seg_exception(seg), 0)?;
         }
         Ok(self.get_laddr32(seg_idx, offset))
@@ -823,7 +823,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn agen_write32(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         len: u32,
     ) -> Result<BxLinAddress> {
         let seg_idx = seg as usize;
@@ -835,19 +835,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Fast path: flat 4GB writable segment
         if (self.sregs[seg_idx].cache.valid & SEG_ACCESS_WOK4_G) != 0 {
-            return Ok(BxLinAddress::from_u32(offset));
+            return Ok(BxLinAddress::from_u32(offset.low32()));
         }
 
         // Medium path: within cached limit
         if (self.sregs[seg_idx].cache.valid & SEG_ACCESS_WOK) != 0 {
             let limit = self.sregs[seg_idx].cache.u.segment_limit_scaled();
-            if offset <= limit.wrapping_sub(len.wrapping_sub(1)) {
+            if offset.low32() <= limit.wrapping_sub(len.wrapping_sub(1)) {
                 return Ok(self.get_laddr32(seg_idx, offset));
             }
         }
 
         // Slow path: full segment checks
-        if !self.write_virtual_checks(seg_idx, offset, len) {
+        if !self.write_virtual_checks(seg_idx, offset.low32(), len) {
             self.exception(Self::seg_exception(seg), 0)?;
         }
         Ok(self.get_laddr32(seg_idx, offset))
@@ -862,7 +862,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a byte from virtual memory.
     /// Bochs: read_virtual_byte_32 (access.h) — thin wrapper
     #[inline]
-    pub fn read_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<u8> {
+    pub fn read_virtual_byte(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u8> {
         let laddr = self.agen_read32(seg, offset, 1)?;
         self.read_linear_byte(seg, laddr)
     }
@@ -870,7 +870,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a word from virtual memory.
     /// Bochs: read_virtual_word_32 (access.h) — thin wrapper
     #[inline]
-    pub fn read_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u16> {
+    pub fn read_virtual_word(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u16> {
         let laddr = self.agen_read32(seg, offset, 2)?;
         self.read_linear_word(seg, laddr)
     }
@@ -878,7 +878,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a dword from virtual memory.
     /// Bochs: read_virtual_dword_32 (access.h) — thin wrapper
     #[inline]
-    pub fn read_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u32> {
+    pub fn read_virtual_dword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u32> {
         let laddr = self.agen_read32(seg, offset, 4)?;
         self.read_linear_dword(seg, laddr)
     }
@@ -886,7 +886,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a qword from virtual memory.
     /// Bochs: read_virtual_qword_32 (access.h) — thin wrapper
     #[inline]
-    pub(crate) fn read_virtual_qword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
+    pub(crate) fn read_virtual_qword(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u64> {
         let laddr = self.agen_read32(seg, offset, 8)?;
         self.read_linear_qword(seg, laddr)
     }
@@ -903,7 +907,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Write a byte to virtual memory.
     /// Bochs: write_virtual_byte_32 (access.h) — thin wrapper
     #[inline]
-    pub fn write_virtual_byte(&mut self, seg: BxSegregs, offset: u32, val: u8) -> Result<()> {
+    pub fn write_virtual_byte(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+        val: u8,
+    ) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 1)?;
         self.write_linear_byte(seg, laddr, val)
     }
@@ -914,7 +923,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_word(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         val: u16,
     ) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 2)?;
@@ -927,7 +936,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_dword(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         val: u32,
     ) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 4)?;
@@ -940,7 +949,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_virtual_qword(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         val: u64,
     ) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 8)?;
@@ -953,7 +962,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn read_virtual_xmmword(
         &mut self,
         seg: super::decoder::BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedXmmRegister> {
         let lo = self.read_virtual_qword(seg, offset)?;
         let hi = self.read_virtual_qword(seg, offset.wrapping_add(8))?;
@@ -969,9 +978,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn read_virtual_xmmword_aligned(
         &mut self,
         seg: super::decoder::BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedXmmRegister> {
-        if (offset & 0xF) != 0 {
+        if !offset.is_aligned(16) {
             self.exception(super::cpu::Exception::Gp, 0)?;
         }
         self.read_virtual_xmmword(seg, offset)
@@ -983,7 +992,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_xmmword(
         &mut self,
         seg: super::decoder::BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
         self.write_virtual_qword(seg, offset, val.xmm64u(0))?;
@@ -997,10 +1006,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_xmmword_aligned(
         &mut self,
         seg: super::decoder::BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
-        if (offset & 0xF) != 0 {
+        if !offset.is_aligned(16) {
             self.exception(super::cpu::Exception::Gp, 0)?;
         }
         self.write_virtual_xmmword(seg, offset, val)
@@ -1030,7 +1039,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn prepare_rmw_virtual_byte(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
     ) -> Result<BxLinAddress> {
         let laddr = self.agen_write32(seg, offset, 1)?;
         self.prepare_rmw_linear_byte(laddr)?;
@@ -1040,7 +1049,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read phase of a read-modify-write byte access.
     /// Bochs: read_RMW_virtual_byte_32 (access.h) — thin wrapper
     #[inline]
-    pub fn read_rmw_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<u8> {
+    pub fn read_rmw_virtual_byte(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u8> {
         self.prepare_rmw_virtual_byte(seg, offset)?;
         Ok(self.read_prepared_rmw_byte())
     }
@@ -1051,7 +1060,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn prepare_rmw_virtual_word(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
     ) -> Result<BxLinAddress> {
         let laddr = self.agen_write32(seg, offset, 2)?;
         self.prepare_rmw_linear_word(laddr)?;
@@ -1061,7 +1070,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read phase of a read-modify-write word access.
     /// Bochs: read_RMW_virtual_word_32 (access.h) — thin wrapper
     #[inline]
-    pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u16> {
+    pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u16> {
         self.prepare_rmw_virtual_word(seg, offset)?;
         Ok(self.read_prepared_rmw_word())
     }
@@ -1072,7 +1081,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn prepare_rmw_virtual_dword(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
     ) -> Result<BxLinAddress> {
         let laddr = self.agen_write32(seg, offset, 4)?;
         self.prepare_rmw_linear_dword(laddr)?;
@@ -1082,14 +1091,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read phase of a read-modify-write dword access.
     /// Bochs: read_RMW_virtual_dword_32 (access.h) — thin wrapper
     #[inline]
-    pub fn read_rmw_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u32> {
+    pub fn read_rmw_virtual_dword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u32> {
         self.prepare_rmw_virtual_dword(seg, offset)?;
         Ok(self.read_prepared_rmw_dword())
     }
 
     /// RMW read qword in 32-bit mode.
     /// Bochs: read_RMW_virtual_qword_32 (access.h) — thin wrapper
-    pub fn read_rmw_virtual_qword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
+    pub fn read_rmw_virtual_qword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u64> {
         let laddr = self.agen_write32(seg, offset, 8)?;
         let (data, _) = self.read_rmw_linear_qword(seg, laddr)?;
         Ok(data)
@@ -1284,14 +1293,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn get_laddr32_seg_checked(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         len: u32,
     ) -> Result<BxLinAddress> {
         // In real mode, just add base (no segment type checks)
         if self.real_mode() {
             let base = self.get_segment_base(seg);
             return Ok(BxLinAddress::from_u32(
-                base.wrapping_add(offset as u64).low32(),
+                base.wrapping_add(u64::from(offset.low32())).low32(),
             ));
         }
         self.agen_read32(seg, offset, len)
@@ -1299,9 +1308,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Simple linear address without any checks (used internally).
     #[inline]
-    pub fn get_laddr32_seg(&self, seg: BxSegregs, offset: u32) -> BxLinAddress {
+    pub fn get_laddr32_seg(&self, seg: BxSegregs, offset: BxEffAddress) -> BxLinAddress {
         let seg_base = self.get_segment_base(seg);
-        BxLinAddress::from_u32(seg_base.wrapping_add(offset as u64).low32())
+        BxLinAddress::from_u32(seg_base.wrapping_add(u64::from(offset.low32())).low32())
     }
 
     // ===== 64-bit Virtual read functions (Bochs access64.cc) =====
@@ -1315,7 +1324,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a byte from virtual memory in 64-bit mode.
     /// Bochs: read_virtual_byte (access.h) — thin wrapper: agen + canonical + read_linear_byte
     #[inline]
-    pub(crate) fn read_virtual_byte_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u8> {
+    pub(crate) fn read_virtual_byte_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u8> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
         self.read_linear_byte(seg, laddr)
@@ -1324,7 +1337,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a word from virtual memory in 64-bit mode.
     /// Bochs: read_virtual_word (access.h) — thin wrapper: agen + canonical + read_linear_word
     #[inline]
-    pub(crate) fn read_virtual_word_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u16> {
+    pub(crate) fn read_virtual_word_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u16> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
         self.read_linear_word(seg, laddr)
@@ -1333,7 +1350,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a dword from virtual memory in 64-bit mode.
     /// Bochs: read_virtual_dword (access.h) — thin wrapper: agen + canonical + read_linear_dword
     #[inline]
-    pub(crate) fn read_virtual_dword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u32> {
+    pub(crate) fn read_virtual_dword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u32> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
         self.read_linear_dword(seg, laddr)
@@ -1342,7 +1363,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a qword from virtual memory in 64-bit mode.
     /// Bochs: read_virtual_qword (access.h) — thin wrapper: agen + canonical + read_linear_qword
     #[inline]
-    pub(crate) fn read_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u64> {
+    pub(crate) fn read_virtual_qword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u64> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
         self.read_linear_qword(seg, laddr)
@@ -1356,7 +1381,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_virtual_byte_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: u8,
     ) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
@@ -1370,7 +1395,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_virtual_word_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: u16,
     ) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
@@ -1384,7 +1409,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_virtual_dword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: u32,
     ) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
@@ -1398,7 +1423,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_virtual_qword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: u64,
     ) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
@@ -1410,7 +1435,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read phase of a RMW qword access in 64-bit mode.
     /// Bochs: read_RMW_virtual_qword (access.h) — thin wrapper
-    pub(crate) fn read_rmw_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u64> {
+    pub(crate) fn read_rmw_virtual_qword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u64> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
         let (data, _) = self.read_rmw_linear_qword(seg, laddr)?;
@@ -1443,47 +1472,51 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     // ===== 64-bit Stack access functions =====
+    //
+    // Like the 16/32-bit stack helpers (stack.rs), these take the stack
+    // pointer's value — RSP, or RSP plus a frame offset — and are where it
+    // becomes an offset in SS.
 
     /// Read a word from the stack in 64-bit mode (SS segment).
     /// Bochs: stack_read_word (long64 path)
     #[inline]
     pub(crate) fn stack_read_word_64(&mut self, offset: u64) -> Result<u16> {
-        self.read_virtual_word_64(BxSegregs::Ss, offset)
+        self.read_virtual_word_64(BxSegregs::Ss, BxEffAddress::new(offset))
     }
 
     /// Write a word to the stack in 64-bit mode (SS segment).
     /// Bochs: stack_write_word (long64 path)
     #[inline]
     pub(crate) fn stack_write_word_64(&mut self, offset: u64, val: u16) -> Result<()> {
-        self.write_virtual_word_64(BxSegregs::Ss, offset, val)
+        self.write_virtual_word_64(BxSegregs::Ss, BxEffAddress::new(offset), val)
     }
 
     /// Read a dword from the stack in 64-bit mode (SS segment).
     /// Bochs: stack_read_dword (long64 path)
     #[inline]
     pub(crate) fn stack_read_dword_64(&mut self, offset: u64) -> Result<u32> {
-        self.read_virtual_dword_64(BxSegregs::Ss, offset)
+        self.read_virtual_dword_64(BxSegregs::Ss, BxEffAddress::new(offset))
     }
 
     /// Write a dword to the stack in 64-bit mode (SS segment).
     /// Bochs: stack_write_dword (long64 path)
     #[inline]
     pub(crate) fn stack_write_dword_64(&mut self, offset: u64, val: u32) -> Result<()> {
-        self.write_virtual_dword_64(BxSegregs::Ss, offset, val)
+        self.write_virtual_dword_64(BxSegregs::Ss, BxEffAddress::new(offset), val)
     }
 
     /// Read a qword from the stack in 64-bit mode (SS segment).
     /// Bochs: stack_read_qword
     #[inline]
     pub(crate) fn stack_read_qword_64(&mut self, offset: u64) -> Result<u64> {
-        self.read_virtual_qword_64(BxSegregs::Ss, offset)
+        self.read_virtual_qword_64(BxSegregs::Ss, BxEffAddress::new(offset))
     }
 
     /// Write a qword to the stack in 64-bit mode (SS segment).
     /// Bochs: stack_write_qword
     #[inline]
     pub(crate) fn stack_write_qword_64(&mut self, offset: u64, val: u64) -> Result<()> {
-        self.write_virtual_qword_64(BxSegregs::Ss, offset, val)
+        self.write_virtual_qword_64(BxSegregs::Ss, BxEffAddress::new(offset), val)
     }
 
     // ===== Host pointer resolution for bulk operations (Bochs v2h_write_byte / v2h_read_byte) =====
@@ -2744,72 +2777,61 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read byte — dispatches to read_virtual_byte or read_virtual_byte_64.
     #[inline]
-    pub fn v_read_byte(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u8> {
-        let offset = offset.into();
+    pub fn v_read_byte(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u8> {
         if self.long64_mode() {
             self.read_virtual_byte_64(seg, offset)
         } else {
-            self.read_virtual_byte(seg, offset as u32)
+            self.read_virtual_byte(seg, offset)
         }
     }
 
     /// Read word — dispatches to read_virtual_word or read_virtual_word_64.
     #[inline]
-    pub fn v_read_word(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u16> {
-        let offset = offset.into();
+    pub fn v_read_word(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u16> {
         if self.long64_mode() {
             self.read_virtual_word_64(seg, offset)
         } else {
-            self.read_virtual_word(seg, offset as u32)
+            self.read_virtual_word(seg, offset)
         }
     }
 
     /// Read dword — dispatches to read_virtual_dword or read_virtual_dword_64.
     #[inline]
-    pub fn v_read_dword(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u32> {
-        let offset = offset.into();
+    pub fn v_read_dword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u32> {
         if self.long64_mode() {
             self.read_virtual_dword_64(seg, offset)
         } else {
-            self.read_virtual_dword(seg, offset as u32)
+            self.read_virtual_dword(seg, offset)
         }
     }
 
     /// Write byte — dispatches to write_virtual_byte or write_virtual_byte_64.
     #[inline]
-    pub fn v_write_byte(&mut self, seg: BxSegregs, offset: impl Into<u64>, val: u8) -> Result<()> {
-        let offset = offset.into();
+    pub fn v_write_byte(&mut self, seg: BxSegregs, offset: BxEffAddress, val: u8) -> Result<()> {
         if self.long64_mode() {
             self.write_virtual_byte_64(seg, offset, val)
         } else {
-            self.write_virtual_byte(seg, offset as u32, val)
+            self.write_virtual_byte(seg, offset, val)
         }
     }
 
     /// Write word — dispatches to write_virtual_word or write_virtual_word_64.
     #[inline]
-    pub fn v_write_word(&mut self, seg: BxSegregs, offset: impl Into<u64>, val: u16) -> Result<()> {
-        let offset = offset.into();
+    pub fn v_write_word(&mut self, seg: BxSegregs, offset: BxEffAddress, val: u16) -> Result<()> {
         if self.long64_mode() {
             self.write_virtual_word_64(seg, offset, val)
         } else {
-            self.write_virtual_word(seg, offset as u32, val)
+            self.write_virtual_word(seg, offset, val)
         }
     }
 
     /// Write dword — dispatches to write_virtual_dword or write_virtual_dword_64.
     #[inline]
-    pub fn v_write_dword(
-        &mut self,
-        seg: BxSegregs,
-        offset: impl Into<u64>,
-        val: u32,
-    ) -> Result<()> {
-        let offset = offset.into();
+    pub fn v_write_dword(&mut self, seg: BxSegregs, offset: BxEffAddress, val: u32) -> Result<()> {
         if self.long64_mode() {
             self.write_virtual_dword_64(seg, offset, val)
         } else {
-            self.write_virtual_dword(seg, offset as u32, val)
+            self.write_virtual_dword(seg, offset, val)
         }
     }
 
@@ -2819,68 +2841,57 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// RMW read byte — dispatches to read_rmw_virtual_byte or read_rmw_virtual_byte_64.
     #[inline]
-    pub fn v_read_rmw_byte(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u8> {
-        let offset = offset.into();
+    pub fn v_read_rmw_byte(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u8> {
         if self.long64_mode() {
             self.read_rmw_virtual_byte_64(seg, offset)
         } else {
-            self.read_rmw_virtual_byte(seg, offset as u32)
+            self.read_rmw_virtual_byte(seg, offset)
         }
     }
 
     /// RMW read word — dispatches to read_rmw_virtual_word or read_rmw_virtual_word_64.
     #[inline]
-    pub fn v_read_rmw_word(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u16> {
-        let offset = offset.into();
+    pub fn v_read_rmw_word(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u16> {
         if self.long64_mode() {
             self.read_rmw_virtual_word_64(seg, offset)
         } else {
-            self.read_rmw_virtual_word(seg, offset as u32)
+            self.read_rmw_virtual_word(seg, offset)
         }
     }
 
     /// RMW read dword — dispatches to read_rmw_virtual_dword or read_rmw_virtual_dword_64.
     #[inline]
-    pub fn v_read_rmw_dword(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u32> {
-        let offset = offset.into();
+    pub fn v_read_rmw_dword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u32> {
         if self.long64_mode() {
             self.read_rmw_virtual_dword_64(seg, offset)
         } else {
-            self.read_rmw_virtual_dword(seg, offset as u32)
+            self.read_rmw_virtual_dword(seg, offset)
         }
     }
 
     // ===== Mode-dispatching wrappers for qword =====
 
-    pub fn v_read_qword(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u64> {
-        let offset = offset.into();
+    pub fn v_read_qword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u64> {
         if self.long64_mode() {
             self.read_virtual_qword_64(seg, offset)
         } else {
-            self.read_virtual_qword(seg, offset as u32)
+            self.read_virtual_qword(seg, offset)
         }
     }
 
-    pub fn v_write_qword(
-        &mut self,
-        seg: BxSegregs,
-        offset: impl Into<u64>,
-        val: u64,
-    ) -> Result<()> {
-        let offset = offset.into();
+    pub fn v_write_qword(&mut self, seg: BxSegregs, offset: BxEffAddress, val: u64) -> Result<()> {
         if self.long64_mode() {
             self.write_virtual_qword_64(seg, offset, val)
         } else {
-            self.write_virtual_qword(seg, offset as u32, val)
+            self.write_virtual_qword(seg, offset, val)
         }
     }
 
-    pub fn v_read_rmw_qword(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u64> {
-        let offset = offset.into();
+    pub fn v_read_rmw_qword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u64> {
         if self.long64_mode() {
             self.read_rmw_virtual_qword_64(seg, offset)
         } else {
-            self.read_rmw_virtual_qword(seg, offset as u32)
+            self.read_rmw_virtual_qword(seg, offset)
         }
     }
 
@@ -2889,54 +2900,50 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn v_read_xmmword(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedXmmRegister> {
-        let offset = offset.into();
         if self.long64_mode() {
             self.read_virtual_xmmword_64(seg, offset)
         } else {
-            self.read_virtual_xmmword(seg, offset as u32)
+            self.read_virtual_xmmword(seg, offset)
         }
     }
 
     pub fn v_read_xmmword_aligned(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedXmmRegister> {
-        let offset = offset.into();
         if self.long64_mode() {
             self.read_virtual_xmmword_aligned_64(seg, offset)
         } else {
-            self.read_virtual_xmmword_aligned(seg, offset as u32)
+            self.read_virtual_xmmword_aligned(seg, offset)
         }
     }
 
     pub fn v_write_xmmword(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
-        let offset = offset.into();
         if self.long64_mode() {
             self.write_virtual_xmmword_64(seg, offset, val)
         } else {
-            self.write_virtual_xmmword(seg, offset as u32, val)
+            self.write_virtual_xmmword(seg, offset, val)
         }
     }
 
     pub fn v_write_xmmword_aligned(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
-        let offset = offset.into();
         if self.long64_mode() {
             self.write_virtual_xmmword_aligned_64(seg, offset, val)
         } else {
-            self.write_virtual_xmmword_aligned(seg, offset as u32, val)
+            self.write_virtual_xmmword_aligned(seg, offset, val)
         }
     }
 
@@ -2947,7 +2954,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn read_virtual_xmmword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedXmmRegister> {
         let lo = self.read_virtual_qword_64(seg, offset)?;
         let hi = self.read_virtual_qword_64(seg, offset.wrapping_add(8))?;
@@ -2962,9 +2969,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn read_virtual_xmmword_aligned_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedXmmRegister> {
-        if (offset & 0xF) != 0 {
+        if !offset.is_aligned(16) {
             self.exception(super::cpu::Exception::Gp, 0)?;
         }
         self.read_virtual_xmmword_64(seg, offset)
@@ -2975,7 +2982,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_xmmword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
         self.write_virtual_qword_64(seg, offset, val.xmm64u(0))?;
@@ -2988,10 +2995,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_xmmword_aligned_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
-        if (offset & 0xF) != 0 {
+        if !offset.is_aligned(16) {
             self.exception(super::cpu::Exception::Gp, 0)?;
         }
         self.write_virtual_xmmword_64(seg, offset, val)
@@ -3003,7 +3010,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn read_virtual_ymmword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedYmmRegister> {
         let q0 = self.read_virtual_qword_64(seg, offset)?;
         let q1 = self.read_virtual_qword_64(seg, offset.wrapping_add(8))?;
@@ -3021,7 +3028,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_ymmword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedYmmRegister,
     ) -> Result<()> {
         self.write_virtual_qword_64(seg, offset, val.ymm64u(0))?;
@@ -3042,7 +3049,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn read_virtual_zmmword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedZmmRegister> {
         let mut r = super::xmm::BxPackedZmmRegister::default();
         for n in 0..8u64 {
@@ -3056,7 +3063,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_zmmword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedZmmRegister,
     ) -> Result<()> {
         for n in 0..8u64 {
@@ -3070,9 +3077,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn v_read_zmmword(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedZmmRegister> {
-        let offset = offset.into();
         // ZMM operands only exist under EVEX, which rusty_box decodes in long mode.
         self.read_virtual_zmmword_64(seg, offset)
     }
@@ -3080,10 +3086,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn v_write_zmmword(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedZmmRegister,
     ) -> Result<()> {
-        let offset = offset.into();
         self.write_virtual_zmmword_64(seg, offset, val)
     }
 
@@ -3092,9 +3097,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn v_read_ymmword(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedYmmRegister> {
-        let offset = offset.into();
         // YMM operations are only used in long mode (VEX/EVEX)
         self.read_virtual_ymmword_64(seg, offset)
     }
@@ -3102,10 +3106,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn v_write_ymmword(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedYmmRegister,
     ) -> Result<()> {
-        let offset = offset.into();
         self.write_virtual_ymmword_64(seg, offset, val)
     }
 
@@ -3119,7 +3122,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn prepare_rmw_virtual_byte_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> Result<BxLinAddress> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
@@ -3130,7 +3133,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// RMW read byte in 64-bit mode.
     /// Bochs: read_RMW_virtual_byte (access.h) — thin wrapper
     #[inline]
-    pub(crate) fn read_rmw_virtual_byte_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u8> {
+    pub(crate) fn read_rmw_virtual_byte_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u8> {
         self.prepare_rmw_virtual_byte_64(seg, offset)?;
         Ok(self.read_prepared_rmw_byte())
     }
@@ -3140,7 +3147,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn prepare_rmw_virtual_word_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> Result<BxLinAddress> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
@@ -3151,7 +3158,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// RMW read word in 64-bit mode.
     /// Bochs: read_RMW_virtual_word (access.h) — thin wrapper
     #[inline]
-    pub(crate) fn read_rmw_virtual_word_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u16> {
+    pub(crate) fn read_rmw_virtual_word_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u16> {
         self.prepare_rmw_virtual_word_64(seg, offset)?;
         Ok(self.read_prepared_rmw_word())
     }
@@ -3161,7 +3172,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn prepare_rmw_virtual_dword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> Result<BxLinAddress> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
@@ -3172,7 +3183,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// RMW read dword in 64-bit mode.
     /// Bochs: read_RMW_virtual_dword (access.h) — thin wrapper
     #[inline]
-    pub(crate) fn read_rmw_virtual_dword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u32> {
+    pub(crate) fn read_rmw_virtual_dword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u32> {
         self.prepare_rmw_virtual_dword_64(seg, offset)?;
         Ok(self.read_prepared_rmw_dword())
     }

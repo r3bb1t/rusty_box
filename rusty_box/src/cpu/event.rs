@@ -7,7 +7,7 @@ use super::svm::{
     BX_VM_CR_MSR_INIT_REDIRECT_MASK, SVM_INTERCEPT0_INIT, SVM_INTERCEPT0_SMI, SvmVmexit,
 };
 use super::vmx::VmxVmexitReason;
-use crate::config::BxLinAddress;
+use crate::config::{BxEffAddress, BxLinAddress};
 
 /// What one INTA moment produced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -941,7 +941,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// base must be applied (nonzero in real mode and non-flat protected
     /// segments; zero in 64-bit).
     fn pending_code_breakpoint_trap(&self) -> u32 {
-        let laddr = self.get_laddr(BxSegregs::Cs as usize, self.prev_rip);
+        let laddr = self.get_laddr(BxSegregs::Cs as usize, BxEffAddress::new(self.prev_rip));
         self.code_breakpoint_match(laddr)
     }
 

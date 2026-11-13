@@ -115,7 +115,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             0xFFFFFFFF
         };
-        let cs_raw = self.read_virtual_word_64(seg, (eaddr.wrapping_add(8)) & asize_mask)?;
+        let cs_raw = self.read_virtual_word_64(seg, eaddr.wrapping_add(8).masked(asize_mask))?;
 
         // BX_ASSERT(protected_mode()) — in 64-bit mode we are always in protected mode
 
@@ -189,7 +189,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             0xFFFFFFFF
         };
-        let cs_raw = self.read_virtual_word_64(seg, (eaddr.wrapping_add(8)) & asize_mask)?;
+        let cs_raw = self.read_virtual_word_64(seg, eaddr.wrapping_add(8).masked(asize_mask))?;
 
         // Bochs ctrl_xfer64.cc JMP64_Ep: BX_ASSERT(protected_mode()) — 64-bit
         // mode is always protected mode — then jump_protected.

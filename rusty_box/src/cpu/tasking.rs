@@ -11,7 +11,7 @@ use super::descriptor::{
     is_code_segment_readable, is_data_segment, is_data_segment_writable,
 };
 use super::segment_ctrl_pro::parse_selector;
-use crate::config::BxLinAddress;
+use crate::config::{BxEffAddress, BxLinAddress};
 
 // Task switch source constants — Bochs cpu.h enum task_switch_source.
 // SVM/VMX task-switch qualification reads these values directly so the
@@ -302,7 +302,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     push_cs_lip_ssp = true;
                     old_ssp_cet = self.ssp();
                     old_cs_cet = self.sregs[BxSegregs::Cs as usize].selector.value;
-                    old_rip_cet = self.get_laddr32(BxSegregs::Cs as usize, self.eip()).get();
+                    old_rip_cet = self
+                        .get_laddr32(BxSegregs::Cs as usize, BxEffAddress::from_u32(self.eip()))
+                        .get();
                 }
             }
             if source == BX_TASK_FROM_IRET {
@@ -631,7 +633,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     tracing::error!("task_switch shadow_stack_restore: CS mismatch");
                     self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
                 }
-                let cur_lip = self.get_laddr32(BxSegregs::Cs as usize, self.eip()).get();
+                let cur_lip = self
+                    .get_laddr32(BxSegregs::Cs as usize, BxEffAddress::from_u32(self.eip()))
+                    .get();
                 if cur_lip != shadow_lip_cet {
                     tracing::error!("task_switch shadow_stack_restore: LIP mismatch");
                     self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;

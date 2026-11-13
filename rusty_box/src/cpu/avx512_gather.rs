@@ -34,6 +34,7 @@
 use rusty_box_decoder::BX_NIL_REGISTER;
 
 use super::decoder::{BxSegregs, Instruction};
+use crate::config::BxEffAddress;
 
 /// Number of 32-bit elements per vector length: VL=128→4, VL=256→8, VL=512→16
 #[inline]
@@ -94,7 +95,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Compute the effective address for VSIB element `n` with a 32-bit
     /// (dword) index lane. Bochs `BxResolveGatherD`.
     #[inline]
-    fn resolve_gather_d(&self, instr: &Instruction, sib_idx: u8, n: usize) -> u64 {
+    fn resolve_gather_d(&self, instr: &Instruction, sib_idx: u8, n: usize) -> BxEffAddress {
         let index = i64::from(self.vmm[sib_idx as usize].zmm32s(n));
         let scale = instr.sib_scale();
         let disp = i64::from(instr.displ32s());
@@ -102,17 +103,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let off = (index << scale).wrapping_add(disp);
         let addr = base.wrapping_add(off as u64);
         if instr.as64_l() != 0 {
-            addr
+            BxEffAddress::new(addr)
         } else {
             // 32-bit addressing: effective address truncated to 32 bits.
-            addr as u32 as u64
+            BxEffAddress::from_u32(addr as u32)
         }
     }
 
     /// Compute the effective address for VSIB element `n` with a 64-bit
     /// (qword) index lane. Bochs `BxResolveGatherQ`.
     #[inline]
-    fn resolve_gather_q(&self, instr: &Instruction, sib_idx: u8, n: usize) -> u64 {
+    fn resolve_gather_q(&self, instr: &Instruction, sib_idx: u8, n: usize) -> BxEffAddress {
         let index = self.vmm[sib_idx as usize].zmm64s(n);
         let scale = instr.sib_scale();
         let disp = i64::from(instr.displ32s());
@@ -120,9 +121,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let off = (index << scale).wrapping_add(disp);
         let addr = base.wrapping_add(off as u64);
         if instr.as64_l() != 0 {
-            addr
+            BxEffAddress::new(addr)
         } else {
-            addr as u32 as u64
+            // 32-bit addressing: effective address truncated to 32 bits.
+            BxEffAddress::from_u32(addr as u32)
         }
     }
 
@@ -585,6 +587,7 @@ mod tests {
     use rusty_box_decoder::fetch_decode64;
     use rusty_box_decoder::opcode::Opcode;
 
+    use crate::config::BxEffAddress;
     use crate::cpu::decoder::{BxSegregs, Instruction};
 
     /// Build an EVEX.512 instruction with default sizes; tests fill in
@@ -660,7 +663,11 @@ mod tests {
         );
         // 0x4000 + (-1 << 2) + 0 = 0x3FFC
         let addr = cpu.resolve_gather_d(&i, 5, 0);
-        assert_eq!(addr, 0x3FFC, "signed index sign-extended before scaling");
+        assert_eq!(
+            addr,
+            BxEffAddress::new(0x3FFC),
+            "signed index sign-extended before scaling"
+        );
     }
 
     #[test]
@@ -684,7 +691,7 @@ mod tests {
         );
         // 0x10000 + (-2 << 3) + 0x10 = 0x10000 - 16 + 16 = 0x10000
         let addr = cpu.resolve_gather_q(&i, 7, 0);
-        assert_eq!(addr, 0x10000);
+        assert_eq!(addr, BxEffAddress::new(0x10000));
     }
 
     #[test]

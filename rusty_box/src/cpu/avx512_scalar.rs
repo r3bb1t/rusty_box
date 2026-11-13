@@ -753,13 +753,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // Memory form store: write element [0] to memory
             if (mask & 1) != 0 {
                 let src = read_zmm(self, instr.src());
-                let laddr = self.resolve_addr(instr);
+                let eaddr = self.resolve_addr(instr);
                 let seg = BxSegregs::from(instr.seg());
                 let val = src.zmm64u(0);
                 let lo = val as u32;
                 let hi = (val >> 32) as u32;
-                self.v_write_dword(seg, laddr, lo)?;
-                self.v_write_dword(seg, laddr + 4, hi)?;
+                self.v_write_dword(seg, eaddr, lo)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(4), hi)?;
             }
         }
         Ok(())

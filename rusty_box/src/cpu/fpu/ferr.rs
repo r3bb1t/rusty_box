@@ -109,7 +109,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.the_i387.fds = self.sregs[seg_idx].selector.value;
             // Resolve the effective address that the instruction references.
             let eaddr = self.resolve_addr(instr);
-            self.the_i387.fdp = eaddr;
+            // FDP holds the operand's offset as a register value.
+            self.the_i387.fdp = eaddr.get();
         }
     }
 

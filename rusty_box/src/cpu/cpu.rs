@@ -17,7 +17,7 @@ use super::lazy_flags::BxLazyflagsEntry;
 use super::svm::VmcbCache;
 use super::vmx::{VmcsCache, VmcsMapping, VmxCap};
 use super::xmm::{BxMxcsr, BxZmmReg};
-use crate::config::{A20Mask, BxAddress, BxLinAddress, BxPhyAddress, BxPtrEquiv};
+use crate::config::{A20Mask, BxAddress, BxEffAddress, BxLinAddress, BxPhyAddress, BxPtrEquiv};
 use crate::cpu::cpuid::{SVMExtensions, VMXExtensions};
 use crate::cpu::crregs::BxEfer;
 use crate::cpu::decoder::features::X86Feature;
@@ -955,14 +955,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Mode-dispatching address resolver (matches BX_CPU_RESOLVE_ADDR).
     /// Returns 64-bit effective address in long mode, zero-extended 32-bit otherwise.
     #[inline]
-    pub fn resolve_addr(&self, instr: &Instruction) -> u64 {
+    pub fn resolve_addr(&self, instr: &Instruction) -> BxEffAddress {
         // Bochs BX_CPU_RESOLVE_ADDR: (i)->as64L() ? BxResolve64 : BxResolve32
         // Must use per-instruction address-size attribute, NOT CPU mode.
         // In 64-bit mode with 67h prefix, as64_l()==0 → use 32-bit resolution.
         if instr.as64_l() != 0 {
             self.resolve_addr64(instr)
         } else {
-            u64::from(self.resolve_addr32(instr))
+            BxEffAddress::from_u32(self.resolve_addr32(instr))
         }
     }
 
@@ -1004,7 +1004,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Resolve effective address (64-bit addressing mode)
     /// Matching BX_CPU_RESOLVE_ADDR_64
     /// Made pub(crate) so it can be accessed from ctrl_xfer64.rs
-    pub(crate) fn resolve_addr64(&self, instr: &Instruction) -> u64 {
+    pub(crate) fn resolve_addr64(&self, instr: &Instruction) -> BxEffAddress {
         // Calculate: base + (index << scale) + displacement
         // base_reg: 0-15 = GPR, 16 = RIP (for RIP-relative), 19 = NIL (no base)
         // gen_reg[16] holds RIP (already advanced by ilen before execution),
@@ -1031,7 +1031,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             eaddr = eaddr.wrapping_add(index_val << scale);
         }
 
-        eaddr
+        BxEffAddress::new(eaddr)
     }
 
     /// Read 8-bit register with extend8bitL support (matches BX_READ_8BIT_REGx)
@@ -1499,20 +1499,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.gen_reg[index].set_hrx(0);
     }
 
+    /// The linear address of `offset`'s low 32 bits in segment `seg`, in
+    /// 32-bit arithmetic (Bochs `get_laddr32`, cpu.h).
     #[inline]
-    pub(super) fn get_laddr32(&self, seg: usize, offset: u32) -> BxLinAddress {
-        BxLinAddress::from_u32((self.sregs[seg].cache.u.segment_base() + u64::from(offset)).low32())
+    pub(super) fn get_laddr32(&self, seg: usize, offset: BxEffAddress) -> BxLinAddress {
+        let base = self.sregs[seg].cache.u.segment_base();
+        BxLinAddress::from_u32((base + u64::from(offset.low32())).low32())
     }
 
     /// The linear address of `offset` in segment `seg` under the current
     /// mode: 64-bit arithmetic in 64-bit mode, 32-bit otherwise (Bochs
     /// `get_laddr`, cpu.h).
     #[inline]
-    pub(super) fn get_laddr(&self, seg: usize, offset: u64) -> BxLinAddress {
+    pub(super) fn get_laddr(&self, seg: usize, offset: BxEffAddress) -> BxLinAddress {
         if self.long64_mode() {
             self.get_laddr64(seg, offset)
         } else {
-            self.get_laddr32(seg, offset as u32)
+            self.get_laddr32(seg, offset)
         }
     }
 
@@ -1520,14 +1523,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// In 64-bit mode, ES/CS/SS/DS bases are forced to 0 per Intel SDM.
     /// Only FS and GS may have non-zero bases (loaded via MSR).
     #[inline]
-    pub(super) fn get_laddr64(&self, seg: usize, offset: u64) -> BxLinAddress {
+    pub(super) fn get_laddr64(&self, seg: usize, offset: BxEffAddress) -> BxLinAddress {
         // BxSegregs: ES=0, CS=1, SS=2, DS=3, FS=4, GS=5
         if seg < 4 {
             // ES, CS, SS, DS — base is always 0 in 64-bit mode
-            BxLinAddress::new(offset)
+            BxLinAddress::new(offset.get())
         } else {
             // FS, GS — use actual segment base from MSR
-            self.sregs[seg].cache.u.segment_base().wrapping_add(offset)
+            self.sregs[seg]
+                .cache
+                .u
+                .segment_base()
+                .wrapping_add(offset.get())
         }
     }
 }
@@ -3258,7 +3265,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 self.set_eip(eip);
             }
 
-            laddr = self.get_laddr32(BxSegregs::Cs as _, eip);
+            laddr = self.get_laddr32(BxSegregs::Cs as _, BxEffAddress::from_u32(eip));
             let cs_base = self.sregs[BxSegregs::Cs as usize].cache.u.segment_base();
             tracing::trace!(
                 "prefetch: CS.base={:#x}, EIP={:#x}, laddr={:#x}",

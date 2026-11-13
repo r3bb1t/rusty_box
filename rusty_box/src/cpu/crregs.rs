@@ -1549,7 +1549,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = super::decoder::BxSegregs::from(instr.seg());
-            linear_addr = self.get_laddr(seg as usize, u64::from(eaddr));
+            linear_addr = self.get_laddr(seg as usize, eaddr);
             self.v_read_word(seg, eaddr)?
         };
 

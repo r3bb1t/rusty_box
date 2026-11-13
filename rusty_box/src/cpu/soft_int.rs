@@ -303,7 +303,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Read lower and upper bounds from memory (2 words)
         let bound_min = self.v_read_word(seg, eaddr)? as i16;
-        let bound_max = self.v_read_word(seg, eaddr.wrapping_add(2) & asize_mask)? as i16;
+        let bound_max = self.v_read_word(seg, eaddr.wrapping_add(2).masked(asize_mask))? as i16;
 
         // Check if value is outside bounds
         if op1_16 < bound_min || op1_16 > bound_max {
@@ -343,7 +343,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Read lower and upper bounds from memory (2 dwords)
         let bound_min = self.v_read_dword(seg, eaddr)? as i32;
-        let bound_max = self.v_read_dword(seg, eaddr.wrapping_add(4) & asize_mask)? as i32;
+        let bound_max = self.v_read_dword(seg, eaddr.wrapping_add(4).masked(asize_mask))? as i32;
 
         // Check if value is outside bounds
         if op1_32 < bound_min || op1_32 > bound_max {

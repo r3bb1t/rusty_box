@@ -10,7 +10,7 @@
 
 use super::access::{forward_byte_copy, host_fill_bytes};
 use super::decoder::{BxSegregs, Instruction};
-use crate::config::{BxLinAddress, BxPhyAddress};
+use crate::config::{BxEffAddress, BxLinAddress, BxPhyAddress};
 use crate::convert::usize_from_u32;
 use crate::cpu::rusty_box::MemoryAccessType;
 
@@ -104,8 +104,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn fast_rep_movs32_chunk(
         &mut self,
         source_seg: BxSegregs,
-        source_offset: u32,
-        destination_offset: u32,
+        source_offset: BxEffAddress,
+        destination_offset: BxEffAddress,
         guest_count: u32,
         element_size: usize,
     ) -> super::Result<Option<RepMovsChunk>> {
@@ -133,8 +133,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         ) else {
             return Ok(None);
         };
-        if !self.read_virtual_checks(source_seg as usize, source_offset, span.bytes)
-            || !self.write_virtual_checks(BxSegregs::Es as usize, destination_offset, span.bytes)
+        if !self.read_virtual_checks(source_seg as usize, source_offset.low32(), span.bytes)
+            || !self.write_virtual_checks(
+                BxSegregs::Es as usize,
+                destination_offset.low32(),
+                span.bytes,
+            )
             || self.smc_range_has_cached_code(destination_paddr, span.bytes)
         {
             return Ok(None);
@@ -151,7 +155,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     #[inline]
     fn fast_rep_stos32_chunk(
         &mut self,
-        destination_offset: u32,
+        destination_offset: BxEffAddress,
         guest_count: u32,
         element_size: usize,
     ) -> super::Result<Option<RepStosChunk>> {
@@ -172,8 +176,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         else {
             return Ok(None);
         };
-        if !self.write_virtual_checks(BxSegregs::Es as usize, destination_offset, span.bytes)
-            || self.smc_range_has_cached_code(destination_paddr, span.bytes)
+        if !self.write_virtual_checks(
+            BxSegregs::Es as usize,
+            destination_offset.low32(),
+            span.bytes,
+        ) || self.smc_range_has_cached_code(destination_paddr, span.bytes)
         {
             return Ok(None);
         }
@@ -189,8 +196,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn fast_rep_movs64_chunk(
         &mut self,
         source_seg: BxSegregs,
-        source_offset: u64,
-        destination_offset: u64,
+        source_offset: BxEffAddress,
+        destination_offset: BxEffAddress,
         guest_count: u64,
         element_size: usize,
     ) -> super::Result<Option<RepMovsChunk>> {
@@ -234,7 +241,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     #[inline]
     fn fast_rep_stos64_chunk(
         &mut self,
-        destination_offset: u64,
+        destination_offset: BxEffAddress,
         guest_count: u64,
         element_size: usize,
     ) -> super::Result<Option<RepStosChunk>> {
@@ -271,8 +278,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVSB - Move byte from DS:SI to ES:DI (16-bit address mode)
     pub fn movsb16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let si = self.si() as u32;
-        let di = self.di() as u32;
+        let si = BxEffAddress::from_u16(self.si());
+        let di = BxEffAddress::from_u16(self.di());
 
         let byte = self.read_virtual_byte(BxSegregs::from(instr.seg()), si)?;
         self.write_virtual_byte(BxSegregs::Es, di, byte)?;
@@ -298,8 +305,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let esi = self.esi();
         let edi = self.edi();
 
-        let byte = self.read_virtual_byte(BxSegregs::from(instr.seg()), esi)?;
-        self.write_virtual_byte(BxSegregs::Es, edi, byte)?;
+        let byte =
+            self.read_virtual_byte(BxSegregs::from(instr.seg()), BxEffAddress::from_u32(esi))?;
+        self.write_virtual_byte(BxSegregs::Es, BxEffAddress::from_u32(edi), byte)?;
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
         self.set_rsi(esi.wrapping_add(increment) as u64);
@@ -310,8 +318,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVSW - Move word from DS:SI to ES:DI (16-bit address mode)
     pub fn movsw16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let si = self.si() as u32;
-        let di = self.di() as u32;
+        let si = BxEffAddress::from_u16(self.si());
+        let di = BxEffAddress::from_u16(self.di());
 
         let word = self.read_virtual_word(BxSegregs::from(instr.seg()), si)?;
         self.write_virtual_word(BxSegregs::Es, di, word)?;
@@ -336,8 +344,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let esi = self.esi();
         let edi = self.edi();
 
-        let word = self.read_virtual_word(BxSegregs::from(instr.seg()), esi)?;
-        self.write_virtual_word(BxSegregs::Es, edi, word)?;
+        let word =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), BxEffAddress::from_u32(esi))?;
+        self.write_virtual_word(BxSegregs::Es, BxEffAddress::from_u32(edi), word)?;
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
         self.set_rsi(esi.wrapping_add(increment) as u64);
@@ -348,8 +357,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVSD - Move dword from DS:SI to ES:DI (16-bit address mode)
     pub fn movsd16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let si = self.si() as u32;
-        let di = self.di() as u32;
+        let si = BxEffAddress::from_u16(self.si());
+        let di = BxEffAddress::from_u16(self.di());
 
         let dword = self.read_virtual_dword(BxSegregs::from(instr.seg()), si)?;
         self.write_virtual_dword(BxSegregs::Es, di, dword)?;
@@ -374,8 +383,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let esi = self.esi();
         let edi = self.edi();
 
-        let dword = self.read_virtual_dword(BxSegregs::from(instr.seg()), esi)?;
-        self.write_virtual_dword(BxSegregs::Es, edi, dword)?;
+        let dword =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), BxEffAddress::from_u32(esi))?;
+        self.write_virtual_dword(BxSegregs::Es, BxEffAddress::from_u32(edi), dword)?;
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
         self.set_rsi(esi.wrapping_add(increment) as u64);
@@ -390,7 +400,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// STOSB - Store AL at ES:DI (16-bit address mode)
     pub fn stosb16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let di = self.di() as u32;
+        let di = BxEffAddress::from_u16(self.di());
         let al = self.al();
 
         self.write_virtual_byte(BxSegregs::Es, di, al)?;
@@ -411,7 +421,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let edi = self.edi();
         let al = self.al();
 
-        self.write_virtual_byte(BxSegregs::Es, edi, al)?;
+        self.write_virtual_byte(BxSegregs::Es, BxEffAddress::from_u32(edi), al)?;
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
         self.set_rdi(edi.wrapping_add(increment) as u64);
@@ -421,7 +431,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// STOSW - Store AX at ES:DI (16-bit address mode)
     pub fn stosw16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let di = self.di() as u32;
+        let di = BxEffAddress::from_u16(self.di());
         let ax = self.ax();
 
         self.write_virtual_word(BxSegregs::Es, di, ax)?;
@@ -442,7 +452,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let edi = self.edi();
         let ax = self.ax();
 
-        self.write_virtual_word(BxSegregs::Es, edi, ax)?;
+        self.write_virtual_word(BxSegregs::Es, BxEffAddress::from_u32(edi), ax)?;
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
         self.set_rdi(edi.wrapping_add(increment) as u64);
@@ -452,7 +462,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// STOSD - Store EAX at ES:DI (16-bit address mode)
     pub fn stosd16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let di = self.di() as u32;
+        let di = BxEffAddress::from_u16(self.di());
         let eax = self.eax();
 
         self.write_virtual_dword(BxSegregs::Es, di, eax)?;
@@ -473,7 +483,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let edi = self.edi();
         let eax = self.eax();
 
-        self.write_virtual_dword(BxSegregs::Es, edi, eax)?;
+        self.write_virtual_dword(BxSegregs::Es, BxEffAddress::from_u32(edi), eax)?;
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
         self.set_rdi(edi.wrapping_add(increment) as u64);
@@ -487,7 +497,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// LODSB - Load byte from DS:SI into AL (16-bit address mode)
     pub fn lodsb16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let si = self.si() as u32;
+        let si = BxEffAddress::from_u16(self.si());
 
         let byte = self.read_virtual_byte(BxSegregs::from(instr.seg()), si)?;
 
@@ -508,7 +518,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn lodsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
 
-        let byte = self.read_virtual_byte(BxSegregs::from(instr.seg()), esi)?;
+        let byte =
+            self.read_virtual_byte(BxSegregs::from(instr.seg()), BxEffAddress::from_u32(esi))?;
         self.set_al(byte);
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
@@ -519,7 +530,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// LODSW - Load word from DS:SI into AX (16-bit address mode)
     pub fn lodsw16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let si = self.si() as u32;
+        let si = BxEffAddress::from_u16(self.si());
 
         let word = self.read_virtual_word(BxSegregs::from(instr.seg()), si)?;
 
@@ -540,7 +551,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn lodsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
 
-        let word = self.read_virtual_word(BxSegregs::from(instr.seg()), esi)?;
+        let word =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), BxEffAddress::from_u32(esi))?;
         self.set_ax(word);
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
@@ -551,7 +563,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// LODSD - Load dword from DS:SI into EAX (16-bit address mode)
     pub fn lodsd16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let si = self.si() as u32;
+        let si = BxEffAddress::from_u16(self.si());
 
         let dword = self.read_virtual_dword(BxSegregs::from(instr.seg()), si)?;
 
@@ -572,7 +584,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn lodsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
 
-        let dword = self.read_virtual_dword(BxSegregs::from(instr.seg()), esi)?;
+        let dword =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), BxEffAddress::from_u32(esi))?;
         self.set_eax(dword);
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
@@ -587,8 +600,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CMPSB - Compare bytes at DS:SI and ES:DI (16-bit address mode)
     pub fn cmpsb16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let si = self.si() as u32;
-        let di = self.di() as u32;
+        let si = BxEffAddress::from_u16(self.si());
+        let di = BxEffAddress::from_u16(self.di());
 
         let op1 = self.read_virtual_byte(BxSegregs::from(instr.seg()), si)?;
         let op2 = self.read_virtual_byte(BxSegregs::Es, di)?;
@@ -616,8 +629,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let esi = self.esi();
         let edi = self.edi();
 
-        let op1 = self.read_virtual_byte(BxSegregs::from(instr.seg()), esi)?;
-        let op2 = self.read_virtual_byte(BxSegregs::Es, edi)?;
+        let op1 =
+            self.read_virtual_byte(BxSegregs::from(instr.seg()), BxEffAddress::from_u32(esi))?;
+        let op2 = self.read_virtual_byte(BxSegregs::Es, BxEffAddress::from_u32(edi))?;
 
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub8(op1, op2, result);
@@ -631,8 +645,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CMPSW - Compare words at DS:SI and ES:DI (16-bit address mode)
     pub fn cmpsw16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let si = self.si() as u32;
-        let di = self.di() as u32;
+        let si = BxEffAddress::from_u16(self.si());
+        let di = BxEffAddress::from_u16(self.di());
 
         let op1 = self.read_virtual_word(BxSegregs::from(instr.seg()), si)?;
         let op2 = self.read_virtual_word(BxSegregs::Es, di)?;
@@ -660,8 +674,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let esi = self.esi();
         let edi = self.edi();
 
-        let op1 = self.read_virtual_word(BxSegregs::from(instr.seg()), esi)?;
-        let op2 = self.read_virtual_word(BxSegregs::Es, edi)?;
+        let op1 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), BxEffAddress::from_u32(esi))?;
+        let op2 = self.read_virtual_word(BxSegregs::Es, BxEffAddress::from_u32(edi))?;
 
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub16(op1, op2, result);
@@ -675,8 +690,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CMPSD - Compare dwords at DS:SI and ES:DI (16-bit address mode)
     pub fn cmpsd16(&mut self, instr: &Instruction) -> super::Result<()> {
-        let si = self.si() as u32;
-        let di = self.di() as u32;
+        let si = BxEffAddress::from_u16(self.si());
+        let di = BxEffAddress::from_u16(self.di());
 
         let op1 = self.read_virtual_dword(BxSegregs::from(instr.seg()), si)?;
         let op2 = self.read_virtual_dword(BxSegregs::Es, di)?;
@@ -704,8 +719,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let esi = self.esi();
         let edi = self.edi();
 
-        let op1 = self.read_virtual_dword(BxSegregs::from(instr.seg()), esi)?;
-        let op2 = self.read_virtual_dword(BxSegregs::Es, edi)?;
+        let op1 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), BxEffAddress::from_u32(esi))?;
+        let op2 = self.read_virtual_dword(BxSegregs::Es, BxEffAddress::from_u32(edi))?;
 
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub32(op1, op2, result);
@@ -723,7 +739,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// SCASB - Compare AL with byte at ES:DI (16-bit address mode)
     pub fn scasb16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let di = self.di() as u32;
+        let di = BxEffAddress::from_u16(self.di());
         let al = self.al();
 
         let op2 = self.read_virtual_byte(BxSegregs::Es, di)?;
@@ -747,7 +763,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let edi = self.edi();
         let al = self.al();
 
-        let op2 = self.read_virtual_byte(BxSegregs::Es, edi)?;
+        let op2 = self.read_virtual_byte(BxSegregs::Es, BxEffAddress::from_u32(edi))?;
 
         let result = al.wrapping_sub(op2);
         self.update_flags_sub8(al, op2, result);
@@ -760,7 +776,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// SCASW - Compare AX with word at ES:DI (16-bit address mode)
     pub fn scasw16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let di = self.di() as u32;
+        let di = BxEffAddress::from_u16(self.di());
         let ax = self.ax();
 
         let op2 = self.read_virtual_word(BxSegregs::Es, di)?;
@@ -784,7 +800,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let edi = self.edi();
         let ax = self.ax();
 
-        let op2 = self.read_virtual_word(BxSegregs::Es, edi)?;
+        let op2 = self.read_virtual_word(BxSegregs::Es, BxEffAddress::from_u32(edi))?;
 
         let result = ax.wrapping_sub(op2);
         self.update_flags_sub16(ax, op2, result);
@@ -797,7 +813,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// SCASD - Compare EAX with dword at ES:DI (16-bit address mode)
     pub fn scasd16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let di = self.di() as u32;
+        let di = BxEffAddress::from_u16(self.di());
         let eax = self.eax();
 
         let op2 = self.read_virtual_dword(BxSegregs::Es, di)?;
@@ -821,7 +837,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let edi = self.edi();
         let eax = self.eax();
 
-        let op2 = self.read_virtual_dword(BxSegregs::Es, edi)?;
+        let op2 = self.read_virtual_dword(BxSegregs::Es, BxEffAddress::from_u32(edi))?;
 
         let result = eax.wrapping_sub(op2);
         self.update_flags_sub32(eax, op2, result);
@@ -1405,7 +1421,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while ecx != 0 && !df {
             let esi = self.esi();
             let edi = self.edi();
-            let Some(chunk) = self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 1)? else {
+            let Some(chunk) = self.fast_rep_movs32_chunk(
+                seg,
+                BxEffAddress::from_u32(esi),
+                BxEffAddress::from_u32(edi),
+                ecx,
+                1,
+            )?
+            else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -1464,7 +1487,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while ecx != 0 && !df {
             let esi = self.esi();
             let edi = self.edi();
-            let Some(chunk) = self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 2)? else {
+            let Some(chunk) = self.fast_rep_movs32_chunk(
+                seg,
+                BxEffAddress::from_u32(esi),
+                BxEffAddress::from_u32(edi),
+                ecx,
+                2,
+            )?
+            else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -1523,7 +1553,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while ecx != 0 && !df {
             let esi = self.esi();
             let edi = self.edi();
-            let Some(chunk) = self.fast_rep_movs32_chunk(seg, esi, edi, ecx, 4)? else {
+            let Some(chunk) = self.fast_rep_movs32_chunk(
+                seg,
+                BxEffAddress::from_u32(esi),
+                BxEffAddress::from_u32(edi),
+                ecx,
+                4,
+            )?
+            else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -1581,7 +1618,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while ecx != 0 && !df {
             let edi = self.edi();
-            let Some(chunk) = self.fast_rep_stos32_chunk(edi, ecx, 1)? else {
+            let Some(chunk) = self.fast_rep_stos32_chunk(BxEffAddress::from_u32(edi), ecx, 1)?
+            else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -1638,7 +1676,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while ecx != 0 && !df {
             let edi = self.edi();
-            let Some(chunk) = self.fast_rep_stos32_chunk(edi, ecx, 2)? else {
+            let Some(chunk) = self.fast_rep_stos32_chunk(BxEffAddress::from_u32(edi), ecx, 2)?
+            else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -1698,7 +1737,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while ecx != 0 && !df {
             let edi = self.edi();
-            let Some(chunk) = self.fast_rep_stos32_chunk(edi, ecx, 4)? else {
+            let Some(chunk) = self.fast_rep_stos32_chunk(BxEffAddress::from_u32(edi), ecx, 4)?
+            else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -2632,8 +2672,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn movsb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
         let rdi = self.rdi();
-        let byte = self.read_virtual_byte_64(BxSegregs::from(instr.seg()), rsi)?;
-        self.write_virtual_byte_64(BxSegregs::Es, rdi, byte)?;
+        let byte =
+            self.read_virtual_byte_64(BxSegregs::from(instr.seg()), BxEffAddress::new(rsi))?;
+        self.write_virtual_byte_64(BxSegregs::Es, BxEffAddress::new(rdi), byte)?;
         let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
         self.set_rsi(rsi.wrapping_add(delta));
         self.set_rdi(rdi.wrapping_add(delta));
@@ -2649,7 +2690,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while rcx != 0 && !df {
             let rsi = self.rsi();
             let rdi = self.rdi();
-            let Some(chunk) = self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 1)? else {
+            let Some(chunk) = self.fast_rep_movs64_chunk(
+                seg,
+                BxEffAddress::new(rsi),
+                BxEffAddress::new(rdi),
+                rcx,
+                1,
+            )?
+            else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -2702,8 +2750,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn movsw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
         let rdi = self.rdi();
-        let val = self.read_virtual_word_64(BxSegregs::from(instr.seg()), rsi)?;
-        self.write_virtual_word_64(BxSegregs::Es, rdi, val)?;
+        let val =
+            self.read_virtual_word_64(BxSegregs::from(instr.seg()), BxEffAddress::new(rsi))?;
+        self.write_virtual_word_64(BxSegregs::Es, BxEffAddress::new(rdi), val)?;
         let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
         self.set_rsi(rsi.wrapping_add(delta));
         self.set_rdi(rdi.wrapping_add(delta));
@@ -2719,7 +2768,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while rcx != 0 && !df {
             let rsi = self.rsi();
             let rdi = self.rdi();
-            let Some(chunk) = self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 2)? else {
+            let Some(chunk) = self.fast_rep_movs64_chunk(
+                seg,
+                BxEffAddress::new(rsi),
+                BxEffAddress::new(rdi),
+                rcx,
+                2,
+            )?
+            else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -2772,8 +2828,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn movsd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
         let rdi = self.rdi();
-        let val = self.read_virtual_dword_64(BxSegregs::from(instr.seg()), rsi)?;
-        self.write_virtual_dword_64(BxSegregs::Es, rdi, val)?;
+        let val =
+            self.read_virtual_dword_64(BxSegregs::from(instr.seg()), BxEffAddress::new(rsi))?;
+        self.write_virtual_dword_64(BxSegregs::Es, BxEffAddress::new(rdi), val)?;
         let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
         self.set_rsi(rsi.wrapping_add(delta));
         self.set_rdi(rdi.wrapping_add(delta));
@@ -2789,7 +2846,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while rcx != 0 && !df {
             let rsi = self.rsi();
             let rdi = self.rdi();
-            let Some(chunk) = self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 4)? else {
+            let Some(chunk) = self.fast_rep_movs64_chunk(
+                seg,
+                BxEffAddress::new(rsi),
+                BxEffAddress::new(rdi),
+                rcx,
+                4,
+            )?
+            else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -2844,7 +2908,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn stosb64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let rdi = self.rdi();
         let al = self.al();
-        self.write_virtual_byte_64(BxSegregs::Es, rdi, al)?;
+        self.write_virtual_byte_64(BxSegregs::Es, BxEffAddress::new(rdi), al)?;
         let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
         self.set_rdi(rdi.wrapping_add(delta));
         Ok(())
@@ -2858,7 +2922,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while rcx != 0 && !df {
             let rdi = self.rdi();
-            let Some(chunk) = self.fast_rep_stos64_chunk(rdi, rcx, 1)? else {
+            let Some(chunk) = self.fast_rep_stos64_chunk(BxEffAddress::new(rdi), rcx, 1)? else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -2910,7 +2974,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn stosw64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let rdi = self.rdi();
         let ax = self.ax();
-        self.write_virtual_word_64(BxSegregs::Es, rdi, ax)?;
+        self.write_virtual_word_64(BxSegregs::Es, BxEffAddress::new(rdi), ax)?;
         let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
         self.set_rdi(rdi.wrapping_add(delta));
         Ok(())
@@ -2924,7 +2988,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while rcx != 0 && !df {
             let rdi = self.rdi();
-            let Some(chunk) = self.fast_rep_stos64_chunk(rdi, rcx, 2)? else {
+            let Some(chunk) = self.fast_rep_stos64_chunk(BxEffAddress::new(rdi), rcx, 2)? else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -2979,7 +3043,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn stosd64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let rdi = self.rdi();
         let eax = self.eax();
-        self.write_virtual_dword_64(BxSegregs::Es, rdi, eax)?;
+        self.write_virtual_dword_64(BxSegregs::Es, BxEffAddress::new(rdi), eax)?;
         let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
         self.set_rdi(rdi.wrapping_add(delta));
         Ok(())
@@ -2993,7 +3057,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while rcx != 0 && !df {
             let rdi = self.rdi();
-            let Some(chunk) = self.fast_rep_stos64_chunk(rdi, rcx, 4)? else {
+            let Some(chunk) = self.fast_rep_stos64_chunk(BxEffAddress::new(rdi), rcx, 4)? else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -3049,7 +3113,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// LODSB with 64-bit addressing
     pub fn lodsb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
-        let byte = self.read_virtual_byte_64(BxSegregs::from(instr.seg()), rsi)?;
+        let byte =
+            self.read_virtual_byte_64(BxSegregs::from(instr.seg()), BxEffAddress::new(rsi))?;
         self.set_al(byte);
         let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
         self.set_rsi(rsi.wrapping_add(delta));
@@ -3085,7 +3150,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// LODSW with 64-bit addressing
     pub fn lodsw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
-        let val = self.read_virtual_word_64(BxSegregs::from(instr.seg()), rsi)?;
+        let val =
+            self.read_virtual_word_64(BxSegregs::from(instr.seg()), BxEffAddress::new(rsi))?;
         self.set_ax(val);
         let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
         self.set_rsi(rsi.wrapping_add(delta));
@@ -3121,7 +3187,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// LODSD with 64-bit addressing
     pub fn lodsd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
-        let val = self.read_virtual_dword_64(BxSegregs::from(instr.seg()), rsi)?;
+        let val =
+            self.read_virtual_dword_64(BxSegregs::from(instr.seg()), BxEffAddress::new(rsi))?;
         // Bochs: RAX = val (zero-extends 32-bit to 64-bit)
         self.set_rax(val as u64);
         let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
@@ -3161,8 +3228,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn cmpsb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
         let rdi = self.rdi();
-        let op1 = self.read_virtual_byte_64(BxSegregs::from(instr.seg()), rsi)?;
-        let op2 = self.read_virtual_byte_64(BxSegregs::Es, rdi)?;
+        let op1 =
+            self.read_virtual_byte_64(BxSegregs::from(instr.seg()), BxEffAddress::new(rsi))?;
+        let op2 = self.read_virtual_byte_64(BxSegregs::Es, BxEffAddress::new(rdi))?;
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub8(op1, op2, result);
         let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
@@ -3225,8 +3293,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn cmpsw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
         let rdi = self.rdi();
-        let op1 = self.read_virtual_word_64(BxSegregs::from(instr.seg()), rsi)?;
-        let op2 = self.read_virtual_word_64(BxSegregs::Es, rdi)?;
+        let op1 =
+            self.read_virtual_word_64(BxSegregs::from(instr.seg()), BxEffAddress::new(rsi))?;
+        let op2 = self.read_virtual_word_64(BxSegregs::Es, BxEffAddress::new(rdi))?;
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub16(op1, op2, result);
         let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
@@ -3289,8 +3358,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn cmpsd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
         let rdi = self.rdi();
-        let op1 = self.read_virtual_dword_64(BxSegregs::from(instr.seg()), rsi)?;
-        let op2 = self.read_virtual_dword_64(BxSegregs::Es, rdi)?;
+        let op1 =
+            self.read_virtual_dword_64(BxSegregs::from(instr.seg()), BxEffAddress::new(rsi))?;
+        let op2 = self.read_virtual_dword_64(BxSegregs::Es, BxEffAddress::new(rdi))?;
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub32(op1, op2, result);
         let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
@@ -3355,7 +3425,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn scasb64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let rdi = self.rdi();
         let al = self.al();
-        let op2 = self.read_virtual_byte_64(BxSegregs::Es, rdi)?;
+        let op2 = self.read_virtual_byte_64(BxSegregs::Es, BxEffAddress::new(rdi))?;
         let result = al.wrapping_sub(op2);
         self.update_flags_sub8(al, op2, result);
         let delta: u64 = if self.get_df() { u64::MAX } else { 1 };
@@ -3417,7 +3487,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn scasw64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let rdi = self.rdi();
         let ax = self.ax();
-        let op2 = self.read_virtual_word_64(BxSegregs::Es, rdi)?;
+        let op2 = self.read_virtual_word_64(BxSegregs::Es, BxEffAddress::new(rdi))?;
         let result = ax.wrapping_sub(op2);
         self.update_flags_sub16(ax, op2, result);
         let delta: u64 = if self.get_df() { (-2i64) as u64 } else { 2 };
@@ -3479,7 +3549,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn scasd64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let rdi = self.rdi();
         let eax = self.eax();
-        let op2 = self.read_virtual_dword_64(BxSegregs::Es, rdi)?;
+        let op2 = self.read_virtual_dword_64(BxSegregs::Es, BxEffAddress::new(rdi))?;
         let result = eax.wrapping_sub(op2);
         self.update_flags_sub32(eax, op2, result);
         let delta: u64 = if self.get_df() { (-4i64) as u64 } else { 4 };
@@ -3546,8 +3616,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn movsq64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
         let rdi = self.rdi();
-        let val = self.read_virtual_qword_64(BxSegregs::from(instr.seg()), rsi)?;
-        self.write_virtual_qword_64(BxSegregs::Es, rdi, val)?;
+        let val =
+            self.read_virtual_qword_64(BxSegregs::from(instr.seg()), BxEffAddress::new(rsi))?;
+        self.write_virtual_qword_64(BxSegregs::Es, BxEffAddress::new(rdi), val)?;
         let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
         self.set_rsi(rsi.wrapping_add(delta));
         self.set_rdi(rdi.wrapping_add(delta));
@@ -3564,7 +3635,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         while rcx != 0 && !df {
             let rsi = self.rsi();
             let rdi = self.rdi();
-            let Some(chunk) = self.fast_rep_movs64_chunk(seg, rsi, rdi, rcx, 8)? else {
+            let Some(chunk) = self.fast_rep_movs64_chunk(
+                seg,
+                BxEffAddress::new(rsi),
+                BxEffAddress::new(rdi),
+                rcx,
+                8,
+            )?
+            else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -3617,7 +3695,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn stosq64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let rdi = self.rdi();
         let rax = self.rax();
-        self.write_virtual_qword_64(BxSegregs::Es, rdi, rax)?;
+        self.write_virtual_qword_64(BxSegregs::Es, BxEffAddress::new(rdi), rax)?;
         let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
         self.set_rdi(rdi.wrapping_add(delta));
         Ok(())
@@ -3632,7 +3710,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // FastRep direct chunks are proved in full before filling.
         while rcx != 0 && !df {
             let rdi = self.rdi();
-            let Some(chunk) = self.fast_rep_stos64_chunk(rdi, rcx, 8)? else {
+            let Some(chunk) = self.fast_rep_stos64_chunk(BxEffAddress::new(rdi), rcx, 8)? else {
                 break;
             };
             let BulkSpan { elements, bytes } = chunk.span;
@@ -3686,7 +3764,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// LODSQ -- Load qword from [RSI] into RAX (64-bit addressing)
     pub fn lodsq64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
-        let val = self.read_virtual_qword_64(BxSegregs::from(instr.seg()), rsi)?;
+        let val =
+            self.read_virtual_qword_64(BxSegregs::from(instr.seg()), BxEffAddress::new(rsi))?;
         self.set_rax(val);
         let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
         self.set_rsi(rsi.wrapping_add(delta));
@@ -3724,8 +3803,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn cmpsq64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
         let rdi = self.rdi();
-        let op1 = self.read_virtual_qword_64(BxSegregs::from(instr.seg()), rsi)?;
-        let op2 = self.read_virtual_qword_64(BxSegregs::Es, rdi)?;
+        let op1 =
+            self.read_virtual_qword_64(BxSegregs::from(instr.seg()), BxEffAddress::new(rsi))?;
+        let op2 = self.read_virtual_qword_64(BxSegregs::Es, BxEffAddress::new(rdi))?;
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub64(op1, op2, result);
         let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
@@ -3790,7 +3870,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn scasq64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let rdi = self.rdi();
         let rax = self.rax();
-        let op2 = self.read_virtual_qword_64(BxSegregs::Es, rdi)?;
+        let op2 = self.read_virtual_qword_64(BxSegregs::Es, BxEffAddress::new(rdi))?;
         let result = rax.wrapping_sub(op2);
         self.update_flags_sub64(rax, op2, result);
         let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };

@@ -28,7 +28,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         // Bochs protect_ctrl.cc LGDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
-        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr.get())? {
             return Ok(());
         }
         // Bochs: (eaddr + 2) & i->asize_mask() — mask for 16-bit address wrap
@@ -40,7 +40,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             0xFFFF_FFFF
         };
         let limit = self.v_read_word(seg, eaddr)?;
-        let mut base = self.v_read_dword(seg, eaddr.wrapping_add(2) & asize_mask)? as u64;
+        let mut base = u64::from(self.v_read_dword(seg, eaddr.wrapping_add(2).masked(asize_mask))?);
 
         // In 16-bit operand size mode, mask base to 24 bits (80286 compatibility)
         // Based on Bochs protect_ctrl.cc
@@ -71,7 +71,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         // Bochs protect_ctrl.cc SGDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
-        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr.get())? {
             return Ok(());
         }
         let asize_mask: u64 = if self.long64_mode() {
@@ -84,7 +84,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let limit = self.gdtr.limit;
         self.v_write_word(seg, eaddr, limit)?;
         let base = self.gdtr.base.low32();
-        self.v_write_dword(seg, eaddr.wrapping_add(2) & asize_mask, base)?;
+        self.v_write_dword(seg, eaddr.wrapping_add(2).masked(asize_mask), base)?;
         Ok(())
     }
 
@@ -105,7 +105,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         // Bochs protect_ctrl.cc LIDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
-        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr.get())? {
             return Ok(());
         }
         let asize_mask: u64 = if self.long64_mode() {
@@ -116,7 +116,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             0xFFFF_FFFF
         };
         let limit = self.v_read_word(seg, eaddr)?;
-        let mut base = self.v_read_dword(seg, eaddr.wrapping_add(2) & asize_mask)? as u64;
+        let mut base = u64::from(self.v_read_dword(seg, eaddr.wrapping_add(2).masked(asize_mask))?);
 
         // In 16-bit operand size mode, mask base to 24 bits
         // Based on Bochs protect_ctrl.cc
@@ -147,7 +147,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         // Bochs protect_ctrl.cc SIDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
-        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr.get())? {
             return Ok(());
         }
         let asize_mask: u64 = if self.long64_mode() {
@@ -160,7 +160,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let limit = self.idtr.limit;
         self.v_write_word(seg, eaddr, limit)?;
         let base = self.idtr.base.low32();
-        self.v_write_dword(seg, eaddr.wrapping_add(2) & asize_mask, base)?;
+        self.v_write_dword(seg, eaddr.wrapping_add(2).masked(asize_mask), base)?;
         Ok(())
     }
 
@@ -187,7 +187,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let qual = if instr.mod_c0() {
                 0
             } else {
-                self.resolve_addr(instr)
+                self.resolve_addr(instr).get()
             };
             if self.vmexit_check_ldtr_tr_access(qual)? {
                 return Ok(());
@@ -263,7 +263,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let qual = if instr.mod_c0() {
                 0
             } else {
-                self.resolve_addr(instr)
+                self.resolve_addr(instr).get()
             };
             if self.vmexit_check_ldtr_tr_access(qual)? {
                 return Ok(());
@@ -738,7 +738,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let laddr = self.get_laddr64(seg as usize, eaddr);
         // Bochs protect_ctrl.cc LGDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
-        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr.get())? {
             return Ok(());
         }
         let limit = self.system_read_word(laddr)?;
@@ -766,7 +766,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let laddr = self.get_laddr64(seg as usize, eaddr);
         // Bochs protect_ctrl.cc LIDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
-        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr.get())? {
             return Ok(());
         }
         let limit = self.system_read_word(laddr)?;
@@ -797,7 +797,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let laddr = self.get_laddr64(seg as usize, eaddr);
         // Bochs protect_ctrl.cc SGDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
-        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr.get())? {
             return Ok(());
         }
         let limit = self.gdtr.limit;
@@ -824,7 +824,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let laddr = self.get_laddr64(seg as usize, eaddr);
         // Bochs protect_ctrl.cc SIDT_Ms — DESCRIPTOR_TABLE_VMEXIT gate.
-        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr)? {
+        if self.in_vmx_guest && self.vmexit_check_gdtr_idtr_access(eaddr.get())? {
             return Ok(());
         }
         let limit = self.idtr.limit;
@@ -863,7 +863,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
 
-        let selector = self.v_read_word(seg, eaddr.wrapping_add(8) & instr.asize_mask())?;
+        let selector = self.v_read_word(seg, eaddr.wrapping_add(8).masked(instr.asize_mask()))?;
         let offset = self.v_read_qword(seg, eaddr)?;
 
         self.load_seg_reg(target_seg, selector)?;

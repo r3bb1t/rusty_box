@@ -12,6 +12,8 @@ use super::avx512_load::cut_opmask_to;
 use super::cpu::BxCpuC;
 use super::decoder::{BxSegregs, Instruction};
 use super::xmm::BxPackedZmmRegister;
+use crate::config::BxEffAddress;
+use crate::convert::u64_from_usize;
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
@@ -178,11 +180,11 @@ fn write_zmm_masked_b<T: crate::cpu::instrumentation::Instrumentation>(
 fn read_mem_128<T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     seg: BxSegregs,
-    eaddr: u64,
+    eaddr: BxEffAddress,
 ) -> super::Result<[u8; 16]> {
     let mut buf = [0u8; 16];
     for i in 0..4 {
-        let val = cpu.v_read_dword(seg, eaddr + (i * 4) as u64)?;
+        let val = cpu.v_read_dword(seg, eaddr.wrapping_add(u64_from_usize(i * 4)))?;
         let bytes = val.to_le_bytes();
         buf[i * 4..i * 4 + 4].copy_from_slice(&bytes);
     }
@@ -193,11 +195,11 @@ fn read_mem_128<T: crate::cpu::instrumentation::Instrumentation>(
 fn read_mem_256<T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     seg: BxSegregs,
-    eaddr: u64,
+    eaddr: BxEffAddress,
 ) -> super::Result<[u8; 32]> {
     let mut buf = [0u8; 32];
     for i in 0..8 {
-        let val = cpu.v_read_dword(seg, eaddr + (i * 4) as u64)?;
+        let val = cpu.v_read_dword(seg, eaddr.wrapping_add(u64_from_usize(i * 4)))?;
         let bytes = val.to_le_bytes();
         buf[i * 4..i * 4 + 4].copy_from_slice(&bytes);
     }

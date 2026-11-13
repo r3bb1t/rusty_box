@@ -7,6 +7,7 @@
 use super::cpu::BxCpuC;
 use super::decoder::{BxSegregs, Instruction};
 use super::error::Result;
+use crate::config::BxEffAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -16,8 +17,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// LEA r16, m - Load effective address into 16-bit register
     pub fn lea_gw_m(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
-        let eaddr = self.resolve_addr(instr) as u16;
-        self.set_gpr16(dst, eaddr);
+        // LEA writes the offset itself into the register.
+        let offset = self.resolve_addr(instr).low16();
+        self.set_gpr16(dst, offset);
     }
 
     /// LEA r32, m - Load effective address into 32-bit register
@@ -29,9 +31,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let eaddr = if instr.as64_l() != 0 {
             self.resolve_addr64(instr)
         } else {
-            u64::from(self.resolve_addr32(instr))
+            BxEffAddress::from_u32(self.resolve_addr32(instr))
         };
-        self.set_gpr32(dst, eaddr as u32);
+        // LEA writes the offset itself into the register.
+        self.set_gpr32(dst, eaddr.low32());
     }
 
     // =========================================================================
@@ -246,9 +249,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Based on Bochs data_xfer8.cc XLAT (lines 84-97)
     pub fn xlat(&mut self, instr: &Instruction) -> super::Result<()> {
         let seg = BxSegregs::from(instr.seg());
-        let al = self.al() as u64;
         let new_al = if instr.as64_l() != 0 {
-            let laddr = self.get_laddr64(seg as usize, self.rbx().wrapping_add(al));
+            let eaddr = BxEffAddress::new(self.rbx().wrapping_add(u64::from(self.al())));
+            let laddr = self.get_laddr64(seg as usize, eaddr);
             self.read_virtual_byte_at_laddr(laddr)?
         } else {
             // asize_mask: 0xFFFF for 16-bit, 0xFFFFFFFF for 32-bit address size
@@ -257,7 +260,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             } else {
                 0xFFFF
             };
-            let eaddr = self.ebx().wrapping_add(al as u32) & mask;
+            let eaddr =
+                BxEffAddress::from_u32(self.ebx().wrapping_add(u32::from(self.al())) & mask);
             self.v_read_byte(seg, eaddr)?
         };
         self.set_al(new_al);
@@ -1728,7 +1732,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn load_segw(&mut self, instr: &Instruction, target_seg: BxSegregs) -> Result<()> {
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2) & instr.asize_mask())?;
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2).masked(instr.asize_mask()))?;
         let reg_16 = self.v_read_word(seg, eaddr)?;
 
         self.load_seg_reg(target_seg, segsel)?;
@@ -1741,7 +1745,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn load_segd(&mut self, instr: &Instruction, target_seg: BxSegregs) -> Result<()> {
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4) & instr.asize_mask())?;
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4).masked(instr.asize_mask()))?;
         let reg_32 = self.v_read_dword(seg, eaddr)?;
 
         self.load_seg_reg(target_seg, segsel)?;

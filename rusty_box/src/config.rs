@@ -235,6 +235,101 @@ impl core::fmt::UpperHex for BxLinAddress {
     }
 }
 
+/// An effective address: an offset within a segment, before the segment's
+/// base is added (Intel SDM Vol. 1 §3.7.5; Bochs `bx_address eaddr` and the
+/// `offset` the `read_virtual_*`/`write_virtual_*` accessors take).
+///
+/// An offset comes into being where an instruction forms one — its ModRM
+/// or SIB operand (Bochs `BX_CPU_RESOLVE_ADDR`), a direct memory offset, a
+/// stack or string register used as its pointer — and becomes a linear
+/// address only through `get_laddr` (Bochs `get_laddr32`/`get_laddr64`). A
+/// register's value stays a number until it is used as an offset. Its
+/// arithmetic is a position's, as [`BxLinAddress`]'s is; the address size
+/// an offset wraps at is the caller's, applied by [`masked`] or by
+/// [`low32`]/[`low16`].
+///
+/// [`masked`]: BxEffAddress::masked
+/// [`low32`]: BxEffAddress::low32
+/// [`low16`]: BxEffAddress::low16
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct BxEffAddress(u64);
+
+impl BxEffAddress {
+    /// The offset `offset`.
+    #[inline(always)]
+    pub const fn new(offset: u64) -> Self {
+        Self(offset)
+    }
+
+    /// The 32-bit offset `offset`, as 16- and 32-bit addressing forms one.
+    #[inline(always)]
+    pub fn from_u32(offset: u32) -> Self {
+        Self(u64::from(offset))
+    }
+
+    /// The 16-bit offset `offset`, as 16-bit addressing forms one.
+    #[inline(always)]
+    pub fn from_u16(offset: u16) -> Self {
+        Self(u64::from(offset))
+    }
+
+    /// The offset as a number.
+    #[inline(always)]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The low 32 bits of the offset, as 32-bit addressing keeps them.
+    #[inline(always)]
+    pub const fn low32(self) -> u32 {
+        self.0 as u32
+    }
+
+    /// The low 16 bits of the offset, as 16-bit addressing keeps them.
+    #[inline(always)]
+    pub const fn low16(self) -> u16 {
+        self.0 as u16
+    }
+
+    /// The offset with only the bits `mask` keeps: an address size's width
+    /// (Bochs `i->asize_mask()`), an alignment.
+    #[inline(always)]
+    pub const fn masked(self, mask: u64) -> Self {
+        Self(self.0 & mask)
+    }
+
+    /// Whether the offset is a multiple of `align`, a power of two.
+    #[inline(always)]
+    pub const fn is_aligned(self, align: u64) -> bool {
+        self.0 & (align - 1) == 0
+    }
+
+    /// `distance` bytes past the offset, modulo 2^64.
+    #[inline(always)]
+    pub const fn wrapping_add(self, distance: u64) -> Self {
+        Self(self.0.wrapping_add(distance))
+    }
+
+    /// `distance` bytes before the offset, modulo 2^64.
+    #[inline(always)]
+    pub const fn wrapping_sub(self, distance: u64) -> Self {
+        Self(self.0.wrapping_sub(distance))
+    }
+}
+
+impl core::fmt::LowerHex for BxEffAddress {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+impl core::fmt::UpperHex for BxEffAddress {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::UpperHex::fmt(&self.0, f)
+    }
+}
+
 #[cfg(target_pointer_width = "32")]
 pub type BxPtrEquiv = u32;
 /// The non-zero counterpart of [`BxPtrEquiv`], so a pointer-sized value can be

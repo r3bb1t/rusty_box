@@ -11,7 +11,7 @@ use bitflags::bitflags;
 /// so a tracer needs no second import.
 pub use rusty_box_devices::api::IoPort;
 
-use crate::config::{BxLinAddress, BxPhyAddress};
+use crate::config::{BxEffAddress, BxLinAddress, BxPhyAddress};
 
 // ─────────────────────────── InstrAction ───────────────────────────
 
@@ -481,7 +481,7 @@ pub struct PhyAccess<'a> {
 pub struct PrefetchEvent {
     pub what: PrefetchHint,
     pub seg: u8,
-    pub offset: u64,
+    pub offset: BxEffAddress,
 }
 
 /// Payload for `Instrumentation::mem_unmapped` — the access that was about
