@@ -10,6 +10,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -40,8 +41,10 @@ fn sse_emulator() -> Box<Emulator> {
     gate[5] = 0x8E;
     gate[6..8].copy_from_slice(&((GP_HANDLER >> 16) as u16).to_le_bytes());
     gate[8..12].copy_from_slice(&((GP_HANDLER >> 32) as u32).to_le_bytes());
-    emu.mem_write(IDT + 13 * 16, &gate).expect("idt");
-    emu.mem_write(GP_HANDLER, &[0xF4]).expect("handler");
+    emu.mem_write(BxPhyAddress::new(IDT + 13 * 16), &gate)
+        .expect("idt");
+    emu.mem_write(BxPhyAddress::new(GP_HANDLER), &[0xF4])
+        .expect("handler");
     emu
 }
 
@@ -98,7 +101,8 @@ const AFTER_FLD1: X87View = X87View {
 fn run(emu: &mut Emulator, code: &[u8]) {
     let mut image = code.to_vec();
     image.extend_from_slice(&[0xEB, 0xFE]);
-    emu.mem_write(CODE, &image).expect("write code");
+    emu.mem_write(BxPhyAddress::new(CODE), &image)
+        .expect("write code");
     let end = CODE + code.len() as u64;
     emu.emu_start(CODE, Some(end), None, Some(64))
         .expect("execute");
@@ -111,7 +115,8 @@ fn run(emu: &mut Emulator, code: &[u8]) {
 
 fn x87_view(emu: &mut Emulator) -> X87View {
     let mut env = [0u8; 28];
-    emu.mem_read(ENV, &mut env).expect("read env");
+    emu.mem_read(BxPhyAddress::new(ENV), &mut env)
+        .expect("read env");
     let status = u16::from_le_bytes([env[4], env[5]]);
     X87View {
         top: (status >> 11) & 7,
@@ -143,7 +148,8 @@ fn ints(lo: i32, hi: i32) -> u64 {
 
 fn read_out(emu: &mut Emulator) -> u64 {
     let mut out = [0u8; 8];
-    emu.mem_read(OUT, &mut out).expect("read out");
+    emu.mem_read(BxPhyAddress::new(OUT), &mut out)
+        .expect("read out");
     u64::from_le_bytes(out)
 }
 
@@ -165,7 +171,7 @@ const KEPT: u64 = 0xAAAA_BBBB_CCCC_DDDD;
 fn cvtpi2ps_from_mmx_converts_and_enters_mmx_state() {
     on_big_stack(|| {
         let mut emu = sse_emulator();
-        emu.mem_write(DATA, &ints(3, -2).to_le_bytes())
+        emu.mem_write(BxPhyAddress::new(DATA), &ints(3, -2).to_le_bytes())
             .expect("data");
         emu.reg_write_xmm(X86Reg::Xmm0, xmm([0, KEPT]));
         let code = [
@@ -191,7 +197,7 @@ fn cvtpi2ps_from_mmx_converts_and_enters_mmx_state() {
 fn cvtpi2ps_from_memory_leaves_the_x87_state_alone() {
     on_big_stack(|| {
         let mut emu = sse_emulator();
-        emu.mem_write(DATA, &ints(-7, 100).to_le_bytes())
+        emu.mem_write(BxPhyAddress::new(DATA), &ints(-7, 100).to_le_bytes())
             .expect("data");
         emu.reg_write_xmm(X86Reg::Xmm0, xmm([0, KEPT]));
         let code = [
@@ -214,7 +220,7 @@ fn cvtpi2ps_from_memory_leaves_the_x87_state_alone() {
 fn cvtpi2pd_converts_both_integers_to_doubles() {
     on_big_stack(|| {
         let mut emu = sse_emulator();
-        emu.mem_write(DATA, &ints(i32::MIN, 5).to_le_bytes())
+        emu.mem_write(BxPhyAddress::new(DATA), &ints(i32::MIN, 5).to_le_bytes())
             .expect("data");
         emu.reg_write_xmm(X86Reg::Xmm0, xmm([u64::MAX, u64::MAX]));
         let code = [
@@ -306,16 +312,19 @@ fn cvtpd2pi_from_memory_needs_16_byte_alignment() {
         }
 
         let mut emu = sse_emulator();
-        emu.mem_write(DATA, &bytes).expect("data");
+        emu.mem_write(BxPhyAddress::new(DATA), &bytes)
+            .expect("data");
         // cvtpd2pi mm0, [DATA]: 66 0F 2D /r, ModRM 0x04, SIB 0x25.
         let aligned = [&[0x66, 0x0F, 0x2D, 0x04, 0x25][..], &abs(DATA)].concat();
         run(&mut emu, &[aligned, movq_mm0_to(OUT)].concat());
         assert_eq!(read_out(&mut emu), ints(1, 2));
 
         let mut emu = sse_emulator();
-        emu.mem_write(DATA, &bytes).expect("data");
+        emu.mem_write(BxPhyAddress::new(DATA), &bytes)
+            .expect("data");
         let misaligned = [&[0x66, 0x0F, 0x2D, 0x04, 0x25][..], &abs(DATA + 8)].concat();
-        emu.mem_write(CODE, &misaligned).expect("write code");
+        emu.mem_write(BxPhyAddress::new(CODE), &misaligned)
+            .expect("write code");
         emu.emu_start(CODE, Some(GP_HANDLER), None, Some(4))
             .expect("execute");
         assert_eq!(

@@ -28,6 +28,7 @@
 
 mod state_gate;
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::arch_state::{ArchGroups, VcpuArchState};
 use rusty_box::cpu::decoder::{Opcode, X86Feature};
 use rusty_box::cpu::{CpuSetupMode, HookMask, Instruction, Instrumentation, OpcodeEvent, X86Reg};
@@ -257,7 +258,8 @@ fn guest_xsetbv(emu: &mut Emulator, xcr0: u64) {
     emu.reg_write(X86Reg::Rax, xcr0);
     emu.reg_write(X86Reg::Rcx, 0);
     emu.reg_write(X86Reg::Rdx, 0);
-    emu.mem_write(CODE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+    emu.mem_write(BxPhyAddress::new(CODE), &[0x0F, 0x01, 0xD1])
+        .expect("xsetbv");
     emu.emu_start(CODE, Some(CODE + 3), None, Some(1))
         .expect("xsetbv runs");
 }
@@ -443,7 +445,7 @@ fn lazy_switch_mismatches(mode: LazyMode) -> Vec<String> {
         let outcome = match mode {
             LazyMode::Long64 => {
                 install_fault_handlers(&mut emu);
-                emu.mem_write(NM_GATE.handler, &LAZY_SWITCH_HANDLER_64)
+                emu.mem_write(BxPhyAddress::new(NM_GATE.handler), &LAZY_SWITCH_HANDLER_64)
                     .expect("write the lazy-switch handler");
                 run_installed_at(&mut emu, CODE, case.code)
             }
@@ -498,9 +500,12 @@ fn run_protected32_lazy(emu: &mut Emulator, code: &[u8]) -> Outcome {
         },
     ] {
         let gate = handler.gate;
-        emu.mem_write(IDT + gate.vector * 8, &gate32(gate.handler).to_le_bytes())
-            .expect("write the gate");
-        emu.mem_write(gate.handler, handler.body)
+        emu.mem_write(
+            BxPhyAddress::new(IDT + gate.vector * 8),
+            &gate32(gate.handler).to_le_bytes(),
+        )
+        .expect("write the gate");
+        emu.mem_write(BxPhyAddress::new(gate.handler), handler.body)
             .expect("write the handler");
     }
     emu.reg_write(X86Reg::IdtrBase, IDT);
@@ -508,7 +513,8 @@ fn run_protected32_lazy(emu: &mut Emulator, code: &[u8]) -> Outcome {
 
     let mut image = code.to_vec();
     image.extend_from_slice(&[0xEB, 0xFE]); // jmp $
-    emu.mem_write(CODE, &image).expect("write code");
+    emu.mem_write(BxPhyAddress::new(CODE), &image)
+        .expect("write code");
     emu.reg_write(X86Reg::Rsp, STACK);
     let stop = emu.emu_start(CODE, None, None, Some(8)).expect("emu_start");
     let eip = emu.cpu().rip();
@@ -588,8 +594,11 @@ fn tss_descriptor(base: u64) -> u64 {
 /// Write `descriptors` as the GDT at `base` and load GDTR with it.
 fn install_gdt(emu: &mut Emulator, base: u64, descriptors: &[u64]) {
     for (index, descriptor) in descriptors.iter().enumerate() {
-        emu.mem_write(base + index as u64 * 8, &descriptor.to_le_bytes())
-            .expect("write the GDT");
+        emu.mem_write(
+            BxPhyAddress::new(base + index as u64 * 8),
+            &descriptor.to_le_bytes(),
+        )
+        .expect("write the GDT");
     }
     emu.reg_write(X86Reg::GdtrBase, base);
     emu.reg_write(X86Reg::GdtrLimit, descriptors.len() as u64 * 8 - 1);
@@ -607,9 +616,13 @@ const PM_VECTORS: u64 = 32;
 fn install_protected32_halt_gates(emu: &mut Emulator) {
     for vector in 0..PM_VECTORS {
         let handler = PM_HANDLERS + vector * 16;
-        emu.mem_write(PM_IDT + vector * 8, &gate32(handler).to_le_bytes())
-            .expect("write the IDT");
-        emu.mem_write(handler, &[0xF4]).expect("write the handler");
+        emu.mem_write(
+            BxPhyAddress::new(PM_IDT + vector * 8),
+            &gate32(handler).to_le_bytes(),
+        )
+        .expect("write the IDT");
+        emu.mem_write(BxPhyAddress::new(handler), &[0xF4])
+            .expect("write the handler");
     }
     emu.reg_write(X86Reg::IdtrBase, PM_IDT);
     emu.reg_write(X86Reg::IdtrLimit, PM_VECTORS * 8 - 1);
@@ -675,7 +688,8 @@ fn a_task_switch_sets_cr0_ts_and_the_next_x87_instruction_faults() {
                 );
                 install_protected32_halt_gates(&mut emu);
 
-                emu.mem_write(OLD_TSS, &[0; 0x68]).expect("old TSS");
+                emu.mem_write(BxPhyAddress::new(OLD_TSS), &[0; 0x68])
+                    .expect("old TSS");
                 let mut tss = [0u8; 0x68];
                 let mut put = |offset: usize, value: u32| {
                     tss[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -691,8 +705,9 @@ fn a_task_switch_sets_cr0_ts_and_the_next_x87_instruction_faults() {
                 put(0x58, 0x10); // FS
                 put(0x5C, 0x10); // GS
                 put(0x64, 0x68 << 16); // I/O map base past the limit
-                emu.mem_write(NEW_TSS, &tss).expect("new TSS");
-                emu.mem_write(NEW_TASK_CODE, task.code)
+                emu.mem_write(BxPhyAddress::new(NEW_TSS), &tss)
+                    .expect("new TSS");
+                emu.mem_write(BxPhyAddress::new(NEW_TASK_CODE), task.code)
                     .expect("new task code");
 
                 // mov ax, OLD_TSS_SELECTOR; ltr ax; jmp far NEW_TSS_SELECTOR:0
@@ -700,7 +715,8 @@ fn a_task_switch_sets_cr0_ts_and_the_next_x87_instruction_faults() {
                 old_task.extend_from_slice(&OLD_TSS_SELECTOR.to_le_bytes());
                 old_task.extend_from_slice(&[0x0F, 0x00, 0xD8, 0xEA, 0, 0, 0, 0]);
                 old_task.extend_from_slice(&NEW_TSS_SELECTOR.to_le_bytes());
-                emu.mem_write(CODE, &old_task).expect("old task code");
+                emu.mem_write(BxPhyAddress::new(CODE), &old_task)
+                    .expect("old task code");
 
                 let stop = emu
                     .emu_start(CODE, None, None, Some(16))
@@ -726,7 +742,7 @@ fn a_task_switch_sets_cr0_ts_and_the_next_x87_instruction_faults() {
                              (eip={eip:#x}, stop={stop:?})"
                         );
                         let mut pushed_eip = [0u8; 4];
-                        emu.mem_read(NEW_STACK - 12, &mut pushed_eip)
+                        emu.mem_read(BxPhyAddress::new(NEW_STACK - 12), &mut pushed_eip)
                             .expect("read the frame");
                         assert_eq!(
                             u64::from(u32::from_le_bytes(pushed_eip)),
@@ -973,12 +989,13 @@ fn vex_and_evex_raise_ud_in_virtual_8086_mode() {
                 tss[0x04..0x08].copy_from_slice(&(RING0_STACK as u32).to_le_bytes()); // ESP0
                 tss[0x08..0x0C].copy_from_slice(&0x10u32.to_le_bytes()); // SS0
                 tss[0x64..0x68].copy_from_slice(&(0x68u32 << 16).to_le_bytes()); // no I/O map
-                emu.mem_write(TSS, &tss).expect("TSS");
+                emu.mem_write(BxPhyAddress::new(TSS), &tss).expect("TSS");
                 install_protected32_halt_gates(&mut emu);
 
                 let mut v86 = case.code.to_vec();
                 v86.extend_from_slice(&[0xEB, 0xFE]); // jmp $
-                emu.mem_write(V86_CODE, &v86).expect("virtual-8086 code");
+                emu.mem_write(BxPhyAddress::new(V86_CODE), &v86)
+                    .expect("virtual-8086 code");
 
                 // mov ax, TSS_SELECTOR; ltr ax; then an IRETD frame for a
                 // virtual-8086 task — GS, FS, DS, ES, SS, ESP, EFLAGS (VM set),
@@ -997,7 +1014,8 @@ fn vex_and_evex_raise_ud_in_virtual_8086_mode() {
                 ring0.extend_from_slice(&u32::from(V86_CS).to_le_bytes()); // CS
                 ring0.extend_from_slice(&[0x6A, 0x00]); // EIP
                 ring0.push(0xCF); // IRETD
-                emu.mem_write(CODE, &ring0).expect("ring-0 code");
+                emu.mem_write(BxPhyAddress::new(CODE), &ring0)
+                    .expect("ring-0 code");
                 // The IRETD frame is built on the ring-0 stack itself.
                 emu.reg_write(X86Reg::Rsp, RING0_STACK);
 
@@ -1007,7 +1025,7 @@ fn vex_and_evex_raise_ud_in_virtual_8086_mode() {
                 let eip = emu.cpu().rip();
                 if eip != PM_HANDLERS + UD_VECTOR * 16 + 1 {
                     let mut frame = [0u8; 36];
-                    emu.mem_read(RING0_STACK - 36, &mut frame)
+                    emu.mem_read(BxPhyAddress::new(RING0_STACK - 36), &mut frame)
                         .expect("read the frame");
                     mismatches.push(format!(
                         "{}: ended at eip={eip:#x} (stop={stop:?}, dr6={:#x}, top of the \
@@ -1020,7 +1038,7 @@ fn vex_and_evex_raise_ud_in_virtual_8086_mode() {
                 // A fault from virtual-8086 mode switches to the ring-0 stack
                 // and pushes GS, FS, DS, ES, SS, ESP, EFLAGS, CS and EIP.
                 let mut frame = [0u8; 12];
-                emu.mem_read(RING0_STACK - 36, &mut frame)
+                emu.mem_read(BxPhyAddress::new(RING0_STACK - 36), &mut frame)
                     .expect("read the frame");
                 let pushed_eip = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
                 let pushed_cs = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);

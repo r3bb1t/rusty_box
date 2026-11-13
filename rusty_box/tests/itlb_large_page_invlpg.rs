@@ -20,6 +20,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -49,12 +50,15 @@ fn invlpg_flushes_every_itlb_frame_of_a_large_code_page() {
                 Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("new emulator");
 
             // Old bytes (identity phys of V_FN): mov rbx, 0x11111111 ; ret
-            emu.mem_write(V_FN, &[0x48, 0xC7, 0xC3, 0x11, 0x11, 0x11, 0x11, 0xC3])
-                .expect("write old fn");
+            emu.mem_write(
+                BxPhyAddress::new(V_FN),
+                &[0x48, 0xC7, 0xC3, 0x11, 0x11, 0x11, 0x11, 0xC3],
+            )
+            .expect("write old fn");
             // New bytes (phys the remapped huge page exposes at V_FN):
             // mov rbx, 0x22222222 ; ret
             emu.mem_write(
-                V_FN_NEW_PHYS,
+                BxPhyAddress::new(V_FN_NEW_PHYS),
                 &[0x48, 0xC7, 0xC3, 0x22, 0x22, 0x22, 0x22, 0xC3],
             )
             .expect("write new fn");
@@ -81,7 +85,8 @@ fn invlpg_flushes_every_itlb_frame_of_a_large_code_page() {
             code.extend_from_slice(&[0xFF, 0xD0]);
             let park = DRIVER + code.len() as u64;
             code.extend_from_slice(&[0xEB, 0xFE]);
-            emu.mem_write(DRIVER, &code).expect("write driver");
+            emu.mem_write(BxPhyAddress::new(DRIVER), &code)
+                .expect("write driver");
 
             emu.reg_write(X86Reg::Rsp, STACK_TOP);
             emu.reg_write(X86Reg::Rbx, 0);

@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 
+use rusty_box::config::BxLinAddress;
 use rusty_box::cpu::LinearRange;
 
 /// The most threads a walk reports before giving up: a corrupt or cyclic list
@@ -118,7 +119,7 @@ pub(crate) fn frame_is_users(saved: &SavedRegisters, stack: LinearRange) -> bool
     saved.cs & 3 == USER_PRIVILEGE
         && saved.rip != 0
         && saved.rip < USER_SPACE_END
-        && (stack.start..=stack.end).contains(&saved.rsp)
+        && (stack.start..=stack.end).contains(&BxLinAddress::new(saved.rsp))
 }
 
 /// Walks the `LIST_ENTRY` ring at `head` by its `Flink` (offset 0), returning
@@ -155,7 +156,7 @@ pub(crate) fn stack_owner(start: u64, end: u64, threads: &[WinThread]) -> Option
     threads.iter().find_map(|thread| {
         thread
             .stack
-            .filter(|stack| stack.start <= start && end <= stack.end)
+            .filter(|stack| stack.start.get() <= start && end <= stack.end.get())
             .map(|_| thread.tid)
     })
 }
@@ -211,15 +212,15 @@ mod tests {
             thread(
                 0x1A4,
                 Some(LinearRange {
-                    start: 0x5B_0000,
-                    end: 0x60_0000,
+                    start: BxLinAddress::new(0x5B_0000),
+                    end: BxLinAddress::new(0x60_0000),
                 }),
             ),
             thread(
                 0x2B8,
                 Some(LinearRange {
-                    start: 0x70_0000,
-                    end: 0x74_0000,
+                    start: BxLinAddress::new(0x70_0000),
+                    end: BxLinAddress::new(0x74_0000),
                 }),
             ),
         ];
@@ -302,8 +303,8 @@ mod tests {
     #[test]
     fn a_frame_is_a_threads_own_only_with_a_user_cs_rip_and_stack() {
         let stack = LinearRange {
-            start: 0x10_0000,
-            end: 0x20_0000,
+            start: BxLinAddress::new(0x10_0000),
+            end: BxLinAddress::new(0x20_0000),
         };
         assert!(frame_is_users(&user_frame(), stack));
         // A WOW64 thread entered from 32-bit code (CS 0x23).

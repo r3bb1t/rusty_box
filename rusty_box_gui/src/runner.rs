@@ -1659,6 +1659,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use rusty_box::config::BxLinAddress;
     #[cfg(feature = "gui-egui")]
     use rusty_box::cpu::{CodeBreakpoint, CodeBreakpointHit};
     use rusty_box::params::BxParams;
@@ -3316,7 +3317,7 @@ mod tests {
         let boot = snapshot.cpus[0];
         assert_eq!(boot.mode, rusty_box::cpu::ExecutionMode::Real);
         assert_eq!(boot.registers.rip, 0xFFF0);
-        assert_eq!(boot.segment_bases.cs, 0xFFFF_0000);
+        assert_eq!(boot.segment_bases.cs, BxLinAddress::new(0xFFFF_0000));
         assert_eq!(snapshot.code[0].bytes, [0xEB, 0xFE]);
         assert_eq!(vm.ips(), 0, "a paused VM shows no rate");
 

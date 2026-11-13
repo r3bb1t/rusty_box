@@ -2,6 +2,7 @@
 //! Windows stores it (UTF-16LE). The search reads RAM only, never a device
 //! window, since a device read changes the device.
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{Instrumentation, VmxGuest};
 use rusty_box::emulator::{Emulator, RamOffset, SliceEngine};
 
@@ -187,7 +188,8 @@ fn find_physical<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
     abandoned: F,
 ) -> FindOutcome {
     let total = emu.mem_size() as u64;
-    let RamOffset(mut offset) = RamOffset::at_or_after_physical(request.from.value);
+    let RamOffset(mut offset) =
+        RamOffset::at_or_after_physical(BxPhyAddress::new(request.from.value));
     let mut window = Window {
         bytes: Vec::new(),
         start: offset,
@@ -212,7 +214,9 @@ fn find_physical<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
             return FindOutcome::Found(FoundAt {
                 at: GuestAddress {
                     space: AddressSpace::Physical,
-                    value: RamOffset(window.start.wrapping_add(hit as u64)).physical(),
+                    value: RamOffset(window.start.wrapping_add(hit as u64))
+                        .physical()
+                        .get(),
                 },
                 len: request.pattern.len() as u64,
             });
@@ -223,7 +227,7 @@ fn find_physical<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
     FindOutcome::NotFound {
         searched_to: GuestAddress {
             space: AddressSpace::Physical,
-            value: RamOffset(offset).physical(),
+            value: RamOffset(offset).physical().get(),
         },
     }
 }
@@ -259,6 +263,7 @@ fn find_linear<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
         // RAM only: an unmapped page, or one that maps a device window or
         // lies past RAM, breaks the run of bytes a hit could span.
         let ram = translate_in(emu, cpu, space, vmx_guest, address)
+            .map(BxPhyAddress::new)
             .and_then(RamOffset::of_physical)
             .filter(|RamOffset(offset)| offset.saturating_add(len as u64) <= total);
         let read = match ram {
@@ -352,7 +357,9 @@ mod tests {
         let mut machine = long_mode_machine();
         // Straddles the first 1 MiB chunk's end.
         let at = (1 << 20) - 3;
-        machine.mem_write(at, b"needle").expect("write");
+        machine
+            .mem_write(BxPhyAddress::new(at), b"needle")
+            .expect("write");
         let outcome = find(
             &mut machine,
             0,
@@ -382,7 +389,7 @@ mod tests {
         let mut machine = long_mode_machine();
         let at = CpuSetupMode::FlatLong64.first_free_physical_address() + 0x2345;
         machine
-            .mem_write(at, &[0xDE, 0xAD, 0xBE, 0xEF])
+            .mem_write(BxPhyAddress::new(at), &[0xDE, 0xAD, 0xBE, 0xEF])
             .expect("write");
         machine.reg_write(X86Reg::Rip, at);
         let outcome = find(

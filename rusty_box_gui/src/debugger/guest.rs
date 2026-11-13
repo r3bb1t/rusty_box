@@ -5,6 +5,7 @@
 //! Bochs's debugger primitives (`dbg_xlate_linear2phy`, `dbg_fetch_mem`);
 //! tests answer it from a page map.
 
+use rusty_box::config::{BxLinAddress, BxPhyAddress};
 use rusty_box::cpu::{
     CpuDebugView, CpuSnapshot, Fetched, Instrumentation, LinearRange, MappingWalk, PageMapping,
     VmxGuest, WalkStep,
@@ -98,7 +99,8 @@ pub(crate) trait VmxGuestSpaces: GuestMemory {
 
 impl<T: Instrumentation, E: SliceEngine<T>> VmxGuestSpaces for DebugCpu<'_, T, E> {
     fn vmx_guest_translate(&mut self, guest: &VmxGuest, cr3: u64, linear: u64) -> Option<u64> {
-        self.dbg_xlate_vmx_guest_linear2phy(guest, cr3, linear)
+        self.dbg_xlate_vmx_guest_linear2phy(guest, cr3, BxLinAddress::new(linear))
+            .map(BxPhyAddress::get)
     }
 
     fn vmx_guest_page_mappings<F>(
@@ -252,13 +254,14 @@ pub(crate) fn vmx_guest_view(guest: &VmxGuest, processor: &CpuDebugView) -> CpuD
 impl<T: Instrumentation, E: SliceEngine<T>> GuestMemory for DebugCpu<'_, T, E> {
     fn translate(&mut self, root: Root, linear: u64) -> Option<u64> {
         match root {
-            Root::Live => self.dbg_xlate_linear2phy(linear),
-            Root::Process(cr3) => self.dbg_xlate_linear2phy_in(cr3, linear),
+            Root::Live => self.dbg_xlate_linear2phy(BxLinAddress::new(linear)),
+            Root::Process(cr3) => self.dbg_xlate_linear2phy_in(cr3, BxLinAddress::new(linear)),
         }
+        .map(BxPhyAddress::get)
     }
 
     fn read_physical(&mut self, physical: u64, buf: &mut [u8]) -> GuestRead {
-        match self.dbg_fetch_mem(physical, buf) {
+        match self.dbg_fetch_mem(BxPhyAddress::new(physical), buf) {
             Ok(Fetched::Valid) => GuestRead::Read,
             Ok(Fetched::OutsideMemory) => GuestRead::Unreadable,
             Err(error) => {
@@ -488,14 +491,15 @@ pub(crate) mod fake {
             } else {
                 &self.kernel
             };
+            let span = range.start.get()..range.end.get();
             let pages = user
-                .range(range.start..range.end)
-                .chain(session.range(range.start..range.end))
-                .chain(shared.range(range.start..range.end));
+                .range(span.clone())
+                .chain(session.range(span.clone()))
+                .chain(shared.range(span));
             for (&linear, &physical) in pages {
                 let mapping = PageMapping {
-                    linear,
-                    physical,
+                    linear: BxLinAddress::new(linear),
+                    physical: BxPhyAddress::new(physical),
                     size: PAGE,
                     access: PageAccess {
                         user: linear < KERNEL_HALF,

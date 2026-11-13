@@ -1032,6 +1032,7 @@ impl FastMachineFault {
 
 #[cfg(test)]
 mod tests {
+    use rusty_box::config::BxPhyAddress;
     use rusty_box::cpu::instrumentation::X86Reg;
 
     use super::*;
@@ -1344,7 +1345,7 @@ mod tests {
         );
         built
             .mem_write(
-                0x1100,
+                BxPhyAddress::new(0x1100),
                 &[
                     0xB0, b'G', 0xE6, DEBUG_PORT, //
                     0x0F, 0x01, 0x1E, 0x10, 0x12, //
@@ -1355,13 +1356,22 @@ mod tests {
             )
             .expect("#GP handler");
         built
-            .mem_write(0x1180, &[0xB0, b'I', 0xE6, DEBUG_PORT, 0xCF])
+            .mem_write(
+                BxPhyAddress::new(0x1180),
+                &[0xB0, b'I', 0xE6, DEBUG_PORT, 0xCF],
+            )
             .expect("INT 0x80 handler");
         built
-            .mem_write(0x1200, &[0x3F, 0x00, 0x00, 0x00, 0x00, 0x00])
+            .mem_write(
+                BxPhyAddress::new(0x1200),
+                &[0x3F, 0x00, 0x00, 0x00, 0x00, 0x00],
+            )
             .expect("narrow IDTR");
         built
-            .mem_write(0x1210, &[0xFF, 0x03, 0x00, 0x00, 0x00, 0x00])
+            .mem_write(
+                BxPhyAddress::new(0x1210),
+                &[0xFF, 0x03, 0x00, 0x00, 0x00, 0x00],
+            )
             .expect("full IDTR");
         let mut machine = FastMachine::adopt(built).expect("a machine on hardware");
 
@@ -1443,7 +1453,7 @@ mod tests {
         );
         built
             .mem_write(
-                0x1100,
+                BxPhyAddress::new(0x1100),
                 &[
                     0xB0, b'G', 0xE6, DEBUG_PORT, //
                     0xE4, 0x60, //
@@ -1455,17 +1465,23 @@ mod tests {
             .expect("#GP handler");
         built
             .mem_write(
-                0x1180,
+                BxPhyAddress::new(0x1180),
                 &[
                     0xB0, b'K', 0xE6, DEBUG_PORT, 0xE4, 0x60, 0xB0, 0x20, 0xE6, 0x20, 0xCF,
                 ],
             )
             .expect("IRQ1 handler");
         built
-            .mem_write(0x1200, &[0x3F, 0x00, 0x00, 0x00, 0x00, 0x00])
+            .mem_write(
+                BxPhyAddress::new(0x1200),
+                &[0x3F, 0x00, 0x00, 0x00, 0x00, 0x00],
+            )
             .expect("narrow IDTR");
         built
-            .mem_write(0x1210, &[0xFF, 0x03, 0x00, 0x00, 0x00, 0x00])
+            .mem_write(
+                BxPhyAddress::new(0x1210),
+                &[0xFF, 0x03, 0x00, 0x00, 0x00, 0x00],
+            )
             .expect("full IDTR");
         let mut machine = FastMachine::adopt(built).expect("a machine on hardware");
 
@@ -1532,10 +1548,10 @@ mod tests {
         // #UD's real-mode vector (IVT entry 6) at 0000:2000, which spins. The
         // ROM's 0xFF bytes raise #UD at the platform's reset vector.
         built
-            .mem_write(6 * 4, &[0x00, 0x20, 0x00, 0x00])
+            .mem_write(BxPhyAddress::new(6 * 4), &[0x00, 0x20, 0x00, 0x00])
             .expect("the IVT is writable");
         built
-            .mem_write(0x2000, &SPIN)
+            .mem_write(BxPhyAddress::new(0x2000), &SPIN)
             .expect("the spin is writable");
         let mut machine = FastMachine::adopt(built).expect("a machine on hardware");
 
@@ -1646,7 +1662,7 @@ mod tests {
         let (stored, read) = machine
             .with_machine(|m| {
                 let mut bytes = [0u8; 8];
-                m.mem_read(0x500, &mut bytes)
+                m.mem_read(BxPhyAddress::new(0x500), &mut bytes)
                     .expect("the guest's store is readable");
                 (u64::from_le_bytes(bytes), m.reg_read(X86Reg::Tsc))
             })
@@ -1720,7 +1736,7 @@ mod tests {
         let stored = machine
             .with_machine(|m| {
                 let mut bytes = [0u8; 8];
-                m.mem_read(0x500, &mut bytes)
+                m.mem_read(BxPhyAddress::new(0x500), &mut bytes)
                     .expect("the guest's store is readable");
                 u64::from_le_bytes(bytes)
             })
@@ -2077,7 +2093,7 @@ mod tests {
 
         machine
             .with_machine(|m| {
-                m.mem_write(0x3000, &[0xF5])
+                m.mem_write(BxPhyAddress::new(0x3000), &[0xF5])
                     .expect("the byte FS will point at");
                 m.reg_write(X86Reg::Rbx, 0x5A);
                 m.reg_write(X86Reg::Cr2, 0xC2);

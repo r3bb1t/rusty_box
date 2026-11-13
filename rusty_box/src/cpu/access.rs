@@ -1698,7 +1698,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         size: usize,
     ) -> Result<()> {
         if let Some(ref pp) = self.page_permissions {
-            if !pp.check(paddr.get(), super::instrumentation::MemPerms::READ) {
+            if !pp.check(paddr, super::instrumentation::MemPerms::READ) {
                 if self.instrumentation.active.has_mem_perm()
                     && self.instrumentation.fire_mem_perm_violation(
                         &super::instrumentation::MemPermViolation {
@@ -1725,7 +1725,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         size: usize,
     ) -> Result<()> {
         if let Some(ref pp) = self.page_permissions {
-            if !pp.check(paddr.get(), super::instrumentation::MemPerms::WRITE) {
+            if !pp.check(paddr, super::instrumentation::MemPerms::WRITE) {
                 if self.instrumentation.active.has_mem_perm()
                     && self.instrumentation.fire_mem_perm_violation(
                         &super::instrumentation::MemPermViolation {
@@ -1782,10 +1782,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.mmio.is_empty() {
             return None;
         }
-        // The host's callbacks are its public API, which carries addresses
-        // as numbers.
-        if let Some(region) = self.mmio.find_mut(paddr.get()) {
-            return Some((region.read_cb)(paddr.get(), size));
+        if let Some(region) = self.mmio.find_mut(paddr) {
+            return Some((region.read_cb)(paddr, size));
         }
         None
     }
@@ -1795,8 +1793,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.mmio.is_empty() {
             return false;
         }
-        if let Some(region) = self.mmio.find_mut(paddr.get()) {
-            (region.write_cb)(paddr.get(), size, val);
+        if let Some(region) = self.mmio.find_mut(paddr) {
+            (region.write_cb)(paddr, size, val);
             return true;
         }
         false

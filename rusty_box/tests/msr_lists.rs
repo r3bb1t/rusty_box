@@ -7,6 +7,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::decoder::X86Feature;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
@@ -47,8 +48,10 @@ fn emulator() -> Box<Emulator> {
     gate[5] = 0x8E;
     gate[6..8].copy_from_slice(&((GP_HANDLER >> 16) as u16).to_le_bytes());
     gate[8..12].copy_from_slice(&((GP_HANDLER >> 32) as u32).to_le_bytes());
-    emu.mem_write(IDT + 13 * 16, &gate).expect("idt");
-    emu.mem_write(GP_HANDLER, &[0xF4]).expect("handler");
+    emu.mem_write(BxPhyAddress::new(IDT + 13 * 16), &gate)
+        .expect("idt");
+    emu.mem_write(BxPhyAddress::new(GP_HANDLER), &[0xF4])
+        .expect("handler");
     emu
 }
 
@@ -57,12 +60,13 @@ fn write_table(emu: &mut Emulator, at: u64, entries: &[u64]) {
         .iter()
         .flat_map(|entry| entry.to_le_bytes())
         .collect();
-    emu.mem_write(at, &bytes).expect("table");
+    emu.mem_write(BxPhyAddress::new(at), &bytes).expect("table");
 }
 
 fn read_qword(emu: &mut Emulator, at: u64) -> u64 {
     let mut bytes = [0u8; 8];
-    emu.mem_read(at, &mut bytes).expect("read");
+    emu.mem_read(BxPhyAddress::new(at), &mut bytes)
+        .expect("read");
     u64::from_le_bytes(bytes)
 }
 
@@ -81,7 +85,8 @@ fn run(emu: &mut Emulator, instruction: &[u8], rdi: u64, rcx: u64) -> Ended {
     let mut image = instruction.to_vec();
     let end = CODE + image.len() as u64;
     image.extend_from_slice(&[0xEB, 0xFE]);
-    emu.mem_write(CODE, &image).expect("write code");
+    emu.mem_write(BxPhyAddress::new(CODE), &image)
+        .expect("write code");
     emu.emu_start(CODE, Some(end), None, Some(16))
         .expect("execute");
     match emu.cpu().rip() {

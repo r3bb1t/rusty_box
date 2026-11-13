@@ -1451,7 +1451,8 @@ mod tests {
             let mut emu = machine();
             emu.reg_write(X86Reg::Rax, 0x0123_4567_89AB_CDEF);
             emu.reg_write(X86Reg::Rcx, 0x0FED_CBA9_7654_3210);
-            emu.mem_write(DATA, &[0x10, 0x20, 0x30, 0x40]).unwrap();
+            emu.mem_write(BxPhyAddress::new(DATA), &[0x10, 0x20, 0x30, 0x40])
+                .unwrap();
             emu.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0x5A;
             emu.device_manager.keyboard.kbd_controller.outb = true;
             // A real OBF fill raises IRQ1 (Bochs keyboard.cc periodic timer);
@@ -1484,7 +1485,7 @@ mod tests {
 
             emu.reg_write(X86Reg::Rax, 0);
             emu.reg_write(X86Reg::Rcx, 0);
-            emu.mem_fill(DATA, 4, 0xCC).unwrap();
+            emu.mem_fill(BxPhyAddress::new(DATA), 4, 0xCC).unwrap();
             emu.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0;
             emu.device_manager.keyboard.kbd_controller.outb = false;
             emu.device_manager.dma.ext_page_reg[3] = 0;
@@ -1494,7 +1495,10 @@ mod tests {
 
             assert_eq!(emu.reg_read(X86Reg::Rax), 0x0123_4567_89AB_CDEF);
             assert_eq!(emu.reg_read(X86Reg::Rcx), 0x0FED_CBA9_7654_3210);
-            assert_eq!(emu.mem_read_vec(DATA, 4).unwrap(), [0x10, 0x20, 0x30, 0x40]);
+            assert_eq!(
+                emu.mem_read_vec(BxPhyAddress::new(DATA), 4).unwrap(),
+                [0x10, 0x20, 0x30, 0x40]
+            );
             assert_eq!(
                 emu.device_manager.keyboard.kbd_controller.kbd_output_buffer,
                 0x5A
@@ -1551,7 +1555,9 @@ mod tests {
         // byte is applied — never min-copied onto the live RAM.
         on_large_stack(|| {
             let mut source = machine();
-            source.mem_write(0x1000, &[0xAB, 0xCD]).unwrap();
+            source
+                .mem_write(BxPhyAddress::new(0x1000), &[0xAB, 0xCD])
+                .unwrap();
             source.service_scheduler_boundary(0).unwrap();
             let mut saved = Vec::new();
             source.save_snapshot(&mut saved).unwrap();

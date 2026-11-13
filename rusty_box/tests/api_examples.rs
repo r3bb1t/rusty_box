@@ -13,6 +13,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::{BxLinAddress, BxPhyAddress};
 use rusty_box::cpu::{
     CodeSize, CpuSetupMode, ExecutionMode, Fetched, LinearRange, MappingWalk, PageAccess,
     PageMapping, ResetReason, WalkStep, X86Reg,
@@ -157,7 +158,7 @@ fn a_real_mode_machine_fetches_from_where_the_caller_loaded_code() {
     // mov byte [MARK], 0x5A ; jmp $
     machine
         .virt_write(
-            CODE,
+            BxLinAddress::new(CODE),
             &[0xC6, 0x06, MARK as u8, (MARK >> 8) as u8, 0x5A, 0xEB, 0xFE],
         )
         .expect("load");
@@ -166,7 +167,9 @@ fn a_real_mode_machine_fetches_from_where_the_caller_loaded_code() {
     machine.step(RunBudget::Instructions(32)).expect("step");
 
     let mut mark = [0u8; 1];
-    machine.virt_read(MARK, &mut mark).expect("read back");
+    machine
+        .virt_read(BxLinAddress::new(MARK), &mut mark)
+        .expect("read back");
     assert_eq!(mark[0], 0x5A, "the guest ran the store it was given");
     assert_eq!(
         machine.reg_read(X86Reg::Rip),
@@ -241,8 +244,15 @@ fn the_configured_memory_size_is_the_memory_the_machine_has() {
 
     // The last byte of guest RAM is writable and reads back.
     let last = 8 * 1024 * 1024 - 1;
-    machine.mem_write(last, &[0x5A]).expect("write last byte");
-    assert_eq!(machine.mem_read_u8(last).expect("read back"), 0x5A);
+    machine
+        .mem_write(BxPhyAddress::new(last), &[0x5A])
+        .expect("write last byte");
+    assert_eq!(
+        machine
+            .mem_read_u8(BxPhyAddress::new(last))
+            .expect("read back"),
+        0x5A
+    );
 }
 
 // ── Running, and knowing why it stopped ─────────────────────────────────────
@@ -543,7 +553,10 @@ fn a_machine_can_be_driven_at_register_level_with_no_firmware() {
 
     // mov rax, 42 ; hlt
     machine
-        .mem_write(CODE, &[0x48, 0xC7, 0xC0, 0x2A, 0x00, 0x00, 0x00, 0xF4])
+        .mem_write(
+            BxPhyAddress::new(CODE),
+            &[0x48, 0xC7, 0xC0, 0x2A, 0x00, 0x00, 0x00, 0xF4],
+        )
         .expect("write code");
     machine.reg_write(X86Reg::Rsp, 0x0010_0000);
 
@@ -555,12 +568,22 @@ fn a_machine_can_be_driven_at_register_level_with_no_firmware() {
     // The same bytes, read back three ways. Long mode's tables are an
     // identity map, so the linear and physical addresses agree.
     let mut raw = [0u8; 4];
-    machine.mem_read(CODE, &mut raw).expect("mem_read");
+    machine
+        .mem_read(BxPhyAddress::new(CODE), &mut raw)
+        .expect("mem_read");
     assert_eq!(raw[0], 0x48);
-    assert_eq!(machine.mem_read_u8(CODE).expect("u8"), 0x48);
-    machine.virt_read(CODE, &mut raw).expect("virt_read");
+    assert_eq!(
+        machine.mem_read_u8(BxPhyAddress::new(CODE)).expect("u8"),
+        0x48
+    );
+    machine
+        .virt_read(BxLinAddress::new(CODE), &mut raw)
+        .expect("virt_read");
     assert_eq!(raw[0], 0x48);
-    assert_eq!(machine.virt_to_phys(CODE).expect("walk"), CODE);
+    assert_eq!(
+        machine.virt_to_phys(BxLinAddress::new(CODE)).expect("walk"),
+        BxPhyAddress::new(CODE)
+    );
 }
 
 #[test]
@@ -586,7 +609,7 @@ fn an_exit_address_ends_a_run_before_the_instruction_budget_does() {
 
     // Four one-byte NOPs, then HLT.
     machine
-        .mem_write(CODE, &[0x90, 0x90, 0x90, 0x90, 0xF4])
+        .mem_write(BxPhyAddress::new(CODE), &[0x90, 0x90, 0x90, 0x90, 0xF4])
         .expect("write code");
     machine.set_exits(&[CODE + 2]);
 
@@ -610,7 +633,9 @@ fn a_run_bounded_by_an_instruction_count_retires_exactly_that_many() {
 
     // Sixteen one-byte NOPs. Nothing here ends a run on its own, so whatever
     // stops it is the budget.
-    machine.mem_write(CODE, &[0x90; 16]).expect("write code");
+    machine
+        .mem_write(BxPhyAddress::new(CODE), &[0x90; 16])
+        .expect("write code");
     machine.reg_write(X86Reg::Rsp, 0x0010_0000);
 
     for count in [1u64, 3, 7] {
@@ -646,10 +671,15 @@ fn an_instruction_count_is_not_spent_on_trace_boundaries() {
     main.extend_from_slice(&((SUB - (CODE + 0x0C)) as u32).to_le_bytes());
     main.extend_from_slice(&[0x48, 0xFF, 0xC9]);
     main.extend_from_slice(&[0x75, 0xF6]);
-    machine.mem_write(CODE, &main).expect("main");
+    machine
+        .mem_write(BxPhyAddress::new(CODE), &main)
+        .expect("main");
     // SUB: mov rdx,1 ; ret
     machine
-        .mem_write(SUB, &[0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00, 0xC3])
+        .mem_write(
+            BxPhyAddress::new(SUB),
+            &[0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00, 0xC3],
+        )
         .expect("sub");
 
     // Two turns of the loop: mov rcx, then twice (call, mov rdx, ret, dec,
@@ -681,7 +711,9 @@ fn an_instruction_count_is_not_spent_on_trace_boundaries() {
 fn a_run_can_be_bounded_by_guest_time_rather_than_by_instructions() {
     let mut machine =
         Emulator::new_with_mode(small_config(), CpuSetupMode::FlatLong64).expect("machine");
-    machine.mem_write(CODE, &[0x90; 64]).expect("write code");
+    machine
+        .mem_write(BxPhyAddress::new(CODE), &[0x90; 64])
+        .expect("write code");
     machine.reg_write(X86Reg::Rip, CODE);
     machine.reg_write(X86Reg::Rsp, 0x0030_0000);
 
@@ -720,7 +752,7 @@ fn a_tracer_type_rides_along_with_the_machine() {
     .expect("machine");
 
     machine
-        .mem_write(CODE, &[0x90, 0x90, 0x90, 0xF4])
+        .mem_write(BxPhyAddress::new(CODE), &[0x90, 0x90, 0x90, 0xF4])
         .expect("write code");
     machine
         .emu_start(CODE, None, None, Some(8))
@@ -765,13 +797,17 @@ fn a_snapshot_round_trips_architectural_state() {
         .build()
         .expect("build");
     machine.reg_write(X86Reg::Rax, 0xDEAD_BEEF);
-    machine.mem_write(BASE, &[0xA5; 8]).expect("write");
+    machine
+        .mem_write(BxPhyAddress::new(BASE), &[0xA5; 8])
+        .expect("write");
 
     let mut saved = Vec::new();
     machine.save_snapshot(&mut saved).expect("save");
 
     machine.reg_write(X86Reg::Rax, 0);
-    machine.mem_write(BASE, &[0x00; 8]).expect("clobber");
+    machine
+        .mem_write(BxPhyAddress::new(BASE), &[0x00; 8])
+        .expect("clobber");
 
     machine
         .restore_snapshot(&mut std::io::Cursor::new(&saved))
@@ -779,7 +815,9 @@ fn a_snapshot_round_trips_architectural_state() {
 
     assert_eq!(machine.reg_read(X86Reg::Rax), 0xDEAD_BEEF);
     let mut back = [0u8; 8];
-    machine.mem_read(BASE, &mut back).expect("read");
+    machine
+        .mem_read(BxPhyAddress::new(BASE), &mut back)
+        .expect("read");
     assert_eq!(back, [0xA5; 8]);
 }
 
@@ -825,13 +863,17 @@ fn a_debugger_reads_the_boot_processor_at_its_reset_vector() {
     assert_eq!(view.mode, ExecutionMode::Real);
     assert_eq!(view.code_size, CodeSize::Bits16);
     assert_eq!(view.registers.rip, 0xFFF0);
-    assert_eq!(view.segment_bases.cs, 0xFFFF_0000);
+    assert_eq!(view.segment_bases.cs, BxLinAddress::new(0xFFFF_0000));
 
     let reset_vector = view.segment_bases.cs + view.registers.rip;
     let physical = cpu
         .dbg_xlate_linear2phy(reset_vector)
         .expect("paging is off, so every linear address maps");
-    assert_eq!(physical, reset_vector);
+    assert_eq!(
+        physical.get(),
+        reset_vector.get(),
+        "with paging off a linear address is its physical address"
+    );
     let mut bytes = [0u8; 4];
     assert_eq!(
         cpu.dbg_fetch_mem(physical, &mut bytes).expect("fetch"),
@@ -850,12 +892,15 @@ fn a_debugger_sees_the_bios_where_a_ram_read_sees_ram() {
         .build()
         .expect("machine");
     let mut ram = [0xAAu8; 4];
-    machine.mem_read(0xF_FFF0, &mut ram).expect("RAM read");
+    machine
+        .mem_read(BxPhyAddress::new(0xF_FFF0), &mut ram)
+        .expect("RAM read");
     assert_ne!(ram, [0xF4; 4], "RAM under the BIOS is not the BIOS");
     let mut cpu = machine.debug_cpu(0).expect("the boot processor");
     let mut seen = [0u8; 4];
     assert_eq!(
-        cpu.dbg_fetch_mem(0xF_FFF0, &mut seen).expect("fetch"),
+        cpu.dbg_fetch_mem(BxPhyAddress::new(0xF_FFF0), &mut seen)
+            .expect("fetch"),
         Fetched::Valid
     );
     assert_eq!(seen, [0xF4; 4]);
@@ -870,7 +915,8 @@ fn a_debugger_read_of_the_pci_hole_says_it_found_nothing() {
     let mut cpu = machine.debug_cpu(0).expect("the boot processor");
     let mut bytes = [0u8; 4];
     assert_eq!(
-        cpu.dbg_fetch_mem(0xD000_0000, &mut bytes).expect("fetch"),
+        cpu.dbg_fetch_mem(BxPhyAddress::new(0xD000_0000), &mut bytes)
+            .expect("fetch"),
         Fetched::OutsideMemory
     );
     assert_eq!(bytes, [0xFF; 4]);
@@ -896,9 +942,15 @@ fn a_debugger_walks_a_long_mode_processors_page_tables() {
     assert_eq!(view.mode, ExecutionMode::Long64);
     assert_eq!(view.code_size, CodeSize::Bits64);
     assert_ne!(view.efer & 0x400, 0, "EFER.LMA");
-    assert_eq!(cpu.dbg_xlate_linear2phy(mapped), Some(mapped));
+    assert_eq!(
+        cpu.dbg_xlate_linear2phy(BxLinAddress::new(mapped)),
+        Some(BxPhyAddress::new(mapped))
+    );
     // PML4 slot 511: the mode setup maps only the low slots.
-    assert_eq!(cpu.dbg_xlate_linear2phy(0xFFFF_FF80_0000_0000), None);
+    assert_eq!(
+        cpu.dbg_xlate_linear2phy(BxLinAddress::new(0xFFFF_FF80_0000_0000)),
+        None
+    );
 }
 
 /// A 4 MiB page reaches above 4 GiB through PSE-36: the PDE's bits 13..20
@@ -911,15 +963,21 @@ fn a_debugger_walk_follows_a_pse36_page_above_4_gib() {
     let page_directory = 0x0010_0000u64;
     // PDE 1: present, writable, 4 MiB, physical bit 32 set through PSE-36.
     machine
-        .mem_write_u32_le(page_directory + 4, 0x0040_0083 | (1 << 13))
+        .mem_write_u32_le(
+            BxPhyAddress::new(page_directory + 4),
+            0x0040_0083 | (1 << 13),
+        )
         .expect("PDE");
     machine.reg_write(X86Reg::Cr3, page_directory);
     machine.reg_write(X86Reg::Cr4, machine.reg_read(X86Reg::Cr4) | (1 << 4));
     machine.reg_write(X86Reg::Cr0, machine.reg_read(X86Reg::Cr0) | (1 << 31));
     let mut cpu = machine.debug_cpu(0).expect("the boot processor");
-    assert_eq!(cpu.dbg_xlate_linear2phy(0x0040_0123), Some(0x1_0040_0123));
     assert_eq!(
-        cpu.dbg_xlate_linear2phy(0x0080_0000),
+        cpu.dbg_xlate_linear2phy(BxLinAddress::new(0x0040_0123)),
+        Some(BxPhyAddress::new(0x1_0040_0123))
+    );
+    assert_eq!(
+        cpu.dbg_xlate_linear2phy(BxLinAddress::new(0x0080_0000)),
         None,
         "PDE 2 is not present"
     );
@@ -935,10 +993,17 @@ struct Walked {
 fn mappings_below(machine: &mut Emulator, cr3: u64, end: u64) -> Walked {
     let mut cpu = machine.debug_cpu(0).expect("the boot processor");
     let mut found = Vec::new();
-    let walk = cpu.dbg_page_mappings_in(cr3, LinearRange { start: 0, end }, |mapping| {
-        found.push(mapping);
-        WalkStep::Continue
-    });
+    let walk = cpu.dbg_page_mappings_in(
+        cr3,
+        LinearRange {
+            start: BxLinAddress::new(0),
+            end: BxLinAddress::new(end),
+        },
+        |mapping| {
+            found.push(mapping);
+            WalkStep::Continue
+        },
+    );
     Walked { walk, found }
 }
 
@@ -960,18 +1025,18 @@ fn a_mapping_walk_lists_legacy_pages_with_their_combined_rights() {
     let table = 0x0010_1000u64;
     // PDE 0: a page table, present, writable, user.
     machine
-        .mem_write_u32_le(directory, (table as u32) | 0x7)
+        .mem_write_u32_le(BxPhyAddress::new(directory), (table as u32) | 0x7)
         .expect("PDE 0");
     // PTE 5: user, read-only. PTE 6: supervisor, writable.
     machine
-        .mem_write_u32_le(table + 5 * 4, 0x0000_5005)
+        .mem_write_u32_le(BxPhyAddress::new(table + 5 * 4), 0x0000_5005)
         .expect("PTE 5");
     machine
-        .mem_write_u32_le(table + 6 * 4, 0x0000_6003)
+        .mem_write_u32_le(BxPhyAddress::new(table + 6 * 4), 0x0000_6003)
         .expect("PTE 6");
     // PDE 1: a 4 MiB page, present, writable, user.
     machine
-        .mem_write_u32_le(directory + 4, 0x0040_0087)
+        .mem_write_u32_le(BxPhyAddress::new(directory + 4), 0x0040_0087)
         .expect("PDE 1");
     machine.reg_write(X86Reg::Cr4, machine.reg_read(X86Reg::Cr4) | (1 << 4));
     machine.reg_write(X86Reg::Cr0, machine.reg_read(X86Reg::Cr0) | (1 << 31));
@@ -985,8 +1050,8 @@ fn a_mapping_walk_lists_legacy_pages_with_their_combined_rights() {
         found,
         [
             PageMapping {
-                linear: 0x5000,
-                physical: 0x5000,
+                linear: BxLinAddress::new(0x5000),
+                physical: BxPhyAddress::new(0x5000),
                 size: 0x1000,
                 access: PageAccess {
                     user: true,
@@ -995,8 +1060,8 @@ fn a_mapping_walk_lists_legacy_pages_with_their_combined_rights() {
                 },
             },
             PageMapping {
-                linear: 0x6000,
-                physical: 0x6000,
+                linear: BxLinAddress::new(0x6000),
+                physical: BxPhyAddress::new(0x6000),
                 size: 0x1000,
                 access: PageAccess {
                     user: false,
@@ -1005,8 +1070,8 @@ fn a_mapping_walk_lists_legacy_pages_with_their_combined_rights() {
                 },
             },
             PageMapping {
-                linear: 0x40_0000,
-                physical: 0x40_0000,
+                linear: BxLinAddress::new(0x40_0000),
+                physical: BxPhyAddress::new(0x40_0000),
                 size: 0x40_0000,
                 access: RW_USER
             },
@@ -1025,18 +1090,18 @@ fn a_mapping_walk_lists_pae_pages_and_honours_execute_disable() {
     let directory = 0x0010_1000u64;
     let table = 0x0010_2000u64;
     machine
-        .mem_write_u64_le(pdpt, directory | 0x1)
+        .mem_write_u64_le(BxPhyAddress::new(pdpt), directory | 0x1)
         .expect("PDPTE 0");
     // PDE 0: a table. PDE 1: a 2 MiB page.
     machine
-        .mem_write_u64_le(directory, table | 0x7)
+        .mem_write_u64_le(BxPhyAddress::new(directory), table | 0x7)
         .expect("PDE 0");
     machine
-        .mem_write_u64_le(directory + 8, 0x0020_0000 | 0x87)
+        .mem_write_u64_le(BxPhyAddress::new(directory + 8), 0x0020_0000 | 0x87)
         .expect("PDE 1");
     // PTE 7: user, writable, execute-disable.
     machine
-        .mem_write_u64_le(table + 7 * 8, 0x7000 | 0x7 | (1 << 63))
+        .mem_write_u64_le(BxPhyAddress::new(table + 7 * 8), 0x7000 | 0x7 | (1 << 63))
         .expect("PTE 7");
     machine.reg_write(X86Reg::Efer, machine.reg_read(X86Reg::Efer) | (1 << 11));
     machine.reg_write(X86Reg::Cr4, machine.reg_read(X86Reg::Cr4) | (1 << 5));
@@ -1050,8 +1115,8 @@ fn a_mapping_walk_lists_pae_pages_and_honours_execute_disable() {
         found,
         [
             PageMapping {
-                linear: 0x7000,
-                physical: 0x7000,
+                linear: BxLinAddress::new(0x7000),
+                physical: BxPhyAddress::new(0x7000),
                 size: 0x1000,
                 access: PageAccess {
                     user: true,
@@ -1060,8 +1125,8 @@ fn a_mapping_walk_lists_pae_pages_and_honours_execute_disable() {
                 },
             },
             PageMapping {
-                linear: 0x20_0000,
-                physical: 0x20_0000,
+                linear: BxLinAddress::new(0x20_0000),
+                physical: BxPhyAddress::new(0x20_0000),
                 size: 0x20_0000,
                 access: RW_USER
             },
@@ -1081,8 +1146,8 @@ fn a_mapping_walk_lists_a_long_mode_identity_map_and_stops_when_asked() {
     let walk = cpu.dbg_page_mappings_in(
         cr3,
         LinearRange {
-            start: 0,
-            end: u64::MAX,
+            start: BxLinAddress::new(0),
+            end: BxLinAddress::new(u64::MAX),
         },
         |mapping| {
             first = Some(mapping);
@@ -1091,7 +1156,10 @@ fn a_mapping_walk_lists_a_long_mode_identity_map_and_stops_when_asked() {
     );
     assert_eq!(walk, MappingWalk::Stopped);
     let first = first.expect("the identity map maps address zero");
-    assert_eq!((first.linear, first.physical), (0, 0));
+    assert_eq!(
+        (first.linear, first.physical),
+        (BxLinAddress::new(0), BxPhyAddress::new(0))
+    );
     assert!(first.access.writable);
 
     let mut real =
@@ -1111,7 +1179,7 @@ fn a_debugger_read_at_the_top_of_the_address_space_is_outside_memory() {
     let mut cpu = machine.debug_cpu(0).expect("the boot processor");
     let mut bytes = [0u8; 16];
     assert_eq!(
-        cpu.dbg_fetch_mem(0xFFFF_FFFF_FFFF_FFF0, &mut bytes)
+        cpu.dbg_fetch_mem(BxPhyAddress::new(0xFFFF_FFFF_FFFF_FFF0), &mut bytes)
             .expect("fetch"),
         Fetched::OutsideMemory
     );
@@ -1136,7 +1204,9 @@ fn a_ram_image_below_the_pci_hole_is_ram_at_its_physical_address() {
     let mut machine = MachineBuilder::new(small_config())
         .build()
         .expect("machine");
-    machine.mem_write(0x1234, b"rusty").expect("write");
+    machine
+        .mem_write(BxPhyAddress::new(0x1234), b"rusty")
+        .expect("write");
     let mut image = [0u8; 5];
     machine
         .read_ram_image(rusty_box::emulator::RamOffset(0x1234), &mut image)

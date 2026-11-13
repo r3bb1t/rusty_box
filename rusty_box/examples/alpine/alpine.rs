@@ -26,6 +26,7 @@
 use std::time::Instant;
 
 use rusty_box::Result;
+use rusty_box::config::BxPhyAddress;
 use rusty_box::emulator::{
     AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MachineBuilder,
     MemorySize,
@@ -83,7 +84,7 @@ fn parse_chs(s: &str) -> Option<(u16, u8, u8)> {
 
 fn read_guest_u32(emu: &mut Emulator, addr: u64) -> Option<u32> {
     let mut bytes = [0; 4];
-    emu.mem_read(addr, &mut bytes).ok()?;
+    emu.mem_read(BxPhyAddress::new(addr), &mut bytes).ok()?;
     Some(u32::from_le_bytes(bytes))
 }
 
@@ -91,7 +92,7 @@ fn read_guest_u32(emu: &mut Emulator, addr: u64) -> Option<u32> {
 #[cfg(debug_assertions)]
 fn read_guest_u16(emu: &mut Emulator, addr: u64) -> Option<u16> {
     let mut bytes = [0; 2];
-    emu.mem_read(addr, &mut bytes).ok()?;
+    emu.mem_read(BxPhyAddress::new(addr), &mut bytes).ok()?;
     Some(u16::from_le_bytes(bytes))
 }
 

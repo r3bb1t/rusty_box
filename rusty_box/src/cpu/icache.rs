@@ -1306,12 +1306,15 @@ mod smc_mask_tests {
                     gate[5] = 0x8E;
                     gate[6..8].copy_from_slice(&((HANDLER >> 16) as u16).to_le_bytes());
                     gate[8..12].copy_from_slice(&((HANDLER >> 32) as u32).to_le_bytes());
-                    emu.mem_write(IDT + u64::from(Exception::Ud as u8) * 16, &gate)
-                        .unwrap();
-                    emu.mem_write(HANDLER, &[0xF4]).unwrap();
+                    emu.mem_write(
+                        BxPhyAddress::new(IDT + u64::from(Exception::Ud as u8) * 16),
+                        &gate,
+                    )
+                    .unwrap();
+                    emu.mem_write(BxPhyAddress::new(HANDLER), &[0xF4]).unwrap();
 
                     let bytes = [0xC4, 0xE3, 0x75, opcode, 0xD8, 0x01];
-                    emu.mem_write(CODE, &bytes).unwrap();
+                    emu.mem_write(BxPhyAddress::new(CODE), &bytes).unwrap();
                     let result =
                         emu.emu_start(CODE, Some(CODE + bytes.len() as u64), None, Some(1));
                     assert!(
@@ -1328,7 +1331,8 @@ mod smc_mask_tests {
                     assert_eq!(emu.cpu().rip(), HANDLER);
                     assert_eq!(emu.reg_read(X86Reg::Rsp), STACK_TOP - 40);
                     let mut pushed_rip = [0u8; 8];
-                    emu.mem_read(STACK_TOP - 40, &mut pushed_rip).unwrap();
+                    emu.mem_read(BxPhyAddress::new(STACK_TOP - 40), &mut pushed_rip)
+                        .unwrap();
                     assert_eq!(u64::from_le_bytes(pushed_rip), CODE);
                     let cpu = emu.cpu();
 
@@ -1365,7 +1369,7 @@ mod smc_mask_tests {
 
                 // nop; jz +0 (not taken: reset RFLAGS has ZF=0); nop; nop; ret
                 let bytes = [0x90, 0x74, 0x00, 0x90, 0x90, 0xC3];
-                emu.mem_write(CODE, &bytes).unwrap();
+                emu.mem_write(BxPhyAddress::new(CODE), &bytes).unwrap();
                 // Execute up to the RET (4 instructions) — enough to decode
                 // and commit the trace without needing a guest stack.
                 emu.emu_start(CODE, None, None, Some(4)).unwrap();
@@ -1428,10 +1432,13 @@ mod smc_mask_tests {
                 main.push(0x02);
                 main.extend_from_slice(&[0x48, 0xFF, 0xC9]); // dec rcx
                 main.extend_from_slice(&[0x75, 0xEF]); // jnz back to the call
-                emu.mem_write(CODE, &main).unwrap();
+                emu.mem_write(BxPhyAddress::new(CODE), &main).unwrap();
                 // SUB: mov rdx, 1; ret
-                emu.mem_write(SUB, &[0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00, 0xC3])
-                    .unwrap();
+                emu.mem_write(
+                    BxPhyAddress::new(SUB),
+                    &[0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00, 0xC3],
+                )
+                .unwrap();
 
                 // iter1: mov rcx, call, mov rdx, ret, patch, dec, jnz (7)
                 // iter2: call, mov rdx(patched), ret, patch, dec, jnz (6)

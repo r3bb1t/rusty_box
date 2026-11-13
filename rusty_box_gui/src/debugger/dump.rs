@@ -168,6 +168,7 @@ fn partial_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use rusty_box::config::BxPhyAddress;
     use rusty_box::emulator::{EmulatorConfig, MachineBuilder, MemorySize};
 
     use super::*;
@@ -184,8 +185,12 @@ mod tests {
         })
         .build()
         .expect("machine");
-        machine.mem_write(0x1000, b"rusty").expect("write");
-        machine.mem_write(0x3F_FFF0, &[1, 2, 3]).expect("write");
+        machine
+            .mem_write(BxPhyAddress::new(0x1000), b"rusty")
+            .expect("write");
+        machine
+            .mem_write(BxPhyAddress::new(0x3F_FFF0), &[1, 2, 3])
+            .expect("write");
         let path = scratch("whole.bin");
 
         let outcome = dump_ram(machine.as_mut(), &path, || false);

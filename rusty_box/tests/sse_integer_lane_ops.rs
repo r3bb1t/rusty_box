@@ -7,6 +7,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -39,7 +40,8 @@ fn run(emu: &mut Emulator, code: &[u8]) {
     let mut image = [&ENABLE_AVX[..], code].concat();
     let end = CODE + image.len() as u64;
     image.extend_from_slice(&[0xEB, 0xFE]);
-    emu.mem_write(CODE, &image).expect("write code");
+    emu.mem_write(BxPhyAddress::new(CODE), &image)
+        .expect("write code");
     emu.emu_start(CODE, Some(end), None, Some(64))
         .expect("execute");
     assert_eq!(

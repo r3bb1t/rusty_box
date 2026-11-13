@@ -387,6 +387,7 @@ A machine with no firmware is the shortest path to running your own code: pick
 a CPU mode, write bytes, run.
 
 ```rust,no_run
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -396,25 +397,32 @@ let mut machine = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMod
 // tables, and code written over them never runs.
 let code = CpuSetupMode::FlatLong64.first_free_physical_address();
 
-machine.mem_write(code, &[0x48, 0xC7, 0xC0, 0x2A, 0x00, 0x00, 0x00, 0xF4])?; // mov rax,42 ; hlt
+// The setup maps memory one to one, so the same number is where the code lies
+// and where RIP starts.
+machine.mem_write(BxPhyAddress::new(code), &[0x48, 0xC7, 0xC0, 0x2A, 0x00, 0x00, 0x00, 0xF4])?; // mov rax,42 ; hlt
 machine.reg_write(X86Reg::Rsp, 0x0010_0000);
 machine.emu_start(code, None, None, Some(16))?;
 assert_eq!(machine.reg_read(X86Reg::Rax), 42);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Physical and virtual addresses are different verbs:
+Physical and virtual addresses are different verbs, and different types: a
+`BxPhyAddress` is guest-physical, a `BxLinAddress` is linear (virtual), and
+one never stands in for the other:
 
 ```rust,no_run
 # use rusty_box::cpu::CpuSetupMode;
 # use rusty_box::emulator::{Emulator, EmulatorConfig};
+use rusty_box::config::{BxLinAddress, BxPhyAddress};
 # let mut machine = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)?;
 # let addr = CpuSetupMode::FlatLong64.first_free_physical_address();
+let physical = BxPhyAddress::new(addr);
+let linear = BxLinAddress::new(addr);
 let mut buf = [0u8; 4];
-machine.mem_read(addr, &mut buf)?;          // guest-physical
-machine.virt_read(addr, &mut buf)?;         // through the page tables
-let byte = machine.mem_read_u8(addr)?;      // one byte, physical
-let phys = machine.virt_to_phys(addr)?;     // walk without reading
+machine.mem_read(physical, &mut buf)?;       // guest-physical
+machine.virt_read(linear, &mut buf)?;        // through the page tables
+let byte = machine.mem_read_u8(physical)?;   // one byte, physical
+let phys = machine.virt_to_phys(linear)?;    // walk without reading: a BxPhyAddress
 # let _ = (byte, phys);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -480,7 +488,8 @@ the machine's memory (divergence D22; Bochs's debugger has no such view).
 let mut cpu = machine.debug_cpu(0).expect("processor 0 always exists");
 if let Some(guest) = cpu.vmx_guest() {
     println!("VMCS {:#x}: the guest stopped at {:#x}", guest.vmcs, guest.rip);
-    if let Some(physical) = cpu.dbg_xlate_vmx_guest_linear2phy(&guest, guest.cr3, guest.rip) {
+    let code = guest.segment_bases.cs + guest.rip;
+    if let Some(physical) = cpu.dbg_xlate_vmx_guest_linear2phy(&guest, guest.cr3, code) {
         let mut bytes = [0u8; 15];
         if cpu.dbg_fetch_mem(physical, &mut bytes)? == Fetched::Valid {
             println!("{:?}", guest.code_size.decode(&bytes).map(|i| i.get_ia_opcode()));
@@ -522,11 +531,12 @@ because a host cannot see "ignored" any other way.
 An exit address ends a run before its budget does:
 
 ```rust,no_run
+# use rusty_box::config::BxPhyAddress;
 # use rusty_box::cpu::{CpuSetupMode, X86Reg};
 # use rusty_box::emulator::{Emulator, EmulatorConfig};
 # let mut machine = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)?;
 # let code = CpuSetupMode::FlatLong64.first_free_physical_address();
-# machine.mem_write(code, &[0x90, 0x90, 0x90, 0x90, 0xF4])?;
+# machine.mem_write(BxPhyAddress::new(code), &[0x90, 0x90, 0x90, 0x90, 0xF4])?;
 machine.set_exits(&[code + 2]);
 machine.emu_start(code, None, None, Some(64))?;
 assert_eq!(machine.reg_read(X86Reg::Rip), code + 2);
@@ -561,7 +571,7 @@ let mut machine = Emulator::<Counter>::new_with_mode_and_instrumentation(
     Counter::default(),
 )?;
 # let code = CpuSetupMode::FlatLong64.first_free_physical_address();
-# machine.mem_write(code, &[0x90, 0x90, 0x90, 0xF4])?;
+# machine.mem_write(rusty_box::config::BxPhyAddress::new(code), &[0x90, 0x90, 0x90, 0xF4])?;
 machine.emu_start(code, None, None, Some(8))?;
 println!("{} instructions", machine.instrumentation().executed);
 # Ok::<(), Box<dyn std::error::Error>>(())

@@ -3016,7 +3016,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         span: u64,
         range: crate::cpu::instrumentation::LinearRange,
     ) -> bool {
-        base < range.end && base.wrapping_add(span) > range.start
+        base < range.end.get() && base.wrapping_add(span) > range.start.get()
     }
 
     /// One 512-entry table of 8-byte entries (long mode, or PAE's directory
@@ -3084,8 +3084,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     continue;
                 };
                 visit(PageMapping {
-                    linear,
-                    physical: self.a20_mask.apply(physical).get(),
+                    linear: BxLinAddress::new(linear),
+                    physical: self.a20_mask.apply(physical),
                     size: span,
                     access,
                 })
@@ -3154,8 +3154,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     continue;
                 };
                 let step = visit(PageMapping {
-                    linear: base,
-                    physical: self.a20_mask.apply(physical).get(),
+                    linear: BxLinAddress::new(base),
+                    physical: self.a20_mask.apply(physical),
                     size: 1 << 22,
                     access: dir_access,
                 });
@@ -3185,8 +3185,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     continue;
                 };
                 let step = visit(PageMapping {
-                    linear,
-                    physical: self.a20_mask.apply(physical).get(),
+                    linear: BxLinAddress::new(linear),
+                    physical: self.a20_mask.apply(physical),
                     size: 1 << 12,
                     access: access_of(pte, dir_access),
                 });

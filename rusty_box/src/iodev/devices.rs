@@ -2378,7 +2378,7 @@ impl DeviceManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::A20Mask;
+    use crate::config::{A20Mask, BxLinAddress};
 
     /// A tick reading under a stated rate, which is what a device is handed
     /// now instead of a bare instruction count.
@@ -2578,7 +2578,8 @@ mod tests {
         code.extend_from_slice(&[0xBA, 0xFC, 0x0C, 0x00, 0x00, 0xB8]);
         code.extend_from_slice(&value.to_le_bytes());
         code.push(0xEF);
-        emu.virt_write(code_address, &code).unwrap();
+        emu.virt_write(BxLinAddress::new(code_address), &code)
+            .unwrap();
         emu.reg_write(X86Reg::Rip, code_address);
         emu.run_cpu_batch(64).map(|progress| progress.count())
     }
@@ -2589,7 +2590,8 @@ mod tests {
             0xBA, // mov edx, imm32
             port_lo, port_hi, 0x00, 0x00, 0xEC, // in al,dx
         ];
-        emu.virt_write(GUEST_TEST_CODE, &code).unwrap();
+        emu.virt_write(BxLinAddress::new(GUEST_TEST_CODE), &code)
+            .unwrap();
         emu.reg_write(X86Reg::Rip, GUEST_TEST_CODE);
         emu.run_cpu_batch(2)?;
         assert_eq!(emu.devices.last_io_read_port, port);
@@ -2601,7 +2603,8 @@ mod tests {
         let mut code = Vec::with_capacity(6);
         code.extend_from_slice(&[0x8A, 0x05]); // mov al,byte ptr [disp32]
         code.extend_from_slice(&address.to_le_bytes());
-        emu.virt_write(code_address, &code).unwrap();
+        emu.virt_write(BxLinAddress::new(code_address), &code)
+            .unwrap();
         emu.reg_write(X86Reg::Rip, code_address);
         emu.run_cpu_batch(1).map(|progress| progress.count())
     }

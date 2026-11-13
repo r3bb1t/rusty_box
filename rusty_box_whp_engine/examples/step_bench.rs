@@ -19,6 +19,7 @@
 
 use std::time::{Duration, Instant};
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig, MemorySize, RunBudget, StopReason};
 use rusty_box_whp::{
@@ -120,7 +121,7 @@ fn interpreter_hooked(code: &[u8]) -> Option<Duration> {
         Tracer::default(),
     )
     .ok()?;
-    machine.mem_write(CODE, code).ok()?;
+    machine.mem_write(BxPhyAddress::new(CODE), code).ok()?;
     machine.reg_write(X86Reg::Rip, CODE);
     let began = Instant::now();
     loop {
@@ -137,7 +138,7 @@ fn interpreter_hooked(code: &[u8]) -> Option<Duration> {
 /// The interpreter, running free with no hook — the ceiling.
 fn interpreter_free(code: &[u8]) -> Option<Duration> {
     let mut machine = Emulator::<()>::new_with_mode(config(), CpuSetupMode::RealMode).ok()?;
-    machine.mem_write(CODE, code).ok()?;
+    machine.mem_write(BxPhyAddress::new(CODE), code).ok()?;
     machine.reg_write(X86Reg::Rip, CODE);
     let began = Instant::now();
     loop {
@@ -155,7 +156,7 @@ fn interpreter_free(code: &[u8]) -> Option<Duration> {
 /// costs, since each call rebuilds the execution context the free path holds.
 fn interpreter_stepped(code: &[u8]) -> Option<Duration> {
     let mut machine = Emulator::<()>::new_with_mode(config(), CpuSetupMode::RealMode).ok()?;
-    machine.mem_write(CODE, code).ok()?;
+    machine.mem_write(BxPhyAddress::new(CODE), code).ok()?;
     machine.reg_write(X86Reg::Rip, CODE);
     let began = Instant::now();
     for _ in 0..instructions(STEP_ITERATIONS) {

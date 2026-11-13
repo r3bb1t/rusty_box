@@ -812,9 +812,11 @@ fn faulted_interrupt_delivery_commits_prev_rip() {
             gate[6..8].copy_from_slice(&(((HANDLER >> 16) & 0xFFFF) as u16).to_le_bytes());
             gate[8..12].copy_from_slice(&((HANDLER >> 32) as u32).to_le_bytes());
             // #NP (11) and #GP (13) share the same handler for this test.
-            emu.mem_write(11 * 16, &gate).expect("write #NP gate");
-            emu.mem_write(13 * 16, &gate).expect("write #GP gate");
-            emu.mem_write(HANDLER, &[0xEB, 0xFE])
+            emu.mem_write(BxPhyAddress::new(11 * 16), &gate)
+                .expect("write #NP gate");
+            emu.mem_write(BxPhyAddress::new(13 * 16), &gate)
+                .expect("write #GP gate");
+            emu.mem_write(BxPhyAddress::new(HANDLER), &[0xEB, 0xFE])
                 .expect("write handler");
             emu.reg_write(X86Reg::Rsp, 0x0058_0000);
 
@@ -983,7 +985,7 @@ fn instrumented_constructor_applies_configured_cpuid_frequency() {
                 NoopTracer,
             )
             .unwrap();
-            emu.virt_write(CODE_ADDR, &[0x0F, 0xA2, 0xEB, 0xFE])
+            emu.virt_write(BxLinAddress::new(CODE_ADDR), &[0x0F, 0xA2, 0xEB, 0xFE])
                 .unwrap();
             emu.reg_write(X86Reg::Rax, 0x15);
             emu.reg_write(X86Reg::Rcx, 0);
@@ -1015,8 +1017,11 @@ fn a_machine_executes_guest_code_after_hardware_initialisation() {
 
             const CODE_ADDR: u64 = 0x1000;
             // mov eax, 0x2A ; hlt
-            emu.virt_write(CODE_ADDR, &[0xB8, 0x2A, 0x00, 0x00, 0x00, 0xF4])
-                .unwrap();
+            emu.virt_write(
+                BxLinAddress::new(CODE_ADDR),
+                &[0xB8, 0x2A, 0x00, 0x00, 0x00, 0xF4],
+            )
+            .unwrap();
             emu.reg_write(X86Reg::Rip, CODE_ADDR);
             emu.run_cpu_batch(2).unwrap();
             assert_eq!(emu.reg_read(X86Reg::Rax), 0x2A);
@@ -1066,7 +1071,9 @@ fn a_machine_reports_progress_in_the_unit_it_can_actually_measure() {
             let mut uniprocessor =
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
                     .unwrap();
-            uniprocessor.virt_write(0x1000, &code).unwrap();
+            uniprocessor
+                .virt_write(BxLinAddress::new(0x1000), &code)
+                .unwrap();
             uniprocessor.reg_write(X86Reg::Rip, 0x1000);
             let before = uniprocessor.cpu_ref(BSP_INDEX).icount;
             let progress = uniprocessor.run_cpu_batch(8).unwrap();
@@ -1084,7 +1091,9 @@ fn a_machine_reports_progress_in_the_unit_it_can_actually_measure() {
             let mut multiprocessor =
                 Emulator::new_with_mode(config, CpuSetupMode::FlatProtected32).unwrap();
             multiprocessor.reset(ResetReason::Hardware).unwrap();
-            multiprocessor.virt_write(0x1000, &code).unwrap();
+            multiprocessor
+                .virt_write(BxLinAddress::new(0x1000), &code)
+                .unwrap();
             multiprocessor.reg_write(X86Reg::Rip, 0x1000);
             let progress = multiprocessor.run_cpu_batch(8).unwrap();
             assert_eq!(
@@ -1193,7 +1202,8 @@ fn strict_budget_stops_a_linked_branch_chain_exactly() {
             const CODE: u64 = 0x1000;
             emu.reg_write(X86Reg::Rcx, 1_000_000);
             // dec ecx; jnz -3
-            emu.virt_write(CODE, &[0x49, 0x75, 0xFD]).unwrap();
+            emu.virt_write(BxLinAddress::new(CODE), &[0x49, 0x75, 0xFD])
+                .unwrap();
             emu.reg_write(X86Reg::Rip, CODE);
 
             let executed = emu
@@ -1222,7 +1232,7 @@ fn run_cpu_batch_stops_at_the_next_exact_timer_deadline() {
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
                     .unwrap();
             let code = [0x90u8; 8192];
-            emu.virt_write(0x1000, &code).unwrap();
+            emu.virt_write(BxLinAddress::new(0x1000), &code).unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
             emu.pc_system
                 .register_timer(TimerOwner::NullTimer, 1, true, true, "one_tick")
@@ -1267,11 +1277,14 @@ fn smi_apm_handshake_runs_the_guest_smm_handler() {
             //   mov al, 1 ; out 0xb3, al ; mov al, 0 ; out 0xb2, al ; nops
             let mut code = [0x90u8; 64];
             code[..8].copy_from_slice(&[0xB0, 0x01, 0xE6, 0xB3, 0xB0, 0x00, 0xE6, 0xB2]);
-            emu.virt_write(0x1000, &code).unwrap();
+            emu.virt_write(BxLinAddress::new(0x1000), &code).unwrap();
             // SMM handler at 0x38000 (SMBASE 0x30000 + entry 0x8000):
             //   mov al, 0 ; out 0xb3, al ; rsm
-            emu.virt_write(0x38000, &[0xB0, 0x00, 0xE6, 0xB3, 0x0F, 0xAA])
-                .unwrap();
+            emu.virt_write(
+                BxLinAddress::new(0x38000),
+                &[0xB0, 0x00, 0xE6, 0xB3, 0x0F, 0xAA],
+            )
+            .unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
 
             // Run: OUT 0xB2 ends the slice (machine boundary), the
@@ -1742,7 +1755,8 @@ fn keyboard_one_usec_deadline_ends_up_batch_and_raises_irq1() {
             let mut emu =
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
                     .unwrap();
-            emu.virt_write(0x1000, &[0x90; 64]).unwrap();
+            emu.virt_write(BxLinAddress::new(0x1000), &[0x90; 64])
+                .unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
             emu.pc_system.initialize(1_000_000);
             emu.devices.set_timer_ips(1_000_000);
@@ -1925,7 +1939,8 @@ fn no_fixed_device_polling_state_remains() {
             let mut emu =
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
                     .unwrap();
-            emu.virt_write(CODE, &[0x90; 512]).unwrap();
+            emu.virt_write(BxLinAddress::new(CODE), &[0x90; 512])
+                .unwrap();
             emu.reg_write(X86Reg::Rip, CODE);
             emu.pc_system.initialize(1_000_000);
             emu.devices.set_timer_ips(1_000_000);
@@ -2009,8 +2024,11 @@ fn phase1_tests_subpage_guest_blocks_fetch_sequential_instructions() {
             let mut emu = Emulator::new_with_mode(config, CpuSetupMode::FlatProtected32).unwrap();
             // Four NOPs cross the 1 KiB guest-block edge.  The following
             // self-loop ends the trace without executing unrelated zero RAM.
-            emu.virt_write(START, &[0x90, 0x90, 0x90, 0x90, 0xEB, 0xFE])
-                .unwrap();
+            emu.virt_write(
+                BxLinAddress::new(START),
+                &[0x90, 0x90, 0x90, 0x90, 0xEB, 0xFE],
+            )
+            .unwrap();
             emu.reg_write(X86Reg::Rip, START);
 
             let before = emu.cpu_ref(BSP_INDEX).icount;
@@ -2033,8 +2051,11 @@ fn strict_cpu_batch_limit_does_not_execute_trace_tail() {
             let mut emu =
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
                     .unwrap();
-            emu.virt_write(START, &[0x90, 0x90, 0x90, 0x90, 0xEB, 0xFE])
-                .unwrap();
+            emu.virt_write(
+                BxLinAddress::new(START),
+                &[0x90, 0x90, 0x90, 0x90, 0xEB, 0xFE],
+            )
+            .unwrap();
             emu.reg_write(X86Reg::Rip, START);
 
             let before = emu.cpu_ref(BSP_INDEX).icount;
@@ -2063,8 +2084,11 @@ fn run_interactive_stops_at_exact_instruction_limit_across_batches() {
             let mut emu =
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
                     .unwrap();
-            emu.virt_write(START, &[0x90, 0x90, 0x90, 0x90, 0xEB, 0xFA])
-                .unwrap();
+            emu.virt_write(
+                BxLinAddress::new(START),
+                &[0x90, 0x90, 0x90, 0x90, 0xEB, 0xFA],
+            )
+            .unwrap();
             emu.reg_write(X86Reg::Rip, START);
 
             let executed = emu.run_interactive(LIMIT).unwrap();
@@ -2090,8 +2114,11 @@ fn rep_insw32_fast_path_retires_exact_iteration_count() {
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
                     .unwrap();
             // REP INSW with 32-bit address size, then a parking jump.
-            emu.virt_write(CODE_ADDR, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
-                .unwrap();
+            emu.virt_write(
+                BxLinAddress::new(CODE_ADDR),
+                &[0xF3, 0x66, 0x6D, 0xEB, 0xFE],
+            )
+            .unwrap();
             emu.reg_write(X86Reg::Rip, CODE_ADDR);
             emu.reg_write(X86Reg::Rdx, UNMAPPED_PORT);
             emu.reg_write(X86Reg::Rdi, DEST_ADDR);
@@ -2161,8 +2188,11 @@ fn rep_insw32_stops_at_event_budget_across_page_boundary() {
             // REP INSW crosses from 0x2fff to 0x3000 before the timer
             // deadline. The initialized IDE data buffer makes both chunks
             // use the real bulk-port path.
-            emu.virt_write(CODE_ADDR, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
-                .unwrap();
+            emu.virt_write(
+                BxLinAddress::new(CODE_ADDR),
+                &[0xF3, 0x66, 0x6D, 0xEB, 0xFE],
+            )
+            .unwrap();
             emu.reg_write(X86Reg::Rip, CODE_ADDR);
             emu.reg_write(X86Reg::Rdx, IDE_DATA_PORT);
             emu.reg_write(X86Reg::Rdi, DEST_ADDR);
@@ -2202,7 +2232,7 @@ fn smp_batch_with_parked_application_processors_reaches_timer_quantum() {
                 .unwrap();
             let mut emu = Emulator::new_with_mode(config, CpuSetupMode::FlatProtected32).unwrap();
             let code = vec![0x90u8; 131_072];
-            emu.virt_write(0x1000, &code).unwrap();
+            emu.virt_write(BxLinAddress::new(0x1000), &code).unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
 
             let before = emu.cpu_ref(BSP_INDEX).icount;
@@ -2234,7 +2264,7 @@ fn halted_application_processors_do_not_force_trace_sized_batches() {
                 .unwrap();
             let mut emu = Emulator::new_with_mode(config, CpuSetupMode::FlatProtected32).unwrap();
             let code = vec![0x90u8; 131_072];
-            emu.virt_write(0x1000, &code).unwrap();
+            emu.virt_write(BxLinAddress::new(0x1000), &code).unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
             for cpu_index in 1..emu.cpu_count() {
                 let cpu = emu.cpu_mut_at(cpu_index);
@@ -2277,7 +2307,7 @@ fn parked_application_processor_ipi_breaks_bsp_batch_for_delivery() {
                 0x00, // ICR low: SIPI vector 0x09
                 0x90, 0x90, 0x90, 0x90,
             ];
-            emu.virt_write(0x1000, &code).unwrap();
+            emu.virt_write(BxLinAddress::new(0x1000), &code).unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
 
             let executed = emu.run_cpu_batch_elapsed(4096).unwrap();
@@ -2318,7 +2348,7 @@ fn smc_store_within_current_trace_stops_trace() {
             code.extend_from_slice(&[0x90; 7]);
             code.push(0x40);
             code.push(0xF4);
-            emu.virt_write(0x1000, &code).unwrap();
+            emu.virt_write(BxLinAddress::new(0x1000), &code).unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
 
             emu.run_cpu_batch(4096).unwrap();
@@ -2378,13 +2408,16 @@ fn fw_cfg_dma_out_stops_cached_trace_before_following_instruction() {
             descriptor[4..8].copy_from_slice(&(1u32).to_be_bytes());
             descriptor[8..].copy_from_slice(&patched_inc.to_be_bytes());
             emu.load_ram(&descriptor, DESCRIPTOR).unwrap();
-            emu.virt_write(CODE, &code).unwrap();
+            emu.virt_write(BxLinAddress::new(CODE), &code).unwrap();
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rip, CODE);
 
             emu.run_cpu_batch(4096).unwrap();
 
-            assert_eq!(emu.mem_read_vec(patched_inc, 1).unwrap(), [0xF4]);
+            assert_eq!(
+                emu.mem_read_vec(BxPhyAddress::new(patched_inc), 1).unwrap(),
+                [0xF4]
+            );
             assert_eq!(emu.cpu_ref(0).activity_state, CpuActivityState::Hlt);
             assert_eq!(
                 emu.reg_read(X86Reg::Rcx),
@@ -2417,14 +2450,15 @@ fn smp_cross_cpu_code_patch_invalidates_sibling_icache() {
             //   0x9008: jmp 0x9000 (EB F6)
             let mut ap_code = vec![0x90u8; 8];
             ap_code.extend_from_slice(&[0xEB, 0xF6]);
-            emu.virt_write(0x9000, &ap_code).unwrap();
+            emu.virt_write(BxLinAddress::new(0x9000), &ap_code).unwrap();
             // BSP: spin long enough that the AP has cached its loop trace,
             // then patch the AP's jmp to hlt;hlt, then halt.
             let mut bsp_code = vec![0x90u8; 600];
             // mov word [0x9008], 0xF4F4
             bsp_code.extend_from_slice(&[0x66, 0xC7, 0x05, 0x08, 0x90, 0x00, 0x00, 0xF4, 0xF4]);
             bsp_code.push(0xF4); // hlt
-            emu.virt_write(0x1000, &bsp_code).unwrap();
+            emu.virt_write(BxLinAddress::new(0x1000), &bsp_code)
+                .unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
             emu.exec_ctx(AP_INDEX).deliver_sipi(0x09);
             emu.rebuild_cpu_masks_from_scan();
@@ -2470,7 +2504,7 @@ fn dma_write_to_cached_code_page_invalidates_icache() {
             // 0x1000: nop x8 / 0x1008: jmp 0x1000 — jmp is past first_bytes.
             let mut code = vec![0x90u8; 8];
             code.extend_from_slice(&[0xEB, 0xF6]);
-            emu.virt_write(0x1000, &code).unwrap();
+            emu.virt_write(BxLinAddress::new(0x1000), &code).unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
 
             // Let the CPU cache and spin the loop trace.
@@ -2513,7 +2547,7 @@ fn active_cpu_batch_has_no_fixed_millisecond_polling_cap() {
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
                     .unwrap();
             let code = vec![0x90u8; 131_072];
-            emu.virt_write(0x1000, &code).unwrap();
+            emu.virt_write(BxLinAddress::new(0x1000), &code).unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
 
             let executed = emu.run_cpu_batch_retiring(100_000).unwrap();
@@ -2526,7 +2560,9 @@ fn active_cpu_batch_has_no_fixed_millisecond_polling_cap() {
             high_ips_config.ips = Ips::new(300_000_000);
             let mut high_ips_emu =
                 Emulator::new_with_mode(high_ips_config, CpuSetupMode::FlatProtected32).unwrap();
-            high_ips_emu.virt_write(0x1000, &code).unwrap();
+            high_ips_emu
+                .virt_write(BxLinAddress::new(0x1000), &code)
+                .unwrap();
             high_ips_emu.reg_write(X86Reg::Rip, 0x1000);
 
             let executed = high_ips_emu.run_cpu_batch_retiring(100_000).unwrap();
@@ -2553,7 +2589,7 @@ fn keyboard_reset_ack_reaches_bios_poll_before_timeout_at_high_configured_ips() 
                 0x0B, 0xE2, 0xF8, 0xC6, 0x05, 0x00, 0x20, 0x00, 0x00, 0xEE, 0xEB, 0x09, 0xE4, 0x60,
                 0xC6, 0x05, 0x00, 0x20, 0x00, 0x00, 0xAA, 0xF4,
             ];
-            emu.virt_write(0x1000, &code).unwrap();
+            emu.virt_write(BxLinAddress::new(0x1000), &code).unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
 
             for _ in 0..16 {
@@ -2563,13 +2599,13 @@ fn keyboard_reset_ack_reaches_bios_poll_before_timeout_at_high_configured_ips() 
                         .expect("the tick commit");
                 }
 
-                if emu.virt_read_u8(0x2000).unwrap() != 0 {
+                if emu.virt_read_u8(BxLinAddress::new(0x2000)).unwrap() != 0 {
                     break;
                 }
             }
 
             assert_eq!(
-                emu.virt_read_u8(0x2000).unwrap(),
+                emu.virt_read_u8(BxLinAddress::new(0x2000)).unwrap(),
                 0xAA,
                 "BIOS-style keyboard reset poll timed out before OBF/ACK reached port 0x64"
             );
@@ -3014,7 +3050,7 @@ fn all_reset_ports_stop_before_the_next_instruction() {
                 emu.device_manager
                     .init(&mut emu.devices, &mut emu.memory)
                     .unwrap();
-                emu.virt_write(CODE, code).unwrap();
+                emu.virt_write(BxLinAddress::new(CODE), code).unwrap();
                 emu.reg_write(X86Reg::Rip, CODE);
                 let executed = emu.run_cpu_batch_retiring(64).unwrap();
                 assert!(executed > 0);
@@ -3160,7 +3196,8 @@ fn legacy_dma_drq_to_hlda_terminal_count_end_to_end() {
 
             // nop; hlt — handle_async_event services HLDA before the
             // first instruction completes the batch.
-            emu.virt_write(CODE, &[0x90, 0xF4]).unwrap();
+            emu.virt_write(BxLinAddress::new(CODE), &[0x90, 0xF4])
+                .unwrap();
             emu.reg_write(X86Reg::Rip, CODE);
             let executed = emu.run_cpu_batch_retiring(8).unwrap();
             assert!(executed > 0);
@@ -3213,7 +3250,7 @@ fn mid_batch_reset_commits_no_pre_reset_ticks() {
 
             // mov edx,0x92; mov al,0x01; out dx,al; out 0xe9,al; hlt
             emu.virt_write(
-                CODE,
+                BxLinAddress::new(CODE),
                 &[
                     0xBA, 0x92, 0x00, 0x00, 0x00, 0xB0, 0x01, 0xEE, 0xE6, 0xE9, 0xF4,
                 ],
@@ -4542,7 +4579,7 @@ fn self_ipi_control_event_ends_up_batch() {
                 .write_aligned(0xF0, 0x1FF, 0);
             // mov dword ptr [FEE00300], SELF_NMI_IPI; inc ebx; hlt
             emu.virt_write(
-                CODE,
+                BxLinAddress::new(CODE),
                 &[
                     0xC7,
                     0x05,
@@ -4603,7 +4640,7 @@ fn up_lapic_timer_uses_programming_instruction_epoch() {
             }
             // mov dword ptr [FEE00380], INITIAL_COUNT; inc ebx; hlt
             emu.virt_write(
-                CODE,
+                BxLinAddress::new(CODE),
                 &[
                     0xC7,
                     0x05,
@@ -4893,8 +4930,11 @@ fn wait_for_sipi_application_processors_credit_quantum_ticks() {
                 .with_topology(8, TEST_SMP_CORES, TEST_SMP_THREADS)
                 .unwrap();
             let mut emu = Emulator::new_with_mode(config, CpuSetupMode::FlatProtected32).unwrap();
-            emu.virt_write(0x1000, &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN])
-                .unwrap();
+            emu.virt_write(
+                BxLinAddress::new(0x1000),
+                &[AP_TRAMPOLINE_OPCODE; AP_TRAMPOLINE_LEN],
+            )
+            .unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
 
             let cpu_count = emu.cpu_count() as u64;
@@ -5114,7 +5154,8 @@ fn machine_reporting_which_vector_it_takes() -> alloc::boxed::Box<Emulator<()>> 
         ]);
         stub[5] = 0xCF;
     }
-    emu.virt_write(VECTOR_STUBS, &stubs).unwrap();
+    emu.virt_write(BxLinAddress::new(VECTOR_STUBS), &stubs)
+        .unwrap();
 
     let mut ivt = [0u8; 4 * 256];
     for (vector, entry) in ivt.chunks_exact_mut(4).enumerate() {
@@ -5122,13 +5163,13 @@ fn machine_reporting_which_vector_it_takes() -> alloc::boxed::Box<Emulator<()>> 
         entry[..2].copy_from_slice(&offset.to_le_bytes());
         entry[2..].copy_from_slice(&0u16.to_le_bytes());
     }
-    emu.virt_write(0, &ivt).unwrap();
+    emu.virt_write(BxLinAddress::new(0), &ivt).unwrap();
 
     // `mov byte [RAN_MARKER], 0x5A` then `jmp $`. The store proves the
     // guest executed what was loaded; the spin keeps it somewhere known so
     // that any later change of control flow is visible.
     emu.virt_write(
-        VECTOR_TEST_CODE,
+        BxLinAddress::new(VECTOR_TEST_CODE),
         &[
             0xC6,
             0x06,
@@ -5140,9 +5181,11 @@ fn machine_reporting_which_vector_it_takes() -> alloc::boxed::Box<Emulator<()>> 
         ],
     )
     .unwrap();
-    emu.virt_write(RAN_MARKER, &[0x00]).unwrap();
+    emu.virt_write(BxLinAddress::new(RAN_MARKER), &[0x00])
+        .unwrap();
     // Nothing has been taken yet.
-    emu.virt_write(VECTOR_MARKER, &[NO_VECTOR_TAKEN]).unwrap();
+    emu.virt_write(BxLinAddress::new(VECTOR_MARKER), &[NO_VECTOR_TAKEN])
+        .unwrap();
 
     emu.reg_write(X86Reg::Rip, VECTOR_TEST_CODE);
     emu.reg_write(X86Reg::Rflags, 0x0202);
@@ -5164,7 +5207,8 @@ const NO_VECTOR_TAKEN: u8 = 0xFF;
 #[cfg(feature = "alloc")]
 fn vector_taken(emu: &mut Emulator<()>) -> u8 {
     let mut marker = [0u8; 1];
-    emu.virt_read(VECTOR_MARKER, &mut marker).unwrap();
+    emu.virt_read(BxLinAddress::new(VECTOR_MARKER), &mut marker)
+        .unwrap();
     marker[0]
 }
 
@@ -5193,7 +5237,8 @@ fn a_real_mode_machine_runs_the_code_it_was_given() {
             emu.run_cpu_batch(64).unwrap();
 
             let mut ran = [0u8; 1];
-            emu.virt_read(RAN_MARKER, &mut ran).unwrap();
+            emu.virt_read(BxLinAddress::new(RAN_MARKER), &mut ran)
+                .unwrap();
             assert_eq!(
                 ran[0], GUEST_RAN,
                 "the guest must execute the store it was given, at the address \
@@ -5362,11 +5407,15 @@ fn rep_insw_respects_configured_page_write_permissions() {
             let mut emu =
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
                     .unwrap();
-            emu.virt_write(CODE_ADDR, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
+            emu.virt_write(
+                BxLinAddress::new(CODE_ADDR),
+                &[0xF3, 0x66, 0x6D, 0xEB, 0xFE],
+            )
+            .unwrap();
+            emu.mem_write(BxPhyAddress::new(DEST_ADDR), &[0x34, 0x12])
                 .unwrap();
-            emu.mem_write(DEST_ADDR, &[0x34, 0x12]).unwrap();
             emu.mem_protect(
-                DEST_ADDR,
+                BxPhyAddress::new(DEST_ADDR),
                 0x1000,
                 crate::cpu::instrumentation::MemPerms::READ,
             );
@@ -5376,7 +5425,10 @@ fn rep_insw_respects_configured_page_write_permissions() {
             emu.reg_write(X86Reg::Rcx, 1);
 
             emu.run_cpu_batch(1).unwrap();
-            assert_eq!(emu.mem_read_vec(DEST_ADDR, 2).unwrap(), [0x34, 0x12]);
+            assert_eq!(
+                emu.mem_read_vec(BxPhyAddress::new(DEST_ADDR), 2).unwrap(),
+                [0x34, 0x12]
+            );
             assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
         })
         .unwrap()
@@ -5413,7 +5465,7 @@ fn a_guest_power_off_request_reaches_a_step_caller() {
                 code.extend_from_slice(&[0xB0, *letter, 0xEE]);
             }
             code.extend_from_slice(&[0xEB, 0xFE]);
-            emu.mem_write(CODE_ADDR, &code).unwrap();
+            emu.mem_write(BxPhyAddress::new(CODE_ADDR), &code).unwrap();
             emu.reg_write(X86Reg::Rip, CODE_ADDR);
             emu.reg_write(X86Reg::Rdx, SHUTDOWN_PORT);
 
@@ -5521,7 +5573,8 @@ fn a_stop_requested_inside_the_cpu_loop_stops_the_machine() {
                     .unwrap();
             // A guest that never stops on its own, so the only thing that
             // can end the batch is the request.
-            emu.mem_write(CODE_ADDR, &[0xEB, 0xFE]).unwrap();
+            emu.mem_write(BxPhyAddress::new(CODE_ADDR), &[0xEB, 0xFE])
+                .unwrap();
             emu.reg_write(X86Reg::Rip, CODE_ADDR);
 
             emu.cpu_mut().instrumentation.stop_request = true;
@@ -5564,13 +5617,17 @@ fn split_page_rmw_faults_before_first_mmio_read() {
             let mut emu =
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
                     .unwrap();
-            emu.mem_write(CODE_ADDR, &[0x66, 0x6D, 0xEB, 0xFE]).unwrap();
+            emu.mem_write(BxPhyAddress::new(CODE_ADDR), &[0x66, 0x6D, 0xEB, 0xFE])
+                .unwrap();
             // The first byte remains mapped at the end of the first 2 MiB
             // page; the second byte faults in the now-nonpresent page.
-            emu.mem_write(SECOND_LARGE_PAGE_PDE, &0u64.to_le_bytes())
-                .unwrap();
+            emu.mem_write(
+                BxPhyAddress::new(SECOND_LARGE_PAGE_PDE),
+                &0u64.to_le_bytes(),
+            )
+            .unwrap();
             emu.mmio_map(
-                DEST_ADDR,
+                BxPhyAddress::new(DEST_ADDR),
                 1,
                 Box::new(move |_addr, _size| {
                     read_count.fetch_add(1, Ordering::SeqCst);
@@ -5614,10 +5671,10 @@ fn insw_permission_fault_precedes_destructive_mmio_read() {
             let mut emu =
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
                     .unwrap();
-            emu.virt_write(CODE_ADDR, &[0x66, 0x6D, 0xEB, 0xFE])
+            emu.virt_write(BxLinAddress::new(CODE_ADDR), &[0x66, 0x6D, 0xEB, 0xFE])
                 .unwrap();
             emu.mmio_map(
-                DEST_ADDR,
+                BxPhyAddress::new(DEST_ADDR),
                 2,
                 Box::new(move |_addr, _size| {
                     read_count.fetch_add(1, Ordering::SeqCst);
@@ -5628,7 +5685,7 @@ fn insw_permission_fault_precedes_destructive_mmio_read() {
                 }),
             );
             emu.mem_protect(
-                DEST_ADDR,
+                BxPhyAddress::new(DEST_ADDR),
                 0x1000,
                 crate::cpu::instrumentation::MemPerms::READ,
             );
@@ -5664,10 +5721,13 @@ fn rep_insw_mmio_fallback_reads_once_per_input_word() {
             let mut emu =
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
                     .unwrap();
-            emu.virt_write(CODE_ADDR, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
-                .unwrap();
+            emu.virt_write(
+                BxLinAddress::new(CODE_ADDR),
+                &[0xF3, 0x66, 0x6D, 0xEB, 0xFE],
+            )
+            .unwrap();
             emu.mmio_map(
-                DEST_ADDR,
+                BxPhyAddress::new(DEST_ADDR),
                 2,
                 Box::new(move |_addr, _size| {
                     read_count.fetch_add(1, Ordering::SeqCst);
@@ -5801,9 +5861,13 @@ fn ins_byte_and_dword_prefault_before_destructive_port_read() {
                 emu.device_manager.keyboard.kbd_controller.outb = true;
             }
             let before = vec![0xCC; width];
-            emu.virt_write(CODE, code).unwrap();
-            emu.mem_write(DEST, &before).unwrap();
-            emu.mem_protect(DEST, 0x1000, crate::cpu::instrumentation::MemPerms::READ);
+            emu.virt_write(BxLinAddress::new(CODE), code).unwrap();
+            emu.mem_write(BxPhyAddress::new(DEST), &before).unwrap();
+            emu.mem_protect(
+                BxPhyAddress::new(DEST),
+                0x1000,
+                crate::cpu::instrumentation::MemPerms::READ,
+            );
             emu.reg_write(X86Reg::Rip, CODE);
             emu.reg_write(X86Reg::Rdx, u64::from(port.get()));
             emu.reg_write(X86Reg::Rdi, DEST);
@@ -5811,7 +5875,10 @@ fn ins_byte_and_dword_prefault_before_destructive_port_read() {
 
             phase6_run(&mut emu);
 
-            assert_eq!(emu.mem_read_vec(DEST, width).unwrap(), before);
+            assert_eq!(
+                emu.mem_read_vec(BxPhyAddress::new(DEST), width).unwrap(),
+                before
+            );
             assert_eq!(emu.reg_read(X86Reg::Rdi), DEST);
             assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
             if width == 1 {
@@ -5833,8 +5900,8 @@ fn ins_byte_and_dword_prefault_before_destructive_port_read() {
                 emu.device_manager.keyboard.kbd_controller.kbd_output_buffer = stream[0];
                 emu.device_manager.keyboard.kbd_controller.outb = true;
             }
-            emu.virt_write(CODE, code).unwrap();
-            emu.mem_write(DEST, &before).unwrap();
+            emu.virt_write(BxLinAddress::new(CODE), code).unwrap();
+            emu.mem_write(BxPhyAddress::new(DEST), &before).unwrap();
             emu.reg_write(X86Reg::Rip, CODE);
             emu.reg_write(X86Reg::Rdx, u64::from(port.get()));
             emu.reg_write(X86Reg::Rdi, DEST);
@@ -5846,7 +5913,10 @@ fn ins_byte_and_dword_prefault_before_destructive_port_read() {
             } else {
                 vec![stream[0], 0, 0, 0]
             };
-            assert_eq!(emu.mem_read_vec(DEST, width).unwrap(), expected);
+            assert_eq!(
+                emu.mem_read_vec(BxPhyAddress::new(DEST), width).unwrap(),
+                expected
+            );
             assert_eq!(emu.reg_read(X86Reg::Rdi), DEST + width as u64);
             assert_eq!(emu.reg_read(X86Reg::Rcx), 0);
             if width == 1 {
@@ -5892,25 +5962,31 @@ fn rep_string_io_checks_permission_once_even_when_count_zero() {
 
         for code in FORMS {
             let mut emu = phase6_flat32();
-            emu.virt_write(CODE, code).unwrap();
-            emu.mem_write(GP_HANDLER, &[0xEB, 0xFE]).unwrap();
-            emu.mem_write(GDT_BASE + 0x18, &0x00CF_FA00_0000_FFFFu64.to_le_bytes())
+            emu.virt_write(BxLinAddress::new(CODE), code).unwrap();
+            emu.mem_write(BxPhyAddress::new(GP_HANDLER), &[0xEB, 0xFE])
                 .unwrap();
+            emu.mem_write(
+                BxPhyAddress::new(GDT_BASE + 0x18),
+                &0x00CF_FA00_0000_FFFFu64.to_le_bytes(),
+            )
+            .unwrap();
             let mut gate = [0u8; 8];
             gate[0..2].copy_from_slice(&(GP_HANDLER as u16).to_le_bytes());
             gate[2..4].copy_from_slice(&USER_CODE_SELECTOR.to_le_bytes());
             gate[5] = 0x8E;
             gate[6..8].copy_from_slice(&((GP_HANDLER >> 16) as u16).to_le_bytes());
-            emu.mem_write(IDT_BASE + GP_VECTOR * 8, &gate).unwrap();
+            emu.mem_write(BxPhyAddress::new(IDT_BASE + GP_VECTOR * 8), &gate)
+                .unwrap();
             emu.reg_write(X86Reg::IdtrBase, IDT_BASE);
             emu.reg_write(X86Reg::IdtrLimit, GP_VECTOR * 8 + 7);
             emu.reg_write(X86Reg::Rsp, STACK_TOP);
             // The reset task register is a valid 386 TSS at base zero.
             // Install a real denying I/O bitmap entry.  The instruction
             // must raise exactly one #GP before its zero-count exit.
-            emu.mem_write(102, &IO_BITMAP_BASE.to_le_bytes()).unwrap();
+            emu.mem_write(BxPhyAddress::new(102), &IO_BITMAP_BASE.to_le_bytes())
+                .unwrap();
             emu.mem_write(
-                u64::from(IO_BITMAP_BASE) + u64::from(PORT / 8),
+                BxPhyAddress::new(u64::from(IO_BITMAP_BASE) + u64::from(PORT / 8)),
                 &[0xFF, 0xFF],
             )
             .unwrap();
@@ -5957,9 +6033,11 @@ fn rep_bulk_respects_32bit_source_and_destination_segment_limits() {
 
         let run_movsd = |ds_limit, es_limit| {
             let mut emu = phase6_flat32();
-            emu.virt_write(CODE, &[0xF3, 0xA5, 0xEB, 0xFE]).unwrap();
-            emu.mem_write(SRC, &SOURCE).unwrap();
-            emu.mem_fill(DST, SOURCE.len(), 0xCC).unwrap();
+            emu.virt_write(BxLinAddress::new(CODE), &[0xF3, 0xA5, 0xEB, 0xFE])
+                .unwrap();
+            emu.mem_write(BxPhyAddress::new(SRC), &SOURCE).unwrap();
+            emu.mem_fill(BxPhyAddress::new(DST), SOURCE.len(), 0xCC)
+                .unwrap();
             emu.cpu_mut()
                 .set_seg_for_api(X86Reg::Ds, 0x10, 0, ds_limit, SegmentSize::Bits32);
             emu.cpu_mut()
@@ -5970,7 +6048,9 @@ fn rep_bulk_respects_32bit_source_and_destination_segment_limits() {
             emu.reg_write(X86Reg::Rcx, COUNT);
             phase6_run(&mut emu);
             RepOutcome {
-                destination: emu.mem_read_vec(DST, SOURCE.len()).unwrap(),
+                destination: emu
+                    .mem_read_vec(BxPhyAddress::new(DST), SOURCE.len())
+                    .unwrap(),
                 remaining: emu.reg_read(X86Reg::Rcx),
                 source_index: emu.reg_read(X86Reg::Rsi),
                 destination_index: emu.reg_read(X86Reg::Rdi),
@@ -5992,8 +6072,9 @@ fn rep_bulk_respects_32bit_source_and_destination_segment_limits() {
         assert_eq!(destination_limited.destination_index, DST + 8);
 
         let mut emu = phase6_flat32();
-        emu.virt_write(CODE, &[0xF3, 0xAB, 0xEB, 0xFE]).unwrap();
-        emu.mem_fill(DST, 12, 0xCC).unwrap();
+        emu.virt_write(BxLinAddress::new(CODE), &[0xF3, 0xAB, 0xEB, 0xFE])
+            .unwrap();
+        emu.mem_fill(BxPhyAddress::new(DST), 12, 0xCC).unwrap();
         emu.cpu_mut()
             .set_seg_for_api(X86Reg::Es, 0x10, 0, (DST + 7) as u32, SegmentSize::Bits32);
         emu.reg_write(X86Reg::Rip, CODE);
@@ -6002,7 +6083,7 @@ fn rep_bulk_respects_32bit_source_and_destination_segment_limits() {
         emu.reg_write(X86Reg::Rcx, COUNT);
         phase6_run(&mut emu);
         assert_eq!(
-            emu.mem_read_vec(DST, 12).unwrap(),
+            emu.mem_read_vec(BxPhyAddress::new(DST), 12).unwrap(),
             [
                 0x11, 0x22, 0x33, 0x44, 0x11, 0x22, 0x33, 0x44, 0xCC, 0xCC, 0xCC, 0xCC
             ]
@@ -6026,10 +6107,12 @@ fn repeat_iteration_is_not_reported_for_faulting_element() {
             trace,
         )
         .unwrap();
-        emu.virt_write(CODE, &[0xF3, 0xA4, 0xEB, 0xFE]).unwrap();
-        emu.mem_write(0x2000, &[0x41, 0x42]).unwrap();
+        emu.virt_write(BxLinAddress::new(CODE), &[0xF3, 0xA4, 0xEB, 0xFE])
+            .unwrap();
+        emu.mem_write(BxPhyAddress::new(0x2000), &[0x41, 0x42])
+            .unwrap();
         emu.mem_protect(
-            SECOND_PAGE,
+            BxPhyAddress::new(SECOND_PAGE),
             0x1000,
             crate::cpu::instrumentation::MemPerms::READ,
         );
@@ -6038,7 +6121,11 @@ fn repeat_iteration_is_not_reported_for_faulting_element() {
         emu.reg_write(X86Reg::Rdi, FIRST_PAGE_END);
         emu.reg_write(X86Reg::Rcx, 2);
         phase6_run(&mut emu);
-        assert_eq!(emu.mem_read_vec(FIRST_PAGE_END, 1).unwrap(), [0x41]);
+        assert_eq!(
+            emu.mem_read_vec(BxPhyAddress::new(FIRST_PAGE_END), 1)
+                .unwrap(),
+            [0x41]
+        );
         assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
         assert_eq!(phase6_lock(&repeats).len(), 1);
 
@@ -6049,10 +6136,12 @@ fn repeat_iteration_is_not_reported_for_faulting_element() {
             trace,
         )
         .unwrap();
-        emu.virt_write(CODE, &[0xF3, 0xAE, 0xEB, 0xFE]).unwrap();
-        emu.mem_write(FIRST_PAGE_END, &[0x55]).unwrap();
+        emu.virt_write(BxLinAddress::new(CODE), &[0xF3, 0xAE, 0xEB, 0xFE])
+            .unwrap();
+        emu.mem_write(BxPhyAddress::new(FIRST_PAGE_END), &[0x55])
+            .unwrap();
         emu.mem_protect(
-            SECOND_PAGE,
+            BxPhyAddress::new(SECOND_PAGE),
             0x1000,
             crate::cpu::instrumentation::MemPerms::WRITE,
         );
@@ -6073,9 +6162,10 @@ fn repeat_iteration_is_not_reported_for_faulting_element() {
         )
         .unwrap();
         phase6_prepare_fw_cfg(&mut emu, &[0xA5, 0xB6]);
-        emu.virt_write(CODE, &[0xF3, 0x6C, 0xEB, 0xFE]).unwrap();
+        emu.virt_write(BxLinAddress::new(CODE), &[0xF3, 0x6C, 0xEB, 0xFE])
+            .unwrap();
         emu.mem_protect(
-            SECOND_PAGE,
+            BxPhyAddress::new(SECOND_PAGE),
             0x1000,
             crate::cpu::instrumentation::MemPerms::READ,
         );
@@ -6084,7 +6174,11 @@ fn repeat_iteration_is_not_reported_for_faulting_element() {
         emu.reg_write(X86Reg::Rdi, FIRST_PAGE_END);
         emu.reg_write(X86Reg::Rcx, 2);
         phase6_run(&mut emu);
-        assert_eq!(emu.mem_read_vec(FIRST_PAGE_END, 1).unwrap(), [0xA5]);
+        assert_eq!(
+            emu.mem_read_vec(BxPhyAddress::new(FIRST_PAGE_END), 1)
+                .unwrap(),
+            [0xA5]
+        );
         assert_eq!(emu.reg_read(X86Reg::Rcx), 1);
         assert_eq!(phase6_lock(&repeats).len(), 1);
         assert_eq!(phase6_next_fw_cfg_byte(&mut emu), 0xB6);
@@ -6102,21 +6196,22 @@ fn word_mmio_access_preserves_callback_width() {
         let observed = Arc::clone(&writes);
         let mut emu = phase6_flat32();
         emu.mmio_map(
-            MMIO,
+            BxPhyAddress::new(MMIO),
             0x2000,
             Box::new(|_addr, _size| 0),
             Box::new(move |addr, size, value| {
                 phase6_lock(&observed).push((addr, size, value));
             }),
         );
-        emu.virt_write(CODE, &[0x66, 0xAB, 0xEB, 0xFE]).unwrap();
+        emu.virt_write(BxLinAddress::new(CODE), &[0x66, 0xAB, 0xEB, 0xFE])
+            .unwrap();
         emu.reg_write(X86Reg::Rip, CODE);
         emu.reg_write(X86Reg::Rax, 0x1234);
         emu.reg_write(X86Reg::Rdi, MMIO);
         phase6_run(&mut emu);
         assert_eq!(
             phase6_lock(&writes).as_slice(),
-            &[(MMIO, 2, 0x1234)],
+            &[(BxPhyAddress::new(MMIO), 2, 0x1234)],
             "a same-page STOSW must be one width-2 memory-handler transaction"
         );
 
@@ -6124,36 +6219,42 @@ fn word_mmio_access_preserves_callback_width() {
         let observed = Arc::clone(&writes);
         let mut emu = phase6_flat32();
         emu.mmio_map(
-            MMIO,
+            BxPhyAddress::new(MMIO),
             0x2000,
             Box::new(|_addr, _size| 0),
             Box::new(move |addr, size, value| {
                 phase6_lock(&observed).push((addr, size, value));
             }),
         );
-        emu.virt_write(CODE, &[0x66, 0xAB, 0xEB, 0xFE]).unwrap();
+        emu.virt_write(BxLinAddress::new(CODE), &[0x66, 0xAB, 0xEB, 0xFE])
+            .unwrap();
         emu.reg_write(X86Reg::Rip, CODE);
         emu.reg_write(X86Reg::Rax, 0x1234);
         emu.reg_write(X86Reg::Rdi, MMIO + 0xFFF);
         phase6_run(&mut emu);
         assert_eq!(
             phase6_lock(&writes).as_slice(),
-            &[(MMIO + 0xFFF, 1, 0x34), (MMIO + 0x1000, 1, 0x12)],
+            &[
+                (BxPhyAddress::new(MMIO + 0xFFF), 1, 0x34),
+                (BxPhyAddress::new(MMIO + 0x1000), 1, 0x12),
+            ],
             "only a real 4 KiB crossing may split a word handler access"
         );
 
         let mut emu = phase6_flat32();
-        emu.virt_write(MMIO, &[0x90, 0xEB, 0xFE]).unwrap();
+        emu.virt_write(BxLinAddress::new(MMIO), &[0x90, 0xEB, 0xFE])
+            .unwrap();
         emu.reg_write(X86Reg::Rip, MMIO);
         phase6_run(&mut emu);
         let smc_before = emu.memory.smc_seq_next();
         emu.mmio_map(
-            MMIO,
+            BxPhyAddress::new(MMIO),
             0x1000,
             Box::new(|_addr, _size| 0),
             Box::new(|_addr, _size, _value| {}),
         );
-        emu.virt_write(CODE, &[0x66, 0xAB, 0xEB, 0xFE]).unwrap();
+        emu.virt_write(BxLinAddress::new(CODE), &[0x66, 0xAB, 0xEB, 0xFE])
+            .unwrap();
         emu.reg_write(X86Reg::Rip, CODE);
         emu.reg_write(X86Reg::Rax, 0xBEEF);
         emu.reg_write(X86Reg::Rdi, MMIO);
@@ -6175,8 +6276,11 @@ fn rep_insw_smc_preflight_consumes_only_scalar_committed_word() {
         phase6_prepare_fw_cfg(&mut emu, &[]);
         emu.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0xA5;
         emu.device_manager.keyboard.kbd_controller.outb = true;
-        emu.virt_write(CODE_AND_DEST, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
-            .unwrap();
+        emu.virt_write(
+            BxLinAddress::new(CODE_AND_DEST),
+            &[0xF3, 0x66, 0x6D, 0xEB, 0xFE],
+        )
+        .unwrap();
         emu.reg_write(X86Reg::Rip, CODE_AND_DEST);
         emu.reg_write(
             X86Reg::Rdx,
@@ -6189,7 +6293,11 @@ fn rep_insw_smc_preflight_consumes_only_scalar_committed_word() {
 
         phase6_run(&mut emu);
 
-        assert_eq!(emu.mem_read_vec(CODE_AND_DEST, 2).unwrap(), [0xA5, 0]);
+        assert_eq!(
+            emu.mem_read_vec(BxPhyAddress::new(CODE_AND_DEST), 2)
+                .unwrap(),
+            [0xA5, 0]
+        );
         assert_eq!(emu.reg_read(X86Reg::Rcx), 0);
         assert_eq!(emu.reg_read(X86Reg::Rdi), CODE_AND_DEST + 2);
         assert_eq!(
@@ -6215,7 +6323,8 @@ fn rep_insd_obeys_one_element_event_budget() {
         emu.pc_system
             .register_timer(TimerOwner::NullTimer, 1, true, true, "phase6 insd deadline")
             .unwrap();
-        emu.virt_write(CODE, &[0xF3, 0x6D, 0xEB, 0xFE]).unwrap();
+        emu.virt_write(BxLinAddress::new(CODE), &[0xF3, 0x6D, 0xEB, 0xFE])
+            .unwrap();
         emu.reg_write(X86Reg::Rip, CODE);
         emu.reg_write(
             X86Reg::Rdx,
@@ -6226,7 +6335,10 @@ fn rep_insd_obeys_one_element_event_budget() {
 
         phase6_run(&mut emu);
 
-        assert_eq!(emu.mem_read_vec(DEST, 4).unwrap(), [0xA5, 0, 0, 0]);
+        assert_eq!(
+            emu.mem_read_vec(BxPhyAddress::new(DEST), 4).unwrap(),
+            [0xA5, 0, 0, 0]
+        );
         assert_eq!(emu.reg_read(X86Reg::Rcx), 0);
         assert_eq!(emu.reg_read(X86Reg::Rdi), DEST + 4);
         assert!(!emu.device_manager.keyboard.kbd_controller.outb);
@@ -6251,9 +6363,10 @@ fn fast_rep_charges_ticks_not_icount_and_matches_scalar_ticks() {
         fast.pc_system
             .register_timer(TimerOwner::NullTimer, COUNT, true, true, "phase6 fast")
             .unwrap();
-        fast.virt_write(CODE, &[0xF3, 0x66, 0xA5, 0xEB, 0xFE])
+        fast.virt_write(BxLinAddress::new(CODE), &[0xF3, 0x66, 0xA5, 0xEB, 0xFE])
             .unwrap();
-        fast.mem_fill(SRC, (COUNT * 2) as usize, 0x5A).unwrap();
+        fast.mem_fill(BxPhyAddress::new(SRC), (COUNT * 2) as usize, 0x5A)
+            .unwrap();
         fast.reg_write(X86Reg::Rip, CODE);
         fast.reg_write(X86Reg::Rsi, SRC);
         fast.reg_write(X86Reg::Rdi, DST);
@@ -6277,9 +6390,11 @@ fn fast_rep_charges_ticks_not_icount_and_matches_scalar_ticks() {
             .register_timer(TimerOwner::NullTimer, COUNT, true, true, "phase6 scalar")
             .unwrap();
         scalar
-            .virt_write(CODE, &[0xF3, 0x66, 0xA5, 0xEB, 0xFE])
+            .virt_write(BxLinAddress::new(CODE), &[0xF3, 0x66, 0xA5, 0xEB, 0xFE])
             .unwrap();
-        scalar.mem_fill(SRC, (COUNT * 2) as usize, 0x5A).unwrap();
+        scalar
+            .mem_fill(BxPhyAddress::new(SRC), (COUNT * 2) as usize, 0x5A)
+            .unwrap();
         scalar.reg_write(X86Reg::Rip, CODE);
         scalar.reg_write(X86Reg::Rsi, SRC);
         scalar.reg_write(X86Reg::Rdi, DST);
@@ -6289,8 +6404,11 @@ fn fast_rep_charges_ticks_not_icount_and_matches_scalar_ticks() {
         let scalar_retired = scalar.cpu_ref(BSP_INDEX).icount - scalar_before;
 
         assert_eq!(
-            fast.mem_read_vec(DST, (COUNT * 2) as usize).unwrap(),
-            scalar.mem_read_vec(DST, (COUNT * 2) as usize).unwrap()
+            fast.mem_read_vec(BxPhyAddress::new(DST), (COUNT * 2) as usize)
+                .unwrap(),
+            scalar
+                .mem_read_vec(BxPhyAddress::new(DST), (COUNT * 2) as usize)
+                .unwrap()
         );
         assert_eq!(fast.reg_read(X86Reg::Rcx), 0);
         assert_eq!(scalar.reg_read(X86Reg::Rcx), 0);
@@ -6334,8 +6452,9 @@ fn fast_rep_element_budget_uses_elements_not_bytes() {
                     "phase6 element budget",
                 )
                 .unwrap();
-            emu.virt_write(CODE, code).unwrap();
-            emu.mem_fill(SRC, (COUNT * width) as usize, 0x6D).unwrap();
+            emu.virt_write(BxLinAddress::new(CODE), code).unwrap();
+            emu.mem_fill(BxPhyAddress::new(SRC), (COUNT * width) as usize, 0x6D)
+                .unwrap();
             emu.reg_write(X86Reg::Rip, CODE);
             emu.reg_write(X86Reg::Rax, 0x1122_3344);
             emu.reg_write(X86Reg::Rsi, SRC);
@@ -6368,8 +6487,9 @@ fn fast_rep_element_budget_uses_elements_not_bytes() {
                     "phase6 qword budget",
                 )
                 .unwrap();
-            emu.mem_write(LONG_CODE, code).unwrap();
-            emu.mem_fill(LONG_SRC, (COUNT * 8) as usize, 0x7E).unwrap();
+            emu.mem_write(BxPhyAddress::new(LONG_CODE), code).unwrap();
+            emu.mem_fill(BxPhyAddress::new(LONG_SRC), (COUNT * 8) as usize, 0x7E)
+                .unwrap();
             emu.reg_write(X86Reg::Rip, LONG_CODE);
             emu.reg_write(X86Reg::Rax, 0x1122_3344_5566_7788);
             emu.reg_write(X86Reg::Rsi, LONG_SRC);
@@ -6398,10 +6518,14 @@ fn cold_tlb_rep_movsb_propagates_one_page_fault_without_committing() {
 
         let mut emu =
             Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64).unwrap();
-        emu.mem_write(CODE, &[0xF3, 0xA4, 0xEB, 0xFE]).unwrap();
-        emu.mem_write(SRC, &[0x5A]).unwrap();
-        emu.mem_write(SECOND_LARGE_PAGE_PDE, &0u64.to_le_bytes())
+        emu.mem_write(BxPhyAddress::new(CODE), &[0xF3, 0xA4, 0xEB, 0xFE])
             .unwrap();
+        emu.mem_write(BxPhyAddress::new(SRC), &[0x5A]).unwrap();
+        emu.mem_write(
+            BxPhyAddress::new(SECOND_LARGE_PAGE_PDE),
+            &0u64.to_le_bytes(),
+        )
+        .unwrap();
         emu.reg_write(X86Reg::Rip, CODE);
         emu.reg_write(X86Reg::Rsi, SRC);
         emu.reg_write(X86Reg::Rdi, DEST);
@@ -6431,10 +6555,13 @@ fn cold_tlb_rep_insw_propagates_one_fault_without_consuming_port_input() {
         let mut emu =
             Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64).unwrap();
         phase6_prepare_fw_cfg(&mut emu, &[0xA1, 0xB2]);
-        emu.mem_write(CODE, &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
+        emu.mem_write(BxPhyAddress::new(CODE), &[0xF3, 0x66, 0x6D, 0xEB, 0xFE])
             .unwrap();
-        emu.mem_write(SECOND_LARGE_PAGE_PDE, &0u64.to_le_bytes())
-            .unwrap();
+        emu.mem_write(
+            BxPhyAddress::new(SECOND_LARGE_PAGE_PDE),
+            &0u64.to_le_bytes(),
+        )
+        .unwrap();
         emu.reg_write(X86Reg::Rip, CODE);
         emu.reg_write(X86Reg::Rdx, u64::from(FW_CFG_DATA_PORT.get()));
         emu.reg_write(X86Reg::Rdi, DEST);
@@ -6459,11 +6586,14 @@ fn empty_memory_write_is_a_no_op() {
             let mut emu =
                 Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
                     .unwrap();
-            let before = emu.mem_read_vec(0x1000, 4).unwrap();
+            let before = emu.mem_read_vec(BxPhyAddress::new(0x1000), 4).unwrap();
 
-            emu.mem_write(0x1000, &[]).unwrap();
+            emu.mem_write(BxPhyAddress::new(0x1000), &[]).unwrap();
 
-            assert_eq!(emu.mem_read_vec(0x1000, 4).unwrap(), before);
+            assert_eq!(
+                emu.mem_read_vec(BxPhyAddress::new(0x1000), 4).unwrap(),
+                before
+            );
         })
         .unwrap()
         .join()
@@ -6543,8 +6673,11 @@ fn stamp_machine(id: u8) -> Box<Emulator> {
     emu.device_manager
         .init(&mut emu.devices, &mut emu.memory)
         .unwrap();
-    emu.virt_write(STAMP_CODE_ADDRESS, &debugcon_stamp_program(id, STAMP_COUNT))
-        .unwrap();
+    emu.virt_write(
+        BxLinAddress::new(STAMP_CODE_ADDRESS),
+        &debugcon_stamp_program(id, STAMP_COUNT),
+    )
+    .unwrap();
     emu.reg_write(X86Reg::Rip, STAMP_CODE_ADDRESS);
     emu
 }
@@ -6637,7 +6770,8 @@ fn a_sixteen_bit_write_preserves_the_upper_half_of_the_register() {
     emu.device_manager
         .init(&mut emu.devices, &mut emu.memory)
         .unwrap();
-    emu.virt_write(STAMP_CODE_ADDRESS, &code).unwrap();
+    emu.virt_write(BxLinAddress::new(STAMP_CODE_ADDRESS), &code)
+        .unwrap();
     emu.reg_write(X86Reg::Rip, STAMP_CODE_ADDRESS);
     emu.run_cpu_batch(code.len() as u64).unwrap();
 
@@ -6668,7 +6802,8 @@ fn a_guest_out_and_in_round_trip_through_a_real_device() {
     emu.device_manager
         .init(&mut emu.devices, &mut emu.memory)
         .unwrap();
-    emu.virt_write(STAMP_CODE_ADDRESS, &code).unwrap();
+    emu.virt_write(BxLinAddress::new(STAMP_CODE_ADDRESS), &code)
+        .unwrap();
     emu.reg_write(X86Reg::Rip, STAMP_CODE_ADDRESS);
     emu.run_cpu_batch(code.len() as u64).unwrap();
 
@@ -6715,7 +6850,8 @@ fn a_guest_reaches_the_vga_through_the_device_api() {
     emu.device_manager
         .init(&mut emu.devices, &mut emu.memory)
         .unwrap();
-    emu.virt_write(STAMP_CODE_ADDRESS, &code).unwrap();
+    emu.virt_write(BxLinAddress::new(STAMP_CODE_ADDRESS), &code)
+        .unwrap();
     emu.reg_write(X86Reg::Rip, STAMP_CODE_ADDRESS);
     emu.run_cpu_batch(code.len() as u64).unwrap();
 
@@ -7364,7 +7500,7 @@ fn run_guest_until_it_halts(machine: &mut Emulator) {
 
 fn guest_reading(machine: &mut Emulator, index: u16) -> u32 {
     machine
-        .mem_read_u32_le(u64::from(GUEST_READINGS + 4 * index))
+        .mem_read_u32_le(BxPhyAddress::new(u64::from(GUEST_READINGS + 4 * index)))
         .expect("guest RAM")
 }
 
@@ -7460,7 +7596,7 @@ fn a_built_machine_hands_its_guest_a_counting_pit() {
 
             run_guest_until_it_halts(&mut machine);
             let bytes = machine
-                .mem_read_vec(u64::from(GUEST_READINGS), 4)
+                .mem_read_vec(BxPhyAddress::new(u64::from(GUEST_READINGS)), 4)
                 .expect("guest RAM");
             let first = u16::from_le_bytes([bytes[0], bytes[1]]);
             let later = u16::from_le_bytes([bytes[2], bytes[3]]);
@@ -7558,7 +7694,7 @@ fn a_built_machine_reports_the_vga_retrace_from_the_clock() {
 
             run_guest_until_it_halts(&mut machine);
             let reads = machine
-                .mem_read_vec(u64::from(GUEST_READINGS), 3)
+                .mem_read_vec(BxPhyAddress::new(u64::from(GUEST_READINGS)), 3)
                 .expect("guest RAM");
 
             assert_eq!(
@@ -7773,7 +7909,7 @@ fn post_codes_reach_the_host_without_taking_the_dma_page_register() {
             );
 
             let read_back = machine
-                .mem_read_vec(u64::from(GUEST_READINGS), 2)
+                .mem_read_vec(BxPhyAddress::new(u64::from(GUEST_READINGS)), 2)
                 .expect("guest RAM");
             assert_eq!(
                 read_back,
@@ -7824,7 +7960,7 @@ fn a_triple_fault_reboots_the_machine() {
             run_guest_until_it_halts(&mut machine);
 
             let passes = machine
-                .mem_read_u16_le(u64::from(GUEST_PASS))
+                .mem_read_u16_le(BxPhyAddress::new(u64::from(GUEST_PASS)))
                 .expect("guest RAM");
             assert_eq!(
                 passes, 2,
@@ -7865,7 +8001,7 @@ fn a_triple_fault_can_shut_the_processor_down_instead() {
             assert_eq!(stop, Some(crate::emulator::StopReason::CpuShutdown));
             assert!(machine.cpu_ref(0).is_in_shutdown());
             let passes = machine
-                .mem_read_u16_le(u64::from(GUEST_PASS))
+                .mem_read_u16_le(BxPhyAddress::new(u64::from(GUEST_PASS)))
                 .expect("guest RAM");
             assert_eq!(
                 passes, 1,
@@ -7939,7 +8075,7 @@ fn a_hardware_reset_leaves_the_vga_and_the_uarts_as_the_guest_left_them() {
 
             run_guest_until_it_halts(&mut machine);
             let passes = machine
-                .mem_read_u16_le(u64::from(GUEST_PASS))
+                .mem_read_u16_le(BxPhyAddress::new(u64::from(GUEST_PASS)))
                 .expect("guest RAM");
             assert_eq!(
                 passes, 2,
@@ -7957,7 +8093,7 @@ fn a_hardware_reset_leaves_the_vga_and_the_uarts_as_the_guest_left_them() {
             }
 
             let readings = machine
-                .mem_read_vec(u64::from(GUEST_READINGS), 6)
+                .mem_read_vec(BxPhyAddress::new(u64::from(GUEST_READINGS)), 6)
                 .expect("guest RAM");
             assert_eq!(
                 readings[0], 0x0B,
@@ -7999,7 +8135,7 @@ fn the_pm_timer_keeps_counting_across_a_guest_reboot() {
 
             run_guest_until_it_halts(&mut machine);
             let passes = machine
-                .mem_read_u16_le(u64::from(GUEST_PASS))
+                .mem_read_u16_le(BxPhyAddress::new(u64::from(GUEST_PASS)))
                 .expect("guest RAM");
             assert_eq!(
                 passes, 2,

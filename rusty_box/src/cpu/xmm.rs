@@ -571,6 +571,7 @@ mod tests {
     // Only the debug-only alignment-check tests name a linear address.
     #[cfg(debug_assertions)]
     use crate::config::BxLinAddress;
+    use crate::config::BxPhyAddress;
 
     /// Emulator construction needs a bigger stack than the default 2 MiB test
     /// thread: `Emulator` is ~4 MiB and the debug build materialises a few
@@ -600,9 +601,9 @@ mod tests {
         gate[5] = 0x8E;
         gate[6..8].copy_from_slice(&((handler >> 16) as u16).to_le_bytes());
         gate[8..12].copy_from_slice(&((handler >> 32) as u32).to_le_bytes());
-        emu.mem_write(IDT_BASE + u64::from(vector) * 16, &gate)
+        emu.mem_write(BxPhyAddress::new(IDT_BASE + u64::from(vector) * 16), &gate)
             .unwrap();
-        emu.mem_write(handler, &[0xF4]).unwrap();
+        emu.mem_write(BxPhyAddress::new(handler), &[0xF4]).unwrap();
     }
 
     fn install_avx_exception_handlers(emu: &mut Emulator) {
@@ -621,13 +622,14 @@ mod tests {
         emu.reg_write(X86Reg::Rax, 0x7);
         emu.reg_write(X86Reg::Rcx, 0);
         emu.reg_write(X86Reg::Rdx, 0);
-        emu.mem_write(XSETBV_BASE, &[0x0F, 0x01, 0xD1]).unwrap();
+        emu.mem_write(BxPhyAddress::new(XSETBV_BASE), &[0x0F, 0x01, 0xD1])
+            .unwrap();
         emu.emu_start(XSETBV_BASE, Some(XSETBV_BASE + 3), None, Some(1))
             .unwrap();
     }
 
     fn run_one(emu: &mut Emulator, address: u64, code: &[u8]) -> crate::error::Result<()> {
-        emu.mem_write(address, code).unwrap();
+        emu.mem_write(BxPhyAddress::new(address), code).unwrap();
         emu.emu_start(address, Some(address + code.len() as u64), None, Some(1))
             .map(|_| ())
     }
@@ -640,7 +642,8 @@ mod tests {
         assert_eq!(emu.cpu().rip(), handler);
         assert_eq!(emu.reg_read(X86Reg::Rsp), STACK_TOP - 40);
         let mut pushed_rip = [0u8; 8];
-        emu.mem_read(STACK_TOP - 40, &mut pushed_rip).unwrap();
+        emu.mem_read(BxPhyAddress::new(STACK_TOP - 40), &mut pushed_rip)
+            .unwrap();
         assert_eq!(u64::from_le_bytes(pushed_rip), rip);
     }
 

@@ -2275,7 +2275,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             GuestPhysicalMemory::Direct
         };
         Some(VmxGuest {
-            vmcs: self.vmcsptr.get(),
+            vmcs: self.vmcsptr,
             rip: self.vmcs_current_field(VMCS_GUEST_RIP)?,
             rsp: self.vmcs_current_field(VMCS_GUEST_RSP)?,
             rflags,
@@ -2288,19 +2288,19 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             cpl: ((ss_ar >> 5) & 3) as u8,
             activity,
             segment_bases: SegmentBases {
-                es: self.vmcs_current_field(VMCS_GUEST_ES_BASE)?,
-                cs: self.vmcs_current_field(VMCS_GUEST_CS_BASE)?,
-                ss: self.vmcs_current_field(VMCS_GUEST_SS_BASE)?,
-                ds: self.vmcs_current_field(VMCS_GUEST_DS_BASE)?,
-                fs: self.vmcs_current_field(VMCS_GUEST_FS_BASE)?,
-                gs: self.vmcs_current_field(VMCS_GUEST_GS_BASE)?,
+                es: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_ES_BASE)?),
+                cs: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_CS_BASE)?),
+                ss: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_SS_BASE)?),
+                ds: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_DS_BASE)?),
+                fs: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_FS_BASE)?),
+                gs: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_GS_BASE)?),
             },
             gdtr: DescriptorTable {
-                base: self.vmcs_current_field(VMCS_GUEST_GDTR_BASE)?,
+                base: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_GDTR_BASE)?),
                 limit: self.vmcs_current_field(VMCS_32BIT_GUEST_GDTR_LIMIT)? as u16,
             },
             idtr: DescriptorTable {
-                base: self.vmcs_current_field(VMCS_GUEST_IDTR_BASE)?,
+                base: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_IDTR_BASE)?),
                 limit: self.vmcs_current_field(VMCS_32BIT_GUEST_IDTR_LIMIT)? as u16,
             },
             memory,
@@ -7784,7 +7784,8 @@ mod tests {
         on_big_stack(|| {
             let mut emu = vmx_host();
             let shadow = BX_VMCS_REVISION_ID | BX_VMCS_SHADOW_BIT_MASK;
-            emu.mem_write(VMCS_A, &shadow.to_le_bytes()).unwrap();
+            emu.mem_write(BxPhyAddress::new(VMCS_A), &shadow.to_le_bytes())
+                .unwrap();
             let end = HostScript::new().point_at(VMCS_A).vmptrld().run(&mut emu);
             assert_eq!(emu.cpu().rip(), end);
             assert_eq!(
@@ -7814,8 +7815,11 @@ mod tests {
                 // 4 MiB pages mapping the first 4 GiB onto themselves.
                 for index in 0..1024u64 {
                     let pde = ((index << 22) | 0x83) as u32;
-                    emu.mem_write(PAGE_DIRECTORY + index * 4, &pde.to_le_bytes())
-                        .unwrap();
+                    emu.mem_write(
+                        BxPhyAddress::new(PAGE_DIRECTORY + index * 4),
+                        &pde.to_le_bytes(),
+                    )
+                    .unwrap();
                 }
                 emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | CR4_PSE);
                 emu.reg_write(X86Reg::Cr3, PAGE_DIRECTORY);
@@ -7825,12 +7829,16 @@ mod tests {
             emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | CR4_VMXE);
             // Locked, with VMX enabled outside SMX, as the BIOS leaves it.
             emu.cpu_mut().msr.ia32_feature_ctrl = BX_IA32_FEATURE_CONTROL_BITS;
-            emu.mem_write(REGION, &BX_VMCS_REVISION_ID.to_le_bytes())
+            emu.mem_write(
+                BxPhyAddress::new(REGION),
+                &BX_VMCS_REVISION_ID.to_le_bytes(),
+            )
+            .unwrap();
+            emu.mem_write(BxPhyAddress::new(POINTER), &REGION.to_le_bytes())
                 .unwrap();
-            emu.mem_write(POINTER, &REGION.to_le_bytes()).unwrap();
             // mov eax, POINTER; vmxon [eax]
             emu.mem_write(
-                CODE,
+                BxPhyAddress::new(CODE),
                 &[0xB8, 0x00, 0x90, 0x00, 0x00, 0xF3, 0x0F, 0xC7, 0x30],
             )
             .unwrap();
@@ -8024,23 +8032,32 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            emu.mem_write(GDT + index as u64 * 8, &descriptor.to_le_bytes())
-                .unwrap();
+            emu.mem_write(
+                BxPhyAddress::new(GDT + index as u64 * 8),
+                &descriptor.to_le_bytes(),
+            )
+            .unwrap();
         }
         emu.reg_write(X86Reg::GdtrBase, GDT);
         emu.reg_write(X86Reg::GdtrLimit, 5 * 8 - 1);
         emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | CR0_NE);
         emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | CR4_VMXE);
         emu.reg_write(X86Reg::Rsp, HOST_STACK);
-        emu.mem_write(HOST_CODE, &[0x0F, 0x01, 0xC2]).unwrap(); // VMLAUNCH
-        emu.mem_write(HOST_EXIT_HANDLER, &[0xF4]).unwrap(); // HLT
-        emu.mem_write(GUEST_CODE, &[0x0F, 0xA2]).unwrap(); // CPUID
+        emu.mem_write(BxPhyAddress::new(HOST_CODE), &[0x0F, 0x01, 0xC2])
+            .unwrap(); // VMLAUNCH
+        emu.mem_write(BxPhyAddress::new(HOST_EXIT_HANDLER), &[0xF4])
+            .unwrap(); // HLT
+        emu.mem_write(BxPhyAddress::new(GUEST_CODE), &[0x0F, 0xA2])
+            .unwrap(); // CPUID
 
         let cr0 = emu.reg_read(X86Reg::Cr0);
         let cr3 = emu.reg_read(X86Reg::Cr3);
         let cr4 = emu.reg_read(X86Reg::Cr4);
-        emu.mem_write(VMCS_FIXTURE, &BX_VMCS_REVISION_ID.to_le_bytes())
-            .unwrap();
+        emu.mem_write(
+            BxPhyAddress::new(VMCS_FIXTURE),
+            &BX_VMCS_REVISION_ID.to_le_bytes(),
+        )
+        .unwrap();
         let cpu = emu.cpu_mut();
         cpu.in_vmx = true;
         cpu.vmxonptr = BxPhyAddress::new(0x20_A000);
@@ -8266,7 +8283,8 @@ mod tests {
         }
 
         fn run_until(self, emu: &mut Emulator, stop: u64) {
-            emu.mem_write(HOST_SCRIPT, &self.bytes).unwrap();
+            emu.mem_write(BxPhyAddress::new(HOST_SCRIPT), &self.bytes)
+                .unwrap();
             emu.emu_start(HOST_SCRIPT, Some(stop), None, Some(self.instructions + 8))
                 .unwrap();
         }
@@ -8274,8 +8292,11 @@ mod tests {
 
     /// A region VMPTRLD accepts: the revision identifier in its first dword.
     fn vmcs_region(emu: &mut Emulator, region: u64) {
-        emu.mem_write(region, &BX_VMCS_REVISION_ID.to_le_bytes())
-            .unwrap();
+        emu.mem_write(
+            BxPhyAddress::new(region),
+            &BX_VMCS_REVISION_ID.to_le_bytes(),
+        )
+        .unwrap();
     }
 
     /// A VMM that keeps two VMCSs reads back from each what it wrote into it.
@@ -8441,7 +8462,7 @@ mod tests {
             let guest = cpu
                 .vmx_guest()
                 .expect("a launched VMCS in VMX root operation");
-            assert_eq!(guest.vmcs, VMCS_FIXTURE);
+            assert_eq!(guest.vmcs, BxPhyAddress::new(VMCS_FIXTURE));
             assert_eq!(guest.rip, GUEST_CODE, "where the guest's CPUID exited");
             assert_eq!(guest.rsp, GUEST_STACK);
             assert_eq!(guest.cr3, host_cr3);
@@ -8454,10 +8475,14 @@ mod tests {
                 "an IA-32e guest runs with EFER.LMA"
             );
             assert_eq!(guest.memory, GuestPhysicalMemory::Direct);
-            assert_eq!(guest.gdtr.base, GDT);
+            assert_eq!(guest.gdtr.base, BxLinAddress::new(GDT));
             assert_eq!(
-                cpu.dbg_xlate_vmx_guest_linear2phy(&guest, guest.cr3, GUEST_CODE),
-                Some(GUEST_CODE),
+                cpu.dbg_xlate_vmx_guest_linear2phy(
+                    &guest,
+                    guest.cr3,
+                    BxLinAddress::new(GUEST_CODE)
+                ),
+                Some(BxPhyAddress::new(GUEST_CODE)),
                 "the guest shares the host's identity map"
             );
         });
@@ -8501,7 +8526,8 @@ mod tests {
         const EPT_WB_LARGE: u64 = 0x7 | (6 << 3) | 0x80;
         const PRESENT_WRITABLE: u64 = 0x3;
         let qword = |emu: &mut Emulator, at: u64, value: u64| {
-            emu.mem_write(at, &value.to_le_bytes()).unwrap();
+            emu.mem_write(BxPhyAddress::new(at), &value.to_le_bytes())
+                .unwrap();
         };
         qword(emu, EPT_ROOT, (EPT_ROOT + 0x1000) | EPT_RWX);
         qword(emu, EPT_ROOT + 0x1000, (EPT_ROOT + 0x2000) | EPT_RWX);
@@ -8518,7 +8544,7 @@ mod tests {
             qword(emu, EPT_SHIFT + table + index * 8, next | PRESENT_WRITABLE);
         }
         VmxGuest {
-            vmcs: VMCS_FIXTURE,
+            vmcs: BxPhyAddress::new(VMCS_FIXTURE),
             rip: GUEST_LINEAR,
             rsp: 0,
             rflags: 0x2,
@@ -8531,15 +8557,21 @@ mod tests {
             cpl: 0,
             activity: ProcessorActivity::Active,
             segment_bases: SegmentBases {
-                es: 0,
-                cs: 0,
-                ss: 0,
-                ds: 0,
-                fs: 0,
-                gs: 0,
+                es: BxLinAddress::new(0),
+                cs: BxLinAddress::new(0),
+                ss: BxLinAddress::new(0),
+                ds: BxLinAddress::new(0),
+                fs: BxLinAddress::new(0),
+                gs: BxLinAddress::new(0),
             },
-            gdtr: DescriptorTable { base: 0, limit: 0 },
-            idtr: DescriptorTable { base: 0, limit: 0 },
+            gdtr: DescriptorTable {
+                base: BxLinAddress::new(0),
+                limit: 0,
+            },
+            idtr: DescriptorTable {
+                base: BxLinAddress::new(0),
+                limit: 0,
+            },
             memory: GuestPhysicalMemory::Ept {
                 eptp: EPT_ROOT | (3 << 3) | 6,
             },
@@ -8555,15 +8587,23 @@ mod tests {
             let guest = guest_behind_ept(&mut emu);
             let mut cpu = emu.debug_cpu(0).unwrap();
             assert_eq!(
-                cpu.dbg_xlate_vmx_guest_linear2phy(&guest, GUEST_PML4, GUEST_LINEAR + 0x123),
-                Some(EPT_SHIFT + GUEST_PAGE + 0x123)
+                cpu.dbg_xlate_vmx_guest_linear2phy(
+                    &guest,
+                    GUEST_PML4,
+                    BxLinAddress::new(GUEST_LINEAR + 0x123)
+                ),
+                Some(BxPhyAddress::new(EPT_SHIFT + GUEST_PAGE + 0x123))
             );
             let direct = VmxGuest {
                 memory: GuestPhysicalMemory::Direct,
                 ..guest
             };
             assert_eq!(
-                cpu.dbg_xlate_vmx_guest_linear2phy(&direct, GUEST_PML4, GUEST_LINEAR),
+                cpu.dbg_xlate_vmx_guest_linear2phy(
+                    &direct,
+                    GUEST_PML4,
+                    BxLinAddress::new(GUEST_LINEAR)
+                ),
                 None,
                 "without the EPT the guest's tables are not where it put them"
             );
@@ -8580,8 +8620,8 @@ mod tests {
             let mut cpu = emu.debug_cpu(0).unwrap();
             let mut seen = alloc::vec::Vec::new();
             let range = LinearRange {
-                start: GUEST_LINEAR,
-                end: GUEST_LINEAR + 0x1000,
+                start: BxLinAddress::new(GUEST_LINEAR),
+                end: BxLinAddress::new(GUEST_LINEAR + 0x1000),
             };
             let walk = cpu.dbg_vmx_guest_page_mappings(&guest, GUEST_PML4, range, |mapping| {
                 seen.push(mapping);
@@ -8589,8 +8629,8 @@ mod tests {
             });
             assert_eq!(walk, MappingWalk::Complete);
             assert_eq!(seen.len(), 1);
-            assert_eq!(seen[0].linear, GUEST_LINEAR);
-            assert_eq!(seen[0].physical, EPT_SHIFT + GUEST_PAGE);
+            assert_eq!(seen[0].linear, BxLinAddress::new(GUEST_LINEAR));
+            assert_eq!(seen[0].physical, BxPhyAddress::new(EPT_SHIFT + GUEST_PAGE));
         });
     }
 
@@ -8612,7 +8652,8 @@ mod tests {
             let offset =
                 u64::from(vmcs_field_byte_offset(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS).unwrap());
             let mut stored = [0u8; 4];
-            emu.mem_read(VMCS_A + offset, &mut stored).unwrap();
+            emu.mem_read(BxPhyAddress::new(VMCS_A + offset), &mut stored)
+                .unwrap();
             assert_eq!(u32::from_le_bytes(stored), AR_CODE64.rotate_left(8));
             assert_eq!(
                 emu.reg_read(X86Reg::Rcx),
@@ -8630,8 +8671,11 @@ mod tests {
             let mut emu = vmx_host();
             let offset =
                 u64::from(vmcs_field_byte_offset(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS).unwrap());
-            emu.mem_write(VMCS_A + offset, &AR_CODE64.rotate_left(8).to_le_bytes())
-                .unwrap();
+            emu.mem_write(
+                BxPhyAddress::new(VMCS_A + offset),
+                &AR_CODE64.rotate_left(8).to_le_bytes(),
+            )
+            .unwrap();
             let mut ctx = emu.exec_ctx(0);
             ctx.in_vmx_guest = true;
             ctx.vmcs.secondary_proc_based_ctls = VMX_VM_EXEC_CTRL2_VMCS_SHADOWING;
@@ -8793,7 +8837,7 @@ mod tests {
             emu.cpu_mut().ia_extensions_bitmask[feature / 32] |= 1 << (feature % 32);
             // mov ecx, SYSENTER_CS; wrmsrns
             emu.mem_write(
-                GUEST_CODE,
+                BxPhyAddress::new(GUEST_CODE),
                 &[0xB9, 0x74, 0x01, 0x00, 0x00, 0x0F, 0x01, 0xC6],
             )
             .unwrap();

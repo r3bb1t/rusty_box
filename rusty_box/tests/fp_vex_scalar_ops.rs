@@ -22,6 +22,7 @@
 /// and fail unrelated tests with STATUS_STACK_OVERFLOW.
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -283,9 +284,13 @@ fn run_all_cases() {
     let cases = cases();
     for (i, case) in cases.iter().enumerate() {
         let addr = CASE_BASE + i as u64 * CASE_STRIDE;
-        emu.mem_write(addr, case.code).expect("write case code");
-        emu.mem_write(addr + case.code.len() as u64, &[0xEB, 0xFE])
-            .expect("write park jump");
+        emu.mem_write(BxPhyAddress::new(addr), case.code)
+            .expect("write case code");
+        emu.mem_write(
+            BxPhyAddress::new(addr + case.code.len() as u64),
+            &[0xEB, 0xFE],
+        )
+        .expect("write park jump");
     }
 
     let mut failures: Vec<String> = Vec::new();
@@ -400,8 +405,9 @@ fn run_go_runtime_cases() {
     ];
     for (i, (_, code, _)) in programs.iter().enumerate() {
         let addr = CASE_BASE + i as u64 * CASE_STRIDE;
-        emu.mem_write(addr, code).expect("write case code");
-        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+        emu.mem_write(BxPhyAddress::new(addr), code)
+            .expect("write case code");
+        emu.mem_write(BxPhyAddress::new(addr + code.len() as u64), &[0xEB, 0xFE])
             .expect("write park jump");
     }
     fn run(emu: &mut Emulator, programs: &[(&str, &[u8], u64)], idx: usize) {
@@ -522,8 +528,9 @@ fn run_split_load_cases() {
     ];
     for (i, (_, code, _)) in programs.iter().enumerate() {
         let addr = CASE_BASE + i as u64 * CASE_STRIDE;
-        emu.mem_write(addr, code).expect("write case code");
-        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+        emu.mem_write(BxPhyAddress::new(addr), code)
+            .expect("write case code");
+        emu.mem_write(BxPhyAddress::new(addr + code.len() as u64), &[0xEB, 0xFE])
             .expect("write park jump");
     }
     fn run(emu: &mut Emulator, programs: &[(&str, &[u8], u64)], idx: usize) {
@@ -546,7 +553,8 @@ fn run_split_load_cases() {
     // Boundaries to straddle: a 4 KiB page edge and the 2 MiB huge-page
     // edge the FlatLong64 tables use. Data addresses far from CASE_BASE.
     for &(name, base) in &[("4K", 0x0060_0FF8u64), ("2M", 0x009F_FFF8u64)] {
-        emu.mem_write(base, &pattern).expect("write pattern");
+        emu.mem_write(BxPhyAddress::new(base), &pattern)
+            .expect("write pattern");
 
         // movdqu: 16 bytes starting 8 bytes before the boundary.
         emu.reg_write(X86Reg::Rax, base);
@@ -575,7 +583,8 @@ fn run_split_load_cases() {
     // reads bytes 1..17 of the buffer (the overlapping tail of a 17-byte
     // key like "sign-key-sha3-384").
     let base = 0x0070_0000u64;
-    emu.mem_write(base, &pattern).expect("write pattern");
+    emu.mem_write(BxPhyAddress::new(base), &pattern)
+        .expect("write pattern");
     emu.reg_write(X86Reg::Rax, base);
     emu.reg_write(X86Reg::Rcx, 17);
     emu.reg_write_xmm(X86Reg::Xmm0, [0u8; 16]);
@@ -626,7 +635,7 @@ fn enable_guest_avx_state(emu: &mut Emulator) {
     emu.reg_write(X86Reg::Rax, 0x7);
     emu.reg_write(X86Reg::Rcx, 0);
     emu.reg_write(X86Reg::Rdx, 0);
-    emu.mem_write(XSETBV_SETUP_BASE, &[0x0F, 0x01, 0xD1])
+    emu.mem_write(BxPhyAddress::new(XSETBV_SETUP_BASE), &[0x0F, 0x01, 0xD1])
         .expect("write xsetbv");
     emu.emu_start(
         XSETBV_SETUP_BASE,
@@ -653,15 +662,18 @@ fn vex_vpinsrw_sources_vvvv_and_clears_upper() {
             emu.reg_write(X86Reg::Rax, 0x7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+            emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                 .expect("write xsetbv");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("enable guest AVX state");
 
             // vpinsrw xmm0, xmm1, ecx, 3 (VEX.128.66.0F.W0 C4 /r ib, 2-byte VEX
             // C5 F1: vvvv=~1). modrm C1 → reg=xmm0, rm=ecx. imm=3. Then park.
-            emu.mem_write(CASE_BASE, &[0xC5, 0xF1, 0xC4, 0xC1, 0x03, 0xEB, 0xFE])
-                .expect("write code");
+            emu.mem_write(
+                BxPhyAddress::new(CASE_BASE),
+                &[0xC5, 0xF1, 0xC4, 0xC1, 0x03, 0xEB, 0xFE],
+            )
+            .expect("write code");
 
             // Destination xmm0 gets a poison value that must be overwritten, and
             // ymm0's upper lane is poisoned to prove it gets cleared.
@@ -727,7 +739,7 @@ fn vex_vtestps_vtestpd_set_zf_cf_from_sign_bits() {
             emu.reg_write(X86Reg::Rax, 0x7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+            emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                 .expect("write xsetbv");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("enable guest AVX state");
@@ -837,7 +849,8 @@ fn vex_vtestps_vtestpd_set_zf_cf_from_sign_bits() {
             for &(code, name, len, op1, op2, want_zf, want_cf) in cases {
                 let mut prog = code.to_vec();
                 prog.extend_from_slice(&[0xEB, 0xFE]); // park
-                emu.mem_write(CASE_BASE, &prog).expect("write code");
+                emu.mem_write(BxPhyAddress::new(CASE_BASE), &prog)
+                    .expect("write code");
                 emu.reg_write_ymm(X86Reg::Ymm1, op1);
                 emu.reg_write_ymm(X86Reg::Ymm2, op2);
                 // Poison every flag VTEST must clear, so "cleared" is proven.
@@ -913,7 +926,7 @@ fn with_avx_emu(f: impl FnOnce(&mut Emulator) + Send + 'static) {
             emu.reg_write(X86Reg::Rax, 0x7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+            emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                 .expect("write xsetbv");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("enable guest AVX state");
@@ -927,7 +940,8 @@ fn with_avx_emu(f: impl FnOnce(&mut Emulator) + Send + 'static) {
 fn run_one(emu: &mut Emulator, name: &str, code: &[u8]) {
     let mut prog = code.to_vec();
     prog.extend_from_slice(&[0xEB, 0xFE]); // park
-    emu.mem_write(CASE_BASE, &prog).expect("write code");
+    emu.mem_write(BxPhyAddress::new(CASE_BASE), &prog)
+        .expect("write code");
     let end = CASE_BASE + code.len() as u64;
     let stop = emu
         .emu_start(CASE_BASE, Some(end), None, Some(9))
@@ -1198,11 +1212,13 @@ fn vex_f16c_round_trips_half_precision() {
 
         // Memory destination: VCVTPS2PH [rax], ymm1, 0 — C4 E3 7D 1D 08 00.
         let scratch = 0x0060_0000u64;
-        emu.mem_write(scratch, &[0x5A; 32]).expect("poison scratch");
+        emu.mem_write(BxPhyAddress::new(scratch), &[0x5A; 32])
+            .expect("poison scratch");
         emu.reg_write(X86Reg::Rax, scratch);
         run_one(emu, "vcvtps2ph mem", &[0xC4, 0xE3, 0x7D, 0x1D, 0x08, 0x00]);
         let mut back = [0u8; 32];
-        emu.mem_read(scratch, &mut back).expect("read scratch");
+        emu.mem_read(BxPhyAddress::new(scratch), &mut back)
+            .expect("read scratch");
         assert_eq!(&back[..16], &src[..16], "VCVTPS2PH must store 16 bytes");
         assert_eq!(
             &back[16..],
@@ -1297,9 +1313,9 @@ fn install_fault_handlers(emu: &mut Emulator) {
         entry[5] = 0x8E; // present, DPL 0, 64-bit interrupt gate
         entry[6..8].copy_from_slice(&((gate.handler >> 16) as u16).to_le_bytes());
         entry[8..12].copy_from_slice(&((gate.handler >> 32) as u32).to_le_bytes());
-        emu.mem_write(IDT + gate.vector * 16, &entry)
+        emu.mem_write(BxPhyAddress::new(IDT + gate.vector * 16), &entry)
             .expect("write the gate");
-        emu.mem_write(gate.handler, &[0xF4])
+        emu.mem_write(BxPhyAddress::new(gate.handler), &[0xF4])
             .expect("write the handler");
     }
 }
@@ -1322,7 +1338,8 @@ struct FaultFrame {
 fn take_fault(emu: &mut Emulator, code: &[u8], gate: &Gate) -> FaultFrame {
     let mut prog = code.to_vec();
     prog.extend_from_slice(&[0xEB, 0xFE]); // park, should it retire
-    emu.mem_write(CASE_BASE, &prog).expect("write code");
+    emu.mem_write(BxPhyAddress::new(CASE_BASE), &prog)
+        .expect("write code");
     emu.reg_write(X86Reg::Rsp, FAULT_STACK);
     let stop = emu
         .emu_start(CASE_BASE, Some(gate.handler + 1), None, Some(20))
@@ -1357,7 +1374,8 @@ fn take_fault(emu: &mut Emulator, code: &[u8], gate: &Gate) -> FaultFrame {
 
 fn read_qword(emu: &mut Emulator, addr: u64) -> u64 {
     let mut bytes = [0u8; 8];
-    emu.mem_read(addr, &mut bytes).expect("read the stack");
+    emu.mem_read(BxPhyAddress::new(addr), &mut bytes)
+        .expect("read the stack");
     u64::from_le_bytes(bytes)
 }
 
@@ -1371,11 +1389,15 @@ fn vex_maskmov_suppresses_masked_off_elements() {
         const STRADDLE: u64 = HOLE - 16; // dwords 0..3 mapped, 4..7 in the hole
 
         install_fault_handlers(emu);
-        emu.mem_write(flat_long64_pde_addr(HOLE), &0u64.to_le_bytes())
-            .expect("unmap the hole page");
+        emu.mem_write(
+            BxPhyAddress::new(flat_long64_pde_addr(HOLE)),
+            &0u64.to_le_bytes(),
+        )
+        .expect("unmap the hole page");
 
         let payload = ymm_from_u32([10, 11, 12, 13, 14, 15, 16, 17]);
-        emu.mem_write(DATA, &payload).expect("write payload");
+        emu.mem_write(BxPhyAddress::new(DATA), &payload)
+            .expect("write payload");
 
         let all_set = ymm_from_u32([0x8000_0000; 8]);
         let alternating = ymm_from_u32([
@@ -1427,13 +1449,15 @@ fn vex_maskmov_suppresses_masked_off_elements() {
         // ---- stores: VMASKMOVPS [rax], ymm2, ymm1 — C4 E2 6D 2E 08 ----
         let store = &[0xC4u8, 0xE2, 0x6D, 0x2E, 0x08];
 
-        emu.mem_write(DATA, &[0x5A; 32]).expect("poison");
+        emu.mem_write(BxPhyAddress::new(DATA), &[0x5A; 32])
+            .expect("poison");
         emu.reg_write(X86Reg::Rax, DATA);
         emu.reg_write_ymm(X86Reg::Ymm1, payload);
         emu.reg_write_ymm(X86Reg::Ymm2, alternating);
         run_one(emu, "maskmov store alternating", store);
         let mut back = [0u8; 32];
-        emu.mem_read(DATA, &mut back).expect("read back");
+        emu.mem_read(BxPhyAddress::new(DATA), &mut back)
+            .expect("read back");
         let mut expect = [0x5Au8; 32];
         for n in [0usize, 2, 4, 6] {
             expect[n * 4..n * 4 + 4].copy_from_slice(&payload[n * 4..n * 4 + 4]);
@@ -1459,7 +1483,7 @@ fn vex_maskmov_suppresses_masked_off_elements() {
         ]);
         let high_only = ymm_from_u32([0, 0, 0, 0, 0x8000_0000, 0, 0, 0]);
 
-        emu.mem_write(STRADDLE, &[0x11, 0x22, 0x33, 0x44])
+        emu.mem_write(BxPhyAddress::new(STRADDLE), &[0x11, 0x22, 0x33, 0x44])
             .expect("seed");
         emu.reg_write(X86Reg::Rax, STRADDLE);
         emu.reg_write_ymm(X86Reg::Ymm1, [0xAA; 32]);
@@ -1512,7 +1536,8 @@ fn vex_vgather_loads_elements_and_clears_the_mask() {
         for n in 0..16u32 {
             table[n as usize * 4..n as usize * 4 + 4].copy_from_slice(&(100 + n).to_le_bytes());
         }
-        emu.mem_write(TABLE, &table).expect("write table");
+        emu.mem_write(BxPhyAddress::new(TABLE), &table)
+            .expect("write table");
 
         let signed = 0x8000_0000u32;
 
@@ -1621,14 +1646,18 @@ fn vex_vgather_is_restartable_after_a_page_fault() {
         const HOLE: u64 = 0x00C0_0000;
 
         install_fault_handlers(emu);
-        emu.mem_write(flat_long64_pde_addr(HOLE), &0u64.to_le_bytes())
-            .expect("unmap the hole page");
+        emu.mem_write(
+            BxPhyAddress::new(flat_long64_pde_addr(HOLE)),
+            &0u64.to_le_bytes(),
+        )
+        .expect("unmap the hole page");
 
         let mut table = [0u8; 32];
         for n in 0..8u32 {
             table[n as usize * 4..n as usize * 4 + 4].copy_from_slice(&(200 + n).to_le_bytes());
         }
-        emu.mem_write(TABLE, &table).expect("write table");
+        emu.mem_write(BxPhyAddress::new(TABLE), &table)
+            .expect("write table");
 
         // Elements 0 and 1 read from the table; element 2 reads from the
         // unmapped page. Index units are dwords (scale *4).
@@ -1719,7 +1748,8 @@ fn vex_legacy_shared_handlers_clear_the_upper_lane() {
 
         // VMOVNTDQA xmm0, [rax] — C4 E2 79 2A 00 (VEX.128.66.0F38 2A).
         let payload: [u8; 32] = core::array::from_fn(|n| (n as u8).wrapping_mul(3) ^ 0x5A);
-        emu.mem_write(SCRATCH, &payload).expect("write payload");
+        emu.mem_write(BxPhyAddress::new(SCRATCH), &payload)
+            .expect("write payload");
         emu.reg_write(X86Reg::Rax, SCRATCH);
         emu.reg_write_ymm(X86Reg::Ymm0, [0xAA; 32]);
         run_one(emu, "vmovntdqa", &[0xC4, 0xE2, 0x79, 0x2A, 0x00]);
@@ -1815,11 +1845,13 @@ fn pextrw_to_rm16_extracts_the_selected_word() {
         );
 
         // PEXTRW [rax], xmm1, 5 — 66 0F 3A 15 08 05 (memory form).
-        emu.mem_write(SCRATCH, &[0x5A; 4]).expect("poison");
+        emu.mem_write(BxPhyAddress::new(SCRATCH), &[0x5A; 4])
+            .expect("poison");
         emu.reg_write(X86Reg::Rax, SCRATCH);
         run_one(emu, "pextrw m", &[0x66, 0x0F, 0x3A, 0x15, 0x08, 0x05]);
         let mut back = [0u8; 4];
-        emu.mem_read(SCRATCH, &mut back).expect("read back");
+        emu.mem_read(BxPhyAddress::new(SCRATCH), &mut back)
+            .expect("read back");
         assert_eq!(
             &back[..2],
             &src[10..12],
@@ -1986,7 +2018,8 @@ fn legacy_and_vex_extracts_read_modrm_reg_and_write_modrm_rm() {
             }
         }
         for case in &to_memory {
-            emu.mem_write(SCRATCH, &[0x5A; 16]).expect("poison");
+            emu.mem_write(BxPhyAddress::new(SCRATCH), &[0x5A; 16])
+                .expect("poison");
             emu.reg_write_xmm(X86Reg::Xmm0, [0xE0; 16]);
             emu.reg_write_xmm(X86Reg::Xmm2, source);
             emu.reg_write(X86Reg::Rax, SCRATCH);
@@ -1994,7 +2027,8 @@ fn legacy_and_vex_extracts_read_modrm_reg_and_write_modrm_rm() {
             let mut want = [0x5Au8; 16];
             want[..case.element.len()].copy_from_slice(&source[case.element.clone()]);
             let mut got = [0u8; 16];
-            emu.mem_read(SCRATCH, &mut got).expect("read back");
+            emu.mem_read(BxPhyAddress::new(SCRATCH), &mut got)
+                .expect("read back");
             if got != want {
                 wrong.push(format!(
                     "{}: [rax] {got:02X?} (want {want:02X?})",
@@ -2025,8 +2059,11 @@ fn indexbyte_avx2_ingredients() {
             enable_guest_avx_state(&mut emu);
 
             // vpbroadcastb ymm3, xmm1 (VEX.256.66.0F38.W0 78 /r); park jump.
-            emu.mem_write(CASE_BASE, &[0xC4, 0xE2, 0x7D, 0x78, 0xD9, 0xEB, 0xFE])
-                .expect("write code");
+            emu.mem_write(
+                BxPhyAddress::new(CASE_BASE),
+                &[0xC4, 0xE2, 0x7D, 0x78, 0xD9, 0xEB, 0xFE],
+            )
+            .expect("write code");
             let mut x1 = [0u8; 16];
             x1[0] = 0x0A; // '\n'
             x1[1] = 0x77; // garbage that must NOT leak into the splat
@@ -2049,8 +2086,11 @@ fn indexbyte_avx2_ingredients() {
             // tzcnt eax, ebx (F3 0F BC /r) — must be 32 for input 0 (not BSF
             // undefined) and count correctly otherwise.
             let addr2 = CASE_BASE + 64;
-            emu.mem_write(addr2, &[0xF3, 0x0F, 0xBC, 0xC3, 0xEB, 0xFE])
-                .expect("write code");
+            emu.mem_write(
+                BxPhyAddress::new(addr2),
+                &[0xF3, 0x0F, 0xBC, 0xC3, 0xEB, 0xFE],
+            )
+            .expect("write code");
             for (input, want) in [(0x0002_0000u64, 17u64), (0u64, 32u64), (1u64, 0u64)] {
                 emu.reg_write(X86Reg::Rbx, input);
                 emu.reg_write(X86Reg::Rax, 0xFFFF_FFFF_FFFF_FFFF);
@@ -2120,9 +2160,13 @@ fn run_aeshash_cases() {
         0x66, 0x0F, 0xEF, 0xD3,                   // pxor xmm2, xmm3
     ];
     let insns = 11u64;
-    emu.mem_write(CASE_BASE, code).expect("write code");
-    emu.mem_write(CASE_BASE + code.len() as u64, &[0xEB, 0xFE])
-        .expect("write park");
+    emu.mem_write(BxPhyAddress::new(CASE_BASE), code)
+        .expect("write code");
+    emu.mem_write(
+        BxPhyAddress::new(CASE_BASE + code.len() as u64),
+        &[0xEB, 0xFE],
+    )
+    .expect("write park");
     let park = CASE_BASE + code.len() as u64;
 
     let key = b"sign-key-sha3-384"; // 17 bytes — the only >16-byte header
@@ -2130,7 +2174,8 @@ fn run_aeshash_cases() {
     let seed1 = 0xA409_3822_299F_31D0_082E_FA98_EC4E_6C89_u128;
 
     let hash_at = |emu: &mut Emulator, addr: u64| -> [u8; 16] {
-        emu.mem_write(addr, key).expect("write key");
+        emu.mem_write(BxPhyAddress::new(addr), key)
+            .expect("write key");
         emu.reg_write(X86Reg::Rax, addr);
         emu.reg_write(X86Reg::Rcx, key.len() as u64);
         emu.reg_write_xmm(X86Reg::Xmm0, seed0.to_le_bytes());
@@ -2251,8 +2296,9 @@ fn run_packed_cases() {
     ];
     for (i, (_, code)) in programs.iter().enumerate() {
         let addr = CASE_BASE + i as u64 * CASE_STRIDE;
-        emu.mem_write(addr, code).expect("write case code");
-        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+        emu.mem_write(BxPhyAddress::new(addr), code)
+            .expect("write case code");
+        emu.mem_write(BxPhyAddress::new(addr + code.len() as u64), &[0xEB, 0xFE])
             .expect("write park jump");
     }
     fn run(emu: &mut Emulator, programs: &[(&str, &[u8])], idx: usize) {
@@ -2548,8 +2594,9 @@ fn run_hadd_blend_dpp_cases() {
     ];
     for (i, (_, code)) in programs.iter().enumerate() {
         let addr = CASE_BASE + i as u64 * CASE_STRIDE;
-        emu.mem_write(addr, code).expect("write case code");
-        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+        emu.mem_write(BxPhyAddress::new(addr), code)
+            .expect("write case code");
+        emu.mem_write(BxPhyAddress::new(addr + code.len() as u64), &[0xEB, 0xFE])
             .expect("write park jump");
     }
     fn run(emu: &mut Emulator, programs: &[(&str, &[u8])], idx: usize) {
@@ -2770,8 +2817,9 @@ fn run_vex_integer_cases() {
     ];
     for (i, (_, code)) in programs.iter().enumerate() {
         let addr = CASE_BASE + i as u64 * CASE_STRIDE;
-        emu.mem_write(addr, code).expect("write case code");
-        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+        emu.mem_write(BxPhyAddress::new(addr), code)
+            .expect("write case code");
+        emu.mem_write(BxPhyAddress::new(addr + code.len() as u64), &[0xEB, 0xFE])
             .expect("write park jump");
     }
     fn run(emu: &mut Emulator, programs: &[(&str, &[u8])], idx: usize) {
@@ -3010,7 +3058,8 @@ fn run_vex_integer_cases() {
     // 13/14: vlddqu ymm (32-byte load) and legacy lddqu xmm (16-byte load).
     let pattern: Vec<u8> = (0u8..32).map(|i| i.wrapping_mul(13) ^ 0x27).collect();
     let base = 0x0060_0100u64;
-    emu.mem_write(base, &pattern).expect("write pattern");
+    emu.mem_write(BxPhyAddress::new(base), &pattern)
+        .expect("write pattern");
     emu.reg_write(X86Reg::Rax, base);
     emu.reg_write_ymm(X86Reg::Ymm0, [0u8; 32]);
     run(&mut emu, programs, 13);
@@ -3064,8 +3113,9 @@ fn run_cvt_boundary_cases() {
     ];
     for (i, (_, code)) in programs.iter().enumerate() {
         let addr = CASE_BASE + i as u64 * CASE_STRIDE;
-        emu.mem_write(addr, code).expect("write case code");
-        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+        emu.mem_write(BxPhyAddress::new(addr), code)
+            .expect("write case code");
+        emu.mem_write(BxPhyAddress::new(addr + code.len() as u64), &[0xEB, 0xFE])
             .expect("write park jump");
     }
     fn run(emu: &mut Emulator, programs: &[(&str, &[u8])], idx: usize) {
@@ -3202,8 +3252,9 @@ fn run_remap_gap_cases() {
     ];
     for (i, (_, code, _)) in programs.iter().enumerate() {
         let addr = CASE_BASE + i as u64 * CASE_STRIDE;
-        emu.mem_write(addr, code).expect("write code");
-        emu.mem_write(addr + code.len() as u64, &[0xEB, 0xFE])
+        emu.mem_write(BxPhyAddress::new(addr), code)
+            .expect("write code");
+        emu.mem_write(BxPhyAddress::new(addr + code.len() as u64), &[0xEB, 0xFE])
             .expect("write park");
     }
     fn run(emu: &mut Emulator, programs: &[(&str, &[u8], u64)], idx: usize) {
@@ -3346,7 +3397,7 @@ fn evex_is_reachable_by_a_guest_end_to_end() {
             emu.reg_write(X86Reg::Rax, 0xE7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+            emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                 .expect("write xsetbv");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("XSETBV with the AVX-512 XCR0 bits must succeed");
@@ -3357,8 +3408,11 @@ fn evex_is_reachable_by_a_guest_end_to_end() {
             //   P1=75: W=0, vvvv=1110 -> zmm1, pp=01 (66)
             //   P2=48: L'L=10 (512-bit), z=0, b=0, V'=1(inv->0), aaa=000
             //   ModRM C2: reg=zmm0, rm=zmm2
-            emu.mem_write(CASE_BASE, &[0x62, 0xF1, 0x75, 0x48, 0xFE, 0xC2, 0xEB, 0xFE])
-                .expect("write vpaddd");
+            emu.mem_write(
+                BxPhyAddress::new(CASE_BASE),
+                &[0x62, 0xF1, 0x75, 0x48, 0xFE, 0xC2, 0xEB, 0xFE],
+            )
+            .expect("write vpaddd");
 
             let mut a = [0u8; 64];
             let mut b = [0u8; 64];
@@ -3417,7 +3471,7 @@ fn xsave_xrstor_round_trips_the_avx512_components() {
             emu.reg_write(X86Reg::Rax, 0xE7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+            emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                 .expect("write xsetbv");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("enable AVX-512 guest state");
@@ -3443,8 +3497,11 @@ fn xsave_xrstor_round_trips_the_avx512_components() {
             emu.reg_write(X86Reg::Rdi, BUF);
             emu.reg_write(X86Reg::Rax, 0xE7);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0xAE, 0x27, 0xEB, 0xFE])
-                .expect("write xsave");
+            emu.mem_write(
+                BxPhyAddress::new(CASE_BASE),
+                &[0x0F, 0xAE, 0x27, 0xEB, 0xFE],
+            )
+            .expect("write xsave");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("XSAVE must not fault");
 
@@ -3455,8 +3512,11 @@ fn xsave_xrstor_round_trips_the_avx512_components() {
             emu.reg_write(X86Reg::Rdi, BUF);
             emu.reg_write(X86Reg::Rax, 0xE7);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0xAE, 0x2F, 0xEB, 0xFE])
-                .expect("write xrstor");
+            emu.mem_write(
+                BxPhyAddress::new(CASE_BASE),
+                &[0x0F, 0xAE, 0x2F, 0xEB, 0xFE],
+            )
+            .expect("write xrstor");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("XRSTOR must not fault");
 
@@ -3525,7 +3585,7 @@ fn evex_vpternlogd_selects_the_right_source_for_each_imm8() {
                 emu.reg_write(X86Reg::Rax, 0xE7);
                 emu.reg_write(X86Reg::Rcx, 0);
                 emu.reg_write(X86Reg::Rdx, 0);
-                emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1]).expect("write xsetbv");
+                emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1]).expect("write xsetbv");
                 emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                     .expect("enable AVX-512 state");
 
@@ -3533,7 +3593,7 @@ fn evex_vpternlogd_selects_the_right_source_for_each_imm8() {
                 emu.reg_write_zmm(X86Reg::Zmm1, b);
                 emu.reg_write_zmm(X86Reg::Zmm2, c);
 
-                emu.mem_write(CASE_BASE, &[0x62, 0xF3, 0x75, 0x48, 0x25, 0xC2, imm, 0xEB, 0xFE])
+                emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x62, 0xF3, 0x75, 0x48, 0x25, 0xC2, imm, 0xEB, 0xFE])
                     .expect("write vpternlogd");
                 emu.emu_start(CASE_BASE, None, None, Some(1))
                     .expect("VPTERNLOGD must execute");
@@ -3567,7 +3627,7 @@ fn evex_vprord_rotates_each_dword_right() {
             emu.reg_write(X86Reg::Rax, 0xE7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+            emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                 .expect("write xsetbv");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("enable AVX-512 state");
@@ -3581,7 +3641,7 @@ fn evex_vprord_rotates_each_dword_right() {
 
             // VPRORD zmm1, zmm2, 8 = EVEX.512.66.0F.W0 72 /0 ib (vvvv is the dest)
             emu.mem_write(
-                CASE_BASE,
+                BxPhyAddress::new(CASE_BASE),
                 &[0x62, 0xF1, 0x75, 0x48, 0x72, 0xC2, 0x08, 0xEB, 0xFE],
             )
             .expect("write vprord");
@@ -3617,7 +3677,7 @@ fn evex_vpermi2d_reads_the_first_table_from_vvvv() {
             emu.reg_write(X86Reg::Rax, 0xE7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+            emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                 .expect("write xsetbv");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("enable AVX-512 state");
@@ -3638,8 +3698,11 @@ fn evex_vpermi2d_reads_the_first_table_from_vvvv() {
             emu.reg_write_zmm(X86Reg::Zmm2, t2);
 
             // VPERMI2D zmm0, zmm1, zmm2 = EVEX.512.66.0F38.W0 76 /r
-            emu.mem_write(CASE_BASE, &[0x62, 0xF2, 0x75, 0x48, 0x76, 0xC2, 0xEB, 0xFE])
-                .expect("write vpermi2d");
+            emu.mem_write(
+                BxPhyAddress::new(CASE_BASE),
+                &[0x62, 0xF2, 0x75, 0x48, 0x76, 0xC2, 0xEB, 0xFE],
+            )
+            .expect("write vpermi2d");
             emu.emu_start(CASE_BASE, None, None, Some(1))
                 .expect("VPERMI2D must execute");
 
@@ -3676,7 +3739,7 @@ fn evex_vpcmpeqb_sets_one_opmask_bit_per_equal_byte() {
             emu.reg_write(X86Reg::Rax, 0xE7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+            emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                 .expect("write xsetbv");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("enable AVX-512 state");
@@ -3694,7 +3757,7 @@ fn evex_vpcmpeqb_sets_one_opmask_bit_per_equal_byte() {
             // VPCMPEQB k1, ymm0, ymm1   62 F1 7D 28 74 C9
             // KMOVQ    rax, k1          C4 E1 FB 93 C1
             emu.mem_write(
-                CASE_BASE,
+                BxPhyAddress::new(CASE_BASE),
                 &[
                     0x62, 0xF1, 0x7D, 0x28, 0x74, 0xC9, 0xC4, 0xE1, 0xFB, 0x93, 0xC1, 0xEB, 0xFE,
                 ],
@@ -3738,7 +3801,7 @@ fn evex_vextractf32x4_writes_the_rm_operand() {
             emu.reg_write(X86Reg::Rax, 0xE7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+            emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                 .expect("write xsetbv");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("enable AVX-512 state");
@@ -3758,7 +3821,7 @@ fn evex_vextractf32x4_writes_the_rm_operand() {
             // VEXTRACTF32X4 xmm2, zmm1, 1 = EVEX.512.66.0F3A.W0 19 /r ib
             // reg=zmm1 (source), rm=zmm2 (destination), imm8=1 selects lane 1.
             emu.mem_write(
-                CASE_BASE,
+                BxPhyAddress::new(CASE_BASE),
                 &[0x62, 0xF3, 0x7D, 0x48, 0x19, 0xCA, 0x01, 0xEB, 0xFE],
             )
             .expect("write vextractf32x4");
@@ -3797,7 +3860,7 @@ fn evex_vcvtudq2pd_converts_unsigned() {
             emu.reg_write(X86Reg::Rax, 0xE7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+            emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                 .expect("write xsetbv");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("enable AVX-512 state");
@@ -3811,8 +3874,11 @@ fn evex_vcvtudq2pd_converts_unsigned() {
             emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
 
             // VCVTUDQ2PD ymm1, xmm2 = EVEX.256.F3.0F.W0 7A /r
-            emu.mem_write(CASE_BASE, &[0x62, 0xF1, 0x7E, 0x28, 0x7A, 0xCA, 0xEB, 0xFE])
-                .expect("write vcvtudq2pd");
+            emu.mem_write(
+                BxPhyAddress::new(CASE_BASE),
+                &[0x62, 0xF1, 0x7E, 0x28, 0x7A, 0xCA, 0xEB, 0xFE],
+            )
+            .expect("write vcvtudq2pd");
             emu.emu_start(CASE_BASE, None, None, Some(1))
                 .expect("VCVTUDQ2PD must execute");
 
@@ -3892,7 +3958,7 @@ fn evex_float_to_qword_conversions() {
                 emu.reg_write(X86Reg::Rax, 0xE7);
                 emu.reg_write(X86Reg::Rcx, 0);
                 emu.reg_write(X86Reg::Rdx, 0);
-                emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+                emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                     .expect("xsetbv");
                 emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                     .expect("enable AVX-512 state");
@@ -3904,7 +3970,8 @@ fn evex_float_to_qword_conversions() {
                 code[..6].copy_from_slice(enc);
                 code[6] = 0xEB;
                 code[7] = 0xFE;
-                emu.mem_write(CASE_BASE, &code).expect("write conversion");
+                emu.mem_write(BxPhyAddress::new(CASE_BASE), &code)
+                    .expect("write conversion");
                 emu.emu_start(CASE_BASE, None, None, Some(1))
                     .unwrap_or_else(|e| panic!("{name} must execute: {e:?}"));
 
@@ -3935,7 +4002,7 @@ fn evex_unsigned_int_to_float_conversions() {
                 emu.reg_write(X86Reg::Rax, 0xE7);
                 emu.reg_write(X86Reg::Rcx, 0);
                 emu.reg_write(X86Reg::Rdx, 0);
-                emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+                emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                     .expect("xsetbv");
                 emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                     .expect("enable AVX-512 state");
@@ -3954,8 +4021,11 @@ fn evex_unsigned_int_to_float_conversions() {
                 }
                 emu.reg_write_zmm(X86Reg::Zmm2, src);
                 emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
-                emu.mem_write(CASE_BASE, &[0x62, 0xF1, 0xFE, 0x08, 0x7A, 0xCA, 0xEB, 0xFE])
-                    .expect("write");
+                emu.mem_write(
+                    BxPhyAddress::new(CASE_BASE),
+                    &[0x62, 0xF1, 0xFE, 0x08, 0x7A, 0xCA, 0xEB, 0xFE],
+                )
+                .expect("write");
                 emu.emu_start(CASE_BASE, None, None, Some(1))
                     .expect("VCVTUQQ2PD");
                 let got = emu.reg_read_zmm(X86Reg::Zmm1);
@@ -3978,8 +4048,11 @@ fn evex_unsigned_int_to_float_conversions() {
                 }
                 emu.reg_write_zmm(X86Reg::Zmm2, src);
                 emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
-                emu.mem_write(CASE_BASE, &[0x62, 0xF1, 0x7F, 0x08, 0x7A, 0xCA, 0xEB, 0xFE])
-                    .expect("write");
+                emu.mem_write(
+                    BxPhyAddress::new(CASE_BASE),
+                    &[0x62, 0xF1, 0x7F, 0x08, 0x7A, 0xCA, 0xEB, 0xFE],
+                )
+                .expect("write");
                 emu.emu_start(CASE_BASE, None, None, Some(1))
                     .expect("VCVTUDQ2PS");
                 let got = emu.reg_read_zmm(X86Reg::Zmm1);
@@ -4002,8 +4075,11 @@ fn evex_unsigned_int_to_float_conversions() {
                 }
                 emu.reg_write_zmm(X86Reg::Zmm2, src);
                 emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
-                emu.mem_write(CASE_BASE, &[0x62, 0xF1, 0xFF, 0x08, 0x7A, 0xCA, 0xEB, 0xFE])
-                    .expect("write");
+                emu.mem_write(
+                    BxPhyAddress::new(CASE_BASE),
+                    &[0x62, 0xF1, 0xFF, 0x08, 0x7A, 0xCA, 0xEB, 0xFE],
+                )
+                .expect("write");
                 emu.emu_start(CASE_BASE, None, None, Some(1))
                     .expect("VCVTUQQ2PS");
                 let got = emu.reg_read_zmm(X86Reg::Zmm1);
@@ -4069,7 +4145,7 @@ fn evex_vcvtusi2_scalar_conversions() {
                 emu.reg_write(X86Reg::Rax, 0xE7);
                 emu.reg_write(X86Reg::Rcx, 0);
                 emu.reg_write(X86Reg::Rdx, 0);
-                emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+                emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                     .expect("xsetbv");
                 emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                     .expect("enable AVX-512 state");
@@ -4082,7 +4158,8 @@ fn evex_vcvtusi2_scalar_conversions() {
                 code[..6].copy_from_slice(enc);
                 code[6] = 0xEB;
                 code[7] = 0xFE;
-                emu.mem_write(CASE_BASE, &code).expect("write conversion");
+                emu.mem_write(BxPhyAddress::new(CASE_BASE), &code)
+                    .expect("write conversion");
                 emu.emu_start(CASE_BASE, None, None, Some(1))
                     .unwrap_or_else(|e| panic!("{name} must execute: {e:?}"));
 
@@ -4133,7 +4210,7 @@ fn evex_vcvtudq2pd_memory_form_scales_disp8() {
             emu.reg_write(X86Reg::Rax, 0xE7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+            emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                 .expect("xsetbv");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("enable AVX-512 state");
@@ -4143,14 +4220,15 @@ fn evex_vcvtudq2pd_memory_form_scales_disp8() {
             buf[1..5].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
             buf[8..12].copy_from_slice(&7u32.to_le_bytes());
             buf[12..16].copy_from_slice(&0x8000_0000u32.to_le_bytes());
-            emu.mem_write(DATA, &buf).expect("write data");
+            emu.mem_write(BxPhyAddress::new(DATA), &buf)
+                .expect("write data");
 
             emu.reg_write(X86Reg::Rax, DATA);
             emu.reg_write_zmm(X86Reg::Zmm1, [0x5A; 64]);
 
             // VCVTUDQ2PD xmm1, [rax+8]  — EVEX.128.F3.0F.W0 7A, mod=01 disp8=1
             emu.mem_write(
-                CASE_BASE,
+                BxPhyAddress::new(CASE_BASE),
                 &[0x62, 0xF1, 0x7E, 0x08, 0x7A, 0x48, 0x01, 0xEB, 0xFE],
             )
             .expect("write conversion");
@@ -4188,7 +4266,7 @@ fn evex_vcvtudq2pd_kmask_merges() {
             emu.reg_write(X86Reg::Rax, 0xE7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CASE_BASE, &[0x0F, 0x01, 0xD1])
+            emu.mem_write(BxPhyAddress::new(CASE_BASE), &[0x0F, 0x01, 0xD1])
                 .expect("xsetbv");
             emu.emu_start(CASE_BASE, Some(CASE_BASE + 3), None, Some(1))
                 .expect("enable AVX-512 state");
@@ -4207,7 +4285,7 @@ fn evex_vcvtudq2pd_kmask_merges() {
             // VCVTUDQ2PD xmm1{k1}, xmm2  — EVEX.128.F3.0F.W0 7A, aaa=1
             emu.reg_write(X86Reg::Rax, 1);
             emu.mem_write(
-                CASE_BASE,
+                BxPhyAddress::new(CASE_BASE),
                 &[
                     0xC4, 0xE1, 0xFB, 0x92, 0xC8, // KMOVQ k1, rax
                     0x62, 0xF1, 0x7E, 0x09, 0x7A, 0xCA, // VCVTUDQ2PD xmm1{k1}, xmm2

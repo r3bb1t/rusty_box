@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use rusty_box::config::BxLinAddress;
 use rusty_box::cpu::{LinearRange, PageMapping};
 
 use super::pe::PeSection;
@@ -271,15 +272,15 @@ fn vad_covering(vads: &[VadRegion], address: u64) -> Option<usize> {
 /// there are. `mappings` are in address order and do not overlap.
 fn resident(mappings: &[PageMapping], lo: u64, hi: u64) -> (u64, Option<RegionAccess>) {
     let first =
-        mappings.partition_point(|mapping| mapping.linear.saturating_add(mapping.size) <= lo);
+        mappings.partition_point(|mapping| mapping.linear.get().saturating_add(mapping.size) <= lo);
     let mut pages = 0u64;
     let mut access: Option<RegionAccess> = None;
     for mapping in mappings.iter().skip(first) {
-        if mapping.linear >= hi {
+        if mapping.linear.get() >= hi {
             break;
         }
-        let start = mapping.linear.max(lo);
-        let end = mapping.linear.saturating_add(mapping.size).min(hi);
+        let start = mapping.linear.get().max(lo);
+        let end = mapping.linear.get().saturating_add(mapping.size).min(hi);
         if start >= end {
             continue;
         }
@@ -313,14 +314,15 @@ pub(crate) fn clip_mappings(mappings: &[PageMapping], range: LinearRange) -> Vec
         .iter()
         .filter_map(|mapping| {
             let start = mapping.linear.max(range.start);
-            let end = mapping.linear.saturating_add(mapping.size).min(range.end);
+            let end =
+                BxLinAddress::new(mapping.linear.get().saturating_add(mapping.size)).min(range.end);
             // `mapping.linear <= start < end`, so neither difference wraps.
             (start < end).then(|| PageMapping {
                 linear: start,
                 physical: mapping
                     .physical
-                    .wrapping_add(start.wrapping_sub(mapping.linear)),
-                size: end.wrapping_sub(start),
+                    .wrapping_add(start.offset_from(mapping.linear)),
+                size: end.offset_from(start),
                 access: mapping.access,
             })
         })
@@ -479,8 +481,8 @@ fn private_runs(mappings: &[PageMapping], spans: &[Span], vads: &[VadRegion]) ->
     for mapping in mappings {
         // Each 4 KiB page of the mapping, so a label or VAD edge inside a
         // large page splits it cleanly.
-        let mut page = mapping.linear;
-        let end = mapping.linear.saturating_add(mapping.size);
+        let mut page = mapping.linear.get();
+        let end = mapping.linear.get().saturating_add(mapping.size);
         let access = RegionAccess {
             user: mapping.access.user,
             writable: mapping.access.writable,
@@ -539,6 +541,7 @@ fn private_runs(mappings: &[PageMapping], spans: &[Span], vads: &[VadRegion]) ->
 
 #[cfg(test)]
 mod tests {
+    use rusty_box::config::BxPhyAddress;
     use rusty_box::cpu::PageAccess;
 
     use super::*;
@@ -549,8 +552,8 @@ mod tests {
     #[test]
     fn mappings_are_cut_to_the_range_asked_for() {
         let range = LinearRange {
-            start: 0x40_0000,
-            end: 0x48_0000,
+            start: BxLinAddress::new(0x40_0000),
+            end: BxLinAddress::new(0x48_0000),
         };
         let large = map(0x40_0000, 0x20_0000, true, true);
         let before = map(0x3F_F000, 0x2000, false, false);
@@ -559,15 +562,22 @@ mod tests {
         assert_eq!(cut.len(), 2);
         assert_eq!(
             (cut[0].linear, cut[0].size, cut[0].physical),
-            (0x40_0000, 0x1000, 0x40_0000)
+            (
+                BxLinAddress::new(0x40_0000),
+                0x1000,
+                BxPhyAddress::new(0x40_0000)
+            )
         );
-        assert_eq!((cut[1].linear, cut[1].size), (0x40_0000, 0x8_0000));
+        assert_eq!(
+            (cut[1].linear, cut[1].size),
+            (BxLinAddress::new(0x40_0000), 0x8_0000)
+        );
     }
 
     fn map(linear: u64, size: u64, writable: bool, executable: bool) -> PageMapping {
         PageMapping {
-            linear,
-            physical: linear,
+            linear: BxLinAddress::new(linear),
+            physical: BxPhyAddress::new(linear),
             size,
             access: PageAccess {
                 user: true,
@@ -893,8 +903,8 @@ mod tests {
             start: 0,
             teb: Some(0x7FF0_0000),
             stack: Some(LinearRange {
-                start: 0x5B_0000,
-                end: 0x60_0000,
+                start: BxLinAddress::new(0x5B_0000),
+                end: BxLinAddress::new(0x60_0000),
             }),
             uses_fibers: false,
             saved: None,

@@ -542,7 +542,9 @@ mod hook_delivery {
             )
             .expect("machine");
 
-            machine.mem_write(CODE, &[0x90, 0xF4]).expect("write code");
+            machine
+                .mem_write(BxPhyAddress::new(CODE), &[0x90, 0xF4])
+                .expect("write code");
             machine
                 .emu_start(CODE, None, None, Some(2))
                 .expect("emu_start");
@@ -590,11 +592,17 @@ mod hook_delivery {
                 PhyWatch::default(),
             )
             .expect("machine");
-            machine.mem_write(CODE, &[0x90, 0xF4]).expect("write code");
+            machine
+                .mem_write(BxPhyAddress::new(CODE), &[0x90, 0xF4])
+                .expect("write code");
 
-            machine.virt_to_phys(CODE).expect("the code page maps");
+            machine
+                .virt_to_phys(BxLinAddress::new(CODE))
+                .expect("the code page maps");
             let mut bytes = [0u8; 2];
-            machine.virt_read(CODE, &mut bytes).expect("virt_read");
+            machine
+                .virt_read(BxLinAddress::new(CODE), &mut bytes)
+                .expect("virt_read");
 
             let seen = machine.instrumentation();
             assert!(
@@ -718,9 +726,11 @@ mod hook_delivery {
             .expect("machine");
             // Vector 0x30 posted, and the descriptor's ON bit set.
             machine
-                .mem_write(PID + 0x30 / 8, &[1 << (0x30 % 8)])
+                .mem_write(BxPhyAddress::new(PID + 0x30 / 8), &[1 << (0x30 % 8)])
                 .expect("PIR");
-            machine.mem_write(PID + 32, &[1]).expect("PID.ON");
+            machine
+                .mem_write(BxPhyAddress::new(PID + 32), &[1])
+                .expect("PID.ON");
 
             {
                 let mut ctx = machine.exec_ctx(0);
@@ -993,7 +1003,10 @@ mod hook_delivery {
             }
 
             let exit_code = machine
-                .mem_read_vec(VMCB + u64::from(crate::cpu::svm::SVM_CONTROL64_EXITCODE), 8)
+                .mem_read_vec(
+                    BxPhyAddress::new(VMCB + u64::from(crate::cpu::svm::SVM_CONTROL64_EXITCODE)),
+                    8,
+                )
                 .expect("VMCB");
             assert_eq!(
                 u64::from_le_bytes(exit_code.try_into().expect("eight bytes")),
@@ -1027,7 +1040,9 @@ mod hook_delivery {
 
             let indicator = VMCS + crate::cpu::vmx::VMCS_VMX_ABORT_OFFSET;
             assert_eq!(
-                machine.mem_read_u32_le(indicator).expect("VMCS"),
+                machine
+                    .mem_read_u32_le(BxPhyAddress::new(indicator))
+                    .expect("VMCS"),
                 crate::cpu::vmx::VmxAbortCode::LoadingHostMsrs as u32
             );
             assert!(machine.instrumentation().wrote(indicator, 4));
@@ -1069,7 +1084,7 @@ mod hook_delivery {
             .expect("machine");
             // Present, with bit 5 set — reserved in a PAE PDPTE.
             machine
-                .mem_write(HOST_PDPT, &0x21u64.to_le_bytes())
+                .mem_write(BxPhyAddress::new(HOST_PDPT), &0x21u64.to_le_bytes())
                 .expect("PDPTE");
 
             {
@@ -1191,9 +1206,11 @@ mod hook_delivery {
             .msr_write(BX_MSR_SYSENTER_EIP, HANDLER)
             .expect("SYSENTER_EIP");
         machine
-            .mem_write(CODE, &[0x0F, 0x34, 0xF4])
+            .mem_write(BxPhyAddress::new(CODE), &[0x0F, 0x34, 0xF4])
             .expect("write SYSENTER");
-        machine.mem_write(HANDLER, &[0xF4]).expect("write handler");
+        machine
+            .mem_write(BxPhyAddress::new(HANDLER), &[0xF4])
+            .expect("write handler");
         machine
     }
 
@@ -1283,9 +1300,11 @@ mod hook_delivery {
             machine.msr_write(BX_MSR_STAR, 0x0008 << 32).expect("STAR");
             machine.msr_write(BX_MSR_LSTAR, HANDLER).expect("LSTAR");
             machine
-                .mem_write(CODE, &[0x0F, 0x05, 0xF4])
+                .mem_write(BxPhyAddress::new(CODE), &[0x0F, 0x05, 0xF4])
                 .expect("write SYSCALL");
-            machine.mem_write(HANDLER, &[0xF4]).expect("write handler");
+            machine
+                .mem_write(BxPhyAddress::new(HANDLER), &[0xF4])
+                .expect("write handler");
 
             machine
                 .emu_start(CODE, None, None, Some(1))

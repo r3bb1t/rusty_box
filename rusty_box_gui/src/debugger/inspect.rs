@@ -416,8 +416,16 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         },
         Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => Vantage {
             space: AddressSpace::Linear,
-            rip: linear_of(shown.segment_bases.cs, shown.registers.rip, shown.code_size),
-            rsp: linear_of(shown.segment_bases.ss, shown.registers.rsp, shown.code_size),
+            rip: linear_of(
+                shown.segment_bases.cs.get(),
+                shown.registers.rip,
+                shown.code_size,
+            ),
+            rsp: linear_of(
+                shown.segment_bases.ss.get(),
+                shown.registers.rsp,
+                shown.code_size,
+            ),
             size: shown.code_size,
         },
     };
@@ -522,7 +530,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         layout: layout.cloned(),
         layouts,
         through,
-        vmcs: cpu.vmx_guest.map(|guest| guest.vmcs),
+        vmcs: cpu.vmx_guest.map(|guest| guest.vmcs.get()),
         frames: FramesRead::default(),
         elsewhere,
     }
@@ -556,7 +564,7 @@ pub(crate) fn live_tebs(cpus: &[CpuDebugView]) -> Vec<LiveTeb> {
         .filter(|(_, view)| view.registers.cpl == 3)
         .map(|(cpu, view)| LiveTeb {
             cpu,
-            teb: view.segment_bases.gs,
+            teb: view.segment_bases.gs.get(),
         })
         .collect()
 }
@@ -579,7 +587,7 @@ fn windows_image_path<G: GuestMemory>(cpu: &mut G, view: &CpuDebugView) -> Optio
     match view.mode {
         ExecutionMode::Long64 => {
             let teb = if user {
-                view.segment_bases.gs
+                view.segment_bases.gs.get()
             } else {
                 view.kernel_gs_base
             };
@@ -587,7 +595,7 @@ fn windows_image_path<G: GuestMemory>(cpu: &mut G, view: &CpuDebugView) -> Optio
         }
         // A 32-bit process under a 64-bit kernel (WOW64): FS is its 32-bit TEB.
         ExecutionMode::LongCompat | ExecutionMode::Protected if user => {
-            image_path_32(cpu, view.segment_bases.fs)
+            image_path_32(cpu, view.segment_bases.fs.get())
         }
         ExecutionMode::LongCompat
         | ExecutionMode::Protected
@@ -866,6 +874,7 @@ fn read_stack<G: GuestMemory>(
 
 #[cfg(test)]
 mod tests {
+    use rusty_box::config::{BxLinAddress, BxPhyAddress};
     use rusty_box::cpu::{CpuSetupMode, X86Reg};
     use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -935,7 +944,10 @@ mod tests {
         let code = CpuSetupMode::FlatLong64.first_free_physical_address();
         // mov rax, 42 ; hlt
         machine
-            .mem_write(code, &[0x48, 0xC7, 0xC0, 0x2A, 0x00, 0x00, 0x00, 0xF4])
+            .mem_write(
+                BxPhyAddress::new(code),
+                &[0x48, 0xC7, 0xC0, 0x2A, 0x00, 0x00, 0x00, 0xF4],
+            )
             .expect("write");
         machine.reg_write(X86Reg::Rip, code);
         machine.reg_write(X86Reg::Rax, 0x2A);
@@ -1006,7 +1018,9 @@ mod tests {
     fn code_is_read_where_the_view_asks() {
         let mut machine = long_mode_machine();
         let code = CpuSetupMode::FlatLong64.first_free_physical_address();
-        machine.mem_write(code, &[0x90, 0x90, 0xF4]).expect("write");
+        machine
+            .mem_write(BxPhyAddress::new(code), &[0x90, 0x90, 0xF4])
+            .expect("write");
         machine.reg_write(X86Reg::Rip, code);
         let elsewhere = GuestAddress {
             space: AddressSpace::Linear,
@@ -1162,7 +1176,9 @@ mod tests {
         use super::super::windows::{KernelMiss, ViewMiss};
         let mut machine = long_mode_machine();
         let code = CpuSetupMode::FlatLong64.first_free_physical_address();
-        machine.mem_write(code, &[0x90, 0xF4]).expect("write");
+        machine
+            .mem_write(BxPhyAddress::new(code), &[0x90, 0xF4])
+            .expect("write");
         machine.reg_write(X86Reg::Rip, code);
         let request = ViewRequest {
             context: ViewContext::Process {
@@ -1199,7 +1215,7 @@ mod tests {
         let mut machine = machine;
         let mut view = machine.debug_cpu(0).expect("the boot processor").view();
         view.registers.cpl = 3;
-        view.segment_bases.gs = 0x7FF_FFFD_E000;
+        view.segment_bases.gs = BxLinAddress::new(0x7FF_FFFD_E000);
         assert_eq!(
             live_tebs(&[view]),
             [LiveTeb {

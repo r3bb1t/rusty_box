@@ -6,6 +6,7 @@
 //! CodeView record names its PDB, on a page of its own so a test can page it
 //! out.
 
+use rusty_box::config::{BxLinAddress, BxPhyAddress};
 use rusty_box::cpu::{CpuDebugView, CpuSetupMode, GuestPhysicalMemory, VmxGuest};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -350,7 +351,7 @@ impl FakeWindows {
         self.view.registers.cr3 = USER_SHADOW_CR3;
         self.view.registers.cpl = 3;
         self.view.registers.rip = PROCESS_IMAGE_BASE;
-        self.view.segment_bases.gs = USER_TEB;
+        self.view.segment_bases.gs = BxLinAddress::new(USER_TEB);
         self.view.kernel_gs_base = KPCR;
     }
 }
@@ -378,7 +379,7 @@ impl FakeWindows {
     pub(crate) fn pause_in_a_hypervisor(self) -> HypervisorPause {
         let shown = self.view;
         let guest = VmxGuest {
-            vmcs: VMCS,
+            vmcs: BxPhyAddress::new(VMCS),
             rip: shown.registers.rip,
             rsp: shown.registers.rsp,
             rflags: u64::from(shown.registers.eflags),
@@ -398,7 +399,7 @@ impl FakeWindows {
         let mut view = shown;
         view.registers.cr3 = VMM_CR3;
         view.registers.rip = VMM_CODE;
-        view.segment_bases.gs = 0;
+        view.segment_bases.gs = BxLinAddress::new(0);
         view.kernel_gs_base = 0;
         HypervisorPause {
             host: FakeVmxHost::new(self.guest, VMM_CR3),
@@ -561,7 +562,7 @@ fn kernel_view() -> CpuDebugView {
     let mut machine = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
         .expect("a long-mode machine");
     let mut view = machine.debug_cpu(0).expect("the boot processor").view();
-    view.segment_bases.gs = KPCR;
+    view.segment_bases.gs = BxLinAddress::new(KPCR);
     view.kernel_gs_base = 0;
     view.registers.cr3 = LIVE_CR3;
     view.registers.cpl = 0;

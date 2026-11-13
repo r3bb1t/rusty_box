@@ -14,6 +14,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, HookCtx, HookMask, InstrAction, Instrumentation, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig, Ips, MemorySize};
 
@@ -109,7 +110,7 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tracer,
     )?;
 
-    emu.mem_write(SHELLCODE_BASE, SHELLCODE)?;
+    emu.mem_write(BxPhyAddress::new(SHELLCODE_BASE), SHELLCODE)?;
     emu.reg_write(X86Reg::Rsp, STACK_TOP);
 
     tracing::info!("Loaded {} bytes at {SHELLCODE_BASE:#x}", SHELLCODE.len());

@@ -532,20 +532,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             activity: self.processor_activity(),
             efer: self.efer_for_api(),
             segment_bases: super::instrumentation::SegmentBases {
-                es: self.get_segment_base(BxSegregs::Es).get(),
-                cs: self.get_segment_base(BxSegregs::Cs).get(),
-                ss: self.get_segment_base(BxSegregs::Ss).get(),
-                ds: self.get_segment_base(BxSegregs::Ds).get(),
-                fs: self.get_segment_base(BxSegregs::Fs).get(),
-                gs: self.get_segment_base(BxSegregs::Gs).get(),
+                es: self.get_segment_base(BxSegregs::Es),
+                cs: self.get_segment_base(BxSegregs::Cs),
+                ss: self.get_segment_base(BxSegregs::Ss),
+                ds: self.get_segment_base(BxSegregs::Ds),
+                fs: self.get_segment_base(BxSegregs::Fs),
+                gs: self.get_segment_base(BxSegregs::Gs),
             },
             kernel_gs_base: self.msr.kernelgsbase,
             gdtr: super::instrumentation::DescriptorTable {
-                base: self.gdtr.base.get(),
+                base: self.gdtr.base,
                 limit: self.gdtr.limit,
             },
             idtr: super::instrumentation::DescriptorTable {
-                base: self.idtr.base.get(),
+                base: self.idtr.base,
                 limit: self.idtr.limit,
             },
         }

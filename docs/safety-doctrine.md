@@ -405,11 +405,20 @@ that is a register's or a data word's stays a number even where it equals an add
 SSP and the shadow stack's tokens, a linear instruction pointer pushed as data, an MSR's
 value, a VMCS, VMCB or SMRAM field. It becomes an address where it is used as one.
 
+The emulator's public surface carries the same two types. The physical accessors
+(`mem_read`/`mem_write` and their typed helpers, `mem_fill`, `mem_protect`,
+`read_phys_dword`), the host MMIO registry (`mmio_map`/`mmio_unmap`, and the address its
+callbacks receive), `RamOffset`'s conversions and `dbg_fetch_mem` take a `BxPhyAddress`; the
+linear accessors (`virt_read`/`virt_write` and their helpers, `virt_fill`) and the
+debugger's walks (`dbg_xlate_linear2phy`, `_in`, `dbg_xlate_vmx_guest_linear2phy`) take a
+`BxLinAddress`, and a translation returns a `BxPhyAddress`. What the instrumentation and
+debugger views report is typed the same way: `SegmentBases`, `DescriptorTable::base`,
+`PageMapping::{linear, physical}`, `LinearRange`, `VmxGuest::vmcs`, `MemHookEvent`,
+`DtlbInfo::{lpf, ppf}` and `SegmentInfo::base`. A register's value stays a number there too
+(`CpuSnapshot::rip`, `kernel_gs_base`, `VmxGuest::cr3`, the EPT pointer).
+
 Target design, not built: effective addresses become a type (an offset within a segment is
-not yet told apart from other `u64`s); and the emulator's public memory and debugger API (`mem_read`,
-`mem_write`, `virt_to_phys`, `read_phys_dword`, `RamOffset::physical`, `dbg_fetch_mem`,
-`dbg_xlate_linear2phy`, `PageMapping::physical`, `DtlbInfo::ppf`, the host MMIO callbacks)
-takes and returns `u64`.
+not yet told apart from other `u64`s).
 
 **RAM offsets and allocation offsets** are the pair easiest to mix up, because both are
 `usize` byte offsets and they are equal whenever residency is full.

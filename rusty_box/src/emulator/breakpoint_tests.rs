@@ -27,7 +27,7 @@ fn on_test_stack<F: FnOnce() + Send + 'static>(test: F) {
 fn machine_with(code: &[u8]) -> Box<Emulator<()>> {
     let mut emu = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
         .expect("machine");
-    emu.mem_write(CODE, code).expect("write");
+    emu.mem_write(BxPhyAddress::new(CODE), code).expect("write");
     emu.reg_write(X86Reg::Rip, CODE);
     emu
 }
@@ -68,7 +68,8 @@ fn a_linear_breakpoint_stops_before_its_instruction_and_the_next_run_executes_it
             "the instruction did not execute"
         );
         let mut code = [0u8; STRAIGHT.len()];
-        emu.mem_read(CODE, &mut code).expect("read");
+        emu.mem_read(BxPhyAddress::new(CODE), &mut code)
+            .expect("read");
         assert_eq!(code, STRAIGHT, "nothing was written into the guest");
         assert_eq!(emu.stopped_at_breakpoint(), None, "a hit is reported once");
         // With the flag still up, a step stops as any raised flag stops it.
@@ -203,8 +204,11 @@ fn a_linear_breakpoint_is_met_through_another_mapping_of_its_page() {
         // The second 2 MiB page maps physical 0 too, so the code is also at
         // CODE + 2 MiB (the machine's page directory sits at 0x3000).
         const SECOND_LARGE_PAGE_PDE: u64 = 0x3008;
-        emu.mem_write(SECOND_LARGE_PAGE_PDE, &0x83u64.to_le_bytes())
-            .expect("alias");
+        emu.mem_write(
+            BxPhyAddress::new(SECOND_LARGE_PAGE_PDE),
+            &0x83u64.to_le_bytes(),
+        )
+        .expect("alias");
         let alias = CODE + 0x20_0000;
         let at = CodeBreakpoint::Linear(CODE + 3);
         emu.set_code_breakpoints(&[at]).expect("set");

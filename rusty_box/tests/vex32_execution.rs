@@ -11,6 +11,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -37,7 +38,8 @@ fn protected32_emulator() -> Box<Emulator> {
     emu.reg_write(X86Reg::Rax, 0xE7);
     emu.reg_write(X86Reg::Rcx, 0);
     emu.reg_write(X86Reg::Rdx, 0);
-    emu.mem_write(CODE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+    emu.mem_write(BxPhyAddress::new(CODE), &[0x0F, 0x01, 0xD1])
+        .expect("xsetbv");
     emu.emu_start(CODE, Some(CODE + 3), None, Some(1))
         .expect("enable AVX-512 state in protected mode");
     emu
@@ -47,7 +49,8 @@ fn run(emu: &mut Emulator, code: &[u8], steps: u64) {
     let park = CODE + code.len() as u64;
     let mut image = code.to_vec();
     image.extend_from_slice(&[0xEB, 0xFE]); // jmp $
-    emu.mem_write(CODE, &image).expect("write code");
+    emu.mem_write(BxPhyAddress::new(CODE), &image)
+        .expect("write code");
     emu.emu_start(CODE, Some(park), None, Some(steps))
         .expect("execute");
     assert_eq!(
@@ -183,8 +186,10 @@ fn kmovq_moves_a_full_qword_in_protected_mode() {
             let mut emu = protected32_emulator();
 
             const VALUE: u64 = 0xDEAD_BEEF_CAFE_BABE;
-            emu.mem_write(DATA, &VALUE.to_le_bytes()).expect("source");
-            emu.mem_write(DEST, &[0xFF; 8]).expect("poison destination");
+            emu.mem_write(BxPhyAddress::new(DATA), &VALUE.to_le_bytes())
+                .expect("source");
+            emu.mem_write(BxPhyAddress::new(DEST), &[0xFF; 8])
+                .expect("poison destination");
 
             // kmovq k1, [DATA]  = C4 E1 F8 90 0D <disp32>
             // kmovq [DEST], k1  = C4 E1 F8 91 0D <disp32>
@@ -198,7 +203,8 @@ fn kmovq_moves_a_full_qword_in_protected_mode() {
             run(&mut emu, &code, 4);
 
             let mut got = [0u8; 8];
-            emu.mem_read(DEST, &mut got).expect("read destination");
+            emu.mem_read(BxPhyAddress::new(DEST), &mut got)
+                .expect("read destination");
             assert_eq!(
                 u64::from_le_bytes(got),
                 VALUE,
@@ -328,14 +334,16 @@ fn evex_vpextrb_vpextrw_stores_scale_disp8_in_protected_mode() {
             //   7D: W(0) vvvv(1111) 1 pp(01 = 66)
             //   08: z(0) L'L(00) b(0) V'(1) aaa(000)
             //   48: mod 01 (disp8), reg 001 (xmm1), rm 000 (eax)
-            emu.mem_write(DEST, &[0x5A; 16]).expect("poison");
+            emu.mem_write(BxPhyAddress::new(DEST), &[0x5A; 16])
+                .expect("poison");
             run(
                 &mut emu,
                 &[0x62, 0xF3, 0x7D, 0x08, 0x15, 0x48, 0x04, 0x03],
                 4,
             );
             let mut got = [0u8; 16];
-            emu.mem_read(DEST, &mut got).expect("read back");
+            emu.mem_read(BxPhyAddress::new(DEST), &mut got)
+                .expect("read back");
             let mut want = [0x5Au8; 16];
             want[8..10].copy_from_slice(&source[6..8]);
             assert_eq!(
@@ -344,13 +352,15 @@ fn evex_vpextrb_vpextrw_stores_scale_disp8_in_protected_mode() {
             );
 
             // vpextrb [eax+0x04], xmm1, 7 = 62 F3 7D 08 14 48 04 07
-            emu.mem_write(DEST, &[0x5A; 16]).expect("poison");
+            emu.mem_write(BxPhyAddress::new(DEST), &[0x5A; 16])
+                .expect("poison");
             run(
                 &mut emu,
                 &[0x62, 0xF3, 0x7D, 0x08, 0x14, 0x48, 0x04, 0x07],
                 4,
             );
-            emu.mem_read(DEST, &mut got).expect("read back");
+            emu.mem_read(BxPhyAddress::new(DEST), &mut got)
+                .expect("read back");
             let mut want = [0x5Au8; 16];
             want[4] = source[7];
             assert_eq!(got, want, "VPEXTRB m8 stores byte 7 of xmm1 at eax + 4");
@@ -371,9 +381,9 @@ fn legacy_c4_c5_62_still_execute_in_protected_mode() {
             let mut emu = protected32_emulator();
 
             // A far pointer at DATA: offset 0x1234_5678, selector 0x0010.
-            emu.mem_write(DATA, &0x1234_5678u32.to_le_bytes())
+            emu.mem_write(BxPhyAddress::new(DATA), &0x1234_5678u32.to_le_bytes())
                 .expect("offset");
-            emu.mem_write(DATA + 4, &0x0010u16.to_le_bytes())
+            emu.mem_write(BxPhyAddress::new(DATA + 4), &0x0010u16.to_le_bytes())
                 .expect("selector");
 
             // les ecx, [DATA] = C4 0D <disp32>

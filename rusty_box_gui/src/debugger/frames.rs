@@ -171,8 +171,8 @@ pub(crate) fn frames_at_view(view: &CpuDebugView) -> FramesAt {
         root: Root::Live,
         width,
         start: FrameRegisters {
-            rip: linear_of(view.segment_bases.cs, at.rip, view.code_size),
-            rsp: linear_of(view.segment_bases.ss, at.rsp, view.code_size),
+            rip: linear_of(view.segment_bases.cs.get(), at.rip, view.code_size),
+            rsp: linear_of(view.segment_bases.ss.get(), at.rsp, view.code_size),
             registers,
         },
         xmm: Some(at.xmm),

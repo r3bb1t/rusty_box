@@ -35,6 +35,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
+use rusty_box::config::BxLinAddress;
 use rusty_box::cpu::{CpuDebugView, LinearRange, MappingWalk, PageMapping, WalkStep};
 use rusty_box_symbols::units::FieldOffset;
 
@@ -871,7 +872,7 @@ fn shadow_kernel_cr3<G: GuestMemory>(
     view: &CpuDebugView,
     known: &mut Option<u64>,
 ) -> Option<u64> {
-    let kpcrs: Vec<u64> = [view.segment_bases.gs, view.kernel_gs_base]
+    let kpcrs: Vec<u64> = [view.segment_bases.gs.get(), view.kernel_gs_base]
         .into_iter()
         .filter_map(kernel_pointer)
         .collect();
@@ -2607,7 +2608,7 @@ fn read_thread_view_through<G: GuestMemory>(
     }
     // The thread the shown processor runs in user mode: its GS base is its
     // TEB.
-    let shown_teb = (view.registers.cpl == 3).then_some(view.segment_bases.gs);
+    let shown_teb = (view.registers.cpl == 3).then_some(view.segment_bases.gs.get());
     let read = process_modules(cpu, &processes, process, peb_offset, wow64_offset);
     let (user_space, listed) = match &read {
         ModuleRead::Listed(modules) => (true, modules.as_slice()),
@@ -2848,7 +2849,7 @@ fn pdb_kernel<G: GuestMemory>(
 /// The KPCR: GS in the kernel, `IA32_KERNEL_GS_BASE` in user mode (and in
 /// the kernel between its entry and `SWAPGS`) — whichever points at itself.
 fn find_kpcr<G: GuestMemory>(cpu: &mut G, view: &CpuDebugView) -> Option<u64> {
-    [view.segment_bases.gs, view.kernel_gs_base]
+    [view.segment_bases.gs.get(), view.kernel_gs_base]
         .into_iter()
         .filter_map(kernel_pointer)
         .find(|&kpcr| read_u64(cpu, Root::Live, kpcr.wrapping_add(0x18)) == Some(kpcr))
@@ -2857,7 +2858,7 @@ fn find_kpcr<G: GuestMemory>(cpu: &mut G, view: &CpuDebugView) -> Option<u64> {
 /// Whether a KPCR-shaped address is held but does not read, as when the
 /// processor runs on page tables that leave the kernel out.
 fn kpcr_unreadable<G: GuestMemory>(cpu: &mut G, view: &CpuDebugView) -> bool {
-    [view.segment_bases.gs, view.kernel_gs_base]
+    [view.segment_bases.gs.get(), view.kernel_gs_base]
         .into_iter()
         .filter_map(kernel_pointer)
         .any(|kpcr| read_u64(cpu, Root::Live, kpcr.wrapping_add(0x18)).is_none())
@@ -3508,8 +3509,8 @@ fn read_thread<G: GuestMemory>(
         let base = read_u64(cpu, user, teb.wrapping_add(0x08))?;
         let limit = read_u64(cpu, user, teb.wrapping_add(0x10))?;
         (limit < base && user_pointer(base).is_some()).then_some(LinearRange {
-            start: limit,
-            end: base,
+            start: BxLinAddress::new(limit),
+            end: BxLinAddress::new(base),
         })
     });
     // `Win32StartAddress` is the thread's own entry, set for user threads; a
@@ -3811,8 +3812,8 @@ fn read_memory_map<G: GuestMemory>(
     let walk = cpu.page_mappings(
         cr3,
         LinearRange {
-            start: 0,
-            end: USER_SPACE_END,
+            start: BxLinAddress::new(0),
+            end: BxLinAddress::new(USER_SPACE_END),
         },
         |mapping| {
             if mapping.access.user {
@@ -3895,8 +3896,8 @@ fn read_module_sections<G: GuestMemory>(
         sections,
     };
     let image = LinearRange {
-        start: module.base,
-        end: module.base.saturating_add(u64::from(module.size)),
+        start: BxLinAddress::new(module.base),
+        end: BxLinAddress::new(module.base.saturating_add(u64::from(module.size))),
     };
     let mut mappings = Vec::new();
     let walk = cpu.page_mappings(space.cr3, image, |mapping| {
@@ -4393,6 +4394,7 @@ fn read_u16<G: GuestMemory>(cpu: &mut G, root: Root, address: u64) -> Option<u16
 
 #[cfg(test)]
 mod tests {
+    use rusty_box::config::BxPhyAddress;
     use rusty_box::cpu::CpuSetupMode;
     use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -4508,7 +4510,7 @@ mod tests {
                 .expect("machine");
         let base = CpuSetupMode::FlatLong64.first_free_physical_address();
         machine
-            .mem_write(base, &pe::tests::importing_image(true))
+            .mem_write(BxPhyAddress::new(base), &pe::tests::importing_image(true))
             .expect("write the image");
         let mut cpu = machine.debug_cpu(0).expect("the boot processor");
         let cr3 = cpu.view().registers.cr3;

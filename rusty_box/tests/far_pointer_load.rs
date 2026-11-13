@@ -19,6 +19,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -55,18 +56,21 @@ fn lss_reads_the_far_pointer_through_linear_addresses() {
 
             // Repoint virtual [0x60_0000, 0x80_0000) at NEW_BACKING so the
             // far pointer's linear and physical addresses differ.
-            emu.mem_write(PD0_ENTRY3, &(NEW_BACKING | 0x83u64).to_le_bytes())
-                .expect("repoint PD0[3]");
+            emu.mem_write(
+                BxPhyAddress::new(PD0_ENTRY3),
+                &(NEW_BACKING | 0x83u64).to_le_bytes(),
+            )
+            .expect("repoint PD0[3]");
 
             // The real operand lives at the new physical location...
-            emu.mem_write(PTR_PADDR, &TRUE_OFFSET.to_le_bytes())
+            emu.mem_write(BxPhyAddress::new(PTR_PADDR), &TRUE_OFFSET.to_le_bytes())
                 .expect("write far offset");
-            emu.mem_write(PTR_PADDR + 8, &DATA_SEL.to_le_bytes())
+            emu.mem_write(BxPhyAddress::new(PTR_PADDR + 8), &DATA_SEL.to_le_bytes())
                 .expect("write far selector");
             // ...and a decoy sits where a physical-address read would land.
-            emu.mem_write(PTR_VADDR, &DECOY_OFFSET.to_le_bytes())
+            emu.mem_write(BxPhyAddress::new(PTR_VADDR), &DECOY_OFFSET.to_le_bytes())
                 .expect("write decoy offset");
-            emu.mem_write(PTR_VADDR + 8, &0u16.to_le_bytes())
+            emu.mem_write(BxPhyAddress::new(PTR_VADDR + 8), &0u16.to_le_bytes())
                 .expect("write decoy selector");
 
             // lss rbx, [PTR_VADDR]  =  REX.W 0F B2 /r with SIB disp32.
@@ -74,7 +78,8 @@ fn lss_reads_the_far_pointer_through_linear_addresses() {
             code.extend_from_slice(&(PTR_VADDR as u32).to_le_bytes());
             let park = CODE + code.len() as u64;
             code.extend_from_slice(&[0xEB, 0xFE]);
-            emu.mem_write(CODE, &code).expect("write code");
+            emu.mem_write(BxPhyAddress::new(CODE), &code)
+                .expect("write code");
 
             emu.reg_write(X86Reg::Rbx, 0);
             match emu.emu_start(CODE, Some(park), None, Some(8)) {
@@ -108,14 +113,15 @@ fn lss_faults_on_an_unmapped_far_pointer() {
                 Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("new emulator");
 
             // Unmap the 2 MiB page holding the far pointer entirely.
-            emu.mem_write(PD0_ENTRY3, &0u64.to_le_bytes())
+            emu.mem_write(BxPhyAddress::new(PD0_ENTRY3), &0u64.to_le_bytes())
                 .expect("clear PD0[3]");
 
             let mut code: Vec<u8> = vec![0x48, 0x0F, 0xB2, 0x1C, 0x25];
             code.extend_from_slice(&(PTR_VADDR as u32).to_le_bytes());
             let park = CODE + code.len() as u64;
             code.extend_from_slice(&[0xEB, 0xFE]);
-            emu.mem_write(CODE, &code).expect("write code");
+            emu.mem_write(BxPhyAddress::new(CODE), &code)
+                .expect("write code");
 
             emu.reg_write(X86Reg::Rbx, 0);
             match emu.emu_start(CODE, Some(park), None, Some(8)) {

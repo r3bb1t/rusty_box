@@ -344,13 +344,27 @@ const SLOWDOWN_MAX_DELAY_USEC: u32 = 1_500;
 #[cfg(feature = "std")]
 const SLOWDOWN_REALTIME_QUANTUM_USEC: u64 = 1_000_000;
 
+/// One segment register, as [`Emulator::get_seg_info`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentInfo {
+    /// The selector last loaded into it.
+    pub selector: u16,
+    /// Its descriptor cache's base.
+    pub base: BxLinAddress,
+    /// Its descriptor cache's limit, scaled by granularity: the offset of
+    /// its last byte.
+    pub limit: u32,
+    /// Bochs `bx_descriptor_t::valid`: the cache's validity bits.
+    pub valid: u32,
+}
+
 /// One data-TLB slot, as [`Emulator::get_dtlb_info`] reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DtlbInfo {
     /// Linear page frame the slot is tagged with.
-    pub lpf: u64,
+    pub lpf: BxLinAddress,
     /// Physical page frame it maps to.
-    pub ppf: u64,
+    pub ppf: BxPhyAddress,
     /// Per-privilege permission bits Bochs calls `accessBits`.
     pub access_bits: u32,
     /// Byte offset of the backing page into guest RAM, or `None` when the page
@@ -2241,20 +2255,16 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.cpu_ref(0).eip()
     }
 
-    /// Get segment register info: (selector, base, limit, valid_flags).
-    pub fn get_seg_info(&self, seg_idx: usize) -> (u16, u64, u32, u32) {
-        if seg_idx < 6 {
-            let selector = self.cpu_ref(0).sregs[seg_idx].selector.value;
-            let valid = self.cpu_ref(0).sregs[seg_idx].cache.valid;
-            let base = self.cpu_ref(0).sregs[seg_idx].cache.u.segment_base().get();
-            let limit = self.cpu_ref(0).sregs[seg_idx]
-                .cache
-                .u
-                .segment_limit_scaled();
-            (selector, base, limit, valid)
-        } else {
-            (0, 0, 0, 0)
-        }
+    /// The segment register `seg_idx` (Bochs `BX_SEG_REG_ES` .. `GS`, 0 to
+    /// 5), or `None` past GS.
+    pub fn get_seg_info(&self, seg_idx: usize) -> Option<SegmentInfo> {
+        let sreg = self.cpu_ref(0).sregs.get(seg_idx)?;
+        Some(SegmentInfo {
+            selector: sreg.selector.value,
+            base: sreg.cache.u.segment_base(),
+            limit: sreg.cache.u.segment_limit_scaled(),
+            valid: sreg.cache.valid,
+        })
     }
 
     /// Get EAX/EBX/ECX/EDX for diagnostics.
@@ -2289,15 +2299,12 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// stores. Reporting the offset rather than a host address keeps this
     /// answerable without a live execution context, and is the unit the entry
     /// is actually keyed by (R4).
-    pub fn get_dtlb_info(&self, laddr: u64) -> DtlbInfo {
-        let idx = self
-            .cpu_ref(0)
-            .dtlb
-            .get_index_of(BxLinAddress::new(laddr), 3);
+    pub fn get_dtlb_info(&self, laddr: BxLinAddress) -> DtlbInfo {
+        let idx = self.cpu_ref(0).dtlb.get_index_of(laddr, 3);
         let entry = &self.cpu_ref(0).dtlb.entries[idx];
         DtlbInfo {
-            lpf: entry.lpf.get(),
-            ppf: entry.ppf.get(),
+            lpf: entry.lpf,
+            ppf: entry.ppf,
             access_bits: entry.access_bits,
             ram_offset: entry.host_page.map(|page| page.ram_offset()),
         }
@@ -2310,7 +2317,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
     /// Read a physical dword through the block-aware RAM interface.
     /// Returns `None` when the complete range is unavailable.
-    pub fn read_phys_dword(&mut self, paddr: u64) -> Option<u32> {
+    pub fn read_phys_dword(&mut self, paddr: BxPhyAddress) -> Option<u32> {
         let mut bytes = [0; 4];
         self.mem_read(paddr, &mut bytes).ok()?;
         Some(u32::from_le_bytes(bytes))

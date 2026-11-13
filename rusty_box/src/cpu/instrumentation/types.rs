@@ -348,14 +348,14 @@ pub struct MemHookEvent {
     /// Direction of the access.
     pub access: MemAccessRW,
     /// Linear (virtual) address.
-    pub addr: u64,
+    pub addr: BxLinAddress,
     /// Access size in bytes.
     pub size: usize,
     /// Value being written (for Write/RW); value loaded (for Read);
     /// `None` for `Execute` fetches and pre-read events with no value yet.
     pub value: Option<u64>,
     /// Physical (post-translation) address.
-    pub phys_addr: u64,
+    pub phys_addr: BxPhyAddress,
     /// Cache type for the region (MTRR/PAT).
     pub memtype: MemType,
 }
@@ -593,12 +593,12 @@ pub enum ProcessorActivity {
 /// The base of each segment register's descriptor cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentBases {
-    pub es: u64,
-    pub cs: u64,
-    pub ss: u64,
-    pub ds: u64,
-    pub fs: u64,
-    pub gs: u64,
+    pub es: BxLinAddress,
+    pub cs: BxLinAddress,
+    pub ss: BxLinAddress,
+    pub ds: BxLinAddress,
+    pub fs: BxLinAddress,
+    pub gs: BxLinAddress,
 }
 
 /// One processor as a debugger shows it: its registers, and what they mean
@@ -630,7 +630,7 @@ pub struct CpuDebugView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmxGuest {
     /// Guest-physical address of the VMCS region it was read from.
-    pub vmcs: u64,
+    pub vmcs: BxPhyAddress,
     pub rip: u64,
     pub rsp: u64,
     pub rflags: u64,
@@ -669,7 +669,7 @@ pub enum GuestPhysicalMemory {
 /// its limit, the offset of its last byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DescriptorTable {
-    pub base: u64,
+    pub base: BxLinAddress,
     pub limit: u16,
 }
 
@@ -689,9 +689,9 @@ pub struct PageAccess {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageMapping {
     /// The first linear address it maps, canonical in long mode.
-    pub linear: u64,
+    pub linear: BxLinAddress,
     /// Where that address lands in guest-physical memory.
-    pub physical: u64,
+    pub physical: BxPhyAddress,
     /// 4 KiB, 2 MiB or 4 MiB (legacy PSE), 1 GiB.
     pub size: u64,
     pub access: PageAccess,
@@ -700,8 +700,8 @@ pub struct PageMapping {
 /// A span of linear addresses, `start` included and `end` excluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinearRange {
-    pub start: u64,
-    pub end: u64,
+    pub start: BxLinAddress,
+    pub end: BxLinAddress,
 }
 
 /// What a mapping walk's visitor wants next.

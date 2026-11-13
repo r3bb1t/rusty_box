@@ -17,6 +17,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -33,7 +34,8 @@ fn avx_emulator() -> Box<Emulator> {
     emu.reg_write(X86Reg::Rax, 0xE7);
     emu.reg_write(X86Reg::Rcx, 0);
     emu.reg_write(X86Reg::Rdx, 0);
-    emu.mem_write(CODE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+    emu.mem_write(BxPhyAddress::new(CODE), &[0x0F, 0x01, 0xD1])
+        .expect("xsetbv");
     emu.emu_start(CODE, Some(CODE + 3), None, Some(1))
         .expect("enable AVX state");
     emu
@@ -43,7 +45,8 @@ fn run(emu: &mut Emulator, code: &[u8], steps: u64) {
     let park = CODE + code.len() as u64;
     let mut image = code.to_vec();
     image.extend_from_slice(&[0xEB, 0xFE]);
-    emu.mem_write(CODE, &image).expect("write code");
+    emu.mem_write(BxPhyAddress::new(CODE), &image)
+        .expect("write code");
     emu.emu_start(CODE, Some(park), None, Some(steps))
         .expect("execute");
     assert_eq!(emu.cpu().rip(), park, "must reach the park jump");

@@ -8443,6 +8443,8 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use std::sync::atomic::Ordering;
 
+    use rusty_box::config::{BxLinAddress, BxPhyAddress};
+
     use super::*;
 
     /// A path no other test of this process has: the clock alone is not
@@ -12629,7 +12631,10 @@ mod tests {
             .expect("machine");
             let code = CpuSetupMode::FlatLong64.first_free_physical_address();
             machine
-                .mem_write(code, &[0x48, 0xC7, 0xC0, 0x2A, 0, 0, 0, 0xF4])
+                .mem_write(
+                    BxPhyAddress::new(code),
+                    &[0x48, 0xC7, 0xC0, 0x2A, 0, 0, 0, 0xF4],
+                )
                 .expect("write");
             machine.reg_write(X86Reg::Rip, code);
             machine.reg_write(X86Reg::Rax, 0x2A);
@@ -16119,8 +16124,8 @@ mod tests {
                         start: 0x7FF7_0000_1000,
                         teb: Some(0x7FF_FFFD_E000),
                         stack: Some(rusty_box::cpu::LinearRange {
-                            start: 0x10_0000,
-                            end: 0x20_0000,
+                            start: BxLinAddress::new(0x10_0000),
+                            end: BxLinAddress::new(0x20_0000),
                         }),
                         uses_fibers: false,
                         saved: None,

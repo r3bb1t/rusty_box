@@ -65,6 +65,7 @@ pub(crate) mod fixtures {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use rusty_box::config::BxPhyAddress;
     use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
     use rusty_box::emulator::{DeviceClock, Emulator, EmulatorConfig, MachineBuilder, MemorySize};
     use rusty_box::iodev::PortE9Hack;
@@ -131,7 +132,9 @@ pub(crate) mod fixtures {
         };
         let mut machine = Emulator::<(), WhpEngine>::with_engine(config, CpuSetupMode::RealMode)
             .expect("machine");
-        machine.mem_write(CODE, code).expect("load");
+        machine
+            .mem_write(BxPhyAddress::new(CODE), code)
+            .expect("load");
         machine.reg_write(X86Reg::Rip, CODE);
         machine
     }
@@ -159,7 +162,9 @@ pub(crate) mod fixtures {
         machine
             .setup_cpu_mode(CpuSetupMode::RealMode)
             .expect("real mode");
-        machine.mem_write(CODE, code).expect("load");
+        machine
+            .mem_write(BxPhyAddress::new(CODE), code)
+            .expect("load");
         machine.reg_write(X86Reg::Rip, CODE);
         machine
     }
@@ -338,11 +343,14 @@ pub(crate) mod fixtures {
         gdt[8..16].copy_from_slice(&[0xFF, 0xFF, 0, 0, 0, 0x9A, 0xCF, 0]);
         gdt[16..24].copy_from_slice(&[0xFF, 0xFF, 0, 0, 0, 0x92, 0xCF, 0]);
         machine
-            .mem_write(0x2000, &gdt)
+            .mem_write(BxPhyAddress::new(0x2000), &gdt)
             .expect("the GDT is writable");
         // limit 0x17, base 0x2000
         machine
-            .mem_write(0x1F00, &[0x17, 0x00, 0x00, 0x20, 0x00, 0x00])
+            .mem_write(
+                BxPhyAddress::new(0x1F00),
+                &[0x17, 0x00, 0x00, 0x20, 0x00, 0x00],
+            )
             .expect("the GDTR image is writable");
 
         // 0x41 gates, so a vector up to 0x40 has one; only `vector`'s is
@@ -360,14 +368,17 @@ pub(crate) mod fixtures {
             0x00,
         ]);
         machine
-            .mem_write(0x3000, &idt)
+            .mem_write(BxPhyAddress::new(0x3000), &idt)
             .expect("the IDT is writable");
         // limit 0x207, base 0x3000
         machine
-            .mem_write(0x1F08, &[0x07, 0x02, 0x00, 0x30, 0x00, 0x00])
+            .mem_write(
+                BxPhyAddress::new(0x1F08),
+                &[0x07, 0x02, 0x00, 0x30, 0x00, 0x00],
+            )
             .expect("the IDTR image is writable");
         machine
-            .mem_write(HANDLER, &APIC_HANDLER)
+            .mem_write(BxPhyAddress::new(HANDLER), &APIC_HANDLER)
             .expect("the handler is writable");
     }
 
@@ -741,6 +752,7 @@ pub use rusty_box_whp::{InterceptCounter, InterceptCounters, RuntimeCounters};
 #[cfg(test)]
 mod tests {
     use rusty_box::Error;
+    use rusty_box::config::BxPhyAddress;
     use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
     use rusty_box::emulator::{
         DeviceClock, Emulator, EmulatorConfig, EngineRefusal, MemorySize, RunBudget, StopReason,
@@ -878,7 +890,9 @@ mod tests {
         };
         let mut interpreted =
             Emulator::new_with_mode(config, CpuSetupMode::RealMode).expect("machine");
-        interpreted.mem_write(CODE, asking).expect("load");
+        interpreted
+            .mem_write(BxPhyAddress::new(CODE), asking)
+            .expect("load");
         interpreted.reg_write(X86Reg::Rip, CODE);
         interpreted
             .step(RunBudget::Ticks(1_000_000))
@@ -936,7 +950,9 @@ mod tests {
         };
         let mut interpreted =
             Emulator::new_with_mode(config, CpuSetupMode::RealMode).expect("machine");
-        interpreted.mem_write(CODE, asking).expect("load");
+        interpreted
+            .mem_write(BxPhyAddress::new(CODE), asking)
+            .expect("load");
         interpreted.reg_write(X86Reg::Rip, CODE);
         interpreted
             .step(RunBudget::Ticks(1_000_000))
@@ -1109,7 +1125,9 @@ mod tests {
             };
             let mut machine =
                 Emulator::new_with_mode(config, CpuSetupMode::RealMode).expect("machine");
-            machine.mem_write(CODE, code).expect("load");
+            machine
+                .mem_write(BxPhyAddress::new(CODE), code)
+                .expect("load");
             machine.reg_write(X86Reg::Rip, CODE);
             for _ in 0..8 {
                 let outcome = machine
@@ -1128,7 +1146,7 @@ mod tests {
             let count: std::vec::Vec<u8> = console_output(machine);
             let count = *count.last().expect("the guest reported its trap count");
             let raw = machine
-                .mem_read_vec(0x6000, usize::from(count) * 2)
+                .mem_read_vec(BxPhyAddress::new(0x6000), usize::from(count) * 2)
                 .expect("the record buffer is readable");
             let ips = raw
                 .chunks_exact(2)
@@ -1901,7 +1919,10 @@ mod tests {
 
     fn passes(machine: &mut crate::FastMachine<()>) -> u16 {
         machine
-            .with_machine(|m| m.mem_read_u16_le(u64::from(PASS)).expect("guest RAM"))
+            .with_machine(|m| {
+                m.mem_read_u16_le(BxPhyAddress::new(u64::from(PASS)))
+                    .expect("guest RAM")
+            })
             .expect("a stepped machine is paused")
     }
 

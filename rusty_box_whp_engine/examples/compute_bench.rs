@@ -24,6 +24,7 @@
 
 use std::time::{Duration, Instant};
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{
     DeviceClock, Emulator, EmulatorConfig, MemorySize, RunBudget, SliceEngine, StopReason,
@@ -234,7 +235,7 @@ fn bench() -> std::process::ExitCode {
                 return std::process::ExitCode::FAILURE;
             }
         };
-        if machine.mem_write(CODE, &code).is_err() {
+        if machine.mem_write(BxPhyAddress::new(CODE), &code).is_err() {
             eprintln!("could not load the guest");
             return std::process::ExitCode::FAILURE;
         }
@@ -271,7 +272,7 @@ fn bench() -> std::process::ExitCode {
                 return std::process::ExitCode::FAILURE;
             }
         };
-        if assembled.mem_write(CODE, &code).is_err() {
+        if assembled.mem_write(BxPhyAddress::new(CODE), &code).is_err() {
             eprintln!("could not load the guest");
             return std::process::ExitCode::FAILURE;
         }

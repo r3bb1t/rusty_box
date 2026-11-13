@@ -11,6 +11,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::CpuSetupMode;
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -48,14 +49,14 @@ fn pf_diag_tripwire_reports_a_null_page_write_fault() {
 
             // xor eax,eax ; invlpg [rax] ; mov [rax],rax ; jmp $
             emu.mem_write(
-                CODE,
+                BxPhyAddress::new(CODE),
                 &[0x31, 0xC0, 0x0F, 0x01, 0x38, 0x48, 0x89, 0x00, 0xEB, 0xFE],
             )
             .expect("write guest code");
 
             // Unmap virtual 0..2 MiB (guest code sits above it; the GDT and
             // page tables inside it are only ever read physically).
-            emu.mem_write(PD0_ENTRY0, &0u64.to_le_bytes())
+            emu.mem_write(BxPhyAddress::new(PD0_ENTRY0), &0u64.to_le_bytes())
                 .expect("clear PD0[0]");
 
             // The store faults; with no IDT installed delivery escalates, so

@@ -437,8 +437,8 @@ impl<T: Instrumentation, E: SliceEngine<T>> Stepper for MachineStepper<'_, T, E>
             // Breakpoints and line rows are by linear address: CS's base plus
             // EIP.
             CodeSize::Bits32 | CodeSize::Bits16 => StepRegisters {
-                rip: view.segment_bases.cs.wrapping_add(view.registers.rip) & 0xFFFF_FFFF,
-                rsp: view.segment_bases.ss.wrapping_add(view.registers.rsp) & 0xFFFF_FFFF,
+                rip: view.segment_bases.cs.get().wrapping_add(view.registers.rip) & 0xFFFF_FFFF,
+                rsp: view.segment_bases.ss.get().wrapping_add(view.registers.rsp) & 0xFFFF_FFFF,
                 width: CodeWidth::Protected32,
             },
         }
@@ -691,6 +691,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
+    use rusty_box::config::BxPhyAddress;
     use rusty_box::cpu::{CodeBreakpointHit, CpuSetupMode, X86Reg};
     use rusty_box::emulator::EmulatorConfig;
     use rusty_box_symbols::identity::{Guid, ModuleIdentity, PdbId, PeImageId};
@@ -730,7 +731,9 @@ mod tests {
             Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
                 .expect("machine");
         let code = CpuSetupMode::FlatLong64.first_free_physical_address();
-        machine.mem_write(code, &[0x90, 0x90, 0xF4]).expect("write");
+        machine
+            .mem_write(BxPhyAddress::new(code), &[0x90, 0x90, 0xF4])
+            .expect("write");
         machine.reg_write(X86Reg::Rip, code);
         let control = RunControl::new(Arc::new(AtomicBool::new(false)));
         machine.set_stop_flag(Arc::clone(control.stop_flag()));
@@ -890,7 +893,9 @@ mod tests {
             0xE8, 0x0B, 0, 0, 0, 0x90, 0xF4, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
             0x90, 0xC3,
         ];
-        machine.mem_write(code, &program).expect("write");
+        machine
+            .mem_write(BxPhyAddress::new(code), &program)
+            .expect("write");
         machine.reg_write(X86Reg::Rsp, code + STACK);
         Calling {
             machine,
@@ -993,7 +998,9 @@ mod tests {
         let mut program = vec![0xE8, 0x0B, 0, 0, 0, 0x90, 0xF4];
         program.resize(0x10, 0x90);
         program.extend_from_slice(&[0xC7, 0x44, 0x24, 0xF8, 0x2A, 0, 0, 0, 0x90, 0xC3]);
-        machine.mem_write(code, &program).expect("write");
+        machine
+            .mem_write(BxPhyAddress::new(code), &program)
+            .expect("write");
         machine.reg_write(X86Reg::Rsp, code + STACK);
         let mut calling = Calling {
             machine,
@@ -1324,7 +1331,7 @@ mod tests {
         let mut calling = calling();
         calling
             .machine
-            .mem_write(calling.code, &[0xEB, 0xFE])
+            .mem_write(BxPhyAddress::new(calling.code), &[0xEB, 0xFE])
             .expect("jmp $");
         let Calling {
             mut machine,
@@ -1430,7 +1437,9 @@ mod tests {
         let mut text = vec![0xE8];
         text.extend_from_slice(&0xFBu32.to_le_bytes());
         let image = module_image(base, &spec, &text, &[], &[]);
-        machine.mem_write(base, &image.bytes).expect("write");
+        machine
+            .mem_write(BxPhyAddress::new(base), &image.bytes)
+            .expect("write");
         let size = image.bytes.len() as u64;
         let key = ModuleKey {
             identity: GuestIdentity::Unnamed,
@@ -1501,7 +1510,9 @@ mod tests {
         text.resize(0x100, 0xCC);
         text.push(0xC3);
         let image = module_image(base, &spec, &text, &(base + f).to_le_bytes(), &[]);
-        machine.mem_write(base, &image.bytes).expect("write");
+        machine
+            .mem_write(BxPhyAddress::new(base), &image.bytes)
+            .expect("write");
         let size = image.bytes.len() as u64;
         let key = ModuleKey {
             identity: GuestIdentity::Unnamed,
@@ -1575,7 +1586,9 @@ mod tests {
         let (mut machine, control, code) = paused();
         let base = (code + 0x1_0000) & !0xFFF;
         let image = module_image(base, &ImageSpec::bits64(0x1000), &[0xC3], &[], &[]);
-        machine.mem_write(base, &image.bytes).expect("write");
+        machine
+            .mem_write(BxPhyAddress::new(base), &image.bytes)
+            .expect("write");
         let size = image.bytes.len() as u64;
         let key = ModuleKey {
             identity: GuestIdentity::Unnamed,
