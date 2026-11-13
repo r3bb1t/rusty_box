@@ -859,7 +859,7 @@ mod hook_delivery {
         ctx.in_vmx_guest = true;
         // A guest runs from a current VMCS (VMLAUNCH needs one), which its
         // VM exit writes back into (Bochs vmx.cc VMexit).
-        ctx.vmcsptr = 0x5_0000;
+        ctx.vmcsptr = crate::config::BxPhyAddress::new(0x5_0000);
         ctx.vmcs.host_cr0 = u64::from(ctx.cr0.get32());
         ctx.vmcs.host_cr4 = 0;
         ctx.vmcs.host_cr3 = 0;
@@ -997,7 +997,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.vmcsptr = VMCS;
+                ctx.vmcsptr = crate::config::BxPhyAddress::new(VMCS);
                 let abort = ctx.vmx_abort(crate::cpu::vmx::VmxAbortCode::LoadingHostMsrs);
                 assert!(matches!(abort, Err(crate::cpu::CpuError::CpuLoopRestart)));
                 assert!(ctx.is_in_shutdown());

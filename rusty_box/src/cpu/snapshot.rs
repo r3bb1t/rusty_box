@@ -209,9 +209,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         writer.write_bool(self.in_vmx_guest)?;
         writer.write_bool(self.in_smm_vmx)?;
         writer.write_bool(self.in_smm_vmx_guest)?;
-        writer.write_u64(self.vmcsptr)?;
+        writer.write_u64(self.vmcsptr.get())?;
         writer.write_u32(self.vmcs_memtype)?;
-        writer.write_u64(self.vmxonptr)?;
+        writer.write_u64(self.vmxonptr.get())?;
         save_v3_vmcs_cache(writer, &self.vmcs)?;
 
         writer.write_bool(self.in_svm_guest)?;
@@ -473,9 +473,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.in_smm_vmx,
             self.in_smm_vmx_guest,
         )?;
-        self.vmcsptr = vmcsptr;
+        self.vmcsptr = crate::config::BxPhyAddress::new(vmcsptr);
         self.vmcs_memtype = vmcs_memtype;
-        self.vmxonptr = vmxonptr;
+        self.vmxonptr = crate::config::BxPhyAddress::new(vmxonptr);
         restore_v3_vmcs_cache(reader, &mut self.vmcs)?;
 
         self.in_svm_guest = reader.read_bool()?;
@@ -1204,7 +1204,7 @@ fn validate_vmx_state(
     in_smm_vmx: bool,
     in_smm_vmx_guest: bool,
 ) -> SnapResult<()> {
-    let invalid_ptr = super::vmx::BX_INVALID_VMCSPTR;
+    let invalid_ptr = super::vmx::BX_INVALID_VMCSPTR.get();
     if vmcs_memtype > 8
         || vmcsptr != invalid_ptr && vmcsptr & 0x0fff != 0
         || vmxonptr != invalid_ptr && vmxonptr & 0x0fff != 0
@@ -1339,8 +1339,8 @@ mod tests {
         cpu.in_vmx_guest = true;
         cpu.in_smm_vmx = true;
         cpu.in_smm_vmx_guest = true;
-        cpu.vmcsptr = 0x0012_3000;
-        cpu.vmxonptr = 0x0056_7000;
+        cpu.vmcsptr = crate::config::BxPhyAddress::new(0x0012_3000);
+        cpu.vmxonptr = crate::config::BxPhyAddress::new(0x0056_7000);
 
         cpu.vmcs.host_cr0 = 0x8000_0031; // first serialized field
         cpu.vmcs.guest_cs_selector = 0x1234;
@@ -1362,8 +1362,8 @@ mod tests {
         assert!(restored.in_vmx_guest);
         assert!(restored.in_smm_vmx);
         assert!(restored.in_smm_vmx_guest);
-        assert_eq!(restored.vmcsptr, 0x0012_3000);
-        assert_eq!(restored.vmxonptr, 0x0056_7000);
+        assert_eq!(restored.vmcsptr, crate::config::BxPhyAddress::new(0x0012_3000));
+        assert_eq!(restored.vmxonptr, crate::config::BxPhyAddress::new(0x0056_7000));
 
         assert_eq!(restored.vmcs.host_cr0, 0x8000_0031);
         assert_eq!(restored.vmcs.guest_cs_selector, 0x1234);

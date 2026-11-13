@@ -195,9 +195,10 @@ impl BxPhyAddress {
         self.0 & 0xFFF
     }
 
-    /// The byte `offset` into the page frame this address names (Bochs
-    /// `ppf | pageOffset`): the address is a page frame's first byte and
-    /// `offset` lies within the page, so the two share no bit.
+    /// The byte `offset` into the frame this address names (Bochs
+    /// `ppf | pageOffset`, and a large page's `ppf | (laddr & lpf_mask)`):
+    /// the address is a frame's first byte and `offset` lies within the
+    /// frame, so the two share no bit.
     #[inline(always)]
     pub const fn at_page_offset(self, offset: u64) -> Self {
         Self(self.0 | offset)

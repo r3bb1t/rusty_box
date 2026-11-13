@@ -1145,7 +1145,7 @@ pub enum VmxErr {
 
 /// Sentinel for `vmcsptr` and `vmxonptr` indicating no VMCS / no VMXON region.
 /// Bochs vmcs.h BX_INVALID_VMCSPTR.
-pub(super) const BX_INVALID_VMCSPTR: u64 = 0xFFFFFFFFFFFFFFFF;
+pub(super) const BX_INVALID_VMCSPTR: BxPhyAddress = BxPhyAddress::new(0xFFFF_FFFF_FFFF_FFFF);
 
 pub type VmcsCache = BxVmcs;
 
@@ -1514,7 +1514,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             }
 
             self.vmcsptr = BX_INVALID_VMCSPTR;
-            self.vmxonptr = paddr;
+            self.vmxonptr = BxPhyAddress::new(paddr);
             self.in_vmx = true;
             self.mask_event(BxCpuC::<T>::BX_EVENT_INIT);
             self.monitor.reset_monitor();
@@ -1600,7 +1600,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(());
         }
 
-        if paddr == self.vmxonptr {
+        if paddr == self.vmxonptr.get() {
             self.vmfail(VmxErr::VmclearWithVmxonVmcsPtr);
             return Ok(());
         }
@@ -1617,7 +1617,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         );
 
         // If we were using this VMCS as the current one, drop it.
-        if paddr == self.vmcsptr {
+        if paddr == self.vmcsptr.get() {
             self.vmcsptr = BX_INVALID_VMCSPTR;
         }
 
@@ -1654,7 +1654,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(());
         }
 
-        if paddr == self.vmxonptr {
+        if paddr == self.vmxonptr.get() {
             self.vmfail(VmxErr::VmptrldWithVmxonPtr);
             return Ok(());
         }
@@ -1676,7 +1676,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(());
         }
 
-        self.vmcsptr = paddr;
+        self.vmcsptr = BxPhyAddress::new(paddr);
         self.vmsucceed();
         Ok(())
     }
@@ -1699,7 +1699,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
-        let val = self.vmcsptr;
+        let val = self.vmcsptr.get();
         if self.long64_mode() {
             self.write_virtual_qword_64(seg, eaddr, val)?;
         } else {
@@ -1748,7 +1748,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         }
 
         let target_vmcs = if shadow_read {
-            self.vmcs.vmcs_link_pointer
+            BxPhyAddress::new(self.vmcs.vmcs_link_pointer)
         } else {
             self.vmcsptr
         };
@@ -1797,7 +1797,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         }
 
         let target_vmcs = if shadow_write {
-            self.vmcs.vmcs_link_pointer
+            BxPhyAddress::new(self.vmcs.vmcs_link_pointer)
         } else {
             self.vmcsptr
         };
@@ -1869,8 +1869,8 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Bochs vmx.cc `vmread` / `vmread_shadow`: `field` of the VMCS region at
     /// `vmcs_pa`, read from guest-physical memory with its width, an
     /// access-rights field unrotated.
-    fn vmcs_field_read(&mut self, vmcs_pa: u64, field: VmcsField) -> u64 {
-        let pa = BxPhyAddress::new(vmcs_pa + u64::from(field.offset));
+    fn vmcs_field_read(&mut self, vmcs_pa: BxPhyAddress, field: VmcsField) -> u64 {
+        let pa = vmcs_pa + u64::from(field.offset);
         match field.storage {
             VmcsStorage::Word => u64::from(self.read_phys_word(pa)),
             VmcsStorage::Dword => u64::from(self.read_phys_dword(pa)),
@@ -1882,8 +1882,8 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Bochs vmx.cc `vmwrite` / `vmwrite_shadow`: `value` into `field` of the
     /// VMCS region at `vmcs_pa`, truncated to the field's width, an
     /// access-rights field rotated.
-    fn vmcs_field_write(&mut self, vmcs_pa: u64, field: VmcsField, value: u64) {
-        let pa = BxPhyAddress::new(vmcs_pa + u64::from(field.offset));
+    fn vmcs_field_write(&mut self, vmcs_pa: BxPhyAddress, field: VmcsField, value: u64) {
+        let pa = vmcs_pa + u64::from(field.offset);
         match field.storage {
             VmcsStorage::Word => self.write_phys_word(pa, value as u16),
             VmcsStorage::Dword => self.write_phys_dword(pa, value as u32),
@@ -2172,7 +2172,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// The current VMCS's launch state, Bochs vmx.cc
     /// `VMread32(VMCS_LAUNCH_STATE_FIELD_ENCODING)`.
     fn vmcs_launch_state(&mut self) -> u32 {
-        self.read_phys_dword(BxPhyAddress::new(self.vmcsptr + VMCS_LAUNCH_STATE_OFFSET))
+        self.read_phys_dword(self.vmcsptr + VMCS_LAUNCH_STATE_OFFSET)
     }
 
     /// Field `encoding` of the current VMCS, read from its region in memory.
@@ -2272,7 +2272,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             GuestPhysicalMemory::Direct
         };
         Some(VmxGuest {
-            vmcs: self.vmcsptr,
+            vmcs: self.vmcsptr.get(),
             rip: self.vmcs_current_field(VMCS_GUEST_RIP)?,
             rsp: self.vmcs_current_field(VMCS_GUEST_RSP)?,
             rflags,
@@ -3007,7 +3007,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // alone — Bochs gates this on the `vmlaunch` flag.
         if !is_resume {
             self.write_phys_dword(
-            BxPhyAddress::new(self.vmcsptr + VMCS_LAUNCH_STATE_OFFSET),
+            self.vmcsptr + VMCS_LAUNCH_STATE_OFFSET,
             VMCS_STATE_LAUNCHED,
         );
         }
@@ -3841,7 +3841,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         tracing::error!("VMX abort (Bochs VMabort): code={code:?}");
         // Bochs `VMwrite32(VMCS_VMX_ABORT_FIELD_ENCODING, code)`: a physical
         // write into the VMCS region, reported as one.
-        let indicator = BxPhyAddress::new(self.vmcsptr + VMCS_VMX_ABORT_OFFSET);
+        let indicator = self.vmcsptr + VMCS_VMX_ABORT_OFFSET;
         let value = code as u32;
         self.mem_write_dword(indicator, value);
         self.on_phy_access(indicator, &value.to_le_bytes(), MemAccessRW::Write);
@@ -7681,7 +7681,7 @@ mod tests {
             emu.mem_write(VMCS_A, &shadow.to_le_bytes()).unwrap();
             let end = HostScript::new().point_at(VMCS_A).vmptrld().run(&mut emu);
             assert_eq!(emu.cpu().rip(), end);
-            assert_eq!(emu.cpu().vmcsptr, VMCS_A, "the shadow VMCS is current");
+            assert_eq!(emu.cpu().vmcsptr, crate::config::BxPhyAddress::new(VMCS_A), "the shadow VMCS is current");
         });
     }
 
@@ -7917,14 +7917,14 @@ mod tests {
             .unwrap();
         let cpu = emu.cpu_mut();
         cpu.in_vmx = true;
-        cpu.vmxonptr = 0x20_A000;
-        cpu.vmcsptr = VMCS_FIXTURE;
+        cpu.vmxonptr = crate::config::BxPhyAddress::new(0x20_A000);
+        cpu.vmcsptr = crate::config::BxPhyAddress::new(VMCS_FIXTURE);
         let v = &mut cpu.vmcs;
         v.pin_based_ctls = VMX_PINBASED_CTLS_ALLOWED_0;
         v.proc_based_ctls = VMX_PROCBASED_CTLS_ALLOWED_0;
         v.vm_exit_ctls = VMX_EXIT_CTLS_ALLOWED_0 | VMX_VMEXIT_CTRL1_HOST_ADDR_SPACE_SIZE;
         v.vm_entry_ctls = VMX_ENTRY_CTLS_ALLOWED_0 | VMX_VMENTRY_CTRL_X86_64_GUEST;
-        v.vmcs_link_pointer = BX_INVALID_VMCSPTR;
+        v.vmcs_link_pointer = BX_INVALID_VMCSPTR.get();
 
         v.host_cr0 = cr0;
         v.host_cr3 = cr3;
@@ -8210,12 +8210,12 @@ mod tests {
                 held += 1;
                 let field = VmcsField::of(encoding).unwrap();
                 let value = 0x0123_4567_89AB_CDEF_u64.rotate_left(encoding);
-                ctx.vmcs_field_write(VMCS_A, field, value);
+                ctx.vmcs_field_write(crate::config::BxPhyAddress::new(VMCS_A), field, value);
             }
             assert!(held > 100, "the layout walk reaches the cached fields ({held})");
-            ctx.vmcsptr = VMCS_A;
+            ctx.vmcsptr = crate::config::BxPhyAddress::new(VMCS_A);
             ctx.vmcs_load_cache();
-            ctx.vmcsptr = VMCS_B;
+            ctx.vmcsptr = crate::config::BxPhyAddress::new(VMCS_B);
             ctx.vmcs_store_cache();
             for encoding in VmcsLayout::new() {
                 if !ctx.vmcs_field_held(encoding) {
@@ -8223,8 +8223,8 @@ mod tests {
                 }
                 let field = VmcsField::of(encoding).unwrap();
                 assert_eq!(
-                    ctx.vmcs_field_read(VMCS_B, field),
-                    ctx.vmcs_field_read(VMCS_A, field),
+                    ctx.vmcs_field_read(crate::config::BxPhyAddress::new(VMCS_B), field),
+                    ctx.vmcs_field_read(crate::config::BxPhyAddress::new(VMCS_A), field),
                     "field {encoding:#06x}"
                 );
             }

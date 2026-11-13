@@ -1484,7 +1484,7 @@ mod tests {
         // into (Bochs vmx.cc VMexit).
         ap.in_vmx = true;
         ap.in_vmx_guest = true;
-        ap.vmcsptr = 0x5_0000;
+        ap.vmcsptr = crate::config::BxPhyAddress::new(0x5_0000);
 
         bus.ctx(&mut ap).deliver_sipi(TEST_SIPI_VECTOR);
 

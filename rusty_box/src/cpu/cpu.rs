@@ -560,11 +560,11 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     /// save in_vmx and in_vmx_guest flags when in SMM mode
     pub(super) in_smm_vmx: bool,
     pub(super) in_smm_vmx_guest: bool,
-    pub(super) vmcsptr: u64,
+    pub(super) vmcsptr: BxPhyAddress,
 
     pub(super) vmcs_memtype: BxMemType,
 
-    pub(super) vmxonptr: u64,
+    pub(super) vmxonptr: BxPhyAddress,
 
     pub(super) vmcs: VmcsCache,
     pub(super) vmx_cap: VmxCap,

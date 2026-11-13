@@ -783,7 +783,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     /// Sets the VMCS pointer and performs associated memory mapping setup
     /// Mirrors the C++ BX_CPU_C::set_VMCSPTR behavior
-    fn set_VMCSPTR(&mut self, vmxptr: u64) {
+    fn set_VMCSPTR(&mut self, vmxptr: crate::config::BxPhyAddress) {
         self.vmcsptr = vmxptr;
         // Bochs set_VMCSPTR additionally derives a host-side vmcshostptr via
         // getHostMemAddr() and a vmcs_memtype; rusty_box accesses the VMCS by
