@@ -116,8 +116,8 @@ bitflags! {
 /// walk — the executing and non-executing walks must agree on which
 /// addresses are plain RAM.
 #[inline]
-fn is_plain_ram_for_walk(a20_addr: u64) -> bool {
-    a20_addr < 0xA0000 || a20_addr >= 0x100000
+fn is_plain_ram_for_walk(a20_addr: BxPhyAddress) -> bool {
+    a20_addr.get() < 0xA0000 || a20_addr.get() >= 0x100000
 }
 
 impl PteBits {
@@ -206,7 +206,7 @@ const PRIV_CHECK: [u8; 32] = [
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Read a physical dword for a page-table walk without going through the
     /// guest paging machinery.
-    fn read_physical_dword(&mut self, paddr: u64) -> Result<u32> {
+    fn read_physical_dword(&mut self, paddr: BxPhyAddress) -> Result<u32> {
         let mut data = [0u8; 4];
         let policy = self.access_policy(paddr);
         // read_physical_page returns crate::memory::Result which is
@@ -227,7 +227,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a physical qword for a PAE or long-mode page-table walk. Bochs
     /// cpu/paging.cc `read_physical_qword`, reported with the memory type the
     /// walker names.
-    fn read_physical_qword(&mut self, paddr: u64, memtype: MemType) -> Result<u64> {
+    fn read_physical_qword(&mut self, paddr: BxPhyAddress, memtype: MemType) -> Result<u64> {
         let mut data = [0u8; 8];
         let policy = self.access_policy(paddr);
         match self.read_physical_routed(policy, paddr, 8, &mut data) {
@@ -243,7 +243,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     /// Write physical dword (bypasses paging, used for updating page table entries)
-    fn write_physical_dword(&mut self, paddr: u64, value: u32) -> Result<()> {
+    fn write_physical_dword(&mut self, paddr: BxPhyAddress, value: u32) -> Result<()> {
         let mut data = value.to_le_bytes();
         let policy = self.access_policy(paddr);
         // write_physical_page returns crate::memory::Result which is
@@ -270,7 +270,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// table entries).
     fn write_physical_qword(
         &mut self,
-        paddr: u64,
+        paddr: BxPhyAddress,
         value: u64,
         memtype: MemType,
     ) -> Result<()> {
@@ -304,21 +304,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         laddr: BxAddress,
         user: bool,
         rw: MemoryAccessType,
-    ) -> Result<(u64, u32)> {
+    ) -> Result<(BxPhyAddress, u32)> {
         // Get page directory base from CR3
         let cr3 = self.cr3;
         // Bochs paging.cc: in EPT-active mode CR3 itself is a guest-physical
         // address; translate it before any PDE read.
-        let cr3_host = self.ept_translate_for_walk(cr3 & BX_CR3_PAGING_MASK, laddr)?;
+        let cr3_host = self
+            .ept_translate_for_walk(BxPhyAddress::new(cr3 & BX_CR3_PAGING_MASK), laddr)?
+            .get();
         let mut ppf = cr3_host as u32;
 
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
-        let mut entry_addr = [0u64; 2];
+        let mut entry_addr = [BxPhyAddress::new(0); 2];
         let mut entry = [0u32; 2];
 
         // Walk page directory (PDE)
         let pde_index = ((laddr >> 22) & 0x3FF) as u32;
-        entry_addr[BX_LEVEL_PDE] = ppf as u64 + (pde_index * 4) as u64;
+        entry_addr[BX_LEVEL_PDE] = BxPhyAddress::new(ppf as u64 + (pde_index * 4) as u64);
 
         entry[BX_LEVEL_PDE] = self.read_physical_dword(entry_addr[BX_LEVEL_PDE])?;
 
@@ -379,7 +381,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // afterwards, which would land in the wrong host page when
             // the EPT leaf is 4 KiB and the offset crosses a 4 KiB
             // boundary.
-            let merged = ppf_4m | (laddr & 0x003F_FFFF);
+            let merged = BxPhyAddress::new(ppf_4m | (laddr & 0x003F_FFFF));
             return self
                 .ept_translate_for_data(
                     merged,
@@ -399,12 +401,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         // PDE points at the PT in guest-physical space.
-        let ppf_host = self.ept_translate_for_walk(u64::from(ppf), laddr)?;
+        let ppf_host = self
+            .ept_translate_for_walk(BxPhyAddress::new(u64::from(ppf)), laddr)?
+            .get();
         ppf = ppf_host as u32;
 
         // Walk page table (PTE)
         let pte_index = ((laddr >> 12) & 0x3FF) as u32;
-        entry_addr[BX_LEVEL_PTE] = ppf as u64 + (pte_index * 4) as u64;
+        entry_addr[BX_LEVEL_PTE] = BxPhyAddress::new(ppf as u64 + (pte_index * 4) as u64);
 
         entry[BX_LEVEL_PTE] = self.read_physical_dword(entry_addr[BX_LEVEL_PTE])?;
 
@@ -448,7 +452,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs translate_linear (paging.cc) merges (laddr & lpf_mask)
         // into paddress before translate_guest_physical; the EPT walker
         // returns `host_ppf | (paddress & 0xFFF)`.
-        let merged = u64::from(ppf) | (laddr & 0xFFF);
+        let merged = BxPhyAddress::new(u64::from(ppf) | (laddr & 0xFFF));
         self.ept_translate_for_data(
             merged,
             laddr,
@@ -474,7 +478,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// (`update_ept_access_dirty`) is intentionally not modelled here.
     fn update_access_dirty(
         &mut self,
-        entry_addr: &[u64; 2],
+        entry_addr: &[BxPhyAddress; 2],
         entry: &mut [u32; 2],
         leaf: usize,
         write: bool,
@@ -515,7 +519,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         user: bool,
         rw: MemoryAccessType,
         a20_mask: u64,
-    ) -> Result<(u64, u32)> {
+    ) -> Result<(BxPhyAddress, u32)> {
         // Mask to 32 bits if not in long mode
         let laddr = if self.long_mode() {
             laddr
@@ -525,7 +529,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // If paging is disabled, linear address = physical address (with A20 mask)
         if !self.cr0.pg() {
-            let paddr = laddr & a20_mask;
+            let paddr = BxPhyAddress::new(laddr & a20_mask);
             return Ok((paddr, 0xFFF));
         }
 
@@ -542,7 +546,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         match result {
             Ok((paddr, lpf_mask)) => {
                 // Apply A20 mask
-                let paddr = paddr & a20_mask;
+                let paddr = paddr.masked(a20_mask);
 
                 Ok((paddr, lpf_mask))
             }
@@ -572,7 +576,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     };
                     if self.instrumentation.fire_mem_unmapped(&ev) {
                         // Hook suppressed the fault — return dummy address
-                        return Ok((0, 0xFFF));
+                        return Ok((BxPhyAddress::new(0), 0xFFF));
                     }
                 }
 
@@ -629,7 +633,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         laddr: BxAddress,
         user: bool,
         rw: MemoryAccessType,
-    ) -> Result<(u64, u32)> {
+    ) -> Result<(BxPhyAddress, u32)> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
 
@@ -648,13 +652,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         // Bochs paging.cc: PDPTE points at the PD in guest-physical space —
         // translate through EPT before reading the PDE.
-        let mut ppf = self.ept_translate_for_walk(pdpte.bits() & 0x000F_FFFF_FFFF_F000, laddr)?;
+        let mut ppf = self
+            .ept_translate_for_walk(BxPhyAddress::new(pdpte.bits() & 0x000F_FFFF_FFFF_F000), laddr)?
+            .get();
 
-        let mut entry_addr = [0u64; 2];
+        let mut entry_addr = [BxPhyAddress::new(0); 2];
         let mut entry = [PteBits::empty(); 2];
 
         // ---- PDE ----
-        entry_addr[BX_LEVEL_PDE] = ppf + (((laddr >> 21) & 0x1FF) << 3);
+        entry_addr[BX_LEVEL_PDE] = BxPhyAddress::new(ppf + (((laddr >> 21) & 0x1FF) << 3));
         let pde_bytes = self.read_physical_qword(entry_addr[BX_LEVEL_PDE], PAE_WALK_MEMTYPE)?;
         entry[BX_LEVEL_PDE] = PteBits::from_raw(pde_bytes);
 
@@ -728,7 +734,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // the EPT walker sees the full guest-physical and returns
             // `host_ppf | (paddress & 0xFFF)`; never re-OR offset bits on
             // top of the result.
-            let merged = ppf | (laddr & 0x001F_FFFF);
+            let merged = BxPhyAddress::new(ppf | (laddr & 0x001F_FFFF));
             return self
                 .ept_translate_for_data(
                     merged,
@@ -750,10 +756,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         combined_access &= entry[BX_LEVEL_PDE].bits() as u32;
 
         // PDE points at the PT in guest-physical space.
-        ppf = self.ept_translate_for_walk(ppf, laddr)?;
+        ppf = self.ept_translate_for_walk(BxPhyAddress::new(ppf), laddr)?.get();
 
         // ---- PTE ----
-        entry_addr[BX_LEVEL_PTE] = ppf + (((laddr >> 12) & 0x1FF) << 3);
+        entry_addr[BX_LEVEL_PTE] = BxPhyAddress::new(ppf + (((laddr >> 12) & 0x1FF) << 3));
         let pte_bytes = self.read_physical_qword(entry_addr[BX_LEVEL_PTE], PAE_WALK_MEMTYPE)?;
         entry[BX_LEVEL_PTE] = PteBits::from_raw(pte_bytes);
 
@@ -825,7 +831,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         ppf = entry[BX_LEVEL_PTE].bits() & 0x000F_FFFF_FFFF_F000;
         // Bochs translate_linear (paging.cc) merges (laddr & lpf_mask)
         // into paddress before translate_guest_physical.
-        let merged = ppf | (laddr & 0xFFF);
+        let merged = BxPhyAddress::new(ppf | (laddr & 0xFFF));
         self.ept_translate_for_data(
             merged,
             laddr,
@@ -850,7 +856,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         laddr: BxAddress,
         user: bool,
         rw: MemoryAccessType,
-    ) -> Result<(u64, u32)> {
+    ) -> Result<(BxPhyAddress, u32)> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
 
@@ -868,17 +874,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // used as a paging-structure base is first translated through the
         // EPT walker. We translate CR3, then every next-level page-frame
         // base before the matching mem read.
-        let mut ppf = self.ept_translate_for_walk(self.cr3 & BX_CR3_PAGING_MASK_PAE, laddr)?;
+        let mut ppf = self
+            .ept_translate_for_walk(BxPhyAddress::new(self.cr3 & BX_CR3_PAGING_MASK_PAE), laddr)?
+            .get();
         let mut offset_mask = (1u64 << self.linaddr_width as u64) - 1;
 
-        let mut entry_addr = [0u64; 5];
+        let mut entry_addr = [BxPhyAddress::new(0); 5];
         let mut entry = [PteBits::empty(); 5];
         let mut leaf = start_leaf;
         let mut lpf_mask = 0xFFFu32;
 
         loop {
             // Bochs paging.cc: entry_addr[leaf] = ppf + ((laddr >> (9 + 9*leaf)) & 0xff8);
-            entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
+            entry_addr[leaf] = BxPhyAddress::new(ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8));
 
             let entry_val = self.read_physical_qword(entry_addr[leaf], LONG_MODE_WALK_MEMTYPE)?;
             entry[leaf] = PteBits::from_raw(entry_val);
@@ -927,7 +935,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             leaf -= 1;
             // Translate the next-level page-table base through EPT before
             // the next iteration's read.
-            ppf = self.ept_translate_for_walk(ppf, laddr)?;
+            ppf = self.ept_translate_for_walk(BxPhyAddress::new(ppf), laddr)?.get();
         }
 
         // Leaf permission check
@@ -1053,7 +1061,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             BxRwAccess::Read
         };
-        let merged = ppf | (laddr & u64::from(lpf_mask));
+        let merged = BxPhyAddress::new(ppf | (laddr & u64::from(lpf_mask)));
         self.ept_translate_for_data(merged, laddr, user_page, writeable_page, nx_page, ept_rw)
             .map(|paddr| (paddr, lpf_mask))
     }
@@ -1068,7 +1076,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn translate_linear_system_write(
         &mut self,
         laddr: BxAddress,
-    ) -> Result<u64> {
+    ) -> Result<BxPhyAddress> {
         let laddr = if self.long_mode() {
             laddr
         } else {
@@ -1077,7 +1085,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // If paging disabled, linear = physical
         if !self.cr0.pg() {
-            return Ok(laddr & self.a20_mask);
+            return Ok(BxPhyAddress::new(laddr & self.a20_mask));
         }
 
         // Dispatch based on paging mode
@@ -1094,7 +1102,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Read PDE (use fast host pointer path for page table entries)
         let pde_index = ((laddr >> 22) & 0x3FF) as u32;
-        let pde_addr = ppf as u64 + (pde_index * 4) as u64;
+        let pde_addr = BxPhyAddress::new(ppf as u64 + (pde_index * 4) as u64);
         let pde = self.page_walk_read_dword(pde_addr);
 
         if (pde & pte_bits32::PRESENT) == 0 {
@@ -1130,13 +1138,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             let ppf_4m = (pde & 0xFFC00000) as u64;
             let offset = laddr & 0x3FFFFF;
-            return Ok((ppf_4m | offset) & self.a20_mask);
+            return Ok(BxPhyAddress::new((ppf_4m | offset) & self.a20_mask));
         }
 
         // Read PTE
         let pt_base = (pde & 0xFFFFF000) as u64;
         let pte_index = ((laddr >> 12) & 0x3FF) as u32;
-        let pte_addr = pt_base + (pte_index * 4) as u64;
+        let pte_addr = BxPhyAddress::new(pt_base + (pte_index * 4) as u64);
         let pte = self.page_walk_read_dword(pte_addr);
 
         if (pte & pte_bits32::PRESENT) == 0 {
@@ -1162,11 +1170,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let page_base = (pte & 0xFFFFF000) as u64;
         let offset = laddr & 0xFFF;
-        Ok((page_base | offset) & self.a20_mask)
+        Ok(BxPhyAddress::new((page_base | offset) & self.a20_mask))
     }
 
     /// PAE paging system write translation (3-level, 64-bit entries, CPL=0).
-    fn translate_linear_system_write_pae(&mut self, laddr: BxAddress) -> Result<u64> {
+    fn translate_linear_system_write_pae(&mut self, laddr: BxAddress) -> Result<BxPhyAddress> {
         // PDPTE from cache
         let pdpte_index = ((laddr >> 30) & 0x3) as usize;
         let pdpte = PteBits::from_raw(self.pdptrcache.entry[pdpte_index]);
@@ -1177,7 +1185,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut ppf = pdpte.bits() & 0x000F_FFFF_FFFF_F000;
 
         // PDE
-        let pde_addr = ppf + (((laddr >> 21) & 0x1FF) << 3);
+        let pde_addr = BxPhyAddress::new(ppf + (((laddr >> 21) & 0x1FF) << 3));
         let mut pde = PteBits::from_raw(self.page_walk_read_qword(pde_addr, PAE_WALK_MEMTYPE));
         if !pde.contains(PteBits::PRESENT) {
             self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, false, true)?;
@@ -1202,11 +1210,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.page_walk_write_qword(pde_addr, pde.bits(), PAE_WALK_MEMTYPE);
             }
             ppf = pde.bits() & 0x000F_FFFF_FFE0_0000;
-            return Ok((ppf | (laddr & 0x1FFFFF)) & self.a20_mask);
+            return Ok(BxPhyAddress::new((ppf | (laddr & 0x1FFFFF)) & self.a20_mask));
         }
 
         // PTE
-        let pte_addr = ppf + (((laddr >> 12) & 0x1FF) << 3);
+        let pte_addr = BxPhyAddress::new(ppf + (((laddr >> 12) & 0x1FF) << 3));
         let mut pte = PteBits::from_raw(self.page_walk_read_qword(pte_addr, PAE_WALK_MEMTYPE));
         if !pte.contains(PteBits::PRESENT) {
             self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, false, true)?;
@@ -1226,14 +1234,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         ppf = pte.bits() & 0x000F_FFFF_FFFF_F000;
-        Ok((ppf | (laddr & 0xFFF)) & self.a20_mask)
+        Ok(BxPhyAddress::new((ppf | (laddr & 0xFFF)) & self.a20_mask))
     }
 
     /// Long mode paging system write translation (4-level, 64-bit entries, CPL=0).
     fn translate_linear_system_write_long_mode(
         &mut self,
         laddr: BxAddress,
-    ) -> Result<u64> {
+    ) -> Result<BxPhyAddress> {
         let start_leaf = if self.cr4.la57() {
             BX_LEVEL_PML5
         } else {
@@ -1242,12 +1250,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut ppf = self.cr3 & BX_CR3_PAGING_MASK_PAE;
         let mut offset_mask = (1u64 << self.linaddr_width as u64) - 1;
 
-        let mut entry_addr = [0u64; 5];
+        let mut entry_addr = [BxPhyAddress::new(0); 5];
         let mut entry = [PteBits::empty(); 5];
         let mut leaf = start_leaf;
 
         loop {
-            entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
+            entry_addr[leaf] = BxPhyAddress::new(ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8));
             entry[leaf] = PteBits::from_raw(self.page_walk_read_qword(entry_addr[leaf], LONG_MODE_WALK_MEMTYPE));
 
             offset_mask >>= 9;
@@ -1295,13 +1303,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         let paddr = ppf | (laddr & offset_mask);
-        Ok(paddr & self.a20_mask)
+        Ok(BxPhyAddress::new(paddr & self.a20_mask))
     }
 
     /// Apply the A20 mask to a physical address.
     #[inline]
-    fn apply_a20(&self, paddr: u64) -> u64 {
-        paddr & self.a20_mask
+    fn apply_a20(&self, paddr: BxPhyAddress) -> BxPhyAddress {
+        paddr.masked(self.a20_mask)
     }
 
     /// Deliver a #PF exception.
@@ -1331,13 +1339,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// memory bus (`mem_read_dword` / `mem_write_dword`), exactly matching
     /// Bochs `translate_linear` for legacy 32-bit paging.
     #[inline]
-    pub(super) fn translate_data_read(&mut self, laddr: u64) -> Result<u64> {
+    pub(super) fn translate_data_read(&mut self, laddr: u64) -> Result<BxPhyAddress> {
         self.translate_data_access(laddr, false, false)
     }
 
     /// Translate a linear address to physical for a data write.
     #[inline]
-    pub(super) fn translate_data_write(&mut self, laddr: u64) -> Result<u64> {
+    pub(super) fn translate_data_write(&mut self, laddr: u64) -> Result<BxPhyAddress> {
         self.translate_data_access(laddr, true, false)
     }
 
@@ -1346,13 +1354,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// leaf PTE to be a shadow-stack page (R/W=0, D=1) — see check at the leaf
     /// step in each `page_walk_for_dtlb_*` function.
     #[inline]
-    pub(super) fn translate_shadow_stack_read(&mut self, laddr: u64) -> Result<u64> {
+    pub(super) fn translate_shadow_stack_read(&mut self, laddr: u64) -> Result<BxPhyAddress> {
         self.translate_data_access(laddr, false, true)
     }
 
     /// CET: translate a linear address to physical for a shadow-stack write.
     #[inline]
-    pub(super) fn translate_shadow_stack_write(&mut self, laddr: u64) -> Result<u64> {
+    pub(super) fn translate_shadow_stack_write(&mut self, laddr: u64) -> Result<BxPhyAddress> {
         self.translate_data_access(laddr, true, true)
     }
 
@@ -1362,7 +1370,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         laddr: u64,
         is_write: bool,
         is_shadow_stack: bool,
-    ) -> Result<u64> {
+    ) -> Result<BxPhyAddress> {
         // Mask to 32 bits if not in long mode
         let laddr = if self.long_mode() {
             laddr
@@ -1372,7 +1380,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Paging disabled → linear == physical (modulo A20).
         if !self.cr0.pg() {
-            return Ok(self.apply_a20(laddr));
+            return Ok(self.apply_a20(BxPhyAddress::new(laddr)));
         }
 
         let user = self.user_pl;
@@ -1400,7 +1408,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 // TLB hit — return the cached physical address. Read it out
                 // of the entry before the counter below, which needs the CPU
                 // mutably while the probe still holds it shared.
-                let paddr = tlb_entry.ppf | (laddr & 0xFFF);
+                let paddr = tlb_entry.ppf.at_page_offset(laddr & 0xFFF);
                 #[cfg(feature = "profiling")]
                 {
                     self.perf_tlb_hit += 1;
@@ -1479,7 +1487,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         }
 
-        let ppf = paddr & LPF_MASK;
+        let ppf = paddr.masked(LPF_MASK);
 
         // Pre-compute host page address before borrowing the TLB entry mutably.
         // Cache host pointer for direct memory access on future TLB hits.
@@ -1489,12 +1497,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let host_page = {
             let a20_ppf = self.apply_a20(ppf);
             let host_len = self.mem_host_len;
-            let plain_ram = a20_ppf < 0xA0000 || a20_ppf >= 0x100000;
+            let plain_ram = a20_ppf.get() < 0xA0000 || a20_ppf.get() >= 0x100000;
             if !self.mem_host_base.is_null() && plain_ram {
                 // The span is already the offset of this page into the RAM
                 // allocation, which is exactly what the entry caches — the
                 // base is added back at each hit.
-                bx_guest_ram_span(BxPhyAddress::new(a20_ppf), 0x1000, host_len)
+                bx_guest_ram_span(a20_ppf, 0x1000, host_len)
                     .and_then(|span| super::tlb::RamPage::from_ram_offset(span.start))
             } else {
                 super::tlb::NO_DIRECT_ACCESS
@@ -1521,7 +1529,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Fast physical dword read of a paging-structure entry, for a walk the
     /// processor is performing on the guest's behalf. Reported to
     /// instrumentation, as Bochs cpu/paging.cc `read_physical_dword` is.
-    fn page_walk_read_dword(&mut self, paddr: u64) -> u32 {
+    fn page_walk_read_dword(&mut self, paddr: BxPhyAddress) -> u32 {
         let val = self.page_walk_read_dword_ro(paddr);
         self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Read);
         val
@@ -1534,11 +1542,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// guest never made. The exception-delivery system reads walk here too, although
     /// they are the guest's own and Bochs `system_read_*` reports them and
     /// sets accessed bits — divergence D15.
-    fn page_walk_read_dword_ro(&mut self, paddr: u64) -> u32 {
-        let a20_addr = paddr & self.a20_mask;
+    fn page_walk_read_dword_ro(&mut self, paddr: BxPhyAddress) -> u32 {
+        let a20_addr = paddr.masked(self.a20_mask);
         let host_base = self.mem_host_base;
         if !host_base.is_null() && is_plain_ram_for_walk(a20_addr) {
-            if let Some(span) = bx_guest_ram_span(BxPhyAddress::new(a20_addr), 4, self.mem_host_len) {
+            if let Some(span) = bx_guest_ram_span(a20_addr, 4, self.mem_host_len) {
                 return super::access::read_unaligned_u32(super::access::host_offset(
                     host_base, span.start,
                 ));
@@ -1550,13 +1558,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Fast physical dword write for page walk A/D bit updates. Reported to
     /// instrumentation whichever route the store takes, as Bochs
     /// cpu/paging.cc `write_physical_dword` is.
-    fn page_walk_write_dword(&mut self, paddr: u64, val: u32) {
-        let a20_addr = paddr & self.a20_mask;
+    fn page_walk_write_dword(&mut self, paddr: BxPhyAddress, val: u32) {
+        let a20_addr = paddr.masked(self.a20_mask);
         self.smc_write_check(a20_addr, 4);
         let host_base = self.mem_host_base;
         let mut stored = false;
         if !host_base.is_null() && is_plain_ram_for_walk(a20_addr) {
-            if let Some(span) = bx_guest_ram_span(BxPhyAddress::new(a20_addr), 4, self.mem_host_len) {
+            if let Some(span) = bx_guest_ram_span(a20_addr, 4, self.mem_host_len) {
                 super::access::write_unaligned_u32(
                     super::access::host_offset_mut(host_base, span.start),
                     val,
@@ -1575,7 +1583,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs cpu/paging.cc `read_physical_qword`, reported with the memory
     /// type the walker names (UC for PAE, INVALID for long mode and the
     /// PDPTR load, as Bochs's walkers pass them).
-    fn page_walk_read_qword(&mut self, paddr: u64, memtype: MemType) -> u64 {
+    fn page_walk_read_qword(&mut self, paddr: BxPhyAddress, memtype: MemType) -> u64 {
         let val = self.page_walk_read_qword_ro(paddr);
         self.on_phy_access_as(paddr, &val.to_le_bytes(), MemAccessRW::Read, memtype);
         val
@@ -1583,11 +1591,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// The read-only counterpart of [`Self::page_walk_read_qword`], silent for
     /// the reason given on [`Self::page_walk_read_dword_ro`].
-    fn page_walk_read_qword_ro(&mut self, paddr: u64) -> u64 {
-        let a20_addr = paddr & self.a20_mask;
+    fn page_walk_read_qword_ro(&mut self, paddr: BxPhyAddress) -> u64 {
+        let a20_addr = paddr.masked(self.a20_mask);
         let host_base = self.mem_host_base;
         if !host_base.is_null() && is_plain_ram_for_walk(a20_addr) {
-            if let Some(span) = bx_guest_ram_span(BxPhyAddress::new(a20_addr), 8, self.mem_host_len) {
+            if let Some(span) = bx_guest_ram_span(a20_addr, 8, self.mem_host_len) {
                 return super::access::read_unaligned_u64(super::access::host_offset(
                     host_base, span.start,
                 ));
@@ -1599,13 +1607,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Fast physical qword (64-bit) write for PAE/long mode A/D bit updates.
     /// Reported to instrumentation whichever route the store takes, as Bochs
     /// cpu/paging.cc `write_physical_qword` is.
-    fn page_walk_write_qword(&mut self, paddr: u64, val: u64, memtype: MemType) {
-        let a20_addr = paddr & self.a20_mask;
+    fn page_walk_write_qword(&mut self, paddr: BxPhyAddress, val: u64, memtype: MemType) {
+        let a20_addr = paddr.masked(self.a20_mask);
         self.smc_write_check(a20_addr, 8);
         let host_base = self.mem_host_base;
         let mut stored = false;
         if !host_base.is_null() && is_plain_ram_for_walk(a20_addr) {
-            if let Some(span) = bx_guest_ram_span(BxPhyAddress::new(a20_addr), 8, self.mem_host_len) {
+            if let Some(span) = bx_guest_ram_span(a20_addr, 8, self.mem_host_len) {
                 super::access::write_unaligned_u64(
                     super::access::host_offset_mut(host_base, span.start),
                     val,
@@ -1626,13 +1634,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// When EPT is inactive the address passes through unchanged so the
     /// non-VMX hot path stays free of overhead.
     #[inline]
-    fn ept_walk_read_dword(&mut self, paddr_guest: u64, laddr: u64) -> Result<u32> {
+    fn ept_walk_read_dword(&mut self, paddr_guest: BxPhyAddress, laddr: u64) -> Result<u32> {
         let host = self.ept_translate_for_walk(paddr_guest, laddr)?;
         Ok(self.page_walk_read_dword(host))
     }
 
     #[inline]
-    fn ept_walk_read_qword(&mut self, paddr_guest: u64, laddr: u64, memtype: MemType) -> Result<u64> {
+    fn ept_walk_read_qword(&mut self, paddr_guest: BxPhyAddress, laddr: u64, memtype: MemType) -> Result<u64> {
         let host = self.ept_translate_for_walk(paddr_guest, laddr)?;
         Ok(self.page_walk_read_qword(host, memtype))
     }
@@ -1648,7 +1656,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// walk` helper as the read path; `translate_guest_physical` picks
     /// up the Write upgrade automatically when EPTP bit 6 is set.
     #[inline]
-    fn ept_walk_write_dword(&mut self, paddr_guest: u64, laddr: u64, val: u32) -> Result<()> {
+    fn ept_walk_write_dword(&mut self, paddr_guest: BxPhyAddress, laddr: u64, val: u32) -> Result<()> {
         let host = self.ept_translate_for_walk(paddr_guest, laddr)?;
         self.page_walk_write_dword(host, val);
         Ok(())
@@ -1657,7 +1665,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     #[inline]
     fn ept_walk_write_qword(
         &mut self,
-        paddr_guest: u64,
+        paddr_guest: BxPhyAddress,
         laddr: u64,
         val: u64,
         memtype: MemType,
@@ -1703,7 +1711,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let cr3_base = cr3_val & 0xFFFF_FFE0;
         let host_base = if self.ept_active() {
             self.translate_guest_physical(
-                cr3_base,
+                BxPhyAddress::new(cr3_base),
                 /*guest_laddr=*/ 0,
                 /*guest_laddr_valid=*/ false,
                 /*is_page_walk=*/ true,
@@ -1713,11 +1721,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 BxRwAccess::Read,
             )?
         } else {
-            cr3_base
+            BxPhyAddress::new(cr3_base)
         };
         let mut entries = [0u64; 4];
         for n in 0..4u64 {
-            let pdpte = self.page_walk_read_qword(host_base | (n << 3), LONG_MODE_WALK_MEMTYPE);
+            let pdpte = self.page_walk_read_qword(host_base.at_page_offset(n << 3), LONG_MODE_WALK_MEMTYPE);
             if pdpte & 0x1 != 0 && pdpte & PAGING_PAE_PDPTE_RESERVED_BITS != 0 {
                 return Ok(false);
             }
@@ -1741,7 +1749,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         user: bool,
         is_write: bool,
         is_shadow_stack: bool,
-    ) -> Result<(u64, u32, u32, u32)> {
+    ) -> Result<(BxPhyAddress, u32, u32, u32)> {
         #[cfg(feature = "profiling")]
         {
             self.perf_page_walk += 1;
@@ -1770,9 +1778,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         user: bool,
         is_write: bool,
         is_shadow_stack: bool,
-    ) -> Result<(u64, u32, u32)> {
+    ) -> Result<(BxPhyAddress, u32, u32)> {
         // ---- PDE ----
-        let pde_addr = (self.cr3 & BX_CR3_PAGING_MASK) | (((laddr >> 22) & 0x3FF) << 2);
+        let pde_addr =
+            BxPhyAddress::new((self.cr3 & BX_CR3_PAGING_MASK) | (((laddr >> 22) & 0x3FF) << 2));
         let pde = self.ept_walk_read_dword(pde_addr, laddr)?;
 
         if pde & pte_bits32::PRESENT == 0 {
@@ -1821,19 +1830,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let ppf_4m = pde as u64 & 0xFFC0_0000;
             let combined_flags = CombinedAccess::from_bits_truncate(combined);
             let host_4m = self.ept_translate_for_data(
-                ppf_4m,
+                BxPhyAddress::new(ppf_4m),
                 laddr,
                 combined_flags.contains(CombinedAccess::USER),
                 combined_flags.contains(CombinedAccess::WRITE),
                 false,
                 Self::ept_leaf_rw(is_write, is_shadow_stack),
             )?;
-            let paddr = host_4m | (laddr & 0x003F_FFFF);
+            let paddr = host_4m.at_page_offset(laddr & 0x003F_FFFF);
             return Ok((paddr, combined, 0x3F_FFFF)); // 4MB lpf_mask
         }
 
         // ---- PTE ----
-        let pte_addr = (pde as u64 & 0xFFFF_F000) | (((laddr >> 12) & 0x3FF) << 2);
+        let pte_addr = BxPhyAddress::new((pde as u64 & 0xFFFF_F000) | (((laddr >> 12) & 0x3FF) << 2));
         let pte = self.ept_walk_read_dword(pte_addr, laddr)?;
 
         if pte & pte_bits32::PRESENT == 0 {
@@ -1871,14 +1880,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let ppf = pte as u64 & 0xFFFF_F000;
         let combined_flags = CombinedAccess::from_bits_truncate(combined);
         let host_ppf = self.ept_translate_for_data(
-            ppf,
+            BxPhyAddress::new(ppf),
             laddr,
             combined_flags.contains(CombinedAccess::USER),
             combined_flags.contains(CombinedAccess::WRITE),
             false,
             Self::ept_leaf_rw(is_write, is_shadow_stack),
         )?;
-        let paddr = host_ppf | (laddr & 0xFFF);
+        let paddr = host_ppf.at_page_offset(laddr & 0xFFF);
         Ok((paddr, combined, 0xFFF)) // 4KB lpf_mask
     }
 
@@ -1890,7 +1899,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         user: bool,
         is_write: bool,
         is_shadow_stack: bool,
-    ) -> Result<(u64, u32, u32)> {
+    ) -> Result<(BxPhyAddress, u32, u32)> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
 
@@ -1927,11 +1936,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut ppf = pdpte.bits() & 0x000F_FFFF_FFFF_F000;
 
         // ---- PDE ----
-        let mut entry_addr = [0u64; 2];
+        let mut entry_addr = [BxPhyAddress::new(0); 2];
         let mut entry = [PteBits::empty(); 2];
 
         // Bochs: ppf + ((laddr >> (9 + 9*1)) & 0xFF8) — extracts laddr bits 29:21 as byte offset
-        entry_addr[BX_LEVEL_PDE] = ppf + ((laddr >> 18) & 0xFF8);
+        entry_addr[BX_LEVEL_PDE] = BxPhyAddress::new(ppf + ((laddr >> 18) & 0xFF8));
         entry[BX_LEVEL_PDE] =
             PteBits::from_raw(self.ept_walk_read_qword(entry_addr[BX_LEVEL_PDE], laddr, PAE_WALK_MEMTYPE)?);
 
@@ -2039,21 +2048,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // EPT-translate the 2 MiB data page for the leaf access.
             let combined_flags = CombinedAccess::from_bits_truncate(combined_access);
             let host_ppf = self.ept_translate_for_data(
-                ppf,
+                BxPhyAddress::new(ppf),
                 laddr,
                 combined_flags.contains(CombinedAccess::USER),
                 combined_flags.contains(CombinedAccess::WRITE),
                 nx_page,
                 Self::ept_leaf_rw(is_write, is_shadow_stack),
             )?;
-            let paddr = host_ppf | (laddr & 0x001F_FFFF);
+            let paddr = host_ppf.at_page_offset(laddr & 0x001F_FFFF);
             return Ok((paddr, combined_access, 0x1F_FFFF)); // 2MB lpf_mask
         }
 
         combined_access &= entry[BX_LEVEL_PDE].bits() as u32; // U/S and R/W from PDE
 
         // ---- PTE ----
-        entry_addr[BX_LEVEL_PTE] = ppf + (((laddr >> 12) & 0x1FF) << 3);
+        entry_addr[BX_LEVEL_PTE] = BxPhyAddress::new(ppf + (((laddr >> 12) & 0x1FF) << 3));
         entry[BX_LEVEL_PTE] =
             PteBits::from_raw(self.ept_walk_read_qword(entry_addr[BX_LEVEL_PTE], laddr, PAE_WALK_MEMTYPE)?);
 
@@ -2146,14 +2155,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         ppf = entry[BX_LEVEL_PTE].bits() & 0x000F_FFFF_FFFF_F000;
         let combined_flags = CombinedAccess::from_bits_truncate(combined_access);
         let host_ppf = self.ept_translate_for_data(
-            ppf,
+            BxPhyAddress::new(ppf),
             laddr,
             combined_flags.contains(CombinedAccess::USER),
             combined_flags.contains(CombinedAccess::WRITE),
             nx_page,
             Self::ept_leaf_rw(is_write, is_shadow_stack),
         )?;
-        let paddr = host_ppf | (laddr & 0xFFF);
+        let paddr = host_ppf.at_page_offset(laddr & 0xFFF);
         Ok((paddr, combined_access, 0xFFF)) // 4KB lpf_mask
     }
 
@@ -2310,7 +2319,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         user: bool,
         is_write: bool,
         is_shadow_stack: bool,
-    ) -> Result<(u64, u32, u32, u32)> {
+    ) -> Result<(BxPhyAddress, u32, u32, u32)> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
 
@@ -2322,7 +2331,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         let mut ppf = self.cr3 & BX_CR3_PAGING_MASK_PAE;
-        let mut entry_addr = [0u64; 5];
+        let mut entry_addr = [BxPhyAddress::new(0); 5];
         let mut entry = [PteBits::empty(); 5];
 
         // Determine start level: PML5 if LA57, otherwise PML4
@@ -2339,7 +2348,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut lpf_mask = 0xFFFu32;
 
         loop {
-            entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
+            entry_addr[leaf] = BxPhyAddress::new(ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8));
             entry[leaf] = PteBits::from_raw(self.ept_walk_read_qword(entry_addr[leaf], laddr, LONG_MODE_WALK_MEMTYPE)?);
 
             offset_mask >>= 9;
@@ -2487,14 +2496,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // user/writeable/nx page metadata.
         let combined_flags = CombinedAccess::from_bits_truncate(combined_access);
         let host_ppf = self.ept_translate_for_data(
-            ppf,
+            BxPhyAddress::new(ppf),
             laddr,
             combined_flags.contains(CombinedAccess::USER),
             combined_flags.contains(CombinedAccess::WRITE),
             nx_page,
             Self::ept_leaf_rw(is_write, is_shadow_stack),
         )?;
-        let paddr = host_ppf | (laddr & lpf_mask as u64);
+        let paddr = host_ppf.at_page_offset(laddr & lpf_mask as u64);
         Ok((paddr, combined_access, lpf_mask, pkey))
     }
 }
@@ -2573,7 +2582,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn translate_linear_system_read(
         &mut self,
         laddr: BxAddress,
-    ) -> Result<u64> {
+    ) -> Result<BxPhyAddress> {
         let laddr = if self.long_mode() {
             laddr
         } else {
@@ -2582,7 +2591,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // If paging disabled, linear = physical
         if !self.cr0.pg() {
-            return Ok(laddr & self.a20_mask);
+            return Ok(BxPhyAddress::new(laddr & self.a20_mask));
         }
 
         // Dispatch based on paging mode
@@ -2599,7 +2608,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Read PDE (use fast host pointer path for page table entries)
         let pde_index = ((laddr >> 22) & 0x3FF) as u32;
-        let pde_addr = ppf as u64 + (pde_index * 4) as u64;
+        let pde_addr = BxPhyAddress::new(ppf as u64 + (pde_index * 4) as u64);
         let pde = self.page_walk_read_dword_ro(pde_addr);
 
         if (pde & pte_bits32::PRESENT) == 0 {
@@ -2617,13 +2626,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if (pde & pte_bits32::PS) != 0 && self.cr4.pse() {
             let ppf_4m = (pde & 0xFFC00000) as u64;
             let offset = laddr & 0x3FFFFF;
-            return Ok((ppf_4m | offset) & self.a20_mask);
+            return Ok(BxPhyAddress::new((ppf_4m | offset) & self.a20_mask));
         }
 
         // Read PTE
         let pt_base = (pde & 0xFFFFF000) as u64;
         let pte_index = ((laddr >> 12) & 0x3FF) as u32;
-        let pte_addr = pt_base + (pte_index * 4) as u64;
+        let pte_addr = BxPhyAddress::new(pt_base + (pte_index * 4) as u64);
         let pte = self.page_walk_read_dword_ro(pte_addr);
 
         if (pte & pte_bits32::PRESENT) == 0 {
@@ -2639,11 +2648,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let page_base = (pte & 0xFFFFF000) as u64;
         let offset = laddr & 0xFFF;
-        Ok((page_base | offset) & self.a20_mask)
+        Ok(BxPhyAddress::new((page_base | offset) & self.a20_mask))
     }
 
     /// PAE paging system read translation (read-only, no A/D updates).
-    fn translate_linear_system_read_pae(&mut self, laddr: BxAddress) -> Result<u64> {
+    fn translate_linear_system_read_pae(&mut self, laddr: BxAddress) -> Result<BxPhyAddress> {
         let pdpte_index = ((laddr >> 30) & 0x3) as usize;
         let pdpte = PteBits::from_raw(self.pdptrcache.entry[pdpte_index]);
         if !pdpte.contains(PteBits::PRESENT) {
@@ -2653,7 +2662,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         let ppf = pdpte.bits() & 0x000F_FFFF_FFFF_F000;
 
-        let pde_addr = ppf + (((laddr >> 21) & 0x1FF) << 3);
+        let pde_addr = BxPhyAddress::new(ppf + (((laddr >> 21) & 0x1FF) << 3));
         let pde = PteBits::from_raw(self.page_walk_read_qword_ro(pde_addr));
         if !pde.contains(PteBits::PRESENT) {
             return Err(super::CpuError::Memory(
@@ -2663,11 +2672,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if pde.contains(PteBits::PS) {
             let ppf_2m = pde.bits() & 0x000F_FFFF_FFE0_0000;
-            return Ok((ppf_2m | (laddr & 0x1FFFFF)) & self.a20_mask);
+            return Ok(BxPhyAddress::new((ppf_2m | (laddr & 0x1FFFFF)) & self.a20_mask));
         }
 
         let ppf = pde.bits() & 0x000F_FFFF_FFFF_F000;
-        let pte_addr = ppf + (((laddr >> 12) & 0x1FF) << 3);
+        let pte_addr = BxPhyAddress::new(ppf + (((laddr >> 12) & 0x1FF) << 3));
         let pte = PteBits::from_raw(self.page_walk_read_qword_ro(pte_addr));
         if !pte.contains(PteBits::PRESENT) {
             return Err(super::CpuError::Memory(
@@ -2676,11 +2685,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         let page_base = pte.bits() & 0x000F_FFFF_FFFF_F000;
-        Ok((page_base | (laddr & 0xFFF)) & self.a20_mask)
+        Ok(BxPhyAddress::new((page_base | (laddr & 0xFFF)) & self.a20_mask))
     }
 
     /// Long mode paging system read translation (read-only, no A/D updates).
-    fn translate_linear_system_read_long_mode(&mut self, laddr: BxAddress) -> Result<u64> {
+    fn translate_linear_system_read_long_mode(&mut self, laddr: BxAddress) -> Result<BxPhyAddress> {
         let start_leaf = if self.cr4.la57() {
             BX_LEVEL_PML5
         } else {
@@ -2691,7 +2700,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut leaf = start_leaf;
 
         loop {
-            let entry_addr = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
+            let entry_addr = BxPhyAddress::new(ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8));
             let entry = PteBits::from_raw(self.page_walk_read_qword_ro(entry_addr));
 
             offset_mask >>= 9;
@@ -2717,7 +2726,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         let paddr = ppf | (laddr & offset_mask);
-        Ok(paddr & self.a20_mask)
+        Ok(BxPhyAddress::new(paddr & self.a20_mask))
     }
 
     /// Bochs paging.cc `BX_CPU_C::dbg_xlate_linear2phy`: where `laddr` maps,
@@ -2729,7 +2738,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         &mut self,
         laddr: BxAddress,
         walk: DbgWalk,
-    ) -> Option<u64> {
+    ) -> Option<BxPhyAddress> {
         use super::decoder::features::X86Feature;
         const BX_LEVEL_PTE: u32 = 0;
         const BX_LEVEL_PDE: u32 = 1;
@@ -2762,7 +2771,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                             DbgWalk::Root(cr3) | DbgWalk::VmxGuest(VmxGuestWalk { cr3, .. }) => {
                                 // A PAE root is 32 bytes at CR3[31:5]: four PDPTEs.
                                 let at = (cr3 & 0xffff_ffe0) + ((laddr >> 30) & 3) * 8;
-                                let at = self.dbg_nested_translation(at, walk)?;
+                                let at = self.dbg_nested_translation(BxPhyAddress::new(at), walk)?;
                                 self.page_walk_read_qword_ro(at)
                             }
                             DbgWalk::Guest | DbgWalk::Nested => {
@@ -2785,8 +2794,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 loop {
                     pt_address += (laddr >> (9 + 9 * level)) & 0xff8;
                     offset_mask >>= 9;
-                    pt_address = self.dbg_nested_translation(pt_address, walk)?;
-                    let pte = self.page_walk_read_qword_ro(pt_address);
+                    let at = self.dbg_nested_translation(BxPhyAddress::new(pt_address), walk)?;
+                    let pte = self.page_walk_read_qword_ro(at);
                     if pte & 1 == 0 {
                         return None;
                     }
@@ -2822,8 +2831,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let mut level = BX_LEVEL_PDE;
                 loop {
                     pt_address += (laddr >> (10 + 10 * level)) & 0xffc;
-                    pt_address = self.dbg_nested_translation(pt_address, walk)?;
-                    let pte = u64::from(self.page_walk_read_dword_ro(pt_address));
+                    let at = self.dbg_nested_translation(BxPhyAddress::new(pt_address), walk)?;
+                    let pte = u64::from(self.page_walk_read_dword_ro(at));
                     if pte & 1 == 0 {
                         return None;
                     }
@@ -2841,8 +2850,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 pt_address + (laddr & offset_mask)
             }
         };
-        let paddress = self.dbg_nested_translation(paddress, walk)?;
-        Some(paddress & self.a20_mask)
+        let paddress = self.dbg_nested_translation(BxPhyAddress::new(paddress), walk)?;
+        Some(paddress.masked(self.a20_mask))
     }
 
     /// Every page the paging structures rooted at `cr3` map within `range`,
@@ -2914,7 +2923,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 if !Self::dbg_span_overlaps(base, 1 << 30, range) {
                     continue;
                 }
-                let Some(at) = self.dbg_nested_translation((cr3 & 0xffff_ffe0) + index * 8, walk)
+                let Some(at) = self
+                    .dbg_nested_translation(BxPhyAddress::new((cr3 & 0xffff_ffe0) + index * 8), walk)
                 else {
                     continue;
                 };
@@ -2992,7 +3002,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if !Self::dbg_span_overlaps(linear, span, range) {
                 continue;
             }
-            let Some(at) = self.dbg_nested_translation(table + index * 8, walk) else {
+            let Some(at) = self.dbg_nested_translation(BxPhyAddress::new(table + index * 8), walk)
+            else {
                 continue;
             };
             let pte = self.page_walk_read_qword_ro(at);
@@ -3014,12 +3025,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             let step = if level == 0 || large {
                 let frame = pte & 0x000f_ffff_ffff_f000 & !(span - 1);
-                let Some(physical) = self.dbg_nested_translation(frame, walk) else {
+                let Some(physical) = self.dbg_nested_translation(BxPhyAddress::new(frame), walk)
+                else {
                     continue;
                 };
                 visit(PageMapping {
                     linear,
-                    physical: physical & self.a20_mask,
+                    physical: physical.masked(self.a20_mask).get(),
                     size: span,
                     access,
                 })
@@ -3071,7 +3083,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if !Self::dbg_span_overlaps(base, 1 << 22, range) {
                 continue;
             }
-            let Some(at) = self.dbg_nested_translation(directory + pde_index * 4, walk) else {
+            let Some(at) =
+                self.dbg_nested_translation(BxPhyAddress::new(directory + pde_index * 4), walk)
+            else {
                 continue;
             };
             let pde = u64::from(self.page_walk_read_dword_ro(at));
@@ -3081,12 +3095,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let dir_access = access_of(pde, full);
             if pde & 0x80 != 0 && self.dbg_paging(walk).cr4.pse() {
                 let frame = (pde & 0xffc0_0000) + ((pde & 0x003f_e000) << 19);
-                let Some(physical) = self.dbg_nested_translation(frame, walk) else {
+                let Some(physical) = self.dbg_nested_translation(BxPhyAddress::new(frame), walk)
+                else {
                     continue;
                 };
                 let step = visit(PageMapping {
                     linear: base,
-                    physical: physical & self.a20_mask,
+                    physical: physical.masked(self.a20_mask).get(),
                     size: 1 << 22,
                     access: dir_access,
                 });
@@ -3101,19 +3116,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 if !Self::dbg_span_overlaps(linear, 1 << 12, range) {
                     continue;
                 }
-                let Some(at) = self.dbg_nested_translation(table + pte_index * 4, walk) else {
+                let Some(at) =
+                    self.dbg_nested_translation(BxPhyAddress::new(table + pte_index * 4), walk)
+                else {
                     continue;
                 };
                 let pte = u64::from(self.page_walk_read_dword_ro(at));
                 if pte & 1 == 0 {
                     continue;
                 }
-                let Some(physical) = self.dbg_nested_translation(pte & 0xffff_f000, walk) else {
+                let Some(physical) =
+                    self.dbg_nested_translation(BxPhyAddress::new(pte & 0xffff_f000), walk)
+                else {
                     continue;
                 };
                 let step = visit(PageMapping {
                     linear,
-                    physical: physical & self.a20_mask,
+                    physical: physical.masked(self.a20_mask).get(),
                     size: 1 << 12,
                     access: access_of(pte, dir_access),
                 });
@@ -3132,9 +3151,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// (`dbg_translate_guest_physical_npt`) except during that nested walk.
     fn dbg_nested_translation(
         &mut self,
-        guest_paddr: u64,
+        guest_paddr: BxPhyAddress,
         walk: DbgWalk,
-    ) -> Option<u64> {
+    ) -> Option<BxPhyAddress> {
         use crate::cpu::instrumentation::GuestPhysicalMemory;
         if let DbgWalk::VmxGuest(guest) = walk {
             return match guest.memory {
@@ -3150,7 +3169,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             paddr = self.dbg_translate_guest_physical_ept(paddr, eptp)?;
         }
         if walk != DbgWalk::Nested && self.in_svm_guest && self.vmcb.ctrls.nested_paging {
-            paddr = self.dbg_xlate_linear2phy(paddr, DbgWalk::Nested)?;
+            paddr = self.dbg_xlate_linear2phy(paddr.get(), DbgWalk::Nested)?;
         }
         Some(paddr)
     }
@@ -3177,9 +3196,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// paging structures the EPT pointer `eptp` names.
     fn dbg_translate_guest_physical_ept(
         &mut self,
-        guest_paddr: u64,
+        guest_paddr: BxPhyAddress,
         eptp: u64,
-    ) -> Option<u64> {
+    ) -> Option<BxPhyAddress> {
         use super::decoder::features::X86Feature;
         // BX_EPT_ENTRY_NOT_PRESENT, _WRITE_ONLY, _WRITE_EXECUTE
         const EPT_ENTRY_NOT_PRESENT: u64 = 0;
@@ -3188,10 +3207,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut pt_address = eptp & !0xfff;
         let mut offset_mask: u64 = 0x0000_ffff_ffff_ffff;
         let mut level: u32 = 3; // BX_LEVEL_PML4
+        let guest_paddr = guest_paddr.get();
         loop {
             pt_address += (guest_paddr >> (9 + 9 * level)) & 0xff8;
             offset_mask >>= 9;
-            let pte = self.page_walk_read_qword_ro(pt_address);
+            let pte = self.page_walk_read_qword_ro(BxPhyAddress::new(pt_address));
             match pte & 7 {
                 EPT_ENTRY_NOT_PRESENT | EPT_ENTRY_WRITE_ONLY | EPT_ENTRY_WRITE_EXECUTE => {
                     return None
@@ -3219,15 +3239,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             level -= 1;
         }
-        Some(pt_address + (guest_paddr & offset_mask))
+        Some(BxPhyAddress::new(pt_address + (guest_paddr & offset_mask)))
     }
 
     /// Translate a linear address using a caller-supplied CR3 instead of
     /// the current `self.cr3`. Used to read user-space strings after the
     /// kernel has swapped CR3 for KPTI. Long mode only.
-    pub(crate) fn translate_linear_with_cr3(&mut self, laddr: u64, cr3: u64) -> Option<u64> {
+    pub(crate) fn translate_linear_with_cr3(&mut self, laddr: u64, cr3: u64) -> Option<BxPhyAddress> {
         if !self.cr0.pg() {
-            return Some(laddr & self.a20_mask);
+            return Some(BxPhyAddress::new(laddr & self.a20_mask));
         }
         if !self.long_mode() {
             return None;
@@ -3241,7 +3261,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut offset_mask = (1u64 << self.linaddr_width as u64) - 1;
         let mut leaf = start_leaf;
         loop {
-            let entry_addr = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
+            let entry_addr = BxPhyAddress::new(ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8));
             let entry = PteBits::from_raw(self.page_walk_read_qword_ro(entry_addr));
             offset_mask >>= 9;
             if !entry.contains(PteBits::PRESENT) {
@@ -3257,14 +3277,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             leaf -= 1;
         }
-        Some((ppf | (laddr & offset_mask)) & self.a20_mask)
+        Some(BxPhyAddress::new((ppf | (laddr & offset_mask)) & self.a20_mask))
     }
 
     /// Diagnostic-only: translate a linear address to physical without raising exceptions.
     /// Returns None if translation fails.
-    pub(super) fn translate_linear_for_diag(&mut self, laddr: u64) -> Option<u64> {
+    pub(super) fn translate_linear_for_diag(&mut self, laddr: u64) -> Option<BxPhyAddress> {
         if !self.cr0.pg() {
-            return Some(laddr & self.a20_mask);
+            return Some(BxPhyAddress::new(laddr & self.a20_mask));
         }
         self.translate_linear_system_read_long_mode(laddr)
             .ok()
@@ -3373,7 +3393,7 @@ mod tests {
                 "full residency must be an identity map"
             );
 
-            assert_eq!(ctx.translate_data_read(RAM_VADDR).unwrap(), RAM_FRAME);
+            assert_eq!(ctx.translate_data_read(RAM_VADDR).unwrap().get(), RAM_FRAME);
             let slot = ctx.dtlb.get_index_of(RAM_VADDR, 0);
             let cached = ctx.dtlb.entries[slot].host_page;
             assert!(
@@ -3387,7 +3407,7 @@ mod tests {
                 "the cached offset must resolve to the frame's host address"
             );
 
-            assert_eq!(ctx.translate_data_read(LEGACY_VADDR).unwrap(), LEGACY_FRAME);
+            assert_eq!(ctx.translate_data_read(LEGACY_VADDR).unwrap().get(), LEGACY_FRAME);
             let slot = ctx.dtlb.get_index_of(LEGACY_VADDR, 0);
             assert!(
                 ctx.dtlb.entries[slot].host_page.is_none(),
@@ -3424,17 +3444,18 @@ mod tests {
 
         mem.smc_mark_icache_mask(
             BxPhyAddress::new(PAGE_TABLE),
-            crate::cpu::icache::smc_cache_line_mask(PAGE_TABLE, 8),
+            crate::cpu::icache::smc_cache_line_mask(BxPhyAddress::new(PAGE_TABLE), 8),
         );
         let translated = exec_with(&mut cpu, &mut mem, |ctx| {
             let a20 = ctx.memory.a20_mask().bits();
             ctx.translate_linear(0, false, MemoryAccessType::Write, a20)
         })
         .unwrap();
-        assert_eq!(translated, (PAGE_TABLE, 0xFFF));
+        assert_eq!(translated, (BxPhyAddress::new(PAGE_TABLE), 0xFFF));
 
-        let updated_pte =
-            exec_with(&mut cpu, &mut mem, |ctx| ctx.page_walk_read_qword_ro(PAGE_TABLE));
+        let updated_pte = exec_with(&mut cpu, &mut mem, |ctx| {
+            ctx.page_walk_read_qword_ro(BxPhyAddress::new(PAGE_TABLE))
+        });
         assert_eq!(
             updated_pte & (PteBits::ACCESSED | PteBits::DIRTY).bits(),
             (PteBits::ACCESSED | PteBits::DIRTY).bits(),
@@ -3456,7 +3477,7 @@ mod tests {
 
         let error =
             exec_with(&mut cpu, &mut mem, |ctx| {
-                ctx.write_physical_qword(0x0ffc, 0, LONG_MODE_WALK_MEMTYPE)
+                ctx.write_physical_qword(BxPhyAddress::new(0x0ffc), 0, LONG_MODE_WALK_MEMTYPE)
             })
             .expect_err("cross-page handler qword writes must propagate their error");
         assert!(matches!(

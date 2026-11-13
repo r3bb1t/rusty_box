@@ -7,6 +7,7 @@ use super::cpu::Exception;
 use super::decoder::{BxSegregs, Instruction};
 use super::instrumentation::{Instrumentation, MemAccessRW};
 use super::{BxCpuC, Result};
+use crate::config::BxPhyAddress;
 use crate::iodev::IoPort;
 
 // Bochs vmx.h BX_IA32_FEATURE_CONTROL_* bits.
@@ -1500,7 +1501,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             }
 
             // Check revision ID at paddr matches the emulator's.
-            let rev = self.vmx_read_revision_id(paddr);
+            let rev = self.vmx_read_revision_id(BxPhyAddress::new(paddr));
             if rev != BX_VMCS_REVISION_ID {
                 tracing::trace!(
                     "VMXON: VMCS revision mismatch at {:#x}: have {:#x} want {:#x}",
@@ -1607,7 +1608,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // Clear the VMCS launch-state flag in guest-physical memory — Bochs
         // vmx.cc `VMCLEAR` writes it through `write_physical_dword`, which
         // reports the access.
-        let launch_state = paddr + VMCS_LAUNCH_STATE_OFFSET;
+        let launch_state = BxPhyAddress::new(paddr + VMCS_LAUNCH_STATE_OFFSET);
         self.mem_write_dword(launch_state, VMCS_STATE_CLEAR);
         self.on_phy_access(
             launch_state,
@@ -1660,7 +1661,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
         // Bochs vmx.cc VMPTRLD: with VMCS shadowing in the model, a shadow
         // VMCS (bit 31 of its revision dword) may be made current.
-        let mut revision = self.vmx_read_revision_id(paddr);
+        let mut revision = self.vmx_read_revision_id(BxPhyAddress::new(paddr));
         if self.vmx_extension(super::cpuid::VMXExtensions::VmcsShadowing) {
             revision &= !BX_VMCS_SHADOW_BIT_MASK;
         }
@@ -1846,7 +1847,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         if encoding > 0x7fff {
             return true;
         }
-        let pa = self.vmcs.vmread_bitmap_addr | (encoding as u64 >> 3);
+        let pa = BxPhyAddress::new(self.vmcs.vmread_bitmap_addr | (encoding as u64 >> 3));
         let byte = self.read_physical_byte(pa);
         byte & (1u8 << (encoding & 7)) != 0
     }
@@ -1860,7 +1861,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         if encoding > 0x7fff {
             return true;
         }
-        let pa = self.vmcs.vmwrite_bitmap_addr | (encoding as u64 >> 3);
+        let pa = BxPhyAddress::new(self.vmcs.vmwrite_bitmap_addr | (encoding as u64 >> 3));
         let byte = self.read_physical_byte(pa);
         byte & (1u8 << (encoding & 7)) != 0
     }
@@ -1869,7 +1870,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// `vmcs_pa`, read from guest-physical memory with its width, an
     /// access-rights field unrotated.
     fn vmcs_field_read(&mut self, vmcs_pa: u64, field: VmcsField) -> u64 {
-        let pa = vmcs_pa + u64::from(field.offset);
+        let pa = BxPhyAddress::new(vmcs_pa + u64::from(field.offset));
         match field.storage {
             VmcsStorage::Word => u64::from(self.read_phys_word(pa)),
             VmcsStorage::Dword => u64::from(self.read_phys_dword(pa)),
@@ -1882,7 +1883,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// VMCS region at `vmcs_pa`, truncated to the field's width, an
     /// access-rights field rotated.
     fn vmcs_field_write(&mut self, vmcs_pa: u64, field: VmcsField, value: u64) {
-        let pa = vmcs_pa + u64::from(field.offset);
+        let pa = BxPhyAddress::new(vmcs_pa + u64::from(field.offset));
         match field.storage {
             VmcsStorage::Word => self.write_phys_word(pa, value as u16),
             VmcsStorage::Dword => self.write_phys_dword(pa, value as u32),
@@ -2171,7 +2172,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// The current VMCS's launch state, Bochs vmx.cc
     /// `VMread32(VMCS_LAUNCH_STATE_FIELD_ENCODING)`.
     fn vmcs_launch_state(&mut self) -> u32 {
-        self.read_phys_dword(self.vmcsptr + VMCS_LAUNCH_STATE_OFFSET)
+        self.read_phys_dword(BxPhyAddress::new(self.vmcsptr + VMCS_LAUNCH_STATE_OFFSET))
     }
 
     /// Field `encoding` of the current VMCS, read from its region in memory.
@@ -2306,7 +2307,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// A shadow-VMCS field read — Bochs vmx.cc `VMread16_Shadow`, which reads
     /// through `read_physical_word` and so reports the access to
     /// `phy_access`. The other widths below follow it.
-    fn read_phys_word(&mut self, paddr: u64) -> u16 {
+    fn read_phys_word(&mut self, paddr: BxPhyAddress) -> u16 {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 2];
         let val = match self.read_physical_routed(policy, paddr, 2, &mut data) {
@@ -2320,7 +2321,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         val
     }
 
-    fn read_phys_dword(&mut self, paddr: u64) -> u32 {
+    fn read_phys_dword(&mut self, paddr: BxPhyAddress) -> u32 {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 4];
         let val = match self.read_physical_routed(policy, paddr, 4, &mut data) {
@@ -2334,7 +2335,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         val
     }
 
-    fn read_phys_qword(&mut self, paddr: u64) -> u64 {
+    fn read_phys_qword(&mut self, paddr: BxPhyAddress) -> u64 {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 8];
         let val = match self.read_physical_routed(policy, paddr, 8, &mut data) {
@@ -2351,7 +2352,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// A shadow-VMCS field write — Bochs vmx.cc `VMwrite16_Shadow`, through
     /// `write_physical_word`, reported to `phy_access`. The other widths below
     /// follow it.
-    fn write_phys_word(&mut self, paddr: u64, val: u16) {
+    fn write_phys_word(&mut self, paddr: BxPhyAddress, val: u16) {
         let policy = self.access_policy(paddr);
         let mut data = val.to_le_bytes();
         let stored = self.write_physical_routed(policy, paddr, 2, &mut data);
@@ -2364,7 +2365,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Write);
     }
 
-    fn write_phys_dword(&mut self, paddr: u64, val: u32) {
+    fn write_phys_dword(&mut self, paddr: BxPhyAddress, val: u32) {
         let policy = self.access_policy(paddr);
         let mut data = val.to_le_bytes();
         let stored = self.write_physical_routed(policy, paddr, 4, &mut data);
@@ -2377,7 +2378,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Write);
     }
 
-    fn write_phys_qword(&mut self, paddr: u64, val: u64) {
+    fn write_phys_qword(&mut self, paddr: BxPhyAddress, val: u64) {
         let policy = self.access_policy(paddr);
         let mut data = val.to_le_bytes();
         let stored = self.write_physical_routed(policy, paddr, 8, &mut data);
@@ -3005,7 +3006,10 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // VM-entry MSR-load succeeds. VMRESUME leaves the launch state
         // alone — Bochs gates this on the `vmlaunch` flag.
         if !is_resume {
-            self.write_phys_dword(self.vmcsptr + VMCS_LAUNCH_STATE_OFFSET, VMCS_STATE_LAUNCHED);
+            self.write_phys_dword(
+            BxPhyAddress::new(self.vmcsptr + VMCS_LAUNCH_STATE_OFFSET),
+            VMCS_STATE_LAUNCHED,
+        );
         }
 
         // Bochs vmx.cc step 6: arm the preemption timer when the pin-based
@@ -3097,7 +3101,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                 if ecx >= 512 {
                     return self.vmx_vmexit(VmxVmexitReason::Vmfunc, 0);
                 }
-                let paddr = self.vmcs.eptp_list_address.wrapping_add(ecx * 8);
+                let paddr = BxPhyAddress::new(self.vmcs.eptp_list_address.wrapping_add(ecx * 8));
                 // Bochs vmfunc.cc reads the entry with one `read_physical_qword`.
                 let new_eptp = u64::from_le_bytes(self.read_physical_bytes(paddr));
                 if !self.is_eptptr_valid(new_eptp) {
@@ -3151,7 +3155,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // address VMENTRY accepts, so treating it as "no page" would silently
         // ignore a legal configuration. Every caller runs inside a guest whose
         // entry already validated this field.
-        let paddr = self.vmcs.virtual_apic_page_addr + u64::from(offset);
+        let paddr = BxPhyAddress::new(self.vmcs.virtual_apic_page_addr + u64::from(offset));
         u32::from_le_bytes(self.read_physical_bytes(paddr))
     }
 
@@ -3159,7 +3163,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// `VMX_Write_Virtual_APIC`.
     pub(super) fn vmx_write_virtual_apic(&mut self, offset: u32, value: u32) {
         // See `vmx_read_virtual_apic` on why a zero page address is not special.
-        let paddr = self.vmcs.virtual_apic_page_addr + u64::from(offset);
+        let paddr = BxPhyAddress::new(self.vmcs.virtual_apic_page_addr + u64::from(offset));
         self.write_physical_bytes(paddr, value.to_le_bytes());
     }
 
@@ -3440,7 +3444,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // here: a machine's CPUs are scheduled cooperatively, one slice at a
         // time against an exclusively-borrowed memory, so no second agent runs
         // while this does.
-        let pid = self.vmcs.pi_desc_addr;
+        let pid = BxPhyAddress::new(self.vmcs.pi_desc_addr);
         let on = self.read_physical_byte(pid + 32);
         self.write_physical_byte(pid + 32, on & !0x1);
 
@@ -3837,7 +3841,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         tracing::error!("VMX abort (Bochs VMabort): code={code:?}");
         // Bochs `VMwrite32(VMCS_VMX_ABORT_FIELD_ENCODING, code)`: a physical
         // write into the VMCS region, reported as one.
-        let indicator = self.vmcsptr + VMCS_VMX_ABORT_OFFSET;
+        let indicator = BxPhyAddress::new(self.vmcsptr + VMCS_VMX_ABORT_OFFSET);
         let value = code as u32;
         self.mem_write_dword(indicator, value);
         self.on_phy_access(indicator, &value.to_le_bytes(), MemAccessRW::Write);
@@ -4806,7 +4810,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             }
             // Bochs reads the revision-ID dword at linkptr; we approximate
             // with the same dword read used during VMPTRLD.
-            let revision = self.vmx_read_revision_id(linkptr);
+            let revision = self.vmx_read_revision_id(BxPhyAddress::new(linkptr));
             // BX_VMCS_SHADOW_BIT_MASK is bit 31 of the revision word —
             // unset when VMCS_SHADOWING is off (our model).
             if revision & 0x8000_0000 != 0 {
@@ -5568,7 +5572,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Read the VMCS revision ID (first 4 bytes of a VMCS / VMXON region) from
     /// guest-physical memory. Bochs vmx.cc VMXReadRevisionID, which reads it
     /// through `read_physical_dword` and so reports the access.
-    fn vmx_read_revision_id(&mut self, paddr: u64) -> u32 {
+    fn vmx_read_revision_id(&mut self, paddr: BxPhyAddress) -> u32 {
         let revision = self.mem_read_dword(paddr);
         self.on_phy_access(paddr, &revision.to_le_bytes(), MemAccessRW::Read);
         revision
@@ -5686,7 +5690,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// `BX_CPU_C::write_physical_byte` used by vapic.cc to clear PID.ON via
     /// atomic RMW. Logs and continues on failure to match the lenient
     /// posture of `read_physical_byte`.
-    fn write_physical_byte(&mut self, paddr: u64, val: u8) {
+    fn write_physical_byte(&mut self, paddr: BxPhyAddress, val: u8) {
         let policy = self.access_policy(paddr);
         let mut data = [val];
         match self.write_physical_routed(policy, paddr, 1, &mut data) {
@@ -5710,7 +5714,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// register (vapic.cc `VMX_Read_Virtual_APIC`, 4 bytes), the PIR (32) and
     /// an EPTP-list entry (vmfunc.cc, 8). A failed read is logged and reads as
     /// all ones, what [`Self::read_physical_byte`] gives each byte.
-    fn read_physical_bytes<const N: usize>(&mut self, paddr: u64) -> [u8; N] {
+    fn read_physical_bytes<const N: usize>(&mut self, paddr: BxPhyAddress) -> [u8; N] {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; N];
         match self.read_physical_routed(policy, paddr, N, &mut data) {
@@ -5731,7 +5735,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
     /// Write `N` bytes of guest-physical memory as one access, reported once at
     /// its full width, as [`Self::read_physical_bytes`] reads them.
-    fn write_physical_bytes<const N: usize>(&mut self, paddr: u64, mut data: [u8; N]) {
+    fn write_physical_bytes<const N: usize>(&mut self, paddr: BxPhyAddress, mut data: [u8; N]) {
         let policy = self.access_policy(paddr);
         let stored = self.write_physical_routed(policy, paddr, N, &mut data);
         // Bochs handleSMC flushes the writer synchronously at the store.
@@ -5762,7 +5766,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// check failure), the exception propagates to the caller; Bochs
     /// triggers a VMX abort in that case which the caller handles.
     pub(super) fn vmx_load_msrs(&mut self, count: u32, phys_addr: u64) -> Result<u32> {
-        let mut paddr = phys_addr;
+        let mut paddr = BxPhyAddress::new(phys_addr);
         for msr in 1..=count {
             // Bochs vmx.cc LoadMSRs reads each entry through
             // `read_physical_qword`, which reports both halves.
@@ -5799,7 +5803,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// the high qword of each 16-byte entry. Returns the 1-based failing
     /// index or `0` on success. X2APIC MSRs are rejected per Bochs.
     pub(super) fn vmx_store_msrs(&mut self, count: u32, phys_addr: u64) -> Result<u32> {
-        let mut paddr = phys_addr;
+        let mut paddr = BxPhyAddress::new(phys_addr);
         for msr in 1..=count {
             // Bochs vmx.cc StoreMSRs reads the index and writes the value
             // through the physical-access helpers, which report both.
@@ -6261,9 +6265,9 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// When EPT is inactive returns the input unchanged.
     pub(super) fn ept_translate_for_walk(
         &mut self,
-        guest_paddr: u64,
+        guest_paddr: BxPhyAddress,
         guest_laddr: u64,
-    ) -> Result<u64> {
+    ) -> Result<BxPhyAddress> {
         if !self.ept_active() {
             return Ok(guest_paddr);
         }
@@ -6285,13 +6289,13 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// qualification.
     pub(super) fn ept_translate_for_data(
         &mut self,
-        guest_paddr: u64,
+        guest_paddr: BxPhyAddress,
         guest_laddr: u64,
         user_page: bool,
         writeable_page: bool,
         nx_page: bool,
         rw: BxRwAccess,
-    ) -> Result<u64> {
+    ) -> Result<BxPhyAddress> {
         if !self.ept_active() {
             return Ok(guest_paddr);
         }
@@ -6319,7 +6323,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// structure (Bochs sets the qualification bit accordingly).
     pub(super) fn translate_guest_physical(
         &mut self,
-        guest_paddr: u64,
+        guest_paddr: BxPhyAddress,
         guest_laddr: u64,
         guest_laddr_valid: bool,
         is_page_walk: bool,
@@ -6327,7 +6331,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         writeable_page: bool,
         nx_page: bool,
         rw: BxRwAccess,
-    ) -> Result<u64> {
+    ) -> Result<BxPhyAddress> {
         let eptptr = self.vmcs.eptptr;
         let mut ppf = eptptr & 0x000F_FFFF_FFFF_F000;
         let mbe_ctrl = self.vmcs.secondary_proc_based_ctls & VMX_VM_EXEC_CTRL2_MBE_CTRL != 0;
@@ -6379,14 +6383,15 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         }
 
         let mut entry = [0u64; 4];
-        let mut entry_addr = [0u64; 4];
+        let mut entry_addr = [BxPhyAddress::new(0); 4];
         let mut offset_mask: u64 = 0x0000_FFFF_FFFF_FFFF;
         let mut leaf: i32 = 3; // BX_LEVEL_PML4
         let mut vmexit_reason: Option<VmxVmexitReason> = None;
 
         loop {
             let level = leaf as u32;
-            entry_addr[leaf as usize] = ppf + ((guest_paddr >> (9 + 9 * level)) & 0xFF8);
+            entry_addr[leaf as usize] =
+                BxPhyAddress::new(ppf + ((guest_paddr.get() >> (9 + 9 * level)) & 0xFF8));
             entry[leaf as usize] = self.mem_read_qword(entry_addr[leaf as usize]);
             // Bochs paging.cc `translate_guest_physical` reads each EPT entry
             // through `read_physical_qword`, which reports it.
@@ -6468,7 +6473,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
                     break;
                 }
-                ppf += guest_paddr & offset_mask;
+                ppf += guest_paddr.get() & offset_mask;
                 break;
             }
             // Non-leaf entry must have memtype-low/leaf reserved bits clear
@@ -6583,10 +6588,10 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     q.set(EptViolationQual::SSS_PAGE, ept_sss_ctrl && leaf_sss_page);
                 }
                 self.vmcs.guest_linear_addr = guest_laddr;
-                self.vmcs.guest_physical_addr = guest_paddr;
+                self.vmcs.guest_physical_addr = guest_paddr.get();
                 q.bits()
             } else {
-                self.vmcs.guest_physical_addr = guest_paddr;
+                self.vmcs.guest_physical_addr = guest_paddr.get();
                 0
             };
             self.vmx_vmexit(reason, qual)?;
@@ -6602,7 +6607,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             self.update_ept_access_dirty(&entry_addr, &mut entry, leaf as usize, rw.is_write());
         }
 
-        Ok(ppf | (guest_paddr & 0xFFF))
+        Ok(BxPhyAddress::new(ppf | guest_paddr.page_offset()))
     }
 
     /// Bochs paging.cc `BX_CPU_C::update_ept_access_dirty` (cross-checked
@@ -6616,7 +6621,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// correctness for concurrent EPT walks is a known Bochs-parity gap.
     fn update_ept_access_dirty(
         &mut self,
-        entry_addr: &[u64; 4],
+        entry_addr: &[BxPhyAddress; 4],
         entry: &mut [u64; 4],
         leaf: usize,
         write: bool,
@@ -6809,14 +6814,15 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             if msr > HI_END {
                 return true;
             }
-            let paddr = bitmap + u64::from((msr - HI_START) >> 3) + 1024 + write_off;
+            let paddr =
+                BxPhyAddress::new(bitmap + u64::from((msr - HI_START) >> 3) + 1024 + write_off);
             let field = self.read_physical_byte(paddr);
             (field & (1 << (msr & 7))) != 0
         } else {
             if msr > LO_END {
                 return true;
             }
-            let paddr = bitmap + u64::from(msr >> 3) + write_off;
+            let paddr = BxPhyAddress::new(bitmap + u64::from(msr >> 3) + write_off);
             let field = self.read_physical_byte(paddr);
             (field & (1 << (msr & 7))) != 0
         }
@@ -7127,15 +7133,15 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let bitmap = if (port_lo + len) > 0x8000 {
             // Straddles the bitmap-A/B boundary. Bochs reads byte 0xFFF of
             // bitmap A and byte 0x000 of bitmap B.
-            let pa = self.vmcs.io_bitmap_addr[0] + 0xFFF;
-            let pb = self.vmcs.io_bitmap_addr[1];
+            let pa = BxPhyAddress::new(self.vmcs.io_bitmap_addr[0] + 0xFFF);
+            let pb = BxPhyAddress::new(self.vmcs.io_bitmap_addr[1]);
             let b0 = u16::from(self.read_physical_byte(pa));
             let b1 = u16::from(self.read_physical_byte(pb));
             (b1 << 8) | b0
         } else {
             // read_physical_byte cannot cross 4 KiB; do two single-byte reads.
             let which = usize::from((port >> 15) & 1);
-            let pa = self.vmcs.io_bitmap_addr[which] + u64::from(port_lo / 8);
+            let pa = BxPhyAddress::new(self.vmcs.io_bitmap_addr[which] + u64::from(port_lo / 8));
             let b0 = u16::from(self.read_physical_byte(pa));
             let b1 = u16::from(self.read_physical_byte(pa + 1));
             (b1 << 8) | b0
@@ -7302,11 +7308,12 @@ mod tests {
         ctx.vmcs.secondary_proc_based_ctls = VMX_VM_EXEC_CTRL2_EPT_ENABLE;
         ctx.vmcs.eptptr = EPT_PML4;
 
-        ctx.mem_write_qword(EPT_PML4, EPT_PDPT | EPT_RWX);
-        ctx.mem_write_qword(EPT_PDPT, EPT_PD | EPT_RWX);
-        ctx.mem_write_qword(EPT_PD, EPT_PT | EPT_RWX);
+        let at = BxPhyAddress::new;
+        ctx.mem_write_qword(at(EPT_PML4), EPT_PDPT | EPT_RWX);
+        ctx.mem_write_qword(at(EPT_PDPT), EPT_PD | EPT_RWX);
+        ctx.mem_write_qword(at(EPT_PD), EPT_PT | EPT_RWX);
         // Leaf index for EPT_GUEST_PA: (pa >> 9) & 0xFF8 == 8.
-        ctx.mem_write_qword(EPT_PT + 8, EPT_TARGET | EPT_WB_LEAF);
+        ctx.mem_write_qword(at(EPT_PT + 8), EPT_TARGET | EPT_WB_LEAF);
         ctx
     }
 
@@ -7319,11 +7326,11 @@ mod tests {
         let mut ctx = ept_guest(&mut machine);
 
         let host = ctx
-            .ept_translate_for_data(EPT_GUEST_PA, 0, false, true, false, BxRwAccess::Read)
+            .ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA), 0, false, true, false, BxRwAccess::Read)
             .expect("a fully permitted mapping translates");
 
         assert_eq!(
-            host, EPT_TARGET,
+            host.get(), EPT_TARGET,
             "the walk must land on the page the leaf entry names, not on the \
              guest-physical address itself"
         );
@@ -7337,10 +7344,10 @@ mod tests {
         let mut ctx = ept_guest(&mut machine);
 
         let host = ctx
-            .ept_translate_for_data(EPT_GUEST_PA + 0x2A, 0, false, true, false, BxRwAccess::Read)
+            .ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA + 0x2A), 0, false, true, false, BxRwAccess::Read)
             .expect("a fully permitted mapping translates");
 
-        assert_eq!(host, EPT_TARGET + 0x2A);
+        assert_eq!(host.get(), EPT_TARGET + 0x2A);
     }
 
     /// With EPT off, a guest-physical address IS the host-physical address.
@@ -7353,10 +7360,10 @@ mod tests {
         ctx.vmcs.secondary_proc_based_ctls = 0;
 
         let host = ctx
-            .ept_translate_for_data(EPT_GUEST_PA, 0, false, true, false, BxRwAccess::Read)
+            .ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA), 0, false, true, false, BxRwAccess::Read)
             .expect("an untranslated access cannot fail");
 
-        assert_eq!(host, EPT_GUEST_PA);
+        assert_eq!(host.get(), EPT_GUEST_PA);
     }
 
     /// The accessed and dirty bits the hypervisor reads back to find which
@@ -7368,7 +7375,7 @@ mod tests {
         let mut ctx = ept_guest(&mut machine);
         ctx.vmcs.eptptr = EPT_PML4 | 0x40;
 
-        ctx.ept_translate_for_data(EPT_GUEST_PA, 0, false, true, false, BxRwAccess::Write)
+        ctx.ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA), 0, false, true, false, BxRwAccess::Write)
             .expect("a fully permitted mapping translates");
 
         for (name, addr) in [
@@ -7377,12 +7384,12 @@ mod tests {
             ("pd", EPT_PD),
         ] {
             assert_ne!(
-                ctx.mem_read_qword(addr) & 0x100,
+                ctx.mem_read_qword(BxPhyAddress::new(addr)) & 0x100,
                 0,
                 "{name} entry must carry the accessed bit after a walk"
             );
         }
-        let leaf = ctx.mem_read_qword(EPT_PT + 8);
+        let leaf = ctx.mem_read_qword(BxPhyAddress::new(EPT_PT + 8));
         assert_ne!(leaf & 0x100, 0, "leaf entry must carry the accessed bit");
         assert_ne!(leaf & 0x200, 0, "a write must set the leaf's dirty bit");
     }
@@ -7530,9 +7537,9 @@ mod tests {
         ctx.vmcs.pin_based_ctls = VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS;
         ctx.vmcs.pi_notification_vector = 0xF2;
 
-        ctx.write_physical_byte(PID + (0x30 / 8), 1 << (0x30 % 8));
-        ctx.write_physical_byte(PID + (0x71 / 8), 1 << (0x71 % 8));
-        ctx.write_physical_byte(PID + 32, 1);
+        ctx.write_physical_byte(BxPhyAddress::new(PID) + (0x30 / 8), 1 << (0x30 % 8));
+        ctx.write_physical_byte(BxPhyAddress::new(PID) + (0x71 / 8), 1 << (0x71 % 8));
+        ctx.write_physical_byte(BxPhyAddress::new(PID) + 32, 1);
 
         assert!(
             ctx.vmx_posted_interrupt_processing(0xF2),
@@ -7544,8 +7551,8 @@ mod tests {
         assert_eq!(slice1, 1 << (0x30 % 32), "0x30 landed in virtual IRR slice 1");
         let slice3 = ctx.vmx_read_virtual_apic(LapicRegister::Irr1 as u32 + 16 * 3);
         assert_eq!(slice3, 1 << (0x71 % 32), "0x71 landed in slice 3");
-        assert_eq!(ctx.read_physical_byte(PID + 32) & 1, 0, "PID.ON is cleared");
-        assert_eq!(ctx.read_physical_byte(PID + (0x71 / 8)), 0, "PIR is drained");
+        assert_eq!(ctx.read_physical_byte(BxPhyAddress::new(PID) + 32) & 1, 0, "PID.ON is cleared");
+        assert_eq!(ctx.read_physical_byte(BxPhyAddress::new(PID) + (0x71 / 8)), 0, "PIR is drained");
     }
 
     /// An ordinary interrupt that merely arrived while posted interrupts were
@@ -7556,11 +7563,11 @@ mod tests {
         let mut ctx = vapic_guest(&mut machine);
         ctx.vmcs.pin_based_ctls = VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS;
         ctx.vmcs.pi_notification_vector = 0xF2;
-        ctx.write_physical_byte(PID + 32, 1);
+        ctx.write_physical_byte(BxPhyAddress::new(PID) + 32, 1);
 
         assert!(!ctx.vmx_posted_interrupt_processing(0x40));
         assert_eq!(
-            ctx.read_physical_byte(PID + 32) & 1,
+            ctx.read_physical_byte(BxPhyAddress::new(PID) + 32) & 1,
             1,
             "the descriptor is untouched for a different vector"
         );
@@ -8614,9 +8621,9 @@ mod tests {
         let mut ctx = machine.ctx();
         ctx.reset(crate::cpu::ResetReason::Hardware);
         ctx.memory.set_a20_mask(crate::config::A20Mask::OPEN);
-        ctx.mem_write_qword(GDT + 8, CODE_DPL3);
-        ctx.mem_write_qword(GDT + 16, DATA_DPL3);
-        ctx.mem_write_qword(IDT + 13 * 8, GP_GATE);
+        ctx.mem_write_qword(BxPhyAddress::new(GDT + 8), CODE_DPL3);
+        ctx.mem_write_qword(BxPhyAddress::new(GDT + 16), DATA_DPL3);
+        ctx.mem_write_qword(BxPhyAddress::new(IDT + 13 * 8), GP_GATE);
         ctx.set_gdtr_base_for_api(GDT);
         ctx.set_gdtr_limit_for_api(0x17);
         ctx.set_idtr_base_for_api(IDT);
@@ -8641,7 +8648,7 @@ mod tests {
 
         assert_eq!(ctx.rip(), HANDLER, "#GP's handler is entered");
         assert_eq!(
-            ctx.mem_read_dword(u64::from(ctx.esp())),
+            ctx.mem_read_dword(BxPhyAddress::new(u64::from(ctx.esp()))),
             INJECTED_ERROR_CODE,
             "the frame carries the injected error code"
         );

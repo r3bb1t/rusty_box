@@ -14,6 +14,7 @@ use super::{
     instrumentation::{MemAccessRW, MemType},
     BxCpuC, CpuError, Result,
 };
+use crate::config::BxPhyAddress;
 
 pub(super) const SMM_SAVE_STATE_MAP_SIZE: u32 = 128;
 
@@ -173,7 +174,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut paddr = (self.smbase as u64) + 0x10000;
         for dword in saved_state.iter_mut() {
             paddr -= 4;
-            *dword = self.smram_read_physical_dword(paddr);
+            *dword = self.smram_read_physical_dword(BxPhyAddress::new(paddr));
         }
 
         // Exit SMM
@@ -240,7 +241,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut paddr = (self.smbase as u64) + 0x10000;
         for &dword in saved_state.iter() {
             paddr -= 4;
-            self.smram_write_physical_dword(paddr, dword);
+            self.smram_write_physical_dword(BxPhyAddress::new(paddr), dword);
         }
 
         // Initialize CPU to SMM entry state (Bochs smm.cc)
@@ -738,7 +739,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read one dword of the SMRAM state-save area for `RSM`, reported to
     /// `phy_access` as Bochs smm.cc `resume_from_system_management_mode`
     /// reports each one.
-    fn smram_read_physical_dword(&mut self, paddr: u64) -> u32 {
+    fn smram_read_physical_dword(&mut self, paddr: BxPhyAddress) -> u32 {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 4];
         let value = match self.read_physical_routed(policy, paddr as _, 4, &mut data) {
@@ -757,7 +758,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Write one dword of the SMRAM state-save area on SMI entry, reported as
     /// Bochs smm.cc `enter_system_management_mode` reports each one through
     /// `write_physical_dword`.
-    fn smram_write_physical_dword(&mut self, paddr: u64, value: u32) {
+    fn smram_write_physical_dword(&mut self, paddr: BxPhyAddress, value: u32) {
         let policy = self.access_policy(paddr);
         let mut data = value.to_le_bytes();
         let stored = self.write_physical_routed(policy, paddr as _, 4, &mut data);
@@ -883,12 +884,12 @@ mod tests {
         assert_eq!(cpu.rip(), 0x8000, "SMM entry point");
 
         // Revision dword at SMBASE+0xfefc: low byte 0x64 + relocation bit.
-        let rev = cpu.smram_read_physical_dword(0x3fefc);
+        let rev = cpu.smram_read_physical_dword(BxPhyAddress::new(0x3fefc));
         assert_eq!(rev, 0x0002_0064, "x86-64 revision id visible to the BIOS");
         assert_eq!(rev & 0xff, 0x64, "the BIOS cmp $0x64 dispatch byte");
 
         // The relocation handler's store: new SMBASE into SMBASE+0xff00.
-        cpu.smram_write_physical_dword(0x3ff00, 0xa0000);
+        cpu.smram_write_physical_dword(BxPhyAddress::new(0x3ff00), 0xa0000);
 
         cpu.rsm(&Instruction::default())
             .expect("RSM restores a self-saved image");
@@ -936,7 +937,7 @@ mod tests {
 
         // Corrupt the saved CR4 image with unsupported bits (Bochs
         // check_CR4 failure path) — SMBASE+0xff48 is the CR4 slot.
-        cpu.smram_write_physical_dword(0x3ff48, 0xffff_ffff);
+        cpu.smram_write_physical_dword(BxPhyAddress::new(0x3ff48), 0xffff_ffff);
 
         let result = cpu.rsm(&Instruction::default());
         assert!(
@@ -1029,10 +1030,11 @@ mod tests {
         // The image describes a 32-bit PAE guest: paging on, and the EFER
         // reset left clear keeps it out of long mode.
         cpu.enter_system_management_mode();
-        let cr0 = cpu.smram_read_physical_dword(SAVED_CR0);
-        cpu.smram_write_physical_dword(SAVED_CR0, cr0 | CR0_PG_PE);
-        cpu.smram_write_physical_dword(SAVED_CR3, PDPT as u32);
-        cpu.smram_write_physical_dword(SAVED_CR4, CR4_PAE);
+        let at = BxPhyAddress::new;
+        let cr0 = cpu.smram_read_physical_dword(at(SAVED_CR0));
+        cpu.smram_write_physical_dword(at(SAVED_CR0), cr0 | CR0_PG_PE);
+        cpu.smram_write_physical_dword(at(SAVED_CR3), PDPT as u32);
+        cpu.smram_write_physical_dword(at(SAVED_CR4), CR4_PAE);
 
         let result = cpu.rsm(&Instruction::default());
         assert!(
@@ -1127,7 +1129,7 @@ mod tests {
 
         // ...and the CPU's own SMM-mode read of it does see SMRAM.
         assert_eq!(
-            cpu.smram_read_physical_dword(0xafefc),
+            cpu.smram_read_physical_dword(BxPhyAddress::new(0xafefc)),
             SMM_REVISION_ID,
             "in SMM the save area reads back from DRAM"
         );

@@ -204,7 +204,7 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     }
 
     #[inline]
-    pub fn fire_clflush(&mut self, laddr: u64, paddr: u64) {
+    pub fn fire_clflush(&mut self, laddr: u64, paddr: crate::config::BxPhyAddress) {
         self.tracer.clflush(laddr, paddr);
     }
 

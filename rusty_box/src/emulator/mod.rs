@@ -2280,7 +2280,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         let entry = &self.cpu_ref(0).dtlb.entries[idx];
         DtlbInfo {
             lpf: entry.lpf,
-            ppf: entry.ppf,
+            ppf: entry.ppf.get(),
             access_bits: entry.access_bits,
             ram_offset: entry.host_page.map(|page| page.ram_offset()),
         }

@@ -309,7 +309,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
             if gate_dest_offset > cs_descriptor.u.segment_limit_scaled() {
                 let gdt_entry_laddr = self.gdtr.base + (cs_selector.index as u64 * 8);
-                let gdt_phys = gdt_entry_laddr.wrapping_sub(0xC0000000);
+                let gdt_phys =
+                    crate::config::BxPhyAddress::new(gdt_entry_laddr.wrapping_sub(0xC0000000));
                 let raw_lo = self.mem_read_dword(gdt_phys);
                 let raw_hi = self.mem_read_dword(gdt_phys + 4);
                 tracing::error!(

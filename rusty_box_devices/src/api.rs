@@ -195,6 +195,14 @@ impl BxPhyAddress {
         self.0 & 0xFFF
     }
 
+    /// The byte `offset` into the page frame this address names (Bochs
+    /// `ppf | pageOffset`): the address is a page frame's first byte and
+    /// `offset` lies within the page, so the two share no bit.
+    #[inline(always)]
+    pub const fn at_page_offset(self, offset: u64) -> Self {
+        Self(self.0 | offset)
+    }
+
     /// The address with only the bits `mask` keeps: the A20 gate's mask, a
     /// physical-address width's, an alignment.
     #[inline(always)]

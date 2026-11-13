@@ -1750,7 +1750,7 @@ mod tests {
         ctx.sregs[BxSegregs::Cs as usize].selector.rpl = 3;
         ctx.eflags.set_iopl(0);
         ctx.in_svm_guest = true;
-        ctx.vmcb.ctrls.iopm_base = IOPM;
+        ctx.vmcb.ctrls.iopm_base = crate::config::BxPhyAddress::new(IOPM);
         ctx.vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_IO;
 
         let gate = ctx

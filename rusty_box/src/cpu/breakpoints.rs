@@ -310,7 +310,7 @@ impl<T: Instrumentation> ExecCtx<'_, T> {
         self.code_breakpoints
             .physical_set()
             .iter()
-            .find(|&&address| address == physical)
+            .find(|&&address| address == physical.get())
             .map(|&address| BreakpointHere {
                 breakpoint: CodeBreakpoint::Physical(address),
                 linear,

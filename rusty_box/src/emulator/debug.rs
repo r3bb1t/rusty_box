@@ -8,6 +8,7 @@ use crate::cpu::instrumentation::{
     CpuDebugView, Fetched, Instrumentation, LinearRange, MappingWalk, PageMapping, VmxGuest,
     WalkStep,
 };
+use crate::config::BxPhyAddress;
 use crate::cpu::paging::{DbgWalk, VmxGuestWalk};
 #[cfg(doc)]
 use crate::cpu::{MAX_LINEAR_BREAKPOINTS, MAX_PHYSICAL_BREAKPOINTS};
@@ -125,6 +126,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
         self.machine
             .exec_ctx(self.index)
             .dbg_xlate_linear2phy(laddr, DbgWalk::Guest)
+            .map(BxPhyAddress::get)
     }
 
     /// [`Self::dbg_xlate_linear2phy`] through another address space: the
@@ -135,6 +137,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
         self.machine
             .exec_ctx(self.index)
             .dbg_xlate_linear2phy(laddr, DbgWalk::Root(cr3))
+            .map(BxPhyAddress::get)
     }
 
     /// Every page the paging structures rooted at the CR3 value `cr3` map
@@ -169,7 +172,10 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     /// returned is the machine's — what [`Self::dbg_fetch_mem`] reads.
     pub fn dbg_xlate_vmx_guest_linear2phy(&mut self, guest: &VmxGuest, cr3: u64, laddr: u64) -> Option<u64> {
         let walk = DbgWalk::VmxGuest(VmxGuestWalk::of(guest, cr3));
-        self.machine.exec_ctx(self.index).dbg_xlate_linear2phy(laddr, walk)
+        self.machine
+            .exec_ctx(self.index)
+            .dbg_xlate_linear2phy(laddr, walk)
+            .map(BxPhyAddress::get)
     }
 
     /// [`Self::dbg_page_mappings_in`] inside the VMX guest `guest`, read as

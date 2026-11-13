@@ -573,7 +573,7 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     pub(super) in_svm_guest: bool,
     /// global interrupt enable flag, when zero all external interrupt disabled
     pub(super) svm_gif: bool,
-    pub(super) vmcbptr: u64,
+    pub(super) vmcbptr: BxPhyAddress,
     /// Direct backing for the VMCB, as an offset into the memory allocation,
     /// or `None` when the accessors must go through the handler-aware
     /// physical-access paths instead.
@@ -772,14 +772,14 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     /// without a base in hand — the eviction sidecar publishes it directly —
     /// and it is what removes the last borrowed pointer from this struct.
     pub(super) eip_fetch_window: Option<super::tlb::FetchWindow>,
-    pub(super) p_addr_fetch_page: u64, // Guest physical address of current instruction page
+    pub(super) p_addr_fetch_page: BxPhyAddress, // Guest physical address of current instruction page
 
     // Boundaries of current stack page, based on ESP
     // Linear address of current stack page
     pub(super) esp_page_bias: BxAddress,
     pub(super) esp_page_window_size: u32,
     /// Guest physical address of current stack page
-    pub(super) p_addr_stack_page: u64,
+    pub(super) p_addr_stack_page: BxPhyAddress,
 
     pub(super) espPageMemtype: BxMemType,
 
@@ -1375,11 +1375,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 #[derive(Debug, Default, Copy, Clone)]
 pub(crate) struct AddressXlation {
     /// The address offset after resolution
-    pub(crate) rm_addr: u64,
+    pub(crate) rm_addr: BxPhyAddress,
     /// physical address after translation of 1st len1 bytes of data
-    pub(crate) paddress1: u64,
+    pub(crate) paddress1: BxPhyAddress,
     /// physical address after translation of 2nd len2 bytes of data
-    pub(crate) paddress2: u64,
+    pub(crate) paddress2: BxPhyAddress,
     /// Number of bytes in page 1
     pub(crate) len1: u32,
     // Number of bytes in page 2
@@ -1595,7 +1595,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// the host mapping, applying no paging. That is what lets the page-table
     /// and EPT walkers use it to read their own entries — a linear read would
     /// translate an entry's address through the very tables being walked.
-    pub(super) fn mem_read_qword(&mut self, paddr: u64) -> u64 {
+    pub(super) fn mem_read_qword(&mut self, paddr: BxPhyAddress) -> u64 {
         let bytes = [
             self.mem_read_byte(paddr),
             self.mem_read_byte(paddr + 1),
@@ -1610,7 +1610,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     }
 
     /// Write a qword to PHYSICAL memory, little-endian. See `mem_read_qword`.
-    pub(super) fn mem_write_qword(&mut self, paddr: u64, value: u64) {
+    pub(super) fn mem_write_qword(&mut self, paddr: BxPhyAddress, value: u64) {
         // Write 8 bytes to memory
         let bytes = value.to_le_bytes();
         self.mem_write_byte(paddr, bytes[0]);
@@ -1626,7 +1626,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
 #[derive(Debug, Default)]
 pub struct MonitorAddr {
-    pub(super) monitor_addr: u64,
+    pub(super) monitor_addr: BxPhyAddress,
     pub(crate) armed_by: u32,
 }
 
@@ -1638,9 +1638,9 @@ pub(super) const BX_MONITOR_ARMED_BY_UMONITOR: u32 = 3;
 impl MonitorAddr {
     const CACHE_LINE_SIZE: u64 = 64;
 
-    pub fn arm(&mut self, addr: u64, by: u32) {
+    pub fn arm(&mut self, addr: BxPhyAddress, by: u32) {
         // align to cache line
-        self.monitor_addr = addr & !(Self::CACHE_LINE_SIZE - 1);
+        self.monitor_addr = addr.masked(!(Self::CACHE_LINE_SIZE - 1));
         self.armed_by = by;
     }
 
@@ -1846,7 +1846,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(crate) fn on_lin_access(
         &mut self,
         laddr: u64,
-        paddr: u64,
+        paddr: BxPhyAddress,
         data: &[u8],
         rw: super::instrumentation::MemAccessRW,
     ) {
@@ -1878,7 +1878,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     #[inline(always)]
     pub(crate) fn on_phy_access(
         &mut self,
-        paddr: u64,
+        paddr: BxPhyAddress,
         data: &[u8],
         rw: super::instrumentation::MemAccessRW,
     ) {
@@ -1893,7 +1893,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     #[inline(always)]
     pub(crate) fn on_phy_access_as(
         &mut self,
-        paddr: u64,
+        paddr: BxPhyAddress,
         data: &[u8],
         rw: super::instrumentation::MemAccessRW,
         memtype: super::instrumentation::MemType,
@@ -1933,7 +1933,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// exactly the same physical page as the memory mapping decision.
     #[inline]
     pub(crate) fn memory_access_policy(&self, addr: BxPhyAddress) -> CpuMemoryPolicy {
-        CpuMemoryPolicy::new(self.smm_mode(), self.is_monitor(addr.page_base().get(), 0xfff))
+        CpuMemoryPolicy::new(self.smm_mode(), self.is_monitor(addr.page_base(), 0xfff))
     }
 
 
@@ -2044,8 +2044,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// path and let the scalar RMW access perform Bochs-ordered invalidation
     /// before the corresponding external side effect.
     #[inline]
-    pub(crate) fn smc_range_has_cached_code(&self, p_addr: u64, len: u32) -> bool {
-        self.memory.smc_range_has_stamps(BxPhyAddress::new(p_addr), len)
+    pub(crate) fn smc_range_has_cached_code(&self, p_addr: BxPhyAddress, len: u32) -> bool {
+        self.memory.smc_range_has_stamps(p_addr, len)
     }
 
     /// Bochs icache.h `bxPageWriteStampTable::decWriteStamp` + icache.cc
@@ -2056,8 +2056,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// cpus are flushed by the emulator's drain before their next slice,
     /// which the single-threaded round-robin scheduler guarantees runs first.
     #[inline]
-    pub(crate) fn smc_write_check(&mut self, p_addr: u64, len: u32) {
-        self.memory.smc_dec_write_stamp(BxPhyAddress::new(p_addr), len);
+    pub(crate) fn smc_write_check(&mut self, p_addr: BxPhyAddress, len: u32) {
+        self.memory.smc_dec_write_stamp(p_addr, len);
         self.smc_sync_after_phys_write();
     }
 
@@ -2750,7 +2750,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if self.eip_page_window_size == 0 || eip_biased >= u64::from(self.eip_page_window_size) {
             return None;
         }
-        let p_addr: u64 = self.p_addr_fetch_page.wrapping_add(eip_biased);
+        let p_addr = self.p_addr_fetch_page.wrapping_add(eip_biased);
         let hash_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
         let entry = &self.i_cache.entry[hash_idx];
         if entry.p_addr != p_addr {
@@ -2857,7 +2857,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         let eip_biased = eip_biased_64 as u32;
 
         // Physical address for this instruction
-        let p_addr: u64 = self.p_addr_fetch_page.wrapping_add(u64::from(eip_biased));
+        let p_addr = self.p_addr_fetch_page.wrapping_add(u64::from(eip_biased));
 
         // Direct icache lookup without cloning BxICacheEntry.
         // We only need mpool_start_idx and tlen from the entry.
@@ -3378,7 +3378,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             }
         } else {
             let mem_len = self.memory.get_memory_len();
-            let page_base = BxPhyAddress::new(self.p_addr_fetch_page);
+            let page_base = self.p_addr_fetch_page;
             let current_p_addr = page_base.wrapping_add(u64::from(page_offset));
             let page_policy = self.memory_access_policy(self.memory.a20_addr(page_base));
 
@@ -3425,7 +3425,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                                 self.eip_page_window_size.saturating_sub(page_offset);
                             let fetch_len = available.min(page_remaining);
                             if fetch_len != 0 {
-                                self.p_addr_fetch_page = current_p_addr.get();
+                                self.p_addr_fetch_page = current_p_addr;
                                 self.eip_page_bias = 0u64.wrapping_sub(self.rip());
                                 self.eip_page_window_size = fetch_len;
                                 self.eip_fetch_window = Some(super::tlb::FetchWindow {
@@ -3477,7 +3477,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             }
             let eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
             let p_addr = self.p_addr_fetch_page.wrapping_add(u64::from(eip_biased));
-            if self.eip_fetch_window.is_none() && p_addr >= mem_len.try_into()? {
+            if self.eip_fetch_window.is_none() && p_addr.get() >= u64::try_from(mem_len)? {
                 // Address is beyond available memory - set to no direct access
                 tracing::trace!("prefetch: address {p_addr:#x} beyond memory limit {mem_len:#x} and no ROM mapping");
                 self.eip_fetch_window = None;
@@ -3767,7 +3767,7 @@ mod tests {
         let (legacy_mpool, _) =
             exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         let legacy_mode = cpu.fetch_mode_mask.bits().into();
-        assert!(cpu.i_cache.find_entry(LEGACY_TABLE, legacy_mode).is_some());
+        assert!(cpu.i_cache.find_entry(BxPhyAddress::new(LEGACY_TABLE), legacy_mode).is_some());
         assert!(stamped(&mem, LEGACY_TABLE, 4));
 
         cpu.invalidate_prefetch_q();
@@ -3779,7 +3779,7 @@ mod tests {
             exec_with(&mut cpu, &mut mem, |ctx| ctx.translate_linear_system_write(0))
                 .unwrap();
         assert_eq!(
-            legacy_pa, CODE_PAGE,
+            legacy_pa.get(), CODE_PAGE,
             "the legacy direct system-write walk must resolve the leaf"
         );
         let mut legacy_pte = [0; 4];
@@ -3790,7 +3790,7 @@ mod tests {
             "the legacy direct dword writer must persist A+D"
         );
         assert!(
-            cpu.i_cache.find_entry(LEGACY_TABLE, legacy_mode).is_none(),
+            cpu.i_cache.find_entry(BxPhyAddress::new(LEGACY_TABLE), legacy_mode).is_none(),
             "the live cached legacy trace must not survive the PTE write"
         );
         assert_ne!(cpu.async_event, 0);
@@ -3823,7 +3823,7 @@ mod tests {
         cpu.prev_rip = PAE_TABLE;
         let (pae_mpool, _) = exec_with(&mut cpu, &mut mem, |ctx| ctx.get_icache_entry()).unwrap();
         let pae_mode = cpu.fetch_mode_mask.bits().into();
-        assert!(cpu.i_cache.find_entry(PAE_TABLE, pae_mode).is_some());
+        assert!(cpu.i_cache.find_entry(BxPhyAddress::new(PAE_TABLE), pae_mode).is_some());
         assert!(stamped(&mem, PAE_TABLE, 8));
 
         cpu.invalidate_prefetch_q();
@@ -3836,7 +3836,7 @@ mod tests {
             exec_with(&mut cpu, &mut mem, |ctx| ctx.translate_linear_system_write(0))
                 .unwrap();
         assert_eq!(
-            pae_pa, CODE_PAGE,
+            pae_pa.get(), CODE_PAGE,
             "the PAE direct system-write walk must resolve the leaf"
         );
         let mut pae_pte = [0; 8];
@@ -3847,7 +3847,7 @@ mod tests {
             "the PAE direct qword writer must persist A+D"
         );
         assert!(
-            cpu.i_cache.find_entry(PAE_TABLE, pae_mode).is_none(),
+            cpu.i_cache.find_entry(BxPhyAddress::new(PAE_TABLE), pae_mode).is_none(),
             "the live cached PAE trace must not survive the PTE write"
         );
         assert_ne!(cpu.async_event, 0);
@@ -3920,7 +3920,7 @@ mod tests {
         let fetch_mode = cpu.fetch_mode_mask.bits().into();
         assert!(
             cpu.i_cache
-                .find_entry(FIRST_CODE_PAGE + 0x0ffe, fetch_mode)
+                .find_entry(BxPhyAddress::new(FIRST_CODE_PAGE + 0x0ffe), fetch_mode)
                 .is_some(),
             "normal lookup must commit the primary page-split trace"
         );
@@ -3943,7 +3943,7 @@ mod tests {
         cpu.tlb_flush();
         assert!(
             cpu.i_cache
-                .find_entry(FIRST_CODE_PAGE + 0x0ffe, fetch_mode)
+                .find_entry(BxPhyAddress::new(FIRST_CODE_PAGE + 0x0ffe), fetch_mode)
                 .is_none(),
             "TLB break_links must invalidate the live primary split trace"
         );
@@ -4127,7 +4127,7 @@ mod tests {
 
         // Full flush also wakes an MWAIT sleep to ACTIVE.
         let mut cpu = BxCpuBuilder::new().build().unwrap();
-        cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
+        cpu.monitor.arm(BxPhyAddress::new(0x1000), BX_MONITOR_ARMED_BY_MONITOR);
         cpu.activity_state = CpuActivityState::Mwait;
         assert!(cpu.monitor.armed());
         cpu.tlb_flush();
@@ -4140,7 +4140,7 @@ mod tests {
 
         // Non-global flush disarms too.
         let mut cpu = BxCpuBuilder::new().build().unwrap();
-        cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
+        cpu.monitor.arm(BxPhyAddress::new(0x1000), BX_MONITOR_ARMED_BY_MONITOR);
         cpu.tlb_flush_non_global();
         assert!(
             !cpu.monitor.armed(),
@@ -4149,13 +4149,13 @@ mod tests {
 
         // Single-page invlpg disarms too.
         let mut cpu = BxCpuBuilder::new().build().unwrap();
-        cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
+        cpu.monitor.arm(BxPhyAddress::new(0x1000), BX_MONITOR_ARMED_BY_MONITOR);
         cpu.tlb_invlpg(0x2000);
         assert!(!cpu.monitor.armed(), "tlb_invlpg must disarm the monitor");
 
         // Host-side rewire must PRESERVE the monitor across its internal flush.
         let mut cpu = BxCpuBuilder::new().build().unwrap();
-        cpu.monitor.arm(0x1000, BX_MONITOR_ARMED_BY_MONITOR);
+        cpu.monitor.arm(BxPhyAddress::new(0x1000), BX_MONITOR_ARMED_BY_MONITOR);
         cpu.invalidate_host_memory_mappings();
         assert!(
             cpu.monitor.armed(),
@@ -4269,8 +4269,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// would let MWAIT watch a different page than the one memory then maps.
     /// This is the only place the pair is formed, so the two cannot disagree
     /// (R5).
-    pub(super) fn access_policy(&self, paddr: u64) -> CpuMemoryPolicy {
-        let a20_addr = self.memory.a20_addr(BxPhyAddress::new(paddr));
+    pub(super) fn access_policy(&self, paddr: BxPhyAddress) -> CpuMemoryPolicy {
+        let a20_addr = self.memory.a20_addr(paddr);
         self.memory_access_policy(a20_addr)
     }
 
@@ -4284,13 +4284,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     pub(super) fn read_physical_routed(
         &mut self,
         policy: CpuMemoryPolicy,
-        paddr: u64,
+        paddr: BxPhyAddress,
         len: usize,
         data: &mut [u8],
     ) -> crate::Result<()> {
         match self
             .memory
-            .read_physical_page(policy, BxPhyAddress::new(paddr), len, data)?
+            .read_physical_page(policy, paddr, len, data)?
         {
             crate::memory::PhysAccess::Done => Ok(()),
             crate::memory::PhysAccess::Mmio(hit) => {
@@ -4315,13 +4315,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     pub(super) fn write_physical_routed(
         &mut self,
         policy: CpuMemoryPolicy,
-        paddr: u64,
+        paddr: BxPhyAddress,
         len: usize,
         data: &mut [u8],
     ) -> crate::Result<()> {
         match self
             .memory
-            .write_physical_page(policy, BxPhyAddress::new(paddr), len, data)?
+            .write_physical_page(policy, paddr, len, data)?
         {
             crate::memory::PhysAccess::Done => Ok(()),
             crate::memory::PhysAccess::Mmio(hit) => {

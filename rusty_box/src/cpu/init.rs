@@ -481,7 +481,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.msr.ia32_feature_ctrl = 0;
         }
 
-        self.set_VMCBPTR(0);
+        self.set_VMCBPTR(crate::config::BxPhyAddress::new(0));
         self.in_svm_guest = false;
         self.svm_gif = true;
 
@@ -775,7 +775,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     ///
     /// A reset has no live VMCB host mapping; publish that transition before
     /// allocator checks can run again.
-    fn set_VMCBPTR(&mut self, vmcb_ptr: u64) {
+    fn set_VMCBPTR(&mut self, vmcb_ptr: crate::config::BxPhyAddress) {
         self.vmcbptr = vmcb_ptr;
         self.vmcb_host_offset = None;
     }

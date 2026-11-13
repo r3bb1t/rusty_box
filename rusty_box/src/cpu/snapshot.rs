@@ -164,7 +164,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             writer.write_u64(mask.rrx())?;
         }
 
-        writer.write_u64(self.monitor.monitor_addr)?;
+        writer.write_u64(self.monitor.monitor_addr.get())?;
         writer.write_u32(self.monitor.armed_by)?;
 
         writer.write_u64(self.uintr.ui_handler)?;
@@ -216,7 +216,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         writer.write_bool(self.in_svm_guest)?;
         writer.write_bool(self.svm_gif)?;
-        writer.write_u64(self.vmcbptr)?;
+        writer.write_u64(self.vmcbptr.get())?;
         writer.write_u32(self.vmcb_memtype)?;
         // Whether the stream carries a VMCB block is a fact about the CPU
         // MODEL, so it is read from the model rather than from a second copy
@@ -388,7 +388,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if monitor_addr & 63 != 0 || monitor_armed_by > super::cpu::BX_MONITOR_ARMED_BY_UMONITOR {
             return Err(snapshot_invalid("monitor state is invalid"));
         }
-        self.monitor.monitor_addr = monitor_addr;
+        self.monitor.monitor_addr = crate::config::BxPhyAddress::new(monitor_addr);
         self.monitor.armed_by = monitor_armed_by;
 
         let supports_uintr = self.bx_cpuid_support_isa_extension(
@@ -496,7 +496,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if vmcbptr != 0 && vmcbptr & 0xfff != 0 {
             return Err(snapshot_invalid("VMCB pointer is not page aligned"));
         }
-        self.vmcbptr = vmcbptr;
+        self.vmcbptr = crate::config::BxPhyAddress::new(vmcbptr);
         self.vmcb_memtype = vmcb_memtype;
         if has_vmcb {
             restore_v3_vmcb_cache(reader, &mut self.vmcb)?;
@@ -1239,8 +1239,8 @@ fn save_v3_vmcb_cache<W: SnapWrite>(
     }
     write_v3_fields!(writer;
         write_u32(vmcb.ctrls.exitintinfo), write_u32(vmcb.ctrls.exitintinfo_error_code),
-        write_u32(vmcb.ctrls.eventinj), write_u64(vmcb.ctrls.iopm_base),
-        write_u64(vmcb.ctrls.msrpm_base), write_u8(vmcb.ctrls.v_tpr),
+        write_u32(vmcb.ctrls.eventinj), write_u64(vmcb.ctrls.iopm_base.get()),
+        write_u64(vmcb.ctrls.msrpm_base.get()), write_u8(vmcb.ctrls.v_tpr),
         write_u8(vmcb.ctrls.v_intr_prio), write_bool(vmcb.ctrls.v_ignore_tpr),
         write_bool(vmcb.ctrls.v_intr_masking), write_u8(vmcb.ctrls.v_intr_vector),
         write_bool(vmcb.ctrls.nested_paging), write_u64(vmcb.ctrls.ncr3),
@@ -1285,8 +1285,8 @@ fn restore_v3_vmcb_cache<R: SnapRead>(
     vmcb.ctrls.exitintinfo = reader.read_u32()?;
     vmcb.ctrls.exitintinfo_error_code = reader.read_u32()?;
     vmcb.ctrls.eventinj = reader.read_u32()?;
-    vmcb.ctrls.iopm_base = reader.read_u64()?;
-    vmcb.ctrls.msrpm_base = reader.read_u64()?;
+    vmcb.ctrls.iopm_base = crate::config::BxPhyAddress::new(reader.read_u64()?);
+    vmcb.ctrls.msrpm_base = crate::config::BxPhyAddress::new(reader.read_u64()?);
     let v_tpr = reader.read_u8()?;
     let v_intr_prio = reader.read_u8()?;
     let v_ignore_tpr = reader.read_bool()?;
@@ -1381,7 +1381,7 @@ mod tests {
 
         cpu.in_svm_guest = true;
         cpu.svm_gif = false;
-        cpu.vmcbptr = 0x009A_B000;
+        cpu.vmcbptr = crate::config::BxPhyAddress::new(0x009A_B000);
         cpu.vmcb_host_offset = Some(0xDEAD_BEEF); // must NOT survive a restore
         cpu.msr.svm_hsave_pa = 0x00DE_F000;
         cpu.msr.svm_vm_cr = 0x2;
@@ -1411,7 +1411,7 @@ mod tests {
 
         assert!(restored.in_svm_guest);
         assert!(!restored.svm_gif);
-        assert_eq!(restored.vmcbptr, 0x009A_B000);
+        assert_eq!(restored.vmcbptr.get(), 0x009A_B000);
         assert_eq!(
             restored.vmcb_host_offset, None,
             "cached host pointer must be re-resolved after restore"

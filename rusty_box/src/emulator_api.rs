@@ -787,6 +787,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     pub fn virt_to_phys(&mut self, vaddr: u64) -> Result<u64> {
         self.exec_ctx(0)
             .translate_linear_system_read(vaddr)
+            .map(crate::config::BxPhyAddress::get)
             .map_err(Error::Cpu)
     }
 
@@ -820,7 +821,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
                 .exec_ctx(0)
                 .translate_linear_with_cr3(va, cr3)
                 .ok_or_else(|| Error::Memory(crate::memory::MemoryError::PageNotPresent))?;
-            self.mem_read(pa, &mut buf[offset..offset + chunk])?;
+            self.mem_read(pa.get(), &mut buf[offset..offset + chunk])?;
             offset += chunk;
         }
         Ok(())

@@ -120,6 +120,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             append_report(&path, &report);
             return;
         };
+        let rip_phys = rip_phys.get();
         let page = rip_phys & !0xfff;
         out!(
             "fault RIP phys={:#x} (page {:#x}); page has SMC stamps: {}",
@@ -177,8 +178,8 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             .entry
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.p_addr != INVALID_PHY && e.p_addr & !0xfff == page)
-            .map(|(idx, e)| (idx, e.p_addr, e.tlen, e.mpool_start_idx))
+            .filter(|(_, e)| e.p_addr.get() != INVALID_PHY && e.p_addr.get() & !0xfff == page)
+            .map(|(idx, e)| (idx, e.p_addr.get(), e.tlen, e.mpool_start_idx))
             .collect();
         for (idx, p_addr, tlen, mpool_start_idx) in page_entries {
             entries += 1;

@@ -1,6 +1,6 @@
 #![allow(private_interfaces, unused_assignments)]
 
-use crate::config::{BxAddress, BxPtrEquiv};
+use crate::config::{BxAddress, BxPhyAddress, BxPtrEquiv};
 
 pub type BxMemType = u32;
 
@@ -176,7 +176,7 @@ pub(crate) struct TLBEntry<P> {
     /// linear page frame
     pub(crate) lpf: BxAddress,
     // physical page frame
-    pub(crate) ppf: u64,
+    pub(crate) ppf: BxPhyAddress,
     /// Where the page backing this entry lives in host memory, or `None` when
     /// the page must take the slow path — it carries MMIO handlers, is ROM, or
     /// falls outside guest RAM.
@@ -221,7 +221,7 @@ impl<P> TLBEntry<P> {
     /// against. A `const` so a whole TLB can be built without running code.
     const INVALID: Self = Self {
         lpf: BX_INVALID_TLB_ENTRY,
-        ppf: 0,
+        ppf: BxPhyAddress::new(0),
         host_page: None,
         access_bits: 0,
         pkey: 0,
@@ -436,8 +436,8 @@ pub(super) fn lpf_of(laddr: BxAddress) -> BxAddress {
 }
 
 #[inline]
-pub(super) fn ppf_of(paddr: BxAddress) -> BxAddress {
-    paddr & PPF_MASK
+pub(super) fn ppf_of(paddr: BxPhyAddress) -> BxPhyAddress {
+    paddr.masked(PPF_MASK)
 }
 
 /// The distinction every non-global invalidation rests on.
@@ -458,7 +458,7 @@ mod flush_tests {
         let mut tlb = Tlb::<RamPage, 8>::new();
         for (slot, access_bits) in [(0usize, TLB_GLOBAL_PAGE | 0x1), (1usize, 0x1)] {
             tlb.entries[slot].lpf = (slot as u64) << 12;
-            tlb.entries[slot].ppf = (slot as u64) << 12;
+            tlb.entries[slot].ppf = BxPhyAddress::new((slot as u64) << 12);
             tlb.entries[slot].access_bits = access_bits;
         }
         tlb

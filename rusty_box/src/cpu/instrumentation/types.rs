@@ -447,7 +447,7 @@ pub struct OpcodeEvent<'a> {
 /// hint (not a byte count of data).
 #[derive(Debug, Copy, Clone)]
 pub struct MwaitEvent {
-    pub addr: u64,
+    pub addr: crate::config::BxPhyAddress,
     pub len: u32,
     pub flags: MwaitFlags,
 }
@@ -458,7 +458,7 @@ pub struct MwaitEvent {
 #[derive(Debug, Copy, Clone)]
 pub struct LinAccess<'a> {
     pub lin: u64,
-    pub phy: u64,
+    pub phy: crate::config::BxPhyAddress,
     pub data: &'a [u8],
     pub memtype: MemType,
     pub rw: MemAccessRW,
@@ -469,7 +469,7 @@ pub struct LinAccess<'a> {
 /// Same shape as [`LinAccess`] but without a linear address.
 #[derive(Debug, Copy, Clone)]
 pub struct PhyAccess<'a> {
-    pub phy: u64,
+    pub phy: crate::config::BxPhyAddress,
     pub data: &'a [u8],
     pub memtype: MemType,
     pub rw: MemAccessRW,

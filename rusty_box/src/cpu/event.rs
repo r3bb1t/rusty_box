@@ -1810,7 +1810,7 @@ mod tests {
         let mut bus = TestBus::new();
         cpu.reset(ResetReason::Hardware);
         cpu.activity_state = CpuActivityState::Mwait;
-        cpu.monitor.arm(0x1000, crate::cpu::cpu::BX_MONITOR_ARMED_BY_MONITOR);
+        cpu.monitor.arm(BxPhyAddress::new(0x1000), crate::cpu::cpu::BX_MONITOR_ARMED_BY_MONITOR);
         cpu.inhibit_mask = INHIBITED;
         cpu.unmask_event(BxCpuC::<()>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
         cpu.signal_event(BxCpuC::<()>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);

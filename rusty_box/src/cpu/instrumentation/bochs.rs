@@ -198,7 +198,7 @@ pub trait Instrumentation: Default + 'static {
     fn cache_cntrl(&mut self, what: CacheCntrl) {}
 
     /// CLFLUSH instruction.
-    fn clflush(&mut self, laddr: u64, paddr: u64) {}
+    fn clflush(&mut self, laddr: u64, paddr: crate::config::BxPhyAddress) {}
 
     /// Prefetch hint.
     fn prefetch_hint(&mut self, ev: &PrefetchEvent) {}
@@ -357,7 +357,7 @@ macro_rules! impl_instrumentation_tuple {
                 $($T.cache_cntrl(what);)+
             }
 
-            fn clflush(&mut self, laddr: u64, paddr: u64) {
+            fn clflush(&mut self, laddr: u64, paddr: crate::config::BxPhyAddress) {
                 let ($($T,)+) = self;
                 $($T.clflush(laddr, paddr);)+
             }
@@ -509,7 +509,7 @@ mod hook_delivery {
         }
 
         fn phy_access(&mut self, ev: &PhyAccess) {
-            let access = PhyRecord { phy: ev.phy, len: ev.data.len(), memtype: ev.memtype };
+            let access = PhyRecord { phy: ev.phy.get(), len: ev.data.len(), memtype: ev.memtype };
             match ev.rw {
                 MemAccessRW::Write => self.writes.push(access),
                 _ => self.reads.push(access),
@@ -656,7 +656,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.set_vmcbptr(VMCB);
+                ctx.set_vmcbptr(crate::config::BxPhyAddress::new(VMCB));
                 match ctx.svm_vmexit(crate::cpu::svm::SVM_VMEXIT_INVALID, 0, 0) {
                     Ok(()) | Err(crate::cpu::CpuError::CpuLoopRestart) => {}
                     Err(other) => panic!("the exit itself failed: {other:?}"),
@@ -784,12 +784,13 @@ mod hook_delivery {
                 ctx.vmcs.secondary_proc_based_ctls = VMX_VM_EXEC_CTRL2_EPT_ENABLE;
                 // EPTP bit 6 turns on the accessed/dirty updates the walk makes.
                 ctx.vmcs.eptptr = EPT_PML4 | 0x40;
-                ctx.mem_write_qword(EPT_PML4, EPT_PDPT | EPT_RWX);
-                ctx.mem_write_qword(EPT_PDPT, EPT_PD | EPT_RWX);
-                ctx.mem_write_qword(EPT_PD, EPT_PT | EPT_RWX);
-                ctx.mem_write_qword(EPT_PT + 8, EPT_TARGET | EPT_WB_LEAF);
+                let at = crate::config::BxPhyAddress::new;
+                ctx.mem_write_qword(at(EPT_PML4), EPT_PDPT | EPT_RWX);
+                ctx.mem_write_qword(at(EPT_PDPT), EPT_PD | EPT_RWX);
+                ctx.mem_write_qword(at(EPT_PD), EPT_PT | EPT_RWX);
+                ctx.mem_write_qword(at(EPT_PT + 8), EPT_TARGET | EPT_WB_LEAF);
 
-                ctx.ept_translate_for_data(0x1000, 0, false, true, false, BxRwAccess::Read)
+                ctx.ept_translate_for_data(at(0x1000), 0, false, true, false, BxRwAccess::Read)
                     .expect("a fully permitted mapping translates");
             }
 
@@ -952,7 +953,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.set_vmcbptr(VMCB);
+                ctx.set_vmcbptr(crate::config::BxPhyAddress::new(VMCB));
                 ctx.in_svm_guest = true;
                 ctx.vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_SHUTDOWN;
                 ctx.last_exception_type = DOUBLE_FAULT_IN_DELIVERY;
@@ -1042,7 +1043,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.set_vmcbptr(VMCB);
+                ctx.set_vmcbptr(crate::config::BxPhyAddress::new(VMCB));
                 ctx.in_svm_guest = true;
                 let pae_host_cr0 = ctx.cr0.get32() | 0x8000_0001;
                 ctx.vmcb.host_state.cr0.set32(pae_host_cr0);

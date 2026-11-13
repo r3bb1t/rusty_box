@@ -381,13 +381,23 @@ Target design, not built: SVGA banking becomes
 `MemoryWindow::translate(WindowOffset) -> Option<VramOffset>`. Neither `MemoryWindow` nor
 `VramOffset` exists in the tree.
 
-Target design, not built: the CPU's own addresses become types too. Inside the x86 CPU —
-paging, the TLBs, the instruction cache, the routed-access helpers (`access_policy`,
-`read_physical_routed`, `write_physical_routed`), the VMCB and VMX structure pointers, the
-MONITOR address — physical addresses are still `u64`, converted to `BxPhyAddress` once where
-they reach memory or a device; linear addresses are `u64` (`BxAddress`) throughout; and the
-emulator's public memory and debugger API (`mem_read`, `mem_write`, `RamOffset::physical`,
-`DebugCpu::dbg_fetch_mem`) takes and returns `u64`.
+Inside the x86 CPU every physical address is a `BxPhyAddress` too: a TLB entry's page frame,
+the instruction cache's tags and the SMC stamp table, every translation's result (the walks,
+the EPT walk, the debugger's walk), the physical accessors (`mem_read_*`, `mem_write_*`, the
+page-walk readers and writers), the fetch and stack pages, the read-modify-write addresses,
+the VMCB pointer and the SVM permission-map bases, the MONITOR address, and the instrumentation
+events that carry one (`LinAccess::phy`, `PhyAccess::phy`, `MwaitEvent::addr`, `clflush`). A
+page walk's arithmetic on raw table entries stays numeric; an address is formed from it where
+the walk reads a table or returns its result, and a frame plus its offset is `at_page_offset`
+(Bochs `ppf | pageOffset`). VMCS fields hold the numbers a guest wrote; they become addresses
+where they are used.
+
+Target design, not built: linear and effective addresses become types (`BxAddress` is `u64`,
+and an effective address, an offset within a segment, is not yet told apart from the linear
+address it becomes); and the emulator's public memory and debugger API (`mem_read`,
+`mem_write`, `virt_to_phys`, `read_phys_dword`, `RamOffset::physical`, `dbg_fetch_mem`,
+`dbg_xlate_linear2phy`, `PageMapping::physical`, `DtlbInfo::ppf`, the host MMIO callbacks)
+takes and returns `u64`.
 
 **RAM offsets and allocation offsets** are the pair easiest to mix up, because both are
 `usize` byte offsets and they are equal whenever residency is full.

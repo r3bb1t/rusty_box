@@ -10,6 +10,7 @@
 //! - `Emulator::setup_cpu_mode` (and friends)
 
 use super::arch_state::{SegmentAttributeParts, SegmentAttributes, SegmentState};
+use crate::config::BxPhyAddress;
 use super::decoder::BxSegregs;
 use super::instrumentation::X86Reg;
 use super::BxCpuC;
@@ -1318,14 +1319,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
 
     fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> bool {
         for (i, slot) in buf.iter_mut().enumerate() {
-            *slot = self.mem_read_byte(addr + i as u64);
+            *slot = self.mem_read_byte(BxPhyAddress::new(addr) + i as u64);
         }
         true
     }
 
     fn mem_write(&mut self, addr: u64, data: &[u8]) -> bool {
         for (i, &byte) in data.iter().enumerate() {
-            self.mem_write_byte(addr + i as u64, byte);
+            self.mem_write_byte(BxPhyAddress::new(addr) + i as u64, byte);
         }
         true
     }
@@ -1375,7 +1376,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
 fn virt_read_chunked<C, Tr>(buf: &mut [u8], start_va: u64, translate: Tr, ctx: &mut C) -> bool
 where
     C: ReadsPhysical,
-    Tr: Fn(&mut C, u64) -> Option<u64>,
+    Tr: Fn(&mut C, u64) -> Option<BxPhyAddress>,
 {
     let mut off: usize = 0;
     while off < buf.len() {
@@ -1395,14 +1396,14 @@ where
 
 /// The one operation [`virt_read_chunked`] needs from what it is reading.
 trait ReadsPhysical {
-    fn read_physical_byte(&mut self, paddr: u64) -> u8;
+    fn read_physical_byte(&mut self, paddr: BxPhyAddress) -> u8;
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> ReadsPhysical
     for crate::cpu::exec_ctx::ExecCtx<'_, T>
 {
     #[inline]
-    fn read_physical_byte(&mut self, paddr: u64) -> u8 {
+    fn read_physical_byte(&mut self, paddr: BxPhyAddress) -> u8 {
         self.mem_read_byte(paddr)
     }
 }

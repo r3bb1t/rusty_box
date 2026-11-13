@@ -310,8 +310,8 @@ pub struct SvmControls {
 
     pub eventinj: u32,
 
-    pub iopm_base: u64,
-    pub msrpm_base: u64,
+    pub iopm_base: BxPhyAddress,
+    pub msrpm_base: BxPhyAddress,
 
     pub v_tpr: u8,
     pub v_intr_prio: u8,
@@ -695,16 +695,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Set the VMCB pointer and cache the host memory address.
     /// Bochs svm.cc set_VMCBPTR()
-    pub(super) fn set_vmcbptr(&mut self, vmcbptr: u64) {
+    pub(super) fn set_vmcbptr(&mut self, vmcbptr: BxPhyAddress) {
         self.vmcbptr = vmcbptr;
-        if vmcbptr != 0 {
+        if vmcbptr.get() != 0 {
             // Try to get a direct host pointer for fast VMCB access
             {
                 let policy = self.access_policy(vmcbptr);
                 use super::rusty_box::MemoryAccessType;
                 match self
                     .memory
-                    .host_mem_range(BxPhyAddress::new(vmcbptr), MemoryAccessType::RW, policy)
+                    .host_mem_range(vmcbptr, MemoryAccessType::RW, policy)
                 {
                     // VMCB accessors directly offset this base through PAT.
                     // A block-backed span may end sooner, in which case the
@@ -895,9 +895,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let exceptions_intercept = self.vmcb_read32(SVM_CONTROL32_INTERCEPT_EXCEPTIONS);
 
         // Force 4K page alignment on IOPM base
-        let iopm_base = self.vmcb_read64(SVM_CONTROL64_IOPM_BASE_PHY_ADDR) & !0xFFF;
+        let iopm_base =
+            BxPhyAddress::new(self.vmcb_read64(SVM_CONTROL64_IOPM_BASE_PHY_ADDR)).page_base();
         // Force 4K page alignment on MSRPM base
-        let msrpm_base = self.vmcb_read64(SVM_CONTROL64_MSRPM_BASE_PHY_ADDR) & !0xFFF;
+        let msrpm_base =
+            BxPhyAddress::new(self.vmcb_read64(SVM_CONTROL64_MSRPM_BASE_PHY_ADDR)).page_base();
 
         let guest_asid = self.vmcb_read32(SVM_CONTROL32_GUEST_ASID);
         if guest_asid == 0 {
@@ -1648,7 +1650,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// failure to match Bochs' "intercept everything" default for unmapped
     /// bitmap regions, with the read failure logged so the cause is
     /// visible in traces.
-    pub(super) fn read_physical_byte(&mut self, paddr: u64) -> u8 {
+    pub(super) fn read_physical_byte(&mut self, paddr: BxPhyAddress) -> u8 {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 1];
         match self.read_physical_routed(policy, paddr, 1, &mut data) {
@@ -1703,7 +1705,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             tracing::error!("VMRUN: VMCB address not page-aligned: {:#x}", paddr);
             return self.exception(Exception::Gp, 0);
         }
-        self.set_vmcbptr(paddr);
+        self.set_vmcbptr(BxPhyAddress::new(paddr));
 
         tracing::debug!("VMRUN VMCB ptr: {:#x}", self.vmcbptr);
 
@@ -1777,7 +1779,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         let saved_vmcbptr = self.vmcbptr;
-        self.set_vmcbptr(paddr);
+        self.set_vmcbptr(BxPhyAddress::new(paddr));
 
         // Read FS, GS, TR, LDTR from target VMCB
         let fs = self.svm_segment_read(SVM_GUEST_FS_SELECTOR);
@@ -1837,7 +1839,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         let saved_vmcbptr = self.vmcbptr;
-        self.set_vmcbptr(paddr);
+        self.set_vmcbptr(BxPhyAddress::new(paddr));
 
         // Write FS, GS, TR, LDTR to target VMCB
         let fs = self.sregs[BxSegregs::Fs as usize].clone();
@@ -2013,7 +2015,7 @@ mod tests {
                 &eventinj.to_le_bytes(),
             )
             .expect("the VMCB is RAM");
-        ctx.set_vmcbptr(VMCB);
+        ctx.set_vmcbptr(BxPhyAddress::new(VMCB));
         ctx.in_svm_guest = true;
         let outcome = ctx.svm_inject_events().expect("the injection completes");
         Injection { outcome, rip: ctx.rip() }

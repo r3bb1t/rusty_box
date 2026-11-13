@@ -315,7 +315,7 @@ impl BxMemoryStubC {
     /// Bochs icache.h `bxPageWriteStampTable::markICacheMask`.
     #[inline]
     pub(crate) fn smc_mark_icache_mask(&mut self, p_addr: BxPhyAddress, mask: u32) {
-        self.smc_stamps[crate::cpu::icache::smc_page_index(p_addr.get())] |= mask;
+        self.smc_stamps[crate::cpu::icache::smc_page_index(p_addr)] |= mask;
     }
 
     /// Return whether any cached instruction line overlaps this single-page
@@ -323,8 +323,8 @@ impl BxMemoryStubC {
     /// to scalar ordering before consuming externally visible input.
     #[inline]
     pub(crate) fn smc_range_has_stamps(&self, p_addr: BxPhyAddress, len: u32) -> bool {
-        let stamps = self.smc_stamps[crate::cpu::icache::smc_page_index(p_addr.get())];
-        stamps != 0 && stamps & crate::cpu::icache::smc_cache_line_mask(p_addr.get(), len) != 0
+        let stamps = self.smc_stamps[crate::cpu::icache::smc_page_index(p_addr)];
+        stamps != 0 && stamps & crate::cpu::icache::smc_cache_line_mask(p_addr, len) != 0
     }
 
     /// Bochs icache.h `bxPageWriteStampTable::decWriteStamp(pAddr, len)`:
@@ -335,12 +335,12 @@ impl BxMemoryStubC {
     /// `smc_seq_seen` watermark).
     #[inline]
     pub(crate) fn smc_dec_write_stamp(&mut self, p_addr: BxPhyAddress, len: u32) {
-        let index = crate::cpu::icache::smc_page_index(p_addr.get());
+        let index = crate::cpu::icache::smc_page_index(p_addr);
         let stamps = self.smc_stamps[index];
         if stamps == 0 {
             return;
         }
-        let mask = crate::cpu::icache::smc_cache_line_mask(p_addr.get(), len);
+        let mask = crate::cpu::icache::smc_cache_line_mask(p_addr, len);
         if stamps & mask == 0 {
             return;
         }
@@ -353,7 +353,7 @@ impl BxMemoryStubC {
     /// with mask 0xffffffff).
     #[inline]
     pub(crate) fn smc_dec_write_stamp_page(&mut self, p_addr: BxPhyAddress) {
-        let index = crate::cpu::icache::smc_page_index(p_addr.get());
+        let index = crate::cpu::icache::smc_page_index(p_addr);
         if self.smc_stamps[index] == 0 {
             return;
         }
@@ -364,10 +364,7 @@ impl BxMemoryStubC {
     fn smc_push_pending(&mut self, p_addr: BxPhyAddress, mask: u32) {
         if self.smc_pending_len < crate::cpu::icache::SMC_PENDING_CAP {
             self.smc_pending[self.smc_pending_len] =
-                crate::cpu::icache::PendingSmc {
-                    p_addr: p_addr.get(),
-                    mask,
-                };
+                crate::cpu::icache::PendingSmc { p_addr, mask };
             self.smc_pending_len += 1;
         } else {
             // Queue full: every cpu that has not caught up past this event

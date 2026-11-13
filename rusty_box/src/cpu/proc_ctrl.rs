@@ -960,7 +960,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.get_laddr32(seg as usize, eaddr as u32) as u64
             };
             // Best-effort physical resolution — if translation faults, skip the hook.
-            let paddr = self.translate_data_read(laddr).unwrap_or(0);
+            let paddr = self
+                .translate_data_read(laddr)
+                .unwrap_or(crate::config::BxPhyAddress::new(0));
             self.instrumentation.fire_clflush(laddr, paddr);
         }
         Ok(())
@@ -5277,7 +5279,9 @@ mod tests {
         assert_eq!(faults_with(&mut cpu, &urdmsr), Exception::Gp as u8, "not granted");
 
         let grant = |cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, ()>, offset: u64| {
-            let byte = USER_MSR_BITMAP + offset + u64::from(SYSENTER_CS >> 3);
+            let byte = crate::config::BxPhyAddress::new(
+                USER_MSR_BITMAP + offset + u64::from(SYSENTER_CS >> 3),
+            );
             cpu.mem_write_byte(byte, 1 << (SYSENTER_CS & 7));
         };
         grant(&mut cpu, 0);
