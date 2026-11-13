@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn projects_are_kept_with_their_sources_and_path_maps() {
         let set = file(
-            "[[project]]\nname = \"mydriver\"\nsymbols = ['build']\nsources = ['src']\nmap = [{ from = 'C:\\\\agent', to = 'D:\\\\work' }]\n",
+            "[[project]]\nname = \"mydriver\"\nsymbols = ['build']\nsources = ['src']\nmap = [{ from = 'C:\\agent', to = 'D:\\work' }]\n",
         );
         assert_eq!(set.projects[0].map[0].from, PathBuf::from(r"C:\agent"));
         let resolved = SymbolSettings::resolve(&set, &Environment::default(), &app_dir());

@@ -480,7 +480,10 @@ mod tests {
 
     /// Waits for `key` to leave `Queued` and `Indexing`.
     fn settled(service: &XrefService, key: &ModuleKey) -> Option<IndexState> {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Only a bound on a hung index: a 64 MiB image indexed by an
+        // unoptimised build, beside the rest of the suite, takes over ten
+        // seconds.
+        let deadline = Instant::now() + Duration::from_secs(120);
         loop {
             let state = service.state(key);
             match state {

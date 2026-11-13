@@ -395,12 +395,14 @@ mod tests {
             },
         };
         // Every pointer yields a node with two never-before-seen children.
+        let mut last = 1u64;
         let regions = walk(
             1,
-            |pointer| {
+            |_pointer| {
+                last += 2;
                 Some(VadNode {
-                    left: pointer * 2,
-                    right: pointer * 2 + 1,
+                    left: last - 1,
+                    right: last,
                     region,
                 })
             },

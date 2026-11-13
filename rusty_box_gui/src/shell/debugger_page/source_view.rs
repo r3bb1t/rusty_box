@@ -664,10 +664,15 @@ mod tests {
 
     #[test]
     fn a_located_file_maps_the_folders_it_shares_a_tail_with() {
-        let map = located_map(r"C:\agent\src\io\read.c", &PathBuf::from(r"D:\work\src\io\read.c"));
+        // The build path is the build machine's; the file found is this
+        // host's, so it is spelled with this host's separators.
+        let root = PathBuf::from(if cfg!(windows) { r"D:\" } else { "/" });
+        let work = root.join("work");
+        let map = located_map(r"C:\agent\src\io\read.c", &work.join("src").join("io").join("read.c"));
         assert_eq!(components(&map.from).collect::<Vec<&str>>(), ["C:", "agent"]);
-        assert_eq!(map.to, PathBuf::from(r"D:\work"));
-        let renamed = located_map(r"C:\a\read.c", &PathBuf::from(r"D:\b\other.c"));
-        assert_eq!(renamed, PathMap { from: r"C:\a\read.c".into(), to: PathBuf::from(r"D:\b\other.c") });
+        assert_eq!(map.to, work);
+        let other = root.join("b").join("other.c");
+        let renamed = located_map(r"C:\a\read.c", &other);
+        assert_eq!(renamed, PathMap { from: r"C:\a\read.c".into(), to: other });
     }
 }

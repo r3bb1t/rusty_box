@@ -235,10 +235,19 @@ impl SerialTerminal {
         self.for_each_line(|screen, row, cursor| append_row(&mut job, screen, row, cursor, font, colours));
         // Lines are separated, not ended: a final newline would lay out one
         // more, empty, row, and the text's height divided by its lines is
-        // the row height the panel scrolls by.
+        // the row height the panel scrolls by. `LayoutJob::append` merges a
+        // piece into the section before it when their formats match, so the
+        // last section may cover more than the newline: it is shortened by
+        // that one byte, and dropped only if nothing else is left in it.
         if job.text.ends_with('\n') {
             job.text.pop();
-            job.sections.pop();
+            let end = egui::text::ByteIndex(job.text.len());
+            if let Some(last) = job.sections.last_mut() {
+                last.byte_range.end = end;
+                if last.byte_range.start >= end {
+                    job.sections.pop();
+                }
+            }
         }
         self.drawn = Some(Drawn {
             job: job.clone(),
@@ -592,6 +601,26 @@ mod tests {
         let colours: Vec<egui::Color32> = job.sections.iter().map(|section| section.format.color).collect();
         assert_eq!(colours.first(), Some(&palette(1)));
         assert_eq!(colours.get(1), Some(&palette(12)));
+    }
+
+    /// Every byte of the laid-out text keeps a format, the final newline
+    /// dropped: empty rows end in newlines drawn alike, which `append` merges
+    /// into one section with the text before them.
+    #[test]
+    fn every_byte_of_the_layout_has_a_format_when_rows_end_empty() {
+        let mut terminal = fed("plain\r\n");
+        let colours = TerminalColours {
+            foreground: egui::Color32::WHITE,
+            background: egui::Color32::BLACK,
+        };
+        let job = terminal.layout(&egui::FontId::monospace(11.0), colours);
+        let rows = usize::from(terminal.size().rows);
+        assert_eq!(job.text.matches('\n').count(), rows - 1, "the screen's rows are separated, not ended");
+        let covered = job
+            .sections
+            .iter()
+            .try_fold(0, |at, section| (section.byte_range.start.0 == at).then_some(section.byte_range.end.0));
+        assert_eq!(covered, Some(job.text.len()), "the sections cover the text without a gap");
     }
 
     /// Lines scrolled off the screen's top stay above it, oldest first.

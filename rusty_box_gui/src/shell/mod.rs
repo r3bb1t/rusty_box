@@ -302,8 +302,10 @@ mod tests {
     fn drawable_characters() -> BTreeMap<char, Vec<String>> {
         let ctx = egui::Context::default();
         // Fonts exist only once a pass has begun; the output of an empty pass
-        // says nothing about glyph coverage.
-        drop(ctx.run_ui(egui::RawInput::default(), |_ui| {}));
+        // says nothing about glyph coverage, and no renderer takes the font
+        // atlas it built.
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        output.textures_delta.clear();
         ctx.fonts_mut(|fonts| {
             fonts
                 .fonts

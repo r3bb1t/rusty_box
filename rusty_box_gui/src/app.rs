@@ -9047,8 +9047,10 @@ mod tests {
     ) {
         ctx.begin_pass(input);
         body(ctx);
-        let output = ctx.end_pass();
+        let mut output = ctx.end_pass();
         assert!(output.shapes.is_empty(), "a pass with nothing drawn paints nothing");
+        // No renderer takes the font atlas this pass built.
+        output.textures_delta.clear();
     }
 
     /// The frame on which the window went behind another, as egui-winit
@@ -12198,12 +12200,16 @@ mod tests {
             let mut window = window_of_size(app, egui::vec2(1200.0, 800.0));
             window.run_steps(3);
 
+            // The text holds every row of the guest's screen, the empty ones
+            // too, so it runs below the panel's bottom; the written line is
+            // its first row, and a point a few rows down is below that line
+            // and inside the panel.
             let text = window
                 .query_all_by_role(egui::accesskit::Role::Label)
                 .find(|node| node.value().is_some_and(|value| value.contains("UEFI firmware")))
                 .expect("the terminal's text")
                 .rect();
-            let below = egui::pos2(text.left() + 200.0, text.bottom() + 20.0);
+            let below = egui::pos2(text.left() + 200.0, text.top() + 48.0);
             window.hover_at(below);
             window.step();
             // Pressed in one frame and released in the next, as a hand
