@@ -77,6 +77,7 @@ use super::exception::{AccessSyndrome, AddressedClass, Exception, SyndromeClass,
 use super::exec::{Fault, StopCause};
 use super::features::{Feature, Features};
 use super::memattr::{MemAttrs, Shareability};
+use super::pmu::L1dAccess;
 use super::regime::{
     el10_s1_disabled_data_normal, el10_stage1_enabled, el10_stage2_enabled, Granule, OaLayout,
     Regime, S1Params, S1Range, S1Start,
@@ -1185,6 +1186,14 @@ impl Memory {
     #[inline(always)]
     const fn is_device(self) -> bool {
         matches!(self, Self::Device)
+    }
+
+    /// Whether it is Normal Inner and Outer Write-Back memory, the one kind
+    /// the Level 1 data cache holds: its caches do not support
+    /// Write-Through (`CCSIDR_EL1.WT` 0), so Write-Through memory is taken
+    /// as Non-cacheable.
+    const fn is_write_back(self) -> bool {
+        matches!(self, Self::WriteBack | Self::WriteBackShareable)
     }
 
     /// The value a snapshot holds for it.
@@ -5496,9 +5505,10 @@ impl<L: Levels> Cpu<L> {
     /// An access whose TLB entry permits it, and that no alignment check
     /// can refuse — aligned and whole, or misaligned on Normal memory with
     /// no check that faults it before translation — raises none of these
-    /// faults, and is answered inline while no watchpoint is armed
-    /// ([`Cpu::watch_armed`]); everything else makes the checks in order out
-    /// of line, where the entry's hit spares the walk.
+    /// faults, and is answered inline while no watchpoint is armed and the
+    /// PMU counts no access ([`Cpu::data_checked`]); everything else makes
+    /// the checks in order out of line, where the entry's hit spares the
+    /// walk.
     #[inline(always)]
     fn translate_data<B: PhysBus>(
         &mut self,
@@ -5513,7 +5523,7 @@ impl<L: Levels> Cpu<L> {
         if let Some(hit) = self.permitted_hit(va, needs, self.access_el(acc)) {
             // An ordinary access misaligned on Normal memory faults only
             // under SCTLR_ELx.A ([`Cpu::misaligned_faults`]).
-            if !self.watch_armed
+            if !self.data_checked
                 && (on_device == OnDevice::Permitted
                     || (!hit.memory.is_device()
                         && acc.alignment == AlignmentRule::Any
@@ -5530,7 +5540,8 @@ impl<L: Levels> Cpu<L> {
     /// permit the access, a watchpoint armed, or an access an alignment
     /// check may refuse. The
     /// watchpoints come last, after the access's translation and permission
-    /// checks (Arm `AArch64_TranslateAddress`).
+    /// checks (Arm `AArch64_TranslateAddress`). The access it permits is
+    /// reported to the PMU ([`Cpu::report_l1d_access`]).
     #[cold]
     #[inline(never)]
     fn translate_data_checked<B: PhysBus>(
@@ -5551,7 +5562,21 @@ impl<L: Levels> Cpu<L> {
             .map_err(|abort| Self::data_abort(va, abort, slot))?;
         let range = self.watched_range(acc);
         self.check_watchpoints(va, span.watched, direction.into(), el, range)?;
+        self.report_l1d_access(mapping.memory, direction);
         Ok(mapping)
+    }
+
+    /// A data access a translation permitted, reported to the PMU while it
+    /// counts one ([`Cpu::pmu_l1d_access`]): one to Normal Write-Back
+    /// memory, which looks up the Level 1 data cache.
+    #[inline(always)]
+    fn report_l1d_access(&mut self, memory: Memory, direction: DataDirection) {
+        if self.pmu.tracked.counts_accesses() && memory.is_write_back() {
+            self.pmu_l1d_access(match direction {
+                DataDirection::Read | DataDirection::ReadWrite => L1dAccess::Read,
+                DataDirection::Write => L1dAccess::Write,
+            });
+        }
     }
 
     /// How a watchpoint looks at `acc` (Arm `IsRelaxedWatchpointAccess`).
@@ -5763,10 +5788,14 @@ impl<L: Levels> Cpu<L> {
             let byte_va = va.wrapping_add(i);
             let slot = acc.syndrome_slot(AddressInAccess::of_byte(i));
             let t = self
-                .translate(bus, byte_va, AccessKind::Read, el, OnDevice::Refused)
+                .translate_needs(bus, byte_va, Needs::Access(AccessKind::Read), el, OnDevice::Refused)
                 .map_err(|abort| Self::data_abort(byte_va, abort, slot))?;
             let range = self.watched_range(acc);
             self.check_watchpoints(byte_va, 1, WatchedAccess::Load, el, range)?;
+            // One cache access for the part in each page.
+            if i == 0 || byte_va & 0xFFF == 0 {
+                self.report_l1d_access(t.memory, DataDirection::Read);
+            }
             value |= self.bus_read(bus, byte_va, t.pa, AccessWidth::Byte)? << (8 * i);
         }
         Ok(value)
@@ -5884,14 +5913,15 @@ impl<L: Levels> Cpu<L> {
         let second_page = va.wrapping_add(bytes - 1) & !0xFFF;
         let first_bytes = second_page.wrapping_sub(va);
         let range = self.watched_range(acc);
+        let writes = Needs::Access(AccessKind::Write);
         let first = self
-            .translate(bus, va, AccessKind::Write, el, on_device)
+            .translate_needs(bus, va, writes, el, on_device)
             .map_err(|abort| {
                 Self::data_abort(va, abort, acc.syndrome_slot(AddressInAccess::Lowest))
             })?;
         self.check_watchpoints(va, first_bytes, WatchedAccess::Store, el, range)?;
         let second = self
-            .translate(bus, second_page, AccessKind::Write, el, on_device)
+            .translate_needs(bus, second_page, writes, el, on_device)
             .map_err(|abort| {
                 Self::data_abort(
                     second_page,
@@ -5901,6 +5931,9 @@ impl<L: Levels> Cpu<L> {
             })?;
         let second_bytes = bytes - first_bytes;
         self.check_watchpoints(second_page, second_bytes, WatchedAccess::Store, el, range)?;
+        // One cache access for the part in each page.
+        self.report_l1d_access(first.memory, DataDirection::Write);
+        self.report_l1d_access(second.memory, DataDirection::Write);
         Ok(WritePages {
             first: first.pa,
             second: second.pa,

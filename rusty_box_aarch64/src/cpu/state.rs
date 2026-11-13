@@ -292,6 +292,7 @@ impl<L: Levels> Cpu<L> {
             in_guarded_page,
             step_each,
             watch_armed,
+            data_checked,
             stepped,
             should_advance_ss,
             activity,
@@ -328,6 +329,7 @@ impl<L: Levels> Cpu<L> {
         *in_guarded_page = false;
         *step_each = false;
         *watch_armed = false;
+        *data_checked = false;
         *stepped = Stepped::Nothing;
         *should_advance_ss = false;
         *activity = Activity::Running;

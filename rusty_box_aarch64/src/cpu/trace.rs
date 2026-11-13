@@ -758,8 +758,8 @@ impl<L: Levels> Cpu<L> {
     /// due: PSTATE.BTYPE set (a branch through a register led to it, and its
     /// branch target check is due), PSTATE.IL set (an illegal exception
     /// return led to it, and it raises the Illegal Execution state exception
-    /// once fetched) or [`Cpu::step_each`] set (Software Step or a
-    /// breakpoint watches every instruction). Out of line, and cold, so
+    /// once fetched) or [`Cpu::step_each`] set (Software Step, a
+    /// breakpoint or the PMU watches every instruction). Out of line, and cold, so
     /// that the trace loop's register allocation does not depend on it.
     #[cold]
     #[inline(never)]

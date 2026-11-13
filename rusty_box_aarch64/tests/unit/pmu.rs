@@ -58,8 +58,8 @@ const INST_RETIRED: u64 = 0x08;
 const CID_WRITE_RETIRED: u64 = 0x0B;
 const TTBR_WRITE_RETIRED: u64 = 0x1C;
 const CHAIN: u64 = 0x1E;
-/// `L1D_CACHE`, which no processor here counts.
-const L1D_CACHE: u64 = 0x04;
+/// `L1I_CACHE_REFILL`, which no processor here counts.
+const L1I_CACHE_REFILL: u64 = 0x01;
 const FILTER_P: u64 = 1 << 31;
 const FILTER_NSH: u64 = 1 << 27;
 const CYCLES: u64 = 1 << 31;
@@ -468,14 +468,14 @@ fn sw_incr_counts_the_writes_at_the_levels_filtered() {
 }
 
 /// An event a processor does not advertise in `PMCEIDn_EL0` is one it does
-/// not count: a counter set to `L1D_CACHE` stays where it is.
+/// not count: a counter set to `L1I_CACHE_REFILL` stays where it is.
 #[test]
 fn an_event_not_advertised_counts_nothing() {
     for imp in models() {
         let mut cpu = processor_with::<NoEl2>(imp);
         let ceid0 = get(&mut cpu, (3, 3, 9, 12, 6));
-        assert_eq!(ceid0 & (1 << L1D_CACHE), 0);
-        set(&mut cpu, pmevtyper(0), L1D_CACHE);
+        assert_eq!(ceid0 & (1 << L1I_CACHE_REFILL), 0);
+        set(&mut cpu, pmevtyper(0), L1I_CACHE_REFILL);
         set(&mut cpu, pmevcntr(0), 5);
         set(&mut cpu, PMCNTENSET, 1);
         set(&mut cpu, PMCR, PMCR_E);

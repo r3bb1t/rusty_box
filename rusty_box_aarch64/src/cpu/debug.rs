@@ -421,14 +421,18 @@ impl<L: Levels> Cpu<L> {
         self.trace_break = true;
     }
 
-    /// [`Cpu::step_each`] and [`Cpu::watch_armed`], from the registers:
-    /// after a write of one of them, and on a restore.
+    /// [`Cpu::step_each`], [`Cpu::watch_armed`] and [`Cpu::data_checked`],
+    /// from the debug registers and the PMU's tracked events: after a write
+    /// of one of their controls, and on a restore.
     pub(crate) fn derive_debug_controls(&mut self) {
         let mde = self.sys.mdscr_el1 & MDSCR_MDE != 0;
         let breakpoint_enabled = self.sys.dbgbcr.iter().any(|control| control & ENABLE != 0);
         let watchpoint_enabled = self.sys.dbgwcr.iter().any(|control| control & ENABLE != 0);
-        self.step_each = self.sys.mdscr_el1 & MDSCR_SS != 0 || (mde && breakpoint_enabled);
+        self.step_each = self.sys.mdscr_el1 & MDSCR_SS != 0
+            || (mde && breakpoint_enabled)
+            || self.pmu.tracked.counts_retired_kinds();
         self.watch_armed = mde && watchpoint_enabled;
+        self.data_checked = self.watch_armed || self.pmu.tracked.counts_accesses();
     }
 
     /// Arm `AArch64_GenerateDebugExceptions`.

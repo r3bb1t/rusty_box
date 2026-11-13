@@ -65,6 +65,7 @@ pub(crate) mod spec;
 mod sve;
 
 use crate::cpu::exec::bits;
+use crate::cpu::pmu::RetiredKind;
 pub(crate) use crate::cpu::features::Feature;
 
 use asimd::{
@@ -1559,6 +1560,236 @@ pub(crate) enum Class {
     SmeZeroZt0,
     /// LDR and STR of ZT0: the handler reads the direction from bit 21.
     SmeFillSpillZt0,
+}
+
+impl Class {
+    /// What an instruction of this class is, for the PMU's events that
+    /// count instructions of a kind: an SVE class's instruction operates on
+    /// the scalable vector or predicate registers and on neither ZA nor
+    /// ZT0, an SME class's on ZA or ZT0, its loads, stores, fills and
+    /// spills being no data processing. `RDSVL`, `ADDSVL`, `RDVL` and
+    /// `ADDVL` are non-SIMD, and counted as no kind.
+    pub(crate) const fn retired_kind(self) -> RetiredKind {
+        match self {
+            Self::Undefined
+            | Self::PcRelAddressing
+            | Self::AddSubImmediate
+            | Self::LogicalImmediate
+            | Self::MoveWide
+            | Self::Bitfield
+            | Self::Extract
+            | Self::ConditionalBranch
+            | Self::ExceptionGeneration
+            | Self::Hint
+            | Self::PointerAuthHint
+            | Self::WaitWithTimeout
+            | Self::System
+            | Self::FlagManipulation
+            | Self::BranchRegister
+            | Self::AuthenticatedBranch
+            | Self::BranchImmediate
+            | Self::CompareAndBranch
+            | Self::TestAndBranch
+            | Self::SimdLoadStoreMultiple
+            | Self::SimdLoadStoreMultiplePostIndexed
+            | Self::SimdLoadStoreSingle
+            | Self::SimdLoadStoreSinglePostIndexed
+            | Self::LoadStoreExclusive
+            | Self::LoadLiteral
+            | Self::LoadStoreNoAllocatePair
+            | Self::LoadStorePairIndexed
+            | Self::LoadStorePairOffset
+            | Self::LoadStoreUnscaled
+            | Self::LoadStoreIndexed
+            | Self::LoadStoreUnprivileged
+            | Self::LoadStoreRegisterOffset
+            | Self::LoadStoreUnsignedImmediate
+            | Self::LoadAuthenticated
+            | Self::DataProcessing2Source
+            | Self::DataProcessing1Source
+            | Self::PointerAuth
+            | Self::PointerAuthGeneric
+            | Self::LogicalShiftedRegister
+            | Self::AddSubShiftedRegister
+            | Self::AddSubExtendedRegister
+            | Self::AddSubWithCarry
+            | Self::RotateMaskInsertFlags
+            | Self::EvaluateIntoFlags
+            | Self::ConditionalCompareRegister
+            | Self::ConditionalCompareImmediate
+            | Self::ConditionalSelect
+            | Self::DataProcessing3Source
+            | Self::SimdScalarCopy
+            | Self::SimdScalarThreeSame
+            | Self::SimdScalarTwoRegisterMisc
+            | Self::SimdScalarPairwise
+            | Self::SimdScalarThreeDifferent
+            | Self::SimdScalarShiftImmediate
+            | Self::SimdScalarIndexedElement
+            | Self::SimdTableLookup
+            | Self::SimdPermute
+            | Self::SimdExtract
+            | Self::SimdCopy
+            | Self::SimdThreeSame
+            | Self::SimdTwoRegisterMisc
+            | Self::SimdAcrossLanes
+            | Self::SimdThreeDifferent
+            | Self::SimdModifiedImmediate
+            | Self::SimdShiftImmediate
+            | Self::SimdIndexedElement
+            | Self::SimdRoundingDoublingMultiplyAccumulate
+            | Self::SimdScalarRoundingDoublingMultiplyAccumulate
+            | Self::SimdDotProduct
+            | Self::SimdDotProductIndexedElement
+            | Self::SimdMatrixMultiply
+            | Self::SimdThreeSameHalf
+            | Self::SimdScalarThreeSameHalf
+            | Self::SimdTwoRegisterMiscHalf
+            | Self::SimdScalarTwoRegisterMiscHalf
+            | Self::SimdFpMulAddLong
+            | Self::SimdFpMulAddLongIndexedElement
+            | Self::SimdComplexMultiplyAccumulate
+            | Self::SimdComplexMultiplyAccumulateIndexedElement
+            | Self::SimdComplexAdd
+            | Self::SimdBfDotProduct
+            | Self::SimdBfDotProductIndexedElement
+            | Self::SimdBfMulAddLong
+            | Self::SimdBfMulAddLongIndexedElement
+            | Self::SimdBfMatrixMultiply
+            | Self::FpFixedPointConversion
+            | Self::FpIntegerConversion
+            | Self::FpDataProcessing1Source
+            | Self::FpCompare
+            | Self::FpImmediate
+            | Self::FpConditionalCompare
+            | Self::FpDataProcessing2Source
+            | Self::FpConditionalSelect
+            | Self::FpDataProcessing3Source
+            | Self::CryptoAes
+            | Self::CryptoShaThreeRegister
+            | Self::CryptoShaTwoRegister
+            | Self::Crc32
+            | Self::AtomicMemoryOperation
+            | Self::CompareAndSwap
+            | Self::CompareAndSwapPair
+            | Self::LoadStoreOrderedUnscaled
+            | Self::AddStreamingVectorLength
+            | Self::ReadStreamingVectorLength
+            | Self::AddVectorLength
+            | Self::ReadVectorLength => RetiredKind::Other,
+            Self::SveIntBinaryPredicated
+            | Self::SveIntReduction
+            | Self::SveMovprfx
+            | Self::SveShiftPredicated
+            | Self::SveIntUnaryPredicated
+            | Self::SveIntMulAddPredicated
+            | Self::SveIntAddSubUnpredicated
+            | Self::SveBitwiseUnpredicated
+            | Self::SveShiftUnpredicated
+            | Self::SveIndex
+            | Self::SveIntMulUnpredicated
+            | Self::SveElementCount
+            | Self::SveBitmaskImmediate
+            | Self::SveCopyImmediate
+            | Self::SveExtract
+            | Self::SvePermuteUnpredicated
+            | Self::SvePermutePredicate
+            | Self::SvePermuteElements
+            | Self::SvePermutePredicated
+            | Self::SveSelect
+            | Self::SveIntCompare
+            | Self::SvePredicateLogical
+            | Self::SveBreak
+            | Self::SvePredicateMisc
+            | Self::SveWhile
+            | Self::SveWhileCounter
+            | Self::SveWhilePair
+            | Self::SvePext
+            | Self::SvePtrueCounter
+            | Self::SveCntpCounter
+            | Self::SveConditionallyTerminate
+            | Self::SvePredicateCount
+            | Self::SveWideImmediate
+            | Self::SveIntxDot
+            | Self::SveIntxComplex
+            | Self::SveIntxMulLong
+            | Self::SveIntxLongArithmetic
+            | Self::SveIntxEorInterleaved
+            | Self::SveIntxShiftLong
+            | Self::SveIntxAbsDiffAccumulate
+            | Self::SveIntxCarryLong
+            | Self::SveIntxComplexAdd
+            | Self::SveIntxShiftAccumulate
+            | Self::SveIntxNarrow
+            | Self::SveIntxNarrowPair
+            | Self::SveIntxMul
+            | Self::SveIntxBinaryPredicated
+            | Self::SveIntxUnaryPredicated
+            | Self::SveIntxClamp
+            | Self::SveFpArithmeticPredicated
+            | Self::SveFpArithmeticUnpredicated
+            | Self::SveFpReduction
+            | Self::SveFpCompare
+            | Self::SveFpUnaryPredicated
+            | Self::SveFpEstimate
+            | Self::SveFpMulAdd
+            | Self::SveFpIndexed
+            | Self::SveFpClamp
+            | Self::SveFpComplex
+            | Self::SveFpPairwise
+            | Self::SveFpConvertOdd
+            | Self::SveFpWidening
+            | Self::SveFillSpill
+            | Self::SvePrefetch
+            | Self::SveLoadBroadcast
+            | Self::SveLoadBroadcastQuadword
+            | Self::SveLoadContiguous
+            | Self::SveLoadStructures
+            | Self::SveStoreContiguous
+            | Self::SveStoreStructures
+            | Self::SveLoadMulti
+            | Self::SveStoreMulti
+            | Self::SveMultiSelect
+            | Self::SveMultiIntBinary
+            | Self::SveMultiFpBinary
+            | Self::SveMultiClamp
+            | Self::SveMultiZip
+            | Self::SveMultiNarrowShift
+            | Self::SveMultiNarrowInt
+            | Self::SveMultiNarrowFp
+            | Self::SveMultiFpUnary
+            | Self::SveMultiUnpack => RetiredKind::Sve,
+            Self::SmeLoadSlice
+            | Self::SmeStoreSlice
+            | Self::SmeFillSpill
+            | Self::SmeFillSpillZt0 => RetiredKind::SmeLoadStore,
+            Self::SmeArrayIntLongLong
+            | Self::SmeArrayIntLong
+            | Self::SmeArrayFpLong
+            | Self::SmeArrayFpDot
+            | Self::SmeArrayIntDot
+            | Self::SmeArrayFpMulAdd
+            | Self::SmeArrayAddVectors
+            | Self::SmeArrayAccumulate
+            | Self::SmeIndexedIntDot
+            | Self::SmeIndexedFpMulAdd
+            | Self::SmeIndexedVerticalDot
+            | Self::SmeBinaryOuterProduct
+            | Self::SmeIntOuterProductHalfwords
+            | Self::SmeMoveGroupToSlices
+            | Self::SmeMoveGroupFromSlices
+            | Self::SmeMoveGroupToArray
+            | Self::SmeMoveGroupFromArray
+            | Self::SmeLookupTable
+            | Self::SmeFpOuterProduct
+            | Self::SmeIntOuterProduct
+            | Self::SmeMoveToSlice
+            | Self::SmeMoveFromSlice
+            | Self::SmeZero
+            | Self::SmeAddVector
+            | Self::SmeZeroZt0 => RetiredKind::SmeDataProcessing,
+        }
+    }
 }
 
 /// What an encoding's decode does about the branch that led to it into a

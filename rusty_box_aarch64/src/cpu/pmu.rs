@@ -106,11 +106,39 @@ pub(crate) enum PmuEvent {
     StallBackend,
     /// 0x003C `STALL`: likewise.
     Stall,
+    /// 0x0003 `L1D_CACHE_REFILL`: each `L1D_CACHE` access that refills the
+    /// Level 1 data cache. The modelled cache holds every line it is asked
+    /// for, so nothing.
+    L1dCacheRefill,
+    /// 0x0004 `L1D_CACHE`: each data access a program makes to Normal
+    /// Write-Back memory ([`L1dAccess`]); Device and Non-cacheable memory,
+    /// and Write-Through, which the caches do not support (`CCSIDR_EL1.WT`
+    /// 0) and so treat as Non-cacheable, are not looked up in it.
+    L1dCache,
+    /// 0x0039 `L1D_CACHE_LMISS_RD`: each `L1D_CACHE_RD` read that misses
+    /// the Level 1 data cache: nothing, as `L1D_CACHE_REFILL`.
+    L1dCacheLmissRd,
+    /// 0x0040 `L1D_CACHE_RD`: each `L1D_CACHE` access that reads memory.
+    L1dCacheRd,
+    /// 0x4006 `L1I_CACHE_LMISS`: each instruction fetch that misses the
+    /// Level 1 instruction cache: nothing, the modelled cache holding every
+    /// line.
+    L1iCacheLmiss,
+    /// 0x8002 `SVE_INST_RETIRED`: each SVE instruction architecturally
+    /// executed ([`RetiredKind::Sve`]).
+    SveInstRetired,
+    /// 0x8358 `SME_RETIRED`: each SME data-processing instruction
+    /// architecturally executed ([`RetiredKind::SmeDataProcessing`]).
+    SmeRetired,
+    /// 0x835A `SME_INST_RETIRED`: each SME instruction architecturally
+    /// executed, its loads and stores of ZA and ZT0 with its data
+    /// processing.
+    SmeInstRetired,
 }
 
 impl PmuEvent {
     /// Every event, each at the index of its bit in an [`EventSet`].
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 19] = [
         Self::SwIncr,
         Self::InstRetired,
         Self::ExcTaken,
@@ -122,6 +150,14 @@ impl PmuEvent {
         Self::StallFrontend,
         Self::StallBackend,
         Self::Stall,
+        Self::L1dCacheRefill,
+        Self::L1dCache,
+        Self::L1dCacheLmissRd,
+        Self::L1dCacheRd,
+        Self::L1iCacheLmiss,
+        Self::SveInstRetired,
+        Self::SmeRetired,
+        Self::SmeInstRetired,
     ];
 
     /// The event's number, as `PMEVTYPER<n>_EL0.evtCount` names it.
@@ -138,6 +174,14 @@ impl PmuEvent {
             Self::StallFrontend => 0x0023,
             Self::StallBackend => 0x0024,
             Self::Stall => 0x003C,
+            Self::L1dCacheRefill => 0x0003,
+            Self::L1dCache => 0x0004,
+            Self::L1dCacheLmissRd => 0x0039,
+            Self::L1dCacheRd => 0x0040,
+            Self::L1iCacheLmiss => 0x4006,
+            Self::SveInstRetired => 0x8002,
+            Self::SmeRetired => 0x8358,
+            Self::SmeInstRetired => 0x835A,
         }
     }
 
@@ -156,7 +200,15 @@ impl PmuEvent {
             | Self::Chain
             | Self::StallFrontend
             | Self::StallBackend
-            | Self::Stall => false,
+            | Self::Stall
+            | Self::L1dCacheRefill
+            | Self::L1dCache
+            | Self::L1dCacheLmissRd
+            | Self::L1dCacheRd
+            | Self::L1iCacheLmiss
+            | Self::SveInstRetired
+            | Self::SmeRetired
+            | Self::SmeInstRetired => false,
         }
     }
 
@@ -177,6 +229,38 @@ const _: () = {
     }
 };
 
+/// A data access a program makes to Normal Write-Back memory, which looks
+/// up the Level 1 data cache (`L1D_CACHE`): one for each translated access
+/// of an instruction, so a pair, a vector and an atomic update are one
+/// access each, a transfer that crosses a page one for each part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum L1dAccess {
+    /// It reads memory, alone or with a write (an atomic update):
+    /// `L1D_CACHE_RD` too.
+    Read,
+    /// It only writes memory.
+    Write,
+}
+
+/// What an instruction architecturally executed is, for the events that
+/// count instructions of a kind (Arm ARM D14.3; FEAT_PMUv3p9 absent, so
+/// whether a non-SIMD SVE instruction counts is the implementation's
+/// choice, and here an SVE class's does, `RDVL` and `ADDVL` not being in
+/// one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetiredKind {
+    /// An instruction of no counted kind.
+    Other,
+    /// An SVE instruction: one that operates on the scalable vector or
+    /// predicate registers and on neither ZA nor ZT0 (`SVE_INST_RETIRED`).
+    Sve,
+    /// An SME load or store of ZA or ZT0 (`SME_INST_RETIRED`).
+    SmeLoadStore,
+    /// SME data processing on ZA or ZT0 (`SME_INST_RETIRED` and
+    /// `SME_RETIRED`).
+    SmeDataProcessing,
+}
+
 /// What a cycle's instruction did, for the events that count per cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Cycle {
@@ -190,9 +274,34 @@ pub(crate) enum Cycle {
 /// The events a PMU implements, a bit each in [`PmuEvent::ALL`] order:
 /// what `PMCEID0_EL0` and `PMCEID1_EL0` advertise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct EventSet(u16);
+pub(crate) struct EventSet(u32);
 
 impl EventSet {
+    /// No event.
+    pub(crate) const NONE: Self = Self(0);
+
+    /// The events a data access counts as ([`L1dAccess`]).
+    const ACCESSES: Self = Self::of(&[PmuEvent::L1dCache, PmuEvent::L1dCacheRd]);
+
+    /// The events an instruction's kind counts as ([`RetiredKind`]).
+    const RETIRED_KINDS: Self = Self::of(&[
+        PmuEvent::SveInstRetired,
+        PmuEvent::SmeRetired,
+        PmuEvent::SmeInstRetired,
+    ]);
+
+    /// Whether any of these is an event a data access counts as.
+    #[inline(always)]
+    pub(crate) const fn counts_accesses(self) -> bool {
+        self.0 & Self::ACCESSES.0 != 0
+    }
+
+    /// Whether any of these is an event an instruction's kind counts as.
+    #[inline(always)]
+    pub(crate) const fn counts_retired_kinds(self) -> bool {
+        self.0 & Self::RETIRED_KINDS.0 != 0
+    }
+
     /// The set of `events`.
     pub(crate) const fn of(events: &[PmuEvent]) -> Self {
         let mut bits = 0;
@@ -217,10 +326,10 @@ impl EventSet {
 
     /// `PMCEID0_EL0` (`Ceid::Low`) or `PMCEID1_EL0` (`Ceid::High`): bit `e`
     /// of the first is event `e` (0x00 to 0x1F), of the second event `0x20 +
-    /// e` (0x20 to 0x3F); their bits 63:32 name the events 0x4000 to 0x403F,
-    /// none of which a processor here implements.
+    /// e` (0x20 to 0x3F); bit `32 + e` of the first is event `0x4000 + e`,
+    /// of the second event `0x4020 + e`. Every other event has no bit.
     pub(crate) const fn ceid(self, register: Ceid) -> u64 {
-        let base = match register {
+        let base: u16 = match register {
             Ceid::Low => 0x00,
             Ceid::High => 0x20,
         };
@@ -229,8 +338,12 @@ impl EventSet {
         while i < PmuEvent::ALL.len() {
             let event = PmuEvent::ALL[i];
             let number = event.number();
-            if self.has(event) && number >= base && number < base + 0x20 {
-                value |= 1 << (number - base);
+            if self.has(event) {
+                if number >= base && number < base + 0x20 {
+                    value |= 1 << (number - base);
+                } else if number >= 0x4000 + base && number < 0x4000 + base + 0x20 {
+                    value |= 1 << (32 + number - 0x4000 - base);
+                }
             }
             i += 1;
         }
@@ -314,11 +427,14 @@ pub(crate) struct PmuShape {
 }
 
 /// The events both processors count: every common event whose occurrences
-/// the model knows exactly. Of the Cortex-A57's (DDI 0488H Table 11-5),
-/// the cache, TLB, branch prediction, bus, memory error and speculative
-/// ones are left out: the model has no cache, TLB timing, branch predictor
-/// or bus to count them by.
-const COUNTED: [PmuEvent; 8] = [
+/// the model knows exactly, and the Level 1 data cache events Arm requires
+/// of a processor with that cache (D14.6), whose `CLIDR_EL1` both report.
+/// The modelled caches hold every line they are asked for, so a refill
+/// never happens. Of the Cortex-A57's other events (DDI 0488H Table 11-5),
+/// the TLB, branch prediction, bus, memory error, speculative and other
+/// cache ones are left out: the model has no TLB timing, branch predictor,
+/// bus or cache hierarchy to count them by, and Arm requires none of them.
+const COUNTED: [PmuEvent; 10] = [
     PmuEvent::SwIncr,
     PmuEvent::InstRetired,
     PmuEvent::ExcTaken,
@@ -327,12 +443,14 @@ const COUNTED: [PmuEvent; 8] = [
     PmuEvent::CpuCycles,
     PmuEvent::TtbrWriteRetired,
     PmuEvent::Chain,
+    PmuEvent::L1dCacheRefill,
+    PmuEvent::L1dCache,
 ];
 
 impl PmuShape {
     /// The Cortex-A57's (DDI 0488H chapter 11): six event counters,
     /// `PMCR_EL0.IMP` 0x41 (Arm) and `IDCODE` 0x01 (Cortex-A57), `X`
-    /// implemented, [`COUNTED`] — `PMCEID0_EL0` 0x5002_0F01, the TRM's
+    /// implemented, [`COUNTED`] — `PMCEID0_EL0` 0x5002_0F19, the TRM's
     /// 0x7FFF_0F3F less the events the model cannot count, and
     /// `PMCEID1_EL0` 0 — and the TRM's choices for the counters out of
     /// reach.
@@ -348,10 +466,12 @@ impl PmuShape {
     /// The Armv9.2 model's, the board's own: six event counters, as Arm's
     /// Armv9 cores have; `PMCR_EL0.IMP` reading as zero, as FEAT_PMUv3p7
     /// makes it, and `IDCODE` with it; no event export; [`COUNTED`] and the
-    /// stall events FEAT_PMUv3p1 and FEAT_PMUv3p4 require (D14.6), which
-    /// count nothing here — `PMCEID0_EL0` 0x5002_0F01, `PMCEID1_EL0`
-    /// 0x1000_0018; Arm's own choice for the counters out of reach; and
-    /// `MTPMU` 0b1111.
+    /// events FEAT_PMUv3p1, FEAT_PMUv3p4 and FEAT_SME require (D14.6): the
+    /// stall events, which count nothing here, the Level 1 cache read and
+    /// long-latency miss events, and the SVE and SME instruction events —
+    /// `PMCEID0_EL0` 0x40_5002_0F19, `PMCEID1_EL0` 0x1200_0018, the events
+    /// numbered 0x8000 and up and 0x0040 having no bit; Arm's own choice
+    /// for the counters out of reach; and `MTPMU` 0b1111.
     pub(crate) const ARMV9P2: Self = Self {
         counters: EventCounters::new(6),
         identification: 0,
@@ -365,9 +485,17 @@ impl PmuShape {
             PmuEvent::CpuCycles,
             PmuEvent::TtbrWriteRetired,
             PmuEvent::Chain,
+            PmuEvent::L1dCacheRefill,
+            PmuEvent::L1dCache,
             PmuEvent::StallFrontend,
             PmuEvent::StallBackend,
             PmuEvent::Stall,
+            PmuEvent::L1dCacheLmissRd,
+            PmuEvent::L1dCacheRd,
+            PmuEvent::L1iCacheLmiss,
+            PmuEvent::SveInstRetired,
+            PmuEvent::SmeRetired,
+            PmuEvent::SmeInstRetired,
         ]),
         beyond_reach: CounterBeyondReach::Undefined,
         mtpmu: MtpmuReport::Res0,
@@ -497,6 +625,10 @@ pub(crate) struct Pmu {
     /// exception paths leave the PMU alone. Derived
     /// ([`Cpu::pmu_controls_changed`]), so it is not saved.
     pub(crate) enabled: bool,
+    /// The events some enabled counter counts ([`Counting::tracked`]): an
+    /// access or an instruction of a kind is reported to the PMU only while
+    /// it holds one of theirs. Derived, as `enabled` is.
+    pub(crate) tracked: EventSet,
 }
 
 impl Pmu {
@@ -527,6 +659,7 @@ impl Pmu {
                 settled: retired,
             },
             enabled: false,
+            tracked: EventSet::NONE,
         }
     }
 }
@@ -664,6 +797,19 @@ impl Counting<'_> {
     /// Whether any counter is enabled.
     fn any_enabled(self) -> bool {
         self.cycles_enabled() || (0..self.ctx.counters()).any(|n| self.event_enabled(n))
+    }
+
+    /// The events some enabled counter counts, at some level: what the
+    /// processor reports occurrences of beyond the instructions and cycles
+    /// it counts anyway.
+    fn tracked(self) -> EventSet {
+        let mut bits = 0;
+        for n in 0..self.ctx.counters() {
+            if let Some(event) = self.event(n).filter(|_| self.event_enabled(n)) {
+                bits |= 1 << event.index();
+            }
+        }
+        EventSet(bits)
     }
 
     /// Whether counting of the first range (`first`) or the second is
@@ -1130,10 +1276,46 @@ impl<L: Levels> Cpu<L> {
         self.pmu.counts = self.pmu_counts_at(until);
     }
 
+    /// [`Pmu::enabled`], [`Pmu::tracked`] and with them
+    /// [`Cpu::step_each`] and [`Cpu::data_checked`], from the controls:
+    /// after a write of one, and on a restore.
+    fn derive_pmu_controls(&mut self) {
+        let counting = self.pmu_counting();
+        let enabled = counting.any_enabled();
+        let tracked = counting.tracked();
+        self.pmu.enabled = enabled;
+        self.pmu.tracked = tracked;
+        self.derive_debug_controls();
+    }
+
+    /// A data access to Normal Write-Back memory that a translation just
+    /// permitted ([`L1dAccess`]): `L1D_CACHE`, and for a read
+    /// `L1D_CACHE_RD`, at the current level.
+    pub(crate) fn pmu_l1d_access(&mut self, access: L1dAccess) {
+        self.pmu_occur(PmuEvent::L1dCache);
+        if access == L1dAccess::Read {
+            self.pmu_occur(PmuEvent::L1dCacheRd);
+        }
+    }
+
+    /// An instruction of `kind` just architecturally executed, at the
+    /// current level: the events its kind counts as ([`RetiredKind`]).
+    pub(crate) fn pmu_retired(&mut self, kind: RetiredKind) {
+        match kind {
+            RetiredKind::Other => {}
+            RetiredKind::Sve => self.pmu_occur(PmuEvent::SveInstRetired),
+            RetiredKind::SmeLoadStore => self.pmu_occur(PmuEvent::SmeInstRetired),
+            RetiredKind::SmeDataProcessing => {
+                self.pmu_occur(PmuEvent::SmeInstRetired);
+                self.pmu_occur(PmuEvent::SmeRetired);
+            }
+        }
+    }
+
     /// Work out again which counters are enabled, after a write of a
     /// control, and have the machine sample PMUIRQ and the next overflow.
     pub(crate) fn pmu_controls_changed(&mut self) {
-        self.pmu.enabled = self.pmu_counting().any_enabled();
+        self.derive_pmu_controls();
         self.outputs_dirty = true;
     }
 
@@ -1442,7 +1624,7 @@ impl<L: Levels> Cpu<L> {
             // Read-only registers' writes were refused by their checks.
             PmuReg::Ceid(_) | PmuReg::Mmir => {}
         }
-        self.pmu.enabled = self.pmu_counting().any_enabled();
+        self.derive_pmu_controls();
         Ok(WriteEffect::Pmu)
     }
 
@@ -1545,7 +1727,7 @@ impl<L: Levels> Cpu<L> {
             ovs,
             settled: self.retired,
         };
-        self.pmu.enabled = self.pmu_counting().any_enabled();
+        self.derive_pmu_controls();
         Ok(())
     }
 }

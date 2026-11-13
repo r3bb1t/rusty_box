@@ -648,15 +648,24 @@ pub struct Cpu<L: Levels> {
     /// after a restore sets it.
     pub(crate) in_guarded_page: bool,
     /// Whether every instruction runs by [`Cpu::step`], where Software Step
-    /// and the breakpoints are checked: `MDSCR_EL1.SS` is set, or `MDE` with
-    /// a breakpoint enabled. Derived (`Cpu::debug_controls_changed`), so it
-    /// is not saved.
+    /// and the breakpoints are checked and the PMU hears of each
+    /// instruction's kind: `MDSCR_EL1.SS` is set, `MDE` with a breakpoint
+    /// enabled, or the PMU counts an event an instruction's kind counts as
+    /// (`SVE_INST_RETIRED`, `SME_INST_RETIRED`, `SME_RETIRED`). Derived
+    /// (`Cpu::derive_debug_controls`), so it is not saved.
     pub(crate) step_each: bool,
     /// Whether a data access goes through the check of the watchpoints:
     /// `MDSCR_EL1.MDE` is set with a watchpoint enabled. Derived, as
     /// [`Cpu::step_each`] is. While it is set, no data access is answered
     /// by the inline TLB hit, so that every one reaches the check.
     pub(crate) watch_armed: bool,
+    /// Whether every data access takes the checked translation
+    /// ([`Cpu::translate_data`]), never the inline TLB hit: the
+    /// watchpoints are armed ([`Cpu::watch_armed`]) or the PMU counts an
+    /// event a data access counts as (`L1D_CACHE`, `L1D_CACHE_RD`), which
+    /// the checked translation reports. Derived
+    /// ([`Cpu::derive_debug_controls`]), so it is not saved.
+    pub(crate) data_checked: bool,
     /// What took Software Step to active-pending.
     pub(crate) stepped: debug::Stepped,
     /// Arm `ShouldAdvanceSS`: set before each instruction, cleared by one
@@ -735,6 +744,7 @@ impl<L: Levels> Cpu<L> {
             in_guarded_page: false,
             step_each: false,
             watch_armed: false,
+            data_checked: false,
             stepped: debug::Stepped::Nothing,
             should_advance_ss: false,
             activity: Activity::Running,

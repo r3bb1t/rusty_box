@@ -331,6 +331,11 @@ impl<L: Levels> Cpu<L> {
             self.pstate.btype = btype;
         } else {
             self.ss_advance(fetched);
+            if let Some(insn) = fetched {
+                if self.pmu.tracked.counts_retired_kinds() {
+                    self.pmu_retired(classify(insn, self.imp.features).retired_kind());
+                }
+            }
         }
         self.finish(pc, fetched, result, observed.observer).step()
     }

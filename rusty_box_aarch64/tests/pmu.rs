@@ -141,8 +141,10 @@ where
 /// as zero on the Armv9.2 model; `LC` reads one, there being no AArch32.
 /// `PMCEID0_EL0` and `PMCEID1_EL0` name the events counted: `SW_INCR`,
 /// `INST_RETIRED`, `EXC_TAKEN`, `EXC_RETURN`, `CID_WRITE_RETIRED`,
-/// `CPU_CYCLES`, `TTBR_WRITE_RETIRED` and `CHAIN`, and on the Armv9.2 model
-/// the stall events FEAT_PMUv3p1 and FEAT_PMUv3p4 require.
+/// `CPU_CYCLES`, `TTBR_WRITE_RETIRED`, `CHAIN`, `L1D_CACHE_REFILL` and
+/// `L1D_CACHE`, and on the Armv9.2 model the stall, Level 1 cache miss and
+/// read events FEAT_PMUv3p1 and FEAT_PMUv3p4 require (`L1I_CACHE_LMISS`
+/// in bit 38 of `PMCEID0_EL0`).
 #[test]
 fn each_processor_names_its_pmu() {
     let program = [
@@ -153,15 +155,15 @@ fn each_processor_names_its_pmu() {
         SPIN,
     ];
     let spin = RAM_BASE + 16;
-    for (cpu, pmcr, pmuver, ceid1) in [
-        (CpuModel::CortexA57, 0x4101_3040, 1, 0),
-        (CpuModel::Armv9p2, 0x0000_3040, 7, 0x1000_0018),
+    for (cpu, pmcr, pmuver, ceid0, ceid1) in [
+        (CpuModel::CortexA57, 0x4101_3040, 1, 0x5002_0F19, 0),
+        (CpuModel::Armv9p2, 0x0000_3040, 7, 0x40_5002_0F19, 0x1200_0018),
     ] {
         run(cpu, &[(RAM_BASE, &program)], &[], spin, |m| {
             let pmcr_read = m.reg_read(Reg::X9);
             assert_eq!(pmcr_read, pmcr, "{cpu}: PMCR_EL0");
             assert_eq!((pmcr_read >> 11) & 0x1F, 6, "{cpu}: six event counters");
-            assert_eq!(m.reg_read(Reg::X10), 0x5002_0F01, "{cpu}: PMCEID0_EL0");
+            assert_eq!(m.reg_read(Reg::X10), ceid0, "{cpu}: PMCEID0_EL0");
             assert_eq!(m.reg_read(Reg::X11), ceid1, "{cpu}: PMCEID1_EL0");
             assert_eq!((m.reg_read(Reg::X12) >> 8) & 0xF, pmuver, "{cpu}: PMUVer");
         });
@@ -227,6 +229,154 @@ fn the_counters_count_the_instructions_run() {
             },
         );
     }
+}
+
+/// `L1D_CACHE` counts each data access to Normal Write-Back memory and
+/// `L1D_CACHE_RD` the reads among them (D14.3): with the MMU and the data
+/// cache on (`SCTLR_EL1.M` and `C`; with `C` clear every data access is
+/// Non-cacheable) and RAM mapped Write-Back, a load, a store and a load
+/// pair are three accesses,
+/// two of them reads; a load through a Device mapping of the same RAM is
+/// none. `L1D_CACHE_REFILL` counts no refill, the modelled cache holding
+/// every line. The Cortex-A57 has no `L1D_CACHE_RD`, so its counter of
+/// event 0x40 counts nothing.
+#[test]
+fn the_l1_data_cache_events_count_the_write_back_accesses() {
+    const L1D_CACHE_REFILL: u64 = 0x03;
+    const L1D_CACHE: u64 = 0x04;
+    const L1D_CACHE_RD: u64 = 0x40;
+    const TABLE: u64 = RAM_BASE + 0x1_0000;
+    const DATA: u64 = RAM_BASE + 0x8000;
+    /// VA 0x8000_0000 maps RAM's base as Device memory: `DATA` there.
+    const DATA_AS_DEVICE: u64 = 0x8000_0000 + 0x8000;
+    const ISB: u32 = 0xD503_3FDF;
+    const AF: u64 = 1 << 10;
+    const INNER_SHAREABLE: u64 = 3 << 8;
+    const DEVICE: u64 = 1 << 2;
+    let normal_block = RAM_BASE | AF | INNER_SHAREABLE | 0b01;
+    let device_block = RAM_BASE | AF | DEVICE | 0b01;
+    let tables = [
+        0,
+        0,
+        normal_block as u32,
+        (normal_block >> 32) as u32,
+        device_block as u32,
+        (device_block >> 32) as u32,
+    ];
+    let program = [
+        msr(SysReg::MAIR_EL1, 20),
+        msr(SysReg::TCR_EL1, 21),
+        msr(SysReg::TTBR0_EL1, 22),
+        ISB,
+        mrs(23, SysReg::SCTLR_EL1),
+        0xB240_02F7, // orr x23, x23, #1: M
+        0xB27E_02F7, // orr x23, x23, #4: C, without which data is Non-cacheable
+        msr(SysReg::SCTLR_EL1, 23),
+        ISB,
+        msr(pmevcntr(0), XZR),
+        msr(pmevcntr(1), XZR),
+        msr(pmevcntr(2), XZR),
+        msr(pmevtyper(0), 2),
+        msr(pmevtyper(1), 3),
+        msr(pmevtyper(2), 4),
+        msr(SysReg::PMCNTENSET_EL0, 5),
+        msr(SysReg::PMCR_EL0, 6),
+        0xF940_0006, // ldr x6, [x0]
+        0xF900_0406, // str x6, [x0, #8]
+        0xA940_2007, // ldp x7, x8, [x0]
+        0xF940_0029, // ldr x9, [x1]
+        msr(pmcntenclr(), 5),
+        mrs(10, pmevcntr(0)),
+        mrs(11, pmevcntr(1)),
+        mrs(12, pmevcntr(2)),
+        SPIN,
+    ];
+    let spin = RAM_BASE + 4 * (program.len() as u64 - 1);
+    for (cpu, reads) in [(CpuModel::CortexA57, 0), (CpuModel::Armv9p2, 2)] {
+        run(
+            cpu,
+            &[(RAM_BASE, &program), (TABLE, &tables)],
+            &[
+                (Reg::X0, DATA),
+                (Reg::X1, DATA_AS_DEVICE),
+                (Reg::X2, L1D_CACHE),
+                (Reg::X3, L1D_CACHE_RD),
+                (Reg::X4, L1D_CACHE_REFILL),
+                (Reg::X5, 0b111),
+                (Reg::X6, PMCR_E),
+                // Attribute 0 Normal Write-Back, attribute 1 Device-nGnRnE.
+                (Reg::X20, 0x00FF),
+                (Reg::X21, 25 | (1 << 23)),
+                (Reg::X22, TABLE),
+            ],
+            spin,
+            |m| {
+                assert_eq!(m.reg_read(Reg::X10), 3, "{cpu}: L1D_CACHE");
+                assert_eq!(m.reg_read(Reg::X11), reads, "{cpu}: L1D_CACHE_RD");
+                assert_eq!(m.reg_read(Reg::X12), 0, "{cpu}: L1D_CACHE_REFILL");
+            },
+        );
+    }
+}
+
+/// On the Armv9.2 model, `SVE_INST_RETIRED` counts the SVE instructions
+/// executed, `SME_INST_RETIRED` the SME ones, and `SME_RETIRED` the SME
+/// data processing among them (D14.3): after `SMSTART`, which is neither,
+/// `PTRUE` is SVE, `ZERO {ZA}` SME data processing and a fill of a ZA
+/// array vector an SME load.
+#[test]
+fn the_sve_and_sme_events_count_their_instructions() {
+    const SVE_INST_RETIRED: u64 = 0x8002;
+    const SME_INST_RETIRED: u64 = 0x835A;
+    const SME_RETIRED: u64 = 0x8358;
+    const SMSTART: u32 = 0xD503_477F;
+    const PTRUE_P0: u32 = 0x2518_E3E0;
+    const ZERO_ZA: u32 = 0xC008_00FF;
+    const LDR_ZA: u32 = 0xE100_0020; // ldr za[w12, 0], [x1]
+    const ISB: u32 = 0xD503_3FDF;
+    let program = [
+        msr(sysreg(3, 0, 1, 0, 2), 20), // msr cpacr_el1, x20
+        ISB,
+        msr(pmevcntr(0), XZR),
+        msr(pmevcntr(1), XZR),
+        msr(pmevcntr(2), XZR),
+        msr(pmevtyper(0), 2),
+        msr(pmevtyper(1), 3),
+        msr(pmevtyper(2), 4),
+        msr(SysReg::PMCNTENSET_EL0, 5),
+        msr(SysReg::PMCR_EL0, 6),
+        SMSTART,
+        PTRUE_P0,
+        ZERO_ZA,
+        LDR_ZA,
+        msr(pmcntenclr(), 5),
+        mrs(10, pmevcntr(0)),
+        mrs(11, pmevcntr(1)),
+        mrs(12, pmevcntr(2)),
+        SPIN,
+    ];
+    let spin = RAM_BASE + 4 * (program.len() as u64 - 1);
+    run(
+        CpuModel::Armv9p2,
+        &[(RAM_BASE, &program)],
+        &[
+            (Reg::X1, RAM_BASE + 0x8000),
+            (Reg::X2, SVE_INST_RETIRED),
+            (Reg::X3, SME_INST_RETIRED),
+            (Reg::X4, SME_RETIRED),
+            (Reg::X5, 0b111),
+            (Reg::X6, PMCR_E),
+            (Reg::X12, 0),
+            // FPEN, SMEN and ZEN: SIMD&FP, SME and SVE untrapped.
+            (Reg::X20, (3 << 20) | (3 << 24) | (3 << 16)),
+        ],
+        spin,
+        |m| {
+            assert_eq!(m.reg_read(Reg::X10), 1, "SVE_INST_RETIRED");
+            assert_eq!(m.reg_read(Reg::X11), 2, "SME_INST_RETIRED");
+            assert_eq!(m.reg_read(Reg::X12), 1, "SME_RETIRED");
+        },
+    );
 }
 
 /// A counter counts only at the levels its filter leaves it: EL1 runs four
