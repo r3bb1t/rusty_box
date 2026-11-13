@@ -322,6 +322,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             .cache
             .u
             .segment_base()
+            .get()
     }
 
     // getters for 64 bit general registers
@@ -494,25 +495,33 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // access to 64 bit MSR registers (FS.BASE / GS.BASE)
     #[inline]
     pub fn msr_fsbase(&self) -> u64 {
-        self.sregs[BxSegregs::Fs as usize].cache.u.segment_base()
+        self.sregs[BxSegregs::Fs as usize]
+            .cache
+            .u
+            .segment_base()
+            .get()
     }
     #[inline]
     pub fn set_msr_fsbase(&mut self, val: u64) {
         self.sregs[BxSegregs::Fs as usize]
             .cache
             .u
-            .set_segment_base(val)
+            .set_segment_base(crate::config::BxLinAddress::new(val))
     }
     #[inline]
     pub fn msr_gsbase(&self) -> u64 {
-        self.sregs[BxSegregs::Gs as usize].cache.u.segment_base()
+        self.sregs[BxSegregs::Gs as usize]
+            .cache
+            .u
+            .segment_base()
+            .get()
     }
     #[inline]
     pub fn set_msr_gsbase(&mut self, val: u64) {
         self.sregs[BxSegregs::Gs as usize]
             .cache
             .u
-            .set_segment_base(val)
+            .set_segment_base(crate::config::BxLinAddress::new(val))
     }
 
     // =========================================================================
@@ -625,7 +634,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Get IDTR base (for diagnostics)
     #[inline]
     pub fn get_idtr_base(&self) -> u64 {
-        self.idtr.base
+        self.idtr.base.get()
     }
 
     /// Get IDTR limit (for diagnostics)
@@ -637,7 +646,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Get GDTR base (for diagnostics)
     #[inline]
     pub fn get_gdtr_base(&self) -> u64 {
-        self.gdtr.base
+        self.gdtr.base.get()
     }
 
     /// Get GDTR limit (for diagnostics)
@@ -653,6 +662,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             .cache
             .u
             .segment_base()
+            .get()
     }
 
     /// Get DS base from cached descriptor (for diagnostics)
@@ -662,6 +672,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             .cache
             .u
             .segment_base()
+            .get()
     }
 
     /// Get DS selector (for diagnostics)

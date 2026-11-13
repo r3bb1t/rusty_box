@@ -284,11 +284,9 @@ impl<T: Instrumentation> ExecCtx<'_, T> {
     /// window when RIP lies in it and through the page tables when not.
     fn code_breakpoint_here(&mut self) -> Option<BreakpointHere> {
         let rip = self.rip();
-        let linear = if self.long64_mode() {
-            self.get_laddr64(super::decoder::BxSegregs::Cs as usize, rip)
-        } else {
-            u64::from(self.get_laddr32(super::decoder::BxSegregs::Cs as usize, rip as u32))
-        };
+        let linear = self
+            .get_laddr(super::decoder::BxSegregs::Cs as usize, rip)
+            .get();
         if self.code_breakpoints.reported_at(self.icount, linear) {
             return None;
         }
@@ -305,7 +303,7 @@ impl<T: Instrumentation> ExecCtx<'_, T> {
         let physical = if eip_biased < u64::from(self.eip_page_window_size) {
             self.p_addr_fetch_page.wrapping_add(eip_biased)
         } else {
-            self.dbg_xlate_linear2phy(linear, DbgWalk::Guest)?
+            self.dbg_xlate_linear2phy(crate::config::BxLinAddress::new(linear), DbgWalk::Guest)?
         };
         self.code_breakpoints
             .physical_set()

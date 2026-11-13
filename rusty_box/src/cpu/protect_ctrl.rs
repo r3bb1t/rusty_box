@@ -10,6 +10,7 @@ use super::{
     descriptor::SegTypeBits,
     Result,
 };
+use crate::config::BxLinAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// LGDT - Load Global Descriptor Table Register
@@ -49,7 +50,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             base &= 0x00FFFFFF;
         }
 
-        self.gdtr.base = base;
+        self.gdtr.base = BxLinAddress::new(base);
         self.gdtr.limit = limit;
         Ok(())
     }
@@ -84,7 +85,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
         let limit = self.gdtr.limit;
         self.v_write_word(seg, eaddr, limit)?;
-        let base = self.gdtr.base as u32;
+        let base = self.gdtr.base.low32();
         self.v_write_dword(seg, eaddr.wrapping_add(2) & asize_mask, base)?;
         Ok(())
     }
@@ -125,7 +126,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             base &= 0x00FFFFFF;
         }
 
-        self.idtr.base = base;
+        self.idtr.base = BxLinAddress::new(base);
         self.idtr.limit = limit;
         Ok(())
     }
@@ -160,7 +161,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
         let limit = self.idtr.limit;
         self.v_write_word(seg, eaddr, limit)?;
-        let base = self.idtr.base as u32;
+        let base = self.idtr.base.low32();
         self.v_write_dword(seg, eaddr.wrapping_add(2) & asize_mask, base)?;
         Ok(())
     }
@@ -748,7 +749,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         self.gdtr.limit = limit;
-        self.gdtr.base = base;
+        self.gdtr.base = BxLinAddress::new(base);
         Ok(())
     }
 
@@ -776,7 +777,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         self.idtr.limit = limit;
-        self.idtr.base = base;
+        self.idtr.base = BxLinAddress::new(base);
 
         Ok(())
     }
@@ -803,7 +804,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         let limit = self.gdtr.limit;
         self.system_write_word(laddr, limit)?;
-        let base = self.gdtr.base;
+        let base = self.gdtr.base.get();
         self.system_write_qword(laddr.wrapping_add(2), base)?;
         Ok(())
     }
@@ -830,7 +831,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         let limit = self.idtr.limit;
         self.system_write_word(laddr, limit)?;
-        let base = self.idtr.base;
+        let base = self.idtr.base.get();
         self.system_write_qword(laddr.wrapping_add(2), base)?;
         Ok(())
     }

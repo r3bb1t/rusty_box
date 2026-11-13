@@ -14,7 +14,7 @@ use super::{
 };
 
 use crate::{
-    config::BxPhyAddress,
+    config::{BxLinAddress, BxPhyAddress},
     convert::usize_from_u32,
     cpu::rusty_box::MemoryAccessType,
 };
@@ -96,7 +96,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     #[inline]
     fn fast_rep_span64(
         &self,
-        laddr: u64,
+        laddr: BxLinAddress,
         bytes: u32,
         access: MemoryAccessType,
     ) -> bool {
@@ -124,9 +124,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.direct_rep_bulk_allowed(false) || self.get_df() || self.async_event != 0 {
             return Ok(None);
         }
-        let source_laddr = u64::from(self.get_laddr32(source_seg as usize, source_offset));
-        let destination_laddr =
-            u64::from(self.get_laddr32(BxSegregs::Es as usize, destination_offset));
+        let source_laddr = self.get_laddr32(source_seg as usize, source_offset);
+        let destination_laddr = self.get_laddr32(BxSegregs::Es as usize, destination_offset);
         let Some((source_ptr, source_remaining)) = self.get_host_read_ptr(source_laddr)? else {
             return Ok(None);
         };
@@ -171,8 +170,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.direct_rep_bulk_allowed(false) || self.get_df() || self.async_event != 0 {
             return Ok(None);
         }
-        let destination_laddr =
-            u64::from(self.get_laddr32(BxSegregs::Es as usize, destination_offset));
+        let destination_laddr = self.get_laddr32(BxSegregs::Es as usize, destination_offset);
         let Some((destination_ptr, destination_remaining, destination_paddr)) =
             self.get_host_write_ptr_for_bulk(destination_laddr)?
         else {

@@ -23,6 +23,7 @@ use super::cpu::{BxCpuC, CpuActivityState};
 use super::decoder::BxSegregs;
 use super::descriptor::SEG_VALID_CACHE;
 use super::instrumentation::Instrumentation;
+use crate::config::BxLinAddress;
 
 /// The trace-scheduling bits of a processor's `async_event`, held while
 /// something else runs.
@@ -800,11 +801,11 @@ impl<T: Instrumentation> BxCpuC<T> {
         }
         if groups.contains(ArchGroups::TABLES) {
             out.gdtr = DescriptorTableState {
-                base: self.gdtr.base,
+                base: self.gdtr.base.get(),
                 limit: self.gdtr.limit,
             };
             out.idtr = DescriptorTableState {
-                base: self.idtr.base,
+                base: self.idtr.base.get(),
                 limit: self.idtr.limit,
             };
         }
@@ -955,9 +956,9 @@ impl<T: Instrumentation> BxCpuC<T> {
             segment_in(&mut self.tr, &state.tr);
         }
         if groups.contains(ArchGroups::TABLES) {
-            self.gdtr.base = state.gdtr.base;
+            self.gdtr.base = BxLinAddress::new(state.gdtr.base);
             self.gdtr.limit = state.gdtr.limit;
-            self.idtr.base = state.idtr.base;
+            self.idtr.base = BxLinAddress::new(state.idtr.base);
             self.idtr.limit = state.idtr.limit;
         }
 
@@ -1209,7 +1210,7 @@ fn segment_out(seg: &super::descriptor::BxSegmentReg) -> SegmentState {
     let granular = seg.cache.u.segment_g();
     SegmentState {
         selector: seg.selector.value,
-        base: seg.cache.u.segment_base(),
+        base: seg.cache.u.segment_base().get(),
         // The inverse of the scaling the cache applied: a granular limit was
         // stored with its low twelve bits set, so shifting them back off
         // recovers the field a descriptor held.
@@ -1245,7 +1246,7 @@ fn segment_in(seg: &mut super::descriptor::BxSegmentReg, state: &SegmentState) {
     seg.cache.dpl = state.attributes.dpl();
     seg.cache.segment = state.attributes.is_code_or_data();
     seg.cache.r#type = state.attributes.kind();
-    seg.cache.u.set_segment_base(state.base);
+    seg.cache.u.set_segment_base(BxLinAddress::new(state.base));
     seg.cache.u.set_segment_limit_scaled(state.scaled_limit());
     seg.cache.u.set_segment_g(state.attributes.is_granular());
     seg.cache.u.set_segment_d_b(state.attributes.is_default_big());

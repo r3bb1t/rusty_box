@@ -43,6 +43,12 @@ impl A20Mask {
         self.0
     }
 
+    /// Whether the gate is open: the mask keeps bit 20.
+    #[inline(always)]
+    pub const fn is_open(self) -> bool {
+        self.0 & (1 << 20) != 0
+    }
+
     /// `addr` as the gate passes it.
     #[inline(always)]
     pub const fn apply(self, addr: BxPhyAddress) -> BxPhyAddress {
@@ -51,6 +57,161 @@ impl A20Mask {
 }
 
 pub type BxAddress = u64;
+
+/// A guest linear address (Bochs `bx_address` where it names a linear
+/// address): a segment's base plus an offset, before paging translates it.
+///
+/// An address comes into being where a segment base meets an offset
+/// (Bochs `get_laddr32`/`get_laddr64`), or where the architecture names one
+/// (a descriptor table's base, an `INVLPG` operand, a debug register), and
+/// leaves as a bare `u64` ([`get`]) only where a number is what is wanted: a
+/// TLB index, a value a guest reads back (`CR2`, an exit qualification), a
+/// snapshot. Its arithmetic is a position's (R4), as [`BxPhyAddress`]'s is:
+/// an address plus a distance is an address, an address minus an address a
+/// distance, modulo 2^64; masking is by name ([`page_base`], [`page_offset`],
+/// [`masked`]).
+///
+/// [`get`]: BxLinAddress::get
+/// [`page_base`]: BxLinAddress::page_base
+/// [`page_offset`]: BxLinAddress::page_offset
+/// [`masked`]: BxLinAddress::masked
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct BxLinAddress(u64);
+
+impl BxLinAddress {
+    /// The linear address `addr`.
+    #[inline(always)]
+    pub const fn new(addr: u64) -> Self {
+        Self(addr)
+    }
+
+    /// The 32-bit linear address `addr`, as legacy and compatibility mode
+    /// form one (Bochs `get_laddr32`).
+    #[inline(always)]
+    pub const fn from_u32(addr: u32) -> Self {
+        Self(addr as u64)
+    }
+
+    /// The address as a number.
+    #[inline(always)]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The low 32 bits of the address, as a 32-bit linear address keeps
+    /// them.
+    #[inline(always)]
+    pub const fn low32(self) -> u32 {
+        self.0 as u32
+    }
+
+    /// The 4 KiB page the address lies in, as the address of its first byte
+    /// (Bochs `LPFOf`).
+    #[inline(always)]
+    pub const fn page_base(self) -> Self {
+        Self(self.0 & !0xFFF)
+    }
+
+    /// How far into its 4 KiB page the address lies (Bochs `PAGE_OFFSET`).
+    #[inline(always)]
+    pub const fn page_offset(self) -> u64 {
+        self.0 & 0xFFF
+    }
+
+    /// Whether the address is a multiple of `align`, a power of two.
+    #[inline(always)]
+    pub const fn is_aligned(self, align: u64) -> bool {
+        self.0 & (align - 1) == 0
+    }
+
+    /// The first byte of the 4 KiB page after the one the address lies in,
+    /// modulo 2^64: where the rest of a page-crossing access lies.
+    #[inline(always)]
+    pub const fn next_page(self) -> Self {
+        Self((self.0 | 0xFFF).wrapping_add(1))
+    }
+
+    /// The address with only the bits `mask` keeps: a mode's address width,
+    /// an alignment, a large page's frame.
+    #[inline(always)]
+    pub const fn masked(self, mask: u64) -> Self {
+        Self(self.0 & mask)
+    }
+
+    /// `distance` bytes past the address, modulo 2^64.
+    #[inline(always)]
+    pub const fn wrapping_add(self, distance: u64) -> Self {
+        Self(self.0.wrapping_add(distance))
+    }
+
+    /// `distance` bytes past the address, or `None` past the end of the
+    /// address space.
+    #[inline(always)]
+    pub const fn checked_add(self, distance: u64) -> Option<Self> {
+        match self.0.checked_add(distance) {
+            Some(addr) => Some(Self(addr)),
+            None => None,
+        }
+    }
+
+    /// `distance` bytes before the address, modulo 2^64.
+    #[inline(always)]
+    pub const fn wrapping_sub(self, distance: u64) -> Self {
+        Self(self.0.wrapping_sub(distance))
+    }
+
+    /// How far past `base` the address lies, modulo 2^64.
+    #[inline(always)]
+    pub const fn offset_from(self, base: Self) -> u64 {
+        self.0.wrapping_sub(base.0)
+    }
+
+    /// The physical address an access to this linear address reaches with
+    /// paging off: the same number, through the A20 gate (Bochs `A20ADDR`
+    /// applied to a linear address).
+    #[inline(always)]
+    pub const fn unpaged(self, a20: A20Mask) -> BxPhyAddress {
+        a20.apply(BxPhyAddress::new(self.0))
+    }
+}
+
+impl core::ops::Add<u64> for BxLinAddress {
+    type Output = Self;
+    /// [`BxLinAddress::wrapping_add`].
+    #[inline(always)]
+    fn add(self, distance: u64) -> Self {
+        self.wrapping_add(distance)
+    }
+}
+
+impl core::ops::AddAssign<u64> for BxLinAddress {
+    #[inline(always)]
+    fn add_assign(&mut self, distance: u64) {
+        *self = self.wrapping_add(distance);
+    }
+}
+
+impl core::ops::Sub for BxLinAddress {
+    type Output = u64;
+    /// [`BxLinAddress::offset_from`].
+    #[inline(always)]
+    fn sub(self, base: Self) -> u64 {
+        self.offset_from(base)
+    }
+}
+
+impl core::fmt::LowerHex for BxLinAddress {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+impl core::fmt::UpperHex for BxLinAddress {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::UpperHex::fmt(&self.0, f)
+    }
+}
 
 #[cfg(target_pointer_width = "32")]
 pub type BxPtrEquiv = u32;

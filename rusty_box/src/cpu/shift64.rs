@@ -10,7 +10,10 @@ use super::{
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ---- 64-bit read/write helpers for shift instructions ----
-    fn shift_read64(&mut self, instr: &Instruction) -> super::Result<(u64, Option<u64>)> {
+    fn shift_read64(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<(u64, Option<crate::config::BxLinAddress>)> {
         if instr.mod_c0() {
             Ok((self.get_gpr64(instr.dst() as usize), None))
         } else {
@@ -23,8 +26,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
     }
 
-    fn shift_write64(&mut self, instr: &Instruction, paddr: Option<u64>, result: u64) {
-        if let Some(laddr) = paddr {
+    fn shift_write64(
+        &mut self,
+        instr: &Instruction,
+        laddr: Option<crate::config::BxLinAddress>,
+        result: u64,
+    ) {
+        if let Some(laddr) = laddr {
             self.write_rmw_linear_qword(laddr, result);
         } else {
             self.set_gpr64(instr.dst() as usize, result);

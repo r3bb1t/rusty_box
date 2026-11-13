@@ -309,8 +309,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
             if gate_dest_offset > cs_descriptor.u.segment_limit_scaled() {
                 let gdt_entry_laddr = self.gdtr.base + (cs_selector.index as u64 * 8);
-                let gdt_phys =
-                    crate::config::BxPhyAddress::new(gdt_entry_laddr.wrapping_sub(0xC0000000));
+                let gdt_phys = crate::config::BxPhyAddress::new(
+                    gdt_entry_laddr.get().wrapping_sub(0xC0000000),
+                );
                 let raw_lo = self.mem_read_dword(gdt_phys);
                 let raw_hi = self.mem_read_dword(gdt_phys + 4);
                 tracing::error!(
@@ -357,7 +358,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
             // Bochs exception.cc protected_mode_int \u2014 same-priv shadow-stack push.
             if self.shadow_stack_enabled(cpl) {
-                let return_lip = self.get_laddr32(BxSegregs::Cs as usize, old_eip) as u64;
+                let return_lip = self.get_laddr32(BxSegregs::Cs as usize, old_eip).get();
                 self.call_far_shadow_stack_push(old_cs, return_lip, self.ssp())?;
             }
             self.track_indirect(cpl);
@@ -445,7 +446,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // CET state for the inner-priv shadow-stack switch.
         let old_cpl_cet = self.cs_rpl();
         let old_ss_dpl_cet = self.sregs[BxSegregs::Ss as usize].cache.dpl;
-        let return_lip_cet = self.get_laddr32(BxSegregs::Cs as usize, old_eip) as u64;
+        let return_lip_cet = self.get_laddr32(BxSegregs::Cs as usize, old_eip).get();
         let new_ssp_cet = self.msr.ia32_pl_ssp[cs_descriptor.dpl as usize];
 
         // Get SS and ESP from TSS for the new privilege level (matches line 446)
@@ -1074,7 +1075,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs exception.cc long_mode_int \u2014 capture pre-transition CET state.
         let old_cpl_cet = cpl;
         let old_ss_dpl_cet = self.sregs[BxSegregs::Ss as usize].cache.dpl;
-        let return_lip_cet = self.get_laddr64(BxSegregs::Cs as usize, old_rip);
+        let return_lip_cet = self.get_laddr64(BxSegregs::Cs as usize, old_rip).get();
         let mut new_ssp_cet: u64 = 0;
         let mut check_ss_token = true;
 
@@ -1100,7 +1101,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                         .msr
                         .ia32_interrupt_ssp_table
                         .wrapping_add((ist as u64) << 3);
-                    new_ssp_cet = self.system_read_qword(new_ssp_addr)?;
+                    new_ssp_cet =
+                        self.system_read_qword(crate::config::BxLinAddress::new(new_ssp_addr))?;
                 }
             } else {
                 new_ssp_cet = self.msr.ia32_pl_ssp[cs_descriptor.dpl as usize];
@@ -1160,7 +1162,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                         .msr
                         .ia32_interrupt_ssp_table
                         .wrapping_add((ist as u64) << 3);
-                    new_ssp_cet = self.system_read_qword(new_ssp_addr)?;
+                    new_ssp_cet =
+                        self.system_read_qword(crate::config::BxLinAddress::new(new_ssp_addr))?;
                 }
             } else {
                 new_ssp_cet = self.ssp();

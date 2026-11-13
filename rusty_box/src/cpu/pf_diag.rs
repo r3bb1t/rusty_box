@@ -18,7 +18,7 @@
 //! `RUSTY_BOX_PF_DIAG` environment variable (its value is the report path,
 //! appended per hit). Compiled only with the `std` feature.
 
-use crate::config::BxPhyAddress;
+use crate::config::{BxLinAddress, BxPhyAddress};
 use crate::cpu::decoder::{decode64, BX_64BIT_REG_RIP};
 use crate::cpu::instrumentation::Instrumentation;
 use std::fmt::Write as _;
@@ -35,14 +35,19 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// to `prev_rip`, so both the architectural fault RIP (`prev_rip`) and the
     /// in-flight RIP are observable.
     #[cold]
-    pub(super) fn null_write_fault_diag(&mut self, laddr: u64, error_code: u32, user: bool) {
+    pub(super) fn null_write_fault_diag(
+        &mut self,
+        laddr: BxLinAddress,
+        error_code: u32,
+        user: bool,
+    ) {
         let Some(path) = std::env::var_os("RUSTY_BOX_PF_DIAG") else {
             return;
         };
 
         let fault_rip = self.prev_rip;
         let in_flight_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
-        let rip_phys = self.translate_linear_for_diag(fault_rip);
+        let rip_phys = self.translate_linear_for_diag(BxLinAddress::new(fault_rip));
 
         let mut report = String::new();
         // String's fmt::Write never fails; a helper macro keeps the Result

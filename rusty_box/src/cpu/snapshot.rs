@@ -38,7 +38,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// against the PC system's authoritative gate state.
     #[cfg(feature = "std")]
     pub(crate) const fn snapshot_a20_mask(&self) -> u64 {
-        self.a20_mask
+        self.a20_mask.bits()
     }
 
     /// Rejects a CPU/APIC pairing whose architectural APIC-base MSR does not
@@ -201,7 +201,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         write_i32(writer, self.last_exception_type)?;
         writer.write_u32(self.smbase)?;
         writer.write_u32(self.alignment_check_mask)?;
-        writer.write_u64(self.a20_mask)?;
+        writer.write_u64(self.a20_mask.bits())?;
         writer.write_u32(self.fred_event_info)?;
         writer.write_u64(self.fred_event_data)?;
 
@@ -449,7 +449,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if a20_mask != u64::MAX && a20_mask != 0xFFFF_FFFF_FFEF_FFFF {
             return Err(snapshot_invalid("CPU A20 mask is invalid"));
         }
-        self.a20_mask = a20_mask;
+        self.a20_mask = crate::config::A20Mask::from_bits(a20_mask);
         self.fred_event_info = reader.read_u32()?;
         self.fred_event_data = reader.read_u64()?;
 
@@ -656,7 +656,7 @@ fn write_v3_seg_reg<W: SnapWrite>(writer: &mut W, seg: &BxSegmentReg) -> SnapRes
     writer.write_u8(seg.cache.dpl)?;
     writer.write_bool(seg.cache.segment)?;
     writer.write_u8(seg.cache.r#type)?;
-    writer.write_u64(seg.cache.u.segment_base())?;
+    writer.write_u64(seg.cache.u.segment_base().get())?;
     writer.write_u32(seg.cache.u.segment_limit_scaled())?;
     writer.write_bool(seg.cache.u.segment_g())?;
     writer.write_bool(seg.cache.u.segment_d_b())?;
@@ -711,7 +711,9 @@ fn read_v3_seg_reg<R: SnapRead>(
     seg.cache.dpl = dpl;
     seg.cache.segment = segment;
     seg.cache.r#type = descriptor_type;
-    seg.cache.u.set_segment_base(base);
+    seg.cache
+        .u
+        .set_segment_base(crate::config::BxLinAddress::new(base));
     seg.cache.u.set_segment_limit_scaled(limit_scaled);
     seg.cache.u.set_segment_g(granularity);
     seg.cache.u.set_segment_d_b(default_size);
@@ -724,7 +726,7 @@ fn write_v3_global_seg<W: SnapWrite>(
     writer: &mut W,
     seg: &BxGlobalSegmentReg,
 ) -> SnapResult<()> {
-    writer.write_u64(seg.base)?;
+    writer.write_u64(seg.base.get())?;
     writer.write_u16(seg.limit)
 }
 
@@ -732,7 +734,7 @@ fn read_v3_global_seg<R: SnapRead>(
     reader: &mut R,
     seg: &mut BxGlobalSegmentReg,
 ) -> SnapResult<()> {
-    seg.base = reader.read_u64()?;
+    seg.base = crate::config::BxLinAddress::new(reader.read_u64()?);
     seg.limit = reader.read_u16()?;
     Ok(())
 }

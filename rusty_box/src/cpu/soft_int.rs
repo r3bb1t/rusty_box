@@ -654,8 +654,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
             // Bochs iret.cc iret_protected \u2014 same-priv shadow-stack restore.
             if self.shadow_stack_enabled(cpl) {
-                let return_lip =
-                    (cs_descriptor.u.segment_base().wrapping_add(new_eip as u64)) & 0xFFFF_FFFF;
+                let return_lip = (cs_descriptor
+                    .u
+                    .segment_base()
+                    .get()
+                    .wrapping_add(new_eip as u64))
+                    & 0xFFFF_FFFF;
                 let prev_ssp = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
                 self.set_ssp(prev_ssp);
             }
@@ -744,8 +748,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
                 }
                 if cs_selector.rpl != 3 {
-                    let return_lip =
-                        (cs_descriptor.u.segment_base().wrapping_add(new_eip as u64)) & 0xFFFF_FFFF;
+                    let return_lip = (cs_descriptor
+                        .u
+                        .segment_base()
+                        .get()
+                        .wrapping_add(new_eip as u64))
+                        & 0xFFFF_FFFF;
                     new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
                 }
             }
@@ -884,8 +892,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // Same privilege — 16-bit
             // Bochs iret.cc iret_protected (16-bit) \u2014 same-priv shadow-stack restore.
             if self.shadow_stack_enabled(cpl) {
-                let return_lip =
-                    (cs_descriptor.u.segment_base().wrapping_add(new_ip as u64)) & 0xFFFF_FFFF;
+                let return_lip = (cs_descriptor
+                    .u
+                    .segment_base()
+                    .get()
+                    .wrapping_add(new_ip as u64))
+                    & 0xFFFF_FFFF;
                 let prev_ssp = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
                 self.set_ssp(prev_ssp);
             }
@@ -951,8 +963,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
                 }
                 if cs_selector.rpl != 3 {
-                    let return_lip =
-                        (cs_descriptor.u.segment_base().wrapping_add(new_ip as u64)) & 0xFFFF_FFFF;
+                    let return_lip = (cs_descriptor
+                        .u
+                        .segment_base()
+                        .get()
+                        .wrapping_add(new_ip as u64))
+                        & 0xFFFF_FFFF;
                     new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
                 }
             }
@@ -1040,7 +1056,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[cs_index]
             .cache
             .u
-            .set_segment_base((new_cs as u64) << 4);
+            .set_segment_base(crate::config::BxLinAddress::new(u64::from(new_cs) << 4));
         self.set_ip(new_ip);
 
         // Bochs exception.cc — clear IF, TF, AC, RF

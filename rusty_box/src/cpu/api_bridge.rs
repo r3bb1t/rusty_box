@@ -10,7 +10,7 @@
 //! - `Emulator::setup_cpu_mode` (and friends)
 
 use super::arch_state::{SegmentAttributeParts, SegmentAttributes, SegmentState};
-use crate::config::BxPhyAddress;
+use crate::config::{BxLinAddress, BxPhyAddress};
 use super::decoder::BxSegregs;
 use super::instrumentation::X86Reg;
 use super::BxCpuC;
@@ -226,7 +226,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             s.cache.p = state.attributes.is_present();
             s.cache.dpl = state.attributes.dpl();
             s.cache.r#type = state.attributes.kind();
-            s.cache.u.set_segment_base(state.base);
+            s.cache.u.set_segment_base(BxLinAddress::new(state.base));
             s.cache.u.set_segment_limit_scaled(state.scaled_limit());
             s.cache.u.set_segment_g(state.attributes.is_granular());
             s.cache.u.set_segment_d_b(state.attributes.is_default_big());
@@ -411,11 +411,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     #[inline]
     pub(crate) fn gdtr_base_for_api(&self) -> u64 {
-        self.gdtr.base
+        self.gdtr.base.get()
     }
     #[inline]
     pub(crate) fn set_gdtr_base_for_api(&mut self, v: u64) {
-        self.gdtr.base = v;
+        self.gdtr.base = BxLinAddress::new(v);
     }
     #[inline]
     pub(crate) fn gdtr_limit_for_api(&self) -> u64 {
@@ -428,11 +428,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     #[inline]
     pub(crate) fn idtr_base_for_api(&self) -> u64 {
-        self.idtr.base
+        self.idtr.base.get()
     }
     #[inline]
     pub(crate) fn set_idtr_base_for_api(&mut self, v: u64) {
-        self.idtr.base = v;
+        self.idtr.base = BxLinAddress::new(v);
     }
     #[inline]
     pub(crate) fn idtr_limit_for_api(&self) -> u64 {
@@ -525,20 +525,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             activity: self.processor_activity(),
             efer: self.efer_for_api(),
             segment_bases: super::instrumentation::SegmentBases {
-                es: self.get_segment_base(BxSegregs::Es),
-                cs: self.get_segment_base(BxSegregs::Cs),
-                ss: self.get_segment_base(BxSegregs::Ss),
-                ds: self.get_segment_base(BxSegregs::Ds),
-                fs: self.get_segment_base(BxSegregs::Fs),
-                gs: self.get_segment_base(BxSegregs::Gs),
+                es: self.get_segment_base(BxSegregs::Es).get(),
+                cs: self.get_segment_base(BxSegregs::Cs).get(),
+                ss: self.get_segment_base(BxSegregs::Ss).get(),
+                ds: self.get_segment_base(BxSegregs::Ds).get(),
+                fs: self.get_segment_base(BxSegregs::Fs).get(),
+                gs: self.get_segment_base(BxSegregs::Gs).get(),
             },
             kernel_gs_base: self.msr.kernelgsbase,
             gdtr: super::instrumentation::DescriptorTable {
-                base: self.gdtr.base,
+                base: self.gdtr.base.get(),
                 limit: self.gdtr.limit,
             },
             idtr: super::instrumentation::DescriptorTable {
-                base: self.idtr.base,
+                base: self.idtr.base.get(),
                 limit: self.idtr.limit,
             },
         }
@@ -1335,7 +1335,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
         virt_read_chunked(
             buf,
             vaddr,
-            |ctx: &mut Self, va| ctx.translate_linear_for_diag(va),
+            |ctx: &mut Self, va| ctx.translate_linear_for_diag(BxLinAddress::new(va)),
             self,
         )
     }
@@ -1344,7 +1344,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
         virt_read_chunked(
             buf,
             vaddr,
-            |ctx: &mut Self, va| ctx.translate_linear_with_cr3(va, cr3),
+            |ctx: &mut Self, va| ctx.translate_linear_with_cr3(BxLinAddress::new(va), cr3),
             self,
         )
     }

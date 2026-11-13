@@ -41,8 +41,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn swapgs_internal(&mut self) {
         let gs_base = self.get_segment_base(BxSegregs::Gs);
         let kernel_gs = self.msr.kernelgsbase;
-        self.set_segment_base(BxSegregs::Gs, kernel_gs);
-        self.msr.kernelgsbase = gs_base;
+        self.set_segment_base(BxSegregs::Gs, crate::config::BxLinAddress::new(kernel_gs));
+        self.msr.kernelgsbase = gs_base.get();
     }
 
     // ========================================================================

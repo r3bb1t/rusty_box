@@ -2947,7 +2947,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 for cpu_index in 0..emu.cpu_count() {
                     let cpu = emu.cpu_mut_at(cpu_index);
                     let entry = &mut cpu.dtlb.entries[0];
-                    entry.lpf = 0;
+                    entry.lpf = crate::config::BxLinAddress::new(0);
                     entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 }
                 assert!(emu.cpu_ref(0).dtlb.entries[0].valid());
@@ -2988,7 +2988,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 let prime = |emu: &mut Emulator| {
                     for cpu_index in 0..emu.cpu_count() {
                         let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
-                        entry.lpf = 0;
+                        entry.lpf = crate::config::BxLinAddress::new(0);
                         entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                     }
                 };

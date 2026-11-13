@@ -15,7 +15,7 @@
 // |------------------------|--------------------|
 //
 
-use crate::config::BxAddress;
+use crate::config::BxLinAddress;
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct BxSelector {
@@ -50,7 +50,7 @@ pub(crate) enum Descriptor {
 #[derive(Clone, Copy)]
 pub(crate) struct DescriptorSegment {
     /// base address: 286=24bits, 386=32bits, long=64
-    pub(crate) base: BxAddress,
+    pub(crate) base: BxLinAddress,
     /// for efficiency, this contrived field is set to
     ///  limit for byte granular, and
     ///  `(limit << 12) | 0xfff` for page granular seg's
@@ -82,7 +82,7 @@ impl Default for Descriptor {
         // Default to Segment with all zeros — matches the old union's zeroed layout
         // and ensures set_segment_*() calls on default descriptors work correctly.
         Self::Segment(DescriptorSegment {
-            base: 0,
+            base: BxLinAddress::new(0),
             limit_scaled: 0,
             g: false,
             d_b: false,
@@ -98,14 +98,14 @@ impl Descriptor {
     // Returns default (0/false) for wrong variant.
 
     #[inline(always)]
-    pub(crate) fn segment_base(&self) -> BxAddress {
+    pub(crate) fn segment_base(&self) -> BxLinAddress {
         match self {
             Self::Segment(s) => s.base,
-            _ => 0,
+            _ => BxLinAddress::new(0),
         }
     }
     #[inline(always)]
-    pub(crate) fn set_segment_base(&mut self, val: BxAddress) {
+    pub(crate) fn set_segment_base(&mut self, val: BxLinAddress) {
         if let Self::Segment(s) = self {
             s.base = val
         }
@@ -535,7 +535,7 @@ pub(crate) struct BxSegmentReg {
 #[derive(Debug, Default, Clone)]
 pub struct BxGlobalSegmentReg {
     /// base address: 24bits=286,32bits=386,64bits=x86-64
-    pub(super) base: BxAddress,
+    pub(super) base: BxLinAddress,
     pub(super) limit: u16, /* limit, 16bits */
 }
 

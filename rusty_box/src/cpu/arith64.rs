@@ -564,7 +564,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = self.get_laddr64(seg_idx, eaddr);
 
         // Bochs: #GP(0) if not 16-byte aligned
-        if (laddr & 0xF) != 0 {
+        if !laddr.is_aligned(16) {
             self.exception(super::cpu::Exception::Gp, 0)?;
             return Err(super::CpuError::CpuLoopRestart);
         }

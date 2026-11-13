@@ -786,7 +786,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// which can page a block back in under partial residency.
     pub fn virt_to_phys(&mut self, vaddr: u64) -> Result<u64> {
         self.exec_ctx(0)
-            .translate_linear_system_read(vaddr)
+            .translate_linear_system_read(crate::config::BxLinAddress::new(vaddr))
             .map(crate::config::BxPhyAddress::get)
             .map_err(Error::Cpu)
     }
@@ -819,7 +819,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
             let chunk = (0x1000 - page_offset).min(buf.len() - offset);
             let pa = self
                 .exec_ctx(0)
-                .translate_linear_with_cr3(va, cr3)
+                .translate_linear_with_cr3(crate::config::BxLinAddress::new(va), cr3)
                 .ok_or_else(|| Error::Memory(crate::memory::MemoryError::PageNotPresent))?;
             self.mem_read(pa.get(), &mut buf[offset..offset + chunk])?;
             offset += chunk;

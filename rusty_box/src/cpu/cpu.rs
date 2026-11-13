@@ -3,14 +3,14 @@
 
 
 use crate::{
-    config::{BxAddress, BxPhyAddress, BxPtrEquiv},
+    config::{A20Mask, BxAddress, BxLinAddress, BxPhyAddress, BxPtrEquiv},
     cpu::{
         cpuid::{SVMExtensions, VMXExtensions},
         crregs::BxEfer,
         decoder::{features::X86Feature, BxSegregs, BX_64BIT_REG_RIP},
         rusty_box::MemoryAccessType,
         smm::SMMRAM_Fields,
-        tlb::{lpf_of, ppf_of, Tlb},
+        tlb::{ppf_of, Tlb},
     },
     impl_eflag,
     memory::{BxMemC, CpuMemoryPolicy},
@@ -625,7 +625,7 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     pub(super) on_triple_fault: crate::params::OnTripleFault,
 
     /// Cached A20 address mask (set at the top of cpu_loop from BxMemC).
-    pub(super) a20_mask: u64,
+    pub(super) a20_mask: A20Mask,
 
     pub(super) cpu_state_use_ok: u32, // format of BX_FETCH_MODE_*
 
@@ -1211,7 +1211,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     /// Single-page INVLPG (Bochs paging.cc `TLB_invlpg`).
     #[inline]
-    pub(crate) fn invlpg_tlbs(&mut self, laddr: BxAddress) {
+    pub(crate) fn invlpg_tlbs(&mut self, laddr: BxLinAddress) {
         self.dtlb.invlpg(laddr);
         self.itlb.invlpg(laddr);
     }
@@ -1219,7 +1219,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Discard a colliding DTLB mapping before a page walk can allocate
     /// backing.
     #[inline]
-    pub(crate) fn invalidate_dtlb_slot(&mut self, laddr: BxAddress, len: u32) {
+    pub(crate) fn invalidate_dtlb_slot(&mut self, laddr: BxLinAddress, len: u32) {
         self.dtlb.invalidate_slot(laddr, len);
     }
 
@@ -1232,7 +1232,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// window against that geometry. Retiring the whole prefetch queue here
     /// would erase the size the in-flight refill is still measured against.
     #[inline]
-    pub(crate) fn invalidate_itlb_slot(&mut self, laddr: BxAddress, len: u32) {
+    pub(crate) fn invalidate_itlb_slot(&mut self, laddr: BxLinAddress, len: u32) {
         self.eip_fetch_window = None;
         self.itlb.invalidate_slot(laddr, len);
     }
@@ -1505,19 +1505,31 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     }
 
     #[inline]
-    pub(super) fn get_laddr32(&self, seg: usize, offset: u32) -> u32 {
-        (self.sregs[seg].cache.u.segment_base() + u64::from(offset)) as u32
+    pub(super) fn get_laddr32(&self, seg: usize, offset: u32) -> BxLinAddress {
+        BxLinAddress::from_u32((self.sregs[seg].cache.u.segment_base() + u64::from(offset)).low32())
+    }
+
+    /// The linear address of `offset` in segment `seg` under the current
+    /// mode: 64-bit arithmetic in 64-bit mode, 32-bit otherwise (Bochs
+    /// `get_laddr`, cpu.h).
+    #[inline]
+    pub(super) fn get_laddr(&self, seg: usize, offset: u64) -> BxLinAddress {
+        if self.long64_mode() {
+            self.get_laddr64(seg, offset)
+        } else {
+            self.get_laddr32(seg, offset as u32)
+        }
     }
 
     /// Get linear address in 64-bit mode (matching Bochs get_laddr64 — cpu.h)
     /// In 64-bit mode, ES/CS/SS/DS bases are forced to 0 per Intel SDM.
     /// Only FS and GS may have non-zero bases (loaded via MSR).
     #[inline]
-    pub(super) fn get_laddr64(&self, seg: usize, offset: u64) -> u64 {
+    pub(super) fn get_laddr64(&self, seg: usize, offset: u64) -> BxLinAddress {
         // BxSegregs: ES=0, CS=1, SS=2, DS=3, FS=4, GS=5
         if seg < 4 {
             // ES, CS, SS, DS — base is always 0 in 64-bit mode
-            offset
+            BxLinAddress::new(offset)
         } else {
             // FS, GS — use actual segment base from MSR
             self.sregs[seg].cache.u.segment_base().wrapping_add(offset)
@@ -1548,7 +1560,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 let cs_value = self.cs_selector_value();
                 let instr_bytes: [u8; 16] = if let Some(fetch_ptr) = &self.fetch_window_bytes() {
                     let page_base = cs_base + self.eip_page_bias;
-                    let offset = (rip.wrapping_sub(page_base)) as usize;
+                    let offset = (rip.wrapping_sub(page_base.get())) as usize;
                     let ilen = instr.ilen() as usize;
                     if offset < fetch_ptr.len() && offset + ilen <= fetch_ptr.len() {
                         let mut buf = [0u8; 16];
@@ -1845,7 +1857,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     #[inline(always)]
     pub(crate) fn on_lin_access(
         &mut self,
-        laddr: u64,
+        laddr: BxLinAddress,
         paddr: BxPhyAddress,
         data: &[u8],
         rw: super::instrumentation::MemAccessRW,
@@ -1920,7 +1932,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     {
         core::ptr::addr_of_mut!((*ptr).cpuid).write(crate::cpu::cpudb::CpuModel::default());
         core::ptr::addr_of_mut!((*ptr).ignore_bad_msrs).write(true);
-        core::ptr::addr_of_mut!((*ptr).a20_mask).write(0xFFFF_FFFF_FFFF_FFFF);
+        core::ptr::addr_of_mut!((*ptr).a20_mask).write(A20Mask::OPEN);
         core::ptr::addr_of_mut!((*ptr).last_exception_type).write(-1);
         core::ptr::addr_of_mut!((*ptr).instrumentation)
             .write(super::instrumentation::InstrumentationRegistry::with_tracer(T::default()));
@@ -2255,7 +2267,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // while these borrows are alive.
         {
             let (cpu, mem, _devices, _pc_system) = self.slice_parts();
-            cpu.a20_mask = mem.a20_mask().bits();
+            cpu.a20_mask = mem.a20_mask();
         }
 
         let mut iteration = 0u64;
@@ -2946,7 +2958,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     }
 
     /// Get segment base address safely
-    pub(super) fn get_segment_base(&self, seg: super::decoder::BxSegregs) -> BxAddress {
+    pub(super) fn get_segment_base(&self, seg: super::decoder::BxSegregs) -> BxLinAddress {
         self.sregs[seg as usize].cache.u.segment_base()
     }
 
@@ -2961,7 +2973,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     }
 
     /// Set segment base address safely
-    pub(super) fn set_segment_base(&mut self, seg: super::decoder::BxSegregs, base: BxAddress) {
+    pub(super) fn set_segment_base(&mut self, seg: super::decoder::BxSegregs, base: BxLinAddress) {
         self.sregs[seg as usize].cache.u.set_segment_base(base);
     }
 
@@ -3178,18 +3190,22 @@ impl CacheBacking {
 
 impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
     pub(super) fn prefetch(&mut self) -> Result<()> {
-        let laddr: BxAddress;
+        let laddr: BxLinAddress;
         let page_offset;
 
         if self.long64_mode() {
-            if !self.is_canonical_access(self.rip(), MemoryAccessType::Execute, self.user_pl()) {
+            if !self.is_canonical_access(
+                BxLinAddress::new(self.rip()),
+                MemoryAccessType::Execute,
+                self.user_pl(),
+            ) {
                 tracing::error!("prefetch: #GP(0): RIP crossed canonical boundary");
                 self.exception(Exception::Gp, 0)?;
             }
 
             // linear address is equal to RIP in 64-bit long mode
             page_offset = super::tlb::page_offset(self.eip());
-            laddr = self.rip();
+            laddr = BxLinAddress::new(self.rip());
 
             // Calculate RIP at the beginning of the page.
             self.eip_page_bias = u64::from(page_offset).wrapping_sub(self.rip());
@@ -3222,7 +3238,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 self.set_eip(eip);
             }
 
-            laddr = BxAddress::from(self.get_laddr32(BxSegregs::Cs as _, eip));
+            laddr = self.get_laddr32(BxSegregs::Cs as _, eip);
             let cs_base = self.sregs[BxSegregs::Cs as usize].cache.u.segment_base();
             tracing::trace!(
                 "prefetch: CS.base={:#x}, EIP={:#x}, laddr={:#x}",
@@ -3230,7 +3246,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 eip,
                 laddr
             );
-            page_offset = super::tlb::page_offset(laddr);
+            page_offset = laddr.page_offset() as u32;
 
             // Calculate RIP at the beginning of the page. Bochs cpu.cc
             // prefetch: `eipPageBias = (bx_address) pageOffset - EIP` — the
@@ -3292,7 +3308,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // '#if BX_X86_DEBUGGER
         // '''
         self.clear_rf();
-        let lpf = lpf_of(laddr);
+        let lpf = laddr.page_base();
 
         // Check TLB entry - extract values to avoid holding mutable borrow
         let user_pl = self.user_pl;
@@ -3325,7 +3341,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // replace it.
             self.invalidate_itlb_slot(laddr, 0);
             // TLB miss - need to walk page tables
-            let a20_mask = self.memory.a20_mask().bits();
+            let a20_mask = self.memory.a20_mask();
             match self.translate_linear(laddr, user_pl, MemoryAccessType::Execute, a20_mask) {
                 Ok((p_addr, walk_lpf_mask)) => {
                     self.p_addr_fetch_page = ppf_of(p_addr);
@@ -3776,7 +3792,7 @@ mod tests {
         cpu.cr3 = LEGACY_DIRECTORY;
         cpu.async_event = 0;
         let legacy_pa =
-            exec_with(&mut cpu, &mut mem, |ctx| ctx.translate_linear_system_write(0))
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.translate_linear_system_write(crate::config::BxLinAddress::new(0)))
                 .unwrap();
         assert_eq!(
             legacy_pa.get(), CODE_PAGE,
@@ -3833,7 +3849,7 @@ mod tests {
         cpu.pdptrcache.entry[0] = PAE_DIRECTORY | 0x1;
         cpu.async_event = 0;
         let pae_pa =
-            exec_with(&mut cpu, &mut mem, |ctx| ctx.translate_linear_system_write(0))
+            exec_with(&mut cpu, &mut mem, |ctx| ctx.translate_linear_system_write(crate::config::BxLinAddress::new(0)))
                 .unwrap();
         assert_eq!(
             pae_pa.get(), CODE_PAGE,
@@ -3891,7 +3907,9 @@ mod tests {
         // must decode a genuine page-split trace whose immediate comes from
         // the second mapping.
         let cs = &mut cpu.sregs[BxSegregs::Cs as usize];
-        cs.cache.u.set_segment_base(0);
+        cs.cache
+            .u
+            .set_segment_base(crate::config::BxLinAddress::new(0));
         cs.cache.u.set_segment_limit_scaled(u32::MAX);
         cs.cache.u.set_segment_d_b(true);
         cs.cache.u.set_segment_l(false);
@@ -4061,10 +4079,12 @@ mod tests {
                 .expect("the BIOS image must be directly fetchable")
                 .start;
 
-            let slot = ctx.itlb.get_index_of(0xFFFF_0000, 0);
+            let slot = ctx
+                .itlb
+                .get_index_of(crate::config::BxLinAddress::new(0xFFFF_0000), 0);
             {
                 let entry = &mut ctx.itlb.entries[slot];
-                entry.lpf = 0xFFFF_0000;
+                entry.lpf = crate::config::BxLinAddress::new(0xFFFF_0000);
                 entry.host_page = crate::cpu::tlb::AllocPage::from_alloc_offset(offset);
                 entry.access_bits = 1;
             }
@@ -4095,10 +4115,12 @@ mod tests {
             false,
         );
 
-        let slot = cpu.dtlb.get_index_of(TARGET, 0);
+        let slot = cpu
+            .dtlb
+            .get_index_of(crate::config::BxLinAddress::new(TARGET), 0);
         {
             let entry = &mut cpu.dtlb.entries[slot];
-            entry.lpf = TARGET;
+            entry.lpf = crate::config::BxLinAddress::new(TARGET);
             entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(TARGET as usize);
             entry.access_bits = 1;
         }
@@ -4150,7 +4172,7 @@ mod tests {
         // Single-page invlpg disarms too.
         let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.monitor.arm(BxPhyAddress::new(0x1000), BX_MONITOR_ARMED_BY_MONITOR);
-        cpu.tlb_invlpg(0x2000);
+        cpu.tlb_invlpg(crate::config::BxLinAddress::new(0x2000));
         assert!(!cpu.monitor.armed(), "tlb_invlpg must disarm the monitor");
 
         // Host-side rewire must PRESERVE the monitor across its internal flush.

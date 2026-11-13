@@ -4,6 +4,7 @@
 //! Mirrors `io.cc` from Bochs.
 
 use super::decoder::{BxSegregs, Instruction};
+use crate::config::BxLinAddress;
 use crate::cpu::rusty_box::MemoryAccessType;
 use crate::iodev::IoPort;
 
@@ -343,7 +344,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     #[inline]
-    fn report_ins_rmw_access(&mut self, laddr: u64, bytes: &[u8]) {
+    fn report_ins_rmw_access(&mut self, laddr: BxLinAddress, bytes: &[u8]) {
         let xlation = self.address_xlation;
         if xlation.pages == 2 {
             let len1 = xlation.len1 as usize;
@@ -354,7 +355,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 super::instrumentation::MemAccessRW::RW,
             );
             self.on_lin_access(
-                (laddr | 0x0fff).wrapping_add(1),
+                laddr.next_page(),
                 xlation.paddress2,
                 &bytes[len1..],
                 super::instrumentation::MemAccessRW::RW,
@@ -631,13 +632,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             while cx != 0 && event_words_remaining != 0 {
                 let di = self.di();
                 let di_u32 = u32::from(di);
-                let laddr = self.get_laddr32(BxSegregs::Es as usize, di_u32) as u64;
+                let laddr = self.get_laddr32(BxSegregs::Es as usize, di_u32);
                 let Some((host_ptr, host_remaining, paddr)) =
                     self.get_host_write_ptr_for_bulk(laddr)?
                 else {
                     break;
                 };
-                let page_words = (0x1000usize - (laddr as usize & 0x0fff)).min(host_remaining) / 2;
+                let page_words =
+                    (0x1000usize - laddr.page_offset() as usize).min(host_remaining) / 2;
                 let segment_words = (0x1_0000usize - usize::from(di)) / 2;
                 let chunk_words = usize::from(cx)
                     .min(page_words)
@@ -782,13 +784,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.direct_rep_bulk_allowed(true) && !self.get_df() && self.async_event == 0 {
             while ecx != 0 && event_words_remaining != 0 {
                 let edi = self.edi();
-                let laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+                let laddr = self.get_laddr32(BxSegregs::Es as usize, edi);
                 let Some((host_ptr, host_remaining, paddr)) =
                     self.get_host_write_ptr_for_bulk(laddr)?
                 else {
                     break;
                 };
-                let page_words = (0x1000usize - (laddr as usize & 0x0fff)).min(host_remaining) / 2;
+                let page_words =
+                    (0x1000usize - laddr.page_offset() as usize).min(host_remaining) / 2;
                 let chunk_words = (ecx as usize).min(page_words).min(event_words_remaining);
                 let Some(bulk_bytes) = chunk_words.checked_mul(2) else {
                     break;
@@ -1220,7 +1223,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 else {
                     break;
                 };
-                let page_words = (0x1000usize - (laddr as usize & 0x0fff)).min(host_remaining) / 2;
+                let page_words =
+                    (0x1000usize - laddr.page_offset() as usize).min(host_remaining) / 2;
                 let chunk_words = (rcx.min(usize::MAX as u64) as usize)
                     .min(page_words)
                     .min(event_words_remaining);
@@ -1438,7 +1442,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             (instr.seg(), self.rsi() & asize_mask)
         };
-        let laddr = self.get_laddr64(usize::from(laddr_seg), offset);
+        let laddr = self.get_laddr(usize::from(laddr_seg), offset);
         self.vmexit_check_io_string(port, size, direction_in, rep, laddr, instr.seg(), as64, as32)
     }
 

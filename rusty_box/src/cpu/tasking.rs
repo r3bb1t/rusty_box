@@ -14,6 +14,7 @@ use super::{
     segment_ctrl_pro::parse_selector,
     Result,
 };
+use crate::config::BxLinAddress;
 
 // Task switch source constants — Bochs cpu.h enum task_switch_source.
 // SVM/VMX task-switch qualification reads these values directly so the
@@ -67,7 +68,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             0x67 // 386 TSS
         };
 
-        let nbase32 = tss_descriptor.u.segment_base() as u32;
+        let nbase32 = tss_descriptor.u.segment_base().low32();
+        // A field of the new TSS: its base plus `offset` in 32-bit arithmetic
+        // (Bochs `Bit32u(nbase32 + offset)`).
+        let n_tss = |offset: u32| BxLinAddress::from_u32(nbase32.wrapping_add(offset));
         let new_tss_limit = tss_descriptor.u.segment_limit_scaled();
 
         if new_tss_limit < new_tss_max {
@@ -89,7 +93,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             0x5F
         };
 
-        let obase32 = self.tr.cache.u.segment_base() as u32;
+        let obase32 = self.tr.cache.u.segment_base().low32();
+        // A field of the old TSS, as `n_tss` names one of the new TSS.
+        let o_tss = |offset: u32| BxLinAddress::from_u32(obase32.wrapping_add(offset));
         let old_tss_limit = self.tr.cache.u.segment_limit_scaled();
 
         if old_tss_limit < old_tss_max {
@@ -114,75 +120,68 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         // Step 3: If JMP or IRET, clear busy bit in old task TSS descriptor (matches lines 243-249)
         if source == BX_TASK_FROM_JUMP || source == BX_TASK_FROM_IRET {
-            let laddr = (self.gdtr.base + (self.tr.selector.index as u64 * 8) + 4) as u32;
-            let mut temp32 = self.system_read_dword(laddr as u64)?;
+            let laddr = BxLinAddress::from_u32(
+                self.gdtr
+                    .base
+                    .low32()
+                    .wrapping_add(u32::from(self.tr.selector.index) * 8 + 4),
+            );
+            let mut temp32 = self.system_read_dword(laddr)?;
             temp32 &= !0x200; // Clear busy bit
-            self.system_write_dword(laddr as u64, temp32)?;
+            self.system_write_dword(laddr, temp32)?;
         }
 
         // STEP 5: Save the current task state in the TSS (matches lines 269-332)
         if self.tr.cache.r#type <= 3 {
             // 286 TSS - save 16-bit registers
-            self.system_write_word((obase32 + 14) as u64, self.get_ip())?;
-            self.system_write_word((obase32 + 16) as u64, old_eflags as u16)?;
-            self.system_write_word((obase32 + 18) as u64, self.ax())?;
-            self.system_write_word((obase32 + 20) as u64, self.cx())?;
-            self.system_write_word((obase32 + 22) as u64, self.dx())?;
-            self.system_write_word((obase32 + 24) as u64, self.bx())?;
-            self.system_write_word((obase32 + 26) as u64, self.sp())?;
-            self.system_write_word((obase32 + 28) as u64, self.bp())?;
-            self.system_write_word((obase32 + 30) as u64, self.si())?;
-            self.system_write_word((obase32 + 32) as u64, self.di())?;
-            self.system_write_word(
-                (obase32 + 34) as u64,
-                self.sregs[BxSegregs::Es as usize].selector.value,
-            )?;
-            self.system_write_word(
-                (obase32 + 36) as u64,
-                self.sregs[BxSegregs::Cs as usize].selector.value,
-            )?;
-            self.system_write_word(
-                (obase32 + 38) as u64,
-                self.sregs[BxSegregs::Ss as usize].selector.value,
-            )?;
-            self.system_write_word(
-                (obase32 + 40) as u64,
-                self.sregs[BxSegregs::Ds as usize].selector.value,
-            )?;
+            self.system_write_word(o_tss(14), self.get_ip())?;
+            self.system_write_word(o_tss(16), old_eflags as u16)?;
+            self.system_write_word(o_tss(18), self.ax())?;
+            self.system_write_word(o_tss(20), self.cx())?;
+            self.system_write_word(o_tss(22), self.dx())?;
+            self.system_write_word(o_tss(24), self.bx())?;
+            self.system_write_word(o_tss(26), self.sp())?;
+            self.system_write_word(o_tss(28), self.bp())?;
+            self.system_write_word(o_tss(30), self.si())?;
+            self.system_write_word(o_tss(32), self.di())?;
+            self.system_write_word(o_tss(34), self.sregs[BxSegregs::Es as usize].selector.value)?;
+            self.system_write_word(o_tss(36), self.sregs[BxSegregs::Cs as usize].selector.value)?;
+            self.system_write_word(o_tss(38), self.sregs[BxSegregs::Ss as usize].selector.value)?;
+            self.system_write_word(o_tss(40), self.sregs[BxSegregs::Ds as usize].selector.value)?;
         } else {
             // 386 TSS - save 32-bit registers
-            self.system_write_dword((obase32 as u64) + 0x20, self.eip())?;
-            self.system_write_dword((obase32 as u64) + 0x24, old_eflags)?;
-            self.system_write_dword((obase32 as u64) + 0x28, self.eax())?;
-            self.system_write_dword((obase32 as u64) + 0x2c, self.ecx())?;
-            self.system_write_dword((obase32 as u64) + 0x30, self.edx())?;
-            self.system_write_dword((obase32 as u64) + 0x34, self.ebx())?;
-            self.system_write_dword((obase32 as u64) + 0x38, self.esp())?;
-            self.system_write_dword((obase32 as u64) + 0x3c, self.ebp())?;
-            self.system_write_dword((obase32 as u64) + 0x40, self.esi())?;
-            self.system_write_dword((obase32 as u64) + 0x44, self.edi())?;
+            self.system_write_dword(o_tss(0x20), self.eip())?;
+            self.system_write_dword(o_tss(0x24), old_eflags)?;
+            self.system_write_dword(o_tss(0x28), self.eax())?;
+            self.system_write_dword(o_tss(0x2c), self.ecx())?;
+            self.system_write_dword(o_tss(0x30), self.edx())?;
+            self.system_write_dword(o_tss(0x34), self.ebx())?;
+            self.system_write_dword(o_tss(0x38), self.esp())?;
+            self.system_write_dword(o_tss(0x3c), self.ebp())?;
+            self.system_write_dword(o_tss(0x40), self.esi())?;
+            self.system_write_dword(o_tss(0x44), self.edi())?;
             self.system_write_word(
-                (obase32 as u64) + 0x48,
+                o_tss(0x48),
                 self.sregs[BxSegregs::Es as usize].selector.value,
             )?;
             self.system_write_word(
-                (obase32 as u64) + 0x4c,
+                o_tss(0x4c),
                 self.sregs[BxSegregs::Cs as usize].selector.value,
             )?;
             self.system_write_word(
-                (obase32 as u64) + 0x50,
+                o_tss(0x50),
                 self.sregs[BxSegregs::Ss as usize].selector.value,
             )?;
             self.system_write_word(
-                (obase32 as u64) + 0x54,
+                o_tss(0x54),
                 self.sregs[BxSegregs::Ds as usize].selector.value,
             )?;
             self.system_write_word(
-                (obase32 as u64) + 0x58,
+                o_tss(0x58),
                 self.sregs[BxSegregs::Fs as usize].selector.value,
             )?;
             self.system_write_word(
-                (obase32 as u64) + 0x5c,
+                o_tss(0x5c),
                 self.sregs[BxSegregs::Gs as usize].selector.value,
             )?;
         }
@@ -190,7 +189,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // Effect on link field of new task (matches lines 334-339)
         if source == BX_TASK_FROM_CALL || source == BX_TASK_FROM_INT {
             // set to selector of old task's TSS
-            self.system_write_word(nbase32 as u64, self.tr.selector.value)?;
+            self.system_write_word(n_tss(0), self.tr.selector.value)?;
         }
 
         // STEP 6: The new-task state is loaded from the TSS (matches lines 341-411)
@@ -217,21 +216,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             raw_ldt_selector,
         ) = if tss_descriptor.r#type <= 3 {
             // 286 TSS — no CR3, no trap word
-            let new_eip = self.system_read_word((nbase32 + 14) as u64)? as u32;
-            let new_eflags = (self.system_read_word((nbase32 + 16) as u64)? as u32) & 0xFFFF;
-            let new_eax = 0xFFFF0000 | (self.system_read_word((nbase32 + 18) as u64)? as u32);
-            let new_ecx = 0xFFFF0000 | (self.system_read_word((nbase32 + 20) as u64)? as u32);
-            let new_edx = 0xFFFF0000 | (self.system_read_word((nbase32 + 22) as u64)? as u32);
-            let new_ebx = 0xFFFF0000 | (self.system_read_word((nbase32 + 24) as u64)? as u32);
-            let new_esp = 0xFFFF0000 | (self.system_read_word((nbase32 + 26) as u64)? as u32);
-            let new_ebp = 0xFFFF0000 | (self.system_read_word((nbase32 + 28) as u64)? as u32);
-            let new_esi = 0xFFFF0000 | (self.system_read_word((nbase32 + 30) as u64)? as u32);
-            let new_edi = 0xFFFF0000 | (self.system_read_word((nbase32 + 32) as u64)? as u32);
-            let raw_es = self.system_read_word((nbase32 + 34) as u64)?;
-            let raw_cs = self.system_read_word((nbase32 + 36) as u64)?;
-            let raw_ss = self.system_read_word((nbase32 + 38) as u64)?;
-            let raw_ds = self.system_read_word((nbase32 + 40) as u64)?;
-            let raw_ldt = self.system_read_word((nbase32 + 42) as u64)?;
+            let new_eip = self.system_read_word(n_tss(14))? as u32;
+            let new_eflags = (self.system_read_word(n_tss(16))? as u32) & 0xFFFF;
+            let new_eax = 0xFFFF0000 | (self.system_read_word(n_tss(18))? as u32);
+            let new_ecx = 0xFFFF0000 | (self.system_read_word(n_tss(20))? as u32);
+            let new_edx = 0xFFFF0000 | (self.system_read_word(n_tss(22))? as u32);
+            let new_ebx = 0xFFFF0000 | (self.system_read_word(n_tss(24))? as u32);
+            let new_esp = 0xFFFF0000 | (self.system_read_word(n_tss(26))? as u32);
+            let new_ebp = 0xFFFF0000 | (self.system_read_word(n_tss(28))? as u32);
+            let new_esi = 0xFFFF0000 | (self.system_read_word(n_tss(30))? as u32);
+            let new_edi = 0xFFFF0000 | (self.system_read_word(n_tss(32))? as u32);
+            let raw_es = self.system_read_word(n_tss(34))?;
+            let raw_cs = self.system_read_word(n_tss(36))?;
+            let raw_ss = self.system_read_word(n_tss(38))?;
+            let raw_ds = self.system_read_word(n_tss(40))?;
+            let raw_ldt = self.system_read_word(n_tss(42))?;
             (
                 0u32, 0u16, // no CR3, no trap_word for 286 TSS
                 new_eip, new_eflags, new_eax, new_ecx, new_edx, new_ebx, new_esp, new_ebp, new_esi,
@@ -241,30 +240,30 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // 386 TSS
             // Read CR3 now (step 6) but apply after commit point (step 9)
             let new_cr3 = if self.cr0.pg() {
-                self.system_read_dword((nbase32 + 0x1c) as u64)?
+                self.system_read_dword(n_tss(0x1c))?
             } else {
                 0
             };
 
-            let new_eip = self.system_read_dword((nbase32 + 0x20) as u64)?;
-            let new_eflags = self.system_read_dword((nbase32 + 0x24) as u64)?;
-            let new_eax = self.system_read_dword((nbase32 + 0x28) as u64)?;
-            let new_ecx = self.system_read_dword((nbase32 + 0x2c) as u64)?;
-            let new_edx = self.system_read_dword((nbase32 + 0x30) as u64)?;
-            let new_ebx = self.system_read_dword((nbase32 + 0x34) as u64)?;
-            let new_esp = self.system_read_dword((nbase32 + 0x38) as u64)?;
-            let new_ebp = self.system_read_dword((nbase32 + 0x3c) as u64)?;
-            let new_esi = self.system_read_dword((nbase32 + 0x40) as u64)?;
-            let new_edi = self.system_read_dword((nbase32 + 0x44) as u64)?;
-            let raw_es = self.system_read_word((nbase32 + 0x48) as u64)?;
-            let raw_cs = self.system_read_word((nbase32 + 0x4c) as u64)?;
-            let raw_ss = self.system_read_word((nbase32 + 0x50) as u64)?;
-            let raw_ds = self.system_read_word((nbase32 + 0x54) as u64)?;
-            let raw_fs = self.system_read_word((nbase32 + 0x58) as u64)?;
-            let raw_gs = self.system_read_word((nbase32 + 0x5c) as u64)?;
-            let raw_ldt = self.system_read_word((nbase32 + 0x60) as u64)?;
+            let new_eip = self.system_read_dword(n_tss(0x20))?;
+            let new_eflags = self.system_read_dword(n_tss(0x24))?;
+            let new_eax = self.system_read_dword(n_tss(0x28))?;
+            let new_ecx = self.system_read_dword(n_tss(0x2c))?;
+            let new_edx = self.system_read_dword(n_tss(0x30))?;
+            let new_ebx = self.system_read_dword(n_tss(0x34))?;
+            let new_esp = self.system_read_dword(n_tss(0x38))?;
+            let new_ebp = self.system_read_dword(n_tss(0x3c))?;
+            let new_esi = self.system_read_dword(n_tss(0x40))?;
+            let new_edi = self.system_read_dword(n_tss(0x44))?;
+            let raw_es = self.system_read_word(n_tss(0x48))?;
+            let raw_cs = self.system_read_word(n_tss(0x4c))?;
+            let raw_ss = self.system_read_word(n_tss(0x50))?;
+            let raw_ds = self.system_read_word(n_tss(0x54))?;
+            let raw_fs = self.system_read_word(n_tss(0x58))?;
+            let raw_gs = self.system_read_word(n_tss(0x5c))?;
+            let raw_ldt = self.system_read_word(n_tss(0x60))?;
             // Read trap word from TSS offset 0x64 (Bochs tasking.cc)
-            let trap_word = self.system_read_word((nbase32 + 0x64) as u64)?;
+            let trap_word = self.system_read_word(n_tss(0x64))?;
             (
                 new_cr3, trap_word, new_eip, new_eflags, new_eax, new_ecx, new_edx, new_ebx,
                 new_esp, new_ebp, new_esi, new_edi, raw_es, raw_cs, raw_ss, raw_ds, raw_fs, raw_gs,
@@ -275,7 +274,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // Bochs tasking.cc \u2014 read newSSP from new TSS (386 TSS only)
         let new_ssp_cet: u64 =
             if tss_descriptor.r#type >= 9 && self.cr4.cet() && source != BX_TASK_FROM_IRET {
-                self.system_read_dword((nbase32 as u64) + 0x68)? as u64
+                self.system_read_dword(n_tss(0x68))? as u64
             } else {
                 0
             };
@@ -306,7 +305,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     push_cs_lip_ssp = true;
                     old_ssp_cet = self.ssp();
                     old_cs_cet = self.sregs[BxSegregs::Cs as usize].selector.value;
-                    old_rip_cet = self.get_laddr32(BxSegregs::Cs as usize, self.eip()) as u64;
+                    old_rip_cet = self.get_laddr32(BxSegregs::Cs as usize, self.eip()).get();
                 }
             }
             if source == BX_TASK_FROM_IRET {
@@ -327,10 +326,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // Step 7: If CALL, interrupt, or JMP, set busy flag in new task's TSS descriptor
         // Re-read dword2 from GDT for atomicity (Bochs tasking.cc)
         if source != BX_TASK_FROM_IRET {
-            let laddr = (self.gdtr.base + (tss_selector.index as u64 * 8) + 4) as u32;
-            let mut new_dword2 = self.system_read_dword(laddr as u64)?;
+            let laddr = BxLinAddress::from_u32(
+                self.gdtr
+                    .base
+                    .low32()
+                    .wrapping_add(u32::from(tss_selector.index) * 8 + 4),
+            );
+            let mut new_dword2 = self.system_read_dword(laddr)?;
             new_dword2 |= 0x200; // Set busy bit
-            self.system_write_dword(laddr as u64, new_dword2)?;
+            self.system_write_dword(laddr, new_dword2)?;
         }
 
         // Step 8: Load the task register with the segment selector and descriptor for the new task TSS (matches lines 464-469)
@@ -630,7 +634,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     tracing::error!("task_switch shadow_stack_restore: CS mismatch");
                     self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
                 }
-                let cur_lip = self.get_laddr32(BxSegregs::Cs as usize, self.eip()) as u64;
+                let cur_lip = self.get_laddr32(BxSegregs::Cs as usize, self.eip()).get();
                 if cur_lip != shadow_lip_cet {
                     tracing::error!("task_switch shadow_stack_restore: LIP mismatch");
                     self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;

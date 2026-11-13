@@ -1,6 +1,7 @@
 #![allow(unused_variables)]
 #![allow(unused_unsafe)]
 
+use crate::config::BxLinAddress;
 use crate::convert::u64_from_usize;
 use crate::cpu::BxCpuC;
 
@@ -530,18 +531,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs svm.cc SVM_INTERCEPT0_INVLPG — VMEXIT carries the linear
         // address in EXITINFO1 (computed here before we actually flush).
         if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_INVLPG) {
-            let laddr_for_exit: u64 = if self.long64_mode() {
-                self.get_laddr64(seg as usize, eaddr)
-            } else {
-                self.get_laddr32(seg as usize, eaddr as u32) as u64
-            };
-            return self.svm_vmexit(super::svm::SvmVmexit::Invlpg as i32, laddr_for_exit, 0);
+            let laddr_for_exit = self.get_laddr(seg as usize, eaddr);
+            return self.svm_vmexit(
+                super::svm::SvmVmexit::Invlpg as i32,
+                laddr_for_exit.get(),
+                0,
+            );
         }
-        let laddr: u64 = if self.long64_mode() {
-            self.get_laddr64(seg as usize, eaddr)
-        } else {
-            self.get_laddr32(seg as usize, eaddr as u32) as u64
-        };
+        let laddr = self.get_laddr(seg as usize, eaddr);
         // Bochs vmx.cc VMexit_INVLPG — qualification carries the linear addr.
         if self.in_vmx_guest && self.vmexit_check_invlpg(laddr)? {
             return Ok(());
@@ -653,7 +650,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         //  they call translate_data_read which returns paddr directly.)
         let laddr = if self.long64_mode() {
             // In 64-bit mode the effective address IS the linear address
-            eaddr
+            BxLinAddress::new(eaddr)
         } else {
             let seg_base = self.get_segment_base(seg);
             seg_base.wrapping_add(eaddr)
@@ -812,8 +809,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs mwait.cc: UMONITOR performs the same segmentation and
         // paging checks as a 1-byte read (tickle_read_virtual).
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let laddr: u64 = if self.long64_mode() {
-            eaddr
+        let laddr = if self.long64_mode() {
+            BxLinAddress::new(eaddr)
         } else {
             self.get_segment_base(seg).wrapping_add(eaddr)
         };
@@ -954,11 +951,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.instrumentation.active.has_tlb() {
             let seg = super::decoder::BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
-            let laddr: u64 = if self.long64_mode() {
-                self.get_laddr64(seg as usize, eaddr)
-            } else {
-                self.get_laddr32(seg as usize, eaddr as u32) as u64
-            };
+            let laddr = self.get_laddr(seg as usize, eaddr);
             // Best-effort physical resolution — if translation faults, skip the hook.
             let paddr = self
                 .translate_data_read(laddr)
@@ -1176,7 +1169,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// bytes in.
     fn user_msr_permitted(&mut self, msr: u32, write: bool) -> crate::cpu::Result<bool> {
         let page = self.msr.ia32_user_msr_ctrl & !0xFFF;
-        let byte = page + u64::from(msr >> 3) + if write { 2048 } else { 0 };
+        let byte = BxLinAddress::new(page) + u64::from(msr >> 3) + if write { 2048 } else { 0 };
         Ok(self.system_read_byte(byte)? & (1 << (msr & 7)) != 0)
     }
 
@@ -1257,7 +1250,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// the table at RSI holds its index, whose bits 63:32 must be clear.
     fn next_msr_list_entry(&mut self, name: &str) -> crate::cpu::Result<MsrListEntry> {
         let slot = self.rcx().trailing_zeros();
-        let at = self.rsi().wrapping_add(u64::from(slot) * 8);
+        let at = BxLinAddress::new(self.rsi().wrapping_add(u64::from(slot) * 8));
         let address = self.read_linear_qword(super::decoder::BxSegregs::Ds, at)?;
         if address >> 32 != 0 {
             tracing::trace!("{name} index={slot}: reserved bits set in the MSR address table, #GP(0)");
@@ -1293,7 +1286,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 return Ok(());
             }
             let value = self.rdmsr_value(entry.msr)?;
-            let destination = self.rdi().wrapping_add(u64::from(entry.slot) * 8);
+            let destination = BxLinAddress::new(self.rdi().wrapping_add(u64::from(entry.slot) * 8));
             self.write_linear_qword(super::decoder::BxSegregs::Ds, destination, value)?;
             match self.finish_msr_list_entry(entry) {
                 MsrListProgress::Continue => {}
@@ -1310,7 +1303,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.invalidate_prefetch_q();
         while self.rcx() != 0 {
             let entry = self.next_msr_list_entry("WRMSRLIST")?;
-            let source = self.rdi().wrapping_add(u64::from(entry.slot) * 8);
+            let source = BxLinAddress::new(self.rdi().wrapping_add(u64::from(entry.slot) * 8));
             let value = self.read_linear_qword(super::decoder::BxSegregs::Ds, source)?;
             if self.in_vmx_guest
                 && self.vmexit_check_msr(super::vmx::MsrExitReason::Wrmsrlist, entry.msr)?
@@ -1513,8 +1506,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     BX_MSR_LSTAR => self.msr.lstar,
                     BX_MSR_CSTAR => self.msr.cstar,
                     BX_MSR_FMASK => self.msr.fmask as u64,
-                    BX_MSR_FSBASE => self.get_segment_base(super::decoder::BxSegregs::Fs),
-                    BX_MSR_GSBASE => self.get_segment_base(super::decoder::BxSegregs::Gs),
+                    BX_MSR_FSBASE => self.get_segment_base(super::decoder::BxSegregs::Fs).get(),
+                    BX_MSR_GSBASE => self.get_segment_base(super::decoder::BxSegregs::Gs).get(),
                     _ => self.msr.kernelgsbase,
                 }
             }
@@ -2066,7 +2059,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     tracing::trace!("WRMSR: non-canonical value for MSR_FSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
-                self.set_segment_base(super::decoder::BxSegregs::Fs, val);
+                self.set_segment_base(super::decoder::BxSegregs::Fs, BxLinAddress::new(val));
             }
             BX_MSR_GSBASE => {
                 self.require_long_mode_for_msr(msr)?;
@@ -2074,7 +2067,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     tracing::trace!("WRMSR: non-canonical value for MSR_GSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
-                self.set_segment_base(super::decoder::BxSegregs::Gs, val);
+                self.set_segment_base(super::decoder::BxSegregs::Gs, BxLinAddress::new(val));
             }
             BX_MSR_KERNELGSBASE => {
                 self.require_long_mode_for_msr(msr)?;
@@ -2236,7 +2229,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 // Bochs crregs.cc MOV_DdRd — TLB_invlpg at the breakpoint
                 // address (full paging.cc TLB_invlpg: prior code skipped the
                 // stack-cache invalidation and icache link break).
-                self.tlb_invlpg(val as u64);
+                self.tlb_invlpg(BxLinAddress::new(val as u64));
             }
             4 | 6 => {
                 // DR6: preserve reserved bits, only allow bits 0-3 (B0-B3) and bits 13-15 (BD,BS,BT)
@@ -2530,7 +2523,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[cs_idx].cache.dpl = dpl;
         self.sregs[cs_idx].cache.segment = true;
         self.sregs[cs_idx].cache.r#type = 0xb; // CODE_EXEC_READ_ACCESSED
-        self.sregs[cs_idx].cache.u.set_segment_base(0);
+        self.sregs[cs_idx]
+            .cache
+            .u
+            .set_segment_base(crate::config::BxLinAddress::new(0));
         self.sregs[cs_idx]
             .cache
             .u
@@ -2562,7 +2558,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[ss_idx].cache.dpl = dpl;
         self.sregs[ss_idx].cache.segment = true;
         self.sregs[ss_idx].cache.r#type = 0x3; // DATA_READ_WRITE_ACCESSED
-        self.sregs[ss_idx].cache.u.set_segment_base(0);
+        self.sregs[ss_idx]
+            .cache
+            .u
+            .set_segment_base(crate::config::BxLinAddress::new(0));
         self.sregs[ss_idx]
             .cache
             .u
@@ -2768,8 +2767,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Swap GS.base with MSR_KERNELGSBASE
         let gs_base = self.get_segment_base(super::decoder::BxSegregs::Gs);
         let kernel_gs = self.msr.kernelgsbase;
-        self.set_segment_base(super::decoder::BxSegregs::Gs, kernel_gs);
-        self.msr.kernelgsbase = gs_base;
+        self.set_segment_base(super::decoder::BxSegregs::Gs, BxLinAddress::new(kernel_gs));
+        self.msr.kernelgsbase = gs_base.get();
         Ok(())
     }
 
@@ -2787,7 +2786,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Ud, 0);
         }
         let fsbase = self.get_segment_base(super::decoder::BxSegregs::Fs);
-        self.set_gpr32(instr.dst().into(), fsbase as u32);
+        self.set_gpr32(instr.dst().into(), fsbase.low32());
         Ok(())
     }
 
@@ -2799,7 +2798,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Ud, 0);
         }
         let fsbase = self.get_segment_base(super::decoder::BxSegregs::Fs);
-        self.set_gpr64(instr.dst() as usize, fsbase);
+        self.set_gpr64(instr.dst() as usize, fsbase.get());
         Ok(())
     }
 
@@ -2811,7 +2810,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Ud, 0);
         }
         let gsbase = self.get_segment_base(super::decoder::BxSegregs::Gs);
-        self.set_gpr32(instr.dst().into(), gsbase as u32);
+        self.set_gpr32(instr.dst().into(), gsbase.low32());
         Ok(())
     }
 
@@ -2823,7 +2822,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Ud, 0);
         }
         let gsbase = self.get_segment_base(super::decoder::BxSegregs::Gs);
-        self.set_gpr64(instr.dst() as usize, gsbase);
+        self.set_gpr64(instr.dst() as usize, gsbase.get());
         Ok(())
     }
 
@@ -2836,7 +2835,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         // Group 15 opcode: dst() = rm = register operand (not src1() which is nnn = opcode extension)
         let val = self.get_gpr32(instr.dst().into()) as u64;
-        self.set_segment_base(super::decoder::BxSegregs::Fs, val);
+        self.set_segment_base(super::decoder::BxSegregs::Fs, BxLinAddress::new(val));
         Ok(())
     }
 
@@ -2852,7 +2851,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.is_canonical(val) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
-        self.set_segment_base(super::decoder::BxSegregs::Fs, val);
+        self.set_segment_base(super::decoder::BxSegregs::Fs, BxLinAddress::new(val));
         Ok(())
     }
 
@@ -2865,7 +2864,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         // Group 15 opcode: dst() = rm = register operand
         let val = self.get_gpr32(instr.dst().into()) as u64;
-        self.set_segment_base(super::decoder::BxSegregs::Gs, val);
+        self.set_segment_base(super::decoder::BxSegregs::Gs, BxLinAddress::new(val));
         Ok(())
     }
 
@@ -2881,7 +2880,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.is_canonical(val) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
-        self.set_segment_base(super::decoder::BxSegregs::Gs, val);
+        self.set_segment_base(super::decoder::BxSegregs::Gs, BxLinAddress::new(val));
         Ok(())
     }
 
@@ -3267,12 +3266,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
 
         // Must be 64-byte aligned
-        let laddr: u64 = if self.long64_mode() {
-            self.get_laddr64(seg as usize, eaddr)
-        } else {
-            self.get_laddr32(seg as usize, eaddr as u32) as u64
-        };
-        if (laddr & 0x3F) != 0 {
+        let laddr = self.get_laddr(seg as usize, eaddr);
+        if !laddr.is_aligned(64) {
             tracing::trace!("XSAVE: not 64-byte aligned, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -4437,12 +4432,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
-        let laddr: u64 = if self.long64_mode() {
-            self.get_laddr64(seg as usize, eaddr)
-        } else {
-            self.get_laddr32(seg as usize, eaddr as u32) as u64
-        };
-        if (laddr & 0x3F) != 0 {
+        let laddr = self.get_laddr(seg as usize, eaddr);
+        if !laddr.is_aligned(64) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -4531,12 +4522,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
-        let laddr: u64 = if self.long64_mode() {
-            self.get_laddr64(seg as usize, eaddr)
-        } else {
-            self.get_laddr32(seg as usize, eaddr as u32) as u64
-        };
-        if (laddr & 0x3F) != 0 {
+        let laddr = self.get_laddr(seg as usize, eaddr);
+        if !laddr.is_aligned(64) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -4621,12 +4608,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
-        let laddr: u64 = if self.long64_mode() {
-            self.get_laddr64(seg as usize, eaddr)
-        } else {
-            self.get_laddr32(seg as usize, eaddr as u32) as u64
-        };
-        if (laddr & 0x3F) != 0 {
+        let laddr = self.get_laddr(seg as usize, eaddr);
+        if !laddr.is_aligned(64) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 

@@ -288,7 +288,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[cs_idx].cache.segment = true;
         self.sregs[cs_idx].cache.r#type = 0x3; // DATA_READ_WRITE_ACCESSED
         let smbase = self.smbase as u64;
-        self.sregs[cs_idx].cache.u.set_segment_base(smbase);
+        self.sregs[cs_idx]
+            .cache
+            .u
+            .set_segment_base(crate::config::BxLinAddress::new(smbase));
         self.sregs[cs_idx]
             .cache
             .u
@@ -317,7 +320,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.sregs[idx].cache.dpl = 0;
             self.sregs[idx].cache.segment = true;
             self.sregs[idx].cache.r#type = 0x3; // DATA_READ_WRITE_ACCESSED
-            self.sregs[idx].cache.u.set_segment_base(0);
+            self.sregs[idx]
+                .cache
+                .u
+                .set_segment_base(crate::config::BxLinAddress::new(0));
             self.sregs[idx]
                 .cache
                 .u
@@ -391,13 +397,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         smram_set!(SMRAM_FIELD_SMM_REVISION_ID, SMM_REVISION_ID);
 
         // GDTR (base is 64-bit)
-        smram_set!(SMRAM_FIELD_GDTR_BASE_HI32, (self.gdtr.base >> 32) as u32);
-        smram_set!(SMRAM_FIELD_GDTR_BASE, self.gdtr.base as u32);
+        smram_set!(
+            SMRAM_FIELD_GDTR_BASE_HI32,
+            (self.gdtr.base.get() >> 32) as u32
+        );
+        smram_set!(SMRAM_FIELD_GDTR_BASE, self.gdtr.base.get() as u32);
         smram_set!(SMRAM_FIELD_GDTR_LIMIT, self.gdtr.limit as u32);
 
         // IDTR (base is 64-bit)
-        smram_set!(SMRAM_FIELD_IDTR_BASE_HI32, (self.idtr.base >> 32) as u32);
-        smram_set!(SMRAM_FIELD_IDTR_BASE, self.idtr.base as u32);
+        smram_set!(
+            SMRAM_FIELD_IDTR_BASE_HI32,
+            (self.idtr.base.get() >> 32) as u32
+        );
+        smram_set!(SMRAM_FIELD_IDTR_BASE, self.idtr.base.get() as u32);
         smram_set!(SMRAM_FIELD_IDTR_LIMIT, self.idtr.limit as u32);
 
         // Save segment registers (TR, LDTR, and 6 segment regs)
@@ -407,7 +419,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // TR (Task Register)
         let tr_ar = self.pack_seg_ar(&self.tr.cache);
-        let tr_base = self.tr.cache.u.segment_base();
+        let tr_base = self.tr.cache.u.segment_base().get();
         smram_set!(SMRAM_FIELD_TR_BASE_HI32, (tr_base >> 32) as u32);
         smram_set!(SMRAM_FIELD_TR_BASE, tr_base as u32);
         smram_set!(SMRAM_FIELD_TR_LIMIT, self.tr.cache.u.segment_limit_scaled());
@@ -418,7 +430,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // LDTR
         let ldtr_ar = self.pack_seg_ar(&self.ldtr.cache);
-        let ldtr_base = self.ldtr.cache.u.segment_base();
+        let ldtr_base = self.ldtr.cache.u.segment_base().get();
         smram_set!(SMRAM_FIELD_LDTR_BASE_HI32, (ldtr_base >> 32) as u32);
         smram_set!(SMRAM_FIELD_LDTR_BASE, ldtr_base as u32);
         smram_set!(
@@ -436,7 +448,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let idx = seg as usize;
             let ar = self.pack_seg_ar(&self.sregs[idx].cache);
             let sel = self.sregs[idx].selector.value;
-            let base = self.sregs[idx].cache.u.segment_base();
+            let base = self.sregs[idx].cache.u.segment_base().get();
             smram_set!(base_hi_field, (base >> 32) as u32);
             smram_set!(base_field, base as u32);
             smram_set!(limit_field, self.sregs[idx].cache.u.segment_limit_scaled());
@@ -606,9 +618,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.dr7.set32(smram_get!(SMRAM_FIELD_DR7));
 
         // Restore GDTR, IDTR (64-bit bases)
-        self.gdtr.base = smram_get64!(SMRAM_FIELD_GDTR_BASE_HI32, SMRAM_FIELD_GDTR_BASE);
+        self.gdtr.base = crate::config::BxLinAddress::new(smram_get64!(
+            SMRAM_FIELD_GDTR_BASE_HI32,
+            SMRAM_FIELD_GDTR_BASE
+        ));
         self.gdtr.limit = smram_get!(SMRAM_FIELD_GDTR_LIMIT) as u16;
-        self.idtr.base = smram_get64!(SMRAM_FIELD_IDTR_BASE_HI32, SMRAM_FIELD_IDTR_BASE);
+        self.idtr.base = crate::config::BxLinAddress::new(smram_get64!(
+            SMRAM_FIELD_IDTR_BASE_HI32,
+            SMRAM_FIELD_IDTR_BASE
+        ));
         self.idtr.limit = smram_get!(SMRAM_FIELD_IDTR_LIMIT) as u16;
 
         // Restore segment registers. Bochs set_segment_ar_data returns whether
@@ -877,7 +895,7 @@ mod tests {
         cpu.sregs[gs]
             .cache
             .u
-            .set_segment_base(0xffff_8000_1234_5678);
+            .set_segment_base(crate::config::BxLinAddress::new(0xffff_8000_1234_5678));
 
         cpu.enter_system_management_mode();
         assert!(cpu.in_smm);
@@ -901,7 +919,7 @@ mod tests {
         assert_eq!(cpu.gen_reg[8].rrx(), 0x1122_3344_5566_7788);
         assert_eq!(
             cpu.sregs[gs].cache.u.segment_base(),
-            0xffff_8000_1234_5678,
+            crate::config::BxLinAddress::new(0xffff_8000_1234_5678),
             "64-bit GS base survives the save/restore"
         );
     }
@@ -926,7 +944,10 @@ mod tests {
         assert_eq!(cpu.dr7.get32(), 0x400);
         let cs = super::super::decoder::BxSegregs::Cs as usize;
         assert_eq!(cpu.sregs[cs].selector.value, (0x30000 >> 4) as u16);
-        assert_eq!(cpu.sregs[cs].cache.u.segment_base(), 0x30000);
+        assert_eq!(
+            cpu.sregs[cs].cache.u.segment_base(),
+            crate::config::BxLinAddress::new(0x30000)
+        );
     }
 
     #[test]
@@ -1088,7 +1109,7 @@ mod tests {
         let cs = super::super::decoder::BxSegregs::Cs as usize;
         assert_eq!(
             cpu.sregs[cs].cache.u.segment_base(),
-            0xa0000,
+            crate::config::BxLinAddress::new(0xa0000),
             "CS base is the relocated SMBASE, so CS:IP resolves to 0xa8000"
         );
 

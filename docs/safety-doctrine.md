@@ -392,9 +392,21 @@ the walk reads a table or returns its result, and a frame plus its offset is `at
 (Bochs `ppf | pageOffset`). VMCS fields hold the numbers a guest wrote; they become addresses
 where they are used.
 
-Target design, not built: linear and effective addresses become types (`BxAddress` is `u64`,
-and an effective address, an offset within a segment, is not yet told apart from the linear
-address it becomes); and the emulator's public memory and debugger API (`mem_read`,
+Every linear address inside the x86 CPU is a `BxLinAddress` (`rusty_box/src/config.rs`): a
+segment's or descriptor table's base (`segment_base()`, `gdtr.base`, `idtr.base`), what
+`get_laddr`/`get_laddr32`/`get_laddr64` and the `agen_*` checks form from a base and an
+offset, every linear accessor and translation input (`read_linear_*`, `system_read_*`, the
+`translate_*` walks, the RMW preparers), a TLB entry's tag, `INVLPG`'s operand, the EPT
+violation's guest linear address (an `Option`, not an address paired with a validity flag),
+and the instrumentation events that carry one (`LinAccess::lin`, `MemUnmapped::laddr`,
+`MemPermViolation::laddr`, `TlbCntrl::Invlpg`, `clflush`). The CPU's A20 mask is an
+`A20Mask`, and a linear address with paging off reaches memory through `unpaged`. A value
+that is a register's or a data word's stays a number even where it equals an address: the
+SSP and the shadow stack's tokens, a linear instruction pointer pushed as data, an MSR's
+value, a VMCS, VMCB or SMRAM field. It becomes an address where it is used as one.
+
+Target design, not built: effective addresses become a type (an offset within a segment is
+not yet told apart from other `u64`s); and the emulator's public memory and debugger API (`mem_read`,
 `mem_write`, `virt_to_phys`, `read_phys_dword`, `RamOffset::physical`, `dbg_fetch_mem`,
 `dbg_xlate_linear2phy`, `PageMapping::physical`, `DtlbInfo::ppf`, the host MMIO callbacks)
 takes and returns `u64`.

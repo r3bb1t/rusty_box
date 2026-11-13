@@ -7,7 +7,7 @@ use super::{
     },
     Result,
 };
-use crate::config::BxAddress;
+use crate::config::{BxAddress, BxLinAddress};
 
 pub fn parse_selector(raw_selector: u16, selector: &mut BxSelector) {
     selector.value = raw_selector;
@@ -54,7 +54,7 @@ pub(super) fn set_segment_ar_data(
         d.u.set_segment_l((ar_data >> 13) & 0x1 != 0);
         d.u.set_segment_avl((ar_data >> 12) & 0x1 != 0);
 
-        d.u.set_segment_base(base);
+        d.u.set_segment_base(BxLinAddress::new(base));
         d.u.set_segment_limit_scaled(limit_scaled);
     } else {
         match d.r#type {
@@ -68,7 +68,7 @@ pub(super) fn set_segment_ar_data(
                 d.u.set_segment_avl((ar_data >> 12) & 0x1 != 0);
                 d.u.set_segment_d_b((ar_data >> 14) & 0x1 != 0);
                 d.u.set_segment_g((ar_data >> 15) & 0x1 != 0);
-                d.u.set_segment_base(base);
+                d.u.set_segment_base(BxLinAddress::new(base));
                 d.u.set_segment_limit_scaled(limit_scaled);
             }
             other => {
@@ -90,7 +90,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// Based on BX_CPU_C::fetch_raw_descriptor in segment_ctrl_pro.cc
     pub(super) fn fetch_raw_descriptor(&mut self, selector: &BxSelector) -> Result<(u32, u32)> {
         let index = selector.index as u32;
-        let offset: BxAddress = if selector.ti == 0 {
+        let offset = if selector.ti == 0 {
             // GDT
             let index_offset = index * 8 + 7;
             if index_offset > self.gdtr.limit as u32 {
@@ -161,7 +161,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             segment,
             r#type,
             u: super::descriptor::Descriptor::Segment(DescriptorSegment {
-                base: 0,
+                base: BxLinAddress::new(0),
                 limit_scaled: 0,
                 g: false,
                 d_b: false,
@@ -185,7 +185,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let limit_scaled = if g { (limit << 12) | 0xFFF } else { limit };
 
             descriptor.u = super::descriptor::Descriptor::Segment(DescriptorSegment {
-                base,
+                base: BxLinAddress::new(base),
                 limit_scaled,
                 g,
                 d_b,
@@ -244,7 +244,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     let limit_scaled = if g { (limit << 12) | 0xFFF } else { limit };
 
                     descriptor.u = super::descriptor::Descriptor::Segment(DescriptorSegment {
-                        base,
+                        base: BxLinAddress::new(base),
                         limit_scaled,
                         g,
                         d_b,
@@ -366,7 +366,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         selector: &BxSelector,
     ) -> Result<(u32, u32, u32)> {
         let index = selector.index as u32;
-        let offset: u64 = if selector.ti == 0 {
+        let offset = if selector.ti == 0 {
             // GDT — need 16 bytes (index*8 + 15)
             let index_offset = index * 8 + 15;
             if index_offset > self.gdtr.limit as u32 {
@@ -445,7 +445,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     ) -> Result<()> {
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let seg_base = seg.cache.u.segment_base();
-        let laddr = (seg_base + addr as u64) & 0xFFFFFFFF;
+        let laddr = (seg_base + u64::from(addr)).masked(0xFFFF_FFFF);
         self.system_write_word(laddr, value)
     }
 
@@ -462,21 +462,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     ) -> Result<()> {
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let seg_base = seg.cache.u.segment_base();
-        let laddr = (seg_base + addr as u64) & 0xFFFFFFFF;
+        let laddr = (seg_base + u64::from(addr)).masked(0xFFFF_FFFF);
         self.system_write_dword(laddr, value)
     }
 
     /// Write qword to new stack at given privilege level (64-bit linear address variant).
     ///
     /// Based on BX_CPU_C::write_new_stack_qword(bx_address laddr, ...) in access.cc.
-    /// Used in long mode where the linear address is 64-bit and there is no segment base.
+    /// Used in 64-bit mode, where SS has no base: the stack pointer `rsp`
+    /// is the linear address written.
     pub(super) fn write_new_stack_qword_64(
         &mut self,
-        laddr: u64,
+        rsp: u64,
         _dpl: u8,
         value: u64,
     ) -> Result<()> {
-        self.system_write_qword(laddr, value)
+        self.system_write_qword(BxLinAddress::new(rsp), value)
     }
 
     /// Load SS segment register
@@ -1077,7 +1078,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         self.sregs[seg_idx].cache.r#type = 0;
 
         // Zero segment descriptor fields — Bochs segment_ctrl_pro.cc
-        self.sregs[seg_idx].cache.u.set_segment_base(0);
+        self.sregs[seg_idx]
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0));
         self.sregs[seg_idx].cache.u.set_segment_limit_scaled(0);
         self.sregs[seg_idx].cache.u.set_segment_g(false);
         self.sregs[seg_idx].cache.u.set_segment_d_b(false);
@@ -1194,11 +1198,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // In long mode, extend base to 64 bits and check canonical
         // Bochs protect_ctrl.cc
         if self.long64_mode() {
-            descriptor
-                .u
-                .set_segment_base(descriptor.u.segment_base() | (dword3 as u64) << 32);
+            descriptor.u.set_segment_base(BxLinAddress::new(
+                descriptor.u.segment_base().get() | u64::from(dword3) << 32,
+            ));
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
-            if !self.is_canonical(descriptor.u.segment_base()) {
+            if !self.is_canonical(descriptor.u.segment_base().get()) {
                 tracing::error!("LLDT: non-canonical LDT descriptor base!");
                 self.exception(Exception::Gp, raw_selector & 0xfffc)?;
                 return Ok(());
@@ -1324,11 +1328,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // In long mode, extend base to 64 bits and check canonical
         // Bochs protect_ctrl.cc
         if self.long64_mode() {
-            descriptor
-                .u
-                .set_segment_base(descriptor.u.segment_base() | (dword3 as u64) << 32);
+            descriptor.u.set_segment_base(BxLinAddress::new(
+                descriptor.u.segment_base().get() | u64::from(dword3) << 32,
+            ));
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
-            if !self.is_canonical(descriptor.u.segment_base()) {
+            if !self.is_canonical(descriptor.u.segment_base().get()) {
                 tracing::error!("LTR: non-canonical TSS descriptor base!");
                 self.exception(Exception::Gp, raw_selector & 0xfffc)?;
                 return Ok(());
@@ -1430,7 +1434,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Bochs call_far.cc call_protected \u2014 capture old CS / linear
             // return-LIP before branch_far rewrites CS.
             let old_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
-            let temp_lip = self.get_laddr32(BxSegregs::Cs as usize, self.eip()) as u64;
+            let temp_lip = self.get_laddr32(BxSegregs::Cs as usize, self.eip()).get();
 
             if os32 {
                 self.write_new_stack_dword(
@@ -1647,7 +1651,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // state for the inner-priv shadow-stack switch.
             let old_ss_dpl = self.sregs[BxSegregs::Ss as usize].cache.dpl;
             let old_cpl = cpl;
-            let temp_lip = self.get_laddr32(BxSegregs::Cs as usize, return_eip) as u64;
+            let temp_lip = self.get_laddr32(BxSegregs::Cs as usize, return_eip).get();
 
             let is_386_gate = gate_descriptor.r#type == 0xC;
 
@@ -1854,7 +1858,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Bochs call_far.cc call_gate \u2014 CALL GATE TO SAME PRIVILEGE
             // captures old CS / linear-LIP before branch_far rewrites CS.
             let old_cs_same = self.sregs[BxSegregs::Cs as usize].selector.value;
-            let temp_lip_same = self.get_laddr32(BxSegregs::Cs as usize, new_eip) as u64;
+            let temp_lip_same = self.get_laddr32(BxSegregs::Cs as usize, new_eip).get();
 
             self.branch_far(
                 &mut gate_cs_selector,
@@ -1984,6 +1988,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 let return_lip = (cs_descriptor
                     .u
                     .segment_base()
+                    .get()
                     .wrapping_add(return_eip as u64))
                     & 0xFFFF_FFFF;
                 let prev_ssp = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
@@ -2094,6 +2099,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     let return_lip = (cs_descriptor
                         .u
                         .segment_base()
+                        .get()
                         .wrapping_add(return_eip as u64))
                         & 0xFFFF_FFFF;
                     new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
@@ -2346,7 +2352,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Bochs call_far.cc call_protected (long mode) \u2014 capture old
             // CS / linear LIP before branch_far rewrites CS.
             let old_cs_norm = self.sregs[BxSegregs::Cs as usize].selector.value;
-            let temp_lip_norm = self.get_laddr64(BxSegregs::Cs as usize, self.rip());
+            let temp_lip_norm = self.get_laddr64(BxSegregs::Cs as usize, self.rip()).get();
 
             self.check_cs(&cs_descriptor, cs_raw, cs_selector.rpl, cpl)?;
 
@@ -2547,7 +2553,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         let old_rip = self.rip();
 
         // Bochs call_far.cc call_gate64 \u2014 capture pre-transition CET state.
-        let temp_lip = self.get_laddr64(BxSegregs::Cs as usize, self.rip());
+        let temp_lip = self.get_laddr64(BxSegregs::Cs as usize, self.rip()).get();
         let old_ss_dpl = self.sregs[BxSegregs::Ss as usize].cache.dpl;
         let old_cpl = cpl;
 
@@ -2653,8 +2659,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         let (raw_cs_selector, return_rip, stack_param_offset): (u16, u64, u64) =
             if instr.os64_l() != 0 {
-                let cs = self.stack_read_qword(temp_rsp.wrapping_add(8))? as u16;
-                let rip = self.stack_read_qword(temp_rsp)?;
+                let cs = self.stack_read_qword_64(temp_rsp.wrapping_add(8))? as u16;
+                let rip = self.stack_read_qword_64(temp_rsp)?;
                 (cs, rip, 16)
             } else if instr.os32_l() != 0 {
                 // Bochs ret_far.cc: CS at temp_RSP+4, RIP at temp_RSP+0
@@ -2700,7 +2706,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 let return_lip = if self.long_mode() && cs_descriptor.u.segment_l() {
                     return_rip
                 } else {
-                    (cs_descriptor.u.segment_base().wrapping_add(return_rip)) & 0xFFFF_FFFF
+                    (cs_descriptor
+                        .u
+                        .segment_base()
+                        .get()
+                        .wrapping_add(return_rip))
+                        & 0xFFFF_FFFF
                 };
                 let prev_ssp = self.shadow_stack_restore_lip(raw_cs_selector, return_lip)?;
                 self.set_ssp(prev_ssp);
@@ -2734,10 +2745,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
             let (raw_ss_selector, return_rsp): (u16, u64) = if instr.os64_l() != 0 {
                 let ss = self
-                    .stack_read_qword(temp_rsp.wrapping_add(24).wrapping_add(pop_bytes as u64))?
+                    .stack_read_qword_64(temp_rsp.wrapping_add(24).wrapping_add(pop_bytes as u64))?
                     as u16;
-                let rsp = self
-                    .stack_read_qword(temp_rsp.wrapping_add(16).wrapping_add(pop_bytes as u64))?;
+                let rsp = self.stack_read_qword_64(
+                    temp_rsp.wrapping_add(16).wrapping_add(pop_bytes as u64),
+                )?;
                 (ss, rsp)
             } else if instr.os32_l() != 0 {
                 let ss = self.stack_read_word(
@@ -2828,7 +2840,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     let return_lip = if self.long_mode() && cs_descriptor.u.segment_l() {
                         return_rip
                     } else {
-                        (cs_descriptor.u.segment_base().wrapping_add(return_rip)) & 0xFFFF_FFFF
+                        (cs_descriptor
+                            .u
+                            .segment_base()
+                            .get()
+                            .wrapping_add(return_rip))
+                            & 0xFFFF_FFFF
                     };
                     new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_selector, return_lip)?;
                 }
@@ -2906,9 +2923,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // Read RIP, CS, EFLAGS from stack based on operand size
         let (new_eflags, raw_cs_selector, new_rip, top_nbytes_same): (u32, u16, u64, u64) =
             if instr.os64_l() != 0 {
-                let eflags = self.stack_read_qword(temp_rsp.wrapping_add(16))? as u32;
-                let cs = self.stack_read_qword(temp_rsp.wrapping_add(8))? as u16;
-                let rip = self.stack_read_qword(temp_rsp)?;
+                let eflags = self.stack_read_qword_64(temp_rsp.wrapping_add(16))? as u32;
+                let cs = self.stack_read_qword_64(temp_rsp.wrapping_add(8))? as u16;
+                let rip = self.stack_read_qword_64(temp_rsp)?;
                 (eflags, cs, rip, 24)
             } else if instr.os32_l() != 0 {
                 let eflags = self.stack_read_dword((temp_rsp as u32).wrapping_add(8))?;
@@ -2965,7 +2982,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 let return_lip = if cs_descriptor.u.segment_l() {
                     new_rip
                 } else {
-                    (cs_descriptor.u.segment_base().wrapping_add(new_rip)) & 0xFFFF_FFFF
+                    (cs_descriptor.u.segment_base().get().wrapping_add(new_rip)) & 0xFFFF_FFFF
                 };
                 let new_ssp = self.shadow_stack_restore_lip(raw_cs_selector, return_lip)?;
                 self.set_ssp(new_ssp);
@@ -3022,8 +3039,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
             // Read SS and RSP from stack
             let (raw_ss_selector, new_rsp): (u16, u64) = if instr.os64_l() != 0 {
-                let ss = self.stack_read_qword(temp_rsp.wrapping_add(32))? as u16;
-                let rsp = self.stack_read_qword(temp_rsp.wrapping_add(24))?;
+                let ss = self.stack_read_qword_64(temp_rsp.wrapping_add(32))? as u16;
+                let rsp = self.stack_read_qword_64(temp_rsp.wrapping_add(24))?;
                 (ss, rsp)
             } else if instr.os32_l() != 0 {
                 let ss = self.stack_read_dword((temp_rsp as u32).wrapping_add(16))? as u16;
@@ -3117,7 +3134,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     let return_lip = if cs_descriptor.u.segment_l() {
                         new_rip
                     } else {
-                        (cs_descriptor.u.segment_base().wrapping_add(new_rip)) & 0xFFFF_FFFF
+                        (cs_descriptor.u.segment_base().get().wrapping_add(new_rip)) & 0xFFFF_FFFF
                     };
                     new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_selector, return_lip)?;
                 }

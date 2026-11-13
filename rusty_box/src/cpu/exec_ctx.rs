@@ -226,7 +226,7 @@ impl TestMachine {
     /// test context that skipped it would mask guest addresses differently
     /// from a real slice.
     pub(crate) fn ctx(&mut self) -> ExecCtx<'_, ()> {
-        self.cpu.a20_mask = self.memory.a20_mask().bits();
+        self.cpu.a20_mask = self.memory.a20_mask();
         ExecCtx::new(
             &mut self.cpu,
             PcIo::new(

@@ -660,7 +660,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         parse_selector(selector, &mut seg.selector);
         seg.cache.valid = if valid != 0 { 1 } else { 0 };
         seg.cache.set_ar_byte(ar_byte);
-        seg.cache.u.set_segment_base(base);
+        seg.cache
+            .u
+            .set_segment_base(crate::config::BxLinAddress::new(base));
         seg.cache.u.set_segment_limit_scaled(limit);
         seg.cache.u.set_segment_g(upper & 0x0080_0000 != 0);
         seg.cache.u.set_segment_d_b(upper & 0x0040_0000 != 0);
@@ -686,7 +688,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.vmcb_write16(offset, selector);
         self.vmcb_write16(offset + 2, attr);
         self.vmcb_write32(offset + 4, limit);
-        self.vmcb_write64(offset + 8, base);
+        self.vmcb_write64(offset + 8, base.get());
     }
 
     // =====================================================================
@@ -830,10 +832,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.svm_segment_write(&seg, SVM_GUEST_ES_SELECTOR + n * 0x10);
         }
 
-        self.vmcb_write64(SVM_GUEST_GDTR_BASE, self.gdtr.base);
+        self.vmcb_write64(SVM_GUEST_GDTR_BASE, self.gdtr.base.get());
         self.vmcb_write16(SVM_GUEST_GDTR_LIMIT, self.gdtr.limit);
 
-        self.vmcb_write64(SVM_GUEST_IDTR_BASE, self.idtr.base);
+        self.vmcb_write64(SVM_GUEST_IDTR_BASE, self.idtr.base.get());
         self.vmcb_write16(SVM_GUEST_IDTR_LIMIT, self.idtr.limit);
 
         self.vmcb_write64(SVM_GUEST_EFER_MSR, self.efer.get32() as u64);
@@ -1097,9 +1099,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.sregs[n] = guest_sregs[n].clone();
         }
 
-        self.gdtr.base = guest_gdtr_base;
+        self.gdtr.base = crate::config::BxLinAddress::new(guest_gdtr_base);
         self.gdtr.limit = guest_gdtr_limit;
-        self.idtr.base = guest_idtr_base;
+        self.idtr.base = crate::config::BxLinAddress::new(guest_idtr_base);
         self.idtr.limit = guest_idtr_limit;
 
         self.set_rip(guest_rip);
@@ -1962,7 +1964,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs svm.cc INVLPGA — TLB_invlpg(laddr) (FIXME: flush all ASID
         // entries). The prior code skipped the prefetch/stack invalidation and
         // icache link break that Bochs paging.cc TLB_invlpg performs.
-        self.tlb_invlpg(laddr);
+        self.tlb_invlpg(crate::config::BxLinAddress::new(laddr));
         Ok(())
     }
 }

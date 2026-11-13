@@ -7,7 +7,7 @@ use super::cpu::Exception;
 use super::decoder::{BxSegregs, Instruction};
 use super::instrumentation::{Instrumentation, MemAccessRW};
 use super::{BxCpuC, Result};
-use crate::config::BxPhyAddress;
+use crate::config::{BxLinAddress, BxPhyAddress};
 use crate::iodev::IoPort;
 
 // Bochs vmx.h BX_IA32_FEATURE_CONTROL_* bits.
@@ -3654,7 +3654,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
             // LDTR.
             self.vmcs.guest_ldtr_selector = self.ldtr.selector.value;
-            self.vmcs.guest_ldtr_base = self.ldtr.cache.u.segment_base();
+            self.vmcs.guest_ldtr_base = self.ldtr.cache.u.segment_base().get();
             self.vmcs.guest_ldtr_limit = self.ldtr.cache.u.segment_limit_scaled();
             self.vmcs.guest_ldtr_ar = {
                 let ar_byte = self.ldtr.cache.get_ar_byte() as u32;
@@ -3671,7 +3671,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
             // TR.
             self.vmcs.guest_tr_selector = self.tr.selector.value;
-            self.vmcs.guest_tr_base = self.tr.cache.u.segment_base();
+            self.vmcs.guest_tr_base = self.tr.cache.u.segment_base().get();
             self.vmcs.guest_tr_limit = self.tr.cache.u.segment_limit_scaled();
             self.vmcs.guest_tr_ar = {
                 let ar_byte = self.tr.cache.get_ar_byte() as u32;
@@ -3687,9 +3687,9 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             };
 
             // GDTR / IDTR.
-            self.vmcs.guest_gdtr_base = self.gdtr.base;
+            self.vmcs.guest_gdtr_base = self.gdtr.base.get();
             self.vmcs.guest_gdtr_limit = self.gdtr.limit as u32;
-            self.vmcs.guest_idtr_base = self.idtr.base;
+            self.vmcs.guest_idtr_base = self.idtr.base.get();
             self.vmcs.guest_idtr_limit = self.idtr.limit as u32;
 
             // Sysenter MSRs (always saved — Bochs).
@@ -5209,8 +5209,8 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // fetch raw descriptor → parse → write into segment cache.
         // GDTR/IDTR must be restored first so the descriptor fetches use
         // the host's tables.
-        self.gdtr.base = self.vmcs.host_gdtr_base;
-        self.idtr.base = self.vmcs.host_idtr_base;
+        self.gdtr.base = BxLinAddress::new(self.vmcs.host_gdtr_base);
+        self.idtr.base = BxLinAddress::new(self.vmcs.host_idtr_base);
         self.idtr.limit = 0xFFFF;
 
         self.vmexit_load_host_seg(BxSegregs::Es, self.vmcs.host_es_selector)?;
@@ -5228,14 +5228,14 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             self.sregs[BxSegregs::Fs as usize]
                 .cache
                 .u
-                .set_segment_base(host_fs_base);
+                .set_segment_base(BxLinAddress::new(host_fs_base));
         }
         if x86_64_host || self.sregs[BxSegregs::Gs as usize].cache.valid != 0 {
             let host_gs_base = self.vmcs.host_gs_base;
             self.sregs[BxSegregs::Gs as usize]
                 .cache
                 .u
-                .set_segment_base(host_gs_base);
+                .set_segment_base(BxLinAddress::new(host_gs_base));
         }
 
         // TR + LDTR. Bochs marks LDTR unusable (valid=0) and parses TR from
@@ -5244,7 +5244,10 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let (d1, d2) = self.fetch_raw_descriptor(&self.tr.selector.clone())?;
         self.tr.cache = self.parse_descriptor(d1, d2)?;
         let host_tr_base = self.vmcs.host_tr_base;
-        self.tr.cache.u.set_segment_base(host_tr_base);
+        self.tr
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(host_tr_base));
         self.tr.cache.valid = 1;
         self.ldtr.cache.valid = 0;
 
@@ -5305,7 +5308,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let cache = &mut self.sregs[seg as usize].cache;
         cache.set_ar_byte((ar & 0xFF) as u8);
         cache.valid = if unusable { 0 } else { 1 };
-        cache.u.set_segment_base(base);
+        cache.u.set_segment_base(BxLinAddress::new(base));
         cache.u.set_segment_limit_scaled(limit);
         cache.u.set_segment_g((ar >> 15) & 1 != 0);
         cache.u.set_segment_d_b((ar >> 14) & 1 != 0);
@@ -5381,9 +5384,9 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // GDTR / IDTR. The guest's activity state is entered last, after the
         // context switch tail (`vmlaunch_vmresume`), as Bochs vmx.cc
         // `VMenterLoadCheckGuestState` ends.
-        self.gdtr.base = self.vmcs.guest_gdtr_base;
+        self.gdtr.base = BxLinAddress::new(self.vmcs.guest_gdtr_base);
         self.gdtr.limit = self.vmcs.guest_gdtr_limit as u16;
-        self.idtr.base = self.vmcs.guest_idtr_base;
+        self.idtr.base = BxLinAddress::new(self.vmcs.guest_idtr_base);
         self.idtr.limit = self.vmcs.guest_idtr_limit as u16;
 
         // Six data/code segments — loaded directly from VMCS without
@@ -5443,7 +5446,10 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.ldtr.cache.set_ar_byte((ldtr_ar & 0xFF) as u8);
         self.ldtr.cache.valid = if ldtr_unusable { 0 } else { 1 };
         let guest_ldtr_base = self.vmcs.guest_ldtr_base;
-        self.ldtr.cache.u.set_segment_base(guest_ldtr_base);
+        self.ldtr
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(guest_ldtr_base));
         let guest_ldtr_limit = self.vmcs.guest_ldtr_limit;
         self.ldtr.cache.u.set_segment_limit_scaled(guest_ldtr_limit);
         self.ldtr.cache.u.set_segment_g((ldtr_ar >> 15) & 1 != 0);
@@ -5457,7 +5463,10 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.tr.cache.set_ar_byte((tr_ar & 0xFF) as u8);
         self.tr.cache.valid = 1;
         let guest_tr_base = self.vmcs.guest_tr_base;
-        self.tr.cache.u.set_segment_base(guest_tr_base);
+        self.tr
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(guest_tr_base));
         let guest_tr_limit = self.vmcs.guest_tr_limit;
         self.tr.cache.u.set_segment_limit_scaled(guest_tr_limit);
         self.tr.cache.u.set_segment_g((tr_ar >> 15) & 1 != 0);
@@ -5521,7 +5530,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     fn vmexit_save_guest_seg(&mut self, seg: BxSegregs) {
         let s = &self.sregs[seg as usize];
         let sel = s.selector.value;
-        let base: u64 = s.cache.u.segment_base();
+        let base: u64 = s.cache.u.segment_base().get();
         let limit: u32 = s.cache.u.segment_limit_scaled();
         let ar: u32 = Self::vmexit_pack_guest_seg_ar(s);
         match seg {
@@ -5590,8 +5599,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// the mask covers the full address space when A20 is enabled.
     #[inline]
     fn a20_enabled(&self) -> bool {
-        // A20 masks bit 20 to 0 when disabled → `a20_mask` lacks bit 20.
-        (self.a20_mask & (1u64 << 20)) != 0
+        self.a20_mask.is_open()
     }
 
     // =========================================================================
@@ -6145,13 +6153,13 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.vmexit_if_ctls_set(ctls, VMX_VM_EXEC_CTRL1_HLT_VMEXIT, VmxVmexitReason::Hlt, 0)
     }
 
-    pub(super) fn vmexit_check_invlpg(&mut self, linear_addr: u64) -> Result<bool> {
+    pub(super) fn vmexit_check_invlpg(&mut self, linear_addr: BxLinAddress) -> Result<bool> {
         let ctls = self.proc_based_ctls1();
         self.vmexit_if_ctls_set(
             ctls,
             VMX_VM_EXEC_CTRL1_INVLPG_VMEXIT,
             VmxVmexitReason::Invlpg,
-            linear_addr,
+            linear_addr.get(),
         )
     }
 
@@ -6266,15 +6274,14 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     pub(super) fn ept_translate_for_walk(
         &mut self,
         guest_paddr: BxPhyAddress,
-        guest_laddr: u64,
+        guest_laddr: BxLinAddress,
     ) -> Result<BxPhyAddress> {
         if !self.ept_active() {
             return Ok(guest_paddr);
         }
         self.translate_guest_physical(
             guest_paddr,
-            guest_laddr,
-            true,
+            Some(guest_laddr),
             true,
             false,
             false,
@@ -6290,7 +6297,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     pub(super) fn ept_translate_for_data(
         &mut self,
         guest_paddr: BxPhyAddress,
-        guest_laddr: u64,
+        guest_laddr: BxLinAddress,
         user_page: bool,
         writeable_page: bool,
         nx_page: bool,
@@ -6301,8 +6308,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         }
         self.translate_guest_physical(
             guest_paddr,
-            guest_laddr,
-            true,
+            Some(guest_laddr),
             false,
             user_page,
             writeable_page,
@@ -6324,8 +6330,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     pub(super) fn translate_guest_physical(
         &mut self,
         guest_paddr: BxPhyAddress,
-        guest_laddr: u64,
-        guest_laddr_valid: bool,
+        guest_laddr: Option<BxLinAddress>,
         is_page_walk: bool,
         user_page: bool,
         writeable_page: bool,
@@ -6343,7 +6348,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // as a write so the EPT permission check requires WRITE — the
         // companion `update_ept_access_dirty` (called below on success)
         // updates the EPT entries' own A/D bits.
-        let rw = if ept_ad_enabled && is_page_walk && guest_laddr_valid {
+        let rw = if ept_ad_enabled && is_page_walk && guest_laddr.is_some() {
             BxRwAccess::Write
         } else {
             rw
@@ -6548,7 +6553,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                         combined_access.contains(EptPerm::MBE_USER_EXEC),
                     );
                 }
-                if guest_laddr_valid {
+                if guest_laddr.is_some() {
                     q |= EptViolationQual::LADDR_VALID;
                     if !is_page_walk {
                         q |= EptViolationQual::DATA_ACCESS;
@@ -6587,7 +6592,9 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     let leaf_sss_page = (leaf_entry & (1u64 << 60)) != 0;
                     q.set(EptViolationQual::SSS_PAGE, ept_sss_ctrl && leaf_sss_page);
                 }
-                self.vmcs.guest_linear_addr = guest_laddr;
+                // Bochs writes the field whether or not the address is valid,
+                // zero when it is not.
+                self.vmcs.guest_linear_addr = guest_laddr.map_or(0, BxLinAddress::get);
                 self.vmcs.guest_physical_addr = guest_paddr.get();
                 q.bits()
             } else {
@@ -7001,7 +7008,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         &mut self,
         msw: u32,
         is_memory: bool,
-        laddr: u64,
+        laddr: BxLinAddress,
     ) -> Result<(bool, u32)> {
         let mask = (self.vmcs.cr0_guest_host_mask as u32) & 0xF;
         let shadow = self.vmcs.cr0_read_shadow as u32;
@@ -7016,7 +7023,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             let mut qual: u64 = (3u64 << 4) | (u64::from(msw) << 16);
             if is_memory {
                 qual |= 1 << 6;
-                self.vmcs.guest_linear_addr = laddr;
+                self.vmcs.guest_linear_addr = laddr.get();
             }
             self.vmx_vmexit(VmxVmexitReason::CrAccess, qual)?;
             return Ok((true, msw));
@@ -7224,7 +7231,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         size: u32,
         direction_in: bool,
         rep: bool,
-        linear_addr: u64,
+        linear_addr: BxLinAddress,
         seg: u8,
         as64: bool,
         as32: bool,
@@ -7233,7 +7240,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(false);
         }
         let qual = Self::io_qualification(port, size, direction_in, true, rep, false);
-        self.vmcs.guest_linear_addr = linear_addr;
+        self.vmcs.guest_linear_addr = linear_addr.get();
         let mut info: u32 = u32::from(seg) << 15;
         if as64 {
             info |= 1 << 8;
@@ -7326,7 +7333,7 @@ mod tests {
         let mut ctx = ept_guest(&mut machine);
 
         let host = ctx
-            .ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA), 0, false, true, false, BxRwAccess::Read)
+            .ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA), crate::config::BxLinAddress::new(0), false, true, false, BxRwAccess::Read)
             .expect("a fully permitted mapping translates");
 
         assert_eq!(
@@ -7344,7 +7351,7 @@ mod tests {
         let mut ctx = ept_guest(&mut machine);
 
         let host = ctx
-            .ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA + 0x2A), 0, false, true, false, BxRwAccess::Read)
+            .ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA + 0x2A), crate::config::BxLinAddress::new(0), false, true, false, BxRwAccess::Read)
             .expect("a fully permitted mapping translates");
 
         assert_eq!(host.get(), EPT_TARGET + 0x2A);
@@ -7360,7 +7367,7 @@ mod tests {
         ctx.vmcs.secondary_proc_based_ctls = 0;
 
         let host = ctx
-            .ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA), 0, false, true, false, BxRwAccess::Read)
+            .ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA), crate::config::BxLinAddress::new(0), false, true, false, BxRwAccess::Read)
             .expect("an untranslated access cannot fail");
 
         assert_eq!(host.get(), EPT_GUEST_PA);
@@ -7375,7 +7382,7 @@ mod tests {
         let mut ctx = ept_guest(&mut machine);
         ctx.vmcs.eptptr = EPT_PML4 | 0x40;
 
-        ctx.ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA), 0, false, true, false, BxRwAccess::Write)
+        ctx.ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA), crate::config::BxLinAddress::new(0), false, true, false, BxRwAccess::Write)
             .expect("a fully permitted mapping translates");
 
         for (name, addr) in [

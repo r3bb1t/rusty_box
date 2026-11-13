@@ -1,6 +1,7 @@
 #![allow(non_camel_case_types, unused_variables, unused_assignments, dead_code)]
 
 use super::{decoder::Instruction, BxCpuC};
+use crate::config::BxLinAddress;
 
 // CR0 notes:
 //   Each x86 level has its own quirks regarding how it handles
@@ -1440,7 +1441,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // resolve_addr + read_virtual_word. We track `linear_addr` so the VMX
         // intercept below can report it on a VMEXIT.
         let is_memory = !instr.mod_c0();
-        let mut linear_addr: u64 = 0;
+        let mut linear_addr = BxLinAddress::new(0);
         let mut msw = if instr.mod_c0() {
             // For Group 7 (0F 01): b1=0x101, (b1 & 0x0F)==0x01 → Ed,Gd branch: DST=rm, SRC1=nnn
             // So dst() = rm = actual register. Matches Bochs: BX_READ_16BIT_REG(i->src()) where
@@ -1449,7 +1450,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = super::decoder::BxSegregs::from(instr.seg());
-            linear_addr = self.get_laddr64(seg as usize, u64::from(eaddr));
+            linear_addr = self.get_laddr(seg as usize, u64::from(eaddr));
             self.v_read_word(seg, eaddr)?
         };
 

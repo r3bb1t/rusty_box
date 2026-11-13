@@ -38,11 +38,11 @@ use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::AtomicBool;
 
 mod builder;
-pub use builder::{AtaSlot, BootDevice, BootOrder, BuildError, DiskGeometry, MachineBuilder};
 /// Where a volatile disk keeps its writes, and a volatile disk carried from
 /// one machine to the next; named here beside the builder that takes them.
 #[cfg(feature = "std")]
 pub use crate::iodev::hdimage::{Journal, VolatileDisk};
+pub use builder::{AtaSlot, BootDevice, BootOrder, BuildError, DiskGeometry, MachineBuilder};
 mod debug;
 pub use debug::{DebugCpu, RamOffset};
 mod display;
@@ -60,13 +60,13 @@ pub(crate) mod io;
 pub use io::PcIo;
 mod interactive;
 mod run;
+pub(crate) use run::StopCause;
 pub use run::{
     BatchOutcome, EngineRefusal, KeyAction, Keyboard, KeyboardInput, Mouse, Power, PowerState,
     Progress, RunBudget, StopReason, Typed,
 };
 /// The verbs every rusty_box machine shares, whatever it emulates.
 pub use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
-pub(crate) use run::StopCause;
 mod scheduler;
 mod timers;
 pub use timers::DeviceTime;
@@ -789,7 +789,10 @@ impl<'a, T: Instrumentation, E> Processor<'a, T, E> {
     ///
     /// # Errors
     /// Whatever the delivery raised that the processor could not take.
-    pub fn deliver_hardware_event(&mut self, event: crate::cpu::HardwareEvent) -> crate::cpu::Result<()> {
+    pub fn deliver_hardware_event(
+        &mut self,
+        event: crate::cpu::HardwareEvent,
+    ) -> crate::cpu::Result<()> {
         self.io.deliver_hardware_event(self.cpu, event)
     }
 
@@ -939,7 +942,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         &self.config
     }
 
-
     #[cfg(feature = "std")]
     pub(crate) fn finish_snapshot_restore_v3(
         &mut self,
@@ -975,7 +977,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             .device_manager
             .acpi
             .post_restore_snapshot_v3(self.pc_system.clock_at(self.pc_system.time_ticks()));
-        self.device_manager.serial.after_restore_snapshot_v3().restated()?;
+        self.device_manager
+            .serial
+            .after_restore_snapshot_v3()
+            .restated()?;
         self.device_manager
             .vga
             .rebuild_snapshot_v3_derived_state()
@@ -1194,10 +1199,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         Self::new_from_parts(config, cpu_store::OwnedCpus::new(cpus))
     }
 
-    fn new_from_parts(
-        config: EmulatorConfig,
-        cpus: cpu_store::OwnedCpus<T>,
-    ) -> Result<Box<Self>>
+    fn new_from_parts(config: EmulatorConfig, cpus: cpu_store::OwnedCpus<T>) -> Result<Box<Self>>
     where
         E: Default,
     {
@@ -1377,7 +1379,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.devices.set_timer_ips(self.config.ips.per_second_u64());
         self.smp_tick_remainder = 0;
         self.batch_advanced_pc_system = false;
-        tracing::trace!("PC system initialized with {} IPS", self.config.ips.per_second());
+        tracing::trace!(
+            "PC system initialized with {} IPS",
+            self.config.ips.per_second()
+        );
 
         // Step 2: Memory initialization (line 1312)
         // In original: BX_MEM(0)->init_memory(memSize, hostMemSize, memBlockSize);
@@ -1793,7 +1798,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         if let Err(fault) = <E as SliceEngine<T>>::machine_was_reset(&mut self.engine) {
             match self.engine_fault {
                 None => self.engine_fault = Some(fault),
-                Some(_) => tracing::error!("and besides, the reset did not reach the engine: {fault}"),
+                Some(_) => {
+                    tracing::error!("and besides, the reset did not reach the engine: {fault}")
+                }
             }
         }
         // A refusal recorded above is reported by the call that provoked it,
@@ -2197,7 +2204,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
     /// Get CPU activity state and async_event for diagnostics.
     pub fn cpu_diag_state(&self) -> (u32, u32) {
-        (self.cpu_ref(0).activity_state as u32, self.cpu_ref(0).async_event)
+        (
+            self.cpu_ref(0).activity_state as u32,
+            self.cpu_ref(0).async_event,
+        )
     }
 
     /// Get CR0 for diagnostics (bit 0 = PE).
@@ -2235,8 +2245,11 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         if seg_idx < 6 {
             let selector = self.cpu_ref(0).sregs[seg_idx].selector.value;
             let valid = self.cpu_ref(0).sregs[seg_idx].cache.valid;
-            let base = self.cpu_ref(0).sregs[seg_idx].cache.u.segment_base();
-            let limit = self.cpu_ref(0).sregs[seg_idx].cache.u.segment_limit_scaled();
+            let base = self.cpu_ref(0).sregs[seg_idx].cache.u.segment_base().get();
+            let limit = self.cpu_ref(0).sregs[seg_idx]
+                .cache
+                .u
+                .segment_limit_scaled();
             (selector, base, limit, valid)
         } else {
             (0, 0, 0, 0)
@@ -2276,10 +2289,13 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// answerable without a live execution context, and is the unit the entry
     /// is actually keyed by (R4).
     pub fn get_dtlb_info(&self, laddr: u64) -> DtlbInfo {
-        let idx = self.cpu_ref(0).dtlb.get_index_of(laddr, 3);
+        let idx = self
+            .cpu_ref(0)
+            .dtlb
+            .get_index_of(crate::config::BxLinAddress::new(laddr), 3);
         let entry = &self.cpu_ref(0).dtlb.entries[idx];
         DtlbInfo {
-            lpf: entry.lpf,
+            lpf: entry.lpf.get(),
             ppf: entry.ppf.get(),
             access_bits: entry.access_bits,
             ram_offset: entry.host_page.map(|page| page.ram_offset()),
@@ -2329,7 +2345,11 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             "CS={:#06x} mode={} IF={}",
             self.cpu_ref(0).get_cs_selector(),
             self.get_cpu_mode_str(),
-            if self.cpu_ref(0).get_b_if() != 0 { 1 } else { 0 }
+            if self.cpu_ref(0).get_b_if() != 0 {
+                1
+            } else {
+                0
+            }
         );
         tracing::trace!(
             "CR0={:#010x} CR3={:#018x}",
@@ -2597,7 +2617,7 @@ fn assert_machine_send_for_every_send_tracer<T: Instrumentation + Send>() {
     assert_send::<Emulator<T>>();
 }
 
-#[cfg(all(test, feature = "alloc"))]
-mod tests;
 #[cfg(all(test, feature = "std"))]
 mod breakpoint_tests;
+#[cfg(all(test, feature = "alloc"))]
+mod tests;

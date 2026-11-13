@@ -804,7 +804,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                         ctx.user_pl = true;
 
                         let before = ctx.get_exception_diag()[ac];
-                        let addr = BASE + off;
+                        let addr = crate::config::BxLinAddress::new(BASE + off);
                         let outcome = match (width, is_write) {
                             ("word", false) => {
                                 ctx.read_linear_word(BxSegregs::Ds, addr).map(|_| ())
@@ -846,10 +846,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 ctx.alignment_check_mask = 0xf;
                 ctx.user_pl = true;
                 let before = ctx.get_exception_diag()[ac];
-                let read = ctx.read_linear_byte(BxSegregs::Ds, BASE + 1);
+                let read = ctx.read_linear_byte(BxSegregs::Ds, crate::config::BxLinAddress::new(BASE + 1));
                 ctx.alignment_check_mask = 0xf;
                 ctx.user_pl = true;
-                let write = ctx.write_linear_byte(BxSegregs::Ds, BASE + 1, 0);
+                let write = ctx.write_linear_byte(BxSegregs::Ds, crate::config::BxLinAddress::new(BASE + 1), 0);
                 assert_eq!(
                     ctx.get_exception_diag()[ac],
                     before,
@@ -883,7 +883,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 assert_eq!(ctx.alignment_check_mask, 0);
                 for (addr, mask) in [(0x1001u64, WORD), (0x1003, DWORD), (0x1007, QWORD)] {
                     assert!(
-                        ctx.check_alignment(addr, mask).is_ok(),
+                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask).is_ok(),
                         "no #AC while the mask is disarmed"
                     );
                 }
@@ -896,7 +896,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 for (addr, mask) in [(0x1000u64, WORD), (0x1000, DWORD), (0x1000, QWORD),
                                      (0x1002, WORD), (0x1004, DWORD), (0x1008, QWORD)] {
                     assert!(
-                        ctx.check_alignment(addr, mask).is_ok(),
+                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask).is_ok(),
                         "aligned access at {addr:#x} mask {mask} must not fault"
                     );
                 }
@@ -911,7 +911,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 ] {
                     let before = ctx.get_exception_diag()[Exception::Ac as usize];
                     assert!(
-                        ctx.check_alignment(addr, mask).is_err(),
+                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask).is_err(),
                         "{name} must fault"
                     );
                     assert_eq!(
@@ -927,7 +927,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 ctx.user_pl = false;
                 for (addr, mask) in [(0x1001u64, WORD), (0x1003, DWORD), (0x1005, QWORD)] {
                     assert!(
-                        ctx.check_alignment(addr, mask).is_ok(),
+                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask).is_ok(),
                         "#AC applies to user-privilege accesses only"
                     );
                 }

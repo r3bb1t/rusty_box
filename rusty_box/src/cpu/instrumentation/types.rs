@@ -209,7 +209,7 @@ pub enum TlbCntrl {
     /// SMM/VMM context switch — page-root state implicit in the new context.
     ContextSwitch,
     /// INVLPG instruction.
-    Invlpg { laddr: u64 },
+    Invlpg { laddr: crate::config::BxLinAddress },
     /// INVEPT (VMX EPT invalidation).
     Invept { kind: InvEptType },
     /// INVVPID (VMX VPID invalidation — same numeric encoding as INVEPT).
@@ -457,7 +457,7 @@ pub struct MwaitEvent {
 /// Length is implicit (`data.len()`).
 #[derive(Debug, Copy, Clone)]
 pub struct LinAccess<'a> {
-    pub lin: u64,
+    pub lin: crate::config::BxLinAddress,
     pub phy: crate::config::BxPhyAddress,
     pub data: &'a [u8],
     pub memtype: MemType,
@@ -488,7 +488,7 @@ pub struct PrefetchEvent {
 /// the fault.
 #[derive(Debug, Copy, Clone)]
 pub struct MemUnmapped {
-    pub laddr: u64,
+    pub laddr: crate::config::BxLinAddress,
     pub size: usize,
     pub rw: MemAccessRW,
 }
@@ -497,7 +497,7 @@ pub struct MemUnmapped {
 /// per-page `PagePermissions` bitmap. Return `true` to suppress the fault.
 #[derive(Debug, Copy, Clone)]
 pub struct MemPermViolation {
-    pub laddr: u64,
+    pub laddr: crate::config::BxLinAddress,
     pub size: usize,
     pub rw: MemAccessRW,
     pub required: MemPerms,

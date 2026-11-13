@@ -181,7 +181,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(n as u64)) {
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(n as u64).get())
+                {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
             }
@@ -211,7 +213,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(2 * n as u64))
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(2 * n as u64).get())
                 {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
@@ -245,7 +248,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(4 * n as u64))
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(4 * n as u64).get())
                 {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
@@ -279,7 +283,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(8 * n as u64))
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(8 * n as u64).get())
                 {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
@@ -324,7 +329,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(4 * n as u64))
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(4 * n as u64).get())
                 {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
@@ -361,7 +367,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(8 * n as u64))
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(8 * n as u64).get())
                 {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
@@ -1032,7 +1039,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(n as u64)) {
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(n as u64).get())
+                {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
             }
@@ -1066,7 +1075,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(2 * n as u64))
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(2 * n as u64).get())
                 {
                     return self.exception(Self::seg_exception(seg), 0);
                 }

@@ -184,7 +184,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
         let seg = BxSegregs::from(instr.seg());
         let laddr = self.get_laddr64(seg as usize, eaddr);
-        if laddr & (len_in_bytes - 1) != 0 {
+        if !laddr.is_aligned(len_in_bytes) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         Ok(())

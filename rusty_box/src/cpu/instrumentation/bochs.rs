@@ -198,7 +198,7 @@ pub trait Instrumentation: Default + 'static {
     fn cache_cntrl(&mut self, what: CacheCntrl) {}
 
     /// CLFLUSH instruction.
-    fn clflush(&mut self, laddr: u64, paddr: crate::config::BxPhyAddress) {}
+    fn clflush(&mut self, laddr: crate::config::BxLinAddress, paddr: crate::config::BxPhyAddress) {}
 
     /// Prefetch hint.
     fn prefetch_hint(&mut self, ev: &PrefetchEvent) {}
@@ -357,7 +357,7 @@ macro_rules! impl_instrumentation_tuple {
                 $($T.cache_cntrl(what);)+
             }
 
-            fn clflush(&mut self, laddr: u64, paddr: crate::config::BxPhyAddress) {
+            fn clflush(&mut self, laddr: crate::config::BxLinAddress, paddr: crate::config::BxPhyAddress) {
                 let ($($T,)+) = self;
                 $($T.clflush(laddr, paddr);)+
             }
@@ -790,8 +790,15 @@ mod hook_delivery {
                 ctx.mem_write_qword(at(EPT_PD), EPT_PT | EPT_RWX);
                 ctx.mem_write_qword(at(EPT_PT + 8), EPT_TARGET | EPT_WB_LEAF);
 
-                ctx.ept_translate_for_data(at(0x1000), 0, false, true, false, BxRwAccess::Read)
-                    .expect("a fully permitted mapping translates");
+                ctx.ept_translate_for_data(
+                    at(0x1000),
+                    crate::config::BxLinAddress::new(0),
+                    false,
+                    true,
+                    false,
+                    BxRwAccess::Read,
+                )
+                .expect("a fully permitted mapping translates");
             }
 
             let seen = machine.instrumentation();

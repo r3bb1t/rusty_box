@@ -125,7 +125,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     pub fn dbg_xlate_linear2phy(&mut self, laddr: u64) -> Option<u64> {
         self.machine
             .exec_ctx(self.index)
-            .dbg_xlate_linear2phy(laddr, DbgWalk::Guest)
+            .dbg_xlate_linear2phy(crate::config::BxLinAddress::new(laddr), DbgWalk::Guest)
             .map(BxPhyAddress::get)
     }
 
@@ -136,7 +136,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     pub fn dbg_xlate_linear2phy_in(&mut self, cr3: u64, laddr: u64) -> Option<u64> {
         self.machine
             .exec_ctx(self.index)
-            .dbg_xlate_linear2phy(laddr, DbgWalk::Root(cr3))
+            .dbg_xlate_linear2phy(crate::config::BxLinAddress::new(laddr), DbgWalk::Root(cr3))
             .map(BxPhyAddress::get)
     }
 
@@ -174,7 +174,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
         let walk = DbgWalk::VmxGuest(VmxGuestWalk::of(guest, cr3));
         self.machine
             .exec_ctx(self.index)
-            .dbg_xlate_linear2phy(laddr, walk)
+            .dbg_xlate_linear2phy(crate::config::BxLinAddress::new(laddr), walk)
             .map(BxPhyAddress::get)
     }
 

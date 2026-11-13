@@ -4,6 +4,7 @@
 use tracing::info;
 
 use super::Result;
+use crate::config::BxLinAddress;
 #[cfg(feature = "alloc")]
 use crate::cpu::avx::AMX;
 
@@ -209,7 +210,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.sregs[cs_index].cache.segment = true; /* data/code segment */
         self.sregs[cs_index].cache.r#type = BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as _;
 
-        self.sregs[cs_index].cache.u.set_segment_base(0xFFFF0000);
+        self.sregs[cs_index]
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0xFFFF0000));
         self.sregs[cs_index]
             .cache
             .u
@@ -231,7 +235,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.sregs[ds_index].cache.segment = true; /* data/code segment */
         self.sregs[ds_index].cache.r#type = BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as _;
 
-        self.sregs[ds_index].cache.u.set_segment_base(0x00000000);
+        self.sregs[ds_index]
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0x00000000));
         self.sregs[ds_index]
             .cache
             .u
@@ -249,11 +256,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.sregs[BxSegregs::Gs as usize] = self.sregs[ds_index].clone();
 
         /* GDTR (Global Descriptor Table Register) */
-        self.gdtr.base = 0x00000000;
+        self.gdtr.base = BxLinAddress::new(0);
         self.gdtr.limit = 0xFFFF;
 
         /* IDTR (Interrupt Descriptor Table Register) */
-        self.idtr.base = 0x00000000;
+        self.idtr.base = BxLinAddress::new(0);
         self.idtr.limit = 0xFFFF; /* always byte granular */
 
         /* LDTR (Local Descriptor Table Register) */
@@ -268,7 +275,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.ldtr.cache.segment = false; /* system segment */
         /* system segment */
         self.ldtr.cache.r#type = SystemAndGateDescriptorEnum::BxSysSegmentLdt as _;
-        self.ldtr.cache.u.set_segment_base(0x00000000);
+        self.ldtr
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0x00000000));
         self.ldtr.cache.u.set_segment_limit_scaled(0xFFFF);
         self.ldtr.cache.u.set_segment_avl(false);
         self.ldtr.cache.u.set_segment_g(false); /* byte granular */
@@ -285,7 +295,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.tr.cache.segment = false; /* system segment */
         /* system segment */
         self.tr.cache.r#type = SystemAndGateDescriptorEnum::BxSysSegmentBusy386Tss as _;
-        self.tr.cache.u.set_segment_base(0x00000000);
+        self.tr
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0x00000000));
         self.tr.cache.u.set_segment_limit_scaled(0xFFFF);
         self.tr.cache.u.set_segment_avl(false);
         self.tr.cache.u.set_segment_g(false); /* byte granular */
@@ -571,7 +584,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// icache trace links. Shared by the INVLPG instruction, MOV to DR0-3, and
     /// INVLPGA — each a `TLB_invlpg` in Bochs (crregs.cc `MOV_DdRd`, svm.cc
     /// `INVLPGA`).
-    pub(super) fn tlb_invlpg(&mut self, laddr: u64) {
+    pub(super) fn tlb_invlpg(&mut self, laddr: BxLinAddress) {
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
         self.invlpg_tlbs(laddr);
@@ -674,13 +687,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.oszapc.set_oszapc_logic_32(1);
 
         // Set up GDTR to point to GDT in memory
-        self.gdtr.base = gdt_addr;
+        self.gdtr.base = BxLinAddress::new(gdt_addr);
         self.gdtr.limit = 0x1F; // 4 entries × 8 bytes - 1 = 31
 
         // IDT: keep limit large enough that vector lookups don't #GP.
         // Entries will be null (zeroed RAM), but that's OK — the kernel
         // sets up its own IDT before enabling interrupts.
-        self.idtr.base = 0;
+        self.idtr.base = BxLinAddress::new(0);
         self.idtr.limit = 0xFFFF;
 
         // CS: selector 0x10 = GDT entry 2 (flat 32-bit code)
@@ -691,7 +704,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.sregs[cs].cache.dpl = 0;
         self.sregs[cs].cache.segment = true;
         self.sregs[cs].cache.r#type = BxDataAndCodeDescriptorEnum::CodeExecReadAccessed as u8;
-        self.sregs[cs].cache.u.set_segment_base(0);
+        self.sregs[cs]
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0));
         self.sregs[cs].cache.u.set_segment_limit_scaled(0xFFFFFFFF);
         self.sregs[cs].cache.u.set_segment_g(true); // page granular
         self.sregs[cs].cache.u.set_segment_d_b(true); // 32-bit
@@ -714,7 +730,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.sregs[seg_idx].cache.segment = true;
             self.sregs[seg_idx].cache.r#type =
                 BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as u8;
-            self.sregs[seg_idx].cache.u.set_segment_base(0);
+            self.sregs[seg_idx]
+                .cache
+                .u
+                .set_segment_base(BxLinAddress::new(0));
             self.sregs[seg_idx]
                 .cache
                 .u
