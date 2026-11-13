@@ -457,7 +457,7 @@ mod flush_tests {
     fn tlb_with_a_global_and_an_ordinary_page() -> Tlb<RamPage, 8> {
         let mut tlb = Tlb::<RamPage, 8>::new();
         for (slot, access_bits) in [(0usize, TLB_GLOBAL_PAGE | 0x1), (1usize, 0x1)] {
-            tlb.entries[slot].lpf = crate::config::BxLinAddress::new((slot as u64) << 12);
+            tlb.entries[slot].lpf = BxLinAddress::new((slot as u64) << 12);
             tlb.entries[slot].ppf = BxPhyAddress::new((slot as u64) << 12);
             tlb.entries[slot].access_bits = access_bits;
         }
@@ -526,10 +526,7 @@ mod const_initialiser_tests {
     #[test]
     fn a_fresh_tlb_holds_only_invalid_entries() {
         assert_eq!(TLBEntry::<RamPage>::INVALID.lpf, BX_INVALID_TLB_ENTRY);
-        assert_ne!(
-            TLBEntry::<RamPage>::INVALID.lpf,
-            crate::config::BxLinAddress::new(0)
-        );
+        assert_ne!(TLBEntry::<RamPage>::INVALID.lpf, BxLinAddress::new(0));
         let tlb = Tlb::<RamPage, 8>::new();
         for index in 0..8 {
             assert_eq!(tlb.entries[index].lpf, BX_INVALID_TLB_ENTRY);

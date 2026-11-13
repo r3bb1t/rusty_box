@@ -4,6 +4,7 @@
 use super::cpu::{BX_MSR_MAX_INDEX, BxCpuC, CpuActivityState, CpuMode};
 use super::crregs::{BxCr0, BxCr4, BxDr6, BxDr7, BxEfer, Xcr0};
 use super::eflags::EFlags;
+use crate::config::{A20Mask, BxLinAddress, BxPhyAddress};
 use crate::snapshot::{
     SnapError, SnapRead, SnapResult, SnapWrite, bounds, checked_snapshot_len_add,
     checked_snapshot_len_mul,
@@ -394,7 +395,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if monitor_addr & 63 != 0 || monitor_armed_by > super::cpu::BX_MONITOR_ARMED_BY_UMONITOR {
             return Err(snapshot_invalid("monitor state is invalid"));
         }
-        self.monitor.monitor_addr = crate::config::BxPhyAddress::new(monitor_addr);
+        self.monitor.monitor_addr = BxPhyAddress::new(monitor_addr);
         self.monitor.armed_by = monitor_armed_by;
 
         let supports_uintr =
@@ -454,7 +455,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if a20_mask != u64::MAX && a20_mask != 0xFFFF_FFFF_FFEF_FFFF {
             return Err(snapshot_invalid("CPU A20 mask is invalid"));
         }
-        self.a20_mask = crate::config::A20Mask::from_bits(a20_mask);
+        self.a20_mask = A20Mask::from_bits(a20_mask);
         self.fred_event_info = reader.read_u32()?;
         self.fred_event_data = reader.read_u64()?;
 
@@ -477,9 +478,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.in_smm_vmx,
             self.in_smm_vmx_guest,
         )?;
-        self.vmcsptr = crate::config::BxPhyAddress::new(vmcsptr);
+        self.vmcsptr = BxPhyAddress::new(vmcsptr);
         self.vmcs_memtype = vmcs_memtype;
-        self.vmxonptr = crate::config::BxPhyAddress::new(vmxonptr);
+        self.vmxonptr = BxPhyAddress::new(vmxonptr);
         restore_v3_vmcs_cache(reader, &mut self.vmcs)?;
 
         self.in_svm_guest = reader.read_bool()?;
@@ -500,7 +501,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if vmcbptr != 0 && vmcbptr & 0xFFF != 0 {
             return Err(snapshot_invalid("VMCB pointer is not page aligned"));
         }
-        self.vmcbptr = crate::config::BxPhyAddress::new(vmcbptr);
+        self.vmcbptr = BxPhyAddress::new(vmcbptr);
         self.vmcb_memtype = vmcb_memtype;
         if has_vmcb {
             restore_v3_vmcb_cache(reader, &mut self.vmcb)?;
@@ -717,9 +718,7 @@ fn read_v3_seg_reg<R: SnapRead>(reader: &mut R, seg: &mut BxSegmentReg) -> SnapR
     seg.cache.dpl = dpl;
     seg.cache.segment = segment;
     seg.cache.r#type = descriptor_type;
-    seg.cache
-        .u
-        .set_segment_base(crate::config::BxLinAddress::new(base));
+    seg.cache.u.set_segment_base(BxLinAddress::new(base));
     seg.cache.u.set_segment_limit_scaled(limit_scaled);
     seg.cache.u.set_segment_g(granularity);
     seg.cache.u.set_segment_d_b(default_size);
@@ -734,7 +733,7 @@ fn write_v3_global_seg<W: SnapWrite>(writer: &mut W, seg: &BxGlobalSegmentReg) -
 }
 
 fn read_v3_global_seg<R: SnapRead>(reader: &mut R, seg: &mut BxGlobalSegmentReg) -> SnapResult<()> {
-    seg.base = crate::config::BxLinAddress::new(reader.read_u64()?);
+    seg.base = BxLinAddress::new(reader.read_u64()?);
     seg.limit = reader.read_u16()?;
     Ok(())
 }
@@ -1280,8 +1279,8 @@ fn restore_v3_vmcb_cache<R: SnapRead>(
     vmcb.ctrls.exitintinfo = reader.read_u32()?;
     vmcb.ctrls.exitintinfo_error_code = reader.read_u32()?;
     vmcb.ctrls.eventinj = reader.read_u32()?;
-    vmcb.ctrls.iopm_base = crate::config::BxPhyAddress::new(reader.read_u64()?);
-    vmcb.ctrls.msrpm_base = crate::config::BxPhyAddress::new(reader.read_u64()?);
+    vmcb.ctrls.iopm_base = BxPhyAddress::new(reader.read_u64()?);
+    vmcb.ctrls.msrpm_base = BxPhyAddress::new(reader.read_u64()?);
     let v_tpr = reader.read_u8()?;
     let v_intr_prio = reader.read_u8()?;
     let v_ignore_tpr = reader.read_bool()?;
@@ -1309,6 +1308,7 @@ fn restore_v3_vmcb_cache<R: SnapRead>(
 #[cfg(test)]
 mod tests {
     use super::CpuMode;
+    use crate::config::BxPhyAddress;
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::crregs::{BxCr0, BxEfer};
     use crate::cpu::decoder::BxSegregs;
@@ -1333,8 +1333,8 @@ mod tests {
         cpu.in_vmx_guest = true;
         cpu.in_smm_vmx = true;
         cpu.in_smm_vmx_guest = true;
-        cpu.vmcsptr = crate::config::BxPhyAddress::new(0x0012_3000);
-        cpu.vmxonptr = crate::config::BxPhyAddress::new(0x0056_7000);
+        cpu.vmcsptr = BxPhyAddress::new(0x0012_3000);
+        cpu.vmxonptr = BxPhyAddress::new(0x0056_7000);
 
         cpu.vmcs.host_cr0 = 0x8000_0031; // first serialized field
         cpu.vmcs.guest_cs_selector = 0x1234;
@@ -1356,14 +1356,8 @@ mod tests {
         assert!(restored.in_vmx_guest);
         assert!(restored.in_smm_vmx);
         assert!(restored.in_smm_vmx_guest);
-        assert_eq!(
-            restored.vmcsptr,
-            crate::config::BxPhyAddress::new(0x0012_3000)
-        );
-        assert_eq!(
-            restored.vmxonptr,
-            crate::config::BxPhyAddress::new(0x0056_7000)
-        );
+        assert_eq!(restored.vmcsptr, BxPhyAddress::new(0x0012_3000));
+        assert_eq!(restored.vmxonptr, BxPhyAddress::new(0x0056_7000));
 
         assert_eq!(restored.vmcs.host_cr0, 0x8000_0031);
         assert_eq!(restored.vmcs.guest_cs_selector, 0x1234);
@@ -1383,7 +1377,7 @@ mod tests {
 
         cpu.in_svm_guest = true;
         cpu.svm_gif = false;
-        cpu.vmcbptr = crate::config::BxPhyAddress::new(0x009A_B000);
+        cpu.vmcbptr = BxPhyAddress::new(0x009A_B000);
         cpu.vmcb_host_offset = Some(0xDEAD_BEEF); // must NOT survive a restore
         cpu.msr.svm_hsave_pa = 0x00DE_F000;
         cpu.msr.svm_vm_cr = 0x2;

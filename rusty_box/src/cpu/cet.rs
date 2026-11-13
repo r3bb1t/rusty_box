@@ -172,6 +172,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     // =========================================================================
     // Shadow stack memory operations — Bochs access2.cc
+    //
+    // These take the address as the SSP register's number (Bochs `offset`):
+    // the same number is also data on the shadow stack (a busy token is
+    // SSP | 1, a previous-SSP token is SSP itself). It becomes a
+    // `BxLinAddress` where these call the linear accessors.
     // =========================================================================
 
     /// Read a dword from the shadow stack.

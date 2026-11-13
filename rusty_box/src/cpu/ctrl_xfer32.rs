@@ -5,6 +5,7 @@
 use super::cpu::Exception;
 use super::decoder::{BxSegregs, Instruction};
 use super::error::Result;
+use crate::config::BxLinAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -479,7 +480,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[seg_idx]
             .cache
             .u
-            .set_segment_base(crate::config::BxLinAddress::new(u64::from(selector) << 4));
+            .set_segment_base(BxLinAddress::new(u64::from(selector) << 4));
         self.sregs[seg_idx].cache.segment = true;
         self.sregs[seg_idx].cache.p = true;
 

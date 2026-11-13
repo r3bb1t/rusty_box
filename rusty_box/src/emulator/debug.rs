@@ -6,7 +6,7 @@
 
 use super::{Emulator, SliceEngine, SoftwareEngine, StopCause};
 use crate::Result;
-use crate::config::BxPhyAddress;
+use crate::config::{BxLinAddress, BxPhyAddress};
 use crate::cpu::instrumentation::{
     CpuDebugView, Fetched, Instrumentation, LinearRange, MappingWalk, PageMapping, VmxGuest,
     WalkStep,
@@ -39,7 +39,7 @@ impl RamOffset {
         use crate::memory::memory_rusty_box::{
             BX_PCI_HOLE_END, bx_is_pci_hole_addr, bx_translate_gpa_to_linear,
         };
-        let physical = crate::config::BxPhyAddress::new(physical);
+        let physical = BxPhyAddress::new(physical);
         if bx_is_pci_hole_addr(physical) {
             Self(bx_translate_gpa_to_linear(BX_PCI_HOLE_END))
         } else {
@@ -50,7 +50,7 @@ impl RamOffset {
     /// The RAM byte at guest-physical `physical`, or `None` in the PCI hole.
     pub fn of_physical(physical: u64) -> Option<Self> {
         use crate::memory::memory_rusty_box::{bx_is_pci_hole_addr, bx_translate_gpa_to_linear};
-        let physical = crate::config::BxPhyAddress::new(physical);
+        let physical = BxPhyAddress::new(physical);
         (!bx_is_pci_hole_addr(physical)).then(|| Self(bx_translate_gpa_to_linear(physical)))
     }
 }
@@ -126,7 +126,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     pub fn dbg_xlate_linear2phy(&mut self, laddr: u64) -> Option<u64> {
         self.machine
             .exec_ctx(self.index)
-            .dbg_xlate_linear2phy(crate::config::BxLinAddress::new(laddr), DbgWalk::Guest)
+            .dbg_xlate_linear2phy(BxLinAddress::new(laddr), DbgWalk::Guest)
             .map(BxPhyAddress::get)
     }
 
@@ -137,7 +137,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     pub fn dbg_xlate_linear2phy_in(&mut self, cr3: u64, laddr: u64) -> Option<u64> {
         self.machine
             .exec_ctx(self.index)
-            .dbg_xlate_linear2phy(crate::config::BxLinAddress::new(laddr), DbgWalk::Root(cr3))
+            .dbg_xlate_linear2phy(BxLinAddress::new(laddr), DbgWalk::Root(cr3))
             .map(BxPhyAddress::get)
     }
 
@@ -185,7 +185,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
         let walk = DbgWalk::VmxGuest(VmxGuestWalk::of(guest, cr3));
         self.machine
             .exec_ctx(self.index)
-            .dbg_xlate_linear2phy(crate::config::BxLinAddress::new(laddr), walk)
+            .dbg_xlate_linear2phy(BxLinAddress::new(laddr), walk)
             .map(BxPhyAddress::get)
     }
 
@@ -215,11 +215,11 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     /// A RAM block that could not be brought back into residency.
     pub fn dbg_fetch_mem(&mut self, addr: u64, buf: &mut [u8]) -> Result<Fetched> {
         let policy = CpuMemoryPolicy::new(self.machine.cpu_ref(self.index).smm_mode(), false);
-        match self.machine.memory.dbg_fetch_mem(
-            policy,
-            crate::config::BxPhyAddress::new(addr),
-            buf,
-        )? {
+        match self
+            .machine
+            .memory
+            .dbg_fetch_mem(policy, BxPhyAddress::new(addr), buf)?
+        {
             DbgFetch::Read(fetched) => Ok(fetched),
             DbgFetch::Device(hit) => {
                 let now_ticks = self.machine.pc_system.time_ticks();

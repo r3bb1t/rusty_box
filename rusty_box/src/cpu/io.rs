@@ -1710,6 +1710,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 #[cfg(test)]
 mod tests {
     use super::{IoGate, IoInstr};
+    use crate::config::BxPhyAddress;
     use crate::cpu::crregs::BxCr0;
     use crate::cpu::decoder::decode32::fetch_decode32;
     use crate::cpu::decoder::{BxSegregs, Instruction};
@@ -1771,7 +1772,7 @@ mod tests {
         let all_ports = [0xFFu8; 0x2000];
         let copied = machine
             .memory_mut()
-            .write_ram(crate::config::BxPhyAddress::new(IOPM), &all_ports)
+            .write_ram(BxPhyAddress::new(IOPM), &all_ports)
             .expect("the IOPM is RAM");
         assert_eq!(copied, all_ports.len(), "the IOPM reached RAM whole");
         let mut ctx = machine.ctx();
@@ -1779,7 +1780,7 @@ mod tests {
         ctx.sregs[BxSegregs::Cs as usize].selector.rpl = 3;
         ctx.eflags.set_iopl(0);
         ctx.in_svm_guest = true;
-        ctx.vmcb.ctrls.iopm_base = crate::config::BxPhyAddress::new(IOPM);
+        ctx.vmcb.ctrls.iopm_base = BxPhyAddress::new(IOPM);
         ctx.vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_IO;
 
         let gate = ctx

@@ -3182,7 +3182,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
 #[cfg(test)]
 mod tests {
-    use crate::config::BxLinAddress;
+    use crate::config::{A20Mask, BxLinAddress, BxPhyAddress};
     use crate::cpu::crregs::BxCr0;
 
     #[test]
@@ -3206,7 +3206,7 @@ mod tests {
                 // real bases are overridden here rather than provisioned.
                 cpu.mem_host_base = fake_base;
                 cpu.mem_host_len = 3 * GIB + 0x180;
-                cpu.a20_mask = crate::config::A20Mask::OPEN;
+                cpu.a20_mask = A20Mask::OPEN;
                 cpu.cr0.remove(BxCr0::PG);
 
                 // Paging-off bulk mapping rejects the PCI aperture outright.
@@ -3230,7 +3230,7 @@ mod tests {
                 let laddr = BxLinAddress::new(0x4100);
                 let entry = cpu.dtlb.get_entry_of(laddr, 0);
                 entry.lpf = laddr.page_base();
-                entry.ppf = crate::config::BxPhyAddress::new(0x1_0000_0000);
+                entry.ppf = BxPhyAddress::new(0x1_0000_0000);
                 entry.access_bits = 1 << 2; // supervisor write
                 entry.host_page = super::super::tlb::RamPage::from_ram_offset(3 * GIB);
                 let (ptr, remaining, paddr) = cpu
@@ -3245,7 +3245,7 @@ mod tests {
                 let laddr = BxLinAddress::new(0x8000);
                 let entry = cpu.dtlb.get_entry_of(laddr, 0);
                 entry.lpf = laddr.page_base();
-                entry.ppf = crate::config::BxPhyAddress::new(PCI_HOLE);
+                entry.ppf = BxPhyAddress::new(PCI_HOLE);
                 entry.access_bits = 1 << 2;
                 entry.host_page = super::super::tlb::RamPage::from_ram_offset(0);
                 assert!(

@@ -11,6 +11,7 @@
 use super::decoder::BxSegregs;
 use super::descriptor::{SEG_ACCESS_ROK, SEG_ACCESS_WOK, SEG_VALID_CACHE};
 use super::eflags::EFlags;
+use crate::config::BxLinAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Return from protected mode (CPL=0) to V8086 mode via IRET.
@@ -230,11 +231,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let mut temp_flags = (self.read_eflags() & 0xFFFF) as u16;
 
                 // Read CS:IP from IVT (real-mode interrupt vector table at address 0)
-                let temp_cs = self.system_read_word(crate::config::BxLinAddress::new(
-                    u64::from(vector) * 4 + 2,
-                ))?;
-                let temp_ip =
-                    self.system_read_word(crate::config::BxLinAddress::new(u64::from(vector) * 4))?;
+                let temp_cs =
+                    self.system_read_word(BxLinAddress::new(u64::from(vector) * 4 + 2))?;
+                let temp_ip = self.system_read_word(BxLinAddress::new(u64::from(vector) * 4))?;
 
                 // IOPL < 3: adjust flags for VME (vm8086.cc)
                 if self.eflags.iopl() < 3 {
@@ -300,8 +299,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.sregs[sreg].cache.segment = true;
             self.sregs[sreg].cache.r#type = 3; // BX_DATA_READ_WRITE_ACCESSED
 
-            let base =
-                crate::config::BxLinAddress::new(u64::from(self.sregs[sreg].selector.value) << 4);
+            let base = BxLinAddress::new(u64::from(self.sregs[sreg].selector.value) << 4);
             self.sregs[sreg].cache.u.set_segment_base(base);
             self.sregs[sreg].cache.u.set_segment_limit_scaled(0xFFFF);
             self.sregs[sreg].cache.u.set_segment_g(false);

@@ -59,6 +59,7 @@ use super::types::{
     LinAccess, MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent,
     ResetType, TlbCntrl,
 };
+use crate::config::{BxLinAddress, BxPhyAddress};
 use crate::cpu::decoder::Instruction;
 
 /// Instrumentation trait. Implement only the callbacks you need —
@@ -197,7 +198,7 @@ pub trait Instrumentation: Default + 'static {
     fn cache_cntrl(&mut self, what: CacheCntrl) {}
 
     /// CLFLUSH instruction.
-    fn clflush(&mut self, laddr: crate::config::BxLinAddress, paddr: crate::config::BxPhyAddress) {}
+    fn clflush(&mut self, laddr: BxLinAddress, paddr: BxPhyAddress) {}
 
     /// Prefetch hint.
     fn prefetch_hint(&mut self, ev: &PrefetchEvent) {}
@@ -356,7 +357,7 @@ macro_rules! impl_instrumentation_tuple {
                 $($T.cache_cntrl(what);)+
             }
 
-            fn clflush(&mut self, laddr: crate::config::BxLinAddress, paddr: crate::config::BxPhyAddress) {
+            fn clflush(&mut self, laddr: BxLinAddress, paddr: BxPhyAddress) {
                 let ($($T,)+) = self;
                 $($T.clflush(laddr, paddr);)+
             }
@@ -421,6 +422,7 @@ impl_instrumentation_tuple!(A, B, C, D, E, F, G, H);
 #[cfg(all(test, feature = "std"))]
 mod hook_delivery {
     use super::*;
+    use crate::config::A20Mask;
     use crate::cpu::instrumentation::{MemAccessRW, PhyAccess};
     use crate::cpu::msr::{
         BX_MSR_EFER, BX_MSR_LSTAR, BX_MSR_STAR, BX_MSR_SYSENTER_CS, BX_MSR_SYSENTER_EIP,
@@ -665,7 +667,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.set_vmcbptr(crate::config::BxPhyAddress::new(VMCB));
+                ctx.set_vmcbptr(BxPhyAddress::new(VMCB));
                 match ctx.svm_vmexit(crate::cpu::svm::SVM_VMEXIT_INVALID, 0, 0) {
                     Ok(()) | Err(crate::cpu::CpuError::CpuLoopRestart) => {}
                     Err(other) => panic!("the exit itself failed: {other:?}"),
@@ -722,7 +724,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.memory.set_a20_mask(crate::config::A20Mask::OPEN);
+                ctx.memory.set_a20_mask(A20Mask::OPEN);
                 ctx.in_vmx = true;
                 ctx.in_vmx_guest = true;
                 ctx.vmcs.virtual_apic_page_addr = VAPIC_PAGE;
@@ -791,14 +793,14 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.memory.set_a20_mask(crate::config::A20Mask::OPEN);
+                ctx.memory.set_a20_mask(A20Mask::OPEN);
                 ctx.in_vmx = true;
                 ctx.in_vmx_guest = true;
                 ctx.vmcs.proc_based_ctls = VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS;
                 ctx.vmcs.secondary_proc_based_ctls = VMX_VM_EXEC_CTRL2_EPT_ENABLE;
                 // EPTP bit 6 turns on the accessed/dirty updates the walk makes.
                 ctx.vmcs.eptptr = EPT_PML4 | 0x40;
-                let at = crate::config::BxPhyAddress::new;
+                let at = BxPhyAddress::new;
                 ctx.mem_write_qword(at(EPT_PML4), EPT_PDPT | EPT_RWX);
                 ctx.mem_write_qword(at(EPT_PDPT), EPT_PD | EPT_RWX);
                 ctx.mem_write_qword(at(EPT_PD), EPT_PT | EPT_RWX);
@@ -806,7 +808,7 @@ mod hook_delivery {
 
                 ctx.ept_translate_for_data(
                     at(0x1000),
-                    crate::config::BxLinAddress::new(0),
+                    BxLinAddress::new(0),
                     false,
                     true,
                     false,
@@ -876,7 +878,7 @@ mod hook_delivery {
         ctx.in_vmx_guest = true;
         // A guest runs from a current VMCS (VMLAUNCH needs one), which its
         // VM exit writes back into (Bochs vmx.cc VMexit).
-        ctx.vmcsptr = crate::config::BxPhyAddress::new(0x5_0000);
+        ctx.vmcsptr = BxPhyAddress::new(0x5_0000);
         ctx.vmcs.host_cr0 = u64::from(ctx.cr0.get32());
         ctx.vmcs.host_cr4 = 0;
         ctx.vmcs.host_cr3 = 0;
@@ -980,7 +982,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.set_vmcbptr(crate::config::BxPhyAddress::new(VMCB));
+                ctx.set_vmcbptr(BxPhyAddress::new(VMCB));
                 ctx.in_svm_guest = true;
                 ctx.vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_SHUTDOWN;
                 ctx.last_exception_type = DOUBLE_FAULT_IN_DELIVERY;
@@ -1017,7 +1019,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.vmcsptr = crate::config::BxPhyAddress::new(VMCS);
+                ctx.vmcsptr = BxPhyAddress::new(VMCS);
                 let abort = ctx.vmx_abort(crate::cpu::vmx::VmxAbortCode::LoadingHostMsrs);
                 assert!(matches!(abort, Err(crate::cpu::CpuError::CpuLoopRestart)));
                 assert!(ctx.is_in_shutdown());
@@ -1072,7 +1074,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.set_vmcbptr(crate::config::BxPhyAddress::new(VMCB));
+                ctx.set_vmcbptr(BxPhyAddress::new(VMCB));
                 ctx.in_svm_guest = true;
                 let pae_host_cr0 = ctx.cr0.get32() | 0x8000_0001;
                 ctx.vmcb.host_state.cr0.set32(pae_host_cr0);

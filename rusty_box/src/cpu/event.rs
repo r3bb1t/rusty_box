@@ -1288,7 +1288,7 @@ mod tests {
         cpu.dr7 = BxDr7::from_bits_retain(0x1);
         cpu.eflags.remove(crate::cpu::eflags::EFlags::RF);
 
-        let bits = cpu.code_breakpoint_match(crate::config::BxLinAddress::new(0x1234));
+        let bits = cpu.code_breakpoint_match(BxLinAddress::new(0x1234));
         assert_ne!(bits & 0x1, 0, "B0 status bit must be set on a match");
         assert_ne!(
             bits & BxCpuC::<()>::BX_DEBUG_TRAP_HIT,
@@ -1297,17 +1297,11 @@ mod tests {
         );
 
         // A different address does not match.
-        assert_eq!(
-            cpu.code_breakpoint_match(crate::config::BxLinAddress::new(0x5678)),
-            0
-        );
+        assert_eq!(cpu.code_breakpoint_match(BxLinAddress::new(0x5678)), 0);
 
         // RF suppresses instruction breakpoints for one instruction.
         cpu.eflags.insert(crate::cpu::eflags::EFlags::RF);
-        assert_eq!(
-            cpu.code_breakpoint_match(crate::config::BxLinAddress::new(0x1234)),
-            0
-        );
+        assert_eq!(cpu.code_breakpoint_match(BxLinAddress::new(0x1234)), 0);
     }
 
     /// Bochs event.cc Priority 4 compares DR0-3 against
@@ -1359,7 +1353,7 @@ mod tests {
         cpu.dr7 = BxDr7::from_bits_retain(1 << 2); // L1 enabled, L0 disabled
         cpu.eflags.remove(crate::cpu::eflags::EFlags::RF);
 
-        let bits = cpu.code_breakpoint_match(crate::config::BxLinAddress::new(0x2000));
+        let bits = cpu.code_breakpoint_match(BxLinAddress::new(0x2000));
         assert_ne!(bits & 0x1, 0, "B0 status bit still reported for a match");
         assert_eq!(
             bits & BxCpuC::<()>::BX_DEBUG_TRAP_HIT,
@@ -1491,7 +1485,7 @@ mod tests {
         // into (Bochs vmx.cc VMexit).
         ap.in_vmx = true;
         ap.in_vmx_guest = true;
-        ap.vmcsptr = crate::config::BxPhyAddress::new(0x5_0000);
+        ap.vmcsptr = BxPhyAddress::new(0x5_0000);
 
         bus.ctx(&mut ap).deliver_sipi(TEST_SIPI_VECTOR);
 

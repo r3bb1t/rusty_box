@@ -11,6 +11,7 @@ use super::decoder::{BxSegregs, Instruction};
 use super::eflags::EFlags;
 use super::exception::InterruptType;
 use super::segment_ctrl_pro::parse_selector;
+use crate::config::BxLinAddress;
 use crate::cpu::BxCpuC;
 
 /// Selector RPL mask: clears RPL bits.
@@ -40,7 +41,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn swapgs_internal(&mut self) {
         let gs_base = self.get_segment_base(BxSegregs::Gs);
         let kernel_gs = self.msr.kernelgsbase;
-        self.set_segment_base(BxSegregs::Gs, crate::config::BxLinAddress::new(kernel_gs));
+        self.set_segment_base(BxSegregs::Gs, BxLinAddress::new(kernel_gs));
         self.msr.kernelgsbase = gs_base.get();
     }
 

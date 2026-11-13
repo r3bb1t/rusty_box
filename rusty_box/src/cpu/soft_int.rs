@@ -10,6 +10,7 @@ use super::decoder::{BxSegregs, Instruction};
 use super::descriptor::BxSelector;
 use super::eflags::EFlags;
 use super::segment_ctrl_pro::parse_selector;
+use crate::config::BxLinAddress;
 
 /// `CPUID.7:0:EBX` — AVX512F, DQ, IFMA, PF, ER, CD, BW and VL.
 const CPUID_LEAF7_EBX_AVX512: u32 =
@@ -1088,7 +1089,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[cs_index]
             .cache
             .u
-            .set_segment_base(crate::config::BxLinAddress::new(u64::from(new_cs) << 4));
+            .set_segment_base(BxLinAddress::new(u64::from(new_cs) << 4));
         self.set_ip(new_ip);
 
         // Bochs exception.cc — clear IF, TF, AC, RF

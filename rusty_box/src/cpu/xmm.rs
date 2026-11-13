@@ -568,6 +568,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
 #[cfg(test)]
 mod tests {
+    // Only the debug-only alignment-check tests name a linear address.
+    #[cfg(debug_assertions)]
+    use crate::config::BxLinAddress;
 
     /// Emulator construction needs a bigger stack than the default 2 MiB test
     /// thread: `Emulator` is ~4 MiB and the debug build materialises a few
@@ -807,7 +810,7 @@ mod tests {
                         ctx.user_pl = true;
 
                         let before = ctx.get_exception_diag()[ac];
-                        let addr = crate::config::BxLinAddress::new(BASE + off);
+                        let addr = BxLinAddress::new(BASE + off);
                         let outcome = match (width, is_write) {
                             ("word", false) => {
                                 ctx.read_linear_word(BxSegregs::Ds, addr).map(|_| ())
@@ -847,15 +850,10 @@ mod tests {
                 ctx.alignment_check_mask = 0xF;
                 ctx.user_pl = true;
                 let before = ctx.get_exception_diag()[ac];
-                let read =
-                    ctx.read_linear_byte(BxSegregs::Ds, crate::config::BxLinAddress::new(BASE + 1));
+                let read = ctx.read_linear_byte(BxSegregs::Ds, BxLinAddress::new(BASE + 1));
                 ctx.alignment_check_mask = 0xF;
                 ctx.user_pl = true;
-                let write = ctx.write_linear_byte(
-                    BxSegregs::Ds,
-                    crate::config::BxLinAddress::new(BASE + 1),
-                    0,
-                );
+                let write = ctx.write_linear_byte(BxSegregs::Ds, BxLinAddress::new(BASE + 1), 0);
                 assert_eq!(
                     ctx.get_exception_diag()[ac],
                     before,
@@ -889,8 +887,7 @@ mod tests {
                 assert_eq!(ctx.alignment_check_mask, 0);
                 for (addr, mask) in [(0x1001u64, WORD), (0x1003, DWORD), (0x1007, QWORD)] {
                     assert!(
-                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask)
-                            .is_ok(),
+                        ctx.check_alignment(BxLinAddress::new(addr), mask).is_ok(),
                         "no #AC while the mask is disarmed"
                     );
                 }
@@ -909,8 +906,7 @@ mod tests {
                     (0x1008, QWORD),
                 ] {
                     assert!(
-                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask)
-                            .is_ok(),
+                        ctx.check_alignment(BxLinAddress::new(addr), mask).is_ok(),
                         "aligned access at {addr:#x} mask {mask} must not fault"
                     );
                 }
@@ -925,8 +921,7 @@ mod tests {
                 ] {
                     let before = ctx.get_exception_diag()[Exception::Ac as usize];
                     assert!(
-                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask)
-                            .is_err(),
+                        ctx.check_alignment(BxLinAddress::new(addr), mask).is_err(),
                         "{name} must fault"
                     );
                     assert_eq!(
@@ -942,8 +937,7 @@ mod tests {
                 ctx.user_pl = false;
                 for (addr, mask) in [(0x1001u64, WORD), (0x1003, DWORD), (0x1005, QWORD)] {
                     assert!(
-                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask)
-                            .is_ok(),
+                        ctx.check_alignment(BxLinAddress::new(addr), mask).is_ok(),
                         "#AC applies to user-privilege accesses only"
                     );
                 }

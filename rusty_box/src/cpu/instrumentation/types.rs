@@ -11,6 +11,8 @@ use bitflags::bitflags;
 /// so a tracer needs no second import.
 pub use rusty_box_devices::api::IoPort;
 
+use crate::config::{BxLinAddress, BxPhyAddress};
+
 // ─────────────────────────── InstrAction ───────────────────────────
 
 /// Return value from `pre_*` hook methods. Controls whether the CPU executes
@@ -208,7 +210,7 @@ pub enum TlbCntrl {
     /// SMM/VMM context switch — page-root state implicit in the new context.
     ContextSwitch,
     /// INVLPG instruction.
-    Invlpg { laddr: crate::config::BxLinAddress },
+    Invlpg { laddr: BxLinAddress },
     /// INVEPT (VMX EPT invalidation).
     Invept { kind: InvEptType },
     /// INVVPID (VMX VPID invalidation — same numeric encoding as INVEPT).
@@ -446,7 +448,7 @@ pub struct OpcodeEvent<'a> {
 /// hint (not a byte count of data).
 #[derive(Debug, Copy, Clone)]
 pub struct MwaitEvent {
-    pub addr: crate::config::BxPhyAddress,
+    pub addr: BxPhyAddress,
     pub len: u32,
     pub flags: MwaitFlags,
 }
@@ -456,8 +458,8 @@ pub struct MwaitEvent {
 /// Length is implicit (`data.len()`).
 #[derive(Debug, Copy, Clone)]
 pub struct LinAccess<'a> {
-    pub lin: crate::config::BxLinAddress,
-    pub phy: crate::config::BxPhyAddress,
+    pub lin: BxLinAddress,
+    pub phy: BxPhyAddress,
     pub data: &'a [u8],
     pub memtype: MemType,
     pub rw: MemAccessRW,
@@ -468,7 +470,7 @@ pub struct LinAccess<'a> {
 /// Same shape as [`LinAccess`] but without a linear address.
 #[derive(Debug, Copy, Clone)]
 pub struct PhyAccess<'a> {
-    pub phy: crate::config::BxPhyAddress,
+    pub phy: BxPhyAddress,
     pub data: &'a [u8],
     pub memtype: MemType,
     pub rw: MemAccessRW,
@@ -487,7 +489,7 @@ pub struct PrefetchEvent {
 /// the fault.
 #[derive(Debug, Copy, Clone)]
 pub struct MemUnmapped {
-    pub laddr: crate::config::BxLinAddress,
+    pub laddr: BxLinAddress,
     pub size: usize,
     pub rw: MemAccessRW,
 }
@@ -496,7 +498,7 @@ pub struct MemUnmapped {
 /// per-page `PagePermissions` bitmap. Return `true` to suppress the fault.
 #[derive(Debug, Copy, Clone)]
 pub struct MemPermViolation {
-    pub laddr: crate::config::BxLinAddress,
+    pub laddr: BxLinAddress,
     pub size: usize,
     pub rw: MemAccessRW,
     pub required: MemPerms,

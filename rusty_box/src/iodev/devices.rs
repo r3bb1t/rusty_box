@@ -2378,6 +2378,7 @@ impl DeviceManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::A20Mask;
 
     /// A tick reading under a stated rate, which is what a device is handed
     /// now instead of a bare instruction count.
@@ -2708,7 +2709,7 @@ mod tests {
             let mut dm = DeviceManager::new();
             let stub = BxMemoryStubC::create_and_init(4 << 20, 1 << 20, 1 << 20).unwrap();
             let mut mem = BxMemC::new(stub, false);
-            mem.set_a20_mask(crate::config::A20Mask::OPEN);
+            mem.set_a20_mask(A20Mask::OPEN);
             let mut pcs = BxPcSystemC::new();
 
             // Register the channel-0 BM-DMA timer as the emulator would.

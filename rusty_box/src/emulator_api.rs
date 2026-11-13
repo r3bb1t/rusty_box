@@ -10,6 +10,7 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::config::{A20Mask, BxLinAddress, BxPhyAddress};
 #[cfg(feature = "alloc")]
 use crate::cpu::ResetReason;
 use crate::cpu::api_bridge::{ScaledLimit, SegmentSize};
@@ -637,7 +638,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// Returns the number of bytes read (always `buf.len()` on success).
     /// Bypasses MMIO handlers — matches Unicorn `uc_mem_read` semantics.
     pub fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> Result<()> {
-        let addr = crate::config::BxPhyAddress::new(addr);
+        let addr = BxPhyAddress::new(addr);
         let copied = self.memory.read_ram(addr, buf)?;
         if copied != buf.len() {
             return Err(Error::Memory(
@@ -691,7 +692,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
 
     /// Write bytes to guest physical RAM, including swapped blocks.
     pub fn mem_write(&mut self, addr: u64, data: &[u8]) -> Result<()> {
-        let addr = crate::config::BxPhyAddress::new(addr);
+        let addr = BxPhyAddress::new(addr);
         let copied = self.memory.write_ram(addr, data)?;
         if copied != data.len() {
             return Err(Error::Memory(
@@ -713,7 +714,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
                 addr.checked_add(u64::try_from(offset)?)
                     .ok_or(Error::Memory(
                         crate::memory::MemoryError::WritePhysicalPage {
-                            addr: crate::config::BxPhyAddress::new(addr),
+                            addr: BxPhyAddress::new(addr),
                             len: size,
                         },
                     ))?,
@@ -797,8 +798,8 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// which can page a block back in under partial residency.
     pub fn virt_to_phys(&mut self, vaddr: u64) -> Result<u64> {
         self.exec_ctx(0)
-            .translate_linear_system_read(crate::config::BxLinAddress::new(vaddr))
-            .map(crate::config::BxPhyAddress::get)
+            .translate_linear_system_read(BxLinAddress::new(vaddr))
+            .map(BxPhyAddress::get)
             .map_err(Error::Cpu)
     }
 
@@ -830,7 +831,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
             let chunk = (0x1000 - page_offset).min(buf.len() - offset);
             let pa = self
                 .exec_ctx(0)
-                .translate_linear_with_cr3(crate::config::BxLinAddress::new(va), cr3)
+                .translate_linear_with_cr3(BxLinAddress::new(va), cr3)
                 .ok_or_else(|| Error::Memory(crate::memory::MemoryError::PageNotPresent))?;
             self.mem_read(pa.get(), &mut buf[offset..offset + chunk])?;
             offset += chunk;
@@ -1198,7 +1199,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
             self.cpu_mut()
                 .set_seg_for_api(reg, 0, 0, 0xFFFF, SegmentSize::Bits16);
         }
-        self.memory.set_a20_mask(crate::config::A20Mask::OPEN);
+        self.memory.set_a20_mask(A20Mask::OPEN);
         self.cpu_mut().set_rflags_for_api(0x0000_0202); // IF=1, bit1 reserved=1
         Ok(())
     }
@@ -1208,7 +1209,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     fn setup_protected16(&mut self) -> Result<()> {
         self.install_flat_segments(FlatSegments::PROTECTED16)?;
         self.cpu_mut().enter_protected_mode_for_api();
-        self.memory.set_a20_mask(crate::config::A20Mask::OPEN);
+        self.memory.set_a20_mask(A20Mask::OPEN);
         self.cpu_mut().set_rflags_for_api(0x0000_0202);
         Ok(())
     }
@@ -1218,7 +1219,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     fn setup_flat_protected32(&mut self) -> Result<()> {
         self.install_flat_segments(FlatSegments::FLAT_PROTECTED32)?;
         self.cpu_mut().enter_protected_mode_for_api();
-        self.memory.set_a20_mask(crate::config::A20Mask::OPEN);
+        self.memory.set_a20_mask(A20Mask::OPEN);
         self.cpu_mut().set_rflags_for_api(0x0000_0202);
         Ok(())
     }
@@ -1252,7 +1253,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
 
         self.install_flat_segments(FlatSegments::FLAT_LONG64)?;
         self.cpu_mut().enter_long_mode_for_api(PML4);
-        self.memory.set_a20_mask(crate::config::A20Mask::OPEN);
+        self.memory.set_a20_mask(A20Mask::OPEN);
         self.cpu_mut().set_rflags_for_api(0x0000_0202);
         Ok(())
     }

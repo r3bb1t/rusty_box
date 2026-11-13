@@ -7256,6 +7256,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::A20Mask;
     use crate::cpu::exec_ctx::{ExecCtx, TestMachine};
 
     /// Guest-physical page standing in for the virtual-APIC page.
@@ -7268,7 +7269,7 @@ mod tests {
     /// datapath, not VMENTRY, so the controls are placed directly.
     fn vapic_guest(machine: &mut TestMachine) -> ExecCtx<'_, ()> {
         let mut ctx = machine.ctx();
-        ctx.memory.set_a20_mask(crate::config::A20Mask::OPEN);
+        ctx.memory.set_a20_mask(A20Mask::OPEN);
         ctx.in_vmx = true;
         ctx.in_vmx_guest = true;
         ctx.vmcs.virtual_apic_page_addr = VAPIC_PAGE;
@@ -7308,7 +7309,7 @@ mod tests {
     /// walker, not entry validation.
     fn ept_guest(machine: &mut TestMachine) -> ExecCtx<'_, ()> {
         let mut ctx = machine.ctx();
-        ctx.memory.set_a20_mask(crate::config::A20Mask::OPEN);
+        ctx.memory.set_a20_mask(A20Mask::OPEN);
         ctx.in_vmx = true;
         ctx.in_vmx_guest = true;
         ctx.vmcs.proc_based_ctls = VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS;
@@ -7335,7 +7336,7 @@ mod tests {
         let host = ctx
             .ept_translate_for_data(
                 BxPhyAddress::new(EPT_GUEST_PA),
-                crate::config::BxLinAddress::new(0),
+                BxLinAddress::new(0),
                 false,
                 true,
                 false,
@@ -7361,7 +7362,7 @@ mod tests {
         let host = ctx
             .ept_translate_for_data(
                 BxPhyAddress::new(EPT_GUEST_PA + 0x2A),
-                crate::config::BxLinAddress::new(0),
+                BxLinAddress::new(0),
                 false,
                 true,
                 false,
@@ -7384,7 +7385,7 @@ mod tests {
         let host = ctx
             .ept_translate_for_data(
                 BxPhyAddress::new(EPT_GUEST_PA),
-                crate::config::BxLinAddress::new(0),
+                BxLinAddress::new(0),
                 false,
                 true,
                 false,
@@ -7406,7 +7407,7 @@ mod tests {
 
         ctx.ept_translate_for_data(
             BxPhyAddress::new(EPT_GUEST_PA),
-            crate::config::BxLinAddress::new(0),
+            BxLinAddress::new(0),
             false,
             true,
             false,
@@ -7788,7 +7789,7 @@ mod tests {
             assert_eq!(emu.cpu().rip(), end);
             assert_eq!(
                 emu.cpu().vmcsptr,
-                crate::config::BxPhyAddress::new(VMCS_A),
+                BxPhyAddress::new(VMCS_A),
                 "the shadow VMCS is current"
             );
         });
@@ -8042,8 +8043,8 @@ mod tests {
             .unwrap();
         let cpu = emu.cpu_mut();
         cpu.in_vmx = true;
-        cpu.vmxonptr = crate::config::BxPhyAddress::new(0x20_A000);
-        cpu.vmcsptr = crate::config::BxPhyAddress::new(VMCS_FIXTURE);
+        cpu.vmxonptr = BxPhyAddress::new(0x20_A000);
+        cpu.vmcsptr = BxPhyAddress::new(VMCS_FIXTURE);
         let v = &mut cpu.vmcs;
         v.pin_based_ctls = VMX_PINBASED_CTLS_ALLOWED_0;
         v.proc_based_ctls = VMX_PROCBASED_CTLS_ALLOWED_0;
@@ -8383,15 +8384,15 @@ mod tests {
                 held += 1;
                 let field = VmcsField::of(encoding).unwrap();
                 let value = 0x0123_4567_89AB_CDEF_u64.rotate_left(encoding);
-                ctx.vmcs_field_write(crate::config::BxPhyAddress::new(VMCS_A), field, value);
+                ctx.vmcs_field_write(BxPhyAddress::new(VMCS_A), field, value);
             }
             assert!(
                 held > 100,
                 "the layout walk reaches the cached fields ({held})"
             );
-            ctx.vmcsptr = crate::config::BxPhyAddress::new(VMCS_A);
+            ctx.vmcsptr = BxPhyAddress::new(VMCS_A);
             ctx.vmcs_load_cache();
-            ctx.vmcsptr = crate::config::BxPhyAddress::new(VMCS_B);
+            ctx.vmcsptr = BxPhyAddress::new(VMCS_B);
             ctx.vmcs_store_cache();
             for encoding in VmcsLayout::new() {
                 if !ctx.vmcs_field_held(encoding) {
@@ -8399,8 +8400,8 @@ mod tests {
                 }
                 let field = VmcsField::of(encoding).unwrap();
                 assert_eq!(
-                    ctx.vmcs_field_read(crate::config::BxPhyAddress::new(VMCS_B), field),
-                    ctx.vmcs_field_read(crate::config::BxPhyAddress::new(VMCS_A), field),
+                    ctx.vmcs_field_read(BxPhyAddress::new(VMCS_B), field),
+                    ctx.vmcs_field_read(BxPhyAddress::new(VMCS_A), field),
                     "field {encoding:#06x}"
                 );
             }
@@ -8864,7 +8865,7 @@ mod tests {
         let mut machine = TestMachine::new();
         let mut ctx = machine.ctx();
         ctx.reset(crate::cpu::ResetReason::Hardware);
-        ctx.memory.set_a20_mask(crate::config::A20Mask::OPEN);
+        ctx.memory.set_a20_mask(A20Mask::OPEN);
         ctx.mem_write_qword(BxPhyAddress::new(GDT + 8), CODE_DPL3);
         ctx.mem_write_qword(BxPhyAddress::new(GDT + 16), DATA_DPL3);
         ctx.mem_write_qword(BxPhyAddress::new(IDT + 13 * 8), GP_GATE);

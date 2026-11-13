@@ -12,7 +12,7 @@ use super::descriptor::{
 };
 use super::instrumentation::{MemAccessRW, MemType};
 use super::{BxCpuC, CpuError, Result};
-use crate::config::BxPhyAddress;
+use crate::config::{BxLinAddress, BxPhyAddress};
 
 pub(super) const SMM_SAVE_STATE_MAP_SIZE: u32 = 128;
 
@@ -289,7 +289,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[cs_idx]
             .cache
             .u
-            .set_segment_base(crate::config::BxLinAddress::new(smbase));
+            .set_segment_base(BxLinAddress::new(smbase));
         self.sregs[cs_idx]
             .cache
             .u
@@ -321,7 +321,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.sregs[idx]
                 .cache
                 .u
-                .set_segment_base(crate::config::BxLinAddress::new(0));
+                .set_segment_base(BxLinAddress::new(0));
             self.sregs[idx]
                 .cache
                 .u
@@ -616,12 +616,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.dr7.set32(smram_get!(SMRAM_FIELD_DR7));
 
         // Restore GDTR, IDTR (64-bit bases)
-        self.gdtr.base = crate::config::BxLinAddress::new(smram_get64!(
+        self.gdtr.base = BxLinAddress::new(smram_get64!(
             SMRAM_FIELD_GDTR_BASE_HI32,
             SMRAM_FIELD_GDTR_BASE
         ));
         self.gdtr.limit = smram_get!(SMRAM_FIELD_GDTR_LIMIT) as u16;
-        self.idtr.base = crate::config::BxLinAddress::new(smram_get64!(
+        self.idtr.base = BxLinAddress::new(smram_get64!(
             SMRAM_FIELD_IDTR_BASE_HI32,
             SMRAM_FIELD_IDTR_BASE
         ));
@@ -855,7 +855,7 @@ const SEG_FIELDS: [(
 mod tests {
     use super::super::builder::BxCpuBuilder;
     use super::*;
-    use crate::config::BxPhyAddress;
+    use crate::config::{A20Mask, BxPhyAddress};
     use crate::cpu::ResetReason;
     use crate::cpu::exec_ctx::TestMachine;
     use crate::memory::{BxMemC, BxMemoryStubC};
@@ -870,7 +870,7 @@ mod tests {
                 .expect("memory allocation"),
             false,
         );
-        memory.set_a20_mask(crate::config::A20Mask::OPEN);
+        memory.set_a20_mask(A20Mask::OPEN);
         let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(ResetReason::Hardware);
         TestMachine::from_parts(cpu, memory)
@@ -893,7 +893,7 @@ mod tests {
         cpu.sregs[gs]
             .cache
             .u
-            .set_segment_base(crate::config::BxLinAddress::new(0xFFFF_8000_1234_5678));
+            .set_segment_base(BxLinAddress::new(0xFFFF_8000_1234_5678));
 
         cpu.enter_system_management_mode();
         assert!(cpu.in_smm);
@@ -917,7 +917,7 @@ mod tests {
         assert_eq!(cpu.gen_reg[8].rrx(), 0x1122_3344_5566_7788);
         assert_eq!(
             cpu.sregs[gs].cache.u.segment_base(),
-            crate::config::BxLinAddress::new(0xFFFF_8000_1234_5678),
+            BxLinAddress::new(0xFFFF_8000_1234_5678),
             "64-bit GS base survives the save/restore"
         );
     }
@@ -944,7 +944,7 @@ mod tests {
         assert_eq!(cpu.sregs[cs].selector.value, (0x30000 >> 4) as u16);
         assert_eq!(
             cpu.sregs[cs].cache.u.segment_base(),
-            crate::config::BxLinAddress::new(0x30000)
+            BxLinAddress::new(0x30000)
         );
     }
 
@@ -1119,7 +1119,7 @@ mod tests {
         let cs = super::super::decoder::BxSegregs::Cs as usize;
         assert_eq!(
             cpu.sregs[cs].cache.u.segment_base(),
-            crate::config::BxLinAddress::new(0xA0000),
+            BxLinAddress::new(0xA0000),
             "CS base is the relocated SMBASE, so CS:IP resolves to 0xa8000"
         );
 

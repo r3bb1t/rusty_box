@@ -510,6 +510,7 @@ const _: () = assert!(core::mem::size_of::<BxPhyAddress>() == core::mem::size_of
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::A20Mask;
 
     fn collect(candidate: Candidate, carve_outs: &CarveOuts) -> alloc::vec::Vec<GpaWindow> {
         let mut out = alloc::vec::Vec::new();
@@ -722,7 +723,7 @@ mod tests {
                 .expect("memory allocation"),
             true,
         );
-        memory.set_a20_mask(crate::config::A20Mask::OPEN);
+        memory.set_a20_mask(A20Mask::OPEN);
         // The state the firmware actually puts the chipset in, not the reset
         // one: every PAM area open for reading AND writing, which is what
         // `bios_shadow_init` does before it copies itself into the shadow
@@ -842,7 +843,7 @@ mod tests {
                     .expect("a planned host offset must be inside the allocation")[0] = stamp;
                 let mut seen = [0u8; 1];
                 match memory
-                    .read_physical_page(policy, crate::config::BxPhyAddress::new(gpa), 1, &mut seen)
+                    .read_physical_page(policy, BxPhyAddress::new(gpa), 1, &mut seen)
                     .expect("reading a planned page must not fault")
                 {
                     crate::memory::PhysAccess::Done => {}
@@ -877,12 +878,7 @@ mod tests {
                     // this port answering `Mmio` for the same address means
                     // the two disagree about what kind of thing lives there.
                     match memory
-                        .write_physical_page(
-                            policy,
-                            crate::config::BxPhyAddress::new(gpa),
-                            1,
-                            &mut data,
-                        )
+                        .write_physical_page(policy, BxPhyAddress::new(gpa), 1, &mut data)
                         .expect("a planned writable page must accept a write")
                     {
                         crate::memory::PhysAccess::Done => {}

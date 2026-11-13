@@ -2107,6 +2107,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use crate::config::BxPhyAddress;
     use crate::cpu::api_bridge::SegmentSize;
     use crate::cpu::exec_ctx::{ExecCtx, TestMachine};
     use crate::cpu::instrumentation::X86Reg;
@@ -2132,9 +2133,7 @@ mod tests {
 
     /// Write `bytes` to RAM at `at`, all of them.
     fn write_ram(memory: &mut BxMemC, at: u64, bytes: &[u8]) {
-        let copied = memory
-            .write_ram(crate::config::BxPhyAddress::new(at), bytes)
-            .expect("RAM");
+        let copied = memory.write_ram(BxPhyAddress::new(at), bytes).expect("RAM");
         assert_eq!(
             copied,
             bytes.len(),
@@ -2144,9 +2143,7 @@ mod tests {
 
     /// Read `out.len()` bytes of RAM at `at`, all of them.
     fn read_ram(memory: &mut BxMemC, at: u64, out: &mut [u8]) {
-        let copied = memory
-            .read_ram(crate::config::BxPhyAddress::new(at), out)
-            .expect("RAM");
+        let copied = memory.read_ram(BxPhyAddress::new(at), out).expect("RAM");
         assert_eq!(copied, out.len(), "the read at {at:#x} came from RAM whole");
     }
 

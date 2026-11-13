@@ -282,6 +282,7 @@ pub(crate) fn exec_with<T: Instrumentation, R>(
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
+    use crate::config::A20Mask;
     use crate::emulator::{Emulator, EmulatorConfig};
 
     /// `Emulator` is several MiB; tests need an explicit stack.
@@ -306,7 +307,7 @@ mod tests {
 
                 // Memory and the device bus are reachable in the same scope,
                 // with no pointer stored on the CPU and nothing wired first.
-                ctx.memory.set_a20_mask(crate::config::A20Mask::OPEN);
+                ctx.memory.set_a20_mask(A20Mask::OPEN);
                 let _ = ctx.pc_system.get_enable_a20();
 
                 // Assembling the context is what takes the allocation bases —
@@ -318,7 +319,7 @@ mod tests {
                 // exactly this, and it is the combination the raw wiring
                 // existed to fake.
                 let (cpu, memory, _devices, _pc_system) = ctx.slice_parts();
-                memory.set_a20_mask(crate::config::A20Mask::OPEN);
+                memory.set_a20_mask(A20Mask::OPEN);
                 assert_eq!(cpu.rip(), rip, "deref must reach the same cpu");
             })
             .unwrap()

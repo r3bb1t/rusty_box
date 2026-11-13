@@ -121,6 +121,30 @@ impl BxLinAddress {
         self.0 & (align - 1) == 0
     }
 
+    /// The byte offset, in a translation table of 8-byte entries at `level`
+    /// (0 the page table, 1 the page directory, and so on up), of the entry
+    /// that maps this address (Bochs paging.cc `(laddr >> (9 + 9*leaf)) &
+    /// 0xff8`).
+    #[inline(always)]
+    pub const fn entry_offset_64(self, level: usize) -> u64 {
+        (self.0 >> (9 + 9 * level)) & 0xFF8
+    }
+
+    /// The index, in a legacy translation table of 4-byte entries at
+    /// `level` (0 the page table, 1 the page directory), of the entry that
+    /// maps this address: bits 21:12 or 31:22.
+    #[inline(always)]
+    pub const fn entry_index_32(self, level: usize) -> u64 {
+        (self.0 >> (12 + 10 * level)) & 0x3FF
+    }
+
+    /// The index of the PAE page-directory-pointer-table entry that maps
+    /// this address: bits 31:30.
+    #[inline(always)]
+    pub const fn pdpte_index(self) -> usize {
+        ((self.0 >> 30) & 0x3) as usize
+    }
+
     /// The first byte of the 4 KiB page after the one the address lies in,
     /// modulo 2^64: where the rest of a page-crossing access lies.
     #[inline(always)]

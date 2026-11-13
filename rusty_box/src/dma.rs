@@ -1086,6 +1086,7 @@ fn restore_dma_controller<R: SnapRead>(reader: &mut R) -> SnapResult<Dma8237> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::A20Mask;
     #[cfg(feature = "std")]
     use crate::snapshot::SnapshotSection;
     use crate::snapshot::{SnapError, SnapshotReader};
@@ -1356,8 +1357,8 @@ mod tests {
             BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("swapped memory"),
             false,
         );
-        memory.set_a20_mask(crate::config::A20Mask::OPEN);
-        memory.smc_mark_icache_mask(crate::config::BxPhyAddress::new(2 * MIB as u64), u32::MAX);
+        memory.set_a20_mask(A20Mask::OPEN);
+        memory.smc_mark_icache_mask(BxPhyAddress::new(2 * MIB as u64), u32::MAX);
         let before_smc = memory.smc_seq_next();
 
         let mut dma = BxDmaC::new();
@@ -1375,10 +1376,7 @@ mod tests {
         let mut received = [0; 4];
         assert_eq!(
             memory
-                .read_ram(
-                    crate::config::BxPhyAddress::new(2 * MIB as u64),
-                    &mut received
-                )
+                .read_ram(BxPhyAddress::new(2 * MIB as u64), &mut received)
                 .unwrap(),
             4
         );

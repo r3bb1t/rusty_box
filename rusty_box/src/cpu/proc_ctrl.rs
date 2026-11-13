@@ -1,7 +1,7 @@
 #![allow(unused_variables)]
 #![allow(unused_unsafe)]
 
-use crate::config::BxLinAddress;
+use crate::config::{BxLinAddress, BxPhyAddress};
 use crate::convert::u64_from_usize;
 use crate::cpu::BxCpuC;
 
@@ -960,7 +960,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // Best-effort physical resolution — if translation faults, skip the hook.
             let paddr = self
                 .translate_data_read(laddr)
-                .unwrap_or(crate::config::BxPhyAddress::new(0));
+                .unwrap_or(BxPhyAddress::new(0));
             self.instrumentation.fire_clflush(laddr, paddr);
         }
         Ok(())
@@ -2545,7 +2545,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[cs_idx]
             .cache
             .u
-            .set_segment_base(crate::config::BxLinAddress::new(0));
+            .set_segment_base(BxLinAddress::new(0));
         self.sregs[cs_idx]
             .cache
             .u
@@ -2580,7 +2580,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[ss_idx]
             .cache
             .u
-            .set_segment_base(crate::config::BxLinAddress::new(0));
+            .set_segment_base(BxLinAddress::new(0));
         self.sregs[ss_idx]
             .cache
             .u
@@ -4792,6 +4792,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 mod tests {
     //! Bochs-parity tests for `proc_ctrl::wrmsr_value` MSR-write side effects.
 
+    use crate::config::BxPhyAddress;
     use crate::cpu::crregs::BxEfer;
     use crate::cpu::decoder::Instruction;
     use crate::cpu::msr::{
@@ -5303,9 +5304,7 @@ mod tests {
         );
 
         let grant = |cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, ()>, offset: u64| {
-            let byte = crate::config::BxPhyAddress::new(
-                USER_MSR_BITMAP + offset + u64::from(SYSENTER_CS >> 3),
-            );
+            let byte = BxPhyAddress::new(USER_MSR_BITMAP + offset + u64::from(SYSENTER_CS >> 3));
             cpu.mem_write_byte(byte, 1 << (SYSENTER_CS & 7));
         };
         grant(&mut cpu, 0);
@@ -5394,14 +5393,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(cpu.msr.apicbase, relocated_xapic_base);
-        assert_eq!(
-            cpu.lapic.get_base(),
-            crate::config::BxPhyAddress::new(0xFEE1_0000)
-        );
+        assert_eq!(cpu.lapic.get_base(), BxPhyAddress::new(0xFEE1_0000));
         assert_eq!(cpu.lapic.get_mode(), crate::cpu::apic::ApicMode::XapicMode);
         assert!(
-            cpu.lapic
-                .is_selected(crate::config::BxPhyAddress::new(0xFEE1_0030)),
+            cpu.lapic.is_selected(BxPhyAddress::new(0xFEE1_0030)),
             "LAPIC MMIO decode must follow MSR_APICBASE writes"
         );
 
@@ -5411,8 +5406,7 @@ mod tests {
         assert_eq!(cpu.msr.apicbase, x2apic_base);
         assert_eq!(cpu.lapic.get_mode(), crate::cpu::apic::ApicMode::X2apicMode);
         assert!(
-            !cpu.lapic
-                .is_selected(crate::config::BxPhyAddress::new(0xFEE1_0030)),
+            !cpu.lapic.is_selected(BxPhyAddress::new(0xFEE1_0030)),
             "x2APIC mode must disable xAPIC MMIO decode"
         );
     }
@@ -5651,6 +5645,7 @@ mod fxsave_tests {
     //! long mode against Bochs sse_move.cc and xsave.cc: what the 512-byte
     //! image holds, what it leaves alone, and what a restore brings back.
 
+    use crate::config::BxPhyAddress;
     use crate::cpu::CpuModel;
     use crate::cpu::api_bridge::SegmentSize;
     use crate::cpu::crregs::BxEfer;
@@ -5727,9 +5722,7 @@ mod fxsave_tests {
 
     /// Write `bytes` to RAM at `at`, all of them.
     fn write_ram(memory: &mut BxMemC, at: u64, bytes: &[u8]) {
-        let copied = memory
-            .write_ram(crate::config::BxPhyAddress::new(at), bytes)
-            .expect("RAM");
+        let copied = memory.write_ram(BxPhyAddress::new(at), bytes).expect("RAM");
         assert_eq!(
             copied,
             bytes.len(),
@@ -5742,7 +5735,7 @@ mod fxsave_tests {
         let mut image = [0u8; IMAGE_LEN];
         let copied = cpu
             .memory
-            .read_ram(crate::config::BxPhyAddress::new(IMAGE), &mut image)
+            .read_ram(BxPhyAddress::new(IMAGE), &mut image)
             .expect("RAM");
         assert_eq!(copied, IMAGE_LEN, "the image came from RAM whole");
         image

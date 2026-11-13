@@ -1104,6 +1104,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
 
 #[cfg(all(test, feature = "std", feature = "alloc"))]
 mod tests {
+    use crate::config::BxPhyAddress;
 
     /// Emulator construction needs a bigger stack than the default 2 MiB test
     /// thread: `Emulator` is ~4 MiB and the debug build materialises a few
@@ -1292,7 +1293,7 @@ mod tests {
     #[test]
     fn same_instance_restore_does_not_lose_the_next_smc_invalidation() {
         on_large_stack(|| {
-            const CODE_PAGE: crate::config::BxPhyAddress = crate::config::BxPhyAddress::new(0x1000);
+            const CODE_PAGE: BxPhyAddress = BxPhyAddress::new(0x1000);
             let mut emu = machine();
 
             for _ in 0..2 {
@@ -1798,10 +1799,7 @@ mod tests {
                 |base: u64, window: rusty_box_devices::display::vga::VgaWindow, at: u64| {
                     (
                         base,
-                        restored
-                            .memory
-                            .mmio
-                            .lookup(crate::config::BxPhyAddress::new(base)),
+                        restored.memory.mmio.lookup(BxPhyAddress::new(base)),
                         Some(crate::memory::mmio_map::MmioHit {
                             token: crate::iodev::DevSlot::VGA.mmio_window_token(window.id()),
                             offset: at,

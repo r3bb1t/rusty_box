@@ -3817,7 +3817,7 @@ mod tests {
         cpu.cr3 = LEGACY_DIRECTORY;
         cpu.async_event = 0;
         let legacy_pa = exec_with(&mut cpu, &mut mem, |ctx| {
-            ctx.translate_linear_system_write(crate::config::BxLinAddress::new(0))
+            ctx.translate_linear_system_write(BxLinAddress::new(0))
         })
         .unwrap();
         assert_eq!(
@@ -3881,7 +3881,7 @@ mod tests {
         cpu.pdptrcache.entry[0] = PAE_DIRECTORY | 0x1;
         cpu.async_event = 0;
         let pae_pa = exec_with(&mut cpu, &mut mem, |ctx| {
-            ctx.translate_linear_system_write(crate::config::BxLinAddress::new(0))
+            ctx.translate_linear_system_write(BxLinAddress::new(0))
         })
         .unwrap();
         assert_eq!(
@@ -3942,9 +3942,7 @@ mod tests {
         // must decode a genuine page-split trace whose immediate comes from
         // the second mapping.
         let cs = &mut cpu.sregs[BxSegregs::Cs as usize];
-        cs.cache
-            .u
-            .set_segment_base(crate::config::BxLinAddress::new(0));
+        cs.cache.u.set_segment_base(BxLinAddress::new(0));
         cs.cache.u.set_segment_limit_scaled(u32::MAX);
         cs.cache.u.set_segment_d_b(true);
         cs.cache.u.set_segment_l(false);
@@ -4089,7 +4087,7 @@ mod tests {
             BxMemoryStubC::create_and_init(5 * MIB, MIB, MIB).unwrap(),
             false,
         );
-        mem.set_a20_mask(crate::config::A20Mask::OPEN);
+        mem.set_a20_mask(A20Mask::OPEN);
         let mut rom = std::vec![0u8; 0x10000];
         rom[0] = BIOS_MARKER;
         mem.load_ROM(&rom, BxPhyAddress::new(0xFFFF_0000), 0)
@@ -4117,12 +4115,10 @@ mod tests {
                 .expect("the BIOS image must be directly fetchable")
                 .start;
 
-            let slot = ctx
-                .itlb
-                .get_index_of(crate::config::BxLinAddress::new(0xFFFF_0000), 0);
+            let slot = ctx.itlb.get_index_of(BxLinAddress::new(0xFFFF_0000), 0);
             {
                 let entry = &mut ctx.itlb.entries[slot];
-                entry.lpf = crate::config::BxLinAddress::new(0xFFFF_0000);
+                entry.lpf = BxLinAddress::new(0xFFFF_0000);
                 entry.host_page = crate::cpu::tlb::AllocPage::from_alloc_offset(offset);
                 entry.access_bits = 1;
             }
@@ -4153,12 +4149,10 @@ mod tests {
             false,
         );
 
-        let slot = cpu
-            .dtlb
-            .get_index_of(crate::config::BxLinAddress::new(TARGET), 0);
+        let slot = cpu.dtlb.get_index_of(BxLinAddress::new(TARGET), 0);
         {
             let entry = &mut cpu.dtlb.entries[slot];
-            entry.lpf = crate::config::BxLinAddress::new(TARGET);
+            entry.lpf = BxLinAddress::new(TARGET);
             entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(TARGET as usize);
             entry.access_bits = 1;
         }
@@ -4210,7 +4204,7 @@ mod tests {
         let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.monitor
             .arm(BxPhyAddress::new(0x1000), BX_MONITOR_ARMED_BY_MONITOR);
-        cpu.tlb_invlpg(crate::config::BxLinAddress::new(0x2000));
+        cpu.tlb_invlpg(BxLinAddress::new(0x2000));
         assert!(!cpu.monitor.armed(), "tlb_invlpg must disarm the monitor");
 
         // Host-side rewire must PRESERVE the monitor across its internal flush.

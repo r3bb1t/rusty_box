@@ -12,6 +12,7 @@ use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::AtomicBool;
 
 use crate::Result;
+use crate::config::{BxLinAddress, BxPhyAddress};
 use crate::cpu::cpu::CpuActivityState;
 use crate::cpu::instrumentation::{ExitSet, Instrumentation};
 use crate::cpu::{BxCpuC, CpuidFreq, ResetReason, Result as CpuResult};
@@ -1638,7 +1639,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// * `address` - Load address (typically 0xfffe0000 for 128KB BIOS)
     pub(crate) fn load_bios(&mut self, bios_data: &[u8], address: u64) -> Result<()> {
         self.memory
-            .load_ROM(bios_data, crate::config::BxPhyAddress::new(address), 0)?;
+            .load_ROM(bios_data, BxPhyAddress::new(address), 0)?;
         tracing::debug!("Loaded BIOS ({} bytes) at {:#x}", bios_data.len(), address);
         Ok(())
     }
@@ -1650,7 +1651,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// * `address` - Load address (must be in 0xC0000-0xFFFFF range)
     pub(crate) fn load_optional_rom(&mut self, rom_data: &[u8], address: u64) -> Result<()> {
         self.memory
-            .load_ROM(rom_data, crate::config::BxPhyAddress::new(address), 2)?;
+            .load_ROM(rom_data, BxPhyAddress::new(address), 2)?;
         tracing::debug!(
             "Loaded optional ROM ({} bytes) at {:#x}",
             rom_data.len(),
@@ -1669,8 +1670,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     #[cfg(test)]
     pub(crate) fn load_ram(&mut self, ram_data: &[u8], address: u64) -> Result<()> {
         // Stable CPU pin storage outlives this exclusive memory borrow.
-        self.memory
-            .load_RAM(ram_data, crate::config::BxPhyAddress::new(address))?;
+        self.memory.load_RAM(ram_data, BxPhyAddress::new(address))?;
         tracing::debug!(
             "Loaded RAM image ({} bytes) at {:#x}",
             ram_data.len(),
@@ -1868,7 +1868,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Stable emulator pin storage outlives the exclusive memory borrow.
         let copied = self
             .memory
-            .read_ram(crate::config::BxPhyAddress::new(addr as u64), &mut bytes)
+            .read_ram(BxPhyAddress::new(addr as u64), &mut bytes)
             .unwrap_or(0);
         bytes.truncate(copied);
         bytes
@@ -2293,7 +2293,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         let idx = self
             .cpu_ref(0)
             .dtlb
-            .get_index_of(crate::config::BxLinAddress::new(laddr), 3);
+            .get_index_of(BxLinAddress::new(laddr), 3);
         let entry = &self.cpu_ref(0).dtlb.entries[idx];
         DtlbInfo {
             lpf: entry.lpf.get(),

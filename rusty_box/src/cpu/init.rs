@@ -4,7 +4,7 @@
 use tracing::info;
 
 use super::Result;
-use crate::config::BxLinAddress;
+use crate::config::{BxLinAddress, BxPhyAddress};
 use crate::cpu::BxCpuC;
 use crate::cpu::apic::BX_LAPIC_BASE_ADDR;
 #[cfg(feature = "alloc")]
@@ -491,7 +491,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.msr.ia32_feature_ctrl = 0;
         }
 
-        self.set_VMCBPTR(crate::config::BxPhyAddress::new(0));
+        self.set_VMCBPTR(BxPhyAddress::new(0));
         self.in_svm_guest = false;
         self.svm_gif = true;
 
@@ -780,7 +780,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     /// Sets the VMCS pointer and performs associated memory mapping setup
     /// Mirrors the C++ BX_CPU_C::set_VMCSPTR behavior
-    fn set_VMCSPTR(&mut self, vmxptr: crate::config::BxPhyAddress) {
+    fn set_VMCSPTR(&mut self, vmxptr: BxPhyAddress) {
         self.vmcsptr = vmxptr;
         // Bochs set_VMCSPTR additionally derives a host-side vmcshostptr via
         // getHostMemAddr() and a vmcs_memtype; rusty_box accesses the VMCS by
@@ -791,7 +791,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     ///
     /// A reset has no live VMCB host mapping; publish that transition before
     /// allocator checks can run again.
-    fn set_VMCBPTR(&mut self, vmcb_ptr: crate::config::BxPhyAddress) {
+    fn set_VMCBPTR(&mut self, vmcb_ptr: BxPhyAddress) {
         self.vmcbptr = vmcb_ptr;
         self.vmcb_host_offset = None;
     }

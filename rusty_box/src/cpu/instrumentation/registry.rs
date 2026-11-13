@@ -31,6 +31,7 @@ use super::types::{
     MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType,
     TlbCntrl,
 };
+use crate::config::{BxLinAddress, BxPhyAddress};
 use crate::cpu::decoder::Instruction;
 
 /// The tracer a processor carries, with the mask it declared and the stop
@@ -203,11 +204,7 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     }
 
     #[inline]
-    pub fn fire_clflush(
-        &mut self,
-        laddr: crate::config::BxLinAddress,
-        paddr: crate::config::BxPhyAddress,
-    ) {
+    pub fn fire_clflush(&mut self, laddr: BxLinAddress, paddr: BxPhyAddress) {
         self.tracer.clflush(laddr, paddr);
     }
 

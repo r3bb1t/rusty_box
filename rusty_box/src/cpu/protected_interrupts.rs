@@ -9,6 +9,7 @@ use super::decoder::BxSegregs;
 use super::descriptor::{BxDescriptor, BxSegmentReg, BxSelector, SystemAndGateDescriptorEnum};
 use super::eflags::EFlags;
 use super::segment_ctrl_pro::parse_selector;
+use crate::config::{BxLinAddress, BxPhyAddress};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Handle interrupt in protected mode via IDT
@@ -315,9 +316,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
             if gate_dest_offset > cs_descriptor.u.segment_limit_scaled() {
                 let gdt_entry_laddr = self.gdtr.base + (cs_selector.index as u64 * 8);
-                let gdt_phys = crate::config::BxPhyAddress::new(
-                    gdt_entry_laddr.get().wrapping_sub(0xC0000000),
-                );
+                let gdt_phys = BxPhyAddress::new(gdt_entry_laddr.get().wrapping_sub(0xC0000000));
                 let raw_lo = self.mem_read_dword(gdt_phys);
                 let raw_hi = self.mem_read_dword(gdt_phys + 4);
                 tracing::error!(
@@ -1117,8 +1116,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                         .msr
                         .ia32_interrupt_ssp_table
                         .wrapping_add((ist as u64) << 3);
-                    new_ssp_cet =
-                        self.system_read_qword(crate::config::BxLinAddress::new(new_ssp_addr))?;
+                    new_ssp_cet = self.system_read_qword(BxLinAddress::new(new_ssp_addr))?;
                 }
             } else {
                 new_ssp_cet = self.msr.ia32_pl_ssp[cs_descriptor.dpl as usize];
@@ -1178,8 +1176,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                         .msr
                         .ia32_interrupt_ssp_table
                         .wrapping_add((ist as u64) << 3);
-                    new_ssp_cet =
-                        self.system_read_qword(crate::config::BxLinAddress::new(new_ssp_addr))?;
+                    new_ssp_cet = self.system_read_qword(BxLinAddress::new(new_ssp_addr))?;
                 }
             } else {
                 new_ssp_cet = self.ssp();

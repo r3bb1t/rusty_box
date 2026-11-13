@@ -5,6 +5,7 @@ use super::decoder::{
     BX_16BIT_REG_IP, BX_32BIT_REG_EIP, BX_64BIT_REG_RIP, BX_64BIT_REG_SSP, BX_TMP_REGISTER,
     BxSegregs,
 };
+use crate::config::BxLinAddress;
 
 // according to RFC #344, we use "set_<name>" for setters
 impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
@@ -586,7 +587,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.sregs[BxSegregs::Fs as usize]
             .cache
             .u
-            .set_segment_base(crate::config::BxLinAddress::new(val))
+            .set_segment_base(BxLinAddress::new(val))
     }
 
     #[inline]
@@ -603,7 +604,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.sregs[BxSegregs::Gs as usize]
             .cache
             .u
-            .set_segment_base(crate::config::BxLinAddress::new(val))
+            .set_segment_base(BxLinAddress::new(val))
     }
 
     // =========================================================================

@@ -6,7 +6,7 @@
 use super::crregs::{BxCr0, BxCr4, BxEfer};
 use super::descriptor::{BxGlobalSegmentReg, BxSegmentReg};
 use super::i387::BxPackedRegister;
-use crate::config::BxPhyAddress;
+use crate::config::{BxLinAddress, BxPhyAddress};
 
 // =====================
 //  SVM intercept codes
@@ -665,9 +665,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         parse_selector(selector, &mut seg.selector);
         seg.cache.valid = if valid != 0 { 1 } else { 0 };
         seg.cache.set_ar_byte(ar_byte);
-        seg.cache
-            .u
-            .set_segment_base(crate::config::BxLinAddress::new(base));
+        seg.cache.u.set_segment_base(BxLinAddress::new(base));
         seg.cache.u.set_segment_limit_scaled(limit);
         seg.cache.u.set_segment_g(upper & 0x0080_0000 != 0);
         seg.cache.u.set_segment_d_b(upper & 0x0040_0000 != 0);
@@ -1104,9 +1102,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.sregs[n] = guest_sregs[n].clone();
         }
 
-        self.gdtr.base = crate::config::BxLinAddress::new(guest_gdtr_base);
+        self.gdtr.base = BxLinAddress::new(guest_gdtr_base);
         self.gdtr.limit = guest_gdtr_limit;
-        self.idtr.base = crate::config::BxLinAddress::new(guest_idtr_base);
+        self.idtr.base = BxLinAddress::new(guest_idtr_base);
         self.idtr.limit = guest_idtr_limit;
 
         self.set_rip(guest_rip);
@@ -1973,7 +1971,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs svm.cc INVLPGA — TLB_invlpg(laddr) (FIXME: flush all ASID
         // entries). The prior code skipped the prefetch/stack invalidation and
         // icache link break that Bochs paging.cc TLB_invlpg performs.
-        self.tlb_invlpg(crate::config::BxLinAddress::new(laddr));
+        self.tlb_invlpg(BxLinAddress::new(laddr));
         Ok(())
     }
 }

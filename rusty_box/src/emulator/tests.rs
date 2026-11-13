@@ -7,6 +7,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 use rusty_box_devices::pci::PciDevice;
 
 use super::*;
+use crate::config::{BxLinAddress, BxPhyAddress};
 use crate::cpu::api_bridge::SegmentSize;
 use crate::cpu::apic::LocalApicCpuEvent;
 use crate::cpu::decoder::Instruction;
@@ -2890,7 +2891,7 @@ fn pam_boundary_flushes_all_cpu_mappings() {
             for cpu_index in 0..emu.cpu_count() {
                 let cpu = emu.cpu_mut_at(cpu_index);
                 let entry = &mut cpu.dtlb.entries[0];
-                entry.lpf = crate::config::BxLinAddress::new(0);
+                entry.lpf = BxLinAddress::new(0);
                 entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
             }
             assert!(emu.cpu_ref(0).dtlb.entries[0].valid());
@@ -2933,7 +2934,7 @@ fn a20_port92_and_keyboard_transitions_flush_all_cpu_mappings() {
             let prime = |emu: &mut Emulator| {
                 for cpu_index in 0..emu.cpu_count() {
                     let entry = &mut emu.cpu_mut_at(cpu_index).dtlb.entries[0];
-                    entry.lpf = crate::config::BxLinAddress::new(0);
+                    entry.lpf = BxLinAddress::new(0);
                     entry.host_page = crate::cpu::tlb::RamPage::from_ram_offset(0);
                 }
             };
@@ -3168,7 +3169,7 @@ fn legacy_dma_drq_to_hlda_terminal_count_end_to_end() {
             let mut received = [0u8; 4];
             assert_eq!(
                 emu.memory
-                    .read_ram(crate::config::BxPhyAddress::new(0x20_0000), &mut received)
+                    .read_ram(BxPhyAddress::new(0x20_0000), &mut received)
                     .unwrap(),
                 4
             );

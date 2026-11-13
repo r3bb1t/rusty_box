@@ -1112,6 +1112,7 @@ fn validate_fw_cfg_file_directory(
 
 #[cfg(test)]
 mod tests {
+    use crate::config::A20Mask;
     const SELECTOR_WRITE_BYTES: u8 = 2;
     const DATA_READ_BYTES: u8 = 1;
     const TEST_RAM_SIZE: u64 = 64 * 1024 * 1024;
@@ -1140,7 +1141,7 @@ mod tests {
             BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("swapped memory"),
             false,
         );
-        mem.set_a20_mask(crate::config::A20Mask::OPEN);
+        mem.set_a20_mask(A20Mask::OPEN);
         let mut fw_cfg = BxFwCfg::new();
         fw_cfg.add_bytes(KEY, &[0x61, 0x62, 0x63, 0x64, 0x65]);
 
@@ -1204,7 +1205,7 @@ mod tests {
             BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("snapshot memory"),
             false,
         );
-        mem.set_a20_mask(crate::config::A20Mask::OPEN);
+        mem.set_a20_mask(A20Mask::OPEN);
 
         let mut source = BxFwCfg::new();
         source.init(TEST_RAM_SIZE, TEST_CPU_COUNT);

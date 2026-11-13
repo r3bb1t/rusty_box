@@ -18,6 +18,7 @@ use super::BxCpuC;
 use super::exec_ctx::ExecCtx;
 use super::instrumentation::Instrumentation;
 use super::paging::DbgWalk;
+use crate::config::BxLinAddress;
 
 /// How many linear code breakpoints a machine holds: Bochs config.h
 /// `BX_DBG_MAX_LIN_BPOINTS`.
@@ -320,7 +321,7 @@ impl<T: Instrumentation> ExecCtx<'_, T> {
         let physical = if eip_biased < u64::from(self.eip_page_window_size) {
             self.p_addr_fetch_page.wrapping_add(eip_biased)
         } else {
-            self.dbg_xlate_linear2phy(crate::config::BxLinAddress::new(linear), DbgWalk::Guest)?
+            self.dbg_xlate_linear2phy(BxLinAddress::new(linear), DbgWalk::Guest)?
         };
         self.code_breakpoints
             .physical_set()
