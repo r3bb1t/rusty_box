@@ -9,9 +9,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 mod qemu_virt;
 #[cfg(feature = "alloc")]
 use qemu_virt::qemu_virt_interrupts;
-
 use rusty_box_aarch64::board::{GPIO_BASE, RAM_BASE, RTC_BASE, UART0_BASE};
-use rusty_box_aarch64::boot::{fdt, LinuxImage, PlacementError};
+use rusty_box_aarch64::boot::{LinuxImage, PlacementError, fdt};
 use rusty_box_aarch64::cpu::{
     ExceptionClass, Level, NoTranslation, TranslationFault, TranslationStage,
 };
@@ -400,15 +399,19 @@ impl Instrumentation for Watcher {
     fn before_execution(&mut self, _pc: u64, _insn: u32) {
         self.executed += 1;
     }
+
     fn after_execution(&mut self, _pc: u64, _insn: u32) {
         self.retired += 1;
     }
+
     fn branch(&mut self, _from: u64, _to: u64) {
         self.branches += 1;
     }
+
     fn exception(&mut self, taken: ExceptionTaken) {
         self.exceptions.push(taken);
     }
+
     fn memory_access(&mut self, access: MemoryAccess) {
         if access.direction == Direction::Write {
             self.stores.push(access);
@@ -1011,22 +1014,23 @@ fn a_directly_booted_kernel_is_entered_as_the_boot_protocol_asks() {
     let entry = RAM_BASE;
     let tree_at = RAM_BASE + 2 * MIB;
     let initrd_start = RAM_BASE + 4 * MIB;
-    let entered = |m: &VirtMachine<LentStorage<'_>, NoEl2, rusty_box_aarch64::NoInstrumentation>| {
-        assert_eq!(m.reg_read(Reg::Pc), entry);
-        assert_eq!(m.reg_read(Reg::X0), tree_at, "x0 holds the device tree");
-        // x1 to x3 zero as the protocol asks; the rest as reset leaves
-        // them, the board's fill naming each.
-        for n in 1..=30u8 {
-            let x = Reg::x(n).expect("a general-purpose register");
-            let want = if n <= 3 {
-                0
-            } else {
-                0xA5A5_A5A5_A5A5_0000 | u64::from(n)
-            };
-            assert_eq!(m.reg_read(x), want, "x{n}");
-        }
-        assert_eq!(m.pstate().el, rusty_box_aarch64::El::El1);
-    };
+    let entered =
+        |m: &VirtMachine<LentStorage<'_>, NoEl2, rusty_box_aarch64::NoInstrumentation>| {
+            assert_eq!(m.reg_read(Reg::Pc), entry);
+            assert_eq!(m.reg_read(Reg::X0), tree_at, "x0 holds the device tree");
+            // x1 to x3 zero as the protocol asks; the rest as reset leaves
+            // them, the board's fill naming each.
+            for n in 1..=30u8 {
+                let x = Reg::x(n).expect("a general-purpose register");
+                let want = if n <= 3 {
+                    0
+                } else {
+                    0xA5A5_A5A5_A5A5_0000 | u64::from(n)
+                };
+                assert_eq!(m.reg_read(x), want, "x{n}");
+            }
+            assert_eq!(m.pstate().el, rusty_box_aarch64::El::El1);
+        };
     entered(&m);
 
     let tree = m.device_tree().to_vec();
@@ -1752,8 +1756,8 @@ fn a_host_tree_must_name_the_interrupts_the_map_wires() {
 fn the_board_wires_the_interrupt_map_its_configuration_names() {
     use rusty_box_aarch64::board::{GIC_DIST_BASE, GIC_V2M_BASE};
     use rusty_box_aarch64::{
-        GicShape, InterruptMap, InterruptMapError, InterruptSource, MsiCount, MsiExtent,
-        MsiSpis, Spi, SpiCount,
+        GicShape, InterruptMap, InterruptMapError, InterruptSource, MsiCount, MsiExtent, MsiSpis,
+        Spi, SpiCount,
     };
     // str w3, [x1, #0x40c]   (GPIOIEV: rising)
     // str w3, [x1, #0x410]   (GPIOIE)
@@ -2033,8 +2037,16 @@ fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
     assert_eq!(device_id(&mut with_keyboard, 0), 18, "the keyboard first");
     assert_eq!(device_id(&mut with_keyboard, 1), 2, "then the disk");
     let mut from_the_top = build_in(TransportOrder::LastFree, 8, true);
-    assert_eq!(device_id(&mut from_the_top, top), 18, "the keyboard at the top");
-    assert_eq!(device_id(&mut from_the_top, top - 1), 2, "then the disk under it");
+    assert_eq!(
+        device_id(&mut from_the_top, top),
+        18,
+        "the keyboard at the top"
+    );
+    assert_eq!(
+        device_id(&mut from_the_top, top - 1),
+        2,
+        "then the disk under it"
+    );
     assert_eq!(device_id(&mut from_the_top, 0), 0, "nothing at the first");
 
     assert_eq!(m.disk().map(Disk::sectors), Some(8));
@@ -2133,9 +2145,8 @@ fn each_device_layout_puts_the_devices_where_the_tree_names_them() {
         bytes
             .chunks_exact(16)
             .map(|pair| {
-                let cell = |at: usize| {
-                    u64::from_be_bytes(pair[at..at + 8].try_into().expect("two cells"))
-                };
+                let cell =
+                    |at: usize| u64::from_be_bytes(pair[at..at + 8].try_into().expect("two cells"));
                 Window::new(PhysAddr::new(cell(0)), cell(8))
             })
             .collect::<Vec<_>>()

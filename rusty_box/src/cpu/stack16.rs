@@ -2,7 +2,9 @@
 //!
 //! Based on Bochs stack16.cc
 
-use super::{cpu::BxCpuC, decoder::Instruction, eflags::EFlags};
+use super::cpu::BxCpuC;
+use super::decoder::Instruction;
+use super::eflags::EFlags;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================

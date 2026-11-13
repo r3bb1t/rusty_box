@@ -38,7 +38,10 @@ fn sse_emulator_with(cpu_params: BxParams) -> Box<Emulator> {
         ..EmulatorConfig::default()
     };
     let mut emu = Emulator::new_with_mode(config, CpuSetupMode::FlatLong64).expect("emulator");
-    emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | CR4_OSFXSR | CR4_OSXSAVE);
+    emu.reg_write(
+        X86Reg::Cr4,
+        emu.reg_read(X86Reg::Cr4) | CR4_OSFXSR | CR4_OSXSAVE,
+    );
     emu.reg_write(X86Reg::IdtrBase, IDT);
     emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
     emu.reg_write(X86Reg::Rsp, STACK_TOP);
@@ -144,7 +147,12 @@ fn legacy_packed_float_operands_must_be_aligned() {
 fn a_string_compare_operand_may_be_misaligned() {
     on_big_stack(|| {
         // pcmpistri xmm0, [m128], 0: 66 0F 3A 63 /r ib
-        let pcmpistri = [&[0x66, 0x0F, 0x3A, 0x63][..], &absolute(0, MISALIGNED), &[0x00]].concat();
+        let pcmpistri = [
+            &[0x66, 0x0F, 0x3A, 0x63][..],
+            &absolute(0, MISALIGNED),
+            &[0x00],
+        ]
+        .concat();
         assert_eq!(run(&[], &pcmpistri), Ended::Retired);
     });
 }

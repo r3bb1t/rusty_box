@@ -23,8 +23,8 @@ use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 use rusty_box_devices::display::Resolution;
 
 use crate::bus::{
-    load_le, store_le, AccessWidth, BusFault, CodeEpoch, FetchSource, GicEl1Traps, GicRegister,
-    NoGicSystemRegisters, PhysAddr, PhysBus, Writes,
+    AccessWidth, BusFault, CodeEpoch, FetchSource, GicEl1Traps, GicRegister, NoGicSystemRegisters,
+    PhysAddr, PhysBus, Writes, load_le, store_le,
 };
 use crate::cpu::{TimerLines, VirtualLines};
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
@@ -40,7 +40,7 @@ use crate::devices::virtio::block::Block;
 use crate::devices::virtio::gpu::Gpu;
 use crate::devices::virtio::input::{Input, InputKind};
 use crate::devices::virtio::queue::GuestRam;
-use crate::devices::virtio::{Device, Transport, Vdev, MAX_DEVICES};
+use crate::devices::virtio::{Device, MAX_DEVICES, Transport, Vdev};
 use crate::devices::virtio_mmio::{self, Layout};
 #[cfg(feature = "alloc")]
 use crate::disk::Disk;
@@ -178,7 +178,6 @@ pub enum TransportOrder {
 impl TransportOrder {
     /// Every order, in the order a list of them shows.
     pub const ALL: [Self; 2] = [Self::FirstFree, Self::LastFree];
-
     /// The order a board takes unless its host chooses another.
     pub const DEFAULT: Self = Self::FirstFree;
 
@@ -262,7 +261,6 @@ pub enum GicVersion {
 impl GicVersion {
     /// Every version, in the order a list of them shows.
     pub const ALL: [Self; 2] = [Self::V2, Self::V3];
-
     /// The version a board has unless its host chooses another.
     pub const DEFAULT: Self = Self::V2;
 
@@ -677,8 +675,7 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.uart.reset();
         self.rtc.reset(clock);
         if self.power_button_release.take().is_some() {
-            self.gpio
-                .set_input(self.layout.power_button_line(), false);
+            self.gpio.set_input(self.layout.power_button_line(), false);
         }
         self.gpio.reset();
         for transport in self.virtio.iter_mut().flatten() {
@@ -771,8 +768,7 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.uart.update(clock);
         if let Some(release) = self.power_button_release {
             if clock.now() >= release {
-                self.gpio
-                    .set_input(self.layout.power_button_line(), false);
+                self.gpio.set_input(self.layout.power_button_line(), false);
                 self.power_button_release = None;
             }
         }

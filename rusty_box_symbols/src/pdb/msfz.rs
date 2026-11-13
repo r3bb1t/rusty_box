@@ -5,8 +5,8 @@
 //! stored in the file at a 48-bit offset. Chunks are decompressed once and
 //! kept.
 
-use super::{reserved, short, PdbError};
-use crate::decompress::{decompress_to_vec, Codec};
+use super::{PdbError, reserved, short};
+use crate::decompress::{Codec, decompress_to_vec};
 use crate::read::{Bytes, Cursor};
 
 /// `MSFZ_FILE_VERSION_V0`.
@@ -70,7 +70,11 @@ impl Span {
     /// The bytes `fragment`, number `index` of `stream`, names.
     fn of(fragment: Fragment, stream: u32, index: u32) -> Span {
         match fragment {
-            Fragment::InChunk { size, chunk, offset } => Span {
+            Fragment::InChunk {
+                size,
+                chunk,
+                offset,
+            } => Span {
                 space: Space::Chunk(chunk),
                 start: u64::from(offset),
                 end: u64::from(offset).saturating_add(u64::from(size)),
@@ -98,7 +102,10 @@ fn disjoint(spans: &mut [Span]) -> Result<(), PdbError> {
     for pair in spans.windows(2) {
         if let [before, after] = pair {
             if after.space == before.space && after.start < before.end {
-                return Err(PdbError::OverlappingFragments { stream: after.stream, fragment: after.fragment });
+                return Err(PdbError::OverlappingFragments {
+                    stream: after.stream,
+                    fragment: after.fragment,
+                });
             }
         }
     }
@@ -125,13 +132,26 @@ fn codec(code: u32) -> Result<Option<Codec>, PdbError> {
 
 /// `len` bytes of `file` at `at`, decompressed by `code` to `size` bytes.
 fn unpack(file: Bytes<'_>, at: u64, len: u32, code: u32, size: u32) -> Result<Vec<u8>, PdbError> {
-    let at = usize::try_from(at).map_err(|_| PdbError::TooMany { what: "file offset", count: at })?;
-    let raw = file.slice(at, len as usize).map_err(|source| short("MSFZ chunk", source))?;
+    let at = usize::try_from(at).map_err(|_| PdbError::TooMany {
+        what: "file offset",
+        count: at,
+    })?;
+    let raw = file
+        .slice(at, len as usize)
+        .map_err(|source| short("MSFZ chunk", source))?;
     match codec(code)? {
-        Some(codec) => Ok(decompress_to_vec(codec, raw, u64::from(size), MAX_CHUNK_BYTES)?),
+        Some(codec) => Ok(decompress_to_vec(
+            codec,
+            raw,
+            u64::from(size),
+            MAX_CHUNK_BYTES,
+        )?),
         None => {
             if len != size {
-                return Err(PdbError::StoredChunkSize { stored: len, declared: size });
+                return Err(PdbError::StoredChunkSize {
+                    stored: len,
+                    declared: size,
+                });
             }
             let mut out = reserved(u64::from(len), "MSFZ chunk")?;
             out.extend_from_slice(raw);
@@ -158,37 +178,75 @@ impl<'a> MsfzStreams<'a> {
         let chunk_count = header.u32_le().map_err(|source| short(what, source))?;
         let chunk_table_size = header.u32_le().map_err(|source| short(what, source))?;
         if stream_count > MAX_STREAMS || stream_count == 0 {
-            return Err(PdbError::TooMany { what: "streams", count: u64::from(stream_count) });
+            return Err(PdbError::TooMany {
+                what: "streams",
+                count: u64::from(stream_count),
+            });
         }
         let table_bytes = u64::from(chunk_count).saturating_mul(CHUNK_ENTRY_BYTES as u64);
         if chunk_count > MAX_CHUNKS || u64::from(chunk_table_size) != table_bytes {
-            return Err(PdbError::TooMany { what: "chunks", count: u64::from(chunk_count) });
+            return Err(PdbError::TooMany {
+                what: "chunks",
+                count: u64::from(chunk_count),
+            });
         }
-        let table_at = usize::try_from(chunk_table_offset)
-            .map_err(|_| PdbError::TooMany { what: "chunk table offset", count: chunk_table_offset })?;
+        let table_at = usize::try_from(chunk_table_offset).map_err(|_| PdbError::TooMany {
+            what: "chunk table offset",
+            count: chunk_table_offset,
+        })?;
         let table = bytes
             .sub(table_at, chunk_table_size as usize)
             .map_err(|source| short("MSFZ chunk table", source))?;
         let mut chunks = Vec::new();
         chunks
             .try_reserve_exact(chunk_count as usize)
-            .map_err(|_| PdbError::Allocation { what: "chunks", bytes: u64::from(chunk_count) })?;
+            .map_err(|_| PdbError::Allocation {
+                what: "chunks",
+                bytes: u64::from(chunk_count),
+            })?;
         let mut table_cursor = Cursor::new(table, 0);
         for _ in 0..chunk_count {
-            let file_offset = table_cursor.u64_le().map_err(|source| short("MSFZ chunk table", source))?;
-            let compression = table_cursor.u32_le().map_err(|source| short("MSFZ chunk table", source))?;
-            let compressed = table_cursor.u32_le().map_err(|source| short("MSFZ chunk table", source))?;
-            let uncompressed = table_cursor.u32_le().map_err(|source| short("MSFZ chunk table", source))?;
-            chunks.push(Chunk { file_offset, compression, compressed, uncompressed });
+            let file_offset = table_cursor
+                .u64_le()
+                .map_err(|source| short("MSFZ chunk table", source))?;
+            let compression = table_cursor
+                .u32_le()
+                .map_err(|source| short("MSFZ chunk table", source))?;
+            let compressed = table_cursor
+                .u32_le()
+                .map_err(|source| short("MSFZ chunk table", source))?;
+            let uncompressed = table_cursor
+                .u32_le()
+                .map_err(|source| short("MSFZ chunk table", source))?;
+            chunks.push(Chunk {
+                file_offset,
+                compression,
+                compressed,
+                uncompressed,
+            });
         }
-        let directory = unpack(bytes, directory_offset, directory_compressed, directory_compression, directory_size)?;
+        let directory = unpack(
+            bytes,
+            directory_offset,
+            directory_compressed,
+            directory_compression,
+            directory_size,
+        )?;
         let streams = Self::directory(&directory, stream_count, &chunks)?;
         let mut decompressed = Vec::new();
         decompressed
             .try_reserve_exact(chunks.len())
-            .map_err(|_| PdbError::Allocation { what: "chunk cache", bytes: u64::from(chunk_count) })?;
+            .map_err(|_| PdbError::Allocation {
+                what: "chunk cache",
+                bytes: u64::from(chunk_count),
+            })?;
         decompressed.resize_with(chunks.len(), || None);
-        Ok(MsfzStreams { bytes, chunks, decompressed, streams })
+        Ok(MsfzStreams {
+            bytes,
+            chunks,
+            decompressed,
+            streams,
+        })
     }
 
     /// The directory: per stream, fragment sizes and locations until a
@@ -203,7 +261,10 @@ impl<'a> MsfzStreams<'a> {
         let mut streams = Vec::new();
         streams
             .try_reserve_exact(count as usize)
-            .map_err(|_| PdbError::Allocation { what: "streams", bytes: u64::from(count) })?;
+            .map_err(|_| PdbError::Allocation {
+                what: "streams",
+                bytes: u64::from(count),
+            })?;
         for stream in 0..count {
             let mut size = cursor.u32_le().map_err(|source| short(what, source))?;
             if size == NIL_STREAM {
@@ -214,26 +275,46 @@ impl<'a> MsfzStreams<'a> {
             let mut index = 0u32;
             while size != 0 {
                 if size == NIL_STREAM {
-                    return Err(PdbError::BadFragment { stream, fragment: index });
+                    return Err(PdbError::BadFragment {
+                        stream,
+                        fragment: index,
+                    });
                 }
                 let low = cursor.u32_le().map_err(|source| short(what, source))?;
                 let high = cursor.u32_le().map_err(|source| short(what, source))?;
                 let fragment = if high & COMPRESSED_FRAGMENT != 0 {
                     let chunk = high & !COMPRESSED_FRAGMENT;
-                    let entry = chunks.get(chunk as usize).ok_or(PdbError::BadFragment { stream, fragment: index })?;
-                    if u64::from(low).saturating_add(u64::from(size)) > u64::from(entry.uncompressed) {
-                        return Err(PdbError::BadFragment { stream, fragment: index });
+                    let entry = chunks.get(chunk as usize).ok_or(PdbError::BadFragment {
+                        stream,
+                        fragment: index,
+                    })?;
+                    if u64::from(low).saturating_add(u64::from(size))
+                        > u64::from(entry.uncompressed)
+                    {
+                        return Err(PdbError::BadFragment {
+                            stream,
+                            fragment: index,
+                        });
                     }
-                    Fragment::InChunk { size, chunk, offset: low }
+                    Fragment::InChunk {
+                        size,
+                        chunk,
+                        offset: low,
+                    }
                 } else {
-                    let file_offset = (u64::from(high).wrapping_shl(32) | u64::from(low)) & STORED_OFFSET_MASK;
+                    let file_offset =
+                        (u64::from(high).wrapping_shl(32) | u64::from(low)) & STORED_OFFSET_MASK;
                     Fragment::Stored { size, file_offset }
                 };
-                fragments
-                    .try_reserve(1)
-                    .map_err(|_| PdbError::Allocation { what: "fragments", bytes: u64::from(index) })?;
+                fragments.try_reserve(1).map_err(|_| PdbError::Allocation {
+                    what: "fragments",
+                    bytes: u64::from(index),
+                })?;
                 fragments.push(fragment);
-                spans.try_reserve(1).map_err(|_| PdbError::Allocation { what: "fragment spans", bytes: u64::from(index) })?;
+                spans.try_reserve(1).map_err(|_| PdbError::Allocation {
+                    what: "fragment spans",
+                    bytes: u64::from(index),
+                })?;
                 spans.push(Span::of(fragment, stream, index));
                 index = index.wrapping_add(1);
                 size = cursor.u32_le().map_err(|source| short(what, source))?;
@@ -250,16 +331,32 @@ impl<'a> MsfzStreams<'a> {
 
     /// Chunk `chunk`, decompressed (once).
     fn chunk(&mut self, chunk: u32) -> Result<&[u8], PdbError> {
-        let entry = *self.chunks.get(chunk as usize).ok_or(PdbError::NoStream { index: chunk })?;
-        let slot = self.decompressed.get_mut(chunk as usize).ok_or(PdbError::NoStream { index: chunk })?;
+        let entry = *self
+            .chunks
+            .get(chunk as usize)
+            .ok_or(PdbError::NoStream { index: chunk })?;
+        let slot = self
+            .decompressed
+            .get_mut(chunk as usize)
+            .ok_or(PdbError::NoStream { index: chunk })?;
         if slot.is_none() {
-            *slot = Some(unpack(self.bytes, entry.file_offset, entry.compressed, entry.compression, entry.uncompressed)?);
+            *slot = Some(unpack(
+                self.bytes,
+                entry.file_offset,
+                entry.compressed,
+                entry.compression,
+                entry.uncompressed,
+            )?);
         }
         Ok(slot.as_deref().unwrap_or(&[]))
     }
 
     pub(super) fn read(&mut self, index: u32) -> Result<Option<Vec<u8>>, PdbError> {
-        let fragments = match self.streams.get(index as usize).ok_or(PdbError::NoStream { index })? {
+        let fragments = match self
+            .streams
+            .get(index as usize)
+            .ok_or(PdbError::NoStream { index })?
+        {
             Stream::Nil => return Ok(None),
             Stream::Fragments(fragments) => fragments.clone(),
         };
@@ -269,13 +366,23 @@ impl<'a> MsfzStreams<'a> {
             }))
         });
         if total > MAX_STREAM_BYTES {
-            return Err(PdbError::TooMany { what: "stream bytes", count: total });
+            return Err(PdbError::TooMany {
+                what: "stream bytes",
+                count: total,
+            });
         }
         let mut out = reserved(total, "stream")?;
         for (number, fragment) in fragments.iter().enumerate() {
-            let bad = PdbError::BadFragment { stream: index, fragment: u32::try_from(number).unwrap_or(u32::MAX) };
+            let bad = PdbError::BadFragment {
+                stream: index,
+                fragment: u32::try_from(number).unwrap_or(u32::MAX),
+            };
             match *fragment {
-                Fragment::InChunk { size, chunk, offset } => {
+                Fragment::InChunk {
+                    size,
+                    chunk,
+                    offset,
+                } => {
                     let data = self.chunk(chunk)?;
                     let end = (offset as usize).checked_add(size as usize).ok_or(bad)?;
                     out.extend_from_slice(data.get(offset as usize..end).ok_or(bad)?);
@@ -308,11 +415,19 @@ mod tests {
     }
 
     fn in_chunk(size: u32, offset: u32) -> TestFragment {
-        TestFragment { size, low: offset, high: COMPRESSED_FRAGMENT }
+        TestFragment {
+            size,
+            low: offset,
+            high: COMPRESSED_FRAGMENT,
+        }
     }
 
     fn stored(size: u32, file_offset: u32) -> TestFragment {
-        TestFragment { size, low: file_offset, high: 0 }
+        TestFragment {
+            size,
+            low: file_offset,
+            high: 0,
+        }
     }
 
     fn payload() -> Vec<u8> {
@@ -355,7 +470,10 @@ mod tests {
 
     #[test]
     fn disjoint_fragments_read_back() {
-        let file = tiny_msfz(&[&[in_chunk(8, 0), in_chunk(8, 8)], &[stored(4, PAYLOAD_AT + 16)]]);
+        let file = tiny_msfz(&[
+            &[in_chunk(8, 0), in_chunk(8, 8)],
+            &[stored(4, PAYLOAD_AT + 16)],
+        ]);
         let mut msfz = MsfzStreams::open(&file).unwrap();
         assert_eq!(msfz.read(0).unwrap(), Some(payload()[..16].to_vec()));
         assert_eq!(msfz.read(1).unwrap(), Some(payload()[16..20].to_vec()));
@@ -366,24 +484,48 @@ mod tests {
         // Honoured, one chunk range named N times reads as N ranges: a
         // small file expands without bound.
         let file = tiny_msfz(&[&[in_chunk(16, 0), in_chunk(16, 8)]]);
-        assert_eq!(MsfzStreams::open(&file).err(), Some(PdbError::OverlappingFragments { stream: 0, fragment: 1 }));
+        assert_eq!(
+            MsfzStreams::open(&file).err(),
+            Some(PdbError::OverlappingFragments {
+                stream: 0,
+                fragment: 1
+            })
+        );
     }
 
     #[test]
     fn two_streams_sharing_chunk_bytes_are_refused() {
         let file = tiny_msfz(&[&[in_chunk(8, 0)], &[in_chunk(8, 4)]]);
-        assert_eq!(MsfzStreams::open(&file).err(), Some(PdbError::OverlappingFragments { stream: 1, fragment: 0 }));
+        assert_eq!(
+            MsfzStreams::open(&file).err(),
+            Some(PdbError::OverlappingFragments {
+                stream: 1,
+                fragment: 0
+            })
+        );
     }
 
     #[test]
     fn stored_fragments_reusing_file_bytes_are_refused() {
         let file = tiny_msfz(&[&[stored(8, PAYLOAD_AT), stored(8, PAYLOAD_AT + 4)]]);
-        assert_eq!(MsfzStreams::open(&file).err(), Some(PdbError::OverlappingFragments { stream: 0, fragment: 1 }));
+        assert_eq!(
+            MsfzStreams::open(&file).err(),
+            Some(PdbError::OverlappingFragments {
+                stream: 0,
+                fragment: 1
+            })
+        );
     }
 
     #[test]
     fn a_fragment_running_past_its_chunk_is_refused_at_open() {
         let file = tiny_msfz(&[&[in_chunk(16, 24)]]);
-        assert_eq!(MsfzStreams::open(&file).err(), Some(PdbError::BadFragment { stream: 0, fragment: 0 }));
+        assert_eq!(
+            MsfzStreams::open(&file).err(),
+            Some(PdbError::BadFragment {
+                stream: 0,
+                fragment: 0
+            })
+        );
     }
 }

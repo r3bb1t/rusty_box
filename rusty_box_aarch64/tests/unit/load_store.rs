@@ -19,7 +19,7 @@ use std::vec::Vec;
 use rusty_box_core::VmClock;
 
 use super::features::Implementation;
-use super::step::{processor, Taken, CODE, DATA, FP_TRAP, UNDEFINED};
+use super::step::{CODE, DATA, FP_TRAP, Taken, UNDEFINED, processor};
 use super::{Cpu, NoEl2, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -83,7 +83,10 @@ const SCTLR_A: u64 = 1 << 1;
 const SP_ALIGNMENT: Taken = Taken { ec: 0x26, iss: 0 };
 /// A Data Abort taken from EL1 (EC 0x25) with DFSC 0x21, an alignment
 /// fault, on a read: no ISV, as there is no EL2.
-const ALIGNMENT_READ: Taken = Taken { ec: 0x25, iss: 0x21 };
+const ALIGNMENT_READ: Taken = Taken {
+    ec: 0x25,
+    iss: 0x21,
+};
 
 /// One data access as the bus saw it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,10 +299,7 @@ fn ldxp_and_stxp_of_words_are_one_doubleword_access() {
     assert_eq!(cpu.x[4], 0, "the store-exclusive succeeded");
     assert_eq!(ram.log, [write(DATA, AccessWidth::Dword)]);
     let d = DATA as usize;
-    assert_eq!(
-        ram.bytes[d..d + 8],
-        0x2222_2222_1111_1111u64.to_le_bytes()
-    );
+    assert_eq!(ram.bytes[d..d + 8], 0x2222_2222_1111_1111u64.to_le_bytes());
 }
 
 /// `SCTLR_EL1.M` and `C`.
@@ -354,7 +354,10 @@ fn word_pair_accesses(
     } else {
         (
             std::vec![read(at, AccessWidth::Word), read(at + 4, AccessWidth::Word)],
-            std::vec![write(at, AccessWidth::Word), write(at + 4, AccessWidth::Word)],
+            std::vec![
+                write(at, AccessWidth::Word),
+                write(at + 4, AccessWidth::Word)
+            ],
         )
     };
     let offset = at - DATA;
@@ -370,10 +373,7 @@ fn word_pair_accesses(
     assert_eq!(step(cpu, ram, STP_W), None);
     assert_eq!(ram.log, stores, "{case}");
     let a = at as usize;
-    assert_eq!(
-        ram.bytes[a..a + 8],
-        0x6666_6666_5555_5555u64.to_le_bytes()
-    );
+    assert_eq!(ram.bytes[a..a + 8], 0x6666_6666_5555_5555u64.to_le_bytes());
 }
 
 /// With FEAT_LSE2, LDP and STP of two words that lie in one 16-byte
@@ -609,7 +609,11 @@ fn ldraa_with_writeback_into_its_base_is_undefined() {
     let mut cpu = at_data(Implementation::ARMV9P2);
     let x = cpu.x;
     for insn in [LDRAA_X1_X1, LDRAB_X1_X1] {
-        assert_eq!(step(&mut cpu, &mut ram, insn), Some(UNDEFINED), "{insn:#010x}");
+        assert_eq!(
+            step(&mut cpu, &mut ram, insn),
+            Some(UNDEFINED),
+            "{insn:#010x}"
+        );
         assert_eq!(ram.log, [], "{insn:#010x} accesses nothing");
         assert_eq!(cpu.x, x, "{insn:#010x} writes no register");
     }

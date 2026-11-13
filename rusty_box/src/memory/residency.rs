@@ -25,16 +25,16 @@
 //! allocation: the caller adds its own `vector_offset`. That keeps the ROM and
 //! scratch pages that share the allocation out of this type entirely.
 
-#[cfg(feature = "std")]
-use super::{MemorySnapshotGeometry, MemorySnapshotResidency};
-use super::{Block, MemoryError, Result};
-use crate::config::MAX_MEM_BLOCKS;
 use core::ops::Range;
-
 #[cfg(feature = "std")]
 use std::fs::File;
 #[cfg(feature = "std")]
 use std::io::{Read, Seek, SeekFrom, Write};
+
+use super::{Block, MemoryError, Result};
+#[cfg(feature = "std")]
+use super::{MemorySnapshotGeometry, MemorySnapshotResidency};
+use crate::config::MAX_MEM_BLOCKS;
 #[cfg(feature = "std")]
 use crate::snapshot::{SnapError, SnapRead, SnapResult, SnapWrite};
 
@@ -270,11 +270,7 @@ impl Residency {
         self.geometry = geometry;
         self.blocks.fill(Block::SwappedOut);
         if geometry.full_residency() {
-            for (guest_block, entry) in self
-                .blocks
-                .iter_mut()
-                .take(geometry.num_blocks)
-                .enumerate()
+            for (guest_block, entry) in self.blocks.iter_mut().take(geometry.num_blocks).enumerate()
             {
                 *entry = Block::Block {
                     offset: guest_block * geometry.block_size,
@@ -575,7 +571,9 @@ impl Residency {
             .checked_mul(self.geometry.block_size)
             .ok_or_else(|| snapshot_invalid("snapshot guest block offset overflow"))?;
         if start >= self.geometry.guest_len {
-            return Err(snapshot_invalid("snapshot guest block starts beyond guest RAM"));
+            return Err(snapshot_invalid(
+                "snapshot guest block starts beyond guest RAM",
+            ));
         }
         Ok((self.geometry.guest_len - start).min(self.geometry.block_size))
     }
@@ -602,7 +600,9 @@ impl Residency {
             .checked_add(logical_len)
             .ok_or_else(|| snapshot_invalid("snapshot resident slot length overflow"))?;
         if end > self.geometry.resident_len {
-            return Err(snapshot_invalid("snapshot resident slot exceeds host backing"));
+            return Err(snapshot_invalid(
+                "snapshot resident slot exceeds host backing",
+            ));
         }
         Ok(offset)
     }
@@ -630,13 +630,16 @@ impl Residency {
             Block::SwappedOut => Ok(MemorySnapshotResidency::Swapped),
             Block::Block { offset } => {
                 if offset % self.geometry.block_size != 0 {
-                    return Err(snapshot_invalid("snapshot resident block offset is unaligned"));
+                    return Err(snapshot_invalid(
+                        "snapshot resident block offset is unaligned",
+                    ));
                 }
                 let slot = offset / self.geometry.block_size;
                 self.snapshot_slot_offset(slot, logical_len)?;
                 Ok(MemorySnapshotResidency::Resident {
-                    slot: u32::try_from(slot)
-                        .map_err(|_| snapshot_invalid("snapshot resident slot conversion failed"))?,
+                    slot: u32::try_from(slot).map_err(|_| {
+                        snapshot_invalid("snapshot resident slot conversion failed")
+                    })?,
                 })
             }
         }
@@ -751,13 +754,17 @@ impl Residency {
                 != resident_capacity
             || saved_map.len() != expected_num_blocks
         {
-            return Err(snapshot_invalid("snapshot memory geometry does not match machine"));
+            return Err(snapshot_invalid(
+                "snapshot memory geometry does not match machine",
+            ));
         }
 
         let used_blocks = usize::try_from(geometry.used_blocks)
             .map_err(|_| snapshot_invalid("snapshot used block count conversion failed"))?;
         if used_blocks > resident_capacity || used_blocks > expected_num_blocks {
-            return Err(snapshot_invalid("snapshot used block count is out of range"));
+            return Err(snapshot_invalid(
+                "snapshot used block count is out of range",
+            ));
         }
 
         let next_swapout = usize::try_from(geometry.next_swapout_guest_block)
@@ -833,9 +840,9 @@ impl Residency {
             self.blocks[guest_block] = match saved {
                 MemorySnapshotResidency::Swapped => Block::SwappedOut,
                 MemorySnapshotResidency::Resident { slot } => Block::Block {
-                    offset: usize::try_from(slot)
-                        .map_err(|_| snapshot_invalid("snapshot resident slot conversion failed"))?
-                        * self.geometry.block_size,
+                    offset: usize::try_from(slot).map_err(|_| {
+                        snapshot_invalid("snapshot resident slot conversion failed")
+                    })? * self.geometry.block_size,
                 },
             };
         }
@@ -848,4 +855,3 @@ impl Residency {
         Ok(())
     }
 }
-

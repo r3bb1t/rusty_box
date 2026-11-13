@@ -119,7 +119,7 @@ fn run_sliced(slice: u64) -> Outcome {
                     ticks: machine.ticks(),
                     interrupts_counted: machine.reg_read(Reg::X20),
                     pc: machine.reg_read(Reg::Pc),
-                }
+                };
             }
         }
     }

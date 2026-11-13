@@ -820,7 +820,8 @@ impl Queue {
                 };
                 indirect = Some(table);
                 entries = 0;
-                desc = Descriptor::read(ram, table.addr, 0).ok_or(QueueFault::UnmappableIndirect)?;
+                desc =
+                    Descriptor::read(ram, table.addr, 0).ok_or(QueueFault::UnmappableIndirect)?;
                 continue;
             }
             if desc.device_writes() {

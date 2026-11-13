@@ -48,7 +48,7 @@
 use rusty_box_core::snap::{SnapError, SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{VmClock, VmInstant};
 
-use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
+use crate::bus::{AccessWidth, RegOffset, read_by_words, write_by_words};
 
 /// The registers' offsets in the region (DDI 0224C Table 3-1).
 const RTCDR: u64 = 0x000;
@@ -263,9 +263,7 @@ impl Pl031 {
             RTCIMSC => self.im,
             RTCRIS => self.is,
             RTCMIS => self.is & self.im,
-            RTCPERIPHID0..=RTCPCELLID3 => {
-                u32::from(PL031_ID[((reg - RTCPERIPHID0) >> 2) as usize])
-            }
+            RTCPERIPHID0..=RTCPCELLID3 => u32::from(PL031_ID[((reg - RTCPERIPHID0) >> 2) as usize]),
             _ => 0,
         })
     }
@@ -334,8 +332,9 @@ impl Pl031 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box_core::ClockHz;
+
+    use super::*;
 
     const HZ: u64 = 1_000_000;
 
@@ -366,7 +365,10 @@ mod tests {
     /// An RTC that power-on left reading `epoch`, started at `start`.
     fn started(epoch: u64, start: VmClock) -> Pl031 {
         let mut rtc = Pl031::new(epoch);
-        assert!(write(&mut rtc, RTCCR, 1, start), "starting re-arms the alarm");
+        assert!(
+            write(&mut rtc, RTCCR, 1, start),
+            "starting re-arms the alarm"
+        );
         rtc
     }
 
@@ -399,7 +401,10 @@ mod tests {
         let mut rtc = Pl031::new(100);
         assert_eq!(read(&mut rtc, RTCCR, at_second(0)), 0);
         assert_eq!(read(&mut rtc, RTCDR, at_second(7)), 100);
-        assert!(!write(&mut rtc, RTCCR, 0, at_second(7)), "a 0 starts nothing");
+        assert!(
+            !write(&mut rtc, RTCCR, 0, at_second(7)),
+            "a 0 starts nothing"
+        );
         assert_eq!(read(&mut rtc, RTCDR, at_second(8)), 100);
 
         assert!(write(&mut rtc, RTCCR, 1, at_second(8)));
@@ -452,11 +457,18 @@ mod tests {
         assert_eq!(read(&mut rtc, RTCDR, at_second(10)), 110);
         assert_eq!(read(&mut rtc, RTCRIS, at_second(10)), 1);
         assert!(!rtc.irq(), "masked: only the raw status records it");
-        assert_eq!(rtc.next_deadline(), None, "nothing to raise while it is set");
+        assert_eq!(
+            rtc.next_deadline(),
+            None,
+            "nothing to raise while it is set"
+        );
 
         assert!(!write(&mut rtc, RTCIMSC, 1, at_second(10)));
         assert!(rtc.irq());
-        assert!(!write(&mut rtc, RTCICR, 0, at_second(10)), "a 0 clears nothing");
+        assert!(
+            !write(&mut rtc, RTCICR, 0, at_second(10)),
+            "a 0 clears nothing"
+        );
         assert!(rtc.irq());
         assert!(
             write(&mut rtc, RTCICR, 1, at_micros(10_500_000)),
@@ -480,13 +492,14 @@ mod tests {
         let mut rtc = started(100, at_second(0));
         assert!(write(&mut rtc, RTCMR, 90, at_micros(5_250_000)));
         assert_eq!(read(&mut rtc, RTCDR, at_micros(5_250_000)), 105);
-        assert_eq!(read(&mut rtc, RTCRIS, at_micros(5_250_000)), 0, "not at once");
+        assert_eq!(
+            read(&mut rtc, RTCRIS, at_micros(5_250_000)),
+            0,
+            "not at once"
+        );
         // 90 - 105 modulo 2^32 seconds after second 5.
         let wrap = 5 + (1u64 << 32) - 15;
-        assert_eq!(
-            rtc.next_deadline(),
-            Some(VmInstant::from_ticks(wrap * HZ))
-        );
+        assert_eq!(rtc.next_deadline(), Some(VmInstant::from_ticks(wrap * HZ)));
         rtc.update(at_micros(wrap * 1_000_000 - 1));
         assert_eq!(read(&mut rtc, RTCRIS, at_micros(wrap * 1_000_000 - 1)), 0);
         assert_eq!(
@@ -561,7 +574,8 @@ mod tests {
     #[test]
     fn a_narrow_access_reaches_the_register_that_holds_it() {
         let mut rtc = Pl031::new(0x1234_5678);
-        let byte = |rtc: &mut Pl031, off| rtc.read(RegOffset::new(off), AccessWidth::Byte, at_second(0));
+        let byte =
+            |rtc: &mut Pl031, off| rtc.read(RegOffset::new(off), AccessWidth::Byte, at_second(0));
         assert_eq!(byte(&mut rtc, 0x001), 0x1234_5678);
         assert_eq!(byte(&mut rtc, 0xFE9), 0x04);
         assert_eq!(byte(&mut rtc, 0xFFE), 0xB1);

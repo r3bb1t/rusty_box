@@ -312,14 +312,20 @@ mod tests {
     #[test]
     fn the_modern_era_sums_the_optional_headers_before_the_name() {
         // NameInfo present, CreatorInfo absent: one header back.
-        assert_eq!(name_info_delta(ObjectHeaderEra::Modern, INFO_MASK_NAME), Some(0x20));
+        assert_eq!(
+            name_info_delta(ObjectHeaderEra::Modern, INFO_MASK_NAME),
+            Some(0x20)
+        );
         // NameInfo and CreatorInfo both present: two headers back.
         assert_eq!(
             name_info_delta(ObjectHeaderEra::Modern, INFO_MASK_NAME | INFO_MASK_CREATOR),
             Some(0x40)
         );
         // NameInfo absent: no name even if CreatorInfo is present.
-        assert_eq!(name_info_delta(ObjectHeaderEra::Modern, INFO_MASK_CREATOR), None);
+        assert_eq!(
+            name_info_delta(ObjectHeaderEra::Modern, INFO_MASK_CREATOR),
+            None
+        );
     }
 
     #[test]

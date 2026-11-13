@@ -51,7 +51,10 @@ mod tests {
 
     #[test]
     fn a_bitfield_reads_its_bits_from_the_least_significant_end() {
-        let flags = BitRange { position: 5, length: 3 };
+        let flags = BitRange {
+            position: 5,
+            length: 3,
+        };
         assert_eq!(flags.extract(0b1110_0000), 0b111);
         assert_eq!(flags.extract(0b1010_0000), 0b101);
         assert_eq!(flags.extract(0b0001_1111), 0);
@@ -59,11 +62,53 @@ mod tests {
 
     #[test]
     fn a_bitfield_at_the_top_bit_or_past_it_reads_without_panicking() {
-        assert_eq!(BitRange { position: 63, length: 1 }.extract(u64::MAX), 1);
-        assert_eq!(BitRange { position: 64, length: 1 }.extract(u64::MAX), 0);
-        assert_eq!(BitRange { position: u32::MAX, length: u32::MAX }.extract(u64::MAX), 0);
-        assert_eq!(BitRange { position: 0, length: 64 }.extract(0xDEAD_BEEF), 0xDEAD_BEEF);
-        assert_eq!(BitRange { position: 0, length: 200 }.extract(7), 7);
-        assert_eq!(BitRange { position: 3, length: 0 }.extract(u64::MAX), 0);
+        assert_eq!(
+            BitRange {
+                position: 63,
+                length: 1
+            }
+            .extract(u64::MAX),
+            1
+        );
+        assert_eq!(
+            BitRange {
+                position: 64,
+                length: 1
+            }
+            .extract(u64::MAX),
+            0
+        );
+        assert_eq!(
+            BitRange {
+                position: u32::MAX,
+                length: u32::MAX
+            }
+            .extract(u64::MAX),
+            0
+        );
+        assert_eq!(
+            BitRange {
+                position: 0,
+                length: 64
+            }
+            .extract(0xDEAD_BEEF),
+            0xDEAD_BEEF
+        );
+        assert_eq!(
+            BitRange {
+                position: 0,
+                length: 200
+            }
+            .extract(7),
+            7
+        );
+        assert_eq!(
+            BitRange {
+                position: 3,
+                length: 0
+            }
+            .extract(u64::MAX),
+            0
+        );
     }
 }

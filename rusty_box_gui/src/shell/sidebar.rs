@@ -9,18 +9,19 @@
 //! reports the click; the app decides what the click means.
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::destination::{Destination, ShellPage, SidebarAction, Surface};
+use egui::{RichText, Stroke};
+
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::vm_bar::SETTINGS;
+use crate::shell::destination::{Destination, ShellPage, SidebarAction, Surface};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::theme::{
     ACCENT_AMBER, BG_PANEL, SPACE_GROUP, SPACE_ITEM, STROKE_HAIRLINE, TEXT_BODY, TEXT_CAPTION,
     TEXT_MUTED,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::widgets::{selection_row, touch_row_height, RowMark, CHILD_INDENT, ROOT_INDENT};
+use crate::shell::vm_bar::SETTINGS;
 #[cfg(not(target_arch = "wasm32"))]
-use egui::{RichText, Stroke};
+use crate::shell::widgets::{CHILD_INDENT, ROOT_INDENT, RowMark, selection_row, touch_row_height};
 
 /// Whether a VM in the list is a file in the library, a library file that
 /// is behind the VM because its last write failed, or only in memory. The
@@ -233,17 +234,22 @@ impl Sidebar<'_> {
                     Surface::Settings => RowMark::Destination,
                     Surface::Vm => RowMark::Plain,
                 };
-                if selection_row(ui, SETTINGS, ROOT_INDENT, settings_mark, None, touch_row_height(ui)).clicked() {
+                if selection_row(
+                    ui,
+                    SETTINGS,
+                    ROOT_INDENT,
+                    settings_mark,
+                    None,
+                    touch_row_height(ui),
+                )
+                .clicked()
+                {
                     action = Some(SidebarAction::OpenSettings);
                 }
                 ui.add_space(SPACE_ITEM);
 
                 if entries.is_empty() {
-                    ui.label(
-                        RichText::new("No VMs")
-                            .size(TEXT_BODY)
-                            .color(TEXT_MUTED),
-                    );
+                    ui.label(RichText::new("No VMs").size(TEXT_BODY).color(TEXT_MUTED));
                     return action;
                 }
 
@@ -334,9 +340,11 @@ impl Sidebar<'_> {
 
 #[cfg(test)]
 mod tests {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
     use super::*;
     use crate::shell::widgets::ROW_HEIGHT;
-    use egui_kittest::{kittest::Queryable, Harness};
 
     const WINDOW: egui::Vec2 = egui::vec2(640.0, 400.0);
 

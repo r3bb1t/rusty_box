@@ -2,15 +2,15 @@
 //! console, which outlives each of its runs; and what only one running VM
 //! may have at a time, held for a power-on's runs and given back after them.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use rusty_box::gui::shared_display::SharedDisplay;
 use rusty_box::gui::RustyBoxApp;
+use rusty_box::gui::shared_display::SharedDisplay;
 
-use crate::app::{status_snapshot, ShellStatus, VmOrigin};
+use crate::app::{ShellStatus, VmOrigin, status_snapshot};
 use crate::config::Engine;
 use crate::debugger::control::{DumpOutcome, DumpRequest, RunControl, RunPhase};
 
@@ -100,7 +100,9 @@ impl Holdings {
             (Entry::Occupied(taken), claim) => {
                 let holders = taken.into_mut();
                 match (&mut *holders, claim) {
-                    (Holders::Alone(owner), Claim::Alone | Claim::Reading) => return Err(owner.by.clone()),
+                    (Holders::Alone(owner), Claim::Alone | Claim::Reading) => {
+                        return Err(owner.by.clone());
+                    }
                     (Holders::Readers(readers), Claim::Reading) => readers.push(holder),
                     (Holders::Readers(readers), Claim::Alone) => match readers.first() {
                         Some(reader) => return Err(reader.by.clone()),
@@ -536,7 +538,9 @@ mod tests {
         };
 
         let first = holdings.share(disk(), vm("First reader")).expect("free");
-        let second = holdings.share(disk(), vm("Second reader")).expect("readers share");
+        let second = holdings
+            .share(disk(), vm("Second reader"))
+            .expect("readers share");
         assert_eq!(
             holdings.take(disk(), vm("Writer")).err(),
             Some(vm("First reader")),
@@ -550,8 +554,13 @@ mod tests {
         );
         drop(second);
 
-        let writer = holdings.take(disk(), vm("Writer")).expect("free once every reader is gone");
-        assert_eq!(holdings.share(disk(), vm("Reader")).err(), Some(vm("Writer")));
+        let writer = holdings
+            .take(disk(), vm("Writer"))
+            .expect("free once every reader is gone");
+        assert_eq!(
+            holdings.share(disk(), vm("Reader")).err(),
+            Some(vm("Writer"))
+        );
         drop(writer);
         assert!(holdings.share(disk(), vm("Reader")).is_ok());
     }

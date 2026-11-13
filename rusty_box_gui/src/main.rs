@@ -4,9 +4,10 @@
 )]
 
 #[cfg(not(target_arch = "wasm32"))]
-use clap::Parser;
-#[cfg(not(target_arch = "wasm32"))]
 use std::process::ExitCode;
+
+#[cfg(not(target_arch = "wasm32"))]
+use clap::Parser;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> ExitCode {
@@ -24,9 +25,7 @@ fn main() -> ExitCode {
     {
         let flags = args.run_flags();
         if !flags.is_empty() {
-            return print_result(Err(rusty_box_gui::RunError::RunFlagsNeedAMachine {
-                flags,
-            }));
+            return print_result(Err(rusty_box_gui::RunError::RunFlagsNeedAMachine { flags }));
         }
         return print_result(rusty_box_gui::run_shell(None));
     }

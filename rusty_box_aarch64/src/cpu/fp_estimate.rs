@@ -160,45 +160,58 @@ impl Format {
     const fn is_half(self) -> bool {
         self.exp_bits == 5
     }
+
     const fn sign_bit(self) -> u64 {
         1 << (self.exp_bits + self.frac_bits)
     }
+
     const fn exp_max(self) -> u64 {
         (1 << self.exp_bits) - 1
     }
+
     const fn frac_mask(self) -> u64 {
         (1 << self.frac_bits) - 1
     }
+
     const fn exponent(self, bits: u64) -> u64 {
         (bits >> self.frac_bits) & self.exp_max()
     }
+
     const fn fraction(self, bits: u64) -> u64 {
         bits & self.frac_mask()
     }
+
     const fn is_nan(self, bits: u64) -> bool {
         self.exponent(bits) == self.exp_max() && self.fraction(bits) != 0
     }
+
     const fn is_signalling_nan(self, bits: u64) -> bool {
         self.is_nan(bits) && (bits >> (self.frac_bits - 1)) & 1 == 0
     }
+
     const fn is_infinity(self, bits: u64) -> bool {
         self.exponent(bits) == self.exp_max() && self.fraction(bits) == 0
     }
+
     const fn is_zero(self, bits: u64) -> bool {
         bits & !self.sign_bit() == 0
     }
+
     const fn infinity(self, negative: bool) -> u64 {
         self.signed(negative, self.exp_max() << self.frac_bits)
     }
+
     const fn max_normal(self, negative: bool) -> u64 {
         self.signed(
             negative,
             ((self.exp_max() - 1) << self.frac_bits) | self.frac_mask(),
         )
     }
+
     const fn zero(self, negative: bool) -> u64 {
         self.signed(negative, 0)
     }
+
     /// Arm FPDefaultNaN: the top fraction bit set, the sign FPCR.AH.
     const fn default_nan(self, handling: Handling) -> u64 {
         let negative = matches!(handling, Handling::Alternate);
@@ -207,6 +220,7 @@ impl Format {
             (self.exp_max() << self.frac_bits) | (1 << (self.frac_bits - 1)),
         )
     }
+
     const fn signed(self, negative: bool, magnitude: u64) -> u64 {
         if negative {
             magnitude | self.sign_bit()
@@ -255,11 +269,7 @@ fn flush_input(f: Format, bits: u64, ctl: EstimateControl, raised: &mut u64) -> 
             InputFlush::Unreported => true,
         }
     };
-    if flush {
-        bits & f.sign_bit()
-    } else {
-        bits
-    }
+    if flush { bits & f.sign_bit() } else { bits }
 }
 
 /// Arm ARM `RecipEstimate` on a fixed-point input in 0.5 <= x < 1.0, of 9

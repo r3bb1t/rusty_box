@@ -71,13 +71,21 @@ pub(in crate::cpu) fn f64_compare(a: Float64, b: Float64, status: &mut SoftFloat
 /// Quiet compare — a QNaN operand does not raise #I.
 /// Bochs softfloat.h `f64_compare_quiet`.
 #[inline]
-pub(in crate::cpu) fn f64_compare_quiet(a: Float64, b: Float64, status: &mut SoftFloatStatus) -> i32 {
+pub(in crate::cpu) fn f64_compare_quiet(
+    a: Float64,
+    b: Float64,
+    status: &mut SoftFloatStatus,
+) -> i32 {
     f64_compare_full(a, b, true, status)
 }
 
 /// Bochs softfloat3e/f64_min.cc `f64_min`. When both operands compare equal
 /// (including ±0.0) the *second* operand is returned, matching SSE MINPD.
-pub(in crate::cpu) fn f64_min(mut a: Float64, mut b: Float64, status: &mut SoftFloatStatus) -> Float64 {
+pub(in crate::cpu) fn f64_min(
+    mut a: Float64,
+    mut b: Float64,
+    status: &mut SoftFloatStatus,
+) -> Float64 {
     if softfloat_denormals_are_zeros(status) {
         a = f64_denormal_to_zero(a);
         b = f64_denormal_to_zero(b);
@@ -90,7 +98,11 @@ pub(in crate::cpu) fn f64_min(mut a: Float64, mut b: Float64, status: &mut SoftF
 }
 
 /// Bochs softfloat3e/f64_max.cc `f64_max`.
-pub(in crate::cpu) fn f64_max(mut a: Float64, mut b: Float64, status: &mut SoftFloatStatus) -> Float64 {
+pub(in crate::cpu) fn f64_max(
+    mut a: Float64,
+    mut b: Float64,
+    status: &mut SoftFloatStatus,
+) -> Float64 {
     if softfloat_denormals_are_zeros(status) {
         a = f64_denormal_to_zero(a);
         b = f64_denormal_to_zero(b);

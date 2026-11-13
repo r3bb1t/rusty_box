@@ -41,12 +41,10 @@
 //! hot-loop-baseline` counts the AArch64 trace loop's host instructions and
 //! rewrites the baseline the ci step holds them to.
 
-use std::{
-    env,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    time::Instant,
-};
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CiCommand {
@@ -464,7 +462,11 @@ fn production_panics(text: &str) -> usize {
         let code = if is_doc_or_comment {
             String::new()
         } else {
-            without_literals(line).split("//").next().unwrap_or("").to_owned()
+            without_literals(line)
+                .split("//")
+                .next()
+                .unwrap_or("")
+                .to_owned()
         };
         let opens = code.matches('{').count() as i32;
         let closes = code.matches('}').count() as i32;
@@ -525,10 +527,7 @@ fn test_gated_module_files(text: &str) -> Vec<DeclaredModule> {
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("#[path") {
-            path = rest
-                .split('"')
-                .nth(1)
-                .map(str::to_owned);
+            path = rest.split('"').nth(1).map(str::to_owned);
             continue;
         }
         if trimmed.starts_with("#[") {
@@ -560,13 +559,19 @@ fn test_gated_module_files(text: &str) -> Vec<DeclaredModule> {
 /// `lib.rs` or `main.rs`, else in the folder named after it.
 fn declared_module_files(parent: &std::path::Path, name: &str) -> [PathBuf; 2] {
     let dir = parent.parent().unwrap_or(parent);
-    let stem = parent.file_stem().and_then(|stem| stem.to_str()).unwrap_or("");
+    let stem = parent
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("");
     let home = if matches!(stem, "mod" | "lib" | "main") {
         dir.to_path_buf()
     } else {
         dir.join(stem)
     };
-    [home.join(format!("{name}.rs")), home.join(name).join("mod.rs")]
+    [
+        home.join(format!("{name}.rs")),
+        home.join(name).join("mod.rs"),
+    ]
 }
 
 /// Every file under `dir` that a `#[cfg(test)]`-gated `mod name;` declares.
@@ -652,8 +657,7 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
                 }
                 current = lines.next();
             }
-            let switches_lints_off =
-                word_count(&attr, "allow") + word_count(&attr, "expect") > 0;
+            let switches_lints_off = word_count(&attr, "allow") + word_count(&attr, "expect") > 0;
             let covers_dead_code = ["dead_code", "unused", "warnings"]
                 .iter()
                 .any(|lint| word_count(&attr, lint) > 0);
@@ -687,15 +691,13 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
         let entries = std::fs::read_dir(dir)
             .map_err(|err| format!("doctrine ratchets: read_dir {}: {err}", dir.display()))?;
         for entry in entries {
-            let entry =
-                entry.map_err(|err| format!("doctrine ratchets: dir entry: {err}"))?;
+            let entry = entry.map_err(|err| format!("doctrine ratchets: dir entry: {err}"))?;
             let path = entry.path();
             if path.is_dir() {
                 scan_dir(&path, scan)?;
             } else if path.extension().is_some_and(|e| e == "rs") {
-                let text = std::fs::read_to_string(&path).map_err(|err| {
-                    format!("doctrine ratchets: read {}: {err}", path.display())
-                })?;
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|err| format!("doctrine ratchets: read {}: {err}", path.display()))?;
                 if !is_test_file(&path) && !scan.test_files.contains(&path) {
                     scan.panics += production_panics(&text);
                 }
@@ -836,7 +838,9 @@ fn shape_scan(dir: &std::path::Path, findings: &mut Vec<String>) -> Result<(), S
     }
     let entries = std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     for entry in entries {
-        let path = entry.map_err(|error| format!("{}: {error}", dir.display()))?.path();
+        let path = entry
+            .map_err(|error| format!("{}: {error}", dir.display()))?
+            .path();
         if path.is_dir() {
             shape_scan(&path, findings)?;
         } else if path.extension().is_some_and(|ext| ext == "rs") {
@@ -868,7 +872,10 @@ fn no_panic_canary(root: &PathBuf) -> Result<(), String> {
             "--manifest-path",
             "xtask/no_panic_canary/Cargo.toml",
         ])
-        .env("CARGO_TARGET_DIR", root.join("target").join("no_panic_canary"))
+        .env(
+            "CARGO_TARGET_DIR",
+            root.join("target").join("no_panic_canary"),
+        )
         .current_dir(root)
         .output()
         .map_err(|error| format!("no-panic canary: failed to spawn cargo: {error}"))?;
@@ -897,7 +904,7 @@ fn no_panic_canary(root: &PathBuf) -> Result<(), String> {
 /// Every `#[no_panic]` function of `TIER_P_CRATE` must be reached from the
 /// crate's own tests: its release test link proves only what they reach.
 fn tier_p_sweep(root: &PathBuf) -> Result<(), String> {
-    use crate::tier_p::{untested_tier_p, SourceRole};
+    use crate::tier_p::{SourceRole, untested_tier_p};
     let crate_root = root.join(TIER_P_CRATE);
     let mut sources = Vec::new();
     collect_sources(&crate_root.join("src"), SourceRole::Library, &mut sources)?;
@@ -913,7 +920,9 @@ fn tier_p_sweep(root: &PathBuf) -> Result<(), String> {
             first.path
         ));
     }
-    println!("    tier-P sweep: every `#[no_panic]` function of {TIER_P_CRATE} is reached from its tests");
+    println!(
+        "    tier-P sweep: every `#[no_panic]` function of {TIER_P_CRATE} is reached from its tests"
+    );
     Ok(())
 }
 
@@ -925,12 +934,19 @@ fn collect_sources(
 ) -> Result<(), String> {
     let entries = std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     for entry in entries {
-        let path = entry.map_err(|error| format!("{}: {error}", dir.display()))?.path();
+        let path = entry
+            .map_err(|error| format!("{}: {error}", dir.display()))?
+            .path();
         if path.is_dir() {
             collect_sources(&path, role, into)?;
         } else if path.extension().is_some_and(|ext| ext == "rs") {
-            let text = std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-            into.push(crate::tier_p::Source { path: path.display().to_string(), text, role });
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            into.push(crate::tier_p::Source {
+                path: path.display().to_string(),
+                text,
+                role,
+            });
         }
     }
     Ok(())
@@ -956,7 +972,16 @@ struct Step {
 /// The gate's own tests, then the crates the x86 machine does not depend on:
 /// rusty_box_core, rusty_box_devices and rusty_box_aarch64.
 const FOUNDATION_MATRIX: &[Step] = &[
-    // The gate's own scanners first: the ratchets above ran on their rules,
+    // Formatting first, the cheapest step: the workspace is laid out as
+    // `rustfmt.toml` says, whose import and doc-comment options need nightly
+    // rustfmt (`rustup component add rustfmt --toolchain nightly`).
+    Step {
+        name: "format (nightly rustfmt)",
+        args: &["+nightly", "fmt", "--all", "--check"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    // The gate's own scanners: the ratchets above ran on their rules,
     // and these tests are what hold those rules to their cases. The
     // `cargo xtask` alias runs a debug build, so this release build of the
     // crate never replaces the binary running it.
@@ -979,13 +1004,27 @@ const FOUNDATION_MATRIX: &[Step] = &[
     },
     Step {
         name: "core tests (alloc)",
-        args: &["test", "--release", "-p", "rusty_box_core", "--features", "alloc"],
+        args: &[
+            "test",
+            "--release",
+            "-p",
+            "rusty_box_core",
+            "--features",
+            "alloc",
+        ],
         envs: &[],
         stdout_marker: None,
     },
     Step {
         name: "core tests (std)",
-        args: &["test", "--release", "-p", "rusty_box_core", "--features", "std"],
+        args: &[
+            "test",
+            "--release",
+            "-p",
+            "rusty_box_core",
+            "--features",
+            "std",
+        ],
         envs: &[],
         stdout_marker: None,
     },
@@ -1013,7 +1052,14 @@ const FOUNDATION_MATRIX: &[Step] = &[
     },
     Step {
         name: "devices tests (std)",
-        args: &["test", "--release", "-p", "rusty_box_devices", "--features", "std"],
+        args: &[
+            "test",
+            "--release",
+            "-p",
+            "rusty_box_devices",
+            "--features",
+            "std",
+        ],
         envs: &[],
         stdout_marker: None,
     },
@@ -1044,7 +1090,14 @@ const FOUNDATION_MATRIX: &[Step] = &[
     },
     Step {
         name: "aarch64 tests (std)",
-        args: &["test", "--release", "-p", "rusty_box_aarch64", "--features", "std"],
+        args: &[
+            "test",
+            "--release",
+            "-p",
+            "rusty_box_aarch64",
+            "--features",
+            "std",
+        ],
         envs: &[],
         stdout_marker: None,
     },
@@ -1109,7 +1162,13 @@ const MATRIX: &[Step] = &[
     // no gate could see it.
     Step {
         name: "WHP engine tests",
-        args: &["test", "--release", "-p", "rusty_box_whp_engine", "--all-targets"],
+        args: &[
+            "test",
+            "--release",
+            "-p",
+            "rusty_box_whp_engine",
+            "--all-targets",
+        ],
         envs: &[],
         stdout_marker: None,
     },
@@ -1177,7 +1236,13 @@ const MATRIX: &[Step] = &[
     },
     Step {
         name: "no_std + no_alloc check",
-        args: &["check", "--release", "-p", "rusty_box", "--no-default-features"],
+        args: &[
+            "check",
+            "--release",
+            "-p",
+            "rusty_box",
+            "--no-default-features",
+        ],
         envs: &[],
         stdout_marker: None,
     },
@@ -1370,7 +1435,13 @@ const MATRIX: &[Step] = &[
         // binaries; `--all-targets --all-features` reaches every test, example
         // and feature-gated block.
         name: "debug-assertions check (all targets, all features)",
-        args: &["check", "-p", "rusty_box", "--all-targets", "--all-features"],
+        args: &[
+            "check",
+            "-p",
+            "rusty_box",
+            "--all-targets",
+            "--all-features",
+        ],
         envs: &[],
         stdout_marker: None,
     },
@@ -1484,7 +1555,11 @@ fn run_step(root: &Path, step: &Step, aarchmrs: &Aarchmrs) -> Result<(), String>
         }
     }
 
-    println!("<== {} ok ({:.1}s)", step.name, started.elapsed().as_secs_f32());
+    println!(
+        "<== {} ok ({:.1}s)",
+        step.name,
+        started.elapsed().as_secs_f32()
+    );
     Ok(())
 }
 
@@ -1495,13 +1570,15 @@ fn run_step(root: &Path, step: &Step, aarchmrs: &Aarchmrs) -> Result<(), String>
 /// relative one is this process's working directory's. The steps are given
 /// it, so the aarch64 test steps build and run those tests.
 fn locate_aarchmrs() -> Result<PathBuf, String> {
-    let named = env::var_os(AARCHMRS_VAR).map(PathBuf::from).ok_or_else(|| {
-        format!(
-            "{AARCHMRS_VAR} is not set: set it to the unpacked AARCHMRS directory (Arm's \
+    let named = env::var_os(AARCHMRS_VAR)
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            format!(
+                "{AARCHMRS_VAR} is not set: set it to the unpacked AARCHMRS directory (Arm's \
              A-profile machine-readable specification, release 2026-09) so the aarch64 \
              conformance tests run, or pass --skip-aarchmrs"
-        )
-    })?;
+            )
+        })?;
     let dir = if named.is_absolute() {
         named
     } else {
@@ -1511,7 +1588,10 @@ fn locate_aarchmrs() -> Result<PathBuf, String> {
     };
     for file in AARCHMRS_FILES {
         if !dir.join(file).is_file() {
-            return Err(format!("{AARCHMRS_VAR} names {}, which holds no {file}", dir.display()));
+            return Err(format!(
+                "{AARCHMRS_VAR} names {}, which holds no {file}",
+                dir.display()
+            ));
         }
     }
     Ok(dir)
@@ -1636,11 +1716,19 @@ pub fn execute_perf_baseline(_command: PerfBaselineCommand) -> Result<(), String
             .join("examples")
             .join(&exe);
         if !built.exists() {
-            return Err(format!("built {} not found at {}", bench.example, built.display()));
+            return Err(format!(
+                "built {} not found at {}",
+                bench.example,
+                built.display()
+            ));
         }
         let dest = dest_dir.join(&exe);
         std::fs::copy(&built, &dest).map_err(|err| {
-            format!("failed to copy {} to {}: {err}", bench.example, dest.display())
+            format!(
+                "failed to copy {} to {}: {err}",
+                bench.example,
+                dest.display()
+            )
         })?;
         println!("perf baseline archived: {}", dest.display());
     }
@@ -1797,8 +1885,7 @@ mod production;
 
     #[test]
     fn a_character_literal_is_neither_a_brace_nor_a_string() {
-        let code =
-            without_literals(r#"if c == '{' || c == '}' || c == '"' { found.expect("x") }"#);
+        let code = without_literals(r#"if c == '{' || c == '}' || c == '"' { found.expect("x") }"#);
         assert_eq!(code.matches('{').count(), 1);
         assert_eq!(code.matches('}').count(), 1);
         assert!(code.contains("found.expect("));

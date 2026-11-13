@@ -12,8 +12,8 @@ use std::vec::Vec;
 
 use super::Block;
 use crate::bus::AccessWidth;
-use crate::devices::virtio::test_driver::*;
 use crate::devices::virtio::Device;
+use crate::devices::virtio::test_driver::*;
 use crate::disk::Disk;
 
 const F_SEG_MAX: u64 = 1 << 2;
@@ -178,15 +178,15 @@ fn the_configuration_describes_the_disk() {
     assert_eq!(config_u32(&mut d, 36), u32::MAX, "max_discard_sectors");
     assert_eq!(config_u32(&mut d, 40), 1, "max_discard_seg");
     assert_eq!(config_u32(&mut d, 44), 1, "discard_sector_alignment");
-    assert_eq!(
-        config_u32(&mut d, 48),
-        u32::MAX,
-        "max_write_zeroes_sectors"
-    );
+    assert_eq!(config_u32(&mut d, 48), u32::MAX, "max_write_zeroes_sectors");
     assert_eq!(config_u32(&mut d, 52), 1, "max_write_zeroes_seg");
     assert_eq!(config_byte(&mut d, 56), 1, "write_zeroes_may_unmap");
     for off in 57..60 {
-        assert_eq!(config_byte(&mut d, off), 0, "unused1, padding the device zeroes");
+        assert_eq!(
+            config_byte(&mut d, off),
+            0,
+            "unused1, padding the device zeroes"
+        );
     }
     assert_eq!(
         config_byte(&mut d, 60),
@@ -375,14 +375,21 @@ fn types_the_device_does_not_handle_are_unsupported() {
     ] {
         let done = submit(&mut d, kind, 0, &[]);
         assert_eq!(done.status, S_UNSUPP, "type {kind}");
-        assert_eq!(done.used, [(u32::from(done.head), 1)], "type {kind}: the status alone");
+        assert_eq!(
+            done.used,
+            [(u32::from(done.head), 1)],
+            "type {kind}: the status alone"
+        );
     }
     for len in [64, 256] {
         let report = fresh(&mut d, len);
         let done = submit(&mut d, T_ZONE_REPORT, 0, &[Buf::writable(report, len)]);
         assert_eq!(done.status, S_UNSUPP);
         assert_eq!(done.used, [(u32::from(done.head), len + 1)]);
-        assert!(d.mem(report, len as usize).iter().all(|&b| b == 0), "zeroed");
+        assert!(
+            d.mem(report, len as usize).iter().all(|&b| b == 0),
+            "zeroed"
+        );
     }
     let cdb = d.alloc_with(&[0x12; 6]);
     let (sense, scsi) = (fresh(&mut d, 96), fresh(&mut d, 16));
@@ -540,7 +547,10 @@ fn overlapping_buffers_past_the_disk_are_zeroed_and_counted() {
     // A disk of no sectors still answers GET_ID.
     let mut d = blk(Vec::new());
     let id = fresh(&mut d, 20);
-    assert_eq!(submit(&mut d, T_GET_ID, 0, &[Buf::writable(id, 20)]).status, S_OK);
+    assert_eq!(
+        submit(&mut d, T_GET_ID, 0, &[Buf::writable(id, 20)]).status,
+        S_OK
+    );
 }
 
 /// The descriptor naming an indirect table after a normal one has its WRITE
@@ -558,7 +568,14 @@ fn an_indirect_descriptors_write_and_next_flags_are_ignored() {
     d.put_desc_at(table, data, 512, DESC_WRITE | DESC_NEXT, 1);
     d.put_desc_at(table + 16, status, 1, DESC_WRITE, 0);
     d.put_desc(0, 0, hdr, 16, DESC_NEXT, 1);
-    d.put_desc(0, 1, table, 2 * 16, DESC_INDIRECT | DESC_WRITE | DESC_NEXT, 2);
+    d.put_desc(
+        0,
+        1,
+        table,
+        2 * 16,
+        DESC_INDIRECT | DESC_WRITE | DESC_NEXT,
+        2,
+    );
     d.put_desc(0, 2, stray, 1, DESC_WRITE, 0);
     d.publish(0, 0);
     d.notify(0);
@@ -691,7 +708,11 @@ fn config_wce_without_flush_starts_write_through() {
     d.write_width(CONFIG + 32, AccessWidth::Byte, 1);
     assert_eq!(config_byte(&mut d, 32), 1);
     d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
-    assert_eq!(config_byte(&mut d, 32), 1, "DRIVER_OK keeps the driver's choice");
+    assert_eq!(
+        config_byte(&mut d, 32),
+        1,
+        "DRIVER_OK keeps the driver's choice"
+    );
 }
 
 #[test]

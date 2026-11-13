@@ -28,17 +28,31 @@ fn is_server(token: &str) -> bool {
 pub fn parse_nt_symbol_path(alternate: Option<&str>, path: Option<&str>) -> ParsedSymbolPath {
     let mut parsed = ParsedSymbolPath::default();
     let mut cache: Option<PathBuf> = None;
-    let joined = [alternate, path].into_iter().flatten().collect::<Vec<&str>>().join(";");
-    for element in joined.split(';').map(str::trim).filter(|element| !element.is_empty()) {
+    let joined = [alternate, path]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<&str>>()
+        .join(";");
+    for element in joined
+        .split(';')
+        .map(str::trim)
+        .filter(|element| !element.is_empty())
+    {
         let tokens: Vec<&str> = element.split('*').collect();
-        let head = tokens.first().map(|head| head.to_ascii_lowercase()).unwrap_or_default();
+        let head = tokens
+            .first()
+            .map(|head| head.to_ascii_lowercase())
+            .unwrap_or_default();
         let rest: &[&str] = match head.as_str() {
             "srv" => tokens.get(1..).unwrap_or(&[]),
             // `symsrv*symsrv.dll*store*server`: the DLL is not a store.
             "symsrv" => tokens.get(2..).unwrap_or(&[]),
             "cache" => {
                 if cache.is_none() {
-                    cache = tokens.get(1).filter(|dir| !dir.is_empty()).map(PathBuf::from);
+                    cache = tokens
+                        .get(1)
+                        .filter(|dir| !dir.is_empty())
+                        .map(PathBuf::from);
                 }
                 continue;
             }
@@ -81,7 +95,8 @@ mod tests {
 
     #[test]
     fn the_leftmost_store_of_a_cascade_is_the_one_used() {
-        let parsed = parse_nt_symbol_path(None, Some(&format!("srv*D:\\near*\\\\share\\far*{MSDL}")));
+        let parsed =
+            parse_nt_symbol_path(None, Some(&format!("srv*D:\\near*\\\\share\\far*{MSDL}")));
         assert_eq!(parsed.store, Some(PathBuf::from(r"D:\near")));
     }
 
@@ -96,7 +111,9 @@ mod tests {
     fn the_alternate_path_comes_first_and_folders_are_passed_by() {
         let parsed = parse_nt_symbol_path(
             Some("srv*E:\\alt*https://symbols.example/"),
-            Some(&format!("C:\\plain;symsrv*symsrv.dll*C:\\Symbols*{MSDL};cache*C:\\cache")),
+            Some(&format!(
+                "C:\\plain;symsrv*symsrv.dll*C:\\Symbols*{MSDL};cache*C:\\cache"
+            )),
         );
         assert_eq!(parsed.store, Some(PathBuf::from(r"E:\alt")));
         assert_eq!(parsed.servers, ["https://symbols.example/", MSDL]);
@@ -111,8 +128,13 @@ mod tests {
     #[test]
     fn debuginfod_urls_are_space_separated() {
         assert_eq!(
-            parse_debuginfod_urls("https://debuginfod.fedoraproject.org/  https://debuginfod.elfutils.org/"),
-            ["https://debuginfod.fedoraproject.org/", "https://debuginfod.elfutils.org/"]
+            parse_debuginfod_urls(
+                "https://debuginfod.fedoraproject.org/  https://debuginfod.elfutils.org/"
+            ),
+            [
+                "https://debuginfod.fedoraproject.org/",
+                "https://debuginfod.elfutils.org/"
+            ]
         );
         assert!(parse_debuginfod_urls("   ").is_empty());
     }

@@ -33,19 +33,16 @@
 mod apk;
 mod iso9660;
 
-use std::{
-    env,
-    ffi::OsString,
-    fs::{self, File},
-    io::{self, BufWriter, Read, Write},
-    path::{Path, PathBuf},
-    process::Command,
-};
-
-use sha2::{Digest, Sha512};
+use std::env;
+use std::ffi::OsString;
+use std::fs::{self, File};
+use std::io::{self, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use apk::{ApkKeys, Index, Repository};
 use iso9660::IsoImage;
+use sha2::{Digest, Sha512};
 
 const ALPINE_MIRROR: &str = "https://dl-cdn.alpinelinux.org/alpine/v3.23";
 const ARCH: &str = "aarch64";
@@ -243,7 +240,7 @@ pub fn parse_nested_kvm_args(args: &[String]) -> Result<NestedKvmCommand, String
                 return Err(format!(
                     "unknown nested-kvm argument {other:?}\n{}",
                     nested_kvm_usage()
-                ))
+                ));
             }
         }
         index += 1;
@@ -950,7 +947,7 @@ mod tests {
     fn the_image_comes_out_of_a_gzip_zboot_kernel() {
         let mut image = vec![0u8; 4096];
         image[ARM64_IMAGE_MAGIC_AT..ARM64_IMAGE_MAGIC_AT + 4].copy_from_slice(ARM64_IMAGE_MAGIC);
-        image[100] = 0x5a;
+        image[100] = 0x5A;
         assert_eq!(zboot_image(&zboot(b"gzip", &image)).expect("image"), image);
         assert!(zboot_image(&zboot(b"zstd22", &image)).is_err());
         assert!(zboot_image(&zboot(b"gzip", &[0u8; 4096])).is_err());

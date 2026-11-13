@@ -4,9 +4,7 @@
 //! All handlers support both register (mod=11) and memory (mod!=11) operands
 //! for the r/m field, matching Bochs _R and _M variants.
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =====================================================================
@@ -93,7 +91,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs bmi32.cc: BEXTR_GdEdBd{R,M}
     pub fn bextr_gd_ed_bd(&mut self, instr: &Instruction) -> super::Result<()> {
         let control = self.get_gpr32(instr.src2() as usize) as u16;
-        let start = (control & 0xff) as u32;
+        let start = (control & 0xFF) as u32;
         let len = (control >> 8) as u32;
         let val = self.read_ed32(instr, instr.src1())?;
         let result = bextrd(val, start, len);
@@ -129,7 +127,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs bmi32.cc: RORX_GdEdIb{R,M}
     pub fn rorx_gd_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_ed32(instr, instr.src())?;
-        let count = (instr.ib() as u32) & 0x1f;
+        let count = (instr.ib() as u32) & 0x1F;
         if count != 0 {
             op1 = op1.rotate_right(count);
         }
@@ -141,7 +139,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs bmi32.cc: SHRX_GdEdBd{R,M}
     pub fn shrx_gd_ed_bd(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_ed32(instr, instr.src1())?;
-        let count = self.get_gpr32(instr.src2() as usize) & 0x1f;
+        let count = self.get_gpr32(instr.src2() as usize) & 0x1F;
         if count != 0 {
             op1 >>= count;
         }
@@ -153,7 +151,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs bmi32.cc: SARX_GdEdBd{R,M}
     pub fn sarx_gd_ed_bd(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_ed32(instr, instr.src1())? as i32;
-        let count = self.get_gpr32(instr.src2() as usize) & 0x1f;
+        let count = self.get_gpr32(instr.src2() as usize) & 0x1F;
         if count != 0 {
             op1 >>= count;
         }
@@ -165,7 +163,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs bmi32.cc: SHLX_GdEdBd{R,M}
     pub fn shlx_gd_ed_bd(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_ed32(instr, instr.src1())?;
-        let count = self.get_gpr32(instr.src2() as usize) & 0x1f;
+        let count = self.get_gpr32(instr.src2() as usize) & 0x1F;
         if count != 0 {
             op1 <<= count;
         }
@@ -278,8 +276,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 // =========================================================================
 
 fn bextrd(val: u32, start: u32, len: u32) -> u32 {
-    let start = start & 0xff;
-    let len = len & 0xff;
+    let start = start & 0xFF;
+    let len = len & 0xFF;
     if start >= 32 {
         return 0;
     }

@@ -9,11 +9,9 @@
 //! Mirrors Bochs `cpu/avx/avx512.cc` broadcast handlers.
 
 use super::avx512_load::cut_opmask_to;
-use super::{
-    cpu::BxCpuC,
-    decoder::{BxSegregs, Instruction},
-    xmm::BxPackedZmmRegister,
-};
+use super::cpu::BxCpuC;
+use super::decoder::{BxSegregs, Instruction};
+use super::xmm::BxPackedZmmRegister;
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]

@@ -56,9 +56,8 @@
 use super::ctx::HookCtx;
 use super::types::{
     BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, InstrAction, IoHookEvent, IoPort,
-    LinAccess,
-    MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType,
-    TlbCntrl,
+    LinAccess, MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent,
+    ResetType, TlbCntrl,
 };
 use crate::cpu::decoder::Instruction;
 
@@ -484,12 +483,16 @@ mod hook_delivery {
     impl PhyWatch {
         /// Whether an access of `len` bytes at `phy` was reported as a read.
         fn read(&self, phy: u64, len: usize) -> bool {
-            self.reads.iter().any(|access| access.phy == phy && access.len == len)
+            self.reads
+                .iter()
+                .any(|access| access.phy == phy && access.len == len)
         }
 
         /// Whether an access of `len` bytes at `phy` was reported as a write.
         fn wrote(&self, phy: u64, len: usize) -> bool {
-            self.writes.iter().any(|access| access.phy == phy && access.len == len)
+            self.writes
+                .iter()
+                .any(|access| access.phy == phy && access.len == len)
         }
 
         /// The memory types reported for accesses at `phy`, reads and writes.
@@ -509,7 +512,11 @@ mod hook_delivery {
         }
 
         fn phy_access(&mut self, ev: &PhyAccess) {
-            let access = PhyRecord { phy: ev.phy.get(), len: ev.data.len(), memtype: ev.memtype };
+            let access = PhyRecord {
+                phy: ev.phy.get(),
+                len: ev.data.len(),
+                memtype: ev.memtype,
+            };
             match ev.rw {
                 MemAccessRW::Write => self.writes.push(access),
                 _ => self.reads.push(access),
@@ -552,7 +559,9 @@ mod hook_delivery {
                 seen.reads
             );
             assert!(
-                seen.writes.iter().any(|access| access.phy >= PML4 && access.len == 8),
+                seen.writes
+                    .iter()
+                    .any(|access| access.phy >= PML4 && access.len == 8),
                 "the accessed/dirty update the same walk performs is a physical \
                  WRITE, and must be reported as one: writes={:x?}",
                 seen.writes
@@ -706,7 +715,9 @@ mod hook_delivery {
             )
             .expect("machine");
             // Vector 0x30 posted, and the descriptor's ON bit set.
-            machine.mem_write(PID + 0x30 / 8, &[1 << (0x30 % 8)]).expect("PIR");
+            machine
+                .mem_write(PID + 0x30 / 8, &[1 << (0x30 % 8)])
+                .expect("PIR");
             machine.mem_write(PID + 32, &[1]).expect("PID.ON");
 
             {
@@ -726,7 +737,11 @@ mod hook_delivery {
 
             let seen = machine.instrumentation();
             assert!(seen.read(PID, 32), "the PIR read: reads={:x?}", seen.reads);
-            assert!(seen.wrote(PID, 32), "the PIR clear: writes={:x?}", seen.writes);
+            assert!(
+                seen.wrote(PID, 32),
+                "the PIR clear: writes={:x?}",
+                seen.writes
+            );
             let pir_bytes = |accesses: &[PhyRecord]| {
                 accesses
                     .iter()
@@ -757,8 +772,7 @@ mod hook_delivery {
     fn an_ept_walk_reports_its_entries_to_the_phy_access_hook() {
         on_a_large_stack(|| {
             use crate::cpu::vmx::{
-                BxRwAccess, VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS,
-                VMX_VM_EXEC_CTRL2_EPT_ENABLE,
+                BxRwAccess, VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS, VMX_VM_EXEC_CTRL2_EPT_ENABLE,
             };
             const EPT_PML4: u64 = 0x20_0000;
             const EPT_PDPT: u64 = 0x20_1000;
@@ -841,7 +855,10 @@ mod hook_delivery {
         }
 
         fn vmexit(&mut self, reason: u32, qualification: u64) {
-            self.exits.push(ReportedExit { reason, qualification });
+            self.exits.push(ReportedExit {
+                reason,
+                qualification,
+            });
         }
 
         fn tlb_cntrl(&mut self, what: TlbCntrl) {
@@ -914,7 +931,10 @@ mod hook_delivery {
                     qualification: 0,
                 }]
             );
-            assert_eq!(seen.context_switches, 1, "the host state load ends in a context switch");
+            assert_eq!(
+                seen.context_switches, 1,
+                "the host state load ends in a context switch"
+            );
         });
     }
 
@@ -1046,7 +1066,9 @@ mod hook_delivery {
             )
             .expect("machine");
             // Present, with bit 5 set — reserved in a PAE PDPTE.
-            machine.mem_write(HOST_PDPT, &0x21u64.to_le_bytes()).expect("PDPTE");
+            machine
+                .mem_write(HOST_PDPT, &0x21u64.to_le_bytes())
+                .expect("PDPTE");
 
             {
                 let mut ctx = machine.exec_ctx(0);
@@ -1054,13 +1076,23 @@ mod hook_delivery {
                 ctx.in_svm_guest = true;
                 let pae_host_cr0 = ctx.cr0.get32() | 0x8000_0001;
                 ctx.vmcb.host_state.cr0.set32(pae_host_cr0);
-                ctx.vmcb.host_state.cr4.insert(crate::cpu::crregs::BxCr4::PAE);
+                ctx.vmcb
+                    .host_state
+                    .cr4
+                    .insert(crate::cpu::crregs::BxCr4::PAE);
                 ctx.vmcb.host_state.cr3 = HOST_PDPT;
                 ctx.vmcb.host_state.rip = HOST_RIP;
                 let exit = ctx.svm_vmexit(crate::cpu::svm::SVM_VMEXIT_INVALID, 0, 0);
                 assert!(matches!(exit, Err(crate::cpu::CpuError::CpuLoopRestart)));
-                assert!(ctx.is_in_shutdown(), "a host with invalid PDPTEs cannot run");
-                assert_ne!(ctx.rip(), HOST_RIP, "the load stopped before the host's RIP");
+                assert!(
+                    ctx.is_in_shutdown(),
+                    "a host with invalid PDPTEs cannot run"
+                );
+                assert_ne!(
+                    ctx.rip(),
+                    HOST_RIP,
+                    "the load stopped before the host's RIP"
+                );
             }
 
             assert_eq!(
@@ -1194,7 +1226,9 @@ mod hook_delivery {
     fn a_sysenter_that_faults_on_its_cs_never_reaches_the_hook() {
         on_a_large_stack(|| {
             let mut machine = sysenter_machine(true);
-            machine.msr_write(BX_MSR_SYSENTER_CS, 0).expect("SYSENTER_CS");
+            machine
+                .msr_write(BX_MSR_SYSENTER_CS, 0)
+                .expect("SYSENTER_CS");
             // What the #GP leads to in this bare machine does not matter here;
             // only whether the hook was asked about the instruction.
             match machine.emu_start(CODE, None, None, Some(1)) {

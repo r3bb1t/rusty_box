@@ -33,10 +33,10 @@ use core::ops::{Deref, DerefMut};
 use std::vec::Vec;
 
 use super::el2::{El2Reg, HCR_TEA, HCR_VM};
-use super::el2_tests::{self, restored, SavedTlb};
+use super::el2_tests::{self, SavedTlb, restored};
 use super::features::{Feature, Implementation};
 use super::mmu::saved_layout::{ENTRY_LEVEL, ENTRY_S2_LEVEL, KEPT_BYTES, KEPT_LEVEL, NOT_WALKED};
-use super::{id, sctlr, El, WithEl2};
+use super::{El, WithEl2, id, sctlr};
 
 const LDR: u32 = 0xF940_0022; // ldr x2, [x1]
 const AT_S1E1R: u32 = 0xD508_7801; // at s1e1r, x1
@@ -129,11 +129,7 @@ const fn translation(level: i32) -> u64 {
     }
 }
 const fn address_size(level: i32) -> u64 {
-    if level == -1 {
-        0b10_1001
-    } else {
-        level as u64
-    }
+    if level == -1 { 0b10_1001 } else { level as u64 }
 }
 const fn external_on_walk(level: i32) -> u64 {
     if level == -1 {

@@ -14,19 +14,15 @@ pub use rusty_box_devices::api::BxPhyAddress;
 pub struct A20Mask(u64);
 
 impl A20Mask {
-    /// The gate open: every address bit kept.
-    pub const OPEN: Self = Self(u64::MAX);
     /// The gate closed: bit 20 forced to zero, as on an 8086.
     pub const CLOSED: Self = Self(0xFFFF_FFFF_FFEF_FFFF);
+    /// The gate open: every address bit kept.
+    pub const OPEN: Self = Self(u64::MAX);
 
     /// The mask of a gate that is open where `enabled` holds.
     #[inline(always)]
     pub const fn of_gate(enabled: bool) -> Self {
-        if enabled {
-            Self::OPEN
-        } else {
-            Self::CLOSED
-        }
+        if enabled { Self::OPEN } else { Self::CLOSED }
     }
 
     /// The mask whose bits are `bits`, as a snapshot holds it; a caller
@@ -178,6 +174,7 @@ impl BxLinAddress {
 
 impl core::ops::Add<u64> for BxLinAddress {
     type Output = Self;
+
     /// [`BxLinAddress::wrapping_add`].
     #[inline(always)]
     fn add(self, distance: u64) -> Self {
@@ -194,6 +191,7 @@ impl core::ops::AddAssign<u64> for BxLinAddress {
 
 impl core::ops::Sub for BxLinAddress {
     type Output = u64;
+
     /// [`BxLinAddress::offset_from`].
     #[inline(always)]
     fn sub(self, base: Self) -> u64 {

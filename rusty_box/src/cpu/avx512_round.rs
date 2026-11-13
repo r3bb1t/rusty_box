@@ -3,47 +3,43 @@
 //! Implements VRNDSCALE, VSCALEF, VGETEXP, VGETMANT (packed and scalar).
 //! Mirrors Bochs `cpu/avx/avx512_pfpmisc.cc`.
 
-use super::softfloat3e::f32_class::f32_class;
-use super::softfloat3e::f64_class::f64_class;
-use super::softfloat3e::internals::{sign_f32, sign_f64};
-use super::softfloat3e::softfloat::{f32_denormal_to_zero, f64_denormal_to_zero,
-    softfloat_denormals_are_zeros, softfloat_raise_flags, SoftFloatClass, FLAG_DIVBYZERO,
-    FLAG_INVALID};
-use super::avx512_rcp14::{
-    approximate_rcp14_f32, approximate_rcp14_f64, approximate_rsqrt14_f32, approximate_rsqrt14_f64,
-};
-use super::softfloat3e::f32_addsub::f32_sub;
-use super::softfloat3e::f32_range::f32_range;
-use super::softfloat3e::f64_addsub::f64_sub;
-use super::softfloat3e::f64_range::f64_range;
-use super::softfloat3e::specialize::{
-    FLOAT32_DEFAULT_NAN, FLOAT32_MAX_FLOAT, FLOAT32_MIN_FLOAT, FLOAT32_NEGATIVE_ONE,
-    FLOAT32_NEGATIVE_ZERO, FLOAT32_POSITIVE_ONE, FLOAT32_POSITIVE_ZERO, FLOAT64_DEFAULT_NAN,
-    FLOAT64_MAX_FLOAT, FLOAT64_MIN_FLOAT, FLOAT64_NEGATIVE_ONE, FLOAT64_NEGATIVE_ZERO,
-    FLOAT64_POSITIVE_ONE, FLOAT64_POSITIVE_ZERO,
-    FLOAT32_NEGATIVE_INF, FLOAT32_POSITIVE_INF, FLOAT64_NEGATIVE_INF, FLOAT64_POSITIVE_INF,
-};
-use super::sse_pfp::mxcsr_to_softfloat_status_word_imm_override;
-use super::softfloat3e::f32_range::{f32_get_exp, f32_get_mant, f32_scalef};
-use super::softfloat3e::f32_round_to_int::f32_round_to_int_scaled;
-use super::softfloat3e::f64_range::{f64_get_exp, f64_get_mant, f64_scalef};
-use super::softfloat3e::f64_round_to_int::f64_round_to_int_scaled;
-use super::softfloat3e::softfloat::{
-    softfloat_suppress_exception, FLAG_DENORMAL, FLAG_OVERFLOW, FLAG_UNDERFLOW,
-    softfloat_get_exception_flags, softfloat_get_rounding_mode, SoftFloatStatus, FLAG_INEXACT,
-};
-use super::softfloat3e::softfloat_types::{Float32, Float64};
-use super::{
-    cpu::BxCpuC,
-    decoder::Instruction,
-    xmm::BxPackedZmmRegister,
-};
 // Load-bearing in pure no-std builds (core f32/f64 lack these inherent
 // methods there); redundant in unit graphs where std is linked, so the
 // unused-import lint is allowed rather than losing the no-std resolution.
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use rusty_box_core::FloatExt;
+
+use super::avx512_rcp14::{
+    approximate_rcp14_f32, approximate_rcp14_f64, approximate_rsqrt14_f32, approximate_rsqrt14_f64,
+};
+use super::cpu::BxCpuC;
+use super::decoder::Instruction;
+use super::softfloat3e::f32_addsub::f32_sub;
+use super::softfloat3e::f32_class::f32_class;
+use super::softfloat3e::f32_range::{f32_get_exp, f32_get_mant, f32_range, f32_scalef};
+use super::softfloat3e::f32_round_to_int::f32_round_to_int_scaled;
+use super::softfloat3e::f64_addsub::f64_sub;
+use super::softfloat3e::f64_class::f64_class;
+use super::softfloat3e::f64_range::{f64_get_exp, f64_get_mant, f64_range, f64_scalef};
+use super::softfloat3e::f64_round_to_int::f64_round_to_int_scaled;
+use super::softfloat3e::internals::{sign_f32, sign_f64};
+use super::softfloat3e::softfloat::{
+    FLAG_DENORMAL, FLAG_DIVBYZERO, FLAG_INEXACT, FLAG_INVALID, FLAG_OVERFLOW, FLAG_UNDERFLOW,
+    SoftFloatClass, SoftFloatStatus, f32_denormal_to_zero, f64_denormal_to_zero,
+    softfloat_denormals_are_zeros, softfloat_get_exception_flags, softfloat_get_rounding_mode,
+    softfloat_raise_flags, softfloat_suppress_exception,
+};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
+use super::softfloat3e::specialize::{
+    FLOAT32_DEFAULT_NAN, FLOAT32_MAX_FLOAT, FLOAT32_MIN_FLOAT, FLOAT32_NEGATIVE_INF,
+    FLOAT32_NEGATIVE_ONE, FLOAT32_NEGATIVE_ZERO, FLOAT32_POSITIVE_INF, FLOAT32_POSITIVE_ONE,
+    FLOAT32_POSITIVE_ZERO, FLOAT64_DEFAULT_NAN, FLOAT64_MAX_FLOAT, FLOAT64_MIN_FLOAT,
+    FLOAT64_NEGATIVE_INF, FLOAT64_NEGATIVE_ONE, FLOAT64_NEGATIVE_ZERO, FLOAT64_POSITIVE_INF,
+    FLOAT64_POSITIVE_ONE, FLOAT64_POSITIVE_ZERO,
+};
+use super::sse_pfp::mxcsr_to_softfloat_status_word_imm_override;
+use super::xmm::BxPackedZmmRegister;
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
@@ -214,7 +210,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Ok(self.evex_load_wsd_pair(instr)?.zmm64u(0))
         }
     }
-
 
     /// VRNDSCALE imm8: bit 2 keeps MXCSR.RC, bits[1:0] otherwise override it,
     /// and bit 3 suppresses the precision exception. Bochs avx512_pfp.cc
@@ -538,10 +533,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut status = self.sse_status();
         crate::cpu::avx::softfloat_rc_override(&mut status, instr);
         mxcsr_to_softfloat_status_word_imm_override(&mut status, control);
-        softfloat_suppress_exception(
-            &mut status,
-            FLAG_DENORMAL | FLAG_UNDERFLOW | FLAG_OVERFLOW,
-        );
+        softfloat_suppress_exception(&mut status, FLAG_DENORMAL | FLAG_UNDERFLOW | FLAG_OVERFLOW);
         (status, control >> 4)
     }
 
@@ -647,7 +639,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
-
 
     // ========================================================================
     // VFIXUPIMM — replace special-cased operands with table-selected
@@ -936,11 +927,11 @@ mod tests {
     //! scale, and VRANGE's carries a magnitude flag and a sign override that
     //! can hand back a value whose sign belongs to neither input's ordering.
 
-    use crate::cpu::decoder::BxSegregs;
-    use crate::cpu::xmm::MXCSR_RESET;
     use rusty_box_decoder::opcode::Opcode;
 
     use super::*;
+    use crate::cpu::decoder::BxSegregs;
+    use crate::cpu::xmm::MXCSR_RESET;
 
     /// Register-form EVEX: dst=0, rm=1, vvvv=2, k0 (all elements active).
     fn evex(opcode: Opcode, vl: u8, imm8: u8) -> Instruction {
@@ -1115,7 +1106,6 @@ mod tests {
             .unwrap();
         assert_eq!(c.vmm[0].zmm64u(0), 12.0f64.to_bits());
     }
-
 }
 
 /// The eight operand classes VFIXUPIMM's response table is indexed by.
@@ -1199,7 +1189,7 @@ pub(super) fn f32_fixupimm(
     }
 
     match (op2 >> (token * 4)) & 0xF {
-        0x1 => tmp_op1, // apply DAZ to the op1 value
+        0x1 => tmp_op1,               // apply DAZ to the op1 value
         0x2 => tmp_op1 | 0x0040_0000, // quieten
         0x3 => FLOAT32_DEFAULT_NAN,
         0x4 => FLOAT32_NEGATIVE_INF,

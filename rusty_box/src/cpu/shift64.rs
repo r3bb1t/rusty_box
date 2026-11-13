@@ -4,9 +4,7 @@
 //!
 //! Implements SHL, SHR, SAR, ROL, ROR, RCL, RCR, SHLD, SHRD for 64-bit operands
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ---- 64-bit read/write helpers for shift instructions ----

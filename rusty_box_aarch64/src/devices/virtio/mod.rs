@@ -97,12 +97,12 @@ pub(crate) mod test_driver;
 #[path = "../../../tests/unit/virtio_transport.rs"]
 mod tests;
 
+use input::Input;
+use queue::{Chain, GuestRam, Queue, QueueFault, RingFeatures};
 use rusty_box_core::snap::{SnapError, SnapRead, SnapResult, SnapWrite};
 
 use crate::bus::{AccessWidth, RegOffset};
 use crate::identity::VirtioVendorId;
-use input::Input;
-use queue::{Chain, GuestRam, Queue, QueueFault, RingFeatures};
 
 /// "virt", little-endian.
 pub const MAGIC: u32 = 0x7472_6976;
@@ -140,8 +140,10 @@ const VIRTIO_F_RING_RESET: u64 = 1 << 40;
 
 /// The features every device here offers on a non-legacy virtio-mmio
 /// transport, before the device adds its own.
-const COMMON_FEATURES: u64 =
-    VIRTIO_RING_F_INDIRECT_DESC | VIRTIO_RING_F_EVENT_IDX | VIRTIO_F_RING_RESET | VIRTIO_F_VERSION_1;
+const COMMON_FEATURES: u64 = VIRTIO_RING_F_INDIRECT_DESC
+    | VIRTIO_RING_F_EVENT_IDX
+    | VIRTIO_F_RING_RESET
+    | VIRTIO_F_VERSION_1;
 
 pub const STATUS_DRIVER_OK: u8 = 0x04;
 const STATUS_FEATURES_OK: u8 = 0x08;
@@ -793,7 +795,10 @@ impl Transport {
         let v = value as u32;
         match off {
             0x014 => self.host_features_sel = v,
-            0x020 => match self.guest_features.get_mut(self.guest_features_sel as usize) {
+            0x020 => match self
+                .guest_features
+                .get_mut(self.guest_features_sel as usize)
+            {
                 Some(word) => *word = v,
                 None => self.guest_features_beyond |= v != 0,
             },
@@ -1017,9 +1022,7 @@ impl Transport {
         // What `write_status` and `Core::error` hold of every status.
         let status = self.core.status;
         if status & STATUS_DRIVER_OK != 0 && status & STATUS_FEATURES_OK == 0 {
-            return Err(SnapError::Invalid(
-                "virtio DRIVER_OK without FEATURES_OK",
-            ));
+            return Err(SnapError::Invalid("virtio DRIVER_OK without FEATURES_OK"));
         }
         if (status & STATUS_NEEDS_RESET != 0) != self.core.broken.is_some() {
             return Err(SnapError::Invalid(

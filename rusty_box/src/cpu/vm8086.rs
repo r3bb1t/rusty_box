@@ -8,11 +8,9 @@
 //! - VME interrupt redirection (v86_redirect_interrupt)
 //! - V8086 segment cache initialization (init_v8086_mode)
 
-use super::{
-    decoder::BxSegregs,
-    descriptor::{SEG_ACCESS_ROK, SEG_ACCESS_WOK, SEG_VALID_CACHE},
-    eflags::EFlags,
-};
+use super::decoder::BxSegregs;
+use super::descriptor::{SEG_ACCESS_ROK, SEG_ACCESS_WOK, SEG_VALID_CACHE};
+use super::eflags::EFlags;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Return from protected mode (CPL=0) to V8086 mode via IRET.

@@ -25,8 +25,7 @@
 //! postfix does not apply here.
 #![allow(clippy::enum_variant_names)]
 
-use super::Encoding;
-use super::Feature;
+use super::{Encoding, Feature};
 use crate::cpu::exec::bits;
 
 /// Kept out of [`super::decode`], as each group is (`dpimm`).

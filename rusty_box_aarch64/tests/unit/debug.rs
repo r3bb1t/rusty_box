@@ -15,7 +15,7 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::Implementation;
-use super::{id, Cpu, CpuConfig, El, NoEl2, Step};
+use super::{Cpu, CpuConfig, El, NoEl2, Step, id};
 use crate::bus::{AccessWidth, BusFault, CodeEpoch, FetchSource, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 

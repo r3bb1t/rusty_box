@@ -10,7 +10,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::store::{FileStore, ListedFile, Placed, Presence, StoreError, MAX_FILE_BYTES};
+use crate::store::{FileStore, ListedFile, MAX_FILE_BYTES, Placed, Presence, StoreError};
 
 pub struct FsStore {
     /// Distinguishes this writer's partial files from other workers' in the
@@ -43,7 +43,10 @@ impl FsStore {
 
     fn partial_path(&mut self, path: &Path) -> PathBuf {
         self.written = self.written.wrapping_add(1);
-        let mut name = path.file_name().map(|name| name.to_owned()).unwrap_or_default();
+        let mut name = path
+            .file_name()
+            .map(|name| name.to_owned())
+            .unwrap_or_default();
         name.push(format!(
             ".{}.{}.{}.partial",
             std::process::id(),
@@ -77,7 +80,9 @@ impl FileStore for FsStore {
         let file = fs::File::open(path).map_err(read_error)?;
         let wanted = u64::try_from(len).unwrap_or(u64::MAX).min(self.read_cap);
         let mut out = Vec::new();
-        file.take(wanted).read_to_end(&mut out).map_err(read_error)?;
+        file.take(wanted)
+            .read_to_end(&mut out)
+            .map_err(read_error)?;
         Ok(out)
     }
 
@@ -190,7 +195,12 @@ impl FileStore for FsStore {
                 Err(error) if error.kind() == io::ErrorKind::NotFound && folder == root => {
                     return Ok(listed);
                 }
-                Err(source) => return Err(StoreError::List { path: folder, source }),
+                Err(source) => {
+                    return Err(StoreError::List {
+                        path: folder,
+                        source,
+                    });
+                }
             };
             for entry in entries {
                 let entry = entry.map_err(|source| StoreError::List {
@@ -229,7 +239,10 @@ mod tests {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_nanos());
-        std::env::temp_dir().join(format!("rusty_box_symbols-{tag}-{}-{nanos}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "rusty_box_symbols-{tag}-{}-{nanos}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -239,10 +252,17 @@ mod tests {
         let mut first = FsStore::new(0);
         let mut second = FsStore::new(1);
         assert_eq!(first.write_new(&path, b"one").unwrap(), Placed::Written);
-        assert_eq!(second.write_new(&path, b"two").unwrap(), Placed::AlreadyPresent);
+        assert_eq!(
+            second.write_new(&path, b"two").unwrap(),
+            Placed::AlreadyPresent
+        );
         assert_eq!(first.read(&path).unwrap(), b"one");
         let listed = first.list_recursive(&root).unwrap();
-        assert_eq!(listed.len(), 1, "no partial file is left behind: {listed:?}");
+        assert_eq!(
+            listed.len(),
+            1,
+            "no partial file is left behind: {listed:?}"
+        );
         assert_eq!(listed[0].bytes, 3);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -279,7 +299,11 @@ mod tests {
         assert_eq!(files.write_new(&path, &[0; 100]).unwrap(), Placed::Written);
         assert!(matches!(
             files.read(&path),
-            Err(StoreError::TooLarge { bytes: 100, cap: 10, .. })
+            Err(StoreError::TooLarge {
+                bytes: 100,
+                cap: 10,
+                ..
+            })
         ));
         fs::remove_dir_all(&root).unwrap();
     }

@@ -15,12 +15,12 @@
 //! (`FPReducePredicated`, `FPReduce`, `FPConvertSVE`, `FPScale`,
 //! `FPClampScale`, `FPLogB`, `FPMulAddH`, `BFMulAddH`, `BFDotAdd`).
 
-use super::{segment_base, Esize, Pv, Zv};
-use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
+use super::{Esize, Pv, Zv, segment_base};
+use crate::cpu::exec::{ExecResult, Flow, bit, bits, sext};
 use crate::cpu::fp::{
-    bf16_mul_add_long, bf16_neg, fp_binary, fp_compare, fp_compare_holds, fp_convert,
-    fp_convert_round_odd, fp_log_b, fp_mul_add, fp_scale, fp_to_int, fp_unary, int_to_fp, FpBinary,
-    FpCompare, FpConversion, FpEnv, FpType, FpUnary, IntWidth,
+    FpBinary, FpCompare, FpConversion, FpEnv, FpType, FpUnary, IntWidth, bf16_mul_add_long,
+    bf16_neg, fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_log_b,
+    fp_mul_add, fp_scale, fp_to_int, fp_unary, int_to_fp,
 };
 use crate::cpu::za::PairFormat;
 use crate::cpu::{Cpu, Levels};

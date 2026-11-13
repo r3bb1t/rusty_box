@@ -93,7 +93,9 @@ pub(crate) struct FoundAt {
 pub(crate) enum FindOutcome {
     Found(FoundAt),
     /// Nothing between the start and `searched_to`.
-    NotFound { searched_to: GuestAddress },
+    NotFound {
+        searched_to: GuestAddress,
+    },
     /// The VM was told to stop while the search ran.
     Abandoned,
     /// The machine has no debugger to search with: the Arm `virt` board,
@@ -138,7 +140,10 @@ fn translate_in<T: Instrumentation, E: SliceEngine<T>>(
     address: u64,
 ) -> Option<u64> {
     let mut debug = emu.debug_cpu(cpu)?;
-    let mut paused = PausedCpu { cpu: &mut debug, vmx_guest };
+    let mut paused = PausedCpu {
+        cpu: &mut debug,
+        vmx_guest,
+    };
     let root = match space {
         AddressSpace::Linear | AddressSpace::Physical => Root::Live,
         AddressSpace::Process { cr3 } => Root::Process(cr3),
@@ -162,7 +167,10 @@ struct Window {
 impl Window {
     /// Keeps only the bytes a hit not yet found could start in.
     fn keep_tail(&mut self, pattern_len: usize) {
-        let drop = self.bytes.len().saturating_sub(pattern_len.saturating_sub(1));
+        let drop = self
+            .bytes
+            .len()
+            .saturating_sub(pattern_len.saturating_sub(1));
         drop_front(&mut self.bytes, drop);
         self.start = self.start.wrapping_add(drop as u64);
     }
@@ -189,7 +197,8 @@ fn find_physical<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
         if abandoned() {
             return FindOutcome::Abandoned;
         }
-        let len = usize::try_from(total.saturating_sub(offset)).map_or(chunk.len(), |left| left.min(chunk.len()));
+        let len = usize::try_from(total.saturating_sub(offset))
+            .map_or(chunk.len(), |left| left.min(chunk.len()));
         // `len` is at most the chunk's length.
         let Some(buf) = chunk.get_mut(..len) else {
             break;
@@ -239,7 +248,9 @@ fn find_linear<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
         if abandoned() {
             return FindOutcome::Abandoned;
         }
-        let page_end = (address & !(PAGE_BYTES - 1)).saturating_add(PAGE_BYTES).min(end);
+        let page_end = (address & !(PAGE_BYTES - 1))
+            .saturating_add(PAGE_BYTES)
+            .min(end);
         // `page_end` lies past `address`, at most a page on.
         let len = page_end.saturating_sub(address) as usize;
         let Some(buf) = page.get_mut(..len) else {
@@ -293,20 +304,42 @@ fn find_linear<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box::cpu::{CpuSetupMode, X86Reg};
     use rusty_box::emulator::EmulatorConfig;
 
+    use super::*;
+
     #[test]
     fn a_search_reads_hex_text_and_utf16() {
-        assert_eq!(pattern_of(SearchEncoding::Hex, "48 8b 05"), Ok(vec![0x48, 0x8B, 0x05]));
-        assert_eq!(pattern_of(SearchEncoding::Hex, "488B05"), Ok(vec![0x48, 0x8B, 0x05]));
-        assert_eq!(pattern_of(SearchEncoding::Hex, "48 8"), Err(PatternError::OddHex));
-        assert_eq!(pattern_of(SearchEncoding::Hex, "zz"), Err(PatternError::NotHex));
-        assert_eq!(pattern_of(SearchEncoding::Hex, "  "), Err(PatternError::Empty));
+        assert_eq!(
+            pattern_of(SearchEncoding::Hex, "48 8b 05"),
+            Ok(vec![0x48, 0x8B, 0x05])
+        );
+        assert_eq!(
+            pattern_of(SearchEncoding::Hex, "488B05"),
+            Ok(vec![0x48, 0x8B, 0x05])
+        );
+        assert_eq!(
+            pattern_of(SearchEncoding::Hex, "48 8"),
+            Err(PatternError::OddHex)
+        );
+        assert_eq!(
+            pattern_of(SearchEncoding::Hex, "zz"),
+            Err(PatternError::NotHex)
+        );
+        assert_eq!(
+            pattern_of(SearchEncoding::Hex, "  "),
+            Err(PatternError::Empty)
+        );
         assert_eq!(pattern_of(SearchEncoding::Text, "XP"), Ok(b"XP".to_vec()));
-        assert_eq!(pattern_of(SearchEncoding::Utf16, "XP"), Ok(vec![b'X', 0, b'P', 0]));
-        assert_eq!(pattern_of(SearchEncoding::Text, ""), Err(PatternError::Empty));
+        assert_eq!(
+            pattern_of(SearchEncoding::Utf16, "XP"),
+            Ok(vec![b'X', 0, b'P', 0])
+        );
+        assert_eq!(
+            pattern_of(SearchEncoding::Text, ""),
+            Err(PatternError::Empty)
+        );
     }
 
     fn long_mode_machine() -> Box<Emulator> {
@@ -324,7 +357,10 @@ mod tests {
             &mut machine,
             0,
             &FindRequest {
-                from: GuestAddress { space: AddressSpace::Physical, value: 0x1000 },
+                from: GuestAddress {
+                    space: AddressSpace::Physical,
+                    value: 0x1000,
+                },
                 pattern: b"needle".to_vec(),
             },
             || false,
@@ -332,7 +368,10 @@ mod tests {
         assert_eq!(
             outcome,
             FindOutcome::Found(FoundAt {
-                at: GuestAddress { space: AddressSpace::Physical, value: at },
+                at: GuestAddress {
+                    space: AddressSpace::Physical,
+                    value: at
+                },
                 len: 6,
             })
         );
@@ -342,13 +381,18 @@ mod tests {
     fn a_linear_search_finds_bytes_through_the_page_tables() {
         let mut machine = long_mode_machine();
         let at = CpuSetupMode::FlatLong64.first_free_physical_address() + 0x2345;
-        machine.mem_write(at, &[0xDE, 0xAD, 0xBE, 0xEF]).expect("write");
+        machine
+            .mem_write(at, &[0xDE, 0xAD, 0xBE, 0xEF])
+            .expect("write");
         machine.reg_write(X86Reg::Rip, at);
         let outcome = find(
             &mut machine,
             0,
             &FindRequest {
-                from: GuestAddress { space: AddressSpace::Linear, value: at & !0xFFF },
+                from: GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: at & !0xFFF,
+                },
                 pattern: vec![0xDE, 0xAD, 0xBE, 0xEF],
             },
             || false,
@@ -356,7 +400,10 @@ mod tests {
         assert_eq!(
             outcome,
             FindOutcome::Found(FoundAt {
-                at: GuestAddress { space: AddressSpace::Linear, value: at },
+                at: GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: at
+                },
                 len: 4,
             })
         );
@@ -369,12 +416,18 @@ mod tests {
             &mut machine,
             0,
             &FindRequest {
-                from: GuestAddress { space: AddressSpace::Physical, value: 0 },
+                from: GuestAddress {
+                    space: AddressSpace::Physical,
+                    value: 0,
+                },
                 pattern: b"no such bytes anywhere in a fresh machine".to_vec(),
             },
             || false,
         );
-        assert!(matches!(outcome, FindOutcome::NotFound { .. }), "{outcome:?}");
+        assert!(
+            matches!(outcome, FindOutcome::NotFound { .. }),
+            "{outcome:?}"
+        );
     }
 
     #[test]
@@ -384,7 +437,10 @@ mod tests {
             &mut machine,
             0,
             &FindRequest {
-                from: GuestAddress { space: AddressSpace::Physical, value: 0 },
+                from: GuestAddress {
+                    space: AddressSpace::Physical,
+                    value: 0,
+                },
                 pattern: b"x".to_vec(),
             },
             || true,

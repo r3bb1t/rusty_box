@@ -1,14 +1,14 @@
 //! The processor as a host sees it: named register access, the architectural
 //! state at one moment, reset, and saving and restoring the whole processor.
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::debug::Stepped;
 use super::el2::{El2State, El2Storage};
 use super::features::{Feature, Features, LeveledImplementation};
 use super::impdef::ImpdefRegs;
-use super::mmu::{El10Context, El2RegimeContext, TlbContext};
+use super::mmu::{El2RegimeContext, El10Context, TlbContext};
 use super::pmu::Pmu;
 use super::regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, RegClass, VReg};
 use super::sysreg::{
@@ -18,8 +18,8 @@ use super::sysreg::{
 use super::timer::VirtualCount;
 use super::wait::{EventRegister, Wait};
 use super::{
-    id, pauth, reset, sme, Activity, Btype, Cpu, El, ExclusiveMonitor, Levels, Pstate, SysRegs,
-    PC_HISTORY,
+    Activity, Btype, Cpu, El, ExclusiveMonitor, Levels, PC_HISTORY, Pstate, SysRegs, id, pauth,
+    reset, sme,
 };
 
 /// How a snapshot names the processor's activity.
@@ -152,8 +152,69 @@ impl SysRegs {
     /// Channel data register wider than its 32 bits, and any of the debug
     /// registers or `RMR_ELx` with a bit set that no write stores.
     fn from_array(a: [u64; SYSREG_COUNT]) -> SnapResult<Self> {
-        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bvr2, bvr3, bvr4, bvr5, bcr0, bcr1, bcr2, bcr3, bcr4, bcr5, wvr0, wvr1, wvr2, wvr3, wcr0, wcr1, wcr2, wcr3, disr_el1, dtrrx, dtrtx, rvbar, rmr] =
-            a;
+        let [
+            sctlr_el1,
+            actlr_el1,
+            cpacr_el1,
+            ttbr0_el1,
+            ttbr1_el1,
+            tcr_el1,
+            spsr_el1,
+            elr_el1,
+            esr_el1,
+            far_el1,
+            afsr0_el1,
+            afsr1_el1,
+            par_el1,
+            mair_el1,
+            amair_el1,
+            vbar_el1,
+            contextidr_el1,
+            tpidr_el0,
+            tpidrro_el0,
+            tpidr_el1,
+            tpidr2_el0,
+            smcr_el1,
+            csselr_el1,
+            cntkctl_el1,
+            cntfrq_el0,
+            cntp_ctl_el0,
+            cntp_cval_el0,
+            cntv_ctl_el0,
+            cntv_cval_el0,
+            mdscr_el1,
+            mdccint_el1,
+            oslsr_el1,
+            osdlr_el1,
+            oseccr_el1,
+            dbgprcr_el1,
+            dbgclaim,
+            bvr0,
+            bvr1,
+            bvr2,
+            bvr3,
+            bvr4,
+            bvr5,
+            bcr0,
+            bcr1,
+            bcr2,
+            bcr3,
+            bcr4,
+            bcr5,
+            wvr0,
+            wvr1,
+            wvr2,
+            wvr3,
+            wcr0,
+            wcr1,
+            wcr2,
+            wcr3,
+            disr_el1,
+            dtrrx,
+            dtrtx,
+            rvbar,
+            rmr,
+        ] = a;
         let dbgbvr = [bvr0, bvr1, bvr2, bvr3, bvr4, bvr5];
         let dbgbcr = [bcr0, bcr1, bcr2, bcr3, bcr4, bcr5];
         let dbgwvr = [wvr0, wvr1, wvr2, wvr3];
@@ -678,7 +739,7 @@ impl<L: Levels> Cpu<L> {
             _ => {
                 return Err(SnapError::Invalid(
                     "processor activity names a wait this core lacks",
-                ))
+                ));
             }
         };
         let timed = matches!(
@@ -754,11 +815,12 @@ impl<L: Levels> Cpu<L> {
 
 #[cfg(test)]
 mod tests {
+    use rusty_box_core::ClockHz;
+
     use super::*;
     use crate::cpu::debug::DebugPoints;
     use crate::cpu::features::Implementation;
     use crate::cpu::{CpuConfig, NoEl2};
-    use rusty_box_core::ClockHz;
 
     /// The implementation the tests' processor has.
     const IMP: Implementation = Implementation {
@@ -943,7 +1005,9 @@ mod tests {
         let dtrrx = SYSREGS_AT + (SYSREG_COUNT - 4) * 8;
         assert_eq!(
             &image[dtrrx..dtrrx + 16],
-            &[0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0, 0xF0, 0xDE, 0xBC, 0x9A, 0, 0, 0, 0]
+            &[
+                0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0, 0xF0, 0xDE, 0xBC, 0x9A, 0, 0, 0, 0
+            ]
         );
         for slot in [dtrrx, dtrrx + 8] {
             let mut wide = image.clone();

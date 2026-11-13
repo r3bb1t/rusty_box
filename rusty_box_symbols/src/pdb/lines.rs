@@ -26,11 +26,21 @@ pub struct Subsection<'a> {
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_subsection(c13: Bytes<'_>, at: usize) -> Result<Subsection<'_>, ReadError> {
     let kind = c13.u32_le(at)?;
-    let len = c13.u32_le(at.checked_add(4).ok_or(ReadError::Truncated { at, len: 8 })?)? as usize;
-    let data_at = at.checked_add(8).ok_or(ReadError::Truncated { at, len: 8 })?;
+    let len = c13.u32_le(
+        at.checked_add(4)
+            .ok_or(ReadError::Truncated { at, len: 8 })?,
+    )? as usize;
+    let data_at = at
+        .checked_add(8)
+        .ok_or(ReadError::Truncated { at, len: 8 })?;
     let data = c13.sub(data_at, len)?;
-    let end = data_at.checked_add(len).ok_or(ReadError::Truncated { at, len })?;
-    let next = end.checked_add(3).map(|end| end & !3).ok_or(ReadError::Truncated { at, len })?;
+    let end = data_at
+        .checked_add(len)
+        .ok_or(ReadError::Truncated { at, len })?;
+    let next = end
+        .checked_add(3)
+        .map(|end| end & !3)
+        .ok_or(ReadError::Truncated { at, len })?;
     Ok(Subsection { kind, data, next })
 }
 
@@ -63,18 +73,33 @@ pub struct LineBlock<'a> {
 
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_block(data: Bytes<'_>, at: usize) -> Result<LineBlock<'_>, ReadError> {
-    let field = |offset: usize| at.checked_add(offset).ok_or(ReadError::Truncated { at, len: offset });
+    let field = |offset: usize| {
+        at.checked_add(offset)
+            .ok_or(ReadError::Truncated { at, len: offset })
+    };
     let file = data.u32_le(at)?;
     let count = data.u32_le(field(4)?)?;
     let block_bytes = data.u32_le(field(8)?)? as usize;
     if block_bytes < BLOCK_HEADER_BYTES {
-        return Err(ReadError::Truncated { at, len: BLOCK_HEADER_BYTES });
+        return Err(ReadError::Truncated {
+            at,
+            len: BLOCK_HEADER_BYTES,
+        });
     }
-    let entries_len = (count as usize)
-        .checked_mul(LINE_ENTRY_BYTES)
-        .ok_or(ReadError::Truncated { at, len: usize::MAX })?;
+    let entries_len =
+        (count as usize)
+            .checked_mul(LINE_ENTRY_BYTES)
+            .ok_or(ReadError::Truncated {
+                at,
+                len: usize::MAX,
+            })?;
     let entries = data.sub(field(BLOCK_HEADER_BYTES)?, entries_len)?;
-    Ok(LineBlock { file, entries, count, next: field(block_bytes)? })
+    Ok(LineBlock {
+        file,
+        entries,
+        count,
+        next: field(block_bytes)?,
+    })
 }
 
 /// Line entry `index`: its code offset and line number.
@@ -88,10 +113,16 @@ pub struct LineEntry {
 pub fn decode_line(entries: Bytes<'_>, index: u32) -> Result<LineEntry, ReadError> {
     let at = (index as usize)
         .checked_mul(LINE_ENTRY_BYTES)
-        .ok_or(ReadError::Truncated { at: usize::MAX, len: LINE_ENTRY_BYTES })?;
+        .ok_or(ReadError::Truncated {
+            at: usize::MAX,
+            len: LINE_ENTRY_BYTES,
+        })?;
     Ok(LineEntry {
         offset: entries.u32_le(at)?,
-        line: entries.u32_le(at.checked_add(4).ok_or(ReadError::Truncated { at, len: 8 })?)? & LINE_MASK,
+        line: entries.u32_le(
+            at.checked_add(4)
+                .ok_or(ReadError::Truncated { at, len: 8 })?,
+        )? & LINE_MASK,
     })
 }
 
@@ -113,9 +144,15 @@ pub struct ChecksumEntry<'a> {
 /// The checksum entry at byte offset `file`, which is how a line block
 /// names its file: u32 name offset, u8 size, u8 kind, `size` bytes.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
-pub fn decode_checksum_entry(checksums: Bytes<'_>, file: u32) -> Result<ChecksumEntry<'_>, ReadError> {
+pub fn decode_checksum_entry(
+    checksums: Bytes<'_>,
+    file: u32,
+) -> Result<ChecksumEntry<'_>, ReadError> {
     let at = file as usize;
-    let field = |offset: usize| at.checked_add(offset).ok_or(ReadError::Truncated { at, len: offset });
+    let field = |offset: usize| {
+        at.checked_add(offset)
+            .ok_or(ReadError::Truncated { at, len: offset })
+    };
     let name = checksums.u32_le(at)?;
     let size = checksums.u8(field(4)?)?;
     let kind = checksums.u8(field(5)?)?;
@@ -146,7 +183,11 @@ mod tests {
         entry.extend_from_slice(&[0xAA; 16]);
         assert_eq!(
             decode_checksum_entry(Bytes::new(&entry), 0),
-            Ok(ChecksumEntry { name: 4, kind: 1, bytes: &[0xAA; 16] })
+            Ok(ChecksumEntry {
+                name: 4,
+                kind: 1,
+                bytes: &[0xAA; 16]
+            })
         );
     }
 
@@ -154,8 +195,17 @@ mod tests {
     fn a_checksum_entry_cut_short_does_not_read() {
         let mut entry = vec![4, 0, 0, 0, 16, 1];
         entry.extend_from_slice(&[0xAA; 8]);
-        assert!(decode_checksum_entry(Bytes::new(&entry), 0).is_err(), "bytes cut short");
-        assert!(decode_checksum_entry(Bytes::new(&entry[..5]), 0).is_err(), "kind cut off");
-        assert!(decode_checksum_entry(Bytes::new(&entry), u32::MAX).is_err(), "past the end");
+        assert!(
+            decode_checksum_entry(Bytes::new(&entry), 0).is_err(),
+            "bytes cut short"
+        );
+        assert!(
+            decode_checksum_entry(Bytes::new(&entry[..5]), 0).is_err(),
+            "kind cut off"
+        );
+        assert!(
+            decode_checksum_entry(Bytes::new(&entry), u32::MAX).is_err(),
+            "past the end"
+        );
     }
 }

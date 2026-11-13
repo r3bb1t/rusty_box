@@ -18,11 +18,12 @@ use rusty_box_devices::api::ChipsetEffect;
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
+    SnapError, SnapRead, SnapResult, SnapWrite, bounds, checked_snapshot_len_add,
+    checked_snapshot_len_mul,
 };
 
 #[cfg(feature = "std")]
-const PIIX3_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0e];
+const PIIX3_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0E];
 
 #[cfg(feature = "std")]
 fn invalid_piix3_snapshot(message: &'static str) -> SnapError {
@@ -43,8 +44,8 @@ fn validate_piix3_snapshot_identity(
     }
     Ok(())
 }
-use crate::cpu::ResetReason;
 use super::IoPort;
+use crate::cpu::ResetReason;
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
 
@@ -292,14 +293,14 @@ impl BxPiix3 {
             _ => {}
         }
     }
-
 }
 
 // ─── PCI Configuration Space ─────────────────────────────────────────────
 
 impl rusty_box_devices::pci::PciDevice for BxPiix3 {
-    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 0);
     type WriteEffects = Piix3WriteEffects;
+
+    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 0);
 
     /// Read from PCI configuration space.
     fn pci_read(&self, address: u8, io_len: u8) -> u32 {
@@ -411,7 +412,6 @@ impl rusty_box_devices::pci::PciDevice for BxPiix3 {
         }
         effects
     }
-
 }
 
 impl BxPiix3 {
@@ -581,7 +581,11 @@ impl BxPiix3 {
             0 => None,
             1 => Some(ResetReason::Software),
             2 => Some(ResetReason::Hardware),
-            _ => return Err(invalid_piix3_snapshot("snapshot PIIX3 reset reason is invalid")),
+            _ => {
+                return Err(invalid_piix3_snapshot(
+                    "snapshot PIIX3 reset reason is invalid",
+                ));
+            }
         };
 
         let expected_devfunc = rusty_box_devices::pci::pci_device(1, 0);
@@ -598,7 +602,7 @@ impl BxPiix3 {
                 ));
             }
             if (pirq_route & 0x80) == 0 {
-                let irq = pirq_route & 0x0f;
+                let irq = pirq_route & 0x0F;
                 if (VALID_PCI_IRQ_MASK & (1u16 << u32::from(irq))) == 0 {
                     return Err(invalid_piix3_snapshot(
                         "snapshot PIIX3 PIRQ route selects an invalid IRQ",
@@ -636,8 +640,9 @@ impl BxPiix3 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box_devices::pci::PciDevice;
+
+    use super::*;
 
     #[test]
     fn test_piix3_new() {
@@ -863,7 +868,9 @@ mod tests {
             else {
                 panic!("the PIIX3 must describe I/O APIC enable as such")
             };
-            ioapic.set_enabled_with_mem(enabled, base_offset, mem).unwrap()
+            ioapic
+                .set_enabled_with_mem(enabled, base_offset, mem)
+                .unwrap()
         };
 
         // pci_conf[0x4f]=1, [0x80]=0 -> enabled at default base. Idempotent

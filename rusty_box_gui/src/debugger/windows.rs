@@ -38,21 +38,20 @@ use std::sync::Arc;
 use rusty_box::cpu::{CpuDebugView, LinearRange, MappingWalk, PageMapping, WalkStep};
 use rusty_box_symbols::units::FieldOffset;
 
-use super::drivers;
 use super::guest::{GuestMemory, GuestRead, Root};
-use super::kernel_layout::{same_layouts, KernelLayout, LayoutSource};
-use super::module_identity::{read_module_identity, GuestIdentity};
 use super::inspect::{ModuleSpace, SymModule, SymbolIndex};
-use super::ssdt;
+use super::kernel_layout::{KernelLayout, LayoutSource, same_layouts};
 use super::memory_map::{self, MemoryMap, ModuleLayout};
-use super::pe::{self, ExportRead, ExportTarget, ImportRead, HEADER_BYTES};
+use super::module_identity::{GuestIdentity, read_module_identity};
+use super::pe::{self, ExportRead, ExportTarget, HEADER_BYTES, ImportRead};
 use super::threads::{
-    decode_trap_frame, frame_is_users, walk_thread_list, SavedRegisters, WinThread, MAX_THREADS,
-    TRAP_FRAME_BYTES,
+    MAX_THREADS, SavedRegisters, TRAP_FRAME_BYTES, WinThread, decode_trap_frame, frame_is_users,
+    walk_thread_list,
 };
 use super::vad::{
-    self, FieldWidth, VadLayout, VadNode, VadRegion, VadRootKind, VadShape, MAX_VAD_NODES,
+    self, FieldWidth, MAX_VAD_NODES, VadLayout, VadNode, VadRegion, VadRootKind, VadShape,
 };
+use super::{drivers, ssdt};
 
 /// The top of a user address space: canonical low half in long mode, and
 /// above every 32-bit user address, so one bound covers native 64-bit, a
@@ -223,7 +222,9 @@ pub(crate) enum GuiMiss {
 impl GuiMiss {
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::NoShadowDescriptor => "The GUI services were not read: KeServiceDescriptorTableShadow was not found.",
+            Self::NoShadowDescriptor => {
+                "The GUI services were not read: KeServiceDescriptorTableShadow was not found."
+            }
             Self::NoWin32k => "The GUI services were not read: no win32k module is loaded.",
             Self::NoSessionProcess => {
                 "The GUI services were not read: no process maps them (they live in a session's address space)."
@@ -668,21 +669,30 @@ impl KernelState {
             .and_then(kernel_pointer);
         KernelState {
             peb_offset: process.peb.map(|offset| offset.0),
-            parent_offset: process.inherited_from_unique_process_id.map(|offset| offset.0),
+            parent_offset: process
+                .inherited_from_unique_process_id
+                .map(|offset| offset.0),
             wow64_offset: process.wow64_process.map(|offset| offset.0),
             threads: seeded_threads(layout),
-            vad: layout
-                .vad
-                .and_then(|tree| process.vad_root.map(|root| VadSite { layout: tree, offset: root.0 })),
+            vad: layout.vad.and_then(|tree| {
+                process.vad_root.map(|root| VadSite {
+                    layout: tree,
+                    offset: root.0,
+                })
+            }),
             object_era: layout.object_era,
             object_root,
             ssdt: SsdtCache {
-                kernel: globals
-                    .service_descriptor_table
-                    .map(|rva| FoundDescriptor { address: base.wrapping_add(rva.0), source: TableSource::Pdb }),
+                kernel: globals.service_descriptor_table.map(|rva| FoundDescriptor {
+                    address: base.wrapping_add(rva.0),
+                    source: TableSource::Pdb,
+                }),
                 shadow: globals
                     .service_descriptor_table_shadow
-                    .map(|rva| FoundDescriptor { address: base.wrapping_add(rva.0), source: TableSource::Pdb }),
+                    .map(|rva| FoundDescriptor {
+                        address: base.wrapping_add(rva.0),
+                        source: TableSource::Pdb,
+                    }),
                 stubs: StubNames::default(),
             },
             layouts: match layout.source {
@@ -710,8 +720,9 @@ fn seeded_threads(layout: &KernelLayout) -> Option<ThreadLayout> {
         head,
         cid: delta(fields.cid)?,
         teb: delta(fields.teb),
-        start: delta(fields.win32_start_address)
-            .and_then(|win32| delta(fields.start_address).map(|kernel| StartLayout { win32, kernel })),
+        start: delta(fields.win32_start_address).and_then(|win32| {
+            delta(fields.start_address).map(|kernel| StartLayout { win32, kernel })
+        }),
         trap_frame: delta(fields.trap_frame),
     })
 }
@@ -778,9 +789,9 @@ impl ReadThrough {
     pub(crate) const fn label(self) -> Option<&'static str> {
         match self {
             Self::ProcessorTables => None,
-            Self::KernelTables { .. } => {
-                Some("read through the kernel's page tables: this pause runs user mode on KVA-shadow tables")
-            }
+            Self::KernelTables { .. } => Some(
+                "read through the kernel's page tables: this pause runs user mode on KVA-shadow tables",
+            ),
         }
     }
 }
@@ -834,7 +845,9 @@ fn kernel_tables<G: GuestMemory>(
 ) -> ReadThrough {
     let mapped = match &discovery.state {
         Some(state) => kernel_stands(cpu, &state.kernel),
-        None => find_kpcr(cpu, view).and_then(|kpcr| kernel_image(cpu, kpcr)).is_some(),
+        None => find_kpcr(cpu, view)
+            .and_then(|kpcr| kernel_image(cpu, kpcr))
+            .is_some(),
     };
     if mapped {
         return ReadThrough::ProcessorTables;
@@ -913,7 +926,14 @@ pub(crate) fn read_windows<G: GuestMemory>(
     discovery: &mut WindowsDiscovery,
     layout: Option<&Arc<KernelLayout>>,
 ) -> WindowsRead {
-    read_windows_finding(cpu, view, request, FindElsewhere::NOTHING, discovery, layout)
+    read_windows_finding(
+        cpu,
+        view,
+        request,
+        FindElsewhere::NOTHING,
+        discovery,
+        layout,
+    )
 }
 
 /// The modules the code, stack and memory panes name an address against (the
@@ -935,12 +955,24 @@ pub(crate) fn read_windows_finding<G: GuestMemory>(
     discovery.under(layout);
     let asked = Asked { request, find };
     match kernel_tables(cpu, view, discovery) {
-        ReadThrough::ProcessorTables => {
-            read_windows_through(cpu, view, asked, discovery, layout, ReadThrough::ProcessorTables)
-        }
+        ReadThrough::ProcessorTables => read_windows_through(
+            cpu,
+            view,
+            asked,
+            discovery,
+            layout,
+            ReadThrough::ProcessorTables,
+        ),
         ReadThrough::KernelTables { cr3 } => {
             let mut kernel = KernelTablesView { cpu, cr3 };
-            read_windows_through(&mut kernel, view, asked, discovery, layout, ReadThrough::KernelTables { cr3 })
+            read_windows_through(
+                &mut kernel,
+                view,
+                asked,
+                discovery,
+                layout,
+                ReadThrough::KernelTables { cr3 },
+            )
         }
     }
 }
@@ -968,7 +1000,10 @@ pub(crate) struct FindElsewhere<'a> {
 #[cfg(test)]
 impl FindElsewhere<'_> {
     /// Nothing looked for.
-    pub(crate) const NOTHING: FindElsewhere<'static> = FindElsewhere { names: &[], shown: None };
+    pub(crate) const NOTHING: FindElsewhere<'static> = FindElsewhere {
+        names: &[],
+        shown: None,
+    };
 }
 
 /// A module of a process other than the one the pause's modules are.
@@ -1018,29 +1053,53 @@ fn modules_elsewhere<G: GuestMemory>(
         Some(cr3) => same_address_space(process.cr3, cr3),
         None => process.current,
     };
-    let wanted: Vec<String> = find.names.iter().map(|name| name.to_ascii_lowercase()).collect();
+    let wanted: Vec<String> = find
+        .names
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
     let mut modules = Vec::new();
     for process in processes.iter().filter(|process| !shown(process)) {
         let read = match current_read.filter(|_| process.current) {
             Some(read) => read.clone(),
-            None => process_modules(cpu, processes, process, &mut *offsets.peb, &mut *offsets.wow64),
+            None => process_modules(
+                cpu,
+                processes,
+                process,
+                &mut *offsets.peb,
+                &mut *offsets.wow64,
+            ),
         };
         let ModuleRead::Listed(listed) = read else {
             continue;
         };
         let ours: Vec<WinModule> = listed
             .into_iter()
-            .filter(|module| module.name.as_deref().is_some_and(|name| wanted.contains(&name.to_ascii_lowercase())))
+            .filter(|module| {
+                module
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| wanted.contains(&name.to_ascii_lowercase()))
+            })
             .collect();
         let mut found = Vec::new();
-        gather_modules(cpu, Root::Process(process.cr3), &mut found, &ours, ModuleSpace::User);
+        gather_modules(
+            cpu,
+            Root::Process(process.cr3),
+            &mut found,
+            &ours,
+            ModuleSpace::User,
+        );
         modules.extend(found.into_iter().map(|module| ProcessModule {
             cr3: process.cr3,
             process: process.name.clone(),
             module,
         }));
     }
-    ModulesElsewhere { names: find.names.to_vec(), modules }
+    ModulesElsewhere {
+        names: find.names.to_vec(),
+        modules,
+    }
 }
 
 /// [`read_windows_finding`] through the page tables `through` names, which
@@ -1098,7 +1157,13 @@ fn read_windows_through<G: GuestMemory>(
         .map(|current| process_modules(cpu, &processes, current, peb_offset, wow64_offset));
 
     let mut named = Vec::new();
-    gather_modules(cpu, Root::Live, &mut named, &kernel_modules, ModuleSpace::Kernel);
+    gather_modules(
+        cpu,
+        Root::Live,
+        &mut named,
+        &kernel_modules,
+        ModuleSpace::Kernel,
+    );
     if let Some(ModuleRead::Listed(user)) = &current_read {
         gather_modules(cpu, Root::Live, &mut named, user, ModuleSpace::User);
     }
@@ -1111,7 +1176,10 @@ fn read_windows_through<G: GuestMemory>(
         &processes,
         current_read.as_ref(),
         find,
-        ProcessOffsets { peb: &mut *peb_offset, wow64: &mut *wow64_offset },
+        ProcessOffsets {
+            peb: &mut *peb_offset,
+            wow64: &mut *wow64_offset,
+        },
     );
 
     let system = match request {
@@ -1176,12 +1244,21 @@ fn read_windows_through<G: GuestMemory>(
                 );
                 let map = match (detail, &read) {
                     (ProcessDetail::MemoryMap, ModuleRead::Listed(modules)) => {
-                        let mut map =
-                            read_memory_map(cpu, process.eprocess, process.cr3, modules, kernel.build, vad);
+                        let mut map = read_memory_map(
+                            cpu,
+                            process.eprocess,
+                            process.cr3,
+                            modules,
+                            kernel.build,
+                            vad,
+                        );
                         memory_map::label_stacks(&mut map, &threads);
                         Some(map)
                     }
-                    (ProcessDetail::MemoryMap, ModuleRead::NoUserSpace | ModuleRead::Unreadable)
+                    (
+                        ProcessDetail::MemoryMap,
+                        ModuleRead::NoUserSpace | ModuleRead::Unreadable,
+                    )
                     | (ProcessDetail::Modules | ProcessDetail::Threads, _) => None,
                 };
                 // The picked module's detail, read in the process's own
@@ -1255,7 +1332,13 @@ fn read_windows_through<G: GuestMemory>(
             }
         }
     };
-    WindowsRead { symbols, system, layouts: Some(layouts), through, elsewhere }
+    WindowsRead {
+        symbols,
+        system,
+        layouts: Some(layouts),
+        through,
+        elsewhere,
+    }
 }
 
 // ───────────────────────────── drivers ──────────────────────────────
@@ -1291,7 +1374,11 @@ fn object_name<G: GuestMemory>(
     body: u64,
 ) -> Option<String> {
     let name_info = name_info_of(cpu, era, body)?;
-    read_unicode_string(cpu, Root::Live, name_info.wrapping_add(drivers::NAME_INFO_NAME))
+    read_unicode_string(
+        cpu,
+        Root::Live,
+        name_info.wrapping_add(drivers::NAME_INFO_NAME),
+    )
 }
 
 /// The directory an object belongs to: its `NAME_INFO.Directory`.
@@ -1377,7 +1464,10 @@ fn object_namespace<G: GuestMemory>(
     }
     let type_export = export(cpu, &kernel.image, "IoDriverObjectType")?;
     let type_object = read_u64(cpu, Root::Live, type_export).and_then(kernel_pointer)?;
-    for era in [drivers::ObjectHeaderEra::Legacy, drivers::ObjectHeaderEra::Modern] {
+    for era in [
+        drivers::ObjectHeaderEra::Legacy,
+        drivers::ObjectHeaderEra::Modern,
+    ] {
         if object_name(cpu, era, type_object).as_deref() != Some("Driver") {
             continue;
         }
@@ -1489,8 +1579,9 @@ fn read_drivers<G: GuestMemory>(
             if found.len() >= drivers::MAX_DRIVERS {
                 break;
             }
-            let Some(device) = read_exact(cpu, Root::Live, device_body, drivers::DEVICE_OBJECT_SPAN)
-                .and_then(|b| drivers::parse_device(&b))
+            let Some(device) =
+                read_exact(cpu, Root::Live, device_body, drivers::DEVICE_OBJECT_SPAN)
+                    .and_then(|b| drivers::parse_device(&b))
             else {
                 continue;
             };
@@ -1500,8 +1591,9 @@ fn read_drivers<G: GuestMemory>(
             if !seen.insert(driver_object) {
                 continue;
             }
-            if let Some(object) = read_exact(cpu, Root::Live, driver_object, drivers::DRIVER_OBJECT_SIZE)
-                .and_then(|b| drivers::parse_driver(&b))
+            if let Some(object) =
+                read_exact(cpu, Root::Live, driver_object, drivers::DRIVER_OBJECT_SIZE)
+                    .and_then(|b| drivers::parse_driver(&b))
             {
                 found.push((driver_object, false, object));
             }
@@ -1526,7 +1618,9 @@ fn read_drivers<G: GuestMemory>(
                     .iter()
                     .chain([&object.start_io, &object.unload])
                     .any(|&addr| {
-                        addr != 0 && classify_pointer(addr, own, modules, default) == PointerSite::NoModule
+                        addr != 0
+                            && classify_pointer(addr, own, modules, default)
+                                == PointerSite::NoModule
                     });
             WinDriver {
                 driver_object: *driver_object,
@@ -1545,11 +1639,7 @@ fn read_drivers<G: GuestMemory>(
 /// A driver's directory for its namespace name: not-in-namespace drivers reach
 /// us through \Device, so they are shown as living there.
 fn namespace_prefix(in_namespace: bool) -> &'static str {
-    if in_namespace {
-        "Driver"
-    } else {
-        "Device"
-    }
+    if in_namespace { "Driver" } else { "Device" }
 }
 
 /// The device objects of the driver at `device_object`, following `NextDevice`.
@@ -1590,8 +1680,8 @@ fn read_driver_detail<G: GuestMemory>(
     root: u64,
     default: Option<u64>,
 ) -> Option<PickedDriver> {
-    let object =
-        read_exact(cpu, Root::Live, driver_object, drivers::DRIVER_OBJECT_SIZE).and_then(|b| drivers::parse_driver(&b))?;
+    let object = read_exact(cpu, Root::Live, driver_object, drivers::DRIVER_OBJECT_SIZE)
+        .and_then(|b| drivers::parse_driver(&b))?;
     let own = module_of(object.start, modules);
     let shown = match detail {
         DriverDetail::Dispatch => {
@@ -1706,7 +1796,9 @@ fn fast_io_entries<G: GuestMemory>(
         .enumerate()
         .filter_map(|(i, name)| {
             // `i` is below NAMES.len(): the offset cannot wrap.
-            let slot = fast_io.wrapping_add(8).wrapping_add((i as u64).wrapping_mul(8));
+            let slot = fast_io
+                .wrapping_add(8)
+                .wrapping_add((i as u64).wrapping_mul(8));
             let addr = read_u64(cpu, Root::Live, slot)?;
             (addr != 0).then(|| DispatchEntry {
                 label: format!("FastIo.{name}"),
@@ -1870,13 +1962,15 @@ fn read_ssdt<G: GuestMemory>(
 /// The kernel's own entry in `modules`, or one made from its image when the
 /// list does not hold it.
 fn kernel_module(image: &PeImage, modules: &[WinModule]) -> WinModule {
-    module_of(image.base, modules).cloned().unwrap_or(WinModule {
-        base: image.base,
-        size: image.size,
-        name: None,
-        path: None,
-        bits: ModuleBits::Bits64,
-    })
+    module_of(image.base, modules)
+        .cloned()
+        .unwrap_or(WinModule {
+            base: image.base,
+            size: image.size,
+            name: None,
+            path: None,
+            bits: ModuleBits::Bits64,
+        })
 }
 
 /// Whether `module` is one of the GUI's kernel images: `win32k.sys`, or
@@ -1897,7 +1991,11 @@ fn session_candidates(processes: &[WinProcess]) -> Vec<&WinProcess> {
     let named = |process: &WinProcess, name: &str| process.name.eq_ignore_ascii_case(name);
     let mut order: Vec<&WinProcess> = user.iter().copied().filter(|p| p.current).collect();
     for name in SESSION_PROCESSES {
-        order.extend(user.iter().copied().filter(|p| !p.current && named(p, name)));
+        order.extend(
+            user.iter()
+                .copied()
+                .filter(|p| !p.current && named(p, name)),
+        );
     }
     order.extend(
         user.iter()
@@ -1928,7 +2026,10 @@ fn read_stub_names<G: GuestMemory>(
     peb_offset: &mut Option<u64>,
     wow64_offset: &mut Option<u64>,
 ) {
-    let gui_stubs_exported = scene.kernel.build.is_none_or(|build| build >= WIN32U_FIRST_BUILD);
+    let gui_stubs_exported = scene
+        .kernel
+        .build
+        .is_none_or(|build| build >= WIN32U_FIRST_BUILD);
     for process in session_candidates(scene.processes) {
         let gui_wanted = gui_stubs_exported && names.gui.is_empty();
         if !names.kernel.is_empty() && !gui_wanted {
@@ -1941,9 +2042,12 @@ fn read_stub_names<G: GuestMemory>(
         };
         let root = Root::Process(process.cr3);
         let native = |name: &str| {
-            modules
-                .iter()
-                .find(|m| m.bits == ModuleBits::Bits64 && m.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name)))
+            modules.iter().find(|m| {
+                m.bits == ModuleBits::Bits64
+                    && m.name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            })
         };
         if names.kernel.is_empty() {
             if let Some(ntdll) = native("ntdll.dll") {
@@ -2014,7 +2118,9 @@ fn list_services<G: GuestMemory>(
             let site = classify_pointer(routine, module_of(routine, owners), modules, None);
             let inline = match site {
                 PointerSite::OwnImage => inline_jump(cpu, root, routine, owners, modules),
-                PointerSite::InModule { .. } | PointerSite::KernelDefault | PointerSite::NoModule => None,
+                PointerSite::InModule { .. }
+                | PointerSite::KernelDefault
+                | PointerSite::NoModule => None,
             };
             if site != PointerSite::OwnImage || inline.is_some() {
                 any_hooked = true;
@@ -2076,7 +2182,12 @@ fn gui_services<G: GuestMemory>(
     code: &mut Option<ssdt::LeaTargets>,
     names: &BTreeMap<u32, String>,
 ) -> GuiServices {
-    let owners: Vec<WinModule> = scene.modules.iter().filter(|m| is_win32k(m)).cloned().collect();
+    let owners: Vec<WinModule> = scene
+        .modules
+        .iter()
+        .filter(|m| is_win32k(m))
+        .cloned()
+        .collect();
     if owners.is_empty() {
         return GuiServices::Missing(GuiMiss::NoWin32k);
     }
@@ -2090,7 +2201,14 @@ fn gui_services<G: GuestMemory>(
         };
         if table.decoding.inside.saturating_mul(2) > table.entries.len() {
             let located = LocatedTable { located, table };
-            return GuiServices::Listed(list_services(cpu, root, &located, &owners, scene.modules, names));
+            return GuiServices::Listed(list_services(
+                cpu,
+                root,
+                &located,
+                &owners,
+                scene.modules,
+                names,
+            ));
         }
     }
     GuiServices::Missing(GuiMiss::NoSessionProcess)
@@ -2168,7 +2286,9 @@ fn read_table<G: GuestMemory>(
         .filter_map(|chunk| <[u8; 4]>::try_from(chunk).ok())
         .map(i32::from_le_bytes)
         .collect();
-    let decoding = ssdt::decode(base, &entries, |routine| module_of(routine, owners).is_some());
+    let decoding = ssdt::decode(base, &entries, |routine| {
+        module_of(routine, owners).is_some()
+    });
     Some(ServiceTable {
         base,
         entries,
@@ -2251,7 +2371,8 @@ fn kernel_table_from_code<G: GuestMemory>(
         })
         .filter(|located| {
             let table = &located.table;
-            image_holds(image, table.base) && table.decoding.inside.saturating_mul(2) > table.entries.len()
+            image_holds(image, table.base)
+                && table.decoding.inside.saturating_mul(2) > table.entries.len()
         })
         .max_by_key(|located| located.table.decoding.inside)
 }
@@ -2269,8 +2390,8 @@ fn lea_targets<'a, G: GuestMemory>(
 /// Every `lea r10/r11, [rip + disp32]` target in the kernel's executable
 /// sections; none when its headers do not read.
 fn scan_kernel_code<G: GuestMemory>(cpu: &mut G, image: &PeImage) -> ssdt::LeaTargets {
-    let Some(sections) =
-        read_exact(cpu, Root::Live, image.base, HEADER_BYTES).and_then(|header| pe::parse_sections(&header))
+    let Some(sections) = read_exact(cpu, Root::Live, image.base, HEADER_BYTES)
+        .and_then(|header| pe::parse_sections(&header))
     else {
         return ssdt::LeaTargets::default();
     };
@@ -2343,7 +2464,9 @@ pub(crate) enum ViewMiss {
     NoSavedState,
     /// The thread runs in user mode on another processor: its trap frame is
     /// an old kernel entry, and its live state is that processor's.
-    RunningElsewhere { cpu: usize },
+    RunningElsewhere {
+        cpu: usize,
+    },
 }
 
 /// A processor running a thread in user mode, by the TEB its GS base holds.
@@ -2357,7 +2480,9 @@ pub(crate) struct LiveTeb {
 /// does.
 pub(crate) fn cpu_running(teb: Option<u64>, live: &[LiveTeb]) -> Option<usize> {
     let teb = teb?;
-    live.iter().find(|running| running.teb == teb).map(|running| running.cpu)
+    live.iter()
+        .find(|running| running.teb == teb)
+        .map(|running| running.cpu)
 }
 
 impl ViewMiss {
@@ -2386,7 +2511,9 @@ impl ViewMiss {
 pub(crate) enum ThreadViewRead {
     /// The process (or thread) asked for is the one the shown processor
     /// runs: its live state is the view.
-    Running { process: String },
+    Running {
+        process: String,
+    },
     Thread(ThreadView),
     Miss(ViewMiss),
 }
@@ -2408,12 +2535,26 @@ pub(crate) fn read_thread_view<G: GuestMemory>(
 ) -> ThreadViewRead {
     discovery.under(layout);
     match kernel_tables(cpu, view, discovery) {
-        ReadThrough::ProcessorTables => {
-            read_thread_view_through(cpu, view, target, live, discovery, layout, ReadThrough::ProcessorTables)
-        }
+        ReadThrough::ProcessorTables => read_thread_view_through(
+            cpu,
+            view,
+            target,
+            live,
+            discovery,
+            layout,
+            ReadThrough::ProcessorTables,
+        ),
         ReadThrough::KernelTables { cr3 } => {
             let mut kernel = KernelTablesView { cpu, cr3 };
-            read_thread_view_through(&mut kernel, view, target, live, discovery, layout, ReadThrough::KernelTables { cr3 })
+            read_thread_view_through(
+                &mut kernel,
+                view,
+                target,
+                live,
+                discovery,
+                layout,
+                ReadThrough::KernelTables { cr3 },
+            )
         }
     }
 }
@@ -2453,7 +2594,10 @@ fn read_thread_view_through<G: GuestMemory>(
     let eprocess = match target {
         ViewTarget::Process { eprocess } | ViewTarget::Thread { eprocess, .. } => eprocess,
     };
-    let Some(process) = processes.iter().find(|process| process.eprocess == eprocess) else {
+    let Some(process) = processes
+        .iter()
+        .find(|process| process.eprocess == eprocess)
+    else {
         return ThreadViewRead::Miss(ViewMiss::NoSuchProcess);
     };
     if process.current && matches!(target, ViewTarget::Process { .. }) {
@@ -2503,8 +2647,20 @@ fn read_thread_view_through<G: GuestMemory>(
         return ThreadViewRead::Miss(ViewMiss::NoSavedState);
     };
     let mut named = Vec::new();
-    gather_modules(cpu, Root::Live, &mut named, &kernel_modules, ModuleSpace::Kernel);
-    gather_modules(cpu, Root::Process(process.cr3), &mut named, listed, ModuleSpace::User);
+    gather_modules(
+        cpu,
+        Root::Live,
+        &mut named,
+        &kernel_modules,
+        ModuleSpace::Kernel,
+    );
+    gather_modules(
+        cpu,
+        Root::Process(process.cr3),
+        &mut named,
+        listed,
+        ModuleSpace::User,
+    );
     ThreadViewRead::Thread(ThreadView {
         process: process.name.clone(),
         pid: process.pid,
@@ -2571,13 +2727,13 @@ fn find_kernel<'a, G: GuestMemory>(
 
 /// Whether `kernel`, found earlier, is still the guest's: its image header
 /// reads and its System process still holds PID 4 at the learned offset.
-fn kernel_stands<G: GuestMemory>(
-    cpu: &mut G,
-    kernel: &Kernel,
-) -> bool {
+fn kernel_stands<G: GuestMemory>(cpu: &mut G, kernel: &Kernel) -> bool {
     read_u16(cpu, Root::Live, kernel.image.base) == Some(MZ)
-        && read_u64(cpu, Root::Live, kernel.system.wrapping_add(kernel.layout.pid))
-            == Some(SYSTEM_PID)
+        && read_u64(
+            cpu,
+            Root::Live,
+            kernel.system.wrapping_add(kernel.layout.pid),
+        ) == Some(SYSTEM_PID)
 }
 
 /// Finds the kernel through the shown processor: its KPCR, the image below
@@ -2644,10 +2800,23 @@ fn pdb_kernel<G: GuestMemory>(
     let lacks_a_member = process.unique_process_id.is_none()
         || process.image_file_name.is_none()
         || process.active_process_links.is_none();
-    let discovered = if lacks_a_member { process_layout(cpu, system) } else { None };
-    let pid = process.unique_process_id.map(|offset| offset.0).or(discovered.as_ref().map(|found| found.pid))?;
-    let name = process.image_file_name.map(|offset| offset.0).or(discovered.as_ref().map(|found| found.name))?;
-    let links = process.active_process_links.map(|offset| offset.0).or(discovered.as_ref().map(|found| found.links))?;
+    let discovered = if lacks_a_member {
+        process_layout(cpu, system)
+    } else {
+        None
+    };
+    let pid = process
+        .unique_process_id
+        .map(|offset| offset.0)
+        .or(discovered.as_ref().map(|found| found.pid))?;
+    let name = process
+        .image_file_name
+        .map(|offset| offset.0)
+        .or(discovered.as_ref().map(|found| found.name))?;
+    let links = process
+        .active_process_links
+        .map(|offset| offset.0)
+        .or(discovered.as_ref().map(|found| found.links))?;
     if read_u64(cpu, Root::Live, system.wrapping_add(pid)) != Some(SYSTEM_PID)
         || read_array::<7, G>(cpu, Root::Live, system.wrapping_add(name)) != Some(*b"System\0")
     {
@@ -2669,17 +2838,16 @@ fn pdb_kernel<G: GuestMemory>(
             pid,
             links,
             name,
-            directory_table_base: process.directory_table_base.map_or(DIRECTORY_TABLE_BASE, |offset| offset.0),
+            directory_table_base: process
+                .directory_table_base
+                .map_or(DIRECTORY_TABLE_BASE, |offset| offset.0),
         },
     })
 }
 
 /// The KPCR: GS in the kernel, `IA32_KERNEL_GS_BASE` in user mode (and in
 /// the kernel between its entry and `SWAPGS`) — whichever points at itself.
-fn find_kpcr<G: GuestMemory>(
-    cpu: &mut G,
-    view: &CpuDebugView,
-) -> Option<u64> {
+fn find_kpcr<G: GuestMemory>(cpu: &mut G, view: &CpuDebugView) -> Option<u64> {
     [view.segment_bases.gs, view.kernel_gs_base]
         .into_iter()
         .filter_map(kernel_pointer)
@@ -2688,10 +2856,7 @@ fn find_kpcr<G: GuestMemory>(
 
 /// Whether a KPCR-shaped address is held but does not read, as when the
 /// processor runs on page tables that leave the kernel out.
-fn kpcr_unreadable<G: GuestMemory>(
-    cpu: &mut G,
-    view: &CpuDebugView,
-) -> bool {
+fn kpcr_unreadable<G: GuestMemory>(cpu: &mut G, view: &CpuDebugView) -> bool {
     [view.segment_bases.gs, view.kernel_gs_base]
         .into_iter()
         .filter_map(kernel_pointer)
@@ -2701,10 +2866,7 @@ fn kpcr_unreadable<G: GuestMemory>(
 /// The kernel image and its `PsInitialSystemProcess`: the first image at or
 /// below interrupt vector 0's handler that exports that variable. Images that
 /// do not (the HAL, which the kernel's handlers may lie above) are passed by.
-fn kernel_image<G: GuestMemory>(
-    cpu: &mut G,
-    kpcr: u64,
-) -> Option<KernelImage> {
+fn kernel_image<G: GuestMemory>(cpu: &mut G, kpcr: u64) -> Option<KernelImage> {
     let idt = kernel_pointer(read_u64(cpu, Root::Live, kpcr.wrapping_add(0x38))?)?;
     let gate: [u8; 16] = read_array(cpu, Root::Live, idt)?;
     // Intel SDM Vol. 3A, "64-bit IDT gate descriptor": offset bits 0–15 at
@@ -2730,10 +2892,7 @@ fn kernel_image<G: GuestMemory>(
 /// The head of the kernel's loaded-module list: its `PsLoadedModuleList`
 /// export, or the debugger data block's copy where it exports none. Either
 /// is taken only when it heads a list whose first entry points back at it.
-fn loaded_module_list<G: GuestMemory>(
-    cpu: &mut G,
-    image: &PeImage,
-) -> Option<u64> {
+fn loaded_module_list<G: GuestMemory>(cpu: &mut G, image: &PeImage) -> Option<u64> {
     if let Some(head) = export(cpu, image, "PsLoadedModuleList") {
         if heads_a_list(cpu, head) {
             return Some(head);
@@ -2755,10 +2914,7 @@ fn heads_a_list<G: GuestMemory>(cpu: &mut G, head: u64) -> bool {
 /// header tag is `KDBG` (at +0x10, the block 8-aligned) and whose `KernBase`
 /// (+0x18) is the image's base. Windows 8 and later keep the block encoded
 /// unless a kernel debugger is attached; their kernels export the list.
-fn debugger_data_module_list<G: GuestMemory>(
-    cpu: &mut G,
-    image: &PeImage,
-) -> Option<u64> {
+fn debugger_data_module_list<G: GuestMemory>(cpu: &mut G, image: &PeImage) -> Option<u64> {
     const TAG: &[u8; 4] = b"KDBG";
     const TAG_OFFSET: u64 = 0x10;
     const KERN_BASE: u64 = 0x18;
@@ -2789,11 +2945,7 @@ fn debugger_data_module_list<G: GuestMemory>(
 }
 
 /// A PE32+ image whose headers start at `base`.
-fn pe_image<G: GuestMemory>(
-    cpu: &mut G,
-    root: Root,
-    base: u64,
-) -> Option<PeImage> {
+fn pe_image<G: GuestMemory>(cpu: &mut G, root: Root, base: u64) -> Option<PeImage> {
     if read_u16(cpu, root, base)? != MZ {
         return None;
     }
@@ -2814,14 +2966,14 @@ fn pe_image<G: GuestMemory>(
 
 /// The address `image` exports under `name`, found by a binary search of its
 /// export name table (sorted, as the PE format requires).
-fn export<G: GuestMemory>(
-    cpu: &mut G,
-    image: &PeImage,
-    name: &str,
-) -> Option<u64> {
+fn export<G: GuestMemory>(cpu: &mut G, image: &PeImage, name: &str) -> Option<u64> {
     let base = image.base;
     // OptionalHeader at +0x18; DataDirectory[EXPORT] at +0x70 of it.
-    let directory = u64::from(read_u32(cpu, Root::Live, image.nt.wrapping_add(0x18 + 0x70))?);
+    let directory = u64::from(read_u32(
+        cpu,
+        Root::Live,
+        image.nt.wrapping_add(0x18 + 0x70),
+    )?);
     if directory == 0 {
         return None;
     }
@@ -2881,10 +3033,7 @@ fn export<G: GuestMemory>(
 }
 
 /// Finds the moving `EPROCESS` fields in the System process.
-fn process_layout<G: GuestMemory>(
-    cpu: &mut G,
-    system: u64,
-) -> Option<ProcessLayout> {
+fn process_layout<G: GuestMemory>(cpu: &mut G, system: u64) -> Option<ProcessLayout> {
     let block = read_exact(cpu, Root::Live, system, EPROCESS_SPAN)?;
     let qword = |offset: usize| {
         block
@@ -2913,9 +3062,7 @@ fn process_layout<G: GuestMemory>(
         }
     }
     let pid = pid?;
-    let name = block
-        .windows(7)
-        .position(|window| window == b"System\0")? as u64;
+    let name = block.windows(7).position(|window| window == b"System\0")? as u64;
     Some(ProcessLayout {
         pid,
         links: pid.wrapping_add(8),
@@ -2935,7 +3082,11 @@ fn list_processes<G: GuestMemory>(
     let layout = &kernel.layout;
     // Only bounds a `contains`: an image that would run past the top of
     // memory reaches to it.
-    let image = kernel.image.base..kernel.image.base.saturating_add(u64::from(kernel.image.size));
+    let image = kernel.image.base
+        ..kernel
+            .image
+            .base
+            .saturating_add(u64::from(kernel.image.size));
     let first = kernel.system.wrapping_add(layout.links);
     let mut processes = Vec::new();
     let mut visited = HashSet::new();
@@ -2949,7 +3100,11 @@ fn list_processes<G: GuestMemory>(
             let eprocess = entry.wrapping_sub(layout.links);
             let (Some(pid), Some(cr3)) = (
                 read_u64(cpu, Root::Live, eprocess.wrapping_add(layout.pid)),
-                read_u64(cpu, Root::Live, eprocess.wrapping_add(layout.directory_table_base)),
+                read_u64(
+                    cpu,
+                    Root::Live,
+                    eprocess.wrapping_add(layout.directory_table_base),
+                ),
             ) else {
                 break;
             };
@@ -3049,11 +3204,7 @@ const THREAD_DELTA_MAX: i64 = 0x400;
 /// How far past `Cid` the start addresses are looked for.
 const START_DELTA_AFTER: i64 = 0x200;
 
-fn read_at<G: GuestMemory>(
-    cpu: &mut G,
-    node: u64,
-    delta: i64,
-) -> Option<u64> {
+fn read_at<G: GuestMemory>(cpu: &mut G, node: u64, delta: i64) -> Option<u64> {
     read_u64(cpu, Root::Live, node.wrapping_add(delta as u64))
 }
 
@@ -3101,7 +3252,10 @@ fn read_threads<G: GuestMemory>(
     }
     // One holder (a process whose threads all left `Win32StartAddress` zero)
     // is looked at again for the pair when a process shows one.
-    if layout.start.is_none_or(|fields| fields.win32 == fields.kernel) {
+    if layout
+        .start
+        .is_none_or(|fields| fields.win32 == fields.kernel)
+    {
         if let Some(found) = find_start_layout(cpu, &nodes, layout.cid, ranges) {
             layout.start = Some(found);
         }
@@ -3117,7 +3271,9 @@ fn read_threads<G: GuestMemory>(
         if let Some(delta) = find_trap_frame_delta(cpu, &nodes, &threads) {
             layout.trap_frame = Some(delta);
             for (thread, &node) in threads.iter_mut().zip(&nodes) {
-                thread.saved = thread.stack.and_then(|stack| saved_registers(cpu, node, delta, stack));
+                thread.saved = thread
+                    .stack
+                    .and_then(|stack| saved_registers(cpu, node, delta, stack));
             }
         }
     }
@@ -3294,15 +3450,13 @@ fn find_start_layout<G: GuestMemory>(
 
 /// The node-relative offset of `Cid`: `UniqueProcess` equals the PID and
 /// `UniqueThread` is a client-ID-shaped value right after it.
-fn find_cid_delta<G: GuestMemory>(
-    cpu: &mut G,
-    node: u64,
-    pid: u64,
-) -> Option<i64> {
-    (THREAD_DELTA_MIN..THREAD_DELTA_MAX).step_by(8).find(|&delta| {
-        read_at(cpu, node, delta) == Some(pid)
-            && read_at(cpu, node, delta.wrapping_add(8)).is_some_and(is_client_id)
-    })
+fn find_cid_delta<G: GuestMemory>(cpu: &mut G, node: u64, pid: u64) -> Option<i64> {
+    (THREAD_DELTA_MIN..THREAD_DELTA_MAX)
+        .step_by(8)
+        .find(|&delta| {
+            read_at(cpu, node, delta) == Some(pid)
+                && read_at(cpu, node, delta.wrapping_add(8)).is_some_and(is_client_id)
+        })
 }
 
 /// The node-relative offset of `KTHREAD.Teb`: the field whose value reads as a
@@ -3311,11 +3465,7 @@ fn find_cid_delta<G: GuestMemory>(
 /// through the process's own address space. The delta that self-references for
 /// the most threads is the field — a stray lower offset might match one thread
 /// by chance, but only the real `Teb` matches every user thread at once.
-fn find_teb_delta<G: GuestMemory>(
-    cpu: &mut G,
-    nodes: &[u64],
-    cr3: u64,
-) -> Option<i64> {
+fn find_teb_delta<G: GuestMemory>(cpu: &mut G, nodes: &[u64], cr3: u64) -> Option<i64> {
     (THREAD_DELTA_MIN..THREAD_DELTA_MAX)
         .step_by(8)
         .map(|delta| {
@@ -3357,8 +3507,10 @@ fn read_thread<G: GuestMemory>(
     let stack = teb.and_then(|teb| {
         let base = read_u64(cpu, user, teb.wrapping_add(0x08))?;
         let limit = read_u64(cpu, user, teb.wrapping_add(0x10))?;
-        (limit < base && user_pointer(base).is_some())
-            .then_some(LinearRange { start: limit, end: base })
+        (limit < base && user_pointer(base).is_some()).then_some(LinearRange {
+            start: limit,
+            end: base,
+        })
     });
     // `Win32StartAddress` is the thread's own entry, set for user threads; a
     // kernel thread has none, so fall back to the kernel `StartAddress`. Both
@@ -3508,7 +3660,15 @@ pub(crate) fn process_tree(processes: &[WinProcess]) -> Vec<TreeRow> {
     // A cycle of parents has no root: list what it left unplaced at the top.
     for index in 0..processes.len() {
         if placed.get(index) == Some(&false) {
-            place(processes, index, 0, Vec::new(), true, &mut placed, &mut rows);
+            place(
+                processes,
+                index,
+                0,
+                Vec::new(),
+                true,
+                &mut placed,
+                &mut rows,
+            );
         }
     }
     rows
@@ -3552,7 +3712,15 @@ fn place(
     let count = children.len();
     for (n, child) in children.into_iter().enumerate() {
         let last = n.saturating_add(1) == count;
-        place(processes, child, depth.saturating_add(1), below.clone(), last, placed, rows);
+        place(
+            processes,
+            child,
+            depth.saturating_add(1),
+            below.clone(),
+            last,
+            placed,
+            rows,
+        );
     }
 }
 
@@ -3689,11 +3857,18 @@ fn read_module_detail<G: GuestMemory>(
 ) -> PickedDetail {
     match detail {
         ModuleDetail::Sections => PickedDetail::Sections(read_module_sections(cpu, space, module)),
-        ModuleDetail::Exports => PickedDetail::Exports(read_module_exports(cpu, space.root, module)),
-        ModuleDetail::Imports => PickedDetail::Imports(read_module_imports(cpu, space.root, module)),
-        ModuleDetail::Symbols => {
-            PickedDetail::Symbols(read_module_identity(cpu, space.root, module.base, module.name.as_deref()))
+        ModuleDetail::Exports => {
+            PickedDetail::Exports(read_module_exports(cpu, space.root, module))
         }
+        ModuleDetail::Imports => {
+            PickedDetail::Imports(read_module_imports(cpu, space.root, module))
+        }
+        ModuleDetail::Symbols => PickedDetail::Symbols(read_module_identity(
+            cpu,
+            space.root,
+            module.base,
+            module.name.as_deref(),
+        )),
     }
 }
 
@@ -3740,11 +3915,7 @@ fn read_module_sections<G: GuestMemory>(
 }
 
 /// A module's exports, read from its export table through `root`.
-fn read_module_exports<G: GuestMemory>(
-    cpu: &mut G,
-    root: Root,
-    module: &WinModule,
-) -> ExportRead {
+fn read_module_exports<G: GuestMemory>(cpu: &mut G, root: Root, module: &WinModule) -> ExportRead {
     let Some(header) = read_exact(cpu, root, module.base, HEADER_BYTES) else {
         return ExportRead::Unreadable;
     };
@@ -3754,11 +3925,7 @@ fn read_module_exports<G: GuestMemory>(
 }
 
 /// A module's imports, read from its import table and IAT through `root`.
-fn read_module_imports<G: GuestMemory>(
-    cpu: &mut G,
-    root: Root,
-    module: &WinModule,
-) -> ImportRead {
+fn read_module_imports<G: GuestMemory>(cpu: &mut G, root: Root, module: &WinModule) -> ImportRead {
     let Some(header) = read_exact(cpu, root, module.base, HEADER_BYTES) else {
         return ImportRead::Unreadable;
     };
@@ -3814,7 +3981,11 @@ fn vads_at<G: GuestMemory>(
     let root = vad_root_at(cpu, eprocess.wrapping_add(offset), layout.root)?;
     // Probe: the root must read as a plausible node before a full walk.
     read_vad_node(cpu, root, &layout)?;
-    let vads = vad::walk(root, |pointer| read_vad_node(cpu, pointer, &layout), MAX_VAD_NODES);
+    let vads = vad::walk(
+        root,
+        |pointer| read_vad_node(cpu, pointer, &layout),
+        MAX_VAD_NODES,
+    );
     vads_cover_modules(&vads, module_bases).then_some(vads)
 }
 
@@ -3826,11 +3997,7 @@ fn vads_at<G: GuestMemory>(
 /// `LeftChild` is null, a signature a wrong `EPROCESS` field does not share.
 /// The real root is the sentinel's `RightChild` (+0x10). `AvlTree`: the field
 /// is an `RTL_AVL_TREE` whose `Root` (+0x0) is the root directly.
-fn vad_root_at<G: GuestMemory>(
-    cpu: &mut G,
-    field: u64,
-    kind: VadRootKind,
-) -> Option<u64> {
+fn vad_root_at<G: GuestMemory>(cpu: &mut G, field: u64, kind: VadRootKind) -> Option<u64> {
     match kind {
         VadRootKind::AvlTable => {
             let parent = read_u64(cpu, Root::Live, field)?;
@@ -3883,11 +4050,7 @@ struct VpnSpan {
 /// Reads one VAD node laid out as `layout` at `pointer`, or `None` when it
 /// does not read as a plausible descriptor (a sentinel, a leaf's null child,
 /// or garbage from a wrong layout).
-fn read_vad_node<G: GuestMemory>(
-    cpu: &mut G,
-    pointer: u64,
-    layout: &VadLayout,
-) -> Option<VadNode> {
+fn read_vad_node<G: GuestMemory>(cpu: &mut G, pointer: u64, layout: &VadLayout) -> Option<VadNode> {
     let node = layout.node;
     let left = read_u64(cpu, Root::Live, pointer.wrapping_add(node.left))?;
     let right = read_u64(cpu, Root::Live, pointer.wrapping_add(node.right))?;
@@ -3897,14 +4060,24 @@ fn read_vad_node<G: GuestMemory>(
             last: read_u64(cpu, Root::Live, pointer.wrapping_add(node.end_vpn))?,
         },
         FieldWidth::Dword => {
-            let mut first = u64::from(read_u32(cpu, Root::Live, pointer.wrapping_add(node.start_vpn))?);
-            let mut last = u64::from(read_u32(cpu, Root::Live, pointer.wrapping_add(node.end_vpn))?);
+            let mut first = u64::from(read_u32(
+                cpu,
+                Root::Live,
+                pointer.wrapping_add(node.start_vpn),
+            )?);
+            let mut last = u64::from(read_u32(
+                cpu,
+                Root::Live,
+                pointer.wrapping_add(node.end_vpn),
+            )?);
             // A high byte is bits 32 to 39 of its page number.
             if let Some(high) = node.start_vpn_high {
-                first |= u64::from(read_u8(cpu, Root::Live, pointer.wrapping_add(high))?).wrapping_shl(32);
+                first |= u64::from(read_u8(cpu, Root::Live, pointer.wrapping_add(high))?)
+                    .wrapping_shl(32);
             }
             if let Some(high) = node.end_vpn_high {
-                last |= u64::from(read_u8(cpu, Root::Live, pointer.wrapping_add(high))?).wrapping_shl(32);
+                last |= u64::from(read_u8(cpu, Root::Live, pointer.wrapping_add(high))?)
+                    .wrapping_shl(32);
             }
             VpnSpan { first, last }
         }
@@ -3918,7 +4091,9 @@ fn read_vad_node<G: GuestMemory>(
     }
     let flags = match node.flags_width {
         FieldWidth::Qword => read_u64(cpu, Root::Live, pointer.wrapping_add(node.flags))?,
-        FieldWidth::Dword => u64::from(read_u32(cpu, Root::Live, pointer.wrapping_add(node.flags))?),
+        FieldWidth::Dword => {
+            u64::from(read_u32(cpu, Root::Live, pointer.wrapping_add(node.flags))?)
+        }
     };
     // No page number reaches past the user half's: rejected before the shift,
     // so a garbage value cannot wrap into a plausible address.
@@ -3948,11 +4123,7 @@ fn read_vad_node<G: GuestMemory>(
     })
 }
 
-fn read_u8<G: GuestMemory>(
-    cpu: &mut G,
-    root: Root,
-    address: u64,
-) -> Option<u8> {
+fn read_u8<G: GuestMemory>(cpu: &mut G, root: Root, address: u64) -> Option<u8> {
     let mut raw = [0u8; 1];
     read_into(cpu, root, address, &mut raw).then_some(raw[0])
 }
@@ -3960,12 +4131,12 @@ fn read_u8<G: GuestMemory>(
 /// The `EPROCESS.Peb` offset: the first field that, in `PEB_WITNESSES`
 /// processes (or every process there is, if fewer), holds a page-aligned
 /// user address whose `ImageBaseAddress` (+0x10) points at an `MZ` image.
-fn find_peb_offset<G: GuestMemory>(
-    cpu: &mut G,
-    processes: &[WinProcess],
-) -> Option<u64> {
+fn find_peb_offset<G: GuestMemory>(cpu: &mut G, processes: &[WinProcess]) -> Option<u64> {
     let mut witnesses = Vec::new();
-    for process in processes.iter().filter(|p| p.pid != SYSTEM_PID && p.pid != 0) {
+    for process in processes
+        .iter()
+        .filter(|p| p.pid != SYSTEM_PID && p.pid != 0)
+    {
         if let Some(block) = read_exact(cpu, Root::Live, process.eprocess, EPROCESS_SPAN) {
             witnesses.push((process.cr3, block));
         }
@@ -4005,11 +4176,7 @@ fn find_peb_offset<G: GuestMemory>(
 }
 
 /// The modules on the loader list headed at `head`, in load order.
-fn list_modules<G: GuestMemory>(
-    cpu: &mut G,
-    root: Root,
-    head: u64,
-) -> Option<Vec<WinModule>> {
+fn list_modules<G: GuestMemory>(cpu: &mut G, root: Root, head: u64) -> Option<Vec<WinModule>> {
     let mut modules = Vec::new();
     let mut visited = HashSet::new();
     let mut entry = read_u64(cpu, root, head)?;
@@ -4090,10 +4257,7 @@ fn wow64_modules_at<G: GuestMemory>(
 /// The `PEB32` address an `EPROCESS.Wow64Process` value stands for: a user
 /// address below 4 GiB held directly (Windows XP through 8.1), or a kernel
 /// pointer to an `EWOW64PROCESS` whose first field is it (Windows 10 on).
-fn peb32_of<G: GuestMemory>(
-    cpu: &mut G,
-    value: u64,
-) -> Option<u64> {
+fn peb32_of<G: GuestMemory>(cpu: &mut G, value: u64) -> Option<u64> {
     // A 32-bit PEB lives in the 32-bit half of the address space.
     let below_4g = |address: u64| user_pointer(address).filter(|&a| a <= u64::from(u32::MAX));
     match kernel_pointer(value) {
@@ -4105,11 +4269,7 @@ fn peb32_of<G: GuestMemory>(
 /// Walks a 32-bit `InLoadOrderModuleList` at `head`: `DllBase` +0x18,
 /// `SizeOfImage` +0x20, `FullDllName` +0x24, `BaseDllName` +0x2C, all 4-byte
 /// `LDR_DATA_TABLE_ENTRY` fields.
-fn list_modules32<G: GuestMemory>(
-    cpu: &mut G,
-    root: Root,
-    head: u64,
-) -> Vec<WinModule> {
+fn list_modules32<G: GuestMemory>(cpu: &mut G, root: Root, head: u64) -> Vec<WinModule> {
     let mut modules = Vec::new();
     let mut visited = HashSet::new();
     let Some(mut entry) = read_u32(cpu, root, head).map(u64::from) else {
@@ -4143,11 +4303,7 @@ fn list_modules32<G: GuestMemory>(
 
 /// A 32-bit `UNICODE_STRING` at `at`: `Length` (bytes) at +0, `Buffer` (a
 /// 4-byte pointer) at +4.
-fn read_unicode_string32<G: GuestMemory>(
-    cpu: &mut G,
-    root: Root,
-    at: u64,
-) -> Option<String> {
+fn read_unicode_string32<G: GuestMemory>(cpu: &mut G, root: Root, at: u64) -> Option<String> {
     let length = read_u16(cpu, root, at)?;
     if length == 0 || length % 2 != 0 || length > MAX_NAME_BYTES {
         return None;
@@ -4168,11 +4324,7 @@ fn utf16_lossy(bytes: &[u8]) -> String {
 }
 
 /// A 64-bit `UNICODE_STRING` at `at`: `Length` (bytes) at +0, `Buffer` at +8.
-fn read_unicode_string<G: GuestMemory>(
-    cpu: &mut G,
-    root: Root,
-    at: u64,
-) -> Option<String> {
+fn read_unicode_string<G: GuestMemory>(cpu: &mut G, root: Root, at: u64) -> Option<String> {
     let length = read_u16(cpu, root, at)?;
     if length == 0 || length % 2 != 0 || length > MAX_NAME_BYTES {
         return None;
@@ -4194,12 +4346,7 @@ fn user_pointer(value: u64) -> Option<u64> {
 
 /// Fills `buf` from linear `address` under `root`; `false` when any page of
 /// it does not map or does not read.
-fn read_into<G: GuestMemory>(
-    cpu: &mut G,
-    root: Root,
-    address: u64,
-    buf: &mut [u8],
-) -> bool {
+fn read_into<G: GuestMemory>(cpu: &mut G, root: Root, address: u64, buf: &mut [u8]) -> bool {
     match cpu.read_linear(root, address, buf) {
         GuestRead::Read => true,
         GuestRead::Unreadable => false,
@@ -4229,38 +4376,27 @@ fn read_array<const N: usize, G: GuestMemory>(
     read_into(cpu, root, address, &mut bytes).then_some(bytes)
 }
 
-fn read_u64<G: GuestMemory>(
-    cpu: &mut G,
-    root: Root,
-    address: u64,
-) -> Option<u64> {
+fn read_u64<G: GuestMemory>(cpu: &mut G, root: Root, address: u64) -> Option<u64> {
     let mut raw = [0u8; 8];
     read_into(cpu, root, address, &mut raw).then(|| u64::from_le_bytes(raw))
 }
 
-fn read_u32<G: GuestMemory>(
-    cpu: &mut G,
-    root: Root,
-    address: u64,
-) -> Option<u32> {
+fn read_u32<G: GuestMemory>(cpu: &mut G, root: Root, address: u64) -> Option<u32> {
     let mut raw = [0u8; 4];
     read_into(cpu, root, address, &mut raw).then(|| u32::from_le_bytes(raw))
 }
 
-fn read_u16<G: GuestMemory>(
-    cpu: &mut G,
-    root: Root,
-    address: u64,
-) -> Option<u16> {
+fn read_u16<G: GuestMemory>(cpu: &mut G, root: Root, address: u64) -> Option<u16> {
     let mut raw = [0u8; 2];
     read_into(cpu, root, address, &mut raw).then(|| u16::from_le_bytes(raw))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box::cpu::CpuSetupMode;
     use rusty_box::emulator::{Emulator, EmulatorConfig};
+
+    use super::*;
 
     #[test]
     fn a_guest_that_is_not_windows_lists_no_kernel() {
@@ -4303,12 +4439,20 @@ mod tests {
         let view = cpu.view();
         let mut discovery = WindowsDiscovery::default();
         for target in [
-            ViewTarget::Process { eprocess: 0xFFFF_FA80_0000_1000 },
-            ViewTarget::Thread { eprocess: 0xFFFF_FA80_0000_1000, tid: 0x1A4 },
+            ViewTarget::Process {
+                eprocess: 0xFFFF_FA80_0000_1000,
+            },
+            ViewTarget::Thread {
+                eprocess: 0xFFFF_FA80_0000_1000,
+                tid: 0x1A4,
+            },
         ] {
             let read = read_thread_view(&mut cpu, &view, target, &[], &mut discovery, None);
             assert!(
-                matches!(read, ThreadViewRead::Miss(ViewMiss::NoWindowsKernel(KernelMiss::NoKpcr))),
+                matches!(
+                    read,
+                    ThreadViewRead::Miss(ViewMiss::NoWindowsKernel(KernelMiss::NoKpcr))
+                ),
                 "{target:?} read as {read:?}"
             );
         }
@@ -4328,7 +4472,11 @@ mod tests {
             assert!(!miss.describe().is_empty(), "{miss:?}");
         }
         assert!(ViewMiss::NoSavedState.describe().contains("saved"));
-        assert!(ViewMiss::RunningElsewhere { cpu: 1 }.describe().contains("CPU 1"));
+        assert!(
+            ViewMiss::RunningElsewhere { cpu: 1 }
+                .describe()
+                .contains("CPU 1")
+        );
     }
 
     /// A thread that a processor runs in user mode is the one whose TEB that
@@ -4337,8 +4485,14 @@ mod tests {
     #[test]
     fn a_thread_running_on_a_processor_is_found_by_its_teb() {
         let live = [
-            LiveTeb { cpu: 0, teb: 0x7FF_FFFD_E000 },
-            LiveTeb { cpu: 1, teb: 0x7FF_FFFD_A000 },
+            LiveTeb {
+                cpu: 0,
+                teb: 0x7FF_FFFD_E000,
+            },
+            LiveTeb {
+                cpu: 1,
+                teb: 0x7FF_FFFD_A000,
+            },
         ];
         assert_eq!(cpu_running(Some(0x7FF_FFFD_A000), &live), Some(1));
         assert_eq!(cpu_running(Some(0x7FF_FFFD_C000), &live), None);
@@ -4435,15 +4589,26 @@ mod tests {
         let pids: Vec<u64> = listing.processes.iter().map(|p| p.pid).collect();
         assert_eq!(pids, [4, 0x1F0, 0x26C]);
         assert_eq!(listing.processes[1].eprocess, fake.eprocess(1));
-        assert!(listing.processes[0].current, "System runs in the live address space");
-        let modules: Vec<&str> = read.symbols.modules.iter().map(|m| m.name.as_str()).collect();
+        assert!(
+            listing.processes[0].current,
+            "System runs in the live address space"
+        );
+        let modules: Vec<&str> = read
+            .symbols
+            .modules
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
         assert_eq!(modules, ["ntoskrnl.exe", "disk.sys"]);
     }
 
     /// The kernel PDB's layouts, as the shell would hand them over for the
     /// PDB `fixture` describes.
     fn pdb_layout(fixture: &rusty_box_symbols_fixtures::pdb::PdbFixture) -> Arc<KernelLayout> {
-        layout_from(fixture, crate::debugger::kernel_layout::LayoutSource::Matched)
+        layout_from(
+            fixture,
+            crate::debugger::kernel_layout::LayoutSource::Matched,
+        )
     }
 
     fn layout_from(
@@ -4451,8 +4616,13 @@ mod tests {
         source: crate::debugger::kernel_layout::LayoutSource,
     ) -> Arc<KernelLayout> {
         let bytes = rusty_box_symbols_fixtures::pdb::build_pdb(fixture);
-        let tables = rusty_box_symbols::tables::SymbolTables::parse(&bytes).expect("the fixture parses");
-        Arc::new(KernelLayout::from_tables(crate::symbols::kernel::tests::kernel_identity(), &tables, source))
+        let tables =
+            rusty_box_symbols::tables::SymbolTables::parse(&bytes).expect("the fixture parses");
+        Arc::new(KernelLayout::from_tables(
+            crate::symbols::kernel::tests::kernel_identity(),
+            &tables,
+            source,
+        ))
     }
 
     /// A PDB of another build the owner loaded by hand, which agrees with
@@ -4462,8 +4632,17 @@ mod tests {
         use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
         let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
         let view = fake.view;
-        let layout = layout_from(&windows10_kernel(), crate::debugger::kernel_layout::LayoutSource::Forced);
-        let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), Some(&layout));
+        let layout = layout_from(
+            &windows10_kernel(),
+            crate::debugger::kernel_layout::LayoutSource::Forced,
+        );
+        let read = read_windows(
+            &mut fake.guest,
+            &view,
+            PROCESSES,
+            &mut WindowsDiscovery::default(),
+            Some(&layout),
+        );
         assert_eq!(read.layouts, Some(KernelLayouts::ForcedPdb));
         assert!(KernelLayouts::ForcedPdb.label().contains("another build"));
     }
@@ -4474,7 +4653,11 @@ mod tests {
 
     fn listed_processes(read: &WindowsRead) -> Vec<String> {
         match &read.system {
-            SystemListing::Processes(listing) => listing.processes.iter().map(|p| format!("{} {}", p.pid, p.name)).collect(),
+            SystemListing::Processes(listing) => listing
+                .processes
+                .iter()
+                .map(|p| format!("{} {}", p.pid, p.name))
+                .collect(),
             other => panic!("the processes read as {other:?}"),
         }
     }
@@ -4490,10 +4673,19 @@ mod tests {
         let discovered = read_windows(&mut fake.guest, &view, PROCESSES, &mut discovery, None);
         assert_eq!(discovered.layouts, Some(KernelLayouts::Discovered));
         let layout = pdb_layout(&windows10_kernel());
-        let by_pdb = read_windows(&mut fake.guest, &view, PROCESSES, &mut discovery, Some(&layout));
+        let by_pdb = read_windows(
+            &mut fake.guest,
+            &view,
+            PROCESSES,
+            &mut discovery,
+            Some(&layout),
+        );
         assert_eq!(by_pdb.layouts, Some(KernelLayouts::Pdb));
         assert_eq!(listed_processes(&by_pdb), listed_processes(&discovered));
-        assert_eq!(listed_processes(&by_pdb), ["4 System", "496 smss.exe", "620 csrss.exe"]);
+        assert_eq!(
+            listed_processes(&by_pdb),
+            ["4 System", "496 smss.exe", "620 csrss.exe"]
+        );
     }
 
     /// Review focus 2: a PDB of another build (here, an older layout of
@@ -4515,9 +4707,18 @@ mod tests {
             }
         }
         let layout = pdb_layout(&wrong);
-        let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), Some(&layout));
+        let read = read_windows(
+            &mut fake.guest,
+            &view,
+            PROCESSES,
+            &mut WindowsDiscovery::default(),
+            Some(&layout),
+        );
         assert_eq!(read.layouts, Some(KernelLayouts::PdbDisagrees));
-        assert_eq!(listed_processes(&read), ["4 System", "496 smss.exe", "620 csrss.exe"]);
+        assert_eq!(
+            listed_processes(&read),
+            ["4 System", "496 smss.exe", "620 csrss.exe"]
+        );
     }
 
     /// A PDB lacking one `_EPROCESS` member, or the `PsInitialSystemProcess`
@@ -4529,22 +4730,34 @@ mod tests {
         let without_links = {
             let mut pdb = windows10_kernel();
             if let Some(eprocess) = pdb.types.iter_mut().find(|udt| udt.name == "_EPROCESS") {
-                eprocess.fields.retain(|field| field.name != "ActiveProcessLinks");
+                eprocess
+                    .fields
+                    .retain(|field| field.name != "ActiveProcessLinks");
             }
             pdb
         };
         let without_system = {
             let mut pdb = windows10_kernel();
-            pdb.publics.retain(|public| public.name != "PsInitialSystemProcess");
+            pdb.publics
+                .retain(|public| public.name != "PsInitialSystemProcess");
             pdb
         };
         for pdb in [without_links, without_system] {
             let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
             let view = fake.view;
             let layout = pdb_layout(&pdb);
-            let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), Some(&layout));
+            let read = read_windows(
+                &mut fake.guest,
+                &view,
+                PROCESSES,
+                &mut WindowsDiscovery::default(),
+                Some(&layout),
+            );
             assert_eq!(read.layouts, Some(KernelLayouts::Pdb));
-            assert_eq!(listed_processes(&read), ["4 System", "496 smss.exe", "620 csrss.exe"]);
+            assert_eq!(
+                listed_processes(&read),
+                ["4 System", "496 smss.exe", "620 csrss.exe"]
+            );
         }
     }
 
@@ -4573,9 +4786,17 @@ mod tests {
         let vad = state.vad.expect("the VAD site");
         assert_eq!(vad.offset, 0x7D8);
         // The PDB fixture is Windows 10 22H2's, build 19045.
-        assert_eq!(vad.layout, vad::shape_layout(VadShape::BalancedNode, Some(19045)));
+        assert_eq!(
+            vad.layout,
+            vad::shape_layout(VadShape::BalancedNode, Some(19045))
+        );
         assert_eq!(state.object_era, Some(drivers::ObjectHeaderEra::Modern));
-        let pdb = |address| Some(FoundDescriptor { address, source: TableSource::Pdb });
+        let pdb = |address| {
+            Some(FoundDescriptor {
+                address,
+                source: TableSource::Pdb,
+            })
+        };
         assert_eq!(state.ssdt.kernel, pdb(KERNEL_BASE + 0x3040));
         assert_eq!(state.ssdt.shadow, pdb(KERNEL_BASE + 0x3080));
         assert_eq!(state.kernel.layout.directory_table_base, 0x28);
@@ -4591,9 +4812,17 @@ mod tests {
         let view = fake.view;
         let state = discover_kernel(&mut fake.guest, &view, None).expect("the kernel");
         assert_eq!(state.kernel.build, Some(19045));
-        let by_pdb = discover_kernel(&mut fake.guest, &view, Some(&pdb_layout(&windows10_kernel()))).expect("the kernel");
+        let by_pdb = discover_kernel(
+            &mut fake.guest,
+            &view,
+            Some(&pdb_layout(&windows10_kernel())),
+        )
+        .expect("the kernel");
         assert_eq!(by_pdb.kernel.build, Some(19045));
-        let mut unexported = FakeWindows::build(FakeWindowsSpec { build_number: None, ..FakeWindowsSpec::typical() });
+        let mut unexported = FakeWindows::build(FakeWindowsSpec {
+            build_number: None,
+            ..FakeWindowsSpec::typical()
+        });
         let view = unexported.view;
         let state = discover_kernel(&mut unexported.guest, &view, None).expect("the kernel");
         assert_eq!(state.kernel.build, None);
@@ -4607,12 +4836,25 @@ mod tests {
     }
 
     fn stub_names(table: &ServiceTableRead) -> Vec<String> {
-        table.services.iter().map(|service| service.stub_name.clone().unwrap_or_default()).collect()
+        table
+            .services
+            .iter()
+            .map(|service| service.stub_name.clone().unwrap_or_default())
+            .collect()
     }
 
-    fn read_services(fake: &mut crate::debugger::fake_windows::FakeWindows, layout: Option<&Arc<KernelLayout>>) -> SsdtListing {
+    fn read_services(
+        fake: &mut crate::debugger::fake_windows::FakeWindows,
+        layout: Option<&Arc<KernelLayout>>,
+    ) -> SsdtListing {
         let view = fake.view;
-        ssdt_of(read_windows(&mut fake.guest, &view, SystemView::Ssdt, &mut WindowsDiscovery::default(), layout))
+        ssdt_of(read_windows(
+            &mut fake.guest,
+            &view,
+            SystemView::Ssdt,
+            &mut WindowsDiscovery::default(),
+            layout,
+        ))
     }
 
     /// With no PDB and no export, both tables are found through
@@ -4627,7 +4869,10 @@ mod tests {
         let kernel = &listing.kernel;
         assert_eq!(kernel.source, TableSource::Code);
         assert_eq!(kernel.place, TablePlace::InOwner);
-        assert_eq!(stub_names(kernel), ["NtClose", "NtCreateFile", "NtOpenProcess"]);
+        assert_eq!(
+            stub_names(kernel),
+            ["NtClose", "NtCreateFile", "NtOpenProcess"]
+        );
         assert_eq!(kernel.services[1].routine, FakeWindows::kernel_routine(1));
         assert_eq!(kernel.services[1].site, PointerSite::OwnImage);
         assert!(!kernel.any_hooked);
@@ -4648,14 +4893,18 @@ mod tests {
         let layout = pdb_layout(&windows10_kernel());
         let listing = read_services(&mut fake, Some(&layout));
         assert_eq!(listing.kernel.source, TableSource::Pdb);
-        assert!(matches!(&listing.gui, GuiServices::Listed(gui) if gui.source == TableSource::Pdb), "{:?}", listing.gui);
+        assert!(
+            matches!(&listing.gui, GuiServices::Listed(gui) if gui.source == TableSource::Pdb),
+            "{:?}",
+            listing.gui
+        );
     }
 
     /// An entry that leads into another driver is hooked; a routine whose
     /// first instruction jumps into another driver is an inline hook.
     #[test]
     fn an_entry_or_a_first_jump_out_of_the_kernel_is_a_hook() {
-        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec, DISK_BASE};
+        use crate::debugger::fake_windows::{DISK_BASE, FakeWindows, FakeWindowsSpec};
         let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
         fake.set_kernel_entry(1, DISK_BASE + 0x100);
         let patched = FakeWindows::kernel_routine(2);
@@ -4665,11 +4914,23 @@ mod tests {
         fake.patch_kernel_routine(2, &jump);
         let listing = read_services(&mut fake, None);
         let services = &listing.kernel.services;
-        assert_eq!(services[1].site, PointerSite::InModule { base: DISK_BASE, off: 0x100 });
+        assert_eq!(
+            services[1].site,
+            PointerSite::InModule {
+                base: DISK_BASE,
+                off: 0x100
+            }
+        );
         assert_eq!(services[1].module_name.as_deref(), Some("disk.sys"));
         assert!(listing.kernel.any_hooked);
         assert_eq!(services[2].site, PointerSite::OwnImage);
-        assert_eq!(services[2].inline, Some(InlineJump { target, module_name: Some("disk.sys".to_owned()) }));
+        assert_eq!(
+            services[2].inline,
+            Some(InlineJump {
+                target,
+                module_name: Some("disk.sys".to_owned())
+            })
+        );
         assert_eq!(services[0].inline, None);
     }
 
@@ -4677,7 +4938,7 @@ mod tests {
     /// inline hook to where the slot points.
     #[test]
     fn a_jump_through_a_slot_out_of_the_kernel_is_an_inline_hook() {
-        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec, DISK_BASE};
+        use crate::debugger::fake_windows::{DISK_BASE, FakeWindows, FakeWindowsSpec};
         let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
         let target = DISK_BASE + 0x300;
         let mut jump = vec![0xFF, 0x25, 0, 0, 0, 0];
@@ -4686,7 +4947,13 @@ mod tests {
         let listing = read_services(&mut fake, None);
         let service = &listing.kernel.services[0];
         assert_eq!(service.site, PointerSite::OwnImage);
-        assert_eq!(service.inline, Some(InlineJump { target, module_name: Some("disk.sys".to_owned()) }));
+        assert_eq!(
+            service.inline,
+            Some(InlineJump {
+                target,
+                module_name: Some("disk.sys".to_owned())
+            })
+        );
         assert!(listing.kernel.any_hooked);
     }
 
@@ -4696,22 +4963,37 @@ mod tests {
     #[test]
     fn a_table_swapped_whole_is_listed_as_moved() {
         use crate::debugger::fake_windows::{
-            FakeWindows, FakeWindowsSpec, DISK_BASE, KERNEL_BASE, LIVE_CR3, SERVICE_DESCRIPTOR_RVA,
+            DISK_BASE, FakeWindows, FakeWindowsSpec, KERNEL_BASE, LIVE_CR3, SERVICE_DESCRIPTOR_RVA,
         };
         let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
         let copy = DISK_BASE + 0x1000;
         for index in 0..3u32 {
             let offset = FakeWindows::kernel_routine(index).wrapping_sub(copy) as i64;
-            fake.guest.write_u32(LIVE_CR3, copy + 4 * u64::from(index), ((offset << 4) | 2) as u32);
+            fake.guest.write_u32(
+                LIVE_CR3,
+                copy + 4 * u64::from(index),
+                ((offset << 4) | 2) as u32,
+            );
         }
-        fake.guest.write_u64(LIVE_CR3, KERNEL_BASE + SERVICE_DESCRIPTOR_RVA, copy);
+        fake.guest
+            .write_u64(LIVE_CR3, KERNEL_BASE + SERVICE_DESCRIPTOR_RVA, copy);
         let layout = pdb_layout(&windows10_kernel());
         let listing = read_services(&mut fake, Some(&layout));
         assert_eq!(listing.kernel.place, TablePlace::Outside);
         assert_eq!(listing.kernel.base, copy);
-        assert_eq!(listing.kernel.services[2].routine, FakeWindows::kernel_routine(2));
-        assert_eq!(stub_names(&listing.kernel), ["NtClose", "NtCreateFile", "NtOpenProcess"]);
-        assert!(matches!(&listing.gui, GuiServices::Listed(gui) if gui.services.len() == 2), "{:?}", listing.gui);
+        assert_eq!(
+            listing.kernel.services[2].routine,
+            FakeWindows::kernel_routine(2)
+        );
+        assert_eq!(
+            stub_names(&listing.kernel),
+            ["NtClose", "NtCreateFile", "NtOpenProcess"]
+        );
+        assert!(
+            matches!(&listing.gui, GuiServices::Listed(gui) if gui.services.len() == 2),
+            "{:?}",
+            listing.gui
+        );
     }
 
     /// A guest whose GUI table cannot be read says why: no `win32k`, or no
@@ -4751,11 +5033,24 @@ mod tests {
             panic!("the processes read as {:?}", read.system);
         };
         assert_eq!(listing.processes.len(), 3);
-        let current: Vec<&str> = listing.processes.iter().filter(|p| p.current).map(|p| p.name.as_str()).collect();
+        let current: Vec<&str> = listing
+            .processes
+            .iter()
+            .filter(|p| p.current)
+            .map(|p| p.name.as_str())
+            .collect();
         assert_eq!(current, ["csrss.exe"]);
-        assert!(matches!(&listing.modules, Some(modules) if matches!(&modules.read, ModuleRead::Listed(listed) if listed.len() == 3)));
+        assert!(
+            matches!(&listing.modules, Some(modules) if matches!(&modules.read, ModuleRead::Listed(listed) if listed.len() == 3))
+        );
         assert_eq!(discovery.kva_shadow, Some(KPRCB_SHADOW_OFFSET));
-        let ssdt = ssdt_of(read_windows(&mut fake.guest, &view, SystemView::Ssdt, &mut discovery, None));
+        let ssdt = ssdt_of(read_windows(
+            &mut fake.guest,
+            &view,
+            SystemView::Ssdt,
+            &mut discovery,
+            None,
+        ));
         assert_eq!(ssdt.kernel.services.len(), 3);
     }
 
@@ -4769,9 +5064,18 @@ mod tests {
             let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
             fake.pause_in_user_mode_under_kva_shadow(0x3_0000, value);
             let view = fake.view;
-            let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), None);
+            let read = read_windows(
+                &mut fake.guest,
+                &view,
+                PROCESSES,
+                &mut WindowsDiscovery::default(),
+                None,
+            );
             assert!(
-                matches!(read.system, SystemListing::NoWindowsKernel(KernelMiss::KernelUnmapped)),
+                matches!(
+                    read.system,
+                    SystemListing::NoWindowsKernel(KernelMiss::KernelUnmapped)
+                ),
                 "{value:#x}: {:?}",
                 read.system
             );
@@ -4785,24 +5089,49 @@ mod tests {
     #[test]
     fn a_pause_in_a_hypervisor_reads_windows_as_the_guest_its_vmcs_holds() {
         use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
-        use crate::debugger::guest::{vmx_guest_view, LiveAt, PausedCpu};
+        use crate::debugger::guest::{LiveAt, PausedCpu, vmx_guest_view};
         let fake = FakeWindows::build(FakeWindowsSpec::with_services());
         let user_process = fake.eprocess(1);
         let mut pause = fake.pause_in_a_hypervisor();
-        let mut own = PausedCpu { cpu: &mut pause.host, vmx_guest: None };
-        let read = read_windows(&mut own, &pause.view, PROCESSES, &mut WindowsDiscovery::default(), None);
-        assert!(matches!(read.system, SystemListing::NoWindowsKernel(_)), "{:?}", read.system);
+        let mut own = PausedCpu {
+            cpu: &mut pause.host,
+            vmx_guest: None,
+        };
+        let read = read_windows(
+            &mut own,
+            &pause.view,
+            PROCESSES,
+            &mut WindowsDiscovery::default(),
+            None,
+        );
+        assert!(
+            matches!(read.system, SystemListing::NoWindowsKernel(_)),
+            "{:?}",
+            read.system
+        );
 
         let view = vmx_guest_view(&pause.guest, &pause.view);
-        let mut paused = PausedCpu { cpu: &mut pause.host, vmx_guest: Some(pause.guest) };
-        let mut guest = LiveAt { memory: &mut paused, live_cr3: Some(pause.guest.cr3) };
+        let mut paused = PausedCpu {
+            cpu: &mut pause.host,
+            vmx_guest: Some(pause.guest),
+        };
+        let mut guest = LiveAt {
+            memory: &mut paused,
+            live_cr3: Some(pause.guest.cr3),
+        };
         let mut discovery = WindowsDiscovery::default();
         let read = read_windows(&mut guest, &view, PROCESSES, &mut discovery, None);
         let SystemListing::Processes(listing) = &read.system else {
             panic!("the processes read as {:?}", read.system);
         };
         assert_eq!(listing.processes.len(), 3);
-        let ssdt = ssdt_of(read_windows(&mut guest, &view, SystemView::Ssdt, &mut discovery, None));
+        let ssdt = ssdt_of(read_windows(
+            &mut guest,
+            &view,
+            SystemView::Ssdt,
+            &mut discovery,
+            None,
+        ));
         assert_eq!(ssdt.kernel.services.len(), 3);
         assert!(matches!(ssdt.gui, GuiServices::Listed(_)), "{:?}", ssdt.gui);
 
@@ -4816,9 +5145,18 @@ mod tests {
         let SystemListing::Processes(listing) = &read.system else {
             panic!("the processes read as {:?}", read.system);
         };
-        let map = listing.modules.as_ref().and_then(|modules| modules.map.as_ref());
-        let resident: u64 = map.map_or(0, |map| map.regions.iter().map(|region| region.resident_pages).sum());
-        assert!(resident > 0, "the process's pages are walked in the guest: {:?}", listing.modules);
+        let map = listing
+            .modules
+            .as_ref()
+            .and_then(|modules| modules.map.as_ref());
+        let resident: u64 = map.map_or(0, |map| {
+            map.regions.iter().map(|region| region.resident_pages).sum()
+        });
+        assert!(
+            resident > 0,
+            "the process's pages are walked in the guest: {:?}",
+            listing.modules
+        );
     }
 
     /// A kernel-mode pause reads through the processor's own tables.
@@ -4827,7 +5165,13 @@ mod tests {
         use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
         let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
         let view = fake.view;
-        let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), None);
+        let read = read_windows(
+            &mut fake.guest,
+            &view,
+            PROCESSES,
+            &mut WindowsDiscovery::default(),
+            None,
+        );
         assert_eq!(read.through, ReadThrough::ProcessorTables);
     }
 
@@ -4841,7 +5185,9 @@ mod tests {
 
     fn process_names(read: &WindowsRead) -> Vec<String> {
         match &read.system {
-            SystemListing::Processes(listing) => listing.processes.iter().map(|p| p.name.clone()).collect(),
+            SystemListing::Processes(listing) => {
+                listing.processes.iter().map(|p| p.name.clone()).collect()
+            }
             other => panic!("the processes read as {other:?}"),
         }
     }
@@ -4855,9 +5201,16 @@ mod tests {
         let links = spec.eprocess.unique_process_id + 8;
         let mut fake = FakeWindows::build(spec);
         let smss = fake.eprocess(1);
-        fake.guest.write_u64(LIVE_CR3, smss + links, 0xFFFF_FFFF_FFFF_FFF8);
+        fake.guest
+            .write_u64(LIVE_CR3, smss + links, 0xFFFF_FFFF_FFFF_FFF8);
         let view = fake.view;
-        let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), None);
+        let read = read_windows(
+            &mut fake.guest,
+            &view,
+            PROCESSES,
+            &mut WindowsDiscovery::default(),
+            None,
+        );
         assert_eq!(process_names(&read), ["System", "smss.exe"]);
     }
 
@@ -4866,14 +5219,27 @@ mod tests {
     /// found and nothing is listed.
     #[test]
     fn an_export_table_that_claims_every_name_finds_no_kernel() {
-        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec, EXPORTS_RVA, KERNEL_BASE, LIVE_CR3};
+        use crate::debugger::fake_windows::{
+            EXPORTS_RVA, FakeWindows, FakeWindowsSpec, KERNEL_BASE, LIVE_CR3,
+        };
         let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
         let directory = KERNEL_BASE + EXPORTS_RVA;
         fake.guest.write_u32(LIVE_CR3, directory + 0x18, u32::MAX);
-        fake.guest.write_u32(LIVE_CR3, directory + 0x20, 0xFFFF_FFF0);
+        fake.guest
+            .write_u32(LIVE_CR3, directory + 0x20, 0xFFFF_FFF0);
         let view = fake.view;
-        let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), None);
-        assert!(read.symbols.modules.is_empty(), "{:?}", read.symbols.modules);
+        let read = read_windows(
+            &mut fake.guest,
+            &view,
+            PROCESSES,
+            &mut WindowsDiscovery::default(),
+            None,
+        );
+        assert!(
+            read.symbols.modules.is_empty(),
+            "{:?}",
+            read.symbols.modules
+        );
     }
 
     /// Review focus 1: a driver whose image would run past the top of the
@@ -4888,22 +5254,46 @@ mod tests {
             base: edge,
             size: 0x20_0000,
             time_date_stamp: 1,
-            pdb: FakePdb { guid: [0x22; 16], age: 1, path: "edge.pdb" },
+            pdb: FakePdb {
+                guid: [0x22; 16],
+                age: 1,
+                path: "edge.pdb",
+            },
             sections: Vec::new(),
         });
         let mut fake = FakeWindows::build(spec);
         let view = fake.view;
-        let request = SystemView::KernelModules { selected: Some(edge), detail: ModuleDetail::Sections };
-        let read = read_windows(&mut fake.guest, &view, request, &mut WindowsDiscovery::default(), None);
-        let modules: Vec<&str> = read.symbols.modules.iter().map(|m| m.name.as_str()).collect();
+        let request = SystemView::KernelModules {
+            selected: Some(edge),
+            detail: ModuleDetail::Sections,
+        };
+        let read = read_windows(
+            &mut fake.guest,
+            &view,
+            request,
+            &mut WindowsDiscovery::default(),
+            None,
+        );
+        let modules: Vec<&str> = read
+            .symbols
+            .modules
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
         assert_eq!(modules, ["ntoskrnl.exe", "disk.sys", "edge.sys"]);
     }
 
     #[test]
     fn a_page_number_that_would_wrap_is_not_a_region() {
         let wrapped = (1u64 << 52) | 0x10;
-        assert!(wrapped << 12 < USER_SPACE_END, "the shift alone would wrap into the user half");
-        assert!(wrapped >= USER_SPACE_END >> 12, "so the page number itself is what is refused");
+        assert!(
+            wrapped << 12 < USER_SPACE_END,
+            "the shift alone would wrap into the user half"
+        );
+        assert!(
+            wrapped >= USER_SPACE_END >> 12,
+            "so the page number itself is what is refused"
+        );
     }
 
     #[test]
@@ -4917,7 +5307,10 @@ mod tests {
         };
         let ranges = code_ranges(
             &[module(0xFFFF_F800_0100_0000, 0x40_0000)],
-            &[module(0x7FEF_0000_0000, 0x13_0000), module(0x40_0000, 0x1000)],
+            &[
+                module(0x7FEF_0000_0000, 0x13_0000),
+                module(0x40_0000, 0x1000),
+            ],
         );
         assert!(in_code_range(&ranges, 0x40_0FFF));
         assert!(!in_code_range(&ranges, 0x40_1000));
@@ -4992,7 +5385,10 @@ mod tests {
         // The real sentinel: Parent points to the table itself (the low two
         // bits carry the balance), LeftChild is null, the root is RightChild.
         assert_eq!(avl_table_root(table, 0, root, table), kernel_pointer(root));
-        assert_eq!(avl_table_root(table | 0x2, 0, root, table), kernel_pointer(root));
+        assert_eq!(
+            avl_table_root(table | 0x2, 0, root, table),
+            kernel_pointer(root)
+        );
         // A wrong EPROCESS field: its first word is not a self-pointer, so it
         // is not mistaken for a VAD root even if a later word reads as a node.
         assert_eq!(avl_table_root(0xFFFF_FADF_F3E1_E410, 0, root, table), None);
@@ -5012,8 +5408,19 @@ mod tests {
         let view = fake.view;
         let mut discovery = WindowsDiscovery::default();
         let names = ["CSRSS.EXE".to_owned()];
-        let find = FindElsewhere { names: &names, shown: None };
-        let read = read_windows_finding(&mut fake.guest, &view, SystemView::Off, find, &mut discovery, None).elsewhere;
+        let find = FindElsewhere {
+            names: &names,
+            shown: None,
+        };
+        let read = read_windows_finding(
+            &mut fake.guest,
+            &view,
+            SystemView::Off,
+            find,
+            &mut discovery,
+            None,
+        )
+        .elsewhere;
         assert_eq!(read.names, names, "what was looked for");
         assert_eq!(read.modules.len(), 1, "{:?}", read.modules);
         let found = &read.modules[0];
@@ -5026,11 +5433,32 @@ mod tests {
             "{:?}",
             found.module.identity
         );
-        let none = read_windows_finding(&mut fake.guest, &view, SystemView::Off, FindElsewhere::NOTHING, &mut discovery, None);
+        let none = read_windows_finding(
+            &mut fake.guest,
+            &view,
+            SystemView::Off,
+            FindElsewhere::NOTHING,
+            &mut discovery,
+            None,
+        );
         assert!(none.elsewhere.modules.is_empty(), "no names, nothing read");
         // A thread view in csrss names csrss's modules already.
-        let viewing = FindElsewhere { names: &names, shown: Some(0x3_0000) };
-        let read = read_windows_finding(&mut fake.guest, &view, SystemView::Off, viewing, &mut discovery, None);
-        assert!(read.elsewhere.modules.is_empty(), "{:?}", read.elsewhere.modules);
+        let viewing = FindElsewhere {
+            names: &names,
+            shown: Some(0x3_0000),
+        };
+        let read = read_windows_finding(
+            &mut fake.guest,
+            &view,
+            SystemView::Off,
+            viewing,
+            &mut discovery,
+            None,
+        );
+        assert!(
+            read.elsewhere.modules.is_empty(),
+            "{:?}",
+            read.elsewhere.modules
+        );
     }
 }

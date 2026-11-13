@@ -1,4 +1,3 @@
-
 //! AVX-512F floating-point conversion instruction handlers
 //!
 //! Implements packed integer <-> floating-point conversions with EVEX opmask support.
@@ -6,10 +5,18 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_cvt.cc`.
 
+// Load-bearing in pure no-std builds (core f32/f64 lack these inherent
+// methods there); redundant in unit graphs where std is linked, so the
+// unused-import lint is allowed rather than losing the no-std resolution.
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use rusty_box_core::FloatExt;
+
+use super::cpu::BxCpuC;
+use super::decoder::Instruction;
 use super::softfloat3e::f16_to_f32::f16_to_f32;
 use super::softfloat3e::f32_to_f16::f32_to_f16;
 use super::softfloat3e::f32_to_f64::f32_to_f64;
-use super::softfloat3e::softfloat::{softfloat_suppress_exception, FLAG_DENORMAL};
 use super::softfloat3e::f32_to_int::{
     f32_to_i32, f32_to_i32_r_min_mag, f32_to_i64, f32_to_i64_r_min_mag,
 };
@@ -18,26 +25,19 @@ use super::softfloat3e::f64_to_int::{
     f64_to_i32, f64_to_i32_r_min_mag, f64_to_i64, f64_to_i64_r_min_mag,
 };
 use super::softfloat3e::int_to_float::{i32_to_f32, i32_to_f64, i64_to_f32, i64_to_f64};
-use super::softfloat3e::uint64_convert::{
-    f32_to_ui64, f32_to_ui64_r_min_mag, f64_to_ui64, f64_to_ui64_r_min_mag, ui64_to_f32,
-    ui64_to_f64,
+use super::softfloat3e::softfloat::{
+    FLAG_DENORMAL, softfloat_get_exception_flags, softfloat_get_rounding_mode,
+    softfloat_suppress_exception,
 };
-use super::softfloat3e::softfloat::{softfloat_get_exception_flags, softfloat_get_rounding_mode};
 use super::softfloat3e::uint_convert::{
     f32_to_ui32, f32_to_ui32_r_min_mag, f64_to_ui32, f64_to_ui32_r_min_mag, ui32_to_f32,
     ui32_to_f64,
 };
-use super::{
-    cpu::BxCpuC,
-    decoder::Instruction,
-    xmm::BxPackedZmmRegister,
+use super::softfloat3e::uint64_convert::{
+    f32_to_ui64, f32_to_ui64_r_min_mag, f64_to_ui64, f64_to_ui64_r_min_mag, ui64_to_f32,
+    ui64_to_f64,
 };
-// Load-bearing in pure no-std builds (core f32/f64 lack these inherent
-// methods there); redundant in unit graphs where std is linked, so the
-// unused-import lint is allowed rather than losing the no-std resolution.
-#[cfg(not(feature = "std"))]
-#[allow(unused_imports)]
-use rusty_box_core::FloatExt;
+use super::xmm::BxPackedZmmRegister;
 
 // ============================================================================
 // Helper functions (duplicated from avx512.rs — module-private there)
@@ -62,7 +62,6 @@ fn qword_elements(vl: u8) -> usize {
         _ => 8,
     }
 }
-
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
@@ -317,7 +316,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn evex_vcvtdq2pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl); // number of output qword elements
-                                            // Source is half the width: nelements dwords
+        // Source is half the width: nelements dwords
         let src = read_src_half_dword(self, instr)?;
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
@@ -403,7 +402,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn evex_vcvtps2pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl); // output qword count
-                                            // Source is half width: nelements dwords (Float32)
+        // Source is half width: nelements dwords (Float32)
         let src = read_src_half_dword(self, instr)?;
         let mask = read_opmask_for_write(self, instr);
         let mut status = self.sse_status();
@@ -631,6 +630,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.avx_masked_store16(instr, eaddr, &result, mask & ((1u64 << nelements) - 1))
         }
     }
+
     // ========================================================================
     // AVX512_DQ qword <-> floating-point.
     //
@@ -837,7 +837,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -900,9 +899,10 @@ mod tests {
 
     // ---- AVX512_DQ qword <-> float, driven through the dispatcher ----------
 
+    use rusty_box_decoder::opcode::Opcode;
+
     use crate::cpu::decoder::BxSegregs;
     use crate::cpu::xmm::MXCSR_RESET;
-    use rusty_box_decoder::opcode::Opcode;
 
     /// Register-form EVEX convert: dst=0, src=1, opmask `k` (0 = unmasked).
     fn evex_cvt(opcode: Opcode, vl: u8, k: u8, zero_masking: bool) -> Instruction {
@@ -1073,5 +1073,4 @@ mod tests {
         assert_eq!(c.vmm[0].zmm32u(0), 1);
         assert_eq!(c.vmm[0].zmm32u(1), 0xDEAD_BEEF);
     }
-
 }

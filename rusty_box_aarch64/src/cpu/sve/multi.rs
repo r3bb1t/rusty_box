@@ -31,12 +31,12 @@ mod tests;
 use super::counter::PredCounter;
 use super::fp::{esize, fp_type};
 use super::int::BinOp;
-use super::{clamp, group, int, sat_doubling_mul_high, sat_q, shift_by_element, Esize, Zv};
-use crate::cpu::exec::{bit, bits, ExecResult, Flow};
+use super::{Esize, Zv, clamp, group, int, sat_doubling_mul_high, sat_q, shift_by_element};
+use crate::cpu::exec::{ExecResult, Flow, bit, bits};
 use crate::cpu::features::VecLen;
 use crate::cpu::fp::{
-    fp_binary, fp_convert, fp_to_int, fp_unary, int_to_fp, FpBinary, FpConversion, FpType, FpUnary,
-    IntWidth,
+    FpBinary, FpConversion, FpType, FpUnary, IntWidth, fp_binary, fp_convert, fp_to_int, fp_unary,
+    int_to_fp,
 };
 use crate::cpu::{Cpu, Levels};
 use crate::softfloat::{self as sf, FpRounding, InexactReport};

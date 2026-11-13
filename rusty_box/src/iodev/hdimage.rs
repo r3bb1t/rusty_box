@@ -3,9 +3,8 @@
 //! read-only and every sector written kept in a journal file that is removed
 //! when the drive closes.
 
-use std::collections::btree_map;
 use std::collections::hash_map::RandomState;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
 use std::fs::{File, Metadata, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Write};
@@ -22,7 +21,8 @@ const SECTOR_BYTES: u64 = SECTOR as u64;
 /// Bochs hdimage.h `VOLATILE_REDOLOG_EXTENSION` (`".XXXXXX"`): a journal is
 /// its template, a dot, and six characters `mkstemp` picks.
 const JOURNAL_SUFFIX_CHARS: usize = 6;
-const JOURNAL_SUFFIX_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const JOURNAL_SUFFIX_ALPHABET: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 /// The names tried before a journal is given up. glibc's `mkstemp` tries up
 /// to `TMP_MAX` names; Bochs's own `bx_mkstemp` (osdep.cc), used where the C
 /// library has none, tries one and truncates any file that already has it.
@@ -46,7 +46,9 @@ impl Journal {
     /// then names the redolog after the image.
     fn template<'a>(&'a self, image: &'a Path) -> &'a Path {
         match self {
-            Journal::Named(name) if !name.as_os_str().is_empty() && name.as_os_str() != "none" => name,
+            Journal::Named(name) if !name.as_os_str().is_empty() && name.as_os_str() != "none" => {
+                name
+            }
             Journal::Named(_) | Journal::BesideImage => image,
         }
     }
@@ -64,11 +66,20 @@ pub(crate) struct ImageModified {
 }
 
 impl ImageModified {
-    pub(crate) const UNKNOWN: ImageModified = ImageModified { seconds: 0, nanos: 0 };
+    pub(crate) const UNKNOWN: ImageModified = ImageModified {
+        seconds: 0,
+        nanos: 0,
+    };
 
     fn of(metadata: &Metadata) -> ImageModified {
-        match metadata.modified().map(|time| time.duration_since(UNIX_EPOCH)) {
-            Ok(Ok(since)) => ImageModified { seconds: since.as_secs(), nanos: since.subsec_nanos() },
+        match metadata
+            .modified()
+            .map(|time| time.duration_since(UNIX_EPOCH))
+        {
+            Ok(Ok(since)) => ImageModified {
+                seconds: since.as_secs(),
+                nanos: since.subsec_nanos(),
+            },
             // A platform that keeps no modification time, or one before the
             // epoch: nothing to compare, as with Bochs's timestamp 0.
             Ok(Err(_)) | Err(_) => ImageModified::UNKNOWN,
@@ -93,7 +104,9 @@ pub(crate) enum DiskImage {
 impl DiskImage {
     /// The image at `path`, opened for reading and writing.
     pub(crate) fn open_flat(path: &Path) -> io::Result<DiskImage> {
-        Ok(DiskImage::Flat(File::options().read(true).write(true).open(path)?))
+        Ok(DiskImage::Flat(
+            File::options().read(true).write(true).open(path)?,
+        ))
     }
 
     /// The image's bytes.
@@ -137,8 +150,12 @@ impl DiskImage {
 }
 
 fn sector_offset(lba: u64) -> io::Result<u64> {
-    lba.checked_mul(SECTOR_BYTES)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "sector past the end of the image"))
+    lba.checked_mul(SECTOR_BYTES).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sector past the end of the image",
+        )
+    })
 }
 
 /// `buf.len()` bytes of `file` at `offset`, or an error.
@@ -161,16 +178,30 @@ fn read_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
     while !rest.is_empty() {
         match file.seek_read(rest, at) {
             Ok(0) => {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "sector past the end of the file"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "sector past the end of the file",
+                ));
             }
             Ok(moved) => {
                 let Some(tail) = rest.get_mut(moved..) else {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "read past its buffer"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "read past its buffer",
+                    ));
                 };
                 rest = tail;
                 at = at
-                    .checked_add(u64::try_from(moved).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?)
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset past the end of the file"))?;
+                    .checked_add(
+                        u64::try_from(moved)
+                            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?,
+                    )
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "offset past the end of the file",
+                        )
+                    })?;
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
@@ -194,15 +225,31 @@ fn write_at(file: &File, offset: u64, buf: &[u8]) -> io::Result<()> {
     let mut rest = buf;
     while !rest.is_empty() {
         match file.seek_write(rest, at) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "the file took no bytes")),
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "the file took no bytes",
+                ));
+            }
             Ok(moved) => {
                 let Some(tail) = rest.get(moved..) else {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "wrote past its buffer"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "wrote past its buffer",
+                    ));
                 };
                 rest = tail;
                 at = at
-                    .checked_add(u64::try_from(moved).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?)
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset past the end of the file"))?;
+                    .checked_add(
+                        u64::try_from(moved)
+                            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?,
+                    )
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "offset past the end of the file",
+                        )
+                    })?;
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
@@ -243,9 +290,12 @@ impl VolatileImage {
     /// does.
     fn open(path: &Path, journal: &Journal) -> io::Result<VolatileImage> {
         let base = File::open(path).map_err(|error| naming("image", path, error))?;
-        let metadata = base.metadata().map_err(|error| naming("image", path, error))?;
+        let metadata = base
+            .metadata()
+            .map_err(|error| naming("image", path, error))?;
         let template = journal.template(path).to_path_buf();
-        let journal = JournalFile::make(&template).map_err(|error| naming("journal", &template, error))?;
+        let journal =
+            JournalFile::make(&template).map_err(|error| naming("journal", &template, error))?;
         Ok(VolatileImage {
             base,
             size: metadata.len(),
@@ -302,7 +352,8 @@ impl VolatileImage {
     /// snapshot's sectors are restored into. This image keeps its own
     /// journal until [`Self::adopt`] takes the new one.
     pub(crate) fn begin_refill(&self) -> io::Result<JournalRefill> {
-        let journal = JournalFile::make(&self.template).map_err(|error| naming("journal", &self.template, error))?;
+        let journal = JournalFile::make(&self.template)
+            .map_err(|error| naming("journal", &self.template, error))?;
         Ok(JournalRefill {
             journal,
             slots: BTreeMap::new(),
@@ -405,17 +456,29 @@ fn checked_offset(size: u64, lba: u64) -> io::Result<u64> {
     let offset = sector_offset(lba)?;
     match offset.checked_add(SECTOR_BYTES) {
         Some(end) if end <= size => Ok(offset),
-        Some(_) | None => Err(io::Error::new(io::ErrorKind::InvalidInput, "sector past the end of the image")),
+        Some(_) | None => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sector past the end of the image",
+        )),
     }
 }
 
 /// `sector` written to `journal` as sector `lba`: over its slot when it has
 /// one, else into the next free slot.
-fn write_journal(journal: &File, slots: &mut BTreeMap<u64, u64>, lba: u64, sector: &[u8]) -> io::Result<()> {
+fn write_journal(
+    journal: &File,
+    slots: &mut BTreeMap<u64, u64>,
+    lba: u64,
+    sector: &[u8],
+) -> io::Result<()> {
     if sector.len() != SECTOR {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "a write is one sector"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a write is one sector",
+        ));
     }
-    let next = u64::try_from(slots.len()).map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory, "journal slot count"))?;
+    let next = u64::try_from(slots.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory, "journal slot count"))?;
     let slot = *slots.get(&lba).unwrap_or(&next);
     write_at(journal, sector_offset(slot)?, sector)?;
     slots.insert(lba, slot);
@@ -452,11 +515,18 @@ impl JournalFile {
         let name = match std::fs::remove_file(&made.path) {
             Ok(()) => JournalName::Removed,
             Err(error) => {
-                tracing::warn!("journal {} keeps its name until the drive closes: {error}", made.path.display());
+                tracing::warn!(
+                    "journal {} keeps its name until the drive closes: {error}",
+                    made.path.display()
+                );
                 JournalName::RemoveAtClose
             }
         };
-        Ok(JournalFile { file: made.file, path: made.path, name })
+        Ok(JournalFile {
+            file: made.file,
+            path: made.path,
+            name,
+        })
     }
 }
 
@@ -466,7 +536,9 @@ impl Drop for JournalFile {
             JournalName::Removed => {}
             JournalName::RemoveAtClose => match std::fs::remove_file(&self.path) {
                 Ok(()) => {}
-                Err(error) => tracing::error!("journal {} is left behind: {error}", self.path.display()),
+                Err(error) => {
+                    tracing::error!("journal {} is left behind: {error}", self.path.display())
+                }
             },
         }
     }
@@ -496,18 +568,28 @@ fn make_journal(template: &Path) -> io::Result<MadeJournal> {
         let mut suffix = String::with_capacity(JOURNAL_SUFFIX_CHARS);
         for _ in 0..JOURNAL_SUFFIX_CHARS {
             let pick = usize::try_from(seed % JOURNAL_SUFFIX_ALPHABET.len() as u64).unwrap_or(0);
-            suffix.push(char::from(*JOURNAL_SUFFIX_ALPHABET.get(pick).unwrap_or(&b'X')));
+            suffix.push(char::from(
+                *JOURNAL_SUFFIX_ALPHABET.get(pick).unwrap_or(&b'X'),
+            ));
             seed /= JOURNAL_SUFFIX_ALPHABET.len() as u64;
         }
         name.push(suffix);
         let path = PathBuf::from(name);
-        match OpenOptions::new().read(true).write(true).create_new(true).open(&path) {
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
             Ok(file) => return Ok(MadeJournal { file, path }),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
     }
-    Err(io::Error::new(io::ErrorKind::AlreadyExists, "no free journal name beside the template"))
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free journal name beside the template",
+    ))
 }
 
 #[cfg(test)]
@@ -521,7 +603,8 @@ mod tests {
 
     impl Scratch {
         fn new(name: &str) -> Scratch {
-            let dir = std::env::temp_dir().join(format!("rusty-box-hdimage-{name}-{}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("rusty-box-hdimage-{name}-{}", std::process::id()));
             std::fs::create_dir_all(&dir).expect("scratch folder");
             Scratch { dir }
         }
@@ -570,7 +653,11 @@ mod tests {
 
     /// A volatile image over `path`, its journal placed as `journal` says.
     fn volatile(path: &Path, journal: &Journal) -> DiskImage {
-        DiskImage::Volatile(VolatileDisk::open(path.to_str().expect("utf-8"), journal).expect("open").image)
+        DiskImage::Volatile(
+            VolatileDisk::open(path.to_str().expect("utf-8"), journal)
+                .expect("open")
+                .image,
+        )
     }
 
     /// Bochs hdimage.cc `volatile_image_t::volatile_image_t`: an empty
@@ -580,10 +667,21 @@ mod tests {
         let scratch = Scratch::new("unnamed-journal");
         let path = scratch.image(2);
         for name in ["", "none"] {
-            let disk = VolatileDisk::open(path.to_str().expect("utf-8"), &Journal::Named(PathBuf::from(name)))
-                .expect("open");
-            let made = disk.journal_path().file_name().and_then(|made| made.to_str()).expect("a name").to_owned();
-            assert!(made.starts_with("disk.img."), "{name:?} names no journal of its own: {made}");
+            let disk = VolatileDisk::open(
+                path.to_str().expect("utf-8"),
+                &Journal::Named(PathBuf::from(name)),
+            )
+            .expect("open");
+            let made = disk
+                .journal_path()
+                .file_name()
+                .and_then(|made| made.to_str())
+                .expect("a name")
+                .to_owned();
+            assert!(
+                made.starts_with("disk.img."),
+                "{name:?} names no journal of its own: {made}"
+            );
         }
     }
 
@@ -601,7 +699,10 @@ mod tests {
             name: JournalName::RemoveAtClose,
         };
         drop(journal);
-        assert!(!named.exists(), "the drive's close removes the name the journal kept");
+        assert!(
+            !named.exists(),
+            "the drive's close removes the name the journal kept"
+        );
     }
 
     #[test]
@@ -609,24 +710,42 @@ mod tests {
         let scratch = Scratch::new("refill");
         let path = scratch.image(4);
         let mut image = volatile(&path, &Journal::BesideImage);
-        let DiskImage::Volatile(own) = &mut image else { panic!("a volatile image") };
+        let DiskImage::Volatile(own) = &mut image else {
+            panic!("a volatile image")
+        };
         own.write(1, &sector_of(0xAA)).expect("write");
         let mut abandoned = own.begin_refill().expect("refill");
         abandoned.write(2, &sector_of(0xBB)).expect("write");
-        assert!(abandoned.write(4, &sector_of(0xBB)).is_err(), "a sector past the image");
+        assert!(
+            abandoned.write(4, &sector_of(0xBB)).is_err(),
+            "a sector past the image"
+        );
         drop(abandoned);
-        assert_eq!(read(&mut image, 1), sector_of(0xAA), "an abandoned refill changes nothing");
+        assert_eq!(
+            read(&mut image, 1),
+            sector_of(0xAA),
+            "an abandoned refill changes nothing"
+        );
         assert_eq!(read(&mut image, 2), sector_of(2));
 
-        let DiskImage::Volatile(own) = &mut image else { panic!("a volatile image") };
+        let DiskImage::Volatile(own) = &mut image else {
+            panic!("a volatile image")
+        };
         let mut refill = own.begin_refill().expect("refill");
         refill.write(2, &sector_of(0xBB)).expect("write");
         own.adopt(refill);
         assert_eq!(own.written_count(), 1);
-        assert_eq!(read(&mut image, 1), sector_of(1), "a sector the refill lacks reads from the image again");
+        assert_eq!(
+            read(&mut image, 1),
+            sector_of(1),
+            "a sector the refill lacks reads from the image again"
+        );
         assert_eq!(read(&mut image, 2), sector_of(0xBB));
         drop(image);
-        assert!(scratch.others(&path).is_empty(), "neither journal outlives the drive");
+        assert!(
+            scratch.others(&path).is_empty(),
+            "neither journal outlives the drive"
+        );
     }
 
     /// What Bochs hdimage.cc `coherency_check` compares: the image's
@@ -637,8 +756,14 @@ mod tests {
         let path = scratch.image(2);
         // A multiple of 100 ns, the finest time NTFS keeps.
         let when = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123_456_700);
-        File::options().write(true).open(&path).expect("open").set_modified(when).expect("touch");
-        let disk = VolatileDisk::open(path.to_str().expect("utf-8"), &Journal::BesideImage).expect("open");
+        File::options()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_modified(when)
+            .expect("touch");
+        let disk =
+            VolatileDisk::open(path.to_str().expect("utf-8"), &Journal::BesideImage).expect("open");
         assert_eq!(
             disk.image.image_modified(),
             ImageModified {
@@ -666,18 +791,31 @@ mod tests {
         let path = scratch.image(4);
         let mut image = volatile(&path, &Journal::BesideImage);
         assert_eq!(image.size().expect("size"), 4 * SECTOR as u64);
-        assert_eq!(read(&mut image, 1), sector_of(1), "an unwritten sector reads from the image");
+        assert_eq!(
+            read(&mut image, 1),
+            sector_of(1),
+            "an unwritten sector reads from the image"
+        );
         image.write_sector(1, &sector_of(0xAA)).expect("write");
         image.write_sector(3, &sector_of(0xBB)).expect("write");
-        image.write_sector(1, &sector_of(0xCC)).expect("write again");
-        assert_eq!(read(&mut image, 1), sector_of(0xCC), "the latest write wins");
+        image
+            .write_sector(1, &sector_of(0xCC))
+            .expect("write again");
+        assert_eq!(
+            read(&mut image, 1),
+            sector_of(0xCC),
+            "the latest write wins"
+        );
         assert_eq!(read(&mut image, 3), sector_of(0xBB));
         assert_eq!(read(&mut image, 2), sector_of(2));
         drop(image);
         let bytes = std::fs::read(&path).expect("image");
         assert_eq!(bytes[SECTOR], 1, "the image is never written");
         assert_eq!(bytes[3 * SECTOR], 3);
-        assert!(scratch.others(&path).is_empty(), "the journal is gone once the drive closes");
+        assert!(
+            scratch.others(&path).is_empty(),
+            "the journal is gone once the drive closes"
+        );
     }
 
     #[test]
@@ -687,12 +825,30 @@ mod tests {
         let template = scratch.dir.join("work");
         let image = path.to_str().expect("utf-8");
         let named = VolatileDisk::open(image, &Journal::Named(template.clone())).expect("open");
-        let name = named.journal_path().file_name().and_then(|name| name.to_str()).expect("a name").to_owned();
+        let name = named
+            .journal_path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("a name")
+            .to_owned();
         assert!(name.starts_with("work."), "{name}");
-        assert_eq!(name.len(), "work.".len() + 6, "Bochs's six-character mkstemp suffix: {name}");
-        assert!(name["work.".len()..].chars().all(|character| character.is_ascii_alphanumeric()));
+        assert_eq!(
+            name.len(),
+            "work.".len() + 6,
+            "Bochs's six-character mkstemp suffix: {name}"
+        );
+        assert!(
+            name["work.".len()..]
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+        );
         let beside = VolatileDisk::open(image, &Journal::BesideImage).expect("open");
-        let beside_name = beside.journal_path().file_name().and_then(|name| name.to_str()).expect("a name").to_owned();
+        let beside_name = beside
+            .journal_path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("a name")
+            .to_owned();
         assert!(beside_name.starts_with("disk.img."), "{beside_name}");
         drop(named);
     }
@@ -713,11 +869,23 @@ mod tests {
         let scratch = Scratch::new("written");
         let path = scratch.image(4);
         let mut image = volatile(&path, &Journal::BesideImage);
-        let DiskImage::Volatile(own) = &mut image else { panic!("a volatile image") };
+        let DiskImage::Volatile(own) = &mut image else {
+            panic!("a volatile image")
+        };
         own.write(3, &sector_of(0xBB)).expect("write");
         own.write(0, &sector_of(0xAA)).expect("write");
-        let written = own.written().collect::<io::Result<Vec<WrittenSector>>>().expect("listed");
-        assert_eq!(written.iter().map(|sector| sector.lba).collect::<Vec<u64>>(), [0, 3], "in sector order");
+        let written = own
+            .written()
+            .collect::<io::Result<Vec<WrittenSector>>>()
+            .expect("listed");
+        assert_eq!(
+            written
+                .iter()
+                .map(|sector| sector.lba)
+                .collect::<Vec<u64>>(),
+            [0, 3],
+            "in sector order"
+        );
         assert_eq!(written[0].bytes, sector_of(0xAA));
         assert_eq!(written[1].bytes, sector_of(0xBB));
     }
@@ -727,9 +895,15 @@ mod tests {
         let scratch = Scratch::new("named-error");
         let path = scratch.image(2);
         let template = scratch.dir.join("no-such-folder").join("journal");
-        let error = VolatileDisk::open(path.to_str().expect("utf-8"), &Journal::Named(template.clone()))
-            .expect_err("no folder");
-        assert!(error.to_string().contains(&template.display().to_string()), "{error}");
+        let error = VolatileDisk::open(
+            path.to_str().expect("utf-8"),
+            &Journal::Named(template.clone()),
+        )
+        .expect_err("no folder");
+        assert!(
+            error.to_string().contains(&template.display().to_string()),
+            "{error}"
+        );
     }
 
     /// Compiles only while `VolatileImage: Sync` (the scope shares one
@@ -742,7 +916,9 @@ mod tests {
         let scratch = Scratch::new("threads");
         let path = scratch.image(4);
         let mut image = volatile(&path, &Journal::BesideImage);
-        let DiskImage::Volatile(own) = &mut image else { panic!("a volatile image") };
+        let DiskImage::Volatile(own) = &mut image else {
+            panic!("a volatile image")
+        };
         own.write(0, &sector_of(0xAA)).expect("write");
         own.write(2, &sector_of(0xBB)).expect("write");
         own.write(3, &sector_of(0xCC)).expect("write");
@@ -751,8 +927,17 @@ mod tests {
             for _ in 0..READERS {
                 scope.spawn(move || {
                     for _ in 0..ROUNDS {
-                        let written = shared.written().collect::<io::Result<Vec<WrittenSector>>>().expect("listed");
-                        assert_eq!(written.iter().map(|sector| sector.lba).collect::<Vec<u64>>(), [0, 2, 3]);
+                        let written = shared
+                            .written()
+                            .collect::<io::Result<Vec<WrittenSector>>>()
+                            .expect("listed");
+                        assert_eq!(
+                            written
+                                .iter()
+                                .map(|sector| sector.lba)
+                                .collect::<Vec<u64>>(),
+                            [0, 2, 3]
+                        );
                         assert_eq!(written[0].bytes, sector_of(0xAA));
                         assert_eq!(written[1].bytes, sector_of(0xBB));
                         assert_eq!(written[2].bytes, sector_of(0xCC));

@@ -35,7 +35,7 @@
 //! GIC's ([`crate::devices::gicv3`]), which the processor reaches through its
 //! bus.
 
-use super::fgt::{FgtReg, FineGrainedTrap, FGT_ICC_IGRPEN};
+use super::fgt::{FGT_ICC_IGRPEN, FgtReg, FineGrainedTrap};
 use super::nv::VncrOffset;
 use super::sysreg::{Direction, SysRegKey};
 use super::{Cpu, El, Levels};
@@ -120,7 +120,7 @@ fn system_register(bits: PriorityBits, key: SysRegKey, dir: Direction) -> Option
         | IccRegister::Hppir1
         | IccRegister::Rpr => Access::ReadOnly,
         IccRegister::Ap0r(n) | IccRegister::Ap1r(n) if !has_active_priorities(bits, n) => {
-            return None
+            return None;
         }
         IccRegister::Pmr
         | IccRegister::Bpr0

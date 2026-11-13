@@ -16,9 +16,9 @@
 //! (FEAT_AFP, Arm `IsMerging`) takes it from the source register the
 //! instruction's page names ([`Cpu::fp_set_merging`]).
 
-use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::exec::{ExecResult, Flow, bit, bits, sext};
 use super::features::Feature;
-use super::fp_estimate::{self, EstimateControl, EstimatePrecision, DOUBLE, HALF, SINGLE};
+use super::fp_estimate::{self, DOUBLE, EstimateControl, EstimatePrecision, HALF, SINGLE};
 use super::simd::vfp_expand_imm;
 use super::{Cpu, Levels};
 use crate::softfloat::{
@@ -40,6 +40,9 @@ pub(crate) enum FpType {
 }
 
 impl FpType {
+    /// Positive zero is all zero bits in every precision.
+    pub(crate) const ZERO: u64 = 0;
+
     /// `ftype` 00 single, 01 double, 11 half; 10 is reserved.
     pub(crate) const fn from_ftype(ftype: u32) -> Option<Self> {
         match ftype {
@@ -52,11 +55,7 @@ impl FpType {
 
     /// The Advanced SIMD `sz` bit: 0 single, 1 double.
     pub(crate) const fn from_sz(sz: bool) -> Self {
-        if sz {
-            Self::Double
-        } else {
-            Self::Single
-        }
+        if sz { Self::Double } else { Self::Single }
     }
 
     pub(crate) const fn esize(self) -> u32 {
@@ -129,9 +128,6 @@ impl FpType {
         let exp = self.exponent_mask();
         a & exp == exp && a & self.mask() & !(exp | self.sign_bit()) != 0
     }
-
-    /// Positive zero is all zero bits in every precision.
-    pub(crate) const ZERO: u64 = 0;
 }
 
 /// The integer an FP-to-integer or integer-to-FP conversion writes or
@@ -149,11 +145,7 @@ pub(crate) enum IntWidth {
 impl IntWidth {
     /// The general-register width the `sf` bit selects.
     pub(crate) const fn from_sf(sf: bool) -> Self {
-        if sf {
-            Self::Bits64
-        } else {
-            Self::Bits32
-        }
+        if sf { Self::Bits64 } else { Self::Bits32 }
     }
 
     /// The integer's width in bits, for elements of `ty`.

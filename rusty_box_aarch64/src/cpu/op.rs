@@ -26,8 +26,8 @@
 
 use super::dp::{add_with_carry, datasize, decode_bit_masks, ones, ror, shift_reg};
 use super::exception::AccessSyndrome;
-use super::exec::{bit, bits, keep_fault, sext, Fault, Flow, OpResult};
-use super::fp::{dp2_operation, dp3_form, scalar_type, FpBinary, FpDp3Regs, FpType};
+use super::exec::{Fault, Flow, OpResult, bit, bits, keep_fault, sext};
+use super::fp::{FpBinary, FpDp3Regs, FpType, dp2_operation, dp3_form, scalar_type};
 use super::isa::Class;
 use super::ldst::registers_overlap;
 use super::mmu::{DataAccess, ElementPair};
@@ -1262,7 +1262,7 @@ impl<L: Levels> Cpu<L> {
             // A load or store's access, whose fault reports `$syndrome`, the
             // op's syndrome, where its abort leaves room for one
             // ([`one_register_syndrome`]): made only when the access faults.
-            ($step:expr, reporting($syndrome:expr)) => {
+            ($step:expr,reporting($syndrome:expr)) => {
                 match $step {
                     Ok(value) => value,
                     Err(fault) => return Err(keep_fault(raised, fault.reporting($syndrome))),

@@ -5,14 +5,13 @@
 //! Mirrors Bochs cpu/fred.cc — FRED event delivery, ERETS/ERETU return
 //! instructions, and LKGS helper.
 
-use crate::cpu::BxCpuC;
-
+use super::Result;
 use super::cpu::Exception;
 use super::decoder::{BxSegregs, Instruction};
 use super::eflags::EFlags;
 use super::exception::InterruptType;
 use super::segment_ctrl_pro::parse_selector;
-use super::Result;
+use crate::cpu::BxCpuC;
 
 /// Selector RPL mask: clears RPL bits.
 const BX_SELECTOR_RPL_MASK: u64 = 0xFFFC;
@@ -62,7 +61,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         if vector == Exception::Db as u8 {
-            return (self.debug_trap & 0x0000400f) as u64;
+            return (self.debug_trap & 0x0000400F) as u64;
         }
 
         if matches!(int_type, InterruptType::Nmi) {
@@ -508,7 +507,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // CET shadow stack checks for ERETU
             if self.shadow_stack_enabled(3) {
                 if !to_long_mode && (self.msr.ia32_pl_ssp[3] >> 32) != 0 {
-                    tracing::error!("ERETU: attempt to return to compatibility mode while MSR_IA32_PL3_SSP[63:32] != 0");
+                    tracing::error!(
+                        "ERETU: attempt to return to compatibility mode while MSR_IA32_PL3_SSP[63:32] != 0"
+                    );
                     return self.exception(Exception::Gp, 0);
                 }
                 let ssp = self.msr.ia32_pl_ssp[3];
@@ -575,7 +576,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // CET shadow stack checks for ERETU (flat path)
         if self.shadow_stack_enabled(3) {
             if !to_long_mode && (self.msr.ia32_pl_ssp[3] >> 32) != 0 {
-                tracing::error!("ERETU: attempt to return to compatibility mode while MSR_IA32_PL3_SSP[63:32] != 0");
+                tracing::error!(
+                    "ERETU: attempt to return to compatibility mode while MSR_IA32_PL3_SSP[63:32] != 0"
+                );
                 return self.exception(Exception::Gp, 0);
             }
             let ssp = self.msr.ia32_pl_ssp[3];

@@ -142,9 +142,10 @@ impl ExactSizeIterator for RecentPcs {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::VecDeque;
     use std::vec::Vec;
+
+    use super::*;
 
     /// What the record must equal: every retired address, kept one by one.
     struct Naive {

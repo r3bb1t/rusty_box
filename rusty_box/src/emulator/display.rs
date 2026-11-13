@@ -9,10 +9,6 @@
 //! anonymous iterators), R2 (a graphics mode has no text grid, so `text()`
 //! is `Option` rather than a flag plus an accessor that lies).
 
-use crate::cpu::instrumentation::Instrumentation;
-
-use super::{Emulator, SliceEngine};
-
 /// The display vocabulary, re-exported deliberately rather than as a shim.
 ///
 /// A display model lives in `rusty_box_devices`, but [`Emulator::display`]
@@ -24,9 +20,12 @@ use super::{Emulator, SliceEngine};
 /// `rusty_box_devices::…` outright, so a reader of a device file can see that
 /// it is reaching across a boundary.
 pub use rusty_box_devices::display::{
-    card::{StdVga, VgaCard},
     DisplaySource, Resolution, TextGrid, TextPos,
+    card::{StdVga, VgaCard},
 };
+
+use super::{Emulator, SliceEngine};
+use crate::cpu::instrumentation::Instrumentation;
 
 /// A machine's display, borrowed for as long as the handle lives.
 pub struct Display<'m, D: DisplaySource> {
@@ -239,9 +238,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// The handle borrows the machine, so it is taken, used and dropped; a
     /// scrape between two `step` calls sees the frame as it stood when the
     /// last batch ended.
-    pub fn display(
-        &mut self,
-    ) -> Display<'_, VgaCard<StdVga>> {
+    pub fn display(&mut self) -> Display<'_, VgaCard<StdVga>> {
         Display::new(&mut self.device_manager.vga)
     }
 }
@@ -262,7 +259,11 @@ mod tests {
 
     impl FakeScreen {
         fn new(lines: &[&str]) -> Self {
-            let cols = lines.iter().map(|line| line.chars().count()).max().unwrap_or(0);
+            let cols = lines
+                .iter()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0);
             let mut cells = alloc::vec![' '; lines.len() * cols];
             for (row, line) in lines.iter().enumerate() {
                 for (col, ch) in line.chars().enumerate() {

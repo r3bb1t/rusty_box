@@ -5,11 +5,9 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512.cc` extract/insert operations.
 
-use super::{
-    cpu::BxCpuC,
-    decoder::{BxSegregs, Instruction},
-    xmm::BxPackedZmmRegister,
-};
+use super::cpu::BxCpuC;
+use super::decoder::{BxSegregs, Instruction};
+use super::xmm::BxPackedZmmRegister;
 
 /// Byte size for vector length
 #[inline]

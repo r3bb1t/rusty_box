@@ -95,15 +95,25 @@ pub(crate) enum FirstJump {
 /// `mov rax, imm64; jmp rax` (`48 B8 … FF E0`), `push imm32; ret`
 /// (`68 … C3`, the push sign-extended). `None` for anything else.
 pub(crate) fn first_jump(code: &[u8], at: u64) -> Option<FirstJump> {
-    let le32 = |from: usize| -> Option<i32> { Some(i32::from_le_bytes(code.get(from..from.checked_add(4)?)?.try_into().ok()?)) };
+    let le32 = |from: usize| -> Option<i32> {
+        Some(i32::from_le_bytes(
+            code.get(from..from.checked_add(4)?)?.try_into().ok()?,
+        ))
+    };
     match code {
-        [0xE9, ..] => Some(FirstJump::To(at.wrapping_add(5).wrapping_add_signed(i64::from(le32(1)?)))),
-        [0xFF, 0x25, ..] => Some(FirstJump::Through(at.wrapping_add(6).wrapping_add_signed(i64::from(le32(2)?)))),
+        [0xE9, ..] => Some(FirstJump::To(
+            at.wrapping_add(5).wrapping_add_signed(i64::from(le32(1)?)),
+        )),
+        [0xFF, 0x25, ..] => Some(FirstJump::Through(
+            at.wrapping_add(6).wrapping_add_signed(i64::from(le32(2)?)),
+        )),
         [0x48, 0xB8, ..] => {
             if code.get(10..12)? != [0xFF, 0xE0].as_slice() {
                 return None;
             }
-            Some(FirstJump::To(u64::from_le_bytes(code.get(2..10)?.try_into().ok()?)))
+            Some(FirstJump::To(u64::from_le_bytes(
+                code.get(2..10)?.try_into().ok()?,
+            )))
         }
         [0x68, ..] => {
             if *code.get(5)? != 0xC3 {
@@ -217,7 +227,12 @@ impl LeaRipScan {
         }
         let start = address.wrapping_sub(self.window.len() as u64);
         self.window.extend_from_slice(piece);
-        push_lea_rip_targets(&self.window, start, &mut self.found.r10, &mut self.found.r11);
+        push_lea_rip_targets(
+            &self.window,
+            start,
+            &mut self.found.r10,
+            &mut self.found.r11,
+        );
         // Fewer bytes than one instruction: none found twice.
         let keep = self.window.len().min(LEA_RIP_LEN - 1);
         self.window.drain(..self.window.len().saturating_sub(keep));
@@ -320,7 +335,8 @@ mod tests {
         // `4C 8D 15 47 78 23 00` is lea r10, [FFFFF800`03EAB840], followed by
         // the lea r11 of KeServiceDescriptorTableShadow.
         let code = [
-            0x90, 0x4C, 0x8D, 0x15, 0x47, 0x78, 0x23, 0x00, 0x4C, 0x8D, 0x1D, 0x80, 0x78, 0x23, 0x00,
+            0x90, 0x4C, 0x8D, 0x15, 0x47, 0x78, 0x23, 0x00, 0x4C, 0x8D, 0x1D, 0x80, 0x78, 0x23,
+            0x00,
         ];
         let mut scan = LeaRipScan::default();
         scan.feed(&code, 0xFFFF_F800_03C7_3FF1);
@@ -409,7 +425,10 @@ mod tests {
         // A stub cut short, another prologue, or an index past both tables.
         assert_eq!(stub_service(&nt_close[..7]), None);
         assert_eq!(stub_service(&[0x48, 0x8B, 0xC4, 0xB8, 0, 0, 0, 0]), None);
-        assert_eq!(stub_service(&[0x4C, 0x8B, 0xD1, 0xB8, 0x00, 0x20, 0x00, 0x00]), None);
+        assert_eq!(
+            stub_service(&[0x4C, 0x8B, 0xD1, 0xB8, 0x00, 0x20, 0x00, 0x00]),
+            None
+        );
     }
 
     /// Each jump form a hook writes over a routine's first bytes, decoded
@@ -422,15 +441,24 @@ mod tests {
         assert_eq!(first_jump(&rel, at), Some(FirstJump::To(at + 5 + 0x1000)));
         // jmp [rip+disp32]: through the slot after the 6-byte instruction.
         let indirect = [0xFF, 0x25, 0x10, 0x00, 0x00, 0x00];
-        assert_eq!(first_jump(&indirect, at), Some(FirstJump::Through(at + 6 + 0x10)));
+        assert_eq!(
+            first_jump(&indirect, at),
+            Some(FirstJump::Through(at + 6 + 0x10))
+        );
         // mov rax, imm64; jmp rax.
         let mut absolute = vec![0x48, 0xB8];
         absolute.extend_from_slice(&0xFFFF_F880_0123_4560u64.to_le_bytes());
         absolute.extend_from_slice(&[0xFF, 0xE0]);
-        assert_eq!(first_jump(&absolute, at), Some(FirstJump::To(0xFFFF_F880_0123_4560)));
+        assert_eq!(
+            first_jump(&absolute, at),
+            Some(FirstJump::To(0xFFFF_F880_0123_4560))
+        );
         // push imm32; ret — the processor sign-extends the push.
         let push = [0x68, 0x00, 0x00, 0x00, 0x80, 0xC3];
-        assert_eq!(first_jump(&push, at), Some(FirstJump::To(0xFFFF_FFFF_8000_0000)));
+        assert_eq!(
+            first_jump(&push, at),
+            Some(FirstJump::To(0xFFFF_FFFF_8000_0000))
+        );
         // An ordinary prologue, and every form cut short, is no jump.
         assert_eq!(first_jump(&[0x48, 0x89, 0x5C, 0x24, 0x08], at), None);
         for form in [&rel[..], &indirect[..], &absolute[..], &push[..]] {
@@ -443,7 +471,8 @@ mod tests {
     #[test]
     fn one_scan_finds_the_lea_r10_and_lea_r11_targets() {
         let code = [
-            0x90, 0x4C, 0x8D, 0x15, 0x47, 0x78, 0x23, 0x00, 0x4C, 0x8D, 0x1D, 0x80, 0x78, 0x23, 0x00,
+            0x90, 0x4C, 0x8D, 0x15, 0x47, 0x78, 0x23, 0x00, 0x4C, 0x8D, 0x1D, 0x80, 0x78, 0x23,
+            0x00,
         ];
         let mut scan = LeaRipScan::default();
         scan.feed(&code, 0xFFFF_F800_03C7_3FF1);
@@ -457,7 +486,10 @@ mod tests {
     /// is the GUI table's. Anything else is not the shadow.
     #[test]
     fn the_shadow_is_the_array_whose_first_descriptor_is_the_kernel_tables() {
-        let kernel = Descriptor { service_table: 0xFFFF_F800_0100_2000, limit: 0x191 };
+        let kernel = Descriptor {
+            service_table: 0xFFFF_F800_0100_2000,
+            limit: 0x191,
+        };
         let mut bytes = vec![0u8; SHADOW_BYTES];
         bytes[..8].copy_from_slice(&kernel.service_table.to_le_bytes());
         bytes[0x10..0x14].copy_from_slice(&kernel.limit.to_le_bytes());
@@ -465,11 +497,20 @@ mod tests {
         bytes[0x30..0x34].copy_from_slice(&0x33Bu32.to_le_bytes());
         assert_eq!(
             shadow_gui_descriptor(&bytes, kernel),
-            Some(Descriptor { service_table: 0xFFFF_F960_0010_0000, limit: 0x33B })
+            Some(Descriptor {
+                service_table: 0xFFFF_F960_0010_0000,
+                limit: 0x33B
+            })
         );
-        let other = Descriptor { service_table: 0xFFFF_F800_0100_3000, limit: 0x191 };
+        let other = Descriptor {
+            service_table: 0xFFFF_F800_0100_3000,
+            limit: 0x191,
+        };
         assert_eq!(shadow_gui_descriptor(&bytes, other), None);
-        assert_eq!(shadow_gui_descriptor(&bytes[..SHADOW_BYTES - 1], kernel), None);
+        assert_eq!(
+            shadow_gui_descriptor(&bytes[..SHADOW_BYTES - 1], kernel),
+            None
+        );
     }
 
     /// A shadow array known to be one (a PDB symbol, or found before) gives
@@ -482,9 +523,15 @@ mod tests {
         bytes[0x30..0x34].copy_from_slice(&0x33Bu32.to_le_bytes());
         assert_eq!(
             known_shadow_gui_descriptor(&bytes),
-            Some(Descriptor { service_table: 0xFFFF_F960_0010_0000, limit: 0x33B })
+            Some(Descriptor {
+                service_table: 0xFFFF_F960_0010_0000,
+                limit: 0x33B
+            })
         );
-        assert_eq!(known_shadow_gui_descriptor(&bytes[..SHADOW_BYTES - 1]), None);
+        assert_eq!(
+            known_shadow_gui_descriptor(&bytes[..SHADOW_BYTES - 1]),
+            None
+        );
         bytes[0x30..0x34].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(known_shadow_gui_descriptor(&bytes), None);
     }

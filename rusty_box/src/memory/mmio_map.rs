@@ -171,7 +171,9 @@ impl MmioMap {
     /// precisely what it may not — so the whole set is needed at once, not one
     /// address at a time.
     pub(crate) fn regions(&self) -> MmioRegions<'_> {
-        MmioRegions { slots: self.regions.iter() }
+        MmioRegions {
+            slots: self.regions.iter(),
+        }
     }
 
     pub(crate) const fn new() -> Self {
@@ -283,9 +285,7 @@ impl MmioMap {
             return Err(MemoryError::InvalidAddressRange);
         }
         if self.would_overlap(begin, end, None) {
-            tracing::error!(
-                "register failed: {begin:#x}-{end:#x} overlaps a mapped MMIO region"
-            );
+            tracing::error!("register failed: {begin:#x}-{end:#x} overlaps a mapped MMIO region");
             return Err(MemoryError::OverlappingHandlers);
         }
         let slot = self
@@ -427,7 +427,13 @@ mod tests {
     fn a_hit_reports_the_distance_from_the_region_base() {
         let mut map = MmioMap::new();
         map.map(VGA, pa(0xA_0000), pa(0xB_FFFF)).unwrap();
-        assert_eq!(map.lookup(pa(0xA_0000)), Some(MmioHit { token: VGA, offset: 0 }));
+        assert_eq!(
+            map.lookup(pa(0xA_0000)),
+            Some(MmioHit {
+                token: VGA,
+                offset: 0
+            })
+        );
         assert_eq!(
             map.lookup(pa(0xA_0500)),
             Some(MmioHit {
@@ -487,9 +493,17 @@ mod tests {
         let mut map = MmioMap::new();
         map.map(VGA, pa(0xE000_0000), pa(0xE0FF_FFFF)).unwrap();
         map.unmap(IOAPIC, pa(0xE000_0000), pa(0xE0FF_FFFF)).unwrap();
-        assert_eq!(owner(&map, 0xE000_0000), Some(VGA), "wrong token must not unmap");
+        assert_eq!(
+            owner(&map, 0xE000_0000),
+            Some(VGA),
+            "wrong token must not unmap"
+        );
         map.unmap(VGA, pa(0xE000_0000), pa(0xE0FF_0000)).unwrap();
-        assert_eq!(owner(&map, 0xE000_0000), Some(VGA), "wrong range must not unmap");
+        assert_eq!(
+            owner(&map, 0xE000_0000),
+            Some(VGA),
+            "wrong range must not unmap"
+        );
         map.unmap(VGA, pa(0xE000_0000), pa(0xE0FF_FFFF)).unwrap();
         assert_eq!(owner(&map, 0xE000_0000), None);
         assert_eq!(map.len(), 0);
@@ -557,7 +571,8 @@ mod tests {
         let mut map = MmioMap::new();
         for index in 0..MAX_DEVICE_MMIO_REGIONS {
             let base = (index as u64) << 20;
-            map.map(MmioToken(index as u16), pa(base), pa(base + 0xFFFF)).unwrap();
+            map.map(MmioToken(index as u16), pa(base), pa(base + 0xFFFF))
+                .unwrap();
         }
         let base = (MAX_DEVICE_MMIO_REGIONS as u64) << 20;
         assert!(matches!(

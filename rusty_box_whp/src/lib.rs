@@ -48,34 +48,31 @@ mod partition;
 
 // The platform seam, under the one name this crate reaches it by. Every host
 // call `caps` and `partition` make goes through here.
-use rusty_box_whp_sys as sys;
-
 pub use caps::{
-    capabilities, hypervisor_present, Capabilities, ExtendedVmExits, Features, MsrExits,
-    SyntheticFeatures,
-};
-pub use partition::{
-    Canceller, HostPages, InterceptCounter, InterceptCounters, InterruptRequester, LateProperty,
-    LocalApicMode, Partition, PartitionConfig, RuntimeCounters, Vcpu, VpCounters, PAGE_SIZE,
+    Capabilities, ExtendedVmExits, Features, MsrExits, SyntheticFeatures, capabilities,
+    hypervisor_present,
 };
 pub use deadline::{DeadlineTimer, DeadlineWake};
-// The seam's three vocabularies — register shapes, errors, and the exits a
-// processor produces — under the names a caller of this crate uses them by.
-pub use rusty_box_whp_sys::{shape_of, FeatureBanks, GvaTranslation, RegisterValue};
-pub use rusty_box_whp_sys::{WhpError, WhpErrorKind, WhpResult};
-pub use rusty_box_whp_sys::{
-    AccessType, ApicRegister, ApicStatePage, ApicVector, ApicWriteType, CpuidAccess,
-    DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind, InterruptRequest,
-    InterruptedDelivery, InterruptedKind, InterruptionType, IoPortAccess, MemoryAccess, MsrAccess,
-    PendingExtIntEvent, PendingInterruption, PendingInterruptionRead, Reg, SegmentRegister,
-    TableRegister, TriggerMode, VpContext, ALL_REGS, UNEXCHANGED_REGS,
+pub use partition::{
+    Canceller, HostPages, InterceptCounter, InterceptCounters, InterruptRequester, LateProperty,
+    LocalApicMode, PAGE_SIZE, Partition, PartitionConfig, RuntimeCounters, Vcpu, VpCounters,
 };
-
 /// Re-exported so a caller mapping memory into a partition need not also name
 /// the core crate. It is core's type, not this crate's: a permission on a
 /// guest-physical window means the same thing to every engine, and the WHP
 /// flags are one encoding of it rather than its definition.
 pub use rusty_box_core::GpaPerms;
+use rusty_box_whp_sys as sys;
+pub use rusty_box_whp_sys::{
+    ALL_REGS, AccessType, ApicRegister, ApicStatePage, ApicVector, ApicWriteType, CpuidAccess,
+    DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind, InterruptRequest,
+    InterruptedDelivery, InterruptedKind, InterruptionType, IoPortAccess, MemoryAccess, MsrAccess,
+    PendingExtIntEvent, PendingInterruption, PendingInterruptionRead, Reg, SegmentRegister,
+    TableRegister, TriggerMode, UNEXCHANGED_REGS, VpContext, WhpError, WhpErrorKind, WhpResult,
+};
+// The seam's three vocabularies — register shapes, errors, and the exits a
+// processor produces — under the names a caller of this crate uses them by.
+pub use rusty_box_whp_sys::{FeatureBanks, GvaTranslation, RegisterValue, shape_of};
 
 /// A partition handle is a plain integer and the pages behind a mapping are
 /// owned, so a partition moves between threads by derivation rather than by

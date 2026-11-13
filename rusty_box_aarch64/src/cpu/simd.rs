@@ -7,7 +7,7 @@
 //! pseudocode's `V[d] = result` at datasize 64 does.
 
 use super::dp::{ones, replicate};
-use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::exec::{ExecResult, Flow, bit, bits, sext};
 use super::fp::FpType;
 use super::{Cpu, Levels};
 
@@ -27,20 +27,12 @@ pub(crate) fn set_elem(v: &mut u128, index: u32, esize: u32, value: u64) {
 /// Truncate a result to the operation's datasize.
 #[inline]
 pub(crate) fn at_datasize(v: u128, q: bool) -> u128 {
-    if q {
-        v
-    } else {
-        v & u128::from(u64::MAX)
-    }
+    if q { v } else { v & u128::from(u64::MAX) }
 }
 
 #[inline]
 const fn datasize(q: bool) -> u32 {
-    if q {
-        128
-    } else {
-        64
-    }
+    if q { 128 } else { 64 }
 }
 
 /// Arm ARM `VFPExpandImm(imm8, N)` at `ty`'s width: sign `imm8<7>`, an

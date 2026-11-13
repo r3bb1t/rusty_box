@@ -50,7 +50,10 @@ pub(crate) enum SymbolsAction {
     /// Ask which file to load for the module.
     LoadFromFile(ModuleIdentity),
     /// Load the file refused as another build's.
-    LoadAnyway { identity: ModuleIdentity, path: PathBuf },
+    LoadAnyway {
+        identity: ModuleIdentity,
+        path: PathBuf,
+    },
     Retry(ModuleIdentity),
     Cancel(ModuleIdentity),
     Unload(ModuleIdentity),
@@ -91,7 +94,10 @@ impl Fix {
         match self {
             Fix::Cancel => SymbolsAction::Cancel(identity.clone()),
             Fix::Unload => SymbolsAction::Unload(identity.clone()),
-            Fix::LoadAnyway(path) => SymbolsAction::LoadAnyway { identity: identity.clone(), path: path.clone() },
+            Fix::LoadAnyway(path) => SymbolsAction::LoadAnyway {
+                identity: identity.clone(),
+                path: path.clone(),
+            },
             Fix::Retry => SymbolsAction::Retry(identity.clone()),
         }
     }
@@ -144,7 +150,11 @@ fn state_text(identity: &GuestIdentity, state: Option<&ModuleSymbols>) -> StateT
         },
         Some(ModuleSymbols::Downloading { done, total }) => StateText {
             state: match total {
-                Some(total) => format!("downloading {} of {}", human_size(*done), human_size(*total)),
+                Some(total) => format!(
+                    "downloading {} of {}",
+                    human_size(*done),
+                    human_size(*total)
+                ),
                 None => format!("downloading {}", human_size(*done)),
             },
             color: ACCENT_BLUE,
@@ -167,11 +177,16 @@ fn state_text(identity: &GuestIdentity, state: Option<&ModuleSymbols>) -> StateT
             fix: Some(Fix::Unload),
         },
         Some(ModuleSymbols::Refused { found, path }) => {
-            let mut text = missing(format!("refused: the file is {found}"), Some(Fix::LoadAnyway(path.clone())));
+            let mut text = missing(
+                format!("refused: the file is {found}"),
+                Some(Fix::LoadAnyway(path.clone())),
+            );
             text.source = path.display().to_string();
             text
         }
-        Some(ModuleSymbols::NotOnServer) => missing("not on the symbol servers".to_owned(), Some(Fix::Retry)),
+        Some(ModuleSymbols::NotOnServer) => {
+            missing("not on the symbol servers".to_owned(), Some(Fix::Retry))
+        }
         Some(ModuleSymbols::Failed { reason, retry }) => {
             let fix = match retry {
                 Retry::Retryable => Some(Fix::Retry),
@@ -194,7 +209,10 @@ fn source_text(source: &SymbolSource) -> String {
         SymbolSource::Server { url, kept } => match kept {
             Kept::InStore { .. } => format!("downloaded from {url}"),
             Kept::Replaced { bad, .. } => {
-                format!("downloaded from {url}; the store's copy that did not load is now {}", bad.display())
+                format!(
+                    "downloaded from {url}; the store's copy that did not load is now {}",
+                    bad.display()
+                )
             }
             Kept::NotKept { reason } => format!("downloaded from {url}, not kept: {reason}"),
         },
@@ -248,10 +266,22 @@ impl SymbolCounts {
     /// is none.
     pub(crate) fn label(self) -> String {
         let parts: Vec<String> = [
-            Counted { count: self.loaded, what: "loaded" },
-            Counted { count: self.waiting, what: "waiting" },
-            Counted { count: self.downloading, what: "downloading" },
-            Counted { count: self.missing, what: "missing" },
+            Counted {
+                count: self.loaded,
+                what: "loaded",
+            },
+            Counted {
+                count: self.waiting,
+                what: "waiting",
+            },
+            Counted {
+                count: self.downloading,
+                what: "downloading",
+            },
+            Counted {
+                count: self.missing,
+                what: "missing",
+            },
         ]
         .into_iter()
         .filter(|part| part.count > 0)
@@ -324,7 +354,13 @@ pub(crate) fn symbols_page(
         }
         walked.key
     });
-    let picked = pane.picked_symbol.and_then(|base| snapshot.symbols.modules.iter().find(|module| module.base == base));
+    let picked = pane.picked_symbol.and_then(|base| {
+        snapshot
+            .symbols
+            .modules
+            .iter()
+            .find(|module| module.base == base)
+    });
     let title = Title::counted("Symbols", snapshot.symbols.modules.len()).inlined();
     let mut card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
         keyed_pane_card(
@@ -339,8 +375,14 @@ pub(crate) fn symbols_page(
                         ui,
                         &mut pane.symbol_filter,
                         &[
-                            Segment { value: SymbolFilter::All, label: "All" },
-                            Segment { value: SymbolFilter::Missing, label: "Missing only" },
+                            Segment {
+                                value: SymbolFilter::All,
+                                label: "All",
+                            },
+                            Segment {
+                                value: SymbolFilter::Missing,
+                                label: "Missing only",
+                            },
                         ],
                     );
                     if ui.button("Rescan projects").clicked() {
@@ -355,7 +397,10 @@ pub(crate) fn symbols_page(
                     }
                 });
                 if let Some(problem) = &view.projects_problem {
-                    ui.label(RichText::new(format!("The project folders were not indexed: {problem}")).color(ACCENT_RED));
+                    ui.label(
+                        RichText::new(format!("The project folders were not indexed: {problem}"))
+                            .color(ACCENT_RED),
+                    );
                 }
                 if let Some(problems) = index_problems_text(&view.projects.problems) {
                     ui.label(RichText::new(problems).color(ACCENT_AMBER));
@@ -375,14 +420,25 @@ pub(crate) fn symbols_page(
                         continue;
                     }
                     let text = state_text(&module.identity, state_of(&module.identity, view));
-                    let tone = if pane.picked_symbol == Some(module.base) { Tone::Selected } else { keyed_tone(keyed_row, n) };
+                    let tone = if pane.picked_symbol == Some(module.base) {
+                        Tone::Selected
+                    } else {
+                        keyed_tone(keyed_row, n)
+                    };
                     let cells = [
                         Cell::left(module.name.as_str(), TEXT_PRIMARY, MODULE_CHARS),
                         Cell::left(text.state, text.color, STATE_CHARS),
                         Cell::fill(text.source, TEXT_MUTED),
                     ];
-                    let response =
-                        list_row(ui, 0.0, &cells, tone, RowSense::Pick { selected: pane.picked_symbol == Some(module.base) });
+                    let response = list_row(
+                        ui,
+                        0.0,
+                        &cells,
+                        tone,
+                        RowSense::Pick {
+                            selected: pane.picked_symbol == Some(module.base),
+                        },
+                    );
                     follow_key(&response, keyed_row, n);
                     if response.clicked() {
                         pane.picked_symbol = Some(module.base);
@@ -396,13 +452,20 @@ pub(crate) fn symbols_page(
         Fit::Grid => card(ui, Room::Fixed(ui.available_size()), action),
         Fit::Scrolling(_) => {
             let room = Room::Content(fit.density());
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| card(ui, room, action));
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| card(ui, room, action));
         }
     }
 }
 
 /// A module's identity, Load from file, and the fix its state takes.
-fn picked_symbol_bar(ui: &mut egui::Ui, guest: &GuestIdentity, view: &SymbolsView, action: &mut Option<DebuggerAction>) {
+fn picked_symbol_bar(
+    ui: &mut egui::Ui,
+    guest: &GuestIdentity,
+    view: &SymbolsView,
+    action: &mut Option<DebuggerAction>,
+) {
     let text = state_text(guest, state_of(guest, view));
     let Some(identity) = guest.known() else {
         ui.label(RichText::new(text.state).color(ACCENT_AMBER));
@@ -411,7 +474,9 @@ fn picked_symbol_bar(ui: &mut egui::Ui, guest: &GuestIdentity, view: &SymbolsVie
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(identity.to_string()).color(TEXT_PRIMARY));
         if ui.button(LOAD_FROM_FILE).clicked() {
-            *action = Some(DebuggerAction::Symbols(SymbolsAction::LoadFromFile(identity.clone())));
+            *action = Some(DebuggerAction::Symbols(SymbolsAction::LoadFromFile(
+                identity.clone(),
+            )));
         }
         if let Some(fix) = &text.fix {
             if ui.button(fix.label()).clicked() {
@@ -477,20 +542,30 @@ pub(crate) const LOAD_FROM_FILE: &str = "Load symbols from file…";
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::debugger::inspect::ModuleSpace;
     use rusty_box_symbols::identity::{Guid, PeImageId, TablesIdentity};
     use rusty_box_symbols::pe::HeaderError;
     use rusty_box_symbols::units::Rva;
 
+    use super::*;
+    use crate::debugger::inspect::ModuleSpace;
+
     fn module(identity: GuestIdentity) -> SymModule {
-        SymModule { base: 0x1000, size: 0x1000, name: "disk.sys".to_owned(), space: ModuleSpace::Kernel, identity }
+        SymModule {
+            base: 0x1000,
+            size: 0x1000,
+            name: "disk.sys".to_owned(),
+            space: ModuleSpace::Kernel,
+            identity,
+        }
     }
 
     fn known() -> GuestIdentity {
         GuestIdentity::Known(ModuleIdentity::Pe {
             file_name: "disk.sys".to_owned(),
-            image: PeImageId { time_date_stamp: 1, size_of_image: 0x1000 },
+            image: PeImageId {
+                time_date_stamp: 1,
+                size_of_image: 0x1000,
+            },
             pdb: None,
         })
     }
@@ -504,28 +579,80 @@ mod tests {
     /// Every state says what it is and offers the one action that fixes it.
     #[test]
     fn each_state_offers_the_action_that_fixes_it() {
-        let found = TablesIdentity::Pdb { guid: Guid::from_le_bytes([1; 16]), age: 2 };
+        let found = TablesIdentity::Pdb {
+            guid: Guid::from_le_bytes([1; 16]),
+            age: 2,
+        };
         let path = PathBuf::from("D:\\x\\disk.pdb");
-        let case = |state, fix, standing| Case { state, fix, standing };
+        let case = |state, fix, standing| Case {
+            state,
+            fix,
+            standing,
+        };
         let cases = [
             case(None, Some(Fix::Retry), Standing::Missing),
-            case(Some(ModuleSymbols::Pending), Some(Fix::Cancel), Standing::Waiting),
-            case(Some(ModuleSymbols::Downloading { done: 1024, total: Some(4096) }), Some(Fix::Cancel), Standing::Downloading),
             case(
-                Some(ModuleSymbols::Loaded { from: SymbolSource::Store { path: path.clone() } }),
+                Some(ModuleSymbols::Pending),
+                Some(Fix::Cancel),
+                Standing::Waiting,
+            ),
+            case(
+                Some(ModuleSymbols::Downloading {
+                    done: 1024,
+                    total: Some(4096),
+                }),
+                Some(Fix::Cancel),
+                Standing::Downloading,
+            ),
+            case(
+                Some(ModuleSymbols::Loaded {
+                    from: SymbolSource::Store { path: path.clone() },
+                }),
                 Some(Fix::Unload),
                 Standing::Loaded,
             ),
-            case(Some(ModuleSymbols::Forced { found: found.clone(), path: path.clone() }), Some(Fix::Unload), Standing::Loaded),
-            case(Some(ModuleSymbols::Refused { found, path: path.clone() }), Some(Fix::LoadAnyway(path)), Standing::Missing),
-            case(Some(ModuleSymbols::NotOnServer), Some(Fix::Retry), Standing::Missing),
             case(
-                Some(ModuleSymbols::Failed { reason: "timed out".to_owned(), retry: Retry::Retryable }),
+                Some(ModuleSymbols::Forced {
+                    found: found.clone(),
+                    path: path.clone(),
+                }),
+                Some(Fix::Unload),
+                Standing::Loaded,
+            ),
+            case(
+                Some(ModuleSymbols::Refused {
+                    found,
+                    path: path.clone(),
+                }),
+                Some(Fix::LoadAnyway(path)),
+                Standing::Missing,
+            ),
+            case(
+                Some(ModuleSymbols::NotOnServer),
                 Some(Fix::Retry),
                 Standing::Missing,
             ),
-            case(Some(ModuleSymbols::Failed { reason: "bad URL".to_owned(), retry: Retry::Final }), None, Standing::Missing),
-            case(Some(ModuleSymbols::Unloaded), Some(Fix::Retry), Standing::Missing),
+            case(
+                Some(ModuleSymbols::Failed {
+                    reason: "timed out".to_owned(),
+                    retry: Retry::Retryable,
+                }),
+                Some(Fix::Retry),
+                Standing::Missing,
+            ),
+            case(
+                Some(ModuleSymbols::Failed {
+                    reason: "bad URL".to_owned(),
+                    retry: Retry::Final,
+                }),
+                None,
+                Standing::Missing,
+            ),
+            case(
+                Some(ModuleSymbols::Unloaded),
+                Some(Fix::Retry),
+                Standing::Missing,
+            ),
         ];
         for case in cases {
             let text = state_text(&module(known()).identity, case.state.as_ref());
@@ -542,21 +669,34 @@ mod tests {
         let bad = PathBuf::from("D:\\Symbols\\disk.pdb\\0123\\disk.pdb.bad");
         let from = SymbolSource::Server {
             url: "https://msdl.example/disk.pdb".to_owned(),
-            kept: Kept::Replaced { path: PathBuf::from("D:\\Symbols\\disk.pdb\\0123\\disk.pdb"), bad: bad.clone() },
+            kept: Kept::Replaced {
+                path: PathBuf::from("D:\\Symbols\\disk.pdb\\0123\\disk.pdb"),
+                bad: bad.clone(),
+            },
         };
         let text = state_text(&known(), Some(&ModuleSymbols::Loaded { from }));
-        assert!(text.source.contains(&bad.display().to_string()), "{}", text.source);
+        assert!(
+            text.source.contains(&bad.display().to_string()),
+            "{}",
+            text.source
+        );
     }
 
     #[test]
     fn index_problems_name_the_first_few_and_count_the_rest() {
         assert_eq!(index_problems_text(&[]), None);
         let problems: Vec<IndexProblem> = (0..5)
-            .map(|n| IndexProblem { path: PathBuf::from(format!("p{n}.pdb")), reason: "cut short".to_owned() })
+            .map(|n| IndexProblem {
+                path: PathBuf::from(format!("p{n}.pdb")),
+                reason: "cut short".to_owned(),
+            })
             .collect();
         let text = index_problems_text(&problems).expect("listed");
         assert!(text.starts_with("5 project files did not index:"), "{text}");
-        assert!(text.contains("p2.pdb: cut short") && !text.contains("p3.pdb"), "{text}");
+        assert!(
+            text.contains("p2.pdb: cut short") && !text.contains("p3.pdb"),
+            "{text}"
+        );
         assert!(text.ends_with("and 2 more"), "{text}");
     }
 
@@ -569,9 +709,16 @@ mod tests {
             len: 0x40,
         }));
         let text = state_text(&unreadable.identity, None);
-        assert!(text.state.starts_with("no identity: the DOS header"), "{}", text.state);
+        assert!(
+            text.state.starts_with("no identity: the DOS header"),
+            "{}",
+            text.state
+        );
         assert_eq!(text.fix, None);
-        assert_eq!(state_text(&GuestIdentity::Unnamed, None).standing, Standing::Missing);
+        assert_eq!(
+            state_text(&GuestIdentity::Unnamed, None).standing,
+            Standing::Missing
+        );
     }
 
     /// A module asked for but not yet taken by a worker counts as waiting,
@@ -581,23 +728,60 @@ mod tests {
         let view = |state: ModuleSymbols| {
             let mut view = SymbolsView::default();
             if let GuestIdentity::Known(identity) = known() {
-                view.modules.insert(identity, crate::symbols::hub::ModuleEntry { state, tables: None });
+                view.modules.insert(
+                    identity,
+                    crate::symbols::hub::ModuleEntry {
+                        state,
+                        tables: None,
+                    },
+                );
             }
             view
         };
-        let index = SymbolIndex { modules: vec![module(known())], kernel: None };
+        let index = SymbolIndex {
+            modules: vec![module(known())],
+            kernel: None,
+        };
         let waiting = symbol_counts(&index, &view(ModuleSymbols::Pending));
-        assert_eq!(waiting, SymbolCounts { loaded: 0, waiting: 1, downloading: 0, missing: 0 });
+        assert_eq!(
+            waiting,
+            SymbolCounts {
+                loaded: 0,
+                waiting: 1,
+                downloading: 0,
+                missing: 0
+            }
+        );
         assert_eq!(waiting.label(), "1 waiting");
-        let downloading = symbol_counts(&index, &view(ModuleSymbols::Downloading { done: 1, total: None }));
+        let downloading = symbol_counts(
+            &index,
+            &view(ModuleSymbols::Downloading {
+                done: 1,
+                total: None,
+            }),
+        );
         assert_eq!(downloading.label(), "1 downloading");
     }
 
     #[test]
     fn the_chip_counts_only_what_there_is() {
-        let counts = SymbolCounts { loaded: 14, waiting: 0, downloading: 2, missing: 1 };
+        let counts = SymbolCounts {
+            loaded: 14,
+            waiting: 0,
+            downloading: 2,
+            missing: 1,
+        };
         assert_eq!(counts.label(), "14 loaded · 2 downloading · 1 missing");
-        assert_eq!(SymbolCounts { loaded: 3, waiting: 0, downloading: 0, missing: 0 }.label(), "3 loaded");
+        assert_eq!(
+            SymbolCounts {
+                loaded: 3,
+                waiting: 0,
+                downloading: 0,
+                missing: 0
+            }
+            .label(),
+            "3 loaded"
+        );
         assert_eq!(SymbolCounts::default().label(), "no modules");
     }
 }

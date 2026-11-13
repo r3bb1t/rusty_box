@@ -23,7 +23,7 @@ mod common;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use common::{Parsed, RunArgs, Virtualization, RUN_USAGE};
+use common::{Parsed, RUN_USAGE, RunArgs, Virtualization};
 use rusty_box_aarch64::boot::{LinuxImage, SERIAL_CONSOLE_COMMAND_LINE};
 use rusty_box_aarch64::machine::DirectKernel;
 use rusty_box_aarch64::{Levels, MachineBuilder, RamSize, VirtConfig};
@@ -103,7 +103,14 @@ fn boot() -> ExitCode {
         let initrd = args.initrd.as_deref().map(read).transpose()?;
         let dtb = args.dtb.as_deref().map(read).transpose()?;
         let ram = RamSize::mib(args.ram_mib).ok_or("--ram-mib is not a size the board can map")?;
-        Ok((kernel, initrd, dtb, ram, args.run.ips()?, args.run.interrupts()?))
+        Ok((
+            kernel,
+            initrd,
+            dtb,
+            ram,
+            args.run.ips()?,
+            args.run.interrupts()?,
+        ))
     })();
     let (kernel, initrd, dtb, ram, ips, interrupts) = match loaded {
         Ok(l) => l,

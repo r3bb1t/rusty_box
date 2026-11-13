@@ -4,15 +4,15 @@
 
 use rusty_box_symbols::tables::SymbolTables;
 use rusty_box_symbols_fixtures::pdb::{
-    build_pdb, FixtureField, FixtureFrameProc, FixtureGlobal, FixtureLine, FixtureLocal, FixturePlace, FixtureProcedure,
-    FixtureScope, FixtureType, FixtureUdt, PdbFixture,
+    FixtureField, FixtureFrameProc, FixtureGlobal, FixtureLine, FixtureLocal, FixturePlace,
+    FixtureProcedure, FixtureScope, FixtureType, FixtureUdt, PdbFixture, build_pdb,
 };
 
 use super::frames::{InspectRequest, LocalsRead};
-use super::guest::fake::FakeGuest;
 use super::guest::Root;
+use super::guest::fake::FakeGuest;
 use super::unwind::{CodeWidth, Frame, FrameFound, FrameRegisters};
-use super::variables::{frame_scope, locals_of, FrameContext, Innermost, ShownValue, VariableRow};
+use super::variables::{FrameContext, Innermost, ShownValue, VariableRow, frame_scope, locals_of};
 
 pub(crate) const CR3: u64 = 0x1000;
 pub(crate) const BASE: u64 = 0x1_4000_0000;
@@ -33,15 +33,30 @@ pub(crate) struct FrameFixture {
 }
 
 pub(crate) fn local(name: &str, ty: FixtureType, place: FixturePlace) -> FixtureLocal {
-    FixtureLocal { name: name.into(), ty, place }
+    FixtureLocal {
+        name: name.into(),
+        ty,
+        place,
+    }
 }
 
 pub(crate) fn on_stack(name: &str, ty: FixtureType, offset: i32) -> FixtureLocal {
-    local(name, ty, FixturePlace::RegRel { register: CV_RSP, offset })
+    local(
+        name,
+        ty,
+        FixturePlace::RegRel {
+            register: CV_RSP,
+            offset,
+        },
+    )
 }
 
 pub(crate) fn field(name: &str, offset: u64, ty: FixtureType) -> FixtureField {
-    FixtureField { name: name.into(), offset, ty }
+    FixtureField {
+        name: name.into(),
+        offset,
+        ty,
+    }
 }
 
 pub(crate) fn tables_with(fixture: FrameFixture) -> SymbolTables {
@@ -55,14 +70,20 @@ pub(crate) fn tables_with(fixture: FrameFixture) -> SymbolTables {
         len: 0x60,
         file: r"C:\src\read.c".into(),
         checksum: None,
-        lines: vec![FixtureLine { offset: 0, line: 10 }],
+        lines: vec![FixtureLine {
+            offset: 0,
+            line: 10,
+        }],
     });
     pdb.scopes.push(FixtureScope {
         procedure: "ReadBlock".into(),
         debug_start: 0x10,
         debug_end: 0x50,
         parameters: None,
-        frame: Some(FixtureFrameProc { locals: 1, params: 1 }),
+        frame: Some(FixtureFrameProc {
+            locals: 1,
+            params: 1,
+        }),
         locals: fixture.locals,
         inline_locals: Vec::new(),
         blocks: Vec::new(),
@@ -72,7 +93,11 @@ pub(crate) fn tables_with(fixture: FrameFixture) -> SymbolTables {
 
 /// `ReadBlock` with `locals` and the structures `types`.
 pub(crate) fn tables(locals: Vec<FixtureLocal>, types: Vec<FixtureUdt>) -> SymbolTables {
-    tables_with(FrameFixture { locals, types, globals: Vec::new() })
+    tables_with(FrameFixture {
+        locals,
+        types,
+        globals: Vec::new(),
+    })
 }
 
 /// A frame whose code is at `rva`: the innermost one stopped there, a
@@ -86,7 +111,14 @@ pub(crate) fn frame(rva: u64, innermost: Innermost, registers: [Option<u64>; 16]
         Innermost::Yes => BASE + rva,
         Innermost::Caller => BASE + rva + 1,
     };
-    Frame { registers: FrameRegisters { rip, rsp: RSP_AT, registers }, how }
+    Frame {
+        registers: FrameRegisters {
+            rip,
+            rsp: RSP_AT,
+            registers,
+        },
+        how,
+    }
 }
 
 /// Everything a read needs but the guest: the frame, its tables, and its
@@ -100,7 +132,12 @@ pub(crate) struct Setup {
 
 impl Setup {
     pub(crate) fn new(tables: SymbolTables) -> Setup {
-        Setup { tables, frame: frame(IN_BODY, Innermost::Yes, [Some(0); 16]), innermost: Innermost::Yes, xmm: None }
+        Setup {
+            tables,
+            frame: frame(IN_BODY, Innermost::Yes, [Some(0); 16]),
+            innermost: Innermost::Yes,
+            xmm: None,
+        }
     }
 
     pub(crate) fn context(&self) -> FrameContext<'_> {
@@ -132,5 +169,9 @@ pub(crate) fn guest() -> FakeGuest {
 }
 
 pub(crate) fn value<'a>(rows: &'a [VariableRow], name: &str) -> &'a ShownValue {
-    &rows.iter().find(|row| row.name == name).unwrap_or_else(|| panic!("a row {name}: {rows:?}")).value
+    &rows
+        .iter()
+        .find(|row| row.name == name)
+        .unwrap_or_else(|| panic!("a row {name}: {rows:?}"))
+        .value
 }

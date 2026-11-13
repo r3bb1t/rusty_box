@@ -48,8 +48,8 @@
 
 mod device_thread;
 mod engine;
-mod fast_machine;
 mod exchange;
+mod fast_machine;
 mod state;
 mod vcpu_thread;
 mod vm_clock;
@@ -62,15 +62,15 @@ mod xsave;
 /// and these are exercised from more than one.
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use crate::WhpEngine;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
-    use rusty_box::emulator::{
-        DeviceClock, Emulator, EmulatorConfig, MachineBuilder, MemorySize,
-    };
+    use rusty_box::emulator::{DeviceClock, Emulator, EmulatorConfig, MachineBuilder, MemorySize};
     use rusty_box::iodev::PortE9Hack;
     use rusty_box_core::time::{HostClock, HostInstant};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
+
+    use crate::WhpEngine;
 
     /// Where the guest's code goes, and the port it writes to.
     pub(crate) const CODE: u64 = 0x1000;
@@ -129,9 +129,8 @@ pub(crate) mod fixtures {
             port_e9_hack: CONSOLE,
             ..EmulatorConfig::default()
         };
-        let mut machine =
-            Emulator::<(), WhpEngine>::with_engine(config, CpuSetupMode::RealMode)
-                .expect("machine");
+        let mut machine = Emulator::<(), WhpEngine>::with_engine(config, CpuSetupMode::RealMode)
+            .expect("machine");
         machine.mem_write(CODE, code).expect("load");
         machine.reg_write(X86Reg::Rip, CODE);
         machine
@@ -338,7 +337,9 @@ pub(crate) mod fixtures {
         let mut gdt = [0u8; 24];
         gdt[8..16].copy_from_slice(&[0xFF, 0xFF, 0, 0, 0, 0x9A, 0xCF, 0]);
         gdt[16..24].copy_from_slice(&[0xFF, 0xFF, 0, 0, 0, 0x92, 0xCF, 0]);
-        machine.mem_write(0x2000, &gdt).expect("the GDT is writable");
+        machine
+            .mem_write(0x2000, &gdt)
+            .expect("the GDT is writable");
         // limit 0x17, base 0x2000
         machine
             .mem_write(0x1F00, &[0x17, 0x00, 0x00, 0x20, 0x00, 0x00])
@@ -358,12 +359,16 @@ pub(crate) mod fixtures {
             0x00,
             0x00,
         ]);
-        machine.mem_write(0x3000, &idt).expect("the IDT is writable");
+        machine
+            .mem_write(0x3000, &idt)
+            .expect("the IDT is writable");
         // limit 0x207, base 0x3000
         machine
             .mem_write(0x1F08, &[0x07, 0x02, 0x00, 0x30, 0x00, 0x00])
             .expect("the IDTR image is writable");
-        machine.mem_write(HANDLER, &APIC_HANDLER).expect("the handler is writable");
+        machine
+            .mem_write(HANDLER, &APIC_HANDLER)
+            .expect("the handler is writable");
     }
 
     /// Whether this host can run the hypervisor-gated tests.
@@ -391,7 +396,8 @@ pub(crate) mod fixtures {
         static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
         // A test that panicked while holding the turn poisoned nothing: the
         // guard protects an ordering, not a value.
-        TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        TURN.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// A `HostClock` two owners can advance — the test and the source under
@@ -448,8 +454,10 @@ pub(crate) mod fixtures {
     /// takes it to service an exit and the test takes it to read a device.
     pub(crate) fn shared(
         mut machine: std::boxed::Box<Emulator<(), WhpEngine>>,
-    ) -> (Arc<std::sync::Mutex<std::boxed::Box<Emulator<(), WhpEngine>>>>, rusty_box_whp::Vcpu)
-    {
+    ) -> (
+        Arc<std::sync::Mutex<std::boxed::Box<Emulator<(), WhpEngine>>>>,
+        rusty_box_whp::Vcpu,
+    ) {
         let vcpu = crate::engine::bring_up(&mut machine).expect("the partition starts");
         (Arc::new(std::sync::Mutex::new(machine)), vcpu)
     }
@@ -489,10 +497,9 @@ pub(crate) mod fixtures {
             // ahead of it would jump the guest forward on its first exit.
             let clock = {
                 let machine = machine.lock().expect("the machine's lock");
-                let rate = rusty_box_core::time::ClockHz::new(
-                    machine.config().ips.per_second_u64(),
-                )
-                .expect("a positive instruction rate");
+                let rate =
+                    rusty_box_core::time::ClockHz::new(machine.config().ips.per_second_u64())
+                        .expect("a positive instruction rate");
                 let mut clock = crate::VmClockSource::stopped_at(
                     rusty_box_core::time::VmInstant::from_ticks(machine.ticks()),
                     rate,
@@ -511,7 +518,10 @@ pub(crate) mod fixtures {
                 .install_control(control.clone());
             // Born parked; these tests want it running.
             control.resume();
-            Self { control, join: Some(join) }
+            Self {
+                control,
+                join: Some(join),
+            }
         }
 
         pub(crate) fn control(&self) -> &crate::vcpu_thread::VcpuControl {
@@ -523,7 +533,8 @@ pub(crate) mod fixtures {
         pub(crate) fn stop_and_join(mut self) {
             self.control.stop().expect("the stop reaches the platform");
             if let Some(join) = self.join.take() {
-                join.join().expect("the vCPU thread ended without panicking");
+                join.join()
+                    .expect("the vCPU thread ended without panicking");
             }
         }
     }
@@ -623,7 +634,9 @@ pub(crate) mod fixtures {
         let mut arrived = false;
         while !arrived && std::time::Instant::now() < deadline {
             let mut guard = machine.lock().expect("the machine's lock");
-            guard.service_device_time(ips / 1_000).expect("the wheel turns");
+            guard
+                .service_device_time(ips / 1_000)
+                .expect("the wheel turns");
             written.extend(console_output(&mut **guard));
             arrived = enough(&**guard, &written);
             drop(guard);
@@ -633,7 +646,9 @@ pub(crate) mod fixtures {
             .request_park(crate::vcpu_thread::Parked::Paused)
             .expect("the park request reaches the platform");
         let parked = control.wait_parked_by(std::time::Duration::from_secs(5));
-        written.extend(console_output(&mut **machine.lock().expect("the machine's lock")));
+        written.extend(console_output(
+            &mut **machine.lock().expect("the machine's lock"),
+        ));
         assert_eq!(
             parked,
             Some(crate::vcpu_thread::Parked::Paused),
@@ -645,7 +660,12 @@ pub(crate) mod fixtures {
              own account of the run was {:?}",
             control.census()
         );
-        ThreadedRun { machine, control, running, written }
+        ThreadedRun {
+            machine,
+            control,
+            running,
+            written,
+        }
     }
 
     /// Poll `ready` until it answers true, or fail by name once `within` has
@@ -702,12 +722,6 @@ const _: () = {
     s::<FastMachine<()>>();
 };
 
-/// Re-exported so a caller reading [`WhpEngine::platform_counters`] need not
-/// also name the platform crate to spell what it returns. These are that
-/// crate's types, not this one's — the hypervisor's own accounting, which this
-/// engine forwards rather than defines.
-pub use rusty_box_whp::{InterceptCounter, InterceptCounters, RuntimeCounters};
-
 /// Whether this host can run a guest on the hardware at all.
 ///
 /// Re-exported because it is the first question a caller of this engine has,
@@ -718,22 +732,27 @@ pub use rusty_box_whp::{InterceptCounter, InterceptCounters, RuntimeCounters};
 /// # Errors
 /// Whatever the platform said when asked.
 pub use rusty_box_whp::hypervisor_present;
+/// Re-exported so a caller reading [`WhpEngine::platform_counters`] need not
+/// also name the platform crate to spell what it returns. These are that
+/// crate's types, not this one's — the hypervisor's own accounting, which this
+/// engine forwards rather than defines.
+pub use rusty_box_whp::{InterceptCounter, InterceptCounters, RuntimeCounters};
 
 #[cfg(test)]
 mod tests {
-    use crate::fixtures::{
-        a_turn_on_the_hardware, drive_on_a_thread, fast_machine_booting, fast_machine_running,
-        hypervisor_here,
-        ioapic_edge_guest, load_the_protected_mode_tables, machine_running,
-        machine_with_devices_on, masked_lvt0_guest, shared, wait_until, RunningVcpu, ThreadedRun,
-        console_output, CODE, CONSOLE, DEBUG_PORT, MARK,
-    };
-    use crate::vcpu_thread::Parked;
+    use rusty_box::Error;
     use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
     use rusty_box::emulator::{
         DeviceClock, Emulator, EmulatorConfig, EngineRefusal, MemorySize, RunBudget, StopReason,
     };
-    use rusty_box::Error;
+
+    use crate::fixtures::{
+        CODE, CONSOLE, DEBUG_PORT, MARK, RunningVcpu, ThreadedRun, a_turn_on_the_hardware,
+        console_output, drive_on_a_thread, fast_machine_booting, fast_machine_running,
+        hypervisor_here, ioapic_edge_guest, load_the_protected_mode_tables, machine_running,
+        machine_with_devices_on, masked_lvt0_guest, shared, wait_until,
+    };
+    use crate::vcpu_thread::Parked;
 
     /// A machine running on the host's hypervisor executes a guest, and its
     /// output arrives in the machine's own devices.
@@ -763,10 +782,9 @@ mod tests {
             .step(RunBudget::Ticks(1_000_000))
             .expect("the hypervisor runs the guest");
 
-        let written: std::vec::Vec<u8> =
-            machine
-                .with_machine(console_output)
-                .expect("a stepped machine is paused");
+        let written: std::vec::Vec<u8> = machine
+            .with_machine(console_output)
+            .expect("a stepped machine is paused");
         assert_eq!(
             written,
             std::vec![MARK],
@@ -798,16 +816,15 @@ mod tests {
             0x26, 0xC6, 0x06, 0x00, 0x00, MARK, // mov byte [es:0], MARK
             0x26, 0xA0, 0x00, 0x00, //           mov al, [es:0]
             0xE6, DEBUG_PORT, //                 out 0xE9, al
-            0xF4, //                             hlt
+            0xF4,       //                             hlt
         ]);
         machine
             .step(RunBudget::Ticks(1_000_000))
             .expect("the hypervisor runs the guest and the shadow finishes its accesses");
 
-        let written: std::vec::Vec<u8> =
-            machine
-                .with_machine(console_output)
-                .expect("a stepped machine is paused");
+        let written: std::vec::Vec<u8> = machine
+            .with_machine(console_output)
+            .expect("a stepped machine is paused");
         assert_eq!(
             written,
             std::vec![MARK],
@@ -847,15 +864,11 @@ mod tests {
             0x0F, 0xA2, //                          cpuid
             0xE6, DEBUG_PORT, //                    out 0xE9, al
             0x66, 0xC1, 0xE8, 0x08, //              shr eax, 8
-            0xE6, DEBUG_PORT,
-            0x66, 0xC1, 0xE8, 0x08,
-            0xE6, DEBUG_PORT,
-            0x66, 0xC1, 0xE8, 0x08,
-            0xE6, DEBUG_PORT,
-            0x66, 0xC1, 0xE9, 0x1F, //              shr ecx, 31
+            0xE6, DEBUG_PORT, 0x66, 0xC1, 0xE8, 0x08, 0xE6, DEBUG_PORT, 0x66, 0xC1, 0xE8, 0x08,
+            0xE6, DEBUG_PORT, 0x66, 0xC1, 0xE9, 0x1F, //              shr ecx, 31
             0x88, 0xC8, //                          mov al, cl
             0xE6, DEBUG_PORT, //                    out 0xE9, al
-            0xF4, //                                hlt
+            0xF4,       //                                hlt
         ];
 
         let config = EmulatorConfig {
@@ -877,10 +890,9 @@ mod tests {
         on_hardware
             .step(RunBudget::Ticks(1_000_000))
             .expect("the hypervisor runs the guest");
-        let by_the_hardware: std::vec::Vec<u8> =
-            on_hardware
-                .with_machine(console_output)
-                .expect("a stepped machine is paused");
+        let by_the_hardware: std::vec::Vec<u8> = on_hardware
+            .with_machine(console_output)
+            .expect("a stepped machine is paused");
 
         assert_eq!(
             by_the_interpreter.last(),
@@ -912,13 +924,8 @@ mod tests {
         let asking: &[u8] = &[
             0x66, 0xB9, 0xA0, 0x01, 0x00, 0x00, //  mov ecx, IA32_MISC_ENABLE
             0x0F, 0x32, //                          rdmsr
-            0xE6, DEBUG_PORT,
-            0x66, 0xC1, 0xE8, 0x08,
-            0xE6, DEBUG_PORT,
-            0x66, 0xC1, 0xE8, 0x08,
-            0xE6, DEBUG_PORT,
-            0x66, 0xC1, 0xE8, 0x08,
-            0xE6, DEBUG_PORT,
+            0xE6, DEBUG_PORT, 0x66, 0xC1, 0xE8, 0x08, 0xE6, DEBUG_PORT, 0x66, 0xC1, 0xE8, 0x08,
+            0xE6, DEBUG_PORT, 0x66, 0xC1, 0xE8, 0x08, 0xE6, DEBUG_PORT,
             0xF4, //                                hlt
         ];
 
@@ -941,10 +948,9 @@ mod tests {
         on_hardware
             .step(RunBudget::Ticks(1_000_000))
             .expect("the hypervisor runs the guest");
-        let by_the_hardware: std::vec::Vec<u8> =
-            on_hardware
-                .with_machine(console_output)
-                .expect("a stepped machine is paused");
+        let by_the_hardware: std::vec::Vec<u8> = on_hardware
+            .with_machine(console_output)
+            .expect("a stepped machine is paused");
 
         assert_eq!(
             by_the_interpreter.len(),
@@ -1035,7 +1041,7 @@ mod tests {
             0x2D, 0x00, 0x60, // sub ax,0x6000
             0xD1, 0xE8, // shr ax,1
             0xE6, DEBUG_PORT, // out 0xE9,al — trap count
-            0xF4, // hlt (0x33)
+            0xF4,       // hlt (0x33)
             0xEB, 0xFD, // jmp hlt
             // isr (0x36):
             0x55, // push bp
@@ -1085,7 +1091,7 @@ mod tests {
             0x2D, 0x00, 0x60, // sub ax,0x6000
             0xD1, 0xE8, // shr ax,1
             0xE6, DEBUG_PORT, // out 0xE9,al
-            0xF4, // hlt (0x40)
+            0xF4,       // hlt (0x40)
             0xEB, 0xFD, // jmp hlt
             // isr (0x43):
             0x55, 0x89, 0xE5, 0x50, // push bp; mov bp,sp; push ax
@@ -1147,7 +1153,9 @@ mod tests {
                     .step(RunBudget::Ticks(1_000_000))
                     .expect("the hypervisor runs the guest");
             }
-            machine.with_machine(read_trace).expect("a stepped machine is paused")
+            machine
+                .with_machine(read_trace)
+                .expect("a stepped machine is paused")
         };
         let (hw_err_count, hw_err, hw_err_memory_exits) = {
             let mut machine = fast_machine_running(with_errand);
@@ -1156,8 +1164,9 @@ mod tests {
                     .step(RunBudget::Ticks(1_000_000))
                     .expect("the hypervisor runs the guest");
             }
-            let (count, ips) =
-                machine.with_machine(read_trace).expect("a stepped machine is paused");
+            let (count, ips) = machine
+                .with_machine(read_trace)
+                .expect("a stepped machine is paused");
             (count, ips, machine.engine_census().exits.memory)
         };
 
@@ -1170,11 +1179,19 @@ mod tests {
         );
         eprintln!(
             "errand's own step (frame IP 0x102a) on hardware: {}",
-            if hw_err.contains(&0x102A) { "DELIVERED" } else { "LOST" }
+            if hw_err.contains(&0x102A) {
+                "DELIVERED"
+            } else {
+                "LOST"
+            }
         );
         eprintln!(
             "first hardware-retired step after the imposition (frame IP 0x102b): {}",
-            if hw_err.contains(&0x102B) { "DELIVERED" } else { "LOST" }
+            if hw_err.contains(&0x102B) {
+                "DELIVERED"
+            } else {
+                "LOST"
+            }
         );
 
         assert_eq!(
@@ -1237,7 +1254,9 @@ mod tests {
         let mut seen: std::vec::Vec<u8> = std::vec::Vec::new();
         wait_until(
             || {
-                seen.extend(console_output(&mut **machine.lock().expect("the machine's lock")));
+                seen.extend(console_output(
+                    &mut **machine.lock().expect("the machine's lock"),
+                ));
                 !seen.is_empty()
             },
             std::time::Duration::from_secs(2),
@@ -1249,14 +1268,22 @@ mod tests {
              the shadow rather than the export moving nothing"
         );
 
-        control.request_park(Parked::Paused).expect("the park request reaches the platform");
+        control
+            .request_park(Parked::Paused)
+            .expect("the park request reaches the platform");
         assert_eq!(
             control.wait_parked_by(std::time::Duration::from_secs(5)),
             Some(Parked::Paused),
         );
         let census = control.census();
-        assert_eq!(census.exits.cpuid, 1, "one CPUID exit, not a repeated one: {census:?}");
-        assert_eq!(census.exits.port, 1, "and the one port write that carried its answer");
+        assert_eq!(
+            census.exits.cpuid, 1,
+            "one CPUID exit, not a repeated one: {census:?}"
+        );
+        assert_eq!(
+            census.exits.port, 1,
+            "and the one port write that carried its answer"
+        );
         assert!(
             census.export_calls >= 1,
             "a CPUID exit imports and exports register groups, unlike a plain port exit: \
@@ -1316,7 +1343,9 @@ mod tests {
             "no cancel, no window, no halt: {running_census:?}"
         );
 
-        control.request_park(Parked::Paused).expect("the park request reaches the platform");
+        control
+            .request_park(Parked::Paused)
+            .expect("the park request reaches the platform");
         assert_eq!(
             control.wait_parked_by(std::time::Duration::from_secs(5)),
             Some(Parked::Paused),
@@ -1324,7 +1353,9 @@ mod tests {
         );
         // Drained after the park, so the counts below describe a machine
         // nothing is still running against.
-        seen.extend(console_output(&mut **machine.lock().expect("the machine's lock")));
+        seen.extend(console_output(
+            &mut **machine.lock().expect("the machine's lock"),
+        ));
         assert!(seen.iter().all(|byte| *byte == MARK), "{seen:#04x?}");
         let census = control.census();
         assert_eq!(
@@ -1398,7 +1429,12 @@ mod tests {
                 0xCF, //                   iret
             ],
         );
-        let ThreadedRun { machine, control, running, written } = drive_on_a_thread(
+        let ThreadedRun {
+            machine,
+            control,
+            running,
+            written,
+        } = drive_on_a_thread(
             machine,
             std::time::Duration::from_secs(10),
             "the PIT's ticks reached the guest's own ISR as placed ExtINTs",
@@ -1424,7 +1460,12 @@ mod tests {
             "the thread arms no deliverability window: the notification is measured inert \
              under an emulated APIC, and the retry is the guest's own next exit"
         );
-        let acknowledges = guard.processor(0).io().device_manager().irq().acknowledge_count();
+        let acknowledges = guard
+            .processor(0)
+            .io()
+            .device_manager()
+            .irq()
+            .acknowledge_count();
         assert_eq!(
             acknowledges, census.injected,
             "one INTA cycle at this machine's own controllers per placed vector — a \
@@ -1493,7 +1534,9 @@ mod tests {
                 0xCF, //                   iret
             ],
         );
-        let ThreadedRun { machine, written, .. } = drive_on_a_thread(
+        let ThreadedRun {
+            machine, written, ..
+        } = drive_on_a_thread(
             machine,
             std::time::Duration::from_secs(10),
             "a halted guest's own ISR ran",
@@ -1575,7 +1618,7 @@ mod tests {
                 // cleared: say so and stop
                 0xB0, MARK, //             mov al, MARK
                 0xE6, DEBUG_PORT, //       out 0xE9, al
-                0xF4, //                   hlt
+                0xF4,       //                   hlt
             ],
         );
         let ThreadedRun { written, .. } = drive_on_a_thread(
@@ -1651,7 +1694,12 @@ mod tests {
              never reached the gate and proves nothing: {census:?}"
         );
         assert_eq!(
-            machine.lock().expect("the machine's lock").engine().inject_census().injected,
+            machine
+                .lock()
+                .expect("the machine's lock")
+                .engine()
+                .inject_census()
+                .injected,
             0,
             "nothing may be acknowledged at the controllers for a masked line"
         );
@@ -1675,14 +1723,18 @@ mod tests {
         }
         let _turn = a_turn_on_the_hardware();
         // mov al, MARK ; out DEBUG_PORT, al ; jmp $
-        let (machine, vcpu) =
-            shared(machine_running(&[0xB0, MARK, 0xE6, DEBUG_PORT, 0xEB, 0xFE]));
+        let (machine, vcpu) = shared(machine_running(&[0xB0, MARK, 0xE6, DEBUG_PORT, 0xEB, 0xFE]));
         let running = RunningVcpu::spawn(vcpu, 0, machine.clone());
         let control = running.control().clone();
         // The control the front end, the device thread and the machine's own
         // interrupt boundary reach the thread through lives on the engine.
         assert_eq!(
-            machine.lock().expect("the machine's lock").engine().controls().len(),
+            machine
+                .lock()
+                .expect("the machine's lock")
+                .engine()
+                .controls()
+                .len(),
             1,
             "the engine holds the control for the processor a thread is running"
         );
@@ -1690,14 +1742,18 @@ mod tests {
         let mut seen: std::vec::Vec<u8> = std::vec::Vec::new();
         wait_until(
             || {
-                seen.extend(console_output(&mut **machine.lock().expect("the machine's lock")));
+                seen.extend(console_output(
+                    &mut **machine.lock().expect("the machine's lock"),
+                ));
                 seen.contains(&MARK)
             },
             std::time::Duration::from_secs(2),
             "the guest's MARK reached the debug port",
         );
 
-        control.request_park(Parked::Paused).expect("the park request reaches the platform");
+        control
+            .request_park(Parked::Paused)
+            .expect("the park request reaches the platform");
         assert_eq!(
             control.wait_parked_by(std::time::Duration::from_secs(5)),
             Some(Parked::Paused),
@@ -1738,7 +1794,9 @@ mod tests {
             std::time::Duration::from_secs(5),
             "the resumed thread entered the partition again",
         );
-        control.request_park(Parked::Paused).expect("the second park request reaches the platform");
+        control
+            .request_park(Parked::Paused)
+            .expect("the second park request reaches the platform");
         assert_eq!(
             control.wait_parked_by(std::time::Duration::from_secs(5)),
             Some(Parked::Paused),
@@ -1769,15 +1827,23 @@ mod tests {
     fn a_guest_that_reboots(first_pass: &[u8]) -> std::vec::Vec<u8> {
         let pass = PASS.to_le_bytes();
         let mut code = std::vec![
-            0xFF, 0x06, pass[0], pass[1], // inc word [PASS]
-            0x83, 0x3E, pass[0], pass[1], 0x02, // cmp word [PASS], 2
-            0x73, u8::try_from(first_pass.len()).expect("a short first pass"), // jae done
+            0xFF,
+            0x06,
+            pass[0],
+            pass[1], // inc word [PASS]
+            0x83,
+            0x3E,
+            pass[0],
+            pass[1],
+            0x02, // cmp word [PASS], 2
+            0x73,
+            u8::try_from(first_pass.len()).expect("a short first pass"), // jae done
         ];
         code.extend_from_slice(first_pass);
         code.extend([
             0xB0, MARK, // done: mov al, MARK
             0xE6, DEBUG_PORT, // out 0xE9, al
-            0xF4, // hlt
+            0xF4,       // hlt
             0xEB, 0xFD, // jmp hlt
         ]);
         code
@@ -1797,7 +1863,7 @@ mod tests {
         let idt = ZERO_IDT.to_le_bytes();
         [
             0x0F, 0x01, 0x1E, idt[0], idt[1], // lidt [ZERO_IDT]
-            0xCC, // int3
+            0xCC,   // int3
         ]
     }
 
@@ -1825,7 +1891,10 @@ mod tests {
                 || outcome.stop != crate::StepStop::BudgetSpent
                 || std::time::Instant::now() > deadline
             {
-                return MarkedRun { stop: outcome.stop, written };
+                return MarkedRun {
+                    stop: outcome.stop,
+                    written,
+                };
             }
         }
     }
@@ -1854,8 +1923,15 @@ mod tests {
         let MarkedRun { stop, written } = step_until_marked(&mut machine);
 
         assert_eq!(stop, crate::StepStop::BudgetSpent, "wrote {written:#04x?}");
-        assert!(written.contains(&MARK), "the second pass never ran: wrote {written:#04x?}");
-        assert_eq!(passes(&mut machine), 2, "the guest ran, rebooted, and ran again");
+        assert!(
+            written.contains(&MARK),
+            "the second pass never ran: wrote {written:#04x?}"
+        );
+        assert_eq!(
+            passes(&mut machine),
+            2,
+            "the guest ran, rebooted, and ran again"
+        );
     }
 
     /// A reset the host makes while the machine is paused reaches the
@@ -1872,22 +1948,32 @@ mod tests {
                 0xFF, 0x06, pass[0], pass[1], // inc word [PASS]
                 0xB0, MARK, // mov al, MARK
                 0xE6, DEBUG_PORT, // out 0xE9, al
-                0xF4, // hlt
+                0xF4,       // hlt
                 0xEB, 0xFD, // jmp hlt
             ],
             rusty_box::params::BxParams::default(),
         );
 
         let first = step_until_marked(&mut machine).written;
-        assert!(first.contains(&MARK), "the first pass never ran: wrote {first:#04x?}");
+        assert!(
+            first.contains(&MARK),
+            "the first pass never ran: wrote {first:#04x?}"
+        );
         machine
             .with_machine(|m| m.reset(rusty_box::cpu::ResetReason::Hardware))
             .expect("a stepped machine is paused")
             .expect("the reset");
         let second = step_until_marked(&mut machine).written;
 
-        assert!(second.contains(&MARK), "the reset guest never ran: wrote {second:#04x?}");
-        assert_eq!(passes(&mut machine), 2, "the processor ran from the reset vector again");
+        assert!(
+            second.contains(&MARK),
+            "the reset guest never ran: wrote {second:#04x?}"
+        );
+        assert_eq!(
+            passes(&mut machine),
+            2,
+            "the processor ran from the reset vector again"
+        );
     }
 
     /// A triple fault reboots a machine that boots firmware, as Bochs's does
@@ -1907,8 +1993,15 @@ mod tests {
         let MarkedRun { stop, written } = step_until_marked(&mut machine);
 
         assert_eq!(stop, crate::StepStop::BudgetSpent, "wrote {written:#04x?}");
-        assert!(written.contains(&MARK), "the second pass never ran: wrote {written:#04x?}");
-        assert_eq!(passes(&mut machine), 2, "the triple fault rebooted the guest");
+        assert!(
+            written.contains(&MARK),
+            "the second pass never ran: wrote {written:#04x?}"
+        );
+        assert_eq!(
+            passes(&mut machine),
+            2,
+            "the triple fault rebooted the guest"
+        );
     }
 
     /// With `OnTripleFault::ShutDown` the same fault stops the machine with its
@@ -1928,7 +2021,10 @@ mod tests {
         let MarkedRun { stop, written } = step_until_marked(&mut machine);
 
         assert_eq!(stop, crate::StepStop::CpuShutdown, "wrote {written:#04x?}");
-        assert!(!written.contains(&MARK), "a shut-down processor ran on: wrote {written:#04x?}");
+        assert!(
+            !written.contains(&MARK),
+            "a shut-down processor ran on: wrote {written:#04x?}"
+        );
         assert_eq!(passes(&mut machine), 1);
     }
 }

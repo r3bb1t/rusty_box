@@ -2,9 +2,7 @@
 //!
 //! Based on Bochs logical32.cc
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -310,8 +308,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // resolve_addr32 is defined in logical8.rs to avoid duplicate definitions
 
     // get_laddr32_seg is defined in logical8.rs to avoid duplicate definitions
-
-
 
     // =========================================================================
     // Memory-form instructions

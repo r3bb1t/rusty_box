@@ -22,13 +22,13 @@
 
 use core::ops::{Deref, DerefMut};
 
-use super::{cpu::BxCpuC, instrumentation::Instrumentation};
-use crate::{
-    emulator::PcIo,
-    iodev::{devices::DeviceManager, BxDevicesC},
-    memory::BxMemC,
-    pc_system::BxPcSystemC,
-};
+use super::cpu::BxCpuC;
+use super::instrumentation::Instrumentation;
+use crate::emulator::PcIo;
+use crate::iodev::BxDevicesC;
+use crate::iodev::devices::DeviceManager;
+use crate::memory::BxMemC;
+use crate::pc_system::BxPcSystemC;
 
 /// One CPU plus the machine it is executing against.
 pub(crate) struct ExecCtx<'a, T: Instrumentation> {
@@ -145,7 +145,12 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
     pub(crate) fn cpu_with_io(&mut self) -> CpuWithIo<'_, T> {
         CpuWithIo {
             cpu: self.cpu,
-            io: PcIo::new(self.memory, self.devices, self.device_manager, self.pc_system),
+            io: PcIo::new(
+                self.memory,
+                self.devices,
+                self.device_manager,
+                self.pc_system,
+            ),
         }
     }
 }
@@ -334,8 +339,12 @@ mod tests {
         use crate::memory::{BxMemC, BxMemoryStubC};
 
         const MIB: usize = 1024 * 1024;
-        let memory =
-            || BxMemC::new(BxMemoryStubC::create_and_init(MIB, MIB, 4096).unwrap(), false);
+        let memory = || {
+            BxMemC::new(
+                BxMemoryStubC::create_and_init(MIB, MIB, 4096).unwrap(),
+                false,
+            )
+        };
         let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(crate::cpu::ResetReason::Hardware);
         let mut first = memory();

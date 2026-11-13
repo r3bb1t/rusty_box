@@ -5,35 +5,32 @@ use tracing::info;
 
 use super::Result;
 use crate::config::BxLinAddress;
+use crate::cpu::BxCpuC;
+use crate::cpu::apic::BX_LAPIC_BASE_ADDR;
 #[cfg(feature = "alloc")]
 use crate::cpu::avx::AMX;
-
-use crate::{
-    cpu::{
-        apic::BX_LAPIC_BASE_ADDR,
-        cpu::{CpuActivityState, CpuMode},
-        decoder::{features::X86Feature, BxSegregs, BX_GENERAL_REGISTERS, BX_NIL_REGISTER},
-        descriptor::{
-            BxDataAndCodeDescriptorEnum, SystemAndGateDescriptorEnum, SEG_ACCESS_ROK,
-            SEG_ACCESS_WOK, SEG_VALID_CACHE,
-        },
-        eflags::EFlags,
-        i387::BxPackedRegister,
-        segment_ctrl_pro::parse_selector,
-        svm::VmcbCache,
-        vmx::BX_INVALID_VMCSPTR,
-        xmm::MXCSR_RESET,
-        BxCpuC,
-    },
-    params::BxParams,
+use crate::cpu::cpu::{CpuActivityState, CpuMode};
+use crate::cpu::decoder::features::X86Feature;
+use crate::cpu::decoder::{BX_GENERAL_REGISTERS, BX_NIL_REGISTER, BxSegregs};
+use crate::cpu::descriptor::{
+    BxDataAndCodeDescriptorEnum, SEG_ACCESS_ROK, SEG_ACCESS_WOK, SEG_VALID_CACHE,
+    SystemAndGateDescriptorEnum,
 };
+use crate::cpu::eflags::EFlags;
+use crate::cpu::i387::BxPackedRegister;
+use crate::cpu::segment_ctrl_pro::parse_selector;
+use crate::cpu::svm::VmcbCache;
+use crate::cpu::vmx::BX_INVALID_VMCSPTR;
+use crate::cpu::xmm::MXCSR_RESET;
+use crate::params::BxParams;
 
 // Minimal MXCSR/feature related masks used at reset-time.
 const MXCSR_DAZ: u32 = 1 << 6;
 /// Bochs xmm.h `MXCSR_MISALIGNED_EXCEPTION_MASK` (0x00020000).
 const MXCSR_MISALIGNED_EXCEPTION_MASK: u32 = super::xmm::Mxcsr::MM.bits();
 
-use super::{cpudb::intel::core_i7_skylake::Corei7SkylakeX, cpuid::BxCpuIdTrait};
+use super::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
+use super::cpuid::BxCpuIdTrait;
 
 pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
     // Note: hardcode this for now
@@ -167,7 +164,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // (includes ESP — BIOS sets SS:SP before any stack operations)
 
         self.eflags = EFlags::from_bits_retain(0x2); // Bit1 is always set
-                                                     // Bochs init.cc: clearEFlagsOSZAPC() = SET_FLAGS_OSZAPC_LOGIC_32(1).
+        // Bochs init.cc: clearEFlagsOSZAPC() = SET_FLAGS_OSZAPC_LOGIC_32(1).
         self.oszapc.set_oszapc_logic_32(1);
         if source == ResetReason::Hardware {
             self.icount = 0;
@@ -202,7 +199,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
          *        386+    F000       FFFF0000        FFFF   FFF0
          */
         let cs_index = BxSegregs::Cs as usize;
-        parse_selector(0xf000, &mut self.sregs[cs_index].selector);
+        parse_selector(0xF000, &mut self.sregs[cs_index].selector);
 
         self.sregs[cs_index].cache.valid = SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK;
         self.sregs[cs_index].cache.p = true;
@@ -468,7 +465,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // Reset XMM state - unchanged on #INIT
         if source == ResetReason::Hardware {
             self.mxcsr.mxcsr = MXCSR_RESET;
-            self.mxcsr_mask = 0x0000ffbf;
+            self.mxcsr_mask = 0x0000FFBF;
             if self.bx_cpuid_support_isa_extension(X86Feature::IsaSse2) {
                 self.mxcsr_mask |= MXCSR_DAZ
             }
@@ -683,7 +680,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         // Interrupts disabled, direction flag clear
         self.eflags = EFlags::from_bits_retain(0x2); // Bit 1 always set
-                                                     // Bochs-equivalent clearEFlagsOSZAPC(): SET_FLAGS_OSZAPC_LOGIC_32(1).
+        // Bochs-equivalent clearEFlagsOSZAPC(): SET_FLAGS_OSZAPC_LOGIC_32(1).
         self.oszapc.set_oszapc_logic_32(1);
 
         // Set up GDTR to point to GDT in memory

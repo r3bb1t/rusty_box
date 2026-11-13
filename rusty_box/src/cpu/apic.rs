@@ -11,12 +11,11 @@
 use tracing::{debug, error, info};
 
 use crate::config::BxPhyAddress;
-
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
+    SnapError, SnapRead, SnapResult, SnapWrite, bounds, checked_snapshot_len_add,
+    checked_snapshot_len_mul,
 };
-
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -27,7 +26,7 @@ pub const APIC_EDGE_TRIGGERED: u8 = 0;
 pub const APIC_LEVEL_TRIGGERED: u8 = 1;
 
 /// Default Local APIC base address (Bochs: BX_LAPIC_BASE_ADDR)
-pub const BX_LAPIC_BASE_ADDR: BxPhyAddress = BxPhyAddress::new(0xfee00000);
+pub const BX_LAPIC_BASE_ADDR: BxPhyAddress = BxPhyAddress::new(0xFEE00000);
 
 /// First valid APIC vector (Bochs: BX_LAPIC_FIRST_VECTOR, apic.cc)
 const BX_LAPIC_FIRST_VECTOR: u8 = 0x10;
@@ -781,8 +780,7 @@ impl BxLocalApic {
             ApicMode::GloballyDisabled | ApicMode::StateInvalid => true,
             ApicMode::XapicMode | ApicMode::X2apicMode => {
                 let lvt0 = self.lvt[LocalVectorTableEntry::Lint0 as usize];
-                !lvt0.contains(LvtBits::MASKED)
-                    && lvt0.delivery_mode() == ApicDeliveryMode::ExtInt
+                !lvt0.contains(LvtBits::MASKED) && lvt0.delivery_mode() == ApicDeliveryMode::ExtInt
             }
         }
     }
@@ -816,6 +814,7 @@ impl BxLocalApic {
         self.pending_ipi_len -= 1;
         ipi
     }
+
     pub(crate) fn record_tx_accept_error(&mut self) {
         self.shadow_error_status |= APIC_ERR_TX_ACCEPT_ERR;
     }
@@ -1092,12 +1091,7 @@ impl BxLocalApic {
     /// Bochs: write_aligned (apic.cc)
     /// Write a 16-byte-aligned APIC register, `offset` into the APIC's page
     /// (as [`BxLocalApicC::read_aligned`]). Bochs: write_aligned (apic.cc).
-    pub(crate) fn write_aligned(
-        &mut self,
-        offset: u32,
-        value: u32,
-        current_ticks: u64,
-    ) {
+    pub(crate) fn write_aligned(&mut self, offset: u32, value: u32, current_ticks: u64) {
         let apic_reg = self.decode_register(offset);
 
         match apic_reg {
@@ -1224,13 +1218,7 @@ impl BxLocalApic {
         }
     }
 
-    pub(crate) fn write(
-        &mut self,
-        addr: BxPhyAddress,
-        value: u32,
-        len: u32,
-        current_ticks: u64,
-    ) {
+    pub(crate) fn write(&mut self, addr: BxPhyAddress, value: u32, len: u32, current_ticks: u64) {
         if len != 4 {
             error!("APIC write with len={} (should be 4)", len);
             return;
@@ -1964,11 +1952,16 @@ impl BxLocalApic {
             // Log first few and transition events
             let fire_num = self.diag_timer_fires; // incremented by caller after this
             if fire_num < 5 || (fire_num < 200 && fire_num.is_multiple_of(50)) {
-                debug!("[LAPIC] periodic FIRE #{}: vec={:#x} mode={} ticks={} irr_set={} isr_set={} intr={}",
-                    fire_num, timervec.vector(), timervec.timer_mode_field(), current_ticks,
+                debug!(
+                    "[LAPIC] periodic FIRE #{}: vec={:#x} mode={} ticks={} irr_set={} isr_set={} intr={}",
+                    fire_num,
+                    timervec.vector(),
+                    timervec.timer_mode_field(),
+                    current_ticks,
                     Self::get_vector(&self.irr, timervec.vector() as u32),
                     Self::get_vector(&self.isr, timervec.vector() as u32),
-                    self.intr);
+                    self.intr
+                );
             }
             self.trigger_irq(timervec.vector(), APIC_EDGE_TRIGGERED, false);
         } else {
@@ -2023,11 +2016,16 @@ impl BxLocalApic {
             1 => "periodic",
             _ => "other",
         };
-        debug!("[LAPIC] set_initial_count: value={} div_factor={} period={} mode={} vec={:#x} masked={} (call #{})",
-            value, self.timer_divide_factor,
+        debug!(
+            "[LAPIC] set_initial_count: value={} div_factor={} period={} mode={} vec={:#x} masked={} (call #{})",
+            value,
+            self.timer_divide_factor,
             value as u64 * self.timer_divide_factor as u64,
-            mode, timervec.vector(), timervec.contains(LvtBits::MASKED),
-            self.diag_set_initial_count);
+            mode,
+            timervec.vector(),
+            timervec.contains(LvtBits::MASKED),
+            self.diag_set_initial_count
+        );
 
         // In TSC-deadline mode, writes to initial time count are ignored (apic.cc)
         if timervec.contains(LvtBits::TIMER_TSC_DEADLINE) {
@@ -2156,8 +2154,7 @@ impl BxLocalApic {
             // The pc-system absolute activation path clamps due/past deadlines
             // to its current tick plus one.  Preserve the guest-programmed
             // absolute deadline here so batching cannot rebase it.
-            self.timer_activate_request =
-                Some(LocalApicTimerActivation::at_ticks(deadline, false));
+            self.timer_activate_request = Some(LocalApicTimerActivation::at_ticks(deadline, false));
         }
     }
 
@@ -2315,13 +2312,13 @@ pub struct ApicError(u8);
 
 impl ApicError {
     pub const ILLEGAL_ADDR: u8 = 0x80;
+    pub const RX_ACCEPT_ERR: u8 = 0x08;
+    pub const RX_CHECKSUM: u8 = 0x02;
     pub const RX_ILLEGAL_VEC: u8 = 0x40;
+    pub const TX_ACCEPT_ERR: u8 = 0x04;
+    pub const TX_CHECKSUM: u8 = 0x01;
     pub const TX_ILLEGAL_VEC: u8 = 0x20;
     pub const X2APIC_REDIRECTIBLE_IPI: u8 = 0x08;
-    pub const RX_ACCEPT_ERR: u8 = 0x08;
-    pub const TX_ACCEPT_ERR: u8 = 0x04;
-    pub const RX_CHECKSUM: u8 = 0x02;
-    pub const TX_CHECKSUM: u8 = 0x01;
 
     pub fn from_raw(value: u8) -> Self {
         ApicError(value)
@@ -2442,7 +2439,11 @@ impl BxLocalApic {
             return Err(Self::snapshot_invalid("LAPIC FIFO shape is invalid"));
         }
         let mut len = 264u64;
-        for handle in [self.timer_handle, self.vmx_timer_handle, self.mwaitx_timer_handle] {
+        for handle in [
+            self.timer_handle,
+            self.vmx_timer_handle,
+            self.mwaitx_timer_handle,
+        ] {
             len = checked_snapshot_len_add(len, if handle.is_some() { 9 } else { 1 })?;
         }
         // VMX state, MWAITX activity, INTR, and the IPI FIFO logical count.
@@ -2458,22 +2459,37 @@ impl BxLocalApic {
         len = checked_snapshot_len_add(len, 4)?;
         for offset in 0..self.pending_cpu_event_len {
             let slot = (self.pending_cpu_event_head + offset) % PENDING_CPU_EVENT_CAPACITY;
-            let event = self.pending_cpu_events.get(slot).copied().flatten().ok_or_else(|| {
-                Self::snapshot_invalid("LAPIC CPU-control FIFO has a hole")
-            })?;
+            let event = self
+                .pending_cpu_events
+                .get(slot)
+                .copied()
+                .flatten()
+                .ok_or_else(|| Self::snapshot_invalid("LAPIC CPU-control FIFO has a hole"))?;
             len = checked_snapshot_len_add(
                 len,
-                if matches!(event, LocalApicCpuEvent::Sipi(_)) { 2 } else { 1 },
+                if matches!(event, LocalApicCpuEvent::Sipi(_)) {
+                    2
+                } else {
+                    1
+                },
             )?;
         }
         len = checked_snapshot_len_add(
             len,
-            if self.pending_eoi_vector.is_some() { 2 } else { 1 },
+            if self.pending_eoi_vector.is_some() {
+                2
+            } else {
+                1
+            },
         )?;
         len = checked_snapshot_len_add(len, 1)?;
         len = checked_snapshot_len_add(
             len,
-            if self.timer_activate_request.is_some() { 10 } else { 1 },
+            if self.timer_activate_request.is_some() {
+                10
+            } else {
+                1
+            },
         )?;
         checked_snapshot_len_add(len, 1)
     }
@@ -2534,26 +2550,37 @@ impl BxLocalApic {
         Self::write_snapshot_handle(writer, self.mwaitx_timer_handle)?;
         writer.write_bool(self.mwaitx_timer_active)?;
         writer.write_bool(self.intr)?;
-        writer.write_u32(u32::try_from(self.pending_ipi_len)
-            .map_err(|_| Self::snapshot_invalid("LAPIC IPI count overflows"))?)?;
+        writer.write_u32(
+            u32::try_from(self.pending_ipi_len)
+                .map_err(|_| Self::snapshot_invalid("LAPIC IPI count overflows"))?,
+        )?;
         for offset in 0..self.pending_ipi_len {
             let slot = (self.pending_ipi_head + offset) % PENDING_IPI_CAPACITY;
-            let ipi = self.pending_ipis.get(slot).copied().flatten().ok_or_else(|| {
-                Self::snapshot_invalid("LAPIC IPI FIFO has a hole")
-            })?;
+            let ipi = self
+                .pending_ipis
+                .get(slot)
+                .copied()
+                .flatten()
+                .ok_or_else(|| Self::snapshot_invalid("LAPIC IPI FIFO has a hole"))?;
             writer.write_u32(ipi.dest)?;
             writer.write_u32(ipi.lo_cmd)?;
             writer.write_u8(ipi.shorthand)?;
             writer.write_bool(ipi.exclude_source)?;
             writer.write_bool(ipi.accepted)?;
         }
-        writer.write_u32(u32::try_from(self.pending_cpu_event_len)
-            .map_err(|_| Self::snapshot_invalid("LAPIC CPU-control count overflows"))?)?;
+        writer.write_u32(
+            u32::try_from(self.pending_cpu_event_len)
+                .map_err(|_| Self::snapshot_invalid("LAPIC CPU-control count overflows"))?,
+        )?;
         for offset in 0..self.pending_cpu_event_len {
             let slot = (self.pending_cpu_event_head + offset) % PENDING_CPU_EVENT_CAPACITY;
-            match self.pending_cpu_events.get(slot).copied().flatten().ok_or_else(|| {
-                Self::snapshot_invalid("LAPIC CPU-control FIFO has a hole")
-            })? {
+            match self
+                .pending_cpu_events
+                .get(slot)
+                .copied()
+                .flatten()
+                .ok_or_else(|| Self::snapshot_invalid("LAPIC CPU-control FIFO has a hole"))?
+            {
                 LocalApicCpuEvent::Smi => writer.write_u8(0)?,
                 LocalApicCpuEvent::Nmi => writer.write_u8(1)?,
                 LocalApicCpuEvent::Init => writer.write_u8(2)?,
@@ -2581,7 +2608,7 @@ impl BxLocalApic {
         reader: &mut R,
     ) -> SnapResult<LocalApicSnapshotRestore> {
         let base_addr = reader.read_u64()?;
-        if base_addr & 0xfff != 0 {
+        if base_addr & 0xFFF != 0 {
             return Err(Self::snapshot_invalid("LAPIC base is not page aligned"));
         }
         let mode = Self::read_snapshot_mode(reader.read_u8()?)?;
@@ -2605,12 +2632,14 @@ impl BxLocalApic {
         }
         let software_enabled = reader.read_bool()?;
         let spurious_vector = reader.read_u8()?;
-        if !self.xapic && spurious_vector & 0x0f != 0x0f {
-            return Err(Self::snapshot_invalid("legacy LAPIC spurious vector is invalid"));
+        if !self.xapic && spurious_vector & 0x0F != 0x0F {
+            return Err(Self::snapshot_invalid(
+                "legacy LAPIC spurious vector is invalid",
+            ));
         }
         let focus_disable = reader.read_bool()?;
         let task_priority = reader.read_u32()?;
-        if task_priority & !0xff != 0 {
+        if task_priority & !0xFF != 0 {
             return Err(Self::snapshot_invalid("LAPIC TPR has reserved bits"));
         }
         let ldr = reader.read_u32()?;
@@ -2618,7 +2647,7 @@ impl BxLocalApic {
             return Err(Self::snapshot_invalid("LAPIC LDR has reserved bits"));
         }
         let dest_format = reader.read_u32()?;
-        if dest_format & !0x0f != 0 {
+        if dest_format & !0x0F != 0 {
             return Err(Self::snapshot_invalid("LAPIC DFR has reserved bits"));
         }
         let mut isr = [0; 8];
@@ -2630,7 +2659,7 @@ impl BxLocalApic {
                 *value = reader.read_u32()?;
             }
         }
-        if isr[0] & 0xffff != 0 || tmr[0] & 0xffff != 0 || irr[0] & 0xffff != 0 {
+        if isr[0] & 0xFFFF != 0 || tmr[0] & 0xFFFF != 0 || irr[0] & 0xFFFF != 0 {
             return Err(Self::snapshot_invalid(
                 "LAPIC interrupt registers contain reserved low vectors",
             ));
@@ -2656,16 +2685,17 @@ impl BxLocalApic {
         let intr_pending = reader.read_bool()?;
         let timer_divconf = reader.read_u32()?;
         let timer_divide_factor = reader.read_u32()?;
-        let reset_divisor =
-            timer_divconf == 0 && timer_divide_factor == 1;
-        if timer_divconf & !0x0b != 0
+        let reset_divisor = timer_divconf == 0 && timer_divide_factor == 1;
+        if timer_divconf & !0x0B != 0
             || (!reset_divisor
                 && timer_divide_factor != Self::snapshot_timer_divide_factor(timer_divconf))
         {
             return Err(Self::snapshot_invalid("LAPIC timer divisor is invalid"));
         }
         if reader.read_bool()? != self.tsc_deadline_supported {
-            return Err(Self::snapshot_invalid("LAPIC TSC deadline capability mismatch"));
+            return Err(Self::snapshot_invalid(
+                "LAPIC TSC deadline capability mismatch",
+            ));
         }
         // Without the capability a timer write clears bit 18 (Bochs apic.cc
         // `set_lvt_entry`), so no such machine holds it set.
@@ -2690,7 +2720,8 @@ impl BxLocalApic {
         let mwaitx_timer_handle = Self::read_snapshot_handle(reader)?;
         let mwaitx_timer_active = reader.read_bool()?;
         let intr = reader.read_bool()?;
-        let pending_ipi_len = reader.read_count(PENDING_IPI_CAPACITY.min(bounds::MAX_SNAPSHOT_QUEUE_LEN))?;
+        let pending_ipi_len =
+            reader.read_count(PENDING_IPI_CAPACITY.min(bounds::MAX_SNAPSHOT_QUEUE_LEN))?;
         let mut pending_ipis = [None; PENDING_IPI_CAPACITY];
         for destination in pending_ipis.iter_mut().take(pending_ipi_len) {
             let ipi = PendingIpi {
@@ -2712,10 +2743,18 @@ impl BxLocalApic {
                 1 => LocalApicCpuEvent::Nmi,
                 2 => LocalApicCpuEvent::Init,
                 3 => LocalApicCpuEvent::Sipi(reader.read_u8()?),
-                _ => return Err(Self::snapshot_invalid("LAPIC CPU-control event tag is invalid")),
+                _ => {
+                    return Err(Self::snapshot_invalid(
+                        "LAPIC CPU-control event tag is invalid",
+                    ));
+                }
             });
         }
-        let pending_eoi_vector = if reader.read_bool()? { Some(reader.read_u8()?) } else { None };
+        let pending_eoi_vector = if reader.read_bool()? {
+            Some(reader.read_u8()?)
+        } else {
+            None
+        };
         if matches!(pending_eoi_vector, Some(vector) if vector < 0x10) {
             return Err(Self::snapshot_invalid(
                 "LAPIC pending EOI contains a reserved low vector",
@@ -2756,9 +2795,8 @@ impl BxLocalApic {
                 // the register holds (Bochs apic.cc `set_initial_timer_count`,
                 // `periodic`). Only a bit-18 change disarms, so the mode the
                 // count was armed in is the mode seen here.
-                let deadline = ticks_initial.saturating_add(
-                    u64::from(timer_initial) * u64::from(timer_divide_factor),
-                );
+                let deadline = ticks_initial
+                    .saturating_add(u64::from(timer_initial) * u64::from(timer_divide_factor));
                 if request.deadline_ticks != deadline || (timer_initial == 0 && !tsc_deadline) {
                     return Err(Self::snapshot_invalid(
                         "LAPIC timer activation disagrees with its programming epoch",
@@ -2787,20 +2825,57 @@ impl BxLocalApic {
                 .and_then(|value| value.checked_shl(vmx_preemption_timer_rate))
                 .ok_or_else(|| Self::snapshot_invalid("LAPIC VMX timer epoch overflows"))?;
             if vmx_preemption_timer_fire != expected {
-                return Err(Self::snapshot_invalid("LAPIC VMX timer fire epoch is invalid"));
+                return Err(Self::snapshot_invalid(
+                    "LAPIC VMX timer fire epoch is invalid",
+                ));
             }
         }
         let state = LocalApicSnapshotState {
             base_addr: BxPhyAddress::new(base_addr),
-            mode, xapic_ext, software_enabled, spurious_vector, focus_disable,
-            task_priority, ldr, dest_format, isr, tmr, irr, ier, error_status,
-            shadow_error_status, icr_hi, icr_lo, lvt, timer_initial, timer_current,
-            ticks_initial, current_ticks, ticks_at_sync, cpu_ticks_at_sync, intr_pending,
-            timer_divconf, timer_divide_factor, timer_active, timer_handle, vmx_timer_handle,
-            vmx_preemption_timer_value, vmx_preemption_timer_initial, vmx_preemption_timer_fire,
-            vmx_preemption_timer_rate, vmx_timer_active, mwaitx_timer_handle,
-            mwaitx_timer_active, intr, pending_ipis, pending_ipi_len, pending_cpu_events,
-            pending_cpu_event_len, pending_eoi_vector, timer_fired, timer_activate_request,
+            mode,
+            xapic_ext,
+            software_enabled,
+            spurious_vector,
+            focus_disable,
+            task_priority,
+            ldr,
+            dest_format,
+            isr,
+            tmr,
+            irr,
+            ier,
+            error_status,
+            shadow_error_status,
+            icr_hi,
+            icr_lo,
+            lvt,
+            timer_initial,
+            timer_current,
+            ticks_initial,
+            current_ticks,
+            ticks_at_sync,
+            cpu_ticks_at_sync,
+            intr_pending,
+            timer_divconf,
+            timer_divide_factor,
+            timer_active,
+            timer_handle,
+            vmx_timer_handle,
+            vmx_preemption_timer_value,
+            vmx_preemption_timer_initial,
+            vmx_preemption_timer_fire,
+            vmx_preemption_timer_rate,
+            vmx_timer_active,
+            mwaitx_timer_handle,
+            mwaitx_timer_active,
+            intr,
+            pending_ipis,
+            pending_ipi_len,
+            pending_cpu_events,
+            pending_cpu_event_len,
+            pending_eoi_vector,
+            timer_fired,
+            timer_activate_request,
             timer_deactivate_request,
         };
         let restore = LocalApicSnapshotRestore {
@@ -2859,11 +2934,16 @@ impl BxLocalApic {
         Ok(restore)
     }
 
-    fn write_snapshot_handle<W: SnapWrite>(writer: &mut W, handle: Option<usize>) -> SnapResult<()> {
+    fn write_snapshot_handle<W: SnapWrite>(
+        writer: &mut W,
+        handle: Option<usize>,
+    ) -> SnapResult<()> {
         writer.write_bool(handle.is_some())?;
         if let Some(handle) = handle {
-            writer.write_u64(u64::try_from(handle)
-                .map_err(|_| Self::snapshot_invalid("LAPIC timer handle overflows"))?)?;
+            writer.write_u64(
+                u64::try_from(handle)
+                    .map_err(|_| Self::snapshot_invalid("LAPIC timer handle overflows"))?,
+            )?;
         }
         Ok(())
     }
@@ -2897,10 +2977,13 @@ impl BxLocalApic {
     /// `set_lvt_entry` stores them (Bochs apic.cc `set_lvt_entry`, `lvt_mask`)
     /// — so only a bit outside the mask marks an image no machine produced.
     fn validate_snapshot_lvt(index: usize, raw: u32) -> SnapResult<()> {
-        let mask = *LVT_MASKS.get(index)
+        let mask = *LVT_MASKS
+            .get(index)
             .ok_or_else(|| Self::snapshot_invalid("LAPIC LVT index is invalid"))?;
         if raw & !mask != 0 {
-            return Err(Self::snapshot_invalid("LAPIC LVT has invalid reserved state"));
+            return Err(Self::snapshot_invalid(
+                "LAPIC LVT has invalid reserved state",
+            ));
         }
         Ok(())
     }
@@ -2911,14 +2994,18 @@ impl BxLocalApic {
             || ((ipi.lo_cmd >> 8) & 7) == ApicDeliveryMode::Reserved as u32
             || (ipi.shorthand != wire_shorthand && !(wire_shorthand == 3 && ipi.shorthand == 2))
         {
-            return Err(Self::snapshot_invalid("LAPIC pending IPI encoding is invalid"));
+            return Err(Self::snapshot_invalid(
+                "LAPIC pending IPI encoding is invalid",
+            ));
         }
         if wire_shorthand == 0
             && ((ipi.lo_cmd >> 11) & 1) == 0
             && (ipi.dest & APIC_BUS_ID_MASK) != APIC_BUS_ID_MASK
             && ipi.dest >= bus_cpu_count
         {
-            return Err(Self::snapshot_invalid("LAPIC pending IPI destination is invalid"));
+            return Err(Self::snapshot_invalid(
+                "LAPIC pending IPI destination is invalid",
+            ));
         }
         Ok(())
     }
@@ -2946,13 +3033,11 @@ mod tests {
     const INIT_VECTOR: u8 = 0;
     const NO_DESTINATION_SHORTHAND: u8 = 0;
 
-
+    use super::*;
+    use crate::cpu::ResetReason;
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::cpudb::CpuModel;
-    use crate::cpu::ResetReason;
     use crate::snapshot::SnapshotReader;
-
-    use super::*;
 
     fn make_lapic() -> BxLocalApic {
         let mut lapic = BxLocalApic::default();
@@ -3052,7 +3137,10 @@ mod tests {
         // Hardware disabled: the pins bypass the APIC, mask bit and all.
         lapic.lvt[lint0] = LvtBits::from_raw(0x0001_0000);
         lapic.mode = ApicMode::GloballyDisabled;
-        assert!(lapic.lint0_admits_ext_int(), "a disabled APIC gates nothing");
+        assert!(
+            lapic.lint0_admits_ext_int(),
+            "a disabled APIC gates nothing"
+        );
     }
 
     /// A software disable masks every LVT entry, so it closes the legacy wire
@@ -3447,7 +3535,10 @@ mod tests {
         lapic.set_lvt_entry(0x320, 0x0006_0030);
 
         lapic.set_initial_timer_count(7, CURRENT_TICKS);
-        assert_eq!(lapic.timer_initial, 0, "mode 3 ignores an initial-count write");
+        assert_eq!(
+            lapic.timer_initial, 0,
+            "mode 3 ignores an initial-count write"
+        );
         assert!(!lapic.timer_active);
         assert_eq!(lapic.get_current_timer_count(CURRENT_TICKS), 0);
 
@@ -3475,7 +3566,10 @@ mod tests {
         assert!(lapic.write_x2apic(0x300, icr, 0));
 
         assert_eq!(lapic.icr_lo, 0x0004_1040);
-        assert!(BxLocalApic::get_vector(&lapic.irr, 0x40), "the self-IPI was sent");
+        assert!(
+            BxLocalApic::get_vector(&lapic.irr, 0x40),
+            "the self-IPI was sent"
+        );
     }
 
     #[test]
@@ -3637,7 +3731,7 @@ mod tests {
     #[test]
     fn v3_snapshot_rejects_low_pending_eoi_vector() {
         let mut source = make_lapic();
-        source.pending_eoi_vector = Some(0x0f);
+        source.pending_eoi_vector = Some(0x0F);
 
         assert!(restore_v3(&source, &mut make_lapic()).is_err());
     }
@@ -3711,7 +3805,10 @@ mod tests {
         source.set_tsc_deadline(500, 100);
         source.periodic(500);
         source.set_lvt_entry(0x320, 0x0004_0030);
-        assert!(source.timer_activate_request.is_some(), "mode 2 kept the reload armed");
+        assert!(
+            source.timer_activate_request.is_some(),
+            "mode 2 kept the reload armed"
+        );
         source.set_lvt_entry(0x350, 0x0000_0330);
         assert!(source.write_x2apic(0x300, 0x0000_0000_0004_1040, 0));
 
@@ -3762,8 +3859,7 @@ mod tests {
             "the version register reports the P4 xAPIC's six LVT entries"
         );
 
-        cpu.lapic
-            .write_aligned(0x0D0, 0xFF00_0000, 0);
+        cpu.lapic.write_aligned(0x0D0, 0xFF00_0000, 0);
         assert_eq!(
             cpu.lapic.read_aligned(0x0D0, 0),
             0xFF00_0000,

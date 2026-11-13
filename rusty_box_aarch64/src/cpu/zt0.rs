@@ -22,9 +22,9 @@
 #[path = "../../tests/unit/zt0.rs"]
 mod tests;
 
-use super::exec::{bit, bits, ExecResult, Flow};
+use super::exec::{ExecResult, Flow, bit, bits};
 use super::sme::ZT0_BYTES;
-use super::sve::{group, Esize, Zv};
+use super::sve::{Esize, Zv, group};
 use super::{Cpu, Levels};
 use crate::bus::PhysBus;
 

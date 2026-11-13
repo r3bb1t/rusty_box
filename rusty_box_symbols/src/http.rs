@@ -37,11 +37,19 @@ pub enum Retry {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HttpError {
     #[error("{url}: {message}")]
-    Transport { url: String, message: String, retry: Retry },
+    Transport {
+        url: String,
+        message: String,
+        retry: Retry,
+    },
     #[error("{url}: the response broke off: {message}")]
     Body { url: String, message: String },
     #[error("{url}: the file is larger than the {cap} bytes allowed")]
-    TooLarge { url: String, cap: u64, declared: Option<u64> },
+    TooLarge {
+        url: String,
+        cap: u64,
+        declared: Option<u64>,
+    },
     #[error("{url}: cancelled")]
     Cancelled { url: String },
 }

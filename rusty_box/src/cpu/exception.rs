@@ -1,10 +1,7 @@
 #![allow(dead_code)]
-use crate::cpu::{
-    cpu::{Exception, ExceptionClass, BX_CPU_HANDLED_EXCEPTIONS},
-    decoder::features::X86Feature,
-};
-
 use super::Result;
+use crate::cpu::cpu::{BX_CPU_HANDLED_EXCEPTIONS, Exception, ExceptionClass};
+use crate::cpu::decoder::features::X86Feature;
 
 /// The kind of event a delivery carries — Bochs cpu.h `BX_InterruptType`.
 ///
@@ -335,7 +332,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         {
             // Bochs ORs in EXT (0/1) into bit0 of the error code.
             // Our `ext` is a bool, so convert explicitly.
-            error_code = (error_code & 0xfffe) | (u16::from(self.ext));
+            error_code = (error_code & 0xFFFE) | (u16::from(self.ext));
         }
 
         // BOCHS BX_INSTR_EXCEPTION(cpu_id, vector, error_code)
@@ -384,11 +381,28 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
                     .selector
                     .value;
-                tracing::error!("TRIPLE FAULT at RIP={:#x} CS={:#x} vector={:?} error_code={:#x} icount={} CR0={:#x} CR3={:#x} CR2={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
-                    rip, cs, vector, error_code, self.icount,
-                    self.cr0.get32(), self.cr3, self.cr2, self.idtr.base, self.idtr.limit);
-                tracing::error!("TRIPLE FAULT: RIP={:#x} CS={:#06x} vector={:?} error_code={:#x} icount={} CR2={:#x}",
-                    rip, cs, vector, error_code, self.icount, self.cr2);
+                tracing::error!(
+                    "TRIPLE FAULT at RIP={:#x} CS={:#x} vector={:?} error_code={:#x} icount={} CR0={:#x} CR3={:#x} CR2={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
+                    rip,
+                    cs,
+                    vector,
+                    error_code,
+                    self.icount,
+                    self.cr0.get32(),
+                    self.cr3,
+                    self.cr2,
+                    self.idtr.base,
+                    self.idtr.limit
+                );
+                tracing::error!(
+                    "TRIPLE FAULT: RIP={:#x} CS={:#06x} vector={:?} error_code={:#x} icount={} CR2={:#x}",
+                    rip,
+                    cs,
+                    vector,
+                    error_code,
+                    self.icount,
+                    self.cr2
+                );
                 // Bochs vmexit.cc `VMexit_TripleFault`: a VMX guest's triple
                 // fault is its host's, and an exit it causes directly is not
                 // one that occurred during event delivery.
@@ -437,8 +451,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let last = self.last_exception_type as usize;
             let newt = exception_type as usize;
             if last < 3 && newt < 3 && !IS_EXCEPTION_OK[last][newt] {
-                tracing::error!("DOUBLE FAULT: 1st exception type={} 2nd={:?}(type={}) at RIP={:#x} error_code={:#x} icount={} CR2={:#x}",
-                    last, vector, newt, self.rip(), error_code, self.icount, self.cr2);
+                tracing::error!(
+                    "DOUBLE FAULT: 1st exception type={} 2nd={:?}(type={}) at RIP={:#x} error_code={:#x} icount={} CR2={:#x}",
+                    last,
+                    vector,
+                    newt,
+                    self.rip(),
+                    error_code,
+                    self.icount,
+                    self.cr2
+                );
                 tracing::error!(
                     "  RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
                     self.rax(),
@@ -553,13 +575,26 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             {
                 // For #PF, include CR2 (the faulting linear address).
                 if vector == Exception::Pf {
-                    tracing::trace!("EXCEPTION: vec={:?}({:#x}) error_code={:#x} CR2={:#010x} RIP={:#x} ESP={:#x} icount={}",
-                        vector, vector as u8, error_code, self.cr2,
-                        self.rip(), self.esp(), self.icount);
+                    tracing::trace!(
+                        "EXCEPTION: vec={:?}({:#x}) error_code={:#x} CR2={:#010x} RIP={:#x} ESP={:#x} icount={}",
+                        vector,
+                        vector as u8,
+                        error_code,
+                        self.cr2,
+                        self.rip(),
+                        self.esp(),
+                        self.icount
+                    );
                 } else {
-                    tracing::trace!("EXCEPTION: vec={:?}({:#x}) error_code={:#x} push_error={} RIP={:#x} icount={}",
-                        vector, vector as u8, error_code, push_error,
-                        self.rip(), self.icount);
+                    tracing::trace!(
+                        "EXCEPTION: vec={:?}({:#x}) error_code={:#x} push_error={} RIP={:#x} icount={}",
+                        vector,
+                        vector as u8,
+                        error_code,
+                        push_error,
+                        self.rip(),
+                        self.icount
+                    );
                 }
             }
             // Dispatch to long_mode_int or protected_mode_int based on CPU mode.
@@ -604,7 +639,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     // access.cc access_read/write_linear. A raw error here
                     // means some access path still bypasses that — scream,
                     // then fall back to #DF as the least-wrong escalation.
-                    tracing::error!("Exception delivery: raw PageNotPresent for vec={:?} CR3={:#x} — a delivery access path bypassed nested-#PF raising; escalating to #DF", vector, self.cr3);
+                    tracing::error!(
+                        "Exception delivery: raw PageNotPresent for vec={:?} CR3={:#x} — a delivery access path bypassed nested-#PF raising; escalating to #DF",
+                        vector,
+                        self.cr3
+                    );
                     return self.exception(Exception::Df, 0);
                 }
                 Err(e) => return Err(e),

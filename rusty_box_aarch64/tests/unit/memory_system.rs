@@ -17,8 +17,8 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, SnapError, VmClock};
 
 use super::features::{Feature, Features, Implementation};
-use super::mmu::{El10Context, El2RegimeContext, TlbContext};
-use super::{id, Cpu, CpuConfig, El, NoEl2, Step, Tlb};
+use super::mmu::{El2RegimeContext, El10Context, TlbContext};
+use super::{Cpu, CpuConfig, El, NoEl2, Step, Tlb, id};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 

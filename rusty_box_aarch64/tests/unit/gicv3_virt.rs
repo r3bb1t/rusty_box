@@ -77,7 +77,11 @@ fn ich_vtr_reports_each_processors_virtual_interface() {
         (PriorityBits::Seven, 0xD818_000F),
         (PriorityBits::Eight, 0xD818_000F),
     ] {
-        assert_eq!(VirtualInterfaceShape::armv9p2(physical).vtr(), vtr, "{physical:?}");
+        assert_eq!(
+            VirtualInterfaceShape::armv9p2(physical).vtr(),
+            vtr,
+            "{physical:?}"
+        );
     }
     for shape in [A57, V92] {
         let v = VirtualInterface::new(shape);
@@ -471,7 +475,12 @@ fn the_gic_wires_maintenance_hardware_deactivation_and_traps() {
     let redist = |g: &mut GicV3, off: u64, v: u32| {
         let mut no_ram: [u8; 0] = [];
         let mut ram = GuestRam::new(&mut no_ram);
-        g.redist_write(&mut ram, RegOffset::new(off), AccessWidth::Word, u64::from(v));
+        g.redist_write(
+            &mut ram,
+            RegOffset::new(off),
+            AccessWidth::Word,
+            u64::from(v),
+        );
     };
     let redist_get =
         |g: &mut GicV3, off: u64| g.redist_read(RegOffset::new(off), AccessWidth::Word) as u32;

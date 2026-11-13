@@ -10,7 +10,7 @@ pub(super) static BIOS_MASK: usize = BIOSROMSZ - 1;
 pub(super) static EXROM_MASK: usize = EXROMSIZE - 1;
 
 pub(super) fn bios_map_last128k(addr: usize) -> usize {
-    ((addr) | 0xfff00000) & BIOS_MASK
+    ((addr) | 0xFFF00000) & BIOS_MASK
 }
 
 // PCI hole constants for systems with >3GB RAM
@@ -111,7 +111,10 @@ mod tests {
             BX_PCI_HOLE_END,
             BX_PCI_HOLE_END + 0x1234,
         ] {
-            assert_eq!(bx_translate_linear_to_gpa(bx_translate_gpa_to_linear(gpa)), gpa);
+            assert_eq!(
+                bx_translate_linear_to_gpa(bx_translate_gpa_to_linear(gpa)),
+                gpa
+            );
         }
     }
 

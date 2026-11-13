@@ -82,7 +82,7 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::queue::{self, Chain};
 use super::{Core, Vdev};
-use crate::identity::{BoardIdentity, InputDeviceId, InputVendorId, Text, INPUT_NAME_CAPACITY};
+use crate::identity::{BoardIdentity, INPUT_NAME_CAPACITY, InputDeviceId, InputVendorId, Text};
 
 /// Which input device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -152,11 +152,11 @@ struct Event {
 }
 
 impl Event {
+    const SYN: Self = Self::new(EV_SYN, SYN_REPORT, 0);
+
     const fn new(kind: u16, code: u16, value: u32) -> Self {
         Self { kind, code, value }
     }
-
-    const SYN: Self = Self::new(EV_SYN, SYN_REPORT, 0);
 
     fn bytes(self) -> [u8; 8] {
         let mut b = [0u8; 8];

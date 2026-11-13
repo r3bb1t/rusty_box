@@ -3,7 +3,7 @@
 //! list; the directory holds the stream count, each stream's size (0xFFFFFFFF
 //! for a nil stream) and each stream's blocks.
 
-use super::{reserved, short, PdbError};
+use super::{PdbError, reserved, short};
 use crate::read::{Bytes, Cursor};
 
 /// The block sizes MSF 7.00 files use.
@@ -46,13 +46,16 @@ struct BlockOwners {
 
 impl BlockOwners {
     fn new(file_len: usize, block_size: u32) -> Result<BlockOwners, PdbError> {
-        let blocks = u32::try_from(file_len.checked_div(block_size as usize).unwrap_or(0)).unwrap_or(u32::MAX);
+        let blocks = u32::try_from(file_len.checked_div(block_size as usize).unwrap_or(0))
+            .unwrap_or(u32::MAX);
         let word_count = blocks.div_ceil(64) as usize;
         let mut words = Vec::new();
-        words.try_reserve_exact(word_count).map_err(|_| PdbError::Allocation {
-            what: "block owners",
-            bytes: (word_count as u64).saturating_mul(8),
-        })?;
+        words
+            .try_reserve_exact(word_count)
+            .map_err(|_| PdbError::Allocation {
+                what: "block owners",
+                bytes: (word_count as u64).saturating_mul(8),
+            })?;
         words.resize(word_count, 0);
         Ok(BlockOwners { words, blocks })
     }
@@ -60,7 +63,10 @@ impl BlockOwners {
     /// Records `block`'s owner; a block past the file or already owned is
     /// refused.
     fn claim(&mut self, block: u32) -> Result<(), PdbError> {
-        let outside = PdbError::BadBlock { block, count: self.blocks };
+        let outside = PdbError::BadBlock {
+            block,
+            count: self.blocks,
+        };
         if block >= self.blocks {
             return Err(outside);
         }
@@ -86,9 +92,17 @@ impl<'a> MsfStreams<'a> {
         let directory_bytes = bytes.u32_le(44).map_err(|source| short(what, source))?;
         let block_map = bytes.u32_le(52).map_err(|source| short(what, source))?;
         if directory_bytes > MAX_DIRECTORY_BYTES {
-            return Err(PdbError::TooMany { what: "directory bytes", count: u64::from(directory_bytes) });
+            return Err(PdbError::TooMany {
+                what: "directory bytes",
+                count: u64::from(directory_bytes),
+            });
         }
-        let mut msf = MsfStreams { bytes, block_size, block_count, streams: Vec::new() };
+        let mut msf = MsfStreams {
+            bytes,
+            block_size,
+            block_count,
+            streams: Vec::new(),
+        };
         let mut owners = BlockOwners::new(file.len(), block_size)?;
         // The block map lists the directory's blocks; it fits one block.
         let directory_blocks = blocks_for(directory_bytes, block_size);
@@ -99,7 +113,9 @@ impl<'a> MsfStreams<'a> {
         let mut directory = reserved(whole_blocks, "MSF directory")?;
         let mut map_cursor = Cursor::new(Bytes::new(map), 0);
         for _ in 0..directory_blocks {
-            let block = map_cursor.u32_le().map_err(|source| short("MSF block map", source))?;
+            let block = map_cursor
+                .u32_le()
+                .map_err(|source| short("MSF block map", source))?;
             owners.claim(block)?;
             directory.extend_from_slice(msf.block(block)?);
         }
@@ -110,17 +126,27 @@ impl<'a> MsfStreams<'a> {
 
     /// The directory's stream sizes and block lists; every listed block is
     /// claimed in `owners`.
-    fn directory(directory: &[u8], block_size: u32, owners: &mut BlockOwners) -> Result<Vec<Stream>, PdbError> {
+    fn directory(
+        directory: &[u8],
+        block_size: u32,
+        owners: &mut BlockOwners,
+    ) -> Result<Vec<Stream>, PdbError> {
         let mut cursor = Cursor::new(Bytes::new(directory), 0);
         let what = "MSF directory";
         let count = cursor.u32_le().map_err(|source| short(what, source))?;
         if count > MAX_STREAMS {
-            return Err(PdbError::TooMany { what: "streams", count: u64::from(count) });
+            return Err(PdbError::TooMany {
+                what: "streams",
+                count: u64::from(count),
+            });
         }
         let mut sizes = Vec::new();
         sizes
             .try_reserve_exact(count as usize)
-            .map_err(|_| PdbError::Allocation { what: "stream sizes", bytes: u64::from(count) })?;
+            .map_err(|_| PdbError::Allocation {
+                what: "stream sizes",
+                bytes: u64::from(count),
+            })?;
         for _ in 0..count {
             let size = cursor.u32_le().map_err(|source| short(what, source))?;
             sizes.push(if size == NIL_STREAM { None } else { Some(size) });
@@ -128,18 +154,27 @@ impl<'a> MsfStreams<'a> {
         let mut streams = Vec::new();
         streams
             .try_reserve_exact(count as usize)
-            .map_err(|_| PdbError::Allocation { what: "streams", bytes: u64::from(count) })?;
+            .map_err(|_| PdbError::Allocation {
+                what: "streams",
+                bytes: u64::from(count),
+            })?;
         for size in sizes {
             let wanted = blocks_for(size.unwrap_or(0), block_size);
             // Each block number takes 4 directory bytes, so a count past
             // what is left of the directory cannot be real.
             if (wanted as usize) > cursor.remaining() / 4 {
-                return Err(PdbError::TooMany { what: "stream blocks", count: u64::from(wanted) });
+                return Err(PdbError::TooMany {
+                    what: "stream blocks",
+                    count: u64::from(wanted),
+                });
             }
             let mut blocks = Vec::new();
             blocks
                 .try_reserve_exact(wanted as usize)
-                .map_err(|_| PdbError::Allocation { what: "stream blocks", bytes: u64::from(wanted) })?;
+                .map_err(|_| PdbError::Allocation {
+                    what: "stream blocks",
+                    bytes: u64::from(wanted),
+                })?;
             for _ in 0..wanted {
                 let block = cursor.u32_le().map_err(|source| short(what, source))?;
                 owners.claim(block)?;
@@ -153,11 +188,17 @@ impl<'a> MsfStreams<'a> {
     /// Block `block`'s bytes.
     fn block(&self, block: u32) -> Result<&'a [u8], PdbError> {
         if block >= self.block_count {
-            return Err(PdbError::BadBlock { block, count: self.block_count });
+            return Err(PdbError::BadBlock {
+                block,
+                count: self.block_count,
+            });
         }
         let at = (block as usize)
             .checked_mul(self.block_size as usize)
-            .ok_or(PdbError::BadBlock { block, count: self.block_count })?;
+            .ok_or(PdbError::BadBlock {
+                block,
+                count: self.block_count,
+            })?;
         self.bytes
             .slice(at, self.block_size as usize)
             .map_err(|source| short("MSF block", source))
@@ -168,7 +209,10 @@ impl<'a> MsfStreams<'a> {
     }
 
     pub(super) fn read(&self, index: u32) -> Result<Option<Vec<u8>>, PdbError> {
-        let stream = self.streams.get(index as usize).ok_or(PdbError::NoStream { index })?;
+        let stream = self
+            .streams
+            .get(index as usize)
+            .ok_or(PdbError::NoStream { index })?;
         let Some(size) = stream.size else {
             return Ok(None);
         };
@@ -237,7 +281,10 @@ mod tests {
 
     #[test]
     fn distinct_blocks_read_back_in_order() {
-        let directory = directory_of(&[TestStream { size: 600, blocks: &[6, 5] }]);
+        let directory = directory_of(&[TestStream {
+            size: 600,
+            blocks: &[6, 5],
+        }]);
         let mut file = tiny_msf(&[4], &directory);
         file[6 * BLOCK..7 * BLOCK].fill(0xAB);
         file[5 * BLOCK..6 * BLOCK].fill(0xCD);
@@ -252,9 +299,15 @@ mod tests {
     fn a_stream_naming_one_block_twice_is_refused() {
         // Honoured, block 5 named N times reads as N blocks: a small file
         // expands without bound.
-        let directory = directory_of(&[TestStream { size: 1024, blocks: &[5, 5] }]);
+        let directory = directory_of(&[TestStream {
+            size: 1024,
+            blocks: &[5, 5],
+        }]);
         let file = tiny_msf(&[4], &directory);
-        assert_eq!(MsfStreams::open(&file).err(), Some(PdbError::SharedBlock { block: 5 }));
+        assert_eq!(
+            MsfStreams::open(&file).err(),
+            Some(PdbError::SharedBlock { block: 5 })
+        );
     }
 
     #[test]
@@ -262,23 +315,47 @@ mod tests {
         let mut directory = directory_of(&[]);
         directory.resize(2 * BLOCK, 0);
         let file = tiny_msf(&[4, 4], &directory);
-        assert_eq!(MsfStreams::open(&file).err(), Some(PdbError::SharedBlock { block: 4 }));
+        assert_eq!(
+            MsfStreams::open(&file).err(),
+            Some(PdbError::SharedBlock { block: 4 })
+        );
     }
 
     #[test]
     fn a_stream_cannot_own_the_directory_or_the_block_map() {
-        let directory = directory_of(&[TestStream { size: 512, blocks: &[4] }]);
+        let directory = directory_of(&[TestStream {
+            size: 512,
+            blocks: &[4],
+        }]);
         let file = tiny_msf(&[4], &directory);
-        assert_eq!(MsfStreams::open(&file).err(), Some(PdbError::SharedBlock { block: 4 }));
-        let directory = directory_of(&[TestStream { size: 512, blocks: &[MAP_BLOCK] }]);
+        assert_eq!(
+            MsfStreams::open(&file).err(),
+            Some(PdbError::SharedBlock { block: 4 })
+        );
+        let directory = directory_of(&[TestStream {
+            size: 512,
+            blocks: &[MAP_BLOCK],
+        }]);
         let file = tiny_msf(&[4], &directory);
-        assert_eq!(MsfStreams::open(&file).err(), Some(PdbError::SharedBlock { block: MAP_BLOCK }));
+        assert_eq!(
+            MsfStreams::open(&file).err(),
+            Some(PdbError::SharedBlock { block: MAP_BLOCK })
+        );
     }
 
     #[test]
     fn a_stream_block_past_the_file_is_refused_at_open() {
-        let directory = directory_of(&[TestStream { size: 512, blocks: &[9] }]);
+        let directory = directory_of(&[TestStream {
+            size: 512,
+            blocks: &[9],
+        }]);
         let file = tiny_msf(&[4], &directory);
-        assert_eq!(MsfStreams::open(&file).err(), Some(PdbError::BadBlock { block: 9, count: FILE_BLOCKS }));
+        assert_eq!(
+            MsfStreams::open(&file).err(),
+            Some(PdbError::BadBlock {
+                block: 9,
+                count: FILE_BLOCKS
+            })
+        );
     }
 }

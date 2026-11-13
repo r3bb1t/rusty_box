@@ -9,12 +9,12 @@
 //! The indexes live under one lock, taken only to publish or read a state.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver, SendError, Sender};
+use std::sync::mpsc::{Receiver, SendError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use super::decode::XrefKind;
 use super::image::{ImageOffset, ModuleImage};
-use super::index::{build_index, IndexEnd, IndexWork, ModuleIndex, ModuleSpan, Site, Workers};
+use super::index::{IndexEnd, IndexWork, ModuleIndex, ModuleSpan, Site, Workers, build_index};
 use crate::debugger::guest::Root;
 use crate::debugger::module_identity::GuestIdentity;
 
@@ -23,7 +23,9 @@ use crate::debugger::module_identity::GuestIdentity;
 pub(crate) enum IndexSpace {
     /// The kernel half, which every process shares.
     Kernel,
-    Process { cr3: u64 },
+    Process {
+        cr3: u64,
+    },
 }
 
 /// One module as it was loaded: an index is used only for the same key, so a
@@ -93,7 +95,10 @@ pub(crate) enum IndexState {
     /// Copied, waiting for the coordinator.
     Queued,
     /// `done` of `of` bytes indexed.
-    Indexing { done: u64, of: u64 },
+    Indexing {
+        done: u64,
+        of: u64,
+    },
     Ready(Arc<ModuleIndex>),
     Failed(String),
 }
@@ -200,13 +205,19 @@ impl Shared {
                 entry.state = state;
                 entry.job = job;
             }
-            None => entries.push(Entry { key: key.clone(), state, job }),
+            None => entries.push(Entry {
+                key: key.clone(),
+                state,
+                job,
+            }),
         }
     }
 
     /// Whether job `job` still owns `key`'s entry.
     fn owns(&self, key: &ModuleKey, job: u64) -> bool {
-        locked(&self.entries).iter().any(|entry| entry.key == *key && entry.job == job)
+        locked(&self.entries)
+            .iter()
+            .any(|entry| entry.key == *key && entry.job == job)
     }
 
     /// Indexes one job on `workers`, and publishes what came of it.
@@ -218,15 +229,32 @@ impl Shared {
             return;
         }
         self.progress.store(0, Ordering::Relaxed);
-        self.set(&index.key, EntryState::Indexing { of: index.image.bytes.len() as u64 }, job);
-        *locked(&self.current) = Some(Current { key: index.key.clone() });
-        let work = IndexWork { cancel: &self.cancel, progress: &self.progress, workers, modules: &index.spans };
+        self.set(
+            &index.key,
+            EntryState::Indexing {
+                of: index.image.bytes.len() as u64,
+            },
+            job,
+        );
+        *locked(&self.current) = Some(Current {
+            key: index.key.clone(),
+        });
+        let work = IndexWork {
+            cancel: &self.cancel,
+            progress: &self.progress,
+            workers,
+            modules: &index.spans,
+        };
         let outcome = build_index(&index.image, &index.extra_sync, index.taken_at, &work);
         *locked(&self.current) = None;
         match outcome {
-            Ok(built) if self.owns(&index.key, job) => self.set(&index.key, EntryState::Ready(Arc::new(built)), job),
+            Ok(built) if self.owns(&index.key, job) => {
+                self.set(&index.key, EntryState::Ready(Arc::new(built)), job)
+            }
             Ok(_) | Err(IndexEnd::Cancelled) => self.drop_job(&index.key, job),
-            Err(end) if self.owns(&index.key, job) => self.set(&index.key, EntryState::Failed(end.describe()), job),
+            Err(end) if self.owns(&index.key, job) => {
+                self.set(&index.key, EntryState::Failed(end.describe()), job)
+            }
             Err(_) => {}
         }
     }
@@ -318,9 +346,10 @@ impl XrefService {
         Some(match &entry.state {
             EntryState::Copying => IndexState::Copying,
             EntryState::Queued => IndexState::Queued,
-            EntryState::Indexing { of } => {
-                IndexState::Indexing { done: self.shared.progress.load(Ordering::Relaxed).min(*of), of: *of }
-            }
+            EntryState::Indexing { of } => IndexState::Indexing {
+                done: self.shared.progress.load(Ordering::Relaxed).min(*of),
+                of: *of,
+            },
             EntryState::Ready(index) => IndexState::Ready(Arc::clone(index)),
             EntryState::Failed(reason) => IndexState::Failed(reason.clone()),
         })
@@ -329,16 +358,26 @@ impl XrefService {
     /// Stops the job being indexed and drops every queued one; their modules
     /// are no longer indexed or waiting.
     pub(crate) fn cancel(&self) {
-        self.shared.cancelled_below.store(self.shared.next_job.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.shared.cancelled_below.store(
+            self.shared.next_job.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         self.shared.cancel.store(true, Ordering::Relaxed);
-        locked(&self.shared.entries)
-            .retain(|entry| !matches!(entry.state, EntryState::Copying | EntryState::Queued | EntryState::Indexing { .. }));
+        locked(&self.shared.entries).retain(|entry| {
+            !matches!(
+                entry.state,
+                EntryState::Copying | EntryState::Queued | EntryState::Indexing { .. }
+            )
+        });
     }
 
     /// Drops `keys`' indexes (Reindex), stopping the job indexing one of them.
     pub(crate) fn forget(&self, keys: &[ModuleKey]) {
         locked(&self.shared.entries).retain(|entry| !keys.contains(&entry.key));
-        if locked(&self.shared.current).as_ref().is_some_and(|current| keys.contains(&current.key)) {
+        if locked(&self.shared.current)
+            .as_ref()
+            .is_some_and(|current| keys.contains(&current.key))
+        {
             self.shared.cancel.store(true, Ordering::Relaxed);
         }
     }
@@ -351,10 +390,22 @@ impl XrefService {
         {
             let entries = locked(&self.shared.entries);
             for key in keys {
-                match entries.iter().find(|entry| entry.key == *key).map(|entry| &entry.state) {
-                    Some(EntryState::Ready(index)) => ready.push(ReadyIndex { module: key.name.clone(), index: Arc::clone(index) }),
-                    Some(EntryState::Failed(reason)) => failed.push(format!("{}: {reason}", key.name)),
-                    Some(EntryState::Copying | EntryState::Queued | EntryState::Indexing { .. }) | None => {
+                match entries
+                    .iter()
+                    .find(|entry| entry.key == *key)
+                    .map(|entry| &entry.state)
+                {
+                    Some(EntryState::Ready(index)) => ready.push(ReadyIndex {
+                        module: key.name.clone(),
+                        index: Arc::clone(index),
+                    }),
+                    Some(EntryState::Failed(reason)) => {
+                        failed.push(format!("{}: {reason}", key.name))
+                    }
+                    Some(
+                        EntryState::Copying | EntryState::Queued | EntryState::Indexing { .. },
+                    )
+                    | None => {
                         waiting.push(key.name.clone());
                     }
                 }
@@ -368,7 +419,12 @@ impl XrefService {
                         XrefKind::Pointer => readers_of(&ready, site.site),
                         _ => Vec::new(),
                     };
-                    found.push(FoundSite { site: site.site, kind: site.kind, module: module.module.clone(), through });
+                    found.push(FoundSite {
+                        site: site.site,
+                        kind: site.kind,
+                        module: module.module.clone(),
+                        through,
+                    });
                 }
             }
         }
@@ -379,7 +435,10 @@ impl XrefService {
             found,
             waiting,
             failed,
-            holes: ready.iter().map(|module| module.index.holes).fold(0, u32::saturating_add),
+            holes: ready
+                .iter()
+                .map(|module| module.index.holes)
+                .fold(0, u32::saturating_add),
             taken_at: ready.iter().map(|module| module.index.taken_at).min(),
         }
     }
@@ -388,7 +447,9 @@ impl XrefService {
 impl Drop for XrefService {
     /// A VM that goes away stops its indexing at once.
     fn drop(&mut self) {
-        self.shared.cancelled_below.store(u64::MAX, Ordering::Relaxed);
+        self.shared
+            .cancelled_below
+            .store(u64::MAX, Ordering::Relaxed);
         self.shared.cancel.store(true, Ordering::Relaxed);
     }
 }
@@ -401,7 +462,9 @@ struct ReadyIndex {
 
 /// The sites of `index` whose target lies in `range`.
 fn sites_to(index: &ModuleIndex, range: AddressRange) -> &[Site] {
-    let first = index.sites.partition_point(|site| site.target < range.start);
+    let first = index
+        .sites
+        .partition_point(|site| site.target < range.start);
     let last = index.sites.partition_point(|site| site.target < range.end);
     index.sites.get(first..last.max(first)).unwrap_or(&[])
 }
@@ -409,12 +472,23 @@ fn sites_to(index: &ModuleIndex, range: AddressRange) -> &[Site] {
 /// The code in `ready` that reads, or calls or jumps through, the pointer at
 /// `address`.
 fn readers_of(ready: &[ReadyIndex], address: u64) -> Vec<FoundSite> {
-    let range = AddressRange { start: address, end: address.saturating_add(1) };
+    let range = AddressRange {
+        start: address,
+        end: address.saturating_add(1),
+    };
     let mut readers = Vec::new();
     for module in ready {
         for site in sites_to(&module.index, range) {
-            if matches!(site.kind, XrefKind::CallThrough | XrefKind::JumpThrough | XrefKind::Memory) {
-                readers.push(FoundSite { site: site.site, kind: site.kind, module: module.module.clone(), through: Vec::new() });
+            if matches!(
+                site.kind,
+                XrefKind::CallThrough | XrefKind::JumpThrough | XrefKind::Memory
+            ) {
+                readers.push(FoundSite {
+                    site: site.site,
+                    kind: site.kind,
+                    module: module.module.clone(),
+                    through: Vec::new(),
+                });
             }
         }
     }
@@ -424,20 +498,27 @@ fn readers_of(ready: &[ReadyIndex], address: u64) -> Vec<FoundSite> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
     use super::*;
     use crate::debugger::module_identity::GuestIdentity;
     use crate::debugger::xref::decode::XrefKind;
     use crate::debugger::xref::index::ModuleSpan;
-    use crate::debugger::xref::test_image::{module_image, ImageSpec};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use crate::debugger::xref::test_image::{ImageSpec, module_image};
 
     const A: u64 = 0x1_4000_0000;
     const B: u64 = 0x1_8000_0000;
     const F: u64 = 0x1100;
 
     fn key(name: &str, base: u64, size: u64) -> ModuleKey {
-        ModuleKey { identity: GuestIdentity::Unnamed, name: name.to_owned(), base, size, space: IndexSpace::Kernel }
+        ModuleKey {
+            identity: GuestIdentity::Unnamed,
+            name: name.to_owned(),
+            base,
+            size,
+            space: IndexSpace::Kernel,
+        }
     }
 
     fn rel32(next: u64, to: u64) -> [u8; 4] {
@@ -471,11 +552,26 @@ mod tests {
     fn spans() -> Arc<[ModuleSpan]> {
         let a = module_a();
         let b = module_b();
-        Arc::from(vec![ModuleSpan { base: A, size: size_of(&a) }, ModuleSpan { base: B, size: size_of(&b) }])
+        Arc::from(vec![
+            ModuleSpan {
+                base: A,
+                size: size_of(&a),
+            },
+            ModuleSpan {
+                base: B,
+                size: size_of(&b),
+            },
+        ])
     }
 
     fn job(key: ModuleKey, image: ModuleImage) -> IndexJob {
-        IndexJob { key, image, extra_sync: Vec::new(), spans: spans(), taken_at: 42 }
+        IndexJob {
+            key,
+            image,
+            extra_sync: Vec::new(),
+            spans: spans(),
+            taken_at: 42,
+        }
     }
 
     /// Waits for `key` to leave `Queued` and `Indexing`.
@@ -487,7 +583,9 @@ mod tests {
         loop {
             let state = service.state(key);
             match state {
-                Some(IndexState::Queued | IndexState::Copying | IndexState::Indexing { .. }) if Instant::now() < deadline => {
+                Some(IndexState::Queued | IndexState::Copying | IndexState::Indexing { .. })
+                    if Instant::now() < deadline =>
+                {
                     std::thread::sleep(Duration::from_millis(2));
                 }
                 other => return other,
@@ -509,13 +607,26 @@ mod tests {
         service.accept(job(keys[0].clone(), a));
         service.accept(job(keys[1].clone(), b));
         for key in &keys {
-            assert!(matches!(settled(&service, key), Some(IndexState::Ready(_))), "{} indexed", key.name);
+            assert!(
+                matches!(settled(&service, key), Some(IndexState::Ready(_))),
+                "{} indexed",
+                key.name
+            );
         }
         Both { service, keys }
     }
 
     fn query_f(scope: XrefScope) -> XrefQuery {
-        XrefQuery { target: XrefTarget { ranges: vec![AddressRange { start: B + F, end: B + F + 1 }], label: "b!f".into() }, scope }
+        XrefQuery {
+            target: XrefTarget {
+                ranges: vec![AddressRange {
+                    start: B + F,
+                    end: B + F + 1,
+                }],
+                label: "b!f".into(),
+            },
+            scope,
+        }
     }
 
     #[test]
@@ -523,7 +634,13 @@ mod tests {
         let Both { service, keys } = both();
         let answer = service.answer(&query_f(XrefScope::AllModules), &keys);
         let sites: Vec<u64> = answer.found.iter().map(|found| found.site).collect();
-        assert_eq!(sites, [A + u64::from(ImageSpec::bits64(0x1000).data_free()), B + 0x1000]);
+        assert_eq!(
+            sites,
+            [
+                A + u64::from(ImageSpec::bits64(0x1000).data_free()),
+                B + 0x1000
+            ]
+        );
         assert_eq!(answer.found[0].kind, XrefKind::Pointer);
         assert_eq!(answer.found[0].module, "a.sys");
         assert_eq!(answer.found[1].kind, XrefKind::Call);
@@ -538,7 +655,12 @@ mod tests {
         let through: Vec<FoundSite> = answer.found[0].through.clone();
         assert_eq!(
             through,
-            [FoundSite { site: A + 0x1000, kind: XrefKind::CallThrough, module: "a.sys".into(), through: Vec::new() }]
+            [FoundSite {
+                site: A + 0x1000,
+                kind: XrefKind::CallThrough,
+                module: "a.sys".into(),
+                through: Vec::new()
+            }]
         );
     }
 
@@ -592,7 +714,10 @@ mod tests {
         let state = settled(&service, &big);
         assert!(!matches!(state, Some(IndexState::Ready(_))), "{state:?}");
         service.accept(job(big.clone(), image));
-        assert!(matches!(settled(&service, &big), Some(IndexState::Ready(_))));
+        assert!(matches!(
+            settled(&service, &big),
+            Some(IndexState::Ready(_))
+        ));
     }
 
     #[test]
@@ -603,8 +728,17 @@ mod tests {
         assert_eq!(answer.waiting, ["b.sys"]);
         assert!(answer.found.is_empty());
         service.accept(job(keys[1].clone(), module_b()));
-        assert!(matches!(settled(&service, &keys[1]), Some(IndexState::Ready(_))));
-        assert_eq!(service.answer(&query_f(XrefScope::TargetModule), &keys[1..]).found.len(), 1);
+        assert!(matches!(
+            settled(&service, &keys[1]),
+            Some(IndexState::Ready(_))
+        ));
+        assert_eq!(
+            service
+                .answer(&query_f(XrefScope::TargetModule), &keys[1..])
+                .found
+                .len(),
+            1
+        );
     }
 
     #[test]

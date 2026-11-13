@@ -163,7 +163,11 @@ const SIZES: [[u32; 2]; 17] = [
 fn every_edid_is_well_formed() {
     for [w, h] in SIZES {
         let e = edid(w, h);
-        assert_eq!(e[..8], [0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0], "{w}x{h}");
+        assert_eq!(
+            e[..8],
+            [0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0],
+            "{w}x{h}"
+        );
         assert_eq!((e[0x12], e[0x13]), (1, 4), "EDID 1.4, {w}x{h}");
         let blocks = 1 + usize::from(e[126]);
         assert!(blocks <= 2, "{w}x{h}");
@@ -218,7 +222,13 @@ fn the_preferred_mode_is_the_displays_own_size() {
             assert_eq!(e[0x18] & 0x02, 0, "{w}x{h}");
         }
     }
-    for [w, h] in [[640, 480], [1024, 768], [1280, 800], [3840, 2160], [4095, 2160]] {
+    for [w, h] in [
+        [640, 480],
+        [1024, 768],
+        [1280, 800],
+        [3840, 2160],
+        [4095, 2160],
+    ] {
         assert_eq!(edid(w, h)[126], 0, "{w}x{h} fits a detailed timing");
     }
     // Past 4095 pixels, or past a 655.35 MHz clock (4095 by 4095 needs
@@ -323,7 +333,16 @@ fn the_modes_are_the_dmt_modes_that_fit() {
     assert_eq!(e[0x23..0x26], [0x21, 0x08, 0]);
     assert_eq!(
         standard_timings(&e),
-        [[0x81, 0x00], [0xD1, 0xC0], [0xA9, 0xC0], [1, 1], [1, 1], [1, 1], [1, 1], [1, 1]],
+        [
+            [0x81, 0x00],
+            [0xD1, 0xC0],
+            [0xA9, 0xC0],
+            [1, 1],
+            [1, 1],
+            [1, 1],
+            [1, 1],
+            [1, 1]
+        ],
         "1280x800, 1920x1080, 1600x900"
     );
     let iii = descriptor(&e, 0xF7).unwrap_or_else(|| panic!("Established Timings III"));
@@ -366,7 +385,9 @@ fn the_range_limits_hold_the_listed_modes() {
     let limits = descriptor(&e, 0xFD).unwrap_or_else(|| panic!("range limits"));
     assert_eq!(
         limits[4..],
-        [0, 59, 61, 31, 49, 7, 0x01, 0x0A, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20]
+        [
+            0, 59, 61, 31, 49, 7, 0x01, 0x0A, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20
+        ]
     );
     // The base video mode alone: 59.94 Hz, 31.47 kHz, 25.175 MHz.
     let e = edid(0, 0);

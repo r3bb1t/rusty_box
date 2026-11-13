@@ -5,12 +5,13 @@
 //! `render_text_to_framebuffer()`, and the GUI thread reads the framebuffer
 //! for texture upload and pushes scancodes for keyboard input.
 
-use super::vga_font::{VGA_DEFAULT_PALETTE_16, VGA_FONT_8X16};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicBool;
+
+use super::vga_font::{VGA_DEFAULT_PALETTE_16, VGA_FONT_8X16};
 
 /// Shared state between the emulator and GUI threads.
 ///
@@ -340,17 +341,9 @@ impl SharedDisplay {
                         // bit 0 = leftmost pixel. Matches Bochs DrawBitmap (rfb.cc).
                         let pixel_on = (font_byte >> bit) & 1 != 0;
                         let color = if cursor_invert {
-                            if pixel_on {
-                                bg
-                            } else {
-                                fg
-                            }
+                            if pixel_on { bg } else { fg }
                         } else {
-                            if pixel_on {
-                                fg
-                            } else {
-                                bg
-                            }
+                            if pixel_on { fg } else { bg }
                         };
                         let fb_x = px + bit;
                         let fb_y = py + scanline;
@@ -370,17 +363,9 @@ impl SharedDisplay {
                             false
                         };
                         let color = if cursor_invert {
-                            if ninth_on {
-                                bg
-                            } else {
-                                fg
-                            }
+                            if ninth_on { bg } else { fg }
                         } else {
-                            if ninth_on {
-                                fg
-                            } else {
-                                bg
-                            }
+                            if ninth_on { fg } else { bg }
                         };
                         let fb_x = px + 8;
                         let fb_y = py + scanline;
@@ -452,8 +437,9 @@ impl Default for SharedDisplay {
 
 #[cfg(test)]
 mod tests {
-    use super::{SharedDisplay, GUEST_CHARMAP_GLYPH_BYTES, GUEST_CHARMAP_LEN};
     use core::sync::atomic::Ordering;
+
+    use super::{GUEST_CHARMAP_GLYPH_BYTES, GUEST_CHARMAP_LEN, SharedDisplay};
 
     #[test]
     fn shared_display_starts_stopped() {
@@ -498,7 +484,17 @@ mod tests {
         // One cell: character 0x41, attribute 0x0F (white on black).
         let text = [0x41u8, 0x0F, 0x20, 0x0F];
         let palette_identity: [u8; 16] = core::array::from_fn(|i| i as u8);
-        shared.render_text_to_framebuffer(&text, 0xffff, 0xffff, 0, 0, false, 0, 4, &palette_identity);
+        shared.render_text_to_framebuffer(
+            &text,
+            0xFFFF,
+            0xFFFF,
+            0,
+            0,
+            false,
+            0,
+            4,
+            &palette_identity,
+        );
 
         let stride = shared.fb_width as usize * 4;
         let pixel = |x: usize| {
@@ -553,7 +549,7 @@ mod tests {
 
         // One cell: a space on a bright-red foreground (attribute 0x0C).
         let text = [b' ', 0x0C];
-        shared.render_text_to_framebuffer(&text, 0xffff, 0xffff, 0, 0, false, 0, 2, &actl);
+        shared.render_text_to_framebuffer(&text, 0xFFFF, 0xFFFF, 0, 0, false, 0, 2, &actl);
 
         // A blank glyph paints the background everywhere, so check the fg path
         // by drawing a full-block glyph instead.
@@ -564,7 +560,7 @@ mod tests {
         shared.set_text_charmap(0, &map);
         shared.set_text_charmap(1, &map);
         let text = [0xDBu8, 0x0C];
-        shared.render_text_to_framebuffer(&text, 0xffff, 0xffff, 0, 0, false, 0, 2, &actl);
+        shared.render_text_to_framebuffer(&text, 0xFFFF, 0xFFFF, 0, 0, false, 0, 2, &actl);
 
         let pixel = [
             shared.framebuffer[0],
@@ -670,7 +666,7 @@ impl rusty_box_devices::display::sink::DisplaySink for SharedDisplay {
     ) {
         let (cursor_x, cursor_y) = match cursor {
             Some(at) => (at.col, at.row),
-            None => (0xffff, 0xffff),
+            None => (0xFFFF, 0xFFFF),
         };
         self.render_text_to_framebuffer(
             current,

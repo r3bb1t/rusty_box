@@ -439,7 +439,6 @@ impl IidrFields {
 impl<const ARCHITECTURE: u8> Iidr<ARCHITECTURE> {
     /// Bits [19:16], the architecture version.
     const ARCHITECTURE_BITS: u32 = (ARCHITECTURE as u32 & 0xF) << 16;
-
     /// No product, revision 0 and no implementer: every field 0 but the
     /// architecture version.
     pub const NONE: Self = Self(Self::ARCHITECTURE_BITS);
@@ -1039,7 +1038,7 @@ impl BoardIdentity {
                 return Err(IdentityError {
                     field: IdentityField::Compatible,
                     problem,
-                })
+                });
             }
         };
         let keyboard = match text(IdentityField::Keyboard, names.keyboard) {

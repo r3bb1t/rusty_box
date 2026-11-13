@@ -252,7 +252,15 @@ mod tests {
 
     #[test]
     fn unsigned_conversions_match_x86() {
-        for &v in &[0u32, 1, 2, 0x7FFF_FFFF, 0x8000_0000, 0xFFFF_FFFF, 16_777_217] {
+        for &v in &[
+            0u32,
+            1,
+            2,
+            0x7FFF_FFFF,
+            0x8000_0000,
+            0xFFFF_FFFF,
+            16_777_217,
+        ] {
             let mut st = SoftFloatStatus::default();
             assert_eq!(
                 f32::from_bits(ui32_to_f32(v, &mut st)).to_bits(),
@@ -286,10 +294,19 @@ mod tests {
         }
 
         let mut st = SoftFloatStatus::default();
-        assert_eq!(f32_to_ui32_r_min_mag((1.9f32).to_bits(), false, false, &mut st), 1);
+        assert_eq!(
+            f32_to_ui32_r_min_mag((1.9f32).to_bits(), false, false, &mut st),
+            1
+        );
         let mut st = SoftFloatStatus::default();
-        assert_eq!(f32_to_ui32((2.5f32).to_bits(), ROUND_NEAR_EVEN, false, &mut st), 2);
+        assert_eq!(
+            f32_to_ui32((2.5f32).to_bits(), ROUND_NEAR_EVEN, false, &mut st),
+            2
+        );
         let mut st = SoftFloatStatus::default();
-        assert_eq!(f32_to_ui32((2.1f32).to_bits(), ROUND_MAX, false, &mut st), 3);
+        assert_eq!(
+            f32_to_ui32((2.1f32).to_bits(), ROUND_MAX, false, &mut st),
+            3
+        );
     }
 }

@@ -8,12 +8,7 @@ use super::softfloat_types::*;
 use super::specialize::*;
 
 /// Berkeley SoftFloat `softfloat_addMagsF64`.
-fn add_mags_f64(
-    mut ui_a: u64,
-    ui_b: u64,
-    sign_z: bool,
-    status: &mut SoftFloatStatus,
-) -> Float64 {
+fn add_mags_f64(mut ui_a: u64, ui_b: u64, sign_z: bool, status: &mut SoftFloatStatus) -> Float64 {
     let exp_a = exp_f64(ui_a);
     let mut sig_a = frac_f64(ui_a);
     let exp_b = exp_f64(ui_b);
@@ -121,12 +116,7 @@ fn add_mags_f64(
 }
 
 /// Berkeley SoftFloat `softfloat_subMagsF64`.
-fn sub_mags_f64(
-    ui_a: u64,
-    ui_b: u64,
-    mut sign_z: bool,
-    status: &mut SoftFloatStatus,
-) -> Float64 {
+fn sub_mags_f64(ui_a: u64, ui_b: u64, mut sign_z: bool, status: &mut SoftFloatStatus) -> Float64 {
     let mut exp_a = exp_f64(ui_a);
     let mut sig_a = frac_f64(ui_a);
     let exp_b = exp_f64(ui_b);
@@ -343,7 +333,10 @@ mod tests {
     fn f64_add_sub_subnormals() {
         let tiny = f64::from_bits(1); // smallest subnormal
         assert_eq!(add(tiny, tiny).to_bits(), 2);
-        assert_eq!(sub(f64::MIN_POSITIVE, tiny).to_bits(), 0x000F_FFFF_FFFF_FFFF);
+        assert_eq!(
+            sub(f64::MIN_POSITIVE, tiny).to_bits(),
+            0x000F_FFFF_FFFF_FFFF
+        );
         assert_eq!(add(f64::MIN_POSITIVE, -f64::MIN_POSITIVE).to_bits(), 0);
     }
 
@@ -355,9 +348,24 @@ mod tests {
     #[test]
     fn f64_ftz_flushes_only_a_subnormal_equal_exponent_difference() {
         for (a, b, want, flags) in [
-            (0x002F_0000_0000_0000, 0x0020_0000_0000_0000, 0x001E_0000_0000_0000, 0),
-            (0x0028_0000_0000_0000, 0x0020_0000_0000_0000, 0x0010_0000_0000_0000, 0),
-            (0x0024_0000_0000_0000, 0x0020_0000_0000_0000, 0, FLAG_UNDERFLOW | FLAG_INEXACT),
+            (
+                0x002F_0000_0000_0000,
+                0x0020_0000_0000_0000,
+                0x001E_0000_0000_0000,
+                0,
+            ),
+            (
+                0x0028_0000_0000_0000,
+                0x0020_0000_0000_0000,
+                0x0010_0000_0000_0000,
+                0,
+            ),
+            (
+                0x0024_0000_0000_0000,
+                0x0020_0000_0000_0000,
+                0,
+                FLAG_UNDERFLOW | FLAG_INEXACT,
+            ),
         ] {
             let mut st = SoftFloatStatus {
                 softfloat_flush_underflow_to_zero: true,

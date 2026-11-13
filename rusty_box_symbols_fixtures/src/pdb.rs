@@ -11,8 +11,8 @@ use std::sync::Mutex;
 
 use ms_pdb::dbi::section_map::{SectionMapEntry, SectionMapHeader};
 use ms_pdb::dbi::{
-    DbiStreamHeader, ModuleInfoFixed, SectionContribEntry, DBI_STREAM_VERSION_V70,
-    SECTION_CONTRIBUTIONS_SUBSTREAM_VER60,
+    DBI_STREAM_VERSION_V70, DbiStreamHeader, ModuleInfoFixed,
+    SECTION_CONTRIBUTIONS_SUBSTREAM_VER60, SectionContribEntry,
 };
 use ms_pdb::globals::build_global_symbols_index;
 use ms_pdb::globals::name_table::get_v1_default_bucket;
@@ -20,13 +20,13 @@ use ms_pdb::lines::SubsectionKind;
 use ms_pdb::modi::CV_SIGNATURE_C13;
 use ms_pdb::msf::{CreateOptions, Msf};
 use ms_pdb::msfz::{Compression, MsfzWriter};
-use ms_pdb::pdbi::{FeatureCode, NamedStreams, PdbiStream, PDBI_VERSION_VC140, PDBI_VERSION_VC70};
+use ms_pdb::pdbi::{FeatureCode, NamedStreams, PDBI_VERSION_VC70, PDBI_VERSION_VC140, PdbiStream};
 use ms_pdb::syms::builder::SymBuilder;
 use ms_pdb::syms::{OffsetSegment, ProcFixed, SymKind};
-use ms_pdb::tpi::{TypeStreamHeader, TYPE_STREAM_VERSION_2004};
+use ms_pdb::tpi::{TYPE_STREAM_VERSION_2004, TypeStreamHeader};
 use ms_pdb::types::{Leaf, TypeIndex, TypeIndexLe};
 use ms_pdb::{BStr, ReadAt, StreamIndexU16, Uuid, WriteAt};
-use zerocopy::{IntoBytes, I32, U16, U32};
+use zerocopy::{I32, IntoBytes, U16, U32};
 
 const NAMES: u32 = 5;
 const GSS: u32 = 6;
@@ -158,16 +158,35 @@ pub enum FixturePlace {
     /// `S_LDATA32` inside the scope: a static.
     Static { section: u16, offset: u32 },
     /// `S_LOCAL` with its flags, then its `S_DEFRANGE_*` records.
-    Ranged { flags: u16, ranges: Vec<FixtureDefRange> },
+    Ranged {
+        flags: u16,
+        ranges: Vec<FixtureDefRange>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FixtureDefRange {
-    Register { register: u16, range: FixtureRange },
-    FramePointerRel { offset: i32, range: FixtureRange },
-    Subfield { register: u16, offset_in_parent: u32, range: FixtureRange },
-    RegisterRel { register: u16, offset: i32, range: FixtureRange },
-    FullScope { offset: i32 },
+    Register {
+        register: u16,
+        range: FixtureRange,
+    },
+    FramePointerRel {
+        offset: i32,
+        range: FixtureRange,
+    },
+    Subfield {
+        register: u16,
+        offset_in_parent: u32,
+        range: FixtureRange,
+    },
+    RegisterRel {
+        register: u16,
+        offset: i32,
+        range: FixtureRange,
+    },
+    FullScope {
+        offset: i32,
+    },
 }
 
 /// A def-range's code: `len` bytes from `offset` past the procedure's start,
@@ -228,9 +247,16 @@ pub enum FixtureType {
     U64,
     /// `void *` in a 64-bit image.
     Pointer,
-    Array { element: Box<FixtureType>, count: u64 },
+    Array {
+        element: Box<FixtureType>,
+        count: u64,
+    },
     /// `length` bits at bit `position` of a `storage` unit.
-    Bitfield { storage: Box<FixtureType>, position: u8, length: u8 },
+    Bitfield {
+        storage: Box<FixtureType>,
+        position: u8,
+        length: u8,
+    },
     /// A structure or union of the fixture, by name, reached through its
     /// forward reference as MSVC emits a member of structure type.
     Named(String),
@@ -254,7 +280,10 @@ pub enum FixtureType {
     /// `void ()`: an `LF_PROCEDURE` of no parameters.
     Function,
     /// A record of `leaf` holding `payload`, as given.
-    Raw { leaf: u16, payload: Vec<u8> },
+    Raw {
+        leaf: u16,
+        payload: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -355,8 +384,18 @@ impl PdbFixture {
             age,
             pdbi_age: age,
             sections: vec![
-                FixtureSection { name: ".text", rva: 0x1000, size: 0x2000, characteristics: CODE_SECTION },
-                FixtureSection { name: ".data", rva: 0x3000, size: 0x2000, characteristics: DATA_SECTION },
+                FixtureSection {
+                    name: ".text",
+                    rva: 0x1000,
+                    size: 0x2000,
+                    characteristics: CODE_SECTION,
+                },
+                FixtureSection {
+                    name: ".data",
+                    rva: 0x3000,
+                    size: 0x2000,
+                    characteristics: DATA_SECTION,
+                },
             ],
             publics: Vec::new(),
             procedures: Vec::new(),
@@ -441,11 +480,19 @@ struct MemFile {
 
 impl ReadAt for MemFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        self.data.lock().expect("fixture file").as_slice().read_at(buf, offset)
+        self.data
+            .lock()
+            .expect("fixture file")
+            .as_slice()
+            .read_at(buf, offset)
     }
 
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        self.data.lock().expect("fixture file").as_slice().read_exact_at(buf, offset)
+        self.data
+            .lock()
+            .expect("fixture file")
+            .as_slice()
+            .read_exact_at(buf, offset)
     }
 }
 
@@ -515,7 +562,10 @@ fn names_stream(strings: &[&str]) -> NamesStream {
     // The hash table is not read by the reader; its count is.
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&(strings.len() as u32).to_le_bytes());
-    NamesStream { bytes: out, offsets }
+    NamesStream {
+        bytes: out,
+        offsets,
+    }
 }
 
 /// An `IMAGE_SECTION_HEADER` per section.
@@ -548,7 +598,11 @@ fn global_symbols(fixture: &PdbFixture, types: &TypeRecords) -> Vec<u8> {
     }
     // S_GDATA32: type, offset, segment, name.
     for global in &fixture.globals {
-        let ty = types.indices.get(&type_key(&global.ty)).expect("the global's type was written").0;
+        let ty = types
+            .indices
+            .get(&type_key(&global.ty))
+            .expect("the global's type was written")
+            .0;
         let mut data = ty.to_le_bytes().to_vec();
         data.extend_from_slice(&global.offset.to_le_bytes());
         data.extend_from_slice(&global.section.to_le_bytes());
@@ -608,8 +662,17 @@ fn range_bytes(out: &mut Vec<u8>, procedure: &FixtureProcedure, range: &FixtureR
 }
 
 /// One variable's records.
-fn write_local(out: &mut Vec<u8>, local: &FixtureLocal, procedure: &FixtureProcedure, types: &TypeRecords) {
-    let ty = types.indices.get(&type_key(&local.ty)).expect("the variable's type was written").0;
+fn write_local(
+    out: &mut Vec<u8>,
+    local: &FixtureLocal,
+    procedure: &FixtureProcedure,
+    types: &TypeRecords,
+) {
+    let ty = types
+        .indices
+        .get(&type_key(&local.ty))
+        .expect("the variable's type was written")
+        .0;
     let mut data = Vec::new();
     match &local.place {
         FixturePlace::RegRel { register, offset } => {
@@ -657,14 +720,22 @@ fn write_local(out: &mut Vec<u8>, local: &FixtureLocal, procedure: &FixtureProce
                         range_bytes(&mut data, procedure, range);
                         S_DEFRANGE_FRAMEPOINTER_REL
                     }
-                    FixtureDefRange::Subfield { register, offset_in_parent, range } => {
+                    FixtureDefRange::Subfield {
+                        register,
+                        offset_in_parent,
+                        range,
+                    } => {
                         data.extend_from_slice(&register.to_le_bytes());
                         data.extend_from_slice(&0u16.to_le_bytes());
                         data.extend_from_slice(&offset_in_parent.to_le_bytes());
                         range_bytes(&mut data, procedure, range);
                         S_DEFRANGE_SUBFIELD_REGISTER
                     }
-                    FixtureDefRange::RegisterRel { register, offset, range } => {
+                    FixtureDefRange::RegisterRel {
+                        register,
+                        offset,
+                        range,
+                    } => {
                         data.extend_from_slice(&register.to_le_bytes());
                         data.extend_from_slice(&0u16.to_le_bytes());
                         data.extend_from_slice(&offset.to_le_bytes());
@@ -686,7 +757,12 @@ fn write_local(out: &mut Vec<u8>, local: &FixtureLocal, procedure: &FixtureProce
 
 /// A block and what it holds, its `end` pointing at its `S_END` (offsets in
 /// a module stream count its 4-byte signature).
-fn write_block(out: &mut Vec<u8>, block: &FixtureBlock, procedure: &FixtureProcedure, types: &TypeRecords) {
+fn write_block(
+    out: &mut Vec<u8>,
+    block: &FixtureBlock,
+    procedure: &FixtureProcedure,
+    types: &TypeRecords,
+) {
     let mut data = Vec::new();
     data.extend_from_slice(&0u32.to_le_bytes());
     data.extend_from_slice(&0u32.to_le_bytes());
@@ -707,7 +783,12 @@ fn write_block(out: &mut Vec<u8>, block: &FixtureBlock, procedure: &FixtureProce
 }
 
 /// What `scope` adds after its procedure's `S_GPROC32`.
-fn write_scope(out: &mut Vec<u8>, scope: &FixtureScope, procedure: &FixtureProcedure, types: &TypeRecords) {
+fn write_scope(
+    out: &mut Vec<u8>,
+    scope: &FixtureScope,
+    procedure: &FixtureProcedure,
+    types: &TypeRecords,
+) {
     if let Some(frame) = scope.frame {
         let mut data = vec![0u8; 5 * 4 + 2];
         let flags = (u32::from(frame.locals) << 14) | (u32::from(frame.params) << 16);
@@ -742,7 +823,10 @@ fn module_stream(fixture: &PdbFixture, file_names: &[u32], types: &TypeRecords) 
     }
     for procedure in &fixture.procedures {
         let start = builder.buffer.len();
-        let scope = fixture.scopes.iter().find(|scope| scope.procedure == procedure.name);
+        let scope = fixture
+            .scopes
+            .iter()
+            .find(|scope| scope.procedure == procedure.name);
         let fixed = ProcFixed {
             p_parent: U32::new(0),
             p_end: U32::new(0),
@@ -750,7 +834,13 @@ fn module_stream(fixture: &PdbFixture, file_names: &[u32], types: &TypeRecords) 
             proc_len: U32::new(procedure.len),
             debug_start: U32::new(scope.map_or(0, |scope| scope.debug_start)),
             debug_end: U32::new(scope.map_or(procedure.len, |scope| scope.debug_end)),
-            proc_type: TypeIndexLe::from(types.indices.get(&procedure_key(&procedure.name)).copied().unwrap_or(TypeIndex(0))),
+            proc_type: TypeIndexLe::from(
+                types
+                    .indices
+                    .get(&procedure_key(&procedure.name))
+                    .copied()
+                    .unwrap_or(TypeIndex(0)),
+            ),
             offset_segment: OffsetSegment::new(procedure.offset, procedure.section),
             flags: 0,
         };
@@ -819,7 +909,11 @@ fn module_stream(fixture: &PdbFixture, file_names: &[u32], types: &TypeRecords) 
     bytes.extend_from_slice(&c13);
     // The global-references size: none.
     bytes.extend_from_slice(&0u32.to_le_bytes());
-    ModuleStream { bytes, sym_byte_size, c13_byte_size: c13.len() as u32 }
+    ModuleStream {
+        bytes,
+        sym_byte_size,
+        c13_byte_size: c13.len() as u32,
+    }
 }
 
 fn subsection(out: &mut Vec<u8>, kind: SubsectionKind, payload: &[u8]) {
@@ -864,9 +958,12 @@ fn dbi_stream(fixture: &PdbFixture, module: &ModuleStream, files: &[String]) -> 
     contributions.extend_from_slice(contribution.as_bytes());
 
     let count = fixture.sections.len() as u16;
-    let mut section_map = SectionMapHeader { num_segments: U16::new(count), num_logical_segments: U16::new(count) }
-        .as_bytes()
-        .to_vec();
+    let mut section_map = SectionMapHeader {
+        num_segments: U16::new(count),
+        num_logical_segments: U16::new(count),
+    }
+    .as_bytes()
+    .to_vec();
     for (index, section) in fixture.sections.iter().enumerate() {
         let entry = SectionMapEntry {
             // READ | ADDRESS_IS32_BIT | IS_SELECTOR
@@ -1106,7 +1203,11 @@ impl TypeScope<'_> {
             FixtureType::Array { element, count } => self.size(element) * count,
             FixtureType::Bitfield { storage, .. } => self.size(storage),
             FixtureType::Named(name) => {
-                self.types.iter().find(|udt| &udt.name == name).expect("a named type the fixture defines").size
+                self.types
+                    .iter()
+                    .find(|udt| &udt.name == name)
+                    .expect("a named type the fixture defines")
+                    .size
             }
             FixtureType::Nested(udt) => udt.size,
             FixtureType::I8 | FixtureType::Char | FixtureType::Bool => 1,
@@ -1135,14 +1236,21 @@ impl TypeScope<'_> {
                 strz(&mut payload, "");
                 writer.record(Leaf::LF_ARRAY.0, &payload)
             }
-            FixtureType::Bitfield { storage, position, length } => {
+            FixtureType::Bitfield {
+                storage,
+                position,
+                length,
+            } => {
                 let storage_index = self.index(writer, storage);
                 let mut payload = storage_index.0.to_le_bytes().to_vec();
                 payload.push(*length);
                 payload.push(*position);
                 writer.record(Leaf::LF_BITFIELD.0, &payload)
             }
-            FixtureType::Named(name) => *self.forwards.get(name).expect("a named type the fixture defines"),
+            FixtureType::Named(name) => *self
+                .forwards
+                .get(name)
+                .expect("a named type the fixture defines"),
             FixtureType::Nested(udt) => self.define(writer, udt, None),
             FixtureType::I8 => TypeIndex(0x0068),
             FixtureType::I16 => TypeIndex(0x0072),
@@ -1227,7 +1335,11 @@ impl TypeScope<'_> {
             Some(first) => first,
             None => writer.record(Leaf::LF_FIELDLIST.0, &[]),
         };
-        let name = if udt.name.is_empty() { "<unnamed-tag>" } else { &udt.name };
+        let name = if udt.name.is_empty() {
+            "<unnamed-tag>"
+        } else {
+            &udt.name
+        };
         let record = UdtRecord {
             kind: udt.kind,
             form: self.form,
@@ -1283,8 +1395,15 @@ fn scope_locals(scope: &FixtureScope) -> Vec<&FixtureLocal> {
 /// members of that type point at), then its complete definition; then the
 /// broken records the fixture asks for.
 fn type_records(fixture: &PdbFixture) -> TypeRecords {
-    let mut writer = TypeWriter { bytes: Vec::new(), next: TypeIndex::MIN_BEGIN.0 };
-    let mut scope = TypeScope { types: &fixture.types, form: fixture.form, forwards: BTreeMap::new() };
+    let mut writer = TypeWriter {
+        bytes: Vec::new(),
+        next: TypeIndex::MIN_BEGIN.0,
+    };
+    let mut scope = TypeScope {
+        types: &fixture.types,
+        form: fixture.form,
+        forwards: BTreeMap::new(),
+    };
     for udt in &fixture.types {
         let unique = unique_name(&udt.name);
         let forward = UdtRecord {
@@ -1338,48 +1457,89 @@ fn type_records(fixture: &PdbFixture) -> TypeRecords {
         // field-list index.
         writer.record(Leaf::LF_STRUCTURE.0, &[1, 0, 0]);
     }
-    TypeRecords { bytes: writer.bytes, end: writer.next, indices }
+    TypeRecords {
+        bytes: writer.bytes,
+        end: writer.next,
+        indices,
+    }
 }
 
 /// The fixture's streams, by stream index.
 pub fn fixture_streams(fixture: &PdbFixture) -> Vec<FixtureStream> {
-    let files: Vec<String> = fixture.procedures.iter().map(|procedure| procedure.file.clone()).collect();
+    let files: Vec<String> = fixture
+        .procedures
+        .iter()
+        .map(|procedure| procedure.file.clone())
+        .collect();
     // Procedures' files first (a module's checksum entries name them by
     // these offsets), then embedded files' paths and virtual names not
     // among them.
-    let virtual_names: Vec<String> = fixture.embedded.iter().map(|embedded| embedded.path.to_lowercase()).collect();
+    let virtual_names: Vec<String> = fixture
+        .embedded
+        .iter()
+        .map(|embedded| embedded.path.to_lowercase())
+        .collect();
     let mut strings: Vec<&str> = files.iter().map(String::as_str).collect();
-    for text in fixture.embedded.iter().map(|embedded| embedded.path.as_str()).chain(virtual_names.iter().map(String::as_str)) {
+    for text in fixture
+        .embedded
+        .iter()
+        .map(|embedded| embedded.path.as_str())
+        .chain(virtual_names.iter().map(String::as_str))
+    {
         if !strings.contains(&text) {
             strings.push(text);
         }
     }
     let names = names_stream(&strings);
     let offset_of = |text: &str| {
-        let place = strings.iter().position(|known| *known == text).expect("a string of /names");
+        let place = strings
+            .iter()
+            .position(|known| *known == text)
+            .expect("a string of /names");
         names.offsets[place]
     };
     let embedded_names: Vec<EmbeddedNames> = fixture
         .embedded
         .iter()
         .zip(&virtual_names)
-        .map(|(embedded, virtual_name)| EmbeddedNames { file: offset_of(&embedded.path), virtual_file: offset_of(virtual_name) })
+        .map(|(embedded, virtual_name)| EmbeddedNames {
+            file: offset_of(&embedded.path),
+            virtual_file: offset_of(virtual_name),
+        })
         .collect();
     let types = type_records(fixture);
     let gss = global_symbols(fixture, &types);
-    let indexes = build_global_symbols_index(&gss, get_v1_default_bucket(false)).expect("symbol indexes");
+    let indexes =
+        build_global_symbols_index(&gss, get_v1_default_bucket(false)).expect("symbol indexes");
     let module = module_stream(fixture, &names.offsets, &types);
 
     let mut named = NamedStreams::default();
-    assert!(named.insert("/names", NAMES), "the /names stream is named once");
+    assert!(
+        named.insert("/names", NAMES),
+        "the /names stream is named once"
+    );
     let mut embedded_streams = Vec::new();
     if !fixture.embedded.is_empty() {
-        assert!(named.insert("/src/headerblock", HEADER_BLOCK), "the header block is named once");
-        embedded_streams.push(FixtureStream { index: HEADER_BLOCK, bytes: header_block(fixture, &embedded_names) });
-        for (place, (embedded, virtual_name)) in fixture.embedded.iter().zip(&virtual_names).enumerate() {
+        assert!(
+            named.insert("/src/headerblock", HEADER_BLOCK),
+            "the header block is named once"
+        );
+        embedded_streams.push(FixtureStream {
+            index: HEADER_BLOCK,
+            bytes: header_block(fixture, &embedded_names),
+        });
+        for (place, (embedded, virtual_name)) in
+            fixture.embedded.iter().zip(&virtual_names).enumerate()
+        {
             let index = FIRST_EMBEDDED_FILE + place as u32;
-            assert!(named.insert(&format!("/src/files/{virtual_name}"), index), "each embedded file is named once");
-            embedded_streams.push(FixtureStream { index, bytes: embedded.contents.clone() });
+            assert!(
+                named.insert(&format!("/src/files/{virtual_name}"), index),
+                "each embedded file is named once"
+            );
+            embedded_streams.push(FixtureStream {
+                index,
+                bytes: embedded.contents.clone(),
+            });
         }
     }
     let pdbi = PdbiStream {
@@ -1391,25 +1551,61 @@ pub fn fixture_streams(fixture: &PdbFixture) -> Vec<FixtureStream> {
         features: vec![FeatureCode(PDBI_VERSION_VC140)],
     };
     let mut streams = vec![
-        FixtureStream { index: 1, bytes: pdbi.to_bytes().expect("PDBI stream") },
-        FixtureStream { index: 2, bytes: type_stream(&types.bytes, types.end) },
-        FixtureStream { index: 3, bytes: dbi_stream(fixture, &module, &files) },
-        FixtureStream { index: 4, bytes: type_stream(&[], TypeIndex::MIN_BEGIN.0) },
-        FixtureStream { index: NAMES, bytes: names.bytes },
-        FixtureStream { index: GSS, bytes: gss },
-        FixtureStream { index: GSI, bytes: indexes.global_symbol_index_stream_data },
-        FixtureStream { index: PSI, bytes: indexes.public_symbol_index_stream_data },
-        FixtureStream { index: MODULE, bytes: module.bytes },
-        FixtureStream { index: SECTION_HEADERS, bytes: section_headers(&fixture.sections) },
+        FixtureStream {
+            index: 1,
+            bytes: pdbi.to_bytes().expect("PDBI stream"),
+        },
+        FixtureStream {
+            index: 2,
+            bytes: type_stream(&types.bytes, types.end),
+        },
+        FixtureStream {
+            index: 3,
+            bytes: dbi_stream(fixture, &module, &files),
+        },
+        FixtureStream {
+            index: 4,
+            bytes: type_stream(&[], TypeIndex::MIN_BEGIN.0),
+        },
+        FixtureStream {
+            index: NAMES,
+            bytes: names.bytes,
+        },
+        FixtureStream {
+            index: GSS,
+            bytes: gss,
+        },
+        FixtureStream {
+            index: GSI,
+            bytes: indexes.global_symbol_index_stream_data,
+        },
+        FixtureStream {
+            index: PSI,
+            bytes: indexes.public_symbol_index_stream_data,
+        },
+        FixtureStream {
+            index: MODULE,
+            bytes: module.bytes,
+        },
+        FixtureStream {
+            index: SECTION_HEADERS,
+            bytes: section_headers(&fixture.sections),
+        },
     ];
     if let Some(omap) = &fixture.omap {
-        streams.push(FixtureStream { index: ORIGINAL_SECTION_HEADERS, bytes: section_headers(&omap.original_sections) });
+        streams.push(FixtureStream {
+            index: ORIGINAL_SECTION_HEADERS,
+            bytes: section_headers(&omap.original_sections),
+        });
         let mut map = Vec::with_capacity(omap.from_source.len() * 8);
         for entry in &omap.from_source {
             map.extend_from_slice(&entry.from.to_le_bytes());
             map.extend_from_slice(&entry.to.to_le_bytes());
         }
-        streams.push(FixtureStream { index: OMAP_FROM_SOURCE, bytes: map });
+        streams.push(FixtureStream {
+            index: OMAP_FROM_SOURCE,
+            bytes: map,
+        });
     }
     streams.extend(embedded_streams);
     streams
@@ -1420,9 +1616,14 @@ fn msf_file(streams: &[FixtureStream]) -> Vec<u8> {
     let mut msf = Msf::create_with_file(MemFile::default(), CreateOptions::default()).expect("MSF");
     for stream in streams {
         let mut writer = msf.write_stream(stream.index).expect("MSF stream");
-        writer.set_contents(&stream.bytes).expect("MSF stream contents");
+        writer
+            .set_contents(&stream.bytes)
+            .expect("MSF stream contents");
     }
-    assert!(msf.commit().expect("MSF commit"), "the MSF commit wrote nothing");
+    assert!(
+        msf.commit().expect("MSF commit"),
+        "the MSF commit wrote nothing"
+    );
     msf.into_file().data.into_inner().expect("fixture file")
 }
 
@@ -1439,9 +1640,18 @@ pub fn compiler_types_pdb(guid: [u8; 16]) -> Vec<u8> {
         features: vec![FeatureCode(PDBI_VERSION_VC140)],
     };
     msf_file(&[
-        FixtureStream { index: 1, bytes: pdbi.to_bytes().expect("PDBI stream") },
-        FixtureStream { index: 2, bytes: type_stream(&[], TypeIndex::MIN_BEGIN.0) },
-        FixtureStream { index: 3, bytes: Vec::new() },
+        FixtureStream {
+            index: 1,
+            bytes: pdbi.to_bytes().expect("PDBI stream"),
+        },
+        FixtureStream {
+            index: 2,
+            bytes: type_stream(&[], TypeIndex::MIN_BEGIN.0),
+        },
+        FixtureStream {
+            index: 3,
+            bytes: Vec::new(),
+        },
     ])
 }
 
@@ -1456,9 +1666,15 @@ pub fn build_pdb(fixture: &PdbFixture) -> Vec<u8> {
         | FixtureContainer::MsfzStored => {
             let mut writer = MsfzWriter::new(Cursor::new(Vec::new())).expect("MSFZ");
             match fixture.container {
-                FixtureContainer::MsfzDeflate => writer.set_chunk_compression_mode(Compression::Deflate),
-                FixtureContainer::MsfzSmallChunks => writer.set_uncompressed_chunk_size_threshold(4096),
-                FixtureContainer::Msf | FixtureContainer::MsfzZstd | FixtureContainer::MsfzStored => {}
+                FixtureContainer::MsfzDeflate => {
+                    writer.set_chunk_compression_mode(Compression::Deflate)
+                }
+                FixtureContainer::MsfzSmallChunks => {
+                    writer.set_uncompressed_chunk_size_threshold(4096)
+                }
+                FixtureContainer::Msf
+                | FixtureContainer::MsfzZstd
+                | FixtureContainer::MsfzStored => {}
             }
             let last = streams.iter().map(|stream| stream.index).max().unwrap_or(4);
             writer.reserve_num_streams(last as usize + 1);
@@ -1467,7 +1683,9 @@ pub fn build_pdb(fixture: &PdbFixture) -> Vec<u8> {
                 if fixture.container == FixtureContainer::MsfzStored {
                     stream_writer.set_compression_enabled(false);
                 }
-                stream_writer.write_all(&stream.bytes).expect("MSFZ stream contents");
+                stream_writer
+                    .write_all(&stream.bytes)
+                    .expect("MSFZ stream contents");
             }
             let finished = writer.finish().expect("MSFZ finish");
             finished.1.into_inner()

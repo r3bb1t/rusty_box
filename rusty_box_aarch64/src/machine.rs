@@ -23,27 +23,32 @@ use alloc::{boxed::Box, sync::Arc, vec};
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use rusty_box_core::input::pointer::{PointerButton, PointerInput, PointerPos, WheelSteps};
 use rusty_box_core::input::terminal::TerminalKeyboard;
 use rusty_box_core::input::{Key, KeyAction, KeyStroke, KeyboardInput, Typed};
 use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{ClockHz, Progress, RunBudget, SnapError, VmClock, VmInstant};
+#[cfg(feature = "alloc")]
+use rusty_box_devices::display::Resolution;
+#[cfg(feature = "alloc")]
+use rusty_box_devices::display::sink::{DisplaySink, Refreshed};
 
 use crate::board::{
-    BoardGic, GicVersion, Plugged, Plugs, TransportOrder, VirtBoard, VirtioDevices, WithGicV3, FLASH0_BASE,
-    FLASH_BANK_SIZE, RAM_BASE, RAM_LIMIT,
+    BoardGic, FLASH_BANK_SIZE, FLASH0_BASE, GicVersion, Plugged, Plugs, RAM_BASE, RAM_LIMIT,
+    TransportOrder, VirtBoard, VirtioDevices, WithGicV3,
 };
 use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
 use crate::boot::tree::{BoardTree, Chosen, El2Timers, InitrdRange};
 use crate::boot::{
-    self, DeviceTreeError, KernelLayout, LinuxImage, PlacementError, DEVICE_TREE_CAPACITY,
+    self, DEVICE_TREE_CAPACITY, DeviceTreeError, KernelLayout, LinuxImage, PlacementError,
 };
-use crate::bus::{load_le, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
+use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan, load_le};
 use crate::cpu::{
     Activity, CounterRate, Cpu, CpuConfig, CpuModel, CpuState, DebugStops, FixedCounterRate,
-    GicCpuInterface, Levels, NoEl2, NoTranslation, PsciConduit, Pstate, PstateRefusal, Reg,
-    SpectreReport, Step, StopCause, SysReg, SysRegRefusal, SystemRegisterInterface, UndefinedInsn,
-    VReg, WithEl2, WriteEffect, PSCI_COMPATIBLE,
+    GicCpuInterface, Levels, NoEl2, NoTranslation, PSCI_COMPATIBLE, PsciConduit, Pstate,
+    PstateRefusal, Reg, SpectreReport, Step, StopCause, SysReg, SysRegRefusal,
+    SystemRegisterInterface, UndefinedInsn, VReg, WithEl2, WriteEffect,
 };
 use crate::devices::gicv2::{GicExtensions, GicShape, PriorityBits};
 use crate::devices::pl011::TX_CAPACITY;
@@ -57,11 +62,6 @@ use crate::layout::{DeviceLayout, DeviceWindows, TransportRegister};
 #[cfg(feature = "alloc")]
 use crate::storage::OwnedStorage;
 use crate::storage::{GuestStorage, LentStorage};
-use rusty_box_core::input::pointer::{PointerButton, PointerInput, PointerPos, WheelSteps};
-#[cfg(feature = "alloc")]
-use rusty_box_devices::display::sink::{DisplaySink, Refreshed};
-#[cfg(feature = "alloc")]
-use rusty_box_devices::display::Resolution;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -124,9 +124,6 @@ pub struct VirtConfig {
 }
 
 impl VirtConfig {
-    /// 2026-01-01T00:00:00Z.
-    pub const DEFAULT_RTC_EPOCH: u64 = 1_767_225_600;
-
     pub const DEFAULT: Self = Self {
         ips: ClockHz::BOCHS_DEFAULT,
         cpu: CpuModel::CortexA57,
@@ -144,6 +141,8 @@ impl VirtConfig {
         transport_order: TransportOrder::DEFAULT,
         layout: DeviceLayout::DEFAULT,
     };
+    /// 2026-01-01T00:00:00Z.
+    pub const DEFAULT_RTC_EPOCH: u64 = 1_767_225_600;
 }
 
 impl Default for VirtConfig {
@@ -162,10 +161,10 @@ impl RamSize {
     /// `virt` is 128 MiB (`machine_class_init` `default_ram_size` in
     /// `hw/core/machine.c`); a machine of that size is `RamSize::mib(128)`.
     pub const DEFAULT: Self = Self(256 << 20);
-    /// The least a machine can have: room for the device tree.
-    pub const MIN: Self = Self(DEVICE_TREE_CAPACITY as u64);
     /// The most the board can map.
     pub const MAX: Self = Self(RAM_LIMIT);
+    /// The least a machine can have: room for the device tree.
+    pub const MIN: Self = Self(DEVICE_TREE_CAPACITY as u64);
 
     /// `bytes` of RAM, if it is a whole number of 4 KiB pages between
     /// [`RamSize::MIN`] and [`RamSize::MAX`].
@@ -425,7 +424,10 @@ pub struct Bare;
 ///         let machine = MachineBuilder::new(VirtConfig::default())
 ///             .ram(RamSize::mib(16).expect("a valid size"))
 ///             .bare()
-///             .build_in(MemoryLoan { ram: &mut ram, vars: &mut [] })
+///             .build_in(MemoryLoan {
+///                 ram: &mut ram,
+///                 vars: &mut [],
+///             })
 ///             .expect("a bare machine builds");
 ///         machine.ticks()
 ///     })
@@ -993,9 +995,7 @@ impl<'i> Description<'i> {
                     end: PhysAddr::new(start + k.initrd.len() as u64),
                 })
             }
-            (BootChoice::Kernel(_), None) | (BootChoice::Firmware(_) | BootChoice::Bare, _) => {
-                None
-            }
+            (BootChoice::Kernel(_), None) | (BootChoice::Firmware(_) | BootChoice::Bare, _) => None,
         };
         let bootargs = match self.choice {
             BootChoice::Kernel(k) if !k.command_line.is_empty() => Some(k.command_line),
@@ -1133,7 +1133,8 @@ fn check_host_tree(
         };
         // An empty property names no interrupt (2.4.1.1, 2.4.1.3).
         let named = match (
-            node.property("interrupts-extended")?.filter(|v| !v.is_empty()),
+            node.property("interrupts-extended")?
+                .filter(|v| !v.is_empty()),
             node.property("interrupts")?.filter(|v| !v.is_empty()),
         ) {
             (Some(extended), _) => {
@@ -1189,8 +1190,8 @@ fn check_key(
         return Ok(());
     };
     let named = fdt::cell(gpios, 1)?;
-    let controller = fdt::node_with_phandle(tree, fdt::cell(gpios, 0)?)?
-        .ok_or(DeviceTreeError::Malformed)?;
+    let controller =
+        fdt::node_with_phandle(tree, fdt::cell(gpios, 0)?)?.ok_or(DeviceTreeError::Malformed)?;
     let address = match controller.property("reg")? {
         Some(reg) if controller.depth() == 1 => reg_address(reg, cells, 0),
         Some(_) | None => None,
@@ -1570,11 +1571,7 @@ fn edit_host_tree(
         push(Edit::set(CHOSEN, "linux,initrd-end", Value::Bytes(end)));
     }
     // The board's `/psci` node, as `fdt_add_psci_node` writes its own.
-    push(Edit::set(
-        PSCI,
-        "compatible",
-        Value::Bytes(PSCI_COMPATIBLE),
-    ));
+    push(Edit::set(PSCI, "compatible", Value::Bytes(PSCI_COMPATIBLE)));
     push(Edit::set(
         PSCI,
         "method",
@@ -1644,7 +1641,7 @@ fn plan<L: Levels>(
         match layout {
             Some(layout) => layout.fit_device_tree(ram_len, tree_len)?,
             None if tree_len > ram_len => {
-                return Err(BuildError::DeviceTree(DeviceTreeError::TooLarge))
+                return Err(BuildError::DeviceTree(DeviceTreeError::TooLarge));
             }
             None => {}
         }
@@ -2968,7 +2965,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             _ => {
                 return Err(SnapError::Invalid(
                     "snapshot power state is not one a machine has",
-                ))
+                ));
             }
         };
         let tree_len = r.read_len(DEVICE_TREE_CAPACITY)?;
@@ -3166,8 +3163,18 @@ impl Shape {
         for value in v.iter_mut() {
             *value = r.read_u64()?;
         }
-        let [ram_len, vars_len, code_hash, kernel_hash, initrd_hash, identity_hash, ips, counter_hz, kernel_offset, initrd_offset] =
-            v;
+        let [
+            ram_len,
+            vars_len,
+            code_hash,
+            kernel_hash,
+            initrd_hash,
+            identity_hash,
+            ips,
+            counter_hz,
+            kernel_offset,
+            initrd_offset,
+        ] = v;
         Ok(Self {
             ram_len,
             vars_len,
@@ -3492,14 +3499,14 @@ impl<S: GuestStorage> SerialPort for Serial<'_, S> {
 /// A run of this machine always ends with an outcome, so its error is
 /// [`Infallible`](core::convert::Infallible).
 impl<S: GuestStorage, L: Levels, I: Instrumentation> Machine for VirtMachine<S, L, I> {
-    type Outcome = BatchOutcome;
     type Error = core::convert::Infallible;
-    type Serial<'a>
-        = Serial<'a, S>
-    where
-        Self: 'a;
     type Keyboard<'a>
         = Keyboard<'a, S>
+    where
+        Self: 'a;
+    type Outcome = BatchOutcome;
+    type Serial<'a>
+        = Serial<'a, S>
     where
         Self: 'a;
 

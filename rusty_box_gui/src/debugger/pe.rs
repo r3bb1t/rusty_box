@@ -468,7 +468,10 @@ pub(crate) fn exception_directory(header: &[u8]) -> Option<DataDirectory> {
         _ => return None,
     };
     let at = optional.checked_add(entry)?;
-    let directory = DataDirectory { rva: read_u32(header, at)?, size: read_u32(header, at.checked_add(4)?)? };
+    let directory = DataDirectory {
+        rva: read_u32(header, at)?,
+        size: read_u32(header, at.checked_add(4)?)?,
+    };
     (directory.rva != 0 && directory.size != 0).then_some(directory)
 }
 
@@ -549,7 +552,9 @@ impl ThunkPages {
     where
         R: FnMut(u32, usize) -> Option<Vec<u8>>,
     {
-        let end = rva.checked_add(self.width).filter(|&end| end <= self.image_end)?;
+        let end = rva
+            .checked_add(self.width)
+            .filter(|&end| end <= self.image_end)?;
         let held = rva >= self.at
             && u64::from(end) <= u64::from(self.at).saturating_add(self.bytes.len() as u64);
         if !held {
@@ -590,7 +595,11 @@ where
         return ImportName::PagedOut;
     };
     let hint = u16::from_le_bytes(*hint);
-    let name = match text.iter().position(|&byte| byte == 0).and_then(|end| text.get(..end)) {
+    let name = match text
+        .iter()
+        .position(|&byte| byte == 0)
+        .and_then(|end| text.get(..end))
+    {
         Some(name) => String::from_utf8_lossy(name).into_owned(),
         None => {
             let Some(rest) = rva
@@ -617,7 +626,11 @@ where
     while bytes.len() < MAX_EXPORT_NAME {
         let take = bytes_left_in_page(at).min(MAX_EXPORT_NAME.saturating_sub(bytes.len()));
         let chunk = read(at, take)?;
-        match chunk.iter().position(|&b| b == 0).and_then(|end| chunk.get(..end)) {
+        match chunk
+            .iter()
+            .position(|&b| b == 0)
+            .and_then(|end| chunk.get(..end))
+        {
             Some(text) => {
                 bytes.extend_from_slice(text);
                 return Some(String::from_utf8_lossy(&bytes).into_owned());
@@ -662,7 +675,11 @@ pub(crate) mod tests {
         put_u32(&mut bytes, at + 8, 0x8C00);
         put_u32(&mut bytes, at + 12, 0x1000);
         put_u32(&mut bytes, at + 16, 0x8C00);
-        put_u32(&mut bytes, at + 36, SCN_CNT_CODE | SCN_MEM_EXECUTE | SCN_MEM_READ);
+        put_u32(
+            &mut bytes,
+            at + 36,
+            SCN_CNT_CODE | SCN_MEM_EXECUTE | SCN_MEM_READ,
+        );
         at += SECTION_HEADER_LEN;
         // .data: vsize 0x2A00, rva 0xA000, raw 0x2000, READ|WRITE.
         bytes[at..at + 5].copy_from_slice(b".data");
@@ -681,7 +698,11 @@ pub(crate) mod tests {
         put_u32(&mut bytes, 0x3C, 0x80);
         put_u32(&mut bytes, 0x80, 0x0000_4550);
         let optional = 0x98;
-        put_u16(&mut bytes, optional, if wide { PE32_PLUS_MAGIC } else { PE32_MAGIC });
+        put_u16(
+            &mut bytes,
+            optional,
+            if wide { PE32_PLUS_MAGIC } else { PE32_MAGIC },
+        );
         let entry = optional + if wide { 0x88 } else { 0x78 };
         put_u32(&mut bytes, entry, directory.rva);
         put_u32(&mut bytes, entry + 4, directory.size);
@@ -692,7 +713,11 @@ pub(crate) mod tests {
     fn the_width_and_entry_point_read_from_the_optional_header() {
         for wide in [false, true] {
             let mut header = with_exception_directory(wide, DataDirectory { rva: 0, size: 0 });
-            let width = if wide { ImageWidth::Bits64 } else { ImageWidth::Bits32 };
+            let width = if wide {
+                ImageWidth::Bits64
+            } else {
+                ImageWidth::Bits32
+            };
             assert_eq!(image_width(&header), Some(width));
             assert_eq!(entry_point(&header), None, "no entry point");
             // AddressOfEntryPoint sits 16 bytes into either optional header.
@@ -705,12 +730,22 @@ pub(crate) mod tests {
 
     #[test]
     fn the_exception_directory_is_read_from_either_header() {
-        let directory = DataDirectory { rva: 0x5000, size: 0x30 };
+        let directory = DataDirectory {
+            rva: 0x5000,
+            size: 0x30,
+        };
         for wide in [false, true] {
-            assert_eq!(exception_directory(&with_exception_directory(wide, directory)), Some(directory), "wide {wide}");
+            assert_eq!(
+                exception_directory(&with_exception_directory(wide, directory)),
+                Some(directory),
+                "wide {wide}"
+            );
         }
         let empty = DataDirectory { rva: 0, size: 0 };
-        assert_eq!(exception_directory(&with_exception_directory(true, empty)), None);
+        assert_eq!(
+            exception_directory(&with_exception_directory(true, empty)),
+            None
+        );
         assert_eq!(exception_directory(b"MZ"), None);
     }
 
@@ -779,7 +814,11 @@ pub(crate) mod tests {
     }
 
     fn reader(image: &[u8]) -> impl FnMut(u32, usize) -> Option<Vec<u8>> + '_ {
-        move |rva, len| image.get(rva as usize..rva as usize + len).map(<[u8]>::to_vec)
+        move |rva, len| {
+            image
+                .get(rva as usize..rva as usize + len)
+                .map(<[u8]>::to_vec)
+        }
     }
 
     #[test]
@@ -812,7 +851,10 @@ pub(crate) mod tests {
     fn an_image_without_an_export_table_lists_none() {
         let mut image = exporting_image();
         put_u32(&mut image, 0x80 + 4 + 20 + 0x70, 0);
-        assert_eq!(parse_exports(&image[..HEADER_BYTES], reader(&image)), ExportRead::NoTable);
+        assert_eq!(
+            parse_exports(&image[..HEADER_BYTES], reader(&image)),
+            ExportRead::NoTable
+        );
     }
 
     #[test]
@@ -821,7 +863,10 @@ pub(crate) mod tests {
         let header_only = |rva: u32, len: usize| -> Option<Vec<u8>> {
             (rva < 0x2000).then(|| image[rva as usize..rva as usize + len].to_vec())
         };
-        assert_eq!(parse_exports(&image[..HEADER_BYTES], header_only), ExportRead::Unreadable);
+        assert_eq!(
+            parse_exports(&image[..HEADER_BYTES], header_only),
+            ExportRead::Unreadable
+        );
     }
 
     #[test]
@@ -922,7 +967,10 @@ pub(crate) mod tests {
     fn an_image_without_an_import_table_lists_none() {
         let mut image = importing_image(true);
         put_u32(&mut image, 0x80 + 4 + 20 + 0x78, 0);
-        assert_eq!(parse_imports(&image[..HEADER_BYTES], reader(&image)), ImportRead::NoTable);
+        assert_eq!(
+            parse_imports(&image[..HEADER_BYTES], reader(&image)),
+            ImportRead::NoTable
+        );
     }
 
     #[test]
@@ -931,7 +979,10 @@ pub(crate) mod tests {
         let header_only = |rva: u32, len: usize| -> Option<Vec<u8>> {
             (rva < 0x2400).then(|| image[rva as usize..rva as usize + len].to_vec())
         };
-        assert_eq!(parse_imports(&image[..HEADER_BYTES], header_only), ImportRead::Unreadable);
+        assert_eq!(
+            parse_imports(&image[..HEADER_BYTES], header_only),
+            ImportRead::Unreadable
+        );
         assert_eq!(parse_imports(&[0u8; 0x200], |_, _| None), ImportRead::NotPe);
     }
 
@@ -944,7 +995,9 @@ pub(crate) mod tests {
         let mut reads = 0usize;
         let counted = |rva: u32, len: usize| {
             reads += 1;
-            image.get(rva as usize..rva as usize + len).map(<[u8]>::to_vec)
+            image
+                .get(rva as usize..rva as usize + len)
+                .map(<[u8]>::to_vec)
         };
         let read = parse_imports(&image[..HEADER_BYTES], counted);
         assert!(matches!(read, ImportRead::Listed(_)), "{read:?}");
@@ -957,7 +1010,8 @@ pub(crate) mod tests {
     fn a_name_table_is_read_no_further_than_the_image() {
         let mut image = importing_image(true);
         put_u32(&mut image, 0x80 + 4 + 20 + 0x38, 0x2508); // SizeOfImage
-        let ImportRead::Listed(modules) = parse_imports(&image[..HEADER_BYTES], reader(&image)) else {
+        let ImportRead::Listed(modules) = parse_imports(&image[..HEADER_BYTES], reader(&image))
+        else {
             panic!("the table reads");
         };
         assert_eq!(modules[0].functions.len(), 1);
@@ -1002,19 +1056,25 @@ pub(crate) mod tests {
     /// answer or a refusal; none reads out of range.
     #[test]
     fn the_header_parsers_survive_every_corruption_of_their_images() {
-        use rusty_box_symbols_fixtures::mutate::{variants, Budget};
+        use rusty_box_symbols_fixtures::mutate::{Budget, variants};
         struct Parsed {
             sections: usize,
             exports: usize,
             imports: usize,
         }
-        let mut parsed = Parsed { sections: 0, exports: 0, imports: 0 };
+        let mut parsed = Parsed {
+            sections: 0,
+            exports: 0,
+            imports: 0,
+        };
         for original in [image(), importing_image(false), importing_image(true)] {
             for mutation in variants(original.len(), Budget::STANDARD) {
                 let bytes = mutation.apply(&original);
                 let read = |rva: u32, len: usize| {
                     let start = usize::try_from(rva).ok()?;
-                    bytes.get(start..start.checked_add(len)?).map(<[u8]>::to_vec)
+                    bytes
+                        .get(start..start.checked_add(len)?)
+                        .map(<[u8]>::to_vec)
                 };
                 if parse_sections(&bytes).is_some() {
                     parsed.sections += 1;

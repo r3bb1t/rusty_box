@@ -3,11 +3,11 @@
 //! that it says it the board's way rather than QEMU's, and that the tree
 //! is well formed.
 
-use std::format;
-use std::vec;
 use std::vec::Vec;
+use std::{format, vec};
 
-use super::{write, BoardTree, Chosen, El2Timers, InitrdRange};
+use super::{BoardTree, Chosen, El2Timers, InitrdRange, write};
+use crate::CpuModel;
 use crate::board::GicVersion;
 use crate::boot::fdt;
 use crate::bus::PhysAddr;
@@ -16,7 +16,6 @@ use crate::devices::gicv2::{GicExtensions, SpiCount};
 use crate::identity::{BoardIdentity, IdentityNames};
 use crate::interrupt_map::{InterruptMap, MsiCount, MsiExtent, MsiSpis, Spi, Wiring};
 use crate::layout::DeviceLayout;
-use crate::CpuModel;
 
 const RAM: u64 = 256 << 20;
 
@@ -115,7 +114,10 @@ fn the_tree_is_a_well_formed_flattened_tree() {
 fn the_root_memory_and_console_are_the_boards() {
     let tree = plain();
     assert_eq!(prop(&tree, "", "model"), Some(&b"Rusty Box virt\0"[..]));
-    assert_eq!(prop(&tree, "", "compatible"), Some(&b"rusty-box,virt\0"[..]));
+    assert_eq!(
+        prop(&tree, "", "compatible"),
+        Some(&b"rusty-box,virt\0"[..])
+    );
     assert_eq!(
         prop(&tree, "memory@40000000", "reg").map(cells),
         Some(vec![0, 0x4000_0000, 0, (RAM) as u32])
@@ -159,8 +161,16 @@ fn the_root_memory_and_console_are_the_boards() {
 fn the_caches_are_those_ccsidr_reports() {
     const KIB: u64 = 1024;
     for (cpu, compatible, [l1d, l1i, l2]) in [
-        (CpuModel::CortexA57, &b"arm,cortex-a57\0"[..], [(2, 32 * KIB), (3, 48 * KIB), (16, 512 * KIB)]),
-        (CpuModel::Armv9p2, &b"arm,armv8\0"[..], [(4, 32 * KIB), (4, 32 * KIB), (8, 256 * KIB)]),
+        (
+            CpuModel::CortexA57,
+            &b"arm,cortex-a57\0"[..],
+            [(2, 32 * KIB), (3, 48 * KIB), (16, 512 * KIB)],
+        ),
+        (
+            CpuModel::Armv9p2,
+            &b"arm,armv8\0"[..],
+            [(4, 32 * KIB), (4, 32 * KIB), (8, 256 * KIB)],
+        ),
     ] {
         let tree = board_of(cpu, &BoardIdentity::RUSTY_BOX, GicExtensions::Absent, PLAIN);
         let cell = |path: &str, name: &str| -> u64 {
@@ -171,9 +181,24 @@ fn the_caches_are_those_ccsidr_reports() {
         // CCSIDR_EL1 without FEAT_CCIDX: LineSize [2:0] is log2(bytes) - 4,
         // Associativity [12:3] ways - 1, NumSets [27:13] sets - 1.
         for (ccsidr, (ways, size), path, [block_size, set_count, total]) in [
-            (caches.l1_data, l1d, "cpus/cpu@0", ["d-cache-block-size", "d-cache-sets", "d-cache-size"]),
-            (caches.l1_instruction, l1i, "cpus/cpu@0", ["i-cache-block-size", "i-cache-sets", "i-cache-size"]),
-            (caches.l2, l2, "cpus/l2-cache", ["cache-block-size", "cache-sets", "cache-size"]),
+            (
+                caches.l1_data,
+                l1d,
+                "cpus/cpu@0",
+                ["d-cache-block-size", "d-cache-sets", "d-cache-size"],
+            ),
+            (
+                caches.l1_instruction,
+                l1i,
+                "cpus/cpu@0",
+                ["i-cache-block-size", "i-cache-sets", "i-cache-size"],
+            ),
+            (
+                caches.l2,
+                l2,
+                "cpus/l2-cache",
+                ["cache-block-size", "cache-sets", "cache-size"],
+            ),
         ] {
             let line = 1u64 << ((ccsidr & 7) + 4);
             let associativity = ((ccsidr >> 3) & 0x3FF) + 1;
@@ -251,7 +276,11 @@ fn the_gic_names_the_frames_it_decodes() {
         Some(vec![0, 0x0801_0000, 0, 0x1000])
     );
     assert_eq!(
-        prop(&tree, &std::format!("{gic}/msi-controller@8010000"), "compatible"),
+        prop(
+            &tree,
+            &std::format!("{gic}/msi-controller@8010000"),
+            "compatible"
+        ),
         Some(&b"arm,gic-v2m-frame\0"[..])
     );
 }
@@ -310,7 +339,11 @@ fn the_pmu_node_names_the_processor_s_pmu_and_ppi_23() {
         (CpuModel::Armv9p2, &b"arm,armv8-pmuv3\0"[..]),
     ] {
         let tree = board_of(cpu, &BoardIdentity::RUSTY_BOX, GicExtensions::Absent, PLAIN);
-        assert_eq!(prop(&tree, "pmu", "compatible"), Some(compatible), "{cpu:?}");
+        assert_eq!(
+            prop(&tree, "pmu", "compatible"),
+            Some(compatible),
+            "{cpu:?}"
+        );
         assert_eq!(
             prop(&tree, "pmu", "interrupts").map(cells),
             Some(vec![1, 7, (1 << 8) | 4]),
@@ -436,7 +469,9 @@ fn the_devices_are_described_where_they_are() {
         prop(&tree, "gpio@8040000", "interrupts").map(cells),
         Some(vec![0, 2, 4])
     );
-    let gpio = prop(&tree, "gpio@8040000", "phandle").map(cells).expect("phandle");
+    let gpio = prop(&tree, "gpio@8040000", "phandle")
+        .map(cells)
+        .expect("phandle");
     assert_eq!(
         prop(&tree, "gpio-keys/key-power", "gpios").map(cells),
         Some(vec![gpio[0], 0, 0]),
@@ -482,7 +517,10 @@ fn the_devices_are_described_where_they_are() {
         prop(&tree, pcie, "reg").map(cells),
         Some(vec![0x40, 0, 0, 0x1000_0000])
     );
-    assert_eq!(prop(&tree, pcie, "bus-range").map(cells), Some(vec![0, 255]));
+    assert_eq!(
+        prop(&tree, pcie, "bus-range").map(cells),
+        Some(vec![0, 255])
+    );
     // I/O space from 0 at 0x0809_0000, the page after the transports,
     // 64 KiB; non-prefetchable 32-bit memory at 512 MiB, 512 MiB of it;
     // prefetchable 64-bit memory (phys.hi's `p` bit, 0x4000_0000) at
@@ -490,24 +528,45 @@ fn the_devices_are_described_where_they_are() {
     assert_eq!(
         prop(&tree, pcie, "ranges").map(cells),
         Some(vec![
-            0x0100_0000, 0, 0, 0, 0x0809_0000, 0, 0x1_0000, //
-            0x0200_0000, 0, 0x2000_0000, 0, 0x2000_0000, 0, 0x2000_0000, //
-            0x4300_0000, 0x60, 0, 0x60, 0, 0x20, 0,
+            0x0100_0000,
+            0,
+            0,
+            0,
+            0x0809_0000,
+            0,
+            0x1_0000, //
+            0x0200_0000,
+            0,
+            0x2000_0000,
+            0,
+            0x2000_0000,
+            0,
+            0x2000_0000, //
+            0x4300_0000,
+            0x60,
+            0,
+            0x60,
+            0,
+            0x20,
+            0,
         ])
     );
     assert_eq!(prop(&tree, pcie, "dma-coherent"), Some(&[][..]));
-    let msi = prop(&tree, "interrupt-controller@8001000/msi-controller@8010000", "phandle");
+    let msi = prop(
+        &tree,
+        "interrupt-controller@8001000/msi-controller@8010000",
+        "phandle",
+    );
     assert_eq!(prop(&tree, pcie, "msi-parent"), msi, "the GICv2m frame");
     assert_eq!(prop(&tree, pcie, "msi-map"), None);
-    let map = prop(&tree, pcie, "interrupt-map").map(cells).expect("a map");
+    let map = prop(&tree, pcie, "interrupt-map")
+        .map(cells)
+        .expect("a map");
     assert_eq!(map.len(), 16 * 10);
     // Device 1's INTA is the bridge's second line, device 3's INTD its
     // third: (device + pin - 1) mod 4.
     let spi = |device: u32, pin: u32| map[((device * 4 + pin - 1) * 10 + 8) as usize];
-    assert_eq!(
-        [spi(0, 1), spi(1, 1), spi(3, 4), spi(2, 3)],
-        [7, 8, 9, 7]
-    );
+    assert_eq!([spi(0, 1), spi(1, 1), spi(3, 4), spi(2, 3)], [7, 8, 9, 7]);
 }
 
 /// Another interrupt map is the one the tree describes: each device's
@@ -599,8 +658,22 @@ fn the_tree_describes_the_layout_it_is_given() {
         (
             "interrupt-controller@8000000",
             vec![
-                0, 0x0800_0000, 0, 0x1000, 0, 0x0801_0000, 0, 0x2000, //
-                0, 0x0803_0000, 0, 0x2000, 0, 0x0804_0000, 0, 0x2000,
+                0,
+                0x0800_0000,
+                0,
+                0x1000,
+                0,
+                0x0801_0000,
+                0,
+                0x2000, //
+                0,
+                0x0803_0000,
+                0,
+                0x2000,
+                0,
+                0x0804_0000,
+                0,
+                0x2000,
             ],
         ),
         (
@@ -621,12 +694,32 @@ fn the_tree_describes_the_layout_it_is_given() {
     assert_eq!(
         prop(tree, "pcie@4010000000", "ranges").map(cells),
         Some(vec![
-            0x0100_0000, 0, 0, 0, 0x3EFF_0000, 0, 0x1_0000, //
-            0x0200_0000, 0, 0x1000_0000, 0, 0x1000_0000, 0, 0x2EFF_0000, //
-            0x4300_0000, 0x80, 0, 0x80, 0, 0x80, 0,
+            0x0100_0000,
+            0,
+            0,
+            0,
+            0x3EFF_0000,
+            0,
+            0x1_0000, //
+            0x0200_0000,
+            0,
+            0x1000_0000,
+            0,
+            0x1000_0000,
+            0,
+            0x2EFF_0000, //
+            0x4300_0000,
+            0x80,
+            0,
+            0x80,
+            0,
+            0x80,
+            0,
         ])
     );
-    let gpio = prop(tree, "gpio@9030000", "phandle").map(cells).expect("phandle");
+    let gpio = prop(tree, "gpio@9030000", "phandle")
+        .map(cells)
+        .expect("phandle");
     assert_eq!(
         prop(tree, "gpio-keys/key-power", "gpios").map(cells),
         Some(vec![gpio[0], 3, 0]),

@@ -25,8 +25,8 @@
 //! to the machine's storage and is lent to each access, so the same model
 //! serves a bank the machine owns and one a caller lends it.
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use crate::bus::{AccessWidth, RegOffset};
 use crate::identity::FlashIdentity;

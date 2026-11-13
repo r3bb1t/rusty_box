@@ -1,11 +1,9 @@
 #![allow(unused_assignments, dead_code)]
 
-use crate::{
-    cpu::{cpudb::CpuModel, BxCpuC},
-    params::CpuTopology,
-};
-
 use super::Result;
+use crate::cpu::BxCpuC;
+use crate::cpu::cpudb::CpuModel;
+use crate::params::CpuTopology;
 
 #[derive(Debug, Default)]
 pub struct BxCpuBuilder {

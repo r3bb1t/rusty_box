@@ -6,9 +6,9 @@
 //! keyboard, whose status queue takes any report a driver offers and gives
 //! it back with nothing written.
 
+use super::Device;
 use super::input::{Input, InputKind};
 use super::test_driver::*;
-use super::Device;
 use crate::board::RAM_BASE;
 use crate::bus::AccessWidth;
 use crate::identity::BoardIdentity;
@@ -56,7 +56,11 @@ fn the_registers_identify_a_non_legacy_transport_of_the_boards_vendor() {
     }
     for q in [2, 1024, 0xFFFF_FFFF] {
         d.write(QUEUE_SEL, q);
-        assert_eq!(d.read(QUEUE_NUM_MAX), 0, "queue {q}, which the device does not have");
+        assert_eq!(
+            d.read(QUEUE_NUM_MAX),
+            0,
+            "queue {q}, which the device does not have"
+        );
     }
 }
 
@@ -195,7 +199,10 @@ fn a_status_write_of_device_needs_reset_alone_changes_nothing() {
     let mut d = keyboard();
     d.start(LINUX_FEATURES);
     d.write(STATUS, NEEDS_RESET);
-    assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    assert_eq!(
+        d.read(STATUS),
+        ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK
+    );
     d.write(QUEUE_SEL, 1);
     assert_eq!(d.read(QUEUE_READY), 1, "no reset");
     report(&mut d);
@@ -208,8 +215,14 @@ fn a_status_write_of_device_needs_reset_alone_changes_nothing() {
 fn the_driver_cannot_set_device_needs_reset() {
     let mut d = keyboard();
     d.start(LINUX_FEATURES);
-    d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK | NEEDS_RESET);
-    assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    d.write(
+        STATUS,
+        ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK | NEEDS_RESET,
+    );
+    assert_eq!(
+        d.read(STATUS),
+        ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK
+    );
     report(&mut d);
     assert_eq!(d.used(1).len(), 1);
 }
@@ -235,11 +248,19 @@ fn a_device_broken_by_its_features_says_so() {
         d.write(off + 4, (addr >> 32) as u32);
     }
     d.write(QUEUE_READY, 1);
-    assert_eq!(d.read(STATUS) & NEEDS_RESET, 0, "the rings fit without event indices");
+    assert_eq!(
+        d.read(STATUS) & NEEDS_RESET,
+        0,
+        "the rings fit without event indices"
+    );
     d.accept(LINUX_FEATURES);
     d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK);
     assert_eq!(d.read(STATUS) & NEEDS_RESET, NEEDS_RESET);
-    assert_eq!(d.read(INTERRUPT_STATUS), 0, "no notification before DRIVER_OK");
+    assert_eq!(
+        d.read(INTERRUPT_STATUS),
+        0,
+        "no notification before DRIVER_OK"
+    );
     // The driver goes on to DRIVER_OK, and is told then (2.1.2).
     d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
     assert_eq!(d.read(INTERRUPT_STATUS), 2);
@@ -253,7 +274,10 @@ fn a_status_write_clears_no_bit() {
     let mut d = keyboard();
     d.start(LINUX_FEATURES);
     d.write(STATUS, ACKNOWLEDGE | DRIVER);
-    assert_eq!(d.read(STATUS), ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+    assert_eq!(
+        d.read(STATUS),
+        ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK
+    );
     report(&mut d);
     assert_eq!(d.used(1).len(), 1);
 }
@@ -274,7 +298,11 @@ fn a_driver_features_word_past_the_second_leaves_the_others() {
     d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
     report(&mut d);
     report(&mut d);
-    assert_eq!(d.avail_event(1), 2, "event index, a first-word feature, kept");
+    assert_eq!(
+        d.avail_event(1),
+        2,
+        "event index, a first-word feature, kept"
+    );
 }
 
 #[test]
@@ -747,9 +775,15 @@ fn a_snapshot_of_a_status_no_driver_could_make_is_refused() {
         .zip(&started.save())
         .position(|(a, b)| a != b)
         .expect("the snapshots differ");
-    assert_eq!(negotiated[at], ACKNOWLEDGE as u8 | DRIVER as u8 | FEATURES_OK as u8);
+    assert_eq!(
+        negotiated[at],
+        ACKNOWLEDGE as u8 | DRIVER as u8 | FEATURES_OK as u8
+    );
     assert!(Driver::restore_refusal(keyboard_device(), &negotiated).is_none());
-    for status in [ACKNOWLEDGE | DRIVER | DRIVER_OK, ACKNOWLEDGE | DRIVER | FEATURES_OK | NEEDS_RESET] {
+    for status in [
+        ACKNOWLEDGE | DRIVER | DRIVER_OK,
+        ACKNOWLEDGE | DRIVER | FEATURES_OK | NEEDS_RESET,
+    ] {
         let mut bad = negotiated.clone();
         bad[at] = status as u8;
         assert!(

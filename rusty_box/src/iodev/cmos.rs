@@ -30,13 +30,12 @@
 //! - 0x70: CMOS address register (write-only on most machines; reads return 0xFF)
 //! - 0x71: CMOS data register
 
-
+use super::IoPort;
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul,
-    SnapError, SnapRead, SnapResult, SnapWrite, SNAPSHOT_SECTION_VERSION,
+    SNAPSHOT_SECTION_VERSION, SnapError, SnapRead, SnapResult, SnapWrite, bounds,
+    checked_snapshot_len_add, checked_snapshot_len_mul,
 };
-use super::IoPort;
 
 /// CMOS I/O port addresses
 pub const CMOS_ADDR: IoPort = IoPort::new(0x0070);
@@ -262,11 +261,7 @@ fn timeutc(t: &mut BrokenTime) -> i64 {
     epoch += t.sec;
     epoch += 978_307_200; // seconds between 2001-01-01 and 1970-01-01
 
-    if utctime_ext(epoch, t) {
-        epoch
-    } else {
-        -1
-    }
+    if utctime_ext(epoch, t) { epoch } else { -1 }
 }
 
 /// Requested state transition for a fixed CMOS timer owner.
@@ -290,9 +285,9 @@ pub struct CmosTimerSync {
 }
 
 impl CmosTimerSync {
+    pub const ONE_SECOND_DELAY_USEC: u64 = 1_000_000;
     /// Bochs's update-in-progress interval.
     pub const UIP_DELAY_USEC: u64 = 244;
-    pub const ONE_SECOND_DELAY_USEC: u64 = 1_000_000;
 }
 
 /// Register-derived RTC state applied only after every snapshot section has
@@ -447,6 +442,12 @@ impl Default for BxCmosC {
 }
 
 impl BxCmosC {
+    pub(crate) const ONE_SECOND_TIMER_LOCAL: u16 = 1;
+    /// The three scheduler timers the RTC owns — Bochs cmos.cc registers a
+    /// periodic timer, a one-second clock tick, and the UIP pre-update pulse.
+    pub(crate) const PERIODIC_TIMER_LOCAL: u16 = 0;
+    pub(crate) const UIP_TIMER_LOCAL: u16 = 2;
+
     /// Create a new CMOS/RTC controller
     pub fn new() -> Self {
         let mut cmos = Self {
@@ -594,7 +595,6 @@ impl BxCmosC {
         self.ram[REG_STAT_B as usize] &= 0x8F;
         self.ram[REG_STAT_C as usize] = 0x00;
 
-
         CmosTimerSync {
             periodic: self.cra_change(),
             one_second: CmosTimerAction::Restart(CmosTimerSync::ONE_SECOND_DELAY_USEC),
@@ -618,8 +618,7 @@ impl BxCmosC {
             // Values 0001b and 0010b are the same as 1000b and 1001b.
             let effective_nibble = if nibble <= 2 { nibble + 7 } else { nibble };
             self.periodic_interval_usec =
-                (1_000_000.0f64 / (32768.0f64 / ((1u32 << (effective_nibble - 1)) as f64)))
-                    as u32;
+                (1_000_000.0f64 / (32768.0f64 / ((1u32 << (effective_nibble - 1)) as f64))) as u32;
         }
 
         self.periodic_timer_action()
@@ -628,9 +627,7 @@ impl BxCmosC {
     /// Relative delay for the periodic fixed owner, if PIE and the divider
     /// chain currently permit periodic interrupts.
     pub(crate) fn periodic_deadline_usec(&self) -> Option<u64> {
-        if self.ram[REG_STAT_B as usize] & 0x40 != 0
-            && self.periodic_interval_usec != u32::MAX
-        {
+        if self.ram[REG_STAT_B as usize] & 0x40 != 0 && self.periodic_interval_usec != u32::MAX {
             Some(self.periodic_interval_usec as u64)
         } else {
             None
@@ -1082,13 +1079,6 @@ impl BxCmosC {
         sync
     }
 
-
-    /// The three scheduler timers the RTC owns — Bochs cmos.cc registers a
-    /// periodic timer, a one-second clock tick, and the UIP pre-update pulse.
-    pub(crate) const PERIODIC_TIMER_LOCAL: u16 = 0;
-    pub(crate) const ONE_SECOND_TIMER_LOCAL: u16 = 1;
-    pub(crate) const UIP_TIMER_LOCAL: u16 = 2;
-
     #[inline]
     const fn timer_key(local: u16) -> rusty_box_devices::api::TimerKey {
         rusty_box_devices::api::TimerKey {
@@ -1101,10 +1091,7 @@ impl BxCmosC {
     ///
     /// The periodic and one-second timers are continuous (Bochs cmos.cc
     /// activate_timer with continuous = 1); the UIP pulse is a one-shot.
-    fn apply_timer_sync(
-        ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
-        sync: CmosTimerSync,
-    ) {
+    fn apply_timer_sync(ctx: &mut rusty_box_devices::api::DeviceCtx<'_>, sync: CmosTimerSync) {
         for (local, action, continuous) in [
             (Self::PERIODIC_TIMER_LOCAL, sync.periodic, true),
             (Self::ONE_SECOND_TIMER_LOCAL, sync.one_second, true),
@@ -1199,9 +1186,9 @@ impl BxCmosC {
             0
         };
         let memory_above_4gb_in_64k = memory_above_4gb >> 16;
-        self.ram[0x5b] = (memory_above_4gb_in_64k & 0xFF) as u8;
-        self.ram[0x5c] = ((memory_above_4gb_in_64k >> 8) & 0xFF) as u8;
-        self.ram[0x5d] = ((memory_above_4gb_in_64k >> 16) & 0xFF) as u8;
+        self.ram[0x5B] = (memory_above_4gb_in_64k & 0xFF) as u8;
+        self.ram[0x5C] = ((memory_above_4gb_in_64k >> 8) & 0xFF) as u8;
+        self.ram[0x5D] = ((memory_above_4gb_in_64k >> 16) & 0xFF) as u8;
 
         self.update_checksum();
     }
@@ -1309,8 +1296,9 @@ impl BxCmosC {
 
 #[cfg(feature = "std")]
 impl crate::snapshot::SnapshotSection for BxCmosC {
-    const TAG: u32 = crate::snapshot::SEC_CMOS;
     type Restored = ();
+
+    const TAG: u32 = crate::snapshot::SEC_CMOS;
 
     /// Exact length of the versioned CMOS v3 section payload.
     fn snapshot_len(&self) -> SnapResult<u64> {
@@ -1373,10 +1361,7 @@ impl crate::snapshot::SnapshotSection for BxCmosC {
     /// Restore mutable RTC state without registering timers or raising/lowering
     /// IRQ8.  The machine validates the raw timer handles against its restored
     /// owner table and applies the final level only after full restoration.
-    fn restore<R: SnapRead>(
-        &mut self,
-        reader: &mut R,
-    ) -> SnapResult<()> {
+    fn restore<R: SnapRead>(&mut self, reader: &mut R) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(cmos_snapshot_invalid("unsupported CMOS section version"));
         }
@@ -1419,7 +1404,6 @@ impl crate::snapshot::SnapshotSection for BxCmosC {
         self.cmos_ext_mem_addr = cmos_ext_mem_addr;
         Ok(())
     }
-
 }
 
 #[cfg(feature = "std")]
@@ -1433,7 +1417,9 @@ impl BxCmosC {
         // in the state below, which is what keeps a restore from moving a
         // PC-system deadline or generating an IRQ edge.
         match self.cra_change() {
-            CmosTimerAction::Unchanged | CmosTimerAction::Restart(_) | CmosTimerAction::Deactivate => {}
+            CmosTimerAction::Unchanged
+            | CmosTimerAction::Restart(_)
+            | CmosTimerAction::Deactivate => {}
         }
         CmosSnapshotRestoreState {
             periodic_timer_handle: self.periodic_timer_handle,
@@ -1444,7 +1430,7 @@ impl BxCmosC {
                 .ram
                 .get(usize::from(REG_STAT_C))
                 .is_some_and(|status_c| self.irq_enabled && status_c & 0x80 != 0),
-    }
+        }
     }
 }
 
@@ -1469,9 +1455,7 @@ fn write_cmos_snapshot_handle<W: SnapWrite>(
 }
 
 #[cfg(feature = "std")]
-fn read_cmos_snapshot_handle<R: SnapRead>(
-    reader: &mut R,
-) -> SnapResult<Option<usize>> {
+fn read_cmos_snapshot_handle<R: SnapRead>(reader: &mut R) -> SnapResult<Option<usize>> {
     if !reader.read_bool()? {
         return Ok(None);
     }
@@ -1492,7 +1476,9 @@ fn validate_cmos_snapshot(
         return Err(cmos_snapshot_invalid("CMOS address is out of range"));
     }
     if cmos_ext_mem_addr & 0x80 == 0 {
-        return Err(cmos_snapshot_invalid("CMOS extended address is out of range"));
+        return Err(cmos_snapshot_invalid(
+            "CMOS extended address is out of range",
+        ));
     }
 
     let stat_a = cmos_snapshot_register(ram, REG_STAT_A)?;
@@ -1508,10 +1494,14 @@ fn validate_cmos_snapshot(
         return Err(cmos_snapshot_invalid("CMOS status-D mode is invalid"));
     }
     if timeval_change && stat_b & 0x80 == 0 {
-        return Err(cmos_snapshot_invalid("CMOS timeval-change state is invalid"));
+        return Err(cmos_snapshot_invalid(
+            "CMOS timeval-change state is invalid",
+        ));
     }
     if periodic_interval_usec != cmos_periodic_interval_usec(stat_a)? {
-        return Err(cmos_snapshot_invalid("CMOS periodic interval does not match status-A"));
+        return Err(cmos_snapshot_invalid(
+            "CMOS periodic interval does not match status-A",
+        ));
     }
     Ok(())
 }
@@ -2159,7 +2149,6 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn snapshot_cmos_restore_rebuilds_timers_and_continues_time() {
-
         use crate::pc_system::{BxPcSystemC, TimerOwner};
 
         let mut source_pc = BxPcSystemC::new();
@@ -2211,16 +2200,12 @@ mod tests {
         let mut restored_pc = BxPcSystemC::new();
         restored_pc.initialize(1_000_000);
         let mut pc_reader =
-            SnapshotReader::new(pc_payload.as_slice(), pc_payload.len() as u64)
-                .unwrap();
+            SnapshotReader::new(pc_payload.as_slice(), pc_payload.len() as u64).unwrap();
         restored_pc.restore(&mut pc_reader).unwrap();
 
         let mut restored_cmos = BxCmosC::new();
-        let mut cmos_reader = SnapshotReader::new(
-            cmos_payload.as_slice(),
-            cmos_payload.len() as u64,
-        )
-        .unwrap();
+        let mut cmos_reader =
+            SnapshotReader::new(cmos_payload.as_slice(), cmos_payload.len() as u64).unwrap();
         restored_cmos.restore(&mut cmos_reader).unwrap();
         let restored_state = restored_cmos.post_restore_snapshot_v3();
 
@@ -2233,10 +2218,16 @@ mod tests {
         assert_eq!(restored_pc.timer_countdown(periodic_handle), 37);
         assert_eq!(restored_state.periodic_period_usec, periodic_period_usec);
         assert_eq!(restored_state.periodic_timer_handle, Some(periodic_handle));
-        assert_eq!(restored_state.one_second_timer_handle, Some(one_second_handle));
+        assert_eq!(
+            restored_state.one_second_timer_handle,
+            Some(one_second_handle)
+        );
         assert_eq!(restored_state.uip_timer_handle, Some(uip_handle));
         assert!(!restored_state.irq8_level);
-        assert!(!restored_cmos.check_irq8(), "restore must not manufacture an IRQ edge");
+        assert!(
+            !restored_cmos.check_irq8(),
+            "restore must not manufacture an IRQ edge"
+        );
 
         restored_pc
             .validate_timer_handle_owner(periodic_handle, TimerOwner::CmosPeriodic)

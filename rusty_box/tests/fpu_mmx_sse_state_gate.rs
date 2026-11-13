@@ -30,14 +30,12 @@ mod state_gate;
 
 use rusty_box::cpu::arch_state::{ArchGroups, VcpuArchState};
 use rusty_box::cpu::decoder::{Opcode, X86Feature};
-use rusty_box::cpu::{
-    CpuSetupMode, HookMask, Instruction, Instrumentation, OpcodeEvent, X86Reg,
-};
+use rusty_box::cpu::{CpuSetupMode, HookMask, Instruction, Instrumentation, OpcodeEvent, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 use rusty_box::params::BxParams;
 use state_gate::{
-    install_fault_handlers, long64_emulator, run_installed_at, run_one, run_one_at, Gate, Outcome,
-    CODE, MF_GATE, NM_GATE, TEST_STACK_SIZE, UD_GATE,
+    CODE, Gate, MF_GATE, NM_GATE, Outcome, TEST_STACK_SIZE, UD_GATE, install_fault_handlers,
+    long64_emulator, run_installed_at, run_one, run_one_at,
 };
 
 const CR0_MP: u64 = 1 << 1;
@@ -466,7 +464,10 @@ fn lazy_switch_mismatches(mode: LazyMode) -> Vec<String> {
             result: case.expected,
         };
         if saw != owed {
-            mismatches.push(format!("{} ({mode:?}): saw {saw:x?}, owed {owed:x?}", case.name));
+            mismatches.push(format!(
+                "{} ({mode:?}): saw {saw:x?}, owed {owed:x?}",
+                case.name
+            ));
         }
     }
     mismatches
@@ -691,7 +692,8 @@ fn a_task_switch_sets_cr0_ts_and_the_next_x87_instruction_faults() {
                 put(0x5C, 0x10); // GS
                 put(0x64, 0x68 << 16); // I/O map base past the limit
                 emu.mem_write(NEW_TSS, &tss).expect("new TSS");
-                emu.mem_write(NEW_TASK_CODE, task.code).expect("new task code");
+                emu.mem_write(NEW_TASK_CODE, task.code)
+                    .expect("new task code");
 
                 // mov ax, OLD_TSS_SELECTOR; ltr ax; jmp far NEW_TSS_SELECTOR:0
                 let mut old_task = vec![0x66, 0xB8];
@@ -700,7 +702,9 @@ fn a_task_switch_sets_cr0_ts_and_the_next_x87_instruction_faults() {
                 old_task.extend_from_slice(&NEW_TSS_SELECTOR.to_le_bytes());
                 emu.mem_write(CODE, &old_task).expect("old task code");
 
-                let stop = emu.emu_start(CODE, None, None, Some(16)).expect("emu_start");
+                let stop = emu
+                    .emu_start(CODE, None, None, Some(16))
+                    .expect("emu_start");
                 let eip = emu.cpu().rip();
                 let name = task.name;
                 assert_eq!(
@@ -960,7 +964,11 @@ fn vex_and_evex_raise_ud_in_virtual_8086_mode() {
                 );
                 guest_xsetbv(&mut emu, XCR0_AVX512);
 
-                install_gdt(&mut emu, GDT, &[0, FLAT_CODE32, FLAT_DATA32, tss_descriptor(TSS)]);
+                install_gdt(
+                    &mut emu,
+                    GDT,
+                    &[0, FLAT_CODE32, FLAT_DATA32, tss_descriptor(TSS)],
+                );
                 let mut tss = [0u8; 0x68];
                 tss[0x04..0x08].copy_from_slice(&(RING0_STACK as u32).to_le_bytes()); // ESP0
                 tss[0x08..0x0C].copy_from_slice(&0x10u32.to_le_bytes()); // SS0
@@ -993,11 +1001,14 @@ fn vex_and_evex_raise_ud_in_virtual_8086_mode() {
                 // The IRETD frame is built on the ring-0 stack itself.
                 emu.reg_write(X86Reg::Rsp, RING0_STACK);
 
-                let stop = emu.emu_start(CODE, None, None, Some(32)).expect("emu_start");
+                let stop = emu
+                    .emu_start(CODE, None, None, Some(32))
+                    .expect("emu_start");
                 let eip = emu.cpu().rip();
                 if eip != PM_HANDLERS + UD_VECTOR * 16 + 1 {
                     let mut frame = [0u8; 36];
-                    emu.mem_read(RING0_STACK - 36, &mut frame).expect("read the frame");
+                    emu.mem_read(RING0_STACK - 36, &mut frame)
+                        .expect("read the frame");
                     mismatches.push(format!(
                         "{}: ended at eip={eip:#x} (stop={stop:?}, dr6={:#x}, top of the \
                          ring-0 stack {frame:02x?}), Bochs owes #UD",
@@ -1009,11 +1020,15 @@ fn vex_and_evex_raise_ud_in_virtual_8086_mode() {
                 // A fault from virtual-8086 mode switches to the ring-0 stack
                 // and pushes GS, FS, DS, ES, SS, ESP, EFLAGS, CS and EIP.
                 let mut frame = [0u8; 12];
-                emu.mem_read(RING0_STACK - 36, &mut frame).expect("read the frame");
+                emu.mem_read(RING0_STACK - 36, &mut frame)
+                    .expect("read the frame");
                 let pushed_eip = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
                 let pushed_cs = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
                 let pushed_eflags = u32::from_le_bytes([frame[8], frame[9], frame[10], frame[11]]);
-                if pushed_eip != 0 || pushed_cs != u32::from(V86_CS) || pushed_eflags & (1 << 17) == 0 {
+                if pushed_eip != 0
+                    || pushed_cs != u32::from(V86_CS)
+                    || pushed_eflags & (1 << 17) == 0
+                {
                     mismatches.push(format!(
                         "{}: #UD frame names {pushed_cs:#x}:{pushed_eip:#x} with EFLAGS \
                          {pushed_eflags:#x}, not the virtual-8086 instruction at \

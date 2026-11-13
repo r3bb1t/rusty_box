@@ -118,7 +118,7 @@ impl<'a> IsoImage<'a> {
             match descriptor[0] {
                 PRIMARY_DESCRIPTOR => break descriptor,
                 SET_TERMINATOR => {
-                    return Err("the volume descriptor set has no primary descriptor".into())
+                    return Err("the volume descriptor set has no primary descriptor".into());
                 }
                 _ => sector += 1,
             }
@@ -151,7 +151,7 @@ impl<'a> IsoImage<'a> {
             match current.kind {
                 EntryKind::Directory => {}
                 EntryKind::File => {
-                    return Err(format!("{path}: {} is not a directory", current.name))
+                    return Err(format!("{path}: {} is not a directory", current.name));
                 }
             }
             current = self
@@ -339,7 +339,7 @@ impl<'a> IsoImage<'a> {
                             String::from_utf8(bytes)
                                 .map_err(|e| format!("a Rock Ridge name is not UTF-8: {e}"))
                         })
-                        .transpose()
+                        .transpose();
                 }
             }
         }

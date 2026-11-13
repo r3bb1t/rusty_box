@@ -17,18 +17,16 @@
 //! - `time_ticks()` returns precise current time including partial countdown
 
 use bitflags::bitflags;
+use rusty_box_core::time::{ClockHz, VmClock, VmInstant};
 use thiserror::Error;
 
 use crate::config::{A20Mask, BxPhyAddress};
-use rusty_box_core::time::{ClockHz, VmClock, VmInstant};
 use crate::cpu::ResetReason;
 use crate::emulator::DeviceClock;
-
-
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
-    SNAPSHOT_SECTION_VERSION,
+    SNAPSHOT_SECTION_VERSION, SnapError, SnapRead, SnapResult, SnapWrite, bounds,
+    checked_snapshot_len_add, checked_snapshot_len_mul,
 };
 
 bitflags! {
@@ -387,19 +385,15 @@ fn validate_snapshot_state_fields(
     if ips == 0 {
         return Err(snapshot_invalid_data("configured IPS is zero"));
     }
-    if num_timers == 0
-        || num_timers > BX_MAX_TIMERS
-        || num_timers > bounds::MAX_SNAPSHOT_COUNT
-    {
+    if num_timers == 0 || num_timers > BX_MAX_TIMERS || num_timers > bounds::MAX_SNAPSHOT_COUNT {
         return Err(snapshot_invalid_data("timer count is out of range"));
     }
     if num_fired > BX_MAX_TIMERS || num_fired > bounds::MAX_SNAPSHOT_QUEUE_LEN {
-        return Err(snapshot_invalid_data("fired timer queue count is out of range"));
+        return Err(snapshot_invalid_data(
+            "fired timer queue count is out of range",
+        ));
     }
-    if curr_countdown == 0
-        || curr_countdown_period == 0
-        || curr_countdown > curr_countdown_period
-    {
+    if curr_countdown == 0 || curr_countdown_period == 0 || curr_countdown > curr_countdown_period {
         return Err(snapshot_invalid_data("countdown state is inconsistent"));
     }
 
@@ -456,21 +450,22 @@ fn validate_snapshot_state_fields(
             return Err(snapshot_invalid_data("non-null timer uses null owner"));
         }
         if index != 0
-            && timers
-                .iter()
-                .take(index)
-                .any(|previous| {
-                    previous.flags.contains(TimerFlags::IN_USE) && previous.owner == timer.owner
-                })
+            && timers.iter().take(index).any(|previous| {
+                previous.flags.contains(TimerFlags::IN_USE) && previous.owner == timer.owner
+            })
         {
-            return Err(snapshot_invalid_data("timer owner is registered more than once"));
+            return Err(snapshot_invalid_data(
+                "timer owner is registered more than once",
+            ));
         }
         if timer.period < MIN_ALLOWABLE_TIMER_PERIOD {
             return Err(snapshot_invalid_data("timer period is zero"));
         }
         if timer.flags.contains(TimerFlags::ACTIVE) {
             if timer.time_to_fire <= now {
-                return Err(snapshot_invalid_data("active timer deadline is not in the future"));
+                return Err(snapshot_invalid_data(
+                    "active timer deadline is not in the future",
+                ));
             }
             // The countdown never overshoots the earliest active deadline: it
             // is only ever shortened toward a timer, so no active timer may
@@ -506,12 +501,18 @@ fn validate_snapshot_state_fields(
     {
         timer_owner_wire_parts(owner)?;
         if owner == TimerOwner::NullTimer {
-            return Err(snapshot_invalid_data("null timer cannot be pending for dispatch"));
+            return Err(snapshot_invalid_data(
+                "null timer cannot be pending for dispatch",
+            ));
         }
         if count == 0 {
             return Err(snapshot_invalid_data("fired timer count is zero"));
         }
-        if fired_owners.iter().take(index).any(|previous| *previous == owner) {
+        if fired_owners
+            .iter()
+            .take(index)
+            .any(|previous| *previous == owner)
+        {
             return Err(snapshot_invalid_data("fired timer owner is duplicated"));
         }
         if !timer_owner_is_registered(timers, owner) {
@@ -726,7 +727,6 @@ impl BxPcSystemC {
         )
     }
 
-
     // ========================================================================
     // Timer tick mechanism — matches Bochs pc_system.h
     // ========================================================================
@@ -815,7 +815,8 @@ impl BxPcSystemC {
         let next_period = min_time_to_fire
             .checked_sub(self.ticks_total)
             .unwrap_or(MIN_ALLOWABLE_TIMER_PERIOD)
-            .clamp(MIN_ALLOWABLE_TIMER_PERIOD, NULL_TIMER_INTERVAL) as u32;
+            .clamp(MIN_ALLOWABLE_TIMER_PERIOD, NULL_TIMER_INTERVAL)
+            as u32;
         self.curr_countdown = next_period;
         self.curr_countdown_period = next_period;
 
@@ -1053,6 +1054,7 @@ impl BxPcSystemC {
         }
         Ok(())
     }
+
     #[inline]
     fn deadline_from_now(&self, ticks: u64) -> Result<u64, PcSystemError> {
         self.time_ticks()
@@ -1098,9 +1100,7 @@ impl BxPcSystemC {
 
             let deadline_ticks = self.deadline_from_now(period)?;
             self.timers[i].flags = TimerFlags::IN_USE;
-            self.timers[i]
-                .flags
-                .set(TimerFlags::CONTINUOUS, continuous);
+            self.timers[i].flags.set(TimerFlags::CONTINUOUS, continuous);
             self.timers[i].period = period;
             self.timers[i].time_to_fire = deadline_ticks;
             self.timers[i].owner = owner;
@@ -1413,7 +1413,6 @@ impl BxPcSystemC {
             .map(|deadline| deadline.saturating_sub(now))
     }
 
-
     /// Emulate ISA bus timing delay (Bochs pc_system.cc).
     /// ISA bus runs at ~8 MHz. Each ISA cycle takes ~125ns.
     /// At typical IPS rates, this advances the tick counter to simulate bus delay.
@@ -1449,13 +1448,13 @@ impl BxPcSystemC {
         self.num_fired = 0;
         (owners, counts, count)
     }
-
 }
 
 #[cfg(feature = "std")]
 impl crate::snapshot::SnapshotSection for BxPcSystemC {
-    const TAG: u32 = crate::snapshot::SEC_PC_SYSTEM;
     type Restored = ();
+
+    const TAG: u32 = crate::snapshot::SEC_PC_SYSTEM;
 
     /// Return the exact v3 payload length for this PC-system object.
     ///
@@ -1489,12 +1488,9 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
             len = checked_snapshot_len_add(len, field_len)?;
         }
 
+        let timer_wire_len = checked_snapshot_len_add(TIMER_WIRE_FIXED_LEN, TIMER_OWNER_WIRE_LEN)?;
         let timer_wire_len =
-            checked_snapshot_len_add(TIMER_WIRE_FIXED_LEN, TIMER_OWNER_WIRE_LEN)?;
-        let timer_wire_len = checked_snapshot_len_add(
-            timer_wire_len,
-            snapshot_usize_to_u64(BX_MAX_TIMER_ID_LEN)?,
-        )?;
+            checked_snapshot_len_add(timer_wire_len, snapshot_usize_to_u64(BX_MAX_TIMER_ID_LEN)?)?;
         len = checked_snapshot_len_add(
             len,
             checked_snapshot_len_mul(timer_wire_len, snapshot_usize_to_u64(BX_MAX_TIMERS)?)?,
@@ -1502,10 +1498,7 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
         len = checked_snapshot_len_add(len, 4)?; // fired-owner queue count
         len = checked_snapshot_len_add(
             len,
-            checked_snapshot_len_mul(
-                FIRED_OWNER_WIRE_LEN,
-                snapshot_usize_to_u64(self.num_fired)?,
-            )?,
+            checked_snapshot_len_mul(FIRED_OWNER_WIRE_LEN, snapshot_usize_to_u64(self.num_fired)?)?,
         )?;
         Ok(len)
     }
@@ -1566,13 +1559,12 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
     /// Callback topology is intentionally not represented here: device codecs
     /// retain their host anchors and validate their saved timer handles through
     /// `validate_timer_handle_owner` after this object has restored.
-    fn restore<R: SnapRead>(
-        &mut self,
-        reader: &mut R,
-    ) -> SnapResult<()> {
+    fn restore<R: SnapRead>(&mut self, reader: &mut R) -> SnapResult<()> {
         let section_version = reader.read_u32()?;
         if section_version != SNAPSHOT_SECTION_VERSION {
-            return Err(snapshot_invalid_data("unsupported PC-system section version"));
+            return Err(snapshot_invalid_data(
+                "unsupported PC-system section version",
+            ));
         }
 
         let ips = reader.read_u64()?;
@@ -1666,7 +1658,6 @@ impl crate::snapshot::SnapshotSection for BxPcSystemC {
         self.num_fired = num_fired;
         Ok(())
     }
-
 }
 
 impl BxPcSystemC {
@@ -1696,7 +1687,9 @@ impl BxPcSystemC {
     ) -> SnapResult<()> {
         timer_owner_wire_parts(expected)?;
         if handle >= self.num_timers {
-            return Err(snapshot_invalid_data("timer handle is outside the registered range"));
+            return Err(snapshot_invalid_data(
+                "timer handle is outside the registered range",
+            ));
         }
         let timer = self
             .timers
@@ -1733,9 +1726,9 @@ impl BxPcSystemC {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{SnapError, SnapshotReader};
     #[cfg(feature = "std")]
     use crate::snapshot::SnapshotSection;
+    use crate::snapshot::{SnapError, SnapshotReader};
 
     #[test]
     fn test_new_pc_system() {
@@ -1744,7 +1737,7 @@ mod tests {
         assert!(!pc.enable_a20);
         assert_eq!(pc.a20_mask, A20Mask::CLOSED);
         assert_eq!(pc.num_timers, 1); // null timer
-                                      // Countdown should be NULL_TIMER_INTERVAL (u32::MAX)
+        // Countdown should be NULL_TIMER_INTERVAL (u32::MAX)
         assert_eq!(pc.curr_countdown, 0xFFFF_FFFF);
         assert_eq!(pc.curr_countdown_period, 0xFFFF_FFFF);
     }
@@ -2010,7 +2003,6 @@ mod tests {
         assert_eq!(counts[0], 1);
     }
 
-
     #[test]
     fn continuous_absolute_activation_preserves_registered_period() {
         let mut pc = BxPcSystemC::new();
@@ -2072,7 +2064,10 @@ mod tests {
 
         let (owners, counts, count) = pc.take_fired_timers();
         assert_eq!(count, 2);
-        assert_eq!(owners[..count], [TimerOwner::PciIdeCh0, TimerOwner::PciIdeCh1]);
+        assert_eq!(
+            owners[..count],
+            [TimerOwner::PciIdeCh0, TimerOwner::PciIdeCh1]
+        );
         assert_eq!(counts[..count], [1, 1]);
     }
 
@@ -2091,7 +2086,8 @@ mod tests {
 
         pc.activate_timer_at_ticks(later, now + 100, false).unwrap();
         assert_eq!(pc.get_num_ticks_left_next_event(), 100);
-        pc.activate_timer_at_ticks(earlier, now + 50, false).unwrap();
+        pc.activate_timer_at_ticks(earlier, now + 50, false)
+            .unwrap();
         assert_eq!(pc.get_num_ticks_left_next_event(), 50);
         assert_eq!(pc.next_timer_deadline_at(), Some(now + 50));
         assert_eq!(pc.time_ticks(), now);
@@ -2121,25 +2117,17 @@ mod tests {
             TimerOwner::Slowdown,
         ];
         for owner in fixed {
-            pc.register_timer(owner, 0, false, false, "fixed")
-                .unwrap();
+            pc.register_timer(owner, 0, false, false, "fixed").unwrap();
         }
         for cpu_index in 0..crate::params::BX_MAX_SMP_THREADS_SUPPORTED as usize {
-            pc.register_timer(
-                TimerOwner::Lapic(cpu_index),
-                0,
-                false,
-                false,
-                "lapic",
-            )
-            .unwrap();
+            pc.register_timer(TimerOwner::Lapic(cpu_index), 0, false, false, "lapic")
+                .unwrap();
         }
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn snapshot_timer_owner_phase_roundtrip_rejects_owner_mismatch() {
-
         let mut source = BxPcSystemC::new();
         source.initialize(1_000_000);
         source.tickn(15);
@@ -2156,8 +2144,7 @@ mod tests {
 
         let mut restored = BxPcSystemC::new();
         restored.initialize(1_000_000);
-        let mut reader =
-            SnapshotReader::new(payload.as_slice(), payload.len() as u64).unwrap();
+        let mut reader = SnapshotReader::new(payload.as_slice(), payload.len() as u64).unwrap();
         restored.restore(&mut reader).unwrap();
 
         assert_eq!(restored.time_ticks(), source.time_ticks());
@@ -2199,9 +2186,16 @@ mod tests {
         let far = source
             .register_timer(TimerOwner::CmosPeriodic, 0, false, false, "cmos")
             .unwrap();
-        source.activate_timer_at_ticks(far, source.time_ticks() + 500, true).unwrap();
-        source.activate_timer_at_ticks(near, source.time_ticks() + 40, false).unwrap();
-        assert_eq!(source.next_timer_deadline_at(), Some(source.time_ticks() + 40));
+        source
+            .activate_timer_at_ticks(far, source.time_ticks() + 500, true)
+            .unwrap();
+        source
+            .activate_timer_at_ticks(near, source.time_ticks() + 40, false)
+            .unwrap();
+        assert_eq!(
+            source.next_timer_deadline_at(),
+            Some(source.time_ticks() + 40)
+        );
 
         // Deactivate the timer the countdown points at; the countdown is NOT
         // re-narrowed, so it now precedes the earliest active deadline (500).
@@ -2212,8 +2206,7 @@ mod tests {
 
         let mut restored = BxPcSystemC::new();
         restored.initialize(1_000_000);
-        let mut reader =
-            SnapshotReader::new(payload.as_slice(), payload.len() as u64).unwrap();
+        let mut reader = SnapshotReader::new(payload.as_slice(), payload.len() as u64).unwrap();
         restored.restore(&mut reader).unwrap();
         assert_eq!(restored.time_ticks(), source.time_ticks());
 

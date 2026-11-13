@@ -46,4 +46,3 @@ pub trait PciDevice {
     /// assert on the device's own state instead.
     fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> Self::WriteEffects;
 }
-

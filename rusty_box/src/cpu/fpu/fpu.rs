@@ -263,14 +263,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let tmp = 0xFFFF0000u32 | self.the_i387.get_tag_word() as u32;
                 self.v_write_dword(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
                 let tmp = self.the_i387.fip as u32;
-                self.v_write_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x0C) & asize_mask, tmp)?;
                 let tmp = (self.x87_get_fcs() as u32) | ((self.the_i387.foo as u32) << 16);
                 self.v_write_dword(seg, eaddr.wrapping_add(0x10) & asize_mask, tmp)?;
                 let tmp = self.the_i387.fdp as u32;
                 self.v_write_dword(seg, eaddr.wrapping_add(0x14) & asize_mask, tmp)?;
                 let tmp = 0xFFFF0000u32 | self.x87_get_fds() as u32;
                 self.v_write_dword(seg, eaddr.wrapping_add(0x18) & asize_mask, tmp)?;
-                offset = 0x1c;
+                offset = 0x1C;
             } else {
                 // Protected mode - 16 bit
                 let tmp = self.the_i387.get_control_word();
@@ -284,10 +284,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let tmp = self.x87_get_fcs();
                 self.v_write_word(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
                 let tmp = (self.the_i387.fdp & 0xFFFF) as u16;
-                self.v_write_word(seg, eaddr.wrapping_add(0x0a) & asize_mask, tmp)?;
+                self.v_write_word(seg, eaddr.wrapping_add(0x0A) & asize_mask, tmp)?;
                 let tmp = self.x87_get_fds();
-                self.v_write_word(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
-                offset = 0x0e;
+                self.v_write_word(seg, eaddr.wrapping_add(0x0C) & asize_mask, tmp)?;
+                offset = 0x0E;
             }
         } else {
             // Real or V86 mode
@@ -302,14 +302,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let tmp = 0xFFFF0000u32 | self.the_i387.get_tag_word() as u32;
                 self.v_write_dword(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
                 let tmp = 0xFFFF0000u32 | (fp_ip & 0xFFFF);
-                self.v_write_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x0C) & asize_mask, tmp)?;
                 let tmp = ((fp_ip & 0xFFFF0000) >> 4) | self.the_i387.foo as u32;
                 self.v_write_dword(seg, eaddr.wrapping_add(0x10) & asize_mask, tmp)?;
                 let tmp = 0xFFFF0000u32 | (fp_dp & 0xFFFF);
                 self.v_write_dword(seg, eaddr.wrapping_add(0x14) & asize_mask, tmp)?;
                 let tmp = (fp_dp & 0xFFFF0000) >> 4;
                 self.v_write_dword(seg, eaddr.wrapping_add(0x18) & asize_mask, tmp)?;
-                offset = 0x1c;
+                offset = 0x1C;
             } else {
                 // Real mode - 16 bit
                 let tmp = self.the_i387.get_control_word();
@@ -327,12 +327,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.v_write_word(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
                 self.v_write_word(
                     seg,
-                    eaddr.wrapping_add(0x0a) & asize_mask,
+                    eaddr.wrapping_add(0x0A) & asize_mask,
                     (fp_dp & 0xFFFF) as u16,
                 )?;
                 let tmp = ((fp_dp & 0xF0000) >> 4) as u16;
-                self.v_write_word(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
-                offset = 0x0e;
+                self.v_write_word(seg, eaddr.wrapping_add(0x0C) & asize_mask, tmp)?;
+                offset = 0x0E;
             }
         }
 
@@ -362,7 +362,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x10) & asize_mask)?;
                 self.the_i387.fcs = (tmp & 0xFFFF) as u16;
                 self.the_i387.foo = ((tmp >> 16) & 0x07FF) as u16;
-                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x0C) & asize_mask)?;
                 self.the_i387.fip = tmp as u64;
                 let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x08) & asize_mask)?;
                 self.the_i387.twd = (tmp & 0xFFFF) as u16;
@@ -371,12 +371,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.the_i387.tos = ((tmp >> 11) & 0x7) as u8;
                 let tmp = self.v_read_dword(seg, eaddr)?;
                 self.the_i387.cwd = (tmp & 0xFFFF) as u16;
-                offset = 0x1c;
+                offset = 0x1C;
             } else {
                 // Protected mode - 16 bit
-                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x0c) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x0C) & asize_mask)?;
                 self.the_i387.fds = tmp;
-                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x0a) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x0A) & asize_mask)?;
                 self.the_i387.fdp = tmp as u64;
                 let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x08) & asize_mask)?;
                 self.the_i387.fcs = tmp;
@@ -390,7 +390,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let tmp = self.v_read_word(seg, eaddr)?;
                 self.the_i387.cwd = tmp;
                 self.the_i387.foo = 0;
-                offset = 0x0e;
+                offset = 0x0E;
             }
         } else {
             // Real or V86 mode
@@ -404,7 +404,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x10) & asize_mask)?;
                 self.the_i387.foo = (tmp & 0x07FF) as u16;
                 let fp_ip_hi = (tmp & 0x0FFFF000) << 4;
-                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x0C) & asize_mask)?;
                 let fp_ip = fp_ip_hi | (tmp & 0xFFFF);
                 self.the_i387.fip = fp_ip as u64;
                 self.the_i387.fcs = 0;
@@ -415,12 +415,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.the_i387.tos = ((tmp >> 11) & 0x7) as u8;
                 let tmp = self.v_read_dword(seg, eaddr)?;
                 self.the_i387.cwd = (tmp & 0xFFFF) as u16;
-                offset = 0x1c;
+                offset = 0x1C;
             } else {
                 // Real mode - 16 bit
-                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x0c) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x0C) & asize_mask)?;
                 let fp_dp_hi = ((tmp & 0xF000) as u32) << 4;
-                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x0a) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x0A) & asize_mask)?;
                 self.the_i387.fdp = (fp_dp_hi | tmp as u32) as u64;
                 self.the_i387.fds = 0;
                 let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x08) & asize_mask)?;
@@ -436,7 +436,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.the_i387.tos = ((tmp >> 11) & 0x7) as u8;
                 let tmp = self.v_read_word(seg, eaddr)?;
                 self.the_i387.cwd = tmp;
-                offset = 0x0e;
+                offset = 0x0E;
             }
         }
 

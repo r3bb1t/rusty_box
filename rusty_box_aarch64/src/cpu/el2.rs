@@ -29,8 +29,8 @@
 //! registers and the rest RES0; on the Armv9.2 model all 64 bits,
 //! controlling nothing, as their EL1 counterparts do there.
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::features::{Feature, Features, Implementation, LeveledImplementation};
 use super::fgt::FgtReg;
@@ -38,8 +38,8 @@ use super::mmu::{ContextStorage, NoContexts, TlbContexts};
 use super::regime::TTB_BADDR;
 use super::regs::SysReg;
 use super::state::spsr_mask_of;
-use super::sysreg::{smcr_mask, DISR_MASK};
-use super::{id, reset, sctlr, Cpu, El};
+use super::sysreg::{DISR_MASK, smcr_mask};
+use super::{Cpu, El, id, reset, sctlr};
 
 // ----- The levels a processor implements -----
 
@@ -87,13 +87,13 @@ mod sealed {
 }
 
 impl sealed::Sealed for NoEl2 {
-    type State = NoEl2State;
     type Contexts = NoContexts;
+    type State = NoEl2State;
 }
 
 impl sealed::Sealed for WithEl2 {
-    type State = El2State;
     type Contexts = TlbContexts;
+    type State = El2State;
 }
 
 /// Where a processor keeps its EL2 state: [`El2State`] with EL2, nothing
@@ -787,11 +787,7 @@ const TCR_EL2_E2H1_DS: u64 = 1 << 59;
 pub(crate) const fn tcr_el2_mask(features: Features, layout: E2hLayout) -> u64 {
     /// `bits` where `features` holds `feature`.
     const fn with(features: Features, feature: Feature, bits: u64) -> u64 {
-        if features.has(feature) {
-            bits
-        } else {
-            0
-        }
+        if features.has(feature) { bits } else { 0 }
     }
     match layout {
         E2hLayout::E2h0 => {
@@ -1130,6 +1126,10 @@ const fn redefined_kept(
 }
 
 impl El2Reg {
+    /// The registers `HCR_EL2.E2H` redefines, which take the layout it
+    /// selects ([`E2hLayout`]).
+    const REDEFINED: [Self; 4] = [Self::Sctlr, Self::Cptr, Self::Tcr, Self::Cnthctl];
+
     /// What of `value` an `MSR` to the register keeps on a processor
     /// implementing `features`, whose `SPSR_ELx` bits are `spsr_mask`, in
     /// `layout` (which only the registers `HCR_EL2.E2H` redefines read): the
@@ -1323,10 +1323,6 @@ impl El2Reg {
             | Self::Vncr => false,
         }
     }
-
-    /// The registers `HCR_EL2.E2H` redefines, which take the layout it
-    /// selects ([`E2hLayout`]).
-    const REDEFINED: [Self; 4] = [Self::Sctlr, Self::Cptr, Self::Tcr, Self::Cnthctl];
 }
 
 // A snapshot reads `HCR_EL2` before the registers whose layout it selects
@@ -1574,11 +1570,7 @@ impl<L: Levels> Cpu<L> {
     /// `EL2Enabled()` is FALSE, on a processor without EL2.
     #[inline(always)]
     pub(crate) fn hcr_el2(&self) -> u64 {
-        if L::EL2 {
-            self.el2().hcr
-        } else {
-            0
-        }
+        if L::EL2 { self.el2().hcr } else { 0 }
     }
 
     /// Whether `EL2Enabled()` and a bit of `bits` is clear in `HCR_EL2`:
@@ -1630,11 +1622,7 @@ impl<L: Levels> Cpu<L> {
     /// Arm `HighestEL()`: EL2 with FEAT_EL2, EL1 without (no EL3 here).
     #[inline]
     pub(crate) fn highest_el(&self) -> El {
-        if self.have_el2() {
-            El::El2
-        } else {
-            El::El1
-        }
+        if self.have_el2() { El::El2 } else { El::El1 }
     }
 
     /// Whether `EL2Enabled()` and any bit of `bits` is set in `MDCR_EL2`.
@@ -1762,8 +1750,7 @@ mod tests {
         regs.write(El2Reg::Hcr, imp, spsr_mask, HCR_E2H);
         assert_eq!(regs.layout(), E2hLayout::E2h1);
         assert_eq!(
-            regs.cptr,
-            CPTR_FPEN,
+            regs.cptr, CPTR_FPEN,
             "FPEN kept; the bits that are a field in neither layout RES0 with E2H 1"
         );
         regs.write(El2Reg::Tcr, imp, spsr_mask, 0x3F << 16);
@@ -1776,9 +1763,17 @@ mod tests {
             cptr_el2_res1(imp.features, E2hLayout::E2h0) | CPTR_FPEN,
             "the E2H 0 RES1 bits again, FPEN still kept"
         );
-        assert_eq!(regs.tcr & (0x3F << 16), 0x3F << 16, "T1SZ kept, bit 19 with it");
+        assert_eq!(
+            regs.tcr & (0x3F << 16),
+            0x3F << 16,
+            "T1SZ kept, bit 19 with it"
+        );
         regs.write(El2Reg::Hcr, imp, spsr_mask, HCR_E2H);
-        assert_eq!(regs.sctlr & sctlr::NTWI, 0, "nTWI as written, after the round trip");
+        assert_eq!(
+            regs.sctlr & sctlr::NTWI,
+            0,
+            "nTWI as written, after the round trip"
+        );
         assert_eq!(regs.cptr, CPTR_FPEN);
     }
 }

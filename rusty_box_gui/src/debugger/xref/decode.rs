@@ -2,8 +2,8 @@
 //! branch goes to, the address a memory operand names when it is
 //! RIP-relative or absolute, and an immediate that is an address.
 
-use rusty_box::cpu::decoder::{GprIndex, Instruction, Opcode};
 use rusty_box::cpu::CodeSize;
+use rusty_box::cpu::decoder::{GprIndex, Instruction, Opcode};
 
 use crate::debugger::pe::ImageWidth;
 
@@ -64,7 +64,11 @@ pub(crate) fn code_size(width: ImageWidth) -> CodeSize {
 }
 
 /// What `instruction`, at `at` in an image of `width`, refers to.
-pub(crate) fn references_of(instruction: &Instruction, at: u64, width: ImageWidth) -> InstructionRefs {
+pub(crate) fn references_of(
+    instruction: &Instruction,
+    at: u64,
+    width: ImageWidth,
+) -> InstructionRefs {
     let size = code_size(width);
     let next = at.wrapping_add(u64::from(instruction.ilen()));
     let opcode = instruction.get_ia_opcode();
@@ -77,7 +81,10 @@ pub(crate) fn references_of(instruction: &Instruction, at: u64, width: ImageWidt
         refs.push(Reference { target, kind });
     }
     if let Some(target) = moffs_address(instruction, width) {
-        refs.push(Reference { target, kind: XrefKind::Memory });
+        refs.push(Reference {
+            target,
+            kind: XrefKind::Memory,
+        });
     } else if !instruction.mod_c0() {
         if let Some(target) = memory_address(instruction, next, size) {
             let kind = match opcode {
@@ -90,7 +97,10 @@ pub(crate) fn references_of(instruction: &Instruction, at: u64, width: ImageWidt
         }
     }
     if let Some(target) = immediate_address(instruction, width) {
-        refs.push(Reference { target, kind: XrefKind::AddressOf });
+        refs.push(Reference {
+            target,
+            kind: XrefKind::AddressOf,
+        });
     }
     refs
 }
@@ -210,7 +220,11 @@ pub(crate) fn memory_address(instruction: &Instruction, next: u64, size: CodeSiz
             } else {
                 bare_displacement(instruction)? as u64
             };
-            Some(if instruction.as64_l() == 0 { address & 0xFFFF_FFFF } else { address })
+            Some(if instruction.as64_l() == 0 {
+                address & 0xFFFF_FFFF
+            } else {
+                address
+            })
         }
     }
 }
@@ -223,7 +237,12 @@ fn moffs_address(instruction: &Instruction, width: ImageWidth) -> Option<u64> {
     match width {
         ImageWidth::Bits32 => matches!(
             opcode,
-            Opcode::MovAlod | Opcode::MovAxod | Opcode::MovEaxod | Opcode::MovOdAl | Opcode::MovOdAx | Opcode::MovOdEax
+            Opcode::MovAlod
+                | Opcode::MovAxod
+                | Opcode::MovEaxod
+                | Opcode::MovOdAl
+                | Opcode::MovOdAx
+                | Opcode::MovOdEax
         )
         .then(|| u64::from(instruction.id())),
         ImageWidth::Bits64 => matches!(
@@ -248,7 +267,8 @@ fn immediate_address(instruction: &Instruction, width: ImageWidth) -> Option<u64
     let opcode = instruction.get_ia_opcode();
     let value = match width {
         ImageWidth::Bits64 => (opcode == Opcode::MovRrxiq).then(|| instruction.iq())?,
-        ImageWidth::Bits32 => matches!(opcode, Opcode::PushId | Opcode::MovEdId).then(|| u64::from(instruction.id()))?,
+        ImageWidth::Bits32 => matches!(opcode, Opcode::PushId | Opcode::MovEdId)
+            .then(|| u64::from(instruction.id()))?,
     };
     (value >= MIN_IMMEDIATE_ADDRESS).then_some(value)
 }
@@ -256,7 +276,8 @@ fn immediate_address(instruction: &Instruction, width: ImageWidth) -> Option<u64
 /// The address an operand of no base and no index names: its displacement,
 /// sign-extended.
 pub(crate) fn bare_displacement(instruction: &Instruction) -> Option<i64> {
-    (instruction.base_reg() == GprIndex::Nil && has_no_index(instruction)).then(|| i64::from(instruction.displ32s()))
+    (instruction.base_reg() == GprIndex::Nil && has_no_index(instruction))
+        .then(|| i64::from(instruction.displ32s()))
 }
 
 /// Whether a memory operand has no index register: the decoder leaves the
@@ -268,10 +289,11 @@ pub(crate) fn has_no_index(instruction: &Instruction) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use rusty_box::cpu::CodeSize;
+
     use super::*;
     use crate::debugger::inspect::decode_lines;
     use crate::debugger::pe::ImageWidth;
-    use rusty_box::cpu::CodeSize;
 
     const AT: u64 = 0x1_4000_1000;
     const AT32: u64 = 0x40_1000;
@@ -282,8 +304,15 @@ mod tests {
             ImageWidth::Bits32 => AT32,
         };
         let instruction = code_size(width).decode(bytes).expect("the bytes decode");
-        assert_eq!(usize::from(instruction.ilen()), bytes.len(), "one whole instruction");
-        references_of(&instruction, at, width).iter().copied().collect()
+        assert_eq!(
+            usize::from(instruction.ilen()),
+            bytes.len(),
+            "one whole instruction"
+        );
+        references_of(&instruction, at, width)
+            .iter()
+            .copied()
+            .collect()
     }
 
     fn one(target: u64, kind: XrefKind) -> Vec<Reference> {
@@ -292,48 +321,102 @@ mod tests {
 
     #[test]
     fn a_relative_call_and_jump_name_their_targets() {
-        assert_eq!(refs(&[0xE8, 0x10, 0, 0, 0], ImageWidth::Bits64), one(AT + 0x15, XrefKind::Call));
-        assert_eq!(refs(&[0x74, 0xFE], ImageWidth::Bits64), one(AT, XrefKind::Jump));
-        assert_eq!(refs(&[0x0F, 0x85, 0, 1, 0, 0], ImageWidth::Bits64), one(AT + 0x106, XrefKind::Jump));
-        assert_eq!(refs(&[0xE9, 0xFB, 0xFF, 0xFF, 0xFF], ImageWidth::Bits32), one(AT32, XrefKind::Jump));
+        assert_eq!(
+            refs(&[0xE8, 0x10, 0, 0, 0], ImageWidth::Bits64),
+            one(AT + 0x15, XrefKind::Call)
+        );
+        assert_eq!(
+            refs(&[0x74, 0xFE], ImageWidth::Bits64),
+            one(AT, XrefKind::Jump)
+        );
+        assert_eq!(
+            refs(&[0x0F, 0x85, 0, 1, 0, 0], ImageWidth::Bits64),
+            one(AT + 0x106, XrefKind::Jump)
+        );
+        assert_eq!(
+            refs(&[0xE9, 0xFB, 0xFF, 0xFF, 0xFF], ImageWidth::Bits32),
+            one(AT32, XrefKind::Jump)
+        );
     }
 
     #[test]
     fn a_call_through_rip_names_its_slot() {
-        assert_eq!(refs(&[0xFF, 0x15, 0xF2, 0x0F, 0, 0], ImageWidth::Bits64), one(AT + 6 + 0xFF2, XrefKind::CallThrough));
-        assert_eq!(refs(&[0xFF, 0x25, 0xF2, 0x0F, 0, 0], ImageWidth::Bits64), one(AT + 6 + 0xFF2, XrefKind::JumpThrough));
+        assert_eq!(
+            refs(&[0xFF, 0x15, 0xF2, 0x0F, 0, 0], ImageWidth::Bits64),
+            one(AT + 6 + 0xFF2, XrefKind::CallThrough)
+        );
+        assert_eq!(
+            refs(&[0xFF, 0x25, 0xF2, 0x0F, 0, 0], ImageWidth::Bits64),
+            one(AT + 6 + 0xFF2, XrefKind::JumpThrough)
+        );
         // 32-bit `call [0x403000]`.
-        assert_eq!(refs(&[0xFF, 0x15, 0, 0x30, 0x40, 0], ImageWidth::Bits32), one(0x40_3000, XrefKind::CallThrough));
+        assert_eq!(
+            refs(&[0xFF, 0x15, 0, 0x30, 0x40, 0], ImageWidth::Bits32),
+            one(0x40_3000, XrefKind::CallThrough)
+        );
     }
 
     #[test]
     fn a_rip_relative_load_and_store_name_their_address() {
-        assert_eq!(refs(&[0x48, 0x8B, 0x05, 0x10, 0, 0, 0], ImageWidth::Bits64), one(AT + 7 + 0x10, XrefKind::Memory));
-        assert_eq!(refs(&[0x89, 0x0D, 0x10, 0, 0, 0], ImageWidth::Bits64), one(AT + 6 + 0x10, XrefKind::Memory));
+        assert_eq!(
+            refs(&[0x48, 0x8B, 0x05, 0x10, 0, 0, 0], ImageWidth::Bits64),
+            one(AT + 7 + 0x10, XrefKind::Memory)
+        );
+        assert_eq!(
+            refs(&[0x89, 0x0D, 0x10, 0, 0, 0], ImageWidth::Bits64),
+            one(AT + 6 + 0x10, XrefKind::Memory)
+        );
     }
 
     #[test]
     fn lea_takes_an_address() {
-        assert_eq!(refs(&[0x48, 0x8D, 0x0D, 0, 0x10, 0, 0], ImageWidth::Bits64), one(AT + 7 + 0x1000, XrefKind::AddressOf));
+        assert_eq!(
+            refs(&[0x48, 0x8D, 0x0D, 0, 0x10, 0, 0], ImageWidth::Bits64),
+            one(AT + 7 + 0x1000, XrefKind::AddressOf)
+        );
     }
 
     #[test]
     fn an_imm64_and_a_32_bit_push_are_addresses() {
         let mut mov = vec![0x48, 0xB8];
         mov.extend_from_slice(&0x1_4000_3000u64.to_le_bytes());
-        assert_eq!(refs(&mov, ImageWidth::Bits64), one(0x1_4000_3000, XrefKind::AddressOf));
-        assert_eq!(refs(&[0x68, 0, 0x30, 0x40, 0], ImageWidth::Bits32), one(0x40_3000, XrefKind::AddressOf));
-        assert_eq!(refs(&[0xB9, 0, 0x30, 0x40, 0], ImageWidth::Bits32), one(0x40_3000, XrefKind::AddressOf));
-        assert_eq!(refs(&[0xA1, 0, 0x30, 0x40, 0], ImageWidth::Bits32), one(0x40_3000, XrefKind::Memory));
+        assert_eq!(
+            refs(&mov, ImageWidth::Bits64),
+            one(0x1_4000_3000, XrefKind::AddressOf)
+        );
+        assert_eq!(
+            refs(&[0x68, 0, 0x30, 0x40, 0], ImageWidth::Bits32),
+            one(0x40_3000, XrefKind::AddressOf)
+        );
+        assert_eq!(
+            refs(&[0xB9, 0, 0x30, 0x40, 0], ImageWidth::Bits32),
+            one(0x40_3000, XrefKind::AddressOf)
+        );
+        assert_eq!(
+            refs(&[0xA1, 0, 0x30, 0x40, 0], ImageWidth::Bits32),
+            one(0x40_3000, XrefKind::Memory)
+        );
         let mut moffs = vec![0x48, 0xA1];
         moffs.extend_from_slice(&0x7FFE_0014u64.to_le_bytes());
-        assert_eq!(refs(&moffs, ImageWidth::Bits64), one(0x7FFE_0014, XrefKind::Memory));
+        assert_eq!(
+            refs(&moffs, ImageWidth::Bits64),
+            one(0x7FFE_0014, XrefKind::Memory)
+        );
         // `mov dword [0x403000], 0x401000`: the operand and the immediate.
         assert_eq!(
-            refs(&[0xC7, 0x05, 0, 0x30, 0x40, 0, 0, 0x10, 0x40, 0], ImageWidth::Bits32),
+            refs(
+                &[0xC7, 0x05, 0, 0x30, 0x40, 0, 0, 0x10, 0x40, 0],
+                ImageWidth::Bits32
+            ),
             vec![
-                Reference { target: 0x40_3000, kind: XrefKind::Memory },
-                Reference { target: 0x40_1000, kind: XrefKind::AddressOf },
+                Reference {
+                    target: 0x40_3000,
+                    kind: XrefKind::Memory
+                },
+                Reference {
+                    target: 0x40_1000,
+                    kind: XrefKind::AddressOf
+                },
             ]
         );
     }
@@ -349,19 +432,31 @@ mod tests {
     fn register_forms_and_based_operands_name_nothing() {
         assert_eq!(refs(&[0xFF, 0xD0], ImageWidth::Bits64), []);
         assert_eq!(refs(&[0x48, 0x8B, 0x03], ImageWidth::Bits64), []);
-        assert_eq!(refs(&[0x48, 0x8B, 0x44, 0x24, 0x08], ImageWidth::Bits64), []);
+        assert_eq!(
+            refs(&[0x48, 0x8B, 0x44, 0x24, 0x08], ImageWidth::Bits64),
+            []
+        );
         assert_eq!(refs(&[0x90], ImageWidth::Bits64), []);
         assert_eq!(refs(&[0xC3], ImageWidth::Bits64), []);
     }
 
     #[test]
     fn the_code_pane_and_the_index_agree_on_branch_targets() {
-        let branches: [&[u8]; 4] = [&[0xE8, 0x10, 0, 0, 0], &[0x74, 0xFE], &[0x0F, 0x85, 0, 1, 0, 0], &[0xE2, 0x00]];
+        let branches: [&[u8]; 4] = [
+            &[0xE8, 0x10, 0, 0, 0],
+            &[0x74, 0xFE],
+            &[0x0F, 0x85, 0, 1, 0, 0],
+            &[0xE2, 0x00],
+        ];
         for bytes in branches {
             let line = decode_lines(bytes, AT, CodeSize::Bits64);
             let instruction = CodeSize::Bits64.decode(bytes).expect("decodes");
             let next = AT + u64::from(instruction.ilen());
-            assert_eq!(line[0].target, branch_target(&instruction, next, CodeSize::Bits64), "{bytes:02X?}");
+            assert_eq!(
+                line[0].target,
+                branch_target(&instruction, next, CodeSize::Bits64),
+                "{bytes:02X?}"
+            );
             assert!(line[0].target.is_some());
         }
     }

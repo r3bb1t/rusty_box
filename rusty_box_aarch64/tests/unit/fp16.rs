@@ -14,7 +14,7 @@
 use std::vec::Vec;
 
 use super::super::features::Implementation;
-use super::super::step::{exec, processor, FP_TRAP, ILLEGAL_WHEN_STREAMING, UNDEFINED};
+use super::super::step::{FP_TRAP, ILLEGAL_WHEN_STREAMING, UNDEFINED, exec, processor};
 
 /// `fadd h0, h1, h2`, `fmul h0, h1, h2`, `fdiv h0, h1, h2`.
 const FADD_H: u32 = 0x1EE2_2820;

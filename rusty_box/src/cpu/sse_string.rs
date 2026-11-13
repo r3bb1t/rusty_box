@@ -8,7 +8,8 @@
 //! - PCMPISTRM (66 0F 3A 62): Implicit-length (null-terminated), result to XMM0
 //! - PCMPISTRI (66 0F 3A 63): Implicit-length, index to ECX
 
-use super::{decoder::Instruction, xmm::BxPackedXmmRegister};
+use super::decoder::Instruction;
+use super::xmm::BxPackedXmmRegister;
 
 // ============================================================================
 // Helper functions (free functions matching Bochs static helpers)
@@ -46,26 +47,14 @@ fn compare_strings(
                     bool_res[j][i] = match aggregation_operation {
                         0 | 2 | 3 => {
                             // 'equal' comparison
-                            if a == b {
-                                1
-                            } else {
-                                0
-                            }
+                            if a == b { 1 } else { 0 }
                         }
                         1 => {
                             // 'ranges' comparison
                             if (i % 2) == 0 {
-                                if a <= b {
-                                    1
-                                } else {
-                                    0
-                                }
+                                if a <= b { 1 } else { 0 }
                             } else {
-                                if a >= b {
-                                    1
-                                } else {
-                                    0
-                                }
+                                if a >= b { 1 } else { 0 }
                             }
                         }
                         _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
@@ -89,17 +78,9 @@ fn compare_strings(
                         }
                         1 => {
                             if (i % 2) == 0 {
-                                if a <= b {
-                                    1
-                                } else {
-                                    0
-                                }
+                                if a <= b { 1 } else { 0 }
                             } else {
-                                if a >= b {
-                                    1
-                                } else {
-                                    0
-                                }
+                                if a >= b { 1 } else { 0 }
                             }
                         }
                         _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
@@ -123,17 +104,9 @@ fn compare_strings(
                         }
                         1 => {
                             if (i % 2) == 0 {
-                                if a <= b {
-                                    1
-                                } else {
-                                    0
-                                }
+                                if a <= b { 1 } else { 0 }
                             } else {
-                                if a >= b {
-                                    1
-                                } else {
-                                    0
-                                }
+                                if a >= b { 1 } else { 0 }
                             }
                         }
                         _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
@@ -157,17 +130,9 @@ fn compare_strings(
                         }
                         1 => {
                             if (i % 2) == 0 {
-                                if a <= b {
-                                    1
-                                } else {
-                                    0
-                                }
+                                if a <= b { 1 } else { 0 }
                             } else {
-                                if a >= b {
-                                    1
-                                } else {
-                                    0
-                                }
+                                if a >= b { 1 } else { 0 }
                             }
                         }
                         _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),

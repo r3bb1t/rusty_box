@@ -68,11 +68,10 @@ pub use ctx::{CpuAccess, HookCtx};
 pub use registry::InstrumentationRegistry;
 pub use types::{
     BranchEvent, BranchType, CacheCntrl, CodeSize, CpuDebugView, CpuSetupMode, CpuSnapshot,
-    EmuStopReason, ExecutionMode, Fetched, ProcessorActivity, SegmentBases,
-    DescriptorTable, LinearRange, MappingWalk, PageAccess, PageMapping, WalkStep,
-    GuestPhysicalMemory, VmxGuest,
-    ExitSet, HookMask, HwInterruptEvent, InstrAction, InvEptType, InvPcidType, IoHookEvent,
-    IoPort, LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemPerms, MemType, MemUnmapped,
-    MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent, PrefetchHint, ResetType,
-    TlbCntrl, X86Reg,
+    DescriptorTable, EmuStopReason, ExecutionMode, ExitSet, Fetched, GuestPhysicalMemory, HookMask,
+    HwInterruptEvent, InstrAction, InvEptType, InvPcidType, IoHookEvent, IoPort, LinAccess,
+    LinearRange, MappingWalk, MemAccessRW, MemHookEvent, MemPermViolation, MemPerms, MemType,
+    MemUnmapped, MwaitEvent, MwaitFlags, OpcodeEvent, PageAccess, PageMapping, PhyAccess,
+    PrefetchEvent, PrefetchHint, ProcessorActivity, ResetType, SegmentBases, TlbCntrl, VmxGuest,
+    WalkStep, X86Reg,
 };

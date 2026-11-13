@@ -7,8 +7,9 @@ use rusty_box_symbols::units::TypeRef;
 use super::frames::{InspectRequest, TipRead, WatchRead};
 use super::guest::GuestMemory;
 use super::variables::{
-    bitfield_place, locate, read_place, rows_of, size_of, type_text, unmodified, unsigned, Expand, FrameContext, Located,
-    PathRoot, Place, RowHead, RowKind, RowSink, ShownValue, ValuePath, VariableRow,
+    Expand, FrameContext, Located, PathRoot, Place, RowHead, RowKind, RowSink, ShownValue,
+    ValuePath, VariableRow, bitfield_place, locate, read_place, rows_of, size_of, type_text,
+    unmodified, unsigned,
 };
 
 /// The most unary operators and parentheses one watch nests.
@@ -27,9 +28,18 @@ pub(crate) enum WatchExpr {
     Integer(u64),
     Deref(Box<WatchExpr>),
     AddressOf(Box<WatchExpr>),
-    Member { of: Box<WatchExpr>, name: String },
-    Arrow { of: Box<WatchExpr>, name: String },
-    Index { of: Box<WatchExpr>, index: u64 },
+    Member {
+        of: Box<WatchExpr>,
+        name: String,
+    },
+    Arrow {
+        of: Box<WatchExpr>,
+        name: String,
+    },
+    Index {
+        of: Box<WatchExpr>,
+        index: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -86,7 +96,10 @@ pub(crate) fn parse_watch(text: &str) -> Result<WatchExpr, WatchSyntaxError> {
     parser.skip_space();
     match parser.peek() {
         None => Ok(expr),
-        Some(found) => Err(WatchSyntaxError::Unexpected { at: parser.at, found }),
+        Some(found) => Err(WatchSyntaxError::Unexpected {
+            at: parser.at,
+            found,
+        }),
     }
 }
 
@@ -135,11 +148,15 @@ impl Parser<'_> {
         match self.peek() {
             Some('*') => {
                 self.advance('*');
-                Ok(WatchExpr::Deref(Box::new(self.unary(depth.saturating_add(1))?)))
+                Ok(WatchExpr::Deref(Box::new(
+                    self.unary(depth.saturating_add(1))?,
+                )))
             }
             Some('&') => {
                 self.advance('&');
-                Ok(WatchExpr::AddressOf(Box::new(self.unary(depth.saturating_add(1))?)))
+                Ok(WatchExpr::AddressOf(Box::new(
+                    self.unary(depth.saturating_add(1))?,
+                )))
             }
             Some(_) | None => self.postfix(depth),
         }
@@ -162,11 +179,17 @@ impl Parser<'_> {
             match self.peek() {
                 Some('.') => {
                     self.advance('.');
-                    expr = WatchExpr::Member { of: Box::new(expr), name: self.name()? };
+                    expr = WatchExpr::Member {
+                        of: Box::new(expr),
+                        name: self.name()?,
+                    };
                 }
                 Some('-') if self.rest().starts_with("->") => {
                     self.skip("->".len());
-                    expr = WatchExpr::Arrow { of: Box::new(expr), name: self.name()? };
+                    expr = WatchExpr::Arrow {
+                        of: Box::new(expr),
+                        name: self.name()?,
+                    };
                 }
                 Some('[') => {
                     self.advance('[');
@@ -177,7 +200,10 @@ impl Parser<'_> {
                         Some(']') => self.advance(']'),
                         Some(_) | None => return Err(self.unexpected()),
                     }
-                    expr = WatchExpr::Index { of: Box::new(expr), index };
+                    expr = WatchExpr::Index {
+                        of: Box::new(expr),
+                        index,
+                    };
                 }
                 Some(_) | None => return Ok(expr),
             }
@@ -209,7 +235,10 @@ impl Parser<'_> {
     fn name(&mut self) -> Result<String, WatchSyntaxError> {
         self.skip_space();
         let start = self.at;
-        if !self.peek().is_some_and(|first| first == '_' || first.is_ascii_alphabetic()) {
+        if !self
+            .peek()
+            .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        {
             return Err(self.unexpected());
         }
         loop {
@@ -229,7 +258,10 @@ impl Parser<'_> {
             self.skip("0x".len());
         }
         let digits = self.at;
-        while let Some(next) = self.peek().filter(|next| next.is_ascii_alphanumeric() || *next == '_') {
+        while let Some(next) = self
+            .peek()
+            .filter(|next| next.is_ascii_alphanumeric() || *next == '_')
+        {
             self.advance(next);
         }
         let radix = if hexadecimal { 16 } else { 10 };
@@ -248,8 +280,17 @@ pub(crate) fn read_watch<G: GuestMemory>(
     text: &str,
     request: &InspectRequest,
 ) -> WatchRead {
-    let value = parse_watch(text).map_err(WatchError::from).and_then(|expr| evaluate(memory, context, scope, &expr));
-    expression_rows(memory, context, PathRoot::Watch(index), text, value, request)
+    let value = parse_watch(text)
+        .map_err(WatchError::from)
+        .and_then(|expr| evaluate(memory, context, scope, &expr));
+    expression_rows(
+        memory,
+        context,
+        PathRoot::Watch(index),
+        text,
+        value,
+        request,
+    )
 }
 
 /// The value tip's expression `text`, read as a watch is; a word that
@@ -261,10 +302,21 @@ pub(crate) fn read_tip<G: GuestMemory>(
     text: &str,
     request: &InspectRequest,
 ) -> TipRead {
-    let value = parse_watch(text).map_err(WatchError::from).and_then(|expr| evaluate(memory, context, scope, &expr));
+    let value = parse_watch(text)
+        .map_err(WatchError::from)
+        .and_then(|expr| evaluate(memory, context, scope, &expr));
     match value {
-        Err(WatchError::NoVariable { .. }) => TipRead::NoVariable { text: text.to_owned() },
-        Ok(_) | Err(_) => TipRead::Rows(expression_rows(memory, context, PathRoot::Tip, text, value, request)),
+        Err(WatchError::NoVariable { .. }) => TipRead::NoVariable {
+            text: text.to_owned(),
+        },
+        Ok(_) | Err(_) => TipRead::Rows(expression_rows(
+            memory,
+            context,
+            PathRoot::Tip,
+            text,
+            value,
+            request,
+        )),
     }
 }
 
@@ -284,27 +336,86 @@ fn expression_rows<G: GuestMemory>(
         Ok(value) => rows_of(memory, context, head, value, request, &mut rows),
         Err(error) => rows.push(problem_row(head, error.to_string())),
     }
-    WatchRead { text: text.to_owned(), rows: rows.into_rows() }
+    WatchRead {
+        text: text.to_owned(),
+        rows: rows.into_rows(),
+    }
 }
 
 /// Expression `text` under `root` where no frame's variables can be read,
 /// `why`.
 pub(crate) fn unread_watch(root: PathRoot, text: &str, why: &str) -> WatchRead {
-    WatchRead { text: text.to_owned(), rows: vec![problem_row(expression_head(root, text), why.to_owned())] }
+    WatchRead {
+        text: text.to_owned(),
+        rows: vec![problem_row(expression_head(root, text), why.to_owned())],
+    }
 }
 
 fn expression_head(root: PathRoot, text: &str) -> RowHead {
-    RowHead { path: ValuePath { root, steps: Vec::new() }, depth: 0, name: text.to_owned(), kind: RowKind::Watch }
+    RowHead {
+        path: ValuePath {
+            root,
+            steps: Vec::new(),
+        },
+        depth: 0,
+        name: text.to_owned(),
+        kind: RowKind::Watch,
+    }
 }
 
 /// C keywords: a click on one names no variable. `this` is not among
 /// them: in a method it is a parameter.
 const C_KEYWORDS: &[&str] = &[
-    "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float",
-    "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof",
-    "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "bool", "true", "false",
-    "nullptr", "class", "public", "private", "protected", "template", "typename", "namespace", "using", "new", "delete",
-    "operator", "virtual",
+    "auto",
+    "break",
+    "case",
+    "char",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extern",
+    "float",
+    "for",
+    "goto",
+    "if",
+    "inline",
+    "int",
+    "long",
+    "register",
+    "restrict",
+    "return",
+    "short",
+    "signed",
+    "sizeof",
+    "static",
+    "struct",
+    "switch",
+    "typedef",
+    "union",
+    "unsigned",
+    "void",
+    "volatile",
+    "while",
+    "bool",
+    "true",
+    "false",
+    "nullptr",
+    "class",
+    "public",
+    "private",
+    "protected",
+    "template",
+    "typename",
+    "namespace",
+    "using",
+    "new",
+    "delete",
+    "operator",
+    "virtual",
 ];
 
 fn is_identifier(character: char) -> bool {
@@ -321,10 +432,15 @@ pub(crate) fn expression_at(line: &str, column: usize) -> Option<String> {
         return None;
     }
     let mut start = identifier_start(&characters, column)?;
-    let after = characters.get(column..)?.iter().take_while(|character| is_identifier(**character)).count();
+    let after = characters
+        .get(column..)?
+        .iter()
+        .take_while(|character| is_identifier(**character))
+        .count();
     let end = column.checked_add(after)?;
     let word: String = characters.get(start..end)?.iter().collect();
-    if word.starts_with(|first: char| first.is_ascii_digit()) || C_KEYWORDS.contains(&word.as_str()) {
+    if word.starts_with(|first: char| first.is_ascii_digit()) || C_KEYWORDS.contains(&word.as_str())
+    {
         return None;
     }
     let mut expression = word;
@@ -342,7 +458,10 @@ pub(crate) fn expression_at(line: &str, column: usize) -> Option<String> {
         let joint_end = start.checked_sub(joint.len())?;
         let part_start = identifier_start(&characters, joint_end)?;
         let part: String = characters.get(part_start..joint_end)?.iter().collect();
-        if part.is_empty() || part.starts_with(|first: char| first.is_ascii_digit()) || C_KEYWORDS.contains(&part.as_str()) {
+        if part.is_empty()
+            || part.starts_with(|first: char| first.is_ascii_digit())
+            || C_KEYWORDS.contains(&part.as_str())
+        {
             break;
         }
         expression = format!("{part}{joint}{expression}");
@@ -353,7 +472,12 @@ pub(crate) fn expression_at(line: &str, column: usize) -> Option<String> {
 
 /// Where the identifier ending at `end` (exclusive) starts.
 fn identifier_start(characters: &[char], end: usize) -> Option<usize> {
-    let before = characters.get(..end)?.iter().rev().take_while(|character| is_identifier(**character)).count();
+    let before = characters
+        .get(..end)?
+        .iter()
+        .rev()
+        .take_while(|character| is_identifier(**character))
+        .count();
     end.checked_sub(before)
 }
 
@@ -380,7 +504,10 @@ pub(crate) fn evaluate<G: GuestMemory>(
 ) -> Result<Located, WatchError> {
     match expr {
         WatchExpr::Name(name) => lookup(context, scope, name),
-        WatchExpr::Integer(value) => Ok(Located { ty: T_UQUAD, place: Place::Bytes(value.to_le_bytes().to_vec()) }),
+        WatchExpr::Integer(value) => Ok(Located {
+            ty: T_UQUAD,
+            place: Place::Bytes(value.to_le_bytes().to_vec()),
+        }),
         WatchExpr::Deref(of) => {
             let pointer = evaluate(memory, context, scope, of)?;
             deref(memory, context, pointer, WatchError::DerefNonPointer)
@@ -388,7 +515,10 @@ pub(crate) fn evaluate<G: GuestMemory>(
         WatchExpr::AddressOf(of) => {
             let value = evaluate(memory, context, scope, of)?;
             match value.place {
-                Place::Memory(address) => Ok(Located { ty: value.ty, place: Place::AddressOf(address) }),
+                Place::Memory(address) => Ok(Located {
+                    ty: value.ty,
+                    place: Place::AddressOf(address),
+                }),
                 Place::Missing(shown) => Err(watch_error(shown)),
                 Place::Bytes(_) | Place::AddressOf(_) => Err(WatchError::AddressOfNonMemory),
             }
@@ -409,16 +539,29 @@ pub(crate) fn evaluate<G: GuestMemory>(
     }
 }
 
-fn lookup(context: &FrameContext<'_>, scope: Option<&FrameScope>, name: &str) -> Result<Located, WatchError> {
-    let variable = scope.and_then(|scope| scope.variables.iter().find(|variable| variable.name == name).map(|variable| {
-        locate(context, variable, scope)
-    }));
+fn lookup(
+    context: &FrameContext<'_>,
+    scope: Option<&FrameScope>,
+    name: &str,
+) -> Result<Located, WatchError> {
+    let variable = scope.and_then(|scope| {
+        scope
+            .variables
+            .iter()
+            .find(|variable| variable.name == name)
+            .map(|variable| locate(context, variable, scope))
+    });
     if let Some(located) = variable {
         return Ok(located);
     }
     match context.tables.global(name) {
-        Some(global) => Ok(Located { ty: global.ty, place: Place::Memory(context.module_base.wrapping_add(global.rva.0)) }),
-        None => Err(WatchError::NoVariable { name: name.to_owned() }),
+        Some(global) => Ok(Located {
+            ty: global.ty,
+            place: Place::Memory(context.module_base.wrapping_add(global.rva.0)),
+        }),
+        None => Err(WatchError::NoVariable {
+            name: name.to_owned(),
+        }),
     }
 }
 
@@ -430,14 +573,23 @@ fn deref<G: GuestMemory>(
     not_a_pointer: WatchError,
 ) -> Result<Located, WatchError> {
     if let Place::AddressOf(address) = value.place {
-        return Ok(Located { ty: value.ty, place: Place::Memory(address) });
+        return Ok(Located {
+            ty: value.ty,
+            place: Place::Memory(address),
+        });
     }
     match unmodified(context.tables, value.ty).map_err(watch_error)? {
         TypeShape::Pointer { to, size, .. } => {
             let address = pointer_value(memory, context, &value.place, size)?;
-            Ok(Located { ty: to, place: Place::Memory(address) })
+            Ok(Located {
+                ty: to,
+                place: Place::Memory(address),
+            })
         }
-        TypeShape::Array { element, .. } => Ok(Located { ty: element, place: value.place }),
+        TypeShape::Array { element, .. } => Ok(Located {
+            ty: element,
+            place: value.place,
+        }),
         TypeShape::Base(_)
         | TypeShape::Modified { .. }
         | TypeShape::Record { .. }
@@ -457,19 +609,26 @@ fn member<G: GuestMemory>(
     if let Place::AddressOf(_) = record.place {
         return Err(WatchError::DotOnNonRecord);
     }
-    let TypeShape::Record { fields, .. } = unmodified(context.tables, record.ty).map_err(watch_error)? else {
+    let TypeShape::Record { fields, .. } =
+        unmodified(context.tables, record.ty).map_err(watch_error)?
+    else {
         return Err(WatchError::DotOnNonRecord);
     };
     let field = fields
         .iter()
         .find(|field| field.name == name)
-        .ok_or_else(|| WatchError::NoMember { name: name.to_owned() })?;
+        .ok_or_else(|| WatchError::NoMember {
+            name: name.to_owned(),
+        })?;
     let at = record.place.part(field.offset.0);
     let place = match field.bits {
         None => at,
         Some(bits) => bitfield_place(memory, context, &at, field.ty, bits),
     };
-    Ok(Located { ty: field.ty, place })
+    Ok(Located {
+        ty: field.ty,
+        place,
+    })
 }
 
 /// Element `index` of an array, or of the elements a pointer points at.
@@ -481,17 +640,28 @@ fn element<G: GuestMemory>(
 ) -> Result<Located, WatchError> {
     if let Place::AddressOf(address) = base.place {
         let size = sized(context, base.ty)?;
-        return Ok(Located { ty: base.ty, place: Place::Memory(stepped(context, address, index, size)) });
+        return Ok(Located {
+            ty: base.ty,
+            place: Place::Memory(stepped(context, address, index, size)),
+        });
     }
     match unmodified(context.tables, base.ty).map_err(watch_error)? {
         TypeShape::Array { element, .. } => {
             let size = sized(context, element)?;
-            Ok(Located { ty: element, place: base.place.part(index.wrapping_mul(size)) })
+            Ok(Located {
+                ty: element,
+                place: base.place.part(index.wrapping_mul(size)),
+            })
         }
-        TypeShape::Pointer { to, size: width, .. } => {
+        TypeShape::Pointer {
+            to, size: width, ..
+        } => {
             let address = pointer_value(memory, context, &base.place, width)?;
             let size = sized(context, to)?;
-            Ok(Located { ty: to, place: Place::Memory(stepped(context, address, index, size)) })
+            Ok(Located {
+                ty: to,
+                place: Place::Memory(stepped(context, address, index, size)),
+            })
         }
         TypeShape::Base(_)
         | TypeShape::Modified { .. }
@@ -521,7 +691,9 @@ fn pointer_value<G: GuestMemory>(
     place: &Place,
     size: u8,
 ) -> Result<u64, WatchError> {
-    read_place(memory, context.root, place, u64::from(size)).map(|bytes| unsigned(&bytes)).map_err(watch_error)
+    read_place(memory, context.root, place, u64::from(size))
+        .map(|bytes| unsigned(&bytes))
+        .map_err(watch_error)
 }
 
 /// What a value that could not be read says, as a watch's error.
@@ -530,7 +702,9 @@ fn watch_error(shown: ShownValue) -> WatchError {
         ShownValue::Unreadable { at } => WatchError::Unreadable { at },
         ShownValue::OptimizedAway => WatchError::OptimizedAway,
         ShownValue::Problem(problem) => WatchError::Type(problem),
-        ShownValue::UnknownType { index, .. } => WatchError::Type(format!("<type {index:#x}> is not described")),
+        ShownValue::UnknownType { index, .. } => {
+            WatchError::Type(format!("<type {index:#x}> is not described"))
+        }
         ShownValue::NotAvailable
         | ShownValue::Integer { .. }
         | ShownValue::Character { .. }
@@ -546,30 +720,46 @@ fn watch_error(shown: ShownValue) -> WatchError {
 
 #[cfg(test)]
 mod tests {
+    use rusty_box_symbols::tables::FrameScope;
+    use rusty_box_symbols::units::Rva;
+    use rusty_box_symbols_fixtures::pdb::{FixtureGlobal, FixtureType, FixtureUdt, UdtKind};
+
     use super::*;
     use crate::debugger::frames::InspectRequest;
     use crate::debugger::guest::fake::FakeGuest;
     use crate::debugger::test_frame::{
-        field, guest, on_stack, tables, tables_with, FrameFixture, Setup, BASE, CR3, IN_BODY, RSP_AT, TEXT,
+        BASE, CR3, FrameFixture, IN_BODY, RSP_AT, Setup, TEXT, field, guest, on_stack, tables,
+        tables_with,
     };
     use crate::debugger::variables::{ShownValue, Signedness};
-    use rusty_box_symbols::tables::FrameScope;
-    use rusty_box_symbols::units::Rva;
-    use rusty_box_symbols_fixtures::pdb::{FixtureGlobal, FixtureType, FixtureUdt, UdtKind};
 
     fn name(text: &str) -> Box<WatchExpr> {
         Box::new(WatchExpr::Name(text.into()))
     }
 
     fn scope(setup: &Setup) -> FrameScope {
-        setup.tables.frame_locals(Rva(IN_BODY)).expect("the records read").expect("ReadBlock's scope")
+        setup
+            .tables
+            .frame_locals(Rva(IN_BODY))
+            .expect("the records read")
+            .expect("ReadBlock's scope")
     }
 
     /// Watch `text`'s first row's value in `setup`'s frame.
     fn watched(setup: &Setup, guest: &mut FakeGuest, text: &str) -> ShownValue {
-        let read = read_watch(guest, &setup.context(), Some(&scope(setup)), 0, text, &InspectRequest::default());
+        let read = read_watch(
+            guest,
+            &setup.context(),
+            Some(&scope(setup)),
+            0,
+            text,
+            &InspectRequest::default(),
+        );
         assert_eq!(read.text, text);
-        read.rows.first().map(|row| row.value.clone()).unwrap_or_else(|| panic!("no rows for {text}"))
+        read.rows
+            .first()
+            .map(|row| row.value.clone())
+            .unwrap_or_else(|| panic!("no rows for {text}"))
     }
 
     fn node() -> FixtureUdt {
@@ -579,20 +769,31 @@ mod tests {
             size: 16,
             fields: vec![
                 field("value", 0, FixtureType::I32),
-                field("next", 8, FixtureType::PointerTo(Box::new(FixtureType::Named("Node".into())))),
+                field(
+                    "next",
+                    8,
+                    FixtureType::PointerTo(Box::new(FixtureType::Named("Node".into()))),
+                ),
             ],
         }
     }
 
     fn int(raw: u64) -> ShownValue {
-        ShownValue::Integer { raw, size: 4, signedness: Signedness::Signed }
+        ShownValue::Integer {
+            raw,
+            size: 4,
+            signedness: Signedness::Signed,
+        }
     }
 
     #[test]
     fn the_grammar_reads_members_pointers_and_indices() {
         let chain = WatchExpr::Member {
             of: Box::new(WatchExpr::Index {
-                of: Box::new(WatchExpr::Arrow { of: Box::new(WatchExpr::Deref(name("p"))), name: "next".into() }),
+                of: Box::new(WatchExpr::Arrow {
+                    of: Box::new(WatchExpr::Deref(name("p"))),
+                    name: "next".into(),
+                }),
                 index: 3,
             }),
             name: "count".into(),
@@ -600,20 +801,41 @@ mod tests {
         assert_eq!(parse_watch("(*p)->next[3].count"), Ok(chain));
         assert_eq!(
             parse_watch("*p->x"),
-            Ok(WatchExpr::Deref(Box::new(WatchExpr::Arrow { of: name("p"), name: "x".into() }))),
+            Ok(WatchExpr::Deref(Box::new(WatchExpr::Arrow {
+                of: name("p"),
+                name: "x".into()
+            }))),
             "a postfix binds tighter than a unary, as in C"
         );
-        assert_eq!(parse_watch("&ns::g_count"), Ok(WatchExpr::AddressOf(name("ns::g_count"))));
+        assert_eq!(
+            parse_watch("&ns::g_count"),
+            Ok(WatchExpr::AddressOf(name("ns::g_count")))
+        );
         assert_eq!(parse_watch("0x10"), Ok(WatchExpr::Integer(16)));
         assert_eq!(parse_watch(" 42 "), Ok(WatchExpr::Integer(42)));
         assert_eq!(parse_watch(""), Err(WatchSyntaxError::Empty));
         assert_eq!(parse_watch("   "), Err(WatchSyntaxError::Empty));
-        assert_eq!(parse_watch("a..b"), Err(WatchSyntaxError::Unexpected { at: 2, found: '.' }));
-        assert_eq!(parse_watch("(a"), Err(WatchSyntaxError::UnclosedParenthesis));
+        assert_eq!(
+            parse_watch("a..b"),
+            Err(WatchSyntaxError::Unexpected { at: 2, found: '.' })
+        );
+        assert_eq!(
+            parse_watch("(a"),
+            Err(WatchSyntaxError::UnclosedParenthesis)
+        );
         assert_eq!(parse_watch("a."), Err(WatchSyntaxError::EndsEarly));
-        assert_eq!(parse_watch("12ab"), Err(WatchSyntaxError::BadInteger { at: 0 }));
+        assert_eq!(
+            parse_watch("12ab"),
+            Err(WatchSyntaxError::BadInteger { at: 0 })
+        );
         let deep = format!("{}p", "*".repeat(100));
-        assert_eq!(parse_watch(&deep), Err(WatchSyntaxError::Unexpected { at: MAX_WATCH_DEPTH, found: '*' }));
+        assert_eq!(
+            parse_watch(&deep),
+            Err(WatchSyntaxError::Unexpected {
+                at: MAX_WATCH_DEPTH,
+                found: '*'
+            })
+        );
     }
 
     /// A chain of members nests one level per link, as `*` does: a watch
@@ -621,7 +843,13 @@ mod tests {
     #[test]
     fn a_member_chain_past_the_ceiling_is_refused() {
         let long = format!("a{}", ".b".repeat(100_000));
-        assert_eq!(parse_watch(&long), Err(WatchSyntaxError::Unexpected { at: 1 + 2 * MAX_WATCH_DEPTH, found: '.' }));
+        assert_eq!(
+            parse_watch(&long),
+            Err(WatchSyntaxError::Unexpected {
+                at: 1 + 2 * MAX_WATCH_DEPTH,
+                found: '.'
+            })
+        );
         let within = format!("a{}", ".b".repeat(MAX_WATCH_DEPTH - 1));
         assert!(parse_watch(&within).is_ok());
     }
@@ -629,7 +857,9 @@ mod tests {
     /// The expression under a click on `word`'s `offset`-th character, the
     /// first `word` of `line`.
     fn clicked(line: &str, word: &str, offset: usize) -> Option<String> {
-        let at = line.find(word).unwrap_or_else(|| panic!("{word} in {line}"));
+        let at = line
+            .find(word)
+            .unwrap_or_else(|| panic!("{word} in {line}"));
         expression_at(line, line[..at].chars().count() + offset)
     }
 
@@ -638,19 +868,28 @@ mod tests {
         let line = "    total += p->count[i] + node.next->value;";
         assert_eq!(clicked(line, "count", 1).as_deref(), Some("p->count"));
         assert_eq!(clicked(line, "p->", 0).as_deref(), Some("p"));
-        assert_eq!(clicked(line, "value", 2).as_deref(), Some("node.next->value"));
+        assert_eq!(
+            clicked(line, "value", 2).as_deref(),
+            Some("node.next->value")
+        );
         assert_eq!(clicked(line, "next", 0).as_deref(), Some("node.next"));
         assert_eq!(clicked(line, "total", 4).as_deref(), Some("total"));
         assert_eq!(clicked(line, "+=", 0), None);
         assert_eq!(clicked(line, " ", 0), None);
         let global = "return ns::g_count;";
-        assert_eq!(clicked(global, "g_count", 3).as_deref(), Some("ns::g_count"));
+        assert_eq!(
+            clicked(global, "g_count", 3).as_deref(),
+            Some("ns::g_count")
+        );
         assert_eq!(clicked(global, "return", 1), None);
         let declaration = "int x = 42;";
         assert_eq!(clicked(declaration, "42", 0), None);
         assert_eq!(clicked(declaration, "int", 0), None);
         assert_eq!(clicked(declaration, "x", 0).as_deref(), Some("x"));
-        assert_eq!(clicked("this->size", "size", 0).as_deref(), Some("this->size"));
+        assert_eq!(
+            clicked("this->size", "size", 0).as_deref(),
+            Some("this->size")
+        );
         assert_eq!(expression_at(declaration, 400), None);
     }
 
@@ -666,7 +905,11 @@ mod tests {
         guest.write_u32(CR3, TEXT + 0x10, 2);
         assert_eq!(watched(&setup, &mut guest, "node->next->value"), int(2));
         assert_eq!(watched(&setup, &mut guest, "(*node).value"), int(1));
-        assert_eq!(watched(&setup, &mut guest, "node[1].value"), int(2), "indexing a pointer steps by its target's size");
+        assert_eq!(
+            watched(&setup, &mut guest, "node[1].value"),
+            int(2),
+            "indexing a pointer steps by its target's size"
+        );
     }
 
     #[test]
@@ -681,19 +924,48 @@ mod tests {
         let mut guest = guest();
         let unmapped = TEXT + 0x5000;
         guest.write_u64(CR3, RSP_AT + 8, unmapped);
-        assert_eq!(watched(&setup, &mut guest, "nothing"), ShownValue::Problem("no variable named nothing".into()));
-        assert_eq!(watched(&setup, &mut guest, "count->x"), ShownValue::Problem("-> on a non-pointer".into()));
-        assert_eq!(watched(&setup, &mut guest, "count.x"), ShownValue::Problem(". on a non-structure".into()));
-        assert_eq!(watched(&setup, &mut guest, "count[1]"), ShownValue::Problem("[ ] on a non-array or non-pointer".into()));
-        assert_eq!(watched(&setup, &mut guest, "*count"), ShownValue::Problem("* of a non-pointer".into()));
-        assert_eq!(watched(&setup, &mut guest, "&5"), ShownValue::Problem("& of a value not in memory".into()));
-        assert_eq!(watched(&setup, &mut guest, "*bad"), ShownValue::Unreadable { at: unmapped });
-        assert_eq!(watched(&setup, &mut guest, "a..b"), ShownValue::Problem("unexpected '.' at 2".into()));
+        assert_eq!(
+            watched(&setup, &mut guest, "nothing"),
+            ShownValue::Problem("no variable named nothing".into())
+        );
+        assert_eq!(
+            watched(&setup, &mut guest, "count->x"),
+            ShownValue::Problem("-> on a non-pointer".into())
+        );
+        assert_eq!(
+            watched(&setup, &mut guest, "count.x"),
+            ShownValue::Problem(". on a non-structure".into())
+        );
+        assert_eq!(
+            watched(&setup, &mut guest, "count[1]"),
+            ShownValue::Problem("[ ] on a non-array or non-pointer".into())
+        );
+        assert_eq!(
+            watched(&setup, &mut guest, "*count"),
+            ShownValue::Problem("* of a non-pointer".into())
+        );
+        assert_eq!(
+            watched(&setup, &mut guest, "&5"),
+            ShownValue::Problem("& of a value not in memory".into())
+        );
+        assert_eq!(
+            watched(&setup, &mut guest, "*bad"),
+            ShownValue::Unreadable { at: unmapped }
+        );
+        assert_eq!(
+            watched(&setup, &mut guest, "a..b"),
+            ShownValue::Problem("unexpected '.' at 2".into())
+        );
     }
 
     #[test]
     fn a_local_hides_a_global_of_its_name() {
-        let global = |name: &str, offset: u32| FixtureGlobal { name: name.into(), section: 2, offset, ty: FixtureType::I32 };
+        let global = |name: &str, offset: u32| FixtureGlobal {
+            name: name.into(),
+            section: 2,
+            offset,
+            ty: FixtureType::I32,
+        };
         let setup = Setup::new(tables_with(FrameFixture {
             locals: vec![on_stack("g", FixtureType::I32, 0)],
             types: Vec::new(),
@@ -705,18 +977,51 @@ mod tests {
         guest.write_u32(CR3, BASE + 0x3020, 9);
         assert_eq!(watched(&setup, &mut guest, "g"), int(5));
         assert_eq!(watched(&setup, &mut guest, "g_only"), int(9));
-        let read = read_watch(&mut guest, &setup.context(), None, 0, "&g_only", &InspectRequest::default());
-        assert_eq!(read.rows[0].value, ShownValue::Pointer { address: BASE + 0x3020, string: None });
+        let read = read_watch(
+            &mut guest,
+            &setup.context(),
+            None,
+            0,
+            "&g_only",
+            &InspectRequest::default(),
+        );
+        assert_eq!(
+            read.rows[0].value,
+            ShownValue::Pointer {
+                address: BASE + 0x3020,
+                string: None
+            }
+        );
         assert_eq!(read.rows[0].type_name, "int *");
     }
 
     #[test]
     fn indexing_a_pointer_reads_the_element_it_points_past() {
-        let setup = Setup::new(tables(vec![on_stack("buffer", FixtureType::PointerTo(Box::new(FixtureType::Char)), 0)], Vec::new()));
+        let setup = Setup::new(tables(
+            vec![on_stack(
+                "buffer",
+                FixtureType::PointerTo(Box::new(FixtureType::Char)),
+                0,
+            )],
+            Vec::new(),
+        ));
         let mut guest = guest();
         guest.write_u64(CR3, RSP_AT, TEXT);
         guest.write(CR3, TEXT, b"hello\0");
-        assert_eq!(watched(&setup, &mut guest, "buffer[2]"), ShownValue::Character { code: u32::from(b'l'), size: 1 });
-        assert_eq!(watched(&setup, &mut guest, "0x10"), ShownValue::Integer { raw: 16, size: 8, signedness: Signedness::Unsigned });
+        assert_eq!(
+            watched(&setup, &mut guest, "buffer[2]"),
+            ShownValue::Character {
+                code: u32::from(b'l'),
+                size: 1
+            }
+        );
+        assert_eq!(
+            watched(&setup, &mut guest, "0x10"),
+            ShownValue::Integer {
+                raw: 16,
+                size: 8,
+                signedness: Signedness::Unsigned
+            }
+        );
     }
 }

@@ -45,8 +45,8 @@ fn invlpg_flushes_every_itlb_frame_of_a_large_code_page() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
-                .expect("new emulator");
+            let mut emu =
+                Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("new emulator");
 
             // Old bytes (identity phys of V_FN): mov rbx, 0x11111111 ; ret
             emu.mem_write(V_FN, &[0x48, 0xC7, 0xC3, 0x11, 0x11, 0x11, 0x11, 0xC3])

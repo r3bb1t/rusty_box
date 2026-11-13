@@ -27,8 +27,8 @@ use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::{Feature, Features, Implementation};
 use super::pauth::PacKeys;
-use super::step::{exec, processor, Taken, CODE, UNDEFINED};
-use super::{id, Cpu, CpuConfig, El, NoEl2, Step};
+use super::step::{CODE, Taken, UNDEFINED, exec, processor};
+use super::{Cpu, CpuConfig, El, NoEl2, Step, id};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 

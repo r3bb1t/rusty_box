@@ -2,10 +2,8 @@
 
 use core::ptr::NonNull;
 
-use rusty_box::{
-    memory::{BxMemoryStubC, MemoryError},
-    Error,
-};
+use rusty_box::Error;
+use rusty_box::memory::{BxMemoryStubC, MemoryError};
 
 #[test]
 fn undersized_raw_host_is_rejected() {
@@ -18,7 +16,10 @@ fn undersized_raw_host_is_rejected() {
             128 * 1024,
         )
     };
-    assert!(matches!(result, Err(Error::Memory(MemoryError::InsufficientRam))));
+    assert!(matches!(
+        result,
+        Err(Error::Memory(MemoryError::InsufficientRam))
+    ));
 }
 
 #[repr(align(4096))]
@@ -39,7 +40,10 @@ fn unaligned_raw_host_is_rejected() {
                     128 * 1024,
                 )
             };
-            assert!(matches!(result, Err(Error::Memory(MemoryError::Internal(_)))));
+            assert!(matches!(
+                result,
+                Err(Error::Memory(MemoryError::Internal(_)))
+            ));
         })
         .unwrap()
         .join()

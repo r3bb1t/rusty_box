@@ -698,8 +698,8 @@ fn with_sctlr_a_set_a_single_precision_pair_store_to_normal_memory_needs_word_al
 }
 
 #[test]
-fn with_sctlr_a_set_a_double_precision_pair_load_from_normal_memory_needs_doubleword_alignment_only(
-) {
+fn with_sctlr_a_set_a_double_precision_pair_load_from_normal_memory_needs_doubleword_alignment_only()
+ {
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram);
     load(&mut m, &LOAD_PAIR_D);

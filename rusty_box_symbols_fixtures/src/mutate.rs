@@ -24,11 +24,19 @@ pub struct Budget {
 }
 
 impl Budget {
-    /// For a file a reader parses in microseconds.
-    pub const STANDARD: Budget = Budget { flips: 2_000, truncations: 1_000, field_positions: 1_000 };
     /// For a file each of whose variants decodes up to a quarter megabyte
     /// (the LZX cabinets).
-    pub const LARGE_OUTPUT: Budget = Budget { flips: 500, truncations: 256, field_positions: 128 };
+    pub const LARGE_OUTPUT: Budget = Budget {
+        flips: 500,
+        truncations: 256,
+        field_positions: 128,
+    };
+    /// For a file a reader parses in microseconds.
+    pub const STANDARD: Budget = Budget {
+        flips: 2_000,
+        truncations: 1_000,
+        field_positions: 1_000,
+    };
 }
 
 /// SplitMix64 (Steele, Lea and Flood, 2014): fixed by its definition, so a
@@ -103,9 +111,18 @@ impl FieldValue {
 /// One change to a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mutation {
-    FlipBit { at: usize, bit: u8 },
-    Truncate { len: usize },
-    SetField { at: usize, width: Width, value: FieldValue },
+    FlipBit {
+        at: usize,
+        bit: u8,
+    },
+    Truncate {
+        len: usize,
+    },
+    SetField {
+        at: usize,
+        width: Width,
+        value: FieldValue,
+    },
 }
 
 impl Mutation {
@@ -136,7 +153,9 @@ impl fmt::Display for Mutation {
         match self {
             Mutation::FlipBit { at, bit } => write!(f, "flip bit {bit} of byte {at:#x}"),
             Mutation::Truncate { len } => write!(f, "truncate to {len} bytes"),
-            Mutation::SetField { at, width, value } => write!(f, "set the {width:?} at {at:#x} to {value:?}"),
+            Mutation::SetField { at, width, value } => {
+                write!(f, "set the {width:?} at {at:#x} to {value:?}")
+            }
         }
     }
 }
@@ -164,7 +183,9 @@ pub fn variants(len: usize, budget: Budget) -> Vec<Mutation> {
     if len > header {
         let spaced = budget.truncations.max(1);
         for step in 0..spaced {
-            out.push(Mutation::Truncate { len: header + (len - header) * step / spaced });
+            out.push(Mutation::Truncate {
+                len: header + (len - header) * step / spaced,
+            });
         }
         out.push(Mutation::Truncate { len: len - 1 });
     }

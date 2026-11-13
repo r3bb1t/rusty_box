@@ -27,7 +27,10 @@ const ENABLE_AVX: [u8; 12] = [
 fn emulator() -> Box<Emulator> {
     let mut emu = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
         .expect("emulator");
-    emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | CR4_OSFXSR | CR4_OSXSAVE);
+    emu.reg_write(
+        X86Reg::Cr4,
+        emu.reg_read(X86Reg::Cr4) | CR4_OSFXSR | CR4_OSXSAVE,
+    );
     emu
 }
 
@@ -39,7 +42,11 @@ fn run(emu: &mut Emulator, code: &[u8]) {
     emu.mem_write(CODE, &image).expect("write code");
     emu.emu_start(CODE, Some(end), None, Some(64))
         .expect("execute");
-    assert_eq!(emu.cpu().rip(), end, "the sequence must run to its end, not fault");
+    assert_eq!(
+        emu.cpu().rip(),
+        end,
+        "the sequence must run to its end, not fault"
+    );
 }
 
 fn on_big_stack(check: fn()) {
@@ -73,7 +80,12 @@ fn from_dwords(dwords: [u32; 4]) -> [u8; 16] {
 
 fn to_dwords(bytes: [u8; 16]) -> [u32; 4] {
     core::array::from_fn(|n| {
-        u32::from_le_bytes([bytes[n * 4], bytes[n * 4 + 1], bytes[n * 4 + 2], bytes[n * 4 + 3]])
+        u32::from_le_bytes([
+            bytes[n * 4],
+            bytes[n * 4 + 1],
+            bytes[n * 4 + 2],
+            bytes[n * 4 + 3],
+        ])
     })
 }
 
@@ -145,7 +157,11 @@ fn horizontal_ops_combine_adjacent_elements() {
             from_words([0x7FFF, 1, 0x8000, 0xFFFF, 2, 3, 0, 0]),
             from_words([0, 0, 0, 0, 0, 0, 5, 0xFFFF]),
         );
-        assert_eq!(to_words(phaddsw), [0x7FFF, 0x8000, 5, 0, 0, 0, 0, 4], "phaddsw");
+        assert_eq!(
+            to_words(phaddsw),
+            [0x7FFF, 0x8000, 5, 0, 0, 0, 0, 4],
+            "phaddsw"
+        );
 
         // Wrapping: 0 - 1 is 0xFFFF.
         let phsubw = legacy_2op(
@@ -168,7 +184,11 @@ fn horizontal_ops_combine_adjacent_elements() {
             from_words([0x7FFF, 0xFFFF, 0x8000, 1, 0, 0, 0, 0]),
             from_words([0; 8]),
         );
-        assert_eq!(to_words(phsubsw), [0x7FFF, 0x8000, 0, 0, 0, 0, 0, 0], "phsubsw");
+        assert_eq!(
+            to_words(phsubsw),
+            [0x7FFF, 0x8000, 0, 0, 0, 0, 0, 0],
+            "phsubsw"
+        );
     });
 }
 
@@ -225,11 +245,19 @@ fn quadword_compares_fill_each_element() {
     on_big_stack(|| {
         let a = from_qwords([u64::MAX, 2]);
         let b = from_qwords([1, 2]);
-        assert_eq!(to_qwords(legacy_2op(&[0x66, 0x0F, 0x38, 0x29], a, b)), [0, u64::MAX], "pcmpeqq");
+        assert_eq!(
+            to_qwords(legacy_2op(&[0x66, 0x0F, 0x38, 0x29], a, b)),
+            [0, u64::MAX],
+            "pcmpeqq"
+        );
         // -1 > 1 is false; 2 > 1 is true.
         let c = from_qwords([1, 1]);
         assert_eq!(
-            to_qwords(legacy_2op(&[0x66, 0x0F, 0x38, 0x37], from_qwords([u64::MAX, 2]), c)),
+            to_qwords(legacy_2op(
+                &[0x66, 0x0F, 0x38, 0x37],
+                from_qwords([u64::MAX, 2]),
+                c
+            )),
             [0, u64::MAX],
             "pcmpgtq"
         );
@@ -274,7 +302,11 @@ fn vex_forms_read_vvvv_and_clear_above_the_vector_length() {
         // vpavgw xmm2, xmm0, xmm1: VEX.128.66.0F E3 /r (C5 F9), ModRM 0xD1.
         run(&mut emu, &[0xC5, 0xF9, 0xE3, 0xD1]);
         let result = lanes(emu.reg_read_ymm(X86Reg::Ymm2));
-        assert_eq!(to_words(result.low), [2, 3, 0xFFFF, 1, 0, 0, 0, 0], "rounded averages");
+        assert_eq!(
+            to_words(result.low),
+            [2, 3, 0xFFFF, 1, 0, 0, 0, 0],
+            "rounded averages"
+        );
         assert_eq!(result.high, [0; 16], "VEX.128 clears bits 255:128");
     });
 }
@@ -315,7 +347,10 @@ fn vex_256_operates_on_each_lane_separately() {
         );
         emu.reg_write_ymm(
             X86Reg::Ymm1,
-            ymm(&Lanes { low: from_dwords([5, 6, 7, 8]), high: from_dwords([11, 12, 13, 14]) }),
+            ymm(&Lanes {
+                low: from_dwords([5, 6, 7, 8]),
+                high: from_dwords([11, 12, 13, 14]),
+            }),
         );
         run(&mut emu, &[0xC4, 0xE2, 0x7D, 0x2B, 0xD1]);
         let result = lanes(emu.reg_read_ymm(X86Reg::Ymm2));

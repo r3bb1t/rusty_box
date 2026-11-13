@@ -29,9 +29,10 @@
 pub mod fdt;
 pub(crate) mod tree;
 
+pub use fdt::DeviceTreeError;
+
 use crate::board::RAM_BASE;
 use crate::devices::pl011::BaudRate;
-pub use fdt::DeviceTreeError;
 
 /// The largest device tree a machine keeps, its own or a host's edited:
 /// the board's own is about 7 KiB and grows with the kernel's command

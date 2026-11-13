@@ -311,7 +311,11 @@ fn sub_mags_extf80(
 // Public API: extF80_add, extF80_sub
 // ============================================================
 
-pub(in crate::cpu) fn extf80_add(a: ExtFloat80, b: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
+pub(in crate::cpu) fn extf80_add(
+    a: ExtFloat80,
+    b: ExtFloat80,
+    status: &mut SoftFloatStatus,
+) -> ExtFloat80 {
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
         softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;
@@ -327,7 +331,11 @@ pub(in crate::cpu) fn extf80_add(a: ExtFloat80, b: ExtFloat80, status: &mut Soft
     }
 }
 
-pub(in crate::cpu) fn extf80_sub(a: ExtFloat80, b: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
+pub(in crate::cpu) fn extf80_sub(
+    a: ExtFloat80,
+    b: ExtFloat80,
+    status: &mut SoftFloatStatus,
+) -> ExtFloat80 {
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
         softfloat_raise_flags(status, FLAG_INVALID);
         return FLOATX80_DEFAULT_NAN;

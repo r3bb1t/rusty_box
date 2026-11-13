@@ -7,7 +7,7 @@
 #[cfg(all(test, not(debug_assertions)))]
 use no_panic::no_panic;
 
-use super::{short, PdbError};
+use super::{PdbError, short};
 use crate::read::{Bytes, Cursor, ReadError};
 
 pub const HEADER_BYTES: usize = 64;
@@ -79,7 +79,10 @@ pub struct ModuleEntry {
 /// bytes, the module and object names, padded to 4.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_module(substream: Bytes<'_>, at: usize) -> Result<ModuleEntry, ReadError> {
-    let field = |offset: usize| at.checked_add(offset).ok_or(ReadError::Truncated { at, len: offset });
+    let field = |offset: usize| {
+        at.checked_add(offset)
+            .ok_or(ReadError::Truncated { at, len: offset })
+    };
     let info = ModuleInfo {
         stream: substream.u16_le(field(34)?)?,
         symbol_bytes: substream.u32_le(field(36)?)?,
@@ -90,7 +93,10 @@ pub fn decode_module(substream: Bytes<'_>, at: usize) -> Result<ModuleEntry, Rea
     cursor.cstr(MAX_NAME_BYTES)?;
     cursor.cstr(MAX_NAME_BYTES)?;
     cursor.align(4)?;
-    Ok(ModuleEntry { info, next: cursor.position() })
+    Ok(ModuleEntry {
+        info,
+        next: cursor.position(),
+    })
 }
 
 /// The streams the optional debug header names.
@@ -111,7 +117,10 @@ pub struct Span {
 /// The module-information substream's span: right after the header.
 #[must_use]
 pub fn modules_span(header: &DbiHeader) -> Span {
-    Span { at: HEADER_BYTES, len: header.module_info_bytes as usize }
+    Span {
+        at: HEADER_BYTES,
+        len: header.module_info_bytes as usize,
+    }
 }
 
 /// The optional debug header's slots; `None` for an empty slot or one the
@@ -149,13 +158,21 @@ pub fn decode_optional_streams(stream: Bytes<'_>, header: &DbiHeader) -> Optiona
 pub fn section_rvas(stream: &[u8]) -> Result<Vec<u64>, PdbError> {
     let count = stream.len().checked_div(SECTION_HEADER_BYTES).unwrap_or(0);
     if count > MAX_SECTIONS {
-        return Err(PdbError::TooMany { what: "sections", count: count as u64 });
+        return Err(PdbError::TooMany {
+            what: "sections",
+            count: count as u64,
+        });
     }
     let mut rvas = Vec::new();
     rvas.try_reserve_exact(count)
-        .map_err(|_| PdbError::Allocation { what: "sections", bytes: count as u64 })?;
+        .map_err(|_| PdbError::Allocation {
+            what: "sections",
+            bytes: count as u64,
+        })?;
     for header in stream.chunks_exact(SECTION_HEADER_BYTES) {
-        let rva = Bytes::new(header).u32_le(12).map_err(|source| short("section header", source))?;
+        let rva = Bytes::new(header)
+            .u32_le(12)
+            .map_err(|source| short("section header", source))?;
         rvas.push(u64::from(rva));
     }
     Ok(rvas)
@@ -171,18 +188,26 @@ pub struct OmapEntry {
 /// `OMAP_FROM_SRC`, sorted by source RVA.
 pub fn omap(stream: &[u8]) -> Result<Vec<OmapEntry>, PdbError> {
     if stream.len().checked_rem(OMAP_ENTRY_BYTES).unwrap_or(1) != 0 {
-        return Err(PdbError::Omap { bytes: stream.len() });
+        return Err(PdbError::Omap {
+            bytes: stream.len(),
+        });
     }
     let count = stream.len().checked_div(OMAP_ENTRY_BYTES).unwrap_or(0);
     let mut entries = Vec::new();
     entries
         .try_reserve_exact(count)
-        .map_err(|_| PdbError::Allocation { what: "OMAP", bytes: count as u64 })?;
+        .map_err(|_| PdbError::Allocation {
+            what: "OMAP",
+            bytes: count as u64,
+        })?;
     for raw in stream.chunks_exact(OMAP_ENTRY_BYTES) {
         let raw = Bytes::new(raw);
         let from = raw.u32_le(0).map_err(|source| short("OMAP", source))?;
         let to = raw.u32_le(4).map_err(|source| short("OMAP", source))?;
-        entries.push(OmapEntry { from: u64::from(from), to: u64::from(to) });
+        entries.push(OmapEntry {
+            from: u64::from(from),
+            to: u64::from(to),
+        });
     }
     entries.sort_unstable_by_key(|entry| entry.from);
     Ok(entries)
@@ -193,7 +218,9 @@ pub fn omap(stream: &[u8]) -> Result<Vec<OmapEntry>, PdbError> {
 /// mapping to 0 dropped its range.
 #[must_use]
 pub fn omap_translate(map: &[OmapEntry], source: u64) -> Option<u64> {
-    let index = map.partition_point(|entry| entry.from <= source).checked_sub(1)?;
+    let index = map
+        .partition_point(|entry| entry.from <= source)
+        .checked_sub(1)?;
     let entry = map.get(index)?;
     if entry.to == 0 {
         return None;

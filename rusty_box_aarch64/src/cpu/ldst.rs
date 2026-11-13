@@ -32,7 +32,7 @@
 
 use super::dp::extend_reg;
 use super::exception::AccessSyndrome;
-use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::exec::{ExecResult, Flow, bit, bits, sext};
 use super::mmu::{DataAccess, DataDirection, ElementPair, QuadwordPair};
 use super::op::Extend;
 use super::{Cpu, ExclusiveMonitor, Levels};

@@ -18,7 +18,7 @@ use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::Implementation;
 use super::mmu::{El2RegimeContext, TlbContext};
-use super::{id, Btype, Cpu, CpuConfig, El, NoEl2, Pstate, Reg, Step, Tlb};
+use super::{Btype, Cpu, CpuConfig, El, NoEl2, Pstate, Reg, Step, Tlb, id};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 

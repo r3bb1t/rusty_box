@@ -22,7 +22,7 @@ use std::vec;
 use std::vec::Vec;
 
 use super::super::super::features::{Feature, Features, Implementation, VecLen};
-use super::super::super::step::{exec, exec_in, processor, Taken, DATA, UNDEFINED};
+use super::super::super::step::{DATA, Taken, UNDEFINED, exec, exec_in, processor};
 use super::super::super::{Cpu, NoEl2};
 use super::super::Pv;
 
@@ -305,9 +305,11 @@ fn the_strided_forms_skip_the_registers_between() {
     z27.extend(counting(48, 8));
     assert_eq!(z_bytes(&cpu, 27), z27);
     assert_eq!(z_bytes(&cpu, 31), counting(56, 16));
-    assert!([20, 21, 22, 24, 28, 30]
-        .iter()
-        .all(|&z| z_bytes(&cpu, z) == [0xEE; 16]));
+    assert!(
+        [20, 21, 22, 24, 28, 30]
+            .iter()
+            .all(|&z| z_bytes(&cpu, z) == [0xEE; 16])
+    );
 }
 
 /// A multi-vector store writes each register's active elements in turn and

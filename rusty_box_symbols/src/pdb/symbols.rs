@@ -48,12 +48,20 @@ pub struct RecordHeader<'a> {
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_record_header(records: Bytes<'_>, at: usize) -> Result<RecordHeader<'_>, ReadError> {
     let len = usize::from(records.u16_le(at)?);
-    let after_length = at.checked_add(2).ok_or(ReadError::Truncated { at, len: 2 })?;
-    let data_len = len.checked_sub(2).ok_or(ReadError::Truncated { at, len: 4 })?;
+    let after_length = at
+        .checked_add(2)
+        .ok_or(ReadError::Truncated { at, len: 2 })?;
+    let data_len = len
+        .checked_sub(2)
+        .ok_or(ReadError::Truncated { at, len: 4 })?;
     let kind = records.u16_le(after_length)?;
-    let data_at = after_length.checked_add(2).ok_or(ReadError::Truncated { at, len: 4 })?;
+    let data_at = after_length
+        .checked_add(2)
+        .ok_or(ReadError::Truncated { at, len: 4 })?;
     let data = records.sub(data_at, data_len)?;
-    let next = after_length.checked_add(len).ok_or(ReadError::Truncated { at, len })?;
+    let next = after_length
+        .checked_add(len)
+        .ok_or(ReadError::Truncated { at, len })?;
     Ok(RecordHeader { kind, data, next })
 }
 
@@ -135,7 +143,12 @@ pub struct VariableRecord<'a> {
 /// `S_REGISTER`: type, register, name.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_register_variable(data: Bytes<'_>) -> Result<VariableRecord<'_>, ReadError> {
-    Ok(VariableRecord { ty: data.u32_le(0)?, register: data.u16_le(4)?, offset: 0, name: data.cstr(6, MAX_NAME_BYTES)? })
+    Ok(VariableRecord {
+        ty: data.u32_le(0)?,
+        register: data.u16_le(4)?,
+        offset: 0,
+        name: data.cstr(6, MAX_NAME_BYTES)?,
+    })
 }
 
 /// `S_BPREL32`: offset, type, name; its register is the frame pointer.
@@ -177,7 +190,11 @@ pub struct LocalRecord<'a> {
 
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_local(data: Bytes<'_>) -> Result<LocalRecord<'_>, ReadError> {
-    Ok(LocalRecord { ty: data.u32_le(0)?, flags: data.u16_le(4)?, name: data.cstr(6, MAX_NAME_BYTES)? })
+    Ok(LocalRecord {
+        ty: data.u32_le(0)?,
+        flags: data.u16_le(4)?,
+        name: data.cstr(6, MAX_NAME_BYTES)?,
+    })
 }
 
 /// `S_LDATA32`/`S_GDATA32`: type, offset, segment, name.
@@ -202,11 +219,23 @@ pub fn decode_data(data: Bytes<'_>) -> Result<DataRecord<'_>, ReadError> {
 /// Where a def-range puts its variable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DefPlace {
-    Register { register: u16 },
-    FramePointerRel { offset: i32 },
-    Subfield { register: u16, offset_in_parent: u32 },
-    RegisterRel { register: u16, offset: i32 },
-    FullScope { offset: i32 },
+    Register {
+        register: u16,
+    },
+    FramePointerRel {
+        offset: i32,
+    },
+    Subfield {
+        register: u16,
+        offset_in_parent: u32,
+    },
+    RegisterRel {
+        register: u16,
+        offset: i32,
+    },
+    FullScope {
+        offset: i32,
+    },
 }
 
 /// A def-range's code: `len` bytes at `segment:offset`.
@@ -244,7 +273,10 @@ impl DefRange<'_> {
     #[must_use]
     pub fn gap(&self, index: usize) -> Option<DefGap> {
         let at = index.checked_mul(4)?;
-        Some(DefGap { start: self.gaps.u16_le(at).ok()?, len: self.gaps.u16_le(at.checked_add(2)?).ok()? })
+        Some(DefGap {
+            start: self.gaps.u16_le(at).ok()?,
+            len: self.gaps.u16_le(at.checked_add(2)?).ok()?,
+        })
     }
 }
 
@@ -254,15 +286,29 @@ impl DefRange<'_> {
 pub fn decode_def_range(kind: u16, data: Bytes<'_>) -> Result<DefRange<'_>, ReadError> {
     let refused = ReadError::Truncated { at: 0, len: 0 };
     let place = match kind {
-        S_DEFRANGE_REGISTER => DefPlace::Register { register: data.u16_le(0)? },
-        S_DEFRANGE_FRAMEPOINTER_REL => DefPlace::FramePointerRel { offset: data.u32_le(0)? as i32 },
-        S_DEFRANGE_SUBFIELD_REGISTER => {
-            DefPlace::Subfield { register: data.u16_le(0)?, offset_in_parent: data.u32_le(4)? & OFFSET_IN_PARENT_MASK }
-        }
-        S_DEFRANGE_REGISTER_REL => DefPlace::RegisterRel { register: data.u16_le(0)?, offset: data.u32_le(4)? as i32 },
+        S_DEFRANGE_REGISTER => DefPlace::Register {
+            register: data.u16_le(0)?,
+        },
+        S_DEFRANGE_FRAMEPOINTER_REL => DefPlace::FramePointerRel {
+            offset: data.u32_le(0)? as i32,
+        },
+        S_DEFRANGE_SUBFIELD_REGISTER => DefPlace::Subfield {
+            register: data.u16_le(0)?,
+            offset_in_parent: data.u32_le(4)? & OFFSET_IN_PARENT_MASK,
+        },
+        S_DEFRANGE_REGISTER_REL => DefPlace::RegisterRel {
+            register: data.u16_le(0)?,
+            offset: data.u32_le(4)? as i32,
+        },
         S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE => {
-            let place = DefPlace::FullScope { offset: data.u32_le(0)? as i32 };
-            return Ok(DefRange { place, range: None, gaps: Bytes::new(&[]) });
+            let place = DefPlace::FullScope {
+                offset: data.u32_le(0)? as i32,
+            };
+            return Ok(DefRange {
+                place,
+                range: None,
+                gaps: Bytes::new(&[]),
+            });
         }
         _ => return Err(refused),
     };
@@ -270,7 +316,9 @@ pub fn decode_def_range(kind: u16, data: Bytes<'_>) -> Result<DefRange<'_>, Read
     // register-relative forms, 4 for the others.
     let header: usize = match place {
         DefPlace::Subfield { .. } | DefPlace::RegisterRel { .. } => 8,
-        DefPlace::Register { .. } | DefPlace::FramePointerRel { .. } | DefPlace::FullScope { .. } => 4,
+        DefPlace::Register { .. }
+        | DefPlace::FramePointerRel { .. }
+        | DefPlace::FullScope { .. } => 4,
     };
     let range = DefRangeSpan {
         offset: data.u32_le(header)?,
@@ -278,7 +326,11 @@ pub fn decode_def_range(kind: u16, data: Bytes<'_>) -> Result<DefRange<'_>, Read
         len: data.u16_le(header.checked_add(6).ok_or(refused)?)?,
     };
     let gaps = data.tail(header.checked_add(8).ok_or(refused)?)?;
-    Ok(DefRange { place, range: Some(range), gaps })
+    Ok(DefRange {
+        place,
+        range: Some(range),
+        gaps,
+    })
 }
 
 #[cfg(test)]
@@ -310,14 +362,30 @@ mod tests {
         for (index, decode) in decoders.iter().enumerate() {
             let bytes = &whole[index];
             assert!(decode(Bytes::new(bytes)), "record {index} whole");
-            assert!(!decode(Bytes::new(&bytes[..bytes.len() - 1])), "record {index} cut");
+            assert!(
+                !decode(Bytes::new(&bytes[..bytes.len() - 1])),
+                "record {index} cut"
+            );
             assert!(!decode(Bytes::new(&[])), "record {index} empty");
         }
-        for kind in [S_DEFRANGE_REGISTER, S_DEFRANGE_FRAMEPOINTER_REL, S_DEFRANGE_SUBFIELD_REGISTER, S_DEFRANGE_REGISTER_REL] {
-            assert!(decode_def_range(kind, Bytes::new(&[0; 4])).is_err(), "{kind:#x} cut");
+        for kind in [
+            S_DEFRANGE_REGISTER,
+            S_DEFRANGE_FRAMEPOINTER_REL,
+            S_DEFRANGE_SUBFIELD_REGISTER,
+            S_DEFRANGE_REGISTER_REL,
+        ] {
+            assert!(
+                decode_def_range(kind, Bytes::new(&[0; 4])).is_err(),
+                "{kind:#x} cut"
+            );
         }
-        assert!(decode_def_range(S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE, Bytes::new(&[0; 3])).is_err());
-        assert!(decode_def_range(0x1234, Bytes::new(&[0; 32])).is_err(), "not a def-range");
+        assert!(
+            decode_def_range(S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE, Bytes::new(&[0; 3])).is_err()
+        );
+        assert!(
+            decode_def_range(0x1234, Bytes::new(&[0; 32])).is_err(),
+            "not a def-range"
+        );
         let procedure = [vec![0; 35], b"f\0".to_vec()].concat();
         assert!(decode_procedure(Bytes::new(&procedure)).is_ok());
         assert!(decode_procedure(Bytes::new(&procedure[..20])).is_err());
@@ -336,13 +404,21 @@ mod tests {
         }
         let def = decode_def_range(S_DEFRANGE_REGISTER, Bytes::new(&data)).expect("a def-range");
         assert_eq!(def.place, DefPlace::Register { register: 0x14F });
-        assert_eq!(def.range, Some(DefRangeSpan { offset: 0x118, segment: 1, len: 0x20 }));
+        assert_eq!(
+            def.range,
+            Some(DefRangeSpan {
+                offset: 0x118,
+                segment: 1,
+                len: 0x20
+            })
+        );
         assert_eq!(def.gap_count(), 2);
         assert_eq!(def.gap(1), Some(DefGap { start: 10, len: 1 }));
         assert_eq!(def.gap(2), None);
         let mut full = 0xFFFF_FFF8u32.to_le_bytes().to_vec();
         full.push(0);
-        let def = decode_def_range(S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE, Bytes::new(&full)).expect("full scope");
+        let def = decode_def_range(S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE, Bytes::new(&full))
+            .expect("full scope");
         assert_eq!(def.place, DefPlace::FullScope { offset: -8 });
         assert_eq!(def.range, None);
     }

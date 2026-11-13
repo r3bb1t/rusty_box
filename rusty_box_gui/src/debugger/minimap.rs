@@ -146,7 +146,10 @@ mod tests {
         ]);
         let lanes = lanes(&built, 300.0);
         assert_eq!(lanes.len(), 2);
-        assert!(lanes[0].extent >= 20.0, "the small region keeps a visible band");
+        assert!(
+            lanes[0].extent >= 20.0,
+            "the small region keeps a visible band"
+        );
         assert!(lanes[1].executable);
         assert!(lanes[0].offset >= 0.0);
         assert!(lanes[1].offset + lanes[1].extent <= 300.1);
@@ -190,7 +193,11 @@ mod tests {
         }
         let built = map(regions);
         let lanes = lanes(&built, 100.0);
-        assert!(lanes.iter().all(|lane| lane.extent >= MIN_LANE_EXTENT - 0.001));
+        assert!(
+            lanes
+                .iter()
+                .all(|lane| lane.extent >= MIN_LANE_EXTENT - 0.001)
+        );
         let last = lanes[lanes.len() - 1];
         assert!((last.offset + last.extent - 100.0).abs() < 0.01);
     }

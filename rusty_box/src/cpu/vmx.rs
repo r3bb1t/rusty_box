@@ -159,7 +159,7 @@ const VMCS_FIELD_WIDTH_64BIT: u32 = 1;
 const VMCS_FIELD_WIDTH_32BIT: u32 = 2;
 // Bits set outside the legal encoding (Bochs vmx.h
 // `VMCS_ENCODING_RESERVED_BITS`): bit 12 plus bits [31:15].
-const VMCS_ENCODING_RESERVED_BITS: u32 = 0xffff_9000;
+const VMCS_ENCODING_RESERVED_BITS: u32 = 0xFFFF_9000;
 
 // Per-(width, type) base offsets for the canonical Bochs VMCS layout
 // produced by `init_generic_mapping` (cpu/vmcs.cc). The shadow VMCS
@@ -184,7 +184,7 @@ fn vmcs_field_byte_offset(encoding: u32) -> Option<u32> {
     if encoding & VMCS_ENCODING_RESERVED_BITS != 0 {
         return None;
     }
-    let field = encoding & 0x3ff;
+    let field = encoding & 0x3FF;
     let width = (encoding >> 13) & 0x3;
     let field_type = (encoding >> 10) & 0x3;
     if field >= VMCS_FIELD_LIMITS[width as usize] {
@@ -922,10 +922,12 @@ impl SegAr {
     fn extract(self, mask: Self) -> u32 {
         self.intersection(mask).bits() >> mask.bits().trailing_zeros()
     }
+
     #[inline]
     pub(super) fn type_field(self) -> u32 {
         self.extract(Self::TYPE_MASK)
     }
+
     #[inline]
     pub(super) fn dpl(self) -> u8 {
         self.extract(Self::DPL_MASK) as u8
@@ -1844,7 +1846,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         if self.vmcs.secondary_proc_based_ctls & VMX_VM_EXEC_CTRL2_VMCS_SHADOWING == 0 {
             return true;
         }
-        if encoding > 0x7fff {
+        if encoding > 0x7FFF {
             return true;
         }
         let pa = BxPhyAddress::new(self.vmcs.vmread_bitmap_addr | (encoding as u64 >> 3));
@@ -1858,7 +1860,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         if self.vmcs.secondary_proc_based_ctls & VMX_VM_EXEC_CTRL2_VMCS_SHADOWING == 0 {
             return true;
         }
-        if encoding > 0x7fff {
+        if encoding > 0x7FFF {
             return true;
         }
         let pa = BxPhyAddress::new(self.vmcs.vmwrite_bitmap_addr | (encoding as u64 >> 3));
@@ -2260,7 +2262,8 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             3 => ProcessorActivity::WaitForSipi,
             _ => ProcessorActivity::Active,
         };
-        let primary = self.vmcs_current_field(VMCS_32BIT_CONTROL_PROCESSOR_BASED_VMEXEC_CONTROLS)?;
+        let primary =
+            self.vmcs_current_field(VMCS_32BIT_CONTROL_PROCESSOR_BASED_VMEXEC_CONTROLS)?;
         let secondary = self.vmcs_current_field(VMCS_32BIT_CONTROL_SECONDARY_VMEXEC_CONTROLS)?;
         let memory = if primary & u64::from(VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS) != 0
             && secondary & u64::from(VMX_VM_EXEC_CTRL2_EPT_ENABLE) != 0
@@ -2314,7 +2317,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             Ok(()) => u16::from_le_bytes(data),
             Err(e) => {
                 tracing::warn!("read_phys_word({:#018x}) failed: {:?}", paddr, e);
-                return 0xffff;
+                return 0xFFFF;
             }
         };
         self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Read);
@@ -2328,7 +2331,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             Ok(()) => u32::from_le_bytes(data),
             Err(e) => {
                 tracing::warn!("read_phys_dword({:#018x}) failed: {:?}", paddr, e);
-                return 0xffff_ffff;
+                return 0xFFFF_FFFF;
             }
         };
         self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Read);
@@ -2402,9 +2405,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                 u64::from(v.pi_notification_vector)
             }
             // Bochs vmx.cc VMexitSaveGuestState packs SVI into the high byte.
-            VMCS_16BIT_GUEST_INTERRUPT_STATUS => {
-                (u64::from(v.svi) << 8) | u64::from(v.rvi)
-            }
+            VMCS_16BIT_GUEST_INTERRUPT_STATUS => (u64::from(v.svi) << 8) | u64::from(v.rvi),
             VMCS_64BIT_CONTROL_POSTED_INTERRUPT_DESC_ADDR => v.pi_desc_addr,
             VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP0 => eoi_exit_bitmap_qword(v, 0),
             VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP1 => eoi_exit_bitmap_qword(v, 1),
@@ -3006,10 +3007,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // VM-entry MSR-load succeeds. VMRESUME leaves the launch state
         // alone — Bochs gates this on the `vmlaunch` flag.
         if !is_resume {
-            self.write_phys_dword(
-            self.vmcsptr + VMCS_LAUNCH_STATE_OFFSET,
-            VMCS_STATE_LAUNCHED,
-        );
+            self.write_phys_dword(self.vmcsptr + VMCS_LAUNCH_STATE_OFFSET, VMCS_STATE_LAUNCHED);
         }
 
         // Bochs vmx.cc step 6: arm the preemption timer when the pin-based
@@ -3175,7 +3173,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     fn vapic_set_vector(&mut self, arrbase: u32, vector: u8) {
         let reg = u32::from(vector) / 32;
         let offset = arrbase + 16 * reg;
-        let value = self.vmx_read_virtual_apic(offset) | (1u32 << (vector & 0x1f));
+        let value = self.vmx_read_virtual_apic(offset) | (1u32 << (vector & 0x1F));
         self.vmx_write_virtual_apic(offset, value);
     }
 
@@ -3193,7 +3191,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         }
 
         let reg = usize::from(vector) / 32;
-        arr[reg] &= !(1u32 << (vector & 0x1f));
+        arr[reg] &= !(1u32 << (vector & 0x1F));
         self.vmx_write_virtual_apic(arrbase + 16 * reg as u32, arr[reg]);
 
         for n in (0..8).rev() {
@@ -3219,7 +3217,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let vppr = if (vtpr >> 4) >= (svi >> 4) {
             vtpr
         } else {
-            svi & 0xf0
+            svi & 0xF0
         };
         self.vmcs.vppr = vppr;
         self.vmx_write_virtual_apic(LapicRegister::Ppr as u32, u32::from(vppr));
@@ -3275,8 +3273,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.clear_event(BxCpuC::<T>::BX_EVENT_VMX_VEOI_UPDATE);
 
         if !self.virtual_interrupt_delivery() {
-            return self
-                .vmx_vmexit(VmxVmexitReason::ApicWrite, LapicRegister::Eoi as u64);
+            return self.vmx_vmexit(VmxVmexitReason::ApicWrite, LapicRegister::Eoi as u64);
         }
 
         self.vmx_write_virtual_apic(LapicRegister::Eoi as u32, 0);
@@ -3298,7 +3295,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// `bx_local_apic_c::get_vector(vm->eoi_exit_bitmap, vector)`.
     fn eoi_exit_bitmap_bit(&self, vector: u8) -> bool {
         let reg = usize::from(vector) / 32;
-        self.vmcs.eoi_exit_bitmap[reg] & (1u32 << (vector & 0x1f)) != 0
+        self.vmcs.eoi_exit_bitmap[reg] & (1u32 << (vector & 0x1F)) != 0
     }
 
     /// Self-IPI virtualization — Bochs vapic.cc `VMX_Self_IPI_Virtualization`.
@@ -3350,7 +3347,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                 if value >> 8 != 0 {
                     return Some(self.exception(Exception::Gp, 0));
                 }
-                self.vmx_write_virtual_x2apic(TPR, value & 0xff);
+                self.vmx_write_virtual_x2apic(TPR, value & 0xFF);
                 Some(self.vmx_tpr_virtualization())
             }
             EOI if self.virtual_interrupt_delivery() => {
@@ -3368,9 +3365,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     // An illegal vector is still published where the host can
                     // read what the guest attempted, then reported.
                     self.vmx_write_virtual_x2apic(SELF_IPI, u64::from(vector));
-                    return Some(
-                        self.vmx_vmexit(VmxVmexitReason::ApicWrite, u64::from(SELF_IPI)),
-                    );
+                    return Some(self.vmx_vmexit(VmxVmexitReason::ApicWrite, u64::from(SELF_IPI)));
                 }
                 self.vmx_self_ipi_virtualization(vector);
                 Some(Ok(()))
@@ -3407,7 +3402,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
         self.vapic_set_vector(LapicRegister::Isr1 as u32, vector);
         self.vmcs.svi = vector;
-        let vppr = vector & 0xf0;
+        let vppr = vector & 0xF0;
         self.vmcs.vppr = vppr;
         self.vmx_write_virtual_apic(LapicRegister::Ppr as u32, u32::from(vppr));
         self.vmcs.rvi =
@@ -3416,8 +3411,12 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
         self.ext = true;
         self.instrument_hw_interrupt(vector);
-        let result =
-            self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, 0);
+        let result = self.interrupt(
+            vector,
+            super::exception::InterruptType::ExternalInterrupt,
+            false,
+            0,
+        );
         self.ext = false;
         self.prev_rip = self.rip();
         result
@@ -3462,7 +3461,8 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.write_physical_bytes(pid, [0u8; 32]);
         let mut virr = [0u32; 8];
         for (n, slot) in virr.iter_mut().enumerate() {
-            let pir_n = u32::from_le_bytes([pir[4 * n], pir[4 * n + 1], pir[4 * n + 2], pir[4 * n + 3]]);
+            let pir_n =
+                u32::from_le_bytes([pir[4 * n], pir[4 * n + 1], pir[4 * n + 2], pir[4 * n + 3]]);
             let offset = LapicRegister::Irr1 as u32 + 16 * n as u32;
             let merged = self.vmx_read_virtual_apic(offset) | pir_n;
             self.vmx_write_virtual_apic(offset, merged);
@@ -5736,7 +5736,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     paddr,
                     e
                 );
-                [0xff; N]
+                [0xFF; N]
             }
         }
     }
@@ -7333,11 +7333,19 @@ mod tests {
         let mut ctx = ept_guest(&mut machine);
 
         let host = ctx
-            .ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA), crate::config::BxLinAddress::new(0), false, true, false, BxRwAccess::Read)
+            .ept_translate_for_data(
+                BxPhyAddress::new(EPT_GUEST_PA),
+                crate::config::BxLinAddress::new(0),
+                false,
+                true,
+                false,
+                BxRwAccess::Read,
+            )
             .expect("a fully permitted mapping translates");
 
         assert_eq!(
-            host.get(), EPT_TARGET,
+            host.get(),
+            EPT_TARGET,
             "the walk must land on the page the leaf entry names, not on the \
              guest-physical address itself"
         );
@@ -7351,7 +7359,14 @@ mod tests {
         let mut ctx = ept_guest(&mut machine);
 
         let host = ctx
-            .ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA + 0x2A), crate::config::BxLinAddress::new(0), false, true, false, BxRwAccess::Read)
+            .ept_translate_for_data(
+                BxPhyAddress::new(EPT_GUEST_PA + 0x2A),
+                crate::config::BxLinAddress::new(0),
+                false,
+                true,
+                false,
+                BxRwAccess::Read,
+            )
             .expect("a fully permitted mapping translates");
 
         assert_eq!(host.get(), EPT_TARGET + 0x2A);
@@ -7367,7 +7382,14 @@ mod tests {
         ctx.vmcs.secondary_proc_based_ctls = 0;
 
         let host = ctx
-            .ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA), crate::config::BxLinAddress::new(0), false, true, false, BxRwAccess::Read)
+            .ept_translate_for_data(
+                BxPhyAddress::new(EPT_GUEST_PA),
+                crate::config::BxLinAddress::new(0),
+                false,
+                true,
+                false,
+                BxRwAccess::Read,
+            )
             .expect("an untranslated access cannot fail");
 
         assert_eq!(host.get(), EPT_GUEST_PA);
@@ -7382,14 +7404,17 @@ mod tests {
         let mut ctx = ept_guest(&mut machine);
         ctx.vmcs.eptptr = EPT_PML4 | 0x40;
 
-        ctx.ept_translate_for_data(BxPhyAddress::new(EPT_GUEST_PA), crate::config::BxLinAddress::new(0), false, true, false, BxRwAccess::Write)
-            .expect("a fully permitted mapping translates");
+        ctx.ept_translate_for_data(
+            BxPhyAddress::new(EPT_GUEST_PA),
+            crate::config::BxLinAddress::new(0),
+            false,
+            true,
+            false,
+            BxRwAccess::Write,
+        )
+        .expect("a fully permitted mapping translates");
 
-        for (name, addr) in [
-            ("pml4", EPT_PML4),
-            ("pdpt", EPT_PDPT),
-            ("pd", EPT_PD),
-        ] {
+        for (name, addr) in [("pml4", EPT_PML4), ("pdpt", EPT_PDPT), ("pd", EPT_PD)] {
             assert_ne!(
                 ctx.mem_read_qword(BxPhyAddress::new(addr)) & 0x100,
                 0,
@@ -7430,8 +7455,14 @@ mod tests {
         }
 
         let irr = LapicRegister::Irr1 as u32;
-        assert_eq!(ctx.vapic_clear_and_find_highest_priority_int(irr, 0x92), 0x51);
-        assert_eq!(ctx.vapic_clear_and_find_highest_priority_int(irr, 0x51), 0x30);
+        assert_eq!(
+            ctx.vapic_clear_and_find_highest_priority_int(irr, 0x92),
+            0x51
+        );
+        assert_eq!(
+            ctx.vapic_clear_and_find_highest_priority_int(irr, 0x51),
+            0x30
+        );
         assert_eq!(
             ctx.vapic_clear_and_find_highest_priority_int(irr, 0x30),
             0,
@@ -7458,9 +7489,12 @@ mod tests {
 
         assert_eq!(ctx.vmcs.svi, 0x80, "the delivered vector is now in service");
         assert_eq!(ctx.vmcs.rvi, 0x40, "RVI falls to the next pending vector");
-        assert_eq!(ctx.vmcs.vppr, 0x80, "PPR takes the delivered vector's class");
         assert_eq!(
-            ctx.vmx_read_virtual_apic(LapicRegister::Ppr as u32) & 0xff,
+            ctx.vmcs.vppr, 0x80,
+            "PPR takes the delivered vector's class"
+        );
+        assert_eq!(
+            ctx.vmx_read_virtual_apic(LapicRegister::Ppr as u32) & 0xFF,
             0x80,
             "PPR is published where the guest reads it"
         );
@@ -7509,7 +7543,7 @@ mod tests {
 
         assert_eq!(ctx.vmcs.svi, 0x40, "the next in-service vector takes over");
         assert_eq!(
-            ctx.vmx_read_virtual_apic(LapicRegister::Ppr as u32) & 0xff,
+            ctx.vmx_read_virtual_apic(LapicRegister::Ppr as u32) & 0xFF,
             0x40,
             "PPR drops to the new in-service class"
         );
@@ -7555,11 +7589,23 @@ mod tests {
 
         assert_eq!(ctx.vmcs.rvi, 0x71, "RVI rises to the highest posted vector");
         let slice1 = ctx.vmx_read_virtual_apic(LapicRegister::Irr1 as u32 + 16);
-        assert_eq!(slice1, 1 << (0x30 % 32), "0x30 landed in virtual IRR slice 1");
+        assert_eq!(
+            slice1,
+            1 << (0x30 % 32),
+            "0x30 landed in virtual IRR slice 1"
+        );
         let slice3 = ctx.vmx_read_virtual_apic(LapicRegister::Irr1 as u32 + 16 * 3);
         assert_eq!(slice3, 1 << (0x71 % 32), "0x71 landed in slice 3");
-        assert_eq!(ctx.read_physical_byte(BxPhyAddress::new(PID) + 32) & 1, 0, "PID.ON is cleared");
-        assert_eq!(ctx.read_physical_byte(BxPhyAddress::new(PID) + (0x71 / 8)), 0, "PIR is drained");
+        assert_eq!(
+            ctx.read_physical_byte(BxPhyAddress::new(PID) + 32) & 1,
+            0,
+            "PID.ON is cleared"
+        );
+        assert_eq!(
+            ctx.read_physical_byte(BxPhyAddress::new(PID) + (0x71 / 8)),
+            0,
+            "PIR is drained"
+        );
     }
 
     /// An ordinary interrupt that merely arrived while posted interrupts were
@@ -7589,21 +7635,41 @@ mod tests {
         let mut machine = TestMachine::new();
         let mut ctx = machine.ctx();
         for (msr, allowed_0, allowed_1) in [
-            (0x481u32, VMX_PINBASED_CTLS_DEFAULT1, VMX_PINBASED_CTLS_ALLOWED_1),
-            (0x482, VMX_PROCBASED_CTLS_DEFAULT1, VMX_PROCBASED_CTLS_ALLOWED_1),
+            (
+                0x481u32,
+                VMX_PINBASED_CTLS_DEFAULT1,
+                VMX_PINBASED_CTLS_ALLOWED_1,
+            ),
+            (
+                0x482,
+                VMX_PROCBASED_CTLS_DEFAULT1,
+                VMX_PROCBASED_CTLS_ALLOWED_1,
+            ),
             (0x483, VMX_EXIT_CTLS_DEFAULT1, VMX_EXIT_CTLS_ALLOWED_1),
             (0x484, VMX_ENTRY_CTLS_DEFAULT1, VMX_ENTRY_CTLS_ALLOWED_1),
             // The TRUE-controls block starts at 0x48D: 0x48C is
             // IA32_VMX_EPT_VPID_CAP (Bochs msr.h `BX_MSR_VMX_EPT_VPID_CAP`).
             // VM entry checks exactly these.
-            (0x48D, VMX_PINBASED_CTLS_ALLOWED_0, VMX_PINBASED_CTLS_ALLOWED_1),
-            (0x48E, VMX_PROCBASED_CTLS_ALLOWED_0, VMX_PROCBASED_CTLS_ALLOWED_1),
+            (
+                0x48D,
+                VMX_PINBASED_CTLS_ALLOWED_0,
+                VMX_PINBASED_CTLS_ALLOWED_1,
+            ),
+            (
+                0x48E,
+                VMX_PROCBASED_CTLS_ALLOWED_0,
+                VMX_PROCBASED_CTLS_ALLOWED_1,
+            ),
             (0x48F, VMX_EXIT_CTLS_ALLOWED_0, VMX_EXIT_CTLS_ALLOWED_1),
             (0x490, VMX_ENTRY_CTLS_ALLOWED_0, VMX_ENTRY_CTLS_ALLOWED_1),
         ] {
             let value = ctx.rdmsr_value(msr).expect("VMX capability MSR readable");
             assert_eq!(value as u32, allowed_0, "MSR {msr:#x} allowed-0 half");
-            assert_eq!((value >> 32) as u32, allowed_1, "MSR {msr:#x} allowed-1 half");
+            assert_eq!(
+                (value >> 32) as u32,
+                allowed_1,
+                "MSR {msr:#x} allowed-1 half"
+            );
         }
     }
 
@@ -7627,16 +7693,38 @@ mod tests {
         on_big_stack(|| {
             let mut emu = vmx_host();
             let cr4_allowed = emu.cpu().cr4_suppmask;
-            let msr = |emu: &mut Emulator, index: u32| emu.exec_ctx(0).rdmsr_value(index).expect("readable");
-            assert_eq!(msr(&mut emu, 0x480), 0x00D8_1000_0000_002B, "IA32_VMX_BASIC");
+            let msr = |emu: &mut Emulator, index: u32| {
+                emu.exec_ctx(0).rdmsr_value(index).expect("readable")
+            };
+            assert_eq!(
+                msr(&mut emu, 0x480),
+                0x00D8_1000_0000_002B,
+                "IA32_VMX_BASIC"
+            );
             assert_eq!(msr(&mut emu, 0x481) as u32, 0x16, "PINBASED must-be-1");
-            assert_eq!(msr(&mut emu, 0x482) as u32, 0x0401_E172, "PROCBASED must-be-1");
+            assert_eq!(
+                msr(&mut emu, 0x482) as u32,
+                0x0401_E172,
+                "PROCBASED must-be-1"
+            );
             assert_eq!(msr(&mut emu, 0x483) as u32, 0x0003_6DFF, "EXIT must-be-1");
             assert_eq!(msr(&mut emu, 0x484) as u32, 0x0000_11FF, "ENTRY must-be-1");
             assert_eq!(msr(&mut emu, 0x48D) as u32, 0x16, "TRUE_PINBASED must-be-1");
-            assert_eq!(msr(&mut emu, 0x48E) as u32, 0x0400_6172, "TRUE_PROCBASED must-be-1");
-            assert_eq!(msr(&mut emu, 0x48F) as u32, 0x0003_6DFB, "TRUE_EXIT must-be-1");
-            assert_eq!(msr(&mut emu, 0x490) as u32, 0x0000_11FB, "TRUE_ENTRY must-be-1");
+            assert_eq!(
+                msr(&mut emu, 0x48E) as u32,
+                0x0400_6172,
+                "TRUE_PROCBASED must-be-1"
+            );
+            assert_eq!(
+                msr(&mut emu, 0x48F) as u32,
+                0x0003_6DFB,
+                "TRUE_EXIT must-be-1"
+            );
+            assert_eq!(
+                msr(&mut emu, 0x490) as u32,
+                0x0000_11FB,
+                "TRUE_ENTRY must-be-1"
+            );
             assert_eq!(msr(&mut emu, 0x485), 0x2004_01E0, "IA32_VMX_MISC");
             assert_eq!(msr(&mut emu, 0x486), 0x8000_0021, "CR0_FIXED0");
             assert_eq!(msr(&mut emu, 0x487), 0xFFFF_FFFF, "CR0_FIXED1");
@@ -7644,11 +7732,24 @@ mod tests {
             assert_eq!(msr(&mut emu, 0x489), cr4_allowed, "CR4_FIXED1");
             assert_eq!(msr(&mut emu, 0x48A), 0x54, "VMCS_ENUM");
             assert_eq!(msr(&mut emu, 0x48C), 0x0000_0F01_0633_4141, "EPT_VPID_CAP");
-            for (index, name) in [(0x481u32, "PIN"), (0x482, "PROC"), (0x483, "EXIT"), (0x484, "ENTRY")] {
+            for (index, name) in [
+                (0x481u32, "PIN"),
+                (0x482, "PROC"),
+                (0x483, "EXIT"),
+                (0x484, "ENTRY"),
+            ] {
                 let value = msr(&mut emu, index);
                 let true_value = msr(&mut emu, index + 0xC);
-                assert_eq!(value >> 32, true_value >> 32, "{name}: the TRUE MSR allows the same 1-settings");
-                assert_eq!((value as u32) & !((value >> 32) as u32), 0, "{name}: every must-be-1 bit may be 1");
+                assert_eq!(
+                    value >> 32,
+                    true_value >> 32,
+                    "{name}: the TRUE MSR allows the same 1-settings"
+                );
+                assert_eq!(
+                    (value as u32) & !((value >> 32) as u32),
+                    0,
+                    "{name}: every must-be-1 bit may be 1"
+                );
             }
         });
     }
@@ -7667,7 +7768,11 @@ mod tests {
             vmcs.vm_exit_ctls = 0x0003_6DFB | VMX_VMEXIT_CTRL1_HOST_ADDR_SPACE_SIZE;
             vmcs.vm_entry_ctls = 0x0000_11FB | VMX_VMENTRY_CTRL_X86_64_GUEST;
             launch(&mut emu);
-            assert_eq!(emu.cpu().vmcs.exit_reason, EXIT_CPUID, "the guest entered and ran");
+            assert_eq!(
+                emu.cpu().vmcs.exit_reason,
+                EXIT_CPUID,
+                "the guest entered and ran"
+            );
         });
     }
 
@@ -7681,7 +7786,11 @@ mod tests {
             emu.mem_write(VMCS_A, &shadow.to_le_bytes()).unwrap();
             let end = HostScript::new().point_at(VMCS_A).vmptrld().run(&mut emu);
             assert_eq!(emu.cpu().rip(), end);
-            assert_eq!(emu.cpu().vmcsptr, crate::config::BxPhyAddress::new(VMCS_A), "the shadow VMCS is current");
+            assert_eq!(
+                emu.cpu().vmcsptr,
+                crate::config::BxPhyAddress::new(VMCS_A),
+                "the shadow VMCS is current"
+            );
         });
     }
 
@@ -7704,7 +7813,8 @@ mod tests {
                 // 4 MiB pages mapping the first 4 GiB onto themselves.
                 for index in 0..1024u64 {
                     let pde = ((index << 22) | 0x83) as u32;
-                    emu.mem_write(PAGE_DIRECTORY + index * 4, &pde.to_le_bytes()).unwrap();
+                    emu.mem_write(PAGE_DIRECTORY + index * 4, &pde.to_le_bytes())
+                        .unwrap();
                 }
                 emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | CR4_PSE);
                 emu.reg_write(X86Reg::Cr3, PAGE_DIRECTORY);
@@ -7714,11 +7824,15 @@ mod tests {
             emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | CR4_VMXE);
             // Locked, with VMX enabled outside SMX, as the BIOS leaves it.
             emu.cpu_mut().msr.ia32_feature_ctrl = BX_IA32_FEATURE_CONTROL_BITS;
-            emu.mem_write(REGION, &BX_VMCS_REVISION_ID.to_le_bytes()).unwrap();
+            emu.mem_write(REGION, &BX_VMCS_REVISION_ID.to_le_bytes())
+                .unwrap();
             emu.mem_write(POINTER, &REGION.to_le_bytes()).unwrap();
             // mov eax, POINTER; vmxon [eax]
-            emu.mem_write(CODE, &[0xB8, 0x00, 0x90, 0x00, 0x00, 0xF3, 0x0F, 0xC7, 0x30])
-                .unwrap();
+            emu.mem_write(
+                CODE,
+                &[0xB8, 0x00, 0x90, 0x00, 0x00, 0xF3, 0x0F, 0xC7, 0x30],
+            )
+            .unwrap();
             match emu.emu_start(CODE, Some(CODE + 9), None, Some(2)) {
                 Ok(_) | Err(_) => {}
             }
@@ -7757,7 +7871,11 @@ mod tests {
                     .vmwrite(encoding, 0x5A5A)
                     .vmread_into_rcx(encoding)
                     .run(&mut emu);
-                assert_eq!(emu.cpu().rip(), end, "{encoding:#06x}: the script ran to its end");
+                assert_eq!(
+                    emu.cpu().rip(),
+                    end,
+                    "{encoding:#06x}: the script ran to its end"
+                );
                 let failed = emu.reg_read(X86Reg::Rflags) & (1 << 6) != 0;
                 assert_eq!(!failed, supported, "{encoding:#06x}: VMREAD succeeded");
                 if supported {
@@ -7802,7 +7920,11 @@ mod tests {
                 Err(error) => panic!("the exit completes: {error:?}"),
             }
             let entry = vmcs_field(&mut emu, VMCS_32BIT_CONTROL_VMENTRY_CONTROLS) as u32;
-            assert_eq!(entry & VMX_VMENTRY_CTRL_X86_64_GUEST, 0, "a guest outside long mode");
+            assert_eq!(
+                entry & VMX_VMENTRY_CTRL_X86_64_GUEST,
+                0,
+                "a guest outside long mode"
+            );
         });
     }
 
@@ -7815,7 +7937,10 @@ mod tests {
             0,
             "without this bit every secondary control is unreachable"
         );
-        assert_ne!(VMX_PROCBASED_CTLS_ALLOWED_1 & VMX_VM_EXEC_CTRL1_TPR_SHADOW, 0);
+        assert_ne!(
+            VMX_PROCBASED_CTLS_ALLOWED_1 & VMX_VM_EXEC_CTRL1_TPR_SHADOW,
+            0
+        );
         assert_ne!(
             VMX_PROCBASED_CTLS2_ALLOWED_1 & VMX_VM_EXEC_CTRL2_VIRTUAL_INT_DELIVERY,
             0
@@ -7951,11 +8076,31 @@ mod tests {
         v.guest_cs_limit = 0xFFFF_FFFF;
         v.guest_cs_ar = AR_CODE64;
         for (selector, limit, ar) in [
-            (&mut v.guest_ss_selector, &mut v.guest_ss_limit, &mut v.guest_ss_ar),
-            (&mut v.guest_ds_selector, &mut v.guest_ds_limit, &mut v.guest_ds_ar),
-            (&mut v.guest_es_selector, &mut v.guest_es_limit, &mut v.guest_es_ar),
-            (&mut v.guest_fs_selector, &mut v.guest_fs_limit, &mut v.guest_fs_ar),
-            (&mut v.guest_gs_selector, &mut v.guest_gs_limit, &mut v.guest_gs_ar),
+            (
+                &mut v.guest_ss_selector,
+                &mut v.guest_ss_limit,
+                &mut v.guest_ss_ar,
+            ),
+            (
+                &mut v.guest_ds_selector,
+                &mut v.guest_ds_limit,
+                &mut v.guest_ds_ar,
+            ),
+            (
+                &mut v.guest_es_selector,
+                &mut v.guest_es_limit,
+                &mut v.guest_es_ar,
+            ),
+            (
+                &mut v.guest_fs_selector,
+                &mut v.guest_fs_limit,
+                &mut v.guest_fs_ar,
+            ),
+            (
+                &mut v.guest_gs_selector,
+                &mut v.guest_gs_limit,
+                &mut v.guest_gs_ar,
+            ),
         ] {
             *selector = DATA_SELECTOR;
             *limit = 0xFFFF_FFFF;
@@ -8012,8 +8157,15 @@ mod tests {
             assert_eq!(emu.cpu().vmcs.exit_reason, EXIT_CPUID);
             assert_eq!(emu.cpu().rip(), HOST_EXIT_HANDLER);
             assert_eq!(emu.reg_read(X86Reg::Rsp), HOST_STACK);
-            assert!(!emu.cpu().in_vmx_guest, "the exit returned to root operation");
-            assert_eq!(emu.cpu().vmcs.guest_rip, GUEST_CODE, "the guest exited at its CPUID");
+            assert!(
+                !emu.cpu().in_vmx_guest,
+                "the exit returned to root operation"
+            );
+            assert_eq!(
+                emu.cpu().vmcs.guest_rip,
+                GUEST_CODE,
+                "the guest exited at its CPUID"
+            );
         });
     }
 
@@ -8121,7 +8273,8 @@ mod tests {
 
     /// A region VMPTRLD accepts: the revision identifier in its first dword.
     fn vmcs_region(emu: &mut Emulator, region: u64) {
-        emu.mem_write(region, &BX_VMCS_REVISION_ID.to_le_bytes()).unwrap();
+        emu.mem_write(region, &BX_VMCS_REVISION_ID.to_le_bytes())
+            .unwrap();
     }
 
     /// A VMM that keeps two VMCSs reads back from each what it wrote into it.
@@ -8145,8 +8298,16 @@ mod tests {
                 .vmread_into_rcx(VMCS_GUEST_RIP)
                 .run(&mut emu);
             assert_eq!(emu.cpu().rip(), end, "the script ran to its end");
-            assert_eq!(emu.reg_read(X86Reg::Rflags) & 0x41, 0, "every VMX instruction succeeded");
-            assert_eq!(emu.reg_read(X86Reg::Rcx), 0x1111, "VMCS A keeps the RIP written into it");
+            assert_eq!(
+                emu.reg_read(X86Reg::Rflags) & 0x41,
+                0,
+                "every VMX instruction succeeded"
+            );
+            assert_eq!(
+                emu.reg_read(X86Reg::Rcx),
+                0x1111,
+                "VMCS A keeps the RIP written into it"
+            );
         });
     }
 
@@ -8157,15 +8318,27 @@ mod tests {
         on_big_stack(|| {
             let mut emu = vmx_host();
             launch(&mut emu);
-            assert_eq!(emu.cpu().rip(), HOST_EXIT_HANDLER, "the first launch ran the guest");
+            assert_eq!(
+                emu.cpu().rip(),
+                HOST_EXIT_HANDLER,
+                "the first launch ran the guest"
+            );
             let end = HostScript::new()
                 .point_at(VMCS_FIXTURE)
                 .vmclear()
                 .vmptrld()
                 .vmlaunch()
                 .run_into_guest(&mut emu);
-            assert_ne!(emu.cpu().rip(), end, "the second VMLAUNCH did not fall through");
-            assert_eq!(emu.cpu().rip(), HOST_EXIT_HANDLER, "the second launch ran it again");
+            assert_ne!(
+                emu.cpu().rip(),
+                end,
+                "the second VMLAUNCH did not fall through"
+            );
+            assert_eq!(
+                emu.cpu().rip(),
+                HOST_EXIT_HANDLER,
+                "the second launch ran it again"
+            );
         });
     }
 
@@ -8212,7 +8385,10 @@ mod tests {
                 let value = 0x0123_4567_89AB_CDEF_u64.rotate_left(encoding);
                 ctx.vmcs_field_write(crate::config::BxPhyAddress::new(VMCS_A), field, value);
             }
-            assert!(held > 100, "the layout walk reaches the cached fields ({held})");
+            assert!(
+                held > 100,
+                "the layout walk reaches the cached fields ({held})"
+            );
             ctx.vmcsptr = crate::config::BxPhyAddress::new(VMCS_A);
             ctx.vmcs_load_cache();
             ctx.vmcsptr = crate::config::BxPhyAddress::new(VMCS_B);
@@ -8261,7 +8437,9 @@ mod tests {
             let host_cr3 = emu.reg_read(X86Reg::Cr3);
             launch(&mut emu);
             let mut cpu = emu.debug_cpu(0).unwrap();
-            let guest = cpu.vmx_guest().expect("a launched VMCS in VMX root operation");
+            let guest = cpu
+                .vmx_guest()
+                .expect("a launched VMCS in VMX root operation");
             assert_eq!(guest.vmcs, VMCS_FIXTURE);
             assert_eq!(guest.rip, GUEST_CODE, "where the guest's CPUID exited");
             assert_eq!(guest.rsp, GUEST_STACK);
@@ -8269,7 +8447,11 @@ mod tests {
             assert_eq!(guest.mode, ExecutionMode::Long64);
             assert_eq!(guest.code_size, CodeSize::Bits64);
             assert_eq!(guest.cpl, 0);
-            assert_ne!(guest.efer & (1 << 10), 0, "an IA-32e guest runs with EFER.LMA");
+            assert_ne!(
+                guest.efer & (1 << 10),
+                0,
+                "an IA-32e guest runs with EFER.LMA"
+            );
             assert_eq!(guest.memory, GuestPhysicalMemory::Direct);
             assert_eq!(guest.gdtr.base, GDT);
             assert_eq!(
@@ -8287,9 +8469,17 @@ mod tests {
         on_big_stack(|| {
             let mut emu = vmx_host();
             vmm_writes_the_vmcs(&mut emu);
-            assert_eq!(emu.debug_cpu(0).unwrap().vmx_guest(), None, "never launched");
+            assert_eq!(
+                emu.debug_cpu(0).unwrap().vmx_guest(),
+                None,
+                "never launched"
+            );
             emu.cpu_mut().in_vmx = false;
-            assert_eq!(emu.debug_cpu(0).unwrap().vmx_guest(), None, "outside VMX operation");
+            assert_eq!(
+                emu.debug_cpu(0).unwrap().vmx_guest(),
+                None,
+                "outside VMX operation"
+            );
         });
     }
 
@@ -8315,9 +8505,14 @@ mod tests {
         qword(emu, EPT_ROOT, (EPT_ROOT + 0x1000) | EPT_RWX);
         qword(emu, EPT_ROOT + 0x1000, (EPT_ROOT + 0x2000) | EPT_RWX);
         qword(emu, EPT_ROOT + 0x2000, EPT_SHIFT | EPT_WB_LARGE);
-        let tables = [GUEST_PML4, GUEST_PML4 + 0x1000, GUEST_PML4 + 0x2000, GUEST_PML4 + 0x3000];
+        let tables = [
+            GUEST_PML4,
+            GUEST_PML4 + 0x1000,
+            GUEST_PML4 + 0x2000,
+            GUEST_PML4 + 0x3000,
+        ];
         for (level, table) in tables.into_iter().enumerate() {
-            let index = (GUEST_LINEAR >> (39 - 9 * level)) & 0x1ff;
+            let index = (GUEST_LINEAR >> (39 - 9 * level)) & 0x1FF;
             let next = tables.get(level + 1).copied().unwrap_or(GUEST_PAGE);
             qword(emu, EPT_SHIFT + table + index * 8, next | PRESENT_WRITABLE);
         }
@@ -8334,10 +8529,19 @@ mod tests {
             code_size: CodeSize::Bits64,
             cpl: 0,
             activity: ProcessorActivity::Active,
-            segment_bases: SegmentBases { es: 0, cs: 0, ss: 0, ds: 0, fs: 0, gs: 0 },
+            segment_bases: SegmentBases {
+                es: 0,
+                cs: 0,
+                ss: 0,
+                ds: 0,
+                fs: 0,
+                gs: 0,
+            },
             gdtr: DescriptorTable { base: 0, limit: 0 },
             idtr: DescriptorTable { base: 0, limit: 0 },
-            memory: GuestPhysicalMemory::Ept { eptp: EPT_ROOT | (3 << 3) | 6 },
+            memory: GuestPhysicalMemory::Ept {
+                eptp: EPT_ROOT | (3 << 3) | 6,
+            },
         }
     }
 
@@ -8353,7 +8557,10 @@ mod tests {
                 cpu.dbg_xlate_vmx_guest_linear2phy(&guest, GUEST_PML4, GUEST_LINEAR + 0x123),
                 Some(EPT_SHIFT + GUEST_PAGE + 0x123)
             );
-            let direct = VmxGuest { memory: GuestPhysicalMemory::Direct, ..guest };
+            let direct = VmxGuest {
+                memory: GuestPhysicalMemory::Direct,
+                ..guest
+            };
             assert_eq!(
                 cpu.dbg_xlate_vmx_guest_linear2phy(&direct, GUEST_PML4, GUEST_LINEAR),
                 None,
@@ -8371,7 +8578,10 @@ mod tests {
             let guest = guest_behind_ept(&mut emu);
             let mut cpu = emu.debug_cpu(0).unwrap();
             let mut seen = alloc::vec::Vec::new();
-            let range = LinearRange { start: GUEST_LINEAR, end: GUEST_LINEAR + 0x1000 };
+            let range = LinearRange {
+                start: GUEST_LINEAR,
+                end: GUEST_LINEAR + 0x1000,
+            };
             let walk = cpu.dbg_vmx_guest_page_mappings(&guest, GUEST_PML4, range, |mapping| {
                 seen.push(mapping);
                 WalkStep::Continue
@@ -8398,11 +8608,16 @@ mod tests {
                 .vmread_into_rcx(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS)
                 .run(&mut emu);
             assert_eq!(emu.cpu().rip(), end, "the script ran to its end");
-            let offset = u64::from(vmcs_field_byte_offset(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS).unwrap());
+            let offset =
+                u64::from(vmcs_field_byte_offset(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS).unwrap());
             let mut stored = [0u8; 4];
             emu.mem_read(VMCS_A + offset, &mut stored).unwrap();
             assert_eq!(u32::from_le_bytes(stored), AR_CODE64.rotate_left(8));
-            assert_eq!(emu.reg_read(X86Reg::Rcx), u64::from(AR_CODE64), "VMREAD unrotates it");
+            assert_eq!(
+                emu.reg_read(X86Reg::Rcx),
+                u64::from(AR_CODE64),
+                "VMREAD unrotates it"
+            );
         });
     }
 
@@ -8412,7 +8627,8 @@ mod tests {
     fn a_shadow_vmcs_read_unrotates_access_rights() {
         on_big_stack(|| {
             let mut emu = vmx_host();
-            let offset = u64::from(vmcs_field_byte_offset(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS).unwrap());
+            let offset =
+                u64::from(vmcs_field_byte_offset(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS).unwrap());
             emu.mem_write(VMCS_A + offset, &AR_CODE64.rotate_left(8).to_le_bytes())
                 .unwrap();
             let mut ctx = emu.exec_ctx(0);
@@ -8442,7 +8658,11 @@ mod tests {
                 vmcs_field(&mut emu, VMCS_32BIT_INSTRUCTION_ERROR),
                 VmxErr::VmentryInvalidVmControlField as u64
             );
-            assert_ne!(emu.reg_read(X86Reg::Rflags) & (1 << 6), 0, "VMfailValid sets ZF");
+            assert_ne!(
+                emu.reg_read(X86Reg::Rflags) & (1 << 6),
+                0,
+                "VMfailValid sets ZF"
+            );
             assert_eq!(emu.cpu().rip(), HOST_CODE + 3);
             assert!(!emu.cpu().in_vmx_guest);
         });
@@ -8538,10 +8758,20 @@ mod tests {
         ctx.vmcs.ia32_spec_ctrl_mask = 0x1;
         ctx.vmcs.ia32_spec_ctrl_shadow = 0x4;
 
-        assert_eq!(ctx.rdmsr_value(BX_MSR_IA32_SPEC_CTRL).expect("readable"), 0x4);
-        ctx.wrmsr_value(BX_MSR_IA32_SPEC_CTRL, 0x2).expect("a valid value");
-        assert_eq!(ctx.msr.ia32_spec_ctrl, 0x3, "bit 0 is the VMM's; bit 1 is the guest's");
-        assert_eq!(ctx.vmcs.ia32_spec_ctrl_shadow, 0x4, "the shadow is not written");
+        assert_eq!(
+            ctx.rdmsr_value(BX_MSR_IA32_SPEC_CTRL).expect("readable"),
+            0x4
+        );
+        ctx.wrmsr_value(BX_MSR_IA32_SPEC_CTRL, 0x2)
+            .expect("a valid value");
+        assert_eq!(
+            ctx.msr.ia32_spec_ctrl, 0x3,
+            "bit 0 is the VMM's; bit 1 is the guest's"
+        );
+        assert_eq!(
+            ctx.vmcs.ia32_spec_ctrl_shadow, 0x4,
+            "the shadow is not written"
+        );
 
         ctx.vmcs.proc_based_ctls = 0;
         assert_eq!(
@@ -8561,12 +8791,19 @@ mod tests {
             let feature = crate::cpu::decoder::features::X86Feature::IsaWrmsrns as usize;
             emu.cpu_mut().ia_extensions_bitmask[feature / 32] |= 1 << (feature % 32);
             // mov ecx, SYSENTER_CS; wrmsrns
-            emu.mem_write(GUEST_CODE, &[0xB9, 0x74, 0x01, 0x00, 0x00, 0x0F, 0x01, 0xC6])
-                .unwrap();
+            emu.mem_write(
+                GUEST_CODE,
+                &[0xB9, 0x74, 0x01, 0x00, 0x00, 0x0F, 0x01, 0xC6],
+            )
+            .unwrap();
             launch(&mut emu);
             assert_eq!(emu.cpu().vmcs.exit_reason, VmxVmexitReason::Wrmsrns as u32);
             assert_eq!(emu.cpu().vmcs.exit_qualification, 0);
-            assert_eq!(emu.cpu().vmcs.guest_rip, GUEST_CODE + 5, "the exit is at WRMSRNS");
+            assert_eq!(
+                emu.cpu().vmcs.guest_rip,
+                GUEST_CODE + 5,
+                "the exit is at WRMSRNS"
+            );
         });
     }
 
@@ -8636,7 +8873,13 @@ mod tests {
         ctx.set_idtr_base_for_api(IDT);
         ctx.set_idtr_limit_for_api(0x7FF);
         ctx.enter_protected_mode_for_api();
-        ctx.set_seg_for_api(X86Reg::Cs, CODE_SELECTOR, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
+        ctx.set_seg_for_api(
+            X86Reg::Cs,
+            CODE_SELECTOR,
+            0,
+            0xFFFF_FFFF,
+            SegmentSize::Bits32,
+        );
         for reg in [X86Reg::Ss, X86Reg::Ds] {
             ctx.set_seg_for_api(reg, DATA_SELECTOR, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
         }

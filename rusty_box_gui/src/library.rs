@@ -7,17 +7,18 @@
 //! is derived from its name but cut down to a safe alphabet, so no name can
 //! climb out of the folder or land on a Windows device name.
 
-use crate::config::{
-    load_toml_file, resolve_config_in, ArmBoot, MachineConfig, ResolvedConfig, DEFAULT_CONFIG_FILE,
-};
-pub use crate::error::LibraryError;
-use crate::error::RunError;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use crate::config::{
+    ArmBoot, DEFAULT_CONFIG_FILE, MachineConfig, ResolvedConfig, load_toml_file, resolve_config_in,
+};
+pub use crate::error::LibraryError;
+use crate::error::RunError;
 
 /// The longest file stem the library writes, in bytes, a uniqueness suffix
 /// (`-2`, `-3`, …) included.
@@ -708,7 +709,13 @@ mod tests {
     fn toml_names(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)
             .expect("list dir")
-            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         names.sort();
         names
@@ -760,11 +767,24 @@ mod tests {
             assert_eq!(stem(accepted).as_str(), accepted);
         }
         for refused in [
-            "", ".", "..", "../escape", "a/b", "/a", ".hidden", "a/", " alpine", "alpine ",
-            "\talpine", "alpine\n",
+            "",
+            ".",
+            "..",
+            "../escape",
+            "a/b",
+            "/a",
+            ".hidden",
+            "a/",
+            " alpine",
+            "alpine ",
+            "\talpine",
+            "alpine\n",
         ] {
             assert!(
-                matches!(VmStem::parse(refused), Err(LibraryError::InvalidStem { .. })),
+                matches!(
+                    VmStem::parse(refused),
+                    Err(LibraryError::InvalidStem { .. })
+                ),
                 "{refused:?} was accepted"
             );
         }
@@ -841,7 +861,9 @@ mod tests {
 
         let dir = scratch_dir("follow-noop");
         let library = VmLibrary::open(dir.clone()).expect("open");
-        let alpine = library.create("Alpine", &sample_config(&dir)).expect("create");
+        let alpine = library
+            .create("Alpine", &sample_config(&dir))
+            .expect("create");
         let kept = library.rename_to_follow(&alpine, "alpine").expect("rename");
         assert_eq!(kept, alpine);
         assert_eq!(toml_names(&dir), ["alpine.toml"]);
@@ -879,7 +901,9 @@ mod tests {
         let dir = scratch_dir("stem-of-file");
         let elsewhere = scratch_dir("stem-of-file-elsewhere");
         let library = VmLibrary::open(dir.clone()).expect("open");
-        let stem = library.create("Alpine", &sample_config(&dir)).expect("create");
+        let stem = library
+            .create("Alpine", &sample_config(&dir))
+            .expect("create");
         fs::write(elsewhere.join("alpine.toml"), SAMPLE_TOML).expect("write");
         fs::write(dir.join("notes.txt"), "notes").expect("write");
         fs::create_dir(dir.join("folder.toml")).expect("a folder named like a VM file");
@@ -888,10 +912,16 @@ mod tests {
             .join(dir.file_name().expect("the scratch folder has a name"))
             .join("alpine.toml");
 
-        assert_eq!(library.stem_of_file(&library.path_of(&stem)), Some(stem.clone()));
+        assert_eq!(
+            library.stem_of_file(&library.path_of(&stem)),
+            Some(stem.clone())
+        );
         assert_eq!(library.stem_of_file(&roundabout), Some(stem.clone()));
         if cfg!(windows) {
-            assert_eq!(library.stem_of_file(&dir.join("ALPINE.TOML")), Some(stem.clone()));
+            assert_eq!(
+                library.stem_of_file(&dir.join("ALPINE.TOML")),
+                Some(stem.clone())
+            );
         }
         assert_eq!(library.stem_of_file(&elsewhere.join("alpine.toml")), None);
         assert_eq!(library.stem_of_file(&dir.join("notes.txt")), None);
@@ -924,7 +954,9 @@ mod tests {
         let library = VmLibrary::open(dir.clone()).expect("open");
         fs::create_dir(dir.join("alpine.toml")).expect("a folder named like a VM file");
 
-        let stem = library.create("Alpine", &sample_config(&dir)).expect("create");
+        let stem = library
+            .create("Alpine", &sample_config(&dir))
+            .expect("create");
 
         assert_eq!(stem.as_str(), "alpine-2");
         assert!(dir.join("alpine-2.toml").is_file());
@@ -977,7 +1009,9 @@ mod tests {
         let library = VmLibrary::open(dir.clone()).expect("open");
         fs::write(dir.join("Zeta.toml"), SAMPLE_TOML).expect("write");
         fs::write(dir.join("MID.toml"), SAMPLE_TOML).expect("write");
-        library.create("alpha", &sample_config(&dir)).expect("alpha");
+        library
+            .create("alpha", &sample_config(&dir))
+            .expect("alpha");
 
         let contents = library.load().expect("load");
 
@@ -992,9 +1026,18 @@ mod tests {
     fn library_order_breaks_a_case_tie_by_byte_order() {
         use std::cmp::Ordering;
         assert_eq!(library_order(&stem("alpha"), &stem("Beta")), Ordering::Less);
-        assert_eq!(library_order(&stem("Alpine"), &stem("alpine")), Ordering::Less);
-        assert_eq!(library_order(&stem("alpine"), &stem("Alpine")), Ordering::Greater);
-        assert_eq!(library_order(&stem("alpine"), &stem("alpine")), Ordering::Equal);
+        assert_eq!(
+            library_order(&stem("Alpine"), &stem("alpine")),
+            Ordering::Less
+        );
+        assert_eq!(
+            library_order(&stem("alpine"), &stem("Alpine")),
+            Ordering::Greater
+        );
+        assert_eq!(
+            library_order(&stem("alpine"), &stem("alpine")),
+            Ordering::Equal
+        );
     }
 
     #[test]
@@ -1007,7 +1050,9 @@ mod tests {
         assert!(!library.is_empty().expect("broken file"));
 
         fs::remove_file(dir.join("bad.toml")).expect("remove");
-        library.create("Alpine", &sample_config(&dir)).expect("create");
+        library
+            .create("Alpine", &sample_config(&dir))
+            .expect("create");
         assert!(!library.is_empty().expect("valid VM"));
         remove_dir(&dir);
     }
@@ -1069,7 +1114,10 @@ mod tests {
         let contents = library.load().expect("load");
 
         assert_eq!(contents.vms[0].name, "dos-lab");
-        assert_eq!(contents.vms[0].config.pc().expect("a PC").bios, dir.join("bios.bin"));
+        assert_eq!(
+            contents.vms[0].config.pc().expect("a PC").bios,
+            dir.join("bios.bin")
+        );
         remove_dir(&dir);
     }
 
@@ -1129,7 +1177,9 @@ mod tests {
     fn delete_removes_the_file_and_tolerates_one_already_gone() {
         let dir = scratch_dir("delete");
         let library = VmLibrary::open(dir.clone()).expect("open");
-        let stem = library.create("Alpine", &sample_config(&dir)).expect("create");
+        let stem = library
+            .create("Alpine", &sample_config(&dir))
+            .expect("create");
 
         library.delete(&stem).expect("delete");
         library.delete(&stem).expect("delete again");
@@ -1159,7 +1209,9 @@ mod tests {
         let root = scratch_dir("last");
         let dir = root.join("vms");
         let library = VmLibrary::open(dir.clone()).expect("open");
-        let stem = library.create("Alpine", &sample_config(&dir)).expect("create");
+        let stem = library
+            .create("Alpine", &sample_config(&dir))
+            .expect("create");
 
         library.remember_selected(&stem).expect("remember");
         assert_eq!(library.last_selected(), Some(stem.clone()));
@@ -1196,7 +1248,9 @@ mod tests {
     fn a_save_leaves_no_partial_file_behind() {
         let dir = scratch_dir("partial");
         let library = VmLibrary::open(dir.clone()).expect("open");
-        let stem = library.create("Alpine", &sample_config(&dir)).expect("create");
+        let stem = library
+            .create("Alpine", &sample_config(&dir))
+            .expect("create");
         library.remember_selected(&stem).expect("remember");
 
         assert_eq!(toml_names(&dir), [".last", "alpine.toml"]);
@@ -1215,7 +1269,9 @@ mod tests {
         let foreign = dir.join(format!("alpine.toml.{other_pid}.partial"));
         fs::write(&foreign, "half-written by another process").expect("write");
 
-        library.save(&stem, "Alpine", &sample_config(&dir)).expect("save");
+        library
+            .save(&stem, "Alpine", &sample_config(&dir))
+            .expect("save");
 
         assert_eq!(
             fs::read_to_string(&foreign).expect("the other process's partial"),
@@ -1223,7 +1279,10 @@ mod tests {
         );
         assert_eq!(
             toml_names(&dir),
-            ["alpine.toml".to_owned(), format!("alpine.toml.{other_pid}.partial")]
+            [
+                "alpine.toml".to_owned(),
+                format!("alpine.toml.{other_pid}.partial")
+            ]
         );
         assert_eq!(library.load().expect("load").vms[0].name, "Alpine");
         remove_dir(&dir);
@@ -1287,9 +1346,17 @@ mod tests {
         let cwd = std::env::current_dir().expect("working directory");
         let saved = &contents.vms[0].config;
         assert_eq!(saved.pc().expect("a PC").bios, cwd.join("roms/bios.bin"));
-        assert_eq!(saved.pc().expect("a PC").vga_bios, Some(cwd.join("roms/vgabios.bin")));
         assert_eq!(
-            saved.pc().expect("a PC").cdrom.as_ref().map(|cdrom| cdrom.path.as_path()),
+            saved.pc().expect("a PC").vga_bios,
+            Some(cwd.join("roms/vgabios.bin"))
+        );
+        assert_eq!(
+            saved
+                .pc()
+                .expect("a PC")
+                .cdrom
+                .as_ref()
+                .map(|cdrom| cdrom.path.as_path()),
             Some(cwd.join("boot.iso").as_path())
         );
         remove_dir(&dir);
@@ -1343,7 +1410,12 @@ mod tests {
         let library_dir = scratch_dir("bundled-library");
         let exe_dir = scratch_dir("bundled-exe");
         let library = VmLibrary::open(library_dir.clone()).expect("open");
-        assert_eq!(library.import_bundled_vm(&exe_dir).expect("nothing to import"), None);
+        assert_eq!(
+            library
+                .import_bundled_vm(&exe_dir)
+                .expect("nothing to import"),
+            None
+        );
         fs::write(
             exe_dir.join(DEFAULT_CONFIG_FILE),
             "[rom]\nbios = \"roms/BIOS-bochs-latest\"\n\n[cdrom]\npath = \"boot.iso\"\n",
@@ -1353,9 +1425,15 @@ mod tests {
         let stem = library.import_bundled_vm(&exe_dir).expect("import");
         let contents = library.load().expect("load");
 
-        assert_eq!(stem.map(|stem| stem.as_str().to_owned()), Some("rusty-box".to_owned()));
+        assert_eq!(
+            stem.map(|stem| stem.as_str().to_owned()),
+            Some("rusty-box".to_owned())
+        );
         assert_eq!(contents.vms[0].name, DEFAULT_VM_NAME);
-        assert_eq!(contents.vms[0].config.pc().expect("a PC").bios, exe_dir.join("roms/BIOS-bochs-latest"));
+        assert_eq!(
+            contents.vms[0].config.pc().expect("a PC").bios,
+            exe_dir.join("roms/BIOS-bochs-latest")
+        );
         remove_dir(&library_dir);
         remove_dir(&exe_dir);
     }
@@ -1365,7 +1443,10 @@ mod tests {
     fn a_relative_environment_directory_counts_as_unset() {
         let absolute = std::env::temp_dir();
         assert_eq!(absolute_dir(Some("relative/dir".into())), None);
-        assert_eq!(absolute_dir(Some(absolute.clone().into_os_string())), Some(absolute));
+        assert_eq!(
+            absolute_dir(Some(absolute.clone().into_os_string())),
+            Some(absolute)
+        );
         assert_eq!(absolute_dir(None), None);
     }
 }

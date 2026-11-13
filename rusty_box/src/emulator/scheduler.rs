@@ -1,17 +1,11 @@
-use crate::{
-    cpu::{
-        apic::{LocalApicCpuEvent, LocalApicTimerActivation, PendingIpi},
-        cpu::CpuActivityState,
-        instrumentation::Instrumentation,
-        BxCpuC, CpuError, ResetReason, Result as CpuResult,
-    },
-    Result,
-};
-
-
 use super::{
-    CpuMask, DeliveryRoute, Emulator, Progress, SliceEngine, SliceRequest, BOCHS_APIC_BUS_ID_MASK,
+    BOCHS_APIC_BUS_ID_MASK, CpuMask, DeliveryRoute, Emulator, Progress, SliceEngine, SliceRequest,
 };
+use crate::Result;
+use crate::cpu::apic::{LocalApicCpuEvent, LocalApicTimerActivation, PendingIpi};
+use crate::cpu::cpu::CpuActivityState;
+use crate::cpu::instrumentation::Instrumentation;
+use crate::cpu::{BxCpuC, CpuError, ResetReason, Result as CpuResult};
 
 impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Invalidate every host pointer and decoded trace before memory backing
@@ -56,7 +50,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                         != 0
             }
             _ => {
-
                 cpu.is_unmasked_event_pending(u32::MAX)
                     || (cpu.lapic.intr && cpu.interrupts_enabled())
             }
@@ -199,10 +192,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // machine's to presume.
         let mut total_up_advanced: Option<Progress> = None;
         let mut result: CpuResult<()> = Ok(());
-        let initial_deadline_ticks =
-            u64::from(self.pc_system.get_num_cpu_ticks_left_next_event());
-        let strict_up_deadline =
-            !smp && (strict_limit || initial_deadline_ticks <= batch_size);
+        let initial_deadline_ticks = u64::from(self.pc_system.get_num_cpu_ticks_left_next_event());
+        let strict_up_deadline = !smp && (strict_limit || initial_deadline_ticks <= batch_size);
         let batch_size = if smp {
             batch_size
         } else {
@@ -222,9 +213,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             let strict_smp_deadline =
                 smp && (strict_limit || round_deadline_ticks <= unconstrained_per_cpu_batch);
             let per_cpu_batch = if smp {
-                unconstrained_per_cpu_batch
-                    .min(round_deadline_ticks)
-                    .max(1)
+                unconstrained_per_cpu_batch.min(round_deadline_ticks).max(1)
             } else {
                 (remaining / runnable_count as u64).max(1)
             };
@@ -237,16 +226,14 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             loop {
                 let Some(cpu_index) = self.runnable_mask.next_set(cpu_cursor, cpu_count) else {
                     if smp {
-                        round_ticks = round_ticks.saturating_add(
-                            (cpu_count - cpu_cursor) as u64 * idle_credit,
-                        );
+                        round_ticks = round_ticks
+                            .saturating_add((cpu_count - cpu_cursor) as u64 * idle_credit);
                     }
                     break;
                 };
                 if smp {
-                    round_ticks = round_ticks.saturating_add(
-                        (cpu_index - cpu_cursor) as u64 * idle_credit,
-                    );
+                    round_ticks =
+                        round_ticks.saturating_add((cpu_index - cpu_cursor) as u64 * idle_credit);
                 }
                 cpu_cursor = cpu_index + 1;
                 debug_assert!(self.cpu_runnable_for_batch(cpu_index));
@@ -282,7 +269,11 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                     cpu_index,
                     SliceRequest {
                         instructions: per_cpu_batch,
-                        strict: if smp { strict_smp_deadline } else { strict_up_deadline },
+                        strict: if smp {
+                            strict_smp_deadline
+                        } else {
+                            strict_up_deadline
+                        },
                         tick_denominator: if smp { cpu_count as u64 } else { 1 },
                         yield_after_one_trace: smp,
                     },
@@ -313,8 +304,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                         let elapsed = match advanced {
                             Progress::Instructions(_) => {
                                 if smp {
-                                    let delta =
-                                        self.cpu_ref(cpu_index).tick_delta_since_sync();
+                                    let delta = self.cpu_ref(cpu_index).tick_delta_since_sync();
                                     if delta == 0 {
                                         self.smp_quantum_ticks()
                                     } else {
@@ -471,11 +461,13 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     fn drain_code_breakpoint_hits(&mut self) {
         for index in 0..self.cpu_count() {
             if let Some(pending) = self.cpu_mut_at(index).code_breakpoints.take_hit() {
-                self.raise_stop(crate::emulator::StopCause::Breakpoint(crate::cpu::CodeBreakpointHit {
-                    cpu: index,
-                    breakpoint: pending.breakpoint,
-                    linear: pending.linear,
-                }));
+                self.raise_stop(crate::emulator::StopCause::Breakpoint(
+                    crate::cpu::CodeBreakpointHit {
+                        cpu: index,
+                        breakpoint: pending.breakpoint,
+                        linear: pending.linear,
+                    },
+                ));
             }
         }
     }
@@ -486,7 +478,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     pub(super) fn smp_quantum_ticks(&self) -> u64 {
         (self.config.smp_quantum as u64).clamp(1, 32)
     }
-
 
     /// Apply queued SMC invalidations to every cpu, then drop the queue.
     ///
@@ -553,7 +544,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         Ok(true)
     }
 
-
     /// Check if an interrupt is pending (PIC or LAPIC)
     pub fn has_interrupt(&self) -> bool {
         // Legacy PIC path
@@ -604,7 +594,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         }
         self.refresh_cpu_masks(src);
     }
-
 
     fn deliver_lapic_bus_interrupt(
         &mut self,
@@ -858,11 +847,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
         if let Some(activation) = activate {
             if let Some(handle) = timer_handle {
-                if let Err(e) = self.pc_system.activate_timer_at_ticks(
-                    handle,
-                    activation.deadline_ticks,
-                    false,
-                ) {
+                if let Err(e) =
+                    self.pc_system
+                        .activate_timer_at_ticks(handle, activation.deadline_ticks, false)
+                {
                     tracing::error!(
                         "CPU {cpu_index} LAPIC timer activate (handle {handle}) failed: {e:?}"
                     );
@@ -947,7 +935,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 };
 
                 self.apply_lapic_timer_request(cpu_index, timer_handle, deactivate, activate, true);
-
             }
 
             let ticks_now = self.pc_system.time_ticks();
@@ -1072,160 +1059,160 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // drains, and callers rely on them independently of queued work.
         let had_work = self.scheduler_boundary_work_pending();
         if had_work {
-        // Reset dominates every previously queued effect. Hardware requests
-        // win over software requests from the same boundary.
-        let reset_applied = match self.check_and_handle_resets() {
-            Ok(applied) => applied,
-            // A refusal reset drained on its way out already carries its kind,
-            // its backend code and the operation it failed at. Flattening it
-            // into a nameless boundary failure would cost the caller exactly
-            // what `EngineFault` exists to carry, so it crosses whole. Every
-            // other way reset can fail is a chipset effect that would not
-            // settle, which has no name of its own to lose.
-            Err(crate::Error::Cpu(fault @ CpuError::EngineFault(_))) => return Err(fault),
-            Err(error) => {
-                tracing::error!("machine boundary reset handling failed: {error:?}");
-                return Err(CpuError::MachineBoundaryFailed);
-            }
-        };
-
-        if reset_applied {
-            // Reset discarded all pre-reset LAPIC/device/timer work and
-            // rearmed reset-time owners; servicing anything further here
-            // (or ticking elapsed_ticks) would let pre-reset state leak into
-            // the fresh machine — e.g. a rearmed timer firing before the
-            // first instruction at the reset vector.
-            //
-            // Stopping on a refusal is not "anything further": reset itself
-            // tells the engine the interrupt pin fell, so this exit is one a
-            // refusal can be raised on, and it is the only one that would carry
-            // the fault past its own boundary.
-            //
-            // Leaving by the error channel costs the caller the `true` below:
-            // a boundary that both resets and refuses reports the refusal, not
-            // the reset. That is the inverse of the trade `StopCause::displaces`
-            // makes, and deliberate for the same reason read the other way —
-            // the fault is the fact this call cannot re-offer, while the machine
-            // it hands back is unambiguously reset whether or not the flag says
-            // so, and a caller that stops on the error inspects it before it
-            // could act on a reset.
-            self.stop_on_engine_refusal()?;
-            #[cfg(test)]
-            self.assert_cpu_masks_match_scan();
-            return Ok(true);
-        }
-
-        // Bochs apic.cc apic_bus_deliver_smi(): an SMI raised by the ACPI
-        // controller (OUT to SMI_CMD 0xB2 with APMC_EN set) goes to CPU 0.
-        // Drained before the apply/quiesce loop below so the pending flag
-        // never trips its has_pending_machine_boundary convergence check.
-        if core::mem::take(&mut self.device_manager.acpi.smi_request_pending) {
-            self.cpu_mut_at(0).deliver_smi();
-        }
-
-        // Source bus work before local control/EOI and captured-epoch timer
-        // requests.
-        self.drain_lapic_bus();
-        self.service_lapic_local_events();
-        self.service_lapic_timer_requests();
-        self.drain_hpet_pending();
-
-        // Apply the final 8237 HRQ level (Bochs pc_system.cc set_HRQ). The
-        // I/O-dispatch copy covers CPU-issued port traffic; the direct DMA
-        // slot covers producers outside I/O dispatch (tests driving set_drq,
-        // device timer callbacks).
-        let mut hrq_level = self.devices.take_hrq_level();
-        if let Some(level) = self.device_manager.dma.take_hrq_request() {
-            hrq_level = Some(level);
-        }
-        if let Some(level) = hrq_level {
-            self.pc_system.set_hrq(level);
-        }
-
-        // Apply A20 and PCI/memory effects until no producer remains. Capture
-        // both simultaneous A20 desires before changing either controller
-        // mirror, then apply the established port92-then-keyboard order.
-        let mut mapping_changed = false;
-        let mut quiesced = false;
-        for _ in 0..16 {
-            let (port92_a20, keyboard_a20) = {
-                let devices = &mut self.device_manager;
-                let port92 = devices
-                    .port92
-                    .a20_change_pending
-                    .then_some(devices.port92.a20_gate);
-                let keyboard = devices
-                    .keyboard
-                    .a20_change_pending
-                    .then_some(devices.keyboard.a20_enabled);
-                devices.port92.a20_change_pending = false;
-                devices.keyboard.a20_change_pending = false;
-                (port92, keyboard)
-            };
-            if let Some(enabled) = port92_a20 {
-                mapping_changed |= self.apply_a20_gate(enabled);
-            }
-            if let Some(enabled) = keyboard_a20 {
-                mapping_changed |= self.apply_a20_gate(enabled);
-            }
-
-            match self.device_manager.apply_pending_machine_boundary(
-                &mut self.devices,
-                &mut self.memory,
-            ) {
-                Ok(effects) => mapping_changed |= effects.memory_mapping_changed,
+            // Reset dominates every previously queued effect. Hardware requests
+            // win over software requests from the same boundary.
+            let reset_applied = match self.check_and_handle_resets() {
+                Ok(applied) => applied,
+                // A refusal reset drained on its way out already carries its kind,
+                // its backend code and the operation it failed at. Flattening it
+                // into a nameless boundary failure would cost the caller exactly
+                // what `EngineFault` exists to carry, so it crosses whole. Every
+                // other way reset can fail is a chipset effect that would not
+                // settle, which has no name of its own to lose.
+                Err(crate::Error::Cpu(fault @ CpuError::EngineFault(_))) => return Err(fault),
                 Err(error) => {
-                    tracing::error!("machine boundary application failed: {error:?}");
-                    self.invalidate_all_cpu_host_mappings();
+                    tracing::error!("machine boundary reset handling failed: {error:?}");
                     return Err(CpuError::MachineBoundaryFailed);
                 }
+            };
+
+            if reset_applied {
+                // Reset discarded all pre-reset LAPIC/device/timer work and
+                // rearmed reset-time owners; servicing anything further here
+                // (or ticking elapsed_ticks) would let pre-reset state leak into
+                // the fresh machine — e.g. a rearmed timer firing before the
+                // first instruction at the reset vector.
+                //
+                // Stopping on a refusal is not "anything further": reset itself
+                // tells the engine the interrupt pin fell, so this exit is one a
+                // refusal can be raised on, and it is the only one that would carry
+                // the fault past its own boundary.
+                //
+                // Leaving by the error channel costs the caller the `true` below:
+                // a boundary that both resets and refuses reports the refusal, not
+                // the reset. That is the inverse of the trade `StopCause::displaces`
+                // makes, and deliberate for the same reason read the other way —
+                // the fault is the fact this call cannot re-offer, while the machine
+                // it hands back is unambiguously reset whether or not the flag says
+                // so, and a caller that stops on the error inspects it before it
+                // could act on a reset.
+                self.stop_on_engine_refusal()?;
+                #[cfg(test)]
+                self.assert_cpu_masks_match_scan();
+                return Ok(true);
             }
 
-            if !self.device_manager.has_pending_machine_boundary() {
-                quiesced = true;
-                break;
+            // Bochs apic.cc apic_bus_deliver_smi(): an SMI raised by the ACPI
+            // controller (OUT to SMI_CMD 0xB2 with APMC_EN set) goes to CPU 0.
+            // Drained before the apply/quiesce loop below so the pending flag
+            // never trips its has_pending_machine_boundary convergence check.
+            if core::mem::take(&mut self.device_manager.acpi.smi_request_pending) {
+                self.cpu_mut_at(0).deliver_smi();
             }
-        }
-        if !quiesced {
-            #[cfg(test)]
-            tracing::debug!(
-                "machine boundary failed to quiesce: platform={:?} rest={:?}",
-                self.device_manager.pending,
-                (
-                    self.device_manager.port92.a20_change_pending,
-                    self.device_manager.keyboard.a20_change_pending,
-                    self.device_manager.port92.reset_request,
-                    self.device_manager.keyboard.reset_requested,
-                    self.device_manager.pci2isa.reset_request,
-                )
-            );
-            self.invalidate_all_cpu_host_mappings();
-            return Err(CpuError::MachineBoundaryFailed);
-        }
-        let a20_enabled = self.pc_system.get_enable_a20();
-        self.device_manager.port92.a20_gate = a20_enabled;
-        self.device_manager.keyboard.a20_enabled = a20_enabled;
-        if mapping_changed {
-            self.invalidate_all_cpu_host_mappings();
-            // The processors' cached translations are not the only copy of
-            // the map that just moved. An engine that installed it in
-            // hardware holds one too, and this is the one place the machine
-            // knows it moved — every producer of a topology change
-            // (PAM, SMRAM, the BIOS-write gate, a relocated BAR, A20) is
-            // aggregated above (R5).
-            if let Err(fault) =
-                <E as SliceEngine<T>>::memory_map_changed(&mut self.engine, &mut self.memory)
-            {
-                self.engine_fault = Some(fault);
+
+            // Source bus work before local control/EOI and captured-epoch timer
+            // requests.
+            self.drain_lapic_bus();
+            self.service_lapic_local_events();
+            self.service_lapic_timer_requests();
+            self.drain_hpet_pending();
+
+            // Apply the final 8237 HRQ level (Bochs pc_system.cc set_HRQ). The
+            // I/O-dispatch copy covers CPU-issued port traffic; the direct DMA
+            // slot covers producers outside I/O dispatch (tests driving set_drq,
+            // device timer callbacks).
+            let mut hrq_level = self.devices.take_hrq_level();
+            if let Some(level) = self.device_manager.dma.take_hrq_request() {
+                hrq_level = Some(level);
             }
-            // A map the engine could not install leaves by the same choke point
-            // as the other two fallible engine calls (R5), so it raises a stop
-            // rather than only propagating: the three callers with no error
-            // channel log the fault and continue, and continuing here would run
-            // a guest against a map only the model believes in.
-            self.stop_on_engine_refusal()?;
-        }
-        self.drain_device_timer_requests();
+            if let Some(level) = hrq_level {
+                self.pc_system.set_hrq(level);
+            }
+
+            // Apply A20 and PCI/memory effects until no producer remains. Capture
+            // both simultaneous A20 desires before changing either controller
+            // mirror, then apply the established port92-then-keyboard order.
+            let mut mapping_changed = false;
+            let mut quiesced = false;
+            for _ in 0..16 {
+                let (port92_a20, keyboard_a20) = {
+                    let devices = &mut self.device_manager;
+                    let port92 = devices
+                        .port92
+                        .a20_change_pending
+                        .then_some(devices.port92.a20_gate);
+                    let keyboard = devices
+                        .keyboard
+                        .a20_change_pending
+                        .then_some(devices.keyboard.a20_enabled);
+                    devices.port92.a20_change_pending = false;
+                    devices.keyboard.a20_change_pending = false;
+                    (port92, keyboard)
+                };
+                if let Some(enabled) = port92_a20 {
+                    mapping_changed |= self.apply_a20_gate(enabled);
+                }
+                if let Some(enabled) = keyboard_a20 {
+                    mapping_changed |= self.apply_a20_gate(enabled);
+                }
+
+                match self
+                    .device_manager
+                    .apply_pending_machine_boundary(&mut self.devices, &mut self.memory)
+                {
+                    Ok(effects) => mapping_changed |= effects.memory_mapping_changed,
+                    Err(error) => {
+                        tracing::error!("machine boundary application failed: {error:?}");
+                        self.invalidate_all_cpu_host_mappings();
+                        return Err(CpuError::MachineBoundaryFailed);
+                    }
+                }
+
+                if !self.device_manager.has_pending_machine_boundary() {
+                    quiesced = true;
+                    break;
+                }
+            }
+            if !quiesced {
+                #[cfg(test)]
+                tracing::debug!(
+                    "machine boundary failed to quiesce: platform={:?} rest={:?}",
+                    self.device_manager.pending,
+                    (
+                        self.device_manager.port92.a20_change_pending,
+                        self.device_manager.keyboard.a20_change_pending,
+                        self.device_manager.port92.reset_request,
+                        self.device_manager.keyboard.reset_requested,
+                        self.device_manager.pci2isa.reset_request,
+                    )
+                );
+                self.invalidate_all_cpu_host_mappings();
+                return Err(CpuError::MachineBoundaryFailed);
+            }
+            let a20_enabled = self.pc_system.get_enable_a20();
+            self.device_manager.port92.a20_gate = a20_enabled;
+            self.device_manager.keyboard.a20_enabled = a20_enabled;
+            if mapping_changed {
+                self.invalidate_all_cpu_host_mappings();
+                // The processors' cached translations are not the only copy of
+                // the map that just moved. An engine that installed it in
+                // hardware holds one too, and this is the one place the machine
+                // knows it moved — every producer of a topology change
+                // (PAM, SMRAM, the BIOS-write gate, a relocated BAR, A20) is
+                // aggregated above (R5).
+                if let Err(fault) =
+                    <E as SliceEngine<T>>::memory_map_changed(&mut self.engine, &mut self.memory)
+                {
+                    self.engine_fault = Some(fault);
+                }
+                // A map the engine could not install leaves by the same choke point
+                // as the other two fallible engine calls (R5), so it raises a stop
+                // rather than only propagating: the three callers with no error
+                // channel log the fault and continue, and continuing here would run
+                // a guest against a map only the model believes in.
+                self.stop_on_engine_refusal()?;
+            }
+            self.drain_device_timer_requests();
         } // had_work prologue
         // Step virtual time only to the earliest owner deadline, dispatch
         // every tied owner in registration order, then recompute. Callback
@@ -1305,7 +1292,11 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         Err(CpuError::EngineFault(fault))
     }
 
-    pub(super) fn apply_lapic_cpu_event(&mut self, target: usize, event: Option<LocalApicCpuEvent>) {
+    pub(super) fn apply_lapic_cpu_event(
+        &mut self,
+        target: usize,
+        event: Option<LocalApicCpuEvent>,
+    ) {
         let Some(event) = event else {
             return;
         };
@@ -1322,6 +1313,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             LocalApicCpuEvent::Sipi(vector) => self.exec_ctx(target).deliver_sipi(vector),
         }
     }
+
     /// Rebuild CPU interrupt-level bits after snapshot restore without
     /// consuming any restored PIC, IOAPIC, LAPIC, or timer work queues.
     #[cfg(feature = "std")]

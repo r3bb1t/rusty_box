@@ -20,7 +20,7 @@
 use super::counter::PredCounter;
 use super::{Esize, Pv, Zv};
 use crate::bus::{AccessWidth, PhysBus};
-use crate::cpu::exec::{bit, bits, sext, ExecResult, Fault, Flow};
+use crate::cpu::exec::{ExecResult, Fault, Flow, bit, bits, sext};
 use crate::cpu::features::VecLen;
 use crate::cpu::mmu::DataAccess;
 use crate::cpu::{Cpu, Levels};

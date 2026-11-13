@@ -16,18 +16,18 @@
 //! - **Keyboard (8042)**: PS/2 keyboard and mouse controller
 //! - **HardDrive (ATA/IDE)**: Hard disk controller
 
-use crate::ring_buffer::RingBuffer;
-// In scope for the dispatch below: `PioTarget`/`MmioTarget` answer as devices,
-// so the verbs reach them through the trait rather than through a vtable.
-use rusty_box_devices::api::{MmioDevice, PioDevice};
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-#[cfg(feature = "std")]
-use crate::snapshot::{checked_snapshot_len_add, SnapError, SnapRead, SnapResult, SnapWrite};
-
 /// An x86 I/O port, the unit every port-side signature in this module takes.
 pub use rusty_box_devices::api::IoPort;
+// In scope for the dispatch below: `PioTarget`/`MmioTarget` answer as devices,
+// so the verbs reach them through the trait rather than through a vtable.
+use rusty_box_devices::api::{MmioDevice, PioDevice};
+
+use crate::ring_buffer::RingBuffer;
+#[cfg(feature = "std")]
+use crate::snapshot::{SnapError, SnapRead, SnapResult, SnapWrite, checked_snapshot_len_add};
 
 /// The port that is a debug console while [`PortE9Hack`] is on — Bochs
 /// unmapped.cc and io.cc `allow_io`.
@@ -131,13 +131,13 @@ pub mod hpet;
 pub mod ioapic;
 pub mod irq;
 pub mod keyboard;
-pub mod scancodes;
 pub mod pci;
 pub mod pci2isa;
 pub mod pci_ide;
+pub mod scancodes;
 pub use crate::pic;
-pub mod pit;
 pub mod ide;
+pub mod pit;
 #[cfg(feature = "std")]
 pub(crate) mod realtime;
 pub mod serial;
@@ -153,11 +153,10 @@ pub use ioapic::BxIoApic;
 pub use irq::IrqFabric;
 pub use keyboard::BxKeyboardC;
 pub use pci::BxPciBridge;
-pub use pci2isa::BxPiix3;
 pub use pci_ide::BxPciIde;
+pub use pci2isa::BxPiix3;
 pub use pic::BxPicC;
 pub use pit::BxPitC;
-pub use serial::BxSerialC;
 // VgaCore is pub(crate) - not exported outside the crate
 #[cfg(feature = "alloc")]
 /// The NV card, named beside its siblings in this namespace even though
@@ -166,6 +165,7 @@ pub use serial::BxSerialC;
 /// ported-ahead model quietly stops existing.
 #[cfg(feature = "alloc")]
 pub use rusty_box_devices::display::geforce::BxGeForceC;
+pub use serial::BxSerialC;
 
 /// The port tables span the whole port space twice, so this struct's size is
 /// multiplied by 131072. Pinned here so a future field addition is a
@@ -302,36 +302,36 @@ impl TimerRequestTable {
 pub struct DevSlot(u8);
 
 impl DevSlot {
-    /// No device registered — an unclaimed port.
-    pub const NONE: Self = Self(0);
-    /// 8259 PIC (Programmable Interrupt Controller).
-    pub const PIC: Self = Self(1);
-    /// 8254 PIT (Programmable Interval Timer).
-    pub const PIT: Self = Self(2);
+    /// PIIX4 ACPI power management.
+    pub const ACPI: Self = Self(11);
     /// CMOS/RTC.
     pub const CMOS: Self = Self(3);
     /// 8237 DMA controller.
     pub const DMA: Self = Self(4);
-    /// 8042 keyboard/mouse controller.
-    pub const KEYBOARD: Self = Self(5);
+    /// QEMU fw_cfg firmware configuration device.
+    pub const FW_CFG: Self = Self(12);
+    /// High Precision Event Timer. Memory-mapped only.
+    pub const HPET: Self = Self(14);
     /// ATA/ATAPI task-file registers.
     pub const IDE: Self = Self(6);
+    /// 82093AA I/O APIC. Memory-mapped only — it occupies no I/O port.
+    pub const IOAPIC: Self = Self(13);
+    /// 8042 keyboard/mouse controller.
+    pub const KEYBOARD: Self = Self(5);
+    /// No device registered — an unclaimed port.
+    pub const NONE: Self = Self(0);
+    /// PCI bus — config address/data, PIIX3 ELCR and APM ports.
+    pub const PCI: Self = Self(10);
+    /// 8259 PIC (Programmable Interrupt Controller).
+    pub const PIC: Self = Self(1);
+    /// 8254 PIT (Programmable Interval Timer).
+    pub const PIT: Self = Self(2);
+    /// Port 92h system control (A20/reset).
+    pub const PORT92: Self = Self(9);
     /// 16550 UART serial port.
     pub const SERIAL: Self = Self(7);
     /// VGA display controller.
     pub const VGA: Self = Self(8);
-    /// Port 92h system control (A20/reset).
-    pub const PORT92: Self = Self(9);
-    /// PCI bus — config address/data, PIIX3 ELCR and APM ports.
-    pub const PCI: Self = Self(10);
-    /// PIIX4 ACPI power management.
-    pub const ACPI: Self = Self(11);
-    /// QEMU fw_cfg firmware configuration device.
-    pub const FW_CFG: Self = Self(12);
-    /// 82093AA I/O APIC. Memory-mapped only — it occupies no I/O port.
-    pub const IOAPIC: Self = Self(13);
-    /// High Precision Event Timer. Memory-mapped only.
-    pub const HPET: Self = Self(14);
 
     /// True for the unclaimed-port slot.
     #[inline]
@@ -564,6 +564,7 @@ impl BxDevicesC {
     pub(crate) fn take_shutdown_request(&mut self) -> bool {
         core::mem::take(&mut self.shutdown_requested)
     }
+
     /// Configure the scheduler tick frequency before device registration.
     #[inline]
     pub(crate) fn set_timer_ips(&mut self, ips: u64) {
@@ -605,6 +606,7 @@ impl BxDevicesC {
         };
         self.request_timer(owner, request);
     }
+
     /// Non-consuming test of every I/O-latched boundary slot, used by the
     /// scheduler's no-work fast path. Covers exactly the sources
     /// `service_scheduler_boundary` drains from this layer: the final PIC and
@@ -740,11 +742,7 @@ impl BxDevicesC {
         tracing::trace!("Unregistered I/O handlers for port {:#06x}", port);
     }
 
-    pub(crate) fn apply_cmos_timer_sync(
-        &mut self,
-        current_ticks: u64,
-        sync: cmos::CmosTimerSync,
-    ) {
+    pub(crate) fn apply_cmos_timer_sync(&mut self, current_ticks: u64, sync: cmos::CmosTimerSync) {
         for (owner, action, continuous) in [
             (DeviceTimerOwner::CmosPeriodic, sync.periodic, true),
             (DeviceTimerOwner::CmosOneSecond, sync.one_second, true),
@@ -1416,9 +1414,7 @@ fn write_timer_request_snapshot<W: SnapWrite>(
 }
 
 #[cfg(feature = "std")]
-fn read_timer_request_snapshot<R: SnapRead>(
-    reader: &mut R,
-) -> SnapResult<TimerRequest> {
+fn read_timer_request_snapshot<R: SnapRead>(reader: &mut R) -> SnapResult<TimerRequest> {
     match reader.read_u8()? {
         0 => Ok(TimerRequest::Unchanged),
         1 => Ok(TimerRequest::Deactivate),
@@ -1442,14 +1438,8 @@ impl BxDevicesC {
         self.validate_snapshot_v3_state()?;
 
         let mut len = 1u64; // PCI enabled
-        len = checked_snapshot_len_add(
-            len,
-            if self.pic_intr_level.is_some() { 2 } else { 1 },
-        )?;
-        len = checked_snapshot_len_add(
-            len,
-            if self.hrq_level.is_some() { 2 } else { 1 },
-        )?;
+        len = checked_snapshot_len_add(len, if self.pic_intr_level.is_some() { 2 } else { 1 })?;
+        len = checked_snapshot_len_add(len, if self.hrq_level.is_some() { 2 } else { 1 })?;
         len = checked_snapshot_len_add(len, 1)?; // scheduler boundary latch
         for request in self.timer_requests.slots {
             len = checked_snapshot_len_add(len, timer_request_snapshot_len(request)?)?;
@@ -1527,8 +1517,7 @@ impl BxDevicesC {
             None
         };
         let scheduler_boundary_requested = reader.read_bool()?;
-        let mut timer_requests =
-            [TimerRequest::Unchanged; BX_FIXED_TIMER_OWNER_COUNT];
+        let mut timer_requests = [TimerRequest::Unchanged; BX_FIXED_TIMER_OWNER_COUNT];
         let mut has_timer_request = false;
         for request in &mut timer_requests {
             *request = read_timer_request_snapshot(reader)?;
@@ -1589,8 +1578,9 @@ impl BxDevicesC {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box_devices::pci::PciDevice;
+
+    use super::*;
 
     /// BxDevicesC is ~1.5MB due to [IoHandlerEntry; 65536] x2.
     /// Allocate on heap to avoid test stack overflow.
@@ -1644,15 +1634,18 @@ mod tests {
             let first = dm.pci_bridge.smram_effect();
             assert_eq!(
                 first,
-                rusty_box_devices::api::ChipsetEffect::Smram(rusty_box_devices::api::SmramControl::Enable {
-                    dopen: true,
-                    dcls: false
-                })
+                rusty_box_devices::api::ChipsetEffect::Smram(
+                    rusty_box_devices::api::SmramControl::Enable {
+                        dopen: true,
+                        dcls: false
+                    }
+                )
             );
             assert_eq!(first, dm.pci_bridge.smram_effect(), "producer must be pure");
 
             // Every PAM area is described, not just the ones that changed.
-            let rusty_box_devices::api::ChipsetEffect::ShadowRam(areas) = dm.pci_bridge.shadow_ram_effect()
+            let rusty_box_devices::api::ChipsetEffect::ShadowRam(areas) =
+                dm.pci_bridge.shadow_ram_effect()
             else {
                 panic!("the bridge must describe shadow RAM as such")
             };
@@ -1797,8 +1790,14 @@ mod tests {
         // Reading unhandled port should return 0xFF/0xFFFF/0xFFFFFFFF
         let unclaimed = IoPort::new(0x1234);
         assert_eq!(devices.inp(unclaimed, 1, 0, &mut pc_system, &mut dm), 0xFF);
-        assert_eq!(devices.inp(unclaimed, 2, 0, &mut pc_system, &mut dm), 0xFFFF);
-        assert_eq!(devices.inp(unclaimed, 4, 0, &mut pc_system, &mut dm), 0xFFFFFFFF);
+        assert_eq!(
+            devices.inp(unclaimed, 2, 0, &mut pc_system, &mut dm),
+            0xFFFF
+        );
+        assert_eq!(
+            devices.inp(unclaimed, 4, 0, &mut pc_system, &mut dm),
+            0xFFFFFFFF
+        );
     }
 
     // Bochs unmapped.cc port 0x8900 "Shutdown" protocol: the ASCII bytes of
@@ -1849,26 +1848,64 @@ mod tests {
         // (this leaked BIOS text onto the COM1 stdout mirror).
         let (rombios_info, vgabios_info) = (IoPort::new(0x0402), IoPort::new(0x0500));
         for byte in b"PIIX3/PIIX4 init: elcr=60 70\n" {
-            devices.outp(rombios_info, u32::from(*byte), 1, 0, &mut pc_system, &mut dm, &mut mem);
+            devices.outp(
+                rombios_info,
+                u32::from(*byte),
+                1,
+                0,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
         }
         for byte in b"VBE present\n" {
-            devices.outp(vgabios_info, u32::from(*byte), 1, 0, &mut pc_system, &mut dm, &mut mem);
+            devices.outp(
+                vgabios_info,
+                u32::from(*byte),
+                1,
+                0,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
         }
         assert!(devices.port_e9_output.is_empty());
-        assert_eq!(devices.bios_message_i, 0, "newline must flush the rombios buffer");
-        assert_eq!(devices.vgabios_message_i, 0, "newline must flush the vgabios buffer");
+        assert_eq!(
+            devices.bios_message_i, 0,
+            "newline must flush the rombios buffer"
+        );
+        assert_eq!(
+            devices.vgabios_message_i, 0,
+            "newline must flush the vgabios buffer"
+        );
 
         // A line longer than the Bochs 80-byte buffer flushes on overflow and
         // keeps accumulating the remainder.
         for _ in 0..BX_BIOS_MESSAGE_SIZE + 5 {
             let rombios_debug = IoPort::new(0x0403);
-            devices.outp(rombios_debug, u32::from(b'x'), 1, 0, &mut pc_system, &mut dm, &mut mem);
+            devices.outp(
+                rombios_debug,
+                u32::from(b'x'),
+                1,
+                0,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
         }
         assert_eq!(devices.bios_message_i, 5);
         assert!(devices.port_e9_output.is_empty());
 
         // The genuine port-0xE9 debug console still lands in the stream.
-        devices.outp(DEBUGCON_PORT, u32::from(b'X'), 1, 0, &mut pc_system, &mut dm, &mut mem);
+        devices.outp(
+            DEBUGCON_PORT,
+            u32::from(b'X'),
+            1,
+            0,
+            &mut pc_system,
+            &mut dm,
+            &mut mem,
+        );
         assert_eq!(devices.port_e9_output.len(), 1);
     }
 
@@ -2008,17 +2045,25 @@ mod tests {
             assert_ne!(dm.irq.pic().master.irq_in[1], 0);
 
             io.set_timer_ips(1_000_000);
-            io.register_io_read_handler(DevSlot::KEYBOARD, keyboard::KBD_DATA_PORT, "Keyboard", 0x1);
-            assert_eq!(io.inp(keyboard::KBD_DATA_PORT, 1, 77, &mut pc_system, &mut dm), delivered);
+            io.register_io_read_handler(
+                DevSlot::KEYBOARD,
+                keyboard::KBD_DATA_PORT,
+                "Keyboard",
+                0x1,
+            );
+            assert_eq!(
+                io.inp(keyboard::KBD_DATA_PORT, 1, 77, &mut pc_system, &mut dm),
+                delivered
+            );
 
             assert_eq!(dm.irq.pic().master.irq_in[1], 0);
             // The 8042 timer is continuous (Bochs keyboard.cc): keyboard port
             // I/O must not produce one-shot owner timer requests.
             assert_eq!(
-                io.take_boundary_timer_requests().get(DeviceTimerOwner::Keyboard),
+                io.take_boundary_timer_requests()
+                    .get(DeviceTimerOwner::Keyboard),
                 TimerRequest::Unchanged
             );
         });
     }
-
 }

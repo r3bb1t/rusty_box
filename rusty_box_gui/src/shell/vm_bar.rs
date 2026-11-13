@@ -10,22 +10,23 @@
 //! when it does not. The `…` at the far right always holds Dump RAM and the
 //! verbs that belong to the application rather than to the VM.
 
+#[cfg(not(target_arch = "wasm32"))]
+use egui::RichText;
+
 #[cfg(target_os = "android")]
 use crate::shell::destination::ShellPage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::VmBarAction;
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+use crate::shell::theme::TEXT_CAPTION;
 #[cfg(target_os = "android")]
 use crate::shell::theme::{Accent, TEXT_MUTED};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::theme::{BG_PANEL, TEXT_BODY, TEXT_PRIMARY};
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
-use crate::shell::theme::TEXT_CAPTION;
+use crate::shell::widgets::{ShellStateBadge, text_width};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::widgets::{button_width, hairline_below, primary_button};
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
-use crate::shell::widgets::{text_width, ShellStateBadge};
-#[cfg(not(target_arch = "wasm32"))]
-use egui::RichText;
 
 /// What the bar needs to know to draw itself. Borrowed, so the bar cannot
 /// change any of it.
@@ -154,9 +155,7 @@ fn page_tabs_width(ui: &egui::Ui, pages: &[ShellPage]) -> f32 {
     let gap = ui.spacing().item_spacing.x;
     pages
         .iter()
-        .map(|page| {
-            button_width(ui, RichText::new(page.label()).size(TEXT_BODY).strong()) + gap
-        })
+        .map(|page| button_width(ui, RichText::new(page.label()).size(TEXT_BODY).strong()) + gap)
         .sum()
 }
 

@@ -4,7 +4,7 @@
 #[cfg(all(test, not(debug_assertions)))]
 use no_panic::no_panic;
 
-use super::{short, DwarfError, Format};
+use super::{DwarfError, Format, short};
 use crate::read::Bytes;
 
 /// `unit_length` values from here up are reserved; 0xFFFFFFFF marks 64-bit
@@ -35,7 +35,10 @@ pub enum UnitKind {
     Partial,
     /// A type unit: the signature others name it by, and its type's entry
     /// offset from the unit's start.
-    Type { signature: u64, type_offset: u64 },
+    Type {
+        signature: u64,
+        type_offset: u64,
+    },
     Skeleton,
     SplitCompile,
 }
@@ -75,55 +78,95 @@ impl Fields<'_> {
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn offset(self, at: usize) -> Result<u64, DwarfError> {
         match self.format {
-            Format::Dwarf32 => self.section.u32_le(at).map(u64::from).map_err(|source| short("unit header", source)),
-            Format::Dwarf64 => self.section.u64_le(at).map_err(|source| short("unit header", source)),
+            Format::Dwarf32 => self
+                .section
+                .u32_le(at)
+                .map(u64::from)
+                .map_err(|source| short("unit header", source)),
+            Format::Dwarf64 => self
+                .section
+                .u64_le(at)
+                .map_err(|source| short("unit header", source)),
         }
     }
 
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn u8(self, at: usize) -> Result<u8, DwarfError> {
-        self.section.u8(at).map_err(|source| short("unit header", source))
+        self.section
+            .u8(at)
+            .map_err(|source| short("unit header", source))
     }
 
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn u64(self, at: usize) -> Result<u64, DwarfError> {
-        self.section.u64_le(at).map_err(|source| short("unit header", source))
+        self.section
+            .u64_le(at)
+            .map_err(|source| short("unit header", source))
     }
 }
 
 /// `at + by`, or the error a header past `usize` gives.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 fn past(at: usize, by: usize) -> Result<usize, DwarfError> {
-    at.checked_add(by).ok_or(DwarfError::TooMany { what: "section bytes", count: u64::MAX })
+    at.checked_add(by).ok_or(DwarfError::TooMany {
+        what: "section bytes",
+        count: u64::MAX,
+    })
 }
 
 /// The unit length (§7.4): 32-bit, or 0xFFFFFFFF and a 64-bit length.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 fn decode_length(section: Bytes<'_>, at: usize) -> Result<Length, DwarfError> {
-    let first = section.u32_le(at).map_err(|source| short("unit header", source))?;
+    let first = section
+        .u32_le(at)
+        .map_err(|source| short("unit header", source))?;
     if first == DWARF64_MARK {
-        let length = section.u64_le(past(at, 4)?).map_err(|source| short("unit header", source))?;
-        return Ok(Length { format: Format::Dwarf64, length, header_at: past(at, 12)? });
+        let length = section
+            .u64_le(past(at, 4)?)
+            .map_err(|source| short("unit header", source))?;
+        return Ok(Length {
+            format: Format::Dwarf64,
+            length,
+            header_at: past(at, 12)?,
+        });
     }
     if first >= RESERVED_LENGTH {
         return Err(DwarfError::ReservedLength { at, value: first });
     }
-    Ok(Length { format: Format::Dwarf32, length: u64::from(first), header_at: past(at, 4)? })
+    Ok(Length {
+        format: Format::Dwarf32,
+        length: u64::from(first),
+        header_at: past(at, 4)?,
+    })
 }
 
 /// The unit header at `at` in `section`.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
-pub fn decode_unit_header(section: Bytes<'_>, at: usize, kind_of: UnitSection) -> Result<UnitHeader, DwarfError> {
+pub fn decode_unit_header(
+    section: Bytes<'_>,
+    at: usize,
+    kind_of: UnitSection,
+) -> Result<UnitHeader, DwarfError> {
     let length = decode_length(section, at)?;
-    let size = usize::try_from(length.length).map_err(|_| DwarfError::TooMany { what: "unit bytes", count: length.length })?;
+    let size = usize::try_from(length.length).map_err(|_| DwarfError::TooMany {
+        what: "unit bytes",
+        count: length.length,
+    })?;
     let end = past(length.header_at, size)?;
     // The whole unit must lie in the section.
-    section.slice(length.header_at, size).map_err(|source| short("unit", source))?;
-    let version = section.u16_le(length.header_at).map_err(|source| short("unit header", source))?;
+    section
+        .slice(length.header_at, size)
+        .map_err(|source| short("unit", source))?;
+    let version = section
+        .u16_le(length.header_at)
+        .map_err(|source| short("unit header", source))?;
     if !(2..=5).contains(&version) {
         return Err(DwarfError::BadVersion { at, version });
     }
-    let fields = Fields { section, format: length.format };
+    let fields = Fields {
+        section,
+        format: length.format,
+    };
     let offset_size = length.format.offset_size();
     let after_version = past(length.header_at, 2)?;
     let mut header = UnitHeader {
@@ -149,7 +192,10 @@ pub fn decode_unit_header(section: Bytes<'_>, at: usize, kind_of: UnitSection) -
                 let signature = fields.u64(cursor)?;
                 let type_offset = fields.offset(past(cursor, 8)?)?;
                 cursor = past(cursor, past(8, offset_size)?)?;
-                UnitKind::Type { signature, type_offset }
+                UnitKind::Type {
+                    signature,
+                    type_offset,
+                }
             }
             DW_UT_SKELETON => {
                 cursor = past(cursor, 8)?;
@@ -171,12 +217,18 @@ pub fn decode_unit_header(section: Bytes<'_>, at: usize, kind_of: UnitSection) -
                 let signature = fields.u64(cursor)?;
                 let type_offset = fields.offset(past(cursor, 8)?)?;
                 cursor = past(cursor, past(8, offset_size)?)?;
-                UnitKind::Type { signature, type_offset }
+                UnitKind::Type {
+                    signature,
+                    type_offset,
+                }
             }
         };
     }
     if header.address_size != 4 && header.address_size != 8 {
-        return Err(DwarfError::BadAddressSize { at, size: header.address_size });
+        return Err(DwarfError::BadAddressSize {
+            at,
+            size: header.address_size,
+        });
     }
     header.entries_at = cursor;
     Ok(header)

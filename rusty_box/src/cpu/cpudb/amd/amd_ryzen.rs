@@ -5,9 +5,6 @@
 // in rusty_box so SVM / CLZERO / SSE4a / XAPIC_EXT paths have a target
 // to run against.
 
-use crate::cpu::cpuid::BxCpuIdTrait;
-use crate::cpu::decoder::{features::X86Feature, BX_ISA_EXTENSIONS_ARRAY_SIZE};
-
 use bitflags::bitflags;
 
 // Shared Intel-leaf bitflags live under cpudb/intel — rather than copy them
@@ -16,6 +13,9 @@ use bitflags::bitflags;
 use super::super::intel::core_i7_skylake::{
     CpuIdExt1Ecx, CpuIdExt1Edx, CpuIdStd1Ecx, CpuIdStd1Edx, CpuIdStd7Ebx,
 };
+use crate::cpu::cpuid::BxCpuIdTrait;
+use crate::cpu::decoder::BX_ISA_EXTENSIONS_ARRAY_SIZE;
+use crate::cpu::decoder::features::X86Feature;
 
 // ─── Leaf-1 ECX feature base for Ryzen ────────────────────────────────────
 // Bochs ryzen.cc get_std_cpuid_leaf_1_ecx.

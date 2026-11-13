@@ -15,7 +15,7 @@
 #[cfg(all(test, not(debug_assertions)))]
 use no_panic::no_panic;
 
-use crate::read::{copy_prefix, Bytes};
+use crate::read::{Bytes, copy_prefix};
 
 /// RFC 8878 §3.1.1: `0xFD2FB528`, little-endian.
 const MAGIC: u32 = 0xFD2F_B528;
@@ -151,16 +151,23 @@ impl<'a> ForwardBits<'a> {
     fn peek(&self, count: u32) -> u32 {
         let mut value = 0u32;
         for index in 0..count.min(32) {
-            value |= self.bit_at(self.bit.wrapping_add(index as usize)).wrapping_shl(index);
+            value |= self
+                .bit_at(self.bit.wrapping_add(index as usize))
+                .wrapping_shl(index);
         }
         value
     }
 
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn consume(&mut self, count: u32) -> Result<(), ZstdError> {
-        let next = self.bit.checked_add(count as usize).ok_or(corrupt("FSE table description"))?;
+        let next = self
+            .bit
+            .checked_add(count as usize)
+            .ok_or(corrupt("FSE table description"))?;
         if next > self.input.len().saturating_mul(8) {
-            return Err(ZstdError::Truncated { at: self.input.len() });
+            return Err(ZstdError::Truncated {
+                at: self.input.len(),
+            });
         }
         self.bit = next;
         Ok(())
@@ -192,7 +199,10 @@ struct BackwardBits<'a> {
 impl<'a> BackwardBits<'a> {
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn new(input: Bytes<'a>) -> Result<Self, ZstdError> {
-        let last_at = input.len().checked_sub(1).ok_or(corrupt("empty bitstream"))?;
+        let last_at = input
+            .len()
+            .checked_sub(1)
+            .ok_or(corrupt("empty bitstream"))?;
         let last = input.u8(last_at).map_err(|_| corrupt("empty bitstream"))?;
         if last == 0 {
             return Err(corrupt("bitstream end marker"));
@@ -201,7 +211,11 @@ impl<'a> BackwardBits<'a> {
             .checked_mul(8)
             .and_then(|bits| bits.checked_add(highbit(u32::from(last)) as usize))
             .ok_or(corrupt("bitstream size"))?;
-        Ok(BackwardBits { input, total, consumed: 0 })
+        Ok(BackwardBits {
+            input,
+            total,
+            consumed: 0,
+        })
     }
 
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
@@ -261,7 +275,11 @@ struct FseEntry {
     base: u16,
 }
 
-const EMPTY_ENTRY: FseEntry = FseEntry { symbol: 0, bits: 0, base: 0 };
+const EMPTY_ENTRY: FseEntry = FseEntry {
+    symbol: 0,
+    bits: 0,
+    base: 0,
+};
 
 /// Whether a table has been defined in this frame (§3.1.1.3.2.1: "Repeat"
 /// mode reuses the previous block's).
@@ -289,14 +307,21 @@ impl<const N: usize> FseTable<N> {
 
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn cell(&self, state: u32) -> Result<FseEntry, ZstdError> {
-        self.cells.get(state as usize).copied().ok_or(corrupt("FSE state"))
+        self.cells
+            .get(state as usize)
+            .copied()
+            .ok_or(corrupt("FSE state"))
     }
 
     /// The table every state of which decodes `symbol` (RLE mode).
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn rle(&mut self, symbol: u8) {
         if let Some(cell) = self.cells.first_mut() {
-            *cell = FseEntry { symbol, bits: 0, base: 0 };
+            *cell = FseEntry {
+                symbol,
+                bits: 0,
+                base: 0,
+            };
         }
         self.log = 0;
         self.defined = Defined::Yes;
@@ -307,7 +332,10 @@ impl<const N: usize> FseTable<N> {
     /// the reference `FSE_buildDTable`).
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn build(&mut self, counts: &[i16], log: u32) -> Result<(), ZstdError> {
-        let size = 1usize.checked_shl(log).filter(|size| *size <= N).ok_or(corrupt("FSE accuracy"))?;
+        let size = 1usize
+            .checked_shl(log)
+            .filter(|size| *size <= N)
+            .ok_or(corrupt("FSE accuracy"))?;
         let mut next_state = [0u16; 256];
         let mut high = size.wrapping_sub(1);
         for (symbol, count) in counts.iter().enumerate() {
@@ -321,7 +349,10 @@ impl<const N: usize> FseTable<N> {
                 *slot = u16::try_from(*count).map_err(|_| corrupt("FSE counts"))?;
             }
         }
-        let step = size.wrapping_shr(1).wrapping_add(size.wrapping_shr(3)).wrapping_add(3);
+        let step = size
+            .wrapping_shr(1)
+            .wrapping_add(size.wrapping_shr(3))
+            .wrapping_add(3);
         let mask = size.wrapping_sub(1);
         let mut position = 0usize;
         for (symbol, count) in counts.iter().enumerate() {
@@ -348,10 +379,14 @@ impl<const N: usize> FseTable<N> {
         }
         for index in 0..size {
             let cell = self.cells.get_mut(index).ok_or(corrupt("FSE counts"))?;
-            let next = next_state.get_mut(usize::from(cell.symbol)).ok_or(corrupt("FSE symbol"))?;
+            let next = next_state
+                .get_mut(usize::from(cell.symbol))
+                .ok_or(corrupt("FSE symbol"))?;
             let state = u32::from(*next);
             *next = next.wrapping_add(1);
-            let bits = log.checked_sub(highbit(state)).ok_or(corrupt("FSE counts"))?;
+            let bits = log
+                .checked_sub(highbit(state))
+                .ok_or(corrupt("FSE counts"))?;
             let base = state
                 .checked_shl(bits)
                 .and_then(|shifted| shifted.checked_sub(size as u32))
@@ -400,7 +435,10 @@ fn read_fse_description<const N: usize>(
                 }
             }
         }
-        let largest = threshold.wrapping_mul(2).wrapping_sub(1).wrapping_sub(remaining);
+        let largest = threshold
+            .wrapping_mul(2)
+            .wrapping_sub(1)
+            .wrapping_sub(remaining);
         let peeked = bits.peek(width) as i32;
         let low = peeked & threshold.wrapping_sub(1);
         let raw = if low < largest {
@@ -466,11 +504,16 @@ impl HuffmanTable {
         let used;
         if header < 128 {
             let size = usize::from(header);
-            let compressed = input.sub(1, size).map_err(|_| ZstdError::Truncated { at: 1 })?;
+            let compressed = input
+                .sub(1, size)
+                .map_err(|_| ZstdError::Truncated { at: 1 })?;
             used = size.wrapping_add(1);
             let mut table = FseTable::<64>::empty();
-            let description = read_fse_description(compressed, WEIGHT_MAX_LOG, MAX_WEIGHTS, &mut table)?;
-            let stream = compressed.tail(description).map_err(|_| corrupt("Huffman weights"))?;
+            let description =
+                read_fse_description(compressed, WEIGHT_MAX_LOG, MAX_WEIGHTS, &mut table)?;
+            let stream = compressed
+                .tail(description)
+                .map_err(|_| corrupt("Huffman weights"))?;
             count = decode_weights(&table, stream, &mut weights)?;
         } else {
             count = usize::from(header).wrapping_sub(127);
@@ -479,8 +522,14 @@ impl HuffmanTable {
                 .map_err(|_| ZstdError::Truncated { at: 1 })?;
             used = packed.len().wrapping_add(1);
             for (index, slot) in weights.iter_mut().take(count).enumerate() {
-                let byte = packed.u8(index.wrapping_shr(1)).map_err(|_| corrupt("Huffman weights"))?;
-                *slot = if index & 1 == 0 { byte.wrapping_shr(4) } else { byte & 0x0F };
+                let byte = packed
+                    .u8(index.wrapping_shr(1))
+                    .map_err(|_| corrupt("Huffman weights"))?;
+                *slot = if index & 1 == 0 {
+                    byte.wrapping_shr(4)
+                } else {
+                    byte & 0x0F
+                };
             }
         }
         self.build(&mut weights, count)?;
@@ -512,7 +561,8 @@ impl HuffmanTable {
             return Err(corrupt("Huffman weights"));
         }
         let last = weights.get_mut(count).ok_or(corrupt("Huffman weights"))?;
-        *last = u8::try_from(highbit(rest).wrapping_add(1)).map_err(|_| corrupt("Huffman weights"))?;
+        *last =
+            u8::try_from(highbit(rest).wrapping_add(1)).map_err(|_| corrupt("Huffman weights"))?;
         let symbols = weights.get(..=count).ok_or(corrupt("Huffman weights"))?;
         let mut ones = 0usize;
         for weight in symbols {
@@ -526,12 +576,16 @@ impl HuffmanTable {
         let mut position = 0usize;
         for weight in 1..=max_bits {
             let cells = 1usize.wrapping_shl(weight.wrapping_sub(1));
-            let bits = u8::try_from(max_bits.wrapping_add(1).wrapping_sub(weight)).map_err(|_| corrupt("Huffman weights"))?;
+            let bits = u8::try_from(max_bits.wrapping_add(1).wrapping_sub(weight))
+                .map_err(|_| corrupt("Huffman weights"))?;
             let mut symbol = 0u8;
             for symbol_weight in symbols {
                 if u32::from(*symbol_weight) == weight {
                     for _ in 0..cells {
-                        let cell = self.cells.get_mut(position).ok_or(corrupt("Huffman weights"))?;
+                        let cell = self
+                            .cells
+                            .get_mut(position)
+                            .ok_or(corrupt("Huffman weights"))?;
                         *cell = HuffmanEntry { symbol, bits };
                         position = position.wrapping_add(1);
                     }
@@ -572,7 +626,11 @@ impl HuffmanTable {
 /// until the bitstream runs out (reference `FSE_decompress_usingDTable`).
 /// Returns how many weights it decoded.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
-fn decode_weights(table: &FseTable<64>, stream: Bytes<'_>, weights: &mut [u8; 256]) -> Result<usize, ZstdError> {
+fn decode_weights(
+    table: &FseTable<64>,
+    stream: Bytes<'_>,
+    weights: &mut [u8; 256],
+) -> Result<usize, ZstdError> {
     let mut bits = BackwardBits::new(stream)?;
     let mut first = bits.read(table.log);
     let mut second = bits.read(table.log);
@@ -696,7 +754,10 @@ impl Output<'_> {
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn put(&mut self, byte: u8) -> Result<(), ZstdError> {
         let capacity = self.out.len();
-        let slot = self.out.get_mut(self.at).ok_or(ZstdError::OutputFull { capacity })?;
+        let slot = self
+            .out
+            .get_mut(self.at)
+            .ok_or(ZstdError::OutputFull { capacity })?;
         *slot = byte;
         self.at = self.at.wrapping_add(1);
         Ok(())
@@ -740,7 +801,11 @@ struct Literals {
 /// The literals section of a compressed block (§3.1.1.3.1), decoded into
 /// `scratch`.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
-fn read_literals(block: Bytes<'_>, scratch: &mut [u8], state: &mut FrameState) -> Result<Literals, ZstdError> {
+fn read_literals(
+    block: Bytes<'_>,
+    scratch: &mut [u8],
+    state: &mut FrameState,
+) -> Result<Literals, ZstdError> {
     let truncated = ZstdError::Truncated { at: 0 };
     let first = block.u8(0).map_err(|_| truncated)?;
     let kind = first & 3;
@@ -749,40 +814,65 @@ fn read_literals(block: Bytes<'_>, scratch: &mut [u8], state: &mut FrameState) -
     if kind < 2 {
         // Raw (0) or RLE (1): a 5-, 12- or 20-bit size.
         let header = match size_format {
-            0 | 2 => SizeHeader { regenerated: u32::from(first.wrapping_shr(3)), compressed: 0, header: 1 },
+            0 | 2 => SizeHeader {
+                regenerated: u32::from(first.wrapping_shr(3)),
+                compressed: 0,
+                header: 1,
+            },
             1 => SizeHeader {
                 regenerated: u32::from(first.wrapping_shr(4)) | byte(1)?.wrapping_shl(4),
                 compressed: 0,
                 header: 2,
             },
             _ => SizeHeader {
-                regenerated: u32::from(first.wrapping_shr(4)) | byte(1)?.wrapping_shl(4) | byte(2)?.wrapping_shl(12),
+                regenerated: u32::from(first.wrapping_shr(4))
+                    | byte(1)?.wrapping_shl(4)
+                    | byte(2)?.wrapping_shl(12),
                 compressed: 0,
                 header: 3,
             },
         };
         let count = header.regenerated as usize;
-        let target = scratch.get_mut(..count).ok_or(ZstdError::BlockTooLarge { size: count })?;
+        let target = scratch
+            .get_mut(..count)
+            .ok_or(ZstdError::BlockTooLarge { size: count })?;
         if kind == 0 {
             let raw = block.slice(header.header, count).map_err(|_| truncated)?;
             if copy_prefix(target, raw) != count {
                 return Err(corrupt("raw literals"));
             }
-            return Ok(Literals { count, used: header.header.wrapping_add(count) });
+            return Ok(Literals {
+                count,
+                used: header.header.wrapping_add(count),
+            });
         }
         let repeated = block.u8(header.header).map_err(|_| truncated)?;
         target.fill(repeated);
-        return Ok(Literals { count, used: header.header.wrapping_add(1) });
+        return Ok(Literals {
+            count,
+            used: header.header.wrapping_add(1),
+        });
     }
     // Compressed (2) or treeless (3): sizes of 10, 14 or 18 bits.
     let header = match size_format {
         0 | 1 => {
             let bits = u32::from(first) | byte(1)?.wrapping_shl(8) | byte(2)?.wrapping_shl(16);
-            SizeHeader { regenerated: bits.wrapping_shr(4) & 0x3FF, compressed: bits.wrapping_shr(14) & 0x3FF, header: 3 }
+            SizeHeader {
+                regenerated: bits.wrapping_shr(4) & 0x3FF,
+                compressed: bits.wrapping_shr(14) & 0x3FF,
+                header: 3,
+            }
         }
         2 => {
-            let bits = u32::from(first) | byte(1)?.wrapping_shl(8) | byte(2)?.wrapping_shl(16) | byte(3)?.wrapping_shl(24);
-            SizeHeader { regenerated: bits.wrapping_shr(4) & 0x3FFF, compressed: bits.wrapping_shr(18) & 0x3FFF, header: 4 }
+            let bits = u32::from(first)
+                | byte(1)?.wrapping_shl(8)
+                | byte(2)?.wrapping_shl(16)
+                | byte(3)?.wrapping_shl(24);
+            SizeHeader {
+                regenerated: bits.wrapping_shr(4) & 0x3FFF,
+                compressed: bits.wrapping_shr(18) & 0x3FFF,
+                header: 4,
+            }
         }
         _ => {
             let low = u64::from(first)
@@ -802,7 +892,9 @@ fn read_literals(block: Bytes<'_>, scratch: &mut [u8], state: &mut FrameState) -
         return Err(ZstdError::BlockTooLarge { size: count });
     }
     let compressed_len = header.compressed as usize;
-    let body = block.sub(header.header, compressed_len).map_err(|_| truncated)?;
+    let body = block
+        .sub(header.header, compressed_len)
+        .map_err(|_| truncated)?;
     let tree_used = if kind == 2 {
         state.huffman.read(body)?
     } else {
@@ -812,7 +904,9 @@ fn read_literals(block: Bytes<'_>, scratch: &mut [u8], state: &mut FrameState) -
         }
     };
     let streams = body.tail(tree_used).map_err(|_| corrupt("literals"))?;
-    let target = scratch.get_mut(..count).ok_or(ZstdError::BlockTooLarge { size: count })?;
+    let target = scratch
+        .get_mut(..count)
+        .ok_or(ZstdError::BlockTooLarge { size: count })?;
     if size_format == 0 {
         state.huffman.decode_stream(streams, target)?;
     } else {
@@ -834,7 +928,11 @@ struct SizeHeader {
 /// Four Huffman streams behind a six-byte jump table (§3.1.1.3.1.6); each of
 /// the first three regenerates a quarter (rounded up), the last the rest.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
-fn decode_four_streams(table: &HuffmanTable, streams: Bytes<'_>, out: &mut [u8]) -> Result<(), ZstdError> {
+fn decode_four_streams(
+    table: &HuffmanTable,
+    streams: Bytes<'_>,
+    out: &mut [u8],
+) -> Result<(), ZstdError> {
     let sizes = [
         usize::from(streams.u16_le(0).map_err(|_| corrupt("jump table"))?),
         usize::from(streams.u16_le(2).map_err(|_| corrupt("jump table"))?),
@@ -846,15 +944,24 @@ fn decode_four_streams(table: &HuffmanTable, streams: Bytes<'_>, out: &mut [u8])
     for index in 0..4 {
         let input_len = match sizes.get(index) {
             Some(size) => *size,
-            None => streams.len().checked_sub(input_at).ok_or(corrupt("jump table"))?,
+            None => streams
+                .len()
+                .checked_sub(input_at)
+                .ok_or(corrupt("jump table"))?,
         };
         let output_len = if index < 3 {
             segment
         } else {
-            out.len().checked_sub(output_at).ok_or(corrupt("jump table"))?
+            out.len()
+                .checked_sub(output_at)
+                .ok_or(corrupt("jump table"))?
         };
-        let stream = streams.sub(input_at, input_len).map_err(|_| corrupt("jump table"))?;
-        let end = output_at.checked_add(output_len).ok_or(corrupt("jump table"))?;
+        let stream = streams
+            .sub(input_at, input_len)
+            .map_err(|_| corrupt("jump table"))?;
+        let end = output_at
+            .checked_add(output_len)
+            .ok_or(corrupt("jump table"))?;
         let target = out.get_mut(output_at..end).ok_or(corrupt("jump table"))?;
         table.decode_stream(stream, target)?;
         input_at = input_at.wrapping_add(input_len);
@@ -882,7 +989,10 @@ fn execute_sequences(
             }
             return output.put_all(literals);
         }
-        1..=127 => SequenceCount { count: usize::from(first), used: 1 },
+        1..=127 => SequenceCount {
+            count: usize::from(first),
+            used: 1,
+        },
         128..=254 => SequenceCount {
             count: usize::from(first.wrapping_sub(128)).wrapping_shl(8) | byte(1)?,
             used: 2,
@@ -898,9 +1008,24 @@ fn execute_sequences(
     }
     let mut at = header.used.wrapping_add(1);
     let tail = |at: usize| section.tail(at).map_err(|_| truncated);
-    at = at.wrapping_add(read_table(modes.wrapping_shr(6), tail(at)?, &mut state.literal_lengths, LITERAL_LENGTHS)?);
-    at = at.wrapping_add(read_table(modes.wrapping_shr(4) & 3, tail(at)?, &mut state.offsets, OFFSETS)?);
-    at = at.wrapping_add(read_table(modes.wrapping_shr(2) & 3, tail(at)?, &mut state.match_lengths, MATCH_LENGTHS)?);
+    at = at.wrapping_add(read_table(
+        modes.wrapping_shr(6),
+        tail(at)?,
+        &mut state.literal_lengths,
+        LITERAL_LENGTHS,
+    )?);
+    at = at.wrapping_add(read_table(
+        modes.wrapping_shr(4) & 3,
+        tail(at)?,
+        &mut state.offsets,
+        OFFSETS,
+    )?);
+    at = at.wrapping_add(read_table(
+        modes.wrapping_shr(2) & 3,
+        tail(at)?,
+        &mut state.match_lengths,
+        MATCH_LENGTHS,
+    )?);
     let mut bits = BackwardBits::new(tail(at)?)?;
     let mut ll_state = bits.read(state.literal_lengths.log);
     let mut of_state = bits.read(state.offsets.log);
@@ -916,9 +1041,23 @@ fn execute_sequences(
         if offset_code > MAX_OF_SYMBOL as u32 {
             return Err(corrupt("offset code"));
         }
-        let offset_value = 1u64.wrapping_shl(offset_code).wrapping_add(u64::from(bits.read(offset_code)));
-        let match_length = code_value(&ML_BASE, &ML_BITS, usize::from(ml.symbol), &mut bits, "match-length code")?;
-        let literal_length = code_value(&LL_BASE, &LL_BITS, usize::from(ll.symbol), &mut bits, "literal-length code")?;
+        let offset_value = 1u64
+            .wrapping_shl(offset_code)
+            .wrapping_add(u64::from(bits.read(offset_code)));
+        let match_length = code_value(
+            &ML_BASE,
+            &ML_BITS,
+            usize::from(ml.symbol),
+            &mut bits,
+            "match-length code",
+        )?;
+        let literal_length = code_value(
+            &LL_BASE,
+            &LL_BITS,
+            usize::from(ll.symbol),
+            &mut bits,
+            "literal-length code",
+        )?;
         let offset = resolve_offset(&mut state.repeats, offset_value, literal_length)?;
         if index.wrapping_add(1) < header.count {
             // §3.1.1.3.2.2: literal length, then match length, then offset.
@@ -929,8 +1068,12 @@ fn execute_sequences(
         if bits.overflowed() {
             return Err(corrupt("sequences bitstream"));
         }
-        let literal_end = literal_at.checked_add(literal_length).ok_or(corrupt("literal length"))?;
-        let copied = literals.get(literal_at..literal_end).ok_or(corrupt("literal length"))?;
+        let literal_end = literal_at
+            .checked_add(literal_length)
+            .ok_or(corrupt("literal length"))?;
+        let copied = literals
+            .get(literal_at..literal_end)
+            .ok_or(corrupt("literal length"))?;
         output.put_all(copied)?;
         literal_at = literal_end;
         output.copy_match(offset, match_length)?;
@@ -965,15 +1108,24 @@ fn code_value(
 /// The match offset `offset_value` names, updating the repeat offsets
 /// (§3.1.1.5).
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
-fn resolve_offset(repeats: &mut [usize; 3], offset_value: u64, literal_length: usize) -> Result<usize, ZstdError> {
+fn resolve_offset(
+    repeats: &mut [usize; 3],
+    offset_value: u64,
+    literal_length: usize,
+) -> Result<usize, ZstdError> {
     let [first, second, third] = *repeats;
     if offset_value > 3 {
-        let offset = usize::try_from(offset_value.wrapping_sub(3)).map_err(|_| corrupt("offset"))?;
+        let offset =
+            usize::try_from(offset_value.wrapping_sub(3)).map_err(|_| corrupt("offset"))?;
         *repeats = [offset, first, second];
         return Ok(offset);
     }
     // A literal length of 0 shifts the repeat codes by one.
-    let code = if literal_length == 0 { offset_value.wrapping_add(1) } else { offset_value };
+    let code = if literal_length == 0 {
+        offset_value.wrapping_add(1)
+    } else {
+        offset_value
+    };
     let offset = match code {
         1 => first,
         2 => {
@@ -985,7 +1137,10 @@ fn resolve_offset(repeats: &mut [usize; 3], offset_value: u64, literal_length: u
             third
         }
         _ => {
-            let offset = first.checked_sub(1).filter(|offset| *offset != 0).ok_or(corrupt("repeat offset"))?;
+            let offset = first
+                .checked_sub(1)
+                .filter(|offset| *offset != 0)
+                .ok_or(corrupt("repeat offset"))?;
             *repeats = [offset, first, second];
             offset
         }
@@ -1017,14 +1172,21 @@ fn read_frame_header(frame: Bytes<'_>) -> Result<FrameHeader, ZstdError> {
     if descriptor & 0x08 != 0 {
         return Err(ZstdError::ReservedBit);
     }
-    let checksum = if descriptor & 0x04 != 0 { Checksum::Present } else { Checksum::Absent };
+    let checksum = if descriptor & 0x04 != 0 {
+        Checksum::Present
+    } else {
+        Checksum::Absent
+    };
     let mut at = 5usize;
     let mut window = 0u64;
     if !single_segment {
         let window_descriptor = frame.u8(at).map_err(|_| truncated)?;
         let log = 10u32.wrapping_add(u32::from(window_descriptor.wrapping_shr(3)));
         let base = 1u64.wrapping_shl(log);
-        window = base.wrapping_add(base.wrapping_shr(3).wrapping_mul(u64::from(window_descriptor & 7)));
+        window = base.wrapping_add(
+            base.wrapping_shr(3)
+                .wrapping_mul(u64::from(window_descriptor & 7)),
+        );
         at = at.wrapping_add(1);
     }
     let dictionary_bytes = match descriptor & 3 {
@@ -1057,7 +1219,11 @@ fn read_frame_header(frame: Bytes<'_>) -> Result<FrameHeader, ZstdError> {
             value |= u64::from(byte).wrapping_shl((index as u32).wrapping_mul(8));
         }
         // §3.1.1.1.4: a two-byte size is stored minus 256.
-        Some(if size_bytes == 2 { value.wrapping_add(256) } else { value })
+        Some(if size_bytes == 2 {
+            value.wrapping_add(256)
+        } else {
+            value
+        })
     };
     at = at.wrapping_add(size_bytes);
     if single_segment {
@@ -1066,22 +1232,33 @@ fn read_frame_header(frame: Bytes<'_>) -> Result<FrameHeader, ZstdError> {
     if window > MAX_WINDOW {
         return Err(ZstdError::WindowTooLarge { size: window });
     }
-    Ok(FrameHeader { window, content_size, checksum, used: at })
+    Ok(FrameHeader {
+        window,
+        content_size,
+        checksum,
+        used: at,
+    })
 }
 
 /// Decodes one frame starting at `frame`'s first byte; returns the bytes of
 /// input it used.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
-fn decode_frame(frame: Bytes<'_>, output: &mut Output<'_>, scratch: &mut [u8]) -> Result<usize, ZstdError> {
+fn decode_frame(
+    frame: Bytes<'_>,
+    output: &mut Output<'_>,
+    scratch: &mut [u8],
+) -> Result<usize, ZstdError> {
     let header = read_frame_header(frame)?;
-    let block_maximum = usize::try_from(header.window).map_or(MAX_BLOCK, |window| window.min(MAX_BLOCK));
+    let block_maximum =
+        usize::try_from(header.window).map_or(MAX_BLOCK, |window| window.min(MAX_BLOCK));
     let mut state = FrameState::new();
     let mut at = header.used;
     loop {
         let truncated = ZstdError::Truncated { at };
         let raw = frame.array::<3>(at).map_err(|_| truncated)?;
         let [low, middle, high] = raw;
-        let block_header = u32::from(low) | u32::from(middle).wrapping_shl(8) | u32::from(high).wrapping_shl(16);
+        let block_header =
+            u32::from(low) | u32::from(middle).wrapping_shl(8) | u32::from(high).wrapping_shl(16);
         let last = block_header & 1 == 1;
         let kind = block_header.wrapping_shr(1) & 3;
         let size = block_header.wrapping_shr(3) as usize;
@@ -1110,7 +1287,9 @@ fn decode_frame(frame: Bytes<'_>, output: &mut Output<'_>, scratch: &mut [u8]) -
                 }
                 let block = frame.sub(at, size).map_err(|_| truncated)?;
                 let literals = read_literals(block, scratch, &mut state)?;
-                let section = block.tail(literals.used).map_err(|_| corrupt("sequences section"))?;
+                let section = block
+                    .tail(literals.used)
+                    .map_err(|_| corrupt("sequences section"))?;
                 let held = scratch.get(..literals.count).ok_or(corrupt("literals"))?;
                 execute_sequences(section, held, &mut state, output)?;
                 at = at.wrapping_add(size);
@@ -1124,7 +1303,10 @@ fn decode_frame(frame: Bytes<'_>, output: &mut Output<'_>, scratch: &mut [u8]) -
     let produced = output.at.wrapping_sub(output.frame_start);
     if let Some(declared) = header.content_size {
         if declared != produced as u64 {
-            return Err(ZstdError::ContentSize { declared, produced: produced as u64 });
+            return Err(ZstdError::ContentSize {
+                declared,
+                produced: produced as u64,
+            });
         }
     }
     if header.checksum == Checksum::Present {
@@ -1142,11 +1324,22 @@ fn decode_frame(frame: Bytes<'_>, output: &mut Output<'_>, scratch: &mut [u8]) -
 /// Decodes every frame of `input` into `out`, skipping skippable frames;
 /// returns the bytes written. `scratch` must hold [`SCRATCH_BYTES`].
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
-pub fn decompress_frames(input: Bytes<'_>, out: &mut [u8], scratch: &mut [u8]) -> Result<usize, ZstdError> {
+pub fn decompress_frames(
+    input: Bytes<'_>,
+    out: &mut [u8],
+    scratch: &mut [u8],
+) -> Result<usize, ZstdError> {
     if scratch.len() < SCRATCH_BYTES {
-        return Err(ZstdError::ScratchTooSmall { needed: SCRATCH_BYTES, given: scratch.len() });
+        return Err(ZstdError::ScratchTooSmall {
+            needed: SCRATCH_BYTES,
+            given: scratch.len(),
+        });
     }
-    let mut output = Output { out, frame_start: 0, at: 0 };
+    let mut output = Output {
+        out,
+        frame_start: 0,
+        at: 0,
+    };
     let mut at = 0usize;
     while at < input.len() {
         let rest = input.tail(at).map_err(|_| ZstdError::Truncated { at })?;
@@ -1181,7 +1374,9 @@ fn round(accumulator: u64, lane: u64) -> u64 {
 
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 fn merge(hash: u64, accumulator: u64) -> u64 {
-    (hash ^ round(0, accumulator)).wrapping_mul(PRIME64_1).wrapping_add(PRIME64_4)
+    (hash ^ round(0, accumulator))
+        .wrapping_mul(PRIME64_1)
+        .wrapping_add(PRIME64_4)
 }
 
 /// XXH64 (the xxHash specification), whose low 32 bits are a zstd frame's
@@ -1202,7 +1397,10 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
         for stripe in stripes.by_ref() {
             let stripe = Bytes::new(stripe);
             for (index, accumulator) in accumulators.iter_mut().enumerate() {
-                *accumulator = round(*accumulator, stripe.u64_le(index.wrapping_mul(8)).unwrap_or(0));
+                *accumulator = round(
+                    *accumulator,
+                    stripe.u64_le(index.wrapping_mul(8)).unwrap_or(0),
+                );
             }
         }
         let [a, b, c, d] = accumulators;
@@ -1223,13 +1421,19 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
     let mut words = rest.chunks_exact(8);
     for word in words.by_ref() {
         hash ^= round(0, lane(word));
-        hash = hash.rotate_left(27).wrapping_mul(PRIME64_1).wrapping_add(PRIME64_4);
+        hash = hash
+            .rotate_left(27)
+            .wrapping_mul(PRIME64_1)
+            .wrapping_add(PRIME64_4);
     }
     let mut tail = words.remainder();
     if tail.len() >= 4 {
         let half = Bytes::new(tail).u32_le(0).unwrap_or(0);
         hash ^= u64::from(half).wrapping_mul(PRIME64_1);
-        hash = hash.rotate_left(23).wrapping_mul(PRIME64_2).wrapping_add(PRIME64_3);
+        hash = hash
+            .rotate_left(23)
+            .wrapping_mul(PRIME64_2)
+            .wrapping_add(PRIME64_3);
         tail = tail.get(4..).unwrap_or(&[]);
     }
     for byte in tail {
@@ -1245,8 +1449,11 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use rusty_box_symbols_fixtures::compress::{
+        Checksum, ZstdOptions, sample_binary, sample_text, zstd_frame,
+    };
+
     use super::*;
-    use rusty_box_symbols_fixtures::compress::{sample_binary, sample_text, zstd_frame, Checksum, ZstdOptions};
 
     const MAGIC_BYTES: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
@@ -1266,7 +1473,18 @@ mod tests {
     /// single-segment frame's window is its content size, 6 bytes here,
     /// which a 10-byte compressed block may not exceed.
     fn one_sequence(offset_code: u8, bitstream: u8) -> Vec<u8> {
-        let block = [0x18, b'a', b'b', b'c', 0x01, 0x54, 0x03, offset_code, 0x00, bitstream];
+        let block = [
+            0x18,
+            b'a',
+            b'b',
+            b'c',
+            0x01,
+            0x54,
+            0x03,
+            offset_code,
+            0x00,
+            bitstream,
+        ];
         let mut frame = MAGIC_BYTES.to_vec();
         frame.extend_from_slice(&[0x00, 0x00]);
         // Last block, compressed (type 2), 10 bytes: 1 | 2 << 1 | 10 << 3.
@@ -1292,7 +1510,10 @@ mod tests {
     #[test]
     fn raw_and_rle_blocks_decode() {
         // Last block, raw, 5 bytes: 1 | 0 << 1 | 5 << 3 = 0x29.
-        assert_eq!(decode(&frame(5, [0x29, 0, 0], b"hello"), 16).unwrap(), b"hello");
+        assert_eq!(
+            decode(&frame(5, [0x29, 0, 0], b"hello"), 16).unwrap(),
+            b"hello"
+        );
         // Last block, RLE, 4 bytes: 1 | 1 << 1 | 4 << 3 = 0x23.
         assert_eq!(decode(&frame(4, [0x23, 0, 0], b"z"), 16).unwrap(), b"zzzz");
     }
@@ -1314,7 +1535,10 @@ mod tests {
     fn a_match_before_the_start_of_the_output_is_refused() {
         assert_eq!(
             decode(&one_sequence(0x03, 0x08), 16),
-            Err(ZstdError::OffsetTooFar { offset: 5, available: 3 })
+            Err(ZstdError::OffsetTooFar {
+                offset: 5,
+                available: 3
+            })
         );
     }
 
@@ -1323,12 +1547,18 @@ mod tests {
         let mut with_dictionary = MAGIC_BYTES.to_vec();
         with_dictionary.extend_from_slice(&[0x21, 0x07, 0x05, 0x29, 0, 0]);
         with_dictionary.extend_from_slice(b"hello");
-        assert_eq!(decode(&with_dictionary, 16), Err(ZstdError::Dictionary { id: 7 }));
+        assert_eq!(
+            decode(&with_dictionary, 16),
+            Err(ZstdError::Dictionary { id: 7 })
+        );
         // Not single-segment, no content size; window log 10 + 18 = 28.
         let mut huge_window = MAGIC_BYTES.to_vec();
         huge_window.extend_from_slice(&[0x00, 18 << 3, 0x29, 0, 0]);
         huge_window.extend_from_slice(b"hello");
-        assert_eq!(decode(&huge_window, 16), Err(ZstdError::WindowTooLarge { size: 1 << 28 }));
+        assert_eq!(
+            decode(&huge_window, 16),
+            Err(ZstdError::WindowTooLarge { size: 1 << 28 })
+        );
     }
 
     #[test]
@@ -1341,23 +1571,52 @@ mod tests {
             vec![0u8; 200_000],
         ];
         let settings = [
-            ZstdOptions { level: 1, checksum: Checksum::Without, window_log: 0 },
-            ZstdOptions { level: 3, checksum: Checksum::With, window_log: 0 },
-            ZstdOptions { level: 9, checksum: Checksum::With, window_log: 0 },
-            ZstdOptions { level: 19, checksum: Checksum::With, window_log: 0 },
-            ZstdOptions { level: 3, checksum: Checksum::With, window_log: 17 },
+            ZstdOptions {
+                level: 1,
+                checksum: Checksum::Without,
+                window_log: 0,
+            },
+            ZstdOptions {
+                level: 3,
+                checksum: Checksum::With,
+                window_log: 0,
+            },
+            ZstdOptions {
+                level: 9,
+                checksum: Checksum::With,
+                window_log: 0,
+            },
+            ZstdOptions {
+                level: 19,
+                checksum: Checksum::With,
+                window_log: 0,
+            },
+            ZstdOptions {
+                level: 3,
+                checksum: Checksum::With,
+                window_log: 17,
+            },
         ];
         for data in &inputs {
             for options in settings {
                 let compressed = zstd_frame(data, options);
-                assert_eq!(&decode(&compressed, data.len()).unwrap(), data, "{options:?}, {} bytes", data.len());
+                assert_eq!(
+                    &decode(&compressed, data.len()).unwrap(),
+                    data,
+                    "{options:?}, {} bytes",
+                    data.len()
+                );
             }
         }
     }
 
     #[test]
     fn concatenated_frames_decode_one_after_the_other() {
-        let options = ZstdOptions { level: 3, checksum: Checksum::With, window_log: 0 };
+        let options = ZstdOptions {
+            level: 3,
+            checksum: Checksum::With,
+            window_log: 0,
+        };
         let first = sample_text(50_000);
         let second = sample_binary(30_000, 9);
         let mut input = zstd_frame(&first, options);
@@ -1370,24 +1629,57 @@ mod tests {
     #[test]
     fn a_wrong_checksum_or_content_size_is_refused() {
         let data = sample_text(10_000);
-        let mut compressed = zstd_frame(&data, ZstdOptions { level: 3, checksum: Checksum::With, window_log: 0 });
+        let mut compressed = zstd_frame(
+            &data,
+            ZstdOptions {
+                level: 3,
+                checksum: Checksum::With,
+                window_log: 0,
+            },
+        );
         let last = compressed.len() - 1;
         compressed[last] ^= 0xFF;
-        assert!(matches!(decode(&compressed, data.len()), Err(ZstdError::Checksum { .. })));
-        assert_eq!(decode(&frame(6, [0x29, 0, 0], b"hello"), 16), Err(ZstdError::ContentSize { declared: 6, produced: 5 }));
+        assert!(matches!(
+            decode(&compressed, data.len()),
+            Err(ZstdError::Checksum { .. })
+        ));
+        assert_eq!(
+            decode(&frame(6, [0x29, 0, 0], b"hello"), 16),
+            Err(ZstdError::ContentSize {
+                declared: 6,
+                produced: 5
+            })
+        );
     }
 
     #[test]
     fn an_output_too_small_or_input_cut_short_is_refused() {
         let data = sample_text(10_000);
-        let compressed = zstd_frame(&data, ZstdOptions { level: 3, checksum: Checksum::With, window_log: 0 });
-        assert!(matches!(decode(&compressed, 9_999), Err(ZstdError::OutputFull { .. })));
+        let compressed = zstd_frame(
+            &data,
+            ZstdOptions {
+                level: 3,
+                checksum: Checksum::With,
+                window_log: 0,
+            },
+        );
+        assert!(matches!(
+            decode(&compressed, 9_999),
+            Err(ZstdError::OutputFull { .. })
+        ));
         assert!(decode(&compressed[..compressed.len() / 2], data.len()).is_err());
         let mut out = [0u8; 16];
         let mut scratch = [0u8; 16];
         assert_eq!(
-            decompress_frames(Bytes::new(&frame(5, [0x29, 0, 0], b"hello")), &mut out, &mut scratch),
-            Err(ZstdError::ScratchTooSmall { needed: SCRATCH_BYTES, given: 16 })
+            decompress_frames(
+                Bytes::new(&frame(5, [0x29, 0, 0], b"hello")),
+                &mut out,
+                &mut scratch
+            ),
+            Err(ZstdError::ScratchTooSmall {
+                needed: SCRATCH_BYTES,
+                given: 16
+            })
         );
     }
 }

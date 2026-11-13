@@ -6,16 +6,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use egui::RichText;
 
 use super::references::REFERENCES_TO;
-use super::source_view::{file_name, source_at, SourceTip};
+use super::source_view::{SourceTip, file_name, source_at};
 use crate::debugger::frames::{FramesRead, InspectAsk, LocalsRead, WatchRead};
 use crate::debugger::inspect::SymbolIndex;
-use crate::debugger::unwind::{Frame, StackEnd, MAX_FRAMES};
+use crate::debugger::unwind::{Frame, MAX_FRAMES, StackEnd};
 use crate::debugger::variables::{
-    Expand, Preview, PreviewItem, RowKind, ShownValue, Signedness, StringEnd, ValuePath, VariableRow,
+    Expand, Preview, PreviewItem, RowKind, ShownValue, Signedness, StringEnd, ValuePath,
+    VariableRow,
 };
 use crate::debugger::xref::service::{AddressRange, XrefTarget};
 use crate::shell::listing::{
-    char_width, lead_arrow, lead_chevron, lead_hollow_arrow, list_row, Cell, RowSense, Tone,
+    Cell, RowSense, Tone, char_width, lead_arrow, lead_chevron, lead_hollow_arrow, list_row,
 };
 use crate::shell::theme::{ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, TEXT_MUTED, TEXT_PRIMARY};
 use crate::symbols::hub::{ImageKey, ImageState, SymbolsView};
@@ -122,7 +123,11 @@ pub(crate) struct VariableState {
 impl VariableState {
     /// What the run thread is asked to read.
     pub(crate) fn ask(&self) -> InspectAsk {
-        InspectAsk { watches: self.watches.clone(), expanded: self.expanded.clone(), pages: self.pages.clone() }
+        InspectAsk {
+            watches: self.watches.clone(),
+            expanded: self.expanded.clone(),
+            pages: self.pages.clone(),
+        }
     }
 
     /// Acts on a row's ask: opens or closes a value, lists another page. A
@@ -183,8 +188,12 @@ pub(crate) fn stack_end_text(end: StackEnd) -> Option<String> {
     let text = match end {
         StackEnd::Top => return None,
         StackEnd::NoUnwindInfo { rip } => format!("stack ends: no unwind information for {rip:#x}"),
-        StackEnd::BadUnwindInfo { at } => format!("stack ends: unwind information at {at:#x} does not read"),
-        StackEnd::RegisterNotKnown { .. } => "stack ends: a register this frame needs is not known".to_owned(),
+        StackEnd::BadUnwindInfo { at } => {
+            format!("stack ends: unwind information at {at:#x} does not read")
+        }
+        StackEnd::RegisterNotKnown { .. } => {
+            "stack ends: a register this frame needs is not known".to_owned()
+        }
         StackEnd::NoFramePointer => "frame not unwound: no frame pointer".to_owned(),
         StackEnd::NotGrowing => "stack does not unwind further".to_owned(),
         StackEnd::Unreadable { at } => format!("stack ends: memory at {at:#x} is not readable"),
@@ -227,7 +236,11 @@ pub(crate) fn value_text(value: &ShownValue, names: Namer<'_>) -> String {
 /// [`value_text`] without names.
 fn plain_text(value: &ShownValue) -> String {
     match value {
-        ShownValue::Integer { raw, size, signedness } => {
+        ShownValue::Integer {
+            raw,
+            size,
+            signedness,
+        } => {
             let bits = masked(*raw, *size);
             match signedness {
                 Signedness::Signed => format!("{} ({bits:#x})", signed(*raw, *size)),
@@ -250,7 +263,11 @@ fn plain_text(value: &ShownValue) -> String {
         }
         ShownValue::Enum { raw, names } if names.is_empty() => raw.to_string(),
         ShownValue::Enum { names, .. } => names.join(" | "),
-        ShownValue::Aggregate { count, preview, more } => {
+        ShownValue::Aggregate {
+            count,
+            preview,
+            more,
+        } => {
             let mut items: Vec<String> = preview.iter().map(preview_text).collect();
             if *more == Preview::Cut {
                 items.push("…".to_owned());
@@ -285,10 +302,22 @@ fn preview_text(item: &PreviewItem) -> String {
 /// address, a structure or array as braces.
 fn short_text(value: &ShownValue) -> String {
     match value {
-        ShownValue::Integer { raw, size, signedness: Signedness::Signed } => signed(*raw, *size).to_string(),
-        ShownValue::Integer { raw, size, signedness: Signedness::Unsigned } => masked(*raw, *size).to_string(),
+        ShownValue::Integer {
+            raw,
+            size,
+            signedness: Signedness::Signed,
+        } => signed(*raw, *size).to_string(),
+        ShownValue::Integer {
+            raw,
+            size,
+            signedness: Signedness::Unsigned,
+        } => masked(*raw, *size).to_string(),
         ShownValue::Pointer { address, .. } => address_text(*address),
-        ShownValue::Aggregate { count, preview, more } => {
+        ShownValue::Aggregate {
+            count,
+            preview,
+            more,
+        } => {
             let empty = preview.is_empty() && *more == Preview::Whole;
             match count {
                 None if empty => "{}".to_owned(),
@@ -322,7 +351,8 @@ fn masked(raw: u64, size: u8) -> u64 {
 /// `raw`'s low `size` bytes as a signed number.
 fn signed(raw: u64, size: u8) -> i64 {
     let unused = 64u32.saturating_sub(u32::from(size).saturating_mul(8));
-    raw.checked_shl(unused).map_or(0, |high| (high as i64) >> unused)
+    raw.checked_shl(unused)
+        .map_or(0, |high| (high as i64) >> unused)
 }
 
 /// An address as WinDbg writes one: eight digits, sixteen split by a
@@ -371,7 +401,9 @@ fn quoted_string(text: &str, end: StringEnd) -> String {
 fn value_color(value: &ShownValue) -> egui::Color32 {
     match value {
         ShownValue::NotAvailable | ShownValue::OptimizedAway => TEXT_MUTED,
-        ShownValue::Unreadable { .. } | ShownValue::Problem(_) | ShownValue::UnknownType { .. } => ACCENT_AMBER,
+        ShownValue::Unreadable { .. } | ShownValue::Problem(_) | ShownValue::UnknownType { .. } => {
+            ACCENT_AMBER
+        }
         ShownValue::Integer { .. }
         | ShownValue::Character { .. }
         | ShownValue::Boolean { .. }
@@ -396,16 +428,38 @@ pub(crate) fn call_stack_rows(
 ) -> Option<usize> {
     let mut picked = None;
     let digits = frames.frames.len().to_string().len();
-    let lines: Vec<String> =
-        frames.frames.iter().map(|frame| frame_line(frame, index, view).unwrap_or_default()).collect();
-    let line_chars = lines.iter().map(|line| line.chars().count()).max().unwrap_or(0);
+    let lines: Vec<String> = frames
+        .frames
+        .iter()
+        .map(|frame| frame_line(frame, index, view).unwrap_or_default())
+        .collect();
+    let line_chars = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
     for (number, frame) in frames.frames.iter().enumerate() {
         let selected = number == frames.selected;
-        let tone = if selected { Tone::Selected } else { Tone::Plain };
+        let tone = if selected {
+            Tone::Selected
+        } else {
+            Tone::Plain
+        };
         let cells = [
             Cell::right(number.to_string(), TEXT_MUTED, digits),
-            Cell::fill(frame_label(frame, names), if number == 0 { ACCENT_CYAN } else { TEXT_PRIMARY }),
-            Cell::left(lines.get(number).cloned().unwrap_or_default(), TEXT_MUTED, line_chars),
+            Cell::fill(
+                frame_label(frame, names),
+                if number == 0 {
+                    ACCENT_CYAN
+                } else {
+                    TEXT_PRIMARY
+                },
+            ),
+            Cell::left(
+                lines.get(number).cloned().unwrap_or_default(),
+                TEXT_MUTED,
+                line_chars,
+            ),
         ];
         let response = list_row(ui, CHEVRON_LEAD, &cells, tone, RowSense::Pick { selected });
         if number == 0 {
@@ -418,17 +472,33 @@ pub(crate) fn call_stack_rows(
         }
     }
     if let Some(end) = stack_end_text(frames.end) {
-        list_row(ui, CHEVRON_LEAD, &[Cell::fill(end, TEXT_MUTED)], Tone::Plain, RowSense::Look);
+        list_row(
+            ui,
+            CHEVRON_LEAD,
+            &[Cell::fill(end, TEXT_MUTED)],
+            Tone::Plain,
+            RowSense::Look,
+        );
     }
     if let Some(note) = binary_note(frames.end, index, view) {
-        list_row(ui, CHEVRON_LEAD, &[Cell::fill(note, TEXT_MUTED)], Tone::Plain, RowSense::Look);
+        list_row(
+            ui,
+            CHEVRON_LEAD,
+            &[Cell::fill(note, TEXT_MUTED)],
+            Tone::Plain,
+            RowSense::Look,
+        );
     }
     picked
 }
 
 /// For a stack that ends on a module's byte the guest has not paged in,
 /// what became of the module's binary, which such bytes are read from.
-pub(crate) fn binary_note(end: StackEnd, index: &SymbolIndex, view: &SymbolsView) -> Option<String> {
+pub(crate) fn binary_note(
+    end: StackEnd,
+    index: &SymbolIndex,
+    view: &SymbolsView,
+) -> Option<String> {
     let StackEnd::Unreadable { at } = end else {
         return None;
     };
@@ -439,19 +509,31 @@ pub(crate) fn binary_note(end: StackEnd, index: &SymbolIndex, view: &SymbolsView
         None => format!("{name}'s binary was not asked for"),
         Some(ImageState::Pending) => format!("{name}'s binary is being looked up"),
         Some(ImageState::Downloading { .. }) => format!("{name}'s binary is downloading"),
-        Some(ImageState::Loaded { .. }) => format!("{name}'s binary does not hold that byte as loaded"),
+        Some(ImageState::Loaded { .. }) => {
+            format!("{name}'s binary does not hold that byte as loaded")
+        }
         Some(ImageState::NotOnServer) => format!("{name}'s binary is not on the symbol servers"),
-        Some(ImageState::Failed { reason, .. }) => format!("{name}'s binary did not load: {reason}"),
+        Some(ImageState::Failed { reason, .. }) => {
+            format!("{name}'s binary did not load: {reason}")
+        }
     };
     Some(note)
 }
 
 /// The Locals pane: the picked frame's variables, or why there are none.
-pub(crate) fn locals_rows(ui: &mut egui::Ui, locals: &LocalsRead, names: Namer<'_>, index: &SymbolIndex) -> Option<RowAsk> {
+pub(crate) fn locals_rows(
+    ui: &mut egui::Ui,
+    locals: &LocalsRead,
+    names: Namer<'_>,
+    index: &SymbolIndex,
+) -> Option<RowAsk> {
     match locals {
         LocalsRead::NotAsked => muted(ui, NOT_READ),
         LocalsRead::NoModule => muted(ui, NO_MODULE),
-        LocalsRead::NoSymbols { module } => muted(ui, &format!("Symbols for {module} are loading or not found.")),
+        LocalsRead::NoSymbols { module } => muted(
+            ui,
+            &format!("Symbols for {module} are loading or not found."),
+        ),
         LocalsRead::NoFunction => muted(ui, NO_FUNCTION),
         LocalsRead::Unreadable { why } => {
             ui.label(RichText::new(why).color(ACCENT_AMBER));
@@ -480,7 +562,8 @@ pub(crate) fn watch_rows(
         ui.horizontal(|ui| {
             let label = format!("{REMOVE_WATCH} {text}");
             let remove = ui.small_button("×");
-            remove.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+            remove
+                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
             if remove.on_hover_text(&label).clicked() {
                 removed = Some(number);
             }
@@ -534,9 +617,18 @@ pub(crate) fn variable_rows(
 ) -> Option<RowAsk> {
     let mut ask = None;
     let indent = |row: &VariableRow| usize::from(row.depth).saturating_mul(INDENT_CHARS);
-    let name_chars =
-        rows.iter().map(|row| indent(row) + row.name.chars().count()).max().unwrap_or(0).min(NAME_CHARS_MAX);
-    let type_chars = rows.iter().map(|row| row.type_name.chars().count()).max().unwrap_or(0).min(TYPE_CHARS_MAX);
+    let name_chars = rows
+        .iter()
+        .map(|row| indent(row) + row.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(NAME_CHARS_MAX);
+    let type_chars = rows
+        .iter()
+        .map(|row| row.type_name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(TYPE_CHARS_MAX);
     let character = char_width(ui);
     for row in rows {
         match row.kind {
@@ -551,7 +643,13 @@ pub(crate) fn variable_rows(
                 continue;
             }
             RowKind::Ceiling => {
-                list_row(ui, CHEVRON_LEAD, &[Cell::fill(CEILING, ACCENT_AMBER)], Tone::Plain, RowSense::Look);
+                list_row(
+                    ui,
+                    CHEVRON_LEAD,
+                    &[Cell::fill(CEILING, ACCENT_AMBER)],
+                    Tone::Plain,
+                    RowSense::Look,
+                );
                 continue;
             }
             RowKind::Parameter
@@ -577,13 +675,25 @@ pub(crate) fn variable_rows(
         // The whole value, however narrow the pane cuts its cell.
         let whole = format!("{} = {value}\n{}", row.name, row.type_name);
         let cells = [
-            Cell::left(format!("{}{}", " ".repeat(indent(row)), row.name), name_color, name_chars),
+            Cell::left(
+                format!("{}{}", " ".repeat(indent(row)), row.name),
+                name_color,
+                name_chars,
+            ),
             Cell::fill(value, value_color(&row.value)),
             Cell::left(row.type_name.clone(), TEXT_MUTED, type_chars),
         ];
-        let response =
-            list_row(ui, CHEVRON_LEAD, &cells, Tone::Plain, RowSense::Pick { selected: false }).on_hover_text(whole);
-        let chevron = response.rect.translate(egui::vec2(indent(row) as f32 * character, 0.0));
+        let response = list_row(
+            ui,
+            CHEVRON_LEAD,
+            &cells,
+            Tone::Plain,
+            RowSense::Pick { selected: false },
+        )
+        .on_hover_text(whole);
+        let chevron = response
+            .rect
+            .translate(egui::vec2(indent(row) as f32 * character, 0.0));
         match row.expand {
             Expand::Leaf => {}
             Expand::Closed => lead_chevron(ui, chevron, false, TEXT_MUTED),
@@ -592,12 +702,20 @@ pub(crate) fn variable_rows(
         if response.clicked() && row.expand != Expand::Leaf {
             ask = Some(RowAsk::Toggle(row.path.clone()));
         }
-        let in_module = row.memory.filter(|memory| index.module_at(memory.address).is_some());
+        let in_module = row
+            .memory
+            .filter(|memory| index.module_at(memory.address).is_some());
         if let Some(memory) = in_module {
             response.context_menu(|ui| {
                 if ui.button(format!("{REFERENCES_TO} {}", row.name)).clicked() {
-                    let range = AddressRange { start: memory.address, end: memory.address.wrapping_add(memory.size) };
-                    ask = Some(RowAsk::References(XrefTarget { ranges: vec![range], label: row.name.clone() }));
+                    let range = AddressRange {
+                        start: memory.address,
+                        end: memory.address.wrapping_add(memory.size),
+                    };
+                    ask = Some(RowAsk::References(XrefTarget {
+                        ranges: vec![range],
+                        label: row.name.clone(),
+                    }));
                     ui.close();
                 }
             });
@@ -611,9 +729,11 @@ mod tests {
     use super::*;
     use crate::debugger::inspect::SymbolIndex;
     use crate::debugger::unwind::{FrameFound, FrameRegisters};
-    use crate::debugger::variables::{PointedString, Preview, PreviewItem, ShownValue, Signedness, StringEnd};
+    use crate::debugger::variables::{
+        PointedString, Preview, PreviewItem, ShownValue, Signedness, StringEnd,
+    };
     use crate::symbols::hub::{ImageEntry, ImageRetry, SymbolsView};
-    use crate::symbols::kernel::tests::{kernel_symbols, KERNEL_BASE};
+    use crate::symbols::kernel::tests::{KERNEL_BASE, kernel_symbols};
     use crate::symbols::names::tests::{hub_with_kernel_code, loaded};
 
     fn text(value: ShownValue) -> String {
@@ -623,11 +743,18 @@ mod tests {
     }
 
     fn int(raw: u64, size: u8, signedness: Signedness) -> ShownValue {
-        ShownValue::Integer { raw, size, signedness }
+        ShownValue::Integer {
+            raw,
+            size,
+            signedness,
+        }
     }
 
     fn named(name: &str, value: ShownValue) -> PreviewItem {
-        PreviewItem { name: Some(name.into()), value }
+        PreviewItem {
+            name: Some(name.into()),
+            value,
+        }
     }
 
     fn element(value: ShownValue) -> PreviewItem {
@@ -636,11 +763,26 @@ mod tests {
 
     #[test]
     fn values_read_as_the_spec_writes_them() {
-        assert_eq!(text(int(0xFFFF_FFFB, 4, Signedness::Signed)), "-5 (0xfffffffb)");
+        assert_eq!(
+            text(int(0xFFFF_FFFB, 4, Signedness::Signed)),
+            "-5 (0xfffffffb)"
+        );
         assert_eq!(text(int(42, 4, Signedness::Unsigned)), "42 (0x2a)");
-        assert_eq!(text(int(u64::MAX, 8, Signedness::Signed)), "-1 (0xffffffffffffffff)");
-        assert_eq!(text(ShownValue::Character { code: 65, size: 1 }), "'A' (65)");
-        assert_eq!(text(ShownValue::Character { code: 0xE9, size: 1 }), r"'\xE9' (233)");
+        assert_eq!(
+            text(int(u64::MAX, 8, Signedness::Signed)),
+            "-1 (0xffffffffffffffff)"
+        );
+        assert_eq!(
+            text(ShownValue::Character { code: 65, size: 1 }),
+            "'A' (65)"
+        );
+        assert_eq!(
+            text(ShownValue::Character {
+                code: 0xE9,
+                size: 1
+            }),
+            r"'\xE9' (233)"
+        );
         assert_eq!(text(ShownValue::Boolean { raw: 0 }), "false");
         assert_eq!(text(ShownValue::Boolean { raw: 1 }), "true");
         assert_eq!(text(ShownValue::Boolean { raw: 2 }), "true (0x02)");
@@ -650,21 +792,54 @@ mod tests {
         assert_eq!(
             text(ShownValue::Pointer {
                 address: 0x7FF6_1234_0010,
-                string: Some(PointedString { text: "hello".into(), end: StringEnd::Terminated }),
+                string: Some(PointedString {
+                    text: "hello".into(),
+                    end: StringEnd::Terminated
+                }),
             }),
             "0x00007ff6`12340010 \"hello\""
         );
         assert_eq!(
-            text(ShownValue::Pointer { address: 0x40_1000, string: Some(PointedString { text: "hel".into(), end: StringEnd::Cut }) }),
+            text(ShownValue::Pointer {
+                address: 0x40_1000,
+                string: Some(PointedString {
+                    text: "hel".into(),
+                    end: StringEnd::Cut
+                })
+            }),
             "0x00401000 \"hel…\""
         );
         assert_eq!(
-            text(ShownValue::Pointer { address: 0x40_1000, string: Some(PointedString { text: "x".into(), end: StringEnd::Unreadable }) }),
+            text(ShownValue::Pointer {
+                address: 0x40_1000,
+                string: Some(PointedString {
+                    text: "x".into(),
+                    end: StringEnd::Unreadable
+                })
+            }),
             "0x00401000 \"x…\""
         );
-        assert_eq!(text(ShownValue::Enum { raw: 3, names: vec!["Both".into()] }), "Both");
-        assert_eq!(text(ShownValue::Enum { raw: 5, names: vec!["A".into(), "C".into()] }), "A | C");
-        assert_eq!(text(ShownValue::Enum { raw: -8, names: Vec::new() }), "-8");
+        assert_eq!(
+            text(ShownValue::Enum {
+                raw: 3,
+                names: vec!["Both".into()]
+            }),
+            "Both"
+        );
+        assert_eq!(
+            text(ShownValue::Enum {
+                raw: 5,
+                names: vec!["A".into(), "C".into()]
+            }),
+            "A | C"
+        );
+        assert_eq!(
+            text(ShownValue::Enum {
+                raw: -8,
+                names: Vec::new()
+            }),
+            "-8"
+        );
         let flags = ShownValue::Aggregate {
             count: None,
             preview: vec![
@@ -675,7 +850,10 @@ mod tests {
             ],
             more: Preview::Whole,
         };
-        assert_eq!(text(flags), "{Lock=0, VadType=3, Protection=31, PrivateMemory=0}");
+        assert_eq!(
+            text(flags),
+            "{Lock=0, VadType=3, Protection=31, PrivateMemory=0}"
+        );
         let wide = ShownValue::Aggregate {
             count: None,
             preview: vec![
@@ -691,25 +869,60 @@ mod tests {
         assert_eq!(text(wide), "{a=1, b=2, c=3, d=4, e=5, f=6, …}");
         let array = ShownValue::Aggregate {
             count: Some(250),
-            preview: (1..=6).map(|value| element(int(value, 4, Signedness::Signed))).collect(),
+            preview: (1..=6)
+                .map(|value| element(int(value, 4, Signedness::Signed)))
+                .collect(),
             more: Preview::Cut,
         };
         assert_eq!(text(array), "[250] [1, 2, 3, 4, 5, 6, …]");
         let nested = ShownValue::Aggregate {
             count: None,
             preview: vec![
-                named("inner", ShownValue::Aggregate { count: None, preview: Vec::new(), more: Preview::Cut }),
-                named("rows", ShownValue::Aggregate { count: Some(4), preview: Vec::new(), more: Preview::Cut }),
-                named("next", ShownValue::Pointer { address: 0x1000, string: None }),
+                named(
+                    "inner",
+                    ShownValue::Aggregate {
+                        count: None,
+                        preview: Vec::new(),
+                        more: Preview::Cut,
+                    },
+                ),
+                named(
+                    "rows",
+                    ShownValue::Aggregate {
+                        count: Some(4),
+                        preview: Vec::new(),
+                        more: Preview::Cut,
+                    },
+                ),
+                named(
+                    "next",
+                    ShownValue::Pointer {
+                        address: 0x1000,
+                        string: None,
+                    },
+                ),
             ],
             more: Preview::Whole,
         };
         assert_eq!(text(nested), "{inner={…}, rows=[…], next=0x00001000}");
         assert_eq!(text(ShownValue::NotAvailable), "not available here");
         assert_eq!(text(ShownValue::OptimizedAway), "optimized away");
-        assert_eq!(text(ShownValue::Unreadable { at: 0x5000 }), "memory at 0x5000 is not readable");
-        assert_eq!(text(ShownValue::UnknownType { index: 0x1234, leaf: 0x1515, bytes: vec![1, 2, 3] }), "<type 0x1234> 01 02 03");
-        assert_eq!(text(ShownValue::Problem("no variable named x".into())), "no variable named x");
+        assert_eq!(
+            text(ShownValue::Unreadable { at: 0x5000 }),
+            "memory at 0x5000 is not readable"
+        );
+        assert_eq!(
+            text(ShownValue::UnknownType {
+                index: 0x1234,
+                leaf: 0x1515,
+                bytes: vec![1, 2, 3]
+            }),
+            "<type 0x1234> 01 02 03"
+        );
+        assert_eq!(
+            text(ShownValue::Problem("no variable named x".into())),
+            "no variable named x"
+        );
     }
 
     #[test]
@@ -717,7 +930,10 @@ mod tests {
         let hub = hub_with_kernel_code(loaded());
         let view = hub.view();
         let index = kernel_symbols();
-        let value = ShownValue::Pointer { address: KERNEL_BASE + 0x1044, string: None };
+        let value = ShownValue::Pointer {
+            address: KERNEL_BASE + 0x1044,
+            string: None,
+        };
         let shown = value_text(&value, Namer::new(&index, &view));
         assert!(shown.ends_with(" ntoskrnl!KiSystemCall64+0x4"), "{shown}");
     }
@@ -726,14 +942,38 @@ mod tests {
     fn stack_ends_read_as_the_spec_writes_them() {
         assert_eq!(stack_end_text(StackEnd::Top), None);
         let cases = [
-            Ended { end: StackEnd::NoUnwindInfo { rip: 0x1234 }, text: "stack ends: no unwind information for 0x1234" },
-            Ended { end: StackEnd::BadUnwindInfo { at: 0x2000 }, text: "stack ends: unwind information at 0x2000 does not read" },
-            Ended { end: StackEnd::RegisterNotKnown { register: 3 }, text: "stack ends: a register this frame needs is not known" },
-            Ended { end: StackEnd::NoFramePointer, text: "frame not unwound: no frame pointer" },
-            Ended { end: StackEnd::NotGrowing, text: "stack does not unwind further" },
-            Ended { end: StackEnd::Unreadable { at: 0x7000 }, text: "stack ends: memory at 0x7000 is not readable" },
-            Ended { end: StackEnd::Ceiling, text: "stack ends: 256 frames shown" },
-            Ended { end: StackEnd::SixteenBit, text: "16-bit code: the stack is not unwound" },
+            Ended {
+                end: StackEnd::NoUnwindInfo { rip: 0x1234 },
+                text: "stack ends: no unwind information for 0x1234",
+            },
+            Ended {
+                end: StackEnd::BadUnwindInfo { at: 0x2000 },
+                text: "stack ends: unwind information at 0x2000 does not read",
+            },
+            Ended {
+                end: StackEnd::RegisterNotKnown { register: 3 },
+                text: "stack ends: a register this frame needs is not known",
+            },
+            Ended {
+                end: StackEnd::NoFramePointer,
+                text: "frame not unwound: no frame pointer",
+            },
+            Ended {
+                end: StackEnd::NotGrowing,
+                text: "stack does not unwind further",
+            },
+            Ended {
+                end: StackEnd::Unreadable { at: 0x7000 },
+                text: "stack ends: memory at 0x7000 is not readable",
+            },
+            Ended {
+                end: StackEnd::Ceiling,
+                text: "stack ends: 256 frames shown",
+            },
+            Ended {
+                end: StackEnd::SixteenBit,
+                text: "16-bit code: the stack is not unwound",
+            },
         ];
         for case in cases {
             assert_eq!(stack_end_text(case.end).as_deref(), Some(case.text));
@@ -753,34 +993,76 @@ mod tests {
         let index = kernel_symbols();
         let at = KERNEL_BASE + 0x10;
         let module = index.module_at(at).expect("the kernel");
-        let key = module.identity.known().and_then(ImageKey::of).expect("a PE build");
+        let key = module
+            .identity
+            .known()
+            .and_then(ImageKey::of)
+            .expect("a PE build");
         let name = module.name.clone();
         let end = StackEnd::Unreadable { at };
         let mut view = SymbolsView::default();
         let note = |view: &SymbolsView| binary_note(end, &index, view);
-        assert_eq!(note(&view), Some(format!("{name}'s binary was not asked for")));
+        assert_eq!(
+            note(&view),
+            Some(format!("{name}'s binary was not asked for"))
+        );
         let state = |view: &mut SymbolsView, state: ImageState| {
-            view.images.insert(key.clone(), ImageEntry { state, file: None });
+            view.images
+                .insert(key.clone(), ImageEntry { state, file: None });
         };
         state(&mut view, ImageState::Pending);
-        assert_eq!(note(&view), Some(format!("{name}'s binary is being looked up")));
+        assert_eq!(
+            note(&view),
+            Some(format!("{name}'s binary is being looked up"))
+        );
         state(&mut view, ImageState::NotOnServer);
-        assert_eq!(note(&view), Some(format!("{name}'s binary is not on the symbol servers")));
-        state(&mut view, ImageState::Failed { reason: "the server timed out".into(), retry: ImageRetry::Never });
-        assert_eq!(note(&view), Some(format!("{name}'s binary did not load: the server timed out")));
-        assert_eq!(binary_note(StackEnd::Top, &index, &view), None, "a stack that ends at its top");
-        assert_eq!(binary_note(StackEnd::Unreadable { at: 0x10 }, &index, &view), None, "no module there");
+        assert_eq!(
+            note(&view),
+            Some(format!("{name}'s binary is not on the symbol servers"))
+        );
+        state(
+            &mut view,
+            ImageState::Failed {
+                reason: "the server timed out".into(),
+                retry: ImageRetry::Never,
+            },
+        );
+        assert_eq!(
+            note(&view),
+            Some(format!(
+                "{name}'s binary did not load: the server timed out"
+            ))
+        );
+        assert_eq!(
+            binary_note(StackEnd::Top, &index, &view),
+            None,
+            "a stack that ends at its top"
+        );
+        assert_eq!(
+            binary_note(StackEnd::Unreadable { at: 0x10 }, &index, &view),
+            None,
+            "no module there"
+        );
     }
 
     #[test]
     fn the_lower_panes_follow_the_source_until_picked() {
         assert_eq!(LowerLeft::shown(None, true), LowerLeft::Locals);
         assert_eq!(LowerLeft::shown(None, false), LowerLeft::Memory);
-        assert_eq!(LowerLeft::shown(Some(LowerLeft::Watch), false), LowerLeft::Watch);
-        assert_eq!(LowerLeft::shown(Some(LowerLeft::Memory), true), LowerLeft::Memory);
+        assert_eq!(
+            LowerLeft::shown(Some(LowerLeft::Watch), false),
+            LowerLeft::Watch
+        );
+        assert_eq!(
+            LowerLeft::shown(Some(LowerLeft::Memory), true),
+            LowerLeft::Memory
+        );
         assert_eq!(LowerRight::shown(None, true), LowerRight::CallStack);
         assert_eq!(LowerRight::shown(None, false), LowerRight::Stack);
-        assert_eq!(LowerRight::shown(Some(LowerRight::Stack), true), LowerRight::Stack);
+        assert_eq!(
+            LowerRight::shown(Some(LowerRight::Stack), true),
+            LowerRight::Stack
+        );
     }
 
     #[test]
@@ -790,17 +1072,35 @@ mod tests {
         let index = kernel_symbols();
         let names = Namer::new(&index, &view);
         let innermost = Frame {
-            registers: FrameRegisters { rip: KERNEL_BASE + 0x1040, rsp: 0, registers: [None; 16] },
+            registers: FrameRegisters {
+                rip: KERNEL_BASE + 0x1040,
+                rsp: 0,
+                registers: [None; 16],
+            },
             how: FrameFound::Registers,
         };
         assert_eq!(frame_label(&innermost, names), "ntoskrnl!KiSystemCall64");
         let caller = Frame {
-            registers: FrameRegisters { rip: KERNEL_BASE + 0x1051, rsp: 0, registers: [None; 16] },
+            registers: FrameRegisters {
+                rip: KERNEL_BASE + 0x1051,
+                rsp: 0,
+                registers: [None; 16],
+            },
             how: FrameFound::Unwind,
         };
         assert_eq!(frame_label(&caller, names), "ntoskrnl!KiSystemCall64+0x11");
-        assert_eq!(frame_line(&caller, &index, &view).as_deref(), Some("trap.asm:104"));
-        let nowhere = Frame { registers: FrameRegisters { rip: 0x1234, rsp: 0, registers: [None; 16] }, how: FrameFound::Leaf };
+        assert_eq!(
+            frame_line(&caller, &index, &view).as_deref(),
+            Some("trap.asm:104")
+        );
+        let nowhere = Frame {
+            registers: FrameRegisters {
+                rip: 0x1234,
+                rsp: 0,
+                registers: [None; 16],
+            },
+            how: FrameFound::Leaf,
+        };
         assert_eq!(frame_label(&nowhere, names), "0x1234");
         assert_eq!(frame_line(&nowhere, &index, &view), None);
     }

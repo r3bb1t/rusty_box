@@ -168,14 +168,12 @@ fn partial_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box::emulator::{EmulatorConfig, MachineBuilder, MemorySize};
 
+    use super::*;
+
     fn scratch(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "rusty-box-gui-dump-{}-{name}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("rusty-box-gui-dump-{}-{name}", std::process::id()))
     }
 
     #[test]

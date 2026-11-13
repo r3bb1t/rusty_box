@@ -11,12 +11,12 @@
 //! and compare-with-zero forms zero them whatever FPCR.NEP is. A vector of
 //! doubles needs `Q = 1`.
 
-use super::exec::{bit, bits, ExecResult, Flow};
+use super::exec::{ExecResult, Flow, bit, bits};
 use super::features::Feature;
 use super::fp::{
+    FpBinary, FpCompare, FpConversion, FpType, FpUnary, FrintPrecision, IntSize, IntWidth,
     fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_mul_add,
-    fp_to_int, fp_unary, int_to_fp, round_int_n, FpBinary, FpCompare, FpConversion, FpType,
-    FpUnary, FrintPrecision, IntSize, IntWidth,
+    fp_to_int, fp_unary, int_to_fp, round_int_n,
 };
 use super::fp_estimate::{urecpe, ursqrte};
 use super::simd::{elem, set_elem};
@@ -26,11 +26,7 @@ use crate::softfloat::{self as sf, FpOrdering, FpRounding, FusedMulAdd, InexactR
 
 #[inline]
 const fn datasize(q: bool) -> u32 {
-    if q {
-        128
-    } else {
-        64
-    }
+    if q { 128 } else { 64 }
 }
 
 /// A comparison against +0.0 (FCMGT, FCMGE, FCMEQ, FCMLE, FCMLT `#0.0`).
@@ -381,11 +377,7 @@ impl<L: Levels> Cpu<L> {
                                 }
                                 ZeroCompare::Lt => ordering == FpOrdering::Less,
                             };
-                            if holds {
-                                u64::MAX
-                            } else {
-                                0
-                            }
+                            if holds { u64::MAX } else { 0 }
                         }
                         Each::ToInt(rounding, signed) => {
                             fp_to_int(ty, x, 0, rounding, signed, IntWidth::OfElement, &mut env)

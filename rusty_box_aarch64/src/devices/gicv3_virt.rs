@@ -51,10 +51,10 @@
 //! the least binary point is its whole priority, and its active priority
 //! bit is the priority shifted down past the bits not implemented.
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
-use super::gicv2::{group_mask, preempts, PriorityBits, IDLE_PRIORITY, MAX_APRS, SPURIOUS};
+use super::gicv2::{IDLE_PRIORITY, MAX_APRS, PriorityBits, SPURIOUS, group_mask, preempts};
 use crate::bus::{ApIndex, IchRegister, IcvRegister, LrIndex};
 use crate::cpu::VirtualLines;
 

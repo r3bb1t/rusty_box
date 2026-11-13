@@ -1,18 +1,21 @@
-use crate::{
-    args::{Args, BootDevice, DisplayBackend, LogLevel},
-    config::{DiskMode, Engine, MachineConfig, PcConfig, ResolvedConfig},
-    error::RunError,
+use crate::args::{Args, BootDevice, DisplayBackend, LogLevel};
+use crate::config::{DiskMode, Engine, MachineConfig, PcConfig, ResolvedConfig};
+#[cfg(all(
+    not(feature = "guest-trace"),
+    feature = "hv-whp",
+    windows,
+    feature = "gui-egui"
+))]
+use crate::debugger::{
+    control::BetweenRuns,
+    serve::{MachineAfter, perform},
 };
 #[cfg(feature = "gui-egui")]
 use crate::debugger::{
     control::{AfterRun, Passing, RunControl, RunStart},
-    serve::{apply_breakpoints, owners_stop, serve, Next, Stepping},
+    serve::{Next, Stepping, apply_breakpoints, owners_stop, serve},
 };
-#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, feature = "gui-egui"))]
-use crate::debugger::{
-    control::BetweenRuns,
-    serve::{perform, MachineAfter},
-};
+use crate::error::RunError;
 
 /// What pauses, steps and ends a run from outside it: the shell's run
 /// control. A build without the shell has none, and there this type has no
@@ -35,12 +38,16 @@ fn stop_flag_of(link: &RunLink) -> Arc<AtomicBool> {
 }
 // Named only where the hypervisor engine forces it; the interpreter path
 // reaches the same narrowing through a method call and needs no name.
-#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
-use crate::config::CpuCapabilities;
-use rusty_box::cpu::Instrumentation;
-use rusty_box::params::BxParams;
 #[cfg(feature = "gui-egui")]
-use rusty_box::gui::{shared_display::SharedDisplay, BridgeGui};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+#[cfg(feature = "gui-egui")]
+use std::sync::{Mutex, mpsc};
+use std::{fs, io};
+
+use rusty_box::cpu::Instrumentation;
 #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
 use rusty_box::emulator::RunBudget;
 use rusty_box::emulator::{
@@ -48,18 +55,15 @@ use rusty_box::emulator::{
     DiskGeometry as GuestDiskGeometry, Emulator, EmulatorConfig, Ips, Journal, MachineBuilder,
     MemorySize, SliceEngine, VolatileDisk,
 };
+#[cfg(feature = "gui-egui")]
+use rusty_box::gui::{BridgeGui, shared_display::SharedDisplay};
 use rusty_box::gui::{BxGui, NoGui, TermGui};
+use rusty_box::params::BxParams;
 #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
 use rusty_box_whp_engine::{FastMachine, FastMachineFault, StepStop, WhpEngine};
-#[cfg(feature = "gui-egui")]
-use std::collections::HashSet;
-#[cfg(feature = "gui-egui")]
-use std::sync::{mpsc, Mutex};
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-    sync::{atomic::AtomicBool, Arc},
-};
+
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+use crate::config::CpuCapabilities;
 
 /// What a run amounted to, once it ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,7 +119,7 @@ pub fn run_resolved(config: ResolvedConfig) -> Result<RunSummary, RunError> {
                 name: "Command line".to_owned(),
                 config,
                 source: LaunchSource::Flags,
-            }))
+            }));
         }
         #[cfg(all(feature = "gui-egui", target_os = "android"))]
         DisplayBackend::Egui => return run_egui(config),
@@ -195,8 +199,11 @@ fn prepare_configured_media_files(
     config: &PcConfig,
     create_startup_disks: bool,
 ) -> Result<(), RunError> {
-    let creates_disk =
-        create_startup_disks && config.disk.as_ref().is_some_and(|disk| disk.creation.is_some());
+    let creates_disk = create_startup_disks
+        && config
+            .disk
+            .as_ref()
+            .is_some_and(|disk| disk.creation.is_some());
     if let Some(cdrom) = &config.cdrom {
         verify_media_file("CD-ROM", &cdrom.path)?;
     }
@@ -244,10 +251,7 @@ struct PreparedRun {
 /// provisions its startup disk — last, so a configuration refused here for
 /// an engine this build lacks, a blank or unreadable BIOS or a media slot
 /// that does not resolve has erased nothing.
-fn prepare_run(
-    config: PcConfig,
-    create_startup_disks: bool,
-) -> Result<PreparedRun, RunError> {
+fn prepare_run(config: PcConfig, create_startup_disks: bool) -> Result<PreparedRun, RunError> {
     // A build without the hypervisor path cannot honour the `whp` engine,
     // wherever it was chosen — `--engine`, a VM file's `emulator.engine`, or
     // the shell's Engine setting. It refuses before reading or creating
@@ -350,13 +354,13 @@ where
             DiskMode::Volatile { journal } => {
                 let volatile = match carried {
                     Some(volatile) => volatile,
-                    None => VolatileDisk::open(path, &journal_for(journal.as_deref())).map_err(|source| {
-                        RunError::MediaAttach {
+                    None => VolatileDisk::open(path, &journal_for(journal.as_deref())).map_err(
+                        |source| RunError::MediaAttach {
                             kind: "disk",
                             path: disk.path.clone(),
                             source,
-                        }
-                    })?,
+                        },
+                    )?,
                 };
                 builder.volatile_disk(slot, volatile, geometry)
             }
@@ -608,8 +612,7 @@ fn drive_on_the_hypervisor(
 
     // Adoption hands the processor to a thread of its own and the devices to a
     // thread that wakes at their deadlines; nothing runs until a step says so.
-    let mut machine =
-        FastMachine::adopt(emu).map_err(|source| RunError::Hypervisor { source })?;
+    let mut machine = FastMachine::adopt(emu).map_err(|source| RunError::Hypervisor { source })?;
     machine
         .with_machine(|m| {
             // The status bar shows an instruction rate, and this machine has
@@ -695,7 +698,12 @@ enum AfterStop {
 /// A raised stop flag on a run the shell can pause: a guest that switched
 /// itself off or a stop the shell asked for ends the run; a pause or a dump
 /// is served, and the run goes on once the shell lets it.
-#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, feature = "gui-egui"))]
+#[cfg(all(
+    not(feature = "guest-trace"),
+    feature = "hv-whp",
+    windows,
+    feature = "gui-egui"
+))]
 fn after_stop_on_the_hypervisor(
     machine: &mut FastMachine,
     control: &RunLink,
@@ -713,7 +721,12 @@ fn after_stop_on_the_hypervisor(
 }
 
 /// Without the shell there is no run control, so no run gets here.
-#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, not(feature = "gui-egui")))]
+#[cfg(all(
+    not(feature = "guest-trace"),
+    feature = "hv-whp",
+    windows,
+    not(feature = "gui-egui")
+))]
 fn after_stop_on_the_hypervisor(
     _machine: &mut FastMachine,
     control: &RunLink,
@@ -725,7 +738,12 @@ fn after_stop_on_the_hypervisor(
 /// parked and the machine is whole (`FastMachine::with_machine`), so each
 /// task runs there. Nothing counts the instructions it retires, so it cannot
 /// step one.
-#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, feature = "gui-egui"))]
+#[cfg(all(
+    not(feature = "guest-trace"),
+    feature = "hv-whp",
+    windows,
+    feature = "gui-egui"
+))]
 fn serve_on_the_hypervisor(
     machine: &mut FastMachine,
     control: &RunControl,
@@ -859,9 +877,7 @@ impl LaunchVm {
             .and_then(|stem| stem.to_str())
             .map_or_else(|| "Command line".to_owned(), str::to_owned);
         let source = match &args.config {
-            Some(path) if args.names_only_a_config_file() => {
-                LaunchSource::ConfigFile(path.clone())
-            }
+            Some(path) if args.names_only_a_config_file() => LaunchSource::ConfigFile(path.clone()),
             Some(_) | None => LaunchSource::Flags,
         };
         Self {
@@ -1116,9 +1132,7 @@ where
     // The app, and the shell's sender with it, is gone once `run_native`
     // returns: the launcher sees its channel close, stops every run still
     // going and waits for each.
-    let launcher_result = launcher
-        .join()
-        .map_err(|_| RunError::EmulatorThreadPanic)?;
+    let launcher_result = launcher.join().map_err(|_| RunError::EmulatorThreadPanic)?;
     gui_result.map_err(|source| RunError::Gui {
         message: source.to_string(),
     })?;
@@ -1269,7 +1283,9 @@ fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>
         control.begin_run(how);
         prepare_egui_run(&display, pointer_device_of(&config));
         let run = match &config.machine {
-            MachineConfig::Pc(pc) => run_pc_in_shell(pc, &display, &control, provisioned, carried.take()),
+            MachineConfig::Pc(pc) => {
+                run_pc_in_shell(pc, &display, &control, provisioned, carried.take())
+            }
             // An Arm board's disk has no volatile mode, so its run hands no
             // disk on to the next.
             MachineConfig::ArmVirt(virt) => {
@@ -1639,26 +1655,28 @@ fn path_to_str(path: &PathBuf) -> Result<&str, RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::args::DiskGeometry;
     #[cfg(feature = "gui-egui")]
-    use crate::debugger::source_breakpoints::{AppliedBreakpoints, PlacedImage, ScopedAddress};
+    use std::sync::atomic::Ordering;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     #[cfg(feature = "gui-egui")]
     use rusty_box::cpu::{CodeBreakpoint, CodeBreakpointHit};
+    use rusty_box::params::BxParams;
+    use rusty_box_bximage::ImageSize;
     #[cfg(feature = "gui-egui")]
     use rusty_box_symbols::identity::PeImageId;
+
+    use super::*;
+    use crate::args::DiskGeometry;
     use crate::config::{
         CpuCapabilities, Engine, ResolvedCdrom, ResolvedDisk, ResolvedDiskCreation,
     };
     #[cfg(feature = "gui-egui")]
+    use crate::debugger::source_breakpoints::{AppliedBreakpoints, PlacedImage, ScopedAddress};
+    #[cfg(feature = "gui-egui")]
     use crate::sessions::{
         AliveChange, AliveEffect, Exclusive, HeldBy, Holdings, KeepAlive, RunHolds,
     };
-    use rusty_box::params::BxParams;
-    use rusty_box_bximage::ImageSize;
-    #[cfg(feature = "gui-egui")]
-    use std::sync::atomic::Ordering;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn empty_vga_bios_returns_vga_size_error() {
@@ -1949,7 +1967,10 @@ mod tests {
 
         assert!(message.contains("was imported, but"), "{message:?}");
         assert!(message.contains("will not open on it"), "{message:?}");
-        assert!(message.contains(&exe_dir.path.display().to_string()), "{message:?}");
+        assert!(
+            message.contains(&exe_dir.path.display().to_string()),
+            "{message:?}"
+        );
         assert_eq!(library.load().expect("load").vms.len(), 1);
         assert_eq!(library.last_selected(), None);
     }
@@ -1971,7 +1992,10 @@ mod tests {
         let message = import_bundled_vm_from(&library, &exe_dir.path).expect("a message");
 
         assert!(message.contains("was not imported"), "{message:?}");
-        assert!(message.contains(&exe_dir.path.display().to_string()), "{message:?}");
+        assert!(
+            message.contains(&exe_dir.path.display().to_string()),
+            "{message:?}"
+        );
         assert!(library.load().expect("load").is_empty());
         assert_eq!(library.last_selected(), None);
     }
@@ -1995,7 +2019,10 @@ mod tests {
             LaunchVm::from_args(&from_file, config.clone()).name,
             "Alpine edge"
         );
-        assert_eq!(LaunchVm::from_args(&from_flags, config).name, "Command line");
+        assert_eq!(
+            LaunchVm::from_args(&from_flags, config).name,
+            "Command line"
+        );
     }
 
     /// The launch VM the command line `line` describes, resolved the way
@@ -2074,8 +2101,13 @@ mod tests {
         let file_arg = file.to_str().expect("a UTF-8 scratch path");
         let before = fs::read_to_string(&file).expect("read");
 
-        let with_memory =
-            launch_from_command_line(&["rusty_box_gui", "--config", file_arg, "--memory-mib", "64"]);
+        let with_memory = launch_from_command_line(&[
+            "rusty_box_gui",
+            "--config",
+            file_arg,
+            "--memory-mib",
+            "64",
+        ]);
         let start = shell_start(library.clone(), Some(with_memory));
         assert!(
             matches!(&start.opening, ShellOpening::Launch(vm)
@@ -2189,7 +2221,10 @@ mod tests {
         let shared = Arc::new(Mutex::new(SharedDisplay::new()));
         shared.lock().unwrap().queue_serial_input_line("stale");
 
-        prepare_egui_run(&shared, rusty_box::gui::host_input::PointerDevice::RelativeMouse);
+        prepare_egui_run(
+            &shared,
+            rusty_box::gui::host_input::PointerDevice::RelativeMouse,
+        );
 
         assert_eq!(
             shared.lock().unwrap().drain_serial_input(),
@@ -2205,13 +2240,18 @@ mod tests {
         use rusty_box::gui::{HostInputEvent, HostInputSink};
         use rusty_box::iodev::scancodes::BxKey;
         let shared = Arc::new(Mutex::new(SharedDisplay::new()));
-        assert!(shared
-            .lock()
-            .unwrap()
-            .push(HostInputEvent::Key(BxKey::Enter, true)));
+        assert!(
+            shared
+                .lock()
+                .unwrap()
+                .push(HostInputEvent::Key(BxKey::Enter, true))
+        );
         assert_eq!(shared.lock().unwrap().pending_keys.len(), 1);
 
-        prepare_egui_run(&shared, rusty_box::gui::host_input::PointerDevice::RelativeMouse);
+        prepare_egui_run(
+            &shared,
+            rusty_box::gui::host_input::PointerDevice::RelativeMouse,
+        );
 
         assert!(shared.lock().unwrap().pending_keys.is_empty());
     }
@@ -2255,7 +2295,10 @@ mod tests {
         };
 
         prepare_egui_run(&shared, pointer_device_of(&arm));
-        assert_eq!(shared.lock().unwrap().pointer_device, PointerDevice::AbsoluteTablet);
+        assert_eq!(
+            shared.lock().unwrap().pointer_device,
+            PointerDevice::AbsoluteTablet
+        );
         assert_eq!(shared.lock().unwrap().runs_started, 1);
 
         arm.arm_virt_mut().expect("an Arm board").tablet = false;
@@ -2264,7 +2307,10 @@ mod tests {
 
         let pc = disk_creation_config(PathBuf::from("disk.img"), false);
         prepare_egui_run(&shared, pointer_device_of(&pc));
-        assert_eq!(shared.lock().unwrap().pointer_device, PointerDevice::RelativeMouse);
+        assert_eq!(
+            shared.lock().unwrap().pointer_device,
+            PointerDevice::RelativeMouse
+        );
         assert_eq!(shared.lock().unwrap().runs_started, 3);
     }
 
@@ -2283,7 +2329,9 @@ mod tests {
     /// (`TestVm`).
     #[cfg(feature = "gui-egui")]
     fn control_for(display: &Mutex<SharedDisplay>) -> Arc<RunControl> {
-        Arc::new(RunControl::new(Arc::clone(&display.lock().unwrap().stop_flag)))
+        Arc::new(RunControl::new(Arc::clone(
+            &display.lock().unwrap().stop_flag,
+        )))
     }
 
     /// The shell's power-off of a VM that is not paused.
@@ -2291,7 +2339,6 @@ mod tests {
     fn stop(display: &Arc<Mutex<SharedDisplay>>) {
         signal_egui_stop(display, &control_for(display));
     }
-
 
     /// A power-on refused for a missing CD-ROM leaves an `overwrite` disk as
     /// it was: the CD-ROM is checked before the disk is recreated.
@@ -2410,12 +2457,14 @@ mod tests {
         control.arm_for_power_on();
         display.lock().unwrap().start_pending = true;
         commands
-            .send(crate::app::NativeEmulatorCommand::Start(crate::app::StartRun {
-                display: Arc::clone(display),
-                config,
-                holds,
-                control: Arc::clone(control),
-            }))
+            .send(crate::app::NativeEmulatorCommand::Start(
+                crate::app::StartRun {
+                    display: Arc::clone(display),
+                    config,
+                    holds,
+                    control: Arc::clone(control),
+                },
+            ))
             .unwrap();
     }
 
@@ -2759,7 +2808,10 @@ mod tests {
         assert_eq!(outcome.runtime_errors, vec![None]);
         let after = after.unwrap();
         assert_eq!(after.len(), 10_321_920);
-        assert_eq!(after[0], 0x00, "the overwrite Start left the first run's data");
+        assert_eq!(
+            after[0], 0x00,
+            "the overwrite Start left the first run's data"
+        );
     }
 
     /// A BIOS whose instruction at the reset vector jumps to itself, so the
@@ -2856,11 +2908,14 @@ mod tests {
         });
 
         let first = run_to_its_end(&config, None);
-        let handed = first.volatile_disk.expect("the run hands its volatile disk back");
+        let handed = first
+            .volatile_disk
+            .expect("the run hands its volatile disk back");
         let journal = handed.journal_path().to_path_buf();
         let next = run_to_its_end(&config, Some(handed));
         assert_eq!(
-            next.volatile_disk.map(|disk| disk.journal_path().to_path_buf()),
+            next.volatile_disk
+                .map(|disk| disk.journal_path().to_path_buf()),
             Some(journal),
             "the next machine ran on the same journal"
         );
@@ -2868,7 +2923,10 @@ mod tests {
         if let Some(disk_config) = config.disk.as_mut() {
             disk_config.mode = DiskMode::Flat;
         }
-        assert!(run_to_its_end(&config, None).volatile_disk.is_none(), "a flat disk has none to hand on");
+        assert!(
+            run_to_its_end(&config, None).volatile_disk.is_none(),
+            "a flat disk has none to hand on"
+        );
         remove_test_file(&disk);
         remove_test_file(&bios);
     }
@@ -2910,7 +2968,10 @@ mod tests {
         remove_test_file(&kernel);
 
         assert_eq!(display.lock().unwrap().runtime_error, None);
-        assert_eq!(result.expect("the launcher's result").instructions_executed, Some(3));
+        assert_eq!(
+            result.expect("the launcher's result").instructions_executed,
+            Some(3)
+        );
     }
 
     /// Two VMs powered on one after the other both run their guests at once,
@@ -3084,7 +3145,10 @@ mod tests {
 
         wait_for_end(&run, "a VM stopped with its restart queued");
         let retired = run.join().expect("the run's thread");
-        assert!(retired.is_some(), "a run on the interpreter counts what it retired");
+        assert!(
+            retired.is_some(),
+            "a run on the interpreter counts what it retired"
+        );
         remove_test_file(&bios);
         let shown = display.lock().unwrap();
         assert!(!shown.emu_running);
@@ -3132,7 +3196,11 @@ mod tests {
             Some(alpine.clone()),
             "held while it runs"
         );
-        assert_eq!(kept_alive(), [AliveChange::Started], "kept alive while it runs");
+        assert_eq!(
+            kept_alive(),
+            [AliveChange::Started],
+            "kept alive while it runs"
+        );
 
         ask_for_a_restart(&display);
         wait_until(|| {
@@ -3289,8 +3357,15 @@ mod tests {
 
         // The BIOS's `JMP $` at the reset vector: CS base FFFF0000 plus FFF0.
         let at = CodeBreakpoint::Linear(0xFFFF_FFF0);
-        let hit = CodeBreakpointHit { cpu: 0, breakpoint: at, linear: 0xFFFF_FFF0 };
-        vm.control.set_breakpoints(AppliedBreakpoints { set: vec![at], scopes: Vec::new() });
+        let hit = CodeBreakpointHit {
+            cpu: 0,
+            breakpoint: at,
+            linear: 0xFFFF_FFF0,
+        };
+        vm.control.set_breakpoints(AppliedBreakpoints {
+            set: vec![at],
+            scopes: Vec::new(),
+        });
         let snapshot = vm.paused_snapshot();
         assert_eq!(vm.control.stopped_at(), Some(hit));
         assert_eq!(snapshot.cpus[0].registers.rip, 0xFFF0);
@@ -3329,7 +3404,13 @@ mod tests {
             set: vec![at],
             scopes: vec![ScopedAddress {
                 linear: 0xFFFF_FFF0,
-                images: vec![PlacedImage { base, image: PeImageId { time_date_stamp: 7, size_of_image: 0x1_0000 } }],
+                images: vec![PlacedImage {
+                    base,
+                    image: PeImageId {
+                        time_date_stamp: 7,
+                        size_of_image: 0x1_0000,
+                    },
+                }],
             }],
         };
         // The BIOS ROM's first bytes: they read, and are no image's headers.
@@ -3339,13 +3420,25 @@ mod tests {
         wait_until(|| vm.control.applied_breakpoints() == [at]);
         std::thread::sleep(std::time::Duration::from_millis(50));
         vm.control.pause();
-        assert_eq!(vm.paused_snapshot().cpus[0].registers.rip, 0xFFF0, "paused in the `JMP $`");
-        assert_eq!(vm.control.stopped_at(), None, "the program is not loaded at the ROM");
+        assert_eq!(
+            vm.paused_snapshot().cpus[0].registers.rip,
+            0xFFF0,
+            "paused in the `JMP $`"
+        );
+        assert_eq!(
+            vm.control.stopped_at(),
+            None,
+            "the program is not loaded at the ROM"
+        );
 
         // Past the RAM, where nothing reads: nothing rules the program out.
         vm.control.set_breakpoints(scoped(0xD000_0000));
         vm.control.resume();
-        let hit = CodeBreakpointHit { cpu: 0, breakpoint: at, linear: 0xFFFF_FFF0 };
+        let hit = CodeBreakpointHit {
+            cpu: 0,
+            breakpoint: at,
+            linear: 0xFFFF_FFF0,
+        };
         wait_until(|| vm.control.stopped_at() == Some(hit));
 
         vm.stop();
@@ -3429,7 +3522,8 @@ mod tests {
         vm.control.pause();
         let before = vm.paused_snapshot();
 
-        vm.control.step(crate::debugger::stepping::StepRequest::instruction_into(0));
+        vm.control
+            .step(crate::debugger::stepping::StepRequest::instruction_into(0));
         wait_until(|| {
             vm.control
                 .snapshot()
@@ -3473,7 +3567,10 @@ mod tests {
                 bytes: 32 * 1024 * 1024
             }]
         );
-        assert_eq!(fs::metadata(&path).expect("the dump").len(), 32 * 1024 * 1024);
+        assert_eq!(
+            fs::metadata(&path).expect("the dump").len(),
+            32 * 1024 * 1024
+        );
         wait_until(|| vm.control.phase() == RunPhase::Running && vm.ips() > 0);
 
         vm.stop();

@@ -4,19 +4,20 @@
 //! neither the TLB nor an accessed or dirty bit; a read of a device window is
 //! that device's read, as it is in Bochs.
 
+use super::{Emulator, SliceEngine, SoftwareEngine, StopCause};
+use crate::Result;
+use crate::config::BxPhyAddress;
 use crate::cpu::instrumentation::{
     CpuDebugView, Fetched, Instrumentation, LinearRange, MappingWalk, PageMapping, VmxGuest,
     WalkStep,
 };
-use crate::config::BxPhyAddress;
 use crate::cpu::paging::{DbgWalk, VmxGuestWalk};
+use crate::cpu::{BreakpointRefusal, BreakpointSupport, CodeBreakpoint, CodeBreakpointHit};
 #[cfg(doc)]
 use crate::cpu::{MAX_LINEAR_BREAKPOINTS, MAX_PHYSICAL_BREAKPOINTS};
-use crate::cpu::{BreakpointRefusal, BreakpointSupport, CodeBreakpoint, CodeBreakpointHit};
-use crate::memory::{misc_mem::DbgFetch, mmio_map::MmioHit, CpuMemoryPolicy};
-use crate::Result;
-
-use super::{Emulator, SliceEngine, SoftwareEngine, StopCause};
+use crate::memory::CpuMemoryPolicy;
+use crate::memory::misc_mem::DbgFetch;
+use crate::memory::mmio_map::MmioHit;
 
 /// A byte's place in guest RAM's storage order, which is not a physical
 /// address (R4): below the PCI hole the two agree, and the RAM above the
@@ -36,7 +37,7 @@ impl RamOffset {
     /// physical address can start anywhere and never reads a device window.
     pub fn at_or_after_physical(physical: u64) -> Self {
         use crate::memory::memory_rusty_box::{
-            bx_is_pci_hole_addr, bx_translate_gpa_to_linear, BX_PCI_HOLE_END,
+            BX_PCI_HOLE_END, bx_is_pci_hole_addr, bx_translate_gpa_to_linear,
         };
         let physical = crate::config::BxPhyAddress::new(physical);
         if bx_is_pci_hole_addr(physical) {
@@ -145,7 +146,12 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     /// stop: a page's linear and physical address, its size, and the rights
     /// all of its levels together grant. The tables are read as
     /// [`Self::dbg_xlate_linear2phy_in`] reads them, so the two agree.
-    pub fn dbg_page_mappings_in<F>(&mut self, cr3: u64, range: LinearRange, mut visit: F) -> MappingWalk
+    pub fn dbg_page_mappings_in<F>(
+        &mut self,
+        cr3: u64,
+        range: LinearRange,
+        mut visit: F,
+    ) -> MappingWalk
     where
         F: FnMut(PageMapping) -> WalkStep,
     {
@@ -170,7 +176,12 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     /// guest's CR0, CR4 and EFER, every structure address and the result
     /// through the guest's EPT ([`VmxGuest::memory`]), so the address
     /// returned is the machine's — what [`Self::dbg_fetch_mem`] reads.
-    pub fn dbg_xlate_vmx_guest_linear2phy(&mut self, guest: &VmxGuest, cr3: u64, laddr: u64) -> Option<u64> {
+    pub fn dbg_xlate_vmx_guest_linear2phy(
+        &mut self,
+        guest: &VmxGuest,
+        cr3: u64,
+        laddr: u64,
+    ) -> Option<u64> {
         let walk = DbgWalk::VmxGuest(VmxGuestWalk::of(guest, cr3));
         self.machine
             .exec_ctx(self.index)
@@ -204,11 +215,11 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     /// A RAM block that could not be brought back into residency.
     pub fn dbg_fetch_mem(&mut self, addr: u64, buf: &mut [u8]) -> Result<Fetched> {
         let policy = CpuMemoryPolicy::new(self.machine.cpu_ref(self.index).smm_mode(), false);
-        match self
-            .machine
-            .memory
-            .dbg_fetch_mem(policy, crate::config::BxPhyAddress::new(addr), buf)?
-        {
+        match self.machine.memory.dbg_fetch_mem(
+            policy,
+            crate::config::BxPhyAddress::new(addr),
+            buf,
+        )? {
             DbgFetch::Read(fetched) => Ok(fetched),
             DbgFetch::Device(hit) => {
                 let now_ticks = self.machine.pc_system.time_ticks();
@@ -221,7 +232,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
                 // A window with no device behind it has no handler to call
                 // (Bochs finds no memory handler there): it reads as nothing.
                 if !devices.mmio_claimed(hit, device_manager) {
-                    buf.fill(0xff);
+                    buf.fill(0xFF);
                     return Ok(Fetched::OutsideMemory);
                 }
                 let mut fetched = Fetched::Valid;
@@ -232,7 +243,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
                         token: hit.token,
                         offset: hit.offset.wrapping_add(offset),
                     };
-                    let mut one = [0xff_u8];
+                    let mut one = [0xFF_u8];
                     if !devices.mmio_read(at, 1, &mut one, now_ticks, pc_system, device_manager) {
                         fetched = Fetched::OutsideMemory;
                     }

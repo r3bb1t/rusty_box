@@ -23,16 +23,11 @@
 //! does not exist on Windows). `cargo xtask hot-loop-baseline` measures
 //! and rewrites the baseline.
 
-use std::{
-    env, fmt, fs,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Mutex,
-    },
-    thread,
-};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{env, fmt, fs, thread};
 
 /// The committed baseline, relative to the repository root.
 const BASELINE: &str = "xtask/aarch64_hot_loop_baseline.txt";
@@ -67,11 +62,7 @@ impl fmt::Display for Toolchain {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value {
-        "yes"
-    } else {
-        "no"
-    }
+    if value { "yes" } else { "no" }
 }
 
 /// One loop's count under one observer.
@@ -274,7 +265,10 @@ fn build_perfbench(root: &Path, mut cargo: Command) -> Result<PathBuf, String> {
     let exe = format!("aarch64_perfbench{}", env::consts::EXE_SUFFIX);
     let built = target_dir(root).join("release").join("examples").join(exe);
     if !built.exists() {
-        return Err(format!("built aarch64_perfbench not found at {}", built.display()));
+        return Err(format!(
+            "built aarch64_perfbench not found at {}",
+            built.display()
+        ));
     }
     Ok(built)
 }
@@ -295,7 +289,12 @@ fn callgrind_total(file: &Path) -> Result<u64, String> {
         .map_err(|err| format!("{}: summary: {err}", file.display()))
 }
 
-fn count_one(binary: &Path, out_dir: &Path, workload: &'static str, hooks: &'static str) -> Result<Count, String> {
+fn count_one(
+    binary: &Path,
+    out_dir: &Path,
+    workload: &'static str,
+    hooks: &'static str,
+) -> Result<Count, String> {
     let file = out_dir.join(format!("callgrind.{workload}.{hooks}.out"));
     let output = Command::new("valgrind")
         .arg("--tool=callgrind")
@@ -343,18 +342,23 @@ fn measure(root: &Path, toolchain: Toolchain, cargo: Command) -> Result<Counts, 
         .map(|n| n.get())
         .unwrap_or(1)
         .min(jobs.len());
-    println!("counting {} runs under callgrind, {workers} at a time", jobs.len());
+    println!(
+        "counting {} runs under callgrind, {workers} at a time",
+        jobs.len()
+    );
     thread::scope(|scope| {
         for _ in 0..workers {
-            scope.spawn(|| loop {
-                let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(&(workload, hooks)) = jobs.get(index) else {
-                    break;
-                };
-                let result = count_one(&binary, &out_dir, workload, hooks);
-                match results.lock() {
-                    Ok(mut results) => results.push(result),
-                    Err(poisoned) => poisoned.into_inner().push(result),
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(&(workload, hooks)) = jobs.get(index) else {
+                        break;
+                    };
+                    let result = count_one(&binary, &out_dir, workload, hooks);
+                    match results.lock() {
+                        Ok(mut results) => results.push(result),
+                        Err(poisoned) => poisoned.into_inner().push(result),
+                    }
                 }
             });
         }
@@ -515,7 +519,9 @@ mod tests {
 
     #[test]
     fn a_baseline_missing_a_cell_is_refused() {
-        let text = counts(1_000_000).render().replace("fp hooked 1000000\n", "");
+        let text = counts(1_000_000)
+            .render()
+            .replace("fp hooked 1000000\n", "");
         assert!(Counts::parse(&text).is_err());
     }
 
@@ -536,7 +542,11 @@ mod tests {
         let dir = env::temp_dir().join(format!("hot_loop_test_{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("cg.out");
-        fs::write(&file, "version: 1\nevents: Ir\nfn=x\n0x10 5\nsummary: 8470198632\ntotals: 8470198632\n").unwrap();
+        fs::write(
+            &file,
+            "version: 1\nevents: Ir\nfn=x\n0x10 5\nsummary: 8470198632\ntotals: 8470198632\n",
+        )
+        .unwrap();
         assert_eq!(callgrind_total(&file), Ok(8_470_198_632));
         fs::remove_dir_all(&dir).unwrap();
     }

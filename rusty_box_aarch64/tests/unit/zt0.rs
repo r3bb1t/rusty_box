@@ -17,11 +17,10 @@
 use std::vec::Vec;
 
 use super::super::features::{Feature, Features, Implementation, VecLen};
-use super::super::sctlr;
 use super::super::sme::ZT0_BYTES;
-use super::super::step::{exec, exec_in, processor, Taken, DATA, FP_TRAP, SME_DISABLED, UNDEFINED};
+use super::super::step::{DATA, FP_TRAP, SME_DISABLED, Taken, UNDEFINED, exec, exec_in, processor};
 use super::super::sve::Zv;
-use super::super::{Cpu, NoEl2};
+use super::super::{Cpu, NoEl2, sctlr};
 
 /// The SME trap with SMTC 2: outside Streaming SVE mode.
 const NOT_STREAMING: Taken = Taken { ec: 0x1D, iss: 2 };

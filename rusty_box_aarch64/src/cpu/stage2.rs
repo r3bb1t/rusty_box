@@ -39,11 +39,11 @@ use super::el2::{HCR_FWB, HCR_PTW, HCR_TGE, VTCR_EL2_DS, VTCR_EL2_HA, VTCR_EL2_H
 use super::features::{Feature, Features};
 use super::memattr::MemAttrs;
 use super::mmu::{
-    HwUpdate, Ipa, LeafDescriptor, LeafLevel, Level, TranslationFault, WalkStart, WalkStop,
-    PERM_EL0_R, PERM_EL0_W, PERM_EL0_X, PERM_EL1_R, PERM_EL1_W, PERM_EL1_X,
+    HwUpdate, Ipa, LeafDescriptor, LeafLevel, Level, PERM_EL0_R, PERM_EL0_W, PERM_EL0_X,
+    PERM_EL1_R, PERM_EL1_W, PERM_EL1_X, TranslationFault, WalkStart, WalkStop,
 };
-use super::regime::{el10_stage2_enabled, sh0, txsz_taken, Ds, Granule, OaLayout, Regime, TCR_TG0};
-use super::{id, Cpu, Levels};
+use super::regime::{Ds, Granule, OaLayout, Regime, TCR_TG0, el10_stage2_enabled, sh0, txsz_taken};
+use super::{Cpu, Levels, id};
 use crate::bus::{PhysAddr, PhysBus};
 
 /// `VTCR_EL2.T0SZ`, bits 5:0.

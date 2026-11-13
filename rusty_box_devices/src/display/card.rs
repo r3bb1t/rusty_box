@@ -74,10 +74,7 @@ pub enum Dirt<'a> {
     SelfTracked,
     /// One bit per page of the direct-mapped window, least-significant bit of
     /// word zero being the window's first page.
-    Pages {
-        bitmap: &'a [u64],
-        page_size: usize,
-    },
+    Pages { bitmap: &'a [u64], page_size: usize },
 }
 
 impl Dirt<'_> {
@@ -89,7 +86,10 @@ impl Dirt<'_> {
     /// the device's own bitmap already is the answer.
     #[cfg_attr(
         not(feature = "alloc"),
-        allow(dead_code, reason = "consulted by the framebuffer frame, which needs an allocator")
+        allow(
+            dead_code,
+            reason = "consulted by the framebuffer frame, which needs an allocator"
+        )
     )]
     pub(crate) fn reports_nothing(&self) -> bool {
         match self {
@@ -181,7 +181,10 @@ pub struct RefreshCtx<'a, S: DisplaySink> {
 impl<'a, S: DisplaySink> RefreshCtx<'a, S> {
     #[cfg_attr(
         not(feature = "alloc"),
-        allow(dead_code, reason = "built by `VgaCard::refresh`, whose callers are front ends")
+        allow(
+            dead_code,
+            reason = "built by `VgaCard::refresh`, whose callers are front ends"
+        )
     )]
     pub(crate) fn new(core: &'a mut VgaCore, sink: &'a mut S, dirt: Dirt<'a>) -> Self {
         Self { core, sink, dirt }
@@ -511,6 +514,7 @@ mod tests {
         fn dimension_update(&mut self, dims: crate::display::sink::Dimensions) {
             self.dimensions = Some(dims);
         }
+
         fn text_update(
             &mut self,
             _previous: &[u8],
@@ -521,13 +525,11 @@ mod tests {
             self.text_frames += 1;
             self.cursor = cursor;
         }
-        fn graphics_tile_update(
-            &mut self,
-            _rgba: &[u8],
-            _at: crate::display::sink::TilePos,
-        ) {
+
+        fn graphics_tile_update(&mut self, _rgba: &[u8], _at: crate::display::sink::TilePos) {
             self.tiles += 1;
         }
+
         fn palette_change(
             &mut self,
             _index: u8,
@@ -535,8 +537,11 @@ mod tests {
         ) -> crate::display::sink::Redraw {
             crate::display::sink::Redraw::NotNeeded
         }
+
         fn set_text_charmap(&mut self, _map: usize, _glyphs: &[u8]) {}
+
         fn clear_screen(&mut self) {}
+
         fn flush(&mut self) {}
     }
 
@@ -574,7 +579,10 @@ mod tests {
             plain, nvidia,
             "a card that changes nothing about a mode must change nothing about the frame"
         );
-        assert_eq!(plain.text_frames, 1, "and both must actually have drawn one");
+        assert_eq!(
+            plain.text_frames, 1,
+            "and both must actually have drawn one"
+        );
     }
 
     /// A page-tracked window reports a tile dirty when any page overlapping it
@@ -673,7 +681,10 @@ impl<E: VgaExtension> VgaCard<E> {
 
     #[cfg_attr(
         not(feature = "alloc"),
-        allow(dead_code, reason = "consulted by the snapshot rebuild, which needs std")
+        allow(
+            dead_code,
+            reason = "consulted by the snapshot rebuild, which needs std"
+        )
     )]
 
     /// Draw one frame — the core's pump, with the extension offered it first.
@@ -683,7 +694,10 @@ impl<E: VgaExtension> VgaCard<E> {
     /// engine supplies the page bitmap for the windows it mapped as host RAM.
     #[cfg_attr(
         not(feature = "alloc"),
-        allow(dead_code, reason = "called by the front ends, which need an allocator")
+        allow(
+            dead_code,
+            reason = "called by the front ends, which need an allocator"
+        )
     )]
     pub fn refresh<S: DisplaySink>(&mut self, sink: &mut S, dirt: Dirt<'_>) -> Refreshed {
         // Owed to the front end whichever half draws the pixels, so it happens
@@ -754,7 +768,8 @@ impl<E: VgaExtension> VgaCard<E> {
 
     pub fn set_preferred_mode(&mut self, xres: u16, yres: u16, bpp: u16) {
         self.core.set_preferred_mode(xres, yres, bpp);
-        self.ext.vga_apply_preferred_mode(&mut ResetCtx::new(&mut self.core));
+        self.ext
+            .vga_apply_preferred_mode(&mut ResetCtx::new(&mut self.core));
     }
 
     pub fn set_icount_sync(&mut self, ips: u64) {
@@ -763,7 +778,10 @@ impl<E: VgaExtension> VgaCard<E> {
 
     #[cfg_attr(
         not(feature = "alloc"),
-        allow(dead_code, reason = "the interactive loop's redraw pre-check, which needs std")
+        allow(
+            dead_code,
+            reason = "the interactive loop's redraw pre-check, which needs std"
+        )
     )]
     pub fn is_text_dirty(&self) -> bool {
         self.core.is_text_dirty()
@@ -776,7 +794,10 @@ impl<E: VgaExtension> VgaCard<E> {
     /// upstream.
     #[cfg_attr(
         not(feature = "alloc"),
-        allow(dead_code, reason = "reached through the `Display` handle, which needs an allocator")
+        allow(
+            dead_code,
+            reason = "reached through the `Display` handle, which needs an allocator"
+        )
     )]
     pub fn force_initial_update(&mut self) {
         let ext = &mut self.ext;
@@ -803,15 +824,12 @@ impl<E: VgaExtension> VgaCard<E> {
         self.core.take_vertical_timer_restart()
     }
 
-
-
-
-
-
-
     #[cfg_attr(
         not(feature = "alloc"),
-        allow(dead_code, reason = "reached through the `Display` handle, which needs an allocator")
+        allow(
+            dead_code,
+            reason = "reached through the `Display` handle, which needs an allocator"
+        )
     )]
     pub fn init_text_mode3(&mut self) {
         self.core.init_text_mode3();
@@ -826,9 +844,6 @@ impl<E: VgaExtension> VgaCard<E> {
     pub fn scan_all_text_memory(&self) -> alloc::string::String {
         self.core.scan_all_text_memory()
     }
-
-
-
 }
 
 impl<E: VgaExtension> crate::api::PioDevice for VgaCard<E> {
@@ -859,9 +874,10 @@ impl<E: VgaExtension> crate::api::PioDevice for VgaCard<E> {
         // The core's write, with each redraw it asks for answered by this
         // card's `redraw_area` — Bochs reaches the virtual the same way.
         let ext = &mut self.ext;
-        self.core.write_port_with(port, value, len.bytes(), |core, area| {
-            vga_redraw_area(ext, core, area)
-        });
+        self.core
+            .write_port_with(port, value, len.bytes(), |core, area| {
+                vga_redraw_area(ext, core, area)
+            });
     }
 }
 
@@ -893,8 +909,7 @@ impl<E: VgaExtension> crate::api::MmioDevice for VgaCard<E> {
             Some(vga_window @ (VgaWindow::Legacy | VgaWindow::Lfb)) => {
                 for (index, byte) in data.iter_mut().enumerate().take(len as usize) {
                     let offset = at.get() + index as u64;
-                    let mut offered =
-                        MemCtx::new(&mut self.core, vga_window, WindowOffset(offset));
+                    let mut offered = MemCtx::new(&mut self.core, vga_window, WindowOffset(offset));
                     *byte = match self.ext.vga_mem_read(&mut offered) {
                         Some(value) => value,
                         None => self.core.window_read_byte(vga_window, offset),
@@ -904,14 +919,10 @@ impl<E: VgaExtension> crate::api::MmioDevice for VgaCard<E> {
             Some(vga_window) => {
                 let mut offered = MemCtx::new(&mut self.core, vga_window, at);
                 if self.ext.vga_regs_read(&mut offered, len, data) == Written::FallThrough {
-                    crate::api::MmioDevice::mmio_read(
-                        &mut self.core, window, at, len, data, ctx,
-                    );
+                    crate::api::MmioDevice::mmio_read(&mut self.core, window, at, len, data, ctx);
                 }
             }
-            None => crate::api::MmioDevice::mmio_read(
-                &mut self.core, window, at, len, data, ctx,
-            ),
+            None => crate::api::MmioDevice::mmio_read(&mut self.core, window, at, len, data, ctx),
         }
     }
 
@@ -927,8 +938,7 @@ impl<E: VgaExtension> crate::api::MmioDevice for VgaCard<E> {
             Some(vga_window @ (VgaWindow::Legacy | VgaWindow::Lfb)) => {
                 for (index, &value) in data.iter().enumerate().take(len as usize) {
                     let offset = at.get() + index as u64;
-                    let mut offered =
-                        MemCtx::new(&mut self.core, vga_window, WindowOffset(offset));
+                    let mut offered = MemCtx::new(&mut self.core, vga_window, WindowOffset(offset));
                     if self.ext.vga_mem_write(&mut offered, value) == Written::FallThrough {
                         self.core.window_write_byte(vga_window, offset, value);
                     }
@@ -937,14 +947,10 @@ impl<E: VgaExtension> crate::api::MmioDevice for VgaCard<E> {
             Some(vga_window) => {
                 let mut offered = MemCtx::new(&mut self.core, vga_window, at);
                 if self.ext.vga_regs_write(&mut offered, len, data) == Written::FallThrough {
-                    crate::api::MmioDevice::mmio_write(
-                        &mut self.core, window, at, len, data, ctx,
-                    );
+                    crate::api::MmioDevice::mmio_write(&mut self.core, window, at, len, data, ctx);
                 }
             }
-            None => crate::api::MmioDevice::mmio_write(
-                &mut self.core, window, at, len, data, ctx,
-            ),
+            None => crate::api::MmioDevice::mmio_write(&mut self.core, window, at, len, data, ctx),
         }
     }
 }
@@ -966,8 +972,9 @@ impl<E: VgaExtension> crate::display::DisplaySource for VgaCard<E> {
 }
 
 impl crate::pci::PciDevice for VgaCard<StdVga> {
-    const DEVFUNC: u8 = <StdVga as crate::pci::PciDevice>::DEVFUNC;
     type WriteEffects = <StdVga as crate::pci::PciDevice>::WriteEffects;
+
+    const DEVFUNC: u8 = <StdVga as crate::pci::PciDevice>::DEVFUNC;
 
     fn pci_read(&self, address: u8, io_len: u8) -> u32 {
         self.ext.pci_read(address, io_len)
@@ -977,7 +984,6 @@ impl crate::pci::PciDevice for VgaCard<StdVga> {
         self.ext.pci_write(address, value, io_len)
     }
 }
-
 
 /// The PCI/BAR surface, which belongs to the card that has one. A machine
 /// holding a different card reaches its own; there is no generic answer,

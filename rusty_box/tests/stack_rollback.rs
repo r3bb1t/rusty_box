@@ -154,7 +154,12 @@ fn a_near_call_past_the_limit_takes_back_its_push() {
 fn a_far_jump_past_the_limit_raises_gp() {
     on_big_stack(|| {
         // jmp 0000:00010000 — 66 EA ptr16:32.
-        let jmp = [&[0x66, 0xEA][..], &BEYOND_REAL_LIMIT.to_le_bytes(), &[0x00, 0x00]].concat();
+        let jmp = [
+            &[0x66, 0xEA][..],
+            &BEYOND_REAL_LIMIT.to_le_bytes(),
+            &[0x00, 0x00],
+        ]
+        .concat();
         let delivered = real_mode_fault(&[], &jmp);
         assert_eq!(
             delivered,
@@ -185,9 +190,8 @@ struct ProtectedFault {
 
 /// Run `code` in flat 32-bit protected mode through a #GP it must raise.
 fn protected_mode_fault(code: &[u8]) -> ProtectedFault {
-    let mut emu =
-        Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
-            .expect("emulator");
+    let mut emu = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+        .expect("emulator");
     let mut gate = [0u8; 8];
     gate[0..2].copy_from_slice(&(PROTECTED_HANDLER as u16).to_le_bytes());
     gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
@@ -272,9 +276,8 @@ const TSS_SELECTOR: u16 = 0x18;
 /// the virtual-8086 stack, back to a HLT at `V86_HLT_IP`, and require the
 /// HLT's #GP to reach the ring-0 handler.
 fn v86_iret_then_fault(iret: &[u8], iret_frame: &[u8]) -> ProtectedFault {
-    let mut emu =
-        Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
-            .expect("emulator");
+    let mut emu = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+        .expect("emulator");
     // Null, flat ring-0 code and data, and a 32-bit TSS (limit 0x67).
     let gdt = [
         0u64,

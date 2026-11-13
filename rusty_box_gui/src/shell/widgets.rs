@@ -3,20 +3,26 @@
 //! and the Hardware device list share, the status dot and badge, the
 //! hairlines that join stacked panels, and the action tiles.
 
+use egui::{Color32, RichText, Stroke, WidgetInfo, WidgetType};
+
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::theme::SPACE_ITEM;
 use crate::shell::theme::{
-    shell_card_frame, Accent, BG_BASE, BG_CARD, BG_PANEL, SPACE_GROUP, STROKE_HAIRLINE,
-    TEXT_BODY, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TITLE,
+    Accent, BG_BASE, BG_CARD, BG_PANEL, SPACE_GROUP, STROKE_HAIRLINE, TEXT_BODY, TEXT_CAPTION,
+    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TITLE, shell_card_frame,
 };
-use egui::{Color32, RichText, Stroke, WidgetInfo, WidgetType};
 
 /// The header a settings pane opens with: the pane's name over one line
 /// saying what it does, then the gap that separates a header from its
 /// content. Summary opens with its header card and Console with the embedded
 /// view, so neither uses it.
 pub(crate) fn page_header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
-    ui.label(RichText::new(title).size(TEXT_TITLE).strong().color(TEXT_PRIMARY));
+    ui.label(
+        RichText::new(title)
+            .size(TEXT_TITLE)
+            .strong()
+            .color(TEXT_PRIMARY),
+    );
     ui.label(RichText::new(subtitle).size(TEXT_CAPTION).color(TEXT_MUTED));
     ui.add_space(SPACE_GROUP);
 }
@@ -184,7 +190,8 @@ pub(crate) fn selection_row(
         }
         RowMark::Expanded | RowMark::Plain => {
             if response.hovered() {
-                ui.painter().rect_filled(rect, 6.0, BG_CARD.gamma_multiply(0.5));
+                ui.painter()
+                    .rect_filled(rect, 6.0, BG_CARD.gamma_multiply(0.5));
             }
         }
     }
@@ -272,17 +279,28 @@ pub(crate) fn home_fact(ui: &mut egui::Ui, label: &str, value: &str) {
     // path) starts a row of its own and wraps there, rather than taking the
     // row's room from the facts after it.
     let measure = |text: &str, size: f32| {
-        ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(size), TEXT_PRIMARY).size().x
+        ui.painter()
+            .layout_no_wrap(
+                text.to_owned(),
+                egui::FontId::proportional(size),
+                TEXT_PRIMARY,
+            )
+            .size()
+            .x
     };
     let natural = measure(label, TEXT_CAPTION).max(measure(value, TEXT_BODY));
     let width = natural.min(ui.max_rect().width()).ceil();
     crate::shell::listing::wrap_before(ui, width);
-    ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-        ui.set_width(width);
-        ui.spacing_mut().item_spacing.y = 2.0;
-        ui.label(RichText::new(label).size(TEXT_CAPTION).color(TEXT_MUTED));
-        ui.label(RichText::new(value).size(TEXT_BODY).color(TEXT_PRIMARY));
-    });
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 0.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_width(width);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.label(RichText::new(label).size(TEXT_CAPTION).color(TEXT_MUTED));
+            ui.label(RichText::new(value).size(TEXT_BODY).color(TEXT_PRIMARY));
+        },
+    );
 }
 
 /// The one filled button a pane carries: its primary verb, as strong text in
@@ -418,7 +436,12 @@ pub(crate) fn disabled_tile(ui: &mut egui::Ui, title: &str, body: &str) {
         ui.set_width(ui.available_width());
         ui.set_min_height(ACTION_TILE_MIN_HEIGHT);
         ui.spacing_mut().item_spacing.y = 4.0;
-        ui.label(RichText::new(title).size(TEXT_TITLE).strong().color(TEXT_MUTED));
+        ui.label(
+            RichText::new(title)
+                .size(TEXT_TITLE)
+                .strong()
+                .color(TEXT_MUTED),
+        );
         ui.label(RichText::new(body).size(TEXT_SECONDARY).color(TEXT_MUTED));
         action_tile_footer(ui, egui::Button::new("Unavailable"), false);
     });

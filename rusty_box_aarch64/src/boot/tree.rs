@@ -44,21 +44,20 @@
 //! guessable; QEMU draws fresh ones from the host on every boot. A guest
 //! given none gathers its own.
 
-use super::fdt::{DeviceTreeError, Header, Out, FDT_BEGIN_NODE, FDT_END, FDT_END_NODE, HEADER_LEN};
-use crate::board::GicVersion;
+use super::fdt::{DeviceTreeError, FDT_BEGIN_NODE, FDT_END, FDT_END_NODE, HEADER_LEN, Header, Out};
+use crate::CpuModel;
 use crate::board::{
-    FLASH0_BASE, FLASH1_BASE, FLASH_BANK_SIZE, PPI_HYPERVISOR_TIMER, PPI_HYPERVISOR_VIRTUAL_TIMER,
-    PPI_PHYSICAL_TIMER, PPI_PMU, PPI_SECURE_PHYSICAL_TIMER, PPI_VIRTUAL_TIMER, RAM_BASE,
-    UART_CLOCK,
+    FLASH_BANK_SIZE, FLASH0_BASE, FLASH1_BASE, GicVersion, PPI_HYPERVISOR_TIMER,
+    PPI_HYPERVISOR_VIRTUAL_TIMER, PPI_PHYSICAL_TIMER, PPI_PMU, PPI_SECURE_PHYSICAL_TIMER,
+    PPI_VIRTUAL_TIMER, RAM_BASE, UART_CLOCK,
 };
 use crate::bus::PhysAddr;
-use crate::cpu::{PsciConduit, PSCI_COMPATIBLE};
+use crate::cpu::{PSCI_COMPATIBLE, PsciConduit};
 use crate::devices::gicv2::GicExtensions;
 use crate::devices::gicv2_virt::MAINTENANCE_INTID;
 use crate::identity::BoardIdentity;
 use crate::interrupt_map::{Spi, Wiring};
 use crate::layout::{DeviceLayout, DeviceWindows, GicV3Windows, GicWindows, Window};
-use crate::CpuModel;
 
 /// An empty memory reservation block, its terminating entry alone (5.3),
 /// after the header; the structure block (5.4) after it.
@@ -311,7 +310,12 @@ impl<'o> Writer<'o> {
 
     /// The path of the root's child named `base` at unit address `addr`,
     /// NUL-terminated: the node [`Writer::begin_at`] names so.
-    fn path_at(&mut self, name: &'static str, base: &str, addr: u64) -> Result<(), DeviceTreeError> {
+    fn path_at(
+        &mut self,
+        name: &'static str,
+        base: &str,
+        addr: u64,
+    ) -> Result<(), DeviceTreeError> {
         let path = Text::of(format_args!("/{}", UnitName { base, addr }))?;
         self.text(name, &path)
     }
@@ -346,7 +350,10 @@ impl<'o> Writer<'o> {
     fn windows(&mut self, name: &'static str, windows: &[Window]) -> Result<(), DeviceTreeError> {
         self.head(name, windows.len() * 16)?;
         for window in windows {
-            for cell in cells_of(window.base.get()).into_iter().chain(cells_of(window.size)) {
+            for cell in cells_of(window.base.get())
+                .into_iter()
+                .chain(cells_of(window.size))
+            {
                 self.out.put_u32(cell)?;
             }
         }

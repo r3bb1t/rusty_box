@@ -277,12 +277,12 @@ const HOST_TREE: &[u8] = include_bytes!("../../assets/qemu-virt-a57-256m.dtb");
 #[test]
 fn a_host_tree_gets_the_boards_memory_and_psci_nodes() {
     use super::{
-        describe, BootChoice, Description, DeviceTree, PsciConduit, TreeLevels, TreeSource,
+        BootChoice, Description, DeviceTree, PsciConduit, TreeLevels, TreeSource, describe,
     };
+    use crate::CpuModel;
     use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
     use crate::cpu::{NoEl2, WithEl2};
     use crate::identity::BoardIdentity;
-    use crate::CpuModel;
 
     let psci = NodePath::of("psci");
     let identity = BoardIdentity::RUSTY_BOX;
@@ -378,11 +378,11 @@ fn a_host_tree_gets_the_boards_memory_and_psci_nodes() {
 /// which the board does not have.
 #[test]
 fn the_device_tree_names_the_board_by_its_identity() {
-    use super::{describe, BootChoice, Description, DeviceTree, TreeLevels, TreeSource};
+    use super::{BootChoice, Description, DeviceTree, TreeLevels, TreeSource, describe};
+    use crate::CpuModel;
     use crate::boot::fdt;
     use crate::cpu::NoEl2;
     use crate::identity::{BoardIdentity, IdentityNames};
-    use crate::CpuModel;
 
     let machine = Description {
         ram_len: 256 << 20,
@@ -426,13 +426,7 @@ fn the_device_tree_names_the_board_by_its_identity() {
     // A host's tree, here QEMU's own `linux,dummy-virt` one, is named by
     // the identity too.
     let mut tree = std::boxed::Box::new(DeviceTree::EMPTY);
-    describe(
-        TreeSource::Host(HOST_TREE),
-        machine,
-        &host,
-        &mut tree,
-    )
-    .expect("describes");
+    describe(TreeSource::Host(HOST_TREE), machine, &host, &mut tree).expect("describes");
     let tree = tree.as_slice();
     assert_eq!(
         fdt::property(tree, "", "model"),
@@ -446,7 +440,6 @@ fn the_device_tree_names_the_board_by_its_identity() {
         assert_eq!(fdt::property(tree, gone, "compatible"), Ok(None), "{gone}");
     }
 }
-
 
 /// The interrupt map QEMU's `virt` wires (`a15irqmap`), which its tree
 /// names.
@@ -600,7 +593,11 @@ fn a_host_trees_power_key_names_the_line_the_button_drives() {
         ]),
         edited_host_tree(&[
             Edit::set(key, "gpios", Value::Bytes(&on_line_0)),
-            Edit::set(NodePath::of("gpio-keys"), "status", Value::String("disabled")),
+            Edit::set(
+                NodePath::of("gpio-keys"),
+                "status",
+                Value::String("disabled"),
+            ),
         ]),
         // The key on the RTC, which is no GPIO controller of the board's.
         edited_host_tree(&[
@@ -637,7 +634,9 @@ fn a_devices_interrupts_extended_is_the_interrupt_it_names() {
     let uart = NodePath::of("pl011@9000000");
     let intc = NodePath::of("intc@8000000");
     let spi = |n| Spi::new(n).expect("an SPI");
-    let be = |cells: &[u32]| -> std::vec::Vec<u8> { cells.iter().flat_map(|c| c.to_be_bytes()).collect() };
+    let be = |cells: &[u32]| -> std::vec::Vec<u8> {
+        cells.iter().flat_map(|c| c.to_be_bytes()).collect()
+    };
     let (gic_spi1, gic_spi9, other_spi1) = (
         be(&[0x8002, 0, 1, 4]),
         be(&[0, 9, 4]),
@@ -649,7 +648,11 @@ fn a_devices_interrupts_extended_is_the_interrupt_it_names() {
     ]);
     assert_eq!(check_qemu_tree(&extended, qemu), Ok(()));
     match check_qemu_tree(&extended, own) {
-        Err(BuildError::HostTreeInterrupt(HostTreeInterrupt { source, named, wired })) => {
+        Err(BuildError::HostTreeInterrupt(HostTreeInterrupt {
+            source,
+            named,
+            wired,
+        })) => {
             assert_eq!(
                 (source, named, wired),
                 (InterruptSource::Virtio, Some(spi(16)), spi(3)),
@@ -659,7 +662,11 @@ fn a_devices_interrupts_extended_is_the_interrupt_it_names() {
         other => panic!("{other:?}"),
     }
     // The GPIO controller (phandle 0x8004 in QEMU's tree) is no GIC.
-    let via_gpio = edited_host_tree(&[Edit::set(uart, "interrupts-extended", Value::Bytes(&other_spi1))]);
+    let via_gpio = edited_host_tree(&[Edit::set(
+        uart,
+        "interrupts-extended",
+        Value::Bytes(&other_spi1),
+    )]);
     assert_eq!(
         check_qemu_tree(&via_gpio, qemu),
         Err(BuildError::HostTreeInterrupt(HostTreeInterrupt {
@@ -736,7 +743,7 @@ fn a_disabled_device_node_is_left_to_the_tree() {
     use crate::boot::fdt::{Edit, NodePath, Value};
     let own = own_qemu_layout_wiring();
     let names: std::vec::Vec<std::string::String> = (0..32u64)
-        .map(|n| std::format!("virtio_mmio@{:x}", 0xa00_0000 + n * 0x200))
+        .map(|n| std::format!("virtio_mmio@{:x}", 0xA00_0000 + n * 0x200))
         .chain(["pl011@9000000", "pl031@9010000", "pl061@9030000"].map(std::string::String::from))
         .collect();
     let edits: std::vec::Vec<Edit<'_>> = names

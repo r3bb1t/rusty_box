@@ -3,17 +3,14 @@
 //!
 //! Based on Bochs cpu/tasking.cc
 
-use super::{
-    cpu::BxCpuC,
-    cpu::Exception,
-    decoder::BxSegregs,
-    descriptor::{
-        is_code_segment, is_code_segment_non_conforming, is_code_segment_readable, is_data_segment,
-        is_data_segment_writable, BxDescriptor, BxSelector,
-    },
-    segment_ctrl_pro::parse_selector,
-    Result,
+use super::Result;
+use super::cpu::{BxCpuC, Exception};
+use super::decoder::BxSegregs;
+use super::descriptor::{
+    BxDescriptor, BxSelector, is_code_segment, is_code_segment_non_conforming,
+    is_code_segment_readable, is_data_segment, is_data_segment_writable,
 };
+use super::segment_ctrl_pro::parse_selector;
 use crate::config::BxLinAddress;
 
 // Task switch source constants — Bochs cpu.h enum task_switch_source.
@@ -153,11 +150,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             self.system_write_dword(o_tss(0x20), self.eip())?;
             self.system_write_dword(o_tss(0x24), old_eflags)?;
             self.system_write_dword(o_tss(0x28), self.eax())?;
-            self.system_write_dword(o_tss(0x2c), self.ecx())?;
+            self.system_write_dword(o_tss(0x2C), self.ecx())?;
             self.system_write_dword(o_tss(0x30), self.edx())?;
             self.system_write_dword(o_tss(0x34), self.ebx())?;
             self.system_write_dword(o_tss(0x38), self.esp())?;
-            self.system_write_dword(o_tss(0x3c), self.ebp())?;
+            self.system_write_dword(o_tss(0x3C), self.ebp())?;
             self.system_write_dword(o_tss(0x40), self.esi())?;
             self.system_write_dword(o_tss(0x44), self.edi())?;
             self.system_write_word(
@@ -165,7 +162,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 self.sregs[BxSegregs::Es as usize].selector.value,
             )?;
             self.system_write_word(
-                o_tss(0x4c),
+                o_tss(0x4C),
                 self.sregs[BxSegregs::Cs as usize].selector.value,
             )?;
             self.system_write_word(
@@ -181,7 +178,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 self.sregs[BxSegregs::Fs as usize].selector.value,
             )?;
             self.system_write_word(
-                o_tss(0x5c),
+                o_tss(0x5C),
                 self.sregs[BxSegregs::Gs as usize].selector.value,
             )?;
         }
@@ -240,7 +237,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // 386 TSS
             // Read CR3 now (step 6) but apply after commit point (step 9)
             let new_cr3 = if self.cr0.pg() {
-                self.system_read_dword(n_tss(0x1c))?
+                self.system_read_dword(n_tss(0x1C))?
             } else {
                 0
             };
@@ -248,19 +245,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let new_eip = self.system_read_dword(n_tss(0x20))?;
             let new_eflags = self.system_read_dword(n_tss(0x24))?;
             let new_eax = self.system_read_dword(n_tss(0x28))?;
-            let new_ecx = self.system_read_dword(n_tss(0x2c))?;
+            let new_ecx = self.system_read_dword(n_tss(0x2C))?;
             let new_edx = self.system_read_dword(n_tss(0x30))?;
             let new_ebx = self.system_read_dword(n_tss(0x34))?;
             let new_esp = self.system_read_dword(n_tss(0x38))?;
-            let new_ebp = self.system_read_dword(n_tss(0x3c))?;
+            let new_ebp = self.system_read_dword(n_tss(0x3C))?;
             let new_esi = self.system_read_dword(n_tss(0x40))?;
             let new_edi = self.system_read_dword(n_tss(0x44))?;
             let raw_es = self.system_read_word(n_tss(0x48))?;
-            let raw_cs = self.system_read_word(n_tss(0x4c))?;
+            let raw_cs = self.system_read_word(n_tss(0x4C))?;
             let raw_ss = self.system_read_word(n_tss(0x50))?;
             let raw_ds = self.system_read_word(n_tss(0x54))?;
             let raw_fs = self.system_read_word(n_tss(0x58))?;
-            let raw_gs = self.system_read_word(n_tss(0x5c))?;
+            let raw_gs = self.system_read_word(n_tss(0x5C))?;
             let raw_ldt = self.system_read_word(n_tss(0x60))?;
             // Read trap word from TSS offset 0x64 (Bochs tasking.cc)
             let trap_word = self.system_read_word(n_tss(0x64))?;
@@ -447,9 +444,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // LDTR validation (Bochs tasking.cc)
         if ldt_selector.ti != 0 {
             tracing::error!("task_switch: bad LDT selector TI=1");
-            return self.exception(Exception::Ts, raw_ldt_selector & 0xfffc);
+            return self.exception(Exception::Ts, raw_ldt_selector & 0xFFFC);
         }
-        if (raw_ldt_selector & 0xfffc) != 0 {
+        if (raw_ldt_selector & 0xFFFC) != 0 {
             let good = self.fetch_raw_descriptor(&ldt_selector);
             match good {
                 Ok((dword1, dword2)) => {
@@ -459,17 +456,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         || ldt_descriptor.segment
                     {
                         tracing::error!("task_switch: bad LDT segment");
-                        return self.exception(Exception::Ts, raw_ldt_selector & 0xfffc);
+                        return self.exception(Exception::Ts, raw_ldt_selector & 0xFFFC);
                     }
                     if !ldt_descriptor.p {
                         tracing::error!("task_switch: LDT not present");
-                        return self.exception(Exception::Ts, raw_ldt_selector & 0xfffc);
+                        return self.exception(Exception::Ts, raw_ldt_selector & 0xFFFC);
                     }
                     self.ldtr.cache = ldt_descriptor;
                 }
                 Err(_) => {
                     tracing::error!("task_switch: bad LDT fetch");
-                    return self.exception(Exception::Ts, raw_ldt_selector & 0xfffc);
+                    return self.exception(Exception::Ts, raw_ldt_selector & 0xFFFC);
                 }
             }
         }
@@ -488,7 +485,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Protected mode segment validation
 
             // SS validation (Bochs tasking.cc)
-            if (raw_ss_selector & 0xfffc) != 0 {
+            if (raw_ss_selector & 0xFFFC) != 0 {
                 match self.fetch_raw_descriptor(&ss_selector) {
                     Ok((dword1, dword2)) => {
                         let mut ss_descriptor = self.parse_descriptor(dword1, dword2)?;
@@ -498,19 +495,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                             || !is_data_segment_writable(ss_descriptor.r#type)
                         {
                             tracing::error!("task_switch: SS not valid or writable segment");
-                            return self.exception(Exception::Ts, raw_ss_selector & 0xfffc);
+                            return self.exception(Exception::Ts, raw_ss_selector & 0xFFFC);
                         }
                         if !ss_descriptor.p {
                             tracing::error!("task_switch: SS not present");
-                            return self.exception(Exception::Ss, raw_ss_selector & 0xfffc);
+                            return self.exception(Exception::Ss, raw_ss_selector & 0xFFFC);
                         }
                         if ss_descriptor.dpl != cs_selector.rpl {
                             tracing::error!("task_switch: SS.dpl != CS.RPL");
-                            return self.exception(Exception::Ts, raw_ss_selector & 0xfffc);
+                            return self.exception(Exception::Ts, raw_ss_selector & 0xFFFC);
                         }
                         if ss_selector.rpl != ss_descriptor.dpl {
                             tracing::error!("task_switch: SS.rpl != SS.dpl");
-                            return self.exception(Exception::Ts, raw_ss_selector & 0xfffc);
+                            return self.exception(Exception::Ts, raw_ss_selector & 0xFFFC);
                         }
                         self.touch_segment(&ss_selector, &mut ss_descriptor)?;
                         self.sregs[BxSegregs::Ss as usize].cache = ss_descriptor;
@@ -518,12 +515,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     }
                     Err(_) => {
                         tracing::error!("task_switch: bad SS fetch");
-                        return self.exception(Exception::Ts, raw_ss_selector & 0xfffc);
+                        return self.exception(Exception::Ts, raw_ss_selector & 0xFFFC);
                     }
                 }
             } else {
                 tracing::error!("task_switch: SS NULL");
-                return self.exception(Exception::Ts, raw_ss_selector & 0xfffc);
+                return self.exception(Exception::Ts, raw_ss_selector & 0xFFFC);
             }
 
             // Restore CPL (Bochs tasking.cc)
@@ -556,7 +553,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             )?;
 
             // CS validation (Bochs tasking.cc)
-            if (raw_cs_selector & 0xfffc) != 0 {
+            if (raw_cs_selector & 0xFFFC) != 0 {
                 match self.fetch_raw_descriptor(&cs_selector) {
                     Ok((dword1, dword2)) => {
                         let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
@@ -565,35 +562,35 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                             || is_data_segment(cs_descriptor.r#type)
                         {
                             tracing::error!("task_switch: CS not valid executable seg");
-                            return self.exception(Exception::Ts, raw_cs_selector & 0xfffc);
+                            return self.exception(Exception::Ts, raw_cs_selector & 0xFFFC);
                         }
                         if is_code_segment_non_conforming(cs_descriptor.r#type)
                             && cs_descriptor.dpl != cs_selector.rpl
                         {
                             tracing::error!("task_switch: non-conforming CS.dpl!=CS.RPL");
-                            return self.exception(Exception::Ts, raw_cs_selector & 0xfffc);
+                            return self.exception(Exception::Ts, raw_cs_selector & 0xFFFC);
                         }
                         if !is_code_segment_non_conforming(cs_descriptor.r#type)
                             && cs_descriptor.dpl > cs_selector.rpl
                         {
                             tracing::error!("task_switch: conforming CS.dpl>RPL");
-                            return self.exception(Exception::Ts, raw_cs_selector & 0xfffc);
+                            return self.exception(Exception::Ts, raw_cs_selector & 0xFFFC);
                         }
                         if !cs_descriptor.p {
                             tracing::error!("task_switch: CS.p==0");
-                            return self.exception(Exception::Np, raw_cs_selector & 0xfffc);
+                            return self.exception(Exception::Np, raw_cs_selector & 0xFFFC);
                         }
                         self.touch_segment(&cs_selector, &mut cs_descriptor)?;
                         self.sregs[BxSegregs::Cs as usize].cache = cs_descriptor;
                     }
                     Err(_) => {
                         tracing::error!("task_switch: bad CS fetch");
-                        return self.exception(Exception::Ts, raw_cs_selector & 0xfffc);
+                        return self.exception(Exception::Ts, raw_cs_selector & 0xFFFC);
                     }
                 }
             } else {
                 tracing::error!("task_switch: CS NULL");
-                return self.exception(Exception::Ts, raw_cs_selector & 0xfffc);
+                return self.exception(Exception::Ts, raw_cs_selector & 0xFFFC);
             }
 
             // Bochs tasking.cc — updateFetchModeMask() after CS reload
@@ -613,14 +610,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         if self.shadow_stack_enabled(cpl_post_cet) || self.endbranch_enabled(cpl_post_cet) {
             if (new_eflags & super::eflags::EFlags::VM.bits()) != 0 {
                 tracing::error!("task_switch: shadow stack or endbranch enabled in vm8086");
-                return self.exception(Exception::Ts, self.tr.selector.value & 0xfffc);
+                return self.exception(Exception::Ts, self.tr.selector.value & 0xFFFC);
             }
         }
         if source != BX_TASK_FROM_IRET {
             if self.shadow_stack_enabled(cpl_post_cet) {
                 if new_ssp_cet & 0x7 != 0 {
                     tracing::error!("task_switch: newSSP not 8-byte aligned");
-                    return self.exception(Exception::Ts, self.tr.selector.value & 0xfffc);
+                    return self.exception(Exception::Ts, self.tr.selector.value & 0xFFFC);
                 }
                 self.shadow_stack_switch(new_ssp_cet)?;
                 if push_cs_lip_ssp {
@@ -710,7 +707,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         raw_selector: u16,
         cs_rpl: u8,
     ) -> Result<()> {
-        if (raw_selector & 0xfffc) != 0 {
+        if (raw_selector & 0xFFFC) != 0 {
             match self.fetch_raw_descriptor(selector) {
                 Ok((dword1, dword2)) => {
                     let mut descriptor = self.parse_descriptor(dword1, dword2)?;
@@ -721,7 +718,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                             && !is_code_segment_readable(descriptor.r#type))
                     {
                         tracing::error!("task_switch({:?}): not data or readable code", seg);
-                        return self.exception(Exception::Ts, raw_selector & 0xfffc);
+                        return self.exception(Exception::Ts, raw_selector & 0xFFFC);
                     }
 
                     // If data or non-conforming code, RPL and CPL must be <= DPL
@@ -730,12 +727,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         && (selector.rpl > descriptor.dpl || cs_rpl > descriptor.dpl)
                     {
                         tracing::error!("task_switch({:?}): RPL & CPL must be <= DPL", seg);
-                        return self.exception(Exception::Ts, raw_selector & 0xfffc);
+                        return self.exception(Exception::Ts, raw_selector & 0xFFFC);
                     }
 
                     if !descriptor.p {
                         tracing::error!("task_switch({:?}): descriptor not present", seg);
-                        return self.exception(Exception::Np, raw_selector & 0xfffc);
+                        return self.exception(Exception::Np, raw_selector & 0xFFFC);
                     }
 
                     self.touch_segment(selector, &mut descriptor)?;
@@ -743,7 +740,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 }
                 Err(_) => {
                     tracing::error!("task_switch({:?}): bad selector fetch", seg);
-                    return self.exception(Exception::Ts, raw_selector & 0xfffc);
+                    return self.exception(Exception::Ts, raw_selector & 0xFFFC);
                 }
             }
         }

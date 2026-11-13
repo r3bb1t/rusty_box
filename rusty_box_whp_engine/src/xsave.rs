@@ -26,9 +26,10 @@
 //! holds; the selector halves of the 32-bit form are not carried, and the
 //! shadow's are set to zero on a read-back.
 
-use crate::state::VpRegisters;
 use rusty_box::cpu::arch_state::{FpuState, VcpuArchState};
 use rusty_box_whp::WhpResult;
+
+use crate::state::VpRegisters;
 
 /// Fixed legacy-region offsets, identical in the standard and the compacted
 /// form: only extended components move between the two.
@@ -115,7 +116,9 @@ impl HostComponents {
     /// which is consistent, because no such host runs the platform either.
     #[cfg(not(target_arch = "x86_64"))]
     pub(crate) fn of_this_host() -> Self {
-        Self { info: [ComponentInfo::default(); COMPONENTS] }
+        Self {
+            info: [ComponentInfo::default(); COMPONENTS],
+        }
     }
 
     /// Where component `index` sits in an area of `len` bytes whose header
@@ -332,9 +335,7 @@ impl XsaveArea {
             state.mxcsr = u32_at(area, MXCSR);
             for (slot, reg) in state.vector.iter_mut().enumerate().take(16) {
                 let at = XMM0 + slot * 16;
-                if let (Some(low), Some(from)) =
-                    (reg.get_mut(..16), area.get(at..at + 16))
-                {
+                if let (Some(low), Some(from)) = (reg.get_mut(..16), area.get(at..at + 16)) {
                     low.copy_from_slice(from);
                 }
             }
@@ -351,7 +352,9 @@ impl XsaveArea {
             .then(|| self.host.span(xcomp_bv, area.len(), AVX))
             .flatten();
         for (slot, reg) in state.vector.iter_mut().enumerate().take(16) {
-            let Some(high) = reg.get_mut(16..32) else { continue };
+            let Some(high) = reg.get_mut(16..32) else {
+                continue;
+            };
             match avx
                 .as_ref()
                 .and_then(|span| area.get(span.start + slot * 16..span.start + slot * 16 + 16))
@@ -375,7 +378,9 @@ impl XsaveArea {
             .then(|| self.host.span(xcomp_bv, area.len(), ZMM_HI256))
             .flatten();
         for (slot, reg) in state.vector.iter_mut().enumerate().take(16) {
-            let Some(high) = reg.get_mut(32..64) else { continue };
+            let Some(high) = reg.get_mut(32..64) else {
+                continue;
+            };
             match zmm_hi
                 .as_ref()
                 .and_then(|span| area.get(span.start + slot * 32..span.start + slot * 32 + 32))
@@ -457,11 +462,10 @@ impl XsaveArea {
             }
         };
 
-        let ymm_high_live = state
-            .vector
-            .iter()
-            .take(16)
-            .any(|reg| reg.get(16..32).is_some_and(|high| high.iter().any(|byte| *byte != 0)));
+        let ymm_high_live = state.vector.iter().take(16).any(|reg| {
+            reg.get(16..32)
+                .is_some_and(|high| high.iter().any(|byte| *byte != 0))
+        });
         let mut live_bits = extended(AVX, ymm_high_live, &mut |area, span| {
             for (slot, reg) in state.vector.iter().enumerate().take(16) {
                 if let Some(high) = reg.get(16..32) {
@@ -477,11 +481,10 @@ impl XsaveArea {
             }
         })?;
 
-        let zmm_high_live = state
-            .vector
-            .iter()
-            .take(16)
-            .any(|reg| reg.get(32..64).is_some_and(|high| high.iter().any(|byte| *byte != 0)));
+        let zmm_high_live = state.vector.iter().take(16).any(|reg| {
+            reg.get(32..64)
+                .is_some_and(|high| high.iter().any(|byte| *byte != 0))
+        });
         live_bits |= extended(ZMM_HI256, zmm_high_live, &mut |area, span| {
             for (slot, reg) in state.vector.iter().enumerate().take(16) {
                 if let Some(high) = reg.get(32..64) {
@@ -520,9 +523,21 @@ mod tests {
     /// AVX at 576 and a supervisor pair behind it, 872 bytes in all.
     fn measured_host() -> HostComponents {
         let mut info = [ComponentInfo::default(); COMPONENTS];
-        info[AVX as usize] = ComponentInfo { size: 256, offset: 576, align64: false };
-        info[11] = ComponentInfo { size: 16, offset: 0, align64: false };
-        info[12] = ComponentInfo { size: 24, offset: 0, align64: false };
+        info[AVX as usize] = ComponentInfo {
+            size: 256,
+            offset: 576,
+            align64: false,
+        };
+        info[11] = ComponentInfo {
+            size: 16,
+            offset: 0,
+            align64: false,
+        };
+        info[12] = ComponentInfo {
+            size: 24,
+            offset: 0,
+            align64: false,
+        };
         HostComponents { info }
     }
 
@@ -538,7 +553,11 @@ mod tests {
 
     fn boxed(area: std::vec::Vec<u8>, host: HostComponents) -> XsaveArea {
         let len = area.len();
-        XsaveArea { bytes: area.into_boxed_slice(), len, host }
+        XsaveArea {
+            bytes: area.into_boxed_slice(),
+            len,
+            host,
+        }
     }
 
     /// The compacted walk lands AVX at 576 on the measured layout, and a
@@ -547,7 +566,10 @@ mod tests {
     fn the_compacted_walk_places_avx_where_the_platform_put_it() {
         let host = measured_host();
         assert_eq!(host.span(MEASURED_XCOMP, MEASURED_LEN, AVX), Some(576..832));
-        assert_eq!(host.span(MEASURED_XCOMP & !(1 << AVX), MEASURED_LEN, AVX), None);
+        assert_eq!(
+            host.span(MEASURED_XCOMP & !(1 << AVX), MEASURED_LEN, AVX),
+            None
+        );
         assert_eq!(host.span(MEASURED_XCOMP, MEASURED_LEN, OPMASK), None);
         // Too short an area carries no component, whatever the mask claims.
         assert_eq!(host.span(MEASURED_XCOMP, 600, AVX), None);
@@ -630,7 +652,11 @@ mod tests {
 
         assert!(area.area()[832..872].iter().all(|byte| *byte == 0xC7));
         let xstate_bv = u64_at(area.area(), XSTATE_BV);
-        assert_eq!(xstate_bv & (1 << 11), 1 << 11, "the supervisor mark survives");
+        assert_eq!(
+            xstate_bv & (1 << 11),
+            1 << 11,
+            "the supervisor mark survives"
+        );
         assert_eq!(xstate_bv & 0b11, 0b11, "x87 and SSE are marked live");
     }
 

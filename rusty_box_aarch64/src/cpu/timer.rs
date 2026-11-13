@@ -579,10 +579,11 @@ impl<L: Levels> Cpu<L> {
 
 #[cfg(test)]
 mod tests {
+    use rusty_box_core::ClockHz;
+
     use super::*;
     use crate::cpu::features::Implementation;
     use crate::cpu::{CpuConfig, Levels, NoEl2, SysReg, SysRegRefusal, WithEl2};
-    use rusty_box_core::ClockHz;
 
     /// A Cortex-A57 of the levels `L` running at `ips`, its counter at
     /// `counter_hz`.

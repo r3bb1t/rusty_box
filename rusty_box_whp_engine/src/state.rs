@@ -13,11 +13,10 @@
 //! exchange. This module's export leaves those fields of the state exactly as
 //! they were, which is what lets that area fill them afterwards.
 
-use rusty_box_whp::{Reg, RegisterValue, SegmentRegister, TableRegister, Vcpu, WhpResult};
-
 use rusty_box::cpu::arch_state::{
     ArchGroups, DescriptorTableState, SegmentAttributes, SegmentState, VcpuArchState,
 };
+use rusty_box_whp::{Reg, RegisterValue, SegmentRegister, TableRegister, Vcpu, WhpResult};
 
 /// The word-shaped registers, in the order [`WORD_VALUES`] reads and writes.
 ///
@@ -281,7 +280,10 @@ const _: () = {
     assert!(WORD_REGS[DR0_AT] as u32 == Reg::Dr0 as u32);
     assert!(WORD_REGS[DR6_AT] as u32 == Reg::Dr6 as u32);
     assert!(WORD_REGS[DR7_AT] as u32 == Reg::Dr7 as u32);
-    assert!(DR7_AT + 1 == WORD_VALUES, "the debug registers end the word list");
+    assert!(
+        DR7_AT + 1 == WORD_VALUES,
+        "the debug registers end the word list"
+    );
 };
 
 /// The groups this module carries.
@@ -396,7 +398,10 @@ fn value_at(state: &VcpuArchState, index: usize) -> RegisterValue {
             IDTR_SLOT => state.idtr,
             _ => DescriptorTableState::default(),
         };
-        RegisterValue::Table(TableRegister { base: table.base, limit: table.limit })
+        RegisterValue::Table(TableRegister {
+            base: table.base,
+            limit: table.limit,
+        })
     }
 }
 
@@ -459,7 +464,10 @@ fn place_at(state: &mut VcpuArchState, index: usize, value: RegisterValue) {
             RegisterValue::Table(table) => table,
             _ => TableRegister::default(),
         };
-        let table = DescriptorTableState { base: table.base, limit: table.limit };
+        let table = DescriptorTableState {
+            base: table.base,
+            limit: table.limit,
+        };
         // Two entries, as [`value_at`] says.
         match index - TABLES_AT {
             GDTR_SLOT => state.gdtr = table,
@@ -516,8 +524,10 @@ pub(crate) fn write_groups(
     let all = whole_state_regs();
     let mut names = [Reg::Rax; WHOLE_STATE];
     let mut values = [RegisterValue::Word(0); WHOLE_STATE];
-    for ((name, value), index) in
-        names.iter_mut().zip(values.iter_mut()).zip(&positions[..named])
+    for ((name, value), index) in names
+        .iter_mut()
+        .zip(values.iter_mut())
+        .zip(&positions[..named])
     {
         *name = all[*index];
         *value = value_at(state, *index);
@@ -682,12 +692,12 @@ pub(crate) fn export(vp: &impl VpRegisters, state: &mut VcpuArchState) -> WhpRes
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
+    use rusty_box::cpu::arch_state::{MsrState, SegmentAttributeParts, VECTOR_REGISTERS};
+
     use super::test_vp::Recorder;
     use super::*;
-    use rusty_box::cpu::arch_state::{MsrState, SegmentAttributeParts, VECTOR_REGISTERS};
 
     /// A distinctive state, so a field that lands in the wrong slot shows up as
     /// a wrong VALUE rather than as a zero that a default would also produce.
@@ -740,10 +750,24 @@ mod tests {
                 }),
             };
         }
-        state.ldtr = SegmentState { selector: 0x50, base: 0x5000, ..state.segments[0] };
-        state.tr = SegmentState { selector: 0x60, base: 0x6000, ..state.segments[0] };
-        state.gdtr = DescriptorTableState { base: 0x7000, limit: 0x7F };
-        state.idtr = DescriptorTableState { base: 0x8000, limit: 0x8F };
+        state.ldtr = SegmentState {
+            selector: 0x50,
+            base: 0x5000,
+            ..state.segments[0]
+        };
+        state.tr = SegmentState {
+            selector: 0x60,
+            base: 0x6000,
+            ..state.segments[0]
+        };
+        state.gdtr = DescriptorTableState {
+            base: 0x7000,
+            limit: 0x7F,
+        };
+        state.idtr = DescriptorTableState {
+            base: 0x8000,
+            limit: 0x8F,
+        };
         state
     }
 
@@ -777,8 +801,14 @@ mod tests {
         // field by field rather than compared whole, so that a future field
         // added to `MsrState` and forgotten in `msr_words` fails here.
         assert_eq!(
-            MsrState { tsc: 0, ..read_back.msrs },
-            MsrState { tsc: 0, ..original.msrs }
+            MsrState {
+                tsc: 0,
+                ..read_back.msrs
+            },
+            MsrState {
+                tsc: 0,
+                ..original.msrs
+            }
         );
         assert_eq!(read_back.xcr0, original.xcr0);
         assert_eq!(read_back.segments, original.segments);
@@ -860,7 +890,10 @@ mod tests {
         read_back.mxcsr = 0x1F80;
         export(&vp, &mut read_back).expect("a recorder refuses nothing");
 
-        assert_eq!(read_back.vector[1][0], 0xA5, "the vector file is the shadow's");
+        assert_eq!(
+            read_back.vector[1][0], 0xA5,
+            "the vector file is the shadow's"
+        );
         assert_eq!(read_back.opmask[2], 0x1234);
         assert_eq!(read_back.mxcsr, 0x1F80);
         assert_eq!(read_back.vector.len(), VECTOR_REGISTERS);
@@ -876,10 +909,12 @@ mod tests {
 /// recorder that both drive is one account of what a processor was asked.
 #[cfg(test)]
 pub(crate) mod test_vp {
-    use super::{Reg, RegisterValue, SegmentRegister, TableRegister, VpRegisters, WhpResult};
-    use rusty_box_whp::ALL_REGS;
     use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
+
+    use rusty_box_whp::ALL_REGS;
+
+    use super::{Reg, RegisterValue, SegmentRegister, TableRegister, VpRegisters, WhpResult};
 
     #[derive(Default)]
     pub(crate) struct Recorder {
@@ -1048,7 +1083,7 @@ pub(crate) mod test_vp {
                     RegisterValue::Words128(_) => {
                         return Err(rusty_box_whp::WhpError::contract(
                             "the whole-state exchange holds no 128-bit register",
-                        ))
+                        ));
                     }
                 };
             }
@@ -1071,7 +1106,7 @@ pub(crate) mod test_vp {
                     RegisterValue::Words128(_) => {
                         return Err(rusty_box_whp::WhpError::contract(
                             "the whole-state exchange holds no 128-bit register",
-                        ))
+                        ));
                     }
                 }
             }

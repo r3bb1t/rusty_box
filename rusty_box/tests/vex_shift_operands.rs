@@ -25,8 +25,7 @@ const CODE: u64 = 0x0020_0000;
 
 fn avx_emulator() -> Box<Emulator> {
     let cfg = EmulatorConfig::default();
-    let mut emu =
-        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("emulator");
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("emulator");
     emu.reg_write(
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
@@ -112,21 +111,36 @@ fn vex_shift_family_all_read_rm() {
             // xmm1 is always 0x8000_0000_8000_0000 per qword.
             let cases: &[(&[u8], u64, &str)] = &[
                 // vpsrlq xmm0, xmm1, 4   C5 F9 73 D1 04  (/2)
-                (&[0xC5, 0xF9, 0x73, 0xD1, 0x04], 0x0800_0000_0800_0000, "vpsrlq"),
+                (
+                    &[0xC5, 0xF9, 0x73, 0xD1, 0x04],
+                    0x0800_0000_0800_0000,
+                    "vpsrlq",
+                ),
                 // vpsllq xmm0, xmm1, 4   C5 F9 73 F1 04  (/6)
-                (&[0xC5, 0xF9, 0x73, 0xF1, 0x04], 0x0000_0008_0000_0000, "vpsllq"),
+                (
+                    &[0xC5, 0xF9, 0x73, 0xF1, 0x04],
+                    0x0000_0008_0000_0000,
+                    "vpsllq",
+                ),
                 // vpslld xmm0, xmm1, 4   C5 F9 72 F1 04  (/6)
-                (&[0xC5, 0xF9, 0x72, 0xF1, 0x04], 0x0000_0000_0000_0000, "vpslld"),
+                (
+                    &[0xC5, 0xF9, 0x72, 0xF1, 0x04],
+                    0x0000_0000_0000_0000,
+                    "vpslld",
+                ),
                 // vpsrldq xmm0, xmm1, 4  C5 F9 73 D9 04  (/3)
-                (&[0xC5, 0xF9, 0x73, 0xD9, 0x04], 0x8000_0000_8000_0000, "vpsrldq"),
+                (
+                    &[0xC5, 0xF9, 0x73, 0xD9, 0x04],
+                    0x8000_0000_8000_0000,
+                    "vpsrldq",
+                ),
             ];
 
             for (code, want_q0, name) in cases {
                 let mut emu = avx_emulator();
                 let mut src = [0u8; 64];
                 for q in 0..2 {
-                    src[q * 8..q * 8 + 8]
-                        .copy_from_slice(&0x8000_0000_8000_0000u64.to_le_bytes());
+                    src[q * 8..q * 8 + 8].copy_from_slice(&0x8000_0000_8000_0000u64.to_le_bytes());
                 }
                 emu.reg_write_zmm(X86Reg::Zmm1, src);
                 emu.reg_write_zmm(X86Reg::Zmm0, [0xAA; 64]);

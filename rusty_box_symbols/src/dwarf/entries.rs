@@ -3,10 +3,10 @@
 //! steps from entry to entry without allocating, and reads an entry's
 //! attribute by walking its abbreviation's specifications.
 
-use super::abbrev::{parse_abbreviations, Abbreviations, Children};
-use super::forms::{decode_value, Encoding, Value};
+use super::abbrev::{Abbreviations, Children, parse_abbreviations};
+use super::forms::{Encoding, Value, decode_value};
 use super::unit::UnitHeader;
-use super::{short, DwarfError};
+use super::{DwarfError, short};
 use crate::read::Bytes;
 
 /// An entry: where it is, what it is, where its attributes start, and
@@ -26,7 +26,9 @@ pub struct Entry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
     /// The end of a list of siblings.
-    Null { next: usize },
+    Null {
+        next: usize,
+    },
     Entry(Entry),
 }
 
@@ -40,20 +42,33 @@ pub struct UnitContext<'a> {
 }
 
 /// The abbreviation table `header` names, from `.debug_abbrev`.
-pub fn unit_abbreviations(header: &UnitHeader, abbrev_section: Bytes<'_>) -> Result<Abbreviations, DwarfError> {
-    let at = usize::try_from(header.abbrev_offset)
-        .map_err(|_| DwarfError::TooMany { what: "abbreviation offset", count: header.abbrev_offset })?;
+pub fn unit_abbreviations(
+    header: &UnitHeader,
+    abbrev_section: Bytes<'_>,
+) -> Result<Abbreviations, DwarfError> {
+    let at = usize::try_from(header.abbrev_offset).map_err(|_| DwarfError::TooMany {
+        what: "abbreviation offset",
+        count: header.abbrev_offset,
+    })?;
     parse_abbreviations(abbrev_section, at)
 }
 
 impl<'a> UnitContext<'a> {
     #[must_use]
-    pub fn new(section: Bytes<'a>, header: UnitHeader, abbreviations: &'a Abbreviations) -> UnitContext<'a> {
+    pub fn new(
+        section: Bytes<'a>,
+        header: UnitHeader,
+        abbreviations: &'a Abbreviations,
+    ) -> UnitContext<'a> {
         UnitContext {
             section,
             header,
             abbreviations,
-            encoding: Encoding { version: header.version, format: header.format, address_size: header.address_size },
+            encoding: Encoding {
+                version: header.version,
+                format: header.format,
+                address_size: header.address_size,
+            },
         }
     }
 
@@ -61,21 +76,37 @@ impl<'a> UnitContext<'a> {
     /// where the next starts, so an entry that runs past its unit fails
     /// here.
     pub fn step(&self, at: usize) -> Result<Step, DwarfError> {
-        let code = self.section.uleb128(at).map_err(|source| short("entry", source))?;
+        let code = self
+            .section
+            .uleb128(at)
+            .map_err(|source| short("entry", source))?;
         if code.value == 0 {
             return Ok(Step::Null { next: code.next });
         }
-        let index = self
-            .abbreviations
-            .index_of(code.value)
-            .ok_or(DwarfError::UnknownAbbreviation { at, code: code.value })?;
-        let abbreviation = self
-            .abbreviations
-            .by_index(index)
-            .ok_or(DwarfError::UnknownAbbreviation { at, code: code.value })?;
+        let index =
+            self.abbreviations
+                .index_of(code.value)
+                .ok_or(DwarfError::UnknownAbbreviation {
+                    at,
+                    code: code.value,
+                })?;
+        let abbreviation =
+            self.abbreviations
+                .by_index(index)
+                .ok_or(DwarfError::UnknownAbbreviation {
+                    at,
+                    code: code.value,
+                })?;
         let mut cursor = code.next;
         for spec in &abbreviation.attributes {
-            cursor = decode_value(self.section, cursor, spec.form, spec.implicit, &self.encoding)?.next;
+            cursor = decode_value(
+                self.section,
+                cursor,
+                spec.form,
+                spec.implicit,
+                &self.encoding,
+            )?
+            .next;
         }
         if cursor > self.header.end {
             return Err(DwarfError::BadReference { offset: at as u64 });
@@ -100,13 +131,21 @@ impl<'a> UnitContext<'a> {
 
     /// The value of attribute `name` on `entry`.
     pub fn attribute(&self, entry: &Entry, name: u64) -> Result<Option<Value<'a>>, DwarfError> {
-        let abbreviation = self
-            .abbreviations
-            .by_index(entry.abbreviation)
-            .ok_or(DwarfError::BadReference { offset: entry.offset as u64 })?;
+        let abbreviation =
+            self.abbreviations
+                .by_index(entry.abbreviation)
+                .ok_or(DwarfError::BadReference {
+                    offset: entry.offset as u64,
+                })?;
         let mut cursor = entry.attributes_at;
         for spec in &abbreviation.attributes {
-            let decoded = decode_value(self.section, cursor, spec.form, spec.implicit, &self.encoding)?;
+            let decoded = decode_value(
+                self.section,
+                cursor,
+                spec.form,
+                spec.implicit,
+                &self.encoding,
+            )?;
             if spec.name == name {
                 return Ok(Some(decoded.value));
             }

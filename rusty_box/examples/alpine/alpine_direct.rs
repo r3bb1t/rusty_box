@@ -23,12 +23,13 @@
 //! RUSTY_BOX_HEADLESS=1 cargo run --release --example alpine_direct --features std
 //! ```
 
-use rusty_box::{
-    emulator::{AtaSlot, BootDevice, BootOrder, EmulatorConfig, Ips, MemorySize, MachineBuilder},
-    gui::{NoGui, TermGui},
-    Result,
-};
 use std::time::Instant;
+
+use rusty_box::Result;
+use rusty_box::emulator::{
+    AtaSlot, BootDevice, BootOrder, EmulatorConfig, Ips, MachineBuilder, MemorySize,
+};
+use rusty_box::gui::{NoGui, TermGui};
 
 fn main() {
     const THREAD_STACK_SIZE: usize = 1500 * 1024 * 1024;
@@ -265,8 +266,14 @@ fn run_alpine() -> Result<()> {
             format!("{}/binaries/bios/VGABIOS-lgpl-latest.bin", ws),
             format!("{}/../binaries/bios/VGABIOS-lgpl-latest.bin", ws),
             "binaries/bios/VGABIOS-lgpl-latest.bin".to_string(),
-            format!("{}/cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin", ws),
-            format!("{}/../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin", ws),
+            format!(
+                "{}/cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin",
+                ws
+            ),
+            format!(
+                "{}/../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin",
+                ws
+            ),
             "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin".to_string(),
         ];
         let vga_strs: Vec<&str> = vga_candidates.iter().map(|s| s.as_str()).collect();
@@ -402,7 +409,8 @@ fn run_alpine() -> Result<()> {
                 mips,
                 emu.cpu().rip(),
                 emu.get_cpu_mode_str(),
-                io_r, io_w,
+                io_r,
+                io_w,
                 ata_ch0,
                 ata_ch1,
                 ata1_info,

@@ -11,19 +11,19 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use rusty_box::cpu::{BreakpointRefusal, CodeBreakpoint, CodeBreakpointHit};
 use rusty_box::emulator::PowerState;
 
-use super::inspect::{CodeTarget, DebugSnapshot, MemoryTarget, ViewRequest};
-use super::source_breakpoints::{AppliedBreakpoints, BreakpointTarget, ScopedAddress};
-use super::stepping::{StepCeiling, StepRequest};
-use crate::symbols::hub::SymbolsView;
-use super::kernel_layout::{same_layouts, KernelLayout};
-use super::search::{FindOutcome, FindRequest};
-use super::windows::WindowsDiscovery;
-use super::frames::InspectRequest;
 #[cfg(feature = "gui-egui")]
 use super::frames::InspectAsk;
-use super::xref::service::{CopyRequest, XrefService};
+use super::frames::InspectRequest;
+use super::inspect::{CodeTarget, DebugSnapshot, MemoryTarget, ViewRequest};
+use super::kernel_layout::{KernelLayout, same_layouts};
+use super::search::{FindOutcome, FindRequest};
+use super::source_breakpoints::{AppliedBreakpoints, BreakpointTarget, ScopedAddress};
+use super::stepping::{StepCeiling, StepRequest};
+use super::windows::WindowsDiscovery;
 #[cfg(feature = "gui-egui")]
 use super::xref::service::{CopyModule, IndexState};
+use super::xref::service::{CopyRequest, XrefService};
+use crate::symbols::hub::SymbolsView;
 
 /// What the shell asked of the run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,9 +79,8 @@ impl From<rusty_box_aarch64::PowerState> for GuestPower {
     fn from(power: rusty_box_aarch64::PowerState) -> Self {
         match power {
             rusty_box_aarch64::PowerState::Running => Self::On,
-            rusty_box_aarch64::PowerState::PoweredOff | rusty_box_aarch64::PowerState::ProcessorOff => {
-                Self::Over
-            }
+            rusty_box_aarch64::PowerState::PoweredOff
+            | rusty_box_aarch64::PowerState::ProcessorOff => Self::Over,
         }
     }
 }
@@ -291,7 +290,12 @@ impl RunControl {
         let wanted: Vec<CopyModule> = request
             .modules
             .into_iter()
-            .filter(|module| matches!(self.xrefs.state(&module.key), None | Some(IndexState::Failed(_))))
+            .filter(|module| {
+                matches!(
+                    self.xrefs.state(&module.key),
+                    None | Some(IndexState::Failed(_))
+                )
+            })
             .collect();
         if wanted.is_empty() {
             return;
@@ -302,7 +306,10 @@ impl RunControl {
         }
         let keys: Vec<_> = wanted.iter().map(|module| module.key.clone()).collect();
         self.xrefs.mark_copying(&keys);
-        state.tasks.push_back(Task::CopyImages(CopyRequest { modules: wanted, ..request }));
+        state.tasks.push_back(Task::CopyImages(CopyRequest {
+            modules: wanted,
+            ..request
+        }));
         self.changed.notify_all();
     }
 
@@ -310,7 +317,9 @@ impl RunControl {
     /// index under way and those queued are stopped.
     #[cfg(feature = "gui-egui")]
     pub(crate) fn cancel_references(&self) {
-        self.lock().tasks.retain(|task| !matches!(task, Task::CopyImages(_)));
+        self.lock()
+            .tasks
+            .retain(|task| !matches!(task, Task::CopyImages(_)));
         self.xrefs.cancel();
     }
 
@@ -377,7 +386,9 @@ impl RunControl {
             return;
         }
         // Only the newest set is worth giving the machine.
-        state.tasks.retain(|task| !matches!(task, Task::ApplyBreakpoints(_)));
+        state
+            .tasks
+            .retain(|task| !matches!(task, Task::ApplyBreakpoints(_)));
         state.tasks.push_back(Task::ApplyBreakpoints(set));
         if state.phase == RunPhase::Running {
             state.serve_requested = true;
@@ -438,15 +449,27 @@ impl RunControl {
     #[cfg(feature = "gui-egui")]
     pub(crate) fn set_symbols(&self, view: Arc<SymbolsView>) {
         let mut state = self.lock();
-        if state.symbols.as_ref().is_some_and(|held| Arc::ptr_eq(held, &view)) {
+        if state
+            .symbols
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, &view))
+        {
             return;
         }
         // A paused read that waited for a module's tables or binary is read
         // again once they are here; any other new view asks nothing, so a
         // refresh never feeds itself.
         let arrived = state.snapshot.as_ref().is_some_and(|shown| {
-            shown.frames.awaiting.iter().any(|identity| view.tables(identity).is_some())
-                || shown.frames.awaiting_images.iter().any(|key| view.image(key).is_some())
+            shown
+                .frames
+                .awaiting
+                .iter()
+                .any(|identity| view.tables(identity).is_some())
+                || shown
+                    .frames
+                    .awaiting_images
+                    .iter()
+                    .any(|key| view.image(key).is_some())
         });
         state.symbols = Some(view);
         if arrived {
@@ -478,8 +501,15 @@ impl RunControl {
     #[cfg(feature = "gui-egui")]
     pub(crate) fn set_inspect(&self, ask: InspectAsk) {
         let mut state = self.lock();
-        let InspectAsk { watches, expanded, pages } = ask;
-        if state.inspect.watches == watches && state.inspect.expanded == expanded && state.inspect.pages == pages {
+        let InspectAsk {
+            watches,
+            expanded,
+            pages,
+        } = ask;
+        if state.inspect.watches == watches
+            && state.inspect.expanded == expanded
+            && state.inspect.pages == pages
+        {
             return;
         }
         state.inspect.watches = watches;
@@ -678,9 +708,7 @@ impl RunControl {
         let state = self.lock();
         if state.ending {
             AfterRun::End
-        } else if state.serve_requested
-            || state.wanted == Wanted::Pause
-            || !state.tasks.is_empty()
+        } else if state.serve_requested || state.wanted == Wanted::Pause || !state.tasks.is_empty()
         {
             AfterRun::Serve
         } else {
@@ -697,7 +725,10 @@ impl RunControl {
     pub(crate) fn after_passing(&self, power: GuestPower) -> Passing {
         {
             let state = self.lock();
-            let asked = state.ending || state.serve_requested || state.wanted == Wanted::Pause || !state.tasks.is_empty();
+            let asked = state.ending
+                || state.serve_requested
+                || state.wanted == Wanted::Pause
+                || !state.tasks.is_empty();
             if power == GuestPower::On && !asked {
                 self.stop_flag.store(false, Ordering::Relaxed);
                 return Passing::RunOn;
@@ -734,7 +765,10 @@ impl RunControl {
                         self.step_cancel.store(false, Ordering::Relaxed);
                         self.stepping.store(true, Ordering::Relaxed);
                     }
-                    Task::Refresh | Task::Find(_) | Task::ApplyBreakpoints(_) | Task::CopyImages(_) => {}
+                    Task::Refresh
+                    | Task::Find(_)
+                    | Task::ApplyBreakpoints(_)
+                    | Task::CopyImages(_) => {}
                 }
                 return BetweenRuns::Perform(task);
             }
@@ -800,7 +834,12 @@ impl RunControl {
     /// wherever it is reached.
     pub(crate) fn scope_of(&self, hit: &CodeBreakpointHit) -> Option<ScopedAddress> {
         match hit.breakpoint {
-            CodeBreakpoint::Linear(linear) => self.lock().scopes.iter().find(|scope| scope.linear == linear).cloned(),
+            CodeBreakpoint::Linear(linear) => self
+                .lock()
+                .scopes
+                .iter()
+                .find(|scope| scope.linear == linear)
+                .cloned(),
             CodeBreakpoint::Physical(_) => None,
         }
     }
@@ -926,7 +965,11 @@ impl RunControl {
                 // Modules the run did not copy are no longer being copied: a
                 // later find asks for them again.
                 Task::CopyImages(request) => {
-                    let keys: Vec<_> = request.modules.into_iter().map(|module| module.key).collect();
+                    let keys: Vec<_> = request
+                        .modules
+                        .into_iter()
+                        .map(|module| module.key)
+                        .collect();
                     self.xrefs.forget(&keys);
                 }
                 Task::Refresh | Task::Step(_) | Task::Find(_) | Task::ApplyBreakpoints(_) => {}
@@ -938,20 +981,24 @@ impl RunControl {
 
 #[cfg(all(test, feature = "gui-egui"))]
 mod tests {
-    use super::*;
-    use crate::debugger::guest::Root;
-    use crate::debugger::inspect::{AddressSpace, GuestAddress};
-    use crate::debugger::module_identity::GuestIdentity;
-    use crate::debugger::xref::service::{IndexSpace, ModuleKey};
-    use crate::symbols::hub::{ImageEntry, ImageKey, ImageState, ModuleEntry, ModuleSymbols};
+    use std::collections::{BTreeMap, BTreeSet};
+
     use rusty_box_symbols::identity::{ModuleIdentity, PeImageId};
     use rusty_box_symbols::module_file::ModuleFile;
     use rusty_box_symbols::service::SymbolSource;
     use rusty_box_symbols::tables::SymbolTables;
-    use rusty_box_symbols_fixtures::pdb::{build_pdb, PdbFixture};
-    use rusty_box_symbols_fixtures::pe::{pe64_file, Pe64Spec, SpecSection, PAGE_ALIGNED, SECTION_CODE};
+    use rusty_box_symbols_fixtures::pdb::{PdbFixture, build_pdb};
+    use rusty_box_symbols_fixtures::pe::{
+        PAGE_ALIGNED, Pe64Spec, SECTION_CODE, SpecSection, pe64_file,
+    };
+
+    use super::*;
+    use crate::debugger::guest::Root;
+    use crate::debugger::inspect::{AddressSpace, GuestAddress};
+    use crate::debugger::module_identity::GuestIdentity;
     use crate::debugger::source_breakpoints::PlacedImage;
-    use std::collections::{BTreeMap, BTreeSet};
+    use crate::debugger::xref::service::{IndexSpace, ModuleKey};
+    use crate::symbols::hub::{ImageEntry, ImageKey, ImageState, ModuleEntry, ModuleSymbols};
 
     fn control() -> RunControl {
         RunControl::new(Arc::new(AtomicBool::new(false)))
@@ -965,7 +1012,10 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control
     }
 
@@ -973,13 +1023,22 @@ mod tests {
     fn a_step_or_a_run_selects_the_innermost_frame() {
         let control = paused_control();
         control.select_frame(2);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         assert_eq!(control.inspect().frame, 2);
         control.step(StepRequest::instruction_into(0));
-        assert!(matches!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(_))));
+        assert!(matches!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Step(_))
+        ));
         assert_eq!(control.inspect().frame, 0);
         control.select_frame(1);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control.resume();
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert_eq!(control.inspect().frame, 0);
@@ -989,16 +1048,29 @@ mod tests {
     fn a_step_or_a_run_closes_the_tip() {
         let control = paused_control();
         control.show_tip(Some("count".into()));
-        assert_eq!(control.queued(), [Task::Refresh], "a paused run reads the tip");
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.queued(),
+            [Task::Refresh],
+            "a paused run reads the tip"
+        );
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         assert_eq!(control.inspect().tip.as_deref(), Some("count"));
         control.show_tip(Some("count".into()));
         assert_eq!(control.queued(), [], "the same tip again asks nothing");
         control.step(StepRequest::instruction_into(0));
-        assert!(matches!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(_))));
+        assert!(matches!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Step(_))
+        ));
         assert_eq!(control.inspect().tip, None);
         control.show_tip(Some("count".into()));
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control.resume();
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert_eq!(control.inspect().tip, None);
@@ -1010,13 +1082,27 @@ mod tests {
         control.select_frame(1);
         assert_eq!(control.queued(), [Task::Refresh]);
         control.select_frame(1);
-        assert_eq!(control.queued(), [Task::Refresh], "the same pick again asks nothing");
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
-        let ask = InspectAsk { watches: vec!["count".into()], expanded: BTreeSet::new(), pages: BTreeMap::new() };
+        assert_eq!(
+            control.queued(),
+            [Task::Refresh],
+            "the same pick again asks nothing"
+        );
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
+        let ask = InspectAsk {
+            watches: vec!["count".into()],
+            expanded: BTreeSet::new(),
+            pages: BTreeMap::new(),
+        };
         control.set_inspect(ask.clone());
         assert_eq!(control.queued(), [Task::Refresh]);
         assert_eq!(control.inspect().watches, ["count"]);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control.set_inspect(ask);
         assert_eq!(control.queued(), []);
     }
@@ -1025,7 +1111,10 @@ mod tests {
     fn new_symbols_refresh_only_a_read_that_waited_for_them() {
         let identity = ModuleIdentity::Pe {
             file_name: "flat.exe".into(),
-            image: PeImageId { time_date_stamp: 1, size_of_image: 0x1_0000 },
+            image: PeImageId {
+                time_date_stamp: 1,
+                size_of_image: 0x1_0000,
+            },
             pdb: None,
         };
         let control = paused_control();
@@ -1038,7 +1127,14 @@ mod tests {
         let mut view = SymbolsView::default();
         view.modules.insert(
             identity,
-            ModuleEntry { state: ModuleSymbols::Loaded { from: SymbolSource::Store { path: "flat.pdb".into() } }, tables: Some(Arc::new(tables)) },
+            ModuleEntry {
+                state: ModuleSymbols::Loaded {
+                    from: SymbolSource::Store {
+                        path: "flat.pdb".into(),
+                    },
+                },
+                tables: Some(Arc::new(tables)),
+            },
         );
         control.set_symbols(Arc::new(view));
         assert_eq!(control.queued(), [Task::Refresh]);
@@ -1046,7 +1142,13 @@ mod tests {
 
     #[test]
     fn a_binary_refreshes_only_a_read_that_waited_for_it() {
-        let key = ImageKey { file_name: "flat.exe".into(), image: PeImageId { time_date_stamp: 1, size_of_image: 0x2000 } };
+        let key = ImageKey {
+            file_name: "flat.exe".into(),
+            image: PeImageId {
+                time_date_stamp: 1,
+                size_of_image: 0x2000,
+            },
+        };
         let control = paused_control();
         let mut snapshot = empty_snapshot(0x1000);
         snapshot.frames.awaiting_images = vec![key.clone()];
@@ -1056,23 +1158,38 @@ mod tests {
             view.images.insert(key.clone(), entry);
             Arc::new(view)
         };
-        control.set_symbols(with(ImageEntry { state: ImageState::Pending, file: None }));
+        control.set_symbols(with(ImageEntry {
+            state: ImageState::Pending,
+            file: None,
+        }));
         assert_eq!(control.queued(), [], "still being looked up");
-        control.set_symbols(with(ImageEntry { state: ImageState::NotOnServer, file: None }));
+        control.set_symbols(with(ImageEntry {
+            state: ImageState::NotOnServer,
+            file: None,
+        }));
         assert_eq!(control.queued(), [], "nothing new to read with");
         let binary = pe64_file(&Pe64Spec {
             time_date_stamp: 1,
             size_of_image: 0x2000,
             image_base: 0x40_0000,
             section_alignment: PAGE_ALIGNED,
-            sections: vec![SpecSection { name: b".text", rva: 0x1000, bytes: vec![0xC3; 0x10], characteristics: SECTION_CODE }],
+            sections: vec![SpecSection {
+                name: b".text",
+                rva: 0x1000,
+                bytes: vec![0xC3; 0x10],
+                characteristics: SECTION_CODE,
+            }],
             exception: None,
             base_relocations: None,
             import_address_table: None,
         });
         let file = ModuleFile::parse(binary).expect("the binary parses");
         control.set_symbols(with(ImageEntry {
-            state: ImageState::Loaded { from: SymbolSource::Store { path: "flat.exe".into() } },
+            state: ImageState::Loaded {
+                from: SymbolSource::Store {
+                    path: "flat.exe".into(),
+                },
+            },
             file: Some(Arc::new(file)),
         }));
         assert_eq!(control.queued(), [Task::Refresh]);
@@ -1082,19 +1199,40 @@ mod tests {
     /// guest moves: the reset happens before the run thread reads.
     #[test]
     fn a_step_or_a_run_returns_the_code_pane_to_rip() {
-        let elsewhere = CodeTarget::At(GuestAddress { space: AddressSpace::Linear, value: 0x1000 });
+        let elsewhere = CodeTarget::At(GuestAddress {
+            space: AddressSpace::Linear,
+            value: 0x1000,
+        });
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
-        control.set_view(ViewRequest { code: elsewhere, ..control.view() });
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
+        control.set_view(ViewRequest {
+            code: elsewhere,
+            ..control.view()
+        });
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         assert_eq!(control.view().code, elsewhere);
         control.step(StepRequest::instruction_into(0));
-        assert!(matches!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(_))));
+        assert!(matches!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Step(_))
+        ));
         assert_eq!(control.view().code, CodeTarget::Rip);
-        control.set_view(ViewRequest { code: elsewhere, ..control.view() });
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        control.set_view(ViewRequest {
+            code: elsewhere,
+            ..control.view()
+        });
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control.resume();
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert_eq!(control.view().code, CodeTarget::Rip);
@@ -1105,21 +1243,52 @@ mod tests {
     #[test]
     fn finding_references_queues_one_copy_for_modules_not_indexed() {
         let module = |name: &str, base: u64| CopyModule {
-            key: ModuleKey { identity: GuestIdentity::Unnamed, name: name.to_owned(), base, size: 0x3000, space: IndexSpace::Kernel },
+            key: ModuleKey {
+                identity: GuestIdentity::Unnamed,
+                name: name.to_owned(),
+                base,
+                size: 0x3000,
+                space: IndexSpace::Kernel,
+            },
             root: Root::Live,
         };
-        let modules = vec![module("a.sys", 0x1_0000), module("b.sys", 0x2_0000), module("c.sys", 0x3_0000)];
-        let request = CopyRequest { modules: modules.clone(), spans: Vec::new(), taken_at: 9 };
+        let modules = vec![
+            module("a.sys", 0x1_0000),
+            module("b.sys", 0x2_0000),
+            module("c.sys", 0x3_0000),
+        ];
+        let request = CopyRequest {
+            modules: modules.clone(),
+            spans: Vec::new(),
+            taken_at: 9,
+        };
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
-        control.xrefs().mark_copying(std::slice::from_ref(&modules[1].key));
-        control.xrefs().fail(modules[2].key.clone(), "its headers do not read".into());
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
+        control
+            .xrefs()
+            .mark_copying(std::slice::from_ref(&modules[1].key));
+        control
+            .xrefs()
+            .fail(modules[2].key.clone(), "its headers do not read".into());
         control.find_references(request.clone());
         let copied = vec![modules[0].clone(), modules[2].clone()];
-        assert_eq!(control.queued(), [Task::CopyImages(CopyRequest { modules: copied, spans: Vec::new(), taken_at: 9 })]);
-        assert_eq!(control.xrefs().state(&modules[2].key), Some(IndexState::Copying));
+        assert_eq!(
+            control.queued(),
+            [Task::CopyImages(CopyRequest {
+                modules: copied,
+                spans: Vec::new(),
+                taken_at: 9
+            })]
+        );
+        assert_eq!(
+            control.xrefs().state(&modules[2].key),
+            Some(IndexState::Copying)
+        );
         control.find_references(request);
         assert_eq!(control.queued().len(), 1, "nothing is asked twice");
         control.cancel_references();
@@ -1141,8 +1310,14 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.pause();
-        assert_eq!(control.after_run(PowerState::PoweredOff.into()), AfterRun::End);
-        assert_eq!(control.after_run(PowerState::CpuShutdown.into()), AfterRun::End);
+        assert_eq!(
+            control.after_run(PowerState::PoweredOff.into()),
+            AfterRun::End
+        );
+        assert_eq!(
+            control.after_run(PowerState::CpuShutdown.into()),
+            AfterRun::End
+        );
         for arm in [
             rusty_box_aarch64::PowerState::PoweredOff,
             rusty_box_aarch64::PowerState::ProcessorOff,
@@ -1157,8 +1332,14 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         control.pause();
         assert!(raised(&control));
-        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.after_run(PowerState::Running.into()),
+            AfterRun::Serve
+        );
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         assert_eq!(control.phase(), RunPhase::Paused);
     }
 
@@ -1167,18 +1348,27 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control.resume();
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert!(!raised(&control));
         assert_eq!(control.phase(), RunPhase::Running);
 
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control.end_run();
         control.resume();
         assert_eq!(control.next_between_runs(), BetweenRuns::End);
-        assert!(raised(&control), "a resume never lowers a stop the shell asked for");
+        assert!(
+            raised(&control),
+            "a resume never lowers a stop the shell asked for"
+        );
     }
 
     #[test]
@@ -1189,8 +1379,14 @@ mod tests {
         assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
         assert!(raised(&control));
         assert!(control.dump_pending());
-        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::DumpRam(path)));
+        assert_eq!(
+            control.after_run(PowerState::Running.into()),
+            AfterRun::Serve
+        );
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::DumpRam(path))
+        );
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert!(!raised(&control));
     }
@@ -1230,7 +1426,10 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         control.pause();
         control.resume();
-        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
+        assert_eq!(
+            control.after_run(PowerState::Running.into()),
+            AfterRun::Serve
+        );
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert!(!raised(&control));
         assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End);
@@ -1302,9 +1501,18 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         let path = PathBuf::from("memory.bin");
         assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
-        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::DumpRam(path.clone())));
-        assert!(control.dump_pending(), "taken off the queue, but not written yet");
+        assert_eq!(
+            control.after_run(PowerState::Running.into()),
+            AfterRun::Serve
+        );
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::DumpRam(path.clone()))
+        );
+        assert!(
+            control.dump_pending(),
+            "taken off the queue, but not written yet"
+        );
         control.record_dump(DumpOutcome::Saved { path, bytes: 1 });
         assert!(!control.dump_pending());
     }
@@ -1321,7 +1529,10 @@ mod tests {
             rip,
             frames: crate::debugger::frames::FramesRead::default(),
             memory: MemoryWindow {
-                start: GuestAddress { space: AddressSpace::Linear, value: rip },
+                start: GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: rip,
+                },
                 rows: Vec::new(),
             },
             stack: Vec::new(),
@@ -1348,7 +1559,10 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         let layout = Arc::new(KernelLayout {
             kernel: crate::symbols::kernel::tests::kernel_identity(),
             source: crate::debugger::kernel_layout::LayoutSource::Matched,
@@ -1360,12 +1574,22 @@ mod tests {
             failures: Vec::new(),
         });
         control.set_kernel_layout(Some(Arc::clone(&layout)));
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control.set_kernel_layout(Some(Arc::clone(&layout)));
         assert!(control.lock().tasks.is_empty());
-        assert!(control.kernel_layout().is_some_and(|held| Arc::ptr_eq(&held, &layout)));
+        assert!(
+            control
+                .kernel_layout()
+                .is_some_and(|held| Arc::ptr_eq(&held, &layout))
+        );
         control.set_kernel_layout(None);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
     }
 
     /// Each snapshot published after the guest moved keeps the one before
@@ -1388,22 +1612,50 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control.publish_view(empty_snapshot(1));
         control.step(StepRequest::instruction_into(0));
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(StepRequest::instruction_into(0))));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Step(StepRequest::instruction_into(0)))
+        );
         control.publish(empty_snapshot(2));
-        assert_eq!(control.previous_snapshot().expect("kept").memory.start.value, 1);
+        assert_eq!(
+            control
+                .previous_snapshot()
+                .expect("kept")
+                .memory
+                .start
+                .value,
+            1
+        );
 
         // Paging memory re-reads the same guest: the comparison stays.
         control.set_view(ViewRequest {
             memory: crate::debugger::inspect::MemoryTarget::Rsp,
             ..ViewRequest::default()
         });
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
-        assert!(control.unmoved_snapshot().is_some(), "nothing executed since");
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
+        assert!(
+            control.unmoved_snapshot().is_some(),
+            "nothing executed since"
+        );
         control.publish_view(empty_snapshot(3));
-        assert_eq!(control.previous_snapshot().expect("kept").memory.start.value, 1);
+        assert_eq!(
+            control
+                .previous_snapshot()
+                .expect("kept")
+                .memory
+                .start
+                .value,
+            1
+        );
         assert_eq!(control.snapshot().expect("shown").memory.start.value, 3);
     }
 
@@ -1414,18 +1666,34 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control.publish_view(empty_snapshot(1));
         assert!(control.unmoved_snapshot().is_some());
         control.resume();
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
-        assert!(control.unmoved_snapshot().is_none(), "the guest ran between the pauses");
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
+        assert!(
+            control.unmoved_snapshot().is_none(),
+            "the guest ran between the pauses"
+        );
         control.publish_view(empty_snapshot(2));
-        assert_eq!(control.previous_snapshot().expect("kept").memory.start.value, 1);
+        assert_eq!(
+            control
+                .previous_snapshot()
+                .expect("kept")
+                .memory
+                .start
+                .value,
+            1
+        );
     }
-
 
     /// A search is taken only while paused, and a hit becomes the window.
     #[test]
@@ -1435,20 +1703,35 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         let request = FindRequest {
-            from: GuestAddress { space: AddressSpace::Physical, value: 0 },
+            from: GuestAddress {
+                space: AddressSpace::Physical,
+                value: 0,
+            },
             pattern: b"XP".to_vec(),
         };
         control.find(request.clone());
         assert!(!control.searching(), "a running VM takes no search");
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control.find(request.clone());
         assert!(control.searching());
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Find(request)));
-        let at = GuestAddress { space: AddressSpace::Physical, value: 0x1234 };
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Find(request))
+        );
+        let at = GuestAddress {
+            space: AddressSpace::Physical,
+            value: 0x1234,
+        };
         control.record_find(FindOutcome::Found(FoundAt { at, len: 2 }));
         assert!(!control.searching());
-        assert_eq!(control.view().memory, crate::debugger::inspect::MemoryTarget::At(at));
+        assert_eq!(
+            control.view().memory,
+            crate::debugger::inspect::MemoryTarget::At(at)
+        );
     }
 
     #[test]
@@ -1463,11 +1746,21 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.step(StepRequest::instruction_into(0));
-        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End, "no step queued");
+        assert_eq!(
+            control.after_run(PowerState::Running.into()),
+            AfterRun::End,
+            "no step queued"
+        );
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control.step(StepRequest::instruction_into(0));
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(StepRequest::instruction_into(0))));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Step(StepRequest::instruction_into(0)))
+        );
     }
 
     #[test]
@@ -1475,14 +1768,20 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         control.set_view(ViewRequest::default());
         assert!(control.lock().tasks.is_empty());
         control.set_view(ViewRequest {
             memory: crate::debugger::inspect::MemoryTarget::Rsp,
             ..ViewRequest::default()
         });
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
     }
 
     /// A paused run thread sleeps on the condition variable; a stop wakes it.
@@ -1491,7 +1790,10 @@ mod tests {
         let control = Arc::new(control());
         control.begin_run(RunStart::PowerOn);
         control.pause();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         let waiter = {
             let control = Arc::clone(&control);
             std::thread::spawn(move || control.next_between_runs())
@@ -1499,7 +1801,10 @@ mod tests {
         control.end_run();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while !waiter.is_finished() {
-            assert!(std::time::Instant::now() < deadline, "the paused thread never woke");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the paused thread never woke"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(waiter.join().expect("the waiter"), BetweenRuns::End);
@@ -1516,8 +1821,14 @@ mod tests {
         control.set_breakpoints(global(first));
         control.set_breakpoints(global(newest.clone()));
         assert!(raised(&control), "the run stops for the change");
-        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::ApplyBreakpoints(newest.clone())));
+        assert_eq!(
+            control.after_run(PowerState::Running.into()),
+            AfterRun::Serve
+        );
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::ApplyBreakpoints(newest.clone()))
+        );
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert!(!raised(&control), "and runs on");
         assert_eq!(control.breakpoints(), newest, "kept for the next run");
@@ -1533,17 +1844,32 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         // The machine's hit raised the run's stop flag; running on lowers it.
         control.stop_flag().store(true, Ordering::Relaxed);
-        assert_eq!(control.after_passing(PowerState::Running.into()), Passing::RunOn);
+        assert_eq!(
+            control.after_passing(PowerState::Running.into()),
+            Passing::RunOn
+        );
         assert!(!raised(&control), "the run goes on");
-        assert_eq!(control.after_passing(PowerState::PoweredOff.into()), Passing::Then(AfterRun::End));
+        assert_eq!(
+            control.after_passing(PowerState::PoweredOff.into()),
+            Passing::Then(AfterRun::End)
+        );
         control.pause();
-        assert_eq!(control.after_passing(PowerState::Running.into()), Passing::Then(AfterRun::Serve));
+        assert_eq!(
+            control.after_passing(PowerState::Running.into()),
+            Passing::Then(AfterRun::Serve)
+        );
         control.end_run();
-        assert_eq!(control.after_passing(PowerState::Running.into()), Passing::Then(AfterRun::End));
+        assert_eq!(
+            control.after_passing(PowerState::Running.into()),
+            Passing::Then(AfterRun::End)
+        );
     }
 
     fn global(set: Vec<CodeBreakpoint>) -> AppliedBreakpoints {
-        AppliedBreakpoints { set, scopes: Vec::new() }
+        AppliedBreakpoints {
+            set,
+            scopes: Vec::new(),
+        }
     }
 
     /// A breakpoint on a user program's line is scoped to the program's
@@ -1552,20 +1878,57 @@ mod tests {
     fn a_hit_is_judged_by_its_breakpoints_scope() {
         let control = control();
         control.begin_run(RunStart::PowerOn);
-        let set = vec![CodeBreakpoint::Linear(0x1000), CodeBreakpoint::Linear(0x2000)];
+        let set = vec![
+            CodeBreakpoint::Linear(0x1000),
+            CodeBreakpoint::Linear(0x2000),
+        ];
         control.set_breakpoints(global(set.clone()));
-        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::ApplyBreakpoints(set.clone())));
+        assert_eq!(
+            control.after_run(PowerState::Running.into()),
+            AfterRun::Serve
+        );
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::ApplyBreakpoints(set.clone()))
+        );
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
-        let program = PlacedImage { base: 0x400, image: PeImageId { time_date_stamp: 7, size_of_image: 0x2000 } };
-        let scoped = ScopedAddress { linear: 0x1000, images: vec![program] };
-        control.set_breakpoints(AppliedBreakpoints { set, scopes: vec![scoped.clone()] });
+        let program = PlacedImage {
+            base: 0x400,
+            image: PeImageId {
+                time_date_stamp: 7,
+                size_of_image: 0x2000,
+            },
+        };
+        let scoped = ScopedAddress {
+            linear: 0x1000,
+            images: vec![program],
+        };
+        control.set_breakpoints(AppliedBreakpoints {
+            set,
+            scopes: vec![scoped.clone()],
+        });
         assert!(!raised(&control), "the machine's set did not change");
-        let hit = |linear| CodeBreakpointHit { cpu: 0, breakpoint: CodeBreakpoint::Linear(linear), linear };
+        let hit = |linear| CodeBreakpointHit {
+            cpu: 0,
+            breakpoint: CodeBreakpoint::Linear(linear),
+            linear,
+        };
         assert_eq!(control.scope_of(&hit(0x1000)), Some(scoped));
-        assert_eq!(control.scope_of(&hit(0x2000)), None, "an address with no scope");
-        let physical = CodeBreakpointHit { cpu: 0, breakpoint: CodeBreakpoint::Physical(0x1000), linear: 0x1000 };
-        assert_eq!(control.scope_of(&physical), None, "a physical breakpoint stops wherever it is reached");
+        assert_eq!(
+            control.scope_of(&hit(0x2000)),
+            None,
+            "an address with no scope"
+        );
+        let physical = CodeBreakpointHit {
+            cpu: 0,
+            breakpoint: CodeBreakpoint::Physical(0x1000),
+            linear: 0x1000,
+        };
+        assert_eq!(
+            control.scope_of(&physical),
+            None,
+            "a physical breakpoint stops wherever it is reached"
+        );
     }
 
     /// A breakpoint stop pauses the run on the processor that stopped; a
@@ -1580,14 +1943,27 @@ mod tests {
             linear: 0x1000,
         };
         control.stopped_at_breakpoint(hit);
-        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(
+            control.after_run(PowerState::Running.into()),
+            AfterRun::Serve
+        );
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Refresh)
+        );
         assert_eq!(control.phase(), RunPhase::Paused);
         assert_eq!(control.view().cpu, 1, "the stopped processor is shown");
         assert_eq!(control.stopped_at(), Some(hit));
         control.step(StepRequest::instruction_into(0));
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(StepRequest::instruction_into(0))));
-        assert_eq!(control.stopped_at(), None, "a step moves off the breakpoint");
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Step(StepRequest::instruction_into(0)))
+        );
+        assert_eq!(
+            control.stopped_at(),
+            None,
+            "a step moves off the breakpoint"
+        );
         control.stepped_onto_breakpoint(hit);
         control.resume();
         assert_eq!(control.stopped_at(), None);

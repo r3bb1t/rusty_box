@@ -45,14 +45,15 @@
 //! otherwise turns on which codegen unit each module falls in.
 
 use super::arm_ops::clamp_scale;
-use super::f64_to_f16;
 use super::internals::{
     exp_f16, exp_f64, f16_tiny_after_rounding, flush_flags, frac_f16, norm_round_pack_to_f32,
     round_pack_to_f16, sign_f16, sign_f64,
 };
 use super::min_max::Extreme;
-use super::softfloat::{softfloat_raise_flags, Handling, FLAG_INVALID};
-use super::{ArmFpStatus, FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal};
+use super::softfloat::{FLAG_INVALID, Handling, softfloat_raise_flags};
+use super::{
+    ArmFpStatus, FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal, f64_to_f16,
+};
 
 /// A binary interchange format wider than half precision, by the widths of
 /// its exponent and fraction.
@@ -487,11 +488,7 @@ pub(crate) fn f16_dot(op1_a: u16, op1_b: u16, op2_a: u16, op2_b: u16, fp: &mut A
     let product = |x: u16, y: u16, negative: bool| {
         let ((sx, ex), (sy, ey)) = (sig_exp(x), sig_exp(y));
         let p = i128::from(sx * sy) << (ex + ey - 2);
-        if negative {
-            -p
-        } else {
-            p
-        }
+        if negative { -p } else { p }
     };
     let sum = product(a1, a2, sign_pa) + product(b1, b2, sign_pb);
     if sum == 0 {

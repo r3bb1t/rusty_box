@@ -25,18 +25,32 @@ use crate::source::find::{LoadedSource, PathMap, SourceFolders};
 pub(crate) enum ModuleSymbols {
     /// Asked for, not looked up yet.
     Pending,
-    Downloading { done: u64, total: Option<u64> },
-    Loaded { from: SymbolSource },
+    Downloading {
+        done: u64,
+        total: Option<u64>,
+    },
+    Loaded {
+        from: SymbolSource,
+    },
     /// A file the owner attached describes another build; Load anyway
     /// loads it.
-    Refused { found: TablesIdentity, path: PathBuf },
+    Refused {
+        found: TablesIdentity,
+        path: PathBuf,
+    },
     /// Loaded from a file of another build on the owner's word: every name
     /// from it is drawn amber.
-    Forced { found: TablesIdentity, path: PathBuf },
+    Forced {
+        found: TablesIdentity,
+        path: PathBuf,
+    },
     /// Every server answered that it does not have the file. Kept for the
     /// run; Retry asks again.
     NotOnServer,
-    Failed { reason: String, retry: Retry },
+    Failed {
+        reason: String,
+        retry: Retry,
+    },
     /// The owner unloaded it: not looked up again this run unless asked.
     Unloaded,
 }
@@ -69,7 +83,12 @@ impl ImageKey {
     /// The binary of a PE module; an ELF module has none here.
     pub(crate) fn of(identity: &ModuleIdentity) -> Option<ImageKey> {
         match identity {
-            ModuleIdentity::Pe { file_name, image, .. } => Some(ImageKey { file_name: file_name.clone(), image: *image }),
+            ModuleIdentity::Pe {
+                file_name, image, ..
+            } => Some(ImageKey {
+                file_name: file_name.clone(),
+                image: *image,
+            }),
             ModuleIdentity::Elf { .. } => None,
         }
     }
@@ -80,12 +99,20 @@ impl ImageKey {
 pub(crate) enum ImageState {
     /// Asked for, not looked up yet.
     Pending,
-    Downloading { done: u64, total: Option<u64> },
-    Loaded { from: SymbolSource },
+    Downloading {
+        done: u64,
+        total: Option<u64>,
+    },
+    Loaded {
+        from: SymbolSource,
+    },
     /// Every server answered that it does not have the file. Kept for the
     /// run.
     NotOnServer,
-    Failed { reason: String, retry: ImageRetry },
+    Failed {
+        reason: String,
+        retry: ImageRetry,
+    },
 }
 
 /// Whether a binary whose lookup failed is looked up again when a pause
@@ -171,7 +198,9 @@ pub(crate) struct SymbolsView {
 
 impl SymbolsView {
     pub(crate) fn tables(&self, identity: &ModuleIdentity) -> Option<&Arc<SymbolTables>> {
-        self.modules.get(identity).and_then(|entry| entry.tables.as_ref())
+        self.modules
+            .get(identity)
+            .and_then(|entry| entry.tables.as_ref())
     }
 
     pub(crate) fn state(&self, identity: &ModuleIdentity) -> Option<&ModuleSymbols> {
@@ -235,7 +264,9 @@ impl HubConfig {
 /// Work for a worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Job {
-    Locate { identity: ModuleIdentity },
+    Locate {
+        identity: ModuleIdentity,
+    },
     Attach {
         identity: ModuleIdentity,
         path: PathBuf,
@@ -246,9 +277,13 @@ pub(crate) enum Job {
     /// Count the store's files and bytes.
     MeasureStore,
     /// Find and read a source file.
-    ReadSource { key: SourceKey },
+    ReadSource {
+        key: SourceKey,
+    },
     /// Find a module's binary.
-    LocateImage { key: ImageKey },
+    LocateImage {
+        key: ImageKey,
+    },
 }
 
 impl Job {
@@ -257,7 +292,9 @@ impl Job {
     fn module(&self) -> Option<&ModuleIdentity> {
         match self {
             Job::Locate { identity } | Job::Attach { identity, .. } => Some(identity),
-            Job::Rescan | Job::MeasureStore | Job::ReadSource { .. } | Job::LocateImage { .. } => None,
+            Job::Rescan | Job::MeasureStore | Job::ReadSource { .. } | Job::LocateImage { .. } => {
+                None
+            }
         }
     }
 }
@@ -304,7 +341,10 @@ impl HubState {
     }
 
     /// Applies `change` to the published modules (readers keep their view).
-    fn publish_modules<F: FnOnce(&mut BTreeMap<ModuleIdentity, ModuleEntry>)>(&mut self, change: F) {
+    fn publish_modules<F: FnOnce(&mut BTreeMap<ModuleIdentity, ModuleEntry>)>(
+        &mut self,
+        change: F,
+    ) {
         self.publish(|view| change(&mut view.modules));
     }
 
@@ -320,8 +360,16 @@ impl HubState {
             .queue
             .iter()
             .enumerate()
-            .filter(|(_, queued)| queued.job.module().is_none_or(|identity| !busy.contains(identity)))
-            .min_by_key(|(at, queued)| QueueKey { priority: queued.priority, at: *at })
+            .filter(|(_, queued)| {
+                queued
+                    .job
+                    .module()
+                    .is_none_or(|identity| !busy.contains(identity))
+            })
+            .min_by_key(|(at, queued)| QueueKey {
+                priority: queued.priority,
+                at: *at,
+            })
             .map(|(at, _)| at)?;
         // `index` came from this queue's own enumeration: it is in range.
         let Queued { job, .. } = self.queue.remove(index);
@@ -373,7 +421,10 @@ impl SymbolHub {
     }
 
     fn lock(&self) -> MutexGuard<'_, HubState> {
-        self.shared.state.lock().unwrap_or_else(PoisonError::into_inner)
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Runs `change` under the lock. When it published, the shell is asked
@@ -383,7 +434,11 @@ impl SymbolHub {
         let mut state = self.lock();
         let before = state.view.generation;
         let result = change(&mut state);
-        let repaint = if state.view.generation == before { None } else { state.repaint.clone() };
+        let repaint = if state.view.generation == before {
+            None
+        } else {
+            state.repaint.clone()
+        };
         drop(state);
         if let Some(context) = repaint {
             context.request_repaint();
@@ -427,7 +482,10 @@ impl SymbolHub {
         if fresh.is_empty() {
             return;
         }
-        for wanted in modules.iter().filter(|wanted| fresh.contains(&wanted.identity)) {
+        for wanted in modules
+            .iter()
+            .filter(|wanted| fresh.contains(&wanted.identity))
+        {
             state.enqueue(
                 Job::Locate {
                     identity: wanted.identity.clone(),
@@ -450,7 +508,9 @@ impl SymbolHub {
             if state.busy.contains(identity) {
                 return;
             }
-            state.queue.retain(|queued| queued.job.module() != Some(identity));
+            state
+                .queue
+                .retain(|queued| queued.job.module() != Some(identity));
             state.enqueue(
                 Job::Locate {
                     identity: identity.clone(),
@@ -469,7 +529,9 @@ impl SymbolHub {
     pub(crate) fn cancel(&self, identity: &ModuleIdentity) {
         self.update(|state| {
             let before = state.queue.len();
-            state.queue.retain(|queued| queued.job.module() != Some(identity));
+            state
+                .queue
+                .retain(|queued| queued.job.module() != Some(identity));
             if state.busy.contains(identity) {
                 state.cancelled.insert(identity.clone());
                 return;
@@ -485,7 +547,9 @@ impl SymbolHub {
     /// Drops a module's tables; it is not looked up again until Retry.
     pub(crate) fn unload(&self, identity: &ModuleIdentity) {
         self.update(|state| {
-            state.queue.retain(|queued| queued.job.module() != Some(identity));
+            state
+                .queue
+                .retain(|queued| queued.job.module() != Some(identity));
             if state.busy.contains(identity) {
                 state.cancelled.insert(identity.clone());
             }
@@ -509,7 +573,9 @@ impl SymbolHub {
             if state.busy.contains(identity) {
                 state.cancelled.insert(identity.clone());
             }
-            state.queue.retain(|queued| queued.job.module() != Some(identity));
+            state
+                .queue
+                .retain(|queued| queued.job.module() != Some(identity));
             state.enqueue(
                 Job::Attach {
                     identity: identity.clone(),
@@ -562,13 +628,19 @@ impl SymbolHub {
                 .iter()
                 .filter(|key| match state.view.image_state(key) {
                     None => true,
-                    Some(ImageState::Failed { retry: ImageRetry::From(when), .. }) => now >= *when,
+                    Some(ImageState::Failed {
+                        retry: ImageRetry::From(when),
+                        ..
+                    }) => now >= *when,
                     Some(
                         ImageState::Pending
                         | ImageState::Downloading { .. }
                         | ImageState::Loaded { .. }
                         | ImageState::NotOnServer
-                        | ImageState::Failed { retry: ImageRetry::Never, .. },
+                        | ImageState::Failed {
+                            retry: ImageRetry::Never,
+                            ..
+                        },
                     ) => false,
                 })
                 .cloned()
@@ -583,7 +655,13 @@ impl SymbolHub {
             }
             state.publish(|view| {
                 for key in fresh {
-                    view.images.insert(key, ImageEntry { state: ImageState::Pending, file: None });
+                    view.images.insert(
+                        key,
+                        ImageEntry {
+                            state: ImageState::Pending,
+                            file: None,
+                        },
+                    );
                 }
             });
             self.shared.wake.notify_all();
@@ -599,7 +677,13 @@ impl SymbolHub {
             state.publish(|view| {
                 view.images.insert(
                     key.clone(),
-                    ImageEntry { state: ImageState::Downloading { done: progress.done, total: progress.total }, file: None },
+                    ImageEntry {
+                        state: ImageState::Downloading {
+                            done: progress.done,
+                            total: progress.total,
+                        },
+                        file: None,
+                    },
                 );
             });
             Flow::Continue
@@ -629,7 +713,9 @@ impl SymbolHub {
     pub(crate) fn reconfigure(&self, config: HubConfig) {
         self.update(|state| {
             state.config = Arc::new(config);
-            state.queue.retain(|queued| queued.job != Job::Rescan && queued.job != Job::MeasureStore);
+            state
+                .queue
+                .retain(|queued| queued.job != Job::Rescan && queued.job != Job::MeasureStore);
             state.enqueue(Job::Rescan, Priority::Kernel);
             state.enqueue(Job::MeasureStore, Priority::Rest);
             forget_sources(state);
@@ -638,8 +724,10 @@ impl SymbolHub {
                 .modules
                 .iter()
                 .filter(|(identity, entry)| {
-                    matches!(entry.state, ModuleSymbols::NotOnServer | ModuleSymbols::Failed { .. })
-                        && !state.busy.contains(*identity)
+                    matches!(
+                        entry.state,
+                        ModuleSymbols::NotOnServer | ModuleSymbols::Failed { .. }
+                    ) && !state.busy.contains(*identity)
                 })
                 .map(|(identity, _)| identity.clone())
                 .collect();
@@ -660,7 +748,12 @@ impl SymbolHub {
                 .view
                 .images
                 .iter()
-                .filter(|(_, entry)| matches!(entry.state, ImageState::NotOnServer | ImageState::Failed { .. }))
+                .filter(|(_, entry)| {
+                    matches!(
+                        entry.state,
+                        ImageState::NotOnServer | ImageState::Failed { .. }
+                    )
+                })
                 .map(|(key, _)| key.clone())
                 .collect();
             for key in &missing_images {
@@ -668,7 +761,13 @@ impl SymbolHub {
             }
             state.publish(|view| {
                 for key in missing_images {
-                    view.images.insert(key, ImageEntry { state: ImageState::Pending, file: None });
+                    view.images.insert(
+                        key,
+                        ImageEntry {
+                            state: ImageState::Pending,
+                            file: None,
+                        },
+                    );
                 }
             });
             self.shared.wake.notify_all();
@@ -697,7 +796,11 @@ impl SymbolHub {
             if let Some(ticket) = state.take() {
                 return Some(ticket);
             }
-            state = self.shared.wake.wait(state).unwrap_or_else(PoisonError::into_inner);
+            state = self
+                .shared
+                .wake
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 
@@ -766,13 +869,17 @@ impl SymbolHub {
             let was_cancelled = state.cancelled.remove(identity);
             self.shared.wake.notify_all();
             let unloaded = matches!(state.view.state(identity), Some(ModuleSymbols::Unloaded));
-            let superseded = state.queue.iter().any(|queued| queued.job.module() == Some(identity));
+            let superseded = state
+                .queue
+                .iter()
+                .any(|queued| queued.job.module() == Some(identity));
             if unloaded || superseded {
                 return;
             }
             state.publish_modules(|modules| {
                 // A cancelled download ends as a failure, shown as the cancel.
-                let entry = if was_cancelled && matches!(entry.state, ModuleSymbols::Failed { .. }) {
+                let entry = if was_cancelled && matches!(entry.state, ModuleSymbols::Failed { .. })
+                {
                     cancelled()
                 } else {
                     entry
@@ -806,7 +913,8 @@ impl SymbolHub {
     pub(crate) fn set_source_folders(&self, name: &str, folders: SourceFolders) {
         self.update(|state| {
             state.publish(|view| {
-                view.source_folders.insert(name.to_owned(), Arc::new(folders));
+                view.source_folders
+                    .insert(name.to_owned(), Arc::new(folders));
             });
         });
     }
@@ -819,7 +927,8 @@ impl SymbolHub {
                 return;
             }
             state.publish(|view| {
-                view.sources.insert(key.clone(), SourceSlot::Read(Arc::new(loaded)));
+                view.sources
+                    .insert(key.clone(), SourceSlot::Read(Arc::new(loaded)));
             });
         });
     }
@@ -828,7 +937,9 @@ impl SymbolHub {
     /// with it.
     pub(crate) fn add_run_map(&self, map: PathMap) {
         self.update(|state| {
-            state.queue.retain(|queued| !matches!(queued.job, Job::ReadSource { .. }));
+            state
+                .queue
+                .retain(|queued| !matches!(queued.job, Job::ReadSource { .. }));
             state.publish(|view| {
                 if !view.run_maps.contains(&map) {
                     view.run_maps.push(map);
@@ -854,7 +965,9 @@ impl SymbolHub {
 /// Drops every source read and every source folder index, and the reads
 /// still queued.
 fn forget_sources(state: &mut HubState) {
-    state.queue.retain(|queued| !matches!(queued.job, Job::ReadSource { .. }));
+    state
+        .queue
+        .retain(|queued| !matches!(queued.job, Job::ReadSource { .. }));
     if state.view.sources.is_empty() && state.view.source_folders.is_empty() {
         return;
     }

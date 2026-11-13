@@ -15,11 +15,9 @@
 //! - Min/Max/Average (PMINUB, PMAXUB, PMINSW, PMAXSW, PAVGB, PAVGW)
 //! - Misc (PMOVMSKB, PSADBW, MASKMOVDQU)
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-    simd_int,
-    xmm::BxPackedXmmRegister,
-};
+use super::decoder::{BxSegregs, Instruction};
+use super::simd_int;
+use super::xmm::BxPackedXmmRegister;
 
 // ============================================================================
 // Saturation helpers (matching Bochs sse_int.cc / mmx.cc inline functions)
@@ -65,8 +63,8 @@ pub(super) fn saturate_dword_s_to_word_s(val: i32) -> i16 {
 /// `src`, moved to bit 0. Both are taken modulo 64, and a length of 0 keeps
 /// every bit from `shift` up.
 fn xmm_extrq(src: u64, shift: u8, len: u8) -> u64 {
-    let len = len & 0x3f;
-    let shift = shift & 0x3f;
+    let len = len & 0x3F;
+    let shift = shift & 0x3F;
     let src = src >> shift;
     if len != 0 {
         src & ((1u64 << len) - 1)
@@ -79,9 +77,13 @@ fn xmm_extrq(src: u64, shift: u8, len: u8) -> u64 {
 /// `shift` replaced by the low `len` bits of `src`. Both are taken modulo 64,
 /// and a length of 0 means all 64.
 fn xmm_insertq(dest: u64, src: u64, shift: u8, len: u8) -> u64 {
-    let len = len & 0x3f;
-    let shift = shift & 0x3f;
-    let mask = if len == 0 { u64::MAX } else { (1u64 << len) - 1 };
+    let len = len & 0x3F;
+    let shift = shift & 0x3F;
+    let mask = if len == 0 {
+        u64::MAX
+    } else {
+        (1u64 << len) - 1
+    };
     (dest & !(mask << shift)) | ((src & mask) << shift)
 }
 
@@ -639,7 +641,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             result.set_xmmubyte(
                 i,
                 if op1.xmmubyte(i) == op2.xmmubyte(i) {
-                    0xff
+                    0xFF
                 } else {
                     0
                 },
@@ -659,7 +661,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             result.set_xmm16u(
                 i,
                 if op1.xmm16u(i) == op2.xmm16u(i) {
-                    0xffff
+                    0xFFFF
                 } else {
                     0
                 },
@@ -679,7 +681,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             result.set_xmm32u(
                 i,
                 if op1.xmm32u(i) == op2.xmm32u(i) {
-                    0xffffffff
+                    0xFFFFFFFF
                 } else {
                     0
                 },
@@ -699,7 +701,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             result.set_xmmubyte(
                 i,
                 if op1.xmm_sbyte(i) > op2.xmm_sbyte(i) {
-                    0xff
+                    0xFF
                 } else {
                     0
                 },
@@ -719,7 +721,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             result.set_xmm16u(
                 i,
                 if op1.xmm16s(i) > op2.xmm16s(i) {
-                    0xffff
+                    0xFFFF
                 } else {
                     0
                 },
@@ -739,7 +741,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             result.set_xmm32u(
                 i,
                 if op1.xmm32s(i) > op2.xmm32s(i) {
-                    0xffffffff
+                    0xFFFFFFFF
                 } else {
                     0
                 },
@@ -874,7 +876,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // no change
         } else if count > 15 {
             for i in 0..8 {
-                op1.set_xmm16u(i, if op1.xmm16s(i) < 0 { 0xffff } else { 0 });
+                op1.set_xmm16u(i, if op1.xmm16s(i) < 0 { 0xFFFF } else { 0 });
             }
         } else {
             for i in 0..8 {
@@ -895,7 +897,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // no change
         } else if count > 31 {
             for i in 0..4 {
-                op1.set_xmm32u(i, if op1.xmm32s(i) < 0 { 0xffffffff } else { 0 });
+                op1.set_xmm32u(i, if op1.xmm32s(i) < 0 { 0xFFFFFFFF } else { 0 });
             }
         } else {
             for i in 0..4 {
@@ -1057,7 +1059,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // no change
         } else if shift > 15 {
             for i in 0..8 {
-                op.set_xmm16u(i, if op.xmm16s(i) < 0 { 0xffff } else { 0 });
+                op.set_xmm16u(i, if op.xmm16s(i) < 0 { 0xFFFF } else { 0 });
             }
         } else {
             for i in 0..8 {
@@ -1077,7 +1079,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // no change
         } else if shift > 31 {
             for i in 0..4 {
-                op.set_xmm32u(i, if op.xmm32s(i) < 0 { 0xffffffff } else { 0 });
+                op.set_xmm32u(i, if op.xmm32s(i) < 0 { 0xFFFFFFFF } else { 0 });
             }
         } else {
             for i in 0..4 {
@@ -1321,8 +1323,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn insertq_vdq_udq(&mut self, instr: &Instruction) -> super::Result<()> {
         let source = self.read_xmm_reg(instr.src1());
         let destination = self.read_xmm_reg(instr.dst()).xmm64u(0);
-        let inserted =
-            xmm_insertq(destination, source.xmm64u(0), source.xmmubyte(9), source.xmmubyte(8));
+        let inserted = xmm_insertq(
+            destination,
+            source.xmm64u(0),
+            source.xmmubyte(9),
+            source.xmmubyte(8),
+        );
         self.write_xmm_lo_qword(instr.dst(), inserted);
         Ok(())
     }
@@ -1754,7 +1760,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if mask & 0x80 != 0 {
                 result.set_xmmubyte(n, 0);
             } else {
-                result.set_xmmubyte(n, op1.xmmubyte((mask & 0xf) as usize));
+                result.set_xmmubyte(n, op1.xmmubyte((mask & 0xF) as usize));
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
@@ -2129,7 +2135,11 @@ mod tests {
         let copied = memory
             .write_ram(crate::config::BxPhyAddress::new(at), bytes)
             .expect("RAM");
-        assert_eq!(copied, bytes.len(), "the write at {at:#x} reached RAM whole");
+        assert_eq!(
+            copied,
+            bytes.len(),
+            "the write at {at:#x} reached RAM whole"
+        );
     }
 
     /// Read `out.len()` bytes of RAM at `at`, all of them.
@@ -2147,12 +2157,26 @@ mod tests {
     fn long_mode_sse(machine: &mut TestMachine) -> ExecCtx<'_, ()> {
         let memory = machine.memory_mut();
         write_ram(memory, PML4, &(PDPT | PRESENT_WRITABLE).to_le_bytes());
-        write_ram(memory, PDPT, &(PAGE_DIRECTORY | PRESENT_WRITABLE).to_le_bytes());
-        write_ram(memory, PAGE_DIRECTORY, &(PRESENT_WRITABLE | LARGE_PAGE).to_le_bytes());
+        write_ram(
+            memory,
+            PDPT,
+            &(PAGE_DIRECTORY | PRESENT_WRITABLE).to_le_bytes(),
+        );
+        write_ram(
+            memory,
+            PAGE_DIRECTORY,
+            &(PRESENT_WRITABLE | LARGE_PAGE).to_le_bytes(),
+        );
 
         let mut cpu = machine.ctx();
         cpu.reset(crate::cpu::ResetReason::Hardware);
-        cpu.set_seg_for_api(X86Reg::Cs, CODE_SELECTOR, 0, 0xFFFF_FFFF, SegmentSize::Long64);
+        cpu.set_seg_for_api(
+            X86Reg::Cs,
+            CODE_SELECTOR,
+            0,
+            0xFFFF_FFFF,
+            SegmentSize::Long64,
+        );
         for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
             cpu.set_seg_for_api(reg, DATA_SELECTOR, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
         }
@@ -2235,12 +2259,22 @@ mod tests {
         cpu.write_xmm_reg(3, xmm_from_qwords(FIELD, KEPT));
         write_ram(cpu.memory, AT, &[0u8; 16]);
         // movntss [0x8000], xmm3: F3 0F 2B /r, ModRM 0x1C + SIB 0x25 disp32.
-        execute(&mut cpu, &[0xF3, 0x0F, 0x2B, 0x1C, 0x25, 0x00, 0x80, 0x00, 0x00]);
+        execute(
+            &mut cpu,
+            &[0xF3, 0x0F, 0x2B, 0x1C, 0x25, 0x00, 0x80, 0x00, 0x00],
+        );
         // movntsd [0x8008], xmm3
-        execute(&mut cpu, &[0xF2, 0x0F, 0x2B, 0x1C, 0x25, 0x08, 0x80, 0x00, 0x00]);
+        execute(
+            &mut cpu,
+            &[0xF2, 0x0F, 0x2B, 0x1C, 0x25, 0x08, 0x80, 0x00, 0x00],
+        );
         let mut stored = [0u8; 16];
         read_ram(cpu.memory, AT, &mut stored);
-        assert_eq!(stored[..8], [0xF0, 0xDE, 0xBC, 0x9A, 0, 0, 0, 0], "the low dword alone");
+        assert_eq!(
+            stored[..8],
+            [0xF0, 0xDE, 0xBC, 0x9A, 0, 0, 0, 0],
+            "the low dword alone"
+        );
         assert_eq!(stored[8..], FIELD.to_le_bytes(), "the low qword");
     }
 }

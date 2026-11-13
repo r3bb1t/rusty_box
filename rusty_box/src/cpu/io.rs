@@ -113,7 +113,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     && self.vmexit_check_io(port, len, direction_in, form == IoInstr::Immediate)?
             }
         };
-        Ok(if exited { IoGate::Intercepted } else { IoGate::Allowed })
+        Ok(if exited {
+            IoGate::Intercepted
+        } else {
+            IoGate::Allowed
+        })
     }
 
     /// IOPL and the TSS I/O permission bitmap (Bochs io.cc `allow_io`):
@@ -1443,7 +1447,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             (instr.seg(), self.rsi() & asize_mask)
         };
         let laddr = self.get_laddr(usize::from(laddr_seg), offset);
-        self.vmexit_check_io_string(port, size, direction_in, rep, laddr, instr.seg(), as64, as32)
+        self.vmexit_check_io_string(
+            port,
+            size,
+            direction_in,
+            rep,
+            laddr,
+            instr.seg(),
+            as64,
+            as32,
+        )
     }
 
     /// INSB dispatch - selects 16/32/64-bit address mode and REP/non-REP form
@@ -1612,9 +1625,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// handler, which leaves the caller to read it one element at a time.
     fn bulk_port_in(&mut self, port: IoPort, io_len: u8, buf: &mut [u8]) -> usize {
         let current_ticks = self.system_ticks();
-        let bytes_read = self
-            .devices
-            .inp_bulk(port, io_len, buf, current_ticks, self.device_manager);
+        let bytes_read =
+            self.devices
+                .inp_bulk(port, io_len, buf, current_ticks, self.device_manager);
         self.sync_io_events();
         bytes_read
     }
@@ -1628,9 +1641,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         let current_ticks = self.system_ticks();
-        let value = self
-            .devices
-            .inp(port, len, current_ticks, self.pc_system, self.device_manager);
+        let value = self.devices.inp(
+            port,
+            len,
+            current_ticks,
+            self.pc_system,
+            self.device_manager,
+        );
         self.sync_io_events();
 
         // BOCHS BX_INSTR_INP2(addr, len, val) — fires after the read with the value.
@@ -1692,13 +1709,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
 #[cfg(test)]
 mod tests {
-    use crate::cpu::crregs::BxCr0;
-    use crate::cpu::decoder::BxSegregs;
-    use crate::cpu::exec_ctx::TestMachine;
-    use crate::cpu::decoder::{decode32::fetch_decode32, Instruction};
-    use crate::iodev::{IoPort, PortE9Hack};
-
     use super::{IoGate, IoInstr};
+    use crate::cpu::crregs::BxCr0;
+    use crate::cpu::decoder::decode32::fetch_decode32;
+    use crate::cpu::decoder::{BxSegregs, Instruction};
+    use crate::cpu::exec_ctx::TestMachine;
+    use crate::iodev::{IoPort, PortE9Hack};
 
     /// `IN AL, imm8` naming `port`.
     fn in_al_ib(port: u8) -> Instruction {
@@ -1716,8 +1732,14 @@ mod tests {
         ctx.sregs[BxSegregs::Cs as usize].selector.rpl = 3;
         ctx.eflags.set_iopl(0);
         let gate = |ctx: &mut crate::cpu::exec_ctx::ExecCtx<'_, ()>, port: u8| {
-            ctx.allow_io(&in_al_ib(port), IoPort::new(u16::from(port)), 1, true, IoInstr::Immediate)
-                .unwrap()
+            ctx.allow_io(
+                &in_al_ib(port),
+                IoPort::new(u16::from(port)),
+                1,
+                true,
+                IoInstr::Immediate,
+            )
+            .unwrap()
         };
 
         for hack in [PortE9Hack::Off, PortE9Hack::On] {
@@ -1733,7 +1755,10 @@ mod tests {
             matches!(gate(&mut ctx, 0xE9), IoGate::Allowed),
             "the all-rings console opens port 0xE9 at any privilege"
         );
-        assert!(matches!(gate(&mut ctx, 0xE8), IoGate::Denied), "and opens no other port");
+        assert!(
+            matches!(gate(&mut ctx, 0xE8), IoGate::Denied),
+            "and opens no other port"
+        );
     }
 
     /// Bochs io.cc `allow_io`: IOPL and the TSS bitmap are checked before the
@@ -1758,8 +1783,17 @@ mod tests {
         ctx.vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_IO;
 
         let gate = ctx
-            .allow_io(&in_al_ib(0x60), IoPort::new(0x60), 1, true, IoInstr::Immediate)
+            .allow_io(
+                &in_al_ib(0x60),
+                IoPort::new(0x60),
+                1,
+                true,
+                IoInstr::Immediate,
+            )
             .unwrap();
-        assert!(matches!(gate, IoGate::Denied), "the permission check wins over the intercept");
+        assert!(
+            matches!(gate, IoGate::Denied),
+            "the permission check wins over the intercept"
+        );
     }
 }

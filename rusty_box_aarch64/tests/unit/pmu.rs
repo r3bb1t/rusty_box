@@ -7,7 +7,7 @@
 use std::vec::Vec;
 
 use super::super::features::{Feature, Implementation};
-use super::super::step::{exec, processor_with, Taken, UNDEFINED};
+use super::super::step::{Taken, UNDEFINED, exec, processor_with};
 use super::super::{Cpu, El, Levels, NoEl2, Pstate, WithEl2};
 
 /// A System register's `op0`, `op1`, `CRn`, `CRm` and `op2`.

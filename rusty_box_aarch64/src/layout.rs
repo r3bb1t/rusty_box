@@ -83,18 +83,18 @@ pub struct GicWindows {
 }
 
 impl GicWindows {
+    /// The CPU interface's registers, to `GICC_DIR` at 0x1000.
+    pub const CPU_SIZE: u64 = 0x2000;
     /// The distributor's registers (QEMU `gic_init_irqs_and_mmio`'s
     /// `gic_dist`; DDI 0471B Table 3-1).
     pub const DIST_SIZE: u64 = 0x1000;
-    /// The CPU interface's registers, to `GICC_DIR` at 0x1000.
-    pub const CPU_SIZE: u64 = 0x2000;
-    /// The GICv2m frame's registers (BSA DEN0094C I.7).
-    pub const V2M_SIZE: u64 = 0x1000;
     /// The virtual interface control registers (`GICH_*`, IHI 0048B
     /// §5.3): the common base and the processor-specific bases IHI 0048B
     /// §5.2.7 requires, 4 KiB each, as the GIC-400 places them (DDI 0471B
     /// §3.2).
     pub const HYP_SIZE: u64 = 0x2000;
+    /// The GICv2m frame's registers (BSA DEN0094C I.7).
+    pub const V2M_SIZE: u64 = 0x1000;
     /// The virtual CPU interface (`GICV_*`, §5.5), to `GICV_DIR` at
     /// 0x1000.
     pub const VCPU_SIZE: u64 = 0x2000;
@@ -153,10 +153,10 @@ pub struct GicV3Windows {
 impl GicV3Windows {
     /// The distributor's frame.
     pub const DIST_SIZE: u64 = 0x1_0000;
-    /// One Redistributor's two frames, the one processor's.
-    pub const REDIST_SIZE: u64 = 0x2_0000;
     /// The ITS's control frame and translation frame.
     pub const ITS_SIZE: u64 = 0x2_0000;
+    /// One Redistributor's two frames, the one processor's.
+    pub const REDIST_SIZE: u64 = 0x2_0000;
 
     pub const fn dist_window(self) -> Window {
         Window {
@@ -223,11 +223,11 @@ const fn stride(bytes: u64) -> TransportStride {
 pub struct TransportCount(u8);
 
 impl TransportCount {
-    /// One for each device the board can plug in.
-    pub const MIN: Self = Self(MAX_DEVICES as u8);
     /// 32: a snapshot records the transports devices occupy as a bit each
     /// of a 32-bit word.
     pub const MAX: Self = Self(32);
+    /// One for each device the board can plug in.
+    pub const MIN: Self = Self(MAX_DEVICES as u8);
 
     /// `count` transports, if it is from [`TransportCount::MIN`] to
     /// [`TransportCount::MAX`].
@@ -484,7 +484,6 @@ pub enum DeviceLayout {
 impl DeviceLayout {
     /// Every layout, in the order a list of them shows.
     pub const ALL: [Self; 2] = [Self::Board, Self::QemuVirt];
-
     /// The layout a board takes unless its host chooses another.
     pub const DEFAULT: Self = Self::Board;
 
@@ -630,7 +629,10 @@ mod tests {
     #[test]
     fn a_layouts_windows_are_apart_from_each_other_the_flash_and_ram() {
         let ram_base = PhysAddr::new(0x4000_0000);
-        let ram = Window::new(ram_base, DeviceLayout::lowest_above_ram().get() - ram_base.get());
+        let ram = Window::new(
+            ram_base,
+            DeviceLayout::lowest_above_ram().get() - ram_base.get(),
+        );
         let flash = Window::new(PhysAddr::new(0), 0x0800_0000);
         for layout in DeviceLayout::ALL {
             let all = windows(layout.windows());
@@ -703,7 +705,11 @@ mod tests {
         let w = DeviceLayout::Board.windows();
         let block = w.gic.dist.get() - 0x1000;
         assert_eq!(block % PAGE, 0);
-        assert_eq!(w.gic.periphbase.get(), block, "PERIPHBASE is the GIC-400's base");
+        assert_eq!(
+            w.gic.periphbase.get(),
+            block,
+            "PERIPHBASE is the GIC-400's base"
+        );
         assert_eq!(
             [
                 w.gic.dist.get(),
@@ -711,14 +717,23 @@ mod tests {
                 w.gic.hyp.get(),
                 w.gic.vcpu.get()
             ],
-            [block + 0x1000, block + 0x2000, block + 0x4000, block + 0x6000]
+            [
+                block + 0x1000,
+                block + 0x2000,
+                block + 0x4000,
+                block + 0x6000
+            ]
         );
         let pages = [w.gic.v2m, w.uart, w.rtc, w.gpio, w.pcie.pio.base];
         for page in pages {
             assert_eq!(page.get() % PAGE, 0, "{page:?}");
         }
         assert_eq!(w.virtio.stride.bytes(), PAGE);
-        assert_eq!(w.virtio.transport(0).size, PAGE, "a transport decodes its page");
+        assert_eq!(
+            w.virtio.transport(0).size,
+            PAGE,
+            "a transport decodes its page"
+        );
         assert_eq!(w.virtio.first.get() % PAGE, 0);
         for window in [w.pcie.ecam, w.pcie.mmio32, w.pcie.mmio64] {
             assert_eq!(window.base.get() % window.size, 0, "{window:?}");
@@ -726,7 +741,10 @@ mod tests {
         let mapped_io = 0x40_0000_0000..0x80_0000_0000;
         assert!(mapped_io.contains(&w.pcie.ecam.base.get()));
         assert!(w.pcie.mmio64.end().get() <= mapped_io.end);
-        assert!(w.pcie.mmio32.end() <= PhysAddr::new(0x4000_0000), "below RAM");
+        assert!(
+            w.pcie.mmio32.end() <= PhysAddr::new(0x4000_0000),
+            "below RAM"
+        );
     }
 
     /// The board's own layout has a transport for each device it can plug
@@ -744,7 +762,11 @@ mod tests {
             assert_eq!(base % CBAR_GRANULE, 0, "{layout}");
             assert!(base < 1 << 44, "{layout}");
             for frame in [gic.dist, gic.cpu] {
-                assert_eq!(frame.get() & !(CBAR_GRANULE - 1), base, "{layout}: {frame:?}");
+                assert_eq!(
+                    frame.get() & !(CBAR_GRANULE - 1),
+                    base,
+                    "{layout}: {frame:?}"
+                );
             }
         }
     }
@@ -754,10 +776,16 @@ mod tests {
         let board = DeviceLayout::Board.windows().virtio;
         assert_eq!(board.count.get(), 4);
         assert_eq!(board.count, TransportCount::MIN);
-        assert_eq!(board.transport(3), Window::new(PhysAddr::new(0x0808_0000), PAGE));
+        assert_eq!(
+            board.transport(3),
+            Window::new(PhysAddr::new(0x0808_0000), PAGE)
+        );
         let qemu = DeviceLayout::QemuVirt.windows().virtio;
         assert_eq!(qemu.count.get(), 32);
-        assert_eq!(qemu.transport(31), Window::new(PhysAddr::new(0x0A00_3E00), 0x200));
+        assert_eq!(
+            qemu.transport(31),
+            Window::new(PhysAddr::new(0x0A00_3E00), 0x200)
+        );
         assert_eq!(DeviceLayout::fewest_transports(), board.count);
     }
 
@@ -781,11 +809,18 @@ mod tests {
             );
             assert_eq!(
                 v.transport(last),
-                Window::new(PhysAddr::new(v.first.get() + u64::from(last) * stride), stride),
+                Window::new(
+                    PhysAddr::new(v.first.get() + u64::from(last) * stride),
+                    stride
+                ),
                 "{layout}"
             );
             assert_eq!(v.span().end(), v.transport(last).end(), "{layout}");
-            assert_eq!(v.slot_of(at(stride * u64::from(v.count.get()))), None, "{layout}");
+            assert_eq!(
+                v.slot_of(at(stride * u64::from(v.count.get()))),
+                None,
+                "{layout}"
+            );
             assert_eq!(
                 v.slot_of(at(u64::from(last) * stride + stride - 4)),
                 Some(TransportRegister {
@@ -809,7 +844,10 @@ mod tests {
     /// and at most 32.
     #[test]
     fn a_transport_count_holds_every_device_and_at_most_32() {
-        assert_eq!(TransportCount::new(MAX_DEVICES as u8), Some(TransportCount::MIN));
+        assert_eq!(
+            TransportCount::new(MAX_DEVICES as u8),
+            Some(TransportCount::MIN)
+        );
         assert_eq!(TransportCount::new(32), Some(TransportCount::MAX));
         assert_eq!(TransportCount::new(MAX_DEVICES as u8 - 1), None);
         assert_eq!(TransportCount::new(33), None);
@@ -828,7 +866,11 @@ mod tests {
             (0x0800_2000, None),
             (u64::MAX, None),
         ] {
-            assert_eq!(w.offset_of(PhysAddr::new(addr)).map(RegOffset::get), held, "{addr:#x}");
+            assert_eq!(
+                w.offset_of(PhysAddr::new(addr)).map(RegOffset::get),
+                held,
+                "{addr:#x}"
+            );
         }
     }
 
@@ -838,7 +880,10 @@ mod tests {
     fn a_transport_stride_is_a_power_of_two_that_holds_a_transport() {
         assert_eq!(REGISTERS_AND_CONFIG, 0x188);
         for bytes in [0x200, 0x400, PAGE] {
-            assert_eq!(TransportStride::new(bytes).map(TransportStride::bytes), Some(bytes));
+            assert_eq!(
+                TransportStride::new(bytes).map(TransportStride::bytes),
+                Some(bytes)
+            );
         }
         for bytes in [0, 0x100, 0x188, 0x300, PAGE + 0x200] {
             assert_eq!(TransportStride::new(bytes), None, "{bytes:#x}");

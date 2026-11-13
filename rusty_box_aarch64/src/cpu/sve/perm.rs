@@ -4,7 +4,7 @@
 //! SEL. Each handler names the Arm pages it is.
 
 use super::{Esize, Pv, Zv};
-use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
+use crate::cpu::exec::{ExecResult, Flow, bit, bits, sext};
 use crate::cpu::features::VecLen;
 use crate::cpu::{Cpu, Levels};
 

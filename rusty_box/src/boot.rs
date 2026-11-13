@@ -7,7 +7,8 @@
 //! This is the no-alloc equivalent of `Emulator::setup_direct_linux_boot`.
 
 use crate::config::BxPhyAddress;
-use crate::cpu::{cpu::BxCpuC, instrumentation::Instrumentation};
+use crate::cpu::cpu::BxCpuC;
+use crate::cpu::instrumentation::Instrumentation;
 use crate::memory::BxMemC;
 
 /// Error from boot setup (no alloc — uses static strings).
@@ -203,7 +204,10 @@ pub(crate) fn setup_direct_linux_boot_with_pins<T: Instrumentation>(
     let cmdline_len = core::cmp::min(cmdline.len(), 2047);
     cmdline_buf[..cmdline_len].copy_from_slice(&cmdline[..cmdline_len]);
     memory
-        .load_RAM(&cmdline_buf[..cmdline_len + 1], BxPhyAddress::new(cmdline_addr))
+        .load_RAM(
+            &cmdline_buf[..cmdline_len + 1],
+            BxPhyAddress::new(cmdline_addr),
+        )
         .map_err(|_| BootError::MemoryLoadFailed)?;
 
     // ACPI tables (all stack-allocated)
@@ -280,10 +284,7 @@ fn build_madt(cpu_count: u32) -> Result<([u8; MADT_MAX_LEN], usize), BootError> 
 
 /// Write minimal ACPI tables (RSDP → XSDT → MADT) to guest memory.
 /// All buffers are stack-allocated.
-fn write_acpi_tables(
-    memory: &mut BxMemC,
-    cpu_count: u32,
-) -> Result<(), BootError> {
+fn write_acpi_tables(memory: &mut BxMemC, cpu_count: u32) -> Result<(), BootError> {
     const RSDP_ADDR: u64 = 0x40000;
     const XSDT_ADDR: u64 = 0x40100;
     const MADT_ADDR: u64 = 0x40200;

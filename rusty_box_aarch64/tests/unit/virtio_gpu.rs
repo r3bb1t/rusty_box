@@ -8,16 +8,15 @@
 use std::vec;
 use std::vec::Vec;
 
+use rusty_box_devices::display::Resolution;
 use rusty_box_devices::display::sink::{Dimensions, DisplaySink, Redraw, Refreshed, Rgb, TilePos};
 use rusty_box_devices::display::vga::VgaTextModeInfo;
-use rusty_box_devices::display::Resolution;
 
 use super::Gpu;
 use crate::board::RAM_BASE;
 use crate::bus::AccessWidth;
-use crate::devices::virtio::edid;
 use crate::devices::virtio::test_driver::*;
-use crate::devices::virtio::Device;
+use crate::devices::virtio::{Device, edid};
 use crate::identity::{BoardIdentity, DisplayIdentity};
 
 /// The display a board with the default identity plugs in, for a guest with
@@ -567,7 +566,11 @@ fn a_transfer_offset_is_64_bits() {
     let mut screen = Screen::default();
     refresh(&mut d, &mut screen);
     for (x, y) in [(4, 2), (11, 5), (0, 8), (31, 11)] {
-        assert_eq!(screen.pixel(x, y), [0, 0, 0, 0xFF], "nothing transferred at ({x}, {y})");
+        assert_eq!(
+            screen.pixel(x, y),
+            [0, 0, 0, 0xFF],
+            "nothing transferred at ({x}, {y})"
+        );
     }
 }
 
@@ -834,10 +837,26 @@ fn a_cursor_command_answers_ok_nodata() {
     );
     for (request, len, answer) in [
         (cmd(UPDATE_CURSOR, &[]), 24, ERR_INVALID_PARAMETER),
-        (cmd(GET_DISPLAY_INFO, &[0, 1, 2, 0, 0, 0, 0, 0]), 56, ERR_UNSPEC),
-        (cmd(MOVE_CURSOR, &[3, 1, 2, 0, 0, 0, 0, 0]), 56, ERR_INVALID_SCANOUT_ID),
-        (cmd(UPDATE_CURSOR, &[0, 1, 2, 0, 99, 0, 0, 0]), 56, ERR_INVALID_RESOURCE_ID),
-        (cmd(UPDATE_CURSOR, &[0, 1, 2, 0, 3, 0, 0, 0]), 56, ERR_INVALID_PARAMETER),
+        (
+            cmd(GET_DISPLAY_INFO, &[0, 1, 2, 0, 0, 0, 0, 0]),
+            56,
+            ERR_UNSPEC,
+        ),
+        (
+            cmd(MOVE_CURSOR, &[3, 1, 2, 0, 0, 0, 0, 0]),
+            56,
+            ERR_INVALID_SCANOUT_ID,
+        ),
+        (
+            cmd(UPDATE_CURSOR, &[0, 1, 2, 0, 99, 0, 0, 0]),
+            56,
+            ERR_INVALID_RESOURCE_ID,
+        ),
+        (
+            cmd(UPDATE_CURSOR, &[0, 1, 2, 0, 3, 0, 0, 0]),
+            56,
+            ERR_INVALID_PARAMETER,
+        ),
     ] {
         let req = d.alloc_with(&request);
         let resp = d.alloc(24);

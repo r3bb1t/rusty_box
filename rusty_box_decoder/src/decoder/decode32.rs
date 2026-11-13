@@ -3,34 +3,31 @@
 //! Provides `fetch_decode32` and `fetch_decode32_inplace` — both are `const fn`
 //! decoders for x86 protected/real mode that produce an [`Instruction`].
 
-use crate::error::{DecodeError, DecodeResult};
-use crate::instruction::{
-    has_lock_prefix_bits, lock_rep_value_from_bits, set_lock_rep_value_bits, Instruction,
-    InstructionFlags, LOCK_REP_LOCK, LOCK_REP_REP, LOCK_REP_REPNE,
-};
-use crate::opcode::Opcode;
-use crate::BxSegregs;
-
-use super::tables::{BxDecodeError, SsePrefix};
-
 // Import opcode tables
 use super::opmap::*;
-use super::opmap_0f38::BxOpcodeTable0F38;
 use super::opmap_0f3a::BxOpcodeTable0F3A;
-use super::x87::{
-    BX3_DNOW_OPCODE, BX_OPCODE_INFO_FLOATING_POINT_D8, BX_OPCODE_INFO_FLOATING_POINT_D9,
-    BX_OPCODE_INFO_FLOATING_POINT_DA, BX_OPCODE_INFO_FLOATING_POINT_DB,
-    BX_OPCODE_INFO_FLOATING_POINT_DC, BX_OPCODE_INFO_FLOATING_POINT_DD,
-    BX_OPCODE_INFO_FLOATING_POINT_DE, BX_OPCODE_INFO_FLOATING_POINT_DF,
-};
-
+use super::opmap_0f38::BxOpcodeTable0F38;
 // Decoding mask bit offsets
 use super::tables::{
     AS32_OFFSET, LOCK_PREFIX_OFFSET, MASK_K0_OFFSET, MODC0_OFFSET, NNN_OFFSET, OS32_OFFSET,
     RRR_OFFSET, SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET, VEX_OFFSET, VEX_VL_128_256_OFFSET,
     VEX_W_OFFSET,
 };
+use super::tables::{BxDecodeError, SsePrefix};
+use super::x87::{
+    BX_OPCODE_INFO_FLOATING_POINT_D8, BX_OPCODE_INFO_FLOATING_POINT_D9,
+    BX_OPCODE_INFO_FLOATING_POINT_DA, BX_OPCODE_INFO_FLOATING_POINT_DB,
+    BX_OPCODE_INFO_FLOATING_POINT_DC, BX_OPCODE_INFO_FLOATING_POINT_DD,
+    BX_OPCODE_INFO_FLOATING_POINT_DE, BX_OPCODE_INFO_FLOATING_POINT_DF, BX3_DNOW_OPCODE,
+};
 use super::{find_opcode_in_table, read_u16_le, read_u32_le};
+use crate::BxSegregs;
+use crate::error::{DecodeError, DecodeResult};
+use crate::instruction::{
+    Instruction, InstructionFlags, LOCK_REP_LOCK, LOCK_REP_REP, LOCK_REP_REPNE,
+    has_lock_prefix_bits, lock_rep_value_from_bits, set_lock_rep_value_bits,
+};
+use crate::opcode::Opcode;
 
 // 16-bit register indices — matching Bochs BX_16BIT_REG_* constants
 const BX_16BIT_REG_BX: u8 = 3;
@@ -980,7 +977,8 @@ pub const fn fetch_decode32_inplace(
     // (VPXOR vs VPXORD differ in masking granularity, not just encoding), so
     // borrowing an entry from them would decode to the wrong handler.
     if is_evex {
-        instr.opcode = super::vex_shared::lookup_evex_opcode(opcode_map, (b1 & 0xFF) as u8, decmask);
+        instr.opcode =
+            super::vex_shared::lookup_evex_opcode(opcode_map, (b1 & 0xFF) as u8, decmask);
 
         // Which field holds the destination is a property of the opcode, not of
         // the encoding, so the byte-based rules above cannot express it: most
@@ -1759,8 +1757,9 @@ const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool, as_32: bool, nnn: 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::vec;
+
+    use super::*;
 
     #[test]
     fn test_nop() {
@@ -1776,7 +1775,10 @@ mod tests {
     fn lock_wins_over_rep_in_either_order() {
         let illegal = Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
         for bytes in [[0xF0, 0xF3, 0x6C], [0xF3, 0xF0, 0x6C], [0xF0, 0xF2, 0x6C]] {
-            assert_eq!(fetch_decode32(&bytes, true).map(|i| i.get_ia_opcode()), illegal);
+            assert_eq!(
+                fetch_decode32(&bytes, true).map(|i| i.get_ia_opcode()),
+                illegal
+            );
         }
         for bytes in [[0xF0, 0xF3, 0x01, 0x18], [0xF3, 0xF0, 0x01, 0x18]] {
             let i = fetch_decode32(&bytes, true).unwrap();
@@ -1917,10 +1919,10 @@ mod tests {
 
     #[test]
     fn test_out_instruction() {
-        let i = fetch_decode32(&[0xE6, 0x0d], false).unwrap(); // OUT 0x0D, AL
+        let i = fetch_decode32(&[0xE6, 0x0D], false).unwrap(); // OUT 0x0D, AL
         assert_eq!(i.ilen(), 2);
         assert_eq!(i.get_ia_opcode(), Opcode::OutIbAl);
-        assert_eq!(i.immediate, 0x0d);
+        assert_eq!(i.immediate, 0x0D);
         assert_eq!(i.displacement, 0x00);
     }
 
@@ -2175,7 +2177,11 @@ mod tests {
         // VPBLENDVB xmm1, xmm2, xmm3, xmm15 — imm8 = 0xF0
         let i = fetch_decode32(&[0xC4, 0xE3, 0x69, 0x4C, 0xCB, 0xF0], true).unwrap();
         assert_eq!(i.get_ia_opcode(), Opcode::V128VpblendvbVdqHdqWdqIb);
-        assert_eq!(i.src3(), 7, "imm8[7] must not select xmm8-15 in 32-bit mode");
+        assert_eq!(
+            i.src3(),
+            7,
+            "imm8[7] must not select xmm8-15 in 32-bit mode"
+        );
     }
 
     /// 0x62 stays BOUND unless the next byte is a register form.
@@ -2244,7 +2250,11 @@ mod tests {
         //   P2 = z(0) L'L(10 = RU) b(1) ~V'(1) aaa(000)
         let i = fetch_decode32(&[0x62, 0xF1, 0x6C, 0x58, 0x58, 0xCB], true).unwrap();
         assert_eq!(i.get_vl(), 2, "EVEX.b in register form implies VL512");
-        assert_eq!(i.get_rc(), 2, "L'L is the rounding mode here, not the length");
+        assert_eq!(
+            i.get_rc(),
+            2,
+            "L'L is the rounding mode here, not the length"
+        );
     }
 
     /// The decoder is shared with 16-bit mode, exactly as Bochs shares

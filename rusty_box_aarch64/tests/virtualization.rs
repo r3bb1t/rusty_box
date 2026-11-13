@@ -17,7 +17,7 @@
 //! base of RAM; each snippet's source is beside its words.
 
 use rusty_box_aarch64::board::{FLASH0_BASE, RAM_BASE};
-use rusty_box_aarch64::boot::{fdt, LinuxImage};
+use rusty_box_aarch64::boot::{LinuxImage, fdt};
 use rusty_box_aarch64::{
     Cpu, CpuConfig, CpuModel, El, LentStorage, Levels, MachineBuilder, MemoryLoan, NoEl2,
     PowerState, Pstate, PstateRefusal, RamSize, Reg, RunBudget, StopReason, SysReg, VirtConfig,
@@ -140,7 +140,10 @@ fn be_cells(cells: &[u64]) -> Vec<u8> {
 /// maintenance interrupt, PPI 9 (INTID 25), level-high, to the one
 /// processor.
 fn maintenance_interrupt() -> Vec<u8> {
-    [1u32, 9, 0x104].iter().flat_map(|c| c.to_be_bytes()).collect()
+    [1u32, 9, 0x104]
+        .iter()
+        .flat_map(|c| c.to_be_bytes())
+        .collect()
 }
 
 /// With virtualization, firmware starts at EL2 with `SP_EL2` selected (Arm
@@ -707,13 +710,25 @@ fn a_virtual_interrupt_reaches_el1_and_its_eoi_reaches_el2() {
     let mut m = bare(&mut ram);
     load(&mut m, &PROGRAM);
     let out = m.step(RunBudget::Instructions(1_000_000));
-    assert_eq!(out.stop, StopReason::PoweredOff, "the maintenance interrupt reached EL2");
+    assert_eq!(
+        out.stop,
+        StopReason::PoweredOff,
+        "the maintenance interrupt reached EL2"
+    );
     assert_eq!(m.reg_read(Reg::X6), 40, "GICV_IAR: virtual interrupt 40");
     assert!(m.reg_read(Reg::X22) <= 2, "taken once IRQs were unmasked");
-    assert_eq!(m.reg_read(Reg::X7), 25, "GICC_IAR: the maintenance interrupt");
+    assert_eq!(
+        m.reg_read(Reg::X7),
+        25,
+        "GICC_IAR: the maintenance interrupt"
+    );
     assert_eq!(m.reg_read(Reg::X8), 1, "GICH_EISR0: List register 0");
     assert_eq!(m.reg_read(Reg::X9), 1, "GICH_MISR.EOI");
-    assert_eq!(m.reg_read(Reg::X12), 0x0008_0028, "GICH_LR0: invalid, EOI kept");
+    assert_eq!(
+        m.reg_read(Reg::X12),
+        0x0008_0028,
+        "GICH_LR0: invalid, EOI kept"
+    );
     assert_eq!(m.pstate().el, El::El2);
 }
 
@@ -790,10 +805,18 @@ fn a_virtual_irq_input_wakes_wfi_shows_in_isr_and_survives_a_snapshot() {
     load(&mut m, &PROGRAM);
     m.reg_write(Reg::X9, 0);
     let out = m.step(RunBudget::Instructions(200));
-    assert_eq!(out.stop, StopReason::BudgetExhausted, "spinning, not waiting");
+    assert_eq!(
+        out.stop,
+        StopReason::BudgetExhausted,
+        "spinning, not waiting"
+    );
     assert_eq!(m.reg_read(Reg::X7), 1 << 7, "ISR_EL1.I: the virtual IRQ");
     assert_eq!(m.reg_read(Reg::X8), 1, "WFI did not wait");
-    assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 0x5C, "masked, waiting for the go");
+    assert_eq!(
+        m.reg_read(Reg::Pc),
+        RAM_BASE + 0x5C,
+        "masked, waiting for the go"
+    );
     let mut image = Vec::new();
     m.save_snapshot(&mut image).expect("save");
 
@@ -805,7 +828,11 @@ fn a_virtual_irq_input_wakes_wfi_shows_in_isr_and_survives_a_snapshot() {
     restored.reg_write(Reg::X9, 1);
     let out = restored.step(RunBudget::Instructions(20));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
-    assert_eq!(restored.reg_read(Reg::X6), 40, "GICV_IAR: the restored List register's");
+    assert_eq!(
+        restored.reg_read(Reg::X6),
+        40,
+        "GICV_IAR: the restored List register's"
+    );
     assert_eq!(restored.pstate().el, El::El1);
 }
 
@@ -870,8 +897,16 @@ fn a_kernel_booted_with_el2_finds_all_of_it_in_its_device_tree() {
         })
         .expect("builds");
     assert_eq!(m.pstate().el, El::El2);
-    assert_eq!(m.reg_read(Reg::Pc), RAM_BASE, "text_offset 0 from the base of RAM");
-    assert_eq!(m.reg_read(Reg::X0), RAM_BASE + 2 * MIB, "the tree after the kernel");
+    assert_eq!(
+        m.reg_read(Reg::Pc),
+        RAM_BASE,
+        "text_offset 0 from the base of RAM"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X0),
+        RAM_BASE + 2 * MIB,
+        "the tree after the kernel"
+    );
     for reserved in [Reg::X1, Reg::X2, Reg::X3] {
         assert_eq!(m.reg_read(reserved), 0, "booting.rst §4: {reserved:?}");
     }
@@ -1029,10 +1064,18 @@ fn without_virtualization_the_virtual_interface_is_not_there() {
     let mut m = bare_without_el2(&mut ram);
     load(&mut m, &PROGRAM);
     let out = m.step(RunBudget::Instructions(1_000));
-    assert_eq!(out.stop, StopReason::BudgetExhausted, "spinning, not stopped");
+    assert_eq!(
+        out.stop,
+        StopReason::BudgetExhausted,
+        "spinning, not stopped"
+    );
     assert_eq!(m.reg_read(Reg::X20), 2, "both reads aborted");
     let esr = m.reg_read(Reg::X3);
-    assert_eq!(esr >> 26, 0x25, "a data abort from the current level: {esr:#x}");
+    assert_eq!(
+        esr >> 26,
+        0x25,
+        "a data abort from the current level: {esr:#x}"
+    );
     assert_eq!(esr & 0x3F, 0x10, "a synchronous external abort: {esr:#x}");
     assert_eq!(m.reg_read(Reg::X5), 0x0800_60FC, "FAR_EL1: GICV_IIDR");
     assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 0x20);
@@ -1112,15 +1155,35 @@ fn each_virtual_interface_frame_decodes_8_kib() {
     let mut m = bare(&mut ram);
     load(&mut m, &PROGRAM);
     let out = m.step(RunBudget::Instructions(1_000));
-    assert_eq!(out.stop, StopReason::BudgetExhausted, "spinning, not stopped");
+    assert_eq!(
+        out.stop,
+        StopReason::BudgetExhausted,
+        "spinning, not stopped"
+    );
     assert_eq!(m.reg_read(Reg::X3), 0, "GICH's last word: reserved");
     assert_eq!(m.reg_read(Reg::X9), 0, "GICV's last word: reserved");
-    assert_eq!(m.reg_read(Reg::X4), 1 << 27, "GICH_HCR.EOICount: GICV_DIR counted");
-    assert_eq!(m.reg_read(Reg::X20), 2, "both loads outside the frames aborted");
-    assert_eq!(m.reg_read(Reg::X6), 0x0800_0000, "FAR_EL2: the block's reserved page");
+    assert_eq!(
+        m.reg_read(Reg::X4),
+        1 << 27,
+        "GICH_HCR.EOICount: GICV_DIR counted"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X20),
+        2,
+        "both loads outside the frames aborted"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X6),
+        0x0800_0000,
+        "FAR_EL2: the block's reserved page"
+    );
     assert_eq!(m.reg_read(Reg::X5), 0x0800_8000, "FAR_EL2: past GICV");
     let esr = m.reg_read(Reg::X7);
-    assert_eq!(esr >> 26, 0x25, "a data abort from the current level: {esr:#x}");
+    assert_eq!(
+        esr >> 26,
+        0x25,
+        "a data abort from the current level: {esr:#x}"
+    );
     assert_eq!(esr & 0x3F, 0x10, "a synchronous external abort: {esr:#x}");
     assert_eq!(m.pstate().el, El::El2);
     assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 0x60);

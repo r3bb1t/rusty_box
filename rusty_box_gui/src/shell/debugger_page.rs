@@ -14,66 +14,71 @@ pub(crate) mod source_view;
 
 use std::collections::{BTreeSet, HashMap};
 
-use egui::text::{LayoutJob, TextFormat};
 use egui::RichText;
+use egui::text::{LayoutJob, TextFormat};
+use frames_view::{
+    CALL_STACK, CALLER_LINE, LOCALS, LowerLeft, LowerRight, MEMORY, STACK, VariableState, WATCH,
+    call_stack_rows, locals_rows, watch_rows,
+};
+use references::{REFERENCES_TO, REINDEX_MODULE, ReferencesView, address_target, references_page};
 use rusty_box::cpu::{
-    BreakpointRefusal, CodeBreakpoint, CodeBreakpointHit, CodeSize, CpuDebugView, ExecutionMode, ProcessorActivity,
-    MAX_LINEAR_BREAKPOINTS,
+    BreakpointRefusal, CodeBreakpoint, CodeBreakpointHit, CodeSize, CpuDebugView, ExecutionMode,
+    MAX_LINEAR_BREAKPOINTS, ProcessorActivity,
+};
+use source_view::{
+    CodeView, DISASSEMBLY_SWITCH, NO_SOURCE_HERE, PauseSource, PlaceMark, SOURCE_SWITCH, SourceAsk,
+    SourcePane, SourceTip, TipView, line_address, line_marks, line_target, source_at, source_rows,
+    toggled_line,
 };
 
 use crate::debugger::control::{DebugNote, StepCut};
+use crate::debugger::inspect::{
+    AddressSpace, CodeTarget, CodeText, DebugSnapshot, GuestAddress, MEMORY_WINDOW_BYTES,
+    MemoryTarget, ModuleSpace, ROW_BYTES, ViewContext, Viewing, WOW64_CODE_SELECTOR,
+};
 use crate::debugger::source_breakpoints::{
-    parse_target, resolve, BreakpointModules, BreakpointTarget, PendingWhy, Resolutions, SourceResolution, TargetError,
-    TargetText,
+    BreakpointModules, BreakpointTarget, PendingWhy, Resolutions, SourceResolution, TargetError,
+    TargetText, parse_target, resolve,
 };
 use crate::debugger::stepping::{StepCeiling, StepKind, StepUnit};
-use crate::source::find::PathMap;
-use frames_view::{
-    call_stack_rows, locals_rows, watch_rows, LowerLeft, LowerRight, VariableState, CALLER_LINE, CALL_STACK, LOCALS,
-    MEMORY, STACK, WATCH,
-};
-use source_view::{
-    line_address, line_marks, line_target, source_at, source_rows, toggled_line, CodeView, PauseSource, PlaceMark, SourceAsk,
-    SourcePane, SourceTip, TipView, DISASSEMBLY_SWITCH, NO_SOURCE_HERE, SOURCE_SWITCH,
-};
-use crate::debugger::inspect::{
-    AddressSpace, CodeTarget, CodeText, DebugSnapshot, GuestAddress, MemoryTarget, ModuleSpace, ViewContext,
-    Viewing, MEMORY_WINDOW_BYTES, ROW_BYTES, WOW64_CODE_SELECTOR,
-};
 use crate::debugger::threads::SavedRegisters;
 use crate::debugger::xref::service::{XrefScope, XrefTarget};
+use crate::source::find::PathMap;
 use crate::symbols::hub::SymbolsView;
-use references::{address_target, references_page, ReferencesView, REFERENCES_TO, REINDEX_MODULE};
 use crate::symbols::names::{NameMiss, NameTrust, NamedAddress, Namer};
 
 mod symbols_tab;
-pub(crate) use symbols_tab::{SymbolFilter, SymbolsAction};
 #[cfg(test)]
 pub(crate) use symbols_tab::{LOAD_FROM_FILE, SYMBOL_SETTINGS};
-use symbols_tab::{module_symbols_body, symbol_counts, symbols_page, ModuleStates, SYMBOL_STATE_CHARS};
-use crate::debugger::search::{
-    pattern_of, FindOutcome, FindRequest, FoundAt, PatternError, SearchEncoding,
+use symbols_tab::{
+    ModuleStates, SYMBOL_STATE_CHARS, module_symbols_body, symbol_counts, symbols_page,
 };
+pub(crate) use symbols_tab::{SymbolFilter, SymbolsAction};
+
 use crate::debugger::memory_map::{MemoryMap, RegionOwner};
-use crate::debugger::threads::WinThread;
 use crate::debugger::pe::{
     ExportRead, ExportTarget, ImportName, ImportRead, ImportedModule, PeExport, PeImport, ThunksEnd,
 };
+use crate::debugger::search::{
+    FindOutcome, FindRequest, FoundAt, PatternError, SearchEncoding, pattern_of,
+};
+use crate::debugger::threads::WinThread;
 use crate::debugger::windows::{
-    DeviceRow, DispatchEntry, DriverDetail, DriverListing, DriverShown, KernelLayouts,
-    KernelListing, KernelMiss, ModuleBits, ModuleDetail, ModuleRead, PickedDetail, PickedDriver, PickedModule, PointerSite,
-    GuiMiss, GuiServices, ProcessDetail, ProcessListing, SectionsRead, ServiceTableRead, SsdtListing, SsdtService,
-    SystemListing, SystemView, TablePlace, TreeRow, WinDriver, WinModule, WinProcess,
+    DeviceRow, DispatchEntry, DriverDetail, DriverListing, DriverShown, GuiMiss, GuiServices,
+    KernelLayouts, KernelListing, KernelMiss, ModuleBits, ModuleDetail, ModuleRead, PickedDetail,
+    PickedDriver, PickedModule, PointerSite, ProcessDetail, ProcessListing, SectionsRead,
+    ServiceTableRead, SsdtListing, SsdtService, SystemListing, SystemView, TablePlace, TreeRow,
+    WinDriver, WinModule, WinProcess,
 };
 use crate::shell::listing::{
-    card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot, lead_hollow_arrow, lead_ring,
-    list_row, mono_font, row_visible, segmented, skip_row, title_label, tree_guides, Cell, RowSense,
-    Segment, Tone, ROW_PAD, TREE_INDENT,
+    Cell, ROW_PAD, RowSense, Segment, TREE_INDENT, Tone, card_title, char_width, chip, empty_state,
+    header_row, lead_arrow, lead_chevron, lead_dot, lead_hollow_arrow, lead_ring, list_row,
+    mono_font, row_visible, segmented, skip_row, title_label, tree_guides,
 };
 use crate::shell::theme::{
-    shell_card_frame, shell_card_frame_with_margin, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN,
-    ACCENT_RED, CONTROL_FILL_REST, SPACE_CARD, SPACE_CARD_COMPACT, SPACE_ITEM, SPACE_PAGE,
-    SPACE_PAGE_COMPACT, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED, CONTROL_FILL_REST, SPACE_CARD,
+    SPACE_CARD_COMPACT, SPACE_ITEM, SPACE_PAGE, SPACE_PAGE_COMPACT, TEXT_MUTED, TEXT_PRIMARY,
+    TEXT_SECONDARY, shell_card_frame, shell_card_frame_with_margin,
 };
 
 pub(crate) const NOT_RUNNING: &str =
@@ -86,11 +91,9 @@ const STEP_NEEDS_INTERPRETER: &str =
 pub(crate) const MEMORY_ADDRESS: &str = "Memory address";
 /// The accessible name of the breakpoint field.
 pub(crate) const BREAKPOINT_ADDRESS: &str = "Breakpoint address";
-const BREAKPOINTS_NEED_INTERPRETER: &str =
-    "Breakpoints need the interpreter: a VM on the hypervisor runs its instructions where this debugger cannot stop them.";
+const BREAKPOINTS_NEED_INTERPRETER: &str = "Breakpoints need the interpreter: a VM on the hypervisor runs its instructions where this debugger cannot stop them.";
 const BREAKPOINTS_IDLE: &str = "These breakpoints stay idle while the VM runs on the hypervisor.";
-const NEEDS_PC: &str =
-    "An Arm board steps one instruction at a time and takes no breakpoints: the rest of the debugger reads a PC.";
+const NEEDS_PC: &str = "An Arm board steps one instruction at a time and takes no breakpoints: the rest of the debugger reads a PC.";
 /// What the Breakpoints tab's Remove does.
 const REMOVE_BREAKPOINT: &str = "Remove the picked breakpoint.";
 /// A code line's menu items.
@@ -231,7 +234,9 @@ impl AddressError {
 /// the engine's tables, or an address.
 fn go_target(text: &str, names: Namer<'_>) -> Result<u64, AddressError> {
     match text.trim().split_once('!') {
-        Some((module, name)) => names.address_of(module.trim(), name.trim()).map_err(AddressError::Name),
+        Some((module, name)) => names
+            .address_of(module.trim(), name.trim())
+            .map_err(AddressError::Name),
         None => parse_address(text),
     }
 }
@@ -525,14 +530,22 @@ pub(crate) struct DebuggerPageState<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DebuggerAction {
-    Step { kind: StepKind, unit: StepUnit },
+    Step {
+        kind: StepKind,
+        unit: StepUnit,
+    },
     /// Stop the step under way.
     CancelStep,
     /// Pick the file the build recorded at `build_path` from disk.
-    LocateSource { build_path: String },
+    LocateSource {
+        build_path: String,
+    },
     /// Keep a map the owner made by locating a file in the project's
     /// settings.
-    SaveRunMap { project: String, map: PathMap },
+    SaveRunMap {
+        project: String,
+        map: PathMap,
+    },
     DumpRam,
     ShowMemory(MemoryTarget),
     SelectCpu(usize),
@@ -545,7 +558,10 @@ pub(crate) enum DebuggerAction {
     /// Show the CPU tab with the memory pane at `address` in the address
     /// space of the process at `cr3`: a region of a process other than the
     /// running one.
-    ViewInProcess { cr3: u64, address: u64 },
+    ViewInProcess {
+        cr3: u64,
+        address: u64,
+    },
     /// Show the CPU tab looking from here: a process or thread seen from
     /// inside, or the live processor again.
     View(ViewContext),
@@ -572,8 +588,7 @@ pub(crate) enum DebuggerAction {
 pub(crate) const BACK_TO_LIVE: &str = "Back to live CPU";
 /// The code pane's way back from an address opened.
 pub(crate) const BACK_TO_RIP: &str = "Back to RIP";
-const STEP_WHILE_VIEWING: &str =
-    "Step runs the live processor; go back to the live CPU to step.";
+const STEP_WHILE_VIEWING: &str = "Step runs the live processor; go back to the live CPU to step.";
 
 /// What the panes compare against and mark: the snapshot before, and the
 /// last search hit; and what they name addresses by.
@@ -607,13 +622,19 @@ enum FrameMark {
 impl FrameMark {
     fn of(snapshot: &DebugSnapshot) -> FrameMark {
         let selected = snapshot.frames.selected;
-        let Some(frame) = snapshot.frames.frames.get(selected).filter(|_| selected > 0) else {
+        let Some(frame) = snapshot
+            .frames
+            .frames
+            .get(selected)
+            .filter(|_| selected > 0)
+        else {
             return FrameMark::Innermost;
         };
         match snapshot.code_at {
-            CodeTarget::At(at) if at.value == frame.registers.rip => {
-                FrameMark::Caller { number: selected, code: frame.code_address() }
-            }
+            CodeTarget::At(at) if at.value == frame.registers.rip => FrameMark::Caller {
+                number: selected,
+                code: frame.code_address(),
+            },
             CodeTarget::At(_) | CodeTarget::Rip => FrameMark::Innermost,
         }
     }
@@ -724,18 +745,26 @@ fn step_controls(ui: &mut egui::Ui, bar: &Toolbar, action: &mut Option<DebuggerA
             StepControlKind::Into => StepKind::Into,
             StepControlKind::Over => StepKind::Over,
             StepControlKind::Out => StepKind::Out,
-            StepControlKind::RunToCursor => StepKind::RunTo { address: bar.run_to? },
+            StepControlKind::RunToCursor => StepKind::RunTo {
+                address: bar.run_to?,
+            },
         };
-        Some(DebuggerAction::Step { kind, unit: bar.unit })
+        Some(DebuggerAction::Step {
+            kind,
+            unit: bar.unit,
+        })
     };
-    let enabled = |kind: StepControlKind| can_step && (!matches!(kind, StepControlKind::RunToCursor) || bar.run_to.is_some());
+    let enabled = |kind: StepControlKind| {
+        can_step && (!matches!(kind, StepControlKind::RunToCursor) || bar.run_to.is_some())
+    };
     for index in STEP_BUTTON_ORDER {
         let Some(control) = STEP_CONTROLS.get(index) else {
             continue;
         };
         let on = enabled(control.kind);
         let button = ui.add_enabled(on, egui::Button::new(control.shown));
-        button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, on, control.label));
+        button
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, on, control.label));
         let button = if !bar.step_available {
             button.on_disabled_hover_text(STEP_NEEDS_INTERPRETER)
         } else if bar.viewing {
@@ -743,7 +772,11 @@ fn step_controls(ui: &mut egui::Ui, bar: &Toolbar, action: &mut Option<DebuggerA
         } else if matches!(control.kind, StepControlKind::RunToCursor) && bar.run_to.is_none() {
             button.on_disabled_hover_text(NOTHING_PICKED)
         } else {
-            button.on_hover_text(format!("{} · {}", control.label, ui.ctx().format_shortcut(&control.key)))
+            button.on_hover_text(format!(
+                "{} · {}",
+                control.label,
+                ui.ctx().format_shortcut(&control.key)
+            ))
         };
         if button.clicked() {
             *action = ask(control.kind);
@@ -762,7 +795,11 @@ fn step_controls(ui: &mut egui::Ui, bar: &Toolbar, action: &mut Option<DebuggerA
 
 /// Under the header while the panes look from somewhere other than the live
 /// processor: whom they show (or why that cannot be shown) and the way back.
-fn viewing_banner(ui: &mut egui::Ui, snapshot: &DebugSnapshot, action: &mut Option<DebuggerAction>) {
+fn viewing_banner(
+    ui: &mut egui::Ui,
+    snapshot: &DebugSnapshot,
+    action: &mut Option<DebuggerAction>,
+) {
     let text = match &snapshot.viewing {
         Viewing::Live => return,
         Viewing::Running { process } => {
@@ -805,7 +842,9 @@ fn code_elsewhere_banner(
     let text = match frame {
         FrameMark::Caller { number, .. } => format!("Showing caller frame {number}"),
         FrameMark::Innermost => {
-            let place = names.name(at.value).map_or_else(|| format!("{:X}", at.value), |named| named.label());
+            let place = names
+                .name(at.value)
+                .map_or_else(|| format!("{:X}", at.value), |named| named.label());
             format!("Showing code at {place}")
         }
     };
@@ -850,13 +889,16 @@ pub(crate) fn draw_debugger_page(
     } = state;
     // What was read from somewhere else is no baseline for what changed: a
     // live snapshot and a thread's view are compared with neither.
-    let previous = previous.filter(|before| snapshot.is_some_and(|now| now.context == before.context));
+    let previous =
+        previous.filter(|before| snapshot.is_some_and(|now| now.context == before.context));
     // The pause's place in the owner's source: its first code line is the
     // instruction at RIP.
     let pause = snapshot.and_then(|snapshot| pause_source(snapshot, symbols));
-    let source_shown = pause.is_some() && CodeView::shown(pane.code_view, pause.is_some()) == CodeView::Source;
+    let source_shown =
+        pause.is_some() && CodeView::shown(pane.code_view, pause.is_some()) == CodeView::Source;
     let run_to = if source_shown {
-        pane.source_cursor.and_then(|line| line_address(pause.as_ref()?, line))
+        pane.source_cursor
+            .and_then(|line| line_address(pause.as_ref()?, line))
     } else {
         pane.code_cursor
     };
@@ -886,8 +928,13 @@ pub(crate) fn draw_debugger_page(
                 paused,
                 step_available,
                 dump_pending,
-                viewing: snapshot.is_some_and(|snapshot| matches!(snapshot.viewing, Viewing::Thread(_))),
-                unit: if source_shown { StepUnit::Line } else { StepUnit::Instruction },
+                viewing: snapshot
+                    .is_some_and(|snapshot| matches!(snapshot.viewing, Viewing::Thread(_))),
+                unit: if source_shown {
+                    StepUnit::Line
+                } else {
+                    StepUnit::Instruction
+                },
                 run_to,
                 stepping,
             };
@@ -897,7 +944,10 @@ pub(crate) fn draw_debugger_page(
             }
             // Names come from the pause shown, when there is one.
             let no_modules = crate::debugger::inspect::SymbolIndex::default();
-            let names = Namer::new(snapshot.map_or(&no_modules, |snapshot| &snapshot.symbols), symbols);
+            let names = Namer::new(
+                snapshot.map_or(&no_modules, |snapshot| &snapshot.symbols),
+                symbols,
+            );
             if let Some(hit) = stopped_at {
                 breakpoint_banner(ui, hit, names);
             }
@@ -947,7 +997,10 @@ pub(crate) fn draw_debugger_page(
                     | DebuggerTab::Ssdt,
                     _,
                 ) => {
-                    let states = ModuleStates { index: &snapshot.symbols, view: symbols };
+                    let states = ModuleStates {
+                        index: &snapshot.symbols,
+                        view: symbols,
+                    };
                     system_page(ui, fit, snapshot, states, pane, &mut action);
                 }
                 (DebuggerTab::Symbols, _) => {
@@ -964,7 +1017,9 @@ fn note_text(note: DebugNote) -> String {
         DebugNote::StepNeedsInterpreter => STEP_NEEDS_INTERPRETER.to_owned(),
         DebugNote::BreakpointsNeedInterpreter => BREAKPOINTS_NEED_INTERPRETER.to_owned(),
         DebugNote::TooManyBreakpoints => {
-            format!("The machine holds at most {MAX_LINEAR_BREAKPOINTS} breakpoints; the last change was not taken.")
+            format!(
+                "The machine holds at most {MAX_LINEAR_BREAKPOINTS} breakpoints; the last change was not taken."
+            )
         }
         DebugNote::NeedsPc => NEEDS_PC.to_owned(),
         DebugNote::StepCut(cut) => step_cut_text(cut),
@@ -972,8 +1027,10 @@ fn note_text(note: DebugNote) -> String {
 }
 
 pub(crate) const STEP_CANCELLED: &str = "The step was stopped.";
-pub(crate) const STEP_NO_CALLER: &str = "Step out did not run: where this function returns is not known.";
-pub(crate) const STEP_TIME_CEILING: &str = "The step did not finish: stopped after a minute of running.";
+pub(crate) const STEP_NO_CALLER: &str =
+    "Step out did not run: where this function returns is not known.";
+pub(crate) const STEP_TIME_CEILING: &str =
+    "The step did not finish: stopped after a minute of running.";
 
 /// What the page says of a step that stopped before it finished.
 fn step_cut_text(cut: StepCut) -> String {
@@ -984,10 +1041,14 @@ fn step_cut_text(cut: StepCut) -> String {
         StepCut::Ceiling(StepCeiling::Time) => STEP_TIME_CEILING.to_owned(),
         StepCut::Cancelled => STEP_CANCELLED.to_owned(),
         StepCut::NoCaller => STEP_NO_CALLER.to_owned(),
-        StepCut::BreakpointsRefused(BreakpointRefusal::TooManyLinear | BreakpointRefusal::TooManyPhysical) => format!(
+        StepCut::BreakpointsRefused(
+            BreakpointRefusal::TooManyLinear | BreakpointRefusal::TooManyPhysical,
+        ) => format!(
             "The step needs breakpoints of its own, and with yours they are more than the {MAX_LINEAR_BREAKPOINTS} the machine holds."
         ),
-        StepCut::BreakpointsRefused(BreakpointRefusal::EngineCannotStop) => BREAKPOINTS_NEED_INTERPRETER.to_owned(),
+        StepCut::BreakpointsRefused(BreakpointRefusal::EngineCannotStop) => {
+            BREAKPOINTS_NEED_INTERPRETER.to_owned()
+        }
     }
 }
 
@@ -1056,9 +1117,11 @@ fn breakpoint_columns() -> [Cell; 3] {
 /// is not the one asked, and how many places; or why it is pending.
 fn target_place(target: &BreakpointTarget, list: &BreakpointList<'_>) -> String {
     match target {
-        BreakpointTarget::Address(CodeBreakpoint::Linear(address)) => {
-            list.names.name(*address).map(|named| named.label()).unwrap_or_default()
-        }
+        BreakpointTarget::Address(CodeBreakpoint::Linear(address)) => list
+            .names
+            .name(*address)
+            .map(|named| named.label())
+            .unwrap_or_default(),
         BreakpointTarget::Address(CodeBreakpoint::Physical(_)) => "physical address".to_owned(),
         BreakpointTarget::Source(source) => {
             let Some(resolution) = list.resolutions.source(source) else {
@@ -1071,19 +1134,24 @@ fn target_place(target: &BreakpointTarget, list: &BreakpointList<'_>) -> String 
                     };
                     // A place in a process the pause does not stand in is
                     // named by its module alone.
-                    let mut text = list
-                        .names
-                        .name(first.address)
-                        .map_or_else(|| format!("{}!{:X}", first.module, first.address), |named| named.label());
+                    let mut text = list.names.name(first.address).map_or_else(
+                        || format!("{}!{:X}", first.module, first.address),
+                        |named| named.label(),
+                    );
                     if first.line != source.line {
-                        text.push_str(&format!(" · line {} ({} has no code)", first.line, source.line));
+                        text.push_str(&format!(
+                            " · line {} ({} has no code)",
+                            first.line, source.line
+                        ));
                     }
                     if places.len() > 1 {
                         text.push_str(&format!(" · {} places", places.len()));
                     }
                     text
                 }
-                SourceResolution::Pending(PendingWhy::NoModuleHasLine) => PENDING_NO_LINE.to_owned(),
+                SourceResolution::Pending(PendingWhy::NoModuleHasLine) => {
+                    PENDING_NO_LINE.to_owned()
+                }
                 SourceResolution::Pending(PendingWhy::SymbolsLoading { modules }) => {
                     format!("pending: symbols for {} are loading", modules.join(", "))
                 }
@@ -1095,7 +1163,9 @@ fn target_place(target: &BreakpointTarget, list: &BreakpointList<'_>) -> String 
 /// A breakpoint as its row names it: its address, or `file:line`.
 fn target_label(target: &BreakpointTarget) -> String {
     match target {
-        BreakpointTarget::Address(CodeBreakpoint::Linear(address) | CodeBreakpoint::Physical(address)) => {
+        BreakpointTarget::Address(
+            CodeBreakpoint::Linear(address) | CodeBreakpoint::Physical(address),
+        ) => {
             format!("{address:016X}")
         }
         BreakpointTarget::Source(source) => format!("{}:{}", source.file, source.line),
@@ -1112,7 +1182,10 @@ fn breakpoints_page(
     pane: &mut DebuggerPane,
     action: &mut Option<DebuggerAction>,
 ) {
-    if pane.breakpoint_cursor.is_some_and(|row| row >= list.targets.len()) {
+    if pane
+        .breakpoint_cursor
+        .is_some_and(|row| row >= list.targets.len())
+    {
         pane.breakpoint_cursor = None;
     }
     let remove = |row: usize| -> DebuggerAction {
@@ -1123,7 +1196,10 @@ fn breakpoints_page(
         DebuggerAction::SetTargets(set)
     };
     let typing = ui.ctx().egui_wants_keyboard_input();
-    let removing = !typing && ui.input(|input| input.key_pressed(egui::Key::F2) || input.key_pressed(egui::Key::Delete));
+    let removing = !typing
+        && ui.input(|input| {
+            input.key_pressed(egui::Key::F2) || input.key_pressed(egui::Key::Delete)
+        });
     if let Some(row) = pane.breakpoint_cursor.filter(|_| removing) {
         *action = Some(remove(row));
         pane.breakpoint_cursor = None;
@@ -1153,10 +1229,18 @@ fn breakpoints_page(
                 let pending = place.starts_with("pending:");
                 let cells = [
                     Cell::right((row + 1).to_string(), TEXT_MUTED, 3),
-                    Cell::left(target_label(target), if pending { TEXT_MUTED } else { ACCENT_RED }, 24),
+                    Cell::left(
+                        target_label(target),
+                        if pending { TEXT_MUTED } else { ACCENT_RED },
+                        24,
+                    ),
                     Cell::fill(place, if pending { ACCENT_AMBER } else { TEXT_PRIMARY }),
                 ];
-                let tone = if selected { Tone::Selected } else { Tone::Plain };
+                let tone = if selected {
+                    Tone::Selected
+                } else {
+                    Tone::Plain
+                };
                 let response = list_row(ui, 0.0, &cells, tone, RowSense::Pick { selected });
                 if response.clicked() {
                     pane.breakpoint_cursor = Some(row);
@@ -1201,7 +1285,9 @@ fn code_key(
         return;
     }
     // In the source view F2 acts on the picked line, else the pause's.
-    let source = marks.pause.filter(|_| CodeView::shown(pane.code_view, true) == CodeView::Source);
+    let source = marks
+        .pause
+        .filter(|_| CodeView::shown(pane.code_view, true) == CodeView::Source);
     if let Some(source) = source {
         let line = pane.source_cursor.unwrap_or(source.line);
         *action = Some(DebuggerAction::SetTargets(toggled_line(
@@ -1219,7 +1305,12 @@ fn code_key(
         .filter(shown)
         .or_else(|| snapshot.code.first().map(|line| line.address));
     if let Some(address) = address {
-        *action = Some(DebuggerAction::SetTargets(toggled(marks.targets, address, Some(BreakpointModules::of(snapshot)), marks.symbols)));
+        *action = Some(DebuggerAction::SetTargets(toggled(
+            marks.targets,
+            address,
+            Some(BreakpointModules::of(snapshot)),
+            marks.symbols,
+        )));
     }
 }
 
@@ -1246,7 +1337,9 @@ fn add_breakpoint_row(
                 .hint_text("address, module!name or file:line")
                 .desired_width(240.0),
         );
-        field.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, enabled, BREAKPOINT_ADDRESS));
+        field.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, enabled, BREAKPOINT_ADDRESS)
+        });
         let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         let add = ui.add_enabled(enabled, egui::Button::new("Add"));
         let add = if !strip.available {
@@ -1310,13 +1403,19 @@ fn toggled(
     view: &SymbolsView,
 ) -> Vec<BreakpointTarget> {
     let at = BreakpointTarget::Address(CodeBreakpoint::Linear(address));
-    let resolves_here = |target: &BreakpointTarget| match target {
+    let resolves_here = |target: &BreakpointTarget| {
+        match target {
         BreakpointTarget::Source(source) => index.is_some_and(|index| {
             matches!(resolve(source, &index, view), SourceResolution::Resolved { places } if places.iter().any(|place| place.address == address))
         }),
         BreakpointTarget::Address(_) => *target == at,
+    }
     };
-    let kept: Vec<BreakpointTarget> = targets.iter().filter(|target| !resolves_here(target)).cloned().collect();
+    let kept: Vec<BreakpointTarget> = targets
+        .iter()
+        .filter(|target| !resolves_here(target))
+        .cloned()
+        .collect();
     if kept.len() < targets.len() {
         return kept;
     }
@@ -1371,9 +1470,17 @@ fn status_chips(ui: &mut egui::Ui, snapshot: &DebugSnapshot, names: Namer<'_>, p
         let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
         chip(ui, &format!("Process {name}"), TEXT_PRIMARY).on_hover_text(path.as_str());
     }
-    if let Some(named) = snapshot.code.first().and_then(|line| names.name(line.address)) {
-        chip(ui, &format!("at {}", named.label()), name_color(&named, ACCENT_CYAN))
-            .on_hover_text("Where RIP points.");
+    if let Some(named) = snapshot
+        .code
+        .first()
+        .and_then(|line| names.name(line.address))
+    {
+        chip(
+            ui,
+            &format!("at {}", named.label()),
+            name_color(&named, ACCENT_CYAN),
+        )
+        .on_hover_text("Where RIP points.");
     }
     chip(ui, &format!("CR3 {cr3:X}"), TEXT_MUTED)
         .on_hover_text("The address space: each process has its own page tables.");
@@ -1465,16 +1572,17 @@ fn header(
         // The tabs take a row of their own under the buttons and the
         // processor's status.
         ui.end_row();
-        let tabs = DebuggerTab::ALL.map(|tab| Segment { value: tab, label: tab.label() });
+        let tabs = DebuggerTab::ALL.map(|tab| Segment {
+            value: tab,
+            label: tab.label(),
+        });
         if segmented(ui, &mut pane.tab, &tabs) {
             // A tab's keys start on its list, standing on no detail row.
             pane.list_focus = ListFocus::List;
             pane.detail_cursor = None;
             pane.module_cursor = None;
             pane.folded_imports.clear();
-            *action = Some(DebuggerAction::ShowSystem(
-                pane.tab.system_view(pane),
-            ));
+            *action = Some(DebuggerAction::ShowSystem(pane.tab.system_view(pane)));
         }
     });
 }
@@ -1505,14 +1613,20 @@ fn processor_status(
     status_chips(ui, snapshot, Namer::new(&snapshot.symbols, symbols), paused);
     if !snapshot.symbols.modules.is_empty() {
         let counts = symbol_counts(&snapshot.symbols, symbols);
-        let color = if counts.missing > 0 { ACCENT_AMBER } else { TEXT_MUTED };
+        let color = if counts.missing > 0 {
+            ACCENT_AMBER
+        } else {
+            TEXT_MUTED
+        };
         let opened = chip(ui, &counts.label(), color)
             .interact(egui::Sense::click())
             .on_hover_text("Open the Symbols tab.")
             .clicked();
         if opened && pane.tab != DebuggerTab::Symbols {
             pane.tab = DebuggerTab::Symbols;
-            *action = Some(DebuggerAction::ShowSystem(DebuggerTab::Symbols.system_view(pane)));
+            *action = Some(DebuggerAction::ShowSystem(
+                DebuggerTab::Symbols.system_view(pane),
+            ));
         }
     }
 }
@@ -1603,18 +1717,48 @@ fn grid_layout(
             ui,
             egui::vec2(left, page.y),
             gap,
-            Split { share: &mut split.left_rows, default: TOP_SHARE, label: RESIZE_CODE_MEMORY },
+            Split {
+                share: &mut split.left_rows,
+                default: TOP_SHARE,
+                label: RESIZE_CODE_MEMORY,
+            },
             &mut panes,
             |ui, size, panes| {
-                fixed_card(ui, size, Title::plain("Code"), |_| {}, |ui| {
-                    code_pane(ui, snapshot, marks, &mut panes.picks, &mut panes.lower.variables, panes.action);
-                });
+                fixed_card(
+                    ui,
+                    size,
+                    Title::plain("Code"),
+                    |_| {},
+                    |ui| {
+                        code_pane(
+                            ui,
+                            snapshot,
+                            marks,
+                            &mut panes.picks,
+                            &mut panes.lower.variables,
+                            panes.action,
+                        );
+                    },
+                );
             },
             |ui, size, panes| {
-                lower_left_card(ui, Room::Fixed(size), snapshot, marks, pane, &mut panes.lower, panes.action);
+                lower_left_card(
+                    ui,
+                    Room::Fixed(size),
+                    snapshot,
+                    marks,
+                    pane,
+                    &mut panes.lower,
+                    panes.action,
+                );
             },
         );
-        match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_COLUMNS) {
+        match splitter(
+            ui,
+            egui::vec2(gap, page.y),
+            SplitAxis::Columns,
+            RESIZE_COLUMNS,
+        ) {
             SplitterMove::Still => {}
             SplitterMove::Dragged(delta) => {
                 split.columns = resized(columns, delta, page.x, gap, SPLIT_MIN);
@@ -1632,12 +1776,25 @@ fn grid_layout(
             },
             &mut panes,
             |ui, size, _| {
-                fixed_card(ui, size, Title::plain("Registers"), |_| {}, |ui| {
-                    register_rows(ui, snapshot, marks);
-                });
+                fixed_card(
+                    ui,
+                    size,
+                    Title::plain("Registers"),
+                    |_| {},
+                    |ui| {
+                        register_rows(ui, snapshot, marks);
+                    },
+                );
             },
             |ui, size, panes| {
-                lower_right_card(ui, Room::Fixed(size), snapshot, marks, &mut panes.lower, panes.action);
+                lower_right_card(
+                    ui,
+                    Room::Fixed(size),
+                    snapshot,
+                    marks,
+                    &mut panes.lower,
+                    panes.action,
+                );
             },
         );
     });
@@ -1665,7 +1822,11 @@ struct LowerPicks {
 
 impl LowerPicks {
     fn of(pane: &mut DebuggerPane) -> Self {
-        LowerPicks { left: pane.lower_left, right: pane.lower_right, variables: std::mem::take(&mut pane.variables) }
+        LowerPicks {
+            left: pane.lower_left,
+            right: pane.lower_right,
+            variables: std::mem::take(&mut pane.variables),
+        }
     }
 
     fn keep(self, pane: &mut DebuggerPane) {
@@ -1698,9 +1859,18 @@ fn lower_left_card(
         Title::plain(shown.label()).inlined(),
         |ui| {
             let switch = [
-                Segment { value: LowerLeft::Memory, label: MEMORY },
-                Segment { value: LowerLeft::Locals, label: LOCALS },
-                Segment { value: LowerLeft::Watch, label: WATCH },
+                Segment {
+                    value: LowerLeft::Memory,
+                    label: MEMORY,
+                },
+                Segment {
+                    value: LowerLeft::Locals,
+                    label: LOCALS,
+                },
+                Segment {
+                    value: LowerLeft::Watch,
+                    label: WATCH,
+                },
             ];
             ui.horizontal_wrapped(|ui| {
                 if segmented(ui, &mut switched, &switch) {
@@ -1713,9 +1883,17 @@ fn lower_left_card(
         },
         |ui| match shown {
             LowerLeft::Memory => memory_rows(ui, snapshot, marks),
-            LowerLeft::Locals => ask = locals_rows(ui, &snapshot.frames.locals, names, &snapshot.symbols),
+            LowerLeft::Locals => {
+                ask = locals_rows(ui, &snapshot.frames.locals, names, &snapshot.symbols)
+            }
             LowerLeft::Watch => {
-                ask = watch_rows(ui, &snapshot.frames.watches, variables, names, &snapshot.symbols);
+                ask = watch_rows(
+                    ui,
+                    &snapshot.frames.watches,
+                    variables,
+                    names,
+                    &snapshot.symbols,
+                );
             }
         },
     );
@@ -1745,8 +1923,14 @@ fn lower_right_card(
         Title::plain(shown.label()).inlined(),
         |ui| {
             let switch = [
-                Segment { value: LowerRight::Stack, label: STACK },
-                Segment { value: LowerRight::CallStack, label: CALL_STACK },
+                Segment {
+                    value: LowerRight::Stack,
+                    label: STACK,
+                },
+                Segment {
+                    value: LowerRight::CallStack,
+                    label: CALL_STACK,
+                },
             ];
             ui.horizontal_wrapped(|ui| {
                 if segmented(ui, &mut switched, &switch) {
@@ -1757,7 +1941,13 @@ fn lower_right_card(
         |ui| match shown {
             LowerRight::Stack => stack_rows(ui, snapshot, marks),
             LowerRight::CallStack => {
-                picked = call_stack_rows(ui, &snapshot.frames, names, &snapshot.symbols, marks.symbols);
+                picked = call_stack_rows(
+                    ui,
+                    &snapshot.frames,
+                    names,
+                    &snapshot.symbols,
+                    marks.symbols,
+                );
             }
         },
     );
@@ -1860,14 +2050,12 @@ fn splitter(ui: &mut egui::Ui, size: egui::Vec2, axis: SplitAxis, label: &str) -
     if active {
         ui.ctx().set_cursor_icon(cursor);
         let line = match axis {
-            SplitAxis::Columns => egui::Rect::from_center_size(
-                rect.center(),
-                egui::vec2(2.0, rect.height() * 0.4),
-            ),
-            SplitAxis::Rows => egui::Rect::from_center_size(
-                rect.center(),
-                egui::vec2(rect.width() * 0.4, 2.0),
-            ),
+            SplitAxis::Columns => {
+                egui::Rect::from_center_size(rect.center(), egui::vec2(2.0, rect.height() * 0.4))
+            }
+            SplitAxis::Rows => {
+                egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width() * 0.4, 2.0))
+            }
         };
         ui.painter().rect_filled(line, 1.0, ACCENT_CYAN);
     }
@@ -1960,32 +2148,86 @@ fn scrolling_layout(
                 LEFT_SHARE,
                 &mut panes,
                 |ui, panes| {
-                    card(ui, density, Title::plain("Code"), |_| {}, |ui| {
-                        code_pane(ui, snapshot, marks, &mut panes.picks, &mut panes.lower.variables, panes.action);
-                    });
+                    card(
+                        ui,
+                        density,
+                        Title::plain("Code"),
+                        |_| {},
+                        |ui| {
+                            code_pane(
+                                ui,
+                                snapshot,
+                                marks,
+                                &mut panes.picks,
+                                &mut panes.lower.variables,
+                                panes.action,
+                            );
+                        },
+                    );
                     ui.add_space(gap);
-                    lower_left_card(ui, room, snapshot, marks, pane, &mut panes.lower, panes.action);
+                    lower_left_card(
+                        ui,
+                        room,
+                        snapshot,
+                        marks,
+                        pane,
+                        &mut panes.lower,
+                        panes.action,
+                    );
                 },
                 |ui, panes| {
-                    card(ui, density, Title::plain("Registers"), |_| {}, |ui| {
-                        register_rows(ui, snapshot, marks);
-                    });
+                    card(
+                        ui,
+                        density,
+                        Title::plain("Registers"),
+                        |_| {},
+                        |ui| {
+                            register_rows(ui, snapshot, marks);
+                        },
+                    );
                     ui.add_space(gap);
                     lower_right_card(ui, room, snapshot, marks, &mut panes.lower, panes.action);
                 },
             ),
             Columns::One => {
-                card(ui, density, Title::plain("Registers"), |_| {}, |ui| {
-                    register_rows(ui, snapshot, marks);
-                });
+                card(
+                    ui,
+                    density,
+                    Title::plain("Registers"),
+                    |_| {},
+                    |ui| {
+                        register_rows(ui, snapshot, marks);
+                    },
+                );
                 ui.add_space(gap);
-                card(ui, density, Title::plain("Code"), |_| {}, |ui| {
-                    code_pane(ui, snapshot, marks, &mut panes.picks, &mut panes.lower.variables, panes.action);
-                });
+                card(
+                    ui,
+                    density,
+                    Title::plain("Code"),
+                    |_| {},
+                    |ui| {
+                        code_pane(
+                            ui,
+                            snapshot,
+                            marks,
+                            &mut panes.picks,
+                            &mut panes.lower.variables,
+                            panes.action,
+                        );
+                    },
+                );
                 ui.add_space(gap);
                 lower_right_card(ui, room, snapshot, marks, &mut panes.lower, panes.action);
                 ui.add_space(gap);
-                lower_left_card(ui, room, snapshot, marks, pane, &mut panes.lower, panes.action);
+                lower_left_card(
+                    ui,
+                    room,
+                    snapshot,
+                    marks,
+                    pane,
+                    &mut panes.lower,
+                    panes.action,
+                );
             }
         });
     panes.picks.keep(pane);
@@ -2035,7 +2277,11 @@ struct Title<'a> {
 
 impl<'a> Title<'a> {
     const fn plain(text: &'a str) -> Self {
-        Self { text, count: None, inline: false }
+        Self {
+            text,
+            count: None,
+            inline: false,
+        }
     }
 
     const fn counted(text: &'a str, count: usize) -> Self {
@@ -2168,7 +2414,12 @@ struct CodePicks {
 
 impl CodePicks {
     fn of(pane: &DebuggerPane) -> Self {
-        CodePicks { instruction: pane.code_cursor, line: pane.source_cursor, view: pane.code_view, followed: pane.code_followed }
+        CodePicks {
+            instruction: pane.code_cursor,
+            line: pane.source_cursor,
+            view: pane.code_view,
+            followed: pane.code_followed,
+        }
     }
 
     fn keep(self, pane: &mut DebuggerPane) {
@@ -2208,8 +2459,14 @@ fn code_pane(
 ) {
     let mut shown = CodeView::shown(picks.view, marks.pause.is_some());
     let switch = [
-        Segment { value: CodeView::Source, label: SOURCE_SWITCH },
-        Segment { value: CodeView::Disassembly, label: DISASSEMBLY_SWITCH },
+        Segment {
+            value: CodeView::Source,
+            label: SOURCE_SWITCH,
+        },
+        Segment {
+            value: CodeView::Disassembly,
+            label: DISASSEMBLY_SWITCH,
+        },
     ];
     if segmented(ui, &mut shown, &switch) {
         picks.view = Some(shown);
@@ -2223,11 +2480,19 @@ fn code_pane(
         if shown == CodeView::Source {
             ui.label(RichText::new(NO_SOURCE_HERE).color(TEXT_MUTED));
         }
-        let follow = picks.follow(CodePlace { view: CodeView::Disassembly, address, line: None });
+        let follow = picks.follow(CodePlace {
+            view: CodeView::Disassembly,
+            address,
+            line: None,
+        });
         code_rows(ui, snapshot, marks, &mut picks.instruction, follow, action);
         return;
     };
-    let follow = picks.follow(CodePlace { view: CodeView::Source, address, line: Some(source.line) });
+    let follow = picks.follow(CodePlace {
+        view: CodeView::Source,
+        address,
+        line: Some(source.line),
+    });
     let gutter = line_marks(source, marks.breakpoints, marks.targets, marks.resolutions);
     let place = match marks.frame {
         FrameMark::Caller { .. } => PlaceMark::Caller,
@@ -2242,17 +2507,34 @@ fn code_pane(
         names: Namer::new(&snapshot.symbols, marks.symbols),
         index: &snapshot.symbols,
     });
-    let pane = SourcePane { source, slot: marks.symbols.sources.get(&source.key), marks: &gutter, place, tip, follow };
+    let pane = SourcePane {
+        source,
+        slot: marks.symbols.sources.get(&source.key),
+        marks: &gutter,
+        place,
+        tip,
+        follow,
+    };
     match source_rows(ui, &pane, &mut picks.line) {
         None => {}
         Some(SourceAsk::Toggle(line)) => {
-            let targets = toggled_line(marks.targets, source, line, Some(BreakpointModules::of(snapshot)), marks.symbols);
+            let targets = toggled_line(
+                marks.targets,
+                source,
+                line,
+                Some(BreakpointModules::of(snapshot)),
+                marks.symbols,
+            );
             *action = Some(DebuggerAction::SetTargets(targets));
         }
         Some(SourceAsk::Locate) => {
-            *action = Some(DebuggerAction::LocateSource { build_path: source.build_path.clone() });
+            *action = Some(DebuggerAction::LocateSource {
+                build_path: source.build_path.clone(),
+            });
         }
-        Some(SourceAsk::SaveMap { project, map }) => *action = Some(DebuggerAction::SaveRunMap { project, map }),
+        Some(SourceAsk::SaveMap { project, map }) => {
+            *action = Some(DebuggerAction::SaveRunMap { project, map })
+        }
         Some(SourceAsk::References(line)) => {
             if let Some(target) = line_target(source, line) {
                 *action = Some(DebuggerAction::FindReferences(target));
@@ -2283,7 +2565,10 @@ fn code_rows(
     for (index, line) in snapshot.code.iter().enumerate() {
         let named = names.name(line.address);
         if let Some(start) = named.as_ref().filter(|named| named.starts_function()) {
-            let heading = [Cell::fill(format!("{}:", start.label()), name_color(start, ACCENT_BLUE))];
+            let heading = [Cell::fill(
+                format!("{}:", start.label()),
+                name_color(start, ACCENT_BLUE),
+            )];
             list_row(ui, MARKER_LEAD, &heading, Tone::Plain, RowSense::Look);
         }
         let mut bytes: Vec<String> = line
@@ -2334,7 +2619,13 @@ fn code_rows(
             Cell::left(bytes.join(" "), TEXT_MUTED, 3 * shown + 1),
             Cell::fill(text, text_color),
         ];
-        let response = list_row(ui, MARKER_LEAD, &cells, tone, RowSense::Pick { selected: picked });
+        let response = list_row(
+            ui,
+            MARKER_LEAD,
+            &cells,
+            tone,
+            RowSense::Pick { selected: picked },
+        );
         if response.clicked() {
             *cursor = Some(line.address);
         }
@@ -2343,7 +2634,9 @@ fn code_rows(
         if follow && ((at_rip && snapshot.code_at == CodeTarget::Rip) || opened) {
             response.scroll_to_me(Some(egui::Align::Center));
         }
-        let at_breakpoint = marks.breakpoints.contains(&CodeBreakpoint::Linear(line.address));
+        let at_breakpoint = marks
+            .breakpoints
+            .contains(&CodeBreakpoint::Linear(line.address));
         match (at_rip, at_breakpoint) {
             (true, true) => lead_arrow(ui, response.rect, ACCENT_RED),
             (true, false) => lead_arrow(ui, response.rect, ACCENT_CYAN),
@@ -2355,10 +2648,18 @@ fn code_rows(
             (false, false) => {}
         }
         response.context_menu(|ui| {
-            let label = if at_breakpoint { REMOVE_BREAKPOINT_HERE } else { SET_BREAKPOINT_HERE };
+            let label = if at_breakpoint {
+                REMOVE_BREAKPOINT_HERE
+            } else {
+                SET_BREAKPOINT_HERE
+            };
             if ui.button(label).clicked() {
-                *action =
-                    Some(DebuggerAction::SetTargets(toggled(marks.targets, line.address, Some(BreakpointModules::of(snapshot)), marks.symbols)));
+                *action = Some(DebuggerAction::SetTargets(toggled(
+                    marks.targets,
+                    line.address,
+                    Some(BreakpointModules::of(snapshot)),
+                    marks.symbols,
+                )));
                 ui.close();
             }
             // Who refers to this instruction, to the function it starts, and
@@ -2368,11 +2669,16 @@ fn code_rows(
                 asks.push(address_target(line.address, start.label()));
             }
             if let Some(target) = line.target {
-                let label = names.name(target).map_or_else(|| format!("{target:#X}"), |named| named.label());
+                let label = names
+                    .name(target)
+                    .map_or_else(|| format!("{target:#X}"), |named| named.label());
                 asks.push(address_target(target, label));
             }
             for ask in asks {
-                if ui.button(format!("{REFERENCES_TO} {}", ask.label)).clicked() {
+                if ui
+                    .button(format!("{REFERENCES_TO} {}", ask.label))
+                    .clicked()
+                {
                     *action = Some(DebuggerAction::FindReferences(ask));
                     ui.close();
                 }
@@ -2433,7 +2739,12 @@ fn register_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) 
                 if wide {
                     register_row(ui, "RIP", format!("{:016X}", r.rip), rip_changed);
                 } else {
-                    register_row(ui, "EIP", format!("{:08X}", r.rip & 0xFFFF_FFFF), rip_changed);
+                    register_row(
+                        ui,
+                        "EIP",
+                        format!("{:08X}", r.rip & 0xFFFF_FFFF),
+                        rip_changed,
+                    );
                 }
                 let flags_changed = old.is_some_and(|o| o.eflags != r.eflags);
                 register_row(ui, "EFLAGS", format!("{:08X}", r.eflags), flags_changed);
@@ -2448,15 +2759,50 @@ fn register_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) 
                 let bases = &view.segment_bases;
                 let old_bases = before.map(|before| &before.segment_bases);
                 for (name, selector, base, before) in [
-                    ("CS", r.cs, bases.cs, old.zip(old_bases).map(|(o, b)| (o.cs, b.cs))),
-                    ("SS", r.ss, bases.ss, old.zip(old_bases).map(|(o, b)| (o.ss, b.ss))),
-                    ("DS", r.ds, bases.ds, old.zip(old_bases).map(|(o, b)| (o.ds, b.ds))),
-                    ("ES", r.es, bases.es, old.zip(old_bases).map(|(o, b)| (o.es, b.es))),
-                    ("FS", r.fs, bases.fs, old.zip(old_bases).map(|(o, b)| (o.fs, b.fs))),
-                    ("GS", r.gs, bases.gs, old.zip(old_bases).map(|(o, b)| (o.gs, b.gs))),
+                    (
+                        "CS",
+                        r.cs,
+                        bases.cs,
+                        old.zip(old_bases).map(|(o, b)| (o.cs, b.cs)),
+                    ),
+                    (
+                        "SS",
+                        r.ss,
+                        bases.ss,
+                        old.zip(old_bases).map(|(o, b)| (o.ss, b.ss)),
+                    ),
+                    (
+                        "DS",
+                        r.ds,
+                        bases.ds,
+                        old.zip(old_bases).map(|(o, b)| (o.ds, b.ds)),
+                    ),
+                    (
+                        "ES",
+                        r.es,
+                        bases.es,
+                        old.zip(old_bases).map(|(o, b)| (o.es, b.es)),
+                    ),
+                    (
+                        "FS",
+                        r.fs,
+                        bases.fs,
+                        old.zip(old_bases).map(|(o, b)| (o.fs, b.fs)),
+                    ),
+                    (
+                        "GS",
+                        r.gs,
+                        bases.gs,
+                        old.zip(old_bases).map(|(o, b)| (o.gs, b.gs)),
+                    ),
                 ] {
                     let changed = before.is_some_and(|before| before != (selector, base));
-                    register_row(ui, name, format!("{selector:04X}  base {base:016X}"), changed);
+                    register_row(
+                        ui,
+                        name,
+                        format!("{selector:04X}  base {base:016X}"),
+                        changed,
+                    );
                 }
                 let kgs_changed = before.is_some_and(|b| b.kernel_gs_base != view.kernel_gs_base);
                 register_row(
@@ -2479,27 +2825,33 @@ fn register_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) 
             });
         ui.add_space(SPACE_ITEM / 2.0);
         ui.collapsing("x87", |ui| {
-            egui::Grid::new("debugger_x87").num_columns(2).spacing(REGISTER_GRID_SPACING).show(ui, |ui| {
-                for (index, register) in r.fpu_regs.iter().enumerate() {
-                    let changed = old.is_some_and(|o| o.fpu_regs[index] != *register);
-                    register_row(ui, &format!("ST{index}"), le_hex(register), changed);
-                }
-                let sw_changed = old.is_some_and(|o| o.fpu_sw != r.fpu_sw);
-                register_row(ui, "FSW", format!("{:04X}", r.fpu_sw), sw_changed);
-                let cw_changed = old.is_some_and(|o| o.fpu_cw != r.fpu_cw);
-                register_row(ui, "FCW", format!("{:04X}", r.fpu_cw), cw_changed);
-            });
+            egui::Grid::new("debugger_x87")
+                .num_columns(2)
+                .spacing(REGISTER_GRID_SPACING)
+                .show(ui, |ui| {
+                    for (index, register) in r.fpu_regs.iter().enumerate() {
+                        let changed = old.is_some_and(|o| o.fpu_regs[index] != *register);
+                        register_row(ui, &format!("ST{index}"), le_hex(register), changed);
+                    }
+                    let sw_changed = old.is_some_and(|o| o.fpu_sw != r.fpu_sw);
+                    register_row(ui, "FSW", format!("{:04X}", r.fpu_sw), sw_changed);
+                    let cw_changed = old.is_some_and(|o| o.fpu_cw != r.fpu_cw);
+                    register_row(ui, "FCW", format!("{:04X}", r.fpu_cw), cw_changed);
+                });
         });
         ui.collapsing("SSE", |ui| {
-            egui::Grid::new("debugger_sse").num_columns(2).spacing(REGISTER_GRID_SPACING).show(ui, |ui| {
-                let shown = if wide { 16 } else { 8 };
-                for (index, register) in r.xmm.iter().enumerate().take(shown) {
-                    let changed = old.is_some_and(|o| o.xmm[index] != *register);
-                    register_row(ui, &format!("XMM{index}"), le_hex(register), changed);
-                }
-                let mxcsr_changed = old.is_some_and(|o| o.mxcsr != r.mxcsr);
-                register_row(ui, "MXCSR", format!("{:08X}", r.mxcsr), mxcsr_changed);
-            });
+            egui::Grid::new("debugger_sse")
+                .num_columns(2)
+                .spacing(REGISTER_GRID_SPACING)
+                .show(ui, |ui| {
+                    let shown = if wide { 16 } else { 8 };
+                    for (index, register) in r.xmm.iter().enumerate().take(shown) {
+                        let changed = old.is_some_and(|o| o.xmm[index] != *register);
+                        register_row(ui, &format!("XMM{index}"), le_hex(register), changed);
+                    }
+                    let mxcsr_changed = old.is_some_and(|o| o.mxcsr != r.mxcsr);
+                    register_row(ui, "MXCSR", format!("{:08X}", r.mxcsr), mxcsr_changed);
+                });
         });
     }
 }
@@ -2538,7 +2890,8 @@ fn saved_register_rows(ui: &mut egui::Ui, saved: &SavedRegisters) {
                 ("R10", saved.r10),
                 ("R11", saved.r11),
             ] {
-                faint_register_row(ui, name, format!("{value:016X}")).on_hover_text(ENTRY_DEPENDENT);
+                faint_register_row(ui, name, format!("{value:016X}"))
+                    .on_hover_text(ENTRY_DEPENDENT);
             }
             for name in ["R12", "R13", "R14", "R15"] {
                 faint_register_row(ui, name, "—".repeat(16)).on_hover_text(NOT_IN_TRAP_FRAME);
@@ -2619,7 +2972,11 @@ fn flags_job(eflags: u32, before: Option<u32>) -> LayoutJob {
 
 /// A little-endian register, most significant byte first.
 fn le_hex(bytes: &[u8]) -> String {
-    bytes.iter().rev().map(|byte| format!("{byte:02X}")).collect()
+    bytes
+        .iter()
+        .rev()
+        .map(|byte| format!("{byte:02X}"))
+        .collect()
 }
 
 /// The memory pane's controls: the address space, the address to show, the
@@ -2634,8 +2991,14 @@ fn memory_bar(
     {
         ui.horizontal_wrapped(|ui| {
             let mut spaces = vec![
-                Segment { value: AddressSpace::Linear, label: "Linear" },
-                Segment { value: AddressSpace::Physical, label: "Physical" },
+                Segment {
+                    value: AddressSpace::Linear,
+                    label: "Linear",
+                },
+                Segment {
+                    value: AddressSpace::Physical,
+                    label: "Physical",
+                },
             ];
             // A Process space appears once a process other than the running
             // one is being browsed, so it can be selected and left.
@@ -2644,7 +3007,10 @@ fn memory_bar(
                 AddressSpace::Linear | AddressSpace::Physical => snapshot.memory_space,
             };
             if let Some(cr3) = process_space {
-                spaces.push(Segment { value: AddressSpace::Process { cr3 }, label: "Process" });
+                spaces.push(Segment {
+                    value: AddressSpace::Process { cr3 },
+                    label: "Process",
+                });
             }
             segmented(ui, &mut pane.space, &spaces);
             if let Some(cr3) = process_space {
@@ -2669,10 +3035,16 @@ fn memory_bar(
                     Ok(value) => {
                         pane.address_error = None;
                         // A name is a linear address in the panes' own space.
-                        let space = if pane.address_text.contains('!') { vantage_space(snapshot) } else { pane.space };
-                        *action = Some(DebuggerAction::ShowMemory(MemoryTarget::At(
-                            GuestAddress { space, value },
-                        )));
+                        let space = if pane.address_text.contains('!') {
+                            vantage_space(snapshot)
+                        } else {
+                            pane.space
+                        };
+                        *action =
+                            Some(DebuggerAction::ShowMemory(MemoryTarget::At(GuestAddress {
+                                space,
+                                value,
+                            })));
                     }
                     Err(error) => pane.address_error = Some(error),
                 }
@@ -2729,9 +3101,18 @@ fn search_bar(
             ui,
             &mut pane.search_encoding,
             &[
-                Segment { value: SearchEncoding::Hex, label: "Hex" },
-                Segment { value: SearchEncoding::Text, label: "Text" },
-                Segment { value: SearchEncoding::Utf16, label: "UTF-16" },
+                Segment {
+                    value: SearchEncoding::Hex,
+                    label: "Hex",
+                },
+                Segment {
+                    value: SearchEncoding::Text,
+                    label: "Text",
+                },
+                Segment {
+                    value: SearchEncoding::Utf16,
+                    label: "UTF-16",
+                },
             ],
         );
         let label = ui.label(RichText::new(FIND).color(TEXT_MUTED));
@@ -2769,7 +3150,10 @@ fn search_bar(
                 TEXT_MUTED,
             ),
             FindOutcome::Abandoned => ("Search stopped: the VM is stopping".to_owned(), TEXT_MUTED),
-            FindOutcome::NoDebugger => ("This machine's memory cannot be searched".to_owned(), TEXT_MUTED),
+            FindOutcome::NoDebugger => (
+                "This machine's memory cannot be searched".to_owned(),
+                TEXT_MUTED,
+            ),
         };
         ui.label(RichText::new(text).color(color));
     }
@@ -2847,12 +3231,16 @@ fn memory_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
             let address = Cell::left(format!("{base:016X}"), TEXT_MUTED, 16);
             let Some(bytes) = line.bytes else {
                 let unreadable = vec!["??"; per_line].join(" ");
-                let cells =
-                    [address, Cell::left(unreadable, TEXT_MUTED.gamma_multiply(0.6), hex_chars)];
+                let cells = [
+                    address,
+                    Cell::left(unreadable, TEXT_MUTED.gamma_multiply(0.6), hex_chars),
+                ];
                 list_row(ui, 0.0, &cells, tone, RowSense::Look);
                 continue;
             };
-            let old = before.and_then(|rows| rows.get(index)).and_then(|old| old.bytes);
+            let old = before
+                .and_then(|rows| rows.get(index))
+                .and_then(|old| old.bytes);
             let mut hex = LayoutJob::default();
             for offset in 0..per_line {
                 let column = chunk + offset;
@@ -2982,7 +3370,9 @@ pub(crate) fn no_windows_kernel_in(miss: KernelMiss, vmcs: Option<u64>) -> Strin
 
 /// What a listing says when it was read as the guest of the VMCS at `vmcs`.
 pub(crate) fn vmx_guest_label(vmcs: u64) -> String {
-    format!("read as the guest of the VMCS at {vmcs:#x}: this pause is in the hypervisor (VMX root)")
+    format!(
+        "read as the guest of the VMCS at {vmcs:#x}: this pause is in the hypervisor (VMX root)"
+    )
 }
 
 /// The heading over [`no_windows_kernel`]'s text.
@@ -3007,7 +3397,11 @@ fn system_page(
 ) {
     match (&snapshot.system, pane.tab) {
         (SystemListing::NoWindowsKernel(miss), _) => {
-            empty_state(ui, no_windows_kernel_title(*miss), &no_windows_kernel_in(*miss, snapshot.vmcs));
+            empty_state(
+                ui,
+                no_windows_kernel_title(*miss),
+                &no_windows_kernel_in(*miss, snapshot.vmcs),
+            );
         }
         (SystemListing::Processes(listing), DebuggerTab::Processes) => {
             layouts_line(ui, snapshot);
@@ -3025,7 +3419,14 @@ fn system_page(
         }
         (SystemListing::Ssdt(listing), DebuggerTab::Ssdt) => {
             layouts_line(ui, snapshot);
-            ssdt_page(ui, fit, listing, Namer::new(states.index, states.view), pane, action);
+            ssdt_page(
+                ui,
+                fit,
+                listing,
+                Namer::new(states.index, states.view),
+                pane,
+                action,
+            );
         }
         // A list for another tab, or none yet: the run thread is reading.
         (
@@ -3043,27 +3444,36 @@ fn system_page(
 
 #[cfg(test)]
 mod name_tests {
-    use super::*;
-    use crate::symbols::kernel::tests::{kernel_symbols, KERNEL_BASE};
-    use crate::symbols::names::tests::hub_with_kernel_code;
     use rusty_box_symbols::identity::{Guid, TablesIdentity};
+
+    use super::*;
+    use crate::symbols::kernel::tests::{KERNEL_BASE, kernel_symbols};
+    use crate::symbols::names::tests::hub_with_kernel_code;
 
     /// Review focus 3: a name from a file of another build, loaded anyway,
     /// is drawn amber wherever a pane draws it.
     #[test]
     fn a_forced_module_is_named_in_amber() {
         let view = hub_with_kernel_code(crate::symbols::hub::ModuleSymbols::Forced {
-            found: TablesIdentity::Pdb { guid: Guid::from_le_bytes([0x77; 16]), age: 3 },
+            found: TablesIdentity::Pdb {
+                guid: Guid::from_le_bytes([0x77; 16]),
+                age: 3,
+            },
             path: std::path::PathBuf::from("D:\\other\\ntkrnlmp.pdb"),
         })
         .view();
         let symbols = kernel_symbols();
-        let named = Namer::new(&symbols, &view).name(KERNEL_BASE + 0x1040).expect("in the kernel");
-        assert_eq!(named.label(), "ntoskrnl!KiSystemCall64");
-        assert_eq!(name_color(&named, ACCENT_CYAN), ACCENT_AMBER);
-        let matched = Namer::new(&symbols, &hub_with_kernel_code(crate::symbols::names::tests::loaded()).view())
+        let named = Namer::new(&symbols, &view)
             .name(KERNEL_BASE + 0x1040)
             .expect("in the kernel");
+        assert_eq!(named.label(), "ntoskrnl!KiSystemCall64");
+        assert_eq!(name_color(&named, ACCENT_CYAN), ACCENT_AMBER);
+        let matched = Namer::new(
+            &symbols,
+            &hub_with_kernel_code(crate::symbols::names::tests::loaded()).view(),
+        )
+        .name(KERNEL_BASE + 0x1040)
+        .expect("in the kernel");
         assert_eq!(name_color(&matched, ACCENT_CYAN), ACCENT_CYAN);
     }
 
@@ -3093,13 +3503,23 @@ mod name_tests {
         assert_eq!(unnamed.color, TEXT_PRIMARY);
         let rerouted = service_view(&service(Some("NtClose")), names);
         assert_eq!(rerouted.name, "NtClose");
-        assert_eq!(rerouted.target, "ntoskrnl.exe  · rerouted to KiSystemCall64");
+        assert_eq!(
+            rerouted.target,
+            "ntoskrnl.exe  · rerouted to KiSystemCall64"
+        );
         assert_eq!(rerouted.color, ACCENT_AMBER);
         let mut hooked = service(Some("NtClose"));
-        hooked.inline = Some(InlineJump { target: 0xFFFF_F800_0300_0200, module_name: Some("disk.sys".to_owned()) });
+        hooked.inline = Some(InlineJump {
+            target: 0xFFFF_F800_0300_0200,
+            module_name: Some("disk.sys".to_owned()),
+        });
         let inline = service_view(&hooked, names);
         assert_eq!(inline.color, ACCENT_RED);
-        assert!(inline.target.contains("inline hook, jumps to disk.sys"), "{}", inline.target);
+        assert!(
+            inline.target.contains("inline hook, jumps to disk.sys"),
+            "{}",
+            inline.target
+        );
     }
 
     /// Go takes `module!name` as well as an address, and says why a name
@@ -3109,23 +3529,38 @@ mod name_tests {
         let view = hub_with_kernel_code(crate::symbols::names::tests::loaded()).view();
         let symbols = kernel_symbols();
         let names = Namer::new(&symbols, &view);
-        assert_eq!(go_target(" nt!KeBugCheckEx ", names), Ok(KERNEL_BASE + 0x1100));
+        assert_eq!(
+            go_target(" nt!KeBugCheckEx ", names),
+            Ok(KERNEL_BASE + 0x1100)
+        );
         assert_eq!(go_target("0x1234", names), Ok(0x1234));
-        assert_eq!(go_target("nt!Nope", names), Err(AddressError::Name(NameMiss::UnknownName)));
+        assert_eq!(
+            go_target("nt!Nope", names),
+            Err(AddressError::Name(NameMiss::UnknownName))
+        );
         assert_eq!(go_target("zz", names), Err(AddressError::NotHex));
     }
 
     fn trap_line(line: u32) -> BreakpointTarget {
-        BreakpointTarget::Source(crate::debugger::source_breakpoints::SourceTarget { file: "trap.asm".into(), line })
+        BreakpointTarget::Source(crate::debugger::source_breakpoints::SourceTarget {
+            file: "trap.asm".into(),
+            line,
+        })
     }
 
     /// No module of the owner's runs in another process.
     static NOWHERE: crate::debugger::windows::ModulesElsewhere =
-        crate::debugger::windows::ModulesElsewhere { names: Vec::new(), modules: Vec::new() };
+        crate::debugger::windows::ModulesElsewhere {
+            names: Vec::new(),
+            modules: Vec::new(),
+        };
 
     /// A pause's modules: `symbols`, and nothing in other processes.
     fn only(symbols: &crate::debugger::inspect::SymbolIndex) -> BreakpointModules<'_> {
-        BreakpointModules { index: symbols, elsewhere: &NOWHERE }
+        BreakpointModules {
+            index: symbols,
+            elsewhere: &NOWHERE,
+        }
     }
 
     /// F2 on the code a source breakpoint resolved to removes that source
@@ -3140,11 +3575,21 @@ mod name_tests {
         let elsewhere = KERNEL_BASE + 0x1100;
         assert_eq!(
             toggled(&targets, elsewhere, Some(only(&symbols)), &view),
-            [trap_line(100), BreakpointTarget::Address(CodeBreakpoint::Linear(elsewhere))]
+            [
+                trap_line(100),
+                BreakpointTarget::Address(CodeBreakpoint::Linear(elsewhere))
+            ]
         );
         let address = [BreakpointTarget::Address(CodeBreakpoint::Linear(elsewhere))];
-        assert_eq!(toggled(&address, elsewhere, Some(only(&symbols)), &view), []);
-        assert_eq!(toggled(&targets, at_line, None, &view).len(), 2, "without a pause nothing resolves");
+        assert_eq!(
+            toggled(&address, elsewhere, Some(only(&symbols)), &view),
+            []
+        );
+        assert_eq!(
+            toggled(&targets, at_line, None, &view).len(),
+            2,
+            "without a pause nothing resolves"
+        );
     }
 
     /// The code pane brings a place into view once: a new pause, step,
@@ -3153,16 +3598,34 @@ mod name_tests {
     #[test]
     fn the_code_pane_follows_each_new_place_once() {
         let mut picks = CodePicks::of(&DebuggerPane::default());
-        let at_rip = CodePlace { view: CodeView::Source, address: KERNEL_BASE + 0x1040, line: Some(100) };
+        let at_rip = CodePlace {
+            view: CodeView::Source,
+            address: KERNEL_BASE + 0x1040,
+            line: Some(100),
+        };
         assert!(picks.follow(at_rip), "a new pause");
         assert!(!picks.follow(at_rip), "the owner scrolls freely after");
-        let stepped = CodePlace { address: KERNEL_BASE + 0x1050, line: Some(104), ..at_rip };
+        let stepped = CodePlace {
+            address: KERNEL_BASE + 0x1050,
+            line: Some(104),
+            ..at_rip
+        };
         assert!(picks.follow(stepped), "a step");
-        let disassembly = CodePlace { view: CodeView::Disassembly, line: None, ..stepped };
-        assert!(picks.follow(disassembly), "the other view brings it into view");
+        let disassembly = CodePlace {
+            view: CodeView::Disassembly,
+            line: None,
+            ..stepped
+        };
+        assert!(
+            picks.follow(disassembly),
+            "the other view brings it into view"
+        );
         let mut pane = DebuggerPane::default();
         picks.keep(&mut pane);
-        assert!(!CodePicks::of(&pane).follow(disassembly), "kept from one frame to the next");
+        assert!(
+            !CodePicks::of(&pane).follow(disassembly),
+            "kept from one frame to the next"
+        );
     }
 
     /// A source breakpoint's row names where it resolved, and says when the
@@ -3180,12 +3643,24 @@ mod name_tests {
             resolutions: &resolved,
             available: true,
         };
-        assert_eq!(target_place(&trap_line(100), &list), "ntoskrnl!KiSystemCall64");
-        assert_eq!(target_place(&trap_line(101), &list), "ntoskrnl!KiSystemCall64+0x10 · line 104 (101 has no code)");
+        assert_eq!(
+            target_place(&trap_line(100), &list),
+            "ntoskrnl!KiSystemCall64"
+        );
+        assert_eq!(
+            target_place(&trap_line(101), &list),
+            "ntoskrnl!KiSystemCall64+0x10 · line 104 (101 has no code)"
+        );
         assert_eq!(target_place(&trap_line(200), &list), PENDING_NO_LINE);
         let unresolved = Resolutions::of(&targets, None, &view);
-        let before_a_pause = BreakpointList { resolutions: &unresolved, ..list };
-        assert_eq!(target_place(&trap_line(100), &before_a_pause), PENDING_NO_PAUSE);
+        let before_a_pause = BreakpointList {
+            resolutions: &unresolved,
+            ..list
+        };
+        assert_eq!(
+            target_place(&trap_line(100), &before_a_pause),
+            PENDING_NO_PAUSE
+        );
     }
 }
 
@@ -3204,7 +3679,11 @@ fn layouts_line(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
         ui.label(RichText::new(through).small().color(TEXT_MUTED));
     }
     if let Some(vmcs) = snapshot.vmcs {
-        ui.label(RichText::new(vmx_guest_label(vmcs)).small().color(TEXT_MUTED));
+        ui.label(
+            RichText::new(vmx_guest_label(vmcs))
+                .small()
+                .color(TEXT_MUTED),
+        );
     }
 }
 
@@ -3467,7 +3946,11 @@ fn walk(keys: ListKeys, from: Option<usize>, rows: usize) -> Walk {
             Some(KeyRow::Moved(to.min(last)))
         }
     };
-    let open = if keys.open { key.map(KeyRow::row) } else { None };
+    let open = if keys.open {
+        key.map(KeyRow::row)
+    } else {
+        None
+    };
     Walk { key, open }
 }
 
@@ -3592,7 +4075,9 @@ where
                 *cursor = Some(parent);
                 walked.key = Some(KeyRow::Moved(parent));
             }
-            (Some(Branch::Under(_) | Branch::Leaf), true) | (Some(Branch::Leaf), false) | (None, _) => {}
+            (Some(Branch::Under(_) | Branch::Leaf), true)
+            | (Some(Branch::Leaf), false)
+            | (None, _) => {}
         }
     }
     if let Some(opened) = walked.open {
@@ -3610,12 +4095,21 @@ where
 
 /// `pane_card`, outlined in cyan while it is `keyed`: the card the keys move
 /// in.
-fn keyed_pane_card<H, B>(ui: &mut egui::Ui, room: Room, title: Title<'_>, keyed: bool, header: H, body: B)
-where
+fn keyed_pane_card<H, B>(
+    ui: &mut egui::Ui,
+    room: Room,
+    title: Title<'_>,
+    keyed: bool,
+    header: H,
+    body: B,
+) where
     H: FnOnce(&mut egui::Ui),
     B: FnOnce(&mut egui::Ui),
 {
-    let card = ui.scope(|ui| pane_card(ui, room, title, header, body)).response.rect;
+    let card = ui
+        .scope(|ui| pane_card(ui, room, title, header, body))
+        .response
+        .rect;
     if keyed {
         ui.painter().rect_stroke(
             card,
@@ -3654,11 +4148,20 @@ fn kernel_page(
     let picked_name = pane
         .selected_kernel_module
         .and_then(|base| listing.modules.iter().find(|module| module.base == base))
-        .map(|module| module.name.clone().unwrap_or_else(|| format!("{:X}", module.base)));
+        .map(|module| {
+            module
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{:X}", module.base))
+        });
     // Read before the header's field takes the filter for this frame.
     let detail_filter = pane.export_filter.to_lowercase();
     let module_card = ModuleCard {
-        answer: module_answer(listing.picked.as_ref(), pane.selected_kernel_module, pane.kernel_detail),
+        answer: module_answer(
+            listing.picked.as_ref(),
+            pane.selected_kernel_module,
+            pane.kernel_detail,
+        ),
         has_pick: pane.selected_kernel_module.is_some(),
         filter: &detail_filter,
         // The kernel half is mapped alike in every address space.
@@ -3716,7 +4219,14 @@ fn kernel_page(
                 );
             },
             |ui| {
-                module_detail_body(ui, module_card, states, keyed_rows.detail, &mut pane.folded_imports, action);
+                module_detail_body(
+                    ui,
+                    module_card,
+                    states,
+                    keyed_rows.detail,
+                    &mut pane.folded_imports,
+                    action,
+                );
             },
         );
     };
@@ -3730,7 +4240,12 @@ fn kernel_page(
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 list_card(ui, Room::Fixed(egui::vec2(left, page.y)), &mut *action);
-                match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_MODULE_LIST) {
+                match splitter(
+                    ui,
+                    egui::vec2(gap, page.y),
+                    SplitAxis::Columns,
+                    RESIZE_MODULE_LIST,
+                ) {
                     SplitterMove::Still => {}
                     SplitterMove::Dragged(delta) => {
                         moved = Some(resized(share, delta, page.x, gap, SPLIT_MIN));
@@ -3777,7 +4292,9 @@ fn kernel_page(
         pane.detail_cursor = None;
         pane.folded_imports.clear();
         if !matches!(action, Some(DebuggerAction::OpenModule(_))) {
-            *action = Some(DebuggerAction::ShowSystem(DebuggerTab::KernelModules.system_view(pane)));
+            *action = Some(DebuggerAction::ShowSystem(
+                DebuggerTab::KernelModules.system_view(pane),
+            ));
         }
     }
 }
@@ -3805,8 +4322,12 @@ impl ModuleCard<'_> {
                 Some(modules.iter().map(|module| module.functions.len()).sum())
             }
             PickedDetail::Sections(SectionsRead::HeaderUnreadable)
-            | PickedDetail::Exports(ExportRead::NoTable | ExportRead::NotPe | ExportRead::Unreadable)
-            | PickedDetail::Imports(ImportRead::NoTable | ImportRead::NotPe | ImportRead::Unreadable)
+            | PickedDetail::Exports(
+                ExportRead::NoTable | ExportRead::NotPe | ExportRead::Unreadable,
+            )
+            | PickedDetail::Imports(
+                ImportRead::NoTable | ImportRead::NotPe | ImportRead::Unreadable,
+            )
             | PickedDetail::Symbols(_) => None,
         }
     }
@@ -3925,7 +4446,11 @@ fn module_detail_rows(card: ModuleCard<'_>, folds: &Folds<'_>) -> Vec<DetailRow>
                         open: RowOpen::Fold(Fold::ImportGroup(index)),
                         branch: Branch::Parent(Fold::ImportGroup(index)),
                     },
-                    ImportLine::Function { group, function, parent } => DetailRow {
+                    ImportLine::Function {
+                        group,
+                        function,
+                        parent,
+                    } => DetailRow {
                         open: opens(modules[group].functions[function].bound),
                         branch: Branch::Under(parent),
                     },
@@ -3959,7 +4484,10 @@ fn holds_ignoring_case(text: &str, filter: &str) -> bool {
 /// `filter`.
 fn export_matches(export: &PeExport, filter: &str) -> bool {
     filter.is_empty()
-        || export.name.as_deref().is_some_and(|name| holds_ignoring_case(name, filter))
+        || export
+            .name
+            .as_deref()
+            .is_some_and(|name| holds_ignoring_case(name, filter))
         || match &export.target {
             ExportTarget::Forwarded(to) => holds_ignoring_case(to, filter),
             ExportTarget::Rva(_) => false,
@@ -3989,10 +4517,22 @@ fn module_detail_header(
             ui,
             detail,
             &[
-                Segment { value: ModuleDetail::Sections, label: "Sections" },
-                Segment { value: ModuleDetail::Exports, label: "Exports" },
-                Segment { value: ModuleDetail::Imports, label: "Imports" },
-                Segment { value: ModuleDetail::Symbols, label: "Symbols" },
+                Segment {
+                    value: ModuleDetail::Sections,
+                    label: "Sections",
+                },
+                Segment {
+                    value: ModuleDetail::Exports,
+                    label: "Exports",
+                },
+                Segment {
+                    value: ModuleDetail::Imports,
+                    label: "Imports",
+                },
+                Segment {
+                    value: ModuleDetail::Symbols,
+                    label: "Symbols",
+                },
             ],
         );
         match detail {
@@ -4038,7 +4578,10 @@ fn module_detail_body(
             section_rows(ui, map, card.opener, key, action);
         }
         PickedDetail::Sections(SectionsRead::HeaderUnreadable) => {
-            muted(ui, "Its headers are paged out, so its sections cannot be read.");
+            muted(
+                ui,
+                "Its headers are paged out, so its sections cannot be read.",
+            );
         }
         PickedDetail::Exports(ExportRead::Listed(exports)) => {
             export_rows(ui, picked.base, exports, card, key, action);
@@ -4047,12 +4590,16 @@ fn module_detail_body(
         PickedDetail::Exports(ExportRead::NotPe) | PickedDetail::Imports(ImportRead::NotPe) => {
             muted(ui, "Its headers do not read as a PE image.");
         }
-        PickedDetail::Exports(ExportRead::Unreadable) => muted(ui, "Its export table is paged out."),
+        PickedDetail::Exports(ExportRead::Unreadable) => {
+            muted(ui, "Its export table is paged out.")
+        }
         PickedDetail::Imports(ImportRead::Listed(modules)) => {
             import_rows(ui, picked.base, modules, card, key, imports_shut, action);
         }
         PickedDetail::Imports(ImportRead::NoTable) => muted(ui, "It imports nothing."),
-        PickedDetail::Imports(ImportRead::Unreadable) => muted(ui, "Its import table is paged out."),
+        PickedDetail::Imports(ImportRead::Unreadable) => {
+            muted(ui, "Its import table is paged out.")
+        }
         PickedDetail::Symbols(identity) => module_symbols_body(ui, identity, states.view, action),
     }
 }
@@ -4111,13 +4658,21 @@ fn driver_rows(
             skip_row(ui);
             continue;
         }
-        let name_color = if driver.flagged { ACCENT_AMBER } else { TEXT_PRIMARY };
+        let name_color = if driver.flagged {
+            ACCENT_AMBER
+        } else {
+            TEXT_PRIMARY
+        };
         let module = match (&driver.module_name, driver.module) {
             (Some(name), _) => name.clone(),
             (None, Some(_)) => "(unnamed)".to_owned(),
             (None, None) => "no module".to_owned(),
         };
-        let module_color = if driver.module.is_none() { ACCENT_RED } else { TEXT_MUTED };
+        let module_color = if driver.module.is_none() {
+            ACCENT_RED
+        } else {
+            TEXT_MUTED
+        };
         let name = if driver.in_namespace {
             driver.name.clone()
         } else {
@@ -4129,8 +4684,20 @@ fn driver_rows(
             Cell::right(driver.device_count.to_string(), TEXT_MUTED, 7),
         ];
         let picked_now = *picked == Some(driver.driver_object) || key.is_some_and(|key| key.at(n));
-        let tone = if picked_now { Tone::Selected } else { Tone::striped(n) };
-        let response = list_row(ui, 0.0, &cells, tone, RowSense::Pick { selected: picked_now });
+        let tone = if picked_now {
+            Tone::Selected
+        } else {
+            Tone::striped(n)
+        };
+        let response = list_row(
+            ui,
+            0.0,
+            &cells,
+            tone,
+            RowSense::Pick {
+                selected: picked_now,
+            },
+        );
         follow_key(&response, key, n);
         let response = response.on_hover_text(
             "Click to see its dispatch table and devices; double-click to show its module.",
@@ -4224,9 +4791,10 @@ fn driver_detail_rows(answer: Option<&PickedDriver>) -> Vec<DetailRow> {
             .iter()
             .map(|entry| DetailRow::leaf(dispatch_open(entry)))
             .collect(),
-        DriverShown::Devices(rows) => {
-            rows.iter().map(|_| DetailRow::leaf(RowOpen::Nothing)).collect()
-        }
+        DriverShown::Devices(rows) => rows
+            .iter()
+            .map(|_| DetailRow::leaf(RowOpen::Nothing))
+            .collect(),
     }
 }
 
@@ -4249,8 +4817,14 @@ fn driver_detail_header(ui: &mut egui::Ui, title: Title<'_>, detail: &mut Driver
             ui,
             detail,
             &[
-                Segment { value: DriverDetail::Dispatch, label: "Dispatch" },
-                Segment { value: DriverDetail::Devices, label: "Devices" },
+                Segment {
+                    value: DriverDetail::Dispatch,
+                    label: "Dispatch",
+                },
+                Segment {
+                    value: DriverDetail::Devices,
+                    label: "Devices",
+                },
             ],
         );
     });
@@ -4288,7 +4862,9 @@ fn site_text(site: PointerSite, module_name: impl Fn(u64) -> String) -> (String,
     match site {
         PointerSite::OwnImage => ("own image".to_owned(), TEXT_PRIMARY),
         PointerSite::KernelDefault => ("kernel default".to_owned(), TEXT_MUTED),
-        PointerSite::InModule { base, off } => (format!("{}+0x{off:X}", module_name(base)), ACCENT_CYAN),
+        PointerSite::InModule { base, off } => {
+            (format!("{}+0x{off:X}", module_name(base)), ACCENT_CYAN)
+        }
         PointerSite::NoModule => ("no module".to_owned(), ACCENT_RED),
     }
 }
@@ -4326,7 +4902,13 @@ fn dispatch_rows(
             Cell::left(address, TEXT_MUTED, 16),
             Cell::fill(site, color),
         ];
-        let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+        let response = list_row(
+            ui,
+            0.0,
+            &cells,
+            keyed_tone(key, n),
+            RowSense::Pick { selected: false },
+        );
         follow_key(&response, key, n);
         let opener = Opener::Live;
         let address = match dispatch_open(entry) {
@@ -4350,13 +4932,22 @@ fn device_rows(ui: &mut egui::Ui, rows: &[DeviceRow], key: Option<KeyRow>) {
             skip_row(ui);
             continue;
         }
-        let name = device.name.clone().unwrap_or_else(|| "(unnamed)".to_owned());
+        let name = device
+            .name
+            .clone()
+            .unwrap_or_else(|| "(unnamed)".to_owned());
         let cells = [
             Cell::left(name, TEXT_PRIMARY, 32),
             Cell::left(device.device_type.clone(), ACCENT_CYAN, 18),
             Cell::fill(format!("char 0x{:X}", device.characteristics), TEXT_MUTED),
         ];
-        let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+        let response = list_row(
+            ui,
+            0.0,
+            &cells,
+            keyed_tone(key, n),
+            RowSense::Pick { selected: false },
+        );
         follow_key(&response, key, n);
         for driver in &device.attached_above {
             ui.label(mono(format!("    attached above: {driver}")).color(TEXT_MUTED));
@@ -4390,9 +4981,18 @@ fn drivers_page(
     let keyed = keys.map(|_| pane.list_focus);
     let picked_name = pane
         .selected_driver
-        .and_then(|addr| listing.drivers.iter().find(|driver| driver.driver_object == addr))
+        .and_then(|addr| {
+            listing
+                .drivers
+                .iter()
+                .find(|driver| driver.driver_object == addr)
+        })
         .map(|driver| driver.name.clone());
-    let answer = driver_answer(listing.picked.as_ref(), pane.selected_driver, pane.driver_detail);
+    let answer = driver_answer(
+        listing.picked.as_ref(),
+        pane.selected_driver,
+        pane.driver_detail,
+    );
     let has_pick = pane.selected_driver.is_some();
     let count = match answer.map(|picked| &picked.shown) {
         Some(DriverShown::Dispatch(entries)) => Some(entries.len()),
@@ -4420,7 +5020,13 @@ fn drivers_page(
                 header_row(ui, 0.0, &driver_columns());
             },
             |ui| {
-                driver_rows(ui, &shown, &mut pane.selected_driver, keyed_rows.list, action);
+                driver_rows(
+                    ui,
+                    &shown,
+                    &mut pane.selected_driver,
+                    keyed_rows.list,
+                    action,
+                );
             },
         );
     };
@@ -4448,14 +5054,23 @@ fn drivers_page(
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 list_card(ui, Room::Fixed(egui::vec2(left, page.y)), &mut *action);
-                match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_MODULE_LIST) {
+                match splitter(
+                    ui,
+                    egui::vec2(gap, page.y),
+                    SplitAxis::Columns,
+                    RESIZE_MODULE_LIST,
+                ) {
                     SplitterMove::Still => {}
                     SplitterMove::Dragged(delta) => {
                         moved = Some(resized(share, delta, page.x, gap, SPLIT_MIN));
                     }
                     SplitterMove::Reset => moved = Some(PROCESS_LIST_SHARE),
                 }
-                detail_card(ui, Room::Fixed(egui::vec2(page.x - gap - left, page.y)), &mut *action);
+                detail_card(
+                    ui,
+                    Room::Fixed(egui::vec2(page.x - gap - left, page.y)),
+                    &mut *action,
+                );
             });
             if let Some(share) = moved {
                 pane.split.drivers = share;
@@ -4489,7 +5104,9 @@ fn drivers_page(
     if (pane.selected_driver, pane.driver_detail) != picked_before {
         pane.detail_cursor = None;
         if !matches!(action, Some(DebuggerAction::OpenModule(_))) {
-            *action = Some(DebuggerAction::ShowSystem(DebuggerTab::Drivers.system_view(pane)));
+            *action = Some(DebuggerAction::ShowSystem(
+                DebuggerTab::Drivers.system_view(pane),
+            ));
         }
     }
 }
@@ -4559,11 +5176,18 @@ fn service_view(service: &SsdtService, names: Namer<'_>) -> ServiceView {
             .map(|function| function.name),
         PointerSite::InModule { .. } | PointerSite::KernelDefault | PointerSite::NoModule => None,
     };
-    let name = service.stub_name.clone().or_else(|| symbol.clone()).unwrap_or_default();
+    let name = service
+        .stub_name
+        .clone()
+        .or_else(|| symbol.clone())
+        .unwrap_or_default();
     let module = service.module_name.as_deref().unwrap_or("kernel");
-    let rerouted = symbol
-        .as_deref()
-        .filter(|symbol| service.stub_name.as_deref().is_some_and(|stub| stub != *symbol));
+    let rerouted = symbol.as_deref().filter(|symbol| {
+        service
+            .stub_name
+            .as_deref()
+            .is_some_and(|stub| stub != *symbol)
+    });
     let shown = |target: String, color: egui::Color32| ServiceView {
         name: name.clone(),
         target,
@@ -4574,7 +5198,10 @@ fn service_view(service: &SsdtService, names: Namer<'_>) -> ServiceView {
             Some(landing) => format!("{landing} {:016X}", jump.target),
             None => format!("{:016X}, in no module", jump.target),
         };
-        return shown(format!("{module}  · inline hook, jumps to {landing}"), ACCENT_RED);
+        return shown(
+            format!("{module}  · inline hook, jumps to {landing}"),
+            ACCENT_RED,
+        );
     }
     match service.site {
         PointerSite::OwnImage => match rerouted {
@@ -4637,7 +5264,13 @@ fn ssdt_rows(
             Cell::left(format!("{:016X}", service.routine), TEXT_MUTED, 16),
             Cell::fill(shown.view.target.clone(), shown.view.color),
         ];
-        let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+        let response = list_row(
+            ui,
+            0.0,
+            &cells,
+            keyed_tone(key, n),
+            RowSense::Pick { selected: false },
+        );
         follow_key(&response, key, n);
         click_opens(response, Opener::Live, ssdt_open(service), "", action);
     }
@@ -4646,7 +5279,11 @@ fn ssdt_rows(
 /// Under the SSDT title: how the shown table's descriptor was found, and a
 /// table that lies outside its owner (swapped whole), in red.
 fn ssdt_table_lines(ui: &mut egui::Ui, table: &ServiceTableRead) {
-    ui.label(RichText::new(table.source.label()).small().color(TEXT_MUTED));
+    ui.label(
+        RichText::new(table.source.label())
+            .small()
+            .color(TEXT_MUTED),
+    );
     match table.place {
         TablePlace::InOwner => {}
         TablePlace::Outside => {
@@ -4732,8 +5369,14 @@ fn ssdt_page(
                 ui.horizontal_wrapped(|ui| {
                     title_label(ui, title.text, title.count);
                     let tables = [
-                        Segment { value: SsdtTable::Kernel, label: "Kernel" },
-                        Segment { value: SsdtTable::Gui, label: "GUI" },
+                        Segment {
+                            value: SsdtTable::Kernel,
+                            label: "Kernel",
+                        },
+                        Segment {
+                            value: SsdtTable::Gui,
+                            label: "GUI",
+                        },
                     ];
                     if segmented(ui, &mut pane.ssdt_table, &tables) {
                         pane.detail_cursor = None;
@@ -4824,7 +5467,11 @@ fn section_rows(
             RegionOwner::Stack { .. } | RegionOwner::Private => "(other)",
         };
         let executable = region.access.is_some_and(|access| access.executable);
-        let color = if executable { ACCENT_CYAN } else { TEXT_PRIMARY };
+        let color = if executable {
+            ACCENT_CYAN
+        } else {
+            TEXT_PRIMARY
+        };
         let fraction = region.resident_pages as f32 / region.total_pages.max(1) as f32;
         let gauge = if executable {
             Cell::gauge_colored(fraction, MEMORY_GAUGE_CHARS, ACCENT_CYAN)
@@ -4843,7 +5490,13 @@ fn section_rows(
             gauge,
             Cell::fill(region_access_text(region), color),
         ];
-        let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+        let response = list_row(
+            ui,
+            0.0,
+            &cells,
+            keyed_tone(key, n),
+            RowSense::Pick { selected: false },
+        );
         follow_key(&response, key, n);
         click_opens(response, opener, Some(region.start), "", action);
     }
@@ -4873,7 +5526,11 @@ fn export_rows(
     action: &mut Option<DebuggerAction>,
 ) {
     let mut any = false;
-    for (n, export) in exports.iter().filter(|export| export_matches(export, card.filter)).enumerate() {
+    for (n, export) in exports
+        .iter()
+        .filter(|export| export_matches(export, card.filter))
+        .enumerate()
+    {
         any = true;
         if culled(ui, key, n) {
             skip_row(ui);
@@ -4892,12 +5549,21 @@ fn export_rows(
             Cell::right(export.ordinal.to_string(), TEXT_MUTED, EXPORT_ORDINAL_CHARS),
             Cell::fill(label, TEXT_PRIMARY),
         ];
-        let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+        let response = list_row(
+            ui,
+            0.0,
+            &cells,
+            keyed_tone(key, n),
+            RowSense::Pick { selected: false },
+        );
         follow_key(&response, key, n);
         if let Some(at) = target {
             response.context_menu(|ui| {
                 if ui.button(format!("{REFERENCES_TO} {name}")).clicked() {
-                    *action = Some(DebuggerAction::FindReferences(address_target(at, name.to_owned())));
+                    *action = Some(DebuggerAction::FindReferences(address_target(
+                        at,
+                        name.to_owned(),
+                    )));
                     ui.close();
                 }
             });
@@ -4932,10 +5598,18 @@ fn import_columns() -> [Cell; 3] {
 enum ImportLine {
     /// The module imported from, by its index in the import table: how many
     /// of its functions are listed, and whether they show.
-    Group { index: usize, listed: usize, open: bool },
+    Group {
+        index: usize,
+        listed: usize,
+        open: bool,
+    },
     /// Function `function` of the group at `group`, under the group's row
     /// `parent`.
-    Function { group: usize, function: usize, parent: usize },
+    Function {
+        group: usize,
+        function: usize,
+        parent: usize,
+    },
     /// The group's functions past a paged-out entry, under its row `parent`.
     PagedOut { group: usize, parent: usize },
 }
@@ -4953,22 +5627,37 @@ fn import_matches(import: &PeImport, filter: &str) -> bool {
 /// The rows of `modules`' imports the card lists: each module imported from
 /// whose name, or one of whose functions, holds the lowercase `filter`, its
 /// listed functions under it unless it is folded in `shut`.
-fn import_lines(modules: &[ImportedModule], filter: &str, shut: &BTreeSet<usize>) -> Vec<ImportLine> {
+fn import_lines(
+    modules: &[ImportedModule],
+    filter: &str,
+    shut: &BTreeSet<usize>,
+) -> Vec<ImportLine> {
     let mut lines = Vec::new();
     for (index, module) in modules.iter().enumerate() {
         let whole = filter.is_empty()
-            || module.name.as_deref().is_some_and(|name| holds_ignoring_case(name, filter));
+            || module
+                .name
+                .as_deref()
+                .is_some_and(|name| holds_ignoring_case(name, filter));
         let open = !shut.contains(&index);
         let parent = lines.len();
         // The group's row goes first; its count is known once its functions
         // are matched.
-        lines.push(ImportLine::Group { index, listed: 0, open });
+        lines.push(ImportLine::Group {
+            index,
+            listed: 0,
+            open,
+        });
         let mut listed = 0;
         for (function, import) in module.functions.iter().enumerate() {
             if whole || import_matches(import, filter) {
                 listed += 1;
                 if open {
-                    lines.push(ImportLine::Function { group: index, function, parent });
+                    lines.push(ImportLine::Function {
+                        group: index,
+                        function,
+                        parent,
+                    });
                 }
             }
         }
@@ -4976,10 +5665,17 @@ fn import_lines(modules: &[ImportedModule], filter: &str, shut: &BTreeSet<usize>
             lines.truncate(parent);
             continue;
         }
-        lines[parent] = ImportLine::Group { index, listed, open };
+        lines[parent] = ImportLine::Group {
+            index,
+            listed,
+            open,
+        };
         if open {
             match module.end {
-                ThunksEnd::PagedOut => lines.push(ImportLine::PagedOut { group: index, parent }),
+                ThunksEnd::PagedOut => lines.push(ImportLine::PagedOut {
+                    group: index,
+                    parent,
+                }),
                 ThunksEnd::Terminated => {}
             }
         }
@@ -4991,7 +5687,9 @@ fn import_lines(modules: &[ImportedModule], filter: &str, shut: &BTreeSet<usize>
 fn module_named_at(named: &[WinModule], address: u64) -> Option<&str> {
     named
         .iter()
-        .find(|module| (module.base..module.base.saturating_add(u64::from(module.size))).contains(&address))
+        .find(|module| {
+            (module.base..module.base.saturating_add(u64::from(module.size))).contains(&address)
+        })
         .and_then(|module| module.name.as_deref())
 }
 
@@ -5022,16 +5720,28 @@ fn import_rows(
             continue;
         }
         match *line {
-            ImportLine::Group { index, listed, open } => {
+            ImportLine::Group {
+                index,
+                listed,
+                open,
+            } => {
                 let name = modules[index].name.as_deref().unwrap_or("(name paged out)");
                 let tone = if key.is_some_and(|key| key.at(n)) {
                     Tone::Selected
                 } else {
                     Tone::Plain
                 };
-                let cells = [Cell::fill(format!("{name}  {listed} functions"), TEXT_PRIMARY)];
-                let response =
-                    list_row(ui, TREE_INDENT, &cells, tone, RowSense::Pick { selected: open });
+                let cells = [Cell::fill(
+                    format!("{name}  {listed} functions"),
+                    TEXT_PRIMARY,
+                )];
+                let response = list_row(
+                    ui,
+                    TREE_INDENT,
+                    &cells,
+                    tone,
+                    RowSense::Pick { selected: open },
+                );
                 lead_chevron(ui, response.rect, open, TEXT_PRIMARY);
                 follow_key(&response, key, n);
                 if response
@@ -5041,7 +5751,9 @@ fn import_rows(
                     toggled = Some(index);
                 }
             }
-            ImportLine::Function { group, function, .. } => {
+            ImportLine::Function {
+                group, function, ..
+            } => {
                 let import = &modules[group].functions[function];
                 let name = match &import.name {
                     ImportName::Named { name, .. } => name.clone(),
@@ -5065,8 +5777,13 @@ fn import_rows(
                     Cell::left(name, TEXT_PRIMARY, IMPORT_NAME_CHARS),
                     Cell::fill(bound, TEXT_MUTED),
                 ];
-                let response =
-                    list_row(ui, TREE_INDENT, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+                let response = list_row(
+                    ui,
+                    TREE_INDENT,
+                    &cells,
+                    keyed_tone(key, n),
+                    RowSense::Pick { selected: false },
+                );
                 follow_key(&response, key, n);
                 click_opens(
                     response,
@@ -5110,10 +5827,12 @@ fn processes_page(
     pane: &mut DebuggerPane,
     action: &mut Option<DebuggerAction>,
 ) {
-    let chosen = listing
-        .modules
-        .as_ref()
-        .and_then(|modules| listing.processes.iter().find(|p| p.eprocess == modules.eprocess));
+    let chosen = listing.modules.as_ref().and_then(|modules| {
+        listing
+            .processes
+            .iter()
+            .find(|p| p.eprocess == modules.eprocess)
+    });
     let navigable = chosen.is_some_and(|process| process.current);
     // The chosen process's address space, for browsing it when it is not the
     // running one.
@@ -5182,7 +5901,10 @@ fn processes_page(
     let module_filter = pane.process_module_filter.to_lowercase();
     let module_card = ModuleCard {
         answer: module_answer(
-            listing.modules.as_ref().and_then(|modules| modules.picked.as_ref()),
+            listing
+                .modules
+                .as_ref()
+                .and_then(|modules| modules.picked.as_ref()),
             pane.selected_process_module,
             pane.process_module_detail,
         ),
@@ -5194,7 +5916,12 @@ fn processes_page(
     let module_name = pane
         .selected_process_module
         .and_then(|base| listed.iter().find(|module| module.base == base))
-        .map(|module| module.name.clone().unwrap_or_else(|| format!("{:X}", module.base)));
+        .map(|module| {
+            module
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{:X}", module.base))
+        });
     let module_title = Title {
         text: module_name.as_deref().unwrap_or("Module"),
         count: module_card.count(),
@@ -5212,7 +5939,14 @@ fn processes_page(
             room,
             process_title,
             keyed == Some(ListFocus::List),
-            |ui| process_header(ui, process_title, &mut pane.process_layout, &mut pane.list_filter),
+            |ui| {
+                process_header(
+                    ui,
+                    process_title,
+                    &mut pane.process_layout,
+                    &mut pane.list_filter,
+                )
+            },
             |ui| {
                 process_rows(
                     ui,
@@ -5227,25 +5961,33 @@ fn processes_page(
         );
     };
     // The picked module's card: under the modules, in the Modules view.
-    let mut module_card_drawn = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
-        keyed_pane_card(
-            ui,
-            room,
-            module_title,
-            keyed == Some(ListFocus::Module),
-            |ui| {
-                module_detail_header(
-                    ui,
-                    module_title,
-                    &mut pane.process_module_detail,
-                    &mut pane.process_module_filter,
-                );
-            },
-            |ui| {
-                module_detail_body(ui, module_card, states, keyed_rows.module, &mut pane.folded_imports, action);
-            },
-        );
-    };
+    let mut module_card_drawn =
+        |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+            keyed_pane_card(
+                ui,
+                room,
+                module_title,
+                keyed == Some(ListFocus::Module),
+                |ui| {
+                    module_detail_header(
+                        ui,
+                        module_title,
+                        &mut pane.process_module_detail,
+                        &mut pane.process_module_filter,
+                    );
+                },
+                |ui| {
+                    module_detail_body(
+                        ui,
+                        module_card,
+                        states,
+                        keyed_rows.module,
+                        &mut pane.folded_imports,
+                        action,
+                    );
+                },
+            );
+        };
     let mut detail_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
         keyed_pane_card(
             ui,
@@ -5296,7 +6038,12 @@ fn processes_page(
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 process_card(ui, Room::Fixed(egui::vec2(left, page.y)), &mut *action);
-                match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_PROCESS_LIST) {
+                match splitter(
+                    ui,
+                    egui::vec2(gap, page.y),
+                    SplitAxis::Columns,
+                    RESIZE_PROCESS_LIST,
+                ) {
                     SplitterMove::Still => {}
                     SplitterMove::Dragged(delta) => {
                         moved = Some(resized(share, delta, page.x, gap, SPLIT_MIN));
@@ -5375,9 +6122,9 @@ fn processes_page(
                 .find(|region| region.start == address)
                 .and_then(|region| match &region.owner {
                     RegionOwner::Section { base, .. } => Some(*base),
-                    RegionOwner::Header { .. } | RegionOwner::Stack { .. } | RegionOwner::Private => {
-                        None
-                    }
+                    RegionOwner::Header { .. }
+                    | RegionOwner::Stack { .. }
+                    | RegionOwner::Private => None,
                 })
         });
         if let Some(base) = section_owner {
@@ -5488,7 +6235,9 @@ fn process_keys(
     match pane.list_focus {
         ListFocus::List => {
             // The process picked, or the one shown before any pick.
-            let shown = pane.selected_process.or(chosen.map(|process| process.eprocess));
+            let shown = pane
+                .selected_process
+                .or(chosen.map(|process| process.eprocess));
             let at = shown.and_then(|eprocess| {
                 rows.iter()
                     .position(|row| listing.processes[row.index].eprocess == eprocess)
@@ -5569,7 +6318,10 @@ fn process_keys(
             let filter = pane.process_module_filter.to_lowercase();
             let card = ModuleCard {
                 answer: module_answer(
-                    listing.modules.as_ref().and_then(|modules| modules.picked.as_ref()),
+                    listing
+                        .modules
+                        .as_ref()
+                        .and_then(|modules| modules.picked.as_ref()),
                     pane.selected_process_module,
                     pane.process_module_detail,
                 ),
@@ -5661,7 +6413,10 @@ fn process_detail_rows(
 
 /// The memory map of the listing's chosen process, if it has been read.
 fn map_of(listing: &ProcessListing) -> Option<&MemoryMap> {
-    listing.modules.as_ref().and_then(|modules| modules.map.as_ref())
+    listing
+        .modules
+        .as_ref()
+        .and_then(|modules| modules.map.as_ref())
 }
 
 /// The right card's header: the Modules/Memory-map switch, the memory-map
@@ -5683,9 +6438,18 @@ fn right_card_header(
             ui,
             &mut chosen,
             &[
-                Segment { value: ProcessDetail::Modules, label: "Modules" },
-                Segment { value: ProcessDetail::MemoryMap, label: "Memory map" },
-                Segment { value: ProcessDetail::Threads, label: "Threads" },
+                Segment {
+                    value: ProcessDetail::Modules,
+                    label: "Modules",
+                },
+                Segment {
+                    value: ProcessDetail::MemoryMap,
+                    label: "Memory map",
+                },
+                Segment {
+                    value: ProcessDetail::Threads,
+                    label: "Threads",
+                },
             ],
         ) {
             *switch_to = Some(chosen);
@@ -5715,8 +6479,7 @@ fn right_card_header(
 fn draw_minimap(ui: &mut egui::Ui, map: &MemoryMap, minimap_click: &mut Option<u64>) {
     use crate::debugger::minimap;
     let width = ui.available_width();
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::click());
     let painter = ui.painter();
     painter.rect_filled(rect, 3.0, crate::shell::theme::BG_WELL);
     // The lanes drawn are the lanes a click is matched against.
@@ -5858,10 +6621,10 @@ fn region_access_text(region: &crate::debugger::memory_map::MapRegion) -> String
             }
             text
         }
-        None => region
-            .vad
-            .and_then(|info| info.protection)
-            .map_or_else(|| "—".to_owned(), |protection| protection.label().to_owned()),
+        None => region.vad.and_then(|info| info.protection).map_or_else(
+            || "—".to_owned(),
+            |protection| protection.label().to_owned(),
+        ),
     }
 }
 
@@ -5886,12 +6649,16 @@ fn memory_map_rows(
     // alike, in the order `process_detail_rows` lists them.
     let mut row = 0usize;
     let sections = |ui: &mut egui::Ui,
-                        regions: &[usize],
-                        row: &mut usize,
-                        scroll_to: &mut Option<u64>,
-                        action: &mut Option<DebuggerAction>| {
+                    regions: &[usize],
+                    row: &mut usize,
+                    scroll_to: &mut Option<u64>,
+                    action: &mut Option<DebuggerAction>| {
         for &index in regions {
-            let place = RowPlace { lead: TREE_INDENT, row: *row, key };
+            let place = RowPlace {
+                lead: TREE_INDENT,
+                row: *row,
+                key,
+            };
             region_row(ui, map, index, place, opener, scroll_to, action);
             *row += 1;
         }
@@ -5899,7 +6666,11 @@ fn memory_map_rows(
     for group in crate::debugger::memory_map::group(map) {
         match group {
             crate::debugger::memory_map::MapGroup::Region(index) => {
-                let place = RowPlace { lead: 0.0, row, key };
+                let place = RowPlace {
+                    lead: 0.0,
+                    row,
+                    key,
+                };
                 region_row(ui, map, index, place, opener, scroll_to, action);
                 row += 1;
             }
@@ -5957,8 +6728,13 @@ fn memory_map_rows(
                 } else {
                     Tone::Plain
                 };
-                let response =
-                    list_row(ui, TREE_INDENT, &cells, tone, RowSense::Pick { selected: open });
+                let response = list_row(
+                    ui,
+                    TREE_INDENT,
+                    &cells,
+                    tone,
+                    RowSense::Pick { selected: open },
+                );
                 lead_chevron(ui, response.rect, open, name_color);
                 follow_key(&response, key, module_row);
                 if *scroll_to == Some(first.start) {
@@ -6018,7 +6794,9 @@ fn region_row(
     let access_text = region_access_text(region);
     let (module, section) = match &region.owner {
         RegionOwner::Header { module, .. } => (module.as_str(), "headers".to_owned()),
-        RegionOwner::Section { module, section, .. } => (module.as_str(), section.clone()),
+        RegionOwner::Section {
+            module, section, ..
+        } => (module.as_str(), section.clone()),
         RegionOwner::Stack { tid } => ("", format!("stack · thread {tid}")),
         RegionOwner::Private => ("", "private".to_owned()),
     };
@@ -6029,7 +6807,11 @@ fn region_row(
     } else {
         TEXT_MUTED
     };
-    let module_color = if executable { ACCENT_CYAN } else { TEXT_PRIMARY };
+    let module_color = if executable {
+        ACCENT_CYAN
+    } else {
+        TEXT_PRIMARY
+    };
     let fraction = region.resident_pages as f32 / region.total_pages.max(1) as f32;
     let gauge = if executable {
         Cell::gauge_colored(fraction, MEMORY_GAUGE_CHARS, ACCENT_CYAN)
@@ -6091,9 +6873,8 @@ fn process_rows_shown(
     filter: &str,
 ) -> Vec<ShownProcess> {
     let filter = filter.to_lowercase();
-    let matches = |process: &WinProcess| {
-        filter.is_empty() || process.name.to_lowercase().contains(&filter)
-    };
+    let matches =
+        |process: &WinProcess| filter.is_empty() || process.name.to_lowercase().contains(&filter);
     match layout {
         ProcessLayout::List => processes
             .iter()
@@ -6179,13 +6960,27 @@ fn listed_modules(
 
 /// The Processes card's title, controls and column titles. The title shares
 /// the controls row (the card leaves it out), so the list keeps a row.
-fn process_header(ui: &mut egui::Ui, title: Title<'_>, layout: &mut ProcessLayout, filter: &mut String) {
+fn process_header(
+    ui: &mut egui::Ui,
+    title: Title<'_>,
+    layout: &mut ProcessLayout,
+    filter: &mut String,
+) {
     ui.horizontal_wrapped(|ui| {
         title_label(ui, title.text, title.count);
         segmented(
             ui,
             layout,
-            &[Segment { value: ProcessLayout::List, label: "List" }, Segment { value: ProcessLayout::Tree, label: "Tree" }],
+            &[
+                Segment {
+                    value: ProcessLayout::List,
+                    label: "List",
+                },
+                Segment {
+                    value: ProcessLayout::Tree,
+                    label: "Tree",
+                },
+            ],
         );
         filter_field(ui, filter);
     });
@@ -6231,7 +7026,11 @@ fn process_rows(
         }
         let process = &processes[shown.index];
         let selected = chosen.is_some_and(|c| c.eprocess == process.eprocess);
-        let name_color = if process.current { ACCENT_CYAN } else { TEXT_PRIMARY };
+        let name_color = if process.current {
+            ACCENT_CYAN
+        } else {
+            TEXT_PRIMARY
+        };
         let lead = shown.depth as f32 * TREE_INDENT + PROCESS_LEAD;
         let cells = [
             Cell::fill(process.name.as_str(), name_color),
@@ -6425,20 +7224,31 @@ fn thread_rows(
         } else {
             format!("{:016X}", thread.start)
         };
-        let stack = thread
-            .stack
-            .map_or_else(String::new, |stack| format!("{:X}–{:X}", stack.start, stack.end));
+        let stack = thread.stack.map_or_else(String::new, |stack| {
+            format!("{:X}–{:X}", stack.start, stack.end)
+        });
         let tail = if thread.uses_fibers { "fibres" } else { "" };
-        let tail_color = if thread.uses_fibers { ACCENT_AMBER } else { TEXT_MUTED };
+        let tail_color = if thread.uses_fibers {
+            ACCENT_AMBER
+        } else {
+            TEXT_MUTED
+        };
         let cells = [
             Cell::right(thread.tid.to_string(), TEXT_PRIMARY, THREAD_TID_CHARS),
             Cell::left(start, TEXT_MUTED, THREAD_START_CHARS),
             Cell::left(stack, TEXT_MUTED, THREAD_STACK_CHARS),
             Cell::fill(tail, tail_color),
         ];
-        let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+        let response = list_row(
+            ui,
+            0.0,
+            &cells,
+            keyed_tone(key, n),
+            RowSense::Pick { selected: false },
+        );
         follow_key(&response, key, n);
-        let response = response.on_hover_text("Double-click to see the CPU tab from inside this thread.");
+        let response =
+            response.on_hover_text("Double-click to see the CPU tab from inside this thread.");
         // A triple holds the double-click (see `process_rows`).
         if response.double_clicked() || response.triple_clicked() {
             *action = Some(DebuggerAction::View(ViewContext::Thread {
@@ -6478,14 +7288,32 @@ mod tests {
         ];
         let tree = crate::debugger::windows::process_tree(&processes);
         let names = |rows: Vec<ShownProcess>| -> Vec<&str> {
-            rows.iter().map(|row| processes[row.index].name.as_str()).collect()
+            rows.iter()
+                .map(|row| processes[row.index].name.as_str())
+                .collect()
         };
         assert_eq!(
-            names(process_rows_shown(&processes, &tree, ProcessLayout::Tree, "WMI")),
-            ["System", "smss.exe", "winlogon.exe", "services.exe", "wmiprvse.exe"]
+            names(process_rows_shown(
+                &processes,
+                &tree,
+                ProcessLayout::Tree,
+                "WMI"
+            )),
+            [
+                "System",
+                "smss.exe",
+                "winlogon.exe",
+                "services.exe",
+                "wmiprvse.exe"
+            ]
         );
         assert_eq!(
-            names(process_rows_shown(&processes, &tree, ProcessLayout::List, "wmi")),
+            names(process_rows_shown(
+                &processes,
+                &tree,
+                ProcessLayout::List,
+                "wmi"
+            )),
             ["wmiprvse.exe"]
         );
         assert_eq!(
@@ -6500,18 +7328,39 @@ mod tests {
     fn the_layout_is_decided_by_the_room_the_page_has() {
         // A desktop window: wide and tall enough for four useful panes.
         assert_eq!(Fit::of(egui::vec2(1400.0, 900.0)), Fit::Grid);
-        assert_eq!(Fit::of(egui::vec2(GRID_MIN_WIDTH, GRID_MIN_HEIGHT)), Fit::Grid);
+        assert_eq!(
+            Fit::of(egui::vec2(GRID_MIN_WIDTH, GRID_MIN_HEIGHT)),
+            Fit::Grid
+        );
         // A landscape phone: wide, but short — the grid would squeeze every
         // pane to a few rows, so the page scrolls in two columns.
-        assert_eq!(Fit::of(egui::vec2(1000.0, 330.0)), Fit::Scrolling(Columns::Two));
+        assert_eq!(
+            Fit::of(egui::vec2(1000.0, 330.0)),
+            Fit::Scrolling(Columns::Two)
+        );
         // The same short height on a wide desktop window gets the same.
-        assert_eq!(Fit::of(egui::vec2(1800.0, 330.0)), Fit::Scrolling(Columns::Two));
+        assert_eq!(
+            Fit::of(egui::vec2(1800.0, 330.0)),
+            Fit::Scrolling(Columns::Two)
+        );
         // A portrait phone, and a tall but narrow window.
-        assert_eq!(Fit::of(egui::vec2(400.0, 800.0)), Fit::Scrolling(Columns::One));
-        assert_eq!(Fit::of(egui::vec2(700.0, 1400.0)), Fit::Scrolling(Columns::One));
+        assert_eq!(
+            Fit::of(egui::vec2(400.0, 800.0)),
+            Fit::Scrolling(Columns::One)
+        );
+        assert_eq!(
+            Fit::of(egui::vec2(700.0, 1400.0)),
+            Fit::Scrolling(Columns::One)
+        );
         // One point short of either threshold leaves the grid.
-        assert_ne!(Fit::of(egui::vec2(GRID_MIN_WIDTH - 1.0, GRID_MIN_HEIGHT)), Fit::Grid);
-        assert_ne!(Fit::of(egui::vec2(GRID_MIN_WIDTH, GRID_MIN_HEIGHT - 1.0)), Fit::Grid);
+        assert_ne!(
+            Fit::of(egui::vec2(GRID_MIN_WIDTH - 1.0, GRID_MIN_HEIGHT)),
+            Fit::Grid
+        );
+        assert_ne!(
+            Fit::of(egui::vec2(GRID_MIN_WIDTH, GRID_MIN_HEIGHT - 1.0)),
+            Fit::Grid
+        );
     }
 
     /// A narrow pane gives the bytes up before it gives up the opcode: the
@@ -6533,16 +7382,24 @@ mod tests {
     /// A live snapshot of a long-mode machine, and one looking from a thread
     /// whose saved code segment is `cs`, in the address space at 0x3000.
     fn snapshots(cs: u16) -> (DebugSnapshot, DebugSnapshot) {
-        use crate::debugger::inspect::{read_snapshot, ViewRequest};
-        use crate::debugger::threads::{decode_trap_frame, TRAP_FRAME_BYTES};
-        use crate::debugger::windows::{ThreadView, WindowsDiscovery};
         use rusty_box::cpu::CpuSetupMode;
         use rusty_box::emulator::{Emulator, EmulatorConfig};
+
+        use crate::debugger::inspect::{ViewRequest, read_snapshot};
+        use crate::debugger::threads::{TRAP_FRAME_BYTES, decode_trap_frame};
+        use crate::debugger::windows::{ThreadView, WindowsDiscovery};
         let mut machine =
             Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
                 .expect("machine");
         let read = |machine: &mut Emulator| {
-            read_snapshot(machine, &ViewRequest::default(), &[], &mut WindowsDiscovery::default(), None, None)
+            read_snapshot(
+                machine,
+                &ViewRequest::default(),
+                &[],
+                &mut WindowsDiscovery::default(),
+                None,
+                None,
+            )
         };
         let live = read(&mut machine);
         let mut viewed = read(&mut machine);
@@ -6568,7 +7425,11 @@ mod tests {
         viewed.cpus[0].code_size = CodeSize::Bits32;
         assert_eq!(pane_code_size(&viewed), CodeSize::Bits64, "a 64-bit thread");
         let (_, wow64) = snapshots(WOW64_CODE_SELECTOR);
-        assert_eq!(pane_code_size(&wow64), CodeSize::Bits32, "a WOW64 thread in 32-bit code");
+        assert_eq!(
+            pane_code_size(&wow64),
+            CodeSize::Bits32,
+            "a WOW64 thread in 32-bit code"
+        );
     }
 
     /// Addresses are named against the viewed process's modules only in its
@@ -6577,7 +7438,10 @@ mod tests {
     fn addresses_are_named_only_in_the_space_their_modules_belong_to() {
         let (live, viewed) = snapshots(0x33);
         assert_eq!(vantage_space(&live), AddressSpace::Linear);
-        assert_eq!(vantage_space(&viewed), AddressSpace::Process { cr3: 0x3000 });
+        assert_eq!(
+            vantage_space(&viewed),
+            AddressSpace::Process { cr3: 0x3000 }
+        );
     }
 
     /// A drag moves a split by its share of the room the two panes have, and
@@ -6599,7 +7463,10 @@ mod tests {
     #[test]
     fn a_narrow_memory_pane_folds_its_rows_to_eight_bytes() {
         assert_eq!(memory_bytes_per_line(120.0), ROW_BYTES);
-        assert_eq!(memory_bytes_per_line(19.0 + 4.0 * ROW_BYTES as f32), ROW_BYTES);
+        assert_eq!(
+            memory_bytes_per_line(19.0 + 4.0 * ROW_BYTES as f32),
+            ROW_BYTES
+        );
         assert_eq!(memory_bytes_per_line(60.0), ROW_BYTES / 2);
         assert_eq!(memory_bytes_per_line(10.0), ROW_BYTES / 2);
     }
@@ -6620,8 +7487,14 @@ mod tests {
         assert!(holds_ignoring_case("KeWaitForSingleObject", "wait"));
         assert!(holds_ignoring_case("KERNELBASE.dll", "kernelbase"));
         assert!(!holds_ignoring_case("NtClose", "wait"));
-        assert!(!holds_ignoring_case("Nt", "ntclose"), "a filter longer than the name");
-        assert!(holds_ignoring_case("NtClose", ""), "no filter keeps everything");
+        assert!(
+            !holds_ignoring_case("Nt", "ntclose"),
+            "a filter longer than the name"
+        );
+        assert!(
+            holds_ignoring_case("NtClose", ""),
+            "no filter keeps everything"
+        );
     }
 
     #[test]
@@ -6638,11 +7511,17 @@ mod tests {
         assert_eq!(walk(keys(3, false), None, 5).key, Some(KeyRow::Moved(2)));
         assert_eq!(walk(keys(-1, false), None, 5).key, Some(KeyRow::Moved(0)));
         // Both ends hold.
-        assert_eq!(walk(keys(-4, false), Some(2), 5).key, Some(KeyRow::Moved(0)));
+        assert_eq!(
+            walk(keys(-4, false), Some(2), 5).key,
+            Some(KeyRow::Moved(0))
+        );
         assert_eq!(walk(keys(9, false), Some(2), 5).key, Some(KeyRow::Moved(4)));
         // A row past a listing that shrank is no row; no step leaves it so.
         assert_eq!(walk(keys(0, false), Some(7), 5).key, None);
-        assert_eq!(walk(keys(0, false), Some(3), 5).key, Some(KeyRow::Resting(3)));
+        assert_eq!(
+            walk(keys(0, false), Some(3), 5).key,
+            Some(KeyRow::Resting(3))
+        );
         // Enter opens the row stood on after the move, and nothing in an
         // empty listing.
         assert_eq!(walk(keys(1, true), Some(3), 5).open, Some(4));

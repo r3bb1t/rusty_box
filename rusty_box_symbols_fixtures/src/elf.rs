@@ -3,12 +3,11 @@
 //! functions, an optional `.symtab`, and any extra sections a test passes
 //! in, plain or compressed as the gABI or GNU's `.zdebug` convention does.
 
-use object::elf;
-use object::write::elf::{FileHeader, ProgramHeader, SectionHeader, Sym, Writer};
 use object::write::StringId;
-use object::{Endianness, Object, ObjectSegment};
+use object::write::elf::{FileHeader, ProgramHeader, SectionHeader, Sym, Writer};
+use object::{Endianness, Object, ObjectSegment, elf};
 
-use crate::compress::{zlib, zstd_frame, Checksum, ZstdOptions};
+use crate::compress::{Checksum, ZstdOptions, zlib, zstd_frame};
 
 /// gABI `ELFCOMPRESS_ZLIB` and `ELFCOMPRESS_ZSTD`, and `SHF_COMPRESSED`.
 const ELFCOMPRESS_ZLIB: u32 = 1;
@@ -74,12 +73,19 @@ impl ElfSpec {
 
     /// A classic 64-bit executable, linked at 0x400000.
     pub fn exec() -> Self {
-        ElfSpec { e_type: elf::ET_EXEC, link_base: 0x40_0000, ..ElfSpec::pie() }
+        ElfSpec {
+            e_type: elf::ET_EXEC,
+            link_base: 0x40_0000,
+            ..ElfSpec::pie()
+        }
     }
 
     /// A 32-bit PIE, linked at 0.
     pub fn pie32() -> Self {
-        ElfSpec { class: Class::Elf32, ..ElfSpec::pie() }
+        ElfSpec {
+            class: Class::Elf32,
+            ..ElfSpec::pie()
+        }
     }
 }
 
@@ -129,24 +135,44 @@ fn stored(class: Class, section: &ExtraSection) -> Stored {
         header
     };
     match section.encoding {
-        Encoding::Plain => Stored { name: section.name.clone().into_bytes(), bytes: section.data.clone(), flags: 0 },
+        Encoding::Plain => Stored {
+            name: section.name.clone().into_bytes(),
+            bytes: section.data.clone(),
+            flags: 0,
+        },
         Encoding::Zlib => {
             let mut bytes = header(ELFCOMPRESS_ZLIB);
             bytes.extend_from_slice(&zlib(&section.data, 6));
-            Stored { name: section.name.clone().into_bytes(), bytes, flags: SHF_COMPRESSED }
+            Stored {
+                name: section.name.clone().into_bytes(),
+                bytes,
+                flags: SHF_COMPRESSED,
+            }
         }
         Encoding::Zstd => {
             let mut bytes = header(ELFCOMPRESS_ZSTD);
-            let options = ZstdOptions { level: 3, checksum: Checksum::Without, window_log: 0 };
+            let options = ZstdOptions {
+                level: 3,
+                checksum: Checksum::Without,
+                window_log: 0,
+            };
             bytes.extend_from_slice(&zstd_frame(&section.data, options));
-            Stored { name: section.name.clone().into_bytes(), bytes, flags: SHF_COMPRESSED }
+            Stored {
+                name: section.name.clone().into_bytes(),
+                bytes,
+                flags: SHF_COMPRESSED,
+            }
         }
         Encoding::Zdebug => {
             let mut bytes = b"ZLIB".to_vec();
             bytes.extend_from_slice(&(section.data.len() as u64).to_be_bytes());
             bytes.extend_from_slice(&zlib(&section.data, 6));
             let name = section.name.replacen(".debug", ".zdebug", 1).into_bytes();
-            Stored { name, bytes, flags: 0 }
+            Stored {
+                name,
+                bytes,
+                flags: 0,
+            }
         }
     }
 }
@@ -191,7 +217,10 @@ pub fn build_elf(spec: ElfSpec, extra: &[ExtraSection]) -> Vec<u8> {
     let mut text = vec![0x90u8; TEXT_LEN as usize];
     text[FUNC_LEN as usize - 1] = 0xC3;
     text[TEXT_LEN as usize - 1] = 0xC3;
-    let stored_sections: Vec<Stored> = extra.iter().map(|section| stored(spec.class, section)).collect();
+    let stored_sections: Vec<Stored> = extra
+        .iter()
+        .map(|section| stored(spec.class, section))
+        .collect();
 
     let mut bytes = Vec::new();
     let mut writer = Writer::new(Endianness::Little, is_64, &mut bytes);
@@ -210,13 +239,25 @@ pub fn build_elf(spec: ElfSpec, extra: &[ExtraSection]) -> Vec<u8> {
         let name = writer.add_section_name(&section.name);
         writer.reserve_section_index();
         let offset = writer.reserve(section.bytes.len() as u64, 8);
-        placed.push(Placed { name, offset, stored: section });
+        placed.push(Placed {
+            name,
+            offset,
+            stored: section,
+        });
     }
     let symbols = match spec.symtab {
         Symtab::With => {
             let symbols = [
-                FixtureSymbol { name: writer.add_string(b"widget_init"), value: text_va, size: FUNC_LEN },
-                FixtureSymbol { name: writer.add_string(b"helper_no_dwarf"), value: text_va + FUNC_LEN, size: HELPER_LEN },
+                FixtureSymbol {
+                    name: writer.add_string(b"widget_init"),
+                    value: text_va,
+                    size: FUNC_LEN,
+                },
+                FixtureSymbol {
+                    name: writer.add_string(b"helper_no_dwarf"),
+                    value: text_va + FUNC_LEN,
+                    size: HELPER_LEN,
+                },
             ];
             writer.reserve_null_symbol_index();
             writer.reserve_symbol_index(Some(text_index));
@@ -360,7 +401,11 @@ pub fn load_image(file: &[u8], link_base: u64) -> Vec<Option<u8>> {
             image.resize(rva + memory_size, None);
         }
         for index in 0..memory_size {
-            image[rva + index] = Some(if index < file_size { file[offset + index] } else { 0 });
+            image[rva + index] = Some(if index < file_size {
+                file[offset + index]
+            } else {
+                0
+            });
         }
     }
     image

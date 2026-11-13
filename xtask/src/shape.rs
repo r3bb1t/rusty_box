@@ -88,14 +88,21 @@ mod tests {
     use super::*;
 
     fn whats(source: &str) -> Vec<&'static str> {
-        check_source(source).unwrap().into_iter().map(|finding| finding.what).collect()
+        check_source(source)
+            .unwrap()
+            .into_iter()
+            .map(|finding| finding.what)
+            .collect()
     }
 
     #[test]
     fn tuples_in_types_and_values_are_found() {
         assert_eq!(whats("fn f() -> (u8, u8) { todo!() }"), ["a tuple type"]);
         assert_eq!(whats("struct S { pairs: Vec<(u8, u8)> }"), ["a tuple type"]);
-        assert_eq!(whats("fn f() { let pair = (1, 2); }"), ["a tuple expression"]);
+        assert_eq!(
+            whats("fn f() { let pair = (1, 2); }"),
+            ["a tuple expression"]
+        );
         assert_eq!(
             whats("fn f(v: &[u8]) { let _ = v.iter().map(|b| (b, b)); }"),
             ["a tuple expression"]
@@ -106,11 +113,15 @@ mod tests {
     fn the_unit_type_and_a_match_scrutinee_are_not_tuples() {
         assert_eq!(whats("fn f() -> () {}"), Vec::<&str>::new());
         assert_eq!(
-            whats("fn f(a: Option<u8>, b: Option<u8>) -> u8 { match (a, b) { (Some(x), Some(y)) => x ^ y, _ => 0 } }"),
+            whats(
+                "fn f(a: Option<u8>, b: Option<u8>) -> u8 { match (a, b) { (Some(x), Some(y)) => x ^ y, _ => 0 } }"
+            ),
             Vec::<&str>::new()
         );
         assert_eq!(
-            whats("fn f(v: &[u8]) { for (i, b) in v.iter().enumerate() { let _ = i; let _ = b; } }"),
+            whats(
+                "fn f(v: &[u8]) { for (i, b) in v.iter().enumerate() { let _ = i; let _ = b; } }"
+            ),
             Vec::<&str>::new()
         );
     }
@@ -118,7 +129,10 @@ mod tests {
     #[test]
     fn dyn_and_impl_trait_are_found() {
         assert_eq!(whats("fn f(x: &dyn Fn()) {}"), ["a `dyn` trait object"]);
-        assert_eq!(whats("fn f() -> impl Iterator<Item = u8> { 0..1 }"), ["an `impl Trait` type"]);
+        assert_eq!(
+            whats("fn f() -> impl Iterator<Item = u8> { 0..1 }"),
+            ["an `impl Trait` type"]
+        );
     }
 
     #[test]

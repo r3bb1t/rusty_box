@@ -157,7 +157,13 @@ fn each_processor_names_its_pmu() {
     let spin = RAM_BASE + 16;
     for (cpu, pmcr, pmuver, ceid0, ceid1) in [
         (CpuModel::CortexA57, 0x4101_3040, 1, 0x5002_0F19, 0),
-        (CpuModel::Armv9p2, 0x0000_3040, 7, 0x40_5002_0F19, 0x1200_0018),
+        (
+            CpuModel::Armv9p2,
+            0x0000_3040,
+            7,
+            0x40_5002_0F19,
+            0x1200_0018,
+        ),
     ] {
         run(cpu, &[(RAM_BASE, &program)], &[], spin, |m| {
             let pmcr_read = m.reg_read(Reg::X9);

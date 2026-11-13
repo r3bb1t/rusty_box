@@ -1,5 +1,7 @@
+use std::io;
+use std::path::PathBuf;
+
 use crate::args::BootDevice;
-use std::{io, path::PathBuf};
 
 /// Every place an engine is chosen, named by each message that refuses one.
 /// A shell user cannot pass a flag, so a refusal naming the flag alone would
@@ -70,7 +72,9 @@ pub enum RunError {
     /// A setting, in the VM file or on the command line, that the VM's
     /// machine does not have: a PC table on an Arm `virt` VM, or `[virt]` on
     /// a PC. It is refused rather than dropped without a word.
-    #[error("{setting} is not a setting of {machine}; set `[vm] machine` to the machine it belongs to, or remove it")]
+    #[error(
+        "{setting} is not a setting of {machine}; set `[vm] machine` to the machine it belongs to, or remove it"
+    )]
     NotForMachine {
         setting: &'static str,
         machine: crate::config::MachineKind,
@@ -102,7 +106,9 @@ pub enum RunError {
     #[error("virt.firmware and virt.kernel cannot both be set: the board boots one or the other")]
     ConflictingVirtBoot,
 
-    #[error("virt.builtin_firmware and {setting} cannot both be set: the board boots one firmware or kernel")]
+    #[error(
+        "virt.builtin_firmware and {setting} cannot both be set: the board boots one firmware or kernel"
+    )]
     ConflictingBuiltinFirmware { setting: &'static str },
 
     #[error("virt.display.refresh_hz = {hz} is outside 1-{max}", max = crate::config::RefreshHz::MAX)]
@@ -151,9 +157,7 @@ pub enum RunError {
     /// debugging stop, a stop flag on the machine itself, or a guest reset
     /// left to the host.
     #[error("the Arm virt machine stopped where no run asked it to: {stop:?}")]
-    VirtStopped {
-        stop: rusty_box_aarch64::StopReason,
-    },
+    VirtStopped { stop: rusty_box_aarch64::StopReason },
 
     #[error("failed to write the UEFI variable store back to {}: {source}", path.display())]
     VariableStoreWrite { path: PathBuf, source: io::Error },
@@ -176,7 +180,9 @@ pub enum RunError {
     #[error("cpuid_freq must be hardware|none|ips (Bochs cpu: cpuid_freq=), got {value}")]
     InvalidCpuidFreq { value: String },
 
-    #[error("port_e9_hack must be off|on|all-rings (Bochs port_e9_hack: enabled=, all_rings=), got {value}")]
+    #[error(
+        "port_e9_hack must be off|on|all-rings (Bochs port_e9_hack: enabled=, all_rings=), got {value}"
+    )]
     InvalidPortE9Hack { value: String },
 
     #[error("boot order cannot be empty; set boot.order or pass --boot disk|cdrom")]
@@ -355,7 +361,9 @@ pub enum LibraryError {
     #[error("{} is not a file of the VM library in {}", path.display(), dir.display())]
     OutsideLibrary { path: PathBuf, dir: PathBuf },
 
-    #[error("{text:?} is not a VM file stem: one file name, no folder, not starting with a dot, no whitespace at either end")]
+    #[error(
+        "{text:?} is not a VM file stem: one file name, no folder, not starting with a dot, no whitespace at either end"
+    )]
     InvalidStem { text: String },
 
     #[error("failed to make {} absolute: {source}", path.display())]
@@ -404,7 +412,10 @@ mod tests {
             for source in ENGINE_SOURCES {
                 assert!(text.contains(source), "{text:?} does not name {source}");
             }
-            assert!(!text.contains("--engine whp"), "{text:?} names only the flag");
+            assert!(
+                !text.contains("--engine whp"),
+                "{text:?} names only the flag"
+            );
         }
     }
 
@@ -418,7 +429,10 @@ mod tests {
         for flag in ["`--engine`", "`--cpu-capabilities`", "`--log-level`"] {
             assert!(text.contains(flag), "{text:?} does not name {flag}");
         }
-        assert!(text.contains("--config FILE"), "{text:?} does not say how to name a machine");
+        assert!(
+            text.contains("--config FILE"),
+            "{text:?} does not say how to name a machine"
+        );
         assert!(text.contains("Hardware › Processors › Engine"));
         assert!(text.contains("Hardware › Display › Log level"));
         // The shell has no processor-capabilities control; the VM file does.
@@ -439,7 +453,10 @@ mod tests {
     fn a_missing_library_folder_names_the_environment_it_is_found_from() {
         let text = RunError::NoLibraryFolder.to_string();
 
-        assert!(text.starts_with("found no folder for the VM library"), "{text:?}");
+        assert!(
+            text.starts_with("found no folder for the VM library"),
+            "{text:?}"
+        );
         let variables: &[&str] = if cfg!(windows) {
             &["`APPDATA`"]
         } else if cfg!(target_os = "macos") {

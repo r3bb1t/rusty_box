@@ -43,8 +43,9 @@ const DIST_EXTRA: [u32; 30] = [
     13,
 ];
 /// RFC 1951 §3.2.7: the order code-length code lengths are stored in.
-const CODE_LENGTH_ORDER: [usize; CODE_LENGTH_CODES] =
-    [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+const CODE_LENGTH_ORDER: [usize; CODE_LENGTH_CODES] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
 
 /// Why a stream did not decode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -110,7 +111,10 @@ impl<'a> Bits<'a> {
 
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn bit(&mut self) -> Result<u32, InflateError> {
-        let byte = self.input.u8(self.bit.wrapping_shr(3)).map_err(|_| self.truncated())?;
+        let byte = self
+            .input
+            .u8(self.bit.wrapping_shr(3))
+            .map_err(|_| self.truncated())?;
         let value = u32::from(byte.wrapping_shr((self.bit & 7) as u32) & 1);
         self.bit = self.bit.checked_add(1).ok_or(self.truncated())?;
         Ok(value)
@@ -135,7 +139,10 @@ impl<'a> Bits<'a> {
     /// Skips to the next byte boundary (stored blocks start on one).
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn align_to_byte(&mut self) -> Result<(), InflateError> {
-        self.bit = self.byte_position().checked_mul(8).ok_or(self.truncated())?;
+        self.bit = self
+            .byte_position()
+            .checked_mul(8)
+            .ok_or(self.truncated())?;
         Ok(())
     }
 }
@@ -167,14 +174,21 @@ impl<const N: usize> Huffman<N> {
             let slot = code
                 .count
                 .get_mut(usize::from(*length))
-                .ok_or(InflateError::BadSymbol { what, symbol: u16::from(*length) })?;
+                .ok_or(InflateError::BadSymbol {
+                    what,
+                    symbol: u16::from(*length),
+                })?;
             *slot = slot.wrapping_add(1);
         }
         let unused_lengths = usize::from(code.count.first().copied().unwrap_or(0));
         let used_symbols = lengths.len().saturating_sub(unused_lengths);
         if used_symbols == 0 {
             // No codes: complete, though any decode with it fails.
-            return Ok(Built { code, unused_slots: 0, used_symbols });
+            return Ok(Built {
+                code,
+                unused_slots: 0,
+                used_symbols,
+            });
         }
         let mut unused_slots: i32 = 1;
         for length in 1..=MAX_BITS {
@@ -198,7 +212,10 @@ impl<const N: usize> Huffman<N> {
             }
             let offset = offsets
                 .get_mut(usize::from(*length))
-                .ok_or(InflateError::BadSymbol { what, symbol: u16::from(*length) })?;
+                .ok_or(InflateError::BadSymbol {
+                    what,
+                    symbol: u16::from(*length),
+                })?;
             let slot = code
                 .symbol
                 .get_mut(usize::from(*offset))
@@ -206,7 +223,11 @@ impl<const N: usize> Huffman<N> {
             *slot = u16::try_from(symbol).map_err(|_| InflateError::OverSubscribed { what })?;
             *offset = offset.wrapping_add(1);
         }
-        Ok(Built { code, unused_slots, used_symbols })
+        Ok(Built {
+            code,
+            unused_slots,
+            used_symbols,
+        })
     }
 
     /// The next symbol (puff's `decode`). The canonical order keeps
@@ -256,7 +277,10 @@ impl Output<'_> {
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn put(&mut self, byte: u8) -> Result<(), InflateError> {
         let capacity = self.out.len();
-        let slot = self.out.get_mut(self.at).ok_or(InflateError::OutputFull { capacity })?;
+        let slot = self
+            .out
+            .get_mut(self.at)
+            .ok_or(InflateError::OutputFull { capacity })?;
         *slot = byte;
         // `at` indexed a slot, so it is below `usize::MAX`.
         self.at = self.at.wrapping_add(1);
@@ -268,14 +292,20 @@ impl Output<'_> {
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn copy_match(&mut self, distance: usize, length: usize) -> Result<(), InflateError> {
         if distance == 0 || distance > self.at {
-            return Err(InflateError::DistanceTooFar { distance, available: self.at });
+            return Err(InflateError::DistanceTooFar {
+                distance,
+                available: self.at,
+            });
         }
         for _ in 0..length {
             let byte = self
                 .out
                 .get(self.at.wrapping_sub(distance))
                 .copied()
-                .ok_or(InflateError::DistanceTooFar { distance, available: self.at })?;
+                .ok_or(InflateError::DistanceTooFar {
+                    distance,
+                    available: self.at,
+                })?;
             self.put(byte)?;
         }
         Ok(())
@@ -288,16 +318,24 @@ fn stored(bits: &mut Bits<'_>, out: &mut Output<'_>) -> Result<(), InflateError>
     bits.align_to_byte()?;
     let at = bits.byte_position();
     let len = bits.input.u16_le(at).map_err(|_| bits.truncated())?;
-    let complement = bits.input.u16_le(at.wrapping_add(2)).map_err(|_| bits.truncated())?;
+    let complement = bits
+        .input
+        .u16_le(at.wrapping_add(2))
+        .map_err(|_| bits.truncated())?;
     if complement != !len {
         return Err(InflateError::StoredLength { len, complement });
     }
     let body_at = at.checked_add(4).ok_or(bits.truncated())?;
-    let body = bits.input.slice(body_at, usize::from(len)).map_err(|_| bits.truncated())?;
+    let body = bits
+        .input
+        .slice(body_at, usize::from(len))
+        .map_err(|_| bits.truncated())?;
     for byte in body {
         out.put(*byte)?;
     }
-    let after = body_at.checked_add(usize::from(len)).ok_or(bits.truncated())?;
+    let after = body_at
+        .checked_add(usize::from(len))
+        .ok_or(bits.truncated())?;
     bits.bit = after.checked_mul(8).ok_or(bits.truncated())?;
     Ok(())
 }
@@ -321,18 +359,30 @@ fn codes(
         }
         let index = usize::from(symbol.wrapping_sub(257));
         let length_code = match (LENGTH_BASE.get(index), LENGTH_EXTRA.get(index)) {
-            (Some(base), Some(extra)) => BaseAndExtra { base: *base, extra: *extra },
+            (Some(base), Some(extra)) => BaseAndExtra {
+                base: *base,
+                extra: *extra,
+            },
             (Some(_) | None, Some(_) | None) => {
-                return Err(InflateError::BadSymbol { what: "literal/length", symbol })
+                return Err(InflateError::BadSymbol {
+                    what: "literal/length",
+                    symbol,
+                });
             }
         };
         let length = length_code.value(bits)?;
         let distance_symbol = distance.decode(bits)?;
         let index = usize::from(distance_symbol);
         let distance_code = match (DIST_BASE.get(index), DIST_EXTRA.get(index)) {
-            (Some(base), Some(extra)) => BaseAndExtra { base: *base, extra: *extra },
+            (Some(base), Some(extra)) => BaseAndExtra {
+                base: *base,
+                extra: *extra,
+            },
             (Some(_) | None, Some(_) | None) => {
-                return Err(InflateError::BadSymbol { what: "distance", symbol: distance_symbol })
+                return Err(InflateError::BadSymbol {
+                    what: "distance",
+                    symbol: distance_symbol,
+                });
             }
         };
         let back = distance_code.value(bits)?;
@@ -385,7 +435,10 @@ fn dynamic(bits: &mut Bits<'_>, out: &mut Output<'_>) -> Result<(), InflateError
     let distances = (bits.bits(5)? as usize).wrapping_add(1);
     let code_lengths = (bits.bits(4)? as usize).wrapping_add(4);
     if literals > MAX_LITLEN_CODES || distances > MAX_DIST_CODES {
-        return Err(InflateError::TooManyCodes { literals, distances });
+        return Err(InflateError::TooManyCodes {
+            literals,
+            distances,
+        });
     }
     let mut length_lengths = [0u8; CODE_LENGTH_CODES];
     for order in CODE_LENGTH_ORDER.iter().take(code_lengths) {
@@ -395,7 +448,9 @@ fn dynamic(bits: &mut Bits<'_>, out: &mut Output<'_>) -> Result<(), InflateError
     }
     let built = Huffman::<CODE_LENGTH_CODES>::build(&length_lengths, "code length")?;
     if built.unused_slots != 0 {
-        return Err(InflateError::Incomplete { what: "code length" });
+        return Err(InflateError::Incomplete {
+            what: "code length",
+        });
     }
     let length_code = built.code;
     let total = literals.wrapping_add(distances);
@@ -404,18 +459,35 @@ fn dynamic(bits: &mut Bits<'_>, out: &mut Output<'_>) -> Result<(), InflateError
     while index < total {
         let symbol = length_code.decode(bits)?;
         let repeat = match symbol {
-            0..=15 => Repeat { length: symbol.to_le_bytes()[0], times: 1 },
+            0..=15 => Repeat {
+                length: symbol.to_le_bytes()[0],
+                times: 1,
+            },
             16 => {
                 let previous = index
                     .checked_sub(1)
                     .and_then(|at| lengths.get(at))
                     .copied()
                     .ok_or(InflateError::RepeatWithoutPrevious)?;
-                Repeat { length: previous, times: (bits.bits(2)? as usize).wrapping_add(3) }
+                Repeat {
+                    length: previous,
+                    times: (bits.bits(2)? as usize).wrapping_add(3),
+                }
             }
-            17 => Repeat { length: 0, times: (bits.bits(3)? as usize).wrapping_add(3) },
-            18 => Repeat { length: 0, times: (bits.bits(7)? as usize).wrapping_add(11) },
-            other => return Err(InflateError::BadSymbol { what: "code length", symbol: other }),
+            17 => Repeat {
+                length: 0,
+                times: (bits.bits(3)? as usize).wrapping_add(3),
+            },
+            18 => Repeat {
+                length: 0,
+                times: (bits.bits(7)? as usize).wrapping_add(11),
+            },
+            other => {
+                return Err(InflateError::BadSymbol {
+                    what: "code length",
+                    symbol: other,
+                });
+            }
         };
         for _ in 0..repeat.times {
             let slot = lengths
@@ -435,7 +507,10 @@ fn dynamic(bits: &mut Bits<'_>, out: &mut Output<'_>) -> Result<(), InflateError
         Huffman::<FIXED_LITLEN_CODES>::build(literal_lengths, "literal/length")?,
         "literal/length",
     )?;
-    let distance = usable(Huffman::<MAX_DIST_CODES>::build(distance_lengths, "distance")?, "distance")?;
+    let distance = usable(
+        Huffman::<MAX_DIST_CODES>::build(distance_lengths, "distance")?,
+        "distance",
+    )?;
     codes(bits, out, &litlen, &distance)
 }
 
@@ -473,7 +548,9 @@ pub fn adler32(data: &[u8]) -> u32 {
     let mut low = 1u32;
     let mut high = 0u32;
     for byte in data {
-        low = low.wrapping_add(u32::from(*byte)).wrapping_rem(ADLER_MODULUS);
+        low = low
+            .wrapping_add(u32::from(*byte))
+            .wrapping_rem(ADLER_MODULUS);
         high = high.wrapping_add(low).wrapping_rem(ADLER_MODULUS);
     }
     high.wrapping_shl(16) | low
@@ -484,19 +561,27 @@ pub fn adler32(data: &[u8]) -> u32 {
 /// Returns the number of bytes written to `out`.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn inflate_zlib(input: Bytes<'_>, out: &mut [u8]) -> Result<usize, InflateError> {
-    let cmf = input.u8(0).map_err(|_| InflateError::Truncated { bit: 0 })?;
-    let flg = input.u8(1).map_err(|_| InflateError::Truncated { bit: 8 })?;
+    let cmf = input
+        .u8(0)
+        .map_err(|_| InflateError::Truncated { bit: 0 })?;
+    let flg = input
+        .u8(1)
+        .map_err(|_| InflateError::Truncated { bit: 8 })?;
     let check = u16::from(cmf).wrapping_shl(8) | u16::from(flg);
     let deflate = cmf & 0x0F == 8 && cmf.wrapping_shr(4) <= 7;
     let dictionary = flg & 0x20 != 0;
     if !deflate || dictionary || check.wrapping_rem(31) != 0 {
         return Err(InflateError::BadZlibHeader { cmf, flg });
     }
-    let body = input.tail(2).map_err(|_| InflateError::Truncated { bit: 16 })?;
+    let body = input
+        .tail(2)
+        .map_err(|_| InflateError::Truncated { bit: 16 })?;
     let done = inflate(body, out, 0)?;
     let trailer = body
         .array::<4>(done.consumed)
-        .map_err(|_| InflateError::Truncated { bit: done.consumed.saturating_mul(8) })?;
+        .map_err(|_| InflateError::Truncated {
+            bit: done.consumed.saturating_mul(8),
+        })?;
     let found = u32::from_be_bytes(trailer);
     let computed = adler32(out.get(..done.end).unwrap_or(&[]));
     if found != computed {
@@ -507,8 +592,9 @@ pub fn inflate_zlib(input: Bytes<'_>, out: &mut [u8]) -> Result<usize, InflateEr
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box_symbols_fixtures::compress::{raw_deflate, sample_binary, sample_text, zlib};
+
+    use super::*;
 
     /// A fixed block whose only content is "copy 5 bytes from 5 back".
     const MATCH_FIVE_BACK: [u8; 3] = [0x03, 0x13, 0x00];
@@ -518,7 +604,13 @@ mod tests {
         let stream = [0x01, 0x05, 0x00, 0xFA, 0xFF, b'h', b'e', b'l', b'l', b'o'];
         let mut out = [0u8; 5];
         let done = inflate(Bytes::new(&stream), &mut out, 0).unwrap();
-        assert_eq!(done, Inflated { consumed: 10, end: 5 });
+        assert_eq!(
+            done,
+            Inflated {
+                consumed: 10,
+                end: 5
+            }
+        );
         assert_eq!(&out, b"hello");
     }
 
@@ -545,11 +637,17 @@ mod tests {
         let mut out = [0u8; 10];
         assert_eq!(
             inflate(Bytes::new(&MATCH_FIVE_BACK), &mut out, 0),
-            Err(InflateError::DistanceTooFar { distance: 5, available: 0 })
+            Err(InflateError::DistanceTooFar {
+                distance: 5,
+                available: 0
+            })
         );
         assert_eq!(
             inflate(Bytes::new(&MATCH_FIVE_BACK), &mut out, 11),
-            Err(InflateError::BadStart { start: 11, capacity: 10 })
+            Err(InflateError::BadStart {
+                start: 11,
+                capacity: 10
+            })
         );
     }
 
@@ -580,7 +678,10 @@ mod tests {
     #[test]
     fn a_reserved_block_type_is_refused() {
         let mut out = [0u8; 4];
-        assert_eq!(inflate(Bytes::new(&[0x07]), &mut out, 0), Err(InflateError::ReservedBlockType));
+        assert_eq!(
+            inflate(Bytes::new(&[0x07]), &mut out, 0),
+            Err(InflateError::ReservedBlockType)
+        );
     }
 
     #[test]
@@ -588,7 +689,10 @@ mod tests {
         let mut out = [0u8; 8];
         assert_eq!(
             inflate(Bytes::new(&[0x01, 0x05, 0x00, 0x00, 0x00]), &mut out, 0),
-            Err(InflateError::StoredLength { len: 5, complement: 0 })
+            Err(InflateError::StoredLength {
+                len: 5,
+                complement: 0
+            })
         );
     }
 
@@ -598,7 +702,10 @@ mod tests {
         let stream = raw_deflate(&data, 6);
         let mut out = vec![0u8; data.len()];
         let cut = &stream[..stream.len() / 2];
-        assert!(matches!(inflate(Bytes::new(cut), &mut out, 0), Err(InflateError::Truncated { .. })));
+        assert!(matches!(
+            inflate(Bytes::new(cut), &mut out, 0),
+            Err(InflateError::Truncated { .. })
+        ));
     }
 
     #[test]
@@ -606,7 +713,10 @@ mod tests {
         let data = sample_text(5000);
         let stream = raw_deflate(&data, 6);
         let mut out = vec![0u8; 4999];
-        assert_eq!(inflate(Bytes::new(&stream), &mut out, 0), Err(InflateError::OutputFull { capacity: 4999 }));
+        assert_eq!(
+            inflate(Bytes::new(&stream), &mut out, 0),
+            Err(InflateError::OutputFull { capacity: 4999 })
+        );
     }
 
     #[test]
@@ -619,7 +729,10 @@ mod tests {
         let wrong_sum = [0x78, 0x9C, 0x4B, 0x04, 0x00, 0x00, 0x62, 0x00, 0x63];
         assert_eq!(
             inflate_zlib(Bytes::new(&wrong_sum), &mut out),
-            Err(InflateError::BadAdler { found: 0x0062_0063, computed: 0x0062_0062 })
+            Err(InflateError::BadAdler {
+                found: 0x0062_0063,
+                computed: 0x0062_0062
+            })
         );
     }
 }

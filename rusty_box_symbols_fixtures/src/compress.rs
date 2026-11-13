@@ -7,7 +7,8 @@ use std::io::Write;
 /// A raw DEFLATE stream (RFC 1951) of `data` at `level` (0 stores, 9 is
 /// smallest).
 pub fn raw_deflate(data: &[u8], level: u32) -> Vec<u8> {
-    let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(level));
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(level));
     encoder.write_all(data).expect("deflate");
     encoder.finish().expect("deflate")
 }
@@ -37,12 +38,17 @@ pub struct ZstdOptions {
 
 /// One zstd frame of `data`, with its content size in the header.
 pub fn zstd_frame(data: &[u8], options: ZstdOptions) -> Vec<u8> {
-    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), options.level).expect("encoder");
+    let mut encoder =
+        zstd::stream::write::Encoder::new(Vec::new(), options.level).expect("encoder");
     encoder
         .include_checksum(matches!(options.checksum, Checksum::With))
         .expect("checksum flag");
-    encoder.include_contentsize(true).expect("content size flag");
-    encoder.set_pledged_src_size(Some(data.len() as u64)).expect("pledged size");
+    encoder
+        .include_contentsize(true)
+        .expect("content size flag");
+    encoder
+        .set_pledged_src_size(Some(data.len() as u64))
+        .expect("pledged size");
     if options.window_log != 0 {
         encoder.window_log(options.window_log).expect("window log");
     }
@@ -61,8 +67,18 @@ fn next(state: &mut u64) -> u64 {
 /// `len` bytes of words and numbers with frequent repeats.
 pub fn sample_text(len: usize) -> Vec<u8> {
     const WORDS: [&str; 12] = [
-        "KeBugCheckEx", "the ", "process ", "PsActiveProcessHead", "\n", "0x7FFE0000 ",
-        "ntoskrnl ", "symbol ", "store ", "_EPROCESS", " = ", "module ",
+        "KeBugCheckEx",
+        "the ",
+        "process ",
+        "PsActiveProcessHead",
+        "\n",
+        "0x7FFE0000 ",
+        "ntoskrnl ",
+        "symbol ",
+        "store ",
+        "_EPROCESS",
+        " = ",
+        "module ",
     ];
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     let mut out = Vec::with_capacity(len);

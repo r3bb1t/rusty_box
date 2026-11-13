@@ -27,7 +27,10 @@
 //!             seen.extend(port.take_output());
 //!         }
 //!         if seen.windows(needle.len()).any(|w| w == needle) {
-//!             return Ok(matches!(machine.keyboard().type_text("root\n"), Typed::All { .. }));
+//!             return Ok(matches!(
+//!                 machine.keyboard().type_text("root\n"),
+//!                 Typed::All { .. }
+//!             ));
 //!         }
 //!         if outcome.is_terminal() {
 //!             break;
@@ -106,14 +109,14 @@ pub trait Machine {
 /// machine is large) need no unboxing to reach shared code.
 #[cfg(feature = "alloc")]
 impl<M: Machine + ?Sized> Machine for alloc::boxed::Box<M> {
-    type Outcome = M::Outcome;
     type Error = M::Error;
-    type Serial<'a>
-        = M::Serial<'a>
-    where
-        Self: 'a;
     type Keyboard<'a>
         = M::Keyboard<'a>
+    where
+        Self: 'a;
+    type Outcome = M::Outcome;
+    type Serial<'a>
+        = M::Serial<'a>
     where
         Self: 'a;
 

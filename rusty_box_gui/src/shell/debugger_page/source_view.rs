@@ -6,31 +6,30 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use egui::{Color32, RichText};
 use rusty_box::cpu::CodeBreakpoint;
 use rusty_box_symbols::service::SymbolSource;
 use rusty_box_symbols::source_path::{components, ends_with, trailing_components_in_common};
 use rusty_box_symbols::tables::SymbolTables;
 use rusty_box_symbols::units::Rva;
 
-use egui::{Color32, RichText};
-
+use super::frames_view::{CALLER_LINE, RowAsk, TIP_READING, VALUE_TIP, variable_rows};
+use super::references::REFERENCES_TO;
+use crate::debugger::frames::TipRead;
 use crate::debugger::inspect::SymbolIndex;
 use crate::debugger::source_breakpoints::{
-    resolve, BreakpointModules, BreakpointTarget, Resolutions, SourceResolution, SourceTarget,
+    BreakpointModules, BreakpointTarget, Resolutions, SourceResolution, SourceTarget, resolve,
 };
-use crate::debugger::xref::service::{AddressRange, XrefTarget};
-use super::references::REFERENCES_TO;
-use super::frames_view::{variable_rows, RowAsk, CALLER_LINE, TIP_READING, VALUE_TIP};
-use crate::debugger::frames::TipRead;
 use crate::debugger::watch::expression_at;
+use crate::debugger::xref::service::{AddressRange, XrefTarget};
 use crate::shell::listing::{
-    char_at, char_width, char_x, lead_arrow, lead_dot, lead_hollow_arrow, lead_ring, list_row, Cell, RowSense, Tone,
-    ROW_PAD,
+    Cell, ROW_PAD, RowSense, Tone, char_at, char_width, char_x, lead_arrow, lead_dot,
+    lead_hollow_arrow, lead_ring, list_row,
 };
-use crate::symbols::names::Namer;
 use crate::shell::theme::{ACCENT_AMBER, ACCENT_CYAN, ACCENT_RED, TEXT_MUTED, TEXT_PRIMARY};
 use crate::source::find::{FoundBy, PathMap, SourceCheck, SourceFound};
 use crate::symbols::hub::{ModuleSymbols, SourceKey, SourceSlot, SymbolsView};
+use crate::symbols::names::Namer;
 
 /// A code address as a place in the owner's source: the file (as the
 /// module's tables name it) and line, and the tables that say so.
@@ -48,18 +47,27 @@ pub(crate) struct PauseSource {
 
 /// `address` as a source place, when a module of `index` holds it and its
 /// tables have a line row for it.
-pub(crate) fn source_at(address: u64, index: &SymbolIndex, view: &SymbolsView) -> Option<PauseSource> {
+pub(crate) fn source_at(
+    address: u64,
+    index: &SymbolIndex,
+    view: &SymbolsView,
+) -> Option<PauseSource> {
     let module = index.module_at(address)?;
     let identity = module.identity.known()?;
     let tables = Arc::clone(view.tables(identity)?);
     let row = tables.line_at(Rva(address.checked_sub(module.base)?))?;
     let build_path = tables.files().get(row.file)?.path.clone();
     let project = match view.state(identity) {
-        Some(ModuleSymbols::Loaded { from: SymbolSource::Project { name, .. } }) => Some(name.clone()),
+        Some(ModuleSymbols::Loaded {
+            from: SymbolSource::Project { name, .. },
+        }) => Some(name.clone()),
         Some(_) | None => None,
     };
     Some(PauseSource {
-        key: SourceKey { identity: identity.clone(), file: row.file },
+        key: SourceKey {
+            identity: identity.clone(),
+            file: row.file,
+        },
         line: row.line,
         build_path,
         module_base: module.base,
@@ -86,7 +94,9 @@ pub(crate) struct LineMarkAt {
 
 /// The line `address` is code of in `source`'s file, when it is.
 fn line_of(source: &PauseSource, address: u64) -> Option<u32> {
-    let row = source.tables.line_at(Rva(address.checked_sub(source.module_base)?))?;
+    let row = source
+        .tables
+        .line_at(Rva(address.checked_sub(source.module_base)?))?;
     (row.file == source.key.file).then_some(row.line)
 }
 
@@ -116,12 +126,18 @@ pub(crate) fn line_marks(
         let BreakpointTarget::Source(target) = target else {
             continue;
         };
-        let pending = !matches!(resolutions.source(target), Some(SourceResolution::Resolved { .. }));
+        let pending = !matches!(
+            resolutions.source(target),
+            Some(SourceResolution::Resolved { .. })
+        );
         if pending && names_file(target, source) {
             marks.entry(target.line).or_insert(LineMark::Pending);
         }
     }
-    marks.into_iter().map(|(line, mark)| LineMarkAt { line, mark }).collect()
+    marks
+        .into_iter()
+        .map(|(line, mark)| LineMarkAt { line, mark })
+        .collect()
 }
 
 /// The owner's breakpoints after a gutter click on `line` of `source`'s
@@ -140,19 +156,30 @@ pub(crate) fn toggled_line(
             names_file(target, source)
                 && (target.line == line
                     || index.is_some_and(|index| match resolve(target, &index, view) {
-                        SourceResolution::Resolved { places } => places.iter().any(|place| line_of(source, place.address) == Some(line)),
+                        SourceResolution::Resolved { places } => places
+                            .iter()
+                            .any(|place| line_of(source, place.address) == Some(line)),
                         SourceResolution::Pending(_) => false,
                     }))
         }
-        BreakpointTarget::Address(CodeBreakpoint::Linear(address)) => line_of(source, *address) == Some(line),
+        BreakpointTarget::Address(CodeBreakpoint::Linear(address)) => {
+            line_of(source, *address) == Some(line)
+        }
         BreakpointTarget::Address(CodeBreakpoint::Physical(_)) => false,
     };
-    let kept: Vec<BreakpointTarget> = targets.iter().filter(|target| !marks_line(target)).cloned().collect();
+    let kept: Vec<BreakpointTarget> = targets
+        .iter()
+        .filter(|target| !marks_line(target))
+        .cloned()
+        .collect();
     if kept.len() < targets.len() {
         return kept;
     }
     let mut set = targets.to_vec();
-    set.push(BreakpointTarget::Source(SourceTarget { file: source.build_path.clone(), line }));
+    set.push(BreakpointTarget::Source(SourceTarget {
+        file: source.build_path.clone(),
+        line,
+    }));
     set
 }
 
@@ -160,7 +187,10 @@ pub(crate) fn toggled_line(
 /// next line's when it has none.
 pub(crate) fn line_address(source: &PauseSource, line: u32) -> Option<u64> {
     let resolved = source.tables.lines_of(&source.build_path, line);
-    let first = resolved.iter().flat_map(|resolved| resolved.ranges.iter()).find(|range| range.file == source.key.file)?;
+    let first = resolved
+        .iter()
+        .flat_map(|resolved| resolved.ranges.iter())
+        .find(|range| range.file == source.key.file)?;
     Some(source.module_base.wrapping_add(first.start.0))
 }
 
@@ -171,7 +201,10 @@ pub(crate) fn located_map(build_path: &str, found: &Path) -> PathMap {
     let shared = trailing_components_in_common(build_path, &found.to_string_lossy());
     let parts: Vec<&str> = components(build_path).collect();
     let kept = parts.len().saturating_sub(shared);
-    let whole = || PathMap { from: build_path.to_owned(), to: found.to_path_buf() };
+    let whole = || PathMap {
+        from: build_path.to_owned(),
+        to: found.to_path_buf(),
+    };
     if shared == 0 || kept == 0 {
         return whole();
     }
@@ -179,11 +212,17 @@ pub(crate) fn located_map(build_path: &str, found: &Path) -> PathMap {
         return whole();
     };
     let separator = if build_path.contains('\\') { "\\" } else { "/" };
-    let mut from = parts.get(..kept).map(|parts| parts.join(separator)).unwrap_or_default();
+    let mut from = parts
+        .get(..kept)
+        .map(|parts| parts.join(separator))
+        .unwrap_or_default();
     if build_path.starts_with('/') {
         from.insert(0, '/');
     }
-    PathMap { from, to: to.to_path_buf() }
+    PathMap {
+        from,
+        to: to.to_path_buf(),
+    }
 }
 
 /// What the code pane shows.
@@ -211,7 +250,8 @@ pub(crate) const SOURCE_READING: &str = "Reading the source…";
 pub(crate) const SOURCE_DIFFERS: &str = "This file differs from the one the module was built from.";
 pub(crate) const SOURCE_COMPRESSED: &str =
     "The PDB holds this file compressed, in a form this debugger does not undo.";
-pub(crate) const NO_SOURCE_HERE: &str = "No source line for this address: the disassembly is shown.";
+pub(crate) const NO_SOURCE_HERE: &str =
+    "No source line for this address: the disassembly is shown.";
 pub(crate) const LOCATE: &str = "Locate…";
 pub(crate) const SAVE_TO_SETTINGS: &str = "Save to settings";
 /// Lines shown above the current one, and in all.
@@ -228,7 +268,10 @@ pub(crate) enum SourceAsk {
     Locate,
     /// Keep this map the owner made by locating the file in its project's
     /// settings.
-    SaveMap { project: String, map: PathMap },
+    SaveMap {
+        project: String,
+        map: PathMap,
+    },
     /// Who refers to this line's code.
     References(u32),
     /// A click on a name: show its value.
@@ -258,12 +301,20 @@ pub(crate) struct TipView<'a> {
 
 /// The cells of a source line, as `source_rows` lays one out.
 fn line_cells(number: String, digits: usize, text: String, color: Color32) -> [Cell; 2] {
-    [Cell::right(number, TEXT_MUTED, digits), Cell::fill(text, color)]
+    [
+        Cell::right(number, TEXT_MUTED, digits),
+        Cell::fill(text, color),
+    ]
 }
 
 /// Where character `column` of a source line in `row` starts, its numbers
 /// `digits` wide, `char_width` a character.
-pub(crate) fn line_char_x(row: egui::Rect, digits: usize, char_width: f32, column: usize) -> Option<f32> {
+pub(crate) fn line_char_x(
+    row: egui::Rect,
+    digits: usize,
+    char_width: f32,
+    column: usize,
+) -> Option<f32> {
     let cells = line_cells(String::new(), digits, String::new(), TEXT_PRIMARY);
     char_x(row, GUTTER, &cells, char_width, 1, column)
 }
@@ -287,7 +338,10 @@ pub(crate) fn line_target(source: &PauseSource, line: u32) -> Option<XrefTarget>
             end: source.module_base.wrapping_add(range.end.0),
         })
         .collect();
-    (!ranges.is_empty()).then(|| XrefTarget { ranges, label: format!("{}:{line}", file_name(&source.build_path)) })
+    (!ranges.is_empty()).then(|| XrefTarget {
+        ranges,
+        label: format!("{}:{line}", file_name(&source.build_path)),
+    })
 }
 
 /// What the source view draws from.
@@ -363,16 +417,29 @@ struct CheckShown {
 
 fn check_shown(check: SourceCheck) -> CheckShown {
     match check {
-        SourceCheck::Matches => CheckShown { text: "matches the build", color: TEXT_MUTED },
-        SourceCheck::Differs => CheckShown { text: "differs from the build", color: ACCENT_AMBER },
-        SourceCheck::NoChecksum => CheckShown { text: "no checksum recorded: not checked", color: TEXT_MUTED },
+        SourceCheck::Matches => CheckShown {
+            text: "matches the build",
+            color: TEXT_MUTED,
+        },
+        SourceCheck::Differs => CheckShown {
+            text: "differs from the build",
+            color: ACCENT_AMBER,
+        },
+        SourceCheck::NoChecksum => CheckShown {
+            text: "no checksum recorded: not checked",
+            color: TEXT_MUTED,
+        },
     }
 }
 
 /// The source view: a header saying how the file was found (or why it is
 /// not shown), then its lines around the current one. Clicking a line picks
 /// it; clicking its gutter toggles its breakpoint.
-pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut Option<u32>) -> Option<SourceAsk> {
+pub(crate) fn source_rows(
+    ui: &mut egui::Ui,
+    pane: &SourcePane<'_>,
+    cursor: &mut Option<u32>,
+) -> Option<SourceAsk> {
     let mut ask = None;
     let loaded = match pane.slot {
         Some(SourceSlot::Read(loaded)) => loaded,
@@ -398,7 +465,10 @@ pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut
                     if let Some(project) = &pane.source.project {
                         if ui.button(SAVE_TO_SETTINGS).clicked() {
                             let map = located_map(&pane.source.build_path, path);
-                            ask = Some(SourceAsk::SaveMap { project: project.clone(), map });
+                            ask = Some(SourceAsk::SaveMap {
+                                project: project.clone(),
+                                map,
+                            });
                         }
                     }
                 }
@@ -422,9 +492,16 @@ pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut
             locate(ui, &mut ask);
         }
         SourceFound::Ambiguous { candidates } => {
-            ui.label(RichText::new(format!("Several files match {name}; none is picked:")).color(ACCENT_AMBER));
+            ui.label(
+                RichText::new(format!("Several files match {name}; none is picked:"))
+                    .color(ACCENT_AMBER),
+            );
             for candidate in candidates {
-                ui.label(RichText::new(candidate.display().to_string()).monospace().color(TEXT_MUTED));
+                ui.label(
+                    RichText::new(candidate.display().to_string())
+                        .monospace()
+                        .color(TEXT_MUTED),
+                );
             }
             locate(ui, &mut ask);
         }
@@ -433,7 +510,10 @@ pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut
             locate(ui, &mut ask);
         }
         SourceFound::Unreadable { path, reason } => {
-            ui.label(RichText::new(format!("{} does not read: {reason}", path.display())).color(ACCENT_AMBER));
+            ui.label(
+                RichText::new(format!("{} does not read: {reason}", path.display()))
+                    .color(ACCENT_AMBER),
+            );
             locate(ui, &mut ask);
         }
     }
@@ -448,7 +528,10 @@ pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut
     // Where the open tip hangs: under its word, on its line's row.
     let mut tip_anchor = None;
     for number in first..last {
-        let Some(line) = usize::try_from(number).ok().and_then(|number| number.checked_sub(1)).and_then(|at| text.lines.get(at))
+        let Some(line) = usize::try_from(number)
+            .ok()
+            .and_then(|number| number.checked_sub(1))
+            .and_then(|at| text.lines.get(at))
         else {
             break;
         };
@@ -471,15 +554,26 @@ pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut
         };
         let shown = line.replace('\t', "    ");
         let cells = line_cells(number.to_string(), digits, shown.clone(), color);
-        let response = list_row(ui, GUTTER, &cells, tone, RowSense::Pick { selected: picked });
+        let response = list_row(
+            ui,
+            GUTTER,
+            &cells,
+            tone,
+            RowSense::Pick { selected: picked },
+        );
         if current && pane.follow {
             response.scroll_to_me(Some(egui::Align::Center));
         }
         if let Some(view) = pane.tip.as_ref().filter(|view| view.tip.line == number) {
-            let x = line_char_x(response.rect, digits, character, view.tip.column).unwrap_or(response.rect.left());
+            let x = line_char_x(response.rect, digits, character, view.tip.column)
+                .unwrap_or(response.rect.left());
             tip_anchor = Some(egui::pos2(x, response.rect.bottom()));
         }
-        let mark = pane.marks.iter().find(|at| at.line == number).map(|at| at.mark);
+        let mark = pane
+            .marks
+            .iter()
+            .find(|at| at.line == number)
+            .map(|at| at.mark);
         match line_lead(current, pane.place, mark) {
             Lead::Arrow(color) => lead_arrow(ui, response.rect, color),
             Lead::Hollow => lead_hollow_arrow(ui, response.rect, ACCENT_CYAN, CALLER_LINE),
@@ -489,7 +583,10 @@ pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut
             Lead::Nothing => {}
         }
         response.context_menu(|ui| {
-            if ui.button(format!("{REFERENCES_TO} line {number}")).clicked() {
+            if ui
+                .button(format!("{REFERENCES_TO} line {number}"))
+                .clicked()
+            {
                 ask = Some(SourceAsk::References(number));
                 ui.close();
             }
@@ -505,7 +602,13 @@ pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut
                 let clicked = response
                     .interact_pointer_pos()
                     .and_then(|at| line_char_at(response.rect, digits, character, at.x))
-                    .and_then(|column| expression_at(&shown, column).map(|expression| SourceTip { expression, line: number, column }));
+                    .and_then(|column| {
+                        expression_at(&shown, column).map(|expression| SourceTip {
+                            expression,
+                            line: number,
+                            column,
+                        })
+                    });
                 if let Some(tip) = clicked {
                     ask = Some(SourceAsk::ShowTip(tip));
                 }
@@ -527,7 +630,11 @@ const TIP_WIDTH: f32 = 520.0;
 /// The value tip under its word (`anchor`, where its line is drawn): the
 /// expression, then its rows as the Locals pane draws them. Escape, a click
 /// outside it, or a word that names nothing closes it.
-fn tip_popup(ui: &mut egui::Ui, view: &TipView<'_>, anchor: Option<egui::Pos2>) -> Option<SourceAsk> {
+fn tip_popup(
+    ui: &mut egui::Ui,
+    view: &TipView<'_>,
+    anchor: Option<egui::Pos2>,
+) -> Option<SourceAsk> {
     if let TipRead::NoVariable { text } = view.read {
         if *text == view.tip.expression {
             return Some(SourceAsk::CloseTip);
@@ -538,27 +645,36 @@ fn tip_popup(ui: &mut egui::Ui, view: &TipView<'_>, anchor: Option<egui::Pos2>) 
     }
     let anchor = anchor?;
     let mut ask = None;
-    let area = egui::Area::new(ui.id().with(VALUE_TIP)).order(egui::Order::Foreground).fixed_pos(anchor).show(ui.ctx(), |ui| {
-        let frame = egui::Frame::popup(ui.style()).show(ui, |ui| {
-            ui.set_max_width(TIP_WIDTH);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(RichText::new(&view.tip.expression).monospace().strong());
-            ui.add_space(4.0);
-            match view.read {
-                TipRead::Rows(read) if read.text == view.tip.expression => {
-                    if let Some(row) = variable_rows(ui, &read.rows, view.names, view.index) {
-                        ask = Some(SourceAsk::TipRow(row));
+    let area = egui::Area::new(ui.id().with(VALUE_TIP))
+        .order(egui::Order::Foreground)
+        .fixed_pos(anchor)
+        .show(ui.ctx(), |ui| {
+            let frame = egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(TIP_WIDTH);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(RichText::new(&view.tip.expression).monospace().strong());
+                ui.add_space(4.0);
+                match view.read {
+                    TipRead::Rows(read) if read.text == view.tip.expression => {
+                        if let Some(row) = variable_rows(ui, &read.rows, view.names, view.index) {
+                            ask = Some(SourceAsk::TipRow(row));
+                        }
+                    }
+                    TipRead::Rows(_) | TipRead::None | TipRead::NoVariable { .. } => {
+                        ui.label(RichText::new(TIP_READING).color(TEXT_MUTED));
                     }
                 }
-                TipRead::Rows(_) | TipRead::None | TipRead::NoVariable { .. } => {
-                    ui.label(RichText::new(TIP_READING).color(TEXT_MUTED));
-                }
-            }
+            });
+            frame.response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Other, true, VALUE_TIP)
+            });
         });
-        frame.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, VALUE_TIP));
-    });
     let clicked_outside = ui.input(|input| {
-        input.pointer.primary_clicked() && input.pointer.interact_pos().is_some_and(|at| !area.response.rect.contains(at))
+        input.pointer.primary_clicked()
+            && input
+                .pointer
+                .interact_pos()
+                .is_some_and(|at| !area.response.rect.contains(at))
     });
     if ask.is_none() && clicked_outside {
         ask = Some(SourceAsk::CloseTip);
@@ -568,9 +684,10 @@ fn tip_popup(ui: &mut egui::Ui, view: &TipView<'_>, anchor: Option<egui::Pos2>) 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::symbols::kernel::tests::{kernel_identity, kernel_symbols, KERNEL_BASE};
     use std::path::PathBuf;
+
+    use super::*;
+    use crate::symbols::kernel::tests::{KERNEL_BASE, kernel_identity, kernel_symbols};
     use crate::symbols::names::tests::{hub_with_kernel_code, loaded};
 
     const TRAP: &str = r"d:\os\src\ntos\ke\amd64\trap.asm";
@@ -585,24 +702,46 @@ mod tests {
         let source = at_line_100();
         assert_eq!(source.line, 100);
         assert_eq!(source.build_path, TRAP);
-        assert_eq!(source.key, SourceKey { identity: kernel_identity(), file: 0 });
+        assert_eq!(
+            source.key,
+            SourceKey {
+                identity: kernel_identity(),
+                file: 0
+            }
+        );
         assert_eq!(source.module_base, KERNEL_BASE);
         let view = hub_with_kernel_code(loaded()).view();
-        assert_eq!(source_at(KERNEL_BASE + 0x1100, &kernel_symbols(), &view).map(|source| source.line), None, "a public has no lines");
-        assert!(source_at(0x1234, &kernel_symbols(), &view).is_none(), "outside every module");
+        assert_eq!(
+            source_at(KERNEL_BASE + 0x1100, &kernel_symbols(), &view).map(|source| source.line),
+            None,
+            "a public has no lines"
+        );
+        assert!(
+            source_at(0x1234, &kernel_symbols(), &view).is_none(),
+            "outside every module"
+        );
     }
 
     fn trap_line(line: u32) -> BreakpointTarget {
-        BreakpointTarget::Source(SourceTarget { file: "trap.asm".into(), line })
+        BreakpointTarget::Source(SourceTarget {
+            file: "trap.asm".into(),
+            line,
+        })
     }
 
     /// No module of the owner's runs in another process.
     static NOWHERE: crate::debugger::windows::ModulesElsewhere =
-        crate::debugger::windows::ModulesElsewhere { names: Vec::new(), modules: Vec::new() };
+        crate::debugger::windows::ModulesElsewhere {
+            names: Vec::new(),
+            modules: Vec::new(),
+        };
 
     /// A pause's modules: `symbols`, and nothing in other processes.
     fn only(symbols: &SymbolIndex) -> BreakpointModules<'_> {
-        BreakpointModules { index: symbols, elsewhere: &NOWHERE }
+        BreakpointModules {
+            index: symbols,
+            elsewhere: &NOWHERE,
+        }
     }
 
     #[test]
@@ -611,16 +750,32 @@ mod tests {
         let symbols = kernel_symbols();
         let source = at_line_100();
         // Line 104 by its address, line 100 by source, line 300 pending.
-        let applied = [CodeBreakpoint::Linear(KERNEL_BASE + 0x1050), CodeBreakpoint::Linear(KERNEL_BASE + 0x1040)];
-        let targets = [trap_line(100), BreakpointTarget::Address(applied[0]), trap_line(300)];
+        let applied = [
+            CodeBreakpoint::Linear(KERNEL_BASE + 0x1050),
+            CodeBreakpoint::Linear(KERNEL_BASE + 0x1040),
+        ];
+        let targets = [
+            trap_line(100),
+            BreakpointTarget::Address(applied[0]),
+            trap_line(300),
+        ];
         let resolutions = Resolutions::of(&targets, Some(&only(&symbols)), &view);
         let marks = line_marks(&source, &applied, &targets, &resolutions);
         assert_eq!(
             marks.into_iter().collect::<Vec<LineMarkAt>>(),
             [
-                LineMarkAt { line: 100, mark: LineMark::Set },
-                LineMarkAt { line: 104, mark: LineMark::Set },
-                LineMarkAt { line: 300, mark: LineMark::Pending },
+                LineMarkAt {
+                    line: 100,
+                    mark: LineMark::Set
+                },
+                LineMarkAt {
+                    line: 104,
+                    mark: LineMark::Set
+                },
+                LineMarkAt {
+                    line: 300,
+                    mark: LineMark::Pending
+                },
             ]
         );
     }
@@ -634,23 +789,63 @@ mod tests {
         let symbols = kernel_symbols();
         let source = at_line_100();
         let address = BreakpointTarget::Address(CodeBreakpoint::Linear(KERNEL_BASE + 0x1050));
-        assert_eq!(toggled_line(&[trap_line(100)], &source, 100, Some(only(&symbols)), &view), []);
-        assert_eq!(toggled_line(&[address.clone()], &source, 104, Some(only(&symbols)), &view), []);
-        let added = BreakpointTarget::Source(SourceTarget { file: TRAP.into(), line: 104 });
-        assert_eq!(toggled_line(&[trap_line(100)], &source, 104, Some(only(&symbols)), &view), [trap_line(100), added]);
+        assert_eq!(
+            toggled_line(&[trap_line(100)], &source, 100, Some(only(&symbols)), &view),
+            []
+        );
+        assert_eq!(
+            toggled_line(
+                &[address.clone()],
+                &source,
+                104,
+                Some(only(&symbols)),
+                &view
+            ),
+            []
+        );
+        let added = BreakpointTarget::Source(SourceTarget {
+            file: TRAP.into(),
+            line: 104,
+        });
+        assert_eq!(
+            toggled_line(&[trap_line(100)], &source, 104, Some(only(&symbols)), &view),
+            [trap_line(100), added]
+        );
     }
 
     /// The shown line of a Go to is ringed, not arrowed: the arrow means RIP.
     #[test]
     fn the_source_view_marks_a_shown_line_not_the_current_one() {
-        assert_eq!(line_lead(true, PlaceMark::Current, None), Lead::Arrow(ACCENT_CYAN));
-        assert_eq!(line_lead(true, PlaceMark::Current, Some(LineMark::Set)), Lead::Arrow(ACCENT_RED));
+        assert_eq!(
+            line_lead(true, PlaceMark::Current, None),
+            Lead::Arrow(ACCENT_CYAN)
+        );
+        assert_eq!(
+            line_lead(true, PlaceMark::Current, Some(LineMark::Set)),
+            Lead::Arrow(ACCENT_RED)
+        );
         assert_eq!(line_lead(true, PlaceMark::Shown, None), Lead::Shown);
-        assert_eq!(line_lead(true, PlaceMark::Shown, Some(LineMark::Set)), Lead::Shown);
-        assert_eq!(line_lead(true, PlaceMark::Caller, Some(LineMark::Set)), Lead::Hollow, "a caller's line");
-        assert_eq!(line_lead(false, PlaceMark::Caller, Some(LineMark::Set)), Lead::Dot(ACCENT_RED));
-        assert_eq!(line_lead(false, PlaceMark::Shown, Some(LineMark::Set)), Lead::Dot(ACCENT_RED));
-        assert_eq!(line_lead(false, PlaceMark::Current, Some(LineMark::Pending)), Lead::Ring(ACCENT_RED));
+        assert_eq!(
+            line_lead(true, PlaceMark::Shown, Some(LineMark::Set)),
+            Lead::Shown
+        );
+        assert_eq!(
+            line_lead(true, PlaceMark::Caller, Some(LineMark::Set)),
+            Lead::Hollow,
+            "a caller's line"
+        );
+        assert_eq!(
+            line_lead(false, PlaceMark::Caller, Some(LineMark::Set)),
+            Lead::Dot(ACCENT_RED)
+        );
+        assert_eq!(
+            line_lead(false, PlaceMark::Shown, Some(LineMark::Set)),
+            Lead::Dot(ACCENT_RED)
+        );
+        assert_eq!(
+            line_lead(false, PlaceMark::Current, Some(LineMark::Pending)),
+            Lead::Ring(ACCENT_RED)
+        );
         assert_eq!(line_lead(false, PlaceMark::Current, None), Lead::Nothing);
     }
 
@@ -658,7 +853,11 @@ mod tests {
     fn a_lines_code_starts_at_its_first_row() {
         let source = at_line_100();
         assert_eq!(line_address(&source, 104), Some(KERNEL_BASE + 0x1050));
-        assert_eq!(line_address(&source, 101), Some(KERNEL_BASE + 0x1050), "a line without code runs to the next");
+        assert_eq!(
+            line_address(&source, 101),
+            Some(KERNEL_BASE + 0x1050),
+            "a line without code runs to the next"
+        );
         assert_eq!(line_address(&source, 900), None);
     }
 
@@ -668,11 +867,23 @@ mod tests {
         // host's, so it is spelled with this host's separators.
         let root = PathBuf::from(if cfg!(windows) { r"D:\" } else { "/" });
         let work = root.join("work");
-        let map = located_map(r"C:\agent\src\io\read.c", &work.join("src").join("io").join("read.c"));
-        assert_eq!(components(&map.from).collect::<Vec<&str>>(), ["C:", "agent"]);
+        let map = located_map(
+            r"C:\agent\src\io\read.c",
+            &work.join("src").join("io").join("read.c"),
+        );
+        assert_eq!(
+            components(&map.from).collect::<Vec<&str>>(),
+            ["C:", "agent"]
+        );
         assert_eq!(map.to, work);
         let other = root.join("b").join("other.c");
         let renamed = located_map(r"C:\a\read.c", &other);
-        assert_eq!(renamed, PathMap { from: r"C:\a\read.c".into(), to: other });
+        assert_eq!(
+            renamed,
+            PathMap {
+                from: r"C:\a\read.c".into(),
+                to: other
+            }
+        );
     }
 }

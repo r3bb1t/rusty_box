@@ -38,11 +38,21 @@ fn backing_of(module: &SymModule, symbols: Option<&SymbolsView>) -> Backing {
     match symbols.and_then(|view| view.image_state(&key)) {
         None
         | Some(
-            ImageState::Pending | ImageState::Downloading { .. } | ImageState::Failed { retry: ImageRetry::From(_), .. },
+            ImageState::Pending
+            | ImageState::Downloading { .. }
+            | ImageState::Failed {
+                retry: ImageRetry::From(_),
+                ..
+            },
         ) => Backing::Awaited(key),
-        Some(ImageState::Loaded { .. } | ImageState::NotOnServer | ImageState::Failed { retry: ImageRetry::Never, .. }) => {
-            Backing::Nothing
-        }
+        Some(
+            ImageState::Loaded { .. }
+            | ImageState::NotOnServer
+            | ImageState::Failed {
+                retry: ImageRetry::Never,
+                ..
+            },
+        ) => Backing::Nothing,
     }
 }
 
@@ -65,8 +75,17 @@ pub(crate) struct ImageBacked<'a, G> {
 impl<'a, G: GuestMemory> ImageBacked<'a, G> {
     /// Each PE module of `modules` backed by its binary when `symbols` has
     /// it, awaiting it while it is looked up or was never asked for.
-    pub(crate) fn new(memory: &'a mut G, modules: &'a [SymModule], symbols: Option<&'a SymbolsView>) -> Self {
-        ImageBacked { memory, modules, symbols, awaited: Vec::new() }
+    pub(crate) fn new(
+        memory: &'a mut G,
+        modules: &'a [SymModule],
+        symbols: Option<&'a SymbolsView>,
+    ) -> Self {
+        ImageBacked {
+            memory,
+            modules,
+            symbols,
+            awaited: Vec::new(),
+        }
     }
 
     /// The binaries reads wanted and did not have, each once, in the order
@@ -79,14 +98,20 @@ impl<'a, G: GuestMemory> ImageBacked<'a, G> {
     /// module holding them.
     fn from_binary(&mut self, linear: u64, buf: &mut [u8]) -> GuestRead {
         let len = u64::try_from(buf.len()).unwrap_or(u64::MAX);
-        let Some(module) = self.modules.iter().find(|module| holds(module, linear, len)) else {
+        let Some(module) = self
+            .modules
+            .iter()
+            .find(|module| holds(module, linear, len))
+        else {
             return GuestRead::Unreadable;
         };
         match backing_of(module, self.symbols) {
-            Backing::File(file) => match file.read_loaded(module.base, Rva(linear.wrapping_sub(module.base)), buf) {
-                ImageRead::Read => GuestRead::Read,
-                ImageRead::Unreadable => GuestRead::Unreadable,
-            },
+            Backing::File(file) => {
+                match file.read_loaded(module.base, Rva(linear.wrapping_sub(module.base)), buf) {
+                    ImageRead::Read => GuestRead::Read,
+                    ImageRead::Unreadable => GuestRead::Unreadable,
+                }
+            }
             Backing::Awaited(key) => {
                 if !self.awaited.contains(&key) {
                     self.awaited.push(key);

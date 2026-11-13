@@ -19,7 +19,7 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::{Feature, Features, Implementation};
-use super::{id, Cpu, CpuConfig, El, NoEl2, Pstate, Step};
+use super::{Cpu, CpuConfig, El, NoEl2, Pstate, Step, id};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
@@ -608,7 +608,11 @@ fn eret_restores_the_fields_and_an_illegal_return_restores_pan() {
 #[test]
 fn an_illegal_return_raises_illegal_state_after_the_fetch_checks() {
     // A misaligned ELR, one past the four mapped blocks, and a mapped one.
-    for (elr, ec) in [(CODE + 0x102, 0x22), (0x80_0000, 0x21), (CODE + 0x100, 0x0E)] {
+    for (elr, ec) in [
+        (CODE + 0x102, 0x22),
+        (0x80_0000, 0x21),
+        (CODE + 0x100, 0x0E),
+    ] {
         let mut m = Machine::new(Implementation::CORTEX_A57);
         // SPSR M = EL2h, which this core lacks.
         m.cpu.sys.spsr_el1 = 0b1001;
@@ -647,7 +651,13 @@ fn eret_restores_software_step_only_into_an_enabled_debug_target() {
         (MDSCR_SS, true, true, EL0T | SPSR_SS, false),
         (MDSCR_SS | MDSCR_KDE, false, false, EL0T | SPSR_SS, false),
         (MDSCR_SS | MDSCR_KDE, true, false, EL1H | SPSR_SS, true),
-        (MDSCR_SS | MDSCR_KDE, true, false, EL1H | SPSR_SS | SPSR_D, false),
+        (
+            MDSCR_SS | MDSCR_KDE,
+            true,
+            false,
+            EL1H | SPSR_SS | SPSR_D,
+            false,
+        ),
         (MDSCR_SS, true, false, EL1H | SPSR_SS, false),
     ] {
         let mut m = Machine::new(Implementation::CORTEX_A57);

@@ -107,13 +107,8 @@ const F_DISCARD: u64 = 1 << 13;
 const F_WRITE_ZEROES: u64 = 1 << 14;
 
 /// The device's own feature bits over a disk the guest may write.
-pub const FEATURES: u64 = F_SEG_MAX
-    | F_BLK_SIZE
-    | F_WCE
-    | F_TOPOLOGY
-    | F_CONFIG_WCE
-    | F_DISCARD
-    | F_WRITE_ZEROES;
+pub const FEATURES: u64 =
+    F_SEG_MAX | F_BLK_SIZE | F_WCE | F_TOPOLOGY | F_CONFIG_WCE | F_DISCARD | F_WRITE_ZEROES;
 
 /// `struct virtio_blk_config` up to the end of `unused1`: the secure erase
 /// fields after it exist only with `VIRTIO_BLK_F_SECURE_ERASE`.

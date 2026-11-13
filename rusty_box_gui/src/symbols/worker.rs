@@ -9,15 +9,19 @@ use rusty_box_symbols::fs_store::FsStore;
 use rusty_box_symbols::http::HttpClient;
 use rusty_box_symbols::identity::ModuleIdentity;
 use rusty_box_symbols::projects::{Freshness, ProjectIndex};
-use rusty_box_symbols::service::{attach_file, ImageOutcome, LocateOutcome, SymbolService, SymbolSource};
-use rusty_box_symbols::store::{FileStore, StoreError, SymbolStore, MAX_FILE_BYTES};
+use rusty_box_symbols::service::{
+    ImageOutcome, LocateOutcome, SymbolService, SymbolSource, attach_file,
+};
+use rusty_box_symbols::store::{FileStore, MAX_FILE_BYTES, StoreError, SymbolStore};
 use rusty_box_symbols::ureq_http::UreqHttp;
 
 use super::hub::{
-    HubConfig, ImageEntry, ImageRetry, ImageState, Job, ModuleEntry, ModuleSymbols, SourceKey, StoreMeasure, SymbolHub,
-    Ticket,
+    HubConfig, ImageEntry, ImageRetry, ImageState, Job, ModuleEntry, ModuleSymbols, SourceKey,
+    StoreMeasure, SymbolHub, Ticket,
 };
-use crate::source::find::{load_source, ProjectLookup, SourceFolders, SourceRequest, MAX_SOURCE_BYTES};
+use crate::source::find::{
+    MAX_SOURCE_BYTES, ProjectLookup, SourceFolders, SourceRequest, load_source,
+};
 
 /// How many lookups run at once.
 pub(crate) const WORKER_COUNT: u32 = 4;
@@ -37,9 +41,17 @@ impl Drop for SymbolWorkers {
 }
 
 /// A worker's service over the file system and the network.
-fn production_service(config: &HubConfig, writer: u32, http: &UreqHttp) -> Result<SymbolService<FsStore, UreqHttp>, StoreError> {
+fn production_service(
+    config: &HubConfig,
+    writer: u32,
+    http: &UreqHttp,
+) -> Result<SymbolService<FsStore, UreqHttp>, StoreError> {
     let store = SymbolStore::open(FsStore::new(writer), config.store.clone())?;
-    Ok(SymbolService::new(store, http.clone(), config.service.clone()))
+    Ok(SymbolService::new(
+        store,
+        http.clone(),
+        config.service.clone(),
+    ))
 }
 
 /// Starts the workers on `hub`. When one does not start, the hub is closed,
@@ -114,7 +126,14 @@ pub(crate) fn perform<F, H, M, B>(
     B: FnMut(ReadCap) -> F,
 {
     if let Job::ReadSource { key } = &ticket.job {
-        read_source(hub, &ticket.config, &mut bare(ReadCap { bytes: MAX_SOURCE_BYTES }), key);
+        read_source(
+            hub,
+            &ticket.config,
+            &mut bare(ReadCap {
+                bytes: MAX_SOURCE_BYTES,
+            }),
+            key,
+        );
         return;
     }
     let stale = current
@@ -130,9 +149,18 @@ pub(crate) fn perform<F, H, M, B>(
                 let reason = format!("the symbol store does not open: {error}");
                 match &ticket.job {
                     // A picked file is read without the store.
-                    Job::Attach { identity, path, consent } => {
-                        let mut files = bare(ReadCap { bytes: MAX_FILE_BYTES });
-                        hub.finish(identity, entry_of(attach_file(&mut files, path, identity, *consent)));
+                    Job::Attach {
+                        identity,
+                        path,
+                        consent,
+                    } => {
+                        let mut files = bare(ReadCap {
+                            bytes: MAX_FILE_BYTES,
+                        });
+                        hub.finish(
+                            identity,
+                            entry_of(attach_file(&mut files, path, identity, *consent)),
+                        );
                     }
                     Job::Locate { identity } => hub.finish(
                         identity,
@@ -151,7 +179,10 @@ pub(crate) fn perform<F, H, M, B>(
                         ImageEntry {
                             state: ImageState::Failed {
                                 reason,
-                                retry: ImageRetry::of(rusty_box_symbols::http::Retry::Retryable, Instant::now()),
+                                retry: ImageRetry::of(
+                                    rusty_box_symbols::http::Retry::Retryable,
+                                    Instant::now(),
+                                ),
                             },
                             file: None,
                         },
@@ -181,7 +212,8 @@ pub(crate) fn perform<F, H, M, B>(
                 && hub.project_check_due(std::time::Instant::now())
             {
                 let projects = hub.view().projects.clone();
-                match projects.freshness(current.service.store().files(), &current.config.projects) {
+                match projects.freshness(current.service.store().files(), &current.config.projects)
+                {
                     Ok(Freshness::Current) => {}
                     Ok(Freshness::Stale) => {
                         if rescan(hub, current) == Indexed::Rebuilt {
@@ -193,7 +225,11 @@ pub(crate) fn perform<F, H, M, B>(
             }
             hub.finish(&identity, entry_of(outcome));
         }
-        Job::Attach { identity, path, consent } => {
+        Job::Attach {
+            identity,
+            path,
+            consent,
+        } => {
             let outcome = current.service.attach(&path, &identity, consent);
             hub.finish(&identity, entry_of(outcome));
         }
@@ -203,9 +239,12 @@ pub(crate) fn perform<F, H, M, B>(
         }),
         Job::LocateImage { key } => {
             let projects = hub.view().projects.clone();
-            let outcome = current.service.locate_image(&key.file_name, key.image, &projects, |progress| {
-                hub.image_progress(&key, progress)
-            });
+            let outcome =
+                current
+                    .service
+                    .locate_image(&key.file_name, key.image, &projects, |progress| {
+                        hub.image_progress(&key, progress)
+                    });
             hub.finish_image(&key, image_entry_of(outcome));
         }
         // Taken before the service is made.
@@ -216,11 +255,23 @@ pub(crate) fn perform<F, H, M, B>(
 /// What a binary's lookup is to the shell.
 fn image_entry_of(outcome: ImageOutcome) -> ImageEntry {
     match outcome {
-        ImageOutcome::Loaded { file, from } => ImageEntry { state: ImageState::Loaded { from }, file: Some(file) },
-        ImageOutcome::NotOnServer => ImageEntry { state: ImageState::NotOnServer, file: None },
+        ImageOutcome::Loaded { file, from } => ImageEntry {
+            state: ImageState::Loaded { from },
+            file: Some(file),
+        },
+        ImageOutcome::NotOnServer => ImageEntry {
+            state: ImageState::NotOnServer,
+            file: None,
+        },
         ImageOutcome::Unavailable { reason } => {
             let retry = ImageRetry::of(reason.retry(), Instant::now());
-            ImageEntry { state: ImageState::Failed { retry, reason: reason.to_string() }, file: None }
+            ImageEntry {
+                state: ImageState::Failed {
+                    retry,
+                    reason: reason.to_string(),
+                },
+                file: None,
+            }
         }
     }
 }
@@ -240,9 +291,9 @@ fn read_source<F: FileStore>(hub: &SymbolHub, config: &HubConfig, files: &mut F,
         return;
     };
     let project = match view.state(&key.identity) {
-        Some(ModuleSymbols::Loaded { from: SymbolSource::Project { name, .. } }) => {
-            config.sources.iter().find(|project| project.name == *name)
-        }
+        Some(ModuleSymbols::Loaded {
+            from: SymbolSource::Project { name, .. },
+        }) => config.sources.iter().find(|project| project.name == *name),
         Some(_) | None => None,
     };
     let folders = match project {
@@ -252,7 +303,10 @@ fn read_source<F: FileStore>(hub: &SymbolHub, config: &HubConfig, files: &mut F,
                 let indexed = match SourceFolders::index(files, &project.folders) {
                     Ok(indexed) => indexed,
                     Err(error) => {
-                        hub.fail_projects(format!("the source folders of {} do not read: {error}", project.name));
+                        hub.fail_projects(format!(
+                            "the source folders of {} do not read: {error}",
+                            project.name
+                        ));
                         SourceFolders::default()
                     }
                 };
@@ -266,17 +320,24 @@ fn read_source<F: FileStore>(hub: &SymbolHub, config: &HubConfig, files: &mut F,
         build_path: &file.path,
         checksum: file.checksum.as_ref(),
         located: &view.run_maps,
-        project: project.map(|project| ProjectLookup { maps: &project.maps, folders: &folders }),
+        project: project.map(|project| ProjectLookup {
+            maps: &project.maps,
+            folders: &folders,
+        }),
         embedded: tables.embedded_source(key.file),
     };
     hub.finish_source(key, load_source(files, &request));
 }
 
-fn locate<F: FileStore, H: HttpClient>(hub: &SymbolHub, current: &mut Current<F, H>, identity: &ModuleIdentity) -> LocateOutcome {
+fn locate<F: FileStore, H: HttpClient>(
+    hub: &SymbolHub,
+    current: &mut Current<F, H>,
+    identity: &ModuleIdentity,
+) -> LocateOutcome {
     let projects = hub.view().projects.clone();
-    current
-        .service
-        .locate(identity, &projects, |progress| hub.progress(identity, progress))
+    current.service.locate(identity, &projects, |progress| {
+        hub.progress(identity, progress)
+    })
 }
 
 /// Whether a rescan built a new index.
@@ -311,7 +372,11 @@ pub(crate) fn entry_of(outcome: LocateOutcome) -> ModuleEntry {
             state: ModuleSymbols::Refused { found, path },
             tables: None,
         },
-        LocateOutcome::Forced { tables, found, path } => ModuleEntry {
+        LocateOutcome::Forced {
+            tables,
+            found,
+            path,
+        } => ModuleEntry {
             state: ModuleSymbols::Forced { found, path },
             tables: Some(tables),
         },
@@ -331,43 +396,63 @@ pub(crate) fn entry_of(outcome: LocateOutcome) -> ModuleEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::source::find::{FoundBy, PathMap, SourceCheck, SourceFound};
-    use crate::symbols::hub::{
-        ImageKey, ImageState, Priority, ProjectSources, SourceKey, SourceSlot, WantedModule, IMAGE_RETRY_AFTER,
-    };
-    use rusty_box_symbols_fixtures::pe::{pe64_file, Pe64Spec, SpecSection, PAGE_ALIGNED, SECTION_CODE};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
     use rusty_box_symbols::http::{Flow, Progress, Retry};
     use rusty_box_symbols::identity::{Guid, PdbId, PeImageId};
     use rusty_box_symbols::memory_store::MemoryStore;
     use rusty_box_symbols::projects::ProjectFolders;
     use rusty_box_symbols::scripted_http::ScriptedHttp;
-    use rusty_box_symbols::service::{Consent, Downloads, ServiceConfig, DEFAULT_MAX_DOWNLOAD};
+    use rusty_box_symbols::service::{Consent, DEFAULT_MAX_DOWNLOAD, Downloads, ServiceConfig};
     use rusty_box_symbols_fixtures::pdb::{
-        build_pdb, FixtureChecksum, FixtureLine, FixtureProcedure, FixturePublic, PdbFixture, PublicKind,
+        FixtureChecksum, FixtureLine, FixtureProcedure, FixturePublic, PdbFixture, PublicKind,
+        build_pdb,
     };
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
+    use rusty_box_symbols_fixtures::pe::{
+        PAGE_ALIGNED, Pe64Spec, SECTION_CODE, SpecSection, pe64_file,
+    };
+
+    use super::*;
+    use crate::source::find::{FoundBy, PathMap, SourceCheck, SourceFound};
+    use crate::symbols::hub::{
+        IMAGE_RETRY_AFTER, ImageKey, ImageState, Priority, ProjectSources, SourceKey, SourceSlot,
+        WantedModule,
+    };
 
     const MSDL: &str = "https://msdl.example/symbols";
 
     fn module(name: &str, guid_byte: u8) -> ModuleIdentity {
         ModuleIdentity::Pe {
             file_name: format!("{name}.sys"),
-            image: PeImageId { time_date_stamp: u32::from(guid_byte), size_of_image: 0x1000 },
-            pdb: Some(PdbId { name: format!("{name}.pdb"), guid: Guid::from_le_bytes([guid_byte; 16]), age: 1 }),
+            image: PeImageId {
+                time_date_stamp: u32::from(guid_byte),
+                size_of_image: 0x1000,
+            },
+            pdb: Some(PdbId {
+                name: format!("{name}.pdb"),
+                guid: Guid::from_le_bytes([guid_byte; 16]),
+                age: 1,
+            }),
         }
     }
 
     fn pdb(guid_byte: u8) -> Vec<u8> {
         let mut fixture = PdbFixture::new([guid_byte; 16], 1);
-        fixture.publics.push(FixturePublic { name: "Entry".into(), section: 1, offset: 0, kind: PublicKind::Function });
+        fixture.publics.push(FixturePublic {
+            name: "Entry".into(),
+            section: 1,
+            offset: 0,
+            kind: PublicKind::Function,
+        });
         build_pdb(&fixture)
     }
 
     fn url(identity: &ModuleIdentity) -> String {
         match identity {
-            ModuleIdentity::Pe { pdb: Some(pdb), .. } => format!("{MSDL}/{0}/{1}/{0}", pdb.name, pdb.store_key()),
+            ModuleIdentity::Pe { pdb: Some(pdb), .. } => {
+                format!("{MSDL}/{0}/{1}/{0}", pdb.name, pdb.store_key())
+            }
             ModuleIdentity::Pe { pdb: None, .. } | ModuleIdentity::Elf { .. } => String::new(),
         }
     }
@@ -415,7 +500,13 @@ mod tests {
                 }
                 files
             };
-            perform(hub, &mut self.current, &mut |_: &HubConfig| Ok(ready.take().expect("made once")), &mut bare, ticket);
+            perform(
+                hub,
+                &mut self.current,
+                &mut |_: &HubConfig| Ok(ready.take().expect("made once")),
+                &mut bare,
+                ticket,
+            );
         }
 
         /// Performs every job queued now.
@@ -431,7 +522,10 @@ mod tests {
     }
 
     fn want(hub: &SymbolHub, identity: &ModuleIdentity, priority: Priority) {
-        hub.want(&[WantedModule { identity: identity.clone(), priority }]);
+        hub.want(&[WantedModule {
+            identity: identity.clone(),
+            priority,
+        }]);
     }
 
     #[test]
@@ -447,9 +541,22 @@ mod tests {
         assert_eq!(hub.view().state(&kernel), Some(&ModuleSymbols::Pending));
         worker.drain(&hub);
         let view = hub.view();
-        assert!(matches!(view.state(&kernel), Some(ModuleSymbols::Loaded { from: SymbolSource::Server { .. } })));
-        assert!(view.tables(&kernel).and_then(|tables| tables.address_of("Entry")).is_some());
-        assert_eq!(worker.files().paths().len(), 1, "kept in the store, looked up once");
+        assert!(matches!(
+            view.state(&kernel),
+            Some(ModuleSymbols::Loaded {
+                from: SymbolSource::Server { .. }
+            })
+        ));
+        assert!(
+            view.tables(&kernel)
+                .and_then(|tables| tables.address_of("Entry"))
+                .is_some()
+        );
+        assert_eq!(
+            worker.files().paths().len(),
+            1,
+            "kept in the store, looked up once"
+        );
     }
 
     #[test]
@@ -474,16 +581,31 @@ mod tests {
         want(&hub, &kernel, Priority::Kernel);
         let ticket = hub.try_next_job().expect("a job");
         hub.cancel(&kernel);
-        assert_eq!(hub.progress(&kernel, Progress { done: 1, total: None }), Flow::Cancel);
+        assert_eq!(
+            hub.progress(
+                &kernel,
+                Progress {
+                    done: 1,
+                    total: None
+                }
+            ),
+            Flow::Cancel
+        );
         worker.perform(&hub, ticket);
         assert_eq!(
             hub.view().state(&kernel),
-            Some(&ModuleSymbols::Failed { reason: "cancelled".to_owned(), retry: Retry::Retryable })
+            Some(&ModuleSymbols::Failed {
+                reason: "cancelled".to_owned(),
+                retry: Retry::Retryable
+            })
         );
         hub.retry(&kernel);
         assert_eq!(hub.view().state(&kernel), Some(&ModuleSymbols::Pending));
         worker.drain(&hub);
-        assert!(matches!(hub.view().state(&kernel), Some(ModuleSymbols::Loaded { .. })));
+        assert!(matches!(
+            hub.view().state(&kernel),
+            Some(ModuleSymbols::Loaded { .. })
+        ));
     }
 
     /// Review focus 3: a file of another build is refused, and Load anyway
@@ -499,11 +621,16 @@ mod tests {
         let mut worker = Worker::new(&config, files, ScriptedHttp::default());
         hub.attach(&kernel, picked.clone(), Consent::MatchOnly);
         worker.drain(&hub);
-        assert!(matches!(hub.view().state(&kernel), Some(ModuleSymbols::Refused { path, .. }) if *path == picked));
+        assert!(
+            matches!(hub.view().state(&kernel), Some(ModuleSymbols::Refused { path, .. }) if *path == picked)
+        );
         assert!(hub.view().tables(&kernel).is_none());
         hub.attach(&kernel, picked, Consent::LoadAnyway);
         worker.drain(&hub);
-        assert!(matches!(hub.view().state(&kernel), Some(ModuleSymbols::Forced { .. })));
+        assert!(matches!(
+            hub.view().state(&kernel),
+            Some(ModuleSymbols::Forced { .. })
+        ));
         assert!(hub.view().tables(&kernel).is_some());
     }
 
@@ -532,7 +659,10 @@ mod tests {
         free.drain(&hub);
         looking.perform(&hub, lookup);
         free.drain(&hub);
-        assert!(matches!(hub.view().state(&kernel), Some(ModuleSymbols::Loaded { .. })));
+        assert!(matches!(
+            hub.view().state(&kernel),
+            Some(ModuleSymbols::Loaded { .. })
+        ));
         assert!(hub.view().tables(&kernel).is_some());
     }
 
@@ -541,7 +671,10 @@ mod tests {
     #[test]
     fn a_burst_of_misses_lists_the_project_folders_once() {
         let folder = PathBuf::from("work").join("build");
-        let projects = vec![ProjectFolders { name: "mydriver".into(), symbols: vec![folder] }];
+        let projects = vec![ProjectFolders {
+            name: "mydriver".into(),
+            symbols: vec![folder],
+        }];
         let config = config(projects);
         let hub = SymbolHub::new(config.clone());
         let mut worker = Worker::new(&config, MemoryStore::default(), ScriptedHttp::default());
@@ -563,9 +696,13 @@ mod tests {
         hub.attach(&kernel, picked.clone(), Consent::MatchOnly);
         let ticket = hub.try_next_job().expect("the attach");
         let mut current: Option<Current<MemoryStore, ScriptedHttp>> = None;
-        let mut unopened = |config: &HubConfig| -> Result<SymbolService<MemoryStore, ScriptedHttp>, StoreError> {
-            Err(StoreError::Inspect { path: config.store.clone(), source: std::io::Error::other("the drive is gone") })
-        };
+        let mut unopened =
+            |config: &HubConfig| -> Result<SymbolService<MemoryStore, ScriptedHttp>, StoreError> {
+                Err(StoreError::Inspect {
+                    path: config.store.clone(),
+                    source: std::io::Error::other("the drive is gone"),
+                })
+            };
         let mut bare = |_: ReadCap| {
             let mut files = MemoryStore::default();
             files.insert(picked.clone(), pdb(1));
@@ -573,7 +710,12 @@ mod tests {
         };
         perform(&hub, &mut current, &mut unopened, &mut bare, ticket);
         assert!(
-            matches!(hub.view().state(&kernel), Some(ModuleSymbols::Loaded { from: SymbolSource::Attached { .. } })),
+            matches!(
+                hub.view().state(&kernel),
+                Some(ModuleSymbols::Loaded {
+                    from: SymbolSource::Attached { .. }
+                })
+            ),
             "{:?}",
             hub.view().state(&kernel)
         );
@@ -586,7 +728,10 @@ mod tests {
     fn a_build_made_after_indexing_is_found_by_indexing_again() {
         let driver = module("mydriver", 4);
         let folder = PathBuf::from("work").join("build");
-        let projects = vec![ProjectFolders { name: "mydriver".into(), symbols: vec![folder.clone()] }];
+        let projects = vec![ProjectFolders {
+            name: "mydriver".into(),
+            symbols: vec![folder.clone()],
+        }];
         let config = config(projects);
         let hub = SymbolHub::new(config.clone());
         let mut worker = Worker::new(&config, MemoryStore::default(), ScriptedHttp::default());
@@ -596,7 +741,12 @@ mod tests {
         worker.files().insert(folder.join("mydriver.pdb"), pdb(4));
         want(&hub, &driver, Priority::Shown);
         worker.drain(&hub);
-        assert!(matches!(hub.view().state(&driver), Some(ModuleSymbols::Loaded { from: SymbolSource::Project { .. } })));
+        assert!(matches!(
+            hub.view().state(&driver),
+            Some(ModuleSymbols::Loaded {
+                from: SymbolSource::Project { .. }
+            })
+        ));
         assert_eq!(hub.view().projects.len(), 1);
     }
 
@@ -613,7 +763,10 @@ mod tests {
             offset: 0x100,
             len: 0x10,
             file: READ_C.into(),
-            checksum: Some(FixtureChecksum { kind: 1, bytes: md5::Md5::digest(source).to_vec() }),
+            checksum: Some(FixtureChecksum {
+                kind: 1,
+                bytes: md5::Md5::digest(source).to_vec(),
+            }),
             lines: vec![FixtureLine { offset: 0, line: 1 }],
         });
         build_pdb(&fixture)
@@ -632,23 +785,48 @@ mod tests {
         let build = PathBuf::from("work").join("build");
         let mut files = MemoryStore::default();
         files.insert(build.join("mydriver.pdb"), driver_pdb(4, source));
-        let mut config = config(vec![ProjectFolders { name: "mydriver".into(), symbols: vec![build] }]);
-        config.sources =
-            vec![ProjectSources { name: "mydriver".into(), folders: vec![PathBuf::from("work").join("src")], maps: Vec::new() }];
+        let mut config = config(vec![ProjectFolders {
+            name: "mydriver".into(),
+            symbols: vec![build],
+        }]);
+        config.sources = vec![ProjectSources {
+            name: "mydriver".into(),
+            folders: vec![PathBuf::from("work").join("src")],
+            maps: Vec::new(),
+        }];
         let hub = SymbolHub::new(config.clone());
         let mut worker = Worker::new(&config, files, ScriptedHttp::default());
-        worker.disk.insert(PathBuf::from("work").join("src").join("io").join("read.c"), source.to_vec());
+        worker.disk.insert(
+            PathBuf::from("work").join("src").join("io").join("read.c"),
+            source.to_vec(),
+        );
         want(&hub, &driver, Priority::Shown);
         worker.drain(&hub);
-        assert!(matches!(hub.view().state(&driver), Some(ModuleSymbols::Loaded { from: SymbolSource::Project { .. } })));
-        LoadedDriver { hub, worker, driver }
+        assert!(matches!(
+            hub.view().state(&driver),
+            Some(ModuleSymbols::Loaded {
+                from: SymbolSource::Project { .. }
+            })
+        ));
+        LoadedDriver {
+            hub,
+            worker,
+            driver,
+        }
     }
 
     #[test]
     fn a_wanted_source_is_read_once_and_published() {
         let source = b"int read_block(void);\r\n".to_vec();
-        let LoadedDriver { hub, mut worker, driver } = driver_with_source(&source);
-        let key = SourceKey { identity: driver, file: 0 };
+        let LoadedDriver {
+            hub,
+            mut worker,
+            driver,
+        } = driver_with_source(&source);
+        let key = SourceKey {
+            identity: driver,
+            file: 0,
+        };
         hub.want_source(&key);
         hub.want_source(&key);
         assert_eq!(hub.view().sources.get(&key), Some(&SourceSlot::Reading));
@@ -668,19 +846,35 @@ mod tests {
                 check: SourceCheck::Matches,
             }
         );
-        assert_eq!(loaded.text.as_ref().map(|text| text.lines.clone()), Some(vec!["int read_block(void);".to_owned()]));
+        assert_eq!(
+            loaded.text.as_ref().map(|text| text.lines.clone()),
+            Some(vec!["int read_block(void);".to_owned()])
+        );
     }
 
     /// The owner fixed the source folders and pressed Rescan: what was read
     /// is found again.
     #[test]
     fn a_rescan_forgets_the_sources_read() {
-        let LoadedDriver { hub, mut worker, driver } = driver_with_source(b"x");
-        let key = SourceKey { identity: driver, file: 0 };
+        let LoadedDriver {
+            hub,
+            mut worker,
+            driver,
+        } = driver_with_source(b"x");
+        let key = SourceKey {
+            identity: driver,
+            file: 0,
+        };
         hub.want_source(&key);
         worker.drain(&hub);
-        assert!(matches!(hub.view().sources.get(&key), Some(SourceSlot::Read(_))));
-        assert!(!hub.view().source_folders.is_empty(), "the folders were indexed for the read");
+        assert!(matches!(
+            hub.view().sources.get(&key),
+            Some(SourceSlot::Read(_))
+        ));
+        assert!(
+            !hub.view().source_folders.is_empty(),
+            "the folders were indexed for the read"
+        );
         hub.rescan();
         assert!(hub.view().sources.is_empty());
         assert!(hub.view().source_folders.is_empty());
@@ -698,19 +892,36 @@ mod tests {
         let hub = SymbolHub::new(config.clone());
         let mut worker = Worker::new(&config, MemoryStore::default(), http);
         let picked = PathBuf::from("picked");
-        worker.disk.insert(picked.join("src").join("io").join("read.c"), source);
+        worker
+            .disk
+            .insert(picked.join("src").join("io").join("read.c"), source);
         want(&hub, &kernel, Priority::Kernel);
         worker.drain(&hub);
-        let key = SourceKey { identity: kernel, file: 0 };
+        let key = SourceKey {
+            identity: kernel,
+            file: 0,
+        };
         hub.want_source(&key);
         worker.drain(&hub);
         let found = |hub: &SymbolHub| match hub.view().sources.get(&key) {
             Some(SourceSlot::Read(loaded)) => Some(loaded.found.clone()),
             Some(SourceSlot::Reading) | None => None,
         };
-        assert_eq!(found(&hub), Some(SourceFound::Missing { build_path: READ_C.to_owned() }));
-        hub.add_run_map(PathMap { from: r"C:\agent".to_owned(), to: picked.clone() });
-        assert_eq!(hub.view().sources.get(&key), None, "what was read is found again");
+        assert_eq!(
+            found(&hub),
+            Some(SourceFound::Missing {
+                build_path: READ_C.to_owned()
+            })
+        );
+        hub.add_run_map(PathMap {
+            from: r"C:\agent".to_owned(),
+            to: picked.clone(),
+        });
+        assert_eq!(
+            hub.view().sources.get(&key),
+            None,
+            "what was read is found again"
+        );
         hub.want_source(&key);
         worker.drain(&hub);
         assert_eq!(
@@ -728,7 +939,10 @@ mod tests {
         let config = config(Vec::new());
         let hub = SymbolHub::new(config.clone());
         let mut worker = Worker::new(&config, MemoryStore::default(), ScriptedHttp::default());
-        let key = SourceKey { identity: module("nowhere", 9), file: 0 };
+        let key = SourceKey {
+            identity: module("nowhere", 9),
+            file: 0,
+        };
         hub.want_source(&key);
         worker.drain(&hub);
         assert_eq!(hub.view().sources.get(&key), None);
@@ -751,7 +965,10 @@ mod tests {
         assert!(hub.view().tables(&kernel).is_none());
         hub.retry(&kernel);
         worker.drain(&hub);
-        assert!(matches!(hub.view().state(&kernel), Some(ModuleSymbols::Loaded { .. })));
+        assert!(matches!(
+            hub.view().state(&kernel),
+            Some(ModuleSymbols::Loaded { .. })
+        ));
     }
 
     /// The shell is asked to draw only once the hub has let go of its lock:
@@ -778,8 +995,15 @@ mod tests {
         hub.cancel(&kernel);
         // egui reports a request when it moves the next frame earlier, so
         // two in one frame report once.
-        assert!(requests.load(Ordering::SeqCst) >= 1, "a publication asks for a frame");
-        assert_eq!(while_locked.load(Ordering::SeqCst), 0, "no request is made under the hub's lock");
+        assert!(
+            requests.load(Ordering::SeqCst) >= 1,
+            "a publication asks for a frame"
+        );
+        assert_eq!(
+            while_locked.load(Ordering::SeqCst),
+            0,
+            "no request is made under the hub's lock"
+        );
     }
 
     #[test]
@@ -793,10 +1017,16 @@ mod tests {
         assert_ne!(after.generation, before.generation);
     }
 
-    const WIDGET: PeImageId = PeImageId { time_date_stamp: 0x4549_AD6E, size_of_image: 0x2000 };
+    const WIDGET: PeImageId = PeImageId {
+        time_date_stamp: 0x4549_AD6E,
+        size_of_image: 0x2000,
+    };
 
     fn widget_key() -> ImageKey {
-        ImageKey { file_name: "widget.dll".into(), image: WIDGET }
+        ImageKey {
+            file_name: "widget.dll".into(),
+            image: WIDGET,
+        }
     }
 
     fn widget_binary() -> Vec<u8> {
@@ -805,7 +1035,12 @@ mod tests {
             size_of_image: WIDGET.size_of_image,
             image_base: 0x7FF_0000_0000,
             section_alignment: PAGE_ALIGNED,
-            sections: vec![SpecSection { name: b".text", rva: 0x1000, bytes: vec![0xC3; 0x10], characteristics: SECTION_CODE }],
+            sections: vec![SpecSection {
+                name: b".text",
+                rva: 0x1000,
+                bytes: vec![0xC3; 0x10],
+                characteristics: SECTION_CODE,
+            }],
             exception: None,
             base_relocations: None,
             import_address_table: None,
@@ -815,20 +1050,35 @@ mod tests {
     #[test]
     fn a_wanted_binary_is_looked_up_once_and_published() {
         let mut http = ScriptedHttp::default();
-        http.respond(&format!("{MSDL}/widget.dll/4549AD6E2000/widget.dll"), 200, widget_binary());
+        http.respond(
+            &format!("{MSDL}/widget.dll/4549AD6E2000/widget.dll"),
+            200,
+            widget_binary(),
+        );
         let config = config(Vec::new());
         let hub = SymbolHub::new(config.clone());
         let mut worker = Worker::new(&config, MemoryStore::default(), http);
         hub.want_images(&[widget_key()], Instant::now());
         hub.want_images(&[widget_key()], Instant::now());
-        assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::Pending));
+        assert_eq!(
+            hub.view().image_state(&widget_key()),
+            Some(&ImageState::Pending)
+        );
         let ticket = hub.try_next_job().expect("the lookup");
         assert_eq!(ticket.job, Job::LocateImage { key: widget_key() });
         assert!(hub.try_next_job().is_none(), "asked twice, looked up once");
         worker.perform(&hub, ticket);
         let view = hub.view();
-        assert!(matches!(view.image_state(&widget_key()), Some(ImageState::Loaded { from: SymbolSource::Server { .. } })));
-        assert_eq!(view.image(&widget_key()).map(|file| file.image_id()), Some(WIDGET));
+        assert!(matches!(
+            view.image_state(&widget_key()),
+            Some(ImageState::Loaded {
+                from: SymbolSource::Server { .. }
+            })
+        ));
+        assert_eq!(
+            view.image(&widget_key()).map(|file| file.image_id()),
+            Some(WIDGET)
+        );
     }
 
     #[test]
@@ -838,11 +1088,18 @@ mod tests {
         let mut worker = Worker::new(&config, MemoryStore::default(), ScriptedHttp::default());
         hub.want_images(&[widget_key()], Instant::now());
         worker.drain(&hub);
-        assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::NotOnServer));
+        assert_eq!(
+            hub.view().image_state(&widget_key()),
+            Some(&ImageState::NotOnServer)
+        );
         hub.want_images(&[widget_key()], Instant::now() + IMAGE_RETRY_AFTER);
         assert!(hub.try_next_job().is_none(), "not asked again this run");
         hub.reconfigure(config);
-        assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::Pending), "new settings may find it");
+        assert_eq!(
+            hub.view().image_state(&widget_key()),
+            Some(&ImageState::Pending),
+            "new settings may find it"
+        );
     }
 
     /// The network was down for the first lookup: a pause that needs the
@@ -859,8 +1116,15 @@ mod tests {
         let asked = Instant::now();
         hub.want_images(&[widget_key()], asked);
         worker.drain(&hub);
-        let Some(ImageState::Failed { retry: ImageRetry::From(when), .. }) = hub.view().image_state(&widget_key()).cloned() else {
-            panic!("a failure that may mend: {:?}", hub.view().image_state(&widget_key()));
+        let Some(ImageState::Failed {
+            retry: ImageRetry::From(when),
+            ..
+        }) = hub.view().image_state(&widget_key()).cloned()
+        else {
+            panic!(
+                "a failure that may mend: {:?}",
+                hub.view().image_state(&widget_key())
+            );
         };
         assert!(when >= asked + IMAGE_RETRY_AFTER);
         hub.want_images(&[widget_key()], asked);
@@ -869,7 +1133,10 @@ mod tests {
         up.respond(&url, 200, widget_binary());
         let mut worker = Worker::new(&config, MemoryStore::default(), up);
         hub.want_images(&[widget_key()], when);
-        assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::Pending));
+        assert_eq!(
+            hub.view().image_state(&widget_key()),
+            Some(&ImageState::Pending)
+        );
         worker.drain(&hub);
         assert!(hub.view().image(&widget_key()).is_some());
     }
@@ -882,8 +1149,9 @@ mod tests {
             serve(
                 &worker_hub,
                 |config: &HubConfig| {
-                    SymbolStore::open(MemoryStore::default(), config.store.clone())
-                        .map(|store| SymbolService::new(store, ScriptedHttp::default(), config.service.clone()))
+                    SymbolStore::open(MemoryStore::default(), config.store.clone()).map(|store| {
+                        SymbolService::new(store, ScriptedHttp::default(), config.service.clone())
+                    })
                 },
                 |_: ReadCap| MemoryStore::default(),
             )

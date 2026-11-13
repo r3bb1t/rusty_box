@@ -5,8 +5,17 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512.cc`, `avx512_move.cc`, `avx512_pfp.cc`.
 
-use super::avx512_load::cut_opmask_to;
+// Load-bearing in pure no-std builds (core f32/f64 lack these inherent
+// methods there); redundant in unit graphs where std is linked, so the
+// unused-import lint is allowed rather than losing the no-std resolution.
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use rusty_box_core::FloatExt;
+
 use super::avx512_bw::write_zmm_masked_w;
+use super::avx512_load::cut_opmask_to;
+use super::cpu::BxCpuC;
+use super::decoder::{BxSegregs, Instruction};
 use super::softfloat3e::f32_addsub::{f32_add, f32_sub};
 use super::softfloat3e::f32_compare::{f32_max, f32_min};
 use super::softfloat3e::f32_div::f32_div;
@@ -17,19 +26,9 @@ use super::softfloat3e::f64_compare::{f64_max, f64_min};
 use super::softfloat3e::f64_div::f64_div;
 use super::softfloat3e::f64_mul::f64_mul;
 use super::softfloat3e::f64_sqrt::f64_sqrt;
-use super::softfloat3e::softfloat::{softfloat_get_exception_flags, SoftFloatStatus};
+use super::softfloat3e::softfloat::{SoftFloatStatus, softfloat_get_exception_flags};
 use super::softfloat3e::softfloat_types::{Float32, Float64};
-use super::{
-    cpu::BxCpuC,
-    decoder::{BxSegregs, Instruction},
-    xmm::BxPackedZmmRegister,
-};
-// Load-bearing in pure no-std builds (core f32/f64 lack these inherent
-// methods there); redundant in unit graphs where std is linked, so the
-// unused-import lint is allowed rather than losing the no-std resolution.
-#[cfg(not(feature = "std"))]
-#[allow(unused_imports)]
-use rusty_box_core::FloatExt;
+use super::xmm::BxPackedZmmRegister;
 
 /// Width pairing of a VPMOV widening conversion, named after the mnemonic
 /// suffix: `Bw` is byte-to-word, `Dq` dword-to-qword, and so on.
@@ -176,7 +175,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// the effective address to be aligned to the full vector width and raise
     /// #GP(0) otherwise. The unaligned forms (VMOVUPS/UPD, VMOVDQU*) do not.
     /// Bochs avx512_move.cc VMOVAPS_MASK_VpsWpsM.
-    fn evex_check_vector_alignment(&mut self, instr: &Instruction, eaddr: u64) -> super::Result<()> {
+    fn evex_check_vector_alignment(
+        &mut self,
+        instr: &Instruction,
+        eaddr: u64,
+    ) -> super::Result<()> {
         let len_in_bytes = match instr.get_vl() {
             0 => 16u64,
             1 => 32,
@@ -2150,7 +2153,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let ne = vl_bytes(vl) / 2; // word elements
                 for i in 0..ne {
                     let v = src.zmmubyte(i);
-                    r.set_zmm16u(i, if signed { v as i8 as i16 as u16 } else { v as u16 });
+                    r.set_zmm16u(
+                        i,
+                        if signed {
+                            v as i8 as i16 as u16
+                        } else {
+                            v as u16
+                        },
+                    );
                 }
                 write_zmm_masked_w(self, instr.dst(), &r, m, z, vl);
             }
@@ -2158,7 +2168,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let ne = dword_elements(vl);
                 for i in 0..ne {
                     let v = src.zmmubyte(i);
-                    r.set_zmm32u(i, if signed { v as i8 as i32 as u32 } else { v as u32 });
+                    r.set_zmm32u(
+                        i,
+                        if signed {
+                            v as i8 as i32 as u32
+                        } else {
+                            v as u32
+                        },
+                    );
                 }
                 write_zmm_masked(self, instr.dst(), &r, m, z, vl);
             }
@@ -2166,7 +2183,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let ne = qword_elements(vl);
                 for i in 0..ne {
                     let v = src.zmmubyte(i);
-                    r.set_zmm64u(i, if signed { v as i8 as i64 as u64 } else { v as u64 });
+                    r.set_zmm64u(
+                        i,
+                        if signed {
+                            v as i8 as i64 as u64
+                        } else {
+                            v as u64
+                        },
+                    );
                 }
                 write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
             }
@@ -2174,7 +2198,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let ne = dword_elements(vl);
                 for i in 0..ne {
                     let v = src.zmm16u(i);
-                    r.set_zmm32u(i, if signed { v as i16 as i32 as u32 } else { v as u32 });
+                    r.set_zmm32u(
+                        i,
+                        if signed {
+                            v as i16 as i32 as u32
+                        } else {
+                            v as u32
+                        },
+                    );
                 }
                 write_zmm_masked(self, instr.dst(), &r, m, z, vl);
             }
@@ -2182,7 +2213,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let ne = qword_elements(vl);
                 for i in 0..ne {
                     let v = src.zmm16u(i);
-                    r.set_zmm64u(i, if signed { v as i16 as i64 as u64 } else { v as u64 });
+                    r.set_zmm64u(
+                        i,
+                        if signed {
+                            v as i16 as i64 as u64
+                        } else {
+                            v as u64
+                        },
+                    );
                 }
                 write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
             }
@@ -2190,7 +2228,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let ne = qword_elements(vl);
                 for i in 0..ne {
                     let v = src.zmm32u(i);
-                    r.set_zmm64u(i, if signed { v as i32 as i64 as u64 } else { v as u64 });
+                    r.set_zmm64u(
+                        i,
+                        if signed {
+                            v as i32 as i64 as u64
+                        } else {
+                            v as u64
+                        },
+                    );
                 }
                 write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
             }
@@ -2306,6 +2351,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.evex_load_bcst_d_pair(instr)
         }
     }
+
     fn read_evex_rm_pd(
         &mut self,
         instr: &Instruction,
@@ -2376,36 +2422,47 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn evex_vaddps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pfp_2op_ps(instr, f32_add)
     }
+
     pub fn evex_vaddpd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pfp_2op_pd(instr, f64_add)
     }
+
     pub fn evex_vsubps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pfp_2op_ps(instr, f32_sub)
     }
+
     pub fn evex_vsubpd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pfp_2op_pd(instr, f64_sub)
     }
+
     pub fn evex_vmulps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pfp_2op_ps(instr, f32_mul)
     }
+
     pub fn evex_vmulpd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pfp_2op_pd(instr, f64_mul)
     }
+
     pub fn evex_vdivps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pfp_2op_ps(instr, f32_div)
     }
+
     pub fn evex_vdivpd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pfp_2op_pd(instr, f64_div)
     }
+
     pub fn evex_vmaxps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pfp_2op_ps(instr, f32_max)
     }
+
     pub fn evex_vmaxpd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pfp_2op_pd(instr, f64_max)
     }
+
     pub fn evex_vminps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pfp_2op_ps(instr, f32_min)
     }
+
     pub fn evex_vminpd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pfp_2op_pd(instr, f64_min)
     }
@@ -2432,6 +2489,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_zmm_masked(self, instr.dst(), &r, m, z, vl);
         Ok(())
     }
+
     pub fn evex_vsqrtpd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let ne = qword_elements(vl);
@@ -2454,6 +2512,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_zmm_masked_q(self, instr.dst(), &r, m, z, vl);
         Ok(())
     }
+
     // ========================================================================
     // Element duplication, dword/qword rotate-align, and the FP blends.
     // Bochs avx512.cc VMOVSLDUP/VMOVSHDUP/VMOVDDUP, VALIGND/Q, VBLENDMPS/PD.
@@ -2556,7 +2615,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
-
 }
 
 #[cfg(all(test, feature = "alloc"))]
@@ -2569,8 +2627,9 @@ mod tests {
     //! that, because a wrong-width handler produces a correct-looking result
     //! everywhere except the masked lanes.
 
-    use crate::cpu::decoder::{BxSegregs, Instruction};
     use rusty_box_decoder::opcode::Opcode;
+
+    use crate::cpu::decoder::{BxSegregs, Instruction};
 
     /// Register-form EVEX.128 instruction: dst=0, src1=1, src2=2, mask k1,
     /// zero-masking on.
@@ -2609,8 +2668,8 @@ mod tests {
             (Opcode::EvexVxorpdVpdHpdWpd, 0x1111_1111_2222_22DDu64),
         ] {
             let mut machine =
-            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
+                crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+            let mut cpu = machine.ctx();
             cpu.vmm[1].set_zmm64u(0, 0x1111_1111_2222_2222);
             cpu.vmm[1].set_zmm64u(1, 0x3333_3333_4444_4444);
             cpu.vmm[2].set_zmm64u(0, 0x0000_0000_0000_00FF);
@@ -2826,7 +2885,6 @@ mod tests {
         assert_eq!(cpu.opmask[0].rrx(), 0xFF0F, "(!vvvv) & rm");
     }
 
-
     // ---- duplication and align ------------------------------------------
 
     #[test]
@@ -2858,7 +2916,11 @@ mod tests {
         cpu.execute_instruction(&evex_unmasked(Opcode::EvexVmovddupVpdWpd))
             .unwrap();
         assert_eq!(cpu.vmm[0].zmm64u(0), 0xAAAA);
-        assert_eq!(cpu.vmm[0].zmm64u(1), 0xAAAA, "DDUP duplicates the even qword");
+        assert_eq!(
+            cpu.vmm[0].zmm64u(1),
+            0xAAAA,
+            "DDUP duplicates the even qword"
+        );
     }
 
     #[test]
@@ -2887,5 +2949,4 @@ mod tests {
         cpu.execute_instruction(&i).unwrap();
         assert_eq!([0, 1, 2, 3].map(|n| cpu.vmm[0].zmm32u(n)), [10, 11, 12, 13]);
     }
-
 }

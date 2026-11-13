@@ -59,6 +59,7 @@ impl<'a> HookCtx<'a> {
     pub fn reg_read(&self, reg: X86Reg) -> u64 {
         self.cpu.reg_read(reg)
     }
+
     #[inline]
     pub fn reg_write(&mut self, reg: X86Reg, val: u64) {
         self.cpu.reg_write(reg, val)
@@ -68,14 +69,17 @@ impl<'a> HookCtx<'a> {
     pub fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> bool {
         self.cpu.mem_read(addr, buf)
     }
+
     #[inline]
     pub fn mem_write(&mut self, addr: u64, data: &[u8]) -> bool {
         self.cpu.mem_write(addr, data)
     }
+
     #[inline]
     pub fn virt_read(&mut self, vaddr: u64, buf: &mut [u8]) -> bool {
         self.cpu.virt_read(vaddr, buf)
     }
+
     #[inline]
     pub fn virt_read_with_cr3(&mut self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> bool {
         self.cpu.virt_read_with_cr3(vaddr, cr3, buf)
@@ -90,10 +94,12 @@ impl<'a> HookCtx<'a> {
     pub fn rip(&self) -> u64 {
         self.cpu.rip()
     }
+
     #[inline]
     pub fn icount(&self) -> u64 {
         self.cpu.icount()
     }
+
     #[inline]
     pub fn cr3(&self) -> u64 {
         self.cpu.cr3()
@@ -142,6 +148,7 @@ impl InstrAction {
     pub fn is_skip(self) -> bool {
         matches!(self, InstrAction::Skip | InstrAction::SkipAndStop)
     }
+
     #[inline]
     pub fn is_stop(self) -> bool {
         matches!(self, InstrAction::Stop | InstrAction::SkipAndStop)

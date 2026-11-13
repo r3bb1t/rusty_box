@@ -7,7 +7,7 @@
 #[cfg(all(test, not(debug_assertions)))]
 use no_panic::no_panic;
 
-use crate::read::{copy_prefix, Bytes};
+use crate::read::{Bytes, copy_prefix};
 
 /// MS-CAB §2.4: each data block, and so each LZX frame, holds 32 KiB.
 pub const FRAME_BYTES: usize = 32_768;
@@ -79,7 +79,11 @@ impl<'a> Bits<'a> {
 
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn bit(&mut self) -> Result<u32, LzxError> {
-        let word_at = self.bit.wrapping_shr(4).checked_mul(2).ok_or(self.truncated())?;
+        let word_at = self
+            .bit
+            .wrapping_shr(4)
+            .checked_mul(2)
+            .ok_or(self.truncated())?;
         let word = self.input.u16_le(word_at).map_err(|_| self.truncated())?;
         let shift = 15u32.wrapping_sub((self.bit & 15) as u32);
         self.bit = self.bit.checked_add(1).ok_or(self.truncated())?;
@@ -152,7 +156,10 @@ impl<const N: usize> Code<N> {
             what,
         };
         for length in lengths {
-            let slot = code.count.get_mut(usize::from(*length)).ok_or(LzxError::BadTree { what })?;
+            let slot = code
+                .count
+                .get_mut(usize::from(*length))
+                .ok_or(LzxError::BadTree { what })?;
             *slot = slot.wrapping_add(1);
         }
         let zero_lengths = usize::from(code.count.first().copied().unwrap_or(0));
@@ -183,8 +190,13 @@ impl<const N: usize> Code<N> {
             if *length == 0 {
                 continue;
             }
-            let offset = offsets.get_mut(usize::from(*length)).ok_or(LzxError::BadTree { what })?;
-            let slot = code.symbol.get_mut(usize::from(*offset)).ok_or(LzxError::BadTree { what })?;
+            let offset = offsets
+                .get_mut(usize::from(*length))
+                .ok_or(LzxError::BadTree { what })?;
+            let slot = code
+                .symbol
+                .get_mut(usize::from(*offset))
+                .ok_or(LzxError::BadTree { what })?;
             *slot = u16::try_from(symbol).map_err(|_| LzxError::BadTree { what })?;
             *offset = offset.wrapping_add(1);
         }
@@ -206,7 +218,11 @@ impl<const N: usize> Code<N> {
             let count = u32::from(self.count.get(length).copied().unwrap_or(0));
             if code < first.wrapping_add(count) {
                 let at = index.wrapping_add(code.wrapping_sub(first));
-                return self.symbol.get(at as usize).copied().ok_or(LzxError::BadTree { what: self.what });
+                return self
+                    .symbol
+                    .get(at as usize)
+                    .copied()
+                    .ok_or(LzxError::BadTree { what: self.what });
             }
             index = index.wrapping_add(count);
             first = first.wrapping_add(count).wrapping_shl(1);
@@ -219,7 +235,13 @@ impl<const N: usize> Code<N> {
 /// Reads a pretree, then the path lengths of `lengths[start..end]` coded
 /// with it as deltas from the previous lengths (MS-PATCH §2.2.2).
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
-fn read_lengths(bits: &mut Bits<'_>, lengths: &mut [u8], start: usize, end: usize, what: &'static str) -> Result<(), LzxError> {
+fn read_lengths(
+    bits: &mut Bits<'_>,
+    lengths: &mut [u8],
+    start: usize,
+    end: usize,
+    what: &'static str,
+) -> Result<(), LzxError> {
     let mut pretree_lengths = [0u8; PRETREE_SYMBOLS];
     for length in &mut pretree_lengths {
         *length = bits.bits(4)?.to_le_bytes()[0];
@@ -228,23 +250,43 @@ fn read_lengths(bits: &mut Bits<'_>, lengths: &mut [u8], start: usize, end: usiz
     let mut at = start;
     while at < end {
         let code = pretree.decode(bits)?;
-        let previous = lengths.get(at).copied().ok_or(LzxError::RunPastTree { what })?;
+        let previous = lengths
+            .get(at)
+            .copied()
+            .ok_or(LzxError::RunPastTree { what })?;
         let run = match code {
-            0..=16 => Run { length: delta(previous, code), times: 1 },
-            17 => Run { length: 0, times: (bits.bits(4)? as usize).wrapping_add(4) },
-            18 => Run { length: 0, times: (bits.bits(5)? as usize).wrapping_add(20) },
+            0..=16 => Run {
+                length: delta(previous, code),
+                times: 1,
+            },
+            17 => Run {
+                length: 0,
+                times: (bits.bits(4)? as usize).wrapping_add(4),
+            },
+            18 => Run {
+                length: 0,
+                times: (bits.bits(5)? as usize).wrapping_add(20),
+            },
             19 => {
                 let times = (bits.bits(1)? as usize).wrapping_add(4);
                 let code = pretree.decode(bits)?;
                 if code > 16 {
                     return Err(LzxError::BadPretreeCode { code });
                 }
-                Run { length: delta(previous, code), times }
+                Run {
+                    length: delta(previous, code),
+                    times,
+                }
             }
             other => return Err(LzxError::BadPretreeCode { code: other }),
         };
-        let run_end = at.checked_add(run.times).filter(|run_end| *run_end <= end).ok_or(LzxError::RunPastTree { what })?;
-        let slots = lengths.get_mut(at..run_end).ok_or(LzxError::RunPastTree { what })?;
+        let run_end = at
+            .checked_add(run.times)
+            .filter(|run_end| *run_end <= end)
+            .ok_or(LzxError::RunPastTree { what })?;
+        let slots = lengths
+            .get_mut(at..run_end)
+            .ok_or(LzxError::RunPastTree { what })?;
         slots.fill(run.length);
         at = run_end;
     }
@@ -260,7 +302,10 @@ struct Run {
 /// `(previous - code) mod 17`, the delta coding of MS-PATCH §2.2.2.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 fn delta(previous: u8, code: u16) -> u8 {
-    let value = u16::from(previous).wrapping_add(17).wrapping_sub(code).wrapping_rem(17);
+    let value = u16::from(previous)
+        .wrapping_add(17)
+        .wrapping_sub(code)
+        .wrapping_rem(17);
     value.to_le_bytes()[0]
 }
 
@@ -274,7 +319,10 @@ impl Output<'_> {
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn put(&mut self, byte: u8) -> Result<(), LzxError> {
         let capacity = self.out.len();
-        let slot = self.out.get_mut(self.at).ok_or(LzxError::OutputFull { capacity })?;
+        let slot = self
+            .out
+            .get_mut(self.at)
+            .ok_or(LzxError::OutputFull { capacity })?;
         *slot = byte;
         self.at = self.at.wrapping_add(1);
         Ok(())
@@ -285,14 +333,20 @@ impl Output<'_> {
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn copy_match(&mut self, distance: usize, length: usize) -> Result<(), LzxError> {
         if distance == 0 || distance > self.at {
-            return Err(LzxError::DistanceTooFar { distance, available: self.at });
+            return Err(LzxError::DistanceTooFar {
+                distance,
+                available: self.at,
+            });
         }
         for _ in 0..length {
             let byte = self
                 .out
                 .get(self.at.wrapping_sub(distance))
                 .copied()
-                .ok_or(LzxError::DistanceTooFar { distance, available: self.at })?;
+                .ok_or(LzxError::DistanceTooFar {
+                    distance,
+                    available: self.at,
+                })?;
             self.put(byte)?;
         }
         Ok(())
@@ -350,7 +404,9 @@ impl Decoder {
                 bits.align_uncompressed()?;
                 let at = bits.byte_position();
                 for (index, repeat) in self.repeats.iter_mut().enumerate() {
-                    let offset = at.checked_add(index.wrapping_mul(4)).ok_or(bits.truncated())?;
+                    let offset = at
+                        .checked_add(index.wrapping_mul(4))
+                        .ok_or(bits.truncated())?;
                     *repeat = bits.input.u32_le(offset).map_err(|_| bits.truncated())? as usize;
                 }
                 bits.set_byte_position(at.checked_add(12).ok_or(bits.truncated())?)?;
@@ -366,7 +422,10 @@ impl Decoder {
                 read_lengths(bits, &mut self.main_lengths, 0, 256, "main")?;
                 read_lengths(bits, &mut self.main_lengths, 256, self.main_symbols, "main")?;
                 read_lengths(bits, &mut self.length_lengths, 0, LENGTH_SYMBOLS, "length")?;
-                let main_lengths = self.main_lengths.get(..self.main_symbols).ok_or(LzxError::BadTree { what: "main" })?;
+                let main_lengths = self
+                    .main_lengths
+                    .get(..self.main_symbols)
+                    .ok_or(LzxError::BadTree { what: "main" })?;
                 trees.main = Code::build(main_lengths, "main")?;
                 if trees.main.codes == Codes::Empty {
                     return Err(LzxError::BadTree { what: "main" });
@@ -374,12 +433,22 @@ impl Decoder {
                 trees.length = Code::build(&self.length_lengths, "length")?;
             }
         }
-        Ok(Block { kind, size, remaining: size })
+        Ok(Block {
+            kind,
+            size,
+            remaining: size,
+        })
     }
 
     /// Decodes one literal or match of a verbatim or aligned block.
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
-    fn element(&mut self, bits: &mut Bits<'_>, trees: &Trees, block: &mut Block, output: &mut Output<'_>) -> Result<(), LzxError> {
+    fn element(
+        &mut self,
+        bits: &mut Bits<'_>,
+        trees: &Trees,
+        block: &mut Block,
+        output: &mut Output<'_>,
+    ) -> Result<(), LzxError> {
         let element = usize::from(trees.main.decode(bits)?);
         if element < 256 {
             output.put(element.to_le_bytes()[0])?;
@@ -404,8 +473,14 @@ impl Decoder {
                 third
             }
             _ => {
-                let footer = FOOTER_BITS.get(slot).copied().ok_or(LzxError::BadTree { what: "main" })?;
-                let base = BASE_POSITION.get(slot).copied().ok_or(LzxError::BadTree { what: "main" })?;
+                let footer = FOOTER_BITS
+                    .get(slot)
+                    .copied()
+                    .ok_or(LzxError::BadTree { what: "main" })?;
+                let base = BASE_POSITION
+                    .get(slot)
+                    .copied()
+                    .ok_or(LzxError::BadTree { what: "main" })?;
                 let extra = if block.kind == BlockKind::Aligned && footer >= 3 {
                     let verbatim = bits.bits(footer.wrapping_sub(3))?.wrapping_shl(3);
                     verbatim.wrapping_add(u32::from(trees.aligned.decode(bits)?))
@@ -413,7 +488,10 @@ impl Decoder {
                     bits.bits(footer)?
                 };
                 let formatted = base.wrapping_add(extra) as usize;
-                let offset = formatted.checked_sub(2).ok_or(LzxError::DistanceTooFar { distance: 0, available: output.at })?;
+                let offset = formatted.checked_sub(2).ok_or(LzxError::DistanceTooFar {
+                    distance: 0,
+                    available: output.at,
+                })?;
                 self.repeats = [offset, first, second];
                 offset
             }
@@ -453,7 +531,11 @@ pub fn decompress(input: Bytes<'_>, out: &mut [u8], window_bits: u32) -> Result<
     };
     let total = out.len();
     let mut output = Output { out, at: 0 };
-    let mut block = Block { kind: BlockKind::Uncompressed, size: 0, remaining: 0 };
+    let mut block = Block {
+        kind: BlockKind::Uncompressed,
+        size: 0,
+        remaining: 0,
+    };
     let mut frame_end = 0usize;
     while output.at < total {
         frame_end = frame_end.saturating_add(FRAME_BYTES).min(total);
@@ -487,7 +569,8 @@ pub fn decompress(input: Bytes<'_>, out: &mut [u8], window_bits: u32) -> Result<
         // (which are byte-aligned and carry on across the frame).
         let in_raw_bytes = block.kind == BlockKind::Uncompressed && block.remaining > 0;
         if !in_raw_bytes {
-            if block.kind == BlockKind::Uncompressed && block.remaining == 0 && block.size & 1 == 1 {
+            if block.kind == BlockKind::Uncompressed && block.remaining == 0 && block.size & 1 == 1
+            {
                 bits.set_byte_position(bits.byte_position().saturating_add(1))?;
                 block.size = 0;
             }
@@ -560,14 +643,23 @@ mod tests {
     #[test]
     fn a_window_cabinets_do_not_use_is_refused() {
         let mut out = [0u8; 5];
-        assert_eq!(decompress(Bytes::new(&UNCOMPRESSED_HELLO), &mut out, 22), Err(LzxError::BadWindow { bits: 22 }));
-        assert_eq!(decompress(Bytes::new(&UNCOMPRESSED_HELLO), &mut out, 14), Err(LzxError::BadWindow { bits: 14 }));
+        assert_eq!(
+            decompress(Bytes::new(&UNCOMPRESSED_HELLO), &mut out, 22),
+            Err(LzxError::BadWindow { bits: 22 })
+        );
+        assert_eq!(
+            decompress(Bytes::new(&UNCOMPRESSED_HELLO), &mut out, 14),
+            Err(LzxError::BadWindow { bits: 14 })
+        );
     }
 
     #[test]
     fn a_reserved_block_type_or_a_short_stream_is_refused() {
         let mut out = [0u8; 5];
-        assert_eq!(decompress(Bytes::new(&[0, 0, 0, 0]), &mut out, 15), Err(LzxError::BadBlockType { kind: 0 }));
+        assert_eq!(
+            decompress(Bytes::new(&[0, 0, 0, 0]), &mut out, 15),
+            Err(LzxError::BadBlockType { kind: 0 })
+        );
         assert!(matches!(
             decompress(Bytes::new(&UNCOMPRESSED_HELLO[..18]), &mut out, 15),
             Err(LzxError::Truncated { .. })
@@ -578,8 +670,17 @@ mod tests {
     #[test]
     fn a_match_before_the_start_of_the_output_is_refused() {
         let mut out = [7u8; 8];
-        let mut output = Output { out: &mut out, at: 2 };
-        assert_eq!(output.copy_match(3, 2), Err(LzxError::DistanceTooFar { distance: 3, available: 2 }));
+        let mut output = Output {
+            out: &mut out,
+            at: 2,
+        };
+        assert_eq!(
+            output.copy_match(3, 2),
+            Err(LzxError::DistanceTooFar {
+                distance: 3,
+                available: 2
+            })
+        );
         assert_eq!(output.copy_match(2, 2), Ok(()));
         assert_eq!(output.at, 4);
     }
@@ -588,7 +689,9 @@ mod tests {
     fn e8_translation_is_undone_where_the_specification_says() {
         // An E8 at offset 1 holding absolute 0x10, one holding -1, one out of
         // range, and the last ten bytes, which are never translated.
-        let mut frame = vec![0x90, 0xE8, 0x10, 0, 0, 0, 0xE8, 0xFF, 0xFF, 0xFF, 0xFF, 0xE8, 0, 0x20, 0, 0];
+        let mut frame = vec![
+            0x90, 0xE8, 0x10, 0, 0, 0, 0xE8, 0xFF, 0xFF, 0xFF, 0xFF, 0xE8, 0, 0x20, 0, 0,
+        ];
         frame.extend_from_slice(&[0xE8, 0x10, 0, 0, 0, 0, 0, 0, 0, 0]);
         let mut expected = frame.clone();
         // At position 1: 0x10 - 1.

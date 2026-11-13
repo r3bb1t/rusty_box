@@ -81,12 +81,12 @@
 //! A table, or the part of one, outside RAM reads as zeros and takes no
 //! writes, as the board's devices reach RAM alone.
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::gicv2::GicNames;
 use super::gicv3::identification;
-use super::gicv3_lpi::{read_or_zeros, Lpis};
+use super::gicv3_lpi::{Lpis, read_or_zeros};
 use crate::bus::{AccessWidth, RegOffset};
 use crate::devices::virtio::queue::GuestRam;
 
@@ -283,19 +283,19 @@ enum Outcome {
 struct Command([u64; 4]);
 
 impl Command {
-    /// The opcodes of the commands GICv3 has (Table 5-6).
-    const MOVI: u8 = 0x01;
-    const INT: u8 = 0x03;
     const CLEAR: u8 = 0x04;
-    const SYNC: u8 = 0x05;
-    const MAPD: u8 = 0x08;
-    const MAPC: u8 = 0x09;
-    const MAPTI: u8 = 0x0A;
-    const MAPI: u8 = 0x0B;
+    const DISCARD: u8 = 0x0F;
+    const INT: u8 = 0x03;
     const INV: u8 = 0x0C;
     const INVALL: u8 = 0x0D;
+    const MAPC: u8 = 0x09;
+    const MAPD: u8 = 0x08;
+    const MAPI: u8 = 0x0B;
+    const MAPTI: u8 = 0x0A;
     const MOVALL: u8 = 0x0E;
-    const DISCARD: u8 = 0x0F;
+    /// The opcodes of the commands GICv3 has (Table 5-6).
+    const MOVI: u8 = 0x01;
+    const SYNC: u8 = 0x05;
 
     fn opcode(self) -> u8 {
         self.0[0] as u8

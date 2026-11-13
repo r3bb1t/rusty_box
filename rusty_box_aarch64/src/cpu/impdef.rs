@@ -69,15 +69,14 @@
 //! invalid entry reads as zeros (4.3.64). A reserved `RAMID`, which the TRM
 //! says corrupts the data registers, zeroes both sets.
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
-
-use crate::bus::PhysAddr;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::el2::{El2Reg, HCR_TIDCP};
 use super::regs::SysReg;
-use super::sysreg::{trap_to_el2, SysRegError, SysRegKey};
-use super::{reset, Cpu, El, Levels};
+use super::sysreg::{SysRegError, SysRegKey, trap_to_el2};
+use super::{Cpu, El, Levels, reset};
+use crate::bus::PhysAddr;
 
 /// What a processor gives the IMPLEMENTATION DEFINED register space
 /// (`S3_<op1>_C11_*` and `S3_<op1>_C15_*`) and instruction space

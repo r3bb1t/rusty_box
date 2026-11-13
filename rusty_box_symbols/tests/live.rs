@@ -12,13 +12,12 @@ use rusty_box_symbols::cab::extract_single;
 use rusty_box_symbols::http::{Flow, HttpClient};
 use rusty_box_symbols::identity::{PdbId, TablesIdentity};
 use rusty_box_symbols::service::DEFAULT_MAX_DOWNLOAD;
-use rusty_box_symbols::tables::{supplement_of, SymbolTables};
+use rusty_box_symbols::tables::{SymbolTables, supplement_of};
 use rusty_box_symbols::units::Rva;
 use rusty_box_symbols::ureq_http::UreqHttp;
 
 /// The Windows 11 kernel PDB whose RSDS record `identity`'s tests decode.
-const KERNEL_URL: &str =
-    "https://msdl.microsoft.com/download/symbols/ntkrnlmp.pdb/B661C6FE72991D160FE37C48B8BC54701/ntkrnlmp.pdb";
+const KERNEL_URL: &str = "https://msdl.microsoft.com/download/symbols/ntkrnlmp.pdb/B661C6FE72991D160FE37C48B8BC54701/ntkrnlmp.pdb";
 
 fn file_from(variable: &str, what: &str) -> Vec<u8> {
     let Some(path) = std::env::var_os(variable) else {
@@ -32,12 +31,25 @@ fn file_from(variable: &str, what: &str) -> Vec<u8> {
 /// name and back, and the process structure's layout.
 fn assert_kernel_tables(tables: &SymbolTables) {
     println!("identity: {}", tables.identity());
-    let entry = tables.address_of("KiSystemCall64").expect("KiSystemCall64 is named");
-    assert_eq!(tables.symbolize(entry).map(|hit| hit.name), Some("KiSystemCall64".to_owned()));
-    let process = tables.layout("_EPROCESS").expect("_EPROCESS reads").expect("_EPROCESS is defined");
+    let entry = tables
+        .address_of("KiSystemCall64")
+        .expect("KiSystemCall64 is named");
+    assert_eq!(
+        tables.symbolize(entry).map(|hit| hit.name),
+        Some("KiSystemCall64".to_owned())
+    );
+    let process = tables
+        .layout("_EPROCESS")
+        .expect("_EPROCESS reads")
+        .expect("_EPROCESS is defined");
     assert!(process.size > 0x100, "_EPROCESS is {} bytes", process.size);
-    let links = tables.member_location("_EPROCESS", &["ActiveProcessLinks", "Flink"]).expect("the path reads");
-    println!("_EPROCESS: {} bytes; ActiveProcessLinks.Flink: {links:?}", process.size);
+    let links = tables
+        .member_location("_EPROCESS", &["ActiveProcessLinks", "Flink"])
+        .expect("the path reads");
+    println!(
+        "_EPROCESS: {} bytes; ActiveProcessLinks.Flink: {links:?}",
+        process.size
+    );
     assert!(links.is_some());
 }
 
@@ -57,7 +69,12 @@ fn a_real_kernel_pdb_names_its_system_call_entry_and_lays_out_its_processes() {
 fn a_real_cabinet_opens_to_its_pdb() {
     let bytes = file_from("RUSTY_BOX_LIVE_PD_", "a compressed PDB (*.pd_)");
     let extracted = extract_single(&bytes, DEFAULT_MAX_DOWNLOAD).expect("the cabinet opens");
-    println!("{}: {:?}, {} bytes", extracted.name, extracted.compression, extracted.bytes.len());
+    println!(
+        "{}: {:?}, {} bytes",
+        extracted.name,
+        extracted.compression,
+        extracted.bytes.len()
+    );
     let tables = SymbolTables::parse(&extracted.bytes).expect("its PDB parses");
     println!("identity: {}", tables.identity());
 }
@@ -83,8 +100,16 @@ fn the_symbol_server_serves_a_kernel_pdb_through_its_redirect() {
     let TablesIdentity::Pdb { guid, age } = tables.identity() else {
         panic!("{url} gave something other than a PDB");
     };
-    let key = PdbId { name: "ntkrnlmp.pdb".to_owned(), guid, age }.store_key();
-    assert!(url.contains(&format!("/{key}/")), "{url} names another build than {key}");
+    let key = PdbId {
+        name: "ntkrnlmp.pdb".to_owned(),
+        guid,
+        age,
+    }
+    .store_key();
+    assert!(
+        url.contains(&format!("/{key}/")),
+        "{url} names another build than {key}"
+    );
     assert_kernel_tables(&tables);
 }
 
@@ -98,12 +123,19 @@ fn a_real_debug_file_reads_with_its_supplement() {
     println!("supplement: {link:?}");
     let supplement = match (&link, std::env::var_os("RUSTY_BOX_LIVE_ELF_SUPPLEMENT")) {
         (Some(_), Some(path)) => Some(std::fs::read(&path).expect("the supplement reads")),
-        (Some(link), None) => panic!("the file names {}; set RUSTY_BOX_LIVE_ELF_SUPPLEMENT to it", link.file_name),
+        (Some(link), None) => panic!(
+            "the file names {}; set RUSTY_BOX_LIVE_ELF_SUPPLEMENT to it",
+            link.file_name
+        ),
         (None, Some(_) | None) => None,
     };
-    let tables = SymbolTables::parse_with_supplement(&bytes, supplement.as_deref()).expect("the file parses");
+    let tables = SymbolTables::parse_with_supplement(&bytes, supplement.as_deref())
+        .expect("the file parses");
     println!("identity: {}", tables.identity());
-    let named = (0..0x10_0000u64).step_by(0x100).filter(|rva| tables.symbolize(Rva(*rva)).is_some()).count();
+    let named = (0..0x10_0000u64)
+        .step_by(0x100)
+        .filter(|rva| tables.symbolize(Rva(*rva)).is_some())
+        .count();
     println!("{named} of the first 4096 probes at 256-byte steps are named");
     assert!(named > 0);
 }

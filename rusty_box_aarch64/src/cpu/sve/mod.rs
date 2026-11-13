@@ -34,7 +34,7 @@ mod pred;
 #[path = "../../../tests/unit/sve.rs"]
 mod tests;
 
-use super::exec::{bits, sext, Fault};
+use super::exec::{Fault, bits, sext};
 use super::features::VecLen;
 use super::simd_arith::{doubling_mul_high, int as simd_int, sat, shift_signed};
 use super::{Cpu, Levels};
@@ -439,11 +439,7 @@ pub(crate) fn sat_add_scalar(value: u64, delta: i128, wide: bool, unsigned: bool
             i128::from(value as i32)
         };
         let result = sat_q_bits(operand + delta, 32, unsigned);
-        if unsigned {
-            result
-        } else {
-            sext(result, 32)
-        }
+        if unsigned { result } else { sext(result, 32) }
     }
 }
 

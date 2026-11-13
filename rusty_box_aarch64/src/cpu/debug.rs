@@ -26,7 +26,7 @@
 //! Both are derived from the registers, by [`Cpu::debug_controls_changed`].
 
 use super::dp::ones;
-use super::el2::{has_contextidr_el2, VTTBR_VMID8};
+use super::el2::{VTTBR_VMID8, has_contextidr_el2};
 use super::exception::{AddressedClass, Exception, SyndromeClass};
 use super::exec::Fault;
 use super::features::{Feature, Features};
@@ -56,6 +56,13 @@ pub(crate) struct DebugPoints {
 }
 
 impl DebugPoints {
+    /// The Armv9.2 model's, the least the architecture permits: two
+    /// breakpoints, one of them context-aware, and two watchpoints.
+    pub(crate) const ARMV9P2: Self = Self {
+        breakpoints: 2,
+        context_aware: 1,
+        watchpoints: 2,
+    };
     /// The Cortex-A57's: six breakpoints, two of them context-aware, and
     /// four watchpoints (DDI 0488H, 4.3.19: `BRPs` 5, `CTX_CMPs` 1, `WRPs`
     /// 3).
@@ -63,14 +70,6 @@ impl DebugPoints {
         breakpoints: 6,
         context_aware: 2,
         watchpoints: 4,
-    };
-
-    /// The Armv9.2 model's, the least the architecture permits: two
-    /// breakpoints, one of them context-aware, and two watchpoints.
-    pub(crate) const ARMV9P2: Self = Self {
-        breakpoints: 2,
-        context_aware: 1,
-        watchpoints: 2,
     };
 
     /// Arm `NumBreakpointsImplemented`.
@@ -382,11 +381,7 @@ const fn bas_is_contiguous(bas: u8) -> bool {
 /// FEAT_LVA3's, is no processor's here). Bits above it are compared with
 /// nothing, Arm's `Unpredictable_DBGxVR_RESS` default.
 const fn debug_addr_top(features: Features) -> u32 {
-    if features.has(Feature::Lva) {
-        52
-    } else {
-        48
-    }
+    if features.has(Feature::Lva) { 52 } else { 48 }
 }
 
 /// Whether the watchpoint with `control` and `DBGWVR<n>` `value` watches the

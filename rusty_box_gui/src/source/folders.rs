@@ -19,11 +19,18 @@ fn key(name: &str) -> String {
 
 impl SourceFolders {
     /// Walks each of `folders` once.
-    pub(crate) fn index<F: FileStore>(files: &mut F, folders: &[PathBuf]) -> Result<SourceFolders, StoreError> {
+    pub(crate) fn index<F: FileStore>(
+        files: &mut F,
+        folders: &[PathBuf],
+    ) -> Result<SourceFolders, StoreError> {
         let mut by_name: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
         for folder in folders {
             for listed in files.list_recursive(folder)? {
-                let Some(name) = listed.path.file_name().map(|name| key(&name.to_string_lossy())) else {
+                let Some(name) = listed
+                    .path
+                    .file_name()
+                    .map(|name| key(&name.to_string_lossy()))
+                else {
                     continue;
                 };
                 by_name.entry(name).or_default().push(listed.path);
@@ -43,9 +50,11 @@ impl SourceFolders {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use rusty_box_symbols::memory_store::MemoryStore;
     use std::path::PathBuf;
+
+    use rusty_box_symbols::memory_store::MemoryStore;
+
+    use super::*;
 
     #[test]
     fn files_are_found_by_name_without_case() {
@@ -56,7 +65,13 @@ mod tests {
         files.insert(src.join("io").join("write.c"), b"c".to_vec());
         files.insert(PathBuf::from("elsewhere").join("read.c"), b"d".to_vec());
         let index = SourceFolders::index(&mut files, &[src.clone()]).unwrap();
-        assert_eq!(index.named("READ.C"), [src.join("io").join("read.c"), src.join("net").join("Read.c")]);
+        assert_eq!(
+            index.named("READ.C"),
+            [
+                src.join("io").join("read.c"),
+                src.join("net").join("Read.c")
+            ]
+        );
         assert_eq!(index.named("write.c"), [src.join("io").join("write.c")]);
         assert!(index.named("missing.c").is_empty());
     }

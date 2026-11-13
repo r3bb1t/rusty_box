@@ -58,10 +58,8 @@
 //!   0xF8); `GICV_APR0` is an alias of `GICH_APR` and the other `GICV_APRn`
 //!   are RAZ/WI, as §5.5.12 suggests.
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
-
-use crate::cpu::VirtualLines;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 // GICV_CTLR has GICC_CTLR's bits (Table 5-11), and GICH_VMCR aliases them
 // (Table 5-4); the virtual CPU interface's two register sets are the
@@ -75,6 +73,7 @@ use super::gicv2::{
     GICD_CTLR_EN_GRP1 as CTLR_EN_GRP1, GicV2, IDLE_PRIORITY, MAXIRQ, SPURIOUS, group_enable,
     group_mask, preempts, read_through,
 };
+use crate::cpu::VirtualLines;
 
 /// The List registers: four, as the GIC-400 implements (DDI 0471B
 /// `GICH_VTR.ListRegs` 3), and QEMU (`GIC_NR_LR`).
@@ -321,7 +320,11 @@ impl VirtInterface {
     /// Whether List register `n` preempts the running priority, under its
     /// own group's binary point ([`preempts`]).
     fn preempts(&self, n: usize) -> bool {
-        preempts(self.priority(n), self.group_mask(n), self.running_priority())
+        preempts(
+            self.priority(n),
+            self.group_mask(n),
+            self.running_priority(),
+        )
     }
 
     /// The interrupt the virtual CPU interface signals, if any: the highest
@@ -382,7 +385,10 @@ impl VirtInterface {
         // "No List register is in pending state": active and pending is a
         // state of its own (Table 5-9 `State`), as in QEMU's
         // `gic_extract_lr_info`.
-        let none_pending = !self.lr.iter().any(|&lr| LrState::of(lr) == LrState::Pending);
+        let none_pending = !self
+            .lr
+            .iter()
+            .any(|&lr| LrState::of(lr) == LrState::Pending);
         let grp0 = self.ctlr & CTLR_EN_GRP0 != 0;
         let grp1 = self.ctlr & CTLR_EN_GRP1 != 0;
         let mut misr = 0;
@@ -695,7 +701,9 @@ impl VirtInterface {
             ));
         }
         if lr.iter().any(|&lr| lr & !LR_MASK != 0) {
-            return Err(SnapError::Invalid("GIC List register with reserved bits set"));
+            return Err(SnapError::Invalid(
+                "GIC List register with reserved bits set",
+            ));
         }
         Ok(Self {
             hcr,
@@ -711,11 +719,10 @@ impl VirtInterface {
 
 #[cfg(test)]
 mod tests {
+    use super::{GICH_VTR, MAINTENANCE_INTID};
     use crate::bus::{AccessWidth, RegOffset};
     use crate::devices::gicv2::tests::{cpu, cpu_get, dist, dist_get};
     use crate::devices::gicv2::{GicExtensions, GicV2};
-
-    use super::{GICH_VTR, MAINTENANCE_INTID};
 
     // GICH_* offsets (IHI 0048B Table 5-1).
     const HCR: u64 = 0x00;
@@ -857,7 +864,11 @@ mod tests {
         // Group 1 under GICV_ABPR (3), so BPR 2 applies: group priority
         // 0x48 & 0xF8 = 0x48, level 9.
         assert_eq!(hyp_get(&mut g, APR), 1 << (0x48 >> 3));
-        assert_eq!(vcpu_get(&mut g, APR0), hyp_get(&mut g, APR), "GICV_APR0 aliases it");
+        assert_eq!(
+            vcpu_get(&mut g, APR0),
+            hyp_get(&mut g, APR),
+            "GICV_APR0 aliases it"
+        );
         assert_eq!(vcpu_get(&mut g, RPR), 0x48);
         assert!(!g.virtual_lines().irq, "active, so not signalled");
         assert_eq!(vcpu_get(&mut g, AIAR), 1023);
@@ -893,7 +904,11 @@ mod tests {
         hyp(&mut g, LR0, LR_GRP1 | PENDING | prio(0x40) | 30);
         assert_eq!(vcpu_get(&mut g, IAR), 1022);
         assert_eq!(vcpu_get(&mut g, HPPIR), 1022);
-        assert_eq!(hyp_get(&mut g, LR0) & PENDING_ACTIVE, PENDING, "not acknowledged");
+        assert_eq!(
+            hyp_get(&mut g, LR0) & PENDING_ACTIVE,
+            PENDING,
+            "not acknowledged"
+        );
         vcpu(&mut g, CTLR, GRP0 | GRP1 | ACK_CTL);
         assert_eq!(vcpu_get(&mut g, HPPIR), 30);
         assert_eq!(vcpu_get(&mut g, IAR), 30);
@@ -933,13 +948,24 @@ mod tests {
         vcpu(&mut g, CTLR, GRP1);
         hyp(&mut g, LR0, PENDING | prio(0x20) | 50);
         hyp(&mut g, LR0 + 4, LR_GRP1 | PENDING | prio(0x40) | 51);
-        assert!(!g.virtual_lines().irq && !g.virtual_lines().fiq, "Group 0's interrupt is highest");
+        assert!(
+            !g.virtual_lines().irq && !g.virtual_lines().fiq,
+            "Group 0's interrupt is highest"
+        );
         assert_eq!(vcpu_get(&mut g, HPPIR), 50, "Group 0's, though disabled");
-        assert_eq!(vcpu_get(&mut g, AHPPIR), 1023, "a Group 0 interrupt is highest");
+        assert_eq!(
+            vcpu_get(&mut g, AHPPIR),
+            1023,
+            "a Group 0 interrupt is highest"
+        );
         assert_eq!(vcpu_get(&mut g, AIAR), 1023, "Group 0 is not signalled");
         assert_eq!(hyp_get(&mut g, LR0 + 4) & PENDING_ACTIVE, PENDING);
         hyp(&mut g, HCR, 0);
-        assert_eq!(vcpu_get(&mut g, HPPIR), 1023, "the interface does not operate");
+        assert_eq!(
+            vcpu_get(&mut g, HPPIR),
+            1023,
+            "the interface does not operate"
+        );
         hyp(&mut g, HCR, EN);
         hyp(&mut g, LR0, 0);
         assert!(g.virtual_lines().irq, "the Group 1 interrupt is signalled");
@@ -1044,10 +1070,16 @@ mod tests {
         hyp(&mut g, LR0, physical(27) | PENDING | prio(0x40) | 27);
         assert_eq!(vcpu_get(&mut g, IAR), 27);
         vcpu(&mut g, EOIR, 27);
-        assert!(active_at_distributor(&mut g, 27), "the EOI only dropped the priority");
+        assert!(
+            active_at_distributor(&mut g, 27),
+            "the EOI only dropped the priority"
+        );
         vcpu(&mut g, DIR, 27);
         assert_eq!(hyp_get(&mut g, LR0) & PENDING_ACTIVE, 0);
-        assert!(!active_at_distributor(&mut g, 27), "retired in the distributor");
+        assert!(
+            !active_at_distributor(&mut g, 27),
+            "retired in the distributor"
+        );
     }
 
     /// A List register is a word: an access at an offset inside one reaches
@@ -1107,7 +1139,10 @@ mod tests {
         assert_eq!(vcpu_get(&mut g, IAR), 1023);
         vcpu(&mut g, CTLR, GRP0 | GRP1);
         vcpu(&mut g, PMR, 0x40);
-        assert!(!g.virtual_lines().irq, "priority 0x40 is not higher than the mask");
+        assert!(
+            !g.virtual_lines().irq,
+            "priority 0x40 is not higher than the mask"
+        );
         vcpu(&mut g, PMR, 0x48);
         assert!(g.virtual_lines().irq);
         assert_eq!(vcpu_get(&mut g, PMR), 0x48);
@@ -1143,7 +1178,10 @@ mod tests {
             hyp(&mut g, LR0, LR_GRP1 | PENDING | prio(0x80) | 40);
             assert_eq!(vcpu_get(&mut g, AIAR), 40);
             hyp(&mut g, LR0 + 4, LR_GRP1 | PENDING | prio(0x70) | 41);
-            assert!(g.virtual_lines().irq, "Group 1 0x70 over 0x80 at ABPR {abpr}");
+            assert!(
+                g.virtual_lines().irq,
+                "Group 1 0x70 over 0x80 at ABPR {abpr}"
+            );
         }
         let mut g = virtual_gic();
         vcpu(&mut g, BPR, 0);
@@ -1189,7 +1227,10 @@ mod tests {
         vcpu(&mut g, EOIR, 27);
         assert_eq!(hyp_get(&mut g, LR0) & PENDING_ACTIVE, 0, "invalid");
         assert_eq!(hyp_get(&mut g, APR), 0);
-        assert!(!active_at_distributor(&mut g, 27), "retired in the distributor");
+        assert!(
+            !active_at_distributor(&mut g, 27),
+            "retired in the distributor"
+        );
         assert_eq!(hyp_get(&mut g, ELRSR0) & 1, 1, "an empty List register");
     }
 
@@ -1203,7 +1244,11 @@ mod tests {
         assert_eq!(vcpu_get(&mut g, IAR), 42);
         vcpu(&mut g, EOIR, 42);
         assert_eq!(hyp_get(&mut g, APR), 0, "the priority dropped");
-        assert_eq!(hyp_get(&mut g, LR0) & PENDING_ACTIVE, ACTIVE, "still active");
+        assert_eq!(
+            hyp_get(&mut g, LR0) & PENDING_ACTIVE,
+            ACTIVE,
+            "still active"
+        );
         vcpu(&mut g, DIR, 42);
         assert_eq!(hyp_get(&mut g, LR0) & PENDING_ACTIVE, 0);
 
@@ -1256,7 +1301,10 @@ mod tests {
         assert!(pending_at_distributor(&mut g, MAINTENANCE_INTID));
         hyp(&mut g, LR0, 0);
         assert_eq!(hyp_get(&mut g, MISR), 0);
-        assert!(!pending_at_distributor(&mut g, MAINTENANCE_INTID), "level-sensitive");
+        assert!(
+            !pending_at_distributor(&mut g, MAINTENANCE_INTID),
+            "level-sensitive"
+        );
         hyp(&mut g, LR0, LR_EOI);
         hyp(&mut g, HCR, 0);
         assert!(
@@ -1274,7 +1322,11 @@ mod tests {
         let mut g = virtual_gic();
         hyp(&mut g, HCR, EN | (1 << 2));
         vcpu(&mut g, EOIR, 50);
-        assert_eq!(hyp_get(&mut g, HCR) >> 27, 0, "nothing dropped, nothing counted");
+        assert_eq!(
+            hyp_get(&mut g, HCR) >> 27,
+            0,
+            "nothing dropped, nothing counted"
+        );
         hyp(&mut g, APR, 1 << 4);
         vcpu(&mut g, EOIR, 50);
         assert_eq!(hyp_get(&mut g, HCR) >> 27, 1);
@@ -1369,7 +1421,10 @@ mod tests {
         let mut again = std::vec::Vec::new();
         restored.save(&mut again).expect("save");
         assert!(again == image);
-        assert!(restored.virtual_lines().irq, "the restored interface signals");
+        assert!(
+            restored.virtual_lines().irq,
+            "the restored interface signals"
+        );
         assert_eq!(vcpu_get(&mut restored, AHPPIR), 27);
 
         // `GICH_HCR` opens the virtual section, 31 bytes from the end: an
@@ -1412,8 +1467,10 @@ mod tests {
         let at = bad.len() - 4;
         bad[at + 2] |= 0x70;
         let mut source: &[u8] = &bad;
-        assert!(GicV2::with_extensions(GicExtensions::Virtualization)
-            .restore(&mut source)
-            .is_err());
+        assert!(
+            GicV2::with_extensions(GicExtensions::Virtualization)
+                .restore(&mut source)
+                .is_err()
+        );
     }
 }

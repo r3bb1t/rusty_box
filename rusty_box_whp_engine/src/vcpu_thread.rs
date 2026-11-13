@@ -53,11 +53,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use rusty_box::cpu::arch_state::ArchGroups;
-use rusty_box::cpu::{
-    cpu::{BxCpuC, Exception},
-    instrumentation::Instrumentation,
-    CpuError, HardwareEvent, ResetReason, Result,
-};
+use rusty_box::cpu::cpu::{BxCpuC, Exception};
+use rusty_box::cpu::instrumentation::Instrumentation;
+use rusty_box::cpu::{CpuError, HardwareEvent, ResetReason, Result};
 use rusty_box::emulator::{DeviceTime, Emulator, PcIo, Processor, ProcessorParts, StopReason};
 use rusty_box::params::OnTripleFault;
 use rusty_box_core::{EngineFault, EngineFaultKind};
@@ -67,9 +65,9 @@ use rusty_box_whp::{
 };
 
 use crate::engine::{
-    describe_the_fault, history_mark, platform_failed, ports_on_the_shadow, reports_each_fault,
-    report_the_state_the_platform_refused, run_the_shadow_out_of_smm, withhold_virtualisation_from,
-    ExitCounts, InjectState, PlatformCounters, Trapped, WhpEngine, RFLAGS_TF,
+    ExitCounts, InjectState, PlatformCounters, RFLAGS_TF, Trapped, WhpEngine, describe_the_fault,
+    history_mark, platform_failed, ports_on_the_shadow, report_the_state_the_platform_refused,
+    reports_each_fault, run_the_shadow_out_of_smm, withhold_virtualisation_from,
 };
 use crate::exchange::{Exchange, ExitClass};
 use crate::state::VpRegisters;
@@ -417,10 +415,7 @@ impl CancelRun for Canceller {
 /// one. That is the wedge `FastMachine` bounds with a timeout and answers by
 /// detaching the thread; clearing the flag here would turn every slow park into
 /// a lost one to no benefit.
-pub(crate) fn park_request(
-    exit_requested: &AtomicBool,
-    cancel: &impl CancelRun,
-) -> WhpResult<()> {
+pub(crate) fn park_request(exit_requested: &AtomicBool, cancel: &impl CancelRun) -> WhpResult<()> {
     exit_requested.store(true, Ordering::Release);
     cancel.cancel()
 }
@@ -764,7 +759,10 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         } else {
             None
         };
-        let slot = ParkSlot { requested: Some(Parked::Paused), ..ParkSlot::default() };
+        let slot = ParkSlot {
+            requested: Some(Parked::Paused),
+            ..ParkSlot::default()
+        };
         let control = VcpuControl {
             exit_requested: Arc::new(AtomicBool::new(true)),
             ext_int_pending: Arc::new(AtomicBool::new(false)),
@@ -917,14 +915,21 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         if !self.control.ext_int_pending.load(Ordering::SeqCst) {
             return Staged::Clear;
         }
-        let Self { vcpu, index, machine, inject, control, .. } = self;
+        let Self {
+            vcpu,
+            index,
+            machine,
+            inject,
+            control,
+            ..
+        } = self;
         let mut guard = match machine.lock() {
             Ok(guard) => guard,
             Err(_) => {
                 return Staged::Park(Parked::Fault(EngineFault::new(
                     EngineFaultKind::Host,
                     "machine lock poisoned by a panicking peer thread",
-                )))
+                )));
             }
         };
         let mut processor = guard.processor(*index);
@@ -1018,8 +1023,17 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         // Destructured so the machine's lock borrows one field rather than the
         // whole thread: everything else the servicer needs is a sibling field,
         // and the guard lives across the call that uses them.
-        let Self { vcpu, index, machine, clock, exchange, xsave, inject, control, apic_at_power_on: _ } =
-            self;
+        let Self {
+            vcpu,
+            index,
+            machine,
+            clock,
+            exchange,
+            xsave,
+            inject,
+            control,
+            apic_at_power_on: _,
+        } = self;
         let mut guard = match machine.lock() {
             Ok(guard) => guard,
             // A peer thread panicked while holding the machine. Under the
@@ -1031,7 +1045,7 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
                 return Continue::Park(Parked::Fault(EngineFault::new(
                     EngineFaultKind::Host,
                     "machine lock poisoned by a panicking peer thread",
-                )))
+                )));
             }
         };
         // The machine was reset after this exit was taken: it belongs to a
@@ -1060,13 +1074,11 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
                     // the guest asked to be powered off, say. Nothing the
                     // processor does afterwards is wanted, so it leaves rather
                     // than running on.
-                    Ok(DeviceTime { stop: Some(reason), .. }) => {
-                        return Continue::Park(Parked::from_stop(reason))
-                    }
+                    Ok(DeviceTime {
+                        stop: Some(reason), ..
+                    }) => return Continue::Park(Parked::from_stop(reason)),
                     Ok(_) => {}
-                    Err(error) => {
-                        return Continue::Park(Parked::Fault(refused_service(&error)))
-                    }
+                    Err(error) => return Continue::Park(Parked::Fault(refused_service(&error))),
                 }
             }
         }
@@ -1086,9 +1098,9 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             match crate::device_thread::service_once(&mut guard, &clock) {
                 // A stop found here is the machine's, not this exit's, and the
                 // processor has no business running on after it.
-                Ok(DeviceTime { stop: Some(reason), .. }) => {
-                    return Continue::Park(Parked::from_stop(reason))
-                }
+                Ok(DeviceTime {
+                    stop: Some(reason), ..
+                }) => return Continue::Park(Parked::from_stop(reason)),
                 Ok(_) => {}
                 Err(error) => return Continue::Park(Parked::Fault(refused_service(&error))),
             }
@@ -1099,7 +1111,10 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         // the thread installs the reset processor before it enters again; or
         // the shutdown state, which only a reset leaves.
         if exit.reason == ExitReason::UnrecoverableException {
-            let action = guard.processor(*index).cpu_mut().take_hardware_triple_fault();
+            let action = guard
+                .processor(*index)
+                .cpu_mut()
+                .take_hardware_triple_fault();
             return match action {
                 OnTripleFault::ResetTheMachine => match guard.reset(ResetReason::Hardware) {
                     Ok(()) => Continue::Run,
@@ -1113,7 +1128,14 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             .engine_mut()
             .history
             .record(exit.vp.rip, history_mark(exit.reason));
-        let mut servicer = Servicer { vcpu, index: *index, exchange, xsave, inject, control };
+        let mut servicer = Servicer {
+            vcpu,
+            index: *index,
+            exchange,
+            xsave,
+            inject,
+            control,
+        };
         let carry_on = match servicer.answer(exit, &mut processor) {
             Ok(carry_on) => carry_on,
             Err(error) => return Continue::Park(Parked::Fault(refused_service(&error))),
@@ -1134,9 +1156,9 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         if guard.reset_is_pending() {
             let clock = clock.lock().unwrap_or_else(PoisonError::into_inner);
             match crate::device_thread::service_once(&mut guard, &clock) {
-                Ok(DeviceTime { stop: Some(reason), .. }) => {
-                    return Continue::Park(Parked::from_stop(reason))
-                }
+                Ok(DeviceTime {
+                    stop: Some(reason), ..
+                }) => return Continue::Park(Parked::from_stop(reason)),
                 Ok(_) => {}
                 Err(error) => return Continue::Park(Parked::Fault(refused_service(&error))),
             }
@@ -1163,12 +1185,19 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
     /// with it. The import takes that lock and releases it before the wait.
     fn park(&mut self, why: Parked) -> Woke {
         let registers = self.bring_the_shadow_home();
-        match self.vcpu.counters().intercept_counters().and_then(|intercepts| {
-            self.vcpu
-                .counters()
-                .runtime_counters()
-                .map(|runtime| PlatformCounters { intercepts, runtime })
-        }) {
+        match self
+            .vcpu
+            .counters()
+            .intercept_counters()
+            .and_then(|intercepts| {
+                self.vcpu
+                    .counters()
+                    .runtime_counters()
+                    .map(|runtime| PlatformCounters {
+                        intercepts,
+                        runtime,
+                    })
+            }) {
             Ok(counters) => {
                 *self
                     .control
@@ -1235,7 +1264,14 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         if self.control.reset_is_owed() {
             return RegistersAtPark::InTheMachine { placed: None };
         }
-        let Self { vcpu, index, machine, exchange, xsave, .. } = self;
+        let Self {
+            vcpu,
+            index,
+            machine,
+            exchange,
+            xsave,
+            ..
+        } = self;
         let mut guard = match machine.lock() {
             Ok(guard) => guard,
             Err(_) => {
@@ -1289,7 +1325,16 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         if !self.exchange.owes_the_partition() {
             return Ok(());
         }
-        let Self { vcpu, index, machine, exchange, xsave, inject, control, .. } = self;
+        let Self {
+            vcpu,
+            index,
+            machine,
+            exchange,
+            xsave,
+            inject,
+            control,
+            ..
+        } = self;
         let mut guard = machine.lock().map_err(|_| {
             EngineFault::new(
                 EngineFaultKind::Host,
@@ -1304,10 +1349,10 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
         if handback.written.contains(ArchGroups::RIP_RFLAGS) {
             inject.republish_if(cpu.interrupts_enabled());
         }
-        control
-            .census
-            .handback_calls
-            .fetch_add(u64::try_from(handback.calls).unwrap_or(u64::MAX), Ordering::Release);
+        control.census.handback_calls.fetch_add(
+            u64::try_from(handback.calls).unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
         Ok(())
     }
 
@@ -1356,7 +1401,10 @@ impl<T: Instrumentation + Send + 'static> VcpuThread<T> {
             .reinstall_after_reset(&self.vcpu)
             .map_err(|error| refused_service(&error))?;
         self.inject = InjectState::at_reset();
-        tracing::debug!("vCPU {} installed the machine's reset processor", self.index);
+        tracing::debug!(
+            "vCPU {} installed the machine's reset processor",
+            self.index
+        );
         Ok(())
     }
 
@@ -1440,8 +1488,7 @@ impl Servicer<'_> {
         // handleAsyncEvent`, "Priority 3: External Hardware Interventions"),
         // and taking it here — before the entry stages a legacy vector — is
         // that order.
-        if matches!(carry_on, Continue::Run)
-            && processor.cpu().owes_a_system_management_interrupt()
+        if matches!(carry_on, Continue::Run) && processor.cpu().owes_a_system_management_interrupt()
         {
             let calls = take_the_signalled_smi(self.vcpu, self.exchange, self.xsave, processor)?;
             self.control
@@ -1511,7 +1558,11 @@ impl Servicer<'_> {
                     Finish::Instruction => ExitClass::Mmio,
                     Finish::RaisingInstruction | Finish::Delivery(_) => ExitClass::Exception,
                 };
-                self.import(processor.cpu_mut(), class, &access.instruction_bytes[..bytes])?;
+                self.import(
+                    processor.cpu_mut(),
+                    class,
+                    &access.instruction_bytes[..bytes],
+                )?;
                 self.finish_the_errand(processor, Trapped::Access, finish)?;
                 Ok(Continue::Run)
             }
@@ -1549,7 +1600,11 @@ impl Servicer<'_> {
                 let finish = self.take_back_the_interrupted_delivery(exit)?;
                 self.import(processor.cpu_mut(), ExitClass::Exception, NO_BYTES)?;
                 if reports_each_fault() {
-                    let ProcessorParts { cpu, mut io, engine } = processor.parts();
+                    let ProcessorParts {
+                        cpu,
+                        mut io,
+                        engine,
+                    } = processor.parts();
                     describe_the_fault(self.vcpu, cpu, &mut io, exit, &engine.history);
                 }
                 self.finish_the_errand(processor, Trapped::Access, finish)?;
@@ -1607,9 +1662,16 @@ impl Servicer<'_> {
             // application processor's LVT0 says nothing about the 8259 — and
             // the platform has already applied its value to the register that
             // processor reads.
-            ExitReason::ApicWriteTrap { register: ApicWriteType::Lint0, value } => {
+            ExitReason::ApicWriteTrap {
+                register: ApicWriteType::Lint0,
+                value,
+            } => {
                 if self.index == BOOT_PROCESSOR {
-                    processor.io().device_manager().irq_mut().set_bsp_lint0(value);
+                    processor
+                        .io()
+                        .device_manager()
+                        .irq_mut()
+                        .set_bsp_lint0(value);
                 }
                 Ok(Continue::Run)
             }
@@ -1660,7 +1722,8 @@ impl Servicer<'_> {
             // there.
             ExitReason::ApicSmiTrap => {
                 processor.deliver_smi();
-                let calls = take_the_signalled_smi(self.vcpu, self.exchange, self.xsave, processor)?;
+                let calls =
+                    take_the_signalled_smi(self.vcpu, self.exchange, self.xsave, processor)?;
                 self.control
                     .census
                     .export_calls
@@ -1691,7 +1754,8 @@ impl Servicer<'_> {
         class: ExitClass,
         bytes: &[u8],
     ) -> Result<()> {
-        self.exchange.import_for(self.vcpu, cpu, class, bytes, self.xsave)
+        self.exchange
+            .import_for(self.vcpu, cpu, class, bytes, self.xsave)
     }
 
     /// Take back a delivery this exit interrupted, and answer what the shadow
@@ -1722,7 +1786,10 @@ impl Servicer<'_> {
         if exit.vp.execution_state & INTERRUPTION_PENDING == 0 {
             return Ok(Finish::Instruction);
         }
-        let word = self.vcpu.read_reg(Reg::PendingInterruption).map_err(platform_failed)?;
+        let word = self
+            .vcpu
+            .read_reg(Reg::PendingInterruption)
+            .map_err(platform_failed)?;
         let delivery = match PendingInterruptionRead::from_word(word) {
             PendingInterruptionRead::Empty => return Ok(Finish::Instruction),
             PendingInterruptionRead::Delivery(delivery) => delivery,
@@ -1751,10 +1818,15 @@ impl Servicer<'_> {
                 // exception it models pushes.
                 let error_code = u16::try_from(delivery.error_code.unwrap_or(0))
                     .map_err(|_| no_event_for(word))?;
-                Finish::Delivery(HardwareEvent::Exception { vector: exception, error_code })
+                Finish::Delivery(HardwareEvent::Exception {
+                    vector: exception,
+                    error_code,
+                })
             }
         };
-        self.vcpu.write_reg(Reg::PendingInterruption, 0).map_err(platform_failed)?;
+        self.vcpu
+            .write_reg(Reg::PendingInterruption, 0)
+            .map_err(platform_failed)?;
         Ok(finish)
     }
 
@@ -1789,12 +1861,15 @@ impl Servicer<'_> {
         // enters a handler — the processor it leaves behind is the one the
         // platform must continue from.
         match finish {
-            Finish::Instruction | Finish::RaisingInstruction => processor.finish_the_instruction()?,
+            Finish::Instruction | Finish::RaisingInstruction => {
+                processor.finish_the_instruction()?
+            }
             Finish::Delivery(event) => processor.deliver_hardware_event(event)?,
         }
         processor.deliver_the_trap_owed()?;
         let cpu = processor.cpu_mut();
-        self.inject.refresh_from_shadow(cpu.interrupts_enabled(), cpu.in_interrupt_shadow());
+        self.inject
+            .refresh_from_shadow(cpu.interrupts_enabled(), cpu.in_interrupt_shadow());
         // Withheld on the shadow ITSELF, before the export, so that what the
         // partition receives and what the shadow keeps are one processor.
         if let Trapped::Cpuid { leaf } = trapped {
@@ -1910,7 +1985,9 @@ pub(crate) fn service_port_access<V: VpRegisters>(
         );
         access.rax
     } else {
-        let value = io.devices.inp(port, width, ticks, io.pc_system, io.device_manager);
+        let value = io
+            .devices
+            .inp(port, width, ticks, io.pc_system, io.device_manager);
         // A narrower `IN` leaves the bytes above its width as the guest had
         // them — the same rule the interpreter's own `port_in` follows.
         (access.rax & !mask) | (u64::from(value) & mask)
@@ -1920,7 +1997,8 @@ pub(crate) fn service_port_access<V: VpRegisters>(
     // does not advance RIP itself, so finishing it is arithmetic rather than a
     // decode (probe finding 2).
     let resume = exit.vp.rip + u64::from(exit.vp.instruction_length);
-    vp.write_words(&[Reg::Rip, Reg::Rax], &[resume, rax]).map_err(platform_failed)
+    vp.write_words(&[Reg::Rip, Reg::Rax], &[resume, rax])
+        .map_err(platform_failed)
 }
 
 /// Take a system-management interrupt the shadow has ALREADY been signalled,
@@ -1978,7 +2056,10 @@ fn refused_service(error: &CpuError) -> EngineFault {
         CpuError::EngineFault(fault) => *fault,
         other => {
             tracing::error!("servicing an exit on the vCPU thread failed: {other}");
-            EngineFault::new(EngineFaultKind::Host, "servicing an exit on the vCPU thread")
+            EngineFault::new(
+                EngineFaultKind::Host,
+                "servicing an exit on the vCPU thread",
+            )
         }
     }
 }
@@ -1990,7 +2071,10 @@ fn refused_reset(error: &rusty_box::Error) -> EngineFault {
         rusty_box::Error::Cpu(CpuError::EngineFault(fault)) => *fault,
         other => {
             tracing::error!("resetting the machine after a triple fault failed: {other}");
-            EngineFault::new(EngineFaultKind::Host, "resetting the machine after a triple fault")
+            EngineFault::new(
+                EngineFaultKind::Host,
+                "resetting the machine after a triple fault",
+            )
         }
     }
 }
@@ -2006,16 +2090,21 @@ fn unserviced(exit: &Exit) -> Parked {
         exit.vp.rip,
         exit.vp.execution_state
     );
-    Parked::Fault(EngineFault::new(EngineFaultKind::Unserviced, exit.reason.name()))
+    Parked::Fault(EngineFault::new(
+        EngineFaultKind::Unserviced,
+        exit.reason.name(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ext_int_request, park_request, CancelRun};
-    use crate::engine::ext_int_permitted;
-    use rusty_box_whp::{SegmentRegister, VpContext, WhpResult};
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    use rusty_box_whp::{SegmentRegister, VpContext, WhpResult};
+
+    use super::{CancelRun, ext_int_request, park_request};
+    use crate::engine::ext_int_permitted;
 
     /// The three header bits the freshness contract rests on, and nothing else.
     ///
@@ -2040,14 +2129,29 @@ mod tests {
             cr8: 0,
             execution_state: 0,
         };
-        assert!(ext_int_permitted(&base), "IF set, no shadow, nothing pending");
-        assert!(!ext_int_permitted(&VpContext { rflags: 0x002, ..base }), "IF clear");
         assert!(
-            !ext_int_permitted(&VpContext { execution_state: 1 << 12, ..base }),
+            ext_int_permitted(&base),
+            "IF set, no shadow, nothing pending"
+        );
+        assert!(
+            !ext_int_permitted(&VpContext {
+                rflags: 0x002,
+                ..base
+            }),
+            "IF clear"
+        );
+        assert!(
+            !ext_int_permitted(&VpContext {
+                execution_state: 1 << 12,
+                ..base
+            }),
             "interrupt shadow"
         );
         assert!(
-            !ext_int_permitted(&VpContext { execution_state: 1 << 6, ..base }),
+            !ext_int_permitted(&VpContext {
+                execution_state: 1 << 6,
+                ..base
+            }),
             "an interruption is already pending"
         );
     }
@@ -2093,13 +2197,21 @@ mod tests {
         for _ in 0..8 {
             ext_int_request(&owed, &blocked, &in_run, &cancel).unwrap();
         }
-        assert_eq!(cancel.0.get(), 1, "eight boundaries, one interrupt, one cancel");
+        assert_eq!(
+            cancel.0.get(),
+            1,
+            "eight boundaries, one interrupt, one cancel"
+        );
         assert!(owed.load(Ordering::Acquire), "and the vector is still owed");
 
         // The thread staged it and cleared the flag.
         owed.store(false, Ordering::Release);
         ext_int_request(&owed, &blocked, &in_run, &cancel).unwrap();
-        assert_eq!(cancel.0.get(), 2, "the next interrupt fetches the processor out again");
+        assert_eq!(
+            cancel.0.get(),
+            2,
+            "the next interrupt fetches the processor out again"
+        );
     }
 
     /// A guest that could not take the vector is fetched out again at every
@@ -2134,7 +2246,11 @@ mod tests {
         for _ in 0..8 {
             ext_int_request(&owed, &blocked, &in_run, &cancel).unwrap();
         }
-        assert_eq!(cancel.0.get(), 8, "a guest that can take it costs nothing further");
+        assert_eq!(
+            cancel.0.get(),
+            8,
+            "a guest that can take it costs nothing further"
+        );
     }
 
     /// A request raised while the processor is between runs cancels nothing.
@@ -2154,7 +2270,11 @@ mod tests {
 
         ext_int_request(&owed, &blocked, &in_run, &cancel).expect("a request is recordable");
 
-        assert_eq!(cancel.0.get(), 0, "a processor that is not running is not cancelled");
+        assert_eq!(
+            cancel.0.get(),
+            0,
+            "a processor that is not running is not cancelled"
+        );
         assert!(owed.load(Ordering::SeqCst), "and the vector is still owed");
     }
 
@@ -2171,14 +2291,24 @@ mod tests {
 
         ext_int_request(&owed, &blocked, &in_run, &cancel).expect("a request is recordable");
 
-        assert_eq!(cancel.0.get(), 1, "a running processor is fetched out exactly once");
-        assert!(owed.load(Ordering::SeqCst), "and the vector is owed until it is staged");
+        assert_eq!(
+            cancel.0.get(),
+            1,
+            "a running processor is fetched out exactly once"
+        );
+        assert!(
+            owed.load(Ordering::SeqCst),
+            "and the vector is owed until it is staged"
+        );
     }
 
     #[test]
     fn a_park_request_sets_the_flag_before_it_cancels() {
         let flag = AtomicBool::new(false);
-        let cancel = RecordingCancel { flag: &flag, saw: Cell::new(None) };
+        let cancel = RecordingCancel {
+            flag: &flag,
+            saw: Cell::new(None),
+        };
         park_request(&flag, &cancel).unwrap();
         assert_eq!(
             cancel.saw.get(),

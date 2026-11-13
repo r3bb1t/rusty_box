@@ -48,19 +48,18 @@ pub(crate) struct Accent {
 }
 
 impl Accent {
-    /// A PC's, and the browser's, which builds only a PC.
-    pub(crate) const PC: Self = Self {
-        strong: ACCENT_CYAN,
-        data: ACCENT_BLUE,
-        selection: Color32::from_rgb(0x1E, 0x5F, 0x62),
-    };
-
     /// An Arm `virt` board's.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const ARM_VIRT: Self = Self {
         strong: Color32::from_rgb(0xEF, 0x4B, 0x4B),
         data: Color32::from_rgb(0xFF, 0x8A, 0x80),
         selection: Color32::from_rgb(0x62, 0x1E, 0x24),
+    };
+    /// A PC's, and the browser's, which builds only a PC.
+    pub(crate) const PC: Self = Self {
+        strong: ACCENT_CYAN,
+        data: ACCENT_BLUE,
+        selection: Color32::from_rgb(0x1E, 0x5F, 0x62),
     };
 
     /// The accent of a VM that is `machine`.
@@ -95,7 +94,8 @@ impl Accent {
     }
 
     fn write(self, ctx: &egui::Context) {
-        use egui::{style::Selection, Theme};
+        use egui::Theme;
+        use egui::style::Selection;
         ctx.data_mut(|data| data.insert_temp(Self::id(), self));
         ctx.style_mut_of(Theme::Dark, |style| {
             style.visuals.text_cursor.stroke.color = self.strong;
@@ -186,11 +186,12 @@ pub(crate) fn shell_card_frame_with_margin(margin: i8) -> egui::Frame {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        configure_shell_style, Accent, ACCENT_CYAN, BG_BASE, BG_CARD, BG_PANEL, BG_WELL,
-        CONTROL_FILL_ACTIVE, CONTROL_FILL_HOVERED, CONTROL_FILL_REST, TEXT_PRIMARY,
-    };
     use egui::Color32;
+
+    use super::{
+        ACCENT_CYAN, Accent, BG_BASE, BG_CARD, BG_PANEL, BG_WELL, CONTROL_FILL_ACTIVE,
+        CONTROL_FILL_HOVERED, CONTROL_FILL_REST, TEXT_PRIMARY, configure_shell_style,
+    };
 
     /// WCAG relative luminance of an opaque sRGB colour: 0.0 is black, 1.0 is
     /// white. Each channel is linearised before the weighted sum, so two
@@ -296,13 +297,26 @@ mod tests {
             );
             for (what, a, b, floor) in [
                 ("primary verb text", BG_BASE, accent.strong, TEXT_CONTRAST),
-                ("destination rule", accent.strong, BG_CARD, NON_TEXT_CONTRAST),
+                (
+                    "destination rule",
+                    accent.strong,
+                    BG_CARD,
+                    NON_TEXT_CONTRAST,
+                ),
                 ("published rate", accent.data, BG_PANEL, TEXT_CONTRAST),
-                ("selected text", TEXT_PRIMARY, accent.selection, TEXT_CONTRAST),
+                (
+                    "selected text",
+                    TEXT_PRIMARY,
+                    accent.selection,
+                    TEXT_CONTRAST,
+                ),
                 ("current row text", TEXT_PRIMARY, current_row, TEXT_CONTRAST),
             ] {
                 let ratio = contrast_ratio(a, b);
-                assert!(ratio >= floor, "{machine:?} {what}: {ratio:.3}:1 < {floor}:1");
+                assert!(
+                    ratio >= floor,
+                    "{machine:?} {what}: {ratio:.3}:1 < {floor}:1"
+                );
             }
         }
     }
@@ -332,7 +346,14 @@ mod tests {
         assert_eq!(visuals.text_cursor.stroke.color, Accent::ARM_VIRT.strong);
         assert_eq!(visuals.selection.bg_fill, Accent::ARM_VIRT.selection);
         Accent::PC.apply(&ctx);
-        assert_eq!(ctx.style_of(egui::Theme::Dark).visuals.selection.stroke.color, ACCENT_CYAN);
+        assert_eq!(
+            ctx.style_of(egui::Theme::Dark)
+                .visuals
+                .selection
+                .stroke
+                .color,
+            ACCENT_CYAN
+        );
     }
 
     #[test]

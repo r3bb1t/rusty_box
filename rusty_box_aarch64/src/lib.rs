@@ -83,8 +83,8 @@ pub use disk::{Access, Disk};
 pub use identity::{
     BoardIdentity, CompatibleList, CompatibleStrings, EdidDate, EdidProductCode, EdidWeek,
     EdidWeekNumber, EdidYear, FlashDeviceCode, FlashIdentity, FlashManufacturer, GicCpuIidr,
-    GicDistFields, GicDistIidr, GicIdentity, IdentityError,
-    IdentityField, IdentityNames, IdentityProblem, Iidr, IidrField, IidrFields, InputDeviceId, InputProductId, InputVendorId,
+    GicDistFields, GicDistIidr, GicIdentity, IdentityError, IdentityField, IdentityNames,
+    IdentityProblem, Iidr, IidrField, IidrFields, InputDeviceId, InputProductId, InputVendorId,
     InputVersion, MsiFrameIidr, NotAnEdidWeek, NotAnEdidYear, NotIidrFields, NotJep106Number,
     NotPnpId, PnpId, VirtioVendorId,
 };
@@ -98,16 +98,16 @@ pub use machine::Display;
 #[cfg(feature = "alloc")]
 pub use machine::StopHandle;
 pub use machine::{
-    BatchOutcome, BuildError, GicCpuInterfaceBits, HostTreeAddress, HostTreeInterrupt,
-    MachineBuilder, MemoryError, MemoryLoan, OnResetRequest, PowerState, RamSize, StopReason,
-    TreeDevice, VirtConfig, VirtMachine,
+    BatchOutcome, BuildError, GicCpuInterfaceBits, HostTreeAddress, HostTreeInterrupt, Keyboard,
+    MachineBuilder, MemoryError, MemoryLoan, OnResetRequest, Pointer, PowerState, RamSize,
+    StopReason, TreeDevice, VirtConfig, VirtMachine,
 };
-pub use machine::{Keyboard, Pointer};
 pub use rusty_box_core::input::pointer::{PointerButton, PointerInput, PointerPos, WheelSteps};
 pub use rusty_box_core::input::{Key, KeyAction, KeyboardInput, Typed};
 /// The verbs every rusty_box machine shares, whatever it emulates.
 pub use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
 pub use rusty_box_core::{ClockHz, Progress, RunBudget};
+pub use rusty_box_devices::display::Resolution;
 /// What the display shows through: the size of a picture and the sink a
 /// host implements to receive its frames, with every type its methods take,
 /// shared with the x86 machine.
@@ -115,7 +115,6 @@ pub use rusty_box_devices::display::sink::{
     CursorPos, Dimensions, DisplaySink, NullDisplay, Redraw, Refreshed, Rgb, TilePos,
 };
 pub use rusty_box_devices::display::vga::VgaTextModeInfo;
-pub use rusty_box_devices::display::Resolution;
 #[cfg(feature = "alloc")]
 pub use storage::OwnedStorage;
 pub use storage::{GuestStorage, LentStorage};

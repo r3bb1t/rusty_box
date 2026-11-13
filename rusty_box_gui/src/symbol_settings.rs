@@ -27,7 +27,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use rusty_box_symbols::projects::ProjectFolders;
-use rusty_box_symbols::service::{Downloads, ServiceConfig, DEFAULT_MAX_DOWNLOAD};
+use rusty_box_symbols::service::{DEFAULT_MAX_DOWNLOAD, Downloads, ServiceConfig};
 use rusty_box_symbols::symbol_path::{parse_debuginfod_urls, parse_nt_symbol_path};
 
 use crate::error::LibraryError;
@@ -168,21 +168,37 @@ impl SymbolSettings {
     /// `file`, completed from `environment` and the defaults. `app_dir` is the
     /// folder the settings file is in: a relative path in the file is taken
     /// from there.
-    pub(crate) fn resolve(file: &SettingsFile, environment: &Environment, app_dir: &Path) -> SymbolSettings {
+    pub(crate) fn resolve(
+        file: &SettingsFile,
+        environment: &Environment,
+        app_dir: &Path,
+    ) -> SymbolSettings {
         let nt = parse_nt_symbol_path(
-            environment.nt_alt_symbol_path.as_ref().and_then(|value| value.to_str()),
-            environment.nt_symbol_path.as_ref().and_then(|value| value.to_str()),
+            environment
+                .nt_alt_symbol_path
+                .as_ref()
+                .and_then(|value| value.to_str()),
+            environment
+                .nt_symbol_path
+                .as_ref()
+                .and_then(|value| value.to_str()),
         );
         let nt_variable = "_NT_SYMBOL_PATH";
         let store = match &file.symbols.store {
             Some(store) => Resolved {
-                value: if store.is_relative() { app_dir.join(store) } else { store.clone() },
+                value: if store.is_relative() {
+                    app_dir.join(store)
+                } else {
+                    store.clone()
+                },
                 origin: Origin::File,
             },
             None => match nt.store.filter(|store| store.is_absolute()) {
                 Some(store) => Resolved {
                     value: store,
-                    origin: Origin::Environment { variable: nt_variable },
+                    origin: Origin::Environment {
+                        variable: nt_variable,
+                    },
                 },
                 None => Resolved {
                     value: default_store(environment, app_dir),
@@ -211,7 +227,9 @@ impl SymbolSettings {
             },
             None if !nt.servers.is_empty() => Resolved {
                 value: nt.servers,
-                origin: Origin::Environment { variable: nt_variable },
+                origin: Origin::Environment {
+                    variable: nt_variable,
+                },
             },
             None => Resolved {
                 value: vec![MICROSOFT_SYMBOL_SERVER.to_owned()],
@@ -278,7 +296,10 @@ impl SymbolSettings {
                 maps: project
                     .map
                     .iter()
-                    .map(|map| PathMap { from: map.from.to_string_lossy().into_owned(), to: map.to.clone() })
+                    .map(|map| PathMap {
+                        from: map.from.to_string_lossy().into_owned(),
+                        to: map.to.clone(),
+                    })
                     .collect(),
             })
             .collect()
@@ -321,13 +342,19 @@ const MAX_SET_ASIDE: u32 = 100;
 /// `<name>.broken-2`, … beside it, whole or not at all; `None` when there is
 /// no file. An earlier copy is never replaced.
 fn set_aside(path: &Path) -> Result<Option<PathBuf>, SettingsError> {
-    let failed = |source: std::io::Error| SettingsError::SetAside { path: path.to_owned(), source };
+    let failed = |source: std::io::Error| SettingsError::SetAside {
+        path: path.to_owned(),
+        source,
+    };
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(failed(source)),
     };
-    let name = path.file_name().map_or_else(|| std::ffi::OsString::from(SETTINGS_FILE), std::ffi::OsStr::to_os_string);
+    let name = path.file_name().map_or_else(
+        || std::ffi::OsString::from(SETTINGS_FILE),
+        std::ffi::OsStr::to_os_string,
+    );
     for number in 1..=MAX_SET_ASIDE {
         let mut aside_name = name.clone();
         if number == 1 {
@@ -365,7 +392,7 @@ pub(crate) fn load(path: &Path) -> LoadedSettings {
             return LoadedSettings {
                 file: SettingsFile::default(),
                 problem: None,
-            }
+            };
         }
         Err(source) => {
             return LoadedSettings {
@@ -374,11 +401,14 @@ pub(crate) fn load(path: &Path) -> LoadedSettings {
                     path: path.to_owned(),
                     source,
                 }),
-            }
+            };
         }
     };
     match toml::from_str(&text) {
-        Ok(file) => LoadedSettings { file, problem: None },
+        Ok(file) => LoadedSettings {
+            file,
+            problem: None,
+        },
         Err(source) => LoadedSettings {
             file: SettingsFile::default(),
             problem: Some(SettingsError::Parse {
@@ -391,7 +421,8 @@ pub(crate) fn load(path: &Path) -> LoadedSettings {
 
 /// Writes `file` to `path` whole or not at all.
 pub(crate) fn save(path: &Path, file: &SettingsFile) -> Result<(), SettingsError> {
-    let text = toml::to_string_pretty(file).map_err(|source| SettingsError::Serialize { source })?;
+    let text =
+        toml::to_string_pretty(file).map_err(|source| SettingsError::Serialize { source })?;
     crate::library::write_atomically(path, text.as_bytes())?;
     Ok(())
 }
@@ -420,7 +451,9 @@ impl SettingsState {
             file: loaded.file,
             // The TOML parser's message ends with a line break; the page
             // continues the sentence after it.
-            problem: loaded.problem.map(|problem| problem.to_string().trim_end().to_owned()),
+            problem: loaded
+                .problem
+                .map(|problem| problem.to_string().trim_end().to_owned()),
             set_aside: None,
             environment,
             resolved,
@@ -479,19 +512,34 @@ pub(crate) enum DraftError {
 const MAP_ARROW: &str = "=>";
 
 fn lines(text: &str) -> Vec<String> {
-    text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned).collect()
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn joined<T: AsRef<std::ffi::OsStr>>(items: &[T]) -> String {
-    items.iter().map(|item| Path::new(item.as_ref()).display().to_string()).collect::<Vec<String>>().join("\n")
+    items
+        .iter()
+        .map(|item| Path::new(item.as_ref()).display().to_string())
+        .collect::<Vec<String>>()
+        .join("\n")
 }
 
 impl SettingsDraft {
     /// The fields for `file`.
     pub(crate) fn of(file: &SettingsFile) -> Self {
-        let servers = |list: &Option<Vec<String>>| list.as_ref().map_or_else(String::new, |list| list.join("\n"));
+        let servers = |list: &Option<Vec<String>>| {
+            list.as_ref()
+                .map_or_else(String::new, |list| list.join("\n"))
+        };
         SettingsDraft {
-            store: file.symbols.store.as_ref().map_or_else(String::new, |store| store.display().to_string()),
+            store: file
+                .symbols
+                .store
+                .as_ref()
+                .map_or_else(String::new, |store| store.display().to_string()),
             downloads: file.symbols.download,
             microsoft: servers(&file.symbols.microsoft),
             debuginfod: servers(&file.symbols.debuginfod),
@@ -505,7 +553,9 @@ impl SettingsDraft {
                     map: project
                         .map
                         .iter()
-                        .map(|map| format!("{} {MAP_ARROW} {}", map.from.display(), map.to.display()))
+                        .map(|map| {
+                            format!("{} {MAP_ARROW} {}", map.from.display(), map.to.display())
+                        })
                         .collect::<Vec<String>>()
                         .join("\n"),
                 })
@@ -521,30 +571,49 @@ impl SettingsDraft {
             let name = project.name.trim();
             if name.is_empty() {
                 // The page numbers projects from one.
-                return Err(DraftError::UnnamedProject { number: index.saturating_add(1) });
+                return Err(DraftError::UnnamedProject {
+                    number: index.saturating_add(1),
+                });
             }
             let mut map = Vec::new();
             for line in lines(&project.map) {
                 let Some((from, to)) = line.split_once(MAP_ARROW) else {
-                    return Err(DraftError::BadMap { project: name.to_owned(), line });
+                    return Err(DraftError::BadMap {
+                        project: name.to_owned(),
+                        line,
+                    });
                 };
                 let from = from.trim();
                 let to = to.trim();
                 if from.is_empty() || to.is_empty() {
-                    return Err(DraftError::BadMap { project: name.to_owned(), line });
+                    return Err(DraftError::BadMap {
+                        project: name.to_owned(),
+                        line,
+                    });
                 }
-                map.push(PathMapToml { from: PathBuf::from(from), to: PathBuf::from(to) });
+                map.push(PathMapToml {
+                    from: PathBuf::from(from),
+                    to: PathBuf::from(to),
+                });
             }
             projects.push(ProjectToml {
                 name: name.to_owned(),
-                symbols: lines(&project.symbols).into_iter().map(PathBuf::from).collect(),
-                sources: lines(&project.sources).into_iter().map(PathBuf::from).collect(),
+                symbols: lines(&project.symbols)
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect(),
+                sources: lines(&project.sources)
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect(),
                 map,
             });
         }
         Ok(SettingsFile {
             symbols: SymbolsToml {
-                store: Some(self.store.trim()).filter(|store| !store.is_empty()).map(PathBuf::from),
+                store: Some(self.store.trim())
+                    .filter(|store| !store.is_empty())
+                    .map(PathBuf::from),
                 download: self.downloads,
                 microsoft: servers(&self.microsoft),
                 debuginfod: servers(&self.debuginfod),
@@ -557,7 +626,9 @@ impl SettingsDraft {
 /// The folder the settings file is in, which a relative path in it is taken
 /// from.
 fn app_dir_of(settings_file: &Path) -> PathBuf {
-    settings_file.parent().map_or_else(PathBuf::new, Path::to_path_buf)
+    settings_file
+        .parent()
+        .map_or_else(PathBuf::new, Path::to_path_buf)
 }
 
 /// The settings file beside the library folder `library_dir`: in its parent,
@@ -601,27 +672,77 @@ mod tests {
             ..Environment::default()
         };
         let none = SymbolSettings::resolve(&SettingsFile::default(), &environment, &app_dir());
-        assert_eq!(none.store, Resolved { value: store, origin: Origin::Environment { variable: "_NT_SYMBOL_PATH" } });
+        assert_eq!(
+            none.store,
+            Resolved {
+                value: store,
+                origin: Origin::Environment {
+                    variable: "_NT_SYMBOL_PATH"
+                }
+            }
+        );
         assert_eq!(none.microsoft.value, ["https://symbols.example/"]);
-        assert_eq!(none.debuginfod.origin, Origin::Environment { variable: "DEBUGINFOD_URLS" });
-        assert_eq!(none.downloads, Resolved { value: Downloads::Automatic, origin: Origin::Default });
+        assert_eq!(
+            none.debuginfod.origin,
+            Origin::Environment {
+                variable: "DEBUGINFOD_URLS"
+            }
+        );
+        assert_eq!(
+            none.downloads,
+            Resolved {
+                value: Downloads::Automatic,
+                origin: Origin::Default
+            }
+        );
 
         let set = file(
             "[symbols]\nstore = 'cache'\ndownload = \"off\"\nmicrosoft = []\ndebuginfod = [\"https://mine.example/\"]\n",
         );
         let resolved = SymbolSettings::resolve(&set, &environment, &app_dir());
-        assert_eq!(resolved.store, Resolved { value: app_dir().join("cache"), origin: Origin::File });
-        assert_eq!(resolved.downloads, Resolved { value: Downloads::Off, origin: Origin::File });
-        assert!(resolved.microsoft.value.is_empty(), "an empty list in the file is a choice");
+        assert_eq!(
+            resolved.store,
+            Resolved {
+                value: app_dir().join("cache"),
+                origin: Origin::File
+            }
+        );
+        assert_eq!(
+            resolved.downloads,
+            Resolved {
+                value: Downloads::Off,
+                origin: Origin::File
+            }
+        );
+        assert!(
+            resolved.microsoft.value.is_empty(),
+            "an empty list in the file is a choice"
+        );
         assert_eq!(resolved.debuginfod.value, ["https://mine.example/"]);
     }
 
     #[test]
     fn with_nothing_set_the_defaults_hold() {
-        let resolved = SymbolSettings::resolve(&SettingsFile::default(), &Environment::default(), &app_dir());
-        assert_eq!(resolved.microsoft, Resolved { value: vec![MICROSOFT_SYMBOL_SERVER.to_owned()], origin: Origin::Default });
+        let resolved = SymbolSettings::resolve(
+            &SettingsFile::default(),
+            &Environment::default(),
+            &app_dir(),
+        );
+        assert_eq!(
+            resolved.microsoft,
+            Resolved {
+                value: vec![MICROSOFT_SYMBOL_SERVER.to_owned()],
+                origin: Origin::Default
+            }
+        );
         assert_eq!(resolved.debuginfod.value, [ELFUTILS_DEBUGINFOD]);
-        assert_eq!(resolved.store, Resolved { value: app_dir().join("symbols"), origin: Origin::Default });
+        assert_eq!(
+            resolved.store,
+            Resolved {
+                value: app_dir().join("symbols"),
+                origin: Origin::Default
+            }
+        );
     }
 
     /// A relative variable would name a folder under the working directory.
@@ -644,10 +765,20 @@ mod tests {
         let resolved = SymbolSettings::resolve(&set, &Environment::default(), &app_dir());
         assert_eq!(
             resolved.project_folders(),
-            [ProjectFolders { name: "mydriver".to_owned(), symbols: vec![PathBuf::from("build")] }]
+            [ProjectFolders {
+                name: "mydriver".to_owned(),
+                symbols: vec![PathBuf::from("build")]
+            }]
         );
         let sources = resolved.project_sources();
-        let [ProjectSources { name, folders, maps }] = sources.as_slice() else {
+        let [
+            ProjectSources {
+                name,
+                folders,
+                maps,
+            },
+        ] = sources.as_slice()
+        else {
             panic!("one project: {sources:?}");
         };
         assert_eq!(name, "mydriver");
@@ -655,7 +786,10 @@ mod tests {
         let [PathMap { from, to }] = maps.as_slice() else {
             panic!("one map: {maps:?}");
         };
-        assert_eq!(rusty_box_symbols::source_path::components(from).collect::<Vec<&str>>(), ["C:", "agent"]);
+        assert_eq!(
+            rusty_box_symbols::source_path::components(from).collect::<Vec<&str>>(),
+            ["C:", "agent"]
+        );
         assert_eq!(*to, PathBuf::from(r"D:\work"));
     }
 
@@ -663,14 +797,22 @@ mod tests {
     /// it is.
     #[test]
     fn a_broken_file_reports_why_and_is_not_rewritten() {
-        let dir = std::env::temp_dir().join(format!("rusty-box-gui-settings-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rusty-box-gui-settings-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("folder");
         let path = dir.join(SETTINGS_FILE);
         std::fs::write(&path, "[symbols]\nstore = 3\n").expect("write");
         let loaded = load(&path);
         assert_eq!(loaded.file, SettingsFile::default());
-        assert!(matches!(loaded.problem, Some(SettingsError::Parse { .. })), "{:?}", loaded.problem);
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), "[symbols]\nstore = 3\n");
+        assert!(
+            matches!(loaded.problem, Some(SettingsError::Parse { .. })),
+            "{:?}",
+            loaded.problem
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "[symbols]\nstore = 3\n"
+        );
         let missing = load(&dir.join("absent.toml"));
         assert!(missing.problem.is_none());
         std::fs::remove_dir_all(&dir).expect("clean up");
@@ -678,10 +820,14 @@ mod tests {
 
     #[test]
     fn saved_settings_load_back_the_same() {
-        let dir = std::env::temp_dir().join(format!("rusty-box-gui-settings-save-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "rusty-box-gui-settings-save-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).expect("folder");
         let path = dir.join(SETTINGS_FILE);
-        let settings = file("[symbols]\ndownload = \"off\"\n[[project]]\nname = \"p\"\nsymbols = ['out']\n");
+        let settings =
+            file("[symbols]\ndownload = \"off\"\n[[project]]\nname = \"p\"\nsymbols = ['out']\n");
         save(&path, &settings).expect("save");
         assert_eq!(load(&path).file, settings);
         std::fs::remove_dir_all(&dir).expect("clean up");
@@ -690,7 +836,10 @@ mod tests {
     #[test]
     fn the_settings_file_sits_beside_the_library_folder() {
         let library = app_dir().join("vms");
-        assert_eq!(settings_file_beside(&library), app_dir().join(SETTINGS_FILE));
+        assert_eq!(
+            settings_file_beside(&library),
+            app_dir().join(SETTINGS_FILE)
+        );
     }
 
     /// The page's fields hold what the file says, and give the same file
@@ -714,28 +863,49 @@ mod tests {
     #[test]
     fn a_draft_with_a_bad_map_or_an_unnamed_project_says_which() {
         let mut draft = SettingsDraft::default();
-        draft.projects.push(ProjectDraft { name: "p".to_owned(), map: "C:\\agent -> D:\\work".to_owned(), ..ProjectDraft::default() });
+        draft.projects.push(ProjectDraft {
+            name: "p".to_owned(),
+            map: "C:\\agent -> D:\\work".to_owned(),
+            ..ProjectDraft::default()
+        });
         assert_eq!(
             draft.to_file(),
-            Err(DraftError::BadMap { project: "p".to_owned(), line: "C:\\agent -> D:\\work".to_owned() })
+            Err(DraftError::BadMap {
+                project: "p".to_owned(),
+                line: "C:\\agent -> D:\\work".to_owned()
+            })
         );
         draft.projects[0].name.clear();
-        assert_eq!(draft.to_file(), Err(DraftError::UnnamedProject { number: 1 }));
+        assert_eq!(
+            draft.to_file(),
+            Err(DraftError::UnnamedProject { number: 1 })
+        );
     }
 
     /// Review focus 5: saving rewrites the file, resolves from it, and
     /// clears the problem the old file had.
     #[test]
     fn saving_resolves_from_the_saved_file() {
-        let dir = std::env::temp_dir().join(format!("rusty-box-gui-settings-state-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "rusty-box-gui-settings-state-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).expect("folder");
         let path = dir.join(SETTINGS_FILE);
         std::fs::write(&path, "[symbols]\nstore = 3\n").expect("write");
         let mut state = SettingsState::load(path.clone(), Environment::default());
         assert!(state.problem.is_some());
-        state.save(file("[symbols]\ndownload = \"off\"\n")).expect("save");
+        state
+            .save(file("[symbols]\ndownload = \"off\"\n"))
+            .expect("save");
         assert_eq!(state.problem, None);
-        assert_eq!(state.resolved.downloads, Resolved { value: Downloads::Off, origin: Origin::File });
+        assert_eq!(
+            state.resolved.downloads,
+            Resolved {
+                value: Downloads::Off,
+                origin: Origin::File
+            }
+        );
         assert_eq!(load(&path).file, state.file);
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
@@ -744,18 +914,31 @@ mod tests {
     /// survives saving from the page, beside it.
     #[test]
     fn saving_over_a_broken_file_keeps_it_aside() {
-        let dir = std::env::temp_dir().join(format!("rusty-box-gui-settings-aside-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "rusty-box-gui-settings-aside-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).expect("folder");
         let path = dir.join(SETTINGS_FILE);
         std::fs::write(&path, "[symbols]\nstore = 3\n").expect("write");
         let mut state = SettingsState::load(path.clone(), Environment::default());
-        state.save(file("[symbols]\ndownload = \"off\"\n")).expect("save");
+        state
+            .save(file("[symbols]\ndownload = \"off\"\n"))
+            .expect("save");
         let aside = dir.join(format!("{SETTINGS_FILE}.broken"));
         assert_eq!(state.set_aside.as_deref(), Some(aside.as_path()));
-        assert_eq!(std::fs::read_to_string(&aside).expect("kept"), "[symbols]\nstore = 3\n");
+        assert_eq!(
+            std::fs::read_to_string(&aside).expect("kept"),
+            "[symbols]\nstore = 3\n"
+        );
         // The file loads now: saving again keeps nothing more aside.
-        state.save(file("[symbols]\ndownload = \"automatic\"\n")).expect("save again");
-        assert_eq!(std::fs::read_to_string(&aside).expect("still kept"), "[symbols]\nstore = 3\n");
+        state
+            .save(file("[symbols]\ndownload = \"automatic\"\n"))
+            .expect("save again");
+        assert_eq!(
+            std::fs::read_to_string(&aside).expect("still kept"),
+            "[symbols]\nstore = 3\n"
+        );
         assert!(!dir.join(format!("{SETTINGS_FILE}.broken-2")).exists());
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
@@ -764,7 +947,10 @@ mod tests {
     /// in a line break would start that sentence on a line of its own.
     #[test]
     fn a_broken_files_problem_ends_where_its_text_does() {
-        let dir = std::env::temp_dir().join(format!("rusty-box-gui-settings-problem-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "rusty-box-gui-settings-problem-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).expect("folder");
         let path = dir.join(SETTINGS_FILE);
         std::fs::write(&path, "[symbols]\nstore = 3\n").expect("write");
@@ -776,7 +962,10 @@ mod tests {
 
     #[test]
     fn a_second_broken_file_does_not_replace_the_first_kept_aside() {
-        let dir = std::env::temp_dir().join(format!("rusty-box-gui-settings-aside2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "rusty-box-gui-settings-aside2-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).expect("folder");
         let path = dir.join(SETTINGS_FILE);
         std::fs::write(dir.join(format!("{SETTINGS_FILE}.broken")), "first").expect("write");
@@ -785,8 +974,14 @@ mod tests {
         state.save(SettingsFile::default()).expect("save");
         let second = dir.join(format!("{SETTINGS_FILE}.broken-2"));
         assert_eq!(state.set_aside.as_deref(), Some(second.as_path()));
-        assert_eq!(std::fs::read_to_string(dir.join(format!("{SETTINGS_FILE}.broken"))).expect("first"), "first");
-        assert_eq!(std::fs::read_to_string(&second).expect("second"), "second = [");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(format!("{SETTINGS_FILE}.broken"))).expect("first"),
+            "first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second).expect("second"),
+            "second = ["
+        );
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
 }

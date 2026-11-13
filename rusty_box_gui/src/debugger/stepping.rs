@@ -5,8 +5,9 @@
 
 use std::time::Duration;
 
-pub(crate) use super::unwind::CodeWidth;
 pub(crate) use rusty_box::cpu::{BreakpointRefusal, CodeBreakpointHit};
+
+pub(crate) use super::unwind::CodeWidth;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StepKind {
@@ -36,7 +37,11 @@ pub(crate) struct StepRequest {
 impl StepRequest {
     /// One instruction of processor `cpu`, into a call.
     pub(crate) const fn instruction_into(cpu: usize) -> Self {
-        StepRequest { kind: StepKind::Into, unit: StepUnit::Instruction, cpu }
+        StepRequest {
+            kind: StepKind::Into,
+            unit: StepUnit::Instruction,
+            cpu,
+        }
     }
 }
 
@@ -144,7 +149,10 @@ pub(crate) struct StepLimits {
 
 /// Spec §7.2: ten million instructions single-stepped or a minute of
 /// running, whichever comes first.
-pub(crate) const STEP_LIMITS: StepLimits = StepLimits { single_steps: 10_000_000, time: Duration::from_secs(60) };
+pub(crate) const STEP_LIMITS: StepLimits = StepLimits {
+    single_steps: 10_000_000,
+    time: Duration::from_secs(60),
+};
 
 /// Which limit a step reached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,7 +187,10 @@ const MOST_POPPED: u64 = 0xFFFF;
 fn returned(registers: StepRegisters, caller_rsp: u64) -> bool {
     match registers.width {
         CodeWidth::Long64 => registers.rsp == caller_rsp,
-        CodeWidth::Protected32 => registers.rsp.checked_sub(caller_rsp).is_some_and(|above| above <= MOST_POPPED),
+        CodeWidth::Protected32 => registers
+            .rsp
+            .checked_sub(caller_rsp)
+            .is_some_and(|above| above <= MOST_POPPED),
     }
 }
 
@@ -196,7 +207,9 @@ impl Budget {
             return Err(StepEnd::Cancelled);
         }
         if self.single_steps >= self.limits.single_steps {
-            return Err(StepEnd::Ceiling(StepCeiling::Instructions(self.single_steps)));
+            return Err(StepEnd::Ceiling(StepCeiling::Instructions(
+                self.single_steps,
+            )));
         }
         if stepper.elapsed() >= self.limits.time {
             return Err(StepEnd::Ceiling(StepCeiling::Time));
@@ -216,13 +229,20 @@ impl Budget {
 
     /// Runs until the processor is at `target` with `caller_rsp`'s stack
     /// (or anywhere at `target`, without one).
-    fn run_to<S: Stepper>(&mut self, stepper: &mut S, target: u64, caller_rsp: Option<u64>) -> Result<(), StepEnd> {
+    fn run_to<S: Stepper>(
+        &mut self,
+        stepper: &mut S,
+        target: u64,
+        caller_rsp: Option<u64>,
+    ) -> Result<(), StepEnd> {
         loop {
             self.check(stepper)?;
             match stepper.run_until(&[target], self.limits.time) {
                 RunStop::AtTarget => {
                     let registers = stepper.registers();
-                    if registers.rip == target && caller_rsp.is_none_or(|caller_rsp| returned(registers, caller_rsp)) {
+                    if registers.rip == target
+                        && caller_rsp.is_none_or(|caller_rsp| returned(registers, caller_rsp))
+                    {
                         return Ok(());
                     }
                 }
@@ -230,7 +250,9 @@ impl Budget {
                 RunStop::MachineOver => return Err(StepEnd::MachineOver),
                 RunStop::Cancelled => return Err(StepEnd::Cancelled),
                 RunStop::Ceiling => return Err(StepEnd::Ceiling(StepCeiling::Time)),
-                RunStop::BreakpointsRefused(refusal) => return Err(StepEnd::BreakpointsRefused(refusal)),
+                RunStop::BreakpointsRefused(refusal) => {
+                    return Err(StepEnd::BreakpointsRefused(refusal));
+                }
             }
         }
     }
@@ -243,11 +265,23 @@ impl Budget {
 
     /// One instruction, `decoded`; a call or trap is run to its return when
     /// `over`.
-    fn instruction<S: Stepper>(&mut self, stepper: &mut S, decoded: Option<Decoded>, over: bool) -> Result<(), StepEnd> {
+    fn instruction<S: Stepper>(
+        &mut self,
+        stepper: &mut S,
+        decoded: Option<Decoded>,
+        over: bool,
+    ) -> Result<(), StepEnd> {
         match decoded {
-            Some(Decoded { length, flow: Flow::Call | Flow::Trap }) if over => {
+            Some(Decoded {
+                length,
+                flow: Flow::Call | Flow::Trap,
+            }) if over => {
                 let registers = stepper.registers();
-                self.run_to(stepper, registers.rip.wrapping_add(length), Some(registers.rsp))
+                self.run_to(
+                    stepper,
+                    registers.rip.wrapping_add(length),
+                    Some(registers.rsp),
+                )
             }
             Some(_) | None => self.single_step(stepper),
         }
@@ -263,7 +297,12 @@ impl Budget {
     /// than `from` (any row, without one). A function entered without rows
     /// is stepped out of again; code without rows reached otherwise ends the
     /// step, the source left.
-    fn lines<S: Stepper>(&mut self, stepper: &mut S, from: Option<SourcePlace>, over: bool) -> Result<(), StepEnd> {
+    fn lines<S: Stepper>(
+        &mut self,
+        stepper: &mut S,
+        from: Option<SourcePlace>,
+        over: bool,
+    ) -> Result<(), StepEnd> {
         loop {
             let decoded = Self::decode(stepper);
             self.instruction(stepper, decoded, over)?;
@@ -276,14 +315,21 @@ impl Budget {
 
     /// Whether the step ends where the processor is, having got there by an
     /// instruction of `flow`.
-    fn settled<S: Stepper>(&mut self, stepper: &mut S, from: Option<SourcePlace>, flow: Flow) -> Result<bool, StepEnd> {
+    fn settled<S: Stepper>(
+        &mut self,
+        stepper: &mut S,
+        from: Option<SourcePlace>,
+        flow: Flow,
+    ) -> Result<bool, StepEnd> {
         let rip = stepper.registers().rip;
         match stepper.line_row(rip) {
             Some(row) => Ok(rip == row.start && from != Some(row.place)),
             None if matches!(flow, Flow::Call | Flow::Trap) => {
                 self.out(stepper)?;
                 let rip = stepper.registers().rip;
-                Ok(stepper.line_row(rip).is_some_and(|row| rip == row.start && from != Some(row.place)))
+                Ok(stepper
+                    .line_row(rip)
+                    .is_some_and(|row| rip == row.start && from != Some(row.place)))
             }
             None => Ok(true),
         }
@@ -291,12 +337,22 @@ impl Budget {
 }
 
 /// Runs `request` on `stepper` within `limits`.
-pub(crate) fn step<S: Stepper>(stepper: &mut S, request: &StepRequest, limits: &StepLimits) -> StepEnd {
-    let mut budget = Budget { limits: *limits, single_steps: 0 };
+pub(crate) fn step<S: Stepper>(
+    stepper: &mut S,
+    request: &StepRequest,
+    limits: &StepLimits,
+) -> StepEnd {
+    let mut budget = Budget {
+        limits: *limits,
+        single_steps: 0,
+    };
     let start = stepper.registers().rip;
     let by_line = request.unit == StepUnit::Line;
     // Code without rows is stepped by instruction, whatever the unit.
-    let from = stepper.line_row(start).map(|row| row.place).filter(|_| by_line);
+    let from = stepper
+        .line_row(start)
+        .map(|row| row.place)
+        .filter(|_| by_line);
     let ended = match request.kind {
         StepKind::Into if from.is_some() => budget.lines(stepper, from, false),
         StepKind::Over if from.is_some() => budget.lines(stepper, from, true),
@@ -309,9 +365,11 @@ pub(crate) fn step<S: Stepper>(stepper: &mut S, request: &StepRequest, limits: &
             budget.instruction(stepper, decoded, true)
         }
         // Back in the caller, a step by line goes on to a row start.
-        StepKind::Out if by_line => budget.out(stepper).and_then(|()| match budget.settled(stepper, None, Flow::Return)? {
-            true => Ok(()),
-            false => budget.lines(stepper, None, true),
+        StepKind::Out if by_line => budget.out(stepper).and_then(|()| {
+            match budget.settled(stepper, None, Flow::Return)? {
+                true => Ok(()),
+                false => budget.lines(stepper, None, true),
+            }
         }),
         StepKind::Out => budget.out(stepper),
         StepKind::RunTo { address } => budget.run_to(stepper, address, None),
@@ -324,9 +382,11 @@ pub(crate) fn step<S: Stepper>(stepper: &mut S, request: &StepRequest, limits: &
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use rusty_box::cpu::CodeBreakpoint;
     use std::collections::{BTreeMap, BTreeSet};
+
+    use rusty_box::cpu::CodeBreakpoint;
+
+    use super::*;
 
     /// What one scripted instruction does.
     #[derive(Clone, Copy)]
@@ -336,7 +396,10 @@ mod tests {
         Call(u64),
         /// Calls `target` while the call depth is below `depth`, else falls
         /// through.
-        CallWhile { target: u64, depth: usize },
+        CallWhile {
+            target: u64,
+            depth: usize,
+        },
         Ret,
         /// `ret n`: returns and pops `n` bytes of arguments.
         RetPopping(u64),
@@ -394,7 +457,15 @@ mod tests {
         }
 
         fn row(&mut self, start: u64, end: u64, line: u32) {
-            self.rows.push(RowSpan { start, end, place: SourcePlace { module: 0, file: 0, line } });
+            self.rows.push(RowSpan {
+                start,
+                end,
+                place: SourcePlace {
+                    module: 0,
+                    file: 0,
+                    line,
+                },
+            });
         }
 
         fn rsp(&self) -> u64 {
@@ -435,12 +506,20 @@ mod tests {
     }
 
     fn hit(linear: u64) -> CodeBreakpointHit {
-        CodeBreakpointHit { cpu: 0, breakpoint: CodeBreakpoint::Linear(linear), linear }
+        CodeBreakpointHit {
+            cpu: 0,
+            breakpoint: CodeBreakpoint::Linear(linear),
+            linear,
+        }
     }
 
     impl Stepper for FakeCpu {
         fn registers(&mut self) -> StepRegisters {
-            self.shown.unwrap_or(StepRegisters { rip: self.rip, rsp: self.rsp(), width: self.width })
+            self.shown.unwrap_or(StepRegisters {
+                rip: self.rip,
+                rsp: self.rsp(),
+                width: self.width,
+            })
         }
 
         fn single_step(&mut self) -> Stepped {
@@ -450,7 +529,11 @@ mod tests {
         fn run_until(&mut self, targets: &[u64], until: Duration) -> RunStop {
             if let Some(rsp) = self.ghost.take() {
                 let target = *targets.first().expect("a target");
-                self.shown = Some(StepRegisters { rip: target, rsp, width: self.width });
+                self.shown = Some(StepRegisters {
+                    rip: target,
+                    rsp,
+                    width: self.width,
+                });
                 return RunStop::AtTarget;
             }
             loop {
@@ -476,20 +559,30 @@ mod tests {
                 Op::Ret | Op::RetPopping(_) => Flow::Return,
                 Op::Next | Op::Jump(_) | Op::PowerOff => Flow::Other,
             };
-            Some(Decoded { length: instruction.length, flow })
+            Some(Decoded {
+                length: instruction.length,
+                flow,
+            })
         }
 
         fn line_row(&mut self, rip: u64) -> Option<RowSpan> {
-            self.rows.iter().copied().find(|row| row.start <= rip && rip < row.end)
+            self.rows
+                .iter()
+                .copied()
+                .find(|row| row.start <= rip && rip < row.end)
         }
 
         fn caller(&mut self) -> Option<CallerFrame> {
             let rip = *self.stack.last()?;
-            Some(CallerFrame { rip, rsp: self.rsp() + 8 })
+            Some(CallerFrame {
+                rip,
+                rsp: self.rsp() + 8,
+            })
         }
 
         fn cancelled(&mut self) -> bool {
-            self.cancel_after.is_some_and(|after| self.executed >= after)
+            self.cancel_after
+                .is_some_and(|after| self.executed >= after)
         }
 
         fn elapsed(&mut self) -> Duration {
@@ -497,7 +590,10 @@ mod tests {
         }
     }
 
-    const LIMITS: StepLimits = StepLimits { single_steps: 1000, time: Duration::from_secs(1) };
+    const LIMITS: StepLimits = StepLimits {
+        single_steps: 1000,
+        time: Duration::from_secs(1),
+    };
 
     /// `main`: line 1 at 0x100; line 2 (`x = f();`) is 0x104..0x10D, its
     /// `call` at 0x104 returning to 0x109 inside it; line 3 at 0x10D, line 4
@@ -515,7 +611,14 @@ mod tests {
         cpu.row(0x10D, 0x111, 3);
         cpu.row(0x111, 0x112, 4);
         cpu.at(0x200, 4, Op::Next);
-        cpu.at(0x204, 5, Op::CallWhile { target: 0x200, depth: 3 });
+        cpu.at(
+            0x204,
+            5,
+            Op::CallWhile {
+                target: 0x200,
+                depth: 3,
+            },
+        );
         cpu.at(0x209, 1, Op::Ret);
         cpu.row(0x200, 0x204, 10);
         cpu.row(0x204, 0x209, 11);
@@ -535,21 +638,34 @@ mod tests {
     #[test]
     fn into_by_instruction_runs_one_instruction() {
         let mut cpu = program(0x104);
-        assert_eq!(step(&mut cpu, &request(StepKind::Into, StepUnit::Instruction), &LIMITS), StepEnd::Done);
+        assert_eq!(
+            step(
+                &mut cpu,
+                &request(StepKind::Into, StepUnit::Instruction),
+                &LIMITS
+            ),
+            StepEnd::Done
+        );
         assert_eq!(cpu.rip, 0x200);
     }
 
     #[test]
     fn into_by_line_stops_at_the_next_row_start() {
         let mut cpu = program(0x100);
-        assert_eq!(step(&mut cpu, &request(StepKind::Into, StepUnit::Line), &LIMITS), StepEnd::Done);
+        assert_eq!(
+            step(&mut cpu, &request(StepKind::Into, StepUnit::Line), &LIMITS),
+            StepEnd::Done
+        );
         assert_eq!(cpu.rip, 0x104);
     }
 
     #[test]
     fn into_by_line_enters_a_callee_with_rows() {
         let mut cpu = program(0x104);
-        assert_eq!(step(&mut cpu, &request(StepKind::Into, StepUnit::Line), &LIMITS), StepEnd::Done);
+        assert_eq!(
+            step(&mut cpu, &request(StepKind::Into, StepUnit::Line), &LIMITS),
+            StepEnd::Done
+        );
         assert_eq!(cpu.rip, 0x200);
         assert_eq!(cpu.stack.len(), 2);
     }
@@ -559,7 +675,10 @@ mod tests {
     #[test]
     fn into_by_line_steps_back_out_of_a_callee_without_rows() {
         let mut cpu = program(0x10D);
-        assert_eq!(step(&mut cpu, &request(StepKind::Into, StepUnit::Line), &LIMITS), StepEnd::Done);
+        assert_eq!(
+            step(&mut cpu, &request(StepKind::Into, StepUnit::Line), &LIMITS),
+            StepEnd::Done
+        );
         assert_eq!(cpu.rip, 0x111);
         assert_eq!(cpu.stack.len(), 1);
     }
@@ -569,7 +688,10 @@ mod tests {
     #[test]
     fn over_by_line_runs_a_call_and_stops_at_a_row_start() {
         let mut cpu = program(0x104);
-        assert_eq!(step(&mut cpu, &request(StepKind::Over, StepUnit::Line), &LIMITS), StepEnd::Done);
+        assert_eq!(
+            step(&mut cpu, &request(StepKind::Over, StepUnit::Line), &LIMITS),
+            StepEnd::Done
+        );
         assert_eq!(cpu.rip, 0x10D);
         assert_eq!(cpu.stack.len(), 1);
     }
@@ -577,11 +699,28 @@ mod tests {
     #[test]
     fn over_by_instruction_runs_a_call_to_its_return() {
         let mut cpu = program(0x104);
-        assert_eq!(step(&mut cpu, &request(StepKind::Over, StepUnit::Instruction), &LIMITS), StepEnd::Done);
+        assert_eq!(
+            step(
+                &mut cpu,
+                &request(StepKind::Over, StepUnit::Instruction),
+                &LIMITS
+            ),
+            StepEnd::Done
+        );
         assert_eq!(cpu.rip, 0x109);
         let mut plain = program(0x100);
-        assert_eq!(step(&mut plain, &request(StepKind::Over, StepUnit::Instruction), &LIMITS), StepEnd::Done);
-        assert_eq!(plain.rip, 0x104, "an instruction that is no call is one step");
+        assert_eq!(
+            step(
+                &mut plain,
+                &request(StepKind::Over, StepUnit::Instruction),
+                &LIMITS
+            ),
+            StepEnd::Done
+        );
+        assert_eq!(
+            plain.rip, 0x104,
+            "an instruction that is no call is one step"
+        );
     }
 
     /// Review focus 2: inside `f`, stepping over its recursive call: the
@@ -591,7 +730,14 @@ mod tests {
         let mut cpu = program(0x204);
         cpu.stack.push(0x109);
         let depth = cpu.stack.len();
-        assert_eq!(step(&mut cpu, &request(StepKind::Over, StepUnit::Instruction), &LIMITS), StepEnd::Done);
+        assert_eq!(
+            step(
+                &mut cpu,
+                &request(StepKind::Over, StepUnit::Instruction),
+                &LIMITS
+            ),
+            StepEnd::Done
+        );
         assert_eq!(cpu.rip, 0x209);
         assert_eq!(cpu.stack.len(), depth, "the outer return, not a deeper one");
     }
@@ -602,8 +748,22 @@ mod tests {
         let mut cpu = program(0x104);
         // A kernel thread's stack a few pages above.
         cpu.ghost = Some(TOP - 8 + 0x3000);
-        assert_eq!(step(&mut cpu, &request(StepKind::Over, StepUnit::Instruction), &LIMITS), StepEnd::Done);
-        assert_eq!(cpu.registers(), StepRegisters { rip: 0x109, rsp: TOP - 8, width: CodeWidth::Long64 });
+        assert_eq!(
+            step(
+                &mut cpu,
+                &request(StepKind::Over, StepUnit::Instruction),
+                &LIMITS
+            ),
+            StepEnd::Done
+        );
+        assert_eq!(
+            cpu.registers(),
+            StepRegisters {
+                rip: 0x109,
+                rsp: TOP - 8,
+                width: CodeWidth::Long64
+            }
+        );
     }
 
     /// A 32-bit `stdcall` callee pops its arguments: the return still
@@ -614,15 +774,36 @@ mod tests {
         cpu.width = CodeWidth::Protected32;
         cpu.at(0x209, 3, Op::RetPopping(8));
         cpu.at(0x204, 5, Op::Next);
-        assert_eq!(step(&mut cpu, &request(StepKind::Over, StepUnit::Instruction), &LIMITS), StepEnd::Done);
-        assert_eq!(cpu.registers(), StepRegisters { rip: 0x109, rsp: TOP - 8 + 8, width: CodeWidth::Protected32 });
+        assert_eq!(
+            step(
+                &mut cpu,
+                &request(StepKind::Over, StepUnit::Instruction),
+                &LIMITS
+            ),
+            StepEnd::Done
+        );
+        assert_eq!(
+            cpu.registers(),
+            StepRegisters {
+                rip: 0x109,
+                rsp: TOP - 8 + 8,
+                width: CodeWidth::Protected32
+            }
+        );
     }
 
     #[test]
     fn out_by_instruction_returns_to_the_caller() {
         let mut cpu = program(0x200);
         cpu.stack.push(0x109);
-        assert_eq!(step(&mut cpu, &request(StepKind::Out, StepUnit::Instruction), &LIMITS), StepEnd::Done);
+        assert_eq!(
+            step(
+                &mut cpu,
+                &request(StepKind::Out, StepUnit::Instruction),
+                &LIMITS
+            ),
+            StepEnd::Done
+        );
         assert_eq!(cpu.rip, 0x109);
         assert_eq!(cpu.stack.len(), 1);
     }
@@ -631,7 +812,10 @@ mod tests {
     fn out_by_line_goes_on_to_a_row_start() {
         let mut cpu = program(0x200);
         cpu.stack.push(0x109);
-        assert_eq!(step(&mut cpu, &request(StepKind::Out, StepUnit::Line), &LIMITS), StepEnd::Done);
+        assert_eq!(
+            step(&mut cpu, &request(StepKind::Out, StepUnit::Line), &LIMITS),
+            StepEnd::Done
+        );
         assert_eq!(cpu.rip, 0x10D);
     }
 
@@ -639,13 +823,24 @@ mod tests {
     fn out_without_a_known_caller_says_so() {
         let mut cpu = program(0x100);
         cpu.stack.clear();
-        assert_eq!(step(&mut cpu, &request(StepKind::Out, StepUnit::Instruction), &LIMITS), StepEnd::NoCaller);
+        assert_eq!(
+            step(
+                &mut cpu,
+                &request(StepKind::Out, StepUnit::Instruction),
+                &LIMITS
+            ),
+            StepEnd::NoCaller
+        );
     }
 
     #[test]
     fn run_to_stops_at_the_address() {
         let mut cpu = program(0x100);
-        let end = step(&mut cpu, &request(StepKind::RunTo { address: 0x10D }, StepUnit::Line), &LIMITS);
+        let end = step(
+            &mut cpu,
+            &request(StepKind::RunTo { address: 0x10D }, StepUnit::Line),
+            &LIMITS,
+        );
         assert_eq!(end, StepEnd::Done);
         assert_eq!(cpu.rip, 0x10D);
     }
@@ -654,11 +849,18 @@ mod tests {
     fn a_user_breakpoint_ends_a_step() {
         let mut cpu = program(0x104);
         cpu.user_breakpoints.insert(0x204);
-        assert_eq!(step(&mut cpu, &request(StepKind::Over, StepUnit::Line), &LIMITS), StepEnd::UserBreakpoint(hit(0x204)));
+        assert_eq!(
+            step(&mut cpu, &request(StepKind::Over, StepUnit::Line), &LIMITS),
+            StepEnd::UserBreakpoint(hit(0x204))
+        );
         let mut cpu = program(0x100);
         cpu.user_breakpoints.insert(0x104);
         assert_eq!(
-            step(&mut cpu, &request(StepKind::Into, StepUnit::Instruction), &LIMITS),
+            step(
+                &mut cpu,
+                &request(StepKind::Into, StepUnit::Instruction),
+                &LIMITS
+            ),
             StepEnd::UserBreakpoint(hit(0x104))
         );
     }
@@ -669,7 +871,10 @@ mod tests {
         cpu.at(0x300, 2, Op::Jump(0x300));
         cpu.row(0x300, 0x302, 20);
         let end = step(&mut cpu, &request(StepKind::Into, StepUnit::Line), &LIMITS);
-        assert_eq!(end, StepEnd::Ceiling(StepCeiling::Instructions(LIMITS.single_steps)));
+        assert_eq!(
+            end,
+            StepEnd::Ceiling(StepCeiling::Instructions(LIMITS.single_steps))
+        );
     }
 
     #[test]
@@ -677,7 +882,11 @@ mod tests {
         let mut cpu = program(0x300);
         cpu.at(0x300, 5, Op::Call(0x305));
         cpu.at(0x305, 2, Op::Jump(0x305));
-        let end = step(&mut cpu, &request(StepKind::Over, StepUnit::Instruction), &LIMITS);
+        let end = step(
+            &mut cpu,
+            &request(StepKind::Over, StepUnit::Instruction),
+            &LIMITS,
+        );
         assert_eq!(end, StepEnd::Ceiling(StepCeiling::Time));
     }
 
@@ -687,15 +896,29 @@ mod tests {
         cpu.at(0x300, 2, Op::Jump(0x300));
         cpu.row(0x300, 0x302, 20);
         cpu.cancel_after = Some(10);
-        assert_eq!(step(&mut cpu, &request(StepKind::Into, StepUnit::Line), &LIMITS), StepEnd::Cancelled);
+        assert_eq!(
+            step(&mut cpu, &request(StepKind::Into, StepUnit::Line), &LIMITS),
+            StepEnd::Cancelled
+        );
         assert!(cpu.executed <= 11);
     }
 
     #[test]
     fn a_machine_that_powers_off_ends_the_step() {
         let mut cpu = program(0x111);
-        assert_eq!(step(&mut cpu, &request(StepKind::Over, StepUnit::Line), &LIMITS), StepEnd::Done, "returns to 0x900");
-        assert_eq!(step(&mut cpu, &request(StepKind::Into, StepUnit::Instruction), &LIMITS), StepEnd::MachineOver);
+        assert_eq!(
+            step(&mut cpu, &request(StepKind::Over, StepUnit::Line), &LIMITS),
+            StepEnd::Done,
+            "returns to 0x900"
+        );
+        assert_eq!(
+            step(
+                &mut cpu,
+                &request(StepKind::Into, StepUnit::Instruction),
+                &LIMITS
+            ),
+            StepEnd::MachineOver
+        );
     }
 
     /// Code with no rows is stepped by instruction, whatever the unit.
@@ -703,7 +926,10 @@ mod tests {
     fn by_line_without_rows_steps_an_instruction() {
         let mut cpu = program(0x400);
         cpu.stack.push(0x111);
-        assert_eq!(step(&mut cpu, &request(StepKind::Into, StepUnit::Line), &LIMITS), StepEnd::Done);
+        assert_eq!(
+            step(&mut cpu, &request(StepKind::Into, StepUnit::Line), &LIMITS),
+            StepEnd::Done
+        );
         assert_eq!(cpu.rip, 0x404);
     }
 }

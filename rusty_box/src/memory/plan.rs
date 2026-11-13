@@ -27,12 +27,12 @@
 //!    (`bx_translate_gpa_to_linear`), so RAM above the hole is a second window
 //!    with its own host offset — never an alias of the first.
 
-use rusty_box_core::{GpaPerms, GpaPlan, GpaPlanError, GpaWindow, HostOffset, GUEST_PAGE};
+use rusty_box_core::{GUEST_PAGE, GpaPerms, GpaPlan, GpaPlanError, GpaWindow, HostOffset};
 
-use super::memory_rusty_box::{
-    bios_map_last128k, BIOSROMSZ, BX_PCI_HOLE_END, BX_PCI_HOLE_SIZE, BX_PCI_HOLE_START, EXROM_MASK,
-};
 use super::BxMemC;
+use super::memory_rusty_box::{
+    BIOSROMSZ, BX_PCI_HOLE_END, BX_PCI_HOLE_SIZE, BX_PCI_HOLE_START, EXROM_MASK, bios_map_last128k,
+};
 use crate::config::BxPhyAddress;
 
 /// The video aperture. Never direct: reads are vetoed so the VGA model can
@@ -114,7 +114,10 @@ impl MemoryPlan {
             carve_outs.add(region.begin.get(), region.end.get().saturating_add(1));
         }
 
-        let mut plan = Self { windows: [EMPTY_WINDOW; MAX_PLAN_WINDOWS], len: 0 };
+        let mut plan = Self {
+            windows: [EMPTY_WINDOW; MAX_PLAN_WINDOWS],
+            len: 0,
+        };
         let mut needed = 0usize;
         let mut emit = |candidate: Candidate| {
             carve_outs.split(candidate, &mut |piece| {
@@ -167,11 +170,8 @@ impl MemoryPlan {
             if write > 0 {
                 let previous = &mut self.windows[write - 1];
                 let joins_in_guest = previous.gpa.checked_add(previous.len) == Some(window.gpa);
-                let joins_in_host = previous
-                    .host
-                    .get()
-                    .checked_add(previous.len)
-                    == Some(window.host.get());
+                let joins_in_host =
+                    previous.host.get().checked_add(previous.len) == Some(window.host.get());
                 if joins_in_guest && joins_in_host && previous.perms == window.perms {
                     previous.len += window.len;
                     continue;
@@ -184,8 +184,12 @@ impl MemoryPlan {
     }
 }
 
-const EMPTY_WINDOW: GpaWindow =
-    GpaWindow { gpa: 0, len: 0, host: HostOffset::ZERO, perms: GpaPerms::NONE };
+const EMPTY_WINDOW: GpaWindow = GpaWindow {
+    gpa: 0,
+    len: 0,
+    host: HostOffset::ZERO,
+    perms: GpaPerms::NONE,
+};
 
 /// The ranges no window may cover, kept sorted so a candidate is split in one
 /// pass.
@@ -196,7 +200,10 @@ struct CarveOuts {
 
 impl CarveOuts {
     fn new() -> Self {
-        Self { ranges: [(0, 0); MAX_PLAN_WINDOWS], len: 0 }
+        Self {
+            ranges: [(0, 0); MAX_PLAN_WINDOWS],
+            len: 0,
+        }
     }
 
     /// Record `[start, end)` as host-serviced.
@@ -316,7 +323,11 @@ impl BxMemC {
                         gpa: area_base,
                         end: area_base + area_len,
                         delta: 0,
-                        perms: if writes_ram { GpaPerms::RWX } else { GpaPerms::RX },
+                        perms: if writes_ram {
+                            GpaPerms::RWX
+                        } else {
+                            GpaPerms::RX
+                        },
                     });
                 }
             } else {
@@ -443,7 +454,12 @@ fn ram_above_the_hole(guest_len: u64) -> Option<Candidate> {
 }
 
 fn ram_between(gpa: u64, end: u64, delta: u64) -> Candidate {
-    Candidate { gpa, end, delta, perms: GpaPerms::RWX }
+    Candidate {
+        gpa,
+        end,
+        delta,
+        perms: GpaPerms::RWX,
+    }
 }
 
 /// The candidates, before carve-outs. Fixed storage for the same reason the
@@ -457,8 +473,12 @@ struct CandidateList {
 impl CandidateList {
     fn new() -> Self {
         Self {
-            items: [Candidate { gpa: 0, end: 0, delta: 0, perms: GpaPerms::NONE };
-                MAX_PLAN_WINDOWS],
+            items: [Candidate {
+                gpa: 0,
+                end: 0,
+                delta: 0,
+                perms: GpaPerms::NONE,
+            }; MAX_PLAN_WINDOWS],
             len: 0,
         }
     }
@@ -475,8 +495,8 @@ impl CandidateList {
 }
 
 impl IntoIterator for CandidateList {
-    type Item = Candidate;
     type IntoIter = core::iter::Take<core::array::IntoIter<Candidate, MAX_PLAN_WINDOWS>>;
+    type Item = Candidate;
 
     fn into_iter(self) -> Self::IntoIter {
         self.items.into_iter().take(self.len)
@@ -531,7 +551,11 @@ mod tests {
         };
         let pieces = collect(above_hole, &carve_outs);
         assert_eq!(pieces.len(), 2);
-        assert_eq!(pieces[0].host, HostOffset::new(0xC000_0000), "4 GiB maps to 3 GiB");
+        assert_eq!(
+            pieces[0].host,
+            HostOffset::new(0xC000_0000),
+            "4 GiB maps to 3 GiB"
+        );
         assert_eq!(pieces[1].host, HostOffset::new(0xC000_3000));
     }
 
@@ -554,8 +578,7 @@ mod tests {
         carve_outs.add(0x4000, 0x5000);
         carve_outs.add(0x1000, 0x2000);
         let pieces = collect(ram_between(0, 0x8000, 0), &carve_outs);
-        let spans: alloc::vec::Vec<(u64, u64)> =
-            pieces.iter().map(|w| (w.gpa, w.len)).collect();
+        let spans: alloc::vec::Vec<(u64, u64)> = pieces.iter().map(|w| (w.gpa, w.len)).collect();
         assert_eq!(spans, [(0, 0x1000), (0x2000, 0x2000), (0x5000, 0x3000)]);
     }
 
@@ -567,7 +590,10 @@ mod tests {
     }
 
     fn plan_of(windows: &[GpaWindow]) -> MemoryPlan {
-        let mut plan = MemoryPlan { windows: [EMPTY_WINDOW; MAX_PLAN_WINDOWS], len: 0 };
+        let mut plan = MemoryPlan {
+            windows: [EMPTY_WINDOW; MAX_PLAN_WINDOWS],
+            len: 0,
+        };
         for window in windows {
             plan.push(*window);
         }
@@ -576,7 +602,12 @@ mod tests {
     }
 
     fn window(gpa: u64, len: u64, host: u64, perms: GpaPerms) -> GpaWindow {
-        GpaWindow { gpa, len, host: HostOffset::new(host), perms }
+        GpaWindow {
+            gpa,
+            len,
+            host: HostOffset::new(host),
+            perms,
+        }
     }
 
     #[test]
@@ -651,7 +682,10 @@ mod tests {
         let sixty_four_mib = 64 * 1024 * 1024;
         let above = ram_above_the_hole(BX_PCI_HOLE_START.get() + sixty_four_mib)
             .expect("memory past the hole needs its own window");
-        assert_eq!(above.gpa, 0x1_0000_0000, "the guest sees it at four gigabytes");
+        assert_eq!(
+            above.gpa, 0x1_0000_0000,
+            "the guest sees it at four gigabytes"
+        );
         assert_eq!(above.end - above.gpa, sixty_four_mib);
         assert_eq!(
             above.gpa.wrapping_add(above.delta),
@@ -774,7 +808,10 @@ mod tests {
         let mut memory = a_machine_like_the_boot_examples();
         memory.smram_available = true;
         memory.smram_enable = true;
-        assert!(memory.smram_is_open(), "the window this test is about must be open");
+        assert!(
+            memory.smram_is_open(),
+            "the window this test is about must be open"
+        );
         the_plan_agrees_with_this_ports_routing(&mut memory);
     }
 
@@ -868,7 +905,10 @@ mod tests {
                 offset += GUEST_PAGE;
             }
         }
-        assert!(checked > 1000, "a 32 MiB machine has more pages than this: {checked}");
+        assert!(
+            checked > 1000,
+            "a 32 MiB machine has more pages than this: {checked}"
+        );
     }
 
     #[test]
@@ -879,6 +919,9 @@ mod tests {
         // zero-length window no engine would accept.
         list.push(ram_between(0x1000, 0x1000, 0));
         list.push(ram_between(0x2000, 0x5000, 0));
-        assert_eq!(list.len, 1, "a zero-length candidate must not become a window");
+        assert_eq!(
+            list.len, 1,
+            "a zero-length candidate must not become a window"
+        );
     }
 }

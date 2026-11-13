@@ -2,13 +2,13 @@
 //! signature, age, GUID, then the named-stream map, a hash table from a
 //! name (an offset into a string buffer) to a stream index.
 
+use std::collections::BTreeMap;
+
 #[cfg(all(test, not(debug_assertions)))]
 use no_panic::no_panic;
 
-use std::collections::BTreeMap;
-
 use super::hash_table::{HashTable, TableLimits};
-use super::{short, PdbError};
+use super::{PdbError, short};
 use crate::identity::Guid;
 use crate::read::{Bytes, Cursor, ReadError};
 
@@ -54,15 +54,28 @@ impl<'a> NamedStreamMap<'a> {
     fn open(stream: &'a [u8]) -> Result<NamedStreamMap<'a>, PdbError> {
         let mut cursor = Cursor::new(Bytes::new(stream), 28);
         let names_size = cursor.u32_le().map_err(|source| short(WHAT, source))? as usize;
-        let names = Bytes::new(cursor.bytes(names_size).map_err(|source| short(WHAT, source))?);
-        let table = HashTable::open(cursor, TableLimits { what: WHAT, max_capacity: MAX_CAPACITY })?;
+        let names = Bytes::new(
+            cursor
+                .bytes(names_size)
+                .map_err(|source| short(WHAT, source))?,
+        );
+        let table = HashTable::open(
+            cursor,
+            TableLimits {
+                what: WHAT,
+                max_capacity: MAX_CAPACITY,
+            },
+        )?;
         Ok(NamedStreamMap { names, table })
     }
 
     /// The next name that reads, with its stream; `None` past the last.
     fn next_stream(&mut self) -> Result<Option<NamedStream<'a>>, PdbError> {
         while let Some(entry) = self.table.next_entry(4)? {
-            let index = entry.value.u32_le(0).map_err(|source| short(WHAT, source))?;
+            let index = entry
+                .value
+                .u32_le(0)
+                .map_err(|source| short(WHAT, source))?;
             if let Ok(name) = self.names.cstr(entry.key as usize, MAX_NAME_BYTES) {
                 return Ok(Some(NamedStream { name, index }));
             }
@@ -90,7 +103,10 @@ pub fn named_streams(stream: &[u8]) -> Result<BTreeMap<Vec<u8>, u32>, PdbError> 
     while let Some(named) = map.next_stream()? {
         let mut name = Vec::new();
         name.try_reserve_exact(named.name.len())
-            .map_err(|_| PdbError::Allocation { what: "stream names", bytes: named.name.len() as u64 })?;
+            .map_err(|_| PdbError::Allocation {
+                what: "stream names",
+                bytes: named.name.len() as u64,
+            })?;
         name.extend_from_slice(named.name);
         by_name.entry(name).or_insert(named.index);
     }

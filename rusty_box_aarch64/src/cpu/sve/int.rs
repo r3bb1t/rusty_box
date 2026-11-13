@@ -4,11 +4,11 @@
 //! is.
 
 use super::{
-    decode_pred_count, int, mul_high, sat_add_scalar, sat_doubling_mul_high, sat_q, Esize, Zv,
+    Esize, Zv, decode_pred_count, int, mul_high, sat_add_scalar, sat_doubling_mul_high, sat_q,
 };
 use crate::cpu::crypto::polynomial_mult;
 use crate::cpu::dp::{decode_bit_masks, ror};
-use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
+use crate::cpu::exec::{ExecResult, Flow, bit, bits, sext};
 use crate::cpu::features::VecLen;
 use crate::cpu::fp::FpType;
 use crate::cpu::simd::vfp_expand_imm;

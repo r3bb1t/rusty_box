@@ -3,9 +3,11 @@
 //! Maps ASCII characters and special keys to PS/2 scancode set 2.
 //! Based on standard PC/AT keyboard scancode set 2.
 
-use crate::iodev::scancodes::BxKey;
 use alloc::vec::Vec;
+
 use rusty_box_core::input::{KeyAction, KeyStroke};
+
+use crate::iodev::scancodes::BxKey;
 
 /// PS/2 Scancode Set 2 mapping for ASCII characters
 /// Returns (make_code, break_code) for a given ASCII character
@@ -138,7 +140,6 @@ pub fn char_to_scancode_sequence(ch: char) -> Vec<u8> {
         Vec::new()
     }
 }
-
 
 /// Map an ASCII character to the guest key that produces it on a US layout,
 /// and whether Shift must be held.

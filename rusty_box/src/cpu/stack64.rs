@@ -2,10 +2,8 @@
 //!
 //! Based on Bochs stack64.cc
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
-};
+use super::decoder::{BxSegregs, Instruction};
+use super::eflags::EFlags;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================

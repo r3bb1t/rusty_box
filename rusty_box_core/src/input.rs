@@ -272,9 +272,6 @@ const _: () = {
 };
 
 impl Key {
-    /// How many keys there are (`BX_KEY_NBKEYS`).
-    pub const COUNT: usize = 119;
-
     /// Every key, in the enum's order: a machine describing the keys its
     /// keyboard has derives that set from this.
     pub const ALL: [Key; Key::COUNT] = [
@@ -398,6 +395,8 @@ impl Key {
         Self::PowerPower,
         Self::PowerWake,
     ];
+    /// How many keys there are (`BX_KEY_NBKEYS`).
+    pub const COUNT: usize = 119;
 
     /// The key's index into Bochs's per-key tables (Bochs uses `key & 0xFF`).
     #[inline]
@@ -536,7 +535,11 @@ impl KeyStroke {
             events[1] = (self.key, KeyAction::Release);
             2
         };
-        KeyEvents { events, len, next: 0 }
+        KeyEvents {
+            events,
+            len,
+            next: 0,
+        }
     }
 }
 
@@ -552,7 +555,11 @@ impl Iterator for KeyEvents {
     type Item = (Key, KeyAction);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let event = self.events.get(self.next).filter(|_| self.next < self.len).copied();
+        let event = self
+            .events
+            .get(self.next)
+            .filter(|_| self.next < self.len)
+            .copied();
         if event.is_some() {
             self.next += 1;
         }
@@ -600,7 +607,9 @@ impl Typed {
     /// How many characters the guest received in full.
     pub fn delivered(self) -> usize {
         match self {
-            Self::All { delivered } | Self::Refused { delivered } | Self::Unmappable { delivered, .. } => delivered,
+            Self::All { delivered }
+            | Self::Refused { delivered }
+            | Self::Unmappable { delivered, .. } => delivered,
         }
     }
 
@@ -645,7 +654,13 @@ mod tests {
             (Key::ShiftL, KeyAction::Release),
         ];
         let stroke = KeyStroke::for_char('Q');
-        assert_eq!(stroke, Some(KeyStroke { key: Key::Q, shift: true }));
+        assert_eq!(
+            stroke,
+            Some(KeyStroke {
+                key: Key::Q,
+                shift: true
+            })
+        );
         assert!(stroke.is_some_and(|s| s.events().eq(upper)));
         let lower = KeyStroke::for_char('q').map(|s| s.events().count());
         assert_eq!(lower, Some(2));

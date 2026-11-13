@@ -34,26 +34,25 @@
 
 use super::debug::DebugPoints;
 use super::el2::{
-    has_contextidr_el2, El2Reg, CNTHCTL_E2H1_EL1PCTEN, CNTHCTL_E2H1_EL1PTEN, CNTHCTL_EL1NVPCT,
-    CNTHCTL_EL1NVVCT, CNTHCTL_EL1PCEN, CNTHCTL_EL1PCTEN, CNTHCTL_EL1TVCT, CNTHCTL_EL1TVT,
-    CPTR_TCPAC, HCR_AMO, HCR_APK, HCR_FIEN, HCR_TACR, HCR_TERR, HCR_TID1, HCR_TID2, HCR_TID3,
-    HCR_TID4, HCR_TIDCP, HCR_TLOR, HCR_TRVM, HCR_TVM, MDCR_TDA, MDCR_TDCC, MDCR_TDE, MDCR_TDOSA,
-    MDCR_TDRA,
+    CNTHCTL_E2H1_EL1PCTEN, CNTHCTL_E2H1_EL1PTEN, CNTHCTL_EL1NVPCT, CNTHCTL_EL1NVVCT,
+    CNTHCTL_EL1PCEN, CNTHCTL_EL1PCTEN, CNTHCTL_EL1TVCT, CNTHCTL_EL1TVT, CPTR_TCPAC, El2Reg,
+    HCR_AMO, HCR_APK, HCR_FIEN, HCR_TACR, HCR_TERR, HCR_TID1, HCR_TID2, HCR_TID3, HCR_TID4,
+    HCR_TIDCP, HCR_TLOR, HCR_TRVM, HCR_TVM, MDCR_TDA, MDCR_TDCC, MDCR_TDE, MDCR_TDOSA, MDCR_TDRA,
+    has_contextidr_el2,
 };
 use super::exception::Route;
 use super::features::{Feature, Features};
 use super::fgt::{FgtReg, FineGrainedTrap};
-use super::id;
-use super::mmu::{El10Context, El2RegimeContext};
+use super::mmu::{El2RegimeContext, El10Context};
 use super::nv::{
-    el2_register_at_el1, El1Counterpart, El2NameAtEl1, Nested, Nv2Own, VncrOffset,
-    VNCR_SMPRIMAP_EL2, VNCR_SP_EL1,
+    El1Counterpart, El2NameAtEl1, Nested, Nv2Own, VNCR_SMPRIMAP_EL2, VNCR_SP_EL1, VncrOffset,
+    el2_register_at_el1,
 };
 use super::pauth::KeyHalf;
 use super::pmu::PmuEvent;
 use super::regs::{SysReg, SysRegRefusal};
 use super::timer::{GenericTimer, Tval};
-use super::{sctlr, Cpu, El, Levels, Pstate, SysRegs};
+use super::{Cpu, El, Levels, Pstate, SysRegs, id, sctlr};
 
 /// Who is accessing a system register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,15 +105,19 @@ impl SysRegKey {
     pub(super) const fn op0(self) -> u32 {
         self.0 >> 14
     }
+
     pub(super) const fn op1(self) -> u32 {
         (self.0 >> 11) & 7
     }
+
     pub(super) const fn crn(self) -> u32 {
         (self.0 >> 7) & 15
     }
+
     pub(super) const fn crm(self) -> u32 {
         (self.0 >> 3) & 15
     }
+
     pub(super) const fn op2(self) -> u32 {
         self.0 & 7
     }
@@ -560,11 +563,7 @@ const fn mapped(map: &[(u32, u32)], k: u32) -> Option<u32> {
 /// which [`EL2_STORAGE`], built for every feature, relies on.
 const fn el2_encoding(reg: El2Reg, features: Features) -> Option<u32> {
     const fn present(encoding: u32, has: bool) -> Option<u32> {
-        if has {
-            Some(encoding)
-        } else {
-            None
-        }
+        if has { Some(encoding) } else { None }
     }
     match reg {
         El2Reg::Hcr => Some(HCR_EL2),
@@ -1591,10 +1590,10 @@ impl<L: Levels> Cpu<L> {
                 });
             }
             DIT if self.implements(Feature::Dit) => {
-                return Ok(if self.pstate.dit { Pstate::DIT } else { 0 })
+                return Ok(if self.pstate.dit { Pstate::DIT } else { 0 });
             }
             SSBS if self.implements(Feature::Ssbs2) => {
-                return Ok(if self.pstate.ssbs { Pstate::SSBS } else { 0 })
+                return Ok(if self.pstate.ssbs { Pstate::SSBS } else { 0 });
             }
             SVCR if self.implements(Feature::Sme) => {
                 self.sme_register_check(accessor)?;

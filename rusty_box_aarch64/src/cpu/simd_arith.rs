@@ -19,7 +19,7 @@
 
 use super::crypto::polynomial_mult;
 use super::dp::ones;
-use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::exec::{ExecResult, Flow, bit, bits, sext};
 use super::features::Feature;
 use super::fp::FpType;
 use super::simd::{at_datasize, elem, set_elem};
@@ -30,11 +30,7 @@ pub(crate) const FPSR_QC: u64 = 1 << 27;
 
 #[inline]
 const fn datasize(q: bool) -> u32 {
-    if q {
-        128
-    } else {
-        64
-    }
+    if q { 128 } else { 64 }
 }
 
 /// An element (already masked to its size by [`elem`]) as a signed integer.
@@ -54,11 +50,7 @@ fn uint(v: u64) -> i128 {
 /// bits.
 #[inline]
 pub(crate) fn int(v: u64, esize: u32, unsigned: bool) -> i128 {
-    if unsigned {
-        uint(v)
-    } else {
-        sint(v, esize)
-    }
+    if unsigned { uint(v) } else { sint(v, esize) }
 }
 
 /// The low `esize` bits of an exact result.
@@ -88,11 +80,7 @@ pub(crate) fn sat(value: i128, esize: u32, unsigned: bool, qc: &mut bool) -> u64
 
 #[inline]
 const fn all_if(condition: bool) -> u64 {
-    if condition {
-        u64::MAX
-    } else {
-        0
-    }
+    if condition { u64::MAX } else { 0 }
 }
 
 /// SQDMULH and SQRDMULH before their saturation: `(2 * a * b + rounding)
@@ -172,11 +160,7 @@ pub(crate) fn shift_signed(element: i128, shift: i32, esize: u32, rounding: bool
     } else if n > 64 {
         // |element| < 2^64 < 2^(n-1): the rounded quotient is 0, and the
         // truncated one is 0 or, for a negative element, -1.
-        if !rounding && element < 0 {
-            -1
-        } else {
-            0
-        }
+        if !rounding && element < 0 { -1 } else { 0 }
     } else {
         let round = if rounding { 1i128 << (n - 1) } else { 0 };
         (element + round) >> n

@@ -1,7 +1,7 @@
 //! Float64 fused multiply-add: a*b + c (with operation modifier).
 //! Ported from Berkeley SoftFloat 3e f64_mulAdd.c.
 
-use super::f128::{short_shift_right_jam128, SOFTFLOAT_MULADD_SUB_C, SOFTFLOAT_MULADD_SUB_PROD};
+use super::f128::{SOFTFLOAT_MULADD_SUB_C, SOFTFLOAT_MULADD_SUB_PROD, short_shift_right_jam128};
 use super::internals::*;
 use super::primitives::*;
 use super::softfloat::*;

@@ -66,12 +66,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use rusty_box_core::snap::{SnapError, SnapRead, SnapResult, SnapWrite};
-use rusty_box_devices::display::sink::{Dimensions, DisplaySink, Refreshed, TilePos};
 use rusty_box_devices::display::Resolution;
+use rusty_box_devices::display::sink::{Dimensions, DisplaySink, Refreshed, TilePos};
 
-use super::edid;
 use super::queue::{self, Chain, GuestRam};
-use super::Vdev;
+use super::{Vdev, edid};
 use crate::identity::DisplayIdentity;
 
 pub const CONTROL_QUEUE: usize = 0;

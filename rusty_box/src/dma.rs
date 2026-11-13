@@ -28,14 +28,11 @@
 use crate::config::BxPhyAddress;
 use crate::iodev::IoPort;
 use crate::memory::BxMemC;
-
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
-    SNAPSHOT_SECTION_VERSION,
+    SNAPSHOT_SECTION_VERSION, SnapError, SnapRead, SnapResult, SnapWrite, checked_snapshot_len_add,
+    checked_snapshot_len_mul,
 };
-
-
 
 /// DMA buffer size for transfers (Bochs dma.h BX_DMA_BUFFER_SIZE = 512)
 const BX_DMA_BUFFER_SIZE: usize = 512;
@@ -385,7 +382,7 @@ impl BxDmaC {
         } else {
             dma_base.wrapping_sub((self.s[ma_sl].chan[ch].base_count as u32) << ma_sl)
         };
-        let boundary_mask: u32 = 0x7fff0000 << ma_sl;
+        let boundary_mask: u32 = 0x7FFF0000 << ma_sl;
         if (dma_base & boundary_mask) != (dma_roof & boundary_mask) {
             tracing::debug!("dma_base = {:#010x}", dma_base);
             tracing::debug!(
@@ -498,7 +495,7 @@ impl BxDmaC {
             maxlen = 1 << (ma_sl as u16);
         }
 
-        let mut buffer = [0xffu8; BX_DMA_BUFFER_SIZE];
+        let mut buffer = [0xFFu8; BX_DMA_BUFFER_SIZE];
         let len: u16;
 
         let transfer_type = self.s[ma_sl].chan[channel].mode.transfer_type;
@@ -526,7 +523,10 @@ impl BxDmaC {
 
                 // Short writes intentionally commit only the guest-RAM prefix.
                 // `write_ram` emits the matching SMC stamps for that prefix.
-                if let Err(error) = mem.write_ram(BxPhyAddress::new(u64::from(phy_addr)), &buffer[..len as usize]) {
+                if let Err(error) = mem.write_ram(
+                    BxPhyAddress::new(u64::from(phy_addr)),
+                    &buffer[..len as usize],
+                ) {
                     tracing::error!("DMA: physical write at {phy_addr:#x} failed: {error:?}");
                 }
             }
@@ -535,7 +535,10 @@ impl BxDmaC {
                 // (Bochs dma.cc)
 
                 // Preserve the 0xff fill for an unavailable guest-RAM tail.
-                if let Err(error) = mem.read_ram(BxPhyAddress::new(u64::from(phy_addr)), &mut buffer[..maxlen as usize]) {
+                if let Err(error) = mem.read_ram(
+                    BxPhyAddress::new(u64::from(phy_addr)),
+                    &mut buffer[..maxlen as usize],
+                ) {
                     tracing::error!("DMA: physical read at {phy_addr:#x} failed: {error:?}");
                 }
 
@@ -624,6 +627,7 @@ impl BxDmaC {
             }
         }
     }
+
     /// Reinterpret a byte DMA buffer as 16-bit words for DMA2 handlers.
     #[inline]
     fn buffer_as_word_slice(buffer: &[u8; BX_DMA_BUFFER_SIZE]) -> &[u16] {
@@ -638,14 +642,9 @@ impl BxDmaC {
     fn buffer_as_word_slice_mut(buffer: &mut [u8; BX_DMA_BUFFER_SIZE]) -> &mut [u16] {
         // SAFETY: the caller exclusively owns the stack buffer.
         unsafe {
-            core::slice::from_raw_parts_mut(
-                buffer.as_mut_ptr() as *mut u16,
-                BX_DMA_BUFFER_SIZE / 2,
-            )
+            core::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u16, BX_DMA_BUFFER_SIZE / 2)
         }
     }
-
-
 
     // -----------------------------------------------------------------------
     // I/O port read handler (Bochs dma.cc)
@@ -913,8 +912,9 @@ impl BxDmaC {
 
 #[cfg(feature = "std")]
 impl crate::snapshot::SnapshotSection for BxDmaC {
-    const TAG: u32 = crate::snapshot::SEC_DMA;
     type Restored = ();
+
+    const TAG: u32 = crate::snapshot::SEC_DMA;
 
     fn snapshot_len(&self) -> SnapResult<u64> {
         for controller in &self.s {
@@ -929,10 +929,7 @@ impl crate::snapshot::SnapshotSection for BxDmaC {
         checked_snapshot_len_add(prefix_and_controllers, tail)
     }
 
-    fn save<W: SnapWrite>(
-        &self,
-        writer: &mut W,
-    ) -> SnapResult<()> {
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.snapshot_len()?;
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
 
@@ -949,12 +946,11 @@ impl crate::snapshot::SnapshotSection for BxDmaC {
         Ok(())
     }
 
-    fn restore<R: SnapRead>(
-        &mut self,
-        reader: &mut R,
-    ) -> SnapResult<()> {
+    fn restore<R: SnapRead>(&mut self, reader: &mut R) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
-            return Err(dma_snapshot_invalid("unsupported DMA snapshot section version"));
+            return Err(dma_snapshot_invalid(
+                "unsupported DMA snapshot section version",
+            ));
         }
 
         let mut controllers = [Dma8237::new(), Dma8237::new()];
@@ -971,9 +967,7 @@ impl crate::snapshot::SnapshotSection for BxDmaC {
             None
         };
 
-        for (controller_index, (saved, live)) in
-            controllers.iter().zip(self.s.iter()).enumerate()
-        {
+        for (controller_index, (saved, live)) in controllers.iter().zip(self.s.iter()).enumerate() {
             for (channel_index, (saved_channel, live_channel)) in
                 saved.chan.iter().zip(live.chan.iter()).enumerate()
             {
@@ -1025,10 +1019,7 @@ fn validate_dma_controller(controller: &Dma8237) -> SnapResult<()> {
 }
 
 #[cfg(feature = "std")]
-fn save_dma_controller<W: SnapWrite>(
-    writer: &mut W,
-    controller: &Dma8237,
-) -> SnapResult<()> {
+fn save_dma_controller<W: SnapWrite>(writer: &mut W, controller: &Dma8237) -> SnapResult<()> {
     validate_dma_controller(controller)?;
     for value in &controller.drq {
         writer.write_bool(*value)?;
@@ -1060,9 +1051,7 @@ fn save_dma_controller<W: SnapWrite>(
 }
 
 #[cfg(feature = "std")]
-fn restore_dma_controller<R: SnapRead>(
-    reader: &mut R,
-) -> SnapResult<Dma8237> {
+fn restore_dma_controller<R: SnapRead>(reader: &mut R) -> SnapResult<Dma8237> {
     let mut controller = Dma8237::new();
     for value in &mut controller.drq {
         *value = reader.read_bool()?;
@@ -1094,13 +1083,12 @@ fn restore_dma_controller<R: SnapRead>(
     Ok(controller)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{SnapError, SnapshotReader};
     #[cfg(feature = "std")]
     use crate::snapshot::SnapshotSection;
+    use crate::snapshot::{SnapError, SnapshotReader};
 
     #[test]
     fn test_dma_creation() {
@@ -1354,7 +1342,7 @@ mod tests {
         use crate::memory::{BxMemC, BxMemoryStubC};
 
         fn dma_write(data: &mut [u8], maxlen: u16) -> u16 {
-            let payload = [0xd1, 0xa5, 0x5e, 0x33];
+            let payload = [0xD1, 0xA5, 0x5E, 0x33];
             let len = payload.len().min(maxlen as usize);
             data[..len].copy_from_slice(&payload[..len]);
             len as u16
@@ -1387,11 +1375,14 @@ mod tests {
         let mut received = [0; 4];
         assert_eq!(
             memory
-                .read_ram(crate::config::BxPhyAddress::new(2 * MIB as u64), &mut received)
+                .read_ram(
+                    crate::config::BxPhyAddress::new(2 * MIB as u64),
+                    &mut received
+                )
                 .unwrap(),
             4
         );
-        assert_eq!(received, [0xd1, 0xa5, 0x5e, 0x33]);
+        assert_eq!(received, [0xD1, 0xA5, 0x5E, 0x33]);
         assert!(
             memory.smc_seq_next() > before_smc,
             "legacy DMA must stamp the exact guest write"

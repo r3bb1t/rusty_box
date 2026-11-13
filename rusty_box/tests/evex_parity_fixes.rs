@@ -14,8 +14,7 @@ const CODE: u64 = 0x0020_0000;
 /// Build an emulator in flat long mode with the full AVX-512 XCR0 enabled.
 fn evex_emulator() -> Box<Emulator> {
     let cfg = EmulatorConfig::default();
-    let mut emu =
-        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("emulator");
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("emulator");
     emu.reg_write(
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
@@ -131,7 +130,8 @@ fn evex_vmovdqu64_register_store_masks_at_qword_granularity() {
 
             let got = emu.reg_read_zmm(X86Reg::Zmm2);
             for q in 0..8u64 {
-                let v = u64::from_le_bytes(got[q as usize * 8..q as usize * 8 + 8].try_into().unwrap());
+                let v =
+                    u64::from_le_bytes(got[q as usize * 8..q as usize * 8 + 8].try_into().unwrap());
                 let want = if q < 2 { q + 1 } else { 0 };
                 assert_eq!(
                     v, want,
@@ -293,8 +293,10 @@ fn run_one(emu: &mut Emulator, code: &[u8]) -> Outcome {
     gate[5] = 0x8E; // present, DPL 0, 64-bit interrupt gate
     gate[6..8].copy_from_slice(&((UD_HANDLER >> 16) as u16).to_le_bytes());
     gate[8..12].copy_from_slice(&((UD_HANDLER >> 32) as u32).to_le_bytes());
-    emu.mem_write(IDT + UD_VECTOR * 16, &gate).expect("write the #UD gate");
-    emu.mem_write(UD_HANDLER, &[0xF4]).expect("write the #UD handler");
+    emu.mem_write(IDT + UD_VECTOR * 16, &gate)
+        .expect("write the #UD gate");
+    emu.mem_write(UD_HANDLER, &[0xF4])
+        .expect("write the #UD handler");
 
     let mut image = code.to_vec();
     image.extend_from_slice(&[0xEB, 0xFE]); // jmp $
@@ -303,7 +305,11 @@ fn run_one(emu: &mut Emulator, code: &[u8]) -> Outcome {
     let stop = emu.emu_start(CODE, None, None, Some(8)).expect("emu_start");
     let rip = emu.cpu().rip();
     if rip == CODE + code.len() as u64 {
-        assert_eq!(emu.reg_read(X86Reg::Rsp), STACK, "a retired instruction pushes nothing");
+        assert_eq!(
+            emu.reg_read(X86Reg::Rsp),
+            STACK,
+            "a retired instruction pushes nothing"
+        );
         return Outcome::Retired;
     }
     assert_eq!(
@@ -311,9 +317,14 @@ fn run_one(emu: &mut Emulator, code: &[u8]) -> Outcome {
         UD_HANDLER + 1,
         "the instruction neither retired nor took #UD: stop={stop:?}"
     );
-    assert_eq!(emu.reg_read(X86Reg::Rsp), STACK - 40, "#UD pushes one frame");
+    assert_eq!(
+        emu.reg_read(X86Reg::Rsp),
+        STACK - 40,
+        "#UD pushes one frame"
+    );
     let mut pushed_rip = [0u8; 8];
-    emu.mem_read(STACK - 40, &mut pushed_rip).expect("read the frame");
+    emu.mem_read(STACK - 40, &mut pushed_rip)
+        .expect("read the frame");
     assert_eq!(
         u64::from_le_bytes(pushed_rip),
         CODE,
@@ -420,11 +431,17 @@ fn evex_vpextr_stores_scale_disp8_by_the_element_size() {
             ];
             let mut wrong = Vec::new();
             for case in &cases {
-                emu.mem_write(DATA, &[0x5A; 32]).expect("poison the store area");
+                emu.mem_write(DATA, &[0x5A; 32])
+                    .expect("poison the store area");
                 emu.reg_write_xmm(X86Reg::Xmm0, base_register);
                 emu.reg_write_xmm(X86Reg::Xmm1, source);
                 emu.reg_write(X86Reg::Rax, DATA);
-                assert_eq!(run_one(&mut emu, case.code), Outcome::Retired, "{}", case.name);
+                assert_eq!(
+                    run_one(&mut emu, case.code),
+                    Outcome::Retired,
+                    "{}",
+                    case.name
+                );
 
                 let mut want = [0x5Au8; 32];
                 want[case.offset..case.offset + case.element.len()]
@@ -432,7 +449,10 @@ fn evex_vpextr_stores_scale_disp8_by_the_element_size() {
                 let mut got = [0u8; 32];
                 emu.mem_read(DATA, &mut got).expect("read the store area");
                 if got != want {
-                    wrong.push(format!("{}:\n    got  {got:02X?}\n    want {want:02X?}", case.name));
+                    wrong.push(format!(
+                        "{}:\n    got  {got:02X?}\n    want {want:02X?}",
+                        case.name
+                    ));
                 }
             }
             assert!(
@@ -493,8 +513,8 @@ fn evex_vpextr_register_forms_read_modrm_reg_and_write_modrm_rm() {
                     name: "vpextrq rcx, xmm2, 1",
                     code: &[0x62, 0xF3, 0xFD, 0x08, 0x16, 0xD1, 0x01],
                     want: u64::from_le_bytes([
-                        source[8], source[9], source[10], source[11], source[12],
-                        source[13], source[14], source[15],
+                        source[8], source[9], source[10], source[11], source[12], source[13],
+                        source[14], source[15],
                     ]),
                 },
             ];
@@ -504,7 +524,12 @@ fn evex_vpextr_register_forms_read_modrm_reg_and_write_modrm_rm() {
                 emu.reg_write_xmm(X86Reg::Xmm2, source);
                 emu.reg_write(X86Reg::Rcx, 0xDEAD_BEEF_DEAD_BEEF);
                 emu.reg_write(X86Reg::Rdx, RDX);
-                assert_eq!(run_one(&mut emu, case.code), Outcome::Retired, "{}", case.name);
+                assert_eq!(
+                    run_one(&mut emu, case.code),
+                    Outcome::Retired,
+                    "{}",
+                    case.name
+                );
 
                 let rcx = emu.reg_read(X86Reg::Rcx);
                 let rdx = emu.reg_read(X86Reg::Rdx);

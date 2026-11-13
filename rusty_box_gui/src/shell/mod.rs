@@ -22,9 +22,9 @@ pub(crate) mod debugger_page;
 pub(crate) mod destination;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod listing;
+pub(crate) mod sidebar;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod symbols_page;
-pub(crate) mod sidebar;
 pub(crate) mod theme;
 pub(crate) mod vm_bar;
 pub(crate) mod widgets;
@@ -40,7 +40,10 @@ mod tests {
     /// The sources whose string literals reach the screen, each with the path
     /// a failure names.
     const SOURCES: [(&str, &str); 11] = [
-        ("rusty_box_gui/src/shell/symbols_page.rs", include_str!("symbols_page.rs")),
+        (
+            "rusty_box_gui/src/shell/symbols_page.rs",
+            include_str!("symbols_page.rs"),
+        ),
         ("rusty_box_gui/src/app.rs", include_str!("../app.rs")),
         (
             "rusty_box_gui/src/shell/debugger_page.rs",
@@ -59,10 +62,19 @@ mod tests {
             include_str!("destination.rs"),
         ),
         ("rusty_box_gui/src/shell/mod.rs", include_str!("mod.rs")),
-        ("rusty_box_gui/src/shell/sidebar.rs", include_str!("sidebar.rs")),
+        (
+            "rusty_box_gui/src/shell/sidebar.rs",
+            include_str!("sidebar.rs"),
+        ),
         ("rusty_box_gui/src/shell/theme.rs", include_str!("theme.rs")),
-        ("rusty_box_gui/src/shell/vm_bar.rs", include_str!("vm_bar.rs")),
-        ("rusty_box_gui/src/shell/widgets.rs", include_str!("widgets.rs")),
+        (
+            "rusty_box_gui/src/shell/vm_bar.rs",
+            include_str!("vm_bar.rs"),
+        ),
+        (
+            "rusty_box_gui/src/shell/widgets.rs",
+            include_str!("widgets.rs"),
+        ),
     ];
 
     /// Where the scanner is in the source: outside any literal, inside one of
@@ -273,11 +285,16 @@ mod tests {
 
     #[test]
     fn the_scanner_reads_literals_and_skips_comments() {
-        let [in_comments, in_string, in_raw, in_char, in_multiline, in_escape] =
-            [0x2192, 0x22EF, 0x00D7, 0x2014, 0x2026, 0x25A3].map(|code_point| {
-                char::from_u32(code_point)
-                    .expect("the fixture's code points are assigned characters")
-            });
+        let [
+            in_comments,
+            in_string,
+            in_raw,
+            in_char,
+            in_multiline,
+            in_escape,
+        ] = [0x2192, 0x22EF, 0x00D7, 0x2014, 0x2026, 0x25A3].map(|code_point| {
+            char::from_u32(code_point).expect("the fixture's code points are assigned characters")
+        });
         let source = fixture(&Placed {
             in_comments,
             in_string,

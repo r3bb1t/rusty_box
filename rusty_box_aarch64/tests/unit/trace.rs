@@ -6,10 +6,10 @@
 
 use rusty_box_core::{ClockHz, VmClock};
 
-use super::{classify, predecode, Slot, TraceCache, MAX_STAMPS, MIN_STAMPS};
+use super::{MAX_STAMPS, MIN_STAMPS, Slot, TraceCache, classify, predecode};
 use crate::bus::{AccessWidth, BusFault, CodeEpoch, FetchSource, PhysAddr, PhysBus};
 use crate::cpu::features::{Features, Implementation};
-use crate::cpu::{id, Cpu, CpuConfig, NoEl2, Step};
+use crate::cpu::{Cpu, CpuConfig, NoEl2, Step, id};
 use crate::instrumentation::NoInstrumentation;
 
 const RAM_BASE: u64 = 0x4000_0000;

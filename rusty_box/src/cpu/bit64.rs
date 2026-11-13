@@ -1,8 +1,6 @@
 //! 64-bit bit scan and bit test instructions: BSF, BSR, BT, BTS, BTR, BTC
 //! Matching Bochs bit64.cc and logical64.cc (BT variants)
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================

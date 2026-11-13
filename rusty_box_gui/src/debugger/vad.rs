@@ -164,7 +164,10 @@ impl VadFlags {
     pub(crate) fn decode(self, flags: u64) -> VadInfo {
         match self {
             VadFlags::Known(bits) => decode_flags(flags, bits),
-            VadFlags::Unknown => VadInfo { kind: VadKind::Unknown, protection: None },
+            VadFlags::Unknown => VadInfo {
+                kind: VadKind::Unknown,
+                protection: None,
+            },
         }
     }
 }
@@ -201,7 +204,11 @@ const FLAG_ERAS: [FlagEra; 5] = [
         first: 3790,
         last: 7601,
         shape: VadShape::AvlX64,
-        bits: VadFlagBits { vad_type: bit_range(52, 3), protection: bit_range(56, 5), private_memory: bit_range(63, 1) },
+        bits: VadFlagBits {
+            vad_type: bit_range(52, 3),
+            protection: bit_range(56, 5),
+            private_memory: bit_range(63, 1),
+        },
     },
     // 8 RTM (9200) through 10 1709 (16299): VadType, Protection,
     // PreferredNode:6, NoChange, PrivateMemory.
@@ -209,7 +216,11 @@ const FLAG_ERAS: [FlagEra; 5] = [
         first: 9200,
         last: 16299,
         shape: VadShape::BalancedNode,
-        bits: VadFlagBits { vad_type: bit_range(0, 3), protection: bit_range(3, 5), private_memory: bit_range(15, 1) },
+        bits: VadFlagBits {
+            vad_type: bit_range(0, 3),
+            protection: bit_range(3, 5),
+            private_memory: bit_range(15, 1),
+        },
     },
     // 10 1803 (17134) and 1809 (17763): NoChange moved to the top of the
     // word, PrivateMemory follows PreferredNode:6.
@@ -217,7 +228,11 @@ const FLAG_ERAS: [FlagEra; 5] = [
         first: 17134,
         last: 17763,
         shape: VadShape::BalancedNode,
-        bits: VadFlagBits { vad_type: bit_range(0, 3), protection: bit_range(3, 5), private_memory: bit_range(14, 1) },
+        bits: VadFlagBits {
+            vad_type: bit_range(0, 3),
+            protection: bit_range(3, 5),
+            private_memory: bit_range(14, 1),
+        },
     },
     // 10 1903 (18362) through 22H2 (19045): Lock, LockContended,
     // DeleteInProgress, NoChange, VadType, Protection, PreferredNode:6,
@@ -226,7 +241,11 @@ const FLAG_ERAS: [FlagEra; 5] = [
         first: 18362,
         last: 19045,
         shape: VadShape::BalancedNode,
-        bits: VadFlagBits { vad_type: bit_range(4, 3), protection: bit_range(7, 5), private_memory: bit_range(20, 1) },
+        bits: VadFlagBits {
+            vad_type: bit_range(4, 3),
+            protection: bit_range(7, 5),
+            private_memory: bit_range(20, 1),
+        },
     },
     // Server 2022 (20348), 11 21H2 (22000) through 25H2 (26200):
     // PreferredNode grew to 7 bits.
@@ -234,7 +253,11 @@ const FLAG_ERAS: [FlagEra; 5] = [
         first: 20348,
         last: 26200,
         shape: VadShape::BalancedNode,
-        bits: VadFlagBits { vad_type: bit_range(4, 3), protection: bit_range(7, 5), private_memory: bit_range(21, 1) },
+        bits: VadFlagBits {
+            vad_type: bit_range(4, 3),
+            protection: bit_range(7, 5),
+            private_memory: bit_range(21, 1),
+        },
     },
 ];
 
@@ -471,7 +494,12 @@ mod tests {
     }
 
     fn release(build: u32, shape: VadShape, vad_type: u32, private_memory: u32) -> Release {
-        Release { build, shape, vad_type, private_memory }
+        Release {
+            build,
+            shape,
+            vad_type,
+            private_memory,
+        }
     }
 
     /// Every release whose `_MMVAD_FLAGS` was read from the Vergilius Project
@@ -507,8 +535,16 @@ mod tests {
             let VadFlags::Known(bits) = build_flags(release.shape, Some(release.build)) else {
                 panic!("build {} has no era", release.build);
             };
-            assert_eq!(bits.vad_type.position, release.vad_type, "build {}", release.build);
-            assert_eq!(bits.private_memory.position, release.private_memory, "build {}", release.build);
+            assert_eq!(
+                bits.vad_type.position, release.vad_type,
+                "build {}",
+                release.build
+            );
+            assert_eq!(
+                bits.private_memory.position, release.private_memory,
+                "build {}",
+                release.build
+            );
         }
     }
 
@@ -520,7 +556,13 @@ mod tests {
         let VadFlags::Known(bits) = build_flags(VadShape::BalancedNode, Some(17763)) else {
             panic!("1809 has an era");
         };
-        assert_eq!(decode_flags(flags, bits), VadInfo { kind: VadKind::Private, protection: Some(WinProtection::ReadWrite) });
+        assert_eq!(
+            decode_flags(flags, bits),
+            VadInfo {
+                kind: VadKind::Private,
+                protection: Some(WinProtection::ReadWrite)
+            }
+        );
     }
 
     /// A build no era covers — unread, between eras, newer than the last,
@@ -538,7 +580,13 @@ mod tests {
         ];
         for flags in unknown {
             assert_eq!(flags, VadFlags::Unknown);
-            assert_eq!(flags.decode(u64::MAX), VadInfo { kind: VadKind::Unknown, protection: None });
+            assert_eq!(
+                flags.decode(u64::MAX),
+                VadInfo {
+                    kind: VadKind::Unknown,
+                    protection: None
+                }
+            );
         }
     }
 
@@ -547,17 +595,25 @@ mod tests {
     #[test]
     fn flags_decode_where_the_layout_puts_them() {
         let moved = VadFlagBits {
-            private_memory: BitRange { position: 21, length: 1 },
+            private_memory: BitRange {
+                position: 21,
+                length: 1,
+            },
             ..flag_bits(VadShape::BalancedNode)
         };
         let flags = (4u64 << 7) | (1 << 21);
         assert_eq!(decode_flags(flags, moved).kind, VadKind::Private);
-        assert_eq!(decode_flags(flags, flag_bits(VadShape::BalancedNode)).kind, VadKind::Mapped);
+        assert_eq!(
+            decode_flags(flags, flag_bits(VadShape::BalancedNode)).kind,
+            VadKind::Mapped
+        );
     }
 
     #[test]
     fn protection_covers_every_base_value() {
-        let labels: Vec<&str> = (0..8).map(|b| WinProtection::from_bits(b).label()).collect();
+        let labels: Vec<&str> = (0..8)
+            .map(|b| WinProtection::from_bits(b).label())
+            .collect();
         assert_eq!(labels, ["---", "R", "X", "R X", "RW", "RWc", "RWX", "RWXc"]);
     }
 }

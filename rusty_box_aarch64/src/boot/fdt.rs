@@ -308,7 +308,11 @@ impl Out<'_> {
 
     /// An `FDT_PROP` token's head (5.4.1): a value of `len` bytes follows,
     /// its name at `name_off` in the strings block.
-    pub(super) fn put_prop_head(&mut self, len: usize, name_off: usize) -> Result<(), DeviceTreeError> {
+    pub(super) fn put_prop_head(
+        &mut self,
+        len: usize,
+        name_off: usize,
+    ) -> Result<(), DeviceTreeError> {
         self.put_u32(FDT_PROP)?;
         self.put_len(len)?;
         self.put_len(name_off)
@@ -896,7 +900,8 @@ impl<'t> TreeNode<'t> {
 
     /// Its property `name`'s first cell, or `absent` when it has none.
     pub(crate) fn cell_or(&self, name: &str, absent: u32) -> Result<u32, DeviceTreeError> {
-        self.property(name)?.map_or(Ok(absent), |value| cell(value, 0))
+        self.property(name)?
+            .map_or(Ok(absent), |value| cell(value, 0))
     }
 
     /// Whether it is enabled: no `status`, or `"okay"` (Devicetree
@@ -1405,9 +1410,11 @@ mod tests {
         for token in [FDT_END_NODE, FDT_PROP, 1, 0, p_is_1, FDT_END_NODE] {
             trailing.extend(token.to_be_bytes());
         }
-        assert!(dst[..len]
-            .windows(trailing.len())
-            .any(|w| w == &trailing[..]));
+        assert!(
+            dst[..len]
+                .windows(trailing.len())
+                .any(|w| w == &trailing[..])
+        );
     }
 
     /// A path names no node through an empty component; the root is the
@@ -1572,7 +1579,11 @@ mod tests {
         let extra = [
             Edit::set(NodePath::of("cpus/memory"), "n", Value::Bytes(&[1])),
             Edit::set(NodePath::of("cpus/memory-map"), "n", Value::Bytes(&[2])),
-            Edit::set(NodePath::of("chosen/memory@80000000"), "n", Value::Bytes(&[3])),
+            Edit::set(
+                NodePath::of("chosen/memory@80000000"),
+                "n",
+                Value::Bytes(&[3]),
+            ),
         ];
         let len = rebuild(QEMU_DTB, &[], &extra, &mut dst).expect("rebuild");
         let source = dst[..len].to_vec();
@@ -1610,7 +1621,10 @@ mod tests {
         let len = rebuild(&source, &removals, &readd, &mut dst).expect("rebuild");
         let tree = &dst[..len];
         assert_eq!(layout(tree, "").1[0], "psci");
-        assert_eq!(layout(tree, "psci"), (std::vec!["method".into()], std::vec![]));
+        assert_eq!(
+            layout(tree, "psci"),
+            (std::vec!["method".into()], std::vec![])
+        );
         assert_eq!(property(tree, "psci", "method"), Ok(Some(&b"smc\0"[..])));
 
         // An edit that sets nothing makes its node exist and leaves one

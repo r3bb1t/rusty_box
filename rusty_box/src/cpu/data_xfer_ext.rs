@@ -4,11 +4,9 @@
 //!
 //! Implements LEA, XCHG, MOV segment, LES, LDS, CBW, CWD, CWDE, CDQ
 
-use super::{
-    cpu::BxCpuC,
-    decoder::{BxSegregs, Instruction},
-    error::Result,
-};
+use super::cpu::BxCpuC;
+use super::decoder::{BxSegregs, Instruction};
+use super::error::Result;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -1024,6 +1022,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovno_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1033,6 +1032,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovb_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1042,6 +1042,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovnb_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1051,6 +1052,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovz_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1060,6 +1062,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovnz_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1069,6 +1072,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovbe_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1078,6 +1082,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovnbe_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1087,6 +1092,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovs_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1096,6 +1102,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovns_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1105,6 +1112,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovp_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1114,6 +1122,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovnp_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1123,6 +1132,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovl_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1132,6 +1142,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovnl_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1141,6 +1152,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovle_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1150,6 +1162,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
+
     pub fn cmovnle_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1171,6 +1184,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovo_gd_ed_m(instr)
         }
     }
+
     pub fn cmovno_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovno_gd_ed_r(instr);
@@ -1179,6 +1193,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovno_gd_ed_m(instr)
         }
     }
+
     pub fn cmovb_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovb_gd_ed_r(instr);
@@ -1187,6 +1202,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovb_gd_ed_m(instr)
         }
     }
+
     pub fn cmovnb_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovnb_gd_ed_r(instr);
@@ -1195,6 +1211,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovnb_gd_ed_m(instr)
         }
     }
+
     pub fn cmovz_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovz_gd_ed_r(instr);
@@ -1203,6 +1220,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovz_gd_ed_m(instr)
         }
     }
+
     pub fn cmovnz_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovnz_gd_ed_r(instr);
@@ -1211,6 +1229,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovnz_gd_ed_m(instr)
         }
     }
+
     pub fn cmovbe_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovbe_gd_ed_r(instr);
@@ -1219,6 +1238,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovbe_gd_ed_m(instr)
         }
     }
+
     pub fn cmovnbe_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovnbe_gd_ed_r(instr);
@@ -1227,6 +1247,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovnbe_gd_ed_m(instr)
         }
     }
+
     pub fn cmovs_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovs_gd_ed_r(instr);
@@ -1235,6 +1256,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovs_gd_ed_m(instr)
         }
     }
+
     pub fn cmovns_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovns_gd_ed_r(instr);
@@ -1243,6 +1265,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovns_gd_ed_m(instr)
         }
     }
+
     pub fn cmovp_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovp_gd_ed_r(instr);
@@ -1251,6 +1274,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovp_gd_ed_m(instr)
         }
     }
+
     pub fn cmovnp_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovnp_gd_ed_r(instr);
@@ -1259,6 +1283,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovnp_gd_ed_m(instr)
         }
     }
+
     pub fn cmovl_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovl_gd_ed_r(instr);
@@ -1267,6 +1292,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovl_gd_ed_m(instr)
         }
     }
+
     pub fn cmovnl_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovnl_gd_ed_r(instr);
@@ -1275,6 +1301,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovnl_gd_ed_m(instr)
         }
     }
+
     pub fn cmovle_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovle_gd_ed_r(instr);
@@ -1283,6 +1310,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovle_gd_ed_m(instr)
         }
     }
+
     pub fn cmovnle_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovnle_gd_ed_r(instr);
@@ -1304,6 +1332,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovno_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1312,6 +1341,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovb_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1320,6 +1350,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovnb_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1328,6 +1359,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovz_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1336,6 +1368,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovnz_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1344,6 +1377,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovbe_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1352,6 +1386,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovnbe_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1360,6 +1395,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovs_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1368,6 +1404,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovns_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1376,6 +1413,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovp_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1384,6 +1422,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovnp_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1392,6 +1431,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovl_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1400,6 +1440,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovnl_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1408,6 +1449,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovle_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1416,6 +1458,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovnle_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let op2 = self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?;
@@ -1436,6 +1479,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovo_gw_ew_m(instr)
         }
     }
+
     pub fn cmovno_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovno_gw_ew_r(instr);
@@ -1444,6 +1488,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovno_gw_ew_m(instr)
         }
     }
+
     pub fn cmovb_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovb_gw_ew_r(instr);
@@ -1452,6 +1497,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovb_gw_ew_m(instr)
         }
     }
+
     pub fn cmovnb_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovnb_gw_ew_r(instr);
@@ -1460,6 +1506,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovnb_gw_ew_m(instr)
         }
     }
+
     pub fn cmovz_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovz_gw_ew_r(instr);
@@ -1468,6 +1515,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovz_gw_ew_m(instr)
         }
     }
+
     pub fn cmovnz_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovnz_gw_ew_r(instr);
@@ -1476,6 +1524,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovnz_gw_ew_m(instr)
         }
     }
+
     pub fn cmovbe_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovbe_gw_ew_r(instr);
@@ -1484,6 +1533,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovbe_gw_ew_m(instr)
         }
     }
+
     pub fn cmovnbe_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovnbe_gw_ew_r(instr);
@@ -1492,6 +1542,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovnbe_gw_ew_m(instr)
         }
     }
+
     pub fn cmovs_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovs_gw_ew_r(instr);
@@ -1500,6 +1551,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovs_gw_ew_m(instr)
         }
     }
+
     pub fn cmovns_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovns_gw_ew_r(instr);
@@ -1508,6 +1560,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovns_gw_ew_m(instr)
         }
     }
+
     pub fn cmovp_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovp_gw_ew_r(instr);
@@ -1516,6 +1569,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovp_gw_ew_m(instr)
         }
     }
+
     pub fn cmovnp_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovnp_gw_ew_r(instr);
@@ -1524,6 +1578,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovnp_gw_ew_m(instr)
         }
     }
+
     pub fn cmovl_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovl_gw_ew_r(instr);
@@ -1532,6 +1587,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovl_gw_ew_m(instr)
         }
     }
+
     pub fn cmovnl_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovnl_gw_ew_r(instr);
@@ -1540,6 +1596,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovnl_gw_ew_m(instr)
         }
     }
+
     pub fn cmovle_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovle_gw_ew_r(instr);
@@ -1548,6 +1605,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmovle_gw_ew_m(instr)
         }
     }
+
     pub fn cmovnle_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmovnle_gw_ew_r(instr);

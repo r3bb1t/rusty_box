@@ -2,11 +2,9 @@
 //!
 //! Based on Bochs ctrl_xfer16.cc
 
-use super::{
-    cpu::Exception,
-    decoder::{BxSegregs, Instruction},
-    error::Result,
-};
+use super::cpu::Exception;
+use super::decoder::{BxSegregs, Instruction};
+use super::error::Result;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================

@@ -26,17 +26,16 @@
 //! Ported from `cpp_orig/bochs/iodev/ioapic.cc` (370 lines) and
 //! `cpp_orig/bochs/iodev/ioapic.h` (117 lines).
 
+use rusty_box_devices::api::WindowOffset;
+
 use super::irq::ServiceRequest;
 use crate::config::BxPhyAddress;
 use crate::memory::BxMemC;
-use rusty_box_devices::api::WindowOffset;
-
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
-    SNAPSHOT_SECTION_VERSION,
+    SNAPSHOT_SECTION_VERSION, SnapError, SnapRead, SnapResult, SnapWrite, bounds,
+    checked_snapshot_len_add, checked_snapshot_len_mul,
 };
-
 
 // ---------------------------------------------------------------------------
 // Constants — matching Bochs ioapic.h
@@ -827,8 +826,16 @@ impl BxIoApic {
             let delivery_mode = entry.delivery_mode();
             let dest = entry.destination() as u32;
             let dest_mode = entry.destination_mode();
-            let queued = !(delivery_mode == IoApicDeliveryMode::LowPriority as u8 && dest_mode == 0)
-                && self.enqueue_delivery(pin as u8, vector, delivery_mode, trigger, dest, dest_mode);
+            let queued = !(delivery_mode == IoApicDeliveryMode::LowPriority as u8
+                && dest_mode == 0)
+                && self.enqueue_delivery(
+                    pin as u8,
+                    vector,
+                    delivery_mode,
+                    trigger,
+                    dest,
+                    dest_mode,
+                );
 
             // Bochs sets the delivery-status bit on both paths: the message is
             // either in flight or stuck. `complete_deferred_delivery` clears it
@@ -938,9 +945,16 @@ impl BxIoApic {
             let entry = &self.ioredtbl[pin];
             // Only show non-default entries (unmasked or configured)
             if !entry.is_masked() || entry.vector() != 0 {
-                tracing::trace!("[HLT-STATE]   pin {:2}: lo={:#010x} hi={:#010x} vec={:#04x} masked={} trigger={} deliv={}",
-                    pin, entry.get_lo_part(), entry.get_hi_part(), entry.vector(),
-                    entry.is_masked(), entry.trigger_mode(), entry.delivery_mode());
+                tracing::trace!(
+                    "[HLT-STATE]   pin {:2}: lo={:#010x} hi={:#010x} vec={:#04x} masked={} trigger={} deliv={}",
+                    pin,
+                    entry.get_lo_part(),
+                    entry.get_hi_part(),
+                    entry.vector(),
+                    entry.is_masked(),
+                    entry.trigger_mode(),
+                    entry.delivery_mode()
+                );
             }
         }
     }
@@ -973,8 +987,9 @@ impl BxIoApic {
 
 #[cfg(feature = "std")]
 impl crate::snapshot::SnapshotSection for BxIoApic {
-    const TAG: u32 = crate::snapshot::SEC_IOAPIC;
     type Restored = ();
+
+    const TAG: u32 = crate::snapshot::SEC_IOAPIC;
 
     fn snapshot_len(&self) -> SnapResult<u64> {
         validate_ioapic_snapshot_state(self)?;
@@ -989,10 +1004,7 @@ impl crate::snapshot::SnapshotSection for BxIoApic {
         checked_snapshot_len_add(queue_prefix, queue)
     }
 
-    fn save<W: SnapWrite>(
-        &self,
-        writer: &mut W,
-    ) -> SnapResult<()> {
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         self.snapshot_len()?;
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         writer.write_bool(self.enabled)?;
@@ -1005,10 +1017,10 @@ impl crate::snapshot::SnapshotSection for BxIoApic {
             writer.write_u32(entry.lo)?;
             writer.write_u32(entry.hi)?;
         }
-        writer.write_u32(
-            u32::try_from(self.num_pending_deliveries)
-                .map_err(|_| ioapic_snapshot_invalid("IOAPIC pending queue count is too large"))?,
-        )?;
+        writer
+            .write_u32(u32::try_from(self.num_pending_deliveries).map_err(|_| {
+                ioapic_snapshot_invalid("IOAPIC pending queue count is too large")
+            })?)?;
         let deliveries = self
             .pending_deliveries
             .get(..self.num_pending_deliveries)
@@ -1019,10 +1031,7 @@ impl crate::snapshot::SnapshotSection for BxIoApic {
         Ok(())
     }
 
-    fn restore<R: SnapRead>(
-        &mut self,
-        reader: &mut R,
-    ) -> SnapResult<()> {
+    fn restore<R: SnapRead>(&mut self, reader: &mut R) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(ioapic_snapshot_invalid(
                 "unsupported IOAPIC snapshot section version",
@@ -1108,7 +1117,9 @@ fn validate_ioapic_configuration(
         return Err(ioapic_snapshot_invalid("IOAPIC ID exceeds capability"));
     }
     if intin & !pin_mask != 0 || irr & !pin_mask != 0 {
-        return Err(ioapic_snapshot_invalid("IOAPIC pin state exceeds capability"));
+        return Err(ioapic_snapshot_invalid(
+            "IOAPIC pin state exceeds capability",
+        ));
     }
     Ok(())
 }
@@ -1122,7 +1133,7 @@ fn validate_ioapic_route(lo: u32, hi: u32) -> SnapResult<()> {
     }
     let delivery_mode = u8::try_from((lo >> 8) & 0x07)
         .map_err(|_| ioapic_snapshot_invalid("IOAPIC delivery mode does not fit"))?;
-    let vector = u8::try_from(lo & 0xff)
+    let vector = u8::try_from(lo & 0xFF)
         .map_err(|_| ioapic_snapshot_invalid("IOAPIC vector does not fit"))?;
     let destination = u8::try_from(hi >> 24)
         .map_err(|_| ioapic_snapshot_invalid("IOAPIC destination does not fit"))?;
@@ -1130,7 +1141,9 @@ fn validate_ioapic_route(lo: u32, hi: u32) -> SnapResult<()> {
         return Err(ioapic_snapshot_invalid("IOAPIC delivery mode is reserved"));
     }
     if ioapic_mode_requires_vector(delivery_mode) && vector < 0x10 && lo & (1 << 16) == 0 {
-        return Err(ioapic_snapshot_invalid("IOAPIC interrupt vector is invalid"));
+        return Err(ioapic_snapshot_invalid(
+            "IOAPIC interrupt vector is invalid",
+        ));
     }
     if lo & (1 << 14) != 0 && lo & (1 << 15) == 0 {
         return Err(ioapic_snapshot_invalid(
@@ -1138,7 +1151,9 @@ fn validate_ioapic_route(lo: u32, hi: u32) -> SnapResult<()> {
         ));
     }
     if u32::from(destination) > APIC_ID_MASK {
-        return Err(ioapic_snapshot_invalid("IOAPIC destination exceeds capability"));
+        return Err(ioapic_snapshot_invalid(
+            "IOAPIC destination exceeds capability",
+        ));
     }
     Ok(())
 }
@@ -1204,9 +1219,7 @@ fn save_ioapic_delivery<W: SnapWrite>(
 }
 
 #[cfg(feature = "std")]
-fn restore_ioapic_delivery<R: SnapRead>(
-    reader: &mut R,
-) -> SnapResult<PendingIoApicDelivery> {
+fn restore_ioapic_delivery<R: SnapRead>(reader: &mut R) -> SnapResult<PendingIoApicDelivery> {
     let delivery = PendingIoApicDelivery {
         pin: reader.read_u8()?,
         vector: reader.read_u8()?,
@@ -1380,7 +1393,6 @@ impl BxIoApic {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
 
 #[cfg(test)]
 mod tests {
@@ -1597,44 +1609,38 @@ mod tests {
         assert!(!ioapic.is_enabled());
 
         // Enable at default base -> changed, mapped at 0xFEC00000.
-        assert!(ioapic
-            .set_enabled_with_mem(true, 0x0000, &mut mem)
-            .unwrap());
+        assert!(ioapic.set_enabled_with_mem(true, 0x0000, &mut mem).unwrap());
         assert!(ioapic.is_enabled());
         assert_eq!(ioapic.base_address(), 0xFEC0_0000);
 
         // Re-enable at the same base -> no change.
-        assert!(!ioapic
-            .set_enabled_with_mem(true, 0x0000, &mut mem)
-            .unwrap());
+        assert!(!ioapic.set_enabled_with_mem(true, 0x0000, &mut mem).unwrap());
         assert!(ioapic.is_enabled());
 
         // Disable -> changed, window unregistered.
-        assert!(ioapic
-            .set_enabled_with_mem(false, 0x0000, &mut mem)
-            .unwrap());
+        assert!(
+            ioapic
+                .set_enabled_with_mem(false, 0x0000, &mut mem)
+                .unwrap()
+        );
         assert!(!ioapic.is_enabled());
 
         // Re-disable -> no change.
-        assert!(!ioapic
-            .set_enabled_with_mem(false, 0x0000, &mut mem)
-            .unwrap());
+        assert!(
+            !ioapic
+                .set_enabled_with_mem(false, 0x0000, &mut mem)
+                .unwrap()
+        );
 
         // Enable at a relocated base -> changed, base moved.
-        assert!(ioapic
-            .set_enabled_with_mem(true, 0x0400, &mut mem)
-            .unwrap());
+        assert!(ioapic.set_enabled_with_mem(true, 0x0400, &mut mem).unwrap());
         assert_eq!(ioapic.base_address(), 0xFEC0_0400);
 
         // Relocate while enabled (Bochs: enabled && base_offset != base_addr&0xffff).
-        assert!(ioapic
-            .set_enabled_with_mem(true, 0x0800, &mut mem)
-            .unwrap());
+        assert!(ioapic.set_enabled_with_mem(true, 0x0800, &mut mem).unwrap());
         assert_eq!(ioapic.base_address(), 0xFEC0_0800);
 
         // Same base again -> no change.
-        assert!(!ioapic
-            .set_enabled_with_mem(true, 0x0800, &mut mem)
-            .unwrap());
+        assert!(!ioapic.set_enabled_with_mem(true, 0x0800, &mut mem).unwrap());
     }
 }

@@ -1,6 +1,9 @@
+use std::fmt;
+use std::path::PathBuf;
+use std::str::FromStr;
+
 use clap::{ArgAction, Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
-use std::{fmt, path::PathBuf, str::FromStr};
 
 /// The launcher's command line. `Args::default()` is the command line with no
 /// flags: every default below is the one clap gives an absent flag.
@@ -530,7 +533,16 @@ mod tests {
     fn only_a_config_or_a_machine_flag_names_a_machine() {
         let parse = |line: &[&str]| Args::try_parse_from(line).expect("the command line parses");
         assert!(!parse(&["rusty_box_gui"]).names_a_machine());
-        assert!(!parse(&["rusty_box_gui", "--display", "headless", "--log-level", "info"]).names_a_machine());
+        assert!(
+            !parse(&[
+                "rusty_box_gui",
+                "--display",
+                "headless",
+                "--log-level",
+                "info"
+            ])
+            .names_a_machine()
+        );
         assert!(!parse(&["rusty_box_gui", "--no-config", "--engine", "whp"]).names_a_machine());
         assert!(parse(&["rusty_box_gui", "--config", "vm.toml"]).names_a_machine());
         assert!(parse(&["rusty_box_gui", "--cdrom", "a.iso"]).names_a_machine());
@@ -543,18 +555,40 @@ mod tests {
     fn only_a_config_file_with_nothing_beside_it_names_only_a_config_file() {
         let parse = |line: &[&str]| Args::try_parse_from(line).expect("the command line parses");
         assert!(parse(&["rusty_box_gui", "--config", "vm.toml"]).names_only_a_config_file());
-        assert!(parse(&["rusty_box_gui", "-f", "vm.toml", "--display", "headless"])
-            .names_only_a_config_file());
+        assert!(
+            parse(&["rusty_box_gui", "-f", "vm.toml", "--display", "headless"])
+                .names_only_a_config_file()
+        );
         assert!(!parse(&["rusty_box_gui"]).names_only_a_config_file());
         assert!(!parse(&["rusty_box_gui", "--cdrom", "a.iso"]).names_only_a_config_file());
-        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--memory-mib", "64"])
-            .names_only_a_config_file());
-        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--cdrom", "a.iso"])
-            .names_only_a_config_file());
-        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--engine", "interpreter"])
-            .names_only_a_config_file());
-        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--log-level", "info"])
-            .names_only_a_config_file());
+        assert!(
+            !parse(&["rusty_box_gui", "--config", "vm.toml", "--memory-mib", "64"])
+                .names_only_a_config_file()
+        );
+        assert!(
+            !parse(&["rusty_box_gui", "--config", "vm.toml", "--cdrom", "a.iso"])
+                .names_only_a_config_file()
+        );
+        assert!(
+            !parse(&[
+                "rusty_box_gui",
+                "--config",
+                "vm.toml",
+                "--engine",
+                "interpreter"
+            ])
+            .names_only_a_config_file()
+        );
+        assert!(
+            !parse(&[
+                "rusty_box_gui",
+                "--config",
+                "vm.toml",
+                "--log-level",
+                "info"
+            ])
+            .names_only_a_config_file()
+        );
     }
 
     #[test]
@@ -601,6 +635,9 @@ mod tests {
             none
         );
         #[cfg(feature = "gui-egui")]
-        assert_eq!(parse(&["rusty_box_gui", "--display", "egui"]).run_flags(), none);
+        assert_eq!(
+            parse(&["rusty_box_gui", "--display", "egui"]).run_flags(),
+            none
+        );
     }
 }

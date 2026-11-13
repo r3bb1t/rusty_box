@@ -12,7 +12,7 @@
 #[cfg(all(test, not(debug_assertions)))]
 use no_panic::no_panic;
 
-use crate::decompress::{decompress_to_vec, Codec, DecompressError};
+use crate::decompress::{Codec, DecompressError, decompress_to_vec};
 use crate::identity::{BuildId, ModuleIdentity};
 use crate::pe::ImageRead;
 use crate::read::{Bytes, ReadError};
@@ -76,8 +76,18 @@ impl ElfClass {
     #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
     fn sizes(self) -> RecordSizes {
         match self {
-            ElfClass::Elf32 => RecordSizes { section: 40, program: 32, symbol: 16, compression_header: 12 },
-            ElfClass::Elf64 => RecordSizes { section: 64, program: 56, symbol: 24, compression_header: 24 },
+            ElfClass::Elf32 => RecordSizes {
+                section: 40,
+                program: 32,
+                symbol: 16,
+                compression_header: 12,
+            },
+            ElfClass::Elf64 => RecordSizes {
+                section: 64,
+                program: 56,
+                symbol: 24,
+                compression_header: 24,
+            },
         }
     }
 }
@@ -248,7 +258,11 @@ pub fn decode_header(file: Bytes<'_>) -> Result<ElfHeader, ElfError> {
         other => return Err(ElfError::BadData { data: other }),
     }
     let half = |at: usize| file.u16_le(at).map_err(|source| short(what, source));
-    let word = |at: usize| file.u32_le(at).map(u64::from).map_err(|source| short(what, source));
+    let word = |at: usize| {
+        file.u32_le(at)
+            .map(u64::from)
+            .map_err(|source| short(what, source))
+    };
     let long = |at: usize| file.u64_le(at).map_err(|source| short(what, source));
     let kind = half(16)?;
     let machine = half(18)?;
@@ -378,16 +392,13 @@ pub fn find_note<'a>(notes: Bytes<'a>, align: usize, name: &[u8], kind: u32) -> 
 /// for 8-aligned note sections (`.note.gnu.property`), else 4.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 fn note_alignment(align: u64) -> usize {
-    if align == 8 {
-        8
-    } else {
-        4
-    }
+    if align == 8 { 8 } else { 4 }
 }
 
 /// A build-id descriptor as a [`BuildId`], when its length is plausible.
 fn build_id_of(descriptor: &[u8]) -> Option<BuildId> {
-    (!descriptor.is_empty() && descriptor.len() <= MAX_BUILD_ID_BYTES).then(|| BuildId(descriptor.to_vec()))
+    (!descriptor.is_empty() && descriptor.len() <= MAX_BUILD_ID_BYTES)
+        .then(|| BuildId(descriptor.to_vec()))
 }
 
 /// An ELF file's tables, over its bytes.
@@ -416,9 +427,13 @@ impl<'a> ElfFile<'a> {
         };
         let names = match raw_sections.get(names_index as usize) {
             Some(table) if table.kind != SHT_NOBITS => {
-                let at = usize::try_from(table.offset).map_err(|_| ElfError::BadSectionIndex { index: names_index })?;
-                let len = usize::try_from(table.size).map_err(|_| ElfError::BadSectionIndex { index: names_index })?;
-                bytes.sub(at, len).map_err(|source| short("section name table", source))?
+                let at = usize::try_from(table.offset)
+                    .map_err(|_| ElfError::BadSectionIndex { index: names_index })?;
+                let len = usize::try_from(table.size)
+                    .map_err(|_| ElfError::BadSectionIndex { index: names_index })?;
+                bytes
+                    .sub(at, len)
+                    .map_err(|source| short("section name table", source))?
             }
             Some(_) | None if raw_sections.is_empty() => Bytes::new(&[]),
             Some(_) | None => return Err(ElfError::BadSectionIndex { index: names_index }),
@@ -426,7 +441,10 @@ impl<'a> ElfFile<'a> {
         let mut sections = Vec::new();
         sections
             .try_reserve_exact(raw_sections.len())
-            .map_err(|_| ElfError::Allocation { what: "sections", count: raw_sections.len() as u64 })?;
+            .map_err(|_| ElfError::Allocation {
+                what: "sections",
+                count: raw_sections.len() as u64,
+            })?;
         for raw in &raw_sections {
             let name = names.cstr(raw.name as usize, MAX_NAME_BYTES).unwrap_or(&[]);
             sections.push(ElfSection {
@@ -443,20 +461,43 @@ impl<'a> ElfFile<'a> {
         }
         let program_count = header.program_count.min(MAX_PROGRAM_HEADERS);
         if program_count > 0 && usize::from(header.program_entry_size) < sizes.program {
-            return Err(ElfError::BadEntrySize { what: "program header", size: u64::from(header.program_entry_size) });
+            return Err(ElfError::BadEntrySize {
+                what: "program header",
+                size: u64::from(header.program_entry_size),
+            });
         }
         let mut program_headers = Vec::new();
         program_headers
             .try_reserve_exact(usize::from(program_count))
-            .map_err(|_| ElfError::Allocation { what: "program headers", count: u64::from(program_count) })?;
+            .map_err(|_| ElfError::Allocation {
+                what: "program headers",
+                count: u64::from(program_count),
+            })?;
         for index in 0..u64::from(program_count) {
-            let at = nth(header.program_offset, index, u64::from(header.program_entry_size))
-                .and_then(|at| usize::try_from(at).ok())
-                .ok_or(ElfError::TooMany { what: "program headers", count: u64::from(program_count) })?;
-            let raw = bytes.sub(at, sizes.program).map_err(|source| short("program header", source))?;
-            program_headers.push(decode_program_header(raw, header.class).map_err(|source| short("program header", source))?);
+            let at = nth(
+                header.program_offset,
+                index,
+                u64::from(header.program_entry_size),
+            )
+            .and_then(|at| usize::try_from(at).ok())
+            .ok_or(ElfError::TooMany {
+                what: "program headers",
+                count: u64::from(program_count),
+            })?;
+            let raw = bytes
+                .sub(at, sizes.program)
+                .map_err(|source| short("program header", source))?;
+            program_headers.push(
+                decode_program_header(raw, header.class)
+                    .map_err(|source| short("program header", source))?,
+            );
         }
-        Ok(ElfFile { bytes, class: header.class, sections, program_headers })
+        Ok(ElfFile {
+            bytes,
+            class: header.class,
+            sections,
+            program_headers,
+        })
     }
 
     /// The section table, with gABI extended numbering.
@@ -466,27 +507,39 @@ impl<'a> ElfFile<'a> {
             return Ok(Vec::new());
         }
         if usize::from(header.section_entry_size) < sizes.section {
-            return Err(ElfError::BadEntrySize { what: "section header", size: u64::from(header.section_entry_size) });
+            return Err(ElfError::BadEntrySize {
+                what: "section header",
+                size: u64::from(header.section_entry_size),
+            });
         }
         let entry = u64::from(header.section_entry_size);
         let read = |index: u64| -> Result<RawSection, ElfError> {
             let at = nth(header.section_offset, index, entry)
                 .and_then(|at| usize::try_from(at).ok())
                 .ok_or(ElfError::BadSectionIndex { index })?;
-            let raw = bytes.sub(at, sizes.section).map_err(|source| short("section header", source))?;
-            decode_section_header(raw, header.class).map_err(|source| short("section header", source))
+            let raw = bytes
+                .sub(at, sizes.section)
+                .map_err(|source| short("section header", source))?;
+            decode_section_header(raw, header.class)
+                .map_err(|source| short("section header", source))
         };
         let count = match header.section_count {
             0 => read(0)?.size,
             count => u64::from(count),
         };
         if count > MAX_SECTIONS {
-            return Err(ElfError::TooMany { what: "sections", count });
+            return Err(ElfError::TooMany {
+                what: "sections",
+                count,
+            });
         }
         let mut sections = Vec::new();
         sections
             .try_reserve_exact(count as usize)
-            .map_err(|_| ElfError::Allocation { what: "sections", count })?;
+            .map_err(|_| ElfError::Allocation {
+                what: "sections",
+                count,
+            })?;
         for index in 0..count {
             sections.push(read(index)?);
         }
@@ -506,11 +559,14 @@ impl<'a> ElfFile<'a> {
     /// The section named `name`; `.debug_x` also finds `.zdebug_x`.
     #[must_use]
     pub fn section(&self, name: &str) -> Option<&ElfSection> {
-        self.sections.iter().find(|section| section.name == name).or_else(|| {
-            let rest = name.strip_prefix(".debug")?;
-            let zdebug = format!(".zdebug{rest}");
-            self.sections.iter().find(|section| section.name == zdebug)
-        })
+        self.sections
+            .iter()
+            .find(|section| section.name == name)
+            .or_else(|| {
+                let rest = name.strip_prefix(".debug")?;
+                let zdebug = format!(".zdebug{rest}");
+                self.sections.iter().find(|section| section.name == zdebug)
+            })
     }
 
     /// A section's contents, decompressed when it is compressed.
@@ -518,30 +574,75 @@ impl<'a> ElfFile<'a> {
         if section.kind == SHT_NOBITS {
             return Ok(SectionBytes::Borrowed(&[]));
         }
-        let at = usize::try_from(section.offset).map_err(|_| short("section", ReadError::Truncated { at: usize::MAX, len: 0 }))?;
-        let len = usize::try_from(section.size).map_err(|_| short("section", ReadError::Truncated { at, len: usize::MAX }))?;
-        let raw = self.bytes.sub(at, len).map_err(|source| short("section", source))?;
+        let at = usize::try_from(section.offset).map_err(|_| {
+            short(
+                "section",
+                ReadError::Truncated {
+                    at: usize::MAX,
+                    len: 0,
+                },
+            )
+        })?;
+        let len = usize::try_from(section.size).map_err(|_| {
+            short(
+                "section",
+                ReadError::Truncated {
+                    at,
+                    len: usize::MAX,
+                },
+            )
+        })?;
+        let raw = self
+            .bytes
+            .sub(at, len)
+            .map_err(|source| short("section", source))?;
         if section.flags & SHF_COMPRESSED != 0 {
             let sizes = self.class.sizes();
-            let kind = raw.u32_le(0).map_err(|source| short("compression header", source))?;
+            let kind = raw
+                .u32_le(0)
+                .map_err(|source| short("compression header", source))?;
             let size = match self.class {
-                ElfClass::Elf32 => u64::from(raw.u32_le(4).map_err(|source| short("compression header", source))?),
-                ElfClass::Elf64 => raw.u64_le(8).map_err(|source| short("compression header", source))?,
+                ElfClass::Elf32 => u64::from(
+                    raw.u32_le(4)
+                        .map_err(|source| short("compression header", source))?,
+                ),
+                ElfClass::Elf64 => raw
+                    .u64_le(8)
+                    .map_err(|source| short("compression header", source))?,
             };
             let codec = match kind {
                 ELFCOMPRESS_ZLIB => Codec::Zlib,
                 ELFCOMPRESS_ZSTD => Codec::Zstd,
                 other => return Err(ElfError::UnknownCompression { kind: other }),
             };
-            let body = raw.tail(sizes.compression_header).map_err(|source| short("compression header", source))?;
-            return Ok(SectionBytes::Decompressed(decompress_to_vec(codec, body.as_slice(), size, MAX_SECTION_BYTES)?));
+            let body = raw
+                .tail(sizes.compression_header)
+                .map_err(|source| short("compression header", source))?;
+            return Ok(SectionBytes::Decompressed(decompress_to_vec(
+                codec,
+                body.as_slice(),
+                size,
+                MAX_SECTION_BYTES,
+            )?));
         }
         if section.name.starts_with(".zdebug") {
-            let magic = raw.array::<4>(0).map_err(|source| short(".zdebug header", source))?;
+            let magic = raw
+                .array::<4>(0)
+                .map_err(|source| short(".zdebug header", source))?;
             if &magic == b"ZLIB" {
-                let size = u64::from_be_bytes(raw.array::<8>(4).map_err(|source| short(".zdebug header", source))?);
-                let body = raw.tail(12).map_err(|source| short(".zdebug header", source))?;
-                return Ok(SectionBytes::Decompressed(decompress_to_vec(Codec::Zlib, body.as_slice(), size, MAX_SECTION_BYTES)?));
+                let size = u64::from_be_bytes(
+                    raw.array::<8>(4)
+                        .map_err(|source| short(".zdebug header", source))?,
+                );
+                let body = raw
+                    .tail(12)
+                    .map_err(|source| short(".zdebug header", source))?;
+                return Ok(SectionBytes::Decompressed(decompress_to_vec(
+                    Codec::Zlib,
+                    body.as_slice(),
+                    size,
+                    MAX_SECTION_BYTES,
+                )?));
             }
         }
         Ok(SectionBytes::Borrowed(raw.as_slice()))
@@ -549,14 +650,27 @@ impl<'a> ElfFile<'a> {
 
     /// The GNU build-id, from a note section, else from a `PT_NOTE`.
     pub fn build_id(&self) -> Result<Option<BuildId>, ElfError> {
-        for section in self.sections.iter().filter(|section| section.kind == SHT_NOTE) {
+        for section in self
+            .sections
+            .iter()
+            .filter(|section| section.kind == SHT_NOTE)
+        {
             let notes = self.section_bytes(section)?;
-            let found = find_note(Bytes::new(notes.as_slice()), note_alignment(section.align), GNU_NOTE_NAME, NT_GNU_BUILD_ID);
+            let found = find_note(
+                Bytes::new(notes.as_slice()),
+                note_alignment(section.align),
+                GNU_NOTE_NAME,
+                NT_GNU_BUILD_ID,
+            );
             if let Some(id) = found.and_then(build_id_of) {
                 return Ok(Some(id));
             }
         }
-        for segment in self.program_headers.iter().filter(|segment| segment.kind == PT_NOTE) {
+        for segment in self
+            .program_headers
+            .iter()
+            .filter(|segment| segment.kind == PT_NOTE)
+        {
             let Ok(at) = usize::try_from(segment.offset) else {
                 continue;
             };
@@ -566,7 +680,14 @@ impl<'a> ElfFile<'a> {
             let Ok(notes) = self.bytes.sub(at, len) else {
                 continue;
             };
-            if let Some(id) = find_note(notes, note_alignment(segment.align), GNU_NOTE_NAME, NT_GNU_BUILD_ID).and_then(build_id_of) {
+            if let Some(id) = find_note(
+                notes,
+                note_alignment(segment.align),
+                GNU_NOTE_NAME,
+                NT_GNU_BUILD_ID,
+            )
+            .and_then(build_id_of)
+            {
                 return Ok(Some(id));
             }
         }
@@ -580,14 +701,21 @@ impl<'a> ElfFile<'a> {
         };
         let bytes = self.section_bytes(section)?;
         let link = Bytes::new(bytes.as_slice());
-        let path = link.cstr(0, MAX_NAME_BYTES).map_err(|source| short(".gnu_debugaltlink", source))?;
-        let rest = link.tail(path.len().saturating_add(1)).map_err(|source| short(".gnu_debugaltlink", source))?;
+        let path = link
+            .cstr(0, MAX_NAME_BYTES)
+            .map_err(|source| short(".gnu_debugaltlink", source))?;
+        let rest = link
+            .tail(path.len().saturating_add(1))
+            .map_err(|source| short(".gnu_debugaltlink", source))?;
         let Some(build_id) = build_id_of(rest.as_slice()) else {
             return Ok(None);
         };
         let path = String::from_utf8_lossy(path);
         let file_name = path.rsplit('/').next().unwrap_or(&path).to_owned();
-        Ok(Some(AltLink { file_name, build_id }))
+        Ok(Some(AltLink {
+            file_name,
+            build_id,
+        }))
     }
 
     /// Every defined function and data symbol of `.symtab`, else of
@@ -597,19 +725,28 @@ impl<'a> ElfFile<'a> {
             .sections
             .iter()
             .find(|section| section.kind == SHT_SYMTAB)
-            .or_else(|| self.sections.iter().find(|section| section.kind == SHT_DYNSYM));
+            .or_else(|| {
+                self.sections
+                    .iter()
+                    .find(|section| section.kind == SHT_DYNSYM)
+            });
         let Some(table) = table else {
             return Ok(Vec::new());
         };
         let entry = (self.class.sizes().symbol as u64).max(table.entry_size);
         let count = table.size.checked_div(entry).unwrap_or(0);
         if count > MAX_SYMBOLS {
-            return Err(ElfError::TooMany { what: "symbols", count });
+            return Err(ElfError::TooMany {
+                what: "symbols",
+                count,
+            });
         }
-        let strings_section = self
-            .sections
-            .get(table.link as usize)
-            .ok_or(ElfError::BadSectionIndex { index: u64::from(table.link) })?;
+        let strings_section =
+            self.sections
+                .get(table.link as usize)
+                .ok_or(ElfError::BadSectionIndex {
+                    index: u64::from(table.link),
+                })?;
         let strings_bytes = self.section_bytes(strings_section)?;
         let strings = Bytes::new(strings_bytes.as_slice());
         let entries_bytes = self.section_bytes(table)?;
@@ -617,11 +754,23 @@ impl<'a> ElfFile<'a> {
         let mut symbols = Vec::new();
         symbols
             .try_reserve(count as usize)
-            .map_err(|_| ElfError::Allocation { what: "symbols", count })?;
+            .map_err(|_| ElfError::Allocation {
+                what: "symbols",
+                count,
+            })?;
         for index in 0..count {
-            let at = index.checked_mul(entry).and_then(|at| usize::try_from(at).ok()).ok_or(ElfError::TooMany { what: "symbols", count })?;
-            let raw = entries.sub(at, self.class.sizes().symbol).map_err(|source| short("symbol", source))?;
-            let symbol = decode_symbol(raw, self.class).map_err(|source| short("symbol", source))?;
+            let at = index
+                .checked_mul(entry)
+                .and_then(|at| usize::try_from(at).ok())
+                .ok_or(ElfError::TooMany {
+                    what: "symbols",
+                    count,
+                })?;
+            let raw = entries
+                .sub(at, self.class.sizes().symbol)
+                .map_err(|source| short("symbol", source))?;
+            let symbol =
+                decode_symbol(raw, self.class).map_err(|source| short("symbol", source))?;
             let kind = match symbol.info & 0x0F {
                 STT_FUNC => SymbolKind::Function,
                 STT_OBJECT => SymbolKind::Object,
@@ -630,7 +779,9 @@ impl<'a> ElfFile<'a> {
             if symbol.section == SHN_UNDEF || symbol.value == 0 {
                 continue;
             }
-            let name = strings.cstr(symbol.name as usize, MAX_NAME_BYTES).unwrap_or(&[]);
+            let name = strings
+                .cstr(symbol.name as usize, MAX_NAME_BYTES)
+                .unwrap_or(&[]);
             if name.is_empty() {
                 continue;
             }
@@ -678,7 +829,10 @@ impl ElfImageIdentity {
     /// ELF file without one cannot be matched to its debug information.
     #[must_use]
     pub fn module_identity(&self, file_name: String) -> Option<ModuleIdentity> {
-        self.build_id.clone().map(|build_id| ModuleIdentity::Elf { file_name, build_id })
+        self.build_id.clone().map(|build_id| ModuleIdentity::Elf {
+            file_name,
+            build_id,
+        })
     }
 }
 
@@ -690,7 +844,11 @@ pub enum ElfImageError {
     #[error("the ELF headers do not parse: {0}")]
     Headers(ElfError),
     #[error("the {what} ({len} bytes at RVA {:#x}) did not read", rva.0)]
-    Unreadable { what: &'static str, rva: Rva, len: usize },
+    Unreadable {
+        what: &'static str,
+        rva: Rva,
+        len: usize,
+    },
     #[error("the image has no PT_LOAD segment")]
     NoLoadSegment,
     #[error("the build-id note ({len} bytes at RVA {:#x}) did not read", rva.0)]
@@ -711,7 +869,11 @@ where
     match read(Rva(0), &mut first) {
         ImageRead::Read => {}
         ImageRead::Unreadable => {
-            return Err(ElfImageError::Unreadable { what: "ELF header", rva: Rva(0), len: ELF_HEADER_READ })
+            return Err(ElfImageError::Unreadable {
+                what: "ELF header",
+                rva: Rva(0),
+                len: ELF_HEADER_READ,
+            });
         }
     }
     let header = match decode_header(Bytes::new(&first)) {
@@ -726,14 +888,25 @@ where
         .try_reserve_exact(usize::from(count))
         .map_err(|_| ElfImageError::Allocation { count })?;
     for index in 0..u64::from(count) {
-        let at = nth(header.program_offset, index, u64::from(header.program_entry_size))
-            .ok_or(ElfImageError::Headers(ElfError::TooMany { what: "program headers", count: u64::from(count) }))?;
+        let at = nth(
+            header.program_offset,
+            index,
+            u64::from(header.program_entry_size),
+        )
+        .ok_or(ElfImageError::Headers(ElfError::TooMany {
+            what: "program headers",
+            count: u64::from(count),
+        }))?;
         let mut raw = [0u8; 56];
         let part = raw.get_mut(..sizes.program).unwrap_or(&mut []);
         match read(Rva(at), part) {
             ImageRead::Read => {}
             ImageRead::Unreadable => {
-                return Err(ElfImageError::Unreadable { what: "program header", rva: Rva(at), len: sizes.program })
+                return Err(ElfImageError::Unreadable {
+                    what: "program header",
+                    rva: Rva(at),
+                    len: sizes.program,
+                });
             }
         }
         let decoded = decode_program_header(Bytes::new(part), header.class)
@@ -741,32 +914,54 @@ where
         program_headers.push(decoded);
     }
     let link_base = link_base(&program_headers).ok_or(ElfImageError::NoLoadSegment)?;
-    for segment in program_headers.iter().filter(|segment| segment.kind == PT_NOTE) {
+    for segment in program_headers
+        .iter()
+        .filter(|segment| segment.kind == PT_NOTE)
+    {
         let rva = Rva(segment.address.wrapping_sub(link_base));
-        let len = usize::try_from(segment.file_size).map_or(MAX_NOTE_BYTES, |len| len.min(MAX_NOTE_BYTES));
+        let len = usize::try_from(segment.file_size)
+            .map_or(MAX_NOTE_BYTES, |len| len.min(MAX_NOTE_BYTES));
         let mut raw = [0u8; MAX_NOTE_BYTES];
         let notes = raw.get_mut(..len).unwrap_or(&mut []);
         match read(rva, notes) {
             ImageRead::Read => {}
             ImageRead::Unreadable => return Err(ElfImageError::NoteUnreadable { rva, len }),
         }
-        if let Some(id) = find_note(Bytes::new(notes), note_alignment(segment.align), GNU_NOTE_NAME, NT_GNU_BUILD_ID).and_then(build_id_of) {
-            return Ok(ElfImageIdentity { build_id: Some(id), link_base });
+        if let Some(id) = find_note(
+            Bytes::new(notes),
+            note_alignment(segment.align),
+            GNU_NOTE_NAME,
+            NT_GNU_BUILD_ID,
+        )
+        .and_then(build_id_of)
+        {
+            return Ok(ElfImageIdentity {
+                build_id: Some(id),
+                link_base,
+            });
         }
     }
-    Ok(ElfImageIdentity { build_id: None, link_base })
+    Ok(ElfImageIdentity {
+        build_id: None,
+        link_base,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box_symbols_fixtures::compress::sample_text;
     use rusty_box_symbols_fixtures::elf::{
-        build_elf, load_image, ElfSpec, Encoding, ExtraSection, BUILD_ID, FUNC_LEN, TEXT_RVA,
+        BUILD_ID, ElfSpec, Encoding, ExtraSection, FUNC_LEN, TEXT_RVA, build_elf, load_image,
     };
 
+    use super::*;
+
     fn info_section(encoding: Encoding) -> ExtraSection {
-        ExtraSection { name: ".debug_info".to_owned(), data: sample_text(20_000), encoding }
+        ExtraSection {
+            name: ".debug_info".to_owned(),
+            data: sample_text(20_000),
+            encoding,
+        }
     }
 
     /// Reads a loaded image whose `None` bytes are paged out.
@@ -789,7 +984,11 @@ mod tests {
         for spec in [ElfSpec::pie(), ElfSpec::exec(), ElfSpec::pie32()] {
             let bytes = build_elf(spec, &[]);
             let file = ElfFile::parse(&bytes).unwrap();
-            assert_eq!(file.build_id().unwrap(), Some(BuildId(BUILD_ID.to_vec())), "{spec:?}");
+            assert_eq!(
+                file.build_id().unwrap(),
+                Some(BuildId(BUILD_ID.to_vec())),
+                "{spec:?}"
+            );
             assert_eq!(file.link_base(), spec.link_base, "{spec:?}");
             let symbols = file.symbols().unwrap();
             let names: Vec<&str> = symbols.iter().map(|symbol| symbol.name.as_str()).collect();
@@ -803,12 +1002,23 @@ mod tests {
     #[test]
     fn compressed_sections_read_as_their_plain_bytes() {
         let plain = sample_text(20_000);
-        for encoding in [Encoding::Plain, Encoding::Zlib, Encoding::Zstd, Encoding::Zdebug] {
+        for encoding in [
+            Encoding::Plain,
+            Encoding::Zlib,
+            Encoding::Zstd,
+            Encoding::Zdebug,
+        ] {
             for spec in [ElfSpec::pie(), ElfSpec::pie32()] {
                 let bytes = build_elf(spec, &[info_section(encoding)]);
                 let file = ElfFile::parse(&bytes).unwrap();
-                let section = file.section(".debug_info").expect("found by its plain name");
-                assert_eq!(file.section_bytes(section).unwrap().as_slice(), plain.as_slice(), "{encoding:?} {spec:?}");
+                let section = file
+                    .section(".debug_info")
+                    .expect("found by its plain name");
+                assert_eq!(
+                    file.section_bytes(section).unwrap().as_slice(),
+                    plain.as_slice(),
+                    "{encoding:?} {spec:?}"
+                );
             }
         }
     }
@@ -817,12 +1027,19 @@ mod tests {
     fn a_debugaltlink_names_its_supplement() {
         let mut data = b"/usr/lib/debug/.dwz/x86_64-redhat-linux-gnu/foo.debug\0".to_vec();
         data.extend_from_slice(&[0xAB; 20]);
-        let section = ExtraSection { name: ".gnu_debugaltlink".to_owned(), data, encoding: Encoding::Plain };
+        let section = ExtraSection {
+            name: ".gnu_debugaltlink".to_owned(),
+            data,
+            encoding: Encoding::Plain,
+        };
         let bytes = build_elf(ElfSpec::pie(), &[section]);
         let file = ElfFile::parse(&bytes).unwrap();
         assert_eq!(
             file.alt_link().unwrap(),
-            Some(AltLink { file_name: "foo.debug".to_owned(), build_id: BuildId(vec![0xAB; 20]) })
+            Some(AltLink {
+                file_name: "foo.debug".to_owned(),
+                build_id: BuildId(vec![0xAB; 20])
+            })
         );
     }
 
@@ -831,8 +1048,14 @@ mod tests {
         let mut bytes = build_elf(ElfSpec::pie(), &[]);
         bytes[5] = 2;
         assert!(matches!(ElfFile::parse(&bytes), Err(ElfError::BigEndian)));
-        assert!(matches!(ElfFile::parse(b"MZ\x90\x00"), Err(ElfError::NotElf)));
-        assert!(matches!(ElfFile::parse(b"\x7FELF"), Err(ElfError::Short { .. })));
+        assert!(matches!(
+            ElfFile::parse(b"MZ\x90\x00"),
+            Err(ElfError::NotElf)
+        ));
+        assert!(matches!(
+            ElfFile::parse(b"\x7FELF"),
+            Err(ElfError::Short { .. })
+        ));
     }
 
     #[test]
@@ -840,7 +1063,10 @@ mod tests {
         let mut bytes = build_elf(ElfSpec::pie(), &[]);
         // e_shoff (64-bit, offset 40) far past the file.
         bytes[40..48].copy_from_slice(&0x7FFF_FFFF_0000u64.to_le_bytes());
-        assert!(matches!(ElfFile::parse(&bytes), Err(ElfError::Short { .. })));
+        assert!(matches!(
+            ElfFile::parse(&bytes),
+            Err(ElfError::Short { .. })
+        ));
     }
 
     #[test]
@@ -848,12 +1074,21 @@ mod tests {
         for spec in [ElfSpec::pie(), ElfSpec::exec(), ElfSpec::pie32()] {
             let bytes = build_elf(spec, &[]);
             let image = load_image(&bytes, spec.link_base);
-            let identity = identity_from_image(&mut |rva, buf: &mut [u8]| read_image(&image, rva, buf)).unwrap();
-            assert_eq!(identity.build_id, Some(BuildId(BUILD_ID.to_vec())), "{spec:?}");
+            let identity =
+                identity_from_image(&mut |rva, buf: &mut [u8]| read_image(&image, rva, buf))
+                    .unwrap();
+            assert_eq!(
+                identity.build_id,
+                Some(BuildId(BUILD_ID.to_vec())),
+                "{spec:?}"
+            );
             assert_eq!(identity.link_base, spec.link_base, "{spec:?}");
             assert_eq!(
                 identity.module_identity("widget".to_owned()),
-                Some(ModuleIdentity::Elf { file_name: "widget".to_owned(), build_id: BuildId(BUILD_ID.to_vec()) })
+                Some(ModuleIdentity::Elf {
+                    file_name: "widget".to_owned(),
+                    build_id: BuildId(BUILD_ID.to_vec())
+                })
             );
         }
     }
@@ -862,7 +1097,11 @@ mod tests {
     fn a_paged_out_note_is_reported_not_guessed() {
         let bytes = build_elf(ElfSpec::pie(), &[]);
         let mut image = load_image(&bytes, 0);
-        let note = ElfFile::parse(&bytes).unwrap().section(".note.gnu.build-id").unwrap().offset as usize;
+        let note = ElfFile::parse(&bytes)
+            .unwrap()
+            .section(".note.gnu.build-id")
+            .unwrap()
+            .offset as usize;
         image[note] = None;
         assert!(matches!(
             identity_from_image(&mut |rva, buf: &mut [u8]| read_image(&image, rva, buf)),

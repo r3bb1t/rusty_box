@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use crate::source_path;
-use crate::tables::{push, LineRow, ParseError, ResolvedLine, SourceFile};
+use crate::tables::{LineRow, ParseError, ResolvedLine, SourceFile, push};
 use crate::units::Rva;
 
 /// A function's code, `start..end` in RVAs.
@@ -53,53 +53,97 @@ struct LineKey {
 
 /// The span holding `at`, of spans sorted by start.
 fn containing(functions: &[CodeSpan], at: u64) -> Option<usize> {
-    let place = functions.partition_point(|span| span.start <= at).checked_sub(1)?;
-    functions.get(place).filter(|span| at < span.end).map(|_| place)
+    let place = functions
+        .partition_point(|span| span.start <= at)
+        .checked_sub(1)?;
+    functions
+        .get(place)
+        .filter(|span| at < span.end)
+        .map(|_| place)
 }
 
 fn line_key(rows: &[LineRow], place: usize) -> LineKey {
     rows.get(place).map_or(
-        LineKey { at: FileLine { file: usize::MAX, line: u32::MAX }, start: Rva(u64::MAX) },
-        |row| LineKey { at: FileLine { file: row.file, line: row.line }, start: row.start },
+        LineKey {
+            at: FileLine {
+                file: usize::MAX,
+                line: u32::MAX,
+            },
+            start: Rva(u64::MAX),
+        },
+        |row| LineKey {
+            at: FileLine {
+                file: row.file,
+                line: row.line,
+            },
+            start: row.start,
+        },
     )
 }
 
 impl LineIndex {
     /// Indexes `rows` (a row that covers no bytes is left out) against
     /// `functions`, sorted by start.
-    pub(crate) fn build(mut rows: Vec<LineRow>, functions: &[CodeSpan]) -> Result<LineIndex, ParseError> {
+    pub(crate) fn build(
+        mut rows: Vec<LineRow>,
+        functions: &[CodeSpan],
+    ) -> Result<LineIndex, ParseError> {
         rows.retain(|row| row.start < row.end);
         rows.sort_unstable_by(|a, b| {
-            a.start.cmp(&b.start).then(a.end.cmp(&b.end)).then(a.file.cmp(&b.file)).then(a.line.cmp(&b.line))
+            a.start
+                .cmp(&b.start)
+                .then(a.end.cmp(&b.end))
+                .then(a.file.cmp(&b.file))
+                .then(a.line.cmp(&b.line))
         });
         let mut by_line = Vec::new();
-        by_line.try_reserve_exact(rows.len()).map_err(|_| ParseError::Allocation { what: "line index" })?;
+        by_line
+            .try_reserve_exact(rows.len())
+            .map_err(|_| ParseError::Allocation { what: "line index" })?;
         by_line.extend(0..rows.len());
         by_line.sort_unstable_by_key(|place| line_key(&rows, *place));
         let mut function_of = Vec::new();
-        function_of.try_reserve_exact(rows.len()).map_err(|_| ParseError::Allocation { what: "line index" })?;
+        function_of
+            .try_reserve_exact(rows.len())
+            .map_err(|_| ParseError::Allocation { what: "line index" })?;
         let mut first_line = BTreeMap::new();
         for row in &rows {
             let function = containing(functions, row.start.0);
             function_of.push(function);
             if let Some(function) = function {
                 first_line
-                    .entry(FunctionInFile { file: row.file, function })
+                    .entry(FunctionInFile {
+                        file: row.file,
+                        function,
+                    })
                     .and_modify(|least: &mut u32| *least = (*least).min(row.line))
                     .or_insert(row.line);
             }
         }
-        Ok(LineIndex { rows, by_line, function_of, first_line })
+        Ok(LineIndex {
+            rows,
+            by_line,
+            function_of,
+            first_line,
+        })
     }
 
     /// The row whose code holds `rva`.
     pub(crate) fn line_at(&self, rva: Rva) -> Option<LineRow> {
-        let place = self.rows.partition_point(|row| row.start <= rva).checked_sub(1)?;
+        let place = self
+            .rows
+            .partition_point(|row| row.start <= rva)
+            .checked_sub(1)?;
         self.rows.get(place).filter(|row| rva < row.end).copied()
     }
 
     /// Line `line` of each of `files` whose path ends with `file`.
-    pub(crate) fn lines_of(&self, files: &[SourceFile], file: &str, line: u32) -> Vec<ResolvedLine> {
+    pub(crate) fn lines_of(
+        &self,
+        files: &[SourceFile],
+        file: &str,
+        line: u32,
+    ) -> Vec<ResolvedLine> {
         let mut answers = Vec::new();
         for (index, source) in files.iter().enumerate() {
             if !source_path::ends_with(&source.path, file) {
@@ -117,13 +161,16 @@ impl LineIndex {
 
     /// The lines of file `file` that have code, ascending, each once.
     pub(crate) fn code_lines(&self, file: usize) -> Vec<u32> {
-        let from = self.by_line.partition_point(|place| line_key(&self.rows, *place).at.file < file);
+        let from = self
+            .by_line
+            .partition_point(|place| line_key(&self.rows, *place).at.file < file);
         let mut lines: Vec<u32> = Vec::new();
         for place in self.by_line.get(from..).unwrap_or_default() {
             let Some(row) = self.rows.get(*place).filter(|row| row.file == file) else {
                 break;
             };
-            if lines.last() != Some(&row.line) && push(&mut lines, row.line, "code lines").is_err() {
+            if lines.last() != Some(&row.line) && push(&mut lines, row.line, "code lines").is_err()
+            {
                 break;
             }
         }
@@ -132,8 +179,12 @@ impl LineIndex {
 
     /// Where in `by_line` the rows of `at` begin, and where they end.
     fn places_of(&self, at: FileLine) -> core::ops::Range<usize> {
-        let from = self.by_line.partition_point(|place| line_key(&self.rows, *place).at < at);
-        let to = self.by_line.partition_point(|place| line_key(&self.rows, *place).at <= at);
+        let from = self
+            .by_line
+            .partition_point(|place| line_key(&self.rows, *place).at < at);
+        let to = self
+            .by_line
+            .partition_point(|place| line_key(&self.rows, *place).at <= at);
         from..to
     }
 
@@ -148,7 +199,10 @@ impl LineIndex {
         let past = places.end;
         if !places.is_empty() {
             let every = |_: Option<usize>| true;
-            return Some(ResolvedLine { line, ranges: self.rows_at(self.by_line.get(places)?, &every) });
+            return Some(ResolvedLine {
+                line,
+                ranges: self.rows_at(self.by_line.get(places)?, &every),
+            });
         }
         // No code on the line: the next line with code in a function whose
         // rows in this file begin before it.
@@ -200,11 +254,19 @@ mod tests {
     use super::*;
 
     fn row(start: u64, end: u64, file: usize, line: u32) -> LineRow {
-        LineRow { start: Rva(start), end: Rva(end), file, line }
+        LineRow {
+            start: Rva(start),
+            end: Rva(end),
+            file,
+            line,
+        }
     }
 
     fn file(path: &str) -> SourceFile {
-        SourceFile { path: path.to_owned(), checksum: None }
+        SourceFile {
+            path: path.to_owned(),
+            checksum: None,
+        }
     }
 
     /// `first` holds lines 10 to 20 of a.c, `second` lines 30 to 40.
@@ -215,7 +277,20 @@ mod tests {
             row(0x200, 0x208, 0, 30),
             row(0x208, 0x210, 0, 40),
         ];
-        LineIndex::build(rows, &[CodeSpan { start: 0x100, end: 0x110 }, CodeSpan { start: 0x200, end: 0x210 }]).unwrap()
+        LineIndex::build(
+            rows,
+            &[
+                CodeSpan {
+                    start: 0x100,
+                    end: 0x110,
+                },
+                CodeSpan {
+                    start: 0x200,
+                    end: 0x210,
+                },
+            ],
+        )
+        .unwrap()
     }
 
     #[test]
@@ -225,32 +300,61 @@ mod tests {
         assert_eq!(index.lines_of(&files, "a.c", 25), []);
         assert_eq!(
             index.lines_of(&files, "a.c", 35),
-            [ResolvedLine { line: 40, ranges: vec![row(0x208, 0x210, 0, 40)] }]
+            [ResolvedLine {
+                line: 40,
+                ranges: vec![row(0x208, 0x210, 0, 40)]
+            }]
         );
-        assert_eq!(index.lines_of(&files, "a.c", 15), [ResolvedLine { line: 20, ranges: vec![row(0x108, 0x110, 0, 20)] }]);
+        assert_eq!(
+            index.lines_of(&files, "a.c", 15),
+            [ResolvedLine {
+                line: 20,
+                ranges: vec![row(0x108, 0x110, 0, 20)]
+            }]
+        );
     }
 
     #[test]
     fn a_row_that_covers_no_code_is_left_out() {
-        let index = LineIndex::build(vec![row(0x100, 0x100, 0, 9), row(0x100, 0x108, 0, 10)], &[]).unwrap();
+        let index =
+            LineIndex::build(vec![row(0x100, 0x100, 0, 9), row(0x100, 0x108, 0, 10)], &[]).unwrap();
         assert_eq!(index.line_at(Rva(0x100)), Some(row(0x100, 0x108, 0, 10)));
-        assert_eq!(index.lines_of(&[file("a.c")], "a.c", 9), [], "no function holds it, so nothing resolves");
+        assert_eq!(
+            index.lines_of(&[file("a.c")], "a.c", 9),
+            [],
+            "no function holds it, so nothing resolves"
+        );
     }
 
     /// Rows outside every function are found by address and by their own
     /// line, but a line without code near them resolves to nothing.
     #[test]
     fn rows_outside_functions_answer_only_their_own_line() {
-        let index = LineIndex::build(vec![row(0x100, 0x108, 0, 10), row(0x108, 0x110, 0, 12)], &[]).unwrap();
+        let index = LineIndex::build(
+            vec![row(0x100, 0x108, 0, 10), row(0x108, 0x110, 0, 12)],
+            &[],
+        )
+        .unwrap();
         let files = [file("a.c")];
-        assert_eq!(index.lines_of(&files, "a.c", 12), [ResolvedLine { line: 12, ranges: vec![row(0x108, 0x110, 0, 12)] }]);
+        assert_eq!(
+            index.lines_of(&files, "a.c", 12),
+            [ResolvedLine {
+                line: 12,
+                ranges: vec![row(0x108, 0x110, 0, 12)]
+            }]
+        );
         assert_eq!(index.lines_of(&files, "a.c", 11), []);
     }
 
     #[test]
     fn a_files_lines_with_code_are_listed_once_each() {
         let index = LineIndex::build(
-            vec![row(0x100, 0x108, 0, 10), row(0x108, 0x110, 1, 3), row(0x110, 0x118, 0, 12), row(0x200, 0x208, 0, 10)],
+            vec![
+                row(0x100, 0x108, 0, 10),
+                row(0x108, 0x110, 1, 3),
+                row(0x110, 0x118, 0, 12),
+                row(0x200, 0x208, 0, 10),
+            ],
             &[],
         )
         .unwrap();
@@ -264,7 +368,10 @@ mod tests {
         let index = LineIndex::build(vec![row(0x100, 0x108, 0, u32::MAX)], &[]).unwrap();
         assert_eq!(
             index.lines_of(&[file("a.c")], "a.c", u32::MAX),
-            [ResolvedLine { line: u32::MAX, ranges: vec![row(0x100, 0x108, 0, u32::MAX)] }]
+            [ResolvedLine {
+                line: u32::MAX,
+                ranges: vec![row(0x100, 0x108, 0, u32::MAX)]
+            }]
         );
     }
 }

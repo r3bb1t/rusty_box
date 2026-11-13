@@ -135,9 +135,18 @@ pub fn pe64_file(spec: &Pe64Spec) -> Vec<u8> {
     put32(&mut file, opt + 60, PE64_HEADERS);
     put32(&mut file, opt + 108, 16);
     let directories = [
-        DirectorySlot { index: 3, directory: spec.exception },
-        DirectorySlot { index: 5, directory: spec.base_relocations },
-        DirectorySlot { index: 12, directory: spec.import_address_table },
+        DirectorySlot {
+            index: 3,
+            directory: spec.exception,
+        },
+        DirectorySlot {
+            index: 5,
+            directory: spec.base_relocations,
+        },
+        DirectorySlot {
+            index: 12,
+            directory: spec.import_address_table,
+        },
     ];
     for slot in directories {
         if let Some(directory) = slot.directory {
@@ -207,8 +216,16 @@ pub fn pe32_file(codeview: &[u8]) -> Vec<u8> {
     put32(&mut file, opt + 96 + 52, 28);
     let table = opt + 224;
     let sections = [
-        FileSection { name: b".text", rva: 0x1000, raw: 0x400 },
-        FileSection { name: b".rdata", rva: 0x2000, raw: 0x600 },
+        FileSection {
+            name: b".text",
+            rva: 0x1000,
+            raw: 0x400,
+        },
+        FileSection {
+            name: b".rdata",
+            rva: 0x2000,
+            raw: 0x600,
+        },
     ];
     for (index, section) in sections.iter().enumerate() {
         let at = table + index * 40;

@@ -22,10 +22,10 @@ use std::vec::Vec;
 
 use rusty_box_core::{ClockHz, VmClock};
 
-use super::{predecode, Op};
+use super::{Op, predecode};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::cpu::decode::classify;
-use crate::cpu::exec::{cond_holds, Nzcv};
+use crate::cpu::exec::{Nzcv, cond_holds};
 use crate::cpu::features::{Feature, Features};
 use crate::cpu::state::fpcr_mask;
 use crate::cpu::{Cpu, CpuConfig, CpuModel, El, NoEl2, Pstate};

@@ -153,11 +153,9 @@ pub mod snapshot;
 
 // Re-export commonly used types
 pub use cpu::CpuidFreq;
+pub use emulator::{Emulator, EmulatorConfig};
 /// The guest-physical map and the vocabulary it is written in. The window
 /// types come from the core crate because a permission on guest memory means
 /// the same thing to every execution engine; the derivation is this machine's.
 pub use memory::plan::{MemoryPlan, MemoryPlanError};
-pub use rusty_box_core::{GpaPerms, GpaPlan, GpaPlanError, GpaWindow, HostOffset, GUEST_PAGE};
-
-pub use emulator::Emulator;
-pub use emulator::EmulatorConfig;
+pub use rusty_box_core::{GUEST_PAGE, GpaPerms, GpaPlan, GpaPlanError, GpaWindow, HostOffset};

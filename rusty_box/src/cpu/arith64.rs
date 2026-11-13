@@ -30,8 +30,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.oszapc.set_oszapc_add_64(op1, op2, res);
     }
 
-
-
     /// SET_FLAGS_OSZAP_ADD_64: update OSZAP flags only (no CF) after a 64-bit add.
     /// Used by INC which must preserve CF.
     fn update_flags_oszap_add64(&mut self, op1: u64, op2: u64, res: u64) {

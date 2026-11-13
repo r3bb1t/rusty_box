@@ -19,7 +19,13 @@ pub enum PointerButton {
 }
 
 impl PointerButton {
-    pub const ALL: [PointerButton; 5] = [Self::Left, Self::Right, Self::Middle, Self::Side, Self::Extra];
+    pub const ALL: [PointerButton; 5] = [
+        Self::Left,
+        Self::Right,
+        Self::Middle,
+        Self::Side,
+        Self::Extra,
+    ];
 }
 
 /// A point on the guest's screen as a fraction of its width and height,
@@ -100,11 +106,26 @@ mod tests {
     /// `qemu_input_scale_axis`), on the whole 16-bit range.
     #[test]
     fn pixels_scale_as_qemu_scales_them() {
-        assert_eq!(PointerPos::from_pixel(0, 0, 1280, 800), PointerPos::new(0, 0));
-        assert_eq!(PointerPos::from_pixel(1280, 800, 1280, 800), PointerPos::new(0xFFFF, 0xFFFF));
-        assert_eq!(PointerPos::from_pixel(640, 400, 1280, 800), PointerPos::new(0x7FFF, 0x7FFF));
-        assert_eq!(PointerPos::from_pixel(5000, 5000, 1280, 800), PointerPos::new(0xFFFF, 0xFFFF));
-        assert_eq!(PointerPos::from_pixel(3, 3, 0, 0), PointerPos::new(0x7FFF, 0x7FFF));
+        assert_eq!(
+            PointerPos::from_pixel(0, 0, 1280, 800),
+            PointerPos::new(0, 0)
+        );
+        assert_eq!(
+            PointerPos::from_pixel(1280, 800, 1280, 800),
+            PointerPos::new(0xFFFF, 0xFFFF)
+        );
+        assert_eq!(
+            PointerPos::from_pixel(640, 400, 1280, 800),
+            PointerPos::new(0x7FFF, 0x7FFF)
+        );
+        assert_eq!(
+            PointerPos::from_pixel(5000, 5000, 1280, 800),
+            PointerPos::new(0xFFFF, 0xFFFF)
+        );
+        assert_eq!(
+            PointerPos::from_pixel(3, 3, 0, 0),
+            PointerPos::new(0x7FFF, 0x7FFF)
+        );
         assert_eq!(PointerPos::new(0xFFFF, 1).x(), PointerPos::MAX);
     }
 }

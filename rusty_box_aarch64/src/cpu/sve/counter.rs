@@ -17,7 +17,7 @@ mod tests;
 
 use super::pred::WhileCompare;
 use super::{Esize, Pv};
-use crate::cpu::exec::{bit, bits, ExecResult, Flow};
+use crate::cpu::exec::{ExecResult, Flow, bit, bits};
 use crate::cpu::features::VecLen;
 use crate::cpu::{Cpu, Levels};
 

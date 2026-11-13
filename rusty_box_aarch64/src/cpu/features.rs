@@ -20,7 +20,13 @@
 //! [`Implementation`]: a feature set, the processor's identity, and the
 //! IMPLEMENTATION DEFINED choices its features leave open.
 
+use core::marker::PhantomData;
+
+use rusty_box_core::ClockHz;
+
 use super::debug::DebugPoints;
+use super::el2::Levels;
+use super::gic::GicCpuInterface;
 use super::id::{self, Caches};
 use super::impdef::ImpdefSpace;
 use super::pmu::PmuShape;
@@ -28,11 +34,6 @@ use crate::bus::PhysAddr;
 use crate::devices::gicv2::PriorityBits;
 use crate::devices::gicv3_virt::VirtualInterfaceShape;
 use crate::layout::DeviceLayout;
-use rusty_box_core::ClockHz;
-
-use super::el2::Levels;
-use super::gic::GicCpuInterface;
-use core::marker::PhantomData;
 
 /// An architectural feature, by the Arm ARM's `FEAT_` name; the instruction
 /// set features are what an encoding belongs to.
@@ -675,74 +676,6 @@ impl Feature {
 pub(crate) struct Features(u128);
 
 impl Features {
-    /// What the Cortex-A57 this crate's processor is shaped like implements,
-    /// as its TRM (DDI 0488H, 4.3.18 to 4.3.21) reports it: ARMv8.0 with
-    /// FP, Advanced SIMD, CRC32 and the optional Cryptographic Extension,
-    /// all of it (AES with the 64-bit PMULL, SHA-1 and SHA-256:
-    /// `ID_AA64ISAR0_EL1` 0x11120), the OS Double Lock
-    /// (`ID_AA64DFR0_EL1.DoubleLock` 0, its bits 63:32 being RES0), and the
-    /// 4 KiB and 64 KiB translation granules, not the 16 KiB one
-    /// (`ID_AA64MMFR0_EL1` `TGran4` 0, `TGran64` 0 and `TGran16` 0). With
-    /// EL2, stage 2 has the granules stage 1 has, there being no FEAT_GTG
-    /// (`TGran4_2`, `TGran16_2` and `TGran64_2` RES0 in the TRM, 0 being
-    /// "as stage 1"): FEAT_S2TGran64K, which a processor without EL2 drops
-    /// ([`Features::NEED_EL2`]). Its PMU is PMUv3 (`ID_AA64DFR0_EL1.PMUVer`
-    /// 1, 4.3.19; chapter 11).
-    pub(crate) const CORTEX_A57: Self = Self::of(&[
-        Feature::Base,
-        Feature::Fp,
-        Feature::AdvSimd,
-        Feature::Aes,
-        Feature::Pmull,
-        Feature::Sha1,
-        Feature::Sha256,
-        Feature::Crc32,
-        Feature::DoubleLock,
-        Feature::TGran64K,
-        Feature::S2TGran64K,
-        Feature::PmuV3,
-    ]);
-
-    /// Every feature: a set no processor implements (FEAT_DoubleLock with
-    /// FEAT_SME, for one), for what is decided once for whichever features
-    /// a processor has, such as where each register a feature brings is
-    /// encoded.
-    pub(crate) const EVERY: Self = Self::of(&Feature::ALL);
-
-    /// FEAT_EL2 in AArch64 state only (FEAT_AA64EL2 without FEAT_AA32EL2):
-    /// what a processor of the level set [`WithEl2`](super::WithEl2) adds.
-    const EL2: Self = Self(Feature::El2.bit() | Feature::Aa64El2.bit());
-
-    /// The features only a processor with EL2 has, which one of the level
-    /// set [`NoEl2`](super::NoEl2) drops with EL2: FEAT_ECV_POFF
-    /// (`(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`), the stage 2
-    /// granules (`FEAT_S2TGran16K ==> (FEAT_AA64EL2 && FEAT_TGran16K)`),
-    /// FEAT_GTG, whose `ID_AA64MMFR0_EL1` fields read 0 without EL2,
-    /// FEAT_VHE (`FEAT_VHE ==> (... && FEAT_AA64EL2)`), FEAT_XNX
-    /// (`FEAT_XNX ==> FEAT_EL2`), FEAT_S2FWB (`FEAT_S2FWB ==>
-    /// FEAT_AA64EL2`), FEAT_EVT and FEAT_EVT2, whose
-    /// `ID_AA64MMFR2_EL1.EVT` is 0 without EL2 (Arm ARM D24.2: "If EL2 is
-    /// not implemented, the only permitted value is 0b0000"), FEAT_FGT,
-    /// which needs EL2 or EL3 (`FEAT_FGT ==> (FEAT_EL2 || FEAT_EL3)`) and
-    /// this processor has no EL3, FEAT_HCX (`(FEAT_AA64 && FEAT_HCX)
-    /// ==> FEAT_AA64EL2`), and FEAT_NV (`FEAT_NV ==> FEAT_EL2`) with FEAT_NV2,
-    /// which needs it.
-    const NEED_EL2: Self = Self(
-        Feature::EcvPoff.bit()
-            | Feature::S2TGran16K.bit()
-            | Feature::S2TGran64K.bit()
-            | Feature::Gtg.bit()
-            | Feature::Vhe.bit()
-            | Feature::Xnx.bit()
-            | Feature::S2Fwb.bit()
-            | Feature::Evt.bit()
-            | Feature::Evt2.bit()
-            | Feature::Fgt.bit()
-            | Feature::Hcx.bit()
-            | Feature::Nv.bit()
-            | Feature::Nv2.bit(),
-    );
-
     /// What the Armv9.2 processor model implements: every feature Arm's
     /// `Features.json` requires of an Armv9.2 processor that has FP and
     /// Advanced SIMD and AArch64 at EL0 and EL1, and at EL2 where it has
@@ -881,6 +814,70 @@ impl Features {
         Feature::PmuV3p5,
         Feature::PmuV3p7,
     ]);
+    /// What the Cortex-A57 this crate's processor is shaped like implements,
+    /// as its TRM (DDI 0488H, 4.3.18 to 4.3.21) reports it: ARMv8.0 with
+    /// FP, Advanced SIMD, CRC32 and the optional Cryptographic Extension,
+    /// all of it (AES with the 64-bit PMULL, SHA-1 and SHA-256:
+    /// `ID_AA64ISAR0_EL1` 0x11120), the OS Double Lock
+    /// (`ID_AA64DFR0_EL1.DoubleLock` 0, its bits 63:32 being RES0), and the
+    /// 4 KiB and 64 KiB translation granules, not the 16 KiB one
+    /// (`ID_AA64MMFR0_EL1` `TGran4` 0, `TGran64` 0 and `TGran16` 0). With
+    /// EL2, stage 2 has the granules stage 1 has, there being no FEAT_GTG
+    /// (`TGran4_2`, `TGran16_2` and `TGran64_2` RES0 in the TRM, 0 being
+    /// "as stage 1"): FEAT_S2TGran64K, which a processor without EL2 drops
+    /// ([`Features::NEED_EL2`]). Its PMU is PMUv3 (`ID_AA64DFR0_EL1.PMUVer`
+    /// 1, 4.3.19; chapter 11).
+    pub(crate) const CORTEX_A57: Self = Self::of(&[
+        Feature::Base,
+        Feature::Fp,
+        Feature::AdvSimd,
+        Feature::Aes,
+        Feature::Pmull,
+        Feature::Sha1,
+        Feature::Sha256,
+        Feature::Crc32,
+        Feature::DoubleLock,
+        Feature::TGran64K,
+        Feature::S2TGran64K,
+        Feature::PmuV3,
+    ]);
+    /// FEAT_EL2 in AArch64 state only (FEAT_AA64EL2 without FEAT_AA32EL2):
+    /// what a processor of the level set [`WithEl2`](super::WithEl2) adds.
+    const EL2: Self = Self(Feature::El2.bit() | Feature::Aa64El2.bit());
+    /// Every feature: a set no processor implements (FEAT_DoubleLock with
+    /// FEAT_SME, for one), for what is decided once for whichever features
+    /// a processor has, such as where each register a feature brings is
+    /// encoded.
+    pub(crate) const EVERY: Self = Self::of(&Feature::ALL);
+    /// The features only a processor with EL2 has, which one of the level
+    /// set [`NoEl2`](super::NoEl2) drops with EL2: FEAT_ECV_POFF
+    /// (`(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`), the stage 2
+    /// granules (`FEAT_S2TGran16K ==> (FEAT_AA64EL2 && FEAT_TGran16K)`),
+    /// FEAT_GTG, whose `ID_AA64MMFR0_EL1` fields read 0 without EL2,
+    /// FEAT_VHE (`FEAT_VHE ==> (... && FEAT_AA64EL2)`), FEAT_XNX
+    /// (`FEAT_XNX ==> FEAT_EL2`), FEAT_S2FWB (`FEAT_S2FWB ==>
+    /// FEAT_AA64EL2`), FEAT_EVT and FEAT_EVT2, whose
+    /// `ID_AA64MMFR2_EL1.EVT` is 0 without EL2 (Arm ARM D24.2: "If EL2 is
+    /// not implemented, the only permitted value is 0b0000"), FEAT_FGT,
+    /// which needs EL2 or EL3 (`FEAT_FGT ==> (FEAT_EL2 || FEAT_EL3)`) and
+    /// this processor has no EL3, FEAT_HCX (`(FEAT_AA64 && FEAT_HCX)
+    /// ==> FEAT_AA64EL2`), and FEAT_NV (`FEAT_NV ==> FEAT_EL2`) with FEAT_NV2,
+    /// which needs it.
+    const NEED_EL2: Self = Self(
+        Feature::EcvPoff.bit()
+            | Feature::S2TGran16K.bit()
+            | Feature::S2TGran64K.bit()
+            | Feature::Gtg.bit()
+            | Feature::Vhe.bit()
+            | Feature::Xnx.bit()
+            | Feature::S2Fwb.bit()
+            | Feature::Evt.bit()
+            | Feature::Evt2.bit()
+            | Feature::Fgt.bit()
+            | Feature::Hcx.bit()
+            | Feature::Nv.bit()
+            | Feature::Nv2.bit(),
+    );
 
     /// The set of `features`.
     pub(crate) const fn of(features: &[Feature]) -> Self {
@@ -923,10 +920,10 @@ impl Features {
 pub(crate) struct VecLen(u16);
 
 impl VecLen {
-    /// The shortest length: 128 bits.
-    pub(crate) const MIN: Self = Self(128);
     /// `MAX_VL`, the architecture's longest vector: 2048 bits.
     pub(crate) const MAX: Self = Self(2048);
+    /// The shortest length: 128 bits.
+    pub(crate) const MIN: Self = Self(128);
 
     #[inline]
     pub(crate) const fn bits(self) -> u32 {
@@ -995,6 +992,22 @@ pub(crate) struct Implementation {
 }
 
 impl Implementation {
+    /// The Armv9.2 processor model: [`Features::ARMV9P2`], a software
+    /// model's `MIDR_EL1`, Streaming SVE vectors of up to 512 bits, the
+    /// counter Armv8.6 and later require, caches of the board's own, the
+    /// fewest breakpoints and watchpoints Arm permits, a PMU of the
+    /// board's own, and no IMPLEMENTATION DEFINED registers.
+    pub(crate) const ARMV9P2: Self = Self {
+        features: Features::ARMV9P2,
+        midr: id::MIDR_SOFTWARE_MODEL,
+        max_svl: VecLen(512),
+        counter_hz: SYSTEM_COUNTER_HZ,
+        caches: Caches::ARMV9P2,
+        debug: DebugPoints::ARMV9P2,
+        pmu: PmuShape::ARMV9P2,
+        impdef: ImpdefSpace::Empty,
+        gic: GicCpuInterface::Absent,
+    };
     /// The Cortex-A57 shape: [`Features::CORTEX_A57`] and the Cortex-A57's
     /// `MIDR_EL1`, with no streaming vector length to choose, the board's
     /// 1 GHz counter, and the Cortex-A57's caches, breakpoints, watchpoints,
@@ -1039,23 +1052,6 @@ impl Implementation {
             ..self
         }
     }
-
-    /// The Armv9.2 processor model: [`Features::ARMV9P2`], a software
-    /// model's `MIDR_EL1`, Streaming SVE vectors of up to 512 bits, the
-    /// counter Armv8.6 and later require, caches of the board's own, the
-    /// fewest breakpoints and watchpoints Arm permits, a PMU of the
-    /// board's own, and no IMPLEMENTATION DEFINED registers.
-    pub(crate) const ARMV9P2: Self = Self {
-        features: Features::ARMV9P2,
-        midr: id::MIDR_SOFTWARE_MODEL,
-        max_svl: VecLen(512),
-        counter_hz: SYSTEM_COUNTER_HZ,
-        caches: Caches::ARMV9P2,
-        debug: DebugPoints::ARMV9P2,
-        pmu: PmuShape::ARMV9P2,
-        impdef: ImpdefSpace::Empty,
-        gic: GicCpuInterface::Absent,
-    };
 
     /// This implementation as a processor of the level set `L` has it, with
     /// FEAT_EL2 and FEAT_AA64EL2 exactly when `L` has EL2: the processor's
@@ -1191,13 +1187,13 @@ pub const SYSTEM_COUNTER_HZ: ClockHz = match ClockHz::new(1_000_000_000) {
 pub struct CounterRate(ClockHz);
 
 impl CounterRate {
-    /// BSA's least rate (DEN0094C RB_TIME_02: "at least 10MHz").
-    pub const MIN_HZ: u64 = 10_000_000;
-    /// The most `CNTFRQ_EL0`, a 32-bit field, can report.
-    pub const MAX_HZ: u64 = u32::MAX as u64;
     /// 1 GHz ([`SYSTEM_COUNTER_HZ`]): the rate of Armv8.6 and later, which
     /// a board gives every processor unless its host chooses another.
     pub const DEFAULT: Self = Self(SYSTEM_COUNTER_HZ);
+    /// The most `CNTFRQ_EL0`, a 32-bit field, can report.
+    pub const MAX_HZ: u64 = u32::MAX as u64;
+    /// BSA's least rate (DEN0094C RB_TIME_02: "at least 10MHz").
+    pub const MIN_HZ: u64 = 10_000_000;
 
     /// `hz`, if it is from [`CounterRate::MIN_HZ`] to
     /// [`CounterRate::MAX_HZ`].

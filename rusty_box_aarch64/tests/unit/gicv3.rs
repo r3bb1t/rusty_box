@@ -58,7 +58,12 @@ fn dist_get(g: &mut GicV3, off: u64) -> u32 {
 fn redist(g: &mut GicV3, off: u64, v: u32) {
     let mut no_ram: [u8; 0] = [];
     let mut ram = GuestRam::new(&mut no_ram);
-    g.redist_write(&mut ram, RegOffset::new(off), AccessWidth::Word, u64::from(v));
+    g.redist_write(
+        &mut ram,
+        RegOffset::new(off),
+        AccessWidth::Word,
+        u64::from(v),
+    );
 }
 
 fn redist_get(g: &mut GicV3, off: u64) -> u32 {
@@ -389,7 +394,10 @@ fn the_running_priority_ignores_the_binary_point() {
         1 << (0x38 >> 3)
     );
     make_pending(&mut g, SPI + 1);
-    assert!(!g.irq_out(), "0x20 and 0x38 are one group priority under BPR1 5");
+    assert!(
+        !g.irq_out(),
+        "0x20 and 0x38 are one group priority under BPR1 5"
+    );
 }
 
 /// With `EOImode` set an end of interrupt drops the priority only, and
@@ -574,8 +582,7 @@ fn lpis_load_and_write_back_their_tables() {
     redist64(&mut g, &mut ram, GICR_CTLR, 0);
     assert_eq!(redist_get(&mut g, GICR_CTLR), 0b10, "CES: cleared");
     assert_eq!(
-        ram[LPI_PENDING_BYTE],
-        0b101,
+        ram[LPI_PENDING_BYTE], 0b101,
         "8192 and the disabled 8194 still pending"
     );
     assert_eq!(g.icc_read(IccRegister::Hppir1), 1023);
@@ -594,7 +601,11 @@ fn ptz_and_idbits_leave_lpis_unread() {
     config(&mut ram, 8192, 0xA3);
     ram[LPI_PENDING_BYTE] = 1;
     let mut g = with_lpis(&mut ram, true);
-    assert_eq!(redist64_get(&mut g, GICR_PENDBASER), PEND_TABLE, "PTZ reads 0");
+    assert_eq!(
+        redist64_get(&mut g, GICR_PENDBASER),
+        PEND_TABLE,
+        "PTZ reads 0"
+    );
     assert_eq!(g.icc_read(IccRegister::Hppir1), 1023);
     let mut g = running();
     redist64(&mut g, &mut ram, GICR_PROPBASER, PROP_TABLE | 12);
@@ -637,8 +648,16 @@ fn lpis_are_prioritized_with_the_other_interrupts() {
     let mut g = with_lpis(&mut ram, false);
     enable_spi(&mut g, SPI, true, 0x60);
     make_pending(&mut g, SPI);
-    assert_eq!(g.icc_read(IccRegister::Iar1), u64::from(SPI), "the lower INTID");
-    assert_eq!(g.icc_read(IccRegister::Iar1), 1023, "the same group priority");
+    assert_eq!(
+        g.icc_read(IccRegister::Iar1),
+        u64::from(SPI),
+        "the lower INTID"
+    );
+    assert_eq!(
+        g.icc_read(IccRegister::Iar1),
+        1023,
+        "the same group priority"
+    );
     g.icc_write(IccRegister::Eoir1, u64::from(SPI));
     enable_spi(&mut g, SPI + 1, true, 0x80);
     make_pending(&mut g, SPI + 1);

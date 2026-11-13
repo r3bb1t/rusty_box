@@ -85,26 +85,32 @@ impl GuestStorage for LentStorage<'_> {
             initrd: self.initrd,
         }
     }
+
     #[inline(always)]
     fn ram(&self) -> &[u8] {
         self.ram
     }
+
     #[inline(always)]
     fn ram_mut(&mut self) -> &mut [u8] {
         self.ram
     }
+
     #[inline]
     fn code(&self) -> &[u8] {
         self.code
     }
+
     #[inline]
     fn vars(&self) -> &[u8] {
         self.vars
     }
+
     #[inline]
     fn vars_mut(&mut self) -> &mut [u8] {
         self.vars
     }
+
     fn boot_images(&self) -> BootImages<'_> {
         BootImages {
             kernel: self.kernel,
@@ -135,26 +141,32 @@ impl GuestStorage for OwnedStorage {
             initrd: &self.initrd,
         }
     }
+
     #[inline(always)]
     fn ram(&self) -> &[u8] {
         &self.ram
     }
+
     #[inline(always)]
     fn ram_mut(&mut self) -> &mut [u8] {
         &mut self.ram
     }
+
     #[inline]
     fn code(&self) -> &[u8] {
         &self.code
     }
+
     #[inline]
     fn vars(&self) -> &[u8] {
         &self.vars
     }
+
     #[inline]
     fn vars_mut(&mut self) -> &mut [u8] {
         &mut self.vars
     }
+
     fn boot_images(&self) -> BootImages<'_> {
         BootImages {
             kernel: &self.kernel,

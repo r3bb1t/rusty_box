@@ -1,4 +1,3 @@
-
 mod error;
 pub(crate) mod memory_rusty_box;
 pub mod memory_stub;
@@ -12,12 +11,14 @@ mod residency;
 #[cfg(test)]
 mod tests;
 
-pub use super::error::Result;
-use crate::config::{A20Mask, BxPhyAddress};
-use residency::{Residency, ResidentParts};
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+
 pub use error::*;
+use residency::{Residency, ResidentParts};
+
+pub use super::error::Result;
+use crate::config::{A20Mask, BxPhyAddress};
 
 /// The only CPU state consumed by handler-aware physical-memory operations.
 ///
@@ -176,7 +177,6 @@ pub struct BxMemoryStubC {
     /// CPUs whose watermark is below this must flush their whole icache
     /// (an event was dropped on pending-queue overflow).
     smc_overflow_seq: u64,
-
 }
 
 // `Send` is derived, not promised (R6): every field is owned or exclusively
@@ -199,7 +199,6 @@ pub(crate) fn test_ram() -> BxMemC {
     memory.set_a20_mask(A20Mask::OPEN);
     memory
 }
-
 
 /// What a physical access still needs from its caller.
 ///
@@ -249,7 +248,6 @@ pub struct BxMemC {
     /// A20 address mask - controls address line 20 gating
     /// This is synchronized from BxPcSystemC when A20 state changes
     a20_mask: A20Mask,
-
 }
 
 impl BxMemC {
@@ -264,13 +262,10 @@ impl BxMemC {
         self.a20_mask = mask;
     }
 
-
     /// Get the current A20 mask
     pub fn a20_mask(&self) -> A20Mask {
         self.a20_mask
     }
-
-
 
     // ── SMC write-stamp table forwarders (table lives in the stub) ─────────
 
@@ -398,7 +393,6 @@ impl BxMemC {
             self.bios_rom_access &= !region;
         }
     }
-
 }
 
 // implement getters and setters for memory stub
@@ -480,19 +474,11 @@ impl BxMemoryStubC {
         let bo = self.bogus_offset;
         &mut self.actual_vector_mut()[bo..]
     }
-
-
 }
 impl BxMemC {
-
     /// Copy RAM through the checked, block-resident backing store. This bypasses
     /// device handlers just like Bochs's physical DMA RAM path.
-    pub(crate) fn read_ram(
-        &mut self,
-        addr: BxPhyAddress,
-        out: &mut [u8],
-    ) -> Result<usize> {
-
+    pub(crate) fn read_ram(&mut self, addr: BxPhyAddress, out: &mut [u8]) -> Result<usize> {
         let mut copied = 0usize;
         while copied < out.len() {
             let logical = addr
@@ -502,11 +488,9 @@ impl BxMemC {
             if memory_rusty_box::bx_is_pci_hole_addr(a20) {
                 break;
             }
-            let Some(span) = memory_rusty_box::bx_guest_ram_span(
-                a20,
-                1,
-                self.inherited_memory_stub.guest_len(),
-            ) else {
+            let Some(span) =
+                memory_rusty_box::bx_guest_ram_span(a20, 1, self.inherited_memory_stub.guest_len())
+            else {
                 break;
             };
             let page_left = 0x1000usize - a20.page_offset() as usize;
@@ -539,11 +523,7 @@ impl BxMemC {
 
     /// Copy RAM through the checked, block-resident backing store and stamp
     /// precisely the A20-adjusted guest bytes actually committed.
-    pub(crate) fn write_ram(
-        &mut self,
-        addr: BxPhyAddress,
-        data: &[u8],
-    ) -> Result<usize> {
+    pub(crate) fn write_ram(&mut self, addr: BxPhyAddress, data: &[u8]) -> Result<usize> {
         let mut copied = 0usize;
         while copied < data.len() {
             let logical = addr
@@ -553,11 +533,9 @@ impl BxMemC {
             if memory_rusty_box::bx_is_pci_hole_addr(a20) {
                 break;
             }
-            let Some(span) = memory_rusty_box::bx_guest_ram_span(
-                a20,
-                1,
-                self.inherited_memory_stub.guest_len(),
-            ) else {
+            let Some(span) =
+                memory_rusty_box::bx_guest_ram_span(a20, 1, self.inherited_memory_stub.guest_len())
+            else {
                 break;
             };
             let page_left = 0x1000usize - a20.page_offset() as usize;
@@ -753,7 +731,7 @@ impl BxMemC {
         let mem_stub = BxMemoryStubC::create_and_init(guest_size, host_size, block_size)?;
         self.inherited_memory_stub = *mem_stub;
         self.rom_present = [false; 65];
-        self.bios_rom_addr = 0xffff0000;
+        self.bios_rom_addr = 0xFFFF0000;
         self.memory_type = [[false, false]; 13];
         Ok(())
     }
@@ -762,16 +740,18 @@ impl BxMemC {
 #[cfg(all(test, feature = "std"))]
 mod phase1_tests {
 
-/// Emulator construction needs more than the default 2 MiB test stack:
-/// `Emulator` is ~4 MiB. 64 MiB is ample and stays small, because many
-/// parallel tests each reserve it, and oversized reservations exhaust the
-/// process and fail unrelated tests with STATUS_STACK_OVERFLOW.
-const TEST_STACK_SIZE: usize = 64 * MIB;
-    use super::{
-        memory_rusty_box::*, A20Mask, BxMemC, BxMemoryStubC, BxPhyAddress, CpuMemoryPolicy,
-        MemoryError, MemorySnapshotGeometry, MemorySnapshotResidency,
-    };
+    /// Emulator construction needs more than the default 2 MiB test stack:
+    /// `Emulator` is ~4 MiB. 64 MiB is ample and stays small, because many
+    /// parallel tests each reserve it, and oversized reservations exhaust the
+    /// process and fail unrelated tests with STATUS_STACK_OVERFLOW.
+    const TEST_STACK_SIZE: usize = 64 * MIB;
     use std::io::{Seek, SeekFrom};
+
+    use super::memory_rusty_box::*;
+    use super::{
+        A20Mask, BxMemC, BxMemoryStubC, BxPhyAddress, CpuMemoryPolicy, MemoryError,
+        MemorySnapshotGeometry, MemorySnapshotResidency,
+    };
     use crate::Error;
 
     const MIB: usize = 1024 * 1024;
@@ -806,7 +786,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             if out.len() > self.remaining {
                 return Err(crate::snapshot::SnapError::Truncated);
             }
-            out.fill(0xa5);
+            out.fill(0xA5);
             self.remaining -= out.len();
             Ok(())
         }
@@ -833,7 +813,9 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         let below_hole = BxPhyAddress::new(BX_PCI_HOLE_START.get() - 1);
         assert_eq!(bx_guest_ram_span(below_hole, 1, 4 * MIB), None);
         assert_eq!(
-            bx_guest_ram_span(BX_PCI_HOLE_START, 0, usize::MAX).unwrap().start as u64,
+            bx_guest_ram_span(BX_PCI_HOLE_START, 0, usize::MAX)
+                .unwrap()
+                .start as u64,
             BX_PCI_HOLE_START.get()
         );
         assert!(bx_guest_ram_span(BX_PCI_HOLE_START, 1, usize::MAX).is_none());
@@ -852,11 +834,19 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         assert_eq!(mem.identity_guest_base(), (core::ptr::null_mut(), 0));
         for block in 0..4usize {
             let value = [0x40 + block as u8];
-            assert_eq!(mem.write_ram(BxPhyAddress::new((block * MIB) as u64), &value).unwrap(), 1);
+            assert_eq!(
+                mem.write_ram(BxPhyAddress::new((block * MIB) as u64), &value)
+                    .unwrap(),
+                1
+            );
         }
         for block in 0..4usize {
             let mut value = [0];
-            assert_eq!(mem.read_ram(BxPhyAddress::new((block * MIB) as u64), &mut value).unwrap(), 1);
+            assert_eq!(
+                mem.read_ram(BxPhyAddress::new((block * MIB) as u64), &mut value)
+                    .unwrap(),
+                1
+            );
             assert_eq!(value, [0x40 + block as u8], "guest block {block}");
         }
     }
@@ -873,13 +863,18 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         assert_eq!(geometry.used_blocks, 0);
 
         assert_eq!(mem.write_ram(BxPhyAddress::new(0), &[0x11]).unwrap(), 1);
-        assert_eq!(mem.write_ram(BxPhyAddress::new((2 * MIB) as u64), &[0x22]).unwrap(), 1);
+        assert_eq!(
+            mem.write_ram(BxPhyAddress::new((2 * MIB) as u64), &[0x22])
+                .unwrap(),
+            1
+        );
 
         let mut first = [0];
         let mut second = [0];
         assert_eq!(mem.read_ram(BxPhyAddress::new(0), &mut first).unwrap(), 1);
         assert_eq!(
-            mem.read_ram(BxPhyAddress::new((2 * MIB) as u64), &mut second).unwrap(),
+            mem.read_ram(BxPhyAddress::new((2 * MIB) as u64), &mut second)
+                .unwrap(),
             1
         );
         assert_eq!((first, second), ([0x11], [0x22]));
@@ -888,8 +883,12 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     #[test]
     fn undersized_host_first_touch_reads_zero_without_eof() {
         let mut mem = swapped_memory();
-        let mut bytes = [0xff; 32];
-        assert_eq!(mem.read_ram(BxPhyAddress::new((3 * MIB) as u64), &mut bytes).unwrap(), bytes.len());
+        let mut bytes = [0xFF; 32];
+        assert_eq!(
+            mem.read_ram(BxPhyAddress::new((3 * MIB) as u64), &mut bytes)
+                .unwrap(),
+            bytes.len()
+        );
         assert_eq!(bytes, [0; 32]);
     }
 
@@ -898,12 +897,14 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         let mut mem = swapped_memory();
         let source = [0x11, 0x22, 0x33, 0x44];
         assert_eq!(
-            mem.write_ram(BxPhyAddress::new((MIB - 2) as u64), &source).unwrap(),
+            mem.write_ram(BxPhyAddress::new((MIB - 2) as u64), &source)
+                .unwrap(),
             source.len()
         );
         let mut output = [0; 4];
         assert_eq!(
-            mem.read_ram(BxPhyAddress::new((MIB - 2) as u64), &mut output).unwrap(),
+            mem.read_ram(BxPhyAddress::new((MIB - 2) as u64), &mut output)
+                .unwrap(),
             output.len()
         );
         assert_eq!(output, source);
@@ -912,22 +913,38 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     #[test]
     fn ram_copy_reports_out_of_range_without_partial_overflow() {
         let mut mem = swapped_memory();
-        let data = [0xaa, 0xbb];
-        assert_eq!(mem.write_ram(BxPhyAddress::new((4 * MIB - 1) as u64), &data).unwrap(), 1);
+        let data = [0xAA, 0xBB];
+        assert_eq!(
+            mem.write_ram(BxPhyAddress::new((4 * MIB - 1) as u64), &data)
+                .unwrap(),
+            1
+        );
         let mut last = [0];
-        assert_eq!(mem.read_ram(BxPhyAddress::new((4 * MIB - 1) as u64), &mut last).unwrap(), 1);
-        assert_eq!(last, [0xaa]);
+        assert_eq!(
+            mem.read_ram(BxPhyAddress::new((4 * MIB - 1) as u64), &mut last)
+                .unwrap(),
+            1
+        );
+        assert_eq!(last, [0xAA]);
     }
 
     #[test]
     fn block_aware_ram_copy_reapplies_a20_across_one_megabyte() {
         let mut mem = swapped_memory();
         mem.set_a20_mask(A20Mask::CLOSED);
-        assert_eq!(mem.write_ram(BxPhyAddress::new(0x000f_fffe), &[1, 2, 3, 4]).unwrap(), 4);
+        assert_eq!(
+            mem.write_ram(BxPhyAddress::new(0x000F_FFFE), &[1, 2, 3, 4])
+                .unwrap(),
+            4
+        );
         let mut low = [0; 2];
         let mut high = [0; 2];
         assert_eq!(mem.read_ram(BxPhyAddress::new(0), &mut low).unwrap(), 2);
-        assert_eq!(mem.read_ram(BxPhyAddress::new(0x000f_fffe), &mut high).unwrap(), 2);
+        assert_eq!(
+            mem.read_ram(BxPhyAddress::new(0x000F_FFFE), &mut high)
+                .unwrap(),
+            2
+        );
         assert_eq!(low, [3, 4]);
         assert_eq!(high, [1, 2]);
     }
@@ -936,9 +953,14 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     fn load_ram_above_host_backing_is_complete() {
         let mut mem = swapped_memory();
         let data = [7, 8, 9];
-        mem.load_RAM(&data, BxPhyAddress::new((3 * MIB) as u64)).unwrap();
+        mem.load_RAM(&data, BxPhyAddress::new((3 * MIB) as u64))
+            .unwrap();
         let mut output = [0; 3];
-        assert_eq!(mem.read_ram(BxPhyAddress::new((3 * MIB) as u64), &mut output).unwrap(), 3);
+        assert_eq!(
+            mem.read_ram(BxPhyAddress::new((3 * MIB) as u64), &mut output)
+                .unwrap(),
+            3
+        );
         assert_eq!(output, data);
         assert!(matches!(
             mem.load_RAM(&[1, 2], BxPhyAddress::new((4 * MIB - 1) as u64)),
@@ -953,10 +975,18 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         );
         source.set_a20_mask(A20Mask::OPEN);
         source.write_ram(BxPhyAddress::new(0), &[0x31]).unwrap();
-        source.write_ram(BxPhyAddress::new((2 * MIB) as u64), &[0x42]).unwrap();
-        source.write_ram(BxPhyAddress::new((4 * MIB - 1) as u64), &[0x43]).unwrap();
-        source.write_ram(BxPhyAddress::new((4 * MIB) as u64), &[0x51]).unwrap();
-        source.write_ram(BxPhyAddress::new((5 * MIB - 1) as u64), &[0x52]).unwrap();
+        source
+            .write_ram(BxPhyAddress::new((2 * MIB) as u64), &[0x42])
+            .unwrap();
+        source
+            .write_ram(BxPhyAddress::new((4 * MIB - 1) as u64), &[0x43])
+            .unwrap();
+        source
+            .write_ram(BxPhyAddress::new((4 * MIB) as u64), &[0x51])
+            .unwrap();
+        source
+            .write_ram(BxPhyAddress::new((5 * MIB - 1) as u64), &[0x52])
+            .unwrap();
 
         let (geometry, residency) = snapshot_map(&source);
         assert_eq!(geometry.guest_len, (5 * MIB) as u64);
@@ -996,10 +1026,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             false,
         );
         restored.set_a20_mask(A20Mask::OPEN);
-        restored
-            .inherited_memory_stub
-            .actual_vector_mut()[MIB..2 * MIB]
-            .fill(0xa5);
+        restored.inherited_memory_stub.actual_vector_mut()[MIB..2 * MIB].fill(0xA5);
         {
             let mut stream = crate::snapshot::IoSource::new(&mut image);
             for (guest_block, saved) in residency.iter().copied().enumerate() {
@@ -1013,15 +1040,22 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .inherited_memory_stub
             .finish_snapshot_restore(geometry, &residency)
             .unwrap();
-        assert!(restored.inherited_memory_stub.actual_vector_slice()[MIB..2 * MIB]
-            .iter()
-            .all(|&byte| byte == 0));
+        assert!(
+            restored.inherited_memory_stub.actual_vector_slice()[MIB..2 * MIB]
+                .iter()
+                .all(|&byte| byte == 0)
+        );
 
         let mut value = [0];
-        assert_eq!(restored.read_ram(BxPhyAddress::new(0), &mut value).unwrap(), 1);
+        assert_eq!(
+            restored.read_ram(BxPhyAddress::new(0), &mut value).unwrap(),
+            1
+        );
         assert_eq!(value, [0x31]);
         assert_eq!(
-            restored.read_ram(BxPhyAddress::new((2 * MIB) as u64), &mut value).unwrap(),
+            restored
+                .read_ram(BxPhyAddress::new((2 * MIB) as u64), &mut value)
+                .unwrap(),
             1
         );
         assert_eq!(value, [0x42]);
@@ -1033,7 +1067,9 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         );
         assert_eq!(value, [0]);
         assert_eq!(
-            restored.read_ram(BxPhyAddress::new((4 * MIB) as u64), &mut value).unwrap(),
+            restored
+                .read_ram(BxPhyAddress::new((4 * MIB) as u64), &mut value)
+                .unwrap(),
             1
         );
         assert_eq!(value, [0x51]);
@@ -1077,15 +1113,13 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         ];
         let mut duplicate_geometry = geometry;
         duplicate_geometry.used_blocks = 2;
-        assert!(
-            matches!(
-                memory
-                    .inherited_memory_stub
-                    .finish_snapshot_restore(duplicate_geometry, &duplicate_slots)
-                    .unwrap_err(),
-                crate::snapshot::SnapError::Invalid(_)
-            )
-        );
+        assert!(matches!(
+            memory
+                .inherited_memory_stub
+                .finish_snapshot_restore(duplicate_geometry, &duplicate_slots)
+                .unwrap_err(),
+            crate::snapshot::SnapError::Invalid(_)
+        ));
         assert_eq!(snapshot_map(&memory).1, before);
 
         let used_count_mismatch = [
@@ -1094,15 +1128,13 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             MemorySnapshotResidency::Swapped,
             MemorySnapshotResidency::Swapped,
         ];
-        assert!(
-            matches!(
-                memory
-                    .inherited_memory_stub
-                    .finish_snapshot_restore(geometry, &used_count_mismatch)
-                    .unwrap_err(),
-                crate::snapshot::SnapError::Invalid(_)
-            )
-        );
+        assert!(matches!(
+            memory
+                .inherited_memory_stub
+                .finish_snapshot_restore(geometry, &used_count_mismatch)
+                .unwrap_err(),
+            crate::snapshot::SnapError::Invalid(_)
+        ));
         assert_eq!(snapshot_map(&memory).1, before);
     }
 
@@ -1122,15 +1154,13 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             MemorySnapshotResidency::Swapped,
         ];
 
-        assert!(
-            matches!(
-                memory
-                    .inherited_memory_stub
-                    .finish_snapshot_restore(geometry, &sparse_map)
-                    .unwrap_err(),
-                crate::snapshot::SnapError::Invalid(_)
-            )
-        );
+        assert!(matches!(
+            memory
+                .inherited_memory_stub
+                .finish_snapshot_restore(geometry, &sparse_map)
+                .unwrap_err(),
+            crate::snapshot::SnapError::Invalid(_)
+        ));
         assert_eq!(snapshot_map(&memory).1, before);
     }
 
@@ -1138,9 +1168,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     fn snapshot_rejects_truncated_swapped_block_input() {
         let mut memory = swapped_memory();
         let (geometry, before) = snapshot_map(&memory);
-        let mut input = ShortReader {
-            remaining: MIB - 1,
-        };
+        let mut input = ShortReader { remaining: MIB - 1 };
         let error = memory
             .inherited_memory_stub
             .read_snapshot_block(0, MemorySnapshotResidency::Swapped, &mut input)
@@ -1161,21 +1189,29 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
                 );
                 mem.set_a20_mask(A20Mask::OPEN);
                 let mut written = [0x11, 0x22, 0x33, 0x44];
-                let wrote = mem.write_physical_page(CpuMemoryPolicy::default(),
-                    BxPhyAddress::new(1022),
-                    written.len(),
-                    &mut written,
-                )
-                .unwrap();
-                assert_eq!(wrote, super::PhysAccess::Done, "plain RAM reaches no device");
+                let wrote = mem
+                    .write_physical_page(
+                        CpuMemoryPolicy::default(),
+                        BxPhyAddress::new(1022),
+                        written.len(),
+                        &mut written,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    wrote,
+                    super::PhysAccess::Done,
+                    "plain RAM reaches no device"
+                );
 
                 let mut read = [0; 4];
-                let got = mem.read_physical_page(CpuMemoryPolicy::default(),
-                    BxPhyAddress::new(1022),
-                    read.len(),
-                    &mut read,
-                )
-                .unwrap();
+                let got = mem
+                    .read_physical_page(
+                        CpuMemoryPolicy::default(),
+                        BxPhyAddress::new(1022),
+                        read.len(),
+                        &mut read,
+                    )
+                    .unwrap();
                 assert_eq!(got, super::PhysAccess::Done, "plain RAM reaches no device");
                 assert_eq!(read, written);
             })
@@ -1183,11 +1219,6 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .join()
             .unwrap();
     }
-
-
-
-
-
 
     /// The residency epoch advances exactly when a guest block changes slots.
     ///
@@ -1210,7 +1241,8 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         // but to evict block 0, which the previous read just referenced.
         let mut mem = swapped_memory();
         mem.write_ram(BxPhyAddress::new(0), &[0xAA]).unwrap();
-        mem.write_ram(BxPhyAddress::new(MIB as u64), &[0xBB]).unwrap();
+        mem.write_ram(BxPhyAddress::new(MIB as u64), &[0xBB])
+            .unwrap();
 
         let mut buf = [0u8; 1];
         mem.read_ram(BxPhyAddress::new(0), &mut buf).unwrap();
@@ -1237,14 +1269,16 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
         mem.read_ram(BxPhyAddress::new(0), &mut buf).unwrap();
         let after_first = mem.swap_epoch();
 
-        mem.read_ram(BxPhyAddress::new(MIB as u64), &mut buf).unwrap();
+        mem.read_ram(BxPhyAddress::new(MIB as u64), &mut buf)
+            .unwrap();
         let after_swap = mem.swap_epoch();
         assert!(
             after_swap > after_first,
             "relocating a block must announce itself: {after_first} -> {after_swap}"
         );
 
-        mem.read_ram(BxPhyAddress::new(2 * MIB as u64), &mut buf).unwrap();
+        mem.read_ram(BxPhyAddress::new(2 * MIB as u64), &mut buf)
+            .unwrap();
         assert!(
             mem.swap_epoch() > after_swap,
             "every relocation advances the epoch, not just the first"
@@ -1325,7 +1359,7 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
     #[test]
     fn failed_reload_leaves_target_block_swapped_until_retry() {
         let mut mem = swapped_memory();
-        mem.write_ram(BxPhyAddress::new(0), &[0x5a]).unwrap();
+        mem.write_ram(BxPhyAddress::new(0), &[0x5A]).unwrap();
         mem.inherited_memory_stub
             .residency
             .overflow_file
@@ -1333,7 +1367,10 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .unwrap();
 
         let mut byte = [0];
-        assert!(mem.read_ram(BxPhyAddress::new(MIB as u64), &mut byte).is_err());
+        assert!(
+            mem.read_ram(BxPhyAddress::new(MIB as u64), &mut byte)
+                .is_err()
+        );
         let blocks = mem.inherited_memory_stub.residency.blocks();
         assert!(matches!(blocks[1], super::Block::SwappedOut));
 
@@ -1342,7 +1379,11 @@ const TEST_STACK_SIZE: usize = 64 * MIB;
             .overflow_file
             .set_len((2 * MIB) as u64)
             .unwrap();
-        assert_eq!(mem.read_ram(BxPhyAddress::new(MIB as u64), &mut byte).unwrap(), 1);
+        assert_eq!(
+            mem.read_ram(BxPhyAddress::new(MIB as u64), &mut byte)
+                .unwrap(),
+            1
+        );
         assert_eq!(byte, [0]);
     }
 }

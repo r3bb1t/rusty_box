@@ -11,19 +11,18 @@
 //! - Physical Region Descriptor (PRD) table processing
 //! - Timer-driven DMA transfers (Bochs pci_ide.cc)
 
-
 use super::IoPort;
 #[cfg(feature = "std")]
 use crate::{
     pc_system::{BxPcSystemC, TimerOwner},
     snapshot::{
-        bounds, checked_snapshot_len_add, checked_snapshot_len_mul,
-        SnapError, SnapRead, SnapResult, SnapWrite,
+        SnapError, SnapRead, SnapResult, SnapWrite, bounds, checked_snapshot_len_add,
+        checked_snapshot_len_mul,
     },
 };
 
 #[cfg(feature = "std")]
-const PCI_IDE_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0e];
+const PCI_IDE_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0E];
 
 #[cfg(feature = "std")]
 fn invalid_pci_ide_snapshot(message: &'static str) -> SnapError {
@@ -210,9 +209,7 @@ fn write_bmdma_snapshot_state<W: SnapWrite>(
 }
 
 #[cfg(feature = "std")]
-fn read_bmdma_snapshot_state<R: SnapRead>(
-    reader: &mut R,
-) -> SnapResult<BmDmaSnapshotState> {
+fn read_bmdma_snapshot_state<R: SnapRead>(reader: &mut R) -> SnapResult<BmDmaSnapshotState> {
     let cmd_ssbm = reader.read_bool()?;
     let cmd_rwcon = reader.read_bool()?;
     let status = reader.read_u8()?;
@@ -570,14 +567,14 @@ impl BxPciIde {
             0
         }
     }
-
 }
 
 // ─── PCI Configuration Space ─────────────────────────────────────────────
 
 impl rusty_box_devices::pci::PciDevice for BxPciIde {
-    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 1);
     type WriteEffects = PciIdeWriteEffects;
+
+    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 1);
 
     /// Write to PCI configuration space.
     /// Bochs: bx_pci_ide_c::pci_write_handler() (pci_ide.cc)
@@ -596,7 +593,7 @@ impl rusty_box_devices::pci::PciDevice for BxPciIde {
         const BAR4_SIZE: u32 = 16;
         let is_bar4 = (0x20..0x24).contains(&address);
         let mut probe = false;
-        if is_bar4 && value >= 0xffff_fff0 {
+        if is_bar4 && value >= 0xFFFF_FFF0 {
             value = (value & !(BAR4_SIZE - 1)) | 0x01; // I/O-space type bit
             probe = true;
         }
@@ -673,7 +670,6 @@ impl rusty_box_devices::pci::PciDevice for BxPciIde {
         }
         value
     }
-
 }
 
 impl BxPciIde {
@@ -748,12 +744,12 @@ impl BxPciIde {
         ];
 
         validate_pci_ide_snapshot_identity(&pci_conf, &self.pci_conf)?;
-        if (desired_bmdma_base & 0x0f) != 0 {
+        if (desired_bmdma_base & 0x0F) != 0 {
             return Err(invalid_pci_ide_snapshot(
                 "snapshot PCI IDE BAR4 base is not 16-byte aligned",
             ));
         }
-        let bar4_low = pci_conf[0x20] & 0x0f;
+        let bar4_low = pci_conf[0x20] & 0x0F;
         if (desired_bmdma_base != 0 && bar4_low != 0x01)
             || (desired_bmdma_base == 0 && bar4_low != 0 && bar4_low != 0x01)
         {
@@ -823,10 +819,10 @@ impl BxPciIde {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::snapshot::SnapshotReader;
     use rusty_box_devices::pci::PciDevice;
 
+    use super::*;
+    use crate::snapshot::SnapshotReader;
 
     #[test]
     fn test_pci_ide_new() {
@@ -951,9 +947,9 @@ mod tests {
     #[test]
     fn pci_ide_snapshot_resumes_mid_bmdma_transfer() {
         let mut ide = BxPciIde::new();
-        assert!(ide.pci_write(0x20, 0x0000_c001, 4).bmdma_base_changed);
-        ide.bmdma_write(IoPort::new(0xc004), 0x0000_1200, 4);
-        ide.bmdma_write(IoPort::new(0xc000), 0x09, 1);
+        assert!(ide.pci_write(0x20, 0x0000_C001, 4).bmdma_base_changed);
+        ide.bmdma_write(IoPort::new(0xC004), 0x0000_1200, 4);
+        ide.bmdma_write(IoPort::new(0xC000), 0x09, 1);
         let channel = &mut ide.bmdma[0];
         channel.status |= 0x04;
         channel.prd_current = 0x0000_1240;
@@ -961,7 +957,7 @@ mod tests {
         channel.buffer_idx = 20;
         channel.data_ready = true;
         for (index, byte) in channel.buffer[..64].iter_mut().enumerate() {
-            *byte = index as u8 ^ 0x5a;
+            *byte = index as u8 ^ 0x5A;
         }
 
         let saved_len = ide.snapshot_v3_body_len().unwrap();
@@ -969,7 +965,7 @@ mod tests {
         ide.save_snapshot_v3_body(&mut saved).unwrap();
         assert_eq!(saved.len() as u64, saved_len);
 
-        ide.bmdma_base = 0xd000;
+        ide.bmdma_base = 0xD000;
         let channel = &mut ide.bmdma[0];
         channel.cmd_ssbm = false;
         channel.cmd_rwcon = false;
@@ -986,17 +982,17 @@ mod tests {
         let topology = ide.restore_snapshot_v3_body(&mut reader).unwrap();
         reader.finish_exact().unwrap();
 
-        assert_eq!(topology.bmdma_base, 0xc000);
-        assert_eq!(ide.bmdma_base, 0xd000);
-        assert_eq!(ide.bmdma_read(IoPort::new(0xd000), 1), 0x09);
-        assert_eq!(ide.bmdma_read(IoPort::new(0xd002), 1), 0x05);
-        assert_eq!(ide.bmdma_read(IoPort::new(0xd004), 4), 0x0000_1200);
+        assert_eq!(topology.bmdma_base, 0xC000);
+        assert_eq!(ide.bmdma_base, 0xD000);
+        assert_eq!(ide.bmdma_read(IoPort::new(0xD000), 1), 0x09);
+        assert_eq!(ide.bmdma_read(IoPort::new(0xD002), 1), 0x05);
+        assert_eq!(ide.bmdma_read(IoPort::new(0xD004), 4), 0x0000_1200);
         let channel = &ide.bmdma[0];
         assert_eq!(channel.prd_current, 0x0000_1240);
         assert_eq!((channel.buffer_top, channel.buffer_idx), (64, 20));
         assert!(channel.data_ready);
         for (index, &byte) in channel.buffer[..64].iter().enumerate() {
-            assert_eq!(byte, index as u8 ^ 0x5a);
+            assert_eq!(byte, index as u8 ^ 0x5A);
         }
         assert_eq!(ide.take_pending_timer_arm(0), Some(1));
     }

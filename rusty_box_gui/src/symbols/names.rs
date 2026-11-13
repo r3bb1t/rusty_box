@@ -6,9 +6,8 @@
 use rusty_box_symbols::tables::SourceLine;
 use rusty_box_symbols::units::Rva;
 
-use crate::debugger::inspect::SymbolIndex;
-
 use super::hub::{ModuleSymbols, SymbolsView};
+use crate::debugger::inspect::SymbolIndex;
 
 /// Whether a name comes from tables of the module's own build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +44,10 @@ impl NamedAddress {
     pub(crate) fn label(&self) -> String {
         match &self.function {
             Some(function) => {
-                let stem = self.module.rsplit_once('.').map_or(self.module.as_str(), |(stem, _extension)| stem);
+                let stem = self
+                    .module
+                    .rsplit_once('.')
+                    .map_or(self.module.as_str(), |(stem, _extension)| stem);
                 if function.offset == 0 {
                     format!("{stem}!{}", function.name)
                 } else {
@@ -59,7 +61,9 @@ impl NamedAddress {
 
     /// Whether the address is where its function begins.
     pub(crate) fn starts_function(&self) -> bool {
-        self.function.as_ref().is_some_and(|function| function.offset == 0)
+        self.function
+            .as_ref()
+            .is_some_and(|function| function.offset == 0)
     }
 
     /// `file:line`, when the tables have line information for the address.
@@ -110,13 +114,21 @@ impl<'a> Namer<'a> {
             .modules
             .iter()
             .find(|candidate| {
-                let stem = candidate.name.rsplit_once('.').map_or(candidate.name.as_str(), |(stem, _extension)| stem);
+                let stem = candidate
+                    .name
+                    .rsplit_once('.')
+                    .map_or(candidate.name.as_str(), |(stem, _extension)| stem);
                 candidate.name.eq_ignore_ascii_case(module)
                     || stem.eq_ignore_ascii_case(module)
-                    || (module.eq_ignore_ascii_case("nt") && self.symbols.kernel == Some(candidate.base))
+                    || (module.eq_ignore_ascii_case("nt")
+                        && self.symbols.kernel == Some(candidate.base))
             })
             .ok_or(NameMiss::UnknownModule)?;
-        let tables = found.identity.known().and_then(|identity| self.view.tables(identity)).ok_or(NameMiss::NoSymbols)?;
+        let tables = found
+            .identity
+            .known()
+            .and_then(|identity| self.view.tables(identity))
+            .ok_or(NameMiss::NoSymbols)?;
         let rva = tables.address_of(name).ok_or(NameMiss::UnknownName)?;
         Ok(found.base.wrapping_add(rva.0))
     }
@@ -129,7 +141,11 @@ impl<'a> Namer<'a> {
         let function = identity
             .and_then(|identity| self.view.tables(identity))
             .and_then(|tables| tables.symbolize(Rva(module_offset)))
-            .map(|hit| FunctionName { name: hit.name, offset: hit.offset, line: hit.line });
+            .map(|hit| FunctionName {
+                name: hit.name,
+                offset: hit.offset,
+                line: hit.line,
+            });
         let forced = identity
             .and_then(|identity| self.view.state(identity))
             .is_some_and(|state| matches!(state, ModuleSymbols::Forced { .. }));
@@ -137,22 +153,32 @@ impl<'a> Namer<'a> {
             module: module.name.clone(),
             module_offset,
             function,
-            trust: if forced { NameTrust::Forced } else { NameTrust::Matched },
+            trust: if forced {
+                NameTrust::Forced
+            } else {
+                NameTrust::Matched
+            },
         })
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-    use crate::symbols::hub::{ModuleEntry, SymbolHub};
-    use crate::symbols::kernel::tests::{kernel_identity, kernel_symbols, look_up_as_a_worker, quiet_hub, KERNEL_BASE, KERNEL_GUID};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
     use rusty_box_symbols::identity::{Guid, TablesIdentity};
     use rusty_box_symbols::service::SymbolSource;
     use rusty_box_symbols::tables::SymbolTables;
-    use rusty_box_symbols_fixtures::pdb::{build_pdb, FixtureLine, FixtureProcedure, FixturePublic, PdbFixture, PublicKind};
-    use std::path::PathBuf;
-    use std::sync::Arc;
+    use rusty_box_symbols_fixtures::pdb::{
+        FixtureLine, FixtureProcedure, FixturePublic, PdbFixture, PublicKind, build_pdb,
+    };
+
+    use super::*;
+    use crate::symbols::hub::{ModuleEntry, SymbolHub};
+    use crate::symbols::kernel::tests::{
+        KERNEL_BASE, KERNEL_GUID, kernel_identity, kernel_symbols, look_up_as_a_worker, quiet_hub,
+    };
 
     /// `KiSystemCall64` at RVA 0x1040 with a line table, and `KeBugCheckEx`
     /// at 0x1100 as a public only.
@@ -165,29 +191,61 @@ pub(crate) mod tests {
             len: 0x40,
             file: "d:\\os\\src\\ntos\\ke\\amd64\\trap.asm".to_owned(),
             checksum: None,
-            lines: vec![FixtureLine { offset: 0, line: 100 }, FixtureLine { offset: 0x10, line: 104 }],
+            lines: vec![
+                FixtureLine {
+                    offset: 0,
+                    line: 100,
+                },
+                FixtureLine {
+                    offset: 0x10,
+                    line: 104,
+                },
+            ],
         });
-        pdb.publics.push(FixturePublic { name: "KiSystemCall64".to_owned(), section: 1, offset: 0x40, kind: PublicKind::Function });
-        pdb.publics.push(FixturePublic { name: "KeBugCheckEx".to_owned(), section: 1, offset: 0x100, kind: PublicKind::Function });
+        pdb.publics.push(FixturePublic {
+            name: "KiSystemCall64".to_owned(),
+            section: 1,
+            offset: 0x40,
+            kind: PublicKind::Function,
+        });
+        pdb.publics.push(FixturePublic {
+            name: "KeBugCheckEx".to_owned(),
+            section: 1,
+            offset: 0x100,
+            kind: PublicKind::Function,
+        });
         SymbolTables::parse(&build_pdb(&pdb)).expect("parses")
     }
 
     /// A hub holding the kernel's code tables, loaded as `state` says.
     pub(crate) fn hub_with_kernel_code(state: ModuleSymbols) -> SymbolHub {
         let hub = quiet_hub();
-        look_up_as_a_worker(&hub, &kernel_identity(), ModuleEntry { state, tables: Some(Arc::new(kernel_code_tables())) });
+        look_up_as_a_worker(
+            &hub,
+            &kernel_identity(),
+            ModuleEntry {
+                state,
+                tables: Some(Arc::new(kernel_code_tables())),
+            },
+        );
         hub
     }
 
     pub(crate) fn loaded() -> ModuleSymbols {
-        ModuleSymbols::Loaded { from: SymbolSource::Store { path: PathBuf::from("symbols/ntkrnlmp.pdb") } }
+        ModuleSymbols::Loaded {
+            from: SymbolSource::Store {
+                path: PathBuf::from("symbols/ntkrnlmp.pdb"),
+            },
+        }
     }
 
     #[test]
     fn an_address_is_named_by_its_function_once_the_tables_load() {
         let symbols = kernel_symbols();
         let before = quiet_hub().view();
-        let named = Namer::new(&symbols, &before).name(KERNEL_BASE + 0x1052).expect("in the kernel");
+        let named = Namer::new(&symbols, &before)
+            .name(KERNEL_BASE + 0x1052)
+            .expect("in the kernel");
         assert_eq!(named.label(), "ntoskrnl.exe+0x1052");
         let view = hub_with_kernel_code(loaded()).view();
         let namer = Namer::new(&symbols, &view);
@@ -198,7 +256,13 @@ pub(crate) mod tests {
         let start = namer.name(KERNEL_BASE + 0x1040).expect("in the kernel");
         assert!(start.starts_function());
         assert_eq!(start.label(), "ntoskrnl!KiSystemCall64");
-        assert_eq!(namer.name(KERNEL_BASE + 0x1100).map(|n| n.label()).as_deref(), Some("ntoskrnl!KeBugCheckEx"));
+        assert_eq!(
+            namer
+                .name(KERNEL_BASE + 0x1100)
+                .map(|n| n.label())
+                .as_deref(),
+            Some("ntoskrnl!KeBugCheckEx")
+        );
         assert_eq!(namer.name(0x1000), None, "outside every module");
     }
 
@@ -207,13 +271,31 @@ pub(crate) mod tests {
         let symbols = kernel_symbols();
         let view = hub_with_kernel_code(loaded()).view();
         let namer = Namer::new(&symbols, &view);
-        assert_eq!(namer.address_of("ntoskrnl", "KeBugCheckEx"), Ok(KERNEL_BASE + 0x1100));
-        assert_eq!(namer.address_of("NTOSKRNL.EXE", "KiSystemCall64"), Ok(KERNEL_BASE + 0x1040));
-        assert_eq!(namer.address_of("nt", "KiSystemCall64"), Ok(KERNEL_BASE + 0x1040));
-        assert_eq!(namer.address_of("disk", "DiskRead"), Err(NameMiss::UnknownModule));
-        assert_eq!(namer.address_of("nt", "NoSuchName"), Err(NameMiss::UnknownName));
+        assert_eq!(
+            namer.address_of("ntoskrnl", "KeBugCheckEx"),
+            Ok(KERNEL_BASE + 0x1100)
+        );
+        assert_eq!(
+            namer.address_of("NTOSKRNL.EXE", "KiSystemCall64"),
+            Ok(KERNEL_BASE + 0x1040)
+        );
+        assert_eq!(
+            namer.address_of("nt", "KiSystemCall64"),
+            Ok(KERNEL_BASE + 0x1040)
+        );
+        assert_eq!(
+            namer.address_of("disk", "DiskRead"),
+            Err(NameMiss::UnknownModule)
+        );
+        assert_eq!(
+            namer.address_of("nt", "NoSuchName"),
+            Err(NameMiss::UnknownName)
+        );
         let unloaded = quiet_hub().view();
-        assert_eq!(Namer::new(&symbols, &unloaded).address_of("nt", "KeBugCheckEx"), Err(NameMiss::NoSymbols));
+        assert_eq!(
+            Namer::new(&symbols, &unloaded).address_of("nt", "KeBugCheckEx"),
+            Err(NameMiss::NoSymbols)
+        );
     }
 
     /// Review focus 3: names from a file of another build, loaded anyway,
@@ -222,11 +304,16 @@ pub(crate) mod tests {
     fn a_name_from_a_forced_file_is_marked_forced() {
         let symbols = kernel_symbols();
         let view = hub_with_kernel_code(ModuleSymbols::Forced {
-            found: TablesIdentity::Pdb { guid: Guid::from_le_bytes([0x77; 16]), age: 3 },
+            found: TablesIdentity::Pdb {
+                guid: Guid::from_le_bytes([0x77; 16]),
+                age: 3,
+            },
             path: PathBuf::from("D:\\other\\ntkrnlmp.pdb"),
         })
         .view();
-        let named = Namer::new(&symbols, &view).name(KERNEL_BASE + 0x1040).expect("in the kernel");
+        let named = Namer::new(&symbols, &view)
+            .name(KERNEL_BASE + 0x1040)
+            .expect("in the kernel");
         assert_eq!(named.label(), "ntoskrnl!KiSystemCall64");
         assert_eq!(named.trust, NameTrust::Forced);
     }

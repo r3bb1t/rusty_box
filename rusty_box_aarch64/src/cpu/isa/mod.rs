@@ -64,10 +64,6 @@ mod sme;
 pub(crate) mod spec;
 mod sve;
 
-use crate::cpu::exec::bits;
-use crate::cpu::pmu::RetiredKind;
-pub(crate) use crate::cpu::features::Feature;
-
 use asimd::{
     Asimdall, Asimddiff, Asimdelem, Asimdext, Asimdimm, Asimdins, Asimdmisc, Asimdmiscfp16,
     Asimdperm, Asimdsame, Asimdsame2, Asimdsamefp16, Asimdshf, Asimdtbl,
@@ -100,7 +96,7 @@ use sme::{
     MortlachAddhv, MortlachB16f32Prod, MortlachBini32Prod, MortlachContigLoad, MortlachContigQload,
     MortlachContigQstore, MortlachContigStore, MortlachCtxtLdst, MortlachExpand1dst,
     MortlachExpand2dstCtg, MortlachExpand4dstCtg, MortlachExtractPred, MortlachExtractZt,
-    MortlachF16f32Prod, MortlachF32f32Prod, MortlachI16i32Prod, MortlachI8i32Prod,
+    MortlachF16f32Prod, MortlachF32f32Prod, MortlachI8i32Prod, MortlachI16i32Prod,
     MortlachInsertPred, MortlachInsertZt, MortlachMulti1FmaLongIdx, MortlachMulti1MlaLongIdx,
     MortlachMulti1MlaLongLongIdxS, MortlachMulti1ZzZaFmaLongSm, MortlachMulti1ZzZaMlaLongLongSm,
     MortlachMulti1ZzZaMlaLongSm, MortlachMulti2ClampInt, MortlachMulti2CldCldntSiCtg,
@@ -184,6 +180,10 @@ use sve::{
     SveMemEldSi, SveMemEldSs, SveMemEstSi, SveMemEstSs, SveMemLdDup, SveMemLdqrSi, SveMemLdqrSs,
     SveMemPrfmSi, SveMemPrfmSs, SveMemPspill, SveMemSpill,
 };
+
+use crate::cpu::exec::bits;
+pub(crate) use crate::cpu::features::Feature;
+use crate::cpu::pmu::RetiredKind;
 
 /// An A64 encoding this processor implements, by its Arm class and Arm
 /// encoding id (the module documentation gives the naming).
@@ -2268,10 +2268,11 @@ impl Encoding {
 
 #[cfg(test)]
 mod tests {
+    use std::vec::Vec;
+
     use super::*;
     use crate::cpu::features::Implementation;
     use crate::cpu::{Cpu, CpuConfig, Levels, NoEl2, SysReg, WithEl2};
-    use std::vec::Vec;
 
     /// A processor of the levels `L` implementing `imp`, as built (EL2 its
     /// levels' to decide), and its ID register space as a host reads it:
@@ -2535,11 +2536,7 @@ mod tests {
             // CnP, UAO, VARange, ST, AT, IDS, FWB, TTL, EVT and E0PD alone.
             // MMFR1 AFP and ISAR2 RPRES are each 1 or 0.
             let at = |feature: Feature, lsb: u32, value: u64| {
-                if imp.has(feature) {
-                    value << lsb
-                } else {
-                    0
-                }
+                if imp.has(feature) { value << lsb } else { 0 }
             };
             let isar0_later = at(Feature::Lse, 20, 2)
                 | at(Feature::Rdm, 28, 1)

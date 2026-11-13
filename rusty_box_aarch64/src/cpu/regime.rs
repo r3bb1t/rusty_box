@@ -32,7 +32,7 @@ use super::el2::{
 use super::exec::sext;
 use super::features::{Feature, Features};
 use super::mmu::{HwUpdate, LeafLevel, Level};
-use super::{id, sctlr, Cpu, El, Levels};
+use super::{Cpu, El, Levels, id, sctlr};
 
 /// A stage 1 translation regime.
 ///

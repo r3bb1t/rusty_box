@@ -9,39 +9,39 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_pfp.cc`.
 
-use super::avx512_round::{f32_fixupimm, f64_fixupimm};
+use super::avx512_round::{f32_fixupimm, f32_reduce, f64_fixupimm, f64_reduce, range_control};
+use super::cpu::BxCpuC;
+use super::decoder::{BxSegregs, Instruction};
 use super::softfloat3e::f32_addsub::{f32_add, f32_sub};
 use super::softfloat3e::f32_compare::{f32_max, f32_min};
-use super::softfloat3e::f32_range::{f32_get_exp, f32_get_mant, f32_range, f32_scalef};
 use super::softfloat3e::f32_div::f32_div;
 use super::softfloat3e::f32_mul::f32_mul;
+use super::softfloat3e::f32_range::{f32_get_exp, f32_get_mant, f32_range, f32_scalef};
 use super::softfloat3e::f32_sqrt::f32_sqrt;
+use super::softfloat3e::f32_to_f64::f32_to_f64;
 use super::softfloat3e::f64_addsub::{f64_add, f64_sub};
 use super::softfloat3e::f64_compare::{f64_max, f64_min};
-use super::softfloat3e::f64_range::{f64_get_exp, f64_get_mant, f64_range, f64_scalef};
 use super::softfloat3e::f64_div::f64_div;
 use super::softfloat3e::f64_mul::f64_mul;
+use super::softfloat3e::f64_range::{f64_get_exp, f64_get_mant, f64_range, f64_scalef};
 use super::softfloat3e::f64_sqrt::f64_sqrt;
-use super::avx512_round::{f32_reduce, f64_reduce, range_control};
-use super::softfloat3e::f32_to_f64::f32_to_f64;
 use super::softfloat3e::f64_to_f32::f64_to_f32;
 use super::softfloat3e::int_to_float::{i32_to_f32, i32_to_f64, i64_to_f32, i64_to_f64};
-use super::softfloat3e::uint64_convert::{f32_to_ui64, f32_to_ui64_r_min_mag, f64_to_ui64,
-    f64_to_ui64_r_min_mag, ui64_to_f32, ui64_to_f64};
-use super::softfloat3e::uint_convert::{f32_to_ui32, f32_to_ui32_r_min_mag, f64_to_ui32,
-    f64_to_ui32_r_min_mag, ui32_to_f32, ui32_to_f64};
-use super::softfloat3e::softfloat::softfloat_get_rounding_mode;
 use super::softfloat3e::softfloat::{
-    softfloat_get_exception_flags, softfloat_suppress_exception, SoftFloatStatus,
-    FLAG_DENORMAL, FLAG_OVERFLOW, FLAG_UNDERFLOW,
+    FLAG_DENORMAL, FLAG_OVERFLOW, FLAG_UNDERFLOW, SoftFloatStatus, softfloat_get_exception_flags,
+    softfloat_get_rounding_mode, softfloat_suppress_exception,
+};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
+use super::softfloat3e::uint_convert::{
+    f32_to_ui32, f32_to_ui32_r_min_mag, f64_to_ui32, f64_to_ui32_r_min_mag, ui32_to_f32,
+    ui32_to_f64,
+};
+use super::softfloat3e::uint64_convert::{
+    f32_to_ui64, f32_to_ui64_r_min_mag, f64_to_ui64, f64_to_ui64_r_min_mag, ui64_to_f32,
+    ui64_to_f64,
 };
 use super::sse_pfp::mxcsr_to_softfloat_status_word_imm_override;
-use super::softfloat3e::softfloat_types::{Float32, Float64};
-use super::{
-    cpu::BxCpuC,
-    decoder::{BxSegregs, Instruction},
-    xmm::BxPackedZmmRegister,
-};
+use super::xmm::BxPackedZmmRegister;
 
 /// Read opmask value for masking. k0 returns all-ones (no masking).
 #[inline]
@@ -349,7 +349,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         })
     }
 
-
     // ========================================================================
     // VREDUCE / VRANGE scalar forms. Bochs avx512_pfp.cc
     // VREDUCESS/SD_MASK_* and VRANGESS/SD_MASK_*.
@@ -393,7 +392,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             f64_range(a, b, is_max, is_abs, sign_ctrl, status)
         })
     }
-
 
     // ========================================================================
     // Scalar conversions between a GPR and a scalar float, and between the two
@@ -473,30 +471,37 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn evex_vcvtss2usi_gd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_cvt_ss2usi(instr, false, false)
     }
+
     /// VCVTSS2USI Gq, Wss — EVEX.F3.0F.W1 79
     pub fn evex_vcvtss2usi_gq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_cvt_ss2usi(instr, true, false)
     }
+
     /// VCVTTSS2USI Gd, Wss — EVEX.F3.0F.W0 78
     pub fn evex_vcvttss2usi_gd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_cvt_ss2usi(instr, false, true)
     }
+
     /// VCVTTSS2USI Gq, Wss — EVEX.F3.0F.W1 78
     pub fn evex_vcvttss2usi_gq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_cvt_ss2usi(instr, true, true)
     }
+
     /// VCVTSD2USI Gd, Wsd — EVEX.F2.0F.W0 79
     pub fn evex_vcvtsd2usi_gd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_cvt_sd2usi(instr, false, false)
     }
+
     /// VCVTSD2USI Gq, Wsd — EVEX.F2.0F.W1 79
     pub fn evex_vcvtsd2usi_gq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_cvt_sd2usi(instr, true, false)
     }
+
     /// VCVTTSD2USI Gd, Wsd — EVEX.F2.0F.W0 78
     pub fn evex_vcvttsd2usi_gd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_cvt_sd2usi(instr, false, true)
     }
+
     /// VCVTTSD2USI Gq, Wsd — EVEX.F2.0F.W1 78
     pub fn evex_vcvttsd2usi_gq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_cvt_sd2usi(instr, true, true)
@@ -803,7 +808,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_scalar_sd(self, instr.dst(), &src1, result, mask, zmask);
         Ok(())
     }
-
 }
 
 #[cfg(all(test, feature = "alloc"))]
@@ -814,9 +818,10 @@ mod tests {
     //! exponent, scalef multiplies by a power of two, and getmant returns
     //! the significand normalised into the interval imm8[1:0] selects.
 
+    use rusty_box_decoder::opcode::Opcode;
+
     use crate::cpu::decoder::{BxSegregs, Instruction};
     use crate::cpu::xmm::MXCSR_RESET;
-    use rusty_box_decoder::opcode::Opcode;
 
     /// Register-form EVEX scalar: dst=0, rm=1 (the value), vvvv=2 (upper
     /// elements). k0, so element 0 is always active.
@@ -1046,5 +1051,4 @@ mod tests {
             .unwrap();
         assert_eq!(c.vmm[0].zmm32u(0), 0.1f32.to_bits());
     }
-
 }

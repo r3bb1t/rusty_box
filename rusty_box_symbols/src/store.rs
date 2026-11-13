@@ -140,7 +140,10 @@ pub fn checked_file_name(name: &str) -> Result<&str, StoreError> {
         || name.ends_with(' ')
         || name.chars().any(|c| {
             c.is_control()
-                || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '#' | '%')
+                || matches!(
+                    c,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '#' | '%'
+                )
         });
     if refused {
         Err(StoreError::UnsafeName {
@@ -220,14 +223,20 @@ impl<F: FileStore> SymbolStore<F> {
     #[must_use]
     pub fn debug_file_path(&self, build_id: &BuildId) -> PathBuf {
         let split = build_id_path(build_id);
-        self.root.join(".build-id").join(split.head).join(format!("{}.debug", split.tail))
+        self.root
+            .join(".build-id")
+            .join(split.head)
+            .join(format!("{}.debug", split.tail))
     }
 
     /// `<root>/.build-id/<first byte>/<rest>`: the executable itself.
     #[must_use]
     pub fn executable_path(&self, build_id: &BuildId) -> PathBuf {
         let split = build_id_path(build_id);
-        self.root.join(".build-id").join(split.head).join(split.tail)
+        self.root
+            .join(".build-id")
+            .join(split.head)
+            .join(split.tail)
     }
 
     /// The file at `path`, when the store holds it.
@@ -291,18 +300,36 @@ mod tests {
         assert_eq!(store.tiers(), Tiers::One);
         assert_eq!(
             store.pdb_path(&kernel_pdb()).unwrap(),
-            root().join("ntkrnlmp.pdb").join("B661C6FE72991D160FE37C48B8BC54701").join("ntkrnlmp.pdb")
+            root()
+                .join("ntkrnlmp.pdb")
+                .join("B661C6FE72991D160FE37C48B8BC54701")
+                .join("ntkrnlmp.pdb")
         );
-        let image = PeImageId { time_date_stamp: 0xAFF6_531F, size_of_image: 0x145_0000 };
+        let image = PeImageId {
+            time_date_stamp: 0xAFF6_531F,
+            size_of_image: 0x145_0000,
+        };
         assert_eq!(
             store.binary_path("ntoskrnl.exe", image).unwrap(),
-            root().join("ntoskrnl.exe").join("AFF6531F1450000").join("ntoskrnl.exe")
+            root()
+                .join("ntoskrnl.exe")
+                .join("AFF6531F1450000")
+                .join("ntoskrnl.exe")
         );
         let build_id = BuildId(vec![0xAB, 0xCD, 0xEF]);
-        assert_eq!(store.debug_file_path(&build_id), root().join(".build-id").join("ab").join("cdef.debug"));
-        assert_eq!(store.executable_path(&build_id), root().join(".build-id").join("ab").join("cdef"));
+        assert_eq!(
+            store.debug_file_path(&build_id),
+            root().join(".build-id").join("ab").join("cdef.debug")
+        );
+        assert_eq!(
+            store.executable_path(&build_id),
+            root().join(".build-id").join("ab").join("cdef")
+        );
         let short = BuildId(vec![0x01]);
-        assert_eq!(store.debug_file_path(&short), root().join(".build-id").join("01").join(".debug"));
+        assert_eq!(
+            store.debug_file_path(&short),
+            root().join(".build-id").join("01").join(".debug")
+        );
     }
 
     #[test]
@@ -324,9 +351,26 @@ mod tests {
     #[test]
     fn a_name_from_the_guest_cannot_leave_the_store() {
         let store = SymbolStore::open(MemoryStore::default(), root()).unwrap();
-        for name in ["..", ".", "", "a/b.pdb", r"..\x.pdb", "c:x.pdb", "x.pdb.", "nul\0.pdb", "x#y.pdb", "x%2F.pdb"] {
-            let pdb = PdbId { name: name.to_owned(), ..kernel_pdb() };
-            assert!(matches!(store.pdb_path(&pdb), Err(StoreError::UnsafeName { .. })), "{name:?} was accepted");
+        for name in [
+            "..",
+            ".",
+            "",
+            "a/b.pdb",
+            r"..\x.pdb",
+            "c:x.pdb",
+            "x.pdb.",
+            "nul\0.pdb",
+            "x#y.pdb",
+            "x%2F.pdb",
+        ] {
+            let pdb = PdbId {
+                name: name.to_owned(),
+                ..kernel_pdb()
+            };
+            assert!(
+                matches!(store.pdb_path(&pdb), Err(StoreError::UnsafeName { .. })),
+                "{name:?} was accepted"
+            );
         }
     }
 
@@ -335,7 +379,10 @@ mod tests {
         let mut store = SymbolStore::open(MemoryStore::default(), root()).unwrap();
         let path = store.pdb_path(&kernel_pdb()).unwrap();
         assert_eq!(store.place(&path, b"first").unwrap(), Placed::Written);
-        assert_eq!(store.place(&path, b"second").unwrap(), Placed::AlreadyPresent);
+        assert_eq!(
+            store.place(&path, b"second").unwrap(),
+            Placed::AlreadyPresent
+        );
         assert_eq!(store.lookup(&path).unwrap(), Some(b"first".to_vec()));
     }
 
@@ -358,6 +405,12 @@ mod tests {
         assert_eq!(store.place(&path, &[0; 100]).unwrap(), Placed::Written);
         let other = store.debug_file_path(&BuildId(vec![1, 2, 3]));
         assert_eq!(store.place(&other, &[0; 20]).unwrap(), Placed::Written);
-        assert_eq!(store.usage().unwrap(), StoreUsage { files: 2, bytes: 120 });
+        assert_eq!(
+            store.usage().unwrap(),
+            StoreUsage {
+                files: 2,
+                bytes: 120
+            }
+        );
     }
 }

@@ -33,11 +33,10 @@ use std::vec::Vec;
 
 use super::super::features::{Feature, Implementation, VecLen};
 use super::super::fp_estimate::fpsr::{DZC, IDC, IOC, IXC, OFC, UFC};
-use super::super::sctlr;
 use super::super::step::{
-    exec, exec_in, processor, Taken, CPACR_ALL, DATA, FP_TRAP, SME_DISABLED, UNDEFINED,
+    CPACR_ALL, DATA, FP_TRAP, SME_DISABLED, Taken, UNDEFINED, exec, exec_in, processor,
 };
-use super::super::{Cpu, NoEl2};
+use super::super::{Cpu, NoEl2, sctlr};
 use super::{Esize, Pv, Zv};
 use crate::softfloat::FPCR_AH;
 
@@ -330,7 +329,9 @@ fn ext_beyond_the_vector_gives_the_first_source() {
     let got: Vec<u8> = (0..16).map(|i| z.byte(i)).collect();
     assert_eq!(
         got,
-        [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0x80, 0x81, 0x82]
+        [
+            3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0x80, 0x81, 0x82
+        ]
     );
 }
 

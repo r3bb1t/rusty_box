@@ -105,7 +105,9 @@ impl Progress {
     #[inline]
     pub const fn checked_add(self, later: Self) -> Result<Self, MixedProgress> {
         match (self, later) {
-            (Self::Instructions(a), Self::Instructions(b)) => Ok(Self::Instructions(a.saturating_add(b))),
+            (Self::Instructions(a), Self::Instructions(b)) => {
+                Ok(Self::Instructions(a.saturating_add(b)))
+            }
             (Self::Ticks(a), Self::Ticks(b)) => Ok(Self::Ticks(a.saturating_add(b))),
             (before, later) => Err(MixedProgress { before, later }),
         }

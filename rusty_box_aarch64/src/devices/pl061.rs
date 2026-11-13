@@ -43,7 +43,7 @@
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
-use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
+use crate::bus::{AccessWidth, RegOffset, read_by_words, write_by_words};
 
 /// The registers' offsets in the region (DDI 0190B Table 3-1).
 const GPIODATA_LAST: u64 = 0x3FC;
@@ -208,7 +208,18 @@ impl Pl061 {
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
         let mut b = [0u8; 10];
         r.read_bytes(&mut b)?;
-        let [data, external, old_levels, dir, isense, ibe, iev, im, edges, afsel] = b;
+        let [
+            data,
+            external,
+            old_levels,
+            dir,
+            isense,
+            ibe,
+            iev,
+            im,
+            edges,
+            afsel,
+        ] = b;
         *self = Self {
             data,
             external,
@@ -262,12 +273,12 @@ mod tests {
         write(&mut gpio, GPIOIBE, LINE);
         write(&mut gpio, GPIOIE, LINE);
         assert!(!gpio.irq());
-        gpio.set_input(BUTTON,true);
+        gpio.set_input(BUTTON, true);
         assert!(gpio.irq(), "the press is an edge");
         assert_eq!(read(&mut gpio, GPIODATA_LAST) & LINE, LINE);
         write(&mut gpio, GPIOIC, LINE);
         assert!(!gpio.irq());
-        gpio.set_input(BUTTON,false);
+        gpio.set_input(BUTTON, false);
         assert!(gpio.irq(), "so is the release");
     }
 
@@ -277,7 +288,7 @@ mod tests {
     #[test]
     fn an_output_reads_what_it_drives_and_an_input_what_the_outside_drives() {
         let mut gpio = Pl061::new();
-        gpio.set_input(BUTTON,true);
+        gpio.set_input(BUTTON, true);
         write(&mut gpio, GPIODIR, LINE);
         write(&mut gpio, GPIODATA_LAST, 0);
         assert_eq!(read(&mut gpio, GPIODATA_LAST), 0);
@@ -332,11 +343,11 @@ mod tests {
         write(&mut gpio, GPIOIS, LINE);
         write(&mut gpio, GPIOIEV, LINE);
         write(&mut gpio, GPIOIE, LINE);
-        gpio.set_input(BUTTON,true);
+        gpio.set_input(BUTTON, true);
         assert!(gpio.irq());
         write(&mut gpio, GPIOIC, LINE);
         assert!(gpio.irq(), "still held high");
-        gpio.set_input(BUTTON,false);
+        gpio.set_input(BUTTON, false);
         assert!(!gpio.irq(), "the level went");
         assert_eq!(read(&mut gpio, GPIORIS), 0);
     }
@@ -346,7 +357,7 @@ mod tests {
     fn a_masked_edge_shows_in_the_raw_status_only() {
         let mut gpio = Pl061::new();
         write(&mut gpio, GPIOIEV, LINE);
-        gpio.set_input(BUTTON,true);
+        gpio.set_input(BUTTON, true);
         assert_eq!(read(&mut gpio, GPIORIS), LINE);
         assert_eq!(read(&mut gpio, GPIOMIS), 0);
         assert!(!gpio.irq());
@@ -361,7 +372,7 @@ mod tests {
         write(&mut gpio, GPIODATA_LAST, LINE);
         write(&mut gpio, GPIOAFSEL, LINE);
         assert_eq!(read(&mut gpio, GPIODATA_LAST), 0);
-        gpio.set_input(BUTTON,true);
+        gpio.set_input(BUTTON, true);
         assert_eq!(read(&mut gpio, GPIODATA_LAST), LINE);
     }
 
@@ -371,7 +382,7 @@ mod tests {
         let mut gpio = Pl061::new();
         write(&mut gpio, GPIOIBE, LINE);
         write(&mut gpio, GPIOIE, LINE);
-        gpio.set_input(BUTTON,true);
+        gpio.set_input(BUTTON, true);
         assert!(gpio.irq());
         gpio.reset();
         assert!(!gpio.irq());

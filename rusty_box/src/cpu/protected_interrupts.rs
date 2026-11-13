@@ -3,14 +3,12 @@
 //!
 //! Based on Bochs cpu/exception.cc protected_mode_int
 
-use super::{
-    cpu::Exception,
-    decoder::BxSegregs,
-    descriptor::{BxDescriptor, BxSegmentReg, BxSelector, SystemAndGateDescriptorEnum},
-    eflags::EFlags,
-    segment_ctrl_pro::parse_selector,
-    Result,
-};
+use super::Result;
+use super::cpu::Exception;
+use super::decoder::BxSegregs;
+use super::descriptor::{BxDescriptor, BxSegmentReg, BxSelector, SystemAndGateDescriptorEnum};
+use super::eflags::EFlags;
+use super::segment_ctrl_pro::parse_selector;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Handle interrupt in protected mode via IDT
@@ -24,10 +22,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     ) -> Result<()> {
         // Only log for exceptions (vectors 0-31), not hardware IRQs (32+)
         if vector < 32 {
-            tracing::trace!("PM_INT: vec={:#04x} IDTR.base={:#010x} IDTR.limit={:#06x} CPL={} RIP={:#010x} icount={}",
-                vector, self.idtr.base, self.idtr.limit,
+            tracing::trace!(
+                "PM_INT: vec={:#04x} IDTR.base={:#010x} IDTR.limit={:#06x} CPL={} RIP={:#010x} icount={}",
+                vector,
+                self.idtr.base,
+                self.idtr.limit,
                 self.sregs[BxSegregs::Cs as usize].selector.rpl,
-                self.rip(), self.icount);
+                self.rip(),
+                self.icount
+            );
         }
         // Bochs: error code for IDT descriptor errors = vector*8 + 2 + EXT
         let idt_error_code = (vector as u16) * 8 + 2;
@@ -147,15 +150,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     Err(_) => {
                         return Err(super::error::CpuError::BadVector {
                             vector: Exception::Ts,
-                            error_code: raw_tss_selector & 0xfffc,
-                        })
+                            error_code: raw_tss_selector & 0xFFFC,
+                        });
                     }
                 };
                 let tss_descriptor =
                     self.parse_descriptor(tss_dword1, tss_dword2).map_err(|_| {
                         super::error::CpuError::BadVector {
                             vector: Exception::Ts,
-                            error_code: raw_tss_selector & 0xfffc,
+                            error_code: raw_tss_selector & 0xFFFC,
                         }
                     })?;
 
@@ -217,7 +220,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let gate_dest_selector = gate_descriptor.u.gate_dest_selector();
         let gate_dest_offset = gate_descriptor.u.gate_dest_offset();
 
-        if (gate_dest_selector & 0xfffc) == 0 {
+        if (gate_dest_selector & 0xFFFC) == 0 {
             tracing::error!("handle_interrupt_trap_gate(): selector null");
             // Bochs exception.cc: #GP(0) for null selector
             return Err(super::error::CpuError::BadVector {
@@ -229,14 +232,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut cs_selector = BxSelector::default();
         parse_selector(gate_dest_selector, &mut cs_selector);
 
-        let cs_err_code = cs_selector.value & 0xfffc;
+        let cs_err_code = cs_selector.value & 0xFFFC;
         let (cs_dword1, cs_dword2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
             Err(_) => {
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
                     error_code: cs_err_code,
-                })
+                });
             }
         };
         let cs_descriptor = self.parse_descriptor(cs_dword1, cs_dword2).map_err(|_| {
@@ -298,7 +301,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 && (super::descriptor::is_code_segment_conforming(cs_descriptor.r#type)
                     || cs_descriptor.dpl != 0)
             {
-                tracing::error!("handle_interrupt_trap_gate(): code segment conforming or DPL({}) != 0 in v8086 mode", cs_descriptor.dpl);
+                tracing::error!(
+                    "handle_interrupt_trap_gate(): code segment conforming or DPL({}) != 0 in v8086 mode",
+                    cs_descriptor.dpl
+                );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
                     error_code: cs_err_code,
@@ -379,11 +385,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                         bytes[i as usize] = self.mem_read_byte(pa);
                     }
                 }
-                tracing::trace!("PM_INT: loading CS sel={:#06x} base={:#010x} limit={:#010x} d_b={} -> EIP={:#010x} (linear={:#010x})",
-                    new_cs_selector.value, base,
+                tracing::trace!(
+                    "PM_INT: loading CS sel={:#06x} base={:#010x} limit={:#010x} d_b={} -> EIP={:#010x} (linear={:#010x})",
+                    new_cs_selector.value,
+                    base,
                     cs_descriptor.u.segment_limit_scaled(),
                     cs_descriptor.u.segment_d_b(),
-                    gate_dest_offset, linear);
+                    gate_dest_offset,
+                    linear
+                );
                 tracing::trace!("PM_INT: handler bytes @ {:#010x}: {:02x?}", linear, bytes);
             }
 
@@ -461,12 +471,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
-                error_code: cs_selector.value & 0xfffc,
+                error_code: cs_selector.value & 0xFFFC,
             });
         }
 
         // Bochs exception.cc: Selector must be non-null else #TS(0)
-        if (ss_for_cpl_x & 0xfffc) == 0 {
+        if (ss_for_cpl_x & 0xFFFC) == 0 {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS selector null");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Ts,
@@ -477,14 +487,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Parse SS selector and fetch descriptor (matches lines 462-465)
         let mut ss_selector = BxSelector::default();
         parse_selector(ss_for_cpl_x, &mut ss_selector);
-        let ss_err_code = ss_for_cpl_x & 0xfffc;
+        let ss_err_code = ss_for_cpl_x & 0xFFFC;
         let (ss_dword1, ss_dword2) = match self.fetch_raw_descriptor(&ss_selector) {
             Ok(v) => v,
             Err(_) => {
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Ts,
                     error_code: ss_err_code,
-                })
+                });
             }
         };
         let ss_descriptor = self.parse_descriptor(ss_dword1, ss_dword2).map_err(|_| {
@@ -555,7 +565,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
         new_stack.selector.rpl = cs_descriptor.dpl;
         new_stack.selector.value =
-            (new_stack.selector.value & 0xfffc) | new_stack.selector.rpl as u16;
+            (new_stack.selector.value & 0xFFFC) | new_stack.selector.rpl as u16;
 
         let is_386_gate = gate_descriptor.r#type >= 14;
 
@@ -956,7 +966,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if gate_descriptor.valid == 0 || gate_descriptor.segment {
             tracing::trace!(
                 "long_mode_int(): gate descriptor is not valid sys seg: vector={} type={:#x} dword1={:#010x} dword2={:#010x} dword3={:#010x} idt_addr={:#x} icount={}",
-                { vector }, gate_descriptor.r#type, dword1, dword2, dword3, idt_entry_addr, self.icount
+                { vector },
+                gate_descriptor.r#type,
+                dword1,
+                dword2,
+                dword3,
+                idt_entry_addr,
+                self.icount
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
@@ -1008,7 +1024,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let ist = gate_descriptor.u.gate_param_count() & 0x7;
 
         // CS selector must be non-null
-        if (gate_dest_selector & 0xfffc) == 0 {
+        if (gate_dest_selector & 0xFFFC) == 0 {
             tracing::error!("long_mode_int(): selector null");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
@@ -1019,14 +1035,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut cs_selector = BxSelector::default();
         parse_selector(gate_dest_selector, &mut cs_selector);
 
-        let cs_err_code = cs_selector.value & 0xfffc;
+        let cs_err_code = cs_selector.value & 0xFFFC;
         let (cs_dword1, cs_dword2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
             Err(_) => {
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
                     error_code: cs_err_code,
-                })
+                });
             }
         };
         let cs_descriptor = self.parse_descriptor(cs_dword1, cs_dword2).map_err(|_| {
@@ -1270,14 +1286,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Err(_) => {
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Ts,
-                    error_code: raw_tss_selector & 0xfffc,
-                })
+                    error_code: raw_tss_selector & 0xFFFC,
+                });
             }
         };
         let tss_descriptor = self.parse_descriptor(tss_dword1, tss_dword2).map_err(|_| {
             super::error::CpuError::BadVector {
                 vector: Exception::Ts,
-                error_code: raw_tss_selector & 0xfffc,
+                error_code: raw_tss_selector & 0xFFFC,
             }
         })?;
 
@@ -1296,7 +1312,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let tss_type = tss_descriptor.r#type;
         if tss_type != 0x1 && tss_type != 0x9 {
             // Must be AVAIL_286_TSS (0x1) or AVAIL_386_TSS (0x9)
-            tracing::error!("handle_task_gate(): TSS selector points to bad TSS type ({:#x}) - #GP(tss_selector)", tss_type);
+            tracing::error!(
+                "handle_task_gate(): TSS selector points to bad TSS type ({:#x}) - #GP(tss_selector)",
+                tss_type
+            );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
                 error_code: 0,

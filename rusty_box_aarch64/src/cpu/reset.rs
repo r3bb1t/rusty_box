@@ -285,7 +285,12 @@ mod tests {
             let mut cpu = processor::<L>(imp);
             assert!(cpu.x.iter().all(|&x| filled(x)));
             cpu.zero_the_fill();
-            assert!(cpu.x.iter().chain([&cpu.sp_el0, &cpu.sp_el1]).all(|&x| x == 0));
+            assert!(
+                cpu.x
+                    .iter()
+                    .chain([&cpu.sp_el0, &cpu.sp_el1])
+                    .all(|&x| x == 0)
+            );
             assert!(cpu.v.iter().all(|&v| v == 0));
             assert_eq!(cpu.pstate.nzcv(), 0);
             for (i, value) in cpu.sys.to_array().into_iter().enumerate() {

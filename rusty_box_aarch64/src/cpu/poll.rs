@@ -93,9 +93,9 @@
 
 use super::decode::classify;
 use super::dp::add_with_carry;
-use super::exec::{bits, cond_holds, Nzcv};
+use super::exec::{Nzcv, bits, cond_holds};
 use super::features::Feature;
-use super::op::{predecode, Op};
+use super::op::{Op, predecode};
 use super::sysreg::SysRegKey;
 use super::trace::PollBound;
 use super::{Cpu, Levels, PC_HISTORY};

@@ -36,7 +36,7 @@ use super::el2::{HCR_TWE, HCR_TWI};
 use super::exception::{Exception, Route, SyndromeClass};
 use super::exec::{ExecResult, Fault, Flow};
 use super::timer::{Count, CountOffset, VirtualCount};
-use super::{sctlr, Activity, Cpu, El, Levels};
+use super::{Activity, Cpu, El, Levels, sctlr};
 
 /// What a waiting processor waits for (R2: each wait is a state of its own).
 /// A timed wait holds its timeout, a value of `CNTVCT_EL0` (Arm

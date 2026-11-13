@@ -89,7 +89,10 @@ impl X87View {
 }
 
 /// After FNINIT and FLD1: TOS 7, register 7 valid (1.0), the rest empty.
-const AFTER_FLD1: X87View = X87View { top: 7, tags: 0x3FFF };
+const AFTER_FLD1: X87View = X87View {
+    top: 7,
+    tags: 0x3FFF,
+};
 
 /// Run `code` and stop where it ends, failing if it faulted instead.
 fn run(emu: &mut Emulator, code: &[u8]) {
@@ -99,7 +102,11 @@ fn run(emu: &mut Emulator, code: &[u8]) {
     let end = CODE + code.len() as u64;
     emu.emu_start(CODE, Some(end), None, Some(64))
         .expect("execute");
-    assert_eq!(emu.cpu().rip(), end, "the sequence must run to its end, not fault");
+    assert_eq!(
+        emu.cpu().rip(),
+        end,
+        "the sequence must run to its end, not fault"
+    );
 }
 
 fn x87_view(emu: &mut Emulator) -> X87View {
@@ -158,7 +165,8 @@ const KEPT: u64 = 0xAAAA_BBBB_CCCC_DDDD;
 fn cvtpi2ps_from_mmx_converts_and_enters_mmx_state() {
     on_big_stack(|| {
         let mut emu = sse_emulator();
-        emu.mem_write(DATA, &ints(3, -2).to_le_bytes()).expect("data");
+        emu.mem_write(DATA, &ints(3, -2).to_le_bytes())
+            .expect("data");
         emu.reg_write_xmm(X86Reg::Xmm0, xmm([0, KEPT]));
         let code = [
             movq_mm1_from(DATA),
@@ -183,7 +191,8 @@ fn cvtpi2ps_from_mmx_converts_and_enters_mmx_state() {
 fn cvtpi2ps_from_memory_leaves_the_x87_state_alone() {
     on_big_stack(|| {
         let mut emu = sse_emulator();
-        emu.mem_write(DATA, &ints(-7, 100).to_le_bytes()).expect("data");
+        emu.mem_write(DATA, &ints(-7, 100).to_le_bytes())
+            .expect("data");
         emu.reg_write_xmm(X86Reg::Xmm0, xmm([0, KEPT]));
         let code = [
             FNINIT_FLD1.to_vec(),
@@ -205,7 +214,8 @@ fn cvtpi2ps_from_memory_leaves_the_x87_state_alone() {
 fn cvtpi2pd_converts_both_integers_to_doubles() {
     on_big_stack(|| {
         let mut emu = sse_emulator();
-        emu.mem_write(DATA, &ints(i32::MIN, 5).to_le_bytes()).expect("data");
+        emu.mem_write(DATA, &ints(i32::MIN, 5).to_le_bytes())
+            .expect("data");
         emu.reg_write_xmm(X86Reg::Xmm0, xmm([u64::MAX, u64::MAX]));
         let code = [
             movq_mm1_from(DATA),
@@ -249,10 +259,22 @@ fn float_to_mmx_conversions_truncate_or_round() {
     on_big_stack(|| {
         let singles = dwords(2.7f32.to_bits(), (-2.5f32).to_bits());
         let doubles = [2.5f64.to_bits(), (-3.7f64).to_bits()];
-        assert_eq!(to_mmx(&[0x0F, 0x2C], [singles, 0]), ints(2, -2), "cvttps2pi");
+        assert_eq!(
+            to_mmx(&[0x0F, 0x2C], [singles, 0]),
+            ints(2, -2),
+            "cvttps2pi"
+        );
         assert_eq!(to_mmx(&[0x0F, 0x2D], [singles, 0]), ints(3, -2), "cvtps2pi");
-        assert_eq!(to_mmx(&[0x66, 0x0F, 0x2C], doubles), ints(2, -3), "cvttpd2pi");
-        assert_eq!(to_mmx(&[0x66, 0x0F, 0x2D], doubles), ints(2, -4), "cvtpd2pi");
+        assert_eq!(
+            to_mmx(&[0x66, 0x0F, 0x2C], doubles),
+            ints(2, -3),
+            "cvttpd2pi"
+        );
+        assert_eq!(
+            to_mmx(&[0x66, 0x0F, 0x2D], doubles),
+            ints(2, -4),
+            "cvtpd2pi"
+        );
     });
 }
 
@@ -264,7 +286,10 @@ fn an_unrepresentable_float_becomes_the_integer_indefinite() {
         let singles = dwords(f32::NAN.to_bits(), 1.0f32.to_bits());
         assert_eq!(to_mmx(&[0x0F, 0x2D], [singles, 0]), dwords(0x8000_0000, 1));
         let doubles = [1.0e10f64.to_bits(), (-1.0f64).to_bits()];
-        assert_eq!(to_mmx(&[0x66, 0x0F, 0x2C], doubles), dwords(0x8000_0000, (-1i32) as u32));
+        assert_eq!(
+            to_mmx(&[0x66, 0x0F, 0x2C], doubles),
+            dwords(0x8000_0000, (-1i32) as u32)
+        );
     });
 }
 
@@ -293,6 +318,10 @@ fn cvtpd2pi_from_memory_needs_16_byte_alignment() {
         emu.mem_write(CODE, &misaligned).expect("write code");
         emu.emu_start(CODE, Some(GP_HANDLER), None, Some(4))
             .expect("execute");
-        assert_eq!(emu.cpu().rip(), GP_HANDLER, "a misaligned operand takes #GP");
+        assert_eq!(
+            emu.cpu().rip(),
+            GP_HANDLER,
+            "a misaligned operand takes #GP"
+        );
     });
 }

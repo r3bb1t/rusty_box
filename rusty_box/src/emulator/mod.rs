@@ -8,7 +8,20 @@
 //! allowing hundreds of emulator instances to run concurrently on different threads.
 
 #[cfg(feature = "alloc")]
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use core::sync::atomic::AtomicBool;
+
+use crate::Result;
+use crate::cpu::cpu::CpuActivityState;
+use crate::cpu::instrumentation::{ExitSet, Instrumentation};
+use crate::cpu::{BxCpuC, CpuidFreq, ResetReason, Result as CpuResult};
+#[cfg(feature = "alloc")]
 use crate::gui::BxGui;
+use crate::iodev::BxDevicesC;
+use crate::iodev::devices::{DeviceManager, SystemControlPort};
+use crate::memory::{BxMemC, BxMemoryStubC};
+use crate::params::BxParams;
+use crate::pc_system::BxPcSystemC;
 #[cfg(feature = "std")]
 use crate::pc_system::TimerOwner;
 #[cfg(feature = "std")]
@@ -17,32 +30,14 @@ use crate::snapshot::Restated;
 use crate::{
     cpu::builder::BxCpuBuilder, iodev::acpi_tables::AcpiTableGenerator, memory::MemoryError,
 };
-use crate::{
-    cpu::{
-        cpu::CpuActivityState,
-        instrumentation::{ExitSet, Instrumentation},
-        BxCpuC, CpuidFreq, ResetReason, Result as CpuResult,
-    },
-    iodev::{
-        devices::{DeviceManager, SystemControlPort},
-        BxDevicesC,
-    },
-    memory::{BxMemC, BxMemoryStubC},
-    params::BxParams,
-    pc_system::BxPcSystemC,
-    Result,
-};
-
-#[cfg(feature = "alloc")]
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::AtomicBool;
 
 mod builder;
+pub use builder::{AtaSlot, BootDevice, BootOrder, BuildError, DiskGeometry, MachineBuilder};
+
 /// Where a volatile disk keeps its writes, and a volatile disk carried from
 /// one machine to the next; named here beside the builder that takes them.
 #[cfg(feature = "std")]
 pub use crate::iodev::hdimage::{Journal, VolatileDisk};
-pub use builder::{AtaSlot, BootDevice, BootOrder, BuildError, DiskGeometry, MachineBuilder};
 mod debug;
 pub use debug::{DebugCpu, RamOffset};
 mod display;
@@ -2188,13 +2183,19 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         } else {
             (false, false)
         };
-        format!("s={:?} cmd={:#04x} ip={} acmd={:#04x} nIEN={} IOAPIC15[v={:#04x} m={} t={}] LAPIC[irr={} isr={}]",
-            d.controller.status, d.controller.current_command,
+        format!(
+            "s={:?} cmd={:#04x} ip={} acmd={:#04x} nIEN={} IOAPIC15[v={:#04x} m={} t={}] LAPIC[irr={} isr={}]",
+            d.controller.status,
+            d.controller.current_command,
             d.controller.interrupt_pending,
             d.atapi.command,
             d.controller.control & 0x02,
-            vec15, masked15 as u8, trig15,
-            irr_set, isr_set)
+            vec15,
+            masked15 as u8,
+            trig15,
+            irr_set,
+            isr_set
+        )
     }
 
     /// Get total I/O port read/write counters for diagnostics.
@@ -2451,11 +2452,11 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Dump key code addresses through requested-size block-aware copies.
         {
             let addrs: &[(u64, &str)] = &[
-                (0x01e1d340, "delay_loop_entry"),
-                (0x01e38ef0, "jmp_target_after_delay"),
+                (0x01E1D340, "delay_loop_entry"),
+                (0x01E38EF0, "jmp_target_after_delay"),
                 (0x01207430, "outer_loop_context"),
                 (0x01207460, "stack_ret_addr_1"),
-                (0x012074e0, "stack_ret_addr_2"),
+                (0x012074E0, "stack_ret_addr_2"),
             ];
             for (paddr, label) in addrs {
                 let code = self.peek_ram_at(*paddr as usize, 48);
@@ -2463,12 +2464,26 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                     tracing::trace!("--- {} (phys={:#010x}) ---", label, paddr);
                     for row in 0..3 {
                         let off = row * 16;
-                        tracing::trace!("  +{:02x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                        tracing::trace!(
+                            "  +{:02x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                             off,
-                            code[off], code[off+1], code[off+2], code[off+3],
-                            code[off+4], code[off+5], code[off+6], code[off+7],
-                            code[off+8], code[off+9], code[off+10], code[off+11],
-                            code[off+12], code[off+13], code[off+14], code[off+15]);
+                            code[off],
+                            code[off + 1],
+                            code[off + 2],
+                            code[off + 3],
+                            code[off + 4],
+                            code[off + 5],
+                            code[off + 6],
+                            code[off + 7],
+                            code[off + 8],
+                            code[off + 9],
+                            code[off + 10],
+                            code[off + 11],
+                            code[off + 12],
+                            code[off + 13],
+                            code[off + 14],
+                            code[off + 15]
+                        );
                     }
                 }
             }
@@ -2476,7 +2491,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Dump stack (16 qwords) through a manual page walk that reads only
         // the individual page-table entries and stack words it needs.
         let rsp = self.cpu_ref(0).rsp();
-        if rsp > 0xffffffff80000000 {
+        if rsp > 0xFFFFFFFF80000000 {
             let cr3 = self.cpu_ref(0).cr3 & !0xFFF;
             let mut read_stack_qword = |addr: u64| -> u64 {
                 let pml4_idx = (addr >> 39) & 0x1FF;
@@ -2516,7 +2531,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             for i in 0..16 {
                 let addr = rsp.wrapping_add(i * 8);
                 let val = read_stack_qword(addr);
-                let marker = if val > 0xffffffff81000000 && val < 0xffffffff82000000 {
+                let marker = if val > 0xFFFFFFFF81000000 && val < 0xFFFFFFFF82000000 {
                     " <-- kernel text?"
                 } else {
                     ""
@@ -2527,7 +2542,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Dump 64 bytes of code at current RIP via the same requested-size
         // physical reads used above.
         let rip = self.cpu_ref(0).rip();
-        if rip > 0xffffffff80000000 {
+        if rip > 0xFFFFFFFF80000000 {
             let cr3 = self.cpu_ref(0).cr3 & !0xFFF;
             let pml4_idx = (rip >> 39) & 0x1FF;
             let pdpt_idx = (rip >> 30) & 0x1FF;
@@ -2565,12 +2580,26 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                         tracing::trace!("--- Code at RIP={:#018x} (phys={:#010x}) ---", rip, paddr);
                         for row in 0..4 {
                             let off = row * 16;
-                            tracing::trace!("  {:016x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                            tracing::trace!(
+                                "  {:016x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                                 rip + off as u64,
-                                code[off], code[off+1], code[off+2], code[off+3],
-                                code[off+4], code[off+5], code[off+6], code[off+7],
-                                code[off+8], code[off+9], code[off+10], code[off+11],
-                                code[off+12], code[off+13], code[off+14], code[off+15]);
+                                code[off],
+                                code[off + 1],
+                                code[off + 2],
+                                code[off + 3],
+                                code[off + 4],
+                                code[off + 5],
+                                code[off + 6],
+                                code[off + 7],
+                                code[off + 8],
+                                code[off + 9],
+                                code[off + 10],
+                                code[off + 11],
+                                code[off + 12],
+                                code[off + 13],
+                                code[off + 14],
+                                code[off + 15]
+                            );
                         }
                     }
                 }

@@ -59,7 +59,10 @@ const DEFAULT_SIZE: ScreenSize = ScreenSize { rows: 24, cols: 80 };
 
 /// The largest screen a guest's resize request may make. GRUB on an EDK2
 /// console asks for 56 rows of 240.
-const MAX_SIZE: ScreenSize = ScreenSize { rows: 200, cols: 500 };
+const MAX_SIZE: ScreenSize = ScreenSize {
+    rows: 200,
+    cols: 500,
+};
 
 /// Lines kept above the screen.
 const SCROLLBACK_LINES: usize = 1000;
@@ -96,7 +99,8 @@ impl vt100::Callbacks for GuestResize {
     // `vt100` hands the request over as `(rows, cols)`.
     fn resize(&mut self, screen: &mut vt100::Screen, (rows, cols): (u16, u16)) {
         let wanted = ScreenSize { rows, cols };
-        if (1..=MAX_SIZE.rows).contains(&wanted.rows) && (1..=MAX_SIZE.cols).contains(&wanted.cols) {
+        if (1..=MAX_SIZE.rows).contains(&wanted.rows) && (1..=MAX_SIZE.cols).contains(&wanted.cols)
+        {
             screen.set_size(wanted.rows, wanted.cols);
         }
     }
@@ -224,7 +228,11 @@ impl SerialTerminal {
     /// The scrollback and the screen as one block of text, oldest line
     /// first, in `font` and the guest's colours over `colours`, with the
     /// cursor shown where the guest left it visible.
-    pub(crate) fn layout(&mut self, font: &egui::FontId, colours: TerminalColours) -> egui::text::LayoutJob {
+    pub(crate) fn layout(
+        &mut self,
+        font: &egui::FontId,
+        colours: TerminalColours,
+    ) -> egui::text::LayoutJob {
         if let Some(drawn) = &self.drawn {
             if drawn.font == *font && drawn.colours == colours {
                 return drawn.job.clone();
@@ -232,7 +240,9 @@ impl SerialTerminal {
         }
         let mut job = egui::text::LayoutJob::default();
         job.wrap.max_width = f32::INFINITY;
-        self.for_each_line(|screen, row, cursor| append_row(&mut job, screen, row, cursor, font, colours));
+        self.for_each_line(|screen, row, cursor| {
+            append_row(&mut job, screen, row, cursor, font, colours)
+        });
         // Lines are separated, not ended: a final newline would lay out one
         // more, empty, row, and the text's height divided by its lines is
         // the row height the panel scrolls by. `LayoutJob::append` merges a
@@ -313,19 +323,24 @@ pub(crate) fn terminal_input(event: &egui::Event, application_cursor: bool) -> O
 /// xterm's modifier parameter: 1, plus 1 for Shift, 2 for Alt, 4 for Ctrl;
 /// `None` when no modifier is held.
 fn modifier_parameter(modifiers: egui::Modifiers) -> Option<u8> {
-    let parameter = 1 + u8::from(modifiers.shift) + 2 * u8::from(modifiers.alt) + 4 * u8::from(modifiers.ctrl);
+    let parameter =
+        1 + u8::from(modifiers.shift) + 2 * u8::from(modifiers.alt) + 4 * u8::from(modifiers.ctrl);
     (parameter > 1).then_some(parameter)
 }
 
 /// A key that types no text, as xterm sends it.
-fn key_input(key: egui::Key, modifiers: egui::Modifiers, application_cursor: bool) -> Option<Vec<u8>> {
+fn key_input(
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+    application_cursor: bool,
+) -> Option<Vec<u8>> {
     use egui::Key;
     // Cursor keys and Home/End: `ESC [ final`, or `ESC O final` in
     // application mode; with a modifier, `ESC [ 1 ; modifier final`.
     let cursor = |final_byte: u8| match modifier_parameter(modifiers) {
         Some(parameter) => format!("\x1b[1;{parameter}{}", char::from(final_byte)).into_bytes(),
-        None if application_cursor => vec![0x1b, b'O', final_byte],
-        None => vec![0x1b, b'[', final_byte],
+        None if application_cursor => vec![0x1B, b'O', final_byte],
+        None => vec![0x1B, b'[', final_byte],
     };
     // The editing keys and F5 up: `ESC [ number ~`, with a modifier
     // `ESC [ number ; modifier ~`.
@@ -336,7 +351,7 @@ fn key_input(key: egui::Key, modifiers: egui::Modifiers, application_cursor: boo
     // F1 to F4: `ESC O final`, with a modifier `ESC [ 1 ; modifier final`.
     let function = |final_byte: u8| match modifier_parameter(modifiers) {
         Some(parameter) => format!("\x1b[1;{parameter}{}", char::from(final_byte)).into_bytes(),
-        None => vec![0x1b, b'O', final_byte],
+        None => vec![0x1B, b'O', final_byte],
     };
     let bytes = match key {
         Key::Enter => vec![b'\r'],
@@ -449,11 +464,14 @@ fn append_row(
     let cols = ScreenSize::of(screen).cols;
     let shown = |col: u16| {
         Some(col) == cursor
-            || screen
-                .cell(row, col)
-                .is_some_and(|cell| cell.has_contents() || cell.bgcolor() != vt100::Color::Default || cell.inverse())
+            || screen.cell(row, col).is_some_and(|cell| {
+                cell.has_contents() || cell.bgcolor() != vt100::Color::Default || cell.inverse()
+            })
     };
-    let end = (0..cols).rev().find(|&col| shown(col)).map_or(0, |col| col.saturating_add(1));
+    let end = (0..cols)
+        .rev()
+        .find(|&col| shown(col))
+        .map_or(0, |col| col.saturating_add(1));
     let mut run = String::new();
     let mut run_format: Option<egui::TextFormat> = None;
     for col in 0..end {
@@ -492,7 +510,12 @@ fn append_row(
 
 /// How a cell is drawn: its colours, bold brightening the eight base
 /// colours as on a VT100 console, inverse (or the cursor) swapping them.
-fn cell_format(cell: &vt100::Cell, cursor: bool, font: &egui::FontId, colours: TerminalColours) -> egui::TextFormat {
+fn cell_format(
+    cell: &vt100::Cell,
+    cursor: bool,
+    font: &egui::FontId,
+    colours: TerminalColours,
+) -> egui::TextFormat {
     let foreground = match (cell.fgcolor(), cell.bold()) {
         (vt100::Color::Idx(index @ 0..=7), true) => palette(index.saturating_add(8)),
         (colour, _) => colour_of(colour).unwrap_or(colours.foreground),
@@ -528,7 +551,10 @@ fn colour_of(colour: vt100::Color) -> Option<egui::Color32> {
 /// cube, then 24 greys from 8 to 238.
 fn palette(index: u8) -> egui::Color32 {
     let rgb = match index {
-        0..=15 => BASE_COLOURS.get(usize::from(index)).copied().unwrap_or([0; 3]),
+        0..=15 => BASE_COLOURS
+            .get(usize::from(index))
+            .copied()
+            .unwrap_or([0; 3]),
         16..=231 => {
             let cube = index - 16;
             let level = |n: u8| CUBE_LEVELS.get(usize::from(n % 6)).copied().unwrap_or(0);
@@ -568,7 +594,10 @@ mod tests {
     #[test]
     fn a_guest_resize_request_sizes_the_screen() {
         let mut terminal = fed("\x1b[8;056;240t");
-        let grub = ScreenSize { rows: 56, cols: 240 };
+        let grub = ScreenSize {
+            rows: 56,
+            cols: 240,
+        };
         assert_eq!(terminal.size(), grub);
         terminal.catch_up("\x1b[8;056;240t\x1b[8;9999;9999t", 30);
         assert_eq!(terminal.size(), grub, "a size past the limit is refused");
@@ -580,7 +609,10 @@ mod tests {
     fn catching_up_feeds_the_new_bytes_once() {
         let mut terminal = fed("one\r\n");
         terminal.catch_up("one\r\ntwo\r\n", 10);
-        assert_eq!(terminal.text().lines().take(2).collect::<Vec<_>>(), ["one", "two"]);
+        assert_eq!(
+            terminal.text().lines().take(2).collect::<Vec<_>>(),
+            ["one", "two"]
+        );
 
         // The log kept only its last line of thirty bytes written.
         terminal.catch_up("ten\r\n", 30);
@@ -598,7 +630,11 @@ mod tests {
         let job = terminal.layout(&egui::FontId::monospace(11.0), colours);
         assert!(job.text.starts_with("RB"));
         // One section per run of cells drawn alike: "R", then "B".
-        let colours: Vec<egui::Color32> = job.sections.iter().map(|section| section.format.color).collect();
+        let colours: Vec<egui::Color32> = job
+            .sections
+            .iter()
+            .map(|section| section.format.color)
+            .collect();
         assert_eq!(colours.first(), Some(&palette(1)));
         assert_eq!(colours.get(1), Some(&palette(12)));
     }
@@ -615,12 +651,19 @@ mod tests {
         };
         let job = terminal.layout(&egui::FontId::monospace(11.0), colours);
         let rows = usize::from(terminal.size().rows);
-        assert_eq!(job.text.matches('\n').count(), rows - 1, "the screen's rows are separated, not ended");
-        let covered = job
-            .sections
-            .iter()
-            .try_fold(0, |at, section| (section.byte_range.start.0 == at).then_some(section.byte_range.end.0));
-        assert_eq!(covered, Some(job.text.len()), "the sections cover the text without a gap");
+        assert_eq!(
+            job.text.matches('\n').count(),
+            rows - 1,
+            "the screen's rows are separated, not ended"
+        );
+        let covered = job.sections.iter().try_fold(0, |at, section| {
+            (section.byte_range.start.0 == at).then_some(section.byte_range.end.0)
+        });
+        assert_eq!(
+            covered,
+            Some(job.text.len()),
+            "the sections cover the text without a gap"
+        );
     }
 
     /// Lines scrolled off the screen's top stay above it, oldest first.
@@ -644,7 +687,11 @@ mod tests {
         // 31 lines on a 24-row screen: 7 above it, the cursor on row 23.
         assert_eq!(terminal.cursor_cell(), Some(TextCell { line: 30, col: 2 }));
         terminal.catch_up(&format!("{lines}ab\x1b[?25l"), (lines.len() + 8) as u64);
-        assert_eq!(terminal.cursor_cell(), None, "a hidden cursor is not followed");
+        assert_eq!(
+            terminal.cursor_cell(),
+            None,
+            "a hidden cursor is not followed"
+        );
     }
 
     fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
@@ -662,17 +709,39 @@ mod tests {
     fn keys_are_sent_as_xterm_sends_them() {
         let none = egui::Modifiers::NONE;
         let input = |event: egui::Event| terminal_input(&event, false);
-        assert_eq!(input(egui::Event::Text("ls".to_owned())), Some(b"ls".to_vec()));
+        assert_eq!(
+            input(egui::Event::Text("ls".to_owned())),
+            Some(b"ls".to_vec())
+        );
         assert_eq!(input(key(egui::Key::Enter, none)), Some(b"\r".to_vec()));
         assert_eq!(input(key(egui::Key::Backspace, none)), Some(vec![0x7F]));
-        assert_eq!(input(key(egui::Key::ArrowUp, none)), Some(b"\x1b[A".to_vec()));
-        assert_eq!(input(key(egui::Key::ArrowUp, egui::Modifiers::CTRL)), Some(b"\x1b[1;5A".to_vec()));
-        assert_eq!(input(key(egui::Key::Delete, none)), Some(b"\x1b[3~".to_vec()));
+        assert_eq!(
+            input(key(egui::Key::ArrowUp, none)),
+            Some(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            input(key(egui::Key::ArrowUp, egui::Modifiers::CTRL)),
+            Some(b"\x1b[1;5A".to_vec())
+        );
+        assert_eq!(
+            input(key(egui::Key::Delete, none)),
+            Some(b"\x1b[3~".to_vec())
+        );
         assert_eq!(input(key(egui::Key::F1, none)), Some(b"\x1bOP".to_vec()));
         assert_eq!(input(key(egui::Key::F5, none)), Some(b"\x1b[15~".to_vec()));
-        assert_eq!(input(key(egui::Key::D, egui::Modifiers::CTRL)), Some(vec![0x04]));
-        assert_eq!(input(egui::Event::Copy), Some(vec![0x03]), "Ctrl+C interrupts");
-        assert_eq!(input(egui::Event::Paste("a\nb".to_owned())), Some(b"a\nb".to_vec()));
+        assert_eq!(
+            input(key(egui::Key::D, egui::Modifiers::CTRL)),
+            Some(vec![0x04])
+        );
+        assert_eq!(
+            input(egui::Event::Copy),
+            Some(vec![0x03]),
+            "Ctrl+C interrupts"
+        );
+        assert_eq!(
+            input(egui::Event::Paste("a\nb".to_owned())),
+            Some(b"a\nb".to_vec())
+        );
         // A letter without Ctrl types text, which arrives as Text.
         assert_eq!(input(key(egui::Key::D, none)), None);
     }
@@ -683,9 +752,15 @@ mod tests {
         let mut terminal = fed("\x1b[?1h");
         assert!(terminal.application_cursor());
         let up = key(egui::Key::ArrowUp, egui::Modifiers::NONE);
-        assert_eq!(terminal_input(&up, terminal.application_cursor()), Some(b"\x1bOA".to_vec()));
+        assert_eq!(
+            terminal_input(&up, terminal.application_cursor()),
+            Some(b"\x1bOA".to_vec())
+        );
         terminal.catch_up("\x1b[?1h\x1b[?1l", 10);
-        assert_eq!(terminal_input(&up, terminal.application_cursor()), Some(b"\x1b[A".to_vec()));
+        assert_eq!(
+            terminal_input(&up, terminal.application_cursor()),
+            Some(b"\x1b[A".to_vec())
+        );
     }
 
     #[test]

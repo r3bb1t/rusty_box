@@ -3,7 +3,7 @@
 //! an instruction.
 
 use crate::debugger::guest::{GuestMemory, GuestRead, Root};
-use crate::debugger::pe::{self, ExportRead, ExportTarget, ImageWidth, PeSection, HEADER_BYTES};
+use crate::debugger::pe::{self, ExportRead, ExportTarget, HEADER_BYTES, ImageWidth, PeSection};
 use crate::debugger::unwind::function_starts;
 
 /// An image past this is not copied.
@@ -54,7 +54,9 @@ pub(crate) enum ImageMiss {
     NoHeaders,
     /// Its headers do not read as PE.
     NotPe,
-    TooLarge { bytes: u64 },
+    TooLarge {
+        bytes: u64,
+    },
     NoMemory,
 }
 
@@ -64,7 +66,11 @@ impl ImageMiss {
             ImageMiss::NoHeaders => "its headers do not read".to_owned(),
             ImageMiss::NotPe => "its headers are not a PE image's".to_owned(),
             ImageMiss::TooLarge { bytes } => {
-                format!("it is {} MiB, past the {} MiB copied", bytes.wrapping_shr(20), MAX_IMAGE_BYTES.wrapping_shr(20))
+                format!(
+                    "it is {} MiB, past the {} MiB copied",
+                    bytes.wrapping_shr(20),
+                    MAX_IMAGE_BYTES.wrapping_shr(20)
+                )
             }
             ImageMiss::NoMemory => "there is no memory for its copy".to_owned(),
         }
@@ -76,7 +82,10 @@ impl ImageMiss {
 /// hole; then gathers the offsets known to start an instruction — the entry
 /// point, the exports that lie in code (a forwarder is not code), and for a
 /// 64-bit image the begin of every `RUNTIME_FUNCTION`, read from the copy.
-pub(crate) fn copy_image<G: GuestMemory>(memory: &mut G, at: ImageAt) -> Result<ModuleImage, ImageMiss> {
+pub(crate) fn copy_image<G: GuestMemory>(
+    memory: &mut G,
+    at: ImageAt,
+) -> Result<ModuleImage, ImageMiss> {
     if at.size > MAX_IMAGE_BYTES {
         return Err(ImageMiss::TooLarge { bytes: at.size });
     }
@@ -88,7 +97,9 @@ pub(crate) fn copy_image<G: GuestMemory>(memory: &mut G, at: ImageAt) -> Result<
     let width = pe::image_width(&header).ok_or(ImageMiss::NotPe)?;
     let sections = pe::parse_sections(&header).ok_or(ImageMiss::NotPe)?;
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(size).map_err(|_| ImageMiss::NoMemory)?;
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| ImageMiss::NoMemory)?;
     bytes.resize(size, 0);
     let mut pages = Vec::new();
     for (index, page) in bytes.chunks_mut(PAGE_BYTES as usize).enumerate() {
@@ -101,7 +112,14 @@ pub(crate) fn copy_image<G: GuestMemory>(memory: &mut G, at: ImageAt) -> Result<
             }
         }
     }
-    let mut image = ModuleImage { base: at.base, width, bytes, pages, sections, sync: Vec::new() };
+    let mut image = ModuleImage {
+        base: at.base,
+        width,
+        bytes,
+        pages,
+        sections,
+        sync: Vec::new(),
+    };
     image.sync = sync_points(&image, &header);
     Ok(image)
 }
@@ -111,7 +129,9 @@ impl ModuleImage {
     pub(crate) fn in_code(&self, rva: u64) -> bool {
         self.sections.iter().any(|section| {
             section.executable
-                && rva.checked_sub(u64::from(section.rva)).is_some_and(|into| into < u64::from(section.virtual_size))
+                && rva
+                    .checked_sub(u64::from(section.rva))
+                    .is_some_and(|into| into < u64::from(section.virtual_size))
         })
     }
 
@@ -123,7 +143,10 @@ impl ModuleImage {
         let first = start.checked_div(PAGE_BYTES as usize)?;
         let last = end.saturating_sub(1).checked_div(PAGE_BYTES as usize)?;
         let pages = self.pages.get(first..=last.max(first))?;
-        pages.iter().all(|page| *page == PageRead::Read).then_some(bytes)
+        pages
+            .iter()
+            .all(|page| *page == PageRead::Read)
+            .then_some(bytes)
     }
 }
 
@@ -140,7 +163,11 @@ fn sync_points(image: &ModuleImage, header: &[u8]) -> Vec<ImageOffset> {
     }
     if image.width == ImageWidth::Bits64 {
         if let Some(directory) = pe::exception_directory(header) {
-            sync.extend(function_starts(&image.bytes, directory).into_iter().map(u64::from));
+            sync.extend(
+                function_starts(&image.bytes, directory)
+                    .into_iter()
+                    .map(u64::from),
+            );
         }
     }
     sync.retain(|rva| image.in_code(*rva));
@@ -151,12 +178,13 @@ fn sync_points(image: &ModuleImage, header: &[u8]) -> Vec<ImageOffset> {
 
 #[cfg(test)]
 mod tests {
+    use rusty_box::cpu::{LinearRange, MappingWalk, PageMapping, WalkStep};
+
     use super::*;
     use crate::debugger::guest::fake::{FakeGuest, PAGE};
     use crate::debugger::guest::{GuestMemory, GuestRead, Root};
     use crate::debugger::pe::ImageWidth;
-    use crate::debugger::xref::test_image::{build_image, Function, ImageSpec};
-    use rusty_box::cpu::{LinearRange, MappingWalk, PageMapping, WalkStep};
+    use crate::debugger::xref::test_image::{Function, ImageSpec, build_image};
 
     const CR3: u64 = 0x5000;
     const BASE: u64 = 0x1_4000_0000;
@@ -165,7 +193,16 @@ mod tests {
         let mut spec = ImageSpec::bits64(0x3000);
         spec.entry = 0x1200;
         spec.exports = vec![0x1100, 0x2000];
-        spec.functions = vec![Function { begin: 0x1100, end: 0x1180 }, Function { begin: 0x1400, end: 0x1500 }];
+        spec.functions = vec![
+            Function {
+                begin: 0x1100,
+                end: 0x1180,
+            },
+            Function {
+                begin: 0x1400,
+                end: 0x1500,
+            },
+        ];
         spec
     }
 
@@ -176,7 +213,11 @@ mod tests {
     }
 
     fn at(size: u64) -> ImageAt {
-        ImageAt { base: BASE, size, root: Root::Live }
+        ImageAt {
+            base: BASE,
+            size,
+            root: Root::Live,
+        }
     }
 
     #[test]
@@ -188,13 +229,22 @@ mod tests {
         assert_eq!(image.base, BASE);
         assert_eq!(image.bytes, bytes);
         assert!(image.pages.iter().all(|page| *page == PageRead::Read));
-        let names: Vec<&str> = image.sections.iter().map(|section| section.name.as_str()).collect();
+        let names: Vec<&str> = image
+            .sections
+            .iter()
+            .map(|section| section.name.as_str())
+            .collect();
         assert_eq!(names, [".text", ".data"]);
         // The entry, both exports and both function begins; the export at
         // 0x1100 is also a function's begin and appears once.
         assert_eq!(
             image.sync,
-            [ImageOffset(0x1100), ImageOffset(0x1200), ImageOffset(0x1400), ImageOffset(0x2000)]
+            [
+                ImageOffset(0x1100),
+                ImageOffset(0x1200),
+                ImageOffset(0x1400),
+                ImageOffset(0x2000)
+            ]
         );
     }
 
@@ -208,7 +258,14 @@ mod tests {
         let image = copy_image(&mut guest, at(bytes.len() as u64)).expect("an image");
         assert_eq!(image.pages[3], PageRead::Hole);
         assert!(image.bytes[0x3000..0x4000].iter().all(|byte| *byte == 0));
-        assert_eq!(image.pages.iter().filter(|page| **page == PageRead::Hole).count(), 1);
+        assert_eq!(
+            image
+                .pages
+                .iter()
+                .filter(|page| **page == PageRead::Hole)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -218,7 +275,14 @@ mod tests {
         let bytes = build_image(&spec);
         let image = copy_image(&mut guest_with(&bytes), at(bytes.len() as u64)).expect("an image");
         assert_eq!(image.width, ImageWidth::Bits32);
-        assert_eq!(image.sync, [ImageOffset(0x1100), ImageOffset(0x1200), ImageOffset(0x2000)]);
+        assert_eq!(
+            image.sync,
+            [
+                ImageOffset(0x1100),
+                ImageOffset(0x1200),
+                ImageOffset(0x2000)
+            ]
+        );
     }
 
     /// A guest that counts the pages it was asked to translate.
@@ -248,9 +312,15 @@ mod tests {
     #[test]
     fn an_image_past_256_mib_is_refused_before_it_is_read() {
         let bytes = build_image(&spec());
-        let mut counting = Counting { guest: guest_with(&bytes), translated: 0 };
+        let mut counting = Counting {
+            guest: guest_with(&bytes),
+            translated: 0,
+        };
         let size = 257 << 20;
-        assert_eq!(copy_image(&mut counting, at(size)).err(), Some(ImageMiss::TooLarge { bytes: size }));
+        assert_eq!(
+            copy_image(&mut counting, at(size)).err(),
+            Some(ImageMiss::TooLarge { bytes: size })
+        );
         assert_eq!(counting.translated, 0);
     }
 
@@ -258,8 +328,14 @@ mod tests {
     fn bytes_that_are_not_pe_are_refused() {
         let mut guest = FakeGuest::new(CR3);
         guest.write(CR3, BASE, &[0x90; PAGE as usize * 2]);
-        assert_eq!(copy_image(&mut guest, at(PAGE * 2)).err(), Some(ImageMiss::NotPe));
+        assert_eq!(
+            copy_image(&mut guest, at(PAGE * 2)).err(),
+            Some(ImageMiss::NotPe)
+        );
         let mut empty = FakeGuest::new(CR3);
-        assert_eq!(copy_image(&mut empty, at(PAGE * 2)).err(), Some(ImageMiss::NoHeaders));
+        assert_eq!(
+            copy_image(&mut empty, at(PAGE * 2)).err(),
+            Some(ImageMiss::NoHeaders)
+        );
     }
 }

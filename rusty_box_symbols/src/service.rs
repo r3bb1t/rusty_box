@@ -11,15 +11,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::cab::{extract_single, is_cabinet, CabError};
+use crate::cab::{CabError, extract_single, is_cabinet};
 use crate::elf::AltLink;
-use crate::http::{classify, Flow, HttpClient, HttpError, Progress, Retry, StatusClass};
+use crate::http::{Flow, HttpClient, HttpError, Progress, Retry, StatusClass, classify};
 use crate::identity::{BuildId, IdentityMatch, ModuleIdentity, PdbId, PeImageId, TablesIdentity};
 use crate::module_file::ModuleFile;
-use crate::pe::{pdb_from_binary, BinaryPdbError, HeaderError};
+use crate::pe::{BinaryPdbError, HeaderError, pdb_from_binary};
 use crate::projects::ProjectIndex;
-use crate::store::{checked_file_name, FileStore, Placed, StoreError, SymbolStore};
-use crate::tables::{declared_identity, supplement_of, ParseError, SymbolTables};
+use crate::store::{FileStore, Placed, StoreError, SymbolStore, checked_file_name};
+use crate::tables::{ParseError, SymbolTables, declared_identity, supplement_of};
 
 /// The most a download may be: a cabinet's largest file.
 pub const DEFAULT_MAX_DOWNLOAD: u64 = 0x7FFF_8000;
@@ -52,22 +52,39 @@ pub enum ServerKind {
 /// Whether a downloaded file was kept in the store.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Kept {
-    InStore { path: PathBuf },
+    InStore {
+        path: PathBuf,
+    },
     /// Kept at `path` in place of a store file that did not load, which was
     /// moved to `bad` once this download verified.
-    Replaced { path: PathBuf, bad: PathBuf },
+    Replaced {
+        path: PathBuf,
+        bad: PathBuf,
+    },
     /// The tables loaded, but writing them to the store failed.
-    NotKept { reason: String },
+    NotKept {
+        reason: String,
+    },
 }
 
 /// Where loaded tables came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SymbolSource {
-    Attached { path: PathBuf },
-    Project { name: String, path: PathBuf },
-    Store { path: PathBuf },
+    Attached {
+        path: PathBuf,
+    },
+    Project {
+        name: String,
+        path: PathBuf,
+    },
+    Store {
+        path: PathBuf,
+    },
     /// The URL asked for (never a redirect's signed URL).
-    Server { url: String, kept: Kept },
+    Server {
+        url: String,
+        kept: Kept,
+    },
 }
 
 /// Whether an attached file of another build is loaded.
@@ -90,7 +107,11 @@ pub enum LocateError {
     #[error(transparent)]
     Http(#[from] HttpError),
     #[error("{url} answered {status}")]
-    Status { url: String, status: u16, retry: Retry },
+    Status {
+        url: String,
+        status: u16,
+        retry: Retry,
+    },
     #[error("{origin} does not parse: {source}")]
     Parse {
         origin: String,
@@ -104,7 +125,10 @@ pub enum LocateError {
         source: CabError,
     },
     #[error("{origin} describes {found}, not this module's build")]
-    WrongBuild { origin: String, found: TablesIdentity },
+    WrongBuild {
+        origin: String,
+        found: TablesIdentity,
+    },
     #[error("the module's binary does not give its PDB: {0}")]
     Binary(BinaryPdbError),
     #[error("{origin} is not a binary whose headers read: {source}")]
@@ -140,23 +164,41 @@ impl LocateError {
 
 /// What looking up a module's binary came to.
 pub enum ImageOutcome {
-    Loaded { file: Arc<ModuleFile>, from: SymbolSource },
+    Loaded {
+        file: Arc<ModuleFile>,
+        from: SymbolSource,
+    },
     /// Every server answered that it does not have the file.
     NotOnServer,
-    Unavailable { reason: LocateError },
+    Unavailable {
+        reason: LocateError,
+    },
 }
 
 /// What a lookup came to.
 pub enum LocateOutcome {
-    Loaded { tables: Arc<SymbolTables>, from: SymbolSource },
+    Loaded {
+        tables: Arc<SymbolTables>,
+        from: SymbolSource,
+    },
     /// An attached file of another build, refused; `Consent::LoadAnyway`
     /// loads it.
-    Refused { found: TablesIdentity, wanted: ModuleIdentity, path: PathBuf },
+    Refused {
+        found: TablesIdentity,
+        wanted: ModuleIdentity,
+        path: PathBuf,
+    },
     /// An attached file of another build, loaded on the owner's word.
-    Forced { tables: Arc<SymbolTables>, found: TablesIdentity, path: PathBuf },
+    Forced {
+        tables: Arc<SymbolTables>,
+        found: TablesIdentity,
+        path: PathBuf,
+    },
     /// Every server answered that it does not have the file.
     NotOnServer,
-    Unavailable { reason: LocateError },
+    Unavailable {
+        reason: LocateError,
+    },
 }
 
 /// Where a module's file lives: its store path, and the URLs to try, by
@@ -180,7 +222,9 @@ enum StoreCopy {
     /// A file this reader could not use, and why. It stays until a download
     /// of the build verifies: the store may be a debugger's too, and a file
     /// this reader rejects may serve it.
-    Unusable { reason: LocateError },
+    Unusable {
+        reason: LocateError,
+    },
 }
 
 impl StoreCopy {
@@ -233,7 +277,10 @@ fn keyed_urls(servers: &[String], file: &str, key: &str) -> Vec<Vec<String>> {
         .iter()
         .map(|server| {
             let server = server.trim_end_matches('/');
-            vec![format!("{server}/{file}/{key}/{file}"), format!("{server}/{file}/{key}/{}", compressed_name(file))]
+            vec![
+                format!("{server}/{file}/{key}/{file}"),
+                format!("{server}/{file}/{key}/{}", compressed_name(file)),
+            ]
         })
         .collect()
 }
@@ -241,7 +288,13 @@ fn keyed_urls(servers: &[String], file: &str, key: &str) -> Vec<Vec<String>> {
 fn debuginfod_urls(servers: &[String], build_id: &BuildId) -> Vec<Vec<String>> {
     servers
         .iter()
-        .map(|server| vec![format!("{}/buildid/{}/debuginfo", server.trim_end_matches('/'), build_id.to_hex())])
+        .map(|server| {
+            vec![format!(
+                "{}/buildid/{}/debuginfo",
+                server.trim_end_matches('/'),
+                build_id.to_hex()
+            )]
+        })
         .collect()
 }
 
@@ -261,17 +314,33 @@ fn image_of(bytes: Vec<u8>, wanted: PeImageId, origin: String) -> Result<ModuleF
 
 /// What an attached file comes to: taken when it is `wanted`'s build, else
 /// refused, or loaded as forced on `LoadAnyway`.
-fn judge_attached(tables: SymbolTables, path: &Path, wanted: &ModuleIdentity, consent: Consent) -> LocateOutcome {
+fn judge_attached(
+    tables: SymbolTables,
+    path: &Path,
+    wanted: &ModuleIdentity,
+    consent: Consent,
+) -> LocateOutcome {
     let found = tables.identity();
     match (wanted.matches(&found), consent) {
-        (IdentityMatch::Same, Consent::MatchOnly | Consent::LoadAnyway) => {
-            LocateOutcome::Loaded { tables: Arc::new(tables), from: SymbolSource::Attached { path: path.to_owned() } }
-        }
+        (IdentityMatch::Same, Consent::MatchOnly | Consent::LoadAnyway) => LocateOutcome::Loaded {
+            tables: Arc::new(tables),
+            from: SymbolSource::Attached {
+                path: path.to_owned(),
+            },
+        },
         (IdentityMatch::Different | IdentityMatch::Unknown, Consent::MatchOnly) => {
-            LocateOutcome::Refused { found, wanted: wanted.clone(), path: path.to_owned() }
+            LocateOutcome::Refused {
+                found,
+                wanted: wanted.clone(),
+                path: path.to_owned(),
+            }
         }
         (IdentityMatch::Different | IdentityMatch::Unknown, Consent::LoadAnyway) => {
-            LocateOutcome::Forced { tables: Arc::new(tables), found, path: path.to_owned() }
+            LocateOutcome::Forced {
+                tables: Arc::new(tables),
+                found,
+                path: path.to_owned(),
+            }
         }
     }
 }
@@ -279,14 +348,28 @@ fn judge_attached(tables: SymbolTables, path: &Path, wanted: &ModuleIdentity, co
 /// Loads a file the owner picked for `wanted`, read through `files` alone:
 /// how an attach works while the store does not open. A dwz supplement the
 /// file names is not looked for; the file loads without it.
-pub fn attach_file<F: FileStore>(files: &mut F, path: &Path, wanted: &ModuleIdentity, consent: Consent) -> LocateOutcome {
+pub fn attach_file<F: FileStore>(
+    files: &mut F,
+    path: &Path,
+    wanted: &ModuleIdentity,
+    consent: Consent,
+) -> LocateOutcome {
     let bytes = match files.read(path) {
         Ok(bytes) => bytes,
-        Err(error) => return LocateOutcome::Unavailable { reason: error.into() },
+        Err(error) => {
+            return LocateOutcome::Unavailable {
+                reason: error.into(),
+            };
+        }
     };
     match SymbolTables::parse_with_supplement(&bytes, None) {
         Ok(tables) => judge_attached(tables, path, wanted, consent),
-        Err(source) => LocateOutcome::Unavailable { reason: LocateError::Parse { origin: path.display().to_string(), source } },
+        Err(source) => LocateOutcome::Unavailable {
+            reason: LocateError::Parse {
+                origin: path.display().to_string(),
+                source,
+            },
+        },
     }
 }
 
@@ -298,7 +381,11 @@ pub struct SymbolService<F: FileStore, H: HttpClient> {
 
 impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
     pub fn new(store: SymbolStore<F>, http: H, config: ServiceConfig) -> Self {
-        SymbolService { store, http, config }
+        SymbolService {
+            store,
+            http,
+            config,
+        }
     }
 
     pub fn store(&mut self) -> &mut SymbolStore<F> {
@@ -322,12 +409,21 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
     /// Finds `wanted`'s tables. A PE module whose PDB identity did not read
     /// in the guest is first identified through its own binary, fetched by
     /// TimeDateStamp and SizeOfImage.
-    pub fn locate<P>(&mut self, wanted: &ModuleIdentity, projects: &ProjectIndex, mut progress: P) -> LocateOutcome
+    pub fn locate<P>(
+        &mut self,
+        wanted: &ModuleIdentity,
+        projects: &ProjectIndex,
+        mut progress: P,
+    ) -> LocateOutcome
     where
         P: FnMut(Progress) -> Flow,
     {
         let wanted = match wanted {
-            ModuleIdentity::Pe { file_name, image, pdb: None } => match self.pdb_through_binary(file_name, *image, &mut progress) {
+            ModuleIdentity::Pe {
+                file_name,
+                image,
+                pdb: None,
+            } => match self.pdb_through_binary(file_name, *image, &mut progress) {
                 Ok(BinaryLookup::Found(pdb)) => wanted.with_pdb(pdb),
                 Ok(BinaryLookup::NotOnServer) => return LocateOutcome::NotOnServer,
                 Err(reason) => return LocateOutcome::Unavailable { reason },
@@ -339,11 +435,16 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
                 Ok(tables) if wanted.matches(&tables.identity()) == IdentityMatch::Same => {
                     return LocateOutcome::Loaded {
                         tables: Arc::new(tables),
-                        from: SymbolSource::Project { name: found.project.clone(), path: found.path.clone() },
+                        from: SymbolSource::Project {
+                            name: found.project.clone(),
+                            path: found.path.clone(),
+                        },
                     };
                 }
                 // The owner cancelled the file's supplement download.
-                Err(reason @ LocateError::Http(HttpError::Cancelled { .. })) => return LocateOutcome::Unavailable { reason },
+                Err(reason @ LocateError::Http(HttpError::Cancelled { .. })) => {
+                    return LocateOutcome::Unavailable { reason };
+                }
                 // A file changed since it was indexed is passed by.
                 Ok(_) | Err(_) => {}
             }
@@ -359,20 +460,44 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
                 let origin = keyed.store_path.display().to_string();
                 match self.parse(&bytes, projects, &mut progress) {
                     Ok(tables) if wanted.matches(&tables.identity()) == IdentityMatch::Same => {
-                        return LocateOutcome::Loaded { tables: Arc::new(tables), from: SymbolSource::Store { path: keyed.store_path } };
+                        return LocateOutcome::Loaded {
+                            tables: Arc::new(tables),
+                            from: SymbolSource::Store {
+                                path: keyed.store_path,
+                            },
+                        };
                     }
-                    Ok(tables) => StoreCopy::Unusable { reason: LocateError::WrongBuild { origin, found: tables.identity() } },
+                    Ok(tables) => StoreCopy::Unusable {
+                        reason: LocateError::WrongBuild {
+                            origin,
+                            found: tables.identity(),
+                        },
+                    },
                     // A cancel says nothing about the store file: it stays.
-                    Err(Unparsed::Cancelled(error)) => return LocateOutcome::Unavailable { reason: error.into() },
-                    Err(Unparsed::Parse(source)) => StoreCopy::Unusable { reason: LocateError::Parse { origin, source } },
+                    Err(Unparsed::Cancelled(error)) => {
+                        return LocateOutcome::Unavailable {
+                            reason: error.into(),
+                        };
+                    }
+                    Err(Unparsed::Parse(source)) => StoreCopy::Unusable {
+                        reason: LocateError::Parse { origin, source },
+                    },
                 }
             }
             Ok(None) => StoreCopy::Absent,
-            Err(error) => return LocateOutcome::Unavailable { reason: error.into() },
+            Err(error) => {
+                return LocateOutcome::Unavailable {
+                    reason: error.into(),
+                };
+            }
         };
         match self.config.downloads {
-            Downloads::Off => LocateOutcome::Unavailable { reason: store_copy.without_downloads() },
-            Downloads::Automatic => self.download(&wanted, keyed, store_copy, projects, &mut progress),
+            Downloads::Off => LocateOutcome::Unavailable {
+                reason: store_copy.without_downloads(),
+            },
+            Downloads::Automatic => {
+                self.download(&wanted, keyed, store_copy, projects, &mut progress)
+            }
         }
     }
 
@@ -384,7 +509,11 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
             StoreCopy::Unusable { .. } => match self.store.quarantine(&path) {
                 Ok(bad) => Some(bad),
                 Err(error) => {
-                    return Kept::NotKept { reason: format!("the store's copy that did not load could not be moved aside: {error}") }
+                    return Kept::NotKept {
+                        reason: format!(
+                            "the store's copy that did not load could not be moved aside: {error}"
+                        ),
+                    };
                 }
             },
         };
@@ -392,25 +521,43 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
             // Another writer filing the same build first leaves the same
             // build in the store.
             (Ok(Placed::Written | Placed::AlreadyPresent), None) => Kept::InStore { path },
-            (Ok(Placed::Written | Placed::AlreadyPresent), Some(bad)) => Kept::Replaced { path, bad },
-            (Err(error), None) => Kept::NotKept { reason: error.to_string() },
-            (Err(error), Some(bad)) => {
-                Kept::NotKept { reason: format!("{error}; the copy that did not load is kept as {}", bad.display()) }
+            (Ok(Placed::Written | Placed::AlreadyPresent), Some(bad)) => {
+                Kept::Replaced { path, bad }
             }
+            (Err(error), None) => Kept::NotKept {
+                reason: error.to_string(),
+            },
+            (Err(error), Some(bad)) => Kept::NotKept {
+                reason: format!(
+                    "{error}; the copy that did not load is kept as {}",
+                    bad.display()
+                ),
+            },
         }
     }
 
     /// Loads a file the owner picked for `wanted`: taken when it is the
     /// module's build, else refused, or loaded as forced on `LoadAnyway`.
-    pub fn attach(&mut self, path: &Path, wanted: &ModuleIdentity, consent: Consent) -> LocateOutcome {
-        let tables = match self.parse_local(path, &ProjectIndex::default(), &mut |_| Flow::Continue) {
+    pub fn attach(
+        &mut self,
+        path: &Path,
+        wanted: &ModuleIdentity,
+        consent: Consent,
+    ) -> LocateOutcome {
+        let tables = match self.parse_local(path, &ProjectIndex::default(), &mut |_| Flow::Continue)
+        {
             Ok(tables) => tables,
             Err(reason) => return LocateOutcome::Unavailable { reason },
         };
         judge_attached(tables, path, wanted, consent)
     }
 
-    fn parse_local<P>(&mut self, path: &Path, projects: &ProjectIndex, progress: &mut P) -> Result<SymbolTables, LocateError>
+    fn parse_local<P>(
+        &mut self,
+        path: &Path,
+        projects: &ProjectIndex,
+        progress: &mut P,
+    ) -> Result<SymbolTables, LocateError>
     where
         P: FnMut(Progress) -> Flow,
     {
@@ -421,12 +568,19 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
 
     /// The tables of `bytes`, with their dwz supplement when they name one
     /// and it can be had.
-    fn parse<P>(&mut self, bytes: &[u8], projects: &ProjectIndex, progress: &mut P) -> Result<SymbolTables, Unparsed>
+    fn parse<P>(
+        &mut self,
+        bytes: &[u8],
+        projects: &ProjectIndex,
+        progress: &mut P,
+    ) -> Result<SymbolTables, Unparsed>
     where
         P: FnMut(Progress) -> Flow,
     {
         let supplement = match supplement_of(bytes).map_err(Unparsed::Parse)? {
-            Some(link) => self.supplement(&link, projects, progress).map_err(Unparsed::Cancelled)?,
+            Some(link) => self
+                .supplement(&link, projects, progress)
+                .map_err(Unparsed::Cancelled)?,
             None => None,
         };
         SymbolTables::parse_with_supplement(bytes, supplement.as_deref()).map_err(Unparsed::Parse)
@@ -436,11 +590,18 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
     /// debuginfod's (verified, then kept). Anything that does not give it
     /// gives `None`, and the file it serves loads without it; the owner's
     /// cancel of its download is the one error.
-    fn supplement<P>(&mut self, link: &AltLink, projects: &ProjectIndex, progress: &mut P) -> Result<Option<Vec<u8>>, HttpError>
+    fn supplement<P>(
+        &mut self,
+        link: &AltLink,
+        projects: &ProjectIndex,
+        progress: &mut P,
+    ) -> Result<Option<Vec<u8>>, HttpError>
     where
         P: FnMut(Progress) -> Flow,
     {
-        let wanted = TablesIdentity::Elf { build_id: Some(link.build_id.clone()) };
+        let wanted = TablesIdentity::Elf {
+            build_id: Some(link.build_id.clone()),
+        };
         let is_it = |bytes: &[u8]| declared_identity(bytes).is_ok_and(|found| found == wanted);
         if let Some(found) = projects.find_build_id(&link.build_id) {
             if let Ok(bytes) = self.store.files().read(&found.path) {
@@ -486,10 +647,18 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
                 servers: keyed_urls(&self.config.microsoft, &pdb.name, &pdb.store_key()),
             }),
             // `locate` identifies a PE module through its binary first.
-            ModuleIdentity::Pe { file_name, image, pdb: None } => Ok(Keyed {
+            ModuleIdentity::Pe {
+                file_name,
+                image,
+                pdb: None,
+            } => Ok(Keyed {
                 store_path: self.store.binary_path(file_name, *image)?,
                 kind: ServerKind::Microsoft,
-                servers: keyed_urls(&self.config.microsoft, checked_file_name(file_name)?, &image.store_key()),
+                servers: keyed_urls(
+                    &self.config.microsoft,
+                    checked_file_name(file_name)?,
+                    &image.store_key(),
+                ),
             }),
             ModuleIdentity::Elf { build_id, .. } => Ok(Keyed {
                 store_path: self.store.debug_file_path(build_id),
@@ -523,21 +692,35 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
                     StatusClass::Ok => {
                         let bytes = if is_cabinet(&response.body) {
                             extract_single(&response.body, self.config.max_download)
-                                .map_err(|source| LocateError::Cabinet { url: url.clone(), source })?
+                                .map_err(|source| LocateError::Cabinet {
+                                    url: url.clone(),
+                                    source,
+                                })?
                                 .bytes
                         } else {
                             response.body
                         };
-                        return Ok(Some(Fetched { url: url.clone(), bytes }));
+                        return Ok(Some(Fetched {
+                            url: url.clone(),
+                            bytes,
+                        }));
                     }
                     // The plain name missing: its compressed name next.
                     StatusClass::NotFound => continue,
                     StatusClass::Retryable => {
-                        failure = Some(LocateError::Status { url: url.clone(), status: response.status, retry: Retry::Retryable });
+                        failure = Some(LocateError::Status {
+                            url: url.clone(),
+                            status: response.status,
+                            retry: Retry::Retryable,
+                        });
                         break;
                     }
                     StatusClass::Final => {
-                        failure = Some(LocateError::Status { url: url.clone(), status: response.status, retry: Retry::Final });
+                        failure = Some(LocateError::Status {
+                            url: url.clone(),
+                            status: response.status,
+                            retry: Retry::Final,
+                        });
                         break;
                     }
                 }
@@ -567,20 +750,41 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
         };
         let tables = match self.parse(&fetched.bytes, projects, progress) {
             Ok(tables) => tables,
-            Err(unparsed) => return LocateOutcome::Unavailable { reason: unparsed.at(fetched.url) },
+            Err(unparsed) => {
+                return LocateOutcome::Unavailable {
+                    reason: unparsed.at(fetched.url),
+                };
+            }
         };
         let found = tables.identity();
         if wanted.matches(&found) != IdentityMatch::Same {
-            return LocateOutcome::Unavailable { reason: LocateError::WrongBuild { origin: fetched.url, found } };
+            return LocateOutcome::Unavailable {
+                reason: LocateError::WrongBuild {
+                    origin: fetched.url,
+                    found,
+                },
+            };
         }
         let kept = self.keep(keyed.store_path, &fetched.bytes, store_copy);
-        LocateOutcome::Loaded { tables: Arc::new(tables), from: SymbolSource::Server { url: fetched.url, kept } }
+        LocateOutcome::Loaded {
+            tables: Arc::new(tables),
+            from: SymbolSource::Server {
+                url: fetched.url,
+                kept,
+            },
+        }
     }
 
     /// The binary of the PE module `file_name` whose image key is `image`:
     /// a project's, the store's, else the server's, each taken only when it
     /// is that image.
-    pub fn locate_image<P>(&mut self, file_name: &str, image: PeImageId, projects: &ProjectIndex, mut progress: P) -> ImageOutcome
+    pub fn locate_image<P>(
+        &mut self,
+        file_name: &str,
+        image: PeImageId,
+        projects: &ProjectIndex,
+        mut progress: P,
+    ) -> ImageOutcome
     where
         P: FnMut(Progress) -> Flow,
     {
@@ -590,12 +794,19 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
                 if let Ok(file) = image_of(bytes, image, found.path.display().to_string()) {
                     return ImageOutcome::Loaded {
                         file: Arc::new(file),
-                        from: SymbolSource::Project { name: found.project.clone(), path: found.path.clone() },
+                        from: SymbolSource::Project {
+                            name: found.project.clone(),
+                            path: found.path.clone(),
+                        },
                     };
                 }
             }
         }
-        let binary = ModuleIdentity::Pe { file_name: file_name.to_owned(), image, pdb: None };
+        let binary = ModuleIdentity::Pe {
+            file_name: file_name.to_owned(),
+            image,
+            pdb: None,
+        };
         let keyed = match self.keyed(&binary) {
             Ok(keyed) => keyed,
             Err(reason) => return ImageOutcome::Unavailable { reason },
@@ -603,17 +814,31 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
         // Not this image, or broken: fetched again, and replaced only by a
         // verified download.
         let store_copy = match self.store.lookup(&keyed.store_path) {
-            Ok(Some(bytes)) => match image_of(bytes, image, keyed.store_path.display().to_string()) {
+            Ok(Some(bytes)) => match image_of(bytes, image, keyed.store_path.display().to_string())
+            {
                 Ok(file) => {
-                    return ImageOutcome::Loaded { file: Arc::new(file), from: SymbolSource::Store { path: keyed.store_path } };
+                    return ImageOutcome::Loaded {
+                        file: Arc::new(file),
+                        from: SymbolSource::Store {
+                            path: keyed.store_path,
+                        },
+                    };
                 }
                 Err(reason) => StoreCopy::Unusable { reason },
             },
             Ok(None) => StoreCopy::Absent,
-            Err(error) => return ImageOutcome::Unavailable { reason: error.into() },
+            Err(error) => {
+                return ImageOutcome::Unavailable {
+                    reason: error.into(),
+                };
+            }
         };
         match self.config.downloads {
-            Downloads::Off => return ImageOutcome::Unavailable { reason: store_copy.without_downloads() },
+            Downloads::Off => {
+                return ImageOutcome::Unavailable {
+                    reason: store_copy.without_downloads(),
+                };
+            }
             Downloads::Automatic => {}
         }
         let fetched = match self.fetch(&keyed, &mut progress) {
@@ -627,24 +852,41 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
             Err(reason) => return ImageOutcome::Unavailable { reason },
         };
         let kept = self.keep(keyed.store_path, file.bytes(), store_copy);
-        ImageOutcome::Loaded { file: Arc::new(file), from: SymbolSource::Server { url: fetched.url, kept } }
+        ImageOutcome::Loaded {
+            file: Arc::new(file),
+            from: SymbolSource::Server {
+                url: fetched.url,
+                kept,
+            },
+        }
     }
 
     /// The PDB identity of the PE module whose image key is `image`, read
     /// from its binary: the store's copy, else the server's (verified to be
     /// that image before it is stored).
-    fn pdb_through_binary<P>(&mut self, file_name: &str, image: PeImageId, progress: &mut P) -> Result<BinaryLookup, LocateError>
+    fn pdb_through_binary<P>(
+        &mut self,
+        file_name: &str,
+        image: PeImageId,
+        progress: &mut P,
+    ) -> Result<BinaryLookup, LocateError>
     where
         P: FnMut(Progress) -> Flow,
     {
-        let binary = ModuleIdentity::Pe { file_name: file_name.to_owned(), image, pdb: None };
+        let binary = ModuleIdentity::Pe {
+            file_name: file_name.to_owned(),
+            image,
+            pdb: None,
+        };
         let keyed = self.keyed(&binary)?;
         // Not this image, or broken: fetched again, and replaced only by a
         // verified download.
         let store_copy = match self.store.lookup(&keyed.store_path)? {
             Some(bytes) => match pdb_from_binary(bytes, image) {
                 Ok(pdb) => return Ok(BinaryLookup::Found(pdb)),
-                Err(error) => StoreCopy::Unusable { reason: LocateError::Binary(error) },
+                Err(error) => StoreCopy::Unusable {
+                    reason: LocateError::Binary(error),
+                },
             },
             None => StoreCopy::Absent,
         };
@@ -659,32 +901,38 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
         match self.keep(keyed.store_path, &fetched.bytes, store_copy) {
             // The binary only names the PDB: kept or not, it served this
             // lookup, as a supplement does.
-            Kept::InStore { .. } | Kept::Replaced { .. } | Kept::NotKept { .. } => Ok(BinaryLookup::Found(pdb)),
+            Kept::InStore { .. } | Kept::Replaced { .. } | Kept::NotKept { .. } => {
+                Ok(BinaryLookup::Found(pdb))
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rusty_box_symbols_fixtures::cab::{CabinetKind, cabinet};
+    use rusty_box_symbols_fixtures::dwarf::{DwzForms, SUPPLEMENT_BUILD_ID, dwz_pair};
+    use rusty_box_symbols_fixtures::elf::{BUILD_ID, ElfSpec, Symtab, TEXT_RVA, build_elf};
+    use rusty_box_symbols_fixtures::pdb::{FixturePublic, PdbFixture, PublicKind, build_pdb};
+    use rusty_box_symbols_fixtures::pe::{
+        PAGE_ALIGNED, Pe64Spec, SECTION_CODE, SpecSection, pe32_file, pe64_file, rsds,
+    };
+
     use super::*;
     use crate::identity::{BuildId, Guid};
     use crate::memory_store::MemoryStore;
+    use crate::pe::ImageRead;
     use crate::projects::ProjectFolders;
     use crate::scripted_http::ScriptedHttp;
     use crate::units::Rva;
-    use rusty_box_symbols_fixtures::cab::{cabinet, CabinetKind};
-    use rusty_box_symbols_fixtures::dwarf::{dwz_pair, DwzForms, SUPPLEMENT_BUILD_ID};
-    use rusty_box_symbols_fixtures::elf::{build_elf, ElfSpec, Symtab, BUILD_ID, TEXT_RVA};
-    use rusty_box_symbols_fixtures::pdb::{build_pdb, FixturePublic, PdbFixture, PublicKind};
-    use crate::pe::ImageRead;
-    use rusty_box_symbols_fixtures::pe::{pe32_file, pe64_file, rsds, Pe64Spec, SpecSection, PAGE_ALIGNED, SECTION_CODE};
 
     const MSDL: &str = "https://msdl.example/download/symbols";
     const DEBUGINFOD: &str = "https://debuginfod.example";
 
     /// The Windows 11 kernel's RSDS GUID bytes (see `identity`'s tests).
     const GUID_BYTES: [u8; 16] = [
-        0xFE, 0xC6, 0x61, 0xB6, 0x99, 0x72, 0x16, 0x1D, 0x0F, 0xE3, 0x7C, 0x48, 0xB8, 0xBC, 0x54, 0x70,
+        0xFE, 0xC6, 0x61, 0xB6, 0x99, 0x72, 0x16, 0x1D, 0x0F, 0xE3, 0x7C, 0x48, 0xB8, 0xBC, 0x54,
+        0x70,
     ];
 
     fn guid() -> Guid {
@@ -694,15 +942,27 @@ mod tests {
     fn kernel() -> ModuleIdentity {
         ModuleIdentity::Pe {
             file_name: "ntoskrnl.exe".to_owned(),
-            image: PeImageId { time_date_stamp: 0x0BAD_F00D, size_of_image: 0x3000 },
-            pdb: Some(PdbId { name: "ntkrnlmp.pdb".to_owned(), guid: guid(), age: 1 }),
+            image: PeImageId {
+                time_date_stamp: 0x0BAD_F00D,
+                size_of_image: 0x3000,
+            },
+            pdb: Some(PdbId {
+                name: "ntkrnlmp.pdb".to_owned(),
+                guid: guid(),
+                age: 1,
+            }),
         }
     }
 
     /// A PDB of `guid` and `age` whose one public names RVA 0x1010.
     fn pdb(guid: [u8; 16], age: u32) -> Vec<u8> {
         let mut fixture = PdbFixture::new(guid, age);
-        fixture.publics.push(FixturePublic { name: "PsActiveProcessHead".into(), section: 1, offset: 0x10, kind: PublicKind::Data });
+        fixture.publics.push(FixturePublic {
+            name: "PsActiveProcessHead".into(),
+            section: 1,
+            offset: 0x10,
+            kind: PublicKind::Data,
+        });
         build_pdb(&fixture)
     }
 
@@ -719,37 +979,56 @@ mod tests {
         }
     }
 
-    fn service(files: MemoryStore, http: ScriptedHttp, downloads: Downloads) -> SymbolService<MemoryStore, ScriptedHttp> {
+    fn service(
+        files: MemoryStore,
+        http: ScriptedHttp,
+        downloads: Downloads,
+    ) -> SymbolService<MemoryStore, ScriptedHttp> {
         let store = SymbolStore::open(files, PathBuf::from("store")).unwrap();
         SymbolService::new(store, http, config(downloads))
     }
 
     fn store_path() -> PathBuf {
-        PathBuf::from("store").join("ntkrnlmp.pdb").join("B661C6FE72991D160FE37C48B8BC54701").join("ntkrnlmp.pdb")
+        PathBuf::from("store")
+            .join("ntkrnlmp.pdb")
+            .join("B661C6FE72991D160FE37C48B8BC54701")
+            .join("ntkrnlmp.pdb")
     }
 
-    fn go(service: &mut SymbolService<MemoryStore, ScriptedHttp>, wanted: &ModuleIdentity) -> LocateOutcome {
+    fn go(
+        service: &mut SymbolService<MemoryStore, ScriptedHttp>,
+        wanted: &ModuleIdentity,
+    ) -> LocateOutcome {
         service.locate(wanted, &ProjectIndex::default(), |_| Flow::Continue)
     }
 
     fn loaded_from(outcome: &LocateOutcome) -> Option<&SymbolSource> {
         match outcome {
             LocateOutcome::Loaded { from, .. } => Some(from),
-            LocateOutcome::Refused { .. } | LocateOutcome::Forced { .. } | LocateOutcome::NotOnServer | LocateOutcome::Unavailable { .. } => None,
+            LocateOutcome::Refused { .. }
+            | LocateOutcome::Forced { .. }
+            | LocateOutcome::NotOnServer
+            | LocateOutcome::Unavailable { .. } => None,
         }
     }
 
     fn unavailable(outcome: &LocateOutcome) -> Option<&LocateError> {
         match outcome {
             LocateOutcome::Unavailable { reason } => Some(reason),
-            LocateOutcome::Loaded { .. } | LocateOutcome::Refused { .. } | LocateOutcome::Forced { .. } | LocateOutcome::NotOnServer => None,
+            LocateOutcome::Loaded { .. }
+            | LocateOutcome::Refused { .. }
+            | LocateOutcome::Forced { .. }
+            | LocateOutcome::NotOnServer => None,
         }
     }
 
     fn loaded_tables(outcome: LocateOutcome) -> Arc<SymbolTables> {
         match outcome {
             LocateOutcome::Loaded { tables, .. } => tables,
-            LocateOutcome::Refused { .. } | LocateOutcome::Forced { .. } | LocateOutcome::NotOnServer | LocateOutcome::Unavailable { .. } => {
+            LocateOutcome::Refused { .. }
+            | LocateOutcome::Forced { .. }
+            | LocateOutcome::NotOnServer
+            | LocateOutcome::Unavailable { .. } => {
                 panic!("expected loaded tables")
             }
         }
@@ -760,17 +1039,32 @@ mod tests {
         let mut files = MemoryStore::default();
         let build = PathBuf::from("work").join("build").join("ntkrnlmp.pdb");
         files.insert(build.clone(), pdb(GUID_BYTES, 1));
-        let projects = [ProjectFolders { name: "kernel".into(), symbols: vec![PathBuf::from("work")] }];
+        let projects = [ProjectFolders {
+            name: "kernel".into(),
+            symbols: vec![PathBuf::from("work")],
+        }];
         let index = ProjectIndex::build(&mut files, &projects).unwrap();
         files.insert(store_path(), pdb(GUID_BYTES, 1));
         let mut http = ScriptedHttp::default();
         http.respond(&kernel_url(), 200, pdb(GUID_BYTES, 1));
         let mut service = service(files, http, Downloads::Automatic);
         let outcome = service.locate(&kernel(), &index, |_| Flow::Continue);
-        assert_eq!(loaded_from(&outcome), Some(&SymbolSource::Project { name: "kernel".into(), path: build }));
+        assert_eq!(
+            loaded_from(&outcome),
+            Some(&SymbolSource::Project {
+                name: "kernel".into(),
+                path: build
+            })
+        );
         let outcome = go(&mut service, &kernel());
-        assert_eq!(loaded_from(&outcome), Some(&SymbolSource::Store { path: store_path() }));
-        assert!(service.http().requests().is_empty(), "the server is never asked for a local file");
+        assert_eq!(
+            loaded_from(&outcome),
+            Some(&SymbolSource::Store { path: store_path() })
+        );
+        assert!(
+            service.http().requests().is_empty(),
+            "the server is never asked for a local file"
+        );
     }
 
     #[test]
@@ -781,23 +1075,42 @@ mod tests {
         let outcome = go(&mut service, &kernel());
         assert_eq!(
             loaded_from(&outcome),
-            Some(&SymbolSource::Server { url: kernel_url(), kept: Kept::InStore { path: store_path() } })
+            Some(&SymbolSource::Server {
+                url: kernel_url(),
+                kept: Kept::InStore { path: store_path() }
+            })
         );
-        assert_eq!(loaded_tables(outcome).address_of("PsActiveProcessHead").map(|rva| rva.0), Some(0x1010));
+        assert_eq!(
+            loaded_tables(outcome)
+                .address_of("PsActiveProcessHead")
+                .map(|rva| rva.0),
+            Some(0x1010)
+        );
         assert!(service.store().lookup(&store_path()).unwrap().is_some());
     }
 
     #[test]
     fn a_pdb_missing_by_its_name_is_fetched_as_a_cabinet() {
         let mut http = ScriptedHttp::default();
-        let compressed = format!("{MSDL}/ntkrnlmp.pdb/B661C6FE72991D160FE37C48B8BC54701/ntkrnlmp.pd_");
-        http.respond(&compressed, 200, cabinet("ntkrnlmp.pdb", &pdb(GUID_BYTES, 1), CabinetKind::MsZip));
+        let compressed =
+            format!("{MSDL}/ntkrnlmp.pdb/B661C6FE72991D160FE37C48B8BC54701/ntkrnlmp.pd_");
+        http.respond(
+            &compressed,
+            200,
+            cabinet("ntkrnlmp.pdb", &pdb(GUID_BYTES, 1), CabinetKind::MsZip),
+        );
         let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
         let outcome = go(&mut service, &kernel());
-        assert!(matches!(loaded_from(&outcome), Some(SymbolSource::Server { .. })));
+        assert!(matches!(
+            loaded_from(&outcome),
+            Some(SymbolSource::Server { .. })
+        ));
         assert_eq!(service.http().requests(), [kernel_url(), compressed]);
         // The store keeps the PDB itself, not the cabinet.
-        assert_eq!(service.store().lookup(&store_path()).unwrap(), Some(pdb(GUID_BYTES, 1)));
+        assert_eq!(
+            service.store().lookup(&store_path()).unwrap(),
+            Some(pdb(GUID_BYTES, 1))
+        );
     }
 
     #[test]
@@ -806,7 +1119,10 @@ mod tests {
         http.respond(&kernel_url(), 200, pdb([9; 16], 1));
         let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
         let outcome = go(&mut service, &kernel());
-        assert!(matches!(unavailable(&outcome), Some(LocateError::WrongBuild { .. })));
+        assert!(matches!(
+            unavailable(&outcome),
+            Some(LocateError::WrongBuild { .. })
+        ));
         assert_eq!(service.store().lookup(&store_path()).unwrap(), None);
     }
 
@@ -828,10 +1144,23 @@ mod tests {
         let outcome = go(&mut service, &kernel());
         assert_eq!(
             loaded_from(&outcome),
-            Some(&SymbolSource::Server { url: kernel_url(), kept: Kept::Replaced { path: store_path(), bad: bad_path() } })
+            Some(&SymbolSource::Server {
+                url: kernel_url(),
+                kept: Kept::Replaced {
+                    path: store_path(),
+                    bad: bad_path()
+                }
+            })
         );
-        assert_eq!(service.store().lookup(&bad_path()).unwrap(), Some(TRUNCATED.to_vec()), "moved aside, not deleted");
-        assert_eq!(service.store().lookup(&store_path()).unwrap(), Some(pdb(GUID_BYTES, 1)));
+        assert_eq!(
+            service.store().lookup(&bad_path()).unwrap(),
+            Some(TRUNCATED.to_vec()),
+            "moved aside, not deleted"
+        );
+        assert_eq!(
+            service.store().lookup(&store_path()).unwrap(),
+            Some(pdb(GUID_BYTES, 1))
+        );
     }
 
     /// A store shared with a debugger keeps a file this reader cannot load
@@ -843,15 +1172,27 @@ mod tests {
         files.insert(store_path(), TRUNCATED.to_vec());
         let mut service = service(files, ScriptedHttp::default(), Downloads::Off);
         let outcome = go(&mut service, &kernel());
-        assert!(matches!(unavailable(&outcome), Some(LocateError::Parse { .. })));
-        assert_eq!(service.store().lookup(&store_path()).unwrap(), Some(TRUNCATED.to_vec()));
+        assert!(matches!(
+            unavailable(&outcome),
+            Some(LocateError::Parse { .. })
+        ));
+        assert_eq!(
+            service.store().lookup(&store_path()).unwrap(),
+            Some(TRUNCATED.to_vec())
+        );
         assert_eq!(service.store().lookup(&bad_path()).unwrap(), None);
 
         let mut files = MemoryStore::default();
         files.insert(store_path(), TRUNCATED.to_vec());
         let mut service = self::service(files, ScriptedHttp::default(), Downloads::Automatic);
-        assert!(matches!(go(&mut service, &kernel()), LocateOutcome::NotOnServer));
-        assert_eq!(service.store().lookup(&store_path()).unwrap(), Some(TRUNCATED.to_vec()));
+        assert!(matches!(
+            go(&mut service, &kernel()),
+            LocateOutcome::NotOnServer
+        ));
+        assert_eq!(
+            service.store().lookup(&store_path()).unwrap(),
+            Some(TRUNCATED.to_vec())
+        );
         assert_eq!(service.store().lookup(&bad_path()).unwrap(), None);
     }
 
@@ -859,31 +1200,53 @@ mod tests {
     fn a_store_binary_that_does_not_read_stays_when_nothing_replaces_it() {
         let module = ModuleIdentity::Pe {
             file_name: "ntoskrnl.exe".to_owned(),
-            image: PeImageId { time_date_stamp: 0x0BAD_F00D, size_of_image: 0x3000 },
+            image: PeImageId {
+                time_date_stamp: 0x0BAD_F00D,
+                size_of_image: 0x3000,
+            },
             pdb: None,
         };
-        let kept = PathBuf::from("store").join("ntoskrnl.exe").join("0BADF00D3000").join("ntoskrnl.exe");
+        let kept = PathBuf::from("store")
+            .join("ntoskrnl.exe")
+            .join("0BADF00D3000")
+            .join("ntoskrnl.exe");
         let mut files = MemoryStore::default();
         files.insert(kept.clone(), b"MZ cut short".to_vec());
         let mut service = service(files, ScriptedHttp::default(), Downloads::Off);
         let outcome = go(&mut service, &module);
-        assert!(matches!(unavailable(&outcome), Some(LocateError::Binary(_))));
-        assert_eq!(service.store().lookup(&kept).unwrap(), Some(b"MZ cut short".to_vec()));
+        assert!(matches!(
+            unavailable(&outcome),
+            Some(LocateError::Binary(_))
+        ));
+        assert_eq!(
+            service.store().lookup(&kept).unwrap(),
+            Some(b"MZ cut short".to_vec())
+        );
     }
 
     #[test]
     fn a_network_failure_is_retryable_and_leaves_local_files_working() {
         let other = ModuleIdentity::Pe {
             file_name: "hal.dll".to_owned(),
-            image: PeImageId { time_date_stamp: 2, size_of_image: 0x1000 },
-            pdb: Some(PdbId { name: "hal.pdb".to_owned(), guid: Guid::from_le_bytes([5; 16]), age: 1 }),
+            image: PeImageId {
+                time_date_stamp: 2,
+                size_of_image: 0x1000,
+            },
+            pdb: Some(PdbId {
+                name: "hal.pdb".to_owned(),
+                guid: Guid::from_le_bytes([5; 16]),
+                age: 1,
+            }),
         };
         let key = match &other {
             ModuleIdentity::Pe { pdb: Some(pdb), .. } => pdb.store_key(),
             ModuleIdentity::Pe { pdb: None, .. } | ModuleIdentity::Elf { .. } => String::new(),
         };
         let mut files = MemoryStore::default();
-        let hal_path = PathBuf::from("store").join("hal.pdb").join(key).join("hal.pdb");
+        let hal_path = PathBuf::from("store")
+            .join("hal.pdb")
+            .join(key)
+            .join("hal.pdb");
         files.insert(hal_path.clone(), pdb([5; 16], 1));
         let mut http = ScriptedHttp::default();
         http.unreachable(&kernel_url());
@@ -891,25 +1254,49 @@ mod tests {
         let outcome = go(&mut service, &kernel());
         let reason = unavailable(&outcome).expect("unavailable");
         assert_eq!(reason.retry(), Retry::Retryable, "{reason}");
-        assert_eq!(loaded_from(&go(&mut service, &other)), Some(&SymbolSource::Store { path: hal_path }));
+        assert_eq!(
+            loaded_from(&go(&mut service, &other)),
+            Some(&SymbolSource::Store { path: hal_path })
+        );
 
         let mut http = ScriptedHttp::default();
         http.respond(&kernel_url(), 503, Vec::new());
         let mut service = self::service(MemoryStore::default(), http, Downloads::Automatic);
         let outcome = go(&mut service, &kernel());
-        assert!(matches!(unavailable(&outcome), Some(LocateError::Status { status: 503, retry: Retry::Retryable, .. })));
+        assert!(matches!(
+            unavailable(&outcome),
+            Some(LocateError::Status {
+                status: 503,
+                retry: Retry::Retryable,
+                ..
+            })
+        ));
     }
 
     #[test]
     fn a_file_on_no_server_is_not_on_the_server() {
-        let mut service = service(MemoryStore::default(), ScriptedHttp::default(), Downloads::Automatic);
-        assert!(matches!(go(&mut service, &kernel()), LocateOutcome::NotOnServer));
+        let mut service = service(
+            MemoryStore::default(),
+            ScriptedHttp::default(),
+            Downloads::Automatic,
+        );
+        assert!(matches!(
+            go(&mut service, &kernel()),
+            LocateOutcome::NotOnServer
+        ));
     }
 
     #[test]
     fn with_downloads_off_nothing_is_fetched() {
-        let mut service = service(MemoryStore::default(), ScriptedHttp::default(), Downloads::Off);
-        assert!(matches!(unavailable(&go(&mut service, &kernel())), Some(LocateError::DownloadsOff)));
+        let mut service = service(
+            MemoryStore::default(),
+            ScriptedHttp::default(),
+            Downloads::Off,
+        );
+        assert!(matches!(
+            unavailable(&go(&mut service, &kernel())),
+            Some(LocateError::DownloadsOff)
+        ));
         assert!(service.http().requests().is_empty());
     }
 
@@ -919,10 +1306,21 @@ mod tests {
         let picked = PathBuf::from("Downloads").join("ntkrnlmp.pdb");
         files.insert(picked.clone(), pdb(GUID_BYTES, 2));
         let mut service = service(files, ScriptedHttp::default(), Downloads::Off);
-        let LocateOutcome::Refused { found, wanted, path } = service.attach(&picked, &kernel(), Consent::MatchOnly) else {
+        let LocateOutcome::Refused {
+            found,
+            wanted,
+            path,
+        } = service.attach(&picked, &kernel(), Consent::MatchOnly)
+        else {
             panic!("expected a refusal")
         };
-        assert_eq!(found, TablesIdentity::Pdb { guid: guid(), age: 2 });
+        assert_eq!(
+            found,
+            TablesIdentity::Pdb {
+                guid: guid(),
+                age: 2
+            }
+        );
         assert_eq!(wanted, kernel());
         assert_eq!(path, picked);
     }
@@ -933,16 +1331,33 @@ mod tests {
         let picked = PathBuf::from("Downloads").join("ntkrnlmp.pdb");
         files.insert(picked.clone(), pdb(GUID_BYTES, 2));
         let mut service = service(files, ScriptedHttp::default(), Downloads::Off);
-        let LocateOutcome::Forced { tables, found, path } = service.attach(&picked, &kernel(), Consent::LoadAnyway) else {
+        let LocateOutcome::Forced {
+            tables,
+            found,
+            path,
+        } = service.attach(&picked, &kernel(), Consent::LoadAnyway)
+        else {
             panic!("forced")
         };
-        assert_eq!(found, TablesIdentity::Pdb { guid: guid(), age: 2 });
+        assert_eq!(
+            found,
+            TablesIdentity::Pdb {
+                guid: guid(),
+                age: 2
+            }
+        );
         assert_eq!(path, picked);
         assert!(tables.address_of("PsActiveProcessHead").is_some());
         // The right build attaches without asking.
         let right = PathBuf::from("Downloads").join("right.pdb");
-        service.store().files().insert(right.clone(), pdb(GUID_BYTES, 1));
-        assert_eq!(loaded_from(&service.attach(&right, &kernel(), Consent::MatchOnly)), Some(&SymbolSource::Attached { path: right }));
+        service
+            .store()
+            .files()
+            .insert(right.clone(), pdb(GUID_BYTES, 1));
+        assert_eq!(
+            loaded_from(&service.attach(&right, &kernel(), Consent::MatchOnly)),
+            Some(&SymbolSource::Attached { path: right })
+        );
     }
 
     /// A picked file read through a file reader alone is judged as an
@@ -955,11 +1370,22 @@ mod tests {
         files.insert(right.clone(), pdb(GUID_BYTES, 1));
         files.insert(other.clone(), pdb(GUID_BYTES, 2));
         assert_eq!(
-            loaded_from(&attach_file(&mut files, &right, &kernel(), Consent::MatchOnly)),
+            loaded_from(&attach_file(
+                &mut files,
+                &right,
+                &kernel(),
+                Consent::MatchOnly
+            )),
             Some(&SymbolSource::Attached { path: right })
         );
-        assert!(matches!(attach_file(&mut files, &other, &kernel(), Consent::MatchOnly), LocateOutcome::Refused { .. }));
-        assert!(matches!(attach_file(&mut files, &other, &kernel(), Consent::LoadAnyway), LocateOutcome::Forced { .. }));
+        assert!(matches!(
+            attach_file(&mut files, &other, &kernel(), Consent::MatchOnly),
+            LocateOutcome::Refused { .. }
+        ));
+        assert!(matches!(
+            attach_file(&mut files, &other, &kernel(), Consent::LoadAnyway),
+            LocateOutcome::Forced { .. }
+        ));
     }
 
     /// A user-mode module's pageable debug directory.
@@ -968,7 +1394,10 @@ mod tests {
         let binary = pe32_file(&rsds(GUID_BYTES, 1, r"c:\build\ntkrnlmp.pdb"));
         let module = ModuleIdentity::Pe {
             file_name: "ntoskrnl.exe".to_owned(),
-            image: PeImageId { time_date_stamp: 0x0BAD_F00D, size_of_image: 0x3000 },
+            image: PeImageId {
+                time_date_stamp: 0x0BAD_F00D,
+                size_of_image: 0x3000,
+            },
             pdb: None,
         };
         let mut http = ScriptedHttp::default();
@@ -977,16 +1406,28 @@ mod tests {
         http.respond(&kernel_url(), 200, pdb(GUID_BYTES, 1));
         let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
         let outcome = go(&mut service, &module);
-        assert!(matches!(loaded_from(&outcome), Some(SymbolSource::Server { .. })));
+        assert!(matches!(
+            loaded_from(&outcome),
+            Some(SymbolSource::Server { .. })
+        ));
         assert_eq!(service.http().requests(), [binary_url, kernel_url()]);
-        let kept = PathBuf::from("store").join("ntoskrnl.exe").join("0BADF00D3000").join("ntoskrnl.exe");
-        assert!(service.store().lookup(&kept).unwrap().is_some(), "the binary is kept");
+        let kept = PathBuf::from("store")
+            .join("ntoskrnl.exe")
+            .join("0BADF00D3000")
+            .join("ntoskrnl.exe");
+        assert!(
+            service.store().lookup(&kept).unwrap().is_some(),
+            "the binary is kept"
+        );
     }
 
     #[test]
     fn an_elf_module_is_fetched_from_debuginfod() {
         let build_id = BuildId(BUILD_ID.to_vec());
-        let module = ModuleIdentity::Elf { file_name: "widget".into(), build_id: build_id.clone() };
+        let module = ModuleIdentity::Elf {
+            file_name: "widget".into(),
+            build_id: build_id.clone(),
+        };
         let file = build_elf(ElfSpec::pie(), &[]);
         let url = format!("{DEBUGINFOD}/buildid/{}/debuginfo", build_id.to_hex());
         let mut http = ScriptedHttp::default();
@@ -994,7 +1435,13 @@ mod tests {
         let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
         let outcome = go(&mut service, &module);
         let debug_path = service.store().debug_file_path(&build_id);
-        assert_eq!(loaded_from(&outcome), Some(&SymbolSource::Server { url, kept: Kept::InStore { path: debug_path } }));
+        assert_eq!(
+            loaded_from(&outcome),
+            Some(&SymbolSource::Server {
+                url,
+                kept: Kept::InStore { path: debug_path }
+            })
+        );
     }
 
     /// A dwz debug file's supplement is fetched by the build-id its
@@ -1002,24 +1449,46 @@ mod tests {
     #[test]
     fn a_dwz_supplement_is_fetched_by_its_build_id() {
         let pair = dwz_pair(DwzForms::Gnu, TEXT_RVA);
-        let main = build_elf(ElfSpec { symtab: Symtab::Without, ..ElfSpec::pie() }, &pair.main);
+        let main = build_elf(
+            ElfSpec {
+                symtab: Symtab::Without,
+                ..ElfSpec::pie()
+            },
+            &pair.main,
+        );
         let build_id = BuildId(BUILD_ID.to_vec());
         let supplement_id = BuildId(SUPPLEMENT_BUILD_ID.to_vec());
-        let module = ModuleIdentity::Elf { file_name: "widget".into(), build_id: build_id.clone() };
+        let module = ModuleIdentity::Elf {
+            file_name: "widget".into(),
+            build_id: build_id.clone(),
+        };
         let mut http = ScriptedHttp::default();
-        http.respond(&format!("{DEBUGINFOD}/buildid/{}/debuginfo", build_id.to_hex()), 200, main);
+        http.respond(
+            &format!("{DEBUGINFOD}/buildid/{}/debuginfo", build_id.to_hex()),
+            200,
+            main,
+        );
         let supplement_url = format!("{DEBUGINFOD}/buildid/{}/debuginfo", supplement_id.to_hex());
         http.respond(&supplement_url, 200, pair.supplement);
         let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
         let tables = loaded_tables(go(&mut service, &module));
-        assert_eq!(tables.symbolize(Rva(TEXT_RVA)).map(|hit| hit.name), Some("dwz_function".to_owned()));
+        assert_eq!(
+            tables.symbolize(Rva(TEXT_RVA)).map(|hit| hit.name),
+            Some("dwz_function".to_owned())
+        );
         assert!(service.http().requests().contains(&supplement_url));
         let kept = service.store().debug_file_path(&supplement_id);
-        assert!(service.store().lookup(&kept).unwrap().is_some(), "the supplement is kept");
+        assert!(
+            service.store().lookup(&kept).unwrap().is_some(),
+            "the supplement is kept"
+        );
     }
 
     fn cancelled(outcome: &LocateOutcome) -> bool {
-        matches!(unavailable(outcome), Some(LocateError::Http(HttpError::Cancelled { .. })))
+        matches!(
+            unavailable(outcome),
+            Some(LocateError::Http(HttpError::Cancelled { .. }))
+        )
     }
 
     /// The owner's cancel during the supplement's download ends the lookup
@@ -1027,13 +1496,30 @@ mod tests {
     #[test]
     fn a_cancel_during_the_supplement_download_cancels_the_lookup() {
         let pair = dwz_pair(DwzForms::Gnu, TEXT_RVA);
-        let main = build_elf(ElfSpec { symtab: Symtab::Without, ..ElfSpec::pie() }, &pair.main);
+        let main = build_elf(
+            ElfSpec {
+                symtab: Symtab::Without,
+                ..ElfSpec::pie()
+            },
+            &pair.main,
+        );
         let build_id = BuildId(BUILD_ID.to_vec());
         let supplement_id = BuildId(SUPPLEMENT_BUILD_ID.to_vec());
-        let module = ModuleIdentity::Elf { file_name: "widget".into(), build_id: build_id.clone() };
+        let module = ModuleIdentity::Elf {
+            file_name: "widget".into(),
+            build_id: build_id.clone(),
+        };
         let mut http = ScriptedHttp::default();
-        http.respond(&format!("{DEBUGINFOD}/buildid/{}/debuginfo", build_id.to_hex()), 200, main);
-        http.respond(&format!("{DEBUGINFOD}/buildid/{}/debuginfo", supplement_id.to_hex()), 200, pair.supplement);
+        http.respond(
+            &format!("{DEBUGINFOD}/buildid/{}/debuginfo", build_id.to_hex()),
+            200,
+            main,
+        );
+        http.respond(
+            &format!("{DEBUGINFOD}/buildid/{}/debuginfo", supplement_id.to_hex()),
+            200,
+            pair.supplement,
+        );
         let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
         // The second download is the supplement's: cancel it.
         let mut downloads = 0u32;
@@ -1047,7 +1533,11 @@ mod tests {
         });
         assert!(cancelled(&outcome), "a cancel is a cancel");
         let main_path = service.store().debug_file_path(&build_id);
-        assert_eq!(service.store().lookup(&main_path).unwrap(), None, "nothing kept from a cancelled lookup");
+        assert_eq!(
+            service.store().lookup(&main_path).unwrap(),
+            None,
+            "nothing kept from a cancelled lookup"
+        );
     }
 
     /// A store file whose supplement download the owner cancels is not
@@ -1055,37 +1545,76 @@ mod tests {
     #[test]
     fn a_cancel_during_a_store_files_supplement_leaves_the_store_file() {
         let pair = dwz_pair(DwzForms::Gnu, TEXT_RVA);
-        let main = build_elf(ElfSpec { symtab: Symtab::Without, ..ElfSpec::pie() }, &pair.main);
+        let main = build_elf(
+            ElfSpec {
+                symtab: Symtab::Without,
+                ..ElfSpec::pie()
+            },
+            &pair.main,
+        );
         let build_id = BuildId(BUILD_ID.to_vec());
         let supplement_id = BuildId(SUPPLEMENT_BUILD_ID.to_vec());
-        let module = ModuleIdentity::Elf { file_name: "widget".into(), build_id: build_id.clone() };
+        let module = ModuleIdentity::Elf {
+            file_name: "widget".into(),
+            build_id: build_id.clone(),
+        };
         let mut http = ScriptedHttp::default();
-        http.respond(&format!("{DEBUGINFOD}/buildid/{}/debuginfo", supplement_id.to_hex()), 200, pair.supplement);
+        http.respond(
+            &format!("{DEBUGINFOD}/buildid/{}/debuginfo", supplement_id.to_hex()),
+            200,
+            pair.supplement,
+        );
         let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
         let main_path = service.store().debug_file_path(&build_id);
-        service.store().files().insert(main_path.clone(), main.clone());
+        service
+            .store()
+            .files()
+            .insert(main_path.clone(), main.clone());
         // The only download is the supplement's: cancel the first.
         let outcome = service.locate(&module, &ProjectIndex::default(), |_| Flow::Cancel);
         assert!(cancelled(&outcome), "a cancel is a cancel");
-        assert_eq!(service.store().lookup(&main_path).unwrap(), Some(main), "the store file stays");
+        assert_eq!(
+            service.store().lookup(&main_path).unwrap(),
+            Some(main),
+            "the store file stays"
+        );
     }
 
     /// Review focus 5: the supplement is not on the server.
     #[test]
     fn a_missing_supplement_does_not_fail_the_lookup() {
         let pair = dwz_pair(DwzForms::Standard, TEXT_RVA);
-        let main = build_elf(ElfSpec { symtab: Symtab::Without, ..ElfSpec::pie() }, &pair.main);
+        let main = build_elf(
+            ElfSpec {
+                symtab: Symtab::Without,
+                ..ElfSpec::pie()
+            },
+            &pair.main,
+        );
         let build_id = BuildId(BUILD_ID.to_vec());
-        let module = ModuleIdentity::Elf { file_name: "widget".into(), build_id: build_id.clone() };
+        let module = ModuleIdentity::Elf {
+            file_name: "widget".into(),
+            build_id: build_id.clone(),
+        };
         let mut http = ScriptedHttp::default();
-        http.respond(&format!("{DEBUGINFOD}/buildid/{}/debuginfo", build_id.to_hex()), 200, main);
+        http.respond(
+            &format!("{DEBUGINFOD}/buildid/{}/debuginfo", build_id.to_hex()),
+            200,
+            main,
+        );
         let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
         let tables = loaded_tables(go(&mut service, &module));
-        assert_eq!(tables.symbolize(Rva(TEXT_RVA + 0x14)).map(|hit| hit.name), Some("own_function".to_owned()));
+        assert_eq!(
+            tables.symbolize(Rva(TEXT_RVA + 0x14)).map(|hit| hit.name),
+            Some("own_function".to_owned())
+        );
         assert_eq!(tables.symbolize(Rva(TEXT_RVA)), None, "missing, not wrong");
     }
 
-    const IMAGE: PeImageId = PeImageId { time_date_stamp: 0x4549_AD6E, size_of_image: 0x2000 };
+    const IMAGE: PeImageId = PeImageId {
+        time_date_stamp: 0x4549_AD6E,
+        size_of_image: 0x2000,
+    };
 
     /// `widget.dll` of `image`'s build: one `.text` page of `ret`s.
     fn widget(image: PeImageId) -> Vec<u8> {
@@ -1094,7 +1623,12 @@ mod tests {
             size_of_image: image.size_of_image,
             image_base: 0x7FF_0000_0000,
             section_alignment: PAGE_ALIGNED,
-            sections: vec![SpecSection { name: b".text", rva: 0x1000, bytes: vec![0xC3; 0x10], characteristics: SECTION_CODE }],
+            sections: vec![SpecSection {
+                name: b".text",
+                rva: 0x1000,
+                bytes: vec![0xC3; 0x10],
+                characteristics: SECTION_CODE,
+            }],
             exception: None,
             base_relocations: None,
             import_address_table: None,
@@ -1106,7 +1640,10 @@ mod tests {
     }
 
     fn widget_store_path() -> PathBuf {
-        PathBuf::from("store").join("widget.dll").join("4549AD6E2000").join("widget.dll")
+        PathBuf::from("store")
+            .join("widget.dll")
+            .join("4549AD6E2000")
+            .join("widget.dll")
     }
 
     fn image_from(outcome: &ImageOutcome) -> Option<&SymbolSource> {
@@ -1116,7 +1653,10 @@ mod tests {
         }
     }
 
-    fn find_widget(service: &mut SymbolService<MemoryStore, ScriptedHttp>, projects: &ProjectIndex) -> ImageOutcome {
+    fn find_widget(
+        service: &mut SymbolService<MemoryStore, ScriptedHttp>,
+        projects: &ProjectIndex,
+    ) -> ImageOutcome {
         service.locate_image("widget.dll", IMAGE, projects, |_| Flow::Continue)
     }
 
@@ -1125,17 +1665,34 @@ mod tests {
         let mut files = MemoryStore::default();
         let build = PathBuf::from("work").join("widget.dll");
         files.insert(build.clone(), widget(IMAGE));
-        let projects = [ProjectFolders { name: "widget".into(), symbols: vec![PathBuf::from("work")] }];
+        let projects = [ProjectFolders {
+            name: "widget".into(),
+            symbols: vec![PathBuf::from("work")],
+        }];
         let index = ProjectIndex::build(&mut files, &projects).unwrap();
         files.insert(widget_store_path(), widget(IMAGE));
         let mut http = ScriptedHttp::default();
         http.respond(&widget_url(), 200, widget(IMAGE));
         let mut service = service(files, http, Downloads::Automatic);
         let outcome = find_widget(&mut service, &index);
-        assert_eq!(image_from(&outcome), Some(&SymbolSource::Project { name: "widget".into(), path: build }));
+        assert_eq!(
+            image_from(&outcome),
+            Some(&SymbolSource::Project {
+                name: "widget".into(),
+                path: build
+            })
+        );
         let outcome = find_widget(&mut service, &ProjectIndex::default());
-        assert_eq!(image_from(&outcome), Some(&SymbolSource::Store { path: widget_store_path() }));
-        assert!(service.http().requests().is_empty(), "the server is never asked for a local file");
+        assert_eq!(
+            image_from(&outcome),
+            Some(&SymbolSource::Store {
+                path: widget_store_path()
+            })
+        );
+        assert!(
+            service.http().requests().is_empty(),
+            "the server is never asked for a local file"
+        );
     }
 
     #[test]
@@ -1146,18 +1703,37 @@ mod tests {
         let outcome = find_widget(&mut service, &ProjectIndex::default());
         assert_eq!(
             image_from(&outcome),
-            Some(&SymbolSource::Server { url: widget_url(), kept: Kept::InStore { path: widget_store_path() } })
+            Some(&SymbolSource::Server {
+                url: widget_url(),
+                kept: Kept::InStore {
+                    path: widget_store_path()
+                }
+            })
         );
-        let ImageOutcome::Loaded { file, .. } = outcome else { panic!("expected the binary") };
+        let ImageOutcome::Loaded { file, .. } = outcome else {
+            panic!("expected the binary")
+        };
         let mut code = [0u8; 4];
-        assert_eq!(file.read_loaded(0x7FF_0000_0000, Rva(0x1000), &mut code), ImageRead::Read);
+        assert_eq!(
+            file.read_loaded(0x7FF_0000_0000, Rva(0x1000), &mut code),
+            ImageRead::Read
+        );
         assert_eq!(code, [0xC3; 4]);
-        assert!(service.store().lookup(&widget_store_path()).unwrap().is_some());
+        assert!(
+            service
+                .store()
+                .lookup(&widget_store_path())
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
     fn a_binary_of_another_build_is_refused_and_never_enters_the_store() {
-        let other = PeImageId { time_date_stamp: 0x1111_1111, ..IMAGE };
+        let other = PeImageId {
+            time_date_stamp: 0x1111_1111,
+            ..IMAGE
+        };
         let mut http = ScriptedHttp::default();
         http.respond(&widget_url(), 200, widget(other));
         let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
@@ -1174,26 +1750,55 @@ mod tests {
         let mut http = ScriptedHttp::default();
         http.respond(&widget_url(), 200, widget(IMAGE));
         let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
-        let other = PeImageId { time_date_stamp: 0x1111_1111, ..IMAGE };
-        service.store().files().insert(widget_store_path(), widget(other));
+        let other = PeImageId {
+            time_date_stamp: 0x1111_1111,
+            ..IMAGE
+        };
+        service
+            .store()
+            .files()
+            .insert(widget_store_path(), widget(other));
         let outcome = find_widget(&mut service, &ProjectIndex::default());
-        assert!(matches!(image_from(&outcome), Some(SymbolSource::Server { kept: Kept::Replaced { .. }, .. })));
-        assert_eq!(service.store().lookup(&widget_store_path()).unwrap(), Some(widget(IMAGE)));
+        assert!(matches!(
+            image_from(&outcome),
+            Some(SymbolSource::Server {
+                kept: Kept::Replaced { .. },
+                ..
+            })
+        ));
+        assert_eq!(
+            service.store().lookup(&widget_store_path()).unwrap(),
+            Some(widget(IMAGE))
+        );
     }
 
     #[test]
-    fn a_binary_no_server_has_is_not_on_the_server_and_one_not_local_without_downloads_is_unavailable() {
-        let mut service = service(MemoryStore::default(), ScriptedHttp::default(), Downloads::Automatic);
-        assert!(matches!(find_widget(&mut service, &ProjectIndex::default()), ImageOutcome::NotOnServer));
+    fn a_binary_no_server_has_is_not_on_the_server_and_one_not_local_without_downloads_is_unavailable()
+     {
+        let mut service = service(
+            MemoryStore::default(),
+            ScriptedHttp::default(),
+            Downloads::Automatic,
+        );
+        assert!(matches!(
+            find_widget(&mut service, &ProjectIndex::default()),
+            ImageOutcome::NotOnServer
+        ));
         let mut off = service_off();
         assert!(matches!(
             find_widget(&mut off, &ProjectIndex::default()),
-            ImageOutcome::Unavailable { reason: LocateError::DownloadsOff }
+            ImageOutcome::Unavailable {
+                reason: LocateError::DownloadsOff
+            }
         ));
         assert!(off.http().requests().is_empty());
     }
 
     fn service_off() -> SymbolService<MemoryStore, ScriptedHttp> {
-        service(MemoryStore::default(), ScriptedHttp::default(), Downloads::Off)
+        service(
+            MemoryStore::default(),
+            ScriptedHttp::default(),
+            Downloads::Off,
+        )
     }
 }

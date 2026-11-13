@@ -1,6 +1,5 @@
 #![allow(private_interfaces, unused_assignments, dead_code)]
 
-
 //! 8254 PIT (Programmable Interval Timer) Emulation
 //!
 //! Based on Bochs pit82c54.cc (counter state machines) and pit.cc (port
@@ -17,14 +16,14 @@
 //! bit 1 = speaker data enable, bit 4 = refresh clock divided by 2 (derived
 //! from the microsecond clock), bit 5 = counter 2 OUT.
 
-
 use rusty_box_core::time::VmClock;
+
+use super::IoPort;
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul,
-    SnapError, SnapRead, SnapResult, SnapWrite, SNAPSHOT_SECTION_VERSION,
+    SNAPSHOT_SECTION_VERSION, SnapError, SnapRead, SnapResult, SnapWrite, bounds,
+    checked_snapshot_len_add, checked_snapshot_len_mul,
 };
-use super::IoPort;
 
 /// PIT I/O port addresses
 pub const PIT_COUNTER0: IoPort = IoPort::new(0x0040);
@@ -65,7 +64,6 @@ pub(crate) struct PitSnapshotRestoreState {
     pub(crate) timer_handle: Option<usize>,
     pub(crate) irq0_level: bool,
 }
-
 
 /// Number of PIT counters
 const PIT_NUM_COUNTERS: usize = 3;
@@ -886,6 +884,9 @@ pub(crate) fn test_clock_at(ticks: u64) -> VmClock {
 }
 
 impl BxPitC {
+    /// The PIT's single scheduler timer.
+    pub(crate) const EVENT_TIMER_LOCAL: u16 = 0;
+
     /// Create a new PIT controller in power-on state (Bochs bx_pit_c
     /// constructor + init()).
     pub fn new() -> Self {
@@ -1010,9 +1011,8 @@ impl BxPitC {
         }
 
         Some(
-            ((u64::from(event_ticks) * u64::from(USEC_PER_SECOND))
-                / u64::from(TICKS_PER_SECOND))
-            .max(1),
+            ((u64::from(event_ticks) * u64::from(USEC_PER_SECOND)) / u64::from(TICKS_PER_SECOND))
+                .max(1),
         )
     }
 
@@ -1115,7 +1115,6 @@ impl BxPitC {
             return;
         }
 
-
         // Bochs pit.cc keeps a SINGLE time cursor (`s.last_usec`): every sync —
         // the timer callback and every port access — advances the counters to
         // the absolute emulated microsecond, from the same baseline. `total_usec`
@@ -1183,9 +1182,6 @@ impl BxPitC {
         }
     }
 
-    /// The PIT's single scheduler timer.
-    pub(crate) const EVENT_TIMER_LOCAL: u16 = 0;
-
     #[inline]
     const fn event_timer_key() -> rusty_box_devices::api::TimerKey {
         rusty_box_devices::api::TimerKey {
@@ -1212,8 +1208,7 @@ impl BxPitC {
         // The k-th replayed level, ending at `level`, alternating backwards.
         let mut lvl = if replay % 2 == 1 { level } else { !level };
         for _ in 0..replay {
-            ctx.irq
-                .set_level(rusty_box_devices::api::IrqLine(0), lvl);
+            ctx.irq.set_level(rusty_box_devices::api::IrqLine(0), lvl);
             lvl = !lvl;
         }
         if level {
@@ -1459,19 +1454,21 @@ impl BxPitC {
         let transitions = self.counters[0].take_out_transitions();
         (transitions, self.counters[0].output)
     }
-
 }
 
 #[cfg(feature = "std")]
 impl crate::snapshot::SnapshotSection for BxPitC {
-    const TAG: u32 = crate::snapshot::SEC_PIT;
     type Restored = ();
+
+    const TAG: u32 = crate::snapshot::SEC_PIT;
 
     /// Exact length of the versioned PIT v3 section payload.
     fn snapshot_len(&self) -> SnapResult<u64> {
         const COUNTER_LEN: u64 = 33;
         if PIT_NUM_COUNTERS > bounds::MAX_SNAPSHOT_COUNT {
-            return Err(pit_snapshot_invalid("PIT counter count exceeds implementation bound"));
+            return Err(pit_snapshot_invalid(
+                "PIT counter count exceeds implementation bound",
+            ));
         }
         let counters = checked_snapshot_len_mul(
             u64::try_from(PIT_NUM_COUNTERS)
@@ -1498,11 +1495,7 @@ impl crate::snapshot::SnapshotSection for BxPitC {
     /// Stream all mutable PIT counter and phase state.  Registered handlers,
     /// host-time anchors, and the configured instruction rate remain live.
     fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
-        validate_pit_phase(
-            self.ips,
-            self.usec_remainder,
-            self.pit_usec_accumulator,
-        )?;
+        validate_pit_phase(self.ips, self.usec_remainder, self.pit_usec_accumulator)?;
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         for counter in &self.counters {
             validate_pit_counter(counter)?;
@@ -1524,10 +1517,7 @@ impl crate::snapshot::SnapshotSection for BxPitC {
     /// Restore mutable PIT state without touching its callback topology or
     /// generating IRQ0 edges.  PC-system owner validation is intentionally
     /// deferred until its full timer table has been restored.
-    fn restore<R: SnapRead>(
-        &mut self,
-        reader: &mut R,
-    ) -> SnapResult<()> {
+    fn restore<R: SnapRead>(&mut self, reader: &mut R) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(pit_snapshot_invalid("unsupported PIT section version"));
         }
@@ -1553,7 +1543,9 @@ impl crate::snapshot::SnapshotSection for BxPitC {
         let pit_usec_accumulator = u128::from_le_bytes(pit_usec_accumulator);
         let realtime_sync = reader.read_bool()?;
         if realtime_sync != self.realtime_last.is_some() {
-            return Err(pit_snapshot_invalid("PIT realtime configuration does not match"));
+            return Err(pit_snapshot_invalid(
+                "PIT realtime configuration does not match",
+            ));
         }
         validate_pit_phase(self.ips, usec_remainder, pit_usec_accumulator)?;
 
@@ -1570,7 +1562,6 @@ impl crate::snapshot::SnapshotSection for BxPitC {
         self.pit_usec_accumulator = pit_usec_accumulator;
         Ok(())
     }
-
 }
 
 #[cfg(feature = "std")]
@@ -1596,10 +1587,7 @@ fn pit_snapshot_invalid(message: &'static str) -> SnapError {
 }
 
 #[cfg(feature = "std")]
-fn write_snapshot_handle<W: SnapWrite>(
-    writer: &mut W,
-    handle: Option<usize>,
-) -> SnapResult<()> {
+fn write_snapshot_handle<W: SnapWrite>(writer: &mut W, handle: Option<usize>) -> SnapResult<()> {
     writer.write_bool(handle.is_some())?;
     if let Some(handle) = handle {
         writer.write_u64(
@@ -1611,9 +1599,7 @@ fn write_snapshot_handle<W: SnapWrite>(
 }
 
 #[cfg(feature = "std")]
-fn read_snapshot_handle<R: SnapRead>(
-    reader: &mut R,
-) -> SnapResult<Option<usize>> {
+fn read_snapshot_handle<R: SnapRead>(reader: &mut R) -> SnapResult<Option<usize>> {
     if !reader.read_bool()? {
         return Ok(None);
     }
@@ -1650,10 +1636,7 @@ fn write_pit_counter<W: SnapWrite>(writer: &mut W, counter: &PitCounter) -> Snap
 }
 
 #[cfg(feature = "std")]
-fn read_pit_counter<R: SnapRead>(
-    reader: &mut R,
-    counter: &mut PitCounter,
-) -> SnapResult<()> {
+fn read_pit_counter<R: SnapRead>(reader: &mut R, counter: &mut PitCounter) -> SnapResult<()> {
     counter.mode = reader.read_u8()?;
     counter.inlatch = reader.read_u16()?;
     counter.count = reader.read_u16()?;
@@ -1842,7 +1825,10 @@ mod tests {
                 let mut pit = BxPitC::new();
                 pit.init_icount_sync(0, hz);
                 pit.sync_to_icount(clock);
-                assert_eq!(pit.usec_remainder, expected_remainder, "hz={hz} ticks={ticks}");
+                assert_eq!(
+                    pit.usec_remainder, expected_remainder,
+                    "hz={hz} ticks={ticks}"
+                );
             }
         }
     }
@@ -2201,9 +2187,15 @@ mod tests {
 
         pit.write(PIT_CONTROL, 0x00, 1, clock_at(3)); // latch counter 0
         let outlatch = pit.counters[0].outlatch;
-        assert_eq!(pit.read(PIT_COUNTER0, 1, clock_at(3)), (outlatch & 0xFF) as u32);
+        assert_eq!(
+            pit.read(PIT_COUNTER0, 1, clock_at(3)),
+            (outlatch & 0xFF) as u32
+        );
         assert_eq!(pit.counters[0].read_state, RWState::MsByteMultiple);
-        assert_eq!(pit.read(PIT_COUNTER0, 1, clock_at(3)), (outlatch >> 8) as u32);
+        assert_eq!(
+            pit.read(PIT_COUNTER0, 1, clock_at(3)),
+            (outlatch >> 8) as u32
+        );
         assert_eq!(pit.counters[0].read_state, RWState::LsByteMultiple);
     }
 
@@ -2297,8 +2289,8 @@ mod tests {
         let _ = pit.drain_irq0_events();
 
         // Advance ~1000 us purely through the timer-callback (tick) path.
-        let early = pit.timer_callback(clock_at(1_000)).irq0_transitions
-            + pit.drain_irq0_events().0;
+        let early =
+            pit.timer_callback(clock_at(1_000)).irq0_transitions + pit.drain_irq0_events().0;
         assert!(early > 0, "PIT must tick via the timer path");
 
         // A guest reads a PIT port at the same emulated time. This must NOT
@@ -2337,8 +2329,7 @@ mod tests {
         let mut final_level = false;
         let mut fired_at_usec = None;
         for current_usec in 1..=4 {
-            let callback =
-                pit.timer_callback(clock_at(current_usec));
+            let callback = pit.timer_callback(clock_at(current_usec));
             transitions += callback.irq0_transitions;
             final_level = callback.irq0_level;
             if callback.irq0_transitions != 0 {
@@ -2372,5 +2363,4 @@ mod tests {
         assert_eq!(pit.total_ticks, before_ticks);
         assert_eq!(pit.counters[0].next_change_time, before_event);
     }
-
 }

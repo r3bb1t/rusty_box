@@ -18,9 +18,10 @@
 //! written in place. Either way it is the host's memory or the host's file,
 //! hence `alloc`, as for the virtio-gpu's resources.
 
+use alloc::boxed::Box;
 #[cfg(feature = "std")]
 use alloc::vec;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 
 /// QEMU's `BDRV_SECTOR_SIZE`: the unit a disk's size and every request are
 /// counted in.
@@ -282,9 +283,10 @@ fn span(at: DiskOffset, len: u64, total: usize) -> Option<core::ops::Range<usize
 /// and a read or write elsewhere.
 #[cfg(feature = "std")]
 mod host {
-    use super::DiskOffset;
     use std::fs::File;
     use std::io::{ErrorKind, Result};
+
+    use super::DiskOffset;
 
     /// Fill `out` from `at`, zeros past the end of the file.
     pub(super) fn read(file: &mut File, at: DiskOffset, out: &mut [u8]) -> Result<()> {

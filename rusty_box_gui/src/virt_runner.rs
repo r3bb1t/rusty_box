@@ -17,16 +17,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusty_box_aarch64::boot::LinuxImage;
-use rusty_box_aarch64::machine::NoBoot;
-#[cfg(feature = "gui-egui")]
-use rusty_box_aarch64::{Key, KeyAction, PointerInput, Refreshed};
-use rusty_box_aarch64::{
-    BatchOutcome, ClockHz, Disk, KeyboardInput, Levels, MachineBuilder, NoEl2, OwnedStorage, RamSize, Resolution,
-    RunBudget, StopReason, VirtConfig, VirtMachine, WithEl2,
-};
 #[cfg(feature = "gui-egui")]
 use rusty_box::gui::{host_input::AbsolutePointerEvent, shared_display::SharedDisplay};
+use rusty_box_aarch64::boot::LinuxImage;
+use rusty_box_aarch64::machine::NoBoot;
+use rusty_box_aarch64::{
+    BatchOutcome, ClockHz, Disk, KeyboardInput, Levels, MachineBuilder, NoEl2, OwnedStorage,
+    RamSize, Resolution, RunBudget, StopReason, VirtConfig, VirtMachine, WithEl2,
+};
+#[cfg(feature = "gui-egui")]
+use rusty_box_aarch64::{Key, KeyAction, PointerInput, Refreshed};
 
 use crate::config::{ArmBoot, ArmVirtConfig, DiskAccess, VirtDisk, Virtualization};
 #[cfg(feature = "gui-egui")]
@@ -38,7 +38,7 @@ use crate::debugger::{
     stepping::{StepKind, StepRequest, StepUnit},
 };
 use crate::error::RunError;
-use crate::runner::{read_required_file, Console, RunSummary};
+use crate::runner::{Console, RunSummary, read_required_file};
 
 /// The machine a run here builds, with the exception levels `L` names: every
 /// run's code is generic over them, so each feature works the same on both.
@@ -204,7 +204,9 @@ fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Board, RunError> {
     let board = board(config)?;
     match config.virtualization {
         Virtualization::Off => boot(board, files).map(|machine| Board::NoEl2(Box::new(machine))),
-        Virtualization::On => boot(board.with_el2(), files).map(|machine| Board::WithEl2(Box::new(machine))),
+        Virtualization::On => {
+            boot(board.with_el2(), files).map(|machine| Board::WithEl2(Box::new(machine)))
+        }
     }
 }
 
@@ -212,7 +214,8 @@ fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Board, RunError> {
 /// what to boot.
 fn board<'i>(config: &ArmVirtConfig) -> Result<MachineBuilder<'i, NoBoot>, RunError> {
     let virt_config = VirtConfig {
-        ips: ClockHz::new(u64::from(config.ips)).ok_or(RunError::ZeroValue { field: "virt.ips" })?,
+        ips: ClockHz::new(u64::from(config.ips))
+            .ok_or(RunError::ZeroValue { field: "virt.ips" })?,
         cpu: config.cpu,
         spectre: config.spectre,
         counter: config.counter,
@@ -335,7 +338,9 @@ fn host_epoch_seconds() -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(since) => since.as_secs(),
         Err(error) => {
-            tracing::warn!("the host clock reads before 1970 ({error}); the guest's clock starts at 2026");
+            tracing::warn!(
+                "the host clock reads before 1970 ({error}); the guest's clock starts at 2026"
+            );
             VirtConfig::DEFAULT_RTC_EPOCH
         }
     }
@@ -443,7 +448,10 @@ fn mirror_to_stdout(bytes: &[u8]) {
 /// serial console on standard output and, for [`Console::Terminal`], this
 /// terminal's keys sent to it. The terminal leaves the run as QEMU's
 /// `-nographic` console does, on Ctrl-A then X; Ctrl-A twice sends one.
-pub(crate) fn run_on_console(config: ArmVirtConfig, console: Console) -> Result<RunSummary, RunError> {
+pub(crate) fn run_on_console(
+    config: ArmVirtConfig,
+    console: Console,
+) -> Result<RunSummary, RunError> {
     let files = BootFiles::read(&config)?;
     match build(&config, &files)? {
         Board::NoEl2(mut machine) => console_run(&config, &files, &mut *machine, console),
@@ -510,7 +518,9 @@ fn finish<L: Levels>(
 ) -> Result<RunSummary, RunError> {
     let persisted = files.persist(machine);
     let closed = close_disk(machine, config);
-    let mut failures = [ran.err(), persisted.err(), closed.err()].into_iter().flatten();
+    let mut failures = [ran.err(), persisted.err(), closed.err()]
+        .into_iter()
+        .flatten();
     match failures.next() {
         None => Ok(RunSummary {
             instructions_executed: Some(machine.instructions()),
@@ -560,7 +570,9 @@ impl RawTerminal {
         let raw = match crossterm::terminal::enable_raw_mode() {
             Ok(()) => true,
             Err(error) => {
-                tracing::warn!("the terminal could not be put in raw mode ({error}); keys reach the guest a line at a time");
+                tracing::warn!(
+                    "the terminal could not be put in raw mode ({error}); keys reach the guest a line at a time"
+                );
                 false
             }
         };
@@ -573,7 +585,9 @@ impl RawTerminal {
 
     /// Stop reading the terminal after `error`, reporting it once.
     fn close_input(&mut self, error: &std::io::Error) {
-        tracing::warn!("the terminal could not be read ({error}); the guest gets no keys from it for the rest of the run");
+        tracing::warn!(
+            "the terminal could not be read ({error}); the guest gets no keys from it for the rest of the run"
+        );
         self.input = TerminalInput::Closed;
     }
 
@@ -725,7 +739,10 @@ fn function_key(number: u8) -> Option<rusty_box_aarch64::Key> {
 fn send_bytes<L: Levels>(machine: &mut Virt<L>, bytes: &[u8]) {
     let taken = machine.keyboard().bytes(bytes);
     if taken < bytes.len() {
-        tracing::warn!("the serial console took {taken} of a key's {} bytes", bytes.len());
+        tracing::warn!(
+            "the serial console took {taken} of a key's {} bytes",
+            bytes.len()
+        );
     }
 }
 
@@ -864,9 +881,10 @@ fn perform<L: Levels>(
         }
         Task::CopyImages(request) => {
             for module in request.modules {
-                control
-                    .xrefs()
-                    .fail(module.key, "an Arm board has no debugger to copy a module through".to_owned());
+                control.xrefs().fail(
+                    module.key,
+                    "an Arm board has no debugger to copy a module through".to_owned(),
+                );
             }
             Ok(MachineAfter::Live)
         }
@@ -945,7 +963,11 @@ impl<'d> ShellWindow<'d> {
     fn pump_input<L: Levels>(&mut self, machine: &mut Virt<L>) {
         if let Ok(mut shown) = self.display.lock() {
             for (key, pressed) in shown.pending_keys.drain(..) {
-                let action = if pressed { KeyAction::Press } else { KeyAction::Release };
+                let action = if pressed {
+                    KeyAction::Press
+                } else {
+                    KeyAction::Release
+                };
                 push_bounded(&mut self.keys, (key, action));
             }
             for event in shown.pending_pointer.drain(..) {
@@ -970,7 +992,9 @@ impl<'d> ShellWindow<'d> {
                 while let Some(&event) = self.pointer.front() {
                     let taken = match event {
                         AbsolutePointerEvent::MoveTo(pos) => tablet.move_to(pos),
-                        AbsolutePointerEvent::Button(button, action) => tablet.button(button, action),
+                        AbsolutePointerEvent::Button(button, action) => {
+                            tablet.button(button, action)
+                        }
                         AbsolutePointerEvent::Wheel(steps) => tablet.wheel(steps),
                     };
                     if !taken {
@@ -992,7 +1016,9 @@ impl<'d> ShellWindow<'d> {
         if left == 0 || left < waiting {
             self.input_taken = Instant::now();
         } else if self.input_taken.elapsed() >= STALE_INPUT {
-            tracing::debug!("the guest took no input for {STALE_INPUT:?}; {left} waiting events were dropped");
+            tracing::debug!(
+                "the guest took no input for {STALE_INPUT:?}; {left} waiting events were dropped"
+            );
             self.keys.clear();
             self.pointer.clear();
             self.serial.clear();
@@ -1026,7 +1052,8 @@ impl<'d> ShellWindow<'d> {
         }
         if when == Presenting::WhenDue && self.last_rate.elapsed() >= IPS_INTERVAL {
             let instructions = machine.instructions();
-            let per_second = instructions.saturating_sub(self.rate_from) as f64 / self.last_rate.elapsed().as_secs_f64();
+            let per_second = instructions.saturating_sub(self.rate_from) as f64
+                / self.last_rate.elapsed().as_secs_f64();
             self.show_ips(per_second as u32);
             self.rate_from = instructions;
             self.last_rate = Instant::now();
@@ -1211,7 +1238,9 @@ mod tests {
     fn current_el_a_guest_reads<L: Levels>(machine: &mut Virt<L>) -> u64 {
         const MRS_X1_CURRENTEL: u32 = 0xD538_4241;
         let at = rusty_box_aarch64::board::RAM_BASE;
-        machine.mem_write(at, &MRS_X1_CURRENTEL.to_le_bytes()).expect("in RAM");
+        machine
+            .mem_write(at, &MRS_X1_CURRENTEL.to_le_bytes())
+            .expect("in RAM");
         machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
         let stepped = machine.step(RunBudget::Instructions(1));
         assert_eq!(stepped.stop, StopReason::BudgetExhausted);
@@ -1235,10 +1264,17 @@ mod tests {
                 };
                 let files = BootFiles::read(&config).expect("the kernel");
                 let read = match (build(&config, &files).expect("the machine"), virtualization) {
-                    (Board::NoEl2(mut machine), Virtualization::Off) => current_el_a_guest_reads(&mut *machine),
-                    (Board::WithEl2(mut machine), Virtualization::On) => current_el_a_guest_reads(&mut *machine),
-                    (Board::NoEl2(_), Virtualization::On) | (Board::WithEl2(_), Virtualization::Off) => {
-                        panic!("{cpu:?}, virtualization {virtualization}: the other machine was built")
+                    (Board::NoEl2(mut machine), Virtualization::Off) => {
+                        current_el_a_guest_reads(&mut *machine)
+                    }
+                    (Board::WithEl2(mut machine), Virtualization::On) => {
+                        current_el_a_guest_reads(&mut *machine)
+                    }
+                    (Board::NoEl2(_), Virtualization::On)
+                    | (Board::WithEl2(_), Virtualization::Off) => {
+                        panic!(
+                            "{cpu:?}, virtualization {virtualization}: the other machine was built"
+                        )
                     }
                 };
                 let want = match virtualization {
@@ -1338,10 +1374,18 @@ mod tests {
             stop,
         };
         for stop in [StopReason::BudgetExhausted, StopReason::Halted] {
-            assert_eq!(settle(outcome(stop)).expect("runs on"), Settled::RunOn, "{stop:?}");
+            assert_eq!(
+                settle(outcome(stop)).expect("runs on"),
+                Settled::RunOn,
+                "{stop:?}"
+            );
         }
         for stop in [StopReason::PoweredOff, StopReason::ProcessorOff] {
-            assert_eq!(settle(outcome(stop)).expect("ends"), Settled::Over, "{stop:?}");
+            assert_eq!(
+                settle(outcome(stop)).expect("ends"),
+                Settled::Over,
+                "{stop:?}"
+            );
         }
         for stop in [
             StopReason::StopRequested,
@@ -1385,7 +1429,7 @@ mod tests {
             };
             let files = BootFiles::read(&config).expect("the kernel");
             let machine = no_el2(build(&config, &files).expect("the machine"));
-            let midr =machine.sysreg_read(rusty_box_aarch64::SysReg::MIDR_EL1);
+            let midr = machine.sysreg_read(rusty_box_aarch64::SysReg::MIDR_EL1);
             let cntfrq = machine.sysreg_read(rusty_box_aarch64::SysReg::CNTFRQ_EL0);
             let want = match model {
                 rusty_box_aarch64::CpuModel::CortexA57 => (0x411F_D073, 1_000_000_000),
@@ -1427,7 +1471,11 @@ mod tests {
                 rusty_box_aarch64::StopReason::BudgetExhausted,
                 "{report:?}: the call returns"
             );
-            assert_eq!(machine.reg_read(rusty_box_aarch64::Reg::X0), answer, "{report:?}");
+            assert_eq!(
+                machine.reg_read(rusty_box_aarch64::Reg::X0),
+                answer,
+                "{report:?}"
+            );
         }
     }
 
@@ -1463,9 +1511,14 @@ mod tests {
             Ok(24_000_000)
         );
         let at = rusty_box_aarch64::board::RAM_BASE;
-        machine.mem_write(at, &LDR_W0_X1.to_le_bytes()).expect("in RAM");
+        machine
+            .mem_write(at, &LDR_W0_X1.to_le_bytes())
+            .expect("in RAM");
         machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
-        machine.reg_write(rusty_box_aarch64::Reg::X1, rusty_box_aarch64::board::GIC_DIST_BASE + 4);
+        machine.reg_write(
+            rusty_box_aarch64::Reg::X1,
+            rusty_box_aarch64::board::GIC_DIST_BASE + 4,
+        );
         let stepped = machine.step(rusty_box_aarch64::RunBudget::Instructions(1));
         assert_eq!(stepped.stop, rusty_box_aarch64::StopReason::BudgetExhausted);
         assert_eq!(
@@ -1474,7 +1527,10 @@ mod tests {
             "GICD_TYPER.ITLinesNumber"
         );
         machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
-        machine.reg_write(rusty_box_aarch64::Reg::X1, rusty_box_aarch64::board::GIC_V2M_BASE + 8);
+        machine.reg_write(
+            rusty_box_aarch64::Reg::X1,
+            rusty_box_aarch64::board::GIC_V2M_BASE + 8,
+        );
         let stepped = machine.step(rusty_box_aarch64::RunBudget::Instructions(1));
         assert_eq!(stepped.stop, rusty_box_aarch64::StopReason::BudgetExhausted);
         assert_eq!(
@@ -1493,18 +1549,21 @@ mod tests {
         const LDR_W0_X1: u32 = 0xB940_0020;
         let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
         let image = ScratchFile::new("order.img", &[0; 512]);
-        let device_id = |machine: &mut Virt<NoEl2>, layout: rusty_box_aarch64::DeviceLayout, slot: u8| {
-            let at = rusty_box_aarch64::board::RAM_BASE;
-            machine.mem_write(at, &LDR_W0_X1.to_le_bytes()).expect("in RAM");
-            machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
-            machine.reg_write(
-                rusty_box_aarch64::Reg::X1,
-                layout.windows().virtio.transport(slot).base.get() + 8,
-            );
-            let stepped = machine.step(rusty_box_aarch64::RunBudget::Instructions(1));
-            assert_eq!(stepped.stop, rusty_box_aarch64::StopReason::BudgetExhausted);
-            machine.reg_read(rusty_box_aarch64::Reg::X0)
-        };
+        let device_id =
+            |machine: &mut Virt<NoEl2>, layout: rusty_box_aarch64::DeviceLayout, slot: u8| {
+                let at = rusty_box_aarch64::board::RAM_BASE;
+                machine
+                    .mem_write(at, &LDR_W0_X1.to_le_bytes())
+                    .expect("in RAM");
+                machine.reg_write(rusty_box_aarch64::Reg::Pc, at);
+                machine.reg_write(
+                    rusty_box_aarch64::Reg::X1,
+                    layout.windows().virtio.transport(slot).base.get() + 8,
+                );
+                let stepped = machine.step(rusty_box_aarch64::RunBudget::Instructions(1));
+                assert_eq!(stepped.stop, rusty_box_aarch64::StopReason::BudgetExhausted);
+                machine.reg_read(rusty_box_aarch64::Reg::X0)
+            };
         for layout in rusty_box_aarch64::DeviceLayout::ALL {
             // The board's own layout's 4 transports, QEMU's 32.
             let last = layout.windows().virtio.count.get() - 1;
@@ -1524,8 +1583,16 @@ mod tests {
                 };
                 let files = BootFiles::read(&config).expect("the kernel");
                 let mut machine = no_el2(build(&config, &files).expect("the machine"));
-                assert_eq!(device_id(&mut machine, layout, disk_slot), 2, "{layout}, {order:?}: the disk");
-                assert_eq!(device_id(&mut machine, layout, empty_slot), 0, "{layout}, {order:?}: nothing");
+                assert_eq!(
+                    device_id(&mut machine, layout, disk_slot),
+                    2,
+                    "{layout}, {order:?}: the disk"
+                );
+                assert_eq!(
+                    device_id(&mut machine, layout, empty_slot),
+                    0,
+                    "{layout}, {order:?}: nothing"
+                );
             }
         }
     }
@@ -1562,7 +1629,9 @@ mod tests {
     fn a_file_this_process_may_only_read_is_a_read_only_disk() {
         let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
         let image = ScratchFile::new("readable.img", &[0; 512]);
-        let writable = std::fs::metadata(&image.0).expect("the image").permissions();
+        let writable = std::fs::metadata(&image.0)
+            .expect("the image")
+            .permissions();
         let mut readable = writable.clone();
         readable.set_readonly(true);
         std::fs::set_permissions(&image.0, readable).expect("make the image read-only");
@@ -1587,7 +1656,10 @@ mod tests {
     #[test]
     fn a_disk_that_cannot_be_opened_is_refused_with_its_path() {
         let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
-        let missing = std::env::temp_dir().join(format!("rusty-box-gui-virt-{}-absent.img", std::process::id()));
+        let missing = std::env::temp_dir().join(format!(
+            "rusty-box-gui-virt-{}-absent.img",
+            std::process::id()
+        ));
         let config = ArmVirtConfig {
             disk: Some(VirtDisk {
                 path: missing.clone(),
@@ -1597,7 +1669,11 @@ mod tests {
         };
 
         match run_on_console(config, Console::Headless) {
-            Err(RunError::MediaAttach { kind: "disk", path, source }) => {
+            Err(RunError::MediaAttach {
+                kind: "disk",
+                path,
+                source,
+            }) => {
                 assert_eq!((path, source.kind()), (missing, io::ErrorKind::NotFound));
             }
             other => panic!("not refused as a disk: {other:?}"),
@@ -1612,7 +1688,10 @@ mod tests {
         (no_el2(build(&config, &files).expect("the machine")), kernel)
     }
 
-    fn key(code: crossterm::event::KeyCode, modifiers: crossterm::event::KeyModifiers) -> crossterm::event::KeyEvent {
+    fn key(
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, modifiers)
     }
 
@@ -1633,11 +1712,20 @@ mod tests {
         };
         let empty = room(&mut machine);
 
-        assert_eq!(terminal.key(&mut machine, key(KeyCode::Up, KeyModifiers::NONE)), Pumped::RunOn);
+        assert_eq!(
+            terminal.key(&mut machine, key(KeyCode::Up, KeyModifiers::NONE)),
+            Pumped::RunOn
+        );
         assert_eq!(room(&mut machine), empty - 3, "ESC [ A");
-        assert_eq!(terminal.key(&mut machine, key(KeyCode::Char('c'), KeyModifiers::CONTROL)), Pumped::RunOn);
+        assert_eq!(
+            terminal.key(&mut machine, key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Pumped::RunOn
+        );
         assert_eq!(room(&mut machine), empty - 4, "Ctrl-C is one byte");
-        assert_eq!(terminal.key(&mut machine, key(KeyCode::Char('é'), KeyModifiers::NONE)), Pumped::RunOn);
+        assert_eq!(
+            terminal.key(&mut machine, key(KeyCode::Char('é'), KeyModifiers::NONE)),
+            Pumped::RunOn
+        );
         assert_eq!(room(&mut machine), empty - 6, "é is two bytes of UTF-8");
     }
 
@@ -1677,7 +1765,10 @@ mod tests {
         assert_eq!(room(&mut machine), empty - 1, "one Ctrl-A");
 
         assert_eq!(terminal.key(&mut machine, ctrl_a), Pumped::RunOn);
-        assert_eq!(terminal.key(&mut machine, key(KeyCode::Char('x'), KeyModifiers::NONE)), Pumped::Quit);
+        assert_eq!(
+            terminal.key(&mut machine, key(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Pumped::Quit
+        );
         assert_eq!(room(&mut machine), empty - 1, "the escape sent nothing");
     }
 
@@ -1713,7 +1804,9 @@ mod tests {
                 ..kernel_board(&kernel)
             };
             let display = Arc::new(Mutex::new(SharedDisplay::new()));
-            let control = Arc::new(RunControl::new(Arc::new(std::sync::atomic::AtomicBool::new(false))));
+            let control = Arc::new(RunControl::new(Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            )));
             control.begin_run(crate::debugger::control::RunStart::PowerOn);
 
             let summary = run_in_shell(&config, &display, &control).expect("the run");
@@ -1778,7 +1871,11 @@ mod tests {
         window.pump_input(&mut machine);
 
         assert!(window.keys.is_empty());
-        assert_eq!(room(&mut machine), empty - 200, "every tap typed its letter");
+        assert_eq!(
+            room(&mut machine),
+            empty - 200,
+            "every tap typed its letter"
+        );
     }
 
     /// A burst a guest is not taking yet (its virtio keyboard has no driver)

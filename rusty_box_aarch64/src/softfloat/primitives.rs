@@ -91,29 +91,17 @@ pub(crate) fn shift_right_jam128(a64: u64, a0: u64, dist: u32) -> (u64, u64) {
 
 #[inline]
 pub(crate) fn count_leading_zeros16(a: u16) -> u8 {
-    if a == 0 {
-        16
-    } else {
-        a.leading_zeros() as u8
-    }
+    if a == 0 { 16 } else { a.leading_zeros() as u8 }
 }
 
 #[inline]
 pub(crate) fn count_leading_zeros32(a: u32) -> u8 {
-    if a == 0 {
-        32
-    } else {
-        a.leading_zeros() as u8
-    }
+    if a == 0 { 32 } else { a.leading_zeros() as u8 }
 }
 
 #[inline]
 pub(crate) fn count_leading_zeros64(a: u64) -> u8 {
-    if a == 0 {
-        64
-    } else {
-        a.leading_zeros() as u8
-    }
+    if a == 0 { 64 } else { a.leading_zeros() as u8 }
 }
 
 // --- 128-bit arithmetic using Rust u128 ---

@@ -23,11 +23,11 @@
 use std::vec::Vec;
 
 use super::el2::{HCR_E2H, HCR_TGE};
-use super::el2_tests::{restored, Machine};
+use super::el2_tests::{Machine, restored};
 use super::features::Implementation;
 use super::mmu::saved_layout::NO_CONTEXT;
 use super::mmu::{El2RegimeContext, TlbContext};
-use super::{id, El, WithEl2};
+use super::{El, WithEl2, id};
 
 const CODE: u64 = 0x4_0000;
 const VBAR_EL2: u64 = 0xA000;

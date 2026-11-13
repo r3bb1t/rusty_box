@@ -10,18 +10,16 @@
 //! R4 (`AtaSlot`, `DiskGeometry` and `BootDevice` replace the loose
 //! `usize`/`u8` currency the old init chain passed around).
 
-use crate::{
-    cpu::{instrumentation::Instrumentation, ResetReason},
-    Result,
-};
-
-use super::{Emulator, EmulatorConfig, SliceEngine};
-#[cfg(feature = "std")]
-use super::{Journal, VolatileDisk};
 // Only the alloc-gated `build` names the interpreter; a no-alloc host places
 // its machine itself and takes the default engine with it.
 #[cfg(feature = "alloc")]
 use super::SoftwareEngine;
+use super::{Emulator, EmulatorConfig, SliceEngine};
+#[cfg(feature = "std")]
+use super::{Journal, VolatileDisk};
+use crate::Result;
+use crate::cpu::ResetReason;
+use crate::cpu::instrumentation::Instrumentation;
 
 /// A misconfiguration caught at the construction choke point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -34,7 +32,9 @@ pub enum BuildError {
     /// One tracer instance cannot be shared between processors, and
     /// `Instrumentation` is not required to be cloneable. Use
     /// [`MachineBuilder::tracer_factory`] to give each processor its own.
-    #[error("a machine built from one tracer instance runs one processor; {requested} were configured")]
+    #[error(
+        "a machine built from one tracer instance runs one processor; {requested} were configured"
+    )]
     InstrumentedSmp { requested: u32 },
 }
 
@@ -217,10 +217,16 @@ enum Media {
         geometry: DiskGeometry,
     },
     #[cfg(feature = "std")]
-    CdromFile { path: alloc::string::String },
+    CdromFile {
+        path: alloc::string::String,
+    },
     #[cfg(feature = "alloc")]
-    CdromBytes { data: alloc::vec::Vec<u8> },
-    CdromStatic { data: &'static [u8] },
+    CdromBytes {
+        data: alloc::vec::Vec<u8>,
+    },
+    CdromStatic {
+        data: &'static [u8],
+    },
 }
 
 impl Media {
@@ -416,7 +422,12 @@ impl<'r, T: Instrumentation> MachineBuilder<'r, T> {
     /// machine for a restart gives it the same disk, so the guest's writes
     /// last until power-off.
     #[cfg(feature = "std")]
-    pub fn volatile_disk(mut self, slot: AtaSlot, disk: VolatileDisk, geometry: DiskGeometry) -> Self {
+    pub fn volatile_disk(
+        mut self,
+        slot: AtaSlot,
+        disk: VolatileDisk,
+        geometry: DiskGeometry,
+    ) -> Self {
         self.settings.media[slot.index()] = Some(Media::VolatileDisk { disk, geometry });
         self
     }
@@ -682,7 +693,9 @@ fn attach<T: Instrumentation, E: SliceEngine<T>>(
             geometry.sectors_per_track,
         )?,
         #[cfg(feature = "std")]
-        Media::VolatileDisk { disk, geometry } => machine.attach_open_volatile_disk(slot, disk, geometry)?,
+        Media::VolatileDisk { disk, geometry } => {
+            machine.attach_open_volatile_disk(slot, disk, geometry)?
+        }
         #[cfg(feature = "alloc")]
         Media::DiskBytes { data, geometry } => machine.attach_disk_data(
             slot.channel(),
@@ -714,8 +727,7 @@ fn attach<T: Instrumentation, E: SliceEngine<T>>(
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
-    use crate::emulator::MemorySize;
-    use crate::emulator::StopReason;
+    use crate::emulator::{MemorySize, StopReason};
 
     const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
@@ -771,7 +783,9 @@ mod tests {
     fn an_empty_bios_image_has_no_load_address() {
         assert!(matches!(
             bios_load_address(0),
-            Err(crate::Error::Build(BuildError::UnusableBiosImage { bytes: 0 }))
+            Err(crate::Error::Build(BuildError::UnusableBiosImage {
+                bytes: 0
+            }))
         ));
         // Bochs misc_mem.cc: a 64 KiB image ends at the 4 GiB boundary, a
         // 128 KiB image one bank below it.
@@ -818,8 +832,10 @@ mod tests {
     #[test]
     fn a_volatile_disk_reaches_the_cmos_and_leaves_no_journal_named() {
         on_a_big_stack(|| {
-            let path = std::env::temp_dir()
-                .join(format!("rusty-box-builder-volatile-{}.img", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "rusty-box-builder-volatile-{}.img",
+                std::process::id()
+            ));
             std::fs::write(&path, [7u8; 1024]).expect("image");
             let mut machine = MachineBuilder::new(small_machine())
                 .volatile_disk_file(
@@ -838,10 +854,18 @@ mod tests {
             // Unix removes an open file's name at once; Windows does only with
             // POSIX delete semantics, else at close.
             if cfg!(unix) {
-                assert_eq!(journals_beside(&path), 0, "the journal has no name while the machine runs");
+                assert_eq!(
+                    journals_beside(&path),
+                    0,
+                    "the journal has no name while the machine runs"
+                );
             }
             drop(machine);
-            assert_eq!(journals_beside(&path), 0, "nothing of the journal outlives the machine");
+            assert_eq!(
+                journals_beside(&path),
+                0,
+                "nothing of the journal outlives the machine"
+            );
             assert_eq!(std::fs::read(&path).expect("image"), [7u8; 1024]);
             std::fs::remove_file(&path).expect("remove");
         });
@@ -852,18 +876,26 @@ mod tests {
     #[test]
     fn a_volatile_disk_taken_back_from_one_machine_serves_the_next() {
         on_a_big_stack(|| {
-            let path = std::env::temp_dir()
-                .join(format!("rusty-box-builder-carry-{}.img", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "rusty-box-builder-carry-{}.img",
+                std::process::id()
+            ));
             std::fs::write(&path, [7u8; 1024]).expect("image");
-            let disk = VolatileDisk::open(path.to_str().expect("utf-8"), &Journal::BesideImage).expect("open");
+            let disk = VolatileDisk::open(path.to_str().expect("utf-8"), &Journal::BesideImage)
+                .expect("open");
             let journal = disk.journal_path().to_path_buf();
             let mut first = MachineBuilder::new(small_machine())
                 .volatile_disk(AtaSlot::PRIMARY_MASTER, disk, DiskGeometry::new(2, 1, 1))
                 .build()
                 .expect("build");
-            let disk = first.take_volatile_disk(AtaSlot::PRIMARY_MASTER).expect("given back");
+            let disk = first
+                .take_volatile_disk(AtaSlot::PRIMARY_MASTER)
+                .expect("given back");
             assert_eq!(disk.journal_path(), journal, "the same journal");
-            assert!(first.take_volatile_disk(AtaSlot::PRIMARY_MASTER).is_none(), "and none left behind");
+            assert!(
+                first.take_volatile_disk(AtaSlot::PRIMARY_MASTER).is_none(),
+                "and none left behind"
+            );
             drop(first);
 
             let mut next = MachineBuilder::new(small_machine())
@@ -871,7 +903,8 @@ mod tests {
                 .build()
                 .expect("build");
             assert_eq!(
-                next.take_volatile_disk(AtaSlot::PRIMARY_MASTER).map(|disk| disk.journal_path().to_path_buf()),
+                next.take_volatile_disk(AtaSlot::PRIMARY_MASTER)
+                    .map(|disk| disk.journal_path().to_path_buf()),
                 Some(journal)
             );
             drop(next);

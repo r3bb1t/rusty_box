@@ -14,10 +14,9 @@
 //! the slot. QEMU's memory core splits an eight-byte access into two
 //! four-byte ones, low half first.
 
+use super::virtio::{MAGIC, MODERN_VERSION};
 use crate::bus::{AccessWidth, RegOffset};
 use crate::identity::VirtioVendorId;
-
-use super::virtio::{MAGIC, MODERN_VERSION};
 
 const LEGACY_VERSION: u32 = 1;
 

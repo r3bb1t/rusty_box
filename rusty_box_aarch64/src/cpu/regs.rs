@@ -170,11 +170,7 @@ pub struct VReg(u8);
 impl VReg {
     /// `Vn`, for `n` in `0..=31`.
     pub const fn new(n: u8) -> Option<Self> {
-        if n < 32 {
-            Some(Self(n))
-        } else {
-            None
-        }
+        if n < 32 { Some(Self(n)) } else { None }
     }
 
     pub const fn index(self) -> u8 {
@@ -317,15 +313,19 @@ impl SysReg {
     pub const fn op0(self) -> u8 {
         (self.0 >> 14) as u8
     }
+
     pub const fn op1(self) -> u8 {
         ((self.0 >> 11) & 7) as u8
     }
+
     pub const fn crn(self) -> u8 {
         ((self.0 >> 7) & 15) as u8
     }
+
     pub const fn crm(self) -> u8 {
         ((self.0 >> 3) & 15) as u8
     }
+
     pub const fn op2(self) -> u8 {
         (self.0 & 7) as u8
     }

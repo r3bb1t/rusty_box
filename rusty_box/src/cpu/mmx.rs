@@ -12,10 +12,8 @@
 //! - SSE-era MMX extensions (PSHUFW, PINSRW, PEXTRW, PMOVMSKB, etc.)
 //! - SSSE3 MMX extensions (PSHUFB, PHADD, PHSUB, PSIGN, PABS, PALIGNR)
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-    i387::BxPackedRegister,
-};
+use super::decoder::{BxSegregs, Instruction};
+use super::i387::BxPackedRegister;
 
 // ============================================================================
 // Saturation helpers (matching Bochs mmx.cc inline functions)
@@ -552,7 +550,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
         for j in 0..8usize {
-            r.set_Ubyte(j, if op1.Sbyte(j) > op2.Sbyte(j) { 0xff } else { 0 });
+            r.set_Ubyte(j, if op1.Sbyte(j) > op2.Sbyte(j) { 0xFF } else { 0 });
         }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
@@ -568,7 +566,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
         for j in 0..4usize {
-            r.set_U16(j, if op1.S16(j) > op2.S16(j) { 0xffff } else { 0 });
+            r.set_U16(j, if op1.S16(j) > op2.S16(j) { 0xFFFF } else { 0 });
         }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
@@ -587,7 +585,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             r.set_U32(
                 j,
                 if op1.S32(j) > op2.S32(j) {
-                    0xffffffff
+                    0xFFFFFFFF
                 } else {
                     0
                 },
@@ -814,7 +812,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             r.set_Ubyte(
                 j,
                 if op1.Ubyte(j) == op2.Ubyte(j) {
-                    0xff
+                    0xFF
                 } else {
                     0
                 },
@@ -834,7 +832,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
         for j in 0..4usize {
-            r.set_U16(j, if op1.U16(j) == op2.U16(j) { 0xffff } else { 0 });
+            r.set_U16(j, if op1.U16(j) == op2.U16(j) { 0xFFFF } else { 0 });
         }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
@@ -853,7 +851,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             r.set_U32(
                 j,
                 if op1.U32(j) == op2.U32(j) {
-                    0xffffffff
+                    0xFFFFFFFF
                 } else {
                     0
                 },
@@ -1225,7 +1223,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if count == 0 { /* no change */
         } else if count > 15 {
             for j in 0..4usize {
-                op1.set_U16(j, if op1.S16(j) < 0 { 0xffff } else { 0 });
+                op1.set_U16(j, if op1.S16(j) < 0 { 0xFFFF } else { 0 });
             }
         } else {
             for j in 0..4usize {
@@ -1246,7 +1244,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if count == 0 { /* no change */
         } else if count > 31 {
             for j in 0..2usize {
-                op1.set_U32(j, if op1.S32(j) < 0 { 0xffffffff } else { 0 });
+                op1.set_U32(j, if op1.S32(j) < 0 { 0xFFFFFFFF } else { 0 });
             }
         } else {
             for j in 0..2usize {
@@ -1721,7 +1719,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if shift == 0 { /* no-op */
         } else if shift > 15 {
             for j in 0..4usize {
-                op.set_U16(j, if op.S16(j) < 0 { 0xffff } else { 0 });
+                op.set_U16(j, if op.S16(j) < 0 { 0xFFFF } else { 0 });
             }
         } else {
             for j in 0..4usize {
@@ -1774,7 +1772,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if shift == 0 { /* no-op */
         } else if shift > 31 {
             for j in 0..2usize {
-                op.set_U32(j, if op.S32(j) < 0 { 0xffffffff } else { 0 });
+                op.set_U32(j, if op.S32(j) < 0 { 0xFFFFFFFF } else { 0 });
             }
         } else {
             for j in 0..2usize {

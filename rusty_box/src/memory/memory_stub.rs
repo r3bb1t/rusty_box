@@ -1,5 +1,6 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+
 #[cfg(feature = "std")]
 use tempfile::tempfile;
 
@@ -11,9 +12,8 @@ use super::{BxMemoryStubC, MemoryError, Result};
 use super::{MemorySnapshotGeometry, MemorySnapshotResidency};
 use crate::config::{A20Mask, BxPhyAddress};
 use crate::memory::memory_rusty_box::{
-    bx_guest_ram_span, bx_is_pci_hole_addr, BIOSROMSZ, EXROMSIZE,
+    BIOSROMSZ, EXROMSIZE, bx_guest_ram_span, bx_is_pci_hole_addr,
 };
-
 #[cfg(feature = "std")]
 use crate::snapshot::{SnapRead, SnapResult, SnapWrite};
 
@@ -107,7 +107,6 @@ impl RamBacking {
 }
 
 impl BxMemoryStubC {
-
     pub fn get_memory_len(&self) -> usize {
         self.guest_len()
     }
@@ -290,9 +289,7 @@ impl BxMemoryStubC {
             // unaliased for the life of the machine. Wrapping it once here is
             // the only place that contract is taken on trust; everything below
             // works from the resulting slice.
-            backing: RamBacking::Borrowed(unsafe {
-                core::slice::from_raw_parts_mut(ptr, len)
-            }),
+            backing: RamBacking::Borrowed(unsafe { core::slice::from_raw_parts_mut(ptr, len) }),
             actual_vector_len: len,
             residency,
             vector_offset,
@@ -433,11 +430,7 @@ impl BxMemoryStubC {
     }
 
     #[cfg(feature = "std")]
-    fn snapshot_resident_block_mut(
-        &mut self,
-        slot: usize,
-        len: usize,
-    ) -> SnapResult<&mut [u8]> {
+    fn snapshot_resident_block_mut(&mut self, slot: usize, len: usize) -> SnapResult<&mut [u8]> {
         let offset = self.residency.snapshot_slot_offset(slot, len)?;
         let start = self
             .vector_offset
@@ -458,7 +451,8 @@ impl BxMemoryStubC {
         &self,
         guest_block: u32,
     ) -> SnapResult<MemorySnapshotResidency> {
-        self.residency.snapshot_residency(guest_block_index(guest_block)?)
+        self.residency
+            .snapshot_residency(guest_block_index(guest_block)?)
     }
 
     /// Stream one logical guest block in GPA order without changing residency.
@@ -521,7 +515,8 @@ impl BxMemoryStubC {
             .map
             .finish_snapshot_restore(parts.ram, geometry, saved_map)?;
         self.smc_stamps.fill(0);
-        self.smc_pending.fill(crate::cpu::icache::PendingSmc::default());
+        self.smc_pending
+            .fill(crate::cpu::icache::PendingSmc::default());
         self.smc_pending_len = 0;
         self.smc_seq_next = 0;
         self.smc_overflow_seq = 0;
@@ -535,10 +530,7 @@ impl BxMemoryStubC {
     /// The offset, not a pointer, is the primitive: it is what the CPU caches
     /// and what the eviction check compares, and unlike an address it does not
     /// depend on where the allocation happens to sit.
-    pub(super) fn resident_slot_range(
-        &mut self,
-        addr: usize,
-    ) -> Result<core::ops::Range<usize>> {
+    pub(super) fn resident_slot_range(&mut self, addr: usize) -> Result<core::ops::Range<usize>> {
         let vector_offset = self.vector_offset;
         let parts = self.resident_parts();
         let range = parts.map.slot_range(parts.ram, addr)?;
@@ -550,10 +542,7 @@ impl BxMemoryStubC {
     }
 
     /// The same resident span as `resident_slot_range`, as bytes.
-    pub(super) fn get_vector_offset<'a>(
-        &'a mut self,
-        addr: usize,
-    ) -> Result<&'a mut [u8]> {
+    pub(super) fn get_vector_offset<'a>(&'a mut self, addr: usize) -> Result<&'a mut [u8]> {
         let range = self.resident_slot_range(addr)?;
         Ok(&mut self.actual_vector_mut()[range])
     }
@@ -573,7 +562,6 @@ impl BxMemoryStubC {
     pub(super) fn bogus_range(&self, offset: usize) -> core::ops::Range<usize> {
         (self.bogus_offset + offset)..self.actual_vector_len
     }
-
 
     pub(crate) fn write_physical_page(
         &mut self,
@@ -636,7 +624,7 @@ impl BxMemoryStubC {
 
         if bx_is_pci_hole_addr(a20_addr) {
             // PCI MMIO hole — reads return 0xFF
-            data[..len].fill(0xff);
+            data[..len].fill(0xFF);
             return Ok(());
         }
         if bx_guest_ram_span(a20_addr, len, self.guest_len()).is_some() {
@@ -655,10 +643,9 @@ impl BxMemoryStubC {
             let fill_len = len.min(bogus.len());
             data[..fill_len].copy_from_slice(&bogus[..fill_len]);
             if len > fill_len {
-                data[fill_len..].fill(0xff);
+                data[fill_len..].fill(0xFF);
             }
             Ok(())
         }
     }
-
 }

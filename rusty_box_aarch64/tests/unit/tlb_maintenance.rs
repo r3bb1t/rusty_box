@@ -32,7 +32,7 @@ use super::el2_tests::SavedTlb;
 use super::features::{Feature, Features, Implementation};
 use super::mmu::saved_layout::{ENTRY_LEVEL, NOT_WALKED};
 use super::mmu::{El2RegimeContext, TlbContext};
-use super::{id, Cpu, CpuConfig, El, Levels, NoEl2, Pstate, Step, WithEl2};
+use super::{Cpu, CpuConfig, El, Levels, NoEl2, Pstate, Step, WithEl2, id};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 

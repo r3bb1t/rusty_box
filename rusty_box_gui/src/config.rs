@@ -1,14 +1,14 @@
-use crate::args::{Args, BootDevice, DiskGeometry, DisplayBackend, LogLevel};
-use crate::error::RunError;
+use std::path::{Path, PathBuf};
+use std::{fs, io};
+
+use rusty_box::CpuidFreq;
 #[cfg(not(target_arch = "wasm32"))]
 use rusty_box::cpu::decoder::features::X86Feature;
 use rusty_box::iodev::PortE9Hack;
 use rusty_box::params::{BxParamError, BxParams};
-use rusty_box::CpuidFreq;
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-};
+
+use crate::args::{Args, BootDevice, DiskGeometry, DisplayBackend, LogLevel};
+use crate::error::RunError;
 
 pub const DEFAULT_CONFIG_FILE: &str = "rusty_box.toml";
 
@@ -166,9 +166,11 @@ impl NumberedChoice for rusty_box_aarch64::CounterRate {
     fn from_number(hz: u64) -> Option<Self> {
         Self::new(hz)
     }
+
     fn number(self) -> u64 {
         self.hz().get()
     }
+
     fn numbers() -> String {
         format!(
             "{} to {} Hz (at least BSA's 10 MHz, at most CNTFRQ_EL0 holds)",
@@ -182,9 +184,11 @@ impl NumberedChoice for rusty_box_aarch64::SpiCount {
     fn from_number(spis: u64) -> Option<Self> {
         u32::try_from(spis).ok().and_then(Self::new)
     }
+
     fn number(self) -> u64 {
         u64::from(self.get())
     }
+
     fn numbers() -> String {
         format!(
             "a multiple of 32 from the board's {} to the GIC-400's {}",
@@ -198,9 +202,11 @@ impl NumberedChoice for rusty_box_aarch64::PriorityBits {
     fn from_number(bits: u64) -> Option<Self> {
         u8::try_from(bits).ok().and_then(Self::new)
     }
+
     fn number(self) -> u64 {
         u64::from(self.count())
     }
+
     fn numbers() -> String {
         let all = Self::ALL;
         format!(
@@ -215,9 +221,11 @@ impl NumberedChoice for rusty_box_aarch64::Spi {
     fn from_number(spi: u64) -> Option<Self> {
         u32::try_from(spi).ok().and_then(Self::new)
     }
+
     fn number(self) -> u64 {
         u64::from(self.number())
     }
+
     fn numbers() -> String {
         format!(
             "an SPI from {} to {}, INTIDs {} to {} (IHI 0048B §2.2.1)",
@@ -233,9 +241,11 @@ impl NumberedChoice for rusty_box_aarch64::MsiCount {
     fn from_number(count: u64) -> Option<Self> {
         u32::try_from(count).ok().and_then(Self::new)
     }
+
     fn number(self) -> u64 {
         u64::from(self.get())
     }
+
     fn numbers() -> String {
         format!(
             "{} to {} SPIs, what MSI_TYPER counts (BSA DEN0094C I.9.1)",
@@ -270,7 +280,8 @@ impl VirtInterruptsToml {
     /// `layout`.
     fn map(&self, layout: rusty_box_aarch64::DeviceLayout) -> rusty_box_aarch64::InterruptMap {
         let own = rusty_box_aarch64::InterruptMap::own(layout);
-        let spi = |key: Option<NumberToml<rusty_box_aarch64::Spi>>, own| key.map_or(own, |spi| spi.0);
+        let spi =
+            |key: Option<NumberToml<rusty_box_aarch64::Spi>>, own| key.map_or(own, |spi| spi.0);
         rusty_box_aarch64::InterruptMap {
             uart: spi(self.uart, own.uart),
             rtc: spi(self.rtc, own.rtc),
@@ -279,9 +290,11 @@ impl VirtInterruptsToml {
             pcie_intx: spi(self.pcie_intx, own.pcie_intx),
             msi: rusty_box_aarch64::MsiSpis {
                 first: spi(self.msi_first, own.msi.first),
-                count: self.msi_count.map_or(rusty_box_aarch64::MsiExtent::ToTheLast, |count| {
-                    rusty_box_aarch64::MsiExtent::Count(count.0)
-                }),
+                count: self
+                    .msi_count
+                    .map_or(rusty_box_aarch64::MsiExtent::ToTheLast, |count| {
+                        rusty_box_aarch64::MsiExtent::Count(count.0)
+                    }),
             },
         }
     }
@@ -356,7 +369,9 @@ impl<T: core::str::FromStr<Err: core::fmt::Display>> TryFrom<String> for NamedTo
     type Error = String;
 
     fn try_from(name: String) -> Result<Self, String> {
-        name.parse().map(Self).map_err(|e| format!("\"{name}\": {e}"))
+        name.parse()
+            .map(Self)
+            .map_err(|e| format!("\"{name}\": {e}"))
     }
 }
 
@@ -387,7 +402,6 @@ pub enum Virtualization {
 impl Virtualization {
     /// Every choice, in the order a list of them shows.
     pub const ALL: [Self; 2] = [Self::Off, Self::On];
-
     /// The board's own: without EL2, as `rusty_box_aarch64::MachineBuilder`
     /// builds a machine unless asked for EL2.
     pub const DEFAULT: Self = Self::Off;
@@ -935,7 +949,10 @@ pub enum ArmBoot {
     /// has not finished.
     Unset,
     /// UEFI firmware from flash, with its variable store when one is given.
-    Firmware { code: PathBuf, vars: Option<PathBuf> },
+    Firmware {
+        code: PathBuf,
+        vars: Option<PathBuf>,
+    },
     /// The EDK2 for QEMU's `virt` built into the front end, from flash, with
     /// its variable store when one is given.
     BuiltinFirmware { vars: Option<PathBuf> },
@@ -1157,10 +1174,17 @@ pub(crate) fn virt_counter_rate(
 /// The Arm `virt` board `file`'s `[virt]` table and `args` describe. Every
 /// PC setting, in the file or on the command line, is refused: it would be
 /// dropped without a word otherwise.
-fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -> Result<ArmVirtConfig, RunError> {
+fn resolve_arm_virt(
+    file: &FileConfig,
+    args: &Args,
+    config_dir: Option<&Path>,
+) -> Result<ArmVirtConfig, RunError> {
     let pc_tables = [
         ("[emulator]", file.emulator.is_set()),
-        ("[rom]", file.rom.bios.is_some() || file.rom.vga_bios.is_some()),
+        (
+            "[rom]",
+            file.rom.bios.is_some() || file.rom.vga_bios.is_some(),
+        ),
         ("[boot]", !file.boot.order.is_empty()),
         ("[disk]", file.disk.is_some()),
         ("[cdrom]", file.cdrom.is_some()),
@@ -1181,7 +1205,10 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
     }
     let virt = file.virt.clone().unwrap_or_default();
 
-    let memory_mib = args.memory_mib.or(virt.memory_mib).unwrap_or(DEFAULT_VIRT_MEMORY_MIB);
+    let memory_mib = args
+        .memory_mib
+        .or(virt.memory_mib)
+        .unwrap_or(DEFAULT_VIRT_MEMORY_MIB);
     if rusty_box_aarch64::RamSize::mib(u64::from(memory_mib)).is_none() {
         return Err(RunError::InvalidVirtMemory { memory_mib });
     }
@@ -1298,7 +1325,9 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
         }
         None => None,
     };
-    let cpu = virt.cpu.map_or_else(rusty_box_aarch64::CpuModel::default, |cpu| cpu.0);
+    let cpu = virt
+        .cpu
+        .map_or_else(rusty_box_aarch64::CpuModel::default, |cpu| cpu.0);
     let counter = virt_counter_rate(
         cpu,
         virt.counter_hz
@@ -1470,7 +1499,7 @@ fn resolve_pc(
         Some(other) => {
             return Err(RunError::InvalidCpuidFreq {
                 value: other.to_string(),
-            })
+            });
         }
     };
     // Bochs `port_e9_hack: enabled=, all_rings=` (unmapped.cc, io.cc
@@ -1481,11 +1510,11 @@ fn resolve_pc(
         .or(file.emulator.port_e9_hack.as_deref())
     {
         None => PortE9Hack::Off,
-        Some(spelled) => port_e9_hack_from_toml(spelled).ok_or_else(|| {
-            RunError::InvalidPortE9Hack {
+        Some(spelled) => {
+            port_e9_hack_from_toml(spelled).ok_or_else(|| RunError::InvalidPortE9Hack {
                 value: spelled.to_string(),
-            }
-        })?,
+            })?
+        }
     };
     let cpu_params = resolve_cpu_topology(file, args)?;
 
@@ -1557,19 +1586,17 @@ fn resolve_cpu_topology(file: &FileConfig, args: &Args) -> Result<BxParams, RunE
     let cores = args.cpu_cores.or(file.emulator.cpu_cores);
     let threads = args.cpu_threads.or(file.emulator.cpu_threads);
 
-    let (n_processors, n_cores, n_threads) = if sockets.is_some()
-        || cores.is_some()
-        || threads.is_some()
-    {
-        (
-            sockets.unwrap_or(1),
-            cores.unwrap_or(1),
-            threads.unwrap_or(1),
-        )
-    } else {
-        let cpu_count = args.cpus.or(file.emulator.cpus).unwrap_or(1);
-        (cpu_count, 1, 1)
-    };
+    let (n_processors, n_cores, n_threads) =
+        if sockets.is_some() || cores.is_some() || threads.is_some() {
+            (
+                sockets.unwrap_or(1),
+                cores.unwrap_or(1),
+                threads.unwrap_or(1),
+            )
+        } else {
+            let cpu_count = args.cpus.or(file.emulator.cpus).unwrap_or(1);
+            (cpu_count, 1, 1)
+        };
 
     BxParams::default()
         .with_topology(n_processors, n_cores, n_threads)
@@ -1941,13 +1968,22 @@ fn resolve_disk_mode(
             .filter(|journal| !names_no_journal(journal))
             .map(|journal| resolve_toml_path(config_dir, journal)),
     };
-    let journal = match args.disk_journal.clone().filter(|journal| !names_no_journal(journal)) {
+    let journal = match args
+        .disk_journal
+        .clone()
+        .filter(|journal| !names_no_journal(journal))
+    {
         // A relative journal on the command line names a file in the folder
         // the run starts in. Kept absolute, it names the same file when a VM
         // saved from this run is loaded again.
-        Some(journal) => Some(
-            std::path::absolute(&journal).map_err(|source| RunError::JournalPath { path: journal, source })?,
-        ),
+        Some(journal) => {
+            Some(
+                std::path::absolute(&journal).map_err(|source| RunError::JournalPath {
+                    path: journal,
+                    source,
+                })?,
+            )
+        }
         None => file_journal,
     };
     match name {
@@ -2266,9 +2302,10 @@ fn map_metadata_error(error: io::Error) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use clap::Parser;
     use rusty_box_bximage::ImageSize;
+
+    use super::*;
 
     fn args<const N: usize>(values: [&str; N]) -> Args {
         Args::parse_from(values)
@@ -2332,7 +2369,10 @@ mod tests {
             },
             ..FileConfig::default()
         };
-        assert_eq!(resolve_config(file, &args(["rusty_box_gui"])).unwrap(), blank_config());
+        assert_eq!(
+            resolve_config(file, &args(["rusty_box_gui"])).unwrap(),
+            blank_config()
+        );
     }
 
     #[cfg(feature = "gui-egui")]
@@ -2435,7 +2475,10 @@ path = "boot.iso"
             &args(["rusty_box_gui", "--port-e9-hack", "all-rings"]),
         )
         .unwrap();
-        assert_eq!(resolved.pc().expect("a PC").port_e9_hack, PortE9Hack::AllRings);
+        assert_eq!(
+            resolved.pc().expect("a PC").port_e9_hack,
+            PortE9Hack::AllRings
+        );
         assert_eq!(
             resolved.to_file_config().emulator.port_e9_hack.as_deref(),
             Some("all-rings")
@@ -2446,7 +2489,11 @@ path = "boot.iso"
             &args(["rusty_box_gui", "--port-e9-hack", "off"]),
         )
         .unwrap();
-        assert_eq!(resolved.pc().expect("a PC").port_e9_hack, PortE9Hack::Off, "the flag can turn it back off");
+        assert_eq!(
+            resolved.pc().expect("a PC").port_e9_hack,
+            PortE9Hack::Off,
+            "the flag can turn it back off"
+        );
     }
 
     #[test]
@@ -2494,7 +2541,10 @@ path = "boot.iso"
         .unwrap();
 
         assert_eq!(resolved.engine(), Engine::Interpreter);
-        assert_eq!(resolved.pc().expect("a PC").cpu_capabilities, CpuCapabilities::Preset);
+        assert_eq!(
+            resolved.pc().expect("a PC").cpu_capabilities,
+            CpuCapabilities::Preset
+        );
     }
 
     #[test]
@@ -2502,7 +2552,10 @@ path = "boot.iso"
         let resolved = resolve_config(config(WHP_FILE), &args(["rusty_box_gui"])).unwrap();
 
         assert_eq!(resolved.engine(), Engine::Whp);
-        assert_eq!(resolved.pc().expect("a PC").cpu_capabilities, CpuCapabilities::HostShared);
+        assert_eq!(
+            resolved.pc().expect("a PC").cpu_capabilities,
+            CpuCapabilities::HostShared
+        );
     }
 
     #[test]
@@ -2514,7 +2567,10 @@ path = "boot.iso"
         .unwrap();
 
         assert_eq!(resolved.engine(), Engine::Interpreter);
-        assert_eq!(resolved.pc().expect("a PC").cpu_capabilities, CpuCapabilities::Preset);
+        assert_eq!(
+            resolved.pc().expect("a PC").cpu_capabilities,
+            CpuCapabilities::Preset
+        );
         // At their defaults, neither is written back.
         let emulator = resolved.to_file_config().emulator;
         assert_eq!(emulator.engine, None);
@@ -2529,7 +2585,12 @@ path = "boot.iso"
 
         assert_eq!(resolved.pc().expect("a PC").bios, PathBuf::new());
         assert_eq!(
-            resolved.pc().expect("a PC").cdrom.as_ref().map(|cdrom| cdrom.path.clone()),
+            resolved
+                .pc()
+                .expect("a PC")
+                .cdrom
+                .as_ref()
+                .map(|cdrom| cdrom.path.clone()),
             Some(Path::new("library").join("boot.iso"))
         );
     }
@@ -2563,7 +2624,10 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         );
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
 
-        assert_eq!(resolved.pc().expect("a PC").boot_order, vec![BootDevice::Disk]);
+        assert_eq!(
+            resolved.pc().expect("a PC").boot_order,
+            vec![BootDevice::Disk]
+        );
     }
 
     #[test]
@@ -2592,7 +2656,10 @@ path = "c.img"
         );
         assert_eq!(creation.size, ImageSize::gib(20));
         assert!(!creation.overwrite);
-        assert_eq!(resolved.pc().expect("a PC").boot_order, vec![BootDevice::Disk]);
+        assert_eq!(
+            resolved.pc().expect("a PC").boot_order,
+            vec![BootDevice::Disk]
+        );
     }
 
     #[test]
@@ -2608,7 +2675,14 @@ size = "512M"
 "#,
         );
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
-        let creation = resolved.pc().expect("a PC").disk.clone().unwrap().creation.unwrap();
+        let creation = resolved
+            .pc()
+            .expect("a PC")
+            .disk
+            .clone()
+            .unwrap()
+            .creation
+            .unwrap();
 
         assert_eq!(creation.size, ImageSize::mib(512));
     }
@@ -2851,13 +2925,26 @@ path = "boot.iso"
         .unwrap();
 
         assert_eq!(resolved.pc().expect("a PC").bios, dir.join("bios.bin"));
-        assert_eq!(resolved.pc().expect("a PC").vga_bios, Some(dir.join("vgabios.bin")));
         assert_eq!(
-            resolved.pc().expect("a PC").disk.as_ref().map(|disk| disk.path.as_path()),
+            resolved.pc().expect("a PC").vga_bios,
+            Some(dir.join("vgabios.bin"))
+        );
+        assert_eq!(
+            resolved
+                .pc()
+                .expect("a PC")
+                .disk
+                .as_ref()
+                .map(|disk| disk.path.as_path()),
             Some(dir.join("disk.img").as_path())
         );
         assert_eq!(
-            resolved.pc().expect("a PC").cdrom.as_ref().map(|cdrom| cdrom.path.as_path()),
+            resolved
+                .pc()
+                .expect("a PC")
+                .cdrom
+                .as_ref()
+                .map(|cdrom| cdrom.path.as_path()),
             Some(dir.join("boot.iso").as_path())
         );
 
@@ -2898,7 +2985,12 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
 
         assert_eq!(resolved.pc().expect("a PC").bios, PathBuf::from("new.bin"));
         assert_eq!(
-            resolved.pc().expect("a PC").disk.as_ref().map(|disk| disk.path.as_path()),
+            resolved
+                .pc()
+                .expect("a PC")
+                .disk
+                .as_ref()
+                .map(|disk| disk.path.as_path()),
             Some(Path::new("new.img"))
         );
 
@@ -3195,7 +3287,9 @@ overwrite = false
 
         assert_eq!(resolved, round_tripped);
         let creation = round_tripped
-            .pc().expect("a PC").disk
+            .pc()
+            .expect("a PC")
+            .disk
             .as_ref()
             .and_then(|disk| disk.creation.as_ref())
             .expect("created disk should survive the round trip");
@@ -3225,9 +3319,15 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         );
         let serialized = toml::to_string_pretty(&resolved.to_file_config()).unwrap();
         assert!(serialized.contains("mode = \"volatile\""), "{serialized}");
-        assert!(serialized.contains("journal = \"scratch/journal\""), "{serialized}");
+        assert!(
+            serialized.contains("journal = \"scratch/journal\""),
+            "{serialized}"
+        );
         let reparsed: FileConfig = toml::from_str(&serialized).unwrap();
-        assert_eq!(resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap(), resolved);
+        assert_eq!(
+            resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap(),
+            resolved
+        );
     }
 
     const VOLATILE_DISK_TOML: &str = "[rom]\nbios = \"bios.bin\"\n\n[disk]\npath = \"disk.img\"\nmode = \"volatile\"\nchs = { cylinders = 306, heads = 4, sectors_per_track = 17 }\n";
@@ -3263,7 +3363,13 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         );
         let both = resolve_config(
             config(FLAT_DISK_TOML),
-            &args(["rusty_box_gui", "--disk-mode", "volatile", "--disk-journal", "j"]),
+            &args([
+                "rusty_box_gui",
+                "--disk-mode",
+                "volatile",
+                "--disk-journal",
+                "j",
+            ]),
         )
         .unwrap();
         assert_eq!(
@@ -3282,7 +3388,10 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             "[rom]\nbios = \"bios.bin\"\n\n[disk]\npath = \"disk.img\"\nmode = \"volatile\"\njournal = \"j\"\nchs = { cylinders = 306, heads = 4, sectors_per_track = 17 }\n",
         );
         let flat = resolve_config(file, &args(["rusty_box_gui", "--disk-mode", "flat"])).unwrap();
-        assert_eq!(flat.pc().expect("a PC").disk.clone().unwrap().mode, DiskMode::Flat);
+        assert_eq!(
+            flat.pc().expect("a PC").disk.clone().unwrap().mode,
+            DiskMode::Flat
+        );
     }
 
     /// Bochs hdimage.cc `volatile_image_t::volatile_image_t`: an empty
@@ -3305,14 +3414,27 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
                 "[rom]\nbios = \"bios.bin\"\n\n[disk]\npath = \"disk.img\"\njournal = \"{journal}\"\nchs = {{ cylinders = 306, heads = 4, sectors_per_track = 17 }}\n"
             ));
             let resolved = resolve_config(flat, &args(["rusty_box_gui"])).unwrap();
-            assert_eq!(resolved.pc().expect("a PC").disk.clone().unwrap().mode, DiskMode::Flat, "{journal:?}");
+            assert_eq!(
+                resolved.pc().expect("a PC").disk.clone().unwrap().mode,
+                DiskMode::Flat,
+                "{journal:?}"
+            );
         }
         // The command line refuses an empty value itself; `none` is the
         // spelling that reaches the rule.
-        let on_the_line =
-            resolve_config(config(FLAT_DISK_TOML), &args(["rusty_box_gui", "--disk-journal", "none"]));
+        let on_the_line = resolve_config(
+            config(FLAT_DISK_TOML),
+            &args(["rusty_box_gui", "--disk-journal", "none"]),
+        );
         assert_eq!(
-            on_the_line.unwrap().pc().expect("a PC").disk.clone().unwrap().mode,
+            on_the_line
+                .unwrap()
+                .pc()
+                .expect("a PC")
+                .disk
+                .clone()
+                .unwrap()
+                .mode,
             DiskMode::Flat
         );
     }
@@ -3330,7 +3452,10 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             config(FLAT_DISK_TOML),
             &args(["rusty_box_gui", "--disk-journal", "j"]),
         );
-        assert!(matches!(on_the_line, Err(RunError::JournalWithoutVolatileDisk)));
+        assert!(matches!(
+            on_the_line,
+            Err(RunError::JournalWithoutVolatileDisk)
+        ));
     }
 
     #[test]
@@ -3344,7 +3469,10 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         assert_eq!(disk.mode, DiskMode::Volatile { journal: None });
         let serialized = toml::to_string_pretty(&resolved.to_file_config()).unwrap();
         let reparsed: FileConfig = toml::from_str(&serialized).unwrap();
-        assert_eq!(resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap(), resolved);
+        assert_eq!(
+            resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap(),
+            resolved
+        );
     }
 
     /// A file the shell keeps resolves the same under `Args::default()` as
@@ -3471,7 +3599,9 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             pcie_intx: spi(34),
             msi: rusty_box_aarch64::MsiSpis {
                 first: spi(38),
-                count: rusty_box_aarch64::MsiExtent::Count(rusty_box_aarch64::MsiCount::new(25).expect("a count")),
+                count: rusty_box_aarch64::MsiExtent::Count(
+                    rusty_box_aarch64::MsiCount::new(25).expect("a count"),
+                ),
             },
         };
         let mut maps = [rusty_box_aarch64::InterruptMap::DEFAULT, own_map]
@@ -3529,7 +3659,10 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             };
 
             let serialized = toml::to_string_pretty(&resolved.to_file_config()).unwrap();
-            assert!(serialized.contains("machine = \"arm-virt\""), "{serialized}");
+            assert!(
+                serialized.contains("machine = \"arm-virt\""),
+                "{serialized}"
+            );
             let reparsed: FileConfig = toml::from_str(&serialized).unwrap();
             let round_tripped = resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap();
 
@@ -3543,8 +3676,15 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
 
         assert_eq!(resolved.arm_virt(), Some(&ArmVirtConfig::blank()));
-        assert_eq!(ArmVirtConfig::blank().memory_mib, 256, "QEMU virt's default RAM");
-        assert_eq!(ArmVirtConfig::blank().cpu, rusty_box_aarch64::CpuModel::CortexA57);
+        assert_eq!(
+            ArmVirtConfig::blank().memory_mib,
+            256,
+            "QEMU virt's default RAM"
+        );
+        assert_eq!(
+            ArmVirtConfig::blank().cpu,
+            rusty_box_aarch64::CpuModel::CortexA57
+        );
         assert_eq!(
             ArmVirtConfig::blank().virtualization,
             Virtualization::Off,
@@ -3578,13 +3718,18 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
     #[test]
     fn virt_numbers_are_the_numbers_their_settings_take() {
         let board = |keys: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\n{keys}\n");
-        let file: FileConfig =
-            toml::from_str(&board("counter_hz = 24000000\ngic_spis = 256\ngic_priority_bits = 7")).unwrap();
+        let file: FileConfig = toml::from_str(&board(
+            "counter_hz = 24000000\ngic_spis = 256\ngic_priority_bits = 7",
+        ))
+        .unwrap();
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
         let virt = resolved.arm_virt().expect("an Arm board");
         assert_eq!(virt.counter.hz().get(), 24_000_000);
         assert_eq!(virt.gic.spis.get(), 256);
-        assert_eq!(virt.gic.priority_bits, rusty_box_aarch64::PriorityBits::Seven);
+        assert_eq!(
+            virt.gic.priority_bits,
+            rusty_box_aarch64::PriorityBits::Seven
+        );
 
         for (keys, named) in [
             ("counter_hz = 1000", "10000000"),
@@ -3598,7 +3743,8 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             assert!(refused.contains(named), "{keys}: {refused}");
         }
 
-        let file: FileConfig = toml::from_str(&board("cpu = \"armv9.2\"\ncounter_hz = 24000000")).unwrap();
+        let file: FileConfig =
+            toml::from_str(&board("cpu = \"armv9.2\"\ncounter_hz = 24000000")).unwrap();
         assert!(matches!(
             resolve_config(file, &args(["rusty_box_gui"])),
             Err(RunError::FixedCounterRate(_))
@@ -3611,8 +3757,13 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
     /// file is read, and a map the GIC cannot hold when it is resolved.
     #[test]
     fn virt_interrupts_name_the_spis_the_devices_drive() {
-        let board = |keys: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\ngic_spis = 256\n[virt.interrupts]\n{keys}\n");
-        let file: FileConfig = toml::from_str(&board("uart = 200\nmsi_first = 39\nmsi_count = 100")).unwrap();
+        let board = |keys: &str| {
+            format!(
+                "[vm]\nmachine = \"arm-virt\"\n[virt]\ngic_spis = 256\n[virt.interrupts]\n{keys}\n"
+            )
+        };
+        let file: FileConfig =
+            toml::from_str(&board("uart = 200\nmsi_first = 39\nmsi_count = 100")).unwrap();
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
         let virt = resolved.arm_virt().expect("an Arm board");
         let own = rusty_box_aarch64::InterruptMap::DEFAULT;
@@ -3621,7 +3772,9 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         assert_eq!(virt.interrupts.msi.first.number(), 39);
         assert_eq!(
             virt.interrupts.msi.count,
-            rusty_box_aarch64::MsiExtent::Count(rusty_box_aarch64::MsiCount::new(100).expect("a count"))
+            rusty_box_aarch64::MsiExtent::Count(
+                rusty_box_aarch64::MsiCount::new(100).expect("a count")
+            )
         );
         let file: FileConfig = toml::from_str(&board("")).unwrap();
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
@@ -3655,7 +3808,9 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
     /// refused when the file is read, naming the answers there are.
     #[test]
     fn virt_spectre_takes_a_report_by_name_and_refuses_others() {
-        let board = |report: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\nspectre = \"{report}\"\n");
+        let board = |report: &str| {
+            format!("[vm]\nmachine = \"arm-virt\"\n[virt]\nspectre = \"{report}\"\n")
+        };
         for report in rusty_box_aarch64::SpectreReport::ALL {
             let file: FileConfig = toml::from_str(&board(report.name())).unwrap();
             let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
@@ -3675,7 +3830,9 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
     /// file is read, naming the settings there are.
     #[test]
     fn virt_virtualization_takes_a_setting_by_name_and_refuses_others() {
-        let board = |name: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\nvirtualization = \"{name}\"\n");
+        let board = |name: &str| {
+            format!("[vm]\nmachine = \"arm-virt\"\n[virt]\nvirtualization = \"{name}\"\n")
+        };
         for virtualization in Virtualization::ALL {
             let file: FileConfig = toml::from_str(&board(virtualization.name())).unwrap();
             let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
@@ -3693,10 +3850,14 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             .expect_err("no setting is named so")
             .to_string();
         assert!(
-            refused.contains("\"true\"") && refused.contains("\"off\"") && refused.contains("\"on\""),
+            refused.contains("\"true\"")
+                && refused.contains("\"off\"")
+                && refused.contains("\"on\""),
             "{refused}"
         );
-        let unquoted = toml::from_str::<FileConfig>("[vm]\nmachine = \"arm-virt\"\n[virt]\nvirtualization = true\n");
+        let unquoted = toml::from_str::<FileConfig>(
+            "[vm]\nmachine = \"arm-virt\"\n[virt]\nvirtualization = true\n",
+        );
         assert!(unquoted.is_err(), "a boolean is not a setting's name");
     }
 
@@ -3704,12 +3865,16 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
     /// is refused when the file is read, naming the orders there are.
     #[test]
     fn virt_transport_order_takes_an_order_by_name_and_refuses_others() {
-        let board =
-            |order: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\ntransport_order = \"{order}\"\n");
+        let board = |order: &str| {
+            format!("[vm]\nmachine = \"arm-virt\"\n[virt]\ntransport_order = \"{order}\"\n")
+        };
         for order in rusty_box_aarch64::TransportOrder::ALL {
             let file: FileConfig = toml::from_str(&board(order.name())).unwrap();
             let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
-            assert_eq!(resolved.arm_virt().map(|virt| virt.transport_order), Some(order));
+            assert_eq!(
+                resolved.arm_virt().map(|virt| virt.transport_order),
+                Some(order)
+            );
         }
         let refused = toml::from_str::<FileConfig>(&board("middle"))
             .expect_err("no order is named so")
@@ -3763,7 +3928,10 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
                 "[vm]\nmachine = \"arm-virt\"\n[virt]\nkernel = \"Image\"\nlayout = \"{layout}\"\n{line}"
             ))
             .unwrap();
-            match resolve_config(file, &args(["rusty_box_gui"])).unwrap().arm_virt() {
+            match resolve_config(file, &args(["rusty_box_gui"]))
+                .unwrap()
+                .arm_virt()
+            {
                 Some(ArmVirtConfig {
                     boot: ArmBoot::Linux { command_line, .. },
                     ..
@@ -3776,7 +3944,11 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         assert_eq!(vm("qemu-virt", Some(qemus)), qemus);
         for layout in ["board", "qemu-virt"] {
             assert_eq!(vm(layout, None), own, "{layout}");
-            assert_eq!(vm(layout, Some("console=ttyAMA0 quiet")), "console=ttyAMA0 quiet", "{layout}");
+            assert_eq!(
+                vm(layout, Some("console=ttyAMA0 quiet")),
+                "console=ttyAMA0 quiet",
+                "{layout}"
+            );
         }
     }
 
@@ -3810,7 +3982,9 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
             assert_eq!(resolved.arm_virt().map(|virt| virt.cpu), Some(model));
         }
-        let refused = toml::from_str::<FileConfig>(&board("cortex-a53")).unwrap_err().to_string();
+        let refused = toml::from_str::<FileConfig>(&board("cortex-a53"))
+            .unwrap_err()
+            .to_string();
         assert!(
             refused.contains("\"cortex-a53\": no processor model has that name")
                 && refused.contains("\"cortex-a57\"")
@@ -3827,7 +4001,10 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
 
         match &resolved.arm_virt().expect("an Arm board").boot {
             ArmBoot::Linux { command_line, .. } => {
-                assert_eq!(command_line, rusty_box_aarch64::boot::SERIAL_CONSOLE_COMMAND_LINE);
+                assert_eq!(
+                    command_line,
+                    rusty_box_aarch64::boot::SERIAL_CONSOLE_COMMAND_LINE
+                );
             }
             other => panic!("not a kernel boot: {other:?}"),
         }
@@ -3918,7 +4095,8 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
     #[test]
     fn the_virt_disk_is_found_beside_its_file_and_written_by_default() {
         let file: FileConfig =
-            toml::from_str("[vm]\nmachine = \"arm-virt\"\n[virt]\ndisk = \"alpine.img\"\n").unwrap();
+            toml::from_str("[vm]\nmachine = \"arm-virt\"\n[virt]\ndisk = \"alpine.img\"\n")
+                .unwrap();
         let dir = Path::new("vms");
         let resolved = resolve_config_with_base(file, &args(["rusty_box_gui"]), Some(dir)).unwrap();
 
@@ -3945,19 +4123,27 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         ));
         assert!(matches!(
             refusal("firmware = \"QEMU_EFI.fd\"\ninitrd = \"initrd\"\n"),
-            RunError::VirtSettingNeedsKernel { setting: "virt.initrd" }
+            RunError::VirtSettingNeedsKernel {
+                setting: "virt.initrd"
+            }
         ));
         assert!(matches!(
             refusal("kernel = \"Image\"\nfirmware_vars = \"vars.fd\"\n"),
-            RunError::VirtSettingNeedsFirmware { setting: "virt.firmware_vars" }
+            RunError::VirtSettingNeedsFirmware {
+                setting: "virt.firmware_vars"
+            }
         ));
         assert!(matches!(
             refusal("command_line = \"quiet\"\n"),
-            RunError::VirtSettingWithoutBoot { setting: "virt.command_line" }
+            RunError::VirtSettingWithoutBoot {
+                setting: "virt.command_line"
+            }
         ));
         assert!(matches!(
             refusal("disk_read_only = false\n"),
-            RunError::VirtSettingWithoutDisk { setting: "virt.disk_read_only" }
+            RunError::VirtSettingWithoutDisk {
+                setting: "virt.disk_read_only"
+            }
         ));
         assert!(matches!(
             refusal("memory_mib = 0\n"),
@@ -3976,7 +4162,9 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         ));
         assert!(matches!(
             refusal("builtin_firmware = true\nkernel = \"Image\"\n"),
-            RunError::ConflictingBuiltinFirmware { setting: "virt.kernel" }
+            RunError::ConflictingBuiltinFirmware {
+                setting: "virt.kernel"
+            }
         ));
     }
 }

@@ -19,7 +19,24 @@ impl Guid {
     /// The GUID whose on-disk bytes are `bytes`.
     #[must_use]
     pub fn from_le_bytes(bytes: [u8; 16]) -> Guid {
-        let [a0, a1, a2, a3, b0, b1, c0, c1, d0, d1, d2, d3, d4, d5, d6, d7] = bytes;
+        let [
+            a0,
+            a1,
+            a2,
+            a3,
+            b0,
+            b1,
+            c0,
+            c1,
+            d0,
+            d1,
+            d2,
+            d3,
+            d4,
+            d5,
+            d6,
+            d7,
+        ] = bytes;
         Guid {
             data1: u32::from_le_bytes([a0, a1, a2, a3]),
             data2: u16::from_le_bytes([b0, b1]),
@@ -153,7 +170,12 @@ impl ModuleIdentity {
             (ModuleIdentity::Pe { pdb: None, .. }, TablesIdentity::Pdb { .. }) => {
                 IdentityMatch::Unknown
             }
-            (ModuleIdentity::Elf { build_id, .. }, TablesIdentity::Elf { build_id: Some(found) }) => {
+            (
+                ModuleIdentity::Elf { build_id, .. },
+                TablesIdentity::Elf {
+                    build_id: Some(found),
+                },
+            ) => {
                 if build_id == found {
                     IdentityMatch::Same
                 } else {
@@ -173,7 +195,9 @@ impl ModuleIdentity {
     #[must_use]
     pub fn with_pdb(&self, pdb: PdbId) -> ModuleIdentity {
         match self {
-            ModuleIdentity::Pe { file_name, image, .. } => ModuleIdentity::Pe {
+            ModuleIdentity::Pe {
+                file_name, image, ..
+            } => ModuleIdentity::Pe {
                 file_name: file_name.clone(),
                 image: *image,
                 pdb: Some(pdb),
@@ -186,13 +210,24 @@ impl ModuleIdentity {
 impl fmt::Display for ModuleIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ModuleIdentity::Pe { file_name, pdb: Some(pdb), .. } => {
+            ModuleIdentity::Pe {
+                file_name,
+                pdb: Some(pdb),
+                ..
+            } => {
                 write!(f, "{file_name} ({} {} age {})", pdb.name, pdb.guid, pdb.age)
             }
-            ModuleIdentity::Pe { file_name, image, pdb: None } => {
+            ModuleIdentity::Pe {
+                file_name,
+                image,
+                pdb: None,
+            } => {
                 write!(f, "{file_name} (image {})", image.store_key())
             }
-            ModuleIdentity::Elf { file_name, build_id } => {
+            ModuleIdentity::Elf {
+                file_name,
+                build_id,
+            } => {
                 write!(f, "{file_name} (build-id {})", build_id.to_hex())
             }
         }
@@ -232,14 +267,25 @@ mod tests {
     fn the_symbol_server_key_swaps_the_first_three_guid_fields() {
         let guid = Guid::from_le_bytes(SSQP_RSDS_GUID);
         assert_eq!(guid.to_string(), "{497B72F6-390A-44FC-878E-5A2D63B6CC4B}");
-        let pdb = PdbId { name: "foo.pdb".to_owned(), guid, age: 1 };
+        let pdb = PdbId {
+            name: "foo.pdb".to_owned(),
+            guid,
+            age: 1,
+        };
         assert_eq!(pdb.store_key(), "497B72F6390A44FC878E5A2D63B6CC4B1");
     }
 
     #[test]
     fn the_age_is_lowercase_hex_without_padding() {
         let guid = Guid::from_le_bytes(SSQP_RSDS_GUID);
-        let at = |age| PdbId { name: "foo.pdb".to_owned(), guid, age }.store_key();
+        let at = |age| {
+            PdbId {
+                name: "foo.pdb".to_owned(),
+                guid,
+                age,
+            }
+            .store_key()
+        };
         assert_eq!(at(0x1A), "497B72F6390A44FC878E5A2D63B6CC4B1a");
         assert_eq!(at(16), "497B72F6390A44FC878E5A2D63B6CC4B10");
     }
@@ -252,7 +298,11 @@ mod tests {
             0xFE, 0xC6, 0x61, 0xB6, 0x99, 0x72, 0x16, 0x1D, 0x0F, 0xE3, 0x7C, 0x48, 0xB8, 0xBC,
             0x54, 0x70,
         ]);
-        let pdb = PdbId { name: "ntkrnlmp.pdb".to_owned(), guid, age: 1 };
+        let pdb = PdbId {
+            name: "ntkrnlmp.pdb".to_owned(),
+            guid,
+            age: 1,
+        };
         assert_eq!(pdb.store_key(), "B661C6FE72991D160FE37C48B8BC54701");
     }
 
@@ -260,9 +310,15 @@ mod tests {
     /// 0xc2000 -> `542D574Ec2000`.
     #[test]
     fn the_binary_key_is_the_timestamp_then_the_image_size() {
-        let image = PeImageId { time_date_stamp: 0x542D_574E, size_of_image: 0xC_2000 };
+        let image = PeImageId {
+            time_date_stamp: 0x542D_574E,
+            size_of_image: 0xC_2000,
+        };
         assert_eq!(image.store_key(), "542D574Ec2000");
-        let small = PeImageId { time_date_stamp: 0x1234, size_of_image: 0x1000 };
+        let small = PeImageId {
+            time_date_stamp: 0x1234,
+            size_of_image: 0x1000,
+        };
         assert_eq!(small.store_key(), "000012341000");
     }
 
@@ -275,34 +331,83 @@ mod tests {
     #[test]
     fn a_module_matches_only_tables_of_its_own_build() {
         let guid = Guid::from_le_bytes(SSQP_RSDS_GUID);
-        let image = PeImageId { time_date_stamp: 1, size_of_image: 0x1000 };
-        let pdb = PdbId { name: "a.pdb".to_owned(), guid, age: 3 };
-        let module = ModuleIdentity::Pe { file_name: "a.dll".to_owned(), image, pdb: Some(pdb) };
-        assert_eq!(module.matches(&TablesIdentity::Pdb { guid, age: 3 }), IdentityMatch::Same);
-        assert_eq!(module.matches(&TablesIdentity::Pdb { guid, age: 4 }), IdentityMatch::Different);
+        let image = PeImageId {
+            time_date_stamp: 1,
+            size_of_image: 0x1000,
+        };
+        let pdb = PdbId {
+            name: "a.pdb".to_owned(),
+            guid,
+            age: 3,
+        };
+        let module = ModuleIdentity::Pe {
+            file_name: "a.dll".to_owned(),
+            image,
+            pdb: Some(pdb),
+        };
         assert_eq!(
-            module.matches(&TablesIdentity::Elf { build_id: Some(BuildId(vec![1])) }),
-            IdentityMatch::Different
-        );
-        let unread = ModuleIdentity::Pe { file_name: "a.dll".to_owned(), image, pdb: None };
-        assert_eq!(unread.matches(&TablesIdentity::Pdb { guid, age: 3 }), IdentityMatch::Unknown);
-        let elf = ModuleIdentity::Elf { file_name: "a.so".to_owned(), build_id: BuildId(vec![1, 2]) };
-        assert_eq!(
-            elf.matches(&TablesIdentity::Elf { build_id: Some(BuildId(vec![1, 2])) }),
+            module.matches(&TablesIdentity::Pdb { guid, age: 3 }),
             IdentityMatch::Same
         );
-        assert_eq!(elf.matches(&TablesIdentity::Elf { build_id: None }), IdentityMatch::Unknown);
+        assert_eq!(
+            module.matches(&TablesIdentity::Pdb { guid, age: 4 }),
+            IdentityMatch::Different
+        );
+        assert_eq!(
+            module.matches(&TablesIdentity::Elf {
+                build_id: Some(BuildId(vec![1]))
+            }),
+            IdentityMatch::Different
+        );
+        let unread = ModuleIdentity::Pe {
+            file_name: "a.dll".to_owned(),
+            image,
+            pdb: None,
+        };
+        assert_eq!(
+            unread.matches(&TablesIdentity::Pdb { guid, age: 3 }),
+            IdentityMatch::Unknown
+        );
+        let elf = ModuleIdentity::Elf {
+            file_name: "a.so".to_owned(),
+            build_id: BuildId(vec![1, 2]),
+        };
+        assert_eq!(
+            elf.matches(&TablesIdentity::Elf {
+                build_id: Some(BuildId(vec![1, 2]))
+            }),
+            IdentityMatch::Same
+        );
+        assert_eq!(
+            elf.matches(&TablesIdentity::Elf { build_id: None }),
+            IdentityMatch::Unknown
+        );
     }
 
     #[test]
     fn learning_a_modules_pdb_keeps_its_image_identity() {
         let guid = Guid::from_le_bytes(SSQP_RSDS_GUID);
-        let image = PeImageId { time_date_stamp: 7, size_of_image: 0x2000 };
-        let module = ModuleIdentity::Pe { file_name: "n.dll".to_owned(), image, pdb: None };
-        let pdb = PdbId { name: "n.pdb".to_owned(), guid, age: 1 };
+        let image = PeImageId {
+            time_date_stamp: 7,
+            size_of_image: 0x2000,
+        };
+        let module = ModuleIdentity::Pe {
+            file_name: "n.dll".to_owned(),
+            image,
+            pdb: None,
+        };
+        let pdb = PdbId {
+            name: "n.pdb".to_owned(),
+            guid,
+            age: 1,
+        };
         assert_eq!(
             module.with_pdb(pdb.clone()),
-            ModuleIdentity::Pe { file_name: "n.dll".to_owned(), image, pdb: Some(pdb) }
+            ModuleIdentity::Pe {
+                file_name: "n.dll".to_owned(),
+                image,
+                pdb: Some(pdb)
+            }
         );
     }
 }

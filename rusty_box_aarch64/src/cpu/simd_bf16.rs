@@ -6,7 +6,7 @@
 //! instruction's page and the shared pseudocode it calls (`BFDotAdd`,
 //! `BFMulAddH`, `BFMatMulAddH`); the arithmetic is in `softfloat/bfloat.rs`.
 
-use super::exec::{bit, bits, ExecResult, Flow};
+use super::exec::{ExecResult, Flow, bit, bits};
 use super::fp::bf16_mul_add_long;
 use super::simd::{elem, set_elem};
 use super::{Cpu, Levels};

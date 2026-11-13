@@ -5,18 +5,20 @@
 
 use egui::RichText;
 
+use super::{DebuggerAction, DebuggerPane, Density, Title, card, go_target};
 use crate::debugger::guest::Root;
-use crate::debugger::inspect::{AddressSpace, CodeTarget, DebugSnapshot, GuestAddress, ModuleSpace, SymModule, Viewing};
+use crate::debugger::inspect::{
+    AddressSpace, CodeTarget, DebugSnapshot, GuestAddress, ModuleSpace, SymModule, Viewing,
+};
 use crate::debugger::xref::decode::XrefKind;
 use crate::debugger::xref::index::ModuleSpan;
 use crate::debugger::xref::service::{
-    AddressRange, CopyModule, CopyRequest, FoundSite, IndexSpace, IndexState, ModuleKey, XrefAnswer, XrefScope, XrefTarget,
+    AddressRange, CopyModule, CopyRequest, FoundSite, IndexSpace, IndexState, ModuleKey,
+    XrefAnswer, XrefScope, XrefTarget,
 };
-use crate::shell::listing::{header_row, list_row, segmented, Cell, RowSense, Segment, Tone};
+use crate::shell::listing::{Cell, RowSense, Segment, Tone, header_row, list_row, segmented};
 use crate::shell::theme::{ACCENT_AMBER, ACCENT_BLUE, SPACE_ITEM, TEXT_MUTED, TEXT_PRIMARY};
 use crate::symbols::names::{NamedAddress, Namer};
-
-use super::{card, go_target, DebuggerAction, DebuggerPane, Density, Title};
 
 /// The start of every "References to …" menu entry.
 pub(crate) const REFERENCES_TO: &str = "References to";
@@ -28,9 +30,9 @@ pub(crate) const REINDEX_ALL: &str = "Reindex all";
 /// A module row's menu entry in the Processes and Kernel modules lists.
 pub(crate) const REINDEX_MODULE: &str = "Reindex cross references";
 pub(crate) const CANCEL: &str = "Cancel";
-pub(crate) const NOTHING_ASKED: &str =
-    "Pick References to on a code line, a source line or an export, or type an address or module!name.";
-pub(crate) const NO_MODULE_HOLDS: &str = "No module of this pause holds the target: try All modules.";
+pub(crate) const NOTHING_ASKED: &str = "Pick References to on a code line, a source line or an export, or type an address or module!name.";
+pub(crate) const NO_MODULE_HOLDS: &str =
+    "No module of this pause holds the target: try All modules.";
 const PLACE_CHARS: usize = 36;
 const KIND_CHARS: usize = 12;
 
@@ -67,7 +69,11 @@ fn plural(count: usize, one: &str, many: &str) -> String {
 /// The answer's first line: how many, to what, in how many modules, when the
 /// indexes were taken, and what was not searched.
 pub(crate) fn answer_header(answer: &XrefAnswer) -> String {
-    let mut modules: Vec<&str> = answer.found.iter().map(|found| found.module.as_str()).collect();
+    let mut modules: Vec<&str> = answer
+        .found
+        .iter()
+        .map(|found| found.module.as_str())
+        .collect();
     modules.sort_unstable();
     modules.dedup();
     let mut header = format!(
@@ -77,13 +83,22 @@ pub(crate) fn answer_header(answer: &XrefAnswer) -> String {
         plural(modules.len(), "module", "modules")
     );
     if let Some(taken_at) = answer.taken_at {
-        header.push_str(&format!(" · indexed at the pause at instruction {}", grouped(taken_at)));
+        header.push_str(&format!(
+            " · indexed at the pause at instruction {}",
+            grouped(taken_at)
+        ));
     }
     if answer.holes > 0 {
-        header.push_str(&format!(" · {} not read", plural(answer.holes as usize, "page", "pages")));
+        header.push_str(&format!(
+            " · {} not read",
+            plural(answer.holes as usize, "page", "pages")
+        ));
     }
     if !answer.waiting.is_empty() {
-        header.push_str(&format!(" · {} still indexing", plural(answer.waiting.len(), "module", "modules")));
+        header.push_str(&format!(
+            " · {} still indexing",
+            plural(answer.waiting.len(), "module", "modules")
+        ));
     }
     header
 }
@@ -98,24 +113,38 @@ pub(crate) fn state_text(state: Option<&IndexState>) -> String {
             let percent = done.saturating_mul(100).checked_div(*of).unwrap_or(0);
             format!("indexing {percent}%")
         }
-        Some(IndexState::Ready(index)) => format!("indexed at instruction {}", grouped(index.taken_at)),
+        Some(IndexState::Ready(index)) => {
+            format!("indexed at instruction {}", grouped(index.taken_at))
+        }
         Some(IndexState::Failed(reason)) => format!("failed: {reason}"),
     }
 }
 
 /// Whether a module's index is still being made.
 fn busy(state: Option<&IndexState>) -> bool {
-    matches!(state, Some(IndexState::Copying | IndexState::Queued | IndexState::Indexing { .. }))
+    matches!(
+        state,
+        Some(IndexState::Copying | IndexState::Queued | IndexState::Indexing { .. })
+    )
 }
 
 /// The address space the pause's user modules are read in: a viewed
 /// thread's process, else the shown processor's.
 fn user_space(snapshot: &DebugSnapshot) -> CopySpace {
     match &snapshot.viewing {
-        Viewing::Thread(thread) => CopySpace { space: IndexSpace::Process { cr3: thread.cr3 }, root: Root::Process(thread.cr3) },
+        Viewing::Thread(thread) => CopySpace {
+            space: IndexSpace::Process { cr3: thread.cr3 },
+            root: Root::Process(thread.cr3),
+        },
         Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => {
-            let cr3 = snapshot.cpus.get(snapshot.cpu).map_or(0, |cpu| cpu.registers.cr3);
-            CopySpace { space: IndexSpace::Process { cr3 }, root: Root::Live }
+            let cr3 = snapshot
+                .cpus
+                .get(snapshot.cpu)
+                .map_or(0, |cpu| cpu.registers.cr3);
+            CopySpace {
+                space: IndexSpace::Process { cr3 },
+                root: Root::Live,
+            }
         }
     }
 }
@@ -129,7 +158,10 @@ struct CopySpace {
 /// `module` of `snapshot`, as it is copied and keyed.
 pub(crate) fn copy_module(snapshot: &DebugSnapshot, module: &SymModule) -> CopyModule {
     let at = match module.space {
-        ModuleSpace::Kernel => CopySpace { space: IndexSpace::Kernel, root: Root::Live },
+        ModuleSpace::Kernel => CopySpace {
+            space: IndexSpace::Kernel,
+            root: Root::Live,
+        },
         ModuleSpace::User => user_space(snapshot),
     };
     CopyModule {
@@ -146,9 +178,18 @@ pub(crate) fn copy_module(snapshot: &DebugSnapshot, module: &SymModule) -> CopyM
 
 /// The modules an answer for `target` is read from: the module holding its
 /// first address, or every module of the pause.
-pub(crate) fn scope_modules(snapshot: &DebugSnapshot, scope: XrefScope, target: &XrefTarget) -> Vec<CopyModule> {
+pub(crate) fn scope_modules(
+    snapshot: &DebugSnapshot,
+    scope: XrefScope,
+    target: &XrefTarget,
+) -> Vec<CopyModule> {
     match scope {
-        XrefScope::AllModules => snapshot.symbols.modules.iter().map(|module| copy_module(snapshot, module)).collect(),
+        XrefScope::AllModules => snapshot
+            .symbols
+            .modules
+            .iter()
+            .map(|module| copy_module(snapshot, module))
+            .collect(),
         XrefScope::TargetModule => target
             .ranges
             .first()
@@ -161,14 +202,35 @@ pub(crate) fn scope_modules(snapshot: &DebugSnapshot, scope: XrefScope, target: 
 /// What the run thread is asked to copy for `modules`: every module of the
 /// pause is a place a data pointer may point into.
 pub(crate) fn copy_request(snapshot: &DebugSnapshot, modules: Vec<CopyModule>) -> CopyRequest {
-    let spans = snapshot.symbols.modules.iter().map(|module| ModuleSpan { base: module.base, size: module.size }).collect();
-    let taken_at = snapshot.cpus.get(snapshot.cpu).map_or(0, |cpu| cpu.registers.icount);
-    CopyRequest { modules, spans, taken_at }
+    let spans = snapshot
+        .symbols
+        .modules
+        .iter()
+        .map(|module| ModuleSpan {
+            base: module.base,
+            size: module.size,
+        })
+        .collect();
+    let taken_at = snapshot
+        .cpus
+        .get(snapshot.cpu)
+        .map_or(0, |cpu| cpu.registers.icount);
+    CopyRequest {
+        modules,
+        spans,
+        taken_at,
+    }
 }
 
 /// The one byte at `address`, labelled `label`.
 pub(crate) fn address_target(address: u64, label: String) -> XrefTarget {
-    XrefTarget { ranges: vec![AddressRange { start: address, end: address.saturating_add(1) }], label }
+    XrefTarget {
+        ranges: vec![AddressRange {
+            start: address,
+            end: address.saturating_add(1),
+        }],
+        label,
+    }
 }
 
 /// One module the answer is read from, and how far its index is.
@@ -189,28 +251,55 @@ fn place_of(named: Option<&NamedAddress>, address: u64) -> String {
 }
 
 /// One found site's row, `depth` 1 for a pointer's reader; a click opens it.
-fn site_row(ui: &mut egui::Ui, found: &FoundSite, depth: u8, names: Namer<'_>, action: &mut Option<DebuggerAction>) {
+fn site_row(
+    ui: &mut egui::Ui,
+    found: &FoundSite,
+    depth: u8,
+    names: Namer<'_>,
+    action: &mut Option<DebuggerAction>,
+) {
     let named = names.name(found.site);
     let mut place = place_of(named.as_ref(), found.site);
     if depth > 0 {
         place.insert_str(0, "↳ ");
     }
-    let line = named.as_ref().and_then(NamedAddress::source).unwrap_or_default();
+    let line = named
+        .as_ref()
+        .and_then(NamedAddress::source)
+        .unwrap_or_default();
     let cells = [
         Cell::left(format!("{:016X}", found.site), TEXT_MUTED, 16),
-        Cell::left(place, if depth > 0 { TEXT_MUTED } else { ACCENT_BLUE }, PLACE_CHARS),
+        Cell::left(
+            place,
+            if depth > 0 { TEXT_MUTED } else { ACCENT_BLUE },
+            PLACE_CHARS,
+        ),
         Cell::left(kind_text(found.kind), TEXT_PRIMARY, KIND_CHARS),
         Cell::fill(line, TEXT_MUTED),
     ];
-    let response = list_row(ui, 0.0, &cells, Tone::Plain, RowSense::Pick { selected: false });
+    let response = list_row(
+        ui,
+        0.0,
+        &cells,
+        Tone::Plain,
+        RowSense::Pick { selected: false },
+    );
     if response.clicked() {
-        let at = GuestAddress { space: AddressSpace::Linear, value: found.site };
+        let at = GuestAddress {
+            space: AddressSpace::Linear,
+            value: found.site,
+        };
         *action = Some(DebuggerAction::ShowCode(CodeTarget::At(at)));
     }
 }
 
 /// The field and the scope switch.
-fn ask_row(ui: &mut egui::Ui, names: Namer<'_>, pane: &mut DebuggerPane, action: &mut Option<DebuggerAction>) {
+fn ask_row(
+    ui: &mut egui::Ui,
+    names: Namer<'_>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
     ui.horizontal_wrapped(|ui| {
         let field = ui.add(
             egui::TextEdit::singleline(&mut pane.references_text)
@@ -218,20 +307,31 @@ fn ask_row(ui: &mut egui::Ui, names: Namer<'_>, pane: &mut DebuggerPane, action:
                 .hint_text("address or module!name")
                 .desired_width(240.0),
         );
-        field.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, REFERENCES_FIELD));
+        field.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, REFERENCES_FIELD)
+        });
         let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         if ui.button("Find").clicked() || entered {
             match go_target(&pane.references_text, names) {
                 Ok(address) => {
                     pane.references_error = None;
-                    *action = Some(DebuggerAction::FindReferences(address_target(address, pane.references_text.trim().to_owned())));
+                    *action = Some(DebuggerAction::FindReferences(address_target(
+                        address,
+                        pane.references_text.trim().to_owned(),
+                    )));
                 }
                 Err(error) => pane.references_error = Some(error),
             }
         }
         let switch = [
-            Segment { value: XrefScope::TargetModule, label: THIS_MODULE },
-            Segment { value: XrefScope::AllModules, label: ALL_MODULES },
+            Segment {
+                value: XrefScope::TargetModule,
+                label: THIS_MODULE,
+            },
+            Segment {
+                value: XrefScope::AllModules,
+                label: ALL_MODULES,
+            },
         ];
         if segmented(ui, &mut pane.references_scope, &switch) {
             if let Some(target) = pane.references.clone() {
@@ -278,7 +378,9 @@ pub(super) fn references_page(
         |ui| {
             ui.horizontal(|ui| {
                 if ui.button(REINDEX_ALL).clicked() {
-                    header_ask = Some(DebuggerAction::Reindex(view.modules.iter().map(|row| row.key.base).collect()));
+                    header_ask = Some(DebuggerAction::Reindex(
+                        view.modules.iter().map(|row| row.key.base).collect(),
+                    ));
                 }
                 if any_busy && ui.button(CANCEL).clicked() {
                     header_ask = Some(DebuggerAction::CancelReferences);
@@ -292,7 +394,9 @@ pub(super) fn references_page(
                     ui.label(RichText::new(state_text(row.state.as_ref())).color(TEXT_MUTED));
                     let button = ui.button(REINDEX);
                     let name = format!("{REINDEX} {}", row.key.name);
-                    button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+                    button.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name)
+                    });
                     if button.clicked() {
                         row_ask = Some(DebuggerAction::Reindex(vec![row.key.base]));
                     }
@@ -337,14 +441,18 @@ pub(super) fn references_page(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::debugger::xref::index::ModuleIndex;
     use crate::debugger::xref::service::XrefQuery;
-    use std::sync::Arc;
 
     fn answer(found: Vec<FoundSite>, holes: u32, waiting: Vec<String>) -> XrefAnswer {
         XrefAnswer {
-            query: XrefQuery { target: address_target(0x1000, "mydriver!ReadBlock".into()), scope: XrefScope::AllModules },
+            query: XrefQuery {
+                target: address_target(0x1000, "mydriver!ReadBlock".into()),
+                scope: XrefScope::AllModules,
+            },
             found,
             waiting,
             failed: Vec::new(),
@@ -354,7 +462,12 @@ mod tests {
     }
 
     fn site(module: &str, at: u64) -> FoundSite {
-        FoundSite { site: at, kind: XrefKind::Call, module: module.into(), through: Vec::new() }
+        FoundSite {
+            site: at,
+            kind: XrefKind::Call,
+            module: module.into(),
+            through: Vec::new(),
+        }
     }
 
     #[test]
@@ -369,7 +482,18 @@ mod tests {
             XrefKind::Pointer,
         ];
         let texts: Vec<&str> = kinds.into_iter().map(kind_text).collect();
-        assert_eq!(texts, ["call", "jump", "call through", "jump through", "reads/writes", "address of", "pointer"]);
+        assert_eq!(
+            texts,
+            [
+                "call",
+                "jump",
+                "call through",
+                "jump through",
+                "reads/writes",
+                "address of",
+                "pointer"
+            ]
+        );
         let found = vec![site("a.sys", 1), site("a.sys", 2), site("b.sys", 3)];
         assert_eq!(
             answer_header(&answer(found.clone(), 0, Vec::new())),
@@ -383,13 +507,34 @@ mod tests {
 
     #[test]
     fn index_states_read_as_written() {
-        let index = Arc::new(ModuleIndex { base: 0, size: 0, sites: Vec::new(), holes: 0, taken_at: 1_000 });
+        let index = Arc::new(ModuleIndex {
+            base: 0,
+            size: 0,
+            sites: Vec::new(),
+            holes: 0,
+            taken_at: 1_000,
+        });
         assert_eq!(state_text(None), "not indexed");
-        assert_eq!(state_text(Some(&IndexState::Copying)), "waiting to be copied");
-        assert_eq!(state_text(Some(&IndexState::Queued)), "waiting to be indexed");
-        assert_eq!(state_text(Some(&IndexState::Indexing { done: 2, of: 5 })), "indexing 40%");
-        assert_eq!(state_text(Some(&IndexState::Ready(index))), "indexed at instruction 1,000");
-        assert_eq!(state_text(Some(&IndexState::Failed("its headers do not read".into()))), "failed: its headers do not read");
+        assert_eq!(
+            state_text(Some(&IndexState::Copying)),
+            "waiting to be copied"
+        );
+        assert_eq!(
+            state_text(Some(&IndexState::Queued)),
+            "waiting to be indexed"
+        );
+        assert_eq!(
+            state_text(Some(&IndexState::Indexing { done: 2, of: 5 })),
+            "indexing 40%"
+        );
+        assert_eq!(
+            state_text(Some(&IndexState::Ready(index))),
+            "indexed at instruction 1,000"
+        );
+        assert_eq!(
+            state_text(Some(&IndexState::Failed("its headers do not read".into()))),
+            "failed: its headers do not read"
+        );
     }
 
     #[test]

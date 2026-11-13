@@ -12,10 +12,10 @@
 //! `IdeSubsystem` owns all three. The threading becomes an internal detail, so
 //! callers hold one device instead of reaching across the manager.
 
+use super::IoPort;
 use super::harddrv::BxHardDriveC;
 use super::irq::IrqFabric;
 use super::pci_ide::BxPciIde;
-use super::IoPort;
 
 /// Bounce-buffer capacity for one bus-master transfer — Bochs pci_ide.cc
 /// copies through a scratch region of this size.
@@ -99,5 +99,4 @@ impl IdeSubsystem {
     pub(crate) fn seek_timer(&mut self, param: u8, irq: &mut IrqFabric) {
         self.drives.seek_timer(param, irq, &mut self.bus_master)
     }
-
 }

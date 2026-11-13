@@ -14,10 +14,10 @@
 //! physical page and may run under any linear mapping of it, which is why
 //! the cut is by page offset and the check is exact.
 
+use super::BxCpuC;
 use super::exec_ctx::ExecCtx;
 use super::instrumentation::Instrumentation;
 use super::paging::DbgWalk;
-use super::BxCpuC;
 
 /// How many linear code breakpoints a machine holds: Bochs config.h
 /// `BX_DBG_MAX_LIN_BPOINTS`.
@@ -55,7 +55,9 @@ pub enum BreakpointRefusal {
     TooManyPhysical,
     /// The engine runs the guest on the host's processor, where nothing of
     /// this port sees an instruction boundary.
-    #[error("this machine's engine does not run the guest through the interpreter, so it cannot stop before an instruction")]
+    #[error(
+        "this machine's engine does not run the guest through the interpreter, so it cannot stop before an instruction"
+    )]
     EngineCannotStop,
 }
 
@@ -153,7 +155,10 @@ impl CodeBreakpointState {
     /// Replaces the set with `breakpoints`; refused whole, leaving the set as
     /// it was, when a kind has more than its slots.
     pub(crate) fn set(&mut self, breakpoints: &[CodeBreakpoint]) -> Result<(), BreakpointRefusal> {
-        let linear = breakpoints.iter().filter(|bp| matches!(bp, CodeBreakpoint::Linear(_))).count();
+        let linear = breakpoints
+            .iter()
+            .filter(|bp| matches!(bp, CodeBreakpoint::Linear(_)))
+            .count();
         let physical = breakpoints.len().saturating_sub(linear);
         if linear > MAX_LINEAR_BREAKPOINTS {
             return Err(BreakpointRefusal::TooManyLinear);
@@ -191,11 +196,15 @@ impl CodeBreakpointState {
     }
 
     fn linear_set(&self) -> &[u64] {
-        self.linear.get(..usize::from(self.linear_count)).unwrap_or(&[])
+        self.linear
+            .get(..usize::from(self.linear_count))
+            .unwrap_or(&[])
     }
 
     fn physical_set(&self) -> &[u64] {
-        self.physical.get(..usize::from(self.physical_count)).unwrap_or(&[])
+        self.physical
+            .get(..usize::from(self.physical_count))
+            .unwrap_or(&[])
     }
 
     /// Whether a trace being built must end before an instruction at
@@ -269,7 +278,10 @@ impl CodeBreakpointState {
 impl<T: Instrumentation> BxCpuC<T> {
     /// Replaces this processor's code breakpoints and drops every cached
     /// trace, so each trace is built again with the cuts the new set needs.
-    pub(crate) fn set_code_breakpoints(&mut self, breakpoints: &[CodeBreakpoint]) -> Result<(), BreakpointRefusal> {
+    pub(crate) fn set_code_breakpoints(
+        &mut self,
+        breakpoints: &[CodeBreakpoint],
+    ) -> Result<(), BreakpointRefusal> {
         self.code_breakpoints.set(breakpoints)?;
         self.i_cache.flush_all();
         Ok(())
@@ -290,7 +302,12 @@ impl<T: Instrumentation> ExecCtx<'_, T> {
         if self.code_breakpoints.reported_at(self.icount, linear) {
             return None;
         }
-        if let Some(&address) = self.code_breakpoints.linear_set().iter().find(|&&address| address == linear) {
+        if let Some(&address) = self
+            .code_breakpoints
+            .linear_set()
+            .iter()
+            .find(|&&address| address == linear)
+        {
             return Some(BreakpointHere {
                 breakpoint: CodeBreakpoint::Linear(address),
                 linear,

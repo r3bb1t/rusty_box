@@ -1,25 +1,21 @@
-use crate::{
-    cpu::{
-        cpu::CpuActivityState,
-        instrumentation::Instrumentation,
-        BxCpuC, CodeBreakpointHit,
-    },
-    Result,
-};
-#[cfg(feature = "alloc")]
-use crate::{cpu::CpuError, Error};
-
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{Emulator, EventDelivery, ProgressUnit, ResetReason, SliceEngine, SoftwareEngine};
-use crate::memory::plan::{MemoryPlan, MemoryPlanError};
-pub use rusty_box_core::input::{KeyAction, KeyboardInput, Typed};
 use rusty_box_core::input::KeyStroke;
+pub use rusty_box_core::input::{KeyAction, KeyboardInput, Typed};
+
 // Only the direct-Linux-boot path below reaches a CPU through the store, and
 // that path needs an allocator.
 #[cfg(feature = "alloc")]
 use super::cpu_store::CpuStore;
+use super::{Emulator, EventDelivery, ProgressUnit, ResetReason, SliceEngine, SoftwareEngine};
+use crate::Result;
+use crate::cpu::cpu::CpuActivityState;
+use crate::cpu::instrumentation::Instrumentation;
+use crate::cpu::{BxCpuC, CodeBreakpointHit};
+use crate::memory::plan::{MemoryPlan, MemoryPlanError};
+#[cfg(feature = "alloc")]
+use crate::{Error, cpu::CpuError};
 
 /// What a machine was asked for that its engine cannot do.
 ///
@@ -87,10 +83,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> Power<'_, T, E> {
             .machine
             .pc_system
             .clock_at(self.machine.pc_system.time_ticks());
-        self.machine
-            .device_manager
-            .acpi
-            .press_power_button(clock);
+        self.machine.device_manager.acpi.press_power_button(clock);
     }
 
     /// Reset the machine. Unlike the power button this is not negotiable with
@@ -504,10 +497,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // card's own tile bitmap is the complete record of what changed. A
         // hypervisor engine, whose framebuffer window the guest writes without
         // exiting, supplies its page bitmap here instead.
-        let _presented_unconditionally = self
-            .device_manager
-            .vga
-            .refresh(&mut sink, rusty_box_devices::display::card::Dirt::SelfTracked);
+        let _presented_unconditionally = self.device_manager.vga.refresh(
+            &mut sink,
+            rusty_box_devices::display::card::Dirt::SelfTracked,
+        );
     }
 
     /// Hold one piece of host keyboard input for the guest, to be offered by
@@ -600,7 +593,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Keys before raw bytes, the order this pump has always used.
         self.host_input.push_keys(keys_to_send);
         self.host_input.push_scancodes(scancodes_to_send);
-        self.host_input.push_serial(FRONT_END_SERIAL_PORT, serial_input);
+        self.host_input
+            .push_serial(FRONT_END_SERIAL_PORT, serial_input);
 
         // Offer held keyboard input until the 8042 refuses one, and stop there
         // rather than skipping past it, so input reaches the guest in the
@@ -624,20 +618,18 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             keyboard_changed = true;
         }
         for mouse in mouse_to_send {
-            if self
-                .device_manager
-                .keyboard
-                .mouse_motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons)
-            {
+            if self.device_manager.keyboard.mouse_motion(
+                mouse.dx,
+                mouse.dy,
+                mouse.dz,
+                mouse.buttons,
+            ) {
                 keyboard_changed = true;
             } else {
                 // Usually not back-pressure: the guest may have the mouse in
                 // remote mode or reporting disabled. Relative motion folds
                 // into the next packet, so it is said rather than held.
-                tracing::debug!(
-                    "PS/2 mouse packet refused (buttons {:#04x})",
-                    mouse.buttons
-                );
+                tracing::debug!("PS/2 mouse packet refused (buttons {:#04x})", mouse.buttons);
             }
         }
         // The same gate Bochs's `rx_timer` applies before reading a host byte:
@@ -840,9 +832,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             RunBudget::Ticks(_) => self.pc_system.time_ticks(),
         };
         let spent = |machine: &Self| match budget {
-            RunBudget::Instructions(_) => {
-                machine.cpu_ref(0).icount.saturating_sub(started_at)
-            }
+            RunBudget::Instructions(_) => machine.cpu_ref(0).icount.saturating_sub(started_at),
             RunBudget::Ticks(_) => machine.pc_system.time_ticks().saturating_sub(started_at),
         };
         let ceiling = match budget {
@@ -929,7 +919,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                         break;
                     }
                     self.service_lapic_local_events();
-                    if self.cpu_ref(0).lapic.intr && (self.cpu_ref(0).interrupts_enabled() || mwait_if) {
+                    if self.cpu_ref(0).lapic.intr
+                        && (self.cpu_ref(0).interrupts_enabled() || mwait_if)
+                    {
                         self.cpu_mut()
                             .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                         break;
@@ -1014,7 +1006,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
             break 'batch;
         }
-
 
         // Handle keyboard/mouse/serial input from GUI.
         self.pump_gui_input();
@@ -1238,7 +1229,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         }
         StopReason::BudgetExhausted
     }
-
 }
 
 /// Render one VGA frame into a `SharedDisplay` framebuffer.

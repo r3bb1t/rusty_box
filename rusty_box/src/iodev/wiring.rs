@@ -7,6 +7,7 @@
 //! request reaches real hardware state.
 
 use rusty_box_devices::api::{DeviceCtx, TimerKey, TimerService};
+
 use crate::iodev::irq::IrqFabric;
 use crate::pc_system::BxPcSystemC;
 
@@ -109,8 +110,9 @@ impl TimerHandles {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box_devices::api::DeviceKind;
+
+    use super::*;
     use crate::pc_system::TimerOwner;
 
     /// A device arming a timer mid-batch must anchor the deadline at the tick
@@ -164,8 +166,11 @@ pub(crate) struct NullTimerService;
 
 impl TimerService for NullTimerService {
     fn arm_oneshot_usec(&mut self, _key: TimerKey, _delay_usec: u64) {}
+
     fn arm_periodic_usec(&mut self, _key: TimerKey, _period_usec: u64) {}
+
     fn arm_oneshot_ticks(&mut self, _key: TimerKey, _delay_ticks: u64) {}
+
     fn cancel(&mut self, _key: TimerKey) {}
 }
 
@@ -219,10 +224,12 @@ impl WheelTimerService<'_> {
             self.now_ticks,
             self.pc_system.time_ticks()
         );
-        match self
-            .pc_system
-            .activate_timer_at_ticks_with_period(handle, deadline, delay_ticks, continuous)
-        {
+        match self.pc_system.activate_timer_at_ticks_with_period(
+            handle,
+            deadline,
+            delay_ticks,
+            continuous,
+        ) {
             Ok(()) => {}
             Err(error) => {
                 // A device can only reach a handle the machine registered for

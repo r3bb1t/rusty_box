@@ -2,21 +2,18 @@
 pub mod decoder;
 pub mod instrumentation;
 
-pub use instrumentation::{
-    BranchEvent, BranchType, CacheCntrl, CodeSize, CpuDebugView, CpuSetupMode, CpuSnapshot,
-    EmuStopReason, ExecutionMode, Fetched, ProcessorActivity, SegmentBases,
-    DescriptorTable, LinearRange, MappingWalk, PageAccess, PageMapping, WalkStep,
-    GuestPhysicalMemory, VmxGuest,
-    ExitSet, HookCtx, HookMask, HwInterruptEvent, InstrAction, Instrumentation, InvEptType,
-    InvPcidType, IoHookEvent, IoPort, LinAccess, MemAccessRW, MemHookEvent, MemPermViolation,
-    MemPerms, MemType, MemUnmapped, MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent,
-    PrefetchHint, ResetType, TlbCntrl, X86Reg,
-};
-
 /// The decoded instruction every [`Instrumentation`] execution hook is handed.
 /// Re-exported beside the trait so implementing one needs a single import.
 pub use decoder::Instruction;
-
+pub use instrumentation::{
+    BranchEvent, BranchType, CacheCntrl, CodeSize, CpuDebugView, CpuSetupMode, CpuSnapshot,
+    DescriptorTable, EmuStopReason, ExecutionMode, ExitSet, Fetched, GuestPhysicalMemory, HookCtx,
+    HookMask, HwInterruptEvent, InstrAction, Instrumentation, InvEptType, InvPcidType, IoHookEvent,
+    IoPort, LinAccess, LinearRange, MappingWalk, MemAccessRW, MemHookEvent, MemPermViolation,
+    MemPerms, MemType, MemUnmapped, MwaitEvent, MwaitFlags, OpcodeEvent, PageAccess, PageMapping,
+    PhyAccess, PrefetchEvent, PrefetchHint, ProcessorActivity, ResetType, SegmentBases, TlbCntrl,
+    VmxGuest, WalkStep, X86Reg,
+};
 /// Re-exported where the CPU's consumers already look for it; a reset is a
 /// machine event, so the type itself is arch-neutral and lives in the core.
 pub use rusty_box_core::ResetReason;
@@ -36,7 +33,6 @@ pub(super) mod arith32;
 pub(super) mod arith64;
 pub(super) mod arith8;
 pub(super) mod avx;
-pub(super) mod avx_pfp;
 pub(super) mod avx512;
 pub(super) mod avx512_bcast;
 pub(super) mod avx512_bw;
@@ -54,6 +50,7 @@ pub(super) mod avx512_rcp14;
 mod avx512_rcp14_tables;
 mod avx512_round;
 pub(super) mod avx512_scalar;
+pub(super) mod avx_pfp;
 pub(super) mod bcd;
 pub(super) mod bit;
 pub(super) mod bit16;
@@ -71,7 +68,6 @@ pub(super) mod cet;
 #[allow(clippy::module_inception)]
 pub mod cpu;
 mod cpu_getters_and_setters;
-pub(crate) mod exec_ctx;
 pub(super) mod cpu_macros;
 pub(super) mod cpudb;
 pub(super) mod cpuid;
@@ -90,8 +86,9 @@ pub(super) mod descriptor;
 pub(super) mod dispatcher;
 pub mod eflags;
 pub(super) mod event;
-pub(crate) use event::{AcknowledgedInterrupt, TrapDischarge};
+pub(crate) mod exec_ctx;
 pub use event::HardwareEvent;
+pub(crate) use event::{AcknowledgedInterrupt, TrapDischarge};
 pub(super) mod exception;
 pub(super) mod fetch_mode;
 pub(super) mod flag_ctrl;
@@ -130,13 +127,13 @@ pub(super) mod shift16;
 pub(super) mod shift32;
 pub(super) mod shift64;
 pub(super) mod shift8;
+pub(super) mod simd_int;
+pub(super) mod simd_pfp;
 pub(super) mod smm;
 #[cfg(feature = "std")]
 pub mod snapshot;
 pub(super) mod soft_int;
-pub(super) mod simd_pfp;
 pub(super) mod softfloat3e;
-pub(super) mod simd_int;
 pub(super) mod sse;
 pub(super) mod sse_fp;
 pub(super) mod sse_move;
@@ -158,8 +155,7 @@ pub(super) mod vmx;
 pub(super) mod xmm;
 
 pub use cpu::BxCpuC;
-pub use cpuid::{BxCpuIdTrait, CpuidFreq};
-
+pub use cpudb::CpuModel;
 pub use cpudb::amd::amd_ryzen::AmdRyzen;
 pub use cpudb::intel::*;
-pub use cpudb::CpuModel;
+pub use cpuid::{BxCpuIdTrait, CpuidFreq};

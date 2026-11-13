@@ -143,15 +143,29 @@ impl FakeWindowsSpec {
     pub(crate) fn with_services() -> FakeWindowsSpec {
         let mut spec = Self::typical();
         spec.kernel.sections = vec![
-            FakeSection { name: ".text", rva: KERNEL_TEXT_RVA as u32, size: 0x1000, executable: true },
-            FakeSection { name: ".rdata", rva: KERNEL_RDATA_RVA as u32, size: 0x1000, executable: false },
+            FakeSection {
+                name: ".text",
+                rva: KERNEL_TEXT_RVA as u32,
+                size: 0x1000,
+                executable: true,
+            },
+            FakeSection {
+                name: ".rdata",
+                rva: KERNEL_RDATA_RVA as u32,
+                size: 0x1000,
+                executable: false,
+            },
         ];
         spec.drivers.push(FakeImage {
             name: "win32k.sys",
             base: WIN32K_BASE,
             size: 0x10_0000,
             time_date_stamp: 0x4549_B07D,
-            pdb: FakePdb { guid: [0x32; 16], age: 1, path: "win32k.pdb" },
+            pdb: FakePdb {
+                guid: [0x32; 16],
+                age: 1,
+                path: "win32k.pdb",
+            },
             sections: Vec::new(),
         });
         spec.services = Some(FakeServices {
@@ -194,9 +208,21 @@ impl FakeWindowsSpec {
                 sections: Vec::new(),
             }],
             processes: vec![
-                FakeProcess { pid: 4, name: "System", cr3: LIVE_CR3 },
-                FakeProcess { pid: 0x1F0, name: "smss.exe", cr3: 0x2_0000 },
-                FakeProcess { pid: 0x26C, name: "csrss.exe", cr3: 0x3_0000 },
+                FakeProcess {
+                    pid: 4,
+                    name: "System",
+                    cr3: LIVE_CR3,
+                },
+                FakeProcess {
+                    pid: 0x1F0,
+                    name: "smss.exe",
+                    cr3: 0x2_0000,
+                },
+                FakeProcess {
+                    pid: 0x26C,
+                    name: "csrss.exe",
+                    cr3: 0x3_0000,
+                },
             ],
             eprocess: EprocessFields {
                 unique_process_id: 0x440,
@@ -220,25 +246,48 @@ impl FakeWindows {
     pub(crate) fn build(spec: FakeWindowsSpec) -> FakeWindows {
         let mut guest = FakeGuest::new(LIVE_CR3);
         let mut kernel_exports = vec![
-            FakeExport { name: "PsActiveProcessHead", rva: ACTIVE_PROCESS_HEAD_RVA },
-            FakeExport { name: "PsInitialSystemProcess", rva: INITIAL_SYSTEM_PROCESS_RVA },
-            FakeExport { name: "PsLoadedModuleList", rva: LOADED_MODULE_LIST_RVA },
+            FakeExport {
+                name: "PsActiveProcessHead",
+                rva: ACTIVE_PROCESS_HEAD_RVA,
+            },
+            FakeExport {
+                name: "PsInitialSystemProcess",
+                rva: INITIAL_SYSTEM_PROCESS_RVA,
+            },
+            FakeExport {
+                name: "PsLoadedModuleList",
+                rva: LOADED_MODULE_LIST_RVA,
+            },
         ];
         if spec.build_number.is_some() {
-            kernel_exports.push(FakeExport { name: "NtBuildNumber", rva: NT_BUILD_NUMBER_RVA });
+            kernel_exports.push(FakeExport {
+                name: "NtBuildNumber",
+                rva: NT_BUILD_NUMBER_RVA,
+            });
         }
         write_image(&mut guest, LIVE_CR3, &spec.kernel, &kernel_exports);
         if let Some(build) = spec.build_number {
-            guest.write_u32(LIVE_CR3, spec.kernel.base + NT_BUILD_NUMBER_RVA, FREE_BUILD | build);
+            guest.write_u32(
+                LIVE_CR3,
+                spec.kernel.base + NT_BUILD_NUMBER_RVA,
+                FREE_BUILD | build,
+            );
         }
         for driver in &spec.drivers {
             write_image(&mut guest, LIVE_CR3, driver, &[]);
         }
         write_kpcr(&mut guest, spec.kernel.base + HANDLER_RVA);
         write_processes(&mut guest, &spec);
-        let images: Vec<&FakeImage> =
-            core::iter::once(&spec.kernel).chain(spec.drivers.iter()).collect();
-        write_module_list(&mut guest, LIVE_CR3, spec.kernel.base + LOADED_MODULE_LIST_RVA, LDR_ENTRY_BASE, &images);
+        let images: Vec<&FakeImage> = core::iter::once(&spec.kernel)
+            .chain(spec.drivers.iter())
+            .collect();
+        write_module_list(
+            &mut guest,
+            LIVE_CR3,
+            spec.kernel.base + LOADED_MODULE_LIST_RVA,
+            LDR_ENTRY_BASE,
+            &images,
+        );
         if let Some(services) = &spec.services {
             write_services(&mut guest, &spec, services);
             write_user_processes(&mut guest, &spec, services);
@@ -267,12 +316,17 @@ impl FakeWindows {
     /// Points kernel service `index` at `routine`: a hooked entry.
     pub(crate) fn set_kernel_entry(&mut self, index: u32, routine: u64) {
         let table = KERNEL_BASE + KI_SERVICE_TABLE_RVA;
-        self.guest.write_u32(LIVE_CR3, table + 4 * u64::from(index), shift_entry(table, routine));
+        self.guest.write_u32(
+            LIVE_CR3,
+            table + 4 * u64::from(index),
+            shift_entry(table, routine),
+        );
     }
 
     /// Writes `code` over kernel service `index`'s routine: an inline hook.
     pub(crate) fn patch_kernel_routine(&mut self, index: u32, code: &[u8]) {
-        self.guest.write(LIVE_CR3, Self::kernel_routine(index), code);
+        self.guest
+            .write(LIVE_CR3, Self::kernel_routine(index), code);
     }
 
     /// Pauses the live processor in user mode, at the image base of the
@@ -280,7 +334,11 @@ impl FakeWindows {
     /// tables: its user half, and of the kernel only the KPRCB page the
     /// entry stubs read, whose `KernelDirectoryTableBase` holds
     /// `kernel_directory_table_base`.
-    pub(crate) fn pause_in_user_mode_under_kva_shadow(&mut self, process_cr3: u64, kernel_directory_table_base: u64) {
+    pub(crate) fn pause_in_user_mode_under_kva_shadow(
+        &mut self,
+        process_cr3: u64,
+        kernel_directory_table_base: u64,
+    ) {
         self.guest.alias_user_half(process_cr3, USER_SHADOW_CR3);
         self.guest.isolate(USER_SHADOW_CR3);
         self.guest.write_session(
@@ -389,7 +447,11 @@ fn write_services(guest: &mut FakeGuest, spec: &FakeWindowsSpec, services: &Fake
     for index in 0..services.kernel.len() {
         let routine = FakeWindows::kernel_routine(index as u32);
         guest.write(LIVE_CR3, routine, &ROUTINE_CODE);
-        guest.write_u32(LIVE_CR3, table + 4 * index as u64, shift_entry(table, routine));
+        guest.write_u32(
+            LIVE_CR3,
+            table + 4 * index as u64,
+            shift_entry(table, routine),
+        );
     }
     let descriptor = base + SERVICE_DESCRIPTOR_RVA;
     let shadow = base + SHADOW_DESCRIPTOR_RVA;
@@ -405,7 +467,11 @@ fn write_services(guest: &mut FakeGuest, spec: &FakeWindowsSpec, services: &Fake
     for index in 0..services.gui.len() {
         let routine = FakeWindows::gui_routine(index as u32);
         guest.write_session(session, routine, &ROUTINE_CODE);
-        guest.write_session(session, gui_table + 4 * index as u64, &shift_entry(gui_table, routine).to_le_bytes());
+        guest.write_session(
+            session,
+            gui_table + 4 * index as u64,
+            &shift_entry(gui_table, routine).to_le_bytes(),
+        );
     }
 }
 
@@ -418,7 +484,11 @@ fn write_user_processes(guest: &mut FakeGuest, spec: &FakeWindowsSpec, services:
         base,
         size: 0x10_0000,
         time_date_stamp: 0x5000_0000,
-        pdb: FakePdb { guid: [0x55; 16], age: 1, path: "dll.pdb" },
+        pdb: FakePdb {
+            guid: [0x55; 16],
+            age: 1,
+            path: "dll.pdb",
+        },
         sections: Vec::new(),
     };
     let ntdll = dll("ntdll.dll", NTDLL_BASE);
@@ -427,29 +497,55 @@ fn write_user_processes(guest: &mut FakeGuest, spec: &FakeWindowsSpec, services:
         names
             .iter()
             .enumerate()
-            .map(|(index, &name)| FakeExport { name, rva: STUBS_RVA + index as u64 * ROUTINE_STRIDE })
+            .map(|(index, &name)| FakeExport {
+                name,
+                rva: STUBS_RVA + index as u64 * ROUTINE_STRIDE,
+            })
             .collect()
     };
     for (index, process) in spec.processes.iter().enumerate().skip(1) {
         let cr3 = process.cr3;
-        guest.write_u64(LIVE_CR3, EPROCESS_BASE + index as u64 * 0x1000 + EPROCESS_PEB, PEB);
+        guest.write_u64(
+            LIVE_CR3,
+            EPROCESS_BASE + index as u64 * 0x1000 + EPROCESS_PEB,
+            PEB,
+        );
         guest.write_u64(cr3, PEB + 0x10, PROCESS_IMAGE_BASE);
         guest.write_u64(cr3, PEB + 0x18, PEB_LDR);
         let image = dll(process.name, PROCESS_IMAGE_BASE);
         write_image(guest, cr3, &image, &[]);
         let mut kernel_exports = stub_exports(&services.kernel);
         // An export that is no stub: passed by.
-        kernel_exports.push(FakeExport { name: "RtlAllocateHeap", rva: STUBS_RVA + 0x800 });
+        kernel_exports.push(FakeExport {
+            name: "RtlAllocateHeap",
+            rva: STUBS_RVA + 0x800,
+        });
         write_image(guest, cr3, &ntdll, &kernel_exports);
         write_image(guest, cr3, &win32u, &stub_exports(&services.gui));
         for number in 0..services.kernel.len() {
-            write_stub(guest, cr3, NTDLL_BASE + STUBS_RVA + number as u64 * ROUTINE_STRIDE, number as u32);
+            write_stub(
+                guest,
+                cr3,
+                NTDLL_BASE + STUBS_RVA + number as u64 * ROUTINE_STRIDE,
+                number as u32,
+            );
         }
         guest.write(cr3, NTDLL_BASE + STUBS_RVA + 0x800, &ROUTINE_CODE);
         for number in 0..services.gui.len() {
-            write_stub(guest, cr3, WIN32U_BASE + STUBS_RVA + number as u64 * ROUTINE_STRIDE, 0x1000 + number as u32);
+            write_stub(
+                guest,
+                cr3,
+                WIN32U_BASE + STUBS_RVA + number as u64 * ROUTINE_STRIDE,
+                0x1000 + number as u32,
+            );
         }
-        write_module_list(guest, cr3, PEB_LDR + 0x10, USER_LDR_ENTRIES, &[&image, &ntdll, &win32u]);
+        write_module_list(
+            guest,
+            cr3,
+            PEB_LDR + 0x10,
+            USER_LDR_ENTRIES,
+            &[&image, &ntdll, &win32u],
+        );
     }
 }
 
@@ -464,10 +560,7 @@ fn write_stub(guest: &mut FakeGuest, cr3: u64, at: u64, index: u32) {
 fn kernel_view() -> CpuDebugView {
     let mut machine = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
         .expect("a long-mode machine");
-    let mut view = machine
-        .debug_cpu(0)
-        .expect("the boot processor")
-        .view();
+    let mut view = machine.debug_cpu(0).expect("the boot processor").view();
     view.segment_bases.gs = KPCR;
     view.kernel_gs_base = 0;
     view.registers.cr3 = LIVE_CR3;
@@ -529,7 +622,15 @@ fn write_image(guest: &mut FakeGuest, cr3: u64, image: &FakeImage, exports: &[Fa
         guest.write_u32(cr3, header + 12, section.rva);
         guest.write_u32(cr3, header + 16, section.size);
         guest.write_u32(cr3, header + 20, section.rva);
-        guest.write_u32(cr3, header + 36, if section.executable { CODE_SECTION } else { DATA_SECTION });
+        guest.write_u32(
+            cr3,
+            header + 36,
+            if section.executable {
+                CODE_SECTION
+            } else {
+                DATA_SECTION
+            },
+        );
     }
     if !exports.is_empty() {
         guest.write_u32(cr3, directories, EXPORTS_RVA as u32);
@@ -592,9 +693,8 @@ fn write_kpcr(guest: &mut FakeGuest, handler: u64) {
 fn write_processes(guest: &mut FakeGuest, spec: &FakeWindowsSpec) {
     let cr3 = LIVE_CR3;
     let fields = spec.eprocess;
-    let links_of = |index: usize| {
-        EPROCESS_BASE + index as u64 * 0x1000 + fields.unique_process_id + 8
-    };
+    let links_of =
+        |index: usize| EPROCESS_BASE + index as u64 * 0x1000 + fields.unique_process_id + 8;
     let head = spec.kernel.base + ACTIVE_PROCESS_HEAD_RVA;
     let mut ring = vec![head];
     ring.extend((0..spec.processes.len()).map(links_of));
@@ -622,7 +722,13 @@ fn write_processes(guest: &mut FakeGuest, spec: &FakeWindowsSpec) {
 /// A loader entry per image (`KLDR_DATA_TABLE_ENTRY` and
 /// `LDR_DATA_TABLE_ENTRY` share these offsets), page by page from
 /// `entries`, ringed through `head`, in the space at `cr3`.
-fn write_module_list(guest: &mut FakeGuest, cr3: u64, head: u64, entries: u64, images: &[&FakeImage]) {
+fn write_module_list(
+    guest: &mut FakeGuest,
+    cr3: u64,
+    head: u64,
+    entries: u64,
+    images: &[&FakeImage],
+) {
     let entry_of = |index: usize| entries + index as u64 * 0x1000;
     let mut ring = vec![head];
     ring.extend((0..images.len()).map(entry_of));

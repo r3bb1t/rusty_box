@@ -5,17 +5,12 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_mask{8,16,32,64}.cc`.
 
-use super::{
-    cpu::BxCpuC,
-    decoder::{BxSegregs, Instruction},
-};
+use super::cpu::BxCpuC;
+use super::decoder::{BxSegregs, Instruction};
 
 /// Helper: read opmask register value (full 64-bit)
 #[inline]
-fn read_opmask<T: crate::cpu::instrumentation::Instrumentation>(
-    cpu: &BxCpuC<T>,
-    idx: u8,
-) -> u64 {
+fn read_opmask<T: crate::cpu::instrumentation::Instrumentation>(cpu: &BxCpuC<T>, idx: u8) -> u64 {
     cpu.opmask_rrx(idx as usize)
 }
 
@@ -219,6 +214,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), s1 & s2, MASK_B);
         Ok(())
     }
+
     /// KANDW KGw, KHw, KEw
     pub fn kandw_kgw_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -226,6 +222,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), s1 & s2, MASK_W);
         Ok(())
     }
+
     /// KANDD KGd, KHd, KEd
     pub fn kandd_kgd_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -233,6 +230,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), s1 & s2, MASK_D);
         Ok(())
     }
+
     /// KANDQ KGq, KHq, KEq
     pub fn kandq_kgq_khq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -248,6 +246,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), (!s1) & s2, MASK_B);
         Ok(())
     }
+
     /// KANDNW KGw, KHw, KEw
     pub fn kandnw_kgw_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -255,6 +254,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), (!s1) & s2, MASK_W);
         Ok(())
     }
+
     /// KANDND KGd, KHd, KEd
     pub fn kandnd_kgd_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -262,6 +262,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), (!s1) & s2, MASK_D);
         Ok(())
     }
+
     /// KANDNQ KGq, KHq, KEq
     pub fn kandnq_kgq_khq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -277,6 +278,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), s1 | s2, MASK_B);
         Ok(())
     }
+
     /// KORW KGw, KHw, KEw
     pub fn korw_kgw_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -284,6 +286,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), s1 | s2, MASK_W);
         Ok(())
     }
+
     /// KORD KGd, KHd, KEd
     pub fn kord_kgd_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -291,6 +294,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), s1 | s2, MASK_D);
         Ok(())
     }
+
     /// KORQ KGq, KHq, KEq
     pub fn korq_kgq_khq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -306,6 +310,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), s1 ^ s2, MASK_B);
         Ok(())
     }
+
     /// KXORW KGw, KHw, KEw
     pub fn kxorw_kgw_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -313,6 +318,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), s1 ^ s2, MASK_W);
         Ok(())
     }
+
     /// KXORD KGd, KHd, KEd
     pub fn kxord_kgd_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -320,6 +326,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), s1 ^ s2, MASK_D);
         Ok(())
     }
+
     /// KXORQ KGq, KHq, KEq
     pub fn kxorq_kgq_khq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -335,6 +342,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), !(s1 ^ s2), MASK_B);
         Ok(())
     }
+
     /// KXNORW KGw, KHw, KEw
     pub fn kxnorw_kgw_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -342,6 +350,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), !(s1 ^ s2), MASK_W);
         Ok(())
     }
+
     /// KXNORD KGd, KHd, KEd
     pub fn kxnord_kgd_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -349,6 +358,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), !(s1 ^ s2), MASK_D);
         Ok(())
     }
+
     /// KXNORQ KGq, KHq, KEq
     pub fn kxnorq_kgq_khq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -367,18 +377,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), !src, MASK_B);
         Ok(())
     }
+
     /// KNOTW KGw, KEw
     pub fn knotw_kgw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src());
         write_opmask_masked(self, instr.dst(), !src, MASK_W);
         Ok(())
     }
+
     /// KNOTD KGd, KEd
     pub fn knotd_kgd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src());
         write_opmask_masked(self, instr.dst(), !src, MASK_D);
         Ok(())
     }
+
     /// KNOTQ KGq, KEq
     pub fn knotq_kgq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src());
@@ -397,6 +410,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), s1.wrapping_add(s2) as u64, MASK_B);
         Ok(())
     }
+
     /// KADDW KGw, KHw, KEw
     pub fn kaddw_kgw_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2()) as u16;
@@ -404,6 +418,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), s1.wrapping_add(s2) as u64, MASK_W);
         Ok(())
     }
+
     /// KADDD KGd, KHd, KEd
     pub fn kaddd_kgd_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2()) as u32;
@@ -411,6 +426,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), s1.wrapping_add(s2) as u64, MASK_D);
         Ok(())
     }
+
     /// KADDQ KGq, KHq, KEq
     pub fn kaddq_kgq_khq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2());
@@ -434,6 +450,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     /// KORTESTW KGw, KEw — Bochs KORTESTW_KGwKEwR
     pub fn kortestw_kgw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let tmp = (read_opmask(self, instr.dst()) | read_opmask(self, instr.src())) & MASK_W;
@@ -445,6 +462,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     /// KORTESTD KGd, KEd — Bochs KORTESTD_KGdKEdR
     pub fn kortestd_kgd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let tmp = (read_opmask(self, instr.dst()) | read_opmask(self, instr.src())) & MASK_D;
@@ -456,6 +474,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     /// KORTESTQ KGq, KEq — Bochs KORTESTQ_KGqKEqR
     pub fn kortestq_kgq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let tmp = read_opmask(self, instr.dst()) | read_opmask(self, instr.src());
@@ -485,6 +504,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     /// KTESTW KGw, KEw — Bochs KTESTW_KGwKEwR
     pub fn ktestw_kgw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = read_opmask(self, instr.dst()) & MASK_W;
@@ -498,6 +518,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     /// KTESTD KGd, KEd — Bochs KTESTD_KGdKEdR
     pub fn ktestd_kgd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = read_opmask(self, instr.dst()) & MASK_D;
@@ -511,6 +532,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     /// KTESTQ KGq, KEq — Bochs KTESTQ_KGqKEqR
     pub fn ktestq_kgq_keq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = read_opmask(self, instr.dst());
@@ -541,6 +563,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), result, MASK_B);
         Ok(())
     }
+
     /// KSHIFTLW KGw, KEw, Ib
     pub fn kshiftlw_kgw_kew_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src()) & MASK_W;
@@ -553,6 +576,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), result, MASK_W);
         Ok(())
     }
+
     /// KSHIFTLD KGd, KEd, Ib
     pub fn kshiftld_kgd_ked_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src()) & MASK_D;
@@ -565,6 +589,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), result, MASK_D);
         Ok(())
     }
+
     /// KSHIFTLQ KGq, KEq, Ib
     pub fn kshiftlq_kgq_keq_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src());
@@ -590,6 +615,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), result, MASK_B);
         Ok(())
     }
+
     /// KSHIFTRW KGw, KEw, Ib
     pub fn kshiftrw_kgw_kew_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src()) & MASK_W;
@@ -602,6 +628,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), result, MASK_W);
         Ok(())
     }
+
     /// KSHIFTRD KGd, KEd, Ib
     pub fn kshiftrd_kgd_ked_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src()) & MASK_D;
@@ -614,6 +641,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), result, MASK_D);
         Ok(())
     }
+
     /// KSHIFTRQ KGq, KEq, Ib
     pub fn kshiftrq_kgq_keq_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = read_opmask(self, instr.src());
@@ -639,6 +667,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), result, MASK_W);
         Ok(())
     }
+
     /// KUNPCKWD KGd, KHw, KEw — unpack two 16-bit masks into one 32-bit mask
     pub fn kunpckwd_kgd_khw_kew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2()) & MASK_W;
@@ -647,6 +676,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_opmask_masked(self, instr.dst(), result, MASK_D);
         Ok(())
     }
+
     /// KUNPCKDQ KGq, KHd, KEd — unpack two 32-bit masks into one 64-bit mask
     pub fn kunpckdq_kgq_khd_ked_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let s1 = read_opmask(self, instr.src2()) & MASK_D;

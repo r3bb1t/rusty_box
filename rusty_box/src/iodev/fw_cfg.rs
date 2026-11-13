@@ -8,13 +8,13 @@
 //!
 //! Reference: `cpp_orig/bochs/iodev/fw_cfg.cc` (700 lines)
 
+use super::IoPort;
 use crate::config::BxPhyAddress;
 use crate::memory::BxMemC;
-use super::IoPort;
-
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
+    SnapError, SnapRead, SnapResult, SnapWrite, bounds, checked_snapshot_len_add,
+    checked_snapshot_len_mul,
 };
 
 // ─── I/O Ports ──────────────────────────────────────────────────────────
@@ -103,7 +103,7 @@ const FW_CFG_VERSION_DMA: u32 = 0x02;
 // ─── DMA ────────────────────────────────────────────────────────────────
 
 /// "QEMU CFG" in big-endian
-const FW_CFG_DMA_SIGNATURE: u64 = 0x51454d5520434647;
+const FW_CFG_DMA_SIGNATURE: u64 = 0x51454D5520434647;
 
 const FW_CFG_DMA_CTL_ERROR: u32 = 0x01;
 const FW_CFG_DMA_CTL_READ: u32 = 0x02;
@@ -309,6 +309,7 @@ impl BxFwCfg {
         self.cur_offset = 0;
         self.dma_addr = 0;
     }
+
     /// Number of bytes emitted by the PLATFORM fw_cfg component body.
     ///
     /// The parent PLATFORM section owns the section-version prefix.  This
@@ -348,10 +349,10 @@ impl BxFwCfg {
         writer.write_u16(self.cur_entry)?;
         writer.write_u32(self.cur_offset)?;
         writer.write_u64(self.dma_addr)?;
-        writer.write_u64(
-            u64::try_from(self.file_dir_len)
-                .map_err(|_| invalid_fw_cfg_snapshot("file-directory length does not fit u64"))?,
-        )?;
+        writer
+            .write_u64(u64::try_from(self.file_dir_len).map_err(|_| {
+                invalid_fw_cfg_snapshot("file-directory length does not fit u64")
+            })?)?;
         writer.write_u32(u32::from(self.file_count))?;
 
         for slot in &self.slots[..usize::from(self.slot_count)] {
@@ -394,12 +395,7 @@ impl BxFwCfg {
                 len: reader.read_u16()?,
             };
         }
-        validate_fw_cfg_slots(
-            &saved_slots[..slot_count],
-            data_used,
-            cur_entry,
-            cur_offset,
-        )?;
+        validate_fw_cfg_slots(&saved_slots[..slot_count], data_used, cur_entry, cur_offset)?;
 
         reader.read_bytes(&mut self.data_pool[..data_used])?;
         reader.read_bytes(&mut self.file_dir)?;
@@ -454,7 +450,6 @@ impl BxFwCfg {
             &self.file_dir,
         )
     }
-
 
     // ─── Slot Lookup ────────────────────────────────────────────────────
 
@@ -543,13 +538,7 @@ impl BxFwCfg {
     /// - 0x510: selector (2-byte write sets cur_entry, resets offset)
     /// - 0x511: data write (ignored)
     /// - 0x514-0x51B: DMA address accumulation; writing low 32 bits triggers DMA
-    pub(crate) fn write_port(
-        &mut self,
-        port: IoPort,
-        value: u32,
-        io_len: u8,
-        mem: &mut BxMemC,
-    ) {
+    pub(crate) fn write_port(&mut self, port: IoPort, value: u32, io_len: u8, mem: &mut BxMemC) {
         match port {
             FW_CFG_IO_BASE => {
                 if io_len == 2 {
@@ -659,7 +648,9 @@ impl BxFwCfg {
             if let Some(data) = self.get_entry_data(key) {
                 let available = data.len().saturating_sub(entry_offset);
                 let requested = available.min(length as usize);
-                let committed = match mem.write_ram(address, &data[entry_offset..entry_offset + requested]) {
+                let committed = match mem
+                    .write_ram(address, &data[entry_offset..entry_offset + requested])
+                {
                     Ok(copied) => copied,
                     Err(error) => {
                         tracing::error!("fw_cfg DMA READ: write to {address:#x} failed: {error:?}");
@@ -676,7 +667,10 @@ impl BxFwCfg {
             }
             if !success {
                 control |= FW_CFG_DMA_CTL_ERROR;
-                tracing::error!("fw_cfg DMA: invalid or incomplete entry {:#06x}", self.cur_entry);
+                tracing::error!(
+                    "fw_cfg DMA: invalid or incomplete entry {:#06x}",
+                    self.cur_entry
+                );
             }
             control &= !FW_CFG_DMA_CTL_READ;
         }
@@ -1002,7 +996,9 @@ fn validate_fw_cfg_file_directory(
     directory: &[u8; FW_CFG_FILE_DIRECTORY_SIZE],
 ) -> SnapResult<()> {
     if file_dir_len > FW_CFG_FILE_DIRECTORY_SIZE || file_count > FW_CFG_FILE_SLOTS {
-        return Err(invalid_fw_cfg_snapshot("fw_cfg file directory exceeds capacity"));
+        return Err(invalid_fw_cfg_snapshot(
+            "fw_cfg file directory exceeds capacity",
+        ));
     }
     let directory_slot = slots
         .iter()
@@ -1017,9 +1013,9 @@ fn validate_fw_cfg_file_directory(
     let directory_end = directory_start
         .checked_add(usize::from(directory_slot.len))
         .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file directory slot range overflows"))?;
-    let pool_directory = data_pool.get(directory_start..directory_end).ok_or_else(|| {
-        invalid_fw_cfg_snapshot("fw_cfg file directory slot exceeds data pool")
-    })?;
+    let pool_directory = data_pool
+        .get(directory_start..directory_end)
+        .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file directory slot exceeds data pool"))?;
     if pool_directory != &directory[..file_dir_len] {
         return Err(invalid_fw_cfg_snapshot(
             "fw_cfg file directory data disagrees with pool",
@@ -1062,7 +1058,6 @@ fn validate_fw_cfg_file_directory(
         ));
     }
 
-
     for index in 0..file_count {
         let entry_start = 4usize
             .checked_add(
@@ -1098,7 +1093,9 @@ fn validate_fw_cfg_file_directory(
         )
         .map_err(|_| invalid_fw_cfg_snapshot("fw_cfg file selector does not fit u16"))?;
         if selected_key != expected_key {
-            return Err(invalid_fw_cfg_snapshot("fw_cfg file selector is out of order"));
+            return Err(invalid_fw_cfg_snapshot(
+                "fw_cfg file selector is out of order",
+            ));
         }
         let file_slot = slots
             .iter()
@@ -1112,7 +1109,6 @@ fn validate_fw_cfg_file_directory(
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1161,7 +1157,10 @@ mod tests {
         fw_cfg.process_dma(DESCRIPTOR, &mut mem);
 
         let mut payload = [0; 5];
-        assert_eq!(mem.read_ram(DESTINATION, &mut payload).unwrap(), payload.len());
+        assert_eq!(
+            mem.read_ram(DESTINATION, &mut payload).unwrap(),
+            payload.len()
+        );
         assert_eq!(payload, [0x61, 0x62, 0x63, 0x64, 0x65]);
         let mut completion = [0; 4];
         assert_eq!(mem.read_ram(DESCRIPTOR, &mut completion).unwrap(), 4);
@@ -1222,13 +1221,15 @@ mod tests {
             u32::from(PAYLOAD[0])
         );
 
-        let control =
-            (u32::from(payload_key) << 16) | FW_CFG_DMA_CTL_SELECT | FW_CFG_DMA_CTL_READ;
+        let control = (u32::from(payload_key) << 16) | FW_CFG_DMA_CTL_SELECT | FW_CFG_DMA_CTL_READ;
         let mut descriptor = [0u8; 16];
         descriptor[..4].copy_from_slice(&control.to_be_bytes());
         descriptor[4..8].copy_from_slice(&(PAYLOAD.len() as u32).to_be_bytes());
         descriptor[8..].copy_from_slice(&DESTINATION.get().to_be_bytes());
-        assert_eq!(mem.write_ram(DESCRIPTOR, &descriptor).unwrap(), descriptor.len());
+        assert_eq!(
+            mem.write_ram(DESCRIPTOR, &descriptor).unwrap(),
+            descriptor.len()
+        );
 
         // Write all but the triggering byte of a bytewise DMA address.  The
         // final byte must resume the descriptor after restoration.

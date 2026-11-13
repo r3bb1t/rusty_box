@@ -216,12 +216,24 @@ const DMT_MODES: [DmtMode; 19] = [
     },
     // 20h 1280 × 960
     DmtMode {
-        timing: dmt(108_000, [1280, 1376, 1488, 1800], [960, 961, 964, 1000], P, P),
+        timing: dmt(
+            108_000,
+            [1280, 1376, 1488, 1800],
+            [960, 961, 964, 1000],
+            P,
+            P,
+        ),
         code: Code::EstablishedIii { byte: 7, bit: 3 },
     },
     // 23h 1280 × 1024
     DmtMode {
-        timing: dmt(108_000, [1280, 1328, 1440, 1688], [1024, 1025, 1028, 1066], P, P),
+        timing: dmt(
+            108_000,
+            [1280, 1328, 1440, 1688],
+            [1024, 1025, 1028, 1066],
+            P,
+            P,
+        ),
         code: Code::EstablishedIii { byte: 7, bit: 1 },
     },
     // 27h 1360 × 768
@@ -231,57 +243,123 @@ const DMT_MODES: [DmtMode; 19] = [
     },
     // 2Ah 1400 × 1050
     DmtMode {
-        timing: dmt(121_750, [1400, 1488, 1632, 1864], [1050, 1053, 1057, 1089], N, P),
+        timing: dmt(
+            121_750,
+            [1400, 1488, 1632, 1864],
+            [1050, 1053, 1057, 1089],
+            N,
+            P,
+        ),
         code: Code::EstablishedIii { byte: 8, bit: 1 },
     },
     // 2Fh 1440 × 900
     DmtMode {
-        timing: dmt(106_500, [1440, 1520, 1672, 1904], [900, 903, 909, 934], N, P),
+        timing: dmt(
+            106_500,
+            [1440, 1520, 1672, 1904],
+            [900, 903, 909, 934],
+            N,
+            P,
+        ),
         code: Code::EstablishedIii { byte: 8, bit: 5 },
     },
     // 33h 1600 × 1200
     DmtMode {
-        timing: dmt(162_000, [1600, 1664, 1856, 2160], [1200, 1201, 1204, 1250], P, P),
+        timing: dmt(
+            162_000,
+            [1600, 1664, 1856, 2160],
+            [1200, 1201, 1204, 1250],
+            P,
+            P,
+        ),
         code: Code::EstablishedIii { byte: 9, bit: 2 },
     },
     // 3Ah 1680 × 1050
     DmtMode {
-        timing: dmt(146_250, [1680, 1784, 1960, 2240], [1050, 1053, 1059, 1089], N, P),
+        timing: dmt(
+            146_250,
+            [1680, 1784, 1960, 2240],
+            [1050, 1053, 1059, 1089],
+            N,
+            P,
+        ),
         code: Code::EstablishedIii { byte: 9, bit: 5 },
     },
     // 3Eh 1792 × 1344
     DmtMode {
-        timing: dmt(204_750, [1792, 1920, 2120, 2448], [1344, 1345, 1348, 1394], N, P),
+        timing: dmt(
+            204_750,
+            [1792, 1920, 2120, 2448],
+            [1344, 1345, 1348, 1394],
+            N,
+            P,
+        ),
         code: Code::EstablishedIii { byte: 10, bit: 5 },
     },
     // 41h 1856 × 1392
     DmtMode {
-        timing: dmt(218_250, [1856, 1952, 2176, 2528], [1392, 1393, 1396, 1439], N, P),
+        timing: dmt(
+            218_250,
+            [1856, 1952, 2176, 2528],
+            [1392, 1393, 1396, 1439],
+            N,
+            P,
+        ),
         code: Code::EstablishedIii { byte: 10, bit: 3 },
     },
     // 45h 1920 × 1200
     DmtMode {
-        timing: dmt(193_250, [1920, 2056, 2256, 2592], [1200, 1203, 1209, 1245], N, P),
+        timing: dmt(
+            193_250,
+            [1920, 2056, 2256, 2592],
+            [1200, 1203, 1209, 1245],
+            N,
+            P,
+        ),
         code: Code::EstablishedIii { byte: 10, bit: 0 },
     },
     // 49h 1920 × 1440
     DmtMode {
-        timing: dmt(234_000, [1920, 2048, 2256, 2600], [1440, 1441, 1444, 1500], N, P),
+        timing: dmt(
+            234_000,
+            [1920, 2048, 2256, 2600],
+            [1440, 1441, 1444, 1500],
+            N,
+            P,
+        ),
         code: Code::EstablishedIii { byte: 11, bit: 5 },
     },
     // 52h 1920 × 1080
     DmtMode {
-        timing: dmt(148_500, [1920, 2008, 2052, 2200], [1080, 1084, 1089, 1125], P, P),
+        timing: dmt(
+            148_500,
+            [1920, 2008, 2052, 2200],
+            [1080, 1084, 1089, 1125],
+            P,
+            P,
+        ),
         code: Code::Standard([0xD1, 0xC0]),
     },
     // 53h 1600 × 900, reduced blanking
     DmtMode {
-        timing: dmt(108_000, [1600, 1624, 1704, 1800], [900, 901, 904, 1000], P, P),
+        timing: dmt(
+            108_000,
+            [1600, 1624, 1704, 1800],
+            [900, 901, 904, 1000],
+            P,
+            P,
+        ),
         code: Code::Standard([0xA9, 0xC0]),
     },
     // 54h 2048 × 1152, reduced blanking
     DmtMode {
-        timing: dmt(162_000, [2048, 2074, 2154, 2250], [1152, 1153, 1156, 1200], P, P),
+        timing: dmt(
+            162_000,
+            [2048, 2074, 2154, 2250],
+            [1152, 1153, 1156, 1200],
+            P,
+            P,
+        ),
         code: Code::Standard([0xE1, 0xC0]),
     },
 ];
@@ -446,10 +524,7 @@ fn fitted_image(t: &Timing, width: u32, height: u32) -> ImageMm {
         };
     }
     let (sw, sh) = (mm(width).min(MAX_IMAGE_MM), mm(height).min(MAX_IMAGE_MM));
-    let (mw, mh) = (
-        u64::from(t.horizontal.active),
-        u64::from(t.vertical.active),
-    );
+    let (mw, mh) = (u64::from(t.horizontal.active), u64::from(t.vertical.active));
     if mw * sh >= mh * sw {
         ImageMm {
             width: sw,
@@ -778,9 +853,8 @@ enum Native {
 pub(crate) fn generate(width: u32, height: u32, display: &DisplayIdentity) -> [u8; EDID_LEN] {
     let mut edid = [0u8; EDID_LEN];
 
-    let fits = |m: &&DmtMode| {
-        m.timing.horizontal.active <= width && m.timing.vertical.active <= height
-    };
+    let fits =
+        |m: &&DmtMode| m.timing.horizontal.active <= width && m.timing.vertical.active <= height;
     let listed = || core::iter::once(&BASE_VIDEO_MODE).chain(DMT_MODES.iter().filter(fits));
 
     let native = match cvt_reduced_blanking(width, height) {

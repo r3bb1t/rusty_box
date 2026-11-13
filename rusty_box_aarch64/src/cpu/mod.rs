@@ -28,11 +28,11 @@ mod difftest;
 mod dp;
 mod el2;
 #[cfg(test)]
-#[path = "../../tests/unit/el2.rs"]
-mod el2_tests;
-#[cfg(test)]
 #[path = "../../tests/unit/el2_features.rs"]
 mod el2_features;
+#[cfg(test)]
+#[path = "../../tests/unit/el2.rs"]
+mod el2_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/el2_vectors.rs"]
 mod el2_vectors;
@@ -41,11 +41,11 @@ mod exec;
 mod features;
 mod fgt;
 mod fp;
-mod gic;
 mod fp_estimate;
 #[cfg(test)]
 #[path = "../../tests/unit/fp_extensions.rs"]
 mod fp_extensions;
+mod gic;
 #[cfg(test)]
 #[path = "../../tests/unit/granules.rs"]
 mod granules;
@@ -96,10 +96,10 @@ mod sysreg;
 mod sysreg_spec;
 mod system;
 mod timer;
-mod tlbi;
 #[cfg(test)]
 #[path = "../../tests/unit/tlb_maintenance.rs"]
 mod tlb_maintenance;
+mod tlbi;
 mod trace;
 #[cfg(test)]
 #[path = "../../tests/unit/vhe.rs"]
@@ -109,25 +109,22 @@ mod za;
 mod za_array;
 mod zt0;
 
-use rusty_box_core::{ClockHz, VmClock, VmInstant};
-
 use el2::El2Storage;
-
 pub use el2::{Levels, NoEl2, VirtualLines, WithEl2};
 pub use exception::ExceptionClass;
+use exec::Nzcv;
 pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
-pub use features::{CounterRate, CpuModel, FixedCounterRate, UnknownCpuModel, SYSTEM_COUNTER_HZ};
+pub use features::{CounterRate, CpuModel, FixedCounterRate, SYSTEM_COUNTER_HZ, UnknownCpuModel};
+pub(crate) use gic::{GicCpuInterface, SystemRegisterInterface};
 pub use history::RecentPcs;
 pub use mmu::{Ipa, LeafLevel, Level, NoTranslation, Tlb, TranslationFault, TranslationStage};
 pub use regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, SysReg, SysRegRefusal, VReg};
-pub(crate) use gic::{GicCpuInterface, SystemRegisterInterface};
+use rusty_box_core::{ClockHz, VmClock, VmInstant};
 pub(crate) use sysreg::WriteEffect;
-pub(crate) use system::{PsciConduit, PSCI_COMPATIBLE};
+pub(crate) use system::{PSCI_COMPATIBLE, PsciConduit};
 pub use system::{SpectreReport, UnknownSpectreReport};
 pub use timer::{TimerLines, VirtualCount};
 pub use wait::Wait;
-
-use exec::Nzcv;
 
 /// An exception level this architecture's AArch64 state names, short of
 /// EL3.
@@ -248,6 +245,13 @@ pub struct Pstate {
 }
 
 impl Pstate {
+    /// The `SPSR_ELx` bits of the fields every processor has: NZCV, SS, IL,
+    /// DAIF and M.
+    pub(crate) const BASE: u64 = 0xF030_03DF;
+    /// `SPSR_ELx.DIT`, and the bit the `DIT` register reads it at.
+    pub(crate) const DIT: u64 = 1 << 24;
+    /// `SPSR_ELx.PAN`, and the bit the `PAN` register reads it at.
+    pub(crate) const PAN: u64 = 1 << 22;
     /// The state out of reset of a processor whose highest exception level
     /// is EL1 (Arm `AArch64_TakeReset`): EL1 with `SP_EL1`, every interrupt
     /// masked, DIT clear. PAN and UAO, which reset leaves UNKNOWN, and SSBS,
@@ -274,6 +278,10 @@ impl Pstate {
         dit: false,
         ssbs: false,
     };
+    /// `SPSR_ELx.SSBS`, and the bit the `SSBS` register reads it at.
+    pub(crate) const SSBS: u64 = 1 << 12;
+    /// `SPSR_ELx.UAO`, and the bit the `UAO` register reads it at.
+    pub(crate) const UAO: u64 = 1 << 23;
 
     /// The state out of reset of a processor implementing the levels `L`:
     /// Arm `AArch64_TakeReset` starts it at the highest implemented
@@ -283,18 +291,6 @@ impl Pstate {
         let el = if L::EL2 { El::El2 } else { El::El1 };
         Self { el, ..Self::RESET }
     }
-
-    /// `SPSR_ELx.SSBS`, and the bit the `SSBS` register reads it at.
-    pub(crate) const SSBS: u64 = 1 << 12;
-    /// `SPSR_ELx.PAN`, and the bit the `PAN` register reads it at.
-    pub(crate) const PAN: u64 = 1 << 22;
-    /// `SPSR_ELx.UAO`, and the bit the `UAO` register reads it at.
-    pub(crate) const UAO: u64 = 1 << 23;
-    /// `SPSR_ELx.DIT`, and the bit the `DIT` register reads it at.
-    pub(crate) const DIT: u64 = 1 << 24;
-    /// The `SPSR_ELx` bits of the fields every processor has: NZCV, SS, IL,
-    /// DAIF and M.
-    pub(crate) const BASE: u64 = 0xF030_03DF;
 
     /// The `SPSR_ELx` encoding of this state (AArch64 form, `M[4]` = 0).
     pub const fn to_spsr(self) -> u64 {
@@ -856,11 +852,7 @@ impl<L: Levels> Cpu<L> {
 
     #[inline]
     pub(crate) fn x_or_zr(&self, n: u32) -> u64 {
-        if n == 31 {
-            0
-        } else {
-            self.x[n as usize]
-        }
+        if n == 31 { 0 } else { self.x[n as usize] }
     }
 
     #[inline]

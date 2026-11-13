@@ -14,7 +14,7 @@ use std::vec::Vec;
 use rusty_box_core::{SnapError, VmClock, VmInstant};
 
 use super::super::features::{Feature, Implementation};
-use super::super::step::{processor_with, Taken, CODE, DATA, UNDEFINED, VBAR};
+use super::super::step::{CODE, DATA, Taken, UNDEFINED, VBAR, processor_with};
 use super::super::sysreg::WriteEffect;
 use super::super::{
     Activity, Cpu, El, Levels, NoEl2, Pstate, Step, SysReg, VirtualCount, Wait, WithEl2,

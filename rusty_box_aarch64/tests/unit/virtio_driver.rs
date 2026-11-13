@@ -9,12 +9,11 @@ use std::vec::Vec;
 
 use rusty_box_core::snap::{SnapResult, SnapWrite};
 
+use super::queue::GuestRam;
+use super::{Device, Transport, Vdev};
 use crate::board::RAM_BASE;
 use crate::bus::{AccessWidth, RegOffset};
 use crate::identity::BoardIdentity;
-
-use super::queue::GuestRam;
-use super::{Device, Transport, Vdev};
 
 // Register offsets (virtio 1.2 4.2.2).
 pub const MAGIC_VALUE: u64 = 0x000;
@@ -410,7 +409,10 @@ impl Driver {
     }
 
     /// Whether a transport over `device` refuses `saved`, and why.
-    pub fn restore_refusal(device: Device, saved: &[u8]) -> Option<rusty_box_core::snap::SnapError> {
+    pub fn restore_refusal(
+        device: Device,
+        saved: &[u8],
+    ) -> Option<rusty_box_core::snap::SnapError> {
         let mut transport = Transport::new(31, device);
         let mut r: &[u8] = saved;
         transport.restore(&mut r).err()

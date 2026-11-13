@@ -1,6 +1,6 @@
 //! A RAM store writes exactly its width, little-endian, or nothing at all.
 
-use super::{le_value, store_le, AccessWidth};
+use super::{AccessWidth, le_value, store_le};
 
 const WIDTHS: [AccessWidth; 4] = [
     AccessWidth::Byte,

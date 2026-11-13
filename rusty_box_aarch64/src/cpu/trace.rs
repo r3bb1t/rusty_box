@@ -64,7 +64,7 @@
 use super::decode::classify;
 use super::exec::{Done, Fault, Observed, Step};
 use super::id::MAX_PA_BITS;
-use super::op::{predecode, Op, OpSource};
+use super::op::{Op, OpSource, predecode};
 use super::poll::PollStep;
 use super::{Btype, Cpu, Levels};
 use crate::bus::{CodeEpoch, FetchSource, PhysAddr, PhysBus, PhysSpan};

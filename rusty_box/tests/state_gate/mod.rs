@@ -72,7 +72,8 @@ pub fn install_fault_handlers<T: Instrumentation>(emu: &mut Emulator<T>) {
         entry[8..12].copy_from_slice(&((gate.handler >> 32) as u32).to_le_bytes());
         emu.mem_write(IDT + gate.vector * 16, &entry)
             .expect("write the gate");
-        emu.mem_write(gate.handler, &[0xF4]).expect("write the handler");
+        emu.mem_write(gate.handler, &[0xF4])
+            .expect("write the handler");
     }
 }
 
@@ -114,7 +115,9 @@ pub fn run_installed_at<T: Instrumentation>(
     } else if rip == MF_GATE.handler + 1 {
         Outcome::FloatingPointError
     } else {
-        panic!("the instruction neither retired nor took #UD, #NM or #MF: rip={rip:#x}, stop={stop:?}");
+        panic!(
+            "the instruction neither retired nor took #UD, #NM or #MF: rip={rip:#x}, stop={stop:?}"
+        );
     };
     match outcome {
         Outcome::Retired => assert_eq!(

@@ -5,8 +5,8 @@
 //! Mirrors Bochs cpu/cet.cc — ENDBR32/ENDBR64, shadow stack helpers,
 //! indirect branch tracking, and legacy endbranch treatment.
 
-use super::decoder::{BxSegregs, Instruction};
 use super::Result;
+use super::decoder::{BxSegregs, Instruction};
 use crate::config::BxLinAddress;
 
 // CET control MSR bit constants — matches Bochs cet.cc
@@ -28,7 +28,7 @@ pub(super) const BX_CP_RSTORSSP: u16 = 4;
 pub(super) const BX_CP_SETSSBSY: u16 = 5;
 
 /// Reserved bits mask for CET control validation — bits 6-9
-const CET_RESERVED_BITS: u64 = 0x3c0;
+const CET_RESERVED_BITS: u64 = 0x3C0;
 
 /// Canonicalize a 64-bit address (sign-extend bit 47).
 /// Bochs cpu.h CanonicalizeAddress()
@@ -573,7 +573,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        let src = self.get_gpr32(instr.dst() as usize) & 0xff;
+        let src = self.get_gpr32(instr.dst() as usize) & 0xFF;
         let tmpsrc = if src == 0 { 1 } else { src };
 
         // Bochs cet.cc INCSSPD: touches the first and last dword of the
@@ -594,7 +594,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        let src = self.get_gpr32(instr.dst() as usize) & 0xff;
+        let src = self.get_gpr32(instr.dst() as usize) & 0xFF;
         let tmpsrc = if src == 0 { 1 } else { src };
 
         // Bochs cet.cc INCSSPQ: probe first/last qword for #PF / shadow-stack
@@ -840,7 +840,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // PAUSE is a hint — no architectural state changes
         Ok(())
     }
-
 }
 
 // ============================================================================
@@ -859,7 +858,7 @@ mod tests {
     /// and fail unrelated tests with STATUS_STACK_OVERFLOW.
     const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::*;
-    use crate::cpu::cpu::{CpuMode};
+    use crate::cpu::cpu::CpuMode;
     use crate::cpu::crregs::BxCr4;
     use crate::cpu::decoder::BxSegregs;
 

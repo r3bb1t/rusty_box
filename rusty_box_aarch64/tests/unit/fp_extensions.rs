@@ -13,7 +13,7 @@
 //! The words are GNU as's (`-march=armv8.6-a+fp16+bf16`, objdump -d).
 
 use super::features::{Feature, Features, Implementation, VecLen};
-use super::step::{exec, processor, CPACR_ALL, FP_TRAP, ILLEGAL_WHEN_STREAMING, UNDEFINED};
+use super::step::{CPACR_ALL, FP_TRAP, ILLEGAL_WHEN_STREAMING, UNDEFINED, exec, processor};
 
 /// `fcmla v0.4s, v1.4s, v2.4s, #90`, `fcmla v0.4h, v1.4h, v2.4h, #0`.
 const FCMLA_4S: u32 = 0x6E82_CC20;

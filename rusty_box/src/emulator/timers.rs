@@ -1,15 +1,11 @@
-use crate::{
-    cpu::{
-        instrumentation::Instrumentation,
-    },
-    iodev::{DeviceTimerOwner, TimerRequest},
-    pc_system::TimerOwner, Result,
-};
-
-use super::{DeviceClock, Emulator, SliceEngine, StopReason};
 #[cfg(feature = "std")]
 use super::SLOWDOWN_QUANTUM_USEC;
+use super::{DeviceClock, Emulator, SliceEngine, StopReason};
+use crate::Result;
 use crate::cpu::Result as CpuResult;
+use crate::cpu::instrumentation::Instrumentation;
+use crate::iodev::{DeviceTimerOwner, TimerRequest};
+use crate::pc_system::TimerOwner;
 
 /// What one advance of device time did (R0).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -116,13 +112,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             .register_timer(TimerOwner::Pit, 0, false, false, "PIT")?;
         self.device_manager.pit.set_timer_handle(pit);
 
-        let keyboard = self.pc_system.register_timer(
-            TimerOwner::Keyboard,
-            0,
-            false,
-            false,
-            "keyboard",
-        )?;
+        let keyboard =
+            self.pc_system
+                .register_timer(TimerOwner::Keyboard, 0, false, false, "keyboard")?;
         self.device_manager.keyboard.set_timer_handle(keyboard);
 
         // Bochs hpet.cc init(): one one-shot timer per comparator with the
@@ -239,13 +231,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
         #[cfg(feature = "std")]
         if self.config.sync_slowdown {
-            let handle = self.pc_system.register_timer(
-                TimerOwner::Slowdown,
-                0,
-                false,
-                false,
-                "slowdown",
-            )?;
+            let handle =
+                self.pc_system
+                    .register_timer(TimerOwner::Slowdown, 0, false, false, "slowdown")?;
             self.slowdown_timer.initialize(
                 handle,
                 self.pc_system.time_usec(),
@@ -318,8 +306,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             .cmos_reset_timer_sync
             .take()
             .unwrap_or_else(|| self.device_manager.cmos.timer_sync());
-        self.devices
-            .apply_cmos_timer_sync(current_ticks, cmos_sync);
+        self.devices.apply_cmos_timer_sync(current_ticks, cmos_sync);
         self.devices.request_timer_after_usec(
             DeviceTimerOwner::AcpiPmOverflow,
             current_ticks,
@@ -350,7 +337,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     }
 
     /// Dispatch timer fires accumulated by `pc_system.tickn()`.
-    ///
     pub fn dispatch_timer_fires(&mut self) {
         let (owners, counts, count) = self.pc_system.take_fired_timers();
         let current_ticks = self.pc_system.time_ticks();
@@ -483,19 +469,16 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 #[cfg(feature = "std")]
                 TimerOwner::Slowdown => {
                     for _ in 0..counts[entry] {
-                        let action = self.slowdown_timer.handle_timer(
-                            self.pc_system.time_usec(),
-                            std::time::Instant::now(),
-                        );
+                        let action = self
+                            .slowdown_timer
+                            .handle_timer(self.pc_system.time_usec(), std::time::Instant::now());
                         if let Some(handle) = self.slowdown_timer.timer_handle {
                             if let Err(error) = self.pc_system.activate_timer_usec(
                                 handle,
                                 action.next_delay_usec,
                                 false,
                             ) {
-                                tracing::error!(
-                                    "slowdown timer reactivation failed: {error:?}"
-                                );
+                                tracing::error!("slowdown timer reactivation failed: {error:?}");
                             }
                         }
                         if action.sleep_one_quantum {
@@ -507,7 +490,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 }
             }
         }
-
     }
 
     /// Run the VGA's vertical timer up to the present, and keep the wheel
@@ -555,7 +537,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             // Bochs's timer service reports the time the deadline fell on, so
             // the waveform never drifts by however late the boundary came.
             let tick = self.device_manager.vga.vertical_timer(due, ticks);
-            deadline = tick.next_usec.map(|next| due.saturating_add(u64::from(next)));
+            deadline = tick
+                .next_usec
+                .map(|next| due.saturating_add(u64::from(next)));
         }
         if deadline.is_some_and(|due| now >= due) {
             deadline = self
@@ -572,7 +556,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         if was == Some(deadline) && self.pc_system.timer_is_active(handle) {
             return;
         }
-        let wait = u32::try_from(deadline.saturating_sub(now)).unwrap_or(u32::MAX).max(1);
+        let wait = u32::try_from(deadline.saturating_sub(now))
+            .unwrap_or(u32::MAX)
+            .max(1);
         match self.pc_system.activate_timer_usec(handle, wait, false) {
             Ok(()) => {}
             Err(error) => {
@@ -756,7 +742,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             // 32-bit message. Bochs never advertises the FSB capability bit,
             // so guests do not normally reach this.
             let mut bytes = value.to_le_bytes();
-            match self.memory.write_physical_page(// DEV_MEM_WRITE_PHYSICAL — a device access, so it must not see
+            match self.memory.write_physical_page(
+                // DEV_MEM_WRITE_PHYSICAL — a device access, so it must not see
                 // SMRAM (Bochs memory.cc `cpu == NULL`).
                 crate::memory::CpuMemoryPolicy::device(),
                 address,

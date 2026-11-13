@@ -90,28 +90,29 @@
 //!   (sector count, sector number, cylinder low/high) update HOB (High Order Byte)
 //!   registers on BOTH drives on the channel, supporting LBA48 addressing.
 
-use crate::ring_buffer::RingBuffer;
-use rusty_box_devices::api::{IoPort, IrqLine};
 #[cfg(feature = "alloc")]
 use alloc::format;
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-use bitflags::bitflags;
-
-#[cfg(feature = "std")]
-use crate::iodev::hdimage::{DiskImage, ImageModified, Journal, VolatileDisk, VolatileImage};
 #[cfg(feature = "std")]
 use std::fs::File;
 #[cfg(feature = "std")]
 use std::io::{Read, Seek, SeekFrom};
 #[cfg(feature = "std")]
 use std::path::Path;
+
+use bitflags::bitflags;
+use rusty_box_devices::api::{IoPort, IrqLine};
+
+#[cfg(feature = "std")]
+use crate::iodev::hdimage::{DiskImage, ImageModified, Journal, VolatileDisk, VolatileImage};
+use crate::ring_buffer::RingBuffer;
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
-    SNAPSHOT_SECTION_VERSION,
+    SNAPSHOT_SECTION_VERSION, SnapError, SnapRead, SnapResult, SnapWrite, bounds,
+    checked_snapshot_len_add, checked_snapshot_len_mul,
 };
 
 /// Sector size in bytes
@@ -456,7 +457,7 @@ pub enum Asc {
     LogicalBlockOor = 0x21,
     InvFieldInCmdPacket = 0x24,
     MediumMayHaveChanged = 0x28,
-    MediumNotPresent = 0x3a,
+    MediumNotPresent = 0x3A,
 }
 
 /// ATAPI sense info (Bochs harddrv.h)
@@ -843,7 +844,9 @@ impl AtaDrive {
                 path,
                 size
             ),
-            core::cmp::Ordering::Less => tracing::info!("ATA: extra data outside of CHS address range in '{}'", path),
+            core::cmp::Ordering::Less => {
+                tracing::info!("ATA: extra data outside of CHS address range in '{}'", path)
+            }
             core::cmp::Ordering::Equal => {}
         }
 
@@ -944,7 +947,7 @@ impl AtaDrive {
                     return false;
                 }
                 buf[..2352].fill(0);
-                buf[1..11].fill(0xff);
+                buf[1..11].fill(0xFF);
                 let raw_block = lba.wrapping_add(150);
                 buf[12] = ((raw_block / 75) / 60) as u8;
                 buf[13] = ((raw_block / 75) % 60) as u8;
@@ -1042,8 +1045,7 @@ impl AtaDrive {
         let mut serial = *b"BXCD00000           "; // 20 chars
         serial[8] = self.device_num;
         for i in 0..10 {
-            self.id_drive[10 + i] =
-                ((serial[i * 2] as u16) << 8) | serial[i * 2 + 1] as u16;
+            self.id_drive[10 + i] = ((serial[i * 2] as u16) << 8) | serial[i * 2 + 1] as u16;
         }
 
         // Words 23-26: firmware "ALPHA1  "
@@ -1057,8 +1059,7 @@ impl AtaDrive {
         let len = usize::from(self.model_len).min(40);
         model[..len].copy_from_slice(&self.model[..len]);
         for i in 0..20 {
-            self.id_drive[27 + i] =
-                ((model[i * 2] as u16) << 8) | model[i * 2 + 1] as u16;
+            self.id_drive[27 + i] = ((model[i * 2] as u16) << 8) | model[i * 2 + 1] as u16;
         }
 
         self.id_drive[47] = 0;
@@ -1081,15 +1082,15 @@ impl AtaDrive {
         }
 
         self.id_drive[64] = 0x0001; // PIO
-        self.id_drive[65] = 0x00b4;
-        self.id_drive[66] = 0x00b4;
-        self.id_drive[67] = 0x012c;
-        self.id_drive[68] = 0x00b4;
+        self.id_drive[65] = 0x00B4;
+        self.id_drive[66] = 0x00B4;
+        self.id_drive[67] = 0x012C;
+        self.id_drive[68] = 0x00B4;
 
         self.id_drive[71] = 30; // faked
         self.id_drive[72] = 30; // faked
 
-        self.id_drive[80] = 0x1e; // supports up to ATA/ATAPI-4
+        self.id_drive[80] = 0x1E; // supports up to ATA/ATAPI-4
         // Words 81-88: 0 — ATAPI advertises NO Ultra DMA (Bochs sets 88 = 0)
 
         self.identify_set = true;
@@ -1146,9 +1147,9 @@ impl AtaDrive {
             if !self.controller.lba48 {
                 // LBA28: increment the 28-bit LBA value stored across registers
                 let logical_sector = self.get_lba() as u64 + 1;
-                self.controller.head_no = ((logical_sector >> 24) & 0xf) as u8;
-                self.controller.cylinder_no = ((logical_sector >> 8) & 0xffff) as u16;
-                self.controller.sector_no = (logical_sector & 0xff) as u8;
+                self.controller.head_no = ((logical_sector >> 24) & 0xF) as u8;
+                self.controller.cylinder_no = ((logical_sector >> 8) & 0xFFFF) as u16;
+                self.controller.sector_no = (logical_sector & 0xFF) as u8;
             } else {
                 // LBA48: update both current and HOB registers (Bochs harddrv.cc)
                 let curr_lba = ((self.controller.hob.hcyl as u64) << 40)
@@ -1157,11 +1158,11 @@ impl AtaDrive {
                     | ((self.controller.cylinder_no as u64) << 8)
                     | (self.controller.sector_no as u64);
                 let next_lba = curr_lba + 1;
-                self.controller.hob.hcyl = ((next_lba >> 40) & 0xff) as u8;
-                self.controller.hob.lcyl = ((next_lba >> 32) & 0xff) as u8;
-                self.controller.hob.sector = ((next_lba >> 24) & 0xff) as u8;
-                self.controller.cylinder_no = ((next_lba >> 8) & 0xffff) as u16;
-                self.controller.sector_no = (next_lba & 0xff) as u8;
+                self.controller.hob.hcyl = ((next_lba >> 40) & 0xFF) as u8;
+                self.controller.hob.lcyl = ((next_lba >> 32) & 0xFF) as u8;
+                self.controller.hob.sector = ((next_lba >> 24) & 0xFF) as u8;
+                self.controller.cylinder_no = ((next_lba >> 8) & 0xFFFF) as u16;
+                self.controller.sector_no = (next_lba & 0xFF) as u8;
             }
         } else {
             // CHS mode: increment sector, wrap to next head/cylinder
@@ -1277,13 +1278,19 @@ impl AtaDrive {
                 // Bochs harddrv.cc ide_read_sector: every sector's address is
                 // checked (calculate_logical_address); one past the disk
                 // aborts the command.
-                let Some(lba) = self.calculate_logical_address().and_then(|sector| u64::try_from(sector).ok()) else {
+                let Some(lba) = self
+                    .calculate_logical_address()
+                    .and_then(|sector| u64::try_from(sector).ok())
+                else {
                     return false;
                 };
                 let Some(image) = self.image.as_mut() else {
                     return false;
                 };
-                match image.read_sector(lba, &mut self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE]) {
+                match image.read_sector(
+                    lba,
+                    &mut self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE],
+                ) {
                     Ok(()) => {}
                     Err(error) => {
                         tracing::error!("ATA: ide_read_sector: read failed at LBA {lba}: {error}");
@@ -1385,7 +1392,10 @@ impl AtaDrive {
                 // Bochs harddrv.cc ide_write_sector: every sector's address
                 // is checked (calculate_logical_address); one past the disk
                 // aborts the command, so a flat image never grows.
-                let Some(lba) = self.calculate_logical_address().and_then(|sector| u64::try_from(sector).ok()) else {
+                let Some(lba) = self
+                    .calculate_logical_address()
+                    .and_then(|sector| u64::try_from(sector).ok())
+                else {
                     return false;
                 };
                 let Some(image) = self.image.as_mut() else {
@@ -1393,10 +1403,15 @@ impl AtaDrive {
                 };
                 // A volatile image routes the write to its journal; nothing
                 // here reaches the image file itself.
-                match image.write_sector(lba, &self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE]) {
+                match image.write_sector(
+                    lba,
+                    &self.controller.buffer[buf_offset..buf_offset + SECTOR_SIZE],
+                ) {
                     Ok(()) => {}
                     Err(error) => {
-                        tracing::error!("ATA: ide_write_sector: write failed at LBA {lba}: {error}");
+                        tracing::error!(
+                            "ATA: ide_write_sector: write failed at LBA {lba}: {error}"
+                        );
                         return false;
                     }
                 }
@@ -1901,7 +1916,11 @@ impl BxHardDriveC {
     /// for the next machine; `None` where that drive has none.
     #[cfg(feature = "std")]
     pub fn take_volatile_disk(&mut self, channel: usize, drive: usize) -> Option<VolatileDisk> {
-        self.channels.get_mut(channel)?.drives.get_mut(drive)?.take_volatile()
+        self.channels
+            .get_mut(channel)?
+            .drives
+            .get_mut(drive)?
+            .take_volatile()
     }
 
     /// Attach disk data to a drive (alloc path).
@@ -2213,7 +2232,10 @@ impl BxHardDriveC {
         if ch >= 2 {
             return;
         }
-        let command = self.channels[ch].selected_drive().controller.current_command;
+        let command = self.channels[ch]
+            .selected_drive()
+            .controller
+            .current_command;
         self.command_aborted(ch, command, irq, pci_ide);
         pci_ide.bmdma[ch].status &= !0x01;
         pci_ide.bmdma[ch].status |= 0x02;
@@ -2511,8 +2533,7 @@ impl BxHardDriveC {
                 // present on the channel; otherwise the selected controller's
                 // register (fall through to the main match, which reads the
                 // absent drive's stored register value — Bochs BX_ANY_IS_PRESENT).
-                ATA_ERROR | ATA_SECTOR_COUNT | ATA_SECTOR_NUM | ATA_CYL_LOW
-                | ATA_CYL_HIGH => {
+                ATA_ERROR | ATA_SECTOR_COUNT | ATA_SECTOR_NUM | ATA_CYL_LOW | ATA_CYL_HIGH => {
                     if none_present {
                         return 0;
                     }
@@ -2559,7 +2580,7 @@ impl BxHardDriveC {
                 {
                     let atapi_cmd = drive.atapi.command;
                     match atapi_cmd {
-                        0x28 | 0xa8 | 0xbe => {
+                        0x28 | 0xA8 | 0xBE => {
                             // Bochs harddrv.cc: read ONE block
                             if !drive.cdrom.ready {
                                 tracing::warn!("ATAPI: read with CD-ROM not ready");
@@ -2843,7 +2864,7 @@ impl BxHardDriveC {
             {
                 let atapi_cmd = drive.atapi.command;
                 match atapi_cmd {
-                    0x28 | 0xa8 | 0xbe => {
+                    0x28 | 0xA8 | 0xBE => {
                         if drive.cdrom.remaining_blocks > 0 {
                             let next_lba = drive.cdrom.next_lba;
                             let block_size = drive.controller.buffer_size;
@@ -3143,7 +3164,9 @@ impl BxHardDriveC {
                             // Write sector(s) to disk
                             if drive.ide_write_sector() {
                                 // Recalculate buffer_size for WRITE MULTIPLE
-                                if current_command == ATA_CMD_WRITE_MULTIPLE || current_command == 0x39 {
+                                if current_command == ATA_CMD_WRITE_MULTIPLE
+                                    || current_command == 0x39
+                                {
                                     let ms = drive.controller.multiple_sectors as u32;
                                     if drive.controller.num_sectors > ms {
                                         drive.controller.buffer_size = ms as usize * SECTOR_SIZE;
@@ -3415,8 +3438,8 @@ impl BxHardDriveC {
         let drive = self.channels[channel_num].selected_drive_mut();
         // Bochs harddrv.cc
         let mut byte_count = drive.controller.cylinder_no as i32;
-        if byte_count == 0xffff_i32 {
-            byte_count = 0xfffe;
+        if byte_count == 0xFFFF_i32 {
+            byte_count = 0xFFFE;
         }
         if (byte_count & 1) != 0 && (alloc_length > byte_count) {
             byte_count -= 1;
@@ -3658,12 +3681,12 @@ impl BxHardDriveC {
 
                 self.ready_to_send_atapi(channel_num, irq, pci_ide);
             }
-            0x1b => {
+            0x1B => {
                 // START STOP UNIT — just succeed
                 self.atapi_cmd_nop(channel_num);
                 self.raise_interrupt(channel_num, irq, pci_ide);
             }
-            0x1e => {
+            0x1E => {
                 // PREVENT/ALLOW MEDIUM REMOVAL
                 let drive = self.channels[channel_num].selected_drive_mut();
                 let prevent = (drive.controller.buffer[4] & 1) != 0;
@@ -3687,8 +3710,8 @@ impl BxHardDriveC {
                 let msf = (drive.controller.buffer[1] >> 1) & 1 != 0;
                 let sub_q = (drive.controller.buffer[2] >> 6) & 1 != 0;
                 let data_format = drive.controller.buffer[3];
-                let alloc_length = ((drive.controller.buffer[7] as i32) << 8)
-                    | drive.controller.buffer[8] as i32;
+                let alloc_length =
+                    ((drive.controller.buffer[7] as i32) << 8) | drive.controller.buffer[8] as i32;
 
                 if !ready {
                     self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
@@ -3806,21 +3829,21 @@ impl BxHardDriveC {
                 self.init_send_atapi_command(channel_num, atapi_command, 8, 8, false);
                 let drive = self.channels[channel_num].selected_drive_mut();
                 if ready {
-                    drive.controller.buffer[0] = ((cap >> 24) & 0xff) as u8;
-                    drive.controller.buffer[1] = ((cap >> 16) & 0xff) as u8;
-                    drive.controller.buffer[2] = ((cap >> 8) & 0xff) as u8;
-                    drive.controller.buffer[3] = (cap & 0xff) as u8;
+                    drive.controller.buffer[0] = ((cap >> 24) & 0xFF) as u8;
+                    drive.controller.buffer[1] = ((cap >> 16) & 0xFF) as u8;
+                    drive.controller.buffer[2] = ((cap >> 8) & 0xFF) as u8;
+                    drive.controller.buffer[3] = (cap & 0xFF) as u8;
                     drive.controller.buffer[4] = 0; // block size = 2048
                     drive.controller.buffer[5] = 0;
                     drive.controller.buffer[6] = (CDROM_SECTOR_SIZE >> 8) as u8;
-                    drive.controller.buffer[7] = (CDROM_SECTOR_SIZE & 0xff) as u8;
+                    drive.controller.buffer[7] = (CDROM_SECTOR_SIZE & 0xFF) as u8;
                     self.ready_to_send_atapi(channel_num, irq, pci_ide);
                 } else {
                     self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
                     self.raise_interrupt(channel_num, irq, pci_ide);
                 }
             }
-            0x28 | 0xa8 => {
+            0x28 | 0xA8 => {
                 // READ (10) / READ (12)
                 let drive = self.channels[channel_num].selected_drive_mut();
                 let mut transfer_length: i32;
@@ -3919,7 +3942,7 @@ impl BxHardDriveC {
                         drive.controller.buffer[1] = 18; // TOC length LSB
                         drive.controller.buffer[2] = 1; // first track
                         drive.controller.buffer[3] = 1; // last track
-                                                        // Track 1 descriptor (Bochs cdrom.cc)
+                        // Track 1 descriptor (Bochs cdrom.cc)
                         drive.controller.buffer[4] = 0; // reserved
                         drive.controller.buffer[5] = 0x15; // ADR=1, CONTROL=5 (data, incremental)
                         drive.controller.buffer[6] = 1; // track number
@@ -3953,10 +3976,10 @@ impl BxHardDriveC {
                             drive.controller.buffer[18] = s;
                             drive.controller.buffer[19] = f;
                         } else {
-                            drive.controller.buffer[16] = ((blocks >> 24) & 0xff) as u8;
-                            drive.controller.buffer[17] = ((blocks >> 16) & 0xff) as u8;
-                            drive.controller.buffer[18] = ((blocks >> 8) & 0xff) as u8;
-                            drive.controller.buffer[19] = (blocks & 0xff) as u8;
+                            drive.controller.buffer[16] = ((blocks >> 24) & 0xFF) as u8;
+                            drive.controller.buffer[17] = ((blocks >> 16) & 0xFF) as u8;
+                            drive.controller.buffer[18] = ((blocks >> 8) & 0xFF) as u8;
+                            drive.controller.buffer[19] = (blocks & 0xFF) as u8;
                         }
                         self.ready_to_send_atapi(channel_num, irq, pci_ide);
                     }
@@ -4143,7 +4166,7 @@ impl BxHardDriveC {
                     self.raise_interrupt(channel_num, irq, pci_ide);
                 }
             }
-            0x4a => {
+            0x4A => {
                 // GET EVENT STATUS NOTIFICATION (Bochs harddrv.cc)
                 let drive = self.channels[channel_num].selected_drive_mut();
                 let polled = (drive.controller.buffer[1] & 1) != 0;
@@ -4161,7 +4184,7 @@ impl BxHardDriveC {
                         drive.controller.buffer[1] = 4; // MEDIA event is 4 bytes long
                         drive.controller.buffer[2] = 4; // 4 = MEDIA event
                         drive.controller.buffer[3] = 1 << 4; // we only support MEDIA event (bit 4)
-                                                             // Event code based on status_changed (Bochs harddrv.cc)
+                        // Event code based on status_changed (Bochs harddrv.cc)
                         drive.controller.buffer[4] = if drive.status_changed == 0 {
                             0 // No change
                         } else if inserted {
@@ -4213,7 +4236,7 @@ impl BxHardDriveC {
                 );
                 self.raise_interrupt(channel_num, irq, pci_ide);
             }
-            0xbd => {
+            0xBD => {
                 // MECHANISM STATUS
                 let drive = self.channels[channel_num].selected_drive_mut();
                 let alloc_length =
@@ -4226,11 +4249,11 @@ impl BxHardDriveC {
                 drive.controller.buffer[5] = 1; // one slot
                 self.ready_to_send_atapi(channel_num, irq, pci_ide);
             }
-            0x1a => {
+            0x1A => {
                 // MODE SENSE (6) — Bochs harddrv.cc
                 let drive = self.channels[channel_num].selected_drive_mut();
                 let mode_alloc_length = drive.controller.buffer[4] as i32;
-                let page_code = drive.controller.buffer[2] & 0x3f;
+                let page_code = drive.controller.buffer[2] & 0x3F;
                 let ready = drive.cdrom.ready;
                 let locked = drive.cdrom.locked;
                 match page_code {
@@ -4248,7 +4271,7 @@ impl BxHardDriveC {
                         drive.controller.buffer[1] = if ready { 0x12 } else { 0x70 }; // medium type
                         drive.controller.buffer[2] = 0; // device-specific
                         drive.controller.buffer[3] = 0; // block descriptor length
-                                                        // error recovery page
+                        // error recovery page
                         drive.controller.buffer[4] = 0x01;
                         drive.controller.buffer[5] = 0x06;
                         drive.controller.buffer[6] = 0x00; // error recovery params
@@ -4259,7 +4282,7 @@ impl BxHardDriveC {
                         drive.controller.buffer[11] = 0x00;
                         self.ready_to_send_atapi(channel_num, irq, pci_ide);
                     }
-                    0x2a => {
+                    0x2A => {
                         // CD-ROM capabilities page (same as MODE SENSE 10)
                         self.init_send_atapi_command(
                             channel_num,
@@ -4273,7 +4296,7 @@ impl BxHardDriveC {
                         drive.controller.buffer[1] = if ready { 0x12 } else { 0x70 };
                         drive.controller.buffer[2] = 0;
                         drive.controller.buffer[3] = 0;
-                        drive.controller.buffer[4] = 0x2a;
+                        drive.controller.buffer[4] = 0x2A;
                         drive.controller.buffer[5] = 0x12;
                         drive.controller.buffer[6] = 0x03;
                         drive.controller.buffer[7] = 0x00;
@@ -4283,19 +4306,19 @@ impl BxHardDriveC {
                         drive.controller.buffer[10] = 1 | locked_bit | (1 << 3) | (1 << 5);
                         drive.controller.buffer[11] = 0;
                         drive.controller.buffer[12] = ((16 * 176) >> 8) as u8;
-                        drive.controller.buffer[13] = ((16 * 176) & 0xff) as u8;
+                        drive.controller.buffer[13] = ((16 * 176) & 0xFF) as u8;
                         drive.controller.buffer[14] = 0;
                         drive.controller.buffer[15] = 2;
                         drive.controller.buffer[16] = (512 >> 8) as u8;
-                        drive.controller.buffer[17] = (512 & 0xff) as u8;
+                        drive.controller.buffer[17] = (512 & 0xFF) as u8;
                         drive.controller.buffer[18] = ((16 * 176) >> 8) as u8;
-                        drive.controller.buffer[19] = ((16 * 176) & 0xff) as u8;
+                        drive.controller.buffer[19] = ((16 * 176) & 0xFF) as u8;
                         for i in 20..24 {
                             drive.controller.buffer[i] = 0;
                         }
                         self.ready_to_send_atapi(channel_num, irq, pci_ide);
                     }
-                    0x0e => {
+                    0x0E => {
                         // CD-ROM audio control page (Bochs harddrv.cc)
                         self.init_send_atapi_command(
                             channel_num,
@@ -4328,12 +4351,12 @@ impl BxHardDriveC {
                     }
                 }
             }
-            0x5a => {
+            0x5A => {
                 // MODE SENSE (10) — Bochs harddrv.cc
                 let drive = self.channels[channel_num].selected_drive_mut();
                 let mode_alloc_length =
                     ((drive.controller.buffer[7] as i32) << 8) | drive.controller.buffer[8] as i32;
-                let page_code = drive.controller.buffer[2] & 0x3f;
+                let page_code = drive.controller.buffer[2] & 0x3F;
                 let ready = drive.cdrom.ready;
                 let locked = drive.cdrom.locked;
                 match page_code {
@@ -4367,7 +4390,7 @@ impl BxHardDriveC {
                         }
                         self.ready_to_send_atapi(channel_num, irq, pci_ide);
                     }
-                    0x2a => {
+                    0x2A => {
                         // CD-ROM capabilities
                         self.init_send_atapi_command(
                             channel_num,
@@ -4379,12 +4402,12 @@ impl BxHardDriveC {
                         let drive = self.channels[channel_num].selected_drive_mut();
                         let size = 20; // page size
                         drive.controller.buffer[0] = ((size + 6) >> 8) as u8;
-                        drive.controller.buffer[1] = ((size + 6) & 0xff) as u8;
+                        drive.controller.buffer[1] = ((size + 6) & 0xFF) as u8;
                         drive.controller.buffer[2] = if ready { 0x12 } else { 0x70 };
                         for i in 3..8 {
                             drive.controller.buffer[i] = 0;
                         }
-                        drive.controller.buffer[8] = 0x2a;
+                        drive.controller.buffer[8] = 0x2A;
                         drive.controller.buffer[9] = 0x12;
                         drive.controller.buffer[10] = 0x03;
                         drive.controller.buffer[11] = 0x00;
@@ -4394,19 +4417,19 @@ impl BxHardDriveC {
                         drive.controller.buffer[14] = 1 | locked_bit | (1 << 3) | (1 << 5);
                         drive.controller.buffer[15] = 0;
                         drive.controller.buffer[16] = ((16 * 176) >> 8) as u8;
-                        drive.controller.buffer[17] = ((16 * 176) & 0xff) as u8;
+                        drive.controller.buffer[17] = ((16 * 176) & 0xFF) as u8;
                         drive.controller.buffer[18] = 0;
                         drive.controller.buffer[19] = 2;
                         drive.controller.buffer[20] = (512 >> 8) as u8;
-                        drive.controller.buffer[21] = (512 & 0xff) as u8;
+                        drive.controller.buffer[21] = (512 & 0xFF) as u8;
                         drive.controller.buffer[22] = ((16 * 176) >> 8) as u8;
-                        drive.controller.buffer[23] = ((16 * 176) & 0xff) as u8;
+                        drive.controller.buffer[23] = ((16 * 176) & 0xFF) as u8;
                         for i in 24..28 {
                             drive.controller.buffer[i] = 0;
                         }
                         self.ready_to_send_atapi(channel_num, irq, pci_ide);
                     }
-                    0x0e => {
+                    0x0E => {
                         // CD-ROM audio control page (Bochs harddrv.cc)
                         self.init_send_atapi_command(
                             channel_num,
@@ -4439,7 +4462,7 @@ impl BxHardDriveC {
                     }
                 }
             }
-            0xbe => {
+            0xBE => {
                 // READ CD
                 let drive = self.channels[channel_num].selected_drive_mut();
                 let lba = ((drive.controller.buffer[2] as u32) << 24)
@@ -4457,12 +4480,12 @@ impl BxHardDriveC {
                     self.raise_interrupt(channel_num, irq, pci_ide);
                     return;
                 }
-                if transfer_length == 0 || (transfer_req & 0xf8) == 0 {
+                if transfer_length == 0 || (transfer_req & 0xF8) == 0 {
                     self.atapi_cmd_nop(channel_num);
                     self.raise_interrupt(channel_num, irq, pci_ide);
                     return;
                 }
-                let sector_size = if (transfer_req & 0xf8) == 0xf8 {
+                let sector_size = if (transfer_req & 0xF8) == 0xF8 {
                     2352
                 } else {
                     2048
@@ -4485,7 +4508,7 @@ impl BxHardDriveC {
                 // Bochs harddrv.cc READ CD: start_seek(channel)
                 self.start_seek(channel_num);
             }
-            0x2b => {
+            0x2B => {
                 // SEEK (Bochs harddrv.cc)
                 let drive = self.channels[channel_num].selected_drive_mut();
                 let lba = ((drive.controller.buffer[2] as u32) << 24)
@@ -4658,7 +4681,10 @@ impl BxHardDriveC {
                     .controller
                     .status
                     .remove(AtaStatus::DSC | AtaStatus::DRQ | AtaStatus::CORR);
-                drive.controller.status.insert(AtaStatus::BSY | AtaStatus::DRDY);
+                drive
+                    .controller
+                    .status
+                    .insert(AtaStatus::BSY | AtaStatus::DRDY);
                 drive.controller.buffer_index = 0;
                 self.start_seek(channel_num);
                 let drive = self.channels[channel_num].selected_drive_mut();
@@ -4718,7 +4744,10 @@ impl BxHardDriveC {
                     .controller
                     .status
                     .remove(AtaStatus::DSC | AtaStatus::DRQ | AtaStatus::CORR);
-                drive.controller.status.insert(AtaStatus::BSY | AtaStatus::DRDY);
+                drive
+                    .controller
+                    .status
+                    .insert(AtaStatus::BSY | AtaStatus::DRDY);
                 drive.controller.buffer_index = 0;
                 self.start_seek(channel_num);
                 let drive = self.channels[channel_num].selected_drive_mut();
@@ -4749,7 +4778,10 @@ impl BxHardDriveC {
                         .controller
                         .status
                         .remove(AtaStatus::DSC | AtaStatus::DRQ | AtaStatus::CORR);
-                    drive.controller.status.insert(AtaStatus::BSY | AtaStatus::DRDY);
+                    drive
+                        .controller
+                        .status
+                        .insert(AtaStatus::BSY | AtaStatus::DRDY);
                     tracing::trace!(
                         "ATA: READ DMA lba={} num_sectors={}",
                         drive.get_lba(),
@@ -4819,7 +4851,10 @@ impl BxHardDriveC {
                 drive.next_lsector = logical_sector;
                 drive.controller.error = AtaError::empty();
                 drive.controller.status.remove(AtaStatus::BSY);
-                drive.controller.status.insert(AtaStatus::DSC | AtaStatus::DRQ);
+                drive
+                    .controller
+                    .status
+                    .insert(AtaStatus::DSC | AtaStatus::DRQ);
                 drive.controller.buffer_index = 0;
                 // No IRQ on initial write command (Bochs doesn't raise here)
             }
@@ -4859,7 +4894,10 @@ impl BxHardDriveC {
                 drive.next_lsector = logical_sector;
                 drive.controller.error = AtaError::empty();
                 drive.controller.status.remove(AtaStatus::BSY);
-                drive.controller.status.insert(AtaStatus::DSC | AtaStatus::DRQ);
+                drive
+                    .controller
+                    .status
+                    .insert(AtaStatus::DSC | AtaStatus::DRQ);
                 drive.controller.buffer_index = 0;
             }
             // 0x40 = READ VERIFY, 0x41 = no retry, 0x42 = READ VERIFY EXT (LBA48)
@@ -4894,17 +4932,20 @@ impl BxHardDriveC {
                 }
                 let max_sector = drive.geometry.total_sectors as i64 - 1;
                 if !drive.controller.lba48 {
-                    drive.controller.head_no = ((max_sector >> 24) & 0xf) as u8;
-                    drive.controller.cylinder_no = ((max_sector >> 8) & 0xffff) as u16;
-                    drive.controller.sector_no = (max_sector & 0xff) as u8;
+                    drive.controller.head_no = ((max_sector >> 24) & 0xF) as u8;
+                    drive.controller.cylinder_no = ((max_sector >> 8) & 0xFFFF) as u16;
+                    drive.controller.sector_no = (max_sector & 0xFF) as u8;
                 } else {
-                    drive.controller.hob.hcyl = ((max_sector >> 40) & 0xff) as u8;
-                    drive.controller.hob.lcyl = ((max_sector >> 32) & 0xff) as u8;
-                    drive.controller.hob.sector = ((max_sector >> 24) & 0xff) as u8;
-                    drive.controller.cylinder_no = ((max_sector >> 8) & 0xffff) as u16;
-                    drive.controller.sector_no = (max_sector & 0xff) as u8;
+                    drive.controller.hob.hcyl = ((max_sector >> 40) & 0xFF) as u8;
+                    drive.controller.hob.lcyl = ((max_sector >> 32) & 0xFF) as u8;
+                    drive.controller.hob.sector = ((max_sector >> 24) & 0xFF) as u8;
+                    drive.controller.cylinder_no = ((max_sector >> 8) & 0xFFFF) as u16;
+                    drive.controller.sector_no = (max_sector & 0xFF) as u8;
                 }
-                drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DSC);
+                drive
+                    .controller
+                    .status
+                    .insert(AtaStatus::DRDY | AtaStatus::DSC);
                 self.raise_interrupt(channel_num, irq, pci_ide);
             }
             // 0x37 = SET MAX ADDRESS EXT, 0xF9 = SET MAX ADDRESS
@@ -4932,7 +4973,10 @@ impl BxHardDriveC {
                     .controller
                     .status
                     .remove(AtaStatus::DSC | AtaStatus::DRQ | AtaStatus::CORR);
-                drive.controller.status.insert(AtaStatus::BSY | AtaStatus::DRDY);
+                drive
+                    .controller
+                    .status
+                    .insert(AtaStatus::BSY | AtaStatus::DRDY);
                 self.start_seek(channel_num);
             }
             ATA_CMD_EXECUTE_DIAGNOSTICS => {
@@ -4972,7 +5016,8 @@ impl BxHardDriveC {
                 if spt != disk_spt {
                     tracing::error!(
                         "ATA: init drive params: logical sector count {} not supported (expected {})",
-                        spt, disk_spt
+                        spt,
+                        disk_spt
                     );
                     self.command_aborted(channel_num, command, irq, pci_ide);
                     return;
@@ -4984,7 +5029,8 @@ impl BxHardDriveC {
                 } else if head_no != (disk_heads - 1) {
                     tracing::error!(
                         "ATA: init drive params: max. logical head number {} not supported (expected {})",
-                        head_no, disk_heads - 1
+                        head_no,
+                        disk_heads - 1
                     );
                     self.command_aborted(channel_num, command, irq, pci_ide);
                     return;
@@ -5103,9 +5149,7 @@ impl BxHardDriveC {
                     return;
                 }
                 let count = drive.controller.sector_count;
-                if count == 0
-                    || count as usize > MAX_MULTIPLE_SECTORS
-                    || (count & (count - 1)) != 0
+                if count == 0 || count as usize > MAX_MULTIPLE_SECTORS || (count & (count - 1)) != 0
                 {
                     self.command_aborted(channel_num, command, irq, pci_ide);
                     return;
@@ -5200,8 +5244,8 @@ impl BxHardDriveC {
                         return;
                     }
                     drive.controller.sector_count = 1; // c_d=1 (command)
-                                                       // Bochs sets individual fields: busy=0, write_fault=0, drq=1
-                                                       // preserving other bits like drive_ready (DRDY) and seek_complete (DSC).
+                    // Bochs sets individual fields: busy=0, write_fault=0, drq=1
+                    // preserving other bits like drive_ready (DRDY) and seek_complete (DSC).
                     drive
                         .controller
                         .status
@@ -5308,8 +5352,9 @@ const SNAPSHOT_VOLATILE_MEDIA_FIXED: u64 = 1 + 8 + 1 + 8 + 8 + 8 + 4 + 8;
 const SNAPSHOT_WRITTEN_SECTOR_LEN: u64 = 8 + SECTOR_SIZE as u64;
 /// The most written sectors one record can carry inside a section's ceiling.
 #[cfg(feature = "std")]
-const MAX_SNAPSHOT_WRITTEN_SECTORS: u64 =
-    (bounds::MAX_SNAPSHOT_SECTION_LEN - SNAPSHOT_VOLATILE_MEDIA_FIXED) / SNAPSHOT_WRITTEN_SECTOR_LEN;
+const MAX_SNAPSHOT_WRITTEN_SECTORS: u64 = (bounds::MAX_SNAPSHOT_SECTION_LEN
+    - SNAPSHOT_VOLATILE_MEDIA_FIXED)
+    / SNAPSHOT_WRITTEN_SECTOR_LEN;
 /// Why a save is refused when the volatile journals are what overflows the
 /// HARDDRV section.
 #[cfg(feature = "std")]
@@ -5442,10 +5487,10 @@ fn snapshot_device_type_tag(device_type: DeviceType) -> u8 {
 
 #[cfg(feature = "std")]
 fn snapshot_media_hash(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut hash = 0xCBF2_9CE4_8422_2325_u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
     }
     hash
 }
@@ -5456,10 +5501,7 @@ fn snapshot_media_hash(bytes: &[u8]) -> u64 {
     reason = "each platform reads one half: unix the (device, inode) in `metadata`, \
               elsewhere a hash of `path`"
 )]
-fn snapshot_file_identity(
-    metadata: &std::fs::Metadata,
-    path: &str,
-) -> SnapResult<(u8, u64, u64)> {
+fn snapshot_file_identity(metadata: &std::fs::Metadata, path: &str) -> SnapResult<(u8, u64, u64)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -5569,22 +5611,32 @@ impl SnapshotDriveState {
     fn validate(&self) -> SnapResult<()> {
         let controller = &self.controller;
         if controller.buffer_index > controller.buffer_size {
-            return Err(snapshot_invalid("ATA snapshot buffer index exceeds buffer size"));
+            return Err(snapshot_invalid(
+                "ATA snapshot buffer index exceeds buffer size",
+            ));
         }
         if controller.control & !0x86 != 0 {
-            return Err(snapshot_invalid("ATA snapshot has reserved control bits set"));
+            return Err(snapshot_invalid(
+                "ATA snapshot has reserved control bits set",
+            ));
         }
-        if controller.head_no > 0x0f {
-            return Err(snapshot_invalid("ATA snapshot head number exceeds taskfile width"));
+        if controller.head_no > 0x0F {
+            return Err(snapshot_invalid(
+                "ATA snapshot head number exceeds taskfile width",
+            ));
         }
         if controller.multiple_sectors != 0
             && (!controller.multiple_sectors.is_power_of_two()
                 || controller.multiple_sectors as usize > MAX_MULTIPLE_SECTORS)
         {
-            return Err(snapshot_invalid("ATA snapshot has invalid multiple-sector count"));
+            return Err(snapshot_invalid(
+                "ATA snapshot has invalid multiple-sector count",
+            ));
         }
         if controller.index_pulse_count >= 10 {
-            return Err(snapshot_invalid("ATA snapshot index pulse counter is out of range"));
+            return Err(snapshot_invalid(
+                "ATA snapshot index pulse counter is out of range",
+            ));
         }
         if (controller.mdma_mode != 0 && !controller.mdma_mode.is_power_of_two())
             || (controller.udma_mode != 0 && !controller.udma_mode.is_power_of_two())
@@ -5592,17 +5644,23 @@ impl SnapshotDriveState {
             return Err(snapshot_invalid("ATA snapshot has invalid DMA mode bits"));
         }
         if self.atapi.drq_bytes < 0 || self.atapi.total_bytes_remaining < 0 {
-            return Err(snapshot_invalid("ATA snapshot has negative ATAPI transfer state"));
+            return Err(snapshot_invalid(
+                "ATA snapshot has negative ATAPI transfer state",
+            ));
         }
         let atapi_drq_len = usize::try_from(self.atapi.drq_bytes)
             .map_err(|_| snapshot_invalid("ATA snapshot ATAPI DRQ length is invalid"))?;
         if atapi_drq_len > SECTOR_SIZE * 256 {
-            return Err(snapshot_invalid("ATA snapshot ATAPI DRQ length exceeds buffer"));
+            return Err(snapshot_invalid(
+                "ATA snapshot ATAPI DRQ length exceeds buffer",
+            ));
         }
         let atapi_drq_cursor = u32::try_from(self.atapi.drq_bytes)
             .map_err(|_| snapshot_invalid("ATA snapshot ATAPI DRQ cursor is invalid"))?;
         if controller.current_command == ATA_CMD_PACKET && controller.drq_index > atapi_drq_cursor {
-            return Err(snapshot_invalid("ATA snapshot ATAPI DRQ cursor exceeds cycle"));
+            return Err(snapshot_invalid(
+                "ATA snapshot ATAPI DRQ cursor exceeds cycle",
+            ));
         }
         if self.cdrom.remaining_blocks < 0 {
             return Err(snapshot_invalid("ATA snapshot has negative CD block count"));
@@ -5612,15 +5670,14 @@ impl SnapshotDriveState {
             return Err(snapshot_invalid("ATA snapshot CD LBA cursor exceeds media"));
         }
         if !matches!(self.status_changed, -1..=1) {
-            return Err(snapshot_invalid("ATA snapshot media-change state is invalid"));
+            return Err(snapshot_invalid(
+                "ATA snapshot media-change state is invalid",
+            ));
         }
         if !matches!(self.sense.sense_key, 0 | 2 | 3 | 5 | 6) {
             return Err(snapshot_invalid("ATA snapshot has invalid SCSI sense key"));
         }
-        if !matches!(
-            self.sense.asc,
-            0 | 0x11 | 0x20 | 0x21 | 0x24 | 0x28 | 0x3a
-        ) {
+        if !matches!(self.sense.asc, 0 | 0x11 | 0x20 | 0x21 | 0x24 | 0x28 | 0x3A) {
             return Err(snapshot_invalid("ATA snapshot has invalid SCSI ASC"));
         }
         if self.sense.ascq > 1 {
@@ -5676,14 +5733,18 @@ impl AtaDrive {
     fn volatile_image(&self) -> SnapResult<&VolatileImage> {
         match &self.image {
             Some(DiskImage::Volatile(volatile)) => Ok(volatile),
-            Some(DiskImage::Flat(_)) | None => Err(snapshot_invalid("ATA volatile media disappeared")),
+            Some(DiskImage::Flat(_)) | None => {
+                Err(snapshot_invalid("ATA volatile media disappeared"))
+            }
         }
     }
 
     fn volatile_image_mut(&mut self) -> SnapResult<&mut VolatileImage> {
         match &mut self.image {
             Some(DiskImage::Volatile(volatile)) => Ok(volatile),
-            Some(DiskImage::Flat(_)) | None => Err(snapshot_invalid("ATA volatile media disappeared")),
+            Some(DiskImage::Flat(_)) | None => {
+                Err(snapshot_invalid("ATA volatile media disappeared"))
+            }
         }
     }
 
@@ -5708,14 +5769,18 @@ impl AtaDrive {
             + usize::from(u8::from(has_disk_file))
             + usize::from(u8::from(has_cdrom_file));
         if media_count > 1 {
-            return Err(snapshot_invalid("ATA drive has multiple live media backings"));
+            return Err(snapshot_invalid(
+                "ATA drive has multiple live media backings",
+            ));
         }
         if self.device_type == DeviceType::None && media_count != 0 {
             return Err(snapshot_invalid("ATA absent drive has live media"));
         }
         if media_count == 0 {
             if self.image_path.is_some() {
-                return Err(snapshot_invalid("ATA drive path exists without an open media resource"));
+                return Err(snapshot_invalid(
+                    "ATA drive path exists without an open media resource",
+                ));
             }
             return Ok(SnapshotMediaDescriptor {
                 tag: SNAPSHOT_MEDIA_NONE,
@@ -5765,7 +5830,9 @@ impl AtaDrive {
             }
             (None, Some(file)) => {
                 if self.device_type != DeviceType::Cdrom {
-                    return Err(snapshot_invalid("ATA CD-ROM file does not match drive type"));
+                    return Err(snapshot_invalid(
+                        "ATA CD-ROM file does not match drive type",
+                    ));
                 }
                 (SNAPSHOT_MEDIA_CDROM_FILE, file)
             }
@@ -5819,7 +5886,10 @@ impl AtaDrive {
             SNAPSHOT_MEDIA_VOLATILE_DISK_FILE => self.snapshot_volatile_journal_len()?,
             _ => 0,
         };
-        Ok(DriveSnapshotLen { fixed: len, journal })
+        Ok(DriveSnapshotLen {
+            fixed: len,
+            journal,
+        })
     }
 
     fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
@@ -5828,7 +5898,9 @@ impl AtaDrive {
             || usize::from(self.serial_len) > self.serial.len()
             || usize::from(self.firmware_len) > self.firmware.len()
         {
-            return Err(snapshot_invalid("ATA drive identity length exceeds fixed field"));
+            return Err(snapshot_invalid(
+                "ATA drive identity length exceeds fixed field",
+            ));
         }
         writer.write_u8(snapshot_device_type_tag(self.device_type))?;
         writer.write_u32(self.geometry.cylinders)?;
@@ -5923,7 +5995,9 @@ impl AtaDrive {
                 }
                 #[cfg(not(feature = "alloc"))]
                 {
-                    Err(snapshot_invalid("ATA owned media is unavailable without allocation"))
+                    Err(snapshot_invalid(
+                        "ATA owned media is unavailable without allocation",
+                    ))
                 }
             }
             SNAPSHOT_MEDIA_STATIC => {
@@ -5962,10 +6036,7 @@ impl AtaDrive {
         }
     }
 
-    fn restore<R: SnapRead>(
-        &mut self,
-        reader: &mut R,
-    ) -> SnapResult<()> {
+    fn restore<R: SnapRead>(&mut self, reader: &mut R) -> SnapResult<()> {
         let device_type = snapshot_device_type(reader.read_u8()?)?;
         let geometry = DriveGeometry {
             cylinders: reader.read_u32()?,
@@ -5975,19 +6046,25 @@ impl AtaDrive {
         };
         let model_len = reader.read_u8()?;
         if usize::from(model_len) > self.model.len() {
-            return Err(snapshot_invalid("ATA snapshot model length exceeds fixed field"));
+            return Err(snapshot_invalid(
+                "ATA snapshot model length exceeds fixed field",
+            ));
         }
         let mut model = [0u8; 40];
         reader.read_bytes(&mut model)?;
         let serial_len = reader.read_u8()?;
         if usize::from(serial_len) > self.serial.len() {
-            return Err(snapshot_invalid("ATA snapshot serial length exceeds fixed field"));
+            return Err(snapshot_invalid(
+                "ATA snapshot serial length exceeds fixed field",
+            ));
         }
         let mut serial = [0u8; 20];
         reader.read_bytes(&mut serial)?;
         let firmware_len = reader.read_u8()?;
         if usize::from(firmware_len) > self.firmware.len() {
-            return Err(snapshot_invalid("ATA snapshot firmware length exceeds fixed field"));
+            return Err(snapshot_invalid(
+                "ATA snapshot firmware length exceeds fixed field",
+            ));
         }
         let mut firmware = [0u8; 8];
         reader.read_bytes(&mut firmware)?;
@@ -6005,7 +6082,9 @@ impl AtaDrive {
             || firmware != self.firmware
             || device_num != self.device_num
         {
-            return Err(snapshot_invalid("ATA snapshot drive identity does not match live configuration"));
+            return Err(snapshot_invalid(
+                "ATA snapshot drive identity does not match live configuration",
+            ));
         }
 
         let state = SnapshotDriveState::read(reader)?;
@@ -6024,21 +6103,22 @@ impl AtaDrive {
         Ok(())
     }
 
-    fn restore_snapshot_media<R: SnapRead>(
-        &mut self,
-        reader: &mut R,
-    ) -> SnapResult<()> {
+    fn restore_snapshot_media<R: SnapRead>(&mut self, reader: &mut R) -> SnapResult<()> {
         let saved_tag = reader.read_u8()?;
         let live = self.snapshot_media_descriptor()?;
         if saved_tag != live.tag {
-            return Err(snapshot_invalid("ATA snapshot media backing does not match live media"));
+            return Err(snapshot_invalid(
+                "ATA snapshot media backing does not match live media",
+            ));
         }
         match saved_tag {
             SNAPSHOT_MEDIA_NONE => Ok(()),
             SNAPSHOT_MEDIA_OWNED => {
                 let saved_len = reader.read_u64()?;
                 if saved_len != live.len {
-                    return Err(snapshot_invalid("ATA snapshot owned media length does not match"));
+                    return Err(snapshot_invalid(
+                        "ATA snapshot owned media length does not match",
+                    ));
                 }
                 #[cfg(feature = "alloc")]
                 {
@@ -6050,14 +6130,18 @@ impl AtaDrive {
                 }
                 #[cfg(not(feature = "alloc"))]
                 {
-                    Err(snapshot_invalid("ATA owned media is unavailable without allocation"))
+                    Err(snapshot_invalid(
+                        "ATA owned media is unavailable without allocation",
+                    ))
                 }
             }
             SNAPSHOT_MEDIA_STATIC => {
                 let saved_len = reader.read_u64()?;
                 let saved_hash = reader.read_u64()?;
                 if saved_len != live.len || saved_hash != live.identity_a {
-                    return Err(snapshot_invalid("ATA snapshot static media does not match live media"));
+                    return Err(snapshot_invalid(
+                        "ATA snapshot static media does not match live media",
+                    ));
                 }
                 Ok(())
             }
@@ -6071,7 +6155,9 @@ impl AtaDrive {
                     || saved_a != live.identity_a
                     || saved_b != live.identity_b
                 {
-                    return Err(snapshot_invalid("ATA snapshot file media does not match live resource"));
+                    return Err(snapshot_invalid(
+                        "ATA snapshot file media does not match live resource",
+                    ));
                 }
                 Ok(())
             }
@@ -6090,7 +6176,9 @@ impl AtaDrive {
                     || saved_a != live.identity_a
                     || saved_b != live.identity_b
                 {
-                    return Err(snapshot_invalid("ATA snapshot file media does not match live resource"));
+                    return Err(snapshot_invalid(
+                        "ATA snapshot file media does not match live resource",
+                    ));
                 }
                 let saved_modified = ImageModified {
                     seconds: reader.read_u64()?,
@@ -6105,26 +6193,37 @@ impl AtaDrive {
                 }
                 let count = reader.read_u64()?;
                 if count > MAX_SNAPSHOT_WRITTEN_SECTORS {
-                    return Err(snapshot_invalid("ATA snapshot volatile journal exceeds bound"));
+                    return Err(snapshot_invalid(
+                        "ATA snapshot volatile journal exceeds bound",
+                    ));
                 }
                 // Each record is a different sector of the image, so no more
                 // of them than the image has sectors.
                 if count > self.geometry.total_sectors {
-                    return Err(snapshot_invalid("ATA snapshot volatile journal holds more sectors than its image"));
+                    return Err(snapshot_invalid(
+                        "ATA snapshot volatile journal holds more sectors than its image",
+                    ));
                 }
                 // The records go into a new journal beside the live one, which
                 // takes over only once every record is read and checked: a
                 // refused snapshot leaves the live journal as it was, and no
                 // record is held in memory past its own write.
-                let mut refill = self.volatile_image()?.begin_refill().map_err(|_| SnapError::Host)?;
+                let mut refill = self
+                    .volatile_image()?
+                    .begin_refill()
+                    .map_err(|_| SnapError::Host)?;
                 let mut previous: Option<u64> = None;
                 for _ in 0..count {
                     let lba = reader.read_u64()?;
                     if lba >= self.geometry.total_sectors {
-                        return Err(snapshot_invalid("ATA snapshot volatile journal names a sector past the image"));
+                        return Err(snapshot_invalid(
+                            "ATA snapshot volatile journal names a sector past the image",
+                        ));
                     }
                     if previous.is_some_and(|previous| previous >= lba) {
-                        return Err(snapshot_invalid("ATA snapshot volatile journal is not in sector order"));
+                        return Err(snapshot_invalid(
+                            "ATA snapshot volatile journal is not in sector order",
+                        ));
                     }
                     previous = Some(lba);
                     let mut bytes = [0u8; SECTOR_SIZE];
@@ -6141,8 +6240,9 @@ impl AtaDrive {
 
 #[cfg(feature = "std")]
 impl crate::snapshot::SnapshotSection for BxHardDriveC {
-    const TAG: u32 = crate::snapshot::SEC_HARDDRV;
     type Restored = ();
+
+    const TAG: u32 = crate::snapshot::SEC_HARDDRV;
 
     /// Exact payload length for the HARDDRV v3 section, including its version.
     fn snapshot_len(&self) -> SnapResult<u64> {
@@ -6168,10 +6268,7 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
     }
 
     /// Streams the complete HARDDRV v3 section without staging its fixed buffers or media.
-    fn save<W: SnapWrite>(
-        &self,
-        writer: &mut W,
-    ) -> SnapResult<()> {
+    fn save<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
         for channel in &self.channels {
             if usize::from(channel.drive_select) >= channel.drives.len() {
@@ -6203,10 +6300,7 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
     }
 
     /// Restores the HARDDRV v3 section while retaining the live media resources.
-    fn restore<R: SnapRead>(
-        &mut self,
-        reader: &mut R,
-    ) -> SnapResult<()> {
+    fn restore<R: SnapRead>(&mut self, reader: &mut R) -> SnapResult<()> {
         if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
             return Err(snapshot_invalid("unsupported ATA snapshot section version"));
         }
@@ -6216,10 +6310,14 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
             let irq = reader.read_u8()?;
             let drive_select = reader.read_u8()?;
             if ioaddr1 != channel.ioaddr1 || ioaddr2 != channel.ioaddr2 || irq != channel.irq {
-                return Err(snapshot_invalid("ATA snapshot channel configuration does not match"));
+                return Err(snapshot_invalid(
+                    "ATA snapshot channel configuration does not match",
+                ));
             }
             if usize::from(drive_select) >= channel.drives.len() {
-                return Err(snapshot_invalid("ATA snapshot drive selection is out of range"));
+                return Err(snapshot_invalid(
+                    "ATA snapshot drive selection is out of range",
+                ));
             }
             for drive in &mut channel.drives {
                 drive.restore(reader)?;
@@ -6241,15 +6339,13 @@ impl crate::snapshot::SnapshotSection for BxHardDriveC {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{self, File};
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, UNIX_EPOCH};
+
     use super::*;
-    use crate::snapshot::{SnapError, SnapshotReader};
-    use crate::snapshot::SnapshotSection;
-    use std::{
-        fs::{self, File},
-        io::{Read, Seek, SeekFrom, Write},
-        path::{Path, PathBuf},
-        time::{Duration, UNIX_EPOCH},
-    };
+    use crate::snapshot::{SnapError, SnapshotReader, SnapshotSection};
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -6415,10 +6511,16 @@ mod tests {
             let ptr = alloc::alloc::alloc_zeroed(layout) as *mut BxHardDriveC;
             assert!(!ptr.is_null());
             // Write channel addresses (everything else is zeroed/default).
-            core::ptr::addr_of_mut!((*ptr).channels[0])
-                .write(AtaChannel::new(ATA_PRIMARY_DATA_PORT, IoPort::new(0x3F0), 14));
-            core::ptr::addr_of_mut!((*ptr).channels[1])
-                .write(AtaChannel::new(ATA_SECONDARY_DATA_PORT, IoPort::new(0x370), 15));
+            core::ptr::addr_of_mut!((*ptr).channels[0]).write(AtaChannel::new(
+                ATA_PRIMARY_DATA_PORT,
+                IoPort::new(0x3F0),
+                14,
+            ));
+            core::ptr::addr_of_mut!((*ptr).channels[1]).write(AtaChannel::new(
+                ATA_SECONDARY_DATA_PORT,
+                IoPort::new(0x370),
+                15,
+            ));
             alloc::boxed::Box::from_raw(ptr)
         };
         assert_eq!(hd.channels[0].ioaddr1, IoPort::new(0x1F0));
@@ -6553,11 +6655,17 @@ mod tests {
                 assert_eq!(hd.channels[0].drives[0].cdrom.curr_lba, 3);
 
                 // PACKET + READ(10) at LBA 0, 1 block.
-                hd.write(IoPort::new(0x1f7), ATA_CMD_PACKET as u32, 1, &mut irq, &mut pci_ide);
+                hd.write(
+                    IoPort::new(0x1F7),
+                    ATA_CMD_PACKET as u32,
+                    1,
+                    &mut irq,
+                    &mut pci_ide,
+                );
                 let packet = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
                 for word in packet.chunks_exact(2) {
                     let value = u16::from_le_bytes([word[0], word[1]]) as u32;
-                    hd.write(IoPort::new(0x1f0), value, 2, &mut irq, &mut pci_ide);
+                    hd.write(IoPort::new(0x1F0), value, 2, &mut irq, &mut pci_ide);
                 }
 
                 // Bochs harddrv.cc start_seek: fSeekTime =
@@ -6576,16 +6684,22 @@ mod tests {
 
                 // Drain the transferred block so completion commits curr_lba.
                 for _ in 0..CDROM_SECTOR_SIZE / 2 {
-                    hd.read(IoPort::new(0x1f0), 2, &mut irq, &mut pci_ide);
+                    hd.read(IoPort::new(0x1F0), 2, &mut irq, &mut pci_ide);
                 }
                 assert_eq!(hd.channels[0].drives[0].cdrom.curr_lba, 1);
 
                 // Second read from LBA 1: distance |1 - 1 + 1| = 1 → 20000 usec.
-                hd.write(IoPort::new(0x1f7), ATA_CMD_PACKET as u32, 1, &mut irq, &mut pci_ide);
+                hd.write(
+                    IoPort::new(0x1F7),
+                    ATA_CMD_PACKET as u32,
+                    1,
+                    &mut irq,
+                    &mut pci_ide,
+                );
                 let packet = [0x28u8, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0];
                 for word in packet.chunks_exact(2) {
                     let value = u16::from_le_bytes([word[0], word[1]]) as u32;
-                    hd.write(IoPort::new(0x1f0), value, 2, &mut irq, &mut pci_ide);
+                    hd.write(IoPort::new(0x1F0), value, 2, &mut irq, &mut pci_ide);
                 }
                 assert_eq!(hd.take_pending_seek_arm(0, 0), Some(20_000));
             })
@@ -6601,16 +6715,16 @@ mod tests {
         let mut pci_ide = crate::iodev::pci_ide::BxPciIde::new();
         // 2-sector disk. Media init: curr_lsector = sector count = 2
         // (Bochs harddrv.cc: hd_size / sect_size).
-        hd.attach_disk_data(0, 0, vec![0x5au8; SECTOR_SIZE * 2], 1, 1, 2);
+        hd.attach_disk_data(0, 0, vec![0x5Au8; SECTOR_SIZE * 2], 1, 1, 2);
         assert_eq!(hd.channels[0].drives[0].curr_lsector, 2);
 
         for (port, value) in [
-            (0x1f2u16, 1u32),
-            (0x1f3, 0),
-            (0x1f4, 0),
-            (0x1f5, 0),
-            (0x1f6, 0xe0),
-            (0x1f7, u32::from(ATA_CMD_READ_SECTORS)),
+            (0x1F2u16, 1u32),
+            (0x1F3, 0),
+            (0x1F4, 0),
+            (0x1F5, 0),
+            (0x1F6, 0xE0),
+            (0x1F7, u32::from(ATA_CMD_READ_SECTORS)),
         ] {
             hd.write(IoPort::new(port), value, 1, &mut irq, &mut pci_ide);
         }
@@ -6635,16 +6749,20 @@ mod tests {
         drive.controller.interrupt_pending = false;
         drive.geometry.total_sectors = 4;
         for (port, value) in [
-            (0x1f2u16, 1u32),
-            (0x1f3, 3), // LBA 3: valid per (forged) geometry, absent in data
-            (0x1f4, 0),
-            (0x1f5, 0),
-            (0x1f6, 0xe0),
-            (0x1f7, u32::from(ATA_CMD_READ_SECTORS)),
+            (0x1F2u16, 1u32),
+            (0x1F3, 3), // LBA 3: valid per (forged) geometry, absent in data
+            (0x1F4, 0),
+            (0x1F5, 0),
+            (0x1F6, 0xE0),
+            (0x1F7, u32::from(ATA_CMD_READ_SECTORS)),
         ] {
             hd.write(IoPort::new(port), value, 1, &mut irq, &mut pci_ide);
         }
-        assert_eq!(hd.take_pending_seek_arm(0, 0), None, "failed read must clear the arm");
+        assert_eq!(
+            hd.take_pending_seek_arm(0, 0),
+            None,
+            "failed read must clear the arm"
+        );
         let drive = &hd.channels[0].drives[0];
         assert!(drive.controller.status.contains(AtaStatus::ERR));
         assert!(drive.controller.error.contains(AtaError::ABRT));
@@ -6747,33 +6865,38 @@ mod tests {
         let mut pci_ide = crate::iodev::pci_ide::BxPciIde::new();
 
         // Channel 0: master (device 0) absent, slave (device 1) present.
-        hd.attach_disk_data(0, 1, vec![0x5au8; SECTOR_SIZE * 2], 1, 1, 2);
+        hd.attach_disk_data(0, 1, vec![0x5Au8; SECTOR_SIZE * 2], 1, 1, 2);
         assert_eq!(hd.channels[0].drives[0].device_type, DeviceType::None);
         assert_eq!(hd.channels[0].drive_select, 0, "master selected by default");
 
         // Bochs harddrv.cc BX_ANY_IS_PRESENT: with a drive present on the
         // channel, the taskfile registers return the selected (absent)
         // controller's value — not 0xFF (OSes probe the slave this way).
-        hd.channels[0].drives[0].controller.sector_count = 0x5a;
+        hd.channels[0].drives[0].controller.sector_count = 0x5A;
         assert_eq!(
-            hd.read(IoPort::new(0x1f2), 1, &mut irq, &mut pci_ide),
-            0x5a,
+            hd.read(IoPort::new(0x1F2), 1, &mut irq, &mut pci_ide),
+            0x5A,
             "absent master + present slave returns the register, not 0xFF"
         );
         // Status and alternate status still read 0 for an absent selection.
-        assert_eq!(hd.read(IoPort::new(0x1f7), 1, &mut irq, &mut pci_ide), 0);
-        assert_eq!(hd.read(ATA_PRIMARY_CONTROL_PORT, 1, &mut irq, &mut pci_ide), 0);
+        assert_eq!(hd.read(IoPort::new(0x1F7), 1, &mut irq, &mut pci_ide), 0);
+        assert_eq!(
+            hd.read(ATA_PRIMARY_CONTROL_PORT, 1, &mut irq, &mut pci_ide),
+            0
+        );
 
         // CALIBRATE (0x10) to the absent selected master: Bochs reports track-0-
         // not-found (error 0x02, DRDY|ERR) and raises the IRQ — not a silent drop.
         hd.channels[0].drives[0].controller.interrupt_pending = false;
-        hd.write(IoPort::new(0x1f7), 0x10, 1, &mut irq, &mut pci_ide);
+        hd.write(IoPort::new(0x1F7), 0x10, 1, &mut irq, &mut pci_ide);
         let drive = &hd.channels[0].drives[0];
         assert_eq!(drive.controller.error.bits(), 0x02, "track 0 not found");
-        assert!(drive
-            .controller
-            .status
-            .contains(AtaStatus::DRDY | AtaStatus::ERR));
+        assert!(
+            drive
+                .controller
+                .status
+                .contains(AtaStatus::DRDY | AtaStatus::ERR)
+        );
         assert!(
             drive.controller.interrupt_pending,
             "CALIBRATE to an absent drive raises the completion IRQ"
@@ -6791,12 +6914,18 @@ mod tests {
 
                 let mut iso = vec![0u8; CDROM_SECTOR_SIZE * 2];
                 for (i, byte) in iso[..CDROM_SECTOR_SIZE].iter_mut().enumerate() {
-                    *byte = (i & 0xff) as u8;
+                    *byte = (i & 0xFF) as u8;
                 }
                 hd.attach_cdrom_data(1, 0, iso);
 
-                hd.write(IoPort::new(0x177), ATA_CMD_PACKET as u32, 1, &mut irq, &mut pci_ide);
-                let packet = [0xbe, 0, 0, 0, 0, 0, 0, 0, 1, 0xf8, 0, 0];
+                hd.write(
+                    IoPort::new(0x177),
+                    ATA_CMD_PACKET as u32,
+                    1,
+                    &mut irq,
+                    &mut pci_ide,
+                );
+                let packet = [0xBE, 0, 0, 0, 0, 0, 0, 0, 1, 0xF8, 0, 0];
                 for word in packet.chunks_exact(2) {
                     let value = u16::from_le_bytes([word[0], word[1]]) as u32;
                     hd.write(IoPort::new(0x170), value, 2, &mut irq, &mut pci_ide);
@@ -6815,14 +6944,14 @@ mod tests {
                 }
 
                 assert_eq!(out[0], 0x00);
-                assert_eq!(&out[1..11], &[0xff; 10]);
+                assert_eq!(&out[1..11], &[0xFF; 10]);
                 assert_eq!(out[11], 0x00);
                 assert_eq!(&out[12..16], &[0x00, 0x02, 0x00, 0x01]);
                 assert_eq!(
                     &out[16..32],
                     &[
-                        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
-                        0x0c, 0x0d, 0x0e, 0x0f,
+                        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+                        0x0C, 0x0D, 0x0E, 0x0F,
                     ]
                 );
             })
@@ -6838,16 +6967,16 @@ mod tests {
         let mut pci_ide = crate::iodev::pci_ide::BxPciIde::new();
         let mut media = vec![0u8; SECTOR_SIZE * 2];
         media[..SECTOR_SIZE].fill(0x31);
-        media[SECTOR_SIZE..].fill(0xa7);
+        media[SECTOR_SIZE..].fill(0xA7);
         hd.attach_disk_data(0, 0, media, 1, 1, 2);
 
         for (port, value) in [
-            (0x1f2, 2),
-            (0x1f3, 0),
-            (0x1f4, 0),
-            (0x1f5, 0),
-            (0x1f6, 0xe0),
-            (0x1f7, ATA_CMD_READ_SECTORS),
+            (0x1F2, 2),
+            (0x1F3, 0),
+            (0x1F4, 0),
+            (0x1F5, 0),
+            (0x1F6, 0xE0),
+            (0x1F7, ATA_CMD_READ_SECTORS),
         ] {
             hd.write(IoPort::new(port), value as u32, 1, &mut irq, &mut pci_ide);
         }
@@ -6855,7 +6984,10 @@ mod tests {
         // the buffered data) is presented by seek_timer at the deadline.
         assert!(hd.take_pending_seek_arm(0, 0).is_some());
         hd.seek_timer(0b00, &mut irq, &mut pci_ide);
-        assert_eq!(hd.read(IoPort::new(0x1f0), 2, &mut irq, &mut pci_ide), 0x3131);
+        assert_eq!(
+            hd.read(IoPort::new(0x1F0), 2, &mut irq, &mut pci_ide),
+            0x3131
+        );
 
         let saved_len = hd.snapshot_len().unwrap();
         let mut saved = Vec::with_capacity(saved_len as usize);
@@ -6867,7 +6999,7 @@ mod tests {
         drive.controller.current_command = 0;
         drive.controller.buffer_index = 0;
         drive.controller.buffer[..SECTOR_SIZE].fill(0);
-        drive.disk_data.as_mut().unwrap().fill(0xff);
+        drive.disk_data.as_mut().unwrap().fill(0xFF);
 
         let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
         hd.restore(&mut reader).unwrap();
@@ -6879,17 +7011,23 @@ mod tests {
         assert_eq!(drive.controller.buffer_index, 2);
         assert_eq!(drive.controller.num_sectors, 1);
         assert_eq!(&drive.controller.buffer[..2], &[0x31, 0x31]);
-        assert_eq!(drive.disk_data.as_deref().unwrap()[SECTOR_SIZE], 0xa7);
+        assert_eq!(drive.disk_data.as_deref().unwrap()[SECTOR_SIZE], 0xA7);
 
         for _ in 0..255 {
-            assert_eq!(hd.read(IoPort::new(0x1f0), 2, &mut irq, &mut pci_ide), 0x3131);
+            assert_eq!(
+                hd.read(IoPort::new(0x1F0), 2, &mut irq, &mut pci_ide),
+                0x3131
+            );
         }
         let drive = &hd.channels[0].drives[0];
         assert_eq!(drive.controller.current_command, ATA_CMD_READ_SECTORS);
         assert!(drive.controller.status.contains(AtaStatus::DRQ));
         assert_eq!(drive.controller.buffer_index, 0);
         assert_eq!(drive.controller.num_sectors, 0);
-        assert_eq!(hd.read(IoPort::new(0x1f0), 2, &mut irq, &mut pci_ide), 0xa7a7);
+        assert_eq!(
+            hd.read(IoPort::new(0x1F0), 2, &mut irq, &mut pci_ide),
+            0xA7A7
+        );
     }
 
     #[test]
@@ -6959,30 +7097,52 @@ mod tests {
     fn a_volatile_drive_keeps_its_writes_in_the_journal_and_the_image_unchanged() {
         let TestImage { path, bytes } = image_of("rusty-box-volatile", 4);
         let mut hd = BxHardDriveC::new();
-        hd.attach_volatile_disk(0, 0, path.to_str().unwrap(), &Journal::BesideImage, 1, 1, 4).unwrap();
+        hd.attach_volatile_disk(0, 0, path.to_str().unwrap(), &Journal::BesideImage, 1, 1, 4)
+            .unwrap();
         // Unix removes an open file's name at once. Windows does with POSIX
         // delete semantics (NTFS, Windows 10 1903 and later) and otherwise at
         // close, so only the check after the drive closes holds everywhere.
         if cfg!(unix) {
-            assert!(beside(&path).is_empty(), "the journal has no name once it is made");
+            assert!(
+                beside(&path).is_empty(),
+                "the journal has no name once it is made"
+            );
         }
         let drive = &mut hd.channels[0].drives[0];
         assert_eq!(drive.device_type, DeviceType::Disk);
         assert_eq!(drive.geometry.total_sectors, 4);
-        assert_eq!(drive.curr_lsector, 4, "Bochs parks the heads one past the last LBA");
+        assert_eq!(
+            drive.curr_lsector, 4,
+            "Bochs parks the heads one past the last LBA"
+        );
         address_lba28(drive, 1);
         drive.controller.buffer[..SECTOR_SIZE].fill(0xAA);
         assert!(drive.ide_write_sector());
         address_lba28(drive, 1);
         drive.controller.buffer[..SECTOR_SIZE].fill(0);
         assert!(drive.ide_read_sector());
-        assert_eq!(&drive.controller.buffer[..SECTOR_SIZE], &[0xAA; SECTOR_SIZE][..], "the journal's copy");
+        assert_eq!(
+            &drive.controller.buffer[..SECTOR_SIZE],
+            &[0xAA; SECTOR_SIZE][..],
+            "the journal's copy"
+        );
         address_lba28(drive, 2);
         assert!(drive.ide_read_sector());
-        assert_eq!(&drive.controller.buffer[..SECTOR_SIZE], &[2u8; SECTOR_SIZE][..], "the image's copy");
+        assert_eq!(
+            &drive.controller.buffer[..SECTOR_SIZE],
+            &[2u8; SECTOR_SIZE][..],
+            "the image's copy"
+        );
         drop(hd);
-        assert_eq!(fs::read(&path).unwrap(), bytes, "the image is never written");
-        assert!(beside(&path).is_empty(), "nothing of the journal outlives the drive");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            bytes,
+            "the image is never written"
+        );
+        assert!(
+            beside(&path).is_empty(),
+            "nothing of the journal outlives the drive"
+        );
         fs::remove_file(&path).unwrap();
     }
 
@@ -6990,7 +7150,9 @@ mod tests {
     fn a_volatile_drive_refuses_a_sector_past_the_image() {
         let TestImage { path, .. } = image_of("rusty-box-volatile-end", 2);
         let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(1, 1, 2));
-        drive.attach_volatile_image(path.to_str().unwrap(), &Journal::BesideImage).unwrap();
+        drive
+            .attach_volatile_image(path.to_str().unwrap(), &Journal::BesideImage)
+            .unwrap();
         address_lba28(&mut drive, 2);
         assert!(!drive.ide_write_sector());
         address_lba28(&mut drive, 2);
@@ -7038,14 +7200,20 @@ mod tests {
     fn ata_snapshot_carries_a_volatile_journal_and_refills_it() {
         let TestImage { path, .. } = image_of("rusty-box-volatile-snap", 4);
         let mut hd = BxHardDriveC::new();
-        hd.attach_volatile_disk(0, 0, path.to_str().unwrap(), &Journal::BesideImage, 1, 1, 4).unwrap();
+        hd.attach_volatile_disk(0, 0, path.to_str().unwrap(), &Journal::BesideImage, 1, 1, 4)
+            .unwrap();
         write_sector_of(&mut hd, 3, 0xBB);
         write_sector_of(&mut hd, 0, 0xAA);
         let saved_len = hd.snapshot_len().unwrap();
         let mut saved = Vec::new();
         hd.save(&mut saved).unwrap();
         assert_eq!(saved.len() as u64, saved_len);
-        assert_eq!(hd.channels[0].drives[0].snapshot_volatile_journal_len().unwrap(), 2 * 520);
+        assert_eq!(
+            hd.channels[0].drives[0]
+                .snapshot_volatile_journal_len()
+                .unwrap(),
+            2 * 520
+        );
 
         write_sector_of(&mut hd, 1, 0xCC);
         write_sector_of(&mut hd, 0, 0xDD);
@@ -7053,7 +7221,11 @@ mod tests {
         hd.restore(&mut reader).unwrap();
         reader.finish_exact().unwrap();
         assert_eq!(first_byte_of(&mut hd, 0), 0xAA, "the saved write is back");
-        assert_eq!(first_byte_of(&mut hd, 1), 1, "a write after the save is gone: the image's byte again");
+        assert_eq!(
+            first_byte_of(&mut hd, 1),
+            1,
+            "a write after the save is gone: the image's byte again"
+        );
         assert_eq!(first_byte_of(&mut hd, 3), 0xBB);
         drop(hd);
         fs::remove_file(&path).unwrap();
@@ -7063,18 +7235,26 @@ mod tests {
     fn ata_snapshot_refuses_a_volatile_journal_past_the_bound() {
         let TestImage { path, .. } = image_of("rusty-box-volatile-bound", 2);
         let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(1, 1, 2));
-        drive.attach_volatile_image(path.to_str().unwrap(), &Journal::BesideImage).unwrap();
+        drive
+            .attach_volatile_image(path.to_str().unwrap(), &Journal::BesideImage)
+            .unwrap();
         let descriptor = drive.snapshot_media_descriptor().unwrap();
         assert_eq!(descriptor.tag, SNAPSHOT_MEDIA_VOLATILE_DISK_FILE);
         let mut media = Vec::new();
         drive.save_snapshot_media(&mut media, descriptor).unwrap();
-        assert_eq!(media.len() as u64, SNAPSHOT_VOLATILE_MEDIA_FIXED, "nothing written: the fixed part alone");
+        assert_eq!(
+            media.len() as u64,
+            SNAPSHOT_VOLATILE_MEDIA_FIXED,
+            "nothing written: the fixed part alone"
+        );
         let count_at = SNAPSHOT_VOLATILE_MEDIA_FIXED as usize - 8;
         media[count_at..].copy_from_slice(&(MAX_SNAPSHOT_WRITTEN_SECTORS + 1).to_le_bytes());
         let mut reader = media.as_slice();
         assert_eq!(
             drive.restore_snapshot_media(&mut reader),
-            Err(SnapError::Invalid("ATA snapshot volatile journal exceeds bound"))
+            Err(SnapError::Invalid(
+                "ATA snapshot volatile journal exceeds bound"
+            ))
         );
         drop(drive);
         fs::remove_file(&path).unwrap();
@@ -7085,25 +7265,42 @@ mod tests {
         let TestImage { path, .. } = image_of("rusty-box-volatile-mismatch", 2);
         let TestImage { path: other, .. } = image_of("rusty-box-volatile-other", 2);
         let mut volatile = BxHardDriveC::new();
-        volatile.attach_volatile_disk(0, 0, path.to_str().unwrap(), &Journal::BesideImage, 1, 1, 2).unwrap();
+        volatile
+            .attach_volatile_disk(0, 0, path.to_str().unwrap(), &Journal::BesideImage, 1, 1, 2)
+            .unwrap();
         let mut saved = Vec::new();
         volatile.save(&mut saved).unwrap();
 
         let mut flat = BxHardDriveC::new();
-        flat.attach_disk(0, 0, path.to_str().unwrap(), 1, 1, 2).unwrap();
+        flat.attach_disk(0, 0, path.to_str().unwrap(), 1, 1, 2)
+            .unwrap();
         let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
         assert_eq!(
             flat.restore(&mut reader),
-            Err(SnapError::Invalid("ATA snapshot media backing does not match live media"))
+            Err(SnapError::Invalid(
+                "ATA snapshot media backing does not match live media"
+            ))
         );
 
         // The same size and geometry, so the drive identity passes; a different file.
         let mut elsewhere = BxHardDriveC::new();
-        elsewhere.attach_volatile_disk(0, 0, other.to_str().unwrap(), &Journal::BesideImage, 1, 1, 2).unwrap();
+        elsewhere
+            .attach_volatile_disk(
+                0,
+                0,
+                other.to_str().unwrap(),
+                &Journal::BesideImage,
+                1,
+                1,
+                2,
+            )
+            .unwrap();
         let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
         assert_eq!(
             elsewhere.restore(&mut reader),
-            Err(SnapError::Invalid("ATA snapshot file media does not match live resource"))
+            Err(SnapError::Invalid(
+                "ATA snapshot file media does not match live resource"
+            ))
         );
         drop(volatile);
         drop(flat);
@@ -7133,18 +7330,26 @@ mod tests {
         let mut saved = Vec::new();
         {
             let mut hd = BxHardDriveC::new();
-            hd.attach_volatile_disk(0, 0, image, &Journal::BesideImage, 1, 1, 2).unwrap();
+            hd.attach_volatile_disk(0, 0, image, &Journal::BesideImage, 1, 1, 2)
+                .unwrap();
             hd.save(&mut saved).unwrap();
         }
         let mut same = BxHardDriveC::new();
-        same.attach_volatile_disk(0, 0, image, &Journal::BesideImage, 1, 1, 2).unwrap();
+        same.attach_volatile_disk(0, 0, image, &Journal::BesideImage, 1, 1, 2)
+            .unwrap();
         let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
-        assert_eq!(same.restore(&mut reader), Ok(()), "the image as it was saved over");
+        assert_eq!(
+            same.restore(&mut reader),
+            Ok(()),
+            "the image as it was saved over"
+        );
         drop(same);
 
         touch(&path, 1_700_000_000);
         let mut changed = BxHardDriveC::new();
-        changed.attach_volatile_disk(0, 0, image, &Journal::BesideImage, 1, 1, 2).unwrap();
+        changed
+            .attach_volatile_disk(0, 0, image, &Journal::BesideImage, 1, 1, 2)
+            .unwrap();
         let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
         assert_eq!(
             changed.restore(&mut reader),
@@ -7166,7 +7371,11 @@ mod tests {
         address_lba28(&mut drive, 2);
         drive.controller.buffer[..SECTOR_SIZE].fill(0xAA);
         assert!(!drive.ide_write_sector(), "one sector past the disk");
-        assert_eq!(fs::read(&path).unwrap(), bytes, "the image neither grows nor changes");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            bytes,
+            "the image neither grows nor changes"
+        );
 
         address_lba28(&mut drive, 1);
         drive.controller.buffer_size = 2 * SECTOR_SIZE;
@@ -7177,7 +7386,10 @@ mod tests {
         drop(drive);
         let after = fs::read(&path).unwrap();
         assert_eq!(after.len(), 2 * SECTOR_SIZE, "the image does not grow");
-        assert_eq!(after[SECTOR_SIZE], 0xAA, "the sector inside the disk is written, as Bochs writes it");
+        assert_eq!(
+            after[SECTOR_SIZE], 0xAA,
+            "the sector inside the disk is written, as Bochs writes it"
+        );
         fs::remove_file(&path).unwrap();
     }
 
@@ -7187,7 +7399,9 @@ mod tests {
     fn ata_snapshot_refuses_a_volatile_journal_larger_than_its_image() {
         let TestImage { path, .. } = image_of("rusty-box-volatile-count", 2);
         let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(1, 1, 2));
-        drive.attach_volatile_image(path.to_str().unwrap(), &Journal::BesideImage).unwrap();
+        drive
+            .attach_volatile_image(path.to_str().unwrap(), &Journal::BesideImage)
+            .unwrap();
         let descriptor = drive.snapshot_media_descriptor().unwrap();
         let mut media = Vec::new();
         drive.save_snapshot_media(&mut media, descriptor).unwrap();
@@ -7196,7 +7410,9 @@ mod tests {
         let mut reader = media.as_slice();
         assert_eq!(
             drive.restore_snapshot_media(&mut reader),
-            Err(SnapError::Invalid("ATA snapshot volatile journal holds more sectors than its image"))
+            Err(SnapError::Invalid(
+                "ATA snapshot volatile journal holds more sectors than its image"
+            ))
         );
         drop(drive);
         fs::remove_file(&path).unwrap();
@@ -7207,7 +7423,9 @@ mod tests {
         assert_eq!(harddrv_section_len(100, 520), Ok(620));
         assert_eq!(
             harddrv_section_len(bounds::MAX_SNAPSHOT_SECTION_LEN - 100, 520),
-            Err(SnapError::Invalid("ATA volatile journals exceed the snapshot section bound"))
+            Err(SnapError::Invalid(
+                "ATA volatile journals exceed the snapshot section bound"
+            ))
         );
         assert_eq!(
             harddrv_section_len(bounds::MAX_SNAPSHOT_SECTION_LEN + 1, 0),
@@ -7223,18 +7441,33 @@ mod tests {
         let image = path.to_str().unwrap();
         let mut first = BxHardDriveC::new();
         let disk = VolatileDisk::open(image, &Journal::BesideImage).unwrap();
-        first.attach_open_volatile_disk(0, 0, disk, 1, 1, 4).unwrap();
+        first
+            .attach_open_volatile_disk(0, 0, disk, 1, 1, 4)
+            .unwrap();
         write_sector_of(&mut first, 2, 0xAA);
-        let disk = first.take_volatile_disk(0, 0).expect("the drive gives its disk back");
-        assert!(first.take_volatile_disk(0, 0).is_none(), "and has none left");
+        let disk = first
+            .take_volatile_disk(0, 0)
+            .expect("the drive gives its disk back");
+        assert!(
+            first.take_volatile_disk(0, 0).is_none(),
+            "and has none left"
+        );
 
         let mut next = BxHardDriveC::new();
         next.attach_open_volatile_disk(0, 0, disk, 1, 1, 4).unwrap();
-        assert_eq!(first_byte_of(&mut next, 2), 0xAA, "the guest's write outlives the drive that took it");
+        assert_eq!(
+            first_byte_of(&mut next, 2),
+            0xAA,
+            "the guest's write outlives the drive that took it"
+        );
         assert_eq!(first_byte_of(&mut next, 3), 3);
         drop(first);
         drop(next);
-        assert_eq!(fs::read(&path).unwrap()[2 * SECTOR_SIZE], 2, "the image is never written");
+        assert_eq!(
+            fs::read(&path).unwrap()[2 * SECTOR_SIZE],
+            2,
+            "the image is never written"
+        );
         fs::remove_file(&path).unwrap();
     }
 }

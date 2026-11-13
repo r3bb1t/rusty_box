@@ -1,16 +1,15 @@
-use std::{
-    env,
-    ffi::OsStr,
-    fs::{self, File},
-    io::{self, Write},
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    thread,
-    time::Duration,
-};
-
-use adb_client::{server::ADBServer, server_device::ADBServerDevice, ADBDeviceExt};
+use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+use std::{env, thread};
+
+use adb_client::ADBDeviceExt;
+use adb_client::server::ADBServer;
+use adb_client::server_device::ADBServerDevice;
 
 pub mod ci;
 pub mod hot_loop;
@@ -255,7 +254,9 @@ where
     match args[0].as_str() {
         "android" => parse_android_args(&args[1..]).map(XtaskCommand::Android),
         "ci" => ci::parse_ci_args(&args[1..]).map(XtaskCommand::Ci),
-        "perf-baseline" => Ok(XtaskCommand::PerfBaseline(ci::PerfBaselineCommand::default())),
+        "perf-baseline" => Ok(XtaskCommand::PerfBaseline(
+            ci::PerfBaselineCommand::default(),
+        )),
         "hot-loop-baseline" => Ok(XtaskCommand::HotLoopBaseline),
         "check-shell-command" => Ok(XtaskCommand::CheckShellCommand),
         "nested-kvm" => nested_kvm::parse_nested_kvm_args(&args[1..]).map(XtaskCommand::NestedKvm),
@@ -373,7 +374,7 @@ fn parse_android_args(args: &[String]) -> Result<AndroidCommand, String> {
             return Err(format!(
                 "unknown android action {other:?}\n{}",
                 android_usage()
-            ))
+            ));
         }
     };
 
@@ -405,7 +406,7 @@ fn parse_android_args(args: &[String]) -> Result<AndroidCommand, String> {
                 return Err(format!(
                     "unexpected android argument {other:?}\n{}",
                     android_usage()
-                ))
+                ));
             }
         }
         index += 1;
@@ -905,12 +906,12 @@ fn merge_apk(parts: &ApkParts<'_>) -> Result<(), String> {
             .map_err(|error| copy_failed(parts.linked, error))?;
     }
 
-    let dex = fs::read(parts.dex).map_err(|error| format!("read {}: {error}", parts.dex.display()))?;
+    let dex =
+        fs::read(parts.dex).map_err(|error| format!("read {}: {error}", parts.dex.display()))?;
     writer
         .start_file(
             "classes.dex",
-            zip::write::FileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated),
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated),
         )
         .map_err(|error| format!("add classes.dex to the APK: {error}"))?;
     writer
@@ -1119,7 +1120,10 @@ fn program_stdout(
         .output()
         .map_err(|error| format!("{label}: failed to spawn {:?}: {error}", program))?;
     if !output.status.success() {
-        return Err(format!("{label}: command exited with status {}", output.status));
+        return Err(format!(
+            "{label}: command exited with status {}",
+            output.status
+        ));
     }
     String::from_utf8(output.stdout)
         .map_err(|error| format!("{label}: the output is not UTF-8: {error}"))
@@ -1263,8 +1267,9 @@ fn android_usage() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     #[test]
     fn command_line_tools_urls_are_platform_specific() {
@@ -1437,7 +1442,10 @@ mod tests {
     #[test]
     fn d8_and_apksigner_are_batch_files_on_windows() {
         assert_eq!(BuildTool::D8.file_name(HostOs::Windows), "d8.bat");
-        assert_eq!(BuildTool::Apksigner.file_name(HostOs::Windows), "apksigner.bat");
+        assert_eq!(
+            BuildTool::Apksigner.file_name(HostOs::Windows),
+            "apksigner.bat"
+        );
         assert_eq!(BuildTool::Aapt2.file_name(HostOs::Windows), "aapt2.exe");
         assert_eq!(BuildTool::D8.file_name(HostOs::Linux), "d8");
     }

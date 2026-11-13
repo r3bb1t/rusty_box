@@ -20,16 +20,15 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_fma.cc`.
 
-use super::avx::{packed_fma_flags, vex_fma_operands_u32, vex_fma_operands_u64, VexFmaForm,
-    VexPackedFmaOp};
+use super::avx::{
+    VexFmaForm, VexPackedFmaOp, packed_fma_flags, vex_fma_operands_u32, vex_fma_operands_u64,
+};
+use super::cpu::BxCpuC;
+use super::decoder::Instruction;
 use super::softfloat3e::f32_mul_add::f32_mul_add;
 use super::softfloat3e::f64_mul_add::f64_mul_add;
 use super::softfloat3e::softfloat::softfloat_get_exception_flags;
-use super::{
-    cpu::BxCpuC,
-    decoder::Instruction,
-    xmm::BxPackedZmmRegister,
-};
+use super::xmm::BxPackedZmmRegister;
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
@@ -177,7 +176,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 continue;
             }
             let (a, b, c) = vex_fma_operands_u32(form, v.zmm32u(i), h.zmm32u(i), w.zmm32u(i));
-            result.set_zmm32u(i, f32_mul_add(a, b, c, packed_fma_flags(op, i), &mut status));
+            result.set_zmm32u(
+                i,
+                f32_mul_add(a, b, c, packed_fma_flags(op, i), &mut status),
+            );
         }
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
@@ -207,7 +209,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 continue;
             }
             let (a, b, c) = vex_fma_operands_u64(form, v.zmm64u(i), h.zmm64u(i), w.zmm64u(i));
-            result.set_zmm64u(i, f64_mul_add(a, b, c, packed_fma_flags(op, i), &mut status));
+            result.set_zmm64u(
+                i,
+                f64_mul_add(a, b, c, packed_fma_flags(op, i), &mut status),
+            );
         }
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         let zmask = instr.is_zero_masking() != 0;
@@ -448,9 +453,10 @@ mod tests {
     //! multiply-add. Only comparing the two mnemonics against each other, on
     //! the same inputs, pins the parity down.
 
+    use rusty_box_decoder::opcode::Opcode;
+
     use crate::cpu::decoder::{BxSegregs, Instruction};
     use crate::cpu::xmm::MXCSR_RESET;
-    use rusty_box_decoder::opcode::Opcode;
 
     /// Register-form EVEX.128, no masking. The 213 form computes
     /// H * V + W, with dst doubling as V.
@@ -471,9 +477,7 @@ mod tests {
 
     /// H=2.0, V=3.0, W=1.0 in every element, so H*V = 6.0 and the two
     /// possible results are 6+1=7 and 6-1=5 — far apart and exact.
-    fn seed(
-        cpu: &mut crate::cpu::cpu::BxCpuC<()>,
-    ) {
+    fn seed(cpu: &mut crate::cpu::cpu::BxCpuC<()>) {
         cpu.mxcsr.mxcsr = MXCSR_RESET;
         for n in 0..4 {
             cpu.vmm[0].set_zmm32u(n, 3.0f32.to_bits()); // V
@@ -493,7 +497,11 @@ mod tests {
         seed(&mut cpu);
         cpu.execute_instruction(&evex_reg(Opcode::EvexVfmaddsub213psVpsHpsWps))
             .unwrap();
-        assert_eq!(cpu.vmm[0].zmm32u(0), sub, "FMADDSUB element 0 must subtract");
+        assert_eq!(
+            cpu.vmm[0].zmm32u(0),
+            sub,
+            "FMADDSUB element 0 must subtract"
+        );
         assert_eq!(cpu.vmm[0].zmm32u(1), add, "FMADDSUB element 1 must add");
         assert_eq!(cpu.vmm[0].zmm32u(2), sub);
         assert_eq!(cpu.vmm[0].zmm32u(3), add);
@@ -505,7 +513,11 @@ mod tests {
         cpu.execute_instruction(&evex_reg(Opcode::EvexVfmsubadd213psVpsHpsWps))
             .unwrap();
         assert_eq!(cpu.vmm[0].zmm32u(0), add, "FMSUBADD element 0 must add");
-        assert_eq!(cpu.vmm[0].zmm32u(1), sub, "FMSUBADD element 1 must subtract");
+        assert_eq!(
+            cpu.vmm[0].zmm32u(1),
+            sub,
+            "FMSUBADD element 1 must subtract"
+        );
         assert_eq!(cpu.vmm[0].zmm32u(2), add);
         assert_eq!(cpu.vmm[0].zmm32u(3), sub);
     }

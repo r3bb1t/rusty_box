@@ -298,7 +298,11 @@ fn a_selector_with_no_entry_reads_size_zero() {
     assert_eq!(d.read_width(CONFIG, AccessWidth::Byte), 0x11, "select");
     assert_eq!(d.read_width(CONFIG + 1, AccessWidth::Byte), 0x04, "subsel");
     for off in 2..136 {
-        assert_eq!(d.read_width(CONFIG + off, AccessWidth::Byte), 0, "byte {off}");
+        assert_eq!(
+            d.read_width(CONFIG + off, AccessWidth::Byte),
+            0,
+            "byte {off}"
+        );
     }
 }
 
@@ -310,7 +314,11 @@ fn select_and_subsel_may_be_written_in_either_order() {
     let mut d = device(InputKind::Keyboard);
     entry(&mut d, 0x01, 0);
     d.write_width(CONFIG + 1, AccessWidth::Byte, 0x01);
-    assert_eq!(d.read_width(CONFIG + 2, AccessWidth::Byte), 0, "(0x01, 0x01): none");
+    assert_eq!(
+        d.read_width(CONFIG + 2, AccessWidth::Byte),
+        0,
+        "(0x01, 0x01): none"
+    );
     d.write_width(CONFIG, AccessWidth::Byte, 0x11);
     assert_eq!(
         d.read_width(CONFIG + 2, AccessWidth::Byte),

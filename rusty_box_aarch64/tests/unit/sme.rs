@@ -12,8 +12,8 @@ use std::vec::Vec;
 
 use super::super::features::{Feature, Implementation, VecLen};
 use super::super::step::{
-    exec, processor, Taken, CPACR_ALL, DATA, FP_TRAP, ILLEGAL_WHEN_STREAMING, SME_DISABLED,
-    UNDEFINED,
+    CPACR_ALL, DATA, FP_TRAP, ILLEGAL_WHEN_STREAMING, SME_DISABLED, Taken, UNDEFINED, exec,
+    processor,
 };
 use super::super::sysreg::SMCR_EZT0;
 use super::super::{Cpu, El, NoEl2, Pstate};

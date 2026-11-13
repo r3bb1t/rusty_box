@@ -4,7 +4,7 @@
 //! module then keeps its image identity, which finds its binary.
 
 use rusty_box_symbols::identity::{ModuleIdentity, PeImageId};
-use rusty_box_symbols::pe::{read_headers, read_pe_identity, HeaderError, ImageRead};
+use rusty_box_symbols::pe::{HeaderError, ImageRead, read_headers, read_pe_identity};
 use rusty_box_symbols::units::Rva;
 
 use super::guest::{GuestMemory, GuestRead, Root};
@@ -41,10 +41,11 @@ pub(crate) fn read_module_identity<G: GuestMemory>(
     let Some(name) = name else {
         return GuestIdentity::Unnamed;
     };
-    let mut read = |rva: Rva, buf: &mut [u8]| match mem.read_linear(root, base.wrapping_add(rva.0), buf) {
-        GuestRead::Read => ImageRead::Read,
-        GuestRead::Unreadable => ImageRead::Unreadable,
-    };
+    let mut read =
+        |rva: Rva, buf: &mut [u8]| match mem.read_linear(root, base.wrapping_add(rva.0), buf) {
+            GuestRead::Read => ImageRead::Read,
+            GuestRead::Unreadable => ImageRead::Unreadable,
+        };
     match read_pe_identity(&mut read) {
         Ok(identity) => GuestIdentity::Known(identity.module_identity(name.to_owned())),
         Err(error) => GuestIdentity::HeadersUnreadable(error),
@@ -65,10 +66,11 @@ pub(crate) enum BuildAt {
 
 /// The build of the image at `base` under `root`, from its headers alone.
 pub(crate) fn read_build_at<G: GuestMemory>(mem: &mut G, root: Root, base: u64) -> BuildAt {
-    let mut read = |rva: Rva, buf: &mut [u8]| match mem.read_linear(root, base.wrapping_add(rva.0), buf) {
-        GuestRead::Read => ImageRead::Read,
-        GuestRead::Unreadable => ImageRead::Unreadable,
-    };
+    let mut read =
+        |rva: Rva, buf: &mut [u8]| match mem.read_linear(root, base.wrapping_add(rva.0), buf) {
+            GuestRead::Read => ImageRead::Read,
+            GuestRead::Unreadable => ImageRead::Unreadable,
+        };
     match read_headers(&mut read) {
         Ok(headers) => BuildAt::Image(headers.image_id()),
         // Nothing read, or the host could not hold what did: nothing told.
@@ -86,18 +88,25 @@ pub(crate) fn read_build_at<G: GuestMemory>(mem: &mut G, root: Root, base: u64) 
 
 #[cfg(test)]
 mod tests {
+    use rusty_box_symbols::identity::{Guid, PdbId, PeImageId};
+
     use super::*;
     use crate::debugger::fake_windows::{
-        FakeWindows, FakeWindowsSpec, ACTIVE_PROCESS_HEAD_RVA, DEBUG_DIRECTORY_RVA, KERNEL_BASE, LIVE_CR3,
+        ACTIVE_PROCESS_HEAD_RVA, DEBUG_DIRECTORY_RVA, FakeWindows, FakeWindowsSpec, KERNEL_BASE,
+        LIVE_CR3,
     };
-    use rusty_box_symbols::identity::{Guid, PdbId, PeImageId};
 
     #[test]
     fn a_kernel_image_names_its_build_and_its_pdb() {
         let spec = FakeWindowsSpec::typical();
         let pdb = spec.kernel.pdb.clone();
         let mut fake = FakeWindows::build(spec);
-        let read = read_module_identity(&mut fake.guest, Root::Live, KERNEL_BASE, Some("ntoskrnl.exe"));
+        let read = read_module_identity(
+            &mut fake.guest,
+            Root::Live,
+            KERNEL_BASE,
+            Some("ntoskrnl.exe"),
+        );
         assert_eq!(
             read,
             GuestIdentity::Known(ModuleIdentity::Pe {
@@ -120,8 +129,14 @@ mod tests {
     #[test]
     fn a_paged_out_codeview_record_leaves_the_image_identity() {
         let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
-        fake.guest.page_out(LIVE_CR3, KERNEL_BASE + DEBUG_DIRECTORY_RVA);
-        let read = read_module_identity(&mut fake.guest, Root::Live, KERNEL_BASE, Some("ntoskrnl.exe"));
+        fake.guest
+            .page_out(LIVE_CR3, KERNEL_BASE + DEBUG_DIRECTORY_RVA);
+        let read = read_module_identity(
+            &mut fake.guest,
+            Root::Live,
+            KERNEL_BASE,
+            Some("ntoskrnl.exe"),
+        );
         let Some(ModuleIdentity::Pe { image, pdb, .. }) = read.known() else {
             panic!("the headers read, so the image is known: {read:?}");
         };
@@ -134,25 +149,47 @@ mod tests {
     #[test]
     fn an_images_build_reads_from_its_headers_alone() {
         let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
-        fake.guest.page_out(LIVE_CR3, KERNEL_BASE + DEBUG_DIRECTORY_RVA);
-        let build = PeImageId { time_date_stamp: 0x5E1D_2A4B, size_of_image: 0x10_0000 };
-        assert_eq!(read_build_at(&mut fake.guest, Root::Live, KERNEL_BASE), BuildAt::Image(build));
+        fake.guest
+            .page_out(LIVE_CR3, KERNEL_BASE + DEBUG_DIRECTORY_RVA);
+        let build = PeImageId {
+            time_date_stamp: 0x5E1D_2A4B,
+            size_of_image: 0x10_0000,
+        };
         assert_eq!(
-            read_build_at(&mut fake.guest, Root::Live, KERNEL_BASE + ACTIVE_PROCESS_HEAD_RVA),
+            read_build_at(&mut fake.guest, Root::Live, KERNEL_BASE),
+            BuildAt::Image(build)
+        );
+        assert_eq!(
+            read_build_at(
+                &mut fake.guest,
+                Root::Live,
+                KERNEL_BASE + ACTIVE_PROCESS_HEAD_RVA
+            ),
             BuildAt::NoImage,
             "the kernel's data page: it reads, and holds no headers"
         );
         fake.guest.page_out(LIVE_CR3, KERNEL_BASE);
-        assert_eq!(read_build_at(&mut fake.guest, Root::Live, KERNEL_BASE), BuildAt::Unreadable);
+        assert_eq!(
+            read_build_at(&mut fake.guest, Root::Live, KERNEL_BASE),
+            BuildAt::Unreadable
+        );
     }
 
     #[test]
     fn a_module_whose_headers_do_not_read_has_no_identity() {
         let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
         fake.guest.page_out(LIVE_CR3, KERNEL_BASE);
-        let read = read_module_identity(&mut fake.guest, Root::Live, KERNEL_BASE, Some("ntoskrnl.exe"));
+        let read = read_module_identity(
+            &mut fake.guest,
+            Root::Live,
+            KERNEL_BASE,
+            Some("ntoskrnl.exe"),
+        );
         assert!(
-            matches!(read, GuestIdentity::HeadersUnreadable(HeaderError::Unreadable { .. })),
+            matches!(
+                read,
+                GuestIdentity::HeadersUnreadable(HeaderError::Unreadable { .. })
+            ),
             "{read:?}"
         );
         assert_eq!(

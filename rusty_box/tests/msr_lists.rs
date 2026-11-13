@@ -53,7 +53,10 @@ fn emulator() -> Box<Emulator> {
 }
 
 fn write_table(emu: &mut Emulator, at: u64, entries: &[u64]) {
-    let bytes: Vec<u8> = entries.iter().flat_map(|entry| entry.to_le_bytes()).collect();
+    let bytes: Vec<u8> = entries
+        .iter()
+        .flat_map(|entry| entry.to_le_bytes())
+        .collect();
     emu.mem_write(at, &bytes).expect("table");
 }
 
@@ -110,13 +113,25 @@ fn the_lists_write_and_read_the_msrs_rcx_names() {
 
         assert_eq!(run(&mut emu, &WRMSRLIST, VALUES_IN, 0b101), Ended::Retired);
         assert_eq!(emu.reg_read(X86Reg::Rcx), 0, "every entry done");
-        assert_eq!(emu.cpu().read_msr_for_api(SYSENTER_CS as u32).expect("msr"), 0x10);
-        assert_eq!(emu.cpu().read_msr_for_api(SYSENTER_ESP as u32).expect("msr"), ESP);
+        assert_eq!(
+            emu.cpu().read_msr_for_api(SYSENTER_CS as u32).expect("msr"),
+            0x10
+        );
+        assert_eq!(
+            emu.cpu()
+                .read_msr_for_api(SYSENTER_ESP as u32)
+                .expect("msr"),
+            ESP
+        );
 
         assert_eq!(run(&mut emu, &RDMSRLIST, VALUES_OUT, 0b101), Ended::Retired);
         assert_eq!(emu.reg_read(X86Reg::Rcx), 0);
         assert_eq!(read_qword(&mut emu, VALUES_OUT), 0x10);
-        assert_eq!(read_qword(&mut emu, VALUES_OUT + 8), UNTOUCHED, "slot 1 not named");
+        assert_eq!(
+            read_qword(&mut emu, VALUES_OUT + 8),
+            UNTOUCHED,
+            "slot 1 not named"
+        );
         assert_eq!(read_qword(&mut emu, VALUES_OUT + 16), ESP);
     });
 }
@@ -127,11 +142,21 @@ fn the_lists_write_and_read_the_msrs_rcx_names() {
 fn a_reserved_index_bit_faults_at_its_own_entry() {
     on_big_stack(|| {
         let mut emu = emulator();
-        write_table(&mut emu, INDEXES, &[SYSENTER_CS, 0x1_0000_0000 | SYSENTER_ESP]);
+        write_table(
+            &mut emu,
+            INDEXES,
+            &[SYSENTER_CS, 0x1_0000_0000 | SYSENTER_ESP],
+        );
         write_table(&mut emu, VALUES_IN, &[0x23, 0]);
 
-        assert_eq!(run(&mut emu, &WRMSRLIST, VALUES_IN, 0b11), Ended::GeneralProtection);
-        assert_eq!(emu.cpu().read_msr_for_api(SYSENTER_CS as u32).expect("msr"), 0x23);
+        assert_eq!(
+            run(&mut emu, &WRMSRLIST, VALUES_IN, 0b11),
+            Ended::GeneralProtection
+        );
+        assert_eq!(
+            emu.cpu().read_msr_for_api(SYSENTER_CS as u32).expect("msr"),
+            0x23
+        );
         assert_eq!(emu.reg_read(X86Reg::Rcx), 0b10, "entry 1 is still owed");
     });
 }
@@ -142,7 +167,10 @@ fn a_misaligned_table_faults_before_any_entry() {
     on_big_stack(|| {
         let mut emu = emulator();
         write_table(&mut emu, INDEXES, &[SYSENTER_CS]);
-        assert_eq!(run(&mut emu, &RDMSRLIST, VALUES_OUT + 4, 0b1), Ended::GeneralProtection);
+        assert_eq!(
+            run(&mut emu, &RDMSRLIST, VALUES_OUT + 4, 0b1),
+            Ended::GeneralProtection
+        );
         assert_eq!(emu.reg_read(X86Reg::Rcx), 0b1, "nothing was done");
     });
 }

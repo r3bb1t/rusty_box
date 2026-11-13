@@ -35,8 +35,8 @@
 //! other than a call (`SVC`, `HVC`) being a cycle but no instruction
 //! executed.
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::el2::{
     MDCR_HCCD, MDCR_HLP, MDCR_HPMD, MDCR_HPME, MDCR_HPMFZO, MDCR_HPMN, MDCR_TPM, MDCR_TPMCR,
@@ -44,7 +44,7 @@ use super::el2::{
 use super::exception::Route;
 use super::features::{Feature, Features};
 use super::fgt::{FgtReg, FineGrainedTrap};
-use super::sysreg::{trap_to_el1, trap_to_el2, Direction, SysRegError, SysRegKey, WriteEffect};
+use super::sysreg::{Direction, SysRegError, SysRegKey, WriteEffect, trap_to_el1, trap_to_el2};
 use super::{Cpu, El, Levels};
 
 /// The most event counters a processor here has: the Cortex-A57's six
@@ -277,12 +277,10 @@ pub(crate) enum Cycle {
 pub(crate) struct EventSet(u32);
 
 impl EventSet {
-    /// No event.
-    pub(crate) const NONE: Self = Self(0);
-
     /// The events a data access counts as ([`L1dAccess`]).
     const ACCESSES: Self = Self::of(&[PmuEvent::L1dCache, PmuEvent::L1dCacheRd]);
-
+    /// No event.
+    pub(crate) const NONE: Self = Self(0);
     /// The events an instruction's kind counts as ([`RetiredKind`]).
     const RETIRED_KINDS: Self = Self::of(&[
         PmuEvent::SveInstRetired,
@@ -448,21 +446,6 @@ const COUNTED: [PmuEvent; 10] = [
 ];
 
 impl PmuShape {
-    /// The Cortex-A57's (DDI 0488H chapter 11): six event counters,
-    /// `PMCR_EL0.IMP` 0x41 (Arm) and `IDCODE` 0x01 (Cortex-A57), `X`
-    /// implemented, [`COUNTED`] — `PMCEID0_EL0` 0x5002_0F19, the TRM's
-    /// 0x7FFF_0F3F less the events the model cannot count, and
-    /// `PMCEID1_EL0` 0 — and the TRM's choices for the counters out of
-    /// reach.
-    pub(crate) const CORTEX_A57: Self = Self {
-        counters: EventCounters::new(6),
-        identification: 0x4101 << 16,
-        export: EventExport::Implemented,
-        events: EventSet::of(&COUNTED),
-        beyond_reach: CounterBeyondReach::Res0,
-        mtpmu: MtpmuReport::Unreported,
-    };
-
     /// The Armv9.2 model's, the board's own: six event counters, as Arm's
     /// Armv9 cores have; `PMCR_EL0.IMP` reading as zero, as FEAT_PMUv3p7
     /// makes it, and `IDCODE` with it; no event export; [`COUNTED`] and the
@@ -499,6 +482,20 @@ impl PmuShape {
         ]),
         beyond_reach: CounterBeyondReach::Undefined,
         mtpmu: MtpmuReport::Res0,
+    };
+    /// The Cortex-A57's (DDI 0488H chapter 11): six event counters,
+    /// `PMCR_EL0.IMP` 0x41 (Arm) and `IDCODE` 0x01 (Cortex-A57), `X`
+    /// implemented, [`COUNTED`] — `PMCEID0_EL0` 0x5002_0F19, the TRM's
+    /// 0x7FFF_0F3F less the events the model cannot count, and
+    /// `PMCEID1_EL0` 0 — and the TRM's choices for the counters out of
+    /// reach.
+    pub(crate) const CORTEX_A57: Self = Self {
+        counters: EventCounters::new(6),
+        identification: 0x4101 << 16,
+        export: EventExport::Implemented,
+        events: EventSet::of(&COUNTED),
+        beyond_reach: CounterBeyondReach::Res0,
+        mtpmu: MtpmuReport::Unreported,
     };
 }
 
@@ -886,11 +883,7 @@ impl Counting<'_> {
         } else {
             self.ctx.mdcr & MDCR_HLP
         };
-        if long != 0 {
-            64
-        } else {
-            32
-        }
+        if long != 0 { 64 } else { 32 }
     }
 
     /// Add `amount` to event counter `n`, no more than takes it to its
@@ -1228,7 +1221,7 @@ impl PmuReg {
             (Self::Userenr, Read | Write) => 57,
             (Self::Ceid(_), Read) => 58,
             (Self::Pmcr, Read) | (Self::Swinc, Read) | (Self::Mmir | Self::Ceid(_), Write) => {
-                return None
+                return None;
             }
         };
         let reg = match dir {

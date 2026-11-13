@@ -3,9 +3,9 @@ pub(in crate::cpu) mod primitives;
 pub(in crate::cpu) mod softfloat;
 pub(in crate::cpu) mod softfloat_compare;
 pub(in crate::cpu) mod softfloat_types;
+pub(in crate::cpu) mod specialize;
 pub(in crate::cpu) mod uint64_convert;
 pub(in crate::cpu) mod uint_convert;
-pub(in crate::cpu) mod specialize;
 
 // Phase 1: ExtFloat80 operations (matching Bochs softfloat3e/ file layout)
 pub(in crate::cpu) mod extf80_addsub;

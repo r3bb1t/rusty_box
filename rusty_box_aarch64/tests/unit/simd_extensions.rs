@@ -12,7 +12,7 @@
 use std::vec::Vec;
 
 use super::super::features::{Feature, Features, Implementation};
-use super::super::step::{exec, processor, CPACR_ALL, FP_TRAP, ILLEGAL_WHEN_STREAMING, UNDEFINED};
+use super::super::step::{CPACR_ALL, FP_TRAP, ILLEGAL_WHEN_STREAMING, UNDEFINED, exec, processor};
 
 /// `sqrdmlah v0.<T>, v1.<T>, v2.<T>` (`sqrdmlsh` with `sub`) at `size`.
 const fn rdm_vector(size: u32, sub: bool) -> u32 {
@@ -195,12 +195,7 @@ fn the_64_bit_pmull_needs_feat_pmull() {
     const PMULL_8H: u32 = 0x0E22_E020; // pmull v0.8h, v1.8b, v2.8b
     const MRS_ID_AA64ISAR0: u32 = 0xD538_0600; // mrs x0, id_aa64isar0_el1
     let aes_alone = Implementation {
-        features: Features::of(&[
-            Feature::Base,
-            Feature::Fp,
-            Feature::AdvSimd,
-            Feature::Aes,
-        ]),
+        features: Features::of(&[Feature::Base, Feature::Fp, Feature::AdvSimd, Feature::Aes]),
         ..Implementation::CORTEX_A57
     };
     for (imp, aes_field, pmull_1q) in [

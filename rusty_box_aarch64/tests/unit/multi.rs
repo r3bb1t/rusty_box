@@ -25,7 +25,7 @@ use std::vec::Vec;
 
 use super::super::super::features::{Feature, Implementation, VecLen};
 use super::super::super::fp_estimate::fpsr::{IOC, IXC, OFC};
-use super::super::super::step::{exec, processor, Taken, UNDEFINED};
+use super::super::super::step::{Taken, UNDEFINED, exec, processor};
 use super::super::super::{Cpu, NoEl2};
 use super::super::{Esize, Pv, Zv};
 
@@ -757,7 +757,9 @@ fn the_narrowing_shifts_of_four_vectors_concatenate_or_interleave() {
             ],
             Esize::B
         ),
-        vec![2, 0x7F, 0x80, 0, 0, 1, 0, 0xFF, 3, 3, 3, 3, 0xFD, 0xFD, 0xFD, 0xFD]
+        vec![
+            2, 0x7F, 0x80, 0, 0, 1, 0, 0xFF, 3, 3, 3, 3, 0xFD, 0xFD, 0xFD, 0xFD
+        ]
     );
     assert_eq!(
         run(
@@ -785,7 +787,9 @@ fn the_narrowing_shifts_of_four_vectors_concatenate_or_interleave() {
             ],
             Esize::B
         ),
-        vec![0xFF, 0xFF, 5, 0x40, 1, 0xFF, 5, 0x40, 1, 0xFF, 5, 0x40, 2, 0, 5, 0x40]
+        vec![
+            0xFF, 0xFF, 5, 0x40, 1, 0xFF, 5, 0x40, 1, 0xFF, 5, 0x40, 2, 0, 5, 0x40
+        ]
     );
     assert_eq!(
         run(
@@ -869,7 +873,9 @@ fn the_saturating_narrows_of_four_vectors_concatenate_or_interleave() {
             ],
             Esize::B
         ),
-        vec![0x7F, 0x7F, 0x80, 0x80, 5, 5, 5, 5, 0xFB, 0xFB, 0xFB, 0xFB, 0x7F, 0x7F, 0x7F, 0x7F]
+        vec![
+            0x7F, 0x7F, 0x80, 0x80, 5, 5, 5, 5, 0xFB, 0xFB, 0xFB, 0xFB, 0x7F, 0x7F, 0x7F, 0x7F
+        ]
     );
     assert_eq!(
         run(
@@ -959,11 +965,15 @@ fn bfcvt_and_fcvt_concatenate_or_interleave_and_fcvt_ignores_ahp() {
     };
     assert_eq!(
         half(FCVT_2),
-        vec![0x3C00, 0x7C00, 0x7E00, 0x0001, 0xC000, 0x3800, 0x7BFF, 0x8000]
+        vec![
+            0x3C00, 0x7C00, 0x7E00, 0x0001, 0xC000, 0x3800, 0x7BFF, 0x8000
+        ]
     );
     assert_eq!(
         half(FCVTN_2),
-        vec![0x3C00, 0xC000, 0x7C00, 0x3800, 0x7E00, 0x7BFF, 0x0001, 0x8000]
+        vec![
+            0x3C00, 0xC000, 0x7C00, 0x3800, 0x7E00, 0x7BFF, 0x0001, 0x8000
+        ]
     );
 }
 

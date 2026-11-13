@@ -14,13 +14,12 @@
 //! - Helper accessors: is_tag_empty, read/write FPU registers, setcc, clear_c1
 //! - write_eflags_fpu_compare: for FCOMI/FUCOMI (sets EFLAGS ZF/PF/CF)
 
+use super::super::cpu::Exception;
 use super::super::decoder::{BxSegregs, Instruction};
 use super::super::i387::*;
 use super::super::softfloat3e::softfloat::*;
-use super::super::softfloat3e::specialize::*;
-
-use super::super::cpu::Exception;
 use super::super::softfloat3e::softfloat_types::ExtFloat80;
+use super::super::softfloat3e::specialize::*;
 
 // ---------------------------------------------------------------------------
 // Free function: convert i387 control word → SoftFloat status

@@ -26,7 +26,7 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, SnapError, VmClock, VmInstant};
 
 use super::el2::{
-    El2Reg, CNTHCTL_ECV_POFF, CPTR_TFP, CPTR_TSM, HCR_AMO, HCR_CD, HCR_DC, HCR_FMO, HCR_HCD,
+    CNTHCTL_ECV_POFF, CPTR_TFP, CPTR_TSM, El2Reg, HCR_AMO, HCR_CD, HCR_DC, HCR_FMO, HCR_HCD,
     HCR_IMO, HCR_PTW, HCR_TEA, HCR_TGE, HCR_TSC, HCR_VF, HCR_VI, HCR_VM, HCR_VSE, MDCR_TDE,
     VirtualLines,
 };
@@ -34,16 +34,16 @@ use super::exception::AccessSyndrome;
 use super::exec::Fault;
 use super::features::{CpuModel, Feature, Implementation};
 use super::mmu::saved_layout::{
-    CONTEXTS, CONTEXT_BYTES, CONTEXT_HCR, CONTEXT_SCTLR, CONTEXT_VTCR, CONTEXT_VTTBR, ENTRY_BYTES,
+    CONTEXT_BYTES, CONTEXT_HCR, CONTEXT_SCTLR, CONTEXT_VTCR, CONTEXT_VTTBR, CONTEXTS, ENTRY_BYTES,
     ENTRY_COMBINED, ENTRY_MEMORY, ENTRY_S2_LEVEL, ENTRY_S2_MEMORY, ENTRY_S2_PERMS, ENTRY_STAGE1,
-    KEPT_BYTES, NOT_WALKED, NO_CONTEXT, STAGE2_CONTEXT_BYTES,
+    KEPT_BYTES, NO_CONTEXT, NOT_WALKED, STAGE2_CONTEXT_BYTES,
 };
-use super::mmu::{DataAccess, El10Context, El2RegimeContext, TlbContext};
+use super::mmu::{DataAccess, El2RegimeContext, El10Context, TlbContext};
 use super::op::Extend;
 use super::sysreg::{CPACR_FPEN, CPACR_SMEN, OSLSR_OSLK, SMCR_EZT0};
 use super::{
-    id, Cpu, CpuConfig, El, Ipa, Level, Levels, NoEl2, NoTranslation, Pstate, Step, SysReg,
-    SysRegRefusal, TimerLines, Tlb, TranslationFault, TranslationStage, WithEl2, WriteEffect,
+    Cpu, CpuConfig, El, Ipa, Level, Levels, NoEl2, NoTranslation, Pstate, Step, SysReg,
+    SysRegRefusal, TimerLines, Tlb, TranslationFault, TranslationStage, WithEl2, WriteEffect, id,
 };
 use crate::bus::{AccessWidth, BusFault, CodeEpoch, FetchSource, PhysAddr, PhysBus};
 use crate::instrumentation::{ExceptionKind, NoInstrumentation};
@@ -1346,9 +1346,15 @@ fn the_virtual_inputs_are_pending_where_vi_and_vf_would_be() {
     ] {
         m.cpu.set_virtual_interrupt_lines(lines);
         unmasked_at(&mut m, El::El1, 0);
-        assert!(m.cpu.deliver_interrupt().is_none(), "{kind:?}: nothing routed");
+        assert!(
+            m.cpu.deliver_interrupt().is_none(),
+            "{kind:?}: nothing routed"
+        );
         unmasked_at(&mut m, El::El1, other);
-        assert!(m.cpu.deliver_interrupt().is_none(), "{kind:?}: the other kind routed");
+        assert!(
+            m.cpu.deliver_interrupt().is_none(),
+            "{kind:?}: the other kind routed"
+        );
         unmasked_at(&mut m, El::El1, routing | HCR_TGE);
         assert!(m.cpu.deliver_interrupt().is_none(), "{kind:?}: TGE set");
         unmasked_at(&mut m, El::El2, routing);
@@ -2968,10 +2974,7 @@ fn stage_2_configurations_arm_refuses_take_a_level_0_translation_fault() {
     }
 
     // A 30-bit IPA space from level 2, at `S2_L2`; the data at 1 GiB.
-    m.cpu
-        .el2_state
-        .regs
-        .write(El2Reg::Vtcr, imp, 0, 34 | PS_40);
+    m.cpu.el2_state.regs.write(El2Reg::Vtcr, imp, 0, 34 | PS_40);
     m.cpu.el2_state.regs.vttbr = S2_L2;
     m.cpu.flush_tlb();
     m.at(El::El1);

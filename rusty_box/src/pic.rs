@@ -117,8 +117,8 @@
 //! PCI-to-ISA bridge (Bochs `iodev/pci2isa.cc`), which stores `elcr1`/`elcr2`
 //! and forwards mode changes here via [`BxPicC::set_mode`].
 
-use crate::iodev::irq::IoApicEdge;
 use crate::iodev::IoPort;
+use crate::iodev::irq::IoApicEdge;
 
 /// PIC I/O port addresses
 pub const PIC_MASTER_CMD: IoPort = IoPort::new(0x0020);
@@ -1082,8 +1082,9 @@ impl BxPicC {
 
 #[cfg(feature = "std")]
 impl crate::snapshot::SnapshotSection for BxPicC {
-    const TAG: u32 = crate::snapshot::SEC_PIC;
     type Restored = DeferredIoApicEdges;
+
+    const TAG: u32 = crate::snapshot::SEC_PIC;
 
     fn snapshot_len(&self) -> crate::snapshot::SnapResult<u64> {
         // Fixed body, then the v3 forwarding-queue length — always zero now
@@ -1092,10 +1093,7 @@ impl crate::snapshot::SnapshotSection for BxPicC {
         crate::snapshot::checked_snapshot_len_add(4 + 2 * 28 + 2, 4)
     }
 
-    fn save<W: crate::snapshot::SnapWrite>(
-        &self,
-        writer: &mut W,
-    ) -> crate::snapshot::SnapResult {
+    fn save<W: crate::snapshot::SnapWrite>(&self, writer: &mut W) -> crate::snapshot::SnapResult {
         self.snapshot_len()?;
         writer.write_u32(crate::snapshot::SNAPSHOT_SECTION_VERSION)?;
         for chip in [&self.master, &self.slave] {
@@ -1134,12 +1132,18 @@ impl crate::snapshot::SnapshotSection for BxPicC {
         reader: &mut R,
     ) -> crate::snapshot::SnapResult<DeferredIoApicEdges> {
         if reader.read_u32()? != crate::snapshot::SNAPSHOT_SECTION_VERSION {
-            return Err(crate::snapshot::SnapError::Invalid("unsupported PIC snapshot section version"));
+            return Err(crate::snapshot::SnapError::Invalid(
+                "unsupported PIC snapshot section version",
+            ));
         }
         let mut chips = [self.master.clone(), self.slave.clone()];
         for (index, chip) in chips.iter_mut().enumerate() {
             let master = reader.read_bool()?;
-            if master != (index == 0) { return Err(crate::snapshot::SnapError::Invalid("PIC chip topology does not match")); }
+            if master != (index == 0) {
+                return Err(crate::snapshot::SnapError::Invalid(
+                    "PIC chip topology does not match",
+                ));
+            }
             chip.master = master;
             chip.interrupt_offset = reader.read_u8()?;
             chip.sfnm = reader.read_bool()?;
@@ -1267,7 +1271,7 @@ mod tests {
         let vector = pic.iac();
         assert_eq!(vector, 0x08 + 3);
         assert_eq!(pic.master.isr, 1 << 3); // IRQ3 in service
-                                            // Specific EOI for IRQ3 (0x63)
+        // Specific EOI for IRQ3 (0x63)
         pic.write(PIC_MASTER_CMD, 0x63, 1);
         assert_eq!(pic.master.isr, 0); // Cleared
     }
@@ -1279,7 +1283,7 @@ mod tests {
         let _ = pic.raise_irq(0);
         pic.iac();
         assert_eq!(pic.master.isr, 1 << 0); // IRQ0 in service
-                                            // Non-specific EOI (0x20)
+        // Non-specific EOI (0x20)
         pic.write(PIC_MASTER_CMD, 0x20, 1);
         assert_eq!(pic.master.isr, 0); // Cleared highest priority (IRQ0)
     }

@@ -39,10 +39,10 @@
 #[path = "../../tests/unit/za_array.rs"]
 mod tests;
 
-use super::exec::{bit, bits, ExecResult, Flow};
+use super::exec::{ExecResult, Flow, bit, bits};
 use super::features::VecLen;
-use super::fp::{fp_binary, fp_mul_add, FpBinary, FpType};
-use super::sve::{group, Esize, Zv};
+use super::fp::{FpBinary, FpType, fp_binary, fp_mul_add};
+use super::sve::{Esize, Zv, group};
 use super::za::{PairFormat, Signedness, ZaMove};
 use super::{Cpu, Levels};
 use crate::softfloat::FusedMulAdd;

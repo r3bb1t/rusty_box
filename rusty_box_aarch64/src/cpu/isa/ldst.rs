@@ -1,9 +1,7 @@
 //! Arm group `ldst` (Arm ARM C4.1, "Loads and Stores"): the A64 space with
 //! `op1 = x1x0`.
 
-use super::atomic;
-use super::Encoding;
-use super::Feature;
+use super::{Encoding, Feature, atomic};
 use crate::cpu::exec::bits;
 
 /// Arm group `asisdlse`: Advanced SIMD load/store multiple structures.

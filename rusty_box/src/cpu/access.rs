@@ -11,17 +11,15 @@
 //
 // Includes cross-page boundary handling for multi-byte accesses.
 
+use super::Result;
 use super::cpu::Exception;
 use super::decoder::BxSegregs;
 use super::descriptor::{
     SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
 };
 use super::rusty_box::MemoryAccessType;
-use super::Result;
-use crate::{
-    config::{BxLinAddress, BxPhyAddress, BxPtrEquiv},
-    memory::memory_rusty_box::bx_guest_ram_span,
-};
+use crate::config::{BxLinAddress, BxPhyAddress, BxPtrEquiv};
+use crate::memory::memory_rusty_box::bx_guest_ram_span;
 
 /// BX_MAX_MEM_ACCESS_LENGTH from Bochs — maximum access size for
 /// segment limit checks.  Matches the largest scalar access (qword=8).
@@ -233,6 +231,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         bx_guest_ram_span(a20, len, self.mem_host_len).map(|span| (a20, span.start))
     }
+
     /// Slow path for mem_read_byte: MMIO/VGA/ROM through memory system handlers.
     /// Separated to keep the inlined fast path small for better icache utilization.
     #[cold]
@@ -270,6 +269,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // zero is the value the slow path has always yielded there.
         0
     }
+
     /// Slow path for mem_write_byte: MMIO/VGA/ROM through memory system handlers.
     /// Separated to keep the inlined fast path small for better icache utilization.
     #[cold]
@@ -325,6 +325,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return;
         }
     }
+
     /// Write-back phase of a read-modify-write byte access.
     /// Uses address_xlation populated by read_rmw_virtual_byte.
     /// Bochs: write_RMW_linear_byte (access2.cc)
@@ -340,6 +341,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         }
     }
+
     /// Write-back phase of a read-modify-write word access.
     /// Uses address_xlation populated by read_rmw_virtual_word.
     /// Bochs: write_RMW_linear_word (access2.cc)
@@ -368,6 +370,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         }
     }
+
     /// Write-back phase of a read-modify-write dword access.
     /// Uses address_xlation populated by read_rmw_virtual_dword.
     /// Bochs: write_RMW_linear_dword (access2.cc)
@@ -401,6 +404,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         }
     }
+
     #[inline(always)]
     pub(super) fn mem_read_byte(&mut self, addr: BxPhyAddress) -> u8 {
         // Fast path: direct host pointer for plain RAM.
@@ -414,20 +418,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         self.mem_read_byte_slow(addr)
     }
+
     #[inline(always)]
     pub(super) fn mem_read_word(&mut self, addr: BxPhyAddress) -> u16 {
         let a20_addr = self.a20_mask.apply(addr);
-        let crosses_physical_page = a20_addr.page_offset() == 0x0fff;
+        let crosses_physical_page = a20_addr.page_offset() == 0x0FFF;
         if !crosses_physical_page {
             // Fast path: direct host pointer for plain RAM.
             if let Some((_a20_addr, linear)) = self.direct_ram_offset(addr, 2) {
                 return read_unaligned_u16(host_offset(self.mem_host_base, linear));
             }
             if self.lapic.is_selected(a20_addr) {
-                return self
-                    .lapic
-                    .read(a20_addr, 2, self.cpu_ticks())
-                    as u16;
+                return self.lapic.read(a20_addr, 2, self.cpu_ticks()) as u16;
             }
             let paddr = addr;
             {
@@ -448,6 +450,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let hi = self.mem_read_byte(addr.wrapping_add(1)) as u16;
         lo | (hi << 8)
     }
+
     #[inline(always)]
     pub(super) fn mem_read_dword(&mut self, addr: BxPhyAddress) -> u32 {
         let a20_addr = self.a20_mask.apply(addr);
@@ -458,9 +461,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // LAPIC MMIO intercept: 32-bit aligned register access
         // Bochs apic.cc read() — LAPIC registers are always dword-accessed.
         if self.lapic.is_selected(a20_addr) {
-            return self
-                .lapic
-                .read(a20_addr, 4, self.cpu_ticks());
+            return self.lapic.read(a20_addr, 4, self.cpu_ticks());
         }
         // Slow path: route through read_physical_page to hit registered MMIO handlers
         // (IOAPIC, VGA, etc.) with proper dword access width.
@@ -480,6 +481,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let hi = self.mem_read_word(addr + 2) as u32;
         lo | (hi << 16)
     }
+
     #[inline(always)]
     pub(super) fn mem_write_byte(&mut self, addr: BxPhyAddress, value: u8) {
         // Fast path: direct host pointer for plain RAM.
@@ -491,10 +493,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         self.mem_write_byte_slow(addr, value);
     }
+
     #[inline(always)]
     pub(super) fn mem_write_word(&mut self, addr: BxPhyAddress, value: u16) {
         let a20_addr = self.a20_mask.apply(addr);
-        let crosses_physical_page = a20_addr.page_offset() == 0x0fff;
+        let crosses_physical_page = a20_addr.page_offset() == 0x0FFF;
         if !crosses_physical_page {
             // Fast path: direct host pointer for plain RAM.
             if let Some((a20_addr, linear)) = self.direct_ram_offset(addr, 2) {
@@ -528,6 +531,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.mem_write_byte(addr, value as u8);
         self.mem_write_byte(addr.wrapping_add(1), (value >> 8) as u8);
     }
+
     pub(super) fn mem_write_dword(&mut self, addr: BxPhyAddress, value: u32) {
         let a20_addr = self.a20_mask.apply(addr);
         // Fast path: direct host pointer for plain RAM
@@ -540,8 +544,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs apic.cc write() — LAPIC registers are always dword-accessed.
         if self.lapic.is_selected(a20_addr) {
             let current_ticks = self.system_ticks();
-            self.lapic
-                .write(a20_addr, value, 4, current_ticks);
+            self.lapic.write(a20_addr, value, 4, current_ticks);
             self.sync_lapic_events();
             return;
         }
@@ -563,6 +566,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.mem_write_word(addr, value as u16);
         self.mem_write_word(addr + 2, (value >> 16) as u16);
     }
+
     // ===== Canonical address check (Bochs access.cc IsCanonicalAccess) =====
 
     pub(super) fn is_canonical_access(
@@ -3189,61 +3193,65 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-        const GIB: usize = 1 << 30;
-        const HIGH_GPA: u64 = 0x1_0000_0100;
-        const PCI_HOLE: u64 = 0xC000_0000;
+                const GIB: usize = 1 << 30;
+                const HIGH_GPA: u64 = 0x1_0000_0100;
+                const PCI_HOLE: u64 = 0xC000_0000;
 
-        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
-        let mut cpu = machine.ctx();
-        let fake_base = 0x1000usize as *mut u8;
-        // This test exercises pointer selection only; no returned pointer is
-        // dereferenced. The synthetic extent avoids a multi-GiB allocation
-        // while making the high-GPA translation observable, so the context's
-        // real bases are overridden here rather than provisioned.
-        cpu.mem_host_base = fake_base;
-        cpu.mem_host_len = 3 * GIB + 0x180;
-        cpu.a20_mask = crate::config::A20Mask::OPEN;
-        cpu.cr0.remove(BxCr0::PG);
+                let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+                let mut cpu = machine.ctx();
+                let fake_base = 0x1000usize as *mut u8;
+                // This test exercises pointer selection only; no returned pointer is
+                // dereferenced. The synthetic extent avoids a multi-GiB allocation
+                // while making the high-GPA translation observable, so the context's
+                // real bases are overridden here rather than provisioned.
+                cpu.mem_host_base = fake_base;
+                cpu.mem_host_len = 3 * GIB + 0x180;
+                cpu.a20_mask = crate::config::A20Mask::OPEN;
+                cpu.cr0.remove(BxCr0::PG);
 
-        // Paging-off bulk mapping rejects the PCI aperture outright.
-        assert!(cpu.get_host_write_ptr_for_bulk(BxLinAddress::new(PCI_HOLE)).unwrap().is_none());
+                // Paging-off bulk mapping rejects the PCI aperture outright.
+                assert!(
+                    cpu.get_host_write_ptr_for_bulk(BxLinAddress::new(PCI_HOLE))
+                        .unwrap()
+                        .is_none()
+                );
 
-        // GPA 4 GiB maps to linear host offset 3 GiB and is clipped at RAM.
-        let (ptr, remaining, paddr) = cpu
-            .get_host_write_ptr_for_bulk(BxLinAddress::new(HIGH_GPA))
-            .unwrap()
-            .expect("translated high RAM must have a direct bulk mapping");
-        assert_eq!(ptr, fake_base.wrapping_add(3 * GIB + 0x100));
-        assert_eq!(remaining, 0x80);
-        assert_eq!(paddr.get(), HIGH_GPA);
+                // GPA 4 GiB maps to linear host offset 3 GiB and is clipped at RAM.
+                let (ptr, remaining, paddr) = cpu
+                    .get_host_write_ptr_for_bulk(BxLinAddress::new(HIGH_GPA))
+                    .unwrap()
+                    .expect("translated high RAM must have a direct bulk mapping");
+                assert_eq!(ptr, fake_base.wrapping_add(3 * GIB + 0x100));
+                assert_eq!(remaining, 0x80);
+                assert_eq!(paddr.get(), HIGH_GPA);
 
-        // The same bounds proof runs for a populated DTLB entry, preventing a
-        // stale direct pointer from making PCI-hole RAM reachable.
-        let laddr = BxLinAddress::new(0x4100);
-        let entry = cpu.dtlb.get_entry_of(laddr, 0);
-        entry.lpf = laddr.page_base();
-        entry.ppf = crate::config::BxPhyAddress::new(0x1_0000_0000);
-        entry.access_bits = 1 << 2; // supervisor write
-        entry.host_page = super::super::tlb::RamPage::from_ram_offset(3 * GIB);
-        let (ptr, remaining, paddr) = cpu
-            .get_host_write_ptr_for_bulk(laddr)
-            .unwrap()
-            .expect("DTLB mapping must retain translated high-RAM bounds");
-        assert_eq!(ptr, fake_base.wrapping_add(3 * GIB + 0x100));
-        assert_eq!(remaining, 0x80);
-        assert_eq!(paddr.get(), 0x1_0000_0100);
+                // The same bounds proof runs for a populated DTLB entry, preventing a
+                // stale direct pointer from making PCI-hole RAM reachable.
+                let laddr = BxLinAddress::new(0x4100);
+                let entry = cpu.dtlb.get_entry_of(laddr, 0);
+                entry.lpf = laddr.page_base();
+                entry.ppf = crate::config::BxPhyAddress::new(0x1_0000_0000);
+                entry.access_bits = 1 << 2; // supervisor write
+                entry.host_page = super::super::tlb::RamPage::from_ram_offset(3 * GIB);
+                let (ptr, remaining, paddr) = cpu
+                    .get_host_write_ptr_for_bulk(laddr)
+                    .unwrap()
+                    .expect("DTLB mapping must retain translated high-RAM bounds");
+                assert_eq!(ptr, fake_base.wrapping_add(3 * GIB + 0x100));
+                assert_eq!(remaining, 0x80);
+                assert_eq!(paddr.get(), 0x1_0000_0100);
 
-        cpu.cr0.insert(BxCr0::PG);
-        let laddr = BxLinAddress::new(0x8000);
-        let entry = cpu.dtlb.get_entry_of(laddr, 0);
-        entry.lpf = laddr.page_base();
-        entry.ppf = crate::config::BxPhyAddress::new(PCI_HOLE);
-        entry.access_bits = 1 << 2;
-        entry.host_page = super::super::tlb::RamPage::from_ram_offset(0);
-        assert!(
-            cpu.get_host_write_ptr_for_bulk(laddr).unwrap().is_none(),
-            "a TLB pointer must not bypass the PCI hole"
-        );
+                cpu.cr0.insert(BxCr0::PG);
+                let laddr = BxLinAddress::new(0x8000);
+                let entry = cpu.dtlb.get_entry_of(laddr, 0);
+                entry.lpf = laddr.page_base();
+                entry.ppf = crate::config::BxPhyAddress::new(PCI_HOLE);
+                entry.access_bits = 1 << 2;
+                entry.host_page = super::super::tlb::RamPage::from_ram_offset(0);
+                assert!(
+                    cpu.get_host_write_ptr_for_bulk(laddr).unwrap().is_none(),
+                    "a TLB pointer must not bypass the PCI hole"
+                );
             })
             .unwrap()
             .join()

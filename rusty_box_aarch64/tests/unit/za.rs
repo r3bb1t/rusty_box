@@ -24,12 +24,11 @@ use std::vec;
 use std::vec::Vec;
 
 use super::super::features::{Feature, Features, Implementation, VecLen};
-use super::super::sctlr;
 use super::super::step::{
-    exec, exec_in, processor, Taken, CPACR_ALL, DATA, FP_TRAP, SME_DISABLED, UNDEFINED,
+    CPACR_ALL, DATA, FP_TRAP, SME_DISABLED, Taken, UNDEFINED, exec, exec_in, processor,
 };
 use super::super::sve::{Pv, Zv};
-use super::super::{Cpu, NoEl2};
+use super::super::{Cpu, NoEl2, sctlr};
 use crate::softfloat::FPCR_AH;
 
 /// The SME trap with SMTC 2: outside Streaming SVE mode.

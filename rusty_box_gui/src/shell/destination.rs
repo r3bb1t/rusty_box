@@ -84,7 +84,11 @@ impl Destination {
     /// holds `remaining` profiles, clamped so it always names a live one.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn clamped_after_removal(self, removed: usize, remaining: usize) -> Self {
-        let vm = if self.vm > removed { self.vm - 1 } else { self.vm };
+        let vm = if self.vm > removed {
+            self.vm - 1
+        } else {
+            self.vm
+        };
         Self {
             vm: vm.min(remaining.saturating_sub(1)),
             page: self.page,

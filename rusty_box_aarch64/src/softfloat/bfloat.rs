@@ -18,11 +18,11 @@
 //! denormal flushed, rounding to nearest and no exception.
 
 use super::softfloat::{
-    softfloat_raise_flags, Handling, SoftFloatStatus, FLAG_INEXACT, FLAG_INVALID, FLAG_OVERFLOW,
-    FLAG_UNDERFLOW, ROUND_MINMAG,
+    FLAG_INEXACT, FLAG_INVALID, FLAG_OVERFLOW, FLAG_UNDERFLOW, Handling, ROUND_MINMAG,
+    SoftFloatStatus, softfloat_raise_flags,
 };
 use super::specialize::{f32_flush_input, float32_default_nan};
-use super::{f32_addsub, f32_mul, ArmFpStatus, FpRounding};
+use super::{ArmFpStatus, FpRounding, f32_addsub, f32_mul};
 
 /// Arm BFUnpack's fixed flush to zero: a denormal is a zero of its sign.
 fn unpacked(a: u32) -> u32 {

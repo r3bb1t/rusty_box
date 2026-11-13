@@ -1,0 +1,36 @@
+# Formatting for the whole workspace. Run with nightly rustfmt:
+#
+#     cargo +nightly fmt --all
+#
+# Builds and tests stay on stable; only formatting uses nightly, for the
+# options below marked (nightly). `cargo xtask ci` checks it.
+
+# Stable options.
+style_edition = "2024"
+max_width = 100
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true
+hex_literal_case = "Upper"
+
+# Nightly options.
+unstable_features = true
+# One `use` per module, grouped std / external crates / this crate.
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"
+# Associated types and constants before methods in every impl.
+reorder_impl_items = true
+# Doc comments: `#[doc = ".."]` written as `///`, examples formatted.
+normalize_doc_attributes = true
+format_code_in_doc_comments = true
+format_macro_matchers = true
+
+# Hand-laid tables, one entry per line: the decoder's opcode maps and the
+# scancode table. A formatter would split each row across several lines.
+ignore = [
+    "rusty_box_decoder/src/decoder/opmap.rs",
+    "rusty_box_decoder/src/decoder/opmap_0f38.rs",
+    "rusty_box_decoder/src/decoder/opmap_0f3a.rs",
+    "rusty_box_decoder/src/decoder/opmap_evex.rs",
+    "rusty_box/src/iodev/scancodes.rs",
+]

@@ -72,8 +72,8 @@
 //! rounding to nearest even, on every target but 32-bit x86 without SSE2:
 //! there x87 rounds twice, and this module answers `None`.
 
-use super::softfloat::{FLAG_INEXACT, ROUND_NEAR_EVEN};
 use super::ArmFpStatus;
+use super::softfloat::{FLAG_INEXACT, ROUND_NEAR_EVEN};
 
 #[cfg(test)]
 #[path = "../../tests/unit/host_float.rs"]

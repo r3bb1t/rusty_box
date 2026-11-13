@@ -25,11 +25,11 @@
 //! (`SignedSat`, `UnsignedSat`, `ShiftSat`, `UnsignedRecipEstimate`,
 //! `UnsignedRSqrtEstimate`).
 
-use super::int::{shift_amounts, BinOp};
-use super::{clamp, int, sat_doubling_mul_high, sat_q, segment_base, shift_by_element, Esize, Zv};
+use super::int::{BinOp, shift_amounts};
+use super::{Esize, Zv, clamp, int, sat_doubling_mul_high, sat_q, segment_base, shift_by_element};
 use crate::cpu::crypto::polynomial_mult;
 use crate::cpu::dp::add_with_carry;
-use crate::cpu::exec::{bit, bits, ExecResult, Flow};
+use crate::cpu::exec::{ExecResult, Flow, bit, bits};
 use crate::cpu::features::Feature;
 use crate::cpu::fp_estimate::{urecpe, ursqrte};
 use crate::cpu::simd_arith::{rounding_doubling_mul_add, shift_signed};

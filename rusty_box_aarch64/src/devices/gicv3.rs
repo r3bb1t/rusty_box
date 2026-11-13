@@ -105,17 +105,17 @@
 //! input line change; the machine reads [`GicV3::irq_out`],
 //! [`GicV3::fiq_out`] and [`GicV3::virtual_lines`] between instructions.
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::gicv2::{
-    group_mask, preempts, Bits, GicNames, GicShape, SpiCount, GICD_CTLR_EN_GRP0,
-    GICD_CTLR_EN_GRP1, IDLE_PRIORITY, MAX_APRS, MAX_IRQ, NR_SGIS, SGI_BITS, SPURIOUS, WORDS,
+    Bits, GICD_CTLR_EN_GRP0, GICD_CTLR_EN_GRP1, GicNames, GicShape, IDLE_PRIORITY, MAX_APRS,
+    MAX_IRQ, NR_SGIS, SGI_BITS, SPURIOUS, SpiCount, WORDS, group_mask, preempts,
 };
 use super::gicv3_its::Its;
-use super::gicv3_lpi::{Lpis, GICR_PENDBASER, GICR_PROPBASER, ID_BITS};
+use super::gicv3_lpi::{GICR_PENDBASER, GICR_PROPBASER, ID_BITS, Lpis};
 use super::gicv3_virt::{
-    PhysicalDeactivation, VirtualInterface, VirtualInterfaceShape, MAINTENANCE_INTID,
+    MAINTENANCE_INTID, PhysicalDeactivation, VirtualInterface, VirtualInterfaceShape,
 };
 use crate::bus::{AccessWidth, GicEl1Traps, GicRegister, IccRegister, RegOffset};
 use crate::cpu::VirtualLines;
@@ -360,7 +360,7 @@ impl GicV3 {
             (GicRegister::Control(ich), Some(el2)) => el2.control_read(ich),
             (GicRegister::SreEl2, Some(el2)) => el2.sre_el2(),
             (GicRegister::Virtual(_) | GicRegister::Control(_) | GicRegister::SreEl2, None) => {
-                return 0
+                return 0;
             }
         };
         self.refresh_virtual();
@@ -384,7 +384,7 @@ impl GicV3 {
                 PhysicalDeactivation(None)
             }
             (GicRegister::Virtual(_) | GicRegister::Control(_) | GicRegister::SreEl2, None) => {
-                return
+                return;
             }
         };
         if let PhysicalDeactivation(Some(intid)) = deactivation {
@@ -1208,7 +1208,7 @@ impl GicV3 {
             _ => {
                 return Err(SnapError::Invalid(
                     "GICv3 Redistributor sleep state out of range",
-                ))
+                ));
             }
         };
         let mut points = [0u8; 3];

@@ -103,14 +103,20 @@ impl ModuleFile {
     /// one of them is a byte the loader maps unchanged from the file (base
     /// relocations aside).
     pub fn read_loaded(&self, base: u64, rva: Rva, buf: &mut [u8]) -> ImageRead {
-        let Some(end) = u64::try_from(buf.len()).ok().and_then(|len| rva.0.checked_add(len)) else {
+        let Some(end) = u64::try_from(buf.len())
+            .ok()
+            .and_then(|len| rva.0.checked_add(len))
+        else {
             return ImageRead::Unreadable;
         };
         let headers = self.headers();
         if end > u64::from(headers.size_of_image) {
             return ImageRead::Unreadable;
         }
-        if headers.import_address_table.is_some_and(|table| overlaps(table, rva.0, end)) {
+        if headers
+            .import_address_table
+            .is_some_and(|table| overlaps(table, rva.0, end))
+        {
             return ImageRead::Unreadable;
         }
         let mut cursor = rva.0;
@@ -128,7 +134,10 @@ impl ModuleFile {
             let Ok(file_len) = usize::try_from(from_file) else {
                 return ImageRead::Unreadable;
             };
-            let Some(piece) = filled.checked_add(take_len).and_then(|piece_end| buf.get_mut(filled..piece_end)) else {
+            let Some(piece) = filled
+                .checked_add(take_len)
+                .and_then(|piece_end| buf.get_mut(filled..piece_end))
+            else {
                 return ImageRead::Unreadable;
             };
             let Some((file_part, zero_part)) = piece.split_at_mut_checked(file_len) else {
@@ -180,18 +189,23 @@ impl ModuleFile {
         let size_of_headers = u64::from(headers.size_of_headers);
         let headers_end = rounded(size_of_headers).min(next_start(0));
         if rva < headers_end {
-            return Some(Region { file_end: size_of_headers.min(headers_end), end: headers_end });
+            return Some(Region {
+                file_end: size_of_headers.min(headers_end),
+                end: headers_end,
+            });
         }
         let region_of_section = |section: &SectionHeader| {
             let start = section.virtual_address.0;
             let bytes_end = start.saturating_add(section.span());
             let end = rounded(bytes_end).min(next_start(start));
-            Region { file_end: bytes_end.min(end), end }
+            Region {
+                file_end: bytes_end.min(end),
+                end,
+            }
         };
-        let section = headers
-            .sections
-            .iter()
-            .find(|section| section.virtual_address.0 <= rva && rva < region_of_section(section).end)?;
+        let section = headers.sections.iter().find(|section| {
+            section.virtual_address.0 <= rva && rva < region_of_section(section).end
+        })?;
         if section.characteristics & SECTION_WRITABLE != 0 {
             return None;
         }
@@ -201,17 +215,27 @@ impl ModuleFile {
     /// Applies, to `buf` read at `start`, every fixup whose bytes it covers,
     /// for the image moved by `delta`.
     fn relocate(&self, fixups: &[Fixup], delta: u64, start: u64, buf: &mut [u8]) -> ImageRead {
-        let Some(end) = u64::try_from(buf.len()).ok().and_then(|len| start.checked_add(len)) else {
+        let Some(end) = u64::try_from(buf.len())
+            .ok()
+            .and_then(|len| start.checked_add(len))
+        else {
             return ImageRead::Unreadable;
         };
         let first = fixups.partition_point(|fixup| fixup.rva.saturating_add(WIDEST_FIXUP) <= start);
-        for fixup in fixups.iter().skip(first).take_while(|fixup| fixup.rva < end) {
+        for fixup in fixups
+            .iter()
+            .skip(first)
+            .take_while(|fixup| fixup.rva < end)
+        {
             let width = fixup.kind.width();
             if fixup.rva.saturating_add(width) <= start {
                 continue;
             }
             let mut moved = [0u8; 8];
-            let Some(raw) = usize::try_from(width).ok().and_then(|width| moved.get_mut(..width)) else {
+            let Some(raw) = usize::try_from(width)
+                .ok()
+                .and_then(|width| moved.get_mut(..width))
+            else {
                 return ImageRead::Unreadable;
             };
             match self.file.read_into(Rva(fixup.rva), raw) {
@@ -231,7 +255,9 @@ impl ModuleFile {
                     let Some(linked) = raw.first_chunk::<8>().copied() else {
                         return ImageRead::Unreadable;
                     };
-                    raw.copy_from_slice(&u64::from_le_bytes(linked).wrapping_add(delta).to_le_bytes());
+                    raw.copy_from_slice(
+                        &u64::from_le_bytes(linked).wrapping_add(delta).to_le_bytes(),
+                    );
                 }
                 FixupKind::Other => return ImageRead::Unreadable,
             }
@@ -297,7 +323,10 @@ fn read_relocations(file: &FileImage<Vec<u8>>, directory: DataDirectory) -> Relo
         let Ok(block_size) = table.u32_le(at.saturating_add(4)) else {
             return Relocations::Unreadable;
         };
-        let Some(block_end) = usize::try_from(block_size).ok().and_then(|block| at.checked_add(block)) else {
+        let Some(block_end) = usize::try_from(block_size)
+            .ok()
+            .and_then(|block| at.checked_add(block))
+        else {
             return Relocations::Unreadable;
         };
         if block_size < 8 || block_end > size {
@@ -330,11 +359,13 @@ fn read_relocations(file: &FileImage<Vec<u8>>, directory: DataDirectory) -> Relo
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box_symbols_fixtures::pe::{
-        pe64_file, relocation_block, Directory, Pe64Spec, SpecSection, PAGE_ALIGNED, PE64_HEADERS, REL_BASED_DIR64,
-        REL_BASED_HIGHLOW, SECTION_CODE, SECTION_READ_ONLY, SECTION_WRITABLE,
+        Directory, PAGE_ALIGNED, PE64_HEADERS, Pe64Spec, REL_BASED_DIR64, REL_BASED_HIGHLOW,
+        SECTION_CODE, SECTION_READ_ONLY, SECTION_WRITABLE, SpecSection, pe64_file,
+        relocation_block,
     };
+
+    use super::*;
 
     const LINKED: u64 = 0x1_4000_0000;
     const MOVED: u64 = 0x7FF_1230_0000;
@@ -361,14 +392,37 @@ mod tests {
             image_base: LINKED,
             section_alignment: PAGE_ALIGNED,
             sections: vec![
-                SpecSection { name: b".text", rva: 0x1000, bytes: text, characteristics: SECTION_CODE },
-                SpecSection { name: b".rdata", rva: 0x2000, bytes: rdata, characteristics: SECTION_READ_ONLY },
-                SpecSection { name: b".data", rva: 0x3000, bytes: vec![0x22; 0x40], characteristics: SECTION_WRITABLE },
-                SpecSection { name: b".reloc", rva: 0x4000, bytes: relocations, characteristics: SECTION_READ_ONLY },
+                SpecSection {
+                    name: b".text",
+                    rva: 0x1000,
+                    bytes: text,
+                    characteristics: SECTION_CODE,
+                },
+                SpecSection {
+                    name: b".rdata",
+                    rva: 0x2000,
+                    bytes: rdata,
+                    characteristics: SECTION_READ_ONLY,
+                },
+                SpecSection {
+                    name: b".data",
+                    rva: 0x3000,
+                    bytes: vec![0x22; 0x40],
+                    characteristics: SECTION_WRITABLE,
+                },
+                SpecSection {
+                    name: b".reloc",
+                    rva: 0x4000,
+                    bytes: relocations,
+                    characteristics: SECTION_READ_ONLY,
+                },
             ],
             exception: None,
             base_relocations: Some(Directory { rva: 0x4000, size }),
-            import_address_table: Some(Directory { rva: 0x2020, size: 0x10 }),
+            import_address_table: Some(Directory {
+                rva: 0x2020,
+                size: 0x10,
+            }),
         }
     }
 
@@ -390,7 +444,11 @@ mod tests {
         assert_eq!(read(&file, LINKED, 0x1000, 4), Some(vec![0xC3; 4]));
         assert_eq!(read(&file, LINKED, 0x2000, 0x20), Some(vec![0x11; 0x20]));
         assert_eq!(read(&file, LINKED, 0x20F0, 0x10), Some(vec![0x11; 0x10]));
-        assert_eq!(read(&file, LINKED, 0, 2), Some(b"MZ".to_vec()), "the headers are mapped");
+        assert_eq!(
+            read(&file, LINKED, 0, 2),
+            Some(b"MZ".to_vec()),
+            "the headers are mapped"
+        );
     }
 
     #[test]
@@ -398,12 +456,26 @@ mod tests {
         let file = module(&[]);
         let page = read(&file, LINKED, 0, 0x1000).expect("the whole header page");
         assert_eq!(&page[..2], b"MZ");
-        assert!(page[PE64_HEADERS as usize..].iter().all(|byte| *byte == 0), "past SizeOfHeaders");
+        assert!(
+            page[PE64_HEADERS as usize..].iter().all(|byte| *byte == 0),
+            "past SizeOfHeaders"
+        );
         let text = read(&file, LINKED, 0x1000, 0x1000).expect("the whole page of .text");
         assert_eq!(&text[..4], &[0xC3; 4]);
-        assert!(text[0x200..].iter().all(|byte| *byte == 0), "past the section's raw data");
-        assert_eq!(read(&file, LINKED, 0x1FFC, 8), Some(vec![0, 0, 0, 0, 0x11, 0x11, 0x11, 0x11]), "across into .rdata");
-        assert_eq!(read(&file, LINKED, 0x2FFC, 8), None, "across into the writable .data");
+        assert!(
+            text[0x200..].iter().all(|byte| *byte == 0),
+            "past the section's raw data"
+        );
+        assert_eq!(
+            read(&file, LINKED, 0x1FFC, 8),
+            Some(vec![0, 0, 0, 0, 0x11, 0x11, 0x11, 0x11]),
+            "across into .rdata"
+        );
+        assert_eq!(
+            read(&file, LINKED, 0x2FFC, 8),
+            None,
+            "across into the writable .data"
+        );
     }
 
     /// A driver linked with `/ALIGN:0x200`: its sections share pages, and
@@ -416,36 +488,83 @@ mod tests {
             image_base: LINKED,
             section_alignment: 0x200,
             sections: vec![
-                SpecSection { name: b".text", rva: 0x400, bytes: vec![0xC3; 0x80], characteristics: SECTION_CODE },
-                SpecSection { name: b".rdata", rva: 0x600, bytes: vec![0x11; 0x40], characteristics: SECTION_READ_ONLY },
-                SpecSection { name: b".data", rva: 0x800, bytes: vec![0x22; 0x40], characteristics: SECTION_WRITABLE },
+                SpecSection {
+                    name: b".text",
+                    rva: 0x400,
+                    bytes: vec![0xC3; 0x80],
+                    characteristics: SECTION_CODE,
+                },
+                SpecSection {
+                    name: b".rdata",
+                    rva: 0x600,
+                    bytes: vec![0x11; 0x40],
+                    characteristics: SECTION_READ_ONLY,
+                },
+                SpecSection {
+                    name: b".data",
+                    rva: 0x800,
+                    bytes: vec![0x22; 0x40],
+                    characteristics: SECTION_WRITABLE,
+                },
             ],
             exception: None,
             base_relocations: None,
             import_address_table: None,
         }))
         .unwrap();
-        assert_eq!(read(&file, LINKED, 0x400, 4), Some(vec![0xC3; 4]), "not the header page's zeros");
-        assert_eq!(read(&file, LINKED, 0x600, 4), Some(vec![0x11; 4]), "not .text's page's zeros");
-        assert_eq!(read(&file, LINKED, 0x3FC, 8), Some(vec![0, 0, 0, 0, 0xC3, 0xC3, 0xC3, 0xC3]), "across into .text");
+        assert_eq!(
+            read(&file, LINKED, 0x400, 4),
+            Some(vec![0xC3; 4]),
+            "not the header page's zeros"
+        );
+        assert_eq!(
+            read(&file, LINKED, 0x600, 4),
+            Some(vec![0x11; 4]),
+            "not .text's page's zeros"
+        );
+        assert_eq!(
+            read(&file, LINKED, 0x3FC, 8),
+            Some(vec![0, 0, 0, 0, 0xC3, 0xC3, 0xC3, 0xC3]),
+            "across into .text"
+        );
         assert_eq!(read(&file, LINKED, 0x800, 4), None, "the writable .data");
-        assert_eq!(read(&file, LINKED, 0x7FE, 4), None, "a read reaching into it");
+        assert_eq!(
+            read(&file, LINKED, 0x7FE, 4),
+            None,
+            "a read reaching into it"
+        );
     }
 
     #[test]
     fn a_writable_section_holds_the_guests_values_and_is_not_served() {
         let file = module(&[]);
         assert_eq!(read(&file, LINKED, 0x3000, 4), None);
-        assert_eq!(read(&file, LINKED, 0x2FFE, 4), None, "a read reaching into it");
+        assert_eq!(
+            read(&file, LINKED, 0x2FFE, 4),
+            None,
+            "a read reaching into it"
+        );
     }
 
     #[test]
     fn the_import_address_table_is_filled_by_the_loader_and_is_not_served() {
         let file = module(&[]);
         assert_eq!(read(&file, LINKED, 0x2020, 8), None);
-        assert_eq!(read(&file, LINKED, 0x201C, 8), None, "a read overlapping its start");
-        assert_eq!(read(&file, LINKED, 0x2018, 8), Some(vec![0x11; 8]), "the bytes before it");
-        assert_eq!(read(&file, LINKED, 0x2030, 8), Some(vec![0x11; 8]), "the bytes after it");
+        assert_eq!(
+            read(&file, LINKED, 0x201C, 8),
+            None,
+            "a read overlapping its start"
+        );
+        assert_eq!(
+            read(&file, LINKED, 0x2018, 8),
+            Some(vec![0x11; 8]),
+            "the bytes before it"
+        );
+        assert_eq!(
+            read(&file, LINKED, 0x2030, 8),
+            Some(vec![0x11; 8]),
+            "the bytes after it"
+        );
     }
 
     #[test]
@@ -453,15 +572,30 @@ mod tests {
         let file = module(&[]);
         let delta = MOVED - LINKED;
         let pointer = read(&file, MOVED, 0x2040, 8).unwrap();
-        assert_eq!(u64::from_le_bytes(pointer.try_into().unwrap()), POINTER + delta);
+        assert_eq!(
+            u64::from_le_bytes(pointer.try_into().unwrap()),
+            POINTER + delta
+        );
         let narrow = read(&file, MOVED, 0x1010, 4).unwrap();
-        assert_eq!(u32::from_le_bytes(narrow.try_into().unwrap()), 0x4000_3020u32.wrapping_add(delta as u32));
+        assert_eq!(
+            u32::from_le_bytes(narrow.try_into().unwrap()),
+            0x4000_3020u32.wrapping_add(delta as u32)
+        );
         // A read that starts inside a fixup gets the relocated bytes it covers.
         let moved = (POINTER + delta).to_le_bytes();
-        assert_eq!(read(&file, MOVED, 0x2044, 6).unwrap(), [&moved[4..8], &[0x11, 0x11][..]].concat());
-        assert_eq!(read(&file, MOVED, 0x203E, 4).unwrap(), [&[0x11, 0x11][..], &moved[..2]].concat());
+        assert_eq!(
+            read(&file, MOVED, 0x2044, 6).unwrap(),
+            [&moved[4..8], &[0x11, 0x11][..]].concat()
+        );
+        assert_eq!(
+            read(&file, MOVED, 0x203E, 4).unwrap(),
+            [&[0x11, 0x11][..], &moved[..2]].concat()
+        );
         // At the linked base nothing moves.
-        assert_eq!(read(&file, LINKED, 0x2040, 8).unwrap(), POINTER.to_le_bytes());
+        assert_eq!(
+            read(&file, LINKED, 0x2040, 8).unwrap(),
+            POINTER.to_le_bytes()
+        );
     }
 
     #[test]
@@ -469,8 +603,16 @@ mod tests {
         // IMAGE_REL_BASED_HIGH at .text+0x40.
         let file = module(&[1 << 12 | 0x40]);
         assert_eq!(read(&file, MOVED, 0x1040, 2), None);
-        assert_eq!(read(&file, MOVED, 0x1000, 4), Some(vec![0xC3; 4]), "bytes away from it");
-        assert_eq!(read(&file, LINKED, 0x1040, 2), Some(vec![0xC3; 2]), "at the linked base it is not applied");
+        assert_eq!(
+            read(&file, MOVED, 0x1000, 4),
+            Some(vec![0xC3; 4]),
+            "bytes away from it"
+        );
+        assert_eq!(
+            read(&file, LINKED, 0x1040, 2),
+            Some(vec![0xC3; 2]),
+            "at the linked base it is not applied"
+        );
     }
 
     #[test]
@@ -487,11 +629,21 @@ mod tests {
         let file = module(&[]);
         assert_eq!(read(&file, LINKED, 0x5000, 1), None);
         assert_eq!(read(&file, LINKED, u64::MAX, 2), None);
-        assert_eq!(read(&file, LINKED, 0x1000, 0), Some(Vec::new()), "nothing asked reads");
+        assert_eq!(
+            read(&file, LINKED, 0x1000, 0),
+            Some(Vec::new()),
+            "nothing asked reads"
+        );
     }
 
     #[test]
     fn the_file_names_its_image() {
-        assert_eq!(module(&[]).image_id(), PeImageId { time_date_stamp: 0x5E1F_0001, size_of_image: 0x5000 });
+        assert_eq!(
+            module(&[]).image_id(),
+            PeImageId {
+                time_date_stamp: 0x5E1F_0001,
+                size_of_image: 0x5000
+            }
+        );
     }
 }

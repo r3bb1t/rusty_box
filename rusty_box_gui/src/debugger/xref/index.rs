@@ -14,8 +14,8 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use super::decode::{code_size, references_of, XrefKind};
-use super::image::{ModuleImage, PageRead, PAGE_BYTES};
+use super::decode::{XrefKind, code_size, references_of};
+use super::image::{ModuleImage, PAGE_BYTES, PageRead};
 use crate::debugger::pe::ImageWidth;
 
 /// A piece past this is cut again.
@@ -152,13 +152,21 @@ fn runs(image: &ModuleImage, from: u64, to: u64) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
     let mut at = from;
     while at < to {
-        let page_end = at.saturating_add(PAGE_BYTES).saturating_sub(at.wrapping_rem(PAGE_BYTES)).min(to);
+        let page_end = at
+            .saturating_add(PAGE_BYTES)
+            .saturating_sub(at.wrapping_rem(PAGE_BYTES))
+            .min(to);
         let page = usize::try_from(at.wrapping_div(PAGE_BYTES)).ok();
-        let read = page.and_then(|page| image.pages.get(page)).is_some_and(|page| *page == PageRead::Read);
+        let read = page
+            .and_then(|page| image.pages.get(page))
+            .is_some_and(|page| *page == PageRead::Read);
         if read {
             match runs.last_mut() {
                 Some(run) if run.end == at => run.end = page_end,
-                Some(_) | None => runs.push(Run { start: at, end: page_end }),
+                Some(_) | None => runs.push(Run {
+                    start: at,
+                    end: page_end,
+                }),
             }
         }
         at = page_end;
@@ -174,22 +182,39 @@ fn trusted_pieces(image: &ModuleImage, sync: &[u64]) -> Vec<Piece> {
     let mut pieces = Vec::new();
     for section in &image.sections {
         let start = u64::from(section.rva).min(image_end);
-        let end = start.saturating_add(u64::from(section.virtual_size)).min(image_end);
+        let end = start
+            .saturating_add(u64::from(section.virtual_size))
+            .min(image_end);
         for run in runs(image, start, end) {
             if section.executable {
                 let first = sync.partition_point(|offset| *offset <= run.start);
                 let last = sync.partition_point(|offset| *offset < run.end);
                 let mut piece_start = run.start;
                 for cut in sync.get(first..last).unwrap_or(&[]) {
-                    pieces.push(Piece { start: piece_start, end: *cut, limit: run.end, kind: PieceKind::Code(Begin::Trusted) });
+                    pieces.push(Piece {
+                        start: piece_start,
+                        end: *cut,
+                        limit: run.end,
+                        kind: PieceKind::Code(Begin::Trusted),
+                    });
                     piece_start = *cut;
                 }
-                pieces.push(Piece { start: piece_start, end: run.end, limit: run.end, kind: PieceKind::Code(Begin::Trusted) });
+                pieces.push(Piece {
+                    start: piece_start,
+                    end: run.end,
+                    limit: run.end,
+                    kind: PieceKind::Code(Begin::Trusted),
+                });
             } else {
                 let mut chunk = run.start;
                 while chunk < run.end {
                     let chunk_end = chunk.saturating_add(MAX_PIECE).min(run.end);
-                    pieces.push(Piece { start: chunk, end: chunk_end, limit: run.end, kind: PieceKind::Pointers });
+                    pieces.push(Piece {
+                        start: chunk,
+                        end: chunk_end,
+                        limit: run.end,
+                        kind: PieceKind::Pointers,
+                    });
                     chunk = chunk_end;
                 }
             }
@@ -212,7 +237,12 @@ fn split_pieces(pieces: &[Piece]) -> Vec<Piece> {
         let mut kind = piece.kind;
         loop {
             let end = start.saturating_add(MAX_PIECE).min(piece.end);
-            split.push(Piece { start, end, limit: piece.limit, kind });
+            split.push(Piece {
+                start,
+                end,
+                limit: piece.limit,
+                kind,
+            });
             if end >= piece.end {
                 break;
             }
@@ -225,7 +255,13 @@ fn split_pieces(pieces: &[Piece]) -> Vec<Piece> {
 
 /// The sync points `image` and `extra` give, ascending, each once.
 fn sync_offsets(image: &ModuleImage, extra: &[super::image::ImageOffset]) -> Vec<u64> {
-    let mut sync: Vec<u64> = image.sync.iter().chain(extra).map(|offset| offset.0).filter(|offset| image.in_code(*offset)).collect();
+    let mut sync: Vec<u64> = image
+        .sync
+        .iter()
+        .chain(extra)
+        .map(|offset| offset.0)
+        .filter(|offset| image.in_code(*offset))
+        .collect();
     sync.sort_unstable();
     sync.dedup();
     sync
@@ -242,7 +278,11 @@ fn decode_at(image: &ModuleImage, at: u64, limit: u64, sites: &mut Vec<Site>) ->
     let Ok(end) = usize::try_from(end) else {
         return 1;
     };
-    let Some(bytes) = image.bytes.get(start..end).filter(|bytes| !bytes.is_empty()) else {
+    let Some(bytes) = image
+        .bytes
+        .get(start..end)
+        .filter(|bytes| !bytes.is_empty())
+    else {
         return 1;
     };
     let Ok(instruction) = code_size(image.width).decode(bytes) else {
@@ -254,14 +294,25 @@ fn decode_at(image: &ModuleImage, at: u64, limit: u64, sites: &mut Vec<Site>) ->
     }
     let address = image.base.wrapping_add(at);
     for reference in references_of(&instruction, address, image.width).iter() {
-        sites.push(Site { target: reference.target, site: address, kind: reference.kind });
+        sites.push(Site {
+            target: reference.target,
+            site: address,
+            kind: reference.kind,
+        });
     }
     length
 }
 
 /// Decodes from `from` while the stream is before `end`; the starts below
 /// `window` go to `starts`. Returns where the stream goes on.
-fn sweep(image: &ModuleImage, from: u64, end: u64, limit: u64, window: u64, out: &mut PieceResult) -> u64 {
+fn sweep(
+    image: &ModuleImage,
+    from: u64,
+    end: u64,
+    limit: u64,
+    window: u64,
+    out: &mut PieceResult,
+) -> u64 {
     let mut at = from;
     while at < end {
         if at < window {
@@ -273,7 +324,12 @@ fn sweep(image: &ModuleImage, from: u64, end: u64, limit: u64, window: u64, out:
 }
 
 /// The pointer-aligned values of `piece` that point into one of `modules`.
-fn scan_pointers(image: &ModuleImage, piece: &Piece, modules: &[ModuleSpan], out: &mut PieceResult) {
+fn scan_pointers(
+    image: &ModuleImage,
+    piece: &Piece,
+    modules: &[ModuleSpan],
+    out: &mut PieceResult,
+) {
     let width: u64 = match image.width {
         ImageWidth::Bits32 => 4,
         ImageWidth::Bits64 => 8,
@@ -286,12 +342,20 @@ fn scan_pointers(image: &ModuleImage, piece: &Piece, modules: &[ModuleSpan], out
         let value = usize::try_from(at).ok().and_then(|start| {
             let bytes = image.bytes.get(start..)?;
             match image.width {
-                ImageWidth::Bits32 => bytes.first_chunk::<4>().map(|chunk| u64::from(u32::from_le_bytes(*chunk))),
-                ImageWidth::Bits64 => bytes.first_chunk::<8>().map(|chunk| u64::from_le_bytes(*chunk)),
+                ImageWidth::Bits32 => bytes
+                    .first_chunk::<4>()
+                    .map(|chunk| u64::from(u32::from_le_bytes(*chunk))),
+                ImageWidth::Bits64 => bytes
+                    .first_chunk::<8>()
+                    .map(|chunk| u64::from_le_bytes(*chunk)),
             }
         });
         if let Some(value) = value.filter(|value| points_into(modules, *value)) {
-            out.sites.push(Site { target: value, site: image.base.wrapping_add(at), kind: XrefKind::Pointer });
+            out.sites.push(Site {
+                target: value,
+                site: image.base.wrapping_add(at),
+                kind: XrefKind::Pointer,
+            });
         }
         at = at.saturating_add(width);
     }
@@ -317,7 +381,14 @@ fn index_piece(image: &ModuleImage, piece: &Piece, modules: &[ModuleSpan]) -> Pi
                 Begin::Trusted => piece.start,
                 Begin::Split => piece.start.saturating_add(CONVERGE_WINDOW),
             };
-            result.next = sweep(image, piece.start, piece.end, piece.limit, window, &mut result);
+            result.next = sweep(
+                image,
+                piece.start,
+                piece.end,
+                piece.limit,
+                window,
+                &mut result,
+            );
         }
     }
     result
@@ -325,7 +396,11 @@ fn index_piece(image: &ModuleImage, piece: &Piece, modules: &[ModuleSpan]) -> Pi
 
 /// Indexes `pieces` on `work.workers` threads (this one among them), each
 /// result in its piece's place.
-fn index_pieces(image: &ModuleImage, pieces: &[Piece], work: &IndexWork<'_>) -> Result<Vec<PieceResult>, IndexEnd> {
+fn index_pieces(
+    image: &ModuleImage,
+    pieces: &[Piece],
+    work: &IndexWork<'_>,
+) -> Result<Vec<PieceResult>, IndexEnd> {
     let next = AtomicUsize::new(0);
     let take = || {
         let mut done = Vec::new();
@@ -338,7 +413,8 @@ fn index_pieces(image: &ModuleImage, pieces: &[Piece], work: &IndexWork<'_>) -> 
                 return done;
             };
             let result = index_piece(image, piece, work.modules);
-            work.progress.fetch_add(piece.end.saturating_sub(piece.start), Ordering::Relaxed);
+            work.progress
+                .fetch_add(piece.end.saturating_sub(piece.start), Ordering::Relaxed);
             done.push(Done { index, result });
         }
     };
@@ -346,7 +422,10 @@ fn index_pieces(image: &ModuleImage, pieces: &[Piece], work: &IndexWork<'_>) -> 
     let finished = std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for _ in 1..workers {
-            match std::thread::Builder::new().name("rusty_box_xref".to_owned()).spawn_scoped(scope, take) {
+            match std::thread::Builder::new()
+                .name("rusty_box_xref".to_owned())
+                .spawn_scoped(scope, take)
+            {
                 Ok(handle) => handles.push(handle),
                 // A thread that does not start leaves its pieces to the rest.
                 Err(_) => break,
@@ -371,7 +450,10 @@ fn index_pieces(image: &ModuleImage, pieces: &[Piece], work: &IndexWork<'_>) -> 
             *slot = Some(done.result);
         }
     }
-    results.into_iter().map(|result| result.ok_or(IndexEnd::Cancelled)).collect()
+    results
+        .into_iter()
+        .map(|result| result.ok_or(IndexEnd::Cancelled))
+        .collect()
 }
 
 /// The pieces' sites in one stream: a split piece's from where the stream
@@ -402,7 +484,9 @@ fn merge(image: &ModuleImage, pieces: &[Piece], results: Vec<PieceResult>) -> Ve
                     }
                     if result.starts.binary_search(&at).is_ok() {
                         let from = image.base.wrapping_add(at);
-                        redone.sites.extend(result.sites.iter().filter(|site| site.site >= from));
+                        redone
+                            .sites
+                            .extend(result.sites.iter().filter(|site| site.site >= from));
                         stream = result.next;
                         merged.push(redone.sites);
                         break;
@@ -422,12 +506,17 @@ fn merge(image: &ModuleImage, pieces: &[Piece], results: Vec<PieceResult>) -> Ve
 
 /// Gathers `parts` into one sorted list, or says why it cannot.
 fn gather(parts: Vec<Vec<Site>>) -> Result<Vec<Site>, IndexEnd> {
-    let total = parts.iter().map(Vec::len).fold(0usize, usize::saturating_add);
+    let total = parts
+        .iter()
+        .map(Vec::len)
+        .fold(0usize, usize::saturating_add);
     if total > MAX_SITES {
         return Err(IndexEnd::TooManySites);
     }
     let mut sites = Vec::new();
-    sites.try_reserve_exact(total).map_err(|_| IndexEnd::NoMemory)?;
+    sites
+        .try_reserve_exact(total)
+        .map_err(|_| IndexEnd::NoMemory)?;
     for part in parts {
         sites.extend(part);
     }
@@ -436,7 +525,11 @@ fn gather(parts: Vec<Vec<Site>>) -> Result<Vec<Site>, IndexEnd> {
 }
 
 fn holes(image: &ModuleImage) -> u32 {
-    let count = image.pages.iter().filter(|page| **page == PageRead::Hole).count();
+    let count = image
+        .pages
+        .iter()
+        .filter(|page| **page == PageRead::Hole)
+        .count();
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
@@ -455,7 +548,13 @@ pub(crate) fn build_index(
     let pieces = split_pieces(&trusted_pieces(image, &sync_offsets(image, extra)));
     let results = index_pieces(image, &pieces, work)?;
     let sites = gather(merge(image, &pieces, results))?;
-    Ok(ModuleIndex { base: image.base, size: image.bytes.len() as u64, sites, holes: holes(image), taken_at })
+    Ok(ModuleIndex {
+        base: image.base,
+        size: image.bytes.len() as u64,
+        sites,
+        holes: holes(image),
+        taken_at,
+    })
 }
 
 /// The reference the parallel index must equal: each trusted piece swept in
@@ -475,23 +574,37 @@ pub(crate) fn build_index_in_order(
             match piece.kind {
                 PieceKind::Pointers => scan_pointers(image, piece, modules, &mut result),
                 PieceKind::Code(_) => {
-                    result.next = sweep(image, piece.start, piece.end, piece.limit, piece.start, &mut result);
+                    result.next = sweep(
+                        image,
+                        piece.start,
+                        piece.end,
+                        piece.limit,
+                        piece.start,
+                        &mut result,
+                    );
                 }
             }
             result.sites
         })
         .collect();
     let sites = gather(parts)?;
-    Ok(ModuleIndex { base: image.base, size: image.bytes.len() as u64, sites, holes: holes(image), taken_at })
+    Ok(ModuleIndex {
+        base: image.base,
+        size: image.bytes.len() as u64,
+        sites,
+        holes: holes(image),
+        taken_at,
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
     use super::*;
     use crate::debugger::xref::decode::XrefKind;
     use crate::debugger::xref::image::{ModuleImage, PageRead};
-    use crate::debugger::xref::test_image::{module_image, ImageSpec};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use crate::debugger::xref::test_image::{ImageSpec, module_image};
 
     const BASE: u64 = 0x1_4000_0000;
     const TAKEN_AT: u64 = 7;
@@ -507,12 +620,20 @@ mod tests {
             Run {
                 cancel: AtomicBool::new(false),
                 progress: AtomicU64::new(0),
-                modules: vec![ModuleSpan { base: image.base, size: image.bytes.len() as u64 }],
+                modules: vec![ModuleSpan {
+                    base: image.base,
+                    size: image.bytes.len() as u64,
+                }],
             }
         }
 
         fn work(&self, workers: usize) -> IndexWork<'_> {
-            IndexWork { cancel: &self.cancel, progress: &self.progress, workers: Workers(workers), modules: &self.modules }
+            IndexWork {
+                cancel: &self.cancel,
+                progress: &self.progress,
+                workers: Workers(workers),
+                modules: &self.modules,
+            }
         }
     }
 
@@ -526,7 +647,9 @@ mod tests {
         let mut state = seed;
         (0..len)
             .map(|_| {
-                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
                 (state >> 56) as u8
             })
             .collect()
@@ -553,19 +676,43 @@ mod tests {
         let data = (BASE + f).to_le_bytes();
         let image = module_image(BASE, &spec, &text, &data, &[0x1000]);
         let index = index(&image, 4);
-        let to_f: Vec<Site> = index.sites.iter().filter(|site| site.target == BASE + f).copied().collect();
+        let to_f: Vec<Site> = index
+            .sites
+            .iter()
+            .filter(|site| site.target == BASE + f)
+            .copied()
+            .collect();
         assert_eq!(
             to_f,
             [
-                Site { target: BASE + f, site: BASE + 0x1000, kind: XrefKind::Call },
-                Site { target: BASE + f, site: BASE + 0x1005, kind: XrefKind::Jump },
-                Site { target: BASE + f, site: BASE + u64::from(spec.data_free()), kind: XrefKind::Pointer },
+                Site {
+                    target: BASE + f,
+                    site: BASE + 0x1000,
+                    kind: XrefKind::Call
+                },
+                Site {
+                    target: BASE + f,
+                    site: BASE + 0x1005,
+                    kind: XrefKind::Jump
+                },
+                Site {
+                    target: BASE + f,
+                    site: BASE + u64::from(spec.data_free()),
+                    kind: XrefKind::Pointer
+                },
             ]
         );
-        assert!(index.sites.contains(&Site { target: BASE + g, site: BASE + 0x100A, kind: XrefKind::AddressOf }));
+        assert!(index.sites.contains(&Site {
+            target: BASE + g,
+            site: BASE + 0x100A,
+            kind: XrefKind::AddressOf
+        }));
         assert_eq!(index.taken_at, TAKEN_AT);
         assert_eq!(index.holes, 0);
-        assert!(index.sites.windows(2).all(|pair| pair[0] <= pair[1]), "sorted by target, then site");
+        assert!(
+            index.sites.windows(2).all(|pair| pair[0] <= pair[1]),
+            "sorted by target, then site"
+        );
     }
 
     #[test]
@@ -573,15 +720,22 @@ mod tests {
         for seed in 1..=64u64 {
             let spec = ImageSpec::bits64(0x10_0000);
             let text = noise(seed, 0x10_0000);
-            let sync: Vec<u64> = noise(seed ^ 0xFF, 8).iter().map(|byte| 0x1000 + u64::from(*byte) * 0x1000).collect();
+            let sync: Vec<u64> = noise(seed ^ 0xFF, 8)
+                .iter()
+                .map(|byte| 0x1000 + u64::from(*byte) * 0x1000)
+                .collect();
             let mut sync = sync;
             sync.sort_unstable();
             sync.dedup();
             let image = module_image(BASE, &spec, &text, &[], &sync);
             let parallel = index(&image, 8);
-            let in_order = build_index_in_order(&image, &[], TAKEN_AT, &Run::over(&image).modules).expect("an index");
+            let in_order = build_index_in_order(&image, &[], TAKEN_AT, &Run::over(&image).modules)
+                .expect("an index");
             assert_eq!(parallel.sites.len(), in_order.sites.len(), "seed {seed}");
-            assert!(parallel.sites == in_order.sites, "seed {seed}: the parallel index differs");
+            assert!(
+                parallel.sites == in_order.sites,
+                "seed {seed}: the parallel index differs"
+            );
         }
     }
 
@@ -594,10 +748,17 @@ mod tests {
         let text = vec![0xE8; 200 << 10];
         let image = module_image(BASE, &spec, &text, &[], &[]);
         let parallel = index(&image, 8);
-        let in_order = build_index_in_order(&image, &[], TAKEN_AT, &Run::over(&image).modules).expect("an index");
+        let in_order = build_index_in_order(&image, &[], TAKEN_AT, &Run::over(&image).modules)
+            .expect("an index");
         assert!(!parallel.sites.is_empty());
         assert!(parallel.sites == in_order.sites);
-        assert!(parallel.sites.iter().all(|site| (site.site - BASE - 0x1000) % 5 == 0), "one stream, from .text's start");
+        assert!(
+            parallel
+                .sites
+                .iter()
+                .all(|site| (site.site - BASE - 0x1000) % 5 == 0),
+            "one stream, from .text's start"
+        );
     }
 
     #[test]
@@ -615,8 +776,17 @@ mod tests {
         let index = index(&image, 4);
         assert_eq!(index.holes, 1);
         assert!(index.sites.iter().all(|site| site.site != BASE + 0x1FFF));
-        assert!(index.sites.iter().all(|site| !(BASE + 0x2000..BASE + 0x3000).contains(&site.site)));
-        assert!(index.sites.contains(&Site { target: BASE + 0x1000, site: BASE + 0x3000, kind: XrefKind::Call }));
+        assert!(
+            index
+                .sites
+                .iter()
+                .all(|site| !(BASE + 0x2000..BASE + 0x3000).contains(&site.site))
+        );
+        assert!(index.sites.contains(&Site {
+            target: BASE + 0x1000,
+            site: BASE + 0x3000,
+            kind: XrefKind::Call
+        }));
     }
 
     #[test]
@@ -625,7 +795,10 @@ mod tests {
         let image = module_image(BASE, &spec, &noise(3, 0x10_0000), &[], &[]);
         let run = Run::over(&image);
         run.cancel.store(true, Ordering::Relaxed);
-        assert_eq!(build_index(&image, &[], TAKEN_AT, &run.work(4)).err(), Some(IndexEnd::Cancelled));
+        assert_eq!(
+            build_index(&image, &[], TAKEN_AT, &run.work(4)).err(),
+            Some(IndexEnd::Cancelled)
+        );
 
         let size = 64 << 20;
         let spec = ImageSpec::bits64(size);

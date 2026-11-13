@@ -81,11 +81,11 @@
 //! input line change; the machine reads `irq_out`/`fiq_out`, and with the
 //! Virtualization Extensions `virtual_lines`, between instructions.
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
-use super::gicv2_virt::{HwDeactivation, ReadEffect, VirtInterface, MAINTENANCE_INTID};
-use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
+use super::gicv2_virt::{HwDeactivation, MAINTENANCE_INTID, ReadEffect, VirtInterface};
+use crate::bus::{AccessWidth, RegOffset, read_by_words, write_by_words};
 use crate::cpu::VirtualLines;
 use crate::identity::{GicIdentity, MsiFrameIidr};
 use crate::interrupt_map::{InterruptMap, MsiCount, Spi};
@@ -117,6 +117,9 @@ const IMPLEMENTED_PPIS: u32 = 0xFE00_0000 | (1 << 22) | (1 << 23);
 pub struct SpiCount(u16);
 
 impl SpiCount {
+    /// The count a board's GIC has unless its host chooses another: the
+    /// GIC-400's largest.
+    pub const DEFAULT: Self = Self::MAX;
     /// The GIC-400's largest configuration.
     pub const MAX: Self = Self(480);
     /// The fewest any interrupt map fits: an SPI for each of the board's
@@ -129,9 +132,6 @@ impl SpiCount {
         ((InterruptMap::device_lines(DeviceLayout::fewest_transports()) + 1).div_ceil(32) * 32)
             as u16,
     );
-    /// The count a board's GIC has unless its host chooses another: the
-    /// GIC-400's largest.
-    pub const DEFAULT: Self = Self::MAX;
 
     /// `spis`, if it is a multiple of 32 from [`SpiCount::MIN`] to
     /// [`SpiCount::MAX`].
@@ -220,11 +220,7 @@ impl PriorityBits {
     /// subpriority (§3.3.3, Table 3-2).
     const fn group_bits(self) -> u32 {
         let count = self.count() as u32;
-        if count < 7 {
-            count
-        } else {
-            7
-        }
+        if count < 7 { count } else { 7 }
     }
 
     /// `GICC_BPR`'s minimum binary point: the one whose group priority is
@@ -300,11 +296,7 @@ impl GicShape {
     /// exist.
     pub(super) const fn existing(self, intid: u32) -> Option<usize> {
         let i = intid as usize;
-        if self.implemented(i) {
-            Some(i)
-        } else {
-            None
-        }
+        if self.implemented(i) { Some(i) } else { None }
     }
 
     /// The interrupts of word `w` of a bank that exist, a bit each
@@ -498,10 +490,12 @@ impl Bits {
     pub(super) const fn new() -> Self {
         Self([0; WORDS])
     }
+
     #[inline]
     pub(super) fn get(&self, i: usize) -> bool {
         self.0[i / 32] & (1 << (i % 32)) != 0
     }
+
     #[inline]
     pub(super) fn set(&mut self, i: usize, v: bool) {
         if v {
@@ -510,6 +504,7 @@ impl Bits {
             self.0[i / 32] &= !(1 << (i % 32));
         }
     }
+
     /// Bits `first..first + 8` as a byte, where `first` is a multiple of 8
     /// (a byte of a one-bit-per-interrupt bank); a byte past the last
     /// interrupt reads as zero.
@@ -1013,7 +1008,11 @@ impl GicV2 {
     /// group's binary point ([`preempts`]).
     #[inline]
     fn preempts(&self, irq: usize) -> bool {
-        preempts(self.priority[irq], self.group_mask(irq), self.running_priority)
+        preempts(
+            self.priority[irq],
+            self.group_mask(irq),
+            self.running_priority,
+        )
     }
 
     /// The groups the CPU interface chooses its interrupt among (IHI 0048B
@@ -2319,9 +2318,20 @@ pub(super) mod tests {
         dist(&mut g, 0x084, 1 << 9);
         raise(&mut g, 40, 0x10);
         raise(&mut g, 41, 0x20);
-        assert!(!g.irq_out() && !g.fiq_out(), "Group 0's interrupt is highest");
-        assert_eq!(cpu_get(&mut g, HPPIR), 40, "Group 0's, though not signalled");
-        assert_eq!(cpu_get(&mut g, AHPPIR), 1023, "a Group 0 interrupt is highest");
+        assert!(
+            !g.irq_out() && !g.fiq_out(),
+            "Group 0's interrupt is highest"
+        );
+        assert_eq!(
+            cpu_get(&mut g, HPPIR),
+            40,
+            "Group 0's, though not signalled"
+        );
+        assert_eq!(
+            cpu_get(&mut g, AHPPIR),
+            1023,
+            "a Group 0 interrupt is highest"
+        );
         assert_eq!(cpu_get(&mut g, AIAR), 1023);
         assert_eq!(cpu_get(&mut g, IAR), 1023, "Group 0 is not signalled");
         assert_eq!(dist_get(&mut g, 0x304), 0, "nothing acknowledged");
@@ -2526,7 +2536,11 @@ pub(super) mod tests {
     /// Enable interrupt `spi` and write it to `MSI_SETSPI_NS`.
     fn raise_msi_enabled(g: &mut GicV2, spi: u32) {
         dist(g, 0x100 + u64::from(spi / 32) * 4, 1 << (spi % 32));
-        g.v2m_write(RegOffset::new(V2M_MSI_SETSPI_NS), AccessWidth::Word, u64::from(spi));
+        g.v2m_write(
+            RegOffset::new(V2M_MSI_SETSPI_NS),
+            AccessWidth::Word,
+            u64::from(spi),
+        );
     }
 
     #[test]

@@ -59,7 +59,8 @@ pub struct Untested {
 pub fn untested_tier_p(sources: &[Source]) -> Result<Vec<Untested>, String> {
     let mut krate = Crate::default();
     for source in sources {
-        let file = syn::parse_file(&source.text).map_err(|error| format!("{}: {error}", source.path))?;
+        let file =
+            syn::parse_file(&source.text).map_err(|error| format!("{}: {error}", source.path))?;
         match source.role {
             // Parsed so a broken file still fails the sweep; what it holds
             // proves nothing.
@@ -83,14 +84,20 @@ pub fn untested_tier_p(sources: &[Source]) -> Result<Vec<Untested>, String> {
         .marked
         .iter()
         .filter(|marked| !reached.contains(&marked.id))
-        .map(|marked| Untested { path: marked.path.clone(), function: marked.id.shown() })
+        .map(|marked| Untested {
+            path: marked.path.clone(),
+            function: marked.id.shown(),
+        })
         .collect())
 }
 
 /// The module a file under `src` holds: `src/lib.rs` is `crate`,
 /// `src/pdb/mod.rs` is `crate::pdb`, `src/pdb/msf.rs` is `crate::pdb::msf`.
 fn module_of(path: &str) -> Vec<String> {
-    let parts: Vec<&str> = path.split(['/', '\\']).filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
     let under = match parts.iter().rposition(|part| *part == "src") {
         Some(at) => parts.get(at + 1..).unwrap_or(&[]),
         None => &parts[..],
@@ -98,7 +105,11 @@ fn module_of(path: &str) -> Vec<String> {
     let mut module = vec![CRATE.to_owned()];
     for (index, part) in under.iter().enumerate() {
         let file = index + 1 == under.len();
-        let name = if file { part.strip_suffix(".rs").unwrap_or(part) } else { part };
+        let name = if file {
+            part.strip_suffix(".rs").unwrap_or(part)
+        } else {
+            part
+        };
         if file && matches!(name, "lib" | "main" | "mod") {
             continue;
         }
@@ -196,14 +207,22 @@ impl Crate {
     /// references resolve to, transitively.
     fn reached(&self) -> BTreeSet<FnId> {
         let mut reached = BTreeSet::new();
-        let mut pending: Vec<FnId> = self.seeds.iter().flat_map(|reference| self.resolve(reference)).collect();
+        let mut pending: Vec<FnId> = self
+            .seeds
+            .iter()
+            .flat_map(|reference| self.resolve(reference))
+            .collect();
         while let Some(id) = pending.pop() {
             if reached.contains(&id) {
                 continue;
             }
             if let Some(references) = self.calls.get(&id) {
                 for reference in references {
-                    pending.extend(self.resolve(reference).into_iter().filter(|callee| !reached.contains(callee)));
+                    pending.extend(
+                        self.resolve(reference)
+                            .into_iter()
+                            .filter(|callee| !reached.contains(callee)),
+                    );
                 }
             }
             reached.insert(id);
@@ -240,15 +259,23 @@ impl Crate {
         match reference {
             Reference::Method { name } => self.every(name, Candidates::Methods),
             Reference::Loose { name } => self.every(name, Candidates::All),
-            Reference::Path { module, owner, segments } => {
-                self.resolve_path(module, owner.as_deref(), segments, MAX_ALIAS_HOPS)
-            }
+            Reference::Path {
+                module,
+                owner,
+                segments,
+            } => self.resolve_path(module, owner.as_deref(), segments, MAX_ALIAS_HOPS),
         }
     }
 
     /// What `segments`, written in `module` (inside `owner`'s `impl` when
     /// there is one), names.
-    fn resolve_path(&self, module: &[String], owner: Option<&str>, segments: &[String], hops: u32) -> Vec<FnId> {
+    fn resolve_path(
+        &self,
+        module: &[String],
+        owner: Option<&str>,
+        segments: &[String],
+        hops: u32,
+    ) -> Vec<FnId> {
         let Some((name, prefix)) = segments.split_last() else {
             return Vec::new();
         };
@@ -280,7 +307,11 @@ impl Crate {
     /// A bare `name` in `module`: its own function, an imported one, or one
     /// a `*` import brings in.
     fn resolve_name(&self, module: &[String], name: &str, hops: u32) -> Vec<FnId> {
-        let own = FnId { module: module.to_vec(), owner: None, name: name.to_owned() };
+        let own = FnId {
+            module: module.to_vec(),
+            owner: None,
+            name: name.to_owned(),
+        };
         if self.fns.contains(&own) {
             return vec![own];
         }
@@ -295,11 +326,18 @@ impl Crate {
                 if let Expanded::Crate(opened) = self.expand(module, glob, hops) {
                     // A `*` brings in the module's own functions and what it
                     // imports.
-                    let id = FnId { module: opened.clone(), owner: None, name: name.to_owned() };
+                    let id = FnId {
+                        module: opened.clone(),
+                        owner: None,
+                        name: name.to_owned(),
+                    };
                     if self.fns.contains(&id) {
                         return vec![id];
                     }
-                    let imported = self.scopes.get(&opened).is_some_and(|scope| scope.aliases.contains_key(name));
+                    let imported = self
+                        .scopes
+                        .get(&opened)
+                        .is_some_and(|scope| scope.aliases.contains_key(name));
                     if let (true, Some(left)) = (imported, hops.checked_sub(1)) {
                         return self.resolve_name(&opened, name, left);
                     }
@@ -313,17 +351,27 @@ impl Crate {
     /// its re-export), else a method of the type `path` ends in.
     fn resolve_in_crate(&self, path: &[String], name: &str, hops: u32) -> Vec<FnId> {
         if self.modules.contains(path) {
-            let id = FnId { module: path.to_vec(), owner: None, name: name.to_owned() };
+            let id = FnId {
+                module: path.to_vec(),
+                owner: None,
+                name: name.to_owned(),
+            };
             if self.fns.contains(&id) {
                 return vec![id];
             }
-            let re_exported = self.scopes.get(path).is_some_and(|scope| scope.aliases.contains_key(name));
+            let re_exported = self
+                .scopes
+                .get(path)
+                .is_some_and(|scope| scope.aliases.contains_key(name));
             return match (re_exported, hops.checked_sub(1)) {
                 (true, Some(left)) => self.resolve_name(path, name, left),
                 (true, None) | (false, _) => self.every(name, Candidates::Free),
             };
         }
-        let methods = path.last().map(|type_name| self.methods_of(type_name, name)).unwrap_or_default();
+        let methods = path
+            .last()
+            .map(|type_name| self.methods_of(type_name, name))
+            .unwrap_or_default();
         if methods.is_empty() {
             self.every(name, Candidates::All)
         } else {
@@ -357,7 +405,10 @@ impl Crate {
                 if self.modules.contains(&child) {
                     return joined(child);
                 }
-                let alias = self.scopes.get(module).and_then(|scope| scope.aliases.get(first));
+                let alias = self
+                    .scopes
+                    .get(module)
+                    .and_then(|scope| scope.aliases.get(first));
                 match (alias, hops.checked_sub(1)) {
                     (Some(target), Some(left)) => match self.expand(module, target, left) {
                         Expanded::Crate(base) => joined(base),
@@ -374,7 +425,9 @@ impl Crate {
 fn is_tier_p(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| match &attr.meta {
         syn::Meta::Path(path) => path.is_ident("no_panic"),
-        syn::Meta::List(list) => list.path.is_ident("cfg_attr") && list.tokens.to_string().contains("no_panic"),
+        syn::Meta::List(list) => {
+            list.path.is_ident("cfg_attr") && list.tokens.to_string().contains("no_panic")
+        }
         syn::Meta::NameValue(_) => false,
     })
 }
@@ -402,7 +455,11 @@ fn collect_idents(tokens: TokenStream, into: &mut BTreeSet<String>) {
 /// The type an `impl` block names, when it names one by path.
 fn type_name(ty: &syn::Type) -> Option<String> {
     match ty {
-        syn::Type::Path(path) => path.path.segments.last().map(|segment| segment.ident.to_string()),
+        syn::Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string()),
         _ => None,
     }
 }
@@ -458,10 +515,17 @@ struct Sweep<'s> {
 impl Sweep<'_> {
     /// Records the function `name` defined here; marked, it is swept.
     fn define(&mut self, attrs: &[syn::Attribute], name: &syn::Ident) -> FnId {
-        let id = FnId { module: self.module.clone(), owner: self.owner.clone(), name: name.to_string() };
+        let id = FnId {
+            module: self.module.clone(),
+            owner: self.owner.clone(),
+            name: name.to_string(),
+        };
         self.krate.fns.insert(id.clone());
         if is_tier_p(attrs) {
-            self.krate.marked.push(Marked { id: id.clone(), path: self.path.to_owned() });
+            self.krate.marked.push(Marked {
+                id: id.clone(),
+                path: self.path.to_owned(),
+            });
         }
         id
     }
@@ -472,7 +536,11 @@ impl Sweep<'_> {
         if self.in_test {
             self.krate.seeds.push(reference);
         } else if let Some(current) = &self.current {
-            self.krate.calls.entry(current.clone()).or_default().push(reference);
+            self.krate
+                .calls
+                .entry(current.clone())
+                .or_default()
+                .push(reference);
         }
     }
 
@@ -523,20 +591,32 @@ impl<'ast> Visit<'ast> for Sweep<'_> {
     }
 
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        let segments = node.path.segments.iter().map(|segment| segment.ident.to_string()).collect();
-        self.hold(Reference::Path { module: self.module.clone(), owner: self.owner.clone(), segments });
+        let segments = node
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect();
+        self.hold(Reference::Path {
+            module: self.module.clone(),
+            owner: self.owner.clone(),
+            segments,
+        });
         visit::visit_expr_path(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        self.hold(Reference::Method { name: node.method.to_string() });
+        self.hold(Reference::Method {
+            name: node.method.to_string(),
+        });
         visit::visit_expr_method_call(self, node);
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         // Arguments that parse as expressions are read as code; others are
         // their identifiers.
-        let parsed = node.parse_body_with(Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated);
+        let parsed =
+            node.parse_body_with(Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated);
         match parsed {
             Ok(arguments) => {
                 for argument in &arguments {
@@ -560,7 +640,11 @@ mod tests {
     use super::*;
 
     fn library(text: &str) -> Source {
-        Source { path: "src/read.rs".to_owned(), text: text.to_owned(), role: SourceRole::Library }
+        Source {
+            path: "src/read.rs".to_owned(),
+            text: text.to_owned(),
+            role: SourceRole::Library,
+        }
     }
 
     fn names(untested: Vec<Untested>) -> Vec<String> {
@@ -573,14 +657,25 @@ mod tests {
             "#[cfg_attr(all(test, not(debug_assertions)), no_panic)]\npub fn decode(b: &[u8]) -> u8 { 0 }\n\
              #[cfg(test)]\nmod tests { #[test] fn t() { assert_eq!(super::decode(&[]), 0); } }",
         );
-        assert_eq!(names(untested_tier_p(&[source]).unwrap()), Vec::<String>::new());
+        assert_eq!(
+            names(untested_tier_p(&[source]).unwrap()),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn a_marked_function_no_test_names_is_reported_with_its_file() {
-        let source = library("#[no_panic]\npub fn decode(b: &[u8]) -> u8 { 0 }\npub fn caller() -> u8 { decode(&[]) }");
+        let source = library(
+            "#[no_panic]\npub fn decode(b: &[u8]) -> u8 { 0 }\npub fn caller() -> u8 { decode(&[]) }",
+        );
         let untested = untested_tier_p(&[source]).unwrap();
-        assert_eq!(untested, [Untested { path: "src/read.rs".to_owned(), function: "decode".to_owned() }]);
+        assert_eq!(
+            untested,
+            [Untested {
+                path: "src/read.rs".to_owned(),
+                function: "decode".to_owned()
+            }]
+        );
     }
 
     /// An integration test compiles the crate without `cfg(test)`, so the
@@ -595,7 +690,10 @@ mod tests {
             text: "#[test] fn t() { let b = Bytes; assert_eq!(b.u32_le(), 0); }".to_owned(),
             role: SourceRole::Test,
         };
-        assert_eq!(names(untested_tier_p(&[source, test]).unwrap()), ["Bytes::u32_le"]);
+        assert_eq!(
+            names(untested_tier_p(&[source, test]).unwrap()),
+            ["Bytes::u32_le"]
+        );
     }
 
     #[test]
@@ -604,7 +702,10 @@ mod tests {
             "pub struct Bytes; impl Bytes {\n#[cfg_attr(all(test, not(debug_assertions)), no_panic)]\npub fn u32_le(&self) -> u32 { 0 } }\n\
              #[cfg(test)]\nmod tests { #[test] fn t() { let b = super::Bytes; assert_eq!(b.u32_le(), 0); } }",
         );
-        assert_eq!(names(untested_tier_p(&[source]).unwrap()), Vec::<String>::new());
+        assert_eq!(
+            names(untested_tier_p(&[source]).unwrap()),
+            Vec::<String>::new()
+        );
     }
 
     /// A marked helper a tested function calls is linked into the test
@@ -616,11 +717,18 @@ mod tests {
              pub fn decode(b: &[u8]) -> u8 { bits(b) }\n\
              #[cfg(test)]\nmod tests { #[test] fn t() { assert_eq!(super::decode(&[]), 0); } }",
         );
-        assert_eq!(names(untested_tier_p(&[source]).unwrap()), Vec::<String>::new());
+        assert_eq!(
+            names(untested_tier_p(&[source]).unwrap()),
+            Vec::<String>::new()
+        );
     }
 
     fn source(path: &str, text: &str) -> Source {
-        Source { path: path.to_owned(), text: text.to_owned(), role: SourceRole::Library }
+        Source {
+            path: path.to_owned(),
+            text: text.to_owned(),
+            role: SourceRole::Library,
+        }
     }
 
     const MARK: &str = "#[cfg_attr(all(test, not(debug_assertions)), no_panic)]";
@@ -636,11 +744,17 @@ mod tests {
                  #[cfg(test)]\nmod tests {{ use super::*; #[test] fn t() {{ assert_eq!(decode_header(&[]), 0); }} }}"
             ),
         );
-        let dbi = source("C:\\repo\\rusty_box_symbols\\src\\pdb\\dbi.rs", &format!("{MARK}\npub fn decode_header(b: &[u8]) -> u8 {{ 0 }}"));
+        let dbi = source(
+            "C:\\repo\\rusty_box_symbols\\src\\pdb\\dbi.rs",
+            &format!("{MARK}\npub fn decode_header(b: &[u8]) -> u8 {{ 0 }}"),
+        );
         let untested = untested_tier_p(&[cab, dbi]).unwrap();
         assert_eq!(
             untested,
-            [Untested { path: "C:\\repo\\rusty_box_symbols\\src\\pdb\\dbi.rs".to_owned(), function: "decode_header".to_owned() }]
+            [Untested {
+                path: "C:\\repo\\rusty_box_symbols\\src\\pdb\\dbi.rs".to_owned(),
+                function: "decode_header".to_owned()
+            }]
         );
     }
 
@@ -648,15 +762,27 @@ mod tests {
     /// only that one.
     #[test]
     fn a_call_through_a_use_import_reaches_its_target() {
-        let read = source("src/read.rs", &format!("{MARK}\npub fn decode(b: &[u8]) -> u8 {{ 0 }}"));
-        let other = source("src/other.rs", &format!("{MARK}\npub fn decode(b: &[u8]) -> u8 {{ 0 }}"));
+        let read = source(
+            "src/read.rs",
+            &format!("{MARK}\npub fn decode(b: &[u8]) -> u8 {{ 0 }}"),
+        );
+        let other = source(
+            "src/other.rs",
+            &format!("{MARK}\npub fn decode(b: &[u8]) -> u8 {{ 0 }}"),
+        );
         let cab = source(
             "src/cab/mod.rs",
             "use crate::read::decode;\npub fn open(b: &[u8]) -> u8 { decode(b) }\n\
              #[cfg(test)]\nmod tests { #[test] fn t() { assert_eq!(super::open(&[]), 0); } }",
         );
         let untested = untested_tier_p(&[read, other, cab]).unwrap();
-        assert_eq!(untested, [Untested { path: "src/other.rs".to_owned(), function: "decode".to_owned() }]);
+        assert_eq!(
+            untested,
+            [Untested {
+                path: "src/other.rs".to_owned(),
+                function: "decode".to_owned()
+            }]
+        );
     }
 
     /// `Bytes::u8(..)` through an imported type reaches `Bytes`'s method,
@@ -675,7 +801,13 @@ mod tests {
             "use crate::read::Bytes;\n#[cfg(test)]\nmod tests { use super::*; #[test] fn t() { assert_eq!(Bytes::u8(&Bytes), 0); } }",
         );
         let untested = untested_tier_p(&[read, msf]).unwrap();
-        assert_eq!(untested, [Untested { path: "src/read.rs".to_owned(), function: "Cursor::u8".to_owned() }]);
+        assert_eq!(
+            untested,
+            [Untested {
+                path: "src/read.rs".to_owned(),
+                function: "Cursor::u8".to_owned()
+            }]
+        );
     }
 
     /// `receiver.name()` does not say the receiver's type, so it reaches
@@ -690,12 +822,18 @@ mod tests {
                  #[cfg(test)]\nmod tests {{ #[test] fn t() {{ assert_eq!(super::Bytes.u8(), 0); }} }}"
             ),
         );
-        assert_eq!(names(untested_tier_p(&[read]).unwrap()), Vec::<String>::new());
+        assert_eq!(
+            names(untested_tier_p(&[read]).unwrap()),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn an_unmarked_function_is_not_swept() {
         let source = library("pub fn assemble(b: &[u8]) -> Vec<u8> { b.to_vec() }");
-        assert_eq!(names(untested_tier_p(&[source]).unwrap()), Vec::<String>::new());
+        assert_eq!(
+            names(untested_tier_p(&[source]).unwrap()),
+            Vec::<String>::new()
+        );
     }
 }

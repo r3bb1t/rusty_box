@@ -7,7 +7,7 @@
 #[cfg(all(test, not(debug_assertions)))]
 use no_panic::no_panic;
 
-use super::{short, PdbError};
+use super::{PdbError, short};
 use crate::read::{Bytes, Cursor};
 
 /// Whether bit `slot` is set in a little-endian bit vector of 32-bit words.
@@ -50,11 +50,17 @@ impl<'a> HashTable<'a> {
         let entries = cursor.u32_le().map_err(|source| short(what, source))?;
         let capacity = cursor.u32_le().map_err(|source| short(what, source))?;
         if capacity > limits.max_capacity || entries > capacity {
-            return Err(PdbError::TooMany { what, count: u64::from(capacity) });
+            return Err(PdbError::TooMany {
+                what,
+                count: u64::from(capacity),
+            });
         }
         let present_words = cursor.u32_le().map_err(|source| short(what, source))?;
         if present_words > capacity.wrapping_shr(5).wrapping_add(1) {
-            return Err(PdbError::TooMany { what, count: u64::from(present_words) });
+            return Err(PdbError::TooMany {
+                what,
+                count: u64::from(present_words),
+            });
         }
         let present = Bytes::new(
             cursor
@@ -65,7 +71,13 @@ impl<'a> HashTable<'a> {
         cursor
             .skip((deleted_words as usize).saturating_mul(4))
             .map_err(|source| short(what, source))?;
-        Ok(HashTable { cursor, present, capacity, slot: 0, what })
+        Ok(HashTable {
+            cursor,
+            present,
+            capacity,
+            slot: 0,
+            what,
+        })
     }
 
     /// The next present bucket, its value `value_len` bytes; `None` past
@@ -79,7 +91,11 @@ impl<'a> HashTable<'a> {
             }
             let what = self.what;
             let key = self.cursor.u32_le().map_err(|source| short(what, source))?;
-            let value = Bytes::new(self.cursor.bytes(value_len).map_err(|source| short(what, source))?);
+            let value = Bytes::new(
+                self.cursor
+                    .bytes(value_len)
+                    .map_err(|source| short(what, source))?,
+            );
             return Ok(Some(HashEntry { key, value }));
         }
         Ok(None)

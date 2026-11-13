@@ -38,15 +38,15 @@ pub mod snap;
 pub mod time;
 
 pub use engine::{
-    EngineCaps, EngineFault, EngineFaultKind, GpaOverlap, GpaPerms, GpaPlan, GpaPlanError,
-    GpaWindow, HostOffset, VpIndex, GUEST_PAGE,
+    EngineCaps, EngineFault, EngineFaultKind, GUEST_PAGE, GpaOverlap, GpaPerms, GpaPlan,
+    GpaPlanError, GpaWindow, HostOffset, VpIndex,
 };
 pub use float::FloatExt;
 pub use reset::ResetReason;
 pub use ring_buffer::RingBuffer;
 pub use run::{MixedProgress, Progress, RunBudget};
 pub use snap::{
-    SnapError, SnapRead, SnapResult, SnapWrite, SnapshotSection, MAX_COUNT, MAX_SECTION_LEN,
+    MAX_COUNT, MAX_SECTION_LEN, SnapError, SnapRead, SnapResult, SnapWrite, SnapshotSection,
 };
 pub use time::{
     ClockHz, Cycles, HostClock, HostInstant, MicrosPhase, TimeOverflow, VmClock, VmDuration,

@@ -53,7 +53,10 @@ pub enum AbsolutePointerEvent {
     /// The pointer is at this point of the guest's picture.
     MoveTo(rusty_box_core::input::pointer::PointerPos),
     /// A button went down or came up.
-    Button(rusty_box_core::input::pointer::PointerButton, rusty_box_core::input::KeyAction),
+    Button(
+        rusty_box_core::input::pointer::PointerButton,
+        rusty_box_core::input::KeyAction,
+    ),
     /// The wheel turned this many detents.
     Wheel(rusty_box_core::input::pointer::WheelSteps),
 }
@@ -156,7 +159,9 @@ pub fn translate_egui_mouse(
             // the next frame's delta is measured from the same pointer position
             // and the guest simply sees one coarser movement. A dropped BUTTON
             // edge is not, so it is worth saying when it happens.
-            tracing::debug!("host mouse event refused by the sink; motion coalesces into the next frame");
+            tracing::debug!(
+                "host mouse event refused by the sink; motion coalesces into the next frame"
+            );
         }
     }
     buttons
@@ -329,7 +334,9 @@ pub fn translate_egui_keyboard(
     });
     delivery.reconcile(sink, &mut guest, frame_end);
     if delivery.refused {
-        tracing::debug!("host key event refused by the sink; the rest of the frame was not delivered");
+        tracing::debug!(
+            "host key event refused by the sink; the rest of the frame was not delivered"
+        );
     }
     guest
 }
@@ -515,7 +522,8 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation> HostInputSink
                 self.hold_keyboard_input(HostKeyboardInput::Key(key, pressed))
             }
             HostInputEvent::Mouse(mouse) => {
-                self.mouse().motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons)
+                self.mouse()
+                    .motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons)
             }
         }
     }
@@ -568,7 +576,6 @@ impl HostInputBacklog {
     /// front end. One frame of typing is a few dozen, so this is roughly a
     /// minute of fast typing into a guest that is taking none of it.
     const KEYBOARD_CAPACITY: usize = 1024;
-
     /// Host serial bytes held per port on the same terms — a few screens of
     /// pasted text into a guest whose UART receiver never drains.
     const SERIAL_CAPACITY: usize = 4096;
@@ -589,8 +596,10 @@ impl HostInputBacklog {
     }
 
     pub(crate) fn push_keys(&mut self, keys: Vec<(crate::iodev::scancodes::BxKey, bool)>) {
-        self.keyboard
-            .extend(keys.into_iter().map(|(key, pressed)| HostKeyboardInput::Key(key, pressed)));
+        self.keyboard.extend(
+            keys.into_iter()
+                .map(|(key, pressed)| HostKeyboardInput::Key(key, pressed)),
+        );
     }
 
     pub(crate) fn push_scancodes(&mut self, scancodes: Vec<u8>) {
@@ -628,7 +637,9 @@ impl HostInputBacklog {
         let Some(held) = self.serial.get_mut(port) else {
             return 0;
         };
-        let taken = bytes.len().min(Self::SERIAL_CAPACITY.saturating_sub(held.len()));
+        let taken = bytes
+            .len()
+            .min(Self::SERIAL_CAPACITY.saturating_sub(held.len()));
         held.extend(&bytes[..taken]);
         taken
     }
@@ -693,12 +704,16 @@ impl HostInputSink for RecordingSink {
 
 #[cfg(all(test, feature = "gui-egui"))]
 mod egui_keyboard_tests {
-    use super::{translate_egui_keyboard, HeldModifiers, HostInputEvent, HostInputSink, RecordingSink};
-    use crate::iodev::scancodes::BxKey;
     use alloc::string::ToString;
     use alloc::vec;
     use alloc::vec::Vec;
+
     use egui::{Event, Key, Modifiers};
+
+    use super::{
+        HeldModifiers, HostInputEvent, HostInputSink, RecordingSink, translate_egui_keyboard,
+    };
+    use crate::iodev::scancodes::BxKey;
 
     fn frame(events: Vec<Event>, modifiers: Modifiers) -> egui::InputState {
         let mut input = egui::InputState::default();
@@ -783,7 +798,10 @@ mod egui_keyboard_tests {
     #[test]
     fn without_a_physical_key_the_logical_key_is_forwarded() {
         let mut sink = RecordingSink::default();
-        let mut input = frame(vec![key(Key::Enter, None, true, Modifiers::NONE)], Modifiers::NONE);
+        let mut input = frame(
+            vec![key(Key::Enter, None, true, Modifiers::NONE)],
+            Modifiers::NONE,
+        );
 
         translate_egui_keyboard(&mut input, HeldModifiers::default(), &mut sink);
 
@@ -898,7 +916,12 @@ mod egui_keyboard_tests {
     fn a_modifiers_own_key_event_is_not_forwarded_twice() {
         let mut sink = RecordingSink::default();
         let mut input = frame(
-            vec![key(Key::ShiftLeft, Some(Key::ShiftLeft), true, Modifiers::SHIFT)],
+            vec![key(
+                Key::ShiftLeft,
+                Some(Key::ShiftLeft),
+                true,
+                Modifiers::SHIFT,
+            )],
             Modifiers::SHIFT,
         );
 

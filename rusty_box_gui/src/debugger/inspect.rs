@@ -9,15 +9,15 @@ use rusty_box::cpu::{CodeSize, CpuDebugView, Instrumentation};
 use rusty_box::emulator::{Emulator, SliceEngine};
 
 use super::frames::FramesRead;
-use super::guest::{vmx_guest_view, GuestMemory, GuestRead, PausedCpu, Root};
-use super::kernel_layout::{same_layouts, KernelLayout};
+use super::guest::{GuestMemory, GuestRead, PausedCpu, Root, vmx_guest_view};
+use super::kernel_layout::{KernelLayout, same_layouts};
 use super::module_identity::GuestIdentity;
-use super::xref::decode::{bare_displacement, branch_target, has_no_index};
 use super::windows::{
-    read_thread_view, read_windows_finding, FindElsewhere, KernelLayouts, LiveTeb, ModulesElsewhere, ReadThrough,
-    SystemListing, SystemView,
-    ThreadView, ThreadViewRead, ViewMiss, ViewTarget, WindowsDiscovery,
+    FindElsewhere, KernelLayouts, LiveTeb, ModulesElsewhere, ReadThrough, SystemListing,
+    SystemView, ThreadView, ThreadViewRead, ViewMiss, ViewTarget, WindowsDiscovery,
+    read_thread_view, read_windows_finding,
 };
+use super::xref::decode::{bare_displacement, branch_target, has_no_index};
 
 pub(crate) const ROW_BYTES: usize = 16;
 /// The low bits a row-aligned address clears.
@@ -37,7 +37,9 @@ pub(crate) enum AddressSpace {
     Linear,
     /// Another process's linear space, read through its CR3 — so a process
     /// other than the running one can be browsed.
-    Process { cr3: u64 },
+    Process {
+        cr3: u64,
+    },
 }
 
 /// An address in one of the spaces the page reads (R4).
@@ -64,8 +66,13 @@ pub(crate) enum ViewContext {
     Live,
     /// A process: its first thread with saved user state, or the live
     /// processor when it is the process that runs.
-    Process { eprocess: u64 },
-    Thread { eprocess: u64, tid: u64 },
+    Process {
+        eprocess: u64,
+    },
+    Thread {
+        eprocess: u64,
+        tid: u64,
+    },
 }
 
 /// Where the code pane reads: at RIP, or at an address the owner opened (a
@@ -168,9 +175,11 @@ impl SymbolIndex {
     /// the width test keeps a kernel module near the top of memory from
     /// wrapping.
     pub(crate) fn module_at(&self, address: u64) -> Option<&SymModule> {
-        self.modules
-            .iter()
-            .find(|module| address.checked_sub(module.base).is_some_and(|offset| offset < module.size))
+        self.modules.iter().find(|module| {
+            address
+                .checked_sub(module.base)
+                .is_some_and(|offset| offset < module.size)
+        })
     }
 
     /// `address` named against the module that contains it, if any.
@@ -355,7 +364,10 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         Some(guest) => vmx_guest_view(guest, &shown),
         None => shown,
     };
-    let mut cpu = PausedCpu { cpu: &mut cpu, vmx_guest };
+    let mut cpu = PausedCpu {
+        cpu: &mut cpu,
+        vmx_guest,
+    };
     // What was read of the guest's structures is carried over only for the
     // same processor, the same listing, the same point of view, the same
     // kernel layouts and the same binaries looked for.
@@ -425,7 +437,12 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         },
     };
     let memory = read_memory(&mut cpu, start);
-    let stack = read_stack(&mut cpu, vantage.space, vantage.rsp, slot_bytes(vantage.size));
+    let stack = read_stack(
+        &mut cpu,
+        vantage.space,
+        vantage.rsp,
+        slot_bytes(vantage.size),
+    );
     let structures = match carried {
         Some(last) => GuestStructures {
             process: last.process.clone(),
@@ -442,8 +459,18 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
                 Viewing::Thread(thread) => Some(thread.cr3),
                 Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => None,
             };
-            let find = FindElsewhere { names: binaries, shown };
-            let windows = read_windows_finding(&mut cpu.walked(), &walked_view, view.system, find, discovery, layout);
+            let find = FindElsewhere {
+                names: binaries,
+                shown,
+            };
+            let windows = read_windows_finding(
+                &mut cpu.walked(),
+                &walked_view,
+                view.system,
+                find,
+                discovery,
+                layout,
+            );
             match &viewing {
                 // The view's own process names its addresses.
                 Viewing::Thread(thread) => GuestStructures {
@@ -465,7 +492,14 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             }
         }
     };
-    let GuestStructures { process, symbols, system, layouts, through, elsewhere } = structures;
+    let GuestStructures {
+        process,
+        symbols,
+        system,
+        layouts,
+        through,
+        elsewhere,
+    } = structures;
     let memory_space = match start.space {
         AddressSpace::Process { cr3 } => Some(cr3),
         AddressSpace::Linear | AddressSpace::Physical => None,
@@ -539,10 +573,7 @@ const MAX_IMAGE_PATH_UNITS: u16 = 1024;
 /// `IA32_KERNEL_GS_BASE` after `SWAPGS`. `None` for a guest that is not
 /// Windows, a kernel thread with no user side, a 32-bit kernel, or anything
 /// that does not read as these structures.
-fn windows_image_path<G: GuestMemory>(
-    cpu: &mut G,
-    view: &CpuDebugView,
-) -> Option<String> {
+fn windows_image_path<G: GuestMemory>(cpu: &mut G, view: &CpuDebugView) -> Option<String> {
     use rusty_box::cpu::ExecutionMode;
     let user = view.registers.cpl == 3;
     match view.mode {
@@ -570,34 +601,33 @@ fn user_pointer_64(value: u64) -> Option<u64> {
     (value != 0 && value < 0x0000_8000_0000_0000).then_some(value)
 }
 
-fn read_u64<G: GuestMemory>(
-    cpu: &mut G,
-    address: u64,
-) -> Option<u64> {
-    let at = GuestAddress { space: AddressSpace::Linear, value: address };
+fn read_u64<G: GuestMemory>(cpu: &mut G, address: u64) -> Option<u64> {
+    let at = GuestAddress {
+        space: AddressSpace::Linear,
+        value: address,
+    };
     let bytes: [u8; 8] = read_prefix(cpu, at, 8).try_into().ok()?;
     Some(u64::from_le_bytes(bytes))
 }
 
-fn read_u32<G: GuestMemory>(
-    cpu: &mut G,
-    address: u64,
-) -> Option<u32> {
-    let at = GuestAddress { space: AddressSpace::Linear, value: address };
+fn read_u32<G: GuestMemory>(cpu: &mut G, address: u64) -> Option<u32> {
+    let at = GuestAddress {
+        space: AddressSpace::Linear,
+        value: address,
+    };
     let bytes: [u8; 4] = read_prefix(cpu, at, 4).try_into().ok()?;
     Some(u32::from_le_bytes(bytes))
 }
 
 /// A `UNICODE_STRING`'s text, given its length in bytes and its buffer.
-fn read_unicode<G: GuestMemory>(
-    cpu: &mut G,
-    length_bytes: u16,
-    buffer: u64,
-) -> Option<String> {
+fn read_unicode<G: GuestMemory>(cpu: &mut G, length_bytes: u16, buffer: u64) -> Option<String> {
     if length_bytes == 0 || length_bytes % 2 != 0 || length_bytes / 2 > MAX_IMAGE_PATH_UNITS {
         return None;
     }
-    let at = GuestAddress { space: AddressSpace::Linear, value: buffer };
+    let at = GuestAddress {
+        space: AddressSpace::Linear,
+        value: buffer,
+    };
     let bytes = read_prefix(cpu, at, usize::from(length_bytes));
     if bytes.len() != usize::from(length_bytes) {
         return None;
@@ -612,10 +642,7 @@ fn read_unicode<G: GuestMemory>(
 
 /// x64 TEB → PEB at +0x60, PEB → ProcessParameters at +0x20, and
 /// ImagePathName (Length at +0x60, Buffer at +0x68) in the parameters.
-fn image_path_64<G: GuestMemory>(
-    cpu: &mut G,
-    teb: u64,
-) -> Option<String> {
+fn image_path_64<G: GuestMemory>(cpu: &mut G, teb: u64) -> Option<String> {
     let teb = user_pointer_64(teb)?;
     let peb = user_pointer_64(read_u64(cpu, teb.wrapping_add(0x60))?)?;
     let parameters = user_pointer_64(read_u64(cpu, peb.wrapping_add(0x20))?)?;
@@ -626,10 +653,7 @@ fn image_path_64<G: GuestMemory>(
 
 /// x86 TEB → PEB at +0x30, PEB → ProcessParameters at +0x10, and
 /// ImagePathName (Length at +0x38, Buffer at +0x3C) in the parameters.
-fn image_path_32<G: GuestMemory>(
-    cpu: &mut G,
-    teb: u64,
-) -> Option<String> {
+fn image_path_32<G: GuestMemory>(cpu: &mut G, teb: u64) -> Option<String> {
     let pointer = |value: u32| (value != 0).then_some(u64::from(value));
     let teb = pointer(u32::try_from(teb).ok()?)?;
     let peb = pointer(read_u32(cpu, teb.wrapping_add(0x30))?)?;
@@ -640,11 +664,7 @@ fn image_path_32<G: GuestMemory>(
 }
 
 /// Reads `buf.len()` bytes at `at`, which lie within one page.
-fn read_within_page<G: GuestMemory>(
-    cpu: &mut G,
-    at: GuestAddress,
-    buf: &mut [u8],
-) -> Readable {
+fn read_within_page<G: GuestMemory>(cpu: &mut G, at: GuestAddress, buf: &mut [u8]) -> Readable {
     let translated = match at.space {
         AddressSpace::Physical => Some(at.value),
         AddressSpace::Linear => cpu.translate(Root::Live, at.value),
@@ -661,16 +681,13 @@ fn read_within_page<G: GuestMemory>(
 
 /// The readable bytes from `at` up to `len`, stopping at the first page that
 /// does not read.
-fn read_prefix<G: GuestMemory>(
-    cpu: &mut G,
-    at: GuestAddress,
-    len: usize,
-) -> Vec<u8> {
+fn read_prefix<G: GuestMemory>(cpu: &mut G, at: GuestAddress, len: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(len);
     let mut address = at.value;
     while bytes.len() < len {
         // The bytes left in `address`'s page: 1 to `PAGE_BYTES`.
-        let in_page = usize::try_from(PAGE_BYTES.wrapping_sub(address & (PAGE_BYTES - 1))).unwrap_or(len);
+        let in_page =
+            usize::try_from(PAGE_BYTES.wrapping_sub(address & (PAGE_BYTES - 1))).unwrap_or(len);
         let mut piece = vec![0u8; in_page.min(len.saturating_sub(bytes.len()))];
         let at_piece = GuestAddress {
             space: at.space,
@@ -726,7 +743,11 @@ pub(crate) fn decode_lines(bytes: &[u8], address: u64, size: CodeSize) -> Vec<Co
             }
             Err(_) => None,
         };
-        let line = decoded.unwrap_or(DecodedLine { length: 1, text: CodeText::Undecodable, target: None });
+        let line = decoded.unwrap_or(DecodedLine {
+            length: 1,
+            text: CodeText::Undecodable,
+            target: None,
+        });
         lines.push(CodeLine {
             address: at,
             bytes: rest.get(..line.length).unwrap_or(rest).to_vec(),
@@ -762,7 +783,8 @@ fn target_of(instruction: &Instruction, next: u64, size: CodeSize) -> Option<u64
         },
         CodeSize::Bits64 => match instruction.get_ia_opcode() {
             Opcode::LeaGqM | Opcode::LeaGdM => {
-                let rip_relative = instruction.base_reg() == GprIndex::Rip && has_no_index(instruction);
+                let rip_relative =
+                    instruction.base_reg() == GprIndex::Rip && has_no_index(instruction);
                 let address = if rip_relative {
                     next.wrapping_add(i64::from(instruction.displ32s()) as u64)
                 } else {
@@ -770,18 +792,20 @@ fn target_of(instruction: &Instruction, next: u64, size: CodeSize) -> Option<u64
                 };
                 // A 32-bit address size or destination keeps the low half
                 // (Bochs LEA_GdM).
-                let narrow = instruction.as64_l() == 0 || instruction.get_ia_opcode() == Opcode::LeaGdM;
-                Some(if narrow { address & 0xFFFF_FFFF } else { address })
+                let narrow =
+                    instruction.as64_l() == 0 || instruction.get_ia_opcode() == Opcode::LeaGdM;
+                Some(if narrow {
+                    address & 0xFFFF_FFFF
+                } else {
+                    address
+                })
             }
             _ => None,
         },
     }
 }
 
-fn read_memory<G: GuestMemory>(
-    cpu: &mut G,
-    start: GuestAddress,
-) -> MemoryWindow {
+fn read_memory<G: GuestMemory>(cpu: &mut G, start: GuestAddress) -> MemoryWindow {
     let aligned = GuestAddress {
         space: start.space,
         value: start.value & !ROW_MASK,
@@ -789,7 +813,9 @@ fn read_memory<G: GuestMemory>(
     let mut rows = Vec::with_capacity(MEMORY_ROWS);
     for row in 0..MEMORY_ROWS as u64 {
         // At most `MEMORY_ROWS` rows of `ROW_BYTES`: the product is small.
-        let address = aligned.value.wrapping_add(row.wrapping_mul(ROW_BYTES as u64));
+        let address = aligned
+            .value
+            .wrapping_add(row.wrapping_mul(ROW_BYTES as u64));
         let mut bytes = [0u8; ROW_BYTES];
         let at = GuestAddress {
             space: aligned.space,
@@ -821,7 +847,10 @@ fn read_stack<G: GuestMemory>(
     for slot in 0..STACK_SLOTS {
         // At most `STACK_SLOTS` slots of 4 or 8 bytes: the product is small.
         let address = rsp.wrapping_add(slot.wrapping_mul(width) as u64);
-        let at = GuestAddress { space, value: address };
+        let at = GuestAddress {
+            space,
+            value: address,
+        };
         let bytes = read_prefix(cpu, at, width);
         let value = (bytes.len() == width).then(|| {
             let mut raw = [0u8; 8];
@@ -837,13 +866,17 @@ fn read_stack<G: GuestMemory>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box::cpu::{CpuSetupMode, X86Reg};
     use rusty_box::emulator::{Emulator, EmulatorConfig};
 
+    use super::*;
+
     #[test]
     fn a_linear_address_is_formed_as_the_processor_forms_it() {
-        assert_eq!(linear_of(0xFFFF_0000, 0xFFF0, CodeSize::Bits16), 0xFFFF_FFF0);
+        assert_eq!(
+            linear_of(0xFFFF_0000, 0xFFF0, CodeSize::Bits16),
+            0xFFFF_FFF0
+        );
         assert_eq!(
             linear_of(0x1000, 0xFFFF_FFFF, CodeSize::Bits32),
             0xFFF,
@@ -869,9 +902,11 @@ mod tests {
             (lines[1].address, lines[1].bytes.as_slice()),
             (0x7C01, &[0xEB, 0xFE][..])
         );
-        assert!(lines
-            .iter()
-            .all(|line| matches!(line.text, CodeText::Opcode(_))));
+        assert!(
+            lines
+                .iter()
+                .all(|line| matches!(line.text, CodeText::Opcode(_)))
+        );
     }
 
     #[test]
@@ -973,13 +1008,33 @@ mod tests {
         let code = CpuSetupMode::FlatLong64.first_free_physical_address();
         machine.mem_write(code, &[0x90, 0x90, 0xF4]).expect("write");
         machine.reg_write(X86Reg::Rip, code);
-        let elsewhere = GuestAddress { space: AddressSpace::Linear, value: code + 2 };
-        let request = ViewRequest { code: CodeTarget::At(elsewhere), ..ViewRequest::default() };
-        let snapshot = read_snapshot(&mut machine, &request, &[], &mut WindowsDiscovery::default(), None, None);
+        let elsewhere = GuestAddress {
+            space: AddressSpace::Linear,
+            value: code + 2,
+        };
+        let request = ViewRequest {
+            code: CodeTarget::At(elsewhere),
+            ..ViewRequest::default()
+        };
+        let snapshot = read_snapshot(
+            &mut machine,
+            &request,
+            &[],
+            &mut WindowsDiscovery::default(),
+            None,
+            None,
+        );
         assert_eq!(snapshot.code[0].address, code + 2);
         assert_eq!(snapshot.code_at, CodeTarget::At(elsewhere));
         assert_eq!(snapshot.rip, code, "the pause stays where RIP is");
-        let at_rip = read_snapshot(&mut machine, &ViewRequest::default(), &[], &mut WindowsDiscovery::default(), None, None);
+        let at_rip = read_snapshot(
+            &mut machine,
+            &ViewRequest::default(),
+            &[],
+            &mut WindowsDiscovery::default(),
+            None,
+            None,
+        );
         assert_eq!(at_rip.code[0].address, code);
         assert_eq!(at_rip.code_at, CodeTarget::Rip);
     }
@@ -1007,14 +1062,28 @@ mod tests {
     fn an_unmoved_guest_carries_its_structure_reads_into_the_next_snapshot() {
         let mut machine = long_mode_machine();
         let mut discovery = WindowsDiscovery::default();
-        let mut first = read_snapshot(&mut machine, &ViewRequest::default(), &[], &mut discovery, None, None);
+        let mut first = read_snapshot(
+            &mut machine,
+            &ViewRequest::default(),
+            &[],
+            &mut discovery,
+            None,
+            None,
+        );
         // A marker no real read could produce, so a re-read would drop it.
         first.process = Some("carried.exe".to_owned());
         let paged = ViewRequest {
             memory: MemoryTarget::Rsp,
             ..ViewRequest::default()
         };
-        let carried = read_snapshot(&mut machine, &paged, &[], &mut discovery, Some(&first), None);
+        let carried = read_snapshot(
+            &mut machine,
+            &paged,
+            &[],
+            &mut discovery,
+            Some(&first),
+            None,
+        );
         assert_eq!(carried.process.as_deref(), Some("carried.exe"));
         // A different listing asked for is read afresh.
         let kernel = SystemView::KernelModules {
@@ -1025,12 +1094,26 @@ mod tests {
             system: kernel,
             ..ViewRequest::default()
         };
-        let read = read_snapshot(&mut machine, &listed, &[], &mut discovery, Some(&first), None);
+        let read = read_snapshot(
+            &mut machine,
+            &listed,
+            &[],
+            &mut discovery,
+            Some(&first),
+            None,
+        );
         assert_eq!(read.process, None);
         assert_eq!(read.asked, kernel);
         // So is a pause that looks for other binaries in the other processes.
         let binaries = ["prog.exe".to_owned()];
-        let read = read_snapshot(&mut machine, &paged, &binaries, &mut discovery, Some(&first), None);
+        let read = read_snapshot(
+            &mut machine,
+            &paged,
+            &binaries,
+            &mut discovery,
+            Some(&first),
+            None,
+        );
         assert_eq!(read.process, None);
     }
 
@@ -1041,7 +1124,14 @@ mod tests {
         use crate::symbols::kernel::tests::kernel_identity;
         let mut machine = long_mode_machine();
         let mut discovery = WindowsDiscovery::default();
-        let mut first = read_snapshot(&mut machine, &ViewRequest::default(), &[], &mut discovery, None, None);
+        let mut first = read_snapshot(
+            &mut machine,
+            &ViewRequest::default(),
+            &[],
+            &mut discovery,
+            None,
+            None,
+        );
         first.process = Some("carried.exe".to_owned());
         let layout = Arc::new(KernelLayout {
             kernel: kernel_identity(),
@@ -1053,7 +1143,14 @@ mod tests {
             object_era: None,
             failures: Vec::new(),
         });
-        let read = read_snapshot(&mut machine, &ViewRequest::default(), &[], &mut discovery, Some(&first), Some(&layout));
+        let read = read_snapshot(
+            &mut machine,
+            &ViewRequest::default(),
+            &[],
+            &mut discovery,
+            Some(&first),
+            Some(&layout),
+        );
         assert_eq!(read.process, None);
         assert!(read.layout.is_some_and(|read| Arc::ptr_eq(&read, &layout)));
     }
@@ -1068,13 +1165,24 @@ mod tests {
         machine.mem_write(code, &[0x90, 0xF4]).expect("write");
         machine.reg_write(X86Reg::Rip, code);
         let request = ViewRequest {
-            context: ViewContext::Process { eprocess: 0xFFFF_FA80_0000_1000 },
+            context: ViewContext::Process {
+                eprocess: 0xFFFF_FA80_0000_1000,
+            },
             ..ViewRequest::default()
         };
-        let snapshot =
-            read_snapshot(&mut machine, &request, &[], &mut WindowsDiscovery::default(), None, None);
+        let snapshot = read_snapshot(
+            &mut machine,
+            &request,
+            &[],
+            &mut WindowsDiscovery::default(),
+            None,
+            None,
+        );
         assert!(
-            matches!(snapshot.viewing, Viewing::Miss(ViewMiss::NoWindowsKernel(KernelMiss::NoKpcr))),
+            matches!(
+                snapshot.viewing,
+                Viewing::Miss(ViewMiss::NoWindowsKernel(KernelMiss::NoKpcr))
+            ),
             "{:?}",
             snapshot.viewing
         );
@@ -1092,7 +1200,13 @@ mod tests {
         let mut view = machine.debug_cpu(0).expect("the boot processor").view();
         view.registers.cpl = 3;
         view.segment_bases.gs = 0x7FF_FFFD_E000;
-        assert_eq!(live_tebs(&[view]), [LiveTeb { cpu: 0, teb: 0x7FF_FFFD_E000 }]);
+        assert_eq!(
+            live_tebs(&[view]),
+            [LiveTeb {
+                cpu: 0,
+                teb: 0x7FF_FFFD_E000
+            }]
+        );
         view.registers.cpl = 0;
         assert!(live_tebs(&[view]).is_empty());
     }
@@ -1103,13 +1217,30 @@ mod tests {
     fn a_different_view_context_is_read_afresh() {
         let mut machine = long_mode_machine();
         let mut discovery = WindowsDiscovery::default();
-        let mut first = read_snapshot(&mut machine, &ViewRequest::default(), &[], &mut discovery, None, None);
+        let mut first = read_snapshot(
+            &mut machine,
+            &ViewRequest::default(),
+            &[],
+            &mut discovery,
+            None,
+            None,
+        );
         first.process = Some("carried.exe".to_owned());
         let viewing = ViewRequest {
-            context: ViewContext::Thread { eprocess: 0xFFFF_FA80_0000_1000, tid: 0x1A4 },
+            context: ViewContext::Thread {
+                eprocess: 0xFFFF_FA80_0000_1000,
+                tid: 0x1A4,
+            },
             ..ViewRequest::default()
         };
-        let read = read_snapshot(&mut machine, &viewing, &[], &mut discovery, Some(&first), None);
+        let read = read_snapshot(
+            &mut machine,
+            &viewing,
+            &[],
+            &mut discovery,
+            Some(&first),
+            None,
+        );
         assert_eq!(read.process, None);
     }
 
@@ -1127,12 +1258,27 @@ mod tests {
         ];
         let lines = decode_lines(&code, at, CodeSize::Bits64);
         let targets: Vec<Option<u64>> = lines.iter().take(4).map(|line| line.target).collect();
-        assert_eq!(targets, [Some(at + 5 + 0xBB), Some(at + 5), Some(at + 14 - 0x1000), None]);
+        assert_eq!(
+            targets,
+            [
+                Some(at + 5 + 0xBB),
+                Some(at + 5),
+                Some(at + 14 - 0x1000),
+                None
+            ]
+        );
         // 32-bit code wraps at 4 GiB.
-        let lines = decode_lines(&[0xE9, 0x10, 0x00, 0x00, 0x00], 0xFFFF_FFF0, CodeSize::Bits32);
+        let lines = decode_lines(
+            &[0xE9, 0x10, 0x00, 0x00, 0x00],
+            0xFFFF_FFF0,
+            CodeSize::Bits32,
+        );
         assert_eq!(lines[0].target, Some(0x05));
         // A 16-bit branch's target is an offset in CS: none is given.
-        assert_eq!(decode_lines(&[0xEB, 0x00], 0x7C00, CodeSize::Bits16)[0].target, None);
+        assert_eq!(
+            decode_lines(&[0xEB, 0x00], 0x7C00, CodeSize::Bits16)[0].target,
+            None
+        );
     }
 
     #[test]
@@ -1166,11 +1312,15 @@ mod tests {
             })
         );
         assert_eq!(
-            index.module_at(0x7FEF_0000_0000).map(|module| module.name.as_str()),
+            index
+                .module_at(0x7FEF_0000_0000)
+                .map(|module| module.name.as_str()),
             Some("ntdll.dll")
         );
         assert_eq!(
-            index.resolve(0xFFFF_F800_0100_0100).map(|symbol| symbol.space),
+            index
+                .resolve(0xFFFF_F800_0100_0100)
+                .map(|symbol| symbol.space),
             Some(ModuleSpace::Kernel)
         );
         // Outside every module, and just past one's end, name nothing.

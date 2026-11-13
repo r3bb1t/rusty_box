@@ -8,18 +8,18 @@
 use std::collections::BTreeMap;
 
 use super::dbi::{self, OmapEntry};
-use super::info;
 use super::lines::{self, DEBUG_S_FILECHKSMS, DEBUG_S_LINES};
-use super::symbols::{self, S_GDATA32, S_GPROC32, S_GPROC32_ID, S_LDATA32, S_LPROC32, S_LPROC32_ID, S_PUB32};
-use super::{short, PdbError, PdbFile};
+use super::symbols::{
+    self, S_GDATA32, S_GPROC32, S_GPROC32_ID, S_LDATA32, S_LPROC32, S_LPROC32_ID, S_PUB32,
+};
+use super::{PdbError, PdbFile, info, short, source_block};
 use crate::identity::{Guid, TablesIdentity};
-use crate::read::Bytes;
-use super::source_block;
 use crate::line_index::{CodeSpan, LineIndex};
+use crate::read::Bytes;
 use crate::tables::{
-    push, ChecksumKind, EmbeddedSource, FileChecksum, FrameScope, GlobalVariable, LayoutError, LineRow, LocalsError,
-    MemberLocation, ParseError, ProcedureSpan, ResolvedLine, SourceFile, SourceLine, SymbolHit, TypeError, TypeLayout,
-    TypeShape,
+    ChecksumKind, EmbeddedSource, FileChecksum, FrameScope, GlobalVariable, LayoutError, LineRow,
+    LocalsError, MemberLocation, ParseError, ProcedureSpan, ResolvedLine, SourceFile, SourceLine,
+    SymbolHit, TypeError, TypeLayout, TypeShape, push,
 };
 use crate::units::{Rva, TypeRef};
 
@@ -87,7 +87,8 @@ impl Addresses {
         match &self.omap {
             Some(_) => true,
             None => {
-                let starts_at_or_below = |rva: u64| self.sections.iter().filter(|start| **start <= rva).count();
+                let starts_at_or_below =
+                    |rva: u64| self.sections.iter().filter(|start| **start <= rva).count();
                 starts_at_or_below(a) == starts_at_or_below(b)
             }
         }
@@ -165,14 +166,26 @@ fn read_embedded(
             continue;
         };
         if entry.compression != 0 {
-            embedded.insert(place, EmbeddedSource::Compressed { kind: entry.compression });
+            embedded.insert(
+                place,
+                EmbeddedSource::Compressed {
+                    kind: entry.compression,
+                },
+            );
             continue;
         }
         let Some(virtual_name) = lines::names_string(names, entry.virtual_file) else {
             continue;
         };
         let mut wanted = Vec::new();
-        if wanted.try_reserve_exact(EMBEDDED_STREAM_PREFIX.len().saturating_add(virtual_name.len())).is_err() {
+        if wanted
+            .try_reserve_exact(
+                EMBEDDED_STREAM_PREFIX
+                    .len()
+                    .saturating_add(virtual_name.len()),
+            )
+            .is_err()
+        {
             continue;
         }
         wanted.extend_from_slice(EMBEDDED_STREAM_PREFIX);
@@ -186,7 +199,10 @@ fn read_embedded(
         if bytes.len() > MAX_EMBEDDED_FILE_BYTES {
             continue;
         }
-        let Some(after) = total.checked_add(bytes.len()).filter(|after| *after <= MAX_EMBEDDED_BYTES) else {
+        let Some(after) = total
+            .checked_add(bytes.len())
+            .filter(|after| *after <= MAX_EMBEDDED_BYTES)
+        else {
             continue;
         };
         total = after;
@@ -226,15 +242,20 @@ fn optional(file: &mut PdbFile<'_>, index: Option<u16>) -> Result<Option<Vec<u8>
 pub fn pdb_identity(bytes: &[u8]) -> Result<TablesIdentity, ParseError> {
     let mut file = PdbFile::open(bytes)?;
     let info_stream = required(&mut file, INFO_STREAM, "PDB info")?;
-    let head = info::decode_head(Bytes::new(&info_stream)).map_err(|source| short("PDB info", source))?;
+    let head =
+        info::decode_head(Bytes::new(&info_stream)).map_err(|source| short("PDB info", source))?;
     let dbi_stream = required(&mut file, DBI_STREAM, "DBI")?;
     // The compiler's own PDB beside a build's objects has an info stream
     // and no DBI header: nothing links to it.
     if dbi_stream.len() < dbi::HEADER_BYTES {
         return Err(ParseError::CompilerTypes);
     }
-    let header = dbi::decode_header(Bytes::new(&dbi_stream)).map_err(|source| short("DBI header", source))?;
-    Ok(TablesIdentity::Pdb { guid: head.guid, age: header.age })
+    let header = dbi::decode_header(Bytes::new(&dbi_stream))
+        .map_err(|source| short("DBI header", source))?;
+    Ok(TablesIdentity::Pdb {
+        guid: head.guid,
+        age: header.age,
+    })
 }
 
 fn text(name: &[u8]) -> String {
@@ -258,7 +279,8 @@ impl PdbTables {
     pub fn parse(bytes: &[u8]) -> Result<PdbTables, ParseError> {
         let mut file = PdbFile::open(bytes)?;
         let info_stream = required(&mut file, INFO_STREAM, "PDB info")?;
-        let head = info::decode_head(Bytes::new(&info_stream)).map_err(|source| short("PDB info", source))?;
+        let head = info::decode_head(Bytes::new(&info_stream))
+            .map_err(|source| short("PDB info", source))?;
         let dbi_stream = required(&mut file, DBI_STREAM, "DBI")?;
         let dbi_bytes = Bytes::new(&dbi_stream);
         let header = dbi::decode_header(dbi_bytes).map_err(|source| short("DBI header", source))?;
@@ -267,18 +289,26 @@ impl PdbTables {
             (Some(map), Some(original)) => {
                 let sections = optional(&mut file, Some(original))?.unwrap_or_default();
                 let map = optional(&mut file, Some(map))?.unwrap_or_default();
-                Addresses { sections: dbi::section_rvas(&sections)?, omap: Some(dbi::omap(&map)?) }
+                Addresses {
+                    sections: dbi::section_rvas(&sections)?,
+                    omap: Some(dbi::omap(&map)?),
+                }
             }
             (Some(_) | None, Some(_) | None) => {
                 let sections = optional(&mut file, streams.section_headers)?.unwrap_or_default();
-                Addresses { sections: dbi::section_rvas(&sections)?, omap: None }
+                Addresses {
+                    sections: dbi::section_rvas(&sections)?,
+                    omap: None,
+                }
             }
         };
         // TPI is stream 2. A PDB whose type records do not read still names
         // addresses; only its layouts answer with the error.
         let types = match file.stream(2) {
             Ok(Some(stream)) => super::tpi::TypeTables::parse(stream),
-            Ok(None) => Err(LayoutError::Unreadable { what: "TPI stream (nil)" }),
+            Ok(None) => Err(LayoutError::Unreadable {
+                what: "TPI stream (nil)",
+            }),
             Err(_) => Err(LayoutError::Unreadable { what: "TPI stream" }),
         };
         let mut tables = PdbTables {
@@ -294,7 +324,10 @@ impl PdbTables {
             types,
             scopes: Vec::new(),
             scope_bytes: 0,
-            addresses: Addresses { sections: Vec::new(), omap: None },
+            addresses: Addresses {
+                sections: Vec::new(),
+                omap: None,
+            },
         };
         let mut rows = Vec::new();
         if header.symbol_records != NO_STREAM {
@@ -307,16 +340,23 @@ impl PdbTables {
             None => Vec::new(),
         };
         let span = dbi::modules_span(&header);
-        let modules = dbi_bytes.sub(span.at, span.len).map_err(|source| short("module list", source))?;
+        let modules = dbi_bytes
+            .sub(span.at, span.len)
+            .map_err(|source| short("module list", source))?;
         let mut at = 0usize;
         let mut count = 0usize;
         let mut file_index = BTreeMap::new();
         while at < modules.len() {
             count = count.saturating_add(1);
             if count > MAX_MODULES {
-                return Err(PdbError::TooMany { what: "modules", count: count as u64 }.into());
+                return Err(PdbError::TooMany {
+                    what: "modules",
+                    count: count as u64,
+                }
+                .into());
             }
-            let entry = dbi::decode_module(modules, at).map_err(|source| short("module entry", source))?;
+            let entry =
+                dbi::decode_module(modules, at).map_err(|source| short("module entry", source))?;
             at = entry.next;
             if entry.info.stream == NO_STREAM {
                 continue;
@@ -325,29 +365,47 @@ impl PdbTables {
                 continue;
             };
             let names = Bytes::new(&names);
-            let found = ModuleFindings { rows: &mut rows, file_index: &mut file_index };
+            let found = ModuleFindings {
+                rows: &mut rows,
+                file_index: &mut file_index,
+            };
             tables.read_module(&stream, &entry.info, &addresses, names, found)?;
         }
         tables.embedded = read_embedded(&mut file, &info_stream, Bytes::new(&names), &file_index);
         tables.addresses = addresses;
         tables.publics.sort_unstable_by_key(|named| named.rva);
-        tables.globals.sort_unstable_by(|a, b| a.name.cmp(&b.name).then(a.rva.cmp(&b.rva)));
-        tables.procedures.sort_unstable_by_key(|procedure| procedure.rva);
+        tables
+            .globals
+            .sort_unstable_by(|a, b| a.name.cmp(&b.name).then(a.rva.cmp(&b.rva)));
+        tables
+            .procedures
+            .sort_unstable_by_key(|procedure| procedure.rva);
         let mut spans = Vec::new();
         spans
             .try_reserve_exact(tables.procedures.len())
-            .map_err(|_| ParseError::Allocation { what: "procedure spans" })?;
+            .map_err(|_| ParseError::Allocation {
+                what: "procedure spans",
+            })?;
         spans.extend(tables.procedures.iter().map(|procedure| CodeSpan {
             start: procedure.rva,
             end: procedure.rva.saturating_add(procedure.len),
         }));
         tables.lines = LineIndex::build(rows, &spans)?;
         for procedure in &tables.procedures {
-            push(&mut tables.by_name, Named { name: procedure.name.clone(), rva: procedure.rva }, "name index")?;
+            push(
+                &mut tables.by_name,
+                Named {
+                    name: procedure.name.clone(),
+                    rva: procedure.rva,
+                },
+                "name index",
+            )?;
         }
         // Unstable sorts take no scratch buffer; the address breaks a tie
         // between namesakes as the procedures' own order would.
-        tables.by_name.sort_unstable_by(|a, b| a.name.cmp(&b.name).then(a.rva.cmp(&b.rva)));
+        tables
+            .by_name
+            .sort_unstable_by(|a, b| a.name.cmp(&b.name).then(a.rva.cmp(&b.rva)));
         Ok(tables)
     }
 
@@ -362,17 +420,38 @@ impl PdbTables {
             if !matches!(record.kind, S_PUB32 | S_GDATA32 | S_LDATA32) {
                 continue;
             }
-            let named = symbols::decode_named_address(record.data)
-                .map_err(|_| PdbError::BadRecord { what: "public symbol", at })?;
+            let named =
+                symbols::decode_named_address(record.data).map_err(|_| PdbError::BadRecord {
+                    what: "public symbol",
+                    at,
+                })?;
             let Some(rva) = addresses.rva(named.segment, named.offset) else {
                 continue;
             };
             let name = text(named.name);
             if matches!(record.kind, S_GDATA32 | S_LDATA32) {
-                let data = symbols::decode_data(record.data).map_err(|_| PdbError::BadRecord { what: "global data", at })?;
-                push(&mut self.globals, Global { name: name.clone(), rva, ty: data.ty }, "globals")?;
+                let data = symbols::decode_data(record.data).map_err(|_| PdbError::BadRecord {
+                    what: "global data",
+                    at,
+                })?;
+                push(
+                    &mut self.globals,
+                    Global {
+                        name: name.clone(),
+                        rva,
+                        ty: data.ty,
+                    },
+                    "globals",
+                )?;
             }
-            push(&mut self.by_name, Named { name: name.clone(), rva }, "name index")?;
+            push(
+                &mut self.by_name,
+                Named {
+                    name: name.clone(),
+                    rva,
+                },
+                "name index",
+            )?;
             push(&mut self.publics, Named { name, rva }, "publics")?;
         }
         Ok(())
@@ -390,24 +469,38 @@ impl PdbTables {
         let stream = Bytes::new(stream);
         // Symbols follow the 4-byte CodeView signature.
         let symbols_len = (module.symbol_bytes as usize).saturating_sub(4);
-        let records = stream.sub(4, symbols_len).map_err(|source| short("module symbols", source))?;
+        let records = stream
+            .sub(4, symbols_len)
+            .map_err(|source| short("module symbols", source))?;
         // The module's records are kept for its procedures' scopes while the
         // total stays within `MAX_SCOPE_BYTES`.
         let kept_as = u32::try_from(self.scopes.len()).ok();
         let keep = kept_as.is_some()
-            && self.scope_bytes.checked_add(records.len()).is_some_and(|total| total <= MAX_SCOPE_BYTES);
+            && self
+                .scope_bytes
+                .checked_add(records.len())
+                .is_some_and(|total| total <= MAX_SCOPE_BYTES);
         let mut kept_any = false;
         let mut at = 0usize;
         while at < records.len() {
-            let record = symbols::decode_record_header(records, at)
-                .map_err(|_| PdbError::BadRecord { what: "module symbol", at })?;
+            let record =
+                symbols::decode_record_header(records, at).map_err(|_| PdbError::BadRecord {
+                    what: "module symbol",
+                    at,
+                })?;
             let record_at = at;
             at = record.next;
-            if !matches!(record.kind, S_GPROC32 | S_LPROC32 | S_GPROC32_ID | S_LPROC32_ID) {
+            if !matches!(
+                record.kind,
+                S_GPROC32 | S_LPROC32 | S_GPROC32_ID | S_LPROC32_ID
+            ) {
                 continue;
             }
-            let procedure = symbols::decode_procedure(record.data)
-                .map_err(|_| PdbError::BadRecord { what: "procedure", at })?;
+            let procedure =
+                symbols::decode_procedure(record.data).map_err(|_| PdbError::BadRecord {
+                    what: "procedure",
+                    at,
+                })?;
             let Some(rva) = addresses.rva(procedure.segment, procedure.offset) else {
                 continue;
             };
@@ -418,7 +511,13 @@ impl PdbTables {
             kept_any |= scope.is_some();
             push(
                 &mut self.procedures,
-                Procedure { name: text(procedure.name), rva, len: u64::from(procedure.len), ty: procedure.ty, scope },
+                Procedure {
+                    name: text(procedure.name),
+                    rva,
+                    len: u64::from(procedure.len),
+                    ty: procedure.ty,
+                    scope,
+                },
                 "procedures",
             )?;
         }
@@ -426,20 +525,27 @@ impl PdbTables {
             let mut bytes = Vec::new();
             bytes
                 .try_reserve_exact(records.len())
-                .map_err(|_| ParseError::Allocation { what: "module scopes" })?;
+                .map_err(|_| ParseError::Allocation {
+                    what: "module scopes",
+                })?;
             bytes.extend_from_slice(records.as_slice());
             self.scope_bytes = self.scope_bytes.saturating_add(bytes.len());
             push(&mut self.scopes, bytes, "module scopes")?;
         }
         let c13_at = (module.symbol_bytes as usize).saturating_add(module.c11_bytes as usize);
         let Ok(c13) = stream.sub(c13_at, module.c13_bytes as usize) else {
-            return Err(PdbError::BadRecord { what: "C13 line data", at: c13_at }.into());
+            return Err(PdbError::BadRecord {
+                what: "C13 line data",
+                at: c13_at,
+            }
+            .into());
         };
         // The file checksums first: line blocks name files through them.
         let mut checksums = Bytes::new(&[]);
         let mut at = 0usize;
         while at < c13.len() {
-            let subsection = lines::decode_subsection(c13, at).map_err(|source| short("C13 subsection", source))?;
+            let subsection = lines::decode_subsection(c13, at)
+                .map_err(|source| short("C13 subsection", source))?;
             at = subsection.next;
             if subsection.kind == DEBUG_S_FILECHKSMS {
                 checksums = subsection.data;
@@ -447,10 +553,15 @@ impl PdbTables {
         }
         let mut at = 0usize;
         while at < c13.len() {
-            let subsection = lines::decode_subsection(c13, at).map_err(|source| short("C13 subsection", source))?;
+            let subsection = lines::decode_subsection(c13, at)
+                .map_err(|source| short("C13 subsection", source))?;
             at = subsection.next;
             if subsection.kind == DEBUG_S_LINES {
-                let block = C13Lines { data: subsection.data, checksums, names };
+                let block = C13Lines {
+                    data: subsection.data,
+                    checksums,
+                    names,
+                };
                 self.read_lines(block, addresses, found.rows, found.file_index)?;
             }
         }
@@ -466,28 +577,44 @@ impl PdbTables {
         rows: &mut Vec<LineRow>,
         file_index: &mut BTreeMap<u32, usize>,
     ) -> Result<(), ParseError> {
-        let C13Lines { data, checksums, names } = block;
-        let head = lines::decode_lines_head(data).map_err(|source| short("lines header", source))?;
+        let C13Lines {
+            data,
+            checksums,
+            names,
+        } = block;
+        let head =
+            lines::decode_lines_head(data).map_err(|source| short("lines header", source))?;
         let mut at = 12usize;
         while at < data.len() {
-            let block = lines::decode_block(data, at).map_err(|source| short("line block", source))?;
+            let block =
+                lines::decode_block(data, at).map_err(|source| short("line block", source))?;
             at = block.next;
-            let name_offset = lines::checksum_name(checksums, block.file).map_err(|source| short("file checksum", source))?;
+            let name_offset = lines::checksum_name(checksums, block.file)
+                .map_err(|source| short("file checksum", source))?;
             let file = match file_index.get(&name_offset) {
                 Some(index) => *index,
                 None => {
-                    let path = lines::names_string(names, name_offset).map(text).unwrap_or_default();
+                    let path = lines::names_string(names, name_offset)
+                        .map(text)
+                        .unwrap_or_default();
                     // A checksum whose bytes do not read leaves the file
                     // without one; the name alone still names it.
-                    let checksum = lines::decode_checksum_entry(checksums, block.file).ok().and_then(file_checksum);
+                    let checksum = lines::decode_checksum_entry(checksums, block.file)
+                        .ok()
+                        .and_then(file_checksum);
                     let index = self.files.len();
-                    push(&mut self.files, SourceFile { path, checksum }, "source files")?;
+                    push(
+                        &mut self.files,
+                        SourceFile { path, checksum },
+                        "source files",
+                    )?;
                     file_index.insert(name_offset, index);
                     index
                 }
             };
             for index in 0..block.count {
-                let entry = lines::decode_line(block.entries, index).map_err(|source| short("line entry", source))?;
+                let entry = lines::decode_line(block.entries, index)
+                    .map_err(|source| short("line entry", source))?;
                 let end = if index.saturating_add(1) < block.count {
                     lines::decode_line(block.entries, index.saturating_add(1))
                         .map_err(|source| short("line entry", source))?
@@ -500,7 +627,16 @@ impl PdbTables {
                     continue;
                 };
                 let end = rva.saturating_add(u64::from(end.saturating_sub(entry.offset)));
-                push(rows, LineRow { start: Rva(rva), end: Rva(end), file, line: entry.line }, "line ranges")?;
+                push(
+                    rows,
+                    LineRow {
+                        start: Rva(rva),
+                        end: Rva(end),
+                        file,
+                        line: entry.line,
+                    },
+                    "line ranges",
+                )?;
             }
         }
         Ok(())
@@ -508,7 +644,10 @@ impl PdbTables {
 
     #[must_use]
     pub fn identity(&self) -> TablesIdentity {
-        TablesIdentity::Pdb { guid: self.guid, age: self.age }
+        TablesIdentity::Pdb {
+            guid: self.guid,
+            age: self.age,
+        }
     }
 
     /// The procedure `rva` lies in, else the nearest public symbol at or
@@ -516,10 +655,12 @@ impl PdbTables {
     #[must_use]
     pub fn symbolize(&self, rva: Rva) -> Option<SymbolHit> {
         let at = rva.0;
-        let line = self
-            .lines
-            .line_at(rva)
-            .and_then(|row| Some(SourceLine { file: self.files.get(row.file)?.path.clone(), line: row.line }));
+        let line = self.lines.line_at(rva).and_then(|row| {
+            Some(SourceLine {
+                file: self.files.get(row.file)?.path.clone(),
+                line: row.line,
+            })
+        });
         let procedure = self
             .procedures
             .partition_point(|procedure| procedure.rva <= at)
@@ -580,7 +721,11 @@ impl PdbTables {
             .checked_sub(1)
             .and_then(|index| self.procedures.get(index))?;
         let end = procedure.rva.saturating_add(procedure.len);
-        (at < end).then(|| ProcedureSpan { name: procedure.name.clone(), start: Rva(procedure.rva), end: Rva(end) })
+        (at < end).then(|| ProcedureSpan {
+            name: procedure.name.clone(),
+            start: Rva(procedure.rva),
+            end: Rva(end),
+        })
     }
 
     /// The variables in scope at `rva`, from the records of the procedure
@@ -597,23 +742,40 @@ impl PdbTables {
             return Ok(None);
         };
         let Some(scope) = procedure.scope else {
-            return Err(LocalsError::NotKept { cap_mib: MAX_SCOPE_MIB });
+            return Err(LocalsError::NotKept {
+                cap_mib: MAX_SCOPE_MIB,
+            });
         };
         let records = usize::try_from(scope.module)
             .ok()
             .and_then(|module| self.scopes.get(module))
-            .ok_or(LocalsError::Unreadable { what: "module symbols" })?;
+            .ok_or(LocalsError::Unreadable {
+                what: "module symbols",
+            })?;
         let parameters = match &self.types {
             Ok(types) => types.parameter_count(procedure.ty),
             Err(_) => 0,
         };
-        let record = usize::try_from(scope.record).map_err(|_| LocalsError::Unreadable { what: "procedure record" })?;
-        super::scope::read_scope(Bytes::new(records), record, rva, &self.addresses, parameters).map(Some)
+        let record = usize::try_from(scope.record).map_err(|_| LocalsError::Unreadable {
+            what: "procedure record",
+        })?;
+        super::scope::read_scope(
+            Bytes::new(records),
+            record,
+            rva,
+            &self.addresses,
+            parameters,
+        )
+        .map(Some)
     }
 
     #[must_use]
     pub fn procedure_starts(&self) -> Vec<Rva> {
-        let mut starts: Vec<Rva> = self.procedures.iter().map(|procedure| Rva(procedure.rva)).collect();
+        let mut starts: Vec<Rva> = self
+            .procedures
+            .iter()
+            .map(|procedure| Rva(procedure.rva))
+            .collect();
         starts.dedup();
         starts
     }
@@ -630,17 +792,24 @@ impl PdbTables {
     /// symbol-record stream.
     #[must_use]
     pub fn global(&self, name: &str) -> Option<GlobalVariable> {
-        let first = self.globals.partition_point(|global| global.name.as_str() < name);
+        let first = self
+            .globals
+            .partition_point(|global| global.name.as_str() < name);
         self.globals
             .get(first)
             .filter(|global| global.name == name)
-            .map(|global| GlobalVariable { rva: Rva(global.rva), ty: TypeRef(global.ty) })
+            .map(|global| GlobalVariable {
+                rva: Rva(global.rva),
+                ty: TypeRef(global.ty),
+            })
     }
 
     /// A public symbol's RVA, else a procedure's.
     #[must_use]
     pub fn address_of(&self, name: &str) -> Option<Rva> {
-        let first = self.by_name.partition_point(|named| named.name.as_str() < name);
+        let first = self
+            .by_name
+            .partition_point(|named| named.name.as_str() < name);
         self.by_name
             .get(first)
             .filter(|named| named.name == name)
@@ -656,7 +825,11 @@ impl PdbTables {
     }
 
     /// Where the member reached through `path` sits in `type_name`.
-    pub fn member_location(&self, type_name: &str, path: &[&str]) -> Result<Option<MemberLocation>, LayoutError> {
+    pub fn member_location(
+        &self,
+        type_name: &str,
+        path: &[&str],
+    ) -> Result<Option<MemberLocation>, LayoutError> {
         match &self.types {
             Ok(types) => types.member_location(type_name, path),
             Err(error) => Err(error.clone()),
@@ -666,15 +839,21 @@ impl PdbTables {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tables::{ChecksumKind, EmbeddedSource, FileChecksum, LineRow, ProcedureSpan, ResolvedLine, SourceFile};
     use rusty_box_symbols_fixtures::pdb::{
-        build_pdb, compiler_types_pdb, FixtureChecksum, FixtureContainer, FixtureEmbedded, FixtureLine, FixtureOmap,
-        FixtureOmapEntry, FixtureProcedure, FixturePublic, FixtureSection, PdbFixture, PublicKind, CODE_SECTION,
+        CODE_SECTION, FixtureChecksum, FixtureContainer, FixtureEmbedded, FixtureLine, FixtureOmap,
+        FixtureOmapEntry, FixtureProcedure, FixturePublic, FixtureSection, PdbFixture, PublicKind,
+        build_pdb, compiler_types_pdb,
+    };
+
+    use super::*;
+    use crate::tables::{
+        ChecksumKind, EmbeddedSource, FileChecksum, LineRow, ProcedureSpan, ResolvedLine,
+        SourceFile,
     };
 
     const GUID: [u8; 16] = [
-        0xB9, 0xDB, 0x44, 0x38, 0x17, 0x20, 0x67, 0x49, 0xBE, 0x7A, 0xA4, 0xA2, 0xC2, 0x04, 0x30, 0xFA,
+        0xB9, 0xDB, 0x44, 0x38, 0x17, 0x20, 0x67, 0x49, 0xBE, 0x7A, 0xA4, 0xA2, 0xC2, 0x04, 0x30,
+        0xFA,
     ];
 
     /// Two procedures with lines, their publics, and a data public.
@@ -682,9 +861,24 @@ mod tests {
         let mut fixture = PdbFixture::new(GUID, 7);
         fixture.container = container;
         fixture.publics = vec![
-            FixturePublic { name: "KiTestProc".into(), section: 1, offset: 0x100, kind: PublicKind::Function },
-            FixturePublic { name: "KiOtherProc".into(), section: 1, offset: 0x180, kind: PublicKind::Function },
-            FixturePublic { name: "PsActiveProcessHead".into(), section: 2, offset: 0x10, kind: PublicKind::Data },
+            FixturePublic {
+                name: "KiTestProc".into(),
+                section: 1,
+                offset: 0x100,
+                kind: PublicKind::Function,
+            },
+            FixturePublic {
+                name: "KiOtherProc".into(),
+                section: 1,
+                offset: 0x180,
+                kind: PublicKind::Function,
+            },
+            FixturePublic {
+                name: "PsActiveProcessHead".into(),
+                section: 2,
+                offset: 0x10,
+                kind: PublicKind::Data,
+            },
         ];
         fixture.procedures = vec![
             FixtureProcedure {
@@ -694,7 +888,16 @@ mod tests {
                 len: 0x40,
                 file: r"d:\src\ktest.c".into(),
                 checksum: None,
-                lines: vec![FixtureLine { offset: 0, line: 10 }, FixtureLine { offset: 0x10, line: 12 }],
+                lines: vec![
+                    FixtureLine {
+                        offset: 0,
+                        line: 10,
+                    },
+                    FixtureLine {
+                        offset: 0x10,
+                        line: 12,
+                    },
+                ],
             },
             FixtureProcedure {
                 name: "KiOtherProc".into(),
@@ -703,18 +906,29 @@ mod tests {
                 len: 0x20,
                 file: r"d:\src\other.c".into(),
                 checksum: None,
-                lines: vec![FixtureLine { offset: 0, line: 30 }],
+                lines: vec![FixtureLine {
+                    offset: 0,
+                    line: 30,
+                }],
             },
         ];
         fixture
     }
 
     fn line(file: &str, line: u32) -> Option<SourceLine> {
-        Some(SourceLine { file: file.to_owned(), line })
+        Some(SourceLine {
+            file: file.to_owned(),
+            line,
+        })
     }
 
     /// A 16-byte procedure in `.text` at `offset`, one line, in `file`.
-    fn in_file(name: &str, offset: u32, file: &str, checksum: Option<FixtureChecksum>) -> FixtureProcedure {
+    fn in_file(
+        name: &str,
+        offset: u32,
+        file: &str,
+        checksum: Option<FixtureChecksum>,
+    ) -> FixtureProcedure {
         FixtureProcedure {
             name: name.into(),
             section: 1,
@@ -727,30 +941,78 @@ mod tests {
     }
 
     fn source(path: &str, checksum: Option<FileChecksum>) -> SourceFile {
-        SourceFile { path: path.to_owned(), checksum }
+        SourceFile {
+            path: path.to_owned(),
+            checksum,
+        }
     }
 
     #[test]
     fn a_pdb_lists_its_files_with_their_checksums() {
         let mut fixture = PdbFixture::new(GUID, 1);
         fixture.procedures = vec![
-            in_file("Md5", 0x100, r"d:\src\md5.c", Some(FixtureChecksum { kind: 1, bytes: vec![0x11; 16] })),
-            in_file("Sha1", 0x110, r"d:\src\sha1.c", Some(FixtureChecksum { kind: 2, bytes: vec![0x22; 20] })),
-            in_file("Sha256", 0x120, r"d:\src\sha256.c", Some(FixtureChecksum { kind: 3, bytes: vec![0x33; 32] })),
+            in_file(
+                "Md5",
+                0x100,
+                r"d:\src\md5.c",
+                Some(FixtureChecksum {
+                    kind: 1,
+                    bytes: vec![0x11; 16],
+                }),
+            ),
+            in_file(
+                "Sha1",
+                0x110,
+                r"d:\src\sha1.c",
+                Some(FixtureChecksum {
+                    kind: 2,
+                    bytes: vec![0x22; 20],
+                }),
+            ),
+            in_file(
+                "Sha256",
+                0x120,
+                r"d:\src\sha256.c",
+                Some(FixtureChecksum {
+                    kind: 3,
+                    bytes: vec![0x33; 32],
+                }),
+            ),
             in_file("Plain", 0x130, r"d:\src\plain.c", None),
         ];
         let tables = PdbTables::parse(&build_pdb(&fixture)).unwrap();
         assert_eq!(
             tables.files(),
             [
-                source(r"d:\src\md5.c", Some(FileChecksum { kind: ChecksumKind::Md5, bytes: vec![0x11; 16] })),
-                source(r"d:\src\sha1.c", Some(FileChecksum { kind: ChecksumKind::Sha1, bytes: vec![0x22; 20] })),
-                source(r"d:\src\sha256.c", Some(FileChecksum { kind: ChecksumKind::Sha256, bytes: vec![0x33; 32] })),
+                source(
+                    r"d:\src\md5.c",
+                    Some(FileChecksum {
+                        kind: ChecksumKind::Md5,
+                        bytes: vec![0x11; 16]
+                    })
+                ),
+                source(
+                    r"d:\src\sha1.c",
+                    Some(FileChecksum {
+                        kind: ChecksumKind::Sha1,
+                        bytes: vec![0x22; 20]
+                    })
+                ),
+                source(
+                    r"d:\src\sha256.c",
+                    Some(FileChecksum {
+                        kind: ChecksumKind::Sha256,
+                        bytes: vec![0x33; 32]
+                    })
+                ),
                 source(r"d:\src\plain.c", None),
             ]
         );
         // The line ranges still name their files.
-        assert_eq!(tables.symbolize(Rva(0x1124)).and_then(|hit| hit.line), line(r"d:\src\sha256.c", 1));
+        assert_eq!(
+            tables.symbolize(Rva(0x1124)).and_then(|hit| hit.line),
+            line(r"d:\src\sha256.c", 1)
+        );
     }
 
     /// `ReadBlock` in `d:\b\src\io\read.c` at RVA 0x1200..0x1230: line 10
@@ -761,27 +1023,56 @@ mod tests {
         let mut read_block = in_file("ReadBlock", 0x200, r"d:\b\src\io\read.c", None);
         read_block.len = 0x30;
         read_block.lines = vec![
-            FixtureLine { offset: 0, line: 10 },
-            FixtureLine { offset: 8, line: 12 },
-            FixtureLine { offset: 0x10, line: 10 },
-            FixtureLine { offset: 0x18, line: 14 },
+            FixtureLine {
+                offset: 0,
+                line: 10,
+            },
+            FixtureLine {
+                offset: 8,
+                line: 12,
+            },
+            FixtureLine {
+                offset: 0x10,
+                line: 10,
+            },
+            FixtureLine {
+                offset: 0x18,
+                line: 14,
+            },
         ];
         let mut x_read = in_file("XRead", 0x300, r"d:\b\src\io\xread.c", None);
-        x_read.lines = vec![FixtureLine { offset: 0, line: 10 }];
+        x_read.lines = vec![FixtureLine {
+            offset: 0,
+            line: 10,
+        }];
         fixture.procedures = vec![read_block, x_read];
         PdbTables::parse(&build_pdb(&fixture)).unwrap()
     }
 
     fn row(start: u64, end: u64, file: usize, line: u32) -> LineRow {
-        LineRow { start: Rva(start), end: Rva(end), file, line }
+        LineRow {
+            start: Rva(start),
+            end: Rva(end),
+            file,
+            line,
+        }
     }
 
     #[test]
     fn line_at_gives_the_whole_row() {
         let tables = read_c();
-        assert_eq!(tables.line_at(Rva(0x120A)), Some(row(0x1208, 0x1210, 0, 12)));
-        assert_eq!(tables.line_at(Rva(0x1218)), Some(row(0x1218, 0x1230, 0, 14)));
-        assert_eq!(tables.line_at(Rva(0x1300)), Some(row(0x1300, 0x1310, 1, 10)));
+        assert_eq!(
+            tables.line_at(Rva(0x120A)),
+            Some(row(0x1208, 0x1210, 0, 12))
+        );
+        assert_eq!(
+            tables.line_at(Rva(0x1218)),
+            Some(row(0x1218, 0x1230, 0, 14))
+        );
+        assert_eq!(
+            tables.line_at(Rva(0x1300)),
+            Some(row(0x1300, 0x1310, 1, 10))
+        );
         assert_eq!(tables.line_at(Rva(0x1230)), None, "past the last row");
         assert_eq!(tables.line_at(Rva(0x11FF)), None, "below the first");
     }
@@ -791,17 +1082,29 @@ mod tests {
         let tables = read_c();
         assert_eq!(
             tables.lines_of(r"io\read.c", 10),
-            [ResolvedLine { line: 10, ranges: vec![row(0x1200, 0x1208, 0, 10), row(0x1210, 0x1218, 0, 10)] }]
+            [ResolvedLine {
+                line: 10,
+                ranges: vec![row(0x1200, 0x1208, 0, 10), row(0x1210, 0x1218, 0, 10)]
+            }]
         );
     }
 
     #[test]
     fn lines_of_matches_whole_trailing_components() {
         let tables = read_c();
-        let read = [ResolvedLine { line: 10, ranges: vec![row(0x1200, 0x1208, 0, 10), row(0x1210, 0x1218, 0, 10)] }];
+        let read = [ResolvedLine {
+            line: 10,
+            ranges: vec![row(0x1200, 0x1208, 0, 10), row(0x1210, 0x1218, 0, 10)],
+        }];
         assert_eq!(tables.lines_of("read.c", 10), read, "not xread.c");
         assert_eq!(tables.lines_of("IO/READ.C", 10), read);
-        assert_eq!(tables.lines_of("xread.c", 10), [ResolvedLine { line: 10, ranges: vec![row(0x1300, 0x1310, 1, 10)] }]);
+        assert_eq!(
+            tables.lines_of("xread.c", 10),
+            [ResolvedLine {
+                line: 10,
+                ranges: vec![row(0x1300, 0x1310, 1, 10)]
+            }]
+        );
         assert_eq!(tables.lines_of(r"o\read.c", 10), []);
         assert_eq!(tables.lines_of("io", 10), []);
     }
@@ -809,28 +1112,52 @@ mod tests {
     #[test]
     fn a_line_without_code_resolves_to_the_next_line_of_its_function() {
         let tables = read_c();
-        assert_eq!(tables.lines_of("read.c", 11), [ResolvedLine { line: 12, ranges: vec![row(0x1208, 0x1210, 0, 12)] }]);
-        assert_eq!(tables.lines_of("read.c", 13), [ResolvedLine { line: 14, ranges: vec![row(0x1218, 0x1230, 0, 14)] }]);
+        assert_eq!(
+            tables.lines_of("read.c", 11),
+            [ResolvedLine {
+                line: 12,
+                ranges: vec![row(0x1208, 0x1210, 0, 12)]
+            }]
+        );
+        assert_eq!(
+            tables.lines_of("read.c", 13),
+            [ResolvedLine {
+                line: 14,
+                ranges: vec![row(0x1218, 0x1230, 0, 14)]
+            }]
+        );
     }
 
     #[test]
     fn a_line_past_its_function_resolves_to_nothing() {
         let tables = read_c();
         assert_eq!(tables.lines_of("read.c", 15), []);
-        assert_eq!(tables.lines_of("read.c", 9), [], "before the function's first line");
+        assert_eq!(
+            tables.lines_of("read.c", 9),
+            [],
+            "before the function's first line"
+        );
         assert_eq!(tables.lines_of("xread.c", 11), []);
     }
 
     #[test]
     fn procedure_at_gives_the_span() {
         let tables = read_c();
-        let read_block = Some(ProcedureSpan { name: "ReadBlock".into(), start: Rva(0x1200), end: Rva(0x1230) });
+        let read_block = Some(ProcedureSpan {
+            name: "ReadBlock".into(),
+            start: Rva(0x1200),
+            end: Rva(0x1230),
+        });
         assert_eq!(tables.procedure_at(Rva(0x1200)), read_block);
         assert_eq!(tables.procedure_at(Rva(0x122F)), read_block);
         assert_eq!(tables.procedure_at(Rva(0x1230)), None);
         assert_eq!(
             tables.procedure_at(Rva(0x1304)),
-            Some(ProcedureSpan { name: "XRead".into(), start: Rva(0x1300), end: Rva(0x1310) })
+            Some(ProcedureSpan {
+                name: "XRead".into(),
+                start: Rva(0x1300),
+                end: Rva(0x1310)
+            })
         );
     }
 
@@ -856,10 +1183,17 @@ mod tests {
                 in_file("Other", 0x100, r"d:\b\src\io\other.c", None),
                 in_file("ReadBlock", 0x200, r"d:\b\src\io\read.c", None),
             ];
-            fixture.embedded =
-                vec![FixtureEmbedded { path: r"d:\b\src\io\read.c".into(), contents: source.clone(), compression: 0 }];
+            fixture.embedded = vec![FixtureEmbedded {
+                path: r"d:\b\src\io\read.c".into(),
+                contents: source.clone(),
+                compression: 0,
+            }];
             let tables = PdbTables::parse(&build_pdb(&fixture)).unwrap();
-            assert_eq!(tables.embedded_source(1), Some(&EmbeddedSource::Plain(source.clone())), "{container:?}");
+            assert_eq!(
+                tables.embedded_source(1),
+                Some(&EmbeddedSource::Plain(source.clone())),
+                "{container:?}"
+            );
             assert_eq!(tables.embedded_source(0), None, "other.c is not embedded");
             assert_eq!(tables.embedded_source(2), None, "no such file");
         }
@@ -868,30 +1202,54 @@ mod tests {
     #[test]
     fn a_compressed_embedded_file_says_so() {
         let tables = embedding(
-            FixtureEmbedded { path: r"d:\b\src\io\read.c".into(), contents: vec![0x78, 0x9C, 1, 2], compression: 2 },
+            FixtureEmbedded {
+                path: r"d:\b\src\io\read.c".into(),
+                contents: vec![0x78, 0x9C, 1, 2],
+                compression: 2,
+            },
             None,
         );
-        assert_eq!(tables.embedded_source(1), Some(&EmbeddedSource::Compressed { kind: 2 }));
+        assert_eq!(
+            tables.embedded_source(1),
+            Some(&EmbeddedSource::Compressed { kind: 2 })
+        );
     }
 
     #[test]
     fn an_embedded_file_past_16_mib_is_left_out() {
-        let file = |len: usize| FixtureEmbedded { path: r"d:\b\src\io\read.c".into(), contents: vec![b'a'; len], compression: 0 };
-        assert_eq!(embedding(file((16 << 20) + 1), None).embedded_source(1), None);
-        assert!(embedding(file(16 << 20), None).embedded_source(1).is_some(), "16 MiB itself is kept");
+        let file = |len: usize| FixtureEmbedded {
+            path: r"d:\b\src\io\read.c".into(),
+            contents: vec![b'a'; len],
+            compression: 0,
+        };
+        assert_eq!(
+            embedding(file((16 << 20) + 1), None).embedded_source(1),
+            None
+        );
+        assert!(
+            embedding(file(16 << 20), None).embedded_source(1).is_some(),
+            "16 MiB itself is kept"
+        );
     }
 
     /// A header block that does not read leaves every file without
     /// embedded source, and the PDB's names and lines as they are.
     #[test]
     fn a_header_block_cut_short_embeds_nothing() {
-        let file = || FixtureEmbedded { path: r"d:\b\src\io\read.c".into(), contents: b"x".to_vec(), compression: 0 };
+        let file = || FixtureEmbedded {
+            path: r"d:\b\src\io\read.c".into(),
+            contents: b"x".to_vec(),
+            compression: 0,
+        };
         for len in [0, 10, 63, 64, 70, 90] {
             let tables = embedding(file(), Some(len));
             assert_eq!(tables.embedded_source(1), None, "cut to {len}");
             assert_eq!(tables.line_at(Rva(0x1200)).map(|row| row.line), Some(1));
         }
-        assert!(embedding(file(), None).embedded_source(1).is_some(), "the uncut block embeds the file");
+        assert!(
+            embedding(file(), None).embedded_source(1).is_some(),
+            "the uncut block embeds the file"
+        );
     }
 
     /// A kind this reader does not know, or a size that is not its kind's,
@@ -900,9 +1258,33 @@ mod tests {
     fn a_checksum_of_an_unknown_kind_is_left_out() {
         let mut fixture = PdbFixture::new(GUID, 1);
         fixture.procedures = vec![
-            in_file("Unknown", 0x100, r"d:\src\unknown.c", Some(FixtureChecksum { kind: 9, bytes: vec![0x11; 16] })),
-            in_file("Misfit", 0x110, r"d:\src\misfit.c", Some(FixtureChecksum { kind: 1, bytes: vec![0x22; 20] })),
-            in_file("Sha256", 0x120, r"d:\src\sha256.c", Some(FixtureChecksum { kind: 3, bytes: vec![0x33; 32] })),
+            in_file(
+                "Unknown",
+                0x100,
+                r"d:\src\unknown.c",
+                Some(FixtureChecksum {
+                    kind: 9,
+                    bytes: vec![0x11; 16],
+                }),
+            ),
+            in_file(
+                "Misfit",
+                0x110,
+                r"d:\src\misfit.c",
+                Some(FixtureChecksum {
+                    kind: 1,
+                    bytes: vec![0x22; 20],
+                }),
+            ),
+            in_file(
+                "Sha256",
+                0x120,
+                r"d:\src\sha256.c",
+                Some(FixtureChecksum {
+                    kind: 3,
+                    bytes: vec![0x33; 32],
+                }),
+            ),
         ];
         let tables = PdbTables::parse(&build_pdb(&fixture)).unwrap();
         assert_eq!(
@@ -910,29 +1292,57 @@ mod tests {
             [
                 source(r"d:\src\unknown.c", None),
                 source(r"d:\src\misfit.c", None),
-                source(r"d:\src\sha256.c", Some(FileChecksum { kind: ChecksumKind::Sha256, bytes: vec![0x33; 32] })),
+                source(
+                    r"d:\src\sha256.c",
+                    Some(FileChecksum {
+                        kind: ChecksumKind::Sha256,
+                        bytes: vec![0x33; 32]
+                    })
+                ),
             ]
         );
     }
 
     #[test]
     fn a_pdb_names_addresses_in_either_container() {
-        for container in [FixtureContainer::Msf, FixtureContainer::MsfzZstd, FixtureContainer::MsfzSmallChunks] {
+        for container in [
+            FixtureContainer::Msf,
+            FixtureContainer::MsfzZstd,
+            FixtureContainer::MsfzSmallChunks,
+        ] {
             let tables = PdbTables::parse(&build_pdb(&named(container))).unwrap();
-            assert_eq!(tables.identity(), TablesIdentity::Pdb { guid: Guid::from_le_bytes(GUID), age: 7 });
+            assert_eq!(
+                tables.identity(),
+                TablesIdentity::Pdb {
+                    guid: Guid::from_le_bytes(GUID),
+                    age: 7
+                }
+            );
             assert_eq!(
                 tables.symbolize(Rva(0x1114)),
-                Some(SymbolHit { name: "KiTestProc".into(), offset: 0x14, line: line(r"d:\src\ktest.c", 12) }),
+                Some(SymbolHit {
+                    name: "KiTestProc".into(),
+                    offset: 0x14,
+                    line: line(r"d:\src\ktest.c", 12)
+                }),
                 "{container:?}"
             );
             assert_eq!(
                 tables.symbolize(Rva(0x1180)),
-                Some(SymbolHit { name: "KiOtherProc".into(), offset: 0, line: line(r"d:\src\other.c", 30) })
+                Some(SymbolHit {
+                    name: "KiOtherProc".into(),
+                    offset: 0,
+                    line: line(r"d:\src\other.c", 30)
+                })
             );
             // Past every procedure, the nearest public names it, with no line.
             assert_eq!(
                 tables.symbolize(Rva(0x3018)),
-                Some(SymbolHit { name: "PsActiveProcessHead".into(), offset: 8, line: None })
+                Some(SymbolHit {
+                    name: "PsActiveProcessHead".into(),
+                    offset: 8,
+                    line: None
+                })
             );
             // Below every symbol, nothing.
             assert_eq!(tables.symbolize(Rva(0x1000)), None);
@@ -947,25 +1357,48 @@ mod tests {
     #[test]
     fn a_public_names_no_address_in_the_next_section() {
         let tables = PdbTables::parse(&build_pdb(&named(FixtureContainer::Msf))).unwrap();
-        assert_eq!(tables.symbolize(Rva(0x3004)), None, "not KiOtherProc+0x1E84");
-        assert_eq!(tables.symbolize(Rva(0x1FF0)).map(|hit| hit.name), Some("KiOtherProc".to_owned()), "its own section");
+        assert_eq!(
+            tables.symbolize(Rva(0x3004)),
+            None,
+            "not KiOtherProc+0x1E84"
+        );
+        assert_eq!(
+            tables.symbolize(Rva(0x1FF0)).map(|hit| hit.name),
+            Some("KiOtherProc".to_owned()),
+            "its own section"
+        );
     }
 
     #[test]
     fn publics_are_bounded_by_the_sections_they_lie_in() {
-        let addresses = Addresses { sections: vec![0x1000, 0x3000], omap: None };
+        let addresses = Addresses {
+            sections: vec![0x1000, 0x3000],
+            omap: None,
+        };
         assert!(addresses.one_section(0x1180, 0x2FFF));
         assert!(!addresses.one_section(0x1180, 0x3000));
-        assert!(!addresses.one_section(0x0800, 0x1000), "the headers are no section");
-        let rewritten = Addresses { sections: vec![0x1000, 0x3000], omap: Some(Vec::new()) };
-        assert!(rewritten.one_section(0x1180, 0x3004), "a rewritten image's sections bound nothing");
+        assert!(
+            !addresses.one_section(0x0800, 0x1000),
+            "the headers are no section"
+        );
+        let rewritten = Addresses {
+            sections: vec![0x1000, 0x3000],
+            omap: Some(Vec::new()),
+        };
+        assert!(
+            rewritten.one_section(0x1180, 0x3004),
+            "a rewritten image's sections bound nothing"
+        );
     }
 
     /// MSVC's `vc140.pdb` describes no linked module: it is told apart from
     /// a broken PDB, so a project folder holding one has no problem.
     #[test]
     fn a_compiler_type_database_is_no_linked_modules_pdb() {
-        assert_eq!(pdb_identity(&compiler_types_pdb(GUID)), Err(ParseError::CompilerTypes));
+        assert_eq!(
+            pdb_identity(&compiler_types_pdb(GUID)),
+            Err(ParseError::CompilerTypes)
+        );
     }
 
     /// A PDB whose info-stream age is above its DBI age is the DBI age's
@@ -976,7 +1409,10 @@ mod tests {
         fixture.age = 0xD;
         fixture.pdbi_age = 0xC;
         let bytes = build_pdb(&fixture);
-        let expected = TablesIdentity::Pdb { guid: Guid::from_le_bytes(GUID), age: 0xD };
+        let expected = TablesIdentity::Pdb {
+            guid: Guid::from_le_bytes(GUID),
+            age: 0xD,
+        };
         assert_eq!(PdbTables::parse(&bytes).unwrap().identity(), expected);
         assert_eq!(pdb_identity(&bytes), Ok(expected));
     }
@@ -988,19 +1424,41 @@ mod tests {
         let mut fixture = named(FixtureContainer::Msf);
         fixture.omap = Some(FixtureOmap {
             original_sections: vec![
-                FixtureSection { name: ".text", rva: 0x1000, size: 0x2000, characteristics: CODE_SECTION },
-                FixtureSection { name: ".data", rva: 0x3000, size: 0x2000, characteristics: CODE_SECTION },
+                FixtureSection {
+                    name: ".text",
+                    rva: 0x1000,
+                    size: 0x2000,
+                    characteristics: CODE_SECTION,
+                },
+                FixtureSection {
+                    name: ".data",
+                    rva: 0x3000,
+                    size: 0x2000,
+                    characteristics: CODE_SECTION,
+                },
             ],
             from_source: vec![
-                FixtureOmapEntry { from: 0x1000, to: 0x5000 },
-                FixtureOmapEntry { from: 0x1180, to: 0 },
-                FixtureOmapEntry { from: 0x3000, to: 0x7000 },
+                FixtureOmapEntry {
+                    from: 0x1000,
+                    to: 0x5000,
+                },
+                FixtureOmapEntry {
+                    from: 0x1180,
+                    to: 0,
+                },
+                FixtureOmapEntry {
+                    from: 0x3000,
+                    to: 0x7000,
+                },
             ],
         });
         let tables = PdbTables::parse(&build_pdb(&fixture)).unwrap();
         assert_eq!(tables.address_of("KiTestProc"), Some(Rva(0x5100)));
         assert_eq!(tables.address_of("PsActiveProcessHead"), Some(Rva(0x7010)));
-        assert_eq!(tables.symbolize(Rva(0x5104)).map(|hit| hit.name), Some("KiTestProc".to_owned()));
+        assert_eq!(
+            tables.symbolize(Rva(0x5104)).map(|hit| hit.name),
+            Some("KiTestProc".to_owned())
+        );
         // The dropped procedure has no address in the rewritten image.
         assert_eq!(tables.address_of("KiOtherProc"), None);
     }
@@ -1008,14 +1466,19 @@ mod tests {
     #[test]
     fn bytes_that_are_not_a_pdb_are_refused() {
         assert!(PdbTables::parse(b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\0\0\0garbage").is_err());
-        assert_eq!(PdbTables::parse(&[]).map(|tables| tables.identity()), Err(ParseError::Pdb(PdbError::NotPdb)));
+        assert_eq!(
+            PdbTables::parse(&[]).map(|tables| tables.identity()),
+            Err(ParseError::Pdb(PdbError::NotPdb))
+        );
     }
 
     #[test]
     fn symbol_records_decode_one_at_a_time() {
         // S_PUB32: length 16 (kind, flags, offset, segment, "ab", NUL, one
         // pad byte), kind 0x110E, flags 2, offset 0x10, segment 1.
-        let record = [16, 0, 0x0E, 0x11, 2, 0, 0, 0, 0x10, 0, 0, 0, 1, 0, b'a', b'b', 0, 0];
+        let record = [
+            16, 0, 0x0E, 0x11, 2, 0, 0, 0, 0x10, 0, 0, 0, 1, 0, b'a', b'b', 0, 0,
+        ];
         let header = crate::pdb::symbols::decode_record_header(Bytes::new(&record), 0).unwrap();
         assert_eq!(header.kind, crate::pdb::symbols::S_PUB32);
         assert_eq!(header.next, 18);

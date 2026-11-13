@@ -2,15 +2,20 @@
 //! assembler for what gimli cannot write (the `strx`/`addrx`/`rnglistx`
 //! forms, type units, the GNU alternate-file forms).
 
-use gimli::write::{Address, AttributeValue, DwarfUnit, EndianVec, Expression, FileInfo, LineProgram, LineString, Sections};
+use gimli::write::{
+    Address, AttributeValue, DwarfUnit, EndianVec, Expression, FileInfo, LineProgram, LineString,
+    Sections,
+};
 use gimli::{Encoding, Format, LineEncoding};
 
-use crate::elf::{build_elf, ElfSpec, Encoding as StoredAs, ExtraSection, Symtab, FUNC_LEN};
+use crate::elf::{ElfSpec, Encoding as StoredAs, ExtraSection, FUNC_LEN, Symtab, build_elf};
 
 pub const COMP_DIR: &str = "/build/widget";
 
 /// The MD5 a DWARF 5 line program records for `src/main.c`.
-pub const MAIN_C_MD5: [u8; 16] = [0x5d, 0x41, 0x40, 0x2a, 0xbc, 0x4b, 0x2a, 0x76, 0xb9, 0x71, 0x9d, 0x91, 0x10, 0x17, 0xc5, 0x92];
+pub const MAIN_C_MD5: [u8; 16] = [
+    0x5D, 0x41, 0x40, 0x2A, 0xBC, 0x4B, 0x2A, 0x76, 0xB9, 0x71, 0x9D, 0x91, 0x10, 0x17, 0xC5, 0x92,
+];
 
 /// 32- or 64-bit DWARF.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,9 +64,18 @@ pub fn build_dwarf(spec: DwarfSpec) -> Vec<ExtraSection> {
     let comp_dir = LineString::new(COMP_DIR, encoding, &mut dwarf.line_strings);
     let src_dir = LineString::new("src", encoding, &mut dwarf.line_strings);
     let main_c = LineString::new("main.c", encoding, &mut dwarf.line_strings);
-    let main_c_info = FileInfo { md5: MAIN_C_MD5, ..FileInfo::default() };
-    let mut program =
-        LineProgram::new(encoding, LineEncoding::default(), comp_dir, Some(src_dir.clone()), main_c.clone(), Some(main_c_info.clone()));
+    let main_c_info = FileInfo {
+        md5: MAIN_C_MD5,
+        ..FileInfo::default()
+    };
+    let mut program = LineProgram::new(
+        encoding,
+        LineEncoding::default(),
+        comp_dir,
+        Some(src_dir.clone()),
+        main_c.clone(),
+        Some(main_c_info.clone()),
+    );
     // DWARF 5 file entries carry `DW_LNCT_MD5`; earlier versions have no field for it.
     program.file_has_md5 = true;
     let directory = program.add_directory(src_dir);
@@ -86,8 +100,14 @@ pub fn build_dwarf(spec: DwarfSpec) -> Vec<ExtraSection> {
         unit.set(gimli::DW_AT_producer, AttributeValue::StringRef(producer));
         unit.set(gimli::DW_AT_name, AttributeValue::StringRef(unit_name));
         unit.set(gimli::DW_AT_comp_dir, AttributeValue::StringRef(unit_dir));
-        unit.set(gimli::DW_AT_language, AttributeValue::Language(gimli::DW_LANG_C99));
-        unit.set(gimli::DW_AT_low_pc, AttributeValue::Address(Address::Constant(text_va)));
+        unit.set(
+            gimli::DW_AT_language,
+            AttributeValue::Language(gimli::DW_LANG_C99),
+        );
+        unit.set(
+            gimli::DW_AT_low_pc,
+            AttributeValue::Address(Address::Constant(text_va)),
+        );
         unit.set(gimli::DW_AT_high_pc, AttributeValue::Udata(FUNC_LEN));
     }
     let function_name = dwarf.strings.add("widget_init");
@@ -96,7 +116,10 @@ pub fn build_dwarf(spec: DwarfSpec) -> Vec<ExtraSection> {
         let entry = dwarf.unit.get_mut(function);
         entry.set(gimli::DW_AT_name, AttributeValue::StringRef(function_name));
         entry.set(gimli::DW_AT_external, AttributeValue::FlagPresent);
-        entry.set(gimli::DW_AT_low_pc, AttributeValue::Address(Address::Constant(text_va)));
+        entry.set(
+            gimli::DW_AT_low_pc,
+            AttributeValue::Address(Address::Constant(text_va)),
+        );
         entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(FUNC_LEN));
     }
 
@@ -147,14 +170,23 @@ pub fn build_dwarf(spec: DwarfSpec) -> Vec<ExtraSection> {
         entry.set(gimli::DW_AT_name, AttributeValue::StringRef(outer_name));
         entry.set(gimli::DW_AT_byte_size, AttributeValue::Udata(24));
     }
-    dwarf.unit.get_mut(a).set(gimli::DW_AT_data_member_location, AttributeValue::Udata(0));
+    dwarf
+        .unit
+        .get_mut(a)
+        .set(gimli::DW_AT_data_member_location, AttributeValue::Udata(0));
     let mut at_eight = Expression::new();
     at_eight.op_plus_uconst(8);
-    dwarf.unit.get_mut(b).set(gimli::DW_AT_data_member_location, AttributeValue::Exprloc(at_eight));
+    dwarf.unit.get_mut(b).set(
+        gimli::DW_AT_data_member_location,
+        AttributeValue::Exprloc(at_eight),
+    );
     {
         let entry = dwarf.unit.get_mut(c);
         entry.set(gimli::DW_AT_bit_size, AttributeValue::Udata(3));
-        entry.set(gimli::DW_AT_data_bit_offset, AttributeValue::Udata(4 * 8 + 5));
+        entry.set(
+            gimli::DW_AT_data_bit_offset,
+            AttributeValue::Udata(4 * 8 + 5),
+        );
     }
     {
         // Storage 4 bytes at 4; 2 bits whose top is 22 bits below the
@@ -165,8 +197,14 @@ pub fn build_dwarf(spec: DwarfSpec) -> Vec<ExtraSection> {
         entry.set(gimli::DW_AT_bit_size, AttributeValue::Udata(2));
         entry.set(gimli::DW_AT_bit_offset, AttributeValue::Udata(22));
     }
-    dwarf.unit.get_mut(x).set(gimli::DW_AT_data_member_location, AttributeValue::Udata(0));
-    dwarf.unit.get_mut(inner).set(gimli::DW_AT_data_member_location, AttributeValue::Udata(8));
+    dwarf
+        .unit
+        .get_mut(x)
+        .set(gimli::DW_AT_data_member_location, AttributeValue::Udata(0));
+    dwarf
+        .unit
+        .get_mut(inner)
+        .set(gimli::DW_AT_data_member_location, AttributeValue::Udata(8));
     let alias = dwarf.unit.add(root, gimli::DW_TAG_typedef);
     let alias_name = dwarf.strings.add("WidgetAlias");
     {
@@ -181,7 +219,11 @@ pub fn build_dwarf(spec: DwarfSpec) -> Vec<ExtraSection> {
     sections
         .for_each(|id, data| {
             if !data.slice().is_empty() {
-                out.push(ExtraSection { name: id.name().to_owned(), data: data.slice().to_vec(), encoding: StoredAs::Plain });
+                out.push(ExtraSection {
+                    name: id.name().to_owned(),
+                    data: data.slice().to_vec(),
+                    encoding: StoredAs::Plain,
+                });
             }
             Ok::<(), gimli::write::Error>(())
         })
@@ -287,24 +329,103 @@ pub fn split_forms_dwarf(text_va: u64) -> Vec<ExtraSection> {
     // 1: compile_unit: name strx1, str_offsets_base, addr_base,
     // rnglists_base (sec_offset), low_pc addr.
     abbrev.uleb(1).uleb(0x11).u8(1);
-    abbrev.uleb(0x03).uleb(0x25).uleb(0x72).uleb(0x17).uleb(0x73).uleb(0x17).uleb(0x74).uleb(0x17).uleb(0x11).uleb(0x01);
+    abbrev
+        .uleb(0x03)
+        .uleb(0x25)
+        .uleb(0x72)
+        .uleb(0x17)
+        .uleb(0x73)
+        .uleb(0x17)
+        .uleb(0x74)
+        .uleb(0x17)
+        .uleb(0x11)
+        .uleb(0x01);
     abbrev.uleb(0).uleb(0);
     // 2: subprogram: name strx1, low_pc addrx1, high_pc data4.
-    abbrev.uleb(2).uleb(0x2e).u8(0).uleb(0x03).uleb(0x25).uleb(0x11).uleb(0x29).uleb(0x12).uleb(0x06).uleb(0).uleb(0);
+    abbrev
+        .uleb(2)
+        .uleb(0x2E)
+        .u8(0)
+        .uleb(0x03)
+        .uleb(0x25)
+        .uleb(0x11)
+        .uleb(0x29)
+        .uleb(0x12)
+        .uleb(0x06)
+        .uleb(0)
+        .uleb(0);
     // 3: subprogram: name strx1, ranges rnglistx.
-    abbrev.uleb(3).uleb(0x2e).u8(0).uleb(0x03).uleb(0x25).uleb(0x55).uleb(0x23).uleb(0).uleb(0);
+    abbrev
+        .uleb(3)
+        .uleb(0x2E)
+        .u8(0)
+        .uleb(0x03)
+        .uleb(0x25)
+        .uleb(0x55)
+        .uleb(0x23)
+        .uleb(0)
+        .uleb(0);
     // 4: structure_type: name strx1, byte_size data1.
-    abbrev.uleb(4).uleb(0x13).u8(1).uleb(0x03).uleb(0x25).uleb(0x0b).uleb(0x0b).uleb(0).uleb(0);
+    abbrev
+        .uleb(4)
+        .uleb(0x13)
+        .u8(1)
+        .uleb(0x03)
+        .uleb(0x25)
+        .uleb(0x0B)
+        .uleb(0x0B)
+        .uleb(0)
+        .uleb(0);
     // 5: member: name strx1, type ref_sig8, data_member_location data1.
-    abbrev.uleb(5).uleb(0x0d).u8(0).uleb(0x03).uleb(0x25).uleb(0x49).uleb(0x20).uleb(0x38).uleb(0x0b).uleb(0).uleb(0);
+    abbrev
+        .uleb(5)
+        .uleb(0x0D)
+        .u8(0)
+        .uleb(0x03)
+        .uleb(0x25)
+        .uleb(0x49)
+        .uleb(0x20)
+        .uleb(0x38)
+        .uleb(0x0B)
+        .uleb(0)
+        .uleb(0);
     // 6: type_unit root.
     abbrev.uleb(6).uleb(0x41).u8(1).uleb(0).uleb(0);
     // 7: structure_type: name string, byte_size data1.
-    abbrev.uleb(7).uleb(0x13).u8(1).uleb(0x03).uleb(0x08).uleb(0x0b).uleb(0x0b).uleb(0).uleb(0);
+    abbrev
+        .uleb(7)
+        .uleb(0x13)
+        .u8(1)
+        .uleb(0x03)
+        .uleb(0x08)
+        .uleb(0x0B)
+        .uleb(0x0B)
+        .uleb(0)
+        .uleb(0);
     // 8: member: name string, type ref4, data_member_location data1.
-    abbrev.uleb(8).uleb(0x0d).u8(0).uleb(0x03).uleb(0x08).uleb(0x49).uleb(0x13).uleb(0x38).uleb(0x0b).uleb(0).uleb(0);
+    abbrev
+        .uleb(8)
+        .uleb(0x0D)
+        .u8(0)
+        .uleb(0x03)
+        .uleb(0x08)
+        .uleb(0x49)
+        .uleb(0x13)
+        .uleb(0x38)
+        .uleb(0x0B)
+        .uleb(0)
+        .uleb(0);
     // 9: base_type: name string, byte_size data1.
-    abbrev.uleb(9).uleb(0x24).u8(0).uleb(0x03).uleb(0x08).uleb(0x0b).uleb(0x0b).uleb(0).uleb(0);
+    abbrev
+        .uleb(9)
+        .uleb(0x24)
+        .u8(0)
+        .uleb(0x03)
+        .uleb(0x08)
+        .uleb(0x0B)
+        .uleb(0x0B)
+        .uleb(0)
+        .uleb(0);
     abbrev.uleb(0);
 
     let mut strings = Assembler::default();
@@ -327,7 +448,17 @@ pub fn split_forms_dwarf(text_va: u64) -> Vec<ExtraSection> {
     // Header (12 bytes), one offset (4 bytes, relative to the header's
     // end), then DW_RLE_start_length and DW_RLE_end_of_list.
     let mut rnglists = Assembler::default();
-    rnglists.u32(0).u16(5).u8(8).u8(0).u32(1).u32(4).u8(7).u64(text_va + 0x10).uleb(0x10).u8(0);
+    rnglists
+        .u32(0)
+        .u16(5)
+        .u8(8)
+        .u8(0)
+        .u32(1)
+        .u32(4)
+        .u8(7)
+        .u64(text_va + 0x10)
+        .uleb(0x10)
+        .u8(0);
     close_length(&mut rnglists, 0);
 
     let mut info = Assembler::default();
@@ -364,7 +495,11 @@ pub fn split_forms_dwarf(text_va: u64) -> Vec<ExtraSection> {
     info.u8(0);
     close_length(&mut info, compile);
 
-    let plain = |name: &str, data: Vec<u8>| ExtraSection { name: name.to_owned(), data, encoding: StoredAs::Plain };
+    let plain = |name: &str, data: Vec<u8>| ExtraSection {
+        name: name.to_owned(),
+        data,
+        encoding: StoredAs::Plain,
+    };
     vec![
         plain(".debug_info", info.bytes),
         plain(".debug_abbrev", abbrev.bytes),
@@ -378,33 +513,68 @@ pub fn split_forms_dwarf(text_va: u64) -> Vec<ExtraSection> {
 /// DWARF 4: `typedef A B; typedef B A; struct Loop { A m @0; }` — a type
 /// chain that never reaches a type.
 pub fn looping_typedefs() -> Vec<ExtraSection> {
-    let encoding = Encoding { format: Format::Dwarf32, version: 4, address_size: 8 };
+    let encoding = Encoding {
+        format: Format::Dwarf32,
+        version: 4,
+        address_size: 8,
+    };
     let mut dwarf = DwarfUnit::new(encoding);
     let root = dwarf.unit.root();
     let a = dwarf.unit.add(root, gimli::DW_TAG_typedef);
     let b = dwarf.unit.add(root, gimli::DW_TAG_typedef);
     let a_name = dwarf.strings.add("A");
     let b_name = dwarf.strings.add("B");
-    dwarf.unit.get_mut(a).set(gimli::DW_AT_name, AttributeValue::StringRef(a_name));
-    dwarf.unit.get_mut(a).set(gimli::DW_AT_type, AttributeValue::UnitRef(b));
-    dwarf.unit.get_mut(b).set(gimli::DW_AT_name, AttributeValue::StringRef(b_name));
-    dwarf.unit.get_mut(b).set(gimli::DW_AT_type, AttributeValue::UnitRef(a));
+    dwarf
+        .unit
+        .get_mut(a)
+        .set(gimli::DW_AT_name, AttributeValue::StringRef(a_name));
+    dwarf
+        .unit
+        .get_mut(a)
+        .set(gimli::DW_AT_type, AttributeValue::UnitRef(b));
+    dwarf
+        .unit
+        .get_mut(b)
+        .set(gimli::DW_AT_name, AttributeValue::StringRef(b_name));
+    dwarf
+        .unit
+        .get_mut(b)
+        .set(gimli::DW_AT_type, AttributeValue::UnitRef(a));
     let looping = dwarf.unit.add(root, gimli::DW_TAG_structure_type);
     let loop_name = dwarf.strings.add("Loop");
-    dwarf.unit.get_mut(looping).set(gimli::DW_AT_name, AttributeValue::StringRef(loop_name));
-    dwarf.unit.get_mut(looping).set(gimli::DW_AT_byte_size, AttributeValue::Udata(8));
+    dwarf
+        .unit
+        .get_mut(looping)
+        .set(gimli::DW_AT_name, AttributeValue::StringRef(loop_name));
+    dwarf
+        .unit
+        .get_mut(looping)
+        .set(gimli::DW_AT_byte_size, AttributeValue::Udata(8));
     let member = dwarf.unit.add(looping, gimli::DW_TAG_member);
     let member_name = dwarf.strings.add("m");
-    dwarf.unit.get_mut(member).set(gimli::DW_AT_name, AttributeValue::StringRef(member_name));
-    dwarf.unit.get_mut(member).set(gimli::DW_AT_type, AttributeValue::UnitRef(a));
-    dwarf.unit.get_mut(member).set(gimli::DW_AT_data_member_location, AttributeValue::Udata(0));
+    dwarf
+        .unit
+        .get_mut(member)
+        .set(gimli::DW_AT_name, AttributeValue::StringRef(member_name));
+    dwarf
+        .unit
+        .get_mut(member)
+        .set(gimli::DW_AT_type, AttributeValue::UnitRef(a));
+    dwarf
+        .unit
+        .get_mut(member)
+        .set(gimli::DW_AT_data_member_location, AttributeValue::Udata(0));
     let mut sections = Sections::new(EndianVec::new(gimli::LittleEndian));
     dwarf.write(&mut sections).expect("DWARF");
     let mut out = Vec::new();
     sections
         .for_each(|id, data| {
             if !data.slice().is_empty() {
-                out.push(ExtraSection { name: id.name().to_owned(), data: data.slice().to_vec(), encoding: StoredAs::Plain });
+                out.push(ExtraSection {
+                    name: id.name().to_owned(),
+                    data: data.slice().to_vec(),
+                    encoding: StoredAs::Plain,
+                });
             }
             Ok::<(), gimli::write::Error>(())
         })
@@ -452,12 +622,12 @@ pub fn dwz_pair(forms: DwzForms, text_va: u64) -> DwzPair {
         DwzForms::Standard => 5,
     };
     let string_form: u64 = match forms {
-        DwzForms::Gnu => 0x1f21,
-        DwzForms::Standard => 0x1d,
+        DwzForms::Gnu => 0x1F21,
+        DwzForms::Standard => 0x1D,
     };
     let reference_form: u64 = match forms {
-        DwzForms::Gnu => 0x1f20,
-        DwzForms::Standard => 0x1c,
+        DwzForms::Gnu => 0x1F20,
+        DwzForms::Standard => 0x1C,
     };
 
     let mut sup_strings = Assembler::default();
@@ -473,10 +643,39 @@ pub fn dwz_pair(forms: DwzForms, text_va: u64) -> DwzPair {
     let mut sup_abbrev = Assembler::default();
     // 1: partial_unit; 2: structure_type (name strp, byte_size data1);
     // 3: member (name strp, type ref4, location data1); 4: base_type.
-    sup_abbrev.uleb(1).uleb(0x3c).u8(1).uleb(0).uleb(0);
-    sup_abbrev.uleb(2).uleb(0x13).u8(1).uleb(0x03).uleb(0x0e).uleb(0x0b).uleb(0x0b).uleb(0).uleb(0);
-    sup_abbrev.uleb(3).uleb(0x0d).u8(0).uleb(0x03).uleb(0x0e).uleb(0x49).uleb(0x13).uleb(0x38).uleb(0x0b).uleb(0).uleb(0);
-    sup_abbrev.uleb(4).uleb(0x24).u8(0).uleb(0x03).uleb(0x0e).uleb(0x0b).uleb(0x0b).uleb(0).uleb(0);
+    sup_abbrev.uleb(1).uleb(0x3C).u8(1).uleb(0).uleb(0);
+    sup_abbrev
+        .uleb(2)
+        .uleb(0x13)
+        .u8(1)
+        .uleb(0x03)
+        .uleb(0x0E)
+        .uleb(0x0B)
+        .uleb(0x0B)
+        .uleb(0)
+        .uleb(0);
+    sup_abbrev
+        .uleb(3)
+        .uleb(0x0D)
+        .u8(0)
+        .uleb(0x03)
+        .uleb(0x0E)
+        .uleb(0x49)
+        .uleb(0x13)
+        .uleb(0x38)
+        .uleb(0x0B)
+        .uleb(0)
+        .uleb(0);
+    sup_abbrev
+        .uleb(4)
+        .uleb(0x24)
+        .u8(0)
+        .uleb(0x03)
+        .uleb(0x0E)
+        .uleb(0x0B)
+        .uleb(0x0B)
+        .uleb(0)
+        .uleb(0);
     sup_abbrev.uleb(0);
     let mut sup_info = Assembler::default();
     unit_header(&mut sup_info, version, 3);
@@ -492,8 +691,16 @@ pub fn dwz_pair(forms: DwzForms, text_va: u64) -> DwzPair {
     sup_info.u8(0);
     sup_info.patch_u32(value_type, long_entry as u32);
     close_length(&mut sup_info, 0);
-    let plain = |name: &str, data: Vec<u8>| ExtraSection { name: name.to_owned(), data, encoding: StoredAs::Plain };
-    let supplement_spec = ElfSpec { symtab: Symtab::Without, build_id: SUPPLEMENT_BUILD_ID, ..ElfSpec::pie() };
+    let plain = |name: &str, data: Vec<u8>| ExtraSection {
+        name: name.to_owned(),
+        data,
+        encoding: StoredAs::Plain,
+    };
+    let supplement_spec = ElfSpec {
+        symtab: Symtab::Without,
+        build_id: SUPPLEMENT_BUILD_ID,
+        ..ElfSpec::pie()
+    };
     let supplement = build_elf(
         supplement_spec,
         &[
@@ -507,24 +714,80 @@ pub fn dwz_pair(forms: DwzForms, text_va: u64) -> DwzPair {
     // 1: compile_unit (name string, low_pc addr); 2: subprogram named in
     // the supplement; 3: subprogram named inline; 4: structure_type;
     // 5: member typed in the supplement.
-    abbrev.uleb(1).uleb(0x11).u8(1).uleb(0x03).uleb(0x08).uleb(0x11).uleb(0x01).uleb(0).uleb(0);
-    abbrev.uleb(2).uleb(0x2e).u8(0).uleb(0x03).uleb(string_form).uleb(0x11).uleb(0x01).uleb(0x12).uleb(0x06).uleb(0).uleb(0);
-    abbrev.uleb(3).uleb(0x2e).u8(0).uleb(0x03).uleb(0x08).uleb(0x11).uleb(0x01).uleb(0x12).uleb(0x06).uleb(0).uleb(0);
-    abbrev.uleb(4).uleb(0x13).u8(1).uleb(0x03).uleb(0x08).uleb(0x0b).uleb(0x0b).uleb(0).uleb(0);
-    abbrev.uleb(5).uleb(0x0d).u8(0).uleb(0x03).uleb(0x08).uleb(0x49).uleb(reference_form).uleb(0x38).uleb(0x0b).uleb(0).uleb(0);
+    abbrev
+        .uleb(1)
+        .uleb(0x11)
+        .u8(1)
+        .uleb(0x03)
+        .uleb(0x08)
+        .uleb(0x11)
+        .uleb(0x01)
+        .uleb(0)
+        .uleb(0);
+    abbrev
+        .uleb(2)
+        .uleb(0x2E)
+        .u8(0)
+        .uleb(0x03)
+        .uleb(string_form)
+        .uleb(0x11)
+        .uleb(0x01)
+        .uleb(0x12)
+        .uleb(0x06)
+        .uleb(0)
+        .uleb(0);
+    abbrev
+        .uleb(3)
+        .uleb(0x2E)
+        .u8(0)
+        .uleb(0x03)
+        .uleb(0x08)
+        .uleb(0x11)
+        .uleb(0x01)
+        .uleb(0x12)
+        .uleb(0x06)
+        .uleb(0)
+        .uleb(0);
+    abbrev
+        .uleb(4)
+        .uleb(0x13)
+        .u8(1)
+        .uleb(0x03)
+        .uleb(0x08)
+        .uleb(0x0B)
+        .uleb(0x0B)
+        .uleb(0)
+        .uleb(0);
+    abbrev
+        .uleb(5)
+        .uleb(0x0D)
+        .u8(0)
+        .uleb(0x03)
+        .uleb(0x08)
+        .uleb(0x49)
+        .uleb(reference_form)
+        .uleb(0x38)
+        .uleb(0x0B)
+        .uleb(0)
+        .uleb(0);
     abbrev.uleb(0);
     let mut info = Assembler::default();
     unit_header(&mut info, version, 1);
     info.uleb(1).cstr("dwz.c").u64(0);
     info.uleb(2).u32(dwz_function as u32).u64(text_va).u32(0x10);
-    info.uleb(3).cstr("own_function").u64(text_va + 0x10).u32(0x10);
+    info.uleb(3)
+        .cstr("own_function")
+        .u64(text_va + 0x10)
+        .u32(0x10);
     info.uleb(4).cstr("Local").u8(16);
     info.uleb(5).cstr("shared").u32(shared_entry as u32).u8(8);
     info.u8(0);
     info.u8(0);
     close_length(&mut info, 0);
     let mut alt_link = Assembler::default();
-    alt_link.cstr("/usr/lib/debug/.dwz/x86_64-redhat-linux-gnu/fixture.debug").bytes(&SUPPLEMENT_BUILD_ID);
+    alt_link
+        .cstr("/usr/lib/debug/.dwz/x86_64-redhat-linux-gnu/fixture.debug")
+        .bytes(&SUPPLEMENT_BUILD_ID);
     DwzPair {
         main: vec![
             plain(".debug_info", info.bytes),

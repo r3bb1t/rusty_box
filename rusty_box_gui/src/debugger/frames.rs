@@ -8,12 +8,17 @@ use rusty_box_symbols::identity::ModuleIdentity;
 
 use super::guest::{GuestMemory, Root};
 use super::image_memory::ImageBacked;
-use super::inspect::{linear_of, DebugSnapshot, SymModule, SymbolIndex, Viewing, WOW64_CODE_SELECTOR};
+use super::inspect::{
+    DebugSnapshot, SymModule, SymbolIndex, Viewing, WOW64_CODE_SELECTOR, linear_of,
+};
 use super::threads::SavedRegisters;
 use super::unwind::{
-    caller_of, unwind, CodeWidth, Frame, FrameFound, FrameRegisters, Stack, StackEnd, UnwindModule, Unwinding, RBP, RSP,
+    CodeWidth, Frame, FrameFound, FrameRegisters, RBP, RSP, Stack, StackEnd, UnwindModule,
+    Unwinding, caller_of, unwind,
 };
-use super::variables::{frame_scope, locals_of, FrameContext, Innermost, PathRoot, ValuePath, VariableRow};
+use super::variables::{
+    FrameContext, Innermost, PathRoot, ValuePath, VariableRow, frame_scope, locals_of,
+};
 use super::watch::{read_tip, read_watch, unread_watch};
 use crate::symbols::hub::{ImageKey, SymbolsView};
 
@@ -36,7 +41,9 @@ pub(crate) enum TipRead {
     None,
     Rows(WatchRead),
     /// The clicked word `text` names no variable: the tip closes.
-    NoVariable { text: String },
+    NoVariable {
+        text: String,
+    },
 }
 
 /// The part of an `InspectRequest` the shell sends each frame; the frame is
@@ -56,10 +63,14 @@ pub(crate) enum LocalsRead {
     /// The frame's code is in no module of the pause.
     NoModule,
     /// The module's symbols are loading, or were not found.
-    NoSymbols { module: String },
+    NoSymbols {
+        module: String,
+    },
     /// No function's records hold the frame's code.
     NoFunction,
-    Unreadable { why: String },
+    Unreadable {
+        why: String,
+    },
     Rows(Vec<VariableRow>),
 }
 
@@ -125,11 +136,19 @@ pub(crate) fn frames_at_thread(saved: &SavedRegisters, cr3: u64) -> FramesAt {
     if let Some(slot) = registers.get_mut(RBP) {
         *slot = Some(saved.rbp);
     }
-    let width = if saved.cs == WOW64_CODE_SELECTOR { CodeWidth::Protected32 } else { CodeWidth::Long64 };
+    let width = if saved.cs == WOW64_CODE_SELECTOR {
+        CodeWidth::Protected32
+    } else {
+        CodeWidth::Long64
+    };
     FramesAt {
         root: Root::Process(cr3),
         width: Some(width),
-        start: FrameRegisters { rip: saved.rip, rsp: saved.rsp, registers },
+        start: FrameRegisters {
+            rip: saved.rip,
+            rsp: saved.rsp,
+            registers,
+        },
         xmm: None,
     }
 }
@@ -139,8 +158,8 @@ pub(crate) fn frames_at_thread(saved: &SavedRegisters, cr3: u64) -> FramesAt {
 pub(crate) fn frames_at_view(view: &CpuDebugView) -> FramesAt {
     let at = &view.registers;
     let registers = [
-        at.rax, at.rcx, at.rdx, at.rbx, at.rsp, at.rbp, at.rsi, at.rdi, at.r8, at.r9, at.r10, at.r11, at.r12, at.r13, at.r14,
-        at.r15,
+        at.rax, at.rcx, at.rdx, at.rbx, at.rsp, at.rbp, at.rsi, at.rdi, at.r8, at.r9, at.r10,
+        at.r11, at.r12, at.r13, at.r14, at.r15,
     ]
     .map(Some);
     let width = match view.code_size {
@@ -165,15 +184,21 @@ pub(crate) fn frames_at_view(view: &CpuDebugView) -> FramesAt {
 pub(crate) fn frames_at(snapshot: &DebugSnapshot) -> FramesAt {
     match &snapshot.viewing {
         Viewing::Thread(thread) => frames_at_thread(&thread.saved, thread.cr3),
-        Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => match snapshot.cpus.get(snapshot.cpu) {
-            Some(view) => frames_at_view(view),
-            None => FramesAt {
-                root: Root::Live,
-                width: None,
-                start: FrameRegisters { rip: snapshot.rip, rsp: 0, registers: [None; 16] },
-                xmm: None,
-            },
-        },
+        Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => {
+            match snapshot.cpus.get(snapshot.cpu) {
+                Some(view) => frames_at_view(view),
+                None => FramesAt {
+                    root: Root::Live,
+                    width: None,
+                    start: FrameRegisters {
+                        rip: snapshot.rip,
+                        rsp: 0,
+                        registers: [None; 16],
+                    },
+                    xmm: None,
+                },
+            }
+        }
     }
 }
 
@@ -196,11 +221,26 @@ pub(crate) fn caller_frame<G: GuestMemory>(
 ) -> Option<Frame> {
     let mut memory = ImageBacked::new(memory, of.modules, symbols);
     let modules = unwind_modules(of.modules);
-    caller_of(&mut memory, &Unwinding { root: of.root, modules: &modules, width: of.width }, frame).ok()
+    caller_of(
+        &mut memory,
+        &Unwinding {
+            root: of.root,
+            modules: &modules,
+            width: of.width,
+        },
+        frame,
+    )
+    .ok()
 }
 
 fn unwind_modules(modules: &[SymModule]) -> Vec<UnwindModule> {
-    modules.iter().map(|module| UnwindModule { base: module.base, size: module.size }).collect()
+    modules
+        .iter()
+        .map(|module| UnwindModule {
+            base: module.base,
+            size: module.size,
+        })
+        .collect()
 }
 
 /// The stack from `at` and the frame `request` picks (the innermost when
@@ -217,11 +257,29 @@ pub(crate) fn read_frames<G: GuestMemory>(
     let stack = match at.width {
         Some(width) => {
             let modules = unwind_modules(&index.modules);
-            unwind(&mut memory, &Unwinding { root: at.root, modules: &modules, width }, at.start)
+            unwind(
+                &mut memory,
+                &Unwinding {
+                    root: at.root,
+                    modules: &modules,
+                    width,
+                },
+                at.start,
+            )
         }
-        None => Stack { frames: vec![Frame { registers: at.start, how: FrameFound::Registers }], end: StackEnd::SixteenBit },
+        None => Stack {
+            frames: vec![Frame {
+                registers: at.start,
+                how: FrameFound::Registers,
+            }],
+            end: StackEnd::SixteenBit,
+        },
     };
-    let selected = if request.frame < stack.frames.len() { request.frame } else { 0 };
+    let selected = if request.frame < stack.frames.len() {
+        request.frame
+    } else {
+        0
+    };
     let awaiting = stack
         .frames
         .get(selected)
@@ -230,10 +288,20 @@ pub(crate) fn read_frames<G: GuestMemory>(
         .filter(|identity| symbols.and_then(|view| view.tables(identity)).is_none())
         .map(|identity| vec![identity.clone()])
         .unwrap_or_default();
-    let picked = at.width.and_then(|width| stack.frames.get(selected).map(|frame| Picked { frame, selected, width }));
+    let picked = at.width.and_then(|width| {
+        stack.frames.get(selected).map(|frame| Picked {
+            frame,
+            selected,
+            width,
+        })
+    });
     let read = match picked {
         Some(picked) => read_in_frame(&mut memory, at, index, symbols, &picked, request),
-        None => FrameRead::unread(LocalsRead::NotAsked, request, "16-bit code's variables are not read"),
+        None => FrameRead::unread(
+            LocalsRead::NotAsked,
+            request,
+            "16-bit code's variables are not read",
+        ),
     };
     let awaiting_images = memory.into_awaited();
     FramesRead {
@@ -267,7 +335,11 @@ impl FrameRead {
             Some(text) => TipRead::Rows(unread_watch(PathRoot::Tip, text, why)),
             None => TipRead::None,
         };
-        FrameRead { locals, watches, tip }
+        FrameRead {
+            locals,
+            watches,
+            tip,
+        }
     }
 }
 
@@ -289,16 +361,33 @@ fn read_in_frame<G: GuestMemory>(
     request: &InspectRequest,
 ) -> FrameRead {
     let Some(module) = index.module_at(picked.frame.code_address()) else {
-        return FrameRead::unread(LocalsRead::NoModule, request, "the frame's code is in no module");
+        return FrameRead::unread(
+            LocalsRead::NoModule,
+            request,
+            "the frame's code is in no module",
+        );
     };
-    let tables = module.identity.known().and_then(|identity| symbols.and_then(|view| view.tables(identity)));
+    let tables = module
+        .identity
+        .known()
+        .and_then(|identity| symbols.and_then(|view| view.tables(identity)));
     let Some(tables) = tables else {
         let why = format!("the symbols of {} are not loaded", module.name);
-        return FrameRead::unread(LocalsRead::NoSymbols { module: module.name.clone() }, request, &why);
+        return FrameRead::unread(
+            LocalsRead::NoSymbols {
+                module: module.name.clone(),
+            },
+            request,
+            &why,
+        );
     };
     let context = FrameContext {
         frame: picked.frame,
-        innermost: if picked.selected == 0 { Innermost::Yes } else { Innermost::Caller },
+        innermost: if picked.selected == 0 {
+            Innermost::Yes
+        } else {
+            Innermost::Caller
+        },
         xmm: at.xmm.as_ref(),
         root: at.root,
         width: picked.width,
@@ -316,30 +405,38 @@ fn read_in_frame<G: GuestMemory>(
         Some(text) => read_tip(memory, &context, in_scope, text, request),
         None => TipRead::None,
     };
-    FrameRead { locals, watches, tip }
+    FrameRead {
+        locals,
+        watches,
+        tip,
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use rusty_box_symbols::identity::PeImageId;
+    use rusty_box_symbols::module_file::ModuleFile;
+    use rusty_box_symbols::service::SymbolSource;
+    use rusty_box_symbols::tables::SymbolTables;
+    use rusty_box_symbols_fixtures::pdb::{
+        FixtureField, FixtureLine, FixtureLocal, FixturePlace, FixtureProcedure, FixtureScope,
+        FixtureType, FixtureUdt, PdbFixture, UdtKind, build_pdb,
+    };
+    use rusty_box_symbols_fixtures::pe::{
+        Directory, PAGE_ALIGNED, Pe64Spec, SECTION_CODE, SECTION_READ_ONLY, SpecSection, pe64_file,
+    };
+
     use super::*;
     use crate::debugger::guest::fake::FakeGuest;
     use crate::debugger::inspect::{ModuleSpace, SymModule};
     use crate::debugger::module_identity::GuestIdentity;
     use crate::debugger::unwind::RBX;
     use crate::debugger::variables::{ShownValue, Signedness};
-    use crate::symbols::hub::{ImageEntry, ImageKey, ImageRetry, ImageState, ModuleEntry, ModuleSymbols};
-    use rusty_box_symbols::identity::PeImageId;
-    use rusty_box_symbols::module_file::ModuleFile;
-    use rusty_box_symbols::service::SymbolSource;
-    use rusty_box_symbols::tables::SymbolTables;
-    use rusty_box_symbols_fixtures::pdb::{
-        build_pdb, FixtureField, FixtureLine, FixtureLocal, FixturePlace, FixtureProcedure, FixtureScope, FixtureType,
-        FixtureUdt, PdbFixture, UdtKind,
+    use crate::symbols::hub::{
+        ImageEntry, ImageKey, ImageRetry, ImageState, ModuleEntry, ModuleSymbols,
     };
-    use rusty_box_symbols_fixtures::pe::{
-        pe64_file, Directory, Pe64Spec, SpecSection, PAGE_ALIGNED, SECTION_CODE, SECTION_READ_ONLY,
-    };
-    use std::sync::Arc;
 
     /// CodeView's `RSP`.
     const CV_RSP: u16 = 335;
@@ -374,20 +471,38 @@ mod tests {
     }
 
     fn registers_at(rip: u64, rsp: u64) -> FrameRegisters {
-        FrameRegisters { rip, rsp, registers: [Some(0); 16] }
+        FrameRegisters {
+            rip,
+            rsp,
+            registers: [Some(0); 16],
+        }
     }
 
     fn at_f(width: Option<CodeWidth>) -> FramesAt {
-        FramesAt { root: Root::Live, width, start: registers_at(F, STACK), xmm: None }
+        FramesAt {
+            root: Root::Live,
+            width,
+            start: registers_at(F, STACK),
+            xmm: None,
+        }
     }
 
     fn request(frame: usize) -> InspectRequest {
-        InspectRequest { frame, ..InspectRequest::default() }
+        InspectRequest {
+            frame,
+            ..InspectRequest::default()
+        }
     }
 
     #[test]
     fn the_stack_of_a_leaf_called_from_main_has_two_frames() {
-        let read = read_frames(&mut leaf_called_from_main(), &at_f(Some(CodeWidth::Long64)), &index(), None, &request(0));
+        let read = read_frames(
+            &mut leaf_called_from_main(),
+            &at_f(Some(CodeWidth::Long64)),
+            &index(),
+            None,
+            &request(0),
+        );
         assert_eq!(read.frames.len(), 2);
         assert_eq!(read.frames[0].how, FrameFound::Registers);
         assert_eq!(read.frames[1].registers.rip, MAIN + 5);
@@ -397,9 +512,21 @@ mod tests {
 
     #[test]
     fn a_selection_past_the_stack_falls_back_to_the_innermost_frame() {
-        let read = read_frames(&mut leaf_called_from_main(), &at_f(Some(CodeWidth::Long64)), &index(), None, &request(7));
+        let read = read_frames(
+            &mut leaf_called_from_main(),
+            &at_f(Some(CodeWidth::Long64)),
+            &index(),
+            None,
+            &request(7),
+        );
         assert_eq!(read.selected, 0);
-        let read = read_frames(&mut leaf_called_from_main(), &at_f(Some(CodeWidth::Long64)), &index(), None, &request(1));
+        let read = read_frames(
+            &mut leaf_called_from_main(),
+            &at_f(Some(CodeWidth::Long64)),
+            &index(),
+            None,
+            &request(1),
+        );
         assert_eq!(read.selected, 1);
     }
 
@@ -407,12 +534,21 @@ mod tests {
     fn a_module_whose_symbols_have_not_loaded_is_awaited() {
         let identity = ModuleIdentity::Pe {
             file_name: "flat.exe".into(),
-            image: PeImageId { time_date_stamp: 1, size_of_image: 0x1_0000 },
+            image: PeImageId {
+                time_date_stamp: 1,
+                size_of_image: 0x1_0000,
+            },
             pdb: None,
         };
         let mut known = index();
         known.modules[0].identity = GuestIdentity::Known(identity.clone());
-        let read = read_frames(&mut leaf_called_from_main(), &at_f(Some(CodeWidth::Long64)), &known, None, &request(0));
+        let read = read_frames(
+            &mut leaf_called_from_main(),
+            &at_f(Some(CodeWidth::Long64)),
+            &known,
+            None,
+            &request(0),
+        );
         assert_eq!(read.awaiting, [identity.clone()]);
         let read = read_frames(
             &mut leaf_called_from_main(),
@@ -422,16 +558,38 @@ mod tests {
             &request(1),
         );
         assert_eq!(read.awaiting, [identity], "the caller's module, picked");
-        assert_eq!(read.locals, LocalsRead::NoSymbols { module: "flat.exe".into() });
-        let unnamed = read_frames(&mut leaf_called_from_main(), &at_f(Some(CodeWidth::Long64)), &index(), None, &request(0));
-        assert!(unnamed.awaiting.is_empty(), "nothing names an unnamed module's tables");
-        assert_eq!(unnamed.locals, LocalsRead::NoSymbols { module: "flat.exe".into() });
+        assert_eq!(
+            read.locals,
+            LocalsRead::NoSymbols {
+                module: "flat.exe".into()
+            }
+        );
+        let unnamed = read_frames(
+            &mut leaf_called_from_main(),
+            &at_f(Some(CodeWidth::Long64)),
+            &index(),
+            None,
+            &request(0),
+        );
+        assert!(
+            unnamed.awaiting.is_empty(),
+            "nothing names an unnamed module's tables"
+        );
+        assert_eq!(
+            unnamed.locals,
+            LocalsRead::NoSymbols {
+                module: "flat.exe".into()
+            }
+        );
     }
 
     fn flat_identity() -> ModuleIdentity {
         ModuleIdentity::Pe {
             file_name: "flat.exe".into(),
-            image: PeImageId { time_date_stamp: 1, size_of_image: 0x1_0000 },
+            image: PeImageId {
+                time_date_stamp: 1,
+                size_of_image: 0x1_0000,
+            },
             pdb: None,
         }
     }
@@ -449,7 +607,14 @@ mod tests {
     }
 
     fn at_rsp(name: &str, ty: FixtureType) -> FixtureLocal {
-        FixtureLocal { name: name.into(), ty, place: FixturePlace::RegRel { register: CV_RSP, offset: 0 } }
+        FixtureLocal {
+            name: name.into(),
+            ty,
+            place: FixturePlace::RegRel {
+                register: CV_RSP,
+                offset: 0,
+            },
+        }
     }
 
     /// `main` holding `argc` and the structure `pair` at `[rsp]`, and `f`
@@ -462,16 +627,30 @@ mod tests {
             kind: UdtKind::Struct,
             size: 8,
             fields: vec![
-                FixtureField { name: "a".into(), offset: 0, ty: FixtureType::I32 },
-                FixtureField { name: "b".into(), offset: 4, ty: FixtureType::I32 },
+                FixtureField {
+                    name: "a".into(),
+                    offset: 0,
+                    ty: FixtureType::I32,
+                },
+                FixtureField {
+                    name: "b".into(),
+                    offset: 4,
+                    ty: FixtureType::I32,
+                },
             ],
         }];
         let scopes = [
             ScopeOf {
                 procedure: "main",
-                locals: vec![at_rsp("argc", FixtureType::I32), at_rsp("pair", FixtureType::Named("Pair".into()))],
+                locals: vec![
+                    at_rsp("argc", FixtureType::I32),
+                    at_rsp("pair", FixtureType::Named("Pair".into())),
+                ],
             },
-            ScopeOf { procedure: "f", locals: vec![at_rsp("x", FixtureType::I32)] },
+            ScopeOf {
+                procedure: "f",
+                locals: vec![at_rsp("x", FixtureType::I32)],
+            },
         ];
         for scope in scopes {
             fixture.scopes.push(FixtureScope {
@@ -490,7 +669,11 @@ mod tests {
         view.modules.insert(
             flat_identity(),
             ModuleEntry {
-                state: ModuleSymbols::Loaded { from: SymbolSource::Store { path: "flat.pdb".into() } },
+                state: ModuleSymbols::Loaded {
+                    from: SymbolSource::Store {
+                        path: "flat.pdb".into(),
+                    },
+                },
                 tables: Some(Arc::new(tables)),
             },
         );
@@ -516,13 +699,35 @@ mod tests {
         known.modules[0].identity = GuestIdentity::Known(flat_identity());
         let view = flat_view();
         let at = at_f(Some(CodeWidth::Long64));
-        let innermost = read_frames(&mut leaf_called_from_main(), &at, &known, Some(&view), &request(0));
+        let innermost = read_frames(
+            &mut leaf_called_from_main(),
+            &at,
+            &known,
+            Some(&view),
+            &request(0),
+        );
         assert_eq!(names(&innermost.locals), ["x"]);
         assert!(innermost.awaiting.is_empty());
-        let caller = read_frames(&mut leaf_called_from_main(), &at, &known, Some(&view), &request(1));
+        let caller = read_frames(
+            &mut leaf_called_from_main(),
+            &at,
+            &known,
+            Some(&view),
+            &request(1),
+        );
         assert_eq!(names(&caller.locals), ["argc", "pair"]);
-        let LocalsRead::Rows(rows) = &caller.locals else { panic!("rows") };
-        assert_eq!(rows[0].value, ShownValue::Integer { raw: 0, size: 4, signedness: Signedness::Signed }, "[rsp] of main is 0");
+        let LocalsRead::Rows(rows) = &caller.locals else {
+            panic!("rows")
+        };
+        assert_eq!(
+            rows[0].value,
+            ShownValue::Integer {
+                raw: 0,
+                size: 4,
+                signedness: Signedness::Signed
+            },
+            "[rsp] of main is 0"
+        );
     }
 
     #[test]
@@ -530,13 +735,33 @@ mod tests {
         let mut known = index();
         known.modules[0].identity = GuestIdentity::Known(flat_identity());
         let view = flat_view();
-        let ask = InspectRequest { frame: 1, watches: vec!["argc".into(), "a..b".into()], ..InspectRequest::default() };
-        let read = read_frames(&mut leaf_called_from_main(), &at_f(Some(CodeWidth::Long64)), &known, Some(&view), &ask);
+        let ask = InspectRequest {
+            frame: 1,
+            watches: vec!["argc".into(), "a..b".into()],
+            ..InspectRequest::default()
+        };
+        let read = read_frames(
+            &mut leaf_called_from_main(),
+            &at_f(Some(CodeWidth::Long64)),
+            &known,
+            Some(&view),
+            &ask,
+        );
         assert_eq!(read.watches.len(), 2);
         assert_eq!(read.watches[0].text, "argc");
-        assert_eq!(read.watches[0].rows[0].value, ShownValue::Integer { raw: 0, size: 4, signedness: Signedness::Signed });
+        assert_eq!(
+            read.watches[0].rows[0].value,
+            ShownValue::Integer {
+                raw: 0,
+                size: 4,
+                signedness: Signedness::Signed
+            }
+        );
         assert_eq!(read.watches[0].rows[0].path.root, PathRoot::Watch(0));
-        assert_eq!(read.watches[1].rows[0].value, ShownValue::Problem("unexpected '.' at 2".into()));
+        assert_eq!(
+            read.watches[1].rows[0].value,
+            ShownValue::Problem("unexpected '.' at 2".into())
+        );
         let innermost = read_frames(
             &mut leaf_called_from_main(),
             &at_f(Some(CodeWidth::Long64)),
@@ -544,70 +769,163 @@ mod tests {
             Some(&view),
             &InspectRequest { frame: 0, ..ask },
         );
-        assert_eq!(innermost.watches[0].rows[0].value, ShownValue::Problem("no variable named argc".into()));
+        assert_eq!(
+            innermost.watches[0].rows[0].value,
+            ShownValue::Problem("no variable named argc".into())
+        );
         let unloaded = read_frames(
             &mut leaf_called_from_main(),
             &at_f(Some(CodeWidth::Long64)),
             &known,
             None,
-            &InspectRequest { frame: 0, watches: vec!["argc".into()], ..InspectRequest::default() },
+            &InspectRequest {
+                frame: 0,
+                watches: vec!["argc".into()],
+                ..InspectRequest::default()
+            },
         );
-        assert_eq!(unloaded.watches[0].rows[0].value, ShownValue::Problem("the symbols of flat.exe are not loaded".into()));
+        assert_eq!(
+            unloaded.watches[0].rows[0].value,
+            ShownValue::Problem("the symbols of flat.exe are not loaded".into())
+        );
     }
 
     fn tip_in_main(tip: &str, expanded: BTreeSet<ValuePath>) -> TipRead {
         let mut known = index();
         known.modules[0].identity = GuestIdentity::Known(flat_identity());
-        let ask = InspectRequest { frame: 1, tip: Some(tip.into()), expanded, ..InspectRequest::default() };
-        read_frames(&mut leaf_called_from_main(), &at_f(Some(CodeWidth::Long64)), &known, Some(&flat_view()), &ask).tip
+        let ask = InspectRequest {
+            frame: 1,
+            tip: Some(tip.into()),
+            expanded,
+            ..InspectRequest::default()
+        };
+        read_frames(
+            &mut leaf_called_from_main(),
+            &at_f(Some(CodeWidth::Long64)),
+            &known,
+            Some(&flat_view()),
+            &ask,
+        )
+        .tip
     }
 
     #[test]
     fn a_tip_is_read_as_a_watch_in_the_selected_frame() {
-        let TipRead::Rows(read) = tip_in_main("argc", BTreeSet::new()) else { panic!("rows") };
+        let TipRead::Rows(read) = tip_in_main("argc", BTreeSet::new()) else {
+            panic!("rows")
+        };
         assert_eq!(read.text, "argc");
-        assert_eq!(read.rows[0].value, ShownValue::Integer { raw: 0, size: 4, signedness: Signedness::Signed });
+        assert_eq!(
+            read.rows[0].value,
+            ShownValue::Integer {
+                raw: 0,
+                size: 4,
+                signedness: Signedness::Signed
+            }
+        );
         assert_eq!(read.rows[0].path.root, PathRoot::Tip);
-        let TipRead::Rows(closed) = tip_in_main("pair", BTreeSet::new()) else { panic!("rows") };
+        let TipRead::Rows(closed) = tip_in_main("pair", BTreeSet::new()) else {
+            panic!("rows")
+        };
         assert_eq!(closed.rows.len(), 1);
-        assert!(matches!(&closed.rows[0].value, ShownValue::Aggregate { preview, .. } if preview.len() == 2));
-        let open = BTreeSet::from([ValuePath { root: PathRoot::Tip, steps: Vec::new() }]);
-        let TipRead::Rows(expanded) = tip_in_main("pair", open) else { panic!("rows") };
-        let members: Vec<&str> = expanded.rows.iter().skip(1).map(|row| row.name.as_str()).collect();
+        assert!(
+            matches!(&closed.rows[0].value, ShownValue::Aggregate { preview, .. } if preview.len() == 2)
+        );
+        let open = BTreeSet::from([ValuePath {
+            root: PathRoot::Tip,
+            steps: Vec::new(),
+        }]);
+        let TipRead::Rows(expanded) = tip_in_main("pair", open) else {
+            panic!("rows")
+        };
+        let members: Vec<&str> = expanded
+            .rows
+            .iter()
+            .skip(1)
+            .map(|row| row.name.as_str())
+            .collect();
         assert_eq!(members, ["a", "b"]);
     }
 
     #[test]
     fn a_tip_on_a_word_that_names_nothing_reads_as_no_variable() {
-        assert_eq!(tip_in_main("nothing", BTreeSet::new()), TipRead::NoVariable { text: "nothing".into() });
-        let no_tip = read_frames(&mut leaf_called_from_main(), &at_f(Some(CodeWidth::Long64)), &index(), None, &request(0));
+        assert_eq!(
+            tip_in_main("nothing", BTreeSet::new()),
+            TipRead::NoVariable {
+                text: "nothing".into()
+            }
+        );
+        let no_tip = read_frames(
+            &mut leaf_called_from_main(),
+            &at_f(Some(CodeWidth::Long64)),
+            &index(),
+            None,
+            &request(0),
+        );
         assert_eq!(no_tip.tip, TipRead::None);
     }
 
     #[test]
     fn a_frame_in_no_module_says_so() {
-        let at = FramesAt { root: Root::Live, width: Some(CodeWidth::Long64), start: registers_at(0x9_0000, STACK), xmm: None };
-        let read = read_frames(&mut leaf_called_from_main(), &at, &index(), None, &request(0));
+        let at = FramesAt {
+            root: Root::Live,
+            width: Some(CodeWidth::Long64),
+            start: registers_at(0x9_0000, STACK),
+            xmm: None,
+        };
+        let read = read_frames(
+            &mut leaf_called_from_main(),
+            &at,
+            &index(),
+            None,
+            &request(0),
+        );
         assert_eq!(read.locals, LocalsRead::NoModule);
-        let sixteen = read_frames(&mut leaf_called_from_main(), &at_f(None), &index(), None, &request(0));
-        assert_eq!(sixteen.locals, LocalsRead::NotAsked, "16-bit code's variables are not read");
+        let sixteen = read_frames(
+            &mut leaf_called_from_main(),
+            &at_f(None),
+            &index(),
+            None,
+            &request(0),
+        );
+        assert_eq!(
+            sixteen.locals,
+            LocalsRead::NotAsked,
+            "16-bit code's variables are not read"
+        );
     }
 
     #[test]
     fn sixteen_bit_code_is_one_frame_that_says_why() {
-        let read = read_frames(&mut leaf_called_from_main(), &at_f(None), &index(), None, &request(0));
+        let read = read_frames(
+            &mut leaf_called_from_main(),
+            &at_f(None),
+            &index(),
+            None,
+            &request(0),
+        );
         assert_eq!(read.frames.len(), 1);
         assert_eq!(read.end, StackEnd::SixteenBit);
     }
 
-    const UNWOUND: PeImageId = PeImageId { time_date_stamp: 0x5E1F_0002, size_of_image: 0x4000 };
+    const UNWOUND: PeImageId = PeImageId {
+        time_date_stamp: 0x5E1F_0002,
+        size_of_image: 0x4000,
+    };
 
     fn unwound_identity() -> ModuleIdentity {
-        ModuleIdentity::Pe { file_name: "unwound.exe".into(), image: UNWOUND, pdb: None }
+        ModuleIdentity::Pe {
+            file_name: "unwound.exe".into(),
+            image: UNWOUND,
+            pdb: None,
+        }
     }
 
     fn unwound_key() -> ImageKey {
-        ImageKey { file_name: "unwound.exe".into(), image: UNWOUND }
+        ImageKey {
+            file_name: "unwound.exe".into(),
+            image: UNWOUND,
+        }
     }
 
     /// `unwound.exe` linked at `BASE`: `main` at 0x1000 and `f` at 0x1100,
@@ -628,11 +946,29 @@ mod tests {
             image_base: BASE,
             section_alignment: PAGE_ALIGNED,
             sections: vec![
-                SpecSection { name: b".text", rva: 0x1000, bytes: text, characteristics: SECTION_CODE },
-                SpecSection { name: b".rdata", rva: 0x2000, bytes: info, characteristics: SECTION_READ_ONLY },
-                SpecSection { name: b".pdata", rva: 0x3000, bytes: pdata, characteristics: SECTION_READ_ONLY },
+                SpecSection {
+                    name: b".text",
+                    rva: 0x1000,
+                    bytes: text,
+                    characteristics: SECTION_CODE,
+                },
+                SpecSection {
+                    name: b".rdata",
+                    rva: 0x2000,
+                    bytes: info,
+                    characteristics: SECTION_READ_ONLY,
+                },
+                SpecSection {
+                    name: b".pdata",
+                    rva: 0x3000,
+                    bytes: pdata,
+                    characteristics: SECTION_READ_ONLY,
+                },
             ],
-            exception: Some(Directory { rva: 0x3000, size: 12 }),
+            exception: Some(Directory {
+                rva: 0x3000,
+                size: 12,
+            }),
             base_relocations: None,
             import_address_table: None,
         })
@@ -663,17 +999,32 @@ mod tests {
     }
 
     fn at_f_past_prolog() -> FramesAt {
-        FramesAt { root: Root::Live, width: Some(CodeWidth::Long64), start: registers_at(F + 0x10, STACK), xmm: None }
+        FramesAt {
+            root: Root::Live,
+            width: Some(CodeWidth::Long64),
+            start: registers_at(F + 0x10, STACK),
+            xmm: None,
+        }
     }
 
     #[test]
     fn unwind_data_the_guest_has_not_paged_in_is_read_from_the_modules_binary() {
         let file = ModuleFile::parse(unwound_binary()).expect("the fixture parses");
         let view = view_with_image(ImageEntry {
-            state: ImageState::Loaded { from: SymbolSource::Store { path: "unwound.exe".into() } },
+            state: ImageState::Loaded {
+                from: SymbolSource::Store {
+                    path: "unwound.exe".into(),
+                },
+            },
             file: Some(Arc::new(file)),
         });
-        let read = read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), Some(&view), &request(0));
+        let read = read_frames(
+            &mut f_with_unwind_data_paged_out(),
+            &at_f_past_prolog(),
+            &unwound_index(),
+            Some(&view),
+            &request(0),
+        );
         assert_eq!(read.frames.len(), 2, "f, then main: {:?}", read.end);
         assert_eq!(read.frames[1].registers.rip, MAIN + 5);
         assert_eq!(read.frames[1].registers.rsp, STACK + 0x20);
@@ -686,28 +1037,67 @@ mod tests {
     fn the_caller_step_out_runs_to_is_found_through_the_binary() {
         let file = ModuleFile::parse(unwound_binary()).expect("the fixture parses");
         let view = view_with_image(ImageEntry {
-            state: ImageState::Loaded { from: SymbolSource::Store { path: "unwound.exe".into() } },
+            state: ImageState::Loaded {
+                from: SymbolSource::Store {
+                    path: "unwound.exe".into(),
+                },
+            },
             file: Some(Arc::new(file)),
         });
-        let frame = Frame { registers: registers_at(F + 0x10, STACK), how: FrameFound::Registers };
+        let frame = Frame {
+            registers: registers_at(F + 0x10, STACK),
+            how: FrameFound::Registers,
+        };
         let index = unwound_index();
-        let unwinding = CallerOf { root: Root::Live, modules: &index.modules, width: CodeWidth::Long64 };
-        let caller = caller_frame(&mut f_with_unwind_data_paged_out(), &unwinding, Some(&view), &frame);
+        let unwinding = CallerOf {
+            root: Root::Live,
+            modules: &index.modules,
+            width: CodeWidth::Long64,
+        };
+        let caller = caller_frame(
+            &mut f_with_unwind_data_paged_out(),
+            &unwinding,
+            Some(&view),
+            &frame,
+        );
         assert_eq!(caller.map(|caller| caller.registers.rip), Some(MAIN + 5));
-        let without = caller_frame(&mut f_with_unwind_data_paged_out(), &unwinding, None, &frame);
+        let without = caller_frame(
+            &mut f_with_unwind_data_paged_out(),
+            &unwinding,
+            None,
+            &frame,
+        );
         assert_eq!(without, None, "no binary, no caller");
     }
 
     #[test]
     fn a_binary_the_view_does_not_have_yet_is_awaited() {
-        let read = read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), None, &request(0));
+        let read = read_frames(
+            &mut f_with_unwind_data_paged_out(),
+            &at_f_past_prolog(),
+            &unwound_index(),
+            None,
+            &request(0),
+        );
         assert_eq!(read.frames.len(), 1);
         assert_eq!(read.end, StackEnd::Unreadable { at: BASE });
         assert_eq!(read.awaiting_images, [unwound_key()]);
-        let pending = view_with_image(ImageEntry { state: ImageState::Pending, file: None });
-        let read =
-            read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), Some(&pending), &request(0));
-        assert_eq!(read.awaiting_images, [unwound_key()], "still being looked up");
+        let pending = view_with_image(ImageEntry {
+            state: ImageState::Pending,
+            file: None,
+        });
+        let read = read_frames(
+            &mut f_with_unwind_data_paged_out(),
+            &at_f_past_prolog(),
+            &unwound_index(),
+            Some(&pending),
+            &request(0),
+        );
+        assert_eq!(
+            read.awaiting_images,
+            [unwound_key()],
+            "still being looked up"
+        );
     }
 
     /// A lookup the network failed may mend: the read names the binary
@@ -716,25 +1106,52 @@ mod tests {
     #[test]
     fn a_binary_whose_lookup_may_mend_is_awaited_and_a_broken_one_is_not() {
         let failed = |retry| {
-            view_with_image(ImageEntry { state: ImageState::Failed { reason: "down".into(), retry }, file: None })
+            view_with_image(ImageEntry {
+                state: ImageState::Failed {
+                    reason: "down".into(),
+                    retry,
+                },
+                file: None,
+            })
         };
         let may_mend = failed(ImageRetry::From(std::time::Instant::now()));
-        let read =
-            read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), Some(&may_mend), &request(0));
+        let read = read_frames(
+            &mut f_with_unwind_data_paged_out(),
+            &at_f_past_prolog(),
+            &unwound_index(),
+            Some(&may_mend),
+            &request(0),
+        );
         assert_eq!(read.awaiting_images, [unwound_key()]);
         let broken = failed(ImageRetry::Never);
-        let read =
-            read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), Some(&broken), &request(0));
+        let read = read_frames(
+            &mut f_with_unwind_data_paged_out(),
+            &at_f_past_prolog(),
+            &unwound_index(),
+            Some(&broken),
+            &request(0),
+        );
         assert!(read.awaiting_images.is_empty());
     }
 
     #[test]
     fn a_binary_that_was_not_found_is_not_awaited_again() {
-        let missing = view_with_image(ImageEntry { state: ImageState::NotOnServer, file: None });
-        let read =
-            read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), Some(&missing), &request(0));
+        let missing = view_with_image(ImageEntry {
+            state: ImageState::NotOnServer,
+            file: None,
+        });
+        let read = read_frames(
+            &mut f_with_unwind_data_paged_out(),
+            &at_f_past_prolog(),
+            &unwound_index(),
+            Some(&missing),
+            &request(0),
+        );
         assert_eq!(read.end, StackEnd::Unreadable { at: BASE });
-        assert!(read.awaiting_images.is_empty(), "a refresh would find nothing new");
+        assert!(
+            read.awaiting_images.is_empty(),
+            "a refresh would find nothing new"
+        );
     }
 
     #[test]
@@ -762,7 +1179,10 @@ mod tests {
         assert_eq!(at.width, Some(CodeWidth::Long64));
         assert_eq!(at.start.registers[RBP], Some(0x5555));
         assert_eq!(at.start.registers[RSP], Some(STACK));
-        assert_eq!(at.start.registers[RBX], None, "a trap frame's other registers may not be the thread's");
+        assert_eq!(
+            at.start.registers[RBX], None,
+            "a trap frame's other registers may not be the thread's"
+        );
         assert_eq!(at.xmm, None);
         let wow64 = frames_at_thread(&SavedRegisters { cs: 0x23, ..saved }, 0x8000);
         assert_eq!(wow64.width, Some(CodeWidth::Protected32));

@@ -5,25 +5,26 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rusty_box::cpu::decoder::Opcode;
-use rusty_box::cpu::{BreakpointRefusal, CodeBreakpoint, CodeBreakpointHit, CodeSize, CpuDebugView, Instrumentation};
+use rusty_box::cpu::{
+    BreakpointRefusal, CodeBreakpoint, CodeBreakpointHit, CodeSize, CpuDebugView, Instrumentation,
+};
 use rusty_box::emulator::{Emulator, RunBudget, SliceEngine, StopReason};
 use rusty_box_symbols::units::Rva;
 
 use super::control::{BetweenRuns, DebugNote, RunControl, StepCut, Task};
 use super::dump::dump_ram;
-use super::guest::{GuestMemory, GuestRead, Root};
-use super::inspect::{read_snapshot, DebugSnapshot, SymModule};
+use super::frames::{CallerOf, caller_frame, frames_at, read_frames};
+use super::guest::{GuestMemory, GuestRead, PausedCpu, Root};
+use super::inspect::{DebugSnapshot, SymModule, read_snapshot};
+use super::module_identity::read_build_at;
 use super::search::find;
+use super::source_breakpoints::{admits, binaries_to_find};
 use super::stepping::{
-    step, CallerFrame, CodeWidth, Decoded, Flow, RowSpan, RunStop, SourcePlace, StepEnd, StepRegisters, StepRequest,
-    Stepped, Stepper, STEP_LIMITS,
+    CallerFrame, CodeWidth, Decoded, Flow, RowSpan, RunStop, STEP_LIMITS, SourcePlace, StepEnd,
+    StepRegisters, StepRequest, Stepped, Stepper, step,
 };
 use super::unwind::{Frame, FrameFound, FrameRegisters};
-use super::frames::{caller_frame, frames_at, read_frames, CallerOf};
-use super::guest::PausedCpu;
-use super::module_identity::read_build_at;
-use super::source_breakpoints::{admits, binaries_to_find};
-use super::xref::image::{copy_image, ImageAt, ImageOffset};
+use super::xref::image::{ImageAt, ImageOffset, copy_image};
 use super::xref::index::ModuleSpan;
 use super::xref::service::{CopyRequest, IndexJob, IndexState};
 use crate::symbols::hub::SymbolsView;
@@ -123,7 +124,11 @@ pub(crate) fn perform<T: Instrumentation, E: SliceEngine<T>>(
 /// and hands it to the cross-reference service with its PDB procedures as
 /// sync points; the service indexes it off this thread while the next one is
 /// copied. A module that does not copy is recorded as failed, with why.
-fn copy_images<T: Instrumentation, E: SliceEngine<T>>(emu: &mut Emulator<T, E>, control: &RunControl, request: CopyRequest) {
+fn copy_images<T: Instrumentation, E: SliceEngine<T>>(
+    emu: &mut Emulator<T, E>,
+    control: &RunControl,
+    request: CopyRequest,
+) {
     let cpu = control.view().cpu;
     let cpu = if cpu < emu.cpu_count() { cpu } else { 0 };
     let symbols = control.symbols();
@@ -136,20 +141,36 @@ fn copy_images<T: Instrumentation, E: SliceEngine<T>>(emu: &mut Emulator<T, E>, 
             continue;
         }
         let Some(mut debug) = emu.debug_cpu(cpu) else {
-            control.xrefs().fail(module.key, "the processor it is read through is gone".to_owned());
+            control.xrefs().fail(
+                module.key,
+                "the processor it is read through is gone".to_owned(),
+            );
             continue;
         };
         // Paused in VMX root operation, the modules listed are the guest's,
         // read as the walk read them.
         let vmx_guest = debug.vmx_guest();
-        let mut paused = PausedCpu { cpu: &mut debug, vmx_guest };
-        let at = ImageAt { base: module.key.base, size: module.key.size, root: module.root };
+        let mut paused = PausedCpu {
+            cpu: &mut debug,
+            vmx_guest,
+        };
+        let at = ImageAt {
+            base: module.key.base,
+            size: module.key.size,
+            root: module.root,
+        };
         match copy_image(&mut paused.walked(), at) {
             Ok(image) => {
                 let extra_sync = symbols
                     .as_ref()
                     .and_then(|view| view.tables(module.key.identity.known()?).map(Arc::clone))
-                    .map(|tables| tables.procedure_starts().into_iter().map(|rva| ImageOffset(rva.0)).collect())
+                    .map(|tables| {
+                        tables
+                            .procedure_starts()
+                            .into_iter()
+                            .map(|rva| ImageOffset(rva.0))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 control.xrefs().accept(IndexJob {
                     key: module.key,
@@ -196,7 +217,11 @@ fn perform_step<T: Instrumentation, E: SliceEngine<T>>(
     let before = emu.cpu_snapshot().icount;
     // A processor past the last (a view of another machine) steps the boot
     // processor.
-    let cpu = if request.cpu < emu.cpu_count() { request.cpu } else { 0 };
+    let cpu = if request.cpu < emu.cpu_count() {
+        request.cpu
+    } else {
+        0
+    };
     // A machine has its boot processor at least.
     let Some(mut stepper) = MachineStepper::new(emu, control, cpu) else {
         return Ok(live(0));
@@ -238,7 +263,9 @@ pub(crate) fn apply_breakpoints<T: Instrumentation, E: SliceEngine<T>>(
 ) {
     match emu.set_code_breakpoints(set) {
         Ok(()) => control.record_applied_breakpoints(set),
-        Err(BreakpointRefusal::EngineCannotStop) => control.note_refusal(DebugNote::BreakpointsNeedInterpreter),
+        Err(BreakpointRefusal::EngineCannotStop) => {
+            control.note_refusal(DebugNote::BreakpointsNeedInterpreter)
+        }
         Err(BreakpointRefusal::TooManyLinear | BreakpointRefusal::TooManyPhysical) => {
             control.note_refusal(DebugNote::TooManyBreakpoints);
         }
@@ -272,7 +299,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> MachineStepper<'a, T, E> {
     /// `None` when the machine has no processor `cpu`.
     fn new(emu: &'a mut Emulator<T, E>, control: &'a RunControl, cpu: usize) -> Option<Self> {
         let last_view = emu.debug_cpu(cpu)?.view();
-        let modules = control.snapshot().map(|snapshot| snapshot.symbols.modules.clone()).unwrap_or_default();
+        let modules = control
+            .snapshot()
+            .map(|snapshot| snapshot.symbols.modules.clone())
+            .unwrap_or_default();
         Some(MachineStepper {
             emu,
             control,
@@ -310,7 +340,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> MachineStepper<'a, T, E> {
     fn run_to_targets(&mut self, targets: &[u64], until: Duration) -> RunStop {
         if targets.contains(&self.registers().rip) {
             match self.single_step() {
-                Stepped::Retired if targets.contains(&self.registers().rip) => return RunStop::AtTarget,
+                Stepped::Retired if targets.contains(&self.registers().rip) => {
+                    return RunStop::AtTarget;
+                }
                 Stepped::Retired => {}
                 Stepped::UserBreakpoint(hit) => return RunStop::UserBreakpoint(hit),
                 Stepped::MachineOver => return RunStop::MachineOver,
@@ -328,14 +360,23 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> MachineStepper<'a, T, E> {
                     if hit.cpu == self.cpu && targets.contains(&hit.linear) {
                         return RunStop::AtTarget;
                     }
-                    if self.user.contains(&hit.breakpoint) && owners_stop(self.emu, self.control, &hit) {
+                    if self.user.contains(&hit.breakpoint)
+                        && owners_stop(self.emu, self.control, &hit)
+                    {
                         return RunStop::UserBreakpoint(hit);
                     }
                     // A target another processor reached, or a program's line
                     // where that program is not loaded: it runs on.
                 }
-                Some(StopReason::GuestPowerOff | StopReason::CpuShutdown) | None => return RunStop::MachineOver,
-                Some(StopReason::BudgetExhausted | StopReason::Halted | StopReason::StopRequested | StopReason::EngineFault) => {}
+                Some(StopReason::GuestPowerOff | StopReason::CpuShutdown) | None => {
+                    return RunStop::MachineOver;
+                }
+                Some(
+                    StopReason::BudgetExhausted
+                    | StopReason::Halted
+                    | StopReason::StopRequested
+                    | StopReason::EngineFault,
+                ) => {}
             }
         }
     }
@@ -388,7 +429,11 @@ impl<T: Instrumentation, E: SliceEngine<T>> Stepper for MachineStepper<'_, T, E>
     fn registers(&mut self) -> StepRegisters {
         let view = self.view();
         match view.code_size {
-            CodeSize::Bits64 => StepRegisters { rip: view.registers.rip, rsp: view.registers.rsp, width: CodeWidth::Long64 },
+            CodeSize::Bits64 => StepRegisters {
+                rip: view.registers.rip,
+                rsp: view.registers.rsp,
+                width: CodeWidth::Long64,
+            },
             // Breakpoints and line rows are by linear address: CS's base plus
             // EIP.
             CodeSize::Bits32 | CodeSize::Bits16 => StepRegisters {
@@ -409,8 +454,15 @@ impl<T: Instrumentation, E: SliceEngine<T>> Stepper for MachineStepper<'_, T, E>
                 // processor before its instruction; the next run executes
                 // it, so the step is that run's.
                 Some(StopReason::Breakpoint(_)) => {}
-                Some(StopReason::GuestPowerOff | StopReason::CpuShutdown) | None => return Stepped::MachineOver,
-                Some(StopReason::BudgetExhausted | StopReason::Halted | StopReason::StopRequested | StopReason::EngineFault) => {
+                Some(StopReason::GuestPowerOff | StopReason::CpuShutdown) | None => {
+                    return Stepped::MachineOver;
+                }
+                Some(
+                    StopReason::BudgetExhausted
+                    | StopReason::Halted
+                    | StopReason::StopRequested
+                    | StopReason::EngineFault,
+                ) => {
                     return Stepped::Retired;
                 }
             }
@@ -436,20 +488,32 @@ impl<T: Instrumentation, E: SliceEngine<T>> Stepper for MachineStepper<'_, T, E>
         let mut debug = self.emu.debug_cpu(self.cpu)?;
         // An instruction may end before the page that does not map.
         let readable = (1..=MAX_INSTRUCTION_BYTES).rev().find(|length| {
-            bytes.get_mut(..*length).is_some_and(|prefix| debug.read_linear(Root::Live, rip, prefix) == GuestRead::Read)
+            bytes
+                .get_mut(..*length)
+                .is_some_and(|prefix| debug.read_linear(Root::Live, rip, prefix) == GuestRead::Read)
         })?;
         let instruction = size.decode(bytes.get(..readable)?).ok()?;
-        Some(Decoded { length: u64::from(instruction.ilen()), flow: flow_of(instruction.get_ia_opcode()) })
+        Some(Decoded {
+            length: u64::from(instruction.ilen()),
+            flow: flow_of(instruction.get_ia_opcode()),
+        })
     }
 
     fn line_row(&mut self, rip: u64) -> Option<RowSpan> {
-        let module = self.modules.iter().find(|module| rip.checked_sub(module.base).is_some_and(|offset| offset < module.size))?;
+        let module = self.modules.iter().find(|module| {
+            rip.checked_sub(module.base)
+                .is_some_and(|offset| offset < module.size)
+        })?;
         let tables = self.symbols.as_ref()?.tables(module.identity.known()?)?;
         let row = tables.line_at(Rva(rip.checked_sub(module.base)?))?;
         Some(RowSpan {
             start: module.base.wrapping_add(row.start.0),
             end: module.base.wrapping_add(row.end.0),
-            place: SourcePlace { module: module.base, file: row.file, line: row.line },
+            place: SourcePlace {
+                module: module.base,
+                file: row.file,
+                line: row.line,
+            },
         })
     }
 
@@ -477,11 +541,25 @@ impl<T: Instrumentation, E: SliceEngine<T>> Stepper for MachineStepper<'_, T, E>
         ]) {
             *slot = Some(value);
         }
-        let of = CallerOf { root: Root::Live, modules: &self.modules, width: at.width };
-        let frame = Frame { registers: FrameRegisters { rip: at.rip, rsp: at.rsp, registers }, how: FrameFound::Registers };
+        let of = CallerOf {
+            root: Root::Live,
+            modules: &self.modules,
+            width: at.width,
+        };
+        let frame = Frame {
+            registers: FrameRegisters {
+                rip: at.rip,
+                rsp: at.rsp,
+                registers,
+            },
+            how: FrameFound::Registers,
+        };
         let mut debug = self.emu.debug_cpu(self.cpu)?;
         let caller = caller_frame(&mut debug, &of, self.symbols.as_deref(), &frame)?;
-        Some(CallerFrame { rip: caller.registers.rip, rsp: caller.registers.rsp })
+        Some(CallerFrame {
+            rip: caller.registers.rip,
+            rsp: caller.registers.rsp,
+        })
     }
 
     fn cancelled(&mut self) -> bool {
@@ -511,7 +589,10 @@ pub(crate) fn owners_stop<T: Instrumentation, E: SliceEngine<T>>(
         return true;
     };
     let vmx_guest = debug.vmx_guest();
-    let mut paused = PausedCpu { cpu: &mut debug, vmx_guest };
+    let mut paused = PausedCpu {
+        cpu: &mut debug,
+        vmx_guest,
+    };
     let mut memory = paused.walked();
     admits(&scope, |base| read_build_at(&mut memory, Root::Live, base))
 }
@@ -532,10 +613,19 @@ fn read_for<T: Instrumentation, E: SliceEngine<T>>(
     // The owner's programs, looked for in the processes the panes do not
     // stand in, which a source line binds in as well.
     let targets = control.targets();
-    let binaries = symbols.as_deref().map_or(&[][..], |view| binaries_to_find(&targets, &view.projects));
+    let binaries = symbols
+        .as_deref()
+        .map_or(&[][..], |view| binaries_to_find(&targets, &view.projects));
     let mut snapshot = {
         let mut discovery = control.discovery();
-        read_snapshot(emu, &view, binaries, &mut discovery, unmoved.as_deref(), layout.as_ref())
+        read_snapshot(
+            emu,
+            &view,
+            binaries,
+            &mut discovery,
+            unmoved.as_deref(),
+            layout.as_ref(),
+        )
     };
     // The call stack from where the panes stand, through the processor they
     // were read through (as the guest's own structures were, in VMX root).
@@ -543,8 +633,17 @@ fn read_for<T: Instrumentation, E: SliceEngine<T>>(
     let request = control.inspect();
     if let Some(mut debug) = emu.debug_cpu(snapshot.cpu) {
         let vmx_guest = debug.vmx_guest();
-        let mut paused = PausedCpu { cpu: &mut debug, vmx_guest };
-        snapshot.frames = read_frames(&mut paused.walked(), &at, &snapshot.symbols, symbols.as_deref(), &request);
+        let mut paused = PausedCpu {
+            cpu: &mut debug,
+            vmx_guest,
+        };
+        snapshot.frames = read_frames(
+            &mut paused.walked(),
+            &at,
+            &snapshot.symbols,
+            symbols.as_deref(),
+            &request,
+        );
     }
     snapshot
 }
@@ -567,7 +666,7 @@ pub(crate) fn serve<T: Instrumentation, E: SliceEngine<T>>(
                         return Ok(Served {
                             next: Next::End,
                             retired,
-                        })
+                        });
                     }
                 }
             }
@@ -575,13 +674,13 @@ pub(crate) fn serve<T: Instrumentation, E: SliceEngine<T>>(
                 return Ok(Served {
                     next: Next::Resume,
                     retired,
-                })
+                });
             }
             BetweenRuns::End => {
                 return Ok(Served {
                     next: Next::End,
                     retired,
-                })
+                });
             }
         }
     }
@@ -589,33 +688,38 @@ pub(crate) fn serve<T: Instrumentation, E: SliceEngine<T>>(
 
 #[cfg(all(test, feature = "gui-egui"))]
 mod tests {
-    use super::*;
-    use crate::debugger::control::{DumpOutcome, StepCut};
-    use crate::debugger::inspect::{ModuleSpace, SymModule, SymbolIndex};
-    use crate::debugger::module_identity::GuestIdentity;
-    use crate::debugger::stepping::{StepKind, StepRequest, StepUnit};
-    use crate::debugger::guest::Root;
-    use crate::debugger::xref::decode::XrefKind;
-    use crate::debugger::xref::service::{
-        AddressRange, CopyModule, FoundSite, IndexSpace, IndexState, ModuleKey, XrefQuery, XrefScope, XrefTarget,
-    };
-    use crate::debugger::xref::test_image::{module_image, Function, ImageSpec};
-    use crate::symbols::hub::{ModuleEntry, ModuleSymbols, SymbolsView};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
     use rusty_box::cpu::{CodeBreakpointHit, CpuSetupMode, X86Reg};
     use rusty_box::emulator::EmulatorConfig;
     use rusty_box_symbols::identity::{Guid, ModuleIdentity, PdbId, PeImageId};
     use rusty_box_symbols::service::SymbolSource;
     use rusty_box_symbols::tables::SymbolTables;
     use rusty_box_symbols_fixtures::pdb::{
-        build_pdb, FixtureLine, FixtureLocal, FixturePlace, FixtureProcedure, FixtureScope, FixtureType, PdbFixture,
+        FixtureLine, FixtureLocal, FixturePlace, FixtureProcedure, FixtureScope, FixtureType,
+        PdbFixture, build_pdb,
     };
+
+    use super::*;
+    use crate::debugger::control::{DumpOutcome, StepCut};
     use crate::debugger::frames::{LocalsRead, TipRead};
+    use crate::debugger::guest::Root;
+    use crate::debugger::inspect::{ModuleSpace, SymModule, SymbolIndex};
+    use crate::debugger::module_identity::GuestIdentity;
     use crate::debugger::source_breakpoints::{
-        applied_set, AppliedBreakpoints, BreakpointModules, BreakpointTarget, ModulesElsewhere, PlacedImage, ScopedAddress,
-        SourceTarget,
+        AppliedBreakpoints, BreakpointModules, BreakpointTarget, ModulesElsewhere, PlacedImage,
+        ScopedAddress, SourceTarget, applied_set,
     };
+    use crate::debugger::stepping::{StepKind, StepRequest, StepUnit};
     use crate::debugger::variables::{ShownValue, Signedness};
-    use std::sync::{atomic::AtomicBool, Arc};
+    use crate::debugger::xref::decode::XrefKind;
+    use crate::debugger::xref::service::{
+        AddressRange, CopyModule, FoundSite, IndexSpace, IndexState, ModuleKey, XrefQuery,
+        XrefScope, XrefTarget,
+    };
+    use crate::debugger::xref::test_image::{Function, ImageSpec, module_image};
+    use crate::symbols::hub::{ModuleEntry, ModuleSymbols, SymbolsView};
 
     const ONE: StepRequest = StepRequest::instruction_into(0);
 
@@ -647,9 +751,17 @@ mod tests {
             code
         );
         control.step(ONE);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(ONE)));
-        let performed =
-            perform(&mut machine, &control, Task::Step(ONE), Stepping::Instructions).expect("step");
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Step(ONE))
+        );
+        let performed = perform(
+            &mut machine,
+            &control,
+            Task::Step(ONE),
+            Stepping::Instructions,
+        )
+        .expect("step");
         assert_eq!(performed.retired, 1);
         assert_eq!(performed.after, MachineAfter::Live);
         assert_eq!(
@@ -665,20 +777,51 @@ mod tests {
         use rusty_box::cpu::CodeBreakpointHit;
         let (mut machine, control, code) = paused();
         let at = CodeBreakpoint::Linear(code + 1);
-        perform(&mut machine, &control, Task::ApplyBreakpoints(vec![at]), Stepping::Instructions).expect("apply");
+        perform(
+            &mut machine,
+            &control,
+            Task::ApplyBreakpoints(vec![at]),
+            Stepping::Instructions,
+        )
+        .expect("apply");
         assert_eq!(control.note(), None, "the interpreter takes breakpoints");
         control.step(ONE);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(ONE)));
-        let performed = perform(&mut machine, &control, Task::Step(ONE), Stepping::Instructions).expect("step");
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Step(ONE))
+        );
+        let performed = perform(
+            &mut machine,
+            &control,
+            Task::Step(ONE),
+            Stepping::Instructions,
+        )
+        .expect("step");
         assert_eq!(performed.retired, 1);
         assert_eq!(
             control.stopped_at(),
-            Some(CodeBreakpointHit { cpu: 0, breakpoint: at, linear: code + 1 })
+            Some(CodeBreakpointHit {
+                cpu: 0,
+                breakpoint: at,
+                linear: code + 1
+            })
         );
         control.step(ONE);
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(ONE)));
-        let performed = perform(&mut machine, &control, Task::Step(ONE), Stepping::Instructions).expect("step");
-        assert_eq!(performed.retired, 1, "the breakpoint's own instruction executes");
+        assert_eq!(
+            control.next_between_runs(),
+            BetweenRuns::Perform(Task::Step(ONE))
+        );
+        let performed = perform(
+            &mut machine,
+            &control,
+            Task::Step(ONE),
+            Stepping::Instructions,
+        )
+        .expect("step");
+        assert_eq!(
+            performed.retired, 1,
+            "the breakpoint's own instruction executes"
+        );
         assert_eq!(machine.cpu_snapshot().rip, code + 2);
         assert_eq!(control.stopped_at(), None);
     }
@@ -688,7 +831,8 @@ mod tests {
     struct SilentEngine;
 
     impl<T: Instrumentation> SliceEngine<T> for SilentEngine {
-        const PROGRESS_UNIT: rusty_box::emulator::ProgressUnit = rusty_box::emulator::ProgressUnit::Instructions;
+        const PROGRESS_UNIT: rusty_box::emulator::ProgressUnit =
+            rusty_box::emulator::ProgressUnit::Instructions;
 
         fn run_slice(
             &mut self,
@@ -703,8 +847,11 @@ mod tests {
     /// A machine whose engine refuses breakpoints leaves the page a note.
     #[test]
     fn breakpoints_an_engine_refuses_leave_a_note() {
-        let mut machine = Emulator::<(), SilentEngine>::with_engine(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
-            .expect("machine");
+        let mut machine = Emulator::<(), SilentEngine>::with_engine(
+            EmulatorConfig::default(),
+            CpuSetupMode::FlatLong64,
+        )
+        .expect("machine");
         let control = RunControl::new(Arc::new(AtomicBool::new(false)));
         apply_breakpoints(&mut machine, &control, &[CodeBreakpoint::Linear(0x1000)]);
         assert_eq!(control.note(), Some(DebugNote::BreakpointsNeedInterpreter));
@@ -713,8 +860,13 @@ mod tests {
     #[test]
     fn a_step_on_the_hypervisor_is_refused_with_a_note() {
         let (mut machine, control, code) = paused();
-        let performed =
-            perform(&mut machine, &control, Task::Step(ONE), Stepping::Unavailable).expect("refusal");
+        let performed = perform(
+            &mut machine,
+            &control,
+            Task::Step(ONE),
+            Stepping::Unavailable,
+        )
+        .expect("refusal");
         assert_eq!(performed.retired, 0);
         assert_eq!(control.note(), Some(DebugNote::StepNeedsInterpreter));
         assert_eq!(machine.cpu_snapshot().rip, code, "the guest did not move");
@@ -734,10 +886,17 @@ mod tests {
 
     fn calling() -> Calling {
         let (mut machine, control, code) = paused();
-        let program = [0xE8, 0x0B, 0, 0, 0, 0x90, 0xF4, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xC3];
+        let program = [
+            0xE8, 0x0B, 0, 0, 0, 0x90, 0xF4, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+            0x90, 0xC3,
+        ];
         machine.mem_write(code, &program).expect("write");
         machine.reg_write(X86Reg::Rsp, code + STACK);
-        Calling { machine, control, code }
+        Calling {
+            machine,
+            control,
+            code,
+        }
     }
 
     fn request(kind: StepKind, unit: StepUnit) -> StepRequest {
@@ -753,7 +912,10 @@ mod tests {
 
     fn landing(machine: &Emulator) -> Landing {
         let snapshot = machine.cpu_snapshot();
-        Landing { rip: snapshot.rip, rsp: snapshot.rsp }
+        Landing {
+            rip: snapshot.rip,
+            rsp: snapshot.rsp,
+        }
     }
 
     /// The pause read with one module, `identity`, holding the code (as a
@@ -763,29 +925,61 @@ mod tests {
     fn publish_module_over(calling: &mut Calling, identity: GuestIdentity, base: u64) {
         let mut snapshot = read_for(&mut calling.machine, &calling.control);
         snapshot.symbols = SymbolIndex {
-            modules: vec![SymModule { base, size: 0x10_0000, name: "flat.exe".into(), space: ModuleSpace::User, identity }],
+            modules: vec![SymModule {
+                base,
+                size: 0x10_0000,
+                name: "flat.exe".into(),
+                space: ModuleSpace::User,
+                identity,
+            }],
             kernel: None,
         };
         let at = frames_at(&snapshot);
         let symbols = calling.control.symbols();
-        let mut debug = calling.machine.debug_cpu(snapshot.cpu).expect("the processor");
+        let mut debug = calling
+            .machine
+            .debug_cpu(snapshot.cpu)
+            .expect("the processor");
         let vmx_guest = debug.vmx_guest();
-        let mut paused = PausedCpu { cpu: &mut debug, vmx_guest };
-        snapshot.frames =
-            read_frames(&mut paused.walked(), &at, &snapshot.symbols, symbols.as_deref(), &calling.control.inspect());
+        let mut paused = PausedCpu {
+            cpu: &mut debug,
+            vmx_guest,
+        };
+        snapshot.frames = read_frames(
+            &mut paused.walked(),
+            &at,
+            &snapshot.symbols,
+            symbols.as_deref(),
+            &calling.control.inspect(),
+        );
         calling.control.publish(snapshot);
     }
 
     fn flat_identity() -> ModuleIdentity {
         ModuleIdentity::Pe {
             file_name: "flat.exe".into(),
-            image: PeImageId { time_date_stamp: 1, size_of_image: 0x10_0000 },
-            pdb: Some(PdbId { name: "flat.pdb".into(), guid: Guid::from_le_bytes([5; 16]), age: 1 }),
+            image: PeImageId {
+                time_date_stamp: 1,
+                size_of_image: 0x10_0000,
+            },
+            pdb: Some(PdbId {
+                name: "flat.pdb".into(),
+                guid: Guid::from_le_bytes([5; 16]),
+                age: 1,
+            }),
         }
     }
 
     fn main_c(name: &str, offset: u32, lines: Vec<FixtureLine>) -> FixtureProcedure {
-        FixtureProcedure { name: name.into(), section: 1, offset, len: 0x10, file: r"C:\src\main.c".into(), checksum: None, lines }
+        FixtureProcedure {
+            name: name.into(),
+            section: 1,
+            offset,
+            len: 0x10,
+            file: r"C:\src\main.c".into(),
+            checksum: None,
+            lines,
+        }
     }
 
     /// Spec §11's last bullet: `main: call f ; nop ; hlt` (lines 1–2) and
@@ -801,17 +995,48 @@ mod tests {
         program.extend_from_slice(&[0xC7, 0x44, 0x24, 0xF8, 0x2A, 0, 0, 0, 0x90, 0xC3]);
         machine.mem_write(code, &program).expect("write");
         machine.reg_write(X86Reg::Rsp, code + STACK);
-        let mut calling = Calling { machine, control, code };
+        let mut calling = Calling {
+            machine,
+            control,
+            code,
+        };
         let mut fixture = PdbFixture::new([5; 16], 1);
-        fixture.procedures.push(main_c("main", 0x100, vec![FixtureLine { offset: 0, line: 1 }, FixtureLine { offset: 6, line: 2 }]));
-        fixture.procedures.push(main_c("f", 0x110, vec![FixtureLine { offset: 0, line: 10 }, FixtureLine { offset: 8, line: 11 }]));
+        fixture.procedures.push(main_c(
+            "main",
+            0x100,
+            vec![
+                FixtureLine { offset: 0, line: 1 },
+                FixtureLine { offset: 6, line: 2 },
+            ],
+        ));
+        fixture.procedures.push(main_c(
+            "f",
+            0x110,
+            vec![
+                FixtureLine {
+                    offset: 0,
+                    line: 10,
+                },
+                FixtureLine {
+                    offset: 8,
+                    line: 11,
+                },
+            ],
+        ));
         fixture.scopes.push(FixtureScope {
             procedure: "f".into(),
             debug_start: 0,
             debug_end: 0x10,
             parameters: None,
             frame: None,
-            locals: vec![FixtureLocal { name: "x".into(), ty: FixtureType::I32, place: FixturePlace::RegRel { register: 335, offset: -8 } }],
+            locals: vec![FixtureLocal {
+                name: "x".into(),
+                ty: FixtureType::I32,
+                place: FixturePlace::RegRel {
+                    register: 335,
+                    offset: -8,
+                },
+            }],
             inline_locals: Vec::new(),
             blocks: Vec::new(),
         });
@@ -820,7 +1045,11 @@ mod tests {
         view.modules.insert(
             flat_identity(),
             ModuleEntry {
-                state: ModuleSymbols::Loaded { from: SymbolSource::Store { path: "flat.pdb".into() } },
+                state: ModuleSymbols::Loaded {
+                    from: SymbolSource::Store {
+                        path: "flat.pdb".into(),
+                    },
+                },
                 tables: Some(Arc::new(tables)),
             },
         );
@@ -829,80 +1058,214 @@ mod tests {
         // `.text` is at RVA 0x1000, `main` 0x100 into it and `f` 0x110.
         let base = code - 0x1100;
         publish_module_over(&mut calling, GuestIdentity::Known(flat_identity()), base);
-        let index = calling.control.snapshot().expect("published").symbols.clone();
-        let line_10 = BreakpointTarget::Source(SourceTarget { file: "main.c".into(), line: 10 });
+        let index = calling
+            .control
+            .snapshot()
+            .expect("published")
+            .symbols
+            .clone();
+        let line_10 = BreakpointTarget::Source(SourceTarget {
+            file: "main.c".into(),
+            line: 10,
+        });
         let elsewhere = ModulesElsewhere::default();
-        let set = applied_set(&[line_10], Some(&BreakpointModules { index: &index, elsewhere: &elsewhere }), &view).set;
+        let set = applied_set(
+            &[line_10],
+            Some(&BreakpointModules {
+                index: &index,
+                elsewhere: &elsewhere,
+            }),
+            &view,
+        )
+        .set;
         assert_eq!(set, [CodeBreakpoint::Linear(code + F)]);
-        perform(&mut calling.machine, &calling.control, Task::ApplyBreakpoints(set), Stepping::Instructions).expect("apply");
-        let stop = calling.machine.step(RunBudget::Instructions(1_000)).expect("run").stop;
-        assert!(matches!(stop, StopReason::Breakpoint(hit) if hit.linear == code + F), "{stop:?}");
+        perform(
+            &mut calling.machine,
+            &calling.control,
+            Task::ApplyBreakpoints(set),
+            Stepping::Instructions,
+        )
+        .expect("apply");
+        let stop = calling
+            .machine
+            .step(RunBudget::Instructions(1_000))
+            .expect("run")
+            .stop;
+        assert!(
+            matches!(stop, StopReason::Breakpoint(hit) if hit.linear == code + F),
+            "{stop:?}"
+        );
         let over = request(StepKind::Over, StepUnit::Line);
-        perform(&mut calling.machine, &calling.control, Task::Step(over), Stepping::Instructions).expect("step");
+        perform(
+            &mut calling.machine,
+            &calling.control,
+            Task::Step(over),
+            Stepping::Instructions,
+        )
+        .expect("step");
         assert_eq!(calling.machine.cpu_snapshot().rip, code + 0x18, "line 11");
         publish_module_over(&mut calling, GuestIdentity::Known(flat_identity()), base);
         let shown = calling.control.snapshot().expect("published");
         assert!(shown.frames.frames.len() >= 2, "{:?}", shown.frames.frames);
         assert_eq!(shown.frames.frames[1].registers.rip, code + CALL_LENGTH);
-        let forty_two = ShownValue::Integer { raw: 42, size: 4, signedness: Signedness::Signed };
-        let LocalsRead::Rows(rows) = &shown.frames.locals else { panic!("locals: {:?}", shown.frames.locals) };
-        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<&str>>(), ["x"]);
+        let forty_two = ShownValue::Integer {
+            raw: 42,
+            size: 4,
+            signedness: Signedness::Signed,
+        };
+        let LocalsRead::Rows(rows) = &shown.frames.locals else {
+            panic!("locals: {:?}", shown.frames.locals)
+        };
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<&str>>(),
+            ["x"]
+        );
         assert_eq!(rows[0].value, forty_two);
         calling.control.show_tip(Some("x".into()));
         publish_module_over(&mut calling, GuestIdentity::Known(flat_identity()), base);
-        let TipRead::Rows(tip) = &calling.control.snapshot().expect("published").frames.tip else { panic!("a tip") };
+        let TipRead::Rows(tip) = &calling.control.snapshot().expect("published").frames.tip else {
+            panic!("a tip")
+        };
         assert_eq!(tip.rows[0].value, forty_two);
         calling.control.select_frame(1);
         publish_module_over(&mut calling, GuestIdentity::Known(flat_identity()), base);
-        assert_eq!(calling.control.snapshot().expect("published").frames.selected, 1);
+        assert_eq!(
+            calling
+                .control
+                .snapshot()
+                .expect("published")
+                .frames
+                .selected,
+            1
+        );
         // Out by line returns past the call and runs to the end of its line:
         // line 2 of `main`.
         let out = request(StepKind::Out, StepUnit::Line);
-        perform(&mut calling.machine, &calling.control, Task::Step(out), Stepping::Instructions).expect("out");
-        assert_eq!(calling.machine.cpu_snapshot().rip, code + 6, "back in main, at line 2");
+        perform(
+            &mut calling.machine,
+            &calling.control,
+            Task::Step(out),
+            Stepping::Instructions,
+        )
+        .expect("out");
+        assert_eq!(
+            calling.machine.cpu_snapshot().rip,
+            code + 6,
+            "back in main, at line 2"
+        );
     }
 
     #[test]
     fn stepping_over_a_call_stops_after_it() {
         let mut calling = calling();
         let over = request(StepKind::Over, StepUnit::Instruction);
-        perform(&mut calling.machine, &calling.control, Task::Step(over), Stepping::Instructions).expect("step");
-        assert_eq!(landing(&calling.machine), Landing { rip: calling.code + CALL_LENGTH, rsp: calling.code + STACK });
+        perform(
+            &mut calling.machine,
+            &calling.control,
+            Task::Step(over),
+            Stepping::Instructions,
+        )
+        .expect("step");
+        assert_eq!(
+            landing(&calling.machine),
+            Landing {
+                rip: calling.code + CALL_LENGTH,
+                rsp: calling.code + STACK
+            }
+        );
         assert_eq!(calling.control.note(), None);
     }
 
     #[test]
     fn stepping_out_returns_to_the_caller() {
         let mut calling = calling();
-        perform(&mut calling.machine, &calling.control, Task::Step(ONE), Stepping::Instructions).expect("into");
-        assert_eq!(landing(&calling.machine), Landing { rip: calling.code + F, rsp: calling.code + STACK - 8 });
+        perform(
+            &mut calling.machine,
+            &calling.control,
+            Task::Step(ONE),
+            Stepping::Instructions,
+        )
+        .expect("into");
+        assert_eq!(
+            landing(&calling.machine),
+            Landing {
+                rip: calling.code + F,
+                rsp: calling.code + STACK - 8
+            }
+        );
         let base = calling.code & !0xFFFF;
         publish_module_over(&mut calling, GuestIdentity::Unnamed, base);
         let out = request(StepKind::Out, StepUnit::Instruction);
-        perform(&mut calling.machine, &calling.control, Task::Step(out), Stepping::Instructions).expect("out");
-        assert_eq!(landing(&calling.machine), Landing { rip: calling.code + CALL_LENGTH, rsp: calling.code + STACK });
+        perform(
+            &mut calling.machine,
+            &calling.control,
+            Task::Step(out),
+            Stepping::Instructions,
+        )
+        .expect("out");
+        assert_eq!(
+            landing(&calling.machine),
+            Landing {
+                rip: calling.code + CALL_LENGTH,
+                rsp: calling.code + STACK
+            }
+        );
     }
 
     #[test]
     fn running_to_an_address_stops_there() {
         let mut calling = calling();
-        let to = request(StepKind::RunTo { address: calling.code + 6 }, StepUnit::Line);
-        perform(&mut calling.machine, &calling.control, Task::Step(to), Stepping::Instructions).expect("run to");
-        assert_eq!(landing(&calling.machine), Landing { rip: calling.code + 6, rsp: calling.code + STACK });
+        let to = request(
+            StepKind::RunTo {
+                address: calling.code + 6,
+            },
+            StepUnit::Line,
+        );
+        perform(
+            &mut calling.machine,
+            &calling.control,
+            Task::Step(to),
+            Stepping::Instructions,
+        )
+        .expect("run to");
+        assert_eq!(
+            landing(&calling.machine),
+            Landing {
+                rip: calling.code + 6,
+                rsp: calling.code + STACK
+            }
+        );
     }
 
     #[test]
     fn a_breakpoint_inside_a_call_stepped_over_stops_the_step_there() {
         let mut calling = calling();
         let at = CodeBreakpoint::Linear(calling.code + F);
-        perform(&mut calling.machine, &calling.control, Task::ApplyBreakpoints(vec![at]), Stepping::Instructions)
-            .expect("apply");
+        perform(
+            &mut calling.machine,
+            &calling.control,
+            Task::ApplyBreakpoints(vec![at]),
+            Stepping::Instructions,
+        )
+        .expect("apply");
         let over = request(StepKind::Over, StepUnit::Instruction);
-        perform(&mut calling.machine, &calling.control, Task::Step(over), Stepping::Instructions).expect("step");
+        perform(
+            &mut calling.machine,
+            &calling.control,
+            Task::Step(over),
+            Stepping::Instructions,
+        )
+        .expect("step");
         assert_eq!(calling.machine.cpu_snapshot().rip, calling.code + F);
         assert_eq!(
             calling.control.stopped_at(),
-            Some(CodeBreakpointHit { cpu: 0, breakpoint: at, linear: calling.code + F })
+            Some(CodeBreakpointHit {
+                cpu: 0,
+                breakpoint: at,
+                linear: calling.code + F
+            })
         );
     }
 
@@ -914,14 +1277,43 @@ mod tests {
         let mut calling = calling();
         let at = CodeBreakpoint::Linear(calling.code + F);
         // The code's own bytes stand where the program's headers would.
-        let program = PlacedImage { base: calling.code, image: PeImageId { time_date_stamp: 7, size_of_image: 0x2000 } };
-        let elsewhere = ScopedAddress { linear: calling.code + F, images: vec![program] };
-        calling.control.set_breakpoints(AppliedBreakpoints { set: vec![at], scopes: vec![elsewhere] });
-        perform(&mut calling.machine, &calling.control, Task::ApplyBreakpoints(vec![at]), Stepping::Instructions)
-            .expect("apply");
+        let program = PlacedImage {
+            base: calling.code,
+            image: PeImageId {
+                time_date_stamp: 7,
+                size_of_image: 0x2000,
+            },
+        };
+        let elsewhere = ScopedAddress {
+            linear: calling.code + F,
+            images: vec![program],
+        };
+        calling.control.set_breakpoints(AppliedBreakpoints {
+            set: vec![at],
+            scopes: vec![elsewhere],
+        });
+        perform(
+            &mut calling.machine,
+            &calling.control,
+            Task::ApplyBreakpoints(vec![at]),
+            Stepping::Instructions,
+        )
+        .expect("apply");
         let over = request(StepKind::Over, StepUnit::Instruction);
-        perform(&mut calling.machine, &calling.control, Task::Step(over), Stepping::Instructions).expect("step");
-        assert_eq!(landing(&calling.machine), Landing { rip: calling.code + CALL_LENGTH, rsp: calling.code + STACK });
+        perform(
+            &mut calling.machine,
+            &calling.control,
+            Task::Step(over),
+            Stepping::Instructions,
+        )
+        .expect("step");
+        assert_eq!(
+            landing(&calling.machine),
+            Landing {
+                rip: calling.code + CALL_LENGTH,
+                rsp: calling.code + STACK
+            }
+        );
         assert_eq!(calling.control.stopped_at(), None);
         assert_eq!(calling.control.note(), None, "the step was not cut");
     }
@@ -930,13 +1322,31 @@ mod tests {
     #[test]
     fn a_step_is_stopped_on_the_owners_word() {
         let mut calling = calling();
-        calling.machine.mem_write(calling.code, &[0xEB, 0xFE]).expect("jmp $");
-        let Calling { mut machine, control, code } = calling;
+        calling
+            .machine
+            .mem_write(calling.code, &[0xEB, 0xFE])
+            .expect("jmp $");
+        let Calling {
+            mut machine,
+            control,
+            code,
+        } = calling;
         let control = Arc::new(control);
         let stepping = Arc::clone(&control);
-        let to = request(StepKind::RunTo { address: code + 0x100 }, StepUnit::Instruction);
+        let to = request(
+            StepKind::RunTo {
+                address: code + 0x100,
+            },
+            StepUnit::Instruction,
+        );
         let runner = std::thread::spawn(move || {
-            perform(&mut machine, &stepping, Task::Step(to), Stepping::Instructions).expect("step");
+            perform(
+                &mut machine,
+                &stepping,
+                Task::Step(to),
+                Stepping::Instructions,
+            )
+            .expect("step");
             machine
         });
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -953,8 +1363,15 @@ mod tests {
         let mut calling = calling();
         let identity = ModuleIdentity::Pe {
             file_name: "flat.exe".into(),
-            image: PeImageId { time_date_stamp: 1, size_of_image: 0x10_0000 },
-            pdb: Some(PdbId { name: "flat.pdb".into(), guid: Guid::from_le_bytes([5; 16]), age: 1 }),
+            image: PeImageId {
+                time_date_stamp: 1,
+                size_of_image: 0x10_0000,
+            },
+            pdb: Some(PdbId {
+                name: "flat.pdb".into(),
+                guid: Guid::from_le_bytes([5; 16]),
+                age: 1,
+            }),
         };
         let mut fixture = PdbFixture::new([5; 16], 1);
         fixture.procedures.push(FixtureProcedure {
@@ -964,14 +1381,21 @@ mod tests {
             len: 0x10,
             file: r"C:\src\main.c".into(),
             checksum: None,
-            lines: vec![FixtureLine { offset: 0, line: 1 }, FixtureLine { offset: 6, line: 2 }],
+            lines: vec![
+                FixtureLine { offset: 0, line: 1 },
+                FixtureLine { offset: 6, line: 2 },
+            ],
         });
         let tables = SymbolTables::parse(&build_pdb(&fixture)).expect("the fixture parses");
         let mut view = SymbolsView::default();
         view.modules.insert(
             identity.clone(),
             ModuleEntry {
-                state: ModuleSymbols::Loaded { from: SymbolSource::Store { path: "flat.pdb".into() } },
+                state: ModuleSymbols::Loaded {
+                    from: SymbolSource::Store {
+                        path: "flat.pdb".into(),
+                    },
+                },
                 tables: Some(Arc::new(tables)),
             },
         );
@@ -980,8 +1404,20 @@ mod tests {
         let base = calling.code - 0x1100;
         publish_module_over(&mut calling, GuestIdentity::Known(identity), base);
         let over = request(StepKind::Over, StepUnit::Line);
-        perform(&mut calling.machine, &calling.control, Task::Step(over), Stepping::Instructions).expect("step");
-        assert_eq!(landing(&calling.machine), Landing { rip: calling.code + 6, rsp: calling.code + STACK });
+        perform(
+            &mut calling.machine,
+            &calling.control,
+            Task::Step(over),
+            Stepping::Instructions,
+        )
+        .expect("step");
+        assert_eq!(
+            landing(&calling.machine),
+            Landing {
+                rip: calling.code + 6,
+                rsp: calling.code + STACK
+            }
+        );
     }
 
     /// A PE image written into a long-mode machine's memory is copied by the
@@ -996,9 +1432,18 @@ mod tests {
         let image = module_image(base, &spec, &text, &[], &[]);
         machine.mem_write(base, &image.bytes).expect("write");
         let size = image.bytes.len() as u64;
-        let key = ModuleKey { identity: GuestIdentity::Unnamed, name: "flat.sys".into(), base, size, space: IndexSpace::Kernel };
+        let key = ModuleKey {
+            identity: GuestIdentity::Unnamed,
+            name: "flat.sys".into(),
+            base,
+            size,
+            space: IndexSpace::Kernel,
+        };
         control.find_references(CopyRequest {
-            modules: vec![CopyModule { key: key.clone(), root: Root::Live }],
+            modules: vec![CopyModule {
+                key: key.clone(),
+                root: Root::Live,
+            }],
             spans: vec![ModuleSpan { base, size }],
             taken_at: 5,
         });
@@ -1012,12 +1457,19 @@ mod tests {
             match control.xrefs().state(&key) {
                 Some(IndexState::Ready(index)) => break index,
                 Some(IndexState::Failed(reason)) => panic!("indexing failed: {reason}"),
-                Some(_) | None if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(5)),
+                Some(_) | None if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5))
+                }
                 other => panic!("not indexed: {other:?}"),
             }
         };
         assert_eq!(index.taken_at, 5);
-        assert!(index.sites.iter().any(|site| site.site == base + 0x1000 && site.target == base + 0x1100));
+        assert!(
+            index
+                .sites
+                .iter()
+                .any(|site| site.site == base + 0x1000 && site.target == base + 0x1100)
+        );
     }
 
     /// Spec §11-style end to end: a 64-bit image in a long-mode machine,
@@ -1030,7 +1482,16 @@ mod tests {
         let mut spec = ImageSpec::bits64(0x1000);
         let main = 0x1000u64;
         let f = 0x1100u64;
-        spec.functions = vec![Function { begin: 0x1000, end: 0x1010 }, Function { begin: 0x1100, end: 0x1101 }];
+        spec.functions = vec![
+            Function {
+                begin: 0x1000,
+                end: 0x1010,
+            },
+            Function {
+                begin: 0x1100,
+                end: 0x1101,
+            },
+        ];
         let slot = u64::from(spec.data_free());
         let mut text = vec![0xE8];
         text.extend_from_slice(&((f - (main + 5)) as u32).to_le_bytes());
@@ -1042,9 +1503,18 @@ mod tests {
         let image = module_image(base, &spec, &text, &(base + f).to_le_bytes(), &[]);
         machine.mem_write(base, &image.bytes).expect("write");
         let size = image.bytes.len() as u64;
-        let key = ModuleKey { identity: GuestIdentity::Unnamed, name: "flat.exe".into(), base, size, space: IndexSpace::Kernel };
+        let key = ModuleKey {
+            identity: GuestIdentity::Unnamed,
+            name: "flat.exe".into(),
+            base,
+            size,
+            space: IndexSpace::Kernel,
+        };
         control.find_references(CopyRequest {
-            modules: vec![CopyModule { key: key.clone(), root: Root::Live }],
+            modules: vec![CopyModule {
+                key: key.clone(),
+                root: Root::Live,
+            }],
             spans: vec![ModuleSpan { base, size }],
             taken_at: 77,
         });
@@ -1054,18 +1524,33 @@ mod tests {
         perform(&mut machine, &control, task, Stepping::Instructions).expect("copy");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !matches!(control.xrefs().state(&key), Some(IndexState::Ready(_))) {
-            assert!(std::time::Instant::now() < deadline, "not indexed: {:?}", control.xrefs().state(&key));
+            assert!(
+                std::time::Instant::now() < deadline,
+                "not indexed: {:?}",
+                control.xrefs().state(&key)
+            );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let query = XrefQuery {
-            target: XrefTarget { ranges: vec![AddressRange { start: base + f, end: base + f + 1 }], label: "f".into() },
+            target: XrefTarget {
+                ranges: vec![AddressRange {
+                    start: base + f,
+                    end: base + f + 1,
+                }],
+                label: "f".into(),
+            },
             scope: XrefScope::TargetModule,
         };
         let answer = control.xrefs().answer(&query, std::slice::from_ref(&key));
         assert_eq!(
             answer.found,
             [
-                FoundSite { site: base + main, kind: XrefKind::Call, module: "flat.exe".into(), through: Vec::new() },
+                FoundSite {
+                    site: base + main,
+                    kind: XrefKind::Call,
+                    module: "flat.exe".into(),
+                    through: Vec::new()
+                },
                 FoundSite {
                     site: base + slot,
                     kind: XrefKind::Pointer,
@@ -1092,9 +1577,18 @@ mod tests {
         let image = module_image(base, &ImageSpec::bits64(0x1000), &[0xC3], &[], &[]);
         machine.mem_write(base, &image.bytes).expect("write");
         let size = image.bytes.len() as u64;
-        let key = ModuleKey { identity: GuestIdentity::Unnamed, name: "flat.exe".into(), base, size, space: IndexSpace::Kernel };
+        let key = ModuleKey {
+            identity: GuestIdentity::Unnamed,
+            name: "flat.exe".into(),
+            base,
+            size,
+            space: IndexSpace::Kernel,
+        };
         control.find_references(CopyRequest {
-            modules: vec![CopyModule { key: key.clone(), root: Root::Live }],
+            modules: vec![CopyModule {
+                key: key.clone(),
+                root: Root::Live,
+            }],
             spans: vec![ModuleSpan { base, size }],
             taken_at: 1,
         });
@@ -1109,10 +1603,8 @@ mod tests {
     #[test]
     fn a_dump_task_records_its_outcome() {
         let (mut machine, control, _) = paused();
-        let path = std::env::temp_dir().join(format!(
-            "rusty-box-gui-serve-{}.bin",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("rusty-box-gui-serve-{}.bin", std::process::id()));
         perform(
             &mut machine,
             &control,

@@ -10,17 +10,17 @@ use super::el2::{
     HCR_TSW, HCR_TTLB, HCR_TTLBIS, HCR_TTLBOS,
 };
 use super::exception::{Exception, Route, SyndromeClass};
-use super::exec::{bit, bits, ExecResult, Fault, Flow, StopCause};
+use super::exec::{ExecResult, Fault, Flow, StopCause, bit, bits};
 use super::features::Feature;
 use super::fgt::{HFGITR_SVC_EL0, HFGITR_SVC_EL1};
 use super::gic::GicAccess;
 use super::mmu::{AtCheck, AtStages, CacheMaintenance};
 use super::nv::VncrOffset;
 use super::sme::SmeTrap;
-use super::sysreg::{Direction, SysRegError, SysRegKey, CPACR_FPEN};
+use super::sysreg::{CPACR_FPEN, Direction, SysRegError, SysRegKey};
 use super::tlbi::TlbiForm;
 use super::wait::Wait;
-use super::{sctlr, Cpu, El, Levels};
+use super::{Cpu, El, Levels, sctlr};
 use crate::bus::{NoGicSystemRegisters, PhysBus};
 
 /// PSCI function identifiers and return codes (Arm DEN 0022D §5.1, Table 6).
@@ -161,7 +161,6 @@ pub enum SpectreReport {
 impl SpectreReport {
     /// Every answer, in the order a list of them shows.
     pub const ALL: [SpectreReport; 3] = [Self::NotRequired, Self::Mitigated, Self::Unreported];
-
     /// The answer a board gives unless its host chooses another.
     pub const DEFAULT: Self = Self::NotRequired;
 
@@ -1245,11 +1244,7 @@ impl PsciConduit {
     /// not implement, so where Arm makes the instruction UNDEFINED for want
     /// of EL2 or EL3 it is a firmware call instead.
     pub(crate) const fn of<L: Levels>() -> Self {
-        if L::EL2 {
-            Self::Smc
-        } else {
-            Self::Hvc
-        }
+        if L::EL2 { Self::Smc } else { Self::Hvc }
     }
 
     /// The device tree's `/psci` `method` naming it (QEMU

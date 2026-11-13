@@ -18,11 +18,12 @@
 //! running processor is then exactly the three copyable tokens
 //! [`Canceller`], [`InterruptRequester`] and [`VpCounters`].
 
-use crate::caps::{MsrExits, SyntheticFeatures};
 use core::cell::Cell;
 use core::marker::PhantomData;
+
 use rusty_box_core::GpaPerms;
 
+use crate::caps::{MsrExits, SyntheticFeatures};
 use crate::sys::{
     self, ApicStatePage, Exit, GvaTranslation, InternalActivity, InterruptRequest,
     PendingInterruption, PropertyCode, RawPartition, Reg, RegisterValue, SegmentRegister,
@@ -94,7 +95,11 @@ impl HostPages {
         if offset > PAGE_SIZE || offset + len > storage.len() {
             return Err(WhpError::host_memory(CALL));
         }
-        Ok(Self { storage, offset, len })
+        Ok(Self {
+            storage,
+            offset,
+            len,
+        })
     }
 
     /// The guest-visible bytes.
@@ -167,7 +172,9 @@ impl PartitionConfig {
     /// [`crate::WhpErrorKind::Unsupported`] on a host without the platform,
     /// otherwise [`crate::WhpErrorKind::Platform`].
     pub fn new() -> WhpResult<Self> {
-        Ok(Self { handle: OwnedPartition(sys::create_partition()?) })
+        Ok(Self {
+            handle: OwnedPartition(sys::create_partition()?),
+        })
     }
 
     /// How many virtual processors the partition will have. Required: the
@@ -176,7 +183,11 @@ impl PartitionConfig {
     /// # Errors
     /// [`crate::WhpErrorKind::Platform`] if the platform refuses the count.
     pub fn processor_count(&mut self, count: u32) -> WhpResult<&mut Self> {
-        sys::set_property(self.handle.0, PropertyCode::ProcessorCount, u64::from(count))?;
+        sys::set_property(
+            self.handle.0,
+            PropertyCode::ProcessorCount,
+            u64::from(count),
+        )?;
         Ok(self)
     }
 
@@ -189,7 +200,11 @@ impl PartitionConfig {
         &mut self,
         exits: crate::caps::ExtendedVmExits,
     ) -> WhpResult<&mut Self> {
-        sys::set_property(self.handle.0, PropertyCode::ExtendedVmExits, exits.as_word())?;
+        sys::set_property(
+            self.handle.0,
+            PropertyCode::ExtendedVmExits,
+            exits.as_word(),
+        )?;
         Ok(self)
     }
 
@@ -279,10 +294,7 @@ impl PartitionConfig {
     /// it does for any flag beyond its own bank, naming none of them, so a
     /// caller wanting to know WHICH flag offended must compare against the
     /// capability itself.
-    pub fn synthetic_features(
-        &mut self,
-        bank0: SyntheticFeatures,
-    ) -> WhpResult<&mut Self> {
+    pub fn synthetic_features(&mut self, bank0: SyntheticFeatures) -> WhpResult<&mut Self> {
         // BanksCount in the low half of the first word, Reserved0 in the high
         // half, then the bank — the structure's own little-endian layout.
         let mut payload = [0u8; 16];
@@ -420,11 +432,11 @@ impl InterceptCounters {
 /// Each `WHV_PROCESSOR_INTERCEPT_COUNTER` is a count followed by a time, so a
 /// class occupies two consecutive words and its position is its index in the
 /// declaration order of `WHV_PROCESSOR_INTERCEPT_COUNTERS`.
-const fn counter_at(
-    words: &[u64; InterceptCounters::WORDS],
-    class: usize,
-) -> InterceptCounter {
-    InterceptCounter { count: words[class * 2], time_100ns: words[class * 2 + 1] }
+const fn counter_at(words: &[u64; InterceptCounters::WORDS], class: usize) -> InterceptCounter {
+    InterceptCounter {
+        count: words[class * 2],
+        time_100ns: words[class * 2 + 1],
+    }
 }
 
 /// How many whole `u64`s of a `capacity`-word buffer the platform filled.
@@ -434,11 +446,7 @@ const fn counter_at(
 /// refuses, rather than an index past the end.
 const fn filled_words(written_bytes: usize, capacity: usize) -> usize {
     let whole = written_bytes / core::mem::size_of::<u64>();
-    if whole < capacity {
-        whole
-    } else {
-        capacity
-    }
+    if whole < capacity { whole } else { capacity }
 }
 
 /// How long a processor has existed, and how much of that the hypervisor spent
@@ -462,7 +470,10 @@ impl RuntimeCounters {
     /// As [`InterceptCounters::from_words`].
     fn from_words(words: &[u64]) -> Option<Self> {
         let words: &[u64; Self::WORDS] = words.get(..Self::WORDS)?.try_into().ok()?;
-        Some(Self { total_100ns: words[0], hypervisor_100ns: words[1] })
+        Some(Self {
+            total_100ns: words[0],
+            hypervisor_100ns: words[1],
+        })
     }
 }
 
@@ -516,12 +527,7 @@ impl Drop for Partition {
     unsafe_code,
     reason = "the crate's one call to the retaining verb, discharged by each of its three callers"
 )]
-fn map_range(
-    handle: RawPartition,
-    host: &mut [u8],
-    gpa: u64,
-    perms: GpaPerms,
-) -> WhpResult<()> {
+fn map_range(handle: RawPartition, host: &mut [u8], gpa: u64, perms: GpaPerms) -> WhpResult<()> {
     unsafe { sys::map_gpa(handle, host, gpa, perms) }
 }
 
@@ -673,7 +679,10 @@ impl Partition {
         if !self.processors.contains(&index) {
             return Err(WhpError::contract(CALL));
         }
-        Ok(Canceller { handle: self.handle.0, index })
+        Ok(Canceller {
+            handle: self.handle.0,
+            index,
+        })
     }
 
     /// A handle that can deliver an interrupt through the emulated APIC from
@@ -684,19 +693,27 @@ impl Partition {
     /// from [`Vcpu::inject`].
     #[must_use]
     pub fn interrupt_requester(&self) -> InterruptRequester {
-        InterruptRequester { handle: self.handle.0 }
+        InterruptRequester {
+            handle: self.handle.0,
+        }
     }
 
     /// The permissions a mapped range currently carries.
     #[must_use]
     pub fn perms_at(&self, gpa: u64) -> Option<GpaPerms> {
-        self.regions.iter().find(|region| region.gpa == gpa).map(|region| region.perms)
+        self.regions
+            .iter()
+            .find(|region| region.gpa == gpa)
+            .map(|region| region.perms)
     }
 
     /// Host-side access to a mapped range's bytes.
     #[must_use]
     pub fn bytes_at(&self, gpa: u64) -> Option<&[u8]> {
-        self.regions.iter().find(|region| region.gpa == gpa).map(|region| region.pages.bytes())
+        self.regions
+            .iter()
+            .find(|region| region.gpa == gpa)
+            .map(|region| region.pages.bytes())
     }
 
     /// Host-side write access to a mapped range's bytes, for loading a guest
@@ -750,7 +767,11 @@ impl Partition {
             return Err(WhpError::contract(CALL));
         }
         self.taken.push(index);
-        Ok(Vcpu { handle: self.handle.0, index, one_thread: PhantomData })
+        Ok(Vcpu {
+            handle: self.handle.0,
+            index,
+            one_thread: PhantomData,
+        })
     }
 
     /// A copyable token for a processor's two counter reads, usable from any
@@ -769,7 +790,10 @@ impl Partition {
         if !self.processors.contains(&index) {
             return Err(WhpError::contract(CALL));
         }
-        Ok(VpCounters { handle: self.handle.0, index })
+        Ok(VpCounters {
+            handle: self.handle.0,
+            index,
+        })
     }
 
     /// Hand the partition's emulated APIC an interrupt to arbitrate and
@@ -901,14 +925,20 @@ impl Vcpu {
     /// Carries the lifetime obligation [`Partition::canceller`] states.
     #[must_use]
     pub const fn canceller(&self) -> Canceller {
-        Canceller { handle: self.handle, index: self.index }
+        Canceller {
+            handle: self.handle,
+            index: self.index,
+        }
     }
 
     /// A copyable token for this processor's counter reads, usable from any
     /// thread while the processor runs.
     #[must_use]
     pub const fn counters(&self) -> VpCounters {
-        VpCounters { handle: self.handle, index: self.index }
+        VpCounters {
+            handle: self.handle,
+            index: self.index,
+        }
     }
 
     /// Run the processor until it exits.
@@ -1032,11 +1062,7 @@ impl Vcpu {
     ///
     /// # Errors
     /// As [`Vcpu::read_regs`].
-    pub fn write_segments(
-        &self,
-        regs: &[Reg],
-        segments: &[SegmentRegister],
-    ) -> WhpResult<()> {
+    pub fn write_segments(&self, regs: &[Reg], segments: &[SegmentRegister]) -> WhpResult<()> {
         sys::set_segments(self.handle, self.index, regs, segments)
     }
 
@@ -1215,8 +1241,12 @@ impl VpCounters {
     pub fn intercept_counters(&self) -> WhpResult<InterceptCounters> {
         const CALL: &str = "WHvGetVirtualProcessorCounters(Intercepts)";
         let mut words = [0u64; InterceptCounters::WORDS];
-        let written =
-            sys::get_counters(self.handle, self.index, sys::CounterSet::Intercepts, &mut words)?;
+        let written = sys::get_counters(
+            self.handle,
+            self.index,
+            sys::CounterSet::Intercepts,
+            &mut words,
+        )?;
         InterceptCounters::from_words(&words[..filled_words(written, words.len())])
             .ok_or(WhpError::contract(CALL))
     }
@@ -1229,8 +1259,12 @@ impl VpCounters {
     pub fn runtime_counters(&self) -> WhpResult<RuntimeCounters> {
         const CALL: &str = "WHvGetVirtualProcessorCounters(Runtime)";
         let mut words = [0u64; RuntimeCounters::WORDS];
-        let written =
-            sys::get_counters(self.handle, self.index, sys::CounterSet::Runtime, &mut words)?;
+        let written = sys::get_counters(
+            self.handle,
+            self.index,
+            sys::CounterSet::Runtime,
+            &mut words,
+        )?;
         RuntimeCounters::from_words(&words[..filled_words(written, words.len())])
             .ok_or(WhpError::contract(CALL))
     }
@@ -1394,7 +1428,8 @@ mod tests {
         static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
         // A test that panicked while holding the turn poisoned nothing: the
         // guard protects an ordering, not a value.
-        TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        TURN.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// How many exits one measurement guest may take before the loop calls it
@@ -1409,13 +1444,11 @@ mod tests {
     /// loading a guest needs both halves — which is the whole of why this is
     /// a function rather than a method on either.
     #[cfg(test)]
-    fn load_real_mode_code(
-        partition: &mut Partition,
-        vcpu: &Vcpu,
-        code: &[u8],
-    ) -> WhpResult<()> {
+    fn load_real_mode_code(partition: &mut Partition, vcpu: &Vcpu, code: &[u8]) -> WhpResult<()> {
         let start = GUEST_IP as usize;
-        let memory = partition.bytes_at_mut(RESET_CS_BASE).expect("the mapped guest page");
+        let memory = partition
+            .bytes_at_mut(RESET_CS_BASE)
+            .expect("the mapped guest page");
         memory[start..start + code.len()].copy_from_slice(code);
         vcpu.write_reg(Reg::Rip, GUEST_IP)
     }
@@ -1436,7 +1469,9 @@ mod tests {
             match exit.reason {
                 crate::ExitReason::Halt => return Ok(()),
                 crate::ExitReason::IoPortAccess(_) => {
-                    guest.vcpu.write_reg(Reg::Rip, exit.rip_after_instruction())?;
+                    guest
+                        .vcpu
+                        .write_reg(Reg::Rip, exit.rip_after_instruction())?;
                 }
                 other => panic!("the measurement guest took an unexpected exit: {other:?}"),
             }
@@ -1487,15 +1522,26 @@ mod tests {
         let partition = &guest.partition;
 
         assert_eq!(
-            partition.reference_time_100ns().expect("the reference clock is readable"),
+            partition
+                .reference_time_100ns()
+                .expect("the reference clock is readable"),
             0,
             "a partition whose processor has never run has accumulated no time"
         );
         let exit = guest.vcpu.run().expect("the guest runs");
-        assert!(matches!(exit.reason, crate::ExitReason::Halt), "{:?}", exit.reason);
+        assert!(
+            matches!(exit.reason, crate::ExitReason::Halt),
+            "{:?}",
+            exit.reason
+        );
 
-        let started = partition.reference_time_100ns().expect("readable after the run");
-        assert!(started > 0, "running the guest started the partition's clock");
+        let started = partition
+            .reference_time_100ns()
+            .expect("readable after the run");
+        assert!(
+            started > 0,
+            "running the guest started the partition's clock"
+        );
         while_real_time_passes();
         let running = partition.reference_time_100ns().expect("readable again");
         assert!(
@@ -1504,17 +1550,23 @@ mod tests {
         );
 
         partition.suspend_time().expect("partition time suspends");
-        let held = partition.reference_time_100ns().expect("readable while suspended");
+        let held = partition
+            .reference_time_100ns()
+            .expect("readable while suspended");
         while_real_time_passes();
         assert_eq!(
-            partition.reference_time_100ns().expect("readable while suspended"),
+            partition
+                .reference_time_100ns()
+                .expect("readable while suspended"),
             held,
             "a suspended partition's clock does not advance, however long the host takes"
         );
 
         partition.resume_time().expect("partition time resumes");
         while_real_time_passes();
-        let resumed = partition.reference_time_100ns().expect("readable after the resume");
+        let resumed = partition
+            .reference_time_100ns()
+            .expect("readable after the resume");
         assert!(
             resumed > held,
             "the clock picks up from where it was held: {held} then {resumed}"
@@ -1581,7 +1633,10 @@ mod tests {
         let _turn = a_turn_on_the_hardware();
         let guest = a_halting_guest().expect("a partition");
         assert_eq!(
-            guest.vcpu.read_words128(Reg::PendingEvent).expect("the slot is readable"),
+            guest
+                .vcpu
+                .read_words128(Reg::PendingEvent)
+                .expect("the slot is readable"),
             [0; 2],
             "a processor that has never run holds no pending event"
         );
@@ -1591,8 +1646,10 @@ mod tests {
             .vcpu
             .write_words128(Reg::PendingEvent, event.as_words())
             .expect("the platform accepts an ExtINT in the pending-event slot");
-        let read_back =
-            guest.vcpu.read_words128(Reg::PendingEvent).expect("readable after the write");
+        let read_back = guest
+            .vcpu
+            .read_words128(Reg::PendingEvent)
+            .expect("readable after the write");
         assert_eq!(
             crate::PendingExtIntEvent::from_words(read_back),
             Some(event),
@@ -1677,7 +1734,10 @@ mod tests {
                 "{lvt:?} resets masked and nothing else"
             );
         }
-        assert_eq!(lvt_entries, 6, "the version register agrees with the six entries above");
+        assert_eq!(
+            lvt_entries, 6,
+            "the version register agrees with the six entries above"
+        );
         assert_eq!(
             page.vector(crate::ApicVector::Request),
             [0; 8],
@@ -1729,7 +1789,9 @@ mod tests {
         // Mapping is where the platform materialises the partition underneath,
         // so an APIC request before it has nothing to arbitrate against.
         let pages = HostPages::new(1).expect("one page");
-        partition.map(RESET_CS_BASE, pages, GpaPerms::RWX).expect("a mapped page");
+        partition
+            .map(RESET_CS_BASE, pages, GpaPerms::RWX)
+            .expect("a mapped page");
         partition.create_processor(0).expect("a processor");
         let vcpu = partition.take_vcpu(0).expect("the processor");
 
@@ -1740,9 +1802,11 @@ mod tests {
         // the vector, while an NMI still arrives. So the page has to be written
         // back software-enabled before the request has anywhere to land.
         let mut page = ApicStatePage::zeroed();
-        vcpu.read_apic_state(&mut page).expect("the APIC page is readable");
+        vcpu.read_apic_state(&mut page)
+            .expect("the APIC page is readable");
         page.set_register(crate::ApicRegister::Spurious, 0x1FF);
-        vcpu.write_apic_state(&page).expect("the APIC accepts being enabled");
+        vcpu.write_apic_state(&page)
+            .expect("the APIC accepts being enabled");
 
         const VECTOR: u32 = 0x41;
         partition
@@ -1755,7 +1819,8 @@ mod tests {
             })
             .expect("the emulated APIC accepts a fixed vector for processor 0");
 
-        vcpu.read_apic_state(&mut page).expect("the APIC page is readable again");
+        vcpu.read_apic_state(&mut page)
+            .expect("the APIC page is readable again");
 
         // The processor has never run, so nothing has moved the vector out of
         // the request bitmap and into the in-service one.
@@ -1855,24 +1920,38 @@ mod tests {
         eprintln!(
             "measured: {written} bytes, XSTATE_BV {xstate_bv:#x}, XCOMP_BV {xcomp_bv:#x} \
              ({} form)",
-            if xcomp_bv >> 63 != 0 { "compacted" } else { "standard" }
+            if xcomp_bv >> 63 != 0 {
+                "compacted"
+            } else {
+                "standard"
+            }
         );
 
         // Identical put-back first: the exchange's common case.
-        guest.vcpu.write_xsave(&area[..written]).expect("the unchanged area writes");
+        guest
+            .vcpu
+            .write_xsave(&area[..written])
+            .expect("the unchanged area writes");
 
         // Now the patch: XMM0's sixteen legacy bytes, with the SSE component
         // marked live so the platform treats them as state rather than init.
         const XMM0: usize = 160;
         const SSE_LIVE: u64 = 1 << 1;
-        let pattern: [u8; 16] = *b"\xA5\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x5A";
+        let pattern: [u8; 16] =
+            *b"\xA5\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x5A";
         area[XMM0..XMM0 + 16].copy_from_slice(&pattern);
         let marked = (xstate_bv | SSE_LIVE).to_le_bytes();
         area[512..520].copy_from_slice(&marked);
-        guest.vcpu.write_xsave(&area[..written]).expect("the patched area writes");
+        guest
+            .vcpu
+            .write_xsave(&area[..written])
+            .expect("the patched area writes");
 
         let mut back = [0u8; 4096];
-        let again = guest.vcpu.read_xsave(&mut back).expect("the area reads back");
+        let again = guest
+            .vcpu
+            .read_xsave(&mut back)
+            .expect("the area reads back");
         assert!(again >= 576);
         assert_eq!(
             back[XMM0..XMM0 + 16],
@@ -2000,7 +2079,10 @@ mod tests {
         assert_eq!(RuntimeCounters::from_words(&[0; 1]), None);
         assert_eq!(
             RuntimeCounters::from_words(&[3, 1]),
-            Some(RuntimeCounters { total_100ns: 3, hypervisor_100ns: 1 })
+            Some(RuntimeCounters {
+                total_100ns: 3,
+                hypervisor_100ns: 1
+            })
         );
     }
 
@@ -2038,12 +2120,15 @@ mod tests {
             .expect("the single-word ProcessorFeatures property, set to the host's own bank")
             .local_apic(LocalApicMode::None)
             .expect("no emulated APIC");
-        let mut partition =
-            config.setup().expect("setup succeeds with the banked features offered");
+        let mut partition = config
+            .setup()
+            .expect("setup succeeds with the banked features offered");
 
         let mut pages = HostPages::new(2).expect("guest pages");
         pages.bytes_mut()[GUEST_IP as usize] = 0xF4;
-        partition.map(RESET_CS_BASE, pages, GpaPerms::RWX).expect("the guest map");
+        partition
+            .map(RESET_CS_BASE, pages, GpaPerms::RWX)
+            .expect("the guest map");
         partition.create_processor(0).expect("the processor");
         let vcpu = partition.take_vcpu(0).expect("the processor is handed out");
         vcpu.write_reg(Reg::Rip, GUEST_IP).expect("the entry point");
@@ -2071,7 +2156,10 @@ mod tests {
             return;
         }
         let _turn = a_turn_on_the_hardware();
-        let HaltingGuest { vcpu, mut partition } = a_halting_guest().expect("a partition");
+        let HaltingGuest {
+            vcpu,
+            mut partition,
+        } = a_halting_guest().expect("a partition");
         load_real_mode_code(&mut partition, &vcpu, &[0xF4]).expect("hlt at the entry point");
 
         let ran = std::thread::spawn(move || vcpu.run())
@@ -2088,12 +2176,18 @@ mod tests {
             "the partition was usable here throughout"
         );
         assert_eq!(
-            partition.take_vcpu(0).expect_err("a processor is handed out once").kind(),
+            partition
+                .take_vcpu(0)
+                .expect_err("a processor is handed out once")
+                .kind(),
             crate::WhpErrorKind::Contract,
             "a second handle to one processor is refused by this crate, not by the platform"
         );
         assert_eq!(
-            partition.take_vcpu(1).expect_err("processor 1 was never created").kind(),
+            partition
+                .take_vcpu(1)
+                .expect_err("processor 1 was never created")
+                .kind(),
             crate::WhpErrorKind::Contract,
             "a handle to a processor that does not exist is refused before the platform \
              is asked"
@@ -2102,11 +2196,17 @@ mod tests {
         // same way, so a caller cannot name a processor that does not exist by
         // going around `take_vcpu`.
         assert_eq!(
-            partition.canceller(1).expect_err("processor 1 was never created").kind(),
+            partition
+                .canceller(1)
+                .expect_err("processor 1 was never created")
+                .kind(),
             crate::WhpErrorKind::Contract,
         );
         assert_eq!(
-            partition.vp_counters(1).expect_err("processor 1 was never created").kind(),
+            partition
+                .vp_counters(1)
+                .expect_err("processor 1 was never created")
+                .kind(),
             crate::WhpErrorKind::Contract,
         );
         assert!(

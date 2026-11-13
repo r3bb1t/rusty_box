@@ -44,8 +44,8 @@
 //! interrupt drops the running priority without deactivating anything
 //! (4.1, 12.20 `ICC_EOIR1_EL1`).
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use crate::devices::virtio::queue::GuestRam;
 

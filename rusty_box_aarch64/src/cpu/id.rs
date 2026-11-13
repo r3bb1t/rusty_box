@@ -541,22 +541,6 @@ pub struct Caches {
 }
 
 impl Caches {
-    /// The Cortex-A57's, the CCSIDR_EL1 encodings of the TRM (DDI 0488H,
-    /// 4.3.22, Table 4-37): a 32 KiB 2-way L1 data cache and a 48 KiB
-    /// 3-way L1 instruction cache, the sizes the design fixes (6.1), and a
-    /// 512 KiB 16-way L2. The L2's size is a configuration option of the
-    /// design, 512 KiB, 1 MiB or 2 MiB (1.5, Table 1-1; 7.2), its 16 ways
-    /// and 64-byte lines fixed (7.1). The board takes the smallest: with no
-    /// cache modelled the size buys a guest nothing, and cleaning a whole
-    /// cache by set/way, which walks every set and way of each level to the
-    /// PoC (the Arm ARM's example, DDI 0487M.d, D7.5.9.16.1), costs one
-    /// instruction a line, 8,192 at L2 here where 2 MiB would take 32,768.
-    pub const CORTEX_A57: Self = Self {
-        l1_data: 0x701F_E00A,
-        l1_instruction: 0x201F_E012,
-        l2: 0x703F_E07A,
-    };
-
     /// The Armv9.2 model's: a 32 KiB 4-way L1 data cache, a 32 KiB 4-way
     /// L1 instruction cache and a 256 KiB 8-way unified L2, every line 64
     /// bytes. The model is no Arm part and no Arm document gives a generic
@@ -572,6 +556,21 @@ impl Caches {
         l1_data: 0x000F_E01A,
         l1_instruction: 0x000F_E01A,
         l2: 0x003F_E03A,
+    };
+    /// The Cortex-A57's, the CCSIDR_EL1 encodings of the TRM (DDI 0488H,
+    /// 4.3.22, Table 4-37): a 32 KiB 2-way L1 data cache and a 48 KiB
+    /// 3-way L1 instruction cache, the sizes the design fixes (6.1), and a
+    /// 512 KiB 16-way L2. The L2's size is a configuration option of the
+    /// design, 512 KiB, 1 MiB or 2 MiB (1.5, Table 1-1; 7.2), its 16 ways
+    /// and 64-byte lines fixed (7.1). The board takes the smallest: with no
+    /// cache modelled the size buys a guest nothing, and cleaning a whole
+    /// cache by set/way, which walks every set and way of each level to the
+    /// PoC (the Arm ARM's example, DDI 0487M.d, D7.5.9.16.1), costs one
+    /// instruction a line, 8,192 at L2 here where 2 MiB would take 32,768.
+    pub const CORTEX_A57: Self = Self {
+        l1_data: 0x701F_E00A,
+        l1_instruction: 0x201F_E012,
+        l2: 0x703F_E07A,
     };
 
     /// The cache `csselr` (`CSSELR_EL1`'s Level, bits 3:1, and InD, bit 0)

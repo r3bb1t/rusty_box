@@ -104,15 +104,32 @@ impl GpaPerms {
     /// This is how device MMIO and the unbacked parts of the address space are
     /// expressed — as the absence of a window, or a window that permits
     /// nothing.
-    pub const NONE: Self =
-        Self { read: false, write: false, execute: false, track_dirty: false };
+    pub const NONE: Self = Self {
+        read: false,
+        write: false,
+        execute: false,
+        track_dirty: false,
+    };
     /// Ordinary guest RAM.
-    pub const RWX: Self = Self { read: true, write: true, execute: true, track_dirty: false };
+    pub const RWX: Self = Self {
+        read: true,
+        write: true,
+        execute: true,
+        track_dirty: false,
+    };
+    /// Guest RAM whose writes are being tracked.
+    pub const RWX_TRACKED: Self = Self {
+        track_dirty: true,
+        ..Self::RWX
+    };
     /// A shadowed ROM, or a chipset region whose writes the machine must see:
     /// reads and fetches run at full speed, writes leave the engine.
-    pub const RX: Self = Self { read: true, write: false, execute: true, track_dirty: false };
-    /// Guest RAM whose writes are being tracked.
-    pub const RWX_TRACKED: Self = Self { track_dirty: true, ..Self::RWX };
+    pub const RX: Self = Self {
+        read: true,
+        write: false,
+        execute: true,
+        track_dirty: false,
+    };
 
     /// Whether any access at all is served from host memory. A window that
     /// permits nothing is indistinguishable from no window, and a plan should
@@ -256,7 +273,9 @@ impl<'a> GpaPlan<'a> {
     /// on overflow.
     #[must_use]
     pub fn total_bytes(&self) -> Option<u64> {
-        self.windows.iter().try_fold(0u64, |sum, window| sum.checked_add(window.len))
+        self.windows
+            .iter()
+            .try_fold(0u64, |sum, window| sum.checked_add(window.len))
     }
 
     /// The window covering `gpa`, if the plan maps it. Everything else is an
@@ -290,7 +309,12 @@ impl EngineCaps {
     /// Everything a software interpreter of this port can do.
     #[must_use]
     pub const fn software() -> Self {
-        Self { a20_gate: true, smm: true, counts_instructions: true, tracks_dirty_pages: false }
+        Self {
+            a20_gate: true,
+            smm: true,
+            counts_instructions: true,
+            tracks_dirty_pages: false,
+        }
     }
 }
 
@@ -403,7 +427,12 @@ mod tests {
     use super::*;
 
     fn ram(gpa: u64, len: u64, host: u64) -> GpaWindow {
-        GpaWindow { gpa, len, host: HostOffset::new(host), perms: GpaPerms::RWX }
+        GpaWindow {
+            gpa,
+            len,
+            host: HostOffset::new(host),
+            perms: GpaPerms::RWX,
+        }
     }
 
     #[test]
@@ -411,7 +440,10 @@ mod tests {
         let windows = [ram(0, 0x2000, 0), ram(0x1000, 0x2000, 0x2000)];
         assert_eq!(
             GpaPlan::new(&windows),
-            Err(GpaPlanError::Overlap(GpaOverlap { first: 0, second: 1 }))
+            Err(GpaPlanError::Overlap(GpaOverlap {
+                first: 0,
+                second: 1
+            }))
         );
     }
 
@@ -443,8 +475,14 @@ mod tests {
     /// would tell an engine to install a range every access then leaves again.
     #[test]
     fn a_plan_refuses_a_window_that_permits_nothing() {
-        let dead = GpaWindow { perms: GpaPerms::NONE, ..ram(0, GUEST_PAGE, 0) };
-        assert_eq!(GpaPlan::new(&[dead]), Err(GpaPlanError::PermitsNothing { at: 0 }));
+        let dead = GpaWindow {
+            perms: GpaPerms::NONE,
+            ..ram(0, GUEST_PAGE, 0)
+        };
+        assert_eq!(
+            GpaPlan::new(&[dead]),
+            Err(GpaPlanError::PermitsNothing { at: 0 })
+        );
         assert!(!GpaPerms::NONE.serves_anything());
         assert!(GpaPerms::RX.serves_anything());
     }
@@ -454,7 +492,11 @@ mod tests {
         let windows = [ram(0, 0x2000, 0), ram(0x1_0000_0000, 0x1000, 0x2000)];
         let plan = GpaPlan::new(&windows).expect("a valid plan");
         assert_eq!(plan.window_at(0x1FFF), Some(&windows[0]));
-        assert_eq!(plan.window_at(0x2000), None, "the gap between windows is unmapped");
+        assert_eq!(
+            plan.window_at(0x2000),
+            None,
+            "the gap between windows is unmapped"
+        );
         assert_eq!(plan.window_at(0x1_0000_0000), Some(&windows[1]));
         assert_eq!(plan.total_bytes(), Some(0x3000));
         assert_eq!(plan.len(), 2);

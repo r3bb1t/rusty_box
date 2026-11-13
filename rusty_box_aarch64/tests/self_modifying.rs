@@ -297,8 +297,8 @@ const NEW_CODE: [u32; 2] = [0xD280_00E0, 0xD65F_03C0];
 #[cfg(feature = "alloc")]
 #[test]
 fn code_a_disk_read_puts_over_code_that_ran_runs_as_read() {
-    use rusty_box_aarch64::board::VIRTIO_MMIO_BASE;
     use rusty_box_aarch64::Disk;
+    use rusty_box_aarch64::board::VIRTIO_MMIO_BASE;
 
     const DESC: u64 = RAM_BASE + 0x1_0000;
     const AVAIL: u64 = RAM_BASE + 0x1_1000;

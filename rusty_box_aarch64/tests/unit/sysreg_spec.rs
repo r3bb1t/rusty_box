@@ -30,12 +30,11 @@
 //!   reads 1, by the fieldset Arm's data gives the processor's features.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::format;
 use std::path::PathBuf;
 use std::string::{String, ToString};
 use std::sync::OnceLock;
-use std::vec;
 use std::vec::Vec;
+use std::{format, vec};
 
 use rusty_box_core::{ClockHz, VmClock};
 use serde_json::Value;
@@ -45,8 +44,8 @@ use super::pauth::PacKeys;
 use super::pmu::Pmu;
 use super::wait::EventRegister;
 use super::{
-    id, sme, Activity, Cpu, CpuConfig, El, ExclusiveMonitor, GicCpuInterface, Levels, NoEl2,
-    Pstate, Step, SysRegs, SystemRegisterInterface, WithEl2,
+    Activity, Cpu, CpuConfig, El, ExclusiveMonitor, GicCpuInterface, Levels, NoEl2, Pstate, Step,
+    SysRegs, SystemRegisterInterface, WithEl2, id, sme,
 };
 use crate::bus::{
     AccessWidth, BusFault, GicEl1Traps, GicRegister, NoGicSystemRegisters, PhysAddr, PhysBus,
@@ -2201,7 +2200,9 @@ fn check<L: Levels>(
         // implementation and the processor gives the encoding a register or
         // an instruction of its own (the Cortex-A57's), its TRM decides what
         // the access does: `impdef.rs`, checked by `tests/unit/impdef.rs`.
-        let own = imp.impdef.implements(super::sysreg::SysRegKey::from_insn(site.word));
+        let own = imp
+            .impdef
+            .implements(super::sysreg::SysRegKey::from_insn(site.word));
         if outcome == Outcome::ImplementationDefined && el != 0 && own {
             continue;
         }

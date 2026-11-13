@@ -17,8 +17,8 @@ use no_panic::no_panic;
 
 use crate::read::{Bytes, ReadError};
 use crate::tables::{
-    BaseKind, BaseType, Constness, Enumerator, FieldLayout, LayoutError, MemberLocation, PointerKind, RecordField, RecordKind,
-    TypeError, TypeLayout, TypeShape, Volatility,
+    BaseKind, BaseType, Constness, Enumerator, FieldLayout, LayoutError, MemberLocation,
+    PointerKind, RecordField, RecordKind, TypeError, TypeLayout, TypeShape, Volatility,
 };
 use crate::units::{BitRange, FieldOffset, TypeRef};
 
@@ -96,34 +96,69 @@ pub struct Numeric {
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_numeric(bytes: Bytes<'_>, at: usize) -> Result<Numeric, ReadError> {
     let leaf = bytes.u16_le(at)?;
-    let after = at.checked_add(2).ok_or(ReadError::Truncated { at, len: 2 })?;
+    let after = at
+        .checked_add(2)
+        .ok_or(ReadError::Truncated { at, len: 2 })?;
     if leaf < LF_CHAR {
-        return Ok(Numeric { value: Some(u64::from(leaf)), next: after });
+        return Ok(Numeric {
+            value: Some(u64::from(leaf)),
+            next: after,
+        });
     }
-    let past = |len: usize| after.checked_add(len).ok_or(ReadError::Truncated { at, len });
+    let past = |len: usize| {
+        after
+            .checked_add(len)
+            .ok_or(ReadError::Truncated { at, len })
+    };
     Ok(match leaf {
         LF_CHAR => {
             let value = bytes.u8(after)? as i8;
-            Numeric { value: u64::try_from(value).ok(), next: past(1)? }
+            Numeric {
+                value: u64::try_from(value).ok(),
+                next: past(1)?,
+            }
         }
         LF_SHORT => {
             let value = bytes.u16_le(after)? as i16;
-            Numeric { value: u64::try_from(value).ok(), next: past(2)? }
+            Numeric {
+                value: u64::try_from(value).ok(),
+                next: past(2)?,
+            }
         }
-        LF_USHORT => Numeric { value: Some(u64::from(bytes.u16_le(after)?)), next: past(2)? },
+        LF_USHORT => Numeric {
+            value: Some(u64::from(bytes.u16_le(after)?)),
+            next: past(2)?,
+        },
         LF_LONG => {
             let value = bytes.u32_le(after)? as i32;
-            Numeric { value: u64::try_from(value).ok(), next: past(4)? }
+            Numeric {
+                value: u64::try_from(value).ok(),
+                next: past(4)?,
+            }
         }
-        LF_ULONG => Numeric { value: Some(u64::from(bytes.u32_le(after)?)), next: past(4)? },
+        LF_ULONG => Numeric {
+            value: Some(u64::from(bytes.u32_le(after)?)),
+            next: past(4)?,
+        },
         LF_QUADWORD => {
             let value = bytes.u64_le(after)? as i64;
-            Numeric { value: u64::try_from(value).ok(), next: past(8)? }
+            Numeric {
+                value: u64::try_from(value).ok(),
+                next: past(8)?,
+            }
         }
-        LF_UQUADWORD => Numeric { value: Some(bytes.u64_le(after)?), next: past(8)? },
+        LF_UQUADWORD => Numeric {
+            value: Some(bytes.u64_le(after)?),
+            next: past(8)?,
+        },
         // A real or other non-integer leaf: no value this reader uses, and
         // no width it knows, so the record cannot be walked past it.
-        _ => return Err(ReadError::Truncated { at, len: usize::MAX }),
+        _ => {
+            return Err(ReadError::Truncated {
+                at,
+                len: usize::MAX,
+            });
+        }
     })
 }
 
@@ -139,20 +174,55 @@ pub struct SignedNumeric {
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_signed_numeric(bytes: Bytes<'_>, at: usize) -> Result<SignedNumeric, ReadError> {
     let leaf = bytes.u16_le(at)?;
-    let after = at.checked_add(2).ok_or(ReadError::Truncated { at, len: 2 })?;
+    let after = at
+        .checked_add(2)
+        .ok_or(ReadError::Truncated { at, len: 2 })?;
     if leaf < LF_CHAR {
-        return Ok(SignedNumeric { value: Some(i128::from(leaf)), next: after });
+        return Ok(SignedNumeric {
+            value: Some(i128::from(leaf)),
+            next: after,
+        });
     }
-    let past = |len: usize| after.checked_add(len).ok_or(ReadError::Truncated { at, len });
+    let past = |len: usize| {
+        after
+            .checked_add(len)
+            .ok_or(ReadError::Truncated { at, len })
+    };
     Ok(match leaf {
-        LF_CHAR => SignedNumeric { value: Some(i128::from(bytes.u8(after)? as i8)), next: past(1)? },
-        LF_SHORT => SignedNumeric { value: Some(i128::from(bytes.u16_le(after)? as i16)), next: past(2)? },
-        LF_USHORT => SignedNumeric { value: Some(i128::from(bytes.u16_le(after)?)), next: past(2)? },
-        LF_LONG => SignedNumeric { value: Some(i128::from(bytes.u32_le(after)? as i32)), next: past(4)? },
-        LF_ULONG => SignedNumeric { value: Some(i128::from(bytes.u32_le(after)?)), next: past(4)? },
-        LF_QUADWORD => SignedNumeric { value: Some(i128::from(bytes.u64_le(after)? as i64)), next: past(8)? },
-        LF_UQUADWORD => SignedNumeric { value: Some(i128::from(bytes.u64_le(after)?)), next: past(8)? },
-        _ => return Err(ReadError::Truncated { at, len: usize::MAX }),
+        LF_CHAR => SignedNumeric {
+            value: Some(i128::from(bytes.u8(after)? as i8)),
+            next: past(1)?,
+        },
+        LF_SHORT => SignedNumeric {
+            value: Some(i128::from(bytes.u16_le(after)? as i16)),
+            next: past(2)?,
+        },
+        LF_USHORT => SignedNumeric {
+            value: Some(i128::from(bytes.u16_le(after)?)),
+            next: past(2)?,
+        },
+        LF_LONG => SignedNumeric {
+            value: Some(i128::from(bytes.u32_le(after)? as i32)),
+            next: past(4)?,
+        },
+        LF_ULONG => SignedNumeric {
+            value: Some(i128::from(bytes.u32_le(after)?)),
+            next: past(4)?,
+        },
+        LF_QUADWORD => SignedNumeric {
+            value: Some(i128::from(bytes.u64_le(after)? as i64)),
+            next: past(8)?,
+        },
+        LF_UQUADWORD => SignedNumeric {
+            value: Some(i128::from(bytes.u64_le(after)?)),
+            next: past(8)?,
+        },
+        _ => {
+            return Err(ReadError::Truncated {
+                at,
+                len: usize::MAX,
+            });
+        }
     })
 }
 
@@ -165,7 +235,10 @@ pub struct PointerRecord {
 
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_pointer(data: Bytes<'_>) -> Result<PointerRecord, ReadError> {
-    Ok(PointerRecord { referent: data.u32_le(0)?, attributes: data.u32_le(4)? })
+    Ok(PointerRecord {
+        referent: data.u32_le(0)?,
+        attributes: data.u32_le(4)?,
+    })
 }
 
 /// `LF_MODIFIER`: type, attributes (1 const, 2 volatile, 4 unaligned).
@@ -177,7 +250,10 @@ pub struct ModifierRecord {
 
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_modifier(data: Bytes<'_>) -> Result<ModifierRecord, ReadError> {
-    Ok(ModifierRecord { ty: data.u32_le(0)?, attributes: data.u16_le(4)? })
+    Ok(ModifierRecord {
+        ty: data.u32_le(0)?,
+        attributes: data.u16_le(4)?,
+    })
 }
 
 /// `LF_ARRAY`: element type, index type, size in bytes, name.
@@ -190,7 +266,11 @@ pub struct ArrayRecord {
 
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_array(data: Bytes<'_>) -> Result<ArrayRecord, ReadError> {
-    Ok(ArrayRecord { element: data.u32_le(0)?, index: data.u32_le(4)?, size: decode_numeric(data, 8)? })
+    Ok(ArrayRecord {
+        element: data.u32_le(0)?,
+        index: data.u32_le(4)?,
+        size: decode_numeric(data, 8)?,
+    })
 }
 
 /// `LF_ENUM`: count, property, underlying type, field list, name.
@@ -225,7 +305,11 @@ pub struct ProcedureType {
 
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_procedure_type(data: Bytes<'_>) -> Result<ProcedureType, ReadError> {
-    Ok(ProcedureType { returns: data.u32_le(0)?, parameters: data.u16_le(6)?, arguments: data.u32_le(8)? })
+    Ok(ProcedureType {
+        returns: data.u32_le(0)?,
+        parameters: data.u16_le(6)?,
+        arguments: data.u32_le(8)?,
+    })
 }
 
 /// A structure, class, interface or union record, in either form.
@@ -244,7 +328,14 @@ pub struct UdtRecord<'a> {
 fn is_udt(kind: u16) -> bool {
     matches!(
         kind,
-        LF_CLASS | LF_STRUCTURE | LF_INTERFACE | LF_UNION | LF_CLASS2 | LF_STRUCTURE2 | LF_UNION2 | LF_INTERFACE2
+        LF_CLASS
+            | LF_STRUCTURE
+            | LF_INTERFACE
+            | LF_UNION
+            | LF_CLASS2
+            | LF_STRUCTURE2
+            | LF_UNION2
+            | LF_INTERFACE2
     )
 }
 
@@ -258,7 +349,11 @@ pub fn decode_udt(kind: u16, data: Bytes<'_>) -> Result<UdtRecord<'_>, ReadError
             field_list: data.u32_le(4)?,
             size_at: 16,
         },
-        LF_UNION => UdtHead { property: u32::from(data.u16_le(2)?), field_list: data.u32_le(4)?, size_at: 8 },
+        LF_UNION => UdtHead {
+            property: u32::from(data.u16_le(2)?),
+            field_list: data.u32_le(4)?,
+            size_at: 8,
+        },
         LF_CLASS2 | LF_STRUCTURE2 | LF_UNION2 | LF_INTERFACE2 => UdtHead {
             property: data.u32_le(0)?,
             field_list: data.u32_le(4)?,
@@ -269,12 +364,21 @@ pub fn decode_udt(kind: u16, data: Bytes<'_>) -> Result<UdtRecord<'_>, ReadError
     let size = decode_numeric(data, head.size_at)?;
     let name = data.cstr(size.next, MAX_NAME_BYTES)?;
     let unique = if head.property & PROPERTY_UNIQUE_NAME != 0 {
-        let unique_at = size.next.checked_add(name.len()).and_then(|at| at.checked_add(1));
+        let unique_at = size
+            .next
+            .checked_add(name.len())
+            .and_then(|at| at.checked_add(1));
         unique_at.and_then(|at| data.cstr(at, MAX_NAME_BYTES).ok())
     } else {
         None
     };
-    Ok(UdtRecord { property: head.property, field_list: head.field_list, size: size.value, name, unique })
+    Ok(UdtRecord {
+        property: head.property,
+        field_list: head.field_list,
+        size: size.value,
+        name,
+        unique,
+    })
 }
 
 /// Where one UDT form keeps its fields.
@@ -288,12 +392,26 @@ struct UdtHead {
 /// One field-list entry, and where the next starts (padding skipped).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldRecord<'a> {
-    Member { type_index: u32, offset: Option<u64>, name: &'a [u8], next: usize },
-    Index { continued: u32, next: usize },
+    Member {
+        type_index: u32,
+        offset: Option<u64>,
+        name: &'a [u8],
+        next: usize,
+    },
+    Index {
+        continued: u32,
+        next: usize,
+    },
     /// An enum's enumerator.
-    Enumerator { value: Option<i128>, name: &'a [u8], next: usize },
+    Enumerator {
+        value: Option<i128>,
+        name: &'a [u8],
+        next: usize,
+    },
     /// A base class, method, nested type or static member: stepped over.
-    Other { next: usize },
+    Other {
+        next: usize,
+    },
 }
 
 /// Why a field-list entry did not decode.
@@ -314,7 +432,10 @@ impl From<ReadError> for FieldError {
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 fn after_name(list: Bytes<'_>, at: usize) -> Result<usize, ReadError> {
     let name = list.cstr(at, MAX_NAME_BYTES)?;
-    let end = at.checked_add(name.len()).and_then(|end| end.checked_add(1)).ok_or(ReadError::Truncated { at, len: 1 })?;
+    let end = at
+        .checked_add(name.len())
+        .and_then(|end| end.checked_add(1))
+        .ok_or(ReadError::Truncated { at, len: 1 })?;
     skip_padding(list, end)
 }
 
@@ -333,37 +454,68 @@ fn skip_padding(list: Bytes<'_>, at: usize) -> Result<usize, ReadError> {
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_field(list: Bytes<'_>, at: usize) -> Result<FieldRecord<'_>, FieldError> {
     let leaf = list.u16_le(at)?;
-    let field = |offset: usize| at.checked_add(offset).ok_or(ReadError::Truncated { at, len: offset });
+    let field = |offset: usize| {
+        at.checked_add(offset)
+            .ok_or(ReadError::Truncated { at, len: offset })
+    };
     Ok(match leaf {
         LF_MEMBER => {
             let type_index = list.u32_le(field(4)?)?;
             let offset = decode_numeric(list, field(8)?)?;
             let name = list.cstr(offset.next, MAX_NAME_BYTES)?;
-            FieldRecord::Member { type_index, offset: offset.value, name, next: after_name(list, offset.next)? }
+            FieldRecord::Member {
+                type_index,
+                offset: offset.value,
+                name,
+                next: after_name(list, offset.next)?,
+            }
         }
-        LF_INDEX => FieldRecord::Index { continued: list.u32_le(field(4)?)?, next: skip_padding(list, field(8)?)? },
+        LF_INDEX => FieldRecord::Index {
+            continued: list.u32_le(field(4)?)?,
+            next: skip_padding(list, field(8)?)?,
+        },
         LF_BCLASS | LF_BINTERFACE => {
             let offset = decode_numeric(list, field(8)?)?;
-            FieldRecord::Other { next: skip_padding(list, offset.next)? }
+            FieldRecord::Other {
+                next: skip_padding(list, offset.next)?,
+            }
         }
         LF_VBCLASS | LF_IVBCLASS => {
             let pointer_offset = decode_numeric(list, field(12)?)?;
             let table_offset = decode_numeric(list, pointer_offset.next)?;
-            FieldRecord::Other { next: skip_padding(list, table_offset.next)? }
+            FieldRecord::Other {
+                next: skip_padding(list, table_offset.next)?,
+            }
         }
-        LF_VFUNCTAB => FieldRecord::Other { next: skip_padding(list, field(8)?)? },
-        LF_VFUNCOFF => FieldRecord::Other { next: skip_padding(list, field(12)?)? },
+        LF_VFUNCTAB => FieldRecord::Other {
+            next: skip_padding(list, field(8)?)?,
+        },
+        LF_VFUNCOFF => FieldRecord::Other {
+            next: skip_padding(list, field(12)?)?,
+        },
         LF_ENUMERATE => {
             let value = decode_signed_numeric(list, field(4)?)?;
             let name = list.cstr(value.next, MAX_NAME_BYTES)?;
-            FieldRecord::Enumerator { value: value.value, name, next: after_name(list, value.next)? }
+            FieldRecord::Enumerator {
+                value: value.value,
+                name,
+                next: after_name(list, value.next)?,
+            }
         }
-        LF_STMEMBER | LF_NESTTYPE | LF_NESTTYPEEX | LF_METHOD => FieldRecord::Other { next: after_name(list, field(8)?)? },
+        LF_STMEMBER | LF_NESTTYPE | LF_NESTTYPEEX | LF_METHOD => FieldRecord::Other {
+            next: after_name(list, field(8)?)?,
+        },
         LF_ONEMETHOD => {
             let attributes = list.u16_le(field(2)?)?;
             let property = attributes.wrapping_shr(2) & 7;
-            let name_at = if property == METHOD_INTRO || property == METHOD_PURE_INTRO { field(12)? } else { field(8)? };
-            FieldRecord::Other { next: after_name(list, name_at)? }
+            let name_at = if property == METHOD_INTRO || property == METHOD_PURE_INTRO {
+                field(12)?
+            } else {
+                field(8)?
+            };
+            FieldRecord::Other {
+                next: after_name(list, name_at)?,
+            }
         }
         other => return Err(FieldError::Unknown { leaf: other }),
     })
@@ -382,7 +534,11 @@ struct Member {
 enum Resolved {
     /// A structure or union definition.
     Udt { index: u32 },
-    Bitfield { storage: u32, position: u8, length: u8 },
+    Bitfield {
+        storage: u32,
+        position: u8,
+        length: u8,
+    },
     /// Anything else: a primitive, a pointer, an array, an enum.
     Other { index: u32 },
 }
@@ -416,19 +572,31 @@ impl TypeTables {
         let begin = header.u32_le(8).map_err(|_| unreadable("TPI header"))?;
         let end = header.u32_le(12).map_err(|_| unreadable("TPI header"))?;
         let record_bytes = header.u32_le(16).map_err(|_| unreadable("TPI header"))? as usize;
-        if header_size < HEADER_BYTES || begin < FIRST_RECORD || end < begin || end.saturating_sub(begin) > MAX_TYPES {
+        if header_size < HEADER_BYTES
+            || begin < FIRST_RECORD
+            || end < begin
+            || end.saturating_sub(begin) > MAX_TYPES
+        {
             return Err(unreadable("TPI header"));
         }
-        let records = header.slice(header_size, record_bytes).map_err(|_| unreadable("TPI records"))?.to_vec();
+        let records = header
+            .slice(header_size, record_bytes)
+            .map_err(|_| unreadable("TPI records"))?
+            .to_vec();
         let count = end.wrapping_sub(begin) as usize;
         let mut offsets = Vec::new();
-        offsets.try_reserve_exact(count).map_err(|_| unreadable("TPI index"))?;
+        offsets
+            .try_reserve_exact(count)
+            .map_err(|_| unreadable("TPI index"))?;
         let mut at = 0usize;
         let bytes = Bytes::new(&records);
         while offsets.len() < count && at < bytes.len() {
             offsets.push(u32::try_from(at).map_err(|_| unreadable("TPI records"))?);
             let len = usize::from(bytes.u16_le(at).map_err(|_| unreadable("TPI records"))?);
-            at = at.checked_add(2).and_then(|at| at.checked_add(len)).ok_or(unreadable("TPI records"))?;
+            at = at
+                .checked_add(2)
+                .and_then(|at| at.checked_add(len))
+                .ok_or(unreadable("TPI records"))?;
         }
         let mut tables = TypeTables {
             records,
@@ -462,9 +630,13 @@ impl TypeTables {
             if udt.property & PROPERTY_FORWARD != 0 {
                 continue;
             }
-            by_name.entry(String::from_utf8_lossy(udt.name).into_owned()).or_insert(index);
+            by_name
+                .entry(String::from_utf8_lossy(udt.name).into_owned())
+                .or_insert(index);
             if let Some(unique) = udt.unique {
-                by_unique.entry(String::from_utf8_lossy(unique).into_owned()).or_insert(index);
+                by_unique
+                    .entry(String::from_utf8_lossy(unique).into_owned())
+                    .or_insert(index);
             }
         }
         self.by_name = by_name;
@@ -473,12 +645,16 @@ impl TypeTables {
     }
 
     fn record(&self, index: u32) -> Result<Record<'_>, LayoutError> {
-        let unreadable = LayoutError::Unreadable { what: "type record" };
+        let unreadable = LayoutError::Unreadable {
+            what: "type record",
+        };
         let position = index.checked_sub(self.begin).ok_or(unreadable.clone())? as usize;
         let offset = *self.offsets.get(position).ok_or(unreadable.clone())? as usize;
         let bytes = Bytes::new(&self.records);
         let len = usize::from(bytes.u16_le(offset).map_err(|_| unreadable.clone())?);
-        let kind = bytes.u16_le(offset.saturating_add(2)).map_err(|_| unreadable.clone())?;
+        let kind = bytes
+            .u16_le(offset.saturating_add(2))
+            .map_err(|_| unreadable.clone())?;
         let data = bytes
             .sub(offset.saturating_add(4), len.saturating_sub(2))
             .map_err(|_| unreadable)?;
@@ -489,9 +665,10 @@ impl TypeTables {
     fn definition(&self, name: &str) -> Result<Option<u32>, LayoutError> {
         match self.by_name.get(name) {
             Some(index) => Ok(Some(*index)),
-            None if self.unreadable > 0 => {
-                Err(LayoutError::UnreadableTypeRecords { name: name.to_owned(), count: self.unreadable })
-            }
+            None if self.unreadable > 0 => Err(LayoutError::UnreadableTypeRecords {
+                name: name.to_owned(),
+                count: self.unreadable,
+            }),
             None => Ok(None),
         }
     }
@@ -502,11 +679,19 @@ impl TypeTables {
         if !is_udt(record.kind) {
             return Ok(None);
         }
-        let udt = decode_udt(record.kind, record.data).map_err(|_| LayoutError::Unreadable { what: "structure record" })?;
+        let udt = decode_udt(record.kind, record.data).map_err(|_| LayoutError::Unreadable {
+            what: "structure record",
+        })?;
         if udt.property & PROPERTY_FORWARD == 0 {
-            return Ok(Some(UdtFound { index, field_list: udt.field_list, size: udt.size }));
+            return Ok(Some(UdtFound {
+                index,
+                field_list: udt.field_list,
+                size: udt.size,
+            }));
         }
-        let unique = udt.unique.map(|unique| String::from_utf8_lossy(unique).into_owned());
+        let unique = udt
+            .unique
+            .map(|unique| String::from_utf8_lossy(unique).into_owned());
         let name = String::from_utf8_lossy(udt.name).into_owned();
         let definition = unique
             .and_then(|unique| self.by_unique.get(&unique).copied())
@@ -525,7 +710,9 @@ impl TypeTables {
         while let Some(list) = next_list.take() {
             hops = hops.saturating_add(1);
             if hops > MAX_FIELD_LIST_HOPS {
-                return Err(LayoutError::EndlessFieldList { name: owner.to_owned() });
+                return Err(LayoutError::EndlessFieldList {
+                    name: owner.to_owned(),
+                });
             }
             let record = self.record(list)?;
             if record.kind != LF_FIELDLIST {
@@ -534,16 +721,32 @@ impl TypeTables {
             let mut at = 0usize;
             while at < record.data.len() {
                 let entry = decode_field(record.data, at).map_err(|error| match error {
-                    FieldError::Unknown { leaf } => LayoutError::UnknownFieldRecord { name: owner.to_owned(), leaf },
+                    FieldError::Unknown { leaf } => LayoutError::UnknownFieldRecord {
+                        name: owner.to_owned(),
+                        leaf,
+                    },
                     FieldError::Short(_) => LayoutError::Unreadable { what: "field list" },
                 })?;
                 let next = match entry {
-                    FieldRecord::Member { type_index, offset, name, next } => {
-                        let offset = offset.ok_or(LayoutError::BadNumber { name: owner.to_owned() })?;
+                    FieldRecord::Member {
+                        type_index,
+                        offset,
+                        name,
+                        next,
+                    } => {
+                        let offset = offset.ok_or(LayoutError::BadNumber {
+                            name: owner.to_owned(),
+                        })?;
                         members
                             .try_reserve(1)
-                            .map_err(|_| LayoutError::Unreadable { what: "field list (no memory)" })?;
-                        members.push(Member { name: String::from_utf8_lossy(name).into_owned(), type_index, offset });
+                            .map_err(|_| LayoutError::Unreadable {
+                                what: "field list (no memory)",
+                            })?;
+                        members.push(Member {
+                            name: String::from_utf8_lossy(name).into_owned(),
+                            type_index,
+                            offset,
+                        });
                         next
                     }
                     FieldRecord::Index { continued, next } => {
@@ -571,13 +774,29 @@ impl TypeTables {
             let record = self.record(current)?;
             match record.kind {
                 LF_MODIFIER => {
-                    current = record.data.u32_le(0).map_err(|_| LayoutError::Unreadable { what: "modifier" })?;
+                    current = record
+                        .data
+                        .u32_le(0)
+                        .map_err(|_| LayoutError::Unreadable { what: "modifier" })?;
                 }
                 LF_BITFIELD => {
-                    let storage = record.data.u32_le(0).map_err(|_| LayoutError::Unreadable { what: "bitfield" })?;
-                    let length = record.data.u8(4).map_err(|_| LayoutError::Unreadable { what: "bitfield" })?;
-                    let position = record.data.u8(5).map_err(|_| LayoutError::Unreadable { what: "bitfield" })?;
-                    return Ok(Resolved::Bitfield { storage, position, length });
+                    let storage = record
+                        .data
+                        .u32_le(0)
+                        .map_err(|_| LayoutError::Unreadable { what: "bitfield" })?;
+                    let length = record
+                        .data
+                        .u8(4)
+                        .map_err(|_| LayoutError::Unreadable { what: "bitfield" })?;
+                    let position = record
+                        .data
+                        .u8(5)
+                        .map_err(|_| LayoutError::Unreadable { what: "bitfield" })?;
+                    return Ok(Resolved::Bitfield {
+                        storage,
+                        position,
+                        length,
+                    });
                 }
                 kind if is_udt(kind) => {
                     return Ok(match self.udt(current)? {
@@ -588,7 +807,9 @@ impl TypeTables {
                 _ => return Ok(Resolved::Other { index: current }),
             }
         }
-        Err(LayoutError::EndlessTypeChain { index: u64::from(index) })
+        Err(LayoutError::EndlessTypeChain {
+            index: u64::from(index),
+        })
     }
 
     /// The size of type `index` in bytes, when it has one.
@@ -601,27 +822,43 @@ impl TypeTables {
             let record = self.record(current)?;
             match record.kind {
                 LF_MODIFIER => {
-                    current = record.data.u32_le(0).map_err(|_| LayoutError::Unreadable { what: "modifier" })?;
+                    current = record
+                        .data
+                        .u32_le(0)
+                        .map_err(|_| LayoutError::Unreadable { what: "modifier" })?;
                 }
                 LF_BITFIELD => {
-                    current = record.data.u32_le(0).map_err(|_| LayoutError::Unreadable { what: "bitfield" })?;
+                    current = record
+                        .data
+                        .u32_le(0)
+                        .map_err(|_| LayoutError::Unreadable { what: "bitfield" })?;
                 }
                 LF_ENUM => {
-                    current = record.data.u32_le(4).map_err(|_| LayoutError::Unreadable { what: "enum" })?;
+                    current = record
+                        .data
+                        .u32_le(4)
+                        .map_err(|_| LayoutError::Unreadable { what: "enum" })?;
                 }
                 LF_POINTER => {
-                    let attributes = record.data.u32_le(4).map_err(|_| LayoutError::Unreadable { what: "pointer" })?;
-                    return Ok(Some(u64::from(attributes.wrapping_shr(13) & 0x3F)).filter(|size| *size != 0));
+                    let attributes = record
+                        .data
+                        .u32_le(4)
+                        .map_err(|_| LayoutError::Unreadable { what: "pointer" })?;
+                    return Ok(Some(u64::from(attributes.wrapping_shr(13) & 0x3F))
+                        .filter(|size| *size != 0));
                 }
                 LF_ARRAY => {
-                    let size = decode_numeric(record.data, 8).map_err(|_| LayoutError::Unreadable { what: "array" })?;
+                    let size = decode_numeric(record.data, 8)
+                        .map_err(|_| LayoutError::Unreadable { what: "array" })?;
                     return Ok(size.value);
                 }
                 kind if is_udt(kind) => return Ok(self.udt(current)?.and_then(|found| found.size)),
                 _ => return Ok(None),
             }
         }
-        Err(LayoutError::EndlessTypeChain { index: u64::from(index) })
+        Err(LayoutError::EndlessTypeChain {
+            index: u64::from(index),
+        })
     }
 
     /// Type `ty` one level deep: a primitive by its kind and pointer mode, a
@@ -645,19 +882,34 @@ impl TypeTables {
                     _ => return Ok(unknown_record(ty, record.kind, record.data)),
                 };
                 let size = (pointer.attributes.wrapping_shr(13) & 0x3F) as u8;
-                TypeShape::Pointer { to: TypeRef(pointer.referent), size, kind }
+                TypeShape::Pointer {
+                    to: TypeRef(pointer.referent),
+                    size,
+                    kind,
+                }
             }
             LF_MODIFIER => {
                 let modifier = decode_modifier(record.data).map_err(|_| unreadable("modifier"))?;
                 TypeShape::Modified {
                     of: TypeRef(modifier.ty),
-                    constant: if modifier.attributes & 1 != 0 { Constness::Const } else { Constness::Mutable },
-                    volatile: if modifier.attributes & 2 != 0 { Volatility::Volatile } else { Volatility::Plain },
+                    constant: if modifier.attributes & 1 != 0 {
+                        Constness::Const
+                    } else {
+                        Constness::Mutable
+                    },
+                    volatile: if modifier.attributes & 2 != 0 {
+                        Volatility::Volatile
+                    } else {
+                        Volatility::Plain
+                    },
                 }
             }
             LF_ARRAY => {
                 let array = decode_array(record.data).map_err(|_| unreadable("array"))?;
-                TypeShape::Array { element: TypeRef(array.element), bytes: array.size.value.ok_or(unreadable("array size"))? }
+                TypeShape::Array {
+                    element: TypeRef(array.element),
+                    bytes: array.size.value.ok_or(unreadable("array size"))?,
+                }
             }
             LF_BITFIELD => {
                 let storage = record.data.u32_le(0).map_err(|_| unreadable("bitfield"))?;
@@ -667,12 +919,24 @@ impl TypeTables {
                 return self.shape(TypeRef(storage));
             }
             LF_PROCEDURE => {
-                let procedure = decode_procedure_type(record.data).map_err(|_| unreadable("procedure type"))?;
-                TypeShape::Function { returns: TypeRef(procedure.returns), parameters: procedure.parameters }
+                let procedure =
+                    decode_procedure_type(record.data).map_err(|_| unreadable("procedure type"))?;
+                TypeShape::Function {
+                    returns: TypeRef(procedure.returns),
+                    parameters: procedure.parameters,
+                }
             }
             LF_MFUNCTION => TypeShape::Function {
-                returns: TypeRef(record.data.u32_le(0).map_err(|_| unreadable("member function type"))?),
-                parameters: record.data.u16_le(14).map_err(|_| unreadable("member function type"))?,
+                returns: TypeRef(
+                    record
+                        .data
+                        .u32_le(0)
+                        .map_err(|_| unreadable("member function type"))?,
+                ),
+                parameters: record
+                    .data
+                    .u16_le(14)
+                    .map_err(|_| unreadable("member function type"))?,
             },
             LF_ENUM => self.enum_shape(record.data)?,
             kind if is_udt(kind) => self.record_shape(ty, kind, record.data)?,
@@ -697,30 +961,58 @@ impl TypeTables {
 
     /// A structure, class, interface or union: its definition's members,
     /// a bitfield member by its storage type and bits.
-    fn record_shape(&self, ty: TypeRef, kind: u16, data: Bytes<'_>) -> Result<TypeShape, TypeError> {
+    fn record_shape(
+        &self,
+        ty: TypeRef,
+        kind: u16,
+        data: Bytes<'_>,
+    ) -> Result<TypeShape, TypeError> {
         let found = self.udt(ty.0).map_err(type_error)?;
         let Some(found) = found else {
-            let udt = decode_udt(kind, data).map_err(|_| TypeError::Unreadable { what: "structure record" })?;
-            return Ok(TypeShape::Incomplete { name: String::from_utf8_lossy(udt.name).into_owned() });
+            let udt = decode_udt(kind, data).map_err(|_| TypeError::Unreadable {
+                what: "structure record",
+            })?;
+            return Ok(TypeShape::Incomplete {
+                name: String::from_utf8_lossy(udt.name).into_owned(),
+            });
         };
         let definition = self.record(found.index).map_err(type_error)?;
-        let udt = decode_udt(definition.kind, definition.data).map_err(|_| TypeError::Unreadable { what: "structure record" })?;
+        let udt =
+            decode_udt(definition.kind, definition.data).map_err(|_| TypeError::Unreadable {
+                what: "structure record",
+            })?;
         let name = String::from_utf8_lossy(udt.name).into_owned();
-        let size = found.size.ok_or(TypeError::Unreadable { what: "structure size" })?;
+        let size = found.size.ok_or(TypeError::Unreadable {
+            what: "structure size",
+        })?;
         let members = self.members(found.field_list, &name).map_err(type_error)?;
         let mut fields = Vec::new();
-        fields.try_reserve_exact(members.len()).map_err(|_| TypeError::Unreadable { what: "members (no memory)" })?;
+        fields
+            .try_reserve_exact(members.len())
+            .map_err(|_| TypeError::Unreadable {
+                what: "members (no memory)",
+            })?;
         for member in members {
             let field = match self.resolve(member.type_index).map_err(type_error)? {
-                Resolved::Bitfield { storage, position, length } => RecordField {
+                Resolved::Bitfield {
+                    storage,
+                    position,
+                    length,
+                } => RecordField {
                     name: member.name,
                     offset: FieldOffset(member.offset),
                     ty: TypeRef(storage),
-                    bits: Some(BitRange { position: u32::from(position), length: u32::from(length) }),
+                    bits: Some(BitRange {
+                        position: u32::from(position),
+                        length: u32::from(length),
+                    }),
                 },
-                Resolved::Udt { .. } | Resolved::Other { .. } => {
-                    RecordField { name: member.name, offset: FieldOffset(member.offset), ty: TypeRef(member.type_index), bits: None }
-                }
+                Resolved::Udt { .. } | Resolved::Other { .. } => RecordField {
+                    name: member.name,
+                    offset: FieldOffset(member.offset),
+                    ty: TypeRef(member.type_index),
+                    bits: None,
+                },
             };
             fields.push(field);
         }
@@ -730,7 +1022,12 @@ impl TypeTables {
             LF_INTERFACE | LF_INTERFACE2 => RecordKind::Interface,
             _ => RecordKind::Struct,
         };
-        Ok(TypeShape::Record { kind, name, size, fields })
+        Ok(TypeShape::Record {
+            kind,
+            name,
+            size,
+            fields,
+        })
     }
 
     /// An enum and its enumerators, in order; a forward reference to one is
@@ -747,20 +1044,33 @@ impl TypeTables {
         while let Some(list) = next_list.take() {
             hops = hops.saturating_add(1);
             if hops > MAX_FIELD_LIST_HOPS {
-                return Err(TypeError::Unreadable { what: "enumerators (an endless field list)" });
+                return Err(TypeError::Unreadable {
+                    what: "enumerators (an endless field list)",
+                });
             }
             let record = self.record(list).map_err(type_error)?;
             if record.kind != LF_FIELDLIST {
-                return Err(TypeError::Unreadable { what: "enumerators" });
+                return Err(TypeError::Unreadable {
+                    what: "enumerators",
+                });
             }
             let mut at = 0usize;
             while at < record.data.len() {
-                let entry = decode_field(record.data, at).map_err(|_| TypeError::Unreadable { what: "enumerators" })?;
+                let entry = decode_field(record.data, at).map_err(|_| TypeError::Unreadable {
+                    what: "enumerators",
+                })?;
                 let next = match entry {
                     FieldRecord::Enumerator { value, name, next } => {
-                        let value = value.ok_or(TypeError::Unreadable { what: "enumerator value" })?;
-                        values.try_reserve(1).map_err(|_| TypeError::Unreadable { what: "enumerators (no memory)" })?;
-                        values.push(Enumerator { name: String::from_utf8_lossy(name).into_owned(), value });
+                        let value = value.ok_or(TypeError::Unreadable {
+                            what: "enumerator value",
+                        })?;
+                        values.try_reserve(1).map_err(|_| TypeError::Unreadable {
+                            what: "enumerators (no memory)",
+                        })?;
+                        values.push(Enumerator {
+                            name: String::from_utf8_lossy(name).into_owned(),
+                            value,
+                        });
                         next
                     }
                     FieldRecord::Index { continued, next } => {
@@ -770,12 +1080,18 @@ impl TypeTables {
                     FieldRecord::Member { next, .. } | FieldRecord::Other { next } => next,
                 };
                 if next <= at {
-                    return Err(TypeError::Unreadable { what: "enumerators" });
+                    return Err(TypeError::Unreadable {
+                        what: "enumerators",
+                    });
                 }
                 at = next;
             }
         }
-        Ok(TypeShape::Enum { name, underlying: TypeRef(enumeration.underlying), values })
+        Ok(TypeShape::Enum {
+            name,
+            underlying: TypeRef(enumeration.underlying),
+            values,
+        })
     }
 
     /// How many parameters the function type `index` takes: an
@@ -792,7 +1108,11 @@ impl TypeTables {
             LF_MFUNCTION => {
                 let count = record.data.u16_le(14).unwrap_or(0);
                 let this = record.data.u32_le(8).unwrap_or(0);
-                if this == 0 { count } else { count.saturating_add(1) }
+                if this == 0 {
+                    count
+                } else {
+                    count.saturating_add(1)
+                }
             }
             _ => 0,
         }
@@ -806,26 +1126,41 @@ impl TypeTables {
         let Some(found) = self.udt(index)? else {
             return Ok(None);
         };
-        let size = found.size.ok_or(LayoutError::BadNumber { name: name.to_owned() })?;
+        let size = found.size.ok_or(LayoutError::BadNumber {
+            name: name.to_owned(),
+        })?;
         let members = self.members(found.field_list, name)?;
         let mut fields = Vec::new();
         fields
             .try_reserve_exact(members.len())
-            .map_err(|_| LayoutError::Unreadable { what: "layout (no memory)" })?;
+            .map_err(|_| LayoutError::Unreadable {
+                what: "layout (no memory)",
+            })?;
         for member in members {
             let bits = match self.resolve(member.type_index)? {
-                Resolved::Bitfield { position, length, .. } => {
-                    Some(BitRange { position: u32::from(position), length: u32::from(length) })
-                }
+                Resolved::Bitfield {
+                    position, length, ..
+                } => Some(BitRange {
+                    position: u32::from(position),
+                    length: u32::from(length),
+                }),
                 Resolved::Udt { .. } | Resolved::Other { .. } => None,
             };
-            fields.push(FieldLayout { name: member.name, offset: FieldOffset(member.offset), bits });
+            fields.push(FieldLayout {
+                name: member.name,
+                offset: FieldOffset(member.offset),
+                bits,
+            });
         }
         Ok(Some(TypeLayout { size, fields }))
     }
 
     /// Where the member reached by `path` sits in `type_name`.
-    pub fn member_location(&self, type_name: &str, path: &[&str]) -> Result<Option<MemberLocation>, LayoutError> {
+    pub fn member_location(
+        &self,
+        type_name: &str,
+        path: &[&str],
+    ) -> Result<Option<MemberLocation>, LayoutError> {
         let Some(index) = self.definition(type_name)? else {
             return Ok(None);
         };
@@ -843,14 +1178,25 @@ impl TypeTables {
             let Some(member) = members.into_iter().find(|member| member.name == *name) else {
                 return Ok(None);
             };
-            offset = offset.checked_add(member.offset).ok_or(LayoutError::BadNumber { name: walked.clone() })?;
+            offset = offset
+                .checked_add(member.offset)
+                .ok_or(LayoutError::BadNumber {
+                    name: walked.clone(),
+                })?;
             let resolved = self.resolve(member.type_index)?;
             let last = step.saturating_add(1) == path.len();
             if last {
                 return Ok(Some(match resolved {
-                    Resolved::Bitfield { storage, position, length } => MemberLocation {
+                    Resolved::Bitfield {
+                        storage,
+                        position,
+                        length,
+                    } => MemberLocation {
                         offset: FieldOffset(offset),
-                        bits: Some(BitRange { position: u32::from(position), length: u32::from(length) }),
+                        bits: Some(BitRange {
+                            position: u32::from(position),
+                            length: u32::from(length),
+                        }),
                         size: self.size_of(storage)?,
                     },
                     Resolved::Udt { index } | Resolved::Other { index } => MemberLocation {
@@ -861,10 +1207,14 @@ impl TypeTables {
                 }));
             }
             current = match resolved {
-                Resolved::Udt { index } => self.udt(index)?.ok_or(LayoutError::Unreadable { what: "structure record" })?,
+                Resolved::Udt { index } => self.udt(index)?.ok_or(LayoutError::Unreadable {
+                    what: "structure record",
+                })?,
                 Resolved::Bitfield { .. } | Resolved::Other { .. } => {
                     let next = path.get(step.saturating_add(1)).copied().unwrap_or("");
-                    return Err(LayoutError::NotAStructure { member: format!("{walked}.{next}") });
+                    return Err(LayoutError::NotAStructure {
+                        member: format!("{walked}.{next}"),
+                    });
                 }
             };
         }
@@ -875,21 +1225,35 @@ impl TypeTables {
 /// A layout question's error as a type question's.
 fn type_error(error: LayoutError) -> TypeError {
     match error {
-        LayoutError::EndlessTypeChain { index } => TypeError::EndlessTypeChain { index: u32::try_from(index).unwrap_or(u32::MAX) },
+        LayoutError::EndlessTypeChain { index } => TypeError::EndlessTypeChain {
+            index: u32::try_from(index).unwrap_or(u32::MAX),
+        },
         LayoutError::Unreadable { what } => TypeError::Unreadable { what },
-        LayoutError::EndlessFieldList { .. } => TypeError::Unreadable { what: "a field list that does not end" },
-        LayoutError::UnknownFieldRecord { .. } => TypeError::Unreadable { what: "a field list record this reader cannot step over" },
-        LayoutError::BadNumber { .. } => TypeError::Unreadable { what: "a size or offset" },
+        LayoutError::EndlessFieldList { .. } => TypeError::Unreadable {
+            what: "a field list that does not end",
+        },
+        LayoutError::UnknownFieldRecord { .. } => TypeError::Unreadable {
+            what: "a field list record this reader cannot step over",
+        },
+        LayoutError::BadNumber { .. } => TypeError::Unreadable {
+            what: "a size or offset",
+        },
         LayoutError::UnreadableTypeRecords { .. }
         | LayoutError::NotAStructure { .. }
         | LayoutError::UnsupportedMemberLocation { .. }
-        | LayoutError::MissingSupplement { .. } => TypeError::Unreadable { what: "type records" },
+        | LayoutError::MissingSupplement { .. } => TypeError::Unreadable {
+            what: "type records",
+        },
     }
 }
 
 /// A record of a leaf this reader does not describe: its leaf and bytes.
 fn unknown_record(ty: TypeRef, leaf: u16, data: Bytes<'_>) -> TypeShape {
-    TypeShape::Unknown { index: ty, leaf, bytes: data.as_slice().to_vec() }
+    TypeShape::Unknown {
+        index: ty,
+        leaf,
+        bytes: data.as_slice().to_vec(),
+    }
 }
 
 /// A primitive index's base type (LLVM `SimpleTypeKind`), when it is one
@@ -933,11 +1297,23 @@ fn base_type(kind: u32) -> Option<BaseType> {
 /// in bits 8–11 (LLVM `SimpleTypeMode`: 4 a 32-bit, 6 a 64-bit near pointer).
 fn simple_shape(index: u32) -> TypeShape {
     let kind = index & 0xFF;
-    let unknown = || TypeShape::Unknown { index: TypeRef(index), leaf: 0, bytes: Vec::new() };
+    let unknown = || TypeShape::Unknown {
+        index: TypeRef(index),
+        leaf: 0,
+        bytes: Vec::new(),
+    };
     match index.wrapping_shr(8) & 0xF {
         0 => base_type(kind).map_or_else(unknown, TypeShape::Base),
-        4 => TypeShape::Pointer { to: TypeRef(kind), size: 4, kind: PointerKind::Pointer },
-        6 => TypeShape::Pointer { to: TypeRef(kind), size: 8, kind: PointerKind::Pointer },
+        4 => TypeShape::Pointer {
+            to: TypeRef(kind),
+            size: 4,
+            kind: PointerKind::Pointer,
+        },
+        6 => TypeShape::Pointer {
+            to: TypeRef(kind),
+            size: 8,
+            kind: PointerKind::Pointer,
+        },
         _ => unknown(),
     }
 }
@@ -977,30 +1353,44 @@ fn primitive_size(index: u32) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use rusty_box_symbols_fixtures::dwarf::{DwarfFormat, DwarfSpec, build_dwarf};
+    use rusty_box_symbols_fixtures::elf::{ElfSpec, TEXT_RVA, build_elf};
+    use rusty_box_symbols_fixtures::pdb::{
+        FixtureContainer, FixtureEnum, FixtureEnumerator, FixtureField, FixtureGlobal, FixtureType,
+        FixtureUdt, PdbFixture, RecordForm, UdtKind, build_pdb,
+    };
+
     use super::*;
     use crate::pdb::tables::PdbTables;
     use crate::tables::{
-        BaseKind, BaseType, Constness, Enumerator, FieldLayout, GlobalVariable, MemberLocation, PointerKind, RecordField,
-        RecordKind, SymbolTables, TypeError, TypeShape, Volatility,
+        BaseKind, BaseType, Constness, Enumerator, FieldLayout, GlobalVariable, MemberLocation,
+        PointerKind, RecordField, RecordKind, SymbolTables, TypeError, TypeShape, Volatility,
     };
     use crate::units::{BitRange, FieldOffset, Rva, TypeRef};
-    use rusty_box_symbols_fixtures::dwarf::{build_dwarf, DwarfFormat, DwarfSpec};
-    use rusty_box_symbols_fixtures::elf::{build_elf, ElfSpec, TEXT_RVA};
-    use rusty_box_symbols_fixtures::pdb::{
-        build_pdb, FixtureContainer, FixtureEnum, FixtureEnumerator, FixtureField, FixtureGlobal, FixtureType, FixtureUdt,
-        PdbFixture, RecordForm, UdtKind,
-    };
 
     fn field(name: &str, offset: u64, ty: FixtureType) -> FixtureField {
-        FixtureField { name: name.to_owned(), offset, ty }
+        FixtureField {
+            name: name.to_owned(),
+            offset,
+            ty,
+        }
     }
 
     fn bits(position: u8, length: u8) -> FixtureType {
-        FixtureType::Bitfield { storage: Box::new(FixtureType::U32), position, length }
+        FixtureType::Bitfield {
+            storage: Box::new(FixtureType::U32),
+            position,
+            length,
+        }
     }
 
     fn udt(name: &str, kind: UdtKind, size: u64, fields: Vec<FixtureField>) -> FixtureUdt {
-        FixtureUdt { name: name.to_owned(), kind, size, fields }
+        FixtureUdt {
+            name: name.to_owned(),
+            kind,
+            size,
+            fields,
+        }
     }
 
     /// The shapes the Windows walker reads: a process holding its kernel
@@ -1008,36 +1398,97 @@ mod tests {
     /// flags are bitfields inside an anonymous union.
     fn kernel_types() -> Vec<FixtureUdt> {
         vec![
-            udt("_LIST_ENTRY", UdtKind::Struct, 0x10, vec![
-                field("Flink", 0, FixtureType::Pointer),
-                field("Blink", 8, FixtureType::Pointer),
-            ]),
-            udt("_KPROCESS", UdtKind::Struct, 0x2D8, vec![
-                field("Header", 0, FixtureType::Array { element: Box::new(FixtureType::U8), count: 0x18 }),
-                field("ProfileListHead", 0x18, FixtureType::Named("_LIST_ENTRY".into())),
-                field("DirectoryTableBase", 0x28, FixtureType::U64),
-            ]),
-            udt("_EPROCESS", UdtKind::Struct, 0xA40, vec![
-                field("Pcb", 0, FixtureType::Named("_KPROCESS".into())),
-                field("UniqueProcessId", 0x440, FixtureType::Pointer),
-                field("ActiveProcessLinks", 0x448, FixtureType::Named("_LIST_ENTRY".into())),
-                field("ImageFileName", 0x5A8, FixtureType::Array { element: Box::new(FixtureType::U8), count: 15 }),
-            ]),
-            udt("_MMVAD_FLAGS", UdtKind::Struct, 4, vec![
-                field("Lock", 0, bits(0, 1)),
-                field("VadType", 0, bits(4, 3)),
-                field("Protection", 0, bits(7, 5)),
-                field("PrivateMemory", 0, bits(20, 1)),
-            ]),
-            udt("_MMVAD_SHORT", UdtKind::Struct, 0x40, vec![
-                field("StartingVpn", 0x18, FixtureType::U32),
-                field("u", 0x30, FixtureType::Nested(Box::new(udt("", UdtKind::Union, 4, vec![
-                    field("LongFlags", 0, FixtureType::U32),
-                    field("VadFlags", 0, FixtureType::Named("_MMVAD_FLAGS".into())),
-                ])))),
-            ]),
+            udt(
+                "_LIST_ENTRY",
+                UdtKind::Struct,
+                0x10,
+                vec![
+                    field("Flink", 0, FixtureType::Pointer),
+                    field("Blink", 8, FixtureType::Pointer),
+                ],
+            ),
+            udt(
+                "_KPROCESS",
+                UdtKind::Struct,
+                0x2D8,
+                vec![
+                    field(
+                        "Header",
+                        0,
+                        FixtureType::Array {
+                            element: Box::new(FixtureType::U8),
+                            count: 0x18,
+                        },
+                    ),
+                    field(
+                        "ProfileListHead",
+                        0x18,
+                        FixtureType::Named("_LIST_ENTRY".into()),
+                    ),
+                    field("DirectoryTableBase", 0x28, FixtureType::U64),
+                ],
+            ),
+            udt(
+                "_EPROCESS",
+                UdtKind::Struct,
+                0xA40,
+                vec![
+                    field("Pcb", 0, FixtureType::Named("_KPROCESS".into())),
+                    field("UniqueProcessId", 0x440, FixtureType::Pointer),
+                    field(
+                        "ActiveProcessLinks",
+                        0x448,
+                        FixtureType::Named("_LIST_ENTRY".into()),
+                    ),
+                    field(
+                        "ImageFileName",
+                        0x5A8,
+                        FixtureType::Array {
+                            element: Box::new(FixtureType::U8),
+                            count: 15,
+                        },
+                    ),
+                ],
+            ),
+            udt(
+                "_MMVAD_FLAGS",
+                UdtKind::Struct,
+                4,
+                vec![
+                    field("Lock", 0, bits(0, 1)),
+                    field("VadType", 0, bits(4, 3)),
+                    field("Protection", 0, bits(7, 5)),
+                    field("PrivateMemory", 0, bits(20, 1)),
+                ],
+            ),
+            udt(
+                "_MMVAD_SHORT",
+                UdtKind::Struct,
+                0x40,
+                vec![
+                    field("StartingVpn", 0x18, FixtureType::U32),
+                    field(
+                        "u",
+                        0x30,
+                        FixtureType::Nested(Box::new(udt(
+                            "",
+                            UdtKind::Union,
+                            4,
+                            vec![
+                                field("LongFlags", 0, FixtureType::U32),
+                                field("VadFlags", 0, FixtureType::Named("_MMVAD_FLAGS".into())),
+                            ],
+                        ))),
+                    ),
+                ],
+            ),
             // Big enough that its size and a member's offset need numeric leaves.
-            udt("_BIG", UdtKind::Struct, 0x1_2348, vec![field("Far", 0x1_2340, FixtureType::U64)]),
+            udt(
+                "_BIG",
+                UdtKind::Struct,
+                0x1_2348,
+                vec![field("Far", 0x1_2340, FixtureType::U64)],
+            ),
         ]
     }
 
@@ -1093,12 +1544,32 @@ mod tests {
                 let tables = tables(container, form, 0);
                 let layout = tables.layout("_EPROCESS").unwrap().expect("_EPROCESS");
                 assert_eq!(layout.size, 0xA40);
-                let names: Vec<&str> = layout.fields.iter().map(|field| field.name.as_str()).collect();
-                assert_eq!(names, ["Pcb", "UniqueProcessId", "ActiveProcessLinks", "ImageFileName"], "{container:?} {form:?}");
+                let names: Vec<&str> = layout
+                    .fields
+                    .iter()
+                    .map(|field| field.name.as_str())
+                    .collect();
+                assert_eq!(
+                    names,
+                    [
+                        "Pcb",
+                        "UniqueProcessId",
+                        "ActiveProcessLinks",
+                        "ImageFileName"
+                    ],
+                    "{container:?} {form:?}"
+                );
                 let flags = tables.layout("_MMVAD_FLAGS").unwrap().expect("flags");
                 assert_eq!(
                     flags.fields[2],
-                    FieldLayout { name: "Protection".into(), offset: FieldOffset(0), bits: Some(BitRange { position: 7, length: 5 }) }
+                    FieldLayout {
+                        name: "Protection".into(),
+                        offset: FieldOffset(0),
+                        bits: Some(BitRange {
+                            position: 7,
+                            length: 5
+                        })
+                    }
                 );
             }
         }
@@ -1109,24 +1580,55 @@ mod tests {
         for form in [RecordForm::Classic, RecordForm::Wide] {
             let tables = tables(FixtureContainer::Msf, form, 0);
             assert_eq!(
-                tables.member_location("_EPROCESS", &["Pcb", "DirectoryTableBase"]).unwrap(),
-                Some(MemberLocation { offset: FieldOffset(0x28), bits: None, size: Some(8) })
+                tables
+                    .member_location("_EPROCESS", &["Pcb", "DirectoryTableBase"])
+                    .unwrap(),
+                Some(MemberLocation {
+                    offset: FieldOffset(0x28),
+                    bits: None,
+                    size: Some(8)
+                })
             );
             assert_eq!(
-                tables.member_location("_EPROCESS", &["ActiveProcessLinks", "Blink"]).unwrap(),
-                Some(MemberLocation { offset: FieldOffset(0x450), bits: None, size: Some(8) })
+                tables
+                    .member_location("_EPROCESS", &["ActiveProcessLinks", "Blink"])
+                    .unwrap(),
+                Some(MemberLocation {
+                    offset: FieldOffset(0x450),
+                    bits: None,
+                    size: Some(8)
+                })
             );
             assert_eq!(
-                tables.member_location("_EPROCESS", &["ImageFileName"]).unwrap(),
-                Some(MemberLocation { offset: FieldOffset(0x5A8), bits: None, size: Some(15) })
+                tables
+                    .member_location("_EPROCESS", &["ImageFileName"])
+                    .unwrap(),
+                Some(MemberLocation {
+                    offset: FieldOffset(0x5A8),
+                    bits: None,
+                    size: Some(15)
+                })
             );
             assert_eq!(
-                tables.member_location("_MMVAD_SHORT", &["u", "VadFlags", "Protection"]).unwrap(),
-                Some(MemberLocation { offset: FieldOffset(0x30), bits: Some(BitRange { position: 7, length: 5 }), size: Some(4) })
+                tables
+                    .member_location("_MMVAD_SHORT", &["u", "VadFlags", "Protection"])
+                    .unwrap(),
+                Some(MemberLocation {
+                    offset: FieldOffset(0x30),
+                    bits: Some(BitRange {
+                        position: 7,
+                        length: 5
+                    }),
+                    size: Some(4)
+                })
             );
             assert_eq!(
                 tables.member_location("_BIG", &["Far"]).unwrap(),
-                Some(MemberLocation { offset: FieldOffset(0x1_2340), bits: None, size: Some(8) })
+                Some(MemberLocation {
+                    offset: FieldOffset(0x1_2340),
+                    bits: None,
+                    size: Some(8)
+                })
             );
         }
     }
@@ -1135,7 +1637,12 @@ mod tests {
     #[test]
     fn an_absent_member_or_type_is_no_answer() {
         let tables = tables(FixtureContainer::Msf, RecordForm::Classic, 0);
-        assert_eq!(tables.member_location("_EPROCESS", &["WoW64Process"]).unwrap(), None);
+        assert_eq!(
+            tables
+                .member_location("_EPROCESS", &["WoW64Process"])
+                .unwrap(),
+            None
+        );
         assert_eq!(tables.member_location("_ETHREAD", &["Cid"]).unwrap(), None);
         assert_eq!(tables.layout("_ETHREAD").unwrap(), None);
     }
@@ -1145,7 +1652,9 @@ mod tests {
         let tables = tables(FixtureContainer::Msf, RecordForm::Classic, 0);
         assert_eq!(
             tables.member_location("_EPROCESS", &["UniqueProcessId", "Low"]),
-            Err(LayoutError::NotAStructure { member: "UniqueProcessId.Low".to_owned() })
+            Err(LayoutError::NotAStructure {
+                member: "UniqueProcessId.Low".to_owned()
+            })
         );
     }
 
@@ -1156,7 +1665,10 @@ mod tests {
         let tables = tables(FixtureContainer::Msf, RecordForm::Classic, 2);
         assert_eq!(
             tables.layout("_ETHREAD"),
-            Err(LayoutError::UnreadableTypeRecords { name: "_ETHREAD".to_owned(), count: 2 })
+            Err(LayoutError::UnreadableTypeRecords {
+                name: "_ETHREAD".to_owned(),
+                count: 2
+            })
         );
         assert!(tables.layout("_EPROCESS").unwrap().is_some());
     }
@@ -1170,7 +1682,12 @@ mod tests {
         list.extend_from_slice(&0u16.to_le_bytes());
         list.extend_from_slice(&0x1000u32.to_le_bytes());
         let types = TypeTables::parse(tpi(&[list, structure("Loop", 0x1000)])).unwrap();
-        assert_eq!(types.layout("Loop"), Err(LayoutError::EndlessFieldList { name: "Loop".to_owned() }));
+        assert_eq!(
+            types.layout("Loop"),
+            Err(LayoutError::EndlessFieldList {
+                name: "Loop".to_owned()
+            })
+        );
     }
 
     /// Review focus 3: a member whose type is a modifier of itself.
@@ -1187,7 +1704,10 @@ mod tests {
         list.extend_from_slice(&0u16.to_le_bytes());
         list.extend_from_slice(b"m\0");
         let types = TypeTables::parse(tpi(&[modifier, list, structure("Self", 0x1001)])).unwrap();
-        assert_eq!(types.member_location("Self", &["m"]), Err(LayoutError::EndlessTypeChain { index: 0x1000 }));
+        assert_eq!(
+            types.member_location("Self", &["m"]),
+            Err(LayoutError::EndlessTypeChain { index: 0x1000 })
+        );
     }
 
     /// A PDB of `globals` (in `.data`), over the kernel types.
@@ -1199,7 +1719,12 @@ mod tests {
     }
 
     fn global(name: &str, offset: u32, ty: FixtureType) -> FixtureGlobal {
-        FixtureGlobal { name: name.into(), section: 2, offset, ty }
+        FixtureGlobal {
+            name: name.into(),
+            section: 2,
+            offset,
+            ty,
+        }
     }
 
     /// The type of global `name`.
@@ -1222,29 +1747,70 @@ mod tests {
         assert_eq!(tables.type_of(TypeRef(0x03)), base(BaseKind::Void, 0));
         assert_eq!(
             tables.type_of(TypeRef(0x0670)),
-            Ok(TypeShape::Pointer { to: TypeRef(0x70), size: 8, kind: PointerKind::Pointer })
+            Ok(TypeShape::Pointer {
+                to: TypeRef(0x70),
+                size: 8,
+                kind: PointerKind::Pointer
+            })
         );
         assert_eq!(
             tables.type_of(TypeRef(0x0470)),
-            Ok(TypeShape::Pointer { to: TypeRef(0x70), size: 4, kind: PointerKind::Pointer })
+            Ok(TypeShape::Pointer {
+                to: TypeRef(0x70),
+                size: 4,
+                kind: PointerKind::Pointer
+            })
         );
-        assert_eq!(tables.type_of(TypeRef(0xFF)), Ok(TypeShape::Unknown { index: TypeRef(0xFF), leaf: 0, bytes: Vec::new() }));
+        assert_eq!(
+            tables.type_of(TypeRef(0xFF)),
+            Ok(TypeShape::Unknown {
+                index: TypeRef(0xFF),
+                leaf: 0,
+                bytes: Vec::new()
+            })
+        );
     }
 
     #[test]
     fn a_pointer_a_modifier_and_an_array_name_what_they_hold() {
         let tables = with_globals(vec![
-            global("name", 0, FixtureType::PointerTo(Box::new(FixtureType::Const(Box::new(FixtureType::Char))))),
-            global("table", 8, FixtureType::Array { element: Box::new(FixtureType::I32), count: 10 }),
+            global(
+                "name",
+                0,
+                FixtureType::PointerTo(Box::new(FixtureType::Const(Box::new(FixtureType::Char)))),
+            ),
+            global(
+                "table",
+                8,
+                FixtureType::Array {
+                    element: Box::new(FixtureType::I32),
+                    count: 10,
+                },
+            ),
         ]);
-        let TypeShape::Pointer { to, size: 8, kind: PointerKind::Pointer } = type_of_global(&tables, "name") else {
+        let TypeShape::Pointer {
+            to,
+            size: 8,
+            kind: PointerKind::Pointer,
+        } = type_of_global(&tables, "name")
+        else {
             panic!("a 64-bit pointer")
         };
         assert_eq!(
             tables.type_of(to),
-            Ok(TypeShape::Modified { of: TypeRef(0x70), constant: Constness::Const, volatile: Volatility::Plain })
+            Ok(TypeShape::Modified {
+                of: TypeRef(0x70),
+                constant: Constness::Const,
+                volatile: Volatility::Plain
+            })
         );
-        assert_eq!(type_of_global(&tables, "table"), TypeShape::Array { element: TypeRef(0x74), bytes: 40 });
+        assert_eq!(
+            type_of_global(&tables, "table"),
+            TypeShape::Array {
+                element: TypeRef(0x74),
+                bytes: 40
+            }
+        );
     }
 
     #[test]
@@ -1253,7 +1819,13 @@ mod tests {
             global("process", 0, FixtureType::Named("_EPROCESS".into())),
             global("flags", 0x1000, FixtureType::Named("_MMVAD_FLAGS".into())),
         ]);
-        let TypeShape::Record { kind, name, size, fields } = type_of_global(&tables, "process") else {
+        let TypeShape::Record {
+            kind,
+            name,
+            size,
+            fields,
+        } = type_of_global(&tables, "process")
+        else {
             panic!("a structure")
         };
         assert_eq!(kind, RecordKind::Struct);
@@ -1261,43 +1833,97 @@ mod tests {
         assert_eq!(size, 0xA40);
         assert_eq!(
             fields[1],
-            RecordField { name: "UniqueProcessId".into(), offset: FieldOffset(0x440), ty: TypeRef(0x0603), bits: None }
+            RecordField {
+                name: "UniqueProcessId".into(),
+                offset: FieldOffset(0x440),
+                ty: TypeRef(0x0603),
+                bits: None
+            }
         );
         let TypeShape::Record { fields, .. } = type_of_global(&tables, "flags") else {
             panic!("a structure")
         };
-        let protection = fields.iter().find(|field| field.name == "Protection").expect("Protection");
-        assert_eq!(protection.bits, Some(BitRange { position: 7, length: 5 }));
+        let protection = fields
+            .iter()
+            .find(|field| field.name == "Protection")
+            .expect("Protection");
+        assert_eq!(
+            protection.bits,
+            Some(BitRange {
+                position: 7,
+                length: 5
+            })
+        );
         assert_eq!(protection.ty, TypeRef(0x22), "the storage unit's type");
     }
 
     #[test]
     fn an_enum_lists_its_enumerators_negative_ones_included() {
-        let enumerator = |name: &str, value: i64| FixtureEnumerator { name: name.into(), value };
-        let values = vec![enumerator("Off", -1), enumerator("Read", 1), enumerator("Write", 2), enumerator("Both", 3)];
-        let mode = FixtureEnum { name: "Mode".into(), underlying: Box::new(FixtureType::I32), values };
+        let enumerator = |name: &str, value: i64| FixtureEnumerator {
+            name: name.into(),
+            value,
+        };
+        let values = vec![
+            enumerator("Off", -1),
+            enumerator("Read", 1),
+            enumerator("Write", 2),
+            enumerator("Both", 3),
+        ];
+        let mode = FixtureEnum {
+            name: "Mode".into(),
+            underlying: Box::new(FixtureType::I32),
+            values,
+        };
         let tables = with_globals(vec![global("mode", 0, FixtureType::Enum(mode))]);
-        let TypeShape::Enum { name, underlying, values } = type_of_global(&tables, "mode") else {
+        let TypeShape::Enum {
+            name,
+            underlying,
+            values,
+        } = type_of_global(&tables, "mode")
+        else {
             panic!("an enum")
         };
         assert_eq!(name, "Mode");
         assert_eq!(underlying, TypeRef(0x74));
-        assert_eq!(values[0], Enumerator { name: "Off".into(), value: -1 });
+        assert_eq!(
+            values[0],
+            Enumerator {
+                name: "Off".into(),
+                value: -1
+            }
+        );
         assert_eq!(values.len(), 4);
     }
 
     #[test]
     fn a_function_pointer_names_its_function_type() {
-        let tables = with_globals(vec![global("callback", 0, FixtureType::PointerTo(Box::new(FixtureType::Function)))]);
+        let tables = with_globals(vec![global(
+            "callback",
+            0,
+            FixtureType::PointerTo(Box::new(FixtureType::Function)),
+        )]);
         let TypeShape::Pointer { to, .. } = type_of_global(&tables, "callback") else {
             panic!("a pointer")
         };
-        assert_eq!(tables.type_of(to), Ok(TypeShape::Function { returns: TypeRef(0x03), parameters: 0 }));
+        assert_eq!(
+            tables.type_of(to),
+            Ok(TypeShape::Function {
+                returns: TypeRef(0x03),
+                parameters: 0
+            })
+        );
     }
 
     #[test]
     fn an_unknown_record_shows_its_leaf_and_bytes() {
-        let tables = with_globals(vec![global("odd", 0, FixtureType::Raw { leaf: 0x1234, payload: vec![1, 2, 3] })]);
+        let tables = with_globals(vec![global(
+            "odd",
+            0,
+            FixtureType::Raw {
+                leaf: 0x1234,
+                payload: vec![1, 2, 3],
+            },
+        )]);
         let TypeShape::Unknown { leaf, bytes, .. } = type_of_global(&tables, "odd") else {
             panic!("an unknown record")
         };
@@ -1312,16 +1938,35 @@ mod tests {
         modifier.extend_from_slice(&0u16.to_le_bytes());
         modifier.extend_from_slice(&[0xF2, 0xF1]);
         let types = TypeTables::parse(tpi(&[modifier])).unwrap();
-        assert_eq!(types.shape(TypeRef(0x1000)), Err(TypeError::EndlessTypeChain { index: 0x1000 }));
+        assert_eq!(
+            types.shape(TypeRef(0x1000)),
+            Err(TypeError::EndlessTypeChain { index: 0x1000 })
+        );
     }
 
     #[test]
     fn a_global_is_found_by_name_with_its_type() {
         let tables = with_globals(vec![global("g_count", 0x10, FixtureType::U32)]);
-        assert_eq!(tables.global("g_count"), Some(GlobalVariable { rva: Rva(0x3010), ty: TypeRef(0x22) }));
+        assert_eq!(
+            tables.global("g_count"),
+            Some(GlobalVariable {
+                rva: Rva(0x3010),
+                ty: TypeRef(0x22)
+            })
+        );
         assert_eq!(tables.global("missing"), None);
-        let elf = build_elf(ElfSpec::pie(), &build_dwarf(DwarfSpec { version: 5, format: DwarfFormat::Dwarf32, text_va: TEXT_RVA }));
-        assert_eq!(SymbolTables::parse(&elf).unwrap().global("widget_init"), None);
+        let elf = build_elf(
+            ElfSpec::pie(),
+            &build_dwarf(DwarfSpec {
+                version: 5,
+                format: DwarfFormat::Dwarf32,
+                text_va: TEXT_RVA,
+            }),
+        );
+        assert_eq!(
+            SymbolTables::parse(&elf).unwrap().global("widget_init"),
+            None
+        );
     }
 
     #[test]
@@ -1334,7 +1979,13 @@ mod tests {
         assert!(decode_procedure_type(short).is_err());
         assert!(decode_signed_numeric(Bytes::new(&[0x03, 0x80, 0xFF]), 0).is_err());
         let negative = [0x00, 0x80, 0xFF];
-        assert_eq!(decode_signed_numeric(Bytes::new(&negative), 0), Ok(SignedNumeric { value: Some(-1), next: 3 }));
+        assert_eq!(
+            decode_signed_numeric(Bytes::new(&negative), 0),
+            Ok(SignedNumeric {
+                value: Some(-1),
+                next: 3
+            })
+        );
         let whole = [0u8; 8];
         assert!(decode_pointer(Bytes::new(&whole)).is_ok());
         assert!(decode_modifier(Bytes::new(&whole[..6])).is_ok());
@@ -1349,12 +2000,39 @@ mod tests {
 
     #[test]
     fn numeric_leaves_decode_and_negatives_are_refused() {
-        let numbers = [0x34, 0x12, 0x02, 0x80, 0xFF, 0xFF, 0x0A, 0x80, 1, 0, 0, 0, 0, 0, 0, 0x80, 0x00, 0x80, 0xFF];
+        let numbers = [
+            0x34, 0x12, 0x02, 0x80, 0xFF, 0xFF, 0x0A, 0x80, 1, 0, 0, 0, 0, 0, 0, 0x80, 0x00, 0x80,
+            0xFF,
+        ];
         let bytes = Bytes::new(&numbers);
-        assert_eq!(decode_numeric(bytes, 0), Ok(Numeric { value: Some(0x1234), next: 2 }));
-        assert_eq!(decode_numeric(bytes, 2), Ok(Numeric { value: Some(0xFFFF), next: 6 }));
-        assert_eq!(decode_numeric(bytes, 6), Ok(Numeric { value: Some(0x8000_0000_0000_0001), next: 16 }));
+        assert_eq!(
+            decode_numeric(bytes, 0),
+            Ok(Numeric {
+                value: Some(0x1234),
+                next: 2
+            })
+        );
+        assert_eq!(
+            decode_numeric(bytes, 2),
+            Ok(Numeric {
+                value: Some(0xFFFF),
+                next: 6
+            })
+        );
+        assert_eq!(
+            decode_numeric(bytes, 6),
+            Ok(Numeric {
+                value: Some(0x8000_0000_0000_0001),
+                next: 16
+            })
+        );
         // LF_CHAR -1.
-        assert_eq!(decode_numeric(bytes, 16), Ok(Numeric { value: None, next: 19 }));
+        assert_eq!(
+            decode_numeric(bytes, 16),
+            Ok(Numeric {
+                value: None,
+                next: 19
+            })
+        );
     }
 }

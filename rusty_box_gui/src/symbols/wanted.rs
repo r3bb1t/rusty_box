@@ -3,16 +3,22 @@
 //! panes show an address in; then the rest. A module whose headers did not
 //! read has no identity and is not asked for: its row says why.
 
-use crate::debugger::inspect::{AddressSpace, DebugSnapshot, SymbolIndex};
-
 use super::hub::{Priority, WantedModule};
+use crate::debugger::inspect::{AddressSpace, DebugSnapshot, SymbolIndex};
 
 /// The linear addresses the panes of `snapshot` show: the code pane's first
 /// line and the memory window's start, when it reads linear memory.
 pub(crate) fn shown_addresses(snapshot: &DebugSnapshot) -> Vec<u64> {
-    let mut shown: Vec<u64> = snapshot.code.first().map(|line| line.address).into_iter().collect();
+    let mut shown: Vec<u64> = snapshot
+        .code
+        .first()
+        .map(|line| line.address)
+        .into_iter()
+        .collect();
     match snapshot.memory.start.space {
-        AddressSpace::Linear | AddressSpace::Process { .. } => shown.push(snapshot.memory.start.value),
+        AddressSpace::Linear | AddressSpace::Process { .. } => {
+            shown.push(snapshot.memory.start.value)
+        }
         AddressSpace::Physical => {}
     }
     shown
@@ -28,7 +34,11 @@ pub(crate) fn wanted_modules(symbols: &SymbolIndex, shown: &[u64]) -> Vec<Wanted
         };
         // The difference before the width test keeps a module near the top
         // of memory from wrapping.
-        let contains = |address: u64| address.checked_sub(module.base).is_some_and(|offset| offset < module.size);
+        let contains = |address: u64| {
+            address
+                .checked_sub(module.base)
+                .is_some_and(|offset| offset < module.size)
+        };
         let priority = if symbols.kernel == Some(module.base) {
             Priority::Kernel
         } else if shown.iter().any(|&address| contains(address)) {
@@ -36,7 +46,10 @@ pub(crate) fn wanted_modules(symbols: &SymbolIndex, shown: &[u64]) -> Vec<Wanted
         } else {
             Priority::Rest
         };
-        match wanted.iter_mut().find(|earlier| earlier.identity == *identity) {
+        match wanted
+            .iter_mut()
+            .find(|earlier| earlier.identity == *identity)
+        {
             Some(earlier) => earlier.priority = earlier.priority.min(priority),
             None => wanted.push(WantedModule {
                 identity: identity.clone(),
@@ -49,17 +62,24 @@ pub(crate) fn wanted_modules(symbols: &SymbolIndex, shown: &[u64]) -> Vec<Wanted
 
 #[cfg(test)]
 mod tests {
+    use rusty_box_symbols::identity::ModuleIdentity;
+
     use super::*;
     use crate::debugger::fake_windows::{
-        FakeWindows, FakeWindowsSpec, DEBUG_DIRECTORY_RVA, LIVE_CR3,
+        DEBUG_DIRECTORY_RVA, FakeWindows, FakeWindowsSpec, LIVE_CR3,
     };
-    use crate::debugger::windows::{read_windows, SystemView, WindowsDiscovery};
-    use rusty_box_symbols::identity::ModuleIdentity;
+    use crate::debugger::windows::{SystemView, WindowsDiscovery, read_windows};
 
     fn symbols_of(fake: &mut FakeWindows) -> SymbolIndex {
         let view = fake.view;
-        read_windows(&mut fake.guest, &view, SystemView::Off, &mut WindowsDiscovery::default(), None)
-            .symbols
+        read_windows(
+            &mut fake.guest,
+            &view,
+            SystemView::Off,
+            &mut WindowsDiscovery::default(),
+            None,
+        )
+        .symbols
     }
 
     #[test]
@@ -84,7 +104,8 @@ mod tests {
         let spec = FakeWindowsSpec::typical();
         let driver = spec.drivers[0].clone();
         let mut fake = FakeWindows::build(spec);
-        fake.guest.page_out(LIVE_CR3, driver.base + DEBUG_DIRECTORY_RVA);
+        fake.guest
+            .page_out(LIVE_CR3, driver.base + DEBUG_DIRECTORY_RVA);
         let wanted = wanted_modules(&symbols_of(&mut fake), &[]);
         let disk = wanted
             .iter()

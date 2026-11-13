@@ -1,8 +1,7 @@
 //! Arm group `dpreg` (Arm ARM C4.1, "Data Processing -- Register"): the A64
 //! space with `op1 = x101`.
 
-use super::Feature;
-use super::{Class, Encoding};
+use super::{Class, Encoding, Feature};
 use crate::cpu::exec::bits;
 
 /// Arm group `dp_2src`: Data-processing (2 source).

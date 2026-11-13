@@ -3,13 +3,19 @@
 //! page, `.text` and `.data` after, an export table and a `RUNTIME_FUNCTION`
 //! table inside `.data`.
 
-use crate::debugger::pe::{self, ImageWidth, HEADER_BYTES};
-use crate::debugger::xref::image::{ImageOffset, ModuleImage, PageRead, PAGE_BYTES};
+use crate::debugger::pe::{self, HEADER_BYTES, ImageWidth};
+use crate::debugger::xref::image::{ImageOffset, ModuleImage, PAGE_BYTES, PageRead};
 
 /// A `ModuleImage` at `base` as `copy_image` would give it for `spec`, with
 /// `text` at `.text`'s start, `data` at `.data`'s free bytes, every page
 /// read, and `sync` as the offsets known to start an instruction.
-pub(crate) fn module_image(base: u64, spec: &ImageSpec, text: &[u8], data: &[u8], sync: &[u64]) -> ModuleImage {
+pub(crate) fn module_image(
+    base: u64,
+    spec: &ImageSpec,
+    text: &[u8],
+    data: &[u8],
+    sync: &[u64],
+) -> ModuleImage {
     let mut bytes = build_image(spec);
     let text_at = spec.text.rva as usize;
     bytes[text_at..text_at + text.len()].copy_from_slice(text);
@@ -65,8 +71,14 @@ impl ImageSpec {
         let data = 0x1000 + text.next_multiple_of(0x1000);
         ImageSpec {
             width: ImageWidth::Bits64,
-            text: Section { rva: 0x1000, size: text },
-            data: Section { rva: data, size: 0x4000 },
+            text: Section {
+                rva: 0x1000,
+                size: text,
+            },
+            data: Section {
+                rva: data,
+                size: 0x4000,
+            },
             entry: 0x1000,
             exports: Vec::new(),
             functions: Vec::new(),
@@ -123,7 +135,11 @@ pub(crate) fn build_image(spec: &ImageSpec) -> Vec<u8> {
         let table = spec.data.rva + FUNCTIONS_AT;
         // DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION], the fourth entry.
         put_u32(&mut bytes, directories + 3 * 8, table);
-        put_u32(&mut bytes, directories + 3 * 8 + 4, 12 * spec.functions.len() as u32);
+        put_u32(
+            &mut bytes,
+            directories + 3 * 8 + 4,
+            12 * spec.functions.len() as u32,
+        );
         for (index, function) in spec.functions.iter().enumerate() {
             let at = table as usize + 12 * index;
             put_u32(&mut bytes, at, function.begin);
@@ -132,8 +148,16 @@ pub(crate) fn build_image(spec: &ImageSpec) -> Vec<u8> {
     }
     let mut at = optional + usize::from(optional_size);
     let headers = [
-        SectionHeader { name: b".text", section: &spec.text, characteristics: CODE },
-        SectionHeader { name: b".data", section: &spec.data, characteristics: DATA },
+        SectionHeader {
+            name: b".text",
+            section: &spec.text,
+            characteristics: CODE,
+        },
+        SectionHeader {
+            name: b".data",
+            section: &spec.data,
+            characteristics: DATA,
+        },
     ];
     for header in headers {
         bytes[at..at + 5].copy_from_slice(header.name);

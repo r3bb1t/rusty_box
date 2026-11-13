@@ -152,7 +152,10 @@ impl<'a> Bytes<'a> {
             }
             value |= u64::from(byte & 0x7F).wrapping_shl(shift);
             if byte & 0x80 == 0 {
-                return Ok(Leb { value, next: cursor });
+                return Ok(Leb {
+                    value,
+                    next: cursor,
+                });
             }
         }
         Err(ReadError::LebOverflow { at })
@@ -179,7 +182,10 @@ impl<'a> Bytes<'a> {
                 if used < 64 && byte & 0x40 != 0 {
                     value |= (!0i64).wrapping_shl(used);
                 }
-                return Ok(Leb { value, next: cursor });
+                return Ok(Leb {
+                    value,
+                    next: cursor,
+                });
             }
         }
         Err(ReadError::LebOverflow { at })
@@ -341,7 +347,13 @@ mod tests {
         assert_eq!(bytes.u64_le(1), Ok(0x0908_0706_0504_0302));
         assert_eq!(bytes.u64_le(2), Err(ReadError::Truncated { at: 2, len: 8 }));
         assert_eq!(bytes.u8(9), Err(ReadError::Truncated { at: 9, len: 1 }));
-        assert_eq!(bytes.u32_le(usize::MAX), Err(ReadError::Truncated { at: usize::MAX, len: 4 }));
+        assert_eq!(
+            bytes.u32_le(usize::MAX),
+            Err(ReadError::Truncated {
+                at: usize::MAX,
+                len: 4
+            })
+        );
     }
 
     #[test]
@@ -349,13 +361,25 @@ mod tests {
         let bytes = Bytes::new(b"abcdef");
         assert_eq!(bytes.slice(1, 3), Ok(&b"bcd"[..]));
         assert_eq!(bytes.slice(6, 0), Ok(&b""[..]));
-        assert_eq!(bytes.slice(4, 3), Err(ReadError::Truncated { at: 4, len: 3 }));
-        assert_eq!(bytes.slice(1, usize::MAX), Err(ReadError::Truncated { at: 1, len: usize::MAX }));
+        assert_eq!(
+            bytes.slice(4, 3),
+            Err(ReadError::Truncated { at: 4, len: 3 })
+        );
+        assert_eq!(
+            bytes.slice(1, usize::MAX),
+            Err(ReadError::Truncated {
+                at: 1,
+                len: usize::MAX
+            })
+        );
         let sub = bytes.sub(2, 3).unwrap();
         assert_eq!(sub.as_slice(), b"cde");
         assert_eq!(sub.u8(3), Err(ReadError::Truncated { at: 3, len: 1 }));
         assert_eq!(bytes.tail(6).map(Bytes::len), Ok(0));
-        assert_eq!(bytes.tail(7).map(Bytes::len), Err(ReadError::Truncated { at: 7, len: 0 }));
+        assert_eq!(
+            bytes.tail(7).map(Bytes::len),
+            Err(ReadError::Truncated { at: 7, len: 0 })
+        );
         assert_eq!(bytes.array::<2>(4), Ok(*b"ef"));
     }
 
@@ -363,20 +387,47 @@ mod tests {
     fn a_c_string_ends_at_its_nul_or_is_refused() {
         let bytes = Bytes::new(b"name\0rest");
         assert_eq!(bytes.cstr(0, 64), Ok(&b"name"[..]));
-        assert_eq!(bytes.cstr(5, 64), Err(ReadError::Unterminated { at: 5, max: 64 }));
-        assert_eq!(bytes.cstr(0, 3), Err(ReadError::Unterminated { at: 0, max: 3 }));
-        assert_eq!(bytes.cstr(10, 64), Err(ReadError::Truncated { at: 10, len: 1 }));
+        assert_eq!(
+            bytes.cstr(5, 64),
+            Err(ReadError::Unterminated { at: 5, max: 64 })
+        );
+        assert_eq!(
+            bytes.cstr(0, 3),
+            Err(ReadError::Unterminated { at: 0, max: 3 })
+        );
+        assert_eq!(
+            bytes.cstr(10, 64),
+            Err(ReadError::Truncated { at: 10, len: 1 })
+        );
     }
 
     #[test]
     fn unsigned_leb128_reads_the_standards_examples() {
         let cases = [
-            UlebCase { bytes: &[0x02], value: 2 },
-            UlebCase { bytes: &[0x7F], value: 127 },
-            UlebCase { bytes: &[0x80, 0x01], value: 128 },
-            UlebCase { bytes: &[0x81, 0x01], value: 129 },
-            UlebCase { bytes: &[0x82, 0x01], value: 130 },
-            UlebCase { bytes: &[0xB9, 0x64], value: 12857 },
+            UlebCase {
+                bytes: &[0x02],
+                value: 2,
+            },
+            UlebCase {
+                bytes: &[0x7F],
+                value: 127,
+            },
+            UlebCase {
+                bytes: &[0x80, 0x01],
+                value: 128,
+            },
+            UlebCase {
+                bytes: &[0x81, 0x01],
+                value: 129,
+            },
+            UlebCase {
+                bytes: &[0x82, 0x01],
+                value: 130,
+            },
+            UlebCase {
+                bytes: &[0xB9, 0x64],
+                value: 12857,
+            },
             UlebCase {
                 bytes: &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01],
                 value: u64::MAX,
@@ -392,14 +443,38 @@ mod tests {
     #[test]
     fn signed_leb128_reads_the_standards_examples() {
         let cases = [
-            SlebCase { bytes: &[0x02], value: 2 },
-            SlebCase { bytes: &[0x7E], value: -2 },
-            SlebCase { bytes: &[0xFF, 0x00], value: 127 },
-            SlebCase { bytes: &[0x81, 0x7F], value: -127 },
-            SlebCase { bytes: &[0x80, 0x01], value: 128 },
-            SlebCase { bytes: &[0x80, 0x7F], value: -128 },
-            SlebCase { bytes: &[0x81, 0x01], value: 129 },
-            SlebCase { bytes: &[0xFF, 0x7E], value: -129 },
+            SlebCase {
+                bytes: &[0x02],
+                value: 2,
+            },
+            SlebCase {
+                bytes: &[0x7E],
+                value: -2,
+            },
+            SlebCase {
+                bytes: &[0xFF, 0x00],
+                value: 127,
+            },
+            SlebCase {
+                bytes: &[0x81, 0x7F],
+                value: -127,
+            },
+            SlebCase {
+                bytes: &[0x80, 0x01],
+                value: 128,
+            },
+            SlebCase {
+                bytes: &[0x80, 0x7F],
+                value: -128,
+            },
+            SlebCase {
+                bytes: &[0x81, 0x01],
+                value: 129,
+            },
+            SlebCase {
+                bytes: &[0xFF, 0x7E],
+                value: -129,
+            },
             SlebCase {
                 bytes: &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7F],
                 value: i64::MIN,
@@ -415,24 +490,45 @@ mod tests {
     #[test]
     fn a_leb128_too_long_for_64_bits_or_cut_short_is_refused() {
         let too_big = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02];
-        assert_eq!(Bytes::new(&too_big).uleb128(0), Err(ReadError::LebOverflow { at: 0 }));
+        assert_eq!(
+            Bytes::new(&too_big).uleb128(0),
+            Err(ReadError::LebOverflow { at: 0 })
+        );
         let endless = [0x80; 32];
-        assert_eq!(Bytes::new(&endless).uleb128(0), Err(ReadError::LebOverflow { at: 0 }));
-        assert_eq!(Bytes::new(&endless).sleb128(0), Err(ReadError::LebOverflow { at: 0 }));
-        assert_eq!(Bytes::new(&[0x80, 0x80]).uleb128(0), Err(ReadError::Truncated { at: 2, len: 1 }));
+        assert_eq!(
+            Bytes::new(&endless).uleb128(0),
+            Err(ReadError::LebOverflow { at: 0 })
+        );
+        assert_eq!(
+            Bytes::new(&endless).sleb128(0),
+            Err(ReadError::LebOverflow { at: 0 })
+        );
+        assert_eq!(
+            Bytes::new(&[0x80, 0x80]).uleb128(0),
+            Err(ReadError::Truncated { at: 2, len: 1 })
+        );
     }
 
     #[test]
     fn a_cursor_moves_only_when_a_read_succeeds() {
-        let data = [0x34, 0x12, 0x78, 0x56, 0x34, 0x12, b'h', b'i', 0, 0x85, 0x01, 0xAA];
+        let data = [
+            0x34, 0x12, 0x78, 0x56, 0x34, 0x12, b'h', b'i', 0, 0x85, 0x01, 0xAA,
+        ];
         let mut cursor = Cursor::new(Bytes::new(&data), 0);
         assert_eq!(cursor.u16_le(), Ok(0x1234));
         assert_eq!(cursor.u32_le(), Ok(0x1234_5678));
         assert_eq!(cursor.cstr(16), Ok(&b"hi"[..]));
         assert_eq!(cursor.position(), 9);
         assert_eq!(cursor.uleb128(), Ok(0x85));
-        assert_eq!(cursor.u32_le(), Err(ReadError::Truncated { at: 11, len: 4 }));
-        assert_eq!(cursor.position(), 11, "a failed read leaves the cursor where it was");
+        assert_eq!(
+            cursor.u32_le(),
+            Err(ReadError::Truncated { at: 11, len: 4 })
+        );
+        assert_eq!(
+            cursor.position(),
+            11,
+            "a failed read leaves the cursor where it was"
+        );
         assert_eq!(cursor.remaining(), 1);
         assert_eq!(cursor.align(4), Ok(()));
         assert_eq!(cursor.position(), 12);

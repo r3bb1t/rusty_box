@@ -11,8 +11,8 @@
 
 use super::debug::Stepped;
 use super::el2::{
-    hpfar_fipa, El2Regs, El2Storage, HCR_AMO, HCR_FMO, HCR_IMO, HCR_TEA, HCR_TGE, HCR_VF, HCR_VI,
-    HCR_VSE, MDCR_TDE, VSESR_MASK, VirtualLines,
+    El2Regs, El2Storage, HCR_AMO, HCR_FMO, HCR_IMO, HCR_TEA, HCR_TGE, HCR_VF, HCR_VI, HCR_VSE,
+    MDCR_TDE, VSESR_MASK, VirtualLines, hpfar_fipa,
 };
 use super::features::Feature;
 use super::mmu::{Fsc, Ipa};
@@ -20,7 +20,7 @@ use super::nv::ISS_VNCR;
 use super::op::Extend;
 use super::pmu::Cycle;
 use super::sysreg::{DBGPRCR_CORENPDRQ, MDSCR_KDE, MDSCR_SS, OSDLR_DLK, OSLSR_OSLK};
-use super::{sctlr, Activity, Btype, Cpu, El, Levels, Pstate, SysRegs};
+use super::{Activity, Btype, Cpu, El, Levels, Pstate, SysRegs, sctlr};
 use crate::instrumentation::{ExceptionKind, ExceptionTaken};
 
 /// `ESR_ELx.EC`, the exception classes this core can raise.
@@ -1040,7 +1040,10 @@ impl<L: Levels> Cpu<L> {
     /// a virtual SError, nor on a processor without EL2.
     #[inline(always)]
     fn virtual_input(&self, interrupt: VirtualInterrupt) -> bool {
-        let lines = self.el2_state.get().map_or(VirtualLines::NONE, |s| s.virtual_lines);
+        let lines = self
+            .el2_state
+            .get()
+            .map_or(VirtualLines::NONE, |s| s.virtual_lines);
         match interrupt {
             VirtualInterrupt::Irq => lines.irq,
             VirtualInterrupt::Fiq => lines.fiq,

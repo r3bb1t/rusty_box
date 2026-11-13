@@ -19,7 +19,7 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::el2::HCR_API;
 use super::exception::{AccessSyndrome, Exception, SyndromeClass};
-use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::exec::{ExecResult, Flow, bit, bits, sext};
 use super::features::Feature;
 use super::fgt::EretForm;
 use super::mmu::DataAccess;
@@ -156,20 +156,12 @@ impl PacKey {
     /// branches, `op2<1>` of the hints, `opcode<0>` of the one-source
     /// instructions).
     const fn instruction(b: bool) -> Self {
-        if b {
-            Self::Ib
-        } else {
-            Self::Ia
-        }
+        if b { Self::Ib } else { Self::Ia }
     }
 
     /// The data key, A or B as `b` says.
     const fn data_key(b: bool) -> Self {
-        if b {
-            Self::Db
-        } else {
-            Self::Da
-        }
+        if b { Self::Db } else { Self::Da }
     }
 
     /// Whether the key authenticates data addresses (`data` in the
@@ -367,11 +359,7 @@ const fn field(hi: u32, lo: u32) -> u64 {
 /// The bits a pointer's extension holds: all ones or all zeros by `bit`.
 #[inline]
 const fn replicate(bit: bool) -> u64 {
-    if bit {
-        u64::MAX
-    } else {
-        0
-    }
+    if bit { u64::MAX } else { 0 }
 }
 
 /// `ptr` with its extension, the bits from `bottom` to bit 55 under

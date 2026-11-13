@@ -2,11 +2,7 @@
 //! Floating-Point and Advanced SIMD"): the A64 space with `op1 = x111`.
 //! Its classes are in `asimd` (vector), `asisd` (scalar) and `float`.
 
-use super::asimd;
-use super::asisd;
-use super::crypto;
-use super::float;
-use super::Encoding;
+use super::{Encoding, asimd, asisd, crypto, float};
 use crate::cpu::exec::bits;
 
 /// Kept out of [`super::decode`], as each group is (`dpimm`).

@@ -31,10 +31,9 @@
 //! BASE register (a regular GPR), not the index, so it remains correct
 //! for VSIB without further changes.
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
 use rusty_box_decoder::BX_NIL_REGISTER;
+
+use super::decoder::{BxSegregs, Instruction};
 
 /// Number of 32-bit elements per vector length: VL=128→4, VL=256→8, VL=512→16
 #[inline]
@@ -170,9 +169,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let vl = instr.get_vl();
         let seg = BxSegregs::from(instr.seg());
-        let qword_index = matches!(form, VexGatherForm::QIndexDword | VexGatherForm::QIndexQword);
-        let qword_element =
-            matches!(form, VexGatherForm::DIndexQword | VexGatherForm::QIndexQword);
+        let qword_index = matches!(
+            form,
+            VexGatherForm::QIndexDword | VexGatherForm::QIndexQword
+        );
+        let qword_element = matches!(
+            form,
+            VexGatherForm::DIndexQword | VexGatherForm::QIndexQword
+        );
 
         // Element count and the padding bound Bochs walks to. VGATHERQPS is
         // the odd one out: qword indices but dword results, so it produces at
@@ -578,9 +582,10 @@ mod tests {
     //! Memory-touching execution is exercised by guest code under alpine
     //! when AVX-512 paths are taken (none in alpine kernel itself).
 
-    use crate::cpu::decoder::{BxSegregs, Instruction};
     use rusty_box_decoder::fetch_decode64;
     use rusty_box_decoder::opcode::Opcode;
+
+    use crate::cpu::decoder::{BxSegregs, Instruction};
 
     /// Build an EVEX.512 instruction with default sizes; tests fill in
     /// the VSIB pieces afterwards via public setters.
@@ -789,9 +794,7 @@ mod tests {
         ] {
             // P1 bit 7 carries EVEX.W: 0x7D for W0, 0xFD for W1.
             let p1 = if w == 1 { 0xFD } else { 0x7D };
-            let bytes = [
-                0x62, 0x72, p1, 0x49, op, 0x94, 0xAB, 0x40, 0x00, 0x00, 0x00,
-            ];
+            let bytes = [0x62, 0x72, p1, 0x49, op, 0x94, 0xAB, 0x40, 0x00, 0x00, 0x00];
             let i = fetch_decode64(&bytes).expect("scatter should decode");
             assert_eq!(i.get_ia_opcode(), expected, "opcode {op:#04x} W{w}");
             assert_eq!(i.sib_index(), 5);

@@ -25,7 +25,10 @@ pub struct TerminalBytes {
 }
 
 impl TerminalBytes {
-    const NONE: Self = Self { bytes: [0; 8], len: 0 };
+    const NONE: Self = Self {
+        bytes: [0; 8],
+        len: 0,
+    };
 
     fn push(&mut self, byte: u8) {
         if let Some(slot) = self.bytes.get_mut(self.len) {
@@ -97,10 +100,16 @@ enum Role {
     Modifier(Modifier),
     Lock(Lock),
     /// A printable key: its US-layout character without and with Shift.
-    Character { plain: u8, shifted: u8 },
+    Character {
+        plain: u8,
+        shifted: u8,
+    },
     /// A keypad key: `digit` under Num Lock, the editing key's `sequence`
     /// without it.
-    Keypad { digit: u8, sequence: Sequence },
+    Keypad {
+        digit: u8,
+        sequence: Sequence,
+    },
     /// Enter, Backspace and Esc: one control byte.
     Control(u8),
     /// Tab: `HT`, or xterm's back-tab `CSI Z` with Shift.
@@ -318,9 +327,18 @@ impl TerminalKeyboard {
                 };
                 *engaged ^= down;
             }
-            Role::Character { .. } | Role::Keypad { .. } | Role::Control(_) | Role::Tab | Role::Sequence(_) | Role::Silent => {}
+            Role::Character { .. }
+            | Role::Keypad { .. }
+            | Role::Control(_)
+            | Role::Tab
+            | Role::Sequence(_)
+            | Role::Silent => {}
         }
-        if down { self.press(role) } else { TerminalBytes::NONE }
+        if down {
+            self.press(role)
+        } else {
+            TerminalBytes::NONE
+        }
     }
 
     fn press(&self, role: Role) -> TerminalBytes {
@@ -421,11 +439,19 @@ mod tests {
         kb.apply(Key::CapsLock, KeyAction::Press);
         kb.apply(Key::CapsLock, KeyAction::Release);
         assert_eq!(press(&mut kb, Key::A).as_slice(), b"A");
-        assert_eq!(press(&mut kb, Key::K1).as_slice(), b"1", "Caps Lock leaves digits alone");
+        assert_eq!(
+            press(&mut kb, Key::K1).as_slice(),
+            b"1",
+            "Caps Lock leaves digits alone"
+        );
         kb.apply(Key::CapsLock, KeyAction::Press);
         kb.apply(Key::CtrlL, KeyAction::Press);
         assert_eq!(press(&mut kb, Key::C).as_slice(), &[0x03]);
-        assert_eq!(kb.apply(Key::C, KeyAction::Release).as_slice(), b"", "a release sends nothing");
+        assert_eq!(
+            kb.apply(Key::C, KeyAction::Release).as_slice(),
+            b"",
+            "a release sends nothing"
+        );
     }
 
     /// Cursor, editing and function keys send xterm's sequences, with the
@@ -470,12 +496,22 @@ mod tests {
     #[test]
     fn modifiers_and_locks_are_silent() {
         let mut kb = TerminalKeyboard::new();
-        for key in [Key::ShiftL, Key::CtrlR, Key::AltR, Key::CapsLock, Key::NumLock] {
+        for key in [
+            Key::ShiftL,
+            Key::CtrlR,
+            Key::AltR,
+            Key::CapsLock,
+            Key::NumLock,
+        ] {
             assert!(kb.apply(key, KeyAction::Press).is_empty());
             assert!(kb.apply(key, KeyAction::Release).is_empty());
         }
         kb.apply(Key::ShiftL, KeyAction::Press);
         kb.apply(Key::ShiftL, KeyAction::Release);
-        assert_eq!(press(&mut kb, Key::Q).as_slice(), b"Q", "Caps Lock was toggled on above");
+        assert_eq!(
+            press(&mut kb, Key::Q).as_slice(),
+            b"Q",
+            "Caps Lock was toggled on above"
+        );
     }
 }

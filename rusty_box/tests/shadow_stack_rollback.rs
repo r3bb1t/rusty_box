@@ -131,8 +131,11 @@ fn shadow_stack_machine() -> Box<Emulator> {
     let pdpt = read_u64(&mut emu, cr3 & ENTRY_ADDRESS) & ENTRY_ADDRESS;
     let page_directory = read_u64(&mut emu, pdpt) & ENTRY_ADDRESS;
     let pde = SHADOW_STACK_PAGE | PDE_PRESENT | PDE_DIRTY | PDE_LARGE;
-    emu.mem_write(page_directory + (SHADOW_STACK_PAGE >> 21) * 8, &pde.to_le_bytes())
-        .expect("pde");
+    emu.mem_write(
+        page_directory + (SHADOW_STACK_PAGE >> 21) * 8,
+        &pde.to_le_bytes(),
+    )
+    .expect("pde");
     // Drop every translation cached over the old mapping.
     emu.reg_write(X86Reg::Cr3, cr3);
     // A supervisor token holds its own address with the busy bit clear.

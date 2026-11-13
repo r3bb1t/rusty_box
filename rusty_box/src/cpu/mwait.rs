@@ -1,7 +1,5 @@
-use super::{
-    cpu::{BxCpuC, CpuActivityState},
-    Result,
-};
+use super::Result;
+use super::cpu::{BxCpuC, CpuActivityState};
 use crate::config::BxPhyAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {

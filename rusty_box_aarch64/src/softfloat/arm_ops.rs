@@ -31,11 +31,11 @@ use super::specialize::{
     f32_flush_input, f32_report_denormals, f64_flush_input, f64_report_denormals,
     softfloat_propagate_nan_f32, softfloat_propagate_nan_f64, tininess_before_rounding,
 };
-use super::uint64_convert::f64_to_ui64 as sf_f64_to_ui64;
 use super::uint_convert::f64_to_ui32 as sf_f64_to_ui32;
+use super::uint64_convert::f64_to_ui64 as sf_f64_to_ui64;
 use super::{
-    f32_neg, f32_report_denormals_unless_nan, f64_neg, f64_report_denormals_unless_nan,
-    with_rounding, ArmFpStatus, FpRounding,
+    ArmFpStatus, FpRounding, f32_neg, f32_report_denormals_unless_nan, f64_neg,
+    f64_report_denormals_unless_nan, with_rounding,
 };
 
 const F32_SIGN: u32 = 0x8000_0000;

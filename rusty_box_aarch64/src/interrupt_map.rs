@@ -18,8 +18,8 @@
 
 use core::fmt;
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use crate::devices::gicv2::{MsiFrame, SpiCount};
 use crate::layout::{DeviceLayout, TransportCount};
@@ -85,8 +85,8 @@ impl fmt::Display for Spi {
 pub struct MsiCount(u16);
 
 impl MsiCount {
-    pub const MIN: Self = Self(1);
     pub const MAX: Self = Self(0x3FF);
+    pub const MIN: Self = Self(1);
 
     /// `count` SPIs, if `MSI_TYPER` can report them.
     pub const fn new(count: u32) -> Option<Self> {
@@ -140,6 +140,9 @@ pub struct InterruptMap {
 }
 
 impl InterruptMap {
+    /// The board's own for its own layout ([`DeviceLayout::DEFAULT`]).
+    pub const DEFAULT: Self = Self::own(DeviceLayout::DEFAULT);
+
     /// The SPIs the devices drive on a board of `transports` virtio
     /// transports: the UART's, the RTC's and the GPIO's one each, a
     /// transport's each, and the PCIe host's INTA to INTD.
@@ -168,9 +171,6 @@ impl InterruptMap {
         }
     }
 
-    /// The board's own for its own layout ([`DeviceLayout::DEFAULT`]).
-    pub const DEFAULT: Self = Self::own(DeviceLayout::DEFAULT);
-
     /// Whether the map fits a GIC of `spis` on a board of `layout`: every
     /// source's SPIs the GIC's, the frame's at least one, and none shared
     /// ([`InterruptMapError`]).
@@ -196,7 +196,11 @@ impl InterruptMap {
             Block::of(InterruptSource::Uart, self.uart, 1),
             Block::of(InterruptSource::Rtc, self.rtc, 1),
             Block::of(InterruptSource::Gpio, self.gpio, 1),
-            Block::of(InterruptSource::Virtio, self.virtio, u32::from(transports.get())),
+            Block::of(
+                InterruptSource::Virtio,
+                self.virtio,
+                u32::from(transports.get()),
+            ),
             Block::of(InterruptSource::PcieIntx, self.pcie_intx, PCIE_INTX_LINES),
             Block::of(InterruptSource::MsiFrame, first, count.get()),
         ];
@@ -377,7 +381,14 @@ impl Wiring {
     /// devices' SPIs, then the frame's first and count, then how many
     /// transports there are.
     pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
-        for spi in [self.uart, self.rtc, self.gpio, self.virtio, self.pcie_intx, self.msi.first] {
+        for spi in [
+            self.uart,
+            self.rtc,
+            self.gpio,
+            self.virtio,
+            self.pcie_intx,
+            self.msi.first,
+        ] {
             w.write_u16(spi.0)?;
         }
         w.write_u16(self.msi.count.0)?;
@@ -513,7 +524,10 @@ mod tests {
             ..InterruptMap::DEFAULT
         };
         let spis = SpiCount::new(128).expect("a count");
-        assert_eq!(counted.wire(spis, BOARD).map(|w| w.msi()), Ok(frame(100, 28)));
+        assert_eq!(
+            counted.wire(spis, BOARD).map(|w| w.msi()),
+            Ok(frame(100, 28))
+        );
         let past = InterruptMap {
             msi: MsiSpis {
                 first: spi(100),
@@ -604,14 +618,19 @@ mod tests {
             uart: spi(31),
             ..InterruptMap::DEFAULT
         };
-        assert!(in_the_gap.wire(spis, BOARD).is_ok(), "blocks that touch share none");
+        assert!(
+            in_the_gap.wire(spis, BOARD).is_ok(),
+            "blocks that touch share none"
+        );
     }
 
     /// A wiring saved is restored as it was; a number no SPI, count or
     /// transport count has is refused.
     #[test]
     fn a_wiring_round_trips_and_refuses_what_is_no_spi() {
-        let wiring = InterruptMap::DEFAULT.wire(SpiCount::DEFAULT, BOARD).expect("fits");
+        let wiring = InterruptMap::DEFAULT
+            .wire(SpiCount::DEFAULT, BOARD)
+            .expect("fits");
         let counted = InterruptMap {
             msi: MsiSpis {
                 first: spi(32),
@@ -638,7 +657,10 @@ mod tests {
         for transports in [3, 33] {
             let mut odd = image.clone();
             odd[count_at + 2] = transports;
-            assert!(Wiring::restore(&mut odd.as_slice()).is_err(), "{transports}");
+            assert!(
+                Wiring::restore(&mut odd.as_slice()).is_err(),
+                "{transports}"
+            );
         }
     }
 

@@ -1,10 +1,3 @@
-use crate::cpu::{instrumentation::Instrumentation};
-#[cfg(feature = "alloc")]
-use crate::{
-    cpu::{cpu::CpuActivityState, BxCpuC},
-    Error, Result,
-};
-
 #[cfg(feature = "std")]
 use alloc::format;
 #[cfg(feature = "alloc")]
@@ -12,9 +5,15 @@ use alloc::{string::String, vec::Vec};
 #[cfg(feature = "alloc")]
 use core::sync::atomic::Ordering;
 
-use super::{Emulator, SliceEngine};
 #[cfg(feature = "std")]
 use super::status_ips_from_retired_instructions;
+use super::{Emulator, SliceEngine};
+use crate::cpu::instrumentation::Instrumentation;
+#[cfg(feature = "alloc")]
+use crate::{
+    Error, Result,
+    cpu::{BxCpuC, cpu::CpuActivityState},
+};
 
 impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
@@ -253,7 +252,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                             if hlt_if0_count == 1000 {
                                 tracing::trace!(
                                     "[ZERO-BATCH] HLT/MWAIT with IF=0 for 1000 consecutive batches at RIP={:#x} CS={:#06x} activity={:?} — continuing (egui-match)",
-                                    self.cpu_ref(0).rip(), self.cpu_ref(0).get_cs_selector(), self.cpu_ref(0).activity_state,
+                                    self.cpu_ref(0).rip(),
+                                    self.cpu_ref(0).get_cs_selector(),
+                                    self.cpu_ref(0).activity_state,
                                 );
                             }
                         } else {
@@ -292,7 +293,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                         break;
                     }
 
-
                     // -- Progress tracking --
                     let current_rip = self.cpu_ref(0).rip();
 
@@ -329,7 +329,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                             self.cpu_ref(0).get_cs_selector(),
                             current_rip,
                             self.cpu_ref(0).get_cpu_mode(),
-                            ipl_count, ipl0_type,
+                            ipl_count,
+                            ipl0_type,
                         );
                     }
 
@@ -368,7 +369,11 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                                     self.devices.last_io_read_value,
                                     self.cpu_ref(0).get_cs_selector(),
                                     self.cpu_ref(0).get_cpu_mode(),
-                                    bp, ax, bp2, bp4, bp6,
+                                    bp,
+                                    ax,
+                                    bp2,
+                                    bp4,
+                                    bp6,
                                 );
                             }
                         } else {
@@ -519,8 +524,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                                     break; // CPU is active — return to outer loop
                                 }
                                 // HLT loop: Bochs handleWaitForEvent advances BX_TICKN(10).
-                                let mwait_if2 =
-                                    matches!(self.cpu_ref(0).activity_state, CpuActivityState::MwaitIf);
+                                let mwait_if2 = matches!(
+                                    self.cpu_ref(0).activity_state,
+                                    CpuActivityState::MwaitIf
+                                );
                                 let mut hlt2 = 0u64;
                                 while hlt2 < 100_000_000 {
                                     // Keep host input responsive during MWAIT idle.
@@ -534,8 +541,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                                     if self.cpu_ref(0).lapic.intr
                                         && (self.cpu_ref(0).interrupts_enabled() || mwait_if2)
                                     {
-                                        self.cpu_mut()
-                                            .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
+                                        self.cpu_mut().signal_event(
+                                            BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR,
+                                        );
                                         break;
                                     }
                                     let step = self.hlt_wait_step_ticks();
@@ -562,7 +570,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                         self.advance_pc_system_after_cpu_ticks(executed)?;
                     }
 
-
                     // Log batch sizes and check if timer ticking works
                     #[cfg(debug_assertions)]
                     if instructions_executed < 5 * INSTRUCTION_BATCH_SIZE
@@ -577,9 +584,15 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                             .try_into()
                             .map(u32::from_le_bytes)
                             .unwrap_or(0);
-                        tracing::trace!("BATCH-DIAG: executed={}, total={}k, RIP={:#x}, PIT_count={}, activity={:?}, BDA_ticks={}",
-                            executed, instructions_executed / 1000, self.cpu_ref(0).rip(), pit_c0_count,
-                            self.cpu_ref(0).activity_state, bda_ticks);
+                        tracing::trace!(
+                            "BATCH-DIAG: executed={}, total={}k, RIP={:#x}, PIT_count={}, activity={:?}, BDA_ticks={}",
+                            executed,
+                            instructions_executed / 1000,
+                            self.cpu_ref(0).rip(),
+                            pit_c0_count,
+                            self.cpu_ref(0).activity_state,
+                            bda_ticks
+                        );
                     }
 
                     // Periodic interrupt-chain diagnostic (every ~1M instructions)
@@ -697,9 +710,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                         let mut vec_error = None;
                         crate::vec_diag::snapshot(|index, count| {
                             if vec_error.is_none() {
-                                if let Err(error) =
-                                    writeln!(sink, "V,{retired},{index},{count}")
-                                {
+                                if let Err(error) = writeln!(sink, "V,{retired},{index},{count}") {
                                     vec_error = Some(error);
                                 }
                             }
@@ -766,7 +777,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 }
             }
 
-
             // 6. Check if we should exit (e.g., shutdown requested)
             // TODO: Add shutdown flag check
         }
@@ -795,7 +805,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 // cpu_ticks = instruction count plus the fast-REP tick surplus
                 // (Bochs BX_TICK1-per-instruction + BX_TICKN time domain).
                 let bochs_ticks = self.cpu_ref(0).cpu_ticks();
-                tracing::debug!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
+                tracing::debug!(
+                    "[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}"
+                );
             }
         }
 

@@ -7,7 +7,6 @@
 //! be built in a separate session on top of this clean Rust surface.
 
 use bitflags::bitflags;
-
 /// The port an I/O hook reports, re-exported beside the events that carry it
 /// so a tracer needs no second import.
 pub use rusty_box_devices::api::IoPort;
@@ -1029,14 +1028,17 @@ impl ExitSet {
             len: 0,
         }
     }
+
     pub fn set(&mut self, exits: &[u64]) {
         let n = exits.len().min(64);
         self.addrs[..n].copy_from_slice(&exits[..n]);
         self.len = n as u8;
     }
+
     pub fn clear(&mut self) {
         self.len = 0;
     }
+
     pub fn add(&mut self, addr: u64) -> bool {
         if self.len as usize >= 64 {
             return false;
@@ -1048,6 +1050,7 @@ impl ExitSet {
         self.len += 1;
         true
     }
+
     pub fn remove(&mut self, addr: u64) -> bool {
         for i in 0..self.len as usize {
             if self.addrs[i] == addr {
@@ -1058,10 +1061,12 @@ impl ExitSet {
         }
         false
     }
+
     #[inline]
     pub fn contains(&self, addr: u64) -> bool {
         self.addrs[..self.len as usize].contains(&addr)
     }
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

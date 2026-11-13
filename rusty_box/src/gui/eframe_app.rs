@@ -5,15 +5,13 @@
 //! translated by `host_input` into guest key and mouse events, queued on the
 //! `SharedDisplay` for the emulator thread to drain.
 
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+
 use super::host_input::{HeldModifiers, PointerDevice};
+use super::shared_display::SharedDisplay;
 use super::touchpad::{TouchSample, TouchZone, Touchpad};
 use crate::iodev::scancodes::BxKey;
-use super::shared_display::SharedDisplay;
-
-use std::sync::{
-    atomic::Ordering,
-    {Arc, Mutex},
-};
 
 const SERIAL_PANEL_MIN_HEIGHT: f32 = 48.0;
 const SERIAL_PANEL_DEFAULT_HEIGHT: f32 = 88.0;
@@ -92,12 +90,30 @@ const POINTS_PER_WHEEL_DETENT: f32 = 40.0;
 
 /// egui's pointer buttons, in [`rusty_box_core::input::pointer::PointerButton`]'s
 /// terms.
-const TABLET_BUTTONS: [(egui::PointerButton, rusty_box_core::input::pointer::PointerButton); 5] = [
-    (egui::PointerButton::Primary, rusty_box_core::input::pointer::PointerButton::Left),
-    (egui::PointerButton::Secondary, rusty_box_core::input::pointer::PointerButton::Right),
-    (egui::PointerButton::Middle, rusty_box_core::input::pointer::PointerButton::Middle),
-    (egui::PointerButton::Extra1, rusty_box_core::input::pointer::PointerButton::Side),
-    (egui::PointerButton::Extra2, rusty_box_core::input::pointer::PointerButton::Extra),
+const TABLET_BUTTONS: [(
+    egui::PointerButton,
+    rusty_box_core::input::pointer::PointerButton,
+); 5] = [
+    (
+        egui::PointerButton::Primary,
+        rusty_box_core::input::pointer::PointerButton::Left,
+    ),
+    (
+        egui::PointerButton::Secondary,
+        rusty_box_core::input::pointer::PointerButton::Right,
+    ),
+    (
+        egui::PointerButton::Middle,
+        rusty_box_core::input::pointer::PointerButton::Middle,
+    ),
+    (
+        egui::PointerButton::Extra1,
+        rusty_box_core::input::pointer::PointerButton::Side,
+    ),
+    (
+        egui::PointerButton::Extra2,
+        rusty_box_core::input::pointer::PointerButton::Extra,
+    ),
 ];
 
 impl RustyBoxApp {
@@ -142,7 +158,10 @@ impl RustyBoxApp {
     /// display: the new run's tablet starts from its reset state, with no
     /// position and no button down.
     fn tablet_for_this_run(&mut self) {
-        let run = self.shared.lock().map_or(self.tablet.run, |display| display.runs_started);
+        let run = self
+            .shared
+            .lock()
+            .map_or(self.tablet.run, |display| display.runs_started);
         if run != self.tablet.run {
             self.tablet = TabletState {
                 run,
@@ -153,10 +172,16 @@ impl RustyBoxApp {
 
     /// The point of the guest's picture under `pos`, on the tablet's scale,
     /// for a picture drawn in `image_rect`.
-    fn tablet_position(&self, image_rect: egui::Rect, pos: egui::Pos2) -> rusty_box_core::input::pointer::PointerPos {
+    fn tablet_position(
+        &self,
+        image_rect: egui::Rect,
+        pos: egui::Pos2,
+    ) -> rusty_box_core::input::pointer::PointerPos {
         let (w, h) = (self.last_width.max(1), self.last_height.max(1));
-        let x = ((pos.x - image_rect.min.x) / image_rect.width().max(1.0) * w as f32).clamp(0.0, (w - 1) as f32);
-        let y = ((pos.y - image_rect.min.y) / image_rect.height().max(1.0) * h as f32).clamp(0.0, (h - 1) as f32);
+        let x = ((pos.x - image_rect.min.x) / image_rect.width().max(1.0) * w as f32)
+            .clamp(0.0, (w - 1) as f32);
+        let y = ((pos.y - image_rect.min.y) / image_rect.height().max(1.0) * h as f32)
+            .clamp(0.0, (h - 1) as f32);
         rusty_box_core::input::pointer::PointerPos::from_pixel(x as u32, y as u32, w, h)
     }
 
@@ -165,9 +190,10 @@ impl RustyBoxApp {
     /// never captured — it is the guest's while it is over the picture, and
     /// the guest draws its own cursor there, so the host's is hidden.
     fn handle_tablet_pointer(&mut self, ui: &egui::Ui, image_rect: egui::Rect) {
-        use super::host_input::AbsolutePointerEvent;
-        use rusty_box_core::input::pointer::WheelSteps;
         use rusty_box_core::input::KeyAction;
+        use rusty_box_core::input::pointer::WheelSteps;
+
+        use super::host_input::AbsolutePointerEvent;
 
         if !self.shared_emu_running() {
             return;
@@ -185,7 +211,8 @@ impl RustyBoxApp {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         }
         let (hover, buttons, wheel) = ui.ctx().input(|input| {
-            let buttons = TABLET_BUTTONS.map(|(egui_button, _)| input.pointer.button_down(egui_button));
+            let buttons =
+                TABLET_BUTTONS.map(|(egui_button, _)| input.pointer.button_down(egui_button));
             let wheel: f32 = input
                 .raw
                 .events
@@ -212,7 +239,11 @@ impl RustyBoxApp {
             // A press off the picture is not the guest's.
             if down != self.tablet.held[i] && (over || !down) {
                 self.tablet.held[i] = down;
-                let action = if down { KeyAction::Press } else { KeyAction::Release };
+                let action = if down {
+                    KeyAction::Press
+                } else {
+                    KeyAction::Release
+                };
                 events.push(AbsolutePointerEvent::Button(TABLET_BUTTONS[i].1, action));
             }
         }
@@ -241,9 +272,10 @@ impl RustyBoxApp {
     /// the picture moves the pointer there and presses the left button, a
     /// finger moving drags, and lifting it releases.
     fn handle_tablet_touch(&mut self, ui: &egui::Ui, image_rect: egui::Rect) {
-        use super::host_input::AbsolutePointerEvent;
-        use rusty_box_core::input::pointer::PointerButton;
         use rusty_box_core::input::KeyAction;
+        use rusty_box_core::input::pointer::PointerButton;
+
+        use super::host_input::AbsolutePointerEvent;
 
         if !self.shared_emu_running() {
             return;
@@ -264,7 +296,8 @@ impl RustyBoxApp {
         // One finger is the pointer, from its touch to its lift; any other
         // finger meanwhile does nothing.
         for (id, phase, pos) in touches {
-            let on_picture = image_rect.contains(pos) && ui.ctx().layer_id_at(pos) == Some(ui.layer_id());
+            let on_picture =
+                image_rect.contains(pos) && ui.ctx().layer_id_at(pos) == Some(ui.layer_id());
             let at = self.tablet_position(image_rect, pos);
             let holding = self.tablet.finger == Some(id);
             match phase {
@@ -273,7 +306,10 @@ impl RustyBoxApp {
                     self.tablet.position = Some(at);
                     self.tablet.held[0] = true;
                     events.push(AbsolutePointerEvent::MoveTo(at));
-                    events.push(AbsolutePointerEvent::Button(PointerButton::Left, KeyAction::Press));
+                    events.push(AbsolutePointerEvent::Button(
+                        PointerButton::Left,
+                        KeyAction::Press,
+                    ));
                 }
                 egui::TouchPhase::Move if holding && self.tablet.position != Some(at) => {
                     self.tablet.position = Some(at);
@@ -282,9 +318,15 @@ impl RustyBoxApp {
                 egui::TouchPhase::End | egui::TouchPhase::Cancel if holding => {
                     self.tablet.finger = None;
                     self.tablet.held[0] = false;
-                    events.push(AbsolutePointerEvent::Button(PointerButton::Left, KeyAction::Release));
+                    events.push(AbsolutePointerEvent::Button(
+                        PointerButton::Left,
+                        KeyAction::Release,
+                    ));
                 }
-                egui::TouchPhase::Start | egui::TouchPhase::Move | egui::TouchPhase::End | egui::TouchPhase::Cancel => {}
+                egui::TouchPhase::Start
+                | egui::TouchPhase::Move
+                | egui::TouchPhase::End
+                | egui::TouchPhase::Cancel => {}
             }
         }
         if !events.is_empty() {
@@ -335,7 +377,12 @@ impl RustyBoxApp {
     /// and while it holds it every key is sent to the guest's serial console
     /// as xterm sends it, Tab, the arrows and Esc included; a click
     /// elsewhere gives the keyboard back.
-    fn type_into_serial_terminal(&mut self, ui: &egui::Ui, screen: &egui::Response, area: egui::Rect) {
+    fn type_into_serial_terminal(
+        &mut self,
+        ui: &egui::Ui,
+        screen: &egui::Response,
+        area: egui::Rect,
+    ) {
         // The text is only as large as what the guest has written; a click
         // anywhere in the terminal's area, below or beside it, counts too.
         let backdrop = ui.interact(area, screen.id.with("area"), egui::Sense::click());
@@ -362,14 +409,22 @@ impl RustyBoxApp {
         // window; egui's label selection does the copying.
         let selected = ui
             .ctx()
-            .with_plugin(|selection: &mut egui::text_selection::LabelSelectionState| selection.has_selection())
+            .with_plugin(
+                |selection: &mut egui::text_selection::LabelSelectionState| {
+                    selection.has_selection()
+                },
+            )
             .unwrap_or(false);
         let typed: Vec<u8> = ui.input(|input| {
             input
                 .events
                 .iter()
-                .filter(|event| !(selected && matches!(event, egui::Event::Copy | egui::Event::Cut)))
-                .filter_map(|event| super::serial_terminal::terminal_input(event, application_cursor))
+                .filter(|event| {
+                    !(selected && matches!(event, egui::Event::Copy | egui::Event::Cut))
+                })
+                .filter_map(|event| {
+                    super::serial_terminal::terminal_input(event, application_cursor)
+                })
                 .flatten()
                 .collect()
         });
@@ -560,7 +615,8 @@ impl RustyBoxApp {
             if display.fb_dirty {
                 display.startup_status = None;
             }
-            self.cached_startup_status.clone_from(&display.startup_status);
+            self.cached_startup_status
+                .clone_from(&display.startup_status);
 
             // Feed the serial terminal what the log gained.
             self.serial_terminal
@@ -615,9 +671,10 @@ impl RustyBoxApp {
                 ..Default::default()
             },
             (DisplayScale::Crisp, PixelAspect::Crt4x3)
-            | (DisplayScale::Fit | DisplayScale::Stretch, PixelAspect::Square | PixelAspect::Crt4x3) => {
-                egui::TextureOptions::LINEAR
-            }
+            | (
+                DisplayScale::Fit | DisplayScale::Stretch,
+                PixelAspect::Square | PixelAspect::Crt4x3,
+            ) => egui::TextureOptions::LINEAR,
         };
 
         match &mut self.texture {
@@ -818,7 +875,8 @@ impl RustyBoxApp {
                                 );
                                 let enter_pressed = response.lost_focus()
                                     && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                                let send_enabled = self.cached_emu_running && !self.serial_input.is_empty();
+                                let send_enabled =
+                                    self.cached_emu_running && !self.serial_input.is_empty();
                                 if ui
                                     .add_enabled(send_enabled, egui::Button::new("Send"))
                                     .clicked()
@@ -832,13 +890,23 @@ impl RustyBoxApp {
                         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                             ui.horizontal(|ui| {
                                 let muted = egui::Color32::from_rgb(0x66, 0x66, 0x88);
-                                ui.label(egui::RichText::new("Serial Console").monospace().size(10.0).color(muted));
+                                ui.label(
+                                    egui::RichText::new("Serial Console")
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(muted),
+                                );
                                 let hint = if self.serial_focused {
                                     "typing to the guest; click outside to stop"
                                 } else {
                                     "click to type, drag to select"
                                 };
-                                ui.label(egui::RichText::new(hint).monospace().size(10.0).color(muted));
+                                ui.label(
+                                    egui::RichText::new(hint)
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(muted),
+                                );
                                 if ui.small_button("Copy Log").clicked() {
                                     ui.ctx().copy_text(self.serial_terminal.text());
                                 }
@@ -887,8 +955,11 @@ impl RustyBoxApp {
                                         // would grow down the scrollback.
                                         let lines = screen_lines.first + screen_lines.count;
                                         let line_height = shown.rect.height() / lines.max(1) as f32;
-                                        let cell_width = ui.fonts_mut(|fonts| fonts.glyph_width(&font, 'M'));
-                                        let line_top = |line: usize| shown.rect.top() + line as f32 * line_height;
+                                        let cell_width =
+                                            ui.fonts_mut(|fonts| fonts.glyph_width(&font, 'M'));
+                                        let line_top = |line: usize| {
+                                            shown.rect.top() + line as f32 * line_height
+                                        };
                                         let cursor = egui::Rect::from_min_size(
                                             egui::pos2(
                                                 shown.rect.left() + cell.col as f32 * cell_width,
@@ -911,7 +982,11 @@ impl RustyBoxApp {
                                     }
                                     shown
                                 });
-                            self.type_into_serial_terminal(ui, &scrolled.inner, scrolled.inner_rect);
+                            self.type_into_serial_terminal(
+                                ui,
+                                &scrolled.inner,
+                                scrolled.inner_rect,
+                            );
                         });
                     });
                 });
@@ -996,10 +1071,18 @@ impl RustyBoxApp {
                 }
                 if let Some(rect) = image_rect {
                     match (self.pointer_device(), self.pointer_mode) {
-                        (PointerDevice::RelativeMouse, PointerMode::Mouse) => self.handle_display_pointer(ui, rect),
-                        (PointerDevice::RelativeMouse, PointerMode::Touchpad) => self.handle_touchpad(ui, rect, region),
-                        (PointerDevice::AbsoluteTablet, PointerMode::Mouse) => self.handle_tablet_pointer(ui, rect),
-                        (PointerDevice::AbsoluteTablet, PointerMode::Touchpad) => self.handle_tablet_touch(ui, rect),
+                        (PointerDevice::RelativeMouse, PointerMode::Mouse) => {
+                            self.handle_display_pointer(ui, rect)
+                        }
+                        (PointerDevice::RelativeMouse, PointerMode::Touchpad) => {
+                            self.handle_touchpad(ui, rect, region)
+                        }
+                        (PointerDevice::AbsoluteTablet, PointerMode::Mouse) => {
+                            self.handle_tablet_pointer(ui, rect)
+                        }
+                        (PointerDevice::AbsoluteTablet, PointerMode::Touchpad) => {
+                            self.handle_tablet_touch(ui, rect)
+                        }
                         (PointerDevice::Absent, PointerMode::Mouse | PointerMode::Touchpad) => {}
                     }
                 }
@@ -1225,7 +1308,10 @@ mod tests {
     #[test]
     fn crisp_shrinks_a_guest_larger_than_the_region() {
         let (w, h) = size((1000.0, 428.0), [2000, 1000], 1.0, DisplayScale::Crisp);
-        assert!((w - 856.0).abs() < 0.01 && (h - 428.0).abs() < 0.01, "{w}x{h}");
+        assert!(
+            (w - 856.0).abs() < 0.01 && (h - 428.0).abs() < 0.01,
+            "{w}x{h}"
+        );
     }
 
     #[test]
@@ -1238,6 +1324,10 @@ mod tests {
             PixelAspect::Crt4x3,
         );
         assert_eq!(drawn.y, 428.0);
-        assert!((drawn.x - 428.0 * 4.0 / 3.0).abs() < 0.01, "width {}", drawn.x);
+        assert!(
+            (drawn.x - 428.0 * 4.0 / 3.0).abs() < 0.01,
+            "width {}",
+            drawn.x
+        );
     }
 }

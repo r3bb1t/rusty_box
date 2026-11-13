@@ -19,8 +19,8 @@
 //! in `softfloat/mod.rs` try the host first.
 
 use super::super::softfloat::SoftFloatStatus;
-use super::super::{f32_addsub, f32_div, f32_mul, f64_addsub, f64_div, f64_mul, ArmFpStatus};
-use super::{f32_arith, f64_arith, Arith};
+use super::super::{ArmFpStatus, f32_addsub, f32_div, f32_mul, f64_addsub, f64_div, f64_mul};
+use super::{Arith, f32_arith, f64_arith};
 
 struct SplitMix64(u64);
 
@@ -273,9 +273,9 @@ fn the_host_computes_what_softfloat_computes_wherever_it_answers() {
 /// only where its `mul_add` rounds once (`HOST_FUSES_ONCE`).
 #[cfg(feature = "std")]
 mod fused {
-    use super::super::super::{f32_mul_add, f64_mul_add, ArmFpStatus, FusedMulAdd};
-    use super::super::{f32_fused, f64_fused, HOST_FUSES_ONCE};
-    use super::{fpcr, Reach, SplitMix64, AFP_DRAW, FPSR_IXC};
+    use super::super::super::{ArmFpStatus, FusedMulAdd, f32_mul_add, f64_mul_add};
+    use super::super::{HOST_FUSES_ONCE, f32_fused, f64_fused};
+    use super::{AFP_DRAW, FPSR_IXC, Reach, SplitMix64, fpcr};
 
     /// A binary64 multiply-add `[addend, n, m]`.
     ///

@@ -10,7 +10,7 @@
 use no_panic::no_panic;
 
 use super::hash_table::{HashTable, TableLimits};
-use super::{short, PdbError};
+use super::{PdbError, short};
 use crate::read::{Bytes, Cursor};
 
 /// The version of the header and of each entry (LLVM `SrcVerOne`).
@@ -53,19 +53,33 @@ pub fn decode_entry(entry: Bytes<'_>) -> Option<SourceEntry> {
 pub fn entries(stream: &[u8]) -> Result<Vec<SourceEntry>, PdbError> {
     let what = "source header block";
     let bytes = Bytes::new(stream);
-    bytes.slice(0, HEADER_BYTES).map_err(|source| short(what, source))?;
+    bytes
+        .slice(0, HEADER_BYTES)
+        .map_err(|source| short(what, source))?;
     let version = bytes.u32_le(0).map_err(|source| short(what, source))?;
     if version != SOURCE_BLOCK_VERSION {
         return Err(PdbError::BadRecord { what, at: 0 });
     }
-    let mut table =
-        HashTable::open(Cursor::new(bytes, HEADER_BYTES), TableLimits { what, max_capacity: MAX_EMBEDDED_FILES })?;
+    let mut table = HashTable::open(
+        Cursor::new(bytes, HEADER_BYTES),
+        TableLimits {
+            what,
+            max_capacity: MAX_EMBEDDED_FILES,
+        },
+    )?;
     let mut found = Vec::new();
     while let Some(entry) = table.next_entry(ENTRY_BYTES)? {
         let at = found.len().saturating_mul(ENTRY_BYTES);
-        let decoded = decode_entry(entry.value).ok_or(PdbError::BadRecord { what: "embedded file entry", at })?;
-        crate::tables::push(&mut found, decoded, "embedded files")
-            .map_err(|_| PdbError::Allocation { what: "embedded files", bytes: ENTRY_BYTES as u64 })?;
+        let decoded = decode_entry(entry.value).ok_or(PdbError::BadRecord {
+            what: "embedded file entry",
+            at,
+        })?;
+        crate::tables::push(&mut found, decoded, "embedded files").map_err(|_| {
+            PdbError::Allocation {
+                what: "embedded files",
+                bytes: ENTRY_BYTES as u64,
+            }
+        })?;
     }
     Ok(found)
 }
@@ -90,7 +104,11 @@ mod tests {
     fn an_entry_reads_its_names_and_compression() {
         assert_eq!(
             decode_entry(Bytes::new(&entry())),
-            Some(SourceEntry { file: 0x10, virtual_file: 0x20, compression: 1 })
+            Some(SourceEntry {
+                file: 0x10,
+                virtual_file: 0x20,
+                compression: 1
+            })
         );
     }
 
@@ -98,13 +116,25 @@ mod tests {
     fn an_entry_cut_short_or_of_another_shape_does_not_read() {
         let whole = entry();
         for len in [0, 4, 28, 29, 39] {
-            assert_eq!(decode_entry(Bytes::new(&whole[..len])), None, "cut to {len}");
+            assert_eq!(
+                decode_entry(Bytes::new(&whole[..len])),
+                None,
+                "cut to {len}"
+            );
         }
         let mut sized = entry();
         sized[0] = 44;
-        assert_eq!(decode_entry(Bytes::new(&sized)), None, "an entry size other than 40");
+        assert_eq!(
+            decode_entry(Bytes::new(&sized)),
+            None,
+            "an entry size other than 40"
+        );
         let mut versioned = entry();
         versioned[4] = 0;
-        assert_eq!(decode_entry(Bytes::new(&versioned)), None, "another version");
+        assert_eq!(
+            decode_entry(Bytes::new(&versioned)),
+            None,
+            "another version"
+        );
     }
 }

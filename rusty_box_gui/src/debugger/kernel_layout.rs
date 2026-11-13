@@ -11,7 +11,9 @@ use rusty_box_symbols::tables::{MemberLocation, SymbolTables};
 use rusty_box_symbols::units::{FieldOffset, Rva};
 
 use super::drivers::ObjectHeaderEra;
-use super::vad::{self, FieldWidth, VadFlagBits, VadFlags, VadLayout, VadNodeLayout, VadRootKind, VadShape};
+use super::vad::{
+    self, FieldWidth, VadFlagBits, VadFlags, VadLayout, VadNodeLayout, VadRootKind, VadShape,
+};
 
 /// The kernel variables the walker starts from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -121,7 +123,11 @@ impl Lookups<'_> {
 impl KernelLayout {
     /// The layouts `tables`, the PDB of `kernel` or (`Forced`) of another
     /// build, give.
-    pub(crate) fn from_tables(kernel: ModuleIdentity, tables: &SymbolTables, source: LayoutSource) -> KernelLayout {
+    pub(crate) fn from_tables(
+        kernel: ModuleIdentity,
+        tables: &SymbolTables,
+        source: LayoutSource,
+    ) -> KernelLayout {
         let mut lookups = Lookups {
             tables,
             failures: Vec::new(),
@@ -161,7 +167,10 @@ impl KernelLayout {
         let vad = vad_layout(&mut lookups);
         let object_era = if lookups.member("_OBJECT_HEADER", &["InfoMask"]).is_some() {
             Some(ObjectHeaderEra::Modern)
-        } else if lookups.member("_OBJECT_HEADER", &["NameInfoOffset"]).is_some() {
+        } else if lookups
+            .member("_OBJECT_HEADER", &["NameInfoOffset"])
+            .is_some()
+        {
             Some(ObjectHeaderEra::Legacy)
         } else {
             None
@@ -198,8 +207,22 @@ fn vad_layout(lookups: &mut Lookups<'_>) -> Option<VadLayout> {
         VadRootKind::AvlTable => VadShape::AvlX64,
         VadRootKind::AvlTree => VadShape::BalancedNode,
     };
-    let left = lookups.first(NODE, &[&["VadNode", "Left"], &["VadNode", "LeftChild"], &["LeftChild"]])?;
-    let right = lookups.first(NODE, &[&["VadNode", "Right"], &["VadNode", "RightChild"], &["RightChild"]])?;
+    let left = lookups.first(
+        NODE,
+        &[
+            &["VadNode", "Left"],
+            &["VadNode", "LeftChild"],
+            &["LeftChild"],
+        ],
+    )?;
+    let right = lookups.first(
+        NODE,
+        &[
+            &["VadNode", "Right"],
+            &["VadNode", "RightChild"],
+            &["RightChild"],
+        ],
+    )?;
     let start_vpn = lookups.member(NODE, &["StartingVpn"])?;
     let end_vpn = lookups.member(NODE, &["EndingVpn"])?;
     let flags = lookups.first(NODE, &[&["u", "VadFlags"], &["u", "LongFlags"]])?;
@@ -230,7 +253,11 @@ fn vad_layout(lookups: &mut Lookups<'_>) -> Option<VadLayout> {
         protection: bit("Protection", family_bits.protection),
         private_memory: bit("PrivateMemory", family_bits.private_memory),
     };
-    Some(VadLayout { root, node, flags: VadFlags::Known(flags) })
+    Some(VadLayout {
+        root,
+        node,
+        flags: VadFlags::Known(flags),
+    })
 }
 
 /// A Windows 10 22H2 kernel's PDB as the fixture builder writes it: the
@@ -283,7 +310,7 @@ pub(crate) mod fixture {
     /// The kernel's PDB, its globals in `.data` (RVA 0x3000) where the fake
     /// kernel keeps them.
     pub(crate) fn windows10_kernel(guid: [u8; 16], age: u32) -> PdbFixture {
-        use FixtureType::{Pointer, U32, U64, U8};
+        use FixtureType::{Pointer, U8, U32, U64};
         use UdtKind::{Struct, Union};
         let mut pdb = PdbFixture::new(guid, age);
         pdb.publics = vec![
@@ -295,67 +322,130 @@ pub(crate) mod fixture {
             data("KeServiceDescriptorTableShadow", 0x80),
         ];
         pdb.types = vec![
-            udt("_LIST_ENTRY", Struct, 0x10, vec![
-                field("Flink", 0, Pointer),
-                field("Blink", 8, Pointer),
-            ]),
-            udt("_CLIENT_ID", Struct, 0x10, vec![
-                field("UniqueProcess", 0, Pointer),
-                field("UniqueThread", 8, Pointer),
-            ]),
-            udt("_KPROCESS", Struct, 0x438, vec![field("DirectoryTableBase", 0x28, U64)]),
+            udt(
+                "_LIST_ENTRY",
+                Struct,
+                0x10,
+                vec![field("Flink", 0, Pointer), field("Blink", 8, Pointer)],
+            ),
+            udt(
+                "_CLIENT_ID",
+                Struct,
+                0x10,
+                vec![
+                    field("UniqueProcess", 0, Pointer),
+                    field("UniqueThread", 8, Pointer),
+                ],
+            ),
+            udt(
+                "_KPROCESS",
+                Struct,
+                0x438,
+                vec![field("DirectoryTableBase", 0x28, U64)],
+            ),
             udt("_RTL_AVL_TREE", Struct, 8, vec![field("Root", 0, Pointer)]),
-            udt("_EPROCESS", Struct, 0xA40, vec![
-                field("Pcb", 0, named("_KPROCESS")),
-                field("UniqueProcessId", 0x440, Pointer),
-                field("ActiveProcessLinks", 0x448, named("_LIST_ENTRY")),
-                field("InheritedFromUniqueProcessId", 0x540, Pointer),
-                field("Peb", 0x550, Pointer),
-                field("WoW64Process", 0x580, Pointer),
-                field("ImageFileName", 0x5A8, FixtureType::Array { element: Box::new(U8), count: 15 }),
-                field("ThreadListHead", 0x5E0, named("_LIST_ENTRY")),
-                field("VadRoot", 0x7D8, named("_RTL_AVL_TREE")),
-            ]),
-            udt("_KTHREAD", Struct, 0x430, vec![
-                field("TrapFrame", 0x90, Pointer),
-                field("Teb", 0xF0, Pointer),
-            ]),
-            udt("_ETHREAD", Struct, 0x500, vec![
-                field("Tcb", 0, named("_KTHREAD")),
-                field("StartAddress", 0x450, Pointer),
-                field("Cid", 0x478, named("_CLIENT_ID")),
-                field("Win32StartAddress", 0x4D0, Pointer),
-                field("ThreadListEntry", 0x4E8, named("_LIST_ENTRY")),
-            ]),
-            udt("_RTL_BALANCED_NODE", Struct, 0x18, vec![
-                field("Left", 0, Pointer),
-                field("Right", 8, Pointer),
-                field("ParentValue", 0x10, U64),
-            ]),
-            udt("_MMVAD_FLAGS", Struct, 4, vec![
-                field("Lock", 0, bits(0, 1)),
-                field("VadType", 0, bits(4, 3)),
-                field("Protection", 0, bits(7, 5)),
-                field("PrivateMemory", 0, bits(20, 1)),
-            ]),
-            udt("_MMVAD_SHORT", Struct, 0x40, vec![
-                field("VadNode", 0, named("_RTL_BALANCED_NODE")),
-                field("StartingVpn", 0x18, U32),
-                field("EndingVpn", 0x1C, U32),
-                field("StartingVpnHigh", 0x20, U8),
-                field("EndingVpnHigh", 0x21, U8),
-                field("u", 0x30, FixtureType::Nested(Box::new(udt("", Union, 4, vec![
-                    field("LongFlags", 0, U32),
-                    field("VadFlags", 0, named("_MMVAD_FLAGS")),
-                ])))),
-            ]),
-            udt("_OBJECT_HEADER", Struct, 0x38, vec![
-                field("PointerCount", 0, U64),
-                field("HandleCount", 8, U64),
-                field("TypeIndex", 0x18, U8),
-                field("InfoMask", 0x1A, U8),
-                field("Body", 0x30, U64),
-            ]),
+            udt(
+                "_EPROCESS",
+                Struct,
+                0xA40,
+                vec![
+                    field("Pcb", 0, named("_KPROCESS")),
+                    field("UniqueProcessId", 0x440, Pointer),
+                    field("ActiveProcessLinks", 0x448, named("_LIST_ENTRY")),
+                    field("InheritedFromUniqueProcessId", 0x540, Pointer),
+                    field("Peb", 0x550, Pointer),
+                    field("WoW64Process", 0x580, Pointer),
+                    field(
+                        "ImageFileName",
+                        0x5A8,
+                        FixtureType::Array {
+                            element: Box::new(U8),
+                            count: 15,
+                        },
+                    ),
+                    field("ThreadListHead", 0x5E0, named("_LIST_ENTRY")),
+                    field("VadRoot", 0x7D8, named("_RTL_AVL_TREE")),
+                ],
+            ),
+            udt(
+                "_KTHREAD",
+                Struct,
+                0x430,
+                vec![
+                    field("TrapFrame", 0x90, Pointer),
+                    field("Teb", 0xF0, Pointer),
+                ],
+            ),
+            udt(
+                "_ETHREAD",
+                Struct,
+                0x500,
+                vec![
+                    field("Tcb", 0, named("_KTHREAD")),
+                    field("StartAddress", 0x450, Pointer),
+                    field("Cid", 0x478, named("_CLIENT_ID")),
+                    field("Win32StartAddress", 0x4D0, Pointer),
+                    field("ThreadListEntry", 0x4E8, named("_LIST_ENTRY")),
+                ],
+            ),
+            udt(
+                "_RTL_BALANCED_NODE",
+                Struct,
+                0x18,
+                vec![
+                    field("Left", 0, Pointer),
+                    field("Right", 8, Pointer),
+                    field("ParentValue", 0x10, U64),
+                ],
+            ),
+            udt(
+                "_MMVAD_FLAGS",
+                Struct,
+                4,
+                vec![
+                    field("Lock", 0, bits(0, 1)),
+                    field("VadType", 0, bits(4, 3)),
+                    field("Protection", 0, bits(7, 5)),
+                    field("PrivateMemory", 0, bits(20, 1)),
+                ],
+            ),
+            udt(
+                "_MMVAD_SHORT",
+                Struct,
+                0x40,
+                vec![
+                    field("VadNode", 0, named("_RTL_BALANCED_NODE")),
+                    field("StartingVpn", 0x18, U32),
+                    field("EndingVpn", 0x1C, U32),
+                    field("StartingVpnHigh", 0x20, U8),
+                    field("EndingVpnHigh", 0x21, U8),
+                    field(
+                        "u",
+                        0x30,
+                        FixtureType::Nested(Box::new(udt(
+                            "",
+                            Union,
+                            4,
+                            vec![
+                                field("LongFlags", 0, U32),
+                                field("VadFlags", 0, named("_MMVAD_FLAGS")),
+                            ],
+                        ))),
+                    ),
+                ],
+            ),
+            udt(
+                "_OBJECT_HEADER",
+                Struct,
+                0x38,
+                vec![
+                    field("PointerCount", 0, U64),
+                    field("HandleCount", 8, U64),
+                    field("TypeIndex", 0x18, U8),
+                    field("InfoMask", 0x1A, U8),
+                    field("Body", 0x30, U64),
+                ],
+            ),
         ];
         pdb
     }
@@ -363,10 +453,11 @@ pub(crate) mod fixture {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box_symbols::identity::{Guid, PdbId, PeImageId};
     use rusty_box_symbols::units::BitRange;
-    use rusty_box_symbols_fixtures::pdb::{build_pdb, FixtureType, PdbFixture};
+    use rusty_box_symbols_fixtures::pdb::{FixtureType, PdbFixture, build_pdb};
+
+    use super::*;
 
     const GUID: [u8; 16] = [0x42; 16];
 
@@ -395,7 +486,10 @@ mod tests {
         let layout = layout_of(&fixture::windows10_kernel(GUID, 1));
         assert_eq!(layout.globals.initial_system_process, Some(Rva(0x3010)));
         assert_eq!(layout.globals.service_descriptor_table, Some(Rva(0x3040)));
-        assert_eq!(layout.globals.service_descriptor_table_shadow, Some(Rva(0x3080)));
+        assert_eq!(
+            layout.globals.service_descriptor_table_shadow,
+            Some(Rva(0x3080))
+        );
         let offset = |value| Some(FieldOffset(value));
         assert_eq!(
             layout.process,
@@ -423,7 +517,10 @@ mod tests {
             }
         );
         // The fixture is a Windows 10 22H2 kernel: build 19045.
-        assert_eq!(layout.vad, Some(vad::shape_layout(VadShape::BalancedNode, Some(19045))));
+        assert_eq!(
+            layout.vad,
+            Some(vad::shape_layout(VadShape::BalancedNode, Some(19045)))
+        );
         assert_eq!(layout.object_era, Some(ObjectHeaderEra::Modern));
         assert!(layout.failures.is_empty(), "{:?}", layout.failures);
     }
@@ -439,7 +536,11 @@ mod tests {
             .find(|udt| udt.name == "_MMVAD_FLAGS")
             .expect("the flags type");
         flags.fields.retain(|field| field.name != "VadType");
-        if let Some(private) = flags.fields.iter_mut().find(|field| field.name == "PrivateMemory") {
+        if let Some(private) = flags
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "PrivateMemory")
+        {
             private.ty = FixtureType::Bitfield {
                 storage: Box::new(FixtureType::U32),
                 position: 21,
@@ -449,8 +550,17 @@ mod tests {
         let VadFlags::Known(bits) = layout_of(&pdb).vad.expect("the tree's layout").flags else {
             panic!("a PDB's flag bits are known");
         };
-        assert_eq!(bits.private_memory, BitRange { position: 21, length: 1 });
-        assert_eq!(bits.vad_type, vad::flag_bits(VadShape::BalancedNode).vad_type);
+        assert_eq!(
+            bits.private_memory,
+            BitRange {
+                position: 21,
+                length: 1
+            }
+        );
+        assert_eq!(
+            bits.vad_type,
+            vad::flag_bits(VadShape::BalancedNode).vad_type
+        );
     }
 
     /// An older build without a member leaves just that member to discovery.
@@ -465,7 +575,11 @@ mod tests {
         assert_eq!(layout.process.wow64_process, None);
         assert_eq!(layout.process.peb, Some(FieldOffset(0x550)));
         assert_eq!(layout.vad, None);
-        assert!(layout.failures.is_empty(), "a miss is not a failure: {:?}", layout.failures);
+        assert!(
+            layout.failures.is_empty(),
+            "a miss is not a failure: {:?}",
+            layout.failures
+        );
     }
 
     /// Review focus 2: type records this reader cannot read make every miss
@@ -479,7 +593,10 @@ mod tests {
         assert_eq!(layout.thread, ThreadFields::default());
         assert_eq!(layout.process.unique_process_id, Some(FieldOffset(0x440)));
         assert!(
-            layout.failures.iter().any(|failure| failure.starts_with("_ETHREAD.Cid:")),
+            layout
+                .failures
+                .iter()
+                .any(|failure| failure.starts_with("_ETHREAD.Cid:")),
             "{:?}",
             layout.failures
         );

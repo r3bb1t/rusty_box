@@ -3,8 +3,8 @@
 //! PNEXT, PTRUE, PFALSE, PSEL, WHILE, CTERM, CNTP and the inc/dec by
 //! predicate count. Each handler names the Arm pages it is.
 
-use super::{decode_pred_count, int, pred_test, sat_add_scalar, sat_q, Esize, Pv, Zv};
-use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
+use super::{Esize, Pv, Zv, decode_pred_count, int, pred_test, sat_add_scalar, sat_q};
+use crate::cpu::exec::{ExecResult, Flow, bit, bits, sext};
 use crate::cpu::features::VecLen;
 use crate::cpu::{Cpu, Levels};
 

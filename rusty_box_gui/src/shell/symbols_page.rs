@@ -26,8 +26,10 @@
 use egui::RichText;
 
 use crate::shell::debugger_page::human_size;
-use crate::shell::listing::{segmented, Segment};
-use crate::shell::theme::{ACCENT_AMBER, ACCENT_RED, SPACE_GROUP, SPACE_ITEM, SPACE_PAGE, TEXT_MUTED, TEXT_PRIMARY};
+use crate::shell::listing::{Segment, segmented};
+use crate::shell::theme::{
+    ACCENT_AMBER, ACCENT_RED, SPACE_GROUP, SPACE_ITEM, SPACE_PAGE, TEXT_MUTED, TEXT_PRIMARY,
+};
 use crate::symbol_settings::{DownloadToml, Origin, ProjectDraft, SettingsDraft, SettingsState};
 use crate::symbols::hub::StoreMeasure;
 
@@ -92,12 +94,25 @@ fn section(ui: &mut egui::Ui, title: &str) {
 }
 
 fn lines_field(ui: &mut egui::Ui, text: &mut String, hint: &str) {
-    ui.add(egui::TextEdit::multiline(text).hint_text(hint).desired_rows(2).desired_width(f32::INFINITY));
+    ui.add(
+        egui::TextEdit::multiline(text)
+            .hint_text(hint)
+            .desired_rows(2)
+            .desired_width(f32::INFINITY),
+    );
 }
 
 /// Draws the page and reports what was clicked.
-pub(crate) fn draw_symbols_page(ui: &mut egui::Ui, state: SymbolsPageState<'_>) -> Option<SymbolsPageAction> {
-    let SymbolsPageState { draft, settings, usage, save_problem } = state;
+pub(crate) fn draw_symbols_page(
+    ui: &mut egui::Ui,
+    state: SymbolsPageState<'_>,
+) -> Option<SymbolsPageAction> {
+    let SymbolsPageState {
+        draft,
+        settings,
+        usage,
+        save_problem,
+    } = state;
     let resolved = &settings.resolved;
     let mut action = None;
     egui::ScrollArea::vertical().show(ui, |ui| {

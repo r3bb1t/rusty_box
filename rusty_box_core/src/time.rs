@@ -227,9 +227,9 @@ pub struct VmDuration {
 }
 
 impl VmDuration {
-    pub const ZERO: Self = Self { ticks: 0 };
     /// The shortest span a timer can be armed for — Bochs's "not before now".
     pub const ONE_TICK: Self = Self { ticks: 1 };
+    pub const ZERO: Self = Self { ticks: 0 };
 
     #[inline]
     pub const fn from_ticks(ticks: u64) -> Self {
@@ -442,7 +442,17 @@ mod tests {
     /// does not divide a second evenly is where a conversion routed through
     /// nanoseconds loses a tick, which is the reason this crate converts from
     /// ticks directly.
-    const RATES: &[u64] = &[1, 2, 3, 7, 1_000, 1_000_000, 50_000_000, 300_000_000, u64::MAX];
+    const RATES: &[u64] = &[
+        1,
+        2,
+        3,
+        7,
+        1_000,
+        1_000_000,
+        50_000_000,
+        300_000_000,
+        u64::MAX,
+    ];
 
     fn hz(rate: u64) -> ClockHz {
         ClockHz::new(rate).expect("rates under test are non-zero")

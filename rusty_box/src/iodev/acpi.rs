@@ -20,12 +20,12 @@
 
 use bitflags::bitflags;
 use rusty_box_core::time::VmClock;
-use super::IoPort;
 
+use super::IoPort;
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
-    SNAPSHOT_SECTION_VERSION,
+    SNAPSHOT_SECTION_VERSION, SnapError, SnapRead, SnapResult, SnapWrite, bounds,
+    checked_snapshot_len_add, checked_snapshot_len_mul,
 };
 
 /// PM timer frequency: 3.579545 MHz (ACPI spec, section 4.7.3.3)
@@ -361,19 +361,21 @@ impl BxAcpiCtrl {
             ));
         }
         if usize::from(smbus_index) >= 32 {
-            return Err(Self::invalid_snapshot_v3("ACPI SMBus block index is invalid"));
+            return Err(Self::invalid_snapshot_v3(
+                "ACPI SMBus block index is invalid",
+            ));
         }
 
         Self::validate_snapshot_v3_pci_identity(pci_conf)?;
         Self::validate_snapshot_v3_bases(pm_base, sm_base, pci_conf)
     }
-
 }
 
 #[cfg(feature = "std")]
 impl crate::snapshot::SnapshotSection for BxAcpiCtrl {
-    const TAG: u32 = crate::snapshot::SEC_ACPI;
     type Restored = AcpiSnapshotRestore;
+
+    const TAG: u32 = crate::snapshot::SEC_ACPI;
 
     /// Exact byte count for the single-section ACPI v3 payload.
     fn snapshot_len(&self) -> SnapResult<u64> {
@@ -486,10 +488,7 @@ impl crate::snapshot::SnapshotSection for BxAcpiCtrl {
     ///
     /// PM/SM bases and the raw timer slot are returned for parent-owned
     /// validation and atomic topology relocation.
-    fn restore<R: SnapRead>(
-        &mut self,
-        reader: &mut R,
-    ) -> SnapResult<AcpiSnapshotRestore> {
+    fn restore<R: SnapRead>(&mut self, reader: &mut R) -> SnapResult<AcpiSnapshotRestore> {
         let section_version = reader.read_u32()?;
         if section_version != SNAPSHOT_SECTION_VERSION {
             return Err(Self::invalid_snapshot_v3(
@@ -504,11 +503,9 @@ impl crate::snapshot::SnapshotSection for BxAcpiCtrl {
         let pmcntrl = reader.read_u16()?;
         let tmr_overflow_time = reader.read_u64()?;
         let overflow_timer_handle = if reader.read_bool()? {
-            Some(
-                usize::try_from(reader.read_u64()?).map_err(|_| {
-                    Self::invalid_snapshot_v3("ACPI timer handle does not fit host index")
-                })?,
-            )
+            Some(usize::try_from(reader.read_u64()?).map_err(|_| {
+                Self::invalid_snapshot_v3("ACPI timer handle does not fit host index")
+            })?)
         } else {
             None
         };
@@ -579,10 +576,12 @@ impl crate::snapshot::SnapshotSection for BxAcpiCtrl {
             overflow_timer_handle,
         })
     }
-
 }
 
 impl BxAcpiCtrl {
+    /// The device's single scheduler timer — the PM-clock overflow.
+    pub(crate) const OVERFLOW_TIMER_LOCAL: u16 = 0;
+
     /// Derive SCI against the restored machine clock without injecting an edge.
     #[cfg(feature = "std")]
     pub(crate) fn post_restore_snapshot_v3(&mut self, clock: VmClock) -> bool {
@@ -645,9 +644,7 @@ impl BxAcpiCtrl {
     /// 0xFE)` — the shutdown-status byte the BIOS reads on the resume path —
     /// before requesting the hardware reset. A device reaches only its own
     /// state, so the store is described here and performed by the chipset.
-    pub(crate) fn take_pending_effect(
-        &mut self,
-    ) -> Option<rusty_box_devices::api::ChipsetEffect> {
+    pub(crate) fn take_pending_effect(&mut self) -> Option<rusty_box_devices::api::ChipsetEffect> {
         core::mem::take(&mut self.suspend_to_ram_pending).then_some(
             rusty_box_devices::api::ChipsetEffect::CmosByte {
                 index: 0x0F,
@@ -781,9 +778,9 @@ impl BxAcpiCtrl {
     /// left where it stands, because only a snapshot restore moves it.
     #[cfg(feature = "std")]
     pub fn enable_realtime_sync(&mut self) {
-        self.realtime.get_or_insert_with(|| RealtimeClock::reading(0));
+        self.realtime
+            .get_or_insert_with(|| RealtimeClock::reading(0));
     }
-
 
     // ─── PM Timer ────────────────────────────────────────────────────────
 
@@ -834,8 +831,8 @@ impl BxAcpiCtrl {
             | PmEnable::TMROF_EN.bits();
         let sci_level = (pmsts & self.pmen & sci_mask) != 0;
         self.set_irq_level(sci_level);
-
     }
+
     #[inline]
     fn pm_timer_ticks_at_usec(time_usec: u64) -> u64 {
         muldiv64(time_usec, PM_FREQ as u32, 1_000_000)
@@ -843,8 +840,7 @@ impl BxAcpiCtrl {
 
     #[inline]
     fn overflow_armed(&self) -> bool {
-        self.pmen & PmEnable::TMROF_EN.bits() != 0
-            && self.pmsts & PmStatus::TMROF_STS.bits() == 0
+        self.pmen & PmEnable::TMROF_EN.bits() != 0 && self.pmsts & PmStatus::TMROF_STS.bits() == 0
     }
 
     #[inline]
@@ -869,9 +865,6 @@ impl BxAcpiCtrl {
         self.overflow_remaining_from_usec(self.live_time_usec(clock))
     }
 
-    /// The device's single scheduler timer — the PM-clock overflow.
-    pub(crate) const OVERFLOW_TIMER_LOCAL: u16 = 0;
-
     #[inline]
     const fn overflow_timer_key() -> rusty_box_devices::api::TimerKey {
         rusty_box_devices::api::TimerKey {
@@ -893,7 +886,9 @@ impl BxAcpiCtrl {
         ctx.irq
             .set_level(rusty_box_devices::api::IrqLine(9), self.irq9_level);
         match delay_usec {
-            Some(delay) => ctx.timers.arm_oneshot_usec(Self::overflow_timer_key(), delay),
+            Some(delay) => ctx
+                .timers
+                .arm_oneshot_usec(Self::overflow_timer_key(), delay),
             None => ctx.timers.cancel(Self::overflow_timer_key()),
         }
     }
@@ -949,7 +944,7 @@ impl BxAcpiCtrl {
             self.pmcntrl &= !PmControl::SCI_EN.bits();
         }
 
-        if (self.pci_conf[0x5b] & 0x02) != 0 {
+        if (self.pci_conf[0x5B] & 0x02) != 0 {
             self.smi_request_pending = true;
         }
     }
@@ -1188,14 +1183,14 @@ impl BxAcpiCtrl {
             tracing::trace!("ACPI DBG: {:#010x}", value);
         }
     }
-
 }
 
 // ─── PCI Configuration Space ─────────────────────────────────────────────
 
 impl rusty_box_devices::pci::PciDevice for BxAcpiCtrl {
-    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 3);
     type WriteEffects = AcpiWriteEffects;
+
+    const DEVFUNC: u8 = rusty_box_devices::pci::pci_device(1, 3);
 
     /// Write to PCI configuration space.
     /// Bochs: pci_write_handler() (acpi.cc)
@@ -1308,7 +1303,6 @@ impl rusty_box_devices::pci::PciDevice for BxAcpiCtrl {
         }
         value
     }
-
 }
 
 impl BxAcpiCtrl {
@@ -1411,8 +1405,9 @@ impl rusty_box_devices::api::TimedDevice for BxAcpiCtrl {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box_devices::pci::PciDevice;
+
+    use super::*;
 
     /// Register `offset` of the power-management window the PM BAR names.
     fn pm_port(acpi: &BxAcpiCtrl, offset: u16) -> IoPort {
@@ -1579,7 +1574,12 @@ mod tests {
 
         // Write 1 to PWRBTN_STS to clear it (address = pm_base + 0x00)
         let pm_addr = pm_port(&acpi, 0x00);
-        acpi.write(pm_addr, PmStatus::PWRBTN_STS.bits() as u32, 2, clock_at_usec(0));
+        acpi.write(
+            pm_addr,
+            PmStatus::PWRBTN_STS.bits() as u32,
+            2,
+            clock_at_usec(0),
+        );
 
         // PWRBTN_STS should be cleared, TMROF_STS may still be set (depends on timer)
         assert_eq!(acpi.pmsts & PmStatus::PWRBTN_STS.bits(), 0);
@@ -1606,10 +1606,7 @@ mod tests {
         // Byte at 0x41: 0xB0
         // Low byte with the I/O indicator: the window is still at 0, so
         // nothing has moved yet.
-        assert_eq!(
-            acpi.pci_write(0x40, 0x01, 1),
-            AcpiWriteEffects::default()
-        );
+        assert_eq!(acpi.pci_write(0x40, 0x01, 1), AcpiWriteEffects::default());
         let effects = acpi.pci_write(0x41, 0xB0, 1);
         assert!(effects.pm_base_changed);
         assert_eq!(acpi.pm_base, 0xB000);
@@ -1679,7 +1676,10 @@ mod tests {
         acpi.smi_request_pending = false;
         acpi.generate_smi(ACPI_DISABLE);
         assert_eq!(acpi.pmcntrl & PmControl::SCI_EN.bits(), 0, "SCI_EN cleared");
-        assert!(acpi.smi_request_pending, "delivery is independent of the command value");
+        assert!(
+            acpi.smi_request_pending,
+            "delivery is independent of the command value"
+        );
     }
 
     // Bochs acpi.cc PM1_CNT (reg 0x04) with SUS_EN set:
@@ -1779,10 +1779,7 @@ mod tests {
         let delay = acpi
             .overflow_delay_usec(clock_at_usec(0))
             .expect("TMROF should arm");
-        assert_eq!(
-            delay,
-            muldiv64(0xFF_FFFF, 1_000_000, PM_FREQ as u32) + 1
-        );
+        assert_eq!(delay, muldiv64(0xFF_FFFF, 1_000_000, PM_FREQ as u32) + 1);
         assert!(!acpi.irq9_level);
 
         assert_eq!(acpi.overflow_timer(clock_at_usec(delay)), None);

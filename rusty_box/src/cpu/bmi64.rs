@@ -4,9 +4,7 @@
 //! All handlers support both register (mod=11) and memory (mod!=11) operands
 //! for the r/m field, matching Bochs _R and _M variants.
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =====================================================================
@@ -93,7 +91,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs bmi64.cc: BEXTR_GqEqBq{R,M}
     pub fn bextr_gq_eq_bq(&mut self, instr: &Instruction) -> super::Result<()> {
         let control = self.get_gpr32(instr.src2() as usize) as u16;
-        let start = (control & 0xff) as u32;
+        let start = (control & 0xFF) as u32;
         let len = (control >> 8) as u32;
         let val = self.read_eq64(instr, instr.src1())?;
         let result = bextrq(val, start, len);
@@ -130,7 +128,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs bmi64.cc: RORX_GqEqIb{R,M}
     pub fn rorx_gq_eq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_eq64(instr, instr.src())?;
-        let count = (instr.ib() as u32) & 0x3f;
+        let count = (instr.ib() as u32) & 0x3F;
         if count != 0 {
             op1 = op1.rotate_right(count);
         }
@@ -142,7 +140,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs bmi64.cc: SHRX_GqEqBq{R,M}
     pub fn shrx_gq_eq_bq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_eq64(instr, instr.src1())?;
-        let count = self.get_gpr32(instr.src2() as usize) & 0x3f;
+        let count = self.get_gpr32(instr.src2() as usize) & 0x3F;
         if count != 0 {
             op1 >>= count;
         }
@@ -154,7 +152,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs bmi64.cc: SARX_GqEqBq{R,M}
     pub fn sarx_gq_eq_bq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_eq64(instr, instr.src1())? as i64;
-        let count = self.get_gpr32(instr.src2() as usize) & 0x3f;
+        let count = self.get_gpr32(instr.src2() as usize) & 0x3F;
         if count != 0 {
             op1 >>= count;
         }
@@ -166,7 +164,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs bmi64.cc: SHLX_GqEqBq{R,M}
     pub fn shlx_gq_eq_bq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_eq64(instr, instr.src1())?;
-        let count = self.get_gpr32(instr.src2() as usize) & 0x3f;
+        let count = self.get_gpr32(instr.src2() as usize) & 0x3F;
         if count != 0 {
             op1 <<= count;
         }
@@ -280,8 +278,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 // =========================================================================
 
 fn bextrq(val: u64, start: u32, len: u32) -> u64 {
-    let start = start & 0xff;
-    let len = len & 0xff;
+    let start = start & 0xFF;
+    let len = len & 0xFF;
     if start >= 64 {
         return 0;
     }

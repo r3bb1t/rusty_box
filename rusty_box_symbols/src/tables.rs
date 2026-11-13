@@ -2,11 +2,11 @@
 //! for addresses, addresses for names, and structure layouts; and why a
 //! file did not parse.
 
-use crate::dwarf::tables::{elf_identity, DwarfTables};
+use crate::dwarf::tables::{DwarfTables, elf_identity};
 use crate::elf::{AltLink, ElfFile};
 use crate::identity::TablesIdentity;
-use crate::pdb::tables::{pdb_identity, PdbTables};
-use crate::pdb::{PdbError, MSFZ_MAGIC, MSF_MAGIC, PDB2_MAGIC};
+use crate::pdb::tables::{PdbTables, pdb_identity};
+use crate::pdb::{MSF_MAGIC, MSFZ_MAGIC, PDB2_MAGIC, PdbError};
 use crate::units::{BitRange, CvRegister, FieldOffset, Rva, TypeRef};
 
 /// A source position.
@@ -47,7 +47,10 @@ impl FileChecksum {
     /// A digest of kind `kind`, when `bytes` is that kind's length.
     #[must_use]
     pub fn of(kind: ChecksumKind, bytes: &[u8]) -> Option<FileChecksum> {
-        (bytes.len() == kind.digest_len()).then(|| FileChecksum { kind, bytes: bytes.to_vec() })
+        (bytes.len() == kind.digest_len()).then(|| FileChecksum {
+            kind,
+            bytes: bytes.to_vec(),
+        })
     }
 }
 
@@ -145,12 +148,22 @@ pub struct RangeGap {
 /// A live range's place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangedPlace {
-    Register { register: CvRegister },
+    Register {
+        register: CvRegister,
+    },
     /// Part of the variable (from `offset_in_parent`) in `register`.
-    Subfield { register: CvRegister, offset_in_parent: u32 },
+    Subfield {
+        register: CvRegister,
+        offset_in_parent: u32,
+    },
     /// At `offset` from the frame's base register.
-    FrameRelative { offset: i64 },
-    RegisterRelative { register: CvRegister, offset: i64 },
+    FrameRelative {
+        offset: i64,
+    },
+    RegisterRelative {
+        register: CvRegister,
+        offset: i64,
+    },
 }
 
 /// Which register a frame's variables are addressed from (`S_FRAMEPROC`'s
@@ -277,17 +290,46 @@ pub struct Enumerator {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeShape {
     Base(BaseType),
-    Pointer { to: TypeRef, size: u8, kind: PointerKind },
-    Modified { of: TypeRef, constant: Constness, volatile: Volatility },
-    Array { element: TypeRef, bytes: u64 },
-    Record { kind: RecordKind, name: String, size: u64, fields: Vec<RecordField> },
+    Pointer {
+        to: TypeRef,
+        size: u8,
+        kind: PointerKind,
+    },
+    Modified {
+        of: TypeRef,
+        constant: Constness,
+        volatile: Volatility,
+    },
+    Array {
+        element: TypeRef,
+        bytes: u64,
+    },
+    Record {
+        kind: RecordKind,
+        name: String,
+        size: u64,
+        fields: Vec<RecordField>,
+    },
     /// A forward reference whose definition this file does not hold.
-    Incomplete { name: String },
-    Enum { name: String, underlying: TypeRef, values: Vec<Enumerator> },
-    Function { returns: TypeRef, parameters: u16 },
+    Incomplete {
+        name: String,
+    },
+    Enum {
+        name: String,
+        underlying: TypeRef,
+        values: Vec<Enumerator>,
+    },
+    Function {
+        returns: TypeRef,
+        parameters: u16,
+    },
     /// A type this reader does not know: its index, its record's leaf (0 for
     /// a primitive index), and its bytes, never guessed at.
-    Unknown { index: TypeRef, leaf: u16, bytes: Vec<u8> },
+    Unknown {
+        index: TypeRef,
+        leaf: u16,
+        bytes: Vec<u8>,
+    },
 }
 
 /// Why a type cannot be described.
@@ -382,20 +424,26 @@ pub enum LayoutError {
     NotAStructure { member: String },
     #[error("{name}'s size or a member's offset is not a non-negative integer")]
     BadNumber { name: String },
-    #[error("the field list of {name} holds a record of kind {leaf:#06x} this reader cannot step over")]
+    #[error(
+        "the field list of {name} holds a record of kind {leaf:#06x} this reader cannot step over"
+    )]
     UnknownFieldRecord { name: String, leaf: u16 },
     #[error("{member}'s location is an expression this reader does not evaluate")]
     UnsupportedMemberLocation { member: String },
     /// A dwz debug file names a type in its supplementary file, which is
     /// not at hand.
-    #[error("the type at offset {offset:#x} of the dwz supplementary file is needed, and that file is not loaded")]
+    #[error(
+        "the type at offset {offset:#x} of the dwz supplementary file is needed, and that file is not loaded"
+    )]
     MissingSupplement { offset: u64 },
 }
 
 /// Pushes `item` after reserving room for it, so the push cannot reach
 /// `Vec`'s capacity-overflow panic.
 pub(crate) fn push<T>(items: &mut Vec<T>, item: T, what: &'static str) -> Result<(), ParseError> {
-    items.try_reserve(1).map_err(|_| ParseError::Allocation { what })?;
+    items
+        .try_reserve(1)
+        .map_err(|_| ParseError::Allocation { what })?;
     items.push(item);
     Ok(())
 }
@@ -453,10 +501,15 @@ impl SymbolTables {
 
     /// An ELF file may come with the dwz supplement it names; a PDB never
     /// has one, so `supplement` is ignored for it.
-    pub fn parse_with_supplement(bytes: &[u8], supplement: Option<&[u8]>) -> Result<SymbolTables, ParseError> {
+    pub fn parse_with_supplement(
+        bytes: &[u8],
+        supplement: Option<&[u8]>,
+    ) -> Result<SymbolTables, ParseError> {
         match sniff(bytes)? {
             FileFormat::Pdb => Ok(SymbolTables::Pdb(Box::new(PdbTables::parse(bytes)?))),
-            FileFormat::Elf => Ok(SymbolTables::Dwarf(Box::new(DwarfTables::parse_with_supplement(bytes, supplement)?))),
+            FileFormat::Elf => Ok(SymbolTables::Dwarf(Box::new(
+                DwarfTables::parse_with_supplement(bytes, supplement)?,
+            ))),
         }
     }
 
@@ -589,7 +642,11 @@ impl SymbolTables {
         }
     }
 
-    pub fn member_location(&self, type_name: &str, path: &[&str]) -> Result<Option<MemberLocation>, LayoutError> {
+    pub fn member_location(
+        &self,
+        type_name: &str,
+        path: &[&str],
+    ) -> Result<Option<MemberLocation>, LayoutError> {
         match self {
             SymbolTables::Pdb(tables) => tables.member_location(type_name, path),
             SymbolTables::Dwarf(tables) => tables.member_location(type_name, path),
@@ -599,25 +656,41 @@ impl SymbolTables {
 
 #[cfg(test)]
 mod tests {
+    use rusty_box_symbols_fixtures::dwarf::{
+        DwarfFormat, DwarfSpec, DwzForms, SUPPLEMENT_BUILD_ID, build_dwarf, dwz_pair,
+    };
+    use rusty_box_symbols_fixtures::elf::{BUILD_ID, ElfSpec, TEXT_RVA, build_elf};
+    use rusty_box_symbols_fixtures::pdb::{
+        FixtureContainer, FixtureLine, FixtureProcedure, FixturePublic, PdbFixture, PublicKind,
+        build_pdb,
+    };
+
     use super::*;
     use crate::identity::{BuildId, Guid};
     use crate::units::Rva;
-    use rusty_box_symbols_fixtures::dwarf::{build_dwarf, dwz_pair, DwarfFormat, DwarfSpec, DwzForms, SUPPLEMENT_BUILD_ID};
-    use rusty_box_symbols_fixtures::elf::{build_elf, ElfSpec, BUILD_ID, TEXT_RVA};
-    use rusty_box_symbols_fixtures::pdb::{
-        build_pdb, FixtureContainer, FixtureLine, FixtureProcedure, FixturePublic, PdbFixture, PublicKind,
-    };
 
     fn pdb(container: FixtureContainer) -> Vec<u8> {
         let mut fixture = PdbFixture::new([3; 16], 2);
         fixture.container = container;
-        fixture.publics.push(FixturePublic { name: "KeBugCheckEx".into(), section: 1, offset: 0x40, kind: PublicKind::Function });
+        fixture.publics.push(FixturePublic {
+            name: "KeBugCheckEx".into(),
+            section: 1,
+            offset: 0x40,
+            kind: PublicKind::Function,
+        });
         build_pdb(&fixture)
     }
 
     fn elf() -> Vec<u8> {
         let spec = ElfSpec::pie();
-        build_elf(spec, &build_dwarf(DwarfSpec { version: 5, format: DwarfFormat::Dwarf32, text_va: TEXT_RVA }))
+        build_elf(
+            spec,
+            &build_dwarf(DwarfSpec {
+                version: 5,
+                format: DwarfFormat::Dwarf32,
+                text_va: TEXT_RVA,
+            }),
+        )
     }
 
     #[test]
@@ -626,19 +699,44 @@ mod tests {
             let tables = SymbolTables::parse(&pdb(container)).unwrap();
             assert!(matches!(tables, SymbolTables::Pdb(_)), "{container:?}");
             assert_eq!(tables.address_of("KeBugCheckEx"), Some(Rva(0x1040)));
-            assert_eq!(tables.identity(), TablesIdentity::Pdb { guid: Guid::from_le_bytes([3; 16]), age: 2 });
+            assert_eq!(
+                tables.identity(),
+                TablesIdentity::Pdb {
+                    guid: Guid::from_le_bytes([3; 16]),
+                    age: 2
+                }
+            );
         }
         let tables = SymbolTables::parse(&elf()).unwrap();
         assert!(matches!(tables, SymbolTables::Dwarf(_)));
         assert_eq!(
-            tables.files().iter().map(|file| file.path.as_str()).collect::<Vec<&str>>(),
+            tables
+                .files()
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<&str>>(),
             ["/build/widget/src/main.c"]
         );
         assert_eq!(tables.line_at(Rva(TEXT_RVA)).map(|row| row.line), Some(10));
-        assert_eq!(tables.lines_of("main.c", 11).first().map(|resolved| resolved.line), Some(11));
-        assert_eq!(tables.procedure_at(Rva(TEXT_RVA)).map(|span| span.name), Some("widget_init".to_owned()));
-        assert_eq!(tables.symbolize(Rva(TEXT_RVA)).map(|hit| hit.name), Some("widget_init".to_owned()));
-        assert_eq!(tables.layout("Widget").unwrap().map(|layout| layout.size), Some(16));
+        assert_eq!(
+            tables
+                .lines_of("main.c", 11)
+                .first()
+                .map(|resolved| resolved.line),
+            Some(11)
+        );
+        assert_eq!(
+            tables.procedure_at(Rva(TEXT_RVA)).map(|span| span.name),
+            Some("widget_init".to_owned())
+        );
+        assert_eq!(
+            tables.symbolize(Rva(TEXT_RVA)).map(|hit| hit.name),
+            Some("widget_init".to_owned())
+        );
+        assert_eq!(
+            tables.layout("Widget").unwrap().map(|layout| layout.size),
+            Some(16)
+        );
     }
 
     #[test]
@@ -659,16 +757,28 @@ mod tests {
         assert_eq!(tables.procedure_starts(), [Rva(0x1100), Rva(0x1200)]);
         let dwarf = SymbolTables::parse(&elf()).unwrap().procedure_starts();
         assert_eq!(dwarf.first(), Some(&Rva(TEXT_RVA)));
-        assert!(dwarf.windows(2).all(|pair| pair[0] < pair[1]), "ascending, each once");
+        assert!(
+            dwarf.windows(2).all(|pair| pair[0] < pair[1]),
+            "ascending, each once"
+        );
     }
 
     #[test]
     fn a_pdb_2_file_and_other_bytes_are_refused_by_name() {
         let mut old = crate::pdb::PDB2_MAGIC.to_vec();
         old.extend_from_slice(&[0; 64]);
-        assert!(matches!(SymbolTables::parse(&old), Err(ParseError::Pdb(PdbError::Pdb2))));
-        assert!(matches!(SymbolTables::parse(b"MZ\x90\x00"), Err(ParseError::NotSymbols)));
-        assert_eq!(declared_identity(&old), Err(ParseError::Pdb(PdbError::Pdb2)));
+        assert!(matches!(
+            SymbolTables::parse(&old),
+            Err(ParseError::Pdb(PdbError::Pdb2))
+        ));
+        assert!(matches!(
+            SymbolTables::parse(b"MZ\x90\x00"),
+            Err(ParseError::NotSymbols)
+        ));
+        assert_eq!(
+            declared_identity(&old),
+            Err(ParseError::Pdb(PdbError::Pdb2))
+        );
         assert_eq!(declared_identity(b""), Err(ParseError::NotSymbols));
     }
 
@@ -676,9 +786,17 @@ mod tests {
     fn a_file_declares_its_identity_without_its_tables_being_read() {
         assert_eq!(
             declared_identity(&pdb(FixtureContainer::MsfzDeflate)),
-            Ok(TablesIdentity::Pdb { guid: Guid::from_le_bytes([3; 16]), age: 2 })
+            Ok(TablesIdentity::Pdb {
+                guid: Guid::from_le_bytes([3; 16]),
+                age: 2
+            })
         );
-        assert_eq!(declared_identity(&elf()), Ok(TablesIdentity::Elf { build_id: Some(BuildId(BUILD_ID.to_vec())) }));
+        assert_eq!(
+            declared_identity(&elf()),
+            Ok(TablesIdentity::Elf {
+                build_id: Some(BuildId(BUILD_ID.to_vec()))
+            })
+        );
     }
 
     #[test]
@@ -691,7 +809,10 @@ mod tests {
         assert_eq!(supplement_of(&elf()).unwrap(), None);
         assert_eq!(supplement_of(&pdb(FixtureContainer::Msf)).unwrap(), None);
         let tables = SymbolTables::parse_with_supplement(&main, Some(&pair.supplement)).unwrap();
-        assert_eq!(tables.layout("Shared").unwrap().map(|layout| layout.size), Some(8));
+        assert_eq!(
+            tables.layout("Shared").unwrap().map(|layout| layout.size),
+            Some(8)
+        );
     }
 
     #[test]

@@ -195,11 +195,7 @@ const fn decode_ldf(half: u8) -> AttrHints {
 /// no FEAT_MTE2, so the Tagged encoding 0xF0 is reserved).
 const fn reserved_mair(attr: u8, xs: bool) -> bool {
     if attr & 0xF0 == 0 {
-        if attr & 3 == 0b01 {
-            !xs
-        } else {
-            attr & 3 != 0
-        }
+        if attr & 3 == 0b01 { !xs } else { attr & 3 != 0 }
     } else if attr == 0x40 || attr == 0xA0 {
         !xs
     } else {
@@ -283,7 +279,6 @@ impl MemAttrs {
         shareability: Shareability::Outer,
         xs: true,
     };
-
     /// Normal Inner and Outer Write-Back, read- and write-allocate,
     /// Non-shareable: a data access's attributes with the EL1&0 regime's
     /// stage 1 disabled by `HCR_EL2.DC` (`AArch64_S1DisabledOutput`).

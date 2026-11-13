@@ -27,8 +27,7 @@ const DEST: u64 = 0x0021_0100;
 /// and `[disp32]` operands address memory directly.
 fn protected32_emulator() -> Box<Emulator> {
     let cfg = EmulatorConfig::default();
-    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
-        .expect("emulator");
+    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatProtected32).expect("emulator");
     // CR4.OSFXSR | CR4.OSXSAVE
     emu.reg_write(
         X86Reg::Cr4,
@@ -83,7 +82,8 @@ fn vex_avx_executes_in_protected_mode() {
 
             let got = emu.reg_read_zmm(X86Reg::Zmm0);
             for d in 0..4u32 {
-                let v = u32::from_le_bytes(got[d as usize * 4..d as usize * 4 + 4].try_into().unwrap());
+                let v =
+                    u32::from_le_bytes(got[d as usize * 4..d as usize * 4 + 4].try_into().unwrap());
                 assert_eq!(v, (d + 1) + 10 * (d + 1), "dword {d}");
             }
             assert!(
@@ -117,7 +117,8 @@ fn vex_ymm_executes_in_protected_mode() {
 
             let got = emu.reg_read_zmm(X86Reg::Zmm0);
             for d in 0..8u32 {
-                let v = u32::from_le_bytes(got[d as usize * 4..d as usize * 4 + 4].try_into().unwrap());
+                let v =
+                    u32::from_le_bytes(got[d as usize * 4..d as usize * 4 + 4].try_into().unwrap());
                 assert_eq!(v, 2 * (d + 1), "dword {d} of the 256-bit result");
             }
         })
@@ -328,16 +329,27 @@ fn evex_vpextrb_vpextrw_stores_scale_disp8_in_protected_mode() {
             //   08: z(0) L'L(00) b(0) V'(1) aaa(000)
             //   48: mod 01 (disp8), reg 001 (xmm1), rm 000 (eax)
             emu.mem_write(DEST, &[0x5A; 16]).expect("poison");
-            run(&mut emu, &[0x62, 0xF3, 0x7D, 0x08, 0x15, 0x48, 0x04, 0x03], 4);
+            run(
+                &mut emu,
+                &[0x62, 0xF3, 0x7D, 0x08, 0x15, 0x48, 0x04, 0x03],
+                4,
+            );
             let mut got = [0u8; 16];
             emu.mem_read(DEST, &mut got).expect("read back");
             let mut want = [0x5Au8; 16];
             want[8..10].copy_from_slice(&source[6..8]);
-            assert_eq!(got, want, "VPEXTRW m16 stores word 3 of xmm1 at eax + 4 * 2");
+            assert_eq!(
+                got, want,
+                "VPEXTRW m16 stores word 3 of xmm1 at eax + 4 * 2"
+            );
 
             // vpextrb [eax+0x04], xmm1, 7 = 62 F3 7D 08 14 48 04 07
             emu.mem_write(DEST, &[0x5A; 16]).expect("poison");
-            run(&mut emu, &[0x62, 0xF3, 0x7D, 0x08, 0x14, 0x48, 0x04, 0x07], 4);
+            run(
+                &mut emu,
+                &[0x62, 0xF3, 0x7D, 0x08, 0x14, 0x48, 0x04, 0x07],
+                4,
+            );
             emu.mem_read(DEST, &mut got).expect("read back");
             let mut want = [0x5Au8; 16];
             want[4] = source[7];

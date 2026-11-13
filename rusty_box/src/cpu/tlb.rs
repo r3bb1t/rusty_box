@@ -6,9 +6,9 @@ pub type BxMemType = u32;
 
 pub type BxHostpageaddr = BxPtrEquiv;
 
-pub const LPF_MASK: BxAddress = 0xfffffffffffff000u64;
+pub const LPF_MASK: BxAddress = 0xFFFFFFFFFFFFF000u64;
 
-const PPF_MASK: u64 = 0xfffffffffffff000u64;
+const PPF_MASK: u64 = 0xFFFFFFFFFFFFF000u64;
 
 const TLB_GLOBAL_PAGE: u32 = 0x80000000;
 
@@ -77,7 +77,6 @@ impl CachedHostPage for RamPage {
     fn host_addr(self, base: *mut u8) -> BxHostpageaddr {
         (base as BxHostpageaddr).wrapping_add(self.ram_offset() as BxHostpageaddr)
     }
-
 }
 
 /// A page of directly-fetchable memory, named by where it starts within the
@@ -120,7 +119,6 @@ impl CachedHostPage for AllocPage {
     fn host_addr(self, base: *mut u8) -> BxHostpageaddr {
         (base as BxHostpageaddr).wrapping_add(self.alloc_offset() as BxHostpageaddr)
     }
-
 }
 
 /// The span instruction fetch is currently reading from, located within the
@@ -339,6 +337,7 @@ impl<P, const SIZE: usize> Tlb<P, SIZE> {
         let i = self.get_index_of(lpf, len);
         &self.entries[i]
     }
+
     /// Invalidate the direct-mapped slot selected for a prospective mapping.
     ///
     /// Unlike `invlpg`, this deliberately clears a colliding entry even when
@@ -433,7 +432,7 @@ pub(super) fn page_offset<I>(laddr: I) -> u32
 where
     I: Into<BxAddress>,
 {
-    (laddr.into() as u32) & 0xfff
+    (laddr.into() as u32) & 0xFFF
 }
 
 #[inline]

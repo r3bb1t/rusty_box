@@ -5,7 +5,7 @@
 use rusty_box_core::SnapError;
 
 use super::super::features::{Feature, Implementation};
-use super::super::step::{exec, processor, Taken, CODE, UNDEFINED};
+use super::super::step::{CODE, Taken, UNDEFINED, exec, processor};
 use super::super::{Cpu, El, NoEl2, Pstate};
 
 /// The words are GNU as's (`-march=armv9.2-a+predres`, objdump -d).

@@ -43,8 +43,8 @@ const NULL_DEVICES: &[&str] = &["/dev/null", "$null", "nul", "/dev/stderr", "/de
 /// aliases of the writing cmdlets (`sc`, `ac`, `cpi`, `mi`, `rni`, `ren`),
 /// and cmd's own `copy` and `move`.
 const WRITING_COMMANDS: &[&str] = &[
-    "tee", "cp", "mv", "install", "touch", "truncate", "ln", "dd", "sc", "ac", "cpi", "mi", "rni", "ren", "copy",
-    "move",
+    "tee", "cp", "mv", "install", "touch", "truncate", "ln", "dd", "sc", "ac", "cpi", "mi", "rni",
+    "ren", "copy", "move",
 ];
 
 /// PowerShell cmdlets and aliases that write files, matched case-insensitively
@@ -185,21 +185,28 @@ fn redirects_into_a_file(text: &str) -> bool {
 /// kept as part of their word, which is enough to find command names).
 fn simple_commands(text: &str) -> Vec<Vec<String>> {
     text.split(['\n', ';', '|', '&'])
-        .map(|part| part.split_whitespace().map(str::to_owned).collect::<Vec<String>>())
+        .map(|part| {
+            part.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<String>>()
+        })
         .filter(|words| !words.is_empty())
         .collect()
 }
 
 fn writing_command(words: &[String]) -> Option<&'static str> {
     // Leading `VAR=value` assignments do not name the command.
-    let mut rest = words.iter().skip_while(|word| {
-        word.contains('=') && !word.starts_with('-') && !word.starts_with('$')
-    });
+    let mut rest = words
+        .iter()
+        .skip_while(|word| word.contains('=') && !word.starts_with('-') && !word.starts_with('$'));
     let mut name = rest.next()?;
     // `cmd /c …` and `cmd /k …` run the command that follows.
     if name.eq_ignore_ascii_case("cmd") {
         let mut after = rest.clone();
-        if after.next().is_some_and(|flag| flag.eq_ignore_ascii_case("/c") || flag.eq_ignore_ascii_case("/k")) {
+        if after
+            .next()
+            .is_some_and(|flag| flag.eq_ignore_ascii_case("/c") || flag.eq_ignore_ascii_case("/k"))
+        {
             if let Some(inner) = after.next() {
                 name = inner;
                 rest = after;
@@ -208,12 +215,19 @@ fn writing_command(words: &[String]) -> Option<&'static str> {
     }
     let args: Vec<&String> = rest.collect();
     let lower = name.to_ascii_lowercase();
-    if let Some(&found) = WRITING_COMMANDS.iter().find(|candidate| **candidate == lower) {
+    if let Some(&found) = WRITING_COMMANDS
+        .iter()
+        .find(|candidate| **candidate == lower)
+    {
         return Some(found);
     }
     let has = |flag: &str| args.iter().any(|arg| arg.as_str() == flag);
     match lower.as_str() {
-        "sed" if args.iter().any(|arg| arg.starts_with("-i") || arg.starts_with("--in-place")) => {
+        "sed"
+            if args
+                .iter()
+                .any(|arg| arg.starts_with("-i") || arg.starts_with("--in-place")) =>
+        {
             Some("sed -i")
         }
         "perl"
@@ -228,8 +242,11 @@ fn writing_command(words: &[String]) -> Option<&'static str> {
         "cargo" if has("fmt") => Some("cargo fmt"),
         "new-item"
             if args.windows(2).any(|pair| {
-                pair.first().is_some_and(|flag| flag.eq_ignore_ascii_case("-itemtype"))
-                    && pair.get(1).is_some_and(|kind| kind.eq_ignore_ascii_case("file"))
+                pair.first()
+                    .is_some_and(|flag| flag.eq_ignore_ascii_case("-itemtype"))
+                    && pair
+                        .get(1)
+                        .is_some_and(|kind| kind.eq_ignore_ascii_case("file"))
             }) || args.iter().any(|arg| arg.eq_ignore_ascii_case("-value")) =>
         {
             Some("New-Item -ItemType File")
@@ -244,7 +261,9 @@ fn contains_word(text: &str, word: &str) -> bool {
     let joins = |c: char| c.is_ascii_alphanumeric() || c == '-';
     text.match_indices(word).any(|(at, found)| {
         let before = text.get(..at).and_then(|head| head.chars().next_back());
-        let after = text.get(at + found.len()..).and_then(|tail| tail.chars().next());
+        let after = text
+            .get(at + found.len()..)
+            .and_then(|tail| tail.chars().next());
         !before.is_some_and(joins) && !after.is_some_and(joins)
     })
 }
@@ -297,9 +316,12 @@ pub enum Verdict {
 /// The verdict on one Claude Code PreToolUse event: Bash and PowerShell
 /// commands are classified; every other tool passes.
 pub fn verdict_of(event: &str) -> Result<Verdict, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(event).map_err(|error| format!("the hook event is not JSON: {error}"))?;
-    let tool = value.get("tool_name").and_then(serde_json::Value::as_str).unwrap_or("");
+    let value: serde_json::Value = serde_json::from_str(event)
+        .map_err(|error| format!("the hook event is not JSON: {error}"))?;
+    let tool = value
+        .get("tool_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
     if tool != "Bash" && tool != "PowerShell" {
         return Ok(Verdict::Allow);
     }
@@ -371,23 +393,62 @@ mod tests {
     #[test]
     fn writes_are_refused() {
         let cases = [
-            Case { command: "echo hi > notes.md", refusal: Refusal::Redirect },
-            Case { command: "cargo test >> log.txt", refusal: Refusal::Redirect },
-            Case { command: "cat > src/a.rs <<'EOF'\nfn main() {}\nEOF", refusal: Refusal::Redirect },
-            Case { command: "echo x | tee out.txt", refusal: Refusal::WritingCommand("tee") },
-            Case { command: "sed -i 's/a/b/' src/lib.rs", refusal: Refusal::WritingCommand("sed -i") },
-            Case { command: "perl -pi -e 's/a/b/' x.rs", refusal: Refusal::WritingCommand("perl -i") },
-            Case { command: "cp a.rs b.rs", refusal: Refusal::WritingCommand("cp") },
-            Case { command: "mv a.rs b.rs", refusal: Refusal::WritingCommand("mv") },
-            Case { command: "touch src/lib.rs", refusal: Refusal::WritingCommand("touch") },
-            Case { command: "git apply fix.patch", refusal: Refusal::WritingCommand("git apply") },
-            Case { command: "cargo fmt", refusal: Refusal::WritingCommand("cargo fmt") },
+            Case {
+                command: "echo hi > notes.md",
+                refusal: Refusal::Redirect,
+            },
+            Case {
+                command: "cargo test >> log.txt",
+                refusal: Refusal::Redirect,
+            },
+            Case {
+                command: "cat > src/a.rs <<'EOF'\nfn main() {}\nEOF",
+                refusal: Refusal::Redirect,
+            },
+            Case {
+                command: "echo x | tee out.txt",
+                refusal: Refusal::WritingCommand("tee"),
+            },
+            Case {
+                command: "sed -i 's/a/b/' src/lib.rs",
+                refusal: Refusal::WritingCommand("sed -i"),
+            },
+            Case {
+                command: "perl -pi -e 's/a/b/' x.rs",
+                refusal: Refusal::WritingCommand("perl -i"),
+            },
+            Case {
+                command: "cp a.rs b.rs",
+                refusal: Refusal::WritingCommand("cp"),
+            },
+            Case {
+                command: "mv a.rs b.rs",
+                refusal: Refusal::WritingCommand("mv"),
+            },
+            Case {
+                command: "touch src/lib.rs",
+                refusal: Refusal::WritingCommand("touch"),
+            },
+            Case {
+                command: "git apply fix.patch",
+                refusal: Refusal::WritingCommand("git apply"),
+            },
+            Case {
+                command: "cargo fmt",
+                refusal: Refusal::WritingCommand("cargo fmt"),
+            },
             Case {
                 command: "Set-Content -Path a.txt -Value hi",
                 refusal: Refusal::WritingCommand("Set-Content"),
             },
-            Case { command: "'x' | Out-File b.txt", refusal: Refusal::WritingCommand("Out-File") },
-            Case { command: "Copy-Item a b", refusal: Refusal::WritingCommand("Copy-Item") },
+            Case {
+                command: "'x' | Out-File b.txt",
+                refusal: Refusal::WritingCommand("Out-File"),
+            },
+            Case {
+                command: "Copy-Item a b",
+                refusal: Refusal::WritingCommand("Copy-Item"),
+            },
             Case {
                 command: "New-Item -ItemType File x.rs",
                 refusal: Refusal::WritingCommand("New-Item -ItemType File"),
@@ -405,20 +466,55 @@ mod tests {
                 refusal: Refusal::InterpreterWrites("python3"),
             },
             // `>|` writes the file even with noclobber set.
-            Case { command: "echo x >| notes.md", refusal: Refusal::Redirect },
-            Case { command: "Get-Date | Tee-Object out.txt", refusal: Refusal::WritingCommand("Tee-Object") },
+            Case {
+                command: "echo x >| notes.md",
+                refusal: Refusal::Redirect,
+            },
+            Case {
+                command: "Get-Date | Tee-Object out.txt",
+                refusal: Refusal::WritingCommand("Tee-Object"),
+            },
             // PowerShell's aliases, and cmd's own copy and move.
-            Case { command: "sc a.txt hi", refusal: Refusal::WritingCommand("sc") },
-            Case { command: "'x' | ac a.txt", refusal: Refusal::WritingCommand("ac") },
-            Case { command: "cpi a.rs b.rs", refusal: Refusal::WritingCommand("cpi") },
-            Case { command: "mi a.rs b.rs", refusal: Refusal::WritingCommand("mi") },
-            Case { command: "rni a.rs b.rs", refusal: Refusal::WritingCommand("rni") },
-            Case { command: "ren a.rs b.rs", refusal: Refusal::WritingCommand("ren") },
-            Case { command: "copy a.rs b.rs", refusal: Refusal::WritingCommand("copy") },
-            Case { command: "cmd /c move a.rs b.rs", refusal: Refusal::WritingCommand("move") },
+            Case {
+                command: "sc a.txt hi",
+                refusal: Refusal::WritingCommand("sc"),
+            },
+            Case {
+                command: "'x' | ac a.txt",
+                refusal: Refusal::WritingCommand("ac"),
+            },
+            Case {
+                command: "cpi a.rs b.rs",
+                refusal: Refusal::WritingCommand("cpi"),
+            },
+            Case {
+                command: "mi a.rs b.rs",
+                refusal: Refusal::WritingCommand("mi"),
+            },
+            Case {
+                command: "rni a.rs b.rs",
+                refusal: Refusal::WritingCommand("rni"),
+            },
+            Case {
+                command: "ren a.rs b.rs",
+                refusal: Refusal::WritingCommand("ren"),
+            },
+            Case {
+                command: "copy a.rs b.rs",
+                refusal: Refusal::WritingCommand("copy"),
+            },
+            Case {
+                command: "cmd /c move a.rs b.rs",
+                refusal: Refusal::WritingCommand("move"),
+            },
         ];
         for case in cases {
-            assert_eq!(refusal(case.command), Some(case.refusal), "{}", case.command);
+            assert_eq!(
+                refusal(case.command),
+                Some(case.refusal),
+                "{}",
+                case.command
+            );
         }
     }
 

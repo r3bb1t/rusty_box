@@ -47,17 +47,16 @@
 
 use std::boxed::Box;
 use std::collections::{BTreeMap, BTreeSet};
-use std::format;
 use std::path::PathBuf;
 use std::string::{String, ToString};
 use std::sync::{Mutex, OnceLock};
-use std::vec;
 use std::vec::Vec;
+use std::{format, vec};
 
 use serde_json::Value;
 use syn::{Expr, ImplItem, Item, Pat, ReturnType, Stmt, Type};
 
-use super::{decode, Encoding, Feature};
+use super::{Encoding, Feature, decode};
 
 /// The environment variable naming the unpacked AARCHMRS directory.
 const SPEC_DIR_VAR: &str = "RUSTY_BOX_AARCHMRS";

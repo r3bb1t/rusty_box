@@ -30,7 +30,7 @@ mod state_gate;
 
 use rusty_box::cpu::X86Reg;
 use rusty_box::emulator::{Emulator, EmulatorConfig};
-use state_gate::{long64_emulator, run_one, Outcome, CODE, TEST_STACK_SIZE};
+use state_gate::{CODE, Outcome, TEST_STACK_SIZE, long64_emulator, run_one};
 
 /// A CPU with SSE fully enabled and AVX state deliberately *not* enabled:
 /// CR4.OSFXSR and CR4.OSXSAVE are set, but no XSETBV runs, so XCR0 keeps its

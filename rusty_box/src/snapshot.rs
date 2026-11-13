@@ -4,7 +4,9 @@
 use std::io::{self, Error, ErrorKind, Read, Write};
 
 #[cfg(feature = "std")]
-pub(crate) use rusty_box_core::snap::{SnapError, SnapRead, SnapResult, SnapWrite, SnapshotSection};
+pub(crate) use rusty_box_core::snap::{
+    SnapError, SnapRead, SnapResult, SnapWrite, SnapshotSection,
+};
 
 #[cfg(feature = "std")]
 use crate::{
@@ -53,21 +55,19 @@ pub(crate) const SNAPSHOT_V3_VERSION: u32 = 12;
 #[cfg(feature = "std")]
 pub(crate) const SNAPSHOT_SECTION_VERSION: u32 = 1;
 
+#[cfg(feature = "std")]
+pub(crate) use rusty_box_core::snap::MAX_COUNT as MAX_SNAPSHOT_COUNT;
 /// The section-length and item-count ceilings are the FORMAT's, so they live
 /// with the format's traits and are named here under the spellings this port
 /// already uses.
 #[cfg(feature = "std")]
 pub(crate) use rusty_box_core::snap::MAX_SECTION_LEN as MAX_SNAPSHOT_SECTION_LEN;
 #[cfg(feature = "std")]
-pub(crate) use rusty_box_core::snap::MAX_COUNT as MAX_SNAPSHOT_COUNT;
-#[cfg(feature = "std")]
 pub(crate) const MAX_SNAPSHOT_QUEUE_LEN: usize = 1 << 16;
 
 #[cfg(feature = "std")]
 pub(crate) mod bounds {
-    pub(crate) use super::{
-        MAX_SNAPSHOT_COUNT, MAX_SNAPSHOT_QUEUE_LEN, MAX_SNAPSHOT_SECTION_LEN,
-    };
+    pub(crate) use super::{MAX_SNAPSHOT_COUNT, MAX_SNAPSHOT_QUEUE_LEN, MAX_SNAPSHOT_SECTION_LEN};
 }
 
 #[cfg(feature = "std")]
@@ -107,8 +107,22 @@ pub(crate) const SEC_HPET: u32 = 34;
 
 #[cfg(feature = "std")]
 pub(crate) const SNAPSHOT_V3_SECTION_ORDER: [u32; 17] = [
-    SEC_MEMORY, SEC_PC_SYSTEM, SEC_PLATFORM, SEC_CPU, SEC_PIC, SEC_PIT, SEC_CMOS, SEC_DMA,
-    SEC_KEYBOARD, SEC_SERIAL, SEC_HARDDRV, SEC_PCI, SEC_ACPI, SEC_VGA, SEC_IOAPIC, SEC_LAPIC,
+    SEC_MEMORY,
+    SEC_PC_SYSTEM,
+    SEC_PLATFORM,
+    SEC_CPU,
+    SEC_PIC,
+    SEC_PIT,
+    SEC_CMOS,
+    SEC_DMA,
+    SEC_KEYBOARD,
+    SEC_SERIAL,
+    SEC_HARDDRV,
+    SEC_PCI,
+    SEC_ACPI,
+    SEC_VGA,
+    SEC_IOAPIC,
+    SEC_LAPIC,
     SEC_HPET,
 ];
 
@@ -280,7 +294,10 @@ impl<R: Read> SnapRead for IoSource<R> {
 /// only ever see that section's bytes, so a device that reads too far is
 /// refused rather than silently eating the next device's state.
 #[cfg(feature = "std")]
-pub(crate) struct SnapshotReader<R> { inner: R, remaining: u64 }
+pub(crate) struct SnapshotReader<R> {
+    inner: R,
+    remaining: u64,
+}
 #[cfg(feature = "std")]
 impl<R: SnapRead> SnapshotReader<R> {
     pub(crate) fn new(inner: R, remaining: u64) -> SnapResult<Self> {
@@ -298,7 +315,10 @@ impl<R: SnapRead> SnapshotReader<R> {
     /// writer, which this build does not know, is skipped rather than misread.
     pub(crate) fn discard(&mut self) -> SnapResult {
         let mut scratch = [0u8; 64 * 1024];
-        while self.remaining != 0 { let n = self.remaining.min(scratch.len() as u64) as usize; self.read_bytes(&mut scratch[..n])?; }
+        while self.remaining != 0 {
+            let n = self.remaining.min(scratch.len() as u64) as usize;
+            self.read_bytes(&mut scratch[..n])?;
+        }
         Ok(())
     }
 
@@ -306,14 +326,20 @@ impl<R: SnapRead> SnapshotReader<R> {
     /// device and the writer disagree about the layout, which every later field
     /// would decode from the wrong place.
     pub(crate) fn finish_exact(&self) -> SnapResult {
-        if self.remaining == 0 { Ok(()) } else { Err(SnapError::TrailingBytes) }
+        if self.remaining == 0 {
+            Ok(())
+        } else {
+            Err(SnapError::TrailingBytes)
+        }
     }
 }
 #[cfg(feature = "std")]
 impl<R: SnapRead> SnapRead for SnapshotReader<R> {
     fn read_bytes(&mut self, bytes: &mut [u8]) -> SnapResult {
         let len = u64::try_from(bytes.len()).map_err(|_| SnapError::LengthOutOfRange)?;
-        if len > self.remaining { return Err(SnapError::Truncated); }
+        if len > self.remaining {
+            return Err(SnapError::Truncated);
+        }
         self.inner.read_bytes(bytes)?;
         self.remaining -= len;
         Ok(())
@@ -321,7 +347,11 @@ impl<R: SnapRead> SnapRead for SnapshotReader<R> {
 }
 
 #[cfg(feature = "std")]
-struct SectionWriter<'a, W> { inner: &'a mut W, id: u32, remaining: u64 }
+struct SectionWriter<'a, W> {
+    inner: &'a mut W,
+    id: u32,
+    remaining: u64,
+}
 #[cfg(feature = "std")]
 impl<W: SnapWrite> SnapWrite for SectionWriter<'_, W> {
     fn write_bytes(&mut self, bytes: &[u8]) -> SnapResult {
@@ -348,7 +378,11 @@ fn write_section_with_limit<W: SnapWrite>(
     }
     writer.write_u32(id)?;
     writer.write_u64(len)?;
-    let mut section = SectionWriter { inner: writer, id, remaining: len };
+    let mut section = SectionWriter {
+        inner: writer,
+        id,
+        remaining: len,
+    };
     body(&mut section)?;
     if section.remaining == 0 {
         Ok(())
@@ -380,19 +414,29 @@ fn write_device_section<W: SnapWrite, D: SnapshotSection>(
 
 #[cfg(feature = "std")]
 fn memory_block_len(geometry: MemorySnapshotGeometry, block: u32) -> SnapResult<u64> {
-    let start = u64::from(block).checked_mul(geometry.block_size).ok_or(SnapError::Invalid("snapshot memory block offset overflows"))?;
-    if start >= geometry.guest_len { return Err(SnapError::Invalid("snapshot memory block exceeds guest RAM")); }
+    let start = u64::from(block)
+        .checked_mul(geometry.block_size)
+        .ok_or(SnapError::Invalid("snapshot memory block offset overflows"))?;
+    if start >= geometry.guest_len {
+        return Err(SnapError::Invalid(
+            "snapshot memory block exceeds guest RAM",
+        ));
+    }
     Ok((geometry.guest_len - start).min(geometry.block_size))
 }
 #[cfg(feature = "std")]
 fn memory_payload_len_for_geometry(geometry: MemorySnapshotGeometry) -> SnapResult<u64> {
     let descriptors = u64::from(geometry.num_blocks)
         .checked_mul(5)
-        .ok_or(SnapError::Invalid("snapshot memory descriptor length overflows"))?;
+        .ok_or(SnapError::Invalid(
+            "snapshot memory descriptor length overflows",
+        ))?;
     44u64
         .checked_add(descriptors)
         .and_then(|len| len.checked_add(geometry.guest_len))
-        .ok_or(SnapError::Invalid("snapshot memory payload length overflows"))
+        .ok_or(SnapError::Invalid(
+            "snapshot memory payload length overflows",
+        ))
 }
 
 #[cfg(feature = "std")]
@@ -403,12 +447,23 @@ fn memory_payload_len(memory: &BxMemC) -> SnapResult<u64> {
 fn save_memory<W: SnapWrite>(memory: &mut BxMemC, writer: &mut W) -> SnapResult {
     let g = memory.snapshot_geometry();
     writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
-    writer.write_u64(g.guest_len)?; writer.write_u64(g.host_ram_len)?; writer.write_u64(g.block_size)?;
-    writer.write_u32(g.num_blocks)?; writer.write_u32(g.resident_capacity)?; writer.write_u32(g.used_blocks)?; writer.write_u32(g.next_swapout_guest_block)?;
+    writer.write_u64(g.guest_len)?;
+    writer.write_u64(g.host_ram_len)?;
+    writer.write_u64(g.block_size)?;
+    writer.write_u32(g.num_blocks)?;
+    writer.write_u32(g.resident_capacity)?;
+    writer.write_u32(g.used_blocks)?;
+    writer.write_u32(g.next_swapout_guest_block)?;
     for block in 0..g.num_blocks {
         match memory.snapshot_residency(block)? {
-            MemorySnapshotResidency::Swapped => { writer.write_u8(0)?; writer.write_u32(u32::MAX)?; }
-            MemorySnapshotResidency::Resident { slot } => { writer.write_u8(1)?; writer.write_u32(slot)?; }
+            MemorySnapshotResidency::Swapped => {
+                writer.write_u8(0)?;
+                writer.write_u32(u32::MAX)?;
+            }
+            MemorySnapshotResidency::Resident { slot } => {
+                writer.write_u8(1)?;
+                writer.write_u32(slot)?;
+            }
         }
         memory.write_snapshot_block(block, writer)?;
     }
@@ -416,62 +471,174 @@ fn save_memory<W: SnapWrite>(memory: &mut BxMemC, writer: &mut W) -> SnapResult 
 }
 #[cfg(feature = "std")]
 fn restore_memory<R: SnapRead>(memory: &mut BxMemC, reader: &mut SnapshotReader<R>) -> SnapResult {
-    if reader.read_u32()? != SNAPSHOT_SECTION_VERSION { return Err(SnapError::Invalid("unsupported memory snapshot section version")); }
+    if reader.read_u32()? != SNAPSHOT_SECTION_VERSION {
+        return Err(SnapError::Invalid(
+            "unsupported memory snapshot section version",
+        ));
+    }
     let saved = MemorySnapshotGeometry {
-        guest_len: reader.read_u64()?, host_ram_len: reader.read_u64()?, block_size: reader.read_u64()?,
-        num_blocks: reader.read_u32()?, resident_capacity: reader.read_u32()?, used_blocks: reader.read_u32()?, next_swapout_guest_block: reader.read_u32()?,
+        guest_len: reader.read_u64()?,
+        host_ram_len: reader.read_u64()?,
+        block_size: reader.read_u64()?,
+        num_blocks: reader.read_u32()?,
+        resident_capacity: reader.read_u32()?,
+        used_blocks: reader.read_u32()?,
+        next_swapout_guest_block: reader.read_u32()?,
     };
     let live = memory.snapshot_geometry();
-    let rounded = saved.guest_len.checked_add(saved.block_size.checked_sub(1).ok_or(SnapError::Invalid("snapshot memory block size is zero"))?).ok_or(SnapError::Invalid("snapshot memory geometry overflows"))? / saved.block_size;
-    if saved.guest_len != live.guest_len || saved.host_ram_len != live.host_ram_len || saved.block_size != live.block_size || saved.num_blocks != live.num_blocks || saved.resident_capacity != live.resident_capacity || rounded != u64::from(saved.num_blocks) || saved.used_blocks > saved.resident_capacity || saved.used_blocks > saved.num_blocks || (saved.num_blocks == 0 && saved.next_swapout_guest_block != 0) || (saved.num_blocks != 0 && saved.next_swapout_guest_block >= saved.num_blocks) { return Err(SnapError::Invalid("snapshot memory geometry does not match machine")); }
-    let count = usize::try_from(saved.num_blocks).map_err(|_| SnapError::Invalid("snapshot memory block count does not fit usize"))?;
-    let slots = usize::try_from(saved.resident_capacity).map_err(|_| SnapError::Invalid("snapshot resident capacity does not fit usize"))?;
-    let mut map = Vec::new(); map.try_reserve_exact(count).map_err(|_| SnapError::Invalid("unable to allocate snapshot memory descriptors"))?;
-    let mut seen = Vec::new(); seen.try_reserve_exact(slots).map_err(|_| SnapError::Invalid("unable to allocate snapshot resident slots"))?; seen.resize(slots, false);
+    let rounded = saved
+        .guest_len
+        .checked_add(
+            saved
+                .block_size
+                .checked_sub(1)
+                .ok_or(SnapError::Invalid("snapshot memory block size is zero"))?,
+        )
+        .ok_or(SnapError::Invalid("snapshot memory geometry overflows"))?
+        / saved.block_size;
+    if saved.guest_len != live.guest_len
+        || saved.host_ram_len != live.host_ram_len
+        || saved.block_size != live.block_size
+        || saved.num_blocks != live.num_blocks
+        || saved.resident_capacity != live.resident_capacity
+        || rounded != u64::from(saved.num_blocks)
+        || saved.used_blocks > saved.resident_capacity
+        || saved.used_blocks > saved.num_blocks
+        || (saved.num_blocks == 0 && saved.next_swapout_guest_block != 0)
+        || (saved.num_blocks != 0 && saved.next_swapout_guest_block >= saved.num_blocks)
+    {
+        return Err(SnapError::Invalid(
+            "snapshot memory geometry does not match machine",
+        ));
+    }
+    let count = usize::try_from(saved.num_blocks)
+        .map_err(|_| SnapError::Invalid("snapshot memory block count does not fit usize"))?;
+    let slots = usize::try_from(saved.resident_capacity)
+        .map_err(|_| SnapError::Invalid("snapshot resident capacity does not fit usize"))?;
+    let mut map = Vec::new();
+    map.try_reserve_exact(count)
+        .map_err(|_| SnapError::Invalid("unable to allocate snapshot memory descriptors"))?;
+    let mut seen = Vec::new();
+    seen.try_reserve_exact(slots)
+        .map_err(|_| SnapError::Invalid("unable to allocate snapshot resident slots"))?;
+    seen.resize(slots, false);
     let mut used = 0usize;
     for block in 0..saved.num_blocks {
-        let tag = reader.read_u8()?; let slot = reader.read_u32()?;
-        let residency = match (tag, slot) {
-            (0, u32::MAX) => MemorySnapshotResidency::Swapped,
-            (1, slot) => {
-                let index = usize::try_from(slot).map_err(|_| SnapError::Invalid("snapshot resident slot does not fit usize"))?;
-                if index >= slots || seen[index] { return Err(SnapError::Invalid("snapshot resident slot is invalid or duplicate")); }
-                let offset = u64::from(slot).checked_mul(saved.block_size).ok_or(SnapError::Invalid("snapshot resident slot offset overflows"))?;
-                if offset.checked_add(memory_block_len(saved, block)?).ok_or(SnapError::Invalid("snapshot resident slot extent overflows"))? > saved.host_ram_len { return Err(SnapError::Invalid("snapshot resident slot exceeds host RAM")); }
-                seen[index] = true; used += 1; MemorySnapshotResidency::Resident { slot }
-            }
-            _ => return Err(SnapError::Invalid("snapshot memory residency tag is invalid")),
-        };
+        let tag = reader.read_u8()?;
+        let slot = reader.read_u32()?;
+        let residency =
+            match (tag, slot) {
+                (0, u32::MAX) => MemorySnapshotResidency::Swapped,
+                (1, slot) => {
+                    let index = usize::try_from(slot).map_err(|_| {
+                        SnapError::Invalid("snapshot resident slot does not fit usize")
+                    })?;
+                    if index >= slots || seen[index] {
+                        return Err(SnapError::Invalid(
+                            "snapshot resident slot is invalid or duplicate",
+                        ));
+                    }
+                    let offset =
+                        u64::from(slot)
+                            .checked_mul(saved.block_size)
+                            .ok_or(SnapError::Invalid(
+                                "snapshot resident slot offset overflows",
+                            ))?;
+                    if offset.checked_add(memory_block_len(saved, block)?).ok_or(
+                        SnapError::Invalid("snapshot resident slot extent overflows"),
+                    )? > saved.host_ram_len
+                    {
+                        return Err(SnapError::Invalid(
+                            "snapshot resident slot exceeds host RAM",
+                        ));
+                    }
+                    seen[index] = true;
+                    used += 1;
+                    MemorySnapshotResidency::Resident { slot }
+                }
+                _ => {
+                    return Err(SnapError::Invalid(
+                        "snapshot memory residency tag is invalid",
+                    ));
+                }
+            };
         map.push(residency);
         memory.read_snapshot_block(block, residency, reader)?;
     }
-    if used != usize::try_from(saved.used_blocks).map_err(|_| SnapError::Invalid("snapshot used count does not fit usize"))? || seen[..used].iter().any(|present| !present) { return Err(SnapError::Invalid("snapshot memory residency count is inconsistent")); }
+    if used
+        != usize::try_from(saved.used_blocks)
+            .map_err(|_| SnapError::Invalid("snapshot used count does not fit usize"))?
+        || seen[..used].iter().any(|present| !present)
+    {
+        return Err(SnapError::Invalid(
+            "snapshot memory residency count is inconsistent",
+        ));
+    }
     memory.finish_snapshot_restore(saved, &map)
 }
 
 #[cfg(feature = "std")]
-fn cpu_len<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>>(emu: &Emulator<T, E>) -> SnapResult<u64> {
-    let count = u32::try_from(emu.cpu_count()).map_err(|_| SnapError::Invalid("CPU count does not fit snapshot"))?;
+fn cpu_len<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>>(
+    emu: &Emulator<T, E>,
+) -> SnapResult<u64> {
+    let count = u32::try_from(emu.cpu_count())
+        .map_err(|_| SnapError::Invalid("CPU count does not fit snapshot"))?;
     let mut len = 8u64;
-    for index in 0..count as usize { len = checked_snapshot_len_add(len, checked_snapshot_len_add(12, emu.cpu_ref(index).snapshot_v3_body_len()?)?)?; }
+    for index in 0..count as usize {
+        len = checked_snapshot_len_add(
+            len,
+            checked_snapshot_len_add(12, emu.cpu_ref(index).snapshot_v3_body_len()?)?,
+        )?;
+    }
     Ok(len)
 }
 #[cfg(feature = "std")]
-fn save_cpus<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>, W: SnapWrite>(emu: &Emulator<T, E>, writer: &mut W) -> SnapResult {
-    writer.write_u32(SNAPSHOT_SECTION_VERSION)?; writer.write_u32(u32::try_from(emu.cpu_count()).map_err(|_| SnapError::Invalid("CPU count does not fit snapshot"))?)?;
-    for index in 0..emu.cpu_count() { let cpu = emu.cpu_ref(index); writer.write_u32(cpu.snapshot_cpu_id())?; writer.write_u64(cpu.snapshot_v3_body_len()?)?; cpu.save_snapshot_v3_body(writer)?; }
+fn save_cpus<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>, W: SnapWrite>(
+    emu: &Emulator<T, E>,
+    writer: &mut W,
+) -> SnapResult {
+    writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+    writer.write_u32(
+        u32::try_from(emu.cpu_count())
+            .map_err(|_| SnapError::Invalid("CPU count does not fit snapshot"))?,
+    )?;
+    for index in 0..emu.cpu_count() {
+        let cpu = emu.cpu_ref(index);
+        writer.write_u32(cpu.snapshot_cpu_id())?;
+        writer.write_u64(cpu.snapshot_v3_body_len()?)?;
+        cpu.save_snapshot_v3_body(writer)?;
+    }
     Ok(())
 }
 #[cfg(feature = "std")]
-fn lapic_len<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>>(emu: &Emulator<T, E>) -> SnapResult<u64> {
+fn lapic_len<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>>(
+    emu: &Emulator<T, E>,
+) -> SnapResult<u64> {
     let mut len = 8u64;
-    for index in 0..emu.cpu_count() { len = checked_snapshot_len_add(len, checked_snapshot_len_add(12, emu.cpu_ref(index).lapic.snapshot_v3_body_len()?)?)?; }
+    for index in 0..emu.cpu_count() {
+        len = checked_snapshot_len_add(
+            len,
+            checked_snapshot_len_add(12, emu.cpu_ref(index).lapic.snapshot_v3_body_len()?)?,
+        )?;
+    }
     Ok(len)
 }
 #[cfg(feature = "std")]
-fn save_lapics<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>, W: SnapWrite>(emu: &Emulator<T, E>, writer: &mut W) -> SnapResult {
-    writer.write_u32(SNAPSHOT_SECTION_VERSION)?; writer.write_u32(u32::try_from(emu.cpu_count()).map_err(|_| SnapError::Invalid("CPU count does not fit snapshot"))?)?;
-    for index in 0..emu.cpu_count() { let cpu = emu.cpu_ref(index); writer.write_u32(cpu.snapshot_cpu_id())?; writer.write_u64(cpu.lapic.snapshot_v3_body_len()?)?; cpu.lapic.save_snapshot_v3_body(writer)?; }
+fn save_lapics<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>, W: SnapWrite>(
+    emu: &Emulator<T, E>,
+    writer: &mut W,
+) -> SnapResult {
+    writer.write_u32(SNAPSHOT_SECTION_VERSION)?;
+    writer.write_u32(
+        u32::try_from(emu.cpu_count())
+            .map_err(|_| SnapError::Invalid("CPU count does not fit snapshot"))?,
+    )?;
+    for index in 0..emu.cpu_count() {
+        let cpu = emu.cpu_ref(index);
+        writer.write_u32(cpu.snapshot_cpu_id())?;
+        writer.write_u64(cpu.lapic.snapshot_v3_body_len()?)?;
+        cpu.lapic.save_snapshot_v3_body(writer)?;
+    }
     Ok(())
 }
 
@@ -484,12 +651,30 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
     }
 
     fn save_snapshot_body<W: SnapWrite>(&mut self, writer: &mut W) -> SnapResult {
-        writer.write_bytes(SNAPSHOT_MAGIC)?; writer.write_u32(SNAPSHOT_V3_VERSION)?; writer.write_u32(SNAPSHOT_V3_SECTION_ORDER.len() as u32)?;
+        writer.write_bytes(SNAPSHOT_MAGIC)?;
+        writer.write_u32(SNAPSHOT_V3_VERSION)?;
+        writer.write_u32(SNAPSHOT_V3_SECTION_ORDER.len() as u32)?;
         let memory_len = memory_payload_len(&self.memory)?;
-        write_section_with_limit(writer, SEC_MEMORY, memory_len, memory_len, |s| save_memory(&mut self.memory, s))?;
+        write_section_with_limit(writer, SEC_MEMORY, memory_len, memory_len, |s| {
+            save_memory(&mut self.memory, s)
+        })?;
         write_device_section(writer, &self.pc_system)?;
-        let platform_len = checked_snapshot_len_add(4, checked_snapshot_len_add(self.device_manager.fw_cfg.snapshot_v3_body_len()?, checked_snapshot_len_add(self.devices.snapshot_v3_body_len()?, self.device_manager.snapshot_v3_body_len()?)?)?)?;
-        write_section(writer, SEC_PLATFORM, platform_len, |s| { s.write_u32(SNAPSHOT_SECTION_VERSION)?; self.device_manager.fw_cfg.save_snapshot_v3_body(s)?; self.devices.save_snapshot_v3_body(s)?; self.device_manager.save_snapshot_v3_body(s) })?;
+        let platform_len = checked_snapshot_len_add(
+            4,
+            checked_snapshot_len_add(
+                self.device_manager.fw_cfg.snapshot_v3_body_len()?,
+                checked_snapshot_len_add(
+                    self.devices.snapshot_v3_body_len()?,
+                    self.device_manager.snapshot_v3_body_len()?,
+                )?,
+            )?,
+        )?;
+        write_section(writer, SEC_PLATFORM, platform_len, |s| {
+            s.write_u32(SNAPSHOT_SECTION_VERSION)?;
+            self.device_manager.fw_cfg.save_snapshot_v3_body(s)?;
+            self.devices.save_snapshot_v3_body(s)?;
+            self.device_manager.save_snapshot_v3_body(s)
+        })?;
         write_section(writer, SEC_CPU, cpu_len(self)?, |s| save_cpus(self, s))?;
         write_device_section(writer, self.device_manager.irq.pic())?;
         write_device_section(writer, &self.device_manager.pit)?;
@@ -498,12 +683,28 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
         write_device_section(writer, &self.device_manager.keyboard)?;
         write_device_section(writer, &self.device_manager.serial)?;
         write_device_section(writer, &self.device_manager.ide.drives)?;
-        let pci_len = checked_snapshot_len_add(4, checked_snapshot_len_add(self.device_manager.pci_bridge.snapshot_v3_body_len()?, checked_snapshot_len_add(self.device_manager.pci2isa.snapshot_v3_body_len()?, self.device_manager.ide.bus_master.snapshot_v3_body_len()?)?)?)?;
-        write_section(writer, SEC_PCI, pci_len, |s| { s.write_u32(SNAPSHOT_SECTION_VERSION)?; self.device_manager.pci_bridge.save_snapshot_v3_body(s)?; self.device_manager.pci2isa.save_snapshot_v3_body(s)?; self.device_manager.ide.bus_master.save_snapshot_v3_body(s) })?;
+        let pci_len = checked_snapshot_len_add(
+            4,
+            checked_snapshot_len_add(
+                self.device_manager.pci_bridge.snapshot_v3_body_len()?,
+                checked_snapshot_len_add(
+                    self.device_manager.pci2isa.snapshot_v3_body_len()?,
+                    self.device_manager.ide.bus_master.snapshot_v3_body_len()?,
+                )?,
+            )?,
+        )?;
+        write_section(writer, SEC_PCI, pci_len, |s| {
+            s.write_u32(SNAPSHOT_SECTION_VERSION)?;
+            self.device_manager.pci_bridge.save_snapshot_v3_body(s)?;
+            self.device_manager.pci2isa.save_snapshot_v3_body(s)?;
+            self.device_manager.ide.bus_master.save_snapshot_v3_body(s)
+        })?;
         write_device_section(writer, &self.device_manager.acpi)?;
         write_device_section(writer, &self.device_manager.vga)?;
         write_device_section(writer, self.device_manager.irq.ioapic())?;
-        write_section(writer, SEC_LAPIC, lapic_len(self)?, |s| save_lapics(self, s))?;
+        write_section(writer, SEC_LAPIC, lapic_len(self)?, |s| {
+            save_lapics(self, s)
+        })?;
         write_device_section(writer, &self.device_manager.hpet)
     }
 
@@ -524,16 +725,27 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
     }
 
     fn restore_snapshot_inner<R: Read>(&mut self, reader: &mut IoSource<R>) -> io::Result<()> {
-        let mut magic = [0u8; 8]; reader.read_bytes(&mut magic).restated()?;
-        if magic != *SNAPSHOT_MAGIC { return Err(invalid_snapshot("not a valid snapshot file")); }
+        let mut magic = [0u8; 8];
+        reader.read_bytes(&mut magic).restated()?;
+        if magic != *SNAPSHOT_MAGIC {
+            return Err(invalid_snapshot("not a valid snapshot file"));
+        }
         let version = reader.read_u32().restated()?;
-        if version != SNAPSHOT_V3_VERSION { return Err(invalid_snapshot("snapshot version is not supported")); }
-        let count = usize::try_from(reader.read_u32().restated()?).map_err(|_| invalid_snapshot("snapshot section count does not fit usize"))?;
-        if !(SNAPSHOT_V3_SECTION_ORDER.len()..=MAX_SNAPSHOT_COUNT).contains(&count) { return Err(invalid_snapshot("snapshot section count is invalid")); }
+        if version != SNAPSHOT_V3_VERSION {
+            return Err(invalid_snapshot("snapshot version is not supported"));
+        }
+        let count = usize::try_from(reader.read_u32().restated()?)
+            .map_err(|_| invalid_snapshot("snapshot section count does not fit usize"))?;
+        if !(SNAPSHOT_V3_SECTION_ORDER.len()..=MAX_SNAPSHOT_COUNT).contains(&count) {
+            return Err(invalid_snapshot("snapshot section count is invalid"));
+        }
         let live_bmdma = self.device_manager.bmdma_ports_base;
         let live_pm = self.device_manager.pm_ports_base;
         let live_sm = self.device_manager.sm_ports_base;
-        let live_vga = self.device_manager.vga.snapshot_v3_committed_mapping_target();
+        let live_vga = self
+            .device_manager
+            .vga
+            .snapshot_v3_committed_mapping_target();
         let mut expected = 0usize;
         let mut platform = None;
         let mut io_platform_decoded = false;
@@ -549,8 +761,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
         for _ in 0..count {
             let id = reader.read_u32().restated()?;
             let len = reader.read_u64().restated()?;
-            if expected == SNAPSHOT_V3_SECTION_ORDER.len() || id != SNAPSHOT_V3_SECTION_ORDER[expected] {
-                if SNAPSHOT_V3_SECTION_ORDER.contains(&id) { return Err(invalid_snapshot("snapshot known section is duplicate or out of order")); }
+            if expected == SNAPSHOT_V3_SECTION_ORDER.len()
+                || id != SNAPSHOT_V3_SECTION_ORDER[expected]
+            {
+                if SNAPSHOT_V3_SECTION_ORDER.contains(&id) {
+                    return Err(invalid_snapshot(
+                        "snapshot known section is duplicate or out of order",
+                    ));
+                }
                 let mut extension = SnapshotReader::new(&mut *reader, len).restated()?;
                 extension.discard().restated()?;
                 continue;
@@ -599,7 +817,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
                                 .map_err(|error| {
                                     snapshot_io_error_because(
                                         error,
-                                        format!("device-manager platform state is invalid: {error}"),
+                                        format!(
+                                            "device-manager platform state is invalid: {error}"
+                                        ),
                                     )
                                 })?,
                         );
@@ -624,11 +844,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
                     }
                     SEC_DMA => self.device_manager.dma.restore(&mut section).restated()?,
                     SEC_KEYBOARD => {
-                        keyboard =
-                            Some(self.device_manager.keyboard.restore(&mut section).restated()?);
+                        keyboard = Some(
+                            self.device_manager
+                                .keyboard
+                                .restore(&mut section)
+                                .restated()?,
+                        );
                     }
-                    SEC_SERIAL => self.device_manager.serial.restore(&mut section).restated()?,
-                    SEC_HARDDRV => self.device_manager.ide.drives.restore(&mut section).restated()?,
+                    SEC_SERIAL => self
+                        .device_manager
+                        .serial
+                        .restore(&mut section)
+                        .restated()?,
+                    SEC_HARDDRV => self
+                        .device_manager
+                        .ide
+                        .drives
+                        .restore(&mut section)
+                        .restated()?,
                     SEC_PCI => {
                         if section.read_u32().restated()? != SNAPSHOT_SECTION_VERSION {
                             return Err(invalid_snapshot(
@@ -645,7 +878,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
                             .restated()?;
                         pci = Some(
                             self.device_manager
-                                .ide.bus_master
+                                .ide
+                                .bus_master
                                 .restore_snapshot_v3_body(&mut section)
                                 .restated()?,
                         );
@@ -682,16 +916,30 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
             })?;
             expected += 1;
         }
-        if expected != SNAPSHOT_V3_SECTION_ORDER.len() { return Err(invalid_snapshot("snapshot is missing a required section")); }
-        if !reader.at_end()? { return Err(invalid_snapshot("snapshot has trailing bytes")); }
-        let platform = platform.ok_or_else(|| invalid_snapshot("snapshot platform section was not decoded"))?;
-        if !pit_decoded { return Err(invalid_snapshot("snapshot PIT section was not decoded")); }
-        if !cmos_decoded { return Err(invalid_snapshot("snapshot CMOS section was not decoded")); }
-        let keyboard = keyboard.ok_or_else(|| invalid_snapshot("snapshot keyboard section was not decoded"))?;
+        if expected != SNAPSHOT_V3_SECTION_ORDER.len() {
+            return Err(invalid_snapshot("snapshot is missing a required section"));
+        }
+        if !reader.at_end()? {
+            return Err(invalid_snapshot("snapshot has trailing bytes"));
+        }
+        let platform = platform
+            .ok_or_else(|| invalid_snapshot("snapshot platform section was not decoded"))?;
+        if !pit_decoded {
+            return Err(invalid_snapshot("snapshot PIT section was not decoded"));
+        }
+        if !cmos_decoded {
+            return Err(invalid_snapshot("snapshot CMOS section was not decoded"));
+        }
+        let keyboard = keyboard
+            .ok_or_else(|| invalid_snapshot("snapshot keyboard section was not decoded"))?;
         let acpi = acpi.ok_or_else(|| invalid_snapshot("snapshot ACPI section was not decoded"))?;
         let pci = pci.ok_or_else(|| invalid_snapshot("snapshot PCI section was not decoded"))?;
         let vga = vga.ok_or_else(|| invalid_snapshot("snapshot VGA section was not decoded"))?;
-        if !io_platform_decoded { return Err(invalid_snapshot("snapshot I/O platform state was not decoded")); }
+        if !io_platform_decoded {
+            return Err(invalid_snapshot(
+                "snapshot I/O platform state was not decoded",
+            ));
+        }
         for index in 0..self.cpu_count() {
             let cpu = self.cpu_ref(index);
             if cpu.snapshot_a20_mask() != self.pc_system.a20_mask().bits() {
@@ -709,74 +957,171 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
         let cmos = self.device_manager.cmos.post_restore_snapshot_v3();
         self.memory.set_a20_mask(self.pc_system.a20_mask());
         self.invalidate_all_cpu_host_mappings();
-        self.validate_post_restore_handles(pit, cmos, keyboard, acpi).restated()?;
-        self.device_manager.ide.bus_master.validate_snapshot_v3_timer_owners(&self.pc_system).restated()?;
-        self.device_manager.serial.validate_snapshot_v3_timer_handles(
-            |port, handle| self.pc_system.validate_timer_handle_owner(handle, TimerOwner::SerialFifo(port)),
-            |port, handle| self.pc_system.validate_timer_handle_owner(handle, TimerOwner::SerialTx(port)),
-        ).restated()?;
+        self.validate_post_restore_handles(pit, cmos, keyboard, acpi)
+            .restated()?;
+        self.device_manager
+            .ide
+            .bus_master
+            .validate_snapshot_v3_timer_owners(&self.pc_system)
+            .restated()?;
+        self.device_manager
+            .serial
+            .validate_snapshot_v3_timer_handles(
+                |port, handle| {
+                    self.pc_system
+                        .validate_timer_handle_owner(handle, TimerOwner::SerialFifo(port))
+                },
+                |port, handle| {
+                    self.pc_system
+                        .validate_timer_handle_owner(handle, TimerOwner::SerialTx(port))
+                },
+            )
+            .restated()?;
         self.reanchor_slowdown_after_restore()?;
         // Both interrupt controllers are restored now, so an older image's
         // unforwarded edges can finish the trip the fabric would have made
         // synchronously. Empty for anything this build wrote.
         if let Some(edges) = deferred_edges {
             for edge in edges.as_slice() {
-                self.device_manager
-                    .irq
-                    .set_ioapic_pin(edge.pin, edge.level);
+                self.device_manager.irq.set_ioapic_pin(edge.pin, edge.level);
             }
         }
-        if platform.desired_bmdma_base != pci.bmdma_base || platform.desired_pm_base != acpi.pm_base || platform.desired_sm_base != acpi.sm_base || platform.desired_vga_lfb_base != vga.lfb_base || platform.desired_vga_mmio_base != vga.mmio_base { return Err(invalid_snapshot("snapshot mapping targets disagree across sections")); }
+        if platform.desired_bmdma_base != pci.bmdma_base
+            || platform.desired_pm_base != acpi.pm_base
+            || platform.desired_sm_base != acpi.sm_base
+            || platform.desired_vga_lfb_base != vga.lfb_base
+            || platform.desired_vga_mmio_base != vga.mmio_base
+        {
+            return Err(invalid_snapshot(
+                "snapshot mapping targets disagree across sections",
+            ));
+        }
         self.finish_snapshot_restore_v3(
             live_bmdma, live_pm, live_sm, live_vga, platform, keyboard, cmos, acpi, vga, pci,
         )
     }
 
     fn restore_cpus<R: SnapRead>(&mut self, section: &mut SnapshotReader<R>) -> SnapResult {
-        if section.read_u32()? != SNAPSHOT_SECTION_VERSION { return Err(SnapError::Invalid("unsupported CPU snapshot section version")); }
-        let count = section.read_count(self.cpu_count())?; if count != self.cpu_count() { return Err(SnapError::Invalid("snapshot CPU count does not match machine")); }
-        for index in 0..count { let id = section.read_u32()?; if id != self.cpu_ref(index).snapshot_cpu_id() { return Err(SnapError::Invalid("snapshot CPU ID is not in configured order")); } let len = section.read_u64()?; let mut body = SnapshotReader::new(&mut *section, len)?; self.cpu_mut_at(index).restore_snapshot_v3_body(&mut body, id)?; body.finish_exact()?; }
+        if section.read_u32()? != SNAPSHOT_SECTION_VERSION {
+            return Err(SnapError::Invalid(
+                "unsupported CPU snapshot section version",
+            ));
+        }
+        let count = section.read_count(self.cpu_count())?;
+        if count != self.cpu_count() {
+            return Err(SnapError::Invalid(
+                "snapshot CPU count does not match machine",
+            ));
+        }
+        for index in 0..count {
+            let id = section.read_u32()?;
+            if id != self.cpu_ref(index).snapshot_cpu_id() {
+                return Err(SnapError::Invalid(
+                    "snapshot CPU ID is not in configured order",
+                ));
+            }
+            let len = section.read_u64()?;
+            let mut body = SnapshotReader::new(&mut *section, len)?;
+            self.cpu_mut_at(index)
+                .restore_snapshot_v3_body(&mut body, id)?;
+            body.finish_exact()?;
+        }
         Ok(())
     }
 
     fn restore_lapics<R: SnapRead>(&mut self, section: &mut SnapshotReader<R>) -> SnapResult {
-        if section.read_u32()? != SNAPSHOT_SECTION_VERSION { return Err(SnapError::Invalid("unsupported LAPIC snapshot section version")); }
-        let count = section.read_count(self.cpu_count())?; if count != self.cpu_count() { return Err(SnapError::Invalid("snapshot LAPIC count does not match machine")); }
-        for index in 0..count { let id = section.read_u32()?; if id != self.cpu_ref(index).snapshot_cpu_id() { return Err(SnapError::Invalid("snapshot LAPIC CPU ID is not in configured order")); } let len = section.read_u64()?; let mut body = SnapshotReader::new(&mut *section, len)?; let restored = self.cpu_mut_at(index).lapic.restore_snapshot_v3_body(&mut body)?; body.finish_exact()?; for handle in [restored.timer_handle, restored.vmx_timer_handle, restored.mwaitx_timer_handle].into_iter().flatten() { self.pc_system.validate_timer_handle_owner(handle, TimerOwner::Lapic(index))?; } }
+        if section.read_u32()? != SNAPSHOT_SECTION_VERSION {
+            return Err(SnapError::Invalid(
+                "unsupported LAPIC snapshot section version",
+            ));
+        }
+        let count = section.read_count(self.cpu_count())?;
+        if count != self.cpu_count() {
+            return Err(SnapError::Invalid(
+                "snapshot LAPIC count does not match machine",
+            ));
+        }
+        for index in 0..count {
+            let id = section.read_u32()?;
+            if id != self.cpu_ref(index).snapshot_cpu_id() {
+                return Err(SnapError::Invalid(
+                    "snapshot LAPIC CPU ID is not in configured order",
+                ));
+            }
+            let len = section.read_u64()?;
+            let mut body = SnapshotReader::new(&mut *section, len)?;
+            let restored = self
+                .cpu_mut_at(index)
+                .lapic
+                .restore_snapshot_v3_body(&mut body)?;
+            body.finish_exact()?;
+            for handle in [
+                restored.timer_handle,
+                restored.vmx_timer_handle,
+                restored.mwaitx_timer_handle,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                self.pc_system
+                    .validate_timer_handle_owner(handle, TimerOwner::Lapic(index))?;
+            }
+        }
         Ok(())
     }
 
-    fn validate_post_restore_handles(&self, pit: crate::iodev::pit::PitSnapshotRestoreState, cmos: crate::iodev::cmos::CmosSnapshotRestoreState, keyboard: crate::iodev::keyboard::KeyboardSnapshotRestore, acpi: crate::iodev::acpi::AcpiSnapshotRestore) -> SnapResult {
-        if let Some(handle) = pit.timer_handle { self.pc_system.validate_timer_handle_owner(handle, TimerOwner::Pit)?; }
-        for (handle, owner) in [(cmos.periodic_timer_handle, TimerOwner::CmosPeriodic), (cmos.one_second_timer_handle, TimerOwner::CmosOneSecond), (cmos.uip_timer_handle, TimerOwner::CmosUip), (keyboard.timer_handle, TimerOwner::Keyboard), (acpi.overflow_timer_handle, TimerOwner::AcpiPmOverflow)] { if let Some(handle) = handle { self.pc_system.validate_timer_handle_owner(handle, owner)?; } }
-        for (index, handle) in self.device_manager.hpet.timer_handles.iter().enumerate() { if let Some(handle) = handle { self.pc_system.validate_timer_handle_owner(*handle, TimerOwner::Hpet(index))?; } }
+    fn validate_post_restore_handles(
+        &self,
+        pit: crate::iodev::pit::PitSnapshotRestoreState,
+        cmos: crate::iodev::cmos::CmosSnapshotRestoreState,
+        keyboard: crate::iodev::keyboard::KeyboardSnapshotRestore,
+        acpi: crate::iodev::acpi::AcpiSnapshotRestore,
+    ) -> SnapResult {
+        if let Some(handle) = pit.timer_handle {
+            self.pc_system
+                .validate_timer_handle_owner(handle, TimerOwner::Pit)?;
+        }
+        for (handle, owner) in [
+            (cmos.periodic_timer_handle, TimerOwner::CmosPeriodic),
+            (cmos.one_second_timer_handle, TimerOwner::CmosOneSecond),
+            (cmos.uip_timer_handle, TimerOwner::CmosUip),
+            (keyboard.timer_handle, TimerOwner::Keyboard),
+            (acpi.overflow_timer_handle, TimerOwner::AcpiPmOverflow),
+        ] {
+            if let Some(handle) = handle {
+                self.pc_system.validate_timer_handle_owner(handle, owner)?;
+            }
+        }
+        for (index, handle) in self.device_manager.hpet.timer_handles.iter().enumerate() {
+            if let Some(handle) = handle {
+                self.pc_system
+                    .validate_timer_handle_owner(*handle, TimerOwner::Hpet(index))?;
+            }
+        }
         Ok(())
     }
 }
 
-
 #[cfg(all(test, feature = "std", feature = "alloc"))]
 mod tests {
 
-/// Emulator construction needs a bigger stack than the default 2 MiB test
-/// thread: `Emulator` is ~4 MiB and the debug build materialises a few
-/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
-/// enough concurrent reservations to intermittently exhaust the process
-/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
-const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
-    use super::*;
-    use crate::{
-        cpu::{
-            cpu::CpuActivityState,
-            instrumentation::CpuSetupMode,
-            X86Reg,
-        },
-        emulator::{EmulatorConfig, MemorySize},
-        params::BxParams,
-    };
-    use crate::iodev::devices::PendingPlatformWork;
-    use rusty_box_devices::pci::PciDevice;
+    /// Emulator construction needs a bigger stack than the default 2 MiB test
+    /// thread: `Emulator` is ~4 MiB and the debug build materialises a few
+    /// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
+    /// enough concurrent reservations to intermittently exhaust the process
+    /// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+    const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use std::io::Cursor;
+
+    use rusty_box_devices::pci::PciDevice;
+
+    use super::*;
+    use crate::cpu::X86Reg;
+    use crate::cpu::cpu::CpuActivityState;
+    use crate::cpu::instrumentation::CpuSetupMode;
+    use crate::emulator::{EmulatorConfig, MemorySize};
+    use crate::iodev::devices::PendingPlatformWork;
+    use crate::params::BxParams;
 
     /// Every section-owning device claims a distinct tag, and every tag it
     /// claims is one the container actually expects. A device whose `TAG` was
@@ -857,9 +1202,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         emu
     }
 
-    fn round_trip_smp(
-        source: &mut Emulator,
-    ) -> (Box<Emulator>, Vec<u8>) {
+    fn round_trip_smp(source: &mut Emulator) -> (Box<Emulator>, Vec<u8>) {
         source.service_scheduler_boundary(0).unwrap();
         let mut saved = Vec::new();
         source.save_snapshot(&mut saved).unwrap();
@@ -910,11 +1253,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         snapshot[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
 
-    fn assert_restore_error(
-        snapshot: &[u8],
-        kind: io::ErrorKind,
-        expected_message: &str,
-    ) {
+    fn assert_restore_error(snapshot: &[u8], kind: io::ErrorKind, expected_message: &str) {
         let mut emu = machine();
         let error = emu
             .restore_snapshot(&mut Cursor::new(snapshot))
@@ -1003,18 +1342,17 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
         let mut writer = SnapshotHeaderWriter { bytes: Vec::new() };
         writer.bytes.extend_from_slice(SNAPSHOT_MAGIC);
-        writer.bytes.extend_from_slice(&SNAPSHOT_V3_VERSION.to_le_bytes());
+        writer
+            .bytes
+            .extend_from_slice(&SNAPSHOT_V3_VERSION.to_le_bytes());
         writer
             .bytes
             .extend_from_slice(&(SNAPSHOT_V3_SECTION_ORDER.len() as u32).to_le_bytes());
-        let write_error = write_section_with_limit(
-            &mut writer,
-            SEC_MEMORY,
-            declared,
-            declared,
-            |section| section.write_u32(SNAPSHOT_SECTION_VERSION),
-        )
-        .unwrap_err();
+        let write_error =
+            write_section_with_limit(&mut writer, SEC_MEMORY, declared, declared, |section| {
+                section.write_u32(SNAPSHOT_SECTION_VERSION)
+            })
+            .unwrap_err();
 
         assert_eq!(write_error, SnapError::Host);
         assert_eq!(writer.bytes.len(), 28);
@@ -1028,8 +1366,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         );
 
         let mut empty: &[u8] = &[];
-        let mut section =
-            SnapshotReader::new_with_limit(&mut empty, declared, declared).unwrap();
+        let mut section = SnapshotReader::new_with_limit(&mut empty, declared, declared).unwrap();
         assert_eq!(section.read_u32().unwrap_err(), SnapError::Truncated);
     }
 
@@ -1044,23 +1381,25 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             // 4-sector disc, media init parks curr_lba at 3: READ(10) of
             // LBA 0 arms |0 - 3 + 1| / 4 of the 80 ms stroke = 40000 us.
             emu.device_manager
-                .ide.drives
+                .ide
+                .drives
                 .attach_cdrom_data(0, 0, vec![0u8; 2048 * 4]);
             {
                 let dm = &mut emu.device_manager;
                 let crate::iodev::devices::DeviceManager { ide, irq, .. } = dm;
-                ide.write(crate::iodev::IoPort::new(0x1f7), 0xA0, 1, irq); // PACKET
+                ide.write(crate::iodev::IoPort::new(0x1F7), 0xA0, 1, irq); // PACKET
                 let packet = [0x28u8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
                 for word in packet.chunks_exact(2) {
                     let value = u16::from_le_bytes([word[0], word[1]]) as u32;
-                    ide.write(crate::iodev::IoPort::new(0x1f0), value, 2, irq);
+                    ide.write(crate::iodev::IoPort::new(0x1F0), value, 2, irq);
                 }
             }
             // Apply the arm the way the I/O layer does after the OUT.
             let now = emu.pc_system.time_ticks();
             let arm_usec = emu
                 .device_manager
-                .ide.drives
+                .ide
+                .drives
                 .take_pending_seek_arm(0, 0)
                 .expect("ATAPI READ must arm the seek timer");
             assert_eq!(arm_usec, 40_000);
@@ -1078,7 +1417,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             // Advance to mid-seek and snapshot with the timer still armed.
             emu.service_scheduler_boundary(seek_ticks / 2).unwrap();
             let drive = &emu.device_manager.ide.drives.channels[0].drives[0];
-            assert!(!drive.controller.interrupt_pending, "seek must still be in flight");
+            assert!(
+                !drive.controller.interrupt_pending,
+                "seek must still be in flight"
+            );
 
             let mut saved = Vec::new();
             emu.save_snapshot(&mut saved).unwrap();
@@ -1093,10 +1435,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             emu.service_scheduler_boundary(seek_ticks / 2 + 2).unwrap();
             let drive = &emu.device_manager.ide.drives.channels[0].drives[0];
             assert!(drive.controller.interrupt_pending);
-            assert!(emu
-                .device_manager
-                .irq
-                .line_level(rusty_box_devices::api::IrqLine(14)));
+            assert!(
+                emu.device_manager
+                    .irq
+                    .line_level(rusty_box_devices::api::IrqLine(14))
+            );
         });
     }
 
@@ -1130,9 +1473,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             emu.cpu_mut().lapic.write_aligned(0x80, 0x20, 0);
             emu.device_manager.dma.ext_page_reg[3] = 0x42;
             emu.device_manager.cmos.ram[0x30] = 0x99;
-            emu.device_manager.serial.write(crate::iodev::IoPort::new(0x3FF), 0x77, 1);
+            emu.device_manager
+                .serial
+                .write(crate::iodev::IoPort::new(0x3FF), 0x77, 1);
             emu.service_scheduler_boundary(0).unwrap();
-
 
             let mut saved = Vec::new();
             emu.save_snapshot(&mut saved).unwrap();
@@ -1157,19 +1501,30 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             assert!(emu.device_manager.keyboard.kbd_controller.outb);
             // Non-default device families made it back.
             assert_eq!(
-                emu.device_manager.irq.ioapic().read_aligned(rusty_box_devices::api::WindowOffset(0x00)),
+                emu.device_manager
+                    .irq
+                    .ioapic()
+                    .read_aligned(rusty_box_devices::api::WindowOffset(0x00)),
                 0x12,
                 "IOAPIC IOREGSEL did not round-trip"
             );
             assert_eq!(
-                emu.device_manager.irq.ioapic().read_aligned(rusty_box_devices::api::WindowOffset(0x10)),
+                emu.device_manager
+                    .irq
+                    .ioapic()
+                    .read_aligned(rusty_box_devices::api::WindowOffset(0x10)),
                 0x0001_00E5,
                 "IOAPIC redirect entry did not round-trip"
             );
             assert_eq!(emu.cpu().lapic.read_aligned(0x80, 0), 0x20);
             assert_eq!(emu.device_manager.dma.ext_page_reg[3], 0x42);
             assert_eq!(emu.device_manager.cmos.ram[0x30], 0x99);
-            assert_eq!(emu.device_manager.serial.read(crate::iodev::IoPort::new(0x3FF), 1), 0x77);
+            assert_eq!(
+                emu.device_manager
+                    .serial
+                    .read(crate::iodev::IoPort::new(0x3FF), 1),
+                0x77
+            );
 
             let mut resaved = Vec::new();
             emu.save_snapshot(&mut resaved).unwrap();
@@ -1224,7 +1579,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         // poison, never re-drive an artificial edge.
         on_large_stack(|| {
             let mut source = machine();
-            source.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0x5A;
+            source
+                .device_manager
+                .keyboard
+                .kbd_controller
+                .kbd_output_buffer = 0x5A;
             source.device_manager.keyboard.kbd_controller.outb = true;
             // Deliberately do NOT raise PIC IRQ1: device-high / PIC-low.
             source.service_scheduler_boundary(0).unwrap();
@@ -1247,7 +1606,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             // Keyboard OBF with the line legitimately raised and unmasked so
             // the INT pin (and therefore the CPU event bit) asserts.
             source.device_manager.irq.pic_mut().master.imr = 0xFF & !0x02;
-            source.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0x5A;
+            source
+                .device_manager
+                .keyboard
+                .kbd_controller
+                .kbd_output_buffer = 0x5A;
             source.device_manager.keyboard.kbd_controller.outb = true;
             source
                 .device_manager
@@ -1267,10 +1630,12 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             // off a queue: an edge crossed during restore would drive the I/O
             // APIC pin and leave a delivery queued behind it, and the source's
             // own deliveries were drained before it was saved.
-            assert!(restored
-                .device_manager
-                .irq
-                .line_level(rusty_box_devices::api::IrqLine(1)));
+            assert!(
+                restored
+                    .device_manager
+                    .irq
+                    .line_level(rusty_box_devices::api::IrqLine(1))
+            );
             assert_eq!(
                 restored.device_manager.irq.ioapic().pin_state(1),
                 source_pin,
@@ -1283,8 +1648,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             // The CPU observes the restored line through the republished
             // event bits (Bochs cpu.h BX_EVENT_PENDING_INTR).
             assert_ne!(
-                restored.cpu().pending_event
-                    & crate::cpu::BxCpuC::<()>::BX_EVENT_PENDING_INTR,
+                restored.cpu().pending_event & crate::cpu::BxCpuC::<()>::BX_EVENT_PENDING_INTR,
                 0,
                 "restored PIC line did not republish the CPU event bit"
             );
@@ -1313,7 +1677,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             let divergent_section = first_difference.and_then(|index| {
                 snapshot_sections(&saved)
                     .into_iter()
-                    .find(|section| index >= section.header && index < section.payload + section.len)
+                    .find(|section| {
+                        index >= section.header && index < section.payload + section.len
+                    })
                     .map(|section| (section.id, index - section.payload))
             });
             assert!(
@@ -1330,7 +1696,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         on_large_stack(|| {
             let mut source = smp_machine();
             source.cpu_mut_at(0).set_rax(0x1111_2222_3333_4444);
-            source.cpu_mut_at(1).set_rax(0xaaaa_bbbb_cccc_dddd);
+            source.cpu_mut_at(1).set_rax(0xAAAA_BBBB_CCCC_DDDD);
             source.cpu_mut_at(0).activity_state = CpuActivityState::Hlt;
             source.cpu_mut_at(1).activity_state = CpuActivityState::WaitForSipi;
             source.rebuild_cpu_masks_from_scan();
@@ -1338,7 +1704,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             let (restored, _) = round_trip_smp(&mut source);
 
             assert_eq!(restored.cpu_ref(0).rax(), 0x1111_2222_3333_4444);
-            assert_eq!(restored.cpu_ref(1).rax(), 0xaaaa_bbbb_cccc_dddd);
+            assert_eq!(restored.cpu_ref(1).rax(), 0xAAAA_BBBB_CCCC_DDDD);
             assert_eq!(restored.cpu_ref(0).activity_state, CpuActivityState::Hlt);
             assert_eq!(
                 restored.cpu_ref(1).activity_state,
@@ -1350,11 +1716,11 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     #[test]
     fn snapshot_relocates_ide_acpi_and_vga_from_different_live_bases() {
         on_large_stack(|| {
-            const BMDMA: u32 = 0xc000;
-            const PM: u32 = 0xb000;
-            const SM: u32 = 0xb100;
-            const LFB: u32 = 0xd000_0000;
-            const MMIO: u32 = 0xf100_0000;
+            const BMDMA: u32 = 0xC000;
+            const PM: u32 = 0xB000;
+            const SM: u32 = 0xB100;
+            const LFB: u32 = 0xD000_0000;
+            const MMIO: u32 = 0xF100_0000;
 
             let mut source = relocation_machine();
             assert!(
@@ -1365,16 +1731,28 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .pci_write(0x20, BMDMA | 1, 4)
                     .bmdma_base_changed
             );
-            source.device_manager.pending.insert(PendingPlatformWork::PCI_IDE_BAR4);
+            source
+                .device_manager
+                .pending
+                .insert(PendingPlatformWork::PCI_IDE_BAR4);
             let pm = source.device_manager.acpi.pci_write(0x40, PM | 1, 4);
             let sm = source.device_manager.acpi.pci_write(0x90, SM | 1, 4);
             assert!(pm.pm_base_changed && sm.sm_base_changed);
-            source.device_manager.pending.insert(PendingPlatformWork::ACPI_PM_PORTS);
-            source.device_manager.pending.insert(PendingPlatformWork::ACPI_SM_PORTS);
+            source
+                .device_manager
+                .pending
+                .insert(PendingPlatformWork::ACPI_PM_PORTS);
+            source
+                .device_manager
+                .pending
+                .insert(PendingPlatformWork::ACPI_SM_PORTS);
             let lfb_change = source.device_manager.vga.pci_write(0x10, LFB, 4);
             let mmio_change = source.device_manager.vga.pci_write(0x18, MMIO, 4);
             assert!(lfb_change.lfb && mmio_change.mmio);
-            source.device_manager.pending.insert(PendingPlatformWork::VGA_BARS);
+            source
+                .device_manager
+                .pending
+                .insert(PendingPlatformWork::VGA_BARS);
             source.service_scheduler_boundary(0).unwrap();
 
             let desired_vga = source
@@ -1416,19 +1794,31 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             // landed in — routing the framebuffer through the token of the
             // legacy aperture would hand the card an LFB offset to decode as
             // planar memory.
-            let routes = |base: u64, window: rusty_box_devices::display::vga::VgaWindow, at: u64| {
-                (
-                    base,
-                    restored.memory.mmio.lookup(crate::config::BxPhyAddress::new(base)),
-                    Some(crate::memory::mmio_map::MmioHit {
-                        token: crate::iodev::DevSlot::VGA.mmio_window_token(window.id()),
-                        offset: at,
-                    }),
-                )
-            };
+            let routes =
+                |base: u64, window: rusty_box_devices::display::vga::VgaWindow, at: u64| {
+                    (
+                        base,
+                        restored
+                            .memory
+                            .mmio
+                            .lookup(crate::config::BxPhyAddress::new(base)),
+                        Some(crate::memory::mmio_map::MmioHit {
+                            token: crate::iodev::DevSlot::VGA.mmio_window_token(window.id()),
+                            offset: at,
+                        }),
+                    )
+                };
             for (base, actual, expected) in [
-                routes(0xA_0000, rusty_box_devices::display::vga::VgaWindow::Legacy, 0),
-                routes(u64::from(LFB) + 0x24, rusty_box_devices::display::vga::VgaWindow::Lfb, 0x24),
+                routes(
+                    0xA_0000,
+                    rusty_box_devices::display::vga::VgaWindow::Legacy,
+                    0,
+                ),
+                routes(
+                    u64::from(LFB) + 0x24,
+                    rusty_box_devices::display::vga::VgaWindow::Lfb,
+                    0x24,
+                ),
                 routes(
                     u64::from(MMIO) + 0x500,
                     rusty_box_devices::display::vga::VgaWindow::Registers,
@@ -1437,22 +1827,30 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             ] {
                 assert_eq!(actual, expected, "{base:#x} must route to its own window");
             }
-            assert!(!restored
-                .device_manager
-                .pending
-                .contains(PendingPlatformWork::PCI_IDE_BAR4));
-            assert!(!restored
-                .device_manager
-                .pending
-                .contains(PendingPlatformWork::ACPI_PM_PORTS));
-            assert!(!restored
-                .device_manager
-                .pending
-                .contains(PendingPlatformWork::ACPI_SM_PORTS));
-            assert!(!restored
-                .device_manager
-                .pending
-                .contains(PendingPlatformWork::VGA_BARS));
+            assert!(
+                !restored
+                    .device_manager
+                    .pending
+                    .contains(PendingPlatformWork::PCI_IDE_BAR4)
+            );
+            assert!(
+                !restored
+                    .device_manager
+                    .pending
+                    .contains(PendingPlatformWork::ACPI_PM_PORTS)
+            );
+            assert!(
+                !restored
+                    .device_manager
+                    .pending
+                    .contains(PendingPlatformWork::ACPI_SM_PORTS)
+            );
+            assert!(
+                !restored
+                    .device_manager
+                    .pending
+                    .contains(PendingPlatformWork::VGA_BARS)
+            );
         });
     }
 
@@ -1497,7 +1895,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             apic_source.service_scheduler_boundary(0).unwrap();
             apic_source
                 .cpu_mut_at(0)
-                .write_msr_for_api(0x1b, 0xfee1_0000 | 0x900)
+                .write_msr_for_api(0x1B, 0xFEE1_0000 | 0x900)
                 .unwrap();
             let mut apic_snapshot = Vec::new();
             apic_source.save_snapshot(&mut apic_snapshot).unwrap();
@@ -1625,11 +2023,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
             let mut trailing = saved;
             trailing.push(0);
-            assert_restore_error(
-                &trailing,
-                io::ErrorKind::InvalidData,
-                "trailing bytes",
-            );
+            assert_restore_error(&trailing, io::ErrorKind::InvalidData, "trailing bytes");
         });
     }
 

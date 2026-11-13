@@ -150,11 +150,7 @@ impl FineGrainedTrap {
 
 /// `bits` where `features` holds `feature`, 0 otherwise.
 const fn with(features: Features, feature: Feature, bits: u64) -> u64 {
-    if features.has(feature) {
-        bits
-    } else {
-        0
-    }
+    if features.has(feature) { bits } else { 0 }
 }
 
 /// A run of bits, `lo` to `hi` inclusive.

@@ -21,9 +21,9 @@
 
 use std::vec::Vec;
 
-use super::el2_tests::{restored, Machine};
+use super::el2_tests::{Machine, restored};
 use super::features::{Feature, Implementation};
-use super::{id, El, NoEl2, WithEl2};
+use super::{El, NoEl2, WithEl2, id};
 
 /// Where the word under test executes, and EL2's vector base (`el2.rs`'s).
 const CODE: u64 = 0x4_0000;

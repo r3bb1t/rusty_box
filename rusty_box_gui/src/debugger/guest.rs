@@ -6,8 +6,8 @@
 //! tests answer it from a page map.
 
 use rusty_box::cpu::{
-    CpuDebugView, CpuSnapshot, Fetched, Instrumentation, LinearRange, MappingWalk, PageMapping, VmxGuest,
-    WalkStep,
+    CpuDebugView, CpuSnapshot, Fetched, Instrumentation, LinearRange, MappingWalk, PageMapping,
+    VmxGuest, WalkStep,
 };
 use rusty_box::emulator::{DebugCpu, SliceEngine};
 
@@ -52,7 +52,8 @@ pub(crate) trait GuestMemory {
         while !rest.is_empty() {
             // The bytes left in `at`'s page: 1 to `PAGE_BYTES`.
             let in_page = PAGE_BYTES.wrapping_sub(at & (PAGE_BYTES - 1));
-            let take = usize::try_from(in_page).map_or(rest.len(), |in_page| in_page.min(rest.len()));
+            let take =
+                usize::try_from(in_page).map_or(rest.len(), |in_page| in_page.min(rest.len()));
             let Some((chunk, tail)) = std::mem::take(&mut rest).split_at_mut_checked(take) else {
                 return GuestRead::Unreadable;
             };
@@ -84,7 +85,13 @@ pub(crate) trait VmxGuestSpaces: GuestMemory {
     fn vmx_guest_translate(&mut self, guest: &VmxGuest, cr3: u64, linear: u64) -> Option<u64>;
     /// Visits each mapping of `range` in the address space at `cr3` inside
     /// `guest`.
-    fn vmx_guest_page_mappings<F>(&mut self, guest: &VmxGuest, cr3: u64, range: LinearRange, visit: F) -> MappingWalk
+    fn vmx_guest_page_mappings<F>(
+        &mut self,
+        guest: &VmxGuest,
+        cr3: u64,
+        range: LinearRange,
+        visit: F,
+    ) -> MappingWalk
     where
         F: FnMut(PageMapping) -> WalkStep;
 }
@@ -94,7 +101,13 @@ impl<T: Instrumentation, E: SliceEngine<T>> VmxGuestSpaces for DebugCpu<'_, T, E
         self.dbg_xlate_vmx_guest_linear2phy(guest, cr3, linear)
     }
 
-    fn vmx_guest_page_mappings<F>(&mut self, guest: &VmxGuest, cr3: u64, range: LinearRange, visit: F) -> MappingWalk
+    fn vmx_guest_page_mappings<F>(
+        &mut self,
+        guest: &VmxGuest,
+        cr3: u64,
+        range: LinearRange,
+        visit: F,
+    ) -> MappingWalk
     where
         F: FnMut(PageMapping) -> WalkStep,
     {
@@ -120,7 +133,10 @@ impl<G> PausedCpu<'_, G> {
     /// operation; else the processor's own.
     pub(crate) fn walked(&mut self) -> LiveAt<'_, Self> {
         let live_cr3 = self.vmx_guest.map(|guest| guest.cr3);
-        LiveAt { memory: self, live_cr3 }
+        LiveAt {
+            memory: self,
+            live_cr3,
+        }
     }
 }
 
@@ -272,8 +288,9 @@ impl<T: Instrumentation, E: SliceEngine<T>> GuestMemory for DebugCpu<'_, T, E> {
 pub(crate) mod fake {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::*;
     use rusty_box::cpu::PageAccess;
+
+    use super::*;
 
     pub(crate) const PAGE: u64 = 0x1000;
     /// The first address of the kernel half.
@@ -328,7 +345,11 @@ pub(crate) mod fake {
         /// too, onto the same physical pages, as a process's KVA-shadow
         /// tables map its user half.
         pub(crate) fn alias_user_half(&mut self, from: u64, to: u64) {
-            let pages = self.users.get(&(from & CR3_TABLE)).cloned().unwrap_or_default();
+            let pages = self
+                .users
+                .get(&(from & CR3_TABLE))
+                .cloned()
+                .unwrap_or_default();
             self.users.insert(to & CR3_TABLE, pages);
         }
 
@@ -403,7 +424,12 @@ pub(crate) mod fake {
         /// Every address space written so far, by its table address: the
         /// live one, each user half and each set of session pages.
         pub(crate) fn spaces(&self) -> BTreeSet<u64> {
-            let mut spaces: BTreeSet<u64> = self.users.keys().chain(self.sessions.keys()).copied().collect();
+            let mut spaces: BTreeSet<u64> = self
+                .users
+                .keys()
+                .chain(self.sessions.keys())
+                .copied()
+                .collect();
             spaces.insert(self.live_cr3 & CR3_TABLE);
             spaces
         }
@@ -411,7 +437,13 @@ pub(crate) mod fake {
         fn lookup(&self, cr3: u64, page: u64) -> Option<u64> {
             if page >= KERNEL_HALF {
                 let session = self.sessions.get(&cr3).and_then(|pages| pages.get(&page));
-                let shared = || if self.isolated.contains(&cr3) { None } else { self.kernel.get(&page) };
+                let shared = || {
+                    if self.isolated.contains(&cr3) {
+                        None
+                    } else {
+                        self.kernel.get(&page)
+                    }
+                };
                 session.or_else(shared).copied()
             } else {
                 self.users.get(&cr3)?.get(&page).copied()
@@ -451,7 +483,11 @@ pub(crate) mod fake {
             let empty = BTreeMap::new();
             let user = self.users.get(&cr3).unwrap_or(&empty);
             let session = self.sessions.get(&cr3).unwrap_or(&empty);
-            let shared = if self.isolated.contains(&cr3) { &empty } else { &self.kernel };
+            let shared = if self.isolated.contains(&cr3) {
+                &empty
+            } else {
+                &self.kernel
+            };
             let pages = user
                 .range(range.start..range.end)
                 .chain(session.range(range.start..range.end))
@@ -493,7 +529,10 @@ pub(crate) mod fake {
             let guest_spaces = memory.spaces();
             memory.isolate(vmm_cr3);
             memory.set_live_cr3(vmm_cr3);
-            FakeVmxHost { memory, guest_spaces }
+            FakeVmxHost {
+                memory,
+                guest_spaces,
+            }
         }
 
         fn is_guests(&self, cr3: u64) -> bool {
@@ -529,7 +568,13 @@ pub(crate) mod fake {
             self.memory.translate(Root::Process(cr3), linear)
         }
 
-        fn vmx_guest_page_mappings<F>(&mut self, _guest: &VmxGuest, cr3: u64, range: LinearRange, visit: F) -> MappingWalk
+        fn vmx_guest_page_mappings<F>(
+            &mut self,
+            _guest: &VmxGuest,
+            cr3: u64,
+            range: LinearRange,
+            visit: F,
+        ) -> MappingWalk
         where
             F: FnMut(PageMapping) -> WalkStep,
         {

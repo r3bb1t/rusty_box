@@ -214,11 +214,7 @@ fn powi_by_squaring_f32(mut base: f32, exponent: i32) -> f32 {
         base *= base;
         exp >>= 1;
     }
-    if negative {
-        1.0 / acc
-    } else {
-        acc
-    }
+    if negative { 1.0 / acc } else { acc }
 }
 
 #[cfg(not(feature = "std"))]
@@ -233,9 +229,5 @@ fn powi_by_squaring_f64(mut base: f64, exponent: i32) -> f64 {
         base *= base;
         exp >>= 1;
     }
-    if negative {
-        1.0 / acc
-    } else {
-        acc
-    }
+    if negative { 1.0 / acc } else { acc }
 }

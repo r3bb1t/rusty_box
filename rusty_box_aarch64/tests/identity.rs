@@ -300,7 +300,11 @@ fn the_gic_reads_the_identitys_iidrs() {
             })
             .expect("a bare machine builds");
         assert_eq!(guest_load(&mut m, GICC_IIDR), iidr, "with EL2");
-        assert_eq!(guest_load(&mut m, GICV_IIDR), iidr, "the virtual CPU interface");
+        assert_eq!(
+            guest_load(&mut m, GICV_IIDR),
+            iidr,
+            "the virtual CPU interface"
+        );
     }
     // Every field at its widest leaves the architecture version 2 between.
     let widest = IidrFields {

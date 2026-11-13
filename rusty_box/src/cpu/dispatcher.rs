@@ -6,14 +6,12 @@
 //! This is the central dispatch table, equivalent to Bochs cpu.cc's
 //! BX_CPU_C::cpu_loop() switch statement.
 
-use super::{
-    avx::{VexFmaForm, VexPackedFmaOp, VexScalarFmaOp, VexVarShiftOp},
-    avx512::PmovWiden,
-    avx512_gather::VexGatherForm,
-    avx512_misc::{PmovDst, PmovSat, PmovSrc},
-    decoder::{Instruction, Opcode},
-    simd_int, Result,
-};
+use super::avx::{VexFmaForm, VexPackedFmaOp, VexScalarFmaOp, VexVarShiftOp};
+use super::avx512::PmovWiden;
+use super::avx512_gather::VexGatherForm;
+use super::avx512_misc::{PmovDst, PmovSat, PmovSrc};
+use super::decoder::{Instruction, Opcode};
+use super::{Result, simd_int};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Execute one decoded instruction.
@@ -40,12 +38,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     fn dispatch_instruction(&mut self, instr: &Instruction) -> Result<()> {
-        use crate::cpu::arith16;
-        use crate::cpu::arith32;
-        use crate::cpu::arith8;
-        use crate::cpu::data_xfer16;
-        use crate::cpu::data_xfer32;
-        use crate::cpu::data_xfer8;
+        use crate::cpu::{arith8, arith16, arith32, data_xfer8, data_xfer16, data_xfer32};
 
         match instr.get_ia_opcode() {
             // =========================================================================
@@ -5409,8 +5402,9 @@ mod tests {
     /// or call-position uses — so the parse is exact.
     #[test]
     fn every_opcode_a_model_admits_has_a_dispatcher_arm() {
-        use crate::cpu::decoder::Opcode;
         use rusty_box_decoder::opcode_isa::OPCODE_VARIANT_COUNT;
+
+        use crate::cpu::decoder::Opcode;
 
         let source = include_str!("dispatcher.rs");
         let body = source.split("#[cfg(test)]").next().expect("non-test body");
@@ -5608,7 +5602,10 @@ mod tests {
 
         let error = cpu.execute_instruction(&instr).unwrap_err();
 
-        assert_eq!(error.to_string(), "Unimplemented opcode: Tdpbf16psTnnnTrmTreg");
+        assert_eq!(
+            error.to_string(),
+            "Unimplemented opcode: Tdpbf16psTnnnTrmTreg"
+        );
         match error {
             crate::cpu::CpuError::UnimplementedOpcode { opcode } => {
                 assert_eq!(format!("{opcode:?}"), "Tdpbf16psTnnnTrmTreg");
@@ -5725,8 +5722,8 @@ mod tests {
             (Opcode::V256VpsadbwVdqHdqWdq, 1, 4),
         ] {
             let mut machine =
-            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
+                crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+            let mut cpu = machine.ctx();
             enable_sse(&mut cpu);
             let instr = make_vpsadbw_instr(opcode, vl);
 
@@ -5772,7 +5769,6 @@ mod tests {
             crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
         let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
-
 
         let mut instr = Instruction::default();
         instr.set_ia_opcode(Opcode::V256VpsadbwVdqHdqWdq);
@@ -5857,15 +5853,25 @@ mod tests {
             let copied = memory
                 .write_ram(crate::config::BxPhyAddress::new(at), &bytes)
                 .expect("the page tables are RAM");
-            assert_eq!(copied, bytes.len(), "the entry at {at:#x} reached RAM whole");
+            assert_eq!(
+                copied,
+                bytes.len(),
+                "the entry at {at:#x} reached RAM whole"
+            );
         };
         map(PML4, PDPT | PRESENT_WRITABLE);
         map(PDPT, LOW_DIRECTORY | PRESENT_WRITABLE);
         map(LOW_DIRECTORY, PRESENT_WRITABLE | LARGE_PAGE);
         map(PDPT + HIGH_PDPT_SLOT * 8, HIGH_DIRECTORY | PRESENT_WRITABLE);
         map(HIGH_DIRECTORY, HIGH_TABLE | PRESENT_WRITABLE);
-        map(HIGH_TABLE + HIGH_DWORD_SLOT * 8, HIGH_DWORD_FRAME | PRESENT_WRITABLE);
-        map(HIGH_TABLE + HIGH_WORD_SLOT * 8, HIGH_WORD_FRAME | PRESENT_WRITABLE);
+        map(
+            HIGH_TABLE + HIGH_DWORD_SLOT * 8,
+            HIGH_DWORD_FRAME | PRESENT_WRITABLE,
+        );
+        map(
+            HIGH_TABLE + HIGH_WORD_SLOT * 8,
+            HIGH_WORD_FRAME | PRESENT_WRITABLE,
+        );
 
         let mut cpu = machine.ctx();
         cpu.reset(crate::cpu::ResetReason::Hardware);
@@ -5990,9 +5996,10 @@ mod tests {
             (Opcode::VxorpdVpdHpdWpd, VexLogicalOp::Xor),
         ] {
             for (vl, qword_count) in [(0, 2), (1, 4)] {
-                let mut machine =
-            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
+                let mut machine = crate::cpu::exec_ctx::TestMachine::with_model(
+                    crate::cpu::CpuModel::amd_ryzen(),
+                );
+                let mut cpu = machine.ctx();
                 enable_sse(&mut cpu);
                 let instr = make_vex_fp_logical_instr(opcode, vl);
                 for qword in 0..8 {
@@ -6037,7 +6044,6 @@ mod tests {
             crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
         let mut cpu = machine.ctx();
         enable_sse(&mut cpu);
-
 
         let mut instr = Instruction::default();
         instr.set_ia_opcode(Opcode::VxorpsVpsHpsWps);
@@ -6322,9 +6328,10 @@ mod tests {
                             _ => unreachable!(),
                         };
                         let opcode = vex_packed_fma_opcode(form, op, is_double);
-                        let mut machine =
-            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
+                        let mut machine = crate::cpu::exec_ctx::TestMachine::with_model(
+                            crate::cpu::CpuModel::amd_ryzen(),
+                        );
+                        let mut cpu = machine.ctx();
                         enable_sse(&mut cpu);
 
                         let mut instr = Instruction::default();
@@ -6413,9 +6420,10 @@ mod tests {
             ] {
                 for is_double in [false, true] {
                     let opcode = vex_scalar_fma_opcode(form, op, is_double);
-                    let mut machine =
-            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
+                    let mut machine = crate::cpu::exec_ctx::TestMachine::with_model(
+                        crate::cpu::CpuModel::amd_ryzen(),
+                    );
+                    let mut cpu = machine.ctx();
                     enable_sse(&mut cpu);
 
                     let mut instr = Instruction::default();
@@ -6503,12 +6511,11 @@ mod tests {
             ),
         ] {
             let mut machine =
-            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
+                crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+            let mut cpu = machine.ctx();
             enable_sse(&mut cpu);
             cpu.cpu_mode = CpuMode::Long64;
             cpu.linaddr_width = 48;
-
 
             let mut instr = Instruction::default();
             instr.set_ia_opcode(opcode);
@@ -6545,7 +6552,7 @@ mod tests {
                     "{opcode:?} {form:?} upper qword {qword}"
                 );
             }
-            }
+        }
     }
 
     // Build a scalar-ss FMA instruction: dst=vmm1, src1(rm)=vmm3, src2(vvvv)=vmm2.
@@ -6566,7 +6573,7 @@ mod tests {
     #[test]
     fn vex_fma_scalar_honors_mxcsr_rounding_mode() {
         use crate::cpu::softfloat3e::f32_mul_add::f32_mul_add;
-        use crate::cpu::softfloat3e::softfloat::{SoftFloatStatus, ROUND_NEAR_EVEN, ROUND_TO_ZERO};
+        use crate::cpu::softfloat3e::softfloat::{ROUND_NEAR_EVEN, ROUND_TO_ZERO, SoftFloatStatus};
 
         // VFMADD213SS: result = h*v + w. With h=3, v=1, w=2^24 the fused sum
         // 3 + 2^24 = 16_777_219 is inexact and rounds differently: nearest →
@@ -6575,7 +6582,7 @@ mod tests {
         let v = 1.0f32.to_bits(); // dst  → handler v
         let h = 3.0f32.to_bits(); // vvvv → handler h
         let w = 16_777_216.0f32.to_bits(); // rm → handler w  (= 2^24)
-                                           // Form 213 permutation → (a,b,c) = (h, v, w).
+        // Form 213 permutation → (a,b,c) = (h, v, w).
         let (a, b, c) = (h, v, w);
 
         let mut st_rne = SoftFloatStatus::default();
@@ -6793,8 +6800,8 @@ mod tests {
             [(Opcode::MinsdVsdWsd, true), (Opcode::MaxsdVsdWsd, true)]
         {
             let mut machine =
-            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
+                crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+            let mut cpu = machine.ctx();
             enable_sse(&mut cpu);
             let src = 2.0f64.to_bits();
             cpu.vmm[1].set_zmm64u(0, f64::NAN.to_bits());
@@ -6998,71 +7005,47 @@ mod tests {
         let select_src2 = if signed {
             let a = src1 as i8;
             let b = src2 as i8;
-            if take_max {
-                b > a
-            } else {
-                b < a
-            }
+            if take_max { b > a } else { b < a }
         } else if take_max {
             src2 > src1
         } else {
             src2 < src1
         };
-        if select_src2 {
-            src2
-        } else {
-            src1
-        }
+        if select_src2 { src2 } else { src1 }
     }
 
     fn expected_u16(src1: u16, src2: u16, signed: bool, take_max: bool) -> u16 {
         let select_src2 = if signed {
             let a = src1 as i16;
             let b = src2 as i16;
-            if take_max {
-                b > a
-            } else {
-                b < a
-            }
+            if take_max { b > a } else { b < a }
         } else if take_max {
             src2 > src1
         } else {
             src2 < src1
         };
-        if select_src2 {
-            src2
-        } else {
-            src1
-        }
+        if select_src2 { src2 } else { src1 }
     }
 
     fn expected_u32(src1: u32, src2: u32, signed: bool, take_max: bool) -> u32 {
         let select_src2 = if signed {
             let a = src1 as i32;
             let b = src2 as i32;
-            if take_max {
-                b > a
-            } else {
-                b < a
-            }
+            if take_max { b > a } else { b < a }
         } else if take_max {
             src2 > src1
         } else {
             src2 < src1
         };
-        if select_src2 {
-            src2
-        } else {
-            src1
-        }
+        if select_src2 { src2 } else { src1 }
     }
 
     #[test]
     fn vex_vpmin_vpmax_family_register_semantics() {
         for case in all_vpminmax_cases() {
             let mut machine =
-            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
+                crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
+            let mut cpu = machine.ctx();
             enable_sse(&mut cpu);
             let instr = make_vpminmax_instr(case.opcode, case.vl);
             for i in 0..64 {

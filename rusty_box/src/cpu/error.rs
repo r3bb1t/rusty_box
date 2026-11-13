@@ -1,6 +1,7 @@
 use thiserror::Error;
 
-use crate::cpu::{cpu::Exception, decoder::Opcode};
+use crate::cpu::cpu::Exception;
+use crate::cpu::decoder::Opcode;
 pub type Result<T> = core::result::Result<T, CpuError>;
 
 #[derive(Error, Debug)]

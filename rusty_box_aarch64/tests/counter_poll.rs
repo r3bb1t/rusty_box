@@ -34,6 +34,7 @@ struct Skipping {
 
 impl Instrumentation for Skipping {
     const EXECUTION: Execution = Execution::Skippable;
+
     fn branch(&mut self, _from: u64, _to: u64) {
         self.branches += 1;
     }
@@ -51,6 +52,7 @@ impl Instrumentation for Watching {
     fn before_execution(&mut self, _pc: u64, _insn: u32) {
         self.executed += 1;
     }
+
     fn branch(&mut self, _from: u64, _to: u64) {
         self.branches += 1;
     }

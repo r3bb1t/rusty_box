@@ -236,6 +236,7 @@ impl BxPhyAddress {
 
 impl core::ops::Add<u64> for BxPhyAddress {
     type Output = Self;
+
     /// [`BxPhyAddress::wrapping_add`].
     #[inline(always)]
     fn add(self, distance: u64) -> Self {
@@ -252,6 +253,7 @@ impl core::ops::AddAssign<u64> for BxPhyAddress {
 
 impl core::ops::Sub for BxPhyAddress {
     type Output = u64;
+
     /// [`BxPhyAddress::offset_from`].
     #[inline(always)]
     fn sub(self, base: Self) -> u64 {
@@ -369,8 +371,9 @@ pub struct WindowSlice<'a> {
 }
 
 impl<'a> IntoIterator for WindowSlice<'a> {
+    type IntoIter =
+        core::iter::Flatten<core::iter::Copied<core::slice::Iter<'a, Option<WindowDecl>>>>;
     type Item = WindowDecl;
-    type IntoIter = core::iter::Flatten<core::iter::Copied<core::slice::Iter<'a, Option<WindowDecl>>>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.decls.iter().copied().flatten()

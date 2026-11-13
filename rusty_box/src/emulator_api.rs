@@ -10,18 +10,17 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-
-#[cfg(feature = "alloc")]
-use crate::cpu::instrumentation::EmuStopReason;
-#[cfg(feature = "alloc")]
-use crate::emulator::StopReason;
-use crate::cpu::api_bridge::{ScaledLimit, SegmentSize};
-use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, X86Reg};
 #[cfg(feature = "alloc")]
 use crate::cpu::ResetReason;
-use crate::emulator::{Emulator, SliceEngine};
+use crate::cpu::api_bridge::{ScaledLimit, SegmentSize};
+#[cfg(feature = "alloc")]
+use crate::cpu::instrumentation::EmuStopReason;
+use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, X86Reg};
 #[cfg(feature = "alloc")]
 use crate::emulator::EmulatorConfig;
+#[cfg(feature = "alloc")]
+use crate::emulator::StopReason;
+use crate::emulator::{Emulator, SliceEngine};
 use crate::iodev::devices::DeviceManager;
 use crate::iodev::serial::SerialTxDrain;
 use crate::iodev::{BxDevicesC, DebugconDrain, Port80Drain};
@@ -139,18 +138,21 @@ impl rusty_box_core::machine::SerialPort for Serial<'_> {
 impl<T: crate::cpu::instrumentation::Instrumentation> rusty_box_core::machine::Machine
     for Emulator<T, crate::emulator::SoftwareEngine>
 {
-    type Outcome = crate::emulator::BatchOutcome;
     type Error = Error;
-    type Serial<'a>
-        = Serial<'a>
-    where
-        Self: 'a;
     type Keyboard<'a>
         = crate::emulator::Keyboard<'a>
     where
         Self: 'a;
+    type Outcome = crate::emulator::BatchOutcome;
+    type Serial<'a>
+        = Serial<'a>
+    where
+        Self: 'a;
 
-    fn step(&mut self, budget: rusty_box_core::run::RunBudget) -> Result<crate::emulator::BatchOutcome> {
+    fn step(
+        &mut self,
+        budget: rusty_box_core::run::RunBudget,
+    ) -> Result<crate::emulator::BatchOutcome> {
         Emulator::step(self, budget)
     }
 
@@ -279,7 +281,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
     pub fn get_enable_a20(&self) -> bool {
         self.pc_system.get_enable_a20()
     }
-
 }
 
 // ─────────────────────────── The observer ───────────────────────────
@@ -336,7 +337,9 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
 
     /// Write an MSR by index. Returns Err if the MSR is not writable.
     pub fn msr_write(&mut self, msr: u32, val: u64) -> Result<()> {
-        self.cpu_mut().write_msr_for_api(msr, val).map_err(Error::Cpu)
+        self.cpu_mut()
+            .write_msr_for_api(msr, val)
+            .map_err(Error::Cpu)
     }
 
     /// Build a CPU snapshot on demand. Not invoked by instrumentation — see
@@ -592,12 +595,15 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     pub fn set_exits(&mut self, addrs: &[u64]) {
         self.exit_set.set(addrs);
     }
+
     pub fn clear_exits(&mut self) {
         self.exit_set.clear();
     }
+
     pub fn add_exit(&mut self, addr: u64) -> bool {
         self.exit_set.add(addr)
     }
+
     pub fn remove_exit(&mut self, addr: u64) -> bool {
         self.exit_set.remove(addr)
     }
@@ -632,15 +638,14 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// Bypasses MMIO handlers — matches Unicorn `uc_mem_read` semantics.
     pub fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> Result<()> {
         let addr = crate::config::BxPhyAddress::new(addr);
-        let copied = self.memory.read_ram(
-            addr,
-            buf,
-        )?;
+        let copied = self.memory.read_ram(addr, buf)?;
         if copied != buf.len() {
-            return Err(Error::Memory(crate::memory::MemoryError::ReadPhysicalPage {
-                addr,
-                len: buf.len(),
-            }));
+            return Err(Error::Memory(
+                crate::memory::MemoryError::ReadPhysicalPage {
+                    addr,
+                    len: buf.len(),
+                },
+            ));
         }
         Ok(())
     }
@@ -661,12 +666,17 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
         while done < buf.len() {
             let at = offset
                 .checked_add(u64::try_from(done)?)
-                .ok_or(Error::Memory(crate::memory::MemoryError::ReadPhysicalPage {
-                    addr: bx_translate_linear_to_gpa(offset),
-                    len: buf.len(),
-                }))?;
+                .ok_or(Error::Memory(
+                    crate::memory::MemoryError::ReadPhysicalPage {
+                        addr: bx_translate_linear_to_gpa(offset),
+                        len: buf.len(),
+                    },
+                ))?;
             let stretch = bx_ram_stretch(at, buf.len() - done);
-            self.mem_read(bx_translate_linear_to_gpa(at).get(), &mut buf[done..done + stretch])?;
+            self.mem_read(
+                bx_translate_linear_to_gpa(at).get(),
+                &mut buf[done..done + stretch],
+            )?;
             done += stretch;
         }
         Ok(())
@@ -682,15 +692,14 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// Write bytes to guest physical RAM, including swapped blocks.
     pub fn mem_write(&mut self, addr: u64, data: &[u8]) -> Result<()> {
         let addr = crate::config::BxPhyAddress::new(addr);
-        let copied = self.memory.write_ram(
-            addr,
-            data,
-        )?;
+        let copied = self.memory.write_ram(addr, data)?;
         if copied != data.len() {
-            return Err(Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
-                addr,
-                len: data.len(),
-            }));
+            return Err(Error::Memory(
+                crate::memory::MemoryError::WritePhysicalPage {
+                    addr,
+                    len: data.len(),
+                },
+            ));
         }
         Ok(())
     }
@@ -702,10 +711,12 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
             let count = (size - offset).min(chunk.len());
             self.mem_write(
                 addr.checked_add(u64::try_from(offset)?)
-                    .ok_or(Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
-                        addr: crate::config::BxPhyAddress::new(addr),
-                        len: size,
-                    }))?,
+                    .ok_or(Error::Memory(
+                        crate::memory::MemoryError::WritePhysicalPage {
+                            addr: crate::config::BxPhyAddress::new(addr),
+                            len: size,
+                        },
+                    ))?,
                 &chunk[..count],
             )?;
             offset += count;
@@ -1039,9 +1050,9 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
                 // there. The fault itself travels as `CpuError::EngineFault`
                 // out of `step_exactly`/`step` above, which is the path a
                 // refusal takes on every machine that is running one.
-                StopReason::GuestPowerOff
-                | StopReason::StopRequested
-                | StopReason::EngineFault => return Ok(EmuStopReason::Stopped),
+                StopReason::GuestPowerOff | StopReason::StopRequested | StopReason::EngineFault => {
+                    return Ok(EmuStopReason::Stopped);
+                }
                 StopReason::CpuShutdown => return Ok(EmuStopReason::Shutdown),
                 StopReason::Halted => return Ok(EmuStopReason::Halted),
                 StopReason::Breakpoint(hit) => return Ok(EmuStopReason::ReachedBreakpoint(hit)),
@@ -1146,7 +1157,8 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     pub fn setup_cpu_mode(&mut self, mode: CpuSetupMode) -> Result<()> {
         let on_triple_fault = self.config().cpu_params.on_triple_fault_without_firmware();
         for cpu_index in 0..self.cpu_count() {
-            self.cpu_mut_at(cpu_index).set_on_triple_fault(on_triple_fault);
+            self.cpu_mut_at(cpu_index)
+                .set_on_triple_fault(on_triple_fault);
         }
         match mode {
             CpuSetupMode::RealMode => self.setup_real_mode(),
@@ -1275,13 +1287,8 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
         self.cpu_mut().set_gdtr_base_for_api(GDT_BASE);
         self.cpu_mut().set_gdtr_limit_for_api(0x1F);
 
-        self.cpu_mut().set_seg_for_api(
-            X86Reg::Cs,
-            CODE_SELECTOR,
-            0,
-            segments.limit,
-            segments.code,
-        );
+        self.cpu_mut()
+            .set_seg_for_api(X86Reg::Cs, CODE_SELECTOR, 0, segments.limit, segments.code);
         for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
             self.cpu_mut()
                 .set_seg_for_api(reg, DATA_SELECTOR, 0, segments.limit, segments.data);
@@ -1307,16 +1314,6 @@ struct FlatSegments {
 }
 
 impl FlatSegments {
-    const PROTECTED16: Self = Self {
-        code: SegmentSize::Bits16,
-        data: SegmentSize::Bits16,
-        limit: 0xFFFF,
-    };
-    const FLAT_PROTECTED32: Self = Self {
-        code: SegmentSize::Bits32,
-        data: SegmentSize::Bits32,
-        limit: 0xFFFF_FFFF,
-    };
     /// Long mode's data segments stay 32-bit — the descriptors a 64-bit
     /// operating system loads carry D/B set and L clear, because L belongs to
     /// code segments alone.
@@ -1324,6 +1321,16 @@ impl FlatSegments {
         code: SegmentSize::Long64,
         data: SegmentSize::Bits32,
         limit: 0xFFFF_FFFF,
+    };
+    const FLAT_PROTECTED32: Self = Self {
+        code: SegmentSize::Bits32,
+        data: SegmentSize::Bits32,
+        limit: 0xFFFF_FFFF,
+    };
+    const PROTECTED16: Self = Self {
+        code: SegmentSize::Bits16,
+        data: SegmentSize::Bits16,
+        limit: 0xFFFF,
     };
 }
 
@@ -1435,9 +1442,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let emu =
-                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
-                        .unwrap();
+                let emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatProtected32).unwrap();
                 // CR0.PE should be set
                 let cr0 = emu.reg_read(X86Reg::Cr0);
                 assert!(
@@ -1461,8 +1466,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
-                    .unwrap();
+                let emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
                 let cr0 = emu.reg_read(X86Reg::Cr0);
                 assert!(cr0 & 0x1 != 0, "CR0.PE not set");
                 assert!(cr0 & 0x8000_0000 != 0, "CR0.PG not set: {:#x}", cr0);
@@ -1476,7 +1480,6 @@ mod tests {
             .join()
             .unwrap();
     }
-
 
     /// FPU register round-trip: write FP80 bytes, read back.
     #[test]
@@ -1550,9 +1553,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu =
-                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
-                        .unwrap();
+                let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
                 let code_addr = 0x20_0000;
 
                 // CR4.OSFXSR | CR4.OSXSAVE, then XSETBV to put XCR0 at
@@ -1574,7 +1575,7 @@ mod tests {
                 let mut ymm7 = [0u8; 32];
                 for i in 0..32 {
                     ymm6[i] = 0x20 + i as u8;
-                    ymm7[i] = 0xa0 + i as u8;
+                    ymm7[i] = 0xA0 + i as u8;
                 }
                 emu.reg_write_ymm(X86Reg::Ymm6, ymm6);
                 emu.reg_write_ymm(X86Reg::Ymm7, ymm7);
@@ -1629,15 +1630,13 @@ mod tests {
             .unwrap();
     }
 
-
-
     /// Memory permissions basic operations.
     #[test]
     fn mem_permissions_basic() {
         use crate::cpu::instrumentation::MemPerms;
         use crate::memory::permissions::PagePermissions;
         let mut pp = PagePermissions::new(0x10_0000); // 1MB
-                                                      // Default: all permissions
+        // Default: all permissions
         assert!(pp.check(0x1000, MemPerms::READ));
         assert!(pp.check(0x1000, MemPerms::WRITE));
         assert!(pp.check(0x1000, MemPerms::EXEC));
@@ -1770,7 +1769,10 @@ mod tests {
                     emu.pump_gui_input();
                     read_com1(&mut emu, &mut received);
                 }
-                assert!(refusals > 0, "the burst never met the bound it exists to test");
+                assert!(
+                    refusals > 0,
+                    "the burst never met the bound it exists to test"
+                );
                 assert_eq!(received, burst);
             })
             .unwrap()
@@ -1862,12 +1864,13 @@ mod tests {
                 assert_eq!(out, b"OK", "port-0xE9 writes must survive in order");
 
                 // Draining is destructive — a second read sees nothing new.
-                assert!(emu
-                    .debug_port()
-                    .expect("the console is on")
-                    .take_output()
-                    .next()
-                    .is_none());
+                assert!(
+                    emu.debug_port()
+                        .expect("the console is on")
+                        .take_output()
+                        .next()
+                        .is_none()
+                );
             })
             .unwrap()
             .join()
@@ -1914,15 +1917,16 @@ mod tests {
                     memory_block_size: MIB,
                     ..Default::default()
                 };
-                let mut emu =
-                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
                 let code = 0x10000u64;
                 let resident_epoch = emu.memory.swap_epoch();
                 emu.mem_write(
                     code,
                     &[
-                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x10, 0x00, // mov al,[0x100000] (block 1)
-                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x20, 0x00, // mov al,[0x200000] (block 2)
+                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x10,
+                        0x00, // mov al,[0x100000] (block 1)
+                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x20,
+                        0x00, // mov al,[0x200000] (block 2)
                         0xBB, 0xED, 0x5E, 0x00, 0x00, // mov ebx,0x5EED
                         0xF4, // hlt
                     ],
@@ -1959,8 +1963,7 @@ mod tests {
                     memory_block_size: MIB,
                     ..Default::default()
                 };
-                let mut emu =
-                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
 
                 // One marker per non-code block, so a byte that survives an
                 // eviction round trip is the only way to read it back.
@@ -1988,7 +1991,11 @@ mod tests {
                     EmuStopReason::Halted
                 );
                 assert_eq!(emu.reg_read(X86Reg::Ebx), 0x5EED);
-                assert_eq!(emu.reg_read(X86Reg::Ecx), 0, "the loop must have run to zero");
+                assert_eq!(
+                    emu.reg_read(X86Reg::Ecx),
+                    0,
+                    "the loop must have run to zero"
+                );
                 assert_eq!(
                     emu.reg_read(X86Reg::Rax) & 0xFF,
                     0x77,
@@ -2026,8 +2033,7 @@ mod tests {
                         memory_block_size: MIB,
                         ..Default::default()
                     };
-                    let mut emu =
-                        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
                     emu.mem_write_u8(marker_addr, marker).unwrap();
                     let far = (marker_addr as u32).to_le_bytes();
                     let mut program = vec![
@@ -2084,8 +2090,7 @@ mod tests {
                         memory_block_size: MIB,
                         ..Default::default()
                     };
-                    let mut emu =
-                        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
                     emu.mem_write_u8(3 * MIB as u64, 0x33).unwrap();
                     // The load ends at 2 MiB - 2, so `mov ebx,imm32` straddles
                     // the block 1 / block 2 boundary and the HLT lands past it.
@@ -2141,8 +2146,7 @@ mod tests {
                     memory_block_size: MIB,
                     ..Default::default()
                 };
-                let mut emu =
-                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
                 // 0x1000 is the PML4 root: this write makes PML4[0] non-present.
                 let code = 0x1000u64;
                 emu.mem_write(code, &[0xBB, 0xED, 0x5E, 0x00, 0x00, 0xF4])

@@ -1,15 +1,11 @@
 #![allow(dead_code)]
 
-use crate::{
-    config::BxPhyAddress,
-    cpu::{
-        cpu::BX_ASYNC_EVENT_STOP_TRACE,
-        decoder::{decode32, decode64, DecodeError, Instruction, Opcode},
-        exec_ctx::ExecCtx,
-        tlb::{page_offset, ppf_of},
-        BxCpuC, Result,
-    },
-};
+use crate::config::BxPhyAddress;
+use crate::cpu::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+use crate::cpu::decoder::{DecodeError, Instruction, Opcode, decode32, decode64};
+use crate::cpu::exec_ctx::ExecCtx;
+use crate::cpu::tlb::{page_offset, ppf_of};
+use crate::cpu::{BxCpuC, Result};
 
 /// Number of entries in the machine-wide SMC page-write-stamp table.
 /// Bochs icache.h `bxPageWriteStampTable` allocates PHY_MEM_PAGES_IN_4G_SPACE
@@ -40,9 +36,9 @@ pub(crate) fn smc_cache_line_mask(p_addr: BxPhyAddress, len: u32) -> u32 {
         return 0;
     }
 
-    let page_off = (p_addr.get() as u32) & 0x0fff;
+    let page_off = (p_addr.get() as u32) & 0x0FFF;
     let first_line = page_off >> 7;
-    let last_byte = page_off.saturating_add(len - 1).min(0x0fff);
+    let last_byte = page_off.saturating_add(len - 1).min(0x0FFF);
     let last_line = last_byte >> 7;
     let line_count = last_line - first_line + 1;
     let range = if line_count == 32 {
@@ -179,7 +175,10 @@ impl TraceLink {
     #[inline]
     pub(crate) fn target(self, timestamp: u32, rip: u64) -> Option<(usize, usize)> {
         if self.timestamp == timestamp && self.expected_rip == rip {
-            Some(((self.packed & 0xF_FFFF) as usize, (self.packed >> 20) as usize))
+            Some((
+                (self.packed & 0xF_FFFF) as usize,
+                (self.packed >> 20) as usize,
+            ))
         } else {
             None
         }
@@ -908,7 +907,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                     }
 
                     current_p_addr += i_len as u64;
-                    current_page_offset = (current_page_offset + i_len) & 0xfff;
+                    current_page_offset = (current_page_offset + i_len) & 0xFFF;
                     current_fetch_ptr = &current_fetch_ptr[i_len as usize..];
 
                     // Try to find a trace starting from current pAddr and
@@ -1251,20 +1250,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 #[cfg(test)]
 mod smc_mask_tests {
 
-/// Emulator construction needs a bigger stack than the default 2 MiB test
-/// thread: `Emulator` is ~4 MiB and the debug build materialises a few
-/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
-/// enough concurrent reservations to intermittently exhaust the process
-/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
-const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
+    /// Emulator construction needs a bigger stack than the default 2 MiB test
+    /// thread: `Emulator` is ~4 MiB and the debug build materialises a few
+    /// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
+    /// enough concurrent reservations to intermittently exhaust the process
+    /// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+    const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::{
-        smc_cache_line_mask, BxICache, BxICacheEntry, BxPhyAddress, Opcode,
-        BX_ICACHE_INVALID_PHY_ADDRESS,
+        BX_ICACHE_INVALID_PHY_ADDRESS, BxICache, BxICacheEntry, BxPhyAddress, Opcode,
+        smc_cache_line_mask,
     };
-    use crate::{
-        cpu::{CpuSetupMode, X86Reg},
-        emulator::{Emulator, EmulatorConfig},
-    };
+    use crate::cpu::{CpuSetupMode, X86Reg};
+    use crate::emulator::{Emulator, EmulatorConfig};
 
     #[test]
     fn smc_mask_covers_every_touched_cache_line() {
@@ -1273,7 +1270,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         assert_eq!(smc_cache_line_mask(at(0x0180), 1), 1 << 3);
         assert_eq!(smc_cache_line_mask(at(0x0180), 0x0180), 0b111 << 3);
         assert_eq!(smc_cache_line_mask(at(0x0000), 0x1000), u32::MAX);
-        assert_eq!(smc_cache_line_mask(at(0x0f80), 0x0080), 1 << 31);
+        assert_eq!(smc_cache_line_mask(at(0x0F80), 0x0080), 1 << 31);
     }
 
     // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
@@ -1281,9 +1278,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     #[cfg(debug_assertions)]
     #[test]
     fn boundary_reserved_vvvv_executes_ia_error_not_decoder_failure() {
-        use crate::{cpu::cpu::Exception, error::Error};
+        use crate::cpu::cpu::Exception;
+        use crate::error::Error;
 
-        const CODE: u64 = 0x20_0ffe;
+        const CODE: u64 = 0x20_0FFE;
         const IDT: u64 = 0x28_0000;
         const HANDLER: u64 = 0x29_0000;
         const STACK_TOP: u64 = 0x30_0000;
@@ -1305,16 +1303,17 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     let mut gate = [0u8; 16];
                     gate[0..2].copy_from_slice(&(HANDLER as u16).to_le_bytes());
                     gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
-                    gate[5] = 0x8e;
+                    gate[5] = 0x8E;
                     gate[6..8].copy_from_slice(&((HANDLER >> 16) as u16).to_le_bytes());
                     gate[8..12].copy_from_slice(&((HANDLER >> 32) as u32).to_le_bytes());
                     emu.mem_write(IDT + u64::from(Exception::Ud as u8) * 16, &gate)
                         .unwrap();
-                    emu.mem_write(HANDLER, &[0xf4]).unwrap();
+                    emu.mem_write(HANDLER, &[0xF4]).unwrap();
 
                     let bytes = [0xC4, 0xE3, 0x75, opcode, 0xD8, 0x01];
                     emu.mem_write(CODE, &bytes).unwrap();
-                    let result = emu.emu_start(CODE, Some(CODE + bytes.len() as u64), None, Some(1));
+                    let result =
+                        emu.emu_start(CODE, Some(CODE + bytes.len() as u64), None, Some(1));
                     assert!(
                         !matches!(result, Err(Error::Cpu(crate::cpu::CpuError::Decoder(_)))),
                         "reserved-vvvv {opcode:#x} must become guest #UD, not CpuError::Decoder"
@@ -1360,11 +1359,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::new_with_mode(
-                    EmulatorConfig::default(),
-                    CpuSetupMode::FlatLong64,
-                )
-                .unwrap();
+                let mut emu =
+                    Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+                        .unwrap();
 
                 // nop; jz +0 (not taken: reset RFLAGS has ZF=0); nop; nop; ret
                 let bytes = [0x90, 0x74, 0x00, 0x90, 0x90, 0xC3];
@@ -1415,11 +1412,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::new_with_mode(
-                    EmulatorConfig::default(),
-                    CpuSetupMode::FlatLong64,
-                )
-                .unwrap();
+                let mut emu =
+                    Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+                        .unwrap();
                 emu.reg_write(X86Reg::Rsp, STACK);
 
                 let mut main = Vec::new();
@@ -1461,10 +1456,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(128 * 1024 * 1024)
             .spawn(|| {
                 let mut cache = BxICache::new();
-                let trace_start_paddr = BxPhyAddress::new(0x1ffe);
+                let trace_start_paddr = BxPhyAddress::new(0x1FFE);
                 let fetch_mode_mask = 0;
-                let primary_entry_idx =
-                    BxICache::hash(trace_start_paddr, fetch_mode_mask) as usize;
+                let primary_entry_idx = BxICache::hash(trace_start_paddr, fetch_mode_mask) as usize;
                 cache.entry[primary_entry_idx] = BxICacheEntry {
                     p_addr: trace_start_paddr,
                     trace_mask: 1 << 31,
@@ -1531,7 +1525,9 @@ mod const_initialiser_tests {
                 let cache = BxICache::new();
                 assert_eq!(cache.trace_link_time_stamp, 1);
                 assert!(
-                    cache.trace_links[0].target(cache.trace_link_time_stamp, 0).is_none(),
+                    cache.trace_links[0]
+                        .target(cache.trace_link_time_stamp, 0)
+                        .is_none(),
                     "a fresh link slot must not resolve"
                 );
             })
@@ -1540,7 +1536,6 @@ mod const_initialiser_tests {
             .unwrap();
     }
 }
-
 
 #[cfg(test)]
 mod power_on_state_tests {

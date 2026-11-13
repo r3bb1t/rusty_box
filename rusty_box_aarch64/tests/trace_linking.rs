@@ -59,17 +59,21 @@ impl Instrumentation for Heard {
     fn before_execution(&mut self, pc: u64, insn: u32) {
         self.mix(0, &[pc, u64::from(insn)]);
     }
+
     fn after_execution(&mut self, pc: u64, insn: u32) {
         self.mix(1, &[pc, u64::from(insn)]);
     }
+
     fn branch(&mut self, from: u64, to: u64) {
         self.mix(2, &[from, to]);
     }
+
     fn exception(&mut self, taken: ExceptionTaken) {
         let mut text = Vec::new();
         text.extend(format!("{taken:?}").bytes().map(u64::from));
         self.mix(3, &text);
     }
+
     fn wait(&mut self, pc: u64, wait: Wait) {
         let mut text = Vec::new();
         text.extend(format!("{wait:?}").bytes().map(u64::from));

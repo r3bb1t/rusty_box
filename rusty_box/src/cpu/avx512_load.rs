@@ -28,10 +28,8 @@
 //! word-granularity broadcasts, the non-broadcast masked loads) arrives with
 //! the handler families that name them, ported from `load.cc` at that point.
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-    xmm::BxPackedZmmRegister,
-};
+use super::decoder::{BxSegregs, Instruction};
+use super::xmm::BxPackedZmmRegister;
 
 /// Bochs xmm.h `BYTE_ELEMENTS` — byte lanes for a vector length.
 ///
@@ -113,9 +111,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn load_opmask32(&self, instr: &Instruction) -> u64 {
         let k = instr.opmask();
         if k == 0 {
-            0xffff_ffff
+            0xFFFF_FFFF
         } else {
-            self.opmask_rrx(k as usize) & 0xffff_ffff
+            self.opmask_rrx(k as usize) & 0xFFFF_FFFF
         }
     }
 
@@ -124,9 +122,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn load_opmask16(&self, instr: &Instruction) -> u64 {
         let k = instr.opmask();
         if k == 0 {
-            0xffff
+            0xFFFF
         } else {
-            self.opmask_rrx(k as usize) & 0xffff
+            self.opmask_rrx(k as usize) & 0xFFFF
         }
     }
 
@@ -135,9 +133,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn load_opmask8(&self, instr: &Instruction) -> u64 {
         let k = instr.opmask();
         if k == 0 {
-            0xff
+            0xFF
         } else {
-            self.opmask_rrx(k as usize) & 0xff
+            self.opmask_rrx(k as usize) & 0xFF
         }
     }
 

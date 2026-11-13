@@ -6,12 +6,11 @@
 //! texture. No threads, no Arc<Mutex<>> — the emulator and display are
 //! owned directly by the app.
 
-use rusty_box::{
-    emulator::{
-        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder, RunBudget,
-    },
-    gui::shared_display::SharedDisplay,
+use rusty_box::emulator::{
+    AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MachineBuilder,
+    MemorySize, RunBudget,
 };
+use rusty_box::gui::shared_display::SharedDisplay;
 
 /// The VGA BIOS padded to a whole number of 512-byte option-ROM blocks, which
 /// is what the ROM window expects.
@@ -26,9 +25,8 @@ fn padded_vga_bios() -> Vec<u8> {
 
 // Embedded binary assets (compiled into the WASM)
 const BIOS_DATA: &[u8] = include_bytes!("../../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
-const VGA_BIOS_DATA: &[u8] = include_bytes!(
-    "../../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"
-);
+const VGA_BIOS_DATA: &[u8] =
+    include_bytes!("../../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin");
 const DISK_DATA: &[u8] = include_bytes!("../../../dlxlinux/hd10meg.img");
 
 /// DLX Linux disk geometry
@@ -308,8 +306,8 @@ impl WasmEmulatorApp {
     /// Trigger a file picker for Alpine ISO upload (WASM).
     #[cfg(target_arch = "wasm32")]
     fn open_file_picker(&mut self) {
-        use wasm_bindgen::prelude::*;
         use wasm_bindgen::JsCast;
+        use wasm_bindgen::prelude::*;
 
         let document = web_sys::window().unwrap().document().unwrap();
         let input: web_sys::HtmlInputElement = document
@@ -793,11 +791,7 @@ mod tests {
             space_key(false),
         ];
 
-        let sent: Vec<u8> = press
-            .iter()
-            .flat_map(key_sequences)
-            .flatten()
-            .collect();
+        let sent: Vec<u8> = press.iter().flat_map(key_sequences).flatten().collect();
 
         assert_eq!(sent, [0x29, 0xF0, 0x29]);
     }

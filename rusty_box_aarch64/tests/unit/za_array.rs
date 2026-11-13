@@ -25,7 +25,7 @@ use std::vec;
 use std::vec::Vec;
 
 use super::super::features::{Feature, Implementation, VecLen};
-use super::super::step::{exec, processor, Taken, UNDEFINED};
+use super::super::step::{Taken, UNDEFINED, exec, processor};
 use super::super::sve::{Esize, Zv};
 use super::super::{Cpu, NoEl2};
 use crate::softfloat::FPCR_AH;

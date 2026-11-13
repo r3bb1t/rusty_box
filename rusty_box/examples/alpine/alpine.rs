@@ -23,14 +23,14 @@
 //! ALPINE_CHS=1024,16,63 ALPINE_DISK=alpine.img cargo run --release --example alpine --features std
 //! ```
 
-use rusty_box::{
-    emulator::{
-        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder,
-    },
-    gui::{NoGui, TermGui},
-    Result,
-};
 use std::time::Instant;
+
+use rusty_box::Result;
+use rusty_box::emulator::{
+    AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MachineBuilder,
+    MemorySize,
+};
+use rusty_box::gui::{NoGui, TermGui};
 
 fn main() {
     const THREAD_STACK_SIZE: usize = 1500 * 1024 * 1024; // 1.5 GB
@@ -404,7 +404,7 @@ fn run_alpine() -> Result<()> {
         0x5A, 0xF0, 0x5A, // Enter make + break
     ];
     const KEEP_ALIVE_SCANCODE: &[u8] = &[0x12, 0xF0, 0x12]; // Left Shift
-                                                            // PS/2 Set 2 scancode for Enter key
+    // PS/2 Set 2 scancode for Enter key
     const ENTER_SCANCODE: &[u8] = &[0x5A, 0xF0, 0x5A]; // Enter make + break
 
     let result = if headless {

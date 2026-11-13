@@ -4,7 +4,8 @@
 //! Based on bx_gui_c class from gui/gui.h
 //! This trait defines the interface that all GUI implementations must provide.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use rusty_box_devices::display::sink::{CursorPos, Dimensions, DisplaySink, Redraw, Rgb, TilePos};
 
@@ -225,7 +226,7 @@ impl DisplaySink for GuiSink<'_> {
         // absent one, and every `BxGui` implementation tests for it.
         let (cursor_x, cursor_y) = match cursor {
             Some(at) => (at.col, at.row),
-            None => (0xffff, 0xffff),
+            None => (0xFFFF, 0xFFFF),
         };
         self.gui
             .text_update(previous, current, cursor_x, cursor_y, info);

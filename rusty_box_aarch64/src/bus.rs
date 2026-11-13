@@ -659,7 +659,7 @@ pub struct NoGicSystemRegisters;
 pub trait PhysBus {
     /// Read `width` bytes at `addr`, little-endian, zero-extended to 64 bits.
     fn read(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock)
-        -> Result<u64, BusFault>;
+    -> Result<u64, BusFault>;
 
     /// Write the low `width` bytes of `value` at `addr`, little-endian.
     fn write(

@@ -100,7 +100,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         if (uitt_addr & 0x0E) != 0 {
             return self.exception(Exception::Gp, 0);
         }
-        if misc & 0xffffff0000000000u64 != 0 {
+        if misc & 0xFFFFFF0000000000u64 != 0 {
             return self.exception(Exception::Gp, 0);
         }
 

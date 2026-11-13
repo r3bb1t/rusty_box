@@ -10,12 +10,12 @@ use rusty_box_symbols::identity::{ModuleIdentity, PeImageId};
 use rusty_box_symbols::projects::ProjectIndex;
 use rusty_box_symbols::tables::ResolvedLine;
 
+pub(crate) use super::inspect::SymbolIndex;
 use super::inspect::{DebugSnapshot, ModuleSpace, SymModule};
 use super::module_identity::BuildAt;
-pub(crate) use super::inspect::SymbolIndex;
 pub(crate) use super::windows::ModulesElsewhere;
-pub(crate) use crate::symbols::hub::SymbolsView;
 use crate::symbols::hub::ModuleSymbols;
+pub(crate) use crate::symbols::hub::SymbolsView;
 
 /// A source line as the owner named it: the path's trailing components
 /// (`read.c`, `src\io\read.c`) and the line.
@@ -82,7 +82,10 @@ pub(crate) fn parse_target(text: &str) -> Result<TargetText<'_>, TargetError> {
         return Err(TargetError::NoLine);
     }
     match line.parse::<u32>() {
-        Ok(line) if line > 0 => Ok(TargetText::Source(SourceTarget { file: file.to_owned(), line })),
+        Ok(line) if line > 0 => Ok(TargetText::Source(SourceTarget {
+            file: file.to_owned(),
+            line,
+        })),
         Ok(_) | Err(_) => Err(TargetError::BadLine),
     }
 }
@@ -130,7 +133,10 @@ pub(crate) struct BreakpointModules<'a> {
 impl<'a> BreakpointModules<'a> {
     /// What `snapshot`'s pause resolves source breakpoints against.
     pub(crate) fn of(snapshot: &'a DebugSnapshot) -> Self {
-        BreakpointModules { index: &snapshot.symbols, elsewhere: &snapshot.elsewhere }
+        BreakpointModules {
+            index: &snapshot.symbols,
+            elsewhere: &snapshot.elsewhere,
+        }
     }
 }
 
@@ -154,8 +160,14 @@ pub(crate) struct AppliedBreakpoints {
 /// owner's projects' binaries, while any of the owner's breakpoints is a
 /// source line; none otherwise, so a pause without one reads no other
 /// process.
-pub(crate) fn binaries_to_find<'a>(targets: &[BreakpointTarget], projects: &'a ProjectIndex) -> &'a [String] {
-    if targets.iter().any(|target| matches!(target, BreakpointTarget::Source(_))) {
+pub(crate) fn binaries_to_find<'a>(
+    targets: &[BreakpointTarget],
+    projects: &'a ProjectIndex,
+) -> &'a [String] {
+    if targets
+        .iter()
+        .any(|target| matches!(target, BreakpointTarget::Source(_)))
+    {
         projects.binary_names()
     } else {
         &[]
@@ -170,11 +182,14 @@ pub(crate) fn admits<F>(scope: &ScopedAddress, mut build_at: F) -> bool
 where
     F: FnMut(u64) -> BuildAt,
 {
-    scope.images.iter().any(|placed| match build_at(placed.base) {
-        BuildAt::Image(found) => found == placed.image,
-        BuildAt::NoImage => false,
-        BuildAt::Unreadable => true,
-    })
+    scope
+        .images
+        .iter()
+        .any(|placed| match build_at(placed.base) {
+            BuildAt::Image(found) => found == placed.image,
+            BuildAt::NoImage => false,
+            BuildAt::Unreadable => true,
+        })
 }
 
 /// Why a source breakpoint has no place yet.
@@ -182,7 +197,9 @@ where
 pub(crate) enum PendingWhy {
     NoModuleHasLine,
     /// These modules' symbols are still being looked up.
-    SymbolsLoading { modules: Vec<String> },
+    SymbolsLoading {
+        modules: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -202,10 +219,13 @@ struct BuildLines<'a> {
 /// kernel's everywhere.
 fn space_of(module: &SymModule, identity: &ModuleIdentity) -> PlaceSpace {
     match (module.space, identity) {
-        (ModuleSpace::User, ModuleIdentity::Pe { image, .. }) => {
-            PlaceSpace::Image(PlacedImage { base: module.base, image: *image })
+        (ModuleSpace::User, ModuleIdentity::Pe { image, .. }) => PlaceSpace::Image(PlacedImage {
+            base: module.base,
+            image: *image,
+        }),
+        (ModuleSpace::User, ModuleIdentity::Elf { .. }) | (ModuleSpace::Kernel, _) => {
+            PlaceSpace::Everywhere
         }
-        (ModuleSpace::User, ModuleIdentity::Elf { .. }) | (ModuleSpace::Kernel, _) => PlaceSpace::Everywhere,
     }
 }
 
@@ -213,7 +233,11 @@ fn space_of(module: &SymModule, identity: &ModuleIdentity) -> PlaceSpace {
 /// line, in the modules' order, each code range's start a place, and each
 /// place once: a build loaded at the same base in several processes is one
 /// place.
-pub(crate) fn resolve(target: &SourceTarget, modules: &BreakpointModules<'_>, view: &SymbolsView) -> SourceResolution {
+pub(crate) fn resolve(
+    target: &SourceTarget,
+    modules: &BreakpointModules<'_>,
+    view: &SymbolsView,
+) -> SourceResolution {
     let elsewhere = modules.elsewhere.modules.iter().map(|found| &found.module);
     let mut places: Vec<ResolvedPlace> = Vec::new();
     let mut loading = Vec::new();
@@ -238,13 +262,19 @@ pub(crate) fn resolve(target: &SourceTarget, modules: &BreakpointModules<'_>, vi
             )
             | None => {}
         }
-        let known = match looked_up.iter().position(|build| build.identity == identity) {
+        let known = match looked_up
+            .iter()
+            .position(|build| build.identity == identity)
+        {
             Some(known) => known,
             None => {
                 let Some(tables) = view.tables(identity) else {
                     continue;
                 };
-                looked_up.push(BuildLines { identity, lines: tables.lines_of(&target.file, target.line) });
+                looked_up.push(BuildLines {
+                    identity,
+                    lines: tables.lines_of(&target.file, target.line),
+                });
                 looked_up.len().saturating_sub(1)
             }
         };
@@ -305,7 +335,12 @@ struct ResolvedUnder {
 
 impl ResolvedUnder {
     /// Whether these are `targets` under the pause `snapshot` and `view`.
-    fn same(&self, targets: &[BreakpointTarget], snapshot: Option<&Arc<DebugSnapshot>>, view: &SymbolsView) -> bool {
+    fn same(
+        &self,
+        targets: &[BreakpointTarget],
+        snapshot: Option<&Arc<DebugSnapshot>>,
+        view: &SymbolsView,
+    ) -> bool {
         let same_pause = match (&self.pause, snapshot) {
             (Some(held), Some(shown)) => std::ptr::eq(held.as_ptr(), Arc::as_ptr(shown)),
             (None, None) => true,
@@ -328,36 +363,62 @@ pub(crate) struct Resolutions {
 
 impl Resolutions {
     /// `targets` resolved under `modules`, none before a first pause.
-    pub(crate) fn of(targets: &[BreakpointTarget], modules: Option<&BreakpointModules<'_>>, view: &SymbolsView) -> Resolutions {
+    pub(crate) fn of(
+        targets: &[BreakpointTarget],
+        modules: Option<&BreakpointModules<'_>>,
+        view: &SymbolsView,
+    ) -> Resolutions {
         let mut sources: Vec<SourceResolved> = Vec::new();
         if let Some(modules) = modules {
             for target in targets {
                 if let BreakpointTarget::Source(source) = target {
                     if !sources.iter().any(|known| known.target == *source) {
-                        sources.push(SourceResolved { target: source.clone(), resolution: resolve(source, modules, view) });
+                        sources.push(SourceResolved {
+                            target: source.clone(),
+                            resolution: resolve(source, modules, view),
+                        });
                     }
                 }
             }
         }
         let applied = applied_of(targets, &sources);
-        Resolutions { under: None, sources, applied }
+        Resolutions {
+            under: None,
+            sources,
+            applied,
+        }
     }
 
     /// Brings them up to `targets` under the pause `snapshot` and `view`,
     /// worked out again only when one of those changed.
-    pub(crate) fn follow(&mut self, targets: &[BreakpointTarget], snapshot: Option<&Arc<DebugSnapshot>>, view: &SymbolsView) {
-        if self.under.as_ref().is_some_and(|under| under.same(targets, snapshot, view)) {
+    pub(crate) fn follow(
+        &mut self,
+        targets: &[BreakpointTarget],
+        snapshot: Option<&Arc<DebugSnapshot>>,
+        view: &SymbolsView,
+    ) {
+        if self
+            .under
+            .as_ref()
+            .is_some_and(|under| under.same(targets, snapshot, view))
+        {
             return;
         }
         let modules = snapshot.map(|shown| BreakpointModules::of(shown));
         *self = Resolutions::of(targets, modules.as_ref(), view);
-        self.under =
-            Some(ResolvedUnder { targets: targets.to_vec(), pause: snapshot.map(Arc::downgrade), generation: view.generation });
+        self.under = Some(ResolvedUnder {
+            targets: targets.to_vec(),
+            pause: snapshot.map(Arc::downgrade),
+            generation: view.generation,
+        });
     }
 
     /// How `target` resolved; `None` before a first pause.
     pub(crate) fn source(&self, target: &SourceTarget) -> Option<&SourceResolution> {
-        self.sources.iter().find(|known| known.target == *target).map(|known| &known.resolution)
+        self.sources
+            .iter()
+            .find(|known| known.target == *target)
+            .map(|known| &known.resolution)
     }
 
     /// The breakpoints the targets come to.
@@ -389,7 +450,10 @@ fn applied_of(targets: &[BreakpointTarget], sources: &[SourceResolved]) -> Appli
                 }
             }
             BreakpointTarget::Source(source) => {
-                let resolution = sources.iter().find(|known| known.target == *source).map(|known| &known.resolution);
+                let resolution = sources
+                    .iter()
+                    .find(|known| known.target == *source)
+                    .map(|known| &known.resolution);
                 let Some(SourceResolution::Resolved { places }) = resolution else {
                     continue;
                 };
@@ -397,13 +461,19 @@ fn applied_of(targets: &[BreakpointTarget], sources: &[SourceResolved]) -> Appli
                     add(CodeBreakpoint::Linear(place.address));
                     match place.space {
                         PlaceSpace::Everywhere => everywhere.push(place.address),
-                        PlaceSpace::Image(image) => match scopes.iter_mut().find(|scope| scope.linear == place.address) {
+                        PlaceSpace::Image(image) => match scopes
+                            .iter_mut()
+                            .find(|scope| scope.linear == place.address)
+                        {
                             Some(scope) => {
                                 if !scope.images.contains(&image) {
                                     scope.images.push(image);
                                 }
                             }
-                            None => scopes.push(ScopedAddress { linear: place.address, images: vec![image] }),
+                            None => scopes.push(ScopedAddress {
+                                linear: place.address,
+                                images: vec![image],
+                            }),
                         },
                     }
                 }
@@ -416,33 +486,54 @@ fn applied_of(targets: &[BreakpointTarget], sources: &[SourceResolved]) -> Appli
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::debugger::inspect::{AddressSpace, CodeTarget, GuestAddress, MemoryWindow, ViewContext, Viewing};
-    use crate::debugger::windows::{ProcessModule, ReadThrough, SystemListing, SystemView};
-    use crate::debugger::module_identity::GuestIdentity;
-    use crate::symbols::hub::{ModuleEntry, ModuleSymbols};
     use rusty_box_symbols::identity::{Guid, PdbId};
     use rusty_box_symbols::service::SymbolSource;
     use rusty_box_symbols::tables::SymbolTables;
-    use rusty_box_symbols_fixtures::pdb::{build_pdb, FixtureLine, FixtureProcedure, PdbFixture};
+    use rusty_box_symbols_fixtures::pdb::{FixtureLine, FixtureProcedure, PdbFixture, build_pdb};
     use rusty_box_symbols_fixtures::pe::PAGE_ALIGNED;
 
+    use super::*;
+    use crate::debugger::inspect::{
+        AddressSpace, CodeTarget, GuestAddress, MemoryWindow, ViewContext, Viewing,
+    };
+    use crate::debugger::module_identity::GuestIdentity;
+    use crate::debugger::windows::{ProcessModule, ReadThrough, SystemListing, SystemView};
+    use crate::symbols::hub::{ModuleEntry, ModuleSymbols};
+
     fn source(file: &str, line: u32) -> SourceTarget {
-        SourceTarget { file: file.to_owned(), line }
+        SourceTarget {
+            file: file.to_owned(),
+            line,
+        }
     }
 
     #[test]
     fn a_file_and_line_is_a_source_target() {
-        assert_eq!(parse_target("read.c:120"), Ok(TargetText::Source(source("read.c", 120))));
-        assert_eq!(parse_target(r" src\io\read.c:120 "), Ok(TargetText::Source(source(r"src\io\read.c", 120))));
-        assert_eq!(parse_target(r"C:\src\io\read.c:7"), Ok(TargetText::Source(source(r"C:\src\io\read.c", 7))));
+        assert_eq!(
+            parse_target("read.c:120"),
+            Ok(TargetText::Source(source("read.c", 120)))
+        );
+        assert_eq!(
+            parse_target(r" src\io\read.c:120 "),
+            Ok(TargetText::Source(source(r"src\io\read.c", 120)))
+        );
+        assert_eq!(
+            parse_target(r"C:\src\io\read.c:7"),
+            Ok(TargetText::Source(source(r"C:\src\io\read.c", 7)))
+        );
     }
 
     #[test]
     fn an_address_or_a_name_is_left_to_the_address_reader() {
         assert_eq!(parse_target("0x1234"), Ok(TargetText::Address("0x1234")));
-        assert_eq!(parse_target("nt!KeBugCheckEx"), Ok(TargetText::Address("nt!KeBugCheckEx")));
-        assert_eq!(parse_target("fffff800`12345678"), Ok(TargetText::Address("fffff800`12345678")));
+        assert_eq!(
+            parse_target("nt!KeBugCheckEx"),
+            Ok(TargetText::Address("nt!KeBugCheckEx"))
+        );
+        assert_eq!(
+            parse_target("fffff800`12345678"),
+            Ok(TargetText::Address("fffff800`12345678"))
+        );
     }
 
     #[test]
@@ -451,7 +542,10 @@ mod tests {
         assert_eq!(parse_target(r"C:\src\read.c"), Err(TargetError::NoLine));
         assert_eq!(parse_target(":3"), Err(TargetError::NoFile));
         assert_eq!(parse_target("read.c:0"), Err(TargetError::BadLine));
-        assert_eq!(parse_target("read.c:99999999999"), Err(TargetError::BadLine));
+        assert_eq!(
+            parse_target("read.c:99999999999"),
+            Err(TargetError::BadLine)
+        );
         assert_eq!(parse_target("read.c:1x"), Err(TargetError::BadLine));
     }
 
@@ -461,8 +555,15 @@ mod tests {
     fn identity(name: &str, byte: u8) -> ModuleIdentity {
         ModuleIdentity::Pe {
             file_name: name.into(),
-            image: PeImageId { time_date_stamp: u32::from(byte), size_of_image: 0x10_0000 },
-            pdb: Some(PdbId { name: name.replace(".sys", ".pdb"), guid: Guid::from_le_bytes([byte; 16]), age: 1 }),
+            image: PeImageId {
+                time_date_stamp: u32::from(byte),
+                size_of_image: 0x10_0000,
+            },
+            pdb: Some(PdbId {
+                name: name.replace(".sys", ".pdb"),
+                guid: Guid::from_le_bytes([byte; 16]),
+                age: 1,
+            }),
         }
     }
 
@@ -477,61 +578,124 @@ mod tests {
             len: 0x20,
             file: file.into(),
             checksum: None,
-            lines: vec![FixtureLine { offset: 0, line: 10 }, FixtureLine { offset: 8, line: 12 }],
+            lines: vec![
+                FixtureLine {
+                    offset: 0,
+                    line: 10,
+                },
+                FixtureLine {
+                    offset: 8,
+                    line: 12,
+                },
+            ],
         });
         Arc::new(SymbolTables::parse(&build_pdb(&fixture)).expect("the fixture parses"))
     }
 
     fn module(name: &str, base: u64, byte: u8) -> SymModule {
-        SymModule { base, size: 0x10_0000, name: name.into(), space: ModuleSpace::Kernel, identity: GuestIdentity::Known(identity(name, byte)) }
+        SymModule {
+            base,
+            size: 0x10_0000,
+            name: name.into(),
+            space: ModuleSpace::Kernel,
+            identity: GuestIdentity::Known(identity(name, byte)),
+        }
     }
 
     fn loaded(view: &mut SymbolsView, name: &str, byte: u8, file: &str) {
         let entry = ModuleEntry {
-            state: ModuleSymbols::Loaded { from: SymbolSource::Store { path: "store".into() } },
+            state: ModuleSymbols::Loaded {
+                from: SymbolSource::Store {
+                    path: "store".into(),
+                },
+            },
             tables: Some(tables(byte, file)),
         };
         view.modules.insert(identity(name, byte), entry);
     }
 
     fn pending(view: &mut SymbolsView, name: &str, byte: u8) {
-        view.modules.insert(identity(name, byte), ModuleEntry { state: ModuleSymbols::Pending, tables: None });
+        view.modules.insert(
+            identity(name, byte),
+            ModuleEntry {
+                state: ModuleSymbols::Pending,
+                tables: None,
+            },
+        );
     }
 
     fn two_drivers() -> SymbolIndex {
-        SymbolIndex { modules: vec![module("a.sys", A, 1), module("b.sys", B, 2)], kernel: None }
+        SymbolIndex {
+            modules: vec![module("a.sys", A, 1), module("b.sys", B, 2)],
+            kernel: None,
+        }
     }
 
     fn place(address: u64, module: &str, line: u32) -> ResolvedPlace {
-        ResolvedPlace { address, module: module.into(), line, space: PlaceSpace::Everywhere }
+        ResolvedPlace {
+            address,
+            module: module.into(),
+            line,
+            space: PlaceSpace::Everywhere,
+        }
     }
 
     fn resolve(target: &SourceTarget, index: &SymbolIndex, view: &SymbolsView) -> SourceResolution {
-        super::resolve(target, &BreakpointModules { index, elsewhere: &ModulesElsewhere::default() }, view)
+        super::resolve(
+            target,
+            &BreakpointModules {
+                index,
+                elsewhere: &ModulesElsewhere::default(),
+            },
+            view,
+        )
     }
 
-    fn applied_set(targets: &[BreakpointTarget], index: Option<&SymbolIndex>, view: &SymbolsView) -> Vec<CodeBreakpoint> {
-        let modules = index.map(|index| BreakpointModules { index, elsewhere: &NOWHERE });
+    fn applied_set(
+        targets: &[BreakpointTarget],
+        index: Option<&SymbolIndex>,
+        view: &SymbolsView,
+    ) -> Vec<CodeBreakpoint> {
+        let modules = index.map(|index| BreakpointModules {
+            index,
+            elsewhere: &NOWHERE,
+        });
         super::applied_set(targets, modules.as_ref(), view).set
     }
 
-    static NOWHERE: ModulesElsewhere = ModulesElsewhere { names: Vec::new(), modules: Vec::new() };
+    static NOWHERE: ModulesElsewhere = ModulesElsewhere {
+        names: Vec::new(),
+        modules: Vec::new(),
+    };
 
     const PROGRAM: u64 = 0x1_4000_0000;
     const SECOND: u64 = 0x3B0_0000;
     const MOVED: u64 = 0x5C0_0000;
 
     fn user(name: &str, base: u64, byte: u8) -> SymModule {
-        SymModule { space: ModuleSpace::User, ..module(name, base, byte) }
+        SymModule {
+            space: ModuleSpace::User,
+            ..module(name, base, byte)
+        }
     }
 
     fn in_process(cr3: u64, base: u64) -> ProcessModule {
-        ProcessModule { cr3, process: "prog.exe".into(), module: user("prog.exe", base, 3) }
+        ProcessModule {
+            cr3,
+            process: "prog.exe".into(),
+            module: user("prog.exe", base, 3),
+        }
     }
 
     /// `prog.exe`'s build (fixture byte 3) loaded at `base`.
     fn program_at(base: u64) -> PlacedImage {
-        PlacedImage { base, image: PeImageId { time_date_stamp: 3, size_of_image: 0x10_0000 } }
+        PlacedImage {
+            base,
+            image: PeImageId {
+                time_date_stamp: 3,
+                size_of_image: 0x10_0000,
+            },
+        }
     }
 
     /// A pause's modules, the owner's modules in other processes, and the
@@ -545,29 +709,52 @@ mod tests {
     /// `prog.exe` runs, and two more copies of it: one at the same base, one
     /// moved; `a.sys` is a driver.
     fn program_three_times() -> Pause {
-        let index = SymbolIndex { modules: vec![module("a.sys", A, 1), user("prog.exe", PROGRAM, 3)], kernel: None };
+        let index = SymbolIndex {
+            modules: vec![module("a.sys", A, 1), user("prog.exe", PROGRAM, 3)],
+            kernel: None,
+        };
         let elsewhere = ModulesElsewhere {
             names: vec!["prog.exe".into()],
-            modules: vec![in_process(SECOND, PROGRAM), in_process(MOVED, PROGRAM + 0x10_0000)],
+            modules: vec![
+                in_process(SECOND, PROGRAM),
+                in_process(MOVED, PROGRAM + 0x10_0000),
+            ],
         };
         let mut view = SymbolsView::default();
         loaded(&mut view, "a.sys", 1, r"d:\b\src\io\read.c");
         loaded(&mut view, "prog.exe", 3, r"d:\b\src\io\read.c");
-        Pause { index, elsewhere, view }
+        Pause {
+            index,
+            elsewhere,
+            view,
+        }
     }
 
     #[test]
     fn a_user_line_resolves_once_per_base_its_build_is_loaded_at_and_a_kernel_line_everywhere() {
-        let Pause { index, elsewhere, view } = program_three_times();
-        let modules = BreakpointModules { index: &index, elsewhere: &elsewhere };
+        let Pause {
+            index,
+            elsewhere,
+            view,
+        } = program_three_times();
+        let modules = BreakpointModules {
+            index: &index,
+            elsewhere: &elsewhere,
+        };
         let image = |base| PlaceSpace::Image(program_at(base));
         assert_eq!(
             super::resolve(&source("read.c", 10), &modules, &view),
             SourceResolution::Resolved {
                 places: vec![
                     place(A + 0x1100, "a.sys", 10),
-                    ResolvedPlace { space: image(PROGRAM), ..place(PROGRAM + 0x1100, "prog.exe", 10) },
-                    ResolvedPlace { space: image(PROGRAM + 0x10_0000), ..place(PROGRAM + 0x10_1100, "prog.exe", 10) },
+                    ResolvedPlace {
+                        space: image(PROGRAM),
+                        ..place(PROGRAM + 0x1100, "prog.exe", 10)
+                    },
+                    ResolvedPlace {
+                        space: image(PROGRAM + 0x10_0000),
+                        ..place(PROGRAM + 0x10_1100, "prog.exe", 10)
+                    },
                 ]
             },
             "the copy at the running one's base is the same place"
@@ -576,27 +763,50 @@ mod tests {
 
     #[test]
     fn a_user_place_stops_where_its_build_is_loaded_and_a_typed_address_everywhere() {
-        let Pause { index, elsewhere, view } = program_three_times();
-        let modules = BreakpointModules { index: &index, elsewhere: &elsewhere };
+        let Pause {
+            index,
+            elsewhere,
+            view,
+        } = program_three_times();
+        let modules = BreakpointModules {
+            index: &index,
+            elsewhere: &elsewhere,
+        };
         let line = [BreakpointTarget::Source(source("read.c", 10))];
         let applied = super::applied_set(&line, Some(&modules), &view);
         assert_eq!(
             applied.set,
-            [CodeBreakpoint::Linear(A + 0x1100), CodeBreakpoint::Linear(PROGRAM + 0x1100), CodeBreakpoint::Linear(PROGRAM + 0x10_1100)]
+            [
+                CodeBreakpoint::Linear(A + 0x1100),
+                CodeBreakpoint::Linear(PROGRAM + 0x1100),
+                CodeBreakpoint::Linear(PROGRAM + 0x10_1100)
+            ]
         );
         assert_eq!(
             applied.scopes,
             [
-                ScopedAddress { linear: PROGRAM + 0x1100, images: vec![program_at(PROGRAM)] },
-                ScopedAddress { linear: PROGRAM + 0x10_1100, images: vec![program_at(PROGRAM + 0x10_0000)] },
+                ScopedAddress {
+                    linear: PROGRAM + 0x1100,
+                    images: vec![program_at(PROGRAM)]
+                },
+                ScopedAddress {
+                    linear: PROGRAM + 0x10_1100,
+                    images: vec![program_at(PROGRAM + 0x10_0000)]
+                },
             ],
             "the driver's line is global"
         );
-        let typed = [line[0].clone(), BreakpointTarget::Address(CodeBreakpoint::Linear(PROGRAM + 0x1100))];
+        let typed = [
+            line[0].clone(),
+            BreakpointTarget::Address(CodeBreakpoint::Linear(PROGRAM + 0x1100)),
+        ];
         let applied = super::applied_set(&typed, Some(&modules), &view);
         assert_eq!(
             applied.scopes,
-            [ScopedAddress { linear: PROGRAM + 0x10_1100, images: vec![program_at(PROGRAM + 0x10_0000)] }],
+            [ScopedAddress {
+                linear: PROGRAM + 0x10_1100,
+                images: vec![program_at(PROGRAM + 0x10_0000)]
+            }],
             "an address the owner typed stops in every process"
         );
     }
@@ -606,9 +816,22 @@ mod tests {
     #[test]
     fn a_user_line_is_scoped_by_its_build_without_a_process_list() {
         let Pause { index, view, .. } = program_three_times();
-        let modules = BreakpointModules { index: &index, elsewhere: &NOWHERE };
-        let applied = super::applied_set(&[BreakpointTarget::Source(source("read.c", 10))], Some(&modules), &view);
-        assert_eq!(applied.scopes, [ScopedAddress { linear: PROGRAM + 0x1100, images: vec![program_at(PROGRAM)] }]);
+        let modules = BreakpointModules {
+            index: &index,
+            elsewhere: &NOWHERE,
+        };
+        let applied = super::applied_set(
+            &[BreakpointTarget::Source(source("read.c", 10))],
+            Some(&modules),
+            &view,
+        );
+        assert_eq!(
+            applied.scopes,
+            [ScopedAddress {
+                linear: PROGRAM + 0x1100,
+                images: vec![program_at(PROGRAM)]
+            }]
+        );
         assert_eq!(applied.set.len(), 2);
     }
 
@@ -618,14 +841,36 @@ mod tests {
     #[test]
     fn a_thread_views_pause_keeps_the_running_programs_line() {
         let Pause { view, .. } = program_three_times();
-        let viewed = SymbolIndex { modules: vec![module("a.sys", A, 1), user("other.exe", PROGRAM, 4)], kernel: None };
-        let elsewhere = ModulesElsewhere { names: vec!["prog.exe".into()], modules: vec![in_process(SECOND, PROGRAM)] };
-        let modules = BreakpointModules { index: &viewed, elsewhere: &elsewhere };
-        let applied = super::applied_set(&[BreakpointTarget::Source(source("read.c", 10))], Some(&modules), &view);
-        assert_eq!(applied.set, [CodeBreakpoint::Linear(A + 0x1100), CodeBreakpoint::Linear(PROGRAM + 0x1100)]);
+        let viewed = SymbolIndex {
+            modules: vec![module("a.sys", A, 1), user("other.exe", PROGRAM, 4)],
+            kernel: None,
+        };
+        let elsewhere = ModulesElsewhere {
+            names: vec!["prog.exe".into()],
+            modules: vec![in_process(SECOND, PROGRAM)],
+        };
+        let modules = BreakpointModules {
+            index: &viewed,
+            elsewhere: &elsewhere,
+        };
+        let applied = super::applied_set(
+            &[BreakpointTarget::Source(source("read.c", 10))],
+            Some(&modules),
+            &view,
+        );
+        assert_eq!(
+            applied.set,
+            [
+                CodeBreakpoint::Linear(A + 0x1100),
+                CodeBreakpoint::Linear(PROGRAM + 0x1100)
+            ]
+        );
         assert_eq!(
             applied.scopes,
-            [ScopedAddress { linear: PROGRAM + 0x1100, images: vec![program_at(PROGRAM)] }],
+            [ScopedAddress {
+                linear: PROGRAM + 0x1100,
+                images: vec![program_at(PROGRAM)]
+            }],
             "other.exe at the same base is not the program"
         );
     }
@@ -640,12 +885,22 @@ mod tests {
         let line = [BreakpointTarget::Source(source("read.c", 10))];
         let mut resolutions = Resolutions::default();
         resolutions.follow(&line, None, &view);
-        assert_eq!(resolutions.source(&source("read.c", 10)), None, "before a pause");
+        assert_eq!(
+            resolutions.source(&source("read.c", 10)),
+            None,
+            "before a pause"
+        );
         resolutions.follow(&line, Some(&pause), &view);
-        assert!(matches!(resolutions.source(&source("read.c", 10)), Some(SourceResolution::Resolved { .. })));
+        assert!(matches!(
+            resolutions.source(&source("read.c", 10)),
+            Some(SourceResolution::Resolved { .. })
+        ));
         assert_eq!(resolutions.applied().set.len(), 2);
         // The same generation is the same view: nothing is worked out again.
-        let mut emptied = SymbolsView { generation: view.generation, ..SymbolsView::default() };
+        let mut emptied = SymbolsView {
+            generation: view.generation,
+            ..SymbolsView::default()
+        };
         resolutions.follow(&line, Some(&pause), &emptied);
         assert_eq!(resolutions.applied().set.len(), 2, "kept");
         emptied.generation = view.generation.wrapping_add(1);
@@ -654,7 +909,10 @@ mod tests {
         let another = Arc::new(pause_over(index));
         resolutions.follow(&line, Some(&another), &view);
         assert_eq!(resolutions.applied().set.len(), 2, "a new pause");
-        let typed = [line[0].clone(), BreakpointTarget::Address(CodeBreakpoint::Linear(0x1000))];
+        let typed = [
+            line[0].clone(),
+            BreakpointTarget::Address(CodeBreakpoint::Linear(0x1000)),
+        ];
         resolutions.follow(&typed, Some(&another), &view);
         assert_eq!(resolutions.applied().set.len(), 3, "new targets");
     }
@@ -668,7 +926,13 @@ mod tests {
             code_at: CodeTarget::Rip,
             rip: 0,
             frames: crate::debugger::frames::FramesRead::default(),
-            memory: MemoryWindow { start: GuestAddress { space: AddressSpace::Linear, value: 0 }, rows: Vec::new() },
+            memory: MemoryWindow {
+                start: GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: 0,
+                },
+                rows: Vec::new(),
+            },
             stack: Vec::new(),
             process: None,
             asked: SystemView::Off,
@@ -690,23 +954,34 @@ mod tests {
     #[test]
     fn the_projects_binaries_are_looked_for_only_while_a_line_is_set() {
         let mut files = rusty_box_symbols::memory_store::MemoryStore::default();
-        let binary = rusty_box_symbols_fixtures::pe::pe64_file(&rusty_box_symbols_fixtures::pe::Pe64Spec {
-            time_date_stamp: 1,
-            size_of_image: 0x2000,
-            image_base: PROGRAM,
-            section_alignment: PAGE_ALIGNED,
-            sections: Vec::new(),
-            exception: None,
-            base_relocations: None,
-            import_address_table: None,
-        });
+        let binary =
+            rusty_box_symbols_fixtures::pe::pe64_file(&rusty_box_symbols_fixtures::pe::Pe64Spec {
+                time_date_stamp: 1,
+                size_of_image: 0x2000,
+                image_base: PROGRAM,
+                section_alignment: PAGE_ALIGNED,
+                sections: Vec::new(),
+                exception: None,
+                base_relocations: None,
+                import_address_table: None,
+            });
         files.insert(std::path::PathBuf::from("build").join("rbdemo.exe"), binary);
-        let folders = [rusty_box_symbols::projects::ProjectFolders { name: "rbdemo".into(), symbols: vec!["build".into()] }];
-        let projects = rusty_box_symbols::projects::ProjectIndex::build(&mut files, &folders).expect("indexed");
+        let folders = [rusty_box_symbols::projects::ProjectFolders {
+            name: "rbdemo".into(),
+            symbols: vec!["build".into()],
+        }];
+        let projects = rusty_box_symbols::projects::ProjectIndex::build(&mut files, &folders)
+            .expect("indexed");
         let address = BreakpointTarget::Address(CodeBreakpoint::Linear(0x1000));
-        assert!(binaries_to_find(&[address.clone()], &projects).is_empty(), "no source line: nothing to look for");
+        assert!(
+            binaries_to_find(&[address.clone()], &projects).is_empty(),
+            "no source line: nothing to look for"
+        );
         let line = BreakpointTarget::Source(source("rbdemo.c", 92));
-        assert_eq!(binaries_to_find(&[address, line], &projects), ["rbdemo.exe"]);
+        assert_eq!(
+            binaries_to_find(&[address, line], &projects),
+            ["rbdemo.exe"]
+        );
     }
 
     /// A hit stops where the program's build is loaded at its base (a
@@ -715,15 +990,48 @@ mod tests {
     #[test]
     fn a_hit_is_taken_where_its_programs_build_is_loaded() {
         let program = program_at(PROGRAM);
-        let scope = ScopedAddress { linear: PROGRAM + 0x1100, images: vec![program] };
-        let image_only_at = |base| if base == PROGRAM { BuildAt::Image(program.image) } else { BuildAt::NoImage };
+        let scope = ScopedAddress {
+            linear: PROGRAM + 0x1100,
+            images: vec![program],
+        };
+        let image_only_at = |base| {
+            if base == PROGRAM {
+                BuildAt::Image(program.image)
+            } else {
+                BuildAt::NoImage
+            }
+        };
         assert!(admits(&scope, image_only_at));
-        let other = PeImageId { time_date_stamp: 4, size_of_image: 0x10_0000 };
-        assert!(!admits(&scope, |_| BuildAt::Image(other)), "another program at the same base");
-        assert!(!admits(&scope, |_| BuildAt::NoImage), "code that is no image's");
-        assert!(admits(&scope, |_| BuildAt::Unreadable), "headers that do not read rule nothing out");
-        let two = ScopedAddress { linear: PROGRAM + 0x1100, images: vec![PlacedImage { base: PROGRAM, image: other }, program] };
-        assert!(admits(&two, |_| BuildAt::Image(program.image)), "either of the owner's programs there");
+        let other = PeImageId {
+            time_date_stamp: 4,
+            size_of_image: 0x10_0000,
+        };
+        assert!(
+            !admits(&scope, |_| BuildAt::Image(other)),
+            "another program at the same base"
+        );
+        assert!(
+            !admits(&scope, |_| BuildAt::NoImage),
+            "code that is no image's"
+        );
+        assert!(
+            admits(&scope, |_| BuildAt::Unreadable),
+            "headers that do not read rule nothing out"
+        );
+        let two = ScopedAddress {
+            linear: PROGRAM + 0x1100,
+            images: vec![
+                PlacedImage {
+                    base: PROGRAM,
+                    image: other,
+                },
+                program,
+            ],
+        };
+        assert!(
+            admits(&two, |_| BuildAt::Image(program.image)),
+            "either of the owner's programs there"
+        );
     }
 
     /// A file both drivers were built from (a shared library) breaks in
@@ -735,7 +1043,12 @@ mod tests {
         loaded(&mut view, "b.sys", 2, r"e:\other\io\read.c");
         assert_eq!(
             resolve(&source(r"io\read.c", 10), &two_drivers(), &view),
-            SourceResolution::Resolved { places: vec![place(A + 0x1100, "a.sys", 10), place(B + 0x1100, "b.sys", 10)] }
+            SourceResolution::Resolved {
+                places: vec![
+                    place(A + 0x1100, "a.sys", 10),
+                    place(B + 0x1100, "b.sys", 10)
+                ]
+            }
         );
     }
 
@@ -745,7 +1058,9 @@ mod tests {
         loaded(&mut view, "a.sys", 1, r"d:\b\src\io\read.c");
         assert_eq!(
             resolve(&source("read.c", 11), &two_drivers(), &view),
-            SourceResolution::Resolved { places: vec![place(A + 0x1108, "a.sys", 12)] }
+            SourceResolution::Resolved {
+                places: vec![place(A + 0x1108, "a.sys", 12)]
+            }
         );
     }
 
@@ -756,10 +1071,15 @@ mod tests {
         pending(&mut view, "b.sys", 2);
         assert_eq!(
             resolve(&source("read.c", 10), &two_drivers(), &view),
-            SourceResolution::Pending(PendingWhy::SymbolsLoading { modules: vec!["b.sys".into()] })
+            SourceResolution::Pending(PendingWhy::SymbolsLoading {
+                modules: vec!["b.sys".into()]
+            })
         );
         loaded(&mut view, "b.sys", 2, r"e:\other\write.c");
-        assert_eq!(resolve(&source("read.c", 10), &two_drivers(), &view), SourceResolution::Pending(PendingWhy::NoModuleHasLine));
+        assert_eq!(
+            resolve(&source("read.c", 10), &two_drivers(), &view),
+            SourceResolution::Pending(PendingWhy::NoModuleHasLine)
+        );
     }
 
     #[test]
@@ -774,19 +1094,35 @@ mod tests {
         let index = two_drivers();
         assert_eq!(
             applied_set(&targets, Some(&index), &view),
-            [CodeBreakpoint::Linear(0x5000), CodeBreakpoint::Linear(A + 0x1100)]
+            [
+                CodeBreakpoint::Linear(0x5000),
+                CodeBreakpoint::Linear(A + 0x1100)
+            ]
         );
         loaded(&mut view, "a.sys", 1, r"d:\b\src\io\read.c");
         assert_eq!(
             applied_set(&targets, Some(&index), &view),
-            [CodeBreakpoint::Linear(0x5000), CodeBreakpoint::Linear(A + 0x1100)],
+            [
+                CodeBreakpoint::Linear(0x5000),
+                CodeBreakpoint::Linear(A + 0x1100)
+            ],
             "the line's address is one breakpoint, however many targets name it"
         );
         loaded(&mut view, "b.sys", 2, r"e:\other\read.c");
         assert_eq!(
             applied_set(&targets, Some(&index), &view),
-            [CodeBreakpoint::Linear(0x5000), CodeBreakpoint::Linear(A + 0x1100), CodeBreakpoint::Linear(B + 0x1100)]
+            [
+                CodeBreakpoint::Linear(0x5000),
+                CodeBreakpoint::Linear(A + 0x1100),
+                CodeBreakpoint::Linear(B + 0x1100)
+            ]
         );
-        assert_eq!(applied_set(&targets, None, &view), [CodeBreakpoint::Linear(0x5000), CodeBreakpoint::Linear(A + 0x1100)]);
+        assert_eq!(
+            applied_set(&targets, None, &view),
+            [
+                CodeBreakpoint::Linear(0x5000),
+                CodeBreakpoint::Linear(A + 0x1100)
+            ]
+        );
     }
 }

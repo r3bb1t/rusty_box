@@ -126,14 +126,17 @@ impl BxLazyflagsEntry {
     pub(super) fn set_oszapc_logic_8(&mut self, result: u8) {
         self.set_oszapc(8, 0, result as u64);
     }
+
     #[inline]
     pub(super) fn set_oszapc_logic_16(&mut self, result: u16) {
         self.set_oszapc(16, 0, result as u64);
     }
+
     #[inline]
     pub(super) fn set_oszapc_logic_32(&mut self, result: u32) {
         self.set_oszapc(32, 0, result as u64);
     }
+
     #[inline]
     pub(super) fn set_oszapc_logic_64(&mut self, result: u64) {
         self.set_oszapc(64, 0, result);
@@ -148,6 +151,7 @@ impl BxLazyflagsEntry {
             sum as u64,
         );
     }
+
     #[inline]
     pub(super) fn set_oszapc_add_16(&mut self, op1: u16, op2: u16, sum: u16) {
         self.set_oszapc(
@@ -156,6 +160,7 @@ impl BxLazyflagsEntry {
             sum as u64,
         );
     }
+
     #[inline]
     pub(super) fn set_oszapc_add_32(&mut self, op1: u32, op2: u32, sum: u32) {
         self.set_oszapc(
@@ -164,6 +169,7 @@ impl BxLazyflagsEntry {
             sum as u64,
         );
     }
+
     #[inline]
     pub(super) fn set_oszapc_add_64(&mut self, op1: u64, op2: u64, sum: u64) {
         self.set_oszapc(64, add_cout_vec(op1, op2, sum), sum);
@@ -178,6 +184,7 @@ impl BxLazyflagsEntry {
             diff as u64,
         );
     }
+
     #[inline]
     pub(super) fn set_oszapc_sub_16(&mut self, op1: u16, op2: u16, diff: u16) {
         self.set_oszapc(
@@ -186,6 +193,7 @@ impl BxLazyflagsEntry {
             diff as u64,
         );
     }
+
     #[inline]
     pub(super) fn set_oszapc_sub_32(&mut self, op1: u32, op2: u32, diff: u32) {
         self.set_oszapc(
@@ -194,6 +202,7 @@ impl BxLazyflagsEntry {
             diff as u64,
         );
     }
+
     #[inline]
     pub(super) fn set_oszapc_sub_64(&mut self, op1: u64, op2: u64, diff: u64) {
         self.set_oszapc(64, sub_cout_vec(op1, op2, diff), diff);
@@ -208,6 +217,7 @@ impl BxLazyflagsEntry {
             sum as u64,
         );
     }
+
     #[inline]
     pub(super) fn set_oszap_add_8(&mut self, op1: u8, op2: u8, sum: u8) {
         self.set_oszap(
@@ -216,6 +226,7 @@ impl BxLazyflagsEntry {
             sum as u64,
         );
     }
+
     #[inline]
     pub(super) fn set_oszap_sub_8(&mut self, op1: u8, op2: u8, diff: u8) {
         self.set_oszap(
@@ -224,6 +235,7 @@ impl BxLazyflagsEntry {
             diff as u64,
         );
     }
+
     #[inline]
     pub(super) fn set_oszap_add_32(&mut self, op1: u32, op2: u32, sum: u32) {
         self.set_oszap(
@@ -232,6 +244,7 @@ impl BxLazyflagsEntry {
             sum as u64,
         );
     }
+
     #[inline]
     pub(super) fn set_oszap_sub_32(&mut self, op1: u32, op2: u32, diff: u32) {
         self.set_oszap(
@@ -240,6 +253,7 @@ impl BxLazyflagsEntry {
             diff as u64,
         );
     }
+
     #[inline]
     pub(super) fn set_oszap_sub_16(&mut self, op1: u16, op2: u16, diff: u16) {
         self.set_oszap(
@@ -248,10 +262,12 @@ impl BxLazyflagsEntry {
             diff as u64,
         );
     }
+
     #[inline]
     pub(super) fn set_oszap_add_64(&mut self, op1: u64, op2: u64, sum: u64) {
         self.set_oszap(64, add_cout_vec(op1, op2, sum), sum);
     }
+
     #[inline]
     pub(super) fn set_oszap_sub_64(&mut self, op1: u64, op2: u64, diff: u64) {
         self.set_oszap(64, sub_cout_vec(op1, op2, diff), diff);

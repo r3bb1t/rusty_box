@@ -2,8 +2,8 @@
 //!
 //! Based on Bochs data_xfer64.cc
 
+use crate::cpu::Result;
 use crate::cpu::decoder::{BxSegregs, Instruction};
-use crate::cpu::{Result};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -498,6 +498,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovno_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if !self.get_of() {
@@ -505,6 +506,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovb_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if self.get_cf() {
@@ -512,6 +514,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovnb_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if !self.get_cf() {
@@ -519,6 +522,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovz_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if self.get_zf() {
@@ -526,6 +530,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovnz_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if !self.get_zf() {
@@ -533,6 +538,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovbe_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if self.get_cf() || self.get_zf() {
@@ -540,6 +546,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovnbe_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if !self.get_cf() && !self.get_zf() {
@@ -547,6 +554,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovs_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if self.get_sf() {
@@ -554,6 +562,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovns_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if !self.get_sf() {
@@ -561,6 +570,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovp_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if self.get_pf() {
@@ -568,6 +578,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovnp_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if !self.get_pf() {
@@ -575,6 +586,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovl_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if self.get_sf() != self.get_of() {
@@ -582,6 +594,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovnl_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if self.get_sf() == self.get_of() {
@@ -589,6 +602,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovle_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if self.get_zf() || (self.get_sf() != self.get_of()) {
@@ -596,6 +610,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         Ok(())
     }
+
     pub fn cmovnle_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         let val = self.cmov_read_src64(instr)?;
         if !self.get_zf() && (self.get_sf() == self.get_of()) {
@@ -607,8 +622,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // =========================================================================
     // Helper functions for 64-bit memory operations
     // =========================================================================
-
-
 
     // read_8bit_regx is defined in logical8.rs to avoid duplicate definitions
 }

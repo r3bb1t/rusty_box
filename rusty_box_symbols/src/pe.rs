@@ -14,7 +14,7 @@
 use no_panic::no_panic;
 
 use crate::identity::{Guid, ModuleIdentity, PdbId, PeImageId};
-use crate::read::{copy_prefix, Bytes, ReadError};
+use crate::read::{Bytes, ReadError, copy_prefix};
 use crate::units::Rva;
 
 /// `IMAGE_DOS_SIGNATURE`.
@@ -164,11 +164,23 @@ pub struct DebugEntry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeView<'a> {
     /// PDB 7.0: a GUID, an age and the PDB's recorded path.
-    Rsds { guid: Guid, age: u32, path: &'a [u8] },
+    Rsds {
+        guid: Guid,
+        age: u32,
+        path: &'a [u8],
+    },
     /// PDB 2.0: a timestamp signature, no GUID.
-    Nb10 { signature: u32, age: u32, path: &'a [u8] },
-    Malformed { reason: &'static str },
-    Unknown { signature: [u8; 4] },
+    Nb10 {
+        signature: u32,
+        age: u32,
+        path: &'a [u8],
+    },
+    Malformed {
+        reason: &'static str,
+    },
+    Unknown {
+        signature: [u8; 4],
+    },
 }
 
 /// The headers an identity is read from.
@@ -298,11 +310,15 @@ fn cut_short(what: &'static str, source: ReadError) -> HeaderError {
 /// The DOS header: its magic, and `e_lfanew`, where the NT headers start.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_dos_header(dos: Bytes<'_>) -> Result<u32, HeaderError> {
-    let magic = dos.u16_le(0).map_err(|source| cut_short("DOS header", source))?;
+    let magic = dos
+        .u16_le(0)
+        .map_err(|source| cut_short("DOS header", source))?;
     if magic != MZ {
         return Err(HeaderError::BadDosMagic { found: magic });
     }
-    let e_lfanew = dos.u32_le(0x3C).map_err(|source| cut_short("DOS header", source))?;
+    let e_lfanew = dos
+        .u32_le(0x3C)
+        .map_err(|source| cut_short("DOS header", source))?;
     if !(0x40..=MAX_LFANEW).contains(&e_lfanew) {
         return Err(HeaderError::BadLfanew { e_lfanew });
     }
@@ -313,14 +329,18 @@ pub fn decode_dos_header(dos: Bytes<'_>) -> Result<u32, HeaderError> {
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
 pub fn decode_file_header(prefix: Bytes<'_>) -> Result<FileHeader, HeaderError> {
     let what = "NT headers";
-    let signature = prefix.array::<4>(0).map_err(|source| cut_short(what, source))?;
+    let signature = prefix
+        .array::<4>(0)
+        .map_err(|source| cut_short(what, source))?;
     if &signature != b"PE\0\0" {
         return Err(HeaderError::BadPeSignature { found: signature });
     }
     let machine = prefix.u16_le(4).map_err(|source| cut_short(what, source))?;
     let number_of_sections = prefix.u16_le(6).map_err(|source| cut_short(what, source))?;
     let time_date_stamp = prefix.u32_le(8).map_err(|source| cut_short(what, source))?;
-    let size_of_optional_header = prefix.u16_le(20).map_err(|source| cut_short(what, source))?;
+    let size_of_optional_header = prefix
+        .u16_le(20)
+        .map_err(|source| cut_short(what, source))?;
     if number_of_sections > MAX_SECTIONS {
         return Err(HeaderError::TooManySections {
             count: number_of_sections,
@@ -339,9 +359,14 @@ pub fn decode_file_header(prefix: Bytes<'_>) -> Result<FileHeader, HeaderError> 
 /// data directories do not. A directory past the header's declared size, or
 /// past `NumberOfRvaAndSizes`, is absent.
 #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
-pub fn decode_optional_header(optional: Bytes<'_>, declared_size: u16) -> Result<OptionalHeader, HeaderError> {
+pub fn decode_optional_header(
+    optional: Bytes<'_>,
+    declared_size: u16,
+) -> Result<OptionalHeader, HeaderError> {
     let what = "optional header";
-    let magic = optional.u16_le(0).map_err(|source| cut_short(what, source))?;
+    let magic = optional
+        .u16_le(0)
+        .map_err(|source| cut_short(what, source))?;
     let layout = match magic {
         0x10B => OptionalLayout {
             kind: OptionalHeaderKind::Pe32,
@@ -363,11 +388,22 @@ pub fn decode_optional_header(optional: Bytes<'_>, declared_size: u16) -> Result
     }
     .map_err(|source| cut_short(what, source))?;
     // `SectionAlignment` sits at +32 in both kinds.
-    let section_alignment = optional.u32_le(32).map_err(|source| cut_short(what, source))?;
-    let size_of_image = optional.u32_le(56).map_err(|source| cut_short(what, source))?;
-    let size_of_headers = optional.u32_le(60).map_err(|source| cut_short(what, source))?;
+    let section_alignment = optional
+        .u32_le(32)
+        .map_err(|source| cut_short(what, source))?;
+    let size_of_image = optional
+        .u32_le(56)
+        .map_err(|source| cut_short(what, source))?;
+    let size_of_headers = optional
+        .u32_le(60)
+        .map_err(|source| cut_short(what, source))?;
     let rva_count = optional.u32_le(layout.rva_count_at).unwrap_or(0);
-    let directories = Directories { optional, layout, rva_count, declared_size };
+    let directories = Directories {
+        optional,
+        layout,
+        rva_count,
+        declared_size,
+    };
     Ok(OptionalHeader {
         kind: layout.kind,
         image_base,
@@ -396,13 +432,22 @@ impl Directories<'_> {
     fn entry(&self, index: u32) -> Option<DataDirectory> {
         // Entries are 8 bytes; every index read is below 16, so the offsets
         // stay far below usize's limit.
-        let at = self.layout.directories_at.wrapping_add(usize::try_from(index).ok()?.wrapping_mul(8));
+        let at = self
+            .layout
+            .directories_at
+            .wrapping_add(usize::try_from(index).ok()?.wrapping_mul(8));
         let in_header = at.wrapping_add(8) <= usize::from(self.declared_size);
         if self.rva_count <= index || !in_header {
             return None;
         }
-        match (self.optional.u32_le(at), self.optional.u32_le(at.wrapping_add(4))) {
-            (Ok(rva), Ok(size)) if rva != 0 && size != 0 => Some(DataDirectory { rva: Rva(u64::from(rva)), size }),
+        match (
+            self.optional.u32_le(at),
+            self.optional.u32_le(at.wrapping_add(4)),
+        ) {
+            (Ok(rva), Ok(size)) if rva != 0 && size != 0 => Some(DataDirectory {
+                rva: Rva(u64::from(rva)),
+                size,
+            }),
             (Ok(_) | Err(_), Ok(_) | Err(_)) => None,
         }
     }
@@ -483,7 +528,12 @@ pub fn pdb_file_name(path: &str) -> &str {
 }
 
 /// Fills `buf` from `rva`, or says what did not read.
-fn read_exact<R>(read: &mut R, what: &'static str, rva: u64, buf: &mut [u8]) -> Result<(), HeaderError>
+fn read_exact<R>(
+    read: &mut R,
+    what: &'static str,
+    rva: u64,
+    buf: &mut [u8],
+) -> Result<(), HeaderError>
 where
     R: FnMut(Rva, &mut [u8]) -> ImageRead,
 {
@@ -533,12 +583,16 @@ where
     let mut sections = Vec::new();
     sections
         .try_reserve_exact(count)
-        .map_err(|_| HeaderError::Allocation { what: "section headers", count })?;
+        .map_err(|_| HeaderError::Allocation {
+            what: "section headers",
+            count,
+        })?;
     for index in 0..file.number_of_sections {
         let at = nth(table_rva, index, SECTION_HEADER_BYTES).ok_or(unreadable)?;
         let mut raw = [0u8; SECTION_HEADER_BYTES];
         read_exact(read, "section header", at, &mut raw)?;
-        let section = decode_section(Bytes::new(&raw)).map_err(|source| cut_short("section header", source))?;
+        let section = decode_section(Bytes::new(&raw))
+            .map_err(|source| cut_short("section header", source))?;
         sections.push(section);
     }
     Ok(PeHeaders {
@@ -566,7 +620,9 @@ where
         return PdbLookup::Unavailable(PdbUnavailable::NoDebugDirectory);
     };
     let count = usize::try_from(directory.size)
-        .map_or(MAX_DEBUG_ENTRIES, |size| size.checked_div(DEBUG_ENTRY_BYTES).unwrap_or(0))
+        .map_or(MAX_DEBUG_ENTRIES, |size| {
+            size.checked_div(DEBUG_ENTRY_BYTES).unwrap_or(0)
+        })
         .min(MAX_DEBUG_ENTRIES);
     let mut raw_entries = [0u8; DEBUG_ENTRY_BYTES * MAX_DEBUG_ENTRIES];
     let Some(entries) = count
@@ -582,7 +638,7 @@ where
             return PdbLookup::Unavailable(PdbUnavailable::DebugDirectoryUnreadable {
                 rva: directory.rva,
                 size: directory.size,
-            })
+            });
         }
     }
     let codeview = entries
@@ -598,10 +654,13 @@ where
         });
     }
     let rva = Rva(u64::from(entry.address_of_raw_data));
-    let size = usize::try_from(entry.size_of_data).map_or(MAX_CODEVIEW_BYTES, |size| size.min(MAX_CODEVIEW_BYTES));
+    let size = usize::try_from(entry.size_of_data)
+        .map_or(MAX_CODEVIEW_BYTES, |size| size.min(MAX_CODEVIEW_BYTES));
     let mut raw_record = [0u8; MAX_CODEVIEW_BYTES];
     let Some(record) = raw_record.get_mut(..size) else {
-        return PdbLookup::Unavailable(PdbUnavailable::CodeViewMalformed { reason: "larger than its buffer" });
+        return PdbLookup::Unavailable(PdbUnavailable::CodeViewMalformed {
+            reason: "larger than its buffer",
+        });
     };
     match read(rva, record) {
         ImageRead::Read => {}
@@ -609,7 +668,7 @@ where
             return PdbLookup::Unavailable(PdbUnavailable::CodeViewUnreadable {
                 rva,
                 size: entry.size_of_data,
-            })
+            });
         }
     }
     match decode_codeview(Bytes::new(record)) {
@@ -621,12 +680,18 @@ where
                 age,
             })
         }
-        CodeView::Nb10 { signature, age, path } => PdbLookup::Unavailable(PdbUnavailable::Nb10 {
+        CodeView::Nb10 {
+            signature,
+            age,
+            path,
+        } => PdbLookup::Unavailable(PdbUnavailable::Nb10 {
             signature,
             age,
             pdb_path: String::from_utf8_lossy(path).into_owned(),
         }),
-        CodeView::Malformed { reason } => PdbLookup::Unavailable(PdbUnavailable::CodeViewMalformed { reason }),
+        CodeView::Malformed { reason } => {
+            PdbLookup::Unavailable(PdbUnavailable::CodeViewMalformed { reason })
+        }
         CodeView::Unknown { signature } => {
             PdbLookup::Unavailable(PdbUnavailable::UnknownCodeViewSignature { signature })
         }
@@ -642,7 +707,11 @@ where
     let headers = read_headers(read)?;
     let image = headers.image_id();
     let pdb = read_pdb_lookup(&headers, read);
-    Ok(PeIdentity { headers, image, pdb })
+    Ok(PeIdentity {
+        headers,
+        image,
+        pdb,
+    })
 }
 
 /// `buf.len()` bytes of `file` at offset `at`, or unreadable.
@@ -700,7 +769,10 @@ impl<B: AsRef<[u8]>> FileImage<B> {
         let headers_end = u64::from(self.headers.size_of_headers);
         let mut filled = 0usize;
         while filled < buf.len() {
-            let Some(cursor) = u64::try_from(filled).ok().and_then(|filled| rva.0.checked_add(filled)) else {
+            let Some(cursor) = u64::try_from(filled)
+                .ok()
+                .and_then(|filled| rva.0.checked_add(filled))
+            else {
                 return ImageRead::Unreadable;
             };
             let Some(rest) = buf.get_mut(filled..) else {
@@ -717,10 +789,13 @@ impl<B: AsRef<[u8]>> FileImage<B> {
                 // `contains` held, so `within < span` and `take >= 1`.
                 let within = cursor.wrapping_sub(section.virtual_address.0);
                 let take = want.min(section.span().wrapping_sub(within));
-                let from_file = take.min(u64::from(section.size_of_raw_data).saturating_sub(within));
+                let from_file =
+                    take.min(u64::from(section.size_of_raw_data).saturating_sub(within));
                 let file_at = u64::from(section.pointer_to_raw_data).checked_add(within);
                 match file_at {
-                    Some(file_at) => self.copy_from_file(file_at, from_file, take.wrapping_sub(from_file), rest),
+                    Some(file_at) => {
+                        self.copy_from_file(file_at, from_file, take.wrapping_sub(from_file), rest)
+                    }
                     None => None,
                 }
             };
@@ -735,7 +810,13 @@ impl<B: AsRef<[u8]>> FileImage<B> {
     /// Copies `from_file` bytes of the file at `file_at` into the front of
     /// `out`, then `zeros` zero bytes after them; the number of bytes placed,
     /// or `None` when the file is too short.
-    fn copy_from_file(&self, file_at: u64, from_file: u64, zeros: u64, out: &mut [u8]) -> Option<usize> {
+    fn copy_from_file(
+        &self,
+        file_at: u64,
+        from_file: u64,
+        zeros: u64,
+        out: &mut [u8],
+    ) -> Option<usize> {
         let from_file = usize::try_from(from_file).ok()?;
         let zeros = usize::try_from(zeros).ok()?;
         let total = from_file.checked_add(zeros)?;
@@ -767,7 +848,10 @@ pub enum BinaryPdbError {
 /// The PDB identity of the binary in `bytes`, owned or borrowed, which was
 /// fetched by `wanted` because the guest's copy of its debug directory did
 /// not read.
-pub fn pdb_from_binary<B: AsRef<[u8]>>(bytes: B, wanted: PeImageId) -> Result<PdbId, BinaryPdbError> {
+pub fn pdb_from_binary<B: AsRef<[u8]>>(
+    bytes: B,
+    wanted: PeImageId,
+) -> Result<PdbId, BinaryPdbError> {
     let file = FileImage::new(bytes).map_err(BinaryPdbError::Headers)?;
     let found = file.headers().image_id();
     if found != wanted {
@@ -782,8 +866,9 @@ pub fn pdb_from_binary<B: AsRef<[u8]>>(bytes: B, wanted: PeImageId) -> Result<Pd
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box_symbols_fixtures::pe::{loaded_image, pe32_file, put16, put32, rsds};
+
+    use super::*;
 
     const GUID: [u8; 16] = [
         0xF6, 0x72, 0x7B, 0x49, 0x0A, 0x39, 0xFC, 0x44, 0x87, 0x8E, 0x5A, 0x2D, 0x63, 0xB6, 0xCC,
@@ -805,8 +890,15 @@ mod tests {
     #[test]
     fn a_loaded_image_names_its_pdb_and_itself() {
         let image = loaded_image(&rsds(GUID, 3, r"D:\build\out\driver.pdb"));
-        let identity = read_pe_identity(&mut |rva, buf: &mut [u8]| whole(&image, rva, buf)).unwrap();
-        assert_eq!(identity.image, PeImageId { time_date_stamp: 0x1234_5678, size_of_image: 0x2000 });
+        let identity =
+            read_pe_identity(&mut |rva, buf: &mut [u8]| whole(&image, rva, buf)).unwrap();
+        assert_eq!(
+            identity.image,
+            PeImageId {
+                time_date_stamp: 0x1234_5678,
+                size_of_image: 0x2000
+            }
+        );
         assert_eq!(identity.headers.kind, OptionalHeaderKind::Pe32Plus);
         assert_eq!(identity.headers.sections[0].name_text(), ".rdata");
         assert_eq!(
@@ -814,7 +906,11 @@ mod tests {
             ModuleIdentity::Pe {
                 file_name: "driver.sys".to_owned(),
                 image: identity.image,
-                pdb: Some(PdbId { name: "driver.pdb".to_owned(), guid: Guid::from_le_bytes(GUID), age: 3 }),
+                pdb: Some(PdbId {
+                    name: "driver.pdb".to_owned(),
+                    guid: Guid::from_le_bytes(GUID),
+                    age: 3
+                }),
             }
         );
     }
@@ -827,7 +923,8 @@ mod tests {
         record.extend_from_slice(&2u32.to_le_bytes());
         record.extend_from_slice(b"old.pdb\0");
         let image = loaded_image(&record);
-        let identity = read_pe_identity(&mut |rva, buf: &mut [u8]| whole(&image, rva, buf)).unwrap();
+        let identity =
+            read_pe_identity(&mut |rva, buf: &mut [u8]| whole(&image, rva, buf)).unwrap();
         assert_eq!(
             identity.pdb,
             PdbLookup::Unavailable(PdbUnavailable::Nb10 {
@@ -836,18 +933,29 @@ mod tests {
                 pdb_path: "old.pdb".to_owned(),
             })
         );
-        assert!(matches!(identity.module_identity("old.dll".to_owned()), ModuleIdentity::Pe { pdb: None, .. }));
+        assert!(matches!(
+            identity.module_identity("old.dll".to_owned()),
+            ModuleIdentity::Pe { pdb: None, .. }
+        ));
     }
 
     #[test]
     fn an_unreadable_header_page_means_no_identity() {
         let image = loaded_image(&rsds(GUID, 1, "a.pdb"));
         let mut read = |rva: Rva, buf: &mut [u8]| {
-            if rva.0 >= 0x80 { whole(&image, rva, buf) } else { ImageRead::Unreadable }
+            if rva.0 >= 0x80 {
+                whole(&image, rva, buf)
+            } else {
+                ImageRead::Unreadable
+            }
         };
         assert_eq!(
             read_pe_identity(&mut read),
-            Err(HeaderError::Unreadable { what: "DOS header", rva: Rva(0), len: 0x40 })
+            Err(HeaderError::Unreadable {
+                what: "DOS header",
+                rva: Rva(0),
+                len: 0x40
+            })
         );
     }
 
@@ -857,13 +965,26 @@ mod tests {
     fn a_paged_out_debug_directory_keeps_the_image_identity() {
         let image = loaded_image(&rsds(GUID, 1, "a.pdb"));
         let mut read = |rva: Rva, buf: &mut [u8]| {
-            if rva.0 < 0x1000 { whole(&image, rva, buf) } else { ImageRead::Unreadable }
+            if rva.0 < 0x1000 {
+                whole(&image, rva, buf)
+            } else {
+                ImageRead::Unreadable
+            }
         };
         let identity = read_pe_identity(&mut read).unwrap();
-        assert_eq!(identity.image, PeImageId { time_date_stamp: 0x1234_5678, size_of_image: 0x2000 });
+        assert_eq!(
+            identity.image,
+            PeImageId {
+                time_date_stamp: 0x1234_5678,
+                size_of_image: 0x2000
+            }
+        );
         assert_eq!(
             identity.pdb,
-            PdbLookup::Unavailable(PdbUnavailable::DebugDirectoryUnreadable { rva: Rva(0x1000), size: 28 })
+            PdbLookup::Unavailable(PdbUnavailable::DebugDirectoryUnreadable {
+                rva: Rva(0x1000),
+                size: 28
+            })
         );
     }
 
@@ -881,25 +1002,48 @@ mod tests {
         assert_eq!(two, [0, 0]);
         // Outside every section nothing is mapped.
         assert_eq!(file.read_into(Rva(0x5000), &mut two), ImageRead::Unreadable);
-        assert_eq!(file.read_into(Rva(u64::MAX), &mut two), ImageRead::Unreadable);
+        assert_eq!(
+            file.read_into(Rva(u64::MAX), &mut two),
+            ImageRead::Unreadable
+        );
         let mut read = |rva: Rva, buf: &mut [u8]| file.read_into(rva, buf);
         let identity = read_pe_identity(&mut read).unwrap();
         assert_eq!(
             identity.pdb,
-            PdbLookup::Found(PdbId { name: "wntdll.pdb".to_owned(), guid: Guid::from_le_bytes(GUID), age: 1 })
+            PdbLookup::Found(PdbId {
+                name: "wntdll.pdb".to_owned(),
+                guid: Guid::from_le_bytes(GUID),
+                age: 1
+            })
         );
     }
 
     #[test]
     fn a_binary_fetched_by_its_image_key_gives_its_pdb() {
         let bytes = pe32_file(&rsds(GUID, 7, r"c:\sym\x.pdb"));
-        let wanted = PeImageId { time_date_stamp: 0x0BAD_F00D, size_of_image: 0x3000 };
+        let wanted = PeImageId {
+            time_date_stamp: 0x0BAD_F00D,
+            size_of_image: 0x3000,
+        };
         assert_eq!(
             pdb_from_binary(bytes.clone(), wanted),
-            Ok(PdbId { name: "x.pdb".to_owned(), guid: Guid::from_le_bytes(GUID), age: 7 })
+            Ok(PdbId {
+                name: "x.pdb".to_owned(),
+                guid: Guid::from_le_bytes(GUID),
+                age: 7
+            })
         );
-        let other = PeImageId { time_date_stamp: 1, size_of_image: 0x3000 };
-        assert_eq!(pdb_from_binary(bytes, other), Err(BinaryPdbError::WrongImage { wanted: other, found: wanted }));
+        let other = PeImageId {
+            time_date_stamp: 1,
+            size_of_image: 0x3000,
+        };
+        assert_eq!(
+            pdb_from_binary(bytes, other),
+            Err(BinaryPdbError::WrongImage {
+                wanted: other,
+                found: wanted
+            })
+        );
     }
 
     #[test]
@@ -916,7 +1060,9 @@ mod tests {
         put32(&mut image, 0x3C, 0x2000_0000);
         assert_eq!(
             read_pe_identity(&mut |rva, buf: &mut [u8]| whole(&image, rva, buf)),
-            Err(HeaderError::BadLfanew { e_lfanew: 0x2000_0000 })
+            Err(HeaderError::BadLfanew {
+                e_lfanew: 0x2000_0000
+            })
         );
         let mut image = loaded_image(&rsds(GUID, 1, "a.pdb"));
         put16(&mut image, 0x80 + 6, 97);
@@ -934,9 +1080,24 @@ mod tests {
 
     #[test]
     fn a_malformed_codeview_record_is_reported() {
-        assert_eq!(decode_codeview(Bytes::new(b"RS")), CodeView::Malformed { reason: "shorter than its signature" });
-        assert_eq!(decode_codeview(Bytes::new(b"RSDS\x01\x02")), CodeView::Malformed { reason: "RSDS shorter than 24 bytes" });
-        assert_eq!(decode_codeview(Bytes::new(b"XXXXyyyy")), CodeView::Unknown { signature: *b"XXXX" });
+        assert_eq!(
+            decode_codeview(Bytes::new(b"RS")),
+            CodeView::Malformed {
+                reason: "shorter than its signature"
+            }
+        );
+        assert_eq!(
+            decode_codeview(Bytes::new(b"RSDS\x01\x02")),
+            CodeView::Malformed {
+                reason: "RSDS shorter than 24 bytes"
+            }
+        );
+        assert_eq!(
+            decode_codeview(Bytes::new(b"XXXXyyyy")),
+            CodeView::Unknown {
+                signature: *b"XXXX"
+            }
+        );
     }
 
     /// A record whose declared size passes the cap is read up to the cap;
@@ -949,8 +1110,11 @@ mod tests {
         image.resize(0x1100 + record.len(), 0);
         image[0x1100..0x1100 + record.len()].copy_from_slice(&record);
         put32(&mut image, 0x1000 + 16, record.len() as u32);
-        let identity = read_pe_identity(&mut |rva, buf: &mut [u8]| whole(&image, rva, buf)).unwrap();
-        let PdbLookup::Found(pdb) = identity.pdb else { panic!("found") };
+        let identity =
+            read_pe_identity(&mut |rva, buf: &mut [u8]| whole(&image, rva, buf)).unwrap();
+        let PdbLookup::Found(pdb) = identity.pdb else {
+            panic!("found")
+        };
         assert_eq!(pdb.guid, Guid::from_le_bytes(GUID));
         assert_eq!(pdb.age, 9);
     }

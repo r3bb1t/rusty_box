@@ -4,7 +4,7 @@
 //! comment on each names the encodings it accepts and the pseudocode helper
 //! it follows.
 
-use super::exec::{bit, bits, sext, ExecResult, Flow, Nzcv};
+use super::exec::{ExecResult, Flow, Nzcv, bit, bits, sext};
 use super::fgt::EretForm;
 use super::{Cpu, Levels};
 
@@ -62,21 +62,13 @@ pub(crate) fn add_with_carry(x: u64, y: u64, carry: bool, sf: bool) -> AddResult
 
 #[inline(always)]
 pub(crate) const fn datasize(sf: bool) -> u32 {
-    if sf {
-        64
-    } else {
-        32
-    }
+    if sf { 64 } else { 32 }
 }
 
 /// All ones in the low `n` bits (`n` up to 64).
 #[inline(always)]
 pub(crate) const fn ones(n: u32) -> u64 {
-    if n >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << n) - 1
-    }
+    if n >= 64 { u64::MAX } else { (1u64 << n) - 1 }
 }
 
 /// Rotate the low `size` bits of `value` right by `amount` (`amount < size`).

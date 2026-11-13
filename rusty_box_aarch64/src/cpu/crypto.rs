@@ -24,7 +24,7 @@
 //! tables.
 
 use super::dp::ones;
-use super::exec::{bit, bits, ExecResult, Flow};
+use super::exec::{ExecResult, Flow, bit, bits};
 use super::simd::{elem, set_elem};
 use super::{Cpu, Levels};
 
@@ -278,11 +278,7 @@ fn sha256_hash(mut x: u128, mut y: u128, w: u128, part1: bool) -> u128 {
         x = (x << 32) | u128::from(y_top);
         y = (y << 32) | u128::from(x_top);
     }
-    if part1 {
-        x
-    } else {
-        y
-    }
+    if part1 { x } else { y }
 }
 
 /// SHA256SU0: the first half of the SHA-256 schedule update.

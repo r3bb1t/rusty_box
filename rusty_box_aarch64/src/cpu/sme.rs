@@ -15,8 +15,8 @@
 //! `Unpredictable_SMEZEROUPPER` taken as TRUE), as is ZA when `PSTATE.ZA`
 //! is cleared (`ResetSMEState('0')` leaves it ARBITRARY).
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 #[cfg(test)]
 #[path = "../../tests/unit/sme.rs"]
@@ -24,7 +24,7 @@ mod tests;
 
 use super::el2::{CPTR_SMEN, CPTR_TSM};
 use super::exception::{Exception, Route, SyndromeClass};
-use super::exec::{bits, ExecResult, Fault, Flow};
+use super::exec::{ExecResult, Fault, Flow, bits};
 use super::features::{Feature, VecLen};
 use super::state::FPSR_MASK;
 use super::sve::{Pv, Zv};

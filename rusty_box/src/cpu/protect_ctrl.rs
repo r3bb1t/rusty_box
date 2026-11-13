@@ -5,11 +5,9 @@
 //! Implements LGDT, SGDT, LIDT, SIDT, SLDT, STR, ARPL, LAR, LSL, VERR, VERW
 //! (LLDT and LTR are in segment_ctrl_pro.rs)
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-    descriptor::SegTypeBits,
-    Result,
-};
+use super::Result;
+use super::decoder::{BxSegregs, Instruction};
+use super::descriptor::SegTypeBits;
 use crate::config::BxLinAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
@@ -311,7 +309,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if (op1_16 & 0x03) < (op2_16 & 0x03) {
             // Adjust RPL field and set ZF
-            let new_op1 = (op1_16 & 0xfffc) | (op2_16 & 0x03);
+            let new_op1 = (op1_16 & 0xFFFC) | (op2_16 & 0x03);
             if instr.mod_c0() {
                 // Write back to rm = src1()
                 self.set_gpr16(instr.src1() as usize, new_op1);
@@ -381,7 +379,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
 
         // Null selector → clear ZF
-        if (raw_selector & 0xfffc) == 0 {
+        if (raw_selector & 0xFFFC) == 0 {
             self.set_zf(false);
             return Ok(());
         }
@@ -453,10 +451,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.set_zf(true);
         if instr.os32_l() != 0 {
             // 32-bit: masked by 00FFFF00 (Bochs protect_ctrl.cc)
-            self.set_gpr32(instr.dst() as usize, dword2 & 0x00ffff00);
+            self.set_gpr32(instr.dst() as usize, dword2 & 0x00FFFF00);
         } else {
             // 16-bit: lower byte of access rights
-            self.set_gpr16(instr.dst() as usize, (dword2 & 0xff00) as u16);
+            self.set_gpr16(instr.dst() as usize, (dword2 & 0xFF00) as u16);
         }
         Ok(())
     }
@@ -477,7 +475,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
 
         // Null selector → clear ZF
-        if (raw_selector & 0xfffc) == 0 {
+        if (raw_selector & 0xFFFC) == 0 {
             self.set_zf(false);
             return Ok(());
         }
@@ -500,7 +498,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if (dword2 & 0x00001000) == 0 {
             // System segment (S bit = 0)
-            let seg_type = (dword2 >> 8) & 0x0f;
+            let seg_type = (dword2 >> 8) & 0x0F;
             match seg_type {
                 // 286/386 TSS (avail/busy) — not accepted in long mode; skip 286 check (32-bit)
                 0x1 | 0x3 | 0x2 | 0x9 | 0xB => {
@@ -510,9 +508,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                         return Ok(());
                     }
                     // Compute byte-granular limit
-                    let raw_limit = (dword1 & 0x0000ffff) | (dword2 & 0x000f0000);
+                    let raw_limit = (dword1 & 0x0000FFFF) | (dword2 & 0x000F0000);
                     limit32 = if (dword2 & 0x00800000) != 0 {
-                        (raw_limit << 12) | 0x00000fff
+                        (raw_limit << 12) | 0x00000FFF
                     } else {
                         raw_limit
                     };
@@ -525,15 +523,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         } else {
             // Data/code segment (S bit = 1)
-            let raw_limit = (dword1 & 0x0000ffff) | (dword2 & 0x000f0000);
+            let raw_limit = (dword1 & 0x0000FFFF) | (dword2 & 0x000F0000);
             limit32 = if (dword2 & 0x00800000) != 0 {
-                (raw_limit << 12) | 0x00000fff
+                (raw_limit << 12) | 0x00000FFF
             } else {
                 raw_limit
             };
             // Non-conforming code segments need privilege check
             // (dword2 & 0x00000c00) == 0x00000c00 means conforming code (bits 10+11 both set)
-            if (dword2 & 0x00000c00) != 0x00000c00
+            if (dword2 & 0x00000C00) != 0x00000C00
                 && (descriptor_dpl < cpl || descriptor_dpl < selector.rpl)
             {
                 self.set_zf(false);
@@ -568,7 +566,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
 
         // Null selector → clear ZF
-        if (raw_selector & 0xfffc) == 0 {
+        if (raw_selector & 0xFFFC) == 0 {
             tracing::trace!("VERR: null selector");
             self.set_zf(false);
             return Ok(());
@@ -662,7 +660,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
 
         // Null selector → clear ZF
-        if (raw_selector & 0xfffc) == 0 {
+        if (raw_selector & 0xFFFC) == 0 {
             tracing::trace!("VERW: null selector");
             self.set_zf(false);
             return Ok(());

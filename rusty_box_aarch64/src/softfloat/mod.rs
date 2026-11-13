@@ -58,13 +58,6 @@ mod uint_convert;
 #[path = "../../tests/unit/softfloat.rs"]
 mod tests;
 
-use self::host::Arith;
-use self::min_max::{Extreme, MinMaxRules};
-use self::softfloat::*;
-use self::specialize::{
-    f32_flush_input, f32_report_denormals, f64_flush_input, f64_report_denormals,
-};
-
 pub(crate) use self::arm_ops::{
     f16_ahp_to_f32, f16_ahp_to_f64, f32_log_b, f32_mulx, f32_recip_step, f32_rsqrt_step, f32_scale,
     f32_to_f16_ahp, f32_to_i32_fixed, f32_to_i64_fixed, f32_to_u32_fixed, f32_to_u64_fixed,
@@ -78,7 +71,13 @@ pub(crate) use self::half::{
     f16_mul, f16_mul_add, f16_mul_add_long, f16_mulx, f16_recip_step, f16_round_to_int,
     f16_rsqrt_step, f16_scale, f16_sqrt, f16_sub, f16_to_signed, f16_to_unsigned, int_to_f16,
 };
+use self::host::Arith;
+use self::min_max::{Extreme, MinMaxRules};
+use self::softfloat::*;
 pub(crate) use self::softfloat::{FpOrdering, Handling, InputFlush};
+use self::specialize::{
+    f32_flush_input, f32_report_denormals, f64_flush_input, f64_report_denormals,
+};
 
 // FPCR fields (Arm ARM FPCR).
 /// FPCR.FIZ (FEAT_AFP): flush denormal single- and double-precision

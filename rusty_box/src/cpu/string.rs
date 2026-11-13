@@ -8,16 +8,11 @@
 //! segment limit checks and paging translation (required for protected mode
 //! with paging).
 
-use super::{
-    access::{forward_byte_copy, host_fill_bytes},
-    decoder::{BxSegregs, Instruction},
-};
-
-use crate::{
-    config::{BxLinAddress, BxPhyAddress},
-    convert::usize_from_u32,
-    cpu::rusty_box::MemoryAccessType,
-};
+use super::access::{forward_byte_copy, host_fill_bytes};
+use super::decoder::{BxSegregs, Instruction};
+use crate::config::{BxLinAddress, BxPhyAddress};
+use crate::convert::usize_from_u32;
+use crate::cpu::rusty_box::MemoryAccessType;
 
 /// How much of a REP the direct-bulk path may do in one go, proved before any
 /// mutation and stated in both units the callers need.
@@ -62,8 +57,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // Helper: Get direction flag (DF)
     // =========================================================================
 
-
-
     /// Return an all-or-nothing direct bulk span measured in string elements.
     #[inline]
     fn fast_rep_elements(
@@ -94,12 +87,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Check the complete canonical/LASS span before a direct 64-bit bulk access.
     #[inline]
-    fn fast_rep_span64(
-        &self,
-        laddr: BxLinAddress,
-        bytes: u32,
-        access: MemoryAccessType,
-    ) -> bool {
+    fn fast_rep_span64(&self, laddr: BxLinAddress, bytes: u32, access: MemoryAccessType) -> bool {
         let Some(last_offset) = u64::from(bytes).checked_sub(1) else {
             return false;
         };
@@ -291,14 +279,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let si = self.si().wrapping_sub(1);
-        self.set_si(si);
+            self.set_si(si);
             let di = self.di().wrapping_sub(1);
-        self.set_di(di);
+            self.set_di(di);
         } else {
             let si = self.si().wrapping_add(1);
-        self.set_si(si);
+            self.set_si(si);
             let di = self.di().wrapping_add(1);
-        self.set_di(di);
+            self.set_di(di);
         }
 
         Ok(())
@@ -330,14 +318,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let si = self.si().wrapping_sub(2);
-        self.set_si(si);
+            self.set_si(si);
             let di = self.di().wrapping_sub(2);
-        self.set_di(di);
+            self.set_di(di);
         } else {
             let si = self.si().wrapping_add(2);
-        self.set_si(si);
+            self.set_si(si);
             let di = self.di().wrapping_add(2);
-        self.set_di(di);
+            self.set_di(di);
         }
 
         Ok(())
@@ -368,14 +356,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let si = self.si().wrapping_sub(4);
-        self.set_si(si);
+            self.set_si(si);
             let di = self.di().wrapping_sub(4);
-        self.set_di(di);
+            self.set_di(di);
         } else {
             let si = self.si().wrapping_add(4);
-        self.set_si(si);
+            self.set_si(si);
             let di = self.di().wrapping_add(4);
-        self.set_di(di);
+            self.set_di(di);
         }
 
         Ok(())
@@ -409,10 +397,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let di = self.di().wrapping_sub(1);
-        self.set_di(di);
+            self.set_di(di);
         } else {
             let di = self.di().wrapping_add(1);
-        self.set_di(di);
+            self.set_di(di);
         }
 
         Ok(())
@@ -440,10 +428,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let di = self.di().wrapping_sub(2);
-        self.set_di(di);
+            self.set_di(di);
         } else {
             let di = self.di().wrapping_add(2);
-        self.set_di(di);
+            self.set_di(di);
         }
 
         Ok(())
@@ -471,10 +459,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let di = self.di().wrapping_sub(4);
-        self.set_di(di);
+            self.set_di(di);
         } else {
             let di = self.di().wrapping_add(4);
-        self.set_di(di);
+            self.set_di(di);
         }
 
         Ok(())
@@ -507,10 +495,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let si = self.si().wrapping_sub(1);
-        self.set_si(si);
+            self.set_si(si);
         } else {
             let si = self.si().wrapping_add(1);
-        self.set_si(si);
+            self.set_si(si);
         }
 
         Ok(())
@@ -539,10 +527,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let si = self.si().wrapping_sub(2);
-        self.set_si(si);
+            self.set_si(si);
         } else {
             let si = self.si().wrapping_add(2);
-        self.set_si(si);
+            self.set_si(si);
         }
 
         Ok(())
@@ -571,10 +559,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let si = self.si().wrapping_sub(4);
-        self.set_si(si);
+            self.set_si(si);
         } else {
             let si = self.si().wrapping_add(4);
-        self.set_si(si);
+            self.set_si(si);
         }
 
         Ok(())
@@ -610,14 +598,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let si = self.si().wrapping_sub(1);
-        self.set_si(si);
+            self.set_si(si);
             let di = self.di().wrapping_sub(1);
-        self.set_di(di);
+            self.set_di(di);
         } else {
             let si = self.si().wrapping_add(1);
-        self.set_si(si);
+            self.set_si(si);
             let di = self.di().wrapping_add(1);
-        self.set_di(di);
+            self.set_di(di);
         }
 
         Ok(())
@@ -654,14 +642,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let si = self.si().wrapping_sub(2);
-        self.set_si(si);
+            self.set_si(si);
             let di = self.di().wrapping_sub(2);
-        self.set_di(di);
+            self.set_di(di);
         } else {
             let si = self.si().wrapping_add(2);
-        self.set_si(si);
+            self.set_si(si);
             let di = self.di().wrapping_add(2);
-        self.set_di(di);
+            self.set_di(di);
         }
 
         Ok(())
@@ -698,14 +686,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let si = self.si().wrapping_sub(4);
-        self.set_si(si);
+            self.set_si(si);
             let di = self.di().wrapping_sub(4);
-        self.set_di(di);
+            self.set_di(di);
         } else {
             let si = self.si().wrapping_add(4);
-        self.set_si(si);
+            self.set_si(si);
             let di = self.di().wrapping_add(4);
-        self.set_di(di);
+            self.set_di(di);
         }
 
         Ok(())
@@ -745,10 +733,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let di = self.di().wrapping_sub(1);
-        self.set_di(di);
+            self.set_di(di);
         } else {
             let di = self.di().wrapping_add(1);
-        self.set_di(di);
+            self.set_di(di);
         }
 
         Ok(())
@@ -782,10 +770,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let di = self.di().wrapping_sub(2);
-        self.set_di(di);
+            self.set_di(di);
         } else {
             let di = self.di().wrapping_add(2);
-        self.set_di(di);
+            self.set_di(di);
         }
 
         Ok(())
@@ -819,10 +807,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if self.get_df() {
             let di = self.di().wrapping_sub(4);
-        self.set_di(di);
+            self.set_di(di);
         } else {
             let di = self.di().wrapping_add(4);
-        self.set_di(di);
+            self.set_di(di);
         }
 
         Ok(())
@@ -1435,7 +1423,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1494,7 +1482,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1553,7 +1541,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1610,7 +1598,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1670,7 +1658,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -1730,7 +1718,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2157,24 +2145,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // =========================================================================
     // Memory access helpers using the stored memory pointer
     // =========================================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     // =========================================================================
     // Unified dispatch methods — called from dispatcher.rs
@@ -2697,7 +2667,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2767,7 +2737,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2837,7 +2807,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2905,7 +2875,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -2974,7 +2944,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -3043,7 +3013,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -3612,7 +3582,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }
@@ -3682,7 +3652,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             if self.async_event != 0 {
                 self.assert_rf();
                 let prev_rip = self.prev_rip;
-        self.set_rip(prev_rip);
+                self.set_rip(prev_rip);
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 return Ok(());
             }

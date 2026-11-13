@@ -9,7 +9,7 @@
 //! (`A`, `R`) order nothing further here.
 
 use super::exception::AccessSyndrome;
-use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::exec::{ExecResult, Flow, bit, bits, sext};
 use super::mmu::{DataAccess, DataDirection};
 use super::op::Extend;
 use super::{Cpu, Levels};

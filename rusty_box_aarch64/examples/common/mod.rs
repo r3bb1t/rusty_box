@@ -6,9 +6,9 @@
 use std::collections::VecDeque;
 use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
+use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Once;
 use std::time::Instant;
 
 use rusty_box_aarch64::cpu::DebugStops;
@@ -437,7 +437,8 @@ fn interrupt_map(text: &str, own: InterruptMap) -> Result<InterruptMap, String> 
         let number: u32 = number
             .parse()
             .map_err(|e| format!("--interrupts {key}: {e}"))?;
-        let spi = || Spi::new(number).ok_or_else(|| format!("--interrupts {key}: {number} is no SPI"));
+        let spi =
+            || Spi::new(number).ok_or_else(|| format!("--interrupts {key}: {number} is no SPI"));
         match key {
             "uart" => map.uart = spi()?,
             "rtc" => map.rtc = spi()?,
@@ -446,10 +447,10 @@ fn interrupt_map(text: &str, own: InterruptMap) -> Result<InterruptMap, String> 
             "pcie-intx" => map.pcie_intx = spi()?,
             "msi-first" => map.msi.first = spi()?,
             "msi-count" => {
-                map.msi.count = MsiExtent::Count(
-                    MsiCount::new(number)
-                        .ok_or_else(|| format!("--interrupts msi-count: {number} is not 1 to 1023"))?,
-                )
+                map.msi.count =
+                    MsiExtent::Count(MsiCount::new(number).ok_or_else(|| {
+                        format!("--interrupts msi-count: {number} is not 1 to 1023")
+                    })?)
             }
             other => return Err(format!("--interrupts: {other} is no interrupt source")),
         }

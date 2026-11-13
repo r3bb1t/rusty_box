@@ -75,7 +75,8 @@ pub(crate) fn short(what: &'static str, source: ReadError) -> PdbError {
 pub(crate) fn reserved(len: u64, what: &'static str) -> Result<Vec<u8>, PdbError> {
     let count = usize::try_from(len).map_err(|_| PdbError::Allocation { what, bytes: len })?;
     let mut out = Vec::new();
-    out.try_reserve_exact(count).map_err(|_| PdbError::Allocation { what, bytes: len })?;
+    out.try_reserve_exact(count)
+        .map_err(|_| PdbError::Allocation { what, bytes: len })?;
     Ok(out)
 }
 
@@ -143,11 +144,12 @@ pub mod tpi;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box_symbols_fixtures::compress::sample_text;
     use rusty_box_symbols_fixtures::pdb::{
-        build_pdb, fixture_streams, FixtureContainer, FixturePublic, PdbFixture, PublicKind,
+        FixtureContainer, FixturePublic, PdbFixture, PublicKind, build_pdb, fixture_streams,
     };
+
+    use super::*;
 
     /// A fixture whose streams are not all tiny: 400 publics make the
     /// symbol-record stream span many MSF blocks and MSFZ chunks.
@@ -181,7 +183,11 @@ mod tests {
             let fixture = fixture(container);
             let bytes = build_pdb(&fixture);
             let mut file = PdbFile::open(&bytes).unwrap();
-            let expected_kind = if container == FixtureContainer::Msf { ContainerKind::Msf } else { ContainerKind::Msfz };
+            let expected_kind = if container == FixtureContainer::Msf {
+                ContainerKind::Msf
+            } else {
+                ContainerKind::Msfz
+            };
             assert_eq!(file.kind(), expected_kind);
             for stream in fixture_streams(&fixture) {
                 assert_eq!(
@@ -206,8 +212,14 @@ mod tests {
     fn a_pdb_2_file_is_named_not_parsed() {
         let mut bytes = PDB2_MAGIC.to_vec();
         bytes.extend_from_slice(&[0; 64]);
-        assert_eq!(PdbFile::open(&bytes).map(|file| file.kind()), Err(PdbError::Pdb2));
-        assert_eq!(PdbFile::open(b"not a pdb").map(|file| file.kind()), Err(PdbError::NotPdb));
+        assert_eq!(
+            PdbFile::open(&bytes).map(|file| file.kind()),
+            Err(PdbError::Pdb2)
+        );
+        assert_eq!(
+            PdbFile::open(b"not a pdb").map(|file| file.kind()),
+            Err(PdbError::NotPdb)
+        );
     }
 
     #[test]
@@ -219,7 +231,10 @@ mod tests {
         let mut bytes = build_pdb(&fixture(FixtureContainer::Msf));
         // A block size MSF 7.00 does not use.
         bytes[32..36].copy_from_slice(&3000u32.to_le_bytes());
-        assert_eq!(PdbFile::open(&bytes).map(|file| file.kind()), Err(PdbError::BadBlockSize { size: 3000 }));
+        assert_eq!(
+            PdbFile::open(&bytes).map(|file| file.kind()),
+            Err(PdbError::BadBlockSize { size: 3000 })
+        );
     }
 
     #[test]
@@ -227,7 +242,10 @@ mod tests {
         let mut bytes = build_pdb(&fixture(FixtureContainer::MsfzZstd));
         // The version (header +32) must be 0.
         bytes[32] = 1;
-        assert_eq!(PdbFile::open(&bytes).map(|file| file.kind()), Err(PdbError::BadVersion { version: 1 }));
+        assert_eq!(
+            PdbFile::open(&bytes).map(|file| file.kind()),
+            Err(PdbError::BadVersion { version: 1 })
+        );
         let mut bytes = build_pdb(&fixture(FixtureContainer::MsfzZstd));
         // The chunk table's offset (header +48) past the file.
         bytes[48..56].copy_from_slice(&u64::MAX.to_le_bytes());

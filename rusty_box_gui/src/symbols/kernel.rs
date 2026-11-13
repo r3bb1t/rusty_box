@@ -7,10 +7,9 @@ use std::sync::Arc;
 
 use rusty_box_symbols::tables::SymbolTables;
 
+use super::hub::{ModuleSymbols, SymbolsView};
 use crate::debugger::inspect::SymbolIndex;
 use crate::debugger::kernel_layout::{KernelLayout, LayoutSource};
-
-use super::hub::{ModuleSymbols, SymbolsView};
 
 /// Layouts made from one loaded file of tables.
 pub(crate) struct LayoutCache {
@@ -20,7 +19,9 @@ pub(crate) struct LayoutCache {
 
 impl fmt::Debug for LayoutCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LayoutCache").field("kernel", &self.layout.kernel).finish_non_exhaustive()
+        f.debug_struct("LayoutCache")
+            .field("kernel", &self.layout.kernel)
+            .finish_non_exhaustive()
     }
 }
 
@@ -35,7 +36,10 @@ pub(crate) fn kernel_layout(
     let kernel = symbols.modules.iter().find(|module| module.base == base)?;
     let identity = kernel.identity.known()?;
     let tables = view.tables(identity)?;
-    if let Some(made) = cache.as_ref().filter(|made| Arc::ptr_eq(&made.tables, tables)) {
+    if let Some(made) = cache
+        .as_ref()
+        .filter(|made| Arc::ptr_eq(&made.tables, tables))
+    {
         return Some(Arc::clone(&made.layout));
     }
     let source = match view.state(identity) {
@@ -52,21 +56,30 @@ pub(crate) fn kernel_layout(
         | None => LayoutSource::Matched,
     };
     let layout = Arc::new(KernelLayout::from_tables(identity.clone(), tables, source));
-    *cache = Some(LayoutCache { tables: Arc::clone(tables), layout: Arc::clone(&layout) });
+    *cache = Some(LayoutCache {
+        tables: Arc::clone(tables),
+        layout: Arc::clone(&layout),
+    });
     Some(layout)
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::path::PathBuf;
+
+    use rusty_box_symbols::identity::{Guid, ModuleIdentity, PdbId, PeImageId};
+    use rusty_box_symbols::service::{
+        DEFAULT_MAX_DOWNLOAD, Downloads, ServiceConfig, SymbolSource,
+    };
+    use rusty_box_symbols_fixtures::pdb::build_pdb;
+
     use super::*;
     use crate::debugger::inspect::{ModuleSpace, SymModule};
     use crate::debugger::kernel_layout::fixture;
     use crate::debugger::module_identity::GuestIdentity;
-    use crate::symbols::hub::{HubConfig, Job, ModuleEntry, ModuleSymbols, Priority, SymbolHub, WantedModule};
-    use rusty_box_symbols::identity::{Guid, ModuleIdentity, PdbId, PeImageId};
-    use rusty_box_symbols::service::{Downloads, ServiceConfig, SymbolSource, DEFAULT_MAX_DOWNLOAD};
-    use rusty_box_symbols_fixtures::pdb::build_pdb;
-    use std::path::PathBuf;
+    use crate::symbols::hub::{
+        HubConfig, Job, ModuleEntry, ModuleSymbols, Priority, SymbolHub, WantedModule,
+    };
 
     pub(crate) const KERNEL_BASE: u64 = 0xFFFF_F800_0100_0000;
     pub(crate) const KERNEL_GUID: [u8; 16] = [0x42; 16];
@@ -74,8 +87,15 @@ pub(crate) mod tests {
     pub(crate) fn kernel_identity() -> ModuleIdentity {
         ModuleIdentity::Pe {
             file_name: "ntoskrnl.exe".to_owned(),
-            image: PeImageId { time_date_stamp: 0x5E1D_2A4B, size_of_image: 0x10_0000 },
-            pdb: Some(PdbId { name: "ntkrnlmp.pdb".to_owned(), guid: Guid::from_le_bytes(KERNEL_GUID), age: 1 }),
+            image: PeImageId {
+                time_date_stamp: 0x5E1D_2A4B,
+                size_of_image: 0x10_0000,
+            },
+            pdb: Some(PdbId {
+                name: "ntkrnlmp.pdb".to_owned(),
+                guid: Guid::from_le_bytes(KERNEL_GUID),
+                age: 1,
+            }),
         }
     }
 
@@ -109,10 +129,22 @@ pub(crate) mod tests {
 
     /// Asks `hub` for `identity`, then ends that lookup with `entry` as a
     /// worker does: it takes the job, then finishes it.
-    pub(crate) fn look_up_as_a_worker(hub: &SymbolHub, identity: &ModuleIdentity, entry: ModuleEntry) {
-        hub.want(&[WantedModule { identity: identity.clone(), priority: Priority::Kernel }]);
+    pub(crate) fn look_up_as_a_worker(
+        hub: &SymbolHub,
+        identity: &ModuleIdentity,
+        entry: ModuleEntry,
+    ) {
+        hub.want(&[WantedModule {
+            identity: identity.clone(),
+            priority: Priority::Kernel,
+        }]);
         let ticket = hub.try_next_job().expect("the lookup is queued");
-        assert_eq!(ticket.job, Job::Locate { identity: identity.clone() });
+        assert_eq!(
+            ticket.job,
+            Job::Locate {
+                identity: identity.clone()
+            }
+        );
         hub.finish(identity, entry);
     }
 
@@ -126,7 +158,11 @@ pub(crate) mod tests {
             &hub,
             &kernel_identity(),
             ModuleEntry {
-                state: ModuleSymbols::Loaded { from: SymbolSource::Store { path: PathBuf::from("symbols/ntkrnlmp.pdb") } },
+                state: ModuleSymbols::Loaded {
+                    from: SymbolSource::Store {
+                        path: PathBuf::from("symbols/ntkrnlmp.pdb"),
+                    },
+                },
                 tables: Some(Arc::new(tables)),
             },
         );
@@ -142,13 +178,29 @@ pub(crate) mod tests {
         let pdb = build_pdb(&fixture::windows10_kernel([0x24; 16], 1));
         let tables = SymbolTables::parse(&pdb).expect("the fixture parses");
         let forced = ModuleSymbols::Forced {
-            found: TablesIdentity::Pdb { guid: Guid::from_le_bytes([0x24; 16]), age: 1 },
+            found: TablesIdentity::Pdb {
+                guid: Guid::from_le_bytes([0x24; 16]),
+                age: 1,
+            },
             path: PathBuf::from("Downloads").join("ntkrnlmp.pdb"),
         };
-        look_up_as_a_worker(&hub, &kernel_identity(), ModuleEntry { state: forced, tables: Some(Arc::new(tables)) });
-        let made = kernel_layout(&kernel_symbols(), &hub.view(), &mut None).expect("the tables loaded");
+        look_up_as_a_worker(
+            &hub,
+            &kernel_identity(),
+            ModuleEntry {
+                state: forced,
+                tables: Some(Arc::new(tables)),
+            },
+        );
+        let made =
+            kernel_layout(&kernel_symbols(), &hub.view(), &mut None).expect("the tables loaded");
         assert_eq!(made.source, LayoutSource::Forced);
-        let matched = kernel_layout(&kernel_symbols(), &hub_with_kernel_tables().view(), &mut None).expect("loaded");
+        let matched = kernel_layout(
+            &kernel_symbols(),
+            &hub_with_kernel_tables().view(),
+            &mut None,
+        )
+        .expect("loaded");
         assert_eq!(matched.source, LayoutSource::Matched);
     }
 
@@ -159,7 +211,10 @@ pub(crate) mod tests {
         let view = hub_with_kernel_tables().view();
         let made = kernel_layout(&kernel_symbols(), &view, &mut cache).expect("the tables loaded");
         assert_eq!(made.kernel, kernel_identity());
-        assert_eq!(made.process.unique_process_id.map(|offset| offset.0), Some(0x440));
+        assert_eq!(
+            made.process.unique_process_id.map(|offset| offset.0),
+            Some(0x440)
+        );
         let again = kernel_layout(&kernel_symbols(), &view, &mut cache).expect("still loaded");
         assert!(Arc::ptr_eq(&made, &again), "made once per loaded file");
     }

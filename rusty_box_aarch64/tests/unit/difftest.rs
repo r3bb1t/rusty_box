@@ -1199,12 +1199,14 @@ fn compares_with_zero_need_rm_zero() {
 ///   `immh = 001x` is half precision: `immh<3:2>` nonzero is the single- or
 ///   double-precision ARMv8.0 encoding.
 mod against_disarm64 {
-    use super::{step_exception_class, Stepper};
-    use crate::cpu::isa;
-    use disarm64::InsnOpcode;
-    use disarm64_defn::{InsnClass, InsnFeatureSet};
     use std::sync::Mutex;
     use std::vec::Vec;
+
+    use disarm64::InsnOpcode;
+    use disarm64_defn::{InsnClass, InsnFeatureSet};
+
+    use super::{Stepper, step_exception_class};
+    use crate::cpu::isa;
 
     /// The feature sets of disarm64's table this core implements: binutils'
     /// AES set holds the 64-bit PMULL too, and its SHA2 set SHA-1 and

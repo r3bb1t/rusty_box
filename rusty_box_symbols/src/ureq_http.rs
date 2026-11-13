@@ -91,36 +91,56 @@ impl HttpClient for UreqHttp {
                     url: url.to_owned(),
                     message: transport.to_string(),
                     retry: transport_retry(transport.kind()),
-                })
+                });
             }
         };
         let status = response.status();
         // Only a hint: a compressed transfer declares its compressed size.
-        let declared: Option<u64> = response.header("Content-Length").and_then(|value| value.trim().parse().ok());
+        let declared: Option<u64> = response
+            .header("Content-Length")
+            .and_then(|value| value.trim().parse().ok());
         if declared.is_some_and(|len| len > cap) {
-            return Err(HttpError::TooLarge { url: url.to_owned(), cap, declared });
+            return Err(HttpError::TooLarge {
+                url: url.to_owned(),
+                cap,
+                declared,
+            });
         }
         let mut reader = response.into_reader().take(cap.saturating_add(1));
         let mut body = Vec::new();
         let mut chunk = [0u8; CHUNK_BYTES];
         loop {
-            let read = reader
-                .read(&mut chunk)
-                .map_err(|error| HttpError::Body { url: url.to_owned(), message: error.to_string() })?;
+            let read = reader.read(&mut chunk).map_err(|error| HttpError::Body {
+                url: url.to_owned(),
+                message: error.to_string(),
+            })?;
             if read == 0 {
                 break;
             }
             let bytes = chunk.get(..read).unwrap_or(&[]);
-            body.try_reserve(bytes.len())
-                .map_err(|_| HttpError::Body { url: url.to_owned(), message: "no memory for the body".to_owned() })?;
+            body.try_reserve(bytes.len()).map_err(|_| HttpError::Body {
+                url: url.to_owned(),
+                message: "no memory for the body".to_owned(),
+            })?;
             body.extend_from_slice(bytes);
             let done = u64::try_from(body.len()).unwrap_or(u64::MAX);
             if done > cap {
-                return Err(HttpError::TooLarge { url: url.to_owned(), cap, declared });
+                return Err(HttpError::TooLarge {
+                    url: url.to_owned(),
+                    cap,
+                    declared,
+                });
             }
-            match progress(Progress { done, total: declared }) {
+            match progress(Progress {
+                done,
+                total: declared,
+            }) {
                 Flow::Continue => {}
-                Flow::Cancel => return Err(HttpError::Cancelled { url: url.to_owned() }),
+                Flow::Cancel => {
+                    return Err(HttpError::Cancelled {
+                        url: url.to_owned(),
+                    });
+                }
             }
         }
         Ok(HttpResponse { status, body })
@@ -129,9 +149,10 @@ impl HttpClient for UreqHttp {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
+
+    use super::*;
 
     /// A server on 127.0.0.1 that answers `requests` requests, each by its
     /// path, then stops; returns its base URL.
@@ -143,8 +164,14 @@ mod tests {
             for stream in listener.incoming().take(requests) {
                 let mut stream = stream.unwrap();
                 let mut request_line = String::new();
-                BufReader::new(&stream).read_line(&mut request_line).unwrap();
-                let path = request_line.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                BufReader::new(&stream)
+                    .read_line(&mut request_line)
+                    .unwrap();
+                let path = request_line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("/")
+                    .to_owned();
                 let answer: Vec<u8> = match path.as_str() {
                     "/file" => b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello".to_vec(),
                     "/moved" => format!(
@@ -171,22 +198,44 @@ mod tests {
     #[test]
     fn a_redirect_is_followed_to_the_file() {
         let base = serve(2);
-        let response = UreqHttp::direct().get(&format!("{base}/moved"), 1 << 20, |_| Flow::Continue).unwrap();
-        assert_eq!(response, HttpResponse { status: 200, body: b"hello".to_vec() });
+        let response = UreqHttp::direct()
+            .get(&format!("{base}/moved"), 1 << 20, |_| Flow::Continue)
+            .unwrap();
+        assert_eq!(
+            response,
+            HttpResponse {
+                status: 200,
+                body: b"hello".to_vec()
+            }
+        );
     }
 
     #[test]
     fn a_missing_file_is_a_404_response_not_an_error() {
         let base = serve(1);
-        let response = UreqHttp::direct().get(&format!("{base}/nope"), 1 << 20, |_| Flow::Continue).unwrap();
+        let response = UreqHttp::direct()
+            .get(&format!("{base}/nope"), 1 << 20, |_| Flow::Continue)
+            .unwrap();
         assert_eq!(response.status, 404);
     }
 
     #[test]
     fn a_body_over_the_cap_is_refused_before_it_is_read() {
         let base = serve(1);
-        let error = UreqHttp::direct().get(&format!("{base}/large"), 1000, |_| Flow::Continue).unwrap_err();
-        assert!(matches!(error, HttpError::TooLarge { cap: 1000, declared: Some(200_000), .. }), "{error:?}");
+        let error = UreqHttp::direct()
+            .get(&format!("{base}/large"), 1000, |_| Flow::Continue)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                HttpError::TooLarge {
+                    cap: 1000,
+                    declared: Some(200_000),
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -206,10 +255,20 @@ mod tests {
     #[test]
     fn an_unreachable_host_is_a_retryable_transport_error() {
         // Nothing listens on a port that was just freed.
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let error = UreqHttp::direct().get(&format!("http://127.0.0.1:{port}/x"), 1 << 20, |_| Flow::Continue).unwrap_err();
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let error = UreqHttp::direct()
+            .get(&format!("http://127.0.0.1:{port}/x"), 1 << 20, |_| {
+                Flow::Continue
+            })
+            .unwrap_err();
         assert_eq!(error.retry(), Retry::Retryable, "{error:?}");
-        let malformed = UreqHttp::direct().get("not a url", 1 << 20, |_| Flow::Continue).unwrap_err();
+        let malformed = UreqHttp::direct()
+            .get("not a url", 1 << 20, |_| Flow::Continue)
+            .unwrap_err();
         assert_eq!(malformed.retry(), Retry::Final, "{malformed:?}");
     }
 }

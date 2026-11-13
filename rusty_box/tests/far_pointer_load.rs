@@ -50,8 +50,8 @@ fn lss_reads_the_far_pointer_through_linear_addresses() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
-                .expect("new emulator");
+            let mut emu =
+                Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("new emulator");
 
             // Repoint virtual [0x60_0000, 0x80_0000) at NEW_BACKING so the
             // far pointer's linear and physical addresses differ.
@@ -75,7 +75,6 @@ fn lss_reads_the_far_pointer_through_linear_addresses() {
             let park = CODE + code.len() as u64;
             code.extend_from_slice(&[0xEB, 0xFE]);
             emu.mem_write(CODE, &code).expect("write code");
-
 
             emu.reg_write(X86Reg::Rbx, 0);
             match emu.emu_start(CODE, Some(park), None, Some(8)) {
@@ -105,8 +104,8 @@ fn lss_faults_on_an_unmapped_far_pointer() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
-                .expect("new emulator");
+            let mut emu =
+                Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("new emulator");
 
             // Unmap the 2 MiB page holding the far pointer entirely.
             emu.mem_write(PD0_ENTRY3, &0u64.to_le_bytes())

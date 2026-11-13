@@ -155,7 +155,7 @@ use core::num::NonZeroU32;
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{ClockHz, Cycles, RingBuffer, SnapError, VmClock, VmInstant};
 
-use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
+use crate::bus::{AccessWidth, RegOffset, read_by_words, write_by_words};
 
 /// The registers' offsets in the region (DDI 0183F Table 3-1).
 const UARTDR: RegOffset = RegOffset::new(0x000);
@@ -892,7 +892,9 @@ impl Pl011 {
     }
 
     pub fn read(&mut self, offset: RegOffset, width: AccessWidth) -> u64 {
-        read_by_words(offset, width, |offset| u64::from(self.read_register(offset)))
+        read_by_words(offset, width, |offset| {
+            u64::from(self.read_register(offset))
+        })
     }
 
     /// A read of the register at `offset` (DDI 0183F Table 3-1).
@@ -1018,7 +1020,19 @@ impl Pl011 {
         for reg in regs.iter_mut() {
             *reg = r.read_u32()?;
         }
-        let [flags, rsr, ilpr, ibrd, fbrd, lcr, cr, ifl, int_enabled, int_level, dmacr] = regs;
+        let [
+            flags,
+            rsr,
+            ilpr,
+            ibrd,
+            fbrd,
+            lcr,
+            cr,
+            ifl,
+            int_enabled,
+            int_level,
+            dmacr,
+        ] = regs;
         let mut read_fifo = [0u32; RX_FIFO_DEPTH];
         for entry in read_fifo.iter_mut() {
             *entry = r.read_u32()?;

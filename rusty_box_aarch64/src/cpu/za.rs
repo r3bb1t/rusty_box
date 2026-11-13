@@ -32,11 +32,11 @@
 #[path = "../../tests/unit/za.rs"]
 mod tests;
 
-use super::exec::{bit, bits, ExecResult, Fault, Flow};
+use super::exec::{ExecResult, Fault, Flow, bit, bits};
 use super::features::VecLen;
-use super::fp::{fp_mul_add, FpEnv, FpType};
+use super::fp::{FpEnv, FpType, fp_mul_add};
 use super::mmu::DataAccess;
-use super::sve::{group, int, Esize, Pv, Zv};
+use super::sve::{Esize, Pv, Zv, group, int};
 use super::{Cpu, Levels};
 use crate::bus::{AccessWidth, PhysBus};
 use crate::softfloat::{self as sf, FusedMulAdd};

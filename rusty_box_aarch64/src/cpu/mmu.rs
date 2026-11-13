@@ -64,14 +64,14 @@
 //! that hits it walks and updates it; a hit that permits its access never
 //! needs an update, and so costs nothing more.
 
-use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::debug::{WatchedAccess, WatchedRange};
 use super::dp::ones;
 use super::el2::{
-    hcr_mask, E2hLayout, El2Reg, El2Regs, El2Storage, HCR_CD, HCR_DC, HCR_FWB, HCR_NV, HCR_NV1,
-    HCR_PTW, HCR_TGE, HCR_VM, VTTBR_VMID8,
+    E2hLayout, El2Reg, El2Regs, El2Storage, HCR_CD, HCR_DC, HCR_FWB, HCR_NV, HCR_NV1, HCR_PTW,
+    HCR_TGE, HCR_VM, VTTBR_VMID8, hcr_mask,
 };
 use super::exception::{AccessSyndrome, AddressedClass, Exception, SyndromeClass, SyndromeSlot};
 use super::exec::{Fault, StopCause};
@@ -79,12 +79,12 @@ use super::features::{Feature, Features};
 use super::memattr::{MemAttrs, Shareability};
 use super::pmu::L1dAccess;
 use super::regime::{
-    el10_s1_disabled_data_normal, el10_stage1_enabled, el10_stage2_enabled, Granule, OaLayout,
-    Regime, S1Params, S1Range, S1Start,
+    Granule, OaLayout, Regime, S1Params, S1Range, S1Start, el10_s1_disabled_data_normal,
+    el10_stage1_enabled, el10_stage2_enabled,
 };
-use super::stage2::{s2_granule, s2_start, S2AttrRule, S2Start, S2Walked};
+use super::stage2::{S2AttrRule, S2Start, S2Walked, s2_granule, s2_start};
 use super::tlbi::{Asid, Holds, Invalidation, TlbRecord, TranslationScope, Vmid};
-use super::{id, sctlr, Cpu, El, Levels, SysRegs};
+use super::{Cpu, El, Levels, SysRegs, id, sctlr};
 use crate::bus::{AccessWidth, BusFault, DescriptorSwap, PhysAddr, PhysBus, PhysSpan, Writes};
 
 /// What an access does, for permission checks.
@@ -199,6 +199,13 @@ pub(crate) struct DataAccess {
 }
 
 impl DataAccess {
+    /// An exclusive or atomic access.
+    pub(crate) const ATOMIC: Self = Self {
+        unprivileged: false,
+        alignment: AlignmentRule::Atomic,
+        syndrome: InstructionSyndrome::Absent,
+        class: AccessClass::General,
+    };
     pub(crate) const NORMAL: Self = Self {
         unprivileged: false,
         alignment: AlignmentRule::Any,
@@ -212,28 +219,21 @@ impl DataAccess {
         syndrome: InstructionSyndrome::Absent,
         class: AccessClass::General,
     };
-    /// An exclusive or atomic access.
-    pub(crate) const ATOMIC: Self = Self {
-        unprivileged: false,
-        alignment: AlignmentRule::Atomic,
-        syndrome: InstructionSyndrome::Absent,
-        class: AccessClass::General,
-    };
-    pub(crate) const UNPRIVILEGED: Self = Self {
-        unprivileged: true,
-        alignment: AlignmentRule::Any,
-        syndrome: InstructionSyndrome::Absent,
-        class: AccessClass::General,
+    /// A load or store of an SVE or SME register.
+    pub(crate) const SCALABLE: Self = Self {
+        class: AccessClass::Scalable,
+        ..Self::NORMAL
     };
     /// A load or store of a SIMD&FP register.
     pub(crate) const SIMD_FP: Self = Self {
         class: AccessClass::SimdFp,
         ..Self::NORMAL
     };
-    /// A load or store of an SVE or SME register.
-    pub(crate) const SCALABLE: Self = Self {
-        class: AccessClass::Scalable,
-        ..Self::NORMAL
+    pub(crate) const UNPRIVILEGED: Self = Self {
+        unprivileged: true,
+        alignment: AlignmentRule::Any,
+        syndrome: InstructionSyndrome::Absent,
+        class: AccessClass::General,
     };
 
     /// The same access, made by a load or store of one general-purpose
@@ -291,11 +291,7 @@ enum AddressInAccess {
 impl AddressInAccess {
     /// The address of byte `i` of an access split into bytes.
     const fn of_byte(i: u64) -> Self {
-        if i == 0 {
-            Self::Lowest
-        } else {
-            Self::Later
-        }
+        if i == 0 { Self::Lowest } else { Self::Later }
     }
 }
 
@@ -1422,7 +1418,7 @@ impl S2Memory {
     const fn combined(self, s1: S1Memory, cd: bool) -> Memory {
         let forced = match self {
             Self::Decoded(s2) => {
-                return Memory::combined(s1.memory(), s2.normal_as_non_cacheable(cd))
+                return Memory::combined(s1.memory(), s2.normal_as_non_cacheable(cd));
             }
             Self::ForcedDevice => Memory::Device,
             Self::ForcedStage1 | Self::ForcedStage1Shareable => match s1 {
@@ -2237,11 +2233,7 @@ const fn walk_sctlr(sctlr: u64, stage1: bool) -> u64 {
 /// regime's translations read it: its value with stage 1 enabled
 /// (`stage1`), nothing without.
 const fn walk_only(value: u64, stage1: bool) -> u64 {
-    if stage1 {
-        value
-    } else {
-        0
-    }
+    if stage1 { value } else { 0 }
 }
 
 /// The registers stage 2's translations of IPAs depend on: `VTTBR_EL2`, its
@@ -3063,7 +3055,7 @@ impl<C: TaggedContext> Contexts<C> {
                 Some(_) | None => {
                     return Err(SnapError::Invalid(
                         "TLB's order of contexts names a place other than once",
-                    ))
+                    ));
                 }
             }
         }
@@ -3546,8 +3538,17 @@ impl<L: Levels> Tlb<L> {
             let pa_page = r.read_u64()?;
             let mut rest = [0u8; 9];
             r.read_bytes(&mut rest)?;
-            let [perms, s1_memory, level, regime, stage1, s2_perms, s2_memory, s2_level, memory] =
-                rest;
+            let [
+                perms,
+                s1_memory,
+                level,
+                regime,
+                stage1,
+                s2_perms,
+                s2_memory,
+                s2_level,
+                memory,
+            ] = rest;
             let (Some(level), Some(s2_level)) = (LeafLevel::of(level), LeafLevel::of(s2_level))
             else {
                 return Err(NOT_WALKED);
@@ -3582,7 +3583,7 @@ impl<L: Levels> Tlb<L> {
                 }
                 Some(Regime::El2 | Regime::El20) if page & TAG_MASK != 0 => return Err(NO_CONTEXT),
                 Some(regime @ (Regime::El2 | Regime::El20)) if regime != context.el2.regime() => {
-                    return Err(NO_CONTEXT)
+                    return Err(NO_CONTEXT);
                 }
                 Some(regime @ (Regime::El2 | Regime::El20)) => regime,
                 None => return Err(SnapError::Invalid("TLB entry names no translation regime")),
@@ -4907,7 +4908,7 @@ impl<L: Levels> Cpu<L> {
             let desc = match bus.read_descriptor(address, clock) {
                 Ok(d) => d,
                 Err(BusFault::Unmapped) => {
-                    return fault(TranslationFault::ExternalAbortOnWalk { level })
+                    return fault(TranslationFault::ExternalAbortOnWalk { level });
                 }
             };
             if desc & 1 == 0 {
@@ -5788,7 +5789,13 @@ impl<L: Levels> Cpu<L> {
             let byte_va = va.wrapping_add(i);
             let slot = acc.syndrome_slot(AddressInAccess::of_byte(i));
             let t = self
-                .translate_needs(bus, byte_va, Needs::Access(AccessKind::Read), el, OnDevice::Refused)
+                .translate_needs(
+                    bus,
+                    byte_va,
+                    Needs::Access(AccessKind::Read),
+                    el,
+                    OnDevice::Refused,
+                )
                 .map_err(|abort| Self::data_abort(byte_va, abort, slot))?;
             let range = self.watched_range(acc);
             self.check_watchpoints(byte_va, 1, WatchedAccess::Load, el, range)?;

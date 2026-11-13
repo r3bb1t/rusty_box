@@ -99,13 +99,21 @@ pub struct BxPackedXmmRegister {
 
 impl BxPackedXmmRegister {
     packed_reg_accessors!(uint xmm64u, set_xmm64u, u64, 8);
+
     packed_reg_accessors!(uint xmm32u, set_xmm32u, u32, 4);
+
     packed_reg_accessors!(uint xmm16u, set_xmm16u, u16, 2);
+
     packed_reg_accessors!(byte xmmubyte, set_xmmubyte, xmm_sbyte, set_xmm_sbyte);
+
     packed_reg_accessors!(sint xmm64s, set_xmm64s, xmm64u, set_xmm64u, i64, u64);
+
     packed_reg_accessors!(sint xmm32s, set_xmm32s, xmm32u, set_xmm32u, i32, u32);
+
     packed_reg_accessors!(sint xmm16s, set_xmm16s, xmm16u, set_xmm16u, i16, u16);
+
     packed_reg_accessors!(float xmm32f, set_xmm32f, f32, 4);
+
     packed_reg_accessors!(float xmm64f, set_xmm64f, f64, 8);
 
     /// Raw byte slice (for bulk copy / memcmp).
@@ -113,6 +121,7 @@ impl BxPackedXmmRegister {
     pub fn raw(&self) -> &[u8; 16] {
         &self.bytes
     }
+
     #[inline(always)]
     pub fn raw_mut(&mut self) -> &mut [u8; 16] {
         &mut self.bytes
@@ -141,13 +150,21 @@ pub struct BxPackedYmmRegister {
 
 impl BxPackedYmmRegister {
     packed_reg_accessors!(uint ymm64u, set_ymm64u, u64, 8);
+
     packed_reg_accessors!(uint ymm32u, set_ymm32u, u32, 4);
+
     packed_reg_accessors!(uint ymm16u, set_ymm16u, u16, 2);
+
     packed_reg_accessors!(byte ymmubyte, set_ymmubyte, ymm_sbyte, set_ymm_sbyte);
+
     packed_reg_accessors!(sint ymm64s, set_ymm64s, ymm64u, set_ymm64u, i64, u64);
+
     packed_reg_accessors!(sint ymm32s, set_ymm32s, ymm32u, set_ymm32u, i32, u32);
+
     packed_reg_accessors!(sint ymm16s, set_ymm16s, ymm16u, set_ymm16u, i16, u16);
+
     packed_reg_accessors!(float ymm32f, set_ymm32f, f32, 4);
+
     packed_reg_accessors!(float ymm64f, set_ymm64f, f64, 8);
 
     /// View as XMM halves.
@@ -158,6 +175,7 @@ impl BxPackedYmmRegister {
         r.bytes.copy_from_slice(&self.bytes[s..s + 16]);
         r
     }
+
     #[inline(always)]
     pub fn set_ymm128(&mut self, i: usize, v: BxPackedXmmRegister) {
         let s = i * 16;
@@ -168,6 +186,7 @@ impl BxPackedYmmRegister {
     pub fn raw(&self) -> &[u8; 32] {
         &self.bytes
     }
+
     #[inline(always)]
     pub fn raw_mut(&mut self) -> &mut [u8; 32] {
         &mut self.bytes
@@ -200,13 +219,21 @@ impl Default for BxPackedZmmRegister {
 
 impl BxPackedZmmRegister {
     packed_reg_accessors!(uint zmm64u, set_zmm64u, u64, 8);
+
     packed_reg_accessors!(uint zmm32u, set_zmm32u, u32, 4);
+
     packed_reg_accessors!(uint zmm16u, set_zmm16u, u16, 2);
+
     packed_reg_accessors!(byte zmmubyte, set_zmmubyte, zmm_sbyte, set_zmm_sbyte);
+
     packed_reg_accessors!(sint zmm64s, set_zmm64s, zmm64u, set_zmm64u, i64, u64);
+
     packed_reg_accessors!(sint zmm32s, set_zmm32s, zmm32u, set_zmm32u, i32, u32);
+
     packed_reg_accessors!(sint zmm16s, set_zmm16s, zmm16u, set_zmm16u, i16, u16);
+
     packed_reg_accessors!(float zmm32f, set_zmm32f, f32, 4);
+
     packed_reg_accessors!(float zmm64f, set_zmm64f, f64, 8);
 
     /// View as XMM quarters.
@@ -217,6 +244,7 @@ impl BxPackedZmmRegister {
         r.bytes.copy_from_slice(&self.bytes[s..s + 16]);
         r
     }
+
     #[inline(always)]
     pub fn set_zmm128(&mut self, i: usize, v: BxPackedXmmRegister) {
         let s = i * 16;
@@ -231,6 +259,7 @@ impl BxPackedZmmRegister {
         r.bytes.copy_from_slice(&self.bytes[s..s + 32]);
         r
     }
+
     #[inline(always)]
     pub fn set_zmm256(&mut self, i: usize, v: BxPackedYmmRegister) {
         let s = i * 32;
@@ -245,6 +274,7 @@ impl BxPackedZmmRegister {
     pub fn raw(&self) -> &[u8; 64] {
         &self.bytes
     }
+
     #[inline(always)]
     pub fn raw_mut(&mut self) -> &mut [u8; 64] {
         &mut self.bytes
@@ -313,9 +343,6 @@ bitflags::bitflags! {
 }
 
 impl Mxcsr {
-    /// Both rounding-control bits (mask = 0x6000)
-    pub const RC_MASK: Mxcsr = Self::RC0.union(Self::RC1);
-
     /// All exception mask bits (IM|DM|ZM|OM|UM|PM)
     pub const ALL_MASKS: Mxcsr = Self::IM
         .union(Self::DM)
@@ -323,7 +350,8 @@ impl Mxcsr {
         .union(Self::OM)
         .union(Self::UM)
         .union(Self::PM);
-
+    /// Both rounding-control bits (mask = 0x6000)
+    pub const RC_MASK: Mxcsr = Self::RC0.union(Self::RC1);
     /// Reset value: all exceptions masked, round-to-nearest (= 0x1F80)
     pub const RESET: Mxcsr = Self::ALL_MASKS;
 
@@ -541,20 +569,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 #[cfg(test)]
 mod tests {
 
-/// Emulator construction needs a bigger stack than the default 2 MiB test
-/// thread: `Emulator` is ~4 MiB and the debug build materialises a few
-/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
-/// enough concurrent reservations to intermittently exhaust the process
-/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
-const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
-    use crate::{
-        cpu::{
-            cpu::Exception,
-            CpuSetupMode, X86Reg,
-        },
-        emulator::{Emulator, EmulatorConfig},
-    };
-
+    /// Emulator construction needs a bigger stack than the default 2 MiB test
+    /// thread: `Emulator` is ~4 MiB and the debug build materialises a few
+    /// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
+    /// enough concurrent reservations to intermittently exhaust the process
+    /// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+    const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
+    use crate::cpu::cpu::Exception;
+    use crate::cpu::{CpuSetupMode, X86Reg};
+    use crate::emulator::{Emulator, EmulatorConfig};
 
     const CODE_BASE: u64 = 0x20_0000;
     const XSETBV_BASE: u64 = CODE_BASE + 0x100;
@@ -563,29 +586,20 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     const NM_HANDLER: u64 = 0x29_0010;
     const STACK_TOP: u64 = 0x30_0000;
 
-
     fn avx_emulator() -> alloc::boxed::Box<Emulator> {
-        Emulator::new_with_mode(
-            EmulatorConfig::default(),
-            CpuSetupMode::FlatLong64,
-        )
-        .unwrap()
+        Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64).unwrap()
     }
 
-    fn install_exception_gate(
-        emu: &mut Emulator,
-        vector: u8,
-        handler: u64,
-    ) {
+    fn install_exception_gate(emu: &mut Emulator, vector: u8, handler: u64) {
         let mut gate = [0u8; 16];
         gate[0..2].copy_from_slice(&(handler as u16).to_le_bytes());
         gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
-        gate[5] = 0x8e;
+        gate[5] = 0x8E;
         gate[6..8].copy_from_slice(&((handler >> 16) as u16).to_le_bytes());
         gate[8..12].copy_from_slice(&((handler >> 32) as u32).to_le_bytes());
         emu.mem_write(IDT_BASE + u64::from(vector) * 16, &gate)
             .unwrap();
-        emu.mem_write(handler, &[0xf4]).unwrap();
+        emu.mem_write(handler, &[0xF4]).unwrap();
     }
 
     fn install_avx_exception_handlers(emu: &mut Emulator) {
@@ -604,27 +618,18 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         emu.reg_write(X86Reg::Rax, 0x7);
         emu.reg_write(X86Reg::Rcx, 0);
         emu.reg_write(X86Reg::Rdx, 0);
-        emu.mem_write(XSETBV_BASE, &[0x0f, 0x01, 0xd1]).unwrap();
+        emu.mem_write(XSETBV_BASE, &[0x0F, 0x01, 0xD1]).unwrap();
         emu.emu_start(XSETBV_BASE, Some(XSETBV_BASE + 3), None, Some(1))
             .unwrap();
     }
 
-    fn run_one(
-        emu: &mut Emulator,
-        address: u64,
-        code: &[u8],
-    ) -> crate::error::Result<()> {
+    fn run_one(emu: &mut Emulator, address: u64, code: &[u8]) -> crate::error::Result<()> {
         emu.mem_write(address, code).unwrap();
         emu.emu_start(address, Some(address + code.len() as u64), None, Some(1))
             .map(|_| ())
     }
 
-    fn assert_fault_at_original_rip(
-        emu: &mut Emulator,
-        vector: Exception,
-        handler: u64,
-        rip: u64,
-    ) {
+    fn assert_fault_at_original_rip(emu: &mut Emulator, vector: Exception, handler: u64, rip: u64) {
         assert_eq!(emu.cpu().get_exception_diag()[vector as usize], 1);
         // The delivered fault is the one instruction the run was allowed:
         // Bochs cpu.cc `cpu_loop` counts it (`icount++` in the setjmp
@@ -644,43 +649,43 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-        let forms: [(&str, &[u8]); 6] = [
-            ("VPINSRB", &[0xC4, 0xE3, 0x71, 0x20, 0xC0, 0x05]),
-            ("VPINSRW", &[0xC5, 0xF1, 0xC4, 0xC1, 0x03]),
-            ("VPINSRD", &[0xC4, 0xE3, 0x69, 0x22, 0xC1, 0x02]),
-            ("VPINSRQ", &[0xC4, 0xE3, 0xE9, 0x22, 0xC1, 0x01]),
-            ("VEXTRACTF128", &[0xC4, 0xE3, 0x7D, 0x19, 0xD8, 0x01]),
-            ("VEXTRACTI128", &[0xC4, 0xE3, 0x7D, 0x39, 0xD8, 0x01]),
-        ];
+                let forms: [(&str, &[u8]); 6] = [
+                    ("VPINSRB", &[0xC4, 0xE3, 0x71, 0x20, 0xC0, 0x05]),
+                    ("VPINSRW", &[0xC5, 0xF1, 0xC4, 0xC1, 0x03]),
+                    ("VPINSRD", &[0xC4, 0xE3, 0x69, 0x22, 0xC1, 0x02]),
+                    ("VPINSRQ", &[0xC4, 0xE3, 0xE9, 0x22, 0xC1, 0x01]),
+                    ("VEXTRACTF128", &[0xC4, 0xE3, 0x7D, 0x19, 0xD8, 0x01]),
+                    ("VEXTRACTI128", &[0xC4, 0xE3, 0x7D, 0x39, 0xD8, 0x01]),
+                ];
 
-        for (name, code) in forms {
-            let mut emu = avx_emulator();
-            install_avx_exception_handlers(&mut emu);
-            emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | (1 << 3));
-            run_one(&mut emu, CODE_BASE, code).unwrap();
-            assert_fault_at_original_rip(&mut emu, Exception::Ud, UD_HANDLER, CODE_BASE);
-            assert_eq!(
-                emu.cpu().get_exception_diag()[Exception::Nm as usize],
-                0,
-                "{name} must raise #UD before #NM when OSXSAVE is clear"
-            );
-        }
+                for (name, code) in forms {
+                    let mut emu = avx_emulator();
+                    install_avx_exception_handlers(&mut emu);
+                    emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | (1 << 3));
+                    run_one(&mut emu, CODE_BASE, code).unwrap();
+                    assert_fault_at_original_rip(&mut emu, Exception::Ud, UD_HANDLER, CODE_BASE);
+                    assert_eq!(
+                        emu.cpu().get_exception_diag()[Exception::Nm as usize],
+                        0,
+                        "{name} must raise #UD before #NM when OSXSAVE is clear"
+                    );
+                }
 
-        for (name, code) in forms {
-            let mut emu = avx_emulator();
-            install_avx_exception_handlers(&mut emu);
-            enable_guest_avx(&mut emu);
-            emu.cpu_mut().xcr0.set32(0x1);
-            emu.cpu_mut().handle_avx_mode_change();
-            emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | (1 << 3));
-            run_one(&mut emu, CODE_BASE, code).unwrap();
-            assert_fault_at_original_rip(&mut emu, Exception::Ud, UD_HANDLER, CODE_BASE);
-            assert_eq!(
-                emu.cpu().get_exception_diag()[Exception::Nm as usize],
-                0,
-                "{name} must raise #UD before #NM when XCR0 lacks SSE/YMM"
-            );
-        }
+                for (name, code) in forms {
+                    let mut emu = avx_emulator();
+                    install_avx_exception_handlers(&mut emu);
+                    enable_guest_avx(&mut emu);
+                    emu.cpu_mut().xcr0.set32(0x1);
+                    emu.cpu_mut().handle_avx_mode_change();
+                    emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | (1 << 3));
+                    run_one(&mut emu, CODE_BASE, code).unwrap();
+                    assert_fault_at_original_rip(&mut emu, Exception::Ud, UD_HANDLER, CODE_BASE);
+                    assert_eq!(
+                        emu.cpu().get_exception_diag()[Exception::Nm as usize],
+                        0,
+                        "{name} must raise #UD before #NM when XCR0 lacks SSE/YMM"
+                    );
+                }
             })
             .unwrap()
             .join()
@@ -692,34 +697,34 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-        let mut emu = avx_emulator();
-        enable_guest_avx(&mut emu);
-        let source: [u8; 32] = [
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
-            0x0C, 0x0D, 0x0E, 0x0F, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
-            0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F,
-        ];
-        emu.reg_write_ymm(X86Reg::Ymm3, source);
+                let mut emu = avx_emulator();
+                enable_guest_avx(&mut emu);
+                let source: [u8; 32] = [
+                    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+                    0x0D, 0x0E, 0x0F, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
+                    0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F,
+                ];
+                emu.reg_write_ymm(X86Reg::Ymm3, source);
 
-        for (offset, name, code) in [
-            (
-                0,
-                "VEXTRACTF128",
-                &[0xC4, 0xE3, 0x7D, 0x19, 0xD8, 0x01][..],
-            ),
-            (
-                0x40,
-                "VEXTRACTI128",
-                &[0xC4, 0xE3, 0x7D, 0x39, 0xD8, 0x01][..],
-            ),
-        ] {
-            emu.reg_write_ymm(X86Reg::Ymm0, [0xAA; 32]);
-            let address = CODE_BASE + offset;
-            run_one(&mut emu, address, code).unwrap();
-            let result = emu.reg_read_ymm(X86Reg::Ymm0);
-            assert_eq!(&result[..16], &source[16..], "{name} selected the wrong lane");
-            assert_eq!(&result[16..], &[0; 16], "{name} must clear YMM upper bits");
-        }
+                for (offset, name, code) in [
+                    (0, "VEXTRACTF128", &[0xC4, 0xE3, 0x7D, 0x19, 0xD8, 0x01][..]),
+                    (
+                        0x40,
+                        "VEXTRACTI128",
+                        &[0xC4, 0xE3, 0x7D, 0x39, 0xD8, 0x01][..],
+                    ),
+                ] {
+                    emu.reg_write_ymm(X86Reg::Ymm0, [0xAA; 32]);
+                    let address = CODE_BASE + offset;
+                    run_one(&mut emu, address, code).unwrap();
+                    let result = emu.reg_read_ymm(X86Reg::Ymm0);
+                    assert_eq!(
+                        &result[..16],
+                        &source[16..],
+                        "{name} selected the wrong lane"
+                    );
+                    assert_eq!(&result[16..], &[0; 16], "{name} must clear YMM upper bits");
+                }
             })
             .unwrap()
             .join()
@@ -752,8 +757,6 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     // access_write_linear. `alignment_check_mask` was previously stored and
     // snapshotted but never consulted, so #AC was never raised.
     // ════════════════════════════════════════════════════════════════════
-
-
 
     /// Proves the #AC check is *wired into* each of the six scalar linear
     /// accessors with the correct `ac_mask`, not merely that the predicate
@@ -800,7 +803,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                         // Re-arm every iteration: delivering the previous
                         // exception runs CPL-0 machinery that may clear
                         // user_pl, and the check requires both conditions.
-                        ctx.alignment_check_mask = 0xf;
+                        ctx.alignment_check_mask = 0xF;
                         ctx.user_pl = true;
 
                         let before = ctx.get_exception_diag()[ac];
@@ -814,9 +817,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                                 ctx.read_linear_dword(BxSegregs::Ds, addr).map(|_| ())
                             }
                             ("dword", true) => ctx.write_linear_dword(BxSegregs::Ds, addr, 0),
-                            (_, false) => {
-                                ctx.read_linear_qword(BxSegregs::Ds, addr).map(|_| ())
-                            }
+                            (_, false) => ctx.read_linear_qword(BxSegregs::Ds, addr).map(|_| ()),
                             (_, true) => ctx.write_linear_qword(BxSegregs::Ds, addr, 0),
                         };
                         let raised_ac = ctx.get_exception_diag()[ac] > before;
@@ -843,13 +844,18 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 
                 // Byte accessors take no ac_mask in Bochs and must never #AC.
                 let mut ctx = emu.exec_ctx(0);
-                ctx.alignment_check_mask = 0xf;
+                ctx.alignment_check_mask = 0xF;
                 ctx.user_pl = true;
                 let before = ctx.get_exception_diag()[ac];
-                let read = ctx.read_linear_byte(BxSegregs::Ds, crate::config::BxLinAddress::new(BASE + 1));
-                ctx.alignment_check_mask = 0xf;
+                let read =
+                    ctx.read_linear_byte(BxSegregs::Ds, crate::config::BxLinAddress::new(BASE + 1));
+                ctx.alignment_check_mask = 0xF;
                 ctx.user_pl = true;
-                let write = ctx.write_linear_byte(BxSegregs::Ds, crate::config::BxLinAddress::new(BASE + 1), 0);
+                let write = ctx.write_linear_byte(
+                    BxSegregs::Ds,
+                    crate::config::BxLinAddress::new(BASE + 1),
+                    0,
+                );
                 assert_eq!(
                     ctx.get_exception_diag()[ac],
                     before,
@@ -883,20 +889,28 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 assert_eq!(ctx.alignment_check_mask, 0);
                 for (addr, mask) in [(0x1001u64, WORD), (0x1003, DWORD), (0x1007, QWORD)] {
                     assert!(
-                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask).is_ok(),
+                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask)
+                            .is_ok(),
                         "no #AC while the mask is disarmed"
                     );
                 }
 
                 // Arm exactly what handle_alignment_check() would set.
-                ctx.alignment_check_mask = 0xf;
+                ctx.alignment_check_mask = 0xF;
                 ctx.user_pl = true;
 
                 // Naturally aligned accesses still pass at every width.
-                for (addr, mask) in [(0x1000u64, WORD), (0x1000, DWORD), (0x1000, QWORD),
-                                     (0x1002, WORD), (0x1004, DWORD), (0x1008, QWORD)] {
+                for (addr, mask) in [
+                    (0x1000u64, WORD),
+                    (0x1000, DWORD),
+                    (0x1000, QWORD),
+                    (0x1002, WORD),
+                    (0x1004, DWORD),
+                    (0x1008, QWORD),
+                ] {
                     assert!(
-                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask).is_ok(),
+                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask)
+                            .is_ok(),
                         "aligned access at {addr:#x} mask {mask} must not fault"
                     );
                 }
@@ -911,7 +925,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 ] {
                     let before = ctx.get_exception_diag()[Exception::Ac as usize];
                     assert!(
-                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask).is_err(),
+                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask)
+                            .is_err(),
                         "{name} must fault"
                     );
                     assert_eq!(
@@ -927,7 +942,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 ctx.user_pl = false;
                 for (addr, mask) in [(0x1001u64, WORD), (0x1003, DWORD), (0x1005, QWORD)] {
                     assert!(
-                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask).is_ok(),
+                        ctx.check_alignment(crate::config::BxLinAddress::new(addr), mask)
+                            .is_ok(),
                         "#AC applies to user-privilege accesses only"
                     );
                 }
@@ -942,45 +958,45 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-            let mut emu = avx_emulator();
+                let mut emu = avx_emulator();
 
-            // Ungated base instructions are never touched.
-            assert_eq!(
-                emu.cpu().isa_resolve_opcode(Opcode::Nop),
-                Opcode::Nop,
-                "an opcode with no ISA feature must always be allowed"
-            );
-
-            // Skylake-X advertises AVX2, so VPERMD stays enabled...
-            assert_eq!(
-                emu.cpu().isa_resolve_opcode(Opcode::V256VpermdVdqHdqWdq),
-                Opcode::V256VpermdVdqHdqWdq
-            );
-            // ...and #UDs the moment the feature bit goes away.
-            set_feature(&mut emu, X86Feature::IsaAvx2, false);
-            assert_eq!(
-                emu.cpu().isa_resolve_opcode(Opcode::V256VpermdVdqHdqWdq),
-                Opcode::IaError,
-                "clearing AVX2 must disable AVX2-only opcodes"
-            );
-            set_feature(&mut emu, X86Feature::IsaAvx2, true);
-
-            // Features Skylake-X genuinely lacks are gated out of the box. GFNI
-            // matters in particular: its VEX form is 3-operand, so executing the
-            // legacy 2-operand handler under a VEX prefix would silently compute
-            // the wrong thing rather than fault.
-            for op in [
-                Opcode::Gf2p8affineqbVdqWdqIb,
-                Opcode::Sha256rnds2VdqWdq,
-                Opcode::Getsec,
-                Opcode::V256VaesencVdqHdqWdq,
-            ] {
+                // Ungated base instructions are never touched.
                 assert_eq!(
-                    emu.cpu().isa_resolve_opcode(op),
-                    Opcode::IaError,
-                    "{op:?} is not in the Skylake-X feature set and must #UD"
+                    emu.cpu().isa_resolve_opcode(Opcode::Nop),
+                    Opcode::Nop,
+                    "an opcode with no ISA feature must always be allowed"
                 );
-            }
+
+                // Skylake-X advertises AVX2, so VPERMD stays enabled...
+                assert_eq!(
+                    emu.cpu().isa_resolve_opcode(Opcode::V256VpermdVdqHdqWdq),
+                    Opcode::V256VpermdVdqHdqWdq
+                );
+                // ...and #UDs the moment the feature bit goes away.
+                set_feature(&mut emu, X86Feature::IsaAvx2, false);
+                assert_eq!(
+                    emu.cpu().isa_resolve_opcode(Opcode::V256VpermdVdqHdqWdq),
+                    Opcode::IaError,
+                    "clearing AVX2 must disable AVX2-only opcodes"
+                );
+                set_feature(&mut emu, X86Feature::IsaAvx2, true);
+
+                // Features Skylake-X genuinely lacks are gated out of the box. GFNI
+                // matters in particular: its VEX form is 3-operand, so executing the
+                // legacy 2-operand handler under a VEX prefix would silently compute
+                // the wrong thing rather than fault.
+                for op in [
+                    Opcode::Gf2p8affineqbVdqWdqIb,
+                    Opcode::Sha256rnds2VdqWdq,
+                    Opcode::Getsec,
+                    Opcode::V256VaesencVdqHdqWdq,
+                ] {
+                    assert_eq!(
+                        emu.cpu().isa_resolve_opcode(op),
+                        Opcode::IaError,
+                        "{op:?} is not in the Skylake-X feature set and must #UD"
+                    );
+                }
             })
             .unwrap()
             .join()
@@ -1058,60 +1074,60 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-            let mut emu = avx_emulator();
+                let mut emu = avx_emulator();
 
-            // Without LZCNT, F3 0F BD is architecturally BSR — Bochs copies the
-            // BSR table entry over LZCNT's rather than raising #UD.
-            set_feature(&mut emu, X86Feature::IsaLzcnt, false);
-            assert_eq!(
-                emu.cpu().isa_resolve_opcode(Opcode::LzcntGdEd),
-                Opcode::BsrGdEd
-            );
-            assert_eq!(
-                emu.cpu().isa_resolve_opcode(Opcode::LzcntGqEq),
-                Opcode::BsrGqEq
-            );
-            set_feature(&mut emu, X86Feature::IsaLzcnt, true);
-            assert_eq!(
-                emu.cpu().isa_resolve_opcode(Opcode::LzcntGdEd),
-                Opcode::LzcntGdEd
-            );
+                // Without LZCNT, F3 0F BD is architecturally BSR — Bochs copies the
+                // BSR table entry over LZCNT's rather than raising #UD.
+                set_feature(&mut emu, X86Feature::IsaLzcnt, false);
+                assert_eq!(
+                    emu.cpu().isa_resolve_opcode(Opcode::LzcntGdEd),
+                    Opcode::BsrGdEd
+                );
+                assert_eq!(
+                    emu.cpu().isa_resolve_opcode(Opcode::LzcntGqEq),
+                    Opcode::BsrGqEq
+                );
+                set_feature(&mut emu, X86Feature::IsaLzcnt, true);
+                assert_eq!(
+                    emu.cpu().isa_resolve_opcode(Opcode::LzcntGdEd),
+                    Opcode::LzcntGdEd
+                );
 
-            // Same shape for TZCNT/BSF under BMI1.
-            set_feature(&mut emu, X86Feature::IsaBmi1, false);
-            assert_eq!(
-                emu.cpu().isa_resolve_opcode(Opcode::TzcntGdEd),
-                Opcode::BsfGdEd
-            );
-            set_feature(&mut emu, X86Feature::IsaBmi1, true);
+                // Same shape for TZCNT/BSF under BMI1.
+                set_feature(&mut emu, X86Feature::IsaBmi1, false);
+                assert_eq!(
+                    emu.cpu().isa_resolve_opcode(Opcode::TzcntGdEd),
+                    Opcode::BsfGdEd
+                );
+                set_feature(&mut emu, X86Feature::IsaBmi1, true);
 
-            // 3DNow! Extensions re-enable a fixed list of MMX-era opcodes even
-            // when their declared feature (SSE) is absent.
-            set_feature(&mut emu, X86Feature::IsaSse, false);
-            assert_eq!(
-                emu.cpu().isa_resolve_opcode(Opcode::PavgbPqQq),
-                Opcode::IaError,
-                "without SSE or 3DNow!-Ext the MMX-era form is unavailable"
-            );
-            set_feature(&mut emu, X86Feature::Isa3dnowExt, true);
-            assert_eq!(
-                emu.cpu().isa_resolve_opcode(Opcode::PavgbPqQq),
-                Opcode::PavgbPqQq,
-                "3DNow!-Ext must re-enable the aliased MMX opcodes"
-            );
-            set_feature(&mut emu, X86Feature::Isa3dnowExt, false);
-            set_feature(&mut emu, X86Feature::IsaSse, true);
+                // 3DNow! Extensions re-enable a fixed list of MMX-era opcodes even
+                // when their declared feature (SSE) is absent.
+                set_feature(&mut emu, X86Feature::IsaSse, false);
+                assert_eq!(
+                    emu.cpu().isa_resolve_opcode(Opcode::PavgbPqQq),
+                    Opcode::IaError,
+                    "without SSE or 3DNow!-Ext the MMX-era form is unavailable"
+                );
+                set_feature(&mut emu, X86Feature::Isa3dnowExt, true);
+                assert_eq!(
+                    emu.cpu().isa_resolve_opcode(Opcode::PavgbPqQq),
+                    Opcode::PavgbPqQq,
+                    "3DNow!-Ext must re-enable the aliased MMX opcodes"
+                );
+                set_feature(&mut emu, X86Feature::Isa3dnowExt, false);
+                set_feature(&mut emu, X86Feature::IsaSse, true);
 
-            // AVX10.1 subsumes the AVX-512 sub-extensions.
-            set_feature(&mut emu, X86Feature::IsaAvx512Bw, false);
-            let evex_bw = Opcode::EvexVpaddbVdqHdqWdq;
-            assert_eq!(emu.cpu().isa_resolve_opcode(evex_bw), Opcode::IaError);
-            set_feature(&mut emu, X86Feature::IsaAvx10_1, true);
-            assert_eq!(
-                emu.cpu().isa_resolve_opcode(evex_bw),
-                evex_bw,
-                "AVX10.1 must stand in for the individual AVX-512 sub-features"
-            );
+                // AVX10.1 subsumes the AVX-512 sub-extensions.
+                set_feature(&mut emu, X86Feature::IsaAvx512Bw, false);
+                let evex_bw = Opcode::EvexVpaddbVdqHdqWdq;
+                assert_eq!(emu.cpu().isa_resolve_opcode(evex_bw), Opcode::IaError);
+                set_feature(&mut emu, X86Feature::IsaAvx10_1, true);
+                assert_eq!(
+                    emu.cpu().isa_resolve_opcode(evex_bw),
+                    evex_bw,
+                    "AVX10.1 must stand in for the individual AVX-512 sub-features"
+                );
             })
             .unwrap()
             .join()
