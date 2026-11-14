@@ -59,6 +59,11 @@ path = "examples/alpine/alpine_strace.rs"
 required-features = ["std", "gui-egui"]
 
 [[example]]
+name = "boot_probe"
+path = "examples/boot_probe.rs"
+required-features = ["std"]
+
+[[example]]
 name = "dlxlinux"
 path = "examples/dlxlinux/dlxlinux.rs"
 required-features = ["std"]

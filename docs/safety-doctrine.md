@@ -63,8 +63,10 @@ a *value's constructibility*, but never variant or field presence on a public ty
 representations is carried by a type, never by an enum whose completeness depends on the
 build: `Emulator` declares one `cpus` field of type `cpu_store::MachineCpus<T>`, an alias that
 resolves to `OwnedCpus<T>` with `alloc` and to `BorrowedCpus<'static, T>` without it. The
-general form is a type parameter; for guest RAM that is the target `RamStore<B: RamBytes>`,
-which is not built.
+general form is a type parameter. Guest RAM deliberately is not one: its two backings, owned
+pages with `alloc` and a caller's buffer without, differ only in who frees the bytes, so they
+are the private `memory_stub::RamBacking` behind the one public `BxMemoryStubC`, whose shape
+is the same in every build.
 
 **In the tree:**
 
