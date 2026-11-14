@@ -254,9 +254,11 @@ pub struct EmulatorConfig {
     pub ips: Ips,
     /// Enable PCI support
     pub pci_enabled: bool,
-    /// Register the VGA adapter as a PCI device (`1234:1111`, class `0300`) so a
-    /// guest KMS driver (Linux `bochs-drm`) can bind for a high-res framebuffer.
-    /// Off by default; requires `pci_enabled`. Experimental.
+    /// Register the VGA adapter as a PCI device (`1234:1111`, class `0300`),
+    /// Bochs `pci: slot1=pcivga`, where X servers and a guest KMS driver (Linux
+    /// `bochs-drm`) look for a display. Requires `pci_enabled`. Off by default,
+    /// as in Bochs, whose `is_pci_device("pcivga")` holds only for a slot named
+    /// so; the `rusty_box_gui` launcher turns it on (parity registry D25).
     pub pci_vga: bool,
     /// CPU parameters
     pub cpu_params: BxParams,

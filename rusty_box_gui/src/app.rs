@@ -4699,15 +4699,14 @@ impl NativeShellApp {
                         );
                     });
                     changed |= field_row(ui, "", |ui| {
-                        ui.checkbox(
-                            &mut self.settings.pci_vga,
-                            "Register VGA on PCI (experimental KMS / bochs-drm)",
-                        )
-                        .on_hover_text(
-                            "Exposes the adapter as PCI 1234:1111 so Linux bochs-drm can bind for \
-                             a full KMS framebuffer. Experimental — verify with a guest boot.",
-                        )
-                        .changed()
+                        ui.checkbox(&mut self.settings.pci_vga, "Video card on the PCI bus")
+                            .on_hover_text(
+                                "Shows the adapter to the guest as PCI device 1234:1111, where X \
+                             servers and Linux's bochs-drm look for a display. Off leaves only \
+                             the ISA adapter Bochs builds by default, which some graphical \
+                             guests do not find.",
+                            )
+                            .changed()
                     });
                 });
                 detail_row(ui, "Adapter", "VGA text/graphics framebuffer");

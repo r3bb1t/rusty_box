@@ -1,4 +1,5 @@
-//! Boot a CD image headless and report what its screen and serial console do.
+//! Boot a CD image, or a hard-disk image with `--disk` and `--chs`, headless
+//! and report what its screen and serial console do.
 //!
 //! A diagnosis harness for a guest whose screen goes wrong: it logs, against
 //! emulated time, every write to the display registers that decides whether
@@ -20,7 +21,8 @@ use std::time::Instant;
 use rusty_box::Result;
 use rusty_box::cpu::{HookMask, Instrumentation, IoHookEvent};
 use rusty_box::emulator::{
-    AtaSlot, BootDevice, BootOrder, EmulatorConfig, Ips, MachineBuilder, MemorySize, RunBudget,
+    AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MachineBuilder, MemorySize,
+    RunBudget,
 };
 use rusty_box::gui::NoGui;
 
@@ -198,8 +200,33 @@ enum Login {
     Commands,
 }
 
+/// What the machine boots from.
+enum Medium {
+    /// A CD image on the secondary master, as Bochs `ata1-master: type=cdrom`.
+    Cdrom(String),
+    /// A hard-disk image on the primary master.
+    Disk {
+        path: String,
+        geometry: DiskGeometry,
+    },
+}
+
+/// `C,H,S` as `--chs` spells a disk's geometry.
+fn parse_chs(spec: &str) -> std::result::Result<DiskGeometry, String> {
+    let parts: Vec<&str> = spec.split(',').collect();
+    let [cylinders, heads, sectors] = parts.as_slice() else {
+        return Err(format!("--chs takes C,H,S, not {spec}"));
+    };
+    let bad = |e: std::num::ParseIntError| format!("--chs {spec}: {e}");
+    Ok(DiskGeometry::new(
+        cylinders.parse().map_err(bad)?,
+        heads.parse().map_err(bad)?,
+        sectors.parse().map_err(bad)?,
+    ))
+}
+
 struct Options {
-    iso: String,
+    medium: Medium,
     memory_mib: usize,
     ips: u32,
     seconds: f64,
@@ -211,8 +238,11 @@ struct Options {
 
 fn parse_options() -> std::result::Result<Options, String> {
     let mut args = std::env::args().skip(1);
+    let mut cdrom: Option<String> = None;
+    let mut disk: Option<String> = None;
+    let mut chs: Option<DiskGeometry> = None;
     let mut options = Options {
-        iso: String::new(),
+        medium: Medium::Cdrom(String::new()),
         memory_mib: 512,
         ips: 300_000_000,
         seconds: 300.0,
@@ -239,17 +269,24 @@ fn parse_options() -> std::result::Result<Options, String> {
                 options.login = Some((user.to_string(), password.to_string()));
             }
             "--cmd" => options.commands.push(value("--cmd")?),
-            iso if !iso.starts_with("--") && options.iso.is_empty() => options.iso = arg,
+            "--disk" => disk = Some(value("--disk")?),
+            "--chs" => chs = Some(parse_chs(&value("--chs")?)?),
+            iso if !iso.starts_with("--") && cdrom.is_none() => cdrom = Some(arg),
             other => return Err(format!("unknown argument {other}")),
         }
     }
-    if options.iso.is_empty() {
-        return Err(
-            "usage: boot_probe <image.iso> [--memory-mib N] [--ips N] [--seconds S] \
-                    [--pci-vga] [--login user:password] [--cmd 'command']..."
-                .to_string(),
-        );
-    }
+    options.medium = match (cdrom, disk, chs) {
+        (Some(path), None, None) => Medium::Cdrom(path),
+        (None, Some(path), Some(geometry)) => Medium::Disk { path, geometry },
+        _ => {
+            return Err(
+                "usage: boot_probe (<image.iso> | --disk <image> --chs C,H,S) \
+                        [--memory-mib N] [--ips N] [--seconds S] [--pci-vga] \
+                        [--login user:password] [--cmd 'command']..."
+                    .to_string(),
+            );
+        }
+    };
     Ok(options)
 }
 
@@ -270,14 +307,20 @@ fn main() -> Result<()> {
         pci_vga: options.pci_vga,
         ..Default::default()
     };
-    let mut machine = MachineBuilder::new(config)
+    let builder = MachineBuilder::new(config)
         .tracer(DisplayWatch::default())
         .gui(NoGui::new())
         .bios(&bios)
-        .vga_bios(&vga_bios)
-        .boot_order(BootOrder::just(BootDevice::Cdrom))
-        .cdrom_file(AtaSlot::SECONDARY_MASTER, &options.iso)
-        .build()?;
+        .vga_bios(&vga_bios);
+    let mut machine = match &options.medium {
+        Medium::Cdrom(path) => builder
+            .boot_order(BootOrder::just(BootDevice::Cdrom))
+            .cdrom_file(AtaSlot::SECONDARY_MASTER, path),
+        Medium::Disk { path, geometry } => builder
+            .boot_order(BootOrder::just(BootDevice::Disk))
+            .disk_file(AtaSlot::PRIMARY_MASTER, path, *geometry),
+    }
+    .build()?;
 
     let chunk = u64::from(options.ips / 10);
     let started = Instant::now();

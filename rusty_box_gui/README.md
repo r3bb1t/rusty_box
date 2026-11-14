@@ -355,7 +355,7 @@ Every key, with its default and matching flag:
 | `display.backend` | `"egui"`, `"terminal"` or `"headless"` | `egui` (`terminal` without the `gui-egui` feature) | `--display` |
 | `display.width`, `display.height` | Pre-boot VBE mode. Both are needed and must be non-zero; this raises the VBE ceiling so the guest can select the mode | unset | none |
 | `display.bpp` | Bits per pixel of that mode (8/16/24/32) | `32` | none |
-| `display.pci_vga` | Register the VGA on PCI for Linux `bochs-drm` (experimental) | `false` | none |
+| `display.pci_vga` | Put the VGA on the PCI bus as `1234:1111` (Bochs `pci: slot1=pcivga`), where X servers and Linux `bochs-drm` look for a display; `false` gives Bochs's default ISA-only adapter | `true` | none |
 | `display.stretch` | Stretch the phone's full-screen console to fill the screen rather than keep the guest's shape (its menu's `Stretch to fill`) | `false` | none |
 | `display.pointer_speed_percent` | The phone trackpad's cursor speed, in percent of the finger's travel across the guest's image, 50 to 300 (its menu's `Pointer speed`) | `100` | none |
 | `rom.bios` | System BIOS ROM (required) | none | `--bios` |

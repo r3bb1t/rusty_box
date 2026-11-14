@@ -662,7 +662,7 @@ only when a limit is set.
 |-----|---------|
 | `backend` | `"egui"` (the windowed shell; the default in a build with the `gui-egui` feature, which is on by default), `"terminal"` (text mode in your terminal), or `"headless"` (no display, for benchmarks and CI). |
 | `width` / `height` / `bpp` | Preferred pre-boot VBE mode. It raises the display capability ceiling so the guest *may* select this resolution (GRUB `gfxpayload`, vesafb, KMS). It does not force the mode; the guest decides. Takes effect only when both `width` and `height` are given. `bpp` is 8, 16, 24 or 32, and defaults to 32. |
-| `pci_vga` | **Experimental.** Off by default. Registers the VGA adapter as a PCI device (`1234:1111`), which lets Linux's `bochs-drm` driver bind and switch the console to a KMS framebuffer at the preferred resolution. Caveat: when `bochs-drm` takes over, the text console goes dark until the framebuffer console comes up, and during a slow boot phase that can look like a hang. Confirm your config boots with it off before turning it on. |
+| `pci_vga` | On by default. Puts the VGA adapter on the PCI bus as device `1234:1111` (Bochs `pci: slot1=pcivga`). X servers and Linux's `bochs-drm` look for a display there: SliTaz 5.0's X finds no screen with it off. With it on, when `bochs-drm` takes over the text console goes dark until the framebuffer console comes up, which during a slow boot phase can look like a hang. `false` gives the ISA-only adapter a default Bochs configuration has. |
 | `stretch` | On a phone, stretch the full-screen console to fill the screen rather than keep the guest's shape. Off by default; the full-screen menu's `Stretch to fill` sets it. |
 | `pointer_speed_percent` | On a phone, the trackpad's cursor speed, in percent of the finger's travel across the guest's image: 50 to 300, 100 by default. The full-screen menu's `Pointer speed` sets it. |
 
@@ -981,8 +981,9 @@ Two practical notes:
 2. Did you set **`max_instructions`**? The VM stops silently when the limit
    runs out, and a literal `0` in the config file or on the command line runs
    nothing at all.
-3. Is **`pci_vga = true`**? The console goes dark between `bochs-drm` binding
-   and the framebuffer console coming up. Retest with it off to compare.
+3. Is **`pci_vga`** on (the default)? The console goes dark between
+   `bochs-drm` binding and the framebuffer console coming up. Retest with
+   `pci_vga = false` to compare.
 
 **The badge reads Faulted.** An error notice is on screen. It names what
 failed, for example a missing BIOS file or a disk image that could not be

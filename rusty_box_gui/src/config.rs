@@ -25,7 +25,11 @@ const DEFAULT_SMP_QUANTUM: u32 = 16;
 const DEFAULT_CPUID_FREQ: CpuidFreq = CpuidFreq::None;
 const DEFAULT_MAX_INSTRUCTIONS: u64 = u64::MAX;
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Warn;
-const DEFAULT_PCI_VGA: bool = false;
+/// The launcher's PC has its VGA on the PCI bus, as a Bochs configuration with
+/// `pci: slot1=pcivga` does: modern X servers and KMS drivers find a display
+/// only there. The library keeps Bochs's own default, off
+/// (`EmulatorConfig::pci_vga`); `docs/bochs-parity-divergences.md` D25.
+const DEFAULT_PCI_VGA: bool = true;
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -534,8 +538,8 @@ pub struct DisplayToml {
     pub height: Option<u16>,
     /// Pre-boot VBE bits-per-pixel (8/16/24/32).
     pub bpp: Option<u16>,
-    /// Register the VGA as a PCI device so Linux `bochs-drm` can bind for a KMS
-    /// framebuffer. Off by default; experimental (needs a guest boot to verify).
+    /// Put the VGA on the PCI bus as `1234:1111` (Bochs `pci: slot1=pcivga`),
+    /// where X servers and Linux KMS drivers look for a display. Default true.
     pub pci_vga: Option<bool>,
     /// Stretch the console to fill the screen rather than keep the guest's
     /// shape. The phone's full-screen console reads it. Default false.
@@ -3202,6 +3206,32 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
 
         assert_eq!(resolved.pc().expect("a PC").vga_mode, None);
+    }
+
+    /// The launcher's PC puts its VGA on the PCI bus unless the file says
+    /// otherwise (parity registry D25), and a VM that turned it off keeps it
+    /// off through a save.
+    #[test]
+    fn the_vga_is_on_the_pci_bus_unless_the_file_turns_it_off() {
+        const MACHINE: &str = r#"
+[rom]
+bios = "bios.bin"
+
+[disk]
+path = "disk.img"
+chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
+"#;
+        let default = resolve_config(config(MACHINE), &args(["rusty_box_gui"])).unwrap();
+        assert!(default.pc().expect("a PC").pci_vga);
+        assert_eq!(default.to_file_config().display.pci_vga, None);
+
+        let off = resolve_config(
+            config(&format!("[display]\npci_vga = false\n{MACHINE}")),
+            &args(["rusty_box_gui"]),
+        )
+        .unwrap();
+        assert!(!off.pc().expect("a PC").pci_vga);
+        assert_eq!(off.to_file_config().display.pci_vga, Some(false));
     }
 
     #[test]

@@ -1500,6 +1500,56 @@ reports, which a partition table records) can change with it.
 
 ---
 
+## D25 — The launcher's PC has its VGA on the PCI bus
+
+**Bochs:** `iodev/display/vga.cc` `bx_vga_c::init_vga_extension` registers the
+adapter as PCI device `1234:1111` only when `SIM->is_pci_device("pcivga")`,
+which `gui/siminterface.cc` `bx_real_sim_c::is_pci_device` answers true only
+for a `pci: slotN=pcivga` the configuration names. The shipped `.bochsrc`
+enables the bus with no slots (`pci: enabled=1, chipset=i440fx`), so a default
+Bochs PC has the ISA adapter alone.
+
+**rusty_box:** the library keeps Bochs's default (`EmulatorConfig::pci_vga`,
+off; `rusty_box/src/emulator/mod.rs`), and the CI boot gate runs it. The
+`rusty_box_gui` launcher's default is on (`DEFAULT_PCI_VGA` in
+`rusty_box_gui/src/config.rs`, `[display] pci_vga`). The device is Bochs's
+own, the one `slot1=pcivga` gives; only which configuration the launcher
+starts from differs.
+
+### What the guest observes
+
+A PCI display at 00:02.0, class `0300`, ID `1234:1111`, with the linear
+framebuffer behind its BAR, besides the legacy ports and window every
+configuration has. Linux's `bochs-drm` binds it, and X servers that look for
+a display on the bus find one. While `bochs-drm` takes over, the text console
+goes dark until the framebuffer console comes up.
+
+### Why the divergence is the correct side
+
+Measured with `examples/boot_probe` on SliTaz 5.0-RC4 (Linux 3.16.55, Xorg
+1.12.4) at the launcher's other settings, 2026-11-14. Without the PCI
+display, `lspci -n` lists only `8086:1237`, `8086:7000`, `8086:7010` and
+`8086:7113`; Xorg's vesa driver reports `No devices detected`, the fbdev
+fallback finds no `/dev/fb0`, `Fatal server error: no screens found`, and the
+VGA console stays black under the login manager's retries. With it, `lspci`
+lists `00:02.0 Class 0300: 1234:1111`, Xorg sets 1600x1200 and SliTaz reaches
+its desktop. Tiny Core 15 and DLX Linux boot either way. A launcher whose
+users pick a graphical distribution should start from the configuration
+those distributions need, as QEMU's standard VGA and VirtualBox's adapter are
+PCI devices too.
+
+### Price of closing it
+
+One constant, `DEFAULT_PCI_VGA = false`, and the launcher's docs that state
+the default (`rusty_box_gui/README.md`, `docs/getting-started.md`). A saved
+VM records `pci_vga` only when it differs from the default, so a VM saved
+before the change, which never wrote the key, follows whichever default is
+current.
+
+**Status:** deliberate (2026-11-14, approved by the owner).
+
+---
+
 ## Hypervisor-engine divergences (`H<n>`)
 
 A machine running its guest on `rusty_box_whp_engine` executes on the host's
