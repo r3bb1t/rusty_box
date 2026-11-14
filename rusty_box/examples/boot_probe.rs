@@ -25,6 +25,8 @@ use rusty_box::emulator::{
     RunBudget,
 };
 use rusty_box::gui::NoGui;
+use rusty_box::gui::shared_display::SharedDisplay;
+use rusty_box_devices::display::sink::Refreshed;
 
 const BIOS: &str = "cpp_orig/bochs/bochs/bios/BIOS-bochs-latest";
 const VGA_BIOS: &str = "cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin";
@@ -232,6 +234,8 @@ struct Options {
     seconds: f64,
     /// Put the VGA on the PCI bus as `1234:1111` (Bochs `pci: slot1=pcivga`).
     pci_vga: bool,
+    /// Where to save the screen as it stands when the run ends.
+    screenshot: Option<String>,
     login: Option<(String, String)>,
     commands: Vec<String>,
 }
@@ -247,6 +251,7 @@ fn parse_options() -> std::result::Result<Options, String> {
         ips: 300_000_000,
         seconds: 300.0,
         pci_vga: false,
+        screenshot: None,
         login: None,
         commands: Vec::new(),
     };
@@ -261,6 +266,7 @@ fn parse_options() -> std::result::Result<Options, String> {
                 options.seconds = value("--seconds")?.parse().map_err(|e| format!("{e}"))?
             }
             "--pci-vga" => options.pci_vga = true,
+            "--screenshot" => options.screenshot = Some(value("--screenshot")?),
             "--login" => {
                 let pair = value("--login")?;
                 let (user, password) = pair
@@ -282,6 +288,7 @@ fn parse_options() -> std::result::Result<Options, String> {
             return Err(
                 "usage: boot_probe (<image.iso> | --disk <image> --chs C,H,S) \
                         [--memory-mib N] [--ips N] [--seconds S] [--pci-vga] \
+                        [--screenshot file.png] \
                         [--login user:password] [--cmd 'command']..."
                     .to_string(),
             );
@@ -428,6 +435,44 @@ fn main() -> Result<()> {
         watch.dac_zero_writes,
         watch.start_address_writes,
         u16::from_be_bytes(watch.start_address)
+    );
+    if let Some(path) = &options.screenshot {
+        save_screenshot(&mut machine, path)?;
+    }
+    Ok(())
+}
+
+/// Render the whole current frame — text drawn with the guest's own font, or
+/// the graphics mode's pixels — and write it to `path` as an RGBA PNG.
+fn save_screenshot(
+    machine: &mut rusty_box::emulator::Emulator<DisplayWatch>,
+    path: &str,
+) -> Result<()> {
+    let mut frame = SharedDisplay::new();
+    let mut display = machine.display();
+    display.force_update();
+    match display.render_into(&mut frame) {
+        Refreshed::Frame => {}
+        Refreshed::Unchanged => {
+            println!(
+                "screenshot: the adapter drew nothing after a forced update; {path} not written"
+            );
+            return Ok(());
+        }
+    }
+    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut encoder = png::Encoder::new(file, frame.fb_width, frame.fb_height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    writer
+        .write_image_data(&frame.framebuffer)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!(
+        "screenshot: {}x{} written to {path}",
+        frame.fb_width, frame.fb_height
     );
     Ok(())
 }

@@ -47,6 +47,20 @@ pub enum Written {
     Done,
 }
 
+/// Whose picture is on screen.
+///
+/// Bochs `bx_vga_c::update` draws the VBE framebuffer while the extension is
+/// enabled and calls `bx_vgacore_c::update` otherwise; this names which of
+/// the two the screen shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scanout {
+    /// The core's: a text or legacy graphics mode the CRTC describes.
+    Core,
+    /// The card's own framebuffer, which replaces the core's picture
+    /// whatever the core's registers still describe.
+    Card,
+}
+
 /// What an extension did with a redraw request it was offered first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Redrawn {
@@ -448,6 +462,14 @@ pub trait VgaExtension {
     fn vga_resolution(&self, cx: &CoreRef<'_>) -> Option<crate::display::Resolution> {
         let _ = cx;
         None
+    }
+
+    /// Whose picture the screen shows. A card whose own framebuffer replaces
+    /// the core's answers [`Scanout::Card`] while it does, and the screen then
+    /// has no character grid to read, whatever the core's text registers
+    /// still hold.
+    fn vga_scanout(&self) -> Scanout {
+        Scanout::Core
     }
 
     /// Declare whatever windows the card owns that the core does not — Bochs
@@ -963,11 +985,17 @@ impl<E: VgaExtension> crate::display::DisplaySource for VgaCard<E> {
     }
 
     fn text_grid(&self) -> Option<crate::display::TextGrid> {
-        self.core.text_grid()
+        match self.ext.vga_scanout() {
+            Scanout::Core => self.core.text_grid(),
+            Scanout::Card => None,
+        }
     }
 
     fn text_char(&self, pos: crate::display::TextPos) -> char {
-        self.core.text_char(pos)
+        match self.ext.vga_scanout() {
+            Scanout::Core => self.core.text_char(pos),
+            Scanout::Card => ' ',
+        }
     }
 }
 

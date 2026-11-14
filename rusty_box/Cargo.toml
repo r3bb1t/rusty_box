@@ -101,6 +101,8 @@ libc = { version = "0.2", default-features = false }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+# boot_probe's `--screenshot`: the frame as a PNG.
+png = "0.18"
 tracing-appender = "0.2"
 # Doctrine fixture registry (docs/safety-doctrine.md) — R2/R3 compile-fail pins.
 # Run by the `cargo xtask ci` step "doctrine compile-fail fixtures". The goldens

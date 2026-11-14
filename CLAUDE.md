@@ -87,6 +87,17 @@ Prefer text/`id` locators over raw `pos`. The GUI starts **Stopped** on the laun
 it must be powered on (click "Power On VM") before the guest console appears under the
 Console tab; the status bar shows `Running · <n> IPS` once booting.
 
+On a headless X server (Xvfb) with no window manager the window never gets OS focus,
+and egui gives no widget keyboard focus without it (`Response::has_focus` requires
+`InputState::focused`): the serial terminal's "click to type" never takes the keyboard.
+Run a plain `Xvfb :99` (not `xvfb-run`, whose X authorisation shuts `xdotool` out), start
+the GUI with `DISPLAY=:99`, and focus its window with
+`DISPLAY=:99 xdotool windowfocus --sync $(DISPLAY=:99 xdotool search --name "Rusty Box")`
+before clicking (2026-11-14). For a guest's own screen and serial console with no GUI at
+all, the `boot_probe` example (`rusty_box/examples/README.md`) is faster and needs
+neither: it logs display writes and screen changes, logs in over serial, and saves a
+`--screenshot`.
+
 If the `mcp__egui__*` tools aren't loaded in the current session, drive `egui-mcp`
 directly over stdio (newline-delimited JSON-RPC: `initialize` → `notifications/initialized`
 → `tools/call attach` → `tools/call screenshot {"save_path": "..."}`) and read the saved PNG.

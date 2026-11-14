@@ -774,6 +774,16 @@ impl crate::display::card::VgaExtension for StdVga {
         })
     }
 
+    /// Bochs vga.cc `bx_vga_c::update`: while VBE is enabled the screen is the
+    /// VBE framebuffer, not the core's picture.
+    fn vga_scanout(&self) -> crate::display::card::Scanout {
+        if self.vbe.enabled != 0 {
+            crate::display::card::Scanout::Card
+        } else {
+            crate::display::card::Scanout::Core
+        }
+    }
+
     /// The linear framebuffer is the card's window, at the card's base — Bochs
     /// registers it from `bx_vga_c`, which is what `init_vga_extension()` is
     /// for.
@@ -4690,6 +4700,32 @@ mod tests {
 
         let grid = vga.text_grid().expect("text mode");
         assert_eq!(grid.cursor, Some(TextPos::new(30, 7)));
+    }
+
+    /// While VBE drives the screen the picture is the VBE framebuffer, so the
+    /// display role reports no character grid, though the core's registers
+    /// still describe the text mode the guest left; turning VBE off shows that
+    /// text again.
+    #[test]
+    fn a_vbe_mode_hides_the_text_grid_the_core_still_holds() {
+        use crate::display::{DisplaySource, TextPos};
+
+        let mut vga = card();
+        vga.core.init_text_mode3();
+        assert!(vga.text_grid().is_some(), "mode 3 shows text");
+
+        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
+        assert!(
+            vga.text_grid().is_none(),
+            "the VBE framebuffer is on screen"
+        );
+        assert_eq!(vga.text_char(TextPos::new(0, 0)), ' ');
+
+        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+        assert!(
+            vga.text_grid().is_some(),
+            "the text mode is on screen again"
+        );
     }
 
     /// A graphics mode has no character grid to report.

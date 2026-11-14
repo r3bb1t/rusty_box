@@ -4025,6 +4025,7 @@ dependencies = [
  "libc",
  "libm",
  "paste",
+ "png",
  "rusty_box_core",
  "rusty_box_decoder",
  "rusty_box_devices",
