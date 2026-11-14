@@ -18,7 +18,7 @@ use rusty_box_core::FloatExt;
 use crate::api::{IoPort, WindowOffset};
 use crate::display::card::{MemCtx, PortCtx, ResetCtx, TimingCtx, VgaExtension, Written};
 use crate::display::ddc::BxDdcC;
-use crate::display::vga::{VerticalPhase, VgaWindow};
+use crate::display::vga::{MemoryWindow, VerticalPhase, VgaWindow, VramOffset};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -4256,6 +4256,20 @@ impl BxGeForceC {
         self.memory[addr] = value;
     }
 
+    /// Whether CRTC 0x28 selects the extended modes, in which the legacy
+    /// aperture is the chip's bank window rather than the standard VGA's
+    /// (Bochs geforce.cc `mem_read`/`mem_write`, `crtc.reg[0x28]`).
+    fn extended_aperture(&self) -> bool {
+        self.crtc.reg[0x28] != 0
+    }
+
+    /// The video-memory byte an access into the bank window reaches: bank 0
+    /// (Bochs geforce.cc `bank_base[0]`) on from the window's start, wrapped
+    /// to the memory size.
+    fn bank_window_target(&self, window: VramOffset) -> u32 {
+        window.banked(self.bank_base[0]).get() & self.memsize_mask
+    }
+
     /// Set the current time in nanoseconds (called by emulator timer system).
     pub fn set_time_nsec(&mut self, nsec: u64) {
         self.time_nsec = nsec;
@@ -4317,11 +4331,18 @@ impl VgaExtension for BxGeForceC {
 
     /// Video memory reads land in the NV framebuffer, which the chip addresses
     /// linearly rather than through the planar core.
+    ///
+    /// Bochs geforce.cc `mem_read`: with CRTC 0x28 clear the legacy aperture
+    /// is the core's, a standard VGA with its latches and plane masks; with it
+    /// set, `A0000-AFFFF` is the bank window and the rest of the aperture
+    /// reads 0xFF.
     fn vga_mem_read(&mut self, cx: &mut MemCtx<'_>) -> Option<u8> {
         match cx.window() {
-            // The legacy aperture stays the core's: a GeForce in a text mode is
-            // a standard VGA, latches and plane masks included.
-            VgaWindow::Legacy => None,
+            VgaWindow::Legacy if !self.extended_aperture() => None,
+            VgaWindow::Legacy => Some(match MemoryWindow::A0000_64K.translate(cx.offset()) {
+                Some(window) => self.vram_read8(self.bank_window_target(window)),
+                None => 0xFF,
+            }),
             VgaWindow::Lfb => {
                 let at = cx.offset().get() as u32 & self.memsize_mask;
                 Some(self.vram_read8(at))
@@ -4330,8 +4351,23 @@ impl VgaExtension for BxGeForceC {
         }
     }
 
+    /// Bochs geforce.cc `mem_write`: the write half of [`Self::vga_mem_read`].
+    /// With CRTC 0x1C bit 7 set, a write into the bank window goes to RAMIN
+    /// at the window offset itself, unbanked; outside `A0000-AFFFF` it is
+    /// dropped.
     fn vga_mem_write(&mut self, cx: &mut MemCtx<'_>, value: u8) -> Written {
         match cx.window() {
+            VgaWindow::Legacy if !self.extended_aperture() => Written::FallThrough,
+            VgaWindow::Legacy => {
+                if let Some(window) = MemoryWindow::A0000_64K.translate(cx.offset()) {
+                    if self.crtc.reg[0x1C] & 0x80 != 0 {
+                        self.ramin_write8(window.get(), value);
+                    } else {
+                        self.vram_write8(self.bank_window_target(window), value);
+                    }
+                }
+                Written::Done
+            }
             VgaWindow::Lfb => {
                 let at = cx.offset().get() as u32 & self.memsize_mask;
                 self.vram_write8(at, value);
@@ -4520,6 +4556,42 @@ mod tests {
             );
         }
 
+        /// A byte read `offset` bytes into the `A0000-BFFFF` aperture.
+        fn legacy_read(&mut self, offset: u64) -> u8 {
+            let mut data = [0u8; 1];
+            let mut ctx = DeviceCtx {
+                clock: CLOCK,
+                irq: &mut self.irq,
+                timers: &mut self.timers,
+            };
+            MmioDevice::mmio_read(
+                &mut self.card,
+                VgaWindow::Legacy.id(),
+                WindowOffset(offset),
+                1,
+                &mut data,
+                &mut ctx,
+            );
+            data[0]
+        }
+
+        /// A byte written `offset` bytes into the `A0000-BFFFF` aperture.
+        fn legacy_write(&mut self, offset: u64, value: u8) {
+            let mut ctx = DeviceCtx {
+                clock: CLOCK,
+                irq: &mut self.irq,
+                timers: &mut self.timers,
+            };
+            MmioDevice::mmio_write(
+                &mut self.card,
+                VgaWindow::Legacy.id(),
+                WindowOffset(offset),
+                1,
+                &[value],
+                &mut ctx,
+            );
+        }
+
         /// Open the RMA window at `rma_index` — CRTC 0x38, bit 0 the enable.
         fn rma_select(&mut self, rma_index: u8) {
             self.crtc_write(0x38, (rma_index << 1) | 1);
@@ -4563,6 +4635,75 @@ mod tests {
             }
             byte
         }
+    }
+
+    /// With CRTC 0x28 clear the aperture is the standard VGA's, so a bank the
+    /// guest has set does not move it (Bochs geforce.cc `mem_write` calls
+    /// `bx_vgacore_c::mem_write`).
+    #[test]
+    fn the_aperture_ignores_the_bank_in_the_standard_modes() {
+        let mut guest = Guest::new();
+        guest.crtc_write(0x1D, 0x01);
+
+        guest.legacy_write(0x10, 0x5A);
+
+        assert_eq!(guest.card.ext.bank_base[0], 0x8000);
+        assert_eq!(
+            guest.card.ext.vram_read8(0x8010),
+            0x00,
+            "the write did not reach the chip's memory at bank 0"
+        );
+    }
+
+    /// Bochs geforce.cc `mem_read`/`mem_write`: with CRTC 0x28 set,
+    /// `A0000-AFFFF` reaches video memory at bank 0 (CRTC 0x1D, in 32 KiB
+    /// units).
+    #[test]
+    fn the_bank_window_reaches_video_memory_at_bank_0() {
+        let mut guest = Guest::new();
+        guest.crtc_write(0x28, 0x01);
+        guest.crtc_write(0x1D, 0x02);
+
+        guest.legacy_write(0x1234, 0xA5);
+
+        assert_eq!(guest.card.ext.vram_read8(0x1_1234), 0xA5);
+        assert_eq!(guest.legacy_read(0x1234), 0xA5, "and reads back through it");
+    }
+
+    /// Past `AFFFF` the extended aperture has nothing: a read is 0xFF and a
+    /// write is dropped.
+    #[test]
+    fn the_extended_aperture_past_the_bank_window_reads_ff() {
+        let mut guest = Guest::new();
+        guest.crtc_write(0x28, 0x01);
+
+        guest.legacy_write(0x1_8000, 0x11);
+
+        assert_eq!(guest.legacy_read(0x1_8000), 0xFF);
+        assert_eq!(
+            guest.card.ext.vram_read8(0x8000),
+            0x00,
+            "the write reached no byte the window maps"
+        );
+    }
+
+    /// CRTC 0x1C bit 7 sends a write into the bank window to RAMIN at the
+    /// window offset, ignoring the bank (Bochs geforce.cc `mem_write`).
+    #[test]
+    fn a_bank_window_write_with_crtc_1c_bit_7_lands_in_ramin() {
+        let mut guest = Guest::new();
+        guest.crtc_write(0x28, 0x01);
+        guest.crtc_write(0x1D, 0x02);
+        guest.crtc_write(0x1C, 0x80);
+
+        guest.legacy_write(0x20, 0x77);
+
+        assert_eq!(guest.card.ext.ramin_read8(0x20), 0x77);
+        assert_eq!(
+            guest.card.ext.vram_read8(0x1_0020),
+            0x00,
+            "the banked byte is untouched"
+        );
     }
 
     /// An index past the standard VGA's belongs to the card alone. The core

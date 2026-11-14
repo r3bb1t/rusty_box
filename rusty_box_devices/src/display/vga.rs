@@ -333,26 +333,99 @@ impl VgaMemoryMapping {
 const VGA_WINDOW_GRAPHICS_BASE: BxPhyAddress = BxPhyAddress::new(0xA0000);
 const VGA_WINDOW_GRAPHICS_END: BxPhyAddress = BxPhyAddress::new(0xBFFFF);
 
-/// Where a byte of VGA memory is named. Bochs vgacore.cc `mem_read` and
-/// `mem_write` take both as one `bx_phy_address`, a value below 0xA0000
-/// being an offset into the planes: an address in the legacy window, which
-/// the memory map gates, or the offset a chain-4 framebuffer access reaches
-/// directly.
+/// A position in video memory as the CPU's window reaches it (Bochs
+/// vgacore.cc `offset`): a byte in chain-4, a plane address — four bytes, one
+/// per plane — in the planar modes. A bank, where one applies, is already
+/// added.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct VramOffset(u32);
+
+impl VramOffset {
+    /// The offset as a number.
+    #[inline]
+    pub(crate) const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// `bank` bytes further on: a VBE bank in the planar modes (Bochs
+    /// `ext_offset`) or a GeForce bank (Bochs geforce.cc `bank_base`), modulo
+    /// 2^32 as Bochs's `Bit32u` sum is.
+    #[inline]
+    pub(crate) const fn banked(self, bank: u32) -> Self {
+        Self(self.0.wrapping_add(bank))
+    }
+}
+
+/// The part of the `A0000-BFFFF` aperture the graphics controller's memory map
+/// selects (GR6 bits 3:2, Bochs `graphics_ctrl.memory_mapping`), or that an
+/// SVGA card's bank window covers, as a span of the aperture: `size` bytes
+/// from `start`.
+#[derive(Clone, Copy)]
+pub(crate) struct MemoryWindow {
+    start: u64,
+    size: u64,
+}
+
+impl MemoryWindow {
+    /// `A0000-AFFFF`: memory map 1, and the GeForce bank window (Bochs
+    /// geforce.cc `mem_read`, `addr >= 0xA0000 && addr <= 0xAFFFF`), which
+    /// needs `alloc` as the GeForce does.
+    #[cfg(feature = "alloc")]
+    pub(crate) const A0000_64K: Self = Self::of_mapping(1);
+
+    /// The window memory map `mapping` selects (Bochs vgacore.cc `mem_read`'s
+    /// switch): 1 is A0000-AFFFF, 2 B0000-B7FFF, 3 B8000-BFFFF, and any other
+    /// value the whole 128 KiB.
+    const fn of_mapping(mapping: u8) -> Self {
+        match mapping {
+            1 => Self {
+                start: 0,
+                size: 0x10000,
+            },
+            2 => Self {
+                start: 0x10000,
+                size: 0x8000,
+            },
+            3 => Self {
+                start: 0x18000,
+                size: 0x8000,
+            },
+            _ => Self {
+                start: 0,
+                size: 0x20000,
+            },
+        }
+    }
+
+    /// Where an access `at` bytes into the aperture lands in video memory,
+    /// `None` outside the window, where Bochs reads 0xFF and drops a write.
+    pub(crate) fn translate(self, at: crate::api::WindowOffset) -> Option<VramOffset> {
+        let into = at.get().checked_sub(self.start)?;
+        (into < self.size).then_some(VramOffset(into as u32))
+    }
+}
+
+/// Where a byte of VGA memory is named: an offset into the legacy aperture,
+/// which the memory map gates, or the video-memory offset a chain-4
+/// framebuffer access reaches directly (Bochs passes both to
+/// `bx_vgacore_c::mem_read` as one `bx_phy_address`, a value below 0xA0000
+/// being the latter).
 #[derive(Clone, Copy)]
 enum VgaMemAt {
-    Window(BxPhyAddress),
+    Window(crate::api::WindowOffset),
     /// Reached only through the linear framebuffer, which needs `alloc`.
     #[cfg(feature = "alloc")]
-    Offset(u32),
+    Vram(VramOffset),
 }
 
 impl VgaMemAt {
-    /// The value Bochs passes as `addr`.
-    const fn bochs_addr(self) -> u64 {
+    /// Where the access lands in video memory under memory map `mapping`, or
+    /// `None` outside the window it selects.
+    fn locate(self, mapping: u8) -> Option<VramOffset> {
         match self {
-            Self::Window(addr) => addr.get(),
+            Self::Window(at) => MemoryWindow::of_mapping(mapping).translate(at),
             #[cfg(feature = "alloc")]
-            Self::Offset(offset) => offset as u64,
+            Self::Vram(offset) => Some(offset),
         }
     }
 }
@@ -1200,10 +1273,9 @@ pub struct VgaCore {
     num_x_tiles: u16,
     /// Number of vertical graphics tiles.
     num_y_tiles: u16,
-    /// Bochs extension offset added to legacy VGA memory offsets.
+    /// The VBE bank a planar access through the legacy window lands in, read
+    /// or write (Bochs vgacore.cc `ext_offset`, set from the write bank).
     ext_offset: u32,
-    /// Bochs extension offset added to legacy VGA memory read offsets.
-    ext_read_offset: u32,
     /// Active VGA memory mask (0x3ffff in legacy VGA, VBE memory size - 1 in VBE).
     vga_mem_mask: u32,
     /// Bochs extension start address added to CRTC start address
@@ -1420,7 +1492,6 @@ impl VgaCore {
             num_x_tiles,
             num_y_tiles,
             ext_offset: 0,
-            ext_read_offset: 0,
             vga_mem_mask: (VGA_MEM_SIZE - 1) as u32,
             ext_start_addr: 0,
             ext_y_dblsize: false,
@@ -3257,7 +3328,7 @@ impl VgaCore {
     /// virtual is per byte because a card claims individual addresses. The
     /// width-aware handlers are the register blocks, not video memory.
     pub(crate) fn legacy_read_byte(&mut self, offset: u64) -> u8 {
-        vga_mem_read_byte(self, VgaMemAt::Window(VGA_WINDOW_GRAPHICS_BASE + offset))
+        vga_mem_read_byte(self, VgaMemAt::Window(crate::api::WindowOffset(offset)))
     }
 
     /// Read from the linear framebuffer behind BAR0.
@@ -3285,7 +3356,7 @@ impl VgaCore {
             };
             let offset = at.get() + i;
             if self.seq_chain_four && offset < 0x40000 {
-                *byte = vga_mem_read_byte(self, VgaMemAt::Offset(offset as u32));
+                *byte = vga_mem_read_byte(self, VgaMemAt::Vram(VramOffset(offset as u32)));
             } else {
                 *byte = 0xFF;
             }
@@ -3335,7 +3406,7 @@ impl VgaCore {
     pub(crate) fn legacy_write_byte(&mut self, offset: u64, value: u8) {
         vga_mem_write_byte(
             self,
-            VgaMemAt::Window(VGA_WINDOW_GRAPHICS_BASE + offset),
+            VgaMemAt::Window(crate::api::WindowOffset(offset)),
             value,
         );
     }
@@ -3358,7 +3429,7 @@ impl VgaCore {
             };
             let offset = at.get() + i;
             if self.seq_chain_four && offset < 0x40000 {
-                vga_mem_write_byte(self, VgaMemAt::Offset(offset as u32), value);
+                vga_mem_write_byte(self, VgaMemAt::Vram(VramOffset(offset as u32)), value);
             }
         }
     }
@@ -3419,6 +3490,26 @@ fn vga_storage_get(vga: &VgaCore, index: usize) -> u8 {
     vga.vga_memory.get(index).copied().unwrap_or(0)
 }
 
+/// Whether all four planes' bytes of plane address `offset` lie inside the
+/// active store — Bochs vgacore.cc `((offset << 2) + 3) >= memsize`, past which
+/// a planar read returns 0xFF without loading the latches and a write is
+/// dropped.
+fn vga_plane_address_fits(vga: &VgaCore, offset: u32) -> bool {
+    #[cfg(feature = "alloc")]
+    let len = if vga.vbe_planar_alias {
+        vga.vbe_memory.len()
+    } else {
+        vga.vga_memory.len()
+    };
+    #[cfg(not(feature = "alloc"))]
+    let len = vga.vga_memory.len();
+    usize::try_from(offset)
+        .ok()
+        .and_then(|plane_address| plane_address.checked_mul(4))
+        .and_then(|first| first.checked_add(3))
+        .is_some_and(|last| last < len)
+}
+
 /// The write half of [`vga_storage_get`]. Under the alias both stores are
 /// written, so a mode change in either direction finds the bytes where it
 /// expects them.
@@ -3436,48 +3527,23 @@ fn vga_storage_set(vga: &mut VgaCore, index: usize, value: u8) {
 
 /// Read a single byte from VGA memory. Matches Bochs vgacore.cc `mem_read`.
 fn vga_mem_read_byte(vga: &mut VgaCore, at: VgaMemAt) -> u8 {
-    let addr = at.bochs_addr();
     let mut read_map_select = vga.graphics_regs[GFX_REG_READ_MAP_SELECT] & 0x03;
 
-    // Window gating: compute offset from address (Bochs vgacore.cc)
     let memory_mapping =
         (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
-    let mut offset = if addr >= 0xA0000 {
-        match memory_mapping {
-            1 => {
-                // 0xA0000..0xAFFFF
-                if addr > 0xAFFFF {
-                    return 0xFF;
-                }
-                (addr & 0xFFFF) as u32
-            }
-            2 => {
-                // 0xB0000..0xB7FFF
-                if !(0xB0000..=0xB7FFF).contains(&addr) {
-                    return 0xFF;
-                }
-                (addr & 0x7FFF) as u32
-            }
-            3 => {
-                // 0xB8000..0xBFFFF
-                if addr < 0xB8000 {
-                    return 0xFF;
-                }
-                (addr & 0x7FFF) as u32
-            }
-            _ => {
-                // 0xA0000..0xBFFFF
-                (addr & 0x1FFFF) as u32
-            }
-        }
-    } else {
-        addr as u32
+    let Some(offset) = at.locate(memory_mapping) else {
+        return 0xFF;
     };
-    offset = offset.wrapping_add(vga.ext_read_offset);
 
-    // Chain-four mode (Mode 13h: 320x200x256)
+    // Chain-four mode (Mode 13h: 320x200x256): the byte itself, with no bank
+    // (Bochs vgacore.cc returns before adding `ext_offset`).
     if vga.seq_chain_four {
-        return vga_storage_get(vga, offset as usize);
+        return vga_storage_get(vga, offset.get() as usize);
+    }
+
+    let offset = offset.banked(vga.ext_offset).get();
+    if !vga_plane_address_fits(vga, offset) {
+        return 0xFF;
     }
 
     // Read mode (graphics_regs[5] bit 3)
@@ -3539,57 +3605,30 @@ fn vga_mem_read_byte(vga: &mut VgaCore, at: VgaMemAt) -> u8 {
 
 /// Write a single byte to VGA memory. Matches Bochs vgacore.cc `mem_write`.
 fn vga_mem_write_byte(vga: &mut VgaCore, at: VgaMemAt, value: u8) {
-    let addr = at.bochs_addr();
     let sequ_map_mask = vga.seq_regs[SEQ_REG_MAP_MASK] & 0x0F;
     let graphics_alpha = (vga.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
 
-    // Window gating: compute offset (Bochs vgacore.cc)
     let memory_mapping =
         (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
-    let mut offset = if addr >= 0xA0000 {
-        match memory_mapping {
-            1 => {
-                // 0xA0000..0xAFFFF
-                if !(0xA0000..=0xAFFFF).contains(&addr) {
-                    return;
-                }
-                (addr & 0xFFFF) as u32
-            }
-            2 => {
-                // 0xB0000..0xB7FFF
-                if !(0xB0000..=0xB7FFF).contains(&addr) {
-                    return;
-                }
-                (addr & 0x7FFF) as u32
-            }
-            3 => {
-                // 0xB8000..0xBFFFF
-                if !(0xB8000..=0xBFFFF).contains(&addr) {
-                    return;
-                }
-                (addr & 0x7FFF) as u32
-            }
-            _ => {
-                // 0xA0000..0xBFFFF
-                if !(0xA0000..=0xBFFFF).contains(&addr) {
-                    return;
-                }
-                (addr & 0x1FFFF) as u32
-            }
-        }
-    } else {
-        addr as u32
+    let Some(offset) = at.locate(memory_mapping) else {
+        return;
     };
-    offset = offset.wrapping_add(vga.ext_offset);
 
-    // Chain-four mode (Mode 13h: 320x200x256) — Bochs vgacore.cc
+    // Chain-four mode (Mode 13h: 320x200x256): the byte itself, with no bank
+    // (Bochs vgacore.cc writes before adding `ext_offset`).
     if vga.seq_chain_four {
+        let offset = offset.get();
         vga_storage_set(vga, offset as usize, value);
         vga.vga_mem_updated |= 1 << (offset % 4) as u8;
         #[cfg(feature = "alloc")]
         if graphics_alpha {
             vga.mark_legacy_dirty_offset(offset);
         }
+        return;
+    }
+
+    let offset = offset.banked(vga.ext_offset).get();
+    if !vga_plane_address_fits(vga, offset) {
         return;
     }
 
@@ -4882,29 +4921,28 @@ mod tests {
         assert_eq!(&sink.tile_at(0, 0)[0..4], &[0x33, 0x22, 0x11, 0xFF]);
     }
 
-    #[test]
-    fn vbe_4bpp_bank_write_offsets_legacy_vga_memory() {
+    /// A DISPI 4bpp card in planar mode with plane 0 open for writes and
+    /// reads, the legacy window mapped as `mapping`.
+    fn vbe_4bpp_planar_card(mapping: VgaMemoryMapping) -> VgaCard<StdVga> {
         let mut vga = card();
-        vga.core.seq_chain_four = true;
         vga.core.seq_odd_even_dis = true;
+        vga.core.seq_regs[SEQ_REG_MAP_MASK] = 0x01;
         vga.core.graphics_regs[GFX_REG_MISC] =
-            GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
+            GFX_MISC_GRAPHICS_ALPHA | (mapping as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
         // Attribute controller mode control bit 0 must agree with the graphics
         // controller, or Bochs skip_update() treats it as a mode set in flight.
         vga.core.attr_regs[0x10] |= 0x01;
-
+        vga.core.graphics_regs[GFX_REG_BIT_MASK] = 0xFF;
+        vga.core.graphics_regs[GFX_REG_READ_MAP_SELECT] = 0;
         write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
-        write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, 1);
-
-        write_vram(&mut vga, VgaWindow::Legacy, 0, &[0x5A]);
-
-        assert_eq!(vga.core.vga_memory[0], 0);
-        assert_eq!(vga.core.vga_memory[0x10000], 0x5A);
+        vga
     }
 
+    /// Bochs vgacore.cc `mem_write` stores a chain-4 byte before it adds
+    /// `ext_offset`: the bank moves planar accesses only.
     #[test]
-    fn vbe_4bpp_chain_four_bank_write_updates_vbe_backing() {
+    fn a_chain_four_write_ignores_the_vbe_bank() {
         let mut vga = card();
         vga.core.seq_chain_four = true;
         vga.core.seq_odd_even_dis = true;
@@ -4920,7 +4958,23 @@ mod tests {
 
         write_vram(&mut vga, VgaWindow::Legacy, 0, &[0x5A]);
 
-        assert_eq!(vga.core.vbe_memory[0x10000], 0x5A);
+        assert_eq!(vga.core.vbe_memory[0], 0x5A);
+        assert_eq!(vga.core.vbe_memory[0x10000], 0);
+    }
+
+    /// Bochs vgacore.cc adds `ext_offset` — the write bank in bytes — to a
+    /// planar access's plane address, so bank 1 at 64 KiB granularity puts
+    /// the window's first plane address at 0x10000, its plane-0 byte at
+    /// 0x40000.
+    #[test]
+    fn a_planar_write_lands_in_the_write_bank() {
+        let mut vga = vbe_4bpp_planar_card(VgaMemoryMapping::Vga64k);
+        write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, 1);
+
+        write_vram(&mut vga, VgaWindow::Legacy, 0, &[0x3C]);
+
+        assert_eq!(vga.core.vbe_memory[0x40000], 0x3C);
+        assert_eq!(vga.core.vbe_memory[0], 0);
     }
 
     #[test]
@@ -4947,44 +5001,44 @@ mod tests {
         assert_eq!(byte[0], 0x3C);
     }
 
+    /// Bochs keeps one `ext_offset` for the planar path, set from the write
+    /// bank (vga.cc `VBE_DISPI_INDEX_BANK`); the read bank steers only the
+    /// linear DISPI modes' `vbe_mem_read`. A planar read therefore finds the
+    /// byte in the write bank whatever read bank is selected.
     #[test]
-    fn vbe_4bpp_read_bank_is_independent_from_write_bank() {
-        let mut vga = card();
-        vga.core.seq_chain_four = true;
-        vga.core.seq_odd_even_dis = true;
-        vga.core.graphics_regs[GFX_REG_MISC] =
-            GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
-        // Attribute controller mode control bit 0 must agree with the graphics
-        // controller, or Bochs skip_update() treats it as a mode set in flight.
-        vga.core.attr_regs[0x10] |= 0x01;
-
-        write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
-        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
+    fn a_planar_read_uses_the_write_bank() {
+        let mut vga = vbe_4bpp_planar_card(VgaMemoryMapping::Vga64k);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, VBE_DISPI_BANK_WR | 1);
         write_vram(&mut vga, VgaWindow::Legacy, 0, &[0x7B]);
 
-        write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, VBE_DISPI_BANK_WR);
-        write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, VBE_DISPI_BANK_RD | 1);
-
+        write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, VBE_DISPI_BANK_RD | 2);
         let mut byte = [0];
         read_vram(&mut vga, VgaWindow::Legacy, 0, &mut byte);
 
         assert_eq!(byte[0], 0x7B);
     }
 
+    /// Bochs vgacore.cc `mem_read` returns 0xFF, before loading the latches,
+    /// for a plane address whose four bytes run past the end of video memory.
+    /// The last bank at 64 KiB granularity with the 128 KiB window mapped puts
+    /// the window's second half there.
+    #[test]
+    fn a_planar_read_past_video_memory_returns_ff_and_keeps_the_latches() {
+        let mut vga = vbe_4bpp_planar_card(VgaMemoryMapping::Ega128k);
+        let last_bank = (vga.core.vbe_memory.len() >> 18) - 1;
+        write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, last_bank as u16);
+        vga.core.latch = [1, 2, 3, 4];
+
+        let mut byte = [0];
+        read_vram(&mut vga, VgaWindow::Legacy, 0x10000, &mut byte);
+
+        assert_eq!(byte[0], 0xFF);
+        assert_eq!(vga.core.latch, [1, 2, 3, 4]);
+    }
+
     #[test]
     fn disabling_vbe_clears_legacy_bank_offset() {
-        let mut vga = card();
-        vga.core.seq_chain_four = true;
-        vga.core.seq_odd_even_dis = true;
-        vga.core.graphics_regs[GFX_REG_MISC] =
-            GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
-        // Attribute controller mode control bit 0 must agree with the graphics
-        // controller, or Bochs skip_update() treats it as a mode set in flight.
-        vga.core.attr_regs[0x10] |= 0x01;
-
-        write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
-        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
+        let mut vga = vbe_4bpp_planar_card(VgaMemoryMapping::Vga64k);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, 1);
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
 
@@ -6257,8 +6311,6 @@ impl VgaCard<StdVga> {
         };
         self.core.ext_offset =
             vga_snapshot_bank_offset(self.ext.vbe.bank[0], self.ext.vbe.bank_granularity_kb)?;
-        self.core.ext_read_offset =
-            vga_snapshot_bank_offset(self.ext.vbe.bank[1], self.ext.vbe.bank_granularity_kb)?;
         self.ext.sync_planar_alias(&mut self.core);
         self.ext.recompute_vbe_virtual_start(&mut self.core);
         self.core.calculate_retrace_timing();
@@ -6970,10 +7022,8 @@ impl StdVga {
                     if (rw_mode & VBE_DISPI_BANK_RD) != 0 {
                         self.vbe.bank[1] = bank_val;
                     }
-                    core.ext_offset =
-                        self.vbe.bank[0] as u32 * ((self.vbe.bank_granularity_kb as u32) << 10);
-                    core.ext_read_offset =
-                        self.vbe.bank[1] as u32 * ((self.vbe.bank_granularity_kb as u32) << 10);
+                    core.ext_offset = u32::from(self.vbe.bank[0])
+                        * (u32::from(self.vbe.bank_granularity_kb) << 10);
                 }
             }
             VBE_DISPI_INDEX_ENABLE => {
@@ -6986,7 +7036,6 @@ impl StdVga {
                     self.vbe.offset_y = 0;
                     self.vbe.virtual_start = 0;
                     core.ext_offset = 0;
-                    core.ext_read_offset = 0;
                     core.vga_mem_mask = core.vbe_memsize.saturating_sub(1);
                     self.vbe.bank = [0; 2];
 
@@ -7052,7 +7101,6 @@ impl StdVga {
                     core.text_buffer_update = true;
                     core.last_yres = 0;
                     core.ext_offset = 0;
-                    core.ext_read_offset = 0;
                     core.vga_mem_mask = (VGA_MEM_SIZE - 1) as u32;
                     self.vbe.bank = [0; 2];
                 }
@@ -7071,7 +7119,6 @@ impl StdVga {
                     self.vbe.bank[0] = 0;
                     self.vbe.bank[1] = 0;
                     core.ext_offset = 0;
-                    core.ext_read_offset = 0;
                 }
 
                 // Handle 8-bit DAC mode change

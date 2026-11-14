@@ -203,8 +203,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         self.eflags.remove(EFlags::TF);
         self.eflags.remove(EFlags::NT);
-        self.eflags.remove(EFlags::VM);
-        // Bochs exception.cc — clear_RF() at end of protected_mode_int()
+        // Bochs exception.cc protected_mode_int: clear_VM() leaves
+        // virtual-8086 mode for the handler, then clear_RF().
+        self.clear_vm();
         self.clear_rf();
 
         Ok(())

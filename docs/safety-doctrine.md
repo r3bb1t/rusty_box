@@ -378,9 +378,13 @@ Adopted from vm-memory/vm-device: position − position yields a raw *distance* 
 another position. The strongest form makes a conversion function the *only* path between unit
 domains, so an unconverted access is a compile error, not a review catch.
 
-Target design, not built: SVGA banking becomes
-`MemoryWindow::translate(WindowOffset) -> Option<VramOffset>`. Neither `MemoryWindow` nor
-`VramOffset` exists in the tree.
+SVGA banking goes through `MemoryWindow::translate(WindowOffset) -> Option<VramOffset>`
+(`rusty_box_devices/src/display/vga.rs`): an offset into the `A0000-BFFFF` aperture becomes
+a position in video memory only there, `None` outside the window, where Bochs reads 0xFF and
+drops a write. `VramOffset::banked` adds a bank — the VGA core's VBE bank (`ext_offset`) on
+the planar path, the GeForce's `bank_base[0]` behind its extended aperture — and nothing else
+turns a window offset into a video-memory one. The linear framebuffer's chain-4 path names its
+`VramOffset` directly, since Bochs reaches `bx_vgacore_c::mem_read` there below the window.
 
 Inside the x86 CPU every physical address is a `BxPhyAddress` too: a TLB entry's page frame,
 the instruction cache's tags and the SMC stamp table, every translation's result (the walks,
@@ -507,8 +511,8 @@ fn read_ram_dword_le(stub: &mut BxMemoryStubC, gpa: BxPhyAddress) -> Option<u32>
 ## R5 — One choke point per hazard
 
 Every guarded hazard has exactly one code path through its guard: `ExecCtx` and `PcIo`
-assembly, ISA gating (applied at icache fill), SMC stamping, and — as a target, with R4's
-`MemoryWindow` — banking translation. Adding a second path to a choke-pointed hazard is a
+assembly, ISA gating (applied at icache fill), SMC stamping, and R4's `MemoryWindow` —
+banking translation. Adding a second path to a choke-pointed hazard is a
 defect even if it is correct today. Closed dispatch sets are exhaustive `match`es over enums
 *without* `#[non_exhaustive]`, so adding a variant breaks every site the compiler can see —
 that is the feature. (Validated in production by Firecracker's bus history: their closed-enum

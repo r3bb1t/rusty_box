@@ -946,6 +946,14 @@ pub const fn fetch_decode32_inplace(
         // Can't call set_foo() in const fn, so set id directly (foo is in lower 16 bits of id)
         let foo_val = ((modrm_byte as u16) | ((b1 as u16) << 8)) & 0x7FF;
         instr.immediate = foo_val as u32;
+        // Bochs decoder32_fp_escape -> assign_srcs: a register form's ST(i)
+        // operand is OP_STi, ModRM.rm (fetchdecode.h). Each form names ST(i)
+        // once and reads ST(0) by number, so both fields carry rm: handlers
+        // take it from dst() where ST(i) is written and src() where it is read.
+        if mod_c0 {
+            instr.operands.dst = rm as u8;
+            instr.operands.src1 = rm as u8;
+        }
     } else if opcode_map == 4 && !is_evex {
         // 3DNow! instruction: use suffix to look up opcode directly
         instr.opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];

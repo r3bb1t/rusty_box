@@ -328,11 +328,60 @@ pub(super) const BX_MSR_MAX_INDEX: usize = 0x1000;
 impl_eflag!(id, 21);
 impl_eflag!(vip, 20);
 impl_eflag!(vif, 19);
-impl_eflag!(ac, 18);
-impl_eflag!(vm, 17);
-impl_eflag!(rf, 16);
+impl_eflag!(ac, 18, then handle_alignment_check);
+impl_eflag!(vm, 17, get_only);
+impl_eflag!(rf, 16, get_only);
 impl_eflag!(nt, 14);
-impl_eflag!(if, 9); // Interrupt Flag (bit 9)
+impl_eflag!(if, 9, then handle_interrupt_mask_change); // Interrupt Flag (bit 9)
+
+impl<T: super::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Bochs cpu.h `IMPLEMENT_EFLAG_SET_ACCESSOR_VM` `assert_VM`.
+    #[inline]
+    pub(crate) fn assert_vm(&mut self) {
+        self.set_vm(true);
+    }
+
+    /// Bochs cpu.h `IMPLEMENT_EFLAG_SET_ACCESSOR_VM` `clear_VM`.
+    #[inline]
+    pub(crate) fn clear_vm(&mut self) {
+        self.set_vm(false);
+    }
+
+    /// Bochs cpu.h `IMPLEMENT_EFLAG_SET_ACCESSOR_VM` `set_VM`: VM is
+    /// writable only outside long mode, and writing it enters or leaves
+    /// virtual-8086 mode, which `v8086_mode()` reads from the CPU mode.
+    #[inline]
+    pub(crate) fn set_vm(&mut self, val: bool) {
+        if !self.long_mode() {
+            self.eflags.set(EFlags::VM, val);
+            self.handle_cpu_mode_change();
+        }
+    }
+
+    /// Bochs cpu.h `IMPLEMENT_EFLAG_SET_ACCESSOR_RF` `assert_RF`: setting RF
+    /// drops the prefetch window, so the instruction it resumes is fetched
+    /// afresh.
+    #[inline]
+    pub(crate) fn assert_rf(&mut self) {
+        self.invalidate_prefetch_q();
+        self.eflags.insert(EFlags::RF);
+    }
+
+    /// Bochs cpu.h `IMPLEMENT_EFLAG_SET_ACCESSOR_RF` `clear_RF`.
+    #[inline]
+    pub(crate) fn clear_rf(&mut self) {
+        self.eflags.remove(EFlags::RF);
+    }
+
+    /// Bochs cpu.h `IMPLEMENT_EFLAG_SET_ACCESSOR_RF` `set_RF`.
+    #[inline]
+    pub(crate) fn set_rf(&mut self, val: bool) {
+        if val {
+            self.invalidate_prefetch_q();
+        }
+        self.eflags.set(EFlags::RF, val);
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CpuActivityState {
