@@ -23,6 +23,7 @@ use super::cpu::{BxCpuC, CpuActivityState};
 use super::decoder::BxSegregs;
 use super::descriptor::SEG_VALID_CACHE;
 use super::instrumentation::Instrumentation;
+use crate::config::BxLinAddress;
 
 /// The trace-scheduling bits of a processor's `async_event`, held while
 /// something else runs.
@@ -92,15 +93,15 @@ pub const VECTOR_REGISTERS: usize = super::decoder::BX_XMM_REGISTERS;
 pub struct SegmentAttributes(u16);
 
 impl SegmentAttributes {
-    const TYPE: u16 = 0x000F;
-    const NON_SYSTEM: u16 = 1 << 4;
+    const AVAILABLE: u16 = 1 << 12;
+    const DEFAULT_BIG: u16 = 1 << 14;
     const DPL: u16 = 0x0060;
     const DPL_SHIFT: u32 = 5;
-    const PRESENT: u16 = 1 << 7;
-    const AVAILABLE: u16 = 1 << 12;
-    const LONG: u16 = 1 << 13;
-    const DEFAULT_BIG: u16 = 1 << 14;
     const GRANULAR: u16 = 1 << 15;
+    const LONG: u16 = 1 << 13;
+    const NON_SYSTEM: u16 = 1 << 4;
+    const PRESENT: u16 = 1 << 7;
+    const TYPE: u16 = 0x000F;
 
     /// Build from the packed word, as a backend's register carries it.
     #[must_use]
@@ -643,8 +644,7 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// to the same interrupt taken without one.
     #[must_use]
     pub fn has_an_event_to_deliver(&self) -> bool {
-        self.is_unmasked_event_pending(u32::MAX)
-            || (self.lapic.intr && self.interrupts_enabled())
+        self.is_unmasked_event_pending(u32::MAX) || (self.lapic.intr && self.interrupts_enabled())
     }
 
     /// Whether an external interrupt EXISTS — asserted line or pending LAPIC
@@ -800,11 +800,11 @@ impl<T: Instrumentation> BxCpuC<T> {
         }
         if groups.contains(ArchGroups::TABLES) {
             out.gdtr = DescriptorTableState {
-                base: self.gdtr.base,
+                base: self.gdtr.base.get(),
                 limit: self.gdtr.limit,
             };
             out.idtr = DescriptorTableState {
-                base: self.idtr.base,
+                base: self.idtr.base.get(),
                 limit: self.idtr.limit,
             };
         }
@@ -882,10 +882,7 @@ impl<T: Instrumentation> BxCpuC<T> {
     ///
     /// Validation happens before anything is written, so a rejected state
     /// leaves the processor as it was rather than half-loaded.
-    pub fn import_arch_state(
-        &mut self,
-        state: &VcpuArchState,
-    ) -> Result<(), ArchStateError> {
+    pub fn import_arch_state(&mut self, state: &VcpuArchState) -> Result<(), ArchStateError> {
         self.import_arch_groups(state, ArchGroups::all())
     }
 
@@ -955,9 +952,9 @@ impl<T: Instrumentation> BxCpuC<T> {
             segment_in(&mut self.tr, &state.tr);
         }
         if groups.contains(ArchGroups::TABLES) {
-            self.gdtr.base = state.gdtr.base;
+            self.gdtr.base = BxLinAddress::new(state.gdtr.base);
             self.gdtr.limit = state.gdtr.limit;
-            self.idtr.base = state.idtr.base;
+            self.idtr.base = BxLinAddress::new(state.idtr.base);
             self.idtr.limit = state.idtr.limit;
         }
 
@@ -1000,8 +997,7 @@ impl<T: Instrumentation> BxCpuC<T> {
             self.the_i387.fdp = state.fpu.data_pointer;
             self.the_i387.fcs = state.fpu.instruction_selector;
             self.the_i387.fds = state.fpu.data_selector;
-            for (slot, (signif, sign_exp)) in
-                self.the_i387.st_space.iter_mut().zip(state.fpu.stack)
+            for (slot, (signif, sign_exp)) in self.the_i387.st_space.iter_mut().zip(state.fpu.stack)
             {
                 slot.signif = signif;
                 slot.sign_exp = sign_exp;
@@ -1138,8 +1134,9 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// the delivery touches no vector state.
     #[must_use]
     pub fn next_instruction_touches_vector_state(&self, bytes: &[u8]) -> bool {
+        use rusty_box_decoder::opcode_isa::{CpuState, opcode_state};
+
         use super::decoder::Opcode;
-        use rusty_box_decoder::opcode_isa::{opcode_state, CpuState};
 
         let decoded = self.code_size().decode(bytes);
         let Ok(instruction) = decoded else {
@@ -1147,9 +1144,7 @@ impl<T: Instrumentation> BxCpuC<T> {
         };
         let opcode = instruction.get_ia_opcode();
         match opcode_state(opcode) {
-            CpuState::Fpu | CpuState::Mmx | CpuState::Sse | CpuState::Avx | CpuState::Evex => {
-                true
-            }
+            CpuState::Fpu | CpuState::Mmx | CpuState::Sse | CpuState::Avx | CpuState::Evex => true,
             // No tile register is modelled, so an AMX opcode never survives
             // the ISA gate and never executes on the shadow.
             CpuState::Amx => false,
@@ -1209,7 +1204,7 @@ fn segment_out(seg: &super::descriptor::BxSegmentReg) -> SegmentState {
     let granular = seg.cache.u.segment_g();
     SegmentState {
         selector: seg.selector.value,
-        base: seg.cache.u.segment_base(),
+        base: seg.cache.u.segment_base().get(),
         // The inverse of the scaling the cache applied: a granular limit was
         // stored with its low twelve bits set, so shifting them back off
         // recovers the field a descriptor held.
@@ -1245,10 +1240,12 @@ fn segment_in(seg: &mut super::descriptor::BxSegmentReg, state: &SegmentState) {
     seg.cache.dpl = state.attributes.dpl();
     seg.cache.segment = state.attributes.is_code_or_data();
     seg.cache.r#type = state.attributes.kind();
-    seg.cache.u.set_segment_base(state.base);
+    seg.cache.u.set_segment_base(BxLinAddress::new(state.base));
     seg.cache.u.set_segment_limit_scaled(state.scaled_limit());
     seg.cache.u.set_segment_g(state.attributes.is_granular());
-    seg.cache.u.set_segment_d_b(state.attributes.is_default_big());
+    seg.cache
+        .u
+        .set_segment_d_b(state.attributes.is_default_big());
     seg.cache.u.set_segment_l(state.attributes.is_long());
     seg.cache.u.set_segment_avl(state.attributes.is_available());
 }
@@ -1256,8 +1253,8 @@ fn segment_in(seg: &mut super::descriptor::BxSegmentReg, state: &SegmentState) {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
-    use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::ResetReason;
+    use crate::cpu::builder::BxCpuBuilder;
 
     /// A packed attribute word survives being taken apart and put back
     /// together — including the two bits that are one apart and mean opposite
@@ -1372,7 +1369,10 @@ mod tests {
     fn a_recorded_halt_leaves_the_processor_asleep() {
         let mut cpu = BxCpuBuilder::new().build().expect("a processor");
         cpu.reset(ResetReason::Hardware);
-        assert_eq!(cpu.activity_state, crate::cpu::cpu::CpuActivityState::Active);
+        assert_eq!(
+            cpu.activity_state,
+            crate::cpu::cpu::CpuActivityState::Active
+        );
 
         cpu.record_halt();
         assert_eq!(
@@ -1465,7 +1465,10 @@ mod tests {
             limit: 0xFFFF,
             attributes: SegmentAttributes::from_bits(0x0093),
         });
-        assert_eq!(cpu.import_arch_groups(&real_mode_data, ArchGroups::SEGMENTS), Ok(()));
+        assert_eq!(
+            cpu.import_arch_groups(&real_mode_data, ArchGroups::SEGMENTS),
+            Ok(())
+        );
 
         // Not present, no limit — what a segment reads back as after a null
         // selector load, on every exit until the guest loads it again.
@@ -1502,7 +1505,10 @@ mod tests {
 
         let mut after = VcpuArchState::default();
         cpu.export_arch_state(&mut after);
-        assert_eq!(after.gprs[0], 0xFEED_FACE, "the group in the mask was imported");
+        assert_eq!(
+            after.gprs[0], 0xFEED_FACE,
+            "the group in the mask was imported"
+        );
         assert_eq!(after.cr3, whole.cr3, "CR3 was not in the mask");
         assert_eq!(after.dr7, whole.dr7, "DR7 was not in the mask");
 
@@ -1587,7 +1593,8 @@ mod tests {
         state.gprs[4] = 0;
         ctx.import_arch_state(&state).unwrap();
 
-        ctx.push_16(0x1234).expect("a 16-bit stack has room at its top");
+        ctx.push_16(0x1234)
+            .expect("a 16-bit stack has room at its top");
         assert_eq!(
             ctx.rsp(),
             0xFFFE,

@@ -25,13 +25,14 @@
 //! answered, and a call site that skipped it would run the hook for a tracer
 //! that asked not to see it.
 
-use crate::cpu::decoder::Instruction;
-
 use super::bochs::Instrumentation;
 use super::types::{
-    BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, IoHookEvent, LinAccess, MemPermViolation,
-    MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType, TlbCntrl,
+    BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, IoHookEvent, IoPort, LinAccess,
+    MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType,
+    TlbCntrl,
 };
+use crate::config::{BxLinAddress, BxPhyAddress};
+use crate::cpu::decoder::Instruction;
 
 /// The tracer a processor carries, with the mask it declared and the stop
 /// request its hooks can raise.
@@ -178,7 +179,7 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     }
 
     #[inline]
-    pub fn fire_inp(&mut self, port: u16, size: u8) {
+    pub fn fire_inp(&mut self, port: IoPort, size: u8) {
         self.tracer.inp(port, size);
     }
 
@@ -203,7 +204,7 @@ impl<T: Instrumentation> InstrumentationRegistry<T> {
     }
 
     #[inline]
-    pub fn fire_clflush(&mut self, laddr: u64, paddr: u64) {
+    pub fn fire_clflush(&mut self, laddr: BxLinAddress, paddr: BxPhyAddress) {
         self.tracer.clflush(laddr, paddr);
     }
 
@@ -301,6 +302,5 @@ mod const_constructor_tests {
         assert_eq!(constructed.active, runtime.active);
         assert_eq!(constructed.stop_request, runtime.stop_request);
         assert_eq!(constructed.tracer, runtime.tracer);
-
     }
 }

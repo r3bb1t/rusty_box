@@ -1,11 +1,10 @@
 #![allow(unused_assignments, dead_code)]
 
-use crate::{
-    cpu::{cpudb::CpuModel, BxCpuC},
-    params::CpuTopology,
-};
-
 use super::Result;
+use crate::config::A20Mask;
+use crate::cpu::BxCpuC;
+use crate::cpu::cpudb::CpuModel;
+use crate::params::CpuTopology;
 
 #[derive(Debug, Default)]
 pub struct BxCpuBuilder {
@@ -90,7 +89,7 @@ impl BxCpuBuilder {
         core::ptr::addr_of_mut!((*ptr).cpuid).write(cpuid);
         core::ptr::addr_of_mut!((*ptr).ignore_bad_msrs).write(true);
         core::ptr::addr_of_mut!((*ptr).cpu_topology).write(CpuTopology::default());
-        core::ptr::addr_of_mut!((*ptr).a20_mask).write(0xFFFF_FFFF_FFFF_FFFF);
+        core::ptr::addr_of_mut!((*ptr).a20_mask).write(A20Mask::OPEN);
         core::ptr::addr_of_mut!((*ptr).last_exception_type).write(-1);
         core::ptr::addr_of_mut!((*ptr).instrumentation)
             .write(super::instrumentation::InstrumentationRegistry::with_tracer(tracer));

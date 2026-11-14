@@ -11,11 +11,11 @@
 //! result, and the reason the other verbs are never reached here.
 
 use crate::error::{WhpError, WhpResult};
-use crate::{
-    CapabilityCode, CounterSet, FeatureBanks, GpaPerms, GvaTranslation, PropertyCode,
-    RawPartition, RegisterValue, VpStateType,
-};
 use crate::vcpu::{Exit, InterruptRequest, Reg, SegmentRegister, TableRegister};
+use crate::{
+    CapabilityCode, CounterSet, DeadlineWake, FeatureBanks, GpaPerms, GvaTranslation, PropertyCode,
+    RawDeadline, RawPartition, RegisterValue, VpStateType,
+};
 
 /// The name every refusal below carries, since on this target the platform
 /// itself is what is missing rather than any particular call.
@@ -54,11 +54,7 @@ pub unsafe fn delete_partition(_partition: RawPartition) {
     // which never succeeds here.
 }
 
-pub fn set_property(
-    _partition: RawPartition,
-    _code: PropertyCode,
-    _value: u64,
-) -> WhpResult<()> {
+pub fn set_property(_partition: RawPartition, _code: PropertyCode, _value: u64) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }
 
@@ -160,10 +156,7 @@ pub fn cancel_vp(_partition: RawPartition, _index: u32) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }
 
-pub fn request_interrupt(
-    _partition: RawPartition,
-    _request: InterruptRequest,
-) -> WhpResult<()> {
+pub fn request_interrupt(_partition: RawPartition, _request: InterruptRequest) -> WhpResult<()> {
     Err(WhpError::unsupported(CALL))
 }
 
@@ -176,11 +169,7 @@ pub fn get_counters(
     Err(WhpError::unsupported(CALL))
 }
 
-pub fn get_xsave(
-    _partition: RawPartition,
-    _index: u32,
-    _out: &mut [u8],
-) -> WhpResult<usize> {
+pub fn get_xsave(_partition: RawPartition, _index: u32, _out: &mut [u8]) -> WhpResult<usize> {
     Err(WhpError::unsupported(CALL))
 }
 

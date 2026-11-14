@@ -50,11 +50,11 @@ mod vcpu;
 
 pub use error::{WhpError, WhpErrorKind, WhpResult};
 pub use vcpu::{
-    AccessType, ApicRegister, ApicStatePage, ApicVector, ApicWriteType, CpuidAccess,
+    ALL_REGS, AccessType, ApicRegister, ApicStatePage, ApicVector, ApicWriteType, CpuidAccess,
     DestinationMode, Exit, ExitReason, InternalActivity, InterruptKind, InterruptRequest,
     InterruptedDelivery, InterruptedKind, InterruptionType, IoPortAccess, MemoryAccess, MsrAccess,
     PendingExtIntEvent, PendingInterruption, PendingInterruptionRead, Reg, SegmentRegister,
-    TableRegister, TriggerMode, VpContext, ALL_REGS, UNEXCHANGED_REGS,
+    TableRegister, TriggerMode, UNEXCHANGED_REGS, VpContext,
 };
 
 #[cfg(windows)]
@@ -143,7 +143,10 @@ impl CapabilityCode {
     /// misparsed as a count and a bank.
     #[must_use]
     pub const fn is_banked(self) -> bool {
-        matches!(self, Self::ProcessorFeaturesBanks | Self::SyntheticProcessorFeaturesBanks)
+        matches!(
+            self,
+            Self::ProcessorFeaturesBanks | Self::SyntheticProcessorFeaturesBanks
+        )
     }
 }
 
@@ -323,11 +326,11 @@ pub struct GvaTranslation {
 pub use imp::{
     arm_deadline, cancel_vp, capability, capability_banks, close_deadline, create_deadline,
     create_partition, create_vp, delete_partition, delete_vp, dirty_bitmap, get_counters,
-    get_property_word, ring_deadline, wait_deadline,
-    get_registers, get_segments, get_tables, get_vp_state, get_words, get_xsave,
-    hypervisor_present, map_gpa, request_interrupt, resume_time, run_vp, set_cpuid_exit_list,
-    set_property, set_property_bytes, set_registers, set_segments, set_tables, set_vp_state,
-    set_words, set_xsave, setup, suspend_time, translate_gva, unmap_gpa,
+    get_property_word, get_registers, get_segments, get_tables, get_vp_state, get_words, get_xsave,
+    hypervisor_present, map_gpa, request_interrupt, resume_time, ring_deadline, run_vp,
+    set_cpuid_exit_list, set_property, set_property_bytes, set_registers, set_segments, set_tables,
+    set_vp_state, set_words, set_xsave, setup, suspend_time, translate_gva, unmap_gpa,
+    wait_deadline,
 };
 
 /// Every function `imp` must provide, stated once so the two implementations

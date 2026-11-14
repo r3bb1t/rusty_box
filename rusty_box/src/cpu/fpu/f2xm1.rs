@@ -31,21 +31,21 @@ const FLOATX80_NEG_HALF: ExtFloat80 = ExtFloat80 {
 // --- exp_arr[15] from Bochs f2xm1.cc ---
 
 const EXP_ARR: [Float128; 15] = [
-    Float128::new(0x3fff000000000000, 0x0000000000000000), /*  1 */
-    Float128::new(0x3ffe000000000000, 0x0000000000000000), /*  2 */
-    Float128::new(0x3ffc555555555555, 0x5555555555555555), /*  3 */
-    Float128::new(0x3ffa555555555555, 0x5555555555555555), /*  4 */
-    Float128::new(0x3ff8111111111111, 0x1111111111111111), /*  5 */
-    Float128::new(0x3ff56c16c16c16c1, 0x6c16c16c16c16c17), /*  6 */
-    Float128::new(0x3ff2a01a01a01a01, 0xa01a01a01a01a01a), /*  7 */
-    Float128::new(0x3fefa01a01a01a01, 0xa01a01a01a01a01a), /*  8 */
-    Float128::new(0x3fec71de3a556c73, 0x38faac1c88e50017), /*  9 */
-    Float128::new(0x3fe927e4fb7789f5, 0xc72ef016d3ea6679), /* 10 */
-    Float128::new(0x3fe5ae64567f544e, 0x38fe747e4b837dc7), /* 11 */
-    Float128::new(0x3fe21eed8eff8d89, 0x7b544da987acfe85), /* 12 */
-    Float128::new(0x3fde6124613a86d0, 0x97ca38331d23af68), /* 13 */
-    Float128::new(0x3fda93974a8c07c9, 0xd20badf145dfa3e5), /* 14 */
-    Float128::new(0x3fd6ae7f3e733b81, 0xf11d8656b0ee8cb0), /* 15 */
+    Float128::new(0x3FFF000000000000, 0x0000000000000000), /*  1 */
+    Float128::new(0x3FFE000000000000, 0x0000000000000000), /*  2 */
+    Float128::new(0x3FFC555555555555, 0x5555555555555555), /*  3 */
+    Float128::new(0x3FFA555555555555, 0x5555555555555555), /*  4 */
+    Float128::new(0x3FF8111111111111, 0x1111111111111111), /*  5 */
+    Float128::new(0x3FF56C16C16C16C1, 0x6C16C16C16C16C17), /*  6 */
+    Float128::new(0x3FF2A01A01A01A01, 0xA01A01A01A01A01A), /*  7 */
+    Float128::new(0x3FEFA01A01A01A01, 0xA01A01A01A01A01A), /*  8 */
+    Float128::new(0x3FEC71DE3A556C73, 0x38FAAC1C88E50017), /*  9 */
+    Float128::new(0x3FE927E4FB7789F5, 0xC72EF016D3EA6679), /* 10 */
+    Float128::new(0x3FE5AE64567F544E, 0x38FE747E4B837DC7), /* 11 */
+    Float128::new(0x3FE21EED8EFF8D89, 0x7B544DA987ACFE85), /* 12 */
+    Float128::new(0x3FDE6124613A86D0, 0x97CA38331D23AF68), /* 13 */
+    Float128::new(0x3FDA93974A8C07C9, 0xD20BADF145DFA3E5), /* 14 */
+    Float128::new(0x3FD6AE7F3E733B81, 0xF11D8656B0EE8CB0), /* 15 */
 ];
 
 /// Polynomial approximation for e^x - 1 (from Bochs f2xm1.cc poly_exp).

@@ -21,10 +21,11 @@
 //! an `EXC #UD` or a Go runtime panic on stderr right after `EXECVE`
 //! points at a CPU emulation bug.
 
-use rusty_box::cpu::decoder::{Instruction, Opcode};
-use rusty_box::cpu::{HookCtx, HookMask, InstrAction, Instrumentation, X86Reg};
 use std::fs::File;
 use std::io::{BufWriter, Write};
+
+use rusty_box::cpu::decoder::{Instruction, Opcode};
+use rusty_box::cpu::{HookCtx, HookMask, InstrAction, Instrumentation, X86Reg};
 
 // Linux x86-64 syscall numbers (arch/x86/entry/syscalls/syscall_64.tbl).
 const SYS_WRITE: u64 = 1;
@@ -221,7 +222,9 @@ impl GuestTracer {
         if let Err(e) = res {
             if !self.write_error_reported {
                 self.write_error_reported = true;
-                tracing::error!("guest-trace: log write failed, tracing continues without log: {e}");
+                tracing::error!(
+                    "guest-trace: log write failed, tracing continues without log: {e}"
+                );
             }
         }
     }

@@ -1,12 +1,11 @@
 #![allow(dead_code)]
 
-use super::{
-    decoder::{
-        BxSegregs, BX_16BIT_REG_IP, BX_32BIT_REG_EIP, BX_64BIT_REG_RIP, BX_64BIT_REG_SSP,
-        BX_TMP_REGISTER,
-    },
-    BxCpuC,
+use super::BxCpuC;
+use super::decoder::{
+    BX_16BIT_REG_IP, BX_32BIT_REG_EIP, BX_64BIT_REG_RIP, BX_64BIT_REG_SSP, BX_TMP_REGISTER,
+    BxSegregs,
 };
+use crate::config::BxLinAddress;
 
 // according to RFC #344, we use "set_<name>" for setters
 impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
@@ -15,34 +14,42 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn al(&self) -> u8 {
         self.gen_reg[0].rl()
     }
+
     #[inline]
     pub fn cl(&self) -> u8 {
         self.gen_reg[1].rl()
     }
+
     #[inline]
     pub fn dl(&self) -> u8 {
         self.gen_reg[2].rl()
     }
+
     #[inline]
     pub fn bl(&self) -> u8 {
         self.gen_reg[3].rl()
     }
+
     #[inline]
     pub fn ah(&self) -> u8 {
         self.gen_reg[0].rh()
     }
+
     #[inline]
     pub fn ch(&self) -> u8 {
         self.gen_reg[1].rh()
     }
+
     #[inline]
     pub fn dh(&self) -> u8 {
         self.gen_reg[2].rh()
     }
+
     #[inline]
     pub fn bh(&self) -> u8 {
         self.gen_reg[3].rh()
     }
+
     #[inline]
     pub fn tmp_8_l(&self) -> u8 {
         self.gen_reg[BX_TMP_REGISTER].rl()
@@ -53,34 +60,42 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn set_al(&mut self, val: u8) {
         self.gen_reg[0].set_rl(val)
     }
+
     #[inline]
     pub fn set_cl(&mut self, val: u8) {
         self.gen_reg[1].set_rl(val)
     }
+
     #[inline]
     pub fn set_dl(&mut self, val: u8) {
         self.gen_reg[2].set_rl(val)
     }
+
     #[inline]
     pub fn set_bl(&mut self, val: u8) {
         self.gen_reg[3].set_rl(val)
     }
+
     #[inline]
     pub fn set_ah(&mut self, val: u8) {
         self.gen_reg[0].set_rh(val)
     }
+
     #[inline]
     pub fn set_ch(&mut self, val: u8) {
         self.gen_reg[1].set_rh(val)
     }
+
     #[inline]
     pub fn set_dh(&mut self, val: u8) {
         self.gen_reg[2].set_rh(val)
     }
+
     #[inline]
     pub fn set_bh(&mut self, val: u8) {
         self.gen_reg[3].set_rh(val)
     }
+
     #[inline]
     pub fn set_tmpl_8_l(&mut self, val: u8) {
         self.gen_reg[BX_TMP_REGISTER].set_rl(val)
@@ -91,30 +106,37 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn ax(&self) -> u16 {
         self.gen_reg[0].rx()
     }
+
     #[inline]
     pub fn cx(&self) -> u16 {
         self.gen_reg[1].rx()
     }
+
     #[inline]
     pub fn dx(&self) -> u16 {
         self.gen_reg[2].rx()
     }
+
     #[inline]
     pub fn bx(&self) -> u16 {
         self.gen_reg[3].rx()
     }
+
     #[inline]
     pub fn sp(&self) -> u16 {
         self.gen_reg[4].rx()
     }
+
     #[inline]
     pub fn bp(&self) -> u16 {
         self.gen_reg[5].rx()
     }
+
     #[inline]
     pub fn si(&self) -> u16 {
         self.gen_reg[6].rx()
     }
+
     #[inline]
     pub fn di(&self) -> u16 {
         self.gen_reg[7].rx()
@@ -125,30 +147,37 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn set_ax(&mut self, val: u16) {
         self.gen_reg[0].set_rx(val)
     }
+
     #[inline]
     pub fn set_cx(&mut self, val: u16) {
         self.gen_reg[1].set_rx(val)
     }
+
     #[inline]
     pub fn set_dx(&mut self, val: u16) {
         self.gen_reg[2].set_rx(val)
     }
+
     #[inline]
     pub fn set_bx(&mut self, val: u16) {
         self.gen_reg[3].set_rx(val)
     }
+
     #[inline]
     pub fn set_sp(&mut self, val: u16) {
         self.gen_reg[4].set_rx(val)
     }
+
     #[inline]
     pub fn set_bp(&mut self, val: u16) {
         self.gen_reg[5].set_rx(val)
     }
+
     #[inline]
     pub fn set_si(&mut self, val: u16) {
         self.gen_reg[6].set_rx(val)
     }
+
     #[inline]
     pub fn set_di(&mut self, val: u16) {
         self.gen_reg[7].set_rx(val)
@@ -159,6 +188,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn ip(&self) -> u16 {
         self.gen_reg[BX_16BIT_REG_IP].rx()
     }
+
     #[inline]
     pub fn set_ip(&mut self, val: u16) {
         self.gen_reg[BX_16BIT_REG_IP].set_rx(val)
@@ -168,6 +198,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn tmpl_16(&self) -> u16 {
         self.gen_reg[BX_TMP_REGISTER].rx()
     }
+
     #[inline]
     pub fn set_tmpl_16(&mut self, val: u16) {
         self.gen_reg[BX_TMP_REGISTER].set_rx(val)
@@ -178,30 +209,37 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn eax(&self) -> u32 {
         self.gen_reg[0].erx()
     }
+
     #[inline]
     pub fn ecx(&self) -> u32 {
         self.gen_reg[1].erx()
     }
+
     #[inline]
     pub fn edx(&self) -> u32 {
         self.gen_reg[2].erx()
     }
+
     #[inline]
     pub fn ebx(&self) -> u32 {
         self.gen_reg[3].erx()
     }
+
     #[inline]
     pub fn esp(&self) -> u32 {
         self.gen_reg[4].erx()
     }
+
     #[inline]
     pub fn ebp(&self) -> u32 {
         self.gen_reg[5].erx()
     }
+
     #[inline]
     pub fn esi(&self) -> u32 {
         self.gen_reg[6].erx()
     }
+
     #[inline]
     pub fn edi(&self) -> u32 {
         self.gen_reg[7].erx()
@@ -215,36 +253,43 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.gen_reg[0].set_erx(val);
         self.gen_reg[0].set_hrx(0);
     }
+
     #[inline]
     pub fn set_ecx(&mut self, val: u32) {
         self.gen_reg[1].set_erx(val);
         self.gen_reg[1].set_hrx(0);
     }
+
     #[inline]
     pub fn set_edx(&mut self, val: u32) {
         self.gen_reg[2].set_erx(val);
         self.gen_reg[2].set_hrx(0);
     }
+
     #[inline]
     pub fn set_ebx(&mut self, val: u32) {
         self.gen_reg[3].set_erx(val);
         self.gen_reg[3].set_hrx(0);
     }
+
     #[inline]
     pub fn set_esp(&mut self, val: u32) {
         self.gen_reg[4].set_erx(val);
         self.gen_reg[4].set_hrx(0);
     }
+
     #[inline]
     pub fn set_ebp(&mut self, val: u32) {
         self.gen_reg[5].set_erx(val);
         self.gen_reg[5].set_hrx(0);
     }
+
     #[inline]
     pub fn set_esi(&mut self, val: u32) {
         self.gen_reg[6].set_erx(val);
         self.gen_reg[6].set_hrx(0);
     }
+
     #[inline]
     pub fn set_edi(&mut self, val: u32) {
         self.gen_reg[7].set_erx(val);
@@ -256,6 +301,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn eip(&self) -> u32 {
         self.gen_reg[BX_32BIT_REG_EIP].erx()
     }
+
     #[inline]
     pub fn set_eip(&mut self, val: u32) {
         // EIP and RIP are the same register (index 16), just different views of a union
@@ -274,6 +320,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn tmp_32(&self) -> u32 {
         self.gen_reg[BX_TMP_REGISTER].erx()
     }
+
     #[inline]
     pub fn set_tmp_32(&mut self, val: u32) {
         self.gen_reg[BX_TMP_REGISTER].set_erx(val)
@@ -322,6 +369,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             .cache
             .u
             .segment_base()
+            .get()
     }
 
     // getters for 64 bit general registers
@@ -329,62 +377,77 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn rax(&self) -> u64 {
         self.gen_reg[0].rrx()
     }
+
     #[inline]
     pub fn rcx(&self) -> u64 {
         self.gen_reg[1].rrx()
     }
+
     #[inline]
     pub fn rdx(&self) -> u64 {
         self.gen_reg[2].rrx()
     }
+
     #[inline]
     pub fn rbx(&self) -> u64 {
         self.gen_reg[3].rrx()
     }
+
     #[inline]
     pub fn rsp(&self) -> u64 {
         self.gen_reg[4].rrx()
     }
+
     #[inline]
     pub fn rbp(&self) -> u64 {
         self.gen_reg[5].rrx()
     }
+
     #[inline]
     pub fn rsi(&self) -> u64 {
         self.gen_reg[6].rrx()
     }
+
     #[inline]
     pub fn rdi(&self) -> u64 {
         self.gen_reg[7].rrx()
     }
+
     #[inline]
     pub fn r8(&self) -> u64 {
         self.gen_reg[8].rrx()
     }
+
     #[inline]
     pub fn r9(&self) -> u64 {
         self.gen_reg[9].rrx()
     }
+
     #[inline]
     pub fn r10(&self) -> u64 {
         self.gen_reg[10].rrx()
     }
+
     #[inline]
     pub fn r11(&self) -> u64 {
         self.gen_reg[11].rrx()
     }
+
     #[inline]
     pub fn r12(&self) -> u64 {
         self.gen_reg[12].rrx()
     }
+
     #[inline]
     pub fn r13(&self) -> u64 {
         self.gen_reg[13].rrx()
     }
+
     #[inline]
     pub fn r14(&self) -> u64 {
         self.gen_reg[14].rrx()
     }
+
     #[inline]
     pub fn r15(&self) -> u64 {
         self.gen_reg[15].rrx()
@@ -395,62 +458,77 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn set_rax(&mut self, val: u64) {
         self.gen_reg[0].set_rrx(val)
     }
+
     #[inline]
     pub fn set_rcx(&mut self, val: u64) {
         self.gen_reg[1].set_rrx(val)
     }
+
     #[inline]
     pub fn set_rdx(&mut self, val: u64) {
         self.gen_reg[2].set_rrx(val)
     }
+
     #[inline]
     pub fn set_rbx(&mut self, val: u64) {
         self.gen_reg[3].set_rrx(val)
     }
+
     #[inline]
     pub fn set_rsp(&mut self, val: u64) {
         self.gen_reg[4].set_rrx(val)
     }
+
     #[inline]
     pub fn set_rbp(&mut self, val: u64) {
         self.gen_reg[5].set_rrx(val)
     }
+
     #[inline]
     pub fn set_rsi(&mut self, val: u64) {
         self.gen_reg[6].set_rrx(val)
     }
+
     #[inline]
     pub fn set_rdi(&mut self, val: u64) {
         self.gen_reg[7].set_rrx(val)
     }
+
     #[inline]
     pub fn set_r8(&mut self, val: u64) {
         self.gen_reg[8].set_rrx(val)
     }
+
     #[inline]
     pub fn set_r9(&mut self, val: u64) {
         self.gen_reg[9].set_rrx(val)
     }
+
     #[inline]
     pub fn set_r10(&mut self, val: u64) {
         self.gen_reg[10].set_rrx(val)
     }
+
     #[inline]
     pub fn set_r11(&mut self, val: u64) {
         self.gen_reg[11].set_rrx(val)
     }
+
     #[inline]
     pub fn set_r12(&mut self, val: u64) {
         self.gen_reg[12].set_rrx(val)
     }
+
     #[inline]
     pub fn set_r13(&mut self, val: u64) {
         self.gen_reg[13].set_rrx(val)
     }
+
     #[inline]
     pub fn set_r14(&mut self, val: u64) {
         self.gen_reg[14].set_rrx(val)
     }
+
     #[inline]
     pub fn set_r15(&mut self, val: u64) {
         self.gen_reg[15].set_rrx(val)
@@ -468,6 +546,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn rip(&self) -> u64 {
         self.gen_reg[BX_64BIT_REG_RIP].rrx()
     }
+
     #[inline]
     pub fn set_rip(&mut self, val: u64) {
         self.gen_reg[BX_64BIT_REG_RIP].set_rrx(val)
@@ -477,6 +556,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn ssp(&self) -> u64 {
         self.gen_reg[BX_64BIT_REG_SSP].rrx()
     }
+
     #[inline]
     pub fn set_ssp(&mut self, val: u64) {
         self.gen_reg[BX_64BIT_REG_SSP].set_rrx(val)
@@ -486,6 +566,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn tmp_64(&self) -> u64 {
         self.gen_reg[BX_TMP_REGISTER].rrx()
     }
+
     #[inline]
     pub fn set_tmp_u64(&mut self, val: u64) {
         self.gen_reg[BX_TMP_REGISTER].set_rrx(val)
@@ -494,25 +575,36 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     // access to 64 bit MSR registers (FS.BASE / GS.BASE)
     #[inline]
     pub fn msr_fsbase(&self) -> u64 {
-        self.sregs[BxSegregs::Fs as usize].cache.u.segment_base()
+        self.sregs[BxSegregs::Fs as usize]
+            .cache
+            .u
+            .segment_base()
+            .get()
     }
+
     #[inline]
     pub fn set_msr_fsbase(&mut self, val: u64) {
         self.sregs[BxSegregs::Fs as usize]
             .cache
             .u
-            .set_segment_base(val)
+            .set_segment_base(BxLinAddress::new(val))
     }
+
     #[inline]
     pub fn msr_gsbase(&self) -> u64 {
-        self.sregs[BxSegregs::Gs as usize].cache.u.segment_base()
+        self.sregs[BxSegregs::Gs as usize]
+            .cache
+            .u
+            .segment_base()
+            .get()
     }
+
     #[inline]
     pub fn set_msr_gsbase(&mut self, val: u64) {
         self.sregs[BxSegregs::Gs as usize]
             .cache
             .u
-            .set_segment_base(val)
+            .set_segment_base(BxLinAddress::new(val))
     }
 
     // =========================================================================
@@ -625,7 +717,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Get IDTR base (for diagnostics)
     #[inline]
     pub fn get_idtr_base(&self) -> u64 {
-        self.idtr.base
+        self.idtr.base.get()
     }
 
     /// Get IDTR limit (for diagnostics)
@@ -637,7 +729,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Get GDTR base (for diagnostics)
     #[inline]
     pub fn get_gdtr_base(&self) -> u64 {
-        self.gdtr.base
+        self.gdtr.base.get()
     }
 
     /// Get GDTR limit (for diagnostics)
@@ -653,6 +745,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             .cache
             .u
             .segment_base()
+            .get()
     }
 
     /// Get DS base from cached descriptor (for diagnostics)
@@ -662,6 +755,7 @@ impl<'c, T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             .cache
             .u
             .segment_base()
+            .get()
     }
 
     /// Get DS selector (for diagnostics)

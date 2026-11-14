@@ -13,10 +13,20 @@
     reason = "JNI: the Java VM and NativeActivity handles android-activity hands this process"
 )]
 
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::mpsc::Sender;
+
+use egui::RichText;
+use rusty_box::gui::shared_display::SharedDisplay;
+use rusty_box::gui::{HostInputEvent, HostInputSink, char_to_bx_key_sequence};
+use rusty_box::iodev::scancodes::BxKey;
+pub use winit::platform::android::activity::AndroidApp;
+
 use crate::android_support::{
-    content_rect_in_points, exit_sentence, list_directory, needs_first_vm, seed_first_vm,
-    stage_file, untold_exit, CarriedMachine, DirectoryEntry, EntryKind, EpochMillis, ExitReason,
-    ExitRecord, ExitStanding, FileFilter, Kib, PixelRect,
+    CarriedMachine, DirectoryEntry, EntryKind, EpochMillis, ExitReason, ExitRecord, ExitStanding,
+    FileFilter, Kib, PixelRect, content_rect_in_points, exit_sentence, list_directory,
+    needs_first_vm, seed_first_vm, stage_file, untold_exit,
 };
 use crate::app::{
     BrowseRequest, BrowseTarget, HostWindow, NativeEmulatorCommand, NativeShellApp, THIS_PLATFORM,
@@ -24,15 +34,6 @@ use crate::app::{
 use crate::library::VmLibrary;
 use crate::sessions::AliveEffect;
 use crate::{RunError, RunSummary};
-use egui::RichText;
-use rusty_box::gui::shared_display::SharedDisplay;
-use rusty_box::gui::{char_to_bx_key_sequence, HostInputEvent, HostInputSink};
-use rusty_box::iodev::scancodes::BxKey;
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
-use std::sync::Mutex;
-
-pub use winit::platform::android::activity::AndroidApp;
 
 const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
 const VGA_BIOS_DATA: &[u8] =
@@ -193,6 +194,7 @@ fn run(app: AndroidApp) -> Result<RunSummary, RunError> {
         library,
         opening: crate::runner::ShellOpening::LastShown,
         notice: joined_notice(ended, notice),
+        settings_file: storage.join(crate::symbol_settings::SETTINGS_FILE),
     };
     crate::runner::run_android_shell(start, app, &storage)
 }
@@ -249,13 +251,19 @@ fn last_seen_end(marker: &Path) -> Option<EpochMillis> {
         Ok(text) => match text.trim().parse() {
             Ok(millis) => Some(EpochMillis(millis)),
             Err(error) => {
-                log::warn!("{} holds no time ({error}); every end counts", marker.display());
+                log::warn!(
+                    "{} holds no time ({error}); every end counts",
+                    marker.display()
+                );
                 None
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            log::warn!("{} could not be read ({error}); every end counts", marker.display());
+            log::warn!(
+                "{} could not be read ({error}); every end counts",
+                marker.display()
+            );
             None
         }
     }
@@ -281,7 +289,12 @@ fn phone_library(storage: &Path) -> Result<PhoneLibrary, RunError> {
     let library = VmLibrary::open(storage.join("vms"))?;
     let carried = storage.join("carried");
     let bios = stage("BIOS", &carried, "BIOS-bochs-latest", BIOS_DATA)?;
-    let vga_bios = stage("VGA BIOS", &carried, "VGABIOS-lgpl-latest.bin", VGA_BIOS_DATA)?;
+    let vga_bios = stage(
+        "VGA BIOS",
+        &carried,
+        "VGABIOS-lgpl-latest.bin",
+        VGA_BIOS_DATA,
+    )?;
     let notice = if needs_first_vm(&library) {
         let machine = CarriedMachine {
             bios,
@@ -492,14 +505,17 @@ impl AndroidShellApp {
                             .desired_width(200.0)
                             .hint_text("Text to type"),
                     );
-                    let submitted =
-                        response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    let submitted = response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
                     let pressed = ui
                         .add_enabled(!keypad.text.is_empty(), egui::Button::new("Send"))
                         .clicked();
                     if (submitted || pressed) && !keypad.text.is_empty() {
-                        let keys: Vec<(BxKey, bool)> =
-                            keypad.text.chars().flat_map(char_to_bx_key_sequence).collect();
+                        let keys: Vec<(BxKey, bool)> = keypad
+                            .text
+                            .chars()
+                            .flat_map(char_to_bx_key_sequence)
+                            .collect();
                         send_keys(shared, &keys);
                         keypad.text.clear();
                     }
@@ -705,10 +721,18 @@ impl FileBrowser {
     fn open(request: BrowseRequest, app: &AndroidApp) -> Self {
         let filter = match request.target {
             BrowseTarget::Cdrom => FileFilter::Extension("iso"),
-            BrowseTarget::HardDisk | BrowseTarget::NewDisk | BrowseTarget::NewFloppy => {
-                FileFilter::Extension("img")
-            }
-            BrowseTarget::Bios | BrowseTarget::VgaBios => FileFilter::Any,
+            BrowseTarget::NewDisk | BrowseTarget::NewFloppy => FileFilter::Extension("img"),
+            // An Arm board's disk may be an ISO as well as a raw image.
+            BrowseTarget::HardDisk
+            | BrowseTarget::Bios
+            | BrowseTarget::VgaBios
+            | BrowseTarget::Firmware
+            | BrowseTarget::FirmwareVars
+            | BrowseTarget::Kernel
+            | BrowseTarget::Initrd
+            | BrowseTarget::DeviceTree
+            | BrowseTarget::SymbolFile
+            | BrowseTarget::SourceFile => FileFilter::Any,
             BrowseTarget::RamDump => FileFilter::Extension("bin"),
         };
         let dir = request
@@ -759,7 +783,12 @@ impl FileBrowser {
         self.listing = Listing::of(&self.dir, self.filter);
     }
 
-    fn show(&mut self, ctx: &egui::Context, safe_rect: egui::Rect, app: &AndroidApp) -> BrowserOutcome {
+    fn show(
+        &mut self,
+        ctx: &egui::Context,
+        safe_rect: egui::Rect,
+        app: &AndroidApp,
+    ) -> BrowserOutcome {
         let focused = ctx.input(|input| input.focused);
         if focused && !self.focused {
             self.refresh(app);
@@ -1032,7 +1061,9 @@ fn apply_game_window(app: &AndroidApp, add: i32, clear: i32) -> jni::errors::Res
                 &controller,
                 jni::jni_str!("setSystemBarsBehavior"),
                 jni::jni_sig!("(I)V"),
-                &[jni::objects::JValue::Int(BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE)],
+                &[jni::objects::JValue::Int(
+                    BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE,
+                )],
             )?
             .v()?;
             let types = env.find_class(jni::jni_str!("android/view/WindowInsets$Type"))?;
@@ -1359,10 +1390,20 @@ fn exit_record(
         .call_method(end, jni::jni_str!("getStatus"), jni::jni_sig!("()I"), &[])?
         .i()?;
     let importance = env
-        .call_method(end, jni::jni_str!("getImportance"), jni::jni_sig!("()I"), &[])?
+        .call_method(
+            end,
+            jni::jni_str!("getImportance"),
+            jni::jni_sig!("()I"),
+            &[],
+        )?
         .i()?;
     let at = env
-        .call_method(end, jni::jni_str!("getTimestamp"), jni::jni_sig!("()J"), &[])?
+        .call_method(
+            end,
+            jni::jni_str!("getTimestamp"),
+            jni::jni_sig!("()J"),
+            &[],
+        )?
         .j()?;
     let resident = env
         .call_method(end, jni::jni_str!("getRss"), jni::jni_sig!("()J"), &[])?

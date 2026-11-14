@@ -46,10 +46,11 @@ anonymous `impl Trait` in public signatures: return types are named (`SerialTxDr
 (`MachineBuilder::tracer<U: Instrumentation>(self, tracer: U)`). No meaningless scalars where an
 enum speaks: `StopReason` says why a batch returned, where a `bool` could only say that it did.
 
-The timer wheel does not meet the last clause. `BxPcSystemC::register_timer`
-(`rusty_box/src/pc_system.rs`) is public and takes `continuous: bool, active: bool`, and its
-callers pass bare `false, false`. The target for `continuous` is `Repeat { Once, Periodic }`;
-it is not built.
+The timer wheel (`rusty_box/src/pc_system.rs`) says what its flags mean:
+`BxPcSystemC::register_timer` takes `Repeat { Once, Periodic }` (Bochs `continuous`) and
+`Activation { Active, Inactive }` (Bochs `active`), and every `activate_timer*` takes the
+`Repeat`, as does the machine's deferred `TimerRequest::Activate`. A device whose own mode
+decides names it with `Repeat::periodic_if`; the snapshot keeps the bit Bochs keeps.
 
 *Why:* names survive at call sites; anonymous shapes leak auto-traits implicitly and cannot be
 stored, documented, or diffed. *Scope:* the public surface. Internal choke points may use
@@ -62,8 +63,10 @@ a *value's constructibility*, but never variant or field presence on a public ty
 representations is carried by a type, never by an enum whose completeness depends on the
 build: `Emulator` declares one `cpus` field of type `cpu_store::MachineCpus<T>`, an alias that
 resolves to `OwnedCpus<T>` with `alloc` and to `BorrowedCpus<'static, T>` without it. The
-general form is a type parameter; for guest RAM that is the target `RamStore<B: RamBytes>`,
-which is not built.
+general form is a type parameter. Guest RAM deliberately is not one: its two backings, owned
+pages with `alloc` and a caller's buffer without, differ only in who frees the bytes, so they
+are the private `memory_stub::RamBacking` behind the one public `BxMemoryStubC`, whose shape
+is the same in every build.
 
 **In the tree:**
 
@@ -115,8 +118,9 @@ same commit.
 
 The end state is a target: `#![forbid(unsafe_code)]` on every library crate except the
 host-FFI leaf, with no_alloc placement delegated to the vetted `static_cell` crate, so that the
-one unavoidable `unsafe` lives outside this tree. Today three crates carry the `forbid`:
-`rusty_box_core`, `rusty_box_decoder` and `rusty_box_devices`. `static_cell` is not a
+one unavoidable `unsafe` lives outside this tree. Today five crates carry the `forbid`:
+`rusty_box_core`, `rusty_box_decoder`, `rusty_box_devices`, `rusty_box_aarch64` and
+`rusty_box_symbols`. `static_cell` is not a
 dependency. The leaf, `rusty_box_whp_sys`, is a permanent exception and is registered below.
 Four other scanned trees hold `unsafe` tokens:
 
@@ -133,9 +137,10 @@ leaf does, is the owner's call and is not decided here. This document declares n
 permanent; until that call is made, their tokens are held by their ratchet baselines, not by a
 registry entry.
 
-*Enforcement (mechanical):* the `doctrine ratchets` step of `cargo xtask ci` scans eight trees,
+*Enforcement (mechanical):* the `doctrine ratchets` step of `cargo xtask ci` scans ten trees,
 the `src` of `rusty_box`, `rusty_box_decoder`, `rusty_box_core`, `rusty_box_devices`,
-`rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_whp_engine` and `rusty_box_gui`. It fails when,
+`rusty_box_aarch64`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_whp_engine`,
+`rusty_box_gui` and `rusty_box_symbols`. It fails when,
 in any of them:
 
 - the `unsafe` tokens exceed that tree's entry in `UNSAFE_TOKEN_BASELINES`. The scan counts
@@ -214,7 +219,10 @@ transitions and witnessed runtime facts.
 
 *Enforcement:* a violating field or predicate is a defect to delete, not a pattern to extend;
 trybuild fixtures pin the shape (executing an instruction on a bare CPU without a machine
-does not compile: `rusty_box/tests/compile_fail/r2_bare_cpu_cannot_execute.rs`).
+does not compile: `rusty_box/tests/compile_fail/r2_bare_cpu_cannot_execute.rs`; neither does
+stepping a machine on an engine other than the interpreter through the shared `Machine` verbs,
+which a hypervisor machine would otherwise answer with a run-time refusal:
+`rusty_box/tests/compile_fail/r2_only_the_interpreter_is_a_machine.rs`).
 
 **In the tree:**
 
@@ -338,6 +346,32 @@ offset. The unit types in the tree:
 - `CpuMemoryPolicy` (`rusty_box/src/memory/mod.rs`);
 - `WindowOffset`, how far into a device's window an access landed
   (`rusty_box_devices/src/api.rs`);
+- `BxPhyAddress`, a guest-physical address (`rusty_box_devices/src/api.rs`, re-exported as
+  `rusty_box::config::BxPhyAddress`). Memory's whole surface takes it (`read_ram`/`write_ram`,
+  `load_RAM`/`load_ROM`, `read_physical_page`/`write_physical_page`, `host_mem_range`,
+  `get_host_mem_addr`, `dbg_fetch_mem`, the MMIO map and handler registration, the SMC stamp
+  table, `bx_guest_ram_span` and the PCI-hole translation), as do a device's declared windows
+  (`WindowDecl`), the local APIC's address decode (`is_selected`, `read`, `write`, its base),
+  DMA and the fw_cfg DMA descriptor. Its arithmetic is a position's: plus a distance is an
+  address, minus an address a distance; masking is by name (`page_base`, `page_offset`,
+  `masked`). Register offsets are not addresses: the local APIC's `read_aligned` and
+  `write_aligned` take a register offset (`u32`), the I/O APIC's handlers a `WindowOffset`,
+  and VGA memory names a byte by `VgaMemAt`, a window address or a plane offset;
+- `A20Mask`, the A20 gate's mask (`rusty_box/src/config.rs`): `OPEN`, `CLOSED`,
+  `of_gate`, applied to an address only through `apply`. Memory and the PC system hold it
+  typed; `bits` gives it to the CPU's own address arithmetic and to a snapshot;
+- `IoPort`, one of the 65 536 x86 I/O ports (`rusty_box_devices/src/api.rs`, re-exported as
+  `rusty_box::iodev::IoPort` and beside the instrumentation hooks). Every port-side signature
+  takes it: `PioDevice::pio_read`/`pio_write`, `PortDecl::port`, `BxDevicesC::inp`/`outp` and
+  the handler registration, each device's `read`/`write`, the CPU's `IN`/`OUT`/`INS`/`OUTS`
+  path, the TSS permission bitmap, the VMX I/O bitmaps and the SVM IOPM, and the `inp` hook
+  and `IoHookEvent::port`. A port comes into being only where one is decoded — an
+  instruction's immediate or `DX`, a WHP port exit, a device's own port constants, a BAR the
+  guest programmed — and leaves as a bare `u16` (`IoPort::get`) only where a number is what
+  is wanted: a device decoding its registers, a bitmap indexed by port, a VM-exit
+  qualification, a snapshot. Its arithmetic is the port space's own two operations,
+  `checked_add` (a window's base plus an offset) and `offset_from` (how far into a window an
+  access landed, a distance and therefore a `u16`); there is no `From<u16>` and no `Add`;
 - `VmInstant`, `VmDuration`, `HostInstant` and `ClockHz` (`rusty_box_core/src/time.rs`);
 - `Ips`, the emulated instructions per second in `EmulatorConfig::ips`, defaulting to
   `Ips::BOCHS_DEFAULT` = 50_000_000 (Bochs config.cc `cpu: ips`).
@@ -346,16 +380,70 @@ Adopted from vm-memory/vm-device: position − position yields a raw *distance* 
 another position. The strongest form makes a conversion function the *only* path between unit
 domains, so an unconverted access is a compile error, not a review catch.
 
-Target design, not built: the port space gets its own `u16`-backed type (a port is a bare
-`u16` today, as in `PioDevice::pio_read(&mut self, port: u16, …)`), and SVGA banking becomes
-`MemoryWindow::translate(WindowOffset) -> Option<VramOffset>`. Neither a port type nor
-`MemoryWindow` nor `VramOffset` exists in the tree.
+SVGA banking goes through `MemoryWindow::translate(WindowOffset) -> Option<VramOffset>`
+(`rusty_box_devices/src/display/vga.rs`): an offset into the `A0000-BFFFF` aperture becomes
+a position in video memory only there, `None` outside the window, where Bochs reads 0xFF and
+drops a write. `VramOffset::banked` adds a bank — the VGA core's VBE bank (`ext_offset`) on
+the planar path, the GeForce's `bank_base[0]` behind its extended aperture — and nothing else
+turns a window offset into a video-memory one. The linear framebuffer's chain-4 path names its
+`VramOffset` directly, since Bochs reaches `bx_vgacore_c::mem_read` there below the window.
+
+Inside the x86 CPU every physical address is a `BxPhyAddress` too: a TLB entry's page frame,
+the instruction cache's tags and the SMC stamp table, every translation's result (the walks,
+the EPT walk, the debugger's walk), the physical accessors (`mem_read_*`, `mem_write_*`, the
+page-walk readers and writers), the fetch and stack pages, the read-modify-write addresses,
+the VMCB pointer and the SVM permission-map bases, the MONITOR address, and the instrumentation
+events that carry one (`LinAccess::phy`, `PhyAccess::phy`, `MwaitEvent::addr`, `clflush`). A
+page walk's arithmetic on raw table entries stays numeric; an address is formed from it where
+the walk reads a table or returns its result, and a frame plus its offset is `at_page_offset`
+(Bochs `ppf | pageOffset`). VMCS fields hold the numbers a guest wrote; they become addresses
+where they are used.
+
+Every linear address inside the x86 CPU is a `BxLinAddress` (`rusty_box/src/config.rs`): a
+segment's or descriptor table's base (`segment_base()`, `gdtr.base`, `idtr.base`), what
+`get_laddr`/`get_laddr32`/`get_laddr64` and the `agen_*` checks form from a base and an
+offset, every linear accessor and translation input (`read_linear_*`, `system_read_*`, the
+`translate_*` walks, the RMW preparers), a TLB entry's tag, `INVLPG`'s operand, the EPT
+violation's guest linear address (an `Option`, not an address paired with a validity flag),
+and the instrumentation events that carry one (`LinAccess::lin`, `MemUnmapped::laddr`,
+`MemPermViolation::laddr`, `TlbCntrl::Invlpg`, `clflush`). The CPU's A20 mask is an
+`A20Mask`, and a linear address with paging off reaches memory through `unpaged`. A value
+that is a register's or a data word's stays a number even where it equals an address: the
+SSP and the shadow stack's tokens, a linear instruction pointer pushed as data, an MSR's
+value, a VMCS, VMCB or SMRAM field. It becomes an address where it is used as one.
+
+The emulator's public surface carries the same two types. The physical accessors
+(`mem_read`/`mem_write` and their typed helpers, `mem_fill`, `mem_protect`,
+`read_phys_dword`), the host MMIO registry (`mmio_map`/`mmio_unmap`, and the address its
+callbacks receive), `RamOffset`'s conversions and `dbg_fetch_mem` take a `BxPhyAddress`; the
+linear accessors (`virt_read`/`virt_write` and their helpers, `virt_fill`) and the
+debugger's walks (`dbg_xlate_linear2phy`, `_in`, `dbg_xlate_vmx_guest_linear2phy`) take a
+`BxLinAddress`, and a translation returns a `BxPhyAddress`. What the instrumentation and
+debugger views report is typed the same way: `SegmentBases`, `DescriptorTable::base`,
+`PageMapping::{linear, physical}`, `LinearRange`, `VmxGuest::vmcs`, `MemHookEvent`,
+`DtlbInfo::{lpf, ppf}` and `SegmentInfo::base`. A register's value stays a number there too
+(`CpuSnapshot::rip`, `kernel_gs_base`, `VmxGuest::cr3`, the EPT pointer).
+
+An offset within a segment — what the SDM calls the effective address — is a `BxEffAddress`
+(`rusty_box/src/config.rs`). `resolve_addr` and `resolve_addr64` return one (Bochs
+`BX_CPU_RESOLVE_ADDR`; `resolve_addr32` keeps Bochs `BxResolve32`'s `u32`), every
+`read_virtual_*`/`write_virtual_*`/`read_rmw_virtual_*` accessor and `v_*` dispatcher takes
+one with its segment, and `get_laddr`/`get_laddr32`/`get_laddr64` and `agen_read32`/
+`agen_write32` are where it becomes a `BxLinAddress`. The 32-bit accessors take the same type
+and keep its low 32 bits (`low32`), as Bochs's `Bit32u offset` parameters do; the segment
+limit checks compare that number. An address size's wrap is named (`masked`, Bochs
+`i->asize_mask()`); there is no `+`, so every advance is a `wrapping_add`. A register's value
+becomes an offset where it is used as one: a string instruction's SI/DI, a direct-offset
+`MOV`'s immediate, `XLAT`'s BX + AL, the VSIB element offsets. The stack helpers
+(`stack_read_*`/`stack_write_*`, both widths) take the stack pointer's value and are where
+it becomes an SS offset. An offset that leaves as a number is a register's or a VMCS field's:
+`LEA`'s result, the FPU data pointer, a VMX exit qualification.
 
 **RAM offsets and allocation offsets** are the pair easiest to mix up, because both are
 `usize` byte offsets and they are equal whenever residency is full.
 
 - A **RAM offset** counts from the start of guest RAM. `bx_guest_ram_span`
-  (`rusty_box/src/memory/memory_rusty_box.rs`) takes a guest-physical address (`u64`) and
+  (`rusty_box/src/memory/memory_rusty_box.rs`) takes a guest-physical address (`BxPhyAddress`) and
   returns a span of RAM offsets (`Option<Range<usize>>`), skipping the PCI hole.
 - An **allocation offset** counts from the start of the one allocation that holds guest RAM,
   the ROM image and the bogus page. When residency is partial a guest block may sit in a
@@ -425,8 +513,8 @@ fn read_ram_dword_le(stub: &mut BxMemoryStubC, gpa: BxPhyAddress) -> Option<u32>
 ## R5 — One choke point per hazard
 
 Every guarded hazard has exactly one code path through its guard: `ExecCtx` and `PcIo`
-assembly, ISA gating (applied at icache fill), SMC stamping, and — as a target, with R4's
-`MemoryWindow` — banking translation. Adding a second path to a choke-pointed hazard is a
+assembly, ISA gating (applied at icache fill), SMC stamping, and R4's `MemoryWindow` —
+banking translation. Adding a second path to a choke-pointed hazard is a
 defect even if it is correct today. Closed dispatch sets are exhaustive `match`es over enums
 *without* `#[non_exhaustive]`, so adding a variant breaks every site the compiler can see —
 that is the feature. (Validated in production by Firecracker's bus history: their closed-enum
@@ -681,8 +769,9 @@ recalled: a whole-word search for `dyn` over the `src` tree of every workspace c
 - `rusty_box_gui/src`: 5, all code, all below.
 - `rusty_box_devices/src`: 4. Two are code (`DeviceCtx`, below); two are comments, in
   `api.rs` and `display/card.rs`.
+- `rusty_box_aarch64/src`: 2, code, both `Error::source` signatures, below.
 - `rusty_box_decoder/src` and `rusty_box_whp_engine/src`: 1 each, code, below.
-- `rusty_box_core`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_bximage`, `xtask`, and
+- `rusty_box_core`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_bximage`, `rusty_box_symbols`, `xtask`, and
   the three crates under `examples/`: none.
 
 Integration tests, benches and example programs (the `tests/`, `benches/` and `examples/`
@@ -748,7 +837,8 @@ not stored closures.
   file-input change handler (`WebFilePicker`): `wasm_bindgen::closure::Closure` names its
   callback by a `dyn` trait object.
 - `Option<&(dyn core::error::Error + 'static)>`, the return type of `core::error::Error::source`,
-  implemented by `DecodeError` (`rusty_box_decoder/src/error.rs`).
+  implemented by `DecodeError` (`rusty_box_decoder/src/error.rs`) and by `BuildError` and
+  `MemoryError` (`rusty_box_aarch64/src/machine.rs`).
 
 **Not erasure, but exempted from R0 by name:**
 

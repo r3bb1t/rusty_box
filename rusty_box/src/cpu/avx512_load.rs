@@ -28,10 +28,9 @@
 //! word-granularity broadcasts, the non-broadcast masked loads) arrives with
 //! the handler families that name them, ported from `load.cc` at that point.
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-    xmm::BxPackedZmmRegister,
-};
+use super::decoder::{BxSegregs, Instruction};
+use super::xmm::BxPackedZmmRegister;
+use crate::config::BxEffAddress;
 
 /// Bochs xmm.h `BYTE_ELEMENTS` — byte lanes for a vector length.
 ///
@@ -113,9 +112,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn load_opmask32(&self, instr: &Instruction) -> u64 {
         let k = instr.opmask();
         if k == 0 {
-            0xffff_ffff
+            0xFFFF_FFFF
         } else {
-            self.opmask_rrx(k as usize) & 0xffff_ffff
+            self.opmask_rrx(k as usize) & 0xFFFF_FFFF
         }
     }
 
@@ -124,9 +123,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn load_opmask16(&self, instr: &Instruction) -> u64 {
         let k = instr.opmask();
         if k == 0 {
-            0xffff
+            0xFFFF
         } else {
-            self.opmask_rrx(k as usize) & 0xffff
+            self.opmask_rrx(k as usize) & 0xFFFF
         }
     }
 
@@ -135,9 +134,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn load_opmask8(&self, instr: &Instruction) -> u64 {
         let k = instr.opmask();
         if k == 0 {
-            0xff
+            0xFF
         } else {
-            self.opmask_rrx(k as usize) & 0xff
+            self.opmask_rrx(k as usize) & 0xFF
         }
     }
 
@@ -171,7 +170,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_load8(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &mut BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -181,7 +180,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(n as u64)) {
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(n as u64).get())
+                {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
             }
@@ -201,7 +202,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_load16(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &mut BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -211,7 +212,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(2 * n as u64))
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(2 * n as u64).get())
                 {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
@@ -235,7 +237,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_load32(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &mut BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -245,7 +247,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(4 * n as u64))
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(4 * n as u64).get())
                 {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
@@ -269,7 +272,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_load64(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &mut BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -279,7 +282,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(8 * n as u64))
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(8 * n as u64).get())
                 {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
@@ -314,7 +318,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_store32(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -324,7 +328,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(4 * n as u64))
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(4 * n as u64).get())
                 {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
@@ -351,7 +356,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_store64(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -361,7 +366,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(8 * n as u64))
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(8 * n as u64).get())
                 {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
@@ -984,7 +990,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn evex_load_full_width(
         &mut self,
         _instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         seg: BxSegregs,
         vl: u8,
     ) -> super::Result<BxPackedZmmRegister> {
@@ -1000,7 +1006,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn evex_load_half_width(
         &mut self,
         _instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         seg: BxSegregs,
         vl: u8,
     ) -> super::Result<BxPackedZmmRegister> {
@@ -1022,7 +1028,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_store8(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -1032,7 +1038,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(n as u64)) {
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(n as u64).get())
+                {
                     return self.exception(Self::seg_exception(seg), 0);
                 }
             }
@@ -1056,7 +1064,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn avx_masked_store16(
         &mut self,
         instr: &Instruction,
-        eaddr: u64,
+        eaddr: BxEffAddress,
         op: &BxPackedZmmRegister,
         mask: u64,
     ) -> super::Result<()> {
@@ -1066,7 +1074,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if instr.as64_l() != 0 {
             let laddr = self.get_laddr64(seg as usize, eaddr);
             for n in 0..elements {
-                if (mask & (1u64 << n)) != 0 && !self.is_canonical(laddr.wrapping_add(2 * n as u64))
+                if (mask & (1u64 << n)) != 0
+                    && !self.is_canonical(laddr.wrapping_add(2 * n as u64).get())
                 {
                     return self.exception(Self::seg_exception(seg), 0);
                 }

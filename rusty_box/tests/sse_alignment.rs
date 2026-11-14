@@ -10,6 +10,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::decoder::X86Feature;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
@@ -38,7 +39,10 @@ fn sse_emulator_with(cpu_params: BxParams) -> Box<Emulator> {
         ..EmulatorConfig::default()
     };
     let mut emu = Emulator::new_with_mode(config, CpuSetupMode::FlatLong64).expect("emulator");
-    emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | CR4_OSFXSR | CR4_OSXSAVE);
+    emu.reg_write(
+        X86Reg::Cr4,
+        emu.reg_read(X86Reg::Cr4) | CR4_OSFXSR | CR4_OSXSAVE,
+    );
     emu.reg_write(X86Reg::IdtrBase, IDT);
     emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
     emu.reg_write(X86Reg::Rsp, STACK_TOP);
@@ -48,9 +52,12 @@ fn sse_emulator_with(cpu_params: BxParams) -> Box<Emulator> {
     gate[5] = 0x8E;
     gate[6..8].copy_from_slice(&((GP_HANDLER >> 16) as u16).to_le_bytes());
     gate[8..12].copy_from_slice(&((GP_HANDLER >> 32) as u32).to_le_bytes());
-    emu.mem_write(IDT + 13 * 16, &gate).expect("idt");
-    emu.mem_write(GP_HANDLER, &[0xF4]).expect("handler");
-    emu.mem_write(DATA, &[0x11; 32]).expect("data");
+    emu.mem_write(BxPhyAddress::new(IDT + 13 * 16), &gate)
+        .expect("idt");
+    emu.mem_write(BxPhyAddress::new(GP_HANDLER), &[0xF4])
+        .expect("handler");
+    emu.mem_write(BxPhyAddress::new(DATA), &[0x11; 32])
+        .expect("data");
     emu
 }
 
@@ -94,7 +101,8 @@ fn run_on(emu: &mut Emulator, prologue: &[u8], instruction: &[u8]) -> Ended {
     let mut image = [prologue, instruction].concat();
     let end = CODE + image.len() as u64;
     image.extend_from_slice(&[0xEB, 0xFE]);
-    emu.mem_write(CODE, &image).expect("write code");
+    emu.mem_write(BxPhyAddress::new(CODE), &image)
+        .expect("write code");
     emu.emu_start(CODE, Some(end), None, Some(64))
         .expect("execute");
     let rip = emu.cpu().rip();
@@ -144,7 +152,12 @@ fn legacy_packed_float_operands_must_be_aligned() {
 fn a_string_compare_operand_may_be_misaligned() {
     on_big_stack(|| {
         // pcmpistri xmm0, [m128], 0: 66 0F 3A 63 /r ib
-        let pcmpistri = [&[0x66, 0x0F, 0x3A, 0x63][..], &absolute(0, MISALIGNED), &[0x00]].concat();
+        let pcmpistri = [
+            &[0x66, 0x0F, 0x3A, 0x63][..],
+            &absolute(0, MISALIGNED),
+            &[0x00],
+        ]
+        .concat();
         assert_eq!(run(&[], &pcmpistri), Ended::Retired);
     });
 }
@@ -186,8 +199,11 @@ fn mxcsr_mm_lets_a_legacy_operand_be_misaligned() {
         );
 
         let mut emu = misaligned_sse();
-        emu.mem_write(MXCSR_IMAGE, &(MXCSR_RESET | MXCSR_MM).to_le_bytes())
-            .expect("mxcsr image");
+        emu.mem_write(
+            BxPhyAddress::new(MXCSR_IMAGE),
+            &(MXCSR_RESET | MXCSR_MM).to_le_bytes(),
+        )
+        .expect("mxcsr image");
         assert_eq!(run_on(&mut emu, &ldmxcsr, &paddb), Ended::Retired);
         assert_eq!(
             emu.reg_read(X86Reg::Mxcsr),

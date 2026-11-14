@@ -211,14 +211,28 @@ pub(super) fn xmm_pmaxsd(op1: &mut BxPackedXmmRegister, op2: &BxPackedXmmRegiste
 /// Bochs simd_compare.h `xmm_pcmpeqq`.
 pub(super) fn xmm_pcmpeqq(op1: &mut BxPackedXmmRegister, op2: &BxPackedXmmRegister) {
     for n in 0..2 {
-        op1.set_xmm64u(n, if op1.xmm64u(n) == op2.xmm64u(n) { u64::MAX } else { 0 });
+        op1.set_xmm64u(
+            n,
+            if op1.xmm64u(n) == op2.xmm64u(n) {
+                u64::MAX
+            } else {
+                0
+            },
+        );
     }
 }
 
 /// Bochs simd_compare.h `xmm_pcmpgtq`: signed greater-than.
 pub(super) fn xmm_pcmpgtq(op1: &mut BxPackedXmmRegister, op2: &BxPackedXmmRegister) {
     for n in 0..2 {
-        op1.set_xmm64u(n, if op1.xmm64s(n) > op2.xmm64s(n) { u64::MAX } else { 0 });
+        op1.set_xmm64u(
+            n,
+            if op1.xmm64s(n) > op2.xmm64s(n) {
+                u64::MAX
+            } else {
+                0
+            },
+        );
     }
 }
 

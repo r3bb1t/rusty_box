@@ -2,11 +2,9 @@
 //!
 //! Based on Bochs mult8.cc
 
-use super::{
-    cpu::{Exception},
-    decoder::Instruction,
-    error::Result,
-};
+use super::cpu::Exception;
+use super::decoder::Instruction;
+use super::error::Result;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================

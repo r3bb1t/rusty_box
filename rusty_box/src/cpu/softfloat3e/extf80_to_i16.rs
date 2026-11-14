@@ -14,7 +14,10 @@ pub(in crate::cpu) fn extf80_to_i16(a: ExtFloat80, status: &mut SoftFloatStatus)
     val as i16
 }
 
-pub(in crate::cpu) fn extf80_to_i16_round_to_zero(a: ExtFloat80, status: &mut SoftFloatStatus) -> i16 {
+pub(in crate::cpu) fn extf80_to_i16_round_to_zero(
+    a: ExtFloat80,
+    status: &mut SoftFloatStatus,
+) -> i16 {
     let val = extf80_to_i32_round_to_zero(a, status);
     if !(-32768..=32767).contains(&val) {
         softfloat_raise_flags(status, FLAG_INVALID);

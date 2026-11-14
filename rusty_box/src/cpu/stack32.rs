@@ -2,7 +2,10 @@
 //!
 //! Based on Bochs stack32.cc
 
-use super::{cpu::BxCpuC, decoder::Instruction, eflags::EFlags};
+use super::cpu::BxCpuC;
+use super::decoder::Instruction;
+use super::eflags::EFlags;
+use crate::config::BxEffAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -357,7 +360,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // ENTER finishes with memory write check on the final stack pointer
             // the memory is touched but no write actually occurs
             // emulate it by doing RMW read access from SS:ESP
-            let esp = self.esp();
+            let esp = BxEffAddress::from_u32(self.esp());
             self.v_read_rmw_dword(super::decoder::BxSegregs::Ss, esp)?;
         } else {
             let mut bp = self.bp() as u32;
@@ -384,7 +387,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // ENTER finishes with memory write check on the final stack pointer
             // the memory is touched but no write actually occurs
             // emulate it by doing RMW read access from SS:SP
-            let sp = self.sp() as u32;
+            let sp = BxEffAddress::from_u16(self.sp());
             self.v_read_rmw_dword(super::decoder::BxSegregs::Ss, sp)?;
         }
 

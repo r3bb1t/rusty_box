@@ -7,7 +7,11 @@ use super::softfloat::*;
 use super::softfloat_types::*;
 use super::specialize::*;
 
-pub(in crate::cpu) fn extf80_mul(a: ExtFloat80, b: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
+pub(in crate::cpu) fn extf80_mul(
+    a: ExtFloat80,
+    b: ExtFloat80,
+    status: &mut SoftFloatStatus,
+) -> ExtFloat80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
         softfloat_raise_flags(status, FLAG_INVALID);

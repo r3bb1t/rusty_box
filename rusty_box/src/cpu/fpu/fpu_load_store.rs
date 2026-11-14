@@ -266,13 +266,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut lo8_tmp = lo8;
 
         for _ in 0..16 {
-            val64 += ((lo8_tmp & 0x0f) as i64) * scale;
+            val64 += ((lo8_tmp & 0x0F) as i64) * scale;
             lo8_tmp >>= 4;
             scale *= 10;
         }
 
-        val64 += ((hi2 & 0x0f) as i64) * scale;
-        val64 += (((hi2 >> 4) & 0x0f) as i64) * scale * 10;
+        val64 += ((hi2 & 0x0F) as i64) * scale;
+        val64 += (((hi2 >> 4) & 0x0F) as i64) * scale * 10;
 
         let mut result = i64_to_extf80(val64);
         if (hi2 & 0x8000) != 0 {
@@ -683,7 +683,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
             let reg = self.read_fpu_reg(0);
-            let mut save_val = extf80_to_i64(reg, status.softfloat_rounding_mode, true, &mut status);
+            let mut save_val =
+                extf80_to_i64(reg, status.softfloat_rounding_mode, true, &mut status);
 
             let sign = extf80_sign(reg);
             if sign {

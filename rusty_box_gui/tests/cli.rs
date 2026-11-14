@@ -175,7 +175,10 @@ fn launch_from(dir: &std::path::Path) -> String {
         .current_dir(dir)
         .output()
         .expect("run rusty_box_gui");
-    assert!(!output.status.success(), "the launcher started without a BIOS");
+    assert!(
+        !output.status.success(),
+        "the launcher started without a BIOS"
+    );
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
@@ -253,7 +256,10 @@ fn a_run_flag_without_a_machine_is_refused_before_the_shell_opens() {
         .wait_with_output()
         .expect("collect the launcher's output");
 
-    assert!(!status.success(), "the launcher opened with a machine-less run flag");
+    assert!(
+        !status.success(),
+        "the launcher opened with a machine-less run flag"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("`--engine`, `--log-level` without a machine"),

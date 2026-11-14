@@ -10,6 +10,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -61,7 +62,8 @@ fn opmask_emulator() -> Box<Emulator> {
     emu.reg_write(X86Reg::Rax, 0xE7);
     emu.reg_write(X86Reg::Rcx, 0);
     emu.reg_write(X86Reg::Rdx, 0);
-    emu.mem_write(CODE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+    emu.mem_write(BxPhyAddress::new(CODE), &[0x0F, 0x01, 0xD1])
+        .expect("xsetbv");
     emu.emu_start(CODE, Some(CODE + 3), None, Some(1))
         .expect("enable AVX-512 state");
 
@@ -72,9 +74,10 @@ fn opmask_emulator() -> Box<Emulator> {
     gate[5] = 0x8E;
     gate[6..8].copy_from_slice(&((UD_HANDLER >> 16) as u16).to_le_bytes());
     gate[8..12].copy_from_slice(&((UD_HANDLER >> 32) as u32).to_le_bytes());
-    emu.mem_write(IDT_BASE + UD_VECTOR * 16, &gate)
+    emu.mem_write(BxPhyAddress::new(IDT_BASE + UD_VECTOR * 16), &gate)
         .expect("#UD gate");
-    emu.mem_write(UD_HANDLER, &[0xF4]).expect("#UD handler");
+    emu.mem_write(BxPhyAddress::new(UD_HANDLER), &[0xF4])
+        .expect("#UD handler");
     emu.reg_write(X86Reg::IdtrBase, IDT_BASE);
     emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
     emu.reg_write(X86Reg::Rsp, STACK_TOP);
@@ -97,7 +100,8 @@ fn kshift_register_form_writes_the_shifted_opmask() {
                 let code = kshift(op, w1, 0xCA, 1);
                 let mut image = code.to_vec();
                 image.extend_from_slice(&[0xEB, 0xFE]);
-                emu.mem_write(CODE, &image).expect("write code");
+                emu.mem_write(BxPhyAddress::new(CODE), &image)
+                    .expect("write code");
                 let end = CODE + code.len() as u64;
                 emu.emu_start(CODE, Some(end), None, Some(4))
                     .expect("execute");
@@ -138,12 +142,14 @@ fn kshift_memory_form_raises_ud() {
                 emu.reg_write(X86Reg::Opmask1, K_POISON);
                 // A readable, mapped operand holding a shiftable value, so an
                 // instruction that loaded it would change k1 visibly.
-                emu.mem_write(DATA, &K_SRC.to_le_bytes()).expect("operand");
+                emu.mem_write(BxPhyAddress::new(DATA), &K_SRC.to_le_bytes())
+                    .expect("operand");
                 emu.reg_write(X86Reg::Rax, DATA);
 
                 // ModRM 0x08: mod = 00, reg = 001 (k1), rm = 000 ([rax]).
                 let code = kshift(op, w1, 0x08, 1);
-                emu.mem_write(CODE, &code).expect("write code");
+                emu.mem_write(BxPhyAddress::new(CODE), &code)
+                    .expect("write code");
                 emu.emu_start(CODE, Some(CODE + code.len() as u64), None, Some(1))
                     .expect("execute");
 
@@ -159,7 +165,7 @@ fn kshift_memory_form_raises_ud() {
                     "{name}: a long-mode #UD frame is five qwords, no error code"
                 );
                 let mut pushed_rip = [0u8; 8];
-                emu.mem_read(STACK_TOP - 40, &mut pushed_rip)
+                emu.mem_read(BxPhyAddress::new(STACK_TOP - 40), &mut pushed_rip)
                     .expect("read frame");
                 assert_eq!(
                     u64::from_le_bytes(pushed_rip),

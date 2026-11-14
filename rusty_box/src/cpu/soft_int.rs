@@ -4,24 +4,17 @@
 //!
 //! Implements INT, INT3, INTO, IRET instructions
 
-use super::{
-    cpu::{BxCpuC, CpuActivityState, Exception, BX_ASYNC_EVENT_STOP_TRACE},
-    cpuid::BxCpuIdTrait,
-    decoder::{BxSegregs, Instruction},
-    descriptor::BxSelector,
-    eflags::EFlags,
-    segment_ctrl_pro::parse_selector,
-};
+use super::cpu::{BX_ASYNC_EVENT_STOP_TRACE, BxCpuC, CpuActivityState, Exception};
+use super::cpuid::BxCpuIdTrait;
+use super::decoder::{BxSegregs, Instruction};
+use super::descriptor::BxSelector;
+use super::eflags::EFlags;
+use super::segment_ctrl_pro::parse_selector;
+use crate::config::BxLinAddress;
 
 /// `CPUID.7:0:EBX` — AVX512F, DQ, IFMA, PF, ER, CD, BW and VL.
-const CPUID_LEAF7_EBX_AVX512: u32 = (1 << 16)
-    | (1 << 17)
-    | (1 << 21)
-    | (1 << 26)
-    | (1 << 27)
-    | (1 << 28)
-    | (1 << 30)
-    | (1 << 31);
+const CPUID_LEAF7_EBX_AVX512: u32 =
+    (1 << 16) | (1 << 17) | (1 << 21) | (1 << 26) | (1 << 27) | (1 << 28) | (1 << 30) | (1 << 31);
 /// `CPUID.7:0:ECX` — VBMI, VBMI2, VNNI, BITALG and VPOPCNTDQ.
 const CPUID_LEAF7_ECX_AVX512: u32 = (1 << 1) | (1 << 6) | (1 << 11) | (1 << 12) | (1 << 14);
 /// `CPUID.7:0:EDX` — 4VNNIW, 4FMAPS, VP2INTERSECT and FP16.
@@ -77,6 +70,19 @@ pub(crate) fn bochs_topology_shift(logical_count: u32) -> u32 {
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
+    const XSAVE_COMPONENTS: [(u32, u32); 10] = [
+        (160, 0),     // 0: FPU (x87)
+        (256, 160),   // 1: SSE (XMM)
+        (256, 576),   // 2: YMM (AVX)
+        (0, 0),       // 3: BNDREGS (deprecated MPX)
+        (0, 0),       // 4: BNDCFG (deprecated MPX)
+        (64, 1088),   // 5: OPMASK (AVX-512)
+        (512, 1152),  // 6: ZMM_HI256 (AVX-512)
+        (1024, 1664), // 7: HI_ZMM (AVX-512)
+        (0, 0),       // 8: PT (Processor Trace, not implemented)
+        (8, 2688),    // 9: PKRU
+    ];
+
     // =========================================================================
     // Unified interrupt dispatch — matches Bochs interrupt() in exception.cc
     // =========================================================================
@@ -207,14 +213,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         let vector = instr.ib();
         tracing::trace!("INT {:#04x}", vector);
-        self.interrupt(vector, super::exception::InterruptType::SoftwareInterrupt, false, 0)
+        self.interrupt(
+            vector,
+            super::exception::InterruptType::SoftwareInterrupt,
+            false,
+            0,
+        )
     }
 
     /// INT3 - Breakpoint interrupt (vector 3)
     /// Based on Bochs INT3 in soft_int.cc
     pub fn int3(&mut self, _instr: &Instruction) -> super::Result<()> {
         tracing::trace!("INT3 (breakpoint)");
-        self.interrupt(3, super::exception::InterruptType::SoftwareException, false, 0)
+        self.interrupt(
+            3,
+            super::exception::InterruptType::SoftwareException,
+            false,
+            0,
+        )
     }
 
     /// INTO - Interrupt on overflow (vector 4, only if OF=1)
@@ -228,7 +244,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn into_overflow(&mut self, _instr: &Instruction) -> super::Result<()> {
         if self.get_of() {
             tracing::trace!("INTO: overflow detected, calling INT 4");
-            return self.interrupt(4, super::exception::InterruptType::SoftwareException, false, 0);
+            return self.interrupt(
+                4,
+                super::exception::InterruptType::SoftwareException,
+                false,
+                0,
+            );
         }
         Ok(())
     }
@@ -246,7 +267,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // A privileged software interrupt skips the gate's DPL check, and
         // Bochs sets EXT=1 before calling interrupt() for INT1.
         self.ext = true;
-        self.interrupt(1, super::exception::InterruptType::PrivilegedSoftwareInterrupt, false, 0)
+        self.interrupt(
+            1,
+            super::exception::InterruptType::PrivilegedSoftwareInterrupt,
+            false,
+            0,
+        )
     }
 
     // =========================================================================
@@ -277,7 +303,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Read lower and upper bounds from memory (2 words)
         let bound_min = self.v_read_word(seg, eaddr)? as i16;
-        let bound_max = self.v_read_word(seg, eaddr.wrapping_add(2) & asize_mask)? as i16;
+        let bound_max = self.v_read_word(seg, eaddr.wrapping_add(2).masked(asize_mask))? as i16;
 
         // Check if value is outside bounds
         if op1_16 < bound_min || op1_16 > bound_max {
@@ -317,7 +343,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Read lower and upper bounds from memory (2 dwords)
         let bound_min = self.v_read_dword(seg, eaddr)? as i32;
-        let bound_max = self.v_read_dword(seg, eaddr.wrapping_add(4) & asize_mask)? as i32;
+        let bound_max = self.v_read_dword(seg, eaddr.wrapping_add(4).masked(asize_mask))? as i32;
 
         // Check if value is outside bounds
         if op1_32 < bound_min || op1_32 > bound_max {
@@ -384,7 +410,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let cf = new_flags & 1;
                 tracing::trace!(
                     "IRET from BIOS: CS:IP={:04x}:{:04x} → {:04x}:{:04x} FLAGS={:04x} CF={} AH={:#04x} icount={}",
-                    cs_val, self.rip() as u16, new_cs, new_ip, new_flags, cf, self.ah(), self.icount
+                    cs_val,
+                    self.rip() as u16,
+                    new_cs,
+                    new_ip,
+                    new_flags,
+                    cf,
+                    self.ah(),
+                    self.icount
                 );
             }
         }
@@ -510,35 +543,35 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // Must specify global (TI=0)
             if link_selector.ti != 0 {
                 tracing::error!("iret: link selector.ti=1");
-                return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+                return self.exception(Exception::Ts, raw_link_selector & 0xFFFC);
             }
 
             let (dword1, dword2) = match self.fetch_raw_descriptor(&link_selector) {
                 Ok(v) => v,
                 Err(_) => {
-                    return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+                    return self.exception(Exception::Ts, raw_link_selector & 0xFFFC);
                 }
             };
             let tss_descriptor = match self.parse_descriptor(dword1, dword2) {
                 Ok(v) => v,
                 Err(_) => {
-                    return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+                    return self.exception(Exception::Ts, raw_link_selector & 0xFFFC);
                 }
             };
 
             // Must be a busy TSS
             if tss_descriptor.valid == 0 || tss_descriptor.segment {
                 tracing::error!("iret: TSS selector points to bad TSS");
-                return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+                return self.exception(Exception::Ts, raw_link_selector & 0xFFFC);
             }
             if tss_descriptor.r#type != 0x3 && tss_descriptor.r#type != 0xB {
                 // Must be busy 286 (0x3) or busy 386 (0xB)
                 tracing::error!("iret: TSS not busy type={:#x}", tss_descriptor.r#type);
-                return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+                return self.exception(Exception::Ts, raw_link_selector & 0xFFFC);
             }
             if !tss_descriptor.p {
                 tracing::error!("iret: task descriptor.p == 0");
-                return self.exception(Exception::Np, raw_link_selector & 0xfffc);
+                return self.exception(Exception::Np, raw_link_selector & 0xFFFC);
             }
 
             // Switch tasks (without nesting) to TSS specified by back link selector
@@ -584,7 +617,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         // Return CS selector must be non-null
-        if (raw_cs_raw & 0xfffc) == 0 {
+        if (raw_cs_raw & 0xFFFC) == 0 {
             tracing::error!(
                 "iret_protected: return CS selector null, ESP={:#x} icount={}",
                 temp_esp,
@@ -599,11 +632,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xFFFC),
         };
         let mut cs_descriptor = match self.parse_descriptor(dword1, dword2) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xFFFC),
         };
 
         // Return CS selector RPL must be >= CPL
@@ -614,7 +647,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 cs_selector.rpl,
                 cpl
             );
-            return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, raw_cs_raw & 0xFFFC);
         }
 
         // Validate code-segment descriptor
@@ -654,8 +687,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
             // Bochs iret.cc iret_protected \u2014 same-priv shadow-stack restore.
             if self.shadow_stack_enabled(cpl) {
-                let return_lip =
-                    (cs_descriptor.u.segment_base().wrapping_add(new_eip as u64)) & 0xFFFF_FFFF;
+                let return_lip = (cs_descriptor
+                    .u
+                    .segment_base()
+                    .get()
+                    .wrapping_add(new_eip as u64))
+                    & 0xFFFF_FFFF;
                 let prev_ssp = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
                 self.set_ssp(prev_ssp);
             }
@@ -692,7 +729,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let new_esp = self.stack_read_dword(temp_esp + 12)?;
             let raw_ss_raw = self.stack_read_dword(temp_esp + 16)? as u16;
 
-            if (raw_ss_raw & 0xfffc) == 0 {
+            if (raw_ss_raw & 0xFFFC) == 0 {
                 tracing::error!("iret_protected: SS selector null");
                 return self.exception(Exception::Gp, 0);
             }
@@ -702,16 +739,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
             if ss_selector.rpl != cs_selector.rpl {
                 tracing::error!("iret_protected: SS.rpl != CS.rpl");
-                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC);
             }
 
             let (ss_dw1, ss_dw2) = match self.fetch_raw_descriptor(&ss_selector) {
                 Ok(v) => v,
-                Err(_) => return self.exception(Exception::Gp, raw_ss_raw & 0xfffc),
+                Err(_) => return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC),
             };
             let mut ss_descriptor = match self.parse_descriptor(ss_dw1, ss_dw2) {
                 Ok(v) => v,
-                Err(_) => return self.exception(Exception::Gp, raw_ss_raw & 0xfffc),
+                Err(_) => return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC),
             };
 
             // SS must be a writable data segment
@@ -722,15 +759,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // not writable
             {
                 tracing::error!("iret_protected: SS not writable data segment");
-                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC);
             }
             if ss_descriptor.dpl != cs_selector.rpl {
                 tracing::error!("iret_protected: SS.dpl != CS.rpl");
-                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC);
             }
             if !ss_descriptor.p {
                 tracing::error!("iret_protected: SS not present");
-                return self.exception(Exception::Np, raw_ss_raw & 0xfffc);
+                return self.exception(Exception::Np, raw_ss_raw & 0xFFFC);
             }
 
             // Bochs iret.cc iret_protected \u2014 outer-priv shadow-stack restore.
@@ -744,8 +781,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
                 }
                 if cs_selector.rpl != 3 {
-                    let return_lip =
-                        (cs_descriptor.u.segment_base().wrapping_add(new_eip as u64)) & 0xFFFF_FFFF;
+                    let return_lip = (cs_descriptor
+                        .u
+                        .segment_base()
+                        .get()
+                        .wrapping_add(new_eip as u64))
+                        & 0xFFFF_FFFF;
                     new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
                 }
             }
@@ -807,24 +848,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let mut link_selector = BxSelector::default();
             parse_selector(raw_link_selector, &mut link_selector);
             if link_selector.ti != 0 {
-                return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+                return self.exception(Exception::Ts, raw_link_selector & 0xFFFC);
             }
             let (dword1, dword2) = match self.fetch_raw_descriptor(&link_selector) {
                 Ok(v) => v,
-                Err(_) => return self.exception(Exception::Ts, raw_link_selector & 0xfffc),
+                Err(_) => return self.exception(Exception::Ts, raw_link_selector & 0xFFFC),
             };
             let tss_descriptor = match self.parse_descriptor(dword1, dword2) {
                 Ok(v) => v,
-                Err(_) => return self.exception(Exception::Ts, raw_link_selector & 0xfffc),
+                Err(_) => return self.exception(Exception::Ts, raw_link_selector & 0xFFFC),
             };
             if tss_descriptor.valid == 0 || tss_descriptor.segment {
-                return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+                return self.exception(Exception::Ts, raw_link_selector & 0xFFFC);
             }
             if tss_descriptor.r#type != 0x3 && tss_descriptor.r#type != 0xB {
-                return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+                return self.exception(Exception::Ts, raw_link_selector & 0xFFFC);
             }
             if !tss_descriptor.p {
-                return self.exception(Exception::Np, raw_link_selector & 0xfffc);
+                return self.exception(Exception::Np, raw_link_selector & 0xFFFC);
             }
             return self.task_switch(
                 &link_selector,
@@ -853,7 +894,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let new_flags = self.stack_read_word(temp_esp + 4)? as u32;
 
         // Return CS selector must be non-null
-        if (raw_cs_raw & 0xfffc) == 0 {
+        if (raw_cs_raw & 0xFFFC) == 0 {
             return self.exception(Exception::Gp, 0);
         }
 
@@ -862,16 +903,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xFFFC),
         };
         let mut cs_descriptor = match self.parse_descriptor(dword1, dword2) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xFFFC),
         };
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         if cs_selector.rpl < cpl {
-            return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, raw_cs_raw & 0xFFFC);
         }
 
         // check_cs calls exception() directly: Gp for type/DPL errors, Np for not-present
@@ -884,8 +925,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // Same privilege — 16-bit
             // Bochs iret.cc iret_protected (16-bit) \u2014 same-priv shadow-stack restore.
             if self.shadow_stack_enabled(cpl) {
-                let return_lip =
-                    (cs_descriptor.u.segment_base().wrapping_add(new_ip as u64)) & 0xFFFF_FFFF;
+                let return_lip = (cs_descriptor
+                    .u
+                    .segment_base()
+                    .get()
+                    .wrapping_add(new_ip as u64))
+                    & 0xFFFF_FFFF;
                 let prev_ssp = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
                 self.set_ssp(prev_ssp);
             }
@@ -908,7 +953,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let new_sp = self.stack_read_word(temp_esp + 6)? as u32;
             let raw_ss_raw = self.stack_read_word(temp_esp + 8)?;
 
-            if (raw_ss_raw & 0xfffc) == 0 {
+            if (raw_ss_raw & 0xFFFC) == 0 {
                 return self.exception(Exception::Gp, 0);
             }
 
@@ -916,16 +961,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             parse_selector(raw_ss_raw, &mut ss_selector);
 
             if ss_selector.rpl != cs_selector.rpl {
-                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC);
             }
 
             let (ss_dw1, ss_dw2) = match self.fetch_raw_descriptor(&ss_selector) {
                 Ok(v) => v,
-                Err(_) => return self.exception(Exception::Gp, raw_ss_raw & 0xfffc),
+                Err(_) => return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC),
             };
             let mut ss_descriptor = match self.parse_descriptor(ss_dw1, ss_dw2) {
                 Ok(v) => v,
-                Err(_) => return self.exception(Exception::Gp, raw_ss_raw & 0xfffc),
+                Err(_) => return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC),
             };
 
             if ss_descriptor.valid == 0
@@ -933,13 +978,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 || ss_descriptor.r#type >= 8
                 || (ss_descriptor.r#type & 2) == 0
             {
-                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC);
             }
             if ss_descriptor.dpl != cs_selector.rpl {
-                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC);
             }
             if !ss_descriptor.p {
-                return self.exception(Exception::Np, raw_ss_raw & 0xfffc);
+                return self.exception(Exception::Np, raw_ss_raw & 0xFFFC);
             }
 
             // Bochs iret.cc iret_protected (16-bit) \u2014 outer-priv shadow-stack restore.
@@ -951,8 +996,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     self.exception(Exception::Cp, super::cet::BX_CP_FAR_RET_IRET)?;
                 }
                 if cs_selector.rpl != 3 {
-                    let return_lip =
-                        (cs_descriptor.u.segment_base().wrapping_add(new_ip as u64)) & 0xFFFF_FFFF;
+                    let return_lip = (cs_descriptor
+                        .u
+                        .segment_base()
+                        .get()
+                        .wrapping_add(new_ip as u64))
+                        & 0xFFFF_FFFF;
                     new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
                 }
             }
@@ -1040,7 +1089,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[cs_index]
             .cache
             .u
-            .set_segment_base((new_cs as u64) << 4);
+            .set_segment_base(BxLinAddress::new(u64::from(new_cs) << 4));
         self.set_ip(new_ip);
 
         // Bochs exception.cc — clear IF, TF, AC, RF
@@ -1053,7 +1102,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.eip_page_window_size = 0;
 
         // Only log non-exception interrupts to reduce spam (exceptions are logged in exception.rs)
-        if vector != 0x0d && vector != 0x0e && vector != 0x08 && vector < 0x20 {
+        if vector != 0x0D && vector != 0x0E && vector != 0x08 && vector < 0x20 {
             tracing::trace!(
                 "INT {:#04x}: vector at {:04x}:{:04x}",
                 vector,
@@ -1065,7 +1114,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if vector == 0x15 {
             tracing::trace!(
                 "INT 15h: AH={:#04x} AX={:#06x} → handler at {:04x}:{:04x}, caller was {:04x}:{:04x}",
-                self.ah(), self.ax(), new_cs, new_ip, cs, ip
+                self.ah(),
+                self.ax(),
+                new_cs,
+                new_ip,
+                cs,
+                ip
             );
         }
         Ok(())
@@ -1131,19 +1185,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.enter_sleep_state(CpuActivityState::Hlt);
         Ok(())
     }
-
-    const XSAVE_COMPONENTS: [(u32, u32); 10] = [
-        (160, 0),     // 0: FPU (x87)
-        (256, 160),   // 1: SSE (XMM)
-        (256, 576),   // 2: YMM (AVX)
-        (0, 0),       // 3: BNDREGS (deprecated MPX)
-        (0, 0),       // 4: BNDCFG (deprecated MPX)
-        (64, 1088),   // 5: OPMASK (AVX-512)
-        (512, 1152),  // 6: ZMM_HI256 (AVX-512)
-        (1024, 1664), // 7: HI_ZMM (AVX-512)
-        (0, 0),       // 8: PT (Processor Trace, not implemented)
-        (8, 2688),    // 9: PKRU
-    ];
 
     /// Compute max XSAVE area size for given feature bitmap (standard layout).
     /// Bochs cpuid.cc xsave_max_size_required_by_features()

@@ -5,8 +5,9 @@
 //! touch screen would have no right button at all. [`Touchpad`] reads the raw
 //! touches instead and turns them into what a laptop touchpad sends.
 
-use super::host_input::{HostInputEvent, HostInputSink, HostMouseEvent};
 use alloc::vec::Vec;
+
+use super::host_input::{HostInputEvent, HostInputSink, HostMouseEvent};
 
 /// Where a touch began, which decides what the touch does for its whole life.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,11 +145,14 @@ impl Touchpad {
     /// The buttons the guest holds: the on-screen buttons under a finger, and
     /// the left button a drag holds.
     fn buttons(&self) -> u8 {
-        let on_screen = self.fingers.iter().fold(0, |held, finger| match finger.zone {
-            TouchZone::LeftButton => held | LEFT,
-            TouchZone::RightButton => held | RIGHT,
-            TouchZone::Pad | TouchZone::Elsewhere => held,
-        });
+        let on_screen = self
+            .fingers
+            .iter()
+            .fold(0, |held, finger| match finger.zone {
+                TouchZone::LeftButton => held | LEFT,
+                TouchZone::RightButton => held | RIGHT,
+                TouchZone::Pad | TouchZone::Elsewhere => held,
+            });
         let dragging = match self.gesture {
             Gesture::One { drag: true } => LEFT,
             Gesture::One { drag: false } | Gesture::Idle | Gesture::Two { .. } => 0,
@@ -210,7 +214,11 @@ impl Touchpad {
     }
 
     fn moved<S: HostInputSink>(&mut self, sample: TouchSample, sink: &mut S) {
-        let Some(finger) = self.fingers.iter_mut().find(|finger| finger.id == sample.id) else {
+        let Some(finger) = self
+            .fingers
+            .iter_mut()
+            .find(|finger| finger.id == sample.id)
+        else {
             return;
         };
         let previous = finger.last;
@@ -233,7 +241,10 @@ impl Touchpad {
                     self.move_cursor(sample.pos - from, sink);
                 }
             }
-            Gesture::Two { started, moved: pair_moved } => {
+            Gesture::Two {
+                started,
+                moved: pair_moved,
+            } => {
                 self.gesture = Gesture::Two {
                     started,
                     moved: pair_moved || moved,
@@ -254,7 +265,11 @@ impl Touchpad {
     }
 
     fn lifted<S: HostInputSink>(&mut self, sample: TouchSample, lift: Lift, sink: &mut S) {
-        let Some(index) = self.fingers.iter().position(|finger| finger.id == sample.id) else {
+        let Some(index) = self
+            .fingers
+            .iter()
+            .position(|finger| finger.id == sample.id)
+        else {
             return;
         };
         let finger = self.fingers.remove(index);
@@ -325,7 +340,15 @@ impl Touchpad {
     /// Sends motion and wheel with the buttons held now.
     fn send<S: HostInputSink>(&mut self, dx: i32, dy: i32, dz: i32, sink: &mut S) {
         let buttons = self.buttons();
-        self.push(HostMouseEvent { dx, dy, dz, buttons }, sink);
+        self.push(
+            HostMouseEvent {
+                dx,
+                dy,
+                dz,
+                buttons,
+            },
+            sink,
+        );
     }
 
     fn push<S: HostInputSink>(&mut self, event: HostMouseEvent, sink: &mut S) {
@@ -337,8 +360,9 @@ impl Touchpad {
 
 #[cfg(test)]
 mod tests {
+    use egui::{TouchPhase, pos2};
+
     use super::*;
-    use egui::{pos2, TouchPhase};
 
     /// Every mouse event pushed, in order.
     #[derive(Default)]
@@ -354,7 +378,12 @@ mod tests {
     }
 
     fn mouse(dx: i32, dy: i32, dz: i32, buttons: u8) -> HostMouseEvent {
-        HostMouseEvent { dx, dy, dz, buttons }
+        HostMouseEvent {
+            dx,
+            dy,
+            dz,
+            buttons,
+        }
     }
 
     /// A touchpad at one guest pixel per point, fed through a recorder.
@@ -509,7 +538,14 @@ mod tests {
     #[test]
     fn holding_the_left_button_while_another_finger_slides_drags() {
         let mut rig = Rig::new();
-        rig.at(1, TouchPhase::Start, 600.0, 400.0, 0.0, TouchZone::LeftButton);
+        rig.at(
+            1,
+            TouchPhase::Start,
+            600.0,
+            400.0,
+            0.0,
+            TouchZone::LeftButton,
+        );
         rig.pad(2, TouchPhase::Start, 100.0, 100.0, 0.1);
         rig.pad(2, TouchPhase::Move, 100.0, 140.0, 0.2);
         rig.pad(2, TouchPhase::End, 100.0, 140.0, 0.3);
@@ -517,15 +553,33 @@ mod tests {
 
         assert_eq!(
             rig.seen(),
-            &[mouse(0, 0, 0, 0x01), mouse(0, -40, 0, 0x01), mouse(0, 0, 0, 0)]
+            &[
+                mouse(0, 0, 0, 0x01),
+                mouse(0, -40, 0, 0x01),
+                mouse(0, 0, 0, 0)
+            ]
         );
     }
 
     #[test]
     fn the_right_button_presses_and_releases_with_its_touch() {
         let mut rig = Rig::new();
-        rig.at(1, TouchPhase::Start, 650.0, 400.0, 0.0, TouchZone::RightButton);
-        rig.at(1, TouchPhase::End, 650.0, 400.0, 0.1, TouchZone::RightButton);
+        rig.at(
+            1,
+            TouchPhase::Start,
+            650.0,
+            400.0,
+            0.0,
+            TouchZone::RightButton,
+        );
+        rig.at(
+            1,
+            TouchPhase::End,
+            650.0,
+            400.0,
+            0.1,
+            TouchZone::RightButton,
+        );
 
         assert_eq!(rig.seen(), &[mouse(0, 0, 0, 0x02), mouse(0, 0, 0, 0)]);
     }

@@ -12,24 +12,24 @@ use super::poly::*;
 
 /// PI as ExtFloat80 (for fpatan)
 const FLOATX80_PI: ExtFloat80 = ExtFloat80 {
-    signif: 0xc90fdaa22168c235,
+    signif: 0xC90FDAA22168C235,
     sign_exp: 0x4000,
 };
 
 // --- atan_arr[11] from Bochs fpatan.cc ---
 
 const ATAN_ARR: [Float128; 11] = [
-    Float128::new(0x3fff000000000000, 0x0000000000000000), /*  1 */
-    Float128::new(0xbffd555555555555, 0x5555555555555555), /*  3 */
-    Float128::new(0x3ffc999999999999, 0x999999999999999a), /*  5 */
-    Float128::new(0xbffc249249249249, 0x2492492492492492), /*  7 */
-    Float128::new(0x3ffbc71c71c71c71, 0xc71c71c71c71c71c), /*  9 */
-    Float128::new(0xbffb745d1745d174, 0x5d1745d1745d1746), /* 11 */
-    Float128::new(0x3ffb3b13b13b13b1, 0x3b13b13b13b13b14), /* 13 */
-    Float128::new(0xbffb111111111111, 0x1111111111111111), /* 15 */
-    Float128::new(0x3ffae1e1e1e1e1e1, 0xe1e1e1e1e1e1e1e2), /* 17 */
-    Float128::new(0xbffaaf286bca1af2, 0x86bca1af286bca1b), /* 19 */
-    Float128::new(0x3ffa861861861861, 0x8618618618618618), /* 21 */
+    Float128::new(0x3FFF000000000000, 0x0000000000000000), /*  1 */
+    Float128::new(0xBFFD555555555555, 0x5555555555555555), /*  3 */
+    Float128::new(0x3FFC999999999999, 0x999999999999999A), /*  5 */
+    Float128::new(0xBFFC249249249249, 0x2492492492492492), /*  7 */
+    Float128::new(0x3FFBC71C71C71C71, 0xC71C71C71C71C71C), /*  9 */
+    Float128::new(0xBFFB745D1745D174, 0x5D1745D1745D1746), /* 11 */
+    Float128::new(0x3FFB3B13B13B13B1, 0x3B13B13B13B13B14), /* 13 */
+    Float128::new(0xBFFB111111111111, 0x1111111111111111), /* 15 */
+    Float128::new(0x3FFAE1E1E1E1E1E1, 0xE1E1E1E1E1E1E1E2), /* 17 */
+    Float128::new(0xBFFAAF286BCA1AF2, 0x86BCA1AF286BCA1B), /* 19 */
+    Float128::new(0x3FFA861861861861, 0x8618618618618618), /* 21 */
 ];
 
 /// Polynomial approximation for atan(x), |x| < 1/4 (from Bochs fpatan.cc poly_atan).
@@ -40,7 +40,11 @@ fn poly_atan(x: Float128, status: &mut SoftFloatStatus) -> Float128 {
 /// Compute atan2(b, a) = atan(b/a) with proper quadrant handling.
 /// a = ST(0) (x), b = ST(1) (y).
 /// Ported from Bochs fpatan.cc using Float128 polynomial evaluation.
-pub(in crate::cpu) fn fpatan_impl(a: ExtFloat80, b: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
+pub(in crate::cpu) fn fpatan_impl(
+    a: ExtFloat80,
+    b: ExtFloat80,
+    status: &mut SoftFloatStatus,
+) -> ExtFloat80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
         softfloat_raise_flags(status, FLAG_INVALID);
@@ -229,7 +233,7 @@ pub(in crate::cpu) fn fpatan_impl(a: ExtFloat80, b: ExtFloat80, status: &mut Sof
 
     if x_exp <= FLOATX80_EXP_BIAS - 40 {
         // Skip polynomial, tiny argument
-    } else if x.v64 >= 0x3ffe800000000000 {
+    } else if x.v64 >= 0x3FFE800000000000 {
         // 3/4 < x < 1: arctan(x) = arctan((x-1)/(x+1)) + pi/4
         let t1 = f128_sub(x, FLOAT128_ONE, status);
         let t2 = f128_add(x, FLOAT128_ONE, status);

@@ -10,22 +10,23 @@
 //! when it does not. The `…` at the far right always holds Dump RAM and the
 //! verbs that belong to the application rather than to the VM.
 
+#[cfg(not(target_arch = "wasm32"))]
+use egui::RichText;
+
 #[cfg(target_os = "android")]
 use crate::shell::destination::ShellPage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::VmBarAction;
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+use crate::shell::theme::TEXT_CAPTION;
 #[cfg(target_os = "android")]
-use crate::shell::theme::{ACCENT_CYAN, TEXT_MUTED};
+use crate::shell::theme::{Accent, TEXT_MUTED};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::theme::{BG_PANEL, TEXT_BODY, TEXT_PRIMARY};
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
-use crate::shell::theme::TEXT_CAPTION;
+use crate::shell::widgets::{ShellStateBadge, text_width};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::widgets::{button_width, hairline_below, primary_button};
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
-use crate::shell::widgets::{text_width, ShellStateBadge};
-#[cfg(not(target_arch = "wasm32"))]
-use egui::RichText;
 
 /// What the bar needs to know to draw itself. Borrowed, so the bar cannot
 /// change any of it.
@@ -39,6 +40,9 @@ pub(crate) struct VmBarState<'a> {
     /// The page shown, which a phone's bar marks among its page tabs.
     #[cfg(target_os = "android")]
     pub(crate) page: ShellPage,
+    /// The VM's pages, which a phone's bar lists as its tabs.
+    #[cfg(target_os = "android")]
+    pub(crate) pages: &'a [ShellPage],
     pub(crate) running: bool,
     pub(crate) start_pending: bool,
     /// The shell asked this VM to pause: the verb reads Resume.
@@ -53,6 +57,9 @@ pub(crate) struct VmBarState<'a> {
 /// egui's default fonts hold; `shell::tests` checks each against the font.
 #[cfg(not(target_arch = "wasm32"))]
 const OVERFLOW: &str = "…";
+/// The app's Settings, in the `…` menu as in the drawer.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const SETTINGS: &str = "Settings";
 #[cfg(not(target_arch = "wasm32"))]
 const RESTART: &str = "↻ Restart";
 #[cfg(not(target_arch = "wasm32"))]
@@ -118,9 +125,9 @@ fn console_controls_width(ui: &egui::Ui) -> f32 {
 /// shown page carries the text weight and an accent rule, the rest sit muted.
 /// Reports the page tapped.
 #[cfg(target_os = "android")]
-fn page_tabs(ui: &mut egui::Ui, shown: ShellPage) -> Option<ShellPage> {
+fn page_tabs(ui: &mut egui::Ui, shown: ShellPage, pages: &[ShellPage]) -> Option<ShellPage> {
     let mut tapped = None;
-    for page in ShellPage::ALL {
+    for &page in pages {
         let is_shown = page == shown;
         let text = RichText::new(page.label())
             .size(TEXT_BODY)
@@ -131,7 +138,7 @@ fn page_tabs(ui: &mut egui::Ui, shown: ShellPage) -> Option<ShellPage> {
             ui.painter().hline(
                 response.rect.x_range(),
                 response.rect.bottom() - 1.0,
-                egui::Stroke::new(2.0_f32, ACCENT_CYAN),
+                egui::Stroke::new(2.0_f32, Accent::current(ui.ctx()).strong),
             );
         }
         if response.clicked() {
@@ -144,13 +151,11 @@ fn page_tabs(ui: &mut egui::Ui, shown: ShellPage) -> Option<ShellPage> {
 /// The width the page tabs take together, each measured at its shown weight
 /// so the row does not shift as the page changes.
 #[cfg(target_os = "android")]
-fn page_tabs_width(ui: &egui::Ui) -> f32 {
+fn page_tabs_width(ui: &egui::Ui, pages: &[ShellPage]) -> f32 {
     let gap = ui.spacing().item_spacing.x;
-    ShellPage::ALL
+    pages
         .iter()
-        .map(|page| {
-            button_width(ui, RichText::new(page.label()).size(TEXT_BODY).strong()) + gap
-        })
+        .map(|page| button_width(ui, RichText::new(page.label()).size(TEXT_BODY).strong()) + gap)
         .sum()
 }
 
@@ -221,7 +226,7 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                 #[cfg(not(target_os = "android"))]
                 let beside_name = text_width(ui, badge.clone(), egui::TextStyle::Body);
                 #[cfg(target_os = "android")]
-                let beside_name = page_tabs_width(ui);
+                let beside_name = page_tabs_width(ui, state.pages);
                 let name_width =
                     (ui.available_width() - beside_name - verbs_width - 2.0 * gap).max(0.0);
                 ui.allocate_ui_with_layout(
@@ -242,7 +247,7 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                 #[cfg(not(target_os = "android"))]
                 ui.label(badge);
                 #[cfg(target_os = "android")]
-                if let Some(page) = page_tabs(ui, state.page) {
+                if let Some(page) = page_tabs(ui, state.page, state.pages) {
                     action = Some(VmBarAction::GoTo(page));
                 }
 
@@ -268,6 +273,10 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                         }
                         if ui.button("Create floppy image…").clicked() {
                             action = Some(VmBarAction::CreateFloppy);
+                            ui.close();
+                        }
+                        if ui.button(SETTINGS).clicked() {
+                            action = Some(VmBarAction::OpenSettings);
                             ui.close();
                         }
                         if ui.button("About Rusty Box Workstation").clicked() {
@@ -311,7 +320,7 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                     // beside its neighbours.
                     let can_start = !state.running && !state.start_pending;
                     let power_on = if can_start {
-                        primary_button(POWER_ON)
+                        primary_button(ui, POWER_ON)
                     } else {
                         egui::Button::new(POWER_ON)
                     };

@@ -24,19 +24,19 @@
 #[cfg(feature = "alloc")]
 use alloc::{string::String, vec, vec::Vec};
 
-use crate::display::sink::{CursorPos, Dimensions, DisplaySink, Refreshed, Rgb};
+#[cfg(feature = "std")]
+use rusty_box_core::snap::{
+    MAX_COUNT, MAX_SECTION_LEN, SECTION_VERSION, SnapError, SnapRead, SnapResult, SnapWrite,
+    checked_section_len_add, checked_section_len_mul,
+};
+use rusty_box_core::time::VmClock;
+
+use crate::api::{BxPhyAddress, IoPort};
 use crate::display::card::VgaCard;
 /// Only the graphics paths place tiles, and they need a buffer to convert into.
 #[cfg(feature = "alloc")]
 use crate::display::sink::TilePos;
-use crate::api::BxPhyAddress;
-use rusty_box_core::time::VmClock;
-
-#[cfg(feature = "std")]
-use rusty_box_core::snap::{
-    checked_section_len_add, checked_section_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
-    MAX_COUNT, MAX_SECTION_LEN, SECTION_VERSION,
-};
+use crate::display::sink::{CursorPos, Dimensions, DisplaySink, Refreshed, Rgb};
 
 /// This adapter's identity in the snapshot stream.
 ///
@@ -45,7 +45,6 @@ use rusty_box_core::snap::{
 /// names it from here rather than keeping its own copy.
 #[cfg(feature = "std")]
 pub const SEC_VGA: u32 = 24;
-
 
 /// VGA text mode information
 #[derive(Debug, Clone)]
@@ -112,52 +111,59 @@ const VGA_VCLK: [u32; 4] = [25_175_000, 28_322_000, 25_175_000, 25_175_000];
 /// For each 4-bit color value, provides the per-plane expansion (0x00 or 0xFF)
 const CCDAT: [[u8; 4]; 16] = [
     [0x00, 0x00, 0x00, 0x00],
-    [0xff, 0x00, 0x00, 0x00],
-    [0x00, 0xff, 0x00, 0x00],
-    [0xff, 0xff, 0x00, 0x00],
-    [0x00, 0x00, 0xff, 0x00],
-    [0xff, 0x00, 0xff, 0x00],
-    [0x00, 0xff, 0xff, 0x00],
-    [0xff, 0xff, 0xff, 0x00],
-    [0x00, 0x00, 0x00, 0xff],
-    [0xff, 0x00, 0x00, 0xff],
-    [0x00, 0xff, 0x00, 0xff],
-    [0xff, 0xff, 0x00, 0xff],
-    [0x00, 0x00, 0xff, 0xff],
-    [0xff, 0x00, 0xff, 0xff],
-    [0x00, 0xff, 0xff, 0xff],
-    [0xff, 0xff, 0xff, 0xff],
+    [0xFF, 0x00, 0x00, 0x00],
+    [0x00, 0xFF, 0x00, 0x00],
+    [0xFF, 0xFF, 0x00, 0x00],
+    [0x00, 0x00, 0xFF, 0x00],
+    [0xFF, 0x00, 0xFF, 0x00],
+    [0x00, 0xFF, 0xFF, 0x00],
+    [0xFF, 0xFF, 0xFF, 0x00],
+    [0x00, 0x00, 0x00, 0xFF],
+    [0xFF, 0x00, 0x00, 0xFF],
+    [0x00, 0xFF, 0x00, 0xFF],
+    [0xFF, 0xFF, 0x00, 0xFF],
+    [0x00, 0x00, 0xFF, 0xFF],
+    [0xFF, 0x00, 0xFF, 0xFF],
+    [0x00, 0xFF, 0xFF, 0xFF],
+    [0xFF, 0xFF, 0xFF, 0xFF],
 ];
 
 /// Text snapshot sizes per memory mapping mode (Bochs vgacore.cc)
 const TEXT_SNAP_SIZE: [usize; 4] = [0x20000, 0x10000, 0x8000, 0x8000];
 
 /// VGA I/O ports
-const VGA_CRTC_INDEX: u16 = 0x3D4;
-const VGA_CRTC_DATA: u16 = 0x3D5;
-const VGA_STATUS: u16 = 0x3DA;
-const VGA_CRTC_INDEX_MONO: u16 = 0x3B4;
-const VGA_CRTC_DATA_MONO: u16 = 0x3B5;
-const VGA_STATUS_MONO: u16 = 0x3BA;
-const VGA_ATTRIB_ADDR: u16 = 0x3C0;
-const VGA_ATTRIB_DATA: u16 = 0x3C1;
-const VGA_MISC_OUTPUT: u16 = 0x3CC;
-const VGA_SEQ_INDEX: u16 = 0x3C4;
-const VGA_SEQ_DATA: u16 = 0x3C5;
-const VGA_GRAPHICS_INDEX: u16 = 0x3CE;
-const VGA_GRAPHICS_DATA: u16 = 0x3CF;
+const VGA_CRTC_INDEX: IoPort = IoPort::new(0x3D4);
+const VGA_CRTC_DATA: IoPort = IoPort::new(0x3D5);
+const VGA_STATUS: IoPort = IoPort::new(0x3DA);
+const VGA_CRTC_INDEX_MONO: IoPort = IoPort::new(0x3B4);
+const VGA_CRTC_DATA_MONO: IoPort = IoPort::new(0x3B5);
+const VGA_STATUS_MONO: IoPort = IoPort::new(0x3BA);
+const VGA_ATTRIB_ADDR: IoPort = IoPort::new(0x3C0);
+const VGA_ATTRIB_DATA: IoPort = IoPort::new(0x3C1);
+const VGA_MISC_OUTPUT: IoPort = IoPort::new(0x3CC);
+const VGA_SEQ_INDEX: IoPort = IoPort::new(0x3C4);
+const VGA_SEQ_DATA: IoPort = IoPort::new(0x3C5);
+const VGA_GRAPHICS_INDEX: IoPort = IoPort::new(0x3CE);
+const VGA_GRAPHICS_DATA: IoPort = IoPort::new(0x3CF);
 
 // ---- Additional VGA I/O ports ----
-const VGA_MISC_OUTPUT_WRITE: u16 = 0x3C2;
-const VGA_ENABLE: u16 = 0x3C3;
-const VGA_PEL_MASK: u16 = 0x3C6;
-const VGA_DAC_STATE: u16 = 0x3C7;
-const VGA_PEL_ADDR_WRITE: u16 = 0x3C8;
-const VGA_PEL_DATA: u16 = 0x3C9;
+const VGA_MISC_OUTPUT_WRITE: IoPort = IoPort::new(0x3C2);
+const VGA_ENABLE: IoPort = IoPort::new(0x3C3);
+const VGA_PEL_MASK: IoPort = IoPort::new(0x3C6);
+const VGA_DAC_STATE: IoPort = IoPort::new(0x3C7);
+const VGA_PEL_ADDR_WRITE: IoPort = IoPort::new(0x3C8);
+const VGA_PEL_DATA: IoPort = IoPort::new(0x3C9);
+/// Feature Control read-back; the write side is 0x3BA/0x3DA.
+const VGA_FEATURE_CONTROL_READ: IoPort = IoPort::new(0x3CA);
+/// The two EGA compatibility ports beside it.
+const VGA_EGA_COMPAT_3CB: IoPort = IoPort::new(0x3CB);
+const VGA_EGA_COMPAT_3CD: IoPort = IoPort::new(0x3CD);
+/// Where the high byte of a word read of [`VGA_STATUS`] lands.
+const VGA_STATUS_HIGH: IoPort = IoPort::new(0x3DB);
 
 // ---- VBE (Bochs VGA Extension) I/O ports and constants ----
-const VBE_DISPI_IOPORT_INDEX: u16 = 0x01CE;
-const VBE_DISPI_IOPORT_DATA: u16 = 0x01CF;
+const VBE_DISPI_IOPORT_INDEX: IoPort = IoPort::new(0x01CE);
+const VBE_DISPI_IOPORT_DATA: IoPort = IoPort::new(0x01CF);
 
 const VBE_DISPI_INDEX_ID: u16 = 0x0;
 const VBE_DISPI_INDEX_XRES: u16 = 0x1;
@@ -324,8 +330,105 @@ impl VgaMemoryMapping {
 }
 
 // ---- VGA memory window addresses ----
-const VGA_WINDOW_GRAPHICS_BASE: BxPhyAddress = 0xA0000;
-const VGA_WINDOW_GRAPHICS_END: BxPhyAddress = 0xBFFFF;
+const VGA_WINDOW_GRAPHICS_BASE: BxPhyAddress = BxPhyAddress::new(0xA0000);
+const VGA_WINDOW_GRAPHICS_END: BxPhyAddress = BxPhyAddress::new(0xBFFFF);
+
+/// A position in video memory as the CPU's window reaches it (Bochs
+/// vgacore.cc `offset`): a byte in chain-4, a plane address — four bytes, one
+/// per plane — in the planar modes. A bank, where one applies, is already
+/// added.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct VramOffset(u32);
+
+impl VramOffset {
+    /// The offset as a number.
+    #[inline]
+    pub(crate) const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// `bank` bytes further on: a VBE bank in the planar modes (Bochs
+    /// `ext_offset`) or a GeForce bank (Bochs geforce.cc `bank_base`), modulo
+    /// 2^32 as Bochs's `Bit32u` sum is.
+    #[inline]
+    pub(crate) const fn banked(self, bank: u32) -> Self {
+        Self(self.0.wrapping_add(bank))
+    }
+}
+
+/// The part of the `A0000-BFFFF` aperture the graphics controller's memory map
+/// selects (GR6 bits 3:2, Bochs `graphics_ctrl.memory_mapping`), or that an
+/// SVGA card's bank window covers, as a span of the aperture: `size` bytes
+/// from `start`.
+#[derive(Clone, Copy)]
+pub(crate) struct MemoryWindow {
+    start: u64,
+    size: u64,
+}
+
+impl MemoryWindow {
+    /// `A0000-AFFFF`: memory map 1, and the GeForce bank window (Bochs
+    /// geforce.cc `mem_read`, `addr >= 0xA0000 && addr <= 0xAFFFF`), which
+    /// needs `alloc` as the GeForce does.
+    #[cfg(feature = "alloc")]
+    pub(crate) const A0000_64K: Self = Self::of_mapping(1);
+
+    /// The window memory map `mapping` selects (Bochs vgacore.cc `mem_read`'s
+    /// switch): 1 is A0000-AFFFF, 2 B0000-B7FFF, 3 B8000-BFFFF, and any other
+    /// value the whole 128 KiB.
+    const fn of_mapping(mapping: u8) -> Self {
+        match mapping {
+            1 => Self {
+                start: 0,
+                size: 0x10000,
+            },
+            2 => Self {
+                start: 0x10000,
+                size: 0x8000,
+            },
+            3 => Self {
+                start: 0x18000,
+                size: 0x8000,
+            },
+            _ => Self {
+                start: 0,
+                size: 0x20000,
+            },
+        }
+    }
+
+    /// Where an access `at` bytes into the aperture lands in video memory,
+    /// `None` outside the window, where Bochs reads 0xFF and drops a write.
+    pub(crate) fn translate(self, at: crate::api::WindowOffset) -> Option<VramOffset> {
+        let into = at.get().checked_sub(self.start)?;
+        (into < self.size).then_some(VramOffset(into as u32))
+    }
+}
+
+/// Where a byte of VGA memory is named: an offset into the legacy aperture,
+/// which the memory map gates, or the video-memory offset a chain-4
+/// framebuffer access reaches directly (Bochs passes both to
+/// `bx_vgacore_c::mem_read` as one `bx_phy_address`, a value below 0xA0000
+/// being the latter).
+#[derive(Clone, Copy)]
+enum VgaMemAt {
+    Window(crate::api::WindowOffset),
+    /// Reached only through the linear framebuffer, which needs `alloc`.
+    #[cfg(feature = "alloc")]
+    Vram(VramOffset),
+}
+
+impl VgaMemAt {
+    /// Where the access lands in video memory under memory map `mapping`, or
+    /// `None` outside the window it selects.
+    fn locate(self, mapping: u8) -> Option<VramOffset> {
+        match self {
+            Self::Window(at) => MemoryWindow::of_mapping(mapping).translate(at),
+            #[cfg(feature = "alloc")]
+            Self::Vram(offset) => Some(offset),
+        }
+    }
+}
 
 /// The physical ranges this adapter answers.
 ///
@@ -490,7 +593,7 @@ impl StdVga {
         // to the fixed init LFB address so BAR0 is consistent before the BIOS
         // reassigns it; a differing BAR0 write relocates the framebuffer.
         let base = VBE_DISPI_LFB_PHYSICAL_ADDRESS;
-        self.pci_conf[0x10] = (base as u8 & 0xf0) | 0x08;
+        self.pci_conf[0x10] = (base as u8 & 0xF0) | 0x08;
         self.pci_conf[0x11] = (base >> 8) as u8;
         self.pci_conf[0x12] = (base >> 16) as u8;
         self.pci_conf[0x13] = (base >> 24) as u8;
@@ -569,7 +672,7 @@ impl crate::display::card::VgaExtension for StdVga {
                         self.vbe_mem_read_byte(cx.core(), addr)
                     }
                     VgaWindow::Lfb => {
-                        let addr = self.vbe.base_address as BxPhyAddress + offset;
+                        let addr = self.vbe_base() + offset;
                         self.vbe_mem_read_byte(cx.core(), addr)
                     }
                     VgaWindow::Registers => return None,
@@ -591,7 +694,7 @@ impl crate::display::card::VgaExtension for StdVga {
                 let offset = cx.offset().get();
                 let addr = match cx.window() {
                     VgaWindow::Legacy => VGA_WINDOW_GRAPHICS_BASE + offset,
-                    VgaWindow::Lfb => self.vbe.base_address as BxPhyAddress + offset,
+                    VgaWindow::Lfb => self.vbe_base() + offset,
                     VgaWindow::Registers => return crate::display::card::Written::FallThrough,
                 };
                 self.vbe_mem_write_byte(cx.core(), addr, value);
@@ -671,23 +774,30 @@ impl crate::display::card::VgaExtension for StdVga {
         })
     }
 
+    /// Bochs vga.cc `bx_vga_c::update`: while VBE is enabled the screen is the
+    /// VBE framebuffer, not the core's picture.
+    fn vga_scanout(&self) -> crate::display::card::Scanout {
+        if self.vbe.enabled != 0 {
+            crate::display::card::Scanout::Card
+        } else {
+            crate::display::card::Scanout::Core
+        }
+    }
+
     /// The linear framebuffer is the card's window, at the card's base — Bochs
     /// registers it from `bx_vga_c`, which is what `init_vga_extension()` is
     /// for.
-    fn vga_windows(
-        &self,
-        out: &mut crate::api::WindowDecls,
-    ) -> crate::api::Declared {
+    fn vga_windows(&self, out: &mut crate::api::WindowDecls) -> crate::api::Declared {
         // Without an allocator there is no framebuffer to answer for — the
         // DISPI backing store is the one part of this card that needs one — so
         // the card declares only what it can serve.
         #[cfg(feature = "alloc")]
         {
-            let base = u64::from(self.vbe.base_address);
+            let base = self.vbe_base();
             return out.push(crate::api::WindowDecl {
                 id: VgaWindow::Lfb.id(),
                 base,
-                end: base + u64::from(self.vbe_memsize) - 1,
+                end: base + (u64::from(self.vbe_memsize) - 1),
             });
         }
         #[cfg(not(feature = "alloc"))]
@@ -978,7 +1088,6 @@ pub struct VgaCore {
     /// Set when text mode parameters change
     text_buffer_update: bool,
 
-
     // =====================================================================
     // VGA Enable and PEL/DAC registers (ports 0x3C3, 0x3C6-0x3C9)
     // See vgacore.cc state variables in bx_vgacore_s struct
@@ -1174,17 +1283,19 @@ pub struct VgaCore {
     num_x_tiles: u16,
     /// Number of vertical graphics tiles.
     num_y_tiles: u16,
-    /// Bochs extension offset added to legacy VGA memory offsets.
+    /// The VBE bank a planar access through the legacy window lands in, read
+    /// or write (Bochs vgacore.cc `ext_offset`, set from the write bank).
     ext_offset: u32,
-    /// Bochs extension offset added to legacy VGA memory read offsets.
-    ext_read_offset: u32,
     /// Active VGA memory mask (0x3ffff in legacy VGA, VBE memory size - 1 in VBE).
     vga_mem_mask: u32,
     /// Bochs extension start address added to CRTC start address
     /// (`s.ext_start_addr`, vgacore.h).
     #[cfg_attr(
         not(feature = "alloc"),
-        allow(dead_code, reason = "read by the graphics renderer, which needs an allocator")
+        allow(
+            dead_code,
+            reason = "read by the graphics renderer, which needs an allocator"
+        )
     )]
     ext_start_addr: u32,
     /// Bochs extension vertical double-size flag.
@@ -1204,7 +1315,6 @@ pub struct VgaCore {
     /// capability ceiling and seeds the power-on VBE dimensions. Preserved across
     /// `reset()`.
     preferred_mode: Option<(u16, u16, u16)>,
-
 }
 
 impl Default for VgaCore {
@@ -1214,14 +1324,55 @@ impl Default for VgaCore {
 }
 
 impl VgaCore {
-    /// Video memory a standard VGA has — Bochs `bx_vgacore_c` allocates this
-    /// much when no extension asks for more.
-    pub const LEGACY_VRAM_BYTES: usize = VGA_MEM_SIZE;
-
     /// The largest picture a standard VGA can display — mode 12h, 640x480.
     pub const LEGACY_MAX_XRES: u32 = 640;
     /// See [`Self::LEGACY_MAX_XRES`].
     pub const LEGACY_MAX_YRES: u32 = 480;
+    /// Video memory a standard VGA has — Bochs `bx_vgacore_c` allocates this
+    /// much when no extension asks for more.
+    pub const LEGACY_VRAM_BYTES: usize = VGA_MEM_SIZE;
+    /// The ports this adapter answers on, as Bochs `bx_vgacore_c::init`
+    /// registers them — byte and word (`mask` 0x3), word writes split into two
+    /// byte writes in `write_port`.
+    ///
+    /// Stated rather than registered: a display model that called the I/O bus
+    /// from its own `init` would need the bus to exist before the model does.
+    pub(crate) const PORTS: &'static [crate::api::PortDecl] = {
+        use crate::api::PortDecl;
+        const fn p(port: IoPort, name: &'static str) -> PortDecl {
+            PortDecl {
+                port,
+                name,
+                widths: 0x3,
+            }
+        }
+        &[
+            p(VGA_CRTC_INDEX_MONO, "VGA CRTC Index (mono)"),
+            p(VGA_CRTC_DATA_MONO, "VGA CRTC Data (mono)"),
+            p(VGA_CRTC_INDEX, "VGA CRTC Index"),
+            p(VGA_CRTC_DATA, "VGA CRTC Data"),
+            p(VGA_STATUS, "VGA Status"),
+            p(VGA_STATUS_MONO, "VGA Status (mono)"),
+            p(VGA_ATTRIB_ADDR, "VGA Attribute Address"),
+            p(VGA_ATTRIB_DATA, "VGA Attribute Data"),
+            p(VGA_SEQ_INDEX, "VGA Sequencer Index"),
+            p(VGA_SEQ_DATA, "VGA Sequencer Data"),
+            p(VGA_GRAPHICS_INDEX, "VGA Graphics Index"),
+            p(VGA_GRAPHICS_DATA, "VGA Graphics Data"),
+            p(VGA_MISC_OUTPUT, "VGA Misc Output Read"),
+            p(VGA_MISC_OUTPUT_WRITE, "VGA Misc Output Write"),
+            p(VGA_ENABLE, "VGA Enable"),
+            p(VGA_PEL_MASK, "VGA PEL Mask"),
+            p(VGA_DAC_STATE, "VGA DAC State"),
+            p(VGA_PEL_ADDR_WRITE, "VGA PEL Address Write"),
+            p(VGA_PEL_DATA, "VGA PEL Data"),
+            p(VBE_DISPI_IOPORT_INDEX, "Bochs VBE Index"),
+            p(VBE_DISPI_IOPORT_DATA, "Bochs VBE Data"),
+            p(VGA_FEATURE_CONTROL_READ, "VGA EGA Compat"),
+            p(VGA_EGA_COMPAT_3CB, "VGA EGA Compat"),
+            p(VGA_EGA_COMPAT_3CD, "VGA EGA Compat"),
+        ]
+    };
 
     /// Size the dirty-tile grid for the largest mode the card can reach.
     ///
@@ -1299,7 +1450,7 @@ impl VgaCore {
             y_doublescan: false,
             pel_mask: 0xFF,
             dac_shift: DAC_SHIFT,
-            dac_state: 0x01,   // Initial state
+            dac_state: 0x01, // Initial state
             pel_write_addr: 0,
             pel_read_addr: 0,
             pel_write_cycle: 0,
@@ -1351,7 +1502,6 @@ impl VgaCore {
             num_x_tiles,
             num_y_tiles,
             ext_offset: 0,
-            ext_read_offset: 0,
             vga_mem_mask: (VGA_MEM_SIZE - 1) as u32,
             ext_start_addr: 0,
             ext_y_dblsize: false,
@@ -1373,15 +1523,15 @@ impl VgaCore {
 
         // Initialize sequencer — only fields explicitly set by Bochs init_standard_vga()
         vga.seq_regs[SEQ_REG_RESET] = 0x03; // reset1=1, reset2=1
-                                            // seq_regs[1..3] stay 0 from array init (Bochs: zeroed by memset)
-                                            // Bochs: extended_mem=1 (bit 1) + odd_even_dis=1 (bit 2) = 0x06
+        // seq_regs[1..3] stay 0 from array init (Bochs: zeroed by memset)
+        // Bochs: extended_mem=1 (bit 1) + odd_even_dis=1 (bit 2) = 0x06
         vga.seq_regs[SEQ_REG_MEMORY_MODE] = 0x06;
 
         // Initialize graphics controller — only fields explicitly set by Bochs
         // All regs 0 from array init except memory_mapping=2 in GFX_REG_MISC
         // Bochs init_standard_vga(): graphics_ctrl.memory_mapping = 2
         vga.graphics_regs[GFX_REG_MISC] = 0x08; // memory_mapping=2 (bits 2-3)
-                                                // graphics_regs[0..5,7,8] stay 0 from array init (Bochs: zeroed by memset)
+        // graphics_regs[0..5,7,8] stay 0 from array init (Bochs: zeroed by memset)
 
         // Initialize attribute controller
         // Bochs: palette regs 0-15 are zeroed by memset (not explicitly set)
@@ -1399,59 +1549,15 @@ impl VgaCore {
         vga
     }
 
-    /// The ports this adapter answers on, as Bochs `bx_vgacore_c::init`
-    /// registers them — byte and word (`mask` 0x3), word writes split into two
-    /// byte writes in `write_port`.
-    ///
-    /// Stated rather than registered: a display model that called the I/O bus
-    /// from its own `init` would need the bus to exist before the model does.
-    pub(crate) const PORTS: &'static [crate::api::PortDecl] = {
-        use crate::api::PortDecl;
-        const fn p(port: u16, name: &'static str) -> PortDecl {
-            PortDecl {
-                port,
-                name,
-                widths: 0x3,
-            }
-        }
-        &[
-            p(VGA_CRTC_INDEX_MONO, "VGA CRTC Index (mono)"),
-            p(VGA_CRTC_DATA_MONO, "VGA CRTC Data (mono)"),
-            p(VGA_CRTC_INDEX, "VGA CRTC Index"),
-            p(VGA_CRTC_DATA, "VGA CRTC Data"),
-            p(VGA_STATUS, "VGA Status"),
-            p(VGA_STATUS_MONO, "VGA Status (mono)"),
-            p(VGA_ATTRIB_ADDR, "VGA Attribute Address"),
-            p(VGA_ATTRIB_DATA, "VGA Attribute Data"),
-            p(VGA_SEQ_INDEX, "VGA Sequencer Index"),
-            p(VGA_SEQ_DATA, "VGA Sequencer Data"),
-            p(VGA_GRAPHICS_INDEX, "VGA Graphics Index"),
-            p(VGA_GRAPHICS_DATA, "VGA Graphics Data"),
-            p(VGA_MISC_OUTPUT, "VGA Misc Output Read"),
-            p(VGA_MISC_OUTPUT_WRITE, "VGA Misc Output Write"),
-            p(VGA_ENABLE, "VGA Enable"),
-            p(VGA_PEL_MASK, "VGA PEL Mask"),
-            p(VGA_DAC_STATE, "VGA DAC State"),
-            p(VGA_PEL_ADDR_WRITE, "VGA PEL Address Write"),
-            p(VGA_PEL_DATA, "VGA PEL Data"),
-            p(VBE_DISPI_IOPORT_INDEX, "Bochs VBE Index"),
-            p(VBE_DISPI_IOPORT_DATA, "Bochs VBE Data"),
-            p(0x3CA, "VGA EGA Compat"),
-            p(0x3CB, "VGA EGA Compat"),
-            p(0x3CD, "VGA EGA Compat"),
-        ]
-    };
-
     /// The physical window the core answers on, independent of any card: the
     /// legacy aperture Bochs registers in `bx_vgacore_c::init`.
     pub(crate) fn core_window() -> crate::api::WindowDecl {
         crate::api::WindowDecl {
             id: VgaWindow::Legacy.id(),
-            base: VGA_WINDOW_GRAPHICS_BASE as u64,
-            end: VGA_WINDOW_GRAPHICS_END as u64,
+            base: VGA_WINDOW_GRAPHICS_BASE,
+            end: VGA_WINDOW_GRAPHICS_END,
         }
     }
-
 
     /// Set the pre-boot VBE mode: raise the DISPI capability ceiling so the guest
     /// may select up to this resolution, and seed the power-on dimensions.
@@ -1462,26 +1568,15 @@ impl VgaCore {
         self.preferred_mode = Some((xres, yres, bpp));
     }
 
-
     /// Initialize icount-based timing for retrace computation.
     /// Must be called after CPU initialization.
     pub(crate) fn set_icount_sync(&mut self, ips: u64) {
         self.has_icount_sync = true;
         self.ips = if ips > 0 { ips } else { 15_000_000 };
     }
-
 }
 
-
 impl VgaCore {
-
-
-
-
-
-
-
-
     /// Calculate retrace timing from CRTC registers.
     /// Matches Bochs vgacore.cc `calculate_retrace_timing()`.
     fn calculate_retrace_timing(&mut self) {
@@ -1682,21 +1777,28 @@ impl VgaCore {
     }
 
     /// Read from I/O port
-    pub(crate) fn read_port(&mut self, port: u16, io_len: u8, clock: VmClock) -> u32 {
-        // Bochs vgacore.cc: port gating based on color_emulation
-        if (0x3B0..=0x3BF).contains(&port) && self.misc_color_emulation {
-            return 0xFF; // mono ports disabled in color mode
-        }
-        if (0x3D0..=0x3DF).contains(&port) && !self.misc_color_emulation {
-            return 0xFF; // color ports disabled in mono mode
-        }
+    pub(crate) fn read_port(&mut self, port: IoPort, io_len: u8, clock: VmClock) -> u32 {
         // Bochs vgacore.cc read: a 16-bit access is two byte reads combined
-        // (low | high<<8) — e.g. inw(0x3D4) returns index | data<<8. The VBE
-        // dispi ports return their full 16-bit value and must not be split.
+        // (low | high<<8) — e.g. inw(0x3D4) returns index | data<<8 — split
+        // before the colour/mono gating, so each byte is gated on its own.
+        // The VBE dispi ports return their full 16-bit value and must not be
+        // split.
         if io_len == 2 && port != VBE_DISPI_IOPORT_INDEX && port != VBE_DISPI_IOPORT_DATA {
             let lo = self.read_port(port, 1, clock);
-            let hi = self.read_port(port.wrapping_add(1), 1, clock);
+            // Past port 0xFFFF the high byte reaches no VGA register, and reads
+            // as one, the way the default arm below answers.
+            let hi = match port.checked_add(1) {
+                Some(next) => self.read_port(next, 1, clock),
+                None => 0xFF,
+            };
             return lo | (hi << 8);
+        }
+        // Bochs vgacore.cc: port gating based on color_emulation
+        if (0x3B0..=0x3BF).contains(&port.get()) && self.misc_color_emulation {
+            return 0xFF; // mono ports disabled in color mode
+        }
+        if (0x3D0..=0x3DF).contains(&port.get()) && !self.misc_color_emulation {
+            return 0xFF; // color ports disabled in mono mode
         }
         match port {
             VGA_CRTC_INDEX | VGA_CRTC_INDEX_MONO => self.crtc_index as u32,
@@ -1724,8 +1826,8 @@ impl VgaCore {
                     // The anchor is re-set at each vertical retrace by
                     // vertical_timer(), phase-locking the waveform to the frame.
                     let time_usec = self.current_usec(clock);
-                    let display_usec = time_usec.wrapping_sub(self.display_start_usec)
-                        % self.vtotal_usec as u64;
+                    let display_usec =
+                        time_usec.wrapping_sub(self.display_start_usec) % self.vtotal_usec as u64;
                     let mut r = 0u8;
                     // Vertical retrace (bit 3)
                     if display_usec >= self.vrstart_usec as u64
@@ -1825,14 +1927,14 @@ impl VgaCore {
 
             // Feature Control read-back. Bochs vgacore.cc read case 0x03ca:
             // RETURN(s.feature_control).
-            0x3CA => self.feature_control as u32,
+            VGA_FEATURE_CONTROL_READ => self.feature_control as u32,
 
             // EGA compatibility ports - return 0
-            0x3CB | 0x3CD => 0x00,
+            VGA_EGA_COMPAT_3CB | VGA_EGA_COMPAT_3CD => 0x00,
 
             // Bochs vgacore.cc read case 0x03db: RETURN(0) — the high byte of a
             // 16-bit read from 0x03DA lands here and must read 0, not 0xFF.
-            0x3DB => 0x00,
+            VGA_STATUS_HIGH => 0x00,
 
             _ => 0xFF,
         }
@@ -1840,7 +1942,7 @@ impl VgaCore {
 
     /// Bochs vgacore.cc `write()` on a core with no extension: every redraw a
     /// byte asks for is the core's own `redraw_area`.
-    pub(crate) fn write_port(&mut self, port: u16, value: u32, io_len: u8) {
+    pub(crate) fn write_port(&mut self, port: IoPort, value: u32, io_len: u8) {
         self.write_port_with(port, value, io_len, |core, area| core.vga_redraw_area(area));
     }
 
@@ -1848,20 +1950,24 @@ impl VgaCore {
     /// byte at `port` first, and each byte that changed how the screen is
     /// drawn ends in its own `vga_redraw_area(0, 0, last_xres, last_yres)` —
     /// which `redraw` performs the way the card's `redraw_area` does.
-    pub(crate) fn write_port_with<F>(&mut self, port: u16, value: u32, io_len: u8, mut redraw: F)
+    pub(crate) fn write_port_with<F>(&mut self, port: IoPort, value: u32, io_len: u8, mut redraw: F)
     where
         F: FnMut(&mut Self, RedrawArea),
     {
         if io_len == 2 {
             self.write_byte_with(port, value as u8, &mut redraw);
-            self.write_byte_with(port + 1, (value >> 8) as u8, &mut redraw);
+            // Past port 0xFFFF the high byte reaches no VGA register, which
+            // takes a write as the default arm of `write_register` does.
+            if let Some(next) = port.checked_add(1) {
+                self.write_byte_with(next, (value >> 8) as u8, &mut redraw);
+            }
         } else {
             self.write_byte_with(port, value as u8, &mut redraw);
         }
     }
 
     /// One byte of [`Self::write_port_with`].
-    fn write_byte_with<F>(&mut self, port: u16, value: u8, redraw: &mut F)
+    fn write_byte_with<F>(&mut self, port: IoPort, value: u8, redraw: &mut F)
     where
         F: FnMut(&mut Self, RedrawArea),
     {
@@ -1876,12 +1982,12 @@ impl VgaCore {
 
     /// One byte written to a VGA register — Bochs vgacore.cc `write()` up to
     /// its last statement, the redraw, which the answer asks the caller for.
-    fn write_register(&mut self, port: u16, value: u8) -> ScreenUpdate {
+    fn write_register(&mut self, port: IoPort, value: u8) -> ScreenUpdate {
         // Bochs vgacore.cc: port gating based on color_emulation
-        if (0x3B0..=0x3BF).contains(&port) && self.misc_color_emulation {
+        if (0x3B0..=0x3BF).contains(&port.get()) && self.misc_color_emulation {
             return ScreenUpdate::Unchanged; // mono ports disabled in color mode
         }
-        if (0x3D0..=0x3DF).contains(&port) && !self.misc_color_emulation {
+        if (0x3D0..=0x3DF).contains(&port.get()) && !self.misc_color_emulation {
             return ScreenUpdate::Unchanged; // color ports disabled in mono mode
         }
         let mut needs_update = ScreenUpdate::Unchanged;
@@ -1965,16 +2071,12 @@ impl VgaCore {
                             self.vga_mem_updated |= VGA_MEM_UPDATED_CHARMAP;
                             needs_update = ScreenUpdate::Redraw;
                         }
-                        CRTC_OVERFLOW
-                        | CRTC_PRESET_ROW_SCAN
-                        | CRTC_OFFSET
-                        | CRTC_UNDERLINE_LOC
-                        | CRTC_MODE_CONTROL
-                        | CRTC_LINE_COMPARE => needs_update = ScreenUpdate::Redraw,
+                        CRTC_OVERFLOW | CRTC_PRESET_ROW_SCAN | CRTC_OFFSET | CRTC_UNDERLINE_LOC
+                        | CRTC_MODE_CONTROL | CRTC_LINE_COMPARE => {
+                            needs_update = ScreenUpdate::Redraw
+                        }
                         // Cursor size / location change.
-                        CRTC_CURSOR_START
-                        | CRTC_CURSOR_END
-                        | CRTC_CURSOR_LOC_HIGH
+                        CRTC_CURSOR_START | CRTC_CURSOR_END | CRTC_CURSOR_LOC_HIGH
                         | CRTC_CURSOR_LOC_LOW => self.vga_mem_updated |= 1,
                         _ => {}
                     }
@@ -2056,115 +2158,113 @@ impl VgaCore {
                 // no-ops below, not aliased into the register array.
                 self.seq_index = value;
             }
-            VGA_SEQ_DATA
-                if self.seq_index < 5 => {
-                    // Bochs vgacore.cc write case 0x03c5 keeps each sequencer
-                    // register as decomposed fields, so a read-back only exposes
-                    // the bits it retained. Reproduce that by masking on store.
-                    let old_value = self.seq_regs[self.seq_index as usize];
-                    match self.seq_index {
-                        0 => {
-                            // Reset register. Bochs: on the reset1 falling edge
-                            // (bit 0 going 1 -> 0) the character-map selection is
-                            // reset and the charmap is marked dirty.
-                            if (old_value & 0x01) != 0 && (value & 0x01) == 0 {
-                                self.seq_regs[SEQ_REG_CHAR_MAP_SELECT] = 0;
-                                self.charmap_address1 = 0;
-                                self.charmap_address2 = 0;
-                                self.vga_mem_updated |= VGA_MEM_UPDATED_CHARMAP;
-                            }
-                            // Read-back is reset1 | reset2<<1.
-                            self.seq_regs[0] = value & 0x03;
+            VGA_SEQ_DATA if self.seq_index < 5 => {
+                // Bochs vgacore.cc write case 0x03c5 keeps each sequencer
+                // register as decomposed fields, so a read-back only exposes
+                // the bits it retained. Reproduce that by masking on store.
+                let old_value = self.seq_regs[self.seq_index as usize];
+                match self.seq_index {
+                    0 => {
+                        // Reset register. Bochs: on the reset1 falling edge
+                        // (bit 0 going 1 -> 0) the character-map selection is
+                        // reset and the charmap is marked dirty.
+                        if (old_value & 0x01) != 0 && (value & 0x01) == 0 {
+                            self.seq_regs[SEQ_REG_CHAR_MAP_SELECT] = 0;
+                            self.charmap_address1 = 0;
+                            self.charmap_address2 = 0;
+                            self.vga_mem_updated |= VGA_MEM_UPDATED_CHARMAP;
                         }
-                        1 => {
-                            // Clocking mode. Bochs recalculates the retrace timing
-                            // and forces a redraw only when one of the bits in
-                            // 0x29 changes (dot-clock/2, screen-off, 8/9 dot).
-                            if (value ^ old_value) & 0x29 != 0 {
-                                self.seq_regs[1] = value & 0x3D;
-                                // Bochs: s.sequencer.clear_screen = ((value & 0x20) > 0)
-                                self.seq_clear_screen = (value & 0x20) != 0;
-                                self.calculate_retrace_timing();
-                                needs_update = ScreenUpdate::Redraw;
-                            } else {
-                                self.seq_regs[1] = value & 0x3D;
-                            }
-                        }
-                        // Map mask: only the 4 plane-enable bits are kept.
-                        2 => self.seq_regs[2] = value & 0x0F,
-                        3 => {
-                            // Character map select. Bochs derives two 3-bit map
-                            // indices from the interleaved bit layout and looks
-                            // their plane-2 offsets up in charmap_offset[].
-                            self.seq_regs[3] = value & 0x3F;
-                            let mut charmap1 = value & 0x13;
-                            if charmap1 > 3 {
-                                charmap1 = (charmap1 & 3) + 4;
-                            }
-                            let mut charmap2 = (value & 0x2C) >> 2;
-                            if charmap2 > 3 {
-                                charmap2 = (charmap2 & 3) + 4;
-                            }
-                            // Bochs only applies the selection when the CRTC
-                            // maximum-scan-line register is non-zero (i.e. a text
-                            // mode with a real character height).
-                            if self.crtc_regs[CRTC_MAX_SCAN_LINE] > 0 {
-                                self.charmap_address1 = CHARMAP_OFFSET[charmap1 as usize];
-                                self.charmap_address2 = CHARMAP_OFFSET[charmap2 as usize];
-                                self.vga_mem_updated |= VGA_MEM_UPDATED_CHARMAP;
-                            }
-                        }
-                        4 => {
-                            // Memory mode. Bochs keeps only extended_mem (bit 1),
-                            // odd_even_dis (bit 2) and chain_four (bit 3), and its
-                            // read-back recomposes exactly those.
-                            self.seq_regs[4] = value & 0x0E;
-                            self.seq_chain_four = (value & 0x08) != 0;
-                            self.seq_odd_even_dis = (value & 0x04) != 0;
-                        }
-                        _ => self.seq_regs[self.seq_index as usize] = value,
+                        // Read-back is reset1 | reset2<<1.
+                        self.seq_regs[0] = value & 0x03;
                     }
+                    1 => {
+                        // Clocking mode. Bochs recalculates the retrace timing
+                        // and forces a redraw only when one of the bits in
+                        // 0x29 changes (dot-clock/2, screen-off, 8/9 dot).
+                        if (value ^ old_value) & 0x29 != 0 {
+                            self.seq_regs[1] = value & 0x3D;
+                            // Bochs: s.sequencer.clear_screen = ((value & 0x20) > 0)
+                            self.seq_clear_screen = (value & 0x20) != 0;
+                            self.calculate_retrace_timing();
+                            needs_update = ScreenUpdate::Redraw;
+                        } else {
+                            self.seq_regs[1] = value & 0x3D;
+                        }
+                    }
+                    // Map mask: only the 4 plane-enable bits are kept.
+                    2 => self.seq_regs[2] = value & 0x0F,
+                    3 => {
+                        // Character map select. Bochs derives two 3-bit map
+                        // indices from the interleaved bit layout and looks
+                        // their plane-2 offsets up in charmap_offset[].
+                        self.seq_regs[3] = value & 0x3F;
+                        let mut charmap1 = value & 0x13;
+                        if charmap1 > 3 {
+                            charmap1 = (charmap1 & 3) + 4;
+                        }
+                        let mut charmap2 = (value & 0x2C) >> 2;
+                        if charmap2 > 3 {
+                            charmap2 = (charmap2 & 3) + 4;
+                        }
+                        // Bochs only applies the selection when the CRTC
+                        // maximum-scan-line register is non-zero (i.e. a text
+                        // mode with a real character height).
+                        if self.crtc_regs[CRTC_MAX_SCAN_LINE] > 0 {
+                            self.charmap_address1 = CHARMAP_OFFSET[charmap1 as usize];
+                            self.charmap_address2 = CHARMAP_OFFSET[charmap2 as usize];
+                            self.vga_mem_updated |= VGA_MEM_UPDATED_CHARMAP;
+                        }
+                    }
+                    4 => {
+                        // Memory mode. Bochs keeps only extended_mem (bit 1),
+                        // odd_even_dis (bit 2) and chain_four (bit 3), and its
+                        // read-back recomposes exactly those.
+                        self.seq_regs[4] = value & 0x0E;
+                        self.seq_chain_four = (value & 0x08) != 0;
+                        self.seq_odd_even_dis = (value & 0x04) != 0;
+                    }
+                    _ => self.seq_regs[self.seq_index as usize] = value,
                 }
+            }
             VGA_GRAPHICS_INDEX => {
                 // Bochs vgacore.cc write: graphics controller index is stored
                 // unmasked (`s.graphics_ctrl.index = value;`). Out-of-range
                 // DATA writes are no-ops below, not aliased into the register array.
                 self.graphics_index = value;
             }
-            VGA_GRAPHICS_DATA
-                if self.graphics_index < 9 => {
-                    let old_value = self.graphics_regs[self.graphics_index as usize];
-                    self.graphics_regs[self.graphics_index as usize] = value;
+            VGA_GRAPHICS_DATA if self.graphics_index < 9 => {
+                let old_value = self.graphics_regs[self.graphics_index as usize];
+                self.graphics_regs[self.graphics_index as usize] = value;
 
-                    // Special handling for Miscellaneous Graphics register.
-                    // Bochs vgacore.cc write case 6 sets needs_update when the
-                    // graphics/alpha bit or the memory mapping changes. An
-                    // alpha change also rebuilds the text buffer and zeroes
-                    // last_yres, so the next frame announces new dimensions
-                    // and the redraw this write ends in covers no area.
-                    if self.graphics_index as usize == GFX_REG_MISC {
-                        let old_mapping =
-                            (old_value >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
-                        let new_mapping =
-                            (value >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
-                        let old_graphics_alpha = (old_value & GFX_MISC_GRAPHICS_ALPHA) != 0;
-                        let new_graphics_alpha = (value & GFX_MISC_GRAPHICS_ALPHA) != 0;
-                        if old_mapping != new_mapping || old_graphics_alpha != new_graphics_alpha {
-                            tracing::debug!(
-                                "VGA misc changed: mapping {:?}->{:?}, graphics_alpha {}->{}",
-                                VgaMemoryMapping::from_u8(old_mapping),
-                                VgaMemoryMapping::from_u8(new_mapping),
-                                old_graphics_alpha,
-                                new_graphics_alpha
-                            );
-                            needs_update = ScreenUpdate::Redraw;
-                            if old_graphics_alpha != new_graphics_alpha {
-                                self.text_buffer_update = true;
-                                self.last_yres = 0;
-                            }
+                // Special handling for Miscellaneous Graphics register.
+                // Bochs vgacore.cc write case 6 sets needs_update when the
+                // graphics/alpha bit or the memory mapping changes. An
+                // alpha change also rebuilds the text buffer and zeroes
+                // last_yres, so the next frame announces new dimensions
+                // and the redraw this write ends in covers no area.
+                if self.graphics_index as usize == GFX_REG_MISC {
+                    let old_mapping =
+                        (old_value >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
+                    let new_mapping =
+                        (value >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
+                    let old_graphics_alpha = (old_value & GFX_MISC_GRAPHICS_ALPHA) != 0;
+                    let new_graphics_alpha = (value & GFX_MISC_GRAPHICS_ALPHA) != 0;
+                    if old_mapping != new_mapping || old_graphics_alpha != new_graphics_alpha {
+                        tracing::debug!(
+                            "VGA misc changed: mapping {:?}->{:?}, graphics_alpha {}->{}",
+                            VgaMemoryMapping::from_u8(old_mapping),
+                            VgaMemoryMapping::from_u8(new_mapping),
+                            old_graphics_alpha,
+                            new_graphics_alpha
+                        );
+                        needs_update = ScreenUpdate::Redraw;
+                        if old_graphics_alpha != new_graphics_alpha {
+                            self.text_buffer_update = true;
+                            self.last_yres = 0;
                         }
                     }
                 }
+            }
 
             // Misc Output Read port (0x3CC). Bochs vgacore.cc write: `case 0x03cc:
             // /* Graphics 1 Position (EGA) */ // ignore, EGA only???` — the real
@@ -2248,12 +2348,11 @@ impl VgaCore {
             }
 
             // EGA compatibility ports - ignore writes
-            0x3CA | 0x3CB | 0x3CD => {
+            VGA_FEATURE_CONTROL_READ | VGA_EGA_COMPAT_3CB | VGA_EGA_COMPAT_3CD => {
                 // Ignore (EGA compatibility)
             }
 
-            _ => {
-            }
+            _ => {}
         }
         needs_update
     }
@@ -2323,12 +2422,12 @@ impl VgaCore {
             cursor_address
         };
 
-        let mut char_width =
-            if (self.seq_regs[SEQ_REG_CLOCKING_MODE] & SEQ_CLOCKING_8DOT_CHAR) != 0 {
-                8u32
-            } else {
-                9u32
-            };
+        let mut char_width = if (self.seq_regs[SEQ_REG_CLOCKING_MODE] & SEQ_CLOCKING_8DOT_CHAR) != 0
+        {
+            8u32
+        } else {
+            9u32
+        };
         if (self.seq_regs[SEQ_REG_CLOCKING_MODE] & SEQ_CLOCKING_DOTCLOCKDIV2) != 0 {
             char_width <<= 1;
         }
@@ -2491,7 +2590,12 @@ impl VgaCore {
     /// starts inside keeps its own extent, and a tile outside the grid is
     /// skipped, as `SET_TILE_UPDATED` skips it.
     #[cfg(feature = "alloc")]
-    pub(crate) fn mark_area_tiles(&mut self, area: RedrawArea, limit_width: u32, limit_height: u32) {
+    pub(crate) fn mark_area_tiles(
+        &mut self,
+        area: RedrawArea,
+        limit_width: u32,
+        limit_height: u32,
+    ) {
         let last_x = if area.x0 < limit_width {
             area.x0.wrapping_add(area.width).wrapping_sub(1)
         } else {
@@ -2581,7 +2685,7 @@ impl VgaCore {
             color[0] << shift,
             color[1] << shift,
             color[2] << shift,
-            0xff,
+            0xFF,
         ]
     }
 
@@ -2617,12 +2721,12 @@ impl VgaCore {
                 attribute ^= 0x08;
             }
         }
-        let palette_reg_val = self.attr_regs[(attribute & 0x0f) as usize];
+        let palette_reg_val = self.attr_regs[(attribute & 0x0F) as usize];
         let color_select = self.attr_regs[ATTR_REG_COLOR_SELECT];
         let dac_reg = if (self.attr_regs[ATTR_REG_MODE_CONTROL] & 0x80) != 0 {
-            (palette_reg_val & 0x0f) | (color_select << 4)
+            (palette_reg_val & 0x0F) | (color_select << 4)
         } else {
-            (palette_reg_val & 0x3f) | ((color_select & 0x0c) << 4)
+            (palette_reg_val & 0x3F) | ((color_select & 0x0C) << 4)
         };
         dac_reg & self.pel_mask
     }
@@ -2705,11 +2809,7 @@ impl VgaCore {
                 };
             // Bochs vgacore.cc update(): `if (s.y_doublescan) line_compare >>= 1;`
             // — the split-screen line compare is in doubled rows.
-            if self.y_doublescan {
-                lc >> 1
-            } else {
-                lc
-            }
+            if self.y_doublescan { lc >> 1 } else { lc }
         };
         let shift = (self.graphics_regs[GFX_REG_GRAPHICS_MODE] >> 5) & 0x03;
         // One tile's worth of pixels, reused across the frame. The tile size is
@@ -2746,7 +2846,7 @@ impl VgaCore {
                         let dac_index = match shift {
                             0 => {
                                 let row_addr = if (self.crtc_regs[0x17] & 1) == 0 {
-                                    (start_addr & 0xdfff) + ((y & 1) << 13) + (320 / 4) * (y / 2)
+                                    (start_addr & 0xDFFF) + ((y & 1) << 13) + (320 / 4) * (y / 2)
                                 } else if y > line_compare as u32 {
                                     (y - line_compare as u32 - 1) * line_offset
                                 } else {
@@ -2770,7 +2870,7 @@ impl VgaCore {
                                 }
                                 let mut byte_offset =
                                     (start_addr << 1) + (320 / 4) * (y / 2) + (src_x / 4);
-                                byte_offset &= 0x1fff;
+                                byte_offset &= 0x1FFF;
                                 byte_offset += (y & 1) << 13;
                                 let attribute = 6 - 2 * (src_x % 4);
                                 let memory_index =
@@ -2782,15 +2882,15 @@ impl VgaCore {
                             _ => {
                                 let byte_offset = if (self.crtc_regs[0x14] & 0x40) != 0 {
                                     let row_addr = (start_addr << 2) + y * line_offset;
-                                    (row_addr + (x >> 1)) & 0xffff
+                                    (row_addr + (x >> 1)) & 0xFFFF
                                 } else if (self.crtc_regs[0x17] & 0x40) != 0 {
                                     let h_panning =
                                         (self.attr_regs[ATTR_REG_HORIZ_PIXEL_PAN] >> 1) as u32;
                                     let row_addr = (start_addr << 2) + y * (line_offset << 2);
-                                    (row_addr + (x >> 1) + h_panning) & 0x3ffff
+                                    (row_addr + (x >> 1) + h_panning) & 0x3FFFF
                                 } else {
                                     let row_addr = start_addr + y * line_offset;
-                                    (row_addr + (((x >> 1) & !1) << 1) + ((x >> 1) & 1)) & 0x3ffff
+                                    (row_addr + (((x >> 1) & !1) << 1) + ((x >> 1) & 1)) & 0x3FFFF
                                 };
                                 vga_storage_get(self, byte_offset as usize) & self.pel_mask
                             }
@@ -2819,7 +2919,6 @@ impl VgaCore {
         self.vga_mem_updated = 0;
         Refreshed::Frame
     }
-
 
     /// Restart the vertical timer at the head of a frame.
     ///
@@ -3209,7 +3308,7 @@ impl VgaCore {
 /// stride when the CRTC offset register reads zero, so a mode this is reached
 /// in never carries a zero.
 fn cursor_cell(cursor_address: u16, info: &VgaTextModeInfo) -> Option<CursorPos> {
-    if cursor_address >= 0x7fff {
+    if cursor_address >= 0x7FFF {
         return None;
     }
     let offset_from_start = cursor_address.saturating_sub(info.start_address);
@@ -3224,19 +3323,12 @@ fn cursor_cell(cursor_address: u16, info: &VgaTextModeInfo) -> Option<CursorPos>
 /// Implements read mode 0 (return selected plane) and read mode 1 (color compare).
 /// Loads latch register on every read.
 impl VgaCore {
-
-
     /// Read from the legacy `A0000-BFFFF` aperture.
     ///
     /// Bochs `bx_vgacore_c::mem_read`. The physical address is reconstructed
     /// from the window base because the VBE aperture path addresses by it; the
     /// *routing* decision it used to serve is gone.
-    pub(crate) fn legacy_read(
-        &mut self,
-        at: crate::api::WindowOffset,
-        len: u32,
-        data: &mut [u8],
-    ) {
+    pub(crate) fn legacy_read(&mut self, at: crate::api::WindowOffset, len: u32, data: &mut [u8]) {
         for (i, byte) in data.iter_mut().enumerate().take(len as usize) {
             *byte = self.legacy_read_byte(at.get() + i as u64);
         }
@@ -3246,7 +3338,7 @@ impl VgaCore {
     /// virtual is per byte because a card claims individual addresses. The
     /// width-aware handlers are the register blocks, not video memory.
     pub(crate) fn legacy_read_byte(&mut self, offset: u64) -> u8 {
-        vga_mem_read_byte(self, VGA_WINDOW_GRAPHICS_BASE + offset)
+        vga_mem_read_byte(self, VgaMemAt::Window(crate::api::WindowOffset(offset)))
     }
 
     /// Read from the linear framebuffer behind BAR0.
@@ -3260,17 +3352,12 @@ impl VgaCore {
     /// backing store is `alloc`-only. Without it `init` never registers the
     /// window, so a machine cannot route here at all — reaching it means one was
     /// mapped that nothing can serve.
-    pub(crate) fn lfb_read(
-        &mut self,
-        at: crate::api::WindowOffset,
-        len: u32,
-        data: &mut [u8],
-    ) {
+    pub(crate) fn lfb_read(&mut self, at: crate::api::WindowOffset, len: u32, data: &mut [u8]) {
         #[cfg(not(feature = "alloc"))]
         {
             let _ = (at, len);
             tracing::error!("VGA: framebuffer read with no backing store");
-            data.fill(0xff);
+            data.fill(0xFF);
         }
         #[cfg(feature = "alloc")]
         for i in 0..len as u64 {
@@ -3279,9 +3366,9 @@ impl VgaCore {
             };
             let offset = at.get() + i;
             if self.seq_chain_four && offset < 0x40000 {
-                *byte = vga_mem_read_byte(self, offset);
+                *byte = vga_mem_read_byte(self, VgaMemAt::Vram(VramOffset(offset as u32)));
             } else {
-                *byte = 0xff;
+                *byte = 0xFF;
             }
         }
     }
@@ -3289,12 +3376,7 @@ impl VgaCore {
     /// Write to the legacy `A0000-BFFFF` aperture — Bochs
     /// `bx_vgacore_c::mem_write`, all four write modes with full planar
     /// memory support.
-    pub(crate) fn legacy_write(
-        &mut self,
-        at: crate::api::WindowOffset,
-        len: u32,
-        data: &[u8],
-    ) {
+    pub(crate) fn legacy_write(&mut self, at: crate::api::WindowOffset, len: u32, data: &[u8]) {
         for (i, &value) in data.iter().enumerate().take(len as usize) {
             self.legacy_write_byte(at.get() + i as u64, value);
         }
@@ -3316,7 +3398,7 @@ impl VgaCore {
             }
             // The card owns its register block; a core with no extension has
             // no registers there to answer with.
-            VgaWindow::Registers => 0xff,
+            VgaWindow::Registers => 0xFF,
         }
     }
 
@@ -3324,9 +3406,7 @@ impl VgaCore {
     pub(crate) fn window_write_byte(&mut self, window: VgaWindow, offset: u64, value: u8) {
         match window {
             VgaWindow::Legacy => self.legacy_write_byte(offset, value),
-            VgaWindow::Lfb => {
-                self.lfb_write(crate::api::WindowOffset(offset), 1, &[value])
-            }
+            VgaWindow::Lfb => self.lfb_write(crate::api::WindowOffset(offset), 1, &[value]),
             VgaWindow::Registers => {}
         }
     }
@@ -3334,7 +3414,11 @@ impl VgaCore {
     /// One byte into the legacy aperture — the write half of
     /// [`Self::legacy_read_byte`], and per byte for the same reason.
     pub(crate) fn legacy_write_byte(&mut self, offset: u64, value: u8) {
-        vga_mem_write_byte(self, VGA_WINDOW_GRAPHICS_BASE + offset, value);
+        vga_mem_write_byte(
+            self,
+            VgaMemAt::Window(crate::api::WindowOffset(offset)),
+            value,
+        );
     }
 
     /// Write to the linear framebuffer behind BAR0. Bochs vga.cc `mem_write`'s
@@ -3342,12 +3426,7 @@ impl VgaCore {
     /// non-chain-4 write past the aperture is dropped.
     ///
     /// Present in every build for the reason [`Self::lfb_read`] gives.
-    pub(crate) fn lfb_write(
-        &mut self,
-        at: crate::api::WindowOffset,
-        len: u32,
-        data: &[u8],
-    ) {
+    pub(crate) fn lfb_write(&mut self, at: crate::api::WindowOffset, len: u32, data: &[u8]) {
         #[cfg(not(feature = "alloc"))]
         {
             let _ = (at, len, data);
@@ -3360,7 +3439,7 @@ impl VgaCore {
             };
             let offset = at.get() + i;
             if self.seq_chain_four && offset < 0x40000 {
-                vga_mem_write_byte(self, offset, value);
+                vga_mem_write_byte(self, VgaMemAt::Vram(VramOffset(offset as u32)), value);
             }
         }
     }
@@ -3381,10 +3460,10 @@ impl crate::api::MmioDevice for VgaCore {
         match VgaWindow::from_id(window) {
             Some(VgaWindow::Legacy) => self.legacy_read(at, len, data),
             Some(VgaWindow::Lfb) => self.lfb_read(at, len, data),
-            Some(VgaWindow::Registers) => data.fill(0xff),
+            Some(VgaWindow::Registers) => data.fill(0xFF),
             None => {
                 tracing::error!("VGA: read from window {window:?}, which it never declared");
-                data.fill(0xff);
+                data.fill(0xFF);
             }
         }
     }
@@ -3421,6 +3500,26 @@ fn vga_storage_get(vga: &VgaCore, index: usize) -> u8 {
     vga.vga_memory.get(index).copied().unwrap_or(0)
 }
 
+/// Whether all four planes' bytes of plane address `offset` lie inside the
+/// active store — Bochs vgacore.cc `((offset << 2) + 3) >= memsize`, past which
+/// a planar read returns 0xFF without loading the latches and a write is
+/// dropped.
+fn vga_plane_address_fits(vga: &VgaCore, offset: u32) -> bool {
+    #[cfg(feature = "alloc")]
+    let len = if vga.vbe_planar_alias {
+        vga.vbe_memory.len()
+    } else {
+        vga.vga_memory.len()
+    };
+    #[cfg(not(feature = "alloc"))]
+    let len = vga.vga_memory.len();
+    usize::try_from(offset)
+        .ok()
+        .and_then(|plane_address| plane_address.checked_mul(4))
+        .and_then(|first| first.checked_add(3))
+        .is_some_and(|last| last < len)
+}
+
 /// The write half of [`vga_storage_get`]. Under the alias both stores are
 /// written, so a mode change in either direction finds the bytes where it
 /// expects them.
@@ -3437,48 +3536,24 @@ fn vga_storage_set(vga: &mut VgaCore, index: usize, value: u8) {
 }
 
 /// Read a single byte from VGA memory. Matches Bochs vgacore.cc `mem_read`.
-fn vga_mem_read_byte(vga: &mut VgaCore, addr: BxPhyAddress) -> u8 {
+fn vga_mem_read_byte(vga: &mut VgaCore, at: VgaMemAt) -> u8 {
     let mut read_map_select = vga.graphics_regs[GFX_REG_READ_MAP_SELECT] & 0x03;
 
-    // Window gating: compute offset from address (Bochs vgacore.cc)
     let memory_mapping =
         (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
-    let mut offset = if addr >= 0xA0000 {
-        match memory_mapping {
-            1 => {
-                // 0xA0000..0xAFFFF
-                if addr > 0xAFFFF {
-                    return 0xFF;
-                }
-                (addr & 0xFFFF) as u32
-            }
-            2 => {
-                // 0xB0000..0xB7FFF
-                if !(0xB0000..=0xB7FFF).contains(&addr) {
-                    return 0xFF;
-                }
-                (addr & 0x7FFF) as u32
-            }
-            3 => {
-                // 0xB8000..0xBFFFF
-                if addr < 0xB8000 {
-                    return 0xFF;
-                }
-                (addr & 0x7FFF) as u32
-            }
-            _ => {
-                // 0xA0000..0xBFFFF
-                (addr & 0x1FFFF) as u32
-            }
-        }
-    } else {
-        addr as u32
+    let Some(offset) = at.locate(memory_mapping) else {
+        return 0xFF;
     };
-    offset = offset.wrapping_add(vga.ext_read_offset);
 
-    // Chain-four mode (Mode 13h: 320x200x256)
+    // Chain-four mode (Mode 13h: 320x200x256): the byte itself, with no bank
+    // (Bochs vgacore.cc returns before adding `ext_offset`).
     if vga.seq_chain_four {
-        return vga_storage_get(vga, offset as usize);
+        return vga_storage_get(vga, offset.get() as usize);
+    }
+
+    let offset = offset.banked(vga.ext_offset).get();
+    if !vga_plane_address_fits(vga, offset) {
+        return 0xFF;
     }
 
     // Read mode (graphics_regs[5] bit 3)
@@ -3539,58 +3614,31 @@ fn vga_mem_read_byte(vga: &mut VgaCore, addr: BxPhyAddress) -> u8 {
 }
 
 /// Write a single byte to VGA memory. Matches Bochs vgacore.cc `mem_write`.
-fn vga_mem_write_byte(vga: &mut VgaCore, addr: BxPhyAddress, value: u8) {
+fn vga_mem_write_byte(vga: &mut VgaCore, at: VgaMemAt, value: u8) {
     let sequ_map_mask = vga.seq_regs[SEQ_REG_MAP_MASK] & 0x0F;
     let graphics_alpha = (vga.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
 
-    // Window gating: compute offset (Bochs vgacore.cc)
     let memory_mapping =
         (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
-    let mut offset = if addr >= 0xA0000 {
-        match memory_mapping {
-            1 => {
-                // 0xA0000..0xAFFFF
-                if !(0xA0000..=0xAFFFF).contains(&addr) {
-                    return;
-                }
-                (addr & 0xFFFF) as u32
-            }
-            2 => {
-                // 0xB0000..0xB7FFF
-                if !(0xB0000..=0xB7FFF).contains(&addr) {
-                    return;
-                }
-                (addr & 0x7FFF) as u32
-            }
-            3 => {
-                // 0xB8000..0xBFFFF
-                if !(0xB8000..=0xBFFFF).contains(&addr) {
-                    return;
-                }
-                (addr & 0x7FFF) as u32
-            }
-            _ => {
-                // 0xA0000..0xBFFFF
-                if !(0xA0000..=0xBFFFF).contains(&addr) {
-                    return;
-                }
-                (addr & 0x1FFFF) as u32
-            }
-        }
-    } else {
-        addr as u32
+    let Some(offset) = at.locate(memory_mapping) else {
+        return;
     };
-    offset = offset.wrapping_add(vga.ext_offset);
 
-
-    // Chain-four mode (Mode 13h: 320x200x256) — Bochs vgacore.cc
+    // Chain-four mode (Mode 13h: 320x200x256): the byte itself, with no bank
+    // (Bochs vgacore.cc writes before adding `ext_offset`).
     if vga.seq_chain_four {
+        let offset = offset.get();
         vga_storage_set(vga, offset as usize, value);
         vga.vga_mem_updated |= 1 << (offset % 4) as u8;
         #[cfg(feature = "alloc")]
         if graphics_alpha {
             vga.mark_legacy_dirty_offset(offset);
         }
+        return;
+    }
+
+    let offset = offset.banked(vga.ext_offset).get();
+    if !vga_plane_address_fits(vga, offset) {
         return;
     }
 
@@ -3623,38 +3671,22 @@ fn vga_mem_write_byte(vga: &mut VgaCore, addr: BxPhyAddress, value: u8) {
                 0 => {
                     // Replace
                     new_val[0] |= if (enable_set_reset & 1) != 0 {
-                        if (set_reset & 1) != 0 {
-                            bitmask
-                        } else {
-                            0
-                        }
+                        if (set_reset & 1) != 0 { bitmask } else { 0 }
                     } else {
                         value & bitmask
                     };
                     new_val[1] |= if (enable_set_reset & 2) != 0 {
-                        if (set_reset & 2) != 0 {
-                            bitmask
-                        } else {
-                            0
-                        }
+                        if (set_reset & 2) != 0 { bitmask } else { 0 }
                     } else {
                         value & bitmask
                     };
                     new_val[2] |= if (enable_set_reset & 4) != 0 {
-                        if (set_reset & 4) != 0 {
-                            bitmask
-                        } else {
-                            0
-                        }
+                        if (set_reset & 4) != 0 { bitmask } else { 0 }
                     } else {
                         value & bitmask
                     };
                     new_val[3] |= if (enable_set_reset & 8) != 0 {
-                        if (set_reset & 8) != 0 {
-                            bitmask
-                        } else {
-                            0
-                        }
+                        if (set_reset & 8) != 0 { bitmask } else { 0 }
                     } else {
                         value & bitmask
                     };
@@ -4102,23 +4134,9 @@ pub struct VgaBarChange {
     pub mmio: bool,
 }
 
-impl VgaCore {
+impl VgaCore {}
 
-
-
-
-}
-
-
-impl VgaCore {
-
-
-
-
-
-
-
-}
+impl VgaCore {}
 
 #[cfg(feature = "std")]
 fn invalid_vga_snapshot(message: &'static str) -> SnapError {
@@ -4170,7 +4188,9 @@ fn read_snapshot_fixed_array<R: SnapRead, const N: usize>(
 
 #[cfg(feature = "std")]
 fn vga_snapshot_pci_byte_is_mutable(index: usize) -> bool {
-    matches!(index, 0x0c | 0x0d | 0x3c) || (0x10..=0x13).contains(&index) || (0x18..=0x1b).contains(&index)
+    matches!(index, 0x0C | 0x0D | 0x3C)
+        || (0x10..=0x13).contains(&index)
+        || (0x18..=0x1B).contains(&index)
 }
 
 #[cfg(feature = "std")]
@@ -4234,9 +4254,10 @@ fn validate_vga_snapshot_bar_base(base: u32, span: u32) -> SnapResult<()> {
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
-    use super::*;
     #[cfg(feature = "std")]
     use rusty_box_core::snap::SnapError;
+
+    use super::*;
     use crate::api::WindowOffset;
     use crate::display::sink::Redraw;
 
@@ -4278,6 +4299,7 @@ mod tests {
         fn dimension_update(&mut self, dims: Dimensions) {
             self.dimensions = Some(dims);
         }
+
         fn text_update(
             &mut self,
             _previous: &[u8],
@@ -4288,19 +4310,24 @@ mod tests {
             self.text_frames += 1;
             self.cursor = cursor;
         }
+
         fn graphics_tile_update(&mut self, rgba: &[u8], at: TilePos) {
             self.tiles.push((at, rgba.to_vec()));
         }
+
         fn palette_change(&mut self, index: u8, colour: Rgb) -> Redraw {
             self.palette.push((index, colour));
             Redraw::NotNeeded
         }
+
         fn set_text_charmap(&mut self, map: usize, _glyphs: &[u8]) {
             self.charmaps.push(map);
         }
+
         fn clear_screen(&mut self) {
             self.clears += 1;
         }
+
         fn flush(&mut self) {
             self.flushes += 1;
         }
@@ -4313,10 +4340,7 @@ mod tests {
 
     /// Draw one frame with a stated source of dirtiness — the hypervisor case,
     /// where the device observed none of the guest's writes.
-    fn draw_with(
-        vga: &mut VgaCard<StdVga>,
-        dirt: crate::display::card::Dirt<'_>,
-    ) -> RecordingSink {
+    fn draw_with(vga: &mut VgaCard<StdVga>, dirt: crate::display::card::Dirt<'_>) -> RecordingSink {
         let mut sink = RecordingSink::default();
         vga.refresh(&mut sink, dirt);
         sink
@@ -4345,13 +4369,20 @@ mod tests {
             VgaWindow::Legacy.id(),
             "the core's aperture is declared first, as Bochs registers it first"
         );
-        assert_eq!((declared[0].base, declared[0].end), (0xA_0000, 0xB_FFFF));
+        assert_eq!(
+            (declared[0].base, declared[0].end),
+            (BxPhyAddress::new(0xA_0000), BxPhyAddress::new(0xB_FFFF))
+        );
 
-        assert_eq!(declared.len(), 2, "core aperture plus the card's framebuffer");
+        assert_eq!(
+            declared.len(),
+            2,
+            "core aperture plus the card's framebuffer"
+        );
         assert_eq!(declared[1].id, VgaWindow::Lfb.id());
         assert_eq!(
             declared[1].base,
-            u64::from(vga.ext.vbe.base_address),
+            BxPhyAddress::new(u64::from(vga.ext.vbe.base_address)),
             "the framebuffer window follows the card's base, not a constant"
         );
         assert_eq!(
@@ -4374,15 +4405,15 @@ mod tests {
     /// tries, it is told — never silently truncated.
     #[test]
     fn a_card_that_declares_too_many_windows_is_refused() {
-        use crate::api::{Declared, WindowDecl, WindowDecls, MAX_DEVICE_WINDOWS};
+        use crate::api::{Declared, MAX_DEVICE_WINDOWS, WindowDecl, WindowDecls};
 
         let mut decls = WindowDecls::new();
         for index in 0..MAX_DEVICE_WINDOWS {
             assert_eq!(
                 decls.push(WindowDecl {
                     id: crate::api::WindowId(index as u8),
-                    base: 0,
-                    end: 0,
+                    base: BxPhyAddress::new(0),
+                    end: BxPhyAddress::new(0),
                 }),
                 Declared::Accepted
             );
@@ -4390,8 +4421,8 @@ mod tests {
         assert_eq!(
             decls.push(WindowDecl {
                 id: crate::api::WindowId(9),
-                base: 0,
-                end: 0,
+                base: BxPhyAddress::new(0),
+                end: BxPhyAddress::new(0),
             }),
             Declared::NoRoom
         );
@@ -4424,9 +4455,10 @@ mod tests {
             };
         }
     }
-    use crate::pci::PciDevice;
     #[cfg(feature = "std")]
     use rusty_box_core::snap::SnapshotSection;
+
+    use crate::pci::PciDevice;
 
     /// Program one DISPI register the way a guest does — through the port hook
     /// the card claims, not by poking its state.
@@ -4452,6 +4484,7 @@ mod tests {
 
     impl crate::api::IrqSink for Unwired {
         fn set_level(&mut self, _line: crate::api::IrqLine, _level: bool) {}
+
         fn level(&self, _line: crate::api::IrqLine) -> bool {
             false
         }
@@ -4459,15 +4492,18 @@ mod tests {
 
     impl crate::api::TimerService for Unwired {
         fn arm_oneshot_usec(&mut self, _key: crate::api::TimerKey, _delay_usec: u64) {}
+
         fn arm_periodic_usec(&mut self, _key: crate::api::TimerKey, _period_usec: u64) {}
+
         fn arm_oneshot_ticks(&mut self, _key: crate::api::TimerKey, _delay_ticks: u64) {}
+
         fn cancel(&mut self, _key: crate::api::TimerKey) {}
     }
 
     /// One byte to a VGA port the way a guest's `out` reaches it: through the
     /// card, which offers the access to its extension first and answers any
     /// redraw the write asks for with its own `redraw_area`.
-    fn port_out(vga: &mut VgaCard<StdVga>, port: u16, value: u8) {
+    fn port_out(vga: &mut VgaCard<StdVga>, port: IoPort, value: u8) {
         let mut irq = Unwired;
         let mut timers = Unwired;
         let mut ctx = crate::api::DeviceCtx {
@@ -4554,7 +4590,10 @@ mod tests {
         vga.core.graphics_regs[GFX_REG_MISC] = 0x00;
 
         let sink = draw(&mut vga);
-        assert!(sink.tiles.is_empty(), "no planar tiles for an alphanumeric adapter");
+        assert!(
+            sink.tiles.is_empty(),
+            "no planar tiles for an alphanumeric adapter"
+        );
         assert!(sink.text_frames > 0, "the frame is drawn as text");
         assert_eq!(sink.dimensions.map(|dims| dims.font_height), Some(16));
     }
@@ -4663,6 +4702,32 @@ mod tests {
         assert_eq!(grid.cursor, Some(TextPos::new(30, 7)));
     }
 
+    /// While VBE drives the screen the picture is the VBE framebuffer, so the
+    /// display role reports no character grid, though the core's registers
+    /// still describe the text mode the guest left; turning VBE off shows that
+    /// text again.
+    #[test]
+    fn a_vbe_mode_hides_the_text_grid_the_core_still_holds() {
+        use crate::display::{DisplaySource, TextPos};
+
+        let mut vga = card();
+        vga.core.init_text_mode3();
+        assert!(vga.text_grid().is_some(), "mode 3 shows text");
+
+        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
+        assert!(
+            vga.text_grid().is_none(),
+            "the VBE framebuffer is on screen"
+        );
+        assert_eq!(vga.text_char(TextPos::new(0, 0)), ' ');
+
+        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+        assert!(
+            vga.text_grid().is_some(),
+            "the text mode is on screen again"
+        );
+    }
+
     /// A graphics mode has no character grid to report.
     #[test]
     fn a_graphics_mode_has_no_text_geometry() {
@@ -4760,10 +4825,7 @@ mod tests {
     fn pending_bar2_move_keeps_old_mapping_until_commit() {
         let mut vga = pci_vga();
         vga.pci_write(0x18, 0xF000_0000, 4);
-        assert_eq!(
-            vga.commit_pending_mmio_relocate(),
-            Some((0, 0xF000_0000))
-        );
+        assert_eq!(vga.commit_pending_mmio_relocate(), Some((0, 0xF000_0000)));
 
         vga.pci_write(0x18, 0xF010_0000, 4);
         assert_eq!(
@@ -4781,7 +4843,6 @@ mod tests {
         );
         assert_eq!(vga.ext.mmio_base, 0xF010_0000);
     }
-
 
     #[test]
     fn pci_command_register_is_read_only() {
@@ -4893,11 +4954,31 @@ mod tests {
         let sink = draw(&mut vga);
         let dims = sink.dimensions.expect("a mode set announces its geometry");
         assert_eq!((dims.width, dims.height, dims.bits_per_pixel), (2, 2, 32));
-        assert_eq!(&sink.tile_at(0, 0)[0..4], &[0x33, 0x22, 0x11, 0xff]);
+        assert_eq!(&sink.tile_at(0, 0)[0..4], &[0x33, 0x22, 0x11, 0xFF]);
     }
 
+    /// A DISPI 4bpp card in planar mode with plane 0 open for writes and
+    /// reads, the legacy window mapped as `mapping`.
+    fn vbe_4bpp_planar_card(mapping: VgaMemoryMapping) -> VgaCard<StdVga> {
+        let mut vga = card();
+        vga.core.seq_odd_even_dis = true;
+        vga.core.seq_regs[SEQ_REG_MAP_MASK] = 0x01;
+        vga.core.graphics_regs[GFX_REG_MISC] =
+            GFX_MISC_GRAPHICS_ALPHA | (mapping as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
+        // Attribute controller mode control bit 0 must agree with the graphics
+        // controller, or Bochs skip_update() treats it as a mode set in flight.
+        vga.core.attr_regs[0x10] |= 0x01;
+        vga.core.graphics_regs[GFX_REG_BIT_MASK] = 0xFF;
+        vga.core.graphics_regs[GFX_REG_READ_MAP_SELECT] = 0;
+        write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
+        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
+        vga
+    }
+
+    /// Bochs vgacore.cc `mem_write` stores a chain-4 byte before it adds
+    /// `ext_offset`: the bank moves planar accesses only.
     #[test]
-    fn vbe_4bpp_bank_write_offsets_legacy_vga_memory() {
+    fn a_chain_four_write_ignores_the_vbe_bank() {
         let mut vga = card();
         vga.core.seq_chain_four = true;
         vga.core.seq_odd_even_dis = true;
@@ -4911,30 +4992,25 @@ mod tests {
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, 1);
 
-        write_vram(&mut vga, VgaWindow::Legacy, 0, &[0x5a]);
+        write_vram(&mut vga, VgaWindow::Legacy, 0, &[0x5A]);
 
-        assert_eq!(vga.core.vga_memory[0], 0);
-        assert_eq!(vga.core.vga_memory[0x10000], 0x5a);
+        assert_eq!(vga.core.vbe_memory[0], 0x5A);
+        assert_eq!(vga.core.vbe_memory[0x10000], 0);
     }
 
+    /// Bochs vgacore.cc adds `ext_offset` — the write bank in bytes — to a
+    /// planar access's plane address, so bank 1 at 64 KiB granularity puts
+    /// the window's first plane address at 0x10000, its plane-0 byte at
+    /// 0x40000.
     #[test]
-    fn vbe_4bpp_chain_four_bank_write_updates_vbe_backing() {
-        let mut vga = card();
-        vga.core.seq_chain_four = true;
-        vga.core.seq_odd_even_dis = true;
-        vga.core.graphics_regs[GFX_REG_MISC] =
-            GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
-        // Attribute controller mode control bit 0 must agree with the graphics
-        // controller, or Bochs skip_update() treats it as a mode set in flight.
-        vga.core.attr_regs[0x10] |= 0x01;
-
-        write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
-        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
+    fn a_planar_write_lands_in_the_write_bank() {
+        let mut vga = vbe_4bpp_planar_card(VgaMemoryMapping::Vga64k);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, 1);
 
-        write_vram(&mut vga, VgaWindow::Legacy, 0, &[0x5a]);
+        write_vram(&mut vga, VgaWindow::Legacy, 0, &[0x3C]);
 
-        assert_eq!(vga.core.vbe_memory[0x10000], 0x5a);
+        assert_eq!(vga.core.vbe_memory[0x40000], 0x3C);
+        assert_eq!(vga.core.vbe_memory[0], 0);
     }
 
     #[test]
@@ -4947,64 +5023,64 @@ mod tests {
         // Attribute controller mode control bit 0 must agree with the graphics
         // controller, or Bochs skip_update() treats it as a mode set in flight.
         vga.core.attr_regs[0x10] |= 0x01;
-        vga.core.graphics_regs[GFX_REG_BIT_MASK] = 0xff;
+        vga.core.graphics_regs[GFX_REG_BIT_MASK] = 0xFF;
         vga.core.graphics_regs[GFX_REG_READ_MAP_SELECT] = 0;
 
         write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, 1);
 
-        write_vram(&mut vga, VgaWindow::Legacy, 0, &[0x3c]);
+        write_vram(&mut vga, VgaWindow::Legacy, 0, &[0x3C]);
         let mut byte = [0];
         read_vram(&mut vga, VgaWindow::Legacy, 0, &mut byte);
 
-        assert_eq!(byte[0], 0x3c);
+        assert_eq!(byte[0], 0x3C);
     }
 
+    /// Bochs keeps one `ext_offset` for the planar path, set from the write
+    /// bank (vga.cc `VBE_DISPI_INDEX_BANK`); the read bank steers only the
+    /// linear DISPI modes' `vbe_mem_read`. A planar read therefore finds the
+    /// byte in the write bank whatever read bank is selected.
     #[test]
-    fn vbe_4bpp_read_bank_is_independent_from_write_bank() {
-        let mut vga = card();
-        vga.core.seq_chain_four = true;
-        vga.core.seq_odd_even_dis = true;
-        vga.core.graphics_regs[GFX_REG_MISC] =
-            GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
-        // Attribute controller mode control bit 0 must agree with the graphics
-        // controller, or Bochs skip_update() treats it as a mode set in flight.
-        vga.core.attr_regs[0x10] |= 0x01;
-
-        write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
-        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
+    fn a_planar_read_uses_the_write_bank() {
+        let mut vga = vbe_4bpp_planar_card(VgaMemoryMapping::Vga64k);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, VBE_DISPI_BANK_WR | 1);
-        write_vram(&mut vga, VgaWindow::Legacy, 0, &[0x7b]);
+        write_vram(&mut vga, VgaWindow::Legacy, 0, &[0x7B]);
 
-        write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, VBE_DISPI_BANK_WR);
-        write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, VBE_DISPI_BANK_RD | 1);
-
+        write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, VBE_DISPI_BANK_RD | 2);
         let mut byte = [0];
         read_vram(&mut vga, VgaWindow::Legacy, 0, &mut byte);
 
-        assert_eq!(byte[0], 0x7b);
+        assert_eq!(byte[0], 0x7B);
+    }
+
+    /// Bochs vgacore.cc `mem_read` returns 0xFF, before loading the latches,
+    /// for a plane address whose four bytes run past the end of video memory.
+    /// The last bank at 64 KiB granularity with the 128 KiB window mapped puts
+    /// the window's second half there.
+    #[test]
+    fn a_planar_read_past_video_memory_returns_ff_and_keeps_the_latches() {
+        let mut vga = vbe_4bpp_planar_card(VgaMemoryMapping::Ega128k);
+        let last_bank = (vga.core.vbe_memory.len() >> 18) - 1;
+        write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, last_bank as u16);
+        vga.core.latch = [1, 2, 3, 4];
+
+        let mut byte = [0];
+        read_vram(&mut vga, VgaWindow::Legacy, 0x10000, &mut byte);
+
+        assert_eq!(byte[0], 0xFF);
+        assert_eq!(vga.core.latch, [1, 2, 3, 4]);
     }
 
     #[test]
     fn disabling_vbe_clears_legacy_bank_offset() {
-        let mut vga = card();
-        vga.core.seq_chain_four = true;
-        vga.core.seq_odd_even_dis = true;
-        vga.core.graphics_regs[GFX_REG_MISC] =
-            GFX_MISC_GRAPHICS_ALPHA | (VgaMemoryMapping::Vga64k as u8) << GFX_MISC_MEMORY_MAP_SHIFT;
-        // Attribute controller mode control bit 0 must agree with the graphics
-        // controller, or Bochs skip_update() treats it as a mode set in flight.
-        vga.core.attr_regs[0x10] |= 0x01;
-
-        write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
-        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
+        let mut vga = vbe_4bpp_planar_card(VgaMemoryMapping::Vga64k);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BANK, 1);
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
 
-        write_vram(&mut vga, VgaWindow::Legacy, 0, &[0xa5]);
+        write_vram(&mut vga, VgaWindow::Legacy, 0, &[0xA5]);
 
-        assert_eq!(vga.core.vga_memory[0], 0xa5);
+        assert_eq!(vga.core.vga_memory[0], 0xA5);
     }
 
     /// The graphics controller is still in its alphanumeric setting, as a
@@ -5019,19 +5095,19 @@ mod tests {
         write_vbe(&mut vga, VBE_DISPI_INDEX_YRES, 1);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_8);
         write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
-        vga.core.pel_data[5] = [0x3f, 0, 0];
+        vga.core.pel_data[5] = [0x3F, 0, 0];
         write_vram(&mut vga, VgaWindow::Lfb, 0, &[5]);
 
         let first = draw(&mut vga);
-        assert_eq!(&first.tile_at(0, 0)[0..4], &[0xfc, 0x00, 0x00, 0xff]);
+        assert_eq!(&first.tile_at(0, 0)[0..4], &[0xFC, 0x00, 0x00, 0xFF]);
 
         port_out(&mut vga, VGA_PEL_ADDR_WRITE, 5);
         port_out(&mut vga, VGA_PEL_DATA, 0);
-        port_out(&mut vga, VGA_PEL_DATA, 0x3f);
+        port_out(&mut vga, VGA_PEL_DATA, 0x3F);
         port_out(&mut vga, VGA_PEL_DATA, 0);
 
         let second = draw(&mut vga);
-        assert_eq!(&second.tile_at(0, 0)[0..4], &[0x00, 0xfc, 0x00, 0xff]);
+        assert_eq!(&second.tile_at(0, 0)[0..4], &[0x00, 0xFC, 0x00, 0xFF]);
         assert!(
             second.palette.iter().any(|&(index, _)| index == 5),
             "a completed DAC write reaches the front end as well as the pixels"
@@ -5045,18 +5121,29 @@ mod tests {
         write_vbe(&mut vga, VBE_DISPI_INDEX_XRES, 1);
         write_vbe(&mut vga, VBE_DISPI_INDEX_YRES, 1);
         write_vbe(&mut vga, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_8);
-        write_vbe(&mut vga, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_8BIT_DAC);
+        write_vbe(
+            &mut vga,
+            VBE_DISPI_INDEX_ENABLE,
+            VBE_DISPI_ENABLED | VBE_DISPI_8BIT_DAC,
+        );
         vga.core.write_port(VGA_PEL_ADDR_WRITE, 5, 1);
-        vga.core.write_port(VGA_PEL_DATA, 0xf0, 1);
+        vga.core.write_port(VGA_PEL_DATA, 0xF0, 1);
         vga.core.write_port(VGA_PEL_DATA, 0x00, 1);
-        vga.core.write_port(VGA_PEL_DATA, 0x0c, 1);
+        vga.core.write_port(VGA_PEL_DATA, 0x0C, 1);
         write_vram(&mut vga, VgaWindow::Lfb, 0, &[5]);
 
         let wide = draw(&mut vga);
-        assert_eq!(&wide.tile_at(0, 0)[0..4], &[0xf0, 0x00, 0x0c, 0xff]);
+        assert_eq!(&wide.tile_at(0, 0)[0..4], &[0xF0, 0x00, 0x0C, 0xFF]);
         assert_eq!(
             wide.palette,
-            [(5, Rgb { red: 0xf0, green: 0x00, blue: 0x0c })],
+            [(
+                5,
+                Rgb {
+                    red: 0xF0,
+                    green: 0x00,
+                    blue: 0x0C
+                }
+            )],
             "an 8-bit DAC entry is already host width"
         );
 
@@ -5065,7 +5152,7 @@ mod tests {
         let narrow = draw(&mut vga);
         assert_eq!(
             &narrow.tile_at(0, 0)[0..4],
-            &[0xf0, 0x00, 0x0c, 0xff],
+            &[0xF0, 0x00, 0x0C, 0xFF],
             "narrowing the DAC halves the entries and restores the shift, so the colour holds"
         );
     }
@@ -5076,7 +5163,7 @@ mod tests {
         vga.core.vga_enabled = true;
         vga.core.video_enabled = true;
         vga.core.seq_regs[SEQ_REG_RESET] = 0x03;
-        vga.core.seq_regs[SEQ_REG_MEMORY_MODE] = 0x0e;
+        vga.core.seq_regs[SEQ_REG_MEMORY_MODE] = 0x0E;
         vga.core.seq_chain_four = true;
         vga.core.seq_odd_even_dis = true;
         vga.core.graphics_regs[GFX_REG_MISC] =
@@ -5089,12 +5176,12 @@ mod tests {
         vga.core.crtc_regs[CRTC_VERT_DISPLAY_END] = 0;
         vga.core.crtc_regs[CRTC_VERT_BLANK_START] = 0;
         vga.core.crtc_regs[CRTC_MODE_CONTROL] = 0x40;
-        vga.core.pel_data[5] = [0x3f, 0, 0];
+        vga.core.pel_data[5] = [0x3F, 0, 0];
 
         write_vram(&mut vga, VgaWindow::Legacy, 0, &[5]);
 
         let sink = draw(&mut vga);
-        assert_eq!(&sink.tile_at(0, 0)[0..4], &[0xfc, 0x00, 0x00, 0xff]);
+        assert_eq!(&sink.tile_at(0, 0)[0..4], &[0xFC, 0x00, 0x00, 0xFF]);
     }
     #[test]
     fn legacy_graphics_register_change_redraws_without_memory_write() {
@@ -5102,7 +5189,7 @@ mod tests {
         vga.core.vga_enabled = true;
         vga.core.video_enabled = true;
         vga.core.seq_regs[SEQ_REG_RESET] = 0x03;
-        vga.core.seq_regs[SEQ_REG_MEMORY_MODE] = 0x0e;
+        vga.core.seq_regs[SEQ_REG_MEMORY_MODE] = 0x0E;
         vga.core.seq_chain_four = true;
         vga.core.seq_odd_even_dis = true;
         vga.core.graphics_regs[GFX_REG_MISC] =
@@ -5117,7 +5204,10 @@ mod tests {
         vga.core.crtc_regs[CRTC_MODE_CONTROL] = 0x40;
 
         write_vram(&mut vga, VgaWindow::Legacy, 0, &[5]);
-        assert!(!draw(&mut vga).tiles.is_empty(), "the write produces a frame");
+        assert!(
+            !draw(&mut vga).tiles.is_empty(),
+            "the write produces a frame"
+        );
         assert!(
             draw(&mut vga).tiles.is_empty(),
             "and nothing further until something changes again"
@@ -5174,7 +5264,7 @@ mod tests {
         );
         assert_eq!(
             &sink.tile_at(0, 0)[0..4],
-            &[0x33, 0x22, 0x11, 0xff],
+            &[0x33, 0x22, 0x11, 0xFF],
             "the page bitmap must produce the tile self-tracking missed"
         );
 
@@ -5212,10 +5302,11 @@ mod tests {
 
         let wrapped_start = vga.ext.vbe.virtual_start as usize;
         assert!(wrapped_start < vga.core.vbe_memory.len());
-        vga.core.vbe_memory[wrapped_start..wrapped_start + 4].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        vga.core.vbe_memory[wrapped_start..wrapped_start + 4]
+            .copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
 
         let sink = draw(&mut vga);
-        assert_eq!(&sink.tile_at(0, 0)[0..4], &[0x33, 0x22, 0x11, 0xff]);
+        assert_eq!(&sink.tile_at(0, 0)[0..4], &[0x33, 0x22, 0x11, 0xFF]);
     }
 
     // ---- A write to 0x3CC (Misc Output *read* port) is ignored ----
@@ -5317,16 +5408,31 @@ mod tests {
         assert_eq!((word >> 8) & 0xFF, 0x5A, "high byte = data reg");
     }
 
+    /// Bochs vgacore.cc read splits a word before the colour/mono gating, so
+    /// both bytes of a word read from a disabled block read 0xFF.
+    #[test]
+    fn word_read_of_a_disabled_block_reads_ones_in_both_bytes() {
+        let mut vga = VgaCore::new();
+        vga.misc_color_emulation = true;
+        assert_eq!(vga.read_port(VGA_CRTC_INDEX_MONO, 2, clock_at(0)), 0xFFFF);
+        vga.misc_color_emulation = false;
+        assert_eq!(vga.read_port(VGA_CRTC_INDEX, 2, clock_at(0)), 0xFFFF);
+    }
+
     // Bochs vgacore.cc write cases 0x03ba/0x03da: `feature_control = value & 0x08`;
     // read case 0x03ca returns it; read case 0x03db returns 0.
     #[test]
     fn feature_control_round_trips_via_3da_and_3ca() {
         let mut vga = VgaCore::new();
-        assert_eq!(vga.read_port(0x3CA, 1, clock_at(0)), 0x00, "reset value is 0");
+        assert_eq!(
+            vga.read_port(VGA_FEATURE_CONTROL_READ, 1, clock_at(0)),
+            0x00,
+            "reset value is 0"
+        );
 
         vga.write_port(VGA_STATUS, 0xFF, 1);
         assert_eq!(
-            vga.read_port(0x3CA, 1, clock_at(0)),
+            vga.read_port(VGA_FEATURE_CONTROL_READ, 1, clock_at(0)),
             0x08,
             "only bit 3 of a 0x3DA write is retained"
         );
@@ -5336,17 +5442,20 @@ mod tests {
         // misc_output.color_emulation is set — so it must NOT clear the value.
         vga.write_port(VGA_STATUS_MONO, 0x00, 1);
         assert_eq!(
-            vga.read_port(0x3CA, 1, clock_at(0)),
+            vga.read_port(VGA_FEATURE_CONTROL_READ, 1, clock_at(0)),
             0x08,
             "mono-port write must be ignored in color emulation mode"
         );
 
         // Writing 0 through the active (color) port does clear it.
         vga.write_port(VGA_STATUS, 0x00, 1);
-        assert_eq!(vga.read_port(0x3CA, 1, clock_at(0)), 0x00);
+        assert_eq!(
+            vga.read_port(VGA_FEATURE_CONTROL_READ, 1, clock_at(0)),
+            0x00
+        );
 
         // 0x3DB is the high byte of a 16-bit read from 0x3DA: Bochs returns 0.
-        assert_eq!(vga.read_port(0x3DB, 1, clock_at(0)), 0x00);
+        assert_eq!(vga.read_port(VGA_STATUS_HIGH, 1, clock_at(0)), 0x00);
     }
 
     // Bochs vgacore.cc keeps sequencer registers as decomposed fields, so a
@@ -5401,7 +5510,8 @@ mod tests {
 
         // A non-zero maximum-scan-line is required before Bochs applies the
         // selection, so program CRTC 9 first.
-        vga.core.write_port(VGA_CRTC_INDEX, CRTC_MAX_SCAN_LINE as u32, 1);
+        vga.core
+            .write_port(VGA_CRTC_INDEX, CRTC_MAX_SCAN_LINE as u32, 1);
         vga.core.write_port(VGA_CRTC_DATA, 0x0F, 1);
 
         // Sequencer register 3 = 0 selects charmap A = B = offset 0x0000.
@@ -5426,8 +5536,7 @@ mod tests {
         assert_eq!(vga.core.charmap[0][0], 0xA5, "plane-2 byte 0");
         assert_eq!(vga.core.charmap[0][1], 0x3C, "plane-2 byte 1 (stride 4)");
         assert_eq!(
-            vga.core.charmap[1][0],
-            0xA5,
+            vga.core.charmap[1][0], 0xA5,
             "equal addresses must publish the same glyphs to both maps"
         );
 
@@ -5438,7 +5547,10 @@ mod tests {
         assert_eq!(vga.core.charmap_address2, 0x4000);
         vga.core.update_charmap();
         assert_eq!(vga.core.charmap[0][0], 0xA5, "map 0 unchanged");
-        assert_eq!(vga.core.charmap[1][0], 0x5A, "map 1 now reads the 0x4000 glyphs");
+        assert_eq!(
+            vga.core.charmap[1][0], 0x5A,
+            "map 1 now reads the 0x4000 glyphs"
+        );
 
         // A sequencer reset (reset1 falling edge) clears the selection.
         vga.core.write_port(VGA_SEQ_INDEX, 0, 1);
@@ -5544,7 +5656,11 @@ mod tests {
         seq(&mut vga, 2, 0x0F);
         write_vram(&mut vga, VgaWindow::Legacy, 0, &alloc::vec![0u8; 0x1_0000]);
         let cleared = draw(&mut vga);
-        assert_eq!(cleared.charmaps, alloc::vec![0, 1], "the cleared generator is published");
+        assert_eq!(
+            cleared.charmaps,
+            alloc::vec![0, 1],
+            "the cleared generator is published"
+        );
         disable_a000_color(&mut vga);
 
         enable_a000_data(&mut vga);
@@ -5556,7 +5672,11 @@ mod tests {
         crtc(&mut vga, CRTC_MAX_SCAN_LINE, (FONT_HEIGHT - 1) as u8);
 
         let loaded = draw(&mut vga);
-        assert_eq!(loaded.charmaps, alloc::vec![0, 1], "the loaded font is published");
+        assert_eq!(
+            loaded.charmaps,
+            alloc::vec![0, 1],
+            "the loaded font is published"
+        );
         for ch in 0..256 {
             for row in 0..FONT_HEIGHT {
                 assert_eq!(
@@ -5595,7 +5715,10 @@ mod tests {
         let first = draw(&mut vga);
         assert!(first.text_frames > 0, "the card draws a text screen");
         let quiet = draw(&mut vga);
-        assert!(quiet.charmaps.is_empty(), "nothing is pending before the attach");
+        assert!(
+            quiet.charmaps.is_empty(),
+            "nothing is pending before the attach"
+        );
 
         vga.force_initial_update();
 
@@ -5628,7 +5751,11 @@ mod tests {
         restored.rebuild_snapshot_v3_derived_state().unwrap();
 
         let frame = draw(&mut restored);
-        assert_eq!(frame.charmaps, alloc::vec![0, 1], "the restored generator is published");
+        assert_eq!(
+            frame.charmaps,
+            alloc::vec![0, 1],
+            "the restored generator is published"
+        );
         for ch in 0..256 {
             for row in 0..FONT_HEIGHT {
                 assert_eq!(
@@ -5660,8 +5787,15 @@ mod tests {
         seq(&mut vga, 0, 0x01);
 
         let skipped = draw(&mut vga);
-        assert_eq!(skipped.text_frames, 0, "a sequencer in reset draws no frame");
-        assert_eq!(skipped.charmaps, alloc::vec![0, 1], "the font reaches the display regardless");
+        assert_eq!(
+            skipped.text_frames, 0,
+            "a sequencer in reset draws no frame"
+        );
+        assert_eq!(
+            skipped.charmaps,
+            alloc::vec![0, 1],
+            "the font reaches the display regardless"
+        );
         for ch in 0..256 {
             for row in 0..FONT_HEIGHT {
                 assert_eq!(
@@ -5709,19 +5843,29 @@ mod tests {
         let mut vga = card();
         into_text_mode(&mut vga);
         let first = draw(&mut vga);
-        assert_eq!(first.dimensions.as_ref().map(|dims| dims.font_height), Some(16));
+        assert_eq!(
+            first.dimensions.as_ref().map(|dims| dims.font_height),
+            Some(16)
+        );
 
         seq(&mut vga, 0, 0x01);
         crtc(&mut vga, CRTC_MAX_SCAN_LINE, 11);
 
         let skipped = draw(&mut vga);
-        assert_eq!(skipped.text_frames, 0, "a sequencer in reset draws no frame");
+        assert_eq!(
+            skipped.text_frames, 0,
+            "a sequencer in reset draws no frame"
+        );
         assert_eq!(
             skipped.dimensions.as_ref().map(|dims| dims.font_height),
             Some(12),
             "the new cell height is announced"
         );
-        assert_eq!(skipped.charmaps, alloc::vec![0, 1], "and its generator re-read");
+        assert_eq!(
+            skipped.charmaps,
+            alloc::vec![0, 1],
+            "and its generator re-read"
+        );
     }
 
     // Bochs vgacore.cc write case 0x03c0 data-write mode: per-register bit masks.
@@ -5781,8 +5925,15 @@ mod tests {
         vga.attr_index = 5;
         vga.attr_regs[5] = 0x11;
         vga.write_port(VGA_ATTRIB_DATA, 0xFF, 1);
-        assert_eq!(vga.attr_regs[5], 0x11, "0x3C1 write must not modify attr regs");
-        assert_eq!(vga.read_port(VGA_MISC_OUTPUT_WRITE, 1, clock_at(0)), 0x00, "0x3C2 read = 0");
+        assert_eq!(
+            vga.attr_regs[5], 0x11,
+            "0x3C1 write must not modify attr regs"
+        );
+        assert_eq!(
+            vga.read_port(VGA_MISC_OUTPUT_WRITE, 1, clock_at(0)),
+            0x00,
+            "0x3C2 read = 0"
+        );
     }
 
     // ---- CR11 bit 7 write-protects CRTC registers 0-7 ----
@@ -5861,10 +6012,13 @@ mod tests {
         write_vbe(&mut source, VBE_DISPI_INDEX_BPP, VBE_DISPI_BPP_4);
         write_vbe(&mut source, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED);
         write_vbe(&mut source, VBE_DISPI_INDEX_BANK, BANK);
-        write_vram(&mut source, VgaWindow::Legacy, 0, &[0x6d]);
+        write_vram(&mut source, VgaWindow::Legacy, 0, &[0x6D]);
         let mut before = [0];
         read_vram(&mut source, VgaWindow::Legacy, 0, &mut before);
-        assert_eq!(before[0], 0x6d, "the banked byte reads back before the save");
+        assert_eq!(
+            before[0], 0x6D,
+            "the banked byte reads back before the save"
+        );
 
         let mut saved = Vec::new();
         source.save(&mut saved).unwrap();
@@ -5876,7 +6030,10 @@ mod tests {
 
         let mut after = [0];
         read_vram(&mut restored, VgaWindow::Legacy, 0, &mut after);
-        assert_eq!(after[0], 0x6d, "the restored mode reads the same banked byte");
+        assert_eq!(
+            after[0], 0x6D,
+            "the restored mode reads the same banked byte"
+        );
     }
 
     #[cfg(feature = "std")]
@@ -6012,9 +6169,9 @@ mod tests {
             VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED | VBE_DISPI_8BIT_DAC,
         );
         source.core.write_port(VGA_PEL_ADDR_WRITE, 5, 1);
-        source.core.write_port(VGA_PEL_DATA, 0xf0, 1);
+        source.core.write_port(VGA_PEL_DATA, 0xF0, 1);
         source.core.write_port(VGA_PEL_DATA, 0x00, 1);
-        source.core.write_port(VGA_PEL_DATA, 0x0c, 1);
+        source.core.write_port(VGA_PEL_DATA, 0x0C, 1);
         write_vram(&mut source, VgaWindow::Lfb, 0, &[5]);
 
         let mut saved = Vec::new();
@@ -6029,7 +6186,7 @@ mod tests {
         let sink = draw(&mut restored);
         assert_eq!(
             &sink.tile_at(0, 0)[0..4],
-            &[0xf0, 0x00, 0x0c, 0xff],
+            &[0xF0, 0x00, 0x0C, 0xFF],
             "the restored DAC keeps the width the guest chose"
         );
         assert_eq!(
@@ -6038,7 +6195,14 @@ mod tests {
             "a restore republishes the whole DAC table, as Bochs after_restore_state does"
         );
         assert!(
-            sink.palette.contains(&(5, Rgb { red: 0xf0, green: 0x00, blue: 0x0c })),
+            sink.palette.contains(&(
+                5,
+                Rgb {
+                    red: 0xF0,
+                    green: 0x00,
+                    blue: 0x0C
+                }
+            )),
             "republished entries carry the restored width"
         );
     }
@@ -6077,7 +6241,7 @@ mod tests {
 impl crate::api::PioDevice for VgaCore {
     fn pio_read(
         &mut self,
-        port: u16,
+        port: IoPort,
         len: crate::api::IoLen,
         ctx: &mut crate::api::DeviceCtx<'_>,
     ) -> u32 {
@@ -6086,7 +6250,7 @@ impl crate::api::PioDevice for VgaCore {
 
     fn pio_write(
         &mut self,
-        port: u16,
+        port: IoPort,
         value: u32,
         len: crate::api::IoLen,
         _ctx: &mut crate::api::DeviceCtx<'_>,
@@ -6103,10 +6267,7 @@ impl crate::api::PioDevice for VgaCore {
 impl crate::display::DisplaySource for VgaCore {
     fn resolution(&self) -> crate::display::Resolution {
         if let Some(geometry) = self.text_geometry() {
-            return crate::display::Resolution::new(
-                geometry.pixel_width,
-                geometry.pixel_height,
-            );
+            return crate::display::Resolution::new(geometry.pixel_width, geometry.pixel_height);
         }
         let (width, height) = self.determine_screen_dimensions();
         crate::display::Resolution::new(width, height)
@@ -6119,7 +6280,9 @@ impl crate::display::DisplaySource for VgaCore {
         {
             None
         } else {
-            let from_start = geometry.cursor_address.saturating_sub(geometry.start_address);
+            let from_start = geometry
+                .cursor_address
+                .saturating_sub(geometry.start_address);
             Some(crate::display::TextPos::new(
                 usize::from(from_start / geometry.line_offset),
                 usize::from((from_start % geometry.line_offset) / BYTES_PER_CHAR as u16),
@@ -6152,7 +6315,8 @@ impl VgaCard<StdVga> {
     /// successful whole-machine snapshot restore.
     #[cfg(feature = "std")]
     pub fn rebuild_snapshot_v3_derived_state(&mut self) -> SnapResult<()> {
-        self.ext.validate_vbe_snapshot_state(&VgaSnapshotVbeState::from(&self.ext.vbe))?;
+        self.ext
+            .validate_vbe_snapshot_state(&VgaSnapshotVbeState::from(&self.ext.vbe))?;
         self.validate_snapshot_v3_cache_topology()?;
 
         self.core.misc_color_emulation = (self.core.misc_output & MISC_OUT_COLOR_EMULATION) != 0;
@@ -6165,31 +6329,24 @@ impl VgaCard<StdVga> {
         self.core.seq_chain_four = (self.core.seq_regs[SEQ_REG_MEMORY_MODE] & 0x08) != 0;
         self.core.seq_odd_even_dis = (self.core.seq_regs[SEQ_REG_MEMORY_MODE] & 0x04) != 0;
 
-        let (bpp_multiplier, line_offset) = vga_snapshot_vbe_layout(
-            self.ext.vbe.bpp,
-            self.ext.vbe.virtual_xres,
-        )?;
+        let (bpp_multiplier, line_offset) =
+            vga_snapshot_vbe_layout(self.ext.vbe.bpp, self.ext.vbe.virtual_xres)?;
         self.ext.vbe.bpp_multiplier = bpp_multiplier;
         self.ext.vbe.line_offset = line_offset;
         self.ext.vbe.visible_screen_size = u32::from(line_offset)
             .checked_mul(u32::from(self.ext.vbe.yres))
             .ok_or_else(|| invalid_vga_snapshot("VBE visible-screen size overflows"))?;
         self.core.vga_mem_mask = if self.ext.vbe.enabled == VBE_DISPI_ENABLED {
-            self.ext.vbe_memsize
+            self.ext
+                .vbe_memsize
                 .checked_sub(1)
                 .ok_or_else(|| invalid_vga_snapshot("VBE memory size is zero"))?
         } else {
             u32::try_from(VGA_MEM_SIZE - 1)
                 .map_err(|_| invalid_vga_snapshot("legacy VGA memory mask does not fit u32"))?
         };
-        self.core.ext_offset = vga_snapshot_bank_offset(
-            self.ext.vbe.bank[0],
-            self.ext.vbe.bank_granularity_kb,
-        )?;
-        self.core.ext_read_offset = vga_snapshot_bank_offset(
-            self.ext.vbe.bank[1],
-            self.ext.vbe.bank_granularity_kb,
-        )?;
+        self.core.ext_offset =
+            vga_snapshot_bank_offset(self.ext.vbe.bank[0], self.ext.vbe.bank_granularity_kb)?;
         self.ext.sync_planar_alias(&mut self.core);
         self.ext.recompute_vbe_virtual_start(&mut self.core);
         self.core.calculate_retrace_timing();
@@ -6235,17 +6392,18 @@ impl VgaCard<StdVga> {
 
     #[cfg(feature = "std")]
     fn validate_snapshot_v3_source(&self) -> SnapResult<()> {
-        self.ext.validate_vbe_snapshot_state(&VgaSnapshotVbeState::from(&self.ext.vbe))?;
+        self.ext
+            .validate_vbe_snapshot_state(&VgaSnapshotVbeState::from(&self.ext.vbe))?;
         self.validate_snapshot_v3_cache_topology()?;
-        if snapshot_v3_usize_len(self.core.vbe_memory.len())?
-            != u64::from(self.ext.vbe_memsize)
-        {
+        if snapshot_v3_usize_len(self.core.vbe_memory.len())? != u64::from(self.ext.vbe_memsize) {
             return Err(invalid_vga_snapshot(
                 "live VBE backing storage does not match configured size",
             ));
         }
         if self.core.pel_data.len() > MAX_COUNT {
-            return Err(invalid_vga_snapshot("VGA palette exceeds snapshot count bound"));
+            return Err(invalid_vga_snapshot(
+                "VGA palette exceeds snapshot count bound",
+            ));
         }
         Ok(())
     }
@@ -6273,26 +6431,29 @@ impl VgaCard<StdVga> {
         if attr_index > ATTR_INDEX_MASK {
             return Err(invalid_vga_snapshot("VGA attribute index is out of range"));
         }
-        if !matches!(
-            dac_state,
-            DAC_STATE_WRITE_MODE | DAC_STATE_READ_MODE | 0x01
-        ) {
+        if !matches!(dac_state, DAC_STATE_WRITE_MODE | DAC_STATE_READ_MODE | 0x01) {
             return Err(invalid_vga_snapshot("VGA DAC state is invalid"));
         }
         if pel_write_cycle >= PEL_CYCLES_PER_COLOR || pel_read_cycle >= PEL_CYCLES_PER_COLOR {
             return Err(invalid_vga_snapshot("VGA DAC cycle is out of range"));
         }
         if has_icount_sync != self.core.has_icount_sync || ips != self.core.ips {
-            return Err(invalid_vga_snapshot("VGA retrace clock configuration mismatch"));
+            return Err(invalid_vga_snapshot(
+                "VGA retrace clock configuration mismatch",
+            ));
         }
         if vbe_memsize != self.ext.vbe_memsize {
             return Err(invalid_vga_snapshot("VBE memory configuration mismatch"));
         }
         if preferred_mode != self.core.preferred_mode {
-            return Err(invalid_vga_snapshot("VBE preferred-mode configuration mismatch"));
+            return Err(invalid_vga_snapshot(
+                "VBE preferred-mode configuration mismatch",
+            ));
         }
         if pci_enabled != self.ext.pci_enabled {
-            return Err(invalid_vga_snapshot("VGA PCI enable configuration mismatch"));
+            return Err(invalid_vga_snapshot(
+                "VGA PCI enable configuration mismatch",
+            ));
         }
         self.ext.validate_vbe_snapshot_state(vbe)?;
         validate_vga_snapshot_bar_base(target.lfb_base, self.ext.vbe_memsize)?;
@@ -6312,7 +6473,9 @@ impl VgaCard<StdVga> {
         if u32::from(self.core.num_x_tiles) != expected_x_tiles
             || u32::from(self.core.num_y_tiles) != expected_y_tiles
         {
-            return Err(invalid_vga_snapshot("VGA tile topology does not match configuration"));
+            return Err(invalid_vga_snapshot(
+                "VGA tile topology does not match configuration",
+            ));
         }
         let tile_count = expected_x_tiles
             .checked_mul(expected_y_tiles)
@@ -6328,8 +6491,9 @@ impl VgaCard<StdVga> {
 
 #[cfg(feature = "std")]
 impl rusty_box_core::snap::SnapshotSection for VgaCard<StdVga> {
-    const TAG: u32 = SEC_VGA;
     type Restored = VgaSnapshotRestoreTarget;
+
+    const TAG: u32 = SEC_VGA;
 
     /// Returns the exact byte length of the standalone VGA v3 section payload.
     fn snapshot_len(&self) -> SnapResult<u64> {
@@ -6477,12 +6641,11 @@ impl rusty_box_core::snap::SnapshotSection for VgaCard<StdVga> {
     /// Decoding never changes `vbe.base_address` or `mmio_base`, nor does it
     /// register a memory handler.  The caller must use the returned target only
     /// after the machine-level atomic relocation succeeds.
-    fn restore<R: SnapRead>(
-        &mut self,
-        reader: &mut R,
-    ) -> SnapResult<VgaSnapshotRestoreTarget> {
+    fn restore<R: SnapRead>(&mut self, reader: &mut R) -> SnapResult<VgaSnapshotRestoreTarget> {
         if reader.read_u32()? != SECTION_VERSION {
-            return Err(invalid_vga_snapshot("unsupported VGA snapshot section version"));
+            return Err(invalid_vga_snapshot(
+                "unsupported VGA snapshot section version",
+            ));
         }
 
         let crtc_index = reader.read_u8()?;
@@ -6567,18 +6730,18 @@ impl rusty_box_core::snap::SnapshotSection for VgaCard<StdVga> {
         }
         let mut saved_bar0 = 0u32;
         let mut saved_bar2 = 0u32;
-        let expected_bar0_low = self.ext.pci_conf[0x10] & 0x0f;
-        let expected_bar2_low = self.ext.pci_conf[0x18] & 0x0f;
+        let expected_bar0_low = self.ext.pci_conf[0x10] & 0x0F;
+        let expected_bar2_low = self.ext.pci_conf[0x18] & 0x0F;
         for index in 0..self.ext.pci_conf.len() {
             let saved = reader.read_u8()?;
             let live = self.ext.pci_conf[index];
             if !vga_snapshot_pci_byte_is_mutable(index) && saved != live {
                 return Err(invalid_vga_snapshot("VGA immutable PCI config mismatch"));
             }
-            if index == 0x10 && saved & 0x0f != expected_bar0_low {
+            if index == 0x10 && saved & 0x0F != expected_bar0_low {
                 return Err(invalid_vga_snapshot("VGA BAR0 type bits changed"));
             }
-            if index == 0x18 && saved & 0x0f != expected_bar2_low {
+            if index == 0x18 && saved & 0x0F != expected_bar2_low {
                 return Err(invalid_vga_snapshot("VGA BAR2 type bits changed"));
             }
             match index {
@@ -6588,8 +6751,8 @@ impl rusty_box_core::snap::SnapshotSection for VgaCard<StdVga> {
                 0x13 => saved_bar0 |= u32::from(saved) << 24,
                 0x18 => saved_bar2 |= u32::from(saved),
                 0x19 => saved_bar2 |= u32::from(saved) << 8,
-                0x1a => saved_bar2 |= u32::from(saved) << 16,
-                0x1b => saved_bar2 |= u32::from(saved) << 24,
+                0x1A => saved_bar2 |= u32::from(saved) << 16,
+                0x1B => saved_bar2 |= u32::from(saved) << 24,
                 _ => {}
             }
             self.ext.pci_conf[index] = saved;
@@ -6653,7 +6816,8 @@ impl rusty_box_core::snap::SnapshotSection for VgaCard<StdVga> {
 
         let palette_len = read_snapshot_u32_len(
             reader,
-            self.core.pel_data
+            self.core
+                .pel_data
                 .len()
                 .checked_mul(usize::from(PEL_CYCLES_PER_COLOR))
                 .ok_or_else(|| invalid_vga_snapshot("VGA palette length overflows"))?,
@@ -6678,13 +6842,14 @@ impl rusty_box_core::snap::SnapshotSection for VgaCard<StdVga> {
 
         let vbe_len = reader.read_len(self.core.vbe_memory.len())?;
         if vbe_len != self.core.vbe_memory.len() {
-            return Err(invalid_vga_snapshot("VBE memory length does not match configuration"));
+            return Err(invalid_vga_snapshot(
+                "VBE memory length does not match configuration",
+            ));
         }
         reader.read_bytes(&mut self.core.vbe_memory)?;
 
         Ok(target)
     }
-
 }
 
 /// The DISPI register file and the PCI device — Bochs vga.cc, which is
@@ -6793,7 +6958,8 @@ impl StdVga {
     /// Translates MMIO offset writes into VBE register writes.
     /// Matches Bochs `bx_vga_c::vbe_mmio_write_handler`.
     pub(crate) fn vbe_mmio_write(
-        &mut self, core: &mut VgaCore,
+        &mut self,
+        core: &mut VgaCore,
         at: crate::api::WindowOffset,
         len: u32,
         data: &[u8],
@@ -6884,7 +7050,7 @@ impl StdVga {
                 } else {
                     VBE_DISPI_BANK_RW // compatibility mode
                 };
-                let bank_val = value16 & 0x1ff;
+                let bank_val = value16 & 0x1FF;
                 if bank_val < num_banks {
                     if (rw_mode & VBE_DISPI_BANK_WR) != 0 {
                         self.vbe.bank[0] = bank_val;
@@ -6892,10 +7058,8 @@ impl StdVga {
                     if (rw_mode & VBE_DISPI_BANK_RD) != 0 {
                         self.vbe.bank[1] = bank_val;
                     }
-                    core.ext_offset =
-                        self.vbe.bank[0] as u32 * ((self.vbe.bank_granularity_kb as u32) << 10);
-                    core.ext_read_offset =
-                        self.vbe.bank[1] as u32 * ((self.vbe.bank_granularity_kb as u32) << 10);
+                    core.ext_offset = u32::from(self.vbe.bank[0])
+                        * (u32::from(self.vbe.bank_granularity_kb) << 10);
                 }
             }
             VBE_DISPI_INDEX_ENABLE => {
@@ -6908,7 +7072,6 @@ impl StdVga {
                     self.vbe.offset_y = 0;
                     self.vbe.virtual_start = 0;
                     core.ext_offset = 0;
-                    core.ext_read_offset = 0;
                     core.vga_mem_mask = core.vbe_memsize.saturating_sub(1);
                     self.vbe.bank = [0; 2];
 
@@ -6974,7 +7137,6 @@ impl StdVga {
                     core.text_buffer_update = true;
                     core.last_yres = 0;
                     core.ext_offset = 0;
-                    core.ext_read_offset = 0;
                     core.vga_mem_mask = (VGA_MEM_SIZE - 1) as u32;
                     self.vbe.bank = [0; 2];
                 }
@@ -6993,7 +7155,6 @@ impl StdVga {
                     self.vbe.bank[0] = 0;
                     self.vbe.bank[1] = 0;
                     core.ext_offset = 0;
-                    core.ext_read_offset = 0;
                 }
 
                 // Handle 8-bit DAC mode change
@@ -7145,13 +7306,17 @@ impl StdVga {
     #[cfg(feature = "std")]
     fn validate_vbe_snapshot_state(&self, vbe: &VgaSnapshotVbeState) -> SnapResult<()> {
         if self.vbe_memsize == 0 || !self.vbe_memsize.is_power_of_two() {
-            return Err(invalid_vga_snapshot("VBE memory configuration is not a power of two"));
+            return Err(invalid_vga_snapshot(
+                "VBE memory configuration is not a power of two",
+            ));
         }
         if vbe.max_xres != self.vbe.max_xres
             || vbe.max_yres != self.vbe.max_yres
             || vbe.max_bpp != self.vbe.max_bpp
         {
-            return Err(invalid_vga_snapshot("VBE capability configuration mismatch"));
+            return Err(invalid_vga_snapshot(
+                "VBE capability configuration mismatch",
+            ));
         }
         if vbe.cur_dispi < VBE_DISPI_ID0 || vbe.cur_dispi > VBE_DISPI_ID5 {
             return Err(invalid_vga_snapshot("VBE DISPI identifier is invalid"));
@@ -7187,7 +7352,9 @@ impl StdVga {
             .checked_mul(u32::from(vbe.yres))
             .ok_or_else(|| invalid_vga_snapshot("VBE visible-screen size overflows"))?;
         if virtual_size > self.vbe_memsize || visible_size > self.vbe_memsize {
-            return Err(invalid_vga_snapshot("VBE screen geometry exceeds configured memory"));
+            return Err(invalid_vga_snapshot(
+                "VBE screen geometry exceeds configured memory",
+            ));
         }
         if u32::from(vbe.offset_x)
             .checked_add(u32::from(vbe.xres))
@@ -7198,7 +7365,9 @@ impl StdVga {
                 .ok_or_else(|| invalid_vga_snapshot("VBE vertical offset overflows"))?
                 > u32::from(vbe.virtual_yres)
         {
-            return Err(invalid_vga_snapshot("VBE display offset is outside the virtual screen"));
+            return Err(invalid_vga_snapshot(
+                "VBE display offset is outside the virtual screen",
+            ));
         }
 
         let bank_granularity = u32::from(vbe.bank_granularity_kb)
@@ -7212,11 +7381,15 @@ impl StdVga {
             || u32::from(vbe.bank[0]) >= bank_count
             || u32::from(vbe.bank[1]) >= bank_count
         {
-            return Err(invalid_vga_snapshot("VBE bank is outside configured memory"));
+            return Err(invalid_vga_snapshot(
+                "VBE bank is outside configured memory",
+            ));
         }
         for bank in vbe.bank {
             if vga_snapshot_bank_offset(bank, vbe.bank_granularity_kb)? >= self.vbe_memsize {
-                return Err(invalid_vga_snapshot("VBE bank offset is outside configured memory"));
+                return Err(invalid_vga_snapshot(
+                    "VBE bank offset is outside configured memory",
+                ));
             }
         }
         Ok(())
@@ -7233,30 +7406,40 @@ impl StdVga {
         self.vbe.virtual_start = virtual_start & core.vga_mem_mask;
     }
 
+    /// Where the linear framebuffer starts in the physical address space.
+    #[cfg(feature = "alloc")]
+    fn vbe_base(&self) -> BxPhyAddress {
+        BxPhyAddress::new(u64::from(self.vbe.base_address))
+    }
+
+    /// The offset into VBE memory that `addr` reaches through the window
+    /// bank `bank` selects, or through the linear framebuffer: Bochs vga.cc
+    /// `vbe_mem_read` and `vbe_mem_write`. `None` past the banked window.
+    #[cfg(feature = "alloc")]
+    fn vbe_offset(&self, addr: BxPhyAddress, bank: u16) -> Option<u64> {
+        if addr >= self.vbe_base() {
+            Some(addr - self.vbe_base())
+        } else if addr < BxPhyAddress::new(0xB0000) {
+            Some(
+                u64::from(bank) * (u64::from(self.vbe.bank_granularity_kb) << 10)
+                    + (addr.get() & 0xFFFF),
+            )
+        } else {
+            None
+        }
+    }
+
     #[cfg(feature = "alloc")]
     fn vbe_mem_read_byte(&mut self, core: &mut VgaCore, addr: BxPhyAddress) -> u8 {
-        let offset = if addr >= self.vbe.base_address as BxPhyAddress {
-            addr - self.vbe.base_address as BxPhyAddress
-        } else if addr < 0xB0000 {
-            self.vbe.bank[1] as BxPhyAddress
-                * ((self.vbe.bank_granularity_kb as BxPhyAddress) << 10)
-                + (addr & 0xffff)
-        } else {
+        let Some(offset) = self.vbe_offset(addr, self.vbe.bank[1]) else {
             return 0;
         };
-
         core.vbe_memory.get(offset as usize).copied().unwrap_or(0)
     }
 
     #[cfg(feature = "alloc")]
     fn vbe_mem_write_byte(&mut self, core: &mut VgaCore, addr: BxPhyAddress, value: u8) {
-        let offset = if addr >= self.vbe.base_address as BxPhyAddress {
-            addr - self.vbe.base_address as BxPhyAddress
-        } else if addr < 0xB0000 {
-            self.vbe.bank[0] as BxPhyAddress
-                * ((self.vbe.bank_granularity_kb as BxPhyAddress) << 10)
-                + (addr & 0xffff)
-        } else {
+        let Some(offset) = self.vbe_offset(addr, self.vbe.bank[0]) else {
             return;
         };
 
@@ -7265,18 +7448,18 @@ impl StdVga {
         };
         *slot = value;
 
-        let virtual_start = self.vbe.virtual_start as BxPhyAddress;
+        let virtual_start = u64::from(self.vbe.virtual_start);
         if offset < virtual_start {
             return;
         }
         let visible_offset = offset - virtual_start;
-        if visible_offset >= self.vbe.visible_screen_size as BxPhyAddress {
+        if visible_offset >= u64::from(self.vbe.visible_screen_size) {
             return;
         }
 
-        let bpp_multiplier = self.vbe.bpp_multiplier.max(1) as BxPhyAddress;
+        let bpp_multiplier = u64::from(self.vbe.bpp_multiplier.max(1));
         let pixel_offset = visible_offset / bpp_multiplier;
-        let virtual_xres = self.vbe.virtual_xres.max(1) as BxPhyAddress;
+        let virtual_xres = u64::from(self.vbe.virtual_xres.max(1));
         let x_tile = ((pixel_offset % virtual_xres) as u32) / VGA_X_TILESIZE;
         let y_tile = ((pixel_offset / virtual_xres) as u32) / VGA_Y_TILESIZE;
         // Bochs vga.cc vbe_mem_write: an onscreen write inside the tile grid
@@ -7289,7 +7472,8 @@ impl StdVga {
 
     #[cfg(feature = "alloc")]
     fn refresh_vbe_graphics<S: DisplaySink>(
-        &mut self, core: &mut VgaCore,
+        &mut self,
+        core: &mut VgaCore,
         sink: &mut S,
         dirt: crate::display::card::Dirt<'_>,
     ) -> Refreshed {
@@ -7381,7 +7565,7 @@ impl StdVga {
                         let pixel = match self.vbe.bpp {
                             VBE_DISPI_BPP_4 => {
                                 let dac =
-                                    core.get_vga_pixel(x as u16, y as u16, row_addr, 0xffff, false);
+                                    core.get_vga_pixel(x as u16, y as u16, row_addr, 0xFFFF, false);
                                 core.dac_index_to_rgba(dac)
                             }
                             VBE_DISPI_BPP_8 => {
@@ -7395,14 +7579,14 @@ impl StdVga {
                                 let hi =
                                     core.vbe_memory[((offset + 1) & vbe_mem_mask) as usize] as u16;
                                 let value = lo | (hi << 8);
-                                let r = ((value >> 10) & 0x1f) as u8;
-                                let g = ((value >> 5) & 0x1f) as u8;
-                                let b = (value & 0x1f) as u8;
+                                let r = ((value >> 10) & 0x1F) as u8;
+                                let g = ((value >> 5) & 0x1F) as u8;
+                                let b = (value & 0x1F) as u8;
                                 [
                                     (r << 3) | (r >> 2),
                                     (g << 3) | (g >> 2),
                                     (b << 3) | (b >> 2),
-                                    0xff,
+                                    0xFF,
                                 ]
                             }
                             VBE_DISPI_BPP_16 => {
@@ -7411,14 +7595,14 @@ impl StdVga {
                                 let hi =
                                     core.vbe_memory[((offset + 1) & vbe_mem_mask) as usize] as u16;
                                 let value = lo | (hi << 8);
-                                let r = ((value >> 11) & 0x1f) as u8;
-                                let g = ((value >> 5) & 0x3f) as u8;
-                                let b = (value & 0x1f) as u8;
+                                let r = ((value >> 11) & 0x1F) as u8;
+                                let g = ((value >> 5) & 0x3F) as u8;
+                                let b = (value & 0x1F) as u8;
                                 [
                                     (r << 3) | (r >> 2),
                                     (g << 2) | (g >> 4),
                                     (b << 3) | (b >> 2),
-                                    0xff,
+                                    0xFF,
                                 ]
                             }
                             VBE_DISPI_BPP_24 => {
@@ -7426,16 +7610,16 @@ impl StdVga {
                                 let b = core.vbe_memory[offset as usize];
                                 let g = core.vbe_memory[((offset + 1) & vbe_mem_mask) as usize];
                                 let r = core.vbe_memory[((offset + 2) & vbe_mem_mask) as usize];
-                                [r, g, b, 0xff]
+                                [r, g, b, 0xFF]
                             }
                             VBE_DISPI_BPP_32 => {
                                 let offset = (row_addr + x * 4) & vbe_mem_mask;
                                 let b = core.vbe_memory[offset as usize];
                                 let g = core.vbe_memory[((offset + 1) & vbe_mem_mask) as usize];
                                 let r = core.vbe_memory[((offset + 2) & vbe_mem_mask) as usize];
-                                [r, g, b, 0xff]
+                                [r, g, b, 0xFF]
                             }
-                            _ => [0, 0, 0, 0xff],
+                            _ => [0, 0, 0, 0xFF],
                         };
                         let dst = ((r * tile_width + c) * 4) as usize;
                         rgba[dst..dst + 4].copy_from_slice(&pixel);
@@ -7530,8 +7714,8 @@ impl StdVga {
         let mmio_bar = u32::from_le_bytes([
             self.pci_conf[0x18],
             self.pci_conf[0x19],
-            self.pci_conf[0x1a],
-            self.pci_conf[0x1b],
+            self.pci_conf[0x1A],
+            self.pci_conf[0x1B],
         ]);
         VgaSnapshotRestoreTarget {
             lfb_base: lfb_bar & !(self.vbe_memsize - 1),
@@ -7560,8 +7744,9 @@ impl StdVga {
 }
 
 impl crate::pci::PciDevice for StdVga {
-    const DEVFUNC: u8 = crate::pci::pci_device(2, 0);
     type WriteEffects = VgaBarChange;
+
+    const DEVFUNC: u8 = crate::pci::pci_device(2, 0);
 
     /// Read the PCI config space. Reads back `0xFFFFFFFF` (no device) when PCI is
     /// disabled, so a gated-off VGA is invisible to enumeration.
@@ -7599,8 +7784,8 @@ impl crate::pci::PciDevice for StdVga {
         let mut bar_change = 0u8;
         if let Some((base_reg, size)) = bar {
             // Size probe: a write of >= 0xfffffff0 must read back the size mask.
-            if value >= 0xffff_fff0 {
-                let low = self.pci_conf[base_reg as usize] & 0x0f;
+            if value >= 0xFFFF_FFF0 {
+                let low = self.pci_conf[base_reg as usize] & 0x0F;
                 value = (value & !(size - 1)) | (low as u32);
                 bar_change = 2; // marks a probe; never commits
             }
@@ -7611,12 +7796,12 @@ impl crate::pci::PciDevice for StdVga {
             if addr >= 256 {
                 break;
             }
-            let mut value8 = ((value >> (i * 8)) & 0xff) as u8;
+            let mut value8 = ((value >> (i * 8)) & 0xFF) as u8;
             let oldval = self.pci_conf[addr];
             match bar {
                 Some((base_reg, _)) if addr == base_reg as usize => {
                     // Aligned low byte of a MEM BAR: keep the type nibble.
-                    value8 = (value8 & 0xf0) | (oldval & 0x0f);
+                    value8 = (value8 & 0xF0) | (oldval & 0x0F);
                 }
                 Some(_) => {} // upper BAR bytes: stored verbatim
                 None => match addr {
@@ -7656,5 +7841,4 @@ impl crate::pci::PciDevice for StdVga {
         }
         change
     }
-
 }

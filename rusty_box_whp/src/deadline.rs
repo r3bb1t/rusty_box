@@ -54,7 +54,6 @@
 use std::time::Duration;
 
 use crate::sys;
-
 pub use crate::sys::DeadlineWake;
 
 /// A deadline a thread can wait on, and a doorbell for changing its mind.
@@ -133,7 +132,9 @@ impl DeadlineTimer {
         if let Some(raw) = self.raw {
             match sys::ring_deadline(raw) {
                 Ok(()) => {}
-                Err(error) => tracing::error!("a device deadline's doorbell would not ring: {error}"),
+                Err(error) => {
+                    tracing::error!("a device deadline's doorbell would not ring: {error}")
+                }
             }
         }
     }
@@ -203,8 +204,9 @@ impl Drop for DeadlineTimer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Instant;
+
+    use super::*;
 
     /// A wait for a deadline ends at the deadline, and says so.
     ///
@@ -243,7 +245,11 @@ mod tests {
         let wake = timer.wait(Duration::from_secs(30));
         let waited = began.elapsed();
         hand.join().expect("the ringing thread");
-        assert_eq!(wake, DeadlineWake::Rung, "the doorbell ended it, not the deadline");
+        assert_eq!(
+            wake,
+            DeadlineWake::Rung,
+            "the doorbell ended it, not the deadline"
+        );
         assert!(
             waited < Duration::from_secs(5),
             "the ring must not wait out a 30 s deadline: {waited:?}"

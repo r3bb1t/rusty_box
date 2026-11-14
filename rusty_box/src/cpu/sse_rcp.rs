@@ -13,13 +13,13 @@
 //! SoftFloat status word is involved (Bochs `approximate_rcp` /
 //! `approximate_rsqrt` take none either).
 
-use super::sse_rcp_tables::{RCP_TABLE, RSQRT_TABLE0, RSQRT_TABLE1};
+use super::decoder::Instruction;
 use super::softfloat3e::f32_class::f32_class;
 use super::softfloat3e::internals::pack_to_f32;
-use super::softfloat3e::softfloat::{f32_sign, SoftFloatClass};
+use super::softfloat3e::softfloat::{SoftFloatClass, f32_sign};
 use super::softfloat3e::softfloat_types::Float32;
 use super::softfloat3e::specialize::{FLOAT32_DEFAULT_NAN, FLOAT32_EXP_BIAS};
-use super::decoder::Instruction;
+use super::sse_rcp_tables::{RCP_TABLE, RSQRT_TABLE0, RSQRT_TABLE1};
 
 /// Bochs xmm.h `convert_to_QNaN` — force the quiet bit on a NaN.
 #[inline]
@@ -37,7 +37,7 @@ pub(super) fn approximate_rcp(op: Float32) -> Float32 {
     match f32_class(op) {
         SoftFloatClass::Zero | SoftFloatClass::Denormal => return pack_to_f32(sign, 0xFF, 0),
         SoftFloatClass::NegativeInf | SoftFloatClass::PositiveInf => {
-            return pack_to_f32(sign, 0, 0)
+            return pack_to_f32(sign, 0, 0);
         }
         SoftFloatClass::SNaN | SoftFloatClass::QNaN => return convert_to_qnan(op),
         SoftFloatClass::Normalized => {}
@@ -52,7 +52,11 @@ pub(super) fn approximate_rcp(op: Float32) -> Float32 {
         return pack_to_f32(sign, 0, 0);
     }
 
-    pack_to_f32(sign, exp, (RCP_TABLE[(fraction >> 12) as usize] as u32) << 8)
+    pack_to_f32(
+        sign,
+        exp,
+        (RCP_TABLE[(fraction >> 12) as usize] as u32) << 8,
+    )
 }
 
 /// Bochs sse_rcp.cc `approximate_rsqrt`.

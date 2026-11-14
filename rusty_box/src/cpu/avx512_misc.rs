@@ -8,7 +8,9 @@
 //! Mirrors Bochs `cpu/avx/avx512.cc`, `avx512_move.cc`, `avx512_conflict.cc`.
 
 use super::avx512_load::cut_opmask_to;
-use super::{cpu::BxCpuC, decoder::Instruction, xmm::BxPackedZmmRegister};
+use super::cpu::BxCpuC;
+use super::decoder::Instruction;
+use super::xmm::BxPackedZmmRegister;
 
 // ============================================================================
 // Helper functions (duplicated from avx512.rs — module-private there)
@@ -691,8 +693,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.avx_masked_store64(instr, eaddr, &result, writemask)
         }
     }
-
-
 }
 
 #[cfg(all(test, feature = "alloc"))]
@@ -701,10 +701,10 @@ mod tests {
     //! *data* rather than as a writemask, and VPCONFLICT looks only backwards
     //! — element n never sees elements above it.
 
-    use crate::cpu::decoder::BxSegregs;
     use rusty_box_decoder::opcode::Opcode;
 
     use super::*;
+    use crate::cpu::decoder::BxSegregs;
 
     fn evex_misc(opcode: Opcode, vl: u8) -> Instruction {
         let mut i = Instruction::default();
@@ -737,7 +737,11 @@ mod tests {
         c.execute_instruction(&evex_misc(Opcode::EvexVpbroadcastmw2dVdqKew, 1))
             .unwrap();
         for n in 0..8 {
-            assert_eq!(c.vmm[0].zmm32u(n), 0x00AB, "dword {n} takes the low 16 bits");
+            assert_eq!(
+                c.vmm[0].zmm32u(n),
+                0x00AB,
+                "dword {n} takes the low 16 bits"
+            );
         }
     }
 
@@ -804,5 +808,4 @@ mod tests {
             "the run is only as long as the popcount"
         );
     }
-
 }

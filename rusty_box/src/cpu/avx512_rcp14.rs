@@ -56,7 +56,7 @@ pub(super) fn approximate_rcp14_f32(op: Float32, daz: bool, ftz: bool) -> Float3
     match f32_class(op) {
         SoftFloatClass::Zero => return pack_to_f32(sign, 0xFF, 0),
         SoftFloatClass::NegativeInf | SoftFloatClass::PositiveInf => {
-            return pack_to_f32(sign, 0, 0)
+            return pack_to_f32(sign, 0, 0);
         }
         SoftFloatClass::SNaN | SoftFloatClass::QNaN => return quieten_f32(op),
         SoftFloatClass::Denormal => {
@@ -95,7 +95,7 @@ pub(super) fn approximate_rcp14_f64(op: Float64, daz: bool, ftz: bool) -> Float6
     match f64_class(op) {
         SoftFloatClass::Zero => return pack_to_f64(sign, 0x7FF, 0),
         SoftFloatClass::NegativeInf | SoftFloatClass::PositiveInf => {
-            return pack_to_f64(sign, 0, 0)
+            return pack_to_f64(sign, 0, 0);
         }
         SoftFloatClass::SNaN | SoftFloatClass::QNaN => return quieten_f64(op),
         SoftFloatClass::Denormal => {
@@ -309,7 +309,10 @@ mod tests {
     #[test]
     fn the_special_cases_are_exact() {
         // Zero reciprocates to infinity of the same sign, infinity to zero.
-        assert_eq!(approximate_rcp14_f32(0.0f32.to_bits(), false, false), 0x7F80_0000);
+        assert_eq!(
+            approximate_rcp14_f32(0.0f32.to_bits(), false, false),
+            0x7F80_0000
+        );
         assert_eq!(
             approximate_rcp14_f32((-0.0f32).to_bits(), false, false),
             0xFF80_0000
@@ -325,7 +328,10 @@ mod tests {
 
         // A signalling NaN is quietened, not signalled — VRCP14 raises nothing.
         let snan = 0x7F80_0001u32;
-        assert_eq!(approximate_rcp14_f32(snan, false, false), snan | 0x0040_0000);
+        assert_eq!(
+            approximate_rcp14_f32(snan, false, false),
+            snan | 0x0040_0000
+        );
 
         // rsqrt of a negative is the default NaN; of +inf is zero.
         assert_eq!(

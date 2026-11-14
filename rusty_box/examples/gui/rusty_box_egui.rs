@@ -16,16 +16,16 @@
 //! RUSTY_BOX_BOOT=alpine ALPINE_RAM_MB=512 cargo run --release --example rusty_box_egui --features "std,gui-egui"
 //! ```
 
-use rusty_box::{
-    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MemorySize, MachineBuilder},
-    gui::{shared_display::SharedDisplay, BridgeGui, RustyBoxApp},
-    Result,
-};
-use std::sync::{
-    atomic::Ordering,
-    {Arc, Mutex},
-};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use rusty_box::Result;
+use rusty_box::emulator::{
+    AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MachineBuilder, MemorySize,
+};
+use rusty_box::gui::shared_display::SharedDisplay;
+use rusty_box::gui::{BridgeGui, RustyBoxApp};
 
 // =========================================================================
 // Boot profile
@@ -122,32 +122,34 @@ fn main() {
     let emu_thread = std::thread::Builder::new()
         .stack_size(1500 * 1024 * 1024)
         .name("Emulator".to_string())
-        .spawn(move || loop {
-            {
-                let mut d = shared_for_emu.lock().unwrap();
-                d.stop_flag.store(false, Ordering::Relaxed);
-                d.emu_running = true;
-                d.reset_requested = false;
-            }
+        .spawn(move || {
+            loop {
+                {
+                    let mut d = shared_for_emu.lock().unwrap();
+                    d.stop_flag.store(false, Ordering::Relaxed);
+                    d.emu_running = true;
+                    d.reset_requested = false;
+                }
 
-            if let Err(e) = run_emulator(
-                &profile,
-                &bios_data,
-                vga_bios.as_deref(),
-                Arc::clone(&shared_for_emu),
-                max_instructions,
-            ) {
-                eprintln!("Emulator error: {:?}", e);
-            }
+                if let Err(e) = run_emulator(
+                    &profile,
+                    &bios_data,
+                    vga_bios.as_deref(),
+                    Arc::clone(&shared_for_emu),
+                    max_instructions,
+                ) {
+                    eprintln!("Emulator error: {:?}", e);
+                }
 
-            let restart = {
-                let d = shared_for_emu.lock().unwrap();
-                d.reset_requested
-            };
-            if !restart {
-                break;
+                let restart = {
+                    let d = shared_for_emu.lock().unwrap();
+                    d.reset_requested
+                };
+                if !restart {
+                    break;
+                }
+                println!("Restarting emulator (Reset requested)...");
             }
-            println!("Restarting emulator (Reset requested)...");
         })
         .expect("Failed to spawn emulator thread");
 

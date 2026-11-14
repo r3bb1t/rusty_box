@@ -3,8 +3,8 @@
 Everything after the `---` below is the PR body, ready to paste. The notes above
 it are for whoever files it and are not part of the PR.
 
-**Files that go with it** (all in `docs/`):
-- `bochs-vex-shift-imm-memory-fix.patch` — the fix as a `git am`-ready patch.
+**Files that go with it**:
+- `docs/patches/bochs/bochs-vex-shift-imm-memory-fix.patch` — the fix as a `git am`-ready patch.
   - Author is `r3bb1t`, the identity configured in the `cpp_orig/bochs`
     checkout.
   - It touches two files: twenty `ATTR_MODC0` additions in
@@ -13,7 +13,7 @@ it are for whoever files it and are not part of the PR.
   - Checked with `git apply --check` against upstream master `f87c5e226`
     (2026-10-03).
   - Drop the HISTORY hunk if the maintainer prefers to write HISTORY himself.
-- `bochs-vex-shift-imm-memory-probe.S` — the reproduction, a 512-byte boot
+- `docs/bochs-vex-shift-imm-memory-probe.S` — the reproduction, a 512-byte boot
   sector built with GNU binutils alone. Attach it to the PR, or paste it into a
   collapsed section.
 
@@ -22,8 +22,8 @@ it are for whoever files it and are not part of the PR.
    `git apply --check` first, because upstream moves daily. The hunks are
    anchored on the three group arrays, not on line numbers, so an offset is
    harmless.
-2. Run `git am docs/bochs-vex-shift-imm-memory-fix.patch`, adjusting the commit
-   message or the Date header if wanted. Push the branch to `r3bb1t/Bochs`, then
+2. Run `git am docs/patches/bochs/bochs-vex-shift-imm-memory-fix.patch`,
+   adjusting the commit message or the Date header if wanted. Push the branch to `r3bb1t/Bochs`, then
    open the PR against `bochs-emu/Bochs` master with the body below.
 3. Update the "Filing status" of the entry in `docs/bochs-upstream-bugs.md`
    with the PR link.

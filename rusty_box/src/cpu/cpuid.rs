@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 use bitflags::bitflags;
 
-use super::{decoder::BX_ISA_EXTENSIONS_ARRAY_SIZE, Result};
+use super::Result;
+use super::decoder::BX_ISA_EXTENSIONS_ARRAY_SIZE;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CpuIdError {}

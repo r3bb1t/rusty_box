@@ -19,10 +19,11 @@
 
 use std::time::{Duration, Instant};
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig, MemorySize, RunBudget, StopReason};
 use rusty_box_whp::{
-    GpaPerms, HostPages, LocalApicMode, PartitionConfig, Reg, ExitReason, WhpResult,
+    ExitReason, GpaPerms, HostPages, LocalApicMode, PartitionConfig, Reg, WhpResult,
 };
 
 /// Where the guest's code goes, in both machines.
@@ -73,7 +74,9 @@ const RESET_CS_BASE: u64 = 0xF_0000;
 /// ```
 fn guest(iterations: u32) -> Vec<u8> {
     let n = iterations.to_le_bytes();
-    vec![0x66, 0xB9, n[0], n[1], n[2], n[3], 0x66, 0x49, 0x75, 0xFC, 0xF4]
+    vec![
+        0x66, 0xB9, n[0], n[1], n[2], n[3], 0x66, 0x49, 0x75, 0xFC, 0xF4,
+    ]
 }
 
 fn config() -> EmulatorConfig {
@@ -118,7 +121,7 @@ fn interpreter_hooked(code: &[u8]) -> Option<Duration> {
         Tracer::default(),
     )
     .ok()?;
-    machine.mem_write(CODE, code).ok()?;
+    machine.mem_write(BxPhyAddress::new(CODE), code).ok()?;
     machine.reg_write(X86Reg::Rip, CODE);
     let began = Instant::now();
     loop {
@@ -135,7 +138,7 @@ fn interpreter_hooked(code: &[u8]) -> Option<Duration> {
 /// The interpreter, running free with no hook — the ceiling.
 fn interpreter_free(code: &[u8]) -> Option<Duration> {
     let mut machine = Emulator::<()>::new_with_mode(config(), CpuSetupMode::RealMode).ok()?;
-    machine.mem_write(CODE, code).ok()?;
+    machine.mem_write(BxPhyAddress::new(CODE), code).ok()?;
     machine.reg_write(X86Reg::Rip, CODE);
     let began = Instant::now();
     loop {
@@ -153,7 +156,7 @@ fn interpreter_free(code: &[u8]) -> Option<Duration> {
 /// costs, since each call rebuilds the execution context the free path holds.
 fn interpreter_stepped(code: &[u8]) -> Option<Duration> {
     let mut machine = Emulator::<()>::new_with_mode(config(), CpuSetupMode::RealMode).ok()?;
-    machine.mem_write(CODE, code).ok()?;
+    machine.mem_write(BxPhyAddress::new(CODE), code).ok()?;
     machine.reg_write(X86Reg::Rip, CODE);
     let began = Instant::now();
     for _ in 0..instructions(STEP_ITERATIONS) {
@@ -245,9 +248,21 @@ fn bench() -> std::process::ExitCode {
         None => println!("{name:<30} did not finish"),
     };
 
-    report("interpreter, free running", FAST_ITERATIONS, interpreter_free(&fast));
-    report("interpreter, hook per instr", FAST_ITERATIONS, interpreter_hooked(&fast));
-    report("interpreter, one call per instr", STEP_ITERATIONS, interpreter_stepped(&slow));
+    report(
+        "interpreter, free running",
+        FAST_ITERATIONS,
+        interpreter_free(&fast),
+    );
+    report(
+        "interpreter, hook per instr",
+        FAST_ITERATIONS,
+        interpreter_hooked(&fast),
+    );
+    report(
+        "interpreter, one call per instr",
+        STEP_ITERATIONS,
+        interpreter_stepped(&slow),
+    );
 
     if !rusty_box_whp::hypervisor_present().unwrap_or(false) {
         println!("\nskipped: this host has no Windows Hypervisor Platform");

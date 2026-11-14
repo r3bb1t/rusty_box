@@ -1,6 +1,8 @@
 #![allow(non_camel_case_types, unused_variables, unused_assignments, dead_code)]
 
-use super::{decoder::Instruction, BxCpuC};
+use super::BxCpuC;
+use super::decoder::Instruction;
+use crate::config::BxLinAddress;
 
 // CR0 notes:
 //   Each x86 level has its own quirks regarding how it handles
@@ -43,42 +45,52 @@ impl BxCr0 {
     pub fn pe(self) -> bool {
         self.contains(Self::PE)
     }
+
     #[inline]
     pub fn mp(self) -> bool {
         self.contains(Self::MP)
     }
+
     #[inline]
     pub fn em(self) -> bool {
         self.contains(Self::EM)
     }
+
     #[inline]
     pub fn ts(self) -> bool {
         self.contains(Self::TS)
     }
+
     #[inline]
     pub fn et(self) -> bool {
         self.contains(Self::ET)
     }
+
     #[inline]
     pub fn ne(self) -> bool {
         self.contains(Self::NE)
     }
+
     #[inline]
     pub fn wp(self) -> bool {
         self.contains(Self::WP)
     }
+
     #[inline]
     pub fn am(self) -> bool {
         self.contains(Self::AM)
     }
+
     #[inline]
     pub fn nw(self) -> bool {
         self.contains(Self::NW)
     }
+
     #[inline]
     pub fn cd(self) -> bool {
         self.contains(Self::CD)
     }
+
     #[inline]
     pub fn pg(self) -> bool {
         self.contains(Self::PG)
@@ -88,6 +100,7 @@ impl BxCr0 {
     pub(super) fn get32(self) -> u32 {
         self.bits()
     }
+
     #[inline]
     pub(super) fn set32(&mut self, val: u32) {
         // Bit 4 (ET) is hardwired to 1
@@ -134,110 +147,137 @@ impl BxCr4 {
     pub fn vme(self) -> bool {
         self.contains(Self::VME)
     }
+
     #[inline]
     pub fn pvi(self) -> bool {
         self.contains(Self::PVI)
     }
+
     #[inline]
     pub fn tsd(self) -> bool {
         self.contains(Self::TSD)
     }
+
     #[inline]
     pub fn de(self) -> bool {
         self.contains(Self::DE)
     }
+
     #[inline]
     pub fn pse(self) -> bool {
         self.contains(Self::PSE)
     }
+
     #[inline]
     pub fn pae(self) -> bool {
         self.contains(Self::PAE)
     }
+
     #[inline]
     pub fn mce(self) -> bool {
         self.contains(Self::MCE)
     }
+
     #[inline]
     pub fn pge(self) -> bool {
         self.contains(Self::PGE)
     }
+
     #[inline]
     pub fn pce(self) -> bool {
         self.contains(Self::PCE)
     }
+
     #[inline]
     pub fn osfxsr(self) -> bool {
         self.contains(Self::OSFXSR)
     }
+
     #[inline]
     pub fn osxmmexcpt(self) -> bool {
         self.contains(Self::OSXMMEXCPT)
     }
+
     #[inline]
     pub fn umip(self) -> bool {
         self.contains(Self::UMIP)
     }
+
     #[inline]
     pub fn la57(self) -> bool {
         self.contains(Self::LA57)
     }
+
     #[inline]
     pub fn vmxe(self) -> bool {
         self.contains(Self::VMXE)
     }
+
     #[inline]
     pub fn smxe(self) -> bool {
         self.contains(Self::SMXE)
     }
+
     #[inline]
     pub fn fsgsbase(self) -> bool {
         self.contains(Self::FSGSBASE)
     }
+
     #[inline]
     pub fn pcide(self) -> bool {
         self.contains(Self::PCIDE)
     }
+
     #[inline]
     pub fn osxsave(self) -> bool {
         self.contains(Self::OSXSAVE)
     }
+
     #[inline]
     pub fn keylocker(self) -> bool {
         self.contains(Self::KEYLOCKER)
     }
+
     #[inline]
     pub fn smep(self) -> bool {
         self.contains(Self::SMEP)
     }
+
     #[inline]
     pub fn smap(self) -> bool {
         self.contains(Self::SMAP)
     }
+
     #[inline]
     pub fn pke(self) -> bool {
         self.contains(Self::PKE)
     }
+
     #[inline]
     pub fn cet(self) -> bool {
         self.contains(Self::CET)
     }
+
     #[inline]
     pub fn pks(self) -> bool {
         self.contains(Self::PKS)
     }
+
     #[inline]
     pub fn uintr(self) -> bool {
         self.contains(Self::UINTR)
     }
+
     #[inline]
     pub fn lass(self) -> bool {
         self.contains(Self::LASS)
     }
+
     #[inline]
     pub fn lam_supervisor(self) -> bool {
         self.contains(Self::LAM_SUPERVISOR)
     }
+
     #[inline]
     pub fn fred(self) -> bool {
         self.contains(Self::FRED)
@@ -247,14 +287,17 @@ impl BxCr4 {
     pub(super) fn get(self) -> u64 {
         self.bits()
     }
+
     #[inline]
     pub(super) fn set_val(&mut self, val: u64) {
         *self = Self::from_bits_retain(val);
     }
+
     #[inline]
     pub(super) fn get32(self) -> u32 {
         self.bits() as u32
     }
+
     #[inline]
     pub(super) fn set32(&mut self, val: u32) {
         self.set_val(val as u64);
@@ -279,54 +322,67 @@ impl BxDr6 {
     pub fn b0(self) -> bool {
         self.contains(Self::B0)
     }
+
     #[inline]
     pub fn set_b0(&mut self, val: u8) {
         self.set(Self::B0, val != 0);
     }
+
     #[inline]
     pub fn b1(self) -> bool {
         self.contains(Self::B1)
     }
+
     #[inline]
     pub fn set_b1(&mut self, val: u8) {
         self.set(Self::B1, val != 0);
     }
+
     #[inline]
     pub fn b2(self) -> bool {
         self.contains(Self::B2)
     }
+
     #[inline]
     pub fn set_b2(&mut self, val: u8) {
         self.set(Self::B2, val != 0);
     }
+
     #[inline]
     pub fn b3(self) -> bool {
         self.contains(Self::B3)
     }
+
     #[inline]
     pub fn set_b3(&mut self, val: u8) {
         self.set(Self::B3, val != 0);
     }
+
     #[inline]
     pub fn bd(self) -> bool {
         self.contains(Self::BD)
     }
+
     #[inline]
     pub fn set_bd(&mut self, val: u8) {
         self.set(Self::BD, val != 0);
     }
+
     #[inline]
     pub fn bs(self) -> bool {
         self.contains(Self::BS)
     }
+
     #[inline]
     pub fn set_bs(&mut self, val: u8) {
         self.set(Self::BS, val != 0);
     }
+
     #[inline]
     pub fn bt(self) -> bool {
         self.contains(Self::BT)
     }
+
     #[inline]
     pub fn set_bt(&mut self, val: u8) {
         self.set(Self::BT, val != 0);
@@ -336,6 +392,7 @@ impl BxDr6 {
     pub(super) fn get32(self) -> u32 {
         self.bits()
     }
+
     #[inline]
     pub(super) fn set32(&mut self, val: u32) {
         *self = Self::from_bits_retain(val);
@@ -365,86 +422,107 @@ impl BxDr7 {
     pub fn l0(self) -> bool {
         self.contains(Self::L0)
     }
+
     #[inline]
     pub fn set_l0(&mut self, val: u8) {
         self.set(Self::L0, val != 0);
     }
+
     #[inline]
     pub fn g0(self) -> bool {
         self.contains(Self::G0)
     }
+
     #[inline]
     pub fn set_g0(&mut self, val: u8) {
         self.set(Self::G0, val != 0);
     }
+
     #[inline]
     pub fn l1(self) -> bool {
         self.contains(Self::L1)
     }
+
     #[inline]
     pub fn set_l1(&mut self, val: u8) {
         self.set(Self::L1, val != 0);
     }
+
     #[inline]
     pub fn g1(self) -> bool {
         self.contains(Self::G1)
     }
+
     #[inline]
     pub fn set_g1(&mut self, val: u8) {
         self.set(Self::G1, val != 0);
     }
+
     #[inline]
     pub fn l2(self) -> bool {
         self.contains(Self::L2)
     }
+
     #[inline]
     pub fn set_l2(&mut self, val: u8) {
         self.set(Self::L2, val != 0);
     }
+
     #[inline]
     pub fn g2(self) -> bool {
         self.contains(Self::G2)
     }
+
     #[inline]
     pub fn set_g2(&mut self, val: u8) {
         self.set(Self::G2, val != 0);
     }
+
     #[inline]
     pub fn l3(self) -> bool {
         self.contains(Self::L3)
     }
+
     #[inline]
     pub fn set_l3(&mut self, val: u8) {
         self.set(Self::L3, val != 0);
     }
+
     #[inline]
     pub fn g3(self) -> bool {
         self.contains(Self::G3)
     }
+
     #[inline]
     pub fn set_g3(&mut self, val: u8) {
         self.set(Self::G3, val != 0);
     }
+
     #[inline]
     pub fn le(self) -> bool {
         self.contains(Self::LE)
     }
+
     #[inline]
     pub fn set_le(&mut self, val: u8) {
         self.set(Self::LE, val != 0);
     }
+
     #[inline]
     pub fn ge(self) -> bool {
         self.contains(Self::GE)
     }
+
     #[inline]
     pub fn set_ge(&mut self, val: u8) {
         self.set(Self::GE, val != 0);
     }
+
     #[inline]
     pub fn gd(self) -> bool {
         self.contains(Self::GD)
     }
+
     #[inline]
     pub fn set_gd(&mut self, val: u8) {
         self.set(Self::GD, val != 0);
@@ -455,34 +533,42 @@ impl BxDr7 {
     pub fn r_w0(self) -> u32 {
         (self.bits() & 0x0003_0000) >> 16
     }
+
     #[inline]
     pub fn len0(self) -> u32 {
         (self.bits() & 0x000C_0000) >> 18
     }
+
     #[inline]
     pub fn r_w1(self) -> u32 {
         (self.bits() & 0x0030_0000) >> 20
     }
+
     #[inline]
     pub fn len1(self) -> u32 {
         (self.bits() & 0x00C0_0000) >> 22
     }
+
     #[inline]
     pub fn r_w2(self) -> u32 {
         (self.bits() & 0x0300_0000) >> 24
     }
+
     #[inline]
     pub fn len2(self) -> u32 {
         (self.bits() & 0x0C00_0000) >> 26
     }
+
     #[inline]
     pub fn r_w3(self) -> u32 {
         (self.bits() & 0x3000_0000) >> 28
     }
+
     #[inline]
     pub fn len3(self) -> u32 {
         (self.bits() & 0xC000_0000) >> 30
     }
+
     #[inline]
     pub fn bp_enabled(self) -> u32 {
         self.bits() & 0xFF
@@ -492,6 +578,7 @@ impl BxDr7 {
     pub(super) fn get32(self) -> u32 {
         self.bits()
     }
+
     #[inline]
     pub(super) fn set32(&mut self, val: u32) {
         *self = Self::from_bits_retain(val);
@@ -517,62 +604,77 @@ impl BxEfer {
     pub fn sce(&self) -> bool {
         self.contains(Self::SCE)
     }
+
     #[inline]
     pub fn set_sce(&mut self, val: u8) {
         self.set(Self::SCE, val != 0);
     }
+
     #[inline]
     pub fn lme(&self) -> bool {
         self.contains(Self::LME)
     }
+
     #[inline]
     pub fn set_lme(&mut self, val: u8) {
         self.set(Self::LME, val != 0);
     }
+
     #[inline]
     pub fn lma(&self) -> bool {
         self.contains(Self::LMA)
     }
+
     #[inline]
     pub fn set_lma(&mut self, val: u8) {
         self.set(Self::LMA, val != 0);
     }
+
     #[inline]
     pub fn nxe(&self) -> bool {
         self.contains(Self::NXE)
     }
+
     #[inline]
     pub fn set_nxe(&mut self, val: u8) {
         self.set(Self::NXE, val != 0);
     }
+
     #[inline]
     pub fn svme(&self) -> bool {
         self.contains(Self::SVME)
     }
+
     #[inline]
     pub fn set_svme(&mut self, val: u8) {
         self.set(Self::SVME, val != 0);
     }
+
     #[inline]
     pub fn lmsle(&self) -> bool {
         self.contains(Self::LMSLE)
     }
+
     #[inline]
     pub fn set_lmsle(&mut self, val: u8) {
         self.set(Self::LMSLE, val != 0);
     }
+
     #[inline]
     pub fn ffxsr(&self) -> bool {
         self.contains(Self::FFXSR)
     }
+
     #[inline]
     pub fn set_ffxsr(&mut self, val: u8) {
         self.set(Self::FFXSR, val != 0);
     }
+
     #[inline]
     pub fn tce(&self) -> bool {
         self.contains(Self::TCE)
     }
+
     #[inline]
     pub fn set_tce(&mut self, val: u8) {
         self.set(Self::TCE, val != 0);
@@ -582,6 +684,7 @@ impl BxEfer {
     pub(super) fn get32(self) -> u32 {
         self.bits()
     }
+
     #[inline]
     pub(super) fn set32(&mut self, val: u32) {
         *self = Self::from_bits_retain(val);
@@ -1320,10 +1423,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.in_vmx_guest
             && self.proc_based_ctls1() & super::vmx::VMX_VM_EXEC_CTRL1_TPR_SHADOW != 0
         {
-            self.vmx_write_virtual_apic(
-                super::apic::LapicRegister::Tpr as u32,
-                u32::from(tpr),
-            );
+            self.vmx_write_virtual_apic(super::apic::LapicRegister::Tpr as u32, u32::from(tpr));
             return self.vmx_tpr_virtualization();
         }
 
@@ -1440,7 +1540,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // resolve_addr + read_virtual_word. We track `linear_addr` so the VMX
         // intercept below can report it on a VMEXIT.
         let is_memory = !instr.mod_c0();
-        let mut linear_addr: u64 = 0;
+        let mut linear_addr = BxLinAddress::new(0);
         let mut msw = if instr.mod_c0() {
             // For Group 7 (0F 01): b1=0x101, (b1 & 0x0F)==0x01 → Ed,Gd branch: DST=rm, SRC1=nnn
             // So dst() = rm = actual register. Matches Bochs: BX_READ_16BIT_REG(i->src()) where
@@ -1449,7 +1549,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = super::decoder::BxSegregs::from(instr.seg());
-            linear_addr = self.get_laddr64(seg as usize, u64::from(eaddr));
+            linear_addr = self.get_laddr(seg as usize, eaddr);
             self.v_read_word(seg, eaddr)?
         };
 
@@ -1690,9 +1790,8 @@ mod tests {
         }
 
         // AMD advertises ALT_MOV_CR8: the write must land on the LAPIC TPR.
-        let mut amd_machine = crate::cpu::exec_ctx::TestMachine::with_model(
-            crate::cpu::CpuModel::amd_ryzen(),
-        );
+        let mut amd_machine =
+            crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
         let mut amd = amd_machine.ctx();
         amd.reset(ResetReason::Hardware);
         assert!(amd.bx_cpuid_support_isa_extension(X86Feature::IsaAltMovCr8));
@@ -1973,7 +2072,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // Long mode → SCE + LME + LMA
         if self.bx_cpuid_support_isa_extension(X86Feature::IsaLongMode) {
             allow |= (1 << 0) | (1 << 8) | (1 << 10); // SCE | LME | LMA
-                                                      // FFXSR → EFER.FFXSR (bit 14)
+            // FFXSR → EFER.FFXSR (bit 14)
             if self.bx_cpuid_support_isa_extension(X86Feature::IsaFfxsr) {
                 allow |= 1 << 14;
             }

@@ -4,35 +4,33 @@
 use tracing::info;
 
 use super::Result;
+use crate::config::{BxLinAddress, BxPhyAddress};
+use crate::cpu::BxCpuC;
+use crate::cpu::apic::BX_LAPIC_BASE_ADDR;
 #[cfg(feature = "alloc")]
 use crate::cpu::avx::AMX;
-
-use crate::{
-    cpu::{
-        apic::BX_LAPIC_BASE_ADDR,
-        cpu::{CpuActivityState, CpuMode},
-        decoder::{features::X86Feature, BxSegregs, BX_GENERAL_REGISTERS, BX_NIL_REGISTER},
-        descriptor::{
-            BxDataAndCodeDescriptorEnum, SystemAndGateDescriptorEnum, SEG_ACCESS_ROK,
-            SEG_ACCESS_WOK, SEG_VALID_CACHE,
-        },
-        eflags::EFlags,
-        i387::BxPackedRegister,
-        segment_ctrl_pro::parse_selector,
-        svm::VmcbCache,
-        vmx::BX_INVALID_VMCSPTR,
-        xmm::MXCSR_RESET,
-        BxCpuC,
-    },
-    params::BxParams,
+use crate::cpu::cpu::{CpuActivityState, CpuMode};
+use crate::cpu::decoder::features::X86Feature;
+use crate::cpu::decoder::{BX_GENERAL_REGISTERS, BX_NIL_REGISTER, BxSegregs};
+use crate::cpu::descriptor::{
+    BxDataAndCodeDescriptorEnum, SEG_ACCESS_ROK, SEG_ACCESS_WOK, SEG_VALID_CACHE,
+    SystemAndGateDescriptorEnum,
 };
+use crate::cpu::eflags::EFlags;
+use crate::cpu::i387::BxPackedRegister;
+use crate::cpu::segment_ctrl_pro::parse_selector;
+use crate::cpu::svm::VmcbCache;
+use crate::cpu::vmx::BX_INVALID_VMCSPTR;
+use crate::cpu::xmm::MXCSR_RESET;
+use crate::params::BxParams;
 
 // Minimal MXCSR/feature related masks used at reset-time.
 const MXCSR_DAZ: u32 = 1 << 6;
 /// Bochs xmm.h `MXCSR_MISALIGNED_EXCEPTION_MASK` (0x00020000).
 const MXCSR_MISALIGNED_EXCEPTION_MASK: u32 = super::xmm::Mxcsr::MM.bits();
 
-use super::{cpudb::intel::core_i7_skylake::Corei7SkylakeX, cpuid::BxCpuIdTrait};
+use super::cpudb::intel::core_i7_skylake::Corei7SkylakeX;
+use super::cpuid::BxCpuIdTrait;
 
 pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
     // Note: hardcode this for now
@@ -166,7 +164,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // (includes ESP — BIOS sets SS:SP before any stack operations)
 
         self.eflags = EFlags::from_bits_retain(0x2); // Bit1 is always set
-                                                     // Bochs init.cc: clearEFlagsOSZAPC() = SET_FLAGS_OSZAPC_LOGIC_32(1).
+        // Bochs init.cc: clearEFlagsOSZAPC() = SET_FLAGS_OSZAPC_LOGIC_32(1).
         self.oszapc.set_oszapc_logic_32(1);
         if source == ResetReason::Hardware {
             self.icount = 0;
@@ -174,6 +172,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             // on a hardware reset and stays monotone across software resets.
             self.tick_surplus = 0;
         }
+        // The breakpoints are the debugger's and outlive a reset, as Bochs's
+        // `bx_guard` does; the boundary last reported does not.
+        self.code_breakpoints.forget_reported();
 
         self.ticks_last_sync = self.cpu_ticks();
 
@@ -198,7 +199,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
          *        386+    F000       FFFF0000        FFFF   FFF0
          */
         let cs_index = BxSegregs::Cs as usize;
-        parse_selector(0xf000, &mut self.sregs[cs_index].selector);
+        parse_selector(0xF000, &mut self.sregs[cs_index].selector);
 
         self.sregs[cs_index].cache.valid = SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK;
         self.sregs[cs_index].cache.p = true;
@@ -206,7 +207,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.sregs[cs_index].cache.segment = true; /* data/code segment */
         self.sregs[cs_index].cache.r#type = BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as _;
 
-        self.sregs[cs_index].cache.u.set_segment_base(0xFFFF0000);
+        self.sregs[cs_index]
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0xFFFF0000));
         self.sregs[cs_index]
             .cache
             .u
@@ -228,7 +232,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.sregs[ds_index].cache.segment = true; /* data/code segment */
         self.sregs[ds_index].cache.r#type = BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as _;
 
-        self.sregs[ds_index].cache.u.set_segment_base(0x00000000);
+        self.sregs[ds_index]
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0x00000000));
         self.sregs[ds_index]
             .cache
             .u
@@ -246,11 +253,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.sregs[BxSegregs::Gs as usize] = self.sregs[ds_index].clone();
 
         /* GDTR (Global Descriptor Table Register) */
-        self.gdtr.base = 0x00000000;
+        self.gdtr.base = BxLinAddress::new(0);
         self.gdtr.limit = 0xFFFF;
 
         /* IDTR (Interrupt Descriptor Table Register) */
-        self.idtr.base = 0x00000000;
+        self.idtr.base = BxLinAddress::new(0);
         self.idtr.limit = 0xFFFF; /* always byte granular */
 
         /* LDTR (Local Descriptor Table Register) */
@@ -265,7 +272,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.ldtr.cache.segment = false; /* system segment */
         /* system segment */
         self.ldtr.cache.r#type = SystemAndGateDescriptorEnum::BxSysSegmentLdt as _;
-        self.ldtr.cache.u.set_segment_base(0x00000000);
+        self.ldtr
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0x00000000));
         self.ldtr.cache.u.set_segment_limit_scaled(0xFFFF);
         self.ldtr.cache.u.set_segment_avl(false);
         self.ldtr.cache.u.set_segment_g(false); /* byte granular */
@@ -282,7 +292,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.tr.cache.segment = false; /* system segment */
         /* system segment */
         self.tr.cache.r#type = SystemAndGateDescriptorEnum::BxSysSegmentBusy386Tss as _;
-        self.tr.cache.u.set_segment_base(0x00000000);
+        self.tr
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0x00000000));
         self.tr.cache.u.set_segment_limit_scaled(0xFFFF);
         self.tr.cache.u.set_segment_avl(false);
         self.tr.cache.u.set_segment_g(false); /* byte granular */
@@ -352,7 +365,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.set_pkeys(0, 0);
 
         /* initialise MSR registers to defaults */
-        self.msr.apicbase = BX_LAPIC_BASE_ADDR;
+        self.msr.apicbase = BX_LAPIC_BASE_ADDR.get();
         self.lapic.reset(source as u8);
         self.msr.apicbase |= 0x800;
         if self.bx_cpuid == 0 {
@@ -452,7 +465,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         // Reset XMM state - unchanged on #INIT
         if source == ResetReason::Hardware {
             self.mxcsr.mxcsr = MXCSR_RESET;
-            self.mxcsr_mask = 0x0000ffbf;
+            self.mxcsr_mask = 0x0000FFBF;
             if self.bx_cpuid_support_isa_extension(X86Feature::IsaSse2) {
                 self.mxcsr_mask |= MXCSR_DAZ
             }
@@ -478,7 +491,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.msr.ia32_feature_ctrl = 0;
         }
 
-        self.set_VMCBPTR(0);
+        self.set_VMCBPTR(BxPhyAddress::new(0));
         self.in_svm_guest = false;
         self.svm_gif = true;
 
@@ -568,7 +581,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// icache trace links. Shared by the INVLPG instruction, MOV to DR0-3, and
     /// INVLPGA — each a `TLB_invlpg` in Bochs (crregs.cc `MOV_DdRd`, svm.cc
     /// `INVLPGA`).
-    pub(super) fn tlb_invlpg(&mut self, laddr: u64) {
+    pub(super) fn tlb_invlpg(&mut self, laddr: BxLinAddress) {
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
         self.invlpg_tlbs(laddr);
@@ -667,17 +680,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         // Interrupts disabled, direction flag clear
         self.eflags = EFlags::from_bits_retain(0x2); // Bit 1 always set
-                                                     // Bochs-equivalent clearEFlagsOSZAPC(): SET_FLAGS_OSZAPC_LOGIC_32(1).
+        // Bochs-equivalent clearEFlagsOSZAPC(): SET_FLAGS_OSZAPC_LOGIC_32(1).
         self.oszapc.set_oszapc_logic_32(1);
 
         // Set up GDTR to point to GDT in memory
-        self.gdtr.base = gdt_addr;
+        self.gdtr.base = BxLinAddress::new(gdt_addr);
         self.gdtr.limit = 0x1F; // 4 entries × 8 bytes - 1 = 31
 
         // IDT: keep limit large enough that vector lookups don't #GP.
         // Entries will be null (zeroed RAM), but that's OK — the kernel
         // sets up its own IDT before enabling interrupts.
-        self.idtr.base = 0;
+        self.idtr.base = BxLinAddress::new(0);
         self.idtr.limit = 0xFFFF;
 
         // CS: selector 0x10 = GDT entry 2 (flat 32-bit code)
@@ -688,7 +701,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.sregs[cs].cache.dpl = 0;
         self.sregs[cs].cache.segment = true;
         self.sregs[cs].cache.r#type = BxDataAndCodeDescriptorEnum::CodeExecReadAccessed as u8;
-        self.sregs[cs].cache.u.set_segment_base(0);
+        self.sregs[cs]
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0));
         self.sregs[cs].cache.u.set_segment_limit_scaled(0xFFFFFFFF);
         self.sregs[cs].cache.u.set_segment_g(true); // page granular
         self.sregs[cs].cache.u.set_segment_d_b(true); // 32-bit
@@ -711,7 +727,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.sregs[seg_idx].cache.segment = true;
             self.sregs[seg_idx].cache.r#type =
                 BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as u8;
-            self.sregs[seg_idx].cache.u.set_segment_base(0);
+            self.sregs[seg_idx]
+                .cache
+                .u
+                .set_segment_base(BxLinAddress::new(0));
             self.sregs[seg_idx]
                 .cache
                 .u
@@ -761,7 +780,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     /// Sets the VMCS pointer and performs associated memory mapping setup
     /// Mirrors the C++ BX_CPU_C::set_VMCSPTR behavior
-    fn set_VMCSPTR(&mut self, vmxptr: u64) {
+    fn set_VMCSPTR(&mut self, vmxptr: BxPhyAddress) {
         self.vmcsptr = vmxptr;
         // Bochs set_VMCSPTR additionally derives a host-side vmcshostptr via
         // getHostMemAddr() and a vmcs_memtype; rusty_box accesses the VMCS by
@@ -772,7 +791,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     ///
     /// A reset has no live VMCB host mapping; publish that transition before
     /// allocator checks can run again.
-    fn set_VMCBPTR(&mut self, vmcb_ptr: u64) {
+    fn set_VMCBPTR(&mut self, vmcb_ptr: BxPhyAddress) {
         self.vmcbptr = vmcb_ptr;
         self.vmcb_host_offset = None;
     }

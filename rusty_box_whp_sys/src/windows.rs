@@ -23,13 +23,13 @@
 use windows_sys::Win32::System::Hypervisor::*;
 
 use crate::error::{WhpError, WhpResult};
-use crate::{
-    shape_of, CapabilityCode, CounterSet, DeadlineWake, FeatureBanks, GpaPerms, GvaTranslation,
-    PropertyCode, RawDeadline, RawPartition, RegisterValue, VpStateType,
-};
 use crate::vcpu::{
     AccessType, ApicWriteType, CpuidAccess, Exit, ExitReason, InterruptRequest, IoPortAccess,
     MemoryAccess, MsrAccess, Reg, SegmentRegister, TableRegister, VpContext,
+};
+use crate::{
+    CapabilityCode, CounterSet, DeadlineWake, FeatureBanks, GpaPerms, GvaTranslation, PropertyCode,
+    RawDeadline, RawPartition, RegisterValue, VpStateType, shape_of,
 };
 
 /// `WHvCapabilityCodePhysicalAddressWidth`, which the SDK header defines but
@@ -54,7 +54,9 @@ impl RegVal {
     /// zero clears every byte — which is the SDK's own initialisation idiom,
     /// reached here without `mem::zeroed` so the constructor stays `const`.
     const fn zeroed() -> Self {
-        Self(WHV_REGISTER_VALUE { Reg128: WHV_UINT128 { Dword: [0; 4] } })
+        Self(WHV_REGISTER_VALUE {
+            Reg128: WHV_UINT128 { Dword: [0; 4] },
+        })
     }
 
     const fn word(value: u64) -> Self {
@@ -67,7 +69,9 @@ impl RegVal {
                 Base: seg.base,
                 Limit: seg.limit,
                 Selector: seg.selector,
-                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: seg.attributes },
+                Anonymous: WHV_X64_SEGMENT_REGISTER_0 {
+                    Attributes: seg.attributes,
+                },
             },
         })
     }
@@ -114,7 +118,10 @@ impl RegVal {
     const fn words128(words: [u64; 2]) -> Self {
         Self(WHV_REGISTER_VALUE {
             Reg128: WHV_UINT128 {
-                Anonymous: WHV_UINT128_0 { Low64: words[0], High64: words[1] },
+                Anonymous: WHV_UINT128_0 {
+                    Low64: words[0],
+                    High64: words[1],
+                },
             },
         })
     }
@@ -177,12 +184,8 @@ const fn property_code(code: PropertyCode) -> (WHV_PARTITION_PROPERTY_CODE, u32)
         PropertyCode::ExtendedVmExits => (WHvPartitionPropertyCodeExtendedVmExits, 8),
         PropertyCode::MsrExitBitmap => (WHvPartitionPropertyCodeX64MsrExitBitmap, 8),
         PropertyCode::ExceptionExitBitmap => (WHvPartitionPropertyCodeExceptionExitBitmap, 8),
-        PropertyCode::SeparateSecurityDomain => {
-            (WHvPartitionPropertyCodeSeparateSecurityDomain, 4)
-        }
-        PropertyCode::LocalApicEmulationMode => {
-            (WHvPartitionPropertyCodeLocalApicEmulationMode, 4)
-        }
+        PropertyCode::SeparateSecurityDomain => (WHvPartitionPropertyCodeSeparateSecurityDomain, 4),
+        PropertyCode::LocalApicEmulationMode => (WHvPartitionPropertyCodeLocalApicEmulationMode, 4),
         PropertyCode::ProcessorFeatures => (WHvPartitionPropertyCodeProcessorFeatures, 8),
         // `WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS`: a count word, a reserved
         // word and the single bank the SDK declares
@@ -322,7 +325,12 @@ pub fn capability(code: CapabilityCode) -> WhpResult<u64> {
     // a live `u32`. A short write is caught below rather than trusted.
     check(
         unsafe {
-            WHvGetCapability(raw, core::ptr::from_mut(&mut buffer).cast(), len, &mut written)
+            WHvGetCapability(
+                raw,
+                core::ptr::from_mut(&mut buffer).cast(),
+                len,
+                &mut written,
+            )
         },
         CALL,
     )?;
@@ -357,9 +365,7 @@ pub fn capability_banks(code: CapabilityCode) -> WhpResult<FeatureBanks> {
     // establishes that `len` fits the buffer this borrow keeps alive for the
     // call; `written` is a live, correctly typed out-parameter.
     check(
-        unsafe {
-            WHvGetCapability(raw, buffer.as_mut_ptr().cast(), len, &mut written)
-        },
+        unsafe { WHvGetCapability(raw, buffer.as_mut_ptr().cast(), len, &mut written) },
         CALL,
     )?;
     if written < len {
@@ -373,7 +379,10 @@ pub fn capability_banks(code: CapabilityCode) -> WhpResult<FeatureBanks> {
         // port cannot read; saying so beats silently keeping the first two.
         return Err(WhpError::contract(CALL));
     }
-    Ok(FeatureBanks { count, banks: [buffer[1], buffer[2]] })
+    Ok(FeatureBanks {
+        count,
+        banks: [buffer[1], buffer[2]],
+    })
 }
 
 /// Read a partition property that fits in a word.
@@ -434,9 +443,7 @@ pub fn set_property_bytes(
     // establishes that `len` is exactly what the slice owns; the slice outlives
     // the call because it is borrowed for it.
     check(
-        unsafe {
-            WHvSetPartitionProperty(partition.get(), raw, payload.as_ptr().cast(), len)
-        },
+        unsafe { WHvSetPartitionProperty(partition.get(), raw, payload.as_ptr().cast(), len) },
         CALL,
     )
 }
@@ -522,13 +529,7 @@ pub fn set_vp_state(
     // the call because it is borrowed for it.
     check(
         unsafe {
-            WHvSetVirtualProcessorState(
-                partition.get(),
-                index,
-                raw,
-                blob.as_ptr().cast(),
-                len,
-            )
+            WHvSetVirtualProcessorState(partition.get(), index, raw, blob.as_ptr().cast(), len)
         },
         CALL,
     )
@@ -571,11 +572,7 @@ pub unsafe fn delete_partition(partition: RawPartition) {
 /// property whose table entry is wider than a word has no word to be written
 /// from, and the caller wants a shaped verb — [`set_property_bytes`], as
 /// `SyntheticProcessorFeaturesBanks` does.
-pub fn set_property(
-    partition: RawPartition,
-    code: PropertyCode,
-    value: u64,
-) -> WhpResult<()> {
+pub fn set_property(partition: RawPartition, code: PropertyCode, value: u64) -> WhpResult<()> {
     const CALL: &str = "WHvSetPartitionProperty";
     let (raw, len) = property_code(code);
     if len as usize > core::mem::size_of_val(&value) {
@@ -619,7 +616,10 @@ pub fn set_cpuid_exit_list(partition: RawPartition, leaves: &[u32]) -> WhpResult
 
 pub fn setup(partition: RawPartition) -> WhpResult<()> {
     // SAFETY: a handle from `WHvCreatePartition` that has not been deleted.
-    check(unsafe { WHvSetupPartition(partition.get()) }, "WHvSetupPartition")
+    check(
+        unsafe { WHvSetupPartition(partition.get()) },
+        "WHvSetupPartition",
+    )
 }
 
 /// Give a guest-physical range the host bytes behind it.
@@ -657,15 +657,13 @@ pub unsafe fn map_gpa(
 
 pub fn unmap_gpa(partition: RawPartition, gpa: u64, len: u64) -> WhpResult<()> {
     // SAFETY: no pointer crosses; the partition handle is live.
-    check(unsafe { WHvUnmapGpaRange(partition.get(), gpa, len) }, "WHvUnmapGpaRange")
+    check(
+        unsafe { WHvUnmapGpaRange(partition.get(), gpa, len) },
+        "WHvUnmapGpaRange",
+    )
 }
 
-pub fn dirty_bitmap(
-    partition: RawPartition,
-    gpa: u64,
-    len: u64,
-    out: &mut [u64],
-) -> WhpResult<()> {
+pub fn dirty_bitmap(partition: RawPartition, gpa: u64, len: u64, out: &mut [u64]) -> WhpResult<()> {
     const CALL: &str = "WHvQueryGpaRangeDirtyBitmap";
     let bytes = core::mem::size_of_val(out);
     let Ok(bitmap_len) = u32::try_from(bytes) else {
@@ -739,10 +737,7 @@ pub fn cancel_vp(partition: RawPartition, index: u32) -> WhpResult<()> {
     )
 }
 
-pub fn request_interrupt(
-    partition: RawPartition,
-    request: InterruptRequest,
-) -> WhpResult<()> {
+pub fn request_interrupt(partition: RawPartition, request: InterruptRequest) -> WhpResult<()> {
     let control = WHV_INTERRUPT_CONTROL {
         _bitfield: request.control_word(),
         Destination: request.destination,
@@ -809,11 +804,7 @@ pub fn get_counters(
 /// only shape the platform offers the x87 and vector file in:
 /// `WHV_REGISTER_NAME` stops at the XMM names and carries no YMM or ZMM
 /// register at all.
-pub fn get_xsave(
-    partition: RawPartition,
-    index: u32,
-    out: &mut [u8],
-) -> WhpResult<usize> {
+pub fn get_xsave(partition: RawPartition, index: u32, out: &mut [u8]) -> WhpResult<usize> {
     const CALL: &str = "WHvGetVirtualProcessorXsaveState";
     let Ok(len) = u32::try_from(out.len()) else {
         return Err(WhpError::contract(CALL));
@@ -1071,13 +1062,12 @@ fn set_values(
     )
 }
 
-pub fn translate_gva(
-    partition: RawPartition,
-    index: u32,
-    gva: u64,
-) -> WhpResult<GvaTranslation> {
+pub fn translate_gva(partition: RawPartition, index: u32, gva: u64) -> WhpResult<GvaTranslation> {
     const CALL: &str = "WHvTranslateGva";
-    let mut result = WHV_TRANSLATE_GVA_RESULT { ResultCode: 0, Reserved: 0 };
+    let mut result = WHV_TRANSLATE_GVA_RESULT {
+        ResultCode: 0,
+        Reserved: 0,
+    };
     let mut gpa = 0u64;
     // SAFETY: both out-parameters are live and correctly typed.
     check(
@@ -1093,7 +1083,10 @@ pub fn translate_gva(
         },
         CALL,
     )?;
-    Ok(GvaTranslation { result_code: result.ResultCode, gpa })
+    Ok(GvaTranslation {
+        result_code: result.ResultCode,
+        gpa,
+    })
 }
 
 /// Which APIC register a `WHV_X64_APIC_WRITE_TYPE` names, or `None` for a value
@@ -1203,7 +1196,9 @@ fn decode_exit(context: &WHV_RUN_VP_EXIT_CONTEXT) -> Exit {
         WHvRunVpExitReasonX64Halt => ExitReason::Halt,
         WHvRunVpExitReasonX64ApicEoi => {
             let eoi = unsafe { context.Anonymous.ApicEoi };
-            ExitReason::ApicEoi { vector: eoi.InterruptVector }
+            ExitReason::ApicEoi {
+                vector: eoi.InterruptVector,
+            }
         }
         WHvRunVpExitReasonSynicSintDeliverable => ExitReason::SynicSintDeliverable,
         WHvRunVpExitReasonX64MsrAccess => {
@@ -1237,9 +1232,10 @@ fn decode_exit(context: &WHV_RUN_VP_EXIT_CONTEXT) -> Exit {
         WHvRunVpExitReasonX64ApicWriteTrap => {
             let write = unsafe { context.Anonymous.ApicWrite };
             match apic_write_type(write.Type) {
-                Some(register) => {
-                    ExitReason::ApicWriteTrap { register, value: write.WriteValue }
-                }
+                Some(register) => ExitReason::ApicWriteTrap {
+                    register,
+                    value: write.WriteValue,
+                },
                 // A `WHV_X64_APIC_WRITE_TYPE` outside the five the SDK names.
                 // Reported as the raw exit rather than guessed at, because
                 // mirroring a write into the wrong APIC register is worse than
@@ -1249,7 +1245,9 @@ fn decode_exit(context: &WHV_RUN_VP_EXIT_CONTEXT) -> Exit {
         }
         WHvRunVpExitReasonCanceled => {
             let cancel = unsafe { context.Anonymous.CancelReason };
-            ExitReason::Canceled { reason: cancel.CancelReason }
+            ExitReason::Canceled {
+                reason: cancel.CancelReason,
+            }
         }
         other => ExitReason::Unrecognized(other),
     };
@@ -1291,7 +1289,7 @@ fn decode_exit(context: &WHV_RUN_VP_EXIT_CONTEXT) -> Exit {
 /// 1803 answers for the high-resolution flag.
 pub fn create_deadline() -> WhpResult<RawDeadline> {
     use windows_sys::Win32::System::Threading::{
-        CreateEventW, CreateWaitableTimerExW, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateEventW, CreateWaitableTimerExW,
     };
     const CALL: &str = "CreateWaitableTimerExW";
     const TIMER_ALL_ACCESS: u32 = 0x001F_0003;
@@ -1319,7 +1317,10 @@ pub fn create_deadline() -> WhpResult<RawDeadline> {
         unsafe { windows_sys::Win32::Foundation::CloseHandle(timer) };
         return Err(WhpError::unsupported("CreateEventW"));
     }
-    Ok(RawDeadline { timer: timer as isize, event: event as isize })
+    Ok(RawDeadline {
+        timer: timer as isize,
+        event: event as isize,
+    })
 }
 
 /// Arm `deadline`'s timer to fire `after` nanoseconds from now.
@@ -1363,9 +1364,7 @@ pub fn ring_deadline(deadline: RawDeadline) -> WhpResult<()> {
     // SAFETY: the handle is one `create_deadline` produced, and `SetEvent`
     // borrows it for the call.
     let ok = unsafe {
-        windows_sys::Win32::System::Threading::SetEvent(
-            deadline.event as *mut core::ffi::c_void,
-        )
+        windows_sys::Win32::System::Threading::SetEvent(deadline.event as *mut core::ffi::c_void)
     };
     if ok == 0 {
         return Err(WhpError::unsupported(CALL));
@@ -1380,7 +1379,7 @@ pub fn ring_deadline(deadline: RawDeadline) -> WhpResult<()> {
 /// spin, so it is reported rather than retried.
 pub fn wait_deadline(deadline: RawDeadline) -> WhpResult<DeadlineWake> {
     use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
-    use windows_sys::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
+    use windows_sys::Win32::System::Threading::{INFINITE, WaitForMultipleObjects};
     const CALL: &str = "WaitForMultipleObjects";
     let handles = [
         deadline.timer as *mut core::ffi::c_void,
@@ -1486,8 +1485,22 @@ mod tests {
     #[test]
     fn the_general_purpose_registers_run_in_architectural_order() {
         let names: Vec<_> = [
-            Reg::Rax, Reg::Rcx, Reg::Rdx, Reg::Rbx, Reg::Rsp, Reg::Rbp, Reg::Rsi, Reg::Rdi,
-            Reg::R8, Reg::R9, Reg::R10, Reg::R11, Reg::R12, Reg::R13, Reg::R14, Reg::R15,
+            Reg::Rax,
+            Reg::Rcx,
+            Reg::Rdx,
+            Reg::Rbx,
+            Reg::Rsp,
+            Reg::Rbp,
+            Reg::Rsi,
+            Reg::Rdi,
+            Reg::R8,
+            Reg::R9,
+            Reg::R10,
+            Reg::R11,
+            Reg::R12,
+            Reg::R13,
+            Reg::R14,
+            Reg::R15,
         ]
         .iter()
         .map(|reg| register_name(*reg))

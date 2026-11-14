@@ -4,9 +4,7 @@
 //!
 //! Implements SHL, SHR, SAR, ROL, ROR, SHLD, SHRD for 32-bit operands
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Bochs BX_CLEAR_64BIT_HIGH — called on count==0 for register form.
@@ -30,6 +28,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Ok((val, Some(())))
         }
     }
+
     fn shift_write32(&mut self, instr: &Instruction, paddr: Option<()>, result: u32) {
         if paddr.is_some() {
             self.write_rmw_linear_dword(result);

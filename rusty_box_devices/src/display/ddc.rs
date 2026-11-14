@@ -259,20 +259,24 @@ mod tests {
                 dda: true,
             }
         }
+
         fn set_dck(&mut self, ddc: &mut BxDdcC, dck: bool) {
             self.dck = dck;
             ddc.write(self.dck, self.dda);
         }
+
         fn set_dda(&mut self, ddc: &mut BxDdcC, dda: bool) {
             self.dda = dda;
             ddc.write(self.dck, self.dda);
         }
+
         /// Clock out one host bit: SDA while SCL low, then SCL high+low.
         fn send_bit(&mut self, ddc: &mut BxDdcC, bit: bool) {
             self.set_dda(ddc, bit);
             self.set_dck(ddc, true);
             self.set_dck(ddc, false);
         }
+
         /// Sample one monitor bit at SCL high, then take SCL low.
         fn recv_bit(&mut self, ddc: &mut BxDdcC) -> bool {
             self.set_dck(ddc, true);

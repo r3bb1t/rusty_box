@@ -20,12 +20,16 @@
 //! meaning came from position alone — `1` at one call site and the processor
 //! count at the other, with nothing on the page saying which was which (R0).
 
+use rusty_box_core::EngineFault;
+
 use super::{PcIo, Progress};
-use crate::cpu::{cpu::BxCpuC, exec_ctx::ExecCtx, instrumentation::Instrumentation, Result};
+use crate::cpu::cpu::BxCpuC;
+use crate::cpu::exec_ctx::ExecCtx;
+use crate::cpu::instrumentation::Instrumentation;
+use crate::cpu::{BreakpointSupport, Result};
 use crate::iodev::irq::IoApicDelivery;
 #[cfg(doc)]
 use crate::memory::plan::MemoryPlan;
-use rusty_box_core::EngineFault;
 
 /// One bounded stretch of guest execution, as the machine asks for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,6 +180,14 @@ pub trait SliceEngine<T: Instrumentation> {
     /// gets and what this port's interpreter has always had.
     const EVENT_DELIVERY: EventDelivery = EventDelivery::Machine;
 
+    /// Whether this engine stops before an instruction at a debugger code
+    /// breakpoint.
+    ///
+    /// Defaulted to refusing: only an engine that runs the guest through this
+    /// port's interpreter loop meets the instruction boundaries the check
+    /// runs at, and an engine that says nothing is not assumed to.
+    const CODE_BREAKPOINTS: BreakpointSupport = BreakpointSupport::Refused;
+
     /// Run `cpu` against `io` for the stretch `request` describes, and report
     /// how far the guest got.
     ///
@@ -299,6 +311,7 @@ pub trait SliceEngine<T: Instrumentation> {
 pub struct SoftwareEngine;
 
 impl<T: Instrumentation> SliceEngine<T> for SoftwareEngine {
+    const CODE_BREAKPOINTS: BreakpointSupport = BreakpointSupport::Honoured;
     const PROGRESS_UNIT: ProgressUnit = ProgressUnit::Instructions;
 
     #[inline]
@@ -310,9 +323,17 @@ impl<T: Instrumentation> SliceEngine<T> for SoftwareEngine {
     ) -> Result<Progress> {
         let mut ctx = ExecCtx::new(cpu, io);
         let retired = if request.yield_after_one_trace {
-            ctx.cpu_run_trace_slice(request.instructions, request.strict, request.tick_denominator)
+            ctx.cpu_run_trace_slice(
+                request.instructions,
+                request.strict,
+                request.tick_denominator,
+            )
         } else {
-            ctx.cpu_loop_n_slice(request.instructions, request.strict, request.tick_denominator)
+            ctx.cpu_loop_n_slice(
+                request.instructions,
+                request.strict,
+                request.tick_denominator,
+            )
         }?;
         Ok(Progress::Instructions(retired))
     }

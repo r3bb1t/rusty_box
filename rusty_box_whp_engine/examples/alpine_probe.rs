@@ -63,13 +63,13 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use rusty_box::CpuidFreq;
 use rusty_box::cpu::decoder::features::X86Feature;
 use rusty_box::emulator::{
     AtaSlot, BootDevice, BootOrder, DeviceClock, Emulator, EmulatorConfig, Ips, MachineBuilder,
     MemorySize, ProgressUnit, RunBudget, SliceEngine, StopReason,
 };
 use rusty_box::params::BxParams;
-use rusty_box::CpuidFreq;
 use rusty_box_whp_engine::{FastMachine, FastMachineFault, StepStop, WhpEngine};
 
 const MIB: usize = 1024 * 1024;
@@ -102,7 +102,10 @@ const MILESTONES: &[&str] = &[
 const FATAL: &[&str] = &["Oops", "general protection", "unexpected_intr"];
 
 fn patience() -> Duration {
-    match std::env::var("ALPINE_PROBE_PATIENCE_SECS").ok().and_then(|s| s.parse().ok()) {
+    match std::env::var("ALPINE_PROBE_PATIENCE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         Some(secs) => Duration::from_secs(secs),
         None => Duration::from_secs(300),
     }
@@ -268,15 +271,21 @@ impl<E: SliceEngine<()>> Arm for Stepped<E> {
             Err(error) => {
                 return Advance {
                     progress: 0,
-                    ending: Some(Ending::Said { why: format!("run error: {error}") }),
-                }
+                    ending: Some(Ending::Said {
+                        why: format!("run error: {error}"),
+                    }),
+                };
             }
         };
         let progress = outcome.progress.count();
         let ending = if outcome.is_terminal() {
-            Some(Ending::Said { why: format!("guest stopped: {:?}", outcome.stop) })
+            Some(Ending::Said {
+                why: format!("guest stopped: {:?}", outcome.stop),
+            })
         } else if matches!(outcome.stop, StopReason::Halted) && outcome.progress.stalled() {
-            Some(Ending::Said { why: "halted with nothing to wake it".into() })
+            Some(Ending::Said {
+                why: "halted with nothing to wake it".into(),
+            })
         } else {
             None
         };
@@ -325,33 +334,41 @@ impl Arm for Adopted {
             Err(FastMachineFault::Wedged { waited }) => {
                 return Advance {
                     progress: 0,
-                    ending: Some(Ending::Wedged { waited: waited.as_secs_f64() }),
-                }
+                    ending: Some(Ending::Wedged {
+                        waited: waited.as_secs_f64(),
+                    }),
+                };
             }
             Err(error) => {
                 return Advance {
                     progress: 0,
-                    ending: Some(Ending::Said { why: format!("run error: {error}") }),
-                }
+                    ending: Some(Ending::Said {
+                        why: format!("run error: {error}"),
+                    }),
+                };
             }
         };
         let ending = match outcome.stop {
             StepStop::BudgetSpent => None,
-            StepStop::GuestPowerOff => {
-                Some(Ending::Said { why: "guest stopped: GuestPowerOff".into() })
-            }
-            StepStop::CpuShutdown => {
-                Some(Ending::Said { why: "guest stopped: CpuShutdown after a triple fault".into() })
-            }
-            StepStop::Faulted(fault) => {
-                Some(Ending::Said { why: format!("guest stopped: {fault}") })
-            }
+            StepStop::GuestPowerOff => Some(Ending::Said {
+                why: "guest stopped: GuestPowerOff".into(),
+            }),
+            StepStop::CpuShutdown => Some(Ending::Said {
+                why: "guest stopped: CpuShutdown after a triple fault".into(),
+            }),
+            StepStop::Faulted(fault) => Some(Ending::Said {
+                why: format!("guest stopped: {fault}"),
+            }),
         };
-        Advance { progress: outcome.ticks, ending }
+        Advance {
+            progress: outcome.ticks,
+            ending,
+        }
     }
 
     fn screen(&mut self) -> Result<Option<String>, FastMachineFault> {
-        self.0.with_machine(|machine| machine.display().text().map(|text| text.to_text()))
+        self.0
+            .with_machine(|machine| machine.display().text().map(|text| text.to_text()))
     }
 
     fn rip(&mut self) -> Result<u64, FastMachineFault> {
@@ -381,7 +398,11 @@ impl Arm for Adopted {
         // processor it would ask about belongs to a thread now. The first
         // processor is the whole machine here: this probe fixes the topology
         // at one socket, one core, one thread.
-        match census.vcpus.first().and_then(|vcpu| vcpu.platform_at_last_park) {
+        match census
+            .vcpus
+            .first()
+            .and_then(|vcpu| vcpu.platform_at_last_park)
+        {
             Some(counters) => {
                 let intercepts = &counters.intercepts;
                 println!(
@@ -515,7 +536,11 @@ fn probe() -> i32 {
     // because nothing counts its processor's instructions, and
     // `FastMachine::adopt` refuses a machine that keeps device time in ticks
     // rather than adopting it with its devices silently frozen.
-    let device_clock = if interpreter { DeviceClock::Ticks } else { DeviceClock::HostTime };
+    let device_clock = if interpreter {
+        DeviceClock::Ticks
+    } else {
+        DeviceClock::HostTime
+    };
     let config = EmulatorConfig {
         memory: MemorySize::partially_resident(256 * MIB, 256 * MIB),
         memory_block_size: 128 * 1024,
@@ -582,7 +607,10 @@ fn measure<A: Arm>(arm: &mut A, iso: &str) -> i32 {
             return 1;
         }
     };
-    println!("probe: iso={iso} patience={:?} prequeued_keys={typed}", patience());
+    println!(
+        "probe: iso={iso} patience={:?} prequeued_keys={typed}",
+        patience()
+    );
 
     let outcome = drive(arm, patience());
 
@@ -644,11 +672,7 @@ fn measure<A: Arm>(arm: &mut A, iso: &str) -> i32 {
         Ok(None) => {}
         Err(refused) => println!("screen unread: {refused}"),
     }
-    if outcome.wedged.is_some() {
-        1
-    } else {
-        0
-    }
+    if outcome.wedged.is_some() { 1 } else { 0 }
 }
 
 /// What each phase between two milestones cost, in the two independent
@@ -743,14 +767,22 @@ fn drive<A: Arm>(arm: &mut A, limit: Duration) -> Outcome {
             for (index, needle) in MILESTONES.iter().enumerate() {
                 if seen[index].is_none() && screen.contains(needle) {
                     let census = *sampled.get_or_insert_with(|| arm.sample());
-                    seen[index] = Some(Sighting { wall, ticks, census });
+                    seen[index] = Some(Sighting {
+                        wall,
+                        ticks,
+                        census,
+                    });
                     println!(
                         "milestone {needle:?}: wall {wall:.1}s ticks {ticks} guest {:.2}s",
                         ticks as f64 / IPS as f64
                     );
                 }
             }
-            let now = Sighting { wall, ticks, census: sampled.flatten() };
+            let now = Sighting {
+                wall,
+                ticks,
+                census: sampled.flatten(),
+            };
             for line in screen.lines() {
                 if let Some(stamp) = dmesg_stamp(line) {
                     if newest_stamp.is_none_or(|newest| stamp > newest.stamp) {

@@ -21,8 +21,8 @@
 
 use bitflags::bitflags;
 
-use super::opcode::Opcode;
 use super::BxSegregs;
+use super::opcode::Opcode;
 
 // ============================================================================
 // GprIndex — General-purpose register index enum

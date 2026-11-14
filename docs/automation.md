@@ -222,6 +222,7 @@ guest actually took.
 
 ```rust,no_run
 # use rusty_box::emulator::{EmulatorConfig, MachineBuilder, Typed};
+use rusty_box::emulator::KeyAction;
 use rusty_box::iodev::scancodes::BxKey;
 # let mut machine = MachineBuilder::new(EmulatorConfig::default()).build()?;
 
@@ -242,7 +243,7 @@ match machine.keyboard().type_text(text) {
 
 // Individual keys: press and release, or hold.
 let tapped = machine.keyboard().tap(BxKey::F1);
-let held = machine.keyboard().key(BxKey::CtrlL, true);
+let held = machine.keyboard().key(BxKey::CtrlL, KeyAction::Press);
 
 // Raw scancode bytes, for a set this layout does not cover. The count is how
 // many the guest's ring took.
@@ -262,6 +263,34 @@ loss. Step the machine between bursts.
 reported, not guessed at. `tap` and `key` answer whether the byte reached the
 ring, so a `false` means "type it again after stepping", not "the key does not
 exist".
+
+**The same verbs on every interpreted machine.** The key vocabulary
+(`BxKey` is `rusty_box_core::input::Key`), `KeyAction`, `Typed` and the
+`KeyboardInput` trait are shared with the AArch64 machine, and so is
+`Machine` — step, the serial console, the keyboard — with `RunOutcome` and
+`SerialPort`. Logic written against them drives either guest
+([aarch64-automation.md](aarch64-automation.md)). A machine built on the
+hypervisor engine is not a `Machine`: it runs through `FastMachine`
+(section 9), so stepping it through these verbs is a compile error rather
+than a refusal at run time.
+
+```rust,no_run
+use rusty_box::emulator::{KeyboardInput, Machine, RunBudget, RunOutcome, SerialPort, Typed};
+
+fn log_in<M: Machine>(machine: &mut M) -> Result<bool, M::Error> {
+    for _ in 0..200 {
+        let outcome = machine.step(RunBudget::Ticks(5_000_000))?;
+        let console: Vec<u8> = machine.serial(0).map(|mut p| p.take_output().collect()).unwrap_or_default();
+        if console.windows(6).any(|w| w == b"login:") {
+            return Ok(matches!(machine.keyboard().type_text("root\n"), Typed::All { .. }));
+        }
+        if outcome.is_terminal() {
+            break;
+        }
+    }
+    Ok(false)
+}
+```
 
 ---
 
@@ -286,10 +315,29 @@ match outcome.stop {
     StopReason::CpuShutdown => {}            // a triple fault the machine did not reset on
     StopReason::StopRequested => {}          // a stop handle fired
     StopReason::EngineFault => {}            // the execution engine refused
+    StopReason::Breakpoint(_) => {}          // a processor reached a code breakpoint
 }
 // A caller that only needs "should I keep going" asks this instead.
 if outcome.is_terminal() {
     println!("done");
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Code breakpoints stop a processor before the instruction at an address, with
+nothing written into the guest. A stop raises the machine's stop flag;
+lowering it runs on, and the instruction then executes.
+
+```rust,no_run
+# use core::sync::atomic::Ordering;
+# use rusty_box::cpu::CodeBreakpoint;
+# use rusty_box::emulator::{EmulatorConfig, MachineBuilder, RunBudget, StopReason};
+# let mut machine = MachineBuilder::new(EmulatorConfig::default()).build()?;
+machine.set_code_breakpoints(&[CodeBreakpoint::Linear(0xFFFF_FFF0)])?;
+let outcome = machine.step(RunBudget::Instructions(1_000_000))?;
+if let StopReason::Breakpoint(hit) = outcome.stop {
+    println!("CPU {} stopped at {:#x}", hit.cpu, hit.linear);
+    machine.stop_flag().store(false, Ordering::Relaxed);
 }
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -339,6 +387,7 @@ A machine with no firmware is the shortest path to running your own code: pick
 a CPU mode, write bytes, run.
 
 ```rust,no_run
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -348,25 +397,32 @@ let mut machine = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMod
 // tables, and code written over them never runs.
 let code = CpuSetupMode::FlatLong64.first_free_physical_address();
 
-machine.mem_write(code, &[0x48, 0xC7, 0xC0, 0x2A, 0x00, 0x00, 0x00, 0xF4])?; // mov rax,42 ; hlt
+// The setup maps memory one to one, so the same number is where the code lies
+// and where RIP starts.
+machine.mem_write(BxPhyAddress::new(code), &[0x48, 0xC7, 0xC0, 0x2A, 0x00, 0x00, 0x00, 0xF4])?; // mov rax,42 ; hlt
 machine.reg_write(X86Reg::Rsp, 0x0010_0000);
 machine.emu_start(code, None, None, Some(16))?;
 assert_eq!(machine.reg_read(X86Reg::Rax), 42);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Physical and virtual addresses are different verbs:
+Physical and virtual addresses are different verbs, and different types: a
+`BxPhyAddress` is guest-physical, a `BxLinAddress` is linear (virtual), and
+one never stands in for the other:
 
 ```rust,no_run
 # use rusty_box::cpu::CpuSetupMode;
 # use rusty_box::emulator::{Emulator, EmulatorConfig};
+use rusty_box::config::{BxLinAddress, BxPhyAddress};
 # let mut machine = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)?;
 # let addr = CpuSetupMode::FlatLong64.first_free_physical_address();
+let physical = BxPhyAddress::new(addr);
+let linear = BxLinAddress::new(addr);
 let mut buf = [0u8; 4];
-machine.mem_read(addr, &mut buf)?;          // guest-physical
-machine.virt_read(addr, &mut buf)?;         // through the page tables
-let byte = machine.mem_read_u8(addr)?;      // one byte, physical
-let phys = machine.virt_to_phys(addr)?;     // walk without reading
+machine.mem_read(physical, &mut buf)?;       // guest-physical
+machine.virt_read(linear, &mut buf)?;        // through the page tables
+let byte = machine.mem_read_u8(physical)?;   // one byte, physical
+let phys = machine.virt_to_phys(linear)?;    // walk without reading: a BxPhyAddress
 # let _ = (byte, phys);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -419,6 +475,30 @@ if let Some(physical) = cpu.dbg_xlate_linear2phy(code) {
 A read of a device window is that device's read, with whatever it changes in
 the device, exactly as in Bochs.
 
+A processor paused in a hypervisor (VMX root operation) shows the
+hypervisor. The guest it runs — Windows under Hyper-V or VBS — is the one
+its current VMCS holds, readable without resuming: its registers from the
+VMCS, and its addresses walked through its own page tables and its EPT, to
+the machine's memory (divergence D22; Bochs's debugger has no such view).
+
+```rust,no_run
+# use rusty_box::cpu::Fetched;
+# use rusty_box::emulator::{EmulatorConfig, MachineBuilder};
+# let mut machine = MachineBuilder::new(EmulatorConfig::default()).build()?;
+let mut cpu = machine.debug_cpu(0).expect("processor 0 always exists");
+if let Some(guest) = cpu.vmx_guest() {
+    println!("VMCS {:#x}: the guest stopped at {:#x}", guest.vmcs, guest.rip);
+    let code = guest.segment_bases.cs + guest.rip;
+    if let Some(physical) = cpu.dbg_xlate_vmx_guest_linear2phy(&guest, guest.cr3, code) {
+        let mut bytes = [0u8; 15];
+        if cpu.dbg_fetch_mem(physical, &mut bytes)? == Fetched::Valid {
+            println!("{:?}", guest.code_size.decode(&bytes).map(|i| i.get_ia_opcode()));
+        }
+    }
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 **Limits.** An MSR access the processor would not take is refused with
 `CpuError::MsrRefused`, whose `MsrRefusal` says why, so a host can tell the
 cases apart:
@@ -451,11 +531,12 @@ because a host cannot see "ignored" any other way.
 An exit address ends a run before its budget does:
 
 ```rust,no_run
+# use rusty_box::config::BxPhyAddress;
 # use rusty_box::cpu::{CpuSetupMode, X86Reg};
 # use rusty_box::emulator::{Emulator, EmulatorConfig};
 # let mut machine = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)?;
 # let code = CpuSetupMode::FlatLong64.first_free_physical_address();
-# machine.mem_write(code, &[0x90, 0x90, 0x90, 0x90, 0xF4])?;
+# machine.mem_write(BxPhyAddress::new(code), &[0x90, 0x90, 0x90, 0x90, 0xF4])?;
 machine.set_exits(&[code + 2]);
 machine.emu_start(code, None, None, Some(64))?;
 assert_eq!(machine.reg_read(X86Reg::Rip), code + 2);
@@ -490,7 +571,7 @@ let mut machine = Emulator::<Counter>::new_with_mode_and_instrumentation(
     Counter::default(),
 )?;
 # let code = CpuSetupMode::FlatLong64.first_free_physical_address();
-# machine.mem_write(code, &[0x90, 0x90, 0x90, 0xF4])?;
+# machine.mem_write(rusty_box::config::BxPhyAddress::new(code), &[0x90, 0x90, 0x90, 0xF4])?;
 machine.emu_start(code, None, None, Some(8))?;
 println!("{} instructions", machine.instrumentation().executed);
 # Ok::<(), Box<dyn std::error::Error>>(())

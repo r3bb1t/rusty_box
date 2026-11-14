@@ -4,7 +4,7 @@
 //! caller has set any: `Emulator::mem_protect` creates the bitmap on its
 //! first call, so a machine that never calls it has none and pays nothing.
 
-use crate::config::MAX_PERM_PAGES;
+use crate::config::{BxPhyAddress, MAX_PERM_PAGES};
 use crate::cpu::instrumentation::MemPerms;
 
 const PAGE_SIZE: u64 = 4096;
@@ -37,9 +37,9 @@ impl PagePermissions {
 
     /// Set permissions for a range of physical addresses.
     /// Addresses are page-aligned down; size is rounded up to page boundary.
-    pub fn set(&mut self, addr: u64, size: usize, perms: MemPerms) {
-        let start_page = (addr / PAGE_SIZE) as usize;
-        let end_page = ((addr + size as u64 + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
+    pub fn set(&mut self, addr: BxPhyAddress, size: usize, perms: MemPerms) {
+        let start_page = (addr.get() / PAGE_SIZE) as usize;
+        let end_page = ((addr.get() + size as u64 + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
         for page in start_page..end_page.min(self.page_count) {
             self.bitmap[page] = perms.bits();
         }
@@ -47,8 +47,8 @@ impl PagePermissions {
 
     /// Check if an access at `addr` with `perms_needed` is allowed.
     #[inline]
-    pub fn check(&self, addr: u64, perms_needed: MemPerms) -> bool {
-        let page = (addr / PAGE_SIZE) as usize;
+    pub fn check(&self, addr: BxPhyAddress, perms_needed: MemPerms) -> bool {
+        let page = (addr.get() / PAGE_SIZE) as usize;
         if page >= self.page_count {
             return true; // out of range = permissive
         }

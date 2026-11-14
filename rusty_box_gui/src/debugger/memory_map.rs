@@ -2,7 +2,7 @@
 //! occupies it and how much of it is resident.
 //!
 //! The page-table map built here is the foundation: it walks the process's
-//! own paging structures (`DebugCpu::dbg_page_mappings_in`) for the pages
+//! own paging structures (`GuestMemory::page_mappings`) for the pages
 //! actually mapped, and labels them with the modules the loader list names
 //! and the sections their PE headers declare. Windows' own region records
 //! (the VAD tree) can be overlaid to add reserved-but-unmapped regions and
@@ -14,10 +14,11 @@
 
 use std::collections::BTreeMap;
 
+use rusty_box::config::BxLinAddress;
 use rusty_box::cpu::{LinearRange, PageMapping};
 
 use super::pe::PeSection;
-use super::threads::{stack_owner, WinThread};
+use super::threads::{WinThread, stack_owner};
 use super::vad::{VadInfo, VadKind, VadRegion};
 
 const PAGE: u64 = 0x1000;
@@ -135,8 +136,8 @@ pub(crate) fn group(map: &MemoryMap) -> Vec<MapGroup> {
                 ..
             }) => {
                 regions.push(index);
-                *resident_pages += region.resident_pages;
-                *total_pages += region.total_pages;
+                *resident_pages = resident_pages.saturating_add(region.resident_pages);
+                *total_pages = total_pages.saturating_add(region.total_pages);
             }
             Some(MapGroup::Region(_)) | None => {
                 by_base.insert(base, groups.len());
@@ -254,7 +255,7 @@ fn span_at(spans: &[Span], address: u64) -> Option<Span> {
     let after = spans.partition_point(|span| span.start <= address);
     after
         .checked_sub(1)
-        .map(|at| spans[at])
+        .and_then(|at| spans.get(at).copied())
         .filter(|span| address < span.end)
 }
 
@@ -264,25 +265,27 @@ fn vad_covering(vads: &[VadRegion], address: u64) -> Option<usize> {
     let after = vads.partition_point(|vad| vad.start <= address);
     after
         .checked_sub(1)
-        .filter(|&at| address < vads[at].end)
+        .filter(|&at| vads.get(at).is_some_and(|vad| address < vad.end))
 }
 
 /// The combined access of every mapped page in `[lo, hi)`, and how many
 /// there are. `mappings` are in address order and do not overlap.
 fn resident(mappings: &[PageMapping], lo: u64, hi: u64) -> (u64, Option<RegionAccess>) {
-    let first = mappings.partition_point(|mapping| mapping.linear.saturating_add(mapping.size) <= lo);
+    let first =
+        mappings.partition_point(|mapping| mapping.linear.get().saturating_add(mapping.size) <= lo);
     let mut pages = 0u64;
     let mut access: Option<RegionAccess> = None;
-    for mapping in &mappings[first..] {
-        if mapping.linear >= hi {
+    for mapping in mappings.iter().skip(first) {
+        if mapping.linear.get() >= hi {
             break;
         }
-        let start = mapping.linear.max(lo);
-        let end = mapping.linear.saturating_add(mapping.size).min(hi);
+        let start = mapping.linear.get().max(lo);
+        let end = mapping.linear.get().saturating_add(mapping.size).min(hi);
         if start >= end {
             continue;
         }
-        pages += (end - start) / PAGE;
+        // `start < end` here, so the difference cannot wrap.
+        pages = pages.saturating_add(end.wrapping_sub(start) / PAGE);
         let here = RegionAccess {
             user: mapping.access.user,
             writable: mapping.access.writable,
@@ -311,11 +314,15 @@ pub(crate) fn clip_mappings(mappings: &[PageMapping], range: LinearRange) -> Vec
         .iter()
         .filter_map(|mapping| {
             let start = mapping.linear.max(range.start);
-            let end = mapping.linear.saturating_add(mapping.size).min(range.end);
+            let end =
+                BxLinAddress::new(mapping.linear.get().saturating_add(mapping.size)).min(range.end);
+            // `mapping.linear <= start < end`, so neither difference wraps.
             (start < end).then(|| PageMapping {
                 linear: start,
-                physical: mapping.physical.wrapping_add(start - mapping.linear),
-                size: end - start,
+                physical: mapping
+                    .physical
+                    .wrapping_add(start.offset_from(mapping.linear)),
+                size: end.offset_from(start),
                 access: mapping.access,
             })
         })
@@ -356,16 +363,19 @@ fn assemble(
 
     // Each module label becomes a region, residency read from the mappings.
     for label in &labels {
-        let total_pages = (label.end - label.start) / PAGE;
+        // `module_labels` keeps only labels with `start < end`.
+        let size = label.end.wrapping_sub(label.start);
         let (resident_pages, observed) = resident(mappings, label.start, label.end);
         regions.push(MapRegion {
             start: label.start,
-            size: label.end - label.start,
+            size,
             resident_pages,
-            total_pages,
+            total_pages: size / PAGE,
             access: observed.or(label.section_access),
             owner: label.owner.clone(),
-            vad: vad_covering(records, label.start).map(|at| records[at].info),
+            vad: vad_covering(records, label.start)
+                .and_then(|at| records.get(at))
+                .map(|vad| vad.info),
         });
     }
 
@@ -391,12 +401,12 @@ fn assemble(
 fn reserved_regions(regions: &[MapRegion], vads: &[VadRegion]) -> Vec<MapRegion> {
     let mut reserved = Vec::new();
     for vad in vads {
-        let first = regions
-            .partition_point(|region| region.start.saturating_add(region.size) <= vad.start);
+        let first =
+            regions.partition_point(|region| region.start.saturating_add(region.size) <= vad.start);
         let mut cursor = vad.start;
         let mut module_owned = false;
         let mut gaps: Vec<Span> = Vec::new();
-        for region in &regions[first..] {
+        for region in regions.iter().skip(first) {
             if region.start >= vad.end {
                 break;
             }
@@ -424,7 +434,8 @@ fn reserved_regions(regions: &[MapRegion], vads: &[VadRegion]) -> Vec<MapRegion>
             continue;
         }
         for gap in gaps {
-            let size = gap.end - gap.start;
+            // Every gap is pushed with `start < end`.
+            let size = gap.end.wrapping_sub(gap.start);
             reserved.push(MapRegion {
                 start: gap.start,
                 size,
@@ -447,7 +458,8 @@ pub(crate) fn label_stacks(map: &mut MemoryMap, threads: &[WinThread]) {
         if !matches!(region.owner, RegionOwner::Private) {
             continue;
         }
-        if let Some(tid) = stack_owner(region.start, region.start + region.size, threads) {
+        let end = region.start.saturating_add(region.size);
+        if let Some(tid) = stack_owner(region.start, end, threads) {
             region.owner = RegionOwner::Stack { tid };
         }
     }
@@ -469,8 +481,8 @@ fn private_runs(mappings: &[PageMapping], spans: &[Span], vads: &[VadRegion]) ->
     for mapping in mappings {
         // Each 4 KiB page of the mapping, so a label or VAD edge inside a
         // large page splits it cleanly.
-        let mut page = mapping.linear;
-        let end = mapping.linear.saturating_add(mapping.size);
+        let mut page = mapping.linear.get();
+        let end = mapping.linear.get().saturating_add(mapping.size);
         let access = RegionAccess {
             user: mapping.access.user,
             writable: mapping.access.writable,
@@ -488,13 +500,13 @@ fn private_runs(mappings: &[PageMapping], spans: &[Span], vads: &[VadRegion]) ->
             let vad = vad_covering(vads, page);
             match &mut run {
                 Some(open)
-                    if open.region.start + open.region.size == page
+                    if open.region.start.saturating_add(open.region.size) == page
                         && open.region.access == Some(access)
                         && open.vad == vad =>
                 {
-                    open.region.size += PAGE;
-                    open.region.resident_pages += 1;
-                    open.region.total_pages += 1;
+                    open.region.size = open.region.size.saturating_add(PAGE);
+                    open.region.resident_pages = open.region.resident_pages.saturating_add(1);
+                    open.region.total_pages = open.region.total_pages.saturating_add(1);
                 }
                 _ => {
                     if let Some(open) = run.take() {
@@ -508,13 +520,17 @@ fn private_runs(mappings: &[PageMapping], spans: &[Span], vads: &[VadRegion]) ->
                             total_pages: 1,
                             access: Some(access),
                             owner: RegionOwner::Private,
-                            vad: vad.map(|at| vads[at].info),
+                            vad: vad.and_then(|at| vads.get(at)).map(|record| record.info),
                         },
                         vad,
                     });
                 }
             }
-            page += PAGE;
+            // The last page of the address space ends the mapping.
+            match page.checked_add(PAGE) {
+                Some(next) => page = next,
+                None => break,
+            }
         }
     }
     if let Some(open) = run.take() {
@@ -525,28 +541,43 @@ fn private_runs(mappings: &[PageMapping], spans: &[Span], vads: &[VadRegion]) ->
 
 #[cfg(test)]
 mod tests {
+    use rusty_box::config::BxPhyAddress;
+    use rusty_box::cpu::PageAccess;
+
     use super::*;
     use crate::debugger::vad::WinProtection;
-    use rusty_box::cpu::PageAccess;
 
     /// A large page that runs past a module's end is cut at the end, its
     /// physical address moved with its start; a mapping wholly outside goes.
     #[test]
     fn mappings_are_cut_to_the_range_asked_for() {
-        let range = LinearRange { start: 0x40_0000, end: 0x48_0000 };
+        let range = LinearRange {
+            start: BxLinAddress::new(0x40_0000),
+            end: BxLinAddress::new(0x48_0000),
+        };
         let large = map(0x40_0000, 0x20_0000, true, true);
         let before = map(0x3F_F000, 0x2000, false, false);
         let outside = map(0x60_0000, 0x1000, false, false);
         let cut = clip_mappings(&[before, large, outside], range);
         assert_eq!(cut.len(), 2);
-        assert_eq!((cut[0].linear, cut[0].size, cut[0].physical), (0x40_0000, 0x1000, 0x40_0000));
-        assert_eq!((cut[1].linear, cut[1].size), (0x40_0000, 0x8_0000));
+        assert_eq!(
+            (cut[0].linear, cut[0].size, cut[0].physical),
+            (
+                BxLinAddress::new(0x40_0000),
+                0x1000,
+                BxPhyAddress::new(0x40_0000)
+            )
+        );
+        assert_eq!(
+            (cut[1].linear, cut[1].size),
+            (BxLinAddress::new(0x40_0000), 0x8_0000)
+        );
     }
 
     fn map(linear: u64, size: u64, writable: bool, executable: bool) -> PageMapping {
         PageMapping {
-            linear,
-            physical: linear,
+            linear: BxLinAddress::new(linear),
+            physical: BxPhyAddress::new(linear),
             size,
             access: PageAccess {
                 user: true,
@@ -611,12 +642,16 @@ mod tests {
         );
         assert_eq!((regions[0].resident_pages, regions[0].total_pages), (1, 1));
 
-        assert!(matches!(&regions[1].owner, RegionOwner::Section { section, .. } if section == ".text"));
+        assert!(
+            matches!(&regions[1].owner, RegionOwner::Section { section, .. } if section == ".text")
+        );
         assert_eq!((regions[1].resident_pages, regions[1].total_pages), (1, 2));
         let text = regions[1].access.expect("resident");
         assert!(text.observed && text.executable && !text.writable);
 
-        assert!(matches!(&regions[2].owner, RegionOwner::Section { section, .. } if section == ".data"));
+        assert!(
+            matches!(&regions[2].owner, RegionOwner::Section { section, .. } if section == ".data")
+        );
         assert_eq!(regions[2].resident_pages, 0);
         let data = regions[2].access.expect("from PE flags");
         assert!(!data.observed && data.writable && !data.executable);
@@ -720,7 +755,12 @@ mod tests {
                 (0x20_3000, 0x10_0000 - 3 * PAGE, 0),
             ]
         );
-        assert!(built.regions.iter().all(|r| r.vad.map(|v| v.kind) == Some(VadKind::Private)));
+        assert!(
+            built
+                .regions
+                .iter()
+                .all(|r| r.vad.map(|v| v.kind) == Some(VadKind::Private))
+        );
     }
 
     /// Two adjacent VADs whose pages carry the same rights are two regions,
@@ -784,7 +824,10 @@ mod tests {
         let mappings = [map(base + 0x1000, 2 * PAGE, false, true)];
         let regions = build(&mappings, std::slice::from_ref(&module)).regions;
         assert_eq!(regions.len(), 2);
-        assert_eq!((regions[1].start, regions[1].size), (base + 0x1000, 2 * PAGE));
+        assert_eq!(
+            (regions[1].start, regions[1].size),
+            (base + 0x1000, 2 * PAGE)
+        );
         assert!(regions.iter().all(|r| r.owner != RegionOwner::Private));
     }
 
@@ -810,7 +853,11 @@ mod tests {
             .filter(|group| matches!(group, MapGroup::Module { .. }))
             .count();
         assert_eq!(modules, 1);
-        assert!(groups.iter().any(|group| matches!(group, MapGroup::Region(_))));
+        assert!(
+            groups
+                .iter()
+                .any(|group| matches!(group, MapGroup::Region(_)))
+        );
     }
 
     /// A base so high that its header page would wrap is left out, not
@@ -841,7 +888,13 @@ mod tests {
             origin: MapOrigin::WindowsRecords,
             regions: vec![
                 region(0x5C_0000, RegionOwner::Private),
-                region(0x5D_0000, RegionOwner::Header { base: 0x5D_0000, module: "x.dll".to_owned() }),
+                region(
+                    0x5D_0000,
+                    RegionOwner::Header {
+                        base: 0x5D_0000,
+                        module: "x.dll".to_owned(),
+                    },
+                ),
                 region(0x9_0000, RegionOwner::Private),
             ],
         };
@@ -849,13 +902,19 @@ mod tests {
             tid: 0x1A4,
             start: 0,
             teb: Some(0x7FF0_0000),
-            stack: Some(LinearRange { start: 0x5B_0000, end: 0x60_0000 }),
+            stack: Some(LinearRange {
+                start: BxLinAddress::new(0x5B_0000),
+                end: BxLinAddress::new(0x60_0000),
+            }),
             uses_fibers: false,
             saved: None,
         }];
         label_stacks(&mut map, &threads);
         // Private memory inside the stack is named for the thread.
-        assert!(matches!(map.regions[0].owner, RegionOwner::Stack { tid: 0x1A4 }));
+        assert!(matches!(
+            map.regions[0].owner,
+            RegionOwner::Stack { tid: 0x1A4 }
+        ));
         // A module region inside the stack range keeps its own name.
         assert!(matches!(map.regions[1].owner, RegionOwner::Header { .. }));
         // Private memory outside every stack stays private.

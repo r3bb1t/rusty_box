@@ -1,23 +1,21 @@
-use crate::{
-    cpu::{
-        cpu::CpuActivityState,
-        instrumentation::Instrumentation,
-        BxCpuC,
-    },
-    Result,
-};
-#[cfg(feature = "alloc")]
-use crate::{cpu::CpuError, Error};
-
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use super::{Emulator, EventDelivery, ProgressUnit, ResetReason, SliceEngine, SoftwareEngine};
-use crate::memory::plan::{MemoryPlan, MemoryPlanError};
+use rusty_box_core::input::KeyStroke;
+pub use rusty_box_core::input::{KeyAction, KeyboardInput, Typed};
+
 // Only the direct-Linux-boot path below reaches a CPU through the store, and
 // that path needs an allocator.
 #[cfg(feature = "alloc")]
 use super::cpu_store::CpuStore;
+use super::{Emulator, EventDelivery, ProgressUnit, ResetReason, SliceEngine, SoftwareEngine};
+use crate::Result;
+use crate::cpu::cpu::CpuActivityState;
+use crate::cpu::instrumentation::Instrumentation;
+use crate::cpu::{BxCpuC, CodeBreakpointHit};
+use crate::memory::plan::{MemoryPlan, MemoryPlanError};
+#[cfg(feature = "alloc")]
+use crate::{Error, cpu::CpuError};
 
 /// What a machine was asked for that its engine cannot do.
 ///
@@ -85,10 +83,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> Power<'_, T, E> {
             .machine
             .pc_system
             .clock_at(self.machine.pc_system.time_ticks());
-        self.machine
-            .device_manager
-            .acpi
-            .press_power_button(clock);
+        self.machine.device_manager.acpi.press_power_button(clock);
     }
 
     /// Reset the machine. Unlike the power button this is not negotiable with
@@ -151,8 +146,8 @@ impl<'m> Keyboard<'m> {
     /// set. Returns whether the key reached the guest, which it does whole or
     /// not at all (`BxKeyboardC::gen_scancode`).
     #[must_use = "a refused key never reached the guest"]
-    pub fn key(&mut self, key: crate::iodev::scancodes::BxKey, pressed: bool) -> bool {
-        self.keyboard.gen_scancode(key, pressed)
+    pub fn key(&mut self, key: crate::iodev::scancodes::BxKey, action: KeyAction) -> bool {
+        self.keyboard.gen_scancode(key, action == KeyAction::Press)
     }
 
     /// Press and release a key, whole. A tap is a one-key character, so it
@@ -165,8 +160,8 @@ impl<'m> Keyboard<'m> {
         if self.keyboard.get_elements() >= PASTE_FILL_THRESHOLD {
             return false;
         }
-        let down = self.key(key, true);
-        let up = self.key(key, false);
+        let down = self.key(key, KeyAction::Press);
+        let up = self.key(key, KeyAction::Release);
         down && up
     }
 
@@ -205,14 +200,12 @@ impl<'m> Keyboard<'m> {
     ///
     /// The outcome says what stopped it, because the two ways it can are not
     /// the same problem: see [`Typed`].
-    #[cfg(feature = "alloc")]
     pub fn type_text(&mut self, text: &str) -> Typed {
         let mut delivered = 0;
         for ch in text.chars() {
-            let sequence = crate::gui::keymap::char_to_bx_key_sequence(ch);
-            if sequence.is_empty() {
+            let Some(stroke) = KeyStroke::for_char(ch) else {
                 return Typed::Unmappable { delivered, ch };
-            }
+            };
             // A character starts only while the ring has room for all of it,
             // so none is cut part-way and then sent again from its start.
             if self.keyboard.get_elements() >= PASTE_FILL_THRESHOLD {
@@ -220,8 +213,8 @@ impl<'m> Keyboard<'m> {
             }
             // With the room proved, a refusal here is a keyboard the guest
             // disabled, which refuses the character's first key.
-            for (key, pressed) in sequence {
-                if !self.key(key, pressed) {
+            for (key, action) in stroke.events() {
+                if !self.key(key, action) {
                     return Typed::Refused { delivered };
                 }
             }
@@ -231,58 +224,18 @@ impl<'m> Keyboard<'m> {
     }
 }
 
-/// What became of a [`Keyboard::type_text`] call.
-///
-/// A bare count cannot say why typing stopped, and the two reasons need
-/// opposite responses (R2): a guest that is not draining its 16-byte keyboard
-/// ring will take the rest once it has, while a character the modelled US
-/// keyboard has no key for will never be typed however often it is offered. A
-/// caller that resumed from a count alone would retry such a character
-/// forever.
-#[cfg(feature = "alloc")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[must_use = "text that did not reach the guest is lost unless the caller resumes it"]
-pub enum Typed {
-    /// Every character reached the guest.
-    All {
-        /// How many characters that was.
-        delivered: usize,
-    },
-    /// The guest's keyboard took no more. Step the machine so it drains its
-    /// ring, then resume with `text.chars().skip(delivered)`.
-    ///
-    /// Nothing of the character this stopped on reached the guest: one starts
-    /// only while its whole key sequence fits (Bochs devices.cc
-    /// `service_paste_buf`), so resuming sends each character exactly once.
-    Refused {
-        /// Characters delivered whole before the refusal.
-        delivered: usize,
-    },
-    /// `ch` has no key on the modelled US keyboard, so neither it nor
-    /// anything after it was sent. Resume past it with
-    /// `text.chars().skip(delivered + 1)`.
-    Unmappable {
-        /// Characters delivered whole before this one.
-        delivered: usize,
-        /// The character that cannot be typed.
-        ch: char,
-    },
-}
-
-#[cfg(feature = "alloc")]
-impl Typed {
-    /// How many characters the guest received in full.
-    pub fn delivered(self) -> usize {
-        match self {
-            Self::All { delivered }
-            | Self::Refused { delivered }
-            | Self::Unmappable { delivered, .. } => delivered,
-        }
+/// The shared verbs, for code written against any machine's keyboard.
+impl KeyboardInput for Keyboard<'_> {
+    fn key(&mut self, key: crate::iodev::scancodes::BxKey, action: KeyAction) -> bool {
+        Keyboard::key(self, key, action)
     }
 
-    /// Whether the whole text arrived.
-    pub fn is_complete(self) -> bool {
-        matches!(self, Self::All { .. })
+    fn tap(&mut self, key: crate::iodev::scancodes::BxKey) -> bool {
+        Keyboard::tap(self, key)
+    }
+
+    fn type_text(&mut self, text: &str) -> Typed {
+        Keyboard::type_text(self, text)
     }
 }
 
@@ -364,128 +317,37 @@ pub enum StopReason {
     /// that heard it. This is what a caller sees when the boundary's error had
     /// nowhere to go, which is the case on every path that only logs one.
     EngineFault,
+    /// A processor reached a debugger code breakpoint and stopped before its
+    /// instruction (see [`Emulator::set_code_breakpoints`]). The machine's
+    /// stop flag is raised; lowering it runs on, and the processor then
+    /// executes that instruction rather than stopping again.
+    Breakpoint(CodeBreakpointHit),
 }
 
-/// What bounds one run.
+/// What bounds one run, and how far it got: the vocabulary every machine
+/// shares, whatever processor it emulates. [`Emulator::step`] states how
+/// closely each bound is held. A multiprocessor reports [`Progress::Ticks`]:
+/// Bochs `main.cc` gives every processor a quantum and credits the whole
+/// round with one `BX_TICKN`, so machine time advances by the round's average
+/// — a figure no single processor's instruction count describes.
+pub use rusty_box_core::run::{Progress, RunBudget};
+
+/// Add a later batch's progress to the running total.
 ///
-/// The two units a machine can hold itself to without consulting a clock it
-/// does not own. A host deadline is the third, and waits for a machine that has
-/// a `HostClock`: `std::time::Instant` is not available on every target this
-/// runs on, and a front end that wants to bound a frame already has one.
-///
-/// Neither bound is a hint about an inner batch; [`Emulator::step`] states how
-/// closely each one is held.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RunBudget {
-    /// Guest instructions the boot processor may retire.
-    ///
-    /// Counted on the boot processor because that is the one a caller set RIP
-    /// on. An engine that does not count instructions cannot honour this.
-    Instructions(u64),
-    /// Ticks of guest time to let pass.
-    ///
-    /// The unit both a multiprocessor machine and a hardware engine can hold
-    /// to, and the one [`Emulator::ticks_to_next_timer_deadline`] answers in —
-    /// so "run until the next device deadline" is expressible without guessing
-    /// how many instructions that is.
-    Ticks(u64),
-}
-
-/// How far a run got, in the unit the machine can actually answer in.
-///
-/// A uniprocessor on an engine that counts instructions answers in
-/// instructions: one processor retires them, and its count is the machine's
-/// own. A multiprocessor cannot. Bochs `main.cc` gives every processor a
-/// quantum and credits the whole round with one `BX_TICKN`, so machine time
-/// advances by the round's average — a figure no single processor's
-/// instruction count describes, and one that keeps moving while a halted
-/// processor retires nothing at all. Nor can an engine that runs the guest on
-/// the host's processor: it never sees an instruction retire, so it reports
-/// the time its stretch took.
-///
-/// Naming the two apart is doctrine R4: a count of instructions and a span of
-/// time are different things, and adding one to the other is a type error
-/// rather than a silent mistake.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Progress {
-    /// Guest instructions retired.
-    Instructions(u64),
-    /// Ticks of guest time that passed.
-    Ticks(u64),
-}
-
-impl Progress {
-    /// The instructions retired, or `None` when the machine measured its
-    /// progress as time instead.
-    #[inline]
-    #[must_use]
-    pub fn instructions(self) -> Option<u64> {
-        match self {
-            Self::Instructions(count) => Some(count),
-            Self::Ticks(_) => None,
-        }
-    }
-
-    /// The guest time that passed, or `None` when the machine measured its
-    /// progress as instructions instead.
-    #[inline]
-    #[must_use]
-    pub fn ticks(self) -> Option<u64> {
-        match self {
-            Self::Ticks(count) => Some(count),
-            Self::Instructions(_) => None,
-        }
-    }
-
-    /// Whether the guest failed to advance at all.
-    ///
-    /// One of the two questions both units answer the same way, and the one a
-    /// caller asks to find out whether stepping again is worth it.
-    #[inline]
-    #[must_use]
-    pub fn stalled(self) -> bool {
-        match self {
-            Self::Instructions(count) | Self::Ticks(count) => count == 0,
-        }
-    }
-
-    /// Add a later run's progress to this one.
-    ///
-    /// A machine's processor count is fixed at construction, so every run of
-    /// one machine reports the same unit. Two that disagree would mean adding
-    /// a duration to a count, which is refused rather than summed: the caller
-    /// is handed back the later reading, and the machine has a defect no total
-    /// could describe.
-    #[inline]
-    #[must_use]
-    pub(crate) fn add(self, later: Self) -> Self {
-        match (self, later) {
-            (Self::Instructions(a), Self::Instructions(b)) => {
-                Self::Instructions(a.saturating_add(b))
-            }
-            (Self::Ticks(a), Self::Ticks(b)) => Self::Ticks(a.saturating_add(b)),
-            (before, later) => {
-                tracing::error!(
-                    "a machine changed how it measures progress mid-run: {before:?} then {later:?}"
-                );
-                later
-            }
-        }
-    }
-
-    /// The number, with the unit deliberately discarded.
-    ///
-    /// For pacing, where the unit genuinely does not matter: a front end
-    /// bounding how much it does per frame wants to know how much happened,
-    /// not what kind. Anything that will compare against an instruction count
-    /// or a deadline must ask [`Self::instructions`] or [`Self::ticks`] and
-    /// handle the `None`: discarding the unit there compares a span of time
-    /// with a count.
-    #[inline]
-    #[must_use]
-    pub const fn count(self) -> u64 {
-        match self {
-            Self::Instructions(count) | Self::Ticks(count) => count,
+/// A machine's processor count is fixed at construction, so every batch of
+/// one machine reports the same unit. Two that disagree would mean adding a
+/// duration to a count, which is refused rather than summed: the later
+/// reading stands, and the machine has a defect no total could describe.
+pub(crate) fn accumulate_progress(so_far: Progress, later: Progress) -> Progress {
+    match so_far.checked_add(later) {
+        Ok(total) => total,
+        Err(mixed) => {
+            tracing::error!(
+                "a machine changed how it measures progress mid-run: {:?} then {:?}",
+                mixed.before,
+                mixed.later
+            );
+            mixed.later
         }
     }
 }
@@ -514,19 +376,32 @@ impl BatchOutcome {
     /// Whether the machine should not be stepped again without host action.
     ///
     /// `Halted` and `BudgetExhausted` are ordinary yields — the guest is still
-    /// live and stepping again makes progress. The other four mean execution
-    /// has ended: the guest or the host asked, the processor is in shutdown, or
-    /// the engine refused work the machine cannot do without it. A caller that
-    /// keeps stepping past any of them is spinning.
+    /// live and stepping again makes progress. The others mean execution has
+    /// stopped until the host acts: the guest or the host asked, the processor
+    /// is in shutdown, the engine refused work the machine cannot do without
+    /// it, or a breakpoint stopped a processor and raised the stop flag. A
+    /// caller that keeps stepping past any of them is spinning.
     #[inline]
     pub fn is_terminal(&self) -> bool {
         match self.stop {
             StopReason::GuestPowerOff
             | StopReason::StopRequested
             | StopReason::CpuShutdown
-            | StopReason::EngineFault => true,
+            | StopReason::EngineFault
+            | StopReason::Breakpoint(_) => true,
             StopReason::Halted | StopReason::BudgetExhausted => false,
         }
+    }
+}
+
+/// How a run ended, in the words every rusty_box machine shares.
+impl rusty_box_core::machine::RunOutcome for BatchOutcome {
+    fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    fn is_terminal(&self) -> bool {
+        BatchOutcome::is_terminal(self)
     }
 }
 
@@ -546,6 +421,8 @@ pub(crate) enum StopCause {
     /// The machine's engine refused work the machine cannot do without it, so
     /// the boundary that heard the refusal stopped the machine beneath it.
     EngineFault,
+    /// A processor stopped before the instruction at a code breakpoint.
+    Breakpoint(CodeBreakpointHit),
 }
 
 impl StopCause {
@@ -566,17 +443,22 @@ impl StopCause {
     /// which runs the tail unconditionally; a refused I/O APIC delivery is put
     /// back in the IRR and offered again at the next assertion of that line or
     /// the next redirection-entry write, because nothing re-runs the delivery
-    /// path per boundary. A refusal in turn
-    /// outranks a bare host request, which is the absence of a machine cause
-    /// rather than a cause of its own.
+    /// path per boundary. A breakpoint is not owed again: its processor
+    /// reported the boundary and executes past it on the next run, so it
+    /// outranks a refusal. A refusal in turn outranks a bare host request,
+    /// which is the absence of a machine cause rather than a cause of its
+    /// own. Of two breakpoints in one batch the first recorded stands.
     const fn displaces(self, recorded: Self) -> bool {
-        match (recorded, self) {
-            (Self::GuestPowerOff, _) => false,
-            (_, Self::GuestPowerOff) => true,
-            (Self::HostRequested, Self::EngineFault) => true,
-            (Self::HostRequested, Self::HostRequested)
-            | (Self::EngineFault, Self::EngineFault)
-            | (Self::EngineFault, Self::HostRequested) => false,
+        self.rank() > recorded.rank()
+    }
+
+    /// Precedence among causes that describe one raised flag.
+    const fn rank(self) -> u8 {
+        match self {
+            Self::HostRequested => 0,
+            Self::EngineFault => 1,
+            Self::Breakpoint(_) => 2,
+            Self::GuestPowerOff => 3,
         }
     }
 }
@@ -589,6 +471,7 @@ impl From<StopCause> for StopReason {
             StopCause::HostRequested => Self::StopRequested,
             StopCause::GuestPowerOff => Self::GuestPowerOff,
             StopCause::EngineFault => Self::EngineFault,
+            StopCause::Breakpoint(hit) => Self::Breakpoint(hit),
         }
     }
 }
@@ -614,10 +497,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // card's own tile bitmap is the complete record of what changed. A
         // hypervisor engine, whose framebuffer window the guest writes without
         // exiting, supplies its page bitmap here instead.
-        let _presented_unconditionally = self
-            .device_manager
-            .vga
-            .refresh(&mut sink, rusty_box_devices::display::card::Dirt::SelfTracked);
+        let _presented_unconditionally = self.device_manager.vga.refresh(
+            &mut sink,
+            rusty_box_devices::display::card::Dirt::SelfTracked,
+        );
     }
 
     /// Hold one piece of host keyboard input for the guest, to be offered by
@@ -710,7 +593,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Keys before raw bytes, the order this pump has always used.
         self.host_input.push_keys(keys_to_send);
         self.host_input.push_scancodes(scancodes_to_send);
-        self.host_input.push_serial(FRONT_END_SERIAL_PORT, serial_input);
+        self.host_input
+            .push_serial(FRONT_END_SERIAL_PORT, serial_input);
 
         // Offer held keyboard input until the 8042 refuses one, and stop there
         // rather than skipping past it, so input reaches the guest in the
@@ -734,20 +618,18 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             keyboard_changed = true;
         }
         for mouse in mouse_to_send {
-            if self
-                .device_manager
-                .keyboard
-                .mouse_motion(mouse.dx, mouse.dy, mouse.dz, mouse.buttons)
-            {
+            if self.device_manager.keyboard.mouse_motion(
+                mouse.dx,
+                mouse.dy,
+                mouse.dz,
+                mouse.buttons,
+            ) {
                 keyboard_changed = true;
             } else {
                 // Usually not back-pressure: the guest may have the mouse in
                 // remote mode or reporting disabled. Relative motion folds
                 // into the next packet, so it is said rather than held.
-                tracing::debug!(
-                    "PS/2 mouse packet refused (buttons {:#04x})",
-                    mouse.buttons
-                );
+                tracing::debug!("PS/2 mouse packet refused (buttons {:#04x})", mouse.buttons);
             }
         }
         // The same gate Bochs's `rx_timer` applies before reading a host byte:
@@ -865,29 +747,30 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // and early init functions that call udelay()/mdelay().
         // =====================================================================
         {
+            use crate::pic::{PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA};
             let pic = self.device_manager.irq.pic_mut();
             // Initialize master PIC: ICW1-ICW4
             // ICW1: edge-triggered, cascade, ICW4 needed
-            pic.write(0x20, 0x11, 1);
+            pic.write(PIC_MASTER_CMD, 0x11, 1);
             // ICW2: master vectors 0x20-0x27 (Linux kernel expects IRQ0=0x20)
-            pic.write(0x21, 0x20, 1);
+            pic.write(PIC_MASTER_DATA, 0x20, 1);
             // ICW3: slave on IRQ2
-            pic.write(0x21, 0x04, 1);
+            pic.write(PIC_MASTER_DATA, 0x04, 1);
             // ICW4: 8086 mode, normal EOI
-            pic.write(0x21, 0x01, 1);
+            pic.write(PIC_MASTER_DATA, 0x01, 1);
             // OCW1: mask all master IRQs — kernel will unmask what it needs
-            pic.write(0x21, 0xFF, 1);
+            pic.write(PIC_MASTER_DATA, 0xFF, 1);
 
             // Initialize slave PIC: ICW1-ICW4
-            pic.write(0xA0, 0x11, 1);
+            pic.write(PIC_SLAVE_CMD, 0x11, 1);
             // ICW2: slave vectors 0x28-0x2F (Linux kernel expects IRQ8=0x28)
-            pic.write(0xA1, 0x28, 1);
+            pic.write(PIC_SLAVE_DATA, 0x28, 1);
             // ICW3: cascade identity = 2
-            pic.write(0xA1, 0x02, 1);
+            pic.write(PIC_SLAVE_DATA, 0x02, 1);
             // ICW4: 8086 mode
-            pic.write(0xA1, 0x01, 1);
+            pic.write(PIC_SLAVE_DATA, 0x01, 1);
             // OCW1: mask all slave IRQs
-            pic.write(0xA1, 0xFF, 1);
+            pic.write(PIC_SLAVE_DATA, 0xFF, 1);
 
             // Do NOT program PIT — kernel will set up its own timer via time_init().
             // quick_pit_calibrate() programs PIT C2 via port 0x43/0x42 directly.
@@ -949,9 +832,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             RunBudget::Ticks(_) => self.pc_system.time_ticks(),
         };
         let spent = |machine: &Self| match budget {
-            RunBudget::Instructions(_) => {
-                machine.cpu_ref(0).icount.saturating_sub(started_at)
-            }
+            RunBudget::Instructions(_) => machine.cpu_ref(0).icount.saturating_sub(started_at),
             RunBudget::Ticks(_) => machine.pc_system.time_ticks().saturating_sub(started_at),
         };
         let ceiling = match budget {
@@ -1010,7 +891,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 Err(e) => return Err(crate::error::Error::Cpu(e)),
             };
             total = Some(match total {
-                Some(so_far) => so_far.add(progress),
+                Some(so_far) => accumulate_progress(so_far, progress),
                 None => progress,
             });
 
@@ -1038,7 +919,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                         break;
                     }
                     self.service_lapic_local_events();
-                    if self.cpu_ref(0).lapic.intr && (self.cpu_ref(0).interrupts_enabled() || mwait_if) {
+                    if self.cpu_ref(0).lapic.intr
+                        && (self.cpu_ref(0).interrupts_enabled() || mwait_if)
+                    {
                         self.cpu_mut()
                             .signal_event(BxCpuC::<()>::BX_EVENT_PENDING_LAPIC_INTR);
                         break;
@@ -1123,7 +1006,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
             break 'batch;
         }
-
 
         // Handle keyboard/mouse/serial input from GUI.
         self.pump_gui_input();
@@ -1308,6 +1190,18 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         None
     }
 
+    /// A breakpoint is one event, told once: once `cause` has been reported,
+    /// the flag it raised stands on as a plain stop, so a run made before the
+    /// host lowers it (a debugger's single step) does not report the same hit
+    /// again. A guest power-off and an engine fault describe the machine and
+    /// stay.
+    pub(super) fn breakpoint_reported(&mut self, cause: StopCause) {
+        match cause {
+            StopCause::Breakpoint(_) => self.stop_cause = StopCause::HostRequested,
+            StopCause::HostRequested | StopCause::GuestPowerOff | StopCause::EngineFault => {}
+        }
+    }
+
     /// Why the batch loop above just ended.
     ///
     /// Asked once, after the loop, from state that is still live — which is
@@ -1317,6 +1211,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// the next call and the power-off request does not.
     fn classify_batch_stop(&mut self) -> StopReason {
         if let Some(cause) = self.stop_in_force() {
+            self.breakpoint_reported(cause);
             return cause.into();
         }
 
@@ -1334,7 +1229,6 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         }
         StopReason::BudgetExhausted
     }
-
 }
 
 /// Render one VGA frame into a `SharedDisplay` framebuffer.

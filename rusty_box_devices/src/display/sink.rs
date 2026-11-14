@@ -133,6 +133,7 @@ pub struct NullDisplay;
 
 impl DisplaySink for NullDisplay {
     fn dimension_update(&mut self, _dims: Dimensions) {}
+
     fn text_update(
         &mut self,
         _previous: &[u8],
@@ -141,11 +142,16 @@ impl DisplaySink for NullDisplay {
         _info: &VgaTextModeInfo,
     ) {
     }
+
     fn graphics_tile_update(&mut self, _rgba: &[u8], _at: TilePos) {}
+
     fn palette_change(&mut self, _index: u8, _colour: Rgb) -> Redraw {
         Redraw::NotNeeded
     }
+
     fn set_text_charmap(&mut self, _map: usize, _glyphs: &[u8]) {}
+
     fn clear_screen(&mut self) {}
+
     fn flush(&mut self) {}
 }

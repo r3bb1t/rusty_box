@@ -16,6 +16,19 @@ permissions:
   contents: read
 
 jobs:
+  format:
+    name: Format (nightly rustfmt)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Check formatting
+        run: cargo +nightly fmt --all --check
+
   rust:
     name: Rust feature and target matrix
     runs-on: ubuntu-latest

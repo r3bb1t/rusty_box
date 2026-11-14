@@ -1,18 +1,20 @@
 #![allow(private_interfaces, unused_assignments)]
 
-use crate::config::{BxAddress, BxPhyAddress, BxPtrEquiv};
+use crate::config::{BxAddress, BxLinAddress, BxPhyAddress, BxPtrEquiv};
 
 pub type BxMemType = u32;
 
 pub type BxHostpageaddr = BxPtrEquiv;
 
-pub const LPF_MASK: BxAddress = 0xfffffffffffff000u64;
+pub const LPF_MASK: BxAddress = 0xFFFFFFFFFFFFF000u64;
 
-const PPF_MASK: BxPhyAddress = 0xfffffffffffff000u64;
+const PPF_MASK: u64 = 0xFFFFFFFFFFFFF000u64;
 
 const TLB_GLOBAL_PAGE: u32 = 0x80000000;
 
-const BX_INVALID_TLB_ENTRY: u64 = 0xffffffffffffffffu64;
+/// The tag of an empty entry: no page base, since every page base has its
+/// low 12 bits clear (Bochs `BX_INVALID_TLB_ENTRY`).
+const BX_INVALID_TLB_ENTRY: BxLinAddress = BxLinAddress::new(u64::MAX);
 
 /// What a TLB entry caches so a hit can be served without re-resolving the
 /// mapping.
@@ -75,7 +77,6 @@ impl CachedHostPage for RamPage {
     fn host_addr(self, base: *mut u8) -> BxHostpageaddr {
         (base as BxHostpageaddr).wrapping_add(self.ram_offset() as BxHostpageaddr)
     }
-
 }
 
 /// A page of directly-fetchable memory, named by where it starts within the
@@ -118,7 +119,6 @@ impl CachedHostPage for AllocPage {
     fn host_addr(self, base: *mut u8) -> BxHostpageaddr {
         (base as BxHostpageaddr).wrapping_add(self.alloc_offset() as BxHostpageaddr)
     }
-
 }
 
 /// The span instruction fetch is currently reading from, located within the
@@ -174,7 +174,7 @@ const _: () = assert!(core::mem::size_of::<Option<RamPage>>() == core::mem::size
 
 pub(crate) struct TLBEntry<P> {
     /// linear page frame
-    pub(crate) lpf: BxAddress,
+    pub(crate) lpf: BxLinAddress,
     // physical page frame
     pub(crate) ppf: BxPhyAddress,
     /// Where the page backing this entry lives in host memory, or `None` when
@@ -221,7 +221,7 @@ impl<P> TLBEntry<P> {
     /// against. A `const` so a whole TLB can be built without running code.
     const INVALID: Self = Self {
         lpf: BX_INVALID_TLB_ENTRY,
-        ppf: 0,
+        ppf: BxPhyAddress::new(0),
         host_page: None,
         access_bits: 0,
         pkey: 0,
@@ -312,16 +312,16 @@ impl<P, const SIZE: usize> Tlb<P, SIZE> {
     /// Given a linear page‐frame number (lpf) and optional len,
     /// compute which TLB‐slot it maps to.
     #[inline]
-    pub fn get_index_of(&self, lpf: u64, len: u32) -> usize {
+    pub fn get_index_of(&self, lpf: BxLinAddress, len: u32) -> usize {
         // Mirror: ((size-1)<<12) mask, then shift down by 12
         let tlb_mask = ((SIZE - 1) as u64) << 12;
 
-        ((lpf.wrapping_add(len as u64) & tlb_mask) >> 12) as usize
+        ((lpf.get().wrapping_add(len as u64) & tlb_mask) >> 12) as usize
     }
 
     /// Get a mutable reference to the matching entry
     #[inline]
-    pub(super) fn get_entry_of(&mut self, lpf: u64, len: u32) -> &mut TLBEntry<P> {
+    pub(super) fn get_entry_of(&mut self, lpf: BxLinAddress, len: u32) -> &mut TLBEntry<P> {
         let i = self.get_index_of(lpf, len);
         &mut self.entries[i]
     }
@@ -333,17 +333,18 @@ impl<P, const SIZE: usize> Tlb<P, SIZE> {
     /// hit path read the protection keys and the allocation base alongside the
     /// entry, which it must do to answer the access at all.
     #[inline]
-    pub(super) fn entry_of(&self, lpf: u64, len: u32) -> &TLBEntry<P> {
+    pub(super) fn entry_of(&self, lpf: BxLinAddress, len: u32) -> &TLBEntry<P> {
         let i = self.get_index_of(lpf, len);
         &self.entries[i]
     }
+
     /// Invalidate the direct-mapped slot selected for a prospective mapping.
     ///
     /// Unlike `invlpg`, this deliberately clears a colliding entry even when
     /// it maps a different linear page.  Callers use it before an allocation
     /// that may need to evict the old host-backed page.
     #[inline]
-    pub(super) fn invalidate_slot(&mut self, laddr: u64, len: u32) {
+    pub(super) fn invalidate_slot(&mut self, laddr: BxLinAddress, len: u32) {
         let slot = self.get_index_of(laddr, len);
         self.entries[slot].invalidate();
     }
@@ -383,7 +384,7 @@ impl<P, const SIZE: usize> Tlb<P, SIZE> {
     }
 
     /// Invalidate a single page (INVLPG)
-    pub fn invlpg(&mut self, laddr: u64) {
+    pub fn invlpg(&mut self, laddr: BxLinAddress) {
         self.invlpg_publishing(laddr, |_| {});
     }
 
@@ -392,14 +393,18 @@ impl<P, const SIZE: usize> Tlb<P, SIZE> {
     /// identical to `invlpg`: the non‐split path clears at most one slot, the
     /// split‐large path clears every entry whose page contains `laddr`.
     #[inline]
-    pub(super) fn invlpg_publishing<F: FnMut(usize)>(&mut self, laddr: u64, mut on_invalidate: F) {
+    pub(super) fn invlpg_publishing<F: FnMut(usize)>(
+        &mut self,
+        laddr: BxLinAddress,
+        mut on_invalidate: F,
+    ) {
         if self.split_large {
             // We have to scan all entries to handle large pages specially
             let mut lpf_mask_accum: u32 = 0;
             for (slot, entry) in self.entries.iter_mut().enumerate() {
                 if entry.valid() {
                     let emask = entry.lpf_mask as u64;
-                    if (laddr & !emask) == (entry.lpf & !emask) {
+                    if laddr.masked(!emask) == entry.lpf.masked(!emask) {
                         entry.invalidate();
                         on_invalidate(slot);
                     } else {
@@ -415,7 +420,7 @@ impl<P, const SIZE: usize> Tlb<P, SIZE> {
         // Otherwise (not split‐large), simple single‐slot INVLPG:
         let idx = self.get_index_of(laddr, 0);
         let entry = &mut self.entries[idx];
-        if lpf_of(entry.lpf) == lpf_of(laddr) {
+        if entry.lpf.page_base() == laddr.page_base() {
             entry.invalidate();
             on_invalidate(idx);
         }
@@ -427,17 +432,12 @@ pub(super) fn page_offset<I>(laddr: I) -> u32
 where
     I: Into<BxAddress>,
 {
-    (laddr.into() as u32) & 0xfff
+    (laddr.into() as u32) & 0xFFF
 }
 
 #[inline]
-pub(super) fn lpf_of(laddr: BxAddress) -> BxAddress {
-    laddr & LPF_MASK
-}
-
-#[inline]
-pub(super) fn ppf_of(paddr: BxAddress) -> BxAddress {
-    paddr & PPF_MASK
+pub(super) fn ppf_of(paddr: BxPhyAddress) -> BxPhyAddress {
+    paddr.masked(PPF_MASK)
 }
 
 /// The distinction every non-global invalidation rests on.
@@ -457,8 +457,8 @@ mod flush_tests {
     fn tlb_with_a_global_and_an_ordinary_page() -> Tlb<RamPage, 8> {
         let mut tlb = Tlb::<RamPage, 8>::new();
         for (slot, access_bits) in [(0usize, TLB_GLOBAL_PAGE | 0x1), (1usize, 0x1)] {
-            tlb.entries[slot].lpf = (slot as u64) << 12;
-            tlb.entries[slot].ppf = (slot as BxPhyAddress) << 12;
+            tlb.entries[slot].lpf = BxLinAddress::new((slot as u64) << 12);
+            tlb.entries[slot].ppf = BxPhyAddress::new((slot as u64) << 12);
             tlb.entries[slot].access_bits = access_bits;
         }
         tlb
@@ -526,7 +526,7 @@ mod const_initialiser_tests {
     #[test]
     fn a_fresh_tlb_holds_only_invalid_entries() {
         assert_eq!(TLBEntry::<RamPage>::INVALID.lpf, BX_INVALID_TLB_ENTRY);
-        assert_ne!(TLBEntry::<RamPage>::INVALID.lpf, 0);
+        assert_ne!(TLBEntry::<RamPage>::INVALID.lpf, BxLinAddress::new(0));
         let tlb = Tlb::<RamPage, 8>::new();
         for index in 0..8 {
             assert_eq!(tlb.entries[index].lpf, BX_INVALID_TLB_ENTRY);

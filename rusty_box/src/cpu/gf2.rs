@@ -9,7 +9,8 @@
 //!
 //! All operations use the AES reduction polynomial x^8 + x^4 + x^3 + x + 1 (0x11B).
 
-use super::{decoder::Instruction, xmm::BxPackedXmmRegister};
+use super::decoder::Instruction;
+use super::xmm::BxPackedXmmRegister;
 
 // ============================================================================
 // GF(2^8) Inverse table (from Bochs gf2.cc)

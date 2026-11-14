@@ -4,9 +4,7 @@
 //!
 //! Implements SHL, SHR, SAR, ROL, ROR for 16-bit operands
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ---- 16-bit read/write helpers for shift instructions ----
@@ -20,6 +18,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Ok((val, Some(())))
         }
     }
+
     fn shift_write16(&mut self, instr: &Instruction, paddr: Option<()>, result: u16) {
         if paddr.is_some() {
             self.write_rmw_linear_word(result);
@@ -173,11 +172,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let op1 = op1_u as i16;
 
         let result = if count >= 16 {
-            if op1 < 0 {
-                0xFFFF
-            } else {
-                0
-            }
+            if op1 < 0 { 0xFFFF } else { 0 }
         } else {
             (op1 >> count) as u16
         };
@@ -203,11 +198,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let op1 = op1_u as i16;
 
         let result = if count >= 16 {
-            if op1 < 0 {
-                0xFFFF
-            } else {
-                0
-            }
+            if op1 < 0 { 0xFFFF } else { 0 }
         } else {
             (op1 >> count) as u16
         };

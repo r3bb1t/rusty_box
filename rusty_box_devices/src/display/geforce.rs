@@ -9,14 +9,16 @@
 //! Implements NVIDIA GeForce 2/3/FX 5900/6800 GPU emulation.
 //! Ported from Bochs geforce.cc/geforce.h.
 
-use rusty_box_core::FloatExt;
+use alloc::boxed::Box;
 use alloc::vec;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 
-use crate::api::WindowOffset;
+use rusty_box_core::FloatExt;
+
+use crate::api::{IoPort, WindowOffset};
 use crate::display::card::{MemCtx, PortCtx, ResetCtx, TimingCtx, VgaExtension, Written};
 use crate::display::ddc::BxDdcC;
-use crate::display::vga::{VerticalPhase, VgaWindow};
+use crate::display::vga::{MemoryWindow, VerticalPhase, VgaWindow, VramOffset};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -35,19 +37,29 @@ const BX_ROP_PATTERN: u8 = 0x01;
 
 // The ports Bochs geforce.cc `svga_read`/`svga_write` answer before the
 // standard VGA does.
-const PORT_CRTC_INDEX_MONO: u16 = 0x03B4;
-const PORT_CRTC_DATA_MONO: u16 = 0x03B5;
-const PORT_INPUT_STATUS_0: u16 = 0x03C2;
-const PORT_VGA_ENABLE: u16 = 0x03C3;
-const PORT_RMA_LOW: u16 = 0x03D0;
-const PORT_RMA_HIGH: u16 = 0x03D2;
-const PORT_CRTC_INDEX: u16 = 0x03D4;
-const PORT_CRTC_DATA: u16 = 0x03D5;
+const PORT_CRTC_INDEX_MONO: IoPort = IoPort::new(0x03B4);
+const PORT_CRTC_DATA_MONO: IoPort = IoPort::new(0x03B5);
+const PORT_INPUT_STATUS_0: IoPort = IoPort::new(0x03C2);
+const PORT_VGA_ENABLE: IoPort = IoPort::new(0x03C3);
+/// Where the high byte of a word access to [`PORT_VGA_ENABLE`] lands — Bochs
+/// `VGA_READ(address+1, 1)`.
+const PORT_VGA_ENABLE_HIGH: IoPort = IoPort::new(0x03C4);
+const PORT_RMA_LOW: IoPort = IoPort::new(0x03D0);
+const PORT_RMA_HIGH: IoPort = IoPort::new(0x03D2);
+const PORT_CRTC_INDEX: IoPort = IoPort::new(0x03D4);
+const PORT_CRTC_DATA: IoPort = IoPort::new(0x03D5);
+
+/// The odd port of the even/odd pair a word access at an even `port` splits
+/// across — Bochs's `address+1` for an `address` whose low bit is clear.
+#[inline]
+fn odd_port_of_pair(port: IoPort) -> IoPort {
+    IoPort::new(port.get() | 1)
+}
 
 /// CRTC indices whose write changes the extended mode — Bochs geforce.cc
 /// `svga_write` sets `svga_needs_update_mode` for exactly these.
 const CRTC_MODE_UPDATE_INDICES: [u8; 14] = [
-    0x01, 0x07, 0x09, 0x0c, 0x0d, 0x12, 0x13, 0x15, 0x19, 0x25, 0x28, 0x2D, 0x41, 0x42,
+    0x01, 0x07, 0x09, 0x0C, 0x0D, 0x12, 0x13, 0x15, 0x19, 0x25, 0x28, 0x2D, 0x41, 0x42,
 ];
 
 /// Where a Real Mode Access data transfer lands. Bochs geforce.cc
@@ -103,6 +115,7 @@ impl GeForceModel {
             Self::GeForce6800 => 0x40,
         }
     }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::GeForce2 => "GeForce2 Pro",
@@ -1028,7 +1041,10 @@ fn alpha_wrap(value: i32) -> u8 {
     (-(value >> 8) ^ value) as u8
 }
 
-#[allow(dead_code, reason = "Bochs geforce.cc `color_565_to_888`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `color_565_to_888`, ported ahead of its caller"
+)]
 fn color_565_to_888(value: u16) -> u32 {
     let r = ((value >> 11) & 0x1F) as u32;
     let g = ((value >> 5) & 0x3F) as u32;
@@ -1039,7 +1055,10 @@ fn color_565_to_888(value: u16) -> u32 {
     (r8 << 16) | (g8 << 8) | b8
 }
 
-#[allow(dead_code, reason = "Bochs geforce.cc `color_888_to_565`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `color_888_to_565`, ported ahead of its caller"
+)]
 fn color_888_to_565(value: u32) -> u16 {
     let r = ((value >> 19) & 0x1F) as u16;
     let g = ((value >> 10) & 0x3F) as u16;
@@ -1047,7 +1066,10 @@ fn color_888_to_565(value: u32) -> u16 {
     (r << 11) | (g << 5) | b
 }
 
-#[allow(dead_code, reason = "Bochs geforce.cc `dot3`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `dot3`, ported ahead of its caller"
+)]
 fn dot3(x: &[f32; 3], y: &[f32; 3]) -> f32 {
     x[0] * y[0] + x[1] * y[1] + x[2] * y[2]
 }
@@ -1060,12 +1082,18 @@ fn dot3_slice(x: &[f32], y: &[f32]) -> f32 {
     x[0] * y[0] + x[1] * y[1] + x[2] * y[2]
 }
 
-#[allow(dead_code, reason = "Bochs geforce.cc `dot4`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `dot4`, ported ahead of its caller"
+)]
 fn dot4(x: &[f32], y: &[f32]) -> f32 {
     x[0] * y[0] + x[1] * y[1] + x[2] * y[2] + x[3] * y[3]
 }
 
-#[allow(dead_code, reason = "Bochs geforce.cc `length`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `length`, ported ahead of its caller"
+)]
 fn vec3_length(v: &[f32; 3]) -> f32 {
     // Named through the trait so every build takes the same path: a test
     // build links std, whose inherent `f32::sqrt` would otherwise win the
@@ -1097,13 +1125,19 @@ fn vec3_normalize_into(input: &[f32; 3], out: &mut [f32; 3]) {
     out[2] = input[2] * s;
 }
 
-#[allow(dead_code, reason = "Bochs geforce.cc `edge_function`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `edge_function`, ported ahead of its caller"
+)]
 fn edge_function(v0: &[f32; 4], v1: &[f32; 4], v2: &[f32]) -> f64 {
     ((v1[0] - v0[0]) as f64) * ((v2[1] - v0[1]) as f64)
         - ((v1[1] - v0[1]) as f64) * ((v2[0] - v0[0]) as f64)
 }
 
-#[allow(dead_code, reason = "Bochs geforce.cc `compare`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `compare`, ported ahead of its caller"
+)]
 fn compare(func: u32, val1: u32, val2: u32) -> bool {
     match func {
         1 | 0x200 => false,        // NEVER
@@ -1118,7 +1152,10 @@ fn compare(func: u32, val1: u32, val2: u32) -> bool {
     }
 }
 
-#[allow(dead_code, reason = "Bochs geforce.cc `blend_factor`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `blend_factor`, ported ahead of its caller"
+)]
 fn blend_factor(
     factor: u16,
     src_rgb: f32,
@@ -1138,28 +1175,34 @@ fn blend_factor(
         0x0304 | 0x1007 => dst_a,                  // DEST_ALPHA
         0x0305 | 0x1008 => 1.0 - dst_a,            // INV_DEST_ALPHA
         0x0306 | 0x1009 => dst_rgb,                // DEST_COLOR
-        0x0307 | 0x100a => 1.0 - dst_rgb,          // INV_DEST_COLOR
-        0x0308 | 0x100b => src_a.min(1.0 - dst_a), // SRC_ALPHA_SAT
-        0x8001 | 0x100e => const_rgb,              // CONSTANT_COLOR
-        0x8002 | 0x100f => 1.0 - const_rgb,        // INV_CONSTANT
+        0x0307 | 0x100A => 1.0 - dst_rgb,          // INV_DEST_COLOR
+        0x0308 | 0x100B => src_a.min(1.0 - dst_a), // SRC_ALPHA_SAT
+        0x8001 | 0x100E => const_rgb,              // CONSTANT_COLOR
+        0x8002 | 0x100F => 1.0 - const_rgb,        // INV_CONSTANT
         0x8003 => const_a,                         // CONSTANT_ALPHA
         0x8004 => 1.0 - const_a,                   // INV_CONSTANT_ALPHA
         _ => 0.5,
     }
 }
 
-#[allow(dead_code, reason = "Bochs geforce.cc `blend_equation`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `blend_equation`, ported ahead of its caller"
+)]
 fn blend_equation(equation: u16, src: f32, src_factor: f32, dst: f32, dst_factor: f32) -> f32 {
     match equation {
-        0x0002 | 0x800a => src * src_factor - dst * dst_factor, // SUBTRACT
-        0x0003 | 0x800b => dst * dst_factor - src * src_factor, // REV_SUBTRACT
+        0x0002 | 0x800A => src * src_factor - dst * dst_factor, // SUBTRACT
+        0x0003 | 0x800B => dst * dst_factor - src * src_factor, // REV_SUBTRACT
         0x0004 | 0x8007 => src.min(dst),                        // MIN
         0x0005 | 0x8008 => src.max(dst),                        // MAX
         _ => src * src_factor + dst * dst_factor,               // ADD (default)
     }
 }
 
-#[allow(dead_code, reason = "Bochs geforce.cc `swizzle`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `swizzle`, ported ahead of its caller"
+)]
 fn swizzle_addr(x: u32, y: u32, width: u32, height: u32) -> u32 {
     let mut xleft = true;
     let mut yleft = height != 1;
@@ -1191,25 +1234,31 @@ fn swizzle_addr(x: u32, y: u32, width: u32, height: u32) -> u32 {
     r
 }
 
-#[allow(dead_code, reason = "Bochs geforce.cc `unpack_attribute`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `unpack_attribute`, ported ahead of its caller"
+)]
 fn unpack_attribute(value: u32, d3d: bool, comp: &mut [f32; 4]) {
     if d3d {
-        comp[0] = ((value >> 16) & 0xff) as f32 / 255.0;
-        comp[1] = ((value >> 8) & 0xff) as f32 / 255.0;
-        comp[2] = (value & 0xff) as f32 / 255.0;
-        comp[3] = ((value >> 24) & 0xff) as f32 / 255.0;
+        comp[0] = ((value >> 16) & 0xFF) as f32 / 255.0;
+        comp[1] = ((value >> 8) & 0xFF) as f32 / 255.0;
+        comp[2] = (value & 0xFF) as f32 / 255.0;
+        comp[3] = ((value >> 24) & 0xFF) as f32 / 255.0;
     } else {
         for i in 0..4 {
-            comp[i] = ((value >> (i * 8)) & 0xff) as f32 / 255.0;
+            comp[i] = ((value >> (i * 8)) & 0xFF) as f32 / 255.0;
         }
     }
 }
 
 /// Register combiner variable extraction
-#[allow(dead_code, reason = "Bochs geforce.cc `rc_get_var`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `rc_get_var`, ported ahead of its caller"
+)]
 fn rc_get_var(cw: u32, shift: u32, regs: &[[f32; 4]; 16], civ: u32) -> f32 {
     let x = cw >> shift;
-    let reg = (x & 0xf) as usize;
+    let reg = (x & 0xF) as usize;
     let pir = (x >> 4) & 1;
     let map = (x >> 5) & 7;
     let cir = if pir != 0 { 3 } else { civ } as usize;
@@ -1244,22 +1293,22 @@ fn texture_process_format(tex: &mut GfTexture) {
         if (tex.format & 0x40) != 0 {
             tex.unnormalized = true;
         }
-        tex.format &= 0x9f;
-    } else if tex.format == 0x12 || tex.format == 0x1b || tex.format == 0x1e {
+        tex.format &= 0x9F;
+    } else if tex.format == 0x12 || tex.format == 0x1B || tex.format == 0x1E {
         tex.linear = true;
         tex.unnormalized = true;
     }
     match tex.format {
-        0x0c | 0x0e | 0x0f | 0x86 | 0x87 | 0x88 => {
+        0x0C | 0x0E | 0x0F | 0x86 | 0x87 | 0x88 => {
             tex.compressed = true;
-            tex.dxt_alpha_data = tex.format != 0x0c && tex.format != 0x86;
-            tex.dxt_alpha_explicit = tex.format == 0x0e || tex.format == 0x87;
+            tex.dxt_alpha_data = tex.format != 0x0C && tex.format != 0x86;
+            tex.dxt_alpha_explicit = tex.format == 0x0E || tex.format == 0x87;
             tex.color_bytes = if tex.dxt_alpha_data { 16 } else { 8 };
         }
-        0x02 | 0x03 | 0x04 | 0x05 | 0x27 | 0x28 | 0x82 | 0x83 | 0x84 | 0x8b | 0x8f => {
+        0x02 | 0x03 | 0x04 | 0x05 | 0x27 | 0x28 | 0x82 | 0x83 | 0x84 | 0x8B | 0x8F => {
             tex.color_bytes = 2;
         }
-        0x06 | 0x07 | 0x12 | 0x1e | 0x85 => {
+        0x06 | 0x07 | 0x12 | 0x1E | 0x85 => {
             tex.color_bytes = 4;
         }
         _ => {
@@ -1268,11 +1317,14 @@ fn texture_process_format(tex: &mut GfTexture) {
     }
 }
 
-#[allow(dead_code, reason = "Bochs geforce.cc `texture_update_size`, ported ahead of its caller")]
+#[allow(
+    dead_code,
+    reason = "Bochs geforce.cc `texture_update_size`, ported ahead of its caller"
+)]
 fn texture_update_size(tex: &mut GfTexture, cls: u32) {
     if tex.linear || cls >= 0x4097 {
         tex.size[0] = tex.image_rect >> 16;
-        tex.size[1] = tex.image_rect & 0x0000ffff;
+        tex.size[1] = tex.image_rect & 0x0000FFFF;
     } else {
         tex.size[0] = 1 << tex.base_size[0];
         tex.size[1] = 1 << tex.base_size[1];
@@ -1638,31 +1690,31 @@ impl BxGeForceC {
         flags[0x88] = 0;
         handlers[0x99] = rop_src_notxor_dst;
         flags[0x99] = 0;
-        handlers[0xaa] = rop_nop;
-        flags[0xaa] = 0;
-        handlers[0xbb] = rop_notsrc_or_dst;
-        flags[0xbb] = 0;
-        handlers[0xcc] = rop_src;
-        flags[0xcc] = 0;
-        handlers[0xdd] = rop_src_and_notdst;
-        flags[0xdd] = 0;
-        handlers[0xee] = rop_src_or_dst;
-        flags[0xee] = 0;
-        handlers[0xff] = rop_1;
-        flags[0xff] = 0;
+        handlers[0xAA] = rop_nop;
+        flags[0xAA] = 0;
+        handlers[0xBB] = rop_notsrc_or_dst;
+        flags[0xBB] = 0;
+        handlers[0xCC] = rop_src;
+        flags[0xCC] = 0;
+        handlers[0xDD] = rop_src_and_notdst;
+        flags[0xDD] = 0;
+        handlers[0xEE] = rop_src_or_dst;
+        flags[0xEE] = 0;
+        handlers[0xFF] = rop_1;
+        flags[0xFF] = 0;
         // Pattern ROPs
         handlers[0x05] = rop_notsrc_and_notdst;
-        handlers[0x0a] = rop_notsrc_and_dst;
-        handlers[0x0f] = rop_notsrc;
+        handlers[0x0A] = rop_notsrc_and_dst;
+        handlers[0x0F] = rop_notsrc;
         handlers[0x50] = rop_src_and_notdst;
         flags[0x50] = BX_ROP_PATTERN; // already default
-        handlers[0x5a] = rop_src_xor_dst;
-        handlers[0x5f] = rop_notsrc_or_notdst;
-        handlers[0xad] = rop_src_and_dst;
-        handlers[0xaf] = rop_notsrc_or_dst;
-        handlers[0xf0] = rop_src;
-        handlers[0xf5] = rop_src_or_notdst;
-        handlers[0xfa] = rop_src_or_dst;
+        handlers[0x5A] = rop_src_xor_dst;
+        handlers[0x5F] = rop_notsrc_or_notdst;
+        handlers[0xAD] = rop_src_and_dst;
+        handlers[0xAF] = rop_notsrc_or_dst;
+        handlers[0xF0] = rop_src;
+        handlers[0xF5] = rop_src_or_notdst;
+        handlers[0xFA] = rop_src_or_dst;
     }
 
     /// Reset the NV chip — Bochs geforce.cc `bx_geforce_c::reset` after its
@@ -2318,14 +2370,14 @@ impl BxGeForceC {
                 }
             }
             0x3220 => self.fifo_cache1_dma_push,
-            0x322c => self.fifo_cache1_dma_instance,
+            0x322C => self.fifo_cache1_dma_instance,
             0x3230 => 0x8000_0000, // DMA_CTL
             0x3240 => self.fifo_cache1_dma_put,
             0x3244 => self.fifo_cache1_dma_get,
             0x3248 => self.fifo_cache1_ref_cnt,
             0x3250 => self.fifo_cache1_pull0,
             0x3270 => self.fifo_cache1_get,
-            0x32e0 => self.fifo_grctx_instance,
+            0x32E0 => self.fifo_grctx_instance,
             0x3304 => 0x0000_0001,
             0x9100 => self.timer_intr,
             0x9140 => self.timer_intr_en,
@@ -2334,11 +2386,11 @@ impl BxGeForceC {
             0x9400 => self.get_current_time() as u32,
             0x9410 => (self.get_current_time() >> 32) as u32,
             0x9420 => self.timer_alarm,
-            0x10020c => self.memsize,
+            0x10020C => self.memsize,
             0x100320 => match self.card_type {
-                0x20 => 0x0000_7fff,
-                0x35 => 0x0005_c7ff,
-                _ => 0x0002_e3ff,
+                0x20 => 0x0000_7FFF,
+                0x35 => 0x0005_C7FF,
+                _ => 0x0002_E3FF,
             },
             0x101000 => self.straps0_primary,
             0x400100 => self.graph_intr,
@@ -2351,7 +2403,7 @@ impl BxGeForceC {
             0x40014C => self.graph_ctx_switch1,
             0x400150 => self.graph_ctx_switch2,
             0x400158 => self.graph_ctx_switch4,
-            0x40032c => self.graph_ctxctl_cur,
+            0x40032C => self.graph_ctxctl_cur,
             0x400700 => self.graph_status,
             0x400704 => self.graph_trapped_addr,
             0x400708 => self.graph_trapped_data,
@@ -2374,18 +2426,18 @@ impl BxGeForceC {
             0x600800 => self.crtc_start,
             0x600804 => self.crtc_config,
             0x600808 => 0, // raster pos stub
-            0x60080c => self.crtc_cursor_offset,
+            0x60080C => self.crtc_cursor_offset,
             0x600810 => self.crtc_cursor_config,
-            0x60081c => self.crtc_gpio_ext,
+            0x60081C => self.crtc_gpio_ext,
             0x680300 => self.ramdac_cu_start_pos,
             0x680404 => 0, // CURSYNC
             0x680508 => self.ramdac_vpll,
-            0x68050c => self.ramdac_pll_select,
+            0x68050C => self.ramdac_pll_select,
             0x680578 => self.ramdac_vpll_b,
             0x680600 => self.ramdac_general_control,
             0x680828 => 0, // FP_HCRTC - second monitor disconnected
             a if a >= 0x700000 && a < 0x800000 => {
-                let offset = a & 0x000f_ffff;
+                let offset = a & 0x000F_FFFF;
                 self.ramin_read32(offset)
             }
             _ => {
@@ -2476,7 +2528,7 @@ impl BxGeForceC {
             0x3220 => {
                 self.fifo_cache1_dma_push = value;
             }
-            0x322c => {
+            0x322C => {
                 self.fifo_cache1_dma_instance = value;
             }
             0x3240 => {
@@ -2509,7 +2561,7 @@ impl BxGeForceC {
                 }
                 self.update_irq_level();
             }
-            0x32e0 => {
+            0x32E0 => {
                 self.fifo_grctx_instance = value;
             }
             0x9100 => {
@@ -2571,7 +2623,7 @@ impl BxGeForceC {
             0x400158 => {
                 self.graph_ctx_switch4 = value;
             }
-            0x40032c => {
+            0x40032C => {
                 self.graph_ctxctl_cur = value;
             }
             0x400700 => {
@@ -2586,7 +2638,7 @@ impl BxGeForceC {
             0x400718 => {
                 self.graph_notify = value;
             }
-            0x40071c => {
+            0x40071C => {
                 if value & 2 != 0 {
                     self.graph_flip_read += 1;
                     if self.graph_flip_modulo > 0 {
@@ -2633,7 +2685,7 @@ impl BxGeForceC {
             0x600804 => {
                 self.crtc_config = value;
             }
-            0x60080c => {
+            0x60080C => {
                 self.crtc_cursor_offset = value;
                 self.hw_cursor.offset = self.crtc_cursor_offset;
             }
@@ -2646,7 +2698,7 @@ impl BxGeForceC {
                 self.hw_cursor.size = if value & 0x0001_0000 != 0 { 64 } else { 32 };
                 self.hw_cursor.bpp32 = value & 0x0000_1000 != 0;
             }
-            0x60081c => {
+            0x60081C => {
                 self.crtc_gpio_ext = value;
             }
             0x680300 => {
@@ -2657,7 +2709,7 @@ impl BxGeForceC {
             0x680508 => {
                 self.ramdac_vpll = value;
             }
-            0x68050c => {
+            0x68050C => {
                 self.ramdac_pll_select = value;
             }
             0x680578 => {
@@ -2705,9 +2757,9 @@ impl BxGeForceC {
     // -----------------------------------------------------------------------
 
     pub fn fifo_process_all(&mut self) {
-        let offset = (self.fifo_cache1_push1 & 0x1f) + 1;
+        let offset = (self.fifo_cache1_push1 & 0x1F) + 1;
         for i in 0..GEFORCE_CHANNEL_COUNT as u32 {
-            self.fifo_process_channel((i + offset) & 0x1f);
+            self.fifo_process_channel((i + offset) & 0x1F);
         }
     }
 
@@ -2794,26 +2846,26 @@ impl BxGeForceC {
                     break;
                 }
             } else {
-                if (word & 0xe000_0003) == 0x2000_0000 {
+                if (word & 0xE000_0003) == 0x2000_0000 {
                     // old jump
-                    self.fifo_cache1_dma_get = word & 0x1fff_ffff;
+                    self.fifo_cache1_dma_get = word & 0x1FFF_FFFF;
                 } else if (word & 3) == 1 {
                     // jump
-                    self.fifo_cache1_dma_get = word & 0xffff_fffc;
+                    self.fifo_cache1_dma_get = word & 0xFFFF_FFFC;
                 } else if (word & 3) == 2 {
                     // call
                     self.chs[chid as usize].subr_return = self.fifo_cache1_dma_get;
                     self.chs[chid as usize].subr_active = true;
-                    self.fifo_cache1_dma_get = word & 0xffff_fffc;
+                    self.fifo_cache1_dma_get = word & 0xFFFF_FFFC;
                 } else if word == 0x0002_0000 {
                     // return
                     self.fifo_cache1_dma_get = self.chs[chid as usize].subr_return;
                     self.chs[chid as usize].subr_active = false;
-                } else if (word & 0xa003_0003) == 0 {
+                } else if (word & 0xA003_0003) == 0 {
                     // method header
-                    self.chs[chid as usize].dma_state.mthd = (word >> 2) & 0x7ff;
+                    self.chs[chid as usize].dma_state.mthd = (word >> 2) & 0x7FF;
                     self.chs[chid as usize].dma_state.subc = (word >> 13) & 7;
-                    self.chs[chid as usize].dma_state.mcnt = (word >> 18) & 0x7ff;
+                    self.chs[chid as usize].dma_state.mcnt = (word >> 18) & 0x7FF;
                     self.chs[chid as usize].dma_state.ni = word & 0x4000_0000 != 0;
                 } else {
                     tracing::error!("FIFO: unexpected word {:#010x}", word);
@@ -2877,17 +2929,17 @@ impl BxGeForceC {
                     0x39 => self.execute_m2mf(chi, si, method, adjusted_param),
                     0x43 => self.execute_rop(chi, method, adjusted_param),
                     0x44 | 0x18 => self.execute_patt(chi, method, adjusted_param),
-                    0x4a | 0x4b => self.execute_gdi(chi, cls, method, adjusted_param),
-                    0x52 | 0x9e => self.execute_swzsurf(chi, method, adjusted_param),
+                    0x4A | 0x4B => self.execute_gdi(chi, cls, method, adjusted_param),
+                    0x52 | 0x9E => self.execute_swzsurf(chi, method, adjusted_param),
                     0x57 => self.execute_chroma(chi, method, adjusted_param),
-                    0x5e => self.execute_rect(chi, method, adjusted_param),
-                    0x5f | 0x9f => self.execute_imageblit(chi, method, adjusted_param),
-                    0x61 | 0x65 | 0x8a | 0x21 => self.execute_ifc(chi, method, adjusted_param),
+                    0x5E => self.execute_rect(chi, method, adjusted_param),
+                    0x5F | 0x9F => self.execute_imageblit(chi, method, adjusted_param),
+                    0x61 | 0x65 | 0x8A | 0x21 => self.execute_ifc(chi, method, adjusted_param),
                     0x62 => self.execute_surf2d(chi, method, adjusted_param),
                     0x64 => self.execute_iifc(chi, method, adjusted_param),
                     0x66 | 0x76 => self.execute_sifc(chi, method, adjusted_param),
                     0x72 => self.execute_beta(chi, method, adjusted_param),
-                    0x7b => self.execute_tfc(chi, method, adjusted_param),
+                    0x7B => self.execute_tfc(chi, method, adjusted_param),
                     0x89 => self.execute_sifm(chi, cls, method, adjusted_param),
                     0x96 | 0x97 => {
                         self.execute_d3d(chi, cls, method, adjusted_param);
@@ -2934,10 +2986,10 @@ impl BxGeForceC {
 
     fn execute_clip(&mut self, chi: usize, method: u32, param: u32) {
         let ch = &mut self.chs[chi];
-        if method == 0x0c0 {
+        if method == 0x0C0 {
             ch.clip_x = param as u16;
             ch.clip_y = (param >> 16) as u16;
-        } else if method == 0x0c1 {
+        } else if method == 0x0C1 {
             ch.clip_width = param as u16;
             ch.clip_height = (param >> 16) as u16;
         }
@@ -2948,14 +3000,14 @@ impl BxGeForceC {
         match method {
             0x061 => ch.m2mf_src = param,
             0x062 => ch.m2mf_dst = param,
-            0x0c3 => ch.m2mf_src_offset = param,
-            0x0c4 => ch.m2mf_dst_offset = param,
-            0x0c5 => ch.m2mf_src_pitch = param,
-            0x0c6 => ch.m2mf_dst_pitch = param,
-            0x0c7 => ch.m2mf_line_length = param,
-            0x0c8 => ch.m2mf_line_count = param,
-            0x0c9 => ch.m2mf_format = param,
-            0x0ca => {
+            0x0C3 => ch.m2mf_src_offset = param,
+            0x0C4 => ch.m2mf_dst_offset = param,
+            0x0C5 => ch.m2mf_src_pitch = param,
+            0x0C6 => ch.m2mf_dst_pitch = param,
+            0x0C7 => ch.m2mf_line_length = param,
+            0x0C8 => ch.m2mf_line_count = param,
+            0x0C9 => ch.m2mf_format = param,
+            0x0CA => {
                 ch.m2mf_buffer_notify = param;
                 // Execute M2MF
                 let src = ch.m2mf_src;
@@ -2983,7 +3035,7 @@ impl BxGeForceC {
     }
 
     fn execute_rop(&mut self, chi: usize, method: u32, param: u32) {
-        if method == 0x0c0 {
+        if method == 0x0C0 {
             self.chs[chi].rop = param as u8;
         }
     }
@@ -2991,11 +3043,11 @@ impl BxGeForceC {
     fn execute_patt(&mut self, chi: usize, method: u32, param: u32) {
         let ch = &mut self.chs[chi];
         match method {
-            0x0c2 => ch.patt_shape = param,
-            0x0c3 => ch.patt_type_color = param == 2,
-            0x0c4 => ch.patt_bg_color = param,
-            0x0c5 => ch.patt_fg_color = param,
-            0x0c6 | 0x0c7 => {
+            0x0C2 => ch.patt_shape = param,
+            0x0C3 => ch.patt_type_color = param == 2,
+            0x0C4 => ch.patt_bg_color = param,
+            0x0C5 => ch.patt_fg_color = param,
+            0x0C6 | 0x0C7 => {
                 let base = (method & 1) as usize * 32;
                 for i in 0..32 {
                     ch.patt_data_mono[i + base] = (1 << (i ^ 7)) & param != 0;
@@ -3013,8 +3065,8 @@ impl BxGeForceC {
                 ch.patt_data_color[i] = param & 0xFFFF;
                 ch.patt_data_color[i + 1] = param >> 16;
             }
-            m if m >= 0x1c0 && m < 0x200 => {
-                ch.patt_data_color[(m - 0x1c0) as usize] = param;
+            m if m >= 0x1C0 && m < 0x200 => {
+                ch.patt_data_color[(m - 0x1C0) as usize] = param;
             }
             _ => {}
         }
@@ -3023,10 +3075,10 @@ impl BxGeForceC {
     fn execute_gdi(&mut self, chi: usize, cls: u32, method: u32, param: u32) {
         let ch = &mut self.chs[chi];
         match method {
-            0x0bf => ch.gdi_operation = param,
-            0x0c0 => ch.gdi_color_fmt = param,
-            0x0c1 => ch.gdi_mono_fmt = param,
-            0x0ff => ch.gdi_rect_color = param,
+            0x0BF => ch.gdi_operation = param,
+            0x0C0 => ch.gdi_color_fmt = param,
+            0x0C1 => ch.gdi_mono_fmt = param,
+            0x0FF => ch.gdi_rect_color = param,
             m if m >= 0x100 && m < 0x140 => {
                 if m & 1 != 0 {
                     ch.gdi_rect_wh = param;
@@ -3035,10 +3087,10 @@ impl BxGeForceC {
                     ch.gdi_rect_xy = param;
                 }
             }
-            0x17d => ch.gdi_clip_yx0 = param,
-            0x17e => ch.gdi_clip_yx1 = param,
-            0x17f => ch.gdi_rect_color = param,
-            m if m >= 0x180 && m < 0x1c0 => {
+            0x17D => ch.gdi_clip_yx0 = param,
+            0x17E => ch.gdi_clip_yx1 = param,
+            0x17F => ch.gdi_rect_color = param,
+            m if m >= 0x180 && m < 0x1C0 => {
                 if m & 1 != 0 {
                     ch.gdi_rect_yx1 = param;
                     // gdi_fillrect clipped would execute here
@@ -3057,11 +3109,11 @@ impl BxGeForceC {
         let ch = &mut self.chs[chi];
         match method {
             0x061 => ch.swzs_img_obj = param,
-            0x0c0 => {
+            0x0C0 => {
                 ch.swzs_fmt = param;
-                ch.swzs_width = 1 << ((param >> 16) & 0xff);
+                ch.swzs_width = 1 << ((param >> 16) & 0xFF);
                 ch.swzs_height = 1 << (param >> 24);
-                let color_fmt = param & 0xffff;
+                let color_fmt = param & 0xFFFF;
                 ch.swzs_color_bytes = match color_fmt {
                     1 => 1,
                     2 | 4 => 2,
@@ -3075,16 +3127,16 @@ impl BxGeForceC {
                     }
                 };
             }
-            0x0c1 => ch.swzs_ofs = param,
+            0x0C1 => ch.swzs_ofs = param,
             _ => {}
         }
     }
 
     fn execute_chroma(&mut self, chi: usize, method: u32, param: u32) {
         let ch = &mut self.chs[chi];
-        if method == 0x0c0 {
+        if method == 0x0C0 {
             ch.chroma_color_fmt = param;
-        } else if method == 0x0c1 {
+        } else if method == 0x0C1 {
             ch.chroma_color = param;
         }
     }
@@ -3092,9 +3144,9 @@ impl BxGeForceC {
     fn execute_rect(&mut self, chi: usize, method: u32, param: u32) {
         let ch = &mut self.chs[chi];
         match method {
-            0x0bf => ch.rect_operation = param,
-            0x0c0 => ch.rect_color_fmt = param,
-            0x0c1 => ch.rect_color = param,
+            0x0BF => ch.rect_operation = param,
+            0x0C0 => ch.rect_color_fmt = param,
+            0x0C1 => ch.rect_color = param,
             m if m >= 0x100 && m < 0x120 => {
                 if m & 1 != 0 {
                     ch.rect_hw = param;
@@ -3117,10 +3169,10 @@ impl BxGeForceC {
         }
         let ch = &mut self.chs[chi];
         match method {
-            0x0bf => ch.blit_operation = param,
-            0x0c0 => ch.blit_syx = param,
-            0x0c1 => ch.blit_dyx = param,
-            0x0c2 => {
+            0x0BF => ch.blit_operation = param,
+            0x0C0 => ch.blit_syx = param,
+            0x0C1 => ch.blit_dyx = param,
+            0x0C2 => {
                 ch.blit_hw = param;
                 // copyarea() would execute here
             }
@@ -3142,8 +3194,8 @@ impl BxGeForceC {
         }
         let ch = &mut self.chs[chi];
         match method {
-            0x0bf => ch.ifc_operation = param,
-            0x0c0 => {
+            0x0BF => ch.ifc_operation = param,
+            0x0C0 => {
                 ch.ifc_color_fmt = param;
                 Self::update_color_bytes(
                     ch.s2d_color_fmt,
@@ -3152,7 +3204,7 @@ impl BxGeForceC {
                 );
                 ch.ifc_pixels_per_word = 4 / ch.ifc_color_bytes;
             }
-            0x0c1 => {
+            0x0C1 => {
                 ch.ifc_x = 0;
                 ch.ifc_y = 0;
                 ch.ifc_ofs_x = param & 0xFFFF;
@@ -3161,7 +3213,7 @@ impl BxGeForceC {
                     + ch.ifc_ofs_y * ch.s2d_pitch_dst
                     + ch.ifc_ofs_x * ch.s2d_color_bytes;
             }
-            0x0c2 => {
+            0x0C2 => {
                 ch.ifc_dst_width = param & 0xFFFF;
                 ch.ifc_dst_height = param >> 16;
                 ch.ifc_clip_x0 = 0;
@@ -3169,7 +3221,7 @@ impl BxGeForceC {
                 ch.ifc_clip_x1 = ch.ifc_dst_width;
                 ch.ifc_clip_y1 = ch.ifc_dst_height;
             }
-            0x0c3 => {
+            0x0C3 => {
                 ch.ifc_src_width = param & 0xFFFF;
                 ch.ifc_src_height = param >> 16;
             }
@@ -3185,16 +3237,16 @@ impl BxGeForceC {
         match method {
             0x061 => ch.s2d_img_src = param,
             0x062 => ch.s2d_img_dst = param,
-            0x0c0 => {
+            0x0C0 => {
                 ch.s2d_color_fmt = param;
                 Self::update_color_bytes_s2d(ch);
             }
-            0x0c1 => {
+            0x0C1 => {
                 ch.s2d_pitch_src = param & 0xFFFF;
                 ch.s2d_pitch_dst = param >> 16;
             }
-            0x0c2 => ch.s2d_ofs_src = param,
-            0x0c3 => ch.s2d_ofs_dst = param,
+            0x0C2 => ch.s2d_ofs_src = param,
+            0x0C3 => ch.s2d_ofs_dst = param,
             _ => {}
         }
     }
@@ -3203,16 +3255,16 @@ impl BxGeForceC {
         let ch = &mut self.chs[chi];
         match method {
             0x061 => ch.iifc_palette = param,
-            0x0f9 => ch.iifc_operation = param,
-            0x0fa => {
+            0x0F9 => ch.iifc_operation = param,
+            0x0FA => {
                 ch.iifc_color_fmt = param;
                 Self::update_color_bytes(0, ch.iifc_color_fmt, &mut ch.iifc_color_bytes);
             }
-            0x0fb => ch.iifc_bpp4 = param,
-            0x0fc => ch.iifc_palette_ofs = param,
-            0x0fd => ch.iifc_yx = param,
-            0x0fe => ch.iifc_dhw = param,
-            0x0ff => {
+            0x0FB => ch.iifc_bpp4 = param,
+            0x0FC => ch.iifc_palette_ofs = param,
+            0x0FD => ch.iifc_yx = param,
+            0x0FE => ch.iifc_dhw = param,
+            0x0FF => {
                 ch.iifc_shw = param;
                 let width = ch.iifc_shw & 0xFFFF;
                 let height = ch.iifc_shw >> 16;
@@ -3242,8 +3294,8 @@ impl BxGeForceC {
     fn execute_sifc(&mut self, chi: usize, method: u32, param: u32) {
         let ch = &mut self.chs[chi];
         match method {
-            0x0bf => ch.sifc_operation = param,
-            0x0c0 => {
+            0x0BF => ch.sifc_operation = param,
+            0x0C0 => {
                 ch.sifc_color_fmt = param;
                 Self::update_color_bytes(
                     ch.s2d_color_fmt,
@@ -3251,12 +3303,12 @@ impl BxGeForceC {
                     &mut ch.sifc_color_bytes,
                 );
             }
-            0x0c1 => ch.sifc_shw = param,
-            0x0c2 => ch.sifc_dxds = param,
-            0x0c3 => ch.sifc_dydt = param,
-            0x0c4 => ch.sifc_clip_yx = param,
-            0x0c5 => ch.sifc_clip_hw = param,
-            0x0c6 => {
+            0x0C1 => ch.sifc_shw = param,
+            0x0C2 => ch.sifc_dxds = param,
+            0x0C3 => ch.sifc_dydt = param,
+            0x0C4 => ch.sifc_clip_yx = param,
+            0x0C5 => ch.sifc_clip_hw = param,
+            0x0C6 => {
                 ch.sifc_syx = param;
                 let width = ch.sifc_shw & 0xFFFF;
                 let height = ch.sifc_shw >> 16;
@@ -3283,7 +3335,7 @@ impl BxGeForceC {
     }
 
     fn execute_beta(&mut self, chi: usize, method: u32, param: u32) {
-        if method == 0x0c0 {
+        if method == 0x0C0 {
             self.chs[chi].beta = param;
         }
     }
@@ -3292,14 +3344,14 @@ impl BxGeForceC {
         match method {
             0x061 => {
                 let cls8 = self.ramin_read32(param) as u8;
-                self.chs[chi].tfc_swizzled = cls8 == 0x52 || cls8 == 0x9e;
+                self.chs[chi].tfc_swizzled = cls8 == 0x52 || cls8 == 0x9E;
                 return;
             }
             _ => {}
         }
         let ch = &mut self.chs[chi];
         match method {
-            0x0c0 => {
+            0x0C0 => {
                 ch.tfc_color_fmt = param;
                 Self::update_color_bytes(
                     ch.s2d_color_fmt,
@@ -3307,8 +3359,8 @@ impl BxGeForceC {
                     &mut ch.tfc_color_bytes,
                 );
             }
-            0x0c1 => ch.tfc_yx = param,
-            0x0c2 => {
+            0x0C1 => ch.tfc_yx = param,
+            0x0C2 => {
                 ch.tfc_hw = param;
                 ch.tfc_upload = param == 0x0100_0100
                     && ch.tfc_yx == 0
@@ -3327,8 +3379,8 @@ impl BxGeForceC {
                     ch.tfc_words = Some(vec![0u32; word_count as usize]);
                 }
             }
-            0x0c3 => ch.tfc_clip_wx = param,
-            0x0c4 => ch.tfc_clip_hy = param,
+            0x0C3 => ch.tfc_clip_wx = param,
+            0x0C4 => ch.tfc_clip_hy = param,
             m if m >= 0x100 && m < 0x800 => {
                 if ch.tfc_upload {
                     let s2d_img_dst = ch.s2d_img_dst;
@@ -3355,7 +3407,7 @@ impl BxGeForceC {
         match method {
             0x066 => {
                 let surf_cls8 = self.ramin_read32(param) as u8;
-                let swizzled = surf_cls8 == 0x52 || surf_cls8 == 0x9e;
+                let swizzled = surf_cls8 == 0x52 || surf_cls8 == 0x9E;
                 if cls == 0x0389 {
                     self.chs[chi].sifm_swizzled_0389 = swizzled;
                 } else {
@@ -3367,7 +3419,7 @@ impl BxGeForceC {
         }
         let ch = &mut self.chs[chi];
         match method {
-            0x0c0 => {
+            0x0C0 => {
                 ch.sifm_color_fmt = param;
                 ch.sifm_color_bytes = match param {
                     8 => 1,
@@ -3379,11 +3431,11 @@ impl BxGeForceC {
                     }
                 };
             }
-            0x0c1 => ch.sifm_operation = param,
-            0x0c4 => ch.sifm_dyx = param,
-            0x0c5 => ch.sifm_dhw = param,
-            0x0c6 => ch.sifm_dudx = param as i32,
-            0x0c7 => ch.sifm_dvdy = param as i32,
+            0x0C1 => ch.sifm_operation = param,
+            0x0C4 => ch.sifm_dyx = param,
+            0x0C5 => ch.sifm_dhw = param,
+            0x0C6 => ch.sifm_dudx = param as i32,
+            0x0C7 => ch.sifm_dvdy = param as i32,
             0x100 => ch.sifm_shw = param,
             0x101 => ch.sifm_sfmt = param,
             0x102 => ch.sifm_sofs = param,
@@ -3470,8 +3522,8 @@ impl BxGeForceC {
         ch.d3d_attrib_out_color = [3, 4];
         ch.d3d_attrib_out_fogc = 5;
         ch.d3d_attrib_out_enable = [true; 32];
-        ch.d3d_attrib_in_tex_coord = [0xf; 16];
-        ch.d3d_attrib_out_tex_coord = [0xf; 16];
+        ch.d3d_attrib_in_tex_coord = [0xF; 16];
+        ch.d3d_attrib_out_tex_coord = [0xF; 16];
         for j in 0..ch.d3d_tex_coord_count as usize {
             ch.d3d_attrib_in_tex_coord[j] = match cls {
                 0x0096 => j as u32 + 3,
@@ -3502,18 +3554,18 @@ impl BxGeForceC {
                 self.graph_flip_write = param;
                 return;
             }
-            0x04a => {
+            0x04A => {
                 self.graph_flip_modulo = param;
                 return;
             }
-            0x04b => {
+            0x04B => {
                 self.graph_flip_write += 1;
                 if self.graph_flip_modulo > 0 {
                     self.graph_flip_write %= self.graph_flip_modulo;
                 }
                 return;
             }
-            0x04c => {
+            0x04C => {
                 if self.graph_flip_read == self.graph_flip_write {
                     self.fifo_wait_flip = true;
                     self.fifo_wait = true;
@@ -3538,7 +3590,7 @@ impl BxGeForceC {
             0x067 => ch.d3d_vertex_a_obj = param,
             0x068 => ch.d3d_vertex_b_obj = param,
             0x069 => ch.d3d_semaphore_obj = param,
-            0x06a => ch.d3d_report_obj = param,
+            0x06A => ch.d3d_report_obj = param,
             0x080 => ch.d3d_clip_horizontal = param,
             0x081 => ch.d3d_clip_vertical = param,
             0x082 => {
@@ -3577,68 +3629,68 @@ impl BxGeForceC {
             0x083 => ch.d3d_surface_pitch_a = param,
             0x084 => ch.d3d_surface_color_offset = param,
             0x085 => ch.d3d_surface_zeta_offset = param,
-            0x08b if cls > 0x0497 => ch.d3d_surface_pitch_z = param,
+            0x08B if cls > 0x0497 => ch.d3d_surface_pitch_z = param,
 
             // Fog
-            m if (m == 0x0a7 && cls <= 0x0097) || (m == 0x233 && cls >= 0x0497) => {
+            m if (m == 0x0A7 && cls <= 0x0097) || (m == 0x233 && cls >= 0x0497) => {
                 ch.d3d_fog_mode = param;
             }
-            m if (m == 0x0a8 && cls <= 0x0097) || (m == 0x232 && cls >= 0x0497) => {
+            m if (m == 0x0A8 && cls <= 0x0097) || (m == 0x232 && cls >= 0x0497) => {
                 ch.d3d_fog_gen_mode = param;
             }
-            m if (m == 0x0a9 && cls <= 0x0097) || (m == 0x0db && cls == 0x0497) => {
+            m if (m == 0x0A9 && cls <= 0x0097) || (m == 0x0DB && cls == 0x0497) => {
                 ch.d3d_fog_enable = param;
             }
 
             // Alpha/blend/depth/stencil enable
-            m if (m == 0x0c0 && cls <= 0x0097) || (m == 0x0c1 && cls >= 0x0497) => {
+            m if (m == 0x0C0 && cls <= 0x0097) || (m == 0x0C1 && cls >= 0x0497) => {
                 ch.d3d_alpha_test_enable = param;
             }
-            m if (m == 0x0c1 && cls <= 0x0097) || (m == 0x0c4 && cls >= 0x0497) => {
+            m if (m == 0x0C1 && cls <= 0x0097) || (m == 0x0C4 && cls >= 0x0497) => {
                 ch.d3d_blend_enable = param;
             }
-            m if (m == 0x0c3 && cls <= 0x0097) || (m == 0x29d && cls >= 0x0497) => {
+            m if (m == 0x0C3 && cls <= 0x0097) || (m == 0x29D && cls >= 0x0497) => {
                 ch.d3d_depth_test_enable = param;
             }
-            m if (m == 0x0c5 && cls <= 0x0097) || (m == 0x516 && cls >= 0x0497) => {
+            m if (m == 0x0C5 && cls <= 0x0097) || (m == 0x516 && cls >= 0x0497) => {
                 ch.d3d_lighting_enable = param;
             }
 
             // Depth function
-            m if (m == 0x0d5 && cls <= 0x0097) || (m == 0x29b && cls >= 0x0497) => {
+            m if (m == 0x0D5 && cls <= 0x0097) || (m == 0x29B && cls >= 0x0497) => {
                 ch.d3d_depth_func = param;
             }
-            m if (m == 0x0d7 && cls <= 0x0097) || (m == 0x29c && cls >= 0x0497) => {
+            m if (m == 0x0D7 && cls <= 0x0097) || (m == 0x29C && cls >= 0x0497) => {
                 ch.d3d_depth_write_enable = param;
             }
 
             // Color mask
-            m if (m == 0x0d6 && cls <= 0x0097) || (m == 0x0c9 && cls >= 0x0497) => {
+            m if (m == 0x0D6 && cls <= 0x0097) || (m == 0x0C9 && cls >= 0x0497) => {
                 ch.d3d_color_mask = param;
             }
 
             // Shade mode
-            m if (m == 0x0df && cls <= 0x0097) || (m == 0x0da && cls >= 0x0497) => {
+            m if (m == 0x0DF && cls <= 0x0097) || (m == 0x0DA && cls >= 0x0497) => {
                 ch.d3d_shade_mode = param;
             }
 
             // Clip range
-            0x0e5 => ch.d3d_clip_min = param_float,
-            0x0e6 => ch.d3d_clip_max = param_float,
+            0x0E5 => ch.d3d_clip_min = param_float,
+            0x0E6 => ch.d3d_clip_max = param_float,
 
             // Cull face
-            m if (m == 0x0c2 && cls <= 0x0097) || (m == 0x60f && cls >= 0x0497) => {
+            m if (m == 0x0C2 && cls <= 0x0097) || (m == 0x60F && cls >= 0x0497) => {
                 ch.d3d_cull_face_enable = param;
             }
-            m if (m == 0x0e7 && cls <= 0x0097) || (m == 0x60c && cls >= 0x0497) => {
+            m if (m == 0x0E7 && cls <= 0x0097) || (m == 0x60C && cls >= 0x0497) => {
                 ch.d3d_cull_face = param;
             }
-            m if (m == 0x0e8 && cls <= 0x0097) || (m == 0x60d && cls >= 0x0497) => {
+            m if (m == 0x0E8 && cls <= 0x0097) || (m == 0x60D && cls >= 0x0497) => {
                 ch.d3d_front_face = param;
             }
 
             // Window offset (NV30+)
-            0x0ae if cls >= 0x0497 => {
+            0x0AE if cls >= 0x0497 => {
                 ch.d3d_window_offset_x = param as i16;
                 ch.d3d_window_offset_y = (param >> 16) as i16;
             }
@@ -3652,14 +3704,14 @@ impl BxGeForceC {
             }
 
             // Transform program
-            0x7a5 => ch.d3d_transform_execution_mode = param,
-            0x7a7 => ch.d3d_transform_program_load = param,
-            0x7a8 => ch.d3d_transform_program_start = param,
+            0x7A5 => ch.d3d_transform_execution_mode = param,
+            0x7A7 => ch.d3d_transform_program_load = param,
+            0x7A8 => ch.d3d_transform_program_start = param,
 
             // Begin/end primitive
-            m if (m == 0x37f && cls == 0x0096)
-                || (m == 0x4ff && cls == 0x0096)
-                || (m == 0x5ff && cls <= 0x0097)
+            m if (m == 0x37F && cls == 0x0096)
+                || (m == 0x4FF && cls == 0x0096)
+                || (m == 0x5FF && cls <= 0x0097)
                 || (m == 0x602 && cls >= 0x0497) =>
             {
                 if param != 0 {
@@ -3673,13 +3725,13 @@ impl BxGeForceC {
             }
 
             // Semaphore
-            0x75b => ch.d3d_semaphore_offset = param,
-            0x75c => {
+            0x75B => ch.d3d_semaphore_offset = param,
+            0x75C => {
                 let obj = ch.d3d_semaphore_obj;
                 let ofs = ch.d3d_semaphore_offset;
                 self.dma_write32(obj, ofs, param);
             }
-            0x75d => {
+            0x75D => {
                 self.crtc_start = param;
                 self.svga_needs_update_mode = true;
             }
@@ -3720,56 +3772,56 @@ impl BxGeForceC {
             0x758 => ch.d3d_shader_control = param,
 
             // Register combiner control
-            m if (m == 0x798 && cls == 0x0097) || (m == 0x23f && cls == 0x0497) => {
+            m if (m == 0x798 && cls == 0x0097) || (m == 0x23F && cls == 0x0497) => {
                 ch.d3d_combiner_control = param;
-                ch.d3d_combiner_control_num_stages = param & 0xf;
+                ch.d3d_combiner_control_num_stages = param & 0xF;
             }
 
             // Combiner final
-            m if (m >= 0x0a2 && m <= 0x0a3 && cls <= 0x0097)
-                || (m >= 0x23d && m <= 0x23e && cls == 0x0497) =>
+            m if (m >= 0x0A2 && m <= 0x0A3 && cls <= 0x0097)
+                || (m >= 0x23D && m <= 0x23E && cls == 0x0497) =>
             {
-                let i = if cls <= 0x0097 { m - 0x0a2 } else { m - 0x23d } as usize;
+                let i = if cls <= 0x0097 { m - 0x0A2 } else { m - 0x23D } as usize;
                 ch.d3d_combiner_final[i] = param;
             }
 
             // Normalize enable
-            m if (m == 0x0e9 && cls <= 0x0097) || (m == 0x0df && cls >= 0x0497) => {
+            m if (m == 0x0E9 && cls <= 0x0097) || (m == 0x0DF && cls >= 0x0497) => {
                 ch.d3d_normalize_enable = param;
             }
 
             // Light enable
-            m if (m == 0x0ef && cls <= 0x0097) || (m == 0x508 && cls >= 0x0497) => {
+            m if (m == 0x0EF && cls <= 0x0097) || (m == 0x508 && cls >= 0x0497) => {
                 ch.d3d_light_enable_mask = param;
             }
 
             // Separate specular
-            m if (m == 0x0ee && cls <= 0x0097) || (m == 0x50a && cls >= 0x0497) => {
+            m if (m == 0x0EE && cls <= 0x0097) || (m == 0x50A && cls >= 0x0497) => {
                 ch.d3d_separate_specular = param & 1;
             }
 
             // Stencil
-            m if (m == 0x0cb && cls <= 0x0097) || (m == 0x0ca && cls >= 0x0497) => {
+            m if (m == 0x0CB && cls <= 0x0097) || (m == 0x0CA && cls >= 0x0497) => {
                 ch.d3d_stencil_test_enable = param;
             }
 
             // Blend factors (NV30+)
-            0x0c5 if cls >= 0x0497 => {
+            0x0C5 if cls >= 0x0497 => {
                 ch.d3d_blend_sfactor_rgb = param as u16;
                 ch.d3d_blend_sfactor_alpha = (param >> 16) as u16;
             }
-            0x0c6 if cls >= 0x0497 => {
+            0x0C6 if cls >= 0x0497 => {
                 ch.d3d_blend_dfactor_rgb = param as u16;
                 ch.d3d_blend_dfactor_alpha = (param >> 16) as u16;
             }
-            0x0c8 if cls >= 0x0497 => {
+            0x0C8 if cls >= 0x0497 => {
                 ch.d3d_blend_equation_rgb = param as u16;
                 ch.d3d_blend_equation_alpha = (param >> 16) as u16;
             }
 
             // Transform program data
-            m if (m >= 0x2c0 && m <= 0x2c3 && cls == 0x0097)
-                || (m >= 0x2e0 && m <= 0x2e3 && cls >= 0x0497) =>
+            m if (m >= 0x2C0 && m <= 0x2C3 && cls == 0x0097)
+                || (m >= 0x2E0 && m <= 0x2E3 && cls >= 0x0497) =>
             {
                 let i = (m & 3) as usize;
                 ch.d3d_transform_program[ch.d3d_transform_program_load as usize][i] = param;
@@ -3779,8 +3831,8 @@ impl BxGeForceC {
             }
 
             // Transform constants
-            m if (m >= 0x2e0 && m <= 0x2e3 && cls == 0x0097)
-                || (m >= 0x7c0 && m <= 0x7cf && cls >= 0x0497) =>
+            m if (m >= 0x2E0 && m <= 0x2E3 && cls == 0x0097)
+                || (m >= 0x7C0 && m <= 0x7CF && cls >= 0x0497) =>
             {
                 let i = (m & 3) as usize;
                 ch.d3d_transform_constant[ch.d3d_transform_constant_load as usize][i] = param_float;
@@ -3790,8 +3842,8 @@ impl BxGeForceC {
             }
 
             // Model-view matrix
-            m if (m >= 0x100 && m <= 0x11f && cls == 0x0096)
-                || (m >= 0x120 && m <= 0x13f && cls >= 0x0097 && cls <= 0x0497) =>
+            m if (m >= 0x100 && m <= 0x11F && cls == 0x0096)
+                || (m >= 0x120 && m <= 0x13F && cls >= 0x0097 && cls <= 0x0497) =>
             {
                 let i = (m & 0xF) as usize;
                 let mat = ((m >> 4) & 1) as usize;
@@ -3806,8 +3858,8 @@ impl BxGeForceC {
             }
 
             // Composite matrix
-            m if (m >= 0x140 && m <= 0x14f && cls == 0x0096)
-                || (m >= 0x1a0 && m <= 0x1af && cls >= 0x0097 && cls <= 0x0497) =>
+            m if (m >= 0x140 && m <= 0x14F && cls == 0x0096)
+                || (m >= 0x1A0 && m <= 0x1AF && cls >= 0x0097 && cls <= 0x0497) =>
             {
                 let i = (m & 0xF) as usize;
                 ch.d3d_composite_matrix[i] = param_float;
@@ -3818,26 +3870,26 @@ impl BxGeForceC {
             }
 
             // Viewport offset
-            m if (m >= 0x1ba && m <= 0x1bd && cls == 0x0096)
-                || (m >= 0x288 && m <= 0x28b && cls >= 0x0097) =>
+            m if (m >= 0x1BA && m <= 0x1BD && cls == 0x0096)
+                || (m >= 0x288 && m <= 0x28B && cls >= 0x0097) =>
             {
-                let i = if cls == 0x0096 { m - 0x1ba } else { m - 0x288 } as usize;
+                let i = if cls == 0x0096 { m - 0x1BA } else { m - 0x288 } as usize;
                 ch.d3d_viewport_offset[i] = param_float;
             }
 
             // Viewport scale
-            m if (m >= 0x2bc && m <= 0x2bf && cls == 0x0097)
-                || (m >= 0x28c && m <= 0x28f && cls >= 0x0497) =>
+            m if (m >= 0x2BC && m <= 0x2BF && cls == 0x0097)
+                || (m >= 0x28C && m <= 0x28F && cls >= 0x0497) =>
             {
                 let i = (m & 3) as usize;
                 ch.d3d_viewport_scale[i] = param_float;
             }
 
             // View matrix enable
-            0x0fa if cls == 0x0096 => ch.d3d_view_matrix_enable = param,
+            0x0FA if cls == 0x0096 => ch.d3d_view_matrix_enable = param,
 
             // Transform constant load index
-            m if (m == 0x7a9 && cls == 0x0097) || (m == 0x7bf && cls >= 0x0497) => {
+            m if (m == 0x7A9 && cls == 0x0097) || (m == 0x7BF && cls >= 0x0497) => {
                 ch.d3d_transform_constant_load = param;
             }
 
@@ -3867,7 +3919,7 @@ impl BxGeForceC {
         if port == PORT_VGA_ENABLE && io_len == 2 {
             let clock = cx.clock();
             let low = cx.core().read_port(PORT_VGA_ENABLE, 1, clock);
-            let high = cx.core().read_port(PORT_VGA_ENABLE + 1, 1, clock);
+            let high = cx.core().read_port(PORT_VGA_ENABLE_HIGH, 1, clock);
             return Some(low | (high << 8));
         }
 
@@ -3875,9 +3927,9 @@ impl BxGeForceC {
             return Some(self.rma_read(port, io_len));
         }
 
-        if io_len == 2 && (port & 1) == 0 {
+        if io_len == 2 && (port.get() & 1) == 0 {
             let low = self.svga_read_byte(cx, port);
-            let high = self.svga_read_byte(cx, port + 1);
+            let high = self.svga_read_byte(cx, odd_port_of_pair(port));
             return Some(low | (high << 8));
         }
 
@@ -3890,7 +3942,7 @@ impl BxGeForceC {
     /// One byte of a word access split at an even port — Bochs
     /// `SVGA_READ(address, 1)`: the card's answer where it has one, the
     /// core's byte otherwise.
-    fn svga_read_byte(&self, cx: &mut PortCtx<'_>, port: u16) -> u32 {
+    fn svga_read_byte(&self, cx: &mut PortCtx<'_>, port: IoPort) -> u32 {
         match self.svga_read_own(port) {
             Some(value) => u32::from(value),
             None => {
@@ -3901,12 +3953,10 @@ impl BxGeForceC {
     }
 
     /// The byte ports `svga_read`'s switch answers from the card.
-    fn svga_read_own(&self, port: u16) -> Option<u8> {
+    fn svga_read_own(&self, port: IoPort) -> Option<u8> {
         match port {
             PORT_CRTC_INDEX_MONO | PORT_CRTC_INDEX => Some(self.crtc.index),
-            PORT_CRTC_DATA_MONO | PORT_CRTC_DATA
-                if usize::from(self.crtc.index) > VGA_CRTC_MAX =>
-            {
+            PORT_CRTC_DATA_MONO | PORT_CRTC_DATA if usize::from(self.crtc.index) > VGA_CRTC_MAX => {
                 Some(self.svga_read_crtc(self.crtc.index))
             }
             PORT_INPUT_STATUS_0 => {
@@ -3928,9 +3978,9 @@ impl BxGeForceC {
             return Written::Done;
         }
 
-        if io_len == 2 && (port & 1) == 0 {
-            self.svga_write_byte(cx, port, value & 0xff);
-            self.svga_write_byte(cx, port + 1, value >> 8);
+        if io_len == 2 && (port.get() & 1) == 0 {
+            self.svga_write_byte(cx, port, value & 0xFF);
+            self.svga_write_byte(cx, odd_port_of_pair(port), value >> 8);
             return Written::Done;
         }
 
@@ -3943,7 +3993,7 @@ impl BxGeForceC {
     /// One byte of a word access split at an even port — Bochs
     /// `SVGA_WRITE(address, value, 1)`, whose fall-through is the core's
     /// byte write.
-    fn svga_write_byte(&mut self, cx: &mut PortCtx<'_>, port: u16, value: u32) {
+    fn svga_write_byte(&mut self, cx: &mut PortCtx<'_>, port: IoPort, value: u32) {
         if self.svga_write_own(port, value) == Written::FallThrough {
             cx.core().write_port(port, value, 1);
         }
@@ -3955,7 +4005,7 @@ impl BxGeForceC {
     /// reaches the NV registers even though the core keeps only its low bits.
     /// An index write, and a data write at or below `VGA_CRTC_MAX`, also fall
     /// through so the core's own copy stays in step.
-    fn svga_write_own(&mut self, port: u16, value: u32) -> Written {
+    fn svga_write_own(&mut self, port: IoPort, value: u32) -> Written {
         match port {
             PORT_CRTC_INDEX_MONO | PORT_CRTC_INDEX => {
                 self.crtc.index = value as u8;
@@ -3988,7 +4038,7 @@ impl BxGeForceC {
             }
             None => {
                 tracing::error!("crtc: unknown index {index:#04x} read");
-                0xff
+                0xFF
             }
         }
     }
@@ -4003,22 +4053,22 @@ impl BxGeForceC {
 
         let mut update_cursor_addr = false;
         match index {
-            0x1c => {
+            0x1C => {
                 // Windows 95 hangs after a reboot unless the rising edge of
                 // bit 7 clears the CRTC interrupt enable.
-                if (self.crtc.reg[0x1c] & 0x80) == 0 && (value & 0x80) != 0 {
+                if (self.crtc.reg[0x1C] & 0x80) == 0 && (value & 0x80) != 0 {
                     self.crtc_intr_en = 0;
                     self.update_irq_level();
                 }
             }
-            0x1d | 0x1e => self.bank_base[slot - 0x1d] = u32::from(value) * 0x8000,
-            0x2f..=0x31 => update_cursor_addr = true,
-            0x37 | 0x3f | 0x51 => {
+            0x1D | 0x1E => self.bank_base[slot - 0x1D] = u32::from(value) * 0x8000,
+            0x2F..=0x31 => update_cursor_addr = true,
+            0x37 | 0x3F | 0x51 => {
                 let scl = (value & 0x20) != 0;
                 let sda = (value & 0x10) != 0;
-                if index == 0x3f {
+                if index == 0x3F {
                     self.ddc.write(scl, sda);
-                    self.crtc.reg[0x3e] = self.ddc.read() & 0x0c;
+                    self.crtc.reg[0x3E] = self.ddc.read() & 0x0C;
                 } else {
                     self.crtc.reg[slot - 1] = (u8::from(sda) << 3) | (u8::from(scl) << 2);
                 }
@@ -4036,14 +4086,14 @@ impl BxGeForceC {
         }
 
         if update_cursor_addr {
-            self.hw_cursor.enabled = (self.crtc.reg[0x31] & 0x01) != 0
-                || (self.crtc_cursor_config & 0x0000_0001) != 0;
+            self.hw_cursor.enabled =
+                (self.crtc.reg[0x31] & 0x01) != 0 || (self.crtc_cursor_config & 0x0000_0001) != 0;
             self.hw_cursor.vram = (self.crtc.reg[0x30] & 0x80) != 0
                 || (self.crtc_cursor_config & 0x0000_0100) != 0
                 || self.card_type >= 0x40;
             let offset = ((u32::from(self.crtc.reg[0x31]) >> 2) << 11)
-                | (u32::from(self.crtc.reg[0x30] & 0x7f) << 17)
-                | (u32::from(self.crtc.reg[0x2f]) << 24);
+                | (u32::from(self.crtc.reg[0x30] & 0x7F) << 17)
+                | (u32::from(self.crtc.reg[0x2F]) << 24);
             self.hw_cursor.offset = offset.wrapping_add(self.crtc_cursor_offset);
         }
     }
@@ -4076,7 +4126,7 @@ impl BxGeForceC {
     /// The Real Mode Access window at 0x3D0/0x3D2 — the read half of Bochs
     /// geforce.cc `svga_read`'s `RMA_ACCESS` case. CRTC 0x38 bit 0 opens the
     /// window and bits 7:1 select what it reads: 1 the address, 2 the data.
-    fn rma_read(&self, port: u16, io_len: u8) -> u32 {
+    fn rma_read(&self, port: IoPort, io_len: u8) -> u32 {
         if io_len == 1 {
             tracing::error!("port 0x3d0 access with io_len = 1");
             return 0;
@@ -4122,7 +4172,7 @@ impl BxGeForceC {
 
     /// The write half of [`Self::rma_read`]: index 1 sets the address, index 3
     /// writes the data. A 16-bit write replaces the half the port names.
-    fn rma_write(&mut self, port: u16, value: u32, io_len: u8) {
+    fn rma_write(&mut self, port: IoPort, value: u32, io_len: u8) {
         if io_len == 1 {
             tracing::debug!("port 0x3d0 access with io_len = 1");
             return;
@@ -4160,7 +4210,10 @@ impl BxGeForceC {
                             (self.rma_load(target) & 0x0000_FFFF) | (value << 16)
                         };
                         self.rma_store(target, merged);
-                        tracing::debug!("rma: write to {:#010x} value {merged:#010x}", self.rma_addr);
+                        tracing::debug!(
+                            "rma: write to {:#010x} value {merged:#010x}",
+                            self.rma_addr
+                        );
                     }
                     None => {
                         tracing::error!("rma: oob write to {:#010x} ignored", self.rma_addr);
@@ -4201,6 +4254,20 @@ impl BxGeForceC {
     pub fn vram_bar_write(&mut self, offset: u32, value: u8) {
         let addr = (offset & self.memsize_mask) as usize;
         self.memory[addr] = value;
+    }
+
+    /// Whether CRTC 0x28 selects the extended modes, in which the legacy
+    /// aperture is the chip's bank window rather than the standard VGA's
+    /// (Bochs geforce.cc `mem_read`/`mem_write`, `crtc.reg[0x28]`).
+    fn extended_aperture(&self) -> bool {
+        self.crtc.reg[0x28] != 0
+    }
+
+    /// The video-memory byte an access into the bank window reaches: bank 0
+    /// (Bochs geforce.cc `bank_base[0]`) on from the window's start, wrapped
+    /// to the memory size.
+    fn bank_window_target(&self, window: VramOffset) -> u32 {
+        window.banked(self.bank_base[0]).get() & self.memsize_mask
     }
 
     /// Set the current time in nanoseconds (called by emulator timer system).
@@ -4264,11 +4331,18 @@ impl VgaExtension for BxGeForceC {
 
     /// Video memory reads land in the NV framebuffer, which the chip addresses
     /// linearly rather than through the planar core.
+    ///
+    /// Bochs geforce.cc `mem_read`: with CRTC 0x28 clear the legacy aperture
+    /// is the core's, a standard VGA with its latches and plane masks; with it
+    /// set, `A0000-AFFFF` is the bank window and the rest of the aperture
+    /// reads 0xFF.
     fn vga_mem_read(&mut self, cx: &mut MemCtx<'_>) -> Option<u8> {
         match cx.window() {
-            // The legacy aperture stays the core's: a GeForce in a text mode is
-            // a standard VGA, latches and plane masks included.
-            VgaWindow::Legacy => None,
+            VgaWindow::Legacy if !self.extended_aperture() => None,
+            VgaWindow::Legacy => Some(match MemoryWindow::A0000_64K.translate(cx.offset()) {
+                Some(window) => self.vram_read8(self.bank_window_target(window)),
+                None => 0xFF,
+            }),
             VgaWindow::Lfb => {
                 let at = cx.offset().get() as u32 & self.memsize_mask;
                 Some(self.vram_read8(at))
@@ -4277,8 +4351,23 @@ impl VgaExtension for BxGeForceC {
         }
     }
 
+    /// Bochs geforce.cc `mem_write`: the write half of [`Self::vga_mem_read`].
+    /// With CRTC 0x1C bit 7 set, a write into the bank window goes to RAMIN
+    /// at the window offset itself, unbanked; outside `A0000-AFFFF` it is
+    /// dropped.
     fn vga_mem_write(&mut self, cx: &mut MemCtx<'_>, value: u8) -> Written {
         match cx.window() {
+            VgaWindow::Legacy if !self.extended_aperture() => Written::FallThrough,
+            VgaWindow::Legacy => {
+                if let Some(window) = MemoryWindow::A0000_64K.translate(cx.offset()) {
+                    if self.crtc.reg[0x1C] & 0x80 != 0 {
+                        self.ramin_write8(window.get(), value);
+                    } else {
+                        self.vram_write8(self.bank_window_target(window), value);
+                    }
+                }
+                Written::Done
+            }
             VgaWindow::Lfb => {
                 let at = cx.offset().get() as u32 & self.memsize_mask;
                 self.vram_write8(at, value);
@@ -4355,12 +4444,13 @@ impl VgaExtension for BxGeForceC {
 
 #[cfg(test)]
 mod tests {
+    use rusty_box_core::time::{ClockHz, VmClock, VmInstant};
+
     use super::*;
     use crate::api::{
         DeviceCtx, IoLen, IrqLine, IrqSink, MmioDevice, PioDevice, TimerKey, TimerService,
     };
     use crate::display::card::VgaCard;
-    use rusty_box_core::time::{ClockHz, VmClock, VmInstant};
 
     const CLOCK: VmClock = VmClock::new(VmInstant::ZERO, ClockHz::BOCHS_DEFAULT);
 
@@ -4370,6 +4460,7 @@ mod tests {
 
     impl IrqSink for Unwired {
         fn set_level(&mut self, _line: IrqLine, _level: bool) {}
+
         fn level(&self, _line: IrqLine) -> bool {
             false
         }
@@ -4377,8 +4468,11 @@ mod tests {
 
     impl TimerService for Unwired {
         fn arm_oneshot_usec(&mut self, _key: TimerKey, _delay_usec: u64) {}
+
         fn arm_periodic_usec(&mut self, _key: TimerKey, _period_usec: u64) {}
+
         fn arm_oneshot_ticks(&mut self, _key: TimerKey, _delay_ticks: u64) {}
+
         fn cancel(&mut self, _key: TimerKey) {}
     }
 
@@ -4399,7 +4493,7 @@ mod tests {
             }
         }
 
-        fn port_in(&mut self, port: u16, len: IoLen) -> u32 {
+        fn port_in(&mut self, port: IoPort, len: IoLen) -> u32 {
             let mut ctx = DeviceCtx {
                 clock: CLOCK,
                 irq: &mut self.irq,
@@ -4408,7 +4502,7 @@ mod tests {
             PioDevice::pio_read(&mut self.card, port, len, &mut ctx)
         }
 
-        fn port_out(&mut self, port: u16, value: u32, len: IoLen) {
+        fn port_out(&mut self, port: IoPort, value: u32, len: IoLen) {
             let mut ctx = DeviceCtx {
                 clock: CLOCK,
                 irq: &mut self.irq,
@@ -4462,6 +4556,42 @@ mod tests {
             );
         }
 
+        /// A byte read `offset` bytes into the `A0000-BFFFF` aperture.
+        fn legacy_read(&mut self, offset: u64) -> u8 {
+            let mut data = [0u8; 1];
+            let mut ctx = DeviceCtx {
+                clock: CLOCK,
+                irq: &mut self.irq,
+                timers: &mut self.timers,
+            };
+            MmioDevice::mmio_read(
+                &mut self.card,
+                VgaWindow::Legacy.id(),
+                WindowOffset(offset),
+                1,
+                &mut data,
+                &mut ctx,
+            );
+            data[0]
+        }
+
+        /// A byte written `offset` bytes into the `A0000-BFFFF` aperture.
+        fn legacy_write(&mut self, offset: u64, value: u8) {
+            let mut ctx = DeviceCtx {
+                clock: CLOCK,
+                irq: &mut self.irq,
+                timers: &mut self.timers,
+            };
+            MmioDevice::mmio_write(
+                &mut self.card,
+                VgaWindow::Legacy.id(),
+                WindowOffset(offset),
+                1,
+                &[value],
+                &mut ctx,
+            );
+        }
+
         /// Open the RMA window at `rma_index` — CRTC 0x38, bit 0 the enable.
         fn rma_select(&mut self, rma_index: u8) {
             self.crtc_write(0x38, (rma_index << 1) | 1);
@@ -4507,6 +4637,75 @@ mod tests {
         }
     }
 
+    /// With CRTC 0x28 clear the aperture is the standard VGA's, so a bank the
+    /// guest has set does not move it (Bochs geforce.cc `mem_write` calls
+    /// `bx_vgacore_c::mem_write`).
+    #[test]
+    fn the_aperture_ignores_the_bank_in_the_standard_modes() {
+        let mut guest = Guest::new();
+        guest.crtc_write(0x1D, 0x01);
+
+        guest.legacy_write(0x10, 0x5A);
+
+        assert_eq!(guest.card.ext.bank_base[0], 0x8000);
+        assert_eq!(
+            guest.card.ext.vram_read8(0x8010),
+            0x00,
+            "the write did not reach the chip's memory at bank 0"
+        );
+    }
+
+    /// Bochs geforce.cc `mem_read`/`mem_write`: with CRTC 0x28 set,
+    /// `A0000-AFFFF` reaches video memory at bank 0 (CRTC 0x1D, in 32 KiB
+    /// units).
+    #[test]
+    fn the_bank_window_reaches_video_memory_at_bank_0() {
+        let mut guest = Guest::new();
+        guest.crtc_write(0x28, 0x01);
+        guest.crtc_write(0x1D, 0x02);
+
+        guest.legacy_write(0x1234, 0xA5);
+
+        assert_eq!(guest.card.ext.vram_read8(0x1_1234), 0xA5);
+        assert_eq!(guest.legacy_read(0x1234), 0xA5, "and reads back through it");
+    }
+
+    /// Past `AFFFF` the extended aperture has nothing: a read is 0xFF and a
+    /// write is dropped.
+    #[test]
+    fn the_extended_aperture_past_the_bank_window_reads_ff() {
+        let mut guest = Guest::new();
+        guest.crtc_write(0x28, 0x01);
+
+        guest.legacy_write(0x1_8000, 0x11);
+
+        assert_eq!(guest.legacy_read(0x1_8000), 0xFF);
+        assert_eq!(
+            guest.card.ext.vram_read8(0x8000),
+            0x00,
+            "the write reached no byte the window maps"
+        );
+    }
+
+    /// CRTC 0x1C bit 7 sends a write into the bank window to RAMIN at the
+    /// window offset, ignoring the bank (Bochs geforce.cc `mem_write`).
+    #[test]
+    fn a_bank_window_write_with_crtc_1c_bit_7_lands_in_ramin() {
+        let mut guest = Guest::new();
+        guest.crtc_write(0x28, 0x01);
+        guest.crtc_write(0x1D, 0x02);
+        guest.crtc_write(0x1C, 0x80);
+
+        guest.legacy_write(0x20, 0x77);
+
+        assert_eq!(guest.card.ext.ramin_read8(0x20), 0x77);
+        assert_eq!(
+            guest.card.ext.vram_read8(0x1_0020),
+            0x00,
+            "the banked byte is untouched"
+        );
+    }
+
     /// An index past the standard VGA's belongs to the card alone. The core
     /// keeps six index bits, so index 0x41 reaching it would land on CRTC 0x01,
     /// the horizontal display end of the mode on screen.
@@ -4517,8 +4716,16 @@ mod tests {
 
         guest.crtc_write(0x41, 0x5A);
 
-        assert_eq!(guest.crtc_read(0x41), 0x5A, "the card stores and answers index 0x41");
-        assert_eq!(guest.crtc_read(0x01), 0x4F, "and the core's CRTC 0x01 is untouched");
+        assert_eq!(
+            guest.crtc_read(0x41),
+            0x5A,
+            "the card stores and answers index 0x41"
+        );
+        assert_eq!(
+            guest.crtc_read(0x01),
+            0x4F,
+            "and the core's CRTC 0x01 is untouched"
+        );
     }
 
     /// At or below 0x18 the card keeps a copy and the core still performs the
@@ -4534,7 +4741,10 @@ mod tests {
             guest.card.ext.crtc.reg[0x13], 0x28,
             "the card's copy, which its extended modes are computed from"
         );
-        assert!(guest.card.ext.svga_needs_update_mode, "CRTC 0x13 is a mode register");
+        assert!(
+            guest.card.ext.svga_needs_update_mode,
+            "CRTC 0x13 is a mode register"
+        );
     }
 
     #[test]
@@ -4589,7 +4799,11 @@ mod tests {
         assert_eq!(guest.port_in(PORT_RMA_LOW, IoLen::Dword), 0x0000_2210);
         guest.rma_select(3);
         guest.port_out(PORT_RMA_LOW, 0xCAFE_BABE, IoLen::Dword);
-        assert_eq!(guest.bar0_read(0x2210, 4), 0xCAFE_BABE, "the register BAR0 shows");
+        assert_eq!(
+            guest.bar0_read(0x2210, 4),
+            0xCAFE_BABE,
+            "the register BAR0 shows"
+        );
 
         // A word at 0x3D2 replaces the high half only.
         guest.port_out(PORT_RMA_HIGH, 0x1234, IoLen::Word);
@@ -4605,7 +4819,11 @@ mod tests {
         guest.port_out(PORT_RMA_LOW, 0x0102_0304, IoLen::Dword);
         guest.rma_select(2);
         assert_eq!(guest.port_in(PORT_RMA_LOW, IoLen::Dword), 0x0102_0304);
-        assert_eq!(guest.card.ext.vram_read32(0x1000), 0x0102_0304, "and it is VRAM");
+        assert_eq!(
+            guest.card.ext.vram_read32(0x1000),
+            0x0102_0304,
+            "and it is VRAM"
+        );
     }
 
     #[test]
@@ -4613,7 +4831,11 @@ mod tests {
         let mut guest = Guest::new();
 
         guest.port_out(PORT_RMA_LOW, 0x0000_2210, IoLen::Dword);
-        assert_eq!(guest.port_in(PORT_RMA_LOW, IoLen::Dword), 0, "a closed window reads zero");
+        assert_eq!(
+            guest.port_in(PORT_RMA_LOW, IoLen::Dword),
+            0,
+            "a closed window reads zero"
+        );
 
         guest.rma_select(1);
         assert_eq!(
@@ -4621,7 +4843,11 @@ mod tests {
             0,
             "the address written while it was closed was dropped"
         );
-        assert_eq!(guest.port_in(PORT_RMA_LOW, IoLen::Byte), 0, "a byte access reads zero");
+        assert_eq!(
+            guest.port_in(PORT_RMA_LOW, IoLen::Byte),
+            0,
+            "a byte access reads zero"
+        );
     }
 
     /// The window bounds a transfer by its first byte only, so a read at the
@@ -4649,7 +4875,11 @@ mod tests {
         guest.bar0_write(0x2210, 0x1234_5678, 4);
 
         assert_eq!(guest.bar0_read(0x2210, 1), 0x78);
-        assert_eq!(guest.bar0_read(0x2210, 2), 0x5678, "the low half of the register");
+        assert_eq!(
+            guest.bar0_read(0x2210, 2),
+            0x5678,
+            "the low half of the register"
+        );
         assert_eq!(guest.bar0_read(0x2210, 4), 0x1234_5678);
     }
 
@@ -4659,11 +4889,23 @@ mod tests {
 
         guest.bar0_write(0x2210, 0x1111_2222_3333_4444, 8);
 
-        assert_eq!(guest.bar0_read(0x2210, 4), 0x3333_4444, "PFIFO RAMHT takes the low dword");
-        assert_eq!(guest.bar0_read(0x2214, 4), 0x1111_2222, "PFIFO RAMFC the high one");
+        assert_eq!(
+            guest.bar0_read(0x2210, 4),
+            0x3333_4444,
+            "PFIFO RAMHT takes the low dword"
+        );
+        assert_eq!(
+            guest.bar0_read(0x2214, 4),
+            0x1111_2222,
+            "PFIFO RAMFC the high one"
+        );
 
         guest.bar0_write(0x2210, 0xAB, 1);
-        assert_eq!(guest.bar0_read(0x2210, 4), 0x3333_44AB, "a byte write replaces one byte");
+        assert_eq!(
+            guest.bar0_read(0x2210, 4),
+            0x3333_44AB,
+            "a byte write replaces one byte"
+        );
     }
 
     /// A dword read at 0x18FE straddles the end of the 256-byte PCI config
@@ -4683,12 +4925,19 @@ mod tests {
         let mut guest = Guest::new();
 
         guest.ddc_drive(true, true);
-        assert_eq!(guest.crtc_read(0x3E), 0x0C, "clock and data both high at rest");
+        assert_eq!(
+            guest.crtc_read(0x3E),
+            0x0C,
+            "clock and data both high at rest"
+        );
 
         guest.ddc_address_monitor_for_read();
         guest.ddc_drive(false, true);
         guest.ddc_drive(true, true);
-        assert!(!guest.ddc_monitor_sda(), "the monitor acknowledges address 0x50");
+        assert!(
+            !guest.ddc_monitor_sda(),
+            "the monitor acknowledges address 0x50"
+        );
         guest.ddc_drive(false, true);
 
         assert_eq!(guest.ddc_receive_byte(), 0x00, "EDID header byte 0");
@@ -4717,12 +4966,20 @@ mod tests {
 
         guest.crtc_write(0x1C, 0x80);
 
-        assert_eq!(guest.bar0_read(0x60_0140, 4), 0, "PCRTC_INTR_EN cleared on the edge");
+        assert_eq!(
+            guest.bar0_read(0x60_0140, 4),
+            0,
+            "PCRTC_INTR_EN cleared on the edge"
+        );
         assert_eq!(guest.crtc_read(0x1C), 0x80);
 
         guest.bar0_write(0x60_0140, 1, 4);
         guest.crtc_write(0x1C, 0x80);
-        assert_eq!(guest.bar0_read(0x60_0140, 4), 1, "bit 7 already set is no edge");
+        assert_eq!(
+            guest.bar0_read(0x60_0140, 4),
+            1,
+            "bit 7 already set is no edge"
+        );
     }
 
     /// CRTC 0x2F-0x31 place the hardware cursor image and enable it — the
@@ -4770,7 +5027,11 @@ mod tests {
         guest.crtc_write(0xF5, 0x12);
 
         assert_eq!(guest.crtc_read(0xF5), 0xFF);
-        assert_eq!(guest.crtc_read(0xF0), 0x00, "0xF0 is the last register in the file");
+        assert_eq!(
+            guest.crtc_read(0xF0),
+            0x00,
+            "0xF0 is the last register in the file"
+        );
     }
 
     /// Bochs `bx_geforce_c::reset` restores the power-on straps, clears the

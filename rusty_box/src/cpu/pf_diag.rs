@@ -18,12 +18,14 @@
 //! `RUSTY_BOX_PF_DIAG` environment variable (its value is the report path,
 //! appended per hit). Compiled only with the `std` feature.
 
-use crate::cpu::decoder::{decode64, BX_64BIT_REG_RIP};
-use crate::cpu::instrumentation::Instrumentation;
 use std::fmt::Write as _;
 use std::io::Write as _;
 
-/// Matches icache.rs `BX_ICACHE_INVALID_PHY_ADDRESS` (`BxPhyAddress::MAX`).
+use crate::config::{BxLinAddress, BxPhyAddress};
+use crate::cpu::decoder::{BX_64BIT_REG_RIP, decode64};
+use crate::cpu::instrumentation::Instrumentation;
+
+/// Matches icache.rs `BX_ICACHE_INVALID_PHY_ADDRESS` (`u64::MAX`).
 const INVALID_PHY: u64 = u64::MAX;
 
 impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
@@ -34,14 +36,19 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// to `prev_rip`, so both the architectural fault RIP (`prev_rip`) and the
     /// in-flight RIP are observable.
     #[cold]
-    pub(super) fn null_write_fault_diag(&mut self, laddr: u64, error_code: u32, user: bool) {
+    pub(super) fn null_write_fault_diag(
+        &mut self,
+        laddr: BxLinAddress,
+        error_code: u32,
+        user: bool,
+    ) {
         let Some(path) = std::env::var_os("RUSTY_BOX_PF_DIAG") else {
             return;
         };
 
         let fault_rip = self.prev_rip;
         let in_flight_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
-        let rip_phys = self.translate_linear_for_diag(fault_rip);
+        let rip_phys = self.translate_linear_for_diag(BxLinAddress::new(fault_rip));
 
         let mut report = String::new();
         // String's fmt::Write never fails; a helper macro keeps the Result
@@ -119,18 +126,23 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             append_report(&path, &report);
             return;
         };
-        let page = rip_phys & !0xfff;
+        let rip_phys = rip_phys.get();
+        let page = rip_phys & !0xFFF;
         out!(
             "fault RIP phys={:#x} (page {:#x}); page has SMC stamps: {}",
             rip_phys,
             page,
-            self.memory.smc_range_has_stamps(page, 4096)
+            self.memory
+                .smc_range_has_stamps(BxPhyAddress::new(page), 4096)
         );
 
         // Current guest memory around the fault RIP, and a fresh decode at it.
         let dump_start = rip_phys.saturating_sub(32).max(page);
         let mut window = [0u8; 64];
-        let got = match self.memory.read_ram(dump_start, &mut window) {
+        let got = match self
+            .memory
+            .read_ram(BxPhyAddress::new(dump_start), &mut window)
+        {
             Ok(n) => n,
             Err(_) => 0,
         };
@@ -149,7 +161,10 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         );
 
         let mut rip_bytes = [0u8; 16];
-        let rip_got = match self.memory.read_ram(rip_phys, &mut rip_bytes) {
+        let rip_got = match self
+            .memory
+            .read_ram(BxPhyAddress::new(rip_phys), &mut rip_bytes)
+        {
             Ok(n) => n,
             Err(_) => 0,
         };
@@ -176,8 +191,8 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             .entry
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.p_addr != INVALID_PHY && e.p_addr & !0xfff == page)
-            .map(|(idx, e)| (idx, e.p_addr, e.tlen, e.mpool_start_idx))
+            .filter(|(_, e)| e.p_addr.get() != INVALID_PHY && e.p_addr.get() & !0xFFF == page)
+            .map(|(idx, e)| (idx, e.p_addr.get(), e.tlen, e.mpool_start_idx))
             .collect();
         for (idx, p_addr, tlen, mpool_start_idx) in page_entries {
             entries += 1;
@@ -204,7 +219,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                 // coexist with a borrow of the cached instruction.
                 let cached_opcode = cached.get_ia_opcode();
                 let mut bytes = [0u8; 16];
-                let n = match self.memory.read_ram(addr, &mut bytes) {
+                let n = match self.memory.read_ram(BxPhyAddress::new(addr), &mut bytes) {
                     Ok(n) => n,
                     Err(_) => 0,
                 };
@@ -234,7 +249,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     }
                 }
                 addr += u64::from(cached_ilen);
-                if addr & !0xfff != page {
+                if addr & !0xFFF != page {
                     // Trace continues on the next physical page (page-split);
                     // out of scope for this per-page comparison.
                     break;

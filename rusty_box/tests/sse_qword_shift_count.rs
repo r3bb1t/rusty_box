@@ -10,6 +10,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -43,7 +44,8 @@ fn shift_xmm0(code: &[u8], count: u64) -> [u64; 2] {
     emu.reg_write_xmm(X86Reg::Xmm1, xmm_bytes([count, u64::MAX]));
     let mut image = code.to_vec();
     image.extend_from_slice(&[0xEB, 0xFE]);
-    emu.mem_write(CODE, &image).expect("write code");
+    emu.mem_write(BxPhyAddress::new(CODE), &image)
+        .expect("write code");
     let end = CODE + code.len() as u64;
     emu.emu_start(CODE, Some(end), None, Some(4))
         .expect("execute");

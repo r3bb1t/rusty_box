@@ -1,11 +1,12 @@
-use super::{cpu::BxCpuC, decoder::Instruction};
+use super::cpu::BxCpuC;
+use super::decoder::Instruction;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Bit-mix hash of icount for pseudo-random values (splitmix64 variant).
     fn hw_rand64(&self) -> u64 {
-        let mut x = self.icount.wrapping_mul(0x517cc1b727220a95);
+        let mut x = self.icount.wrapping_mul(0x517CC1B727220A95);
         x ^= x >> 33;
-        x = x.wrapping_mul(0x4cf5ad432745937f);
+        x = x.wrapping_mul(0x4CF5AD432745937F);
         x ^= x >> 33;
         x
     }

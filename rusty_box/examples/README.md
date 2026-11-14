@@ -62,6 +62,7 @@ so passing `--features` only restates what is already on.
 | `shellcode_trace` | `std` | Runs a 74-byte Linux x86-64 reverse-TCP shellcode in flat long mode. A `pre_syscall` hook logs each syscall, spoofs its result and stops at `execve`. |
 | `perfbench` | `std` | A CPU hot-loop microbenchmark in paging-on long mode, for profiling. `cargo xtask perf-baseline` builds it and archives the binary under `target/perf-baselines/<rev>/`. |
 | `snapshot_resume` | `std` | Boots a guest from CD, saves a snapshot, restores it in a new process and keeps running. |
+| `boot_probe` | `std` | Boots a CD image (or a hard-disk image, `--disk <image> --chs C,H,S`) headless and reports, against emulated time, every write that decides whether the screen shows anything (sequencer screen-off, attribute palette source, CRTC timing, DISPI) and each change of screen mode or content. With `--login user:password` it logs in on the serial console and runs each `--cmd` there, printing the answers; `--pci-vga` puts the VGA on the PCI bus. For a guest whose screen goes wrong. |
 
 Instrumentation is not a Cargo feature. It is the machine's type parameter, an
 implementation of `rusty_box::cpu::Instrumentation`. `alpine_strace` installs
@@ -97,6 +98,11 @@ cargo run --release --example shellcode_trace --features std
 
 # CPU benchmark
 PERFBENCH_INSN=500000000 cargo run --release --example perfbench --features std
+
+# Why a guest's screen is blank: display writes, screen changes, and questions
+# asked of the guest over its serial console
+cargo run --release --example boot_probe --features std -- slitaz.iso --pci-vga \
+  --seconds 240 --login root:root --cmd 'tail /var/log/Xorg.0.log'
 
 # Snapshot round trip: `full` (the default) runs `boot-save`, then
 # `restore-run`, as two separate processes; either phase can be run alone.

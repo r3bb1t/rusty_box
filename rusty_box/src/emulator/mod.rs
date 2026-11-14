@@ -8,37 +8,37 @@
 //! allowing hundreds of emulator instances to run concurrently on different threads.
 
 #[cfg(feature = "alloc")]
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use core::sync::atomic::AtomicBool;
+
+use crate::Result;
+use crate::config::{BxLinAddress, BxPhyAddress};
+use crate::cpu::cpu::CpuActivityState;
+use crate::cpu::instrumentation::{ExitSet, Instrumentation};
+use crate::cpu::{BxCpuC, CpuidFreq, ResetReason, Result as CpuResult};
+#[cfg(feature = "alloc")]
 use crate::gui::BxGui;
+use crate::iodev::BxDevicesC;
+use crate::iodev::devices::{DeviceManager, SystemControlPort};
+use crate::memory::{BxMemC, BxMemoryStubC};
+use crate::params::BxParams;
+use crate::pc_system::BxPcSystemC;
 #[cfg(feature = "std")]
-use crate::pc_system::TimerOwner;
+use crate::pc_system::{Repeat, TimerOwner};
 #[cfg(feature = "std")]
 use crate::snapshot::Restated;
 #[cfg(feature = "alloc")]
 use crate::{
     cpu::builder::BxCpuBuilder, iodev::acpi_tables::AcpiTableGenerator, memory::MemoryError,
 };
-use crate::{
-    cpu::{
-        cpu::CpuActivityState,
-        instrumentation::{ExitSet, Instrumentation},
-        BxCpuC, CpuidFreq, ResetReason, Result as CpuResult,
-    },
-    iodev::{
-        devices::{DeviceManager, SystemControlPort},
-        BxDevicesC,
-    },
-    memory::{BxMemC, BxMemoryStubC},
-    params::BxParams,
-    pc_system::BxPcSystemC,
-    Result,
-};
-
-#[cfg(feature = "alloc")]
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::AtomicBool;
 
 mod builder;
 pub use builder::{AtaSlot, BootDevice, BootOrder, BuildError, DiskGeometry, MachineBuilder};
+
+/// Where a volatile disk keeps its writes, and a volatile disk carried from
+/// one machine to the next; named here beside the builder that takes them.
+#[cfg(feature = "std")]
+pub use crate::iodev::hdimage::{Journal, VolatileDisk};
 mod debug;
 pub use debug::{DebugCpu, RamOffset};
 mod display;
@@ -56,13 +56,13 @@ pub(crate) mod io;
 pub use io::PcIo;
 mod interactive;
 mod run;
-pub use run::{
-    BatchOutcome, EngineRefusal, Keyboard, Mouse, Power, PowerState, Progress, RunBudget,
-    StopReason,
-};
-#[cfg(feature = "alloc")]
-pub use run::Typed;
 pub(crate) use run::StopCause;
+pub use run::{
+    BatchOutcome, EngineRefusal, KeyAction, Keyboard, KeyboardInput, Mouse, Power, PowerState,
+    Progress, RunBudget, StopReason, Typed,
+};
+/// The verbs every rusty_box machine shares, whatever it emulates.
+pub use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
 mod scheduler;
 mod timers;
 pub use timers::DeviceTime;
@@ -254,9 +254,11 @@ pub struct EmulatorConfig {
     pub ips: Ips,
     /// Enable PCI support
     pub pci_enabled: bool,
-    /// Register the VGA adapter as a PCI device (`1234:1111`, class `0300`) so a
-    /// guest KMS driver (Linux `bochs-drm`) can bind for a high-res framebuffer.
-    /// Off by default; requires `pci_enabled`. Experimental.
+    /// Register the VGA adapter as a PCI device (`1234:1111`, class `0300`),
+    /// Bochs `pci: slot1=pcivga`, where X servers and a guest KMS driver (Linux
+    /// `bochs-drm`) look for a display. Requires `pci_enabled`. Off by default,
+    /// as in Bochs, whose `is_pci_device("pcivga")` holds only for a slot named
+    /// so; the `rusty_box_gui` launcher turns it on (parity registry D25).
     pub pci_vga: bool,
     /// CPU parameters
     pub cpu_params: BxParams,
@@ -344,13 +346,27 @@ const SLOWDOWN_MAX_DELAY_USEC: u32 = 1_500;
 #[cfg(feature = "std")]
 const SLOWDOWN_REALTIME_QUANTUM_USEC: u64 = 1_000_000;
 
+/// One segment register, as [`Emulator::get_seg_info`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentInfo {
+    /// The selector last loaded into it.
+    pub selector: u16,
+    /// Its descriptor cache's base.
+    pub base: BxLinAddress,
+    /// Its descriptor cache's limit, scaled by granularity: the offset of
+    /// its last byte.
+    pub limit: u32,
+    /// Bochs `bx_descriptor_t::valid`: the cache's validity bits.
+    pub valid: u32,
+}
+
 /// One data-TLB slot, as [`Emulator::get_dtlb_info`] reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DtlbInfo {
     /// Linear page frame the slot is tagged with.
-    pub lpf: u64,
+    pub lpf: BxLinAddress,
     /// Physical page frame it maps to.
-    pub ppf: u64,
+    pub ppf: BxPhyAddress,
     /// Per-privilege permission bits Bochs calls `accessBits`.
     pub access_bits: u32,
     /// Byte offset of the backing page into guest RAM, or `None` when the page
@@ -785,7 +801,10 @@ impl<'a, T: Instrumentation, E> Processor<'a, T, E> {
     ///
     /// # Errors
     /// Whatever the delivery raised that the processor could not take.
-    pub fn deliver_hardware_event(&mut self, event: crate::cpu::HardwareEvent) -> crate::cpu::Result<()> {
+    pub fn deliver_hardware_event(
+        &mut self,
+        event: crate::cpu::HardwareEvent,
+    ) -> crate::cpu::Result<()> {
         self.io.deliver_hardware_event(self.cpu, event)
     }
 
@@ -935,13 +954,12 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         &self.config
     }
 
-
     #[cfg(feature = "std")]
     pub(crate) fn finish_snapshot_restore_v3(
         &mut self,
-        live_bmdma: u16,
-        live_pm: u16,
-        live_sm: u16,
+        live_bmdma: Option<crate::iodev::IoPort>,
+        live_pm: Option<crate::iodev::IoPort>,
+        live_sm: Option<crate::iodev::IoPort>,
         live_vga: rusty_box_devices::display::vga::VgaSnapshotRestoreTarget,
         platform: crate::iodev::devices::PlatformSnapshotRestore,
         keyboard: crate::iodev::keyboard::KeyboardSnapshotRestore,
@@ -971,7 +989,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             .device_manager
             .acpi
             .post_restore_snapshot_v3(self.pc_system.clock_at(self.pc_system.time_ticks()));
-        self.device_manager.serial.after_restore_snapshot_v3().restated()?;
+        self.device_manager
+            .serial
+            .after_restore_snapshot_v3()
+            .restated()?;
         self.device_manager
             .vga
             .rebuild_snapshot_v3_derived_state()
@@ -1018,7 +1039,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                     && !self.pc_system.has_fired_owner(TimerOwner::Slowdown)
                 {
                     self.pc_system
-                        .activate_timer_usec(handle, SLOWDOWN_QUANTUM_USEC as u32, false)
+                        .activate_timer_usec(handle, SLOWDOWN_QUANTUM_USEC as u32, Repeat::Once)
                         .map_err(|error| {
                             Error::new(
                                 ErrorKind::InvalidData,
@@ -1190,10 +1211,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         Self::new_from_parts(config, cpu_store::OwnedCpus::new(cpus))
     }
 
-    fn new_from_parts(
-        config: EmulatorConfig,
-        cpus: cpu_store::OwnedCpus<T>,
-    ) -> Result<Box<Self>>
+    fn new_from_parts(config: EmulatorConfig, cpus: cpu_store::OwnedCpus<T>) -> Result<Box<Self>>
     where
         E: Default,
     {
@@ -1373,7 +1391,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.devices.set_timer_ips(self.config.ips.per_second_u64());
         self.smp_tick_remainder = 0;
         self.batch_advanced_pc_system = false;
-        tracing::trace!("PC system initialized with {} IPS", self.config.ips.per_second());
+        tracing::trace!(
+            "PC system initialized with {} IPS",
+            self.config.ips.per_second()
+        );
 
         // Step 2: Memory initialization (line 1312)
         // In original: BX_MEM(0)->init_memory(memSize, hostMemSize, memBlockSize);
@@ -1633,7 +1654,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// * `bios_data` - Raw BIOS ROM data
     /// * `address` - Load address (typically 0xfffe0000 for 128KB BIOS)
     pub(crate) fn load_bios(&mut self, bios_data: &[u8], address: u64) -> Result<()> {
-        self.memory.load_ROM(bios_data, address, 0)?;
+        self.memory
+            .load_ROM(bios_data, BxPhyAddress::new(address), 0)?;
         tracing::debug!("Loaded BIOS ({} bytes) at {:#x}", bios_data.len(), address);
         Ok(())
     }
@@ -1644,7 +1666,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// * `rom_data` - Raw ROM data
     /// * `address` - Load address (must be in 0xC0000-0xFFFFF range)
     pub(crate) fn load_optional_rom(&mut self, rom_data: &[u8], address: u64) -> Result<()> {
-        self.memory.load_ROM(rom_data, address, 2)?;
+        self.memory
+            .load_ROM(rom_data, BxPhyAddress::new(address), 2)?;
         tracing::debug!(
             "Loaded optional ROM ({} bytes) at {:#x}",
             rom_data.len(),
@@ -1663,7 +1686,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     #[cfg(test)]
     pub(crate) fn load_ram(&mut self, ram_data: &[u8], address: u64) -> Result<()> {
         // Stable CPU pin storage outlives this exclusive memory borrow.
-        self.memory.load_RAM(ram_data, address)?;
+        self.memory.load_RAM(ram_data, BxPhyAddress::new(address))?;
         tracing::debug!(
             "Loaded RAM image ({} bytes) at {:#x}",
             ram_data.len(),
@@ -1786,7 +1809,9 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         if let Err(fault) = <E as SliceEngine<T>>::machine_was_reset(&mut self.engine) {
             match self.engine_fault {
                 None => self.engine_fault = Some(fault),
-                Some(_) => tracing::error!("and besides, the reset did not reach the engine: {fault}"),
+                Some(_) => {
+                    tracing::error!("and besides, the reset did not reach the engine: {fault}")
+                }
             }
         }
         // A refusal recorded above is reported by the call that provoked it,
@@ -1857,7 +1882,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     pub fn peek_ram_at(&mut self, addr: usize, len: usize) -> alloc::vec::Vec<u8> {
         let mut bytes = alloc::vec![0; len];
         // Stable emulator pin storage outlives the exclusive memory borrow.
-        let copied = self.memory.read_ram(addr as u64, &mut bytes).unwrap_or(0);
+        let copied = self
+            .memory
+            .read_ram(BxPhyAddress::new(addr as u64), &mut bytes)
+            .unwrap_or(0);
         bytes.truncate(copied);
         bytes
     }
@@ -1967,6 +1995,61 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             .ide
             .drives
             .attach_disk(channel, drive, path, cylinders, heads, spt)
+    }
+
+    /// Attach a hard disk image the guest cannot change: it is opened
+    /// read-only and every sector written goes to a journal placed as
+    /// `journal` says and removed when the drive closes (Bochs
+    /// `volatile_image_t`).
+    #[cfg(feature = "std")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn attach_volatile_disk(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        path: &str,
+        journal: &Journal,
+        cylinders: u32,
+        heads: u8,
+        spt: u8,
+    ) -> std::io::Result<()> {
+        self.device_manager
+            .ide
+            .drives
+            .attach_volatile_disk(channel, drive, path, journal, cylinders, heads, spt)
+    }
+
+    /// Attach a volatile disk already open, or taken back from another
+    /// machine ([`Self::take_volatile_disk`]), journal and all.
+    #[cfg(feature = "std")]
+    pub(crate) fn attach_open_volatile_disk(
+        &mut self,
+        slot: AtaSlot,
+        disk: VolatileDisk,
+        geometry: DiskGeometry,
+    ) -> std::io::Result<()> {
+        self.device_manager.ide.drives.attach_open_volatile_disk(
+            slot.channel(),
+            slot.drive(),
+            disk,
+            geometry.cylinders,
+            geometry.heads,
+            geometry.sectors_per_track,
+        )
+    }
+
+    /// The volatile disk in `slot`, journal and all, taken back from this
+    /// machine so the next one built for a restart can be given it
+    /// ([`MachineBuilder::volatile_disk`]): the guest's writes then last until
+    /// power-off, as Bochs's redolog lasts across a reset (hdimage.cc
+    /// `volatile_image_t::close` runs only at exit). The drive is left with no
+    /// image. `None` where the slot holds no volatile disk.
+    #[cfg(feature = "std")]
+    pub fn take_volatile_disk(&mut self, slot: AtaSlot) -> Option<VolatileDisk> {
+        self.device_manager
+            .ide
+            .drives
+            .take_volatile_disk(slot.channel(), slot.drive())
     }
 
     /// Attach a CD-ROM ISO image to a channel/drive (requires std feature)
@@ -2116,13 +2199,19 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         } else {
             (false, false)
         };
-        format!("s={:?} cmd={:#04x} ip={} acmd={:#04x} nIEN={} IOAPIC15[v={:#04x} m={} t={}] LAPIC[irr={} isr={}]",
-            d.controller.status, d.controller.current_command,
+        format!(
+            "s={:?} cmd={:#04x} ip={} acmd={:#04x} nIEN={} IOAPIC15[v={:#04x} m={} t={}] LAPIC[irr={} isr={}]",
+            d.controller.status,
+            d.controller.current_command,
             d.controller.interrupt_pending,
             d.atapi.command,
             d.controller.control & 0x02,
-            vec15, masked15 as u8, trig15,
-            irr_set, isr_set)
+            vec15,
+            masked15 as u8,
+            trig15,
+            irr_set,
+            isr_set
+        )
     }
 
     /// Get total I/O port read/write counters for diagnostics.
@@ -2132,7 +2221,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
     /// Get CPU activity state and async_event for diagnostics.
     pub fn cpu_diag_state(&self) -> (u32, u32) {
-        (self.cpu_ref(0).activity_state as u32, self.cpu_ref(0).async_event)
+        (
+            self.cpu_ref(0).activity_state as u32,
+            self.cpu_ref(0).async_event,
+        )
     }
 
     /// Get CR0 for diagnostics (bit 0 = PE).
@@ -2165,17 +2257,16 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.cpu_ref(0).eip()
     }
 
-    /// Get segment register info: (selector, base, limit, valid_flags).
-    pub fn get_seg_info(&self, seg_idx: usize) -> (u16, u64, u32, u32) {
-        if seg_idx < 6 {
-            let selector = self.cpu_ref(0).sregs[seg_idx].selector.value;
-            let valid = self.cpu_ref(0).sregs[seg_idx].cache.valid;
-            let base = self.cpu_ref(0).sregs[seg_idx].cache.u.segment_base();
-            let limit = self.cpu_ref(0).sregs[seg_idx].cache.u.segment_limit_scaled();
-            (selector, base, limit, valid)
-        } else {
-            (0, 0, 0, 0)
-        }
+    /// The segment register `seg_idx` (Bochs `BX_SEG_REG_ES` .. `GS`, 0 to
+    /// 5), or `None` past GS.
+    pub fn get_seg_info(&self, seg_idx: usize) -> Option<SegmentInfo> {
+        let sreg = self.cpu_ref(0).sregs.get(seg_idx)?;
+        Some(SegmentInfo {
+            selector: sreg.selector.value,
+            base: sreg.cache.u.segment_base(),
+            limit: sreg.cache.u.segment_limit_scaled(),
+            valid: sreg.cache.valid,
+        })
     }
 
     /// Get EAX/EBX/ECX/EDX for diagnostics.
@@ -2210,7 +2301,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// stores. Reporting the offset rather than a host address keeps this
     /// answerable without a live execution context, and is the unit the entry
     /// is actually keyed by (R4).
-    pub fn get_dtlb_info(&self, laddr: u64) -> DtlbInfo {
+    pub fn get_dtlb_info(&self, laddr: BxLinAddress) -> DtlbInfo {
         let idx = self.cpu_ref(0).dtlb.get_index_of(laddr, 3);
         let entry = &self.cpu_ref(0).dtlb.entries[idx];
         DtlbInfo {
@@ -2228,7 +2319,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
     /// Read a physical dword through the block-aware RAM interface.
     /// Returns `None` when the complete range is unavailable.
-    pub fn read_phys_dword(&mut self, paddr: u64) -> Option<u32> {
+    pub fn read_phys_dword(&mut self, paddr: BxPhyAddress) -> Option<u32> {
         let mut bytes = [0; 4];
         self.mem_read(paddr, &mut bytes).ok()?;
         Some(u32::from_le_bytes(bytes))
@@ -2264,7 +2355,11 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             "CS={:#06x} mode={} IF={}",
             self.cpu_ref(0).get_cs_selector(),
             self.get_cpu_mode_str(),
-            if self.cpu_ref(0).get_b_if() != 0 { 1 } else { 0 }
+            if self.cpu_ref(0).get_b_if() != 0 {
+                1
+            } else {
+                0
+            }
         );
         tracing::trace!(
             "CR0={:#010x} CR3={:#018x}",
@@ -2366,11 +2461,11 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Dump key code addresses through requested-size block-aware copies.
         {
             let addrs: &[(u64, &str)] = &[
-                (0x01e1d340, "delay_loop_entry"),
-                (0x01e38ef0, "jmp_target_after_delay"),
+                (0x01E1D340, "delay_loop_entry"),
+                (0x01E38EF0, "jmp_target_after_delay"),
                 (0x01207430, "outer_loop_context"),
                 (0x01207460, "stack_ret_addr_1"),
-                (0x012074e0, "stack_ret_addr_2"),
+                (0x012074E0, "stack_ret_addr_2"),
             ];
             for (paddr, label) in addrs {
                 let code = self.peek_ram_at(*paddr as usize, 48);
@@ -2378,12 +2473,26 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                     tracing::trace!("--- {} (phys={:#010x}) ---", label, paddr);
                     for row in 0..3 {
                         let off = row * 16;
-                        tracing::trace!("  +{:02x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                        tracing::trace!(
+                            "  +{:02x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                             off,
-                            code[off], code[off+1], code[off+2], code[off+3],
-                            code[off+4], code[off+5], code[off+6], code[off+7],
-                            code[off+8], code[off+9], code[off+10], code[off+11],
-                            code[off+12], code[off+13], code[off+14], code[off+15]);
+                            code[off],
+                            code[off + 1],
+                            code[off + 2],
+                            code[off + 3],
+                            code[off + 4],
+                            code[off + 5],
+                            code[off + 6],
+                            code[off + 7],
+                            code[off + 8],
+                            code[off + 9],
+                            code[off + 10],
+                            code[off + 11],
+                            code[off + 12],
+                            code[off + 13],
+                            code[off + 14],
+                            code[off + 15]
+                        );
                     }
                 }
             }
@@ -2391,7 +2500,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Dump stack (16 qwords) through a manual page walk that reads only
         // the individual page-table entries and stack words it needs.
         let rsp = self.cpu_ref(0).rsp();
-        if rsp > 0xffffffff80000000 {
+        if rsp > 0xFFFFFFFF80000000 {
             let cr3 = self.cpu_ref(0).cr3 & !0xFFF;
             let mut read_stack_qword = |addr: u64| -> u64 {
                 let pml4_idx = (addr >> 39) & 0x1FF;
@@ -2431,7 +2540,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             for i in 0..16 {
                 let addr = rsp.wrapping_add(i * 8);
                 let val = read_stack_qword(addr);
-                let marker = if val > 0xffffffff81000000 && val < 0xffffffff82000000 {
+                let marker = if val > 0xFFFFFFFF81000000 && val < 0xFFFFFFFF82000000 {
                     " <-- kernel text?"
                 } else {
                     ""
@@ -2442,7 +2551,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Dump 64 bytes of code at current RIP via the same requested-size
         // physical reads used above.
         let rip = self.cpu_ref(0).rip();
-        if rip > 0xffffffff80000000 {
+        if rip > 0xFFFFFFFF80000000 {
             let cr3 = self.cpu_ref(0).cr3 & !0xFFF;
             let pml4_idx = (rip >> 39) & 0x1FF;
             let pdpt_idx = (rip >> 30) & 0x1FF;
@@ -2480,12 +2589,26 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                         tracing::trace!("--- Code at RIP={:#018x} (phys={:#010x}) ---", rip, paddr);
                         for row in 0..4 {
                             let off = row * 16;
-                            tracing::trace!("  {:016x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                            tracing::trace!(
+                                "  {:016x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                                 rip + off as u64,
-                                code[off], code[off+1], code[off+2], code[off+3],
-                                code[off+4], code[off+5], code[off+6], code[off+7],
-                                code[off+8], code[off+9], code[off+10], code[off+11],
-                                code[off+12], code[off+13], code[off+14], code[off+15]);
+                                code[off],
+                                code[off + 1],
+                                code[off + 2],
+                                code[off + 3],
+                                code[off + 4],
+                                code[off + 5],
+                                code[off + 6],
+                                code[off + 7],
+                                code[off + 8],
+                                code[off + 9],
+                                code[off + 10],
+                                code[off + 11],
+                                code[off + 12],
+                                code[off + 13],
+                                code[off + 14],
+                                code[off + 15]
+                            );
                         }
                     }
                 }
@@ -2532,5 +2655,7 @@ fn assert_machine_send_for_every_send_tracer<T: Instrumentation + Send>() {
     assert_send::<Emulator<T>>();
 }
 
+#[cfg(all(test, feature = "std"))]
+mod breakpoint_tests;
 #[cfg(all(test, feature = "alloc"))]
 mod tests;

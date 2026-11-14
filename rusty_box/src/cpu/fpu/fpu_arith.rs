@@ -12,12 +12,11 @@ use super::super::softfloat3e::f32_to_extf80::f32_to_extf80;
 use super::super::softfloat3e::f64_to_extf80::f64_to_extf80;
 use super::super::softfloat3e::i32_to_extf80::i32_to_extf80;
 use super::super::softfloat3e::softfloat::{
-    extf80_is_nan, extf80_is_signaling_nan, extf80_is_unsupported, f32_is_nan,
-    f32_is_signaling_nan, f64_is_nan, f64_is_signaling_nan, softfloat_raise_flags, SoftFloatStatus,
-    FLAG_INVALID,
+    FLAG_INVALID, SoftFloatStatus, extf80_is_nan, extf80_is_signaling_nan, extf80_is_unsupported,
+    f32_is_nan, f32_is_signaling_nan, f64_is_nan, f64_is_signaling_nan, softfloat_raise_flags,
 };
 use super::super::softfloat3e::softfloat_types::ExtFloat80;
-use super::super::softfloat3e::specialize::{softfloat_propagate_nan_extf80, FLOATX80_DEFAULT_NAN};
+use super::super::softfloat3e::specialize::{FLOATX80_DEFAULT_NAN, softfloat_propagate_nan_extf80};
 use super::ferr::i387cw_to_softfloat_status_word;
 
 // ================================================================
@@ -63,11 +62,7 @@ fn fpu_handle_nan_inner_f32(
             }
             return if a_q.sign_exp < b.sign_exp { a_q } else { b };
         }
-        if b_is_nan {
-            b
-        } else {
-            a_q
-        }
+        if b_is_nan { b } else { a_q }
     } else if a_is_nan {
         if b_is_signaling_nan {
             return a_q;
@@ -79,11 +74,7 @@ fn fpu_handle_nan_inner_f32(
         if b.signif < a_q.signif {
             return a_q;
         }
-        if a_q.sign_exp < b.sign_exp {
-            a_q
-        } else {
-            b
-        }
+        if a_q.sign_exp < b.sign_exp { a_q } else { b }
     } else {
         // Only b is NaN
         b
@@ -145,11 +136,7 @@ fn fpu_handle_nan_inner_f64(
             }
             return if a_q.sign_exp < b.sign_exp { a_q } else { b };
         }
-        if b_is_nan {
-            b
-        } else {
-            a_q
-        }
+        if b_is_nan { b } else { a_q }
     } else if a_is_nan {
         if b_is_signaling_nan {
             return a_q;
@@ -161,11 +148,7 @@ fn fpu_handle_nan_inner_f64(
         if b.signif < a_q.signif {
             return a_q;
         }
-        if a_q.sign_exp < b.sign_exp {
-            a_q
-        } else {
-            b
-        }
+        if a_q.sign_exp < b.sign_exp { a_q } else { b }
     } else {
         // Only b is NaN
         b

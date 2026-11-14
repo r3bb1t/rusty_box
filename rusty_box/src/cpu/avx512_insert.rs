@@ -5,11 +5,9 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512.cc` extract/insert operations.
 
-use super::{
-    cpu::BxCpuC,
-    decoder::{BxSegregs, Instruction},
-    xmm::BxPackedZmmRegister,
-};
+use super::cpu::BxCpuC;
+use super::decoder::{BxSegregs, Instruction};
+use super::xmm::BxPackedZmmRegister;
 
 /// Byte size for vector length
 #[inline]
@@ -139,13 +137,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, 0); // VL=0 (128-bit)
         } else {
             // Memory form — write 16 bytes with per-qword masking
-            let laddr = self.resolve_addr(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             let mask = read_opmask_for_write(self, instr);
             for i in 0..2u64 {
                 if (mask >> i) & 1 != 0 {
                     let val = result.zmm64u(i as usize);
-                    self.v_write_qword(seg, laddr + i * 8, val)?;
+                    self.v_write_qword(seg, eaddr.wrapping_add(i * 8), val)?;
                 }
             }
         }
@@ -181,13 +179,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             write_zmm_masked(self, instr.dst(), &result, mask, zmask, 1); // VL=1 (256-bit)
         } else {
             // Memory form — write 32 bytes with per-dword masking
-            let laddr = self.resolve_addr(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             let mask = read_opmask_for_write(self, instr);
             for i in 0..8u64 {
                 if (mask >> i) & 1 != 0 {
                     let val = result.zmm32u(i as usize);
-                    self.v_write_dword(seg, laddr + i * 4, val)?;
+                    self.v_write_dword(seg, eaddr.wrapping_add(i * 4), val)?;
                 }
             }
         }
@@ -223,13 +221,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, 1); // VL=1 (256-bit)
         } else {
             // Memory form — write 32 bytes with per-qword masking
-            let laddr = self.resolve_addr(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             let mask = read_opmask_for_write(self, instr);
             for i in 0..4u64 {
                 if (mask >> i) & 1 != 0 {
                     let val = result.zmm64u(i as usize);
-                    self.v_write_qword(seg, laddr + i * 8, val)?;
+                    self.v_write_qword(seg, eaddr.wrapping_add(i * 8), val)?;
                 }
             }
         }
@@ -362,9 +360,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.set_gpr64(instr.dst() as usize, val as u64);
         } else {
             // Memory form — write 4 bytes
-            let laddr = self.resolve_addr(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.v_write_dword(seg, laddr, val)?;
+            self.v_write_dword(seg, eaddr, val)?;
         }
         Ok(())
     }

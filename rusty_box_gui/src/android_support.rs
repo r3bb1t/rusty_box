@@ -4,15 +4,16 @@
 //! is given. The module compiles for Android, which uses it, and for the
 //! host's tests, which pin it.
 
-use crate::app::ShellStatus;
-use crate::config::{load_toml_file, resolve_config_in, FileConfig, DEFAULT_CONFIG_FILE};
-use crate::error::RunError;
-use crate::library::{VmLibrary, VmStem, DEFAULT_VM_NAME};
-use crate::shell::destination::ShellPage;
-use crate::DisplayBackend;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+
+use crate::DisplayBackend;
+use crate::app::ShellStatus;
+use crate::config::{DEFAULT_CONFIG_FILE, FileConfig, load_toml_file, resolve_config_in};
+use crate::error::RunError;
+use crate::library::{DEFAULT_VM_NAME, VmLibrary, VmStem};
+use crate::shell::destination::ShellPage;
 
 /// The number the text typed into a numeric field commits to: plain digits,
 /// cut to `min..=max`. `None` for text that is not a plain number — empty,
@@ -23,7 +24,9 @@ pub(crate) fn typed_number(text: &str, min: u64, max: u64) -> Option<u64> {
     if !plain {
         return None;
     }
-    text.parse::<u64>().ok().map(|number| number.clamp(min, max))
+    text.parse::<u64>()
+        .ok()
+        .map(|number| number.clamp(min, max))
 }
 
 /// What the machine is doing, as far as the phone's window cares.
@@ -594,7 +597,11 @@ fn memory_words(resident: Kib) -> String {
     if resident.0 < KIB_PER_GB {
         format!("{} MB", resident.0 / KIB_PER_MB)
     } else {
-        format!("{}.{} GB", resident.0 / KIB_PER_GB, resident.0 % KIB_PER_GB * 10 / KIB_PER_GB)
+        format!(
+            "{}.{} GB",
+            resident.0 / KIB_PER_GB,
+            resident.0 % KIB_PER_GB * 10 / KIB_PER_GB
+        )
     }
 }
 
@@ -604,9 +611,15 @@ mod tests {
 
     #[test]
     fn a_typed_number_is_plain_digits_cut_to_the_range() {
-        assert_eq!(typed_number("120000000", 1, 2_000_000_000), Some(120_000_000));
+        assert_eq!(
+            typed_number("120000000", 1, 2_000_000_000),
+            Some(120_000_000)
+        );
         assert_eq!(typed_number("0", 1, 2_000_000_000), Some(1));
-        assert_eq!(typed_number("9999999999", 1, 2_000_000_000), Some(2_000_000_000));
+        assert_eq!(
+            typed_number("9999999999", 1, 2_000_000_000),
+            Some(2_000_000_000)
+        );
         for refused in ["", " ", "12 3", "-5", "+5", "1e6", "12M", "١٢"] {
             assert_eq!(typed_number(refused, 1, 100), None, "{refused:?}");
         }
@@ -663,10 +676,22 @@ mod tests {
 
     #[test]
     fn a_running_machine_is_running_even_while_a_start_is_recorded() {
-        assert_eq!(MachineActivity::of(&status(false, false)), MachineActivity::Stopped);
-        assert_eq!(MachineActivity::of(&status(false, true)), MachineActivity::Starting);
-        assert_eq!(MachineActivity::of(&status(true, false)), MachineActivity::Running);
-        assert_eq!(MachineActivity::of(&status(true, true)), MachineActivity::Running);
+        assert_eq!(
+            MachineActivity::of(&status(false, false)),
+            MachineActivity::Stopped
+        );
+        assert_eq!(
+            MachineActivity::of(&status(false, true)),
+            MachineActivity::Starting
+        );
+        assert_eq!(
+            MachineActivity::of(&status(true, false)),
+            MachineActivity::Running
+        );
+        assert_eq!(
+            MachineActivity::of(&status(true, true)),
+            MachineActivity::Running
+        );
     }
 
     fn scratch_dir(tag: &str) -> PathBuf {
@@ -810,12 +835,18 @@ mod tests {
             Path::new("/storage/emulated/0/Android/data/com.rustybox.android/files/isos"),
             &own
         ));
-        assert!(needs_storage_access(Path::new("/storage/emulated/0/Download"), &own));
+        assert!(needs_storage_access(
+            Path::new("/storage/emulated/0/Download"),
+            &own
+        ));
         assert!(needs_storage_access(
             Path::new("/data/user/0/com.rustybox.android/filesystem"),
             &own
         ));
-        assert!(needs_storage_access(Path::new("/storage/emulated/0/Download"), &[]));
+        assert!(needs_storage_access(
+            Path::new("/storage/emulated/0/Download"),
+            &[]
+        ));
     }
 
     #[test]
@@ -825,11 +856,17 @@ mod tests {
         let path = stage_file(&root, "BIOS-bochs-latest", b"first").expect("stage");
         assert_eq!(fs::read(&path).expect("read staged"), b"first");
 
-        let modified = fs::metadata(&path).expect("stat").modified().expect("mtime");
+        let modified = fs::metadata(&path)
+            .expect("stat")
+            .modified()
+            .expect("mtime");
         let again = stage_file(&root, "BIOS-bochs-latest", b"first").expect("stage again");
         assert_eq!(again, path);
         assert_eq!(
-            fs::metadata(&path).expect("stat").modified().expect("mtime"),
+            fs::metadata(&path)
+                .expect("stat")
+                .modified()
+                .expect("mtime"),
             modified,
             "identical bytes must leave the staged file untouched"
         );
@@ -878,14 +915,22 @@ mod tests {
         assert_eq!(contents.vms.len(), 1);
         let vm = &contents.vms[0];
         assert_eq!(vm.name, DEFAULT_VM_NAME);
-        assert_eq!(vm.config.memory_mib, 96);
-        assert_eq!(vm.config.ips, machine.ips);
-        assert_eq!(vm.config.bios, machine.bios);
-        assert_eq!(vm.config.vga_bios, Some(machine.vga_bios.clone()));
+        assert_eq!(vm.config.memory_mib(), 96);
+        assert_eq!(vm.config.pc().expect("a PC").ips, machine.ips);
+        assert_eq!(vm.config.pc().expect("a PC").bios, machine.bios);
+        assert_eq!(
+            vm.config.pc().expect("a PC").vga_bios,
+            Some(machine.vga_bios.clone())
+        );
         assert_eq!(vm.config.display, DisplayBackend::Egui);
         // The file's own CD is kept, resolved against the file's folder.
         assert_eq!(
-            vm.config.cdrom.as_ref().map(|cdrom| cdrom.path.clone()),
+            vm.config
+                .pc()
+                .expect("a PC")
+                .cdrom
+                .as_ref()
+                .map(|cdrom| cdrom.path.clone()),
             Some(storage.join("other.iso"))
         );
         assert_eq!(library.last_selected(), Some(vm.stem.clone()));
@@ -912,13 +957,16 @@ mod tests {
         assert_eq!(contents.vms.len(), 1);
         let vm = &contents.vms[0];
         assert_eq!(vm.name, DEFAULT_VM_NAME);
-        assert_eq!(vm.config.memory_mib, 256);
-        assert_eq!(vm.config.ips, 300_000_000);
-        assert_eq!(vm.config.bios, machine.bios);
-        assert_eq!(vm.config.vga_bios, Some(machine.vga_bios.clone()));
+        assert_eq!(vm.config.memory_mib(), 256);
+        assert_eq!(vm.config.pc().expect("a PC").ips, 300_000_000);
+        assert_eq!(vm.config.pc().expect("a PC").bios, machine.bios);
+        assert_eq!(
+            vm.config.pc().expect("a PC").vga_bios,
+            Some(machine.vga_bios.clone())
+        );
         assert_eq!(vm.config.display, DisplayBackend::Egui);
-        assert_eq!(vm.config.cdrom, None);
-        assert!(vm.config.boot_order.is_empty());
+        assert_eq!(vm.config.pc().expect("a PC").cdrom, None);
+        assert!(vm.config.pc().expect("a PC").boot_order.is_empty());
         assert_eq!(library.last_selected(), Some(vm.stem.clone()));
         fs::remove_dir_all(&storage).expect("remove scratch dir");
     }
@@ -1069,7 +1117,11 @@ mod tests {
 
         let busy = ExitRecord {
             description: Some("excessive cpu 290000 during 300000".to_owned()),
-            ..ended(ExitReason::ExcessiveResourceUsage, ExitStanding::Background, 0)
+            ..ended(
+                ExitReason::ExcessiveResourceUsage,
+                ExitStanding::Background,
+                0,
+            )
         };
         assert_eq!(
             exit_sentence(&busy, NOW),

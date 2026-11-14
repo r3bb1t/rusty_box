@@ -7,6 +7,8 @@ use super::cpu::Exception;
 use super::decoder::{BxSegregs, Instruction};
 use super::instrumentation::{Instrumentation, MemAccessRW};
 use super::{BxCpuC, Result};
+use crate::config::{BxLinAddress, BxPhyAddress};
+use crate::iodev::IoPort;
 
 // Bochs vmx.h BX_IA32_FEATURE_CONTROL_* bits.
 pub const BX_IA32_FEATURE_CONTROL_LOCK_BIT: u32 = 0x1;
@@ -14,9 +16,14 @@ pub const BX_IA32_FEATURE_CONTROL_VMX_ENABLE_BIT: u32 = 0x4;
 pub const BX_IA32_FEATURE_CONTROL_BITS: u32 =
     BX_IA32_FEATURE_CONTROL_LOCK_BIT | BX_IA32_FEATURE_CONTROL_VMX_ENABLE_BIT;
 
-/// The VMCS revision ID this implementation advertises via IA32_VMX_BASIC.
-/// Bochs uses 1 — kernels treat any value the host returns as authoritative.
-pub const BX_VMCS_REVISION_ID: u32 = 1;
+/// The VMCS revision ID this processor advertises in IA32_VMX_BASIC and
+/// requires of a VMXON region and a VMCS: Bochs vmx.h
+/// `BX_VMX_VMCS_REVISION_ID`, the default mapping's, which Corei7SkylakeX
+/// keeps (its constructor passes no revision of its own).
+pub const BX_VMCS_REVISION_ID: u32 = 0x2B;
+/// Bochs vmx.h `BX_VMCS_SHADOW_BIT_MASK`: bit 31 of a VMCS region's
+/// revision dword, set in a shadow VMCS.
+const BX_VMCS_SHADOW_BIT_MASK: u32 = 0x8000_0000;
 
 /// Offset of the VMX-abort indicator in the VMCS region — Bochs vmcs.cc
 /// `VMCS_VMX_ABORT_FIELD_ADDR`, the SDM's bytes 4..8 after the revision ID.
@@ -152,7 +159,7 @@ const VMCS_FIELD_WIDTH_64BIT: u32 = 1;
 const VMCS_FIELD_WIDTH_32BIT: u32 = 2;
 // Bits set outside the legal encoding (Bochs vmx.h
 // `VMCS_ENCODING_RESERVED_BITS`): bit 12 plus bits [31:15].
-const VMCS_ENCODING_RESERVED_BITS: u32 = 0xffff_9000;
+const VMCS_ENCODING_RESERVED_BITS: u32 = 0xFFFF_9000;
 
 // Per-(width, type) base offsets for the canonical Bochs VMCS layout
 // produced by `init_generic_mapping` (cpu/vmcs.cc). The shadow VMCS
@@ -177,7 +184,7 @@ fn vmcs_field_byte_offset(encoding: u32) -> Option<u32> {
     if encoding & VMCS_ENCODING_RESERVED_BITS != 0 {
         return None;
     }
-    let field = encoding & 0x3ff;
+    let field = encoding & 0x3FF;
     let width = (encoding >> 13) & 0x3;
     let field_type = (encoding >> 10) & 0x3;
     if field >= VMCS_FIELD_LIMITS[width as usize] {
@@ -185,6 +192,95 @@ fn vmcs_field_byte_offset(encoding: u32) -> Option<u32> {
     }
     let type_index = (width << 2) + field_type;
     Some(VMCS_TYPE_BASE_OFFSET[type_index as usize] + field * 4)
+}
+
+/// How a field is stored in a VMCS region (Bochs vmx.cc `vmread` /
+/// `vmwrite`, which choose the access by `VMCS_FIELD_WIDTH`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VmcsStorage {
+    /// A 16-bit field: `VMread16` / `VMwrite16`.
+    Word,
+    /// A 32-bit field, or the high half of a 64-bit one: `VMread32`.
+    Dword,
+    /// A guest segment's access rights: 32 bits held rotated left by 8, the
+    /// `VMCS_AR_ROTATE` format of Bochs vmcs.cc `VMCS_Mapping`
+    /// (vmx.cc `vmx_pack_ar_field` / `vmx_unpack_ar_field`).
+    AccessRights,
+    /// A 64-bit or natural-width field: `VMread64` / `VMread_natural`.
+    Qword,
+}
+
+/// Where one field sits in a VMCS region and how it is stored there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VmcsField {
+    offset: u32,
+    storage: VmcsStorage,
+}
+
+impl VmcsField {
+    /// The field `encoding` names in the generic layout, or `None` for an
+    /// encoding the layout has no place for.
+    fn of(encoding: u32) -> Option<Self> {
+        let offset = vmcs_field_byte_offset(encoding)?;
+        let storage = match (encoding >> 13) & 3 {
+            VMCS_FIELD_WIDTH_16BIT => VmcsStorage::Word,
+            VMCS_FIELD_WIDTH_32BIT
+                if (VMCS_32BIT_GUEST_ES_ACCESS_RIGHTS..=VMCS_32BIT_GUEST_TR_ACCESS_RIGHTS)
+                    .contains(&encoding) =>
+            {
+                VmcsStorage::AccessRights
+            }
+            VMCS_FIELD_WIDTH_32BIT => VmcsStorage::Dword,
+            VMCS_FIELD_WIDTH_64BIT if encoding & 1 != 0 => VmcsStorage::Dword,
+            _ => VmcsStorage::Qword,
+        };
+        Some(Self { offset, storage })
+    }
+}
+
+/// Every full field encoding the generic VMCS layout has a place for, in
+/// layout order (Bochs vmcs.cc `init_generic_mapping`): each width (16-bit,
+/// 64-bit, 32-bit, natural) in its four types. A 64-bit field's high half is
+/// left out — it is the same bytes as the field.
+struct VmcsLayout {
+    width: u32,
+    field_type: u32,
+    index: u32,
+}
+
+impl VmcsLayout {
+    fn new() -> Self {
+        Self {
+            width: 0,
+            field_type: 0,
+            index: 0,
+        }
+    }
+}
+
+impl Iterator for VmcsLayout {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        loop {
+            let limit = *VMCS_FIELD_LIMITS.get(self.width as usize)?;
+            if self.index >= limit {
+                self.index = 0;
+                self.field_type += 1;
+                if self.field_type == 4 {
+                    self.field_type = 0;
+                    self.width += 1;
+                }
+                continue;
+            }
+            let index = self.index;
+            self.index += 1;
+            if self.width == VMCS_FIELD_WIDTH_64BIT && index & 1 != 0 {
+                continue;
+            }
+            return Some((self.width << 13) | (self.field_type << 10) | index);
+        }
+    }
 }
 
 bitflags::bitflags! {
@@ -370,6 +466,32 @@ const VMCS_GUEST_INTERRUPT_SSP_TABLE_ADDR: u32 = 0x682C;
 // VMFUNC + EPTP-list controls — Bochs cpu/vmx.h.
 const VMCS_64BIT_CONTROL_VMFUNC_CTRLS: u32 = 0x2018;
 const VMCS_64BIT_CONTROL_EPTP_LIST_ADDRESS: u32 = 0x2024;
+// The remaining fields Bochs vmcs.cc `vmcs_field_supported` names — Bochs
+// vmx.h encodings.
+const VMCS_16BIT_CONTROL_EPTP_INDEX: u32 = 0x0004;
+const VMCS_16BIT_GUEST_PML_INDEX: u32 = 0x0812;
+const VMCS_16BIT_GUEST_UINV: u32 = 0x0814;
+const VMCS_64BIT_CONTROL_EXECUTIVE_VMCS_PTR: u32 = 0x200C;
+const VMCS_64BIT_CONTROL_PML_ADDRESS: u32 = 0x200E;
+const VMCS_64BIT_CONTROL_APIC_ACCESS_ADDR: u32 = 0x2014;
+const VMCS_64BIT_CONTROL_VE_EXCEPTION_INFO_ADDR: u32 = 0x202A;
+const VMCS_64BIT_CONTROL_XSS_EXITING_BITMAP: u32 = 0x202C;
+const VMCS_64BIT_CONTROL_SPPTP: u32 = 0x2030;
+const VMCS_64BIT_CONTROL_TSC_MULTIPLIER: u32 = 0x2032;
+const VMCS_64BIT_CONTROL_INJECTED_EVENT_DATA: u32 = 0x2052;
+const VMCS_64BIT_MSR_DATA: u32 = 0x2402;
+const VMCS_64BIT_ORIGINAL_EVENT_DATA: u32 = 0x2404;
+const VMCS_64BIT_GUEST_IA32_PERF_GLOBAL_CTRL: u32 = 0x2808;
+const VMCS_64BIT_GUEST_IA32_PDPTE0: u32 = 0x280A;
+const VMCS_64BIT_GUEST_IA32_PDPTE1: u32 = 0x280C;
+const VMCS_64BIT_GUEST_IA32_PDPTE2: u32 = 0x280E;
+const VMCS_64BIT_GUEST_IA32_PDPTE3: u32 = 0x2810;
+const VMCS_32BIT_CONTROL_PAUSE_LOOP_EXITING_GAP: u32 = 0x4020;
+const VMCS_32BIT_CONTROL_PAUSE_LOOP_EXITING_WINDOW: u32 = 0x4022;
+const VMCS_IO_RCX: u32 = 0x6402;
+const VMCS_IO_RSI: u32 = 0x6404;
+const VMCS_IO_RDI: u32 = 0x6406;
+const VMCS_IO_RIP: u32 = 0x6408;
 
 // 32-bit control fields.
 const VMCS_32BIT_CONTROL_PIN_BASED_EXEC_CONTROLS: u32 = 0x4000;
@@ -800,10 +922,12 @@ impl SegAr {
     fn extract(self, mask: Self) -> u32 {
         self.intersection(mask).bits() >> mask.bits().trailing_zeros()
     }
+
     #[inline]
     pub(super) fn type_field(self) -> u32 {
         self.extract(Self::TYPE_MASK)
     }
+
     #[inline]
     pub(super) fn dpl(self) -> u8 {
         self.extract(Self::DPL_MASK) as u8
@@ -840,29 +964,75 @@ const BX_SEG_TYPE_LDT: u32 = 0x2;
 const BX_SEG_TYPE_BUSY_286_TSS: u32 = 0x3;
 const BX_SEG_TYPE_BUSY_386_TSS: u32 = 0xB;
 
-// VMX-control allowed-{0,1} bit masks — Bochs vmx.cc reads these from
-// IA32_VMX_*_CTLS MSRs and uses the low half ("allowed-0", bits that
-// MUST be 1) and the high half ("allowed-1", bits that MAY be 1) to
-// validate guest-supplied control values at VMENTRY. These must stay
-// in lock-step with the values rdmsr_value returns for those MSRs in
-// proc_ctrl.rs.
-pub(super) const VMX_PINBASED_CTLS_ALLOWED_0: u32 = 0x0000_003F;
-/// Allowed-1 adds PROCESS_POSTED_INTERRUPTS (bit 7) to the required set.
-pub(super) const VMX_PINBASED_CTLS_ALLOWED_1: u32 =
-    VMX_PINBASED_CTLS_ALLOWED_0 | VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS;
-pub(super) const VMX_PROCBASED_CTLS_ALLOWED_0: u32 = 0x0401_E172;
-/// Allowed-1 adds the TPR shadow (bit 21) and the gate to the secondary
-/// controls (bit 31). Until bit 31 may be set, `proc_based_ctls2()` reads as
-/// zero no matter what the guest wrote, so the whole secondary control set —
-/// EPT, VPID, INVPCID and now virtual-interrupt delivery — is unreachable.
-pub(super) const VMX_PROCBASED_CTLS_ALLOWED_1: u32 = VMX_PROCBASED_CTLS_ALLOWED_0
+// VMX-control bit masks. VM entry requires every `*_ALLOWED_0` bit set and
+// refuses any bit outside `*_ALLOWED_1` (Bochs vmx.cc
+// VMenterLoadCheckVmControls, which checks the TRUE MSRs' low halves:
+// `VMX_CHECKS_USE_MSR_*`). The IA32_VMX_TRUE_*_CTLS MSRs report exactly
+// these; the older IA32_VMX_*_CTLS MSRs report the same 1-settings with the
+// `*_DEFAULT1` reserved bits as must-be-1 (Bochs vmx.h `*_CTRLS_LO`).
+/// Bochs vmx.h `VMX_MSR_VMX_PINBASED_CTRLS_LO`: reserved bits 1, 2 and 4.
+pub(super) const VMX_PINBASED_CTLS_DEFAULT1: u32 = 0x0000_0016;
+/// Bochs vmx.h `VMX_MSR_VMX_TRUE_PINBASED_CTRLS_LO`.
+pub(super) const VMX_PINBASED_CTLS_ALLOWED_0: u32 = VMX_PINBASED_CTLS_DEFAULT1;
+/// The reserved bits, external-interrupt and NMI exiting, virtual NMIs and
+/// posted-interrupt processing.
+pub(super) const VMX_PINBASED_CTLS_ALLOWED_1: u32 = VMX_PINBASED_CTLS_DEFAULT1
+    | VMX_PIN_BASED_VMEXEC_CTRL_EXTERNAL_INTERRUPT_VMEXIT
+    | VMX_PIN_BASED_VMEXEC_CTRL_NMI_EXITING
+    | VMX_PIN_BASED_VMEXEC_CTRL_VIRTUAL_NMI
+    | VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS;
+/// Bochs vmx.h `VMX_MSR_VMX_PROCBASED_CTRLS_LO`: reserved bits 1, 4-6, 8,
+/// 13-16 and 26 (15 and 16 being CR3-load and CR3-store exiting).
+pub(super) const VMX_PROCBASED_CTLS_DEFAULT1: u32 = 0x0401_E172;
+/// Bochs vmx.h `VMX_MSR_VMX_TRUE_PROCBASED_CTRLS_LO`: CR3-load and CR3-store
+/// exiting may be cleared.
+pub(super) const VMX_PROCBASED_CTLS_ALLOWED_0: u32 = 0x0400_6172;
+/// Adds the TPR shadow (bit 21) and the gate to the secondary controls (bit
+/// 31). Until bit 31 may be set, `proc_based_ctls2()` reads as zero no matter
+/// what the guest wrote, so the whole secondary control set is unreachable.
+pub(super) const VMX_PROCBASED_CTLS_ALLOWED_1: u32 = VMX_PROCBASED_CTLS_DEFAULT1
     | VMX_VM_EXEC_CTRL1_TPR_SHADOW
     | VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS;
-pub(super) const VMX_EXIT_CTLS_ALLOWED_0: u32 = 0;
-/// Allowed-1 adds INTA_ON_VMEXIT (bit 15), which posted interrupts require.
+/// Bochs vmx.h `VMX_MSR_VMX_VMEXIT_CTRLS_LO`: reserved bits 0-8, 10, 11,
+/// 13, 14, 16 and 17.
+pub(super) const VMX_EXIT_CTLS_DEFAULT1: u32 = 0x0003_6DFF;
+/// Bochs vmx.h `VMX_MSR_VMX_TRUE_VMEXIT_CTRLS_LO`: saving IA32_DEBUGCTL
+/// (bit 2) may be cleared.
+pub(super) const VMX_EXIT_CTLS_ALLOWED_0: u32 = 0x0003_6DFB;
+/// Adds the host address-space size (bit 9), loading IA32_PERF_GLOBAL_CTRL
+/// (bit 12) and INTA_ON_VMEXIT (bit 15), which posted interrupts require.
 pub(super) const VMX_EXIT_CTLS_ALLOWED_1: u32 = 0x0003_6FFF | VMX_VMEXIT_CTRL1_INTA_ON_VMEXIT;
-pub(super) const VMX_ENTRY_CTLS_ALLOWED_0: u32 = 0x0000_0011;
+/// Bochs vmx.h `VMX_MSR_VMX_VMENTRY_CTRLS_LO`: reserved bits 0-8 and 12.
+pub(super) const VMX_ENTRY_CTLS_DEFAULT1: u32 = 0x0000_11FF;
+/// Bochs vmx.h `VMX_MSR_VMX_TRUE_VMENTRY_CTRLS_LO`: loading IA32_DEBUGCTL
+/// (bit 2) may be cleared.
+pub(super) const VMX_ENTRY_CTLS_ALLOWED_0: u32 = 0x0000_11FB;
+/// Bits 0-15: the reserved bits, the IA-32e guest, entry to SMM, the
+/// dual-monitor deactivation, and loading IA32_PERF_GLOBAL_CTRL, PAT and EFER.
 pub(super) const VMX_ENTRY_CTLS_ALLOWED_1: u32 = 0x0000_FFFF;
+
+/// The secondary VM-exit controls this processor offers — IA32_VMX_EXIT_CTLS2.
+/// Bochs vmcs.cc `init_secondary_vmexit_ctrls` offers loading the host's
+/// IA32_SPEC_CTRL with SPEC_CTRL virtualization and the shadow-stack busy
+/// control with CET; Corei7SkylakeX has neither, so none.
+pub(super) const VMX_EXIT_CTLS2_ALLOWED_1: u64 = 0;
+
+// IA32_VMX_MISC bits — Bochs vmx.h.
+const VMX_MISC_STORE_LMA_TO_X86_64_GUEST_VMENTRY_CONTROL: u32 = 1 << 5;
+const VMX_SUPPORT_VMENTER_TO_NON_ACTIVE_STATE: u32 = (1 << 6) | (1 << 7) | (1 << 8);
+const VMX_MISC_SUPPORT_VMWRITE_READ_ONLY_FIELDS: u32 = 1 << 29;
+const VMX_MISC_ALLOW_INJECTION_OF_SW_INTERRUPT_WITH_ILEN_0: u32 = 1 << 30;
+/// Bochs vmx.h `VMX_CR3_TARGET_MAX_CNT`.
+const VMX_CR3_TARGET_MAX_CNT: u32 = 4;
+/// Bochs vmx.h `VMX_MSR_CR0_FIXED0`: CR0.PE, CR0.NE and CR0.PG must be set
+/// in VMX operation; `VMX_MSR_CR0_FIXED1`: any CR0 bit may be.
+pub(super) const VMX_MSR_CR0_FIXED0: u64 = 0x8000_0021;
+pub(super) const VMX_MSR_CR0_FIXED1: u64 = 0xFFFF_FFFF;
+/// Bochs vmx.h `VMX_MSR_CR4_FIXED0`: CR4.VMXE must be set.
+pub(super) const VMX_MSR_CR4_FIXED0: u64 = 0x2000;
+/// Bochs vmx.h `VMX_MSR_VMCS_ENUM`: the highest field index any VMCS
+/// encoding uses, `VMX_HIGHEST_VMCS_ENCODING`.
+pub(super) const VMX_MSR_VMCS_ENUM: u64 = 0x54;
 pub(super) const VMX_PROCBASED_CTLS2_ALLOWED_0: u32 = 0;
 pub(super) const VMX_PROCBASED_CTLS2_ALLOWED_1: u32 = VMX_VM_EXEC_CTRL2_EPT_ENABLE
     | VMX_VM_EXEC_CTRL2_VPID_ENABLE
@@ -977,24 +1147,21 @@ pub enum VmxErr {
 
 /// Sentinel for `vmcsptr` and `vmxonptr` indicating no VMCS / no VMXON region.
 /// Bochs vmcs.h BX_INVALID_VMCSPTR.
-pub(super) const BX_INVALID_VMCSPTR: u64 = 0xFFFFFFFFFFFFFFFF;
+pub(super) const BX_INVALID_VMCSPTR: BxPhyAddress = BxPhyAddress::new(0xFFFF_FFFF_FFFF_FFFF);
 
 pub type VmcsCache = BxVmcs;
 
 #[derive(Debug, Default)]
 pub struct VmcsMapping {}
 
-/// In-memory VMCS cache mirroring Bochs cpu/vmx.h `VMCS_CACHE`. Holds the
+/// The processor's VMCS cache, mirroring Bochs cpu/vmx.h `VMCS_CACHE`: the
 /// host and guest state that VMLAUNCH / VMRESUME / VMEXIT swap between, plus
-/// the read-only fields updated by the VMEXIT machinery. Fields are laid
-/// out as Rust structures so VMREAD / VMWRITE can dispatch by encoding
-/// without a raw byte-offset table.
+/// the read-only fields updated by the VMEXIT machinery. The VMCS itself is
+/// the region in guest-physical memory that `vmcsptr` names, where VMREAD and
+/// VMWRITE reach it; VM entry loads this cache from it and VM exit writes the
+/// cache back into it (`vmcs_load_cache` / `vmcs_store_cache`).
 #[derive(Debug, Default)]
 pub struct BxVmcs {
-    // Launch state — Bochs sets this to VMCS_STATE_LAUNCHED after the first
-    // successful VMLAUNCH; VMCLEAR resets it.
-    pub launched: bool,
-
     // ---- Host state (written by the VMM, checked by VMENTRY, loaded on VMEXIT) ----
     pub host_cr0: u64,
     pub host_cr3: u64,
@@ -1281,8 +1448,11 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.oszapc.set_oszapc_logic_32(1);
         if self.vmcsptr != BX_INVALID_VMCSPTR {
             self.oszapc.set_zf(true);
-            // Bochs VMwrite32(VMCS_32BIT_INSTRUCTION_ERROR, error).
-            self.vmcs.vm_instruction_error = error as u32;
+            // Bochs VMwrite32(VMCS_32BIT_INSTRUCTION_ERROR, error): the
+            // generic layout has a place for every read-only 32-bit field.
+            if let Some(field) = VmcsField::of(VMCS_32BIT_INSTRUCTION_ERROR) {
+                self.vmcs_field_write(self.vmcsptr, field, error as u64);
+            }
         } else {
             self.oszapc.set_cf(true);
         }
@@ -1301,11 +1471,12 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         }
 
         if !self.in_vmx {
-            // Entering VMX root from outside VMX.
+            // Entering VMX root from outside VMX: CPL 0, and CR0 within
+            // IA32_VMX_CR0_FIXED0 — NE and PG (PG implies PE).
             let cpl = self.cs_rpl();
             if cpl != 0
                 || !self.cr0.ne()
-                || !self.cr0.pe()
+                || !self.cr0.pg()
                 || !self.a20_enabled()
                 || (self.msr.ia32_feature_ctrl & BX_IA32_FEATURE_CONTROL_LOCK_BIT) == 0
                 || (self.msr.ia32_feature_ctrl & BX_IA32_FEATURE_CONTROL_VMX_ENABLE_BIT) == 0
@@ -1320,7 +1491,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             let paddr = if self.long64_mode() {
                 self.read_virtual_qword_64(seg, eaddr)?
             } else {
-                self.read_virtual_qword(seg, eaddr as u32)?
+                self.read_virtual_qword(seg, eaddr)?
             };
 
             // Must be 4 KiB-aligned and within the physical-address width
@@ -1332,7 +1503,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             }
 
             // Check revision ID at paddr matches the emulator's.
-            let rev = self.vmx_read_revision_id(paddr);
+            let rev = self.vmx_read_revision_id(BxPhyAddress::new(paddr));
             if rev != BX_VMCS_REVISION_ID {
                 tracing::trace!(
                     "VMXON: VMCS revision mismatch at {:#x}: have {:#x} want {:#x}",
@@ -1345,7 +1516,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             }
 
             self.vmcsptr = BX_INVALID_VMCSPTR;
-            self.vmxonptr = paddr;
+            self.vmxonptr = BxPhyAddress::new(paddr);
             self.in_vmx = true;
             self.mask_event(BxCpuC::<T>::BX_EVENT_INIT);
             self.monitor.reset_monitor();
@@ -1423,7 +1594,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let paddr = if self.long64_mode() {
             self.read_virtual_qword_64(seg, eaddr)?
         } else {
-            self.read_virtual_qword(seg, eaddr as u32)?
+            self.read_virtual_qword(seg, eaddr)?
         };
 
         if paddr == 0 || (paddr & 0xFFF) != 0 || (paddr >> BX_PHY_ADDRESS_WIDTH) != 0 {
@@ -1431,7 +1602,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(());
         }
 
-        if paddr == self.vmxonptr {
+        if paddr == self.vmxonptr.get() {
             self.vmfail(VmxErr::VmclearWithVmxonVmcsPtr);
             return Ok(());
         }
@@ -1439,7 +1610,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // Clear the VMCS launch-state flag in guest-physical memory — Bochs
         // vmx.cc `VMCLEAR` writes it through `write_physical_dword`, which
         // reports the access.
-        let launch_state = paddr + VMCS_LAUNCH_STATE_OFFSET;
+        let launch_state = BxPhyAddress::new(paddr + VMCS_LAUNCH_STATE_OFFSET);
         self.mem_write_dword(launch_state, VMCS_STATE_CLEAR);
         self.on_phy_access(
             launch_state,
@@ -1448,7 +1619,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         );
 
         // If we were using this VMCS as the current one, drop it.
-        if paddr == self.vmcsptr {
+        if paddr == self.vmcsptr.get() {
             self.vmcsptr = BX_INVALID_VMCSPTR;
         }
 
@@ -1477,7 +1648,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let paddr = if self.long64_mode() {
             self.read_virtual_qword_64(seg, eaddr)?
         } else {
-            self.read_virtual_qword(seg, eaddr as u32)?
+            self.read_virtual_qword(seg, eaddr)?
         };
 
         if paddr == 0 || (paddr & 0xFFF) != 0 || (paddr >> BX_PHY_ADDRESS_WIDTH) != 0 {
@@ -1485,12 +1656,17 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(());
         }
 
-        if paddr == self.vmxonptr {
+        if paddr == self.vmxonptr.get() {
             self.vmfail(VmxErr::VmptrldWithVmxonPtr);
             return Ok(());
         }
 
-        let revision = self.vmx_read_revision_id(paddr);
+        // Bochs vmx.cc VMPTRLD: with VMCS shadowing in the model, a shadow
+        // VMCS (bit 31 of its revision dword) may be made current.
+        let mut revision = self.vmx_read_revision_id(BxPhyAddress::new(paddr));
+        if self.vmx_extension(super::cpuid::VMXExtensions::VmcsShadowing) {
+            revision &= !BX_VMCS_SHADOW_BIT_MASK;
+        }
         if revision != BX_VMCS_REVISION_ID {
             tracing::trace!(
                 "VMPTRLD: revision mismatch at {:#x}: {:#x} vs {:#x}",
@@ -1502,7 +1678,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(());
         }
 
-        self.vmcsptr = paddr;
+        self.vmcsptr = BxPhyAddress::new(paddr);
         self.vmsucceed();
         Ok(())
     }
@@ -1525,11 +1701,11 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
-        let val = self.vmcsptr;
+        let val = self.vmcsptr.get();
         if self.long64_mode() {
             self.write_virtual_qword_64(seg, eaddr, val)?;
         } else {
-            self.write_virtual_qword(seg, eaddr as u32, val)?;
+            self.write_virtual_qword(seg, eaddr, val)?;
         }
         self.vmsucceed();
         Ok(())
@@ -1574,7 +1750,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         }
 
         let target_vmcs = if shadow_read {
-            self.vmcs.vmcs_link_pointer
+            BxPhyAddress::new(self.vmcs.vmcs_link_pointer)
         } else {
             self.vmcsptr
         };
@@ -1583,12 +1759,14 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(0);
         }
 
-        let v = if shadow_read {
-            self.vmread_shadow_value(encoding, target_vmcs)
+        // Bochs vmx.cc VMREAD: `vmcs_map->is_valid(encoding)`, in either
+        // operation.
+        let field = if self.vmcs_field_supported(encoding) {
+            VmcsField::of(encoding)
         } else {
-            self.vmcs_read_field(encoding)
+            None
         };
-        match v {
+        match field.map(|field| self.vmcs_field_read(target_vmcs, field)) {
             Some(val) => {
                 self.vmsucceed();
                 Ok(val)
@@ -1621,7 +1799,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         }
 
         let target_vmcs = if shadow_write {
-            self.vmcs.vmcs_link_pointer
+            BxPhyAddress::new(self.vmcs.vmcs_link_pointer)
         } else {
             self.vmcsptr
         };
@@ -1630,31 +1808,33 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(());
         }
 
-        // Bochs vmx.cc VMWRITE: VMCS_FIELD_TYPE bits [11:10] == 1 marks
-        // a read-only (vm-exit info) field. Writes to those are rejected
-        // with VMXERR_VMWRITE_READ_ONLY_VMCS_COMPONENT unless
-        // IA32_VMX_MISC[29] (VMX_MISC_SUPPORT_VMWRITE_READ_ONLY_FIELDS)
-        // is advertised. Our IA32_VMX_MISC reads 0 so the bit is clear
-        // and read-only writes always fail. The check applies to both
-        // primary and shadow VMCS writes.
+        // Bochs vmx.cc VMWRITE: first `vmcs_map->is_valid(encoding)`, in
+        // either operation.
+        let field = if self.vmcs_field_supported(encoding) {
+            VmcsField::of(encoding)
+        } else {
+            None
+        };
+        let Some(field) = field else {
+            self.vmfail(VmxErr::UnsupportedVmcsComponentAccess);
+            return Ok(());
+        };
+
+        // Then VMCS_FIELD_TYPE bits [11:10] == 1, a read-only (vm-exit
+        // info) field: refused with VMXERR_VMWRITE_READ_ONLY_VMCS_COMPONENT
+        // unless IA32_VMX_MISC[29] (VMX_MISC_SUPPORT_VMWRITE_READ_ONLY_FIELDS)
+        // is advertised, for the current and a shadow VMCS alike.
         const VMCS_FIELD_TYPE_READ_ONLY: u32 = 1;
-        if (encoding >> 10) & 0x3 == VMCS_FIELD_TYPE_READ_ONLY {
+        if (encoding >> 10) & 0x3 == VMCS_FIELD_TYPE_READ_ONLY
+            && self.vmx_misc_msr() & u64::from(VMX_MISC_SUPPORT_VMWRITE_READ_ONLY_FIELDS) == 0
+        {
             self.vmfail(VmxErr::VmwriteReadOnlyVmcsComponent);
             return Ok(());
         }
 
-        let ok = if shadow_write {
-            self.vmwrite_shadow_value(encoding, target_vmcs, value)
-        } else {
-            self.vmcs_write_field(encoding, value)
-        };
-        if ok {
-            self.vmsucceed();
-            Ok(())
-        } else {
-            self.vmfail(VmxErr::UnsupportedVmcsComponentAccess);
-            Ok(())
-        }
+        self.vmcs_field_write(target_vmcs, field, value);
+        self.vmsucceed();
+        Ok(())
     }
 
     /// Bochs vmexit.cc `Vmexit_Vmread` — returns true when a guest
@@ -1666,10 +1846,10 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         if self.vmcs.secondary_proc_based_ctls & VMX_VM_EXEC_CTRL2_VMCS_SHADOWING == 0 {
             return true;
         }
-        if encoding > 0x7fff {
+        if encoding > 0x7FFF {
             return true;
         }
-        let pa = self.vmcs.vmread_bitmap_addr | (encoding as u64 >> 3);
+        let pa = BxPhyAddress::new(self.vmcs.vmread_bitmap_addr | (encoding as u64 >> 3));
         let byte = self.read_physical_byte(pa);
         byte & (1u8 << (encoding & 7)) != 0
     }
@@ -1680,97 +1860,485 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         if self.vmcs.secondary_proc_based_ctls & VMX_VM_EXEC_CTRL2_VMCS_SHADOWING == 0 {
             return true;
         }
-        if encoding > 0x7fff {
+        if encoding > 0x7FFF {
             return true;
         }
-        let pa = self.vmcs.vmwrite_bitmap_addr | (encoding as u64 >> 3);
+        let pa = BxPhyAddress::new(self.vmcs.vmwrite_bitmap_addr | (encoding as u64 >> 3));
         let byte = self.read_physical_byte(pa);
         byte & (1u8 << (encoding & 7)) != 0
     }
 
-    /// Bochs vmx.cc `vmread_shadow` — fetches `encoding` from the
-    /// shadow VMCS at `vmcs_pa`. The byte offset is computed from the
-    /// canonical Bochs `vmcs_field_offset` mapping (vmcs.cc
-    /// `init_generic_mapping`); width selects 16/32/64-bit access.
-    /// Returns `None` for encodings outside Bochs' supported range so
-    /// the caller maps it to VMXERR_UNSUPPORTED_VMCS_COMPONENT_ACCESS.
-    fn vmread_shadow_value(&mut self, encoding: u32, vmcs_pa: u64) -> Option<u64> {
-        let off = vmcs_field_byte_offset(encoding)?;
-        let pa = vmcs_pa + off as u64;
-        let width = (encoding >> 13) & 3;
-        let is_hi = encoding & 1 != 0;
-        Some(match width {
-            VMCS_FIELD_WIDTH_16BIT => self.read_phys_word(pa) as u64,
-            VMCS_FIELD_WIDTH_32BIT => self.read_phys_dword(pa) as u64,
-            VMCS_FIELD_WIDTH_64BIT => {
-                if is_hi {
-                    self.read_phys_dword(pa) as u64
-                } else {
-                    self.read_phys_qword(pa)
-                }
-            }
-            _ /* VMCS_FIELD_WIDTH_NATURAL */ => self.read_phys_qword(pa),
-        })
+    /// Bochs vmx.cc `vmread` / `vmread_shadow`: `field` of the VMCS region at
+    /// `vmcs_pa`, read from guest-physical memory with its width, an
+    /// access-rights field unrotated.
+    fn vmcs_field_read(&mut self, vmcs_pa: BxPhyAddress, field: VmcsField) -> u64 {
+        let pa = vmcs_pa + u64::from(field.offset);
+        match field.storage {
+            VmcsStorage::Word => u64::from(self.read_phys_word(pa)),
+            VmcsStorage::Dword => u64::from(self.read_phys_dword(pa)),
+            VmcsStorage::AccessRights => u64::from(self.read_phys_dword(pa).rotate_right(8)),
+            VmcsStorage::Qword => self.read_phys_qword(pa),
+        }
     }
 
-    /// Bochs vmx.cc `vmwrite_shadow` — stores `value` into the
-    /// shadow VMCS at `vmcs_pa`. Width-specific writes match the read
-    /// helper so VMREAD reproduces the same value.
-    fn vmwrite_shadow_value(&mut self, encoding: u32, vmcs_pa: u64, value: u64) -> bool {
-        let off = match vmcs_field_byte_offset(encoding) {
-            Some(o) => o,
-            None => return false,
+    /// Bochs vmx.cc `vmwrite` / `vmwrite_shadow`: `value` into `field` of the
+    /// VMCS region at `vmcs_pa`, truncated to the field's width, an
+    /// access-rights field rotated.
+    fn vmcs_field_write(&mut self, vmcs_pa: BxPhyAddress, field: VmcsField, value: u64) {
+        let pa = vmcs_pa + u64::from(field.offset);
+        match field.storage {
+            VmcsStorage::Word => self.write_phys_word(pa, value as u16),
+            VmcsStorage::Dword => self.write_phys_dword(pa, value as u32),
+            VmcsStorage::AccessRights => self.write_phys_dword(pa, (value as u32).rotate_left(8)),
+            VmcsStorage::Qword => self.write_phys_qword(pa, value),
+        }
+    }
+
+    /// Whether VM entry and exit carry the field `encoding` between the VMCS
+    /// and the processor: the cache holds it and the processor has it.
+    fn vmcs_field_held(&self, encoding: u32) -> bool {
+        self.vmcs_field_supported(encoding) && self.vmcs_read_field(encoding).is_some()
+    }
+
+    /// The VM functions this processor offers, IA32_VMX_VMFUNC — Bochs
+    /// vmcs.cc `init_vmfunc_capabilities`, for a processor whose secondary
+    /// controls offer "enable VM functions": none do here.
+    pub(super) fn vmx_vmfunc_supported_bits(&self) -> u64 {
+        const VMX_VMFUNC_EPTP_SWITCHING_MASK: u64 = 1;
+        if VMX_PROCBASED_CTLS2_ALLOWED_1 & VMX_VM_EXEC_CTRL2_VMFUNC_ENABLE != 0
+            && self.vmx_extension(super::cpuid::VMXExtensions::EptpSwitching)
+        {
+            VMX_VMFUNC_EPTP_SWITCHING_MASK
+        } else {
+            0
+        }
+    }
+
+    /// Bochs vmcs.cc `vmcs_field_supported`: whether this processor has the
+    /// VMCS field `encoding` — each field gated on the CPU model's VMX
+    /// extension or ISA feature that brings it, or on the control set that
+    /// holds it being offered. A 64-bit field's high half goes with it.
+    /// VMREAD and VMWRITE refuse any other (VMfail, unsupported component).
+    fn vmcs_field_supported(&self, encoding: u32) -> bool {
+        use super::cpuid::VMXExtensions as X;
+        use super::decoder::features::X86Feature as F;
+        if encoding & VMCS_ENCODING_RESERVED_BITS != 0 {
+            return false;
+        }
+        let field = if (encoding >> 13) & 3 == VMCS_FIELD_WIDTH_64BIT {
+            encoding & !1
+        } else {
+            encoding
         };
-        let pa = vmcs_pa + off as u64;
-        let width = (encoding >> 13) & 3;
-        let is_hi = encoding & 1 != 0;
-        match width {
-            VMCS_FIELD_WIDTH_16BIT => self.write_phys_word(pa, value as u16),
-            VMCS_FIELD_WIDTH_32BIT => self.write_phys_dword(pa, value as u32),
-            VMCS_FIELD_WIDTH_64BIT => {
-                if is_hi {
-                    self.write_phys_dword(pa, value as u32);
+        let ext = |extension: X| self.vmx_extension(extension);
+        let isa = |feature: F| self.bx_cpuid_support_isa_extension(feature);
+        match field {
+            // 16-bit control, guest-state and host-state fields.
+            VMCS_16BIT_CONTROL_VPID => ext(X::VPID),
+            VMCS_16BIT_CONTROL_POSTED_INTERRUPT_NOTIFICATION_VECTOR => ext(X::PostedInterrupts),
+            VMCS_16BIT_CONTROL_EPTP_INDEX => ext(X::EptException),
+            VMCS_16BIT_GUEST_ES_SELECTOR
+            | VMCS_16BIT_GUEST_CS_SELECTOR
+            | VMCS_16BIT_GUEST_SS_SELECTOR
+            | VMCS_16BIT_GUEST_DS_SELECTOR
+            | VMCS_16BIT_GUEST_FS_SELECTOR
+            | VMCS_16BIT_GUEST_GS_SELECTOR
+            | VMCS_16BIT_GUEST_LDTR_SELECTOR
+            | VMCS_16BIT_GUEST_TR_SELECTOR => true,
+            VMCS_16BIT_GUEST_INTERRUPT_STATUS => ext(X::VintrDelivery),
+            VMCS_16BIT_GUEST_PML_INDEX => ext(X::PML),
+            VMCS_16BIT_GUEST_UINV => isa(F::IsaUintr),
+            VMCS_16BIT_HOST_ES_SELECTOR
+            | VMCS_16BIT_HOST_CS_SELECTOR
+            | VMCS_16BIT_HOST_SS_SELECTOR
+            | VMCS_16BIT_HOST_DS_SELECTOR
+            | VMCS_16BIT_HOST_FS_SELECTOR
+            | VMCS_16BIT_HOST_GS_SELECTOR
+            | VMCS_16BIT_HOST_TR_SELECTOR => true,
+            // 32-bit control fields.
+            VMCS_32BIT_CONTROL_PIN_BASED_EXEC_CONTROLS
+            | VMCS_32BIT_CONTROL_PROCESSOR_BASED_VMEXEC_CONTROLS
+            | VMCS_32BIT_CONTROL_EXECUTION_BITMAP
+            | VMCS_32BIT_CONTROL_PAGE_FAULT_ERR_CODE_MASK
+            | VMCS_32BIT_CONTROL_PAGE_FAULT_ERR_CODE_MATCH
+            | VMCS_32BIT_CONTROL_CR3_TARGET_COUNT
+            | VMCS_32BIT_CONTROL_VMEXIT_CONTROLS
+            | VMCS_32BIT_CONTROL_VMEXIT_MSR_STORE_COUNT
+            | VMCS_32BIT_CONTROL_VMEXIT_MSR_LOAD_COUNT
+            | VMCS_32BIT_CONTROL_VMENTRY_CONTROLS
+            | VMCS_32BIT_CONTROL_VMENTRY_MSR_LOAD_COUNT
+            | VMCS_32BIT_CONTROL_VMENTRY_INTERRUPTION_INFO
+            | VMCS_32BIT_CONTROL_VMENTRY_EXCEPTION_ERR_CODE
+            | VMCS_32BIT_CONTROL_VMENTRY_INSTRUCTION_LENGTH => true,
+            VMCS_32BIT_CONTROL_TPR_THRESHOLD => isa(F::IsaLongMode) && ext(X::TprShadow),
+            VMCS_32BIT_CONTROL_SECONDARY_VMEXEC_CONTROLS => VMX_PROCBASED_CTLS2_ALLOWED_1 != 0,
+            VMCS_32BIT_CONTROL_PAUSE_LOOP_EXITING_GAP
+            | VMCS_32BIT_CONTROL_PAUSE_LOOP_EXITING_WINDOW => ext(X::PauseLoopExiting),
+            // 32-bit read-only data fields.
+            VMCS_32BIT_INSTRUCTION_ERROR
+            | VMCS_32BIT_VMEXIT_REASON
+            | VMCS_32BIT_VMEXIT_INTERRUPTION_INFO
+            | VMCS_32BIT_VMEXIT_INTERRUPTION_ERR_CODE
+            | VMCS_32BIT_IDT_VECTORING_INFO
+            | VMCS_32BIT_IDT_VECTORING_ERR_CODE
+            | VMCS_32BIT_VMEXIT_INSTRUCTION_LENGTH
+            | VMCS_32BIT_VMEXIT_INSTRUCTION_INFO => true,
+            // 32-bit guest-state and host-state fields.
+            VMCS_32BIT_GUEST_ES_LIMIT
+            | VMCS_32BIT_GUEST_CS_LIMIT
+            | VMCS_32BIT_GUEST_SS_LIMIT
+            | VMCS_32BIT_GUEST_DS_LIMIT
+            | VMCS_32BIT_GUEST_FS_LIMIT
+            | VMCS_32BIT_GUEST_GS_LIMIT
+            | VMCS_32BIT_GUEST_LDTR_LIMIT
+            | VMCS_32BIT_GUEST_TR_LIMIT
+            | VMCS_32BIT_GUEST_GDTR_LIMIT
+            | VMCS_32BIT_GUEST_IDTR_LIMIT
+            | VMCS_32BIT_GUEST_ES_ACCESS_RIGHTS
+            | VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS
+            | VMCS_32BIT_GUEST_SS_ACCESS_RIGHTS
+            | VMCS_32BIT_GUEST_DS_ACCESS_RIGHTS
+            | VMCS_32BIT_GUEST_FS_ACCESS_RIGHTS
+            | VMCS_32BIT_GUEST_GS_ACCESS_RIGHTS
+            | VMCS_32BIT_GUEST_LDTR_ACCESS_RIGHTS
+            | VMCS_32BIT_GUEST_TR_ACCESS_RIGHTS
+            | VMCS_32BIT_GUEST_INTERRUPTIBILITY_STATE
+            | VMCS_32BIT_GUEST_ACTIVITY_STATE
+            | VMCS_32BIT_GUEST_SMBASE
+            | VMCS_32BIT_GUEST_IA32_SYSENTER_CS_MSR
+            | VMCS_32BIT_HOST_IA32_SYSENTER_CS_MSR => true,
+            VMCS_32BIT_GUEST_PREEMPTION_TIMER_VALUE => ext(X::PreemptionTimer),
+            // 64-bit control fields.
+            VMCS_64BIT_CONTROL_IO_BITMAP_A
+            | VMCS_64BIT_CONTROL_IO_BITMAP_B
+            | VMCS_64BIT_CONTROL_MSR_BITMAPS
+            | VMCS_64BIT_CONTROL_VMEXIT_MSR_STORE_ADDR
+            | VMCS_64BIT_CONTROL_VMEXIT_MSR_LOAD_ADDR
+            | VMCS_64BIT_CONTROL_VMENTRY_MSR_LOAD_ADDR
+            | VMCS_64BIT_CONTROL_EXECUTIVE_VMCS_PTR
+            | VMCS_64BIT_CONTROL_TSC_OFFSET => true,
+            VMCS_64BIT_CONTROL_PML_ADDRESS => ext(X::PML),
+            VMCS_64BIT_CONTROL_VIRTUAL_APIC_PAGE_ADDR => isa(F::IsaLongMode) && ext(X::TprShadow),
+            VMCS_64BIT_CONTROL_APIC_ACCESS_ADDR => ext(X::ApicVirtualization),
+            VMCS_64BIT_CONTROL_POSTED_INTERRUPT_DESC_ADDR => ext(X::PostedInterrupts),
+            VMCS_64BIT_CONTROL_VMFUNC_CTRLS => self.vmx_vmfunc_supported_bits() != 0,
+            VMCS_64BIT_CONTROL_EPTPTR => ext(X::EPT),
+            VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP0
+            | VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP1
+            | VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP2
+            | VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP3 => ext(X::VintrDelivery),
+            VMCS_64BIT_CONTROL_EPTP_LIST_ADDRESS => ext(X::EptpSwitching),
+            VMCS_64BIT_CONTROL_VMREAD_BITMAP_ADDR | VMCS_64BIT_CONTROL_VMWRITE_BITMAP_ADDR => {
+                ext(X::VmcsShadowing)
+            }
+            VMCS_64BIT_CONTROL_VE_EXCEPTION_INFO_ADDR => ext(X::EptException),
+            VMCS_64BIT_CONTROL_XSS_EXITING_BITMAP => isa(F::IsaXsaves),
+            VMCS_64BIT_CONTROL_SPPTP => ext(X::SPP),
+            VMCS_64BIT_CONTROL_TSC_MULTIPLIER => ext(X::TscScaling),
+            VMCS_64BIT_CONTROL_TERTIARY_VMEXEC_CONTROLS => VMX_PROCBASED_CTLS3_ALLOWED_1 != 0,
+            VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS => VMX_EXIT_CTLS2_ALLOWED_1 != 0,
+            VMCS_64BIT_CONTROL_IA32_SPEC_CTRL_MASK | VMCS_64BIT_CONTROL_IA32_SPEC_CTRL_SHADOW => {
+                ext(X::SpecCtrlVirtualization)
+            }
+            VMCS_64BIT_CONTROL_INJECTED_EVENT_DATA => isa(F::IsaFred),
+            // 64-bit read-only data fields.
+            VMCS_64BIT_GUEST_PHYSICAL_ADDR => ext(X::EPT),
+            VMCS_64BIT_MSR_DATA => isa(F::IsaMsrlist),
+            VMCS_64BIT_ORIGINAL_EVENT_DATA => isa(F::IsaFred),
+            // 64-bit guest-state fields.
+            VMCS_64BIT_GUEST_LINK_POINTER | VMCS_64BIT_GUEST_IA32_DEBUGCTL => true,
+            VMCS_64BIT_GUEST_IA32_PAT => ext(X::PAT),
+            VMCS_64BIT_GUEST_IA32_EFER => ext(X::EFER),
+            VMCS_64BIT_GUEST_IA32_PERF_GLOBAL_CTRL => ext(X::PerfGlobalCtrl),
+            VMCS_64BIT_GUEST_IA32_PDPTE0
+            | VMCS_64BIT_GUEST_IA32_PDPTE1
+            | VMCS_64BIT_GUEST_IA32_PDPTE2
+            | VMCS_64BIT_GUEST_IA32_PDPTE3 => ext(X::EPT),
+            VMCS_64BIT_GUEST_IA32_PKRS => isa(F::IsaPks),
+            VMCS_64BIT_GUEST_IA32_FRED_CONFIG
+            | VMCS_64BIT_GUEST_IA32_FRED_RSP1
+            | VMCS_64BIT_GUEST_IA32_FRED_RSP2
+            | VMCS_64BIT_GUEST_IA32_FRED_RSP3
+            | VMCS_64BIT_GUEST_IA32_FRED_STACK_LEVELS
+            | VMCS_64BIT_GUEST_IA32_FRED_SSP1
+            | VMCS_64BIT_GUEST_IA32_FRED_SSP2
+            | VMCS_64BIT_GUEST_IA32_FRED_SSP3 => isa(F::IsaFred),
+            VMCS_64BIT_GUEST_IA32_SPEC_CTRL => ext(X::SpecCtrlVirtualization),
+            // 64-bit host-state fields.
+            VMCS_64BIT_HOST_IA32_PAT => ext(X::PAT),
+            VMCS_64BIT_HOST_IA32_EFER => ext(X::EFER),
+            VMCS_64BIT_HOST_IA32_PERF_GLOBAL_CTRL => ext(X::PerfGlobalCtrl),
+            VMCS_64BIT_HOST_IA32_PKRS => isa(F::IsaPks),
+            VMCS_64BIT_HOST_IA32_FRED_CONFIG
+            | VMCS_64BIT_HOST_IA32_FRED_RSP1
+            | VMCS_64BIT_HOST_IA32_FRED_RSP2
+            | VMCS_64BIT_HOST_IA32_FRED_RSP3
+            | VMCS_64BIT_HOST_IA32_FRED_STACK_LEVELS
+            | VMCS_64BIT_HOST_IA32_FRED_SSP1
+            | VMCS_64BIT_HOST_IA32_FRED_SSP2
+            | VMCS_64BIT_HOST_IA32_FRED_SSP3 => isa(F::IsaFred),
+            VMCS_64BIT_HOST_IA32_SPEC_CTRL => ext(X::SpecCtrlVirtualization),
+            // Natural-width control, read-only, guest-state and host-state
+            // fields.
+            VMCS_CONTROL_CR0_GUEST_HOST_MASK
+            | VMCS_CONTROL_CR4_GUEST_HOST_MASK
+            | VMCS_CONTROL_CR0_READ_SHADOW
+            | VMCS_CONTROL_CR4_READ_SHADOW
+            | VMCS_CR3_TARGET0
+            | VMCS_CR3_TARGET1
+            | VMCS_CR3_TARGET2
+            | VMCS_CR3_TARGET3
+            | VMCS_VMEXIT_QUALIFICATION
+            | VMCS_IO_RCX
+            | VMCS_IO_RSI
+            | VMCS_IO_RDI
+            | VMCS_IO_RIP
+            | VMCS_VMEXIT_GUEST_LINEAR_ADDR
+            | VMCS_GUEST_CR0
+            | VMCS_GUEST_CR3
+            | VMCS_GUEST_CR4
+            | VMCS_GUEST_ES_BASE
+            | VMCS_GUEST_CS_BASE
+            | VMCS_GUEST_SS_BASE
+            | VMCS_GUEST_DS_BASE
+            | VMCS_GUEST_FS_BASE
+            | VMCS_GUEST_GS_BASE
+            | VMCS_GUEST_LDTR_BASE
+            | VMCS_GUEST_TR_BASE
+            | VMCS_GUEST_GDTR_BASE
+            | VMCS_GUEST_IDTR_BASE
+            | VMCS_GUEST_DR7
+            | VMCS_GUEST_RSP
+            | VMCS_GUEST_RIP
+            | VMCS_GUEST_RFLAGS
+            | VMCS_GUEST_PENDING_DBG_EXCEPTIONS
+            | VMCS_GUEST_IA32_SYSENTER_ESP_MSR
+            | VMCS_GUEST_IA32_SYSENTER_EIP_MSR
+            | VMCS_HOST_CR0
+            | VMCS_HOST_CR3
+            | VMCS_HOST_CR4
+            | VMCS_HOST_FS_BASE
+            | VMCS_HOST_GS_BASE
+            | VMCS_HOST_TR_BASE
+            | VMCS_HOST_GDTR_BASE
+            | VMCS_HOST_IDTR_BASE
+            | VMCS_HOST_IA32_SYSENTER_ESP_MSR
+            | VMCS_HOST_IA32_SYSENTER_EIP_MSR
+            | VMCS_HOST_RSP
+            | VMCS_HOST_RIP => true,
+            VMCS_GUEST_IA32_S_CET
+            | VMCS_GUEST_SSP
+            | VMCS_GUEST_INTERRUPT_SSP_TABLE_ADDR
+            | VMCS_HOST_IA32_S_CET
+            | VMCS_HOST_SSP
+            | VMCS_HOST_INTERRUPT_SSP_TABLE_ADDR => isa(F::IsaCet),
+            _ => false,
+        }
+    }
+
+    /// The fields Bochs vmx.cc `VMenterLoadCheckVmControls`,
+    /// `VMenterLoadCheckHostState` and `VMenterLoadCheckGuestState` read out
+    /// of the current VMCS: every field the cache holds, read from the VMCS
+    /// region in memory, so the entry checks and loads see what the VMM
+    /// wrote there.
+    fn vmcs_load_cache(&mut self) {
+        let vmcs_pa = self.vmcsptr;
+        for encoding in VmcsLayout::new() {
+            if !self.vmcs_field_held(encoding) {
+                continue;
+            }
+            if let Some(field) = VmcsField::of(encoding) {
+                let value = self.vmcs_field_read(vmcs_pa, field);
+                self.vmcs_cache_store(encoding, value);
+            }
+        }
+    }
+
+    /// The fields Bochs vmx.cc `VMexit` and `VMexitSaveGuestState` write into
+    /// the current VMCS: every field the cache holds, written into the VMCS
+    /// region in memory, so the VMM's VMREADs and the next entry from this
+    /// VMCS see the state the guest left.
+    pub(super) fn vmcs_store_cache(&mut self) {
+        let vmcs_pa = self.vmcsptr;
+        for encoding in VmcsLayout::new() {
+            let Some(value) = self.vmcs_read_field(encoding) else {
+                continue;
+            };
+            let Some(field) = VmcsField::of(encoding) else {
+                continue;
+            };
+            self.vmcs_field_write(vmcs_pa, field, value);
+        }
+    }
+
+    /// The current VMCS's launch state, Bochs vmx.cc
+    /// `VMread32(VMCS_LAUNCH_STATE_FIELD_ENCODING)`.
+    fn vmcs_launch_state(&mut self) -> u32 {
+        self.read_phys_dword(self.vmcsptr + VMCS_LAUNCH_STATE_OFFSET)
+    }
+
+    /// Field `encoding` of the current VMCS, read from its region in memory.
+    fn vmcs_current_field(&mut self, encoding: u32) -> Option<u64> {
+        let field = VmcsField::of(encoding)?;
+        let vmcs_pa = self.vmcsptr;
+        Some(self.vmcs_field_read(vmcs_pa, field))
+    }
+
+    /// The guest the current VMCS holds, read from its guest-state area,
+    /// while the processor is in VMX root operation and that VMCS has been
+    /// launched: the state the last VM exit from it saved. `None` outside VMX
+    /// operation, inside the guest (the processor's own registers are then
+    /// the guest's), with no current VMCS, or with one never launched.
+    pub(crate) fn vmx_guest(&mut self) -> Option<super::instrumentation::VmxGuest> {
+        use super::instrumentation::{
+            CodeSize, DescriptorTable, ExecutionMode, GuestPhysicalMemory, ProcessorActivity,
+            SegmentBases, VmxGuest,
+        };
+        const EFER_LME: u64 = 1 << 8;
+        const EFER_LMA: u64 = 1 << 10;
+        const CR0_PE: u64 = 1 << 0;
+        const CR0_PG: u64 = 1 << 31;
+        const RFLAGS_VM: u64 = 1 << 17;
+        const AR_L: u64 = 1 << 13;
+        const AR_DB: u64 = 1 << 14;
+        if !self.in_vmx
+            || self.in_vmx_guest
+            || self.vmcsptr == BX_INVALID_VMCSPTR
+            || self.vmcs_launch_state() != VMCS_STATE_LAUNCHED
+        {
+            return None;
+        }
+        let cr0 = self.vmcs_current_field(VMCS_GUEST_CR0)?;
+        let rflags = self.vmcs_current_field(VMCS_GUEST_RFLAGS)?;
+        let entry = self.vmcs_current_field(VMCS_32BIT_CONTROL_VMENTRY_CONTROLS)?;
+        let x86_64_guest = entry & u64::from(VMX_VMENTRY_CTRL_X86_64_GUEST) != 0;
+        // Bochs vmx.cc VMenterLoadCheckGuestState: the guest's EFER is the
+        // VMCS field when entry loads it, else the processor's own with LME
+        // and LMA set for an IA-32e guest, both cleared for a paged legacy
+        // one, and LMA cleared for an unpaged one.
+        let efer = if entry & u64::from(VMX_VMENTRY_CTRL_LOAD_GUEST_EFER_MSR) != 0 {
+            self.vmcs_current_field(VMCS_64BIT_GUEST_IA32_EFER)?
+        } else {
+            let own = u64::from(self.efer.get32());
+            if x86_64_guest {
+                own | EFER_LME | EFER_LMA
+            } else if cr0 & CR0_PG != 0 {
+                own & !(EFER_LME | EFER_LMA)
+            } else {
+                own & !EFER_LMA
+            }
+        };
+        let cs_ar = self.vmcs_current_field(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS)?;
+        let ss_ar = self.vmcs_current_field(VMCS_32BIT_GUEST_SS_ACCESS_RIGHTS)?;
+        let mode = if efer & EFER_LMA != 0 {
+            if cs_ar & AR_L != 0 {
+                ExecutionMode::Long64
+            } else {
+                ExecutionMode::LongCompat
+            }
+        } else if cr0 & CR0_PE == 0 {
+            ExecutionMode::Real
+        } else if rflags & RFLAGS_VM != 0 {
+            ExecutionMode::Virtual8086
+        } else {
+            ExecutionMode::Protected
+        };
+        let code_size = match mode {
+            ExecutionMode::Long64 => CodeSize::Bits64,
+            ExecutionMode::Real
+            | ExecutionMode::Virtual8086
+            | ExecutionMode::Protected
+            | ExecutionMode::LongCompat => {
+                if cs_ar & AR_DB != 0 {
+                    CodeSize::Bits32
                 } else {
-                    self.write_phys_qword(pa, value);
+                    CodeSize::Bits16
                 }
             }
-            _ /* VMCS_FIELD_WIDTH_NATURAL */ => self.write_phys_qword(pa, value),
-        }
-        true
+        };
+        let activity = match self.vmcs_current_field(VMCS_32BIT_GUEST_ACTIVITY_STATE)? {
+            1 => ProcessorActivity::Halted,
+            2 => ProcessorActivity::Shutdown,
+            3 => ProcessorActivity::WaitForSipi,
+            _ => ProcessorActivity::Active,
+        };
+        let primary =
+            self.vmcs_current_field(VMCS_32BIT_CONTROL_PROCESSOR_BASED_VMEXEC_CONTROLS)?;
+        let secondary = self.vmcs_current_field(VMCS_32BIT_CONTROL_SECONDARY_VMEXEC_CONTROLS)?;
+        let memory = if primary & u64::from(VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS) != 0
+            && secondary & u64::from(VMX_VM_EXEC_CTRL2_EPT_ENABLE) != 0
+        {
+            GuestPhysicalMemory::Ept {
+                eptp: self.vmcs_current_field(VMCS_64BIT_CONTROL_EPTPTR)?,
+            }
+        } else {
+            GuestPhysicalMemory::Direct
+        };
+        Some(VmxGuest {
+            vmcs: self.vmcsptr,
+            rip: self.vmcs_current_field(VMCS_GUEST_RIP)?,
+            rsp: self.vmcs_current_field(VMCS_GUEST_RSP)?,
+            rflags,
+            cr0,
+            cr3: self.vmcs_current_field(VMCS_GUEST_CR3)?,
+            cr4: self.vmcs_current_field(VMCS_GUEST_CR4)?,
+            efer,
+            mode,
+            code_size,
+            cpl: ((ss_ar >> 5) & 3) as u8,
+            activity,
+            segment_bases: SegmentBases {
+                es: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_ES_BASE)?),
+                cs: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_CS_BASE)?),
+                ss: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_SS_BASE)?),
+                ds: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_DS_BASE)?),
+                fs: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_FS_BASE)?),
+                gs: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_GS_BASE)?),
+            },
+            gdtr: DescriptorTable {
+                base: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_GDTR_BASE)?),
+                limit: self.vmcs_current_field(VMCS_32BIT_GUEST_GDTR_LIMIT)? as u16,
+            },
+            idtr: DescriptorTable {
+                base: BxLinAddress::new(self.vmcs_current_field(VMCS_GUEST_IDTR_BASE)?),
+                limit: self.vmcs_current_field(VMCS_32BIT_GUEST_IDTR_LIMIT)? as u16,
+            },
+            memory,
+        })
     }
 
     /// A shadow-VMCS field read — Bochs vmx.cc `VMread16_Shadow`, which reads
     /// through `read_physical_word` and so reports the access to
     /// `phy_access`. The other widths below follow it.
-    fn read_phys_word(&mut self, paddr: u64) -> u16 {
+    fn read_phys_word(&mut self, paddr: BxPhyAddress) -> u16 {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 2];
         let val = match self.read_physical_routed(policy, paddr, 2, &mut data) {
             Ok(()) => u16::from_le_bytes(data),
             Err(e) => {
                 tracing::warn!("read_phys_word({:#018x}) failed: {:?}", paddr, e);
-                return 0xffff;
+                return 0xFFFF;
             }
         };
         self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Read);
         val
     }
 
-    fn read_phys_dword(&mut self, paddr: u64) -> u32 {
+    fn read_phys_dword(&mut self, paddr: BxPhyAddress) -> u32 {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 4];
         let val = match self.read_physical_routed(policy, paddr, 4, &mut data) {
             Ok(()) => u32::from_le_bytes(data),
             Err(e) => {
                 tracing::warn!("read_phys_dword({:#018x}) failed: {:?}", paddr, e);
-                return 0xffff_ffff;
+                return 0xFFFF_FFFF;
             }
         };
         self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Read);
         val
     }
 
-    fn read_phys_qword(&mut self, paddr: u64) -> u64 {
+    fn read_phys_qword(&mut self, paddr: BxPhyAddress) -> u64 {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 8];
         let val = match self.read_physical_routed(policy, paddr, 8, &mut data) {
@@ -1787,7 +2355,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// A shadow-VMCS field write — Bochs vmx.cc `VMwrite16_Shadow`, through
     /// `write_physical_word`, reported to `phy_access`. The other widths below
     /// follow it.
-    fn write_phys_word(&mut self, paddr: u64, val: u16) {
+    fn write_phys_word(&mut self, paddr: BxPhyAddress, val: u16) {
         let policy = self.access_policy(paddr);
         let mut data = val.to_le_bytes();
         let stored = self.write_physical_routed(policy, paddr, 2, &mut data);
@@ -1800,7 +2368,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Write);
     }
 
-    fn write_phys_dword(&mut self, paddr: u64, val: u32) {
+    fn write_phys_dword(&mut self, paddr: BxPhyAddress, val: u32) {
         let policy = self.access_policy(paddr);
         let mut data = val.to_le_bytes();
         let stored = self.write_physical_routed(policy, paddr, 4, &mut data);
@@ -1813,7 +2381,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.on_phy_access(paddr, &val.to_le_bytes(), MemAccessRW::Write);
     }
 
-    fn write_phys_qword(&mut self, paddr: u64, val: u64) {
+    fn write_phys_qword(&mut self, paddr: BxPhyAddress, val: u64) {
         let policy = self.access_policy(paddr);
         let mut data = val.to_le_bytes();
         let stored = self.write_physical_routed(policy, paddr, 8, &mut data);
@@ -1837,9 +2405,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                 u64::from(v.pi_notification_vector)
             }
             // Bochs vmx.cc VMexitSaveGuestState packs SVI into the high byte.
-            VMCS_16BIT_GUEST_INTERRUPT_STATUS => {
-                (u64::from(v.svi) << 8) | u64::from(v.rvi)
-            }
+            VMCS_16BIT_GUEST_INTERRUPT_STATUS => (u64::from(v.svi) << 8) | u64::from(v.rvi),
             VMCS_64BIT_CONTROL_POSTED_INTERRUPT_DESC_ADDR => v.pi_desc_addr,
             VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP0 => eoi_exit_bitmap_qword(v, 0),
             VMCS_64BIT_CONTROL_EOI_EXIT_BITMAP1 => eoi_exit_bitmap_qword(v, 1),
@@ -1884,6 +2450,24 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS => v.vm_exit_ctls2,
             VMCS_64BIT_GUEST_IA32_EFER => v.guest_ia32_efer,
             VMCS_64BIT_GUEST_IA32_PAT => v.guest_ia32_pat,
+            VMCS_64BIT_GUEST_IA32_DEBUGCTL => v.guest_ia32_debugctl,
+            VMCS_64BIT_GUEST_IA32_PKRS => v.guest_pkrs,
+            VMCS_64BIT_GUEST_IA32_SPEC_CTRL => v.guest_ia32_spec_ctrl,
+            VMCS_64BIT_GUEST_IA32_FRED_CONFIG => v.guest_fred_config,
+            VMCS_64BIT_GUEST_IA32_FRED_RSP1 => v.guest_fred_rsp[1],
+            VMCS_64BIT_GUEST_IA32_FRED_RSP2 => v.guest_fred_rsp[2],
+            VMCS_64BIT_GUEST_IA32_FRED_RSP3 => v.guest_fred_rsp[3],
+            VMCS_64BIT_GUEST_IA32_FRED_STACK_LEVELS => v.guest_fred_stack_levels,
+            VMCS_64BIT_GUEST_IA32_FRED_SSP1 => v.guest_fred_ssp[1],
+            VMCS_64BIT_GUEST_IA32_FRED_SSP2 => v.guest_fred_ssp[2],
+            VMCS_64BIT_GUEST_IA32_FRED_SSP3 => v.guest_fred_ssp[3],
+            VMCS_64BIT_CONTROL_VMFUNC_CTRLS => v.vmfunc_ctrls,
+            VMCS_64BIT_CONTROL_EPTP_LIST_ADDRESS => v.eptp_list_address,
+            VMCS_32BIT_GUEST_SMBASE => u64::from(v.guest_smbase),
+            VMCS_GUEST_PENDING_DBG_EXCEPTIONS => v.guest_pending_dbg_exceptions,
+            VMCS_GUEST_IA32_S_CET => v.guest_ia32_s_cet,
+            VMCS_GUEST_SSP => v.guest_ssp,
+            VMCS_GUEST_INTERRUPT_SSP_TABLE_ADDR => v.guest_interrupt_ssp_table_addr,
             VMCS_64BIT_HOST_IA32_PAT => v.host_ia32_pat,
             VMCS_64BIT_HOST_IA32_EFER => v.host_ia32_efer,
             VMCS_64BIT_HOST_IA32_PERF_GLOBAL_CTRL => v.host_perf_global_ctrl,
@@ -1997,9 +2581,11 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         })
     }
 
-    /// Dispatch VMWRITE encoding → named field. Returns `false` if the
-    /// encoding isn't supported (callers `VMfail` in that case).
-    fn vmcs_write_field(&mut self, encoding: u32, value: u64) -> bool {
+    /// Stores `value` into the cache's field for `encoding`, the counterpart
+    /// of [`Self::vmcs_read_field`]: every encoding that one reads, this one
+    /// stores, the read-only exit fields included. Any other encoding names
+    /// no cached field and stores nothing.
+    fn vmcs_cache_store(&mut self, encoding: u32, value: u64) {
         let v = &mut self.vmcs;
         match encoding {
             VMCS_16BIT_CONTROL_VPID => v.vpid = value as u16,
@@ -2051,6 +2637,24 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             VMCS_64BIT_CONTROL_SECONDARY_VMEXIT_CONTROLS => v.vm_exit_ctls2 = value,
             VMCS_64BIT_GUEST_IA32_EFER => v.guest_ia32_efer = value,
             VMCS_64BIT_GUEST_IA32_PAT => v.guest_ia32_pat = value,
+            VMCS_64BIT_GUEST_IA32_DEBUGCTL => v.guest_ia32_debugctl = value,
+            VMCS_64BIT_GUEST_IA32_PKRS => v.guest_pkrs = value,
+            VMCS_64BIT_GUEST_IA32_SPEC_CTRL => v.guest_ia32_spec_ctrl = value,
+            VMCS_64BIT_GUEST_IA32_FRED_CONFIG => v.guest_fred_config = value,
+            VMCS_64BIT_GUEST_IA32_FRED_RSP1 => v.guest_fred_rsp[1] = value,
+            VMCS_64BIT_GUEST_IA32_FRED_RSP2 => v.guest_fred_rsp[2] = value,
+            VMCS_64BIT_GUEST_IA32_FRED_RSP3 => v.guest_fred_rsp[3] = value,
+            VMCS_64BIT_GUEST_IA32_FRED_STACK_LEVELS => v.guest_fred_stack_levels = value,
+            VMCS_64BIT_GUEST_IA32_FRED_SSP1 => v.guest_fred_ssp[1] = value,
+            VMCS_64BIT_GUEST_IA32_FRED_SSP2 => v.guest_fred_ssp[2] = value,
+            VMCS_64BIT_GUEST_IA32_FRED_SSP3 => v.guest_fred_ssp[3] = value,
+            VMCS_64BIT_CONTROL_VMFUNC_CTRLS => v.vmfunc_ctrls = value,
+            VMCS_64BIT_CONTROL_EPTP_LIST_ADDRESS => v.eptp_list_address = value,
+            VMCS_32BIT_GUEST_SMBASE => v.guest_smbase = value as u32,
+            VMCS_GUEST_PENDING_DBG_EXCEPTIONS => v.guest_pending_dbg_exceptions = value,
+            VMCS_GUEST_IA32_S_CET => v.guest_ia32_s_cet = value,
+            VMCS_GUEST_SSP => v.guest_ssp = value,
+            VMCS_GUEST_INTERRUPT_SSP_TABLE_ADDR => v.guest_interrupt_ssp_table_addr = value,
             VMCS_64BIT_HOST_IA32_PAT => v.host_ia32_pat = value,
             VMCS_64BIT_HOST_IA32_EFER => v.host_ia32_efer = value,
             VMCS_64BIT_HOST_IA32_PERF_GLOBAL_CTRL => v.host_perf_global_ctrl = value,
@@ -2090,19 +2694,17 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             VMCS_32BIT_CONTROL_VMENTRY_INSTRUCTION_LENGTH => {
                 v.vm_entry_instruction_length = value as u32
             }
-            // Read-only VMCS exit-data fields: Bochs VMwriteReadOnlyVmcsComponent
-            // returns false. Being lenient would let VMMs that pre-zero these
-            // keep going, but Bochs is strict.
-            VMCS_32BIT_INSTRUCTION_ERROR
-            | VMCS_32BIT_VMEXIT_REASON
-            | VMCS_32BIT_VMEXIT_INTERRUPTION_INFO
-            | VMCS_32BIT_VMEXIT_INTERRUPTION_ERR_CODE
-            | VMCS_32BIT_IDT_VECTORING_INFO
-            | VMCS_32BIT_IDT_VECTORING_ERR_CODE
-            | VMCS_32BIT_VMEXIT_INSTRUCTION_LENGTH
-            | VMCS_32BIT_VMEXIT_INSTRUCTION_INFO
-            | VMCS_VMEXIT_QUALIFICATION
-            | VMCS_VMEXIT_GUEST_LINEAR_ADDR => return false,
+            VMCS_64BIT_GUEST_PHYSICAL_ADDR => v.guest_physical_addr = value,
+            VMCS_32BIT_INSTRUCTION_ERROR => v.vm_instruction_error = value as u32,
+            VMCS_32BIT_VMEXIT_REASON => v.exit_reason = value as u32,
+            VMCS_32BIT_VMEXIT_INTERRUPTION_INFO => v.exit_intr_info = value as u32,
+            VMCS_32BIT_VMEXIT_INTERRUPTION_ERR_CODE => v.exit_intr_error_code = value as u32,
+            VMCS_32BIT_IDT_VECTORING_INFO => v.idt_vectoring_info = value as u32,
+            VMCS_32BIT_IDT_VECTORING_ERR_CODE => v.idt_vectoring_error_code = value as u32,
+            VMCS_32BIT_VMEXIT_INSTRUCTION_LENGTH => v.exit_instruction_length = value as u32,
+            VMCS_32BIT_VMEXIT_INSTRUCTION_INFO => v.exit_instruction_info = value as u32,
+            VMCS_VMEXIT_QUALIFICATION => v.exit_qualification = value,
+            VMCS_VMEXIT_GUEST_LINEAR_ADDR => v.guest_linear_addr = value,
             VMCS_32BIT_GUEST_PREEMPTION_TIMER_VALUE => v.vmx_preemption_timer_value = value as u32,
             VMCS_32BIT_GUEST_ES_LIMIT => v.guest_es_limit = value as u32,
             VMCS_32BIT_GUEST_CS_LIMIT => v.guest_cs_limit = value as u32,
@@ -2163,9 +2765,8 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             VMCS_HOST_IA32_SYSENTER_EIP_MSR => v.host_sysenter_eip = value,
             VMCS_HOST_RSP => v.host_rsp = value,
             VMCS_HOST_RIP => v.host_rip = value,
-            _ => return false,
+            _ => {}
         }
-        true
     }
 
     // Top-level VMREAD handlers (32-bit and 64-bit operand size).
@@ -2179,7 +2780,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
-            self.write_virtual_dword(seg, eaddr as u32, val as u32)?;
+            self.write_virtual_dword(seg, eaddr, val as u32)?;
         }
         Ok(())
     }
@@ -2204,7 +2805,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
-            self.read_virtual_dword(seg, eaddr as u32)? as u64
+            u64::from(self.read_virtual_dword(seg, eaddr)?)
         };
         self.vmwrite_impl(enc, src)
     }
@@ -2266,16 +2867,19 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(());
         }
 
-        // Launch-state gate — Bochs VMXERR_VMLAUNCH_NON_CLEAR_VMCS /
-        // VMXERR_VMRESUME_NON_LAUNCHED_VMCS.
-        if is_resume && !self.vmcs.launched {
+        // Launch-state gate, on the launch state in the VMCS region — Bochs
+        // VMXERR_VMLAUNCH_NON_CLEAR_VMCS / VMXERR_VMRESUME_NON_LAUNCHED_VMCS.
+        let launch_state = self.vmcs_launch_state();
+        if is_resume && launch_state != VMCS_STATE_LAUNCHED {
             self.vmfail(VmxErr::VmresumeNonLaunchedVmcs);
             return Ok(());
         }
-        if !is_resume && self.vmcs.launched {
+        if !is_resume && launch_state != VMCS_STATE_CLEAR {
             self.vmfail(VmxErr::VmlaunchNonClearVmcs);
             return Ok(());
         }
+
+        self.vmcs_load_cache();
 
         // Bochs vmx.cc steps 1-3: validate VMX-execution controls + host
         // state + guest state before swapping. Failures here surface as
@@ -2403,7 +3007,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // VM-entry MSR-load succeeds. VMRESUME leaves the launch state
         // alone — Bochs gates this on the `vmlaunch` flag.
         if !is_resume {
-            self.vmcs.launched = true;
+            self.write_phys_dword(self.vmcsptr + VMCS_LAUNCH_STATE_OFFSET, VMCS_STATE_LAUNCHED);
         }
 
         // Bochs vmx.cc step 6: arm the preemption timer when the pin-based
@@ -2445,21 +3049,26 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return self.vmx_vmexit(VmxVmexitReason::Vmcall, 0);
         }
         // Bochs VMCALL: VM/compat-mode \u2192 #UD; non-CPL0 \u2192 #GP; otherwise
-        // VMfail when the VMCS is invalid or already launched. The full
-        // dual-monitor-SMI path Bochs panics on stays unimplemented;
+        // a VMfail in SMM, when the VMCS is invalid, or when its launch state
+        // is not clear. The full dual-monitor-SMI path Bochs panics on stays
+        // unimplemented;
         // surface it as VMfail too — the host gets the canonical
         // \"VMCALL non-clear VMCS\" error rather than a silent NOP.
-        if self.long_compat_mode() {
+        if self.v8086_mode() || self.long_compat_mode() {
             return self.exception(Exception::Ud, 0);
         }
         if self.cs_rpl() != 0 {
             return self.exception(Exception::Gp, 0);
         }
+        if self.in_smm {
+            self.vmfail(VmxErr::VmcallInVmxRootOperation);
+            return Ok(());
+        }
         if self.vmcsptr == BX_INVALID_VMCSPTR {
             self.vmfail_invalid();
             return Ok(());
         }
-        if self.vmcs.launched {
+        if self.vmcs_launch_state() != VMCS_STATE_CLEAR {
             self.vmfail(VmxErr::VmcallNonClearVmcs);
             return Ok(());
         }
@@ -2490,7 +3099,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                 if ecx >= 512 {
                     return self.vmx_vmexit(VmxVmexitReason::Vmfunc, 0);
                 }
-                let paddr = self.vmcs.eptp_list_address.wrapping_add(ecx * 8);
+                let paddr = BxPhyAddress::new(self.vmcs.eptp_list_address.wrapping_add(ecx * 8));
                 // Bochs vmfunc.cc reads the entry with one `read_physical_qword`.
                 let new_eptp = u64::from_le_bytes(self.read_physical_bytes(paddr));
                 if !self.is_eptptr_valid(new_eptp) {
@@ -2544,7 +3153,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // address VMENTRY accepts, so treating it as "no page" would silently
         // ignore a legal configuration. Every caller runs inside a guest whose
         // entry already validated this field.
-        let paddr = self.vmcs.virtual_apic_page_addr + u64::from(offset);
+        let paddr = BxPhyAddress::new(self.vmcs.virtual_apic_page_addr + u64::from(offset));
         u32::from_le_bytes(self.read_physical_bytes(paddr))
     }
 
@@ -2552,7 +3161,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// `VMX_Write_Virtual_APIC`.
     pub(super) fn vmx_write_virtual_apic(&mut self, offset: u32, value: u32) {
         // See `vmx_read_virtual_apic` on why a zero page address is not special.
-        let paddr = self.vmcs.virtual_apic_page_addr + u64::from(offset);
+        let paddr = BxPhyAddress::new(self.vmcs.virtual_apic_page_addr + u64::from(offset));
         self.write_physical_bytes(paddr, value.to_le_bytes());
     }
 
@@ -2564,7 +3173,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     fn vapic_set_vector(&mut self, arrbase: u32, vector: u8) {
         let reg = u32::from(vector) / 32;
         let offset = arrbase + 16 * reg;
-        let value = self.vmx_read_virtual_apic(offset) | (1u32 << (vector & 0x1f));
+        let value = self.vmx_read_virtual_apic(offset) | (1u32 << (vector & 0x1F));
         self.vmx_write_virtual_apic(offset, value);
     }
 
@@ -2582,7 +3191,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         }
 
         let reg = usize::from(vector) / 32;
-        arr[reg] &= !(1u32 << (vector & 0x1f));
+        arr[reg] &= !(1u32 << (vector & 0x1F));
         self.vmx_write_virtual_apic(arrbase + 16 * reg as u32, arr[reg]);
 
         for n in (0..8).rev() {
@@ -2608,7 +3217,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let vppr = if (vtpr >> 4) >= (svi >> 4) {
             vtpr
         } else {
-            svi & 0xf0
+            svi & 0xF0
         };
         self.vmcs.vppr = vppr;
         self.vmx_write_virtual_apic(LapicRegister::Ppr as u32, u32::from(vppr));
@@ -2664,8 +3273,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.clear_event(BxCpuC::<T>::BX_EVENT_VMX_VEOI_UPDATE);
 
         if !self.virtual_interrupt_delivery() {
-            return self
-                .vmx_vmexit(VmxVmexitReason::ApicWrite, LapicRegister::Eoi as u64);
+            return self.vmx_vmexit(VmxVmexitReason::ApicWrite, LapicRegister::Eoi as u64);
         }
 
         self.vmx_write_virtual_apic(LapicRegister::Eoi as u32, 0);
@@ -2687,7 +3295,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// `bx_local_apic_c::get_vector(vm->eoi_exit_bitmap, vector)`.
     fn eoi_exit_bitmap_bit(&self, vector: u8) -> bool {
         let reg = usize::from(vector) / 32;
-        self.vmcs.eoi_exit_bitmap[reg] & (1u32 << (vector & 0x1f)) != 0
+        self.vmcs.eoi_exit_bitmap[reg] & (1u32 << (vector & 0x1F)) != 0
     }
 
     /// Self-IPI virtualization — Bochs vapic.cc `VMX_Self_IPI_Virtualization`.
@@ -2739,7 +3347,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                 if value >> 8 != 0 {
                     return Some(self.exception(Exception::Gp, 0));
                 }
-                self.vmx_write_virtual_x2apic(TPR, value & 0xff);
+                self.vmx_write_virtual_x2apic(TPR, value & 0xFF);
                 Some(self.vmx_tpr_virtualization())
             }
             EOI if self.virtual_interrupt_delivery() => {
@@ -2757,9 +3365,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     // An illegal vector is still published where the host can
                     // read what the guest attempted, then reported.
                     self.vmx_write_virtual_x2apic(SELF_IPI, u64::from(vector));
-                    return Some(
-                        self.vmx_vmexit(VmxVmexitReason::ApicWrite, u64::from(SELF_IPI)),
-                    );
+                    return Some(self.vmx_vmexit(VmxVmexitReason::ApicWrite, u64::from(SELF_IPI)));
                 }
                 self.vmx_self_ipi_virtualization(vector);
                 Some(Ok(()))
@@ -2796,7 +3402,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
         self.vapic_set_vector(LapicRegister::Isr1 as u32, vector);
         self.vmcs.svi = vector;
-        let vppr = vector & 0xf0;
+        let vppr = vector & 0xF0;
         self.vmcs.vppr = vppr;
         self.vmx_write_virtual_apic(LapicRegister::Ppr as u32, u32::from(vppr));
         self.vmcs.rvi =
@@ -2805,8 +3411,12 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
         self.ext = true;
         self.instrument_hw_interrupt(vector);
-        let result =
-            self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, 0);
+        let result = self.interrupt(
+            vector,
+            super::exception::InterruptType::ExternalInterrupt,
+            false,
+            0,
+        );
         self.ext = false;
         self.prev_rip = self.rip();
         result
@@ -2833,7 +3443,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // here: a machine's CPUs are scheduled cooperatively, one slice at a
         // time against an exclusively-borrowed memory, so no second agent runs
         // while this does.
-        let pid = self.vmcs.pi_desc_addr;
+        let pid = BxPhyAddress::new(self.vmcs.pi_desc_addr);
         let on = self.read_physical_byte(pid + 32);
         self.write_physical_byte(pid + 32, on & !0x1);
 
@@ -2851,7 +3461,8 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.write_physical_bytes(pid, [0u8; 32]);
         let mut virr = [0u32; 8];
         for (n, slot) in virr.iter_mut().enumerate() {
-            let pir_n = u32::from_le_bytes([pir[4 * n], pir[4 * n + 1], pir[4 * n + 2], pir[4 * n + 3]]);
+            let pir_n =
+                u32::from_le_bytes([pir[4 * n], pir[4 * n + 1], pir[4 * n + 2], pir[4 * n + 3]]);
             let offset = LapicRegister::Irr1 as u32 + 16 * n as u32;
             let merged = self.vmx_read_virtual_apic(offset) | pir_n;
             self.vmx_write_virtual_apic(offset, merged);
@@ -3001,6 +3612,14 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             if exit_ctls & VMX_VMEXIT_CTRL1_STORE_EFER_MSR != 0 {
                 self.vmcs.guest_ia32_efer = self.efer.get32() as u64;
             }
+            // IA32_VMX_MISC advertises VMX_MISC_STORE_LMA_TO_X86_64_GUEST_
+            // VMENTRY_CONTROL: the exit stores EFER.LMA into the "IA-32e
+            // mode guest" entry control (Bochs vmx.cc VMexitSaveGuestState).
+            if self.long_mode() {
+                self.vmcs.vm_entry_ctls |= VMX_VMENTRY_CTRL_X86_64_GUEST;
+            } else {
+                self.vmcs.vm_entry_ctls &= !VMX_VMENTRY_CTRL_X86_64_GUEST;
+            }
 
             // CET state — Bochs saves unconditionally when CET is
             // supported (the loaded value is meaningless when the guest
@@ -3035,7 +3654,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
             // LDTR.
             self.vmcs.guest_ldtr_selector = self.ldtr.selector.value;
-            self.vmcs.guest_ldtr_base = self.ldtr.cache.u.segment_base();
+            self.vmcs.guest_ldtr_base = self.ldtr.cache.u.segment_base().get();
             self.vmcs.guest_ldtr_limit = self.ldtr.cache.u.segment_limit_scaled();
             self.vmcs.guest_ldtr_ar = {
                 let ar_byte = self.ldtr.cache.get_ar_byte() as u32;
@@ -3052,7 +3671,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 
             // TR.
             self.vmcs.guest_tr_selector = self.tr.selector.value;
-            self.vmcs.guest_tr_base = self.tr.cache.u.segment_base();
+            self.vmcs.guest_tr_base = self.tr.cache.u.segment_base().get();
             self.vmcs.guest_tr_limit = self.tr.cache.u.segment_limit_scaled();
             self.vmcs.guest_tr_ar = {
                 let ar_byte = self.tr.cache.get_ar_byte() as u32;
@@ -3068,9 +3687,9 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             };
 
             // GDTR / IDTR.
-            self.vmcs.guest_gdtr_base = self.gdtr.base;
+            self.vmcs.guest_gdtr_base = self.gdtr.base.get();
             self.vmcs.guest_gdtr_limit = self.gdtr.limit as u32;
-            self.vmcs.guest_idtr_base = self.idtr.base;
+            self.vmcs.guest_idtr_base = self.idtr.base.get();
             self.vmcs.guest_idtr_limit = self.idtr.limit as u32;
 
             // Sysenter MSRs (always saved — Bochs).
@@ -3129,7 +3748,15 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                 }
                 tmp
             };
+        }
 
+        // Bochs VMexit's VMwrites — the exit information and the saved guest
+        // state — land in the current VMCS here, ahead of the MSR-store list.
+        self.vmcs_store_cache();
+
+        if reason != VmxVmexitReason::VmentryFailureGuestState
+            && reason != VmxVmexitReason::VmentryFailureMsr
+        {
             let store_cnt = self.vmcs.vmexit_msr_store_cnt;
             let store_addr = self.vmcs.vmexit_msr_store_addr;
             if store_cnt != 0 {
@@ -3260,7 +3887,13 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.vmcs.exit_reason = entry_failure_reason;
         self.vmcs.exit_qualification = qualification;
         self.vmcs.exit_instruction_length = ((self.rip().wrapping_sub(self.prev_rip)) & 0xF) as u32;
+        // Bochs VMexit: a reason other than an exception or an external
+        // interrupt has no interruption information, and no event was being
+        // delivered, so there is no IDT-vectoring information either.
+        self.vmcs.exit_intr_info = 0;
+        self.vmcs.idt_vectoring_info = 0;
         self.nmi_unblocking_iret = false;
+        self.vmcs_store_cache();
 
         // Bochs vmx.cc VMexit ordering (lines 3144-3154): in_vmx_guest
         // first, then unconditional clear of the VMX-guest-pending
@@ -4177,7 +4810,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             }
             // Bochs reads the revision-ID dword at linkptr; we approximate
             // with the same dword read used during VMPTRLD.
-            let revision = self.vmx_read_revision_id(linkptr);
+            let revision = self.vmx_read_revision_id(BxPhyAddress::new(linkptr));
             // BX_VMCS_SHADOW_BIT_MASK is bit 31 of the revision word —
             // unset when VMCS_SHADOWING is off (our model).
             if revision & 0x8000_0000 != 0 {
@@ -4576,8 +5209,8 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // fetch raw descriptor → parse → write into segment cache.
         // GDTR/IDTR must be restored first so the descriptor fetches use
         // the host's tables.
-        self.gdtr.base = self.vmcs.host_gdtr_base;
-        self.idtr.base = self.vmcs.host_idtr_base;
+        self.gdtr.base = BxLinAddress::new(self.vmcs.host_gdtr_base);
+        self.idtr.base = BxLinAddress::new(self.vmcs.host_idtr_base);
         self.idtr.limit = 0xFFFF;
 
         self.vmexit_load_host_seg(BxSegregs::Es, self.vmcs.host_es_selector)?;
@@ -4595,14 +5228,14 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             self.sregs[BxSegregs::Fs as usize]
                 .cache
                 .u
-                .set_segment_base(host_fs_base);
+                .set_segment_base(BxLinAddress::new(host_fs_base));
         }
         if x86_64_host || self.sregs[BxSegregs::Gs as usize].cache.valid != 0 {
             let host_gs_base = self.vmcs.host_gs_base;
             self.sregs[BxSegregs::Gs as usize]
                 .cache
                 .u
-                .set_segment_base(host_gs_base);
+                .set_segment_base(BxLinAddress::new(host_gs_base));
         }
 
         // TR + LDTR. Bochs marks LDTR unusable (valid=0) and parses TR from
@@ -4611,7 +5244,10 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let (d1, d2) = self.fetch_raw_descriptor(&self.tr.selector.clone())?;
         self.tr.cache = self.parse_descriptor(d1, d2)?;
         let host_tr_base = self.vmcs.host_tr_base;
-        self.tr.cache.u.set_segment_base(host_tr_base);
+        self.tr
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(host_tr_base));
         self.tr.cache.valid = 1;
         self.ldtr.cache.valid = 0;
 
@@ -4672,7 +5308,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let cache = &mut self.sregs[seg as usize].cache;
         cache.set_ar_byte((ar & 0xFF) as u8);
         cache.valid = if unusable { 0 } else { 1 };
-        cache.u.set_segment_base(base);
+        cache.u.set_segment_base(BxLinAddress::new(base));
         cache.u.set_segment_limit_scaled(limit);
         cache.u.set_segment_g((ar >> 15) & 1 != 0);
         cache.u.set_segment_d_b((ar >> 14) & 1 != 0);
@@ -4748,9 +5384,9 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // GDTR / IDTR. The guest's activity state is entered last, after the
         // context switch tail (`vmlaunch_vmresume`), as Bochs vmx.cc
         // `VMenterLoadCheckGuestState` ends.
-        self.gdtr.base = self.vmcs.guest_gdtr_base;
+        self.gdtr.base = BxLinAddress::new(self.vmcs.guest_gdtr_base);
         self.gdtr.limit = self.vmcs.guest_gdtr_limit as u16;
-        self.idtr.base = self.vmcs.guest_idtr_base;
+        self.idtr.base = BxLinAddress::new(self.vmcs.guest_idtr_base);
         self.idtr.limit = self.vmcs.guest_idtr_limit as u16;
 
         // Six data/code segments — loaded directly from VMCS without
@@ -4810,7 +5446,10 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.ldtr.cache.set_ar_byte((ldtr_ar & 0xFF) as u8);
         self.ldtr.cache.valid = if ldtr_unusable { 0 } else { 1 };
         let guest_ldtr_base = self.vmcs.guest_ldtr_base;
-        self.ldtr.cache.u.set_segment_base(guest_ldtr_base);
+        self.ldtr
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(guest_ldtr_base));
         let guest_ldtr_limit = self.vmcs.guest_ldtr_limit;
         self.ldtr.cache.u.set_segment_limit_scaled(guest_ldtr_limit);
         self.ldtr.cache.u.set_segment_g((ldtr_ar >> 15) & 1 != 0);
@@ -4824,7 +5463,10 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.tr.cache.set_ar_byte((tr_ar & 0xFF) as u8);
         self.tr.cache.valid = 1;
         let guest_tr_base = self.vmcs.guest_tr_base;
-        self.tr.cache.u.set_segment_base(guest_tr_base);
+        self.tr
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(guest_tr_base));
         let guest_tr_limit = self.vmcs.guest_tr_limit;
         self.tr.cache.u.set_segment_limit_scaled(guest_tr_limit);
         self.tr.cache.u.set_segment_g((tr_ar >> 15) & 1 != 0);
@@ -4888,7 +5530,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     fn vmexit_save_guest_seg(&mut self, seg: BxSegregs) {
         let s = &self.sregs[seg as usize];
         let sel = s.selector.value;
-        let base: u64 = s.cache.u.segment_base();
+        let base: u64 = s.cache.u.segment_base().get();
         let limit: u32 = s.cache.u.segment_limit_scaled();
         let ar: u32 = Self::vmexit_pack_guest_seg_ar(s);
         match seg {
@@ -4939,7 +5581,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Read the VMCS revision ID (first 4 bytes of a VMCS / VMXON region) from
     /// guest-physical memory. Bochs vmx.cc VMXReadRevisionID, which reads it
     /// through `read_physical_dword` and so reports the access.
-    fn vmx_read_revision_id(&mut self, paddr: u64) -> u32 {
+    fn vmx_read_revision_id(&mut self, paddr: BxPhyAddress) -> u32 {
         let revision = self.mem_read_dword(paddr);
         self.on_phy_access(paddr, &revision.to_le_bytes(), MemAccessRW::Read);
         revision
@@ -4957,8 +5599,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// the mask covers the full address space when A20 is enabled.
     #[inline]
     fn a20_enabled(&self) -> bool {
-        // A20 masks bit 20 to 0 when disabled → `a20_mask` lacks bit 20.
-        (self.a20_mask & (1u64 << 20)) != 0
+        self.a20_mask.is_open()
     }
 
     // =========================================================================
@@ -5057,7 +5698,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// `BX_CPU_C::write_physical_byte` used by vapic.cc to clear PID.ON via
     /// atomic RMW. Logs and continues on failure to match the lenient
     /// posture of `read_physical_byte`.
-    fn write_physical_byte(&mut self, paddr: u64, val: u8) {
+    fn write_physical_byte(&mut self, paddr: BxPhyAddress, val: u8) {
         let policy = self.access_policy(paddr);
         let mut data = [val];
         match self.write_physical_routed(policy, paddr, 1, &mut data) {
@@ -5081,7 +5722,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// register (vapic.cc `VMX_Read_Virtual_APIC`, 4 bytes), the PIR (32) and
     /// an EPTP-list entry (vmfunc.cc, 8). A failed read is logged and reads as
     /// all ones, what [`Self::read_physical_byte`] gives each byte.
-    fn read_physical_bytes<const N: usize>(&mut self, paddr: u64) -> [u8; N] {
+    fn read_physical_bytes<const N: usize>(&mut self, paddr: BxPhyAddress) -> [u8; N] {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; N];
         match self.read_physical_routed(policy, paddr, N, &mut data) {
@@ -5095,14 +5736,14 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     paddr,
                     e
                 );
-                [0xff; N]
+                [0xFF; N]
             }
         }
     }
 
     /// Write `N` bytes of guest-physical memory as one access, reported once at
     /// its full width, as [`Self::read_physical_bytes`] reads them.
-    fn write_physical_bytes<const N: usize>(&mut self, paddr: u64, mut data: [u8; N]) {
+    fn write_physical_bytes<const N: usize>(&mut self, paddr: BxPhyAddress, mut data: [u8; N]) {
         let policy = self.access_policy(paddr);
         let stored = self.write_physical_routed(policy, paddr, N, &mut data);
         // Bochs handleSMC flushes the writer synchronously at the store.
@@ -5133,7 +5774,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// check failure), the exception propagates to the caller; Bochs
     /// triggers a VMX abort in that case which the caller handles.
     pub(super) fn vmx_load_msrs(&mut self, count: u32, phys_addr: u64) -> Result<u32> {
-        let mut paddr = phys_addr;
+        let mut paddr = BxPhyAddress::new(phys_addr);
         for msr in 1..=count {
             // Bochs vmx.cc LoadMSRs reads each entry through
             // `read_physical_qword`, which reports both halves.
@@ -5170,7 +5811,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// the high qword of each 16-byte entry. Returns the 1-based failing
     /// index or `0` on success. X2APIC MSRs are rejected per Bochs.
     pub(super) fn vmx_store_msrs(&mut self, count: u32, phys_addr: u64) -> Result<u32> {
-        let mut paddr = phys_addr;
+        let mut paddr = BxPhyAddress::new(phys_addr);
         for msr in 1..=count {
             // Bochs vmx.cc StoreMSRs reads the index and writes the value
             // through the physical-access helpers, which report both.
@@ -5512,13 +6153,13 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         self.vmexit_if_ctls_set(ctls, VMX_VM_EXEC_CTRL1_HLT_VMEXIT, VmxVmexitReason::Hlt, 0)
     }
 
-    pub(super) fn vmexit_check_invlpg(&mut self, linear_addr: u64) -> Result<bool> {
+    pub(super) fn vmexit_check_invlpg(&mut self, linear_addr: BxLinAddress) -> Result<bool> {
         let ctls = self.proc_based_ctls1();
         self.vmexit_if_ctls_set(
             ctls,
             VMX_VM_EXEC_CTRL1_INVLPG_VMEXIT,
             VmxVmexitReason::Invlpg,
-            linear_addr,
+            linear_addr.get(),
         )
     }
 
@@ -5632,16 +6273,15 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// When EPT is inactive returns the input unchanged.
     pub(super) fn ept_translate_for_walk(
         &mut self,
-        guest_paddr: u64,
-        guest_laddr: u64,
-    ) -> Result<u64> {
+        guest_paddr: BxPhyAddress,
+        guest_laddr: BxLinAddress,
+    ) -> Result<BxPhyAddress> {
         if !self.ept_active() {
             return Ok(guest_paddr);
         }
         self.translate_guest_physical(
             guest_paddr,
-            guest_laddr,
-            true,
+            Some(guest_laddr),
             true,
             false,
             false,
@@ -5656,20 +6296,19 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// qualification.
     pub(super) fn ept_translate_for_data(
         &mut self,
-        guest_paddr: u64,
-        guest_laddr: u64,
+        guest_paddr: BxPhyAddress,
+        guest_laddr: BxLinAddress,
         user_page: bool,
         writeable_page: bool,
         nx_page: bool,
         rw: BxRwAccess,
-    ) -> Result<u64> {
+    ) -> Result<BxPhyAddress> {
         if !self.ept_active() {
             return Ok(guest_paddr);
         }
         self.translate_guest_physical(
             guest_paddr,
-            guest_laddr,
-            true,
+            Some(guest_laddr),
             false,
             user_page,
             writeable_page,
@@ -5690,15 +6329,14 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// structure (Bochs sets the qualification bit accordingly).
     pub(super) fn translate_guest_physical(
         &mut self,
-        guest_paddr: u64,
-        guest_laddr: u64,
-        guest_laddr_valid: bool,
+        guest_paddr: BxPhyAddress,
+        guest_laddr: Option<BxLinAddress>,
         is_page_walk: bool,
         user_page: bool,
         writeable_page: bool,
         nx_page: bool,
         rw: BxRwAccess,
-    ) -> Result<u64> {
+    ) -> Result<BxPhyAddress> {
         let eptptr = self.vmcs.eptptr;
         let mut ppf = eptptr & 0x000F_FFFF_FFFF_F000;
         let mbe_ctrl = self.vmcs.secondary_proc_based_ctls & VMX_VM_EXEC_CTRL2_MBE_CTRL != 0;
@@ -5710,7 +6348,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         // as a write so the EPT permission check requires WRITE — the
         // companion `update_ept_access_dirty` (called below on success)
         // updates the EPT entries' own A/D bits.
-        let rw = if ept_ad_enabled && is_page_walk && guest_laddr_valid {
+        let rw = if ept_ad_enabled && is_page_walk && guest_laddr.is_some() {
             BxRwAccess::Write
         } else {
             rw
@@ -5750,14 +6388,15 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         }
 
         let mut entry = [0u64; 4];
-        let mut entry_addr = [0u64; 4];
+        let mut entry_addr = [BxPhyAddress::new(0); 4];
         let mut offset_mask: u64 = 0x0000_FFFF_FFFF_FFFF;
         let mut leaf: i32 = 3; // BX_LEVEL_PML4
         let mut vmexit_reason: Option<VmxVmexitReason> = None;
 
         loop {
             let level = leaf as u32;
-            entry_addr[leaf as usize] = ppf + ((guest_paddr >> (9 + 9 * level)) & 0xFF8);
+            entry_addr[leaf as usize] =
+                BxPhyAddress::new(ppf + ((guest_paddr.get() >> (9 + 9 * level)) & 0xFF8));
             entry[leaf as usize] = self.mem_read_qword(entry_addr[leaf as usize]);
             // Bochs paging.cc `translate_guest_physical` reads each EPT entry
             // through `read_physical_qword`, which reports it.
@@ -5839,7 +6478,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     vmexit_reason = Some(VmxVmexitReason::EptMisconfiguration);
                     break;
                 }
-                ppf += guest_paddr & offset_mask;
+                ppf += guest_paddr.get() & offset_mask;
                 break;
             }
             // Non-leaf entry must have memtype-low/leaf reserved bits clear
@@ -5914,7 +6553,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                         combined_access.contains(EptPerm::MBE_USER_EXEC),
                     );
                 }
-                if guest_laddr_valid {
+                if guest_laddr.is_some() {
                     q |= EptViolationQual::LADDR_VALID;
                     if !is_page_walk {
                         q |= EptViolationQual::DATA_ACCESS;
@@ -5953,11 +6592,13 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                     let leaf_sss_page = (leaf_entry & (1u64 << 60)) != 0;
                     q.set(EptViolationQual::SSS_PAGE, ept_sss_ctrl && leaf_sss_page);
                 }
-                self.vmcs.guest_linear_addr = guest_laddr;
-                self.vmcs.guest_physical_addr = guest_paddr;
+                // Bochs writes the field whether or not the address is valid,
+                // zero when it is not.
+                self.vmcs.guest_linear_addr = guest_laddr.map_or(0, BxLinAddress::get);
+                self.vmcs.guest_physical_addr = guest_paddr.get();
                 q.bits()
             } else {
-                self.vmcs.guest_physical_addr = guest_paddr;
+                self.vmcs.guest_physical_addr = guest_paddr.get();
                 0
             };
             self.vmx_vmexit(reason, qual)?;
@@ -5973,7 +6614,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             self.update_ept_access_dirty(&entry_addr, &mut entry, leaf as usize, rw.is_write());
         }
 
-        Ok(ppf | (guest_paddr & 0xFFF))
+        Ok(BxPhyAddress::new(ppf | guest_paddr.page_offset()))
     }
 
     /// Bochs paging.cc `BX_CPU_C::update_ept_access_dirty` (cross-checked
@@ -5987,7 +6628,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// correctness for concurrent EPT walks is a known Bochs-parity gap.
     fn update_ept_access_dirty(
         &mut self,
-        entry_addr: &[u64; 4],
+        entry_addr: &[BxPhyAddress; 4],
         entry: &mut [u64; 4],
         leaf: usize,
         write: bool,
@@ -6017,6 +6658,93 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
                 MemAccessRW::Write,
             );
         }
+    }
+
+    /// Bochs `BX_SUPPORT_VMX_EXTENSION`: whether the CPU model has the VMX
+    /// extension `extension`.
+    pub(super) fn vmx_extension(&self, extension: super::cpuid::VMXExtensions) -> bool {
+        self.vmx_extensions_bitmask
+            .as_ref()
+            .is_some_and(|extensions| extensions.contains(extension))
+    }
+
+    /// IA32_VMX_BASIC — Bochs vmx.h `VMX_MSR_VMX_BASIC`: the revision ID; a
+    /// 4096-byte VMCS region; addresses not limited to 32 bits on a model
+    /// with long mode; write-back VMCS memory; INS/OUTS exit information; the
+    /// TRUE control MSRs; and the CET and FRED bits on models with them.
+    pub(super) fn vmx_basic_msr(&self) -> u64 {
+        use super::decoder::features::X86Feature;
+        const VMX_VMCS_AREA_SIZE: u32 = 4096;
+        const BX_MEMTYPE_WB: u32 = 6;
+        let mut high = VMX_VMCS_AREA_SIZE | (BX_MEMTYPE_WB << 18) | (1 << 22) | (1 << 23);
+        if !self.bx_cpuid_support_isa_extension(X86Feature::IsaLongMode) {
+            high |= 1 << 16;
+        }
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaCet) {
+            high |= 1 << 24;
+        }
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaFred) {
+            high |= 1 << 26;
+        }
+        (u64::from(high) << 32) | u64::from(BX_VMCS_REVISION_ID)
+    }
+
+    /// IA32_VMX_MISC — Bochs vmx.h `VMX_MSR_MISC`: preemption-timer rate 0;
+    /// VM exits store EFER.LMA into the "IA-32e mode guest" entry control;
+    /// entry to the HLT, shutdown and wait-for-SIPI activity states; four
+    /// CR3-target values; VMWRITE to read-only fields where the model has
+    /// VMCS shadowing; and injecting a software event of length 0 where it
+    /// has that extension.
+    pub(super) fn vmx_misc_msr(&self) -> u64 {
+        use super::cpuid::VMXExtensions;
+        let mut misc = VMX_MISC_STORE_LMA_TO_X86_64_GUEST_VMENTRY_CONTROL
+            | VMX_SUPPORT_VMENTER_TO_NON_ACTIVE_STATE
+            | (VMX_CR3_TARGET_MAX_CNT << 16);
+        if self.vmx_extension(VMXExtensions::VmcsShadowing) {
+            misc |= VMX_MISC_SUPPORT_VMWRITE_READ_ONLY_FIELDS;
+        }
+        if self.vmx_extension(VMXExtensions::SwInterruptInjectionIlen0) {
+            misc |= VMX_MISC_ALLOW_INJECTION_OF_SW_INTERRUPT_WITH_ILEN_0;
+        }
+        u64::from(misc)
+    }
+
+    /// IA32_VMX_EPT_VPID_CAP — Bochs vmcs.cc `init_ept_vpid_capabilities`:
+    ///   [0]     execute-only EPT translations
+    ///   [6]     4-level page walk (the only length `is_eptptr_valid` takes)
+    ///   [8]     UC EPT paging-structure memory type
+    ///   [14]    WB EPT paging-structure memory type
+    ///   [16]    2 MiB EPT pages
+    ///   [17]    1 GiB EPT pages, on a model with 1 GiB pages
+    ///   [20]    INVEPT
+    ///   [21]    EPT accessed and dirty flags, with that extension
+    ///   [22]    advanced EPT-violation information, with mode-based control
+    ///   [23]    the EPTP shadow-stack control, on a model with CET
+    ///   [25:24] INVEPT single-context and all-context types
+    ///   [32]    INVVPID, and [43:40] its four types, with VPID
+    pub(super) fn vmx_ept_vpid_cap_msr(&self) -> u64 {
+        use super::cpuid::VMXExtensions;
+        use super::decoder::features::X86Feature;
+        let mut caps = 0u64;
+        if self.vmx_extension(VMXExtensions::EPT) {
+            caps = 0x0611_4141;
+            if self.bx_cpuid_support_isa_extension(X86Feature::Isa1gPages) {
+                caps |= 1 << 17;
+            }
+            if self.vmx_extension(VMXExtensions::EptAccessDirty) {
+                caps |= 1 << 21;
+            }
+            if self.vmx_extension(VMXExtensions::MbeControl) {
+                caps |= 1 << 22;
+            }
+            if self.bx_cpuid_support_isa_extension(X86Feature::IsaCet) {
+                caps |= 1 << 23;
+            }
+        }
+        if self.vmx_extension(VMXExtensions::VPID) {
+            caps |= 0x0000_0F01 << 32;
+        }
+        caps
     }
 
     /// EPTPTR-validity check — Bochs vmx.cc `is_eptptr_valid`.
@@ -6093,14 +6821,15 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             if msr > HI_END {
                 return true;
             }
-            let paddr = bitmap + u64::from((msr - HI_START) >> 3) + 1024 + write_off;
+            let paddr =
+                BxPhyAddress::new(bitmap + u64::from((msr - HI_START) >> 3) + 1024 + write_off);
             let field = self.read_physical_byte(paddr);
             (field & (1 << (msr & 7))) != 0
         } else {
             if msr > LO_END {
                 return true;
             }
-            let paddr = bitmap + u64::from(msr >> 3) + write_off;
+            let paddr = BxPhyAddress::new(bitmap + u64::from(msr >> 3) + write_off);
             let field = self.read_physical_byte(paddr);
             (field & (1 << (msr & 7))) != 0
         }
@@ -6279,7 +7008,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         &mut self,
         msw: u32,
         is_memory: bool,
-        laddr: u64,
+        laddr: BxLinAddress,
     ) -> Result<(bool, u32)> {
         let mask = (self.vmcs.cr0_guest_host_mask as u32) & 0xF;
         let shadow = self.vmcs.cr0_read_shadow as u32;
@@ -6294,7 +7023,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             let mut qual: u64 = (3u64 << 4) | (u64::from(msw) << 16);
             if is_memory {
                 qual |= 1 << 6;
-                self.vmcs.guest_linear_addr = laddr;
+                self.vmcs.guest_linear_addr = laddr.get();
             }
             self.vmx_vmexit(VmxVmexitReason::CrAccess, qual)?;
             return Ok((true, msw));
@@ -6398,7 +7127,9 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// `0x8000..0xFFFF` respectively. A multi-byte access whose port range
     /// straddles the 0x8000 split must consult both bitmaps; access ranges
     /// wrapping past 0xFFFF always force a VMEXIT.
-    fn io_bitmap_says_vmexit(&mut self, port: u16, len: u32) -> bool {
+    fn io_bitmap_says_vmexit(&mut self, port: IoPort, len: u32) -> bool {
+        // The bitmaps are indexed by the port number itself.
+        let port = port.get();
         // Wrap-around forces VMEXIT (Bochs guard).
         let end = u32::from(port) + len;
         if end > 0x10000 {
@@ -6409,15 +7140,15 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         let bitmap = if (port_lo + len) > 0x8000 {
             // Straddles the bitmap-A/B boundary. Bochs reads byte 0xFFF of
             // bitmap A and byte 0x000 of bitmap B.
-            let pa = self.vmcs.io_bitmap_addr[0] + 0xFFF;
-            let pb = self.vmcs.io_bitmap_addr[1];
+            let pa = BxPhyAddress::new(self.vmcs.io_bitmap_addr[0] + 0xFFF);
+            let pb = BxPhyAddress::new(self.vmcs.io_bitmap_addr[1]);
             let b0 = u16::from(self.read_physical_byte(pa));
             let b1 = u16::from(self.read_physical_byte(pb));
             (b1 << 8) | b0
         } else {
             // read_physical_byte cannot cross 4 KiB; do two single-byte reads.
             let which = usize::from((port >> 15) & 1);
-            let pa = self.vmcs.io_bitmap_addr[which] + u64::from(port_lo / 8);
+            let pa = BxPhyAddress::new(self.vmcs.io_bitmap_addr[which] + u64::from(port_lo / 8));
             let b0 = u16::from(self.read_physical_byte(pa));
             let b1 = u16::from(self.read_physical_byte(pa + 1));
             (b1 << 8) | b0
@@ -6431,7 +7162,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Decide whether a guest I/O access takes a VMEXIT — Bochs vmexit.cc
     /// VMexit_IO common predicate. Bitmap path beats the unconditional
     /// `IO_VMEXIT` bit when both might apply.
-    fn io_should_vmexit(&mut self, port: u16, size: u32) -> bool {
+    fn io_should_vmexit(&mut self, port: IoPort, size: u32) -> bool {
         let ctls = self.proc_based_ctls1();
         if ctls & VMX_VM_EXEC_CTRL1_IO_BITMAPS != 0 {
             self.io_bitmap_says_vmexit(port, size)
@@ -6450,7 +7181,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     ///   [6]     operand encoding (0 = DX, 1 = immediate)
     ///   [31:16] port number          (packed value)
     fn io_qualification(
-        port: u16,
+        port: IoPort,
         size: u32,
         direction_in: bool,
         string: bool,
@@ -6464,7 +7195,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
         flags.set(IoExitQual::IMMEDIATE, imm);
         let mut qual = flags.bits();
         qual |= u64::from(size.saturating_sub(1) & 0x7);
-        qual |= u64::from(port) << 16;
+        qual |= u64::from(port.get()) << 16;
         qual
     }
 
@@ -6474,7 +7205,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// variants (`IN AL, ib`, `OUT ib, AL`, …).
     pub(super) fn vmexit_check_io(
         &mut self,
-        port: u16,
+        port: IoPort,
         size: u32,
         direction_in: bool,
         imm: bool,
@@ -6491,15 +7222,16 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// `BX_IA_REP_INSx` / `BX_IA_REP_OUTSx` cases. Writes the buffer linear
     /// address into `VMCS_GUEST_LINEAR_ADDR` and a packed
     /// `(seg << 15) | (as64 ? 1<<8 : 0) | (as32 ? 1<<7 : 0)` value into
-    /// `VMCS_32BIT_VMEXIT_INSTRUCTION_INFO`. `port_in` semantics use ES:RDI;
-    /// `port_out` (OUTS) uses the prefix segment with RSI.
+    /// `VMCS_32BIT_VMEXIT_INSTRUCTION_INFO`, where `seg` is the instruction's
+    /// own segment (Bochs `i->seg()`) for INS and OUTS alike; the linear
+    /// address is ES:RDI for INS and that segment with RSI for OUTS.
     pub(super) fn vmexit_check_io_string(
         &mut self,
-        port: u16,
+        port: IoPort,
         size: u32,
         direction_in: bool,
         rep: bool,
-        linear_addr: u64,
+        linear_addr: BxLinAddress,
         seg: u8,
         as64: bool,
         as32: bool,
@@ -6508,7 +7240,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
             return Ok(false);
         }
         let qual = Self::io_qualification(port, size, direction_in, true, rep, false);
-        self.vmcs.guest_linear_addr = linear_addr;
+        self.vmcs.guest_linear_addr = linear_addr.get();
         let mut info: u32 = u32::from(seg) << 15;
         if as64 {
             info |= 1 << 8;
@@ -6524,6 +7256,7 @@ impl<T: Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::A20Mask;
     use crate::cpu::exec_ctx::{ExecCtx, TestMachine};
 
     /// Guest-physical page standing in for the virtual-APIC page.
@@ -6536,7 +7269,7 @@ mod tests {
     /// datapath, not VMENTRY, so the controls are placed directly.
     fn vapic_guest(machine: &mut TestMachine) -> ExecCtx<'_, ()> {
         let mut ctx = machine.ctx();
-        ctx.memory.set_a20_mask(u64::MAX);
+        ctx.memory.set_a20_mask(A20Mask::OPEN);
         ctx.in_vmx = true;
         ctx.in_vmx_guest = true;
         ctx.vmcs.virtual_apic_page_addr = VAPIC_PAGE;
@@ -6576,18 +7309,19 @@ mod tests {
     /// walker, not entry validation.
     fn ept_guest(machine: &mut TestMachine) -> ExecCtx<'_, ()> {
         let mut ctx = machine.ctx();
-        ctx.memory.set_a20_mask(u64::MAX);
+        ctx.memory.set_a20_mask(A20Mask::OPEN);
         ctx.in_vmx = true;
         ctx.in_vmx_guest = true;
         ctx.vmcs.proc_based_ctls = VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS;
         ctx.vmcs.secondary_proc_based_ctls = VMX_VM_EXEC_CTRL2_EPT_ENABLE;
         ctx.vmcs.eptptr = EPT_PML4;
 
-        ctx.mem_write_qword(EPT_PML4, EPT_PDPT | EPT_RWX);
-        ctx.mem_write_qword(EPT_PDPT, EPT_PD | EPT_RWX);
-        ctx.mem_write_qword(EPT_PD, EPT_PT | EPT_RWX);
+        let at = BxPhyAddress::new;
+        ctx.mem_write_qword(at(EPT_PML4), EPT_PDPT | EPT_RWX);
+        ctx.mem_write_qword(at(EPT_PDPT), EPT_PD | EPT_RWX);
+        ctx.mem_write_qword(at(EPT_PD), EPT_PT | EPT_RWX);
         // Leaf index for EPT_GUEST_PA: (pa >> 9) & 0xFF8 == 8.
-        ctx.mem_write_qword(EPT_PT + 8, EPT_TARGET | EPT_WB_LEAF);
+        ctx.mem_write_qword(at(EPT_PT + 8), EPT_TARGET | EPT_WB_LEAF);
         ctx
     }
 
@@ -6600,11 +7334,19 @@ mod tests {
         let mut ctx = ept_guest(&mut machine);
 
         let host = ctx
-            .ept_translate_for_data(EPT_GUEST_PA, 0, false, true, false, BxRwAccess::Read)
+            .ept_translate_for_data(
+                BxPhyAddress::new(EPT_GUEST_PA),
+                BxLinAddress::new(0),
+                false,
+                true,
+                false,
+                BxRwAccess::Read,
+            )
             .expect("a fully permitted mapping translates");
 
         assert_eq!(
-            host, EPT_TARGET,
+            host.get(),
+            EPT_TARGET,
             "the walk must land on the page the leaf entry names, not on the \
              guest-physical address itself"
         );
@@ -6618,10 +7360,17 @@ mod tests {
         let mut ctx = ept_guest(&mut machine);
 
         let host = ctx
-            .ept_translate_for_data(EPT_GUEST_PA + 0x2A, 0, false, true, false, BxRwAccess::Read)
+            .ept_translate_for_data(
+                BxPhyAddress::new(EPT_GUEST_PA + 0x2A),
+                BxLinAddress::new(0),
+                false,
+                true,
+                false,
+                BxRwAccess::Read,
+            )
             .expect("a fully permitted mapping translates");
 
-        assert_eq!(host, EPT_TARGET + 0x2A);
+        assert_eq!(host.get(), EPT_TARGET + 0x2A);
     }
 
     /// With EPT off, a guest-physical address IS the host-physical address.
@@ -6634,10 +7383,17 @@ mod tests {
         ctx.vmcs.secondary_proc_based_ctls = 0;
 
         let host = ctx
-            .ept_translate_for_data(EPT_GUEST_PA, 0, false, true, false, BxRwAccess::Read)
+            .ept_translate_for_data(
+                BxPhyAddress::new(EPT_GUEST_PA),
+                BxLinAddress::new(0),
+                false,
+                true,
+                false,
+                BxRwAccess::Read,
+            )
             .expect("an untranslated access cannot fail");
 
-        assert_eq!(host, EPT_GUEST_PA);
+        assert_eq!(host.get(), EPT_GUEST_PA);
     }
 
     /// The accessed and dirty bits the hypervisor reads back to find which
@@ -6649,21 +7405,24 @@ mod tests {
         let mut ctx = ept_guest(&mut machine);
         ctx.vmcs.eptptr = EPT_PML4 | 0x40;
 
-        ctx.ept_translate_for_data(EPT_GUEST_PA, 0, false, true, false, BxRwAccess::Write)
-            .expect("a fully permitted mapping translates");
+        ctx.ept_translate_for_data(
+            BxPhyAddress::new(EPT_GUEST_PA),
+            BxLinAddress::new(0),
+            false,
+            true,
+            false,
+            BxRwAccess::Write,
+        )
+        .expect("a fully permitted mapping translates");
 
-        for (name, addr) in [
-            ("pml4", EPT_PML4),
-            ("pdpt", EPT_PDPT),
-            ("pd", EPT_PD),
-        ] {
+        for (name, addr) in [("pml4", EPT_PML4), ("pdpt", EPT_PDPT), ("pd", EPT_PD)] {
             assert_ne!(
-                ctx.mem_read_qword(addr) & 0x100,
+                ctx.mem_read_qword(BxPhyAddress::new(addr)) & 0x100,
                 0,
                 "{name} entry must carry the accessed bit after a walk"
             );
         }
-        let leaf = ctx.mem_read_qword(EPT_PT + 8);
+        let leaf = ctx.mem_read_qword(BxPhyAddress::new(EPT_PT + 8));
         assert_ne!(leaf & 0x100, 0, "leaf entry must carry the accessed bit");
         assert_ne!(leaf & 0x200, 0, "a write must set the leaf's dirty bit");
     }
@@ -6697,8 +7456,14 @@ mod tests {
         }
 
         let irr = LapicRegister::Irr1 as u32;
-        assert_eq!(ctx.vapic_clear_and_find_highest_priority_int(irr, 0x92), 0x51);
-        assert_eq!(ctx.vapic_clear_and_find_highest_priority_int(irr, 0x51), 0x30);
+        assert_eq!(
+            ctx.vapic_clear_and_find_highest_priority_int(irr, 0x92),
+            0x51
+        );
+        assert_eq!(
+            ctx.vapic_clear_and_find_highest_priority_int(irr, 0x51),
+            0x30
+        );
         assert_eq!(
             ctx.vapic_clear_and_find_highest_priority_int(irr, 0x30),
             0,
@@ -6725,9 +7490,12 @@ mod tests {
 
         assert_eq!(ctx.vmcs.svi, 0x80, "the delivered vector is now in service");
         assert_eq!(ctx.vmcs.rvi, 0x40, "RVI falls to the next pending vector");
-        assert_eq!(ctx.vmcs.vppr, 0x80, "PPR takes the delivered vector's class");
         assert_eq!(
-            ctx.vmx_read_virtual_apic(LapicRegister::Ppr as u32) & 0xff,
+            ctx.vmcs.vppr, 0x80,
+            "PPR takes the delivered vector's class"
+        );
+        assert_eq!(
+            ctx.vmx_read_virtual_apic(LapicRegister::Ppr as u32) & 0xFF,
             0x80,
             "PPR is published where the guest reads it"
         );
@@ -6776,7 +7544,7 @@ mod tests {
 
         assert_eq!(ctx.vmcs.svi, 0x40, "the next in-service vector takes over");
         assert_eq!(
-            ctx.vmx_read_virtual_apic(LapicRegister::Ppr as u32) & 0xff,
+            ctx.vmx_read_virtual_apic(LapicRegister::Ppr as u32) & 0xFF,
             0x40,
             "PPR drops to the new in-service class"
         );
@@ -6811,9 +7579,9 @@ mod tests {
         ctx.vmcs.pin_based_ctls = VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS;
         ctx.vmcs.pi_notification_vector = 0xF2;
 
-        ctx.write_physical_byte(PID + (0x30 / 8), 1 << (0x30 % 8));
-        ctx.write_physical_byte(PID + (0x71 / 8), 1 << (0x71 % 8));
-        ctx.write_physical_byte(PID + 32, 1);
+        ctx.write_physical_byte(BxPhyAddress::new(PID) + (0x30 / 8), 1 << (0x30 % 8));
+        ctx.write_physical_byte(BxPhyAddress::new(PID) + (0x71 / 8), 1 << (0x71 % 8));
+        ctx.write_physical_byte(BxPhyAddress::new(PID) + 32, 1);
 
         assert!(
             ctx.vmx_posted_interrupt_processing(0xF2),
@@ -6822,11 +7590,23 @@ mod tests {
 
         assert_eq!(ctx.vmcs.rvi, 0x71, "RVI rises to the highest posted vector");
         let slice1 = ctx.vmx_read_virtual_apic(LapicRegister::Irr1 as u32 + 16);
-        assert_eq!(slice1, 1 << (0x30 % 32), "0x30 landed in virtual IRR slice 1");
+        assert_eq!(
+            slice1,
+            1 << (0x30 % 32),
+            "0x30 landed in virtual IRR slice 1"
+        );
         let slice3 = ctx.vmx_read_virtual_apic(LapicRegister::Irr1 as u32 + 16 * 3);
         assert_eq!(slice3, 1 << (0x71 % 32), "0x71 landed in slice 3");
-        assert_eq!(ctx.read_physical_byte(PID + 32) & 1, 0, "PID.ON is cleared");
-        assert_eq!(ctx.read_physical_byte(PID + (0x71 / 8)), 0, "PIR is drained");
+        assert_eq!(
+            ctx.read_physical_byte(BxPhyAddress::new(PID) + 32) & 1,
+            0,
+            "PID.ON is cleared"
+        );
+        assert_eq!(
+            ctx.read_physical_byte(BxPhyAddress::new(PID) + (0x71 / 8)),
+            0,
+            "PIR is drained"
+        );
     }
 
     /// An ordinary interrupt that merely arrived while posted interrupts were
@@ -6837,11 +7617,11 @@ mod tests {
         let mut ctx = vapic_guest(&mut machine);
         ctx.vmcs.pin_based_ctls = VMX_PIN_BASED_VMEXEC_CTRL_PROCESS_POSTED_INTERRUPTS;
         ctx.vmcs.pi_notification_vector = 0xF2;
-        ctx.write_physical_byte(PID + 32, 1);
+        ctx.write_physical_byte(BxPhyAddress::new(PID) + 32, 1);
 
         assert!(!ctx.vmx_posted_interrupt_processing(0x40));
         assert_eq!(
-            ctx.read_physical_byte(PID + 32) & 1,
+            ctx.read_physical_byte(BxPhyAddress::new(PID) + 32) & 1,
             1,
             "the descriptor is untouched for a different vector"
         );
@@ -6856,19 +7636,305 @@ mod tests {
         let mut machine = TestMachine::new();
         let mut ctx = machine.ctx();
         for (msr, allowed_0, allowed_1) in [
-            (0x481u32, VMX_PINBASED_CTLS_ALLOWED_0, VMX_PINBASED_CTLS_ALLOWED_1),
-            (0x482, VMX_PROCBASED_CTLS_ALLOWED_0, VMX_PROCBASED_CTLS_ALLOWED_1),
-            (0x483, VMX_EXIT_CTLS_ALLOWED_0, VMX_EXIT_CTLS_ALLOWED_1),
+            (
+                0x481u32,
+                VMX_PINBASED_CTLS_DEFAULT1,
+                VMX_PINBASED_CTLS_ALLOWED_1,
+            ),
+            (
+                0x482,
+                VMX_PROCBASED_CTLS_DEFAULT1,
+                VMX_PROCBASED_CTLS_ALLOWED_1,
+            ),
+            (0x483, VMX_EXIT_CTLS_DEFAULT1, VMX_EXIT_CTLS_ALLOWED_1),
+            (0x484, VMX_ENTRY_CTLS_DEFAULT1, VMX_ENTRY_CTLS_ALLOWED_1),
             // The TRUE-controls block starts at 0x48D: 0x48C is
             // IA32_VMX_EPT_VPID_CAP (Bochs msr.h `BX_MSR_VMX_EPT_VPID_CAP`).
-            (0x48D, VMX_PINBASED_CTLS_ALLOWED_0, VMX_PINBASED_CTLS_ALLOWED_1),
-            (0x48E, VMX_PROCBASED_CTLS_ALLOWED_0, VMX_PROCBASED_CTLS_ALLOWED_1),
+            // VM entry checks exactly these.
+            (
+                0x48D,
+                VMX_PINBASED_CTLS_ALLOWED_0,
+                VMX_PINBASED_CTLS_ALLOWED_1,
+            ),
+            (
+                0x48E,
+                VMX_PROCBASED_CTLS_ALLOWED_0,
+                VMX_PROCBASED_CTLS_ALLOWED_1,
+            ),
             (0x48F, VMX_EXIT_CTLS_ALLOWED_0, VMX_EXIT_CTLS_ALLOWED_1),
+            (0x490, VMX_ENTRY_CTLS_ALLOWED_0, VMX_ENTRY_CTLS_ALLOWED_1),
         ] {
             let value = ctx.rdmsr_value(msr).expect("VMX capability MSR readable");
             assert_eq!(value as u32, allowed_0, "MSR {msr:#x} allowed-0 half");
-            assert_eq!((value >> 32) as u32, allowed_1, "MSR {msr:#x} allowed-1 half");
+            assert_eq!(
+                (value >> 32) as u32,
+                allowed_1,
+                "MSR {msr:#x} allowed-1 half"
+            );
         }
+    }
+
+    /// What a VMM reads from the VMX capability MSRs, as Bochs vmx.h and
+    /// vmcs.cc compute them for Corei7SkylakeX (msr.cc registers each), with
+    /// the values written out from Bochs's formulas rather than from this
+    /// port's constants:
+    /// - BASIC: revision `BX_VMX_VMCS_REVISION_ID` 0x2B; a 4096-byte VMCS,
+    ///   write-back, INS/OUTS exit information, the TRUE controls; no CET or
+    ///   FRED on this model.
+    /// - The non-TRUE control MSRs report Bochs's `*_CTRLS_LO` reserved bits
+    ///   as must-be-1, the TRUE ones `*_TRUE_*_CTRLS_LO`.
+    /// - MISC: STORE_LMA, entry to HLT/SHUTDOWN/WAIT-FOR-SIPI, 4 CR3 targets,
+    ///   and VMWRITE to read-only fields (this model has VMCS shadowing).
+    /// - CR0 fixed to PE, NE and PG; CR4 fixed to VMXE, and allowed the
+    ///   processor's CR4 mask; VMCS_ENUM the highest index, 0x54.
+    /// - EPT/VPID: the base set, 1 GiB pages and A/D (this model has both),
+    ///   and every INVVPID type.
+    #[test]
+    fn the_vmx_capability_msrs_read_as_bochs_reports_them() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            let cr4_allowed = emu.cpu().cr4_suppmask;
+            let msr = |emu: &mut Emulator, index: u32| {
+                emu.exec_ctx(0).rdmsr_value(index).expect("readable")
+            };
+            assert_eq!(
+                msr(&mut emu, 0x480),
+                0x00D8_1000_0000_002B,
+                "IA32_VMX_BASIC"
+            );
+            assert_eq!(msr(&mut emu, 0x481) as u32, 0x16, "PINBASED must-be-1");
+            assert_eq!(
+                msr(&mut emu, 0x482) as u32,
+                0x0401_E172,
+                "PROCBASED must-be-1"
+            );
+            assert_eq!(msr(&mut emu, 0x483) as u32, 0x0003_6DFF, "EXIT must-be-1");
+            assert_eq!(msr(&mut emu, 0x484) as u32, 0x0000_11FF, "ENTRY must-be-1");
+            assert_eq!(msr(&mut emu, 0x48D) as u32, 0x16, "TRUE_PINBASED must-be-1");
+            assert_eq!(
+                msr(&mut emu, 0x48E) as u32,
+                0x0400_6172,
+                "TRUE_PROCBASED must-be-1"
+            );
+            assert_eq!(
+                msr(&mut emu, 0x48F) as u32,
+                0x0003_6DFB,
+                "TRUE_EXIT must-be-1"
+            );
+            assert_eq!(
+                msr(&mut emu, 0x490) as u32,
+                0x0000_11FB,
+                "TRUE_ENTRY must-be-1"
+            );
+            assert_eq!(msr(&mut emu, 0x485), 0x2004_01E0, "IA32_VMX_MISC");
+            assert_eq!(msr(&mut emu, 0x486), 0x8000_0021, "CR0_FIXED0");
+            assert_eq!(msr(&mut emu, 0x487), 0xFFFF_FFFF, "CR0_FIXED1");
+            assert_eq!(msr(&mut emu, 0x488), 0x2000, "CR4_FIXED0");
+            assert_eq!(msr(&mut emu, 0x489), cr4_allowed, "CR4_FIXED1");
+            assert_eq!(msr(&mut emu, 0x48A), 0x54, "VMCS_ENUM");
+            assert_eq!(msr(&mut emu, 0x48C), 0x0000_0F01_0633_4141, "EPT_VPID_CAP");
+            for (index, name) in [
+                (0x481u32, "PIN"),
+                (0x482, "PROC"),
+                (0x483, "EXIT"),
+                (0x484, "ENTRY"),
+            ] {
+                let value = msr(&mut emu, index);
+                let true_value = msr(&mut emu, index + 0xC);
+                assert_eq!(
+                    value >> 32,
+                    true_value >> 32,
+                    "{name}: the TRUE MSR allows the same 1-settings"
+                );
+                assert_eq!(
+                    (value as u32) & !((value >> 32) as u32),
+                    0,
+                    "{name}: every must-be-1 bit may be 1"
+                );
+            }
+        });
+    }
+
+    /// VM entry requires only the TRUE controls' must-be-1 bits (Bochs vmx.cc
+    /// `VMX_CHECKS_USE_MSR_*`): a VMM may run its guest without external-
+    /// interrupt or NMI exiting, without CR3 exiting, and without saving or
+    /// loading IA32_DEBUGCTL.
+    #[test]
+    fn a_vmm_may_clear_every_control_bochs_does_not_require() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            let vmcs = &mut emu.cpu_mut().vmcs;
+            vmcs.pin_based_ctls = 0x16;
+            vmcs.proc_based_ctls = 0x0400_6172;
+            vmcs.vm_exit_ctls = 0x0003_6DFB | VMX_VMEXIT_CTRL1_HOST_ADDR_SPACE_SIZE;
+            vmcs.vm_entry_ctls = 0x0000_11FB | VMX_VMENTRY_CTRL_X86_64_GUEST;
+            launch(&mut emu);
+            assert_eq!(
+                emu.cpu().vmcs.exit_reason,
+                EXIT_CPUID,
+                "the guest entered and ran"
+            );
+        });
+    }
+
+    /// With VMCS shadowing in the model, VMPTRLD takes a shadow VMCS: bit 31
+    /// of its revision dword set (Bochs vmx.cc VMPTRLD).
+    #[test]
+    fn vmptrld_takes_a_shadow_vmcs() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            let shadow = BX_VMCS_REVISION_ID | BX_VMCS_SHADOW_BIT_MASK;
+            emu.mem_write(BxPhyAddress::new(VMCS_A), &shadow.to_le_bytes())
+                .unwrap();
+            let end = HostScript::new().point_at(VMCS_A).vmptrld().run(&mut emu);
+            assert_eq!(emu.cpu().rip(), end);
+            assert_eq!(
+                emu.cpu().vmcsptr,
+                BxPhyAddress::new(VMCS_A),
+                "the shadow VMCS is current"
+            );
+        });
+    }
+
+    /// IA32_VMX_CR0_FIXED0 holds CR0.PG: VMXON from protected mode without
+    /// paging is refused with #GP and leaves the processor outside VMX
+    /// operation (Bochs vmx.cc VMXON checks CR0.NE and CR0.PG).
+    #[test]
+    fn vmxon_needs_paging() {
+        const CODE: u64 = 0x8000;
+        const POINTER: u64 = 0x9000;
+        const REGION: u64 = 0x1_0000;
+        const PAGE_DIRECTORY: u64 = 0x2000;
+        const CR0_PG: u64 = 1 << 31;
+        const CR4_PSE: u64 = 1 << 4;
+        for paging in [false, true] {
+            let mut emu =
+                Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+                    .unwrap();
+            if paging {
+                // 4 MiB pages mapping the first 4 GiB onto themselves.
+                for index in 0..1024u64 {
+                    let pde = ((index << 22) | 0x83) as u32;
+                    emu.mem_write(
+                        BxPhyAddress::new(PAGE_DIRECTORY + index * 4),
+                        &pde.to_le_bytes(),
+                    )
+                    .unwrap();
+                }
+                emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | CR4_PSE);
+                emu.reg_write(X86Reg::Cr3, PAGE_DIRECTORY);
+                emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | CR0_PG);
+            }
+            emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | CR0_NE);
+            emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | CR4_VMXE);
+            // Locked, with VMX enabled outside SMX, as the BIOS leaves it.
+            emu.cpu_mut().msr.ia32_feature_ctrl = BX_IA32_FEATURE_CONTROL_BITS;
+            emu.mem_write(
+                BxPhyAddress::new(REGION),
+                &BX_VMCS_REVISION_ID.to_le_bytes(),
+            )
+            .unwrap();
+            emu.mem_write(BxPhyAddress::new(POINTER), &REGION.to_le_bytes())
+                .unwrap();
+            // mov eax, POINTER; vmxon [eax]
+            emu.mem_write(
+                BxPhyAddress::new(CODE),
+                &[0xB8, 0x00, 0x90, 0x00, 0x00, 0xF3, 0x0F, 0xC7, 0x30],
+            )
+            .unwrap();
+            match emu.emu_start(CODE, Some(CODE + 9), None, Some(2)) {
+                Ok(_) | Err(_) => {}
+            }
+            assert_eq!(emu.cpu().in_vmx, paging, "VMXON with CR0.PG={paging}");
+        }
+    }
+
+    /// VMREAD and VMWRITE take exactly the fields Bochs vmcs.cc
+    /// `vmcs_field_supported` gives this model: every field of a feature it
+    /// has, a 64-bit field's high half with it, and none of a feature it
+    /// lacks (VMfail with VMXERR_UNSUPPORTED_VMCS_COMPONENT_ACCESS).
+    #[test]
+    fn vmread_and_vmwrite_take_the_fields_bochs_supports() {
+        on_big_stack(|| {
+            for (encoding, supported) in [
+                (VMCS_64BIT_GUEST_IA32_DEBUGCTL, true),
+                (VMCS_64BIT_GUEST_IA32_DEBUGCTL | 1, true),
+                (VMCS_GUEST_PENDING_DBG_EXCEPTIONS, true),
+                (VMCS_32BIT_GUEST_SMBASE, true),
+                (VMCS_64BIT_CONTROL_EPTP_LIST_ADDRESS, true),
+                (VMCS_64BIT_GUEST_IA32_PDPTE0, true),
+                (VMCS_32BIT_CONTROL_PAUSE_LOOP_EXITING_GAP, true),
+                (VMCS_64BIT_CONTROL_EXECUTIVE_VMCS_PTR, true),
+                (VMCS_IO_RCX, true),
+                (VMCS_64BIT_GUEST_IA32_FRED_CONFIG, false),
+                (VMCS_64BIT_CONTROL_TERTIARY_VMEXEC_CONTROLS, false),
+                (VMCS_64BIT_CONTROL_VMFUNC_CTRLS, false),
+                (VMCS_16BIT_GUEST_UINV, false),
+            ] {
+                let mut emu = vmx_host();
+                vmcs_region(&mut emu, VMCS_A);
+                let end = HostScript::new()
+                    .point_at(VMCS_A)
+                    .vmclear()
+                    .vmptrld()
+                    .vmwrite(encoding, 0x5A5A)
+                    .vmread_into_rcx(encoding)
+                    .run(&mut emu);
+                assert_eq!(
+                    emu.cpu().rip(),
+                    end,
+                    "{encoding:#06x}: the script ran to its end"
+                );
+                let failed = emu.reg_read(X86Reg::Rflags) & (1 << 6) != 0;
+                assert_eq!(!failed, supported, "{encoding:#06x}: VMREAD succeeded");
+                if supported {
+                    assert_eq!(emu.reg_read(X86Reg::Rcx), 0x5A5A, "{encoding:#06x}");
+                }
+            }
+        });
+    }
+
+    /// IA32_VMX_MISC bit 29 on this model (it has VMCS shadowing): VMWRITE
+    /// may write a read-only exit-information field (Bochs vmx.cc VMWRITE).
+    #[test]
+    fn vmwrite_writes_a_read_only_field_when_misc_allows_it() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            vmcs_region(&mut emu, VMCS_A);
+            let end = HostScript::new()
+                .point_at(VMCS_A)
+                .vmclear()
+                .vmptrld()
+                .vmwrite(VMCS_32BIT_VMEXIT_REASON, 0x1234)
+                .vmread_into_rcx(VMCS_32BIT_VMEXIT_REASON)
+                .run(&mut emu);
+            assert_eq!(emu.cpu().rip(), end, "the script ran to its end");
+            assert_eq!(emu.reg_read(X86Reg::Rcx), 0x1234);
+        });
+    }
+
+    /// IA32_VMX_MISC bit 5: a VM exit stores the guest's EFER.LMA into the
+    /// "IA-32e mode guest" entry control (Bochs vmx.cc VMexitSaveGuestState),
+    /// so the next entry resumes the guest in the mode it left.
+    #[test]
+    fn a_vm_exit_stores_efer_lma_into_the_ia32e_guest_control() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            vmm_writes_the_vmcs(&mut emu);
+            let mut ctx = emu.exec_ctx(0);
+            ctx.in_vmx_guest = true;
+            ctx.efer.remove(crate::cpu::crregs::BxEfer::LMA);
+            match ctx.vmx_vmexit(VmxVmexitReason::Cpuid, 0) {
+                Ok(()) => {}
+                Err(error) => panic!("the exit completes: {error:?}"),
+            }
+            let entry = vmcs_field(&mut emu, VMCS_32BIT_CONTROL_VMENTRY_CONTROLS) as u32;
+            assert_eq!(
+                entry & VMX_VMENTRY_CTRL_X86_64_GUEST,
+                0,
+                "a guest outside long mode"
+            );
+        });
     }
 
     /// Virtual-interrupt delivery is a secondary control, reachable only if the
@@ -6880,7 +7946,10 @@ mod tests {
             0,
             "without this bit every secondary control is unreachable"
         );
-        assert_ne!(VMX_PROCBASED_CTLS_ALLOWED_1 & VMX_VM_EXEC_CTRL1_TPR_SHADOW, 0);
+        assert_ne!(
+            VMX_PROCBASED_CTLS_ALLOWED_1 & VMX_VM_EXEC_CTRL1_TPR_SHADOW,
+            0
+        );
         assert_ne!(
             VMX_PROCBASED_CTLS2_ALLOWED_1 & VMX_VM_EXEC_CTRL2_VIRTUAL_INT_DELIVERY,
             0
@@ -6904,7 +7973,10 @@ mod tests {
     // into the same structure — and everything after that runs as
     // instructions: VMLAUNCH, the guest's CPUID, the VM exit.
 
-    use crate::cpu::instrumentation::{CpuSetupMode, X86Reg};
+    use crate::cpu::instrumentation::{
+        CodeSize, CpuSetupMode, DescriptorTable, ExecutionMode, GuestPhysicalMemory, LinearRange,
+        MappingWalk, ProcessorActivity, SegmentBases, VmxGuest, WalkStep, X86Reg,
+    };
     use crate::emulator::{Emulator, EmulatorConfig};
 
     /// VMLAUNCH; whatever follows it runs only if the entry did not happen.
@@ -6937,7 +8009,9 @@ mod tests {
         VmxVmexitReason::VmentryFailureGuestState as u32 | (1 << 31);
 
     /// A 64-bit host in VMX root operation with a current VMCS that enters
-    /// cleanly. Each test spoils one field of it.
+    /// cleanly. The VMCS is composed in the processor's cache, where each test
+    /// spoils one field of it, and reaches the VMCS region in memory as the
+    /// VMM's VMWRITEs would put it there when the test launches it.
     fn vmx_host() -> alloc::boxed::Box<Emulator> {
         let mut emu =
             Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64).unwrap();
@@ -6958,32 +8032,42 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            emu.mem_write(GDT + index as u64 * 8, &descriptor.to_le_bytes())
-                .unwrap();
+            emu.mem_write(
+                BxPhyAddress::new(GDT + index as u64 * 8),
+                &descriptor.to_le_bytes(),
+            )
+            .unwrap();
         }
         emu.reg_write(X86Reg::GdtrBase, GDT);
         emu.reg_write(X86Reg::GdtrLimit, 5 * 8 - 1);
         emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | CR0_NE);
         emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) | CR4_VMXE);
         emu.reg_write(X86Reg::Rsp, HOST_STACK);
-        emu.mem_write(HOST_CODE, &[0x0F, 0x01, 0xC2]).unwrap(); // VMLAUNCH
-        emu.mem_write(HOST_EXIT_HANDLER, &[0xF4]).unwrap(); // HLT
-        emu.mem_write(GUEST_CODE, &[0x0F, 0xA2]).unwrap(); // CPUID
+        emu.mem_write(BxPhyAddress::new(HOST_CODE), &[0x0F, 0x01, 0xC2])
+            .unwrap(); // VMLAUNCH
+        emu.mem_write(BxPhyAddress::new(HOST_EXIT_HANDLER), &[0xF4])
+            .unwrap(); // HLT
+        emu.mem_write(BxPhyAddress::new(GUEST_CODE), &[0x0F, 0xA2])
+            .unwrap(); // CPUID
 
         let cr0 = emu.reg_read(X86Reg::Cr0);
         let cr3 = emu.reg_read(X86Reg::Cr3);
         let cr4 = emu.reg_read(X86Reg::Cr4);
+        emu.mem_write(
+            BxPhyAddress::new(VMCS_FIXTURE),
+            &BX_VMCS_REVISION_ID.to_le_bytes(),
+        )
+        .unwrap();
         let cpu = emu.cpu_mut();
         cpu.in_vmx = true;
-        cpu.vmxonptr = 0x20_A000;
-        cpu.vmcsptr = 0x20_B000;
+        cpu.vmxonptr = BxPhyAddress::new(0x20_A000);
+        cpu.vmcsptr = BxPhyAddress::new(VMCS_FIXTURE);
         let v = &mut cpu.vmcs;
-        v.launched = false;
         v.pin_based_ctls = VMX_PINBASED_CTLS_ALLOWED_0;
         v.proc_based_ctls = VMX_PROCBASED_CTLS_ALLOWED_0;
         v.vm_exit_ctls = VMX_EXIT_CTLS_ALLOWED_0 | VMX_VMEXIT_CTRL1_HOST_ADDR_SPACE_SIZE;
         v.vm_entry_ctls = VMX_ENTRY_CTLS_ALLOWED_0 | VMX_VMENTRY_CTRL_X86_64_GUEST;
-        v.vmcs_link_pointer = BX_INVALID_VMCSPTR;
+        v.vmcs_link_pointer = BX_INVALID_VMCSPTR.get();
 
         v.host_cr0 = cr0;
         v.host_cr3 = cr3;
@@ -7010,11 +8094,31 @@ mod tests {
         v.guest_cs_limit = 0xFFFF_FFFF;
         v.guest_cs_ar = AR_CODE64;
         for (selector, limit, ar) in [
-            (&mut v.guest_ss_selector, &mut v.guest_ss_limit, &mut v.guest_ss_ar),
-            (&mut v.guest_ds_selector, &mut v.guest_ds_limit, &mut v.guest_ds_ar),
-            (&mut v.guest_es_selector, &mut v.guest_es_limit, &mut v.guest_es_ar),
-            (&mut v.guest_fs_selector, &mut v.guest_fs_limit, &mut v.guest_fs_ar),
-            (&mut v.guest_gs_selector, &mut v.guest_gs_limit, &mut v.guest_gs_ar),
+            (
+                &mut v.guest_ss_selector,
+                &mut v.guest_ss_limit,
+                &mut v.guest_ss_ar,
+            ),
+            (
+                &mut v.guest_ds_selector,
+                &mut v.guest_ds_limit,
+                &mut v.guest_ds_ar,
+            ),
+            (
+                &mut v.guest_es_selector,
+                &mut v.guest_es_limit,
+                &mut v.guest_es_ar,
+            ),
+            (
+                &mut v.guest_fs_selector,
+                &mut v.guest_fs_limit,
+                &mut v.guest_fs_ar,
+            ),
+            (
+                &mut v.guest_gs_selector,
+                &mut v.guest_gs_limit,
+                &mut v.guest_gs_ar,
+            ),
         ] {
             *selector = DATA_SELECTOR;
             *limit = 0xFFFF_FFFF;
@@ -7030,9 +8134,23 @@ mod tests {
         emu
     }
 
+    /// The VMCS composed in the cache, written into the current VMCS region.
+    fn vmm_writes_the_vmcs(emu: &mut Emulator) {
+        emu.exec_ctx(0).vmcs_store_cache();
+    }
+
+    /// Field `encoding` of the current VMCS, as VMREAD reads it.
+    fn vmcs_field(emu: &mut Emulator, encoding: u32) -> u64 {
+        let field = VmcsField::of(encoding).unwrap();
+        let mut ctx = emu.exec_ctx(0);
+        let vmcs_pa = ctx.vmcsptr;
+        ctx.vmcs_field_read(vmcs_pa, field)
+    }
+
     /// Run the host from its VMLAUNCH until it reaches the exit handler, or
     /// for a few instructions if it never does.
     fn launch(emu: &mut Emulator) {
+        vmm_writes_the_vmcs(emu);
         emu.emu_start(HOST_CODE, Some(HOST_EXIT_HANDLER), None, Some(8))
             .unwrap();
     }
@@ -7057,8 +8175,516 @@ mod tests {
             assert_eq!(emu.cpu().vmcs.exit_reason, EXIT_CPUID);
             assert_eq!(emu.cpu().rip(), HOST_EXIT_HANDLER);
             assert_eq!(emu.reg_read(X86Reg::Rsp), HOST_STACK);
-            assert!(!emu.cpu().in_vmx_guest, "the exit returned to root operation");
-            assert_eq!(emu.cpu().vmcs.guest_rip, GUEST_CODE, "the guest exited at its CPUID");
+            assert!(
+                !emu.cpu().in_vmx_guest,
+                "the exit returned to root operation"
+            );
+            assert_eq!(
+                emu.cpu().vmcs.guest_rip,
+                GUEST_CODE,
+                "the guest exited at its CPUID"
+            );
+        });
+    }
+
+    // ── The VMCS lives in memory ───────────────────────────────────────────
+    // Bochs vmx.cc keeps every VMCS in guest-physical memory: VMREAD and
+    // VMWRITE reach the current one through `vmcsptr`, VM entry reads it and
+    // VM exit writes the guest state back into it. A VMM that keeps several
+    // (Hyper-V keeps one per virtual trust level) switches with VMPTRLD.
+
+    /// Two VMCS regions besides the fixture's.
+    const VMCS_A: u64 = 0x20_C000;
+    const VMCS_B: u64 = 0x20_D000;
+    /// The fixture's own VMCS region (`vmx_host` makes it current).
+    const VMCS_FIXTURE: u64 = 0x20_B000;
+    /// Where the scripts below keep the qword operand of VMCLEAR / VMPTRLD.
+    const POINTER: u64 = 0x20_7000;
+    /// Where a host script runs: clear of the fixture's code, data and stack.
+    const HOST_SCRIPT: u64 = 0x20_3000;
+
+    /// A host instruction sequence, assembled byte by byte.
+    struct HostScript {
+        bytes: alloc::vec::Vec<u8>,
+        instructions: u64,
+    }
+
+    impl HostScript {
+        fn new() -> Self {
+            Self {
+                bytes: alloc::vec::Vec::new(),
+                instructions: 0,
+            }
+        }
+
+        fn emit(mut self, bytes: &[u8]) -> Self {
+            self.bytes.extend_from_slice(bytes);
+            self.instructions += 1;
+            self
+        }
+
+        fn emit_imm64(mut self, opcode: &[u8], value: u64) -> Self {
+            self.bytes.extend_from_slice(opcode);
+            self.bytes.extend_from_slice(&value.to_le_bytes());
+            self.instructions += 1;
+            self
+        }
+
+        /// `mov rax, imm64` then `mov [POINTER], rax`: the region whose
+        /// address the next VMCLEAR or VMPTRLD reads.
+        fn point_at(self, region: u64) -> Self {
+            self.emit_imm64(&[0x48, 0xB8], region)
+                .emit_imm64(&[0x48, 0xA3], POINTER)
+                .emit_imm64(&[0x48, 0xB8], POINTER)
+        }
+
+        /// `vmclear [rax]`.
+        fn vmclear(self) -> Self {
+            self.emit(&[0x66, 0x0F, 0xC7, 0x30])
+        }
+
+        /// `vmptrld [rax]`.
+        fn vmptrld(self) -> Self {
+            self.emit(&[0x0F, 0xC7, 0x30])
+        }
+
+        /// `vmwrite rdx, rbx`: `value` into the field `encoding`.
+        fn vmwrite(self, encoding: u32, value: u64) -> Self {
+            self.emit_imm64(&[0x48, 0xBA], u64::from(encoding))
+                .emit_imm64(&[0x48, 0xBB], value)
+                .emit(&[0x0F, 0x79, 0xD3])
+        }
+
+        /// `vmread rcx, rdx`: the field `encoding` into RCX.
+        fn vmread_into_rcx(self, encoding: u32) -> Self {
+            self.emit_imm64(&[0x48, 0xBA], u64::from(encoding))
+                .emit(&[0x0F, 0x78, 0xD1])
+        }
+
+        fn vmlaunch(self) -> Self {
+            self.emit(&[0x0F, 0x01, 0xC2])
+        }
+
+        /// Runs the script at `HOST_SCRIPT` to its end. Returns where the
+        /// script ends.
+        fn run(self, emu: &mut Emulator) -> u64 {
+            let end = HOST_SCRIPT + self.bytes.len() as u64;
+            self.run_until(emu, end);
+            end
+        }
+
+        /// Runs the script at `HOST_SCRIPT` until a VM entry it makes comes
+        /// back to the host's exit handler. Returns where the script ends,
+        /// which it reaches only if the entry did not happen.
+        fn run_into_guest(self, emu: &mut Emulator) -> u64 {
+            let end = HOST_SCRIPT + self.bytes.len() as u64;
+            self.run_until(emu, HOST_EXIT_HANDLER);
+            end
+        }
+
+        fn run_until(self, emu: &mut Emulator, stop: u64) {
+            emu.mem_write(BxPhyAddress::new(HOST_SCRIPT), &self.bytes)
+                .unwrap();
+            emu.emu_start(HOST_SCRIPT, Some(stop), None, Some(self.instructions + 8))
+                .unwrap();
+        }
+    }
+
+    /// A region VMPTRLD accepts: the revision identifier in its first dword.
+    fn vmcs_region(emu: &mut Emulator, region: u64) {
+        emu.mem_write(
+            BxPhyAddress::new(region),
+            &BX_VMCS_REVISION_ID.to_le_bytes(),
+        )
+        .unwrap();
+    }
+
+    /// A VMM that keeps two VMCSs reads back from each what it wrote into it.
+    #[test]
+    fn each_vmcs_keeps_its_own_fields() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            vmcs_region(&mut emu, VMCS_A);
+            vmcs_region(&mut emu, VMCS_B);
+            let end = HostScript::new()
+                .point_at(VMCS_A)
+                .vmclear()
+                .vmptrld()
+                .vmwrite(VMCS_GUEST_RIP, 0x1111)
+                .point_at(VMCS_B)
+                .vmclear()
+                .vmptrld()
+                .vmwrite(VMCS_GUEST_RIP, 0x2222)
+                .point_at(VMCS_A)
+                .vmptrld()
+                .vmread_into_rcx(VMCS_GUEST_RIP)
+                .run(&mut emu);
+            assert_eq!(emu.cpu().rip(), end, "the script ran to its end");
+            assert_eq!(
+                emu.reg_read(X86Reg::Rflags) & 0x41,
+                0,
+                "every VMX instruction succeeded"
+            );
+            assert_eq!(
+                emu.reg_read(X86Reg::Rcx),
+                0x1111,
+                "VMCS A keeps the RIP written into it"
+            );
+        });
+    }
+
+    /// VMCLEAR makes a launched VMCS clear again, so the VMM can launch it
+    /// anew (Bochs vmx.cc VMCLEAR writes the launch state in memory).
+    #[test]
+    fn a_cleared_vmcs_launches_again() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            launch(&mut emu);
+            assert_eq!(
+                emu.cpu().rip(),
+                HOST_EXIT_HANDLER,
+                "the first launch ran the guest"
+            );
+            let end = HostScript::new()
+                .point_at(VMCS_FIXTURE)
+                .vmclear()
+                .vmptrld()
+                .vmlaunch()
+                .run_into_guest(&mut emu);
+            assert_ne!(
+                emu.cpu().rip(),
+                end,
+                "the second VMLAUNCH did not fall through"
+            );
+            assert_eq!(
+                emu.cpu().rip(),
+                HOST_EXIT_HANDLER,
+                "the second launch ran it again"
+            );
+        });
+    }
+
+    /// A VM exit writes the guest state into the VMCS the guest ran from, and
+    /// another VMCS made current afterwards does not overwrite it.
+    #[test]
+    fn a_vm_exit_leaves_the_guest_state_in_its_own_vmcs() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            vmcs_region(&mut emu, VMCS_A);
+            launch(&mut emu);
+            let end = HostScript::new()
+                .point_at(VMCS_A)
+                .vmclear()
+                .vmptrld()
+                .vmwrite(VMCS_GUEST_RIP, 0x3333)
+                .point_at(VMCS_FIXTURE)
+                .vmptrld()
+                .vmread_into_rcx(VMCS_GUEST_RIP)
+                .run(&mut emu);
+            assert_eq!(emu.cpu().rip(), end, "the script ran to its end");
+            assert_eq!(
+                emu.reg_read(X86Reg::Rcx),
+                GUEST_CODE,
+                "the fixture's VMCS holds where its guest exited"
+            );
+        });
+    }
+
+    /// What VM entry reads out of a VMCS, VM exit writes back unchanged: the
+    /// cache has a place for every field it reads, at the field's full width.
+    #[test]
+    fn every_field_the_cache_holds_survives_an_entry_and_an_exit() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            let mut ctx = emu.exec_ctx(0);
+            let mut held = 0;
+            for encoding in VmcsLayout::new() {
+                if !ctx.vmcs_field_held(encoding) {
+                    continue;
+                }
+                held += 1;
+                let field = VmcsField::of(encoding).unwrap();
+                let value = 0x0123_4567_89AB_CDEF_u64.rotate_left(encoding);
+                ctx.vmcs_field_write(BxPhyAddress::new(VMCS_A), field, value);
+            }
+            assert!(
+                held > 100,
+                "the layout walk reaches the cached fields ({held})"
+            );
+            ctx.vmcsptr = BxPhyAddress::new(VMCS_A);
+            ctx.vmcs_load_cache();
+            ctx.vmcsptr = BxPhyAddress::new(VMCS_B);
+            ctx.vmcs_store_cache();
+            for encoding in VmcsLayout::new() {
+                if !ctx.vmcs_field_held(encoding) {
+                    continue;
+                }
+                let field = VmcsField::of(encoding).unwrap();
+                assert_eq!(
+                    ctx.vmcs_field_read(BxPhyAddress::new(VMCS_B), field),
+                    ctx.vmcs_field_read(BxPhyAddress::new(VMCS_A), field),
+                    "field {encoding:#06x}"
+                );
+            }
+        });
+    }
+
+    /// Bochs vmx.cc VMexit: an exit that is not an exception, an external
+    /// interrupt or a delivery in progress — a failed entry is none of
+    /// them — leaves no interruption and no IDT-vectoring information, even
+    /// when an earlier exit left some in the VMCS.
+    #[test]
+    fn a_failed_entry_leaves_no_interruption_or_vectoring_information() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            let vmcs = &mut emu.cpu_mut().vmcs;
+            vmcs.guest_rip = 1 << 47;
+            vmcs.exit_intr_info = 0x8000_0B0E;
+            vmcs.idt_vectoring_info = 0x8000_030E;
+            launch(&mut emu);
+            assert_eq!(emu.cpu().vmcs.exit_reason, EXIT_ENTRY_FAILED_GUEST_STATE);
+            assert_eq!(vmcs_field(&mut emu, VMCS_32BIT_VMEXIT_INTERRUPTION_INFO), 0);
+            assert_eq!(vmcs_field(&mut emu, VMCS_32BIT_IDT_VECTORING_INFO), 0);
+        });
+    }
+
+    // ── The guest a paused VMM holds ───────────────────────────────────────
+
+    /// A VMM paused after its guest exited shows that guest as the VMCS holds
+    /// it: where the guest stopped, its paging registers, its mode.
+    #[test]
+    fn a_paused_vmm_shows_the_guest_its_vmcs_holds() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            let host_cr3 = emu.reg_read(X86Reg::Cr3);
+            launch(&mut emu);
+            let mut cpu = emu.debug_cpu(0).unwrap();
+            let guest = cpu
+                .vmx_guest()
+                .expect("a launched VMCS in VMX root operation");
+            assert_eq!(guest.vmcs, BxPhyAddress::new(VMCS_FIXTURE));
+            assert_eq!(guest.rip, GUEST_CODE, "where the guest's CPUID exited");
+            assert_eq!(guest.rsp, GUEST_STACK);
+            assert_eq!(guest.cr3, host_cr3);
+            assert_eq!(guest.mode, ExecutionMode::Long64);
+            assert_eq!(guest.code_size, CodeSize::Bits64);
+            assert_eq!(guest.cpl, 0);
+            assert_ne!(
+                guest.efer & (1 << 10),
+                0,
+                "an IA-32e guest runs with EFER.LMA"
+            );
+            assert_eq!(guest.memory, GuestPhysicalMemory::Direct);
+            assert_eq!(guest.gdtr.base, BxLinAddress::new(GDT));
+            assert_eq!(
+                cpu.dbg_xlate_vmx_guest_linear2phy(
+                    &guest,
+                    guest.cr3,
+                    BxLinAddress::new(GUEST_CODE)
+                ),
+                Some(BxPhyAddress::new(GUEST_CODE)),
+                "the guest shares the host's identity map"
+            );
+        });
+    }
+
+    /// Before its first VMLAUNCH a VMCS holds no guest that ran, and a
+    /// processor outside VMX operation has no VMCS at all.
+    #[test]
+    fn no_vmx_guest_before_a_launch_or_outside_vmx_operation() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            vmm_writes_the_vmcs(&mut emu);
+            assert_eq!(
+                emu.debug_cpu(0).unwrap().vmx_guest(),
+                None,
+                "never launched"
+            );
+            emu.cpu_mut().in_vmx = false;
+            assert_eq!(
+                emu.debug_cpu(0).unwrap().vmx_guest(),
+                None,
+                "outside VMX operation"
+            );
+        });
+    }
+
+    /// Guest-physical memory below 2 MiB lands this far up in the machine's.
+    const EPT_SHIFT: u64 = 0x40_0000;
+    const EPT_ROOT: u64 = 0x30_0000;
+    /// The guest's own page tables and one page they map, at guest-physical
+    /// addresses.
+    const GUEST_PML4: u64 = 0x1_0000;
+    const GUEST_PAGE: u64 = 0x1_4000;
+    /// A linear address with a different index at every level.
+    const GUEST_LINEAR: u64 = (1 << 39) | (2 << 30) | (3 << 21) | (4 << 12);
+
+    /// A 64-bit guest whose page tables map `GUEST_LINEAR` to `GUEST_PAGE`,
+    /// behind an EPT that moves its first 2 MiB up by `EPT_SHIFT`.
+    fn guest_behind_ept(emu: &mut Emulator) -> VmxGuest {
+        const EPT_RWX: u64 = 0x7;
+        const EPT_WB_LARGE: u64 = 0x7 | (6 << 3) | 0x80;
+        const PRESENT_WRITABLE: u64 = 0x3;
+        let qword = |emu: &mut Emulator, at: u64, value: u64| {
+            emu.mem_write(BxPhyAddress::new(at), &value.to_le_bytes())
+                .unwrap();
+        };
+        qword(emu, EPT_ROOT, (EPT_ROOT + 0x1000) | EPT_RWX);
+        qword(emu, EPT_ROOT + 0x1000, (EPT_ROOT + 0x2000) | EPT_RWX);
+        qword(emu, EPT_ROOT + 0x2000, EPT_SHIFT | EPT_WB_LARGE);
+        let tables = [
+            GUEST_PML4,
+            GUEST_PML4 + 0x1000,
+            GUEST_PML4 + 0x2000,
+            GUEST_PML4 + 0x3000,
+        ];
+        for (level, table) in tables.into_iter().enumerate() {
+            let index = (GUEST_LINEAR >> (39 - 9 * level)) & 0x1FF;
+            let next = tables.get(level + 1).copied().unwrap_or(GUEST_PAGE);
+            qword(emu, EPT_SHIFT + table + index * 8, next | PRESENT_WRITABLE);
+        }
+        VmxGuest {
+            vmcs: BxPhyAddress::new(VMCS_FIXTURE),
+            rip: GUEST_LINEAR,
+            rsp: 0,
+            rflags: 0x2,
+            cr0: 0x8000_0001,
+            cr3: GUEST_PML4,
+            cr4: 0x20,
+            efer: 0x500,
+            mode: ExecutionMode::Long64,
+            code_size: CodeSize::Bits64,
+            cpl: 0,
+            activity: ProcessorActivity::Active,
+            segment_bases: SegmentBases {
+                es: BxLinAddress::new(0),
+                cs: BxLinAddress::new(0),
+                ss: BxLinAddress::new(0),
+                ds: BxLinAddress::new(0),
+                fs: BxLinAddress::new(0),
+                gs: BxLinAddress::new(0),
+            },
+            gdtr: DescriptorTable {
+                base: BxLinAddress::new(0),
+                limit: 0,
+            },
+            idtr: DescriptorTable {
+                base: BxLinAddress::new(0),
+                limit: 0,
+            },
+            memory: GuestPhysicalMemory::Ept {
+                eptp: EPT_ROOT | (3 << 3) | 6,
+            },
+        }
+    }
+
+    /// A VMX guest's address is walked through its own page tables, every one
+    /// of them reached through its EPT, and lands on the machine's memory.
+    #[test]
+    fn a_vmx_guest_address_is_walked_through_its_ept() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            let guest = guest_behind_ept(&mut emu);
+            let mut cpu = emu.debug_cpu(0).unwrap();
+            assert_eq!(
+                cpu.dbg_xlate_vmx_guest_linear2phy(
+                    &guest,
+                    GUEST_PML4,
+                    BxLinAddress::new(GUEST_LINEAR + 0x123)
+                ),
+                Some(BxPhyAddress::new(EPT_SHIFT + GUEST_PAGE + 0x123))
+            );
+            let direct = VmxGuest {
+                memory: GuestPhysicalMemory::Direct,
+                ..guest
+            };
+            assert_eq!(
+                cpu.dbg_xlate_vmx_guest_linear2phy(
+                    &direct,
+                    GUEST_PML4,
+                    BxLinAddress::new(GUEST_LINEAR)
+                ),
+                None,
+                "without the EPT the guest's tables are not where it put them"
+            );
+        });
+    }
+
+    /// The mapping walk of a VMX guest's address space reports the machine's
+    /// physical page behind each linear page.
+    #[test]
+    fn a_vmx_guest_mapping_walk_lands_on_the_machines_memory() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            let guest = guest_behind_ept(&mut emu);
+            let mut cpu = emu.debug_cpu(0).unwrap();
+            let mut seen = alloc::vec::Vec::new();
+            let range = LinearRange {
+                start: BxLinAddress::new(GUEST_LINEAR),
+                end: BxLinAddress::new(GUEST_LINEAR + 0x1000),
+            };
+            let walk = cpu.dbg_vmx_guest_page_mappings(&guest, GUEST_PML4, range, |mapping| {
+                seen.push(mapping);
+                WalkStep::Continue
+            });
+            assert_eq!(walk, MappingWalk::Complete);
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].linear, BxLinAddress::new(GUEST_LINEAR));
+            assert_eq!(seen[0].physical, BxPhyAddress::new(EPT_SHIFT + GUEST_PAGE));
+        });
+    }
+
+    /// Bochs vmcs.cc lays the VMCS out with `VMCS_AR_ROTATE`: an access-rights
+    /// field sits in memory rotated left by 8 bits (vmx.cc `vmx_pack_ar_field`).
+    #[test]
+    fn access_rights_sit_rotated_in_the_vmcs() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            vmcs_region(&mut emu, VMCS_A);
+            let end = HostScript::new()
+                .point_at(VMCS_A)
+                .vmclear()
+                .vmptrld()
+                .vmwrite(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS, u64::from(AR_CODE64))
+                .vmread_into_rcx(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS)
+                .run(&mut emu);
+            assert_eq!(emu.cpu().rip(), end, "the script ran to its end");
+            let offset =
+                u64::from(vmcs_field_byte_offset(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS).unwrap());
+            let mut stored = [0u8; 4];
+            emu.mem_read(BxPhyAddress::new(VMCS_A + offset), &mut stored)
+                .unwrap();
+            assert_eq!(u32::from_le_bytes(stored), AR_CODE64.rotate_left(8));
+            assert_eq!(
+                emu.reg_read(X86Reg::Rcx),
+                u64::from(AR_CODE64),
+                "VMREAD unrotates it"
+            );
+        });
+    }
+
+    /// A guest reading a shadow VMCS sees an access-rights field the way the
+    /// VMM wrote it (Bochs vmx.cc `vmread_shadow` unpacks it).
+    #[test]
+    fn a_shadow_vmcs_read_unrotates_access_rights() {
+        on_big_stack(|| {
+            let mut emu = vmx_host();
+            let offset =
+                u64::from(vmcs_field_byte_offset(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS).unwrap());
+            emu.mem_write(
+                BxPhyAddress::new(VMCS_A + offset),
+                &AR_CODE64.rotate_left(8).to_le_bytes(),
+            )
+            .unwrap();
+            let mut ctx = emu.exec_ctx(0);
+            ctx.in_vmx_guest = true;
+            ctx.vmcs.secondary_proc_based_ctls = VMX_VM_EXEC_CTRL2_VMCS_SHADOWING;
+            ctx.vmcs.vmread_bitmap_addr = VMCS_B;
+            ctx.vmcs.vmcs_link_pointer = VMCS_A;
+            assert_eq!(
+                ctx.vmread_impl(VMCS_32BIT_GUEST_CS_ACCESS_RIGHTS).unwrap(),
+                u64::from(AR_CODE64)
+            );
         });
     }
 
@@ -7070,13 +8696,18 @@ mod tests {
         on_big_stack(|| {
             let mut emu = vmx_host();
             emu.cpu_mut().vmcs.vm_entry_ctls |= VMX_VMENTRY_CTRL_DEACTIVATE_DUAL_MONITOR_TREATMENT;
+            vmm_writes_the_vmcs(&mut emu);
             emu.emu_start(HOST_CODE, Some(HOST_CODE + 3), None, Some(1))
                 .unwrap();
             assert_eq!(
-                emu.cpu().vmcs.vm_instruction_error,
-                VmxErr::VmentryInvalidVmControlField as u32
+                vmcs_field(&mut emu, VMCS_32BIT_INSTRUCTION_ERROR),
+                VmxErr::VmentryInvalidVmControlField as u64
             );
-            assert_ne!(emu.reg_read(X86Reg::Rflags) & (1 << 6), 0, "VMfailValid sets ZF");
+            assert_ne!(
+                emu.reg_read(X86Reg::Rflags) & (1 << 6),
+                0,
+                "VMfailValid sets ZF"
+            );
             assert_eq!(emu.cpu().rip(), HOST_CODE + 3);
             assert!(!emu.cpu().in_vmx_guest);
         });
@@ -7172,10 +8803,20 @@ mod tests {
         ctx.vmcs.ia32_spec_ctrl_mask = 0x1;
         ctx.vmcs.ia32_spec_ctrl_shadow = 0x4;
 
-        assert_eq!(ctx.rdmsr_value(BX_MSR_IA32_SPEC_CTRL).expect("readable"), 0x4);
-        ctx.wrmsr_value(BX_MSR_IA32_SPEC_CTRL, 0x2).expect("a valid value");
-        assert_eq!(ctx.msr.ia32_spec_ctrl, 0x3, "bit 0 is the VMM's; bit 1 is the guest's");
-        assert_eq!(ctx.vmcs.ia32_spec_ctrl_shadow, 0x4, "the shadow is not written");
+        assert_eq!(
+            ctx.rdmsr_value(BX_MSR_IA32_SPEC_CTRL).expect("readable"),
+            0x4
+        );
+        ctx.wrmsr_value(BX_MSR_IA32_SPEC_CTRL, 0x2)
+            .expect("a valid value");
+        assert_eq!(
+            ctx.msr.ia32_spec_ctrl, 0x3,
+            "bit 0 is the VMM's; bit 1 is the guest's"
+        );
+        assert_eq!(
+            ctx.vmcs.ia32_spec_ctrl_shadow, 0x4,
+            "the shadow is not written"
+        );
 
         ctx.vmcs.proc_based_ctls = 0;
         assert_eq!(
@@ -7195,12 +8836,19 @@ mod tests {
             let feature = crate::cpu::decoder::features::X86Feature::IsaWrmsrns as usize;
             emu.cpu_mut().ia_extensions_bitmask[feature / 32] |= 1 << (feature % 32);
             // mov ecx, SYSENTER_CS; wrmsrns
-            emu.mem_write(GUEST_CODE, &[0xB9, 0x74, 0x01, 0x00, 0x00, 0x0F, 0x01, 0xC6])
-                .unwrap();
+            emu.mem_write(
+                BxPhyAddress::new(GUEST_CODE),
+                &[0xB9, 0x74, 0x01, 0x00, 0x00, 0x0F, 0x01, 0xC6],
+            )
+            .unwrap();
             launch(&mut emu);
             assert_eq!(emu.cpu().vmcs.exit_reason, VmxVmexitReason::Wrmsrns as u32);
             assert_eq!(emu.cpu().vmcs.exit_qualification, 0);
-            assert_eq!(emu.cpu().vmcs.guest_rip, GUEST_CODE + 5, "the exit is at WRMSRNS");
+            assert_eq!(
+                emu.cpu().vmcs.guest_rip,
+                GUEST_CODE + 5,
+                "the exit is at WRMSRNS"
+            );
         });
     }
 
@@ -7261,16 +8909,22 @@ mod tests {
         let mut machine = TestMachine::new();
         let mut ctx = machine.ctx();
         ctx.reset(crate::cpu::ResetReason::Hardware);
-        ctx.memory.set_a20_mask(u64::MAX);
-        ctx.mem_write_qword(GDT + 8, CODE_DPL3);
-        ctx.mem_write_qword(GDT + 16, DATA_DPL3);
-        ctx.mem_write_qword(IDT + 13 * 8, GP_GATE);
+        ctx.memory.set_a20_mask(A20Mask::OPEN);
+        ctx.mem_write_qword(BxPhyAddress::new(GDT + 8), CODE_DPL3);
+        ctx.mem_write_qword(BxPhyAddress::new(GDT + 16), DATA_DPL3);
+        ctx.mem_write_qword(BxPhyAddress::new(IDT + 13 * 8), GP_GATE);
         ctx.set_gdtr_base_for_api(GDT);
         ctx.set_gdtr_limit_for_api(0x17);
         ctx.set_idtr_base_for_api(IDT);
         ctx.set_idtr_limit_for_api(0x7FF);
         ctx.enter_protected_mode_for_api();
-        ctx.set_seg_for_api(X86Reg::Cs, CODE_SELECTOR, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
+        ctx.set_seg_for_api(
+            X86Reg::Cs,
+            CODE_SELECTOR,
+            0,
+            0xFFFF_FFFF,
+            SegmentSize::Bits32,
+        );
         for reg in [X86Reg::Ss, X86Reg::Ds] {
             ctx.set_seg_for_api(reg, DATA_SELECTOR, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
         }
@@ -7289,7 +8943,7 @@ mod tests {
 
         assert_eq!(ctx.rip(), HANDLER, "#GP's handler is entered");
         assert_eq!(
-            ctx.mem_read_dword(u64::from(ctx.esp())),
+            ctx.mem_read_dword(BxPhyAddress::new(u64::from(ctx.esp()))),
             INJECTED_ERROR_CODE,
             "the frame carries the injected error code"
         );

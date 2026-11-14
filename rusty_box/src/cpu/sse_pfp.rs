@@ -18,8 +18,10 @@
 //! unmasked exception leaves the destination untouched; the `?` on
 //! [`Self::check_exceptions_sse`] reproduces that.
 
+use super::decoder::{BxSegregs, Instruction};
+use super::i387::BxPackedRegister;
 use super::simd_pfp::{
-    xmm_addps, xmm_addps_mask, xmm_addpd, xmm_addpd_mask, xmm_addsubpd, xmm_addsubps, xmm_cmppd,
+    xmm_addpd, xmm_addpd_mask, xmm_addps, xmm_addps_mask, xmm_addsubpd, xmm_addsubps, xmm_cmppd,
     xmm_cmpps, xmm_divpd, xmm_divps, xmm_haddpd, xmm_haddps, xmm_hsubpd, xmm_hsubps, xmm_maxpd,
     xmm_maxps, xmm_minpd, xmm_minps, xmm_mulpd, xmm_mulpd_mask, xmm_mulps, xmm_mulps_mask,
     xmm_shufpd, xmm_shufps, xmm_sqrtpd, xmm_sqrtps, xmm_subpd, xmm_subps,
@@ -31,7 +33,9 @@ use super::softfloat3e::f32_mul::f32_mul;
 use super::softfloat3e::f32_round_to_int::f32_round_to_int;
 use super::softfloat3e::f32_sqrt::f32_sqrt;
 use super::softfloat3e::f32_to_f64::f32_to_f64;
-use super::softfloat3e::f32_to_int::{f32_to_i32, f32_to_i32_r_min_mag, f32_to_i64, f32_to_i64_r_min_mag};
+use super::softfloat3e::f32_to_int::{
+    f32_to_i32, f32_to_i32_r_min_mag, f32_to_i64, f32_to_i64_r_min_mag,
+};
 use super::softfloat3e::f64_addsub::f64_add;
 use super::softfloat3e::f64_compare::{f64_compare, f64_compare_quiet, f64_max, f64_min};
 use super::softfloat3e::f64_div::f64_div;
@@ -39,18 +43,16 @@ use super::softfloat3e::f64_mul::f64_mul;
 use super::softfloat3e::f64_round_to_int::f64_round_to_int;
 use super::softfloat3e::f64_sqrt::f64_sqrt;
 use super::softfloat3e::f64_to_f32::f64_to_f32;
-use super::softfloat3e::f64_to_int::{f64_to_i32, f64_to_i32_r_min_mag, f64_to_i64, f64_to_i64_r_min_mag};
+use super::softfloat3e::f64_to_int::{
+    f64_to_i32, f64_to_i32_r_min_mag, f64_to_i64, f64_to_i64_r_min_mag,
+};
 use super::softfloat3e::int_to_float::{i32_to_f32, i32_to_f64, i64_to_f32, i64_to_f64};
 use super::softfloat3e::softfloat::{
-    softfloat_get_exception_flags, softfloat_get_rounding_mode, SoftFloatStatus, FLAG_INEXACT,
+    FLAG_INEXACT, SoftFloatStatus, softfloat_get_exception_flags, softfloat_get_rounding_mode,
 };
 use super::softfloat3e::softfloat_types::{Float32, Float64};
-use super::{
-    decoder::{BxSegregs, Instruction},
-    i387::BxPackedRegister,
-    sse_fp::mxcsr_to_softfloat_status_word,
-    xmm::BxPackedXmmRegister,
-};
+use super::sse_fp::mxcsr_to_softfloat_status_word;
+use super::xmm::BxPackedXmmRegister;
 
 /// Bochs sse_pfp.cc `mxcsr_to_softfloat_status_word_imm_override` — the
 /// SSE4.1 ROUNDxx imm8 overrides the MXCSR rounding mode unless imm8[2] is
@@ -85,7 +87,7 @@ pub(super) fn dpps_lane(
     xmm_mulps_mask(&mut a, &b, status, (mask >> 4) as u32);
     // shuffle b = [BF, AE, DH, CG]
     let a_copy = a;
-    xmm_shufps(&mut b, &a_copy, &a_copy, 0xb1);
+    xmm_shufps(&mut b, &a_copy, &a_copy, 0xB1);
     // b = [(BF+AE), (AE+BF), (DH+CG), (CG+DH)]
     xmm_addps(&mut b, &a, status);
     // shuffle a = [(DH+CG), (CG+DH), (BF+AE), (AE+BF)]
@@ -963,8 +965,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let op = self.sse_pfp_read_op2_lo_qword(instr)?;
         let mut status = self.sse_status();
         let mut result = BxPackedRegister::default();
-        result.set_S32(0, f32_to_i32_r_min_mag(op.xmm32u(0), true, false, &mut status));
-        result.set_S32(1, f32_to_i32_r_min_mag(op.xmm32u(1), true, false, &mut status));
+        result.set_S32(
+            0,
+            f32_to_i32_r_min_mag(op.xmm32u(0), true, false, &mut status),
+        );
+        result.set_S32(
+            1,
+            f32_to_i32_r_min_mag(op.xmm32u(1), true, false, &mut status),
+        );
         self.prepare_fpu2mmx();
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.write_mmx_reg(instr.dst(), result);
@@ -978,8 +986,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
         let mut result = BxPackedRegister::default();
-        result.set_S32(0, f64_to_i32_r_min_mag(op.xmm64u(0), true, false, &mut status));
-        result.set_S32(1, f64_to_i32_r_min_mag(op.xmm64u(1), true, false, &mut status));
+        result.set_S32(
+            0,
+            f64_to_i32_r_min_mag(op.xmm64u(0), true, false, &mut status),
+        );
+        result.set_S32(
+            1,
+            f64_to_i32_r_min_mag(op.xmm64u(1), true, false, &mut status),
+        );
         self.prepare_fpu2mmx();
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.write_mmx_reg(instr.dst(), result);
@@ -1053,7 +1067,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
         for i in 0..4 {
-            op.set_xmm32s(i, f32_to_i32_r_min_mag(op.xmm32u(i), true, false, &mut status));
+            op.set_xmm32s(
+                i,
+                f32_to_i32_r_min_mag(op.xmm32u(i), true, false, &mut status),
+            );
         }
         self.check_exceptions_sse(softfloat_get_exception_flags(&status))?;
         self.write_xmm_reg_lo128(instr.dst(), op);
@@ -1237,7 +1254,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // shuffle op2 = [BF, AE, DH, CG]
         let op1_copy = op1;
-        xmm_shufps(&mut op2, &op1_copy, &op1_copy, 0xb1);
+        xmm_shufps(&mut op2, &op1_copy, &op1_copy, 0xB1);
 
         // op2 = [(BF+AE), (AE+BF), (DH+CG), (CG+DH)]
         xmm_addps(&mut op2, &op1, &mut status);

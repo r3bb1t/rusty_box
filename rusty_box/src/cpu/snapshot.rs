@@ -1,17 +1,14 @@
 //! CPU state save/restore for the snapshot mechanism.
 //! This file lives in cpu/ so it has pub(super) access to BxCpuC fields.
 
-
+use super::cpu::{BX_MSR_MAX_INDEX, BxCpuC, CpuActivityState, CpuMode};
+use super::crregs::{BxCr0, BxCr4, BxDr6, BxDr7, BxEfer, Xcr0};
+use super::eflags::EFlags;
+use crate::config::{A20Mask, BxLinAddress, BxPhyAddress};
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
+    SnapError, SnapRead, SnapResult, SnapWrite, bounds, checked_snapshot_len_add,
+    checked_snapshot_len_mul,
 };
-
-use super::{
-    cpu::{BxCpuC, CpuActivityState, CpuMode, BX_MSR_MAX_INDEX},
-    crregs::{BxCr0, BxCr4, BxDr6, BxDr7, BxEfer, Xcr0},
-    eflags::EFlags,
-};
-
 
 // ============================================================================
 // V3 streaming CPU record
@@ -38,7 +35,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// against the PC system's authoritative gate state.
     #[cfg(feature = "std")]
     pub(crate) const fn snapshot_a20_mask(&self) -> u64 {
-        self.a20_mask
+        self.a20_mask.bits()
     }
 
     /// Rejects a CPU/APIC pairing whose architectural APIC-base MSR does not
@@ -49,9 +46,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         lapic_base: u64,
         lapic_mode: u64,
     ) -> SnapResult<()> {
-        if self.msr.apicbase & !0xfff != lapic_base
-            || (self.msr.apicbase >> 10) & 3 != lapic_mode
-        {
+        if self.msr.apicbase & !0xFFF != lapic_base || (self.msr.apicbase >> 10) & 3 != lapic_mode {
             return Err(snapshot_invalid(
                 "CPU APIC-base MSR disagrees with restored LAPIC",
             ));
@@ -62,10 +57,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Streams one architectural CPU record. Host mappings, TLBs, decode
     /// caches, instruction handlers, instrumentation, and diagnostics stay
     /// live and are rebuilt by the machine-level post-restore phase.
-    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(
-        &self,
-        writer: &mut W,
-    ) -> SnapResult<()> {
+    pub(crate) fn save_snapshot_v3_body<W: SnapWrite>(&self, writer: &mut W) -> SnapResult<()> {
         if self.vmm.len() > bounds::MAX_SNAPSHOT_COUNT
             || self.msrs.len() > bounds::MAX_SNAPSHOT_COUNT
         {
@@ -89,7 +81,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             None => writer.write_bool(false)?,
         }
         writer.write_u8(self.smp_trace_quantum)?;
-
 
         for reg in &self.gen_reg {
             writer.write_u64(reg.rrx())?;
@@ -164,7 +155,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             writer.write_u64(mask.rrx())?;
         }
 
-        writer.write_u64(self.monitor.monitor_addr)?;
+        writer.write_u64(self.monitor.monitor_addr.get())?;
         writer.write_u32(self.monitor.armed_by)?;
 
         writer.write_u64(self.uintr.ui_handler)?;
@@ -201,7 +192,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         write_i32(writer, self.last_exception_type)?;
         writer.write_u32(self.smbase)?;
         writer.write_u32(self.alignment_check_mask)?;
-        writer.write_u64(self.a20_mask)?;
+        writer.write_u64(self.a20_mask.bits())?;
         writer.write_u32(self.fred_event_info)?;
         writer.write_u64(self.fred_event_data)?;
 
@@ -209,14 +200,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         writer.write_bool(self.in_vmx_guest)?;
         writer.write_bool(self.in_smm_vmx)?;
         writer.write_bool(self.in_smm_vmx_guest)?;
-        writer.write_u64(self.vmcsptr)?;
+        writer.write_u64(self.vmcsptr.get())?;
         writer.write_u32(self.vmcs_memtype)?;
-        writer.write_u64(self.vmxonptr)?;
+        writer.write_u64(self.vmxonptr.get())?;
         save_v3_vmcs_cache(writer, &self.vmcs)?;
 
         writer.write_bool(self.in_svm_guest)?;
         writer.write_bool(self.svm_gif)?;
-        writer.write_u64(self.vmcbptr)?;
+        writer.write_u64(self.vmcbptr.get())?;
         writer.write_u32(self.vmcb_memtype)?;
         // Whether the stream carries a VMCB block is a fact about the CPU
         // MODEL, so it is read from the model rather than from a second copy
@@ -242,18 +233,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         expected_cpu_id: u32,
     ) -> SnapResult<()> {
         if self.bx_cpuid != expected_cpu_id {
-            return Err(snapshot_invalid("CPU record does not match configured CPU ID"));
+            return Err(snapshot_invalid(
+                "CPU record does not match configured CPU ID",
+            ));
         }
         if self.vmm.len() > bounds::MAX_SNAPSHOT_COUNT
             || self.msrs.len() != BX_MSR_MAX_INDEX
             || self.msrs.len() > bounds::MAX_SNAPSHOT_COUNT
         {
-            return Err(snapshot_invalid("configured CPU fixed state is incompatible"));
+            return Err(snapshot_invalid(
+                "configured CPU fixed state is incompatible",
+            ));
         }
 
         for extension in &self.ia_extensions_bitmask {
             if reader.read_u32()? != *extension {
-                return Err(snapshot_invalid("CPU ISA capability set differs from snapshot"));
+                return Err(snapshot_invalid(
+                    "CPU ISA capability set differs from snapshot",
+                ));
             }
         }
         let saved_vmx_extensions = if reader.read_bool()? {
@@ -274,7 +271,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
         let smp_trace_quantum = reader.read_u8()?;
         if smp_trace_quantum > 32 || smp_trace_quantum != self.smp_trace_quantum {
-            return Err(snapshot_invalid("SMP trace quantum differs from configured CPU"));
+            return Err(snapshot_invalid(
+                "SMP trace quantum differs from configured CPU",
+            ));
         }
         for reg in &mut self.gen_reg {
             reg.set_rrx(reader.read_u64()?);
@@ -314,13 +313,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             .ok_or_else(|| snapshot_invalid("CR4 contains reserved bits"))?;
         let cr4_suppmask = reader.read_u64()?;
         if cr4_suppmask != self.cr4_suppmask || (cr4.bits() & !cr4_suppmask) != 0 {
-            return Err(snapshot_invalid("CR4 state is incompatible with CPU capabilities"));
+            return Err(snapshot_invalid(
+                "CR4 state is incompatible with CPU capabilities",
+            ));
         }
         let efer = BxEfer::from_bits(reader.read_u32()?)
             .ok_or_else(|| snapshot_invalid("EFER contains reserved bits"))?;
         let efer_suppmask = reader.read_u32()?;
         if efer_suppmask != self.efer_suppmask || (efer.bits() & !efer_suppmask) != 0 {
-            return Err(snapshot_invalid("EFER state is incompatible with CPU capabilities"));
+            return Err(snapshot_invalid(
+                "EFER state is incompatible with CPU capabilities",
+            ));
         }
         for entry in &mut self.pdptrcache.entry {
             *entry = reader.read_u64()?;
@@ -343,7 +346,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             || xcr0 & !xcr0_suppmask != 0
             || xcr0 & 1 == 0
         {
-            return Err(snapshot_invalid("XSAVE state is incompatible with CPU capabilities"));
+            return Err(snapshot_invalid(
+                "XSAVE state is incompatible with CPU capabilities",
+            ));
         }
         self.xcr0 = Xcr0 { value: xcr0 };
         self.pkru = reader.read_u32()?;
@@ -376,7 +381,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let mxcsr = reader.read_u32()?;
         let mxcsr_mask = reader.read_u32()?;
         if mxcsr_mask != self.mxcsr_mask || mxcsr & !mxcsr_mask != 0 {
-            return Err(snapshot_invalid("MXCSR state disagrees with configured CPU"));
+            return Err(snapshot_invalid(
+                "MXCSR state disagrees with configured CPU",
+            ));
         }
         self.mxcsr.mxcsr = mxcsr;
         for mask in &mut self.opmask {
@@ -388,12 +395,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if monitor_addr & 63 != 0 || monitor_armed_by > super::cpu::BX_MONITOR_ARMED_BY_UMONITOR {
             return Err(snapshot_invalid("monitor state is invalid"));
         }
-        self.monitor.monitor_addr = monitor_addr;
+        self.monitor.monitor_addr = BxPhyAddress::new(monitor_addr);
         self.monitor.armed_by = monitor_armed_by;
 
-        let supports_uintr = self.bx_cpuid_support_isa_extension(
-            super::decoder::features::X86Feature::IsaUintr,
-        );
+        let supports_uintr =
+            self.bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaUintr);
         restore_v3_uintr(reader, &mut self.uintr, supports_uintr, self.linaddr_width)?;
         restore_v3_fixed_msrs(reader, &mut self.msr, self.ia32_xss_suppmask)?;
         for msr in &mut self.msrs {
@@ -449,7 +455,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if a20_mask != u64::MAX && a20_mask != 0xFFFF_FFFF_FFEF_FFFF {
             return Err(snapshot_invalid("CPU A20 mask is invalid"));
         }
-        self.a20_mask = a20_mask;
+        self.a20_mask = A20Mask::from_bits(a20_mask);
         self.fred_event_info = reader.read_u32()?;
         self.fred_event_data = reader.read_u64()?;
 
@@ -460,9 +466,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         let vmcsptr = reader.read_u64()?;
         let vmcs_memtype = reader.read_u32()?;
         let vmxonptr = reader.read_u64()?;
-        let supports_vmx = self.bx_cpuid_support_isa_extension(
-            super::decoder::features::X86Feature::IsaVmx,
-        );
+        let supports_vmx =
+            self.bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaVmx);
         validate_vmx_state(
             supports_vmx,
             vmcsptr,
@@ -473,9 +478,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.in_smm_vmx,
             self.in_smm_vmx_guest,
         )?;
-        self.vmcsptr = vmcsptr;
+        self.vmcsptr = BxPhyAddress::new(vmcsptr);
         self.vmcs_memtype = vmcs_memtype;
-        self.vmxonptr = vmxonptr;
+        self.vmxonptr = BxPhyAddress::new(vmxonptr);
         restore_v3_vmcs_cache(reader, &mut self.vmcs)?;
 
         self.in_svm_guest = reader.read_bool()?;
@@ -493,10 +498,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         if has_vmcb != self.svm_supported() {
             return Err(snapshot_invalid("SVM capability does not match snapshot"));
         }
-        if vmcbptr != 0 && vmcbptr & 0xfff != 0 {
+        if vmcbptr != 0 && vmcbptr & 0xFFF != 0 {
             return Err(snapshot_invalid("VMCB pointer is not page aligned"));
         }
-        self.vmcbptr = vmcbptr;
+        self.vmcbptr = BxPhyAddress::new(vmcbptr);
         self.vmcb_memtype = vmcb_memtype;
         if has_vmcb {
             restore_v3_vmcb_cache(reader, &mut self.vmcb)?;
@@ -627,7 +632,9 @@ fn validate_mode_state(
     if valid {
         Ok(())
     } else {
-        Err(snapshot_invalid("CPU mode conflicts with control and segment state"))
+        Err(snapshot_invalid(
+            "CPU mode conflicts with control and segment state",
+        ))
     }
 }
 
@@ -656,7 +663,7 @@ fn write_v3_seg_reg<W: SnapWrite>(writer: &mut W, seg: &BxSegmentReg) -> SnapRes
     writer.write_u8(seg.cache.dpl)?;
     writer.write_bool(seg.cache.segment)?;
     writer.write_u8(seg.cache.r#type)?;
-    writer.write_u64(seg.cache.u.segment_base())?;
+    writer.write_u64(seg.cache.u.segment_base().get())?;
     writer.write_u32(seg.cache.u.segment_limit_scaled())?;
     writer.write_bool(seg.cache.u.segment_g())?;
     writer.write_bool(seg.cache.u.segment_d_b())?;
@@ -664,10 +671,7 @@ fn write_v3_seg_reg<W: SnapWrite>(writer: &mut W, seg: &BxSegmentReg) -> SnapRes
     writer.write_bool(seg.cache.u.segment_avl())
 }
 
-fn read_v3_seg_reg<R: SnapRead>(
-    reader: &mut R,
-    seg: &mut BxSegmentReg,
-) -> SnapResult<()> {
+fn read_v3_seg_reg<R: SnapRead>(reader: &mut R, seg: &mut BxSegmentReg) -> SnapResult<()> {
     let selector_value = reader.read_u16()?;
     let selector_index = reader.read_u16()?;
     let selector_ti = reader.read_u16()?;
@@ -676,7 +680,10 @@ fn read_v3_seg_reg<R: SnapRead>(
     let expected_ti = (selector_value >> 2) & 1;
     let expected_rpl = u8::try_from(selector_value & 3)
         .map_err(|_| snapshot_invalid("selector RPL does not fit u8"))?;
-    if selector_index != expected_index || selector_ti != expected_ti || selector_rpl != expected_rpl {
+    if selector_index != expected_index
+        || selector_ti != expected_ti
+        || selector_rpl != expected_rpl
+    {
         return Err(snapshot_invalid("segment selector cache is inconsistent"));
     }
 
@@ -695,8 +702,8 @@ fn read_v3_seg_reg<R: SnapRead>(
         | super::descriptor::SegAccess::ALL_ACCESS.bits();
     if valid & !VALID_CACHE_BITS != 0
         || dpl > 3
-        || descriptor_type > 0x0f
-        || granularity && limit_scaled & 0x0fff != 0x0fff
+        || descriptor_type > 0x0F
+        || granularity && limit_scaled & 0x0FFF != 0x0FFF
         || long_mode && (!segment || default_size)
     {
         return Err(snapshot_invalid("segment cache is invalid"));
@@ -711,7 +718,7 @@ fn read_v3_seg_reg<R: SnapRead>(
     seg.cache.dpl = dpl;
     seg.cache.segment = segment;
     seg.cache.r#type = descriptor_type;
-    seg.cache.u.set_segment_base(base);
+    seg.cache.u.set_segment_base(BxLinAddress::new(base));
     seg.cache.u.set_segment_limit_scaled(limit_scaled);
     seg.cache.u.set_segment_g(granularity);
     seg.cache.u.set_segment_d_b(default_size);
@@ -720,27 +727,18 @@ fn read_v3_seg_reg<R: SnapRead>(
     Ok(())
 }
 
-fn write_v3_global_seg<W: SnapWrite>(
-    writer: &mut W,
-    seg: &BxGlobalSegmentReg,
-) -> SnapResult<()> {
-    writer.write_u64(seg.base)?;
+fn write_v3_global_seg<W: SnapWrite>(writer: &mut W, seg: &BxGlobalSegmentReg) -> SnapResult<()> {
+    writer.write_u64(seg.base.get())?;
     writer.write_u16(seg.limit)
 }
 
-fn read_v3_global_seg<R: SnapRead>(
-    reader: &mut R,
-    seg: &mut BxGlobalSegmentReg,
-) -> SnapResult<()> {
-    seg.base = reader.read_u64()?;
+fn read_v3_global_seg<R: SnapRead>(reader: &mut R, seg: &mut BxGlobalSegmentReg) -> SnapResult<()> {
+    seg.base = BxLinAddress::new(reader.read_u64()?);
     seg.limit = reader.read_u16()?;
     Ok(())
 }
 
-fn save_v3_fixed_msrs<W: SnapWrite>(
-    writer: &mut W,
-    msr: &super::cpu::BxRegsMsr,
-) -> SnapResult<()> {
+fn save_v3_fixed_msrs<W: SnapWrite>(writer: &mut W, msr: &super::cpu::BxRegsMsr) -> SnapResult<()> {
     writer.write_u64(msr.apicbase)?;
     writer.write_u64(msr.star)?;
     writer.write_u64(msr.lstar)?;
@@ -862,8 +860,8 @@ fn restore_v3_uintr<R: SnapRead>(
         || !is_canonical_to_width(stack_adjust, u32::from(linaddr_width))
         || !is_canonical_to_width(uitt_addr, u32::from(linaddr_width))
         || !is_canonical_to_width(upid_addr, u32::from(linaddr_width))
-        || upid_addr & 0x3f != 0
-        || uitt_addr & 0x0e != 0
+        || upid_addr & 0x3F != 0
+        || uitt_addr & 0x0E != 0
         || !supports_uintr
             && (ui_handler != 0
                 || stack_adjust != 0
@@ -887,10 +885,7 @@ fn restore_v3_uintr<R: SnapRead>(
     Ok(())
 }
 
-fn write_v3_amx<W: SnapWrite>(
-    writer: &mut W,
-    amx: Option<&super::avx::AMX>,
-) -> SnapResult<()> {
+fn write_v3_amx<W: SnapWrite>(writer: &mut W, amx: Option<&super::avx::AMX>) -> SnapResult<()> {
     match amx {
         Some(amx) => {
             writer.write_bool(true)?;
@@ -959,12 +954,8 @@ macro_rules! read_v3_fields {
     };
 }
 
-fn save_v3_vmcs_cache<W: SnapWrite>(
-    writer: &mut W,
-    vm: &super::vmx::VmcsCache,
-) -> SnapResult<()> {
+fn save_v3_vmcs_cache<W: SnapWrite>(writer: &mut W, vm: &super::vmx::VmcsCache) -> SnapResult<()> {
     write_v3_fields!(writer;
-        write_bool(vm.launched),
         write_u64(vm.host_cr0), write_u64(vm.host_cr3), write_u64(vm.host_cr4),
         write_u64(vm.host_rsp), write_u64(vm.host_rip),
         write_u16(vm.host_cs_selector), write_u16(vm.host_ss_selector),
@@ -1080,7 +1071,6 @@ fn restore_v3_vmcs_cache<R: SnapRead>(
     vm: &mut super::vmx::VmcsCache,
 ) -> SnapResult<()> {
     read_v3_fields!(reader, vm;
-        read_bool => launched,
         read_u64 => host_cr0, read_u64 => host_cr3, read_u64 => host_cr4,
         read_u64 => host_rsp, read_u64 => host_rip,
         read_u16 => host_cs_selector, read_u16 => host_ss_selector,
@@ -1159,7 +1149,9 @@ fn restore_v3_vmcs_cache<R: SnapRead>(
         read_u32 => vm_pf_match, read_u32 => vm_cr3_target_cnt
     );
     if vm.guest_activity_state > 3 || vm.vm_cr3_target_cnt > 4 {
-        return Err(snapshot_invalid("VMCS activity or control field is invalid"));
+        return Err(snapshot_invalid(
+            "VMCS activity or control field is invalid",
+        ));
     }
     for value in &mut vm.vm_cr3_target_value {
         *value = reader.read_u64()?;
@@ -1204,10 +1196,10 @@ fn validate_vmx_state(
     in_smm_vmx: bool,
     in_smm_vmx_guest: bool,
 ) -> SnapResult<()> {
-    let invalid_ptr = super::vmx::BX_INVALID_VMCSPTR;
+    let invalid_ptr = super::vmx::BX_INVALID_VMCSPTR.get();
     if vmcs_memtype > 8
-        || vmcsptr != invalid_ptr && vmcsptr & 0x0fff != 0
-        || vmxonptr != invalid_ptr && vmxonptr & 0x0fff != 0
+        || vmcsptr != invalid_ptr && vmcsptr & 0x0FFF != 0
+        || vmxonptr != invalid_ptr && vmxonptr & 0x0FFF != 0
         || in_vmx_guest && !in_vmx
         || in_smm_vmx_guest && !in_smm_vmx
         || (in_vmx || in_vmx_guest || in_smm_vmx || in_smm_vmx_guest) && !supports_vmx
@@ -1241,8 +1233,8 @@ fn save_v3_vmcb_cache<W: SnapWrite>(
     }
     write_v3_fields!(writer;
         write_u32(vmcb.ctrls.exitintinfo), write_u32(vmcb.ctrls.exitintinfo_error_code),
-        write_u32(vmcb.ctrls.eventinj), write_u64(vmcb.ctrls.iopm_base),
-        write_u64(vmcb.ctrls.msrpm_base), write_u8(vmcb.ctrls.v_tpr),
+        write_u32(vmcb.ctrls.eventinj), write_u64(vmcb.ctrls.iopm_base.get()),
+        write_u64(vmcb.ctrls.msrpm_base.get()), write_u8(vmcb.ctrls.v_tpr),
         write_u8(vmcb.ctrls.v_intr_prio), write_bool(vmcb.ctrls.v_ignore_tpr),
         write_bool(vmcb.ctrls.v_intr_masking), write_u8(vmcb.ctrls.v_intr_vector),
         write_bool(vmcb.ctrls.nested_paging), write_u64(vmcb.ctrls.ncr3),
@@ -1287,8 +1279,8 @@ fn restore_v3_vmcb_cache<R: SnapRead>(
     vmcb.ctrls.exitintinfo = reader.read_u32()?;
     vmcb.ctrls.exitintinfo_error_code = reader.read_u32()?;
     vmcb.ctrls.eventinj = reader.read_u32()?;
-    vmcb.ctrls.iopm_base = reader.read_u64()?;
-    vmcb.ctrls.msrpm_base = reader.read_u64()?;
+    vmcb.ctrls.iopm_base = BxPhyAddress::new(reader.read_u64()?);
+    vmcb.ctrls.msrpm_base = BxPhyAddress::new(reader.read_u64()?);
     let v_tpr = reader.read_u8()?;
     let v_intr_prio = reader.read_u8()?;
     let v_ignore_tpr = reader.read_bool()?;
@@ -1296,7 +1288,9 @@ fn restore_v3_vmcb_cache<R: SnapRead>(
     let v_intr_vector = reader.read_u8()?;
     let nested_paging = reader.read_bool()?;
     if v_tpr > 15 || v_intr_prio > 15 {
-        return Err(snapshot_invalid("VMCB virtual interrupt priority is invalid"));
+        return Err(snapshot_invalid(
+            "VMCB virtual interrupt priority is invalid",
+        ));
     }
     vmcb.ctrls.v_tpr = v_tpr;
     vmcb.ctrls.v_intr_prio = v_intr_prio;
@@ -1313,13 +1307,13 @@ fn restore_v3_vmcb_cache<R: SnapRead>(
 
 #[cfg(test)]
 mod tests {
+    use super::CpuMode;
+    use crate::config::BxPhyAddress;
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::crregs::{BxCr0, BxEfer};
     use crate::cpu::decoder::BxSegregs;
     use crate::cpu::eflags::EFlags;
-    use crate::cpu::CpuModel;
-    use crate::cpu::ResetReason;
-    use super::CpuMode;
+    use crate::cpu::{CpuModel, ResetReason};
     use crate::snapshot::SnapshotReader;
 
     /// Round-trip the VMX state through a CPU snapshot, on a model that has
@@ -1339,11 +1333,10 @@ mod tests {
         cpu.in_vmx_guest = true;
         cpu.in_smm_vmx = true;
         cpu.in_smm_vmx_guest = true;
-        cpu.vmcsptr = 0x0012_3000;
-        cpu.vmxonptr = 0x0056_7000;
+        cpu.vmcsptr = BxPhyAddress::new(0x0012_3000);
+        cpu.vmxonptr = BxPhyAddress::new(0x0056_7000);
 
-        cpu.vmcs.launched = true;
-        cpu.vmcs.host_cr0 = 0x8000_0031; // first serialized u64 field
+        cpu.vmcs.host_cr0 = 0x8000_0031; // first serialized field
         cpu.vmcs.guest_cs_selector = 0x1234;
         cpu.vmcs.exit_reason = 0x77;
         cpu.vmcs.exit_qualification = 0xABCD_EF01;
@@ -1363,10 +1356,9 @@ mod tests {
         assert!(restored.in_vmx_guest);
         assert!(restored.in_smm_vmx);
         assert!(restored.in_smm_vmx_guest);
-        assert_eq!(restored.vmcsptr, 0x0012_3000);
-        assert_eq!(restored.vmxonptr, 0x0056_7000);
+        assert_eq!(restored.vmcsptr, BxPhyAddress::new(0x0012_3000));
+        assert_eq!(restored.vmxonptr, BxPhyAddress::new(0x0056_7000));
 
-        assert!(restored.vmcs.launched);
         assert_eq!(restored.vmcs.host_cr0, 0x8000_0031);
         assert_eq!(restored.vmcs.guest_cs_selector, 0x1234);
         assert_eq!(restored.vmcs.exit_reason, 0x77);
@@ -1385,7 +1377,7 @@ mod tests {
 
         cpu.in_svm_guest = true;
         cpu.svm_gif = false;
-        cpu.vmcbptr = 0x009A_B000;
+        cpu.vmcbptr = BxPhyAddress::new(0x009A_B000);
         cpu.vmcb_host_offset = Some(0xDEAD_BEEF); // must NOT survive a restore
         cpu.msr.svm_hsave_pa = 0x00DE_F000;
         cpu.msr.svm_vm_cr = 0x2;
@@ -1415,7 +1407,7 @@ mod tests {
 
         assert!(restored.in_svm_guest);
         assert!(!restored.svm_gif);
-        assert_eq!(restored.vmcbptr, 0x009A_B000);
+        assert_eq!(restored.vmcbptr.get(), 0x009A_B000);
         assert_eq!(
             restored.vmcb_host_offset, None,
             "cached host pointer must be re-resolved after restore"
@@ -1536,6 +1528,6 @@ mod tests {
         assert_eq!(restored.rd_pkey, expected_rd_pkey);
         assert_eq!(restored.wr_pkey, expected_wr_pkey);
         assert_eq!(restored.fetch_mode_mask, expected_fetch_mode_mask);
-        assert_eq!(restored.alignment_check_mask, 0xf);
+        assert_eq!(restored.alignment_check_mask, 0xF);
     }
 }

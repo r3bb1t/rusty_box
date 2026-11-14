@@ -2,9 +2,8 @@
 //!
 //! Based on Bochs logical32.cc
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
+use crate::config::BxEffAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -311,8 +310,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     // get_laddr32_seg is defined in logical8.rs to avoid duplicate definitions
 
-
-
     // =========================================================================
     // Memory-form instructions
     // =========================================================================
@@ -613,7 +610,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     #[inline]
-    fn bit_test_ed_gd_addr(&self, instr: &Instruction, op2: u32) -> u64 {
+    fn bit_test_ed_gd_addr(&self, instr: &Instruction, op2: u32) -> BxEffAddress {
         let eaddr = self.resolve_addr(instr);
         // Bochs bit32.cc BTS_EdGdM: op1_addr = eaddr + 4 * (((s32)(op2 & ~31)) / 32),
         // then mask by the instruction address size. In 64-bit address mode the
@@ -623,11 +620,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let asize_mask = if instr.as64_l() != 0 {
             u64::MAX
         } else if instr.as32_l() != 0 {
-            u32::MAX as u64
+            u64::from(u32::MAX)
         } else {
-            u16::MAX as u64
+            u64::from(u16::MAX)
         };
-        addr & asize_mask
+        addr.masked(asize_mask)
     }
 
     // =========================================================================

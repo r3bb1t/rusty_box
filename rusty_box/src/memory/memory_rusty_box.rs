@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+use crate::config::BxPhyAddress;
+
 /// 4M BIOS ROM @0xffc00000, must be a power of 2
 pub(super) static BIOSROMSZ: usize = 1 << 22;
 /// ROMs 0xc0000-0xdffff (area 0xe0000-0xfffff=bios mapped)
@@ -8,27 +10,30 @@ pub(super) static BIOS_MASK: usize = BIOSROMSZ - 1;
 pub(super) static EXROM_MASK: usize = EXROMSIZE - 1;
 
 pub(super) fn bios_map_last128k(addr: usize) -> usize {
-    ((addr) | 0xfff00000) & BIOS_MASK
+    ((addr) | 0xFFF00000) & BIOS_MASK
 }
 
 // PCI hole constants for systems with >3GB RAM
-pub(crate) const BX_PCI_HOLE_START: u64 = 0xC000_0000; // 3GB
-pub(crate) const BX_PCI_HOLE_END: u64 = 0x1_0000_0000; // 4GB
+pub(crate) const BX_PCI_HOLE_START: BxPhyAddress = BxPhyAddress::new(0xC000_0000); // 3GB
+pub(crate) const BX_PCI_HOLE_END: BxPhyAddress = BxPhyAddress::new(0x1_0000_0000); // 4GB
 pub(crate) const BX_PCI_HOLE_SIZE: u64 = 0x4000_0000; // 1GB
+/// The RAM-store offset where the RAM above the hole starts: the bytes of
+/// RAM below it, which sit at their own addresses.
+const RAM_BELOW_HOLE: u64 = BX_PCI_HOLE_START.get();
 
 /// Returns true if the guest physical address falls in the PCI MMIO hole (3GB-4GB).
 #[inline]
-pub(crate) fn bx_is_pci_hole_addr(gpa: u64) -> bool {
+pub(crate) fn bx_is_pci_hole_addr(gpa: BxPhyAddress) -> bool {
     gpa >= BX_PCI_HOLE_START && gpa < BX_PCI_HOLE_END
 }
 
-/// Translate a guest physical address to a linear RAM offset.
+/// Translate a guest physical address to a RAM-store offset.
 #[inline]
-pub(crate) fn bx_translate_gpa_to_linear(gpa: u64) -> u64 {
+pub(crate) fn bx_translate_gpa_to_linear(gpa: BxPhyAddress) -> u64 {
     if gpa >= BX_PCI_HOLE_END {
-        gpa - BX_PCI_HOLE_SIZE
+        gpa.get() - BX_PCI_HOLE_SIZE
     } else {
-        gpa
+        gpa.get()
     }
 }
 
@@ -36,11 +41,11 @@ pub(crate) fn bx_translate_gpa_to_linear(gpa: u64) -> u64 {
 /// [`bx_translate_gpa_to_linear`] over RAM. RAM below the PCI hole sits at
 /// its own address; the rest sits from 4 GiB up.
 #[inline]
-pub(crate) fn bx_translate_linear_to_gpa(offset: u64) -> u64 {
-    if offset >= BX_PCI_HOLE_START {
-        offset + BX_PCI_HOLE_SIZE
+pub(crate) fn bx_translate_linear_to_gpa(offset: u64) -> BxPhyAddress {
+    if offset >= RAM_BELOW_HOLE {
+        BxPhyAddress::new(offset + BX_PCI_HOLE_SIZE)
     } else {
-        offset
+        BxPhyAddress::new(offset)
     }
 }
 
@@ -48,8 +53,8 @@ pub(crate) fn bx_translate_linear_to_gpa(offset: u64) -> u64 {
 /// most `len`: a read of RAM in storage order never spans the hole.
 #[inline]
 pub(crate) fn bx_ram_stretch(offset: u64, len: usize) -> usize {
-    if offset < BX_PCI_HOLE_START {
-        usize::try_from(BX_PCI_HOLE_START - offset).map_or(len, |left| left.min(len))
+    if offset < RAM_BELOW_HOLE {
+        usize::try_from(RAM_BELOW_HOLE - offset).map_or(len, |left| left.min(len))
     } else {
         len
     }
@@ -63,7 +68,7 @@ pub(crate) fn bx_ram_stretch(offset: u64, len: usize) -> usize {
 /// checked translated insertion point.
 #[inline]
 pub(crate) fn bx_guest_ram_span(
-    gpa: u64,
+    gpa: BxPhyAddress,
     len: usize,
     ram_len: usize,
 ) -> Option<core::ops::Range<usize>> {
@@ -98,15 +103,25 @@ mod tests {
 
     #[test]
     fn a_ram_offset_maps_back_to_the_address_it_came_from() {
-        for gpa in [0, 0x1000, BX_PCI_HOLE_START - 1, BX_PCI_HOLE_END, BX_PCI_HOLE_END + 0x1234] {
-            assert_eq!(bx_translate_linear_to_gpa(bx_translate_gpa_to_linear(gpa)), gpa);
+        let below_hole = BxPhyAddress::new(RAM_BELOW_HOLE - 1);
+        for gpa in [
+            BxPhyAddress::new(0),
+            BxPhyAddress::new(0x1000),
+            below_hole,
+            BX_PCI_HOLE_END,
+            BX_PCI_HOLE_END + 0x1234,
+        ] {
+            assert_eq!(
+                bx_translate_linear_to_gpa(bx_translate_gpa_to_linear(gpa)),
+                gpa
+            );
         }
     }
 
     #[test]
     fn a_stretch_stops_at_the_hole_and_runs_free_above_it() {
-        assert_eq!(bx_ram_stretch(BX_PCI_HOLE_START - 16, 64), 16);
+        assert_eq!(bx_ram_stretch(RAM_BELOW_HOLE - 16, 64), 16);
         assert_eq!(bx_ram_stretch(0, 64), 64);
-        assert_eq!(bx_ram_stretch(BX_PCI_HOLE_START, 64), 64);
+        assert_eq!(bx_ram_stretch(RAM_BELOW_HOLE, 64), 64);
     }
 }

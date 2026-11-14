@@ -11,8 +11,9 @@
 //! reads under the interpreter, so nothing downstream can tell which engine
 //! produced it.
 
-use rusty_box_core::time::{ClockHz, HostClock, HostInstant, VmDuration, VmInstant};
 use std::time::Duration;
+
+use rusty_box_core::time::{ClockHz, HostClock, HostInstant, VmDuration, VmInstant};
 
 /// A host clock over [`std::time::Instant`] — the [`HostClock`] the engine runs
 /// on.
@@ -41,9 +42,7 @@ impl Default for StdClock {
 
 impl HostClock for StdClock {
     fn now(&self) -> HostInstant {
-        HostInstant::from_nanos(
-            u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX),
-        )
+        HostInstant::from_nanos(u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX))
     }
 }
 
@@ -291,7 +290,11 @@ mod tests {
             clock.stop();
             host.advance_nanos(1_000); // paused: invisible
         }
-        assert_eq!(clock.now().ticks(), 30, "ten running intervals of 3 ns each");
+        assert_eq!(
+            clock.now().ticks(),
+            30,
+            "ten running intervals of 3 ns each"
+        );
     }
 
     /// The same property at a rate where each running interval genuinely leaves

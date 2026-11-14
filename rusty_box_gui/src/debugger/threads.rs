@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 
+use rusty_box::config::BxLinAddress;
 use rusty_box::cpu::LinearRange;
 
 /// The most threads a walk reports before giving up: a corrupt or cyclic list
@@ -64,16 +65,28 @@ pub(crate) struct SavedRegisters {
 /// Rip 0x168, SegCs 0x170 (u16), EFlags 0x178 (u32), Rsp 0x180, SegSs 0x188
 /// (u16).
 pub(crate) fn decode_trap_frame(frame: &[u8; TRAP_FRAME_BYTES]) -> SavedRegisters {
+    // Every offset below lies inside the frame, so each read finds its
+    // bytes; a miss would read as 0.
     let u64_at = |offset: usize| {
-        let mut raw = [0u8; 8];
-        raw.copy_from_slice(&frame[offset..offset + 8]);
-        u64::from_le_bytes(raw)
+        offset
+            .checked_add(8)
+            .and_then(|end| frame.get(offset..end))
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            .map_or(0, u64::from_le_bytes)
     };
-    let u16_at = |offset: usize| u16::from_le_bytes([frame[offset], frame[offset + 1]]);
+    let u16_at = |offset: usize| {
+        offset
+            .checked_add(2)
+            .and_then(|end| frame.get(offset..end))
+            .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
+            .map_or(0, u16::from_le_bytes)
+    };
     let u32_at = |offset: usize| {
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(&frame[offset..offset + 4]);
-        u32::from_le_bytes(raw)
+        offset
+            .checked_add(4)
+            .and_then(|end| frame.get(offset..end))
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map_or(0, u32::from_le_bytes)
     };
     SavedRegisters {
         rip: u64_at(0x168),
@@ -106,16 +119,16 @@ pub(crate) fn frame_is_users(saved: &SavedRegisters, stack: LinearRange) -> bool
     saved.cs & 3 == USER_PRIVILEGE
         && saved.rip != 0
         && saved.rip < USER_SPACE_END
-        && (stack.start..=stack.end).contains(&saved.rsp)
+        && (stack.start..=stack.end).contains(&BxLinAddress::new(saved.rsp))
 }
 
 /// Walks the `LIST_ENTRY` ring at `head` by its `Flink` (offset 0), returning
 /// each node's address, up to `cap`. A `Flink` chain that loops without
 /// passing back through `head` is stopped by the visited set, so a corrupt
 /// list ends the walk instead of spinning.
-pub(crate) fn walk_thread_list(
+pub(crate) fn walk_thread_list<F: FnMut(u64) -> Option<u64>>(
     head: u64,
-    mut read_flink: impl FnMut(u64) -> Option<u64>,
+    mut read_flink: F,
     cap: usize,
 ) -> Vec<u64> {
     let mut entries = Vec::new();
@@ -143,7 +156,7 @@ pub(crate) fn stack_owner(start: u64, end: u64, threads: &[WinThread]) -> Option
     threads.iter().find_map(|thread| {
         thread
             .stack
-            .filter(|stack| stack.start <= start && end <= stack.end)
+            .filter(|stack| stack.start.get() <= start && end <= stack.end.get())
             .map(|_| thread.tid)
     })
 }
@@ -179,7 +192,13 @@ mod tests {
         // A short cycle ends at the visited set, well under the cap.
         assert_eq!(walk_thread_list(0, ring(5), MAX_THREADS).len(), 5);
         // A head-terminated list (1 → 2 → head) ends normally.
-        let flat = |node: u64| Some(match node { 0 => 1, 1 => 2, _ => 0 });
+        let flat = |node: u64| {
+            Some(match node {
+                0 => 1,
+                1 => 2,
+                _ => 0,
+            })
+        };
         assert_eq!(walk_thread_list(0, flat, MAX_THREADS), [1, 2]);
         // A cap below the cycle length is honoured.
         assert_eq!(walk_thread_list(0, ring(100), 8).len(), 8);
@@ -190,8 +209,20 @@ mod tests {
     #[test]
     fn a_private_region_in_a_thread_stack_is_labelled() {
         let threads = [
-            thread(0x1A4, Some(LinearRange { start: 0x5B_0000, end: 0x60_0000 })),
-            thread(0x2B8, Some(LinearRange { start: 0x70_0000, end: 0x74_0000 })),
+            thread(
+                0x1A4,
+                Some(LinearRange {
+                    start: BxLinAddress::new(0x5B_0000),
+                    end: BxLinAddress::new(0x60_0000),
+                }),
+            ),
+            thread(
+                0x2B8,
+                Some(LinearRange {
+                    start: BxLinAddress::new(0x70_0000),
+                    end: BxLinAddress::new(0x74_0000),
+                }),
+            ),
         ];
         // A region wholly inside the first stack is that thread's.
         assert_eq!(stack_owner(0x5C_0000, 0x5E_0000, &threads), Some(0x1A4));
@@ -214,9 +245,19 @@ mod tests {
     fn a_trap_frame_decodes_at_the_offsets_windows_uses() {
         let mut frame = [0u8; TRAP_FRAME_BYTES];
         for (offset, value) in [
-            (0x30, 0xA0), (0x38, 0xC0), (0x40, 0xD0), (0x48, 0x08), (0x50, 0x09),
-            (0x58, 0x10), (0x60, 0x11), (0x140, 0xB0), (0x148, 0xD1), (0x150, 0x51),
-            (0x158, 0x7FF0_0000_8000), (0x168, 0x7FF7_1234_5678), (0x180, 0x7FF0_0000_7F00),
+            (0x30, 0xA0),
+            (0x38, 0xC0),
+            (0x40, 0xD0),
+            (0x48, 0x08),
+            (0x50, 0x09),
+            (0x58, 0x10),
+            (0x60, 0x11),
+            (0x140, 0xB0),
+            (0x148, 0xD1),
+            (0x150, 0x51),
+            (0x158, 0x7FF0_0000_8000),
+            (0x168, 0x7FF7_1234_5678),
+            (0x180, 0x7FF0_0000_7F00),
         ] {
             put(&mut frame, offset, value, 8);
         }
@@ -261,17 +302,50 @@ mod tests {
     /// pointer lies in the thread's own stack.
     #[test]
     fn a_frame_is_a_threads_own_only_with_a_user_cs_rip_and_stack() {
-        let stack = LinearRange { start: 0x10_0000, end: 0x20_0000 };
+        let stack = LinearRange {
+            start: BxLinAddress::new(0x10_0000),
+            end: BxLinAddress::new(0x20_0000),
+        };
         assert!(frame_is_users(&user_frame(), stack));
         // A WOW64 thread entered from 32-bit code (CS 0x23).
-        assert!(frame_is_users(&SavedRegisters { cs: 0x23, ..user_frame() }, stack));
+        assert!(frame_is_users(
+            &SavedRegisters {
+                cs: 0x23,
+                ..user_frame()
+            },
+            stack
+        ));
         // Entered from the kernel (CS 0x10): not user state.
-        assert!(!frame_is_users(&SavedRegisters { cs: 0x10, ..user_frame() }, stack));
+        assert!(!frame_is_users(
+            &SavedRegisters {
+                cs: 0x10,
+                ..user_frame()
+            },
+            stack
+        ));
         // A kernel RIP, or none.
-        assert!(!frame_is_users(&SavedRegisters { rip: 0xFFFF_F800_0100_0000, ..user_frame() }, stack));
-        assert!(!frame_is_users(&SavedRegisters { rip: 0, ..user_frame() }, stack));
+        assert!(!frame_is_users(
+            &SavedRegisters {
+                rip: 0xFFFF_F800_0100_0000,
+                ..user_frame()
+            },
+            stack
+        ));
+        assert!(!frame_is_users(
+            &SavedRegisters {
+                rip: 0,
+                ..user_frame()
+            },
+            stack
+        ));
         // An RSP outside the thread's stack belongs to some other frame.
-        assert!(!frame_is_users(&SavedRegisters { rsp: 0x30_0000, ..user_frame() }, stack));
+        assert!(!frame_is_users(
+            &SavedRegisters {
+                rsp: 0x30_0000,
+                ..user_frame()
+            },
+            stack
+        ));
     }
 
     #[test]
@@ -286,7 +360,10 @@ mod tests {
             saved: None,
         };
         // It is never a stack owner, whatever region is asked.
-        assert_eq!(stack_owner(0, u64::MAX, std::slice::from_ref(&kernel_thread)), None);
+        assert_eq!(
+            stack_owner(0, u64::MAX, std::slice::from_ref(&kernel_thread)),
+            None
+        );
         assert!(kernel_thread.stack.is_none());
     }
 }

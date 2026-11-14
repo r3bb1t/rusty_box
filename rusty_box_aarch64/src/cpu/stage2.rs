@@ -1,0 +1,391 @@
+//! Stage 2 translation (VMSAv8-64, FEAT_EL2): the walk of the tables
+//! `VTTBR_EL2` and `VTCR_EL2` describe, which translates the EL1&0 regime's
+//! intermediate physical addresses (IPAs) while `HCR_EL2.VM` or `DC` is set,
+//! with each granule the processor has at stage 2; the permissions it
+//! gives, EL1's and EL0's execute permission apart with FEAT_XNX; and the
+//! memory attributes its leaves make, by `HCR_EL2.FWB`'s rule with
+//! FEAT_S2FWB.
+//!
+//! Provenance (R7): the shared pseudocode of the A64 ISA XML (release
+//! 2026-09): `AArch64_S2Translate` (its checks before the walk),
+//! `AArch64_NSS2TTWParams`, `AArch64_S2DecodeTG0`, `AArch64_HaveS2TG`,
+//! `AArch64_S2TxSZFaults`, `AArch64_S2MinTxSZ`, `AArch64_MaxTxSZ`,
+//! `AArch64_S2InvalidSL`, `AArch64_S2InconsistentSL`,
+//! `AArch64_S2StartLevel`, `AArch64_IPAIsOutOfRange`,
+//! `AArch64_S2TTBaseAddress`, `AArch64_S2SLTTEntryAddress`,
+//! `AArch64_S2Walk`, `AArch64_S2NextWalkStateTable`,
+//! `AArch64_S2NextWalkStateLeaf`, `AArch64_S2LeafBase`, `Stage2OA`,
+//! `AArch64_S2OAOutOfRange`, `AArch64_S2ApplyOutputPerms`,
+//! `AArch64_S2DirectBasePermissions`, `AArch64_S2CheckPermissions`,
+//! `AArch64_S2NextWalkStateLeaf` and `AArch64_S2ApplyFWBMemAttrs`.
+//!
+//! The IMPLEMENTATION DEFINED choices are stage 1's, the pseudocode asking
+//! the same questions of both stages: a `T0SZ` outside the range is taken
+//! as the nearer limit ("Fault on TxSZ value above maximum", "... below
+//! minimum" FALSE; `regime::txsz_taken`), `TG0` naming a granule this
+//! processor lacks is the 4 KiB one ("TG0 encoded granule size"), the
+//! Contiguous bit is treated as 0 ("Treat Contiguous bit as 0"), and a
+//! descriptor with its access flag clear faults for every access, cache
+//! maintenance included ("Generate access flag fault on IC/DC operations"),
+//! unless `VTCR_EL2.HA` (FEAT_HAF) has the walk set it, as it does for the
+//! same accesses; with `VTCR_EL2.HD` (FEAT_HAFDBS) a write to a leaf whose
+//! `DBM` is set makes it writable-dirty, `S2AP[1]` set, as stage 1's
+//! hardware update of its own descriptors does to the stage 2 leaf that
+//! maps them (`mmu.rs`, `Cpu::s1_update`).
+
+use core::convert::Infallible;
+
+use super::el2::{HCR_FWB, HCR_PTW, HCR_TGE, VTCR_EL2_DS, VTCR_EL2_HA, VTCR_EL2_HD, VTCR_EL2_SL2};
+use super::features::{Feature, Features};
+use super::memattr::MemAttrs;
+use super::mmu::{
+    HwUpdate, Ipa, LeafDescriptor, LeafLevel, Level, PERM_EL0_R, PERM_EL0_W, PERM_EL0_X,
+    PERM_EL1_R, PERM_EL1_W, PERM_EL1_X, TranslationFault, WalkStart, WalkStop,
+};
+use super::regime::{Ds, Granule, OaLayout, Regime, TCR_TG0, el10_stage2_enabled, sh0, txsz_taken};
+use super::{Cpu, Levels, id};
+use crate::bus::{PhysAddr, PhysBus};
+
+/// `VTCR_EL2.T0SZ`, bits 5:0.
+const VTCR_T0SZ: u64 = 0x3F;
+/// `VTCR_EL2.SL0`, bits 7:6.
+const VTCR_SL0: u32 = 6;
+/// `VTCR_EL2.PS`, bits 18:16.
+const VTCR_PS: u32 = 16;
+
+/// Arm `AArch64_S2MinTxSZ` without FEAT_D128, for an EL1 in AArch64 state,
+/// the only one here: the smallest `T0SZ` with `granule`, under FEAT_LPA2's
+/// `ds` or not, on a processor implementing `features`, `64 -` the widest
+/// input address. That is `PAMax` bits, or where `PAMax` is 52 bits or
+/// more, 52 with the 64 KiB granule or `ds` and 48 otherwise.
+const fn s2_min_txsz(granule: Granule, ds: Ds, features: Features) -> u32 {
+    let pa_max = id::pa_bits(features);
+    let ia_max = if pa_max < 52 {
+        pa_max
+    } else if granule.holds_52_bits(ds) {
+        52
+    } else {
+        48
+    };
+    64 - ia_max
+}
+
+// `AArch64_S2InvalidSL` makes a start at level 0 with the 4 KiB granule
+// (`SL2:SL0` = 0b010) invalid where `PAMax` is under 44 bits, at level 1
+// with the 64 KiB granule (`SL0` = 0b10) under 44, and at level 1 with the
+// 16 KiB granule (0b10) under 42; on every processor here, 44 bits without
+// FEAT_LPA and 52 with it, all three are valid, and [`s2_start_level`]
+// tests `PAMax` only for the starts that need 52 bits.
+const _: () = assert!(
+    id::pa_bits(Features::of(&[])) >= 44 && id::pa_bits(Features::of(&[Feature::Lpa])) >= 44
+);
+
+/// What a stage 2 walk reads from its registers (Arm `S2TTWParams`, from
+/// `AArch64_NSS2TTWParams`): what `VTCR_EL2` says of it, `VTTBR_EL2`'s
+/// base, and `HCR_EL2.FWB`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct S2Params {
+    /// Where the walk starts and how its addresses are held ([`s2_start`]).
+    start: Option<S2Start>,
+    vttbr: u64,
+    /// The hardware updates stage 2 makes of its leaves (`VTCR_EL2.HA` and
+    /// `HD`).
+    hw: HwUpdate,
+    /// How its leaves' `MemAttr` make memory attributes (`walkparams.fwb`).
+    rule: S2AttrRule,
+}
+
+/// How a stage 2 leaf's `MemAttr` makes the memory attributes of an access
+/// stage 1 gives attributes of its own (Arm `walkparams.fwb`, `HCR_EL2.FWB`,
+/// which only a processor with FEAT_S2FWB keeps).
+///
+/// Closed (R5): `FWB`'s two values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum S2AttrRule {
+    /// `FWB` 0: stage 2's attributes (`S2DecodeMemAttrs`), combined with
+    /// stage 1's (`S2CombineS1MemAttrs`).
+    Combined,
+    /// `FWB` 1: stage 1's attributes as stage 2 forces them
+    /// (`AArch64_S2ApplyFWBMemAttrs`).
+    Forced,
+}
+
+impl S2AttrRule {
+    /// The rule `HCR_EL2` `hcr` selects.
+    pub(crate) const fn of(hcr: u64) -> Self {
+        if hcr & HCR_FWB != 0 {
+            Self::Forced
+        } else {
+            Self::Combined
+        }
+    }
+}
+
+/// Where a stage 2 walk starts: its granule (`VTCR_EL2.TG0`,
+/// [`Granule::stage2`]), the size of its input address (`64 - T0SZ`) and
+/// its start level (`SL0`'s, or `SL2:SL0`'s); and how its addresses are
+/// held and bounded, `PS` with the granule, FEAT_LPA2's `DS` and under it
+/// `SH0` ([`OaLayout::of`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct S2Start {
+    pub(crate) granule: Granule,
+    pub(crate) ia_bits: u32,
+    pub(crate) level: Level,
+    pub(crate) oa: OaLayout,
+}
+
+impl S2Start {
+    /// Whether a walk from here can end at `level` on a processor
+    /// implementing `features` ([`Granule::ends_at`]).
+    pub(crate) const fn ends_at(self, level: LeafLevel, features: Features) -> bool {
+        let ds = self.oa.ds();
+        self.granule.ends_at(self.level, level, ds, features)
+    }
+
+    /// Whether the walk translates `ipa` (Arm `AArch64_IPAIsOutOfRange`,
+    /// negated): whether it fits the input address.
+    pub(crate) const fn translates(self, ipa: Ipa) -> bool {
+        ipa.get() >> self.ia_bits == 0
+    }
+}
+
+/// Arm `AArch64_S2StartLevel` without FEAT_D128: the level a stage 2 walk
+/// with `granule` under `VTCR_EL2` `vtcr` starts at, FEAT_LPA2's `DS`
+/// effective or not (`ds`, [`Granule::effective_ds`]), on a processor
+/// implementing `features`; `None` where `AArch64_S2InvalidSL` makes the
+/// encoding invalid. With the 4 KiB granule it is `SL2:SL0`'s, `SL2`
+/// counting under `DS` alone (`AArch64_NSS2TTWParams`'s `sl2`): 0b011, a
+/// start at level 3, needs FEAT_TTST, and 0b100, a start at level -1, a
+/// 52-bit `PAMax`; 0b101, 0b110 and 0b111 name no level. With the others
+/// it is `SL0`'s: with the 16 KiB granule 0b11, a start at level 0, needs
+/// `DS` and a 52-bit `PAMax`; with the 64 KiB granule 0b11 names no level.
+const fn s2_start_level(granule: Granule, vtcr: u64, ds: Ds, features: Features) -> Option<Level> {
+    let pa_52 = id::pa_bits(features) >= 52;
+    let sl2 = ds.on() && vtcr & VTCR_EL2_SL2 != 0;
+    match (granule, sl2, (vtcr >> VTCR_SL0) & 3) {
+        (Granule::K4, false, 0b00) => Some(Level::Two),
+        (Granule::K4, false, 0b01) => Some(Level::One),
+        (Granule::K4, false, 0b10) => Some(Level::Zero),
+        (Granule::K4, false, 0b11) if features.has(Feature::Ttst) => Some(Level::Three),
+        (Granule::K4, true, 0b00) if pa_52 => Some(Level::Minus1),
+        (Granule::K16 | Granule::K64, _, 0b00) => Some(Level::Three),
+        (Granule::K16 | Granule::K64, _, 0b01) => Some(Level::Two),
+        (Granule::K16 | Granule::K64, _, 0b10) => Some(Level::One),
+        (Granule::K16, _, 0b11) if ds.on() && pa_52 => Some(Level::Zero),
+        (Granule::K4 | Granule::K16 | Granule::K64, _, _) => None,
+    }
+}
+
+/// The granule of stage 2's walks under `VTCR_EL2` `vtcr` on a processor
+/// implementing `features` (`TG0`, [`Granule::stage2`]): the one the walks
+/// and the TLB's sizes of their translations read (R5).
+pub(crate) const fn s2_granule(vtcr: u64, features: Features) -> Granule {
+    Granule::stage2(vtcr >> TCR_TG0, features)
+}
+
+/// Where a stage 2 walk under `VTCR_EL2` `vtcr` starts on a processor
+/// implementing `features`, or `None` where `AArch64_S2Translate` refuses
+/// the configuration before any walk, every translation a level 0
+/// Translation fault. Its `T0SZ` is taken as the nearer of [`s2_min_txsz`]
+/// and `AArch64_MaxTxSZ` of the granule outside them, as stage 1's
+/// ([`txsz_taken`]), but below the first with FEAT_LPA, which leaves
+/// `AArch64_S2TxSZFaults` no choice, is refused; so is an `SL0` or
+/// `SL2:SL0` `AArch64_S2InvalidSL` refuses ([`s2_start_level`]), or one
+/// whose start level does not resolve at least one bit of the input
+/// address the walk takes and at most a full level's stride and four more,
+/// the index into 16 concatenated tables (`AArch64_S2InconsistentSL`). The
+/// one test the walk and a snapshot's TLB both make (R5).
+pub(crate) const fn s2_start(vtcr: u64, features: Features) -> Option<S2Start> {
+    let granule = s2_granule(vtcr, features);
+    let ds = granule.effective_ds(vtcr & VTCR_EL2_DS != 0, features);
+    let min = s2_min_txsz(granule, ds, features);
+    let max = granule.max_txsz(features);
+    let below_min_faults = features.has(Feature::Lpa);
+    let Some(txsz) = txsz_taken((vtcr & VTCR_T0SZ) as u32, min, max, below_min_faults) else {
+        return None;
+    };
+    let Some(level) = s2_start_level(granule, vtcr, ds, features) else {
+        return None;
+    };
+    let ia_bits = 64 - txsz;
+    let lsb = granule.translation_size(level);
+    if ia_bits <= lsb || ia_bits > lsb + granule.stride() + 4 {
+        return None;
+    }
+    Some(S2Start {
+        granule,
+        ia_bits,
+        level,
+        oa: OaLayout::of(vtcr >> VTCR_PS, granule, ds, sh0(vtcr), features),
+    })
+}
+
+/// A completed stage 2 walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct S2Walked {
+    pub(crate) pa: PhysAddr,
+    /// The permissions stage 2 gives, as the stage 1 permission bits they
+    /// leave an access (`AArch64_S2DirectBasePermissions`): read and write
+    /// at EL1 and EL0 alike, a writable-clean leaf's write included, and
+    /// execute as `XN` (with FEAT_XNX, `XN[1:0]`) gives each.
+    pub(crate) perms: u8,
+    pub(crate) level: LeafLevel,
+    /// The leaf descriptor as the walk read it, at its physical address,
+    /// and the hardware updates stage 2 makes of it.
+    pub(crate) leaf: LeafDescriptor<PhysAddr>,
+    pub(crate) hw: HwUpdate,
+    /// How its `MemAttr` makes the access's attributes (`HCR_EL2.FWB`).
+    pub(crate) rule: S2AttrRule,
+    /// The descriptor's `MemAttr` and `FnXS` (false without FEAT_XS), and
+    /// the leaf's shareability — the descriptor's `SH`, or under FEAT_LPA2's
+    /// `DS` `VTCR_EL2.SH0` ([`OaLayout::shareability`]) — as they are,
+    /// read by [`S2Walked::decoded`] and [`S2Walked::forced`].
+    pub(crate) memattr: u8,
+    pub(crate) sh: u8,
+    fnxs: bool,
+}
+
+impl S2Walked {
+    /// The attributes stage 2 gives under `HCR_EL2.FWB` clear
+    /// (`S2DecodeMemAttrs`), which combine with stage 1's.
+    pub(crate) const fn decoded(&self) -> MemAttrs {
+        MemAttrs::stage2(self.memattr, self.sh, self.fnxs)
+    }
+
+    /// The attributes of an access stage 1 gives `s1` under `HCR_EL2.FWB`
+    /// set (`AArch64_S2ApplyFWBMemAttrs`).
+    pub(crate) const fn forced(&self, s1: MemAttrs) -> MemAttrs {
+        MemAttrs::forced_write_back(s1, self.memattr, self.sh, self.fnxs)
+    }
+
+    /// The attributes of an access stage 1 gives `s1` and this leaf maps,
+    /// with `HCR_EL2.CD` (`cd`) making Normal memory Non-cacheable
+    /// (`AArch64_S2TreatAsNormalNC`): under `FWB` clear stage 2's own made
+    /// so and then combined with stage 1's (`S2CombineS1MemAttrs`), under
+    /// `FWB` set the forced ones made so.
+    pub(crate) const fn combined_with(&self, s1: MemAttrs, cd: bool) -> MemAttrs {
+        match self.rule {
+            S2AttrRule::Combined => {
+                MemAttrs::combined(s1, self.decoded().normal_as_non_cacheable(cd))
+            }
+            S2AttrRule::Forced => self.forced(s1).normal_as_non_cacheable(cd),
+        }
+    }
+}
+
+/// The stage 2 permissions a descriptor gives on a processor implementing
+/// `features` (`AArch64_S2ApplyOutputPerms` and
+/// `AArch64_S2DirectBasePermissions` without FEAT_S2PIE or FEAT_HDBSS):
+/// `S2AP[0]` (bit 6) read, `S2AP[1]` (bit 7) write — or, where stage 2
+/// manages dirty state (`hw`), `DBM` (bit 51) write too, the writable-clean
+/// leaf's — at EL1 and EL0 alike; and execute as `XN` (bit 54) and, with
+/// FEAT_XNX, `XNX` (bit 53, `XN[0]`; 0 without) give it: `XN[1:0]` 0b00
+/// executable at both, 0b01 at EL0 alone, 0b10 at neither, 0b11 at EL1
+/// alone.
+const fn s2_permissions(desc: u64, hw: HwUpdate, features: Features) -> u8 {
+    let mut perms = 0;
+    if (desc >> 6) & 1 == 1 {
+        perms |= PERM_EL1_R | PERM_EL0_R;
+    }
+    if (desc >> 7) & 1 == 1 || (hw.dirty() && (desc >> 51) & 1 == 1) {
+        perms |= PERM_EL1_W | PERM_EL0_W;
+    }
+    let xn = (desc >> 54) & 1 == 1;
+    let xnx = features.has(Feature::Xnx) && (desc >> 53) & 1 == 1;
+    let (el1, el0) = match (xn, xnx) {
+        (false, false) => (true, true),
+        (false, true) => (false, true),
+        (true, false) => (false, false),
+        (true, true) => (true, false),
+    };
+    if el1 {
+        perms |= PERM_EL1_X;
+    }
+    if el0 {
+        perms |= PERM_EL0_X;
+    }
+    perms
+}
+
+impl<L: Levels> Cpu<L> {
+    /// Whether accesses translated in `regime` are translated by stage 2
+    /// as well (`AArch64_S2Translate`, reached for the EL1&0 regime with
+    /// `EL2Enabled()`, and `walkparams.vm`): `HCR_EL2.VM` or `DC` set. A
+    /// processor without EL2 tests a constant.
+    #[inline(always)]
+    pub(crate) fn stage2_enabled(&self, regime: Regime) -> bool {
+        regime == Regime::El10 && el10_stage2_enabled(self.hcr_el2())
+    }
+
+    /// Arm `AArch64_NSS2TTWParams`, as far as this processor has them.
+    fn s2_params(&self) -> S2Params {
+        let el2 = self.el2();
+        let features = self.imp.features;
+        S2Params {
+            start: s2_start(el2.vtcr, features),
+            vttbr: el2.vttbr,
+            hw: HwUpdate::of(el2.vtcr, VTCR_EL2_HA, VTCR_EL2_HD, features),
+            rule: S2AttrRule::of(el2.hcr),
+        }
+    }
+
+    /// Whether `HCR_EL2.PTW` refuses a stage 1 walk the descriptors stage
+    /// 2 maps to Device memory (`walkparams.ptw`, clear under `TGE`).
+    pub(crate) fn s2_ptw(&self) -> bool {
+        L::EL2 && self.el2().hcr & (HCR_PTW | HCR_TGE) == HCR_PTW
+    }
+
+    /// The stage 2 translation of `ipa`, as far as the walk: the checks
+    /// `AArch64_S2Translate` makes of the configuration ([`s2_start`]) and
+    /// the address (`AArch64_IPAIsOutOfRange`) before it walks, all level 0
+    /// Translation faults, then `AArch64_S2Walk` from the start level
+    /// `SL0` or `SL2:SL0` gives, which may index up to 16 concatenated
+    /// tables; every descriptor address and the output address must fit the
+    /// output size `PS` gives, else an address size fault, at level 0 for
+    /// the first descriptor and at the level of the descriptor holding the
+    /// address for the others ([`Cpu::walk_tables`], whose descriptors'
+    /// addresses are physical); and a leaf whose Access flag is clear
+    /// faults unless `VTCR_EL2.HA` has stage 2 manage it, the leaf then
+    /// going back as read for its translation to update
+    /// (`AArch64_S2Translate`, `Cpu::s2_leaf`).
+    pub(crate) fn s2_walk<B: PhysBus>(
+        &self,
+        bus: &mut B,
+        ipa: Ipa,
+    ) -> Result<S2Walked, TranslationFault> {
+        let params = self.s2_params();
+        let level0 = TranslationFault::Translation { level: Level::Zero };
+        let Some(s2_start) = params.start else {
+            return Err(level0);
+        };
+        if !s2_start.translates(ipa) {
+            return Err(level0);
+        }
+        let ipa = ipa.get();
+        let S2Start {
+            granule,
+            ia_bits,
+            level,
+            oa,
+        } = s2_start;
+        let start = WalkStart::<PhysAddr>::of_base(params.vttbr, granule, level, ia_bits, oa)?;
+        let physical = &mut |_: &mut B, address: PhysAddr| Ok::<PhysAddr, Infallible>(address);
+        let leaf = match self.walk_tables(bus, ipa, start, params.hw, physical) {
+            Ok(leaf) => leaf,
+            Err(WalkStop::Fault(fault)) => return Err(fault),
+            Err(WalkStop::Descriptor(never)) => match never {},
+        };
+        let desc = leaf.desc.value;
+        Ok(S2Walked {
+            pa: leaf.out,
+            perms: s2_permissions(desc, params.hw, self.imp.features),
+            level: leaf.level,
+            leaf: leaf.desc,
+            hw: params.hw,
+            rule: params.rule,
+            memattr: ((desc >> 2) & 0xF) as u8,
+            sh: oa.shareability(desc),
+            fnxs: self.implements(Feature::Xs) && (desc >> 11) & 1 == 1,
+        })
+    }
+}

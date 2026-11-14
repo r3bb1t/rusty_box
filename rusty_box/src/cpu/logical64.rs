@@ -7,9 +7,7 @@
 //! the CMP_EqGqR register-form (not in arith64), CMP_RAXId, and unified
 //! dispatchers that call into both this file and arith64.rs.
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================

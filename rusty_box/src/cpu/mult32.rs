@@ -2,11 +2,9 @@
 //!
 //! Based on Bochs mult32.cc
 
-use super::{
-    cpu::{Exception},
-    decoder::Instruction,
-    error::Result,
-};
+use super::cpu::Exception;
+use super::decoder::Instruction;
+use super::error::Result;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -183,9 +181,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn idiv_eax_ed_r(&mut self, instr: &Instruction) -> Result<()> {
         let edx = self.get_gpr32(2); // EDX
         let eax = self.get_gpr32(0); // EAX
-                                     // Matching C++: Bit64s op1_64 = GET64_FROM_HI32_LO32(EDX, EAX);
-                                     // GET64_FROM_HI32_LO32 is: (Bit64u(lo) | (Bit64u(hi) << 32))
-                                     // Construct as unsigned first, then cast to signed
+        // Matching C++: Bit64s op1_64 = GET64_FROM_HI32_LO32(EDX, EAX);
+        // GET64_FROM_HI32_LO32 is: (Bit64u(lo) | (Bit64u(hi) << 32))
+        // Construct as unsigned first, then cast to signed
         let op1 = ((eax as u64) | ((edx as u64) << 32)) as i64;
 
         // Check MIN_INT case
@@ -220,9 +218,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn idiv_eax_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let edx = self.get_gpr32(2); // EDX
         let eax = self.get_gpr32(0); // EAX
-                                     // Matching C++: Bit64s op1_64 = GET64_FROM_HI32_LO32(EDX, EAX);
-                                     // GET64_FROM_HI32_LO32 is: (Bit64u(lo) | (Bit64u(hi) << 32))
-                                     // Construct as unsigned first, then cast to signed
+        // Matching C++: Bit64s op1_64 = GET64_FROM_HI32_LO32(EDX, EAX);
+        // GET64_FROM_HI32_LO32 is: (Bit64u(lo) | (Bit64u(hi) << 32))
+        // Construct as unsigned first, then cast to signed
         let op1 = ((eax as u64) | ((edx as u64) << 32)) as i64;
 
         // Check MIN_INT case

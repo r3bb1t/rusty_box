@@ -15,19 +15,15 @@
 use alloc::format;
 #[cfg(feature = "alloc")]
 use alloc::string::String;
-
-use crate::{
-    cpu::ResetReason,
-    memory::BxMemC,
-    pc_system::BxPcSystemC,
-    Result,
-};
 #[cfg(feature = "std")]
 use std::io::{Error, ErrorKind};
 
-#[cfg(feature = "std")]
-use crate::snapshot::{checked_snapshot_len_add, SnapError, SnapRead, SnapResult, SnapWrite};
-
+use rusty_box_devices::api::{
+    ChipsetEffect, DeviceCtx, IoLen, IoPort, MmioDevice, PioDevice, SmramControl, WindowId,
+    WindowOffset,
+};
+use rusty_box_devices::display::card::{StdVga, VgaCard};
+use rusty_box_devices::pci::PciDevice;
 
 use super::acpi::BxAcpiCtrl;
 use super::cmos::{BxCmosC, CMOS_ADDR, CMOS_DATA};
@@ -35,22 +31,22 @@ use super::dma::BxDmaC;
 use super::fw_cfg::BxFwCfg;
 use super::irq::IrqFabric;
 use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT};
-use super::pci::BxPciBridge;
-use rusty_box_devices::pci::PciDevice;
-use super::pci2isa::BxPiix3;
+use super::pci::{BxPciBridge, PCI_CONFIG_ADDR, PCI_CONFIG_DATA, PCI_CONFIG_DATA_PORT_COUNT};
 use super::pci_ide::BxPciIde;
+use super::pci2isa::{APM_CMD_PORT, APM_STS_PORT, BxPiix3, ELCR1_PORT, ELCR2_PORT, PCI_RESET_PORT};
 use super::pic::{PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA};
 use super::pit::{
     BxPitC, PIT_CONTROL, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_SYSTEM_CONTROL_B,
 };
 use super::serial::{BxSerialC, SerialTxDrain};
-use super::BxDevicesC;
-use rusty_box_devices::api::{
-    ChipsetEffect, DeviceCtx, IoLen, MmioDevice, PioDevice, SmramControl, WindowId, WindowOffset,
-};
-use rusty_box_devices::display::card::{StdVga, VgaCard};
-use super::wiring;
-use super::DevSlot;
+use super::{BxDevicesC, DevSlot, wiring};
+use crate::Result;
+use crate::config::BxPhyAddress;
+use crate::cpu::ResetReason;
+use crate::memory::BxMemC;
+use crate::pc_system::{BxPcSystemC, Repeat};
+#[cfg(feature = "std")]
+use crate::snapshot::{SnapError, SnapRead, SnapResult, SnapWrite, checked_snapshot_len_add};
 
 /// Whichever port-mapped device a slot named, borrowed out of the manager.
 ///
@@ -69,7 +65,7 @@ pub(crate) enum PioTarget<'a> {
 }
 
 impl PioDevice for PioTarget<'_> {
-    fn pio_read(&mut self, port: u16, len: IoLen, ctx: &mut DeviceCtx<'_>) -> u32 {
+    fn pio_read(&mut self, port: IoPort, len: IoLen, ctx: &mut DeviceCtx<'_>) -> u32 {
         match self {
             Self::Serial(device) => device.pio_read(port, len, ctx),
             Self::Acpi(device) => device.pio_read(port, len, ctx),
@@ -80,7 +76,7 @@ impl PioDevice for PioTarget<'_> {
         }
     }
 
-    fn pio_write(&mut self, port: u16, value: u32, len: IoLen, ctx: &mut DeviceCtx<'_>) {
+    fn pio_write(&mut self, port: IoPort, value: u32, len: IoLen, ctx: &mut DeviceCtx<'_>) {
         match self {
             Self::Serial(device) => device.pio_write(port, value, len, ctx),
             Self::Acpi(device) => device.pio_write(port, value, len, ctx),
@@ -158,7 +154,64 @@ pub(crate) struct MmioBinding<'a> {
 /// Port 0x92 - System Control Port
 /// Bit 0: Fast A20 gate control (1 = A20 enabled)
 /// Bit 1: Fast reset (writing 1 triggers CPU reset)
-const PORT_92H: u16 = 0x0092;
+const PORT_92H: IoPort = IoPort::new(0x0092);
+
+/// How many ports the PIIX3 IDE bus-master window at BAR4 spans.
+const BMDMA_PORT_COUNT: u16 = 16;
+/// How many ports the PIIX4 ACPI power-management window spans.
+const ACPI_PM_PORT_COUNT: u16 = 64;
+/// How many ports the PIIX4 SMBus window spans.
+const ACPI_SM_PORT_COUNT: u16 = 16;
+
+/// The first port of the I/O window a base address register names, or `None`
+/// while it names none: a BAR of zero is unprogrammed, which is what Bochs's
+/// `if (base == 0)` guards around every relocation test.
+fn bar_ports(bar: u32) -> Option<IoPort> {
+    match bar as u16 {
+        0 => None,
+        base => Some(IoPort::new(base)),
+    }
+}
+
+/// The port `offset` into the window that starts at `base`.
+///
+/// Every window here either sits at a fixed place (the PCI configuration data
+/// ports, fw_cfg's DMA ports) or starts where its BAR's mask put it, aligned
+/// to the window's own size, so it ends at or before port 0xFFFF and the port
+/// exists. A window that did not fit would come from a BAR this chipset
+/// cannot produce; its ports past the end are reported and skipped, never
+/// wrapped onto port 0.
+fn window_port(base: IoPort, offset: u16) -> Option<IoPort> {
+    let port = base.checked_add(offset);
+    if port.is_none() {
+        tracing::error!("I/O window at {base:#06x} runs past port 0xFFFF at offset {offset:#x}");
+    }
+    port
+}
+
+/// A window in the BAR's own encoding — its first port, zero for none — which
+/// is how the v3 PLATFORM section stores a committed window. The inverse of
+/// [`bar_ports`].
+fn bar_ports_code(base: Option<IoPort>) -> u16 {
+    base.map_or(0, IoPort::get)
+}
+
+/// Which register of the PCI host's port block an access names.
+///
+/// The one decode `pci_io_read` and `pci_write` share, in the order Bochs's
+/// handlers claim them: the configuration mechanism's address and data ports,
+/// the PIIX3's own ports, then the IDE bus-master window at BAR4.
+#[derive(Clone, Copy)]
+enum PciHostPort {
+    ConfigAddress,
+    /// How many bytes into the addressed configuration dword the access lands.
+    ConfigData {
+        offset: u8,
+    },
+    Piix3,
+    BusMaster,
+    Unclaimed,
+}
 
 /// Port 92h state storage
 #[derive(Debug, Default, Clone)]
@@ -167,14 +220,18 @@ pub struct Port92State {
     pub(crate) value: u8,
 }
 
+/// The first and last addresses of a `size`-byte window a BAR places at
+/// `base`, or `None` for a BAR of zero, which places it nowhere.
+fn bar_window(base: u32, size: u64) -> Option<(BxPhyAddress, BxPhyAddress)> {
+    let first = BxPhyAddress::new(u64::from(base));
+    (base != 0).then_some((first, first + (size - 1)))
+}
+
 /// Fetch a BM-DMA PRD entry (physical address, raw size dword) from guest
 /// RAM. Reads past a hole or the configured guest length are zero-filled.
-fn read_bmdma_prd(
-    mem: &mut BxMemC,
-    prd_addr: u32,
-) -> (u32, u32) {
+fn read_bmdma_prd(mem: &mut BxMemC, prd_addr: u32) -> (u32, u32) {
     let mut raw = [0u8; 8];
-    match mem.read_ram(prd_addr as u64, &mut raw) {
+    match mem.read_ram(BxPhyAddress::new(u64::from(prd_addr)), &mut raw) {
         Ok(_) => {}
         Err(error) => tracing::error!("BM-DMA PRD read at {prd_addr:#x} failed: {error:?}"),
     }
@@ -303,7 +360,6 @@ pub(crate) struct MachineBoundaryEffects {
     pub(crate) memory_mapping_changed: bool,
 }
 
-
 /// Desired PLATFORM effects and mapping targets decoded from `DeviceManager`.
 ///
 /// The decoder deliberately leaves all live registrations and committed bases
@@ -318,9 +374,9 @@ pub(crate) struct PlatformSnapshotRestore {
     pub(crate) port92_a20_change_pending: bool,
     pub(crate) port92_reset_request: Option<ResetReason>,
     pub(crate) pending: PendingPlatformWork,
-    pub(crate) committed_bmdma_ports_base: u16,
-    pub(crate) committed_pm_ports_base: u16,
-    pub(crate) committed_sm_ports_base: u16,
+    pub(crate) committed_bmdma_ports_base: Option<IoPort>,
+    pub(crate) committed_pm_ports_base: Option<IoPort>,
+    pub(crate) committed_sm_ports_base: Option<IoPort>,
     pub(crate) desired_bmdma_base: u32,
     pub(crate) desired_pm_base: u32,
     pub(crate) desired_sm_base: u32,
@@ -395,14 +451,14 @@ pub struct DeviceManager {
     /// emulator drains this in `rearm_device_timers_after_hardware_reset`
     /// (transient — set and consumed within a single reset, never snapshotted).
     pub(crate) cmos_reset_timer_sync: Option<super::cmos::CmosTimerSync>,
-    /// I/O base the BM-DMA ports are currently registered at (0 = none).
+    /// First port the BM-DMA ports are currently registered at, if any.
     /// Lets a BAR4 move unregister the old range first, matching Bochs
     /// devices.cc pci_write_handler_common BAR remapping.
-    pub(crate) bmdma_ports_base: u16,
-    /// ACPI PM ports currently registered in the I/O dispatcher (0 = none).
-    pub(crate) pm_ports_base: u16,
-    /// ACPI SMBus ports currently registered in the I/O dispatcher (0 = none).
-    pub(crate) sm_ports_base: u16,
+    pub(crate) bmdma_ports_base: Option<IoPort>,
+    /// First port of the ACPI PM ports registered in the I/O dispatcher.
+    pub(crate) pm_ports_base: Option<IoPort>,
+    /// First port of the ACPI SMBus ports registered in the I/O dispatcher.
+    pub(crate) sm_ports_base: Option<IoPort>,
     /// BM-DMA sector staging buffer. Bochs pci_ide.cc timer() hands the drive
     /// a pointer into the channel bounce buffer; here the drive callbacks need
     /// `&mut BxPciIde` (abort/IRQ paths) while that buffer lives inside it, so
@@ -515,9 +571,9 @@ impl DeviceManager {
             pending: PendingPlatformWork::empty(),
             bios_1meg_access_pending: None,
             cmos_reset_timer_sync: None,
-            bmdma_ports_base: 0,
-            pm_ports_base: 0,
-            sm_ports_base: 0,
+            bmdma_ports_base: None,
+            pm_ports_base: None,
+            sm_ports_base: None,
             port92: SystemControlPort::new(),
         }
     }
@@ -541,8 +597,8 @@ impl DeviceManager {
         for decl in windows.as_slice() {
             mem.register_memory_handlers(
                 DevSlot::VGA.mmio_window_token(decl.id),
-                decl.base as crate::config::BxPhyAddress,
-                decl.end as crate::config::BxPhyAddress,
+                decl.base,
+                decl.end,
             )?;
         }
         Ok(())
@@ -577,7 +633,7 @@ impl DeviceManager {
         {
             use super::hpet::{HPET_BASE, HPET_LEN};
             let device_id = DevSlot::HPET.mmio_token();
-            mem.register_memory_handlers(device_id, HPET_BASE, HPET_BASE + HPET_LEN - 1)?;
+            mem.register_memory_handlers(device_id, HPET_BASE, HPET_BASE + (HPET_LEN - 1))?;
         }
         // 9. ACPI Power Management (Bochs: pluginACPIController->init() in devices.cc)
         self.acpi.reset();
@@ -642,15 +698,15 @@ impl DeviceManager {
             self.pci_conf_addr = 0;
             self.pending.set_to(
                 PendingPlatformWork::PCI_IDE_BAR4,
-                self.bmdma_ports_base != self.ide.bus_master.bmdma_base as u16,
+                self.bmdma_ports_base != bar_ports(self.ide.bus_master.bmdma_base),
             );
             self.pending.set_to(
                 PendingPlatformWork::ACPI_PM_PORTS,
-                self.pm_ports_base != self.acpi.pm_base as u16,
+                self.pm_ports_base != bar_ports(self.acpi.pm_base),
             );
             self.pending.set_to(
                 PendingPlatformWork::ACPI_SM_PORTS,
-                self.sm_ports_base != self.acpi.sm_base as u16,
+                self.sm_ports_base != bar_ports(self.acpi.sm_base),
             );
             self.pending.set_to(
                 PendingPlatformWork::VGA_BARS,
@@ -731,19 +787,17 @@ impl DeviceManager {
     fn register_dma_handlers(&mut self, io: &mut BxDevicesC) {
         // DMA1 ports 0x0000-0x000F (Bochs dma.cc)
         for port in 0x0000..=0x000F_u16 {
-            io.register_io_handler(DevSlot::DMA, port, "DMA controller", 0x7);
+            io.register_io_handler(DevSlot::DMA, IoPort::new(port), "DMA controller", 0x7);
         }
 
         // Page registers 0x0080-0x008F (Bochs dma.cc)
         for port in 0x0080..=0x008F_u16 {
-            io.register_io_handler(DevSlot::DMA, port, "DMA controller", 0x7);
+            io.register_io_handler(DevSlot::DMA, IoPort::new(port), "DMA controller", 0x7);
         }
 
         // DMA2 ports 0x00C0-0x00DE, step 2 (Bochs dma.cc)
-        let mut port = 0x00C0_u16;
-        while port <= 0x00DE {
-            io.register_io_handler(DevSlot::DMA, port, "DMA controller", 0x7);
-            port += 2;
+        for port in (0x00C0..=0x00DE_u16).step_by(2) {
+            io.register_io_handler(DevSlot::DMA, IoPort::new(port), "DMA controller", 0x7);
         }
     }
 
@@ -772,22 +826,32 @@ impl DeviceManager {
     fn register_harddrv_handlers(&mut self, io: &mut BxDevicesC) {
         // Primary ATA (0x1F0-0x1F7, 0x3F6)
         for port in 0x1F0..=0x1F7_u16 {
-            io.register_io_handler(DevSlot::IDE, port, "ATA Primary", 0x7);
+            io.register_io_handler(DevSlot::IDE, IoPort::new(port), "ATA Primary", 0x7);
         }
-        io.register_io_handler(DevSlot::IDE, 0x3F6, "ATA Primary Control", 0x1);
+        io.register_io_handler(
+            DevSlot::IDE,
+            super::harddrv::ATA_PRIMARY_CONTROL_PORT,
+            "ATA Primary Control",
+            0x1,
+        );
 
         // Secondary ATA (0x170-0x177, 0x376)
         for port in 0x170..=0x177_u16 {
-            io.register_io_handler(DevSlot::IDE, port, "ATA Secondary", 0x7);
+            io.register_io_handler(DevSlot::IDE, IoPort::new(port), "ATA Secondary", 0x7);
         }
-        io.register_io_handler(DevSlot::IDE, 0x376, "ATA Secondary Control", 0x1);
+        io.register_io_handler(
+            DevSlot::IDE,
+            super::harddrv::ATA_SECONDARY_CONTROL_PORT,
+            "ATA Secondary Control",
+            0x1,
+        );
     }
 
     /// Register Serial Port I/O handlers
     fn register_serial_handlers(&mut self, io: &mut BxDevicesC) {
         // COM1: 0x3F8-0x3FF (8 registers)
         for port in 0x3F8..=0x3FF_u16 {
-            io.register_io_handler(DevSlot::SERIAL, port, "16550 COM1", 0x1);
+            io.register_io_handler(DevSlot::SERIAL, IoPort::new(port), "16550 COM1", 0x1);
         }
     }
 
@@ -799,7 +863,12 @@ impl DeviceManager {
         //   DEV_register_iowrite_handler(..., ACPI_DBG_IO_ADDR, "ACPI", 4)
         // WRITE only, and only 4-byte accesses. Reads and 1/2-byte writes are
         // unmapped in Bochs (default handler: 0xFFFFFFFF / ignored).
-        io.register_io_write_handler(DevSlot::ACPI, 0xB044, "ACPI Debug", 0x4);
+        io.register_io_write_handler(
+            DevSlot::ACPI,
+            super::acpi::ACPI_DBG_IO_ADDR,
+            "ACPI Debug",
+            0x4,
+        );
         // NOTE: the SMI command port (0xB2) is NOT registered by Bochs acpi.cc —
         // it belongs to the PIIX3 bridge (pci2isa.cc), which forwards writes to
         // DEV_acpi_generate_smi. rusty registers it in register_pci_handlers.
@@ -807,36 +876,38 @@ impl DeviceManager {
 
     /// Register ACPI PM I/O port range (called when PM base changes via PCI config).
     pub fn register_acpi_pm_ports(&mut self, io: &mut BxDevicesC) {
-        let base = self.acpi.pm_base as u16;
-        if base == 0 {
+        let Some(base) = bar_ports(self.acpi.pm_base) else {
             return;
-        }
+        };
         // Register 64 ports at PM base — Bochs acpi.cc
-        for offset in 0..64u16 {
+        for offset in 0..ACPI_PM_PORT_COUNT {
             let mask = self.acpi.pm_io_mask(offset as u8);
             if mask != 0 {
-                io.register_io_handler(DevSlot::ACPI, base + offset, "ACPI PM", mask);
+                if let Some(port) = window_port(base, offset) {
+                    io.register_io_handler(DevSlot::ACPI, port, "ACPI PM", mask);
+                }
             }
         }
         self.acpi.pm_ports_registered = true;
-        self.pm_ports_base = base;
+        self.pm_ports_base = Some(base);
     }
 
     /// Register ACPI SMBus I/O port range (called when SM base changes via PCI config).
     pub fn register_acpi_sm_ports(&mut self, io: &mut BxDevicesC) {
-        let base = self.acpi.sm_base as u16;
-        if base == 0 {
+        let Some(base) = bar_ports(self.acpi.sm_base) else {
             return;
-        }
+        };
         // Register 16 ports at SM base — Bochs acpi.cc
-        for offset in 0..16u16 {
+        for offset in 0..ACPI_SM_PORT_COUNT {
             let mask = self.acpi.sm_io_mask(offset as u8);
             if mask != 0 {
-                io.register_io_handler(DevSlot::ACPI, base + offset, "ACPI SMBus", mask);
+                if let Some(port) = window_port(base, offset) {
+                    io.register_io_handler(DevSlot::ACPI, port, "ACPI SMBus", mask);
+                }
             }
         }
         self.acpi.sm_ports_registered = true;
-        self.sm_ports_base = base;
+        self.sm_ports_base = Some(base);
     }
 
     /// Register PCI bus I/O handlers.
@@ -845,16 +916,13 @@ impl DeviceManager {
     /// Bochs: devices.cc (PCI bridge init order)
     fn register_pci_handlers(&mut self, io: &mut BxDevicesC) {
         // PCI config address register (0xCF8) — 4-byte write only
-        io.register_io_handler(
-            DevSlot::PCI,
-            super::pci::PCI_CONFIG_ADDR,
-            "PCI Config Addr",
-            0x4,
-        );
+        io.register_io_handler(DevSlot::PCI, PCI_CONFIG_ADDR, "PCI Config Addr", 0x4);
 
         // PCI config data register (0xCFC-0xCFF) — 1/2/4-byte
-        for port in 0x0CFC..=0x0CFF_u16 {
-            io.register_io_handler(DevSlot::PCI, port, "PCI Config Data", 0x7);
+        for offset in 0..PCI_CONFIG_DATA_PORT_COUNT {
+            if let Some(port) = window_port(PCI_CONFIG_DATA, offset) {
+                io.register_io_handler(DevSlot::PCI, port, "PCI Config Data", 0x7);
+            }
         }
 
         // PIIX3 I/O ports: APM (0xB2-0xB3), ELCR (0x4D0-0x4D1), CPU reset
@@ -862,14 +930,9 @@ impl DeviceManager {
         // handler is registered with mask 3 so the 16-bit `outw 0xB2, ax`
         // idiom reaches the handler (apms loads from the high byte); all
         // other ports and the 0xB2 read side are 1-byte.
-        io.register_io_read_handler(DevSlot::PCI, super::pci2isa::APM_CMD_PORT, "PIIX3", 0x1);
-        io.register_io_write_handler(DevSlot::PCI, super::pci2isa::APM_CMD_PORT, "PIIX3", 0x3);
-        for port in [
-            super::pci2isa::APM_STS_PORT,
-            super::pci2isa::ELCR1_PORT,
-            super::pci2isa::ELCR2_PORT,
-            super::pci2isa::PCI_RESET_PORT,
-        ] {
+        io.register_io_read_handler(DevSlot::PCI, APM_CMD_PORT, "PIIX3", 0x1);
+        io.register_io_write_handler(DevSlot::PCI, APM_CMD_PORT, "PIIX3", 0x3);
+        for port in [APM_STS_PORT, ELCR1_PORT, ELCR2_PORT, PCI_RESET_PORT] {
             io.register_io_handler(DevSlot::PCI, port, "PIIX3", 0x1);
         }
     }
@@ -877,26 +940,65 @@ impl DeviceManager {
     /// Register fw_cfg I/O handlers.
     /// Ports: 0x510 (selector), 0x511 (data), 0x514-0x51B (DMA).
     fn register_fw_cfg_handlers(&mut self, io: &mut BxDevicesC) {
+        use super::fw_cfg::{
+            FW_CFG_DATA_PORT, FW_CFG_DMA_BASE, FW_CFG_DMA_PORT_COUNT, FW_CFG_IO_BASE,
+        };
         // Selector port: 1-byte read, 2-byte write
-        io.register_io_read_handler(DevSlot::FW_CFG, 0x510, "fw_cfg selector", 0x1);
-        io.register_io_write_handler(DevSlot::FW_CFG, 0x510, "fw_cfg selector", 0x3);
+        io.register_io_read_handler(DevSlot::FW_CFG, FW_CFG_IO_BASE, "fw_cfg selector", 0x1);
+        io.register_io_write_handler(DevSlot::FW_CFG, FW_CFG_IO_BASE, "fw_cfg selector", 0x3);
         // Data port: 1-byte read and write
-        io.register_io_read_handler(DevSlot::FW_CFG, 0x511, "fw_cfg data", 0x1);
-        io.register_io_write_handler(DevSlot::FW_CFG, 0x511, "fw_cfg data", 0x3);
+        io.register_io_read_handler(DevSlot::FW_CFG, FW_CFG_DATA_PORT, "fw_cfg data", 0x1);
+        io.register_io_write_handler(DevSlot::FW_CFG, FW_CFG_DATA_PORT, "fw_cfg data", 0x3);
         // DMA ports: 0x514-0x51B, 1/2/4-byte read and write
-        for port in 0x514..=0x51B_u16 {
-            io.register_io_handler(DevSlot::FW_CFG, port, "fw_cfg dma", 0x7);
+        for offset in 0..FW_CFG_DMA_PORT_COUNT {
+            if let Some(port) = window_port(FW_CFG_DMA_BASE, offset) {
+                io.register_io_handler(DevSlot::FW_CFG, port, "fw_cfg dma", 0x7);
+            }
+        }
+    }
+
+    /// Which register of the PCI host's port block `port` names — see
+    /// [`PciHostPort`].
+    fn decode_pci_port(&self, port: IoPort) -> PciHostPort {
+        match port {
+            PCI_CONFIG_ADDR => PciHostPort::ConfigAddress,
+            APM_CMD_PORT | APM_STS_PORT | ELCR1_PORT | ELCR2_PORT | PCI_RESET_PORT => {
+                PciHostPort::Piix3
+            }
+            _ => {
+                let data_offset = port.offset_from(PCI_CONFIG_DATA);
+                if data_offset < PCI_CONFIG_DATA_PORT_COUNT {
+                    PciHostPort::ConfigData {
+                        offset: data_offset as u8,
+                    }
+                } else if self.bmdma_window_holds(port) {
+                    PciHostPort::BusMaster
+                } else {
+                    PciHostPort::Unclaimed
+                }
+            }
+        }
+    }
+
+    /// Whether `port` lies in the bus-master window BAR4 names: the sixteen
+    /// ports `register_pci_ide_bmdma_ports` registers, a window at the top of
+    /// the port space (BAR4 = 0xFFF0) included. Bochs pci_ide.cc
+    /// bx_pci_ide_c::read_handler takes the register as `address - bmdma_addr`.
+    fn bmdma_window_holds(&self, port: IoPort) -> bool {
+        match bar_ports(self.ide.bus_master.bmdma_base) {
+            Some(base) => port.offset_from(base) < BMDMA_PORT_COUNT,
+            None => false,
         }
     }
 
     /// Route a PCI config space read to the correct device.
     /// Bochs: devices.cc bx_devices_c::pci_read_handler() (inline in read_handler)
-    fn pci_io_read(&self, address: u16, io_len: u8) -> u32 {
-        match address {
+    fn pci_io_read(&self, port: IoPort, io_len: u8) -> u32 {
+        match self.decode_pci_port(port) {
             // Config address register (0xCF8)
-            0x0CF8 => self.pci_conf_addr,
+            PciHostPort::ConfigAddress => self.pci_conf_addr,
             // Config data register (0xCFC-0xCFF)
-            0x0CFC..=0x0CFF => {
+            PciHostPort::ConfigData { offset } => {
                 let conf_addr = self.pci_conf_addr;
                 if conf_addr & 0x8000_0000 == 0 {
                     return 0xFFFF_FFFF; // not enabled
@@ -904,7 +1006,6 @@ impl DeviceManager {
                 let bus = ((conf_addr >> 16) & 0xFF) as u8;
                 let devfunc = ((conf_addr >> 8) & 0xFF) as u8;
                 let reg = (conf_addr & 0xFC) as u8;
-                let offset = (address - 0x0CFC) as u8;
 
                 if bus != 0 {
                     return 0xFFFF_FFFF; // only bus 0 implemented
@@ -914,16 +1015,9 @@ impl DeviceManager {
                 self.pci_device_read(devfunc, reg_addr, io_len)
             }
             // APM + ELCR + CPU reset ports → PIIX3
-            0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 | 0x0CF9 => self.pci2isa.read(address),
-            _ => {
-                // BM-DMA ports
-                let base = self.ide.bus_master.bmdma_base as u16;
-                if base > 0 && address >= base && address < base + 16 {
-                    self.ide.bus_master.bmdma_read(address, io_len)
-                } else {
-                    0xFFFF_FFFF
-                }
-            }
+            PciHostPort::Piix3 => self.pci2isa.read(port),
+            PciHostPort::BusMaster => self.ide.bus_master.bmdma_read(port, io_len),
+            PciHostPort::Unclaimed => 0xFFFF_FFFF,
         }
     }
 
@@ -949,21 +1043,26 @@ impl DeviceManager {
     /// Relocate PCI IDE BM-DMA I/O ports to the currently programmed BAR4.
     fn register_pci_ide_bmdma_ports(&mut self, io: &mut BxDevicesC) {
         let old_base = self.bmdma_ports_base;
-        let new_base = self.ide.bus_master.bmdma_base as u16;
+        let new_base = bar_ports(self.ide.bus_master.bmdma_base);
         if old_base == new_base {
             return;
         }
-        if old_base != 0 {
-            for offset in 0..16u16 {
+        if let Some(old_base) = old_base {
+            for offset in 0..BMDMA_PORT_COUNT {
                 if self.ide.bus_master.bmdma_io_mask(offset as u8) != 0 {
-                    io.unregister_io_handler(old_base + offset);
+                    if let Some(port) = window_port(old_base, offset) {
+                        io.unregister_io_handler(port);
+                    }
                 }
             }
         }
-        if new_base != 0 {
-            for offset in 0..16u16 {
+        if let Some(new_base) = new_base {
+            for offset in 0..BMDMA_PORT_COUNT {
                 let mask = self.ide.bus_master.bmdma_io_mask(offset as u8);
                 if mask != 0 {
+                    let Some(port) = window_port(new_base, offset) else {
+                        continue;
+                    };
                     // The bus-master window registers to the PCI slot, not a
                     // slot of its own: `pci_io_read`/`pci_write` recognise it
                     // by range against the live BAR4 value, which keeps the
@@ -972,57 +1071,58 @@ impl DeviceManager {
                     // handler instead, so a dedicated slot is the more faithful
                     // shape — it needs the stale-registration window closed
                     // first, which is why it is not one yet.
-                    io.register_io_handler(
-                        DevSlot::PCI,
-                        new_base + offset,
-                        "PCI IDE BM-DMA",
-                        mask,
-                    );
+                    io.register_io_handler(DevSlot::PCI, port, "PCI IDE BM-DMA", mask);
                 }
             }
         }
         self.bmdma_ports_base = new_base;
         tracing::debug!(
-            "PCI IDE BM-DMA ports relocated {old_base:#06x} -> {new_base:#06x}"
+            "PCI IDE BM-DMA ports relocated {:#06x} -> {:#06x}",
+            bar_ports_code(old_base),
+            bar_ports_code(new_base)
         );
     }
 
     fn relocate_acpi_pm_ports(&mut self, io: &mut BxDevicesC) {
         let old_base = self.pm_ports_base;
-        let new_base = self.acpi.pm_base as u16;
+        let new_base = bar_ports(self.acpi.pm_base);
         if old_base == new_base {
             return;
         }
-        if old_base != 0 {
-            for offset in 0..64u16 {
+        if let Some(old_base) = old_base {
+            for offset in 0..ACPI_PM_PORT_COUNT {
                 if self.acpi.pm_io_mask(offset as u8) != 0 {
-                    io.unregister_io_handler(old_base + offset);
+                    if let Some(port) = window_port(old_base, offset) {
+                        io.unregister_io_handler(port);
+                    }
                 }
             }
         }
         self.acpi.pm_ports_registered = false;
-        self.pm_ports_base = 0;
-        if new_base != 0 {
+        self.pm_ports_base = None;
+        if new_base.is_some() {
             self.register_acpi_pm_ports(io);
         }
     }
 
     fn relocate_acpi_sm_ports(&mut self, io: &mut BxDevicesC) {
         let old_base = self.sm_ports_base;
-        let new_base = self.acpi.sm_base as u16;
+        let new_base = bar_ports(self.acpi.sm_base);
         if old_base == new_base {
             return;
         }
-        if old_base != 0 {
-            for offset in 0..16u16 {
+        if let Some(old_base) = old_base {
+            for offset in 0..ACPI_SM_PORT_COUNT {
                 if self.acpi.sm_io_mask(offset as u8) != 0 {
-                    io.unregister_io_handler(old_base + offset);
+                    if let Some(port) = window_port(old_base, offset) {
+                        io.unregister_io_handler(port);
+                    }
                 }
             }
         }
         self.acpi.sm_ports_registered = false;
-        self.sm_ports_base = 0;
-        if new_base != 0 {
+        self.sm_ports_base = None;
+        if new_base.is_some() {
             self.register_acpi_sm_ports(io);
         }
     }
@@ -1161,20 +1261,15 @@ impl DeviceManager {
     }
 
     /// Transactionally relocate both VGA PCI memory BARs.
-    fn reregister_vga_bars(
-        &mut self,
-        mem: &mut crate::memory::BxMemC,
-    ) -> Result<bool> {
-        use rusty_box_devices::display::vga::{VgaWindow, PCI_VGA_MMIO_SIZE};
+    fn reregister_vga_bars(&mut self, mem: &mut crate::memory::BxMemC) -> Result<bool> {
+        use rusty_box_devices::display::vga::{PCI_VGA_MMIO_SIZE, VgaWindow};
         let mut changed = false;
 
         if let Some((old_base, new_base)) = self.vga.peek_pending_lfb_relocate() {
             let device_id = DevSlot::VGA.mmio_window_token(VgaWindow::Lfb.id());
             let size = u64::from(self.vga.lfb_size());
-            let old_range =
-                (old_base != 0).then_some((u64::from(old_base), u64::from(old_base) + size - 1));
-            let new_range =
-                (new_base != 0).then_some((u64::from(new_base), u64::from(new_base) + size - 1));
+            let old_range = bar_window(old_base, size);
+            let new_range = bar_window(new_base, size);
             mem.relocate_memory_handlers(device_id, old_range, new_range)?;
             self.vga.commit_pending_lfb_relocate();
             changed = old_base != new_base;
@@ -1184,10 +1279,8 @@ impl DeviceManager {
         if let Some((old_base, new_base)) = self.vga.peek_pending_mmio_relocate() {
             let device_id = DevSlot::VGA.mmio_window_token(VgaWindow::Registers.id());
             let size = u64::from(PCI_VGA_MMIO_SIZE);
-            let old_range =
-                (old_base != 0).then_some((u64::from(old_base), u64::from(old_base) + size - 1));
-            let new_range =
-                (new_base != 0).then_some((u64::from(new_base), u64::from(new_base) + size - 1));
+            let old_range = bar_window(old_base, size);
+            let new_range = bar_window(new_base, size);
             mem.relocate_memory_handlers(device_id, old_range, new_range)?;
             self.vga.commit_pending_mmio_relocate();
             changed |= old_base != new_base;
@@ -1234,7 +1327,7 @@ impl DeviceManager {
         // Bochs pci_ide.cc timer: READ DMA waits for the drive's data_ready
         // handshake (bmdma_start_transfer), re-polling at 1 us.
         if pci_ide.bmdma[channel].cmd_rwcon && !pci_ide.bmdma[channel].data_ready {
-            if let Err(error) = pcs.activate_timer_usec(timer_index, 1, false) {
+            if let Err(error) = pcs.activate_timer_usec(timer_index, 1, Repeat::Once) {
                 tracing::error!("BM-DMA ch={channel}: data-ready re-arm failed: {error:?}");
             }
             return;
@@ -1242,9 +1335,8 @@ impl DeviceManager {
 
         // Fetch the current PRD entry (8 bytes: physical addr, size) from
         // guest RAM. Bochs pci_ide.cc timer: DEV_MEM_READ_PHYSICAL.
-        let (prd_addr, prd_size_raw) =
-            read_bmdma_prd(mem, pci_ide.bmdma[channel].prd_current);
-        let mut size = (prd_size_raw & 0xfffe) as usize;
+        let (prd_addr, prd_size_raw) = read_bmdma_prd(mem, pci_ide.bmdma[channel].prd_current);
+        let mut size = (prd_size_raw & 0xFFFE) as usize;
         if size == 0 {
             size = 0x10000;
         }
@@ -1282,7 +1374,7 @@ impl DeviceManager {
             let idx = pci_ide.bmdma[channel].buffer_idx;
             let end = (idx + size).min(pci_ide.bmdma[channel].buffer.len());
             let payload = &pci_ide.bmdma[channel].buffer[idx..end];
-            match mem.write_ram(prd_addr as u64, payload) {
+            match mem.write_ram(BxPhyAddress::new(u64::from(prd_addr)), payload) {
                 Ok(copied) if copied == payload.len() => {
                     pci_ide.bmdma[channel].buffer_idx = end;
                 }
@@ -1307,7 +1399,7 @@ impl DeviceManager {
             let end = (top + size).min(pci_ide.bmdma[channel].buffer.len());
             let guest_buffer = &mut pci_ide.bmdma[channel].buffer[top..end];
             guest_buffer.fill(0);
-            let copied = match mem.read_ram(prd_addr as u64, guest_buffer) {
+            let copied = match mem.read_ram(BxPhyAddress::new(u64::from(prd_addr)), guest_buffer) {
                 Ok(copied) => copied,
                 Err(error) => {
                     tracing::error!("BM-DMA write ch={channel}: guest read failed: {error:?}");
@@ -1322,8 +1414,7 @@ impl DeviceManager {
                 (pci_ide.bmdma[channel].buffer_top - pci_ide.bmdma[channel].buffer_idx) as i64;
             while count > 511 {
                 let idx = pci_ide.bmdma[channel].buffer_idx;
-                ide_scratch[..512]
-                    .copy_from_slice(&pci_ide.bmdma[channel].buffer[idx..idx + 512]);
+                ide_scratch[..512].copy_from_slice(&pci_ide.bmdma[channel].buffer[idx..idx + 512]);
                 if harddrv.bmdma_write_sector(channel as u8, &ide_scratch[..512], irq, pci_ide) {
                     pci_ide.bmdma[channel].buffer_idx += 512;
                     count -= 512;
@@ -1356,13 +1447,13 @@ impl DeviceManager {
             pci_ide.bmdma[channel].buffer_top = residue;
             pci_ide.bmdma[channel].buffer_idx = 0;
             pci_ide.bmdma[channel].prd_current += 8;
-            let (_, next_size_raw) =
-                read_bmdma_prd(mem, pci_ide.bmdma[channel].prd_current);
-            let mut next_size = next_size_raw & 0xfffe;
+            let (_, next_size_raw) = read_bmdma_prd(mem, pci_ide.bmdma[channel].prd_current);
+            let mut next_size = next_size_raw & 0xFFFE;
             if next_size == 0 {
                 next_size = 0x10000;
             }
-            if let Err(error) = pcs.activate_timer_usec(timer_index, (next_size >> 4) | 0x10, false)
+            if let Err(error) =
+                pcs.activate_timer_usec(timer_index, (next_size >> 4) | 0x10, Repeat::Once)
             {
                 tracing::error!("BM-DMA ch={channel}: next-PRD re-arm failed: {error:?}");
             }
@@ -1440,24 +1531,46 @@ impl DeviceManager {
              PIC master_offset={:#04x} slave_offset={:#04x}\n\
              IAC calls={} vector_hist[0x20]={} vector_hist[0x21]={} vector_hist[0x08]={} vector_hist[0x2E]={}",
             self.pit.diag_fires,
-            self.pit.diag_irq0_latched, self.pit.diag_irq0_already_high,
-            c0.mode, c0.inlatch, c0.count, c0.count_written, c0.gate, c0.output, c0.first_pass,
-            pic.master.isr, pic.master.irr, pic.master.imr,
+            self.pit.diag_irq0_latched,
+            self.pit.diag_irq0_already_high,
+            c0.mode,
+            c0.inlatch,
+            c0.count,
+            c0.count_written,
+            c0.gate,
+            c0.output,
+            c0.first_pass,
+            pic.master.isr,
+            pic.master.irr,
+            pic.master.imr,
             pic.master.int_pin,
-            pic.master.irq_in[0], pic.master.irq_in[1],
-            pic.master.irq_in[2], pic.master.irq_in[3],
-            pic.master.irq_in[4], pic.master.irq_in[5],
-            pic.master.irq_in[6], pic.master.irq_in[7],
-            pic.slave.isr, pic.slave.irr, pic.slave.imr,
+            pic.master.irq_in[0],
+            pic.master.irq_in[1],
+            pic.master.irq_in[2],
+            pic.master.irq_in[3],
+            pic.master.irq_in[4],
+            pic.master.irq_in[5],
+            pic.master.irq_in[6],
+            pic.master.irq_in[7],
+            pic.slave.isr,
+            pic.slave.irr,
+            pic.slave.imr,
             pic.slave.int_pin,
-            pic.slave.irq_in[0], pic.slave.irq_in[1],
-            pic.slave.irq_in[2], pic.slave.irq_in[3],
-            pic.slave.irq_in[4], pic.slave.irq_in[5],
-            pic.slave.irq_in[6], pic.slave.irq_in[7],
-            pic.master.interrupt_offset, pic.slave.interrupt_offset,
+            pic.slave.irq_in[0],
+            pic.slave.irq_in[1],
+            pic.slave.irq_in[2],
+            pic.slave.irq_in[3],
+            pic.slave.irq_in[4],
+            pic.slave.irq_in[5],
+            pic.slave.irq_in[6],
+            pic.slave.irq_in[7],
+            pic.master.interrupt_offset,
+            pic.slave.interrupt_offset,
             self.irq.acknowledge_count(),
-            self.irq.vectors_acknowledged(0x20), self.irq.vectors_acknowledged(0x21),
-            self.irq.vectors_acknowledged(0x08), self.irq.vectors_acknowledged(0x2E),
+            self.irq.vectors_acknowledged(0x20),
+            self.irq.vectors_acknowledged(0x21),
+            self.irq.vectors_acknowledged(0x08),
+            self.irq.vectors_acknowledged(0x2E),
         )
     }
 
@@ -1521,7 +1634,7 @@ impl DeviceManager {
         wiring::AccessClock::Machine
     }
 
-    pub(crate) fn bind_pio(&mut self, slot: DevSlot, port: u16) -> Option<PioBinding<'_>> {
+    pub(crate) fn bind_pio(&mut self, slot: DevSlot, port: IoPort) -> Option<PioBinding<'_>> {
         let clock = self.access_clock_for(slot);
         let Self {
             ref mut irq,
@@ -1554,7 +1667,10 @@ impl DeviceManager {
             }
             DevSlot::CMOS => {
                 handles.set(BxCmosC::PERIODIC_TIMER_LOCAL, cmos.periodic_timer_handle);
-                handles.set(BxCmosC::ONE_SECOND_TIMER_LOCAL, cmos.one_second_timer_handle);
+                handles.set(
+                    BxCmosC::ONE_SECOND_TIMER_LOCAL,
+                    cmos.one_second_timer_handle,
+                );
                 handles.set(BxCmosC::UIP_TIMER_LOCAL, cmos.uip_timer_handle);
                 PioTarget::Cmos(cmos)
             }
@@ -1633,27 +1749,27 @@ impl DeviceManager {
     // ─── Dispatch methods called from BxDevicesC via DevSlot ───
 
     /// Port 92h read dispatch (System Control Port)
-    pub(crate) fn port92_read(&self, _port: u16, _io_len: u8) -> u32 {
+    pub(crate) fn port92_read(&self, _port: IoPort, _io_len: u8) -> u32 {
         self.port92.read() as u32
     }
 
     /// Port 92h write dispatch (System Control Port)
-    pub(crate) fn port92_write(&mut self, _port: u16, value: u32, _io_len: u8) {
+    pub(crate) fn port92_write(&mut self, _port: IoPort, value: u32, _io_len: u8) {
         self.port92.write(value as u8);
     }
 
     /// PCI I/O read dispatch
-    pub(crate) fn pci_read(&self, address: u16, io_len: u8) -> u32 {
-        self.pci_io_read(address, io_len)
+    pub(crate) fn pci_read(&self, port: IoPort, io_len: u8) -> u32 {
+        self.pci_io_read(port, io_len)
     }
 
     /// PCI I/O write dispatch
-    pub(crate) fn pci_write(&mut self, address: u16, value: u32, io_len: u8) {
-        match address {
-            0x0CF8 => {
+    pub(crate) fn pci_write(&mut self, port: IoPort, value: u32, io_len: u8) {
+        match self.decode_pci_port(port) {
+            PciHostPort::ConfigAddress => {
                 self.pci_conf_addr = value;
             }
-            0x0CFC..=0x0CFF => {
+            PciHostPort::ConfigData { offset } => {
                 let conf_addr = self.pci_conf_addr;
                 if conf_addr & 0x8000_0000 == 0 {
                     return;
@@ -1661,7 +1777,6 @@ impl DeviceManager {
                 let bus = ((conf_addr >> 16) & 0xFF) as u8;
                 let devfunc = ((conf_addr >> 8) & 0xFF) as u8;
                 let reg = (conf_addr & 0xFC) as u8;
-                let offset = (address - 0x0CFC) as u8;
                 if bus != 0 {
                     return;
                 }
@@ -1684,8 +1799,7 @@ impl DeviceManager {
                         }
                     }
                     BxPiix3::DEVFUNC => {
-                        let effects =
-                            pci_config_write(&mut self.pci2isa, reg_addr, value, io_len);
+                        let effects = pci_config_write(&mut self.pci2isa, reg_addr, value, io_len);
                         if let Some(effects) = effects {
                             if effects.bios_write_changed {
                                 self.pending.insert(PendingPlatformWork::BIOS_WRITE);
@@ -1729,9 +1843,9 @@ impl DeviceManager {
                     _ => {}
                 }
             }
-            0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 | 0x0CF9 => {
-                self.pci2isa.write(address, value, io_len);
-                if address == 0x00B2 {
+            PciHostPort::Piix3 => {
+                self.pci2isa.write(port, value, io_len);
+                if port == APM_CMD_PORT {
                     // Bochs pci2isa.cc case 0x00b2: apmc/apms are stored by
                     // pci2isa.write above; DEV_acpi_generate_smi delivers the
                     // SMI (when APMC_EN is set) and the GUEST's SMM handler is
@@ -1753,19 +1867,15 @@ impl DeviceManager {
                     self.irq.pic_mut().set_mode(false, elcr2);
                 }
             }
-            _ => {
-                let base = self.ide.bus_master.bmdma_base as u16;
-                if base > 0 && address >= base && address < base + 16 {
-                    self.ide.bus_master.bmdma_write(address, value, io_len);
-                }
-            }
+            PciHostPort::BusMaster => self.ide.bus_master.bmdma_write(port, value, io_len),
+            PciHostPort::Unclaimed => {}
         }
     }
 
     /// fw_cfg I/O write dispatch. The guest DMA descriptor names guest RAM,
     /// so the port write carries the machine's memory borrow with it.
-    pub(crate) fn fw_cfg_write(&mut self, address: u16, value: u32, io_len: u8, mem: &mut BxMemC) {
-        self.fw_cfg.write_port(address, value, io_len, mem);
+    pub(crate) fn fw_cfg_write(&mut self, port: IoPort, value: u32, io_len: u8, mem: &mut BxMemC) {
+        self.fw_cfg.write_port(port, value, io_len, mem);
     }
 }
 
@@ -1860,11 +1970,7 @@ impl SystemControlPort {
     /// Bochs devices.cc: return(BX_GET_ENABLE_A20() << 1)
     pub fn read(&self) -> u8 {
         // Bit 1 = A20 gate state, Bit 0 = 0 (reset trigger write-only)
-        if self.a20_gate {
-            0x02
-        } else {
-            0x00
-        }
+        if self.a20_gate { 0x02 } else { 0x00 }
     }
 }
 
@@ -1878,18 +1984,14 @@ fn validate_snapshot_io_base(base: u32, alignment: u32, span: u32) -> SnapResult
     if base == 0 {
         return Ok(());
     }
-    if alignment == 0
-        || !alignment.is_power_of_two()
-        || span == 0
-        || base & (alignment - 1) != 0
-    {
+    if alignment == 0 || !alignment.is_power_of_two() || span == 0 || base & (alignment - 1) != 0 {
         return Err(invalid_platform_snapshot(
             "snapshot I/O mapping base is not canonically aligned",
         ));
     }
-    let end = base.checked_add(span - 1).ok_or_else(|| {
-        invalid_platform_snapshot("snapshot I/O mapping range overflows")
-    })?;
+    let end = base
+        .checked_add(span - 1)
+        .ok_or_else(|| invalid_platform_snapshot("snapshot I/O mapping range overflows"))?;
     if end > u32::from(u16::MAX) {
         return Err(invalid_platform_snapshot(
             "snapshot I/O mapping range exceeds the port space",
@@ -1908,18 +2010,13 @@ fn validate_snapshot_memory_bar(base: u32, size: u32) -> SnapResult<()> {
             "snapshot PCI memory BAR is not canonically aligned",
         ));
     }
-    base.checked_add(size - 1).ok_or_else(|| {
-        invalid_platform_snapshot("snapshot PCI memory BAR range overflows")
-    })?;
+    base.checked_add(size - 1)
+        .ok_or_else(|| invalid_platform_snapshot("snapshot PCI memory BAR range overflows"))?;
     Ok(())
 }
 
 #[cfg(feature = "std")]
-fn validate_snapshot_mapping_flag(
-    pending: bool,
-    committed: u32,
-    desired: u32,
-) -> SnapResult<()> {
+fn validate_snapshot_mapping_flag(pending: bool, committed: u32, desired: u32) -> SnapResult<()> {
     if pending != (committed != desired) {
         return Err(invalid_platform_snapshot(
             "snapshot mapping flag and bases are incoherent",
@@ -2028,9 +2125,9 @@ impl DeviceManager {
         for item in SNAPSHOT_PENDING_ORDER {
             writer.write_bool(self.pending.contains(item))?;
         }
-        writer.write_u16(self.bmdma_ports_base)?;
-        writer.write_u16(self.pm_ports_base)?;
-        writer.write_u16(self.sm_ports_base)?;
+        writer.write_u16(bar_ports_code(self.bmdma_ports_base))?;
+        writer.write_u16(bar_ports_code(self.pm_ports_base))?;
+        writer.write_u16(bar_ports_code(self.sm_ports_base))?;
         writer.write_u32(self.ide.bus_master.bmdma_base)?;
         writer.write_u32(self.acpi.pm_base)?;
         writer.write_u32(self.acpi.sm_base)?;
@@ -2054,9 +2151,9 @@ impl DeviceManager {
         for item in SNAPSHOT_PENDING_ORDER {
             pending.set_to(item, reader.read_bool()?);
         }
-        let committed_bmdma_ports_base = reader.read_u16()?;
-        let committed_pm_ports_base = reader.read_u16()?;
-        let committed_sm_ports_base = reader.read_u16()?;
+        let committed_bmdma_ports_base = bar_ports(u32::from(reader.read_u16()?));
+        let committed_pm_ports_base = bar_ports(u32::from(reader.read_u16()?));
+        let committed_sm_ports_base = bar_ports(u32::from(reader.read_u16()?));
         let desired_bmdma_base = reader.read_u32()?;
         let desired_pm_base = reader.read_u32()?;
         let desired_sm_base = reader.read_u32()?;
@@ -2105,8 +2202,8 @@ impl DeviceManager {
         committed_vga: rusty_box_devices::display::vga::VgaSnapshotRestoreTarget,
     ) -> SnapResult<()> {
         self.port92.validate_snapshot_v3_state()?;
-        if self.acpi.pm_ports_registered != (self.pm_ports_base != 0)
-            || self.acpi.sm_ports_registered != (self.sm_ports_base != 0)
+        if self.acpi.pm_ports_registered != self.pm_ports_base.is_some()
+            || self.acpi.sm_ports_registered != self.sm_ports_base.is_some()
         {
             return Err(invalid_platform_snapshot(
                 "live ACPI port registration state is incoherent",
@@ -2131,9 +2228,9 @@ impl DeviceManager {
     #[allow(clippy::too_many_arguments)]
     fn validate_snapshot_v3_topology(
         pending: PendingPlatformWork,
-        committed_bmdma: u16,
-        committed_pm: u16,
-        committed_sm: u16,
+        committed_bmdma: Option<IoPort>,
+        committed_pm: Option<IoPort>,
+        committed_sm: Option<IoPort>,
         desired_bmdma: u32,
         desired_pm: u32,
         desired_sm: u32,
@@ -2143,6 +2240,9 @@ impl DeviceManager {
         desired_vga_mmio: u32,
         vga_lfb_size: u32,
     ) -> SnapResult<()> {
+        let committed_bmdma = bar_ports_code(committed_bmdma);
+        let committed_pm = bar_ports_code(committed_pm);
+        let committed_sm = bar_ports_code(committed_sm);
         validate_snapshot_io_base(desired_bmdma, 16, 16)?;
         validate_snapshot_io_base(u32::from(committed_bmdma), 16, 16)?;
         validate_snapshot_io_base(desired_pm, 64, 64)?;
@@ -2176,8 +2276,7 @@ impl DeviceManager {
             desired_sm,
         )?;
         if pending.contains(PendingPlatformWork::VGA_BARS)
-            != (committed_vga_mmio != desired_vga_mmio
-            || committed_vga_lfb != desired_vga_lfb)
+            != (committed_vga_mmio != desired_vga_mmio || committed_vga_lfb != desired_vga_lfb)
         {
             return Err(invalid_platform_snapshot(
                 "snapshot VGA mapping flag and bases are incoherent",
@@ -2196,9 +2295,9 @@ impl DeviceManager {
         &mut self,
         io: &mut BxDevicesC,
         mem: &mut BxMemC,
-        live_bmdma: u16,
-        live_pm: u16,
-        live_sm: u16,
+        live_bmdma: Option<IoPort>,
+        live_pm: Option<IoPort>,
+        live_sm: Option<IoPort>,
         live_vga: rusty_box_devices::display::vga::VgaSnapshotRestoreTarget,
         platform: PlatformSnapshotRestore,
         pci: super::pci_ide::PciIdeSnapshotTopology,
@@ -2240,9 +2339,7 @@ impl DeviceManager {
             self.apply_chipset_effect(effect, mem)?;
         }
         self.pending.remove(
-            PendingPlatformWork::PAM
-                | PendingPlatformWork::SMRAM
-                | PendingPlatformWork::BIOS_WRITE,
+            PendingPlatformWork::PAM | PendingPlatformWork::SMRAM | PendingPlatformWork::BIOS_WRITE,
         );
 
         self.ide.bus_master.bmdma_base = pci.bmdma_base;
@@ -2260,26 +2357,17 @@ impl DeviceManager {
         // `reregister_vga_bars` mints: the token is what names the window an
         // access landed in, so sharing one across the framebuffer and the
         // register block would route an LFB access into the legacy aperture.
-        let lfb_id = DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Lfb.id());
-        let registers_id = DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Registers.id());
+        let lfb_id =
+            DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Lfb.id());
+        let registers_id = DevSlot::VGA
+            .mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Registers.id());
         let lfb_size = u64::from(self.vga.lfb_size());
-        let old_lfb = (live_vga.lfb_base != 0).then_some((
-            u64::from(live_vga.lfb_base),
-            u64::from(live_vga.lfb_base) + lfb_size - 1,
-        ));
-        let new_lfb = (vga.lfb_base != 0).then_some((
-            u64::from(vga.lfb_base),
-            u64::from(vga.lfb_base) + lfb_size - 1,
-        ));
+        let old_lfb = bar_window(live_vga.lfb_base, lfb_size);
+        let new_lfb = bar_window(vga.lfb_base, lfb_size);
         mem.relocate_memory_handlers(lfb_id, old_lfb, new_lfb)?;
-        let old_mmio = (live_vga.mmio_base != 0).then_some((
-            u64::from(live_vga.mmio_base),
-            u64::from(live_vga.mmio_base) + u64::from(rusty_box_devices::display::vga::PCI_VGA_MMIO_SIZE) - 1,
-        ));
-        let new_mmio = (vga.mmio_base != 0).then_some((
-            u64::from(vga.mmio_base),
-            u64::from(vga.mmio_base) + u64::from(rusty_box_devices::display::vga::PCI_VGA_MMIO_SIZE) - 1,
-        ));
+        let mmio_size = u64::from(rusty_box_devices::display::vga::PCI_VGA_MMIO_SIZE);
+        let old_mmio = bar_window(live_vga.mmio_base, mmio_size);
+        let new_mmio = bar_window(vga.mmio_base, mmio_size);
         mem.relocate_memory_handlers(registers_id, old_mmio, new_mmio)?;
         self.vga.commit_snapshot_v3_mapping_target(vga);
         self.pending.remove(PendingPlatformWork::VGA_BARS);
@@ -2291,6 +2379,7 @@ impl DeviceManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::{A20Mask, BxLinAddress};
 
     /// A tick reading under a stated rate, which is what a device is handed
     /// now instead of a bare instruction count.
@@ -2305,7 +2394,8 @@ mod tests {
     /// the access does; a bare "some region covers this address" is not.
     fn vga_registers_at(offset: u64) -> crate::memory::mmio_map::MmioHit {
         crate::memory::mmio_map::MmioHit {
-            token: DevSlot::VGA.mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Registers.id()),
+            token: DevSlot::VGA
+                .mmio_window_token(rusty_box_devices::display::vga::VgaWindow::Registers.id()),
             offset,
         }
     }
@@ -2324,10 +2414,8 @@ mod tests {
     }
 
     use super::*;
-    use crate::cpu::{
-        instrumentation::{CpuSetupMode, X86Reg},
-        CpuError,
-    };
+    use crate::cpu::CpuError;
+    use crate::cpu::instrumentation::{CpuSetupMode, X86Reg};
     use crate::emulator::{Emulator, EmulatorConfig};
 
     #[test]
@@ -2457,11 +2545,9 @@ mod tests {
     const GUEST_TEST_CODE: u64 = 0x1000;
 
     fn guest_emulator(pci_vga: bool) -> Box<Emulator> {
-        let mut emu = Emulator::new_with_mode(
-            EmulatorConfig::default(),
-            CpuSetupMode::FlatProtected32,
-        )
-        .unwrap();
+        let mut emu =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+                .unwrap();
         if pci_vga {
             emu.device_manager.vga.enable_pci();
         }
@@ -2479,12 +2565,11 @@ mod tests {
         register: u8,
         value: u32,
     ) -> crate::cpu::Result<u64> {
-        let conf_addr =
-            0x8000_0000u32 | (u32::from(devfunc) << 8) | u32::from(register & 0xFC);
+        let conf_addr = 0x8000_0000u32 | (u32::from(devfunc) << 8) | u32::from(register & 0xFC);
         let code_address = GUEST_TEST_CODE
             + 0x1000
             + u64::from(register) * 0x100
-            + ((u64::from(value) >> 20) & 0x0fff) * 0x20;
+            + ((u64::from(value) >> 20) & 0x0FFF) * 0x20;
         let mut code = Vec::with_capacity(24);
         // mov edx,0xcf8; mov eax,conf_addr; out dx,eax;
         // mov edx,0xcfc; mov eax,value; out dx,eax.
@@ -2494,37 +2579,33 @@ mod tests {
         code.extend_from_slice(&[0xBA, 0xFC, 0x0C, 0x00, 0x00, 0xB8]);
         code.extend_from_slice(&value.to_le_bytes());
         code.push(0xEF);
-        emu.virt_write(code_address, &code).unwrap();
+        emu.virt_write(BxLinAddress::new(code_address), &code)
+            .unwrap();
         emu.reg_write(X86Reg::Rip, code_address);
         emu.run_cpu_batch(64).map(|progress| progress.count())
     }
 
-    fn guest_inb(emu: &mut Emulator, port: u16) -> crate::cpu::Result<u8> {
+    fn guest_inb(emu: &mut Emulator, port: IoPort) -> crate::cpu::Result<u8> {
+        let [port_lo, port_hi] = port.get().to_le_bytes();
         let code = [
-            0xBA,
-            port as u8,
-            (port >> 8) as u8,
-            0x00,
-            0x00,
-            0xEC, // in al,dx
+            0xBA, // mov edx, imm32
+            port_lo, port_hi, 0x00, 0x00, 0xEC, // in al,dx
         ];
-        emu.virt_write(GUEST_TEST_CODE, &code).unwrap();
+        emu.virt_write(BxLinAddress::new(GUEST_TEST_CODE), &code)
+            .unwrap();
         emu.reg_write(X86Reg::Rip, GUEST_TEST_CODE);
         emu.run_cpu_batch(2)?;
         assert_eq!(emu.devices.last_io_read_port, port);
         Ok(emu.reg_read(X86Reg::Rax) as u8)
     }
 
-    fn guest_memory_read(
-        emu: &mut Emulator,
-        address: u32,
-    ) -> crate::cpu::Result<u64> {
-        let code_address =
-            GUEST_TEST_CODE + 0x40000 + ((u64::from(address) >> 20) & 0xff) * 0x10;
+    fn guest_memory_read(emu: &mut Emulator, address: u32) -> crate::cpu::Result<u64> {
+        let code_address = GUEST_TEST_CODE + 0x40000 + ((u64::from(address) >> 20) & 0xFF) * 0x10;
         let mut code = Vec::with_capacity(6);
         code.extend_from_slice(&[0x8A, 0x05]); // mov al,byte ptr [disp32]
         code.extend_from_slice(&address.to_le_bytes());
-        emu.virt_write(code_address, &code).unwrap();
+        emu.virt_write(BxLinAddress::new(code_address), &code)
+            .unwrap();
         emu.reg_write(X86Reg::Rip, code_address);
         emu.run_cpu_batch(1).map(|progress| progress.count())
     }
@@ -2532,7 +2613,6 @@ mod tests {
     #[test]
     fn vga_bar_moves_are_visible_before_next_access() {
         on_big_stack(|| {
-
             let mut emu = guest_emulator(true);
             let lfb_size = u64::from(emu.device_manager.vga.lfb_size());
             let initial_lfb =
@@ -2547,8 +2627,8 @@ mod tests {
                 emu.memory
                     .register_memory_handlers(
                         DevSlot::NONE.mmio_token(),
-                        u64::from(initial_lfb),
-                        u64::from(initial_lfb) + lfb_size - 1,
+                        BxPhyAddress::new(u64::from(initial_lfb)),
+                        BxPhyAddress::new(u64::from(initial_lfb) + lfb_size - 1),
                     )
                     .is_ok(),
                 "the old LFB must be free before the following guest access"
@@ -2556,28 +2636,32 @@ mod tests {
             emu.memory
                 .unregister_memory_handlers(
                     DevSlot::NONE.mmio_token(),
-                    u64::from(initial_lfb),
-                    u64::from(initial_lfb) + lfb_size - 1,
+                    BxPhyAddress::new(u64::from(initial_lfb)),
+                    BxPhyAddress::new(u64::from(initial_lfb) + lfb_size - 1),
                 )
                 .unwrap();
 
             guest_pci_bar_write(&mut emu, 0x10, 0x18, 0xF000_0000).unwrap();
             guest_memory_read(&mut emu, 0xF000_0500).unwrap();
             assert_eq!(
-                emu.memory.mmio.lookup(0xF000_0500),
+                emu.memory.mmio.lookup(BxPhyAddress::new(0xF000_0500)),
                 Some(vga_registers_at(0x500))
             );
 
             guest_pci_bar_write(&mut emu, 0x10, 0x18, 0xF100_0000).unwrap();
             guest_memory_read(&mut emu, 0xF100_0500).unwrap();
-            assert_eq!(emu.memory.mmio.lookup(0xF000_0500), None);
+            assert_eq!(emu.memory.mmio.lookup(BxPhyAddress::new(0xF000_0500)), None);
             assert_eq!(
-                emu.memory.mmio.lookup(0xF100_0500),
+                emu.memory.mmio.lookup(BxPhyAddress::new(0xF100_0500)),
                 Some(vga_registers_at(0x500))
             );
             assert!(
                 emu.memory
-                    .register_memory_handlers(DevSlot::NONE.mmio_token(), 0xF000_0000, 0xF000_0FFF)
+                    .register_memory_handlers(
+                        DevSlot::NONE.mmio_token(),
+                        BxPhyAddress::new(0xF000_0000),
+                        BxPhyAddress::new(0xF000_0FFF)
+                    )
                     .is_ok(),
                 "moving BAR2 must unregister the previous MMIO window"
             );
@@ -2591,27 +2675,27 @@ mod tests {
             emu.memory
                 .register_memory_handlers(
                     DevSlot::NONE.mmio_token(),
-                    u64::from(failed_target),
-                    u64::from(failed_target) + lfb_size - 1,
+                    BxPhyAddress::new(u64::from(failed_target)),
+                    BxPhyAddress::new(u64::from(failed_target) + lfb_size - 1),
                 )
                 .unwrap();
-            let error =
-                guest_pci_bar_write(&mut emu, 0x10, 0x10, failed_target).unwrap_err();
+            let error = guest_pci_bar_write(&mut emu, 0x10, 0x10, failed_target).unwrap_err();
             assert!(matches!(error, CpuError::MachineBoundaryFailed));
             assert_eq!(
                 emu.device_manager.vga.peek_pending_lfb_relocate(),
                 Some((committed_lfb, failed_target))
             );
-            assert!(emu
-                .device_manager
-                .pending
-                .contains(PendingPlatformWork::VGA_BARS));
+            assert!(
+                emu.device_manager
+                    .pending
+                    .contains(PendingPlatformWork::VGA_BARS)
+            );
             assert!(
                 emu.memory
                     .register_memory_handlers(
                         DevSlot::NONE.mmio_token(),
-                        u64::from(committed_lfb),
-                        u64::from(committed_lfb) + lfb_size - 1,
+                        BxPhyAddress::new(u64::from(committed_lfb)),
+                        BxPhyAddress::new(u64::from(committed_lfb) + lfb_size - 1),
                     )
                     .is_err(),
                 "the old LFB handler must survive a failed relocation"
@@ -2624,17 +2708,23 @@ mod tests {
         on_big_stack(|| {
             use crate::iodev::harddrv::DeviceType;
             use crate::memory::{BxMemC, BxMemoryStubC};
-            use crate::pc_system::{BxPcSystemC, TimerOwner};
+            use crate::pc_system::{Activation, BxPcSystemC, TimerOwner};
 
             let mut dm = DeviceManager::new();
             let stub = BxMemoryStubC::create_and_init(4 << 20, 1 << 20, 1 << 20).unwrap();
             let mut mem = BxMemC::new(stub, false);
-            mem.set_a20_mask(u64::MAX);
+            mem.set_a20_mask(A20Mask::OPEN);
             let mut pcs = BxPcSystemC::new();
 
             // Register the channel-0 BM-DMA timer as the emulator would.
             let handle = pcs
-                .register_timer(TimerOwner::PciIdeCh0, 0, false, false, "test bmdma")
+                .register_timer(
+                    TimerOwner::PciIdeCh0,
+                    0,
+                    Repeat::Once,
+                    Activation::Inactive,
+                    "test bmdma",
+                )
                 .unwrap();
             dm.ide.bus_master.bmdma[0].timer_index = Some(handle);
 
@@ -2660,8 +2750,11 @@ mod tests {
             let mut prd = [0u8; 8];
             prd[0..4].copy_from_slice(&0x0030_0000u32.to_le_bytes());
             prd[4..8].copy_from_slice(&(1024u32 | 0x8000_0000).to_le_bytes());
-            assert_eq!(mem.write_ram(0x0020_0000, &prd).unwrap(), prd.len());
-            mem.smc_mark_icache_mask(0x0030_0000, u32::MAX);
+            assert_eq!(
+                mem.write_ram(BxPhyAddress::new(0x0020_0000), &prd).unwrap(),
+                prd.len()
+            );
+            mem.smc_mark_icache_mask(BxPhyAddress::new(0x0030_0000), u32::MAX);
             let before_smc = mem.smc_seq_next();
 
             // Guest issues READ DMA (LBA 0, 2 sectors) via the port interface.
@@ -2671,12 +2764,12 @@ mod tests {
                     ref mut irq,
                     ..
                 } = dm;
-                ide.write(0x1F2, 2, 1, irq); // sector count
-                ide.write(0x1F3, 0, 1, irq); // LBA 7:0
-                ide.write(0x1F4, 0, 1, irq); // LBA 15:8
-                ide.write(0x1F5, 0, 1, irq); // LBA 23:16
-                ide.write(0x1F6, 0xE0, 1, irq); // LBA mode, drive 0
-                ide.write(0x1F7, 0xC8, 1, irq); // READ DMA
+                ide.write(IoPort::new(0x1F2), 2, 1, irq); // sector count
+                ide.write(IoPort::new(0x1F3), 0, 1, irq); // LBA 7:0
+                ide.write(IoPort::new(0x1F4), 0, 1, irq); // LBA 15:8
+                ide.write(IoPort::new(0x1F5), 0, 1, irq); // LBA 23:16
+                ide.write(IoPort::new(0x1F6), 0xE0, 1, irq); // LBA mode, drive 0
+                ide.write(IoPort::new(0x1F7), 0xC8, 1, irq); // READ DMA
             }
             // Bochs harddrv.cc: READ DMA arms the seek timer; only its
             // deadline (seek_timer) signals bmdma_start_transfer.
@@ -2698,18 +2791,21 @@ mod tests {
                 "seek_timer must signal bmdma_start_transfer"
             );
 
-            dm.ide.bus_master.bmdma_write(0xC004, 0x0020_0000, 4);
-            dm.ide.bus_master.bmdma_write(0xC000, 0x09, 1);
+            dm.ide
+                .bus_master
+                .bmdma_write(IoPort::new(0xC004), 0x0020_0000, 4);
+            dm.ide.bus_master.bmdma_write(IoPort::new(0xC000), 0x09, 1);
             let arm = dm.ide.bus_master.take_pending_timer_arm(0);
             assert_eq!(arm, Some(1));
-            pcs.activate_timer_usec(handle, 1, false).unwrap();
+            pcs.activate_timer_usec(handle, 1, Repeat::Once).unwrap();
 
             // Timer fires: single PRD with EOT completes the transfer.
             dm.pci_ide_timer(0, &mut pcs, &mut mem);
 
             let mut guest_payload = [0; 1024];
             assert_eq!(
-                mem.read_ram(0x0030_0000, &mut guest_payload).unwrap(),
+                mem.read_ram(BxPhyAddress::new(0x0030_0000), &mut guest_payload)
+                    .unwrap(),
                 guest_payload.len()
             );
             assert_eq!(
@@ -2742,7 +2838,7 @@ mod tests {
             assert_eq!(emu.devices.read_handlers[0xC000].slot, DevSlot::PCI);
             assert_eq!(emu.devices.write_handlers[0xC004].slot, DevSlot::PCI);
             let reads_before = emu.devices.diag_io_reads;
-            let _ = guest_inb(&mut emu, 0xC000).unwrap();
+            let _ = guest_inb(&mut emu, IoPort::new(0xC000)).unwrap();
             assert_eq!(emu.devices.diag_io_reads, reads_before + 1);
 
             guest_pci_bar_write(&mut emu, 0x09, 0x20, 0x0000_D001).unwrap();
@@ -2751,7 +2847,7 @@ mod tests {
             assert_eq!(emu.devices.read_handlers[0xD000].slot, DevSlot::PCI);
             assert_eq!(emu.devices.write_handlers[0xD004].slot, DevSlot::PCI);
             let reads_before = emu.devices.diag_io_reads;
-            let _ = guest_inb(&mut emu, 0xD000).unwrap();
+            let _ = guest_inb(&mut emu, IoPort::new(0xD000)).unwrap();
             assert_eq!(emu.devices.diag_io_reads, reads_before + 1);
         });
     }
@@ -2759,7 +2855,6 @@ mod tests {
     #[test]
     fn bmdma_start_queues_timer_request_at_issuing_epoch() {
         on_big_stack(|| {
-
             let mut dm = DeviceManager::new();
             let mut io = BxDevicesC::new();
             let mut pc_system = crate::pc_system::BxPcSystemC::new();
@@ -2775,21 +2870,48 @@ mod tests {
             dm.register_pci_ide_bmdma_ports(&mut io);
 
             // The engine needs real scheduler slots to arm.
-            use crate::pc_system::TimerOwner;
+            use crate::pc_system::{Activation, Repeat, TimerOwner};
             let ch0 = pc_system
-                .register_timer(TimerOwner::PciIdeCh0, 0, false, false, "PIIX IDE")
+                .register_timer(
+                    TimerOwner::PciIdeCh0,
+                    0,
+                    Repeat::Once,
+                    Activation::Inactive,
+                    "PIIX IDE",
+                )
                 .unwrap();
             let ch1 = pc_system
-                .register_timer(TimerOwner::PciIdeCh1, 0, false, false, "PIIX IDE")
+                .register_timer(
+                    TimerOwner::PciIdeCh1,
+                    0,
+                    Repeat::Once,
+                    Activation::Inactive,
+                    "PIIX IDE",
+                )
                 .unwrap();
             dm.ide.bus_master.bmdma[0].timer_index = Some(ch0);
             dm.ide.bus_master.bmdma[1].timer_index = Some(ch1);
 
-
             // Guest programs DTPR and starts the engine. Bochs arms the
             // one-tick BM-DMA callback at this issuing instruction's epoch.
-            io.outp(0xC004, 0x8000, 4, 41, &mut pc_system, &mut dm, &mut mem);
-            io.outp(0xC000, 0x09, 1, 41, &mut pc_system, &mut dm, &mut mem);
+            io.outp(
+                IoPort::new(0xC004),
+                0x8000,
+                4,
+                41,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
+            io.outp(
+                IoPort::new(0xC000),
+                0x09,
+                1,
+                41,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
 
             assert_eq!(
                 dm.ide.bus_master.take_pending_timer_arm(0),
@@ -2805,6 +2927,42 @@ mod tests {
             assert!(
                 !pc_system.timer_is_active(ch1),
                 "only the programmed channel arms"
+            );
+        });
+    }
+
+    /// A bus-master window at the top of the port space (BAR4 = 0xFFF0)
+    /// answers on all sixteen of its ports, as any other window does: a
+    /// guest writes channel 1's descriptor table pointer at 0xFFFC and reads
+    /// it back.
+    #[test]
+    fn bmdma_window_at_the_top_of_the_port_space_answers() {
+        on_big_stack(|| {
+            let mut dm = DeviceManager::new();
+            let mut io = BxDevicesC::new();
+            let mut pc_system = crate::pc_system::BxPcSystemC::new();
+            let mut mem = crate::memory::test_ram();
+
+            assert!(
+                dm.ide
+                    .bus_master
+                    .pci_write(0x20, 0x0000_FFF1, 4)
+                    .bmdma_base_changed
+            );
+            dm.register_pci_ide_bmdma_ports(&mut io);
+
+            io.outp(
+                IoPort::new(0xFFFC),
+                0x0001_2340,
+                4,
+                0,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
+            assert_eq!(
+                io.inp(IoPort::new(0xFFFC), 4, 0, &mut pc_system, &mut dm),
+                0x0001_2340
             );
         });
     }
@@ -2893,10 +3051,17 @@ mod tests {
             dm.pending.insert(PendingPlatformWork::VGA_BARS);
             dm.reregister_vga_bars(&mut mem).unwrap();
 
-            assert_eq!(mem.mmio.lookup(0xF000_0500), Some(vga_registers_at(0x500)));
+            assert_eq!(
+                mem.mmio.lookup(BxPhyAddress::new(0xF000_0500)),
+                Some(vga_registers_at(0x500))
+            );
             assert!(
-                mem.register_memory_handlers(DevSlot::NONE.mmio_token(), 0xF000_0000, 0xF000_0FFF)
-                    .is_err(),
+                mem.register_memory_handlers(
+                    DevSlot::NONE.mmio_token(),
+                    BxPhyAddress::new(0xF000_0000),
+                    BxPhyAddress::new(0xF000_0FFF)
+                )
+                .is_err(),
                 "BAR2 MMIO window must be registered"
             );
         });
@@ -2928,8 +3093,24 @@ mod tests {
 
             // Set reset type = hardware (bit1), then trigger (bit1|bit2) —
             // Bochs pci2isa.cc write case 0x0cf9.
-            io.outp(0x0CF9, 0x02, 1, 0, &mut pc_system, &mut dm, &mut mem);
-            io.outp(0x0CF9, 0x06, 1, 0, &mut pc_system, &mut dm, &mut mem);
+            io.outp(
+                PCI_RESET_PORT,
+                0x02,
+                1,
+                0,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
+            io.outp(
+                PCI_RESET_PORT,
+                0x06,
+                1,
+                0,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
 
             assert_eq!(
                 dm.pci2isa.reset_request,
@@ -2937,7 +3118,7 @@ mod tests {
                 "OUT 0xCF9,0x06 with reset_type=hardware must request a hardware reset"
             );
 
-            let value = io.inp(0x0CF9, 1, 0, &mut pc_system, &mut dm);
+            let value = io.inp(PCI_RESET_PORT, 1, 0, &mut pc_system, &mut dm);
             assert_eq!(
                 value, 0x02,
                 "read of 0xCF9 must return the stored pci_reset value, not the unhandled sentinel"
@@ -2959,7 +3140,7 @@ mod tests {
 
             // ELCR1 bit5 -> IRQ5 level-triggered (Bochs pci2isa.cc write case
             // 0x04d0: DEV_pic_set_mode(1, elcr1)).
-            io.outp(0x04D0, 0x20, 1, 0, &mut pc_system, &mut dm, &mut mem);
+            io.outp(ELCR1_PORT, 0x20, 1, 0, &mut pc_system, &mut dm, &mut mem);
 
             assert_eq!(dm.pci2isa.elcr1, 0x20);
             assert!(
@@ -2967,13 +3148,14 @@ mod tests {
                 "elcr1_changed must be drained by the write dispatch"
             );
             assert_eq!(
-                dm.irq.pic().master.edge_level, 0x20,
+                dm.irq.pic().master.edge_level,
+                0x20,
                 "pic.set_mode(true, elcr1) must mirror ELCR1 into master edge_level"
             );
 
             // ELCR2 bit2 -> IRQ10 level-triggered (Bochs pci2isa.cc write case
             // 0x04d1: DEV_pic_set_mode(0, elcr2)).
-            io.outp(0x04D1, 0x04, 1, 0, &mut pc_system, &mut dm, &mut mem);
+            io.outp(ELCR2_PORT, 0x04, 1, 0, &mut pc_system, &mut dm, &mut mem);
 
             assert_eq!(dm.pci2isa.elcr2, 0x04);
             assert!(
@@ -2981,7 +3163,8 @@ mod tests {
                 "elcr2_changed must be drained by the write dispatch"
             );
             assert_eq!(
-                dm.irq.pic().slave.edge_level, 0x04,
+                dm.irq.pic().slave.edge_level,
+                0x04,
                 "pic.set_mode(false, elcr2) must mirror ELCR2 into slave edge_level"
             );
         });
@@ -2997,7 +3180,7 @@ mod tests {
             dm.register_pci_handlers(&mut io);
 
             // Mark IRQ5 level-triggered via the real ELCR1 port write path.
-            io.outp(0x04D0, 0x20, 1, 0, &mut pc_system, &mut dm, &mut mem);
+            io.outp(ELCR1_PORT, 0x20, 1, 0, &mut pc_system, &mut dm, &mut mem);
             assert_eq!(dm.irq.pic().master.edge_level, 0x20);
 
             // Unmask IRQ5 and assert the line (a level-triggered device holds
@@ -3040,7 +3223,7 @@ mod tests {
             // Vendor/device ID (0x00-0x03) must stay read-only.
             let vendor_before = dm.pci2isa.pci_conf[0x00];
             dm.pci_conf_addr = conf_addr(PIIX3, 0x00);
-            dm.pci_write(0x0CFC, 0xDEAD_BEEF, 4);
+            dm.pci_write(PCI_CONFIG_DATA, 0xDEAD_BEEF, 4);
             assert_eq!(
                 dm.pci2isa.pci_conf[0x00], vendor_before,
                 "vendor ID must stay read-only"
@@ -3049,7 +3232,7 @@ mod tests {
             // Revision + class code (0x08-0x0B) must stay read-only.
             let class_before = dm.pci2isa.pci_conf[0x0A];
             dm.pci_conf_addr = conf_addr(PIIX3, 0x08);
-            dm.pci_write(0x0CFC, 0xFFFF_FFFF, 4);
+            dm.pci_write(PCI_CONFIG_DATA, 0xFFFF_FFFF, 4);
             assert_eq!(
                 dm.pci2isa.pci_conf[0x0A], class_before,
                 "class code must stay read-only"
@@ -3059,7 +3242,7 @@ mod tests {
             // there (Bochs gates only on the starting offset).
             let htype_before = dm.pci2isa.pci_conf[0x0E];
             dm.pci_conf_addr = conf_addr(PIIX3, 0x0C);
-            dm.pci_write(0x0CFE, 0xFF, 1); // offset 2 -> reg_addr 0x0C+2 = 0x0E
+            dm.pci_write(IoPort::new(0x0CFE), 0xFF, 1); // offset 2 -> reg_addr 0x0C+2 = 0x0E
             assert_eq!(
                 dm.pci2isa.pci_conf[0x0E], htype_before,
                 "header type must stay read-only when the write starts there"
@@ -3071,7 +3254,7 @@ mod tests {
             // byte at 0x0E -- Bochs checks only the starting offset, there is
             // no per-byte mid-span protection.
             dm.pci_conf_addr = conf_addr(PIIX3, 0x0C);
-            dm.pci_write(0x0CFC, 0xFFFF_FFFF, 4);
+            dm.pci_write(PCI_CONFIG_DATA, 0xFFFF_FFFF, 4);
             assert_eq!(
                 dm.pci2isa.pci_conf[0x0C], 0xFF,
                 "cache-line size byte must remain writable"
@@ -3091,7 +3274,7 @@ mod tests {
             // there.
             let intpin_before = dm.pci2isa.pci_conf[0x3D];
             dm.pci_conf_addr = conf_addr(PIIX3, 0x3C);
-            dm.pci_write(0x0CFD, 0xFF, 1); // offset 1 -> reg_addr 0x3C+1 = 0x3D
+            dm.pci_write(IoPort::new(0x0CFD), 0xFF, 1); // offset 1 -> reg_addr 0x3C+1 = 0x3D
             assert_eq!(
                 dm.pci2isa.pci_conf[0x3D], intpin_before,
                 "interrupt pin must stay read-only when the write starts there"
@@ -3103,7 +3286,7 @@ mod tests {
             let byte3e_before = dm.pci2isa.pci_conf[0x3E];
             let byte3f_before = dm.pci2isa.pci_conf[0x3F];
             dm.pci_conf_addr = conf_addr(PIIX3, 0x3C);
-            dm.pci_write(0x0CFC, 0xFFFF_FFFF, 4);
+            dm.pci_write(PCI_CONFIG_DATA, 0xFFFF_FFFF, 4);
             assert_eq!(
                 dm.pci2isa.pci_conf[0x3C], 0xFF,
                 "interrupt line must remain writable"
@@ -3124,7 +3307,7 @@ mod tests {
 
             // Command register (0x04) must remain writable through the filter.
             dm.pci_conf_addr = conf_addr(PIIX3, 0x04);
-            dm.pci_write(0x0CFC, 0x0F, 1);
+            dm.pci_write(PCI_CONFIG_DATA, 0x0F, 1);
             assert_eq!(
                 dm.pci2isa.pci_conf[0x04], 0x0F,
                 "command register must remain writable through the filter"
@@ -3133,7 +3316,7 @@ mod tests {
             // BAR4 (PCI IDE BM-DMA base, 0x20) must remain writable through
             // the filter — it is nowhere near the read-only byte set.
             dm.pci_conf_addr = conf_addr(PCI_IDE, 0x20);
-            dm.pci_write(0x0CFC, 0x0000_C001, 4);
+            dm.pci_write(PCI_CONFIG_DATA, 0x0000_C001, 4);
             assert!(
                 dm.ide.bus_master.bmdma_present(),
                 "BAR4 write must reach the device through the filter"
@@ -3164,14 +3347,17 @@ mod tests {
             dm.pci_conf_addr = conf_addr(0x00, 0x72);
 
             // SMRAME|DOPEN (0x48): SMRAM open, unrestricted.
-            dm.pci_write(0xCFE, 0x48, 1);
+            dm.pci_write(IoPort::new(0xCFE), 0x48, 1);
             assert!(
                 dm.pending.contains(PendingPlatformWork::SMRAM),
                 "writing 0x72 must set the deferred flag"
             );
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
-            assert!(!dm.pending.contains(PendingPlatformWork::SMRAM), "drain must clear the flag");
+            assert!(
+                !dm.pending.contains(PendingPlatformWork::SMRAM),
+                "drain must clear the flag"
+            );
             assert_eq!(
                 mem.smram_state(),
                 crate::memory::SmramState {
@@ -3183,7 +3369,7 @@ mod tests {
 
             // SMRAME off (0x02): SMRAM fully disabled.
             dm.pci_conf_addr = conf_addr(0x00, 0x72);
-            dm.pci_write(0xCFE, 0x02, 1);
+            dm.pci_write(IoPort::new(0xCFE), 0x02, 1);
             assert!(dm.pending.contains(PendingPlatformWork::SMRAM));
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
@@ -3200,7 +3386,7 @@ mod tests {
             // BX_PANICs; rusty_box must not crash the host on a guest
             // register write and instead treats it as disabled.
             dm.pci_conf_addr = conf_addr(0x00, 0x72);
-            dm.pci_write(0xCFE, 0x68, 1);
+            dm.pci_write(IoPort::new(0xCFE), 0x68, 1);
             assert!(dm.pending.contains(PendingPlatformWork::SMRAM));
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
@@ -3241,7 +3427,7 @@ mod tests {
             // Enable read+write shadow RAM on it. 0x59 & 0xFC == 0x58, so the
             // byte lands at data port 0xCFC + (0x59 - 0x58) == 0xCFD.
             dm.pci_conf_addr = conf_addr(0x00, 0x59);
-            dm.pci_write(0xCFD, 0x30, 1); // area12: read=1, write=1
+            dm.pci_write(IoPort::new(0xCFD), 0x30, 1); // area12: read=1, write=1
             assert!(dm.pending.contains(PendingPlatformWork::PAM));
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
@@ -3266,7 +3452,10 @@ mod tests {
             );
             dm.apply_pending_machine_boundary(&mut io, &mut mem)
                 .unwrap();
-            assert!(!dm.pending.contains(PendingPlatformWork::PAM), "drain must clear the flag");
+            assert!(
+                !dm.pending.contains(PendingPlatformWork::PAM),
+                "drain must clear the flag"
+            );
             assert_eq!(
                 mem.memory_type(12, 1),
                 false,
@@ -3290,12 +3479,61 @@ mod tests {
             let stub = BxMemoryStubC::create_and_init(1 << 20, 1 << 20, 4096).unwrap();
             let mut mem = BxMemC::new(stub, false);
 
-            io.outp(0x0CF8, conf_addr(0x00, 0x59), 4, 11, &mut pc_system, &mut dm, &mut mem);
-            io.outp(0x0CFD, 0x30, 1, 11, &mut pc_system, &mut dm, &mut mem);
-            io.outp(0x0CF8, conf_addr(0x00, 0x72), 4, 11, &mut pc_system, &mut dm, &mut mem);
-            io.outp(0x0CFE, 0x48, 1, 11, &mut pc_system, &mut dm, &mut mem);
-            io.outp(0x0CF8, conf_addr(0x08, 0x4E), 4, 11, &mut pc_system, &mut dm, &mut mem);
-            io.outp(0x0CFE, 0x04, 1, 11, &mut pc_system, &mut dm, &mut mem);
+            let pci_addr = PCI_CONFIG_ADDR;
+            io.outp(
+                pci_addr,
+                conf_addr(0x00, 0x59),
+                4,
+                11,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
+            io.outp(
+                IoPort::new(0x0CFD),
+                0x30,
+                1,
+                11,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
+            io.outp(
+                pci_addr,
+                conf_addr(0x00, 0x72),
+                4,
+                11,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
+            io.outp(
+                IoPort::new(0x0CFE),
+                0x48,
+                1,
+                11,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
+            io.outp(
+                pci_addr,
+                conf_addr(0x08, 0x4E),
+                4,
+                11,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
+            io.outp(
+                IoPort::new(0x0CFE),
+                0x04,
+                1,
+                11,
+                &mut pc_system,
+                &mut dm,
+                &mut mem,
+            );
 
             assert!(io.take_scheduler_boundary_requested());
             assert!(dm.pending.contains(PendingPlatformWork::PAM));
@@ -3337,8 +3575,8 @@ mod tests {
             guest_pci_bar_write(&mut emu, 0x0B, 0x90, 0x0000_B101).unwrap();
             assert_eq!(emu.devices.read_handlers[0xB000].slot, DevSlot::ACPI);
             assert_eq!(emu.devices.write_handlers[0xB100].slot, DevSlot::ACPI);
-            let _ = guest_inb(&mut emu, 0xB000).unwrap();
-            let _ = guest_inb(&mut emu, 0xB100).unwrap();
+            let _ = guest_inb(&mut emu, IoPort::new(0xB000)).unwrap();
+            let _ = guest_inb(&mut emu, IoPort::new(0xB100)).unwrap();
 
             guest_pci_bar_write(&mut emu, 0x0B, 0x40, 0x0000_C001).unwrap();
             guest_pci_bar_write(&mut emu, 0x0B, 0x90, 0x0000_C101).unwrap();
@@ -3346,8 +3584,8 @@ mod tests {
             assert_eq!(emu.devices.write_handlers[0xB100].slot, DevSlot::NONE);
             assert_eq!(emu.devices.read_handlers[0xC000].slot, DevSlot::ACPI);
             assert_eq!(emu.devices.write_handlers[0xC100].slot, DevSlot::ACPI);
-            let _ = guest_inb(&mut emu, 0xC000).unwrap();
-            let _ = guest_inb(&mut emu, 0xC100).unwrap();
+            let _ = guest_inb(&mut emu, IoPort::new(0xC000)).unwrap();
+            let _ = guest_inb(&mut emu, IoPort::new(0xC100)).unwrap();
         });
     }
     #[test]
@@ -3376,17 +3614,23 @@ mod tests {
             target.register_fw_cfg_handlers(&mut io);
             target.pci_conf_addr = 0xA000_0000;
 
-            assert_eq!(io.read_handlers[PORT_92H as usize].slot, DevSlot::PORT92);
+            assert_eq!(
+                io.read_handlers[usize::from(PORT_92H.get())].slot,
+                DevSlot::PORT92
+            );
             assert_eq!(io.write_handlers[0x0CF8].slot, DevSlot::PCI);
             assert_eq!(io.read_handlers[0x0511].slot, DevSlot::FW_CFG);
 
-            let mut reader =
-                SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
+            let mut reader = SnapshotReader::new(saved.as_slice(), saved.len() as u64).unwrap();
             let restored = target.restore_snapshot_v3_body(&mut reader).unwrap();
             reader.finish_exact().unwrap();
 
             assert_eq!(target.port92.value, 0x01);
-            assert_eq!(target.port92.read(), 0x00, "the guest-visible A20 gate is disabled");
+            assert_eq!(
+                target.port92.read(),
+                0x00,
+                "the guest-visible A20 gate is disabled"
+            );
             assert_eq!(restored.port92_a20_gate, false);
             assert!(restored.port92_a20_change_pending);
             assert_eq!(restored.port92_reset_request, Some(ResetReason::Software));
@@ -3401,10 +3645,12 @@ mod tests {
                 "component decode must not overwrite the live latch before the commit"
             );
 
-            assert_eq!(io.read_handlers[PORT_92H as usize].slot, DevSlot::PORT92);
+            assert_eq!(
+                io.read_handlers[usize::from(PORT_92H.get())].slot,
+                DevSlot::PORT92
+            );
             assert_eq!(io.write_handlers[0x0CF8].slot, DevSlot::PCI);
             assert_eq!(io.read_handlers[0x0511].slot, DevSlot::FW_CFG);
         });
     }
-
 }

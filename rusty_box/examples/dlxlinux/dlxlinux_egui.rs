@@ -10,16 +10,16 @@
 //! MAX_INSTRUCTIONS=250000000 ./target/release/examples/dlxlinux_egui.exe
 //! ```
 
-use rusty_box::{
-    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MemorySize, MachineBuilder},
-    gui::{shared_display::SharedDisplay, BridgeGui, RustyBoxApp},
-    Result,
-};
-use std::sync::{
-    atomic::Ordering,
-    {Arc, Mutex},
-};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use rusty_box::Result;
+use rusty_box::emulator::{
+    AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MachineBuilder, MemorySize,
+};
+use rusty_box::gui::shared_display::SharedDisplay;
+use rusty_box::gui::{BridgeGui, RustyBoxApp};
 
 /// DLX Linux disk geometry (from bochsrc.bxrc)
 const DLX_CYLINDERS: u16 = 306;

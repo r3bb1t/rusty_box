@@ -15,15 +15,16 @@
 //! Fired timers are serviced in emulator context and drain immediately, so
 //! all guest-visible times and IRQ edges match Bochs exactly.
 
-use crate::config::BxPhyAddress;
 use rusty_box_core::time::{ClockHz, VmClock, VmInstant};
+
+use crate::config::BxPhyAddress;
 #[cfg(feature = "std")]
-use crate::snapshot::{checked_snapshot_len_add, SnapError, SnapRead, SnapResult, SnapWrite};
+use crate::snapshot::{SnapError, SnapRead, SnapResult, SnapWrite, checked_snapshot_len_add};
 
 /// Bochs hpet.cc `HPET_BASE`.
-pub(crate) const HPET_BASE: BxPhyAddress = 0xFED0_0000;
+pub(crate) const HPET_BASE: BxPhyAddress = BxPhyAddress::new(0xFED0_0000);
 /// Bochs hpet.cc `HPET_LEN`.
-pub(crate) const HPET_LEN: BxPhyAddress = 0x400;
+pub(crate) const HPET_LEN: u64 = 0x400;
 /// Bochs hpet.h `HPET_MIN_TIMERS` — the number of timers Bochs instantiates.
 pub(crate) const HPET_NUM_TIMERS: usize = 3;
 
@@ -32,7 +33,7 @@ const HPET_CLK_PERIOD: u64 = 10;
 /// Bochs hpet.cc `FS_PER_NS`.
 const FS_PER_NS: u64 = 1_000_000;
 /// Bochs hpet.cc `HPET_ROUTING_CAP`.
-const HPET_ROUTING_CAP: u64 = 0xffffff;
+const HPET_ROUTING_CAP: u64 = 0xFFFFFF;
 /// Bochs hpet.cc `RTC_ISA_IRQ`.
 const RTC_ISA_IRQ: u8 = 8;
 /// Bochs hpet.cc clamp bounds for computed fire deltas (HPET ticks).
@@ -67,9 +68,9 @@ const HPET_TN_PERIODIC_CAP: u64 = 0x010;
 const HPET_TN_SIZE_CAP: u64 = 0x020;
 const HPET_TN_SETVAL: u64 = 0x040;
 const HPET_TN_32BIT: u64 = 0x100;
-const HPET_TN_INT_ROUTE_MASK: u64 = 0x3e00;
+const HPET_TN_INT_ROUTE_MASK: u64 = 0x3E00;
 const HPET_TN_FSB_ENABLE: u64 = 0x4000;
-const HPET_TN_CFG_WRITE_MASK: u64 = 0x7f4e;
+const HPET_TN_CFG_WRITE_MASK: u64 = 0x7F4E;
 const HPET_TN_INT_ROUTE_SHIFT: u64 = 9;
 
 /// Queue capacities for side effects accumulated between drains. A single
@@ -130,7 +131,7 @@ impl HpetPending {
         Self {
             irq_ops: [(0, false); PENDING_IRQ_CAPACITY],
             irq_op_count: 0,
-            fsb_writes: [(0, 0); PENDING_FSB_CAPACITY],
+            fsb_writes: [(BxPhyAddress::new(0), 0); PENDING_FSB_CAPACITY],
             fsb_write_count: 0,
             timer_ops: [None; HPET_NUM_TIMERS],
             pit_irq_gate: None,
@@ -179,7 +180,7 @@ impl BxHpetC {
     pub fn new() -> Self {
         // Bochs hpet.cc init(): 3 timers, vendor 0x8086, revision 1,
         // 64-bit counter, legacy-replacement capable, 10 ns period.
-        let mut capability: u64 = 0x8086_a001 | (((HPET_NUM_TIMERS as u64) - 1) << 8);
+        let mut capability: u64 = 0x8086_A001 | (((HPET_NUM_TIMERS as u64) - 1) << 8);
         capability |= (HPET_CLK_PERIOD * FS_PER_NS) << 32;
         Self {
             capability,
@@ -363,7 +364,7 @@ impl BxHpetC {
             }
             if Self::timer_enabled(&timer) {
                 if Self::timer_fsb_route(&timer) {
-                    self.push_fsb((timer.fsb >> 32) as BxPhyAddress, timer.fsb as u32);
+                    self.push_fsb(BxPhyAddress::new(timer.fsb >> 32), timer.fsb as u32);
                 } else if timer.config & HPET_TN_TYPE_LEVEL != 0 {
                     self.push_irq(route, true);
                 } else {
@@ -393,8 +394,10 @@ impl BxHpetC {
             diff = diff.min(wrap_diff);
         }
         diff = diff.clamp(HPET_MIN_ALLOWED_PERIOD, HPET_MAX_ALLOWED_PERIOD);
-        let deadline =
-            self.clock.after_nanos_floor(Self::ticks_to_ns(diff)).ticks();
+        let deadline = self
+            .clock
+            .after_nanos_floor(Self::ticks_to_ns(diff))
+            .ticks();
         self.pending.timer_ops[index] = Some(HpetTimerOp::ArmAtTicks(deadline));
     }
 
@@ -420,11 +423,8 @@ impl BxHpetC {
                     if period32 != 0 {
                         loop {
                             cmp64 = cmp64.wrapping_add(u64::from(period32));
-                            if !Self::time_between(
-                                self.timers[index].last_checked,
-                                cur_tick,
-                                cmp64,
-                            ) {
+                            if !Self::time_between(self.timers[index].last_checked, cur_tick, cmp64)
+                            {
                                 break;
                             }
                         }
@@ -478,11 +478,11 @@ impl BxHpetC {
     /// Memory-system dispatch entry (Bochs static `hpet_read`).
     pub(crate) fn mem_read(&mut self, addr: BxPhyAddress, len: u32, data: &mut [u8]) {
         match len {
-            4 if addr & 0x3 == 0 => {
+            4 if addr.get() & 0x3 == 0 => {
                 let value = self.read_aligned(addr);
                 data[..4].copy_from_slice(&value.to_le_bytes());
             }
-            8 if addr & 0x7 == 0 => {
+            8 if addr.get() & 0x7 == 0 => {
                 let low = self.read_aligned(addr);
                 let high = self.read_aligned(addr + 4);
                 let value = u64::from(low) | (u64::from(high) << 32);
@@ -510,7 +510,7 @@ impl BxHpetC {
     /// actually brought, and only the second can be read.
     pub(crate) fn mem_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) {
         match len {
-            4 if addr & 0x3 == 0 => {
+            4 if addr.get() & 0x3 == 0 => {
                 let Some(bytes) = data.first_chunk::<4>() else {
                     tracing::error!(
                         "HPET: 4-byte write at {:#x} carrying only {} bytes",
@@ -521,7 +521,7 @@ impl BxHpetC {
                 };
                 self.write_aligned(addr, u32::from_le_bytes(*bytes), true);
             }
-            8 if addr & 0x7 == 0 => {
+            8 if addr.get() & 0x7 == 0 => {
                 let Some(bytes) = data.first_chunk::<8>() else {
                     tracing::error!(
                         "HPET: 8-byte write at {:#x} carrying only {} bytes",
@@ -549,7 +549,7 @@ impl BxHpetC {
 
     /// Bochs `read_aligned`.
     pub(crate) fn read_aligned(&self, address: BxPhyAddress) -> u32 {
-        let index = (address & 0x3ff) as u16;
+        let index = (address.get() & 0x3FF) as u16;
         if index < 0x100 {
             match index {
                 HPET_ID => self.capability as u32,
@@ -584,7 +584,7 @@ impl BxHpetC {
                 return 0;
             }
             let timer = &self.timers[id];
-            match index & 0x1f {
+            match index & 0x1F {
                 HPET_TN_CFG => timer.config as u32,
                 HPET_TN_CFG_HI => (timer.config >> 32) as u32,
                 HPET_TN_CMP => timer.cmp as u32,
@@ -600,8 +600,13 @@ impl BxHpetC {
     }
 
     /// Bochs `write_aligned`.
-    pub(crate) fn write_aligned(&mut self, address: BxPhyAddress, value: u32, trailing_write: bool) {
-        let index = (address & 0x3ff) as u16;
+    pub(crate) fn write_aligned(
+        &mut self,
+        address: BxPhyAddress,
+        value: u32,
+        trailing_write: bool,
+    ) {
+        let index = (address.get() & 0x3FF) as u16;
         let new_val = u64::from(value);
         let old_val = u64::from(self.read_aligned(address));
 
@@ -610,14 +615,13 @@ impl BxHpetC {
                 HPET_ID | HPET_ID_HI => {}
                 HPET_CFG => {
                     let val = Self::fixup_reg(new_val, old_val, HPET_CFG_WRITE_MASK);
-                    self.config = (self.config & 0xffff_ffff_0000_0000) | val;
+                    self.config = (self.config & 0xFFFF_FFFF_0000_0000) | val;
                     if Self::activating_bit(old_val, new_val, HPET_CFG_ENABLE) {
                         // Enable main counter and interrupt generation.
                         self.hpet_reference_value = self.hpet_counter;
                         self.hpet_reference_time = self.time_nsec();
                         for i in 0..HPET_NUM_TIMERS {
-                            if Self::timer_enabled(&self.timers[i]) && (self.isr & (1 << i)) != 0
-                            {
+                            if Self::timer_enabled(&self.timers[i]) && (self.isr & (1 << i)) != 0 {
                                 self.update_irq(i, true);
                             }
                             self.hpet_set_timer(i);
@@ -656,8 +660,7 @@ impl BxHpetC {
                     if self.enabled() {
                         tracing::error!("HPET: writing counter while enabled!");
                     } else {
-                        self.hpet_counter =
-                            (self.hpet_counter & 0xffff_ffff_0000_0000) | new_val;
+                        self.hpet_counter = (self.hpet_counter & 0xFFFF_FFFF_0000_0000) | new_val;
                         for timer in &mut self.timers {
                             timer.last_checked = self.hpet_counter;
                         }
@@ -667,8 +670,7 @@ impl BxHpetC {
                     if self.enabled() {
                         tracing::error!("HPET: writing counter while enabled!");
                     } else {
-                        self.hpet_counter =
-                            (self.hpet_counter & 0xffff_ffff) | (new_val << 32);
+                        self.hpet_counter = (self.hpet_counter & 0xFFFF_FFFF) | (new_val << 32);
                         for timer in &mut self.timers {
                             timer.last_checked = self.hpet_counter;
                         }
@@ -684,11 +686,11 @@ impl BxHpetC {
                 tracing::error!("HPET: write: timer id out of range");
                 return;
             }
-            match index & 0x1f {
+            match index & 0x1F {
                 HPET_TN_CFG => {
                     let val = Self::fixup_reg(new_val, old_val, HPET_TN_CFG_WRITE_MASK);
                     let timer = &mut self.timers[id];
-                    timer.config = (timer.config & 0xffff_ffff_0000_0000) | val;
+                    timer.config = (timer.config & 0xFFFF_FFFF_0000_0000) | val;
                     if timer.config & HPET_TN_32BIT != 0 {
                         timer.cmp = u64::from(timer.cmp as u32);
                         timer.period = u64::from(timer.period as u32);
@@ -708,9 +710,9 @@ impl BxHpetC {
                 HPET_TN_CMP => {
                     let timer = &mut self.timers[id];
                     if !Self::timer_is_periodic(timer) || (timer.config & HPET_TN_SETVAL) != 0 {
-                        timer.cmp = (timer.cmp & 0xffff_ffff_0000_0000) | new_val;
+                        timer.cmp = (timer.cmp & 0xFFFF_FFFF_0000_0000) | new_val;
                     }
-                    timer.period = (timer.period & 0xffff_ffff_0000_0000) | new_val;
+                    timer.period = (timer.period & 0xFFFF_FFFF_0000_0000) | new_val;
                     if trailing_write {
                         timer.config &= !HPET_TN_SETVAL;
                     }
@@ -724,9 +726,9 @@ impl BxHpetC {
                         return;
                     }
                     if !Self::timer_is_periodic(timer) || (timer.config & HPET_TN_SETVAL) != 0 {
-                        timer.cmp = (timer.cmp & 0xffff_ffff) | (new_val << 32);
+                        timer.cmp = (timer.cmp & 0xFFFF_FFFF) | (new_val << 32);
                     }
-                    timer.period = (timer.period & 0xffff_ffff) | (new_val << 32);
+                    timer.period = (timer.period & 0xFFFF_FFFF) | (new_val << 32);
                     if trailing_write {
                         timer.config &= !HPET_TN_SETVAL;
                     }
@@ -736,11 +738,11 @@ impl BxHpetC {
                 }
                 HPET_TN_ROUTE => {
                     let timer = &mut self.timers[id];
-                    timer.fsb = (timer.fsb & 0xffff_ffff_0000_0000) | new_val;
+                    timer.fsb = (timer.fsb & 0xFFFF_FFFF_0000_0000) | new_val;
                 }
                 HPET_TN_ROUTE_HI => {
                     let timer = &mut self.timers[id];
-                    timer.fsb = (new_val << 32) | (timer.fsb & 0xffff_ffff);
+                    timer.fsb = (new_val << 32) | (timer.fsb & 0xFFFF_FFFF);
                 }
                 _ => {
                     tracing::error!("HPET: write to reserved offset {:#06x}", index);
@@ -757,8 +759,9 @@ const HPET_SNAPSHOT_VERSION: u32 = 1;
 
 #[cfg(feature = "std")]
 impl crate::snapshot::SnapshotSection for BxHpetC {
-    const TAG: u32 = crate::snapshot::SEC_HPET;
     type Restored = ();
+
+    const TAG: u32 = crate::snapshot::SEC_HPET;
 
     /// Byte length of the HPET snapshot section (fixed layout).
     fn snapshot_len(&self) -> SnapResult<u64> {
@@ -802,10 +805,7 @@ impl crate::snapshot::SnapshotSection for BxHpetC {
     /// the omitted reference/last_checked fields start at zero; rusty_box
     /// restores in place, so it zeroes them explicitly to reproduce Bochs's
     /// counter-restore behavior exactly.
-    fn restore<R: SnapRead>(
-        &mut self,
-        reader: &mut R,
-    ) -> SnapResult<()> {
+    fn restore<R: SnapRead>(&mut self, reader: &mut R) -> SnapResult<()> {
         if reader.read_u32()? != HPET_SNAPSHOT_VERSION {
             return Err(SnapError::Invalid(
                 "unsupported HPET snapshot section version",
@@ -840,8 +840,8 @@ impl crate::snapshot::SnapshotSection for BxHpetC {
 ///
 /// One window, so the id is not consulted. The register decode masks with
 /// `& 0x3ff` and the window is the 1 KiB block at the fixed, 1 KiB-aligned
-/// [`HPET_BASE`], so the offset and the physical address agree on every bit the
-/// decode looks at.
+/// [`HPET_BASE`]: the physical address the handlers take, as Bochs's do, is
+/// that base plus the offset.
 impl rusty_box_devices::api::MmioDevice for BxHpetC {
     #[inline]
     fn mmio_read(
@@ -853,7 +853,7 @@ impl rusty_box_devices::api::MmioDevice for BxHpetC {
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         self.set_now(ctx.clock);
-        self.mem_read(at.get(), len, data);
+        self.mem_read(HPET_BASE + at.get(), len, data);
     }
 
     #[inline]
@@ -866,7 +866,7 @@ impl rusty_box_devices::api::MmioDevice for BxHpetC {
         ctx: &mut rusty_box_devices::api::DeviceCtx<'_>,
     ) {
         self.set_now(ctx.clock);
-        self.mem_write(at.get(), len, data);
+        self.mem_write(HPET_BASE + at.get(), len, data);
     }
 }
 
@@ -889,7 +889,11 @@ mod tests {
         hpet.reset();
         let _ = hpet.take_pending();
         hpet.set_now(clock_at(0));
-        hpet.write_aligned(HPET_BASE + u64::from(HPET_CFG), HPET_CFG_ENABLE as u32, true);
+        hpet.write_aligned(
+            HPET_BASE + u64::from(HPET_CFG),
+            HPET_CFG_ENABLE as u32,
+            true,
+        );
         hpet
     }
 
@@ -897,9 +901,12 @@ mod tests {
     fn capability_register_carries_the_bios_probe_vendor_id() {
         let hpet = BxHpetC::new();
         // rombios32.c: hpet_enabled = (readl(ACPI_HPET_ADDRESS) >> 16) == 0x8086.
-        assert_eq!(hpet.read_aligned(HPET_BASE + u64::from(HPET_ID)) >> 16, 0x8086);
+        assert_eq!(
+            hpet.read_aligned(HPET_BASE + u64::from(HPET_ID)) >> 16,
+            0x8086
+        );
         // Bochs hpet.cc: 3 timers, rev 1, 10 ns (100 MHz) period.
-        assert_eq!((hpet.capability >> 8) & 0x1f, (HPET_NUM_TIMERS as u64) - 1);
+        assert_eq!((hpet.capability >> 8) & 0x1F, (HPET_NUM_TIMERS as u64) - 1);
         assert_eq!(hpet.capability >> 32, HPET_CLK_PERIOD * FS_PER_NS);
     }
 
@@ -949,7 +956,10 @@ mod tests {
         let fired = hpet.take_pending();
         assert!(fired.irq_op_count >= 2);
         let route = fired.irq_ops[0].0;
-        assert_eq!(fired.irq_ops[..fired.irq_op_count], [(route, false), (route, true)]);
+        assert_eq!(
+            fired.irq_ops[..fired.irq_op_count],
+            [(route, false), (route, true)]
+        );
     }
 
     #[test]
@@ -983,7 +993,11 @@ mod tests {
 
         // Leaving legacy mode re-enables the PIT/RTC pins (Bochs reset too).
         hpet.set_now(clock_at(100));
-        hpet.write_aligned(HPET_BASE + u64::from(HPET_CFG), HPET_CFG_ENABLE as u32, true);
+        hpet.write_aligned(
+            HPET_BASE + u64::from(HPET_CFG),
+            HPET_CFG_ENABLE as u32,
+            true,
+        );
         let pending = hpet.take_pending();
         assert_eq!(pending.pit_irq_gate, Some(true));
         assert_eq!(pending.cmos_irq_gate, Some(true));
@@ -1032,7 +1046,10 @@ mod tests {
         hpet.timer_fired(0);
         assert_eq!(hpet.isr & 1, 1, "level mode must latch the status bit");
         let fired = hpet.take_pending();
-        assert_eq!(fired.irq_ops[..fired.irq_op_count].last(), Some(&(0u8, true)));
+        assert_eq!(
+            fired.irq_ops[..fired.irq_op_count].last(),
+            Some(&(0u8, true))
+        );
 
         // Writing 1 to the status bit lowers the line and clears the latch.
         hpet.write_aligned(HPET_BASE + u64::from(HPET_STATUS), 1, true);
@@ -1058,12 +1075,15 @@ mod tests {
         );
         hpet.write_aligned(t0 + u64::from(HPET_TN_CMP), 100, true);
         let t1 = HPET_BASE + 0x120;
-        hpet.write_aligned(t1 + u64::from(HPET_TN_ROUTE), 0xdead_beef, true);
+        hpet.write_aligned(t1 + u64::from(HPET_TN_ROUTE), 0xDEAD_BEEF, true);
         hpet.set_now(clock_at(1_000));
         hpet.timer_fired(0);
         let _ = hpet.take_pending();
 
-        assert_ne!(hpet.hpet_reference_time, 0, "reference cursor should have advanced");
+        assert_ne!(
+            hpet.hpet_reference_time, 0,
+            "reference cursor should have advanced"
+        );
 
         let saved_config = hpet.config;
         let saved_isr = hpet.isr;
@@ -1083,7 +1103,7 @@ mod tests {
         // Dirty the reference fields so the restore must actively zero them.
         restored.hpet_reference_time = 0x1234;
         restored.hpet_reference_value = 0x5678;
-        restored.timers[0].last_checked = 0x9abc;
+        restored.timers[0].last_checked = 0x9ABC;
 
         let mut reader =
             crate::snapshot::SnapshotReader::new(blob.as_slice(), blob.len() as u64).unwrap();
@@ -1095,7 +1115,11 @@ mod tests {
         assert_eq!(restored.isr, saved_isr);
         for (index, expected) in saved_timers.iter().enumerate() {
             let t = &restored.timers[index];
-            assert_eq!((t.config, t.cmp, t.fsb, t.period), *expected, "timer {index}");
+            assert_eq!(
+                (t.config, t.cmp, t.fsb, t.period),
+                *expected,
+                "timer {index}"
+            );
         }
         // Omitted derived fields are zeroed, matching Bochs's fresh-construct
         // restore (hpet.cc register_state does not serialize them).

@@ -10,6 +10,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -39,8 +40,10 @@ struct Delivered {
 fn run_to_handler(emu: &mut Emulator, entry: u64, code: &[u8], handler: u64) {
     let end = entry + code.len() as u64;
     let image = [code, &[0xEB, 0xFE]].concat();
-    emu.mem_write(entry, &image).expect("write code");
-    emu.mem_write(handler, &[0xF4]).expect("write handler");
+    emu.mem_write(BxPhyAddress::new(entry), &image)
+        .expect("write code");
+    emu.mem_write(BxPhyAddress::new(handler), &[0xF4])
+        .expect("write handler");
     emu.emu_start(entry, Some(end), None, Some(32))
         .expect("execute");
     let ip = emu.cpu().rip();
@@ -52,19 +55,22 @@ fn run_to_handler(emu: &mut Emulator, entry: u64, code: &[u8], handler: u64) {
 
 fn read_u16(emu: &mut Emulator, address: u64) -> u64 {
     let mut bytes = [0u8; 2];
-    emu.mem_read(address, &mut bytes).expect("read stack");
+    emu.mem_read(BxPhyAddress::new(address), &mut bytes)
+        .expect("read stack");
     u64::from(u16::from_le_bytes(bytes))
 }
 
 fn read_u32(emu: &mut Emulator, address: u64) -> u64 {
     let mut bytes = [0u8; 4];
-    emu.mem_read(address, &mut bytes).expect("read stack");
+    emu.mem_read(BxPhyAddress::new(address), &mut bytes)
+        .expect("read stack");
     u64::from(u32::from_le_bytes(bytes))
 }
 
 fn read_u64(emu: &mut Emulator, address: u64) -> u64 {
     let mut bytes = [0u8; 8];
-    emu.mem_read(address, &mut bytes).expect("read stack");
+    emu.mem_read(BxPhyAddress::new(address), &mut bytes)
+        .expect("read stack");
     u64::from_le_bytes(bytes)
 }
 
@@ -85,8 +91,10 @@ fn real_mode_fault(stack: &[u8], instruction: &[u8]) -> Delivered {
         .expect("emulator");
     // IVT entry 13 = 0000:REAL_HANDLER.
     let vector = [(REAL_HANDLER as u16).to_le_bytes(), 0u16.to_le_bytes()].concat();
-    emu.mem_write(13 * 4, &vector).expect("ivt");
-    emu.mem_write(REAL_STACK, stack).expect("stack");
+    emu.mem_write(BxPhyAddress::new(13 * 4), &vector)
+        .expect("ivt");
+    emu.mem_write(BxPhyAddress::new(REAL_STACK), stack)
+        .expect("stack");
     emu.reg_write(X86Reg::Rsp, REAL_STACK);
     run_to_handler(&mut emu, REAL_CODE, instruction, REAL_HANDLER);
     let sp = emu.reg_read(X86Reg::Rsp) & 0xFFFF;
@@ -154,7 +162,12 @@ fn a_near_call_past_the_limit_takes_back_its_push() {
 fn a_far_jump_past_the_limit_raises_gp() {
     on_big_stack(|| {
         // jmp 0000:00010000 — 66 EA ptr16:32.
-        let jmp = [&[0x66, 0xEA][..], &BEYOND_REAL_LIMIT.to_le_bytes(), &[0x00, 0x00]].concat();
+        let jmp = [
+            &[0x66, 0xEA][..],
+            &BEYOND_REAL_LIMIT.to_le_bytes(),
+            &[0x00, 0x00],
+        ]
+        .concat();
         let delivered = real_mode_fault(&[], &jmp);
         assert_eq!(
             delivered,
@@ -185,15 +198,15 @@ struct ProtectedFault {
 
 /// Run `code` in flat 32-bit protected mode through a #GP it must raise.
 fn protected_mode_fault(code: &[u8]) -> ProtectedFault {
-    let mut emu =
-        Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
-            .expect("emulator");
+    let mut emu = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+        .expect("emulator");
     let mut gate = [0u8; 8];
     gate[0..2].copy_from_slice(&(PROTECTED_HANDLER as u16).to_le_bytes());
     gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
     gate[5] = 0x8E;
     gate[6..8].copy_from_slice(&((PROTECTED_HANDLER >> 16) as u16).to_le_bytes());
-    emu.mem_write(PROTECTED_IDT + 13 * 8, &gate).expect("idt");
+    emu.mem_write(BxPhyAddress::new(PROTECTED_IDT + 13 * 8), &gate)
+        .expect("idt");
     emu.reg_write(X86Reg::IdtrBase, PROTECTED_IDT);
     emu.reg_write(X86Reg::IdtrLimit, 256 * 8 - 1);
     emu.reg_write(X86Reg::Rsp, PROTECTED_STACK);
@@ -272,9 +285,8 @@ const TSS_SELECTOR: u16 = 0x18;
 /// the virtual-8086 stack, back to a HLT at `V86_HLT_IP`, and require the
 /// HLT's #GP to reach the ring-0 handler.
 fn v86_iret_then_fault(iret: &[u8], iret_frame: &[u8]) -> ProtectedFault {
-    let mut emu =
-        Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
-            .expect("emulator");
+    let mut emu = Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+        .expect("emulator");
     // Null, flat ring-0 code and data, and a 32-bit TSS (limit 0x67).
     let gdt = [
         0u64,
@@ -283,24 +295,33 @@ fn v86_iret_then_fault(iret: &[u8], iret_frame: &[u8]) -> ProtectedFault {
         0x0000_8900_0000_0067 | (V86_TSS << 16),
     ];
     let gdt_bytes: Vec<u8> = gdt.iter().flat_map(|entry| entry.to_le_bytes()).collect();
-    emu.mem_write(V86_GDT, &gdt_bytes).expect("gdt");
+    emu.mem_write(BxPhyAddress::new(V86_GDT), &gdt_bytes)
+        .expect("gdt");
     emu.reg_write(X86Reg::GdtrBase, V86_GDT);
     emu.reg_write(X86Reg::GdtrLimit, 4 * 8 - 1);
     // TSS.ESP0 and TSS.SS0.
-    emu.mem_write(V86_TSS + 4, &(V86_RING0_STACK as u32).to_le_bytes())
-        .expect("tss");
-    emu.mem_write(V86_TSS + 8, &u32::from(RING0_DATA).to_le_bytes())
-        .expect("tss");
+    emu.mem_write(
+        BxPhyAddress::new(V86_TSS + 4),
+        &(V86_RING0_STACK as u32).to_le_bytes(),
+    )
+    .expect("tss");
+    emu.mem_write(
+        BxPhyAddress::new(V86_TSS + 8),
+        &u32::from(RING0_DATA).to_le_bytes(),
+    )
+    .expect("tss");
     // #GP: a 32-bit interrupt gate, DPL 0, to a ring-0 HLT.
     let mut gate = [0u8; 8];
     gate[0..2].copy_from_slice(&(V86_HANDLER as u16).to_le_bytes());
     gate[2..4].copy_from_slice(&RING0_CODE.to_le_bytes());
     gate[5] = 0x8E;
     gate[6..8].copy_from_slice(&((V86_HANDLER >> 16) as u16).to_le_bytes());
-    emu.mem_write(V86_IDT + 13 * 8, &gate).expect("idt");
+    emu.mem_write(BxPhyAddress::new(V86_IDT + 13 * 8), &gate)
+        .expect("idt");
     emu.reg_write(X86Reg::IdtrBase, V86_IDT);
     emu.reg_write(X86Reg::IdtrLimit, 256 * 8 - 1);
-    emu.mem_write(V86_HANDLER, &[0xF4]).expect("handler");
+    emu.mem_write(BxPhyAddress::new(V86_HANDLER), &[0xF4])
+        .expect("handler");
 
     // The IRETD frame into virtual-8086 mode at V86_CS:0, IOPL 3:
     // EIP, CS, EFLAGS (VM, IOPL 3, IF), ESP, SS, ES, DS, FS, GS.
@@ -308,15 +329,17 @@ fn v86_iret_then_fault(iret: &[u8], iret_frame: &[u8]) -> ProtectedFault {
         .iter()
         .flat_map(|dword: &u64| (*dword as u32).to_le_bytes())
         .collect();
-    emu.mem_write(V86_ENTRY_STACK, &entry).expect("entry frame");
+    emu.mem_write(BxPhyAddress::new(V86_ENTRY_STACK), &entry)
+        .expect("entry frame");
     emu.reg_write(X86Reg::Rsp, V86_ENTRY_STACK);
 
     // The virtual-8086 code: `iret`, then a HLT at V86_HLT_IP.
     let mut v86_image = vec![0x90u8; V86_HLT_IP as usize + 1];
     v86_image[..iret.len()].copy_from_slice(iret);
     v86_image[V86_HLT_IP as usize] = 0xF4;
-    emu.mem_write(V86_CS << 4, &v86_image).expect("v86 code");
-    emu.mem_write((V86_SS << 4) + V86_SP, iret_frame)
+    emu.mem_write(BxPhyAddress::new(V86_CS << 4), &v86_image)
+        .expect("v86 code");
+    emu.mem_write(BxPhyAddress::new((V86_SS << 4) + V86_SP), iret_frame)
         .expect("v86 stack");
 
     // mov eax, TSS_SELECTOR; ltr ax; iretd
@@ -326,7 +349,8 @@ fn v86_iret_then_fault(iret: &[u8], iret_frame: &[u8]) -> ProtectedFault {
         &[0x0F, 0x00, 0xD8, 0xCF],
     ]
     .concat();
-    emu.mem_write(PROTECTED_CODE, &code).expect("write code");
+    emu.mem_write(BxPhyAddress::new(PROTECTED_CODE), &code)
+        .expect("write code");
     emu.emu_start(PROTECTED_CODE, None, None, Some(32))
         .expect("execute");
     let ip = emu.cpu().rip();
@@ -418,7 +442,8 @@ fn long_mode_fault(code: &[u8]) -> Delivered {
     gate[5] = 0x8E;
     gate[6..8].copy_from_slice(&((LONG_HANDLER >> 16) as u16).to_le_bytes());
     gate[8..12].copy_from_slice(&((LONG_HANDLER >> 32) as u32).to_le_bytes());
-    emu.mem_write(LONG_IDT + 13 * 16, &gate).expect("idt");
+    emu.mem_write(BxPhyAddress::new(LONG_IDT + 13 * 16), &gate)
+        .expect("idt");
     emu.reg_write(X86Reg::IdtrBase, LONG_IDT);
     emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
     emu.reg_write(X86Reg::Rsp, LONG_STACK);

@@ -1,12 +1,15 @@
 [workspace]
-members = ["rusty_box_core", "rusty_box_devices", "rusty_box_whp_sys", "rusty_box_whp", "rusty_box_whp_engine", "rusty_box", "rusty_box_decoder", "rusty_box_gui", "rusty_box_bximage", "xtask", "examples/rusty_box_web", "examples/rusty_box_uefi", "examples/no_alloc_smoke"]
+members = ["rusty_box_core", "rusty_box_aarch64", "rusty_box_devices", "rusty_box_whp_sys", "rusty_box_whp", "rusty_box_whp_engine", "rusty_box", "rusty_box_decoder", "rusty_box_symbols", "rusty_box_symbols_fixtures", "rusty_box_gui", "rusty_box_bximage", "xtask", "examples/rusty_box_web", "examples/rusty_box_uefi", "examples/no_alloc_smoke"]
 default-members = ["rusty_box"]
 resolver = "2"
 
 [workspace.package]
 version = "0.0.3"
 edition = "2021"
-license = "LGPL-2.1-or-later"
+# The default for a crate written here. A crate ported from Bochs, or holding
+# code ported from another LGPL source, sets its own `license` instead; see
+# the README's License section.
+license = "MIT OR Apache-2.0"
 authors = ["Aslan Gurtsiev", "The Bochs Project (original C++ implementation)"]
 repository = "https://github.com/r3bb1t/rusty_box"
 homepage = "https://github.com/r3bb1t/rusty_box"

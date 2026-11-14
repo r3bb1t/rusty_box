@@ -91,11 +91,7 @@ pub(in crate::cpu) fn f64_to_i32_r_min_mag(
     if exact && ((abs_z as u32 as u64) << shift_dist) != sig {
         softfloat_raise_flags(status, FLAG_INEXACT);
     }
-    if sign {
-        -abs_z
-    } else {
-        abs_z
-    }
+    if sign { -abs_z } else { abs_z }
 }
 
 /// Bochs softfloat3e `f64_to_i64`.
@@ -132,14 +128,7 @@ pub(in crate::cpu) fn f64_to_i64(
     } else {
         sig_extra = shift_right_jam64_extra(sig, 0, shift_dist as u32);
     }
-    softfloat_round_to_i64(
-        sign,
-        sig_extra.0,
-        sig_extra.1,
-        rounding_mode,
-        exact,
-        status,
-    )
+    softfloat_round_to_i64(sign, sig_extra.0, sig_extra.1, rounding_mode, exact, status)
 }
 
 /// Bochs softfloat3e `f64_to_i64_r_minMag` (round toward zero).
@@ -221,8 +210,8 @@ mod tests {
             (-1.9, -1),
             (2147483647.4, 2147483647),
             (-2147483648.5, -2147483648),
-            (2147483648.0, i32::MIN),   // out of range → indefinite
-            (-2147483649.0, i32::MIN),  // out of range → indefinite
+            (2147483648.0, i32::MIN),  // out of range → indefinite
+            (-2147483649.0, i32::MIN), // out of range → indefinite
             (f64::NAN, i32::MIN),
             (f64::INFINITY, i32::MIN),
             (f64::NEG_INFINITY, i32::MIN),
@@ -236,9 +225,15 @@ mod tests {
             );
         }
         let mut st = SoftFloatStatus::default();
-        assert_eq!(f32_to_i32_r_min_mag((1.9f32).to_bits(), false, false, &mut st), 1);
+        assert_eq!(
+            f32_to_i32_r_min_mag((1.9f32).to_bits(), false, false, &mut st),
+            1
+        );
         let mut st = SoftFloatStatus::default();
-        assert_eq!(f32_to_i64_r_min_mag((-1.9f32).to_bits(), false, false, &mut st), -1);
+        assert_eq!(
+            f32_to_i64_r_min_mag((-1.9f32).to_bits(), false, false, &mut st),
+            -1
+        );
         let mut st = SoftFloatStatus::default();
         assert_eq!(
             f64_to_i64_r_min_mag(f64::NAN.to_bits(), false, false, &mut st),
@@ -250,11 +245,20 @@ mod tests {
     #[test]
     fn float_to_int_rounding_uses_rounding_mode() {
         let mut st = SoftFloatStatus::default();
-        assert_eq!(f64_to_i32((2.5f64).to_bits(), ROUND_NEAR_EVEN, false, &mut st), 2);
+        assert_eq!(
+            f64_to_i32((2.5f64).to_bits(), ROUND_NEAR_EVEN, false, &mut st),
+            2
+        );
         let mut st = SoftFloatStatus::default();
-        assert_eq!(f64_to_i32((3.5f64).to_bits(), ROUND_NEAR_EVEN, false, &mut st), 4);
+        assert_eq!(
+            f64_to_i32((3.5f64).to_bits(), ROUND_NEAR_EVEN, false, &mut st),
+            4
+        );
         let mut st = SoftFloatStatus::default();
-        assert_eq!(f64_to_i32((2.9f64).to_bits(), ROUND_TO_ZERO, false, &mut st), 2);
+        assert_eq!(
+            f64_to_i32((2.9f64).to_bits(), ROUND_TO_ZERO, false, &mut st),
+            2
+        );
         let mut st = SoftFloatStatus::default();
         assert_eq!(f64_to_i32((2.1f64).to_bits(), ROUND_MAX, false, &mut st), 3);
         let mut st = SoftFloatStatus::default();

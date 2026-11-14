@@ -2,9 +2,7 @@
 //!
 //! Based on Bochs logical8.cc
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -82,16 +80,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // =========================================================================
     // Helper functions
     // =========================================================================
-
-
-
-
-
-
-
-
-
-
 
     // =========================================================================
     // CMP instructions
@@ -513,6 +501,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.and_eb_gb_m(instr)
         }
     }
+
     pub fn and_gb_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.and_gb_eb_r(instr);
@@ -521,6 +510,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.and_gb_eb_m(instr)
         }
     }
+
     pub fn and_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.and_eb_ib_r(instr);
@@ -529,6 +519,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.and_eb_ib_m(instr)
         }
     }
+
     pub fn or_eb_gb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.or_eb_gb_r(instr);
@@ -537,6 +528,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.or_eb_gb_m(instr)
         }
     }
+
     pub fn or_gb_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.or_gb_eb_r(instr);
@@ -545,6 +537,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.or_gb_eb_m(instr)
         }
     }
+
     pub fn or_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.or_eb_ib_r(instr);
@@ -553,6 +546,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.or_eb_ib_m(instr)
         }
     }
+
     pub fn xor_eb_gb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.xor_eb_gb_r(instr);
@@ -561,6 +555,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.xor_eb_gb_m(instr)
         }
     }
+
     pub fn xor_gb_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.xor_gb_eb_r(instr);
@@ -569,6 +564,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.xor_gb_eb_m(instr)
         }
     }
+
     pub fn xor_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.xor_eb_ib_r(instr);
@@ -577,6 +573,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.xor_eb_ib_m(instr)
         }
     }
+
     pub fn not_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.not_eb_r(instr);
@@ -585,6 +582,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.not_eb_m(instr)
         }
     }
+
     pub fn test_eb_gb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.test_eb_gb_r(instr);
@@ -593,6 +591,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.test_eb_gb_m(instr)
         }
     }
+
     pub fn test_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.test_eb_ib_r(instr);
@@ -601,6 +600,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.test_eb_ib_m(instr)
         }
     }
+
     pub fn cmp_gb_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmp_gb_eb_r(instr);
@@ -609,6 +609,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmp_gb_eb_m(instr)
         }
     }
+
     pub fn cmp_eb_gb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmp_eb_gb_r(instr);
@@ -617,6 +618,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmp_eb_gb_m(instr)
         }
     }
+
     pub fn cmp_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmp_eb_ib_r(instr);

@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rusty_box_decoder::{fetch_decode32, fetch_decode64};
 
 /// Representative x86 instruction byte sequences for benchmarking.

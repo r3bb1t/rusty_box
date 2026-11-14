@@ -15,13 +15,11 @@
 //!   RB_RESUME_INSNS Instructions after the restore (default 200_000_000)
 //!   RB_SNAPSHOT     Snapshot file (default target/snapshot_resume.rbx)
 
-use rusty_box::{
-    emulator::{
-        AtaSlot, BootDevice, BootOrder, Emulator, EmulatorConfig, Ips, MachineBuilder, MemorySize,
-        RunBudget,
-    },
-    gui::NoGui,
+use rusty_box::emulator::{
+    AtaSlot, BootDevice, BootOrder, Emulator, EmulatorConfig, Ips, MachineBuilder, MemorySize,
+    RunBudget,
 };
+use rusty_box::gui::NoGui;
 
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
@@ -57,7 +55,9 @@ impl HarnessConfig {
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "full".to_string());
+    let mode = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "full".to_string());
     std::thread::Builder::new()
         .stack_size(1024 * 1024 * 1024)
         .name("snapshot_resume".to_string())
@@ -100,10 +100,8 @@ fn run(mode: &str) {
 
 fn build_machine(config: &HarnessConfig) -> Box<Emulator> {
     let workspace_root = workspace_root();
-    let bios = std::fs::read(
-        workspace_root.join("cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"),
-    )
-    .expect("read BIOS-bochs-latest");
+    let bios = std::fs::read(workspace_root.join("cpp_orig/bochs/bochs/bios/BIOS-bochs-latest"))
+        .expect("read BIOS-bochs-latest");
     let vga_bios = std::fs::read(
         workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"),
     )
@@ -173,8 +171,9 @@ fn boot_save(config: &HarnessConfig) {
         start.elapsed()
     );
 
-    let mut file =
-        std::io::BufWriter::new(std::fs::File::create(&config.snapshot_path).expect("create snapshot file"));
+    let mut file = std::io::BufWriter::new(
+        std::fs::File::create(&config.snapshot_path).expect("create snapshot file"),
+    );
     emu.save_snapshot(&mut file).expect("save snapshot");
     use std::io::Write as _;
     file.flush().expect("flush snapshot");
@@ -194,8 +193,9 @@ fn restore_run(config: &HarnessConfig) {
     );
     let start = std::time::Instant::now();
     let mut emu = build_machine(config);
-    let mut file =
-        std::io::BufReader::new(std::fs::File::open(&config.snapshot_path).expect("open snapshot file"));
+    let mut file = std::io::BufReader::new(
+        std::fs::File::open(&config.snapshot_path).expect("open snapshot file"),
+    );
     emu.restore_snapshot(&mut file).expect("restore snapshot");
     println!("restore-run: restored in {:?}", start.elapsed());
 

@@ -3,37 +3,35 @@
 //! Provides `fetch_decode64` — a `const fn` decoder for x86-64 long mode
 //! that produces an [`Instruction`].
 
-use crate::error::{DecodeError, DecodeResult};
-use crate::instruction::{
-    has_lock_prefix_bits, lock_rep_value_from_bits, set_lock_rep_value_bits, Instruction,
-    InstructionFlags, LOCK_REP_LOCK, LOCK_REP_REP, LOCK_REP_REPNE,
-};
-use crate::opcode::Opcode;
-use crate::BxSegregs;
-
-use super::tables::{
-    BxDecodeError, SsePrefix, MASK_K0_OFFSET, VEX_VL_128_256_OFFSET, VEX_W_OFFSET,
-};
-
 // Import opcode tables
 use super::opmap::*;
-use super::opmap_0f38::BxOpcodeTable0F38;
 use super::opmap_0f3a::BxOpcodeTable0F3A;
+use super::opmap_0f38::BxOpcodeTable0F38;
+use super::tables::{
+    BxDecodeError, MASK_K0_OFFSET, SsePrefix, VEX_VL_128_256_OFFSET, VEX_W_OFFSET,
+};
 use super::x87::{
-    BX3_DNOW_OPCODE, BX_OPCODE_INFO_FLOATING_POINT_D8, BX_OPCODE_INFO_FLOATING_POINT_D9,
+    BX_OPCODE_INFO_FLOATING_POINT_D8, BX_OPCODE_INFO_FLOATING_POINT_D9,
     BX_OPCODE_INFO_FLOATING_POINT_DA, BX_OPCODE_INFO_FLOATING_POINT_DB,
     BX_OPCODE_INFO_FLOATING_POINT_DC, BX_OPCODE_INFO_FLOATING_POINT_DD,
-    BX_OPCODE_INFO_FLOATING_POINT_DE, BX_OPCODE_INFO_FLOATING_POINT_DF,
+    BX_OPCODE_INFO_FLOATING_POINT_DE, BX_OPCODE_INFO_FLOATING_POINT_DF, BX3_DNOW_OPCODE,
 };
+use crate::BxSegregs;
+use crate::error::{DecodeError, DecodeResult};
+use crate::instruction::{
+    Instruction, InstructionFlags, LOCK_REP_LOCK, LOCK_REP_REP, LOCK_REP_REPNE,
+    has_lock_prefix_bits, lock_rep_value_from_bits, set_lock_rep_value_bits,
+};
+use crate::opcode::Opcode;
 
 #[derive(Clone, Copy)]
 struct RexPrefix(u8);
 
 impl RexPrefix {
     const B_BIT: u8 = 0x01;
-    const X_BIT: u8 = 0x02;
     const R_BIT: u8 = 0x04;
     const W_BIT: u8 = 0x08;
+    const X_BIT: u8 = 0x02;
 
     #[inline]
     const fn empty() -> Self {
@@ -132,6 +130,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     let mut rex_prefix = RexPrefix::empty();
     let mut sse_prefix: u8 = SsePrefix::PrefixNone as u8;
     let mut seg_override: u8 = 7; // 7 = none
+    // A LOCK prefix anywhere among the prefixes, which wins over a REP/REPNE
+    // in either order (Bochs fetchdecode64.cc fetchDecode64 `lock`, applied
+    // through bxInstruction_c::setLock).
+    let mut lock = false;
 
     // === Phase 1: Parse legacy prefixes ===
     // Per Bochs fetchDecode64: REX prefixes do NOT break the prefix loop.
@@ -175,7 +177,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // LOCK prefix
             0xF0 => {
                 rex_prefix = RexPrefix::empty();
-                metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_LOCK);
+                lock = true;
             }
 
             // REPNE/REPNZ (also SSE prefix)
@@ -206,7 +208,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         pos += 1;
     }
 
-    // Post-prefix REX processing (matches Bochs fetchDecode64:1476-1482)
+    // Post-prefix REX processing (Bochs fetchdecode64.cc fetchDecode64)
     // Must happen AFTER prefix loop so REX.W overrides any prior 0x66 prefix
     if !rex_prefix.is_empty() {
         // assertExtend8bit: REX prefix enables extended 8-bit registers (SPL, BPL, SIL, DIL)
@@ -216,6 +218,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             metainfo1_bits |= InstructionFlags::Os64.bits();
             metainfo1_bits |= InstructionFlags::Os32.bits();
         }
+    }
+    if lock {
+        metainfo1_bits = set_lock_rep_value_bits(metainfo1_bits, LOCK_REP_LOCK);
     }
 
     if pos >= max_len {
@@ -243,10 +248,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     let mut evex_z: u8 = 0; // EVEX zeroing-masking
     let mut evex_b_flag: u8 = 0; // EVEX broadcast/RC/SAE
     let mut evex_aaa: u8 = 0; // EVEX opmask register
-                              // EVEX-only extensions (5th bit) for the 32-vector register file:
-                              //   R' extends ModRM.reg (`nnn`) to 5 bits.
-                              //   V' extends `vvvv` to 5 bits for non-VSIB ops, OR extends the SIB
-                              //   index field to 5 bits for VSIB ops (gather/scatter family).
+    // EVEX-only extensions (5th bit) for the 32-vector register file:
+    //   R' extends ModRM.reg (`nnn`) to 5 bits.
+    //   V' extends `vvvv` to 5 bits for non-VSIB ops, OR extends the SIB
+    //   index field to 5 bits for VSIB ops (gather/scatter family).
     let mut evex_r_prime: u8 = 0;
     let mut evex_v_prime: u8 = 0;
 
@@ -369,7 +374,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
         }
         let evex_map = p0 & 0x07; // 3-bit map (Bochs: evex & 0x7)
-                                  // R/X/B from P0 (inverted bits) — bit 3 extension for register encoding
+        // R/X/B from P0 (inverted bits) — bit 3 extension for register encoding
         let rex_r_bit = if (p0 & 0x80) == 0 {
             RexPrefix::R_BIT
         } else {
@@ -385,7 +390,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         } else {
             0
         }; // ~B → REX.B (bit 0)
-           // R' from P0 bit 4 — extends R to 5 bits for EVEX register encoding
+        // R' from P0 bit 4 — extends R to 5 bits for EVEX register encoding
         evex_r_prime = if (p0 & 0x10) == 0 { 1u8 } else { 0u8 }; // ~R' inverted, extends nnn to 5 bits
 
         // P1: W(7) ~vvvv(6:3) 1(2) pp(1:0)
@@ -594,8 +599,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         if rex_prefix.has_r() {
             nnn |= 8;
         } // REX.R
-          // EVEX.R' extends nnn to 5 bits for the 32-vector register file.
-          // For non-EVEX paths `evex_r_prime` is zero so this is a no-op.
+        // EVEX.R' extends nnn to 5 bits for the 32-vector register file.
+        // For non-EVEX paths `evex_r_prime` is zero so this is a no-op.
         nnn |= (evex_r_prime as u32) << 4;
         if rex_prefix.has_b() {
             rm |= 8;
@@ -792,6 +797,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // 0x1D6 (0F D6): Ed,Gd for 66 prefix (MOVQ Wq,Vq is a STORE: rm=dst, nnn=src),
             // but NOT for F2 (MOVDQ2Q) or F3 (MOVQ2DQ) which are LOADs (nnn=dst, rm=src)
             || (b1 == 0x1D6 && sse_prefix == SsePrefix::Prefix66 as u8)
+            // VMREAD Eq,Gq (0F 78, no prefix): rm=where the field goes, nnn=its encoding
+            || (b1 == 0x178 && sse_prefix == SsePrefix::PrefixNone as u8)
             // BT/BTS/BTR/BTC EdGd (0F A3/AB/B3/BB): rm=bit-field(dst), nnn=bit-index(src)
             || matches!(b1, 0x1A3 | 0x1AB | 0x1B3 | 0x1BB)
             // XADD EbGb (0F C0), XADD EdGd (0F C1): rm=dst, nnn=src
@@ -1057,6 +1064,15 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         // Store foo: (modrm | (escape_byte << 8)) & 0x7FF — for x87 FPU handler context
         let foo_val = ((modrm_byte as u16) | ((b1 as u16) << 8)) & 0x7FF;
         instr.immediate = foo_val as u32;
+        // Bochs decoder64_fp_escape -> assign_srcs: a register form's ST(i)
+        // operand is OP_STi, ModRM.rm with REX.B (fetchdecode.h); the FPU
+        // register file indexes it modulo 8. Each form names ST(i) once and
+        // reads ST(0) by number, so both fields carry rm: handlers take it
+        // from dst() where ST(i) is written and src() where it is read.
+        if mod_c0 {
+            instr.operands.dst = rm as u8;
+            instr.operands.src1 = rm as u8;
+        }
     } else if opcode_map == 4 && !is_evex {
         // 3DNow! instruction: use suffix to look up opcode directly
         instr.opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
@@ -1096,7 +1112,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     // (VPXOR vs VPXORD differ in masking granularity, not just encoding), so
     // borrowing an entry from them would decode to the wrong handler.
     if is_evex {
-        instr.opcode = super::vex_shared::lookup_evex_opcode(opcode_map, (b1 & 0xFF) as u8, decmask);
+        instr.opcode =
+            super::vex_shared::lookup_evex_opcode(opcode_map, (b1 & 0xFF) as u8, decmask);
 
         // Which field holds the destination is a property of the opcode, not
         // of the encoding, so the byte-based rules above cannot express it:
@@ -1859,8 +1876,10 @@ const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8,
 #[cfg(test)]
 mod tests {
 
+    use std::vec;
+    use std::vec::Vec;
+
     use super::*;
-    use std::{vec, vec::Vec};
 
     #[test]
     fn test_nop() {
@@ -1868,6 +1887,20 @@ mod tests {
         let i = fetch_decode64(&[0x90]).unwrap();
         assert_eq!(i.ilen(), 1);
         assert_eq!(i.get_ia_opcode(), Opcode::Nop);
+    }
+
+    /// LOCK wins over REP/REPNE whichever comes first: LOCK INSB (no memory
+    /// destination) is #UD, and a LOCK ADD to memory keeps its lock.
+    #[test]
+    fn lock_wins_over_rep_in_either_order() {
+        let illegal = Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+        for bytes in [[0xF0, 0xF3, 0x6C], [0xF3, 0xF0, 0x6C], [0xF0, 0xF2, 0x6C]] {
+            assert_eq!(fetch_decode64(&bytes).map(|i| i.get_ia_opcode()), illegal);
+        }
+        for bytes in [[0xF0, 0xF3, 0x01, 0x18], [0xF3, 0xF0, 0x01, 0x18]] {
+            let i = fetch_decode64(&bytes).unwrap();
+            assert_eq!(i.lock_rep_used_value(), LOCK_REP_LOCK);
+        }
     }
 
     #[test]
@@ -2030,9 +2063,9 @@ mod tests {
         // mov al, 0x3B
         // syscall
         let data = [
-            0x48, 0x31, 0xff, 0x48, 0x31, 0xf6, 0x48, 0x31, 0xd2, 0x48, 0x31, 0xc0, 0x50, 0x48,
-            0xbb, 0x2f, 0x62, 0x69, 0x6e, 0x2f, 0x2f, 0x73, 0x68, 0x53, 0x48, 0x89, 0xe7, 0xb0,
-            0x3b, 0x0f, 0x05,
+            0x48, 0x31, 0xFF, 0x48, 0x31, 0xF6, 0x48, 0x31, 0xD2, 0x48, 0x31, 0xC0, 0x50, 0x48,
+            0xBB, 0x2F, 0x62, 0x69, 0x6E, 0x2F, 0x2F, 0x73, 0x68, 0x53, 0x48, 0x89, 0xE7, 0xB0,
+            0x3B, 0x0F, 0x05,
         ];
 
         let runtime_address = 0x007FFFFFFF400000;

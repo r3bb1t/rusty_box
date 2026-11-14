@@ -2,9 +2,8 @@
 //!
 //! Based on Bochs logical16.cc
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
+use crate::config::BxEffAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -284,8 +283,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     // get_laddr32_seg is defined in logical8.rs to avoid duplicate definitions
 
-
-
     // =========================================================================
     // Memory-form instructions
     // =========================================================================
@@ -473,6 +470,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.xor_ew_gw_m(instr)
         }
     }
+
     pub fn xor_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.xor_gw_ew_r(instr);
@@ -481,6 +479,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.xor_gw_ew_m(instr)
         }
     }
+
     pub fn xor_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.xor_ew_iw_r(instr);
@@ -489,6 +488,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.xor_ew_iw_m(instr)
         }
     }
+
     pub fn and_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.and_ew_gw_r(instr);
@@ -497,6 +497,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.and_ew_gw_m(instr)
         }
     }
+
     pub fn and_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.and_gw_ew_r(instr);
@@ -505,6 +506,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.and_gw_ew_m(instr)
         }
     }
+
     pub fn and_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.and_ew_iw_r(instr);
@@ -513,6 +515,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.and_ew_iw_m(instr)
         }
     }
+
     pub fn or_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.or_ew_gw_r(instr);
@@ -521,6 +524,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.or_ew_gw_m(instr)
         }
     }
+
     pub fn or_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.or_gw_ew_r(instr);
@@ -529,6 +533,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.or_gw_ew_m(instr)
         }
     }
+
     pub fn or_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.or_ew_iw_r(instr);
@@ -537,6 +542,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.or_ew_iw_m(instr)
         }
     }
+
     pub fn not_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.not_ew_r(instr);
@@ -545,6 +551,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.not_ew_m(instr)
         }
     }
+
     pub fn test_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.test_ew_gw_r(instr);
@@ -553,6 +560,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.test_ew_gw_m(instr)
         }
     }
+
     pub fn test_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.test_ew_iw_r(instr);
@@ -561,6 +569,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.test_ew_iw_m(instr)
         }
     }
+
     pub fn cmp_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmp_gw_ew_r(instr);
@@ -569,6 +578,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.cmp_gw_ew_m(instr)
         }
     }
+
     pub fn cmp_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
             self.cmp_ew_iw_r(instr);
@@ -659,7 +669,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     #[inline]
-    fn bit_test_ew_gw_addr(&self, instr: &Instruction, op2: u16) -> u64 {
+    fn bit_test_ew_gw_addr(&self, instr: &Instruction, op2: u16) -> BxEffAddress {
         let eaddr = self.resolve_addr(instr);
         // Bochs bit16.cc BTS_EwGwM: op1_addr = eaddr + 2 * (((s16)(op2 & ~15)) / 16),
         // then mask by the instruction address size.
@@ -668,11 +678,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let asize_mask = if instr.as64_l() != 0 {
             u64::MAX
         } else if instr.as32_l() != 0 {
-            u32::MAX as u64
+            u64::from(u32::MAX)
         } else {
-            u16::MAX as u64
+            u64::from(u16::MAX)
         };
-        addr & asize_mask
+        addr.masked(asize_mask)
     }
 
     /// BT r/m16, r16 — Bit Test (0F A3, 66h prefix)

@@ -53,7 +53,7 @@ cargo run --release -p rusty_box_gui -- `
 
 The egui shell runs `eframe` on the main thread and a launcher thread, which starts every power-on on a thread of its own with a 1500 MiB stack: one thread for each running VM. The window has four parts:
 
-- **Sidebar tree.** Every VM is a row, and the selected one opens to its three pages: **Summary**, **Console** and **Hardware**. The `+` button adds a new VM to the library, copied from the selected one, and a "Search VMs" field filters the list. The command line's temporary VM is marked "(unsaved)", and a library VM whose last save failed "(save failed)". Library files that do not load are listed under **Could not load**. The list scrolls by the wheel, by its scroll bar, and by a finger on a touch screen. Dragging the sidebar's edge in past its narrowest width folds it away; a folded sidebar comes back with a drag from the window's left edge, where the guest's image does not reach it, or with `☰`.
+- **Sidebar tree.** Every VM is a row, and the selected one opens to its pages: **Summary**, **Console**, **Hardware** and, for a PC, **Debugger**. The `+` button adds a new VM to the library, copied from the selected one, and a "Search VMs" field filters the list. The command line's temporary VM is marked "(unsaved)", and a library VM whose last save failed "(save failed)". Library files that do not load are listed under **Could not load**. The list scrolls by the wheel, by its scroll bar, and by a finger on a touch screen. Dragging the sidebar's edge in past its narrowest width folds it away; a folded sidebar comes back with a drag from the window's left edge, where the guest's image does not reach it, or with `☰`.
 - **VM bar** above the page. It carries the selected VM's name, its state, and the verbs that change the state:
   - `▶ Power on` is enabled while the VM is stopped. `■ Power off` and `↻ Restart` are enabled only while it runs.
   - On the Console page only, the bar adds `Ctrl+Alt+Del`, `Capture mouse` / `Release mouse` and `Show serial` / `Hide serial`. The first two are enabled only while the VM runs; `Show serial` / `Hide serial` always is. When the window is too narrow, these fold into the `…` menu.
@@ -65,7 +65,7 @@ The egui shell runs `eframe` on the main thread and a launcher thread, which sta
 The pages:
 
 - **Summary** shows the state and engine and the VM's name, which you can edit here. It lists the memory, processors, boot order, CD/DVD and disk. Its tiles are `Power On VM`, `New Hard Disk` (opens the new-disk sheet under Hardware › Hard Disk) and `Hardware Settings`. A library VM has `Delete VM`; the temporary VM has `Keep in library` and `Discard`. `Delete VM` and `Discard` ask first (`Delete <name>?` / `Discard <name>?`) and work only while the VM is stopped and another VM remains; deleting removes the VM's file, and the disk images it uses are kept. A caption says where the VM is kept: `Saved automatically to <path>`, `Saving to <path> when the edit ends`, or `Not saved: the last write to <path> failed. It is tried again at the next change, selection or power-on.`; for the temporary VM it reads `Temporary VM. Not saved until it is kept in the library.`
-- **Console** shows the guest's display, or `This VM is powered off`, or, while a startup disk is being created, a spinner and a notice naming the image. The serial pane below it, headed `Serial Console (ttyS0)`, shows what the guest writes to COM1, has a `serial input` line (`Send`, or Enter, sends the line with a newline added, and works only while the VM runs), a `Copy Log` button and a `Paste` button that is always disabled. It is shown by default.
+- **Console** shows the guest's display, or `This VM is powered off`, or, while a startup disk is being created, a spinner and a notice naming the image. The serial pane below it, headed `Serial Console`, shows what the guest writes to its first serial port (COM1 on a PC, the PL011 UART on an Arm board), has a `serial input` line (`Send`, or Enter, sends the line with a newline added, and works only while the VM runs), a `Copy Log` button and a `Paste` button that is always disabled. It is shown by default.
 - **Hardware** edits the selected VM. Changes can be made only while the VM is powered off, and apply at the next power-on:
 
   | Pane | Settings |
@@ -83,12 +83,38 @@ The pages:
 
 A confirmation dialog is dismissed by `Cancel`, Escape or a click outside it. The `Search VMs` field matches a VM's name, boot order, and disk and CD/DVD paths, ignoring case.
 
+### Arm VMs
+
+A VM is a PC or an Arm `virt` board, QEMU's `virt` machine with one processor, a Cortex-A57 or an Armv9.2 one with SME2 (the `rusty_box_aarch64` crate). The **Machine** choice at the top of the Hardware page switches between them while the VM is off; switching back within an edit restores what the other machine held. An Arm VM differs from a PC in the shell as follows:
+
+- **Colour.** The shell's accent is the shown VM's machine's: cyan, with the instruction rate in blue, for a PC; red for an Arm board. It marks the primary verb (`▶ Power on` and the like), the page and Hardware pane the shell is on, a running VM's badge, the instruction rate, and the text cursor and selection. Each running VM's dot in the sidebar is in its own machine's accent, whichever VM is shown. Info, warning, error and `Paused` keep their own colours.
+
+- **Pages.** It has no Debugger page, which reads a PC's processors and memory. Pause, Resume and Save RAM work from the VM bar as for a PC; the dump is the board's RAM from its base, `0x4000_0000`.
+- **Summary** shows `1 CPU`, what it boots (`Linux kernel` or `UEFI firmware`) where a PC shows its boot order, and its disk.
+- **Hardware** lists the board's own panes:
+
+  | Pane | Settings |
+  | --- | --- |
+  | Memory | Guest memory, from 1 MB up to what the board maps below its high PCIe window |
+  | Processors | The model (`Cortex-A57 (Armv8.0)` or `Armv9.2 with SME2`) and the IPS target guest time counts instructions at |
+  | Boot | `UEFI firmware` (firmware and variable-store paths; an empty firmware path is the built-in EDK2, which boots the Hard Disk / ISO) or `Linux kernel` (an arm64 `Image`, an initrd, a device tree and the command line) |
+  | Hard Disk | As a PC's, with the new-disk sheet: the raw image behind a virtio-blk, which Linux sees as `/dev/vda` and EDK2 boots from. `Advanced` holds `Read-only` (the guest reads the disk and cannot write it, as QEMU's `readonly=on`), which the disk's card then shows as `· read-only`. A disk the sheet makes is one the guest writes; a file chosen with `Change` keeps the setting |
+  | Display | `virtio-gpu`, and the size it asks the guest for: a preset from 800 × 600 to 1920 × 1080, or any width and height; the `Refresh rate`, how many times a second the window shows the picture (1–240 Hz, 60 by default); the log level |
+  | Input | A virtio `Keyboard` and a virtio `Tablet (absolute pointer)` |
+
+- **Console.** With a virtio-gpu the page shows what the guest's driver draws (Linux's `virtio_gpu` with `console=tty0` puts its console there at the size asked for). With a tablet the host pointer is the guest's absolute pointer over the picture, and the cursor is hidden there; nothing needs capturing. Keys go to the virtio keyboard, or, without one, to the serial console as an xterm would send them. Input the guest takes none of for two seconds (its driver not loaded yet) is dropped rather than sent late. EDK2's `ArmVirtQemu` puts no console on a virtio-gpu (QEMU's does not either), so a firmware boot's menus are on the serial console.
+- **Time.** Guest time keeps to the host clock, as QEMU's does for `virt`: a guest that waits leaves the host idle, and one the interpreter cannot keep up with runs flat out. The RTC starts at the host's time.
+- **Power.** A guest's PSCI `SYSTEM_RESET` resets the board in place; `SYSTEM_OFF` ends the run. A firmware boot's variable store is written back to its file when the run ends, if the firmware changed it.
+- **Disk.** The guest reads and writes the image in place, and what it wrote is flushed to the host's disk when the run ends, however it ends, as QEMU flushes a drive it closes; a flush that fails ends the run with `failed to make what the guest wrote to the disk <path> durable: <error>`. A host error a guest request meets is told to the guest as an I/O error and logged as a warning.
+
+A power-on with nothing to boot is refused with `Choose a firmware or a kernel under Hardware › Boot before powering on.`
+
 ### Several VMs at once
 
 Several VMs run at once, each on a thread of its own. Select one in the sidebar to see its console, VM bar and status strip; the others keep running, and only the VM shown gets the keyboard and mouse. A VM can be added, or another powered on, while VMs run. The selected VM's row has a dot in its state's colour, and so has the row of every other VM that runs or is starting; a VM that is off and not selected has none. A VM that runs or is starting cannot be deleted until it stops. Two things are used by one running VM at a time:
 
 - **The hypervisor.** A process holds one Windows Hypervisor Platform partition at a time, so one VM at a time runs on it. Another VM set to it starts on the interpreter, with the warning `<VM> runs on the interpreter: <VM> is using the hypervisor.` naming both, and its status strip and Summary page name the interpreter while it runs; its Engine setting is left as it is. The hypervisor is free again once the VM that holds it has stopped.
-- **A hard-disk image.** Two writers would corrupt it, so powering on a VM whose hard disk is a file another running VM in this window uses is refused, before any question about recreating the file, with `<path> is in use by <VM>; stop it first.` A new disk's `Replace it`, and the floppy maker's Create with `Replace an existing file`, are refused the same way for such a file, which is left as it is. A second `rusty_box_gui` window keeps no such record, so it can still open the same file. A CD/DVD image, which is only read, can be used by several VMs at once.
+- **A hard-disk image.** Two writers would corrupt it, so powering on a VM whose hard disk is a file another running VM in this window uses is refused, before any question about recreating the file, with `<path> is in use by <VM>; stop it first.` A new disk's `Replace it`, and the floppy maker's Create with `Replace an existing file`, are refused the same way for such a file, which is left as it is. Arm VMs whose disk is read-only only read it, so several of them can run on one file at once; a VM that writes the file is refused while any of them runs, and they are refused while it does, naming the VM that has it, as QEMU's image locking refuses a writer beside a `readonly=on` drive. A second `rusty_box_gui` window keeps no such record, so it can still open the same file. A CD/DVD image, which is only read, can be used by several VMs at once.
 
 **Closing while VMs run.** With no VM running or starting, closing the window, or `…` › `Quit`, closes it. Otherwise the window stays open and asks `VMs are still running`, naming them:
 
@@ -329,7 +355,7 @@ Every key, with its default and matching flag:
 | `display.backend` | `"egui"`, `"terminal"` or `"headless"` | `egui` (`terminal` without the `gui-egui` feature) | `--display` |
 | `display.width`, `display.height` | Pre-boot VBE mode. Both are needed and must be non-zero; this raises the VBE ceiling so the guest can select the mode | unset | none |
 | `display.bpp` | Bits per pixel of that mode (8/16/24/32) | `32` | none |
-| `display.pci_vga` | Register the VGA on PCI for Linux `bochs-drm` (experimental) | `false` | none |
+| `display.pci_vga` | Put the VGA on the PCI bus as `1234:1111` (Bochs `pci: slot1=pcivga`), where X servers and Linux `bochs-drm` look for a display; `false` gives Bochs's default ISA-only adapter | `true` | none |
 | `display.stretch` | Stretch the phone's full-screen console to fill the screen rather than keep the guest's shape (its menu's `Stretch to fill`) | `false` | none |
 | `display.pointer_speed_percent` | The phone trackpad's cursor speed, in percent of the finger's travel across the guest's image, 50 to 300 (its menu's `Pointer speed`) | `100` | none |
 | `rom.bios` | System BIOS ROM (required) | none | `--bios` |
@@ -337,6 +363,8 @@ Every key, with its default and matching flag:
 | `boot.order` | One or both of `"disk"`, `"cdrom"`, in order, with no repeats | inferred, see below | `--boot` |
 | `disk.path` | Existing raw disk image | none | `--disk` |
 | `disk.chs` | `{ cylinders = …, heads = …, sectors_per_track = … }` | auto-detected | `--disk-chs` |
+| `disk.mode` | `"flat"` or `"volatile"`: where the guest's writes go, into the image or into a journal removed at power-off | `"flat"` | `--disk-mode` |
+| `disk.journal` | The volatile journal's name, a random suffix added | beside the image | `--disk-journal` |
 | `disk.channel`, `disk.drive` | ATA slot of the disk | `0`, `0` | none |
 | `disk.create.path` | Disk to provision at startup | none | `--create-disk` |
 | `disk.create.size` | Its size, in bximage syntax | `"20G"` | `--create-disk-size` |
@@ -344,6 +372,71 @@ Every key, with its default and matching flag:
 | `cdrom.path` | ISO image | none | `--cdrom` |
 | `cdrom.channel`, `cdrom.drive` | ATA slot of the CD-ROM | `1`, `0` | none |
 | `logging.level` | `trace`, `debug`, `info`, `warn` or `error` | `warn` | `--log-level` |
+
+An Arm `virt` VM's file sets `[vm] machine = "arm-virt"` and describes the board in a `[virt]` table; every PC table and key above, other than `vm.name`, `display.backend`, `display.stretch`, `display.pointer_speed_percent` and `logging.level`, is refused in it, as `[virt]` is in a PC's. An example, the Alpine recipe the board boots to a graphical console:
+
+```toml
+[vm]
+name = "Alpine (Arm)"
+machine = "arm-virt"
+
+[virt]
+memory_mib = 512
+kernel = "C:/path/Image"
+initrd = "C:/path/initramfs.cpio.gz"
+command_line = "console=ttyAMA0 console=tty0"
+keyboard = true
+tablet = true
+
+[virt.display]
+width = 1024
+height = 768
+```
+
+| Key | Meaning | Default | CLI flag |
+| --- | --- | --- | --- |
+| `vm.machine` | `"pc"` or `"arm-virt"` | `"pc"` | none |
+| `virt.memory_mib` | Guest memory, MiB | `256` (QEMU's) | `--memory-mib` |
+| `virt.ips` | The rate guest time counts instructions at | `50000000` | `--ips` |
+| `virt.cpu` | The processor: `"cortex-a57"`, QEMU's Cortex-A57, or `"armv9.2"`, an Armv9.2 processor with SME and SME2 (no SVE); `virt.virtualization` gives either EL2, and `virt.counter_hz` sets their counter's rate; any other name is refused | `"cortex-a57"` | none |
+| `virt.virtualization` | Whether the processor has EL2, the level a hypervisor runs at, as QEMU's `-M virt,virtualization=off\|on`: `"off"`, EL0 and EL1 alone, the guest entered at EL1 and its firmware taking PSCI calls on `HVC`; or `"on"`, the guest's firmware or kernel entered at EL2 (Linux reports `CPU: All CPU(s) started at EL2` and brings KVM up, in nVHE mode on the Cortex-A57 and VHE mode on the Armv9.2 processor), `HVC` its own and PSCI called with `SMC`, the GIC with its Virtualization Extensions; any other name is refused. The Processor page's Virtualization list | `"off"` | none |
+| `virt.counter_hz` | The system counter's rate in Hz, which `CNTFRQ_EL0` reads: 10000000 (BSA's floor) to 4294967295 (what `CNTFRQ_EL0` holds); an Armv9.2 processor takes 1000000000 alone, and any other is refused. The Processor page's Counter frequency | `1000000000` | none |
+| `virt.gic_spis` | The GIC's SPIs: a multiple of 32 from 32 (the fewest any interrupt map fits; the board's own needs 64) to 480 (the GIC-400's most); any other number is refused. The Processor page's GIC SPIs list | `480` | none |
+| `virt.gic_priority_bits` | The GIC's priority bits, 4 to 8, which set its binary points and active priority registers (IHI 0048B Table 4-47); any other number is refused. The Processor page's GIC priority bits list | `5` | none |
+| `virt.gic` | Which GIC the board has: `"v2"`, a GICv2 with its GICv2m frame, or `"v3"`, a GICv3 whose CPU interface is the processor's System registers (Linux reports `GICv3: 480 SPIs implemented`), on a processor without EL2 (`virt.virtualization = "on"` with it is refused at power-on until the GICv3 has its virtual CPU interface), and on the Cortex-A57 with `virt.gic_priority_bits = 5`, its CPU interface's; any other name is refused. The Processor page's GIC list | `"v2"` | none |
+| `virt.transport_order` | Which free virtio transport each device takes, the display, the keyboard, the tablet and the disk in that order: `"first-free"`, from the first up, or `"last-free"`, from the last down, which keeps the places an older build of this front end gave a VM's devices, so a firmware variable store holding boot entries made then finds its disk; any other name is refused. The Processor page's Virtio transports list | `"first-free"` | none |
+| `virt.layout` | Where the board's devices sit: `"board"`, the board's own layout after Arm's memory map principles, or `"qemu-virt"`, QEMU `virt`'s addresses, which a `device_tree` QEMU wrote names and a firmware variable store made on an older build of this front end holds its boot entries' device paths at; any other name is refused, and a `device_tree` putting a device elsewhere is refused at power-on. A `command_line` that is exactly `console=ttyAMA0 earlycon=pl011,0x9000000`, the serial-console line for QEMU's layout, which names its UART's address, is `console=ttyAMA0 earlycon` on the board's own, whose `earlycon` finds the UART through the device tree. The Processor page's Device addresses list | `"board"` | none |
+| `virt.interrupts.uart`, `.rtc`, `.gpio` | The SPI, numbered from 0 (INTID 32) to 987, the UART, the RTC and the GPIO drive. The Processor page's UART, RTC and GPIO SPI rows | `0`, `1`, `2` | none |
+| `virt.interrupts.virtio`, `.pcie_intx` | The first of the SPIs the virtio transports drive, one each (4 transports on `virt.layout = "board"`, 32 on `"qemu-virt"`), and of the 4 the PCIe host's INTA to INTD drive. A key left out of `[virt.interrupts]` is the board's own for the layout, and the Processor page's map follows a change of Device addresses while it is the board's own | `3`, `7` (`3`, `35` on `"qemu-virt"`) | none |
+| `virt.interrupts.msi_first`, `.msi_count` | The GICv2m frame's first SPI and how many it has, 1 to 1023, which `MSI_TYPER` reports; without `msi_count`, every SPI from `msi_first` to the GIC's last, so a device moved into that range needs the frame moved or counted. A map whose SPIs run past `virt.gic_spis`, or that gives one SPI to two sources, is refused, and so is a `virt.device_tree` naming other SPIs for the devices: a tree QEMU wrote takes QEMU's wiring, `uart = 1`, `rtc = 2`, `gpio = 7`, `virtio = 16`, `pcie_intx = 3`, `msi_first = 48`, `msi_count = 64`. The Processor page's MSI frame rows | `32` (INTID 64; `64`, INTID 96, on `"qemu-virt"`), every SPI to the GIC's last | none |
+| `virt.spectre` | What the firmware tells the guest of the speculative-execution workarounds (SMCCC `SMCCC_ARCH_FEATURES`): `"not-required"`, true of the interpreter, which executes nothing speculatively; `"mitigated"`, required and provided by the firmware, so the guest takes its firmware mitigation paths; or `"unreported"`, no information, as SMCCC 1.0 firmware gives; any other name is refused. The Processor page's Speculation list | `"not-required"` | none |
+| `virt.firmware` | UEFI firmware for flash bank 0, as QEMU's `-bios` (EDK2 `ArmVirtQemu`); not with `virt.kernel` | none | none |
+| `virt.builtin_firmware` | `true` boots the EDK2 `ArmVirtQemu` built into the front end (licence in `THIRD-PARTY-LICENSES`); not with `virt.firmware` or `virt.kernel` | none | none |
+| `virt.firmware_vars` | Its variable store, flash bank 1; written back when the firmware changes it | none | none |
+| `virt.kernel` | An arm64 Linux `Image`, entered directly as QEMU's `-kernel` does; not with `virt.firmware` | none | none |
+| `virt.initrd` | Its initial RAM filesystem | none | none |
+| `virt.command_line` | Its command line | `console=ttyAMA0 earlycon` | none |
+| `virt.device_tree` | A device tree to boot it with instead of the board's own | the board's | none |
+| `virt.keyboard`, `virt.tablet` | Plug in a virtio keyboard, a virtio tablet | `false` | none |
+| `virt.disk` | Plug in a virtio-blk over this raw disk image, read and written in place: Linux's `/dev/vda`, as QEMU's `-drive file=…,format=raw,if=none` with a `virtio-blk-device` | no disk | `--disk` |
+| `virt.disk_read_only` | The guest only reads the disk, as QEMU's `readonly=on`, and the file is opened for reading alone | `false` | none |
+| `virt.display.width`, `virt.display.height` | Plug in a virtio-gpu that asks the guest for this size; both are needed and neither may be zero | no display | none |
+| `virt.display.refresh_hz` | How many times a second the window shows the picture, 1–240 | `60` | none |
+
+`virt.initrd`, `virt.command_line` and `virt.device_tree` need `virt.kernel`, and `virt.firmware_vars` needs `virt.firmware` or `virt.builtin_firmware`, as QEMU's `-initrd`, `-append` and `-dtb` need `-kernel`; `virt.disk_read_only` needs `virt.disk`. A file with neither a firmware nor a kernel boots nothing yet: the shell keeps it and refuses to power it on. A PC switched to an Arm board in the shell boots the built-in firmware, so a disk or ISO is all it needs. On the command line, an Arm VM takes `--config`, `--no-config`, `--display`, `--log-level`, `--memory-mib`, `--ips` and `--disk`; any other flag is refused with `<flag> is not a setting of an Arm virt board`. With `--display headless` the guest's serial console goes to standard output; with `--display terminal` this terminal also sends it keys, and Ctrl-A then X ends the run, as in QEMU's `-nographic` console (Ctrl-A twice sends one Ctrl-A).
+
+A kernel can mount its root filesystem from the disk rather than an initrd, given a kernel with the virtio-mmio, virtio-blk and filesystem drivers built in:
+
+```toml
+[vm]
+name = "Alpine on its disk (Arm)"
+machine = "arm-virt"
+
+[virt]
+kernel = "C:/path/Image"
+command_line = "console=ttyAMA0 root=/dev/vda rw rootwait"
+disk = "C:/path/alpine-root.img"
+```
 
 Release builds compile out `debug` and `trace` output: the workspace builds `tracing` with `release_max_level_info`.
 
@@ -391,6 +484,7 @@ Validation rules:
 - The disk and CD-ROM must each name a valid ATA slot (channel 0 or 1, drive 0 or 1), and they cannot share one.
 - A VGA BIOS file must be a non-zero multiple of 512 bytes.
 - Disk and CD-ROM paths must be valid UTF-8, because `MachineBuilder::disk_file` / `cdrom_file` take `&str`. A non-UTF-8 path is rejected with `path must be valid UTF-8 for current emulator media API`.
+- `disk.journal` (or `--disk-journal`) needs `disk.mode = "volatile"` (or `--disk-mode volatile`). `--disk-mode flat` sets a file's volatile mode and its journal aside together. An empty journal or `"none"` means beside the image (Bochs's own rule), and a relative `--disk-journal` is kept as the absolute path it names when the run starts.
 - `disk.create` cannot be combined with `disk.path` or `disk.chs` in the TOML file. A CLI disk option picks one mode explicitly: `--disk` wins over a TOML `disk.create`, and `--create-disk` wins over a TOML `disk.path`. A creation size or overwrite flag with no creation path is an error.
 - A created disk must be at least 10 MiB and have fewer than 2^24 cylinders, so under 8064 GiB. It uses the same geometry as a disk the shell's new-disk sheet makes.
 
@@ -435,4 +529,4 @@ cargo check --release -p rusty_box_gui --no-default-features
 cargo check --release -p rusty_box_gui --target wasm32-unknown-unknown
 ```
 
-The wasm check needs the ROMs at the `cpp_orig/` paths above. Before every commit, run the whole gate, `cargo xtask ci`. It compiles this crate's tests and its wasm build, but does not run the tests (see `xtask/README.md`).
+The wasm check needs the ROMs at the `cpp_orig/` paths above. Before every commit, run the whole gate, `cargo xtask ci`, with `RUSTY_BOX_AARCHMRS` naming an unpacked copy of Arm's AARCHMRS, or `cargo xtask ci --skip-aarchmrs` without it. It compiles this crate's tests and its wasm build, but does not run the tests (see `xtask/README.md`).

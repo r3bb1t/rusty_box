@@ -3,7 +3,8 @@ name = "rusty_box_devices"
 description = "Device models for the rusty_box emulator, depending on no host and no execution engine"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# Holds device models ported from Bochs, which is LGPL-2.1-or-later.
+license = "LGPL-2.1-or-later"
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true

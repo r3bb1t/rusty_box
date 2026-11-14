@@ -1,5 +1,7 @@
+use std::io;
+use std::path::PathBuf;
+
 use crate::args::BootDevice;
-use std::{io, path::PathBuf};
 
 /// Every place an engine is chosen, named by each message that refuses one.
 /// A shell user cannot pass a flag, so a refusal naming the flag alone would
@@ -32,6 +34,11 @@ fn quoted_flags(flags: &[&str]) -> String {
         .join(", ")
 }
 
+/// A `[virt.display]` dimension as a refusal shows it: the number, or "unset".
+fn display_dimension(value: Option<u32>) -> String {
+    value.map_or_else(|| "unset".to_owned(), |value| value.to_string())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
     #[error("failed to read config {}: {source}", path.display())]
@@ -62,6 +69,102 @@ pub enum RunError {
     )]
     RunFlagsNeedAMachine { flags: Vec<&'static str> },
 
+    /// A setting, in the VM file or on the command line, that the VM's
+    /// machine does not have: a PC table on an Arm `virt` VM, or `[virt]` on
+    /// a PC. It is refused rather than dropped without a word.
+    #[error(
+        "{setting} is not a setting of {machine}; set `[vm] machine` to the machine it belongs to, or remove it"
+    )]
+    NotForMachine {
+        setting: &'static str,
+        machine: crate::config::MachineKind,
+    },
+
+    #[error(
+        "virt.memory_mib = {memory_mib} is outside what the Arm virt board maps: {min}-{max} MiB",
+        min = rusty_box_aarch64::RamSize::MIN.get().div_ceil(1 << 20),
+        max = rusty_box_aarch64::RamSize::MAX.get() >> 20
+    )]
+    InvalidVirtMemory { memory_mib: u32 },
+
+    /// `virt.counter_hz` with a processor whose architecture fixes its
+    /// counter's rate.
+    #[error("virt.counter_hz: {0}")]
+    FixedCounterRate(rusty_box_aarch64::FixedCounterRate),
+
+    #[error(
+        "virt.counter_hz = {hz} is outside the rates a counter runs at: {min} to {max} Hz",
+        min = rusty_box_aarch64::CounterRate::MIN_HZ,
+        max = rusty_box_aarch64::CounterRate::MAX_HZ
+    )]
+    InvalidCounterRate { hz: u64 },
+
+    /// `[virt.interrupts]` a GIC of `virt.gic_spis` cannot hold.
+    #[error("virt.interrupts: {0}")]
+    InterruptMap(rusty_box_aarch64::InterruptMapError),
+
+    #[error("virt.firmware and virt.kernel cannot both be set: the board boots one or the other")]
+    ConflictingVirtBoot,
+
+    #[error(
+        "virt.builtin_firmware and {setting} cannot both be set: the board boots one firmware or kernel"
+    )]
+    ConflictingBuiltinFirmware { setting: &'static str },
+
+    #[error("virt.display.refresh_hz = {hz} is outside 1-{max}", max = crate::config::RefreshHz::MAX)]
+    InvalidRefreshRate { hz: u32 },
+
+    #[error("{setting} needs virt.kernel: firmware loads its own kernel")]
+    VirtSettingNeedsKernel { setting: &'static str },
+
+    #[error("{setting} needs virt.firmware: only firmware keeps a variable store")]
+    VirtSettingNeedsFirmware { setting: &'static str },
+
+    #[error("{setting} has nothing to go with: set virt.firmware or virt.kernel")]
+    VirtSettingWithoutBoot { setting: &'static str },
+
+    #[error("{setting} has no disk to go with: set virt.disk")]
+    VirtSettingWithoutDisk { setting: &'static str },
+
+    #[error(
+        "virt.display needs both a width and a height, neither zero; got {} x {}",
+        display_dimension(*width),
+        display_dimension(*height)
+    )]
+    InvalidVirtDisplay {
+        width: Option<u32>,
+        height: Option<u32>,
+    },
+
+    #[error(
+        "an Arm virt VM needs something to boot: set virt.firmware or virt.kernel in the VM file, \
+         or the firmware or kernel under Hardware › Boot"
+    )]
+    MissingVirtBoot,
+
+    #[error("{} is not a kernel the Arm virt board can boot: {source}", path.display())]
+    VirtKernel {
+        path: PathBuf,
+        source: rusty_box_aarch64::boot::ImageError,
+    },
+
+    #[error("the Arm virt machine could not be built: {source}")]
+    VirtBuild {
+        source: rusty_box_aarch64::BuildError,
+    },
+
+    /// A stop the shell's Arm runs never ask for: an exit address, a
+    /// debugging stop, a stop flag on the machine itself, or a guest reset
+    /// left to the host.
+    #[error("the Arm virt machine stopped where no run asked it to: {stop:?}")]
+    VirtStopped { stop: rusty_box_aarch64::StopReason },
+
+    #[error("failed to write the UEFI variable store back to {}: {source}", path.display())]
+    VariableStoreWrite { path: PathBuf, source: io::Error },
+
+    #[error("failed to make what the guest wrote to the disk {} durable: {source}", path.display())]
+    DiskFlush { path: PathBuf, source: io::Error },
+
     #[error("{field} must be greater than zero")]
     ZeroValue { field: &'static str },
 
@@ -77,7 +180,9 @@ pub enum RunError {
     #[error("cpuid_freq must be hardware|none|ips (Bochs cpu: cpuid_freq=), got {value}")]
     InvalidCpuidFreq { value: String },
 
-    #[error("port_e9_hack must be off|on|all-rings (Bochs port_e9_hack: enabled=, all_rings=), got {value}")]
+    #[error(
+        "port_e9_hack must be off|on|all-rings (Bochs port_e9_hack: enabled=, all_rings=), got {value}"
+    )]
     InvalidPortE9Hack { value: String },
 
     #[error("boot order cannot be empty; set boot.order or pass --boot disk|cdrom")]
@@ -140,6 +245,18 @@ pub enum RunError {
         first: &'static str,
         second: &'static str,
     },
+
+    /// A journal named for a disk whose writes go to the image: the file or
+    /// flag that names one expects the image to stay unchanged.
+    #[error(
+        "disk.journal names a journal, which only a volatile disk has; set disk.mode = \"volatile\" (or --disk-mode volatile)"
+    )]
+    JournalWithoutVolatileDisk,
+
+    /// A relative journal path that cannot be made absolute: the folder the
+    /// run starts in cannot be read.
+    #[error("journal path {}: {source}", path.display())]
+    JournalPath { path: PathBuf, source: io::Error },
 
     #[error("existing disk image {} is not a usable flat image ({len} bytes, not a non-zero multiple of 512); set disk.create.overwrite = true to replace it, or delete it", path.display())]
     InvalidExistingDiskImage { path: PathBuf, len: u64 },
@@ -244,7 +361,9 @@ pub enum LibraryError {
     #[error("{} is not a file of the VM library in {}", path.display(), dir.display())]
     OutsideLibrary { path: PathBuf, dir: PathBuf },
 
-    #[error("{text:?} is not a VM file stem: one file name, no folder, not starting with a dot, no whitespace at either end")]
+    #[error(
+        "{text:?} is not a VM file stem: one file name, no folder, not starting with a dot, no whitespace at either end"
+    )]
     InvalidStem { text: String },
 
     #[error("failed to make {} absolute: {source}", path.display())]
@@ -293,7 +412,10 @@ mod tests {
             for source in ENGINE_SOURCES {
                 assert!(text.contains(source), "{text:?} does not name {source}");
             }
-            assert!(!text.contains("--engine whp"), "{text:?} names only the flag");
+            assert!(
+                !text.contains("--engine whp"),
+                "{text:?} names only the flag"
+            );
         }
     }
 
@@ -307,7 +429,10 @@ mod tests {
         for flag in ["`--engine`", "`--cpu-capabilities`", "`--log-level`"] {
             assert!(text.contains(flag), "{text:?} does not name {flag}");
         }
-        assert!(text.contains("--config FILE"), "{text:?} does not say how to name a machine");
+        assert!(
+            text.contains("--config FILE"),
+            "{text:?} does not say how to name a machine"
+        );
         assert!(text.contains("Hardware › Processors › Engine"));
         assert!(text.contains("Hardware › Display › Log level"));
         // The shell has no processor-capabilities control; the VM file does.
@@ -328,7 +453,10 @@ mod tests {
     fn a_missing_library_folder_names_the_environment_it_is_found_from() {
         let text = RunError::NoLibraryFolder.to_string();
 
-        assert!(text.starts_with("found no folder for the VM library"), "{text:?}");
+        assert!(
+            text.starts_with("found no folder for the VM library"),
+            "{text:?}"
+        );
         let variables: &[&str] = if cfg!(windows) {
             &["`APPDATA`"]
         } else if cfg!(target_os = "macos") {

@@ -49,8 +49,8 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use rusty_box::cpu::instrumentation::Instrumentation;
 use rusty_box::cpu::Result as CpuResult;
+use rusty_box::cpu::instrumentation::Instrumentation;
 use rusty_box::emulator::{DeviceTime, Emulator, SliceEngine};
 use rusty_box_core::time::{HostClock, VmInstant};
 use rusty_box_core::{EngineFault, EngineFaultKind};
@@ -197,11 +197,7 @@ impl DeviceThreadControl {
     /// How many times the thread has serviced.
     #[must_use]
     pub fn served(&self) -> u64 {
-        *self
-            .served
-            .0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        *self.served.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Block until the thread has serviced at least once more than `since`, or
@@ -299,7 +295,10 @@ pub(crate) fn spawn<T: Instrumentation + Send + 'static>(
         .spawn(move || run_loop(&machine, &clock, &vcpus, &mine))
         .map_err(|error| {
             tracing::error!("a device thread could not be started: {error}");
-            EngineFault::new(EngineFaultKind::Host, "the host would not start a device thread")
+            EngineFault::new(
+                EngineFaultKind::Host,
+                "the host would not start a device thread",
+            )
         })?;
     Ok((thread, control))
 }
@@ -446,9 +445,7 @@ fn wait_for_deadline<H: HostClock>(
             None => None,
         };
         let Some(remaining) = remaining else {
-            wake = changed
-                .wait(wake)
-                .unwrap_or_else(PoisonError::into_inner);
+            wake = changed.wait(wake).unwrap_or_else(PoisonError::into_inner);
             continue;
         };
 
@@ -486,9 +483,7 @@ fn wait_for_deadline<H: HostClock>(
         let generation = control.generation.load(Ordering::Acquire);
         drop(wake);
         let until = Instant::now() + spin_for;
-        while Instant::now() < until
-            && control.generation.load(Ordering::Acquire) == generation
-        {
+        while Instant::now() < until && control.generation.load(Ordering::Acquire) == generation {
             std::hint::spin_loop();
         }
         return NextAction::Service;
@@ -497,10 +492,11 @@ fn wait_for_deadline<H: HostClock>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::fixtures::SharedClock;
     use rusty_box::emulator::{EmulatorConfig, MachineBuilder};
     use rusty_box_core::time::ClockHz;
+
+    use super::*;
+    use crate::fixtures::SharedClock;
 
     /// The service catches the wheel up to exactly where the clock stands, and
     /// names the deadline a thread should sleep until.

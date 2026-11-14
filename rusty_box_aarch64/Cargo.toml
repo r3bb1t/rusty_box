@@ -1,0 +1,64 @@
+[package]
+name = "rusty_box_aarch64"
+description = "AArch64 (ARMv8.0-A) interpreter and a QEMU-virt-compatible board: deterministic, no_std and allocation-free"
+version.workspace = true
+edition.workspace = true
+# The CFI flash's command state machine is ported from QEMU's
+# hw/block/pflash_cfi01.c, which is LGPL-2.1-or-later; the rest of the
+# crate is original or derived from BSD-3-Clause sources (Berkeley
+# SoftFloat 3e, Arm's machine-readable pseudocode).
+license = "LGPL-2.1-or-later"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+rusty_box_core = { workspace = true }
+# The display vocabulary (`DisplaySink`, `Resolution`) the virtio-gpu device
+# shows its frames through, shared with the x86 machine's display cards.
+rusty_box_devices = { workspace = true }
+
+[dev-dependencies]
+# Tests save snapshots into a `Vec<u8>`, which is a snapshot sink with `alloc`.
+rusty_box_core = { workspace = true, features = ["alloc"] }
+# An independent A64 decoder, generated from binutils' opcode table: what
+# every encoding of an advertised feature is checked to execute against
+# (tests/encoding_coverage.rs), what every word the decoder accepts that it
+# does not allocate is checked to be UNDEFINED against (tests/unit/difftest.rs),
+# and the disassembler for the Unicorn replay's failure messages. Never a
+# dependency of the library.
+disarm64 = { version = "0.2", default-features = false, features = ["full"] }
+disarm64_defn = { version = "0.2", default-features = false }
+# Read the decoder's own source (syn) and Arm's machine-readable specification
+# (serde_json) for the conformance tests in tests/unit/spec.rs.
+syn = { version = "2", default-features = false, features = ["full", "parsing"] }
+serde_json = "1"
+# The example runners' `--interactive` puts the host terminal in raw mode.
+crossterm = "0.29"
+
+[features]
+default = []
+# Additive, as in rusty_box_core: neither changes the shape of the core.
+alloc = ["rusty_box_core/alloc"]
+std = ["alloc", "rusty_box_core/std"]
+
+[lints]
+workspace = true
+
+[[example]]
+name = "uefi_virt"
+required-features = ["std"]
+
+[[example]]
+name = "linux_virt"
+required-features = ["std"]
+# `cargo test` runs the console script's tests in `examples/common`, which
+# this example and `uefi_virt` share.
+test = true
+
+# Named apart from rusty_box's own `perfbench`, which builds to the same
+# path under target/.
+[[example]]
+name = "aarch64_perfbench"
+path = "examples/perfbench.rs"
+required-features = ["std"]

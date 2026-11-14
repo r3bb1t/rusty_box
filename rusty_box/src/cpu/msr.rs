@@ -1,8 +1,8 @@
 // MSR (Model Specific Register) constants and initialization
 // Mirrors Bochs cpu/msr.h
 
-use crate::cpu::decoder::features::X86Feature;
 use crate::cpu::BxCpuC;
+use crate::cpu::decoder::features::X86Feature;
 
 // =========================================================================
 // MSR Register Addresses — matching Bochs msr.h
@@ -260,9 +260,7 @@ pub const fn msr_descriptor(index: u32) -> Option<MsrDescriptor> {
         BX_MSR_PAT => MsrDescriptor::new("BX_IA32_PAT", F::IsaPat),
 
         BX_MSR_TSC_ADJUST => MsrDescriptor::new("BX_IA32_TSC_ADJUST", F::IsaTscAdjust),
-        BX_MSR_IA32_UMWAIT_CONTROL => {
-            MsrDescriptor::new("MSR_IA32_UMWAIT_CONTROL", F::IsaWaitpkg)
-        }
+        BX_MSR_IA32_UMWAIT_CONTROL => MsrDescriptor::new("MSR_IA32_UMWAIT_CONTROL", F::IsaWaitpkg),
         BX_MSR_XSS => MsrDescriptor::new("MSR_IA32_XSS", F::IsaXsaves),
 
         BX_MSR_IA32_U_CET => MsrDescriptor::new("MSR_IA32_U_CET", F::IsaCet),
@@ -304,9 +302,7 @@ pub const fn msr_descriptor(index: u32) -> Option<MsrDescriptor> {
         BX_MSR_IA32_PRED_CMD => MsrDescriptor::new("MSR_IA32_PRED_CMD", F::IsaScaMitigations),
         BX_MSR_IA32_FLUSH_CMD => MsrDescriptor::new("MSR_IA32_FLUSH_CMD", F::IsaScaMitigations),
 
-        BX_MSR_IA32_FEATURE_CONTROL => {
-            MsrDescriptor::new("MSR_IA32_FEATURE_CONTROL", F::IsaVmx)
-        }
+        BX_MSR_IA32_FEATURE_CONTROL => MsrDescriptor::new("MSR_IA32_FEATURE_CONTROL", F::IsaVmx),
         // 0x480..=0x493 is the whole VMX capability block, contiguous in
         // Bochs's table and complete: BASIC, the four control pairs, MISC, the
         // CR0/CR4 fixed values, VMCS_ENUM, the secondary and tertiary

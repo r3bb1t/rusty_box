@@ -18,17 +18,14 @@
 //! are assembled by a machine destructuring its own `&mut self`, and by nothing
 //! else).
 
-use crate::{
-    cpu::{
-        cpu::{BxCpuC, CpuActivityState},
-        exec_ctx::ExecCtx,
-        instrumentation::Instrumentation,
-        AcknowledgedInterrupt, HardwareEvent, TrapDischarge,
-    },
-    iodev::{devices::DeviceManager, BxDevicesC},
-    memory::BxMemC,
-    pc_system::BxPcSystemC,
-};
+use crate::cpu::cpu::{BxCpuC, CpuActivityState};
+use crate::cpu::exec_ctx::ExecCtx;
+use crate::cpu::instrumentation::Instrumentation;
+use crate::cpu::{AcknowledgedInterrupt, HardwareEvent, TrapDischarge};
+use crate::iodev::BxDevicesC;
+use crate::iodev::devices::DeviceManager;
+use crate::memory::BxMemC;
+use crate::pc_system::BxPcSystemC;
 
 /// Everything a processor executes against, borrowed from one machine.
 pub struct PcIo<'a> {
@@ -59,6 +56,14 @@ pub struct PcIo<'a> {
 }
 
 impl<'a> PcIo<'a> {
+    /// How many items of one repeated instruction are executed before the
+    /// machine gets a look in.
+    ///
+    /// Well past the 256 words of a disk sector, which is the case this
+    /// exists for, and far short of the four billion a `REP` may name — a
+    /// guest that asked for that has not stopped being interruptible.
+    pub const ITEM_CEILING: u32 = 1 << 16;
+
     /// Guest memory, including the routing that decides which accesses are
     /// served from RAM and which belong to a device.
     #[inline]
@@ -370,14 +375,6 @@ impl<'a> PcIo<'a> {
     pub(crate) fn deliver_smi<T: Instrumentation>(&mut self, cpu: &mut BxCpuC<T>) {
         cpu.deliver_smi();
     }
-
-    /// How many items of one repeated instruction are executed before the
-    /// machine gets a look in.
-    ///
-    /// Well past the 256 words of a disk sector, which is the case this
-    /// exists for, and far short of the four billion a `REP` may name — a
-    /// guest that asked for that has not stopped being interruptible.
-    pub const ITEM_CEILING: u32 = 1 << 16;
 
     /// Lend the same parts onward for a shorter time.
     ///

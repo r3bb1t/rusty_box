@@ -9,16 +9,19 @@
 //! reports the click; the app decides what the click means.
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::destination::{Destination, ShellPage, SidebarAction};
+use egui::{RichText, Stroke};
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::destination::{Destination, ShellPage, SidebarAction, Surface};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::theme::{
     ACCENT_AMBER, BG_PANEL, SPACE_GROUP, SPACE_ITEM, STROKE_HAIRLINE, TEXT_BODY, TEXT_CAPTION,
     TEXT_MUTED,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::widgets::{selection_row, touch_row_height, RowMark, CHILD_INDENT, ROOT_INDENT};
+use crate::shell::vm_bar::SETTINGS;
 #[cfg(not(target_arch = "wasm32"))]
-use egui::{RichText, Stroke};
+use crate::shell::widgets::{CHILD_INDENT, ROOT_INDENT, RowMark, selection_row, touch_row_height};
 
 /// Whether a VM in the list is a file in the library, a library file that
 /// is behind the VM because its last write failed, or only in memory. The
@@ -43,6 +46,10 @@ pub(crate) struct VmLibraryEntry {
     pub(crate) cdrom: String,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) source: EntrySource,
+    /// The pages the VM's node opens to, which its machine decides
+    /// ([`ShellPage::of`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) pages: &'static [ShellPage],
 }
 
 impl VmLibraryEntry {
@@ -61,7 +68,15 @@ impl VmLibraryEntry {
             cdrom: cdrom.into(),
             #[cfg(not(target_arch = "wasm32"))]
             source: EntrySource::Saved,
+            #[cfg(not(target_arch = "wasm32"))]
+            pages: &ShellPage::ALL,
         }
+    }
+
+    /// The same entry, for a VM whose node opens to `pages`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn with_pages(self, pages: &'static [ShellPage]) -> Self {
+        Self { pages, ..self }
     }
 
     /// The same entry, marked as a VM that is not in the library.
@@ -152,6 +167,9 @@ pub(crate) struct Sidebar<'a> {
     pub(crate) broken: &'a [crate::library::BrokenVmFile],
     /// Open or closed; a drag across the drawer's edge changes it.
     pub(crate) drawer: &'a mut Drawer,
+    /// Whether a VM's page or the app's Settings is shown: the shown one's
+    /// row is marked.
+    pub(crate) surface: Surface,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -174,6 +192,7 @@ impl Sidebar<'_> {
             dots,
             broken,
             drawer,
+            surface,
         } = self;
         let mut open = *drawer == Drawer::Open;
         let shown = egui::Panel::left("vm_sidebar")
@@ -211,13 +230,26 @@ impl Sidebar<'_> {
                         .hint_text("Search VMs"),
                 );
                 ui.add_space(SPACE_ITEM);
+                let settings_mark = match surface {
+                    Surface::Settings => RowMark::Destination,
+                    Surface::Vm => RowMark::Plain,
+                };
+                if selection_row(
+                    ui,
+                    SETTINGS,
+                    ROOT_INDENT,
+                    settings_mark,
+                    None,
+                    touch_row_height(ui),
+                )
+                .clicked()
+                {
+                    action = Some(SidebarAction::OpenSettings);
+                }
+                ui.add_space(SPACE_ITEM);
 
                 if entries.is_empty() {
-                    ui.label(
-                        RichText::new("No VMs")
-                            .size(TEXT_BODY)
-                            .color(TEXT_MUTED),
-                    );
+                    ui.label(RichText::new("No VMs").size(TEXT_BODY).color(TEXT_MUTED));
                     return action;
                 }
 
@@ -249,8 +281,9 @@ impl Sidebar<'_> {
                             if !is_selected_vm {
                                 continue;
                             }
-                            for page in ShellPage::ALL {
-                                let page_mark = if destination.page() == page {
+                            for &page in entries[index].pages {
+                                let shown = surface == Surface::Vm && destination.page() == page;
+                                let page_mark = if shown {
                                     RowMark::Destination
                                 } else {
                                     RowMark::Plain
@@ -307,9 +340,11 @@ impl Sidebar<'_> {
 
 #[cfg(test)]
 mod tests {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
     use super::*;
     use crate::shell::widgets::ROW_HEIGHT;
-    use egui_kittest::{kittest::Queryable, Harness};
 
     const WINDOW: egui::Vec2 = egui::vec2(640.0, 400.0);
 
@@ -365,6 +400,7 @@ mod tests {
                         dots: &[],
                         broken: &library.broken,
                         drawer: &mut library.drawer,
+                        surface: Surface::Vm,
                     }
                     .show(ui);
                     if action.is_some() {

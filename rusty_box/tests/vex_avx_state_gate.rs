@@ -28,9 +28,10 @@
 
 mod state_gate;
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::X86Reg;
 use rusty_box::emulator::{Emulator, EmulatorConfig};
-use state_gate::{long64_emulator, run_one, Outcome, CODE, TEST_STACK_SIZE};
+use state_gate::{CODE, Outcome, TEST_STACK_SIZE, long64_emulator, run_one};
 
 /// A CPU with SSE fully enabled and AVX state deliberately *not* enabled:
 /// CR4.OSFXSR and CR4.OSXSAVE are set, but no XSETBV runs, so XCR0 keeps its
@@ -52,7 +53,8 @@ fn avx_state_enabled_emulator() -> Box<Emulator> {
     emu.reg_write(X86Reg::Rax, 0x7);
     emu.reg_write(X86Reg::Rcx, 0);
     emu.reg_write(X86Reg::Rdx, 0);
-    emu.mem_write(CODE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+    emu.mem_write(BxPhyAddress::new(CODE), &[0x0F, 0x01, 0xD1])
+        .expect("xsetbv");
     emu.emu_start(CODE, Some(CODE + 3), None, Some(1))
         .expect("enable AVX state");
     emu
@@ -158,7 +160,8 @@ fn cr0_ts_raises_nm_rather_than_ud() {
             emu.reg_write(X86Reg::Rax, 0x7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CODE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+            emu.mem_write(BxPhyAddress::new(CODE), &[0x0F, 0x01, 0xD1])
+                .expect("xsetbv");
             emu.emu_start(CODE, Some(CODE + 3), None, Some(1))
                 .expect("enable AVX state");
 
@@ -195,7 +198,8 @@ fn clearing_cr4_osxsave_disables_avx_immediately() {
             emu.reg_write(X86Reg::Rax, 0x7);
             emu.reg_write(X86Reg::Rcx, 0);
             emu.reg_write(X86Reg::Rdx, 0);
-            emu.mem_write(CODE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+            emu.mem_write(BxPhyAddress::new(CODE), &[0x0F, 0x01, 0xD1])
+                .expect("xsetbv");
             emu.emu_start(CODE, Some(CODE + 3), None, Some(1))
                 .expect("enable AVX state");
 

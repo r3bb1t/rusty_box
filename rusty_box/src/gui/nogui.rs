@@ -3,7 +3,8 @@
 //! This is a stub implementation that provides no visual output.
 //! Useful for headless operation or testing.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use super::gui_trait::{BxGui, DisplayMode, VgaTextModeInfo};
 
