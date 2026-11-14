@@ -44,7 +44,7 @@ use crate::Result;
 use crate::config::BxPhyAddress;
 use crate::cpu::ResetReason;
 use crate::memory::BxMemC;
-use crate::pc_system::BxPcSystemC;
+use crate::pc_system::{BxPcSystemC, Repeat};
 #[cfg(feature = "std")]
 use crate::snapshot::{SnapError, SnapRead, SnapResult, SnapWrite, checked_snapshot_len_add};
 
@@ -1327,7 +1327,7 @@ impl DeviceManager {
         // Bochs pci_ide.cc timer: READ DMA waits for the drive's data_ready
         // handshake (bmdma_start_transfer), re-polling at 1 us.
         if pci_ide.bmdma[channel].cmd_rwcon && !pci_ide.bmdma[channel].data_ready {
-            if let Err(error) = pcs.activate_timer_usec(timer_index, 1, false) {
+            if let Err(error) = pcs.activate_timer_usec(timer_index, 1, Repeat::Once) {
                 tracing::error!("BM-DMA ch={channel}: data-ready re-arm failed: {error:?}");
             }
             return;
@@ -1452,7 +1452,8 @@ impl DeviceManager {
             if next_size == 0 {
                 next_size = 0x10000;
             }
-            if let Err(error) = pcs.activate_timer_usec(timer_index, (next_size >> 4) | 0x10, false)
+            if let Err(error) =
+                pcs.activate_timer_usec(timer_index, (next_size >> 4) | 0x10, Repeat::Once)
             {
                 tracing::error!("BM-DMA ch={channel}: next-PRD re-arm failed: {error:?}");
             }
@@ -2707,7 +2708,7 @@ mod tests {
         on_big_stack(|| {
             use crate::iodev::harddrv::DeviceType;
             use crate::memory::{BxMemC, BxMemoryStubC};
-            use crate::pc_system::{BxPcSystemC, TimerOwner};
+            use crate::pc_system::{Activation, BxPcSystemC, TimerOwner};
 
             let mut dm = DeviceManager::new();
             let stub = BxMemoryStubC::create_and_init(4 << 20, 1 << 20, 1 << 20).unwrap();
@@ -2717,7 +2718,13 @@ mod tests {
 
             // Register the channel-0 BM-DMA timer as the emulator would.
             let handle = pcs
-                .register_timer(TimerOwner::PciIdeCh0, 0, false, false, "test bmdma")
+                .register_timer(
+                    TimerOwner::PciIdeCh0,
+                    0,
+                    Repeat::Once,
+                    Activation::Inactive,
+                    "test bmdma",
+                )
                 .unwrap();
             dm.ide.bus_master.bmdma[0].timer_index = Some(handle);
 
@@ -2790,7 +2797,7 @@ mod tests {
             dm.ide.bus_master.bmdma_write(IoPort::new(0xC000), 0x09, 1);
             let arm = dm.ide.bus_master.take_pending_timer_arm(0);
             assert_eq!(arm, Some(1));
-            pcs.activate_timer_usec(handle, 1, false).unwrap();
+            pcs.activate_timer_usec(handle, 1, Repeat::Once).unwrap();
 
             // Timer fires: single PRD with EOT completes the transfer.
             dm.pci_ide_timer(0, &mut pcs, &mut mem);
@@ -2863,12 +2870,24 @@ mod tests {
             dm.register_pci_ide_bmdma_ports(&mut io);
 
             // The engine needs real scheduler slots to arm.
-            use crate::pc_system::TimerOwner;
+            use crate::pc_system::{Activation, Repeat, TimerOwner};
             let ch0 = pc_system
-                .register_timer(TimerOwner::PciIdeCh0, 0, false, false, "PIIX IDE")
+                .register_timer(
+                    TimerOwner::PciIdeCh0,
+                    0,
+                    Repeat::Once,
+                    Activation::Inactive,
+                    "PIIX IDE",
+                )
                 .unwrap();
             let ch1 = pc_system
-                .register_timer(TimerOwner::PciIdeCh1, 0, false, false, "PIIX IDE")
+                .register_timer(
+                    TimerOwner::PciIdeCh1,
+                    0,
+                    Repeat::Once,
+                    Activation::Inactive,
+                    "PIIX IDE",
+                )
                 .unwrap();
             dm.ide.bus_master.bmdma[0].timer_index = Some(ch0);
             dm.ide.bus_master.bmdma[1].timer_index = Some(ch1);

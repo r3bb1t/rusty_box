@@ -3760,7 +3760,7 @@ mod tests {
     use crate::cpu::exec_ctx::exec_with;
     use crate::memory::{BxMemC, BxMemoryStubC};
     use crate::params::BxParams;
-    use crate::pc_system::TimerOwner;
+    use crate::pc_system::{Activation, Repeat, TimerOwner};
 
     /// `bytes` into guest RAM at physical address `at`.
     fn ram_write(mem: &mut BxMemC, at: u64, bytes: &[u8]) -> crate::Result<usize> {
@@ -4039,7 +4039,13 @@ mod tests {
         machine.pc_system_mut().initialize(1_000_000);
         machine
             .pc_system_mut()
-            .register_timer(TimerOwner::PciIdeCh0, 1000, false, true, "fastrep")
+            .register_timer(
+                TimerOwner::PciIdeCh0,
+                1000,
+                Repeat::Once,
+                Activation::Active,
+                "fastrep",
+            )
             .unwrap();
         let mut cpu = machine.ctx();
         cpu.configure_smp(1, topology);

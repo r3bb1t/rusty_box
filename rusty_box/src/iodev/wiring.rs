@@ -9,7 +9,7 @@
 use rusty_box_devices::api::{DeviceCtx, TimerKey, TimerService};
 
 use crate::iodev::irq::IrqFabric;
-use crate::pc_system::BxPcSystemC;
+use crate::pc_system::{BxPcSystemC, Repeat};
 
 /// Build a device context over the machine's parts and run `f` with it.
 ///
@@ -113,7 +113,7 @@ mod tests {
     use rusty_box_devices::api::DeviceKind;
 
     use super::*;
-    use crate::pc_system::TimerOwner;
+    use crate::pc_system::{Activation, TimerOwner};
 
     /// A device arming a timer mid-batch must anchor the deadline at the tick
     /// of the access that produced it, not at the wheel's position. The wheel
@@ -125,7 +125,13 @@ mod tests {
         let mut pc_system = BxPcSystemC::new();
         pc_system.initialize(1_000_000);
         let handle = pc_system
-            .register_timer(TimerOwner::Pit, 0, false, false, "test")
+            .register_timer(
+                TimerOwner::Pit,
+                0,
+                Repeat::Once,
+                Activation::Inactive,
+                "test",
+            )
             .unwrap();
 
         // The wheel sits at 0 while the issuing access is at tick 500.
@@ -202,7 +208,7 @@ impl WheelTimerService<'_> {
             .min(u128::from(u64::MAX)) as u64
     }
 
-    fn arm_ticks(&mut self, key: TimerKey, delay_ticks: u64, continuous: bool) {
+    fn arm_ticks(&mut self, key: TimerKey, delay_ticks: u64, repeat: Repeat) {
         let Some(handle) = self.handles.get(key.local) else {
             // The binding that built this context did not carry the device's
             // handle for `local`, so the deadline has nowhere to go. Saying so
@@ -228,7 +234,7 @@ impl WheelTimerService<'_> {
             handle,
             deadline,
             delay_ticks,
-            continuous,
+            repeat,
         ) {
             Ok(()) => {}
             Err(error) => {
@@ -242,23 +248,23 @@ impl WheelTimerService<'_> {
         }
     }
 
-    fn arm(&mut self, key: TimerKey, delay_usec: u64, continuous: bool) {
+    fn arm(&mut self, key: TimerKey, delay_usec: u64, repeat: Repeat) {
         let ticks = self.usec_to_ticks(delay_usec);
-        self.arm_ticks(key, ticks, continuous);
+        self.arm_ticks(key, ticks, repeat);
     }
 }
 
 impl TimerService for WheelTimerService<'_> {
     fn arm_oneshot_usec(&mut self, key: TimerKey, delay_usec: u64) {
-        self.arm(key, delay_usec, false);
+        self.arm(key, delay_usec, Repeat::Once);
     }
 
     fn arm_periodic_usec(&mut self, key: TimerKey, period_usec: u64) {
-        self.arm(key, period_usec, true);
+        self.arm(key, period_usec, Repeat::Periodic);
     }
 
     fn arm_oneshot_ticks(&mut self, key: TimerKey, delay_ticks: u64) {
-        self.arm_ticks(key, delay_ticks, false);
+        self.arm_ticks(key, delay_ticks, Repeat::Once);
     }
 
     fn cancel(&mut self, key: TimerKey) {

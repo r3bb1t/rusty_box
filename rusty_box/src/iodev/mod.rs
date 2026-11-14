@@ -25,6 +25,7 @@ pub use rusty_box_devices::api::IoPort;
 // so the verbs reach them through the trait rather than through a vtable.
 use rusty_box_devices::api::{MmioDevice, PioDevice};
 
+use crate::pc_system::Repeat;
 use crate::ring_buffer::RingBuffer;
 #[cfg(feature = "std")]
 use crate::snapshot::{SnapError, SnapRead, SnapResult, SnapWrite, checked_snapshot_len_add};
@@ -237,7 +238,7 @@ pub(crate) enum TimerRequest {
     Activate {
         deadline_ticks: u64,
         period_ticks: u64,
-        continuous: bool,
+        repeat: Repeat,
     },
 }
 
@@ -579,7 +580,7 @@ impl BxDevicesC {
         current_ticks: u64,
         delay_usec: Option<u64>,
     ) {
-        self.request_timer_after_usec_with_mode(owner, current_ticks, delay_usec, false);
+        self.request_timer_after_usec_with_mode(owner, current_ticks, delay_usec, Repeat::Once);
     }
 
     #[inline]
@@ -588,7 +589,7 @@ impl BxDevicesC {
         owner: DeviceTimerOwner,
         current_ticks: u64,
         delay_usec: Option<u64>,
-        continuous: bool,
+        repeat: Repeat,
     ) {
         let request = match delay_usec {
             Some(usec) => {
@@ -599,7 +600,7 @@ impl BxDevicesC {
                 TimerRequest::Activate {
                     deadline_ticks: current_ticks.saturating_add(ticks),
                     period_ticks: ticks,
-                    continuous,
+                    repeat,
                 }
             }
             None => TimerRequest::Deactivate,
@@ -743,10 +744,18 @@ impl BxDevicesC {
     }
 
     pub(crate) fn apply_cmos_timer_sync(&mut self, current_ticks: u64, sync: cmos::CmosTimerSync) {
-        for (owner, action, continuous) in [
-            (DeviceTimerOwner::CmosPeriodic, sync.periodic, true),
-            (DeviceTimerOwner::CmosOneSecond, sync.one_second, true),
-            (DeviceTimerOwner::CmosUip, sync.uip, false),
+        for (owner, action, repeat) in [
+            (
+                DeviceTimerOwner::CmosPeriodic,
+                sync.periodic,
+                Repeat::Periodic,
+            ),
+            (
+                DeviceTimerOwner::CmosOneSecond,
+                sync.one_second,
+                Repeat::Periodic,
+            ),
+            (DeviceTimerOwner::CmosUip, sync.uip, Repeat::Once),
         ] {
             match action {
                 cmos::CmosTimerAction::Unchanged => {}
@@ -755,7 +764,7 @@ impl BxDevicesC {
                         owner,
                         current_ticks,
                         Some(delay),
-                        continuous,
+                        repeat,
                     );
                 }
                 cmos::CmosTimerAction::Deactivate => {
@@ -1403,12 +1412,12 @@ fn write_timer_request_snapshot<W: SnapWrite>(
         TimerRequest::Activate {
             deadline_ticks,
             period_ticks,
-            continuous,
+            repeat,
         } => {
             writer.write_u8(2)?;
             writer.write_u64(deadline_ticks)?;
             writer.write_u64(period_ticks)?;
-            writer.write_bool(continuous)
+            writer.write_bool(repeat.is_periodic())
         }
     }
 }
@@ -1421,7 +1430,7 @@ fn read_timer_request_snapshot<R: SnapRead>(reader: &mut R) -> SnapResult<TimerR
         2 => Ok(TimerRequest::Activate {
             deadline_ticks: reader.read_u64()?,
             period_ticks: reader.read_u64()?,
-            continuous: reader.read_bool()?,
+            repeat: Repeat::periodic_if(reader.read_bool()?),
         }),
         _ => Err(invalid_bx_devices_snapshot(
             "snapshot device timer request tag is invalid",
@@ -1942,7 +1951,7 @@ mod tests {
             TimerRequest::Activate {
                 deadline_ticks: 17,
                 period_ticks: 17,
-                continuous: false,
+                repeat: Repeat::Once,
             },
         );
         devices.request_timer(DeviceTimerOwner::PciIdeCh0, TimerRequest::Deactivate);
@@ -1951,7 +1960,7 @@ mod tests {
             TimerRequest::Activate {
                 deadline_ticks: 23,
                 period_ticks: 23,
-                continuous: true,
+                repeat: Repeat::Periodic,
             },
         );
 
@@ -1969,7 +1978,7 @@ mod tests {
             TimerRequest::Activate {
                 deadline_ticks: 23,
                 period_ticks: 23,
-                continuous: true,
+                repeat: Repeat::Periodic,
             }
         );
         assert_eq!(
@@ -1989,7 +1998,7 @@ mod tests {
             TimerRequest::Activate {
                 deadline_ticks: 17,
                 period_ticks: 17,
-                continuous: false,
+                repeat: Repeat::Once,
             },
         );
 

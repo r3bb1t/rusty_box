@@ -6,6 +6,7 @@ use crate::cpu::apic::{LocalApicCpuEvent, LocalApicTimerActivation, PendingIpi};
 use crate::cpu::cpu::CpuActivityState;
 use crate::cpu::instrumentation::Instrumentation;
 use crate::cpu::{BxCpuC, CpuError, ResetReason, Result as CpuResult};
+use crate::pc_system::Repeat;
 
 impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// Invalidate every host pointer and decoded trace before memory backing
@@ -847,10 +848,11 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
         if let Some(activation) = activate {
             if let Some(handle) = timer_handle {
-                if let Err(e) =
-                    self.pc_system
-                        .activate_timer_at_ticks(handle, activation.deadline_ticks, false)
-                {
+                if let Err(e) = self.pc_system.activate_timer_at_ticks(
+                    handle,
+                    activation.deadline_ticks,
+                    Repeat::Once,
+                ) {
                     tracing::error!(
                         "CPU {cpu_index} LAPIC timer activate (handle {handle}) failed: {e:?}"
                     );

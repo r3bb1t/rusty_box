@@ -46,10 +46,11 @@ anonymous `impl Trait` in public signatures: return types are named (`SerialTxDr
 (`MachineBuilder::tracer<U: Instrumentation>(self, tracer: U)`). No meaningless scalars where an
 enum speaks: `StopReason` says why a batch returned, where a `bool` could only say that it did.
 
-The timer wheel does not meet the last clause. `BxPcSystemC::register_timer`
-(`rusty_box/src/pc_system.rs`) is public and takes `continuous: bool, active: bool`, and its
-callers pass bare `false, false`. The target for `continuous` is `Repeat { Once, Periodic }`;
-it is not built.
+The timer wheel (`rusty_box/src/pc_system.rs`) says what its flags mean:
+`BxPcSystemC::register_timer` takes `Repeat { Once, Periodic }` (Bochs `continuous`) and
+`Activation { Active, Inactive }` (Bochs `active`), and every `activate_timer*` takes the
+`Repeat`, as does the machine's deferred `TimerRequest::Activate`. A device whose own mode
+decides names it with `Repeat::periodic_if`; the snapshot keeps the bit Bochs keeps.
 
 *Why:* names survive at call sites; anonymous shapes leak auto-traits implicitly and cannot be
 stored, documented, or diffed. *Scope:* the public surface. Internal choke points may use

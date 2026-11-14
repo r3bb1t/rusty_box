@@ -24,7 +24,7 @@ use crate::memory::{BxMemC, BxMemoryStubC};
 use crate::params::BxParams;
 use crate::pc_system::BxPcSystemC;
 #[cfg(feature = "std")]
-use crate::pc_system::TimerOwner;
+use crate::pc_system::{Repeat, TimerOwner};
 #[cfg(feature = "std")]
 use crate::snapshot::Restated;
 #[cfg(feature = "alloc")]
@@ -1037,7 +1037,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                     && !self.pc_system.has_fired_owner(TimerOwner::Slowdown)
                 {
                     self.pc_system
-                        .activate_timer_usec(handle, SLOWDOWN_QUANTUM_USEC as u32, false)
+                        .activate_timer_usec(handle, SLOWDOWN_QUANTUM_USEC as u32, Repeat::Once)
                         .map_err(|error| {
                             Error::new(
                                 ErrorKind::InvalidData,

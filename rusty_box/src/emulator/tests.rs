@@ -14,7 +14,7 @@ use crate::cpu::decoder::Instruction;
 use crate::cpu::event::AcknowledgedInterrupt;
 use crate::cpu::instrumentation::{CpuSetupMode, X86Reg};
 use crate::iodev::{DeviceTimerOwner, TimerRequest};
-use crate::pc_system::TimerOwner;
+use crate::pc_system::{Activation, Repeat, TimerOwner};
 const TEST_SMP_PACKAGES: u32 = 2;
 const TEST_SMP_CORES: u32 = 1;
 const TEST_SMP_THREADS: u32 = 1;
@@ -1128,7 +1128,13 @@ fn strict_smp_deadline_keeps_bochs_idle_cpu_quantum_credit() {
             let quantum = emu.smp_quantum_ticks();
             assert!(quantum > 1);
             emu.pc_system
-                .register_timer(TimerOwner::NullTimer, 1, true, false, "one_tick")
+                .register_timer(
+                    TimerOwner::NullTimer,
+                    1,
+                    Repeat::Periodic,
+                    Activation::Inactive,
+                    "one_tick",
+                )
                 .unwrap();
 
             let elapsed = emu.run_cpu_batch_elapsed(quantum / 2).unwrap();
@@ -1166,8 +1172,8 @@ fn equal_smp_deadline_truncates_a_short_final_round() {
                 .register_timer(
                     TimerOwner::NullTimer,
                     short_round,
-                    false,
-                    true,
+                    Repeat::Once,
+                    Activation::Active,
                     "equal_short_round",
                 )
                 .unwrap();
@@ -1235,7 +1241,13 @@ fn run_cpu_batch_stops_at_the_next_exact_timer_deadline() {
             emu.virt_write(BxLinAddress::new(0x1000), &code).unwrap();
             emu.reg_write(X86Reg::Rip, 0x1000);
             emu.pc_system
-                .register_timer(TimerOwner::NullTimer, 1, true, true, "one_tick")
+                .register_timer(
+                    TimerOwner::NullTimer,
+                    1,
+                    Repeat::Periodic,
+                    Activation::Active,
+                    "one_tick",
+                )
                 .unwrap();
 
             let executed = emu.run_cpu_batch_retiring(4096).unwrap();
@@ -1814,14 +1826,20 @@ fn the_machine_reports_how_long_until_its_next_device_deadline() {
 
             let handle = emu
                 .pc_system
-                .register_timer(TimerOwner::CmosPeriodic, 1, false, false, "deadline query")
+                .register_timer(
+                    TimerOwner::CmosPeriodic,
+                    1,
+                    Repeat::Once,
+                    Activation::Inactive,
+                    "deadline query",
+                )
                 .unwrap();
             emu.device_manager.cmos.periodic_timer_handle = Some(handle);
             emu.devices.request_timer_after_usec_with_mode(
                 DeviceTimerOwner::CmosPeriodic,
                 PROGRAMMING_TICKS,
                 Some(PERIOD_TICKS),
-                true,
+                Repeat::Periodic,
             );
             emu.drain_device_timer_requests();
 
@@ -1856,8 +1874,8 @@ fn deferred_continuous_timer_keeps_its_programmed_period() {
                 .register_timer(
                     TimerOwner::CmosPeriodic,
                     1,
-                    false,
-                    false,
+                    Repeat::Once,
+                    Activation::Inactive,
                     "deferred continuous",
                 )
                 .unwrap();
@@ -1867,7 +1885,7 @@ fn deferred_continuous_timer_keeps_its_programmed_period() {
                 DeviceTimerOwner::CmosPeriodic,
                 PROGRAMMING_TICKS,
                 Some(PERIOD_TICKS),
-                true,
+                Repeat::Periodic,
             );
             emu.drain_device_timer_requests();
 
@@ -1903,7 +1921,7 @@ fn deadline_scheduler_preserves_windows_timer_order() {
                 TimerRequest::Activate {
                     deadline_ticks: 1,
                     period_ticks: 1,
-                    continuous: false,
+                    repeat: Repeat::Once,
                 },
             );
             emu.devices.request_timer(
@@ -1911,7 +1929,7 @@ fn deadline_scheduler_preserves_windows_timer_order() {
                 TimerRequest::Activate {
                     deadline_ticks: 2,
                     period_ticks: 2,
-                    continuous: false,
+                    repeat: Repeat::Once,
                 },
             );
             emu.drain_device_timer_requests();
@@ -1966,7 +1984,7 @@ fn no_fixed_device_polling_state_remains() {
                     TimerRequest::Activate {
                         deadline_ticks: 1,
                         period_ticks: 1,
-                        continuous: false,
+                        repeat: Repeat::Once,
                     },
                 );
             }
@@ -2125,7 +2143,13 @@ fn rep_insw32_fast_path_retires_exact_iteration_count() {
             emu.reg_write(X86Reg::Rcx, COUNT);
             let timer = emu
                 .pc_system
-                .register_timer(TimerOwner::Keyboard, COUNT, false, true, "REP deadline")
+                .register_timer(
+                    TimerOwner::Keyboard,
+                    COUNT,
+                    Repeat::Once,
+                    Activation::Active,
+                    "REP deadline",
+                )
                 .unwrap();
             let ticks_before = emu.pc_system.time_ticks();
 
@@ -2201,8 +2225,8 @@ fn rep_insw32_stops_at_event_budget_across_page_boundary() {
                 .register_timer(
                     TimerOwner::NullTimer,
                     EVENT_BUDGET,
-                    false,
-                    true,
+                    Repeat::Once,
+                    Activation::Active,
                     "rep_insw_deadline",
                 )
                 .unwrap();
@@ -2657,8 +2681,8 @@ fn hlt_wait_step_respects_near_pc_system_timer() {
                     .register_timer(
                         TimerOwner::Lapic(0),
                         u64::from(deadline),
-                        false,
-                        true,
+                        Repeat::Once,
+                        Activation::Active,
                         "near_timer",
                     )
                     .unwrap();
@@ -2817,7 +2841,7 @@ fn hardware_reset_rearms_exact_device_owners() {
             let keyboard_handle = emu.device_manager.keyboard.timer_handle().unwrap();
             let one_second_handle = emu.device_manager.cmos.one_second_timer_handle.unwrap();
             emu.pc_system
-                .activate_timer_usec(keyboard_handle, 7, false)
+                .activate_timer_usec(keyboard_handle, 7, Repeat::Once)
                 .unwrap();
             assert!(emu.pc_system.is_timer_active(keyboard_handle));
 
@@ -4217,7 +4241,13 @@ fn smp_batch_services_lapic_timer_at_round_boundary() {
 
             let handle = emu
                 .pc_system
-                .register_timer(TimerOwner::Lapic(AP_INDEX), 1, false, false, "ap_lapic")
+                .register_timer(
+                    TimerOwner::Lapic(AP_INDEX),
+                    1,
+                    Repeat::Once,
+                    Activation::Inactive,
+                    "ap_lapic",
+                )
                 .unwrap();
 
             emu.cpu_mut().activity_state = CpuActivityState::Hlt;
@@ -4281,7 +4311,13 @@ fn smp_lapic_tmcct_advances_across_rounds_without_scheduler_work() {
 
             let handle = emu
                 .pc_system
-                .register_timer(TimerOwner::Lapic(AP_INDEX), 1, false, false, "ap_lapic")
+                .register_timer(
+                    TimerOwner::Lapic(AP_INDEX),
+                    1,
+                    Repeat::Once,
+                    Activation::Inactive,
+                    "ap_lapic",
+                )
                 .unwrap();
 
             {
@@ -4529,8 +4565,8 @@ fn lapic_timer_request_is_activated_before_round_ticks_advance() {
                 .register_timer(
                     TimerOwner::Lapic(BSP_INDEX),
                     TEST_LAPIC_TIMER_PERIOD_TICKS,
-                    false,
-                    false,
+                    Repeat::Once,
+                    Activation::Inactive,
                     "bsp_lapic",
                 )
                 .unwrap();
@@ -4630,7 +4666,13 @@ fn up_lapic_timer_uses_programming_instruction_epoch() {
                     .unwrap();
             let handle = emu
                 .pc_system
-                .register_timer(TimerOwner::Lapic(BSP_INDEX), 1, false, false, "lapic")
+                .register_timer(
+                    TimerOwner::Lapic(BSP_INDEX),
+                    1,
+                    Repeat::Once,
+                    Activation::Inactive,
+                    "lapic",
+                )
                 .unwrap();
             {
                 let cpu = emu.cpu_mut_at(BSP_INDEX);
@@ -4743,8 +4785,8 @@ fn service_lapic_local_events_catches_up_overdue_periodic_ap_timers() {
                 .register_timer(
                     TimerOwner::Lapic(AP_INDEX),
                     TEST_LAPIC_TIMER_PERIOD_TICKS,
-                    false,
-                    false,
+                    Repeat::Once,
+                    Activation::Inactive,
                     "ap_lapic",
                 )
                 .unwrap();
@@ -4797,8 +4839,8 @@ fn service_lapic_local_events_catches_up_overdue_periodic_ap_timers_beyond_previ
                 .register_timer(
                     TimerOwner::Lapic(AP_INDEX),
                     TEST_LAPIC_TIMER_PERIOD_TICKS,
-                    false,
-                    false,
+                    Repeat::Once,
+                    Activation::Inactive,
                     "ap_lapic",
                 )
                 .unwrap();
@@ -4847,8 +4889,8 @@ fn reset_deactivates_lapic_pc_timer_before_next_tick() {
                 .register_timer(
                     TimerOwner::Lapic(BSP_INDEX),
                     TEST_LAPIC_TIMER_PERIOD_TICKS,
-                    false,
-                    false,
+                    Repeat::Once,
+                    Activation::Inactive,
                     "bsp_lapic",
                 )
                 .unwrap();
@@ -6321,7 +6363,13 @@ fn rep_insd_obeys_one_element_event_budget() {
         emu.device_manager.keyboard.kbd_controller.kbd_output_buffer = 0xA5;
         emu.device_manager.keyboard.kbd_controller.outb = true;
         emu.pc_system
-            .register_timer(TimerOwner::NullTimer, 1, true, true, "phase6 insd deadline")
+            .register_timer(
+                TimerOwner::NullTimer,
+                1,
+                Repeat::Periodic,
+                Activation::Active,
+                "phase6 insd deadline",
+            )
             .unwrap();
         emu.virt_write(BxLinAddress::new(CODE), &[0xF3, 0x6D, 0xEB, 0xFE])
             .unwrap();
@@ -6361,7 +6409,13 @@ fn fast_rep_charges_ticks_not_icount_and_matches_scalar_ticks() {
 
         let mut fast = phase6_flat32();
         fast.pc_system
-            .register_timer(TimerOwner::NullTimer, COUNT, true, true, "phase6 fast")
+            .register_timer(
+                TimerOwner::NullTimer,
+                COUNT,
+                Repeat::Periodic,
+                Activation::Active,
+                "phase6 fast",
+            )
             .unwrap();
         fast.virt_write(BxLinAddress::new(CODE), &[0xF3, 0x66, 0xA5, 0xEB, 0xFE])
             .unwrap();
@@ -6387,7 +6441,13 @@ fn fast_rep_charges_ticks_not_icount_and_matches_scalar_ticks() {
         .unwrap();
         scalar
             .pc_system
-            .register_timer(TimerOwner::NullTimer, COUNT, true, true, "phase6 scalar")
+            .register_timer(
+                TimerOwner::NullTimer,
+                COUNT,
+                Repeat::Periodic,
+                Activation::Active,
+                "phase6 scalar",
+            )
             .unwrap();
         scalar
             .virt_write(BxLinAddress::new(CODE), &[0xF3, 0x66, 0xA5, 0xEB, 0xFE])
@@ -6447,8 +6507,8 @@ fn fast_rep_element_budget_uses_elements_not_bytes() {
                 .register_timer(
                     TimerOwner::NullTimer,
                     DEADLINE,
-                    true,
-                    true,
+                    Repeat::Periodic,
+                    Activation::Active,
                     "phase6 element budget",
                 )
                 .unwrap();
@@ -6482,8 +6542,8 @@ fn fast_rep_element_budget_uses_elements_not_bytes() {
                 .register_timer(
                     TimerOwner::NullTimer,
                     DEADLINE,
-                    true,
-                    true,
+                    Repeat::Periodic,
+                    Activation::Active,
                     "phase6 qword budget",
                 )
                 .unwrap();

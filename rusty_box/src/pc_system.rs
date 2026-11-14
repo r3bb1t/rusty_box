@@ -42,6 +42,40 @@ bitflags! {
     }
 }
 
+/// Whether a timer fires once or again every period (Bochs `continuous`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Repeat {
+    /// Fires once, then stays inactive until it is activated again.
+    Once,
+    /// Fires every period until it is deactivated.
+    Periodic,
+}
+
+impl Repeat {
+    /// [`Repeat::Periodic`] where `periodic` holds, else [`Repeat::Once`]: for
+    /// a device whose own mode decides.
+    #[inline]
+    pub const fn periodic_if(periodic: bool) -> Self {
+        if periodic { Self::Periodic } else { Self::Once }
+    }
+
+    /// Whether the timer repeats.
+    #[inline]
+    pub const fn is_periodic(self) -> bool {
+        matches!(self, Self::Periodic)
+    }
+}
+
+/// Whether a timer starts counting when it is registered (Bochs
+/// `register_timer`'s `active`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activation {
+    /// It counts down from registration.
+    Active,
+    /// It waits for an `activate_timer*` call.
+    Inactive,
+}
+
 /// Errors from PC system timer operations.
 ///
 /// These correspond to `BX_PANIC()` calls in Bochs pc_system.cc.
@@ -1087,8 +1121,8 @@ impl BxPcSystemC {
         &mut self,
         owner: TimerOwner,
         period: u64,
-        continuous: bool,
-        active: bool,
+        repeat: Repeat,
+        activation: Activation,
         id: &str,
     ) -> Result<usize, PcSystemError> {
         let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
@@ -1100,7 +1134,9 @@ impl BxPcSystemC {
 
             let deadline_ticks = self.deadline_from_now(period)?;
             self.timers[i].flags = TimerFlags::IN_USE;
-            self.timers[i].flags.set(TimerFlags::CONTINUOUS, continuous);
+            self.timers[i]
+                .flags
+                .set(TimerFlags::CONTINUOUS, repeat.is_periodic());
             self.timers[i].period = period;
             self.timers[i].time_to_fire = deadline_ticks;
             self.timers[i].owner = owner;
@@ -1113,8 +1149,9 @@ impl BxPcSystemC {
             if i >= self.num_timers {
                 self.num_timers = i + 1;
             }
-            if active {
-                self.activate_timer_at_ticks(i, deadline_ticks, continuous)?;
+            match activation {
+                Activation::Active => self.activate_timer_at_ticks(i, deadline_ticks, repeat)?,
+                Activation::Inactive => {}
             }
 
             tracing::trace!("Registered timer {} with id '{}'", i, id);
@@ -1132,15 +1169,15 @@ impl BxPcSystemC {
         &mut self,
         owner: TimerOwner,
         useconds: u32,
-        continuous: bool,
-        active: bool,
+        repeat: Repeat,
+        activation: Activation,
         id: &str,
     ) -> Result<usize, PcSystemError> {
         self.register_timer(
             owner,
             self.usec_to_ticks(u64::from(useconds))?,
-            continuous,
-            active,
+            repeat,
+            activation,
             id,
         )
     }
@@ -1154,7 +1191,7 @@ impl BxPcSystemC {
         &mut self,
         timer_index: usize,
         deadline_ticks: u64,
-        continuous: bool,
+        repeat: Repeat,
     ) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
         let now = self.time_ticks();
@@ -1169,7 +1206,7 @@ impl BxPcSystemC {
         self.timers[timer_index].flags.insert(TimerFlags::ACTIVE);
         self.timers[timer_index]
             .flags
-            .set(TimerFlags::CONTINUOUS, continuous);
+            .set(TimerFlags::CONTINUOUS, repeat.is_periodic());
         self.shorten_countdown_to(deadline_ticks);
         Ok(())
     }
@@ -1183,11 +1220,11 @@ impl BxPcSystemC {
         timer_index: usize,
         deadline_ticks: u64,
         period: u64,
-        continuous: bool,
+        repeat: Repeat,
     ) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
         self.timers[timer_index].period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
-        self.activate_timer_at_ticks(timer_index, deadline_ticks, continuous)
+        self.activate_timer_at_ticks(timer_index, deadline_ticks, repeat)
     }
 
     /// Activate a timer with a period relative to the current tick epoch.
@@ -1198,13 +1235,13 @@ impl BxPcSystemC {
         &mut self,
         timer_index: usize,
         period: u64,
-        continuous: bool,
+        repeat: Repeat,
     ) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
         let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
         let deadline_ticks = self.deadline_from_now(period)?;
         self.timers[timer_index].period = period;
-        self.activate_timer_at_ticks(timer_index, deadline_ticks, continuous)
+        self.activate_timer_at_ticks(timer_index, deadline_ticks, repeat)
     }
 
     /// Activate a timer with period in microseconds.
@@ -1215,7 +1252,7 @@ impl BxPcSystemC {
         &mut self,
         timer_index: usize,
         useconds: u32,
-        continuous: bool,
+        repeat: Repeat,
     ) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
         let ticks = if useconds == 0 {
@@ -1224,7 +1261,7 @@ impl BxPcSystemC {
             self.usec_to_ticks(u64::from(useconds))?
                 .max(MIN_ALLOWABLE_TIMER_PERIOD)
         };
-        self.activate_timer(timer_index, ticks, continuous)
+        self.activate_timer(timer_index, ticks, repeat)
     }
 
     /// Activate a timer with period in nanoseconds.
@@ -1235,7 +1272,7 @@ impl BxPcSystemC {
         &mut self,
         timer_index: usize,
         nseconds: u64,
-        continuous: bool,
+        repeat: Repeat,
     ) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
         let ticks = if nseconds == 0 {
@@ -1246,7 +1283,7 @@ impl BxPcSystemC {
                 .map_err(|_| PcSystemError::TimeConversionOverflow)?
                 .max(MIN_ALLOWABLE_TIMER_PERIOD)
         };
-        self.activate_timer(timer_index, ticks, continuous)
+        self.activate_timer(timer_index, ticks, repeat)
     }
 
     /// Reactivate a timer relative to its previous fire epoch.
@@ -1265,7 +1302,7 @@ impl BxPcSystemC {
             .checked_add(period)
             .ok_or(PcSystemError::TimerDeadlineOverflow)?;
         self.timers[timer_index].period = period;
-        self.activate_timer_at_ticks(timer_index, deadline_ticks, false)
+        self.activate_timer_at_ticks(timer_index, deadline_ticks, Repeat::Once)
     }
 
     /// Deactivate a timer.
@@ -1788,7 +1825,13 @@ mod tests {
 
         // Register a timer — should get slot 1 (slot 0 is null timer)
         let idx = pc
-            .register_timer(TimerOwner::PciIdeCh0, 1000, true, true, "test_timer")
+            .register_timer(
+                TimerOwner::PciIdeCh0,
+                1000,
+                Repeat::Periodic,
+                Activation::Active,
+                "test_timer",
+            )
             .unwrap();
         assert_eq!(idx, 1);
         assert_eq!(pc.num_timers, 2);
@@ -1804,7 +1847,13 @@ mod tests {
 
         // 1000 usec at 15 MIPS = 15000 ticks
         let idx = pc
-            .register_timer_usec(TimerOwner::PciIdeCh0, 1000, true, true, "usec_timer")
+            .register_timer_usec(
+                TimerOwner::PciIdeCh0,
+                1000,
+                Repeat::Periodic,
+                Activation::Active,
+                "usec_timer",
+            )
             .unwrap();
         assert_eq!(idx, 1);
         assert_eq!(pc.timers[1].period, 15000);
@@ -1817,7 +1866,13 @@ mod tests {
         pc.tickn(25);
 
         let idx = pc
-            .register_timer(TimerOwner::PciIdeCh0, 1000, false, false, "inactive")
+            .register_timer(
+                TimerOwner::PciIdeCh0,
+                1000,
+                Repeat::Once,
+                Activation::Inactive,
+                "inactive",
+            )
             .unwrap();
 
         assert!(!pc.timers[idx].flags.contains(TimerFlags::ACTIVE));
@@ -1831,7 +1886,13 @@ mod tests {
 
         // Register a timer with period 100
         let _idx = pc
-            .register_timer(TimerOwner::PciIdeCh0, 100, true, true, "partial_test")
+            .register_timer(
+                TimerOwner::PciIdeCh0,
+                100,
+                Repeat::Periodic,
+                Activation::Active,
+                "partial_test",
+            )
             .unwrap();
 
         // Advance 50 ticks — should NOT fire yet
@@ -1861,8 +1922,8 @@ mod tests {
             .register_timer(
                 TimerOwner::PciIdeCh0,
                 100,
-                false, // one-shot
-                true,
+                Repeat::Once,
+                Activation::Active,
                 "oneshot",
             )
             .unwrap();
@@ -1885,8 +1946,8 @@ mod tests {
             .register_timer(
                 TimerOwner::PciIdeCh0,
                 100,
-                true, // continuous
-                true,
+                Repeat::Periodic,
+                Activation::Active,
                 "continuous",
             )
             .unwrap();
@@ -1904,8 +1965,14 @@ mod tests {
         let mut pc = BxPcSystemC::new();
         pc.initialize(1_000_000);
 
-        pc.register_timer(TimerOwner::PciIdeCh0, 1, true, true, "continuous")
-            .unwrap();
+        pc.register_timer(
+            TimerOwner::PciIdeCh0,
+            1,
+            Repeat::Periodic,
+            Activation::Active,
+            "continuous",
+        )
+        .unwrap();
 
         pc.tickn(65);
         let (owners, counts, count) = pc.take_fired_timers();
@@ -1919,8 +1986,14 @@ mod tests {
         let mut pc = BxPcSystemC::new();
         pc.initialize(1_000_000);
 
-        pc.register_timer(TimerOwner::PciIdeCh0, 1000, false, true, "oneshot")
-            .unwrap();
+        pc.register_timer(
+            TimerOwner::PciIdeCh0,
+            1000,
+            Repeat::Once,
+            Activation::Active,
+            "oneshot",
+        )
+        .unwrap();
 
         assert!(!pc.countdown_would_expire_after(500));
         assert_eq!(pc.curr_countdown, 1000);
@@ -1943,8 +2016,8 @@ mod tests {
             .register_timer(
                 TimerOwner::PciIdeCh0,
                 1000,
-                true,
-                false, // inactive
+                Repeat::Periodic,
+                Activation::Inactive,
                 "unreg",
             )
             .unwrap();
@@ -1963,7 +2036,13 @@ mod tests {
 
         // Register timer with period 1000
         let _t1 = pc
-            .register_timer(TimerOwner::PciIdeCh0, 1000, true, true, "t1")
+            .register_timer(
+                TimerOwner::PciIdeCh0,
+                1000,
+                Repeat::Periodic,
+                Activation::Active,
+                "t1",
+            )
             .unwrap();
         assert_eq!(pc.curr_countdown, 1000);
 
@@ -1973,7 +2052,13 @@ mod tests {
 
         // Now activate a second timer with period 500 — should adjust countdown
         let t2 = pc
-            .register_timer(TimerOwner::PciIdeCh1, 500, true, true, "t2")
+            .register_timer(
+                TimerOwner::PciIdeCh1,
+                500,
+                Repeat::Periodic,
+                Activation::Active,
+                "t2",
+            )
             .unwrap();
         // curr_countdown was 800, new timer needs 500 < 800
         // So countdown adjusted to 500
@@ -1987,11 +2072,18 @@ mod tests {
         pc.initialize(1_000_000);
         pc.tickn(7);
         let timer = pc
-            .register_timer(TimerOwner::PciIdeCh0, 10, false, false, "clamped")
+            .register_timer(
+                TimerOwner::PciIdeCh0,
+                10,
+                Repeat::Once,
+                Activation::Inactive,
+                "clamped",
+            )
             .unwrap();
 
         let now = pc.time_ticks();
-        pc.activate_timer_at_ticks(timer, now - 1, false).unwrap();
+        pc.activate_timer_at_ticks(timer, now - 1, Repeat::Once)
+            .unwrap();
         assert_eq!(pc.timers[timer].time_to_fire, now + 1);
         assert_eq!(pc.get_num_ticks_left_next_event(), 1);
         assert_eq!(pc.time_ticks(), now);
@@ -2009,11 +2101,18 @@ mod tests {
         pc.initialize(1_000_000);
         pc.tickn(7);
         let timer = pc
-            .register_timer(TimerOwner::CmosOneSecond, 50, true, false, "second")
+            .register_timer(
+                TimerOwner::CmosOneSecond,
+                50,
+                Repeat::Periodic,
+                Activation::Inactive,
+                "second",
+            )
             .unwrap();
 
         let now = pc.time_ticks();
-        pc.activate_timer_at_ticks(timer, now + 10, true).unwrap();
+        pc.activate_timer_at_ticks(timer, now + 10, Repeat::Periodic)
+            .unwrap();
         assert_eq!(pc.timers[timer].period, 50);
 
         pc.tickn(10);
@@ -2051,15 +2150,29 @@ mod tests {
         let mut pc = BxPcSystemC::new();
         pc.initialize(1_000_000);
         let first = pc
-            .register_timer(TimerOwner::PciIdeCh0, 100, false, false, "first")
+            .register_timer(
+                TimerOwner::PciIdeCh0,
+                100,
+                Repeat::Once,
+                Activation::Inactive,
+                "first",
+            )
             .unwrap();
         let second = pc
-            .register_timer(TimerOwner::PciIdeCh1, 100, false, false, "second")
+            .register_timer(
+                TimerOwner::PciIdeCh1,
+                100,
+                Repeat::Once,
+                Activation::Inactive,
+                "second",
+            )
             .unwrap();
         let deadline = pc.time_ticks() + 25;
 
-        pc.activate_timer_at_ticks(first, deadline, false).unwrap();
-        pc.activate_timer_at_ticks(second, deadline, false).unwrap();
+        pc.activate_timer_at_ticks(first, deadline, Repeat::Once)
+            .unwrap();
+        pc.activate_timer_at_ticks(second, deadline, Repeat::Once)
+            .unwrap();
         pc.tickn(25);
 
         let (owners, counts, count) = pc.take_fired_timers();
@@ -2078,15 +2191,28 @@ mod tests {
         pc.tickn(10);
         let now = pc.time_ticks();
         let later = pc
-            .register_timer(TimerOwner::PciIdeCh0, 100, false, false, "later")
+            .register_timer(
+                TimerOwner::PciIdeCh0,
+                100,
+                Repeat::Once,
+                Activation::Inactive,
+                "later",
+            )
             .unwrap();
         let earlier = pc
-            .register_timer(TimerOwner::PciIdeCh1, 50, false, false, "earlier")
+            .register_timer(
+                TimerOwner::PciIdeCh1,
+                50,
+                Repeat::Once,
+                Activation::Inactive,
+                "earlier",
+            )
             .unwrap();
 
-        pc.activate_timer_at_ticks(later, now + 100, false).unwrap();
+        pc.activate_timer_at_ticks(later, now + 100, Repeat::Once)
+            .unwrap();
         assert_eq!(pc.get_num_ticks_left_next_event(), 100);
-        pc.activate_timer_at_ticks(earlier, now + 50, false)
+        pc.activate_timer_at_ticks(earlier, now + 50, Repeat::Once)
             .unwrap();
         assert_eq!(pc.get_num_ticks_left_next_event(), 50);
         assert_eq!(pc.next_timer_deadline_at(), Some(now + 50));
@@ -2117,11 +2243,18 @@ mod tests {
             TimerOwner::Slowdown,
         ];
         for owner in fixed {
-            pc.register_timer(owner, 0, false, false, "fixed").unwrap();
+            pc.register_timer(owner, 0, Repeat::Once, Activation::Inactive, "fixed")
+                .unwrap();
         }
         for cpu_index in 0..crate::params::BX_MAX_SMP_THREADS_SUPPORTED as usize {
-            pc.register_timer(TimerOwner::Lapic(cpu_index), 0, false, false, "lapic")
-                .unwrap();
+            pc.register_timer(
+                TimerOwner::Lapic(cpu_index),
+                0,
+                Repeat::Once,
+                Activation::Inactive,
+                "lapic",
+            )
+            .unwrap();
         }
     }
 
@@ -2132,11 +2265,17 @@ mod tests {
         source.initialize(1_000_000);
         source.tickn(15);
         let handle = source
-            .register_timer(TimerOwner::CmosPeriodic, 29, true, false, "CMOS periodic")
+            .register_timer(
+                TimerOwner::CmosPeriodic,
+                29,
+                Repeat::Periodic,
+                Activation::Inactive,
+                "CMOS periodic",
+            )
             .unwrap();
         let deadline = source.time_ticks() + 41;
         source
-            .activate_timer_at_ticks(handle, deadline, true)
+            .activate_timer_at_ticks(handle, deadline, Repeat::Periodic)
             .unwrap();
 
         let mut payload = Vec::new();
@@ -2181,16 +2320,28 @@ mod tests {
 
         // A near timer sets the countdown, a farther timer stays active.
         let near = source
-            .register_timer(TimerOwner::Keyboard, 0, false, false, "kbd")
+            .register_timer(
+                TimerOwner::Keyboard,
+                0,
+                Repeat::Once,
+                Activation::Inactive,
+                "kbd",
+            )
             .unwrap();
         let far = source
-            .register_timer(TimerOwner::CmosPeriodic, 0, false, false, "cmos")
+            .register_timer(
+                TimerOwner::CmosPeriodic,
+                0,
+                Repeat::Once,
+                Activation::Inactive,
+                "cmos",
+            )
             .unwrap();
         source
-            .activate_timer_at_ticks(far, source.time_ticks() + 500, true)
+            .activate_timer_at_ticks(far, source.time_ticks() + 500, Repeat::Periodic)
             .unwrap();
         source
-            .activate_timer_at_ticks(near, source.time_ticks() + 40, false)
+            .activate_timer_at_ticks(near, source.time_ticks() + 40, Repeat::Once)
             .unwrap();
         assert_eq!(
             source.next_timer_deadline_at(),

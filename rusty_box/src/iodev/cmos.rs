@@ -31,6 +31,7 @@
 //! - 0x71: CMOS data register
 
 use super::IoPort;
+use crate::pc_system::Repeat;
 #[cfg(feature = "std")]
 use crate::snapshot::{
     SNAPSHOT_SECTION_VERSION, SnapError, SnapRead, SnapResult, SnapWrite, bounds,
@@ -1092,19 +1093,25 @@ impl BxCmosC {
     /// The periodic and one-second timers are continuous (Bochs cmos.cc
     /// activate_timer with continuous = 1); the UIP pulse is a one-shot.
     fn apply_timer_sync(ctx: &mut rusty_box_devices::api::DeviceCtx<'_>, sync: CmosTimerSync) {
-        for (local, action, continuous) in [
-            (Self::PERIODIC_TIMER_LOCAL, sync.periodic, true),
-            (Self::ONE_SECOND_TIMER_LOCAL, sync.one_second, true),
-            (Self::UIP_TIMER_LOCAL, sync.uip, false),
+        for (local, action, repeat) in [
+            (Self::PERIODIC_TIMER_LOCAL, sync.periodic, Repeat::Periodic),
+            (
+                Self::ONE_SECOND_TIMER_LOCAL,
+                sync.one_second,
+                Repeat::Periodic,
+            ),
+            (Self::UIP_TIMER_LOCAL, sync.uip, Repeat::Once),
         ] {
             let key = Self::timer_key(local);
-            match action {
-                CmosTimerAction::Unchanged => {}
-                CmosTimerAction::Restart(delay) if continuous => {
+            match (action, repeat) {
+                (CmosTimerAction::Unchanged, _) => {}
+                (CmosTimerAction::Restart(delay), Repeat::Periodic) => {
                     ctx.timers.arm_periodic_usec(key, delay)
                 }
-                CmosTimerAction::Restart(delay) => ctx.timers.arm_oneshot_usec(key, delay),
-                CmosTimerAction::Deactivate => ctx.timers.cancel(key),
+                (CmosTimerAction::Restart(delay), Repeat::Once) => {
+                    ctx.timers.arm_oneshot_usec(key, delay)
+                }
+                (CmosTimerAction::Deactivate, _) => ctx.timers.cancel(key),
             }
         }
     }
@@ -2149,7 +2156,7 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn snapshot_cmos_restore_rebuilds_timers_and_continues_time() {
-        use crate::pc_system::{BxPcSystemC, TimerOwner};
+        use crate::pc_system::{Activation, BxPcSystemC, TimerOwner};
 
         let mut source_pc = BxPcSystemC::new();
         source_pc.initialize(1_000_000);
@@ -2157,14 +2164,20 @@ mod tests {
 
         let mut source_cmos = BxCmosC::new();
         let periodic_handle = source_pc
-            .register_timer(TimerOwner::CmosPeriodic, 976, true, false, "CMOS periodic")
+            .register_timer(
+                TimerOwner::CmosPeriodic,
+                976,
+                Repeat::Periodic,
+                Activation::Inactive,
+                "CMOS periodic",
+            )
             .unwrap();
         let one_second_handle = source_pc
             .register_timer(
                 TimerOwner::CmosOneSecond,
                 CmosTimerSync::ONE_SECOND_DELAY_USEC,
-                true,
-                false,
+                Repeat::Periodic,
+                Activation::Inactive,
                 "CMOS one-second",
             )
             .unwrap();
@@ -2172,8 +2185,8 @@ mod tests {
             .register_timer(
                 TimerOwner::CmosUip,
                 CmosTimerSync::UIP_DELAY_USEC,
-                false,
-                false,
+                Repeat::Once,
+                Activation::Inactive,
                 "CMOS UIP",
             )
             .unwrap();
@@ -2185,10 +2198,10 @@ mod tests {
 
         let periodic_deadline = source_pc.time_ticks() + 37;
         source_pc
-            .activate_timer_at_ticks(periodic_handle, periodic_deadline, true)
+            .activate_timer_at_ticks(periodic_handle, periodic_deadline, Repeat::Periodic)
             .unwrap();
         source_pc
-            .activate_timer_at_ticks(one_second_handle, periodic_deadline + 100, true)
+            .activate_timer_at_ticks(one_second_handle, periodic_deadline + 100, Repeat::Periodic)
             .unwrap();
 
         let periodic_period_usec = source_cmos.periodic_deadline_usec();

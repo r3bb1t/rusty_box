@@ -5,7 +5,7 @@ use crate::Result;
 use crate::cpu::Result as CpuResult;
 use crate::cpu::instrumentation::Instrumentation;
 use crate::iodev::{DeviceTimerOwner, TimerRequest};
-use crate::pc_system::TimerOwner;
+use crate::pc_system::{Activation, Repeat, TimerOwner};
 
 /// What one advance of device time did (R0).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -91,7 +91,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         if let Err(error) = self.pc_system.activate_timer_usec(
             handle,
             crate::iodev::keyboard::KBD_SERIAL_DELAY_USEC,
-            false,
+            Repeat::Once,
         ) {
             tracing::error!("failed to arm the 8042 serial-delay one-shot: {error:?}");
         }
@@ -107,22 +107,34 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// registration happens once, from device initialisation, and a device
     /// keeps only its handle.
     pub(super) fn register_timer_owners(&mut self) -> Result<()> {
-        let pit = self
-            .pc_system
-            .register_timer(TimerOwner::Pit, 0, false, false, "PIT")?;
+        let pit = self.pc_system.register_timer(
+            TimerOwner::Pit,
+            0,
+            Repeat::Once,
+            Activation::Inactive,
+            "PIT",
+        )?;
         self.device_manager.pit.set_timer_handle(pit);
 
-        let keyboard =
-            self.pc_system
-                .register_timer(TimerOwner::Keyboard, 0, false, false, "keyboard")?;
+        let keyboard = self.pc_system.register_timer(
+            TimerOwner::Keyboard,
+            0,
+            Repeat::Once,
+            Activation::Inactive,
+            "keyboard",
+        )?;
         self.device_manager.keyboard.set_timer_handle(keyboard);
 
         // Bochs hpet.cc init(): one one-shot timer per comparator with the
         // comparator index as its param ("hpet").
         for index in 0..crate::iodev::hpet::HPET_NUM_TIMERS {
-            let handle =
-                self.pc_system
-                    .register_timer(TimerOwner::Hpet(index), 0, false, false, "hpet")?;
+            let handle = self.pc_system.register_timer(
+                TimerOwner::Hpet(index),
+                0,
+                Repeat::Once,
+                Activation::Inactive,
+                "hpet",
+            )?;
             self.device_manager.hpet.timer_handles[index] = Some(handle);
         }
 
@@ -132,38 +144,38 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         self.vga_vertical_timer_handle = Some(self.pc_system.register_timer(
             TimerOwner::VgaVertical,
             0,
-            false,
-            false,
+            Repeat::Once,
+            Activation::Inactive,
             "vga vertical timer",
         )?);
 
         self.device_manager.cmos.periodic_timer_handle = Some(self.pc_system.register_timer(
             TimerOwner::CmosPeriodic,
             0,
-            false,
-            false,
+            Repeat::Once,
+            Activation::Inactive,
             "CMOS periodic",
         )?);
         self.device_manager.cmos.one_second_timer_handle = Some(self.pc_system.register_timer(
             TimerOwner::CmosOneSecond,
             0,
-            false,
-            false,
+            Repeat::Once,
+            Activation::Inactive,
             "CMOS second",
         )?);
         self.device_manager.cmos.uip_timer_handle = Some(self.pc_system.register_timer(
             TimerOwner::CmosUip,
             0,
-            false,
-            false,
+            Repeat::Once,
+            Activation::Inactive,
             "CMOS UIP",
         )?);
 
         self.device_manager.acpi.overflow_timer_handle = Some(self.pc_system.register_timer(
             TimerOwner::AcpiPmOverflow,
             0,
-            false,
-            false,
+            Repeat::Once,
+            Activation::Inactive,
             "ACPI overflow",
         )?);
 
@@ -171,8 +183,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             let handle = self.pc_system.register_timer(
                 TimerOwner::SerialFifo(port_index),
                 0,
-                false,
-                false,
+                Repeat::Once,
+                Activation::Inactive,
                 "serial FIFO",
             )?;
             self.device_manager
@@ -181,8 +193,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             let tx_handle = self.pc_system.register_timer(
                 TimerOwner::SerialTx(port_index),
                 0,
-                false,
-                false,
+                Repeat::Once,
+                Activation::Inactive,
                 "serial TX",
             )?;
             self.device_manager
@@ -194,9 +206,13 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             (TimerOwner::PciIdeCh0, 0usize),
             (TimerOwner::PciIdeCh1, 1usize),
         ] {
-            let handle = self
-                .pc_system
-                .register_timer(owner, 0, false, false, "PIIX IDE")?;
+            let handle = self.pc_system.register_timer(
+                owner,
+                0,
+                Repeat::Once,
+                Activation::Inactive,
+                "PIIX IDE",
+            )?;
             self.device_manager.ide.bus_master.bmdma[channel].timer_index = Some(handle);
         }
 
@@ -210,8 +226,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 let handle = self.pc_system.register_timer(
                     TimerOwner::HdSeek(param),
                     0,
-                    false,
-                    false,
+                    Repeat::Once,
+                    Activation::Inactive,
                     "HD/CD seek",
                 )?;
                 self.device_manager.ide.drives.seek_timer_handles[channel][device] = Some(handle);
@@ -222,8 +238,8 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             let handle = self.pc_system.register_timer(
                 TimerOwner::Lapic(cpu_index),
                 0,
-                false,
-                false,
+                Repeat::Once,
+                Activation::Inactive,
                 "lapic",
             )?;
             self.cpu_mut_at(cpu_index).lapic.timer_handle = Some(handle);
@@ -231,16 +247,23 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
 
         #[cfg(feature = "std")]
         if self.config.sync_slowdown {
-            let handle =
-                self.pc_system
-                    .register_timer(TimerOwner::Slowdown, 0, false, false, "slowdown")?;
+            let handle = self.pc_system.register_timer(
+                TimerOwner::Slowdown,
+                0,
+                Repeat::Once,
+                Activation::Inactive,
+                "slowdown",
+            )?;
             self.slowdown_timer.initialize(
                 handle,
                 self.pc_system.time_usec(),
                 std::time::Instant::now(),
             );
-            self.pc_system
-                .activate_timer_usec(handle, SLOWDOWN_QUANTUM_USEC as u32, false)?;
+            self.pc_system.activate_timer_usec(
+                handle,
+                SLOWDOWN_QUANTUM_USEC as u32,
+                Repeat::Once,
+            )?;
         }
         let current_ticks = self.pc_system.time_ticks();
         self.devices.request_timer_after_usec(
@@ -292,7 +315,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 if let Err(error) = self.pc_system.activate_timer_usec(
                     handle,
                     crate::iodev::keyboard::KBD_SERIAL_DELAY_USEC,
-                    true,
+                    Repeat::Periodic,
                 ) {
                     tracing::error!("failed to start the 8042 serial-delay timer: {error:?}");
                 }
@@ -476,7 +499,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                             if let Err(error) = self.pc_system.activate_timer_usec(
                                 handle,
                                 action.next_delay_usec,
-                                false,
+                                Repeat::Once,
                             ) {
                                 tracing::error!("slowdown timer reactivation failed: {error:?}");
                             }
@@ -559,7 +582,10 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         let wait = u32::try_from(deadline.saturating_sub(now))
             .unwrap_or(u32::MAX)
             .max(1);
-        match self.pc_system.activate_timer_usec(handle, wait, false) {
+        match self
+            .pc_system
+            .activate_timer_usec(handle, wait, Repeat::Once)
+        {
             Ok(()) => {}
             Err(error) => {
                 tracing::warn!("failed to arm the VGA vertical timer: {error:?}");
@@ -787,7 +813,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             let result = match op {
                 crate::iodev::hpet::HpetTimerOp::ArmAtTicks(deadline) => self
                     .pc_system
-                    .activate_timer_at_ticks(handle, *deadline, false),
+                    .activate_timer_at_ticks(handle, *deadline, Repeat::Once),
                 crate::iodev::hpet::HpetTimerOp::Deactivate => {
                     self.pc_system.deactivate_timer(handle)
                 }
@@ -884,13 +910,13 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 TimerRequest::Activate {
                     deadline_ticks,
                     period_ticks,
-                    continuous,
+                    repeat,
                 } => {
                     let result = self.pc_system.activate_timer_at_ticks_with_period(
                         handle,
                         deadline_ticks,
                         period_ticks,
-                        continuous,
+                        repeat,
                     );
                     if let Err(error) = result {
                         tracing::error!("{label}: timer activation failed: {error:?}");
