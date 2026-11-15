@@ -77,9 +77,9 @@ fn extents(weights: &[f32], length: f32) -> Vec<f32> {
             .sum();
         let room = length - held_count * MIN_LANE_EXTENT;
         let mut newly_held = false;
-        for (index, weight) in weights.iter().enumerate() {
-            if !held[index] && weight / free_weight * room < MIN_LANE_EXTENT {
-                held[index] = true;
+        for (weight, held) in weights.iter().zip(held.iter_mut()) {
+            if !*held && weight / free_weight * room < MIN_LANE_EXTENT {
+                *held = true;
                 newly_held = true;
             }
         }
@@ -146,7 +146,10 @@ mod tests {
         ]);
         let lanes = lanes(&built, 300.0);
         assert_eq!(lanes.len(), 2);
-        assert!(lanes[0].extent >= 20.0, "the small region keeps a visible band");
+        assert!(
+            lanes[0].extent >= 20.0,
+            "the small region keeps a visible band"
+        );
         assert!(lanes[1].executable);
         assert!(lanes[0].offset >= 0.0);
         assert!(lanes[1].offset + lanes[1].extent <= 300.1);
@@ -190,7 +193,11 @@ mod tests {
         }
         let built = map(regions);
         let lanes = lanes(&built, 100.0);
-        assert!(lanes.iter().all(|lane| lane.extent >= MIN_LANE_EXTENT - 0.001));
+        assert!(
+            lanes
+                .iter()
+                .all(|lane| lane.extent >= MIN_LANE_EXTENT - 0.001)
+        );
         let last = lanes[lanes.len() - 1];
         assert!((last.offset + last.extent - 100.0).abs() < 0.01);
     }

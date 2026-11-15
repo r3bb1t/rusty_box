@@ -1,15 +1,11 @@
 #![allow(dead_code)]
 
-use crate::{
-    config::BxPhyAddress,
-    cpu::{
-        cpu::BX_ASYNC_EVENT_STOP_TRACE,
-        decoder::{decode32, decode64, DecodeError, Instruction, Opcode},
-        exec_ctx::ExecCtx,
-        tlb::{lpf_of, page_offset, ppf_of},
-        BxCpuC, Result,
-    },
-};
+use crate::config::BxPhyAddress;
+use crate::cpu::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+use crate::cpu::decoder::{DecodeError, Instruction, Opcode, decode32, decode64};
+use crate::cpu::exec_ctx::ExecCtx;
+use crate::cpu::tlb::{page_offset, ppf_of};
+use crate::cpu::{BxCpuC, Result};
 
 /// Number of entries in the machine-wide SMC page-write-stamp table.
 /// Bochs icache.h `bxPageWriteStampTable` allocates PHY_MEM_PAGES_IN_4G_SPACE
@@ -27,7 +23,7 @@ pub(crate) const SMC_STAMP_ENTRIES: usize = 8192;
 /// physical address (page number, aliased into the table).
 #[inline]
 pub(crate) fn smc_page_index(p_addr: BxPhyAddress) -> usize {
-    (((p_addr as u32) >> 12) as usize) & (SMC_STAMP_ENTRIES - 1)
+    (((p_addr.get() as u32) >> 12) as usize) & (SMC_STAMP_ENTRIES - 1)
 }
 
 /// Bochs icache.h `markICache`/`decWriteStamp` mask computation: one bit per
@@ -40,9 +36,9 @@ pub(crate) fn smc_cache_line_mask(p_addr: BxPhyAddress, len: u32) -> u32 {
         return 0;
     }
 
-    let page_off = (p_addr as u32) & 0x0fff;
+    let page_off = (p_addr.get() as u32) & 0x0FFF;
     let first_line = page_off >> 7;
-    let last_byte = page_off.saturating_add(len - 1).min(0x0fff);
+    let last_byte = page_off.saturating_add(len - 1).min(0x0FFF);
     let last_line = last_byte >> 7;
     let line_count = last_line - first_line + 1;
     let range = if line_count == 32 {
@@ -69,7 +65,7 @@ pub(crate) struct PendingSmc {
 /// correct.
 pub(crate) const SMC_PENDING_CAP: usize = 64;
 
-const BX_ICACHE_INVALID_PHY_ADDRESS: BxPhyAddress = BxPhyAddress::MAX;
+const BX_ICACHE_INVALID_PHY_ADDRESS: BxPhyAddress = BxPhyAddress::new(u64::MAX);
 // Bochs icache.h: BxICacheEntries = (64 * 1024). Must be a power of 2.
 const BX_ICACHE_ENTRIES: usize = 64 * 1024;
 // Bochs icache.h: BX_ICACHE_PAGE_SPLIT_ENTRIES = 8. Must be a power of 2.
@@ -179,7 +175,10 @@ impl TraceLink {
     #[inline]
     pub(crate) fn target(self, timestamp: u32, rip: u64) -> Option<(usize, usize)> {
         if self.timestamp == timestamp && self.expected_rip == rip {
-            Some(((self.packed & 0xF_FFFF) as usize, (self.packed >> 20) as usize))
+            Some((
+                (self.packed & 0xF_FFFF) as usize,
+                (self.packed >> 20) as usize,
+            ))
         } else {
             None
         }
@@ -300,7 +299,7 @@ impl BxICache {
 
     pub(super) fn hash(p_addr: BxPhyAddress, fetch_mode_mask: u64) -> u32 {
         // Bochs icache.h — (pAddr & (BxICacheEntries-1)) ^ fetchModeMask
-        let hash = (p_addr as u32) ^ (fetch_mode_mask as u32);
+        let hash = (p_addr.get() as u32) ^ (fetch_mode_mask as u32);
         hash & ((BX_ICACHE_ENTRIES - 1) as u32)
     }
 
@@ -446,7 +445,7 @@ impl BxICache {
         // Bochs: bxICacheEntry_c *e = get_entry(LPFOf(pAddr), 0);
         // LPF has its low 12 bits clear, so `start` is a multiple of 0x1000
         // and `start + 4096 <= BX_ICACHE_ENTRIES` — the window never wraps.
-        let start = Self::hash(lpf_of(p_addr), 0) as usize;
+        let start = Self::hash(ppf_of(p_addr), 0) as usize;
         let mut idx = start;
         // "go over 32 'cache lines' of 128 byte each"
         for n in 0..32u32 {
@@ -754,7 +753,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             return Err(crate::cpu::CpuError::CpuNotInitialized);
         }
         let fetch_ptr = &fetch_ptr_slice[eip_biased as usize..];
-        let page_offset = page_offset(p_addr as u32);
+        let page_offset = page_offset(p_addr.get() as u32);
 
         let mut trace_mask = 0u32;
 
@@ -806,6 +805,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         let mut tlen = 0usize;
 
         for n in 0..quantum {
+            // An armed code breakpoint begins a trace of its own, so the CPU
+            // loop's trace-start check meets it (`cpu/breakpoints.rs`).
+            if n > 0
+                && self.code_breakpoints.armed()
+                && self.code_breakpoints.cuts_trace_at(current_page_offset)
+            {
+                break;
+            }
             // Check bounds before accessing mpool
             if current_mpindex >= BX_ICACHE_MEM_POOL {
                 // Only log once per trace to reduce spam - mpool full is handled gracefully
@@ -900,12 +907,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                     }
 
                     current_p_addr += i_len as u64;
-                    current_page_offset = (current_page_offset + i_len) & 0xfff;
+                    current_page_offset = (current_page_offset + i_len) & 0xFFF;
                     current_fetch_ptr = &current_fetch_ptr[i_len as usize..];
 
-                    // Try to find a trace starting from current pAddr and merge
-                    // TODO: Check if debugger is active (matching C++ line 194)
-                    if remaining >= 15u32 {
+                    // Try to find a trace starting from current pAddr and
+                    // merge. Not while code breakpoints are armed: the merged
+                    // trace could carry a breakpoint's instruction past the
+                    // trace start the CPU loop checks.
+                    if remaining >= 15u32 && !self.code_breakpoints.armed() {
                         // avoid merging with page split trace
                         if let Some(merged) = self.merge_traces_internal(
                             entry_idx,
@@ -1241,25 +1250,27 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 #[cfg(test)]
 mod smc_mask_tests {
 
-/// Emulator construction needs a bigger stack than the default 2 MiB test
-/// thread: `Emulator` is ~4 MiB and the debug build materialises a few
-/// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
-/// enough concurrent reservations to intermittently exhaust the process
-/// and fail unrelated tests with STATUS_STACK_OVERFLOW.
-const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
-    use super::{smc_cache_line_mask, BxICache, BxICacheEntry, Opcode, BX_ICACHE_INVALID_PHY_ADDRESS};
-    use crate::{
-        cpu::{CpuSetupMode, X86Reg},
-        emulator::{Emulator, EmulatorConfig},
+    /// Emulator construction needs a bigger stack than the default 2 MiB test
+    /// thread: `Emulator` is ~4 MiB and the debug build materialises a few
+    /// copies while boxing it. 64 MiB is ample; the previous 256 MiB made
+    /// enough concurrent reservations to intermittently exhaust the process
+    /// and fail unrelated tests with STATUS_STACK_OVERFLOW.
+    const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
+    use super::{
+        BX_ICACHE_INVALID_PHY_ADDRESS, BxICache, BxICacheEntry, BxPhyAddress, Opcode,
+        smc_cache_line_mask,
     };
+    use crate::cpu::{CpuSetupMode, X86Reg};
+    use crate::emulator::{Emulator, EmulatorConfig};
 
     #[test]
     fn smc_mask_covers_every_touched_cache_line() {
-        assert_eq!(smc_cache_line_mask(0x0180, 0), 0);
-        assert_eq!(smc_cache_line_mask(0x0180, 1), 1 << 3);
-        assert_eq!(smc_cache_line_mask(0x0180, 0x0180), 0b111 << 3);
-        assert_eq!(smc_cache_line_mask(0x0000, 0x1000), u32::MAX);
-        assert_eq!(smc_cache_line_mask(0x0f80, 0x0080), 1 << 31);
+        let at = BxPhyAddress::new;
+        assert_eq!(smc_cache_line_mask(at(0x0180), 0), 0);
+        assert_eq!(smc_cache_line_mask(at(0x0180), 1), 1 << 3);
+        assert_eq!(smc_cache_line_mask(at(0x0180), 0x0180), 0b111 << 3);
+        assert_eq!(smc_cache_line_mask(at(0x0000), 0x1000), u32::MAX);
+        assert_eq!(smc_cache_line_mask(at(0x0F80), 0x0080), 1 << 31);
     }
 
     // Debug-only: asserts on `#[cfg(debug_assertions)]` diagnostic counters
@@ -1267,9 +1278,10 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     #[cfg(debug_assertions)]
     #[test]
     fn boundary_reserved_vvvv_executes_ia_error_not_decoder_failure() {
-        use crate::{cpu::cpu::Exception, error::Error};
+        use crate::cpu::cpu::Exception;
+        use crate::error::Error;
 
-        const CODE: u64 = 0x20_0ffe;
+        const CODE: u64 = 0x20_0FFE;
         const IDT: u64 = 0x28_0000;
         const HANDLER: u64 = 0x29_0000;
         const STACK_TOP: u64 = 0x30_0000;
@@ -1291,16 +1303,20 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     let mut gate = [0u8; 16];
                     gate[0..2].copy_from_slice(&(HANDLER as u16).to_le_bytes());
                     gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
-                    gate[5] = 0x8e;
+                    gate[5] = 0x8E;
                     gate[6..8].copy_from_slice(&((HANDLER >> 16) as u16).to_le_bytes());
                     gate[8..12].copy_from_slice(&((HANDLER >> 32) as u32).to_le_bytes());
-                    emu.mem_write(IDT + u64::from(Exception::Ud as u8) * 16, &gate)
-                        .unwrap();
-                    emu.mem_write(HANDLER, &[0xf4]).unwrap();
+                    emu.mem_write(
+                        BxPhyAddress::new(IDT + u64::from(Exception::Ud as u8) * 16),
+                        &gate,
+                    )
+                    .unwrap();
+                    emu.mem_write(BxPhyAddress::new(HANDLER), &[0xF4]).unwrap();
 
                     let bytes = [0xC4, 0xE3, 0x75, opcode, 0xD8, 0x01];
-                    emu.mem_write(CODE, &bytes).unwrap();
-                    let result = emu.emu_start(CODE, Some(CODE + bytes.len() as u64), None, Some(1));
+                    emu.mem_write(BxPhyAddress::new(CODE), &bytes).unwrap();
+                    let result =
+                        emu.emu_start(CODE, Some(CODE + bytes.len() as u64), None, Some(1));
                     assert!(
                         !matches!(result, Err(Error::Cpu(crate::cpu::CpuError::Decoder(_)))),
                         "reserved-vvvv {opcode:#x} must become guest #UD, not CpuError::Decoder"
@@ -1315,7 +1331,8 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     assert_eq!(emu.cpu().rip(), HANDLER);
                     assert_eq!(emu.reg_read(X86Reg::Rsp), STACK_TOP - 40);
                     let mut pushed_rip = [0u8; 8];
-                    emu.mem_read(STACK_TOP - 40, &mut pushed_rip).unwrap();
+                    emu.mem_read(BxPhyAddress::new(STACK_TOP - 40), &mut pushed_rip)
+                        .unwrap();
                     assert_eq!(u64::from_le_bytes(pushed_rip), CODE);
                     let cpu = emu.cpu();
 
@@ -1323,7 +1340,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                         .i_cache
                         .entry
                         .iter()
-                        .find(|entry| entry.p_addr == CODE)
+                        .find(|entry| entry.p_addr == BxPhyAddress::new(CODE))
                         .expect("normal page-split cache miss must commit the decoded trace");
                     let instr = &cpu.i_cache.mpool[entry.mpool_start_idx];
                     assert_eq!(instr.get_ia_opcode(), Opcode::IaError);
@@ -1346,15 +1363,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::new_with_mode(
-                    EmulatorConfig::default(),
-                    CpuSetupMode::FlatLong64,
-                )
-                .unwrap();
+                let mut emu =
+                    Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+                        .unwrap();
 
                 // nop; jz +0 (not taken: reset RFLAGS has ZF=0); nop; nop; ret
                 let bytes = [0x90, 0x74, 0x00, 0x90, 0x90, 0xC3];
-                emu.mem_write(CODE, &bytes).unwrap();
+                emu.mem_write(BxPhyAddress::new(CODE), &bytes).unwrap();
                 // Execute up to the RET (4 instructions) — enough to decode
                 // and commit the trace without needing a guest stack.
                 emu.emu_start(CODE, None, None, Some(4)).unwrap();
@@ -1364,7 +1379,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                     .i_cache
                     .entry
                     .iter()
-                    .find(|entry| entry.p_addr == CODE)
+                    .find(|entry| entry.p_addr == BxPhyAddress::new(CODE))
                     .expect("the executed code must have a committed trace");
                 let opcodes: Vec<_> = (0..entry.tlen as usize)
                     .map(|k| cpu.i_cache.mpool[entry.mpool_start_idx + k].get_ia_opcode())
@@ -1401,11 +1416,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-                let mut emu = Emulator::new_with_mode(
-                    EmulatorConfig::default(),
-                    CpuSetupMode::FlatLong64,
-                )
-                .unwrap();
+                let mut emu =
+                    Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+                        .unwrap();
                 emu.reg_write(X86Reg::Rsp, STACK);
 
                 let mut main = Vec::new();
@@ -1419,10 +1432,13 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                 main.push(0x02);
                 main.extend_from_slice(&[0x48, 0xFF, 0xC9]); // dec rcx
                 main.extend_from_slice(&[0x75, 0xEF]); // jnz back to the call
-                emu.mem_write(CODE, &main).unwrap();
+                emu.mem_write(BxPhyAddress::new(CODE), &main).unwrap();
                 // SUB: mov rdx, 1; ret
-                emu.mem_write(SUB, &[0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00, 0xC3])
-                    .unwrap();
+                emu.mem_write(
+                    BxPhyAddress::new(SUB),
+                    &[0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00, 0xC3],
+                )
+                .unwrap();
 
                 // iter1: mov rcx, call, mov rdx, ret, patch, dec, jnz (7)
                 // iter2: call, mov rdx(patched), ret, patch, dec, jnz (6)
@@ -1447,10 +1463,9 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
             .stack_size(128 * 1024 * 1024)
             .spawn(|| {
                 let mut cache = BxICache::new();
-                let trace_start_paddr = 0x1ffe;
+                let trace_start_paddr = BxPhyAddress::new(0x1FFE);
                 let fetch_mode_mask = 0;
-                let primary_entry_idx =
-                    BxICache::hash(trace_start_paddr, fetch_mode_mask) as usize;
+                let primary_entry_idx = BxICache::hash(trace_start_paddr, fetch_mode_mask) as usize;
                 cache.entry[primary_entry_idx] = BxICacheEntry {
                     p_addr: trace_start_paddr,
                     trace_mask: 1 << 31,
@@ -1463,7 +1478,7 @@ const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
                         .is_some(),
                     "the split trace must initially hit its primary cache entry"
                 );
-                cache.commit_page_split_trace(0x2000, primary_entry_idx);
+                cache.commit_page_split_trace(BxPhyAddress::new(0x2000), primary_entry_idx);
 
                 // A TLB remap of the second page calls break_links(); the trace
                 // that starts on the first page must no longer be a cache hit.
@@ -1517,7 +1532,9 @@ mod const_initialiser_tests {
                 let cache = BxICache::new();
                 assert_eq!(cache.trace_link_time_stamp, 1);
                 assert!(
-                    cache.trace_links[0].target(cache.trace_link_time_stamp, 0).is_none(),
+                    cache.trace_links[0]
+                        .target(cache.trace_link_time_stamp, 0)
+                        .is_none(),
                     "a fresh link slot must not resolve"
                 );
             })
@@ -1526,7 +1543,6 @@ mod const_initialiser_tests {
             .unwrap();
     }
 }
-
 
 #[cfg(test)]
 mod power_on_state_tests {
@@ -1548,7 +1564,7 @@ mod power_on_state_tests {
             "a zeroed entry would be served for a fetch at physical address 0"
         );
         assert!(
-            cpu.i_cache.find_entry(0, 0).is_none(),
+            cpu.i_cache.find_entry(BxPhyAddress::new(0), 0).is_none(),
             "physical address 0 must not hit an unfilled icache"
         );
         assert_ne!(

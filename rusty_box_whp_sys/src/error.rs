@@ -40,22 +40,38 @@ pub struct WhpError {
 impl WhpError {
     /// The refusal reported by a platform call.
     pub(crate) const fn platform(call: &'static str, hresult: i32) -> Self {
-        Self { kind: WhpErrorKind::Platform, hresult, call }
+        Self {
+            kind: WhpErrorKind::Platform,
+            hresult,
+            call,
+        }
     }
 
     /// This build, or this machine, has no Windows Hypervisor Platform.
     pub(crate) const fn unsupported(call: &'static str) -> Self {
-        Self { kind: WhpErrorKind::Unsupported, hresult: 0, call }
+        Self {
+            kind: WhpErrorKind::Unsupported,
+            hresult: 0,
+            call,
+        }
     }
 
     /// The platform answered, but with something its own contract forbids.
     pub const fn contract(call: &'static str) -> Self {
-        Self { kind: WhpErrorKind::Contract, hresult: 0, call }
+        Self {
+            kind: WhpErrorKind::Contract,
+            hresult: 0,
+            call,
+        }
     }
 
     /// Host memory for a guest-physical range could not be obtained.
     pub const fn host_memory(call: &'static str) -> Self {
-        Self { kind: WhpErrorKind::HostMemory, hresult: 0, call }
+        Self {
+            kind: WhpErrorKind::HostMemory,
+            hresult: 0,
+            call,
+        }
     }
 
     /// Which of the four kinds this is.
@@ -82,16 +98,28 @@ impl fmt::Display for WhpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
             WhpErrorKind::Unsupported => {
-                write!(f, "{}: no Windows Hypervisor Platform on this build or host", self.call)
+                write!(
+                    f,
+                    "{}: no Windows Hypervisor Platform on this build or host",
+                    self.call
+                )
             }
             WhpErrorKind::Platform => {
-                write!(f, "{} failed: HRESULT {:#010x}", self.call, self.hresult as u32)
+                write!(
+                    f,
+                    "{} failed: HRESULT {:#010x}",
+                    self.call, self.hresult as u32
+                )
             }
             WhpErrorKind::Contract => {
                 write!(f, "{} answered outside its own contract", self.call)
             }
             WhpErrorKind::HostMemory => {
-                write!(f, "{}: host memory for the guest-physical range could not be allocated", self.call)
+                write!(
+                    f,
+                    "{}: host memory for the guest-physical range could not be allocated",
+                    self.call
+                )
             }
         }
     }

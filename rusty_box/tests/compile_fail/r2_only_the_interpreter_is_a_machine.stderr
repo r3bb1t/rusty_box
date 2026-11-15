@@ -1,0 +1,17 @@
+error[E0277]: the trait bound `Emulator<(), E>: rusty_box::emulator::Machine` is not satisfied
+  --> tests/compile_fail/r2_only_the_interpreter_is_a_machine.rs:13:11
+   |
+13 |     drive(machine)
+   |     ----- ^^^^^^^ the trait `rusty_box::emulator::Machine` is not implemented for `Emulator<(), E>`
+   |     |
+   |     required by a bound introduced by this call
+   |
+note: required by a bound in `drive`
+  --> tests/compile_fail/r2_only_the_interpreter_is_a_machine.rs:8:13
+   |
+ 8 | fn drive<M: Machine>(machine: &mut M) -> u64 {
+   |             ^^^^^^^ required by this bound in `drive`
+help: consider introducing a `where` clause, but there might be an alternative better way to express this requirement
+   |
+12 | fn on_any_engine<E: SliceEngine<()>>(machine: &mut Emulator<(), E>) -> u64 where Emulator<(), E>: rusty_box::emulator::Machine {
+   |                                                                            +++++++++++++++++++++++++++++++++++++++++++++++++++

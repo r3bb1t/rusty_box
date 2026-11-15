@@ -55,10 +55,11 @@
 
 use super::ctx::HookCtx;
 use super::types::{
-    BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, InstrAction, IoHookEvent, LinAccess,
-    MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent, ResetType,
-    TlbCntrl,
+    BranchEvent, CacheCntrl, HookMask, HwInterruptEvent, InstrAction, IoHookEvent, IoPort,
+    LinAccess, MemPermViolation, MemUnmapped, MwaitEvent, OpcodeEvent, PhyAccess, PrefetchEvent,
+    ResetType, TlbCntrl,
 };
+use crate::config::{BxLinAddress, BxPhyAddress};
 use crate::cpu::decoder::Instruction;
 
 /// Instrumentation trait. Implement only the callbacks you need —
@@ -180,7 +181,7 @@ pub trait Instrumentation: Default + 'static {
     // ── I/O ─────────────────────────────────────────────────────────────────
 
     /// I/O port read — fires BEFORE the read, value is unknown.
-    fn inp(&mut self, port: u16, size: u8) {}
+    fn inp(&mut self, port: IoPort, size: u8) {}
 
     /// I/O port read — fires AFTER the read, value is known.
     fn inp2(&mut self, ev: &IoHookEvent) {}
@@ -197,7 +198,7 @@ pub trait Instrumentation: Default + 'static {
     fn cache_cntrl(&mut self, what: CacheCntrl) {}
 
     /// CLFLUSH instruction.
-    fn clflush(&mut self, laddr: u64, paddr: u64) {}
+    fn clflush(&mut self, laddr: BxLinAddress, paddr: BxPhyAddress) {}
 
     /// Prefetch hint.
     fn prefetch_hint(&mut self, ev: &PrefetchEvent) {}
@@ -331,7 +332,7 @@ macro_rules! impl_instrumentation_tuple {
                 $($T.phy_access(ev);)+
             }
 
-            fn inp(&mut self, port: u16, size: u8) {
+            fn inp(&mut self, port: IoPort, size: u8) {
                 let ($($T,)+) = self;
                 $($T.inp(port, size);)+
             }
@@ -356,7 +357,7 @@ macro_rules! impl_instrumentation_tuple {
                 $($T.cache_cntrl(what);)+
             }
 
-            fn clflush(&mut self, laddr: u64, paddr: u64) {
+            fn clflush(&mut self, laddr: BxLinAddress, paddr: BxPhyAddress) {
                 let ($($T,)+) = self;
                 $($T.clflush(laddr, paddr);)+
             }
@@ -421,6 +422,7 @@ impl_instrumentation_tuple!(A, B, C, D, E, F, G, H);
 #[cfg(all(test, feature = "std"))]
 mod hook_delivery {
     use super::*;
+    use crate::config::A20Mask;
     use crate::cpu::instrumentation::{MemAccessRW, PhyAccess};
     use crate::cpu::msr::{
         BX_MSR_EFER, BX_MSR_LSTAR, BX_MSR_STAR, BX_MSR_SYSENTER_CS, BX_MSR_SYSENTER_EIP,
@@ -483,12 +485,16 @@ mod hook_delivery {
     impl PhyWatch {
         /// Whether an access of `len` bytes at `phy` was reported as a read.
         fn read(&self, phy: u64, len: usize) -> bool {
-            self.reads.iter().any(|access| access.phy == phy && access.len == len)
+            self.reads
+                .iter()
+                .any(|access| access.phy == phy && access.len == len)
         }
 
         /// Whether an access of `len` bytes at `phy` was reported as a write.
         fn wrote(&self, phy: u64, len: usize) -> bool {
-            self.writes.iter().any(|access| access.phy == phy && access.len == len)
+            self.writes
+                .iter()
+                .any(|access| access.phy == phy && access.len == len)
         }
 
         /// The memory types reported for accesses at `phy`, reads and writes.
@@ -508,7 +514,11 @@ mod hook_delivery {
         }
 
         fn phy_access(&mut self, ev: &PhyAccess) {
-            let access = PhyRecord { phy: ev.phy, len: ev.data.len(), memtype: ev.memtype };
+            let access = PhyRecord {
+                phy: ev.phy.get(),
+                len: ev.data.len(),
+                memtype: ev.memtype,
+            };
             match ev.rw {
                 MemAccessRW::Write => self.writes.push(access),
                 _ => self.reads.push(access),
@@ -532,7 +542,9 @@ mod hook_delivery {
             )
             .expect("machine");
 
-            machine.mem_write(CODE, &[0x90, 0xF4]).expect("write code");
+            machine
+                .mem_write(BxPhyAddress::new(CODE), &[0x90, 0xF4])
+                .expect("write code");
             machine
                 .emu_start(CODE, None, None, Some(2))
                 .expect("emu_start");
@@ -551,7 +563,9 @@ mod hook_delivery {
                 seen.reads
             );
             assert!(
-                seen.writes.iter().any(|access| access.phy >= PML4 && access.len == 8),
+                seen.writes
+                    .iter()
+                    .any(|access| access.phy >= PML4 && access.len == 8),
                 "the accessed/dirty update the same walk performs is a physical \
                  WRITE, and must be reported as one: writes={:x?}",
                 seen.writes
@@ -578,11 +592,17 @@ mod hook_delivery {
                 PhyWatch::default(),
             )
             .expect("machine");
-            machine.mem_write(CODE, &[0x90, 0xF4]).expect("write code");
+            machine
+                .mem_write(BxPhyAddress::new(CODE), &[0x90, 0xF4])
+                .expect("write code");
 
-            machine.virt_to_phys(CODE).expect("the code page maps");
+            machine
+                .virt_to_phys(BxLinAddress::new(CODE))
+                .expect("the code page maps");
             let mut bytes = [0u8; 2];
-            machine.virt_read(CODE, &mut bytes).expect("virt_read");
+            machine
+                .virt_read(BxLinAddress::new(CODE), &mut bytes)
+                .expect("virt_read");
 
             let seen = machine.instrumentation();
             assert!(
@@ -655,7 +675,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.set_vmcbptr(VMCB);
+                ctx.set_vmcbptr(BxPhyAddress::new(VMCB));
                 match ctx.svm_vmexit(crate::cpu::svm::SVM_VMEXIT_INVALID, 0, 0) {
                     Ok(()) | Err(crate::cpu::CpuError::CpuLoopRestart) => {}
                     Err(other) => panic!("the exit itself failed: {other:?}"),
@@ -705,12 +725,16 @@ mod hook_delivery {
             )
             .expect("machine");
             // Vector 0x30 posted, and the descriptor's ON bit set.
-            machine.mem_write(PID + 0x30 / 8, &[1 << (0x30 % 8)]).expect("PIR");
-            machine.mem_write(PID + 32, &[1]).expect("PID.ON");
+            machine
+                .mem_write(BxPhyAddress::new(PID + 0x30 / 8), &[1 << (0x30 % 8)])
+                .expect("PIR");
+            machine
+                .mem_write(BxPhyAddress::new(PID + 32), &[1])
+                .expect("PID.ON");
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.memory.set_a20_mask(u64::MAX);
+                ctx.memory.set_a20_mask(A20Mask::OPEN);
                 ctx.in_vmx = true;
                 ctx.in_vmx_guest = true;
                 ctx.vmcs.virtual_apic_page_addr = VAPIC_PAGE;
@@ -725,7 +749,11 @@ mod hook_delivery {
 
             let seen = machine.instrumentation();
             assert!(seen.read(PID, 32), "the PIR read: reads={:x?}", seen.reads);
-            assert!(seen.wrote(PID, 32), "the PIR clear: writes={:x?}", seen.writes);
+            assert!(
+                seen.wrote(PID, 32),
+                "the PIR clear: writes={:x?}",
+                seen.writes
+            );
             let pir_bytes = |accesses: &[PhyRecord]| {
                 accesses
                     .iter()
@@ -756,8 +784,7 @@ mod hook_delivery {
     fn an_ept_walk_reports_its_entries_to_the_phy_access_hook() {
         on_a_large_stack(|| {
             use crate::cpu::vmx::{
-                BxRwAccess, VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS,
-                VMX_VM_EXEC_CTRL2_EPT_ENABLE,
+                BxRwAccess, VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS, VMX_VM_EXEC_CTRL2_EPT_ENABLE,
             };
             const EPT_PML4: u64 = 0x20_0000;
             const EPT_PDPT: u64 = 0x20_1000;
@@ -776,20 +803,28 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.memory.set_a20_mask(u64::MAX);
+                ctx.memory.set_a20_mask(A20Mask::OPEN);
                 ctx.in_vmx = true;
                 ctx.in_vmx_guest = true;
                 ctx.vmcs.proc_based_ctls = VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS;
                 ctx.vmcs.secondary_proc_based_ctls = VMX_VM_EXEC_CTRL2_EPT_ENABLE;
                 // EPTP bit 6 turns on the accessed/dirty updates the walk makes.
                 ctx.vmcs.eptptr = EPT_PML4 | 0x40;
-                ctx.mem_write_qword(EPT_PML4, EPT_PDPT | EPT_RWX);
-                ctx.mem_write_qword(EPT_PDPT, EPT_PD | EPT_RWX);
-                ctx.mem_write_qword(EPT_PD, EPT_PT | EPT_RWX);
-                ctx.mem_write_qword(EPT_PT + 8, EPT_TARGET | EPT_WB_LEAF);
+                let at = BxPhyAddress::new;
+                ctx.mem_write_qword(at(EPT_PML4), EPT_PDPT | EPT_RWX);
+                ctx.mem_write_qword(at(EPT_PDPT), EPT_PD | EPT_RWX);
+                ctx.mem_write_qword(at(EPT_PD), EPT_PT | EPT_RWX);
+                ctx.mem_write_qword(at(EPT_PT + 8), EPT_TARGET | EPT_WB_LEAF);
 
-                ctx.ept_translate_for_data(0x1000, 0, false, true, false, BxRwAccess::Read)
-                    .expect("a fully permitted mapping translates");
+                ctx.ept_translate_for_data(
+                    at(0x1000),
+                    BxLinAddress::new(0),
+                    false,
+                    true,
+                    false,
+                    BxRwAccess::Read,
+                )
+                .expect("a fully permitted mapping translates");
             }
 
             let seen = machine.instrumentation();
@@ -832,7 +867,10 @@ mod hook_delivery {
         }
 
         fn vmexit(&mut self, reason: u32, qualification: u64) {
-            self.exits.push(ReportedExit { reason, qualification });
+            self.exits.push(ReportedExit {
+                reason,
+                qualification,
+            });
         }
 
         fn tlb_cntrl(&mut self, what: TlbCntrl) {
@@ -848,6 +886,9 @@ mod hook_delivery {
     fn place_a_vmx_guest<T: Instrumentation>(ctx: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>) {
         ctx.in_vmx = true;
         ctx.in_vmx_guest = true;
+        // A guest runs from a current VMCS (VMLAUNCH needs one), which its
+        // VM exit writes back into (Bochs vmx.cc VMexit).
+        ctx.vmcsptr = BxPhyAddress::new(0x5_0000);
         ctx.vmcs.host_cr0 = u64::from(ctx.cr0.get32());
         ctx.vmcs.host_cr4 = 0;
         ctx.vmcs.host_cr3 = 0;
@@ -902,7 +943,10 @@ mod hook_delivery {
                     qualification: 0,
                 }]
             );
-            assert_eq!(seen.context_switches, 1, "the host state load ends in a context switch");
+            assert_eq!(
+                seen.context_switches, 1,
+                "the host state load ends in a context switch"
+            );
         });
     }
 
@@ -948,7 +992,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.set_vmcbptr(VMCB);
+                ctx.set_vmcbptr(BxPhyAddress::new(VMCB));
                 ctx.in_svm_guest = true;
                 ctx.vmcb.ctrls.intercept_vector[0] |= 1 << crate::cpu::svm::SVM_INTERCEPT0_SHUTDOWN;
                 ctx.last_exception_type = DOUBLE_FAULT_IN_DELIVERY;
@@ -959,7 +1003,10 @@ mod hook_delivery {
             }
 
             let exit_code = machine
-                .mem_read_vec(VMCB + u64::from(crate::cpu::svm::SVM_CONTROL64_EXITCODE), 8)
+                .mem_read_vec(
+                    BxPhyAddress::new(VMCB + u64::from(crate::cpu::svm::SVM_CONTROL64_EXITCODE)),
+                    8,
+                )
                 .expect("VMCB");
             assert_eq!(
                 u64::from_le_bytes(exit_code.try_into().expect("eight bytes")),
@@ -985,7 +1032,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.vmcsptr = VMCS;
+                ctx.vmcsptr = BxPhyAddress::new(VMCS);
                 let abort = ctx.vmx_abort(crate::cpu::vmx::VmxAbortCode::LoadingHostMsrs);
                 assert!(matches!(abort, Err(crate::cpu::CpuError::CpuLoopRestart)));
                 assert!(ctx.is_in_shutdown());
@@ -993,7 +1040,9 @@ mod hook_delivery {
 
             let indicator = VMCS + crate::cpu::vmx::VMCS_VMX_ABORT_OFFSET;
             assert_eq!(
-                machine.mem_read_u32_le(indicator).expect("VMCS"),
+                machine
+                    .mem_read_u32_le(BxPhyAddress::new(indicator))
+                    .expect("VMCS"),
                 crate::cpu::vmx::VmxAbortCode::LoadingHostMsrs as u32
             );
             assert!(machine.instrumentation().wrote(indicator, 4));
@@ -1034,21 +1083,33 @@ mod hook_delivery {
             )
             .expect("machine");
             // Present, with bit 5 set — reserved in a PAE PDPTE.
-            machine.mem_write(HOST_PDPT, &0x21u64.to_le_bytes()).expect("PDPTE");
+            machine
+                .mem_write(BxPhyAddress::new(HOST_PDPT), &0x21u64.to_le_bytes())
+                .expect("PDPTE");
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.set_vmcbptr(VMCB);
+                ctx.set_vmcbptr(BxPhyAddress::new(VMCB));
                 ctx.in_svm_guest = true;
                 let pae_host_cr0 = ctx.cr0.get32() | 0x8000_0001;
                 ctx.vmcb.host_state.cr0.set32(pae_host_cr0);
-                ctx.vmcb.host_state.cr4.insert(crate::cpu::crregs::BxCr4::PAE);
+                ctx.vmcb
+                    .host_state
+                    .cr4
+                    .insert(crate::cpu::crregs::BxCr4::PAE);
                 ctx.vmcb.host_state.cr3 = HOST_PDPT;
                 ctx.vmcb.host_state.rip = HOST_RIP;
                 let exit = ctx.svm_vmexit(crate::cpu::svm::SVM_VMEXIT_INVALID, 0, 0);
                 assert!(matches!(exit, Err(crate::cpu::CpuError::CpuLoopRestart)));
-                assert!(ctx.is_in_shutdown(), "a host with invalid PDPTEs cannot run");
-                assert_ne!(ctx.rip(), HOST_RIP, "the load stopped before the host's RIP");
+                assert!(
+                    ctx.is_in_shutdown(),
+                    "a host with invalid PDPTEs cannot run"
+                );
+                assert_ne!(
+                    ctx.rip(),
+                    HOST_RIP,
+                    "the load stopped before the host's RIP"
+                );
             }
 
             assert_eq!(
@@ -1145,9 +1206,11 @@ mod hook_delivery {
             .msr_write(BX_MSR_SYSENTER_EIP, HANDLER)
             .expect("SYSENTER_EIP");
         machine
-            .mem_write(CODE, &[0x0F, 0x34, 0xF4])
+            .mem_write(BxPhyAddress::new(CODE), &[0x0F, 0x34, 0xF4])
             .expect("write SYSENTER");
-        machine.mem_write(HANDLER, &[0xF4]).expect("write handler");
+        machine
+            .mem_write(BxPhyAddress::new(HANDLER), &[0xF4])
+            .expect("write handler");
         machine
     }
 
@@ -1182,7 +1245,9 @@ mod hook_delivery {
     fn a_sysenter_that_faults_on_its_cs_never_reaches_the_hook() {
         on_a_large_stack(|| {
             let mut machine = sysenter_machine(true);
-            machine.msr_write(BX_MSR_SYSENTER_CS, 0).expect("SYSENTER_CS");
+            machine
+                .msr_write(BX_MSR_SYSENTER_CS, 0)
+                .expect("SYSENTER_CS");
             // What the #GP leads to in this bare machine does not matter here;
             // only whether the hook was asked about the instruction.
             match machine.emu_start(CODE, None, None, Some(1)) {
@@ -1235,9 +1300,11 @@ mod hook_delivery {
             machine.msr_write(BX_MSR_STAR, 0x0008 << 32).expect("STAR");
             machine.msr_write(BX_MSR_LSTAR, HANDLER).expect("LSTAR");
             machine
-                .mem_write(CODE, &[0x0F, 0x05, 0xF4])
+                .mem_write(BxPhyAddress::new(CODE), &[0x0F, 0x05, 0xF4])
                 .expect("write SYSCALL");
-            machine.mem_write(HANDLER, &[0xF4]).expect("write handler");
+            machine
+                .mem_write(BxPhyAddress::new(HANDLER), &[0xF4])
+                .expect("write handler");
 
             machine
                 .emu_start(CODE, None, None, Some(1))

@@ -1,6 +1,7 @@
 #![allow(unused_variables)]
 #![allow(unused_unsafe)]
 
+use crate::config::{BxEffAddress, BxLinAddress, BxPhyAddress};
 use crate::convert::u64_from_usize;
 use crate::cpu::BxCpuC;
 
@@ -51,7 +52,10 @@ impl StagedX87 {
             state.fip = u64::from(head.xmm32u(2));
             state.fcs = head.xmm16u(6);
         }
-        Self { state, tag_byte: head.xmmubyte(4) }
+        Self {
+            state,
+            tag_byte: head.xmmubyte(4),
+        }
     }
 
     /// Bytes 16-23 of an x87 image: FDP — 64-bit under REX.W, else 32-bit
@@ -76,6 +80,14 @@ const fn vmx_ctls_msr(allowed_0: u32, allowed_1: u32) -> u64 {
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    /// Get the Time Stamp Counter value.
+    ///
+    /// Bochs: TSC = bx_pc_system.time_ticks() + tsc_adjust (no scaling).
+    /// time_ticks() advances via pc_system tickn(), NOT via icount.
+    /// This matches Bochs where BX_TICKN(10) in HLT advances time_ticks()
+    /// but NOT icount, so TSC advances during HLT without inflating icount.
+    const TSC_SCALE: u64 = 1;
+
     /// Leave the ACTIVE activity state. Bochs proc_ctrl.cc `enter_sleep_state`.
     ///
     /// The single entry point for every sleep state, which is what makes the
@@ -245,9 +257,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                     seg.cache.p = true; // present (Bochs line 394)
                     seg.cache.segment = true; // data/code segment (Bochs line 395)
                     seg.cache.r#type = 3; // DATA_READ_WRITE_ACCESSED (Bochs line 396)
-                                          // Note: Bochs does NOT set d_b here — the CS descriptor cache
-                                          // retains its previous d_b setting. This is important for
-                                          // "big real mode" / "unreal mode" where d_b=1 allows >64K access.
+                    // Note: Bochs does NOT set d_b here — the CS descriptor cache
+                    // retains its previous d_b setting. This is important for
+                    // "big real mode" / "unreal mode" where d_b=1 allows >64K access.
                     seg.selector.rpl = 0; // CPL = 0 (Bochs line 398)
                 }
             }
@@ -337,7 +349,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             && self.cr0.am()
             && self.get_ac() != 0
         {
-            self.alignment_check_mask = 0xf;
+            self.alignment_check_mask = 0xF;
         } else {
             self.alignment_check_mask = 0;
         }
@@ -369,14 +381,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             .rpl
             == 3;
     }
-
-    /// Get the Time Stamp Counter value.
-    ///
-    /// Bochs: TSC = bx_pc_system.time_ticks() + tsc_adjust (no scaling).
-    /// time_ticks() advances via pc_system tickn(), NOT via icount.
-    /// This matches Bochs where BX_TICKN(10) in HLT advances time_ticks()
-    /// but NOT icount, so TSC advances during HLT without inflating icount.
-    const TSC_SCALE: u64 = 1;
 
     pub fn get_tsc(&self, system_ticks: u64) -> u64 {
         (system_ticks.wrapping_mul(Self::TSC_SCALE)).wrapping_add(self.tsc_adjust as u64)
@@ -530,18 +534,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs svm.cc SVM_INTERCEPT0_INVLPG — VMEXIT carries the linear
         // address in EXITINFO1 (computed here before we actually flush).
         if self.in_svm_guest && self.svm_intercept_check(super::svm::SVM_INTERCEPT0_INVLPG) {
-            let laddr_for_exit: u64 = if self.long64_mode() {
-                self.get_laddr64(seg as usize, eaddr)
-            } else {
-                self.get_laddr32(seg as usize, eaddr as u32) as u64
-            };
-            return self.svm_vmexit(super::svm::SvmVmexit::Invlpg as i32, laddr_for_exit, 0);
+            let laddr_for_exit = self.get_laddr(seg as usize, eaddr);
+            return self.svm_vmexit(
+                super::svm::SvmVmexit::Invlpg as i32,
+                laddr_for_exit.get(),
+                0,
+            );
         }
-        let laddr: u64 = if self.long64_mode() {
-            self.get_laddr64(seg as usize, eaddr)
-        } else {
-            self.get_laddr32(seg as usize, eaddr as u32) as u64
-        };
+        let laddr = self.get_laddr(seg as usize, eaddr);
         // Bochs vmx.cc VMexit_INVLPG — qualification carries the linear addr.
         if self.in_vmx_guest && self.vmexit_check_invlpg(laddr)? {
             return Ok(());
@@ -653,7 +653,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         //  they call translate_data_read which returns paddr directly.)
         let laddr = if self.long64_mode() {
             // In 64-bit mode the effective address IS the linear address
-            eaddr
+            BxLinAddress::new(eaddr)
         } else {
             let seg_base = self.get_segment_base(seg);
             seg_base.wrapping_add(eaddr)
@@ -666,7 +666,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.get_host_write_ptr(laddr)?.is_none() {
             tracing::warn!(
                 "MONITOR: laddr={:#x} paddr={:#x} has no host mapping (MMIO?), MWAIT may never trigger",
-                laddr, paddr
+                laddr,
+                paddr
             );
         }
 
@@ -812,8 +813,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs mwait.cc: UMONITOR performs the same segmentation and
         // paging checks as a 1-byte read (tickle_read_virtual).
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let laddr: u64 = if self.long64_mode() {
-            eaddr
+        let laddr = if self.long64_mode() {
+            BxLinAddress::new(eaddr)
         } else {
             self.get_segment_base(seg).wrapping_add(eaddr)
         };
@@ -825,7 +826,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.get_host_write_ptr(laddr)?.is_none() {
             tracing::warn!(
                 "UMONITOR: laddr={:#x} paddr={:#x} has no host mapping (MMIO?), UMWAIT may never wake",
-                laddr, paddr
+                laddr,
+                paddr
             );
         }
 
@@ -954,13 +956,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.instrumentation.active.has_tlb() {
             let seg = super::decoder::BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
-            let laddr: u64 = if self.long64_mode() {
-                self.get_laddr64(seg as usize, eaddr)
-            } else {
-                self.get_laddr32(seg as usize, eaddr as u32) as u64
-            };
+            let laddr = self.get_laddr(seg as usize, eaddr);
             // Best-effort physical resolution — if translation faults, skip the hook.
-            let paddr = self.translate_data_read(laddr).unwrap_or(0);
+            let paddr = self
+                .translate_data_read(laddr)
+                .unwrap_or(BxPhyAddress::new(0));
             self.instrumentation.fire_clflush(laddr, paddr);
         }
         Ok(())
@@ -989,7 +989,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             0xFFFF_FFFF_FFFF_FFFF,
         ];
         let asize = (instr.as32_l() != 0) as usize | (((instr.as64_l() != 0) as usize) << 1);
-        let eaddr = self.rax() & !(CACHE_LINE_SIZE - 1) & ASIZE_MASK[asize];
+        let eaddr = BxEffAddress::new(self.rax() & !(CACHE_LINE_SIZE - 1) & ASIZE_MASK[asize]);
 
         // Bochs writes a zmmword (64 bytes) via write_virtual_zmmword.
         // Emit 8 qwords instead — segmentation + paging checks cover the
@@ -1110,7 +1110,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             2
         };
-        if (ecx & 0x7fff_ffff) >= limit {
+        if (ecx & 0x7FFF_FFFF) >= limit {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -1174,7 +1174,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// bytes in.
     fn user_msr_permitted(&mut self, msr: u32, write: bool) -> crate::cpu::Result<bool> {
         let page = self.msr.ia32_user_msr_ctrl & !0xFFF;
-        let byte = page + u64::from(msr >> 3) + if write { 2048 } else { 0 };
+        let byte = BxLinAddress::new(page) + u64::from(msr >> 3) + if write { 2048 } else { 0 };
         Ok(self.system_read_byte(byte)? & (1 << (msr & 7)) != 0)
     }
 
@@ -1239,7 +1239,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if !self.long64_mode() || cpl != 0 {
             tracing::trace!("{name}: not CPL 0 in 64-bit mode, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -1255,13 +1257,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// the table at RSI holds its index, whose bits 63:32 must be clear.
     fn next_msr_list_entry(&mut self, name: &str) -> crate::cpu::Result<MsrListEntry> {
         let slot = self.rcx().trailing_zeros();
-        let at = self.rsi().wrapping_add(u64::from(slot) * 8);
+        let at = BxLinAddress::new(self.rsi().wrapping_add(u64::from(slot) * 8));
         let address = self.read_linear_qword(super::decoder::BxSegregs::Ds, at)?;
         if address >> 32 != 0 {
-            tracing::trace!("{name} index={slot}: reserved bits set in the MSR address table, #GP(0)");
+            tracing::trace!(
+                "{name} index={slot}: reserved bits set in the MSR address table, #GP(0)"
+            );
             self.exception(super::cpu::Exception::Gp, 0)?;
         }
-        Ok(MsrListEntry { slot, msr: address as u32 })
+        Ok(MsrListEntry {
+            slot,
+            msr: address as u32,
+        })
     }
 
     /// End one entry: clear its bit in RCX, and stop with RIP back on the
@@ -1291,7 +1298,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 return Ok(());
             }
             let value = self.rdmsr_value(entry.msr)?;
-            let destination = self.rdi().wrapping_add(u64::from(entry.slot) * 8);
+            let destination = BxLinAddress::new(self.rdi().wrapping_add(u64::from(entry.slot) * 8));
             self.write_linear_qword(super::decoder::BxSegregs::Ds, destination, value)?;
             match self.finish_msr_list_entry(entry) {
                 MsrListProgress::Continue => {}
@@ -1308,7 +1315,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.invalidate_prefetch_q();
         while self.rcx() != 0 {
             let entry = self.next_msr_list_entry("WRMSRLIST")?;
-            let source = self.rdi().wrapping_add(u64::from(entry.slot) * 8);
+            let source = BxLinAddress::new(self.rdi().wrapping_add(u64::from(entry.slot) * 8));
             let value = self.read_linear_qword(super::decoder::BxSegregs::Ds, source)?;
             if self.in_vmx_guest
                 && self.vmexit_check_msr(super::vmx::MsrExitReason::Wrmsrlist, entry.msr)?
@@ -1456,7 +1463,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             BX_MSR_IA32_ARCH_CAPABILITIES => 0x1F,
             // Bochs msr.cc: a VMX guest with IA32_SPEC_CTRL virtualized reads
             // the shadow its VMM set, not the register.
-            BX_MSR_IA32_SPEC_CTRL if self.spec_ctrl_virtualized() => self.vmcs.ia32_spec_ctrl_shadow,
+            BX_MSR_IA32_SPEC_CTRL if self.spec_ctrl_virtualized() => {
+                self.vmcs.ia32_spec_ctrl_shadow
+            }
             BX_MSR_IA32_SPEC_CTRL => self.msr.ia32_spec_ctrl as u64,
             // Bochs msr.cc: write-only MSRs, so a read is a #GP.
             BX_MSR_IA32_PRED_CMD | BX_MSR_IA32_FLUSH_CMD => {
@@ -1511,8 +1520,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     BX_MSR_LSTAR => self.msr.lstar,
                     BX_MSR_CSTAR => self.msr.cstar,
                     BX_MSR_FMASK => self.msr.fmask as u64,
-                    BX_MSR_FSBASE => self.get_segment_base(super::decoder::BxSegregs::Fs),
-                    BX_MSR_GSBASE => self.get_segment_base(super::decoder::BxSegregs::Gs),
+                    BX_MSR_FSBASE => self.get_segment_base(super::decoder::BxSegregs::Fs).get(),
+                    BX_MSR_GSBASE => self.get_segment_base(super::decoder::BxSegregs::Gs).get(),
                     _ => self.msr.kernelgsbase,
                 }
             }
@@ -1537,34 +1546,36 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.msr.ia32_fred_ssp[idx]
             }
             BX_MSR_IA32_FRED_CONFIG => self.msr.ia32_fred_cfg,
-            BX_MSR_VMX_BASIC => {
-                // IA32_VMX_BASIC: VMCS revision=1, VMCS size=4096, memory type=WB(6)
-                // Bits 48=1 (true controls supported), bit 55=1 (INS/OUTS exit info)
-                0x0001_0006_0000_0001u64
-            }
-            // Each of these packs allowed-1 in the high half and allowed-0
-            // (must-be-1) in the low half, and MUST equal the matching
-            // constants in vmx.rs — a guest reads the MSR to decide what it
-            // may set, and VMENTRY then validates against the constant.
+            BX_MSR_VMX_BASIC => self.vmx_basic_msr(),
+            // Each of these packs allowed-1 in the high half and must-be-1
+            // in the low half, from the constants VM entry validates against
+            // (vmx.rs): a guest reads the MSR to decide what it may set. The
+            // TRUE MSRs carry the must-be-1 bits VM entry checks; the older
+            // ones report the reserved default-1 bits as must-be-1 too.
             BX_MSR_VMX_PINBASED_CTRLS => vmx_ctls_msr(
-                super::vmx::VMX_PINBASED_CTLS_ALLOWED_0,
+                super::vmx::VMX_PINBASED_CTLS_DEFAULT1,
                 super::vmx::VMX_PINBASED_CTLS_ALLOWED_1,
             ),
             BX_MSR_VMX_PROCBASED_CTRLS => vmx_ctls_msr(
-                super::vmx::VMX_PROCBASED_CTLS_ALLOWED_0,
+                super::vmx::VMX_PROCBASED_CTLS_DEFAULT1,
                 super::vmx::VMX_PROCBASED_CTLS_ALLOWED_1,
             ),
             BX_MSR_VMX_VMEXIT_CTRLS => vmx_ctls_msr(
-                super::vmx::VMX_EXIT_CTLS_ALLOWED_0,
+                super::vmx::VMX_EXIT_CTLS_DEFAULT1,
                 super::vmx::VMX_EXIT_CTLS_ALLOWED_1,
             ),
-            BX_MSR_VMX_VMENTRY_CTRLS => 0x0000_FFFF_0000_0011u64,
-            BX_MSR_VMX_MISC => 0x0000_0000_0000_0000u64,
-            BX_MSR_VMX_CR0_FIXED0 => 0x0000_0000_8000_0000u64,
-            BX_MSR_VMX_CR0_FIXED1 => 0x0000_0000_FFFF_FFFFu64,
-            BX_MSR_VMX_CR4_FIXED0 => 0x0000_0000_0000_2000u64,
-            BX_MSR_VMX_CR4_FIXED1 => 0x0000_0000_003F_27FFu64,
-            BX_MSR_VMX_VMCS_ENUM => 0x0000_002C_0000_0000u64,
+            BX_MSR_VMX_VMENTRY_CTRLS => vmx_ctls_msr(
+                super::vmx::VMX_ENTRY_CTLS_DEFAULT1,
+                super::vmx::VMX_ENTRY_CTLS_ALLOWED_1,
+            ),
+            BX_MSR_VMX_MISC => self.vmx_misc_msr(),
+            BX_MSR_VMX_CR0_FIXED0 => super::vmx::VMX_MSR_CR0_FIXED0,
+            BX_MSR_VMX_CR0_FIXED1 => super::vmx::VMX_MSR_CR0_FIXED1,
+            BX_MSR_VMX_CR4_FIXED0 => super::vmx::VMX_MSR_CR4_FIXED0,
+            // Bochs msr.cc: `get_cr4_allow_mask()`, the CR4 bits this model
+            // has — `cr4_suppmask`.
+            BX_MSR_VMX_CR4_FIXED1 => self.cr4_suppmask,
+            BX_MSR_VMX_VMCS_ENUM => super::vmx::VMX_MSR_VMCS_ENUM,
             // IA32_VMX_PROCBASED_CTLS2 — no secondary control is required, so
             // allowed-0 is zero and only the allowed-1 half carries anything.
             // Read from the same constant VMENTRY validates against: a guest
@@ -1573,23 +1584,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             BX_MSR_VMX_PROCBASED_CTRLS2 => {
                 vmx_ctls_msr(0, super::vmx::VMX_PROCBASED_CTLS2_ALLOWED_1)
             }
-            // IA32_VMX_EPT_VPID_CAP — Bochs vmcs.cc `init_ept_vpid_capabilities`
-            // composes this from what the EPT walker and the invalidation
-            // instructions actually implement:
-            //   [0]     execute-only EPT translations
-            //   [6]     4-level page walk (the only length is_eptptr_valid takes)
-            //   [8]     UC EPT paging structure memory type
-            //   [14]    WB EPT paging structure memory type
-            //   [16]    2 MiB EPT pages
-            //   [20]    INVEPT supported
-            //   [25:24] INVEPT single-context and all-context types
-            //   [32]    INVVPID supported
-            //   [43:40] INVVPID individual/single/all/single-non-global types
-            BX_MSR_VMX_EPT_VPID_CAP => {
-                const EPT_CAPS: u64 = 0x0611_4141;
-                const VPID_CAPS: u64 = 0x0000_0F01 << 32;
-                EPT_CAPS | VPID_CAPS
-            }
+            BX_MSR_VMX_EPT_VPID_CAP => self.vmx_ept_vpid_cap_msr(),
             BX_MSR_VMX_TRUE_PINBASED_CTRLS => vmx_ctls_msr(
                 super::vmx::VMX_PINBASED_CTLS_ALLOWED_0,
                 super::vmx::VMX_PINBASED_CTLS_ALLOWED_1,
@@ -1602,16 +1597,23 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 super::vmx::VMX_EXIT_CTLS_ALLOWED_0,
                 super::vmx::VMX_EXIT_CTLS_ALLOWED_1,
             ),
-            BX_MSR_VMX_TRUE_VMENTRY_CTRLS => 0x0000_FFFF_0000_0011u64,
-            BX_MSR_VMX_VMFUNC => 0x0000_0000_0000_0000u64,
-            // IA32_VMX_PROCBASED_CTLS3 and IA32_VMX_EXIT_CTLS2. Bochs msr.cc
-            // answers each only while its `vmx_cap` has supported bits for it
-            // and #GPs otherwise. The tertiary controls are 64 allowed-1 bits;
-            // this port offers no secondary exit control.
+            BX_MSR_VMX_TRUE_VMENTRY_CTRLS => vmx_ctls_msr(
+                super::vmx::VMX_ENTRY_CTLS_ALLOWED_0,
+                super::vmx::VMX_ENTRY_CTLS_ALLOWED_1,
+            ),
+            // IA32_VMX_VMFUNC, IA32_VMX_PROCBASED_CTLS3 and IA32_VMX_EXIT_CTLS2.
+            // Bochs msr.cc answers each only while its `vmx_cap` has supported
+            // bits for it and #GPs otherwise; each is 64 allowed-1 bits.
+            BX_MSR_VMX_VMFUNC if self.vmx_vmfunc_supported_bits() != 0 => {
+                self.vmx_vmfunc_supported_bits()
+            }
             BX_MSR_VMX_PROCBASED_CTRLS3 if super::vmx::VMX_PROCBASED_CTLS3_ALLOWED_1 != 0 => {
                 super::vmx::VMX_PROCBASED_CTLS3_ALLOWED_1
             }
-            BX_MSR_VMX_PROCBASED_CTRLS3 | BX_MSR_VMX_VMEXIT_CTRLS2 => {
+            BX_MSR_VMX_VMEXIT_CTRLS2 if super::vmx::VMX_EXIT_CTLS2_ALLOWED_1 != 0 => {
+                super::vmx::VMX_EXIT_CTLS2_ALLOWED_1
+            }
+            BX_MSR_VMX_VMFUNC | BX_MSR_VMX_PROCBASED_CTRLS3 | BX_MSR_VMX_VMEXIT_CTRLS2 => {
                 tracing::debug!("RDMSR: MSR {msr:#010x} has no supported bits, #GP(0)");
                 self.exception(super::cpu::Exception::Gp, 0)?;
                 return Ok(0);
@@ -1844,7 +1846,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.uintr.stack_adjust = val;
             }
             BX_MSR_IA32_UINTR_MISC => {
-                if val & 0xffffff0000000000u64 != 0 {
+                if val & 0xFFFFFF0000000000u64 != 0 {
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 self.uintr.uitt_size = val as u32;
@@ -2071,7 +2073,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     tracing::trace!("WRMSR: non-canonical value for MSR_FSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
-                self.set_segment_base(super::decoder::BxSegregs::Fs, val);
+                self.set_segment_base(super::decoder::BxSegregs::Fs, BxLinAddress::new(val));
             }
             BX_MSR_GSBASE => {
                 self.require_long_mode_for_msr(msr)?;
@@ -2079,7 +2081,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     tracing::trace!("WRMSR: non-canonical value for MSR_GSBASE, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
-                self.set_segment_base(super::decoder::BxSegregs::Gs, val);
+                self.set_segment_base(super::decoder::BxSegregs::Gs, BxLinAddress::new(val));
             }
             BX_MSR_KERNELGSBASE => {
                 self.require_long_mode_for_msr(msr)?;
@@ -2090,9 +2092,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.msr.kernelgsbase = val;
             }
             BX_MSR_TSC_AUX => {
-                if !self.bx_cpuid_support_isa_extension(
-                    super::decoder::features::X86Feature::IsaRdtscp,
-                ) {
+                if !self
+                    .bx_cpuid_support_isa_extension(super::decoder::features::X86Feature::IsaRdtscp)
+                {
                     tracing::debug!("WRMSR MSR_TSC_AUX: RDTSCP not enabled in the cpu model");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
@@ -2241,7 +2243,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 // Bochs crregs.cc MOV_DdRd — TLB_invlpg at the breakpoint
                 // address (full paging.cc TLB_invlpg: prior code skipped the
                 // stack-cache invalidation and icache link break).
-                self.tlb_invlpg(val as u64);
+                self.tlb_invlpg(BxLinAddress::new(val as u64));
             }
             4 | 6 => {
                 // DR6: preserve reserved bits, only allow bits 0-3 (B0-B3) and bits 13-15 (BD,BS,BT)
@@ -2268,8 +2270,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ========================================================================
 
     pub(super) fn fxsave(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        use super::decoder::features::X86Feature;
         use super::decoder::BxSegregs;
+        use super::decoder::features::X86Feature;
 
         if self.cr0.em() || self.cr0.ts() {
             return self.exception(super::cpu::Exception::Nm, 0);
@@ -2299,7 +2301,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             xmm.set_xmm32u(2, 0);
             xmm.set_xmm32u(3, 0);
         }
-        self.v_write_xmmword(seg, eaddr.wrapping_add(16) & asize_mask, &xmm)?;
+        self.v_write_xmmword(seg, eaddr.wrapping_add(16).masked(asize_mask), &xmm)?;
 
         self.x87_save_register_file(instr, eaddr)?;
 
@@ -2325,8 +2327,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ========================================================================
 
     pub(super) fn fxrstor(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        use super::decoder::features::X86Feature;
         use super::decoder::BxSegregs;
+        use super::decoder::features::X86Feature;
 
         if self.cr0.em() || self.cr0.ts() {
             return self.exception(super::cpu::Exception::Nm, 0);
@@ -2340,7 +2342,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let mut restore = StagedX87::from_head(&head, os64);
 
-        let pointers = self.v_read_xmmword(seg, eaddr.wrapping_add(16) & asize_mask)?;
+        let pointers = self.v_read_xmmword(seg, eaddr.wrapping_add(16).masked(asize_mask))?;
         restore.take_data_pointer(&pointers, os64);
 
         let new_mxcsr = pointers.xmm32u(2);
@@ -2441,7 +2443,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut xmm = super::xmm::BxPackedXmmRegister::default();
         xmm.set_xmm16u(0, self.the_i387.get_control_word());
         xmm.set_xmm16u(1, self.the_i387.get_status_word());
-        xmm.set_xmm16u(2, u16::from(Self::pack_fpu_tw(self.the_i387.get_tag_word())));
+        xmm.set_xmm16u(
+            2,
+            u16::from(Self::pack_fpu_tw(self.the_i387.get_tag_word())),
+        );
         xmm.set_xmm16u(3, self.the_i387.foo);
         if os64 {
             xmm.set_xmm64u(1, self.the_i387.fip);
@@ -2457,7 +2462,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn x87_save_register_file(
         &mut self,
         instr: &super::decoder::Instruction,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> super::Result<()> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let asize_mask = instr.asize_mask();
@@ -2466,7 +2471,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let mut xmm = super::xmm::BxPackedXmmRegister::default();
             xmm.set_xmm64u(0, fp.signif);
             xmm.set_xmm16u(4, fp.sign_exp);
-            self.v_write_xmmword(seg, offset.wrapping_add(index * 16 + 32) & asize_mask, &xmm)?;
+            self.v_write_xmmword(
+                seg,
+                offset.wrapping_add(index * 16 + 32).masked(asize_mask),
+                &xmm,
+            )?;
         }
         Ok(())
     }
@@ -2476,14 +2485,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn x87_load_register_file(
         &mut self,
         instr: &super::decoder::Instruction,
-        offset: u64,
+        offset: BxEffAddress,
         restore: &mut StagedX87,
     ) -> super::Result<()> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let asize_mask = instr.asize_mask();
         for index in 0..8u64 {
-            let signif = self.v_read_qword(seg, offset.wrapping_add(index * 16 + 32) & asize_mask)?;
-            let sign_exp = self.v_read_word(seg, offset.wrapping_add(index * 16 + 40) & asize_mask)?;
+            let signif =
+                self.v_read_qword(seg, offset.wrapping_add(index * 16 + 32).masked(asize_mask))?;
+            let sign_exp =
+                self.v_read_word(seg, offset.wrapping_add(index * 16 + 40).masked(asize_mask))?;
             let reg = super::softfloat3e::softfloat_types::ExtFloat80 { signif, sign_exp };
             let tag = if self.is_tag_empty(index as i32) {
                 i32::from(super::i387::FPU_TAG_EMPTY)
@@ -2534,8 +2545,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[cs_idx].cache.p = true;
         self.sregs[cs_idx].cache.dpl = dpl;
         self.sregs[cs_idx].cache.segment = true;
-        self.sregs[cs_idx].cache.r#type = 0xb; // CODE_EXEC_READ_ACCESSED
-        self.sregs[cs_idx].cache.u.set_segment_base(0);
+        self.sregs[cs_idx].cache.r#type = 0xB; // CODE_EXEC_READ_ACCESSED
+        self.sregs[cs_idx]
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0));
         self.sregs[cs_idx]
             .cache
             .u
@@ -2567,7 +2581,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[ss_idx].cache.dpl = dpl;
         self.sregs[ss_idx].cache.segment = true;
         self.sregs[ss_idx].cache.r#type = 0x3; // DATA_READ_WRITE_ACCESSED
-        self.sregs[ss_idx].cache.u.set_segment_base(0);
+        self.sregs[ss_idx]
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0));
         self.sregs[ss_idx]
             .cache
             .u
@@ -2773,8 +2790,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Swap GS.base with MSR_KERNELGSBASE
         let gs_base = self.get_segment_base(super::decoder::BxSegregs::Gs);
         let kernel_gs = self.msr.kernelgsbase;
-        self.set_segment_base(super::decoder::BxSegregs::Gs, kernel_gs);
-        self.msr.kernelgsbase = gs_base;
+        self.set_segment_base(super::decoder::BxSegregs::Gs, BxLinAddress::new(kernel_gs));
+        self.msr.kernelgsbase = gs_base.get();
         Ok(())
     }
 
@@ -2792,7 +2809,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Ud, 0);
         }
         let fsbase = self.get_segment_base(super::decoder::BxSegregs::Fs);
-        self.set_gpr32(instr.dst().into(), fsbase as u32);
+        self.set_gpr32(instr.dst().into(), fsbase.low32());
         Ok(())
     }
 
@@ -2804,7 +2821,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Ud, 0);
         }
         let fsbase = self.get_segment_base(super::decoder::BxSegregs::Fs);
-        self.set_gpr64(instr.dst() as usize, fsbase);
+        self.set_gpr64(instr.dst() as usize, fsbase.get());
         Ok(())
     }
 
@@ -2816,7 +2833,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Ud, 0);
         }
         let gsbase = self.get_segment_base(super::decoder::BxSegregs::Gs);
-        self.set_gpr32(instr.dst().into(), gsbase as u32);
+        self.set_gpr32(instr.dst().into(), gsbase.low32());
         Ok(())
     }
 
@@ -2828,7 +2845,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Ud, 0);
         }
         let gsbase = self.get_segment_base(super::decoder::BxSegregs::Gs);
-        self.set_gpr64(instr.dst() as usize, gsbase);
+        self.set_gpr64(instr.dst() as usize, gsbase.get());
         Ok(())
     }
 
@@ -2841,7 +2858,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         // Group 15 opcode: dst() = rm = register operand (not src1() which is nnn = opcode extension)
         let val = self.get_gpr32(instr.dst().into()) as u64;
-        self.set_segment_base(super::decoder::BxSegregs::Fs, val);
+        self.set_segment_base(super::decoder::BxSegregs::Fs, BxLinAddress::new(val));
         Ok(())
     }
 
@@ -2857,7 +2874,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.is_canonical(val) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
-        self.set_segment_base(super::decoder::BxSegregs::Fs, val);
+        self.set_segment_base(super::decoder::BxSegregs::Fs, BxLinAddress::new(val));
         Ok(())
     }
 
@@ -2870,7 +2887,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         // Group 15 opcode: dst() = rm = register operand
         let val = self.get_gpr32(instr.dst().into()) as u64;
-        self.set_segment_base(super::decoder::BxSegregs::Gs, val);
+        self.set_segment_base(super::decoder::BxSegregs::Gs, BxLinAddress::new(val));
         Ok(())
     }
 
@@ -2886,7 +2903,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.is_canonical(val) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
-        self.set_segment_base(super::decoder::BxSegregs::Gs, val);
+        self.set_segment_base(super::decoder::BxSegregs::Gs, BxLinAddress::new(val));
         Ok(())
     }
 
@@ -3272,12 +3289,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
 
         // Must be 64-byte aligned
-        let laddr: u64 = if self.long64_mode() {
-            self.get_laddr64(seg as usize, eaddr)
-        } else {
-            self.get_laddr32(seg as usize, eaddr as u32) as u64
-        };
-        if (laddr & 0x3F) != 0 {
+        let laddr = self.get_laddr(seg as usize, eaddr);
+        if !laddr.is_aligned(64) {
             tracing::trace!("XSAVE: not 64-byte aligned, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -3359,7 +3372,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_x87_state(
         &mut self,
         instr: &super::decoder::Instruction,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> super::Result<()> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let os64 = instr.os64_l() != 0;
@@ -3382,7 +3395,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_mxcsr_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        eaddr: u64,
+        eaddr: BxEffAddress,
     ) -> super::Result<()> {
         self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
         self.v_write_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
@@ -3394,7 +3407,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_mxcsr_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        eaddr: u64,
+        eaddr: BxEffAddress,
     ) -> super::Result<()> {
         let new_mxcsr = self.v_read_dword(seg, eaddr.wrapping_add(24))?;
         if (new_mxcsr & !self.mxcsr_mask) != 0 {
@@ -3416,14 +3429,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_sse_state(
         &mut self,
         instr: &super::decoder::Instruction,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> super::Result<()> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let asize_mask = instr.asize_mask();
         let num_regs: u8 = if self.long64_mode() { 16 } else { 8 };
         for index in 0..num_regs {
             let xmm = self.read_xmm_reg(index);
-            let at = offset.wrapping_add(u64::from(index) * 16) & asize_mask;
+            let at = offset
+                .wrapping_add(u64::from(index) * 16)
+                .masked(asize_mask);
             self.v_write_xmmword(seg, at, &xmm)?;
         }
         Ok(())
@@ -3435,7 +3450,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_x87_state(
         &mut self,
         instr: &super::decoder::Instruction,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> super::Result<()> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let os64 = instr.os64_l() != 0;
@@ -3471,13 +3486,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_sse_state(
         &mut self,
         instr: &super::decoder::Instruction,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> super::Result<()> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let asize_mask = instr.asize_mask();
         let num_regs: u8 = if self.long64_mode() { 16 } else { 8 };
         for index in 0..num_regs {
-            let at = offset.wrapping_add(u64::from(index) * 16) & asize_mask;
+            let at = offset
+                .wrapping_add(u64::from(index) * 16)
+                .masked(asize_mask);
             let xmm = self.v_read_xmmword(seg, at)?;
             self.write_xmm_reg_lo128(index, xmm);
         }
@@ -3709,7 +3726,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ========================================================================
 
     /// YMM state: upper 128 bits of YMM0-YMM15 (256 bytes max)
-    fn xsave_ymm_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xsave_ymm_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: BxEffAddress,
+    ) -> super::Result<()> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
             let offset = base.wrapping_add(i * 16);
@@ -3722,7 +3743,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    fn xrstor_ymm_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xrstor_ymm_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: BxEffAddress,
+    ) -> super::Result<()> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
             let offset = base.wrapping_add(i * 16);
@@ -3754,7 +3779,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_opmask_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         for i in 0..8u64 {
             let val = self.opmask[i as usize].rrx();
@@ -3766,7 +3791,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_opmask_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         for i in 0..8u64 {
             let val = self.v_read_qword(seg, base.wrapping_add(i * 8))?;
@@ -3785,7 +3810,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_zmm_hi256_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
@@ -3804,7 +3829,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_zmm_hi256_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
@@ -3845,7 +3870,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_hi_zmm_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         if self.long64_mode() {
             for idx in 16..32u64 {
@@ -3868,7 +3893,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_hi_zmm_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         if self.long64_mode() {
             for idx in 16..32u64 {
@@ -3902,7 +3927,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PKRU state — Bochs xsave.cc xsave_pkru_state. The PKRU component is 8
     /// bytes wide but only the low dword is architecturally defined, and Bochs
     /// writes just those 4 bytes, leaving the upper 4 untouched.
-    fn xsave_pkru_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+    fn xsave_pkru_state(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        base: BxEffAddress,
+    ) -> super::Result<()> {
         self.v_write_dword(seg, base, self.pkru)?;
         Ok(())
     }
@@ -3915,7 +3944,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_pkru_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
         pkru_tmp: &mut u32,
     ) -> super::Result<()> {
         *pkru_tmp = self.v_read_dword(seg, base)?;
@@ -3941,7 +3970,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_xtilecfg_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         let mut buf = [0u8; 64];
         if let Some(amx) = self.amx_ref() {
@@ -3971,7 +4000,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_xtilecfg_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         let mut buf = [0u8; 64];
         for i in 0..8u64 {
@@ -4012,7 +4041,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_xtiledata_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         // Snapshot the 8×16×64 = 8192 byte tile buffer up front so the
         // &mut self write loop doesn't alias the AMX struct.
@@ -4040,7 +4069,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_xtiledata_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         // Preload all rows without holding an &mut on amx.
         let mut fresh_tiles: [[u8; 1024]; 8] = [[0u8; 1024]; 8];
@@ -4080,7 +4109,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_cet_u_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         self.v_write_qword(seg, base, self.msr.ia32_cet_control[1])?;
         self.v_write_qword(seg, base.wrapping_add(8), self.msr.ia32_pl_ssp[3])?;
@@ -4093,7 +4122,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_cet_u_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         let ctrl = self.v_read_qword(seg, base)?;
         let pl3_ssp = self.v_read_qword(seg, base.wrapping_add(8))?;
@@ -4122,7 +4151,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_cet_s_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         self.v_write_qword(seg, base, self.msr.ia32_pl_ssp[0])?;
         self.v_write_qword(seg, base.wrapping_add(8), self.msr.ia32_pl_ssp[1])?;
@@ -4133,7 +4162,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_cet_s_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
     ) -> super::Result<()> {
         let pl0_ssp = self.v_read_qword(seg, base)?;
         let pl1_ssp = self.v_read_qword(seg, base.wrapping_add(8))?;
@@ -4160,7 +4189,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xsave_extended_component(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
         feature: u32,
     ) -> super::Result<()> {
         use super::crregs::Xcr0Component;
@@ -4183,7 +4212,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn xrstor_extended_component(
         &mut self,
         seg: super::decoder::BxSegregs,
-        base: u64,
+        base: BxEffAddress,
         feature: u32,
         pkru_tmp: &mut u32,
     ) -> super::Result<()> {
@@ -4442,12 +4471,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
-        let laddr: u64 = if self.long64_mode() {
-            self.get_laddr64(seg as usize, eaddr)
-        } else {
-            self.get_laddr32(seg as usize, eaddr as u32) as u64
-        };
-        if (laddr & 0x3F) != 0 {
+        let laddr = self.get_laddr(seg as usize, eaddr);
+        if !laddr.is_aligned(64) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -4536,12 +4561,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
-        let laddr: u64 = if self.long64_mode() {
-            self.get_laddr64(seg as usize, eaddr)
-        } else {
-            self.get_laddr32(seg as usize, eaddr as u32) as u64
-        };
-        if (laddr & 0x3F) != 0 {
+        let laddr = self.get_laddr(seg as usize, eaddr);
+        if !laddr.is_aligned(64) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -4626,12 +4647,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
-        let laddr: u64 = if self.long64_mode() {
-            self.get_laddr64(seg as usize, eaddr)
-        } else {
-            self.get_laddr32(seg as usize, eaddr as u32) as u64
-        };
-        if (laddr & 0x3F) != 0 {
+        let laddr = self.get_laddr(seg as usize, eaddr);
+        if !laddr.is_aligned(64) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -4795,15 +4812,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 mod tests {
     //! Bochs-parity tests for `proc_ctrl::wrmsr_value` MSR-write side effects.
 
+    use crate::config::BxPhyAddress;
     use crate::cpu::crregs::BxEfer;
     use crate::cpu::decoder::Instruction;
     use crate::cpu::msr::{
         BX_MSR_APICBASE, BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_ARCH_CAPABILITIES,
         BX_MSR_IA32_FEATURE_CONTROL, BX_MSR_IA32_FLUSH_CMD, BX_MSR_IA32_FRED_CONFIG,
         BX_MSR_IA32_FRED_RSP0, BX_MSR_IA32_FRED_RSP3, BX_MSR_IA32_FRED_SSP1, BX_MSR_IA32_MPERF,
-        BX_MSR_IA32_PRED_CMD, BX_MSR_IA32_SPEC_CTRL, BX_MSR_KERNELGSBASE, BX_MSR_LSTAR,
-        BX_MSR_PAT, BX_MSR_PLATFORM_ID, BX_MSR_SYSENTER_EIP, BX_MSR_SYSENTER_ESP, BX_MSR_TSC,
-        BX_MSR_TSC_AUX, BX_MSR_TSC_DEADLINE,
+        BX_MSR_IA32_PRED_CMD, BX_MSR_IA32_SPEC_CTRL, BX_MSR_KERNELGSBASE, BX_MSR_LSTAR, BX_MSR_PAT,
+        BX_MSR_PLATFORM_ID, BX_MSR_SYSENTER_EIP, BX_MSR_SYSENTER_ESP, BX_MSR_TSC, BX_MSR_TSC_AUX,
+        BX_MSR_TSC_DEADLINE,
     };
     use crate::cpu::svm::BX_VM_CR_MSR_SVMDIS_MASK;
     use crate::params::BxParams;
@@ -5056,7 +5074,8 @@ mod tests {
         const NO_MSR_LIVES_HERE: u32 = 0x234;
         assert!(NO_MSR_LIVES_HERE < super::super::msr::BX_MSR_MAX_INDEX);
         assert_eq!(
-            cpu.rdmsr_value(NO_MSR_LIVES_HERE).expect("ignored, not faulted"),
+            cpu.rdmsr_value(NO_MSR_LIVES_HERE)
+                .expect("ignored, not faulted"),
             0
         );
         cpu.wrmsr_value(NO_MSR_LIVES_HERE, 0xDEAD)
@@ -5116,7 +5135,10 @@ mod tests {
             "bit 9 of IA32_SPEC_CTRL is reserved"
         );
 
-        assert_eq!(cpu.rdmsr_value(BX_MSR_IA32_ARCH_CAPABILITIES).unwrap(), 0x1F);
+        assert_eq!(
+            cpu.rdmsr_value(BX_MSR_IA32_ARCH_CAPABILITIES).unwrap(),
+            0x1F
+        );
         assert!(
             cpu.wrmsr_value(BX_MSR_IA32_ARCH_CAPABILITIES, 0).is_err(),
             "IA32_ARCH_CAPABILITIES is read only"
@@ -5190,7 +5212,8 @@ mod tests {
         const CANONICAL: u64 = 0xFFFF_8000_0000_1000;
 
         for msr in [BX_MSR_SYSENTER_ESP, BX_MSR_SYSENTER_EIP] {
-            cpu.wrmsr_value(msr, CANONICAL).expect("a canonical address is taken");
+            cpu.wrmsr_value(msr, CANONICAL)
+                .expect("a canonical address is taken");
             assert!(
                 cpu.wrmsr_value(msr, NON_CANONICAL).is_err(),
                 "MSR {msr:#x}: a non-canonical address must #GP(0)"
@@ -5216,22 +5239,26 @@ mod tests {
         cpu.wrmsr_value(BX_MSR_IA32_FRED_RSP0, 0xFFFF_8000_0000_0040)
             .expect("an aligned canonical RSP0 is taken");
         assert!(
-            cpu.wrmsr_value(BX_MSR_IA32_FRED_RSP0, 0xFFFF_8000_0000_0020).is_err(),
+            cpu.wrmsr_value(BX_MSR_IA32_FRED_RSP0, 0xFFFF_8000_0000_0020)
+                .is_err(),
             "FRED_RSP0 must be 64-byte aligned"
         );
         assert!(
-            cpu.wrmsr_value(BX_MSR_IA32_FRED_RSP3, 0x0000_8000_0000_0000).is_err(),
+            cpu.wrmsr_value(BX_MSR_IA32_FRED_RSP3, 0x0000_8000_0000_0000)
+                .is_err(),
             "FRED_RSP3 must be canonical"
         );
 
         cpu.wrmsr_value(BX_MSR_IA32_FRED_SSP1, 0xFFFF_8000_0000_0008)
             .expect("an aligned canonical SSP1 is taken");
         assert!(
-            cpu.wrmsr_value(BX_MSR_IA32_FRED_SSP1, 0xFFFF_8000_0000_0004).is_err(),
+            cpu.wrmsr_value(BX_MSR_IA32_FRED_SSP1, 0xFFFF_8000_0000_0004)
+                .is_err(),
             "FRED_SSP1 must be 8-byte aligned"
         );
 
-        cpu.wrmsr_value(BX_MSR_IA32_FRED_CONFIG, 0).expect("no reserved bit set");
+        cpu.wrmsr_value(BX_MSR_IA32_FRED_CONFIG, 0)
+            .expect("no reserved bit set");
         assert!(
             cpu.wrmsr_value(BX_MSR_IA32_FRED_CONFIG, 0x4).is_err(),
             "bit 2 of FRED_CONFIG is reserved"
@@ -5241,12 +5268,13 @@ mod tests {
     /// Execute `instr`, which must fault, and return the vector it raised.
     /// The first exception raised is the instruction's own; delivering it on
     /// this bare machine may raise more after it.
-    fn faults_with(
-        cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, ()>,
-        instr: &Instruction,
-    ) -> u8 {
+    fn faults_with(cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, ()>, instr: &Instruction) -> u8 {
         let first = cpu.exc_diag_idx;
-        assert!(cpu.execute_instruction(instr).is_err(), "{:?} must fault", instr.get_ia_opcode());
+        assert!(
+            cpu.execute_instruction(instr).is_err(),
+            "{:?} must fault",
+            instr.get_ia_opcode()
+        );
         cpu.exc_diag_ring[first % 32].1
     }
 
@@ -5271,20 +5299,32 @@ mod tests {
         let mut machine = crate::cpu::exec_ctx::TestMachine::new();
         let mut cpu = machine.ctx();
         set_cpu_feature(&mut cpu, X86Feature::IsaUserMsr, true);
-        cpu.wrmsr_value(SYSENTER_CS, 0x10).expect("SYSENTER_CS is writable");
+        cpu.wrmsr_value(SYSENTER_CS, 0x10)
+            .expect("SYSENTER_CS is writable");
         // URDMSR rcx, rax and UWRMSR rax, rcx: F2/F3 0F 38 F8, ModRM 0xC1.
         let urdmsr = decode(&[0xF2, 0x0F, 0x38, 0xF8, 0xC1]);
         let uwrmsr = decode(&[0xF3, 0x0F, 0x38, 0xF8, 0xC1]);
         cpu.set_rax(u64::from(SYSENTER_CS));
 
-        assert_eq!(faults_with(&mut cpu, &urdmsr), Exception::Ud as u8, "disabled");
+        assert_eq!(
+            faults_with(&mut cpu, &urdmsr),
+            Exception::Ud as u8,
+            "disabled"
+        );
 
-        cpu.wrmsr_value(crate::cpu::msr::BX_MSR_IA32_USER_MSR_CTL, USER_MSR_BITMAP | 1)
-            .expect("a canonical page with the enable bit");
-        assert_eq!(faults_with(&mut cpu, &urdmsr), Exception::Gp as u8, "not granted");
+        cpu.wrmsr_value(
+            crate::cpu::msr::BX_MSR_IA32_USER_MSR_CTL,
+            USER_MSR_BITMAP | 1,
+        )
+        .expect("a canonical page with the enable bit");
+        assert_eq!(
+            faults_with(&mut cpu, &urdmsr),
+            Exception::Gp as u8,
+            "not granted"
+        );
 
         let grant = |cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, ()>, offset: u64| {
-            let byte = USER_MSR_BITMAP + offset + u64::from(SYSENTER_CS >> 3);
+            let byte = BxPhyAddress::new(USER_MSR_BITMAP + offset + u64::from(SYSENTER_CS >> 3));
             cpu.mem_write_byte(byte, 1 << (SYSENTER_CS & 7));
         };
         grant(&mut cpu, 0);
@@ -5303,11 +5343,20 @@ mod tests {
         assert_eq!(cpu.rdmsr_value(SYSENTER_CS).expect("readable"), 0x23);
 
         cpu.set_rax(0x4000);
-        assert_eq!(faults_with(&mut cpu, &urdmsr), Exception::Gp as u8, "past 0x3FFF");
+        assert_eq!(
+            faults_with(&mut cpu, &urdmsr),
+            Exception::Gp as u8,
+            "past 0x3FFF"
+        );
 
-        assert!(cpu
-            .wrmsr_value(crate::cpu::msr::BX_MSR_IA32_USER_MSR_CTL, 0x0000_8000_0000_0001)
-            .is_err(), "the bitmap base must be canonical");
+        assert!(
+            cpu.wrmsr_value(
+                crate::cpu::msr::BX_MSR_IA32_USER_MSR_CTL,
+                0x0000_8000_0000_0001
+            )
+            .is_err(),
+            "the bitmap base must be canonical"
+        );
     }
 
     /// Bochs msr.cc `RDMSR` and `WRMSR` with the index in an immediate (VEX
@@ -5359,15 +5408,15 @@ mod tests {
         let mut cpu = machine.ctx();
         cpu.reset(crate::cpu::ResetReason::Hardware);
 
-        let relocated_xapic_base = 0xfee1_0800u64;
+        let relocated_xapic_base = 0xFEE1_0800u64;
         cpu.wrmsr_value(BX_MSR_APICBASE, relocated_xapic_base)
             .unwrap();
 
         assert_eq!(cpu.msr.apicbase, relocated_xapic_base);
-        assert_eq!(cpu.lapic.get_base(), 0xfee1_0000);
+        assert_eq!(cpu.lapic.get_base(), BxPhyAddress::new(0xFEE1_0000));
         assert_eq!(cpu.lapic.get_mode(), crate::cpu::apic::ApicMode::XapicMode);
         assert!(
-            cpu.lapic.is_selected(0xfee1_0030),
+            cpu.lapic.is_selected(BxPhyAddress::new(0xFEE1_0030)),
             "LAPIC MMIO decode must follow MSR_APICBASE writes"
         );
 
@@ -5377,7 +5426,7 @@ mod tests {
         assert_eq!(cpu.msr.apicbase, x2apic_base);
         assert_eq!(cpu.lapic.get_mode(), crate::cpu::apic::ApicMode::X2apicMode);
         assert!(
-            !cpu.lapic.is_selected(0xfee1_0030),
+            !cpu.lapic.is_selected(BxPhyAddress::new(0xFEE1_0030)),
             "x2APIC mode must disable xAPIC MMIO decode"
         );
     }
@@ -5399,7 +5448,7 @@ mod tests {
         cpu.configure_smp(SOURCE_APIC_ID, topology);
         cpu.reset(crate::cpu::ResetReason::Hardware);
         cpu.configure_smp(SOURCE_APIC_ID, topology);
-        cpu.wrmsr_value(BX_MSR_APICBASE, 0xfee0_0c00).unwrap();
+        cpu.wrmsr_value(BX_MSR_APICBASE, 0xFEE0_0C00).unwrap();
 
         assert_eq!(
             cpu.rdmsr_value(X2APIC_ID_MSR).unwrap(),
@@ -5417,7 +5466,7 @@ mod tests {
             .take_pending_ipi()
             .expect("x2APIC ICR write must queue the destination from the high dword");
         assert_eq!(pending.dest, TARGET_APIC_ID);
-        assert_eq!(pending.lo_cmd as u64 & 0xff, FIXED_VECTOR);
+        assert_eq!(pending.lo_cmd as u64 & 0xFF, FIXED_VECTOR);
     }
 }
 
@@ -5484,7 +5533,10 @@ mod avx_mode_tests {
 
         // Any one of them missing closes it again.
         for missing in [1u32 << 5, 1 << 6, 1 << 7] {
-            set_xcr0(&mut machine, XCR0_X87 | XCR0_SSE | XCR0_YMM | (XCR0_AVX512 & !missing));
+            set_xcr0(
+                &mut machine,
+                XCR0_X87 | XCR0_SSE | XCR0_YMM | (XCR0_AVX512 & !missing),
+            );
             let c = machine.ctx();
             assert!(
                 !c.fetch_mode_mask.contains(FetchModeMask::EVEX_OK),
@@ -5613,12 +5665,13 @@ mod fxsave_tests {
     //! long mode against Bochs sse_move.cc and xsave.cc: what the 512-byte
     //! image holds, what it leaves alone, and what a restore brings back.
 
+    use crate::config::BxPhyAddress;
+    use crate::cpu::CpuModel;
     use crate::cpu::api_bridge::SegmentSize;
     use crate::cpu::crregs::BxEfer;
     use crate::cpu::exec_ctx::{ExecCtx, TestMachine};
     use crate::cpu::instrumentation::X86Reg;
     use crate::cpu::xmm::BxPackedXmmRegister;
-    use crate::cpu::CpuModel;
     use crate::memory::BxMemC;
 
     /// One PML4, one PDPT and one page directory whose first entry maps the
@@ -5656,12 +5709,26 @@ mod fxsave_tests {
     fn long_mode(machine: &mut TestMachine) -> ExecCtx<'_, ()> {
         let memory = machine.memory_mut();
         write_ram(memory, PML4, &(PDPT | PRESENT_WRITABLE).to_le_bytes());
-        write_ram(memory, PDPT, &(PAGE_DIRECTORY | PRESENT_WRITABLE).to_le_bytes());
-        write_ram(memory, PAGE_DIRECTORY, &(PRESENT_WRITABLE | LARGE_PAGE).to_le_bytes());
+        write_ram(
+            memory,
+            PDPT,
+            &(PAGE_DIRECTORY | PRESENT_WRITABLE).to_le_bytes(),
+        );
+        write_ram(
+            memory,
+            PAGE_DIRECTORY,
+            &(PRESENT_WRITABLE | LARGE_PAGE).to_le_bytes(),
+        );
 
         let mut cpu = machine.ctx();
         cpu.reset(crate::cpu::ResetReason::Hardware);
-        cpu.set_seg_for_api(X86Reg::Cs, CODE_SELECTOR, 0, 0xFFFF_FFFF, SegmentSize::Long64);
+        cpu.set_seg_for_api(
+            X86Reg::Cs,
+            CODE_SELECTOR,
+            0,
+            0xFFFF_FFFF,
+            SegmentSize::Long64,
+        );
         for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
             cpu.set_seg_for_api(reg, DATA_SELECTOR, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
         }
@@ -5675,14 +5742,21 @@ mod fxsave_tests {
 
     /// Write `bytes` to RAM at `at`, all of them.
     fn write_ram(memory: &mut BxMemC, at: u64, bytes: &[u8]) {
-        let copied = memory.write_ram(at, bytes).expect("RAM");
-        assert_eq!(copied, bytes.len(), "the write at {at:#x} reached RAM whole");
+        let copied = memory.write_ram(BxPhyAddress::new(at), bytes).expect("RAM");
+        assert_eq!(
+            copied,
+            bytes.len(),
+            "the write at {at:#x} reached RAM whole"
+        );
     }
 
     /// The 512-byte image as RAM holds it.
     fn read_image(cpu: &mut ExecCtx<'_, ()>) -> [u8; IMAGE_LEN] {
         let mut image = [0u8; IMAGE_LEN];
-        let copied = cpu.memory.read_ram(IMAGE, &mut image).expect("RAM");
+        let copied = cpu
+            .memory
+            .read_ram(BxPhyAddress::new(IMAGE), &mut image)
+            .expect("RAM");
         assert_eq!(copied, IMAGE_LEN, "the image came from RAM whole");
         image
     }
@@ -5727,8 +5801,16 @@ mod fxsave_tests {
         execute(&mut cpu, &FXSAVE64_RBX);
 
         let image = read_image(&mut cpu);
-        assert_ne!(&image[..416], &guest[..416], "FXSAVE wrote the state it saves");
-        assert_eq!(&image[416..], &guest[416..], "FXSAVE writes nothing past byte 415");
+        assert_ne!(
+            &image[..416],
+            &guest[..416],
+            "FXSAVE wrote the state it saves"
+        );
+        assert_eq!(
+            &image[416..],
+            &guest[416..],
+            "FXSAVE writes nothing past byte 415"
+        );
     }
 
     /// Bochs xsave.cc xsave_sse_state / xrstor_sse_state, which FXSAVE and
@@ -5753,8 +5835,16 @@ mod fxsave_tests {
         let image = read_image(&mut cpu);
         for index in 0..16usize {
             let slot = 160 + index * 16;
-            assert_eq!(qword(&image, slot), LOW | index as u64, "XMM{index} low half saved");
-            assert_eq!(qword(&image, slot + 8), HIGH | index as u64, "XMM{index} high half saved");
+            assert_eq!(
+                qword(&image, slot),
+                LOW | index as u64,
+                "XMM{index} low half saved"
+            );
+            assert_eq!(
+                qword(&image, slot + 8),
+                HIGH | index as u64,
+                "XMM{index} high half saved"
+            );
         }
 
         for index in 0..16u8 {
@@ -5766,8 +5856,16 @@ mod fxsave_tests {
 
         for index in 0..16u8 {
             let xmm = cpu.read_xmm_reg(index);
-            assert_eq!(xmm.xmm64u(0), LOW | u64::from(index), "XMM{index} low half restored");
-            assert_eq!(xmm.xmm64u(1), HIGH | u64::from(index), "XMM{index} high half restored");
+            assert_eq!(
+                xmm.xmm64u(0),
+                LOW | u64::from(index),
+                "XMM{index} low half restored"
+            );
+            assert_eq!(
+                xmm.xmm64u(1),
+                HIGH | u64::from(index),
+                "XMM{index} high half restored"
+            );
             assert_eq!(
                 cpu.vmm[usize::from(index)].zmm64u(2),
                 ABOVE_BIT_127,
@@ -5788,7 +5886,11 @@ mod fxsave_tests {
         let mut machine = TestMachine::new();
         let mut cpu = long_mode(&mut machine);
         push_three(&mut cpu);
-        let stack = [cpu.read_fpu_reg(0), cpu.read_fpu_reg(1), cpu.read_fpu_reg(2)];
+        let stack = [
+            cpu.read_fpu_reg(0),
+            cpu.read_fpu_reg(1),
+            cpu.read_fpu_reg(2),
+        ];
         cpu.the_i387.foo = FOP;
         cpu.the_i387.fip = FIP;
         cpu.the_i387.fdp = FDP;
@@ -5797,14 +5899,21 @@ mod fxsave_tests {
 
         let image = read_image(&mut cpu);
         assert_eq!((word(&image, 2) >> 11) & 7, 5, "FSW carries the live TOP");
-        assert_eq!(image[4], 0xE0, "abridged tags: physical registers 5, 6 and 7 hold values");
+        assert_eq!(
+            image[4], 0xE0,
+            "abridged tags: physical registers 5, 6 and 7 hold values"
+        );
         assert_eq!(word(&image, 6), FOP, "FOP");
         assert_eq!(qword(&image, 8), FIP, "64-bit FIP");
         assert_eq!(qword(&image, 16), FDP, "64-bit FDP");
         for (st, reg) in stack.iter().enumerate() {
             let slot = 32 + st * 16;
             assert_eq!(qword(&image, slot), reg.signif, "ST({st}) significand");
-            assert_eq!(word(&image, slot + 8), reg.sign_exp, "ST({st}) sign and exponent");
+            assert_eq!(
+                word(&image, slot + 8),
+                reg.sign_exp,
+                "ST({st}) sign and exponent"
+            );
             assert!(
                 image[slot + 10..slot + 16].iter().all(|byte| *byte == 0),
                 "ST({st}) padding is zero"
@@ -5842,7 +5951,11 @@ mod fxsave_tests {
         cpu.set_rax(u64::from(XCR0_X87_SSE));
         cpu.set_rdx(0);
         push_three(&mut cpu);
-        let stack = [cpu.read_fpu_reg(0), cpu.read_fpu_reg(1), cpu.read_fpu_reg(2)];
+        let stack = [
+            cpu.read_fpu_reg(0),
+            cpu.read_fpu_reg(1),
+            cpu.read_fpu_reg(2),
+        ];
 
         execute(&mut cpu, &XSAVE64_RBX);
 
@@ -5851,7 +5964,11 @@ mod fxsave_tests {
         for (st, reg) in stack.iter().enumerate() {
             let slot = 32 + st * 16;
             assert_eq!(qword(&image, slot), reg.signif, "ST({st}) significand");
-            assert_eq!(word(&image, slot + 8), reg.sign_exp, "ST({st}) sign and exponent");
+            assert_eq!(
+                word(&image, slot + 8),
+                reg.sign_exp,
+                "ST({st}) sign and exponent"
+            );
         }
 
         execute(&mut cpu, &FNINIT);
@@ -5883,8 +6000,16 @@ mod fxsave_tests {
             stored_fds: u16,
         }
         for case in [
-            Case { model: CpuModel::corei7_skylake_x(), stored_fcs: 0, stored_fds: 0 },
-            Case { model: CpuModel::amd_ryzen(), stored_fcs: FCS, stored_fds: FDS },
+            Case {
+                model: CpuModel::corei7_skylake_x(),
+                stored_fcs: 0,
+                stored_fds: 0,
+            },
+            Case {
+                model: CpuModel::amd_ryzen(),
+                stored_fcs: FCS,
+                stored_fds: FDS,
+            },
         ] {
             let mut machine = TestMachine::with_model(case.model);
             let mut cpu = long_mode(&mut machine);
@@ -5918,7 +6043,11 @@ mod fxsave_tests {
         execute(&mut cpu, &FXSAVE64_RBX);
 
         let image = read_image(&mut cpu);
-        assert_eq!(&image[160..416], &guest[160..416], "the XMM area is left as it was");
+        assert_eq!(
+            &image[160..416],
+            &guest[160..416],
+            "the XMM area is left as it was"
+        );
 
         // An image whose MXCSR and XMM0 differ from the live ones.
         let mut changed = image;
@@ -5926,7 +6055,10 @@ mod fxsave_tests {
         changed[160..176].fill(0);
         write_ram(cpu.memory, IMAGE, &changed);
         let mxcsr = cpu.mxcsr.mxcsr;
-        assert_ne!(mxcsr, IMAGE_MXCSR, "the image's MXCSR differs from the live one");
+        assert_ne!(
+            mxcsr, IMAGE_MXCSR,
+            "the image's MXCSR differs from the live one"
+        );
 
         execute(&mut cpu, &FXRSTOR64_RBX);
 

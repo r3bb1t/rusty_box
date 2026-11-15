@@ -5,7 +5,7 @@
 use super::cpu::Exception;
 use super::instrumentation::Instrumentation;
 use super::softfloat3e::softfloat::SoftFloatStatus;
-use super::xmm::{BxMxcsr, Mxcsr, MXCSR_EXCEPTIONS};
+use super::xmm::{BxMxcsr, MXCSR_EXCEPTIONS, Mxcsr};
 
 /// Build a SoftFloat status word from the current MXCSR.
 /// Bochs sse_pfp.cc `mxcsr_to_softfloat_status_word`.

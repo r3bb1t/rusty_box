@@ -7,6 +7,11 @@
 //! be built in a separate session on top of this clean Rust surface.
 
 use bitflags::bitflags;
+/// The port an I/O hook reports, re-exported beside the events that carry it
+/// so a tracer needs no second import.
+pub use rusty_box_devices::api::IoPort;
+
+use crate::config::{BxEffAddress, BxLinAddress, BxPhyAddress};
 
 // ─────────────────────────── InstrAction ───────────────────────────
 
@@ -205,7 +210,7 @@ pub enum TlbCntrl {
     /// SMM/VMM context switch — page-root state implicit in the new context.
     ContextSwitch,
     /// INVLPG instruction.
-    Invlpg { laddr: u64 },
+    Invlpg { laddr: BxLinAddress },
     /// INVEPT (VMX EPT invalidation).
     Invept { kind: InvEptType },
     /// INVVPID (VMX VPID invalidation — same numeric encoding as INVEPT).
@@ -343,14 +348,14 @@ pub struct MemHookEvent {
     /// Direction of the access.
     pub access: MemAccessRW,
     /// Linear (virtual) address.
-    pub addr: u64,
+    pub addr: BxLinAddress,
     /// Access size in bytes.
     pub size: usize,
     /// Value being written (for Write/RW); value loaded (for Read);
     /// `None` for `Execute` fetches and pre-read events with no value yet.
     pub value: Option<u64>,
     /// Physical (post-translation) address.
-    pub phys_addr: u64,
+    pub phys_addr: BxPhyAddress,
     /// Cache type for the region (MTRR/PAT).
     pub memtype: MemType,
 }
@@ -370,7 +375,7 @@ pub struct HwInterruptEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct IoHookEvent {
     /// Port number.
-    pub port: u16,
+    pub port: IoPort,
     /// Access size in bytes (1, 2, or 4).
     pub size: u8,
     /// Value (for Out: value being written; for In: value read).
@@ -443,7 +448,7 @@ pub struct OpcodeEvent<'a> {
 /// hint (not a byte count of data).
 #[derive(Debug, Copy, Clone)]
 pub struct MwaitEvent {
-    pub addr: u64,
+    pub addr: BxPhyAddress,
     pub len: u32,
     pub flags: MwaitFlags,
 }
@@ -453,8 +458,8 @@ pub struct MwaitEvent {
 /// Length is implicit (`data.len()`).
 #[derive(Debug, Copy, Clone)]
 pub struct LinAccess<'a> {
-    pub lin: u64,
-    pub phy: u64,
+    pub lin: BxLinAddress,
+    pub phy: BxPhyAddress,
     pub data: &'a [u8],
     pub memtype: MemType,
     pub rw: MemAccessRW,
@@ -465,7 +470,7 @@ pub struct LinAccess<'a> {
 /// Same shape as [`LinAccess`] but without a linear address.
 #[derive(Debug, Copy, Clone)]
 pub struct PhyAccess<'a> {
-    pub phy: u64,
+    pub phy: BxPhyAddress,
     pub data: &'a [u8],
     pub memtype: MemType,
     pub rw: MemAccessRW,
@@ -476,7 +481,7 @@ pub struct PhyAccess<'a> {
 pub struct PrefetchEvent {
     pub what: PrefetchHint,
     pub seg: u8,
-    pub offset: u64,
+    pub offset: BxEffAddress,
 }
 
 /// Payload for `Instrumentation::mem_unmapped` — the access that was about
@@ -484,7 +489,7 @@ pub struct PrefetchEvent {
 /// the fault.
 #[derive(Debug, Copy, Clone)]
 pub struct MemUnmapped {
-    pub laddr: u64,
+    pub laddr: BxLinAddress,
     pub size: usize,
     pub rw: MemAccessRW,
 }
@@ -493,7 +498,7 @@ pub struct MemUnmapped {
 /// per-page `PagePermissions` bitmap. Return `true` to suppress the fault.
 #[derive(Debug, Copy, Clone)]
 pub struct MemPermViolation {
-    pub laddr: u64,
+    pub laddr: BxLinAddress,
     pub size: usize,
     pub rw: MemAccessRW,
     pub required: MemPerms,
@@ -588,12 +593,12 @@ pub enum ProcessorActivity {
 /// The base of each segment register's descriptor cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentBases {
-    pub es: u64,
-    pub cs: u64,
-    pub ss: u64,
-    pub ds: u64,
-    pub fs: u64,
-    pub gs: u64,
+    pub es: BxLinAddress,
+    pub cs: BxLinAddress,
+    pub ss: BxLinAddress,
+    pub ds: BxLinAddress,
+    pub fs: BxLinAddress,
+    pub gs: BxLinAddress,
 }
 
 /// One processor as a debugger shows it: its registers, and what they mean
@@ -616,11 +621,55 @@ pub struct CpuDebugView {
     pub idtr: DescriptorTable,
 }
 
+/// The guest a VMM runs, as its current VMCS holds it while the processor is
+/// in VMX root operation: every VM exit writes the guest's state into the
+/// VMCS's guest-state area (Bochs vmx.cc `VMexitSaveGuestState`), and the
+/// next VM entry loads it from there. The general-purpose registers other
+/// than RSP, the FPU and vector state and `IA32_KERNEL_GS_BASE` are not in
+/// the VMCS: a VMM keeps them in its own memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmxGuest {
+    /// Guest-physical address of the VMCS region it was read from.
+    pub vmcs: BxPhyAddress,
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+    pub cr0: u64,
+    pub cr3: u64,
+    pub cr4: u64,
+    /// IA32_EFER as the guest runs under it: the VMCS's guest field when VM
+    /// entry loads it, else the processor's own with LMA and LME as VM entry
+    /// leaves them for the "IA-32e mode guest" control (Bochs vmx.cc
+    /// `VMenterLoadCheckGuestState`).
+    pub efer: u64,
+    pub mode: ExecutionMode,
+    /// The size the guest decodes its next instruction at.
+    pub code_size: CodeSize,
+    /// The guest's privilege level: its SS's DPL, as VM entry sets it.
+    pub cpl: u8,
+    pub activity: ProcessorActivity,
+    pub segment_bases: SegmentBases,
+    pub gdtr: DescriptorTable,
+    pub idtr: DescriptorTable,
+    /// How the guest's physical addresses reach the machine's memory.
+    pub memory: GuestPhysicalMemory,
+}
+
+/// How a VMX guest's physical addresses reach the machine's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestPhysicalMemory {
+    /// They are the machine's physical addresses: the VMM enables no EPT.
+    Direct,
+    /// Through the EPT paging structures `eptp` (the VMCS's EPT pointer)
+    /// names.
+    Ept { eptp: u64 },
+}
+
 /// A descriptor-table register (GDTR, IDTR): the table's linear base and
 /// its limit, the offset of its last byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DescriptorTable {
-    pub base: u64,
+    pub base: BxLinAddress,
     pub limit: u16,
 }
 
@@ -640,9 +689,9 @@ pub struct PageAccess {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageMapping {
     /// The first linear address it maps, canonical in long mode.
-    pub linear: u64,
+    pub linear: BxLinAddress,
     /// Where that address lands in guest-physical memory.
-    pub physical: u64,
+    pub physical: BxPhyAddress,
     /// 4 KiB, 2 MiB or 4 MiB (legacy PSE), 1 GiB.
     pub size: u64,
     pub access: PageAccess,
@@ -651,8 +700,8 @@ pub struct PageMapping {
 /// A span of linear addresses, `start` included and `end` excluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinearRange {
-    pub start: u64,
-    pub end: u64,
+    pub start: BxLinAddress,
+    pub end: BxLinAddress,
 }
 
 /// What a mapping walk's visitor wants next.
@@ -917,6 +966,9 @@ pub enum EmuStopReason {
     Shutdown,
     /// RIP reached one of the configured exit addresses.
     ReachedExit(u64),
+    /// A processor stopped before the instruction at a debugger code
+    /// breakpoint (`Emulator::set_code_breakpoints`).
+    ReachedBreakpoint(crate::cpu::CodeBreakpointHit),
 }
 
 // ─────────────────────────── CpuSetupMode ───────────────────────────
@@ -978,14 +1030,17 @@ impl ExitSet {
             len: 0,
         }
     }
+
     pub fn set(&mut self, exits: &[u64]) {
         let n = exits.len().min(64);
         self.addrs[..n].copy_from_slice(&exits[..n]);
         self.len = n as u8;
     }
+
     pub fn clear(&mut self) {
         self.len = 0;
     }
+
     pub fn add(&mut self, addr: u64) -> bool {
         if self.len as usize >= 64 {
             return false;
@@ -997,6 +1052,7 @@ impl ExitSet {
         self.len += 1;
         true
     }
+
     pub fn remove(&mut self, addr: u64) -> bool {
         for i in 0..self.len as usize {
             if self.addrs[i] == addr {
@@ -1007,10 +1063,12 @@ impl ExitSet {
         }
         false
     }
+
     #[inline]
     pub fn contains(&self, addr: u64) -> bool {
         self.addrs[..self.len as usize].contains(&addr)
     }
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

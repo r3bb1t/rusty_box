@@ -3,15 +3,15 @@
 Everything after the `---` below is the PR body, ready to paste. Above it are
 the notes for whoever files it; they are not part of the PR.
 
-**Files that go with it** (all in `docs/`):
-- `bochs-retf16-imm16-fix.patch` — the fix as a `git am`-ready patch
+**Files that go with it**:
+- `docs/patches/bochs/bochs-retf16-imm16-fix.patch` — the fix as a `git am`-ready patch
   (author `r3bb1t`, the identity configured in the `cpp_orig/bochs` checkout).
   Two files: the one-line type change in `bochs/cpu/ctrl_xfer16.cc` and a
   `bochs/cpu/HISTORY` line in upstream's own style. Checked with
   `git apply --check` against upstream master `f87c5e226` (2026-10-03); the
   code hunk also applies to the vendored snapshot. Drop the HISTORY hunk if the
   maintainer prefers to write HISTORY himself.
-- `bochs-retf16-imm16-probe.S` — the reproduction: a 512-byte boot sector,
+- `docs/bochs-retf16-imm16-probe.S` — the reproduction: a 512-byte boot sector,
   built with GNU binutils alone. Attach it to the PR, or paste it into a
   collapsed section.
 
@@ -19,7 +19,7 @@ the notes for whoever files it; they are not part of the PR.
 1. In the fork checkout, branch from current upstream master (re-run
    `git apply --check` first — upstream moves daily; the hunk is anchored on
    `RETfar16_Iw`, not on a line number, so an offset is harmless).
-2. `git am docs/bochs-retf16-imm16-fix.patch` (adjust the commit message or
+2. `git am docs/patches/bochs/bochs-retf16-imm16-fix.patch` (adjust the commit message or
    the Date header if wanted), push the branch to `r3bb1t/Bochs`, open the
    PR against `bochs-emu/Bochs` master with the body below.
 3. Then update the "Filing status" of the entry in

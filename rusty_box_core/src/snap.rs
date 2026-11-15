@@ -48,7 +48,10 @@ impl core::fmt::Display for SnapError {
                 write!(f, "snapshot section {section} overran its declared length")
             }
             Self::UnderRan { section } => {
-                write!(f, "snapshot section {section} under-ran its declared length")
+                write!(
+                    f,
+                    "snapshot section {section} under-ran its declared length"
+                )
             }
             Self::LengthOutOfRange => f.write_str("snapshot length is out of range"),
             Self::Invalid(what) => f.write_str(what),
@@ -56,6 +59,8 @@ impl core::fmt::Display for SnapError {
         }
     }
 }
+
+impl core::error::Error for SnapError {}
 
 pub type SnapResult<T = ()> = Result<T, SnapError>;
 
@@ -181,11 +186,14 @@ pub trait SnapRead {
     #[inline]
     fn read_len(&mut self, maximum: usize) -> SnapResult<usize> {
         let value = self.read_u64()?;
-        if value > u64::try_from(maximum).unwrap_or(u64::MAX).min(MAX_SECTION_LEN) {
+        if value
+            > u64::try_from(maximum)
+                .unwrap_or(u64::MAX)
+                .min(MAX_SECTION_LEN)
+        {
             return Err(SnapError::Invalid("snapshot length exceeds bound"));
         }
-        usize::try_from(value)
-            .map_err(|_| SnapError::Invalid("snapshot length does not fit usize"))
+        usize::try_from(value).map_err(|_| SnapError::Invalid("snapshot length does not fit usize"))
     }
 }
 
@@ -417,10 +425,7 @@ mod tests {
         let mut buffer = Buffer::default();
         buffer.write_u16(0xBEEF).unwrap();
         let mut too_much = [0u8; 4];
-        assert_eq!(
-            buffer.read_bytes(&mut too_much),
-            Err(SnapError::Truncated)
-        );
+        assert_eq!(buffer.read_bytes(&mut too_much), Err(SnapError::Truncated));
     }
 
     /// Saving into a buffer and reading it straight back is the round trip
@@ -485,10 +490,19 @@ mod tests {
     #[test]
     fn length_arithmetic_refuses_to_wrap_or_exceed_its_bound() {
         assert_eq!(checked_len_add(2, 3, 16), Ok(5));
-        assert_eq!(checked_len_add(u64::MAX, 1, u64::MAX), Err(SnapError::LengthOutOfRange));
-        assert_eq!(checked_len_add(10, 10, 16), Err(SnapError::LengthOutOfRange));
+        assert_eq!(
+            checked_len_add(u64::MAX, 1, u64::MAX),
+            Err(SnapError::LengthOutOfRange)
+        );
+        assert_eq!(
+            checked_len_add(10, 10, 16),
+            Err(SnapError::LengthOutOfRange)
+        );
         assert_eq!(checked_len_mul(4, 4, 16), Ok(16));
-        assert_eq!(checked_len_mul(u64::MAX, 2, u64::MAX), Err(SnapError::LengthOutOfRange));
+        assert_eq!(
+            checked_len_mul(u64::MAX, 2, u64::MAX),
+            Err(SnapError::LengthOutOfRange)
+        );
         assert_eq!(checked_len_mul(5, 4, 16), Err(SnapError::LengthOutOfRange));
     }
 }

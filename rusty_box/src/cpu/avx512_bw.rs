@@ -6,12 +6,10 @@
 //! Mirrors Bochs `cpu/avx/avx512_bw.cc`.
 
 use super::avx512_load::cut_opmask_to;
+use super::cpu::BxCpuC;
+use super::decoder::Instruction;
 use super::sse::{saturate_word_s_to_byte_s, saturate_word_s_to_byte_u};
-use super::{
-    cpu::BxCpuC,
-    decoder::Instruction,
-    xmm::BxPackedZmmRegister,
-};
+use super::xmm::BxPackedZmmRegister;
 
 /// Number of byte elements per vector length: VL0=16, VL1=32, VL2=64
 #[inline]
@@ -421,7 +419,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         for lane in 0..nlanes {
             let dword_base = lane * 4; // 4 dwords per 128-bit lane
             let word_base = lane * 8; // 8 words per 128-bit lane output
-                                      // Pack 4 dwords from src1 into low 4 words of lane
+            // Pack 4 dwords from src1 into low 4 words of lane
             for j in 0..4 {
                 result.set_zmm16s(
                     word_base + j,
@@ -498,7 +496,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
         for lane in 0..nlanes {
             let byte_base = lane * 16; // 16 bytes per 128-bit lane
-                                       // Interleave low 8 bytes from src1 and src2
+            // Interleave low 8 bytes from src1 and src2
             for j in 0..8 {
                 result.set_zmmubyte(byte_base + j * 2, src1.zmmubyte(byte_base + j));
                 result.set_zmmubyte(byte_base + j * 2 + 1, src2.zmmubyte(byte_base + j));
@@ -552,7 +550,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
         for lane in 0..nlanes {
             let word_base = lane * 8; // 8 words per 128-bit lane
-                                      // Interleave low 4 words from src1 and src2
+            // Interleave low 4 words from src1 and src2
             for j in 0..4 {
                 result.set_zmm16u(word_base + j * 2, src1.zmm16u(word_base + j));
                 result.set_zmm16u(word_base + j * 2 + 1, src2.zmm16u(word_base + j));
@@ -941,7 +939,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         };
         for lane in 0..lanes {
             let base = lane * 8; // 8 words per 128-bit lane
-            let (shuffled, copied) = if high { (base + 4, base) } else { (base, base + 4) };
+            let (shuffled, copied) = if high {
+                (base + 4, base)
+            } else {
+                (base, base + 4)
+            };
             for n in 0..4 {
                 let sel = ((order >> (2 * n)) & 3) as usize;
                 result.set_zmm16u(shuffled + n, src.zmm16u(shuffled + sel));
@@ -965,7 +967,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn evex_vpshufhw(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_pshuf_half_words(instr, true)
     }
-
 
     // ========================================================================
     // Word-granular permutes (AVX512_BW). Bochs avx512.cc VPERMW /
@@ -1008,7 +1009,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let dst = read_zmm(self, instr.dst());
         let mut result = BxPackedZmmRegister::default();
         for n in 0..elements {
-            let control = if index_from_dst { dst.zmm16u(n) } else { op1.zmm16u(n) };
+            let control = if index_from_dst {
+                dst.zmm16u(n)
+            } else {
+                op1.zmm16u(n)
+            };
             let sel = (control & control_mask) as usize;
             let from_op2 = control & (elements as u16) != 0;
             let v = if from_op2 {
@@ -1035,7 +1040,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn evex_vpermi2w(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_perm2_w(instr, true)
     }
-
 
     // ========================================================================
     // VMOVDQU8 / VMOVDQU16 — the byte- and word-granular unaligned moves.
@@ -1149,7 +1153,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.avx_masked_store16(instr, eaddr, &src, mask)
     }
 
-
     /// VDBPSADBW Vdq{k}{z}, Hdq, Wdq, Ib — EVEX.66.0F3A.W0 42.
     ///
     /// Per 128-bit lane: the r/m operand is first dword-shuffled by imm8, then
@@ -1177,23 +1180,34 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
             // xmm_shufps(tmp, op2, op2, imm8) — both halves come from op2.
             let mut tmp = [0u8; 16];
-            for (i, sel) in [order & 3, (order >> 2) & 3, (order >> 4) & 3, (order >> 6) & 3]
-                .into_iter()
-                .enumerate()
+            for (i, sel) in [
+                order & 3,
+                (order >> 2) & 3,
+                (order >> 4) & 3,
+                (order >> 6) & 3,
+            ]
+            .into_iter()
+            .enumerate()
             {
                 let from = base_b + (sel as usize) * 4;
-                tmp[i * 4..i * 4 + 4]
-                    .copy_from_slice(&[
-                        op2.zmmubyte(from),
-                        op2.zmmubyte(from + 1),
-                        op2.zmmubyte(from + 2),
-                        op2.zmmubyte(from + 3),
-                    ]);
+                tmp[i * 4..i * 4 + 4].copy_from_slice(&[
+                    op2.zmmubyte(from),
+                    op2.zmmubyte(from + 1),
+                    op2.zmmubyte(from + 2),
+                    op2.zmmubyte(from + 3),
+                ]);
             }
 
             // The eight quadruple offsets are fixed by the instruction.
             const OFFSETS: [(usize, usize); 8] = [
-                (0, 0), (0, 1), (4, 2), (4, 3), (8, 8), (8, 9), (12, 10), (12, 11),
+                (0, 0),
+                (0, 1),
+                (4, 2),
+                (4, 3),
+                (8, 8),
+                (8, 9),
+                (12, 10),
+                (12, 11),
             ];
             for (w, (o1, o2)) in OFFSETS.into_iter().enumerate() {
                 let mut sum: u32 = 0;
@@ -1210,7 +1224,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_zmm_masked_w(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
-
 }
 
 // ============================================================================
@@ -1241,25 +1254,16 @@ fn saturate_i32_to_u16(val: i32) -> u16 {
     }
 }
 
-
 /// Logical right shift of a word; a count of 16 or more yields zero.
 #[inline]
 fn word_srl(v: u16, count: u32) -> u16 {
-    if count >= 16 {
-        0
-    } else {
-        v >> count
-    }
+    if count >= 16 { 0 } else { v >> count }
 }
 
 /// Logical left shift of a word; a count of 16 or more yields zero.
 #[inline]
 fn word_sll(v: u16, count: u32) -> u16 {
-    if count >= 16 {
-        0
-    } else {
-        v << count
-    }
+    if count >= 16 { 0 } else { v << count }
 }
 
 /// Arithmetic right shift of a word. Unlike the logical shifts an
@@ -1286,8 +1290,9 @@ mod tests {
     //! These drive `execute_instruction` rather than the handler directly,
     //! because the dispatcher arm is itself part of what is under test.
 
-    use crate::cpu::decoder::{BxSegregs, Instruction};
     use rusty_box_decoder::opcode::Opcode;
+
+    use crate::cpu::decoder::{BxSegregs, Instruction};
 
     /// Register-form EVEX instruction with no masking (k0): dst=0, src1=1,
     /// src2=2.
@@ -1325,7 +1330,11 @@ mod tests {
         cpu.execute_instruction(&evex_reg(Opcode::EvexVpaddsbVdqHdqWdq, 0))
             .unwrap();
         assert_eq!(cpu.vmm[0].zmmubyte(0), 127i8 as u8, "signed positive clamp");
-        assert_eq!(cpu.vmm[0].zmmubyte(1), (-128i8) as u8, "signed negative clamp");
+        assert_eq!(
+            cpu.vmm[0].zmmubyte(1),
+            (-128i8) as u8,
+            "signed negative clamp"
+        );
 
         cpu.execute_instruction(&evex_reg(Opcode::EvexVpaddusbVdqHdqWdq, 0))
             .unwrap();
@@ -1413,7 +1422,11 @@ mod tests {
 
         cpu.execute_instruction(&evex_reg(Opcode::EvexVpsrawVdqHdqWdq, 0))
             .unwrap();
-        assert_eq!(cpu.vmm[0].zmm16u(0), 0xFFFF, "negative saturates to all ones");
+        assert_eq!(
+            cpu.vmm[0].zmm16u(0),
+            0xFFFF,
+            "negative saturates to all ones"
+        );
         assert_eq!(cpu.vmm[0].zmm16u(1), 0x0000, "positive saturates to zero");
 
         cpu.execute_instruction(&evex_reg(Opcode::EvexVpsrlwVdqHdqWdq, 0))
@@ -1490,12 +1503,16 @@ mod tests {
         i.set_vl(1);
         cpu.execute_instruction(&i).unwrap();
         assert_eq!(
-            (0..8).map(|n| cpu.vmm[0].zmm16u(n)).collect::<alloc::vec::Vec<_>>(),
+            (0..8)
+                .map(|n| cpu.vmm[0].zmm16u(n))
+                .collect::<alloc::vec::Vec<_>>(),
             [3, 2, 1, 0, 4, 5, 6, 7],
             "low four words reversed, high four untouched"
         );
         assert_eq!(
-            (8..16).map(|n| cpu.vmm[0].zmm16u(n)).collect::<alloc::vec::Vec<_>>(),
+            (8..16)
+                .map(|n| cpu.vmm[0].zmm16u(n))
+                .collect::<alloc::vec::Vec<_>>(),
             [11, 10, 9, 8, 12, 13, 14, 15],
             "the second 128-bit lane is shuffled independently"
         );
@@ -1505,12 +1522,13 @@ mod tests {
         i.set_vl(1);
         cpu.execute_instruction(&i).unwrap();
         assert_eq!(
-            (0..8).map(|n| cpu.vmm[0].zmm16u(n)).collect::<alloc::vec::Vec<_>>(),
+            (0..8)
+                .map(|n| cpu.vmm[0].zmm16u(n))
+                .collect::<alloc::vec::Vec<_>>(),
             [0, 1, 2, 3, 7, 6, 5, 4],
             "high four words reversed, low four untouched"
         );
     }
-
 
     #[test]
     fn vmovdqu8_masks_at_byte_granularity_across_all_64_lanes() {
@@ -1568,7 +1586,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn vdbpsadbw_sums_absolute_differences_over_sliding_quadruples() {
         let mut machine =
@@ -1586,7 +1603,9 @@ mod tests {
         // The eight quadruple offsets are fixed: (0,0) (0,1) (4,2) (4,3)
         // (8,8) (8,9) (12,10) (12,11).
         assert_eq!(
-            (0..8).map(|n| cpu.vmm[0].zmm16u(n)).collect::<alloc::vec::Vec<_>>(),
+            (0..8)
+                .map(|n| cpu.vmm[0].zmm16u(n))
+                .collect::<alloc::vec::Vec<_>>(),
             [0, 4, 8, 4, 0, 4, 8, 4]
         );
 
@@ -1602,5 +1621,4 @@ mod tests {
             "op1 bytes 8..11 against the repeated 0..3 differ by 8 each"
         );
     }
-
 }

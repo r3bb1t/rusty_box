@@ -159,7 +159,12 @@ pub(in crate::cpu) fn norm_subnormal_extf80_sig(sig: u64) -> ExpSig64_32 {
 // Round-and-pack to Float16
 // ============================================================
 
-pub(in crate::cpu) fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatStatus) -> Float16 {
+pub(in crate::cpu) fn round_pack_to_f16(
+    sign: bool,
+    exp: i16,
+    sig: u16,
+    status: &mut SoftFloatStatus,
+) -> Float16 {
     let rounding_mode = softfloat_get_rounding_mode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
     let mut round_increment: u16 = 0x8;
@@ -328,8 +333,7 @@ pub(in crate::cpu) fn round_pack_to_f64(
 
     if 0x7FD <= (exp as u16) {
         if exp < 0 {
-            let is_tiny =
-                (exp < -1) || (sig.wrapping_add(round_increment) < 0x8000_0000_0000_0000);
+            let is_tiny = (exp < -1) || (sig.wrapping_add(round_increment) < 0x8000_0000_0000_0000);
             if is_tiny && !softfloat_is_masked_exception(status, FLAG_UNDERFLOW) {
                 softfloat_raise_flags(status, FLAG_UNDERFLOW);
                 exp += 1536;

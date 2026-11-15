@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rusty_box::emulator::{
-    AtaSlot, BootDevice, BootOrder, DeviceClock, DiskGeometry, EmulatorConfig, Ips,
-    MachineBuilder, MemorySize, RunBudget,
+    AtaSlot, BootDevice, BootOrder, DeviceClock, DiskGeometry, EmulatorConfig, Ips, MachineBuilder,
+    MemorySize, RunBudget,
 };
 use rusty_box_whp_engine::{EngineCensus, FastMachine, FastMachineFault, StepStop, WhpEngine};
 
@@ -46,7 +46,10 @@ const SLICE_TICKS: u64 = 20_000_000;
 /// means running this repeatedly and a full-length boot is six minutes of
 /// waiting per experiment.
 fn patience() -> Duration {
-    match std::env::var("DLX_WHP_PATIENCE_SECS").ok().and_then(|secs| secs.parse().ok()) {
+    match std::env::var("DLX_WHP_PATIENCE_SECS")
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+    {
         Some(secs) => Duration::from_secs(secs),
         None => Duration::from_secs(360),
     }
@@ -106,10 +109,9 @@ fn boot() -> i32 {
             return 1;
         }
     };
-    let vga_bios = std::fs::read(
-        root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"),
-    )
-    .ok();
+    let vga_bios =
+        std::fs::read(root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"))
+            .ok();
     let disk = root.join("dlxlinux/hd10meg.img");
     if !disk.exists() {
         eprintln!("no DLX disk image at {}", disk.display());
@@ -232,7 +234,9 @@ fn boot() -> i32 {
         };
         if let Some(screen) = seen.clone() {
             if screen != shown {
-                for (line, was) in screen.lines().zip(shown.lines().chain(std::iter::repeat("")))
+                for (line, was) in screen
+                    .lines()
+                    .zip(shown.lines().chain(std::iter::repeat("")))
                 {
                     let line = line.trim_end();
                     if line != was.trim_end() && !line.is_empty() {
@@ -358,7 +362,11 @@ fn report(reached: usize, began: Instant, ticks: u64, machine: &mut FastMachine<
         ticks / 1_000_000
     );
     for (index, (name, needle)) in MILESTONES.iter().enumerate() {
-        let mark = if index < reached { "reached" } else { "NOT reached" };
+        let mark = if index < reached {
+            "reached"
+        } else {
+            "NOT reached"
+        };
         println!("  {mark}: {name}  (looking for {needle:?})");
     }
     println!(
@@ -440,7 +448,10 @@ fn report(reached: usize, began: Instant, ticks: u64, machine: &mut FastMachine<
     println!("  placed per vector:       {}", per_vector(&placed));
     match acknowledged {
         Ok(acknowledged) => {
-            println!("  acknowledged per vector: {}", per_vector(&acknowledged.per_vector));
+            println!(
+                "  acknowledged per vector: {}",
+                per_vector(&acknowledged.per_vector)
+            );
             println!(
                 "  acknowledges {}  injected {}",
                 acknowledged.total, census.injections.injected
@@ -497,11 +508,12 @@ fn dump(machine: &mut FastMachine<()>) {
     }
     // DLX's machine leaves the port-0xE9 console off, as `dlxlinux` does
     // unless asked; a machine without one has nothing to report here.
-    let debug_console = |m: &mut rusty_box::emulator::Emulator<(), rusty_box_whp_engine::WhpEngine>| {
-        m.debug_port()
-            .map(|mut port| port.take_output().collect::<Vec<u8>>())
-            .unwrap_or_default()
-    };
+    let debug_console =
+        |m: &mut rusty_box::emulator::Emulator<(), rusty_box_whp_engine::WhpEngine>| {
+            m.debug_port()
+                .map(|mut port| port.take_output().collect::<Vec<u8>>())
+                .unwrap_or_default()
+        };
     match machine.with_machine(debug_console) {
         Ok(debugcon) if debugcon.is_empty() => {}
         Ok(debugcon) => println!("port 0xE9 said: {}", String::from_utf8_lossy(&debugcon)),

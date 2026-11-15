@@ -9,7 +9,7 @@
 //! drop the `spin` dependency.
 
 /// AUTODIN II / Ethernet / FDDI polynomial.
-const CRC32_POLY: u32 = 0x04c11db7;
+const CRC32_POLY: u32 = 0x04C11DB7;
 
 /// Build the auxiliary table for parallel byte-at-a-time CRC-32.
 /// `const fn` — evaluated at compile time, table baked into .rodata.

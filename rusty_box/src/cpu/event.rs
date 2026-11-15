@@ -1,12 +1,13 @@
-use super::{
-    cpu::CpuActivityState,
-    decoder::BxSegregs,
-    eflags::EFlags,
-    exec_ctx::ExecCtx,
-    svm::{SvmVmexit, BX_VM_CR_MSR_INIT_REDIRECT_MASK, SVM_INTERCEPT0_INIT, SVM_INTERCEPT0_SMI},
-    vmx::VmxVmexitReason,
-    BxCpuC,
+use super::BxCpuC;
+use super::cpu::CpuActivityState;
+use super::decoder::BxSegregs;
+use super::eflags::EFlags;
+use super::exec_ctx::ExecCtx;
+use super::svm::{
+    BX_VM_CR_MSR_INIT_REDIRECT_MASK, SVM_INTERCEPT0_INIT, SVM_INTERCEPT0_SMI, SvmVmexit,
 };
+use super::vmx::VmxVmexitReason;
+use crate::config::{BxEffAddress, BxLinAddress};
 
 /// What one INTA moment produced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,7 +64,10 @@ pub enum HardwareEvent {
     Nmi,
     /// An exception, with the error code the processor reported for it — zero
     /// for a vector that pushes none.
-    Exception { vector: super::cpu::Exception, error_code: u16 },
+    Exception {
+        vector: super::cpu::Exception,
+        error_code: u16,
+    },
 }
 
 /// Async-event servicing runs on the execution context: interrupt delivery
@@ -462,13 +466,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                         }
                     }
                 }
-                AcknowledgedInterrupt::Pic(vector) => match self.deliver_acknowledged_interrupt(vector) {
-                    Ok(Delivered::Entered) => {}
-                    Ok(Delivered::Restarted) => return false,
-                    Err(e) => {
-                        tracing::warn!("PIC interrupt delivery failed: {:?}", e);
+                AcknowledgedInterrupt::Pic(vector) => {
+                    match self.deliver_acknowledged_interrupt(vector) {
+                        Ok(Delivered::Entered) => {}
+                        Ok(Delivered::Restarted) => return false,
+                        Err(e) => {
+                            tracing::warn!("PIC interrupt delivery failed: {:?}", e);
+                        }
                     }
-                },
+                }
                 AcknowledgedInterrupt::None => {}
             }
         } else if self.get_hrq() {
@@ -760,9 +766,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         // the 8259 with the legacy event never having been raised at all.
         if self.lapic.lint0_admits_ext_int() && self.device_manager.irq.int_pin_asserted() {
             let vector = self.device_manager.irq.acknowledge();
-            tracing::trace!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
-            vector, self.rip(), self.sregs[0].selector.value,
-            self.cpu_mode, self.eflags.contains(super::eflags::EFlags::IF_));
+            tracing::trace!(
+                "HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
+                vector,
+                self.rip(),
+                self.sregs[0].selector.value,
+                self.cpu_mode,
+                self.eflags.contains(super::eflags::EFlags::IF_)
+            );
             // Wake from halt if needed
             self.activity_state = CpuActivityState::Active;
             AcknowledgedInterrupt::Pic(vector)
@@ -780,7 +791,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             // still asserted, and telling the 8259 its pin fell would retire
             // the edge the guest owes itself once it unmasks.
             if !self.device_manager.irq.int_pin_asserted() {
-                self.device_manager.irq.pic_mut().reconcile_deasserted_intr();
+                self.device_manager
+                    .irq
+                    .pic_mut()
+                    .reconcile_deasserted_intr();
             }
             self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
             if self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR == 0 {
@@ -855,7 +869,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             self.signal_event(Self::BX_EVENT_INIT);
         }
     }
-
 }
 
 /// Startup-IPI delivery runs on the execution context: a SIPI taken in VMX
@@ -872,7 +885,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             return;
         }
 
-        self.unmask_event(BxCpuC::<T>::BX_EVENT_INIT | BxCpuC::<T>::BX_EVENT_SMI | BxCpuC::<T>::BX_EVENT_NMI);
+        self.unmask_event(
+            BxCpuC::<T>::BX_EVENT_INIT | BxCpuC::<T>::BX_EVENT_SMI | BxCpuC::<T>::BX_EVENT_NMI,
+        );
         // Bochs event.cc deliver_SIPI: SIPI arriving while in VMX non-root
         // operation (guest activity state wait-for-SIPI) causes
         // VMexit(VMX_VMEXIT_SIPI, vector) — the exit unwinds (Bochs longjmp),
@@ -902,7 +917,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
-
     /// Whether this CPU would deliver a Priority-4 debug trap at its next
     /// async-event boundary.
     ///
@@ -927,24 +941,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// base must be applied (nonzero in real mode and non-flat protected
     /// segments; zero in 64-bit).
     fn pending_code_breakpoint_trap(&self) -> u32 {
-        let laddr = if self.long64_mode() {
-            self.get_laddr64(BxSegregs::Cs as usize, self.prev_rip)
-        } else {
-            u64::from(self.get_laddr32(BxSegregs::Cs as usize, self.prev_rip as u32))
-        };
+        let laddr = self.get_laddr(BxSegregs::Cs as usize, BxEffAddress::new(self.prev_rip));
         self.code_breakpoint_match(laddr)
     }
 
     /// Check code (instruction-execution) breakpoints at `laddr`.
     /// Bochs crregs.cc `code_breakpoint_match`.
-    fn code_breakpoint_match(&self, laddr: u64) -> u32 {
+    fn code_breakpoint_match(&self, laddr: BxLinAddress) -> u32 {
         // RF suppresses instruction breakpoints for exactly one instruction.
         if self.eflags.contains(EFlags::RF) {
             return 0;
         }
         if self.dr7.bp_enabled() != 0 {
             return self.hwdebug_compare(
-                laddr,
+                laddr.get(),
                 1,
                 Self::BX_HW_DEBUG_INSTRUCTION,
                 Self::BX_HW_DEBUG_INSTRUCTION,
@@ -1001,10 +1011,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BxPhyAddress;
+    use crate::cpu::ResetReason;
     use crate::cpu::arch_state::VcpuArchState;
     use crate::cpu::builder::BxCpuBuilder;
     use crate::cpu::cpu::Exception;
-    use crate::cpu::ResetReason;
     use crate::params::{BxParams, CpuTopology};
 
     const IA32_APIC_BASE_BSP_FLAG: u64 = 0x100;
@@ -1132,10 +1143,7 @@ mod tests {
             0,
             "AP must not advertise BSP bit"
         );
-        assert_ne!(
-            ap.async_event & BxCpuC::<()>::BX_ASYNC_EVENT_SLEEP,
-            0
-        );
+        assert_ne!(ap.async_event & BxCpuC::<()>::BX_ASYNC_EVENT_SLEEP, 0);
     }
 
     #[test]
@@ -1161,10 +1169,7 @@ mod tests {
         ap.set_rax(NONZERO_RAX_SENTINEL);
 
         ap.deliver_init();
-        assert_ne!(
-            ap.pending_event & BxCpuC::<()>::BX_EVENT_INIT,
-            0
-        );
+        assert_ne!(ap.pending_event & BxCpuC::<()>::BX_EVENT_INIT, 0);
         let exited = bus.ctx(&mut ap).handle_async_event();
 
         assert!(exited, "AP entering WAIT_FOR_SIPI must exit the cpu loop");
@@ -1283,7 +1288,7 @@ mod tests {
         cpu.dr7 = BxDr7::from_bits_retain(0x1);
         cpu.eflags.remove(crate::cpu::eflags::EFlags::RF);
 
-        let bits = cpu.code_breakpoint_match(0x1234);
+        let bits = cpu.code_breakpoint_match(BxLinAddress::new(0x1234));
         assert_ne!(bits & 0x1, 0, "B0 status bit must be set on a match");
         assert_ne!(
             bits & BxCpuC::<()>::BX_DEBUG_TRAP_HIT,
@@ -1292,11 +1297,11 @@ mod tests {
         );
 
         // A different address does not match.
-        assert_eq!(cpu.code_breakpoint_match(0x5678), 0);
+        assert_eq!(cpu.code_breakpoint_match(BxLinAddress::new(0x5678)), 0);
 
         // RF suppresses instruction breakpoints for one instruction.
         cpu.eflags.insert(crate::cpu::eflags::EFlags::RF);
-        assert_eq!(cpu.code_breakpoint_match(0x1234), 0);
+        assert_eq!(cpu.code_breakpoint_match(BxLinAddress::new(0x1234)), 0);
     }
 
     /// Bochs event.cc Priority 4 compares DR0-3 against
@@ -1348,7 +1353,7 @@ mod tests {
         cpu.dr7 = BxDr7::from_bits_retain(1 << 2); // L1 enabled, L0 disabled
         cpu.eflags.remove(crate::cpu::eflags::EFlags::RF);
 
-        let bits = cpu.code_breakpoint_match(0x2000);
+        let bits = cpu.code_breakpoint_match(BxLinAddress::new(0x2000));
         assert_ne!(bits & 0x1, 0, "B0 status bit still reported for a match");
         assert_eq!(
             bits & BxCpuC::<()>::BX_DEBUG_TRAP_HIT,
@@ -1475,9 +1480,12 @@ mod tests {
         assert_eq!(ap.activity_state, CpuActivityState::WaitForSipi);
 
         // VMENTRY with guest activity state 3 leaves the CPU in
-        // WAIT_FOR_SIPI while in VMX non-root operation.
+        // WAIT_FOR_SIPI while in VMX non-root operation, from a current
+        // VMCS (VMLAUNCH needs one), which the SIPI's VM exit writes back
+        // into (Bochs vmx.cc VMexit).
         ap.in_vmx = true;
         ap.in_vmx_guest = true;
+        ap.vmcsptr = BxPhyAddress::new(0x5_0000);
 
         bus.ctx(&mut ap).deliver_sipi(TEST_SIPI_VECTOR);
 
@@ -1492,8 +1500,7 @@ mod tests {
             "SIPI VMexit must not load the startup CS"
         );
         assert_eq!(
-            ap.event_mask
-                & (BxCpuC::<()>::BX_EVENT_SMI | BxCpuC::<()>::BX_EVENT_NMI),
+            ap.event_mask & (BxCpuC::<()>::BX_EVENT_SMI | BxCpuC::<()>::BX_EVENT_NMI),
             0,
             "SIPI unmasks SMI/NMI before the VMexit (Bochs deliver_SIPI)"
         );
@@ -1630,11 +1637,11 @@ mod tests {
     /// so the LAPIC will deliver it, and distinct from every 8259 vector.
     const LAPIC_VECTOR: u8 = 0x41;
     /// xAPIC spurious-vector register offset (Bochs apic.h BX_LAPIC_SPURIOUS_VECTOR).
-    const LAPIC_SVR_OFFSET: u64 = 0xF0;
+    const LAPIC_SVR_OFFSET: u32 = 0xF0;
     /// The guest-visible IRR/ISR word holding [`LAPIC_VECTOR`]'s bit:
     /// word 0x41 / 32 = 2 of the register file (Bochs apic.cc read_aligned).
-    const LAPIC_VECTOR_ISR_OFFSET: u64 = 0x120;
-    const LAPIC_VECTOR_IRR_OFFSET: u64 = 0x220;
+    const LAPIC_VECTOR_ISR_OFFSET: u32 = 0x120;
+    const LAPIC_VECTOR_IRR_OFFSET: u32 = 0x220;
     /// Bit 0x41 % 32 = 1 inside that word.
     const LAPIC_VECTOR_REG_BIT: u32 = 1 << 1;
 
@@ -1644,7 +1651,7 @@ mod tests {
     /// survive the LAPIC's turn: the next pop answers with the PIC's vector.
     #[test]
     fn the_lapic_outranks_the_pic_and_the_pic_request_survives() {
-        use crate::cpu::apic::{ApicDeliveryMode, APIC_EDGE_TRIGGERED};
+        use crate::cpu::apic::{APIC_EDGE_TRIGGERED, ApicDeliveryMode};
 
         let (mut cpu, mut bus) = machine_with_irq1_raised();
         // The guest software-enables its LAPIC before use — an SVR write
@@ -1710,7 +1717,7 @@ mod tests {
     /// INTA cycle this boundary — its request stays latched for the next one.
     #[test]
     fn a_zero_vector_from_the_lapic_is_delivered_and_the_pic_waits() {
-        use crate::cpu::apic::{ApicDeliveryMode, APIC_EDGE_TRIGGERED};
+        use crate::cpu::apic::{APIC_EDGE_TRIGGERED, ApicDeliveryMode};
 
         let (mut cpu, mut bus) = machine_with_irq1_raised();
         // The guest software-enables the LAPIC with spurious vector 0.
@@ -1806,7 +1813,10 @@ mod tests {
         let mut bus = TestBus::new();
         cpu.reset(ResetReason::Hardware);
         cpu.activity_state = CpuActivityState::Mwait;
-        cpu.monitor.arm(0x1000, crate::cpu::cpu::BX_MONITOR_ARMED_BY_MONITOR);
+        cpu.monitor.arm(
+            BxPhyAddress::new(0x1000),
+            crate::cpu::cpu::BX_MONITOR_ARMED_BY_MONITOR,
+        );
         cpu.inhibit_mask = INHIBITED;
         cpu.unmask_event(BxCpuC::<()>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
         cpu.signal_event(BxCpuC::<()>::BX_EVENT_VMX_PREEMPTION_TIMER_EXPIRED);
@@ -1884,15 +1894,15 @@ mod tests {
     /// entry.
     fn install_real_mode_guest(bus: &mut TestBus, code: &[u8]) {
         bus.memory
-            .write_ram(u64::from(TRAP_CODE), code)
+            .write_ram(BxPhyAddress::new(u64::from(TRAP_CODE)), code)
             .expect("the guest's code is RAM");
         bus.memory
-            .write_ram(u64::from(TRAP_HANDLER), &[0xCF])
+            .write_ram(BxPhyAddress::new(u64::from(TRAP_HANDLER)), &[0xCF])
             .expect("the handler is RAM");
         let mut vector = [0u8; 4];
         vector[..2].copy_from_slice(&TRAP_HANDLER.to_le_bytes());
         bus.memory
-            .write_ram(IVT_VECTOR_1, &vector)
+            .write_ram(BxPhyAddress::new(IVT_VECTOR_1), &vector)
             .expect("the IVT is RAM");
     }
 
@@ -1928,7 +1938,7 @@ mod tests {
         let mut word = [0u8; 2];
         let read = bus
             .memory
-            .read_ram(addr, &mut word)
+            .read_ram(BxPhyAddress::new(addr), &mut word)
             .expect("the stack is RAM");
         assert_eq!(read, word.len(), "a whole word is readable at {addr:#x}");
         u16::from_le_bytes(word)
@@ -1981,7 +1991,10 @@ mod tests {
             !cpu.eflags.contains(EFlags::TF),
             "TF is clear for the handler"
         );
-        assert_eq!(cpu.debug_trap, 0, "nothing is left latched for the next errand");
+        assert_eq!(
+            cpu.debug_trap, 0,
+            "nothing is left latched for the next errand"
+        );
     }
 
     /// An errand whose instruction SETS TF owes nothing, and leaves nothing
@@ -2004,7 +2017,7 @@ mod tests {
         // The word POPF pops: TF set.
         bus.memory
             .write_ram(
-                u64::from(TRAP_STACK_TOP),
+                BxPhyAddress::new(u64::from(TRAP_STACK_TOP)),
                 &((RFLAGS_RESERVED | RFLAGS_TF) as u16).to_le_bytes(),
             )
             .expect("the stack is RAM");
@@ -2018,7 +2031,11 @@ mod tests {
             u64::from(TRAP_CODE + 1),
             "no trap after the instruction that set TF"
         );
-        assert_eq!(cpu.sp(), TRAP_STACK_TOP + 2, "POPF popped and nothing was pushed");
+        assert_eq!(
+            cpu.sp(),
+            TRAP_STACK_TOP + 2,
+            "POPF popped and nothing was pushed"
+        );
         assert_eq!(cpu.debug_trap, 0, "no latch survives the errand");
 
         // The hardware runs the guest from here and takes the next step
@@ -2036,7 +2053,10 @@ mod tests {
         );
         assert_eq!(cpu.sp(), TRAP_STACK_TOP + 2, "no frame was pushed");
         assert!(!cpu.dr6.bs(), "DR6.BS never reported a step");
-        assert_eq!(cpu.debug_trap, 0, "no latch survives the second errand either");
+        assert_eq!(
+            cpu.debug_trap, 0,
+            "no latch survives the second errand either"
+        );
     }
 
     /// `MOV SS` inhibits the trap for exactly one instruction (Bochs cpu.h
@@ -2054,7 +2074,11 @@ mod tests {
 
         run_one_errand(&mut bus, &mut cpu);
 
-        assert_eq!(cpu.bx(), 1, "the shadowed instruction retired before the trap");
+        assert_eq!(
+            cpu.bx(),
+            1,
+            "the shadowed instruction retired before the trap"
+        );
         assert_eq!(
             cpu.rip(),
             u64::from(TRAP_HANDLER),
@@ -2066,7 +2090,10 @@ mod tests {
             "the saved IP is past the instruction MOV SS shadowed"
         );
         assert!(cpu.dr6.bs(), "DR6.BS reports a single step");
-        assert_eq!(cpu.debug_trap, 0, "nothing is left latched for the next errand");
+        assert_eq!(
+            cpu.debug_trap, 0,
+            "nothing is left latched for the next errand"
+        );
     }
 
     /// A processor that goes to sleep owing a step keeps the step for its
@@ -2083,7 +2110,7 @@ mod tests {
         install_real_mode_guest(&mut bus, &[0x8E, 0xD0, 0xF4]);
         // The handler: inc cx ; iret — its first instruction marks the wake.
         bus.memory
-            .write_ram(u64::from(TRAP_HANDLER), &[0x41, 0xCF])
+            .write_ram(BxPhyAddress::new(u64::from(TRAP_HANDLER)), &[0x41, 0xCF])
             .expect("the handler is RAM");
         reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED | RFLAGS_TF);
 
@@ -2126,9 +2153,7 @@ mod tests {
         // The machine wakes it the way the slice head does: an event arrives
         // and the halted processor is handed one interpreted instruction.
         cpu.signal_event(BxCpuC::<()>::BX_EVENT_NMI);
-        bus.io()
-            .emulate_one(&mut cpu)
-            .expect("the wake retires");
+        bus.io().emulate_one(&mut cpu).expect("the wake retires");
 
         assert_eq!(cpu.activity_state, CpuActivityState::Active);
         assert_eq!(
@@ -2165,7 +2190,7 @@ mod tests {
         let mut entry = [0u8; 4];
         entry[..2].copy_from_slice(&handler.to_le_bytes());
         bus.memory
-            .write_ram(u64::from(vector) * 4, &entry)
+            .write_ram(BxPhyAddress::new(u64::from(vector) * 4), &entry)
             .expect("the IVT is RAM");
     }
 
@@ -2177,7 +2202,10 @@ mod tests {
 
     fn frame_at_the_top(bus: &mut TestBus, cpu: &BxCpuC) -> RealModeFrame {
         let sp = u64::from(cpu.sp());
-        RealModeFrame { ip: read_word(bus, sp), flags: read_word(bus, sp + 4) }
+        RealModeFrame {
+            ip: read_word(bus, sp),
+            flags: read_word(bus, sp + 4),
+        }
     }
 
     fn deliver(bus: &mut TestBus, cpu: &mut BxCpuC, event: HardwareEvent) {
@@ -2198,13 +2226,25 @@ mod tests {
         point_vector_at(&mut bus, 0x30, DELIVERY_HANDLER);
         reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED | IF);
 
-        deliver(&mut bus, &mut cpu, HardwareEvent::ExternalInterrupt { vector: 0x30 });
+        deliver(
+            &mut bus,
+            &mut cpu,
+            HardwareEvent::ExternalInterrupt { vector: 0x30 },
+        );
 
-        assert_eq!(cpu.rip(), u64::from(DELIVERY_HANDLER), "the vector's handler is entered");
+        assert_eq!(
+            cpu.rip(),
+            u64::from(DELIVERY_HANDLER),
+            "the vector's handler is entered"
+        );
         assert_eq!(cpu.bx(), 0, "the instruction at RIP did not run");
         let frame = frame_at_the_top(&mut bus, &cpu);
         assert_eq!(frame.ip, TRAP_CODE, "the handler returns to the boundary");
-        assert_eq!(u64::from(frame.flags) & IF, IF, "the frame keeps the guest's IF");
+        assert_eq!(
+            u64::from(frame.flags) & IF,
+            IF,
+            "the frame keeps the guest's IF"
+        );
         assert!(!cpu.interrupts_enabled(), "the handler runs with IF clear");
     }
 
@@ -2219,7 +2259,11 @@ mod tests {
 
         deliver(&mut bus, &mut cpu, HardwareEvent::Nmi);
 
-        assert_eq!(cpu.rip(), u64::from(DELIVERY_HANDLER), "vector 2's handler is entered");
+        assert_eq!(
+            cpu.rip(),
+            u64::from(DELIVERY_HANDLER),
+            "vector 2's handler is entered"
+        );
         assert_eq!(cpu.bx(), 0, "the instruction at RIP did not run");
         assert_eq!(frame_at_the_top(&mut bus, &cpu).ip, TRAP_CODE);
         cpu.deliver_nmi();
@@ -2244,12 +2288,23 @@ mod tests {
         deliver(
             &mut bus,
             &mut cpu,
-            HardwareEvent::Exception { vector: Exception::Ud, error_code: 0 },
+            HardwareEvent::Exception {
+                vector: Exception::Ud,
+                error_code: 0,
+            },
         );
 
-        assert_eq!(cpu.rip(), u64::from(DELIVERY_HANDLER), "#UD's handler is entered");
+        assert_eq!(
+            cpu.rip(),
+            u64::from(DELIVERY_HANDLER),
+            "#UD's handler is entered"
+        );
         assert_eq!(cpu.bx(), 0, "the instruction at RIP did not run");
-        assert_eq!(frame_at_the_top(&mut bus, &cpu).ip, TRAP_CODE, "the frame names the boundary");
+        assert_eq!(
+            frame_at_the_top(&mut bus, &cpu).ip,
+            TRAP_CODE,
+            "the frame names the boundary"
+        );
     }
 
     /// A delivery that faults is the fault: the IVT is too short for the
@@ -2266,7 +2321,11 @@ mod tests {
         reset_into_real_mode_at(&mut cpu, RFLAGS_RESERVED);
         cpu.set_idtr_limit_for_api(SIXTEEN_VECTORS);
 
-        deliver(&mut bus, &mut cpu, HardwareEvent::ExternalInterrupt { vector: 0x30 });
+        deliver(
+            &mut bus,
+            &mut cpu,
+            HardwareEvent::ExternalInterrupt { vector: 0x30 },
+        );
 
         assert_eq!(cpu.rip(), u64::from(GP_HANDLER), "#GP's handler is entered");
         assert_eq!(cpu.bx(), 0, "the instruction at RIP did not run");

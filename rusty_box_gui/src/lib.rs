@@ -21,29 +21,41 @@ mod android_support;
 #[cfg(feature = "gui-egui")]
 pub mod app;
 pub mod args;
-#[cfg(feature = "gui-egui")]
-pub(crate) mod shell;
 pub mod config;
 #[cfg(all(not(target_arch = "wasm32"), feature = "gui-egui"))]
 pub(crate) mod debugger;
 mod disk_images;
-mod hard_disk;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod library;
 pub mod error;
 #[cfg(all(feature = "guest-trace", not(target_arch = "wasm32")))]
 pub mod guest_trace;
+mod hard_disk;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod library;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runner;
 #[cfg(all(not(target_arch = "wasm32"), feature = "gui-egui"))]
 pub(crate) mod sessions;
+#[cfg(feature = "gui-egui")]
+pub(crate) mod shell;
+#[cfg(all(not(target_arch = "wasm32"), feature = "gui-egui"))]
+pub(crate) mod source;
+#[cfg(all(not(target_arch = "wasm32"), feature = "gui-egui"))]
+pub(crate) mod symbol_settings;
+#[cfg(all(not(target_arch = "wasm32"), feature = "gui-egui"))]
+pub(crate) mod symbols;
+#[cfg(not(target_arch = "wasm32"))]
+mod virt_runner;
 
 pub use args::{Args, BootDevice, DiskGeometry, DisplayBackend};
 pub use config::{FileConfig, ResolvedConfig};
 pub use error::RunError;
-#[cfg(not(target_arch = "wasm32"))]
-pub use runner::{run, run_resolved, RunSummary};
+#[cfg(all(
+    feature = "gui-egui",
+    not(target_arch = "wasm32"),
+    not(target_os = "android")
+))]
+pub use runner::run_shell;
 #[cfg(all(feature = "gui-egui", not(target_arch = "wasm32")))]
 pub use runner::{LaunchSource, LaunchVm, ShellOpening, ShellStart};
-#[cfg(all(feature = "gui-egui", not(target_arch = "wasm32"), not(target_os = "android")))]
-pub use runner::run_shell;
+#[cfg(not(target_arch = "wasm32"))]
+pub use runner::{RunSummary, run, run_resolved};

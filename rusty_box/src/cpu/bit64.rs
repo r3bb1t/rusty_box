@@ -1,8 +1,6 @@
 //! 64-bit bit scan and bit test instructions: BSF, BSR, BT, BTS, BTR, BTC
 //! Matching Bochs bit64.cc and logical64.cc (BT variants)
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -71,7 +69,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let mut addr = eaddr.wrapping_add(displacement as u64);
             // Bochs bit64.cc: truncate to 32 bits when 67h prefix (as64L=0)
             if instr.as64_l() == 0 {
-                addr &= 0xFFFF_FFFF;
+                addr = addr.masked(0xFFFF_FFFF);
             }
             let op1 = self.read_virtual_qword_64(seg, addr)?;
             let bit_index = op2 & 0x3F;
@@ -96,7 +94,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let displacement = (op2 as i64 >> 6) * 8;
             let mut addr = eaddr.wrapping_add(displacement as u64);
             if instr.as64_l() == 0 {
-                addr &= 0xFFFF_FFFF;
+                addr = addr.masked(0xFFFF_FFFF);
             }
             let op1 = self.read_rmw_virtual_qword_64(seg, addr)?;
             let bit_index = op2 & 0x3F;
@@ -122,7 +120,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let displacement = (op2 as i64 >> 6) * 8;
             let mut addr = eaddr.wrapping_add(displacement as u64);
             if instr.as64_l() == 0 {
-                addr &= 0xFFFF_FFFF;
+                addr = addr.masked(0xFFFF_FFFF);
             }
             let op1 = self.read_rmw_virtual_qword_64(seg, addr)?;
             let bit_index = op2 & 0x3F;
@@ -148,7 +146,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let displacement = (op2 as i64 >> 6) * 8;
             let mut addr = eaddr.wrapping_add(displacement as u64);
             if instr.as64_l() == 0 {
-                addr &= 0xFFFF_FFFF;
+                addr = addr.masked(0xFFFF_FFFF);
             }
             let op1 = self.read_rmw_virtual_qword_64(seg, addr)?;
             let bit_index = op2 & 0x3F;

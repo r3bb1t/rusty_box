@@ -19,33 +19,33 @@ const FLOATX80_ONE: ExtFloat80 = ExtFloat80 {
 // --- sin_arr[11] from Bochs fsincos.cc ---
 
 const SIN_ARR: [Float128; 11] = [
-    Float128::new(0x3fff000000000000, 0x0000000000000000), /*  1 */
-    Float128::new(0xbffc555555555555, 0x5555555555555555), /*  3 */
-    Float128::new(0x3ff8111111111111, 0x1111111111111111), /*  5 */
-    Float128::new(0xbff2a01a01a01a01, 0xa01a01a01a01a01a), /*  7 */
-    Float128::new(0x3fec71de3a556c73, 0x38faac1c88e50017), /*  9 */
-    Float128::new(0xbfe5ae64567f544e, 0x38fe747e4b837dc7), /* 11 */
-    Float128::new(0x3fde6124613a86d0, 0x97ca38331d23af68), /* 13 */
-    Float128::new(0xbfd6ae7f3e733b81, 0xf11d8656b0ee8cb0), /* 15 */
-    Float128::new(0x3fce952c77030ad4, 0xa6b2605197771b00), /* 17 */
-    Float128::new(0xbfc62f49b4681415, 0x724ca1ec3b7b9675), /* 19 */
-    Float128::new(0x3fbd71b8ef6dcf57, 0x18bef146fcee6e45), /* 21 */
+    Float128::new(0x3FFF000000000000, 0x0000000000000000), /*  1 */
+    Float128::new(0xBFFC555555555555, 0x5555555555555555), /*  3 */
+    Float128::new(0x3FF8111111111111, 0x1111111111111111), /*  5 */
+    Float128::new(0xBFF2A01A01A01A01, 0xA01A01A01A01A01A), /*  7 */
+    Float128::new(0x3FEC71DE3A556C73, 0x38FAAC1C88E50017), /*  9 */
+    Float128::new(0xBFE5AE64567F544E, 0x38FE747E4B837DC7), /* 11 */
+    Float128::new(0x3FDE6124613A86D0, 0x97CA38331D23AF68), /* 13 */
+    Float128::new(0xBFD6AE7F3E733B81, 0xF11D8656B0EE8CB0), /* 15 */
+    Float128::new(0x3FCE952C77030AD4, 0xA6B2605197771B00), /* 17 */
+    Float128::new(0xBFC62F49B4681415, 0x724CA1EC3B7B9675), /* 19 */
+    Float128::new(0x3FBD71B8EF6DCF57, 0x18BEF146FCEE6E45), /* 21 */
 ];
 
 // --- cos_arr[11] from Bochs fsincos.cc ---
 
 const COS_ARR: [Float128; 11] = [
-    Float128::new(0x3fff000000000000, 0x0000000000000000), /*  0 */
-    Float128::new(0xbffe000000000000, 0x0000000000000000), /*  2 */
-    Float128::new(0x3ffa555555555555, 0x5555555555555555), /*  4 */
-    Float128::new(0xbff56c16c16c16c1, 0x6c16c16c16c16c17), /*  6 */
-    Float128::new(0x3fefa01a01a01a01, 0xa01a01a01a01a01a), /*  8 */
-    Float128::new(0xbfe927e4fb7789f5, 0xc72ef016d3ea6679), /* 10 */
-    Float128::new(0x3fe21eed8eff8d89, 0x7b544da987acfe85), /* 12 */
-    Float128::new(0xbfda93974a8c07c9, 0xd20badf145dfa3e5), /* 14 */
-    Float128::new(0x3fd2ae7f3e733b81, 0xf11d8656b0ee8cb0), /* 16 */
-    Float128::new(0xbfca6827863b97d9, 0x77bb004886a2c2ab), /* 18 */
-    Float128::new(0x3fc1e542ba402022, 0x507a9cad2bf8f0bb), /* 20 */
+    Float128::new(0x3FFF000000000000, 0x0000000000000000), /*  0 */
+    Float128::new(0xBFFE000000000000, 0x0000000000000000), /*  2 */
+    Float128::new(0x3FFA555555555555, 0x5555555555555555), /*  4 */
+    Float128::new(0xBFF56C16C16C16C1, 0x6C16C16C16C16C17), /*  6 */
+    Float128::new(0x3FEFA01A01A01A01, 0xA01A01A01A01A01A), /*  8 */
+    Float128::new(0xBFE927E4FB7789F5, 0xC72EF016D3EA6679), /* 10 */
+    Float128::new(0x3FE21EED8EFF8D89, 0x7B544DA987ACFE85), /* 12 */
+    Float128::new(0xBFDA93974A8C07C9, 0xD20BADF145DFA3E5), /* 14 */
+    Float128::new(0x3FD2AE7F3E733B81, 0xF11D8656B0EE8CB0), /* 16 */
+    Float128::new(0xBFCA6827863B97D9, 0x77BB004886A2C2AB), /* 18 */
+    Float128::new(0x3FC1E542BA402022, 0x507A9CAD2BF8F0BB), /* 20 */
 ];
 
 /// Polynomial approximation for sin(x), 0 <= x <= pi/4 (from Bochs fsincos.cc poly_sin).
@@ -155,11 +155,7 @@ fn sincos_approximation(
     if (quotient & 2) != 0 {
         neg = !neg;
     }
-    if neg {
-        floatx80_chs(ext)
-    } else {
-        ext
-    }
+    if neg { floatx80_chs(ext) } else { ext }
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +310,10 @@ pub(in crate::cpu) fn fsincos_single(
 
 /// Compute both sin and cos of a ExtFloat80 value using Float128 polynomial evaluation.
 /// Ported from Bochs fsincos.cc fsincos().
-pub(in crate::cpu) fn fsincos_both(a: ExtFloat80, status: &mut SoftFloatStatus) -> SinCosBothResult {
+pub(in crate::cpu) fn fsincos_both(
+    a: ExtFloat80,
+    status: &mut SoftFloatStatus,
+) -> SinCosBothResult {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) {
         softfloat_raise_flags(status, FLAG_INVALID);

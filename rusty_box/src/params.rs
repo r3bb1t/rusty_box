@@ -230,7 +230,8 @@ impl BxParams {
     /// What a triple fault does on a machine that boots firmware: the
     /// caller's choice, or Bochs's default reset.
     pub(crate) fn on_triple_fault_with_firmware(&self) -> OnTripleFault {
-        self.cpu_on_triple_fault.unwrap_or(OnTripleFault::ResetTheMachine)
+        self.cpu_on_triple_fault
+            .unwrap_or(OnTripleFault::ResetTheMachine)
     }
 
     /// What a triple fault does on a machine set up without firmware: the

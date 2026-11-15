@@ -19,6 +19,17 @@ impl ShellPage {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const ALL: [Self; 4] = [Self::Home, Self::Console, Self::Hardware, Self::Debugger];
 
+    /// The pages a VM of `machine` has, in the order the tree draws them.
+    /// The Debugger page reads a PC's processors and memory, so an Arm
+    /// board's VM has no Debugger page.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const fn of(machine: crate::config::MachineKind) -> &'static [Self] {
+        match machine {
+            crate::config::MachineKind::Pc => &Self::ALL,
+            crate::config::MachineKind::ArmVirt => &[Self::Home, Self::Console, Self::Hardware],
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -73,7 +84,11 @@ impl Destination {
     /// holds `remaining` profiles, clamped so it always names a live one.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn clamped_after_removal(self, removed: usize, remaining: usize) -> Self {
-        let vm = if self.vm > removed { self.vm - 1 } else { self.vm };
+        let vm = if self.vm > removed {
+            self.vm - 1
+        } else {
+            self.vm
+        };
         Self {
             vm: vm.min(remaining.saturating_sub(1)),
             page: self.page,
@@ -87,6 +102,16 @@ impl Default for Destination {
     }
 }
 
+/// What fills the shell's central area: a page of the shown VM, or the
+/// app's own Settings, which belong to no VM.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Surface {
+    #[default]
+    Vm,
+    Settings,
+}
+
 /// What a click in the sidebar asked for. The sidebar reports it; the app
 /// decides what it means.
 #[cfg(not(target_arch = "wasm32"))]
@@ -97,6 +122,8 @@ pub(crate) enum SidebarAction {
     NewVm,
     /// Delete the library file at this index of the "Could not load" group.
     DeleteBroken(usize),
+    /// Show the app's Settings.
+    OpenSettings,
 }
 
 /// What a click in the VM bar asked for.
@@ -116,6 +143,8 @@ pub(crate) enum VmBarAction {
     SendCtrlAltDel,
     /// Open the floppy maker.
     CreateFloppy,
+    /// Show the app's Settings.
+    OpenSettings,
     ShowAbout,
     Quit,
     /// A phone's page tab: the bar carries the pages a desktop's tree lists.

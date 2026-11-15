@@ -4,9 +4,7 @@
 //!
 //! Implements SHL, SHR, SAR, ROL, ROR for 8-bit operands
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ---- 8-bit read/write helpers for shift instructions ----
@@ -23,6 +21,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Ok((val, Some(())))
         }
     }
+
     fn shift_write8(&mut self, instr: &Instruction, paddr: Option<()>, result: u8) {
         if paddr.is_some() {
             self.write_rmw_linear_byte(result);
@@ -176,11 +175,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let op1 = op1_u as i8;
 
         let result = if count >= 8 {
-            if op1 < 0 {
-                0xFF
-            } else {
-                0
-            }
+            if op1 < 0 { 0xFF } else { 0 }
         } else {
             (op1 >> count) as u8
         };

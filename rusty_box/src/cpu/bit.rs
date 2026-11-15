@@ -1,8 +1,6 @@
 //! Bit manipulation instructions: SETcc
 //! Matching Bochs bit.cc
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -26,51 +24,66 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn seto_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, self.get_of() as u8)
     }
+
     pub fn setno_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, (!self.get_of()) as u8)
     }
+
     pub fn setb_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, self.get_cf() as u8)
     }
+
     pub fn setnb_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, (!self.get_cf()) as u8)
     }
+
     pub fn setz_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, self.get_zf() as u8)
     }
+
     pub fn setnz_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, (!self.get_zf()) as u8)
     }
+
     pub fn setbe_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, (self.get_cf() || self.get_zf()) as u8)
     }
+
     pub fn setnbe_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, (!self.get_cf() && !self.get_zf()) as u8)
     }
+
     pub fn sets_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, self.get_sf() as u8)
     }
+
     pub fn setns_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, (!self.get_sf()) as u8)
     }
+
     pub fn setp_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, self.get_pf() as u8)
     }
+
     pub fn setnp_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, (!self.get_pf()) as u8)
     }
+
     pub fn setl_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, (self.get_sf() != self.get_of()) as u8)
     }
+
     pub fn setnl_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(instr, (self.get_sf() == self.get_of()) as u8)
     }
+
     pub fn setle_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(
             instr,
             (self.get_zf() || (self.get_sf() != self.get_of())) as u8,
         )
     }
+
     pub fn setnle_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.setcc_eb(
             instr,

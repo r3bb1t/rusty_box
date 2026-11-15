@@ -7,11 +7,12 @@
 
 #[cfg(feature = "gui-egui")]
 mod bridge_impl {
-    use super::super::gui_trait::{BxGui, DisplayMode, VgaTextModeInfo};
-    use super::super::shared_display::SharedDisplay;
     use alloc::boxed::Box;
     use alloc::collections::VecDeque;
     use alloc::vec::Vec;
+
+    use super::super::gui_trait::{BxGui, DisplayMode, VgaTextModeInfo};
+    use super::super::shared_display::SharedDisplay;
 
     extern crate std;
     use std::sync::{Arc, Mutex};
@@ -206,12 +207,7 @@ mod bridge_impl {
 
         fn append_serial_log(&self, text: &str) {
             if let Ok(mut display) = self.shared.lock() {
-                display.serial_log.push_str(text);
-                // Cap at 64KB to prevent unbounded growth
-                if display.serial_log.len() > 65536 {
-                    let drain = display.serial_log.len() - 49152;
-                    display.serial_log.drain(..drain);
-                }
+                display.append_serial_log(text);
             }
         }
     }
@@ -226,13 +222,13 @@ mod bridge_impl {
             let mut bridge = BridgeGui::new(shared.clone());
 
             BxGui::dimension_update(&mut bridge, 2, 2, 0, 0, 32);
-            BxGui::graphics_tile_update_rgba(&mut bridge, &[0x10, 0x20, 0x30, 0xff], 0, 0, 1, 1);
+            BxGui::graphics_tile_update_rgba(&mut bridge, &[0x10, 0x20, 0x30, 0xFF], 0, 0, 1, 1);
 
             let display = shared.lock().expect("display lock poisoned");
             assert_eq!(display.fb_width, 2);
             assert_eq!(display.fb_height, 2);
             assert!(display.fb_dirty);
-            assert_eq!(&display.framebuffer[0..4], &[0x10, 0x20, 0x30, 0xff]);
+            assert_eq!(&display.framebuffer[0..4], &[0x10, 0x20, 0x30, 0xFF]);
         }
     }
 }

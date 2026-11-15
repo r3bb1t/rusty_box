@@ -1,8 +1,6 @@
 //! 16-bit bit scan and bit test instructions
 //! Matching Bochs bit16.cc
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================

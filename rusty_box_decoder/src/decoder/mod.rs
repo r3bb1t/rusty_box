@@ -5,20 +5,20 @@
 
 pub mod decode32;
 pub mod decode64;
+pub(crate) mod evex_operands;
 pub(crate) mod opmap;
 pub(crate) mod opmap_0f38;
 pub(crate) mod opmap_0f3a;
-pub(crate) mod evex_operands;
 pub(crate) mod opmap_evex;
 pub mod tables;
 pub(crate) mod vex_shared;
 mod x87;
 
-use crate::opcode::Opcode;
 use tables::OpcodeAttrs;
-
 // Re-export SsePrefix from tables for convenience
 pub use tables::SsePrefix;
+
+use crate::opcode::Opcode;
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]

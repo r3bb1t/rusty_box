@@ -344,8 +344,8 @@ pub fn capabilities() -> WhpResult<Capabilities> {
         sys::capability(sys::CapabilityCode::InterruptClockFrequency).unwrap_or(0);
     let synthetic = sys::capability_banks(sys::CapabilityCode::SyntheticProcessorFeaturesBanks)
         .unwrap_or_default();
-    let banked = sys::capability_banks(sys::CapabilityCode::ProcessorFeaturesBanks)
-        .unwrap_or_default();
+    let banked =
+        sys::capability_banks(sys::CapabilityCode::ProcessorFeaturesBanks).unwrap_or_default();
     Ok(Capabilities {
         features: Features {
             partial_unmap: bit(features_word, feature_bit::PARTIAL_UNMAP),
@@ -382,7 +382,10 @@ mod tests {
     /// declared field order rather than trusting the constant alone.
     #[test]
     fn the_second_level_fault_exit_is_the_fifteenth_bit_of_the_word() {
-        let only = ExtendedVmExits { gpa_access_fault: true, ..ExtendedVmExits::default() };
+        let only = ExtendedVmExits {
+            gpa_access_fault: true,
+            ..ExtendedVmExits::default()
+        };
         assert_eq!(only.as_word(), 1 << 14);
         assert_eq!(ExtendedVmExits::from_word(1 << 14), only);
     }
@@ -398,12 +401,48 @@ mod tests {
     #[test]
     fn each_msr_exit_sits_where_the_platform_declares_it() {
         let each = [
-            (MsrExits { unhandled: true, ..MsrExits::default() }, 0),
-            (MsrExits { tsc_write: true, ..MsrExits::default() }, 1),
-            (MsrExits { tsc_read: true, ..MsrExits::default() }, 2),
-            (MsrExits { apic_base_write: true, ..MsrExits::default() }, 3),
-            (MsrExits { misc_enable_read: true, ..MsrExits::default() }, 4),
-            (MsrExits { microcode_revision_read: true, ..MsrExits::default() }, 5),
+            (
+                MsrExits {
+                    unhandled: true,
+                    ..MsrExits::default()
+                },
+                0,
+            ),
+            (
+                MsrExits {
+                    tsc_write: true,
+                    ..MsrExits::default()
+                },
+                1,
+            ),
+            (
+                MsrExits {
+                    tsc_read: true,
+                    ..MsrExits::default()
+                },
+                2,
+            ),
+            (
+                MsrExits {
+                    apic_base_write: true,
+                    ..MsrExits::default()
+                },
+                3,
+            ),
+            (
+                MsrExits {
+                    misc_enable_read: true,
+                    ..MsrExits::default()
+                },
+                4,
+            ),
+            (
+                MsrExits {
+                    microcode_revision_read: true,
+                    ..MsrExits::default()
+                },
+                5,
+            ),
         ];
         for (exits, bit) in each {
             assert_eq!(exits.as_word(), 1 << bit, "{exits:?} must be bit {bit}");
@@ -436,10 +475,16 @@ mod tests {
         // LDR and DFR sit above the two exits this port has no use for, so
         // their positions are the ones a reader is most likely to guess wrong.
         // Every `ApicWriteType` variant needs its trap here to be producible.
-        let ldr = ExtendedVmExits { apic_write_ldr_trap: true, ..ExtendedVmExits::default() };
+        let ldr = ExtendedVmExits {
+            apic_write_ldr_trap: true,
+            ..ExtendedVmExits::default()
+        };
         assert_eq!(ldr.as_word(), 1 << 12);
         assert_eq!(ExtendedVmExits::from_word(ldr.as_word()), ldr);
-        let dfr = ExtendedVmExits { apic_write_dfr_trap: true, ..ExtendedVmExits::default() };
+        let dfr = ExtendedVmExits {
+            apic_write_dfr_trap: true,
+            ..ExtendedVmExits::default()
+        };
         assert_eq!(dfr.as_word(), 1 << 13);
         assert_eq!(ExtendedVmExits::from_word(dfr.as_word()), dfr);
     }
@@ -456,7 +501,10 @@ mod tests {
         // NOT yielded after its 22 constituents.
         assert_eq!(SyntheticFeatures::OPENVMM_VTL0.iter_names().count(), 22);
         // The header's bit positions, spot-checked where the numbering has gaps.
-        assert_eq!(SyntheticFeatures::EXTENDED_GVA_RANGES_FOR_FLUSH.bits(), 1 << 15);
+        assert_eq!(
+            SyntheticFeatures::EXTENDED_GVA_RANGES_FOR_FLUSH.bits(),
+            1 << 15
+        );
         assert_eq!(SyntheticFeatures::FAST_HYPERCALL_OUTPUT.bits(), 1 << 18);
         assert_eq!(SyntheticFeatures::DIRECT_SYNTHETIC_TIMERS.bits(), 1 << 22);
         assert_eq!(SyntheticFeatures::RETARGET_DEVICE_INTERRUPT.bits(), 1 << 30);
@@ -474,8 +522,15 @@ mod tests {
             1 << 40,
             "the unknown bit survives"
         );
-        assert_eq!(SyntheticFeatures::from_bits(word), None, "and strict parsing refuses it");
-        assert_eq!(SyntheticFeatures::from_bits_truncate(word), SyntheticFeatures::HV1);
+        assert_eq!(
+            SyntheticFeatures::from_bits(word),
+            None,
+            "and strict parsing refuses it"
+        );
+        assert_eq!(
+            SyntheticFeatures::from_bits_truncate(word),
+            SyntheticFeatures::HV1
+        );
     }
 
     #[test]
@@ -517,7 +572,11 @@ mod tests {
     #[test]
     fn asking_for_an_unsupported_exit_is_visible_as_a_missing_bit() {
         let host = ExtendedVmExits::from_word(1 << 0);
-        let wanted = ExtendedVmExits { cpuid: true, gpa_access_fault: true, ..Default::default() };
+        let wanted = ExtendedVmExits {
+            cpuid: true,
+            gpa_access_fault: true,
+            ..Default::default()
+        };
         assert_eq!(wanted.as_word() & !host.as_word(), 1 << 14);
     }
 }

@@ -13,11 +13,11 @@
 //!   PERFBENCH_INSN=500000000 cargo run --release --example perfbench --features std
 //!   samply record ./target/release/examples/perfbench
 
-use rusty_box::{
-    cpu::{CpuSetupMode, X86Reg},
-    emulator::{Emulator, EmulatorConfig, Ips, MemorySize},
-};
 use std::time::Instant;
+
+use rusty_box::config::BxPhyAddress;
+use rusty_box::cpu::{CpuSetupMode, X86Reg};
+use rusty_box::emulator::{Emulator, EmulatorConfig, Ips, MemorySize};
 
 const GUEST_RAM: usize = 128 * 1024 * 1024;
 const CODE_BASE: u64 = 0x0040_0000;
@@ -153,11 +153,11 @@ fn run() {
         ..EmulatorConfig::default()
     };
 
-    let mut emu =
-        Emulator::new_with_mode(cfg.clone(), CpuSetupMode::FlatLong64).expect("machine");
+    let mut emu = Emulator::new_with_mode(cfg.clone(), CpuSetupMode::FlatLong64).expect("machine");
 
     let (mode, code, _ipi) = select_loop();
-    emu.mem_write(CODE_BASE, code).expect("write code");
+    emu.mem_write(BxPhyAddress::new(CODE_BASE), code)
+        .expect("write code");
     emu.reg_write(X86Reg::Rsp, STACK_TOP);
     emu.reg_write(X86Reg::Rbx, DATA_ADDR);
     // Counter high enough it never reaches zero within the budget.

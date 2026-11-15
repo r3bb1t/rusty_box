@@ -1,11 +1,12 @@
 pub(crate) mod amd;
 pub(crate) mod intel;
 
-use super::cpuid::{BxCpuIdTrait, CpuidFreq, SVMExtensions, VMXExtensions};
-use super::decoder::BX_ISA_EXTENSIONS_ARRAY_SIZE;
-use super::Result;
 use amd::amd_ryzen::AmdRyzen;
 use intel::core_i7_skylake::Corei7SkylakeX;
+
+use super::Result;
+use super::cpuid::{BxCpuIdTrait, CpuidFreq, SVMExtensions, VMXExtensions};
+use super::decoder::BX_ISA_EXTENSIONS_ARRAY_SIZE;
 
 /// Runtime-selected CPU model.
 ///

@@ -8,17 +8,29 @@
 //!
 //! Reference: `cpp_orig/bochs/iodev/fw_cfg.cc` (700 lines)
 
+use super::IoPort;
+use crate::config::BxPhyAddress;
 use crate::memory::BxMemC;
-
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
+    SnapError, SnapRead, SnapResult, SnapWrite, bounds, checked_snapshot_len_add,
+    checked_snapshot_len_mul,
 };
 
 // ─── I/O Ports ──────────────────────────────────────────────────────────
 
-const FW_CFG_IO_BASE: u16 = 0x510;
-const FW_CFG_DATA_PORT: u16 = FW_CFG_IO_BASE + 1;
+pub(crate) const FW_CFG_IO_BASE: IoPort = IoPort::new(0x510);
+pub(crate) const FW_CFG_DATA_PORT: IoPort = IoPort::new(0x511);
+/// The eight DMA address ports, 0x514-0x51B.
+pub(crate) const FW_CFG_DMA_BASE: IoPort = IoPort::new(0x514);
+pub(crate) const FW_CFG_DMA_PORT_COUNT: u16 = 8;
+
+/// Which byte of the DMA window `port` names, or `None` outside it.
+#[inline]
+fn dma_port_offset(port: IoPort) -> Option<u16> {
+    let offset = port.offset_from(FW_CFG_DMA_BASE);
+    (offset < FW_CFG_DMA_PORT_COUNT).then_some(offset)
+}
 
 // ─── Selector Keys ──────────────────────────────────────────────────────
 
@@ -91,7 +103,7 @@ const FW_CFG_VERSION_DMA: u32 = 0x02;
 // ─── DMA ────────────────────────────────────────────────────────────────
 
 /// "QEMU CFG" in big-endian
-const FW_CFG_DMA_SIGNATURE: u64 = 0x51454d5520434647;
+const FW_CFG_DMA_SIGNATURE: u64 = 0x51454D5520434647;
 
 const FW_CFG_DMA_CTL_ERROR: u32 = 0x01;
 const FW_CFG_DMA_CTL_READ: u32 = 0x02;
@@ -297,6 +309,7 @@ impl BxFwCfg {
         self.cur_offset = 0;
         self.dma_addr = 0;
     }
+
     /// Number of bytes emitted by the PLATFORM fw_cfg component body.
     ///
     /// The parent PLATFORM section owns the section-version prefix.  This
@@ -336,10 +349,10 @@ impl BxFwCfg {
         writer.write_u16(self.cur_entry)?;
         writer.write_u32(self.cur_offset)?;
         writer.write_u64(self.dma_addr)?;
-        writer.write_u64(
-            u64::try_from(self.file_dir_len)
-                .map_err(|_| invalid_fw_cfg_snapshot("file-directory length does not fit u64"))?,
-        )?;
+        writer
+            .write_u64(u64::try_from(self.file_dir_len).map_err(|_| {
+                invalid_fw_cfg_snapshot("file-directory length does not fit u64")
+            })?)?;
         writer.write_u32(u32::from(self.file_count))?;
 
         for slot in &self.slots[..usize::from(self.slot_count)] {
@@ -382,12 +395,7 @@ impl BxFwCfg {
                 len: reader.read_u16()?,
             };
         }
-        validate_fw_cfg_slots(
-            &saved_slots[..slot_count],
-            data_used,
-            cur_entry,
-            cur_offset,
-        )?;
+        validate_fw_cfg_slots(&saved_slots[..slot_count], data_used, cur_entry, cur_offset)?;
 
         reader.read_bytes(&mut self.data_pool[..data_used])?;
         reader.read_bytes(&mut self.file_dir)?;
@@ -443,7 +451,6 @@ impl BxFwCfg {
         )
     }
 
-
     // ─── Slot Lookup ────────────────────────────────────────────────────
 
     /// Find the slot index for a given raw key, or None.
@@ -474,8 +481,8 @@ impl BxFwCfg {
     /// - 0x510: selector port — returns 0
     /// - 0x511: data port — returns next byte from current entry
     /// - 0x514-0x51B: DMA signature bytes
-    pub fn read_port(&self, address: u16, _io_len: u8) -> u32 {
-        match address {
+    pub fn read_port(&self, port: IoPort, _io_len: u8) -> u32 {
+        match port {
             FW_CFG_IO_BASE => 0,
             FW_CFG_DATA_PORT => {
                 // Reads from the data port. We need &mut self for cur_offset,
@@ -485,20 +492,22 @@ impl BxFwCfg {
                 // can't mutate. The mutable path is provided via read_port_mut.
                 0
             }
-            0x514..=0x51B => {
+            _ => match dma_port_offset(port) {
                 // DMA signature: return byte at offset within the 8-byte signature
-                let offset = (address - 0x514) as u32;
-                let sig = FW_CFG_DMA_SIGNATURE;
-                ((sig >> (offset * 8)) & 0xFF) as u32
-            }
-            _ => 0,
+                Some(offset) => {
+                    let offset = u32::from(offset);
+                    let sig = FW_CFG_DMA_SIGNATURE;
+                    ((sig >> (offset * 8)) & 0xFF) as u32
+                }
+                None => 0,
+            },
         }
     }
 
     /// Mutable read from data port (0x511). Advances cur_offset.
     /// Called when the dispatch can provide &mut self.
-    pub fn read_port_mut(&mut self, address: u16, _io_len: u8) -> u32 {
-        match address {
+    pub fn read_port_mut(&mut self, port: IoPort, _io_len: u8) -> u32 {
+        match port {
             FW_CFG_IO_BASE => 0,
             FW_CFG_DATA_PORT => {
                 if self.cur_entry == FW_CFG_INVALID {
@@ -514,11 +523,13 @@ impl BxFwCfg {
                 }
                 0
             }
-            0x514..=0x51B => {
-                let offset = (address - 0x514) as u32;
-                ((FW_CFG_DMA_SIGNATURE >> (offset * 8)) & 0xFF) as u32
-            }
-            _ => 0,
+            _ => match dma_port_offset(port) {
+                Some(offset) => {
+                    let offset = u32::from(offset);
+                    ((FW_CFG_DMA_SIGNATURE >> (offset * 8)) & 0xFF) as u32
+                }
+                None => 0,
+            },
         }
     }
 
@@ -527,14 +538,8 @@ impl BxFwCfg {
     /// - 0x510: selector (2-byte write sets cur_entry, resets offset)
     /// - 0x511: data write (ignored)
     /// - 0x514-0x51B: DMA address accumulation; writing low 32 bits triggers DMA
-    pub(crate) fn write_port(
-        &mut self,
-        address: u16,
-        value: u32,
-        io_len: u8,
-        mem: &mut BxMemC,
-    ) {
-        match address {
+    pub(crate) fn write_port(&mut self, port: IoPort, value: u32, io_len: u8, mem: &mut BxMemC) {
+        match port {
             FW_CFG_IO_BASE => {
                 if io_len == 2 {
                     self.cur_entry = (value & 0xFFFF) as u16;
@@ -548,8 +553,11 @@ impl BxFwCfg {
                 // Data port write — not used by OVMF
                 tracing::debug!("fw_cfg: write to data port ignored");
             }
-            0x514..=0x51B => {
-                let offset = (address - 0x514) as usize;
+            _ => {
+                let Some(offset) = dma_port_offset(port) else {
+                    return;
+                };
+                let offset = usize::from(offset);
 
                 if io_len == 4 {
                     // OVMF sends values big-endian — swap to native
@@ -575,7 +583,6 @@ impl BxFwCfg {
                     }
                 }
             }
-            _ => {}
         }
     }
 
@@ -583,7 +590,7 @@ impl BxFwCfg {
     /// `dma_addr` so a partial re-write cannot replay it.
     fn trigger_dma(&mut self, mem: &mut BxMemC) {
         let addr = self.dma_addr;
-        self.process_dma(addr, mem);
+        self.process_dma(BxPhyAddress::new(addr), mem);
         self.dma_addr = 0;
     }
 
@@ -595,7 +602,7 @@ impl BxFwCfg {
     /// - control (4 bytes): SELECT/READ/SKIP/WRITE flags + key in upper 16 bits
     /// - length (4 bytes)
     /// - address (8 bytes): guest physical address for data transfer
-    fn process_dma(&mut self, dma_addr: u64, mem: &mut BxMemC) {
+    fn process_dma(&mut self, dma_addr: BxPhyAddress, mem: &mut BxMemC) {
         // A DMA descriptor is indivisible: do not interpret a short/hole
         // prefix, because its control word may not belong to this request.
         let mut desc = [0u8; 16];
@@ -616,9 +623,9 @@ impl BxFwCfg {
         // Parse big-endian descriptor.
         let mut control = u32::from_be_bytes([desc[0], desc[1], desc[2], desc[3]]);
         let length = u32::from_be_bytes([desc[4], desc[5], desc[6], desc[7]]);
-        let address = u64::from_be_bytes([
+        let address = BxPhyAddress::new(u64::from_be_bytes([
             desc[8], desc[9], desc[10], desc[11], desc[12], desc[13], desc[14], desc[15],
-        ]);
+        ]));
 
         tracing::debug!(
             "fw_cfg DMA: control={:#010x}, length={}, address={:#x}, cur_entry={:#06x}",
@@ -641,7 +648,9 @@ impl BxFwCfg {
             if let Some(data) = self.get_entry_data(key) {
                 let available = data.len().saturating_sub(entry_offset);
                 let requested = available.min(length as usize);
-                let committed = match mem.write_ram(address, &data[entry_offset..entry_offset + requested]) {
+                let committed = match mem
+                    .write_ram(address, &data[entry_offset..entry_offset + requested])
+                {
                     Ok(copied) => copied,
                     Err(error) => {
                         tracing::error!("fw_cfg DMA READ: write to {address:#x} failed: {error:?}");
@@ -658,7 +667,10 @@ impl BxFwCfg {
             }
             if !success {
                 control |= FW_CFG_DMA_CTL_ERROR;
-                tracing::error!("fw_cfg DMA: invalid or incomplete entry {:#06x}", self.cur_entry);
+                tracing::error!(
+                    "fw_cfg DMA: invalid or incomplete entry {:#06x}",
+                    self.cur_entry
+                );
             }
             control &= !FW_CFG_DMA_CTL_READ;
         }
@@ -984,7 +996,9 @@ fn validate_fw_cfg_file_directory(
     directory: &[u8; FW_CFG_FILE_DIRECTORY_SIZE],
 ) -> SnapResult<()> {
     if file_dir_len > FW_CFG_FILE_DIRECTORY_SIZE || file_count > FW_CFG_FILE_SLOTS {
-        return Err(invalid_fw_cfg_snapshot("fw_cfg file directory exceeds capacity"));
+        return Err(invalid_fw_cfg_snapshot(
+            "fw_cfg file directory exceeds capacity",
+        ));
     }
     let directory_slot = slots
         .iter()
@@ -999,9 +1013,9 @@ fn validate_fw_cfg_file_directory(
     let directory_end = directory_start
         .checked_add(usize::from(directory_slot.len))
         .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file directory slot range overflows"))?;
-    let pool_directory = data_pool.get(directory_start..directory_end).ok_or_else(|| {
-        invalid_fw_cfg_snapshot("fw_cfg file directory slot exceeds data pool")
-    })?;
+    let pool_directory = data_pool
+        .get(directory_start..directory_end)
+        .ok_or_else(|| invalid_fw_cfg_snapshot("fw_cfg file directory slot exceeds data pool"))?;
     if pool_directory != &directory[..file_dir_len] {
         return Err(invalid_fw_cfg_snapshot(
             "fw_cfg file directory data disagrees with pool",
@@ -1044,7 +1058,6 @@ fn validate_fw_cfg_file_directory(
         ));
     }
 
-
     for index in 0..file_count {
         let entry_start = 4usize
             .checked_add(
@@ -1080,7 +1093,9 @@ fn validate_fw_cfg_file_directory(
         )
         .map_err(|_| invalid_fw_cfg_snapshot("fw_cfg file selector does not fit u16"))?;
         if selected_key != expected_key {
-            return Err(invalid_fw_cfg_snapshot("fw_cfg file selector is out of order"));
+            return Err(invalid_fw_cfg_snapshot(
+                "fw_cfg file selector is out of order",
+            ));
         }
         let file_slot = slots
             .iter()
@@ -1095,9 +1110,9 @@ fn validate_fw_cfg_file_directory(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
+    use crate::config::A20Mask;
     const SELECTOR_WRITE_BYTES: u8 = 2;
     const DATA_READ_BYTES: u8 = 1;
     const TEST_RAM_SIZE: u64 = 64 * 1024 * 1024;
@@ -1118,15 +1133,15 @@ mod tests {
         use crate::memory::{BxMemC, BxMemoryStubC};
 
         const MIB: usize = 1024 * 1024;
-        const DESCRIPTOR: u64 = 2 * MIB as u64;
-        const DESTINATION: u64 = 3 * MIB as u64;
+        const DESCRIPTOR: BxPhyAddress = BxPhyAddress::new(2 * MIB as u64);
+        const DESTINATION: BxPhyAddress = BxPhyAddress::new(3 * MIB as u64);
         const KEY: u16 = 0x1234;
 
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("swapped memory"),
             false,
         );
-        mem.set_a20_mask(u64::MAX);
+        mem.set_a20_mask(A20Mask::OPEN);
         let mut fw_cfg = BxFwCfg::new();
         fw_cfg.add_bytes(KEY, &[0x61, 0x62, 0x63, 0x64, 0x65]);
 
@@ -1134,7 +1149,7 @@ mod tests {
         let mut descriptor = [0u8; 16];
         descriptor[..4].copy_from_slice(&control.to_be_bytes());
         descriptor[4..8].copy_from_slice(&(5u32).to_be_bytes());
-        descriptor[8..].copy_from_slice(&DESTINATION.to_be_bytes());
+        descriptor[8..].copy_from_slice(&DESTINATION.get().to_be_bytes());
         assert_eq!(mem.write_ram(DESCRIPTOR, &descriptor).unwrap(), 16);
         mem.smc_mark_icache_mask(DESCRIPTOR, u32::MAX);
         mem.smc_mark_icache_mask(DESTINATION, u32::MAX);
@@ -1143,7 +1158,10 @@ mod tests {
         fw_cfg.process_dma(DESCRIPTOR, &mut mem);
 
         let mut payload = [0; 5];
-        assert_eq!(mem.read_ram(DESTINATION, &mut payload).unwrap(), payload.len());
+        assert_eq!(
+            mem.read_ram(DESTINATION, &mut payload).unwrap(),
+            payload.len()
+        );
         assert_eq!(payload, [0x61, 0x62, 0x63, 0x64, 0x65]);
         let mut completion = [0; 4];
         assert_eq!(mem.read_ram(DESCRIPTOR, &mut completion).unwrap(), 4);
@@ -1179,15 +1197,15 @@ mod tests {
         use crate::snapshot::SnapshotReader;
 
         const MIB: usize = 1024 * 1024;
-        const DESCRIPTOR: u64 = 2 * MIB as u64;
-        const DESTINATION: u64 = 3 * MIB as u64;
+        const DESCRIPTOR: BxPhyAddress = BxPhyAddress::new(2 * MIB as u64);
+        const DESTINATION: BxPhyAddress = BxPhyAddress::new(3 * MIB as u64);
         const PAYLOAD: &[u8] = b"resume";
 
         let mut mem = BxMemC::new(
             BxMemoryStubC::create_and_init(4 * MIB, MIB, MIB).expect("snapshot memory"),
             false,
         );
-        mem.set_a20_mask(u64::MAX);
+        mem.set_a20_mask(A20Mask::OPEN);
 
         let mut source = BxFwCfg::new();
         source.init(TEST_RAM_SIZE, TEST_CPU_COUNT);
@@ -1204,20 +1222,22 @@ mod tests {
             u32::from(PAYLOAD[0])
         );
 
-        let control =
-            (u32::from(payload_key) << 16) | FW_CFG_DMA_CTL_SELECT | FW_CFG_DMA_CTL_READ;
+        let control = (u32::from(payload_key) << 16) | FW_CFG_DMA_CTL_SELECT | FW_CFG_DMA_CTL_READ;
         let mut descriptor = [0u8; 16];
         descriptor[..4].copy_from_slice(&control.to_be_bytes());
         descriptor[4..8].copy_from_slice(&(PAYLOAD.len() as u32).to_be_bytes());
-        descriptor[8..].copy_from_slice(&DESTINATION.to_be_bytes());
-        assert_eq!(mem.write_ram(DESCRIPTOR, &descriptor).unwrap(), descriptor.len());
+        descriptor[8..].copy_from_slice(&DESTINATION.get().to_be_bytes());
+        assert_eq!(
+            mem.write_ram(DESCRIPTOR, &descriptor).unwrap(),
+            descriptor.len()
+        );
 
         // Write all but the triggering byte of a bytewise DMA address.  The
         // final byte must resume the descriptor after restoration.
-        source.write_port(0x518, 0, 1, &mut mem);
-        source.write_port(0x519, 0x20, 1, &mut mem);
-        source.write_port(0x51A, 0, 1, &mut mem);
-        assert_eq!(source.dma_addr, DESCRIPTOR);
+        source.write_port(IoPort::new(0x518), 0, 1, &mut mem);
+        source.write_port(IoPort::new(0x519), 0x20, 1, &mut mem);
+        source.write_port(IoPort::new(0x51A), 0, 1, &mut mem);
+        assert_eq!(source.dma_addr, DESCRIPTOR.get());
 
         let mut saved = Vec::new();
         source.save_snapshot_v3_body(&mut saved).unwrap();
@@ -1232,8 +1252,8 @@ mod tests {
             u32::from(PAYLOAD[1]),
             "the restored selector and PIO offset must resume at the next byte"
         );
-        assert_eq!(restored.dma_addr, DESCRIPTOR);
-        restored.write_port(0x51B, 0, 1, &mut mem);
+        assert_eq!(restored.dma_addr, DESCRIPTOR.get());
+        restored.write_port(IoPort::new(0x51B), 0, 1, &mut mem);
 
         let mut payload = [0u8; PAYLOAD.len()];
         assert_eq!(

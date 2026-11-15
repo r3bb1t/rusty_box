@@ -10,15 +10,13 @@
 //!
 //! Uses the exact same BitReflect + mod2_64bit algorithm as Bochs.
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
+use super::decoder::{BxSegregs, Instruction};
 
 // ============================================================================
 // CRC32C primitives (matching Bochs crc32.cc exactly)
 // ============================================================================
 
-const CRC32_POLYNOMIAL: u64 = 0x11edc6f41;
+const CRC32_POLYNOMIAL: u64 = 0x11EDC6F41;
 
 /// Reflect 8 bits (Bochs BitReflect8)
 #[inline]

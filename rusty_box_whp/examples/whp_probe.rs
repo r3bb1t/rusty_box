@@ -19,11 +19,11 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use rusty_box_whp::{
-    capabilities, hypervisor_present, ApicRegister, ApicStatePage, ApicVector, Capabilities,
-    DestinationMode, Exit, ExitReason, ExtendedVmExits, GpaPerms, HostPages, InternalActivity,
-    InterruptKind, InterruptRequest, InterruptionType, LateProperty, LocalApicMode, Partition,
-    PartitionConfig, PendingExtIntEvent, PendingInterruption, Reg, SegmentRegister,
-    SyntheticFeatures, TriggerMode, Vcpu, WhpResult, PAGE_SIZE,
+    ApicRegister, ApicStatePage, ApicVector, Capabilities, DestinationMode, Exit, ExitReason,
+    ExtendedVmExits, GpaPerms, HostPages, InternalActivity, InterruptKind, InterruptRequest,
+    InterruptionType, LateProperty, LocalApicMode, PAGE_SIZE, Partition, PartitionConfig,
+    PendingExtIntEvent, PendingInterruption, Reg, SegmentRegister, SyntheticFeatures, TriggerMode,
+    Vcpu, WhpResult, capabilities, hypervisor_present,
 };
 
 /// The guest-physical map every experiment shares.
@@ -88,22 +88,40 @@ fn main() {
     println!("== host ==");
     println!("  features word            {:#018x}", caps.features.raw);
     println!("  partial unmap            {}", caps.features.partial_unmap);
-    println!("  local APIC emulation     {}", caps.features.local_apic_emulation);
-    println!("  dirty page tracking      {}", caps.features.dirty_page_tracking);
+    println!(
+        "  local APIC emulation     {}",
+        caps.features.local_apic_emulation
+    );
+    println!(
+        "  dirty page tracking      {}",
+        caps.features.dirty_page_tracking
+    );
     println!("  idle suspend             {}", caps.features.idle_suspend);
-    println!("  physical address width   {} bits", caps.physical_address_width);
+    println!(
+        "  physical address width   {} bits",
+        caps.physical_address_width
+    );
     // The decoded struct and the word it came from, together. A decode can only
     // report a bit it has a field for, so the remainder is what this host
     // offers and this port cannot ask for — the one number that makes the
     // decoded list checkable rather than merely believable.
-    println!("  exits word               {:#018x}", caps.extended_exits_raw);
+    println!(
+        "  exits word               {:#018x}",
+        caps.extended_exits_raw
+    );
     println!(
         "  exits offered and unnamed by this port {:#018x}",
         caps.extended_exits_raw & !caps.supported_exits.as_word()
     );
     println!("  exits offered            {:?}", caps.supported_exits);
-    println!("  processor features       {:#018x}", caps.processor_features);
-    println!("  synthetic features       {:#018x}", caps.synthetic_features.bits());
+    println!(
+        "  processor features       {:#018x}",
+        caps.processor_features
+    );
+    println!(
+        "  synthetic features       {:#018x}",
+        caps.synthetic_features.bits()
+    );
     println!("  processor clock          {} Hz", caps.processor_clock_hz);
     println!("  interrupt clock          {} Hz", caps.interrupt_clock_hz);
     println!("  TSC deadline timer       {}", caps.tsc_deadline_timer);
@@ -111,7 +129,10 @@ fn main() {
     // busy with someone else's work hands a sleeping thread its processor back
     // late, and a figure measured through that delay is a fact about the host's
     // load rather than about the platform.
-    println!("  scheduling delay         {:?} (mean overshoot of ten 5 ms sleeps)", scheduling_delay());
+    println!(
+        "  scheduling delay         {:?} (mean overshoot of ten 5 ms sleeps)",
+        scheduling_delay()
+    );
     println!("  available parallelism    {}", available_parallelism());
     println!();
 
@@ -125,7 +146,10 @@ fn main() {
         }),
     };
 
-    push(q1_read_only_window(caps.supported_exits.gpa_access_fault), Q1);
+    push(
+        q1_read_only_window(caps.supported_exits.gpa_access_fault),
+        Q1,
+    );
     push(q2_instruction_bytes_and_translation(), Q2);
     push(q3_halt_resume(), Q3);
     push(q4_exit_latency(), Q4);
@@ -134,11 +158,17 @@ fn main() {
     push(q7_cpuid_and_late_properties(caps.supported_exits.cpuid), Q7);
     push(q8_cancel_stickiness(), Q8);
     push(q9_mapping_churn(), Q9);
-    push(q10_wake_under_an_emulated_apic(caps.features.local_apic_emulation), Q10);
+    push(
+        q10_wake_under_an_emulated_apic(caps.features.local_apic_emulation),
+        Q10,
+    );
     push(q11_halt_suspend_clear_under_x2apic(), Q11);
     push(q12_halt_exit_under_x2apic(), Q12);
     push(q13_cancel_stickiness_under_x2apic(), Q13);
-    push(q14_lint0_trap_and_ext_int_gating(caps.supported_exits.apic_write_lint0_trap), Q14);
+    push(
+        q14_lint0_trap_and_ext_int_gating(caps.supported_exits.apic_write_lint0_trap),
+        Q14,
+    );
     push(q15_synthetic_bank_and_hv1(caps), Q15);
     push(q16_tsc_deadline_and_apic_clock(caps), Q16);
     push(q17_partition_time_and_the_tsc(), Q17);
@@ -234,13 +264,20 @@ fn window_after_sti(apic: LocalApicMode, armed: u64) -> WhpResult<String> {
     // Every step below is reported rather than propagated: a mode that refuses
     // the register is an ANSWER to this question, and a `?` here would throw
     // away the three arms that had not run yet.
-    if let Err(err) = guest.vcpu.write_reg(Reg::DeliverabilityNotifications, armed) {
-        return Ok(format!("{apic:?} armed {armed:#06x} -> the platform REFUSED the write: {err}"));
+    if let Err(err) = guest
+        .vcpu
+        .write_reg(Reg::DeliverabilityNotifications, armed)
+    {
+        return Ok(format!(
+            "{apic:?} armed {armed:#06x} -> the platform REFUSED the write: {err}"
+        ));
     }
     let read_back = match guest.vcpu.read_reg(Reg::DeliverabilityNotifications) {
         Ok(word) => word,
         Err(err) => {
-            return Ok(format!("{apic:?} armed {armed:#06x} -> write took, read refused: {err}"))
+            return Ok(format!(
+                "{apic:?} armed {armed:#06x} -> write took, read refused: {err}"
+            ));
         }
     };
     let run = run_with_rescue(&mut guest, RESCUE_AFTER)?;
@@ -248,7 +285,11 @@ fn window_after_sti(apic: LocalApicMode, armed: u64) -> WhpResult<String> {
     Ok(format!(
         "{apic:?} armed {armed:#06x} read back {read_back:#06x} -> {} {}{}",
         reason_name(&run.exit.reason),
-        if run.rescued { "(rescued)" } else { "(left on its own)" },
+        if run.rescued {
+            "(rescued)"
+        } else {
+            "(left on its own)"
+        },
         if window { "  ** WINDOW **" } else { "" },
     ))
 }
@@ -300,7 +341,11 @@ fn q21_the_interrupt_window_under_an_emulated_apic() -> WhpResult<Finding> {
                            than the platform"
             .to_string(),
     };
-    Ok(Finding { question: Q21, answer, detail })
+    Ok(Finding {
+        question: Q21,
+        answer,
+        detail,
+    })
 }
 
 // ---------------------------------------------------------------- fixtures
@@ -323,7 +368,11 @@ impl Guest {
         configure(&mut config)?;
         let mut partition = config.setup()?;
 
-        partition.map(layout::RAM, HostPages::new(layout::RAM_PAGES)?, GpaPerms::RWX)?;
+        partition.map(
+            layout::RAM,
+            HostPages::new(layout::RAM_PAGES)?,
+            GpaPerms::RWX,
+        )?;
         partition.map(layout::READ_ONLY, HostPages::new(1)?, GpaPerms::RX)?;
         partition.create_processor(0)?;
         let vcpu = partition.take_vcpu(0)?;
@@ -334,7 +383,10 @@ impl Guest {
     /// there, and every segment flat at zero.
     fn load(&mut self, code: &[u8]) -> WhpResult<()> {
         let at = layout::CODE as usize;
-        let ram = self.partition.bytes_at_mut(layout::RAM).expect("RAM is mapped");
+        let ram = self
+            .partition
+            .bytes_at_mut(layout::RAM)
+            .expect("RAM is mapped");
         ram[at..at + code.len()].copy_from_slice(code);
 
         self.vcpu.write_segments(
@@ -365,7 +417,9 @@ impl Guest {
     /// Put a byte back, so a marker left by an earlier run cannot be read as
     /// this one's.
     fn poke(&mut self, offset: u16, byte: u8) {
-        self.partition.bytes_at_mut(layout::RAM).expect("RAM is mapped")[offset as usize] = byte;
+        self.partition
+            .bytes_at_mut(layout::RAM)
+            .expect("RAM is mapped")[offset as usize] = byte;
     }
 }
 
@@ -570,7 +624,11 @@ fn q1_read_only_window(host_offers_fault_exit: bool) -> WhpResult<Finding> {
          there is one the mapping permitted)",
         layout::CODE
     );
-    Ok(Finding { question: Q1, answer, detail })
+    Ok(Finding {
+        question: Q1,
+        answer,
+        detail,
+    })
 }
 
 fn q2_instruction_bytes_and_translation() -> WhpResult<Finding> {
@@ -600,14 +658,23 @@ fn q2_instruction_bytes_and_translation() -> WhpResult<Finding> {
             }
             _ => None,
         };
-        Ok(Told { kind, faulting_at, exit, instruction_bytes })
+        Ok(Told {
+            kind,
+            faulting_at,
+            exit,
+            instruction_bytes,
+        })
     }
 
     // The three trapped accesses a PC actually produces, plus a halt, each at
     // a known address so "did the platform already advance RIP?" is decidable.
     let observations = [
         // `mov byte [0], 0x5A` begins five bytes into the blob.
-        observe("write to a read-only window", WRITE_READ_ONLY, layout::CODE + 5)?,
+        observe(
+            "write to a read-only window",
+            WRITE_READ_ONLY,
+            layout::CODE + 5,
+        )?,
         // `mov es:[0], al` begins seven bytes into the blob.
         observe("write to an unmapped range", MMIO_LOOP, layout::CODE + 7)?,
         // `out dx, al` begins three bytes in.
@@ -683,7 +750,11 @@ fn q2_instruction_bytes_and_translation() -> WhpResult<Finding> {
         }
         answer
     };
-    Ok(Finding { question: Q2, answer, detail })
+    Ok(Finding {
+        question: Q2,
+        answer,
+        detail,
+    })
 }
 
 fn q3_halt_resume() -> WhpResult<Finding> {
@@ -751,7 +822,11 @@ fn q3_halt_resume() -> WhpResult<Finding> {
                 .to_owned()
         }
     };
-    Ok(Finding { question: Q3, answer, detail })
+    Ok(Finding {
+        question: Q3,
+        answer,
+        detail,
+    })
 }
 
 /// Which exit a timing loop is built to produce, so a loop that meets any
@@ -800,11 +875,18 @@ fn time_exits(
     // that the loop faults where it was built to.
     let first = guest.run()?;
     if !expect.matches(&first.reason) {
-        panic!("the loop's first exit was {:?} at rip={:#x}", first.reason, first.vp.rip);
+        panic!(
+            "the loop's first exit was {:?} at rip={:#x}",
+            first.reason, first.vp.rip
+        );
     }
     if let ExitReason::MemoryAccess(access) = first.reason {
         if expect == Expect::Memory && access.gpa != layout::MMIO {
-            panic!("the MMIO loop faulted at {:#x}, not {:#x}", access.gpa, layout::MMIO);
+            panic!(
+                "the MMIO loop faulted at {:#x}, not {:#x}",
+                access.gpa,
+                layout::MMIO
+            );
         }
     }
 
@@ -812,7 +894,10 @@ fn time_exits(
     for _ in 0..rounds {
         let exit = guest.run()?;
         if !expect.matches(&exit.reason) {
-            panic!("unexpected exit while timing: {:?} at rip={:#x}", exit.reason, exit.vp.rip);
+            panic!(
+                "unexpected exit while timing: {:?} at rip={:#x}",
+                exit.reason, exit.vp.rip
+            );
         }
     }
     Ok(started.elapsed())
@@ -841,7 +926,11 @@ fn q4_exit_latency() -> WhpResult<Finding> {
          MMIO:     {mmio:?}\n\
          halt:     {halt:?}"
     );
-    Ok(Finding { question: Q4, answer, detail })
+    Ok(Finding {
+        question: Q4,
+        answer,
+        detail,
+    })
 }
 
 fn per_exit_us(total: Duration, rounds: u32) -> f64 {
@@ -864,12 +953,18 @@ fn q5_mapping_cost(host_offers_partial_unmap: bool) -> WhpResult<Finding> {
 
     let started = Instant::now();
     for round in 0..FLIPS {
-        let perms = if round % 2 == 0 { GpaPerms::RX } else { GpaPerms::RWX };
+        let perms = if round % 2 == 0 {
+            GpaPerms::RX
+        } else {
+            GpaPerms::RWX
+        };
         guest.partition.remap(layout::READ_ONLY, perms)?;
     }
     let flips = started.elapsed();
 
-    let partial = match guest.partition.unmap_subrange(0x0040_0000 + PAGE_SIZE as u64, PAGE_SIZE as u64)
+    let partial = match guest
+        .partition
+        .unmap_subrange(0x0040_0000 + PAGE_SIZE as u64, PAGE_SIZE as u64)
     {
         Ok(()) => "accepted".to_owned(),
         Err(err) => format!("refused ({err})"),
@@ -889,14 +984,17 @@ fn q5_mapping_cost(host_offers_partial_unmap: bool) -> WhpResult<Finding> {
          capability says partial unmap is {host_offers_partial_unmap}; \
          attempting one: {partial}"
     );
-    Ok(Finding { question: Q5, answer, detail })
+    Ok(Finding {
+        question: Q5,
+        answer,
+        detail,
+    })
 }
 
 fn q6_separate_security_domain() -> WhpResult<Finding> {
     const ROUNDS: u32 = 20_000;
 
-    let timed =
-        |separate: bool| time_exits(MMIO_LOOP, Expect::Memory, ROUNDS, Some(separate));
+    let timed = |separate: bool| time_exits(MMIO_LOOP, Expect::Memory, ROUNDS, Some(separate));
 
     // Interleaved, and each direction run twice, because a single ordering on
     // a busy desktop measures the desktop.
@@ -920,7 +1018,11 @@ fn q6_separate_security_domain() -> WhpResult<Finding> {
          separate=true:  {on_first:?} then {on_second:?}\n\
          separate=false: {off_first:?} then {off_second:?}"
     );
-    Ok(Finding { question: Q6, answer, detail })
+    Ok(Finding {
+        question: Q6,
+        answer,
+        detail,
+    })
 }
 
 fn q7_cpuid_and_late_properties(host_offers_cpuid_exit: bool) -> WhpResult<Finding> {
@@ -1019,7 +1121,10 @@ fn q7_cpuid_and_late_properties(host_offers_cpuid_exit: bool) -> WhpResult<Findi
 
     // The other half of the question: are processor properties really
     // pre-setup-only? The platform is the authority, so ask it.
-    let late = match guest.partition.set_property_late(LateProperty::ProcessorCount, 1) {
+    let late = match guest
+        .partition
+        .set_property_late(LateProperty::ProcessorCount, 1)
+    {
         Ok(()) => "ACCEPTED after setup".to_owned(),
         Err(err) => format!("refused after setup ({err})"),
     };
@@ -1043,10 +1148,13 @@ fn q7_cpuid_and_late_properties(host_offers_cpuid_exit: bool) -> WhpResult<Findi
          so the host is not demonstrably the author of the answer."
             .to_owned()
     } else {
-        "NO — leaf 1 exits, but the host-supplied ECX did not reach the guest."
-            .to_owned()
+        "NO — leaf 1 exits, but the host-supplied ECX did not reach the guest.".to_owned()
     };
-    Ok(Finding { question: Q7, answer, detail })
+    Ok(Finding {
+        question: Q7,
+        answer,
+        detail,
+    })
 }
 
 fn q8_cancel_stickiness() -> WhpResult<Finding> {
@@ -1097,7 +1205,11 @@ fn q8_cancel_stickiness() -> WhpResult<Finding> {
             Err(err) => format!("refused ({err})"),
         }
     );
-    Ok(Finding { question: Q8, answer, detail })
+    Ok(Finding {
+        question: Q8,
+        answer,
+        detail,
+    })
 }
 
 /// The two routes a host has for getting a vector into a guest.
@@ -1145,7 +1257,10 @@ fn run_with_rescue(guest: &mut Guest, after: Duration) -> WhpResult<Rescued> {
             Ok(()) | Err(_) => {}
         }
         let rescued = rescue.join().expect("the rescue thread did not panic")?;
-        Ok(Rescued { exit: exit?, rescued })
+        Ok(Rescued {
+            exit: exit?,
+            rescued,
+        })
     })
 }
 
@@ -1250,7 +1365,10 @@ fn install_handler(guest: &mut Guest, vector: u16) -> WhpResult<()> {
 /// second handler — a fault handler beside an interrupt handler, or a handler
 /// that stops the guest rather than returning from it.
 fn install_vector(guest: &mut Guest, vector: u16, at: u64, code: &[u8]) -> WhpResult<()> {
-    let ram = guest.partition.bytes_at_mut(layout::RAM).expect("RAM is mapped");
+    let ram = guest
+        .partition
+        .bytes_at_mut(layout::RAM)
+        .expect("RAM is mapped");
     let handler = at as usize;
     ram[handler..handler + code.len()].copy_from_slice(code);
     // A real-mode vector is four bytes: offset then segment.
@@ -1311,7 +1429,11 @@ fn q10_wake_under_an_emulated_apic(host_emulates_apic: bool) -> WhpResult<Findin
     // and a second halt parks the processor exactly like the first. Reporting
     // only the run's fate would read as a failure when the delivery worked.
     let describe = |woke: &Woke| {
-        let handler = if woke.handler_ran { "the handler RAN" } else { "the handler did NOT run" };
+        let handler = if woke.handler_ran {
+            "the handler RAN"
+        } else {
+            "the handler did NOT run"
+        };
         match (&woke.delivered, &woke.exit) {
             (Err(why), _) => format!("delivery refused: {why}"),
             (_, None) => format!("{handler}; the run then parked again and was rescued"),
@@ -1319,12 +1441,20 @@ fn q10_wake_under_an_emulated_apic(host_emulates_apic: bool) -> WhpResult<Findin
         }
     };
     let during = wake_during_run(LocalApicMode::XApic, InterruptKind::Fixed, 0x40, 0x40)?;
-    let _ = writeln!(detail, "XApic, Fixed vector 0x40 mid-run:  {}", describe(&during));
+    let _ = writeln!(
+        detail,
+        "XApic, Fixed vector 0x40 mid-run:  {}",
+        describe(&during)
+    );
     // A real-mode NMI lands on interrupt vector 2, but the request itself
     // carries no vector — an NMI has none, and sending one is rejected as an
     // invalid argument.
     let nmi = wake_during_run(LocalApicMode::XApic, InterruptKind::Nmi, 2, 0)?;
-    let _ = writeln!(detail, "XApic, NMI mid-run:                {}", describe(&nmi));
+    let _ = writeln!(
+        detail,
+        "XApic, NMI mid-run:                {}",
+        describe(&nmi)
+    );
     if nmi.handler_ran && !during.handler_ran {
         let _ = writeln!(
             detail,
@@ -1347,8 +1477,7 @@ fn q10_wake_under_an_emulated_apic(host_emulates_apic: bool) -> WhpResult<Findin
     );
 
     let answer = if !parks {
-        "INCONCLUSIVE — see the detail; the guest did not reach its halt."
-            .to_owned()
+        "INCONCLUSIVE — see the detail; the guest did not reach its halt.".to_owned()
     } else if during.handler_ran {
         "YES, but only from another thread. A halted processor does not leave \
          `WHvRunVirtualProcessor` under XApic on its own, so a register write \
@@ -1386,7 +1515,11 @@ fn q10_wake_under_an_emulated_apic(host_emulates_apic: bool) -> WhpResult<Findin
          LAPIC behind the shadow CPU."
             .to_owned()
     };
-    Ok(Finding { question: Q10, answer, detail })
+    Ok(Finding {
+        question: Q10,
+        answer,
+        detail,
+    })
 }
 
 /// Deliver through the emulated APIC from another thread WHILE the processor
@@ -1551,7 +1684,11 @@ fn q9_mapping_churn() -> WhpResult<Finding> {
             Some(why) => format!("first refusal {why}"),
         }
     );
-    Ok(Finding { question: Q9, answer, detail })
+    Ok(Finding {
+        question: Q9,
+        answer,
+        detail,
+    })
 }
 
 // ------------------------------------------------- the VMM-shape questions
@@ -1673,7 +1810,11 @@ fn fixed_vector(vector: u32, trigger: TriggerMode) -> InterruptRequest {
 
 /// One 256-bit bitmap as the raw words the platform wrote, low word first.
 fn bitmap(words: [u32; ApicVector::WORDS]) -> String {
-    words.iter().map(|word| format!("{word:08x}")).collect::<Vec<_>>().join(" ")
+    words
+        .iter()
+        .map(|word| format!("{word:08x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Every word of the state page the structure claims, so what is still
@@ -1685,8 +1826,7 @@ fn page_words(page: &ApicStatePage) -> String {
             let _ = write!(out, "\n  words {index:>2}..:");
         }
         let at = index * 4;
-        let word =
-            u32::from_le_bytes([page.0[at], page.0[at + 1], page.0[at + 2], page.0[at + 3]]);
+        let word = u32::from_le_bytes([page.0[at], page.0[at + 1], page.0[at + 2], page.0[at + 3]]);
         let _ = write!(out, " {word:08x}");
     }
     out
@@ -1697,7 +1837,13 @@ fn ascii_of(word: u64) -> String {
     (word as u32)
         .to_le_bytes()
         .iter()
-        .map(|byte| if byte.is_ascii_graphic() || *byte == b' ' { char::from(*byte) } else { '.' })
+        .map(|byte| {
+            if byte.is_ascii_graphic() || *byte == b' ' {
+                char::from(*byte)
+            } else {
+                '.'
+            }
+        })
         .collect()
 }
 
@@ -1725,8 +1871,11 @@ fn available_parallelism() -> usize {
 
 /// An activity state with nothing suspended — what a host writes to say the
 /// processor should be executing again.
-const RUNNING: InternalActivity =
-    InternalActivity { startup_suspend: false, halt_suspend: false, idle_suspend: false };
+const RUNNING: InternalActivity = InternalActivity {
+    startup_suspend: false,
+    halt_suspend: false,
+    idle_suspend: false,
+};
 
 /// What one park-then-wake attempt did, run by run.
 struct ParkThenWake {
@@ -1758,18 +1907,32 @@ fn park_then_wake(apic: LocalApicMode, clear_halt_suspend: bool) -> WhpResult<Pa
 
     let mut runs = vec![timed_run(&mut guest, "run 1: sti; hlt", RESCUE_AFTER)?];
 
-    let activity_at_park = guest.vcpu.internal_activity().map_err(|err| err.to_string());
+    let activity_at_park = guest
+        .vcpu
+        .internal_activity()
+        .map_err(|err| err.to_string());
     let pending_event_write = guest
         .vcpu
         .write_words128(
             Reg::PendingEvent,
-            PendingExtIntEvent { vector: IRQ0_VECTOR }.as_words(),
+            PendingExtIntEvent {
+                vector: IRQ0_VECTOR,
+            }
+            .as_words(),
         )
         .map_err(|err| err.to_string());
-    let activity_write = clear_halt_suspend
-        .then(|| guest.vcpu.set_internal_activity(RUNNING).map_err(|err| err.to_string()));
+    let activity_write = clear_halt_suspend.then(|| {
+        guest
+            .vcpu
+            .set_internal_activity(RUNNING)
+            .map_err(|err| err.to_string())
+    });
 
-    runs.push(timed_run(&mut guest, "run 2: after the host's writes", RESCUE_AFTER)?);
+    runs.push(timed_run(
+        &mut guest,
+        "run 2: after the host's writes",
+        RESCUE_AFTER,
+    )?);
 
     Ok(ParkThenWake {
         runs,
@@ -1817,24 +1980,36 @@ fn q11_halt_suspend_clear_under_x2apic() -> WhpResult<Finding> {
     let control_b = park_then_wake(LocalApicMode::None, true)?;
 
     let mut detail = String::new();
-    record(&mut detail, "X2Apic, pending ExtINT then halt_suspend=false:", &main);
-    record(&mut detail, "\ncontrol A — X2Apic, pending ExtINT and NO activity write:", &control_a);
-    record(&mut detail, "\ncontrol B — None, the mode the earlier probe refused in:", &control_b);
+    record(
+        &mut detail,
+        "X2Apic, pending ExtINT then halt_suspend=false:",
+        &main,
+    );
+    record(
+        &mut detail,
+        "\ncontrol A — X2Apic, pending ExtINT and NO activity write:",
+        &control_a,
+    );
+    record(
+        &mut detail,
+        "\ncontrol B — None, the mode the earlier probe refused in:",
+        &control_b,
+    );
 
     let woke = main.runs.last().is_some_and(|run| run.handler_ran);
     let woke_without_clear = control_a.runs.last().is_some_and(|run| run.handler_ran);
     let clear_accepted = matches!(main.activity_write, Some(Ok(())));
     let answer = match (woke, clear_accepted, woke_without_clear) {
-        (true, true, false) =>
+        (true, true, false) => {
             "YES — under X2Apic the activity register IS writable, and clearing \
              HaltSuspend is what wakes the parked processor: with the ExtINT \
              placed but the suspend left standing, the handler never ran."
-                .to_owned(),
-        (true, true, true) =>
-            "YES, IT WAKES — but the clear is not what does it. The pending \
+                .to_owned()
+        }
+        (true, true, true) => "YES, IT WAKES — but the clear is not what does it. The pending \
              ExtINT alone wakes the parked processor; the activity write is \
              accepted and changes nothing."
-                .to_owned(),
+            .to_owned(),
         (true, false, _) => format!(
             "IT WAKES, BUT NOT BY CLEARING THE SUSPEND — the activity write was \
              {}. The pending ExtINT alone is what reaches the guest.",
@@ -1843,13 +2018,16 @@ fn q11_halt_suspend_clear_under_x2apic() -> WhpResult<Finding> {
                 Some(Ok(())) | None => "not attempted".to_owned(),
             }
         ),
-        (false, _, _) =>
-            "NO — the parked processor did NOT take the host-placed ExtINT, with \
+        (false, _, _) => "NO — the parked processor did NOT take the host-placed ExtINT, with \
              or without the halt-suspend clear. The legacy interrupt path needs \
              a different shape on this host."
-                .to_owned(),
+            .to_owned(),
     };
-    Ok(Finding { question: Q11, answer, detail })
+    Ok(Finding {
+        question: Q11,
+        answer,
+        detail,
+    })
 }
 
 fn q12_halt_exit_under_x2apic() -> WhpResult<Finding> {
@@ -1908,11 +2086,10 @@ fn q12_halt_exit_under_x2apic() -> WhpResult<Finding> {
     );
 
     let answer = match (exits, reached_the_halt) {
-        (true, _) =>
-            "YES — a HLT under X2Apic returns from WHvRunVirtualProcessor with \
+        (true, _) => "YES — a HLT under X2Apic returns from WHvRunVirtualProcessor with \
              ExitReason::Halt, exactly as it does with no APIC at all. The run \
              loop needs a Halt arm."
-                .to_owned(),
+            .to_owned(),
         (false, true) => format!(
             "NO — a HLT under X2Apic produces no exit; the hypervisor parks the \
              processor inside WHvRunVirtualProcessor and only a cancel from \
@@ -1928,7 +2105,11 @@ fn q12_halt_exit_under_x2apic() -> WhpResult<Finding> {
              cannot say whether a halt exits."
         ),
     };
-    Ok(Finding { question: Q12, answer, detail })
+    Ok(Finding {
+        question: Q12,
+        answer,
+        detail,
+    })
 }
 
 fn q13_cancel_stickiness_under_x2apic() -> WhpResult<Finding> {
@@ -1940,7 +2121,11 @@ fn q13_cancel_stickiness_under_x2apic() -> WhpResult<Finding> {
 
     // Cancel while the processor is definitely NOT running.
     guest.vcpu.cancel_run()?;
-    let run = timed_run(&mut guest, "spin, after a cancel issued while stopped", RESCUE_AFTER)?;
+    let run = timed_run(
+        &mut guest,
+        "spin, after a cancel issued while stopped",
+        RESCUE_AFTER,
+    )?;
 
     let sticky = !run.rescued && run.elapsed < RESCUE_AFTER / 2;
     let mut detail = String::new();
@@ -1963,7 +2148,11 @@ fn q13_cancel_stickiness_under_x2apic() -> WhpResult<Finding> {
          pre-run cancel being seen."
             .to_owned()
     };
-    Ok(Finding { question: Q13, answer, detail })
+    Ok(Finding {
+        question: Q13,
+        answer,
+        detail,
+    })
 }
 
 /// One LINT0 experiment: what the guest's write to the APIC's LINT0 entry did,
@@ -2010,10 +2199,19 @@ fn lint0_attempt(lvt0: u32, ask_for_the_trap: bool) -> WhpResult<Lint0Attempt> {
     // real-mode selector's reach, so the base goes in directly.
     guest.vcpu.write_segments(
         &[Reg::Ds],
-        &[SegmentRegister { base: layout::XAPIC, limit: 0xFFFF, selector: 0, attributes: 0x93 }],
+        &[SegmentRegister {
+            base: layout::XAPIC,
+            limit: 0xFFFF,
+            selector: 0,
+            attributes: 0x93,
+        }],
     )?;
 
-    let mut runs = vec![timed_run(&mut guest, "run 1: write LINT0, then sti; hlt", RESCUE_AFTER)?];
+    let mut runs = vec![timed_run(
+        &mut guest,
+        "run 1: write LINT0, then sti; hlt",
+        RESCUE_AFTER,
+    )?];
     // The two exits a store to the APIC page can produce leave RIP in
     // DIFFERENT places, and this probe measures both: an `ApicWriteTrap`
     // returns already PAST the store, while an unmapped-range `MemoryAccess`
@@ -2027,7 +2225,9 @@ fn lint0_attempt(lvt0: u32, ask_for_the_trap: bool) -> WhpResult<Lint0Attempt> {
         runs[0].reason,
         ExitReason::ApicWriteTrap { .. } | ExitReason::MemoryAccess(_)
     );
-    guest.vcpu.write_segments(&[Reg::Ds], &[SegmentRegister::real_mode_data(0)])?;
+    guest
+        .vcpu
+        .write_segments(&[Reg::Ds], &[SegmentRegister::real_mode_data(0)])?;
     if stopped_on_the_store {
         guest.vcpu.write_reg(Reg::Rip, AFTER_THE_WRITE)?;
         runs.push(timed_run(&mut guest, "run 2: sti; hlt", RESCUE_AFTER)?);
@@ -2044,14 +2244,29 @@ fn lint0_attempt(lvt0: u32, ask_for_the_trap: bool) -> WhpResult<Lint0Attempt> {
         .vcpu
         .write_words128(
             Reg::PendingEvent,
-            PendingExtIntEvent { vector: IRQ0_VECTOR }.as_words(),
+            PendingExtIntEvent {
+                vector: IRQ0_VECTOR,
+            }
+            .as_words(),
         )
         .map_err(|err| err.to_string());
-    let activity_write =
-        guest.vcpu.set_internal_activity(RUNNING).map_err(|err| err.to_string());
-    runs.push(timed_run(&mut guest, "run 3: after the host places an ExtINT", RESCUE_AFTER)?);
+    let activity_write = guest
+        .vcpu
+        .set_internal_activity(RUNNING)
+        .map_err(|err| err.to_string());
+    runs.push(timed_run(
+        &mut guest,
+        "run 3: after the host places an ExtINT",
+        RESCUE_AFTER,
+    )?);
 
-    Ok(Lint0Attempt { lvt0_written: lvt0, runs, lvt0_in_page, pending_event_write, activity_write })
+    Ok(Lint0Attempt {
+        lvt0_written: lvt0,
+        runs,
+        lvt0_in_page,
+        pending_event_write,
+        activity_write,
+    })
 }
 
 fn q14_lint0_trap_and_ext_int_gating(host_offers_the_trap: bool) -> WhpResult<Finding> {
@@ -2063,7 +2278,11 @@ fn q14_lint0_trap_and_ext_int_gating(host_offers_the_trap: bool) -> WhpResult<Fi
     const UNMASKED_EXT_INT: u32 = 0x0000_0700;
 
     fn record(detail: &mut String, title: &str, attempt: &Lint0Attempt) {
-        let _ = writeln!(detail, "{title} (guest writes {:#010x})", attempt.lvt0_written);
+        let _ = writeln!(
+            detail,
+            "{title} (guest writes {:#010x})",
+            attempt.lvt0_written
+        );
         write_runs(detail, &attempt.runs);
         if let Some(first) = attempt.runs.first() {
             let _ = writeln!(
@@ -2125,7 +2344,10 @@ fn q14_lint0_trap_and_ext_int_gating(host_offers_the_trap: bool) -> WhpResult<Fi
         format!(
             "The trap was asked for and the write did NOT produce one — run 1 \
              came back as {}.",
-            masked.runs.first().map_or("nothing".to_owned(), |run| reason_name(&run.reason))
+            masked
+                .runs
+                .first()
+                .map_or("nothing".to_owned(), |run| reason_name(&run.reason))
         )
     };
     // The comparison is only a comparison if the two attempts actually left
@@ -2136,27 +2358,36 @@ fn q14_lint0_trap_and_ext_int_gating(host_offers_the_trap: bool) -> WhpResult<Fi
         (Ok(masked_value), Ok(unmasked_value)) if masked_value != unmasked_value
     );
     let gating_half = match (really_differed, masked_delivered, unmasked_delivered) {
-        (false, _, _) =>
+        (false, _, _) => {
             " The gating question is CONFOUNDED: the two attempts left the SAME \
              value standing in LINT0, so nothing here compares a masked entry \
-             against an unmasked one.",
-        (true, false, true) =>
+             against an unmasked one."
+        }
+        (true, false, true) => {
             " A host-placed pending ExtINT IS gated by LINT0: it reached the \
              guest with the entry unmasked and not with it masked, so the \
-             platform consults the entry and a fabric need not.",
-        (true, true, true) =>
+             platform consults the entry and a fabric need not."
+        }
+        (true, true, true) => {
             " A host-placed pending ExtINT is NOT gated by LINT0: it reached the \
              guest with the entry masked just as with it unmasked, so a fabric \
-             that must honour the mask has to consult LINT0 itself.",
-        (true, true, false) =>
+             that must honour the mask has to consult LINT0 itself."
+        }
+        (true, true, false) => {
             " INVERTED, which no reading explains: the masked entry delivered \
-             and the unmasked one did not. Treat the gating question as open.",
-        (true, false, false) =>
+             and the unmasked one did not. Treat the gating question as open."
+        }
+        (true, false, false) => {
             " The gating question is INCONCLUSIVE: neither entry delivered, so \
              the wake path itself did not carry the ExtINT and nothing can be \
-             concluded about the mask.",
+             concluded about the mask."
+        }
     };
-    Ok(Finding { question: Q14, answer: trap_half + gating_half, detail })
+    Ok(Finding {
+        question: Q14,
+        answer: trap_half + gating_half,
+        detail,
+    })
 }
 
 fn q15_synthetic_bank_and_hv1(caps: Capabilities) -> WhpResult<Finding> {
@@ -2211,7 +2442,9 @@ fn q15_synthetic_bank_and_hv1(caps: Capabilities) -> WhpResult<Finding> {
     for (slot, leaf) in read.iter_mut().zip(LEAVES) {
         guest.load(&hv_cpuid_blob(leaf))?;
         let exit = guest.run()?;
-        guest.vcpu.read_regs(&[Reg::Rax, Reg::Rbx, Reg::Rcx, Reg::Rdx], slot)?;
+        guest
+            .vcpu
+            .read_regs(&[Reg::Rax, Reg::Rbx, Reg::Rcx, Reg::Rdx], slot)?;
         let _ = writeln!(
             &mut detail,
             "leaf {leaf:#010x}: left through {} — eax={:#010x} ebx={:#010x} \
@@ -2224,7 +2457,12 @@ fn q15_synthetic_bank_and_hv1(caps: Capabilities) -> WhpResult<Finding> {
         );
     }
 
-    let vendor = format!("{}{}{}", ascii_of(read[0][1]), ascii_of(read[0][2]), ascii_of(read[0][3]));
+    let vendor = format!(
+        "{}{}{}",
+        ascii_of(read[0][1]),
+        ascii_of(read[0][2]),
+        ascii_of(read[0][3])
+    );
     let interface = ascii_of(read[1][0]);
     let features = read[2][0];
     let _ = writeln!(
@@ -2254,7 +2492,11 @@ fn q15_synthetic_bank_and_hv1(caps: Capabilities) -> WhpResult<Finding> {
              interface {interface:?}, not \"Microsoft Hv\" and \"Hv#1\"."
         )
     };
-    Ok(Finding { question: Q15, answer, detail })
+    Ok(Finding {
+        question: Q15,
+        answer,
+        detail,
+    })
 }
 
 fn q16_tsc_deadline_and_apic_clock(caps: Capabilities) -> WhpResult<Finding> {
@@ -2322,7 +2564,11 @@ fn q16_tsc_deadline_and_apic_clock(caps: Capabilities) -> WhpResult<Finding> {
         read[1],
         if apic_agrees { "AGREE" } else { "DISAGREE" }
     );
-    Ok(Finding { question: Q16, answer, detail })
+    Ok(Finding {
+        question: Q16,
+        answer,
+        detail,
+    })
 }
 
 fn q17_partition_time_and_the_tsc() -> WhpResult<Finding> {
@@ -2374,7 +2620,11 @@ fn q17_partition_time_and_the_tsc() -> WhpResult<Finding> {
         ("after the halt", free_start, reference_start),
         ("+50 ms, partition time RUNNING", free_end, reference_free),
         ("partition time suspended", held_start, reference_held_start),
-        ("+50 ms, partition time SUSPENDED", held_end, reference_held_end),
+        (
+            "+50 ms, partition time SUSPENDED",
+            held_end,
+            reference_held_end,
+        ),
     ] {
         let _ = writeln!(&mut detail, "  {label:<44} {tsc:>22} {reference:>18}");
     }
@@ -2394,23 +2644,24 @@ fn q17_partition_time_and_the_tsc() -> WhpResult<Finding> {
     );
 
     let answer = match (runs_while_stopped, frozen, advances_again) {
-        (_, true, true) =>
-            "YES — suspending partition time freezes the guest's TSC exactly, \
+        (_, true, true) => "YES — suspending partition time freezes the guest's TSC exactly, \
              and resuming lets it advance again. Note the control: the TSC \
              advances while the processor is merely STOPPED, so a host that \
              wants a guest not to see its own downtime must suspend the clock, \
              not merely refrain from running."
-                .to_owned(),
-        (_, true, false) =>
-            "PARTLY — the suspend froze the TSC, but it did not advance again \
+            .to_owned(),
+        (_, true, false) => "PARTLY — the suspend froze the TSC, but it did not advance again \
              after the resume and another run, which no reading explains."
-                .to_owned(),
-        (_, false, _) =>
-            "NO — the guest's TSC advanced while partition time was suspended. \
+            .to_owned(),
+        (_, false, _) => "NO — the guest's TSC advanced while partition time was suspended. \
              The suspend does not reach the TSC on this host."
-                .to_owned(),
+            .to_owned(),
     };
-    Ok(Finding { question: Q17, answer, detail })
+    Ok(Finding {
+        question: Q17,
+        answer,
+        detail,
+    })
 }
 
 /// A vector the guest accepted, and the APIC page as it stood at that moment.
@@ -2439,7 +2690,12 @@ fn accept_without_eoi(vector: u8) -> WhpResult<Accepted> {
         Ok(())
     })?;
     guest.load(SPIN_WITH_INTERRUPTS)?;
-    install_vector(&mut guest, u16::from(vector), layout::HANDLER, ACCEPT_AND_EXIT)?;
+    install_vector(
+        &mut guest,
+        u16::from(vector),
+        layout::HANDLER,
+        ACCEPT_AND_EXIT,
+    )?;
     software_enable_the_apic(&guest)?;
 
     let requester = guest.partition.interrupt_requester();
@@ -2509,7 +2765,9 @@ fn q18_in_service_versus_trigger_mode() -> WhpResult<Finding> {
             Ok(())
         })?;
         software_enable_the_apic(&guest)?;
-        guest.partition.request_interrupt(fixed_vector(u32::from(VECTOR), trigger))?;
+        guest
+            .partition
+            .request_interrupt(fixed_vector(u32::from(VECTOR), trigger))?;
         let mut page = ApicStatePage::zeroed();
         guest.vcpu.read_apic_state(&mut page)?;
         Ok(page)
@@ -2583,30 +2841,30 @@ fn q18_in_service_versus_trigger_mode() -> WhpResult<Finding> {
         accepted.handler_ran && trigger_mode_carries_it && !in_service_carries_it,
         level_marks_trigger_mode && !level_marks_in_service && edge_marks_neither,
     ) {
-        (true, _, _) =>
-            "CONFIRMED as this port has it — an accepted, unacknowledged vector \
+        (true, _, _) => "CONFIRMED as this port has it — an accepted, unacknowledged vector \
              appears in the field the layout calls IN-SERVICE and not in the one \
              it calls trigger-mode. The two are not swapped."
-                .to_owned(),
-        (_, true, _) =>
-            "SWAPPED — an accepted, unacknowledged vector appears in the field \
+            .to_owned(),
+        (_, true, _) => "SWAPPED — an accepted, unacknowledged vector appears in the field \
              this port calls TRIGGER-MODE. ApicVector::InService and \
              ApicVector::TriggerMode are the wrong way round and must be \
              exchanged before Stage 3 converts the page."
-                .to_owned(),
-        (_, _, true) =>
-            "CONFIRMED by the trigger mode alone — a level-triggered request \
+            .to_owned(),
+        (_, _, true) => "CONFIRMED by the trigger mode alone — a level-triggered request \
              marks the field the layout calls TRIGGER-MODE and leaves in-service \
              clear, and the same vector edge-triggered marks neither. The \
              acceptance probe did not add to it; see the detail."
-                .to_owned(),
-        _ =>
-            "INCONCLUSIVE — neither the level-versus-edge asymmetry nor the \
+            .to_owned(),
+        _ => "INCONCLUSIVE — neither the level-versus-edge asymmetry nor the \
              acceptance separated the two bitmaps on this host. The order stays \
              transcribed, not measured; see the raw words in the detail."
-                .to_owned(),
+            .to_owned(),
     };
-    Ok(Finding { question: Q18, answer, detail })
+    Ok(Finding {
+        question: Q18,
+        answer,
+        detail,
+    })
 }
 
 /// One named register attempted for its answer rather than its effect: what
@@ -2632,9 +2890,18 @@ impl NamedRegisterAttempt {
     fn take(guest: &Guest, reg: Reg, wanted_from: fn(Option<u64>) -> u64) -> Self {
         let before = guest.vcpu.read_reg(reg).map_err(|err| err.to_string());
         let wanted = wanted_from(before.as_ref().ok().copied());
-        let write = guest.vcpu.write_reg(reg, wanted).map_err(|err| err.to_string());
+        let write = guest
+            .vcpu
+            .write_reg(reg, wanted)
+            .map_err(|err| err.to_string());
         let after = guest.vcpu.read_reg(reg).map_err(|err| err.to_string());
-        Self { reg, before, wanted, write, after }
+        Self {
+            reg,
+            before,
+            wanted,
+            write,
+            after,
+        }
     }
 
     /// Whether the value the platform reports afterwards is the one that was
@@ -2648,7 +2915,9 @@ impl NamedRegisterAttempt {
     /// value already standing agrees with itself no matter what the platform
     /// did with it.
     fn asked_for_a_change(&self) -> bool {
-        self.before.as_ref().is_ok_and(|value| *value != self.wanted)
+        self.before
+            .as_ref()
+            .is_ok_and(|value| *value != self.wanted)
     }
 
     fn write_row(&self, detail: &mut String) {
@@ -2712,9 +2981,14 @@ fn q19_the_apic_page_write_path() -> WhpResult<Finding> {
     // read, a write of a value that differs from what is standing, and a
     // read-back, so an accepted-and-ignored write is distinguishable from an
     // applied one.
-    let tpr_write =
-        guest.vcpu.write_reg(Reg::ApicTpr, PRIORITY).map_err(|err| err.to_string());
-    let tpr_read = guest.vcpu.read_reg(Reg::ApicTpr).map_err(|err| err.to_string());
+    let tpr_write = guest
+        .vcpu
+        .write_reg(Reg::ApicTpr, PRIORITY)
+        .map_err(|err| err.to_string());
+    let tpr_read = guest
+        .vcpu
+        .read_reg(Reg::ApicTpr)
+        .map_err(|err| err.to_string());
     let apic_base = NamedRegisterAttempt::take(&guest, Reg::ApicBase, |before| {
         before.unwrap_or(APIC_BASE_RESET) | APIC_BASE_ENABLES
     });
@@ -2788,7 +3062,11 @@ fn q19_the_apic_page_write_path() -> WhpResult<Finding> {
     let answer = format!(
         "The page round-trips {}. The named registers, one at a time on an \
          X2Apic partition: WHvX64RegisterApicTpr write {}, read {}; {}; {}. {}",
-        if first_kib { "bit-identically over its first KiB" } else { "with CHANGES in its first KiB" },
+        if first_kib {
+            "bit-identically over its first KiB"
+        } else {
+            "with CHANGES in its first KiB"
+        },
         outcome(&tpr_write),
         match &tpr_read {
             Ok(value) => format!("{value:#x}"),
@@ -2807,7 +3085,11 @@ fn q19_the_apic_page_write_path() -> WhpResult<Finding> {
                 .to_owned()
         }
     );
-    Ok(Finding { question: Q19, answer, detail })
+    Ok(Finding {
+        question: Q19,
+        answer,
+        detail,
+    })
 }
 
 fn q20_a_software_disabled_apic_drops_a_vector() -> WhpResult<Finding> {
@@ -2857,47 +3139,74 @@ fn q20_a_software_disabled_apic_drops_a_vector() -> WhpResult<Finding> {
         "step", "call", "request bitmap"
     );
     for (label, call, bits) in [
-        ("request of 0x43 with the APIC DISABLED", outcome(&while_disabled), bitmap_while_disabled),
-        ("(no request) after the host enables the APIC", "-".to_owned(), bitmap_after_enabling),
-        ("request of 0x43 with the APIC ENABLED", outcome(&while_enabled), bitmap_while_enabled),
+        (
+            "request of 0x43 with the APIC DISABLED",
+            outcome(&while_disabled),
+            bitmap_while_disabled,
+        ),
+        (
+            "(no request) after the host enables the APIC",
+            "-".to_owned(),
+            bitmap_after_enabling,
+        ),
+        (
+            "request of 0x43 with the APIC ENABLED",
+            outcome(&while_enabled),
+            bitmap_while_enabled,
+        ),
     ] {
         let _ = writeln!(&mut detail, "  {label:<48} {call:<10} {}", bitmap(bits));
     }
-    let _ = writeln!(&mut detail, "  the word this port predicts for 0x43 is {}", bitmap(expected));
+    let _ = writeln!(
+        &mut detail,
+        "  the word this port predicts for 0x43 is {}",
+        bitmap(expected)
+    );
 
     let accepted_while_disabled = while_disabled.is_ok();
     let dropped = bitmap_while_disabled == [0; ApicVector::WORDS];
     let latched_late = bitmap_after_enabling != [0; ApicVector::WORDS];
     let lands_when_enabled = bitmap_while_enabled == expected;
 
-    let answer = match (accepted_while_disabled, dropped, latched_late, lands_when_enabled) {
-        (true, true, false, true) =>
+    let answer = match (
+        accepted_while_disabled,
+        dropped,
+        latched_late,
+        lands_when_enabled,
+    ) {
+        (true, true, false, true) => {
             "DROPPED, and silently: WHvRequestInterrupt returns SUCCESS with the \
              APIC software-disabled and the request bitmap stays EMPTY; the same \
              call after the host sets the spurious register's enable bit lands \
              the vector. A page conversion must carry the spurious register's \
              enable bit, or restoring a page silently disables the guest's APIC."
-                .to_owned(),
-        (true, true, true, _) =>
+                .to_owned()
+        }
+        (true, true, true, _) => {
             "LATCHED — the request was accepted and invisible while the APIC was \
              disabled, but appeared in the bitmap as soon as the enable bit was \
              set. Nothing is lost by a disabled APIC on this host."
-                .to_owned(),
-        (true, false, _, _) =>
-            "NOT GATED — the vector landed in the request bitmap with the APIC \
+                .to_owned()
+        }
+        (true, false, _, _) => "NOT GATED — the vector landed in the request bitmap with the APIC \
              software-disabled, so the enable bit does not stand between a \
              requested vector and the bitmap."
-                .to_owned(),
+            .to_owned(),
         (false, _, _, _) => format!(
             "REFUSED — the platform would not take the request with the APIC \
              software-disabled: {}",
             outcome(&while_disabled)
         ),
-        (true, true, false, false) =>
+        (true, true, false, false) => {
             "PARTLY — the disabled APIC dropped the vector, but enabling it did \
              not make the next request land where this port predicts either; see \
              the raw bitmaps."
-                .to_owned(),
+                .to_owned()
+        }
     };
-    Ok(Finding { question: Q20, answer, detail })
+    Ok(Finding {
+        question: Q20,
+        answer,
+        detail,
+    })
 }

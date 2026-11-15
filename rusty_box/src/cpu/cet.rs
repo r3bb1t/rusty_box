@@ -5,8 +5,9 @@
 //! Mirrors Bochs cpu/cet.cc — ENDBR32/ENDBR64, shadow stack helpers,
 //! indirect branch tracking, and legacy endbranch treatment.
 
-use super::decoder::{BxSegregs, Instruction};
 use super::Result;
+use super::decoder::{BxSegregs, Instruction};
+use crate::config::{BxEffAddress, BxLinAddress};
 
 // CET control MSR bit constants — matches Bochs cet.cc
 pub(super) const CET_SHADOW_STACK_ENABLED: u64 = 1 << 0;
@@ -27,7 +28,7 @@ pub(super) const BX_CP_RSTORSSP: u16 = 4;
 pub(super) const BX_CP_SETSSBSY: u16 = 5;
 
 /// Reserved bits mask for CET control validation — bits 6-9
-const CET_RESERVED_BITS: u64 = 0x3c0;
+const CET_RESERVED_BITS: u64 = 0x3C0;
 
 /// Canonicalize a 64-bit address (sign-extend bit 47).
 /// Bochs cpu.h CanonicalizeAddress()
@@ -155,13 +156,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn legacy_endbranch_treatment(&mut self, cpl: u8) -> Result<bool> {
         let idx = usize::from(cpl == 3);
         if self.msr.ia32_cet_control[idx] & CET_LEGACY_INDIRECT_BRANCH_TREATMENT != 0 {
-            let lip = if self.long64_mode() {
-                self.get_laddr64(BxSegregs::Cs as usize, self.rip())
-            } else {
-                self.get_laddr32(BxSegregs::Cs as usize, self.rip() as u32) as u64
-            };
-            let bitmap_addr =
-                (self.msr.ia32_cet_control[idx] & !0xFFF) + ((lip & 0xFFFF_FFFF_FFFF) >> 15);
+            let lip = self
+                .get_laddr(BxSegregs::Cs as usize, BxEffAddress::new(self.rip()))
+                .get();
+            let bitmap_addr = BxLinAddress::new(
+                (self.msr.ia32_cet_control[idx] & !0xFFF) + ((lip & 0xFFFF_FFFF_FFFF) >> 15),
+            );
             let bitmap_index = ((lip >> 12) & 0x7) as u32;
             let bitmap = self.system_read_byte(bitmap_addr)?;
             if (bitmap & (1 << bitmap_index)) != 0 {
@@ -174,19 +174,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     // =========================================================================
     // Shadow stack memory operations — Bochs access2.cc
+    //
+    // These take the address as the SSP register's number (Bochs `offset`):
+    // the same number is also data on the shadow stack (a busy token is
+    // SSP | 1, a previous-SSP token is SSP itself). It becomes a
+    // `BxLinAddress` where these call the linear accessors.
     // =========================================================================
 
     /// Read a dword from the shadow stack.
     /// Bochs access2.cc shadow_stack_read_dword. The CPL drives the
     /// SS U/S match in the page walker via translate_shadow_stack_read.
     pub(super) fn shadow_stack_read_dword(&mut self, offset: u64, cpl: u8) -> Result<u32> {
-        self.shadow_stack_read_linear_dword(offset, cpl)
+        self.shadow_stack_read_linear_dword(BxLinAddress::new(offset), cpl)
     }
 
     /// Read a qword from the shadow stack.
     /// Bochs access2.cc shadow_stack_read_qword.
     pub(super) fn shadow_stack_read_qword(&mut self, offset: u64, cpl: u8) -> Result<u64> {
-        self.shadow_stack_read_linear_qword(offset, cpl)
+        self.shadow_stack_read_linear_qword(BxLinAddress::new(offset), cpl)
     }
 
     /// Write a dword to the shadow stack.
@@ -197,7 +202,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         cpl: u8,
         data: u32,
     ) -> Result<()> {
-        self.shadow_stack_write_linear_dword(offset, cpl, data)
+        self.shadow_stack_write_linear_dword(BxLinAddress::new(offset), cpl, data)
     }
 
     /// Write a qword to the shadow stack.
@@ -208,7 +213,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         cpl: u8,
         data: u64,
     ) -> Result<()> {
-        self.shadow_stack_write_linear_qword(offset, cpl, data)
+        self.shadow_stack_write_linear_qword(BxLinAddress::new(offset), cpl, data)
     }
 
     /// Pop a qword from the shadow stack: read SSP, then SSP += 8.
@@ -335,18 +340,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Walk the SS-aware page tables. This raises #PF on non-SS pages /
         // U-S mismatch / missing pages — matching Bochs access_write_linear.
-        let paddr = self.translate_shadow_stack_write(offset)?;
+        let laddr = BxLinAddress::new(offset);
+        let paddr = self.translate_shadow_stack_write(laddr)?;
 
         // Prefer the TLB-cached host pointer that translate_shadow_stack_write
         // has just populated; fall back to mem_read/mem_write for MMIO-backed
         // SS pages (architecturally unusual but defensible).
-        let lpf = offset & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let host_ptr: Option<*mut u64> = {
-            let tlb = self.dtlb.entry_of(offset, 7);
+            let tlb = self.dtlb.entry_of(laddr, 7);
             if tlb.lpf == lpf && tlb.host_page.is_some() {
                 let byte_ptr = super::access::host_at_page_offset_mut(
                     super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page),
-                    offset,
+                    laddr,
                 );
                 // SSP is architecturally 8-byte aligned on every caller; the
                 // raw byte pointer thus aligns for u64/AtomicU64.
@@ -544,14 +550,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
-            self.agen_read32(seg, eaddr as u32, 8)? as u64
+            self.agen_read32(seg, eaddr, 8)?
         };
-        if laddr & 0x7 != 0 {
+        if !laddr.is_aligned(8) {
             tracing::error!("CLRSSBSY: SSP_LA not aligned to 8 bytes boundary");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        let invalid_token = self.shadow_stack_atomic_clear_busy(laddr, cpl)?;
+        let invalid_token = self.shadow_stack_atomic_clear_busy(laddr.get(), cpl)?;
         // Bochs cet.cc CLRSSBSY: clearEFlagsOSZAPC(); if (invalid_token) assert_CF();
         self.oszapc.set_oszapc_logic_32(1);
         if invalid_token {
@@ -574,7 +580,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        let src = self.get_gpr32(instr.dst() as usize) & 0xff;
+        let src = self.get_gpr32(instr.dst() as usize) & 0xFF;
         let tmpsrc = if src == 0 { 1 } else { src };
 
         // Bochs cet.cc INCSSPD: touches the first and last dword of the
@@ -595,7 +601,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        let src = self.get_gpr32(instr.dst() as usize) & 0xff;
+        let src = self.get_gpr32(instr.dst() as usize) & 0xFF;
         let tmpsrc = if src == 0 { 1 } else { src };
 
         // Bochs cet.cc INCSSPQ: probe first/last qword for #PF / shadow-stack
@@ -686,16 +692,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
-            self.agen_read32(seg, eaddr as u32, 8)? as u64
+            self.agen_read32(seg, eaddr, 8)?
         };
-        if laddr & 0x7 != 0 {
+        if !laddr.is_aligned(8) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
         let previous_ssp_token = self.ssp() | (self.long64_mode() as u64) | 0x02;
 
         // Bochs cet.cc — token validation. Should be atomic RMW per Bochs.
-        let ssp_tmp = self.shadow_stack_read_qword(laddr, cpl)?;
+        let ssp_tmp = self.shadow_stack_read_qword(laddr.get(), cpl)?;
         if (ssp_tmp & 0x03) != (self.long64_mode() as u64) {
             return self.exception(super::cpu::Exception::Cp, BX_CP_RSTORSSP);
         }
@@ -706,12 +712,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs cet.cc — derive prior top-of-stack from token, must equal laddr.
         let mut tmp = ssp_tmp & !0x01u64;
         tmp = (tmp - 8) & !0x07u64;
-        if tmp != laddr {
+        if tmp != laddr.get() {
             return self.exception(super::cpu::Exception::Cp, BX_CP_RSTORSSP);
         }
-        self.shadow_stack_write_qword(laddr, cpl, previous_ssp_token)?;
+        self.shadow_stack_write_qword(laddr.get(), cpl, previous_ssp_token)?;
 
-        self.set_ssp(laddr);
+        self.set_ssp(laddr.get());
 
         // Bochs cet.cc — clearEFlagsOSZAPC; set CF if 4-byte alignment hole present.
         self.oszapc.set_oszapc_logic_32(1);
@@ -734,13 +740,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
-            self.agen_write32(seg, eaddr as u32, 4)? as u64
+            self.agen_write32(seg, eaddr, 4)?
         };
-        if laddr & 0x3 != 0 {
+        if !laddr.is_aligned(4) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let val = self.get_gpr32(instr.src() as usize);
-        self.shadow_stack_write_dword(laddr, cpl, val)?;
+        self.shadow_stack_write_dword(laddr.get(), cpl, val)?;
         Ok(())
     }
 
@@ -757,13 +763,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
-            self.agen_write32(seg, eaddr as u32, 8)? as u64
+            self.agen_write32(seg, eaddr, 8)?
         };
-        if laddr & 0x7 != 0 {
+        if !laddr.is_aligned(8) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let val = self.get_gpr64(instr.src() as usize);
-        self.shadow_stack_write_qword(laddr, cpl, val)?;
+        self.shadow_stack_write_qword(laddr.get(), cpl, val)?;
         Ok(())
     }
 
@@ -782,14 +788,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
-            self.agen_write32(seg, eaddr as u32, 4)? as u64
+            self.agen_write32(seg, eaddr, 4)?
         };
-        if laddr & 0x3 != 0 {
+        if !laddr.is_aligned(4) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         // Bochs cet.cc — writes with cpl=3 (user-mode shadow stack).
         let val = self.get_gpr32(instr.src() as usize);
-        self.shadow_stack_write_dword(laddr, 3, val)?;
+        self.shadow_stack_write_dword(laddr.get(), 3, val)?;
         Ok(())
     }
 
@@ -808,13 +814,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let laddr = if self.long64_mode() {
             self.get_laddr64(seg as usize, eaddr)
         } else {
-            self.agen_write32(seg, eaddr as u32, 8)? as u64
+            self.agen_write32(seg, eaddr, 8)?
         };
-        if laddr & 0x7 != 0 {
+        if !laddr.is_aligned(8) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let val = self.get_gpr64(instr.src() as usize);
-        self.shadow_stack_write_qword(laddr, 3, val)?;
+        self.shadow_stack_write_qword(laddr.get(), 3, val)?;
         Ok(())
     }
 
@@ -841,7 +847,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // PAUSE is a hint — no architectural state changes
         Ok(())
     }
-
 }
 
 // ============================================================================
@@ -860,7 +865,7 @@ mod tests {
     /// and fail unrelated tests with STATUS_STACK_OVERFLOW.
     const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
     use super::*;
-    use crate::cpu::cpu::{CpuMode};
+    use crate::cpu::cpu::CpuMode;
     use crate::cpu::crregs::BxCr4;
     use crate::cpu::decoder::BxSegregs;
 

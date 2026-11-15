@@ -287,8 +287,16 @@ impl PendingInterruptionRead {
             6 => InterruptedKind::SoftwareException,
             _ => return Self::UnknownKind { kind },
         };
-        let error_code = if (word >> 4) & 1 == 1 { Some((word >> 32) as u32) } else { None };
-        Self::Delivery(InterruptedDelivery { kind, vector: (word >> 16) as u16, error_code })
+        let error_code = if (word >> 4) & 1 == 1 {
+            Some((word >> 32) as u32)
+        } else {
+            None
+        };
+        Self::Delivery(InterruptedDelivery {
+            kind,
+            vector: (word >> 16) as u16,
+            error_code,
+        })
     }
 }
 
@@ -347,10 +355,11 @@ impl PendingExtIntEvent {
     pub const fn from_words(words: [u64; 2]) -> Option<Self> {
         let low = words[0];
         let pending = low >> pending_event_bit::PENDING & 1 != 0;
-        let event_type =
-            low >> pending_event_bit::EVENT_TYPE & pending_event_bit::EVENT_TYPE_WIDTH;
+        let event_type = low >> pending_event_bit::EVENT_TYPE & pending_event_bit::EVENT_TYPE_WIDTH;
         if pending && event_type == pending_event_bit::EXT_INT {
-            Some(Self { vector: (low >> pending_event_bit::VECTOR) as u8 })
+            Some(Self {
+                vector: (low >> pending_event_bit::VECTOR) as u8,
+            })
         } else {
             None
         }
@@ -572,10 +581,15 @@ impl ApicStatePage {
     /// How many bytes `WHvGetVirtualProcessorState` fills for this state type,
     /// and the exact size its setter demands.
     pub const BYTES: usize = 4096;
-
     /// How many words of the page the structure actually occupies. The rest is
     /// zero on every read this port has taken.
     pub const WORDS: usize = 44;
+    /// Every word either accessor can name is inside the page, so neither
+    /// needs a bounds check: [`ApicRegister::word`] and
+    /// [`ApicVector::first_word`] are closed sets and [`Self::WORDS`] is their
+    /// upper bound. Checked rather than asserted in prose, because a field
+    /// appended to the structure would otherwise index past the page.
+    const _IN_PAGE: () = assert!(Self::WORDS * 4 <= Self::BYTES);
 
     /// A page of zeroes — what a read fills in, and the only starting point a
     /// write should be built from.
@@ -612,13 +626,6 @@ impl ApicStatePage {
             self.set_word(which.first_word() + index, value);
         }
     }
-
-    /// Every word either accessor can name is inside the page, so neither
-    /// needs a bounds check: [`ApicRegister::word`] and
-    /// [`ApicVector::first_word`] are closed sets and [`Self::WORDS`] is their
-    /// upper bound. Checked rather than asserted in prose, because a field
-    /// appended to the structure would otherwise index past the page.
-    const _IN_PAGE: () = assert!(Self::WORDS * 4 <= Self::BYTES);
 
     /// The 32-bit word at `index`. The one place the page's byte order is
     /// decided (R5); the platform writes little-endian, as the host is.
@@ -830,10 +837,15 @@ pub enum ExitReason {
     IoPortAccess(IoPortAccess),
     UnrecoverableException,
     InvalidVpRegisterValue,
-    UnsupportedFeature { code: i32, parameter: u64 },
+    UnsupportedFeature {
+        code: i32,
+        parameter: u64,
+    },
     InterruptWindow,
     Halt,
-    ApicEoi { vector: u32 },
+    ApicEoi {
+        vector: u32,
+    },
     SynicSintDeliverable,
     MsrAccess(MsrAccess),
     Cpuid(CpuidAccess),
@@ -846,9 +858,14 @@ pub enum ExitReason {
     /// The payload is `WHV_X64_APIC_WRITE_CONTEXT`: which register, and the
     /// value written — without both, the exit says only that something
     /// happened and the host cannot mirror the write into its own model.
-    ApicWriteTrap { register: ApicWriteType, value: u64 },
+    ApicWriteTrap {
+        register: ApicWriteType,
+        value: u64,
+    },
     /// The host called `WHvCancelRunVirtualProcessor`.
-    Canceled { reason: i32 },
+    Canceled {
+        reason: i32,
+    },
     /// An exit reason the SDK has grown since this port was written.
     Unrecognized(i32),
 }
@@ -934,8 +951,12 @@ impl Exit {
 /// platform's answer rather than this port's assumption. [`Reg::TscAux`] and
 /// [`Reg::TscDeadline`] are the platform's to answer from, and only a machine
 /// reset writes them. All four are reached one at a time, deliberately.
-pub const UNEXCHANGED_REGS: &[Reg] =
-    &[Reg::PendingEvent, Reg::ApicTpr, Reg::TscAux, Reg::TscDeadline];
+pub const UNEXCHANGED_REGS: &[Reg] = &[
+    Reg::PendingEvent,
+    Reg::ApicTpr,
+    Reg::TscAux,
+    Reg::TscDeadline,
+];
 
 /// Every register this port exchanges, in one list.
 ///
@@ -945,17 +966,61 @@ pub const UNEXCHANGED_REGS: &[Reg] =
 /// variant exhaustively so the compiler refuses to let the two drift; what does
 /// not belong in a word transfer goes in [`UNEXCHANGED_REGS`] instead.
 pub const ALL_REGS: &[Reg] = &[
-    Reg::Rax, Reg::Rbx, Reg::Rcx, Reg::Rdx, Reg::Rsi, Reg::Rdi, Reg::Rsp, Reg::Rbp,
-    Reg::R8, Reg::R9, Reg::R10, Reg::R11, Reg::R12, Reg::R13, Reg::R14, Reg::R15,
-    Reg::Rip, Reg::Rflags,
-    Reg::Cs, Reg::Ds, Reg::Es, Reg::Ss, Reg::Fs, Reg::Gs, Reg::Ldtr, Reg::Tr,
-    Reg::Gdtr, Reg::Idtr,
-    Reg::Cr0, Reg::Cr2, Reg::Cr3, Reg::Cr4, Reg::Cr8,
-    Reg::Dr0, Reg::Dr1, Reg::Dr2, Reg::Dr3, Reg::Dr6, Reg::Dr7,
-    Reg::Efer, Reg::KernelGsBase, Reg::Star, Reg::Lstar, Reg::Cstar, Reg::Sfmask,
-    Reg::SysenterCs, Reg::SysenterEsp, Reg::SysenterEip,
-    Reg::Pat, Reg::ApicBase, Reg::Tsc, Reg::Xcr0,
-    Reg::PendingInterruption, Reg::InterruptState, Reg::InternalActivityState,
+    Reg::Rax,
+    Reg::Rbx,
+    Reg::Rcx,
+    Reg::Rdx,
+    Reg::Rsi,
+    Reg::Rdi,
+    Reg::Rsp,
+    Reg::Rbp,
+    Reg::R8,
+    Reg::R9,
+    Reg::R10,
+    Reg::R11,
+    Reg::R12,
+    Reg::R13,
+    Reg::R14,
+    Reg::R15,
+    Reg::Rip,
+    Reg::Rflags,
+    Reg::Cs,
+    Reg::Ds,
+    Reg::Es,
+    Reg::Ss,
+    Reg::Fs,
+    Reg::Gs,
+    Reg::Ldtr,
+    Reg::Tr,
+    Reg::Gdtr,
+    Reg::Idtr,
+    Reg::Cr0,
+    Reg::Cr2,
+    Reg::Cr3,
+    Reg::Cr4,
+    Reg::Cr8,
+    Reg::Dr0,
+    Reg::Dr1,
+    Reg::Dr2,
+    Reg::Dr3,
+    Reg::Dr6,
+    Reg::Dr7,
+    Reg::Efer,
+    Reg::KernelGsBase,
+    Reg::Star,
+    Reg::Lstar,
+    Reg::Cstar,
+    Reg::Sfmask,
+    Reg::SysenterCs,
+    Reg::SysenterEsp,
+    Reg::SysenterEip,
+    Reg::Pat,
+    Reg::ApicBase,
+    Reg::Tsc,
+    Reg::Xcr0,
+    Reg::PendingInterruption,
+    Reg::InterruptState,
+    Reg::InternalActivityState,
     Reg::DeliverabilityNotifications,
 ];
 
@@ -972,17 +1037,43 @@ mod tests {
             // Naming each variant is the assertion: a new one fails to compile
             // here, and the fix is to add it to the list above as well.
             match reg {
-                Reg::Rax | Reg::Rbx | Reg::Rcx | Reg::Rdx | Reg::Rsi | Reg::Rdi | Reg::Rsp
-                | Reg::Rbp | Reg::R8 | Reg::R9 | Reg::R10 | Reg::R11 | Reg::R12 | Reg::R13
-                | Reg::R14 | Reg::R15 | Reg::Rip | Reg::Rflags => {}
-                Reg::Cs | Reg::Ds | Reg::Es | Reg::Ss | Reg::Fs | Reg::Gs | Reg::Ldtr
-                | Reg::Tr => assert!(reg.is_segment(), "{reg:?} is segment-shaped"),
+                Reg::Rax
+                | Reg::Rbx
+                | Reg::Rcx
+                | Reg::Rdx
+                | Reg::Rsi
+                | Reg::Rdi
+                | Reg::Rsp
+                | Reg::Rbp
+                | Reg::R8
+                | Reg::R9
+                | Reg::R10
+                | Reg::R11
+                | Reg::R12
+                | Reg::R13
+                | Reg::R14
+                | Reg::R15
+                | Reg::Rip
+                | Reg::Rflags => {}
+                Reg::Cs | Reg::Ds | Reg::Es | Reg::Ss | Reg::Fs | Reg::Gs | Reg::Ldtr | Reg::Tr => {
+                    assert!(reg.is_segment(), "{reg:?} is segment-shaped")
+                }
                 Reg::Gdtr | Reg::Idtr => assert!(reg.is_table(), "{reg:?} is table-shaped"),
                 Reg::Cr0 | Reg::Cr2 | Reg::Cr3 | Reg::Cr4 | Reg::Cr8 => {}
                 Reg::Dr0 | Reg::Dr1 | Reg::Dr2 | Reg::Dr3 | Reg::Dr6 | Reg::Dr7 => {}
-                Reg::Efer | Reg::KernelGsBase | Reg::Star | Reg::Lstar | Reg::Cstar
-                | Reg::Sfmask | Reg::SysenterCs | Reg::SysenterEsp | Reg::SysenterEip
-                | Reg::Pat | Reg::ApicBase | Reg::Tsc | Reg::Xcr0 => {}
+                Reg::Efer
+                | Reg::KernelGsBase
+                | Reg::Star
+                | Reg::Lstar
+                | Reg::Cstar
+                | Reg::Sfmask
+                | Reg::SysenterCs
+                | Reg::SysenterEsp
+                | Reg::SysenterEip
+                | Reg::Pat
+                | Reg::ApicBase
+                | Reg::Tsc
+                | Reg::Xcr0 => {}
                 Reg::PendingInterruption
                 | Reg::InterruptState
                 | Reg::InternalActivityState
@@ -1103,7 +1194,10 @@ mod tests {
 
     #[test]
     fn a_clear_pending_bit_is_no_delivery_whatever_else_the_word_holds() {
-        assert_eq!(PendingInterruptionRead::from_word(0x0080_0048), PendingInterruptionRead::Empty);
+        assert_eq!(
+            PendingInterruptionRead::from_word(0x0080_0048),
+            PendingInterruptionRead::Empty
+        );
     }
 
     /// Type 1 is reserved and 7 is "other event"; neither is a delivery
@@ -1129,7 +1223,11 @@ mod tests {
             destination: 0,
             vector: 0x40,
         };
-        assert_eq!(request.control_word(), 0, "every field's zero is the SDK's own");
+        assert_eq!(
+            request.control_word(),
+            0,
+            "every field's zero is the SDK's own"
+        );
 
         let nmi_logical_level = InterruptRequest {
             kind: InterruptKind::Nmi,
@@ -1154,7 +1252,11 @@ mod tests {
         let event = PendingExtIntEvent { vector: 0x20 };
         assert_eq!(event.as_words(), [0x0000_0000_0000_200B, 0]); // pending | type 5 << 1 | 0x20 << 8
         assert_eq!(PendingExtIntEvent::from_words([0x200B, 0]), Some(event));
-        assert_eq!(PendingExtIntEvent::from_words([0, 0]), None, "an empty slot is no event");
+        assert_eq!(
+            PendingExtIntEvent::from_words([0, 0]),
+            None,
+            "an empty slot is no event"
+        );
         assert_eq!(
             PendingExtIntEvent::from_words([0x2001, 0]),
             None,
@@ -1195,7 +1297,11 @@ mod tests {
             0x0005_0014,
             "a neighbouring field does not disturb it"
         );
-        assert_eq!(page.register(ApicRegister::LvtTimer), 0, "nor does it bleed backwards");
+        assert_eq!(
+            page.register(ApicRegister::LvtTimer),
+            0,
+            "nor does it bleed backwards"
+        );
         assert_eq!(page.register(ApicRegister::LvtLint1), 0, "nor forwards");
     }
 
@@ -1207,10 +1313,22 @@ mod tests {
         let bits = [1, 2, 3, 4, 5, 6, 7, 8];
         page.set_vector(ApicVector::Request, bits);
         assert_eq!(page.vector(ApicVector::Request), bits);
-        assert_eq!(&page.0[0x54..0x58], &1u32.to_le_bytes(), "the request bitmap starts at word 21");
-        assert_eq!(page.vector(ApicVector::InService), [0; 8], "the other two are untouched");
+        assert_eq!(
+            &page.0[0x54..0x58],
+            &1u32.to_le_bytes(),
+            "the request bitmap starts at word 21"
+        );
+        assert_eq!(
+            page.vector(ApicVector::InService),
+            [0; 8],
+            "the other two are untouched"
+        );
         assert_eq!(page.vector(ApicVector::TriggerMode), [0; 8]);
-        assert_eq!(page.register(ApicRegister::Esr), 0, "and so is the field after them");
+        assert_eq!(
+            page.register(ApicRegister::Esr),
+            0,
+            "and so is the field after them"
+        );
 
         // The three run back to back, so the word after the last one is the ESR
         // and the word before the first is the SVR.

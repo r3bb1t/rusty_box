@@ -22,9 +22,9 @@
 
 #![allow(non_camel_case_types)]
 
+use crate::BxSegregs;
 use crate::instruction::{GprIndex, Instruction};
 use crate::opcode::Opcode;
-use crate::BxSegregs;
 
 // ============================================================================
 // MemoryOperand — fully resolved addressing components
@@ -35773,19 +35773,39 @@ impl Instruction {
                 simd3!(EvexTop4buudTnnnWdqHdqR, EvexTop4buudTnnnWdqHdqM, self)
             }
             O::EvexTop4mxbf8psTnnnWdqHdqIb => {
-                simd3_ib!(EvexTop4mxbf8psTnnnWdqHdqIbR, EvexTop4mxbf8psTnnnWdqHdqIbM, self)
+                simd3_ib!(
+                    EvexTop4mxbf8psTnnnWdqHdqIbR,
+                    EvexTop4mxbf8psTnnnWdqHdqIbM,
+                    self
+                )
             }
             O::EvexTop4mxbhf8psTnnnWdqHdqIb => {
-                simd3_ib!(EvexTop4mxbhf8psTnnnWdqHdqIbR, EvexTop4mxbhf8psTnnnWdqHdqIbM, self)
+                simd3_ib!(
+                    EvexTop4mxbhf8psTnnnWdqHdqIbR,
+                    EvexTop4mxbhf8psTnnnWdqHdqIbM,
+                    self
+                )
             }
             O::EvexTop4mxbsspsTnnnWdqHdqIb => {
-                simd3_ib!(EvexTop4mxbsspsTnnnWdqHdqIbR, EvexTop4mxbsspsTnnnWdqHdqIbM, self)
+                simd3_ib!(
+                    EvexTop4mxbsspsTnnnWdqHdqIbR,
+                    EvexTop4mxbsspsTnnnWdqHdqIbM,
+                    self
+                )
             }
             O::EvexTop4mxhbf8psTnnnWdqHdqIb => {
-                simd3_ib!(EvexTop4mxhbf8psTnnnWdqHdqIbR, EvexTop4mxhbf8psTnnnWdqHdqIbM, self)
+                simd3_ib!(
+                    EvexTop4mxhbf8psTnnnWdqHdqIbR,
+                    EvexTop4mxhbf8psTnnnWdqHdqIbM,
+                    self
+                )
             }
             O::EvexTop4mxhf8psTnnnWdqHdqIb => {
-                simd3_ib!(EvexTop4mxhf8psTnnnWdqHdqIbR, EvexTop4mxhf8psTnnnWdqHdqIbM, self)
+                simd3_ib!(
+                    EvexTop4mxhf8psTnnnWdqHdqIbR,
+                    EvexTop4mxhf8psTnnnWdqHdqIbM,
+                    self
+                )
             }
             O::EvexVaddbf16VphHphWph => {
                 simd3!(EvexVaddbf16VphHphWphR, EvexVaddbf16VphHphWphM, self)
@@ -36019,11 +36039,9 @@ impl Instruction {
                 EvexVcvt2ph2hf8sVf8hdqWphKmaskM,
                 self
             ),
-            O::EvexVcvt2ps2phxVphHpsWps => simd3!(
-                EvexVcvt2ps2phxVphHpsWpsR,
-                EvexVcvt2ps2phxVphHpsWpsM,
-                self
-            ),
+            O::EvexVcvt2ps2phxVphHpsWps => {
+                simd3!(EvexVcvt2ps2phxVphHpsWpsR, EvexVcvt2ps2phxVphHpsWpsM, self)
+            }
             O::EvexVcvt2ps2phxVphHpsWpsKmask => simd3!(
                 EvexVcvt2ps2phxVphHpsWpsKmaskR,
                 EvexVcvt2ps2phxVphHpsWpsKmaskM,
@@ -36046,10 +36064,18 @@ impl Instruction {
                 self
             ),
             O::EvexVcvtbf42hf8Vf8Wf4Kmask => {
-                simd!(EvexVcvtbf42hf8Vf8Wf4KmaskR, EvexVcvtbf42hf8Vf8Wf4KmaskM, self)
+                simd!(
+                    EvexVcvtbf42hf8Vf8Wf4KmaskR,
+                    EvexVcvtbf42hf8Vf8Wf4KmaskM,
+                    self
+                )
             }
             O::EvexVcvtbf62hf8Vf8Wf6Kmask => {
-                simd!(EvexVcvtbf62hf8Vf8Wf6KmaskR, EvexVcvtbf62hf8Vf8Wf6KmaskM, self)
+                simd!(
+                    EvexVcvtbf62hf8Vf8Wf6KmaskR,
+                    EvexVcvtbf62hf8Vf8Wf6KmaskM,
+                    self
+                )
             }
             O::EvexVcvtbf82bf4sWf4Vdq => {
                 simd_st!(EvexVcvtbf82bf4sWf4VdqR, EvexVcvtbf82bf4sWf4VdqM, self)
@@ -36081,16 +36107,32 @@ impl Instruction {
                 self
             ),
             O::EvexVcvtbiasps2bf8Vf8HdqWpsKmask => {
-                simd3!(EvexVcvtbiasps2bf8Vf8HdqWpsKmaskR, EvexVcvtbiasps2bf8Vf8HdqWpsKmaskM, self)
+                simd3!(
+                    EvexVcvtbiasps2bf8Vf8HdqWpsKmaskR,
+                    EvexVcvtbiasps2bf8Vf8HdqWpsKmaskM,
+                    self
+                )
             }
             O::EvexVcvtbiasps2bf8sVf8HdqWpsKmask => {
-                simd3!(EvexVcvtbiasps2bf8sVf8HdqWpsKmaskR, EvexVcvtbiasps2bf8sVf8HdqWpsKmaskM, self)
+                simd3!(
+                    EvexVcvtbiasps2bf8sVf8HdqWpsKmaskR,
+                    EvexVcvtbiasps2bf8sVf8HdqWpsKmaskM,
+                    self
+                )
             }
             O::EvexVcvtbiasps2hf8Vf8HdqWpsKmask => {
-                simd3!(EvexVcvtbiasps2hf8Vf8HdqWpsKmaskR, EvexVcvtbiasps2hf8Vf8HdqWpsKmaskM, self)
+                simd3!(
+                    EvexVcvtbiasps2hf8Vf8HdqWpsKmaskR,
+                    EvexVcvtbiasps2hf8Vf8HdqWpsKmaskM,
+                    self
+                )
             }
             O::EvexVcvtbiasps2hf8sVf8HdqWpsKmask => {
-                simd3!(EvexVcvtbiasps2hf8sVf8HdqWpsKmaskR, EvexVcvtbiasps2hf8sVf8HdqWpsKmaskM, self)
+                simd3!(
+                    EvexVcvtbiasps2hf8sVf8HdqWpsKmaskR,
+                    EvexVcvtbiasps2hf8sVf8HdqWpsKmaskM,
+                    self
+                )
             }
             O::EvexVcvtdq2pdVpdWdq => simd!(EvexVcvtdq2pdVpdWdqR, EvexVcvtdq2pdVpdWdqM, self),
             O::EvexVcvtdq2pdVpdWdqKmask => {
@@ -36105,7 +36147,11 @@ impl Instruction {
                 simd!(EvexVcvtdq2psVpsWdqKmaskR, EvexVcvtdq2psVpsWdqKmaskM, self)
             }
             O::EvexVcvthf62hf8Vf8Wf6Kmask => {
-                simd!(EvexVcvthf62hf8Vf8Wf6KmaskR, EvexVcvthf62hf8Vf8Wf6KmaskM, self)
+                simd!(
+                    EvexVcvthf62hf8Vf8Wf6KmaskR,
+                    EvexVcvthf62hf8Vf8Wf6KmaskM,
+                    self
+                )
             }
             O::EvexVcvthf82bf4sWf4Vdq => {
                 simd_st!(EvexVcvthf82bf4sWf4VdqR, EvexVcvthf82bf4sWf4VdqM, self)
@@ -36223,7 +36269,11 @@ impl Instruction {
                 simd!(EvexVcvtps2bf8Vf8WpsKmaskR, EvexVcvtps2bf8Vf8WpsKmaskM, self)
             }
             O::EvexVcvtps2bf8sVf8WpsKmask => {
-                simd!(EvexVcvtps2bf8sVf8WpsKmaskR, EvexVcvtps2bf8sVf8WpsKmaskM, self)
+                simd!(
+                    EvexVcvtps2bf8sVf8WpsKmaskR,
+                    EvexVcvtps2bf8sVf8WpsKmaskM,
+                    self
+                )
             }
             O::EvexVcvtps2dqVdqWps => simd!(EvexVcvtps2dqVdqWpsR, EvexVcvtps2dqVdqWpsM, self),
             O::EvexVcvtps2dqVdqWpsKmask => {
@@ -36233,7 +36283,11 @@ impl Instruction {
                 simd!(EvexVcvtps2hf8Vf8WpsKmaskR, EvexVcvtps2hf8Vf8WpsKmaskM, self)
             }
             O::EvexVcvtps2hf8sVf8WpsKmask => {
-                simd!(EvexVcvtps2hf8sVf8WpsKmaskR, EvexVcvtps2hf8sVf8WpsKmaskM, self)
+                simd!(
+                    EvexVcvtps2hf8sVf8WpsKmaskR,
+                    EvexVcvtps2hf8sVf8WpsKmaskM,
+                    self
+                )
             }
             O::EvexVcvtps2ibsV8bWps => simd!(EvexVcvtps2ibsV8bWpsR, EvexVcvtps2ibsV8bWpsM, self),
             O::EvexVcvtps2ibsV8bWpsKmask => {
@@ -36286,10 +36340,18 @@ impl Instruction {
                 simd!(EvexVcvtqq2psVpsWdqKmaskR, EvexVcvtqq2psVpsWdqKmaskM, self)
             }
             O::EvexVcvtrops2hf8Vf8WpsKmask => {
-                simd!(EvexVcvtrops2hf8Vf8WpsKmaskR, EvexVcvtrops2hf8Vf8WpsKmaskM, self)
+                simd!(
+                    EvexVcvtrops2hf8Vf8WpsKmaskR,
+                    EvexVcvtrops2hf8Vf8WpsKmaskM,
+                    self
+                )
             }
             O::EvexVcvtrops2hf8sVf8WpsKmask => {
-                simd!(EvexVcvtrops2hf8sVf8WpsKmaskR, EvexVcvtrops2hf8sVf8WpsKmaskM, self)
+                simd!(
+                    EvexVcvtrops2hf8sVf8WpsKmaskR,
+                    EvexVcvtrops2hf8sVf8WpsKmaskM,
+                    self
+                )
             }
             O::EvexVcvtsd2shVssWsh => simd3!(EvexVcvtsd2shVssWshR, EvexVcvtsd2shVssWshM, self),
             O::EvexVcvtsd2shVssWshKmask => {

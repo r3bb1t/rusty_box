@@ -17,7 +17,11 @@ use super::super::softfloat3e::softfloat::SoftFloatStatus;
 //
 //   f(x) ~ [ p(x) + x * q(x) ]
 
-pub(in crate::cpu) fn eval_poly(x: Float128, arr: &[Float128], status: &mut SoftFloatStatus) -> Float128 {
+pub(in crate::cpu) fn eval_poly(
+    x: Float128,
+    arr: &[Float128],
+    status: &mut SoftFloatStatus,
+) -> Float128 {
     let mut n = arr.len();
     n -= 1;
     let mut r = arr[n];
@@ -41,7 +45,11 @@ pub(in crate::cpu) fn eval_poly(x: Float128, arr: &[Float128], status: &mut Soft
 //                    2
 //   f(x) ~ [ p(x) + x * q(x) ]
 
-pub(in crate::cpu) fn even_poly(x: Float128, arr: &[Float128], status: &mut SoftFloatStatus) -> Float128 {
+pub(in crate::cpu) fn even_poly(
+    x: Float128,
+    arr: &[Float128],
+    status: &mut SoftFloatStatus,
+) -> Float128 {
     let x2 = f128_mul(x, x, status);
     eval_poly(x2, arr, status)
 }
@@ -60,7 +68,11 @@ pub(in crate::cpu) fn even_poly(x: Float128, arr: &[Float128], status: &mut Soft
 //                        2
 //   f(x) ~ x * [ p(x) + x * q(x) ]
 
-pub(in crate::cpu) fn odd_poly(x: Float128, arr: &[Float128], status: &mut SoftFloatStatus) -> Float128 {
+pub(in crate::cpu) fn odd_poly(
+    x: Float128,
+    arr: &[Float128],
+    status: &mut SoftFloatStatus,
+) -> Float128 {
     let ep = even_poly(x, arr, status);
     f128_mul(x, ep, status)
 }

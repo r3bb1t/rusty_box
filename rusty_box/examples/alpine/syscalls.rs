@@ -574,7 +574,7 @@ impl Syscall {
                     domain: AddressFamily::from_raw(a[0]),
                     sock_type: SockType::from_raw(a[1]),
                     protocol: a[2] as i32,
-                }
+                };
             }
             42 => {
                 return Self::Connect {
@@ -584,7 +584,7 @@ impl Syscall {
                         len: a[2] as usize,
                     },
                     addrlen: a[2] as u32,
-                }
+                };
             }
             49 => {
                 return Self::Bind {
@@ -594,13 +594,13 @@ impl Syscall {
                         len: a[2] as usize,
                     },
                     addrlen: a[2] as u32,
-                }
+                };
             }
             158 => {
                 return Self::ArchPrctl {
                     code: ArchPrctlCode::from_raw(a[0]),
                     addr: a[1],
-                }
+                };
             }
             24 => return Self::SchedYield,
             34 => return Self::Pause,

@@ -11,8 +11,8 @@ use egui::text::LayoutJob;
 use egui::{Color32, FontId, Rect, RichText, Stroke, WidgetInfo, WidgetType};
 
 use crate::shell::theme::{
-    ACCENT_CYAN, BG_WELL, CONTROL_FILL_REST, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_MUTED,
-    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TITLE,
+    Accent, BG_WELL, CONTROL_FILL_REST, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY,
+    TEXT_SECONDARY, TEXT_TITLE,
 };
 
 /// Every listing row's height, points.
@@ -164,12 +164,7 @@ impl Cell {
 
 /// Where each column of a row of `cells` starts and how wide it is, after a
 /// `lead` (tree guides, a marker) of that many points, in a row `width` wide.
-fn column_rects(
-    row: Rect,
-    lead: f32,
-    cells: &[Cell],
-    char_width: f32,
-) -> Vec<Rect> {
+fn column_rects(row: Rect, lead: f32, cells: &[Cell], char_width: f32) -> Vec<Rect> {
     let gap = GAP_CHARS * char_width;
     let fixed: f32 = cells
         .iter()
@@ -178,7 +173,10 @@ fn column_rects(
             Width::Fill => 0.0,
         })
         .sum();
-    let fills = cells.iter().filter(|cell| cell.width == Width::Fill).count();
+    let fills = cells
+        .iter()
+        .filter(|cell| cell.width == Width::Fill)
+        .count();
     let gaps = gap * cells.len().saturating_sub(1) as f32;
     let left_over = row.width() - 2.0 * ROW_PAD - lead - fixed - gaps;
     let fill = if fills == 0 {
@@ -194,11 +192,45 @@ fn column_rects(
                 Width::Chars(chars) => chars * char_width,
                 Width::Fill => fill,
             };
-            let rect = Rect::from_min_max(egui::pos2(x, row.top()), egui::pos2(x + width, row.bottom()));
+            let rect = Rect::from_min_max(
+                egui::pos2(x, row.top()),
+                egui::pos2(x + width, row.bottom()),
+            );
             x += width + gap;
             rect
         })
         .collect()
+}
+
+/// The character of cell `cell` that `x` falls on, in a row of `cells`
+/// laid out in `row` after `lead`: monospace, `char_width` a character.
+pub(crate) fn char_at(
+    row: Rect,
+    lead: f32,
+    cells: &[Cell],
+    char_width: f32,
+    cell: usize,
+    x: f32,
+) -> Option<usize> {
+    let column = *column_rects(row, lead, cells, char_width).get(cell)?;
+    if x < column.left() || x > column.right() || char_width <= 0.0 {
+        return None;
+    }
+    Some(((x - column.left()) / char_width).floor() as usize)
+}
+
+/// Where character `index` of cell `cell` starts, in a row laid out as
+/// [`char_at`] reads one.
+pub(crate) fn char_x(
+    row: Rect,
+    lead: f32,
+    cells: &[Cell],
+    char_width: f32,
+    cell: usize,
+    index: usize,
+) -> Option<f32> {
+    let column = *column_rects(row, lead, cells, char_width).get(cell)?;
+    Some(column.left() + index as f32 * char_width)
 }
 
 /// The narrowest a row of `cells` can be.
@@ -255,10 +287,11 @@ pub(crate) fn list_row(
         return response;
     }
     let painter = ui.painter();
+    let accent = Accent::current(ui.ctx()).strong;
     let hovered = matches!(sense, RowSense::Pick { .. }) && response.hovered();
     let fill = match tone {
         Tone::Selected => Some(SELECTED),
-        Tone::Current => Some(ACCENT_CYAN.gamma_multiply(0.14)),
+        Tone::Current => Some(accent.gamma_multiply(0.14)),
         Tone::Plain | Tone::Stripe if hovered => Some(HOVER),
         Tone::Stripe => Some(STRIPE),
         Tone::Plain => None,
@@ -270,10 +303,13 @@ pub(crate) fn list_row(
         painter.rect_filled(
             Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
             1.0,
-            ACCENT_CYAN,
+            accent,
         );
     }
-    for (cell, column) in cells.iter().zip(column_rects(rect, lead, cells, char_width)) {
+    for (cell, column) in cells
+        .iter()
+        .zip(column_rects(rect, lead, cells, char_width))
+    {
         let galley = match &cell.text {
             CellText::Gauge(fraction, color) => {
                 let track =
@@ -328,7 +364,10 @@ pub(crate) fn header_row(ui: &mut egui::Ui, lead: f32, cells: &[Cell]) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(given, ROW_HEIGHT), egui::Sense::hover());
     let columns = Rect::from_min_size(rect.min, egui::vec2(columns_width, ROW_HEIGHT));
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    for (cell, column) in cells.iter().zip(column_rects(columns, lead, cells, char_width)) {
+    for (cell, column) in cells
+        .iter()
+        .zip(column_rects(columns, lead, cells, char_width))
+    {
         let galley = painter.layout_no_wrap(
             cell.plain_text().to_owned(),
             FontId::proportional(TEXT_CAPTION),
@@ -360,7 +399,8 @@ pub(crate) fn tree_guides(ui: &egui::Ui, row: Rect, depth: usize, guides: &[bool
     }
     let painter = ui.painter();
     let stroke = Stroke::new(1.0_f32, GUIDE);
-    let column_x = |level: usize| row.left() + ROW_PAD + level as f32 * TREE_INDENT + TREE_INDENT / 2.0;
+    let column_x =
+        |level: usize| row.left() + ROW_PAD + level as f32 * TREE_INDENT + TREE_INDENT / 2.0;
     for (level, &runs_on) in guides.iter().enumerate() {
         if runs_on {
             painter.vline(column_x(level), row.y_range(), stroke);
@@ -370,13 +410,24 @@ pub(crate) fn tree_guides(ui: &egui::Ui, row: Rect, depth: usize, guides: &[bool
     let middle = row.center().y;
     let bottom = if last { middle } else { row.bottom() };
     painter.vline(x, egui::Rangef::new(row.top(), bottom), stroke);
-    painter.hline(egui::Rangef::new(x, x + TREE_INDENT / 2.0 + 2.0), middle, stroke);
+    painter.hline(
+        egui::Rangef::new(x, x + TREE_INDENT / 2.0 + 2.0),
+        middle,
+        stroke,
+    );
 }
 
 /// A small filled dot in a row's lead, ending `lead` points into the row.
 pub(crate) fn lead_dot(ui: &egui::Ui, row: Rect, lead: f32, color: Color32) {
     let center = egui::pos2(row.left() + ROW_PAD + lead - 7.0, row.center().y);
     ui.painter().circle_filled(center, 3.5, color);
+}
+
+/// [`lead_dot`]'s outline: a breakpoint that resolves nowhere yet.
+pub(crate) fn lead_ring(ui: &egui::Ui, row: Rect, lead: f32, color: Color32) {
+    let center = egui::pos2(row.left() + ROW_PAD + lead - 7.0, row.center().y);
+    ui.painter()
+        .circle_stroke(center, 3.0, egui::Stroke::new(1.2, color));
 }
 
 /// A small right-pointing marker in a row's lead: where the processor is.
@@ -392,6 +443,28 @@ pub(crate) fn lead_arrow(ui: &egui::Ui, row: Rect, color: Color32) {
         color,
         Stroke::NONE,
     ));
+}
+
+/// [`lead_arrow`]'s outline: where a caller frame resumes. It is named
+/// `label` for assistive technology, since its row's text does not say it.
+pub(crate) fn lead_hollow_arrow(ui: &mut egui::Ui, row: Rect, color: Color32, label: &str) {
+    let left = row.left() + ROW_PAD;
+    let middle = row.center().y;
+    let points = vec![
+        egui::pos2(left + 0.5, middle - 4.0),
+        egui::pos2(left + 6.5, middle),
+        egui::pos2(left + 0.5, middle + 4.0),
+    ];
+    ui.painter()
+        .add(egui::Shape::closed_line(points, Stroke::new(1.2, color)));
+    let marker = Rect::from_min_max(
+        egui::pos2(left, middle - 4.5),
+        egui::pos2(left + 7.0, middle + 4.5),
+    );
+    let id = ui.id().with(label).with(row.top().to_bits());
+    let enabled = ui.is_enabled();
+    ui.interact(marker, id, egui::Sense::hover())
+        .widget_info(|| WidgetInfo::labeled(WidgetType::Label, enabled, label));
 }
 
 /// A disclosure chevron in a row's lead: pointing right when closed, down
@@ -445,7 +518,10 @@ pub(crate) fn chip(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Respo
         .layout_no_wrap(text.to_owned(), FontId::proportional(TEXT_CAPTION), color)
         .size()
         .x;
-    wrap_before(ui, text_width + 2.0 * f32::from(CHIP_MARGIN_X) + CHIP_BORDER);
+    wrap_before(
+        ui,
+        text_width + 2.0 * f32::from(CHIP_MARGIN_X) + CHIP_BORDER,
+    );
     egui::Frame::new()
         .fill(color.gamma_multiply(0.14))
         .stroke(Stroke::new(1.0_f32, color.gamma_multiply(0.55)))
@@ -465,45 +541,62 @@ const SEGMENT_FRAME_X: f32 = 6.0;
 /// The gap between a segmented switch's buttons, points.
 const SEGMENT_GAP: f32 = 2.0;
 
+/// One button of a segmented switch: the value it picks and its label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Segment<T> {
+    pub(crate) value: T,
+    pub(crate) label: &'static str,
+}
+
 /// A segmented switch over `options`: the picked one filled. Returns whether
-/// the pick changed.
+/// the pick changed. It starts a new row when it does not fit what is left
+/// of this one; a switch wider than a whole row wraps its buttons inside its
+/// frame, so it never runs past the row's edge.
 pub(crate) fn segmented<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
     current: &mut T,
-    options: &[(T, &str)],
+    options: &[Segment<T>],
 ) -> bool {
     let mut changed = false;
     let font = egui::TextStyle::Button.resolve(ui.style());
     let buttons: f32 = options
         .iter()
-        .map(|&(_, label)| {
+        .map(|segment| {
             ui.painter()
-                .layout_no_wrap(label.to_owned(), font.clone(), Color32::PLACEHOLDER)
+                .layout_no_wrap(segment.label.to_owned(), font.clone(), Color32::PLACEHOLDER)
                 .size()
                 .x
                 + 2.0 * SEGMENT_PADDING_X
         })
         .sum();
     let gaps = SEGMENT_GAP * options.len().saturating_sub(1) as f32;
-    wrap_before(ui, buttons + gaps + SEGMENT_FRAME_X);
+    let width = buttons + gaps + SEGMENT_FRAME_X;
+    wrap_before(ui, width);
+    let row = ui.max_rect().width();
     egui::Frame::new()
         .fill(BG_WELL)
         .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
         .corner_radius(8)
         .inner_margin(egui::Margin::same(2))
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = SEGMENT_GAP;
+            ui.spacing_mut().item_spacing = egui::vec2(SEGMENT_GAP, SEGMENT_GAP);
             ui.spacing_mut().button_padding = egui::vec2(SEGMENT_PADDING_X, 3.0);
-            ui.horizontal(|ui| {
-                for &(value, label) in options {
-                    let selected = *current == value;
-                    let button = egui::Button::selectable(selected, label).corner_radius(6);
+            let buttons = |ui: &mut egui::Ui| {
+                for segment in options {
+                    let selected = *current == segment.value;
+                    let button = egui::Button::selectable(selected, segment.label).corner_radius(6);
                     if ui.add(button).clicked() && !selected {
-                        *current = value;
+                        *current = segment.value;
                         changed = true;
                     }
                 }
-            });
+            };
+            if width > row {
+                ui.set_max_width((row - SEGMENT_FRAME_X).max(0.0));
+                ui.horizontal_wrapped(buttons);
+            } else {
+                ui.horizontal(buttons);
+            }
         });
     changed
 }
@@ -524,7 +617,11 @@ pub(crate) fn title_label(ui: &mut egui::Ui, title: &str, count: Option<usize>) 
             .corner_radius(8)
             .inner_margin(egui::Margin::symmetric(6, 0))
             .show(ui, |ui| {
-                ui.label(RichText::new(count.to_string()).size(TEXT_CAPTION).color(TEXT_MUTED));
+                ui.label(
+                    RichText::new(count.to_string())
+                        .size(TEXT_CAPTION)
+                        .color(TEXT_MUTED),
+                );
             });
     }
 }
@@ -571,7 +668,11 @@ mod tests {
                 0.0_f32,
             );
         harness.run();
-        assert!(*harness.state() <= 200.5, "the row took {} points", harness.state());
+        assert!(
+            *harness.state() <= 200.5,
+            "the row took {} points",
+            harness.state()
+        );
     }
 
     #[test]

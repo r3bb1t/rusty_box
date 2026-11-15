@@ -45,9 +45,7 @@ pub(in crate::cpu) fn f64_round_to_int_scaled(
             // round_near_even falls through to round_near_maxMag unless the
             // fraction is zero, in which case the C switch breaks out.
             ROUND_NEAR_EVEN | ROUND_NEAR_MAXMAG => {
-                if !(rounding_mode == ROUND_NEAR_EVEN && frac == 0)
-                    && (exp + scale) == 0x3FE
-                {
+                if !(rounding_mode == ROUND_NEAR_EVEN && frac == 0) && (exp + scale) == 0x3FE {
                     ui_z |= pack_to_f64(false, 0x3FF - scale, 0);
                 }
             }

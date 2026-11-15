@@ -27,7 +27,7 @@ impl Default for SoftFloatStatus {
         Self {
             softfloat_rounding_mode: ROUND_NEAR_EVEN,
             softfloat_exception_flags: 0,
-            softfloat_exception_masks: 0x3f,
+            softfloat_exception_masks: 0x3F,
             softfloat_suppress_exception: 0,
             softfloat_denormals_are_zeros: false,
             softfloat_flush_underflow_to_zero: false,
@@ -55,7 +55,7 @@ pub(in crate::cpu) const FLAG_OVERFLOW: i32 = 0x08;
 pub(in crate::cpu) const FLAG_UNDERFLOW: i32 = 0x10;
 pub(in crate::cpu) const FLAG_INEXACT: i32 = 0x20;
 
-pub(in crate::cpu) const ALL_EXCEPTIONS_MASK: i32 = 0x3f;
+pub(in crate::cpu) const ALL_EXCEPTIONS_MASK: i32 = 0x3F;
 
 /// C1 flag for ExtFloat80 rounding direction
 pub(in crate::cpu) const RAISE_SW_C1: i32 = 0x0200;

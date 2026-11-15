@@ -13,16 +13,17 @@
 //! The host bridge is the root of the PCI bus and handles configuration
 //! space routing for all PCI devices.
 
-use rusty_box_devices::api::{ChipsetEffect, SmramControl, PAM_AREAS};
-use rusty_box_devices::pci::{pci_device, PciDevice};
+use rusty_box_devices::api::{ChipsetEffect, IoPort, PAM_AREAS, SmramControl};
+use rusty_box_devices::pci::{PciDevice, pci_device};
 
 #[cfg(feature = "std")]
 use crate::snapshot::{
-    bounds, checked_snapshot_len_add, checked_snapshot_len_mul, SnapError, SnapRead, SnapResult, SnapWrite,
+    SnapError, SnapRead, SnapResult, SnapWrite, bounds, checked_snapshot_len_add,
+    checked_snapshot_len_mul,
 };
 
 #[cfg(feature = "std")]
-const PCI_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0e];
+const PCI_SNAPSHOT_IDENTITY_BYTES: [usize; 9] = [0, 1, 2, 3, 8, 9, 10, 11, 0x0E];
 
 #[cfg(feature = "std")]
 fn invalid_pci_snapshot(message: &'static str) -> SnapError {
@@ -47,11 +48,11 @@ fn validate_bridge_snapshot_identity(
 const PCI_CONF_SIZE: usize = 256;
 
 /// PCI configuration address port (Bochs: devices.cc uses pci_conf_addr)
-pub const PCI_CONFIG_ADDR: u16 = 0x0CF8;
-/// PCI configuration data port (base — also 0xCF9, 0xCFA, 0xCFB)
-pub const PCI_CONFIG_DATA: u16 = 0x0CFC;
-
-
+pub const PCI_CONFIG_ADDR: IoPort = IoPort::new(0x0CF8);
+/// PCI configuration data window: [`PCI_CONFIG_DATA_PORT_COUNT`] ports from
+/// 0xCFC, each landing that many bytes into the addressed dword.
+pub const PCI_CONFIG_DATA: IoPort = IoPort::new(0x0CFC);
+pub const PCI_CONFIG_DATA_PORT_COUNT: u16 = 4;
 
 /// Deferred memory-subsystem updates a host-bridge config-space write
 /// requires. Bochs applies PAM/SMRAM to the memory object synchronously
@@ -195,7 +196,7 @@ impl BxPciBridge {
         self.pci_conf[0x56] = 0x00;
         self.pci_conf[0x57] = 0x01;
         self.pci_conf[0x58] = 0x10; // i440FX: pci.cc
-                                    // PAM registers 0x59-0x5F: all zeros (pci.cc)
+        // PAM registers 0x59-0x5F: all zeros (pci.cc)
         for i in 0x59..0x60 {
             self.pci_conf[i] = 0x00;
         }
@@ -209,12 +210,12 @@ impl BxPciBridge {
 
         self.dram_detect = 0;
     }
-
 }
 
 impl PciDevice for BxPciBridge {
-    const DEVFUNC: u8 = pci_device(0, 0);
     type WriteEffects = PciBridgeWriteEffects;
+
+    const DEVFUNC: u8 = pci_device(0, 0);
 
     /// Read from PCI configuration space.
     fn pci_read(&self, address: u8, io_len: u8) -> u32 {
@@ -343,7 +344,6 @@ impl PciDevice for BxPciBridge {
         }
         effects
     }
-
 }
 
 impl BxPciBridge {
@@ -572,7 +572,7 @@ mod tests {
         // Set DLCK (bit 4) — should lock DOPEN to 0
         bridge.pci_write(0x72, 0x18, 1); // SMRAME=1, DLCK=1
         assert_ne!(bridge.pci_conf[0x72] & 0x10, 0); // DLCK set
-                                                     // Try to set DOPEN — should fail because DLCK is set
+        // Try to set DOPEN — should fail because DLCK is set
         bridge.pci_write(0x72, 0x48, 1); // DOPEN=1
         assert_eq!(bridge.pci_conf[0x72] & 0x40, 0); // DOPEN stays 0
     }
@@ -593,7 +593,7 @@ mod tests {
         // Seed a known "before" state directly (bypassing pci_write).
         bridge.pci_conf[0x07] = 0xAA; // 1010_1010
         bridge.pci_write(0x07, 0xF0, 1); // write 1111_0000
-                                         // Bochs: new = (0xAA & 0xF0) & 0xFD = 0xA0 & 0xFD = 0xA0
+        // Bochs: new = (0xAA & 0xF0) & 0xFD = 0xA0 & 0xFD = 0xA0
         assert_eq!(bridge.pci_conf[0x07], 0xA0);
 
         // Bit1 (0x02) is unconditionally cleared by the formula, even though

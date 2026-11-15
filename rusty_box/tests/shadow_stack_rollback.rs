@@ -13,6 +13,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::decoder::X86Feature;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
@@ -97,7 +98,8 @@ fn on_big_stack(check: fn()) {
 
 fn read_u64(emu: &mut Emulator, address: u64) -> u64 {
     let mut bytes = [0u8; 8];
-    emu.mem_read(address, &mut bytes).expect("read");
+    emu.mem_read(BxPhyAddress::new(address), &mut bytes)
+        .expect("read");
     u64::from_le_bytes(bytes)
 }
 
@@ -131,26 +133,39 @@ fn shadow_stack_machine() -> Box<Emulator> {
     let pdpt = read_u64(&mut emu, cr3 & ENTRY_ADDRESS) & ENTRY_ADDRESS;
     let page_directory = read_u64(&mut emu, pdpt) & ENTRY_ADDRESS;
     let pde = SHADOW_STACK_PAGE | PDE_PRESENT | PDE_DIRTY | PDE_LARGE;
-    emu.mem_write(page_directory + (SHADOW_STACK_PAGE >> 21) * 8, &pde.to_le_bytes())
-        .expect("pde");
+    emu.mem_write(
+        BxPhyAddress::new(page_directory + (SHADOW_STACK_PAGE >> 21) * 8),
+        &pde.to_le_bytes(),
+    )
+    .expect("pde");
     // Drop every translation cached over the old mapping.
     emu.reg_write(X86Reg::Cr3, cr3);
     // A supervisor token holds its own address with the busy bit clear.
-    emu.mem_write(SHADOW_STACK_TOKEN, &SHADOW_STACK_TOKEN.to_le_bytes())
-        .expect("token");
+    emu.mem_write(
+        BxPhyAddress::new(SHADOW_STACK_TOKEN),
+        &SHADOW_STACK_TOKEN.to_le_bytes(),
+    )
+    .expect("token");
 
     emu.reg_write(X86Reg::IdtrBase, IDT);
     emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
     emu.reg_write(X86Reg::Rsp, STACK_TOP);
     for gate in GATES {
-        emu.mem_write(IDT + gate.vector * 16, &interrupt_gate(gate.handler))
-            .expect("idt");
-        emu.mem_write(gate.handler, &HANDLER).expect("handler");
+        emu.mem_write(
+            BxPhyAddress::new(IDT + gate.vector * 16),
+            &interrupt_gate(gate.handler),
+        )
+        .expect("idt");
+        emu.mem_write(BxPhyAddress::new(gate.handler), &HANDLER)
+            .expect("handler");
     }
     let mut not_present = interrupt_gate(GP_HANDLER);
     not_present[5] &= !GATE_PRESENT;
-    emu.mem_write(IDT + u64::from(NOT_PRESENT_VECTOR) * 16, &not_present)
-        .expect("idt");
+    emu.mem_write(
+        BxPhyAddress::new(IDT + u64::from(NOT_PRESENT_VECTOR) * 16),
+        &not_present,
+    )
+    .expect("idt");
     emu
 }
 
@@ -201,7 +216,8 @@ fn run(body: &[u8]) -> Delivered {
     let mut emu = shadow_stack_machine();
     let end = body_start() + body.len() as u64;
     let image = [&enable_shadow_stack()[..], body, &[0xEB, 0xFE]].concat();
-    emu.mem_write(CODE, &image).expect("write code");
+    emu.mem_write(BxPhyAddress::new(CODE), &image)
+        .expect("write code");
     emu.emu_start(CODE, Some(end), None, Some(64))
         .expect("execute");
     let rip = emu.cpu().rip();

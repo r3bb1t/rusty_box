@@ -1,0 +1,15 @@
+--- a/target/arm/tcg/helper-a64.c
++++ b/target/arm/tcg/helper-a64.c
+@@ -633,6 +633,12 @@
+ 
+     arm_clear_exclusive(env);
+ 
++    /*
++     * AArch64.ExceptionReturn() sends an event (SendEventLocal()) whether
++     * the return is legal or not.
++     */
++    qatomic_set(&env->event_register, true);
++
+     /* We must squash the PSTATE.SS bit to zero unless both of the
+      * following hold:
+      *  1. debug exceptions are currently disabled

@@ -67,4 +67,3 @@ pub trait DisplaySource {
     /// spaces.
     fn text_char(&self, pos: TextPos) -> char;
 }
-

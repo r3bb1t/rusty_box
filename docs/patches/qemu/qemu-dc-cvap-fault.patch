@@ -1,0 +1,158 @@
+--- a/target/arm/helper.c
++++ b/target/arm/helper.c
+@@ -30,6 +30,8 @@
+ #ifdef CONFIG_TCG
+ #include "accel/tcg/probe.h"
+ #include "accel/tcg/getpc.h"
++#include "accel/tcg/cpu-loop.h"
++#include "exec/tlb-flags.h"
+ #include "semihosting/common-semi.h"
+ #endif
+ #include "cpregs.h"
+@@ -5426,6 +5428,65 @@
+       .access = PL0_R, .accessfn = access_rndr, .readfn = rndr_readfn },
+ };
+ 
++#ifdef CONFIG_TCG
++/*
++ * The translation regime @mmu_idx without PAN, which does not apply to
++ * the AccessType_DC access of a data cache maintenance instruction by VA
++ * (CreateAccDescDC()).
++ */
++static ARMMMUIdx dc_mmu_idx(ARMMMUIdx mmu_idx)
++{
++    switch (mmu_idx) {
++    case ARMMMUIdx_E10_1_PAN:
++        return ARMMMUIdx_E10_1;
++    case ARMMMUIdx_E20_2_PAN:
++        return ARMMMUIdx_E20_2;
++    default:
++        return mmu_idx;
++    }
++}
++
++/*
++ * A clean by VA (DC CVAP, DC CVADP) of @vaddr whose read translation with
++ * @mmu_idx has failed. AArch64_S1CheckPermissions() and
++ * AArch64_S2CheckPermissions() give a clean a Permission fault only at
++ * EL0, for want of read permission, so above EL0 one completes; a
++ * Permission fault on the stage 1 walk's own stage 2 translation is the
++ * walk's, taken at any EL. Any other fault is taken with FAR_ELx the
++ * register's value (AArch64_DC()) and ESR_ELx.CM and WnR set
++ * (AArch64_FaultSyndrome() for AccessType_DC).
++ */
++static void dc_clean_fault(CPUARMState *env, uint64_t vaddr,
++                           ARMMMUIdx mmu_idx, uintptr_t ra)
++{
++#ifdef CONFIG_USER_ONLY
++    /* The page is not readable: the read's SIGSEGV reports it. */
++    probe_read(env, vaddr, 1, arm_to_core_mmu_idx(mmu_idx), ra);
++#else
++    GetPhysAddrResult res = {};
++    ARMMMUFaultInfo fi = {};
++
++    if (get_phys_addr(env, vaddr, MMU_DATA_LOAD, 0, mmu_idx, &res, &fi)) {
++        return;
++    }
++    if (fi.type == ARMFault_Permission && !fi.s1ptw &&
++        arm_current_el(env) != 0) {
++        return;
++    }
++    fi.cm = true;
++    cpu_restore_state(env_cpu(env), ra);
++    /*
++     * arm_deliver_fault() merges its syndrome into this template, which
++     * for a cache maintenance instruction holds nothing: ISV, which only
++     * a load or store of one register may set, is 0.
++     */
++    env->exception.syndrome = 0;
++    arm_deliver_fault(env_archcpu(env), vaddr, MMU_DATA_STORE,
++                      arm_to_core_mmu_idx(mmu_idx), &fi);
++#endif
++}
++#endif /* CONFIG_TCG */
++
+ static void dccvap_writefn(CPUARMState *env, const ARMCPRegInfo *ri,
+                           uint64_t value)
+ {
+@@ -5436,10 +5497,15 @@
+     uint64_t vaddr_in = (uint64_t) value;
+     uint64_t vaddr = vaddr_in & ~(dline_size - 1);
+     void *haddr;
+-    int mem_idx = arm_env_mmu_index(env);
++    ARMMMUIdx dc_idx = dc_mmu_idx(arm_mmu_idx(env));
++    int mem_idx = arm_to_core_mmu_idx(dc_idx);
+ 
+     /* This won't be crossing page boundaries */
+-    haddr = probe_read(env, vaddr, dline_size, mem_idx, GETPC());
++    if (probe_access_flags(env, vaddr, dline_size, MMU_DATA_LOAD, mem_idx,
++                           true, &haddr, GETPC()) & TLB_INVALID_MASK) {
++        dc_clean_fault(env, vaddr_in, dc_idx, GETPC());
++        return;
++    }
+     if (haddr) {
+ #ifndef CONFIG_USER_ONLY
+ 
+--- a/target/arm/internals.h
++++ b/target/arm/internals.h
+@@ -795,6 +795,7 @@
+     bool s1ns;
+     bool ea;
+     bool dirtybit;  /* FEAT_S1PIE, FEAT_S2PIE */
++    bool cm;        /* a cache maintenance instruction's fault: ISS.CM */
+ };
+ 
+ /**
+@@ -1016,6 +1017,15 @@
+                             MemOp memop, int size, bool probe, uintptr_t ra);
+ #endif
+ 
++/*
++ * Raise the abort, or granule protection check exception, that @fi
++ * describes for an access of @access_type at @addr with @mmu_idx. The
++ * caller has restored the CPU state.
++ */
++G_NORETURN void arm_deliver_fault(ARMCPU *cpu, vaddr addr,
++                                  MMUAccessType access_type,
++                                  int mmu_idx, ARMMMUFaultInfo *fi);
++
+ static inline int arm_to_core_mmu_idx(ARMMMUIdx mmu_idx)
+ {
+     int coreidx = mmu_idx & ARM_MMU_IDX_COREIDX_MASK;
+--- a/target/arm/tcg/tlb_helper.c
++++ b/target/arm/tcg/tlb_helper.c
+@@ -61,7 +61,7 @@
+     } else if (!FIELD_EX32(template_syn, DABORT_ISS, ISV) || target_el != 2
+         || fi->s1ptw || !fi->stage2) {
+         syn = syn_data_abort_no_iss(same_el, 0,
+-                                    fi->ea, 0, fi->s1ptw, is_write, fsc);
++                                    fi->ea, fi->cm, fi->s1ptw, is_write, fsc);
+     } else {
+         /*
+          * Fields: IL, ISV, SAS, SSE, SRT, SF and AR come from the template
+@@ -70,7 +70,7 @@
+          */
+         syn = syn_data_abort_with_iss(same_el,
+                                       0, 0, 0, 0, 0,
+-                                      fi->ea, 0, fi->s1ptw, is_write, fsc,
++                                      fi->ea, fi->cm, fi->s1ptw, is_write, fsc,
+                                       true);
+         /* Merge the runtime syndrome with the template syndrome.  */
+         syn |= template_syn;
+@@ -172,7 +172,6 @@
+     return gpcsc[fi->gpcf] | fi->level;
+ }
+ 
+-static G_NORETURN
+ void arm_deliver_fault(ARMCPU *cpu, vaddr addr,
+                        MMUAccessType access_type,
+                        int mmu_idx, ARMMMUFaultInfo *fi)
+@@ -207,7 +206,7 @@
+         syn = syn_gpc(fi->stage2 && fi->type == ARMFault_GPCFOnWalk,
+                       access_type == MMU_INST_FETCH,
+                       encode_gpcsc(fi), is_vncr,
+-                      0, fi->s1ptw,
++                      fi->cm, fi->s1ptw,
+                       access_type == MMU_DATA_STORE, fsc);
+ 
+         env->cp15.mfar_el3 = fi->paddr;

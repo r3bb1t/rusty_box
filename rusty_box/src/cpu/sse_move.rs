@@ -17,10 +17,8 @@
 //! (`state_resolve_opcode`) does, once, as Bochs `assignHandler` does.
 //! Legacy SSE (non-VEX) preserves upper bits: uses `write_xmm_reg_lo128`.
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-    xmm::BxPackedXmmRegister,
-};
+use super::decoder::{BxSegregs, Instruction};
+use super::xmm::BxPackedXmmRegister;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================

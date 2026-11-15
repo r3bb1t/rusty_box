@@ -2,9 +2,10 @@
 //! a new disk comes in, the name and folder it is given, and which of the
 //! page's states a VM's settings put it in.
 
-use rusty_box_bximage::ImageSize;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
+
+use rusty_box_bximage::ImageSize;
 
 /// A new hard disk's size, whole MiB.
 ///
@@ -17,6 +18,39 @@ pub(crate) struct DiskSize {
 }
 
 impl DiskSize {
+    /// The custom sizes allowed, in custom units.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const CUSTOM_RANGE: core::ops::RangeInclusive<u32> = 1..=2048;
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) const CUSTOM_RANGE: core::ops::RangeInclusive<u32> = 1..=1024;
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const CUSTOM_UNIT: &'static str = "GB";
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) const CUSTOM_UNIT: &'static str = "MB";
+    /// A custom size is counted in whole units of this many MiB.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const CUSTOM_UNIT_MIB: u32 = 1024;
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) const CUSTOM_UNIT_MIB: u32 = 1;
+    /// Enough for Windows 10, which asks for 32 GB.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const DEFAULT: Self = Self::gib(32);
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) const DEFAULT: Self = Self::mib(64);
+    /// The sizes offered as chips, smallest first.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const PRESETS: [Self; 5] = [
+        Self::gib(2),
+        Self::gib(8),
+        Self::gib(16),
+        Self::gib(32),
+        Self::gib(64),
+    ];
+    /// The sizes offered as chips, smallest first.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) const PRESETS: [Self; 4] =
+        [Self::mib(16), Self::mib(64), Self::mib(256), Self::mib(512)];
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn gib(gib: u32) -> Self {
         Self { mib: gib * 1024 }
@@ -27,44 +61,6 @@ impl DiskSize {
     pub(crate) const fn mib(mib: u32) -> Self {
         Self { mib }
     }
-
-    /// The sizes offered as chips, smallest first.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) const PRESETS: [Self; 5] = [
-        Self::gib(2),
-        Self::gib(8),
-        Self::gib(16),
-        Self::gib(32),
-        Self::gib(64),
-    ];
-    /// Enough for Windows 10, which asks for 32 GB.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) const DEFAULT: Self = Self::gib(32);
-    /// A custom size is counted in whole units of this many MiB.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) const CUSTOM_UNIT_MIB: u32 = 1024;
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) const CUSTOM_UNIT: &'static str = "GB";
-    /// The custom sizes allowed, in custom units.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) const CUSTOM_RANGE: core::ops::RangeInclusive<u32> = 1..=2048;
-
-    /// The sizes offered as chips, smallest first.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) const PRESETS: [Self; 4] = [
-        Self::mib(16),
-        Self::mib(64),
-        Self::mib(256),
-        Self::mib(512),
-    ];
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) const DEFAULT: Self = Self::mib(64);
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) const CUSTOM_UNIT_MIB: u32 = 1;
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) const CUSTOM_UNIT: &'static str = "MB";
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) const CUSTOM_RANGE: core::ops::RangeInclusive<u32> = 1..=1024;
 
     /// A custom size of `count` custom units, held to [`Self::CUSTOM_RANGE`].
     pub(crate) fn custom(count: u32) -> Self {
@@ -135,8 +131,13 @@ pub(crate) fn first_free_name<F: Fn(&str) -> bool>(name: &str, taken: F) -> Stri
         return name.to_owned();
     }
     let path = Path::new(name);
-    let stem = path.file_stem().map_or_else(|| name.to_owned(), |stem| stem.to_string_lossy().into_owned());
-    let extension = path.extension().map(|ext| ext.to_string_lossy().into_owned());
+    let stem = path.file_stem().map_or_else(
+        || name.to_owned(),
+        |stem| stem.to_string_lossy().into_owned(),
+    );
+    let extension = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().into_owned());
     let candidate = |n: u32| match &extension {
         Some(ext) => format!("{stem} ({n}).{ext}"),
         None => format!("{stem} ({n})"),
@@ -183,7 +184,10 @@ pub(crate) fn create_disk(
     size: DiskSize,
     existing: rusty_box_bximage::ExistingFilePolicy,
 ) -> Result<rusty_box_bximage::CreatedImage, String> {
-    if let Some(folder) = path.parent().filter(|folder| !folder.as_os_str().is_empty()) {
+    if let Some(folder) = path
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(folder)
             .map_err(|error| format!("cannot create {}: {error}", folder.display()))?;
     }
@@ -233,7 +237,10 @@ mod tests {
             ["2 GB", "8 GB", "16 GB", "32 GB", "64 GB"]
         );
         assert_eq!(DiskSize::DEFAULT, DiskSize::gib(32));
-        assert_eq!(DiskSize::gib(16).image_size().bytes(), 16 * 1024 * 1024 * 1024);
+        assert_eq!(
+            DiskSize::gib(16).image_size().bytes(),
+            16 * 1024 * 1024 * 1024
+        );
         assert_eq!(DiskSize::mib(64).label(), "64 MB");
     }
 
@@ -271,13 +278,17 @@ mod tests {
     fn disks_go_to_rusty_box_under_documents() {
         assert_eq!(
             documents_folder_under(Path::new("/storage/emulated/0")),
-            Path::new("/storage/emulated/0").join("Documents").join("Rusty Box")
+            Path::new("/storage/emulated/0")
+                .join("Documents")
+                .join("Rusty Box")
         );
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        std::env::temp_dir()
-            .join(format!("rusty_box_gui_hard_disk_{tag}_{}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "rusty_box_gui_hard_disk_{tag}_{}",
+            std::process::id()
+        ))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -297,7 +308,10 @@ mod tests {
         let length = std::fs::metadata(&path).expect("file").len();
         assert_eq!(length, created.bytes);
         // Whole cylinders of 16 heads x 63 sectors x 512 bytes, up to 1 GiB.
-        assert!(length <= 1024 * 1024 * 1024 && length > 1_000_000_000, "{length}");
+        assert!(
+            length <= 1024 * 1024 * 1024 && length > 1_000_000_000,
+            "{length}"
+        );
         std::fs::remove_dir_all(&folder).expect("clean up");
     }
 

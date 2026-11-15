@@ -1,9 +1,10 @@
 // cpu/cpudb/intel/corei7_skylake-x.cc
 
-use crate::cpu::cpuid::{BxCpuIdTrait, CpuidFreq, CpuidLeaf};
-use crate::cpu::decoder::{features::X86Feature, BX_ISA_EXTENSIONS_ARRAY_SIZE};
-
 use bitflags::bitflags;
+
+use crate::cpu::cpuid::{BxCpuIdTrait, CpuidFreq, CpuidLeaf};
+use crate::cpu::decoder::BX_ISA_EXTENSIONS_ARRAY_SIZE;
+use crate::cpu::decoder::features::X86Feature;
 
 /// When RUSTY_BOX_NO_AVX is set, strip AVX/FMA/AVX2/BMI1/BMI2/AVX-512 from
 /// CPUID and ISA extensions. Forces kernel to SSE2-only code paths for
@@ -535,9 +536,9 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             // kernel PIT-calibrates the true tick rate (= IPS setting).
             0x00000000 => (
                 0x00000016, // Max basic leaf (Bochs corei7_skylake-x.cc)
-                0x756e6547, // "Genu"
-                0x6c65746e, // "ntel"
-                0x49656e69, // "ineI" → "GenuineIntel"
+                0x756E6547, // "Genu"
+                0x6C65746E, // "ntel"
+                0x49656E69, // "ineI" → "GenuineIntel"
             ),
 
             // ── Leaf 1: Version / Feature Flags ─────────────────────────
@@ -828,12 +829,18 @@ mod tests {
             | (1 << 30)
             | (1 << 31);
         let (eax, ebx, ecx, edx) = Corei7SkylakeX::new().get_cpuid_leaf(0x0000_0007, 0);
-        assert_eq!(ebx, EXPECTED, "leaf 7 EBX = {ebx:#010X}, want {EXPECTED:#010X}");
+        assert_eq!(
+            ebx, EXPECTED,
+            "leaf 7 EBX = {ebx:#010X}, want {EXPECTED:#010X}"
+        );
         assert_eq!(eax, 0, "max leaf-7 subleaf");
         assert_eq!(ecx, 0);
         assert_eq!(edx, 0);
         // Any subleaf above 0 is zero, as upstream's default arm gives.
-        assert_eq!(Corei7SkylakeX::new().get_cpuid_leaf(0x0000_0007, 1), (0, 0, 0, 0));
+        assert_eq!(
+            Corei7SkylakeX::new().get_cpuid_leaf(0x0000_0007, 1),
+            (0, 0, 0, 0)
+        );
     }
 
     #[test]

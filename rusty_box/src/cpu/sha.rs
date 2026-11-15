@@ -11,7 +11,8 @@
 //! - SHA256MSG1  Vdq, Wdq      (0F 38 CC)
 //! - SHA256MSG2  Vdq, Wdq      (0F 38 CD)
 
-use super::{decoder::Instruction, xmm::BxPackedXmmRegister};
+use super::decoder::Instruction;
+use super::xmm::BxPackedXmmRegister;
 
 // ============================================================================
 // SHA helper functions (matching Bochs sha.cc exactly)

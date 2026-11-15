@@ -15,7 +15,7 @@
 // |------------------------|--------------------|
 //
 
-use crate::config::BxAddress;
+use crate::config::BxLinAddress;
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct BxSelector {
@@ -50,7 +50,7 @@ pub(crate) enum Descriptor {
 #[derive(Clone, Copy)]
 pub(crate) struct DescriptorSegment {
     /// base address: 286=24bits, 386=32bits, long=64
-    pub(crate) base: BxAddress,
+    pub(crate) base: BxLinAddress,
     /// for efficiency, this contrived field is set to
     ///  limit for byte granular, and
     ///  `(limit << 12) | 0xfff` for page granular seg's
@@ -82,7 +82,7 @@ impl Default for Descriptor {
         // Default to Segment with all zeros — matches the old union's zeroed layout
         // and ensures set_segment_*() calls on default descriptors work correctly.
         Self::Segment(DescriptorSegment {
-            base: 0,
+            base: BxLinAddress::new(0),
             limit_scaled: 0,
             g: false,
             d_b: false,
@@ -98,14 +98,15 @@ impl Descriptor {
     // Returns default (0/false) for wrong variant.
 
     #[inline(always)]
-    pub(crate) fn segment_base(&self) -> BxAddress {
+    pub(crate) fn segment_base(&self) -> BxLinAddress {
         match self {
             Self::Segment(s) => s.base,
-            _ => 0,
+            _ => BxLinAddress::new(0),
         }
     }
+
     #[inline(always)]
-    pub(crate) fn set_segment_base(&mut self, val: BxAddress) {
+    pub(crate) fn set_segment_base(&mut self, val: BxLinAddress) {
         if let Self::Segment(s) = self {
             s.base = val
         }
@@ -118,6 +119,7 @@ impl Descriptor {
             _ => 0,
         }
     }
+
     #[inline(always)]
     pub(crate) fn set_segment_limit_scaled(&mut self, val: u32) {
         if let Self::Segment(s) = self {
@@ -132,6 +134,7 @@ impl Descriptor {
             _ => false,
         }
     }
+
     #[inline(always)]
     pub(crate) fn set_segment_g(&mut self, val: bool) {
         if let Self::Segment(s) = self {
@@ -146,6 +149,7 @@ impl Descriptor {
             _ => false,
         }
     }
+
     #[inline(always)]
     pub(crate) fn set_segment_d_b(&mut self, val: bool) {
         if let Self::Segment(s) = self {
@@ -160,6 +164,7 @@ impl Descriptor {
             _ => false,
         }
     }
+
     #[inline(always)]
     pub(crate) fn set_segment_l(&mut self, val: bool) {
         if let Self::Segment(s) = self {
@@ -174,6 +179,7 @@ impl Descriptor {
             _ => false,
         }
     }
+
     #[inline(always)]
     pub(crate) fn set_segment_avl(&mut self, val: bool) {
         if let Self::Segment(s) = self {
@@ -191,6 +197,7 @@ impl Descriptor {
             _ => 0,
         }
     }
+
     #[inline(always)]
     pub(crate) fn set_gate_dest_offset(&mut self, val: u32) {
         if let Self::Gate(g) = self {
@@ -205,6 +212,7 @@ impl Descriptor {
             _ => 0,
         }
     }
+
     #[inline(always)]
     pub(crate) fn set_gate_dest_selector(&mut self, val: u16) {
         if let Self::Gate(g) = self {
@@ -461,24 +469,31 @@ impl SegmentType {
     pub fn is_code_segment(ty: u8) -> bool {
         is_code_segment(ty)
     }
+
     pub fn is_code_segment_conforming(ty: u8) -> bool {
         is_code_segment_conforming(ty)
     }
+
     pub fn is_data_segment_expand_down(ty: u8) -> bool {
         is_data_segment_expand_down(ty)
     }
+
     pub fn is_code_segment_readable(ty: u8) -> bool {
         is_code_segment_readable(ty)
     }
+
     pub fn is_data_segment_writable(ty: u8) -> bool {
         is_data_segment_writable(ty)
     }
+
     pub fn is_segment_accessed(ty: u8) -> bool {
         is_segment_accessed(ty)
     }
+
     pub fn is_data_segment(ty: u8) -> bool {
         is_data_segment(ty)
     }
+
     pub fn is_code_segment_non_conforming(ty: u8) -> bool {
         is_code_segment_non_conforming(ty)
     }
@@ -498,11 +513,11 @@ pub(super) enum SystemAndGateDescriptorEnum {
     /* 0x8 reserved */
     BxSysSegmentAvail386Tss = 0x9,
     /* 0xa reserved */
-    BxSysSegmentBusy386Tss = 0xb,
-    Bx386CallGate = 0xc,
+    BxSysSegmentBusy386Tss = 0xB,
+    Bx386CallGate = 0xC,
     /* 0xd reserved */
-    Bx386InterruptGate = 0xe,
-    Bx386TrapGate = 0xf,
+    Bx386InterruptGate = 0xE,
+    Bx386TrapGate = 0xF,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -518,12 +533,12 @@ pub(super) enum BxDataAndCodeDescriptorEnum {
     DataReadWriteExpandDownAccessed = 0x7,
     CodeExecOnly = 0x8,
     CodeExecOnlyAccessed = 0x9,
-    CodeExecRead = 0xa,
-    CodeExecReadAccessed = 0xb,
-    CodeExecOnlyConforming = 0xc,
-    CodeExecOnlyConformingAccessed = 0xd,
-    CodeExecReadConforming = 0xe,
-    CodeExecReadConformingAccessed = 0xf,
+    CodeExecRead = 0xA,
+    CodeExecReadAccessed = 0xB,
+    CodeExecOnlyConforming = 0xC,
+    CodeExecOnlyConformingAccessed = 0xD,
+    CodeExecReadConforming = 0xE,
+    CodeExecReadConformingAccessed = 0xF,
 }
 
 #[derive(Default, Clone)]
@@ -535,7 +550,7 @@ pub(crate) struct BxSegmentReg {
 #[derive(Debug, Default, Clone)]
 pub struct BxGlobalSegmentReg {
     /// base address: 24bits=286,32bits=386,64bits=x86-64
-    pub(super) base: BxAddress,
+    pub(super) base: BxLinAddress,
     pub(super) limit: u16, /* limit, 16bits */
 }
 

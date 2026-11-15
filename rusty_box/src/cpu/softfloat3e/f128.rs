@@ -77,7 +77,7 @@ pub(in crate::cpu) const FLOAT128_EXP_BIAS: i32 = 0x3FFF;
 
 // PI constants (Pentium-compatible 68-bit precision)
 pub(in crate::cpu) const FLOATX80_PI_EXP: u16 = 0x4000;
-pub(in crate::cpu) const FLOAT_PI_HI: u64 = 0xc90fdaa22168c234;
+pub(in crate::cpu) const FLOAT_PI_HI: u64 = 0xC90FDAA22168C234;
 pub(in crate::cpu) const FLOAT_PI_LO: u64 = 0xC000000000000000;
 
 pub(in crate::cpu) const FLOATX80_PI2_EXP: u16 = 0x3FFF;
@@ -85,12 +85,12 @@ pub(in crate::cpu) const FLOATX80_PI4_EXP: u16 = 0x3FFE;
 
 // 3PI/4 constants
 pub(in crate::cpu) const FLOATX80_3PI4_EXP: u16 = 0x4000;
-pub(in crate::cpu) const FLOAT_3PI4_HI: u64 = 0x96cbe3f9990e91a7;
+pub(in crate::cpu) const FLOAT_3PI4_HI: u64 = 0x96CBE3F9990E91A7;
 pub(in crate::cpu) const FLOAT_3PI4_LO: u64 = 0x9000000000000000;
 
 // 1/LN2 constants
 pub(in crate::cpu) const FLOAT_LN2INV_EXP: i32 = 0x3FFF;
-pub(in crate::cpu) const FLOAT_LN2INV_HI: u64 = 0xb8aa3b295c17f0bb;
+pub(in crate::cpu) const FLOAT_LN2INV_HI: u64 = 0xB8AA3B295C17F0BB;
 pub(in crate::cpu) const FLOAT_LN2INV_LO: u64 = 0xC000000000000000;
 
 // ============================================================
@@ -329,7 +329,14 @@ pub(in crate::cpu) fn mul128_by_64_to_192(a_hi: u64, a_lo: u64, b: u64) -> (u64,
 /// Add two 192-bit values.
 /// (a0, a1, a2) + (b0, b1, b2) = (z0, z1, z2)
 /// where a0/b0/z0 are the highest words and a2/b2/z2 are the lowest.
-pub(in crate::cpu) fn add192(a0: u64, a1: u64, a2: u64, b0: u64, b1: u64, b2: u64) -> (u64, u64, u64) {
+pub(in crate::cpu) fn add192(
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    b0: u64,
+    b1: u64,
+    b2: u64,
+) -> (u64, u64, u64) {
     let z2 = a2.wrapping_add(b2);
     let carry1 = (z2 < a2) as u64;
     let mut z1 = a1.wrapping_add(b1);
@@ -343,7 +350,14 @@ pub(in crate::cpu) fn add192(a0: u64, a1: u64, a2: u64, b0: u64, b1: u64, b2: u6
 
 /// Subtract two 192-bit values.
 /// (a0, a1, a2) - (b0, b1, b2) = (z0, z1, z2)
-pub(in crate::cpu) fn sub192(a0: u64, a1: u64, a2: u64, b0: u64, b1: u64, b2: u64) -> (u64, u64, u64) {
+pub(in crate::cpu) fn sub192(
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    b0: u64,
+    b1: u64,
+    b2: u64,
+) -> (u64, u64, u64) {
     let z2 = a2.wrapping_sub(b2);
     let borrow1 = (a2 < b2) as u64;
     let mut z1 = a1.wrapping_sub(b1);
@@ -1608,27 +1622,27 @@ pub(in crate::cpu) const FLOAT128_LN2INV: Float128 = Float128 {
 };
 
 // LN(2) significand (96-bit precision, BETTER_THAN_PENTIUM variant from Bochs)
-pub(in crate::cpu) const LN2_SIG_HI: u64 = 0xb17217f7d1cf79ab;
-pub(in crate::cpu) const LN2_SIG_LO: u64 = 0xc9e3b39800000000;
+pub(in crate::cpu) const LN2_SIG_HI: u64 = 0xB17217F7D1CF79AB;
+pub(in crate::cpu) const LN2_SIG_LO: u64 = 0xC9E3B39800000000;
 
 // sqrt(2)/2 significand (for fyl2x range check)
-pub(in crate::cpu) const SQRT2_HALF_SIG: u64 = 0xb504f333f9de6484;
+pub(in crate::cpu) const SQRT2_HALF_SIG: u64 = 0xB504F333F9DE6484;
 
 /// LN(2) as Float128 (from Bochs f2xm1.cc)
 pub(in crate::cpu) const FLOAT128_LN2: Float128 = Float128 {
-    v64: 0x3ffe62e42fefa39e,
-    v0: 0xf35793c7673007e6,
+    v64: 0x3FFE62E42FEFA39E,
+    v0: 0xF35793C7673007E6,
 };
 
 /// 2/LN(2) as Float128 (from Bochs fyl2x.cc)
 pub(in crate::cpu) const FLOAT128_LN2INV2: Float128 = Float128 {
-    v64: 0x400071547652b82f,
-    v0: 0xe1777d0ffda0d23a,
+    v64: 0x400071547652B82F,
+    v0: 0xE1777D0FFDA0D23A,
 };
 
 /// 1.0 as Float128
 pub(in crate::cpu) const FLOAT128_ONE: Float128 = Float128 {
-    v64: 0x3fff000000000000,
+    v64: 0x3FFF000000000000,
     v0: 0x0000000000000000,
 };
 
@@ -1640,25 +1654,25 @@ pub(in crate::cpu) const FLOAT128_TWO: Float128 = Float128 {
 
 /// sqrt(3) as Float128 (from Bochs fpatan.cc)
 pub(in crate::cpu) const FLOAT128_SQRT3: Float128 = Float128 {
-    v64: 0x3fffbb67ae8584ca,
-    v0: 0xa73b25742d7078b8,
+    v64: 0x3FFFBB67AE8584CA,
+    v0: 0xA73B25742D7078B8,
 };
 
 /// PI/2 as Float128 (from Bochs fpatan.cc)
 pub(in crate::cpu) const FLOAT128_PI2: Float128 = Float128 {
-    v64: 0x3fff921fb54442d1,
+    v64: 0x3FFF921FB54442D1,
     v0: 0x8469898CC5170416,
 };
 
 /// PI/4 as Float128 (from Bochs fpatan.cc)
 pub(in crate::cpu) const FLOAT128_PI4: Float128 = Float128 {
-    v64: 0x3ffe921fb54442d1,
+    v64: 0x3FFE921FB54442D1,
     v0: 0x8469898CC5170416,
 };
 
 /// PI/6 as Float128 (from Bochs fpatan.cc)
 pub(in crate::cpu) const FLOAT128_PI6: Float128 = Float128 {
-    v64: 0x3ffe0c152382d736,
+    v64: 0x3FFE0C152382D736,
     v0: 0x58465BB32E0F580F,
 };
 

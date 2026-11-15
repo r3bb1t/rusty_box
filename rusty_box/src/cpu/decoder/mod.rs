@@ -1,14 +1,13 @@
 // Re-export the entire decoder crate's public API.
-pub use rusty_box_decoder::*;
-
 // Flatten key types so callers can write `decoder::Instruction` etc.
 pub use rusty_box_decoder::features::X86Feature;
 pub use rusty_box_decoder::instruction::{
     AddressSize, GprIndex, Instruction, InstructionFlags, OperandSize, Operands, RepPrefix,
 };
 pub use rusty_box_decoder::opcode::Opcode;
+pub use rusty_box_decoder::*;
 
-use crate::cpu::{BxCpuC};
+use crate::cpu::BxCpuC;
 
 impl crate::cpu::instrumentation::CodeSize {
     /// Decode one instruction from `bytes` at this size: `fetchDecode64` for
@@ -126,8 +125,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// in turn holds only because every write of CR0.EM/TS, CR4.OSFXSR,
     /// CR4.OSXSAVE and XCR0 recomputes the mask.
     pub(in crate::cpu) fn state_resolve_opcode(&self, opcode: Opcode) -> Opcode {
+        use rusty_box_decoder::opcode_isa::{CpuState, opcode_state};
+
         use super::fetch_mode::FetchModeMask;
-        use rusty_box_decoder::opcode_isa::{opcode_state, CpuState};
 
         // Deliberately exhaustive, with no catch-all arm: a new `CpuState`
         // must be considered here rather than silently inheriting "ungated".

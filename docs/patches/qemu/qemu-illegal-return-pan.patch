@@ -1,0 +1,34 @@
+--- a/target/arm/tcg/helper-a64.c
++++ b/target/arm/tcg/helper-a64.c
+@@ -626,6 +626,7 @@
+     int cur_el = arm_current_el(env);
+     unsigned int spsr_idx = aarch64_banked_spsr_index(cur_el);
+     uint64_t spsr = env->banked_spsr[spsr_idx];
++    uint64_t restored;
+     int new_el;
+     bool return_to_aa64 = (spsr & PSTATE_nRW) == 0;
+ 
+@@ -767,15 +768,20 @@
+ illegal_return:
+     /* Illegal return events of various kinds have architecturally
+      * mandated behaviour:
+-     * restore NZCV and DAIF from SPSR_ELx
++     * restore NZCV, PAN, ALLINT and DAIF from SPSR_ELx
++     * (SetPSTATEFromPSR restores them on any return)
+      * set PSTATE.IL
+      * restore PC from ELR_ELx
+      * no change to exception level, execution state or stack pointer
+      */
+     env->pstate |= PSTATE_IL;
+     env->pc = new_pc;
+-    spsr &= PSTATE_NZCV | PSTATE_DAIF | PSTATE_ALLINT;
+-    spsr |= pstate_read(env) & ~(PSTATE_NZCV | PSTATE_DAIF | PSTATE_ALLINT);
++    restored = PSTATE_NZCV | PSTATE_DAIF | PSTATE_ALLINT;
++    if (cpu_isar_feature(aa64_pan, cpu)) {
++        restored |= PSTATE_PAN;
++    }
++    spsr &= restored;
++    spsr |= pstate_read(env) & ~restored;
+     pstate_write(env, spsr);
+     if (!arm_singlestep_active(env)) {
+         env->pstate &= ~PSTATE_SS;

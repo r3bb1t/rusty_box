@@ -16,7 +16,7 @@ static VEC_COUNTS: [AtomicU64; 512] = [ZERO; 512];
 /// `256 + vector` for PIC deliveries.
 #[inline]
 pub(crate) fn count(index: usize) {
-    VEC_COUNTS[index & 0x1ff].fetch_add(1, Ordering::Relaxed);
+    VEC_COUNTS[index & 0x1FF].fetch_add(1, Ordering::Relaxed);
 }
 
 /// Snapshot every non-zero slot as `(index, count)`. Only the

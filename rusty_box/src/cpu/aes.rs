@@ -11,7 +11,8 @@
 //! - AESKEYGENASSIST (AES Key Generation Assist)
 //! - PCLMULQDQ (Carry-Less Multiplication)
 
-use super::{decoder::Instruction, xmm::BxPackedXmmRegister};
+use super::decoder::Instruction;
+use super::xmm::BxPackedXmmRegister;
 
 // ============================================================================
 // AES S-box tables (from Bochs aes.cc)
@@ -179,7 +180,7 @@ fn aes_inverse_substitute_bytes(state: &mut BxPackedXmmRegister) {
 #[inline]
 fn gf_mul(mut a: u32, mut b: u32) -> u32 {
     let mut res: u32 = 0;
-    let m: u32 = 0x11b;
+    let m: u32 = 0x11B;
 
     while b != 0 {
         if b & 1 != 0 {
@@ -302,10 +303,10 @@ fn aes_inverse_mix_columns(state: &mut BxPackedXmmRegister) {
 /// Apply S-box substitution to each byte of a u32 (Bochs AES_SubWord)
 #[inline]
 fn aes_sub_word(x: u32) -> u32 {
-    let b0 = SBOX_TRANSFORMATION[(x & 0xff) as usize] as u32;
-    let b1 = SBOX_TRANSFORMATION[((x >> 8) & 0xff) as usize] as u32;
-    let b2 = SBOX_TRANSFORMATION[((x >> 16) & 0xff) as usize] as u32;
-    let b3 = SBOX_TRANSFORMATION[((x >> 24) & 0xff) as usize] as u32;
+    let b0 = SBOX_TRANSFORMATION[(x & 0xFF) as usize] as u32;
+    let b1 = SBOX_TRANSFORMATION[((x >> 8) & 0xFF) as usize] as u32;
+    let b2 = SBOX_TRANSFORMATION[((x >> 16) & 0xFF) as usize] as u32;
+    let b3 = SBOX_TRANSFORMATION[((x >> 24) & 0xFF) as usize] as u32;
 
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 }

@@ -20,15 +20,15 @@ const FLOATX80_ONE: ExtFloat80 = ExtFloat80 {
 // --- ln_arr[9] from Bochs fyl2x.cc ---
 
 const LN_ARR: [Float128; 9] = [
-    Float128::new(0x3fff000000000000, 0x0000000000000000), /*  1 */
-    Float128::new(0x3ffd555555555555, 0x5555555555555555), /*  3 */
-    Float128::new(0x3ffc999999999999, 0x999999999999999a), /*  5 */
-    Float128::new(0x3ffc249249249249, 0x2492492492492492), /*  7 */
-    Float128::new(0x3ffbc71c71c71c71, 0xc71c71c71c71c71c), /*  9 */
-    Float128::new(0x3ffb745d1745d174, 0x5d1745d1745d1746), /* 11 */
-    Float128::new(0x3ffb3b13b13b13b1, 0x3b13b13b13b13b14), /* 13 */
-    Float128::new(0x3ffb111111111111, 0x1111111111111111), /* 15 */
-    Float128::new(0x3ffae1e1e1e1e1e1, 0xe1e1e1e1e1e1e1e2), /* 17 */
+    Float128::new(0x3FFF000000000000, 0x0000000000000000), /*  1 */
+    Float128::new(0x3FFD555555555555, 0x5555555555555555), /*  3 */
+    Float128::new(0x3FFC999999999999, 0x999999999999999A), /*  5 */
+    Float128::new(0x3FFC249249249249, 0x2492492492492492), /*  7 */
+    Float128::new(0x3FFBC71C71C71C71, 0xC71C71C71C71C71C), /*  9 */
+    Float128::new(0x3FFB745D1745D174, 0x5D1745D1745D1746), /* 11 */
+    Float128::new(0x3FFB3B13B13B13B1, 0x3B13B13B13B13B14), /* 13 */
+    Float128::new(0x3FFB111111111111, 0x1111111111111111), /* 15 */
+    Float128::new(0x3FFAE1E1E1E1E1E1, 0xE1E1E1E1E1E1E1E2), /* 17 */
 ];
 
 /// Polynomial approximation for (1/2)*ln((1+u)/(1-u)) (from Bochs fyl2x.cc poly_ln).
@@ -56,7 +56,11 @@ fn poly_l2p1(x: Float128, status: &mut SoftFloatStatus) -> Float128 {
 
 /// Compute y * log2(x) where x=a (ST(0)) and y=b (ST(1)).
 /// Ported from Bochs fyl2x.cc using Float128 polynomial evaluation.
-pub(in crate::cpu) fn fyl2x_impl(a: ExtFloat80, b: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
+pub(in crate::cpu) fn fyl2x_impl(
+    a: ExtFloat80,
+    b: ExtFloat80,
+    status: &mut SoftFloatStatus,
+) -> ExtFloat80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
         softfloat_raise_flags(status, FLAG_INVALID);
@@ -188,7 +192,11 @@ pub(in crate::cpu) fn fyl2x_impl(a: ExtFloat80, b: ExtFloat80, status: &mut Soft
 
 /// Compute y * log2(x + 1) where x=a (ST(0)) and y=b (ST(1)).
 /// Ported from Bochs fyl2x.cc fyl2xp1() using Float128 polynomial evaluation.
-pub(in crate::cpu) fn fyl2xp1_impl(a: ExtFloat80, b: ExtFloat80, status: &mut SoftFloatStatus) -> ExtFloat80 {
+pub(in crate::cpu) fn fyl2xp1_impl(
+    a: ExtFloat80,
+    b: ExtFloat80,
+    status: &mut SoftFloatStatus,
+) -> ExtFloat80 {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) || extf80_is_unsupported(b) {
         softfloat_raise_flags(status, FLAG_INVALID);

@@ -11,17 +11,15 @@
 //
 // Includes cross-page boundary handling for multi-byte accesses.
 
+use super::Result;
 use super::cpu::Exception;
 use super::decoder::BxSegregs;
 use super::descriptor::{
     SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
 };
 use super::rusty_box::MemoryAccessType;
-use super::Result;
-use crate::{
-    config::{BxAddress, BxPhyAddress, BxPtrEquiv},
-    memory::memory_rusty_box::bx_guest_ram_span,
-};
+use crate::config::{BxEffAddress, BxLinAddress, BxPhyAddress, BxPtrEquiv};
+use crate::memory::memory_rusty_box::bx_guest_ram_span;
 
 /// BX_MAX_MEM_ACCESS_LENGTH from Bochs — maximum access size for
 /// segment limit checks.  Matches the largest scalar access (qword=8).
@@ -52,18 +50,18 @@ fn pkey_allow(needed_bit: u32, pkey: u32, rd_pkey: &[u32; 16], wr_pkey: &[u32; 1
 
 /// Compute a pointer into a host-mapped page at the given linear address's page offset.
 #[inline(always)]
-pub(super) fn host_at_page_offset(host: *const u8, laddr: u64) -> *const u8 {
+pub(super) fn host_at_page_offset(host: *const u8, laddr: BxLinAddress) -> *const u8 {
     // SAFETY: host points to a valid page (validated during TLB fill),
     // offset is within page (masked to 12 bits)
-    unsafe { host.add((laddr & 0xFFF) as usize) }
+    unsafe { host.add((laddr.page_offset()) as usize) }
 }
 
 /// Mutable variant of [`host_at_page_offset`].
 #[inline(always)]
-pub(super) fn host_at_page_offset_mut(host: *mut u8, laddr: u64) -> *mut u8 {
+pub(super) fn host_at_page_offset_mut(host: *mut u8, laddr: BxLinAddress) -> *mut u8 {
     // SAFETY: host points to a valid page (validated during TLB fill),
     // offset is within page (masked to 12 bits)
-    unsafe { host.add((laddr & 0xFFF) as usize) }
+    unsafe { host.add((laddr.page_offset()) as usize) }
 }
 
 // --- Safe wrappers for unaligned memory access (ptr-based) ---
@@ -224,32 +222,33 @@ fn addr_write_u64(addr: BxPtrEquiv, val: u64) {
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     #[inline(always)]
-    fn direct_ram_offset(&self, addr: u64, len: usize) -> Option<(BxPhyAddress, usize)> {
-        let a20 = addr & self.a20_mask;
+    fn direct_ram_offset(&self, addr: BxPhyAddress, len: usize) -> Option<(BxPhyAddress, usize)> {
+        let a20 = self.a20_mask.apply(addr);
         let end = a20.checked_add(u64::try_from(len).ok()?)?;
-        let plain = (a20 < 0xA0000 && end <= 0xA0000) || a20 >= 0x100000;
+        let plain = (a20.get() < 0xA0000 && end.get() <= 0xA0000) || a20.get() >= 0x100000;
         if !plain || self.mem_host_base.is_null() {
             return None;
         }
         bx_guest_ram_span(a20, len, self.mem_host_len).map(|span| (a20, span.start))
     }
+
     /// Slow path for mem_read_byte: MMIO/VGA/ROM through memory system handlers.
     /// Separated to keep the inlined fast path small for better icache utilization.
     #[cold]
     #[inline(never)]
-    fn mem_read_byte_slow(&mut self, addr: u64) -> u8 {
+    fn mem_read_byte_slow(&mut self, addr: BxPhyAddress) -> u8 {
         // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
         {
-            let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
+            let a20_addr = self.a20_mask.apply(addr);
             if self.lapic.is_selected(a20_addr) {
                 // Read aligned dword, extract requested byte
-                let aligned = a20_addr & !0x3;
+                let aligned = a20_addr.masked(!0x3);
                 let dword = self.lapic.read(aligned, 4, self.cpu_ticks());
-                let byte_offset = (a20_addr & 0x3) as u32;
+                let byte_offset = (a20_addr.get() & 0x3) as u32;
                 return (dword >> (byte_offset * 8)) as u8;
             }
         }
-        let paddr: BxPhyAddress = addr as BxPhyAddress;
+        let paddr = addr;
         let policy = self.access_policy(paddr);
         if let Ok(Some(slice)) =
             self.memory
@@ -270,18 +269,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // zero is the value the slow path has always yielded there.
         0
     }
+
     /// Slow path for mem_write_byte: MMIO/VGA/ROM through memory system handlers.
     /// Separated to keep the inlined fast path small for better icache utilization.
     #[cold]
     #[inline(never)]
-    fn mem_write_byte_slow(&mut self, addr: u64, value: u8) {
+    fn mem_write_byte_slow(&mut self, addr: BxPhyAddress, value: u8) {
         // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
         {
-            let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
+            let a20_addr = self.a20_mask.apply(addr);
             if self.lapic.is_selected(a20_addr) {
                 // Byte-level write to LAPIC: read-modify-write the aligned dword.
                 // In practice, LAPIC is always accessed as dword — this is a safety net.
-                let aligned = a20_addr & !0x3;
+                let aligned = a20_addr.masked(!0x3);
                 // The two halves of this RMW take DIFFERENT time domains:
                 // - LAPIC reads convert through `live_ticks(cpu_ticks)` (apic.cc
                 //   get_current_timer_count path), which subtracts the LAPIC's
@@ -293,7 +293,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 //   pc_system ticks) — `system_ticks()`, like the sibling
                 //   word/dword write paths.
                 let old = self.lapic.read(aligned, 4, self.cpu_ticks());
-                let byte_offset = (a20_addr & 0x3) as u32;
+                let byte_offset = (a20_addr.get() & 0x3) as u32;
                 let mask = !(0xFFu32 << (byte_offset * 8));
                 let new_val = (old & mask) | ((value as u32) << (byte_offset * 8));
                 let current_ticks = self.system_ticks();
@@ -302,7 +302,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 return;
             }
         }
-        let paddr: BxPhyAddress = addr as BxPhyAddress;
+        let paddr = addr;
         {
             let policy = self.access_policy(paddr);
             if let Ok(Some(slice)) =
@@ -325,6 +325,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return;
         }
     }
+
     /// Write-back phase of a read-modify-write byte access.
     /// Uses address_xlation populated by read_rmw_virtual_byte.
     /// Bochs: write_RMW_linear_byte (access2.cc)
@@ -340,6 +341,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         }
     }
+
     /// Write-back phase of a read-modify-write word access.
     /// Uses address_xlation populated by read_rmw_virtual_word.
     /// Bochs: write_RMW_linear_word (access2.cc)
@@ -368,6 +370,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         }
     }
+
     /// Write-back phase of a read-modify-write dword access.
     /// Uses address_xlation populated by read_rmw_virtual_dword.
     /// Bochs: write_RMW_linear_dword (access2.cc)
@@ -401,8 +404,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         }
     }
+
     #[inline(always)]
-    pub(super) fn mem_read_byte(&mut self, addr: u64) -> u8 {
+    pub(super) fn mem_read_byte(&mut self, addr: BxPhyAddress) -> u8 {
         // Fast path: direct host pointer for plain RAM.
         // This matches what Bochs does via hostPageAddr in TLB entries — the vast
         // majority of physical accesses hit RAM and can be served with a single
@@ -414,22 +418,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         self.mem_read_byte_slow(addr)
     }
+
     #[inline(always)]
-    pub(super) fn mem_read_word(&mut self, addr: u64) -> u16 {
-        let a20_addr = addr & self.a20_mask;
-        let crosses_physical_page = (a20_addr & 0x0fff) == 0x0fff;
+    pub(super) fn mem_read_word(&mut self, addr: BxPhyAddress) -> u16 {
+        let a20_addr = self.a20_mask.apply(addr);
+        let crosses_physical_page = a20_addr.page_offset() == 0x0FFF;
         if !crosses_physical_page {
             // Fast path: direct host pointer for plain RAM.
             if let Some((_a20_addr, linear)) = self.direct_ram_offset(addr, 2) {
                 return read_unaligned_u16(host_offset(self.mem_host_base, linear));
             }
-            if self.lapic.is_selected(a20_addr as BxPhyAddress) {
-                return self
-                    .lapic
-                    .read(a20_addr as BxPhyAddress, 2, self.cpu_ticks())
-                    as u16;
+            if self.lapic.is_selected(a20_addr) {
+                return self.lapic.read(a20_addr, 2, self.cpu_ticks()) as u16;
             }
-            let paddr = addr as BxPhyAddress;
+            let paddr = addr;
             {
                 let policy = self.access_policy(paddr);
                 let mut data = [0u8; 2];
@@ -448,23 +450,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let hi = self.mem_read_byte(addr.wrapping_add(1)) as u16;
         lo | (hi << 8)
     }
+
     #[inline(always)]
-    pub(super) fn mem_read_dword(&mut self, addr: u64) -> u32 {
-        let a20_addr = addr & self.a20_mask;
+    pub(super) fn mem_read_dword(&mut self, addr: BxPhyAddress) -> u32 {
+        let a20_addr = self.a20_mask.apply(addr);
         // Fast path: direct host pointer for plain RAM
         if let Some((_a20_addr, linear)) = self.direct_ram_offset(addr, 4) {
             return read_unaligned_u32(host_offset(self.mem_host_base, linear));
         }
         // LAPIC MMIO intercept: 32-bit aligned register access
         // Bochs apic.cc read() — LAPIC registers are always dword-accessed.
-        if self.lapic.is_selected(a20_addr as BxPhyAddress) {
-            return self
-                .lapic
-                .read(a20_addr as BxPhyAddress, 4, self.cpu_ticks());
+        if self.lapic.is_selected(a20_addr) {
+            return self.lapic.read(a20_addr, 4, self.cpu_ticks());
         }
         // Slow path: route through read_physical_page to hit registered MMIO handlers
         // (IOAPIC, VGA, etc.) with proper dword access width.
-        let paddr: BxPhyAddress = addr as BxPhyAddress;
+        let paddr = addr;
         {
             let policy = self.access_policy(paddr);
             let mut data = [0u8; 4];
@@ -480,8 +481,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let hi = self.mem_read_word(addr + 2) as u32;
         lo | (hi << 16)
     }
+
     #[inline(always)]
-    pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
+    pub(super) fn mem_write_byte(&mut self, addr: BxPhyAddress, value: u8) {
         // Fast path: direct host pointer for plain RAM.
         if let Some((a20_addr, linear)) = self.direct_ram_offset(addr, 1) {
             write_host_byte(self.mem_host_base, linear, value);
@@ -491,10 +493,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         self.mem_write_byte_slow(addr, value);
     }
+
     #[inline(always)]
-    pub(super) fn mem_write_word(&mut self, addr: u64, value: u16) {
-        let a20_addr = addr & self.a20_mask;
-        let crosses_physical_page = (a20_addr & 0x0fff) == 0x0fff;
+    pub(super) fn mem_write_word(&mut self, addr: BxPhyAddress, value: u16) {
+        let a20_addr = self.a20_mask.apply(addr);
+        let crosses_physical_page = a20_addr.page_offset() == 0x0FFF;
         if !crosses_physical_page {
             // Fast path: direct host pointer for plain RAM.
             if let Some((a20_addr, linear)) = self.direct_ram_offset(addr, 2) {
@@ -502,14 +505,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.smc_write_check(a20_addr, 2);
                 return;
             }
-            if self.lapic.is_selected(a20_addr as BxPhyAddress) {
+            if self.lapic.is_selected(a20_addr) {
                 let current_ticks = self.system_ticks();
                 self.lapic
-                    .write(a20_addr as BxPhyAddress, u32::from(value), 2, current_ticks);
+                    .write(a20_addr, u32::from(value), 2, current_ticks);
                 self.sync_lapic_events();
                 return;
             }
-            let paddr = addr as BxPhyAddress;
+            let paddr = addr;
             {
                 let policy = self.access_policy(paddr);
                 let mut data = value.to_le_bytes();
@@ -528,8 +531,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.mem_write_byte(addr, value as u8);
         self.mem_write_byte(addr.wrapping_add(1), (value >> 8) as u8);
     }
-    pub(super) fn mem_write_dword(&mut self, addr: u64, value: u32) {
-        let a20_addr = addr & self.a20_mask;
+
+    pub(super) fn mem_write_dword(&mut self, addr: BxPhyAddress, value: u32) {
+        let a20_addr = self.a20_mask.apply(addr);
         // Fast path: direct host pointer for plain RAM
         if let Some((a20_addr, linear)) = self.direct_ram_offset(addr, 4) {
             write_unaligned_u32(host_offset_mut(self.mem_host_base, linear), value);
@@ -538,16 +542,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         // LAPIC MMIO intercept: 32-bit aligned register access
         // Bochs apic.cc write() — LAPIC registers are always dword-accessed.
-        if self.lapic.is_selected(a20_addr as BxPhyAddress) {
+        if self.lapic.is_selected(a20_addr) {
             let current_ticks = self.system_ticks();
-            self.lapic
-                .write(a20_addr as BxPhyAddress, value, 4, current_ticks);
+            self.lapic.write(a20_addr, value, 4, current_ticks);
             self.sync_lapic_events();
             return;
         }
         // Slow path: route through write_physical_page to hit registered MMIO handlers
         // (IOAPIC, VGA, etc.) with proper dword access width.
-        let paddr: BxPhyAddress = addr as BxPhyAddress;
+        let paddr = addr;
         {
             let policy = self.access_policy(paddr);
             let mut data = value.to_le_bytes();
@@ -563,20 +566,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.mem_write_word(addr, value as u16);
         self.mem_write_word(addr + 2, (value >> 16) as u16);
     }
+
     // ===== Canonical address check (Bochs access.cc IsCanonicalAccess) =====
 
     pub(super) fn is_canonical_access(
         &self,
-        laddr: BxAddress,
+        laddr: BxLinAddress,
         rw: MemoryAccessType,
         user: bool,
     ) -> bool {
-        if !self.is_canonical(laddr) {
+        if !self.is_canonical(laddr.get()) {
             return false;
         }
 
         if self.long64_mode() && self.cr4.lass() {
-            let access_user_space = (laddr >> 63) == 0;
+            let access_user_space = (laddr.get() >> 63) == 0;
 
             if user {
                 if !access_user_space {
@@ -607,12 +611,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// hold. Byte accesses are never checked; vector accesses use the separate
     /// `_aligned` #GP path, matching Bochs access2.cc.
     #[inline(always)]
-    pub(super) fn check_alignment(&mut self, laddr: u64, ac_mask: u32) -> Result<()> {
+    pub(super) fn check_alignment(&mut self, laddr: BxLinAddress, ac_mask: u32) -> Result<()> {
         // Near-always-false: the mask is zero unless a CPL-3 guest has armed
         // both CR0.AM and EFLAGS.AC.
         if self.alignment_check_mask != 0
             && self.user_pl
-            && (laddr as u32 & (ac_mask & self.alignment_check_mask)) != 0
+            && (laddr.low32() & (ac_mask & self.alignment_check_mask)) != 0
         {
             return self.exception(Exception::Ac, 0);
         }
@@ -637,7 +641,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     fn check_canonical_data(
         &mut self,
         seg: BxSegregs,
-        laddr: u64,
+        laddr: BxLinAddress,
         rw: MemoryAccessType,
     ) -> Result<()> {
         if self.long64_mode() {
@@ -696,7 +700,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         if (seg_type & 0x04) == 0 {
             // Normal data segment (expand-up, types 2,3)
-            if limit_scaled == 0xFFFFFFFF && base == 0 {
+            if limit_scaled == 0xFFFFFFFF && base.get() == 0 {
                 // Flat 4GB segment — cache fast-path flags
                 self.sregs[seg_idx].cache.valid |=
                     SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
@@ -760,7 +764,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Normal (expand-up) data or readable code segment
         // Bochs access.cc: read checks only set ROK flags, NOT WOK
-        if limit_scaled == 0xFFFFFFFF && base == 0 {
+        if limit_scaled == 0xFFFFFFFF && base.get() == 0 {
             self.sregs[seg_idx].cache.valid |= SEG_ACCESS_ROK | SEG_ACCESS_ROK4_G;
             return true;
         }
@@ -779,7 +783,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Compute linear address for a read access with full segment validation.
     /// Bochs: agen_read32
     #[inline]
-    pub(super) fn agen_read32(&mut self, seg: BxSegregs, offset: u32, len: u32) -> Result<u32> {
+    pub(super) fn agen_read32(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+        len: u32,
+    ) -> Result<BxLinAddress> {
         let seg_idx = seg as usize;
 
         // In long mode, segment limits don't apply (Bochs uses separate agen_read64).
@@ -790,19 +799,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Fast path: flat 4GB readable segment
         if (self.sregs[seg_idx].cache.valid & SEG_ACCESS_ROK4_G) != 0 {
-            return Ok(offset);
+            return Ok(BxLinAddress::from_u32(offset.low32()));
         }
 
         // Medium path: within cached limit
         if (self.sregs[seg_idx].cache.valid & SEG_ACCESS_ROK) != 0 {
             let limit = self.sregs[seg_idx].cache.u.segment_limit_scaled();
-            if offset <= limit.wrapping_sub(len.wrapping_sub(1)) {
+            if offset.low32() <= limit.wrapping_sub(len.wrapping_sub(1)) {
                 return Ok(self.get_laddr32(seg_idx, offset));
             }
         }
 
         // Slow path: full segment checks
-        if !self.read_virtual_checks(seg_idx, offset, len) {
+        if !self.read_virtual_checks(seg_idx, offset.low32(), len) {
             self.exception(Self::seg_exception(seg), 0)?;
         }
         Ok(self.get_laddr32(seg_idx, offset))
@@ -811,7 +820,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Compute linear address for a write access with full segment validation.
     /// Bochs: agen_write32
     #[inline]
-    pub(super) fn agen_write32(&mut self, seg: BxSegregs, offset: u32, len: u32) -> Result<u32> {
+    pub(super) fn agen_write32(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+        len: u32,
+    ) -> Result<BxLinAddress> {
         let seg_idx = seg as usize;
 
         // In long mode, segment limits don't apply (Bochs uses separate agen_write64).
@@ -821,19 +835,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Fast path: flat 4GB writable segment
         if (self.sregs[seg_idx].cache.valid & SEG_ACCESS_WOK4_G) != 0 {
-            return Ok(offset);
+            return Ok(BxLinAddress::from_u32(offset.low32()));
         }
 
         // Medium path: within cached limit
         if (self.sregs[seg_idx].cache.valid & SEG_ACCESS_WOK) != 0 {
             let limit = self.sregs[seg_idx].cache.u.segment_limit_scaled();
-            if offset <= limit.wrapping_sub(len.wrapping_sub(1)) {
+            if offset.low32() <= limit.wrapping_sub(len.wrapping_sub(1)) {
                 return Ok(self.get_laddr32(seg_idx, offset));
             }
         }
 
         // Slow path: full segment checks
-        if !self.write_virtual_checks(seg_idx, offset, len) {
+        if !self.write_virtual_checks(seg_idx, offset.low32(), len) {
             self.exception(Self::seg_exception(seg), 0)?;
         }
         Ok(self.get_laddr32(seg_idx, offset))
@@ -848,39 +862,43 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a byte from virtual memory.
     /// Bochs: read_virtual_byte_32 (access.h) — thin wrapper
     #[inline]
-    pub fn read_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<u8> {
-        let laddr = self.agen_read32(seg, offset, 1)? as u64;
+    pub fn read_virtual_byte(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u8> {
+        let laddr = self.agen_read32(seg, offset, 1)?;
         self.read_linear_byte(seg, laddr)
     }
 
     /// Read a word from virtual memory.
     /// Bochs: read_virtual_word_32 (access.h) — thin wrapper
     #[inline]
-    pub fn read_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u16> {
-        let laddr = self.agen_read32(seg, offset, 2)? as u64;
+    pub fn read_virtual_word(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u16> {
+        let laddr = self.agen_read32(seg, offset, 2)?;
         self.read_linear_word(seg, laddr)
     }
 
     /// Read a dword from virtual memory.
     /// Bochs: read_virtual_dword_32 (access.h) — thin wrapper
     #[inline]
-    pub fn read_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u32> {
-        let laddr = self.agen_read32(seg, offset, 4)? as u64;
+    pub fn read_virtual_dword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u32> {
+        let laddr = self.agen_read32(seg, offset, 4)?;
         self.read_linear_dword(seg, laddr)
     }
 
     /// Read a qword from virtual memory.
     /// Bochs: read_virtual_qword_32 (access.h) — thin wrapper
     #[inline]
-    pub(crate) fn read_virtual_qword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
-        let laddr = self.agen_read32(seg, offset, 8)? as u64;
+    pub(crate) fn read_virtual_qword(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u64> {
+        let laddr = self.agen_read32(seg, offset, 8)?;
         self.read_linear_qword(seg, laddr)
     }
 
     /// Internal helper: read a single byte at a given linear address.
     /// Delegates to read_linear_byte (no segment needed for cross-page helpers).
     #[inline]
-    pub(super) fn read_virtual_byte_at_laddr(&mut self, laddr: u64) -> Result<u8> {
+    pub(super) fn read_virtual_byte_at_laddr(&mut self, laddr: BxLinAddress) -> Result<u8> {
         self.read_linear_byte(BxSegregs::Ds, laddr)
     }
 
@@ -889,8 +907,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Write a byte to virtual memory.
     /// Bochs: write_virtual_byte_32 (access.h) — thin wrapper
     #[inline]
-    pub fn write_virtual_byte(&mut self, seg: BxSegregs, offset: u32, val: u8) -> Result<()> {
-        let laddr = self.agen_write32(seg, offset, 1)? as u64;
+    pub fn write_virtual_byte(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+        val: u8,
+    ) -> Result<()> {
+        let laddr = self.agen_write32(seg, offset, 1)?;
         self.write_linear_byte(seg, laddr, val)
     }
 
@@ -900,10 +923,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_word(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         val: u16,
     ) -> Result<()> {
-        let laddr = self.agen_write32(seg, offset, 2)? as u64;
+        let laddr = self.agen_write32(seg, offset, 2)?;
         self.write_linear_word(seg, laddr, val)
     }
 
@@ -913,10 +936,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_dword(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         val: u32,
     ) -> Result<()> {
-        let laddr = self.agen_write32(seg, offset, 4)? as u64;
+        let laddr = self.agen_write32(seg, offset, 4)?;
         self.write_linear_dword(seg, laddr, val)
     }
 
@@ -926,10 +949,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_virtual_qword(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         val: u64,
     ) -> Result<()> {
-        let laddr = self.agen_write32(seg, offset, 8)? as u64;
+        let laddr = self.agen_write32(seg, offset, 8)?;
         self.write_linear_qword(seg, laddr, val)
     }
 
@@ -939,7 +962,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn read_virtual_xmmword(
         &mut self,
         seg: super::decoder::BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedXmmRegister> {
         let lo = self.read_virtual_qword(seg, offset)?;
         let hi = self.read_virtual_qword(seg, offset.wrapping_add(8))?;
@@ -955,9 +978,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn read_virtual_xmmword_aligned(
         &mut self,
         seg: super::decoder::BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedXmmRegister> {
-        if (offset & 0xF) != 0 {
+        if !offset.is_aligned(16) {
             self.exception(super::cpu::Exception::Gp, 0)?;
         }
         self.read_virtual_xmmword(seg, offset)
@@ -969,7 +992,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_xmmword(
         &mut self,
         seg: super::decoder::BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
         self.write_virtual_qword(seg, offset, val.xmm64u(0))?;
@@ -983,10 +1006,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_xmmword_aligned(
         &mut self,
         seg: super::decoder::BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
-        if (offset & 0xF) != 0 {
+        if !offset.is_aligned(16) {
             self.exception(super::cpu::Exception::Gp, 0)?;
         }
         self.write_virtual_xmmword(seg, offset, val)
@@ -995,7 +1018,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Internal helper: write a single byte at a given linear address.
     /// Delegates to write_linear_byte (no segment needed for cross-page helpers).
     #[inline]
-    pub(super) fn write_virtual_byte_at_laddr(&mut self, laddr: u64, val: u8) -> Result<()> {
+    pub(super) fn write_virtual_byte_at_laddr(
+        &mut self,
+        laddr: BxLinAddress,
+        val: u8,
+    ) -> Result<()> {
         self.write_linear_byte(BxSegregs::Ds, laddr, val)
     }
 
@@ -1009,8 +1036,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Prepare a byte RMW translation without reading physical memory.
     /// This lets callers complete permission checks before MMIO callbacks.
     #[inline]
-    pub(super) fn prepare_rmw_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
-        let laddr = self.agen_write32(seg, offset, 1)? as u64;
+    pub(super) fn prepare_rmw_virtual_byte(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<BxLinAddress> {
+        let laddr = self.agen_write32(seg, offset, 1)?;
         self.prepare_rmw_linear_byte(laddr)?;
         Ok(laddr)
     }
@@ -1018,7 +1049,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read phase of a read-modify-write byte access.
     /// Bochs: read_RMW_virtual_byte_32 (access.h) — thin wrapper
     #[inline]
-    pub fn read_rmw_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<u8> {
+    pub fn read_rmw_virtual_byte(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u8> {
         self.prepare_rmw_virtual_byte(seg, offset)?;
         Ok(self.read_prepared_rmw_byte())
     }
@@ -1026,8 +1057,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Prepare a word RMW translation without reading physical memory.
     /// This lets callers complete permission checks before MMIO callbacks.
     #[inline]
-    pub(super) fn prepare_rmw_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
-        let laddr = self.agen_write32(seg, offset, 2)? as u64;
+    pub(super) fn prepare_rmw_virtual_word(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<BxLinAddress> {
+        let laddr = self.agen_write32(seg, offset, 2)?;
         self.prepare_rmw_linear_word(laddr)?;
         Ok(laddr)
     }
@@ -1035,7 +1070,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read phase of a read-modify-write word access.
     /// Bochs: read_RMW_virtual_word_32 (access.h) — thin wrapper
     #[inline]
-    pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u16> {
+    pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u16> {
         self.prepare_rmw_virtual_word(seg, offset)?;
         Ok(self.read_prepared_rmw_word())
     }
@@ -1043,8 +1078,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Prepare a dword RMW translation without reading physical memory.
     /// This lets callers complete permission checks before MMIO callbacks.
     #[inline]
-    pub(super) fn prepare_rmw_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
-        let laddr = self.agen_write32(seg, offset, 4)? as u64;
+    pub(super) fn prepare_rmw_virtual_dword(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<BxLinAddress> {
+        let laddr = self.agen_write32(seg, offset, 4)?;
         self.prepare_rmw_linear_dword(laddr)?;
         Ok(laddr)
     }
@@ -1052,15 +1091,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read phase of a read-modify-write dword access.
     /// Bochs: read_RMW_virtual_dword_32 (access.h) — thin wrapper
     #[inline]
-    pub fn read_rmw_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u32> {
+    pub fn read_rmw_virtual_dword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u32> {
         self.prepare_rmw_virtual_dword(seg, offset)?;
         Ok(self.read_prepared_rmw_dword())
     }
 
     /// RMW read qword in 32-bit mode.
     /// Bochs: read_RMW_virtual_qword_32 (access.h) — thin wrapper
-    pub fn read_rmw_virtual_qword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
-        let laddr = self.agen_write32(seg, offset, 8)? as u64;
+    pub fn read_rmw_virtual_qword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u64> {
+        let laddr = self.agen_write32(seg, offset, 8)?;
         let (data, _) = self.read_rmw_linear_qword(seg, laddr)?;
         Ok(data)
     }
@@ -1074,7 +1113,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Falls back to a raw page walk if paging is disabled or in non-long mode.
     /// In long mode, routes through translate_data_access so the DTLB is
     /// populated — matching Bochs where access_read_linear always uses the TLB.
-    fn translate_system_read_via_dtlb(&mut self, laddr: BxAddress) -> Result<u64> {
+    fn translate_system_read_via_dtlb(&mut self, laddr: BxLinAddress) -> Result<BxPhyAddress> {
         if self.cr0.pg() && self.long_mode() {
             // In long mode, use the DTLB path (supervisor read).
             // Temporarily force supervisor access so user_pl doesn't interfere.
@@ -1115,27 +1154,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read a byte from a system (linear) address.
     /// Bochs: system_read_byte (access.cc)
-    pub(super) fn system_read_byte(&mut self, laddr: BxAddress) -> Result<u8> {
+    pub(super) fn system_read_byte(&mut self, laddr: BxLinAddress) -> Result<u8> {
         let paddr = self.translate_system_read_via_dtlb(laddr)?;
         Ok(self.mem_read_byte(paddr))
     }
 
     /// Read a word from a system (linear) address with cross-page handling.
     /// Bochs: system_read_word (access.cc)
-    pub(super) fn system_read_word(&mut self, laddr: BxAddress) -> Result<u16> {
-        let page_offset = laddr & 0xFFF;
-        let laddr_mask = if self.long_mode() {
-            0xFFFF_FFFF_FFFF_FFFF
-        } else {
-            0xFFFF_FFFF
-        };
+    pub(super) fn system_read_word(&mut self, laddr: BxLinAddress) -> Result<u16> {
+        let page_offset = laddr.page_offset();
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_system_read_via_dtlb(laddr)?;
             Ok(self.mem_read_word(paddr))
         } else {
             let p0 = self.translate_system_read_via_dtlb(laddr)?;
             let b0 = self.mem_read_byte(p0);
-            let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & laddr_mask;
+            let laddr2 = self.linear_advance(laddr, 0x1000 - page_offset);
             let p1 = self.translate_system_read_via_dtlb(laddr2)?;
             let b1 = self.mem_read_byte(p1);
             Ok(u16::from_le_bytes([b0, b1]))
@@ -1144,20 +1178,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read a dword from a system (linear) address with cross-page handling.
     /// Bochs: system_read_dword (access.cc)
-    pub(super) fn system_read_dword(&mut self, laddr: BxAddress) -> Result<u32> {
-        let page_offset = laddr & 0xFFF;
-        let laddr_mask = if self.long_mode() {
-            0xFFFF_FFFF_FFFF_FFFF
-        } else {
-            0xFFFF_FFFF
-        };
-        if page_offset + 4 <= 0x1000 {
+    pub(super) fn system_read_dword(&mut self, laddr: BxLinAddress) -> Result<u32> {
+        if laddr.page_offset() + 4 <= 0x1000 {
             let paddr = self.translate_system_read_via_dtlb(laddr)?;
             Ok(self.mem_read_dword(paddr))
         } else {
             let mut buf = [0u8; 4];
             for i in 0..4u64 {
-                let la = (laddr.wrapping_add(i)) & laddr_mask;
+                let la = self.linear_advance(laddr, i);
                 let pa = self.translate_system_read_via_dtlb(la)?;
                 buf[i as usize] = self.mem_read_byte(pa);
             }
@@ -1167,20 +1195,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read a qword from a system (linear) address with cross-page handling.
     /// Bochs: system_read_qword (access.cc)
-    pub(super) fn system_read_qword(&mut self, laddr: BxAddress) -> Result<u64> {
-        let page_offset = laddr & 0xFFF;
-        let laddr_mask = if self.long_mode() {
-            0xFFFF_FFFF_FFFF_FFFF
-        } else {
-            0xFFFF_FFFF
-        };
-        if page_offset + 8 <= 0x1000 {
+    pub(super) fn system_read_qword(&mut self, laddr: BxLinAddress) -> Result<u64> {
+        if laddr.page_offset() + 8 <= 0x1000 {
             let paddr = self.translate_system_read_via_dtlb(laddr)?;
             Ok(self.mem_read_qword(paddr))
         } else {
             let mut buf = [0u8; 8];
             for i in 0..8u64 {
-                let la = (laddr.wrapping_add(i)) & laddr_mask;
+                let la = self.linear_advance(laddr, i);
                 let pa = self.translate_system_read_via_dtlb(la)?;
                 buf[i as usize] = self.mem_read_byte(pa);
             }
@@ -1188,9 +1210,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
     }
 
+    /// `laddr` advanced `distance` bytes, wrapping at 4 GiB outside 64-bit
+    /// mode: where the part of a page-crossing access past the first page
+    /// lies (Bochs `access_read_linear`/`access_write_linear` `laddr2`).
+    #[inline]
+    fn linear_advance(&self, laddr: BxLinAddress, distance: u64) -> BxLinAddress {
+        let next = laddr.wrapping_add(distance);
+        if self.long64_mode() {
+            next
+        } else {
+            next.masked(0xFFFF_FFFF)
+        }
+    }
+
     /// Write a byte to a system (linear) address.
     /// Bochs: system_write_byte (access.cc)
-    pub(super) fn system_write_byte(&mut self, laddr: BxAddress, data: u8) -> Result<()> {
+    pub(super) fn system_write_byte(&mut self, laddr: BxLinAddress, data: u8) -> Result<()> {
         let paddr = self.translate_linear_system_write(laddr)?;
         self.mem_write_byte(paddr, data);
         Ok(())
@@ -1198,13 +1233,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Write a word to a system (linear) address with cross-page handling.
     /// Bochs: system_write_word (access.cc)
-    pub(super) fn system_write_word(&mut self, laddr: BxAddress, data: u16) -> Result<()> {
-        let page_offset = laddr & 0xFFF;
-        let laddr_mask = if self.long_mode() {
-            0xFFFF_FFFF_FFFF_FFFF
-        } else {
-            0xFFFF_FFFF
-        };
+    pub(super) fn system_write_word(&mut self, laddr: BxLinAddress, data: u16) -> Result<()> {
+        let page_offset = laddr.page_offset();
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_linear_system_write(laddr)?;
             self.mem_write_word(paddr, data);
@@ -1212,7 +1242,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let bytes = data.to_le_bytes();
             let p0 = self.translate_linear_system_write(laddr)?;
             self.mem_write_byte(p0, bytes[0]);
-            let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & laddr_mask;
+            let laddr2 = self.linear_advance(laddr, 0x1000 - page_offset);
             let p1 = self.translate_linear_system_write(laddr2)?;
             self.mem_write_byte(p1, bytes[1]);
         }
@@ -1221,21 +1251,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Write a dword to a system (linear) address with cross-page handling.
     /// Bochs: system_write_dword (access.cc)
-    pub(super) fn system_write_dword(&mut self, laddr: BxAddress, data: u32) -> Result<()> {
+    pub(super) fn system_write_dword(&mut self, laddr: BxLinAddress, data: u32) -> Result<()> {
         self.check_gdt_watchpoint(laddr, data as u64, 4);
-        let page_offset = laddr & 0xFFF;
-        let laddr_mask = if self.long_mode() {
-            0xFFFF_FFFF_FFFF_FFFF
-        } else {
-            0xFFFF_FFFF
-        };
-        if page_offset + 4 <= 0x1000 {
+        if laddr.page_offset() + 4 <= 0x1000 {
             let paddr = self.translate_linear_system_write(laddr)?;
             self.mem_write_dword(paddr, data);
         } else {
             let bytes = data.to_le_bytes();
             for i in 0..4u64 {
-                let la = (laddr.wrapping_add(i)) & laddr_mask;
+                let la = self.linear_advance(laddr, i);
                 let pa = self.translate_linear_system_write(la)?;
                 self.mem_write_byte(pa, bytes[i as usize]);
             }
@@ -1245,21 +1269,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Write a qword to a system (linear) address with cross-page handling.
     /// Bochs: system_write_qword (access.cc)
-    pub(super) fn system_write_qword(&mut self, laddr: BxAddress, data: u64) -> Result<()> {
+    pub(super) fn system_write_qword(&mut self, laddr: BxLinAddress, data: u64) -> Result<()> {
         self.check_gdt_watchpoint(laddr, data, 8);
-        let page_offset = laddr & 0xFFF;
-        let laddr_mask = if self.long_mode() {
-            0xFFFF_FFFF_FFFF_FFFF
-        } else {
-            0xFFFF_FFFF
-        };
-        if page_offset + 8 <= 0x1000 {
+        if laddr.page_offset() + 8 <= 0x1000 {
             let paddr = self.translate_linear_system_write(laddr)?;
             self.mem_write_qword(paddr, data);
         } else {
             let bytes = data.to_le_bytes();
             for i in 0..8u64 {
-                let la = (laddr.wrapping_add(i)) & laddr_mask;
+                let la = self.linear_advance(laddr, i);
                 let pa = self.translate_linear_system_write(la)?;
                 self.mem_write_byte(pa, bytes[i as usize]);
             }
@@ -1275,22 +1293,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn get_laddr32_seg_checked(
         &mut self,
         seg: BxSegregs,
-        offset: u32,
+        offset: BxEffAddress,
         len: u32,
-    ) -> Result<u32> {
+    ) -> Result<BxLinAddress> {
         // In real mode, just add base (no segment type checks)
         if self.real_mode() {
             let base = self.get_segment_base(seg);
-            return Ok((base.wrapping_add(offset as u64)) as u32);
+            return Ok(BxLinAddress::from_u32(
+                base.wrapping_add(u64::from(offset.low32())).low32(),
+            ));
         }
         self.agen_read32(seg, offset, len)
     }
 
     /// Simple linear address without any checks (used internally).
     #[inline]
-    pub fn get_laddr32_seg(&self, seg: BxSegregs, offset: u32) -> u32 {
+    pub fn get_laddr32_seg(&self, seg: BxSegregs, offset: BxEffAddress) -> BxLinAddress {
         let seg_base = self.get_segment_base(seg);
-        (seg_base.wrapping_add(offset as u64)) as u32
+        BxLinAddress::from_u32(seg_base.wrapping_add(u64::from(offset.low32())).low32())
     }
 
     // ===== 64-bit Virtual read functions (Bochs access64.cc) =====
@@ -1304,7 +1324,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a byte from virtual memory in 64-bit mode.
     /// Bochs: read_virtual_byte (access.h) — thin wrapper: agen + canonical + read_linear_byte
     #[inline]
-    pub(crate) fn read_virtual_byte_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u8> {
+    pub(crate) fn read_virtual_byte_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u8> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
         self.read_linear_byte(seg, laddr)
@@ -1313,7 +1337,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a word from virtual memory in 64-bit mode.
     /// Bochs: read_virtual_word (access.h) — thin wrapper: agen + canonical + read_linear_word
     #[inline]
-    pub(crate) fn read_virtual_word_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u16> {
+    pub(crate) fn read_virtual_word_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u16> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
         self.read_linear_word(seg, laddr)
@@ -1322,7 +1350,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a dword from virtual memory in 64-bit mode.
     /// Bochs: read_virtual_dword (access.h) — thin wrapper: agen + canonical + read_linear_dword
     #[inline]
-    pub(crate) fn read_virtual_dword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u32> {
+    pub(crate) fn read_virtual_dword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u32> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
         self.read_linear_dword(seg, laddr)
@@ -1331,7 +1363,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read a qword from virtual memory in 64-bit mode.
     /// Bochs: read_virtual_qword (access.h) — thin wrapper: agen + canonical + read_linear_qword
     #[inline]
-    pub(crate) fn read_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u64> {
+    pub(crate) fn read_virtual_qword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u64> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
         self.read_linear_qword(seg, laddr)
@@ -1345,7 +1381,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_virtual_byte_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: u8,
     ) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
@@ -1359,7 +1395,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_virtual_word_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: u16,
     ) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
@@ -1373,7 +1409,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_virtual_dword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: u32,
     ) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
@@ -1387,7 +1423,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_virtual_qword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: u64,
     ) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
@@ -1399,7 +1435,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read phase of a RMW qword access in 64-bit mode.
     /// Bochs: read_RMW_virtual_qword (access.h) — thin wrapper
-    pub(crate) fn read_rmw_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u64> {
+    pub(crate) fn read_rmw_virtual_qword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u64> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
         let (data, _) = self.read_rmw_linear_qword(seg, laddr)?;
@@ -1432,47 +1472,51 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     // ===== 64-bit Stack access functions =====
+    //
+    // Like the 16/32-bit stack helpers (stack.rs), these take the stack
+    // pointer's value — RSP, or RSP plus a frame offset — and are where it
+    // becomes an offset in SS.
 
     /// Read a word from the stack in 64-bit mode (SS segment).
     /// Bochs: stack_read_word (long64 path)
     #[inline]
     pub(crate) fn stack_read_word_64(&mut self, offset: u64) -> Result<u16> {
-        self.read_virtual_word_64(BxSegregs::Ss, offset)
+        self.read_virtual_word_64(BxSegregs::Ss, BxEffAddress::new(offset))
     }
 
     /// Write a word to the stack in 64-bit mode (SS segment).
     /// Bochs: stack_write_word (long64 path)
     #[inline]
     pub(crate) fn stack_write_word_64(&mut self, offset: u64, val: u16) -> Result<()> {
-        self.write_virtual_word_64(BxSegregs::Ss, offset, val)
+        self.write_virtual_word_64(BxSegregs::Ss, BxEffAddress::new(offset), val)
     }
 
     /// Read a dword from the stack in 64-bit mode (SS segment).
     /// Bochs: stack_read_dword (long64 path)
     #[inline]
     pub(crate) fn stack_read_dword_64(&mut self, offset: u64) -> Result<u32> {
-        self.read_virtual_dword_64(BxSegregs::Ss, offset)
+        self.read_virtual_dword_64(BxSegregs::Ss, BxEffAddress::new(offset))
     }
 
     /// Write a dword to the stack in 64-bit mode (SS segment).
     /// Bochs: stack_write_dword (long64 path)
     #[inline]
     pub(crate) fn stack_write_dword_64(&mut self, offset: u64, val: u32) -> Result<()> {
-        self.write_virtual_dword_64(BxSegregs::Ss, offset, val)
+        self.write_virtual_dword_64(BxSegregs::Ss, BxEffAddress::new(offset), val)
     }
 
     /// Read a qword from the stack in 64-bit mode (SS segment).
     /// Bochs: stack_read_qword
     #[inline]
     pub(crate) fn stack_read_qword_64(&mut self, offset: u64) -> Result<u64> {
-        self.read_virtual_qword_64(BxSegregs::Ss, offset)
+        self.read_virtual_qword_64(BxSegregs::Ss, BxEffAddress::new(offset))
     }
 
     /// Write a qword to the stack in 64-bit mode (SS segment).
     /// Bochs: stack_write_qword
     #[inline]
     pub(crate) fn stack_write_qword_64(&mut self, offset: u64, val: u64) -> Result<()> {
-        self.write_virtual_qword_64(BxSegregs::Ss, offset, val)
+        self.write_virtual_qword_64(BxSegregs::Ss, BxEffAddress::new(offset), val)
     }
 
     // ===== Host pointer resolution for bulk operations (Bochs v2h_write_byte / v2h_read_byte) =====
@@ -1485,7 +1529,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Returns (host_ptr, bytes_remaining_in_page) or None on miss.
     /// Bochs: v2h_write_byte (access.h)
     #[inline]
-    pub(super) fn get_host_write_ptr(&mut self, laddr: u64) -> Result<Option<(*mut u8, usize)>> {
+    pub(super) fn get_host_write_ptr(
+        &mut self,
+        laddr: BxLinAddress,
+    ) -> Result<Option<(*mut u8, usize)>> {
         let Some((ptr, remaining, paddr)) = self.resolve_host_write_ptr(laddr)? else {
             return Ok(None);
         };
@@ -1499,7 +1546,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     #[inline]
     pub(super) fn get_host_write_ptr_for_bulk(
         &mut self,
-        laddr: u64,
+        laddr: BxLinAddress,
     ) -> Result<Option<(*mut u8, usize, BxPhyAddress)>> {
         self.resolve_host_write_ptr(laddr)
     }
@@ -1507,7 +1554,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     #[inline]
     fn resolve_host_write_ptr(
         &mut self,
-        laddr: u64,
+        laddr: BxLinAddress,
     ) -> Result<Option<(*mut u8, usize, BxPhyAddress)>> {
         // A registered MMIO range may overlap otherwise host-backed RAM.
         // Without per-range clipping, direct bulk writes could bypass a
@@ -1515,7 +1562,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.mmio.is_empty() {
             return Ok(None);
         }
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let mut translated = false;
         loop {
@@ -1528,9 +1575,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 && tlb.host_page.is_some()
                 && !self.mem_host_base.is_null()
             {
-                let page_offset = (laddr & 0xFFF) as usize;
-                let paddr = tlb.ppf | page_offset as BxPhyAddress;
-                let a20_paddr = paddr & self.a20_mask;
+                let page_offset = (laddr.page_offset()) as usize;
+                let paddr = tlb.ppf.at_page_offset(page_offset as u64);
+                let a20_paddr = self.a20_mask.apply(paddr);
                 let Some(span) = bx_guest_ram_span(a20_paddr, 1, self.mem_host_len) else {
                     return Ok(None);
                 };
@@ -1558,16 +1605,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // same RAM ranges as mem_write_byte's handler-aware fast path; VGA,
         // BIOS shadow/ROM, and addresses beyond host RAM stay on the slow path.
         if !self.cr0.pg() {
-            let paddr = laddr & self.a20_mask;
+            let paddr = laddr.unpaged(self.a20_mask);
             let host_base = self.mem_host_base;
-            let plain_ram = (paddr < 0xA0000 || paddr >= 0x100000)
+            let plain_ram = (paddr.get() < 0xA0000 || paddr.get() >= 0x100000)
                 && bx_guest_ram_span(paddr, 1, self.mem_host_len).is_some();
             if !host_base.is_null() && plain_ram {
                 let Some(span) = bx_guest_ram_span(paddr, 1, self.mem_host_len) else {
                     return Ok(None);
                 };
                 let linear = span.start;
-                let page_remaining = 0x1000 - ((paddr as usize) & 0x0fff);
+                let page_remaining = 0x1000 - paddr.page_offset() as usize;
                 let Some(memory_remaining) = self.mem_host_len.checked_sub(linear) else {
                     return Ok(None);
                 };
@@ -1591,11 +1638,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Returns (host_ptr, bytes_remaining_in_page) or None on miss.
     /// Bochs: v2h_read_byte (access.h)
     #[inline]
-    pub(super) fn get_host_read_ptr(&mut self, laddr: u64) -> Result<Option<(*const u8, usize)>> {
+    pub(super) fn get_host_read_ptr(
+        &mut self,
+        laddr: BxLinAddress,
+    ) -> Result<Option<(*const u8, usize)>> {
         if !self.mmio.is_empty() {
             return Ok(None);
         }
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (self.user_pl as u32);
         let mut translated = false;
         loop {
@@ -1608,9 +1658,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 && tlb.host_page.is_some()
                 && !self.mem_host_base.is_null()
             {
-                let page_offset = (laddr & 0xFFF) as usize;
-                let paddr = tlb.ppf | page_offset as BxPhyAddress;
-                let a20_paddr = paddr & self.a20_mask;
+                let page_offset = (laddr.page_offset()) as usize;
+                let paddr = tlb.ppf.at_page_offset(page_offset as u64);
+                let a20_paddr = self.a20_mask.apply(paddr);
                 let Some(span) = bx_guest_ram_span(a20_paddr, 1, self.mem_host_len) else {
                     return Ok(None);
                 };
@@ -1634,16 +1684,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         if !self.cr0.pg() {
-            let paddr = laddr & self.a20_mask;
+            let paddr = laddr.unpaged(self.a20_mask);
             let host_base = self.mem_host_base;
-            let plain_ram = (paddr < 0xA0000 || paddr >= 0x100000)
+            let plain_ram = (paddr.get() < 0xA0000 || paddr.get() >= 0x100000)
                 && bx_guest_ram_span(paddr, 1, self.mem_host_len).is_some();
             if !host_base.is_null() && plain_ram {
                 let Some(span) = bx_guest_ram_span(paddr, 1, self.mem_host_len) else {
                     return Ok(None);
                 };
                 let linear = span.start;
-                let page_remaining = 0x1000 - ((paddr as usize) & 0x0FFF);
+                let page_remaining = 0x1000 - paddr.page_offset() as usize;
                 let Some(memory_remaining) = self.mem_host_len.checked_sub(linear) else {
                     return Ok(None);
                 };
@@ -1674,7 +1724,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ── Permission & MMIO helpers for hot-path memory access ──
 
     #[inline]
-    fn check_perm_read(&mut self, laddr: u64, paddr: u64, size: usize) -> Result<()> {
+    fn check_perm_read(
+        &mut self,
+        laddr: BxLinAddress,
+        paddr: BxPhyAddress,
+        size: usize,
+    ) -> Result<()> {
         if let Some(ref pp) = self.page_permissions {
             if !pp.check(paddr, super::instrumentation::MemPerms::READ) {
                 if self.instrumentation.active.has_mem_perm()
@@ -1696,7 +1751,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     #[inline]
-    fn check_perm_write(&mut self, laddr: u64, paddr: u64, size: usize) -> Result<()> {
+    fn check_perm_write(
+        &mut self,
+        laddr: BxLinAddress,
+        paddr: BxPhyAddress,
+        size: usize,
+    ) -> Result<()> {
         if let Some(ref pp) = self.page_permissions {
             if !pp.check(paddr, super::instrumentation::MemPerms::WRITE) {
                 if self.instrumentation.active.has_mem_perm()
@@ -1720,7 +1780,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Apply instrumentation-only write permissions to a prepared RMW
     /// translation before an external side effect.
     #[inline]
-    pub(super) fn check_rmw_write_permissions(&mut self, laddr: u64, size: usize) -> Result<()> {
+    pub(super) fn check_rmw_write_permissions(
+        &mut self,
+        laddr: BxLinAddress,
+        size: usize,
+    ) -> Result<()> {
         {
             if self.address_xlation.pages == 2 {
                 self.check_perm_write(
@@ -1728,7 +1792,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     self.address_xlation.paddress1,
                     self.address_xlation.len1 as usize,
                 )?;
-                let next_page = (laddr | 0x0fff).wrapping_add(1);
+                let next_page = laddr.next_page();
                 self.check_perm_write(
                     next_page,
                     self.address_xlation.paddress2,
@@ -1742,12 +1806,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     #[inline]
-    pub(super) fn check_rmw_word_write_permissions(&mut self, laddr: u64) -> Result<()> {
+    pub(super) fn check_rmw_word_write_permissions(&mut self, laddr: BxLinAddress) -> Result<()> {
         self.check_rmw_write_permissions(laddr, 2)
     }
 
     #[inline]
-    pub(super) fn mmio_read(&mut self, paddr: u64, size: usize) -> Option<u64> {
+    pub(super) fn mmio_read(&mut self, paddr: BxPhyAddress, size: usize) -> Option<u64> {
         if self.mmio.is_empty() {
             return None;
         }
@@ -1758,7 +1822,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     #[inline]
-    pub(super) fn mmio_write(&mut self, paddr: u64, size: usize, val: u64) -> bool {
+    pub(super) fn mmio_write(&mut self, paddr: BxPhyAddress, size: usize, val: u64) -> bool {
         if self.mmio.is_empty() {
             return false;
         }
@@ -1771,8 +1835,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read a byte given a pre-computed linear address.
     /// Bochs: read_linear_byte (access2.cc)
-    pub(crate) fn read_linear_byte(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u8> {
-        let lpf = laddr & super::tlb::LPF_MASK;
+    pub(crate) fn read_linear_byte(&mut self, _seg: BxSegregs, laddr: BxLinAddress) -> Result<u8> {
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.entry_of(laddr, 0);
         if tlb.lpf == lpf
@@ -1782,7 +1846,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr_hit = tlb.ppf.at_page_offset(laddr.page_offset());
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_read(laddr, paddr_hit, 1)?;
             let v = unsafe { *host_at_page_offset(host, laddr) };
@@ -1817,9 +1881,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read a word given a pre-computed linear address with cross-page handling.
     /// Bochs: read_linear_word (access2.cc)
-    pub(crate) fn read_linear_word(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u16> {
+    pub(crate) fn read_linear_word(&mut self, _seg: BxSegregs, laddr: BxLinAddress) -> Result<u16> {
         self.check_alignment(laddr, 1)?;
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.entry_of(laddr, 1);
         if tlb.lpf == lpf
@@ -1829,7 +1893,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr_hit = tlb.ppf.at_page_offset(laddr.page_offset());
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_read(laddr, paddr_hit, 2)?;
             let ptr = host_at_page_offset(host, laddr);
@@ -1846,7 +1910,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             return Ok(v);
         }
-        let page_offset = laddr & 0xFFF;
+        let page_offset = laddr.page_offset();
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
             self.check_perm_read(laddr, paddr, 2)?;
@@ -1867,7 +1931,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             let p0 = self.translate_data_read(laddr)?;
             let b0 = self.mem_read_byte(p0);
-            let p1 = self.translate_data_read((laddr | 0xFFF).wrapping_add(1))?;
+            let p1 = self.translate_data_read(laddr.next_page())?;
             let b1 = self.mem_read_byte(p1);
             Ok(u16::from_le_bytes([b0, b1]))
         }
@@ -1875,9 +1939,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read a dword given a pre-computed linear address with cross-page handling.
     /// Bochs: read_linear_dword (access2.cc)
-    pub(crate) fn read_linear_dword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u32> {
+    pub(crate) fn read_linear_dword(
+        &mut self,
+        _seg: BxSegregs,
+        laddr: BxLinAddress,
+    ) -> Result<u32> {
         self.check_alignment(laddr, 3)?;
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.entry_of(laddr, 3);
         if tlb.lpf == lpf
@@ -1887,7 +1955,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr_hit = tlb.ppf.at_page_offset(laddr.page_offset());
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_read(laddr, paddr_hit, 4)?;
             let ptr = host_at_page_offset(host, laddr);
@@ -1904,7 +1972,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             return Ok(v);
         }
-        let page_offset = laddr & 0xFFF;
+        let page_offset = laddr.page_offset();
         if page_offset + 4 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
             self.check_perm_read(laddr, paddr, 4)?;
@@ -1934,9 +2002,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read a qword given a pre-computed linear address with cross-page handling.
     /// Bochs: read_linear_qword (access2.cc)
-    pub(crate) fn read_linear_qword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u64> {
+    pub(crate) fn read_linear_qword(
+        &mut self,
+        _seg: BxSegregs,
+        laddr: BxLinAddress,
+    ) -> Result<u64> {
         self.check_alignment(laddr, 7)?;
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (self.user_pl as u32);
         let tlb = self.dtlb.entry_of(laddr, 7);
         if tlb.lpf == lpf
@@ -1946,7 +2018,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr_hit = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr_hit = tlb.ppf.at_page_offset(laddr.page_offset());
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_read(laddr, paddr_hit, 8)?;
             let ptr = host_at_page_offset(host, laddr);
@@ -1963,7 +2035,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             return Ok(v);
         }
-        let page_offset = laddr & 0xFFF;
+        let page_offset = laddr.page_offset();
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
             self.check_perm_read(laddr, paddr, 8)?;
@@ -1993,8 +2065,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Write a byte given a pre-computed linear address.
     /// Bochs: write_linear_byte (access2.cc)
-    pub(crate) fn write_linear_byte(&mut self, _seg: BxSegregs, laddr: u64, val: u8) -> Result<()> {
-        let lpf = laddr & super::tlb::LPF_MASK;
+    pub(crate) fn write_linear_byte(
+        &mut self,
+        _seg: BxSegregs,
+        laddr: BxLinAddress,
+        val: u8,
+    ) -> Result<()> {
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.entry_of(laddr, 0);
         if tlb.lpf == lpf
@@ -2004,7 +2081,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_write(laddr, paddr, 1)?;
             self.smc_write_check(paddr, 1);
@@ -2044,11 +2121,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_linear_word(
         &mut self,
         _seg: BxSegregs,
-        laddr: u64,
+        laddr: BxLinAddress,
         val: u16,
     ) -> Result<()> {
         self.check_alignment(laddr, 1)?;
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.entry_of(laddr, 1);
         if tlb.lpf == lpf
@@ -2058,7 +2135,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_write(laddr, paddr, 2)?;
             self.smc_write_check(paddr, 2);
@@ -2076,7 +2153,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             return Ok(());
         }
-        let page_offset = laddr & 0xFFF;
+        let page_offset = laddr.page_offset();
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             self.check_perm_write(laddr, paddr, 2)?;
@@ -2095,7 +2172,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
         } else {
             let bytes = val.to_le_bytes();
-            let next_page = (laddr | 0xFFF).wrapping_add(1);
+            let next_page = laddr.next_page();
             let p0 = self.translate_data_write(laddr)?;
             let p1 = self.translate_data_write(next_page)?;
             {
@@ -2128,7 +2205,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Write a dword given a pre-computed linear address with cross-page handling.
     /// Bochs: write_linear_dword (access2.cc)
-    fn check_gdt_watchpoint(&mut self, _laddr: u64, _val: u64, _size: u32) {
+    fn check_gdt_watchpoint(&mut self, _laddr: BxLinAddress, _val: u64, _size: u32) {
         // Disabled — the GDT 'corruption' was caused by our own diagnostic code
         // (v_read_byte in SYSCALL handler triggering page walks that set A/D bits)
     }
@@ -2136,12 +2213,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_linear_dword(
         &mut self,
         _seg: BxSegregs,
-        laddr: u64,
+        laddr: BxLinAddress,
         val: u32,
     ) -> Result<()> {
         self.check_alignment(laddr, 3)?;
         self.check_gdt_watchpoint(laddr, val as u64, 4);
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.entry_of(laddr, 3);
         if tlb.lpf == lpf
@@ -2151,7 +2228,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_write(laddr, paddr, 4)?;
             self.smc_write_check(paddr, 4);
@@ -2169,7 +2246,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             return Ok(());
         }
-        let page_offset = laddr & 0xFFF;
+        let page_offset = laddr.page_offset();
         if page_offset + 4 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             self.check_perm_write(laddr, paddr, 4)?;
@@ -2203,12 +2280,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn write_linear_qword(
         &mut self,
         _seg: BxSegregs,
-        laddr: u64,
+        laddr: BxLinAddress,
         val: u64,
     ) -> Result<()> {
         self.check_alignment(laddr, 7)?;
         self.check_gdt_watchpoint(laddr, val, 8);
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.entry_of(laddr, 7);
         // DIAGNOSTIC: bypass TLB for writes to test stale-TLB theory
@@ -2219,7 +2296,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.check_perm_write(laddr, paddr, 8)?;
             self.smc_write_check(paddr, 8);
@@ -2237,7 +2314,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             return Ok(());
         }
-        let page_offset = laddr & 0xFFF;
+        let page_offset = laddr.page_offset();
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             self.check_perm_write(laddr, paddr, 8)?;
@@ -2271,11 +2348,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// `curr_pl` is the privilege level used for SS U/S matching (CPL).
     pub(crate) fn shadow_stack_read_linear_dword(
         &mut self,
-        laddr: u64,
+        laddr: BxLinAddress,
         curr_pl: u8,
     ) -> Result<u32> {
         let user = (curr_pl == 3) as u32;
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let tlb = self.dtlb.entry_of(laddr, 3);
         let pkey_mask = self.rd_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page.is_some()
@@ -2294,11 +2371,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs access2.cc BX_CPU_C::shadow_stack_read_qword.
     pub(crate) fn shadow_stack_read_linear_qword(
         &mut self,
-        laddr: u64,
+        laddr: BxLinAddress,
         curr_pl: u8,
     ) -> Result<u64> {
         let user = (curr_pl == 3) as u32;
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let tlb = self.dtlb.entry_of(laddr, 7);
         let pkey_mask = self.rd_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page.is_some()
@@ -2315,19 +2392,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs access2.cc BX_CPU_C::shadow_stack_write_dword.
     pub(crate) fn shadow_stack_write_linear_dword(
         &mut self,
-        laddr: u64,
+        laddr: BxLinAddress,
         curr_pl: u8,
         val: u32,
     ) -> Result<()> {
         let user = (curr_pl == 3) as u32;
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let tlb = self.dtlb.entry_of(laddr, 3);
         let pkey_mask = self.wr_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf
             && tlb.is_shadow_stack_write_ok(user, pkey_mask)
             && tlb.host_page.is_some()
         {
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.smc_write_check(paddr, 4);
             let ptr = host_at_page_offset_mut(host, laddr);
@@ -2345,19 +2422,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs access2.cc BX_CPU_C::shadow_stack_write_qword.
     pub(crate) fn shadow_stack_write_linear_qword(
         &mut self,
-        laddr: u64,
+        laddr: BxLinAddress,
         curr_pl: u8,
         val: u64,
     ) -> Result<()> {
         let user = (curr_pl == 3) as u32;
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let tlb = self.dtlb.entry_of(laddr, 7);
         let pkey_mask = self.wr_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf
             && tlb.is_shadow_stack_write_ok(user, pkey_mask)
             && tlb.host_page.is_some()
         {
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
             let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
             self.smc_write_check(paddr, 8);
             let ptr = host_at_page_offset_mut(host, laddr);
@@ -2376,10 +2453,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(crate) fn read_rmw_linear_qword(
         &mut self,
         _seg: BxSegregs,
-        laddr: u64,
-    ) -> Result<(u64, u64)> {
+        laddr: BxLinAddress,
+    ) -> Result<(u64, BxLinAddress)> {
         // ---- Inline TLB fast path (Bochs access2.cc) ----
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.entry_of(laddr, 7);
         if tlb.lpf == lpf
@@ -2389,10 +2466,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
+            let page_offset = (laddr.page_offset()) as BxPtrEquiv;
             let host_addr =
                 super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | page_offset;
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
             self.smc_write_check(paddr, 8);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let data = addr_read_u64(host_addr);
@@ -2402,7 +2479,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         // ---- Slow path (Bochs: access_read_linear) ----
-        let page_offset = laddr & 0xFFF;
+        let page_offset = laddr.page_offset();
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             let data = self.mem_read_qword(paddr);
@@ -2413,7 +2490,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let len1 = (0x1000 - page_offset) as u32;
             let len2 = 8 - len1;
             let p0 = self.translate_data_write(laddr)?;
-            let next_page = (laddr | 0xFFF).wrapping_add(1);
+            let next_page = laddr.next_page();
             let p1 = self.translate_data_write(next_page)?;
             let mut buf = [0u8; 8];
             for (i, byte) in buf[..len1 as usize].iter_mut().enumerate() {
@@ -2433,15 +2510,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read phase of a RMW byte given a pre-computed linear address.
     /// Bochs: read_RMW_linear_byte (access2.cc)
-    pub(crate) fn read_rmw_linear_byte(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u8> {
+    pub(crate) fn read_rmw_linear_byte(
+        &mut self,
+        _seg: BxSegregs,
+        laddr: BxLinAddress,
+    ) -> Result<u8> {
         self.prepare_rmw_linear_byte(laddr)?;
         Ok(self.read_prepared_rmw_byte())
     }
 
     /// Prepare the write translation for a byte RMW without reading RAM/MMIO.
     #[inline]
-    pub(super) fn prepare_rmw_linear_byte(&mut self, laddr: u64) -> Result<()> {
-        let lpf = laddr & super::tlb::LPF_MASK;
+    pub(super) fn prepare_rmw_linear_byte(&mut self, laddr: BxLinAddress) -> Result<()> {
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.entry_of(laddr, 0);
         if self.mmio.is_empty()
@@ -2456,8 +2537,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // stored: the probe holds the TLB shared, and writing
             // `address_xlation` needs the context mutably.
             let pages = super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page)
-                | (laddr & 0x0fff) as BxPtrEquiv;
-            let paddress1 = tlb.ppf | (laddr & 0x0fff) as BxPhyAddress;
+                | (laddr.page_offset()) as BxPtrEquiv;
+            let paddress1 = tlb.ppf.at_page_offset(laddr.page_offset());
             self.address_xlation.pages = pages;
             self.address_xlation.paddress1 = paddress1;
             return Ok(());
@@ -2485,7 +2566,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read phase of a RMW word given a pre-computed linear address.
     /// Bochs: read_RMW_linear_word (access2.cc)
-    pub(crate) fn read_rmw_linear_word(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u16> {
+    pub(crate) fn read_rmw_linear_word(
+        &mut self,
+        _seg: BxSegregs,
+        laddr: BxLinAddress,
+    ) -> Result<u16> {
         self.prepare_rmw_linear_word(laddr)?;
         Ok(self.read_prepared_rmw_word())
     }
@@ -2493,9 +2578,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Prepare the write translation for a word RMW without reading RAM/MMIO.
     /// Both pages of a split access are translated before any physical side
     /// effect, matching Bochs `access_read_linear`.
-    pub(super) fn prepare_rmw_linear_word(&mut self, laddr: u64) -> Result<()> {
+    pub(super) fn prepare_rmw_linear_word(&mut self, laddr: BxLinAddress) -> Result<()> {
         // ---- Inline TLB fast path (Bochs access2.cc) ----
-        let lpf = laddr & super::tlb::LPF_MASK;
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.entry_of(laddr, 1);
         if self.mmio.is_empty()
@@ -2506,24 +2591,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 != 0
             && tlb.host_page.is_some()
         {
-            let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
+            let page_offset = (laddr.page_offset()) as BxPtrEquiv;
             let host_addr =
                 super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | page_offset;
-            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
             return Ok(());
         }
 
         // ---- Slow path ----
-        let page_offset = laddr & 0xFFF;
+        let page_offset = laddr.page_offset();
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             self.address_xlation.pages = 1;
             self.address_xlation.paddress1 = paddr;
         } else {
             let p0 = self.translate_data_write(laddr)?;
-            let next_page = (laddr | 0xFFF).wrapping_add(1);
+            let next_page = laddr.next_page();
             let p1 = self.translate_data_write(next_page)?;
             self.address_xlation.pages = 2;
             self.address_xlation.paddress1 = p0;
@@ -2566,7 +2651,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read phase of a RMW dword given a pre-computed linear address.
     /// Bochs: read_RMW_linear_dword (access2.cc)
-    pub(crate) fn read_rmw_linear_dword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u32> {
+    pub(crate) fn read_rmw_linear_dword(
+        &mut self,
+        _seg: BxSegregs,
+        laddr: BxLinAddress,
+    ) -> Result<u32> {
         self.prepare_rmw_linear_dword(laddr)?;
         Ok(self.read_prepared_rmw_dword())
     }
@@ -2574,8 +2663,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Prepare the write translation for a dword RMW without reading RAM/MMIO.
     /// Both pages of a split access are translated before any physical side
     /// effect, matching Bochs `access_read_linear`.
-    pub(super) fn prepare_rmw_linear_dword(&mut self, laddr: u64) -> Result<()> {
-        let lpf = laddr & super::tlb::LPF_MASK;
+    pub(super) fn prepare_rmw_linear_dword(&mut self, laddr: BxLinAddress) -> Result<()> {
+        let lpf = laddr.page_base();
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.entry_of(laddr, 3);
         if self.mmio.is_empty()
@@ -2590,20 +2679,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // stored: the probe holds the TLB shared, and writing
             // `address_xlation` needs the context mutably.
             let pages = super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page)
-                | (laddr & 0x0fff) as BxPtrEquiv;
-            let paddress1 = tlb.ppf | (laddr & 0x0fff) as BxPhyAddress;
+                | (laddr.page_offset()) as BxPtrEquiv;
+            let paddress1 = tlb.ppf.at_page_offset(laddr.page_offset());
             self.address_xlation.pages = pages;
             self.address_xlation.paddress1 = paddress1;
             return Ok(());
         }
 
-        let page_offset = laddr & 0x0fff;
+        let page_offset = laddr.page_offset();
         if page_offset + 4 <= 0x1000 {
             self.address_xlation.pages = 1;
             self.address_xlation.paddress1 = self.translate_data_write(laddr)?;
         } else {
             let len1 = (0x1000 - page_offset) as u32;
-            let next_page = (laddr | 0x0fff).wrapping_add(1);
+            let next_page = laddr.next_page();
             let p0 = self.translate_data_write(laddr)?;
             let p1 = self.translate_data_write(next_page)?;
             self.address_xlation.pages = 2;
@@ -2656,7 +2745,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Write phase of a RMW qword (uses cached address_xlation from read phase).
     #[inline]
-    pub(crate) fn write_rmw_linear_qword(&mut self, _laddr: u64, val: u64) {
+    pub(crate) fn write_rmw_linear_qword(&mut self, _laddr: BxLinAddress, val: u64) {
         let pages = self.address_xlation.pages;
         if pages > 2 {
             // Host pointer cached from TLB hit — direct write (fastest path)
@@ -2680,19 +2769,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
     }
 
-    /// Read a qword from the stack given a pre-computed linear address.
-    /// Used by segment_ctrl_pro.rs which computes RSP directly.
-    #[inline]
-    pub(crate) fn stack_read_qword(&mut self, laddr: u64) -> Result<u64> {
-        self.read_linear_qword(BxSegregs::Ss, laddr)
-    }
-
-    /// Write a qword to the stack given a pre-computed linear address.
-    #[inline]
-    pub(crate) fn stack_write_qword(&mut self, laddr: u64, val: u64) -> Result<()> {
-        self.write_linear_qword(BxSegregs::Ss, laddr, val)
-    }
-
     // =========================================================================
     // Mode-dispatching virtual memory access wrappers
     // =========================================================================
@@ -2701,72 +2777,61 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Read byte — dispatches to read_virtual_byte or read_virtual_byte_64.
     #[inline]
-    pub fn v_read_byte(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u8> {
-        let offset = offset.into();
+    pub fn v_read_byte(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u8> {
         if self.long64_mode() {
             self.read_virtual_byte_64(seg, offset)
         } else {
-            self.read_virtual_byte(seg, offset as u32)
+            self.read_virtual_byte(seg, offset)
         }
     }
 
     /// Read word — dispatches to read_virtual_word or read_virtual_word_64.
     #[inline]
-    pub fn v_read_word(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u16> {
-        let offset = offset.into();
+    pub fn v_read_word(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u16> {
         if self.long64_mode() {
             self.read_virtual_word_64(seg, offset)
         } else {
-            self.read_virtual_word(seg, offset as u32)
+            self.read_virtual_word(seg, offset)
         }
     }
 
     /// Read dword — dispatches to read_virtual_dword or read_virtual_dword_64.
     #[inline]
-    pub fn v_read_dword(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u32> {
-        let offset = offset.into();
+    pub fn v_read_dword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u32> {
         if self.long64_mode() {
             self.read_virtual_dword_64(seg, offset)
         } else {
-            self.read_virtual_dword(seg, offset as u32)
+            self.read_virtual_dword(seg, offset)
         }
     }
 
     /// Write byte — dispatches to write_virtual_byte or write_virtual_byte_64.
     #[inline]
-    pub fn v_write_byte(&mut self, seg: BxSegregs, offset: impl Into<u64>, val: u8) -> Result<()> {
-        let offset = offset.into();
+    pub fn v_write_byte(&mut self, seg: BxSegregs, offset: BxEffAddress, val: u8) -> Result<()> {
         if self.long64_mode() {
             self.write_virtual_byte_64(seg, offset, val)
         } else {
-            self.write_virtual_byte(seg, offset as u32, val)
+            self.write_virtual_byte(seg, offset, val)
         }
     }
 
     /// Write word — dispatches to write_virtual_word or write_virtual_word_64.
     #[inline]
-    pub fn v_write_word(&mut self, seg: BxSegregs, offset: impl Into<u64>, val: u16) -> Result<()> {
-        let offset = offset.into();
+    pub fn v_write_word(&mut self, seg: BxSegregs, offset: BxEffAddress, val: u16) -> Result<()> {
         if self.long64_mode() {
             self.write_virtual_word_64(seg, offset, val)
         } else {
-            self.write_virtual_word(seg, offset as u32, val)
+            self.write_virtual_word(seg, offset, val)
         }
     }
 
     /// Write dword — dispatches to write_virtual_dword or write_virtual_dword_64.
     #[inline]
-    pub fn v_write_dword(
-        &mut self,
-        seg: BxSegregs,
-        offset: impl Into<u64>,
-        val: u32,
-    ) -> Result<()> {
-        let offset = offset.into();
+    pub fn v_write_dword(&mut self, seg: BxSegregs, offset: BxEffAddress, val: u32) -> Result<()> {
         if self.long64_mode() {
             self.write_virtual_dword_64(seg, offset, val)
         } else {
-            self.write_virtual_dword(seg, offset as u32, val)
+            self.write_virtual_dword(seg, offset, val)
         }
     }
 
@@ -2776,68 +2841,57 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// RMW read byte — dispatches to read_rmw_virtual_byte or read_rmw_virtual_byte_64.
     #[inline]
-    pub fn v_read_rmw_byte(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u8> {
-        let offset = offset.into();
+    pub fn v_read_rmw_byte(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u8> {
         if self.long64_mode() {
             self.read_rmw_virtual_byte_64(seg, offset)
         } else {
-            self.read_rmw_virtual_byte(seg, offset as u32)
+            self.read_rmw_virtual_byte(seg, offset)
         }
     }
 
     /// RMW read word — dispatches to read_rmw_virtual_word or read_rmw_virtual_word_64.
     #[inline]
-    pub fn v_read_rmw_word(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u16> {
-        let offset = offset.into();
+    pub fn v_read_rmw_word(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u16> {
         if self.long64_mode() {
             self.read_rmw_virtual_word_64(seg, offset)
         } else {
-            self.read_rmw_virtual_word(seg, offset as u32)
+            self.read_rmw_virtual_word(seg, offset)
         }
     }
 
     /// RMW read dword — dispatches to read_rmw_virtual_dword or read_rmw_virtual_dword_64.
     #[inline]
-    pub fn v_read_rmw_dword(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u32> {
-        let offset = offset.into();
+    pub fn v_read_rmw_dword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u32> {
         if self.long64_mode() {
             self.read_rmw_virtual_dword_64(seg, offset)
         } else {
-            self.read_rmw_virtual_dword(seg, offset as u32)
+            self.read_rmw_virtual_dword(seg, offset)
         }
     }
 
     // ===== Mode-dispatching wrappers for qword =====
 
-    pub fn v_read_qword(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u64> {
-        let offset = offset.into();
+    pub fn v_read_qword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u64> {
         if self.long64_mode() {
             self.read_virtual_qword_64(seg, offset)
         } else {
-            self.read_virtual_qword(seg, offset as u32)
+            self.read_virtual_qword(seg, offset)
         }
     }
 
-    pub fn v_write_qword(
-        &mut self,
-        seg: BxSegregs,
-        offset: impl Into<u64>,
-        val: u64,
-    ) -> Result<()> {
-        let offset = offset.into();
+    pub fn v_write_qword(&mut self, seg: BxSegregs, offset: BxEffAddress, val: u64) -> Result<()> {
         if self.long64_mode() {
             self.write_virtual_qword_64(seg, offset, val)
         } else {
-            self.write_virtual_qword(seg, offset as u32, val)
+            self.write_virtual_qword(seg, offset, val)
         }
     }
 
-    pub fn v_read_rmw_qword(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u64> {
-        let offset = offset.into();
+    pub fn v_read_rmw_qword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u64> {
         if self.long64_mode() {
             self.read_rmw_virtual_qword_64(seg, offset)
         } else {
-            self.read_rmw_virtual_qword(seg, offset as u32)
+            self.read_rmw_virtual_qword(seg, offset)
         }
     }
 
@@ -2846,54 +2900,50 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn v_read_xmmword(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedXmmRegister> {
-        let offset = offset.into();
         if self.long64_mode() {
             self.read_virtual_xmmword_64(seg, offset)
         } else {
-            self.read_virtual_xmmword(seg, offset as u32)
+            self.read_virtual_xmmword(seg, offset)
         }
     }
 
     pub fn v_read_xmmword_aligned(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedXmmRegister> {
-        let offset = offset.into();
         if self.long64_mode() {
             self.read_virtual_xmmword_aligned_64(seg, offset)
         } else {
-            self.read_virtual_xmmword_aligned(seg, offset as u32)
+            self.read_virtual_xmmword_aligned(seg, offset)
         }
     }
 
     pub fn v_write_xmmword(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
-        let offset = offset.into();
         if self.long64_mode() {
             self.write_virtual_xmmword_64(seg, offset, val)
         } else {
-            self.write_virtual_xmmword(seg, offset as u32, val)
+            self.write_virtual_xmmword(seg, offset, val)
         }
     }
 
     pub fn v_write_xmmword_aligned(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
-        let offset = offset.into();
         if self.long64_mode() {
             self.write_virtual_xmmword_aligned_64(seg, offset, val)
         } else {
-            self.write_virtual_xmmword_aligned(seg, offset as u32, val)
+            self.write_virtual_xmmword_aligned(seg, offset, val)
         }
     }
 
@@ -2904,7 +2954,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn read_virtual_xmmword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedXmmRegister> {
         let lo = self.read_virtual_qword_64(seg, offset)?;
         let hi = self.read_virtual_qword_64(seg, offset.wrapping_add(8))?;
@@ -2919,9 +2969,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn read_virtual_xmmword_aligned_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedXmmRegister> {
-        if (offset & 0xF) != 0 {
+        if !offset.is_aligned(16) {
             self.exception(super::cpu::Exception::Gp, 0)?;
         }
         self.read_virtual_xmmword_64(seg, offset)
@@ -2932,7 +2982,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_xmmword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
         self.write_virtual_qword_64(seg, offset, val.xmm64u(0))?;
@@ -2945,10 +2995,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_xmmword_aligned_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
-        if (offset & 0xF) != 0 {
+        if !offset.is_aligned(16) {
             self.exception(super::cpu::Exception::Gp, 0)?;
         }
         self.write_virtual_xmmword_64(seg, offset, val)
@@ -2960,7 +3010,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn read_virtual_ymmword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedYmmRegister> {
         let q0 = self.read_virtual_qword_64(seg, offset)?;
         let q1 = self.read_virtual_qword_64(seg, offset.wrapping_add(8))?;
@@ -2978,7 +3028,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_ymmword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedYmmRegister,
     ) -> Result<()> {
         self.write_virtual_qword_64(seg, offset, val.ymm64u(0))?;
@@ -2999,7 +3049,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn read_virtual_zmmword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedZmmRegister> {
         let mut r = super::xmm::BxPackedZmmRegister::default();
         for n in 0..8u64 {
@@ -3013,7 +3063,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn write_virtual_zmmword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedZmmRegister,
     ) -> Result<()> {
         for n in 0..8u64 {
@@ -3027,9 +3077,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn v_read_zmmword(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedZmmRegister> {
-        let offset = offset.into();
         // ZMM operands only exist under EVEX, which rusty_box decodes in long mode.
         self.read_virtual_zmmword_64(seg, offset)
     }
@@ -3037,10 +3086,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn v_write_zmmword(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedZmmRegister,
     ) -> Result<()> {
-        let offset = offset.into();
         self.write_virtual_zmmword_64(seg, offset, val)
     }
 
@@ -3049,9 +3097,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn v_read_ymmword(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
     ) -> Result<super::xmm::BxPackedYmmRegister> {
-        let offset = offset.into();
         // YMM operations are only used in long mode (VEX/EVEX)
         self.read_virtual_ymmword_64(seg, offset)
     }
@@ -3059,10 +3106,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn v_write_ymmword(
         &mut self,
         seg: BxSegregs,
-        offset: impl Into<u64>,
+        offset: BxEffAddress,
         val: &super::xmm::BxPackedYmmRegister,
     ) -> Result<()> {
-        let offset = offset.into();
         self.write_virtual_ymmword_64(seg, offset, val)
     }
 
@@ -3076,8 +3122,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn prepare_rmw_virtual_byte_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
-    ) -> Result<u64> {
+        offset: BxEffAddress,
+    ) -> Result<BxLinAddress> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
         self.prepare_rmw_linear_byte(laddr)?;
@@ -3087,7 +3133,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// RMW read byte in 64-bit mode.
     /// Bochs: read_RMW_virtual_byte (access.h) — thin wrapper
     #[inline]
-    pub(crate) fn read_rmw_virtual_byte_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u8> {
+    pub(crate) fn read_rmw_virtual_byte_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u8> {
         self.prepare_rmw_virtual_byte_64(seg, offset)?;
         Ok(self.read_prepared_rmw_byte())
     }
@@ -3097,8 +3147,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn prepare_rmw_virtual_word_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
-    ) -> Result<u64> {
+        offset: BxEffAddress,
+    ) -> Result<BxLinAddress> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
         self.prepare_rmw_linear_word(laddr)?;
@@ -3108,7 +3158,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// RMW read word in 64-bit mode.
     /// Bochs: read_RMW_virtual_word (access.h) — thin wrapper
     #[inline]
-    pub(crate) fn read_rmw_virtual_word_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u16> {
+    pub(crate) fn read_rmw_virtual_word_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u16> {
         self.prepare_rmw_virtual_word_64(seg, offset)?;
         Ok(self.read_prepared_rmw_word())
     }
@@ -3118,8 +3172,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn prepare_rmw_virtual_dword_64(
         &mut self,
         seg: BxSegregs,
-        offset: u64,
-    ) -> Result<u64> {
+        offset: BxEffAddress,
+    ) -> Result<BxLinAddress> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
         self.prepare_rmw_linear_dword(laddr)?;
@@ -3129,7 +3183,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// RMW read dword in 64-bit mode.
     /// Bochs: read_RMW_virtual_dword (access.h) — thin wrapper
     #[inline]
-    pub(crate) fn read_rmw_virtual_dword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u32> {
+    pub(crate) fn read_rmw_virtual_dword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: BxEffAddress,
+    ) -> Result<u32> {
         self.prepare_rmw_virtual_dword_64(seg, offset)?;
         Ok(self.read_prepared_rmw_dword())
     }
@@ -3137,6 +3195,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
 #[cfg(test)]
 mod tests {
+    use crate::config::{A20Mask, BxLinAddress, BxPhyAddress};
     use crate::cpu::crregs::BxCr0;
 
     #[test]
@@ -3147,61 +3206,65 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(TEST_STACK_SIZE)
             .spawn(|| {
-        const GIB: usize = 1 << 30;
-        const HIGH_GPA: u64 = 0x1_0000_0100;
-        const PCI_HOLE: u64 = 0xC000_0000;
+                const GIB: usize = 1 << 30;
+                const HIGH_GPA: u64 = 0x1_0000_0100;
+                const PCI_HOLE: u64 = 0xC000_0000;
 
-        let mut machine = crate::cpu::exec_ctx::TestMachine::new();
-        let mut cpu = machine.ctx();
-        let fake_base = 0x1000usize as *mut u8;
-        // This test exercises pointer selection only; no returned pointer is
-        // dereferenced. The synthetic extent avoids a multi-GiB allocation
-        // while making the high-GPA translation observable, so the context's
-        // real bases are overridden here rather than provisioned.
-        cpu.mem_host_base = fake_base;
-        cpu.mem_host_len = 3 * GIB + 0x180;
-        cpu.a20_mask = u64::MAX;
-        cpu.cr0.remove(BxCr0::PG);
+                let mut machine = crate::cpu::exec_ctx::TestMachine::new();
+                let mut cpu = machine.ctx();
+                let fake_base = 0x1000usize as *mut u8;
+                // This test exercises pointer selection only; no returned pointer is
+                // dereferenced. The synthetic extent avoids a multi-GiB allocation
+                // while making the high-GPA translation observable, so the context's
+                // real bases are overridden here rather than provisioned.
+                cpu.mem_host_base = fake_base;
+                cpu.mem_host_len = 3 * GIB + 0x180;
+                cpu.a20_mask = A20Mask::OPEN;
+                cpu.cr0.remove(BxCr0::PG);
 
-        // Paging-off bulk mapping rejects the PCI aperture outright.
-        assert!(cpu.get_host_write_ptr_for_bulk(PCI_HOLE).unwrap().is_none());
+                // Paging-off bulk mapping rejects the PCI aperture outright.
+                assert!(
+                    cpu.get_host_write_ptr_for_bulk(BxLinAddress::new(PCI_HOLE))
+                        .unwrap()
+                        .is_none()
+                );
 
-        // GPA 4 GiB maps to linear host offset 3 GiB and is clipped at RAM.
-        let (ptr, remaining, paddr) = cpu
-            .get_host_write_ptr_for_bulk(HIGH_GPA)
-            .unwrap()
-            .expect("translated high RAM must have a direct bulk mapping");
-        assert_eq!(ptr, fake_base.wrapping_add(3 * GIB + 0x100));
-        assert_eq!(remaining, 0x80);
-        assert_eq!(paddr, HIGH_GPA);
+                // GPA 4 GiB maps to linear host offset 3 GiB and is clipped at RAM.
+                let (ptr, remaining, paddr) = cpu
+                    .get_host_write_ptr_for_bulk(BxLinAddress::new(HIGH_GPA))
+                    .unwrap()
+                    .expect("translated high RAM must have a direct bulk mapping");
+                assert_eq!(ptr, fake_base.wrapping_add(3 * GIB + 0x100));
+                assert_eq!(remaining, 0x80);
+                assert_eq!(paddr.get(), HIGH_GPA);
 
-        // The same bounds proof runs for a populated DTLB entry, preventing a
-        // stale direct pointer from making PCI-hole RAM reachable.
-        let laddr = 0x4100u64;
-        let entry = cpu.dtlb.get_entry_of(laddr, 0);
-        entry.lpf = laddr & super::super::tlb::LPF_MASK;
-        entry.ppf = 0x1_0000_0000;
-        entry.access_bits = 1 << 2; // supervisor write
-        entry.host_page = super::super::tlb::RamPage::from_ram_offset(3 * GIB);
-        let (ptr, remaining, paddr) = cpu
-            .get_host_write_ptr_for_bulk(laddr)
-            .unwrap()
-            .expect("DTLB mapping must retain translated high-RAM bounds");
-        assert_eq!(ptr, fake_base.wrapping_add(3 * GIB + 0x100));
-        assert_eq!(remaining, 0x80);
-        assert_eq!(paddr, 0x1_0000_0100);
+                // The same bounds proof runs for a populated DTLB entry, preventing a
+                // stale direct pointer from making PCI-hole RAM reachable.
+                let laddr = BxLinAddress::new(0x4100);
+                let entry = cpu.dtlb.get_entry_of(laddr, 0);
+                entry.lpf = laddr.page_base();
+                entry.ppf = BxPhyAddress::new(0x1_0000_0000);
+                entry.access_bits = 1 << 2; // supervisor write
+                entry.host_page = super::super::tlb::RamPage::from_ram_offset(3 * GIB);
+                let (ptr, remaining, paddr) = cpu
+                    .get_host_write_ptr_for_bulk(laddr)
+                    .unwrap()
+                    .expect("DTLB mapping must retain translated high-RAM bounds");
+                assert_eq!(ptr, fake_base.wrapping_add(3 * GIB + 0x100));
+                assert_eq!(remaining, 0x80);
+                assert_eq!(paddr.get(), 0x1_0000_0100);
 
-        cpu.cr0.insert(BxCr0::PG);
-        let laddr = 0x8000u64;
-        let entry = cpu.dtlb.get_entry_of(laddr, 0);
-        entry.lpf = laddr & super::super::tlb::LPF_MASK;
-        entry.ppf = PCI_HOLE;
-        entry.access_bits = 1 << 2;
-        entry.host_page = super::super::tlb::RamPage::from_ram_offset(0);
-        assert!(
-            cpu.get_host_write_ptr_for_bulk(laddr).unwrap().is_none(),
-            "a TLB pointer must not bypass the PCI hole"
-        );
+                cpu.cr0.insert(BxCr0::PG);
+                let laddr = BxLinAddress::new(0x8000);
+                let entry = cpu.dtlb.get_entry_of(laddr, 0);
+                entry.lpf = laddr.page_base();
+                entry.ppf = BxPhyAddress::new(PCI_HOLE);
+                entry.access_bits = 1 << 2;
+                entry.host_page = super::super::tlb::RamPage::from_ram_offset(0);
+                assert!(
+                    cpu.get_host_write_ptr_for_bulk(laddr).unwrap().is_none(),
+                    "a TLB pointer must not bypass the PCI hole"
+                );
             })
             .unwrap()
             .join()

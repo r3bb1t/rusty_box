@@ -10,18 +10,18 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-
-#[cfg(feature = "alloc")]
-use crate::cpu::instrumentation::EmuStopReason;
-#[cfg(feature = "alloc")]
-use crate::emulator::StopReason;
-use crate::cpu::api_bridge::{ScaledLimit, SegmentSize};
-use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, X86Reg};
+use crate::config::{A20Mask, BxLinAddress, BxPhyAddress};
 #[cfg(feature = "alloc")]
 use crate::cpu::ResetReason;
-use crate::emulator::{Emulator, SliceEngine};
+use crate::cpu::api_bridge::{ScaledLimit, SegmentSize};
+#[cfg(feature = "alloc")]
+use crate::cpu::instrumentation::EmuStopReason;
+use crate::cpu::instrumentation::{CpuSetupMode, CpuSnapshot, X86Reg};
 #[cfg(feature = "alloc")]
 use crate::emulator::EmulatorConfig;
+#[cfg(feature = "alloc")]
+use crate::emulator::StopReason;
+use crate::emulator::{Emulator, SliceEngine};
 use crate::iodev::devices::DeviceManager;
 use crate::iodev::serial::SerialTxDrain;
 use crate::iodev::{BxDevicesC, DebugconDrain, Port80Drain};
@@ -106,6 +106,67 @@ impl Serial<'_> {
     #[must_use = "a short count means the rest never reached the guest"]
     pub fn send(&mut self, bytes: &[u8]) -> usize {
         self.input.hold_serial(self.port, bytes)
+    }
+}
+
+/// The serial verbs every rusty_box machine shares. Input needs the host
+/// buffer an allocator gives, as [`Serial::send`] does.
+#[cfg(feature = "alloc")]
+impl rusty_box_core::machine::SerialPort for Serial<'_> {
+    type Output<'a>
+        = SerialTxDrain<'a>
+    where
+        Self: 'a;
+
+    fn take_output(&mut self) -> SerialTxDrain<'_> {
+        Serial::take_output(self)
+    }
+
+    fn send(&mut self, bytes: &[u8]) -> usize {
+        Serial::send(self, bytes)
+    }
+}
+
+/// The verbs every interpreted rusty_box machine shares, for code written
+/// against any of them ([`rusty_box_core::machine`]).
+///
+/// Only the interpreter's machine has them. A machine on a hypervisor engine
+/// runs through its own driver (`FastMachine`), not through slices, so it is
+/// left out by type: code that tries to step one through this trait does not
+/// compile, where an impl for every engine would compile and then refuse at
+/// run time.
+#[cfg(feature = "alloc")]
+impl<T: crate::cpu::instrumentation::Instrumentation> rusty_box_core::machine::Machine
+    for Emulator<T, crate::emulator::SoftwareEngine>
+{
+    type Error = Error;
+    type Keyboard<'a>
+        = crate::emulator::Keyboard<'a>
+    where
+        Self: 'a;
+    type Outcome = crate::emulator::BatchOutcome;
+    type Serial<'a>
+        = Serial<'a>
+    where
+        Self: 'a;
+
+    fn step(
+        &mut self,
+        budget: rusty_box_core::run::RunBudget,
+    ) -> Result<crate::emulator::BatchOutcome> {
+        Emulator::step(self, budget)
+    }
+
+    fn ticks(&self) -> u64 {
+        Emulator::ticks(self)
+    }
+
+    fn serial(&mut self, port: usize) -> Option<Serial<'_>> {
+        Emulator::serial(self, port)
+    }
+
+    fn keyboard(&mut self) -> crate::emulator::Keyboard<'_> {
+        Emulator::keyboard(self)
     }
 }
 
@@ -221,7 +282,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
     pub fn get_enable_a20(&self) -> bool {
         self.pc_system.get_enable_a20()
     }
-
 }
 
 // ─────────────────────────── The observer ───────────────────────────
@@ -278,7 +338,9 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
 
     /// Write an MSR by index. Returns Err if the MSR is not writable.
     pub fn msr_write(&mut self, msr: u32, val: u64) -> Result<()> {
-        self.cpu_mut().write_msr_for_api(msr, val).map_err(Error::Cpu)
+        self.cpu_mut()
+            .write_msr_for_api(msr, val)
+            .map_err(Error::Cpu)
     }
 
     /// Build a CPU snapshot on demand. Not invoked by instrumentation — see
@@ -534,12 +596,15 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     pub fn set_exits(&mut self, addrs: &[u64]) {
         self.exit_set.set(addrs);
     }
+
     pub fn clear_exits(&mut self) {
         self.exit_set.clear();
     }
+
     pub fn add_exit(&mut self, addr: u64) -> bool {
         self.exit_set.add(addr)
     }
+
     pub fn remove_exit(&mut self, addr: u64) -> bool {
         self.exit_set.remove(addr)
     }
@@ -551,17 +616,17 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     #[cfg(feature = "alloc")]
     pub fn mmio_map(
         &mut self,
-        addr: u64,
+        addr: BxPhyAddress,
         size: u64,
-        read_cb: alloc::boxed::Box<dyn FnMut(u64, usize) -> u64 + Send>,
-        write_cb: alloc::boxed::Box<dyn FnMut(u64, usize, u64) + Send>,
+        read_cb: alloc::boxed::Box<dyn FnMut(BxPhyAddress, usize) -> u64 + Send>,
+        write_cb: alloc::boxed::Box<dyn FnMut(BxPhyAddress, usize, u64) + Send>,
     ) {
         self.cpu_mut().mmio.map(addr, size, read_cb, write_cb);
     }
 
     /// Remove MMIO regions overlapping [addr, addr+size).
     #[cfg(feature = "alloc")]
-    pub fn mmio_unmap(&mut self, addr: u64, size: u64) {
+    pub fn mmio_unmap(&mut self, addr: BxPhyAddress, size: u64) {
         self.cpu_mut().mmio.unmap(addr, size);
     }
 }
@@ -572,16 +637,15 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// Read bytes from guest physical memory into the caller's buffer.
     /// Returns the number of bytes read (always `buf.len()` on success).
     /// Bypasses MMIO handlers — matches Unicorn `uc_mem_read` semantics.
-    pub fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> Result<()> {
-        let copied = self.memory.read_ram(
-            addr,
-            buf,
-        )?;
+    pub fn mem_read(&mut self, addr: BxPhyAddress, buf: &mut [u8]) -> Result<()> {
+        let copied = self.memory.read_ram(addr, buf)?;
         if copied != buf.len() {
-            return Err(Error::Memory(crate::memory::MemoryError::ReadPhysicalPage {
-                addr,
-                len: buf.len(),
-            }));
+            return Err(Error::Memory(
+                crate::memory::MemoryError::ReadPhysicalPage {
+                    addr,
+                    len: buf.len(),
+                },
+            ));
         }
         Ok(())
     }
@@ -602,50 +666,53 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
         while done < buf.len() {
             let at = offset
                 .checked_add(u64::try_from(done)?)
-                .ok_or(Error::Memory(crate::memory::MemoryError::ReadPhysicalPage {
-                    addr: offset,
-                    len: buf.len(),
-                }))?;
+                .ok_or(Error::Memory(
+                    crate::memory::MemoryError::ReadPhysicalPage {
+                        addr: bx_translate_linear_to_gpa(offset),
+                        len: buf.len(),
+                    },
+                ))?;
             let stretch = bx_ram_stretch(at, buf.len() - done);
-            self.mem_read(bx_translate_linear_to_gpa(at), &mut buf[done..done + stretch])?;
+            self.mem_read(
+                bx_translate_linear_to_gpa(at),
+                &mut buf[done..done + stretch],
+            )?;
             done += stretch;
         }
         Ok(())
     }
 
     #[cfg(feature = "alloc")]
-    pub fn mem_read_vec(&mut self, addr: u64, size: usize) -> Result<Vec<u8>> {
+    pub fn mem_read_vec(&mut self, addr: BxPhyAddress, size: usize) -> Result<Vec<u8>> {
         let mut v = alloc::vec![0u8; size];
         self.mem_read(addr, &mut v)?;
         Ok(v)
     }
 
     /// Write bytes to guest physical RAM, including swapped blocks.
-    pub fn mem_write(&mut self, addr: u64, data: &[u8]) -> Result<()> {
-        let copied = self.memory.write_ram(
-            addr,
-            data,
-        )?;
+    pub fn mem_write(&mut self, addr: BxPhyAddress, data: &[u8]) -> Result<()> {
+        let copied = self.memory.write_ram(addr, data)?;
         if copied != data.len() {
-            return Err(Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
-                addr,
-                len: data.len(),
-            }));
+            return Err(Error::Memory(
+                crate::memory::MemoryError::WritePhysicalPage {
+                    addr,
+                    len: data.len(),
+                },
+            ));
         }
         Ok(())
     }
 
-    pub fn mem_fill(&mut self, addr: u64, size: usize, byte: u8) -> Result<()> {
+    pub fn mem_fill(&mut self, addr: BxPhyAddress, size: usize, byte: u8) -> Result<()> {
         let chunk = [byte; 4096];
         let mut offset = 0usize;
         while offset < size {
             let count = (size - offset).min(chunk.len());
             self.mem_write(
                 addr.checked_add(u64::try_from(offset)?)
-                    .ok_or(Error::Memory(crate::memory::MemoryError::WritePhysicalPage {
-                        addr,
-                        len: size,
-                    }))?,
+                    .ok_or(Error::Memory(
+                        crate::memory::MemoryError::WritePhysicalPage { addr, len: size },
+                    ))?,
                 &chunk[..count],
             )?;
             offset += count;
@@ -662,7 +729,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// Creates the permissions bitmap on first call, sizing it to physical memory.
     pub fn mem_protect(
         &mut self,
-        addr: u64,
+        addr: BxPhyAddress,
         size: usize,
         perms: crate::cpu::instrumentation::MemPerms,
     ) {
@@ -676,43 +743,43 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     // Typed helpers — reduce noise when loaders build page tables, GDT/IDT
     // entries, stack frames, or TEB/PEB scaffolding.
 
-    pub fn mem_read_u8(&mut self, addr: u64) -> Result<u8> {
+    pub fn mem_read_u8(&mut self, addr: BxPhyAddress) -> Result<u8> {
         let mut b = [0u8; 1];
         self.mem_read(addr, &mut b)?;
         Ok(b[0])
     }
 
-    pub fn mem_read_u16_le(&mut self, addr: u64) -> Result<u16> {
+    pub fn mem_read_u16_le(&mut self, addr: BxPhyAddress) -> Result<u16> {
         let mut b = [0u8; 2];
         self.mem_read(addr, &mut b)?;
         Ok(u16::from_le_bytes(b))
     }
 
-    pub fn mem_read_u32_le(&mut self, addr: u64) -> Result<u32> {
+    pub fn mem_read_u32_le(&mut self, addr: BxPhyAddress) -> Result<u32> {
         let mut b = [0u8; 4];
         self.mem_read(addr, &mut b)?;
         Ok(u32::from_le_bytes(b))
     }
 
-    pub fn mem_read_u64_le(&mut self, addr: u64) -> Result<u64> {
+    pub fn mem_read_u64_le(&mut self, addr: BxPhyAddress) -> Result<u64> {
         let mut b = [0u8; 8];
         self.mem_read(addr, &mut b)?;
         Ok(u64::from_le_bytes(b))
     }
 
-    pub fn mem_write_u8(&mut self, addr: u64, val: u8) -> Result<()> {
+    pub fn mem_write_u8(&mut self, addr: BxPhyAddress, val: u8) -> Result<()> {
         self.mem_write(addr, &[val])
     }
 
-    pub fn mem_write_u16_le(&mut self, addr: u64, val: u16) -> Result<()> {
+    pub fn mem_write_u16_le(&mut self, addr: BxPhyAddress, val: u16) -> Result<()> {
         self.mem_write(addr, &val.to_le_bytes())
     }
 
-    pub fn mem_write_u32_le(&mut self, addr: u64, val: u32) -> Result<()> {
+    pub fn mem_write_u32_le(&mut self, addr: BxPhyAddress, val: u32) -> Result<()> {
         self.mem_write(addr, &val.to_le_bytes())
     }
 
-    pub fn mem_write_u64_le(&mut self, addr: u64, val: u64) -> Result<()> {
+    pub fn mem_write_u64_le(&mut self, addr: BxPhyAddress, val: u64) -> Result<()> {
         self.mem_write(addr, &val.to_le_bytes())
     }
 
@@ -724,7 +791,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// Takes `&mut self` because the walk reads the guest's paging structures
     /// the same way an executing walk does — through the routed physical path,
     /// which can page a block back in under partial residency.
-    pub fn virt_to_phys(&mut self, vaddr: u64) -> Result<u64> {
+    pub fn virt_to_phys(&mut self, vaddr: BxLinAddress) -> Result<BxPhyAddress> {
         self.exec_ctx(0)
             .translate_linear_system_read(vaddr)
             .map_err(Error::Cpu)
@@ -733,11 +800,11 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// Read bytes from guest VIRTUAL memory. Translates through current
     /// page tables, then reads from the resulting physical address.
     /// Handles page-crossing reads by translating each page separately.
-    pub fn virt_read(&mut self, vaddr: u64, buf: &mut [u8]) -> Result<()> {
+    pub fn virt_read(&mut self, vaddr: BxLinAddress, buf: &mut [u8]) -> Result<()> {
         let mut offset = 0;
         while offset < buf.len() {
             let va = vaddr + offset as u64;
-            let page_offset = (va & 0xFFF) as usize;
+            let page_offset = va.page_offset() as usize;
             let chunk = (0x1000 - page_offset).min(buf.len() - offset);
             let pa = self.virt_to_phys(va)?;
             self.mem_read(pa, &mut buf[offset..offset + chunk])?;
@@ -750,11 +817,16 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// translation instead of the current CR3. Useful for reading user-space
     /// strings after the kernel has swapped CR3 (KPTI).
     /// Long mode only. Returns `Err` on translation failure.
-    pub fn virt_read_with_cr3(&mut self, vaddr: u64, cr3: u64, buf: &mut [u8]) -> Result<()> {
+    pub fn virt_read_with_cr3(
+        &mut self,
+        vaddr: BxLinAddress,
+        cr3: u64,
+        buf: &mut [u8],
+    ) -> Result<()> {
         let mut offset = 0;
         while offset < buf.len() {
             let va = vaddr + offset as u64;
-            let page_offset = (va & 0xFFF) as usize;
+            let page_offset = va.page_offset() as usize;
             let chunk = (0x1000 - page_offset).min(buf.len() - offset);
             let pa = self
                 .exec_ctx(0)
@@ -769,11 +841,11 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// Write bytes to guest VIRTUAL memory. Translates through current
     /// page tables, then writes to the resulting physical address.
     /// Handles page-crossing writes by translating each page separately.
-    pub fn virt_write(&mut self, vaddr: u64, data: &[u8]) -> Result<()> {
+    pub fn virt_write(&mut self, vaddr: BxLinAddress, data: &[u8]) -> Result<()> {
         let mut offset = 0;
         while offset < data.len() {
             let va = vaddr + offset as u64;
-            let page_offset = (va & 0xFFF) as usize;
+            let page_offset = va.page_offset() as usize;
             let chunk = (0x1000 - page_offset).min(data.len() - offset);
             let pa = self.virt_to_phys(va)?;
             self.mem_write(pa, &data[offset..offset + chunk])?;
@@ -784,59 +856,59 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
 
     /// Read bytes from guest virtual memory into a Vec.
     #[cfg(feature = "alloc")]
-    pub fn virt_read_vec(&mut self, vaddr: u64, size: usize) -> Result<Vec<u8>> {
+    pub fn virt_read_vec(&mut self, vaddr: BxLinAddress, size: usize) -> Result<Vec<u8>> {
         let mut v = alloc::vec![0u8; size];
         self.virt_read(vaddr, &mut v)?;
         Ok(v)
     }
 
-    pub fn virt_read_u8(&mut self, vaddr: u64) -> Result<u8> {
+    pub fn virt_read_u8(&mut self, vaddr: BxLinAddress) -> Result<u8> {
         let mut b = [0u8; 1];
         self.virt_read(vaddr, &mut b)?;
         Ok(b[0])
     }
 
-    pub fn virt_read_u16_le(&mut self, vaddr: u64) -> Result<u16> {
+    pub fn virt_read_u16_le(&mut self, vaddr: BxLinAddress) -> Result<u16> {
         let mut b = [0u8; 2];
         self.virt_read(vaddr, &mut b)?;
         Ok(u16::from_le_bytes(b))
     }
 
-    pub fn virt_read_u32_le(&mut self, vaddr: u64) -> Result<u32> {
+    pub fn virt_read_u32_le(&mut self, vaddr: BxLinAddress) -> Result<u32> {
         let mut b = [0u8; 4];
         self.virt_read(vaddr, &mut b)?;
         Ok(u32::from_le_bytes(b))
     }
 
-    pub fn virt_read_u64_le(&mut self, vaddr: u64) -> Result<u64> {
+    pub fn virt_read_u64_le(&mut self, vaddr: BxLinAddress) -> Result<u64> {
         let mut b = [0u8; 8];
         self.virt_read(vaddr, &mut b)?;
         Ok(u64::from_le_bytes(b))
     }
 
-    pub fn virt_write_u8(&mut self, vaddr: u64, val: u8) -> Result<()> {
+    pub fn virt_write_u8(&mut self, vaddr: BxLinAddress, val: u8) -> Result<()> {
         self.virt_write(vaddr, &[val])
     }
 
-    pub fn virt_write_u16_le(&mut self, vaddr: u64, val: u16) -> Result<()> {
+    pub fn virt_write_u16_le(&mut self, vaddr: BxLinAddress, val: u16) -> Result<()> {
         self.virt_write(vaddr, &val.to_le_bytes())
     }
 
-    pub fn virt_write_u32_le(&mut self, vaddr: u64, val: u32) -> Result<()> {
+    pub fn virt_write_u32_le(&mut self, vaddr: BxLinAddress, val: u32) -> Result<()> {
         self.virt_write(vaddr, &val.to_le_bytes())
     }
 
-    pub fn virt_write_u64_le(&mut self, vaddr: u64, val: u64) -> Result<()> {
+    pub fn virt_write_u64_le(&mut self, vaddr: BxLinAddress, val: u64) -> Result<()> {
         self.virt_write(vaddr, &val.to_le_bytes())
     }
 
     /// Fill `size` bytes of guest virtual memory with `byte`.
     /// Translates through current page tables, handles page crossings.
-    pub fn virt_fill(&mut self, vaddr: u64, size: usize, byte: u8) -> Result<()> {
+    pub fn virt_fill(&mut self, vaddr: BxLinAddress, size: usize, byte: u8) -> Result<()> {
         let mut offset = 0;
         while offset < size {
             let va = vaddr + offset as u64;
-            let page_offset = (va & 0xFFF) as usize;
+            let page_offset = va.page_offset() as usize;
             let chunk = (0x1000 - page_offset).min(size - offset);
             let pa = self.virt_to_phys(va)?;
             self.mem_fill(pa, chunk, byte)?;
@@ -978,11 +1050,12 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
                 // there. The fault itself travels as `CpuError::EngineFault`
                 // out of `step_exactly`/`step` above, which is the path a
                 // refusal takes on every machine that is running one.
-                StopReason::GuestPowerOff
-                | StopReason::StopRequested
-                | StopReason::EngineFault => return Ok(EmuStopReason::Stopped),
+                StopReason::GuestPowerOff | StopReason::StopRequested | StopReason::EngineFault => {
+                    return Ok(EmuStopReason::Stopped);
+                }
                 StopReason::CpuShutdown => return Ok(EmuStopReason::Shutdown),
                 StopReason::Halted => return Ok(EmuStopReason::Halted),
+                StopReason::Breakpoint(hit) => return Ok(EmuStopReason::ReachedBreakpoint(hit)),
                 StopReason::BudgetExhausted => {}
             }
         }
@@ -1084,7 +1157,8 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     pub fn setup_cpu_mode(&mut self, mode: CpuSetupMode) -> Result<()> {
         let on_triple_fault = self.config().cpu_params.on_triple_fault_without_firmware();
         for cpu_index in 0..self.cpu_count() {
-            self.cpu_mut_at(cpu_index).set_on_triple_fault(on_triple_fault);
+            self.cpu_mut_at(cpu_index)
+                .set_on_triple_fault(on_triple_fault);
         }
         match mode {
             CpuSetupMode::RealMode => self.setup_real_mode(),
@@ -1124,7 +1198,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
             self.cpu_mut()
                 .set_seg_for_api(reg, 0, 0, 0xFFFF, SegmentSize::Bits16);
         }
-        self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
+        self.memory.set_a20_mask(A20Mask::OPEN);
         self.cpu_mut().set_rflags_for_api(0x0000_0202); // IF=1, bit1 reserved=1
         Ok(())
     }
@@ -1134,7 +1208,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     fn setup_protected16(&mut self) -> Result<()> {
         self.install_flat_segments(FlatSegments::PROTECTED16)?;
         self.cpu_mut().enter_protected_mode_for_api();
-        self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
+        self.memory.set_a20_mask(A20Mask::OPEN);
         self.cpu_mut().set_rflags_for_api(0x0000_0202);
         Ok(())
     }
@@ -1144,7 +1218,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     fn setup_flat_protected32(&mut self) -> Result<()> {
         self.install_flat_segments(FlatSegments::FLAT_PROTECTED32)?;
         self.cpu_mut().enter_protected_mode_for_api();
-        self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
+        self.memory.set_a20_mask(A20Mask::OPEN);
         self.cpu_mut().set_rflags_for_api(0x0000_0202);
         Ok(())
     }
@@ -1152,19 +1226,18 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// Flat 64-bit long mode with identity-mapped 2 MiB pages at CR3.
     /// Suitable for PE64, ELF64, kernel snapshots.
     fn setup_flat_long64(&mut self) -> Result<()> {
-        // Page-table layout: at `PT_BASE` we place PML4, PDPT, then 4 PDs
+        // Page-table layout: from 0x1000 we place PML4, PDPT, then 4 PDs
         // (each covering 1 GiB, giving 4 GiB of identity-mapped RAM).
-        const PT_BASE: u64 = 0x1000;
-        const PML4: u64 = PT_BASE;
-        const PDPT: u64 = PT_BASE + 0x1000;
-        const PD0: u64 = PT_BASE + 0x2000;
+        const PML4: BxPhyAddress = BxPhyAddress::new(0x1000);
+        const PDPT: BxPhyAddress = BxPhyAddress::new(0x2000);
+        const PD0: BxPhyAddress = BxPhyAddress::new(0x3000);
 
         // PML4[0] = PDPT | P | RW
-        self.mem_write_u64_le(PML4, PDPT | 0x3)?;
+        self.mem_write_u64_le(PML4, PDPT.get() | 0x3)?;
 
         // PDPT[0..4] = PD_i | P | RW  (covers 4 GiB)
         for i in 0..4u64 {
-            self.mem_write_u64_le(PDPT + i * 8, (PD0 + i * 0x1000) | 0x3)?;
+            self.mem_write_u64_le(PDPT + i * 8, (PD0 + i * 0x1000).get() | 0x3)?;
         }
 
         // Each PD has 512 entries of 2 MiB pages: P | RW | PS
@@ -1177,8 +1250,8 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
         }
 
         self.install_flat_segments(FlatSegments::FLAT_LONG64)?;
-        self.cpu_mut().enter_long_mode_for_api(PML4);
-        self.memory.set_a20_mask(0xFFFFFFFFFFFFFFFF);
+        self.cpu_mut().enter_long_mode_for_api(PML4.get());
+        self.memory.set_a20_mask(A20Mask::OPEN);
         self.cpu_mut().set_rflags_for_api(0x0000_0202);
         Ok(())
     }
@@ -1193,7 +1266,9 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// guest 16-bit caches over 32-bit descriptors, and the machine changed
     /// width the first time it touched its own segments.
     fn install_flat_segments(&mut self, segments: FlatSegments) -> Result<()> {
-        const GDT_BASE: u64 = 0x0800;
+        // Paging is off or identity-mapped wherever this runs, so the GDT's
+        // linear base is also where it lies in physical memory.
+        const GDT_BASE: BxPhyAddress = BxPhyAddress::new(0x0800);
         const CODE_SELECTOR: u16 = 0x08;
         const DATA_SELECTOR: u16 = 0x10;
         // Present, DPL 0, S=1; type 1010 = code exec/read non-conforming,
@@ -1210,16 +1285,11 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
             GDT_BASE + DATA_SELECTOR as u64,
             flat_descriptor(DATA_ACCESS, segments.data, segments.limit),
         )?;
-        self.cpu_mut().set_gdtr_base_for_api(GDT_BASE);
+        self.cpu_mut().set_gdtr_base_for_api(GDT_BASE.get());
         self.cpu_mut().set_gdtr_limit_for_api(0x1F);
 
-        self.cpu_mut().set_seg_for_api(
-            X86Reg::Cs,
-            CODE_SELECTOR,
-            0,
-            segments.limit,
-            segments.code,
-        );
+        self.cpu_mut()
+            .set_seg_for_api(X86Reg::Cs, CODE_SELECTOR, 0, segments.limit, segments.code);
         for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
             self.cpu_mut()
                 .set_seg_for_api(reg, DATA_SELECTOR, 0, segments.limit, segments.data);
@@ -1245,16 +1315,6 @@ struct FlatSegments {
 }
 
 impl FlatSegments {
-    const PROTECTED16: Self = Self {
-        code: SegmentSize::Bits16,
-        data: SegmentSize::Bits16,
-        limit: 0xFFFF,
-    };
-    const FLAT_PROTECTED32: Self = Self {
-        code: SegmentSize::Bits32,
-        data: SegmentSize::Bits32,
-        limit: 0xFFFF_FFFF,
-    };
     /// Long mode's data segments stay 32-bit — the descriptors a 64-bit
     /// operating system loads carry D/B set and L clear, because L belongs to
     /// code segments alone.
@@ -1262,6 +1322,16 @@ impl FlatSegments {
         code: SegmentSize::Long64,
         data: SegmentSize::Bits32,
         limit: 0xFFFF_FFFF,
+    };
+    const FLAT_PROTECTED32: Self = Self {
+        code: SegmentSize::Bits32,
+        data: SegmentSize::Bits32,
+        limit: 0xFFFF_FFFF,
+    };
+    const PROTECTED16: Self = Self {
+        code: SegmentSize::Bits16,
+        data: SegmentSize::Bits16,
+        limit: 0xFFFF,
     };
 }
 
@@ -1321,16 +1391,16 @@ mod tests {
                     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
                     0x0E, 0x0F, 0x10,
                 ];
-                emu.mem_write(0x20_000, &data).unwrap();
+                emu.mem_write(BxPhyAddress::new(0x20_000), &data).unwrap();
                 let mut buf = [0u8; 16];
-                emu.mem_read(0x20_000, &mut buf).unwrap();
+                emu.mem_read(BxPhyAddress::new(0x20_000), &mut buf).unwrap();
                 assert_eq!(buf, data);
 
                 // Typed helpers
-                emu.mem_write_u64_le(0x20_000, 0xCAFE_BABE_DEAD_BEEF)
+                emu.mem_write_u64_le(BxPhyAddress::new(0x20_000), 0xCAFE_BABE_DEAD_BEEF)
                     .unwrap();
                 assert_eq!(
-                    emu.mem_read_u64_le(0x20_000).unwrap(),
+                    emu.mem_read_u64_le(BxPhyAddress::new(0x20_000)).unwrap(),
                     0xCAFE_BABE_DEAD_BEEF
                 );
             })
@@ -1373,9 +1443,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let emu =
-                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatProtected32)
-                        .unwrap();
+                let emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatProtected32).unwrap();
                 // CR0.PE should be set
                 let cr0 = emu.reg_read(X86Reg::Cr0);
                 assert!(
@@ -1399,8 +1467,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
-                    .unwrap();
+                let emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
                 let cr0 = emu.reg_read(X86Reg::Cr0);
                 assert!(cr0 & 0x1 != 0, "CR0.PE not set");
                 assert!(cr0 & 0x8000_0000 != 0, "CR0.PG not set: {:#x}", cr0);
@@ -1414,7 +1481,6 @@ mod tests {
             .join()
             .unwrap();
     }
-
 
     /// FPU register round-trip: write FP80 bytes, read back.
     #[test]
@@ -1488,9 +1554,7 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let cfg = EmulatorConfig::default();
-                let mut emu =
-                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
-                        .unwrap();
+                let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
                 let code_addr = 0x20_0000;
 
                 // CR4.OSFXSR | CR4.OSXSAVE, then XSETBV to put XCR0 at
@@ -1505,20 +1569,24 @@ mod tests {
                 emu.reg_write(X86Reg::Rax, 0x7);
                 emu.reg_write(X86Reg::Rcx, 0);
                 emu.reg_write(X86Reg::Rdx, 0);
-                emu.mem_write(code_addr, &[0x0F, 0x01, 0xD1]).unwrap();
+                emu.mem_write(BxPhyAddress::new(code_addr), &[0x0F, 0x01, 0xD1])
+                    .unwrap();
                 emu.emu_start(code_addr, None, None, Some(1)).unwrap();
 
                 let mut ymm6 = [0u8; 32];
                 let mut ymm7 = [0u8; 32];
                 for i in 0..32 {
                     ymm6[i] = 0x20 + i as u8;
-                    ymm7[i] = 0xa0 + i as u8;
+                    ymm7[i] = 0xA0 + i as u8;
                 }
                 emu.reg_write_ymm(X86Reg::Ymm6, ymm6);
                 emu.reg_write_ymm(X86Reg::Ymm7, ymm7);
 
-                emu.mem_write(code_addr, &[0xC4, 0xE3, 0x45, 0x06, 0xC6, 0x03])
-                    .unwrap();
+                emu.mem_write(
+                    BxPhyAddress::new(code_addr),
+                    &[0xC4, 0xE3, 0x45, 0x06, 0xC6, 0x03],
+                )
+                .unwrap();
                 emu.emu_start(code_addr, None, None, Some(1)).unwrap();
 
                 let mut expected = [0u8; 32];
@@ -1567,23 +1635,21 @@ mod tests {
             .unwrap();
     }
 
-
-
     /// Memory permissions basic operations.
     #[test]
     fn mem_permissions_basic() {
         use crate::cpu::instrumentation::MemPerms;
         use crate::memory::permissions::PagePermissions;
         let mut pp = PagePermissions::new(0x10_0000); // 1MB
-                                                      // Default: all permissions
-        assert!(pp.check(0x1000, MemPerms::READ));
-        assert!(pp.check(0x1000, MemPerms::WRITE));
-        assert!(pp.check(0x1000, MemPerms::EXEC));
+        // Default: all permissions
+        assert!(pp.check(BxPhyAddress::new(0x1000), MemPerms::READ));
+        assert!(pp.check(BxPhyAddress::new(0x1000), MemPerms::WRITE));
+        assert!(pp.check(BxPhyAddress::new(0x1000), MemPerms::EXEC));
         // Restrict to read-only
-        pp.set(0x1000, 0x1000, MemPerms::READ);
-        assert!(pp.check(0x1000, MemPerms::READ));
-        assert!(!pp.check(0x1000, MemPerms::WRITE));
-        assert!(!pp.check(0x1000, MemPerms::EXEC));
+        pp.set(BxPhyAddress::new(0x1000), 0x1000, MemPerms::READ);
+        assert!(pp.check(BxPhyAddress::new(0x1000), MemPerms::READ));
+        assert!(!pp.check(BxPhyAddress::new(0x1000), MemPerms::WRITE));
+        assert!(!pp.check(BxPhyAddress::new(0x1000), MemPerms::EXEC));
     }
 
     /// A UART handle exists for exactly the ports this machine built.
@@ -1625,9 +1691,9 @@ mod tests {
             .unwrap();
     }
 
-    const COM1_RBR: u16 = 0x03F8;
-    const COM1_FCR: u16 = 0x03FA;
-    const COM1_LSR: u16 = 0x03FD;
+    const COM1_RBR: crate::iodev::IoPort = crate::iodev::IoPort::new(0x03F8);
+    const COM1_FCR: crate::iodev::IoPort = crate::iodev::IoPort::new(0x03FA);
+    const COM1_LSR: crate::iodev::IoPort = crate::iodev::IoPort::new(0x03FD);
     const LSR_DATA_READY: u32 = 0x01;
     const LSR_OVERRUN: u32 = 0x02;
 
@@ -1708,7 +1774,10 @@ mod tests {
                     emu.pump_gui_input();
                     read_com1(&mut emu, &mut received);
                 }
-                assert!(refusals > 0, "the burst never met the bound it exists to test");
+                assert!(
+                    refusals > 0,
+                    "the burst never met the bound it exists to test"
+                );
                 assert_eq!(received, burst);
             })
             .unwrap()
@@ -1732,8 +1801,11 @@ mod tests {
                 let code_addr = 0x20_0000;
 
                 // in al,0xe9; mov bl,al; mov al,'X'; out 0xe9,al
-                emu.mem_write(code_addr, &[0xE4, 0xE9, 0x88, 0xC3, 0xB0, b'X', 0xE6, 0xE9])
-                    .unwrap();
+                emu.mem_write(
+                    BxPhyAddress::new(code_addr),
+                    &[0xE4, 0xE9, 0x88, 0xC3, 0xB0, b'X', 0xE6, 0xE9],
+                )
+                .unwrap();
                 emu.emu_start(code_addr, None, None, Some(4)).unwrap();
 
                 assert_eq!(
@@ -1774,7 +1846,7 @@ mod tests {
                 let code_addr = 0x20_0000;
 
                 emu.mem_write(
-                    code_addr,
+                    BxPhyAddress::new(code_addr),
                     &[
                         0xE4, 0xE9, // in al, 0xe9
                         0x88, 0xC3, // mov bl, al
@@ -1800,12 +1872,13 @@ mod tests {
                 assert_eq!(out, b"OK", "port-0xE9 writes must survive in order");
 
                 // Draining is destructive — a second read sees nothing new.
-                assert!(emu
-                    .debug_port()
-                    .expect("the console is on")
-                    .take_output()
-                    .next()
-                    .is_none());
+                assert!(
+                    emu.debug_port()
+                        .expect("the console is on")
+                        .take_output()
+                        .next()
+                        .is_none()
+                );
             })
             .unwrap()
             .join()
@@ -1819,16 +1892,16 @@ mod tests {
         let mut reg = MmioRegistry::new();
         assert!(reg.is_empty());
         reg.map(
-            0xFEC0_0000,
+            BxPhyAddress::new(0xFEC0_0000),
             0x1000,
             Box::new(|_addr, _size| 0),
             Box::new(|_addr, _size, _val| {}),
         );
         assert!(!reg.is_empty());
-        assert!(reg.find_mut(0xFEC0_0000).is_some());
-        assert!(reg.find_mut(0xFEC0_0FFF).is_some());
-        assert!(reg.find_mut(0xFEC0_1000).is_none()); // past end
-        reg.unmap(0xFEC0_0000, 0x1000);
+        assert!(reg.find_mut(BxPhyAddress::new(0xFEC0_0000)).is_some());
+        assert!(reg.find_mut(BxPhyAddress::new(0xFEC0_0FFF)).is_some());
+        assert!(reg.find_mut(BxPhyAddress::new(0xFEC0_1000)).is_none()); // past end
+        reg.unmap(BxPhyAddress::new(0xFEC0_0000), 0x1000);
         assert!(reg.is_empty());
     }
 
@@ -1852,15 +1925,16 @@ mod tests {
                     memory_block_size: MIB,
                     ..Default::default()
                 };
-                let mut emu =
-                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
                 let code = 0x10000u64;
                 let resident_epoch = emu.memory.swap_epoch();
                 emu.mem_write(
-                    code,
+                    BxPhyAddress::new(code),
                     &[
-                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x10, 0x00, // mov al,[0x100000] (block 1)
-                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x20, 0x00, // mov al,[0x200000] (block 2)
+                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x10,
+                        0x00, // mov al,[0x100000] (block 1)
+                        0x8A, 0x04, 0x25, 0x00, 0x00, 0x20,
+                        0x00, // mov al,[0x200000] (block 2)
                         0xBB, 0xED, 0x5E, 0x00, 0x00, // mov ebx,0x5EED
                         0xF4, // hlt
                     ],
@@ -1897,14 +1971,16 @@ mod tests {
                     memory_block_size: MIB,
                     ..Default::default()
                 };
-                let mut emu =
-                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
 
                 // One marker per non-code block, so a byte that survives an
                 // eviction round trip is the only way to read it back.
                 for block in 1..8u64 {
-                    emu.mem_write_u8(block * MIB as u64, 0x10 * block as u8 + block as u8)
-                        .unwrap();
+                    emu.mem_write_u8(
+                        BxPhyAddress::new(block * MIB as u64),
+                        0x10 * block as u8 + block as u8,
+                    )
+                    .unwrap();
                 }
 
                 let code = 0x10000u64;
@@ -1919,14 +1995,18 @@ mod tests {
                 program.extend_from_slice(&[0x75, back as u8]); // jnz top
                 program.extend_from_slice(&[0xBB, 0xED, 0x5E, 0x00, 0x00]); // mov ebx,0x5EED
                 program.push(0xF4); // hlt
-                emu.mem_write(code, &program).unwrap();
+                emu.mem_write(BxPhyAddress::new(code), &program).unwrap();
 
                 assert_eq!(
                     emu.emu_start(code, None, None, Some(200)).unwrap(),
                     EmuStopReason::Halted
                 );
                 assert_eq!(emu.reg_read(X86Reg::Ebx), 0x5EED);
-                assert_eq!(emu.reg_read(X86Reg::Ecx), 0, "the loop must have run to zero");
+                assert_eq!(
+                    emu.reg_read(X86Reg::Ecx),
+                    0,
+                    "the loop must have run to zero"
+                );
                 assert_eq!(
                     emu.reg_read(X86Reg::Rax) & 0xFF,
                     0x77,
@@ -1964,9 +2044,9 @@ mod tests {
                         memory_block_size: MIB,
                         ..Default::default()
                     };
-                    let mut emu =
-                        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
-                    emu.mem_write_u8(marker_addr, marker).unwrap();
+                    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                    emu.mem_write_u8(BxPhyAddress::new(marker_addr), marker)
+                        .unwrap();
                     let far = (marker_addr as u32).to_le_bytes();
                     let mut program = vec![
                         0xB9, 0x02, 0x00, 0x00, 0x00, // mov ecx,2
@@ -1980,7 +2060,7 @@ mod tests {
                         0xBB, 0xED, 0x5E, 0x00, 0x00, // mov ebx,0x5EED
                         0xF4, // hlt
                     ]);
-                    emu.mem_write(code, &program).unwrap();
+                    emu.mem_write(BxPhyAddress::new(code), &program).unwrap();
 
                     assert_eq!(
                         emu.emu_start(code, None, None, Some(100)).unwrap(),
@@ -2022,14 +2102,14 @@ mod tests {
                         memory_block_size: MIB,
                         ..Default::default()
                     };
-                    let mut emu =
-                        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
-                    emu.mem_write_u8(3 * MIB as u64, 0x33).unwrap();
+                    let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                    emu.mem_write_u8(BxPhyAddress::new(3 * MIB as u64), 0x33)
+                        .unwrap();
                     // The load ends at 2 MiB - 2, so `mov ebx,imm32` straddles
                     // the block 1 / block 2 boundary and the HLT lands past it.
                     let code = 2 * MIB as u64 - 9;
                     emu.mem_write(
-                        code,
+                        BxPhyAddress::new(code),
                         &[
                             0x8A, 0x04, 0x25, 0x00, 0x00, 0x30, 0x00, // mov al,[0x300000]
                             0xBB, 0xED, 0x5E, 0x00, 0x00, // mov ebx,0x5EED (straddles)
@@ -2079,12 +2159,14 @@ mod tests {
                     memory_block_size: MIB,
                     ..Default::default()
                 };
-                let mut emu =
-                    Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
+                let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).unwrap();
                 // 0x1000 is the PML4 root: this write makes PML4[0] non-present.
                 let code = 0x1000u64;
-                emu.mem_write(code, &[0xBB, 0xED, 0x5E, 0x00, 0x00, 0xF4])
-                    .unwrap();
+                emu.mem_write(
+                    BxPhyAddress::new(code),
+                    &[0xBB, 0xED, 0x5E, 0x00, 0x00, 0xF4],
+                )
+                .unwrap();
                 assert_eq!(
                     emu.emu_start(code, None, None, Some(8)).unwrap(),
                     EmuStopReason::Shutdown,

@@ -5,11 +5,9 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512.cc` and `cpu/avx/avx512_bw.cc` integer ops.
 
-use super::{
-    cpu::BxCpuC,
-    decoder::Instruction,
-    xmm::BxPackedZmmRegister,
-};
+use super::cpu::BxCpuC;
+use super::decoder::Instruction;
+use super::xmm::BxPackedZmmRegister;
 
 // ============================================================================
 // Element count helpers (duplicated per-file to match crate pattern)
@@ -44,7 +42,6 @@ fn qword_elements(vl: u8) -> usize {
         _ => 8,
     }
 }
-
 
 // ============================================================================
 // Opmask / register helpers (duplicated per-file to match crate pattern)

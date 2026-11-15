@@ -19,6 +19,7 @@
 
 #![cfg(feature = "std")]
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -45,31 +46,38 @@ fn far_indirect_jump_must_leave_the_stale_prefetch_window() {
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
             let cfg = EmulatorConfig::default();
-            let mut emu = Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64)
-                .expect("new emulator");
+            let mut emu =
+                Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("new emulator");
 
             // Map V2's 2 MiB page: PDPT[4] -> NEW_PD, NEW_PD[1] -> V2_BACKING (P|RW|PS).
-            emu.mem_write(PDPT + 4 * 8, &(NEW_PD | 0x3).to_le_bytes())
-                .expect("write PDPT[4]");
-            emu.mem_write(NEW_PD + 8, &(V2_BACKING | 0x83).to_le_bytes())
-                .expect("write NEW_PD[1]");
+            emu.mem_write(
+                BxPhyAddress::new(PDPT + 4 * 8),
+                &(NEW_PD | 0x3).to_le_bytes(),
+            )
+            .expect("write PDPT[4]");
+            emu.mem_write(
+                BxPhyAddress::new(NEW_PD + 8),
+                &(V2_BACKING | 0x83).to_le_bytes(),
+            )
+            .expect("write NEW_PD[1]");
 
             // V1: mov rax, V2 ; jmp rax
             let mut code = vec![0x48, 0xB8];
             code.extend_from_slice(&V2.to_le_bytes());
             code.extend_from_slice(&[0xFF, 0xE0]);
-            emu.mem_write(V1, &code).expect("write branch code");
+            emu.mem_write(BxPhyAddress::new(V1), &code)
+                .expect("write branch code");
 
             // Same in-page offset, two different physical pages:
             // stale-window bytes (phys V1+0x10):  mov rbx, 0x33333333 ; jmp $
             emu.mem_write(
-                V1 + 0x10,
+                BxPhyAddress::new(V1 + 0x10),
                 &[0x48, 0xC7, 0xC3, 0x33, 0x33, 0x33, 0x33, 0xEB, 0xFE],
             )
             .expect("write old-page code");
             // correct-target bytes (phys V2_PHYS): mov rbx, 0x22222222 ; jmp $
             emu.mem_write(
-                V2_PHYS,
+                BxPhyAddress::new(V2_PHYS),
                 &[0x48, 0xC7, 0xC3, 0x22, 0x22, 0x22, 0x22, 0xEB, 0xFE],
             )
             .expect("write new-page code");

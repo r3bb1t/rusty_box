@@ -13,12 +13,13 @@
 //! - Disk geometry: 306 cylinders, 4 heads, 17 sectors per track
 //! - IPS: 15000000
 
-use rusty_box::{
-    emulator::{AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MemorySize, MachineBuilder},
-    gui::{NoGui, TermGui},
-    Result,
-};
 use std::time::Instant;
+
+use rusty_box::Result;
+use rusty_box::emulator::{
+    AtaSlot, BootDevice, BootOrder, DiskGeometry, EmulatorConfig, Ips, MachineBuilder, MemorySize,
+};
+use rusty_box::gui::{NoGui, TermGui};
 
 // Note: this example requires the `std` feature (terminal GUI + disk access).
 
@@ -140,7 +141,8 @@ fn run_dlxlinux() -> Result<()> {
         // VGABIOS-lgpl/ subdirectory; older snapshots had them alongside the
         // system BIOS, so both layouts are probed)
         workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"),
-        workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest-cirrus.bin"),
+        workspace_root
+            .join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest-cirrus.bin"),
         workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest-debug.bin"),
         workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest.bin"),
         workspace_root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl-latest-cirrus.bin"),

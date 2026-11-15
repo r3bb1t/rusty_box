@@ -3,11 +3,10 @@
 // (Sessions 2+). Permit unused items until the full wire-up is complete.
 #![allow(dead_code)]
 
-use crate::config::BxPhyAddress;
-
 use super::crregs::{BxCr0, BxCr4, BxEfer};
 use super::descriptor::{BxGlobalSegmentReg, BxSegmentReg};
 use super::i387::BxPackedRegister;
+use crate::config::{BxLinAddress, BxPhyAddress};
 
 // =====================
 //  SVM intercept codes
@@ -50,13 +49,13 @@ pub enum SvmVmexit {
     GdtrRead = 0x67,
     LdtrRead = 0x68,
     TrRead = 0x69,
-    IdtrWrite = 0x6a,
-    GdtrWrite = 0x6b,
-    LdtrWrite = 0x6c,
-    TrWrite = 0x6d,
+    IdtrWrite = 0x6A,
+    GdtrWrite = 0x6B,
+    LdtrWrite = 0x6C,
+    TrWrite = 0x6D,
     // Counters / flags (0x6e-0x71).
-    Rdtsc = 0x6e,
-    Rdpmc = 0x6f,
+    Rdtsc = 0x6E,
+    Rdpmc = 0x6F,
     Pushf = 0x70,
     Popf = 0x71,
     // System events (0x72-0x79).
@@ -69,12 +68,12 @@ pub enum SvmVmexit {
     Hlt = 0x78,
     Invlpg = 0x79,
     // Privileged / IO (0x7a-0x7f).
-    Invlpga = 0x7a,
-    Io = 0x7b,
-    Msr = 0x7c,
-    TaskSwitch = 0x7d,
-    FerrFreeze = 0x7e,
-    Shutdown = 0x7f,
+    Invlpga = 0x7A,
+    Io = 0x7B,
+    Msr = 0x7C,
+    TaskSwitch = 0x7D,
+    FerrFreeze = 0x7E,
+    Shutdown = 0x7F,
     // SVM-specific instructions (0x80-0x88).
     Vmrun = 0x80,
     Vmmcall = 0x81,
@@ -87,24 +86,24 @@ pub enum SvmVmexit {
     Icebp = 0x88,
     // Advanced (0x89-0x8e).
     Wbinvd = 0x89,
-    Monitor = 0x8a,
-    Mwait = 0x8b,
-    MwaitConditional = 0x8c,
-    Xsetbv = 0x8d,
-    Rdpru = 0x8e,
+    Monitor = 0x8A,
+    Mwait = 0x8B,
+    MwaitConditional = 0x8C,
+    Xsetbv = 0x8D,
+    Rdpru = 0x8E,
     // Write-trap variants (0x8f-0x94).
-    EferWriteTrap = 0x8f,
+    EferWriteTrap = 0x8F,
     Cr0WriteTrap = 0x90,
     Cr3WriteTrap = 0x93,
     Cr4WriteTrap = 0x94,
     // Post-SVM extensions (0xa0-0xa6).
-    Invlpgb = 0xa0,
-    InvlpgbIllegal = 0xa1,
-    Invpcid = 0xa2,
-    Mcommit = 0xa3,
-    Tlbsync = 0xa4,
-    Buslock = 0xa5,
-    IdleHlt = 0xa6,
+    Invlpgb = 0xA0,
+    InvlpgbIllegal = 0xA1,
+    Invpcid = 0xA2,
+    Mcommit = 0xA3,
+    Tlbsync = 0xA4,
+    Buslock = 0xA5,
+    IdleHlt = 0xA6,
     // Nested paging / AVIC / SEV-GHCB (0x400-0x403).
     Npf = 0x400,
     AvicIncompleteIpi = 0x401,
@@ -123,12 +122,12 @@ pub const SVM_CONTROL16_INTERCEPT_CR_WRITE: u32 = 0x002;
 pub const SVM_CONTROL16_INTERCEPT_DR_READ: u32 = 0x004;
 pub const SVM_CONTROL16_INTERCEPT_DR_WRITE: u32 = 0x006;
 pub const SVM_CONTROL32_INTERCEPT_EXCEPTIONS: u32 = 0x008;
-pub const SVM_CONTROL32_INTERCEPT1: u32 = 0x00c;
+pub const SVM_CONTROL32_INTERCEPT1: u32 = 0x00C;
 pub const SVM_CONTROL32_INTERCEPT2: u32 = 0x010;
 pub const SVM_CONTROL32_INTERCEPT3: u32 = 0x014;
 
-pub const SVM_CONTROL16_PAUSE_FILTER_THRESHOLD: u32 = 0x03c;
-pub const SVM_CONTROL16_PAUSE_FILTER_COUNT: u32 = 0x03e;
+pub const SVM_CONTROL16_PAUSE_FILTER_THRESHOLD: u32 = 0x03C;
+pub const SVM_CONTROL16_PAUSE_FILTER_COUNT: u32 = 0x03E;
 pub const SVM_CONTROL64_IOPM_BASE_PHY_ADDR: u32 = 0x040;
 pub const SVM_CONTROL64_MSRPM_BASE_PHY_ADDR: u32 = 0x048;
 pub const SVM_CONTROL64_TSC_OFFSET: u32 = 0x050;
@@ -143,14 +142,14 @@ pub const SVM_CONTROL64_EXITCODE: u32 = 0x070;
 pub const SVM_CONTROL64_EXITINFO1: u32 = 0x078;
 pub const SVM_CONTROL64_EXITINFO2: u32 = 0x080;
 pub const SVM_CONTROL32_EXITINTINFO: u32 = 0x088;
-pub const SVM_CONTROL32_EXITINTINFO_ERROR_CODE: u32 = 0x08c;
+pub const SVM_CONTROL32_EXITINTINFO_ERROR_CODE: u32 = 0x08C;
 pub const SVM_CONTROL_NESTED_PAGING_ENABLE: u32 = 0x090;
 
-pub const SVM_CONTROL32_EVENT_INJECTION: u32 = 0x0a8;
-pub const SVM_CONTROL32_EVENT_INJECTION_ERRORCODE: u32 = 0x0ac;
-pub const SVM_CONTROL64_NESTED_PAGING_HOST_CR3: u32 = 0x0b0;
-pub const SVM_CONTROL64_NRIP: u32 = 0x0c8;
-pub const SVM_CONTROL64_GUEST_INSTR_BYTES: u32 = 0x0d0;
+pub const SVM_CONTROL32_EVENT_INJECTION: u32 = 0x0A8;
+pub const SVM_CONTROL32_EVENT_INJECTION_ERRORCODE: u32 = 0x0AC;
+pub const SVM_CONTROL64_NESTED_PAGING_HOST_CR3: u32 = 0x0B0;
+pub const SVM_CONTROL64_NRIP: u32 = 0x0C8;
+pub const SVM_CONTROL64_GUEST_INSTR_BYTES: u32 = 0x0D0;
 
 // ======================
 //  VMCB save state area
@@ -172,23 +171,23 @@ pub const SVM_GUEST_IDTR_BASE: u32 = 0x488;
 
 pub const SVM_GUEST_TR_SELECTOR: u32 = 0x490;
 
-pub const SVM_GUEST_CPL: u32 = 0x4cb;
-pub const SVM_GUEST_EFER_MSR: u32 = 0x4d0;
-pub const SVM_GUEST_EFER_MSR_HI: u32 = 0x4d4;
+pub const SVM_GUEST_CPL: u32 = 0x4CB;
+pub const SVM_GUEST_EFER_MSR: u32 = 0x4D0;
+pub const SVM_GUEST_EFER_MSR_HI: u32 = 0x4D4;
 
 pub const SVM_GUEST_CR4: u32 = 0x548;
-pub const SVM_GUEST_CR4_HI: u32 = 0x54c;
+pub const SVM_GUEST_CR4_HI: u32 = 0x54C;
 pub const SVM_GUEST_CR3: u32 = 0x550;
 pub const SVM_GUEST_CR0: u32 = 0x558;
-pub const SVM_GUEST_CR0_HI: u32 = 0x55c;
+pub const SVM_GUEST_CR0_HI: u32 = 0x55C;
 pub const SVM_GUEST_DR7: u32 = 0x560;
 pub const SVM_GUEST_DR7_HI: u32 = 0x564;
 pub const SVM_GUEST_DR6: u32 = 0x568;
-pub const SVM_GUEST_DR6_HI: u32 = 0x56c;
+pub const SVM_GUEST_DR6_HI: u32 = 0x56C;
 pub const SVM_GUEST_RFLAGS: u32 = 0x570;
 pub const SVM_GUEST_RIP: u32 = 0x578;
-pub const SVM_GUEST_RSP: u32 = 0x5d8;
-pub const SVM_GUEST_RAX: u32 = 0x5f8;
+pub const SVM_GUEST_RSP: u32 = 0x5D8;
+pub const SVM_GUEST_RAX: u32 = 0x5F8;
 pub const SVM_GUEST_STAR_MSR: u32 = 0x600;
 pub const SVM_GUEST_LSTAR_MSR: u32 = 0x608;
 pub const SVM_GUEST_CSTAR_MSR: u32 = 0x610;
@@ -287,7 +286,7 @@ pub struct SvmHostState {
     pub efer: BxEfer,
     pub cr0: BxCr0,
     pub cr4: BxCr4,
-    pub cr3: BxPhyAddress,
+    pub cr3: u64,
     pub eflags: u32,
     pub rip: u64,
     pub rsp: u64,
@@ -373,22 +372,20 @@ pub const BX_VM_CR_MSR_LOCK_MASK: u32 = 1 << 3;
 pub const BX_VM_CR_MSR_SVMDIS_MASK: u32 = 1 << 4;
 
 // SVM MSR addresses
-pub const BX_SVM_VM_CR_MSR: u32 = 0xc001_0114;
-pub const BX_SVM_IGNNE_MSR: u32 = 0xc001_0115;
-pub const BX_SVM_SMM_CTL_MSR: u32 = 0xc001_0116;
-pub const BX_SVM_VM_HSAVE_PA_MSR: u32 = 0xc001_0117;
+pub const BX_SVM_VM_CR_MSR: u32 = 0xC001_0114;
+pub const BX_SVM_IGNNE_MSR: u32 = 0xC001_0115;
+pub const BX_SVM_SMM_CTL_MSR: u32 = 0xC001_0116;
+pub const BX_SVM_VM_HSAVE_PA_MSR: u32 = 0xC001_0117;
 
 /// SVM VIRQ event pending — bit 8 to match Bochs convention.
 pub const BX_EVENT_SVM_VIRQ_PENDING: u32 = 1 << 8;
 
-use super::{
-    cet::canonicalize_address,
-    cpu::{BxCpuC, Exception},
-    decoder::{BxSegregs, Instruction},
-    eflags::EFlags,
-    exception::InterruptType,
-    segment_ctrl_pro::parse_selector,
-};
+use super::cet::canonicalize_address;
+use super::cpu::{BxCpuC, Exception};
+use super::decoder::{BxSegregs, Instruction};
+use super::eflags::EFlags;
+use super::exception::InterruptType;
+use super::segment_ctrl_pro::parse_selector;
 
 /// What `VMRUN`'s event injection made of `EVENTINJ` — Bochs svm.cc
 /// `SvmInjectEvents`'s answer.
@@ -453,11 +450,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 Ok(()) => data[0],
                 Err(e) => {
                     tracing::warn!("vmcb_read8({:#010x}) failed: {:?}", offset, e);
-                    return 0xff;
+                    return 0xFF;
                 }
             }
         };
-        self.on_phy_access(paddr, &[val], crate::cpu::instrumentation::MemAccessRW::Read);
+        self.on_phy_access(
+            paddr,
+            &[val],
+            crate::cpu::instrumentation::MemAccessRW::Read,
+        );
         val
     }
 
@@ -474,7 +475,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 Ok(()) => u16::from_le_bytes(data),
                 Err(e) => {
                     tracing::warn!("vmcb_read16({:#010x}) failed: {:?}", offset, e);
-                    return 0xffff;
+                    return 0xFFFF;
                 }
             }
         };
@@ -499,7 +500,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 Ok(()) => u32::from_le_bytes(data),
                 Err(e) => {
                     tracing::warn!("vmcb_read32({:#010x}) failed: {:?}", offset, e);
-                    return 0xffff_ffff;
+                    return 0xFFFF_FFFF;
                 }
             }
         };
@@ -557,7 +558,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 return;
             }
         }
-        self.on_phy_access(paddr, &[val], crate::cpu::instrumentation::MemAccessRW::Write);
+        self.on_phy_access(
+            paddr,
+            &[val],
+            crate::cpu::instrumentation::MemAccessRW::Write,
+        );
     }
 
     /// Write a u16 to the VMCB at `offset`, reported as [`Self::vmcb_write8`].
@@ -653,14 +658,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         // Reconstruct the descriptor from SVM-format attributes
         // SVM attr format: [7:0] = access byte, [11:8] = upper flags (G, D/B, L, AVL)
-        let ar_byte = (attr & 0xff) as u8;
-        let upper = ((attr & 0xf00) << 4) as u32;
+        let ar_byte = (attr & 0xFF) as u8;
+        let upper = ((attr & 0xF00) << 4) as u32;
 
         let mut seg = super::descriptor::BxSegmentReg::default();
         parse_selector(selector, &mut seg.selector);
         seg.cache.valid = if valid != 0 { 1 } else { 0 };
         seg.cache.set_ar_byte(ar_byte);
-        seg.cache.u.set_segment_base(base);
+        seg.cache.u.set_segment_base(BxLinAddress::new(base));
         seg.cache.u.set_segment_limit_scaled(limit);
         seg.cache.u.set_segment_g(upper & 0x0080_0000 != 0);
         seg.cache.u.set_segment_d_b(upper & 0x0040_0000 != 0);
@@ -686,7 +691,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.vmcb_write16(offset, selector);
         self.vmcb_write16(offset + 2, attr);
         self.vmcb_write32(offset + 4, limit);
-        self.vmcb_write64(offset + 8, base);
+        self.vmcb_write64(offset + 8, base.get());
     }
 
     // =====================================================================
@@ -695,9 +700,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// Set the VMCB pointer and cache the host memory address.
     /// Bochs svm.cc set_VMCBPTR()
-    pub(super) fn set_vmcbptr(&mut self, vmcbptr: u64) {
+    pub(super) fn set_vmcbptr(&mut self, vmcbptr: BxPhyAddress) {
         self.vmcbptr = vmcbptr;
-        if vmcbptr != 0 {
+        if vmcbptr.get() != 0 {
             // Try to get a direct host pointer for fast VMCB access
             {
                 let policy = self.access_policy(vmcbptr);
@@ -830,10 +835,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.svm_segment_write(&seg, SVM_GUEST_ES_SELECTOR + n * 0x10);
         }
 
-        self.vmcb_write64(SVM_GUEST_GDTR_BASE, self.gdtr.base);
+        self.vmcb_write64(SVM_GUEST_GDTR_BASE, self.gdtr.base.get());
         self.vmcb_write16(SVM_GUEST_GDTR_LIMIT, self.gdtr.limit);
 
-        self.vmcb_write64(SVM_GUEST_IDTR_BASE, self.idtr.base);
+        self.vmcb_write64(SVM_GUEST_IDTR_BASE, self.idtr.base.get());
         self.vmcb_write16(SVM_GUEST_IDTR_LIMIT, self.idtr.limit);
 
         self.vmcb_write64(SVM_GUEST_EFER_MSR, self.efer.get32() as u64);
@@ -895,9 +900,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let exceptions_intercept = self.vmcb_read32(SVM_CONTROL32_INTERCEPT_EXCEPTIONS);
 
         // Force 4K page alignment on IOPM base
-        let iopm_base = self.vmcb_read64(SVM_CONTROL64_IOPM_BASE_PHY_ADDR) & !0xFFF;
+        let iopm_base =
+            BxPhyAddress::new(self.vmcb_read64(SVM_CONTROL64_IOPM_BASE_PHY_ADDR)).page_base();
         // Force 4K page alignment on MSRPM base
-        let msrpm_base = self.vmcb_read64(SVM_CONTROL64_MSRPM_BASE_PHY_ADDR) & !0xFFF;
+        let msrpm_base =
+            BxPhyAddress::new(self.vmcb_read64(SVM_CONTROL64_MSRPM_BASE_PHY_ADDR)).page_base();
 
         let guest_asid = self.vmcb_read32(SVM_CONTROL32_GUEST_ASID);
         if guest_asid == 0 {
@@ -910,7 +917,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let v_intr_vector = self.vmcb_read8(SVM_CONTROL_VINTR_VECTOR);
 
         let vintr_control = self.vmcb_read8(SVM_CONTROL_VINTR_PRIO_IGN_TPR);
-        let v_intr_prio = vintr_control & 0xf;
+        let v_intr_prio = vintr_control & 0xF;
         let v_ignore_tpr = ((vintr_control >> 4) & 0x1) != 0;
 
         let pause_filter_count = self.vmcb_read16(SVM_CONTROL16_PAUSE_FILTER_COUNT);
@@ -1095,9 +1102,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.sregs[n] = guest_sregs[n].clone();
         }
 
-        self.gdtr.base = guest_gdtr_base;
+        self.gdtr.base = BxLinAddress::new(guest_gdtr_base);
         self.gdtr.limit = guest_gdtr_limit;
-        self.idtr.base = guest_idtr_base;
+        self.idtr.base = BxLinAddress::new(guest_idtr_base);
         self.idtr.limit = guest_idtr_limit;
 
         self.set_rip(guest_rip);
@@ -1245,7 +1252,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(EventInjection::Done); // No event to inject
         }
 
-        let mut vector = (eventinj & 0xff) as u8;
+        let mut vector = (eventinj & 0xFF) as u8;
         let event_type = (eventinj >> 8) & 7;
         let push_error = (eventinj & (1 << 11)) != 0;
         let error_code = if push_error {
@@ -1288,7 +1295,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             SOFTWARE_INTERRUPT => InterruptType::SoftwareInterrupt,
             _ => {
-                tracing::error!("SvmInjectEvents: unsupported event injection type {}", event_type);
+                tracing::error!(
+                    "SvmInjectEvents: unsupported event injection type {}",
+                    event_type
+                );
                 return Ok(EventInjection::Invalid);
             }
         };
@@ -1334,6 +1344,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn svm_intercept_check(&self, intercept_bitnum: u32) -> bool {
         svm_intercept(&self.vmcb.ctrls, intercept_bitnum)
     }
+
     /// Check if a CR-read intercept is set for register `idx`.
     /// Bochs svm.h SVM_CR_READ_INTERCEPTED.
     #[inline]
@@ -1437,11 +1448,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let mut vmexit = true;
 
         // Determine MSR bitmap offset based on MSR range
-        let msr_map_offset: i32 = if msr <= 0x1fff {
+        let msr_map_offset: i32 = if msr <= 0x1FFF {
             0
-        } else if msr >= 0xc000_0000 && msr <= 0xc000_1fff {
+        } else if msr >= 0xC000_0000 && msr <= 0xC000_1FFF {
             2048
-        } else if msr >= 0xc001_0000 && msr <= 0xc001_1fff {
+        } else if msr >= 0xC001_0000 && msr <= 0xC001_1FFF {
             4096
         } else {
             -1 // Not in any range, always intercept
@@ -1450,7 +1461,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if msr_map_offset >= 0 {
             let msrpm_base = self.vmcb.ctrls.msrpm_base;
             let msr_bitmap_addr = msrpm_base + msr_map_offset as u64;
-            let msr_offset = (msr & 0x1fff) * 2 + op;
+            let msr_offset = (msr & 0x1FFF) * 2 + op;
 
             let paddr = msr_bitmap_addr + (msr_offset / 8) as u64;
             let msr_bitmap = self.read_physical_byte(paddr);
@@ -1463,20 +1474,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    /// SVM I/O intercept — Bochs svm.cc SvmInterceptIO. Checks the IOPM
-    /// bitmap for `port..port+len` and triggers a VMEXIT_IO if any bit is set.
-    /// `direction_in` = true for IN*, false for OUT*. String/REP handling is
-    /// left out of this first cut (see svm.cc for the exact qualification
-    /// bits); the VMEXIT_IO qualification encodes port+len+direction+asize,
-    /// which is enough for non-string I/O.
+    /// SVM I/O intercept — Bochs svm.cc SvmInterceptIO. Checks the IOPM bits
+    /// for `port..port+len` and, if any is set, exits with VMEXIT_IO:
+    /// EXITINFO1 = port << 16 | ASIZE (bits 9:7, from the instruction's
+    /// address size) | LEN (bits 6:4) | REP (bit 3, a string form with a
+    /// REP prefix) | STRING (bit 2) | PORTIN (bit 0), EXITINFO2 = RIP.
+    /// `direction_in` is true for IN/INS, `string` for INS/OUTS.
     pub(super) fn svm_intercept_io(
         &mut self,
-        port: u16,
+        instr: &super::decoder::Instruction,
+        port: crate::iodev::IoPort,
         len: u32,
         direction_in: bool,
         string: bool,
-        rep: bool,
-        asize_bits: u8, // 0 for non-string, 16/32/64 for string
     ) -> super::Result<()> {
         if !self.in_svm_guest {
             return Ok(());
@@ -1484,6 +1494,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.svm_intercept_check(SVM_INTERCEPT0_IO) {
             return Ok(());
         }
+        // The IOPM is indexed, and EXITINFO1 encoded, by the port number itself.
+        let port = port.get();
         // Read two IOPM bitmap bytes to cover cross-bit accesses (Bochs uses
         // single physical reads since read_physical_byte can't cross 4K).
         let iopm_base = self.vmcb.ctrls.iopm_base;
@@ -1496,7 +1508,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(());
         }
         // Qualification (EXITINFO1) layout mirrors Bochs svm.cc — port in bits
-        // 16-31, length flag bits 4-6, asize flag bits 1-3, direction bit 0.
+        // 16-31, address-size flags bits 7-9, length flags bits 4-6, REP bit
+        // 3, string bit 2, direction bit 0.
         let mut qualification: u64 = (port as u64) << 16;
         if direction_in {
             qualification |= 1; // SVM_VMEXIT_IO_PORTIN
@@ -1510,15 +1523,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if string {
             qualification |= 1 << 2; // SVM_VMEXIT_IO_INSTR_STR
         }
-        if rep {
+        if string && instr.rep_used_l() != 0 {
             qualification |= 1 << 3; // SVM_VMEXIT_IO_INSTR_REP
         }
-        match asize_bits {
-            16 => qualification |= 1 << 7, // SVM_VMEXIT_IO_INSTR_ASIZE16
-            32 => qualification |= 1 << 8, // SVM_VMEXIT_IO_INSTR_ASIZE32
-            64 => qualification |= 1 << 9, // SVM_VMEXIT_IO_INSTR_ASIZE64
-            _ => {}
-        }
+        qualification |= if instr.as64_l() != 0 {
+            1 << 9 // SVM_VMEXIT_IO_INSTR_ASIZE64
+        } else if instr.as32_l() != 0 {
+            1 << 8 // SVM_VMEXIT_IO_INSTR_ASIZE32
+        } else {
+            1 << 7 // SVM_VMEXIT_IO_INSTR_ASIZE16
+        };
         // EXITINFO2 is the next-instruction RIP. Bochs passes RIP as-is.
         let rip = self.rip();
         self.svm_vmexit(SvmVmexit::Io as i32, qualification, rip)
@@ -1645,7 +1659,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// failure to match Bochs' "intercept everything" default for unmapped
     /// bitmap regions, with the read failure logged so the cause is
     /// visible in traces.
-    pub(super) fn read_physical_byte(&mut self, paddr: u64) -> u8 {
+    pub(super) fn read_physical_byte(&mut self, paddr: BxPhyAddress) -> u8 {
         let policy = self.access_policy(paddr);
         let mut data = [0u8; 1];
         match self.read_physical_routed(policy, paddr, 1, &mut data) {
@@ -1659,7 +1673,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     paddr,
                     e
                 );
-                0xff
+                0xFF
             }
         }
     }
@@ -1700,7 +1714,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             tracing::error!("VMRUN: VMCB address not page-aligned: {:#x}", paddr);
             return self.exception(Exception::Gp, 0);
         }
-        self.set_vmcbptr(paddr);
+        self.set_vmcbptr(BxPhyAddress::new(paddr));
 
         tracing::debug!("VMRUN VMCB ptr: {:#x}", self.vmcbptr);
 
@@ -1774,7 +1788,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         let saved_vmcbptr = self.vmcbptr;
-        self.set_vmcbptr(paddr);
+        self.set_vmcbptr(BxPhyAddress::new(paddr));
 
         // Read FS, GS, TR, LDTR from target VMCB
         let fs = self.svm_segment_read(SVM_GUEST_FS_SELECTOR);
@@ -1834,7 +1848,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
 
         let saved_vmcbptr = self.vmcbptr;
-        self.set_vmcbptr(paddr);
+        self.set_vmcbptr(BxPhyAddress::new(paddr));
 
         // Write FS, GS, TR, LDTR to target VMCB
         let fs = self.sregs[BxSegregs::Fs as usize].clone();
@@ -1957,7 +1971,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs svm.cc INVLPGA — TLB_invlpg(laddr) (FIXME: flush all ASID
         // entries). The prior code skipped the prefetch/stack invalidation and
         // icache link break that Bochs paging.cc TLB_invlpg performs.
-        self.tlb_invlpg(laddr);
+        self.tlb_invlpg(BxLinAddress::new(laddr));
         Ok(())
     }
 }
@@ -2000,15 +2014,23 @@ mod tests {
         ctx.set_rsp(STACK_TOP);
         for vector in 0..=0xFFu16 {
             let entry = [(0x100 + vector) as u8, ((0x100 + vector) >> 8) as u8, 0, 0];
-            ctx.memory.write_ram(u64::from(vector) * 4, &entry).expect("the IVT is RAM");
+            ctx.memory
+                .write_ram(BxPhyAddress::new(u64::from(vector) * 4), &entry)
+                .expect("the IVT is RAM");
         }
         ctx.memory
-            .write_ram(VMCB + u64::from(SVM_CONTROL32_EVENT_INJECTION), &eventinj.to_le_bytes())
+            .write_ram(
+                BxPhyAddress::new(VMCB + u64::from(SVM_CONTROL32_EVENT_INJECTION)),
+                &eventinj.to_le_bytes(),
+            )
             .expect("the VMCB is RAM");
-        ctx.set_vmcbptr(VMCB);
+        ctx.set_vmcbptr(BxPhyAddress::new(VMCB));
         ctx.in_svm_guest = true;
         let outcome = ctx.svm_inject_events().expect("the injection completes");
-        Injection { outcome, rip: ctx.rip() }
+        Injection {
+            outcome,
+            rip: ctx.rip(),
+        }
     }
 
     fn eventinj(kind: InterruptType, vector: u8) -> u32 {
@@ -2037,8 +2059,16 @@ mod tests {
             (InterruptType::SoftwareInterrupt, 0x80),
         ] {
             let injected = inject(eventinj(kind, vector));
-            assert_eq!(injected.outcome, EventInjection::Done, "{kind:?} is injectable");
-            assert_eq!(injected.rip, handler_of(vector), "{kind:?} reaches vector {vector:#x}");
+            assert_eq!(
+                injected.outcome,
+                EventInjection::Done,
+                "{kind:?} is injectable"
+            );
+            assert_eq!(
+                injected.rip,
+                handler_of(vector),
+                "{kind:?} reaches vector {vector:#x}"
+            );
         }
     }
 
@@ -2054,7 +2084,11 @@ mod tests {
             eventinj(InterruptType::PrivilegedSoftwareInterrupt, 1),
         ] {
             let injected = inject(word);
-            assert_eq!(injected.outcome, EventInjection::Invalid, "{word:#010x} is refused");
+            assert_eq!(
+                injected.outcome,
+                EventInjection::Invalid,
+                "{word:#010x} is refused"
+            );
             assert_eq!(injected.rip, CODE, "{word:#010x} delivered nothing");
         }
     }
@@ -2072,7 +2106,7 @@ mod tests {
         /// Present, writable, user, accessed: an ordinary PML4E, and R/W, U/S
         /// and A are each reserved in a PAE PDPTE.
         const PML4E_FLAGS: u64 = 0x27;
-        const HOST_RIP: u64 = 0xffff_ffff_8100_0000;
+        const HOST_RIP: u64 = 0xFFFF_FFFF_8100_0000;
         const GUEST_RIP: u64 = 0x0040_1000;
         const CR0_ET_PE: u32 = 0x11;
 
@@ -2080,7 +2114,10 @@ mod tests {
         let mut ctx = machine.ctx();
         ctx.reset(crate::cpu::ResetReason::Hardware);
         let pml4e = (PDPT | PML4E_FLAGS).to_le_bytes();
-        let copied = ctx.memory.write_ram(PML4, &pml4e).expect("the PML4 is RAM");
+        let copied = ctx
+            .memory
+            .write_ram(BxPhyAddress::new(PML4), &pml4e)
+            .expect("the PML4 is RAM");
         assert_eq!(copied, pml4e.len(), "PML4[0] reached RAM whole");
 
         // The host: 64-bit mode over that PML4, with SVM enabled, saved the

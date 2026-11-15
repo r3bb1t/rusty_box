@@ -26,13 +26,16 @@
 
 #![cfg(all(feature = "std", feature = "gui-egui"))]
 
-use rusty_box::{
-    cpu::{HookCtx, HookMask, InstrAction, Instrumentation, X86Reg},
-    emulator::{AtaSlot, BootDevice, BootOrder, EmulatorConfig, Ips, MemorySize, MachineBuilder},
-    gui::{shared_display::SharedDisplay, BridgeGui, RustyBoxApp},
-    Result,
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+
+use rusty_box::Result;
+use rusty_box::cpu::{HookCtx, HookMask, InstrAction, Instrumentation, X86Reg};
+use rusty_box::emulator::{
+    AtaSlot, BootDevice, BootOrder, EmulatorConfig, Ips, MachineBuilder, MemorySize,
 };
-use std::sync::{atomic::Ordering, Arc, Mutex};
+use rusty_box::gui::shared_display::SharedDisplay;
+use rusty_box::gui::{BridgeGui, RustyBoxApp};
 
 mod syscalls;
 
@@ -272,9 +275,7 @@ fn main() {
 
     // Fail fast if the ISO is missing (before we open a window).
     if std::fs::metadata(&iso_path).is_err() {
-        eprintln!(
-            "Failed to read '{iso_path}'\nSet ALPINE_ISO=/path/to/alpine-virt-*.iso"
-        );
+        eprintln!("Failed to read '{iso_path}'\nSet ALPINE_ISO=/path/to/alpine-virt-*.iso");
         std::process::exit(1);
     }
 
@@ -294,23 +295,25 @@ fn main() {
     let emu_thread = std::thread::Builder::new()
         .stack_size(1500 * 1024 * 1024)
         .name("alpine-strace".into())
-        .spawn(move || loop {
-            {
-                let mut d = shared_for_emu.lock().unwrap();
-                d.stop_flag.store(false, Ordering::Relaxed);
-                d.emu_running = true;
-                d.reset_requested = false;
-            }
+        .spawn(move || {
+            loop {
+                {
+                    let mut d = shared_for_emu.lock().unwrap();
+                    d.stop_flag.store(false, Ordering::Relaxed);
+                    d.emu_running = true;
+                    d.reset_requested = false;
+                }
 
-            if let Err(e) = run_emulator(&boot, Arc::clone(&shared_for_emu)) {
-                eprintln!("Emulator error: {e:?}");
-            }
+                if let Err(e) = run_emulator(&boot, Arc::clone(&shared_for_emu)) {
+                    eprintln!("Emulator error: {e:?}");
+                }
 
-            let restart = shared_for_emu.lock().unwrap().reset_requested;
-            if !restart {
-                break;
+                let restart = shared_for_emu.lock().unwrap().reset_requested;
+                if !restart {
+                    break;
+                }
+                eprintln!("Restarting emulator (Reset requested)...");
             }
-            eprintln!("Restarting emulator (Reset requested)...");
         })
         .expect("Failed to spawn emulator thread");
 

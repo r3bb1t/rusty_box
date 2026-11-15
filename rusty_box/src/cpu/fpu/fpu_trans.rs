@@ -18,14 +18,13 @@ use super::super::softfloat3e::internals::*;
 use super::super::softfloat3e::softfloat::*;
 use super::super::softfloat3e::softfloat_types::ExtFloat80;
 use super::super::softfloat3e::specialize::*;
-use super::ferr::i387cw_to_softfloat_status_word;
-
 // Import implementation functions from split files
 use super::f2xm1::f2xm1_impl;
+use super::ferr::i387cw_to_softfloat_status_word;
 use super::fpatan::fpatan_impl;
 use super::fprem::do_fprem;
 use super::fsincos::{
-    fsincos_both, fsincos_single, ftan_impl, FtanResult, SinCosBothResult, SinCosResult,
+    FtanResult, SinCosBothResult, SinCosResult, fsincos_both, fsincos_single, ftan_impl,
 };
 use super::fyl2x::{fyl2x_impl, fyl2xp1_impl};
 

@@ -9,19 +9,17 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512_cmp.cc`, `avx512_pfp.cc`.
 
+use super::cpu::BxCpuC;
+use super::decoder::Instruction;
 use super::softfloat3e::f32_class::f32_class;
 use super::softfloat3e::f64_class::f64_class;
 use super::softfloat3e::internals::{sign_f32, sign_f64};
 use super::softfloat3e::softfloat::{
-    f32_denormal_to_zero, f64_denormal_to_zero, softfloat_get_exception_flags, SoftFloatClass,
+    SoftFloatClass, f32_denormal_to_zero, f64_denormal_to_zero, softfloat_get_exception_flags,
 };
-use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::softfloat3e::softfloat_compare::{f32_compare_predicate, f64_compare_predicate};
-use super::{
-    cpu::BxCpuC,
-    decoder::Instruction,
-    xmm::BxPackedZmmRegister,
-};
+use super::softfloat3e::softfloat_types::{Float32, Float64};
+use super::xmm::BxPackedZmmRegister;
 
 /// Number of byte elements per vector length: VL0=16, VL1=32, VL2=64
 #[inline]
@@ -658,7 +656,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.evex_cmp_to_opmask_q(instr, move |a, b| cmp_predicate(imm3, a.cmp(&b)))
     }
 
-
     // ════════════════════════════════════════════════════════════════════
     // Byte and word opmask <-> vector conversions (AVX512_BW). All four are
     // register-only — their def entries name BxError as the load function —
@@ -854,6 +851,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_write_opmask(instr.dst() as usize, r as u64);
         Ok(())
     }
+
     // ========================================================================
     // VCMPSS / VCMPSD — scalar compare whose result is a single opmask bit.
     // Bochs avx512_pfp.cc VCMPSS/VCMPSD_MASK_KGbH..W..IbR.
@@ -900,7 +898,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.bx_write_opmask(instr.dst() as usize, result);
         Ok(())
     }
-
 }
 
 /// Bochs avx512_pfp.cc `fpclass` — imm8 selects which floating-point
@@ -931,7 +928,6 @@ fn f64_fpclass(op: Float64, selector: u8, daz: bool) -> bool {
     fpclass(f64_class(op), sign_f64(op), selector)
 }
 
-
 /// The eight VPCMP integer predicates selected by imm8[2:0], applied to an
 /// already-computed ordering. Bochs avx512_cmp.cc uses the same table for
 /// every width and signedness; only the comparison feeding it changes.
@@ -939,17 +935,16 @@ fn f64_fpclass(op: Float64, selector: u8, daz: bool) -> bool {
 fn cmp_predicate(imm3: u8, ord: core::cmp::Ordering) -> bool {
     use core::cmp::Ordering::*;
     match imm3 {
-        0 => ord == Equal,               // EQ
-        1 => ord == Less,                // LT
-        2 => ord != Greater,             // LE
-        3 => false,                      // FALSE
-        4 => ord != Equal,               // NEQ
-        5 => ord != Less,                // NLT (GE)
-        6 => ord == Greater,             // NLE (GT)
-        _ => true,                       // TRUE
+        0 => ord == Equal,   // EQ
+        1 => ord == Less,    // LT
+        2 => ord != Greater, // LE
+        3 => false,          // FALSE
+        4 => ord != Equal,   // NEQ
+        5 => ord != Less,    // NLT (GE)
+        6 => ord == Greater, // NLE (GT)
+        _ => true,           // TRUE
     }
 }
-
 
 /// Write every byte element up to VL and zero the rest. Used by the
 /// instructions that produce a full vector regardless of the opmask
@@ -1000,8 +995,9 @@ mod tests {
     //!     takes src1 rather than being merged or zeroed, so it must write
     //!     the full vector.
 
-    use crate::cpu::decoder::{BxSegregs, Instruction};
     use rusty_box_decoder::opcode::Opcode;
+
+    use crate::cpu::decoder::{BxSegregs, Instruction};
 
     fn evex_reg(opcode: Opcode, vl: u8) -> Instruction {
         let mut i = Instruction::default();
@@ -1148,7 +1144,11 @@ mod tests {
         cpu.execute_instruction(&i).unwrap();
 
         assert_eq!(cpu.vmm[0].zmmubyte(0), 0x22, "mask set -> src2");
-        assert_eq!(cpu.vmm[0].zmmubyte(1), 0x11, "mask clear -> src1, not merge");
+        assert_eq!(
+            cpu.vmm[0].zmmubyte(1),
+            0x11,
+            "mask clear -> src1, not merge"
+        );
         assert_eq!(cpu.vmm[0].zmmubyte(2), 0x22);
         assert_eq!(cpu.vmm[0].zmmubyte(3), 0x11);
         assert_eq!(cpu.vmm[0].zmmubyte(15), 0x11);
@@ -1184,7 +1184,11 @@ mod tests {
             ins.set_iq(sel as u64);
             ins.set_opmask(0);
             c.execute_instruction(&ins).unwrap();
-            assert_eq!(c.opmask[0].rrx(), 0b1111, "{name} should match imm8={sel:#04x}");
+            assert_eq!(
+                c.opmask[0].rrx(),
+                0b1111,
+                "{name} should match imm8={sel:#04x}"
+            );
 
             // Every other selector rejects it, except that a negative
             // denormal is also "negative finite".
@@ -1193,7 +1197,11 @@ mod tests {
             ins.set_opmask(0);
             ins.set_iq((others & !0x40) as u64);
             c.execute_instruction(&ins).unwrap();
-            assert_eq!(c.opmask[0].rrx(), 0, "{name} should reject the other classes");
+            assert_eq!(
+                c.opmask[0].rrx(),
+                0,
+                "{name} should reject the other classes"
+            );
         }
     }
 
@@ -1254,7 +1262,6 @@ mod tests {
         assert_eq!(c.opmask[0].rrx(), 0);
     }
 
-
     #[test]
     fn vcmpss_writes_one_opmask_bit_and_honours_the_predicate() {
         let mut machine =
@@ -1281,5 +1288,4 @@ mod tests {
         c.execute_instruction(&i).unwrap();
         assert_eq!(c.opmask[0].rrx(), 1, "vvvv < rm, not the reverse");
     }
-
 }

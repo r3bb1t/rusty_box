@@ -1971,10 +1971,18 @@ impl EvexTuple {
             Self::Gpr16 => 2,
             Self::None => 1,
             Self::FullVector => {
-                if broadcast { w4 } else { 16 * len }
+                if broadcast {
+                    w4
+                } else {
+                    16 * len
+                }
             }
             Self::FullVectorW => {
-                if broadcast { 2 } else { 16 * len }
+                if broadcast {
+                    2
+                } else {
+                    16 * len
+                }
             }
             Self::ScalarByte => 1,
             Self::ScalarWord => 2,
@@ -1982,14 +1990,26 @@ impl EvexTuple {
             Self::ScalarQword => 8,
             Self::Scalar => w4,
             Self::HalfVector => {
-                if broadcast { w4 } else { 8 * len }
+                if broadcast {
+                    w4
+                } else {
+                    8 * len
+                }
             }
             Self::HalfVectorW => {
-                if broadcast { 2 } else { 8 * len }
+                if broadcast {
+                    2
+                } else {
+                    8 * len
+                }
             }
             Self::QuarterVector => 4 * len,
             Self::QuarterVectorW => {
-                if broadcast { 2 } else { 4 * len }
+                if broadcast {
+                    2
+                } else {
+                    4 * len
+                }
             }
             Self::EighthVector => 2 * len,
             Self::Vec128 => 16,

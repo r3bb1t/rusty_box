@@ -70,12 +70,12 @@ pub(in crate::cpu) fn f32_get_mant(
     }
 
     match interv {
-        0x0 => exp_a = 0x7F,                          // interval [1,2)
+        0x0 => exp_a = 0x7F, // interval [1,2)
         0x1 => {
             exp_a -= 0x7F;
             exp_a = 0x7F - (exp_a & 0x1);
         } // interval [1/2,2)
-        0x2 => exp_a = 0x7E,                          // interval [1/2,1)
+        0x2 => exp_a = 0x7E, // interval [1/2,1)
         _ => exp_a = 0x7F - ((sig_a >> 22) & 0x1) as i16, // interval [3/4,3/2)
     }
     pack_to_f32(out_sign, exp_a, sig_a)
@@ -110,7 +110,11 @@ pub(in crate::cpu) fn f32_scalef(a: Float32, b: Float32, status: &mut SoftFloatS
             if a_is_signaling_nan || exp_b != 0xFF || sig_b != 0 {
                 return softfloat_propagate_nan_f32(a, b, status);
             }
-            return if sign_b { 0 } else { pack_to_f32(false, 0xFF, 0) };
+            return if sign_b {
+                0
+            } else {
+                pack_to_f32(false, 0xFF, 0)
+            };
         }
         if exp_b == 0xFF && sign_b {
             softfloat_raise_flags(status, FLAG_INVALID);
@@ -221,7 +225,11 @@ pub(in crate::cpu) fn f32_range(
         // Opposite signs with magnitude comparison off: the sign alone decides.
         if !is_max {
             if sign_a { a } else { b }
-        } else if sign_a { b } else { a }
+        } else if sign_a {
+            b
+        } else {
+            a
+        }
     } else {
         let (tmp_a, tmp_b) = if is_abs {
             sign_a = false;
@@ -233,14 +241,18 @@ pub(in crate::cpu) fn f32_range(
         // negative sign inverts the sense of the comparison.
         if !is_max {
             if sign_a ^ (tmp_a < tmp_b) { a } else { b }
-        } else if sign_a ^ (tmp_a < tmp_b) { b } else { a }
+        } else if sign_a ^ (tmp_a < tmp_b) {
+            b
+        } else {
+            a
+        }
     };
 
     match sign_ctrl {
         0 => z = (z & !0x8000_0000) | (a & 0x8000_0000), // keep the sign of a
-        1 => {}                              // keep the comparison result's sign
-        2 => z &= !0x8000_0000,                     // force positive
-        _ => z |= 0x8000_0000,                      // force negative
+        1 => {}                                          // keep the comparison result's sign
+        2 => z &= !0x8000_0000,                          // force positive
+        _ => z |= 0x8000_0000,                           // force negative
     }
     z
 }

@@ -46,7 +46,10 @@ const MILESTONES: &[(&str, &str)] = &[
 ];
 
 fn patience() -> Duration {
-    match std::env::var("ALPINE_PATIENCE_SECS").ok().and_then(|secs| secs.parse().ok()) {
+    match std::env::var("ALPINE_PATIENCE_SECS")
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+    {
         Some(secs) => Duration::from_secs(secs),
         None => Duration::from_secs(300),
     }
@@ -135,7 +138,12 @@ where
         // looking at is exactly the one that failed.
         dump(machine, label);
     }
-    Reached { milestones: reached, took: began.elapsed(), at, wedged: None }
+    Reached {
+        milestones: reached,
+        took: began.elapsed(),
+        at,
+        wedged: None,
+    }
 }
 
 /// Run one machine on hardware to its last milestone, or until patience runs
@@ -213,7 +221,12 @@ fn boot_fast(machine: &mut FastMachine<()>, label: &str) -> Reached {
     if reached < MILESTONES.len() {
         fast_dump(machine, label);
     }
-    Reached { milestones: reached, took: began.elapsed(), at, wedged }
+    Reached {
+        milestones: reached,
+        took: began.elapsed(),
+        at,
+        wedged,
+    }
 }
 
 /// The guest's text screen as it stands between two steps, or `None` when the
@@ -353,8 +366,11 @@ fn bench() -> std::process::ExitCode {
         eprintln!("not inside the workspace");
         return std::process::ExitCode::FAILURE;
     };
-    let iso = std::env::var("ALPINE_ISO")
-        .unwrap_or_else(|_| root.join("alpine-virt-3.24.1-x86_64.iso").to_string_lossy().into());
+    let iso = std::env::var("ALPINE_ISO").unwrap_or_else(|_| {
+        root.join("alpine-virt-3.24.1-x86_64.iso")
+            .to_string_lossy()
+            .into()
+    });
     if !Path::new(&iso).exists() {
         eprintln!("no Alpine ISO at {iso}; set ALPINE_ISO");
         return std::process::ExitCode::FAILURE;
@@ -366,10 +382,9 @@ fn bench() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let vga = std::fs::read(
-        root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"),
-    )
-    .ok();
+    let vga =
+        std::fs::read(root.join("cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"))
+            .ok();
 
     println!("Alpine: {iso}\n");
 
@@ -392,7 +407,12 @@ fn bench() -> std::process::ExitCode {
 
     println!("interpreter:");
     let software = if !want_software {
-        Reached { milestones: 0, took: Duration::ZERO, at: Vec::new(), wedged: None }
+        Reached {
+            milestones: 0,
+            took: Duration::ZERO,
+            at: Vec::new(),
+            wedged: None,
+        }
     } else {
         let mut machine = match builder(
             DeviceClock::Ticks,
@@ -419,7 +439,12 @@ fn bench() -> std::process::ExitCode {
 
     println!("\nhypervisor:");
     let hardware = if !want_hardware {
-        Reached { milestones: 0, took: Duration::ZERO, at: Vec::new(), wedged: None }
+        Reached {
+            milestones: 0,
+            took: Duration::ZERO,
+            at: Vec::new(),
+            wedged: None,
+        }
     } else {
         let assembled = match builder(
             DeviceClock::HostTime,
@@ -446,10 +471,19 @@ fn bench() -> std::process::ExitCode {
         boot_fast(&mut machine, "hypervisor")
     };
 
-    println!("\n{:<14} {:>10} {:>12}", "milestone", "interpreter", "hypervisor");
+    println!(
+        "\n{:<14} {:>10} {:>12}",
+        "milestone", "interpreter", "hypervisor"
+    );
     for (index, (name, _)) in MILESTONES.iter().enumerate() {
-        let one = software.at.get(index).map(|at| format!("{:.1}s", at.as_secs_f64()));
-        let two = hardware.at.get(index).map(|at| format!("{:.1}s", at.as_secs_f64()));
+        let one = software
+            .at
+            .get(index)
+            .map(|at| format!("{:.1}s", at.as_secs_f64()));
+        let two = hardware
+            .at
+            .get(index)
+            .map(|at| format!("{:.1}s", at.as_secs_f64()));
         println!(
             "{name:<14} {:>10} {:>12}",
             one.as_deref().unwrap_or("—"),

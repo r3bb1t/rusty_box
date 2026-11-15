@@ -19,28 +19,28 @@
 //! instructions-per-second rate — the same rate the software engine's ticks are
 //! denominated in, which is what lets a snapshot cross between them.
 
-use rusty_box_whp::{
-    DestinationMode, Exit, ExitReason, ExtendedVmExits, InterceptCounters, InterruptKind,
-    InterruptRequest, LocalApicMode, MsrExits, Partition, PartitionConfig, RuntimeCounters,
-    TriggerMode, Vcpu, VpContext, WhpError,
-};
-
-use super::xsave;
+use rusty_box::GpaWindow;
 use rusty_box::cpu::arch_state::VcpuArchState;
-use rusty_box::cpu::{cpu::BxCpuC, instrumentation::Instrumentation, CpuError, Result};
+use rusty_box::cpu::cpu::BxCpuC;
+use rusty_box::cpu::instrumentation::Instrumentation;
+use rusty_box::cpu::{CpuError, Result};
 use rusty_box::emulator::{
     DeliveryRoute, DeviceClock, Emulator, EventDelivery, PcIo, Processor, ProcessorParts, Progress,
     ProgressUnit, SliceEngine, SliceRequest,
 };
 use rusty_box::iodev::ioapic::IoApicDeliveryMode;
 use rusty_box::iodev::irq::{IoApicDelivery, IoApicDestinationMode, IoApicTrigger};
+use rusty_box::memory::BxMemC;
+use rusty_box::memory::plan::MemoryPlan;
 use rusty_box_core::{EngineFault, EngineFaultKind};
+use rusty_box_whp::{
+    DestinationMode, Exit, ExitReason, ExtendedVmExits, InterceptCounters, InterruptKind,
+    InterruptRequest, LocalApicMode, MsrExits, Partition, PartitionConfig, RuntimeCounters,
+    TriggerMode, Vcpu, VpContext, WhpError,
+};
 
 use super::vcpu_thread::VcpuControl;
-
-use rusty_box::memory::plan::MemoryPlan;
-use rusty_box::memory::BxMemC;
-use rusty_box::GpaWindow;
+use super::xsave;
 
 /// The processor this engine runs.
 ///
@@ -141,7 +141,11 @@ pub(crate) struct ExitHistory {
 
 impl Default for ExitHistory {
     fn default() -> Self {
-        Self { entries: [(0, 0); Self::DEPTH], at: 0, seen: 0 }
+        Self {
+            entries: [(0, 0); Self::DEPTH],
+            at: 0,
+            seen: 0,
+        }
     }
 }
 
@@ -218,8 +222,9 @@ fn trapped_exceptions() -> u64 {
     const GENERAL_PROTECTION: u64 = 1 << 13;
 
     match std::env::var("WHP_TRAP_EXCEPTIONS") {
-        Ok(vectors) => u64::from_str_radix(vectors.trim_start_matches("0x"), 16)
-            .unwrap_or(GENERAL_PROTECTION),
+        Ok(vectors) => {
+            u64::from_str_radix(vectors.trim_start_matches("0x"), 16).unwrap_or(GENERAL_PROTECTION)
+        }
         Err(_) => GENERAL_PROTECTION,
     }
 }
@@ -280,7 +285,9 @@ pub(crate) fn refused_state(error: WhpError, state: &VcpuArchState) -> CpuError 
 
 pub(crate) fn platform_failed(error: WhpError) -> CpuError {
     tracing::error!("WHP platform call failed: {error}");
-    CpuError::UnsupportedCpuOperation { operation: "the hypervisor refused" }
+    CpuError::UnsupportedCpuOperation {
+        operation: "the hypervisor refused",
+    }
 }
 
 /// A state the platform handed back that this port will not load — a segment
@@ -291,7 +298,9 @@ pub(crate) fn platform_failed(error: WhpError) -> CpuError {
 /// same way.
 pub(crate) fn refused_import(error: rusty_box::cpu::arch_state::ArchStateError) -> CpuError {
     tracing::error!("the hypervisor returned a state this port refuses: {error}");
-    CpuError::UnsupportedCpuOperation { operation: "hypervisor state refused on import" }
+    CpuError::UnsupportedCpuOperation {
+        operation: "hypervisor state refused on import",
+    }
 }
 
 /// What the injection decision must know about deliverability, kept current
@@ -377,7 +386,13 @@ impl InjectState {
     /// anything: nothing in flight, `IF` clear — the architectural reset
     /// value — not shadowed, `CR8` zero, and no window armed.
     pub(crate) const fn at_reset() -> Self {
-        Self { in_flight: false, if_flag: false, cr8: 0, shadowed: false, window: None }
+        Self {
+            in_flight: false,
+            if_flag: false,
+            cr8: 0,
+            shadowed: false,
+            window: None,
+        }
     }
 
     /// Cache what an exit header says — the authority for an iteration in
@@ -518,10 +533,16 @@ pub(crate) struct InterruptStateWord {
 impl InterruptStateWord {
     /// A processor that has never run: it cannot be mid-instruction, and
     /// NMIs are unmasked at reset.
-    pub(crate) const AT_RESET: Self = Self { shadow: false, nmi_masked: false };
+    pub(crate) const AT_RESET: Self = Self {
+        shadow: false,
+        nmi_masked: false,
+    };
 
     pub(crate) const fn decode(word: u64) -> Self {
-        Self { shadow: word & 1 != 0, nmi_masked: word & 2 != 0 }
+        Self {
+            shadow: word & 1 != 0,
+            nmi_masked: word & 2 != 0,
+        }
     }
 
     pub(crate) fn encode(self) -> u64 {
@@ -760,7 +781,11 @@ pub struct InjectCensus {
 /// elements, and the per-vector histogram holds 256.
 impl Default for InjectCensus {
     fn default() -> Self {
-        Self { injected: 0, windows_armed: 0, injected_per_vector: [0; 256] }
+        Self {
+            injected: 0,
+            windows_armed: 0,
+            injected_per_vector: [0; 256],
+        }
     }
 }
 
@@ -896,9 +921,12 @@ impl WhpEngine {
     /// an engine that has not run has no hardware to have charged anything, or
     /// if the platform refuses the query.
     pub fn platform_counters(&self) -> Result<PlatformCounters> {
-        let started = self.started.as_ref().ok_or(CpuError::UnsupportedCpuOperation {
-            operation: "the partition did not start",
-        })?;
+        let started = self
+            .started
+            .as_ref()
+            .ok_or(CpuError::UnsupportedCpuOperation {
+                operation: "the partition did not start",
+            })?;
         let counters = started.vcpu()?.counters();
         Ok(PlatformCounters {
             intercepts: counters.intercept_counters().map_err(platform_failed)?,
@@ -960,9 +988,9 @@ const fn requested_kind(mode: IoApicDeliveryMode) -> Option<InterruptKind> {
         // A reserved encoding answers `None` too, and the call site tells the
         // two apart: one is a gap in this port, the other a guest programming
         // its own I/O APIC wrongly.
-        IoApicDeliveryMode::Smi
-        | IoApicDeliveryMode::Reserved3
-        | IoApicDeliveryMode::Reserved6 => None,
+        IoApicDeliveryMode::Smi | IoApicDeliveryMode::Reserved3 | IoApicDeliveryMode::Reserved6 => {
+            None
+        }
     }
 }
 
@@ -1100,7 +1128,9 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
 
             let installed = install_the_machines_map(&mut partition, io.memory(), None)
                 .map_err(CpuError::EngineFault)?;
-            partition.create_processor(BOOT_VP).map_err(platform_failed)?;
+            partition
+                .create_processor(BOOT_VP)
+                .map_err(platform_failed)?;
             let vcpu = partition.take_vcpu(BOOT_VP).map_err(platform_failed)?;
 
             // The fresh processor's own area, read once here so every later
@@ -1141,15 +1171,16 @@ fn start<'a>(started: &'a mut Option<Started>, io: &mut PcIo<'_>) -> Result<&'a 
 /// Whatever [`start`] refused, or
 /// [`CpuError::UnsupportedCpuOperation`] if the processor has already been
 /// taken: one processor has one runner.
-pub(crate) fn bring_up<T: Instrumentation>(
-    machine: &mut Emulator<T, WhpEngine>,
-) -> Result<Vcpu> {
+pub(crate) fn bring_up<T: Instrumentation>(machine: &mut Emulator<T, WhpEngine>) -> Result<Vcpu> {
     let mut processor = machine.processor(BOOT_VP as usize);
     let ProcessorParts { mut io, engine, .. } = processor.parts();
     let started = start(&mut engine.started, &mut io)?;
-    started.vcpu.take().ok_or(CpuError::UnsupportedCpuOperation {
-        operation: "the processor was already taken by a thread",
-    })
+    started
+        .vcpu
+        .take()
+        .ok_or(CpuError::UnsupportedCpuOperation {
+            operation: "the processor was already taken by a thread",
+        })
 }
 
 /// The machine's vocabulary for a mapping this engine could not apply.
@@ -1194,7 +1225,10 @@ fn install_the_machines_map(
 ) -> core::result::Result<MemoryPlan, EngineFault> {
     let plan = MemoryPlan::derive(memory).map_err(|error| {
         tracing::error!("this machine has no stable guest-physical map: {error:?}");
-        EngineFault::new(EngineFaultKind::Memory, "deriving a partially resident machine's map")
+        EngineFault::new(
+            EngineFaultKind::Memory,
+            "deriving a partially resident machine's map",
+        )
     })?;
     let old: &[GpaWindow] = installed.map_or(&[], MemoryPlan::windows);
     if old == plan.windows() {
@@ -1262,10 +1296,6 @@ fn map_window(
 }
 
 impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
-    // The hardware retires the guest's instructions and this port never sees
-    // them, so what a slice can report is the time it took. See `ticks_elapsed`.
-    const PROGRESS_UNIT: ProgressUnit = ProgressUnit::Ticks;
-
     // The machine's step loop must not deliver an 8259 vector between batches
     // (`Emulator::run_until_budget_spent` skips its `iac` for this engine):
     // the processor thread owns that delivery. The hardware knows nothing of
@@ -1277,11 +1307,11 @@ impl<T: Instrumentation> SliceEngine<T> for WhpEngine {
     // chipset SMI through `take_the_signalled_smi` before the next entry.
     // An I/O APIC message takes `route_ioapic_delivery` below.
     const EVENT_DELIVERY: EventDelivery = EventDelivery::Engine;
+    // The hardware retires the guest's instructions and this port never sees
+    // them, so what a slice can report is the time it took. See `ticks_elapsed`.
+    const PROGRESS_UNIT: ProgressUnit = ProgressUnit::Ticks;
 
-    fn memory_map_changed(
-        &mut self,
-        memory: &mut BxMemC,
-    ) -> core::result::Result<(), EngineFault> {
+    fn memory_map_changed(&mut self, memory: &mut BxMemC) -> core::result::Result<(), EngineFault> {
         // Before the first slice there is no partition and nothing installed;
         // the map this would have installed is the one `start` derives, so a
         // change now is not a change to anything.
@@ -1656,8 +1686,10 @@ pub(crate) fn describe_the_fault<T: Instrumentation>(
     // What the guest was doing on the way here. `o`/`i` are port writes and
     // reads, `S` a string or repeated one, `m` memory, `h` a halt, `w` an
     // interrupt window.
-    let trail: std::vec::Vec<std::string::String> =
-        history.replay().map(|(rip, kind)| std::format!("{}@{rip:#x}", kind as char)).collect();
+    let trail: std::vec::Vec<std::string::String> = history
+        .replay()
+        .map(|(rip, kind)| std::format!("{}@{rip:#x}", kind as char))
+        .collect();
     tracing::error!("  exits leading here (oldest first): {}", trail.join(" "));
     const NAMES: [&str; 16] = [
         "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12",
@@ -1696,9 +1728,11 @@ pub(crate) fn describe_the_fault<T: Instrumentation>(
     // that led here is the interesting part, and it is the bytes immediately
     // preceding the `IRET`.
     let before = code.wrapping_sub(0x60);
-    for (what, linear, len) in
-        [("before", before, 0x60u64), ("code", code, 16u64), ("stack", stack, 24u64)]
-    {
+    for (what, linear, len) in [
+        ("before", before, 0x60u64),
+        ("code", code, 16u64),
+        ("stack", stack, 24u64),
+    ] {
         match vcpu.translate_gva(linear) {
             Ok(translation) if translation.result_code == 0 => {
                 // Straight out of the allocation at the guest-physical
@@ -1730,8 +1764,9 @@ pub(crate) fn describe_the_fault<T: Instrumentation>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rusty_box_whp::SegmentRegister;
+
+    use super::*;
 
     /// The cache decodes an exit header and nothing else: `InterruptionPending`
     /// is `ExecutionState` bit 6, `InterruptShadow` is bit 12, `IF` is `RFLAGS`
@@ -1758,15 +1793,24 @@ mod tests {
 
         // Bits 6 and 12 together, IF set.
         inject.refresh_from(&header(0x1040, 0x202, 0x5));
-        assert!(inject.in_flight, "ExecutionState bit 6 is InterruptionPending");
+        assert!(
+            inject.in_flight,
+            "ExecutionState bit 6 is InterruptionPending"
+        );
         assert!(inject.shadowed, "ExecutionState bit 12 is InterruptShadow");
         assert!(inject.if_flag, "RFLAGS bit 9 is IF");
         assert_eq!(inject.cr8, 0x5, "the header's CR8 nibble round-trips");
         assert_eq!(inject.window, Some(3), "no header reports an armed window");
 
         inject.refresh_from(&header(0x0000, 0x2, 0x0));
-        assert!(!inject.in_flight, "ExecutionState 0 means nothing in flight");
-        assert!(!inject.shadowed, "ExecutionState 0 means no interrupt shadow");
+        assert!(
+            !inject.in_flight,
+            "ExecutionState 0 means nothing in flight"
+        );
+        assert!(
+            !inject.shadowed,
+            "ExecutionState 0 means no interrupt shadow"
+        );
         assert!(!inject.if_flag, "RFLAGS 0x2 has IF clear");
         assert_eq!(inject.cr8, 0);
         assert_eq!(inject.window, Some(3), "a refresh never touches the window");
@@ -1845,9 +1889,12 @@ mod tests {
     #[test]
     fn the_interrupt_state_word_round_trips_its_two_bits() {
         assert_eq!(InterruptStateWord::decode(0), InterruptStateWord::AT_RESET);
-        for (word, shadow, nmi_masked) in
-            [(0b00u64, false, false), (0b01, true, false), (0b10, false, true), (0b11, true, true)]
-        {
+        for (word, shadow, nmi_masked) in [
+            (0b00u64, false, false),
+            (0b01, true, false),
+            (0b10, false, true),
+            (0b11, true, true),
+        ] {
             let decoded = InterruptStateWord::decode(word);
             assert_eq!(decoded, InterruptStateWord { shadow, nmi_masked });
             assert_eq!(decoded.encode(), word);

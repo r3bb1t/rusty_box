@@ -156,7 +156,7 @@ pub(in crate::cpu) fn do_fprem(
     let z_exp;
 
     if exp_diff >= 64 {
-        let n = ((exp_diff & 0x1f) | 0x20) as u8;
+        let n = ((exp_diff & 0x1F) | 0x20) as u8;
         remainder_kernel(a_sig0, b_sig, n, &mut a_sig0, &mut a_sig1);
         z_exp = a_exp - n as i32;
         overflow = 1;

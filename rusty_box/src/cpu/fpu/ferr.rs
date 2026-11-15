@@ -14,13 +14,12 @@
 //! - Helper accessors: is_tag_empty, read/write FPU registers, setcc, clear_c1
 //! - write_eflags_fpu_compare: for FCOMI/FUCOMI (sets EFLAGS ZF/PF/CF)
 
+use super::super::cpu::Exception;
 use super::super::decoder::{BxSegregs, Instruction};
 use super::super::i387::*;
 use super::super::softfloat3e::softfloat::*;
-use super::super::softfloat3e::specialize::*;
-
-use super::super::cpu::Exception;
 use super::super::softfloat3e::softfloat_types::ExtFloat80;
+use super::super::softfloat3e::specialize::*;
 
 // ---------------------------------------------------------------------------
 // Free function: convert i387 control word → SoftFloat status
@@ -110,7 +109,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.the_i387.fds = self.sregs[seg_idx].selector.value;
             // Resolve the effective address that the instruction references.
             let eaddr = self.resolve_addr(instr);
-            self.the_i387.fdp = eaddr;
+            // FDP holds the operand's offset as a register value.
+            self.the_i387.fdp = eaddr.get();
         }
     }
 

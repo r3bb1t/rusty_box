@@ -12,12 +12,11 @@
 //! transcribing Bochs's per-mode duplication a second time for 32-bit mode would
 //! have reintroduced all of them.
 
+use super::opmap_evex::{EVEX_MAPS, EVEX_TABLE};
+use super::tables::{BxDecodeError, attrs};
+use super::{find_opcode_in_table, form_opcode};
 use crate::error::{DecodeError, DecodeResult};
 use crate::opcode::Opcode;
-
-use super::opmap_evex::{EVEX_MAPS, EVEX_TABLE};
-use super::tables::{attrs, BxDecodeError};
-use super::{find_opcode_in_table, form_opcode};
 
 /// Resolve an EVEX-encoded opcode.
 ///
@@ -1829,9 +1828,10 @@ pub(super) const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
 
 #[cfg(test)]
 mod tests {
+    use std::vec::Vec;
+
     use super::*;
     use crate::decoder::decode64::fetch_decode64;
-    use std::vec::Vec;
 
     /// Build a 3-byte VEX encoding for one (map, opcode) slot.
     ///
@@ -1886,8 +1886,8 @@ mod tests {
         (
             2,
             &[
-                0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC,
-                0xED, 0xEE, 0xEF,
+                0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED,
+                0xEE, 0xEF,
             ],
             "CMPCCXADD",
         ),
@@ -1895,8 +1895,8 @@ mod tests {
         (
             3,
             &[
-                0x5C, 0x5D, 0x5E, 0x5F, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x78,
-                0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
+                0x5C, 0x5D, 0x5E, 0x5F, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x78, 0x79,
+                0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
             ],
             "FMA4",
         ),
@@ -2015,7 +2015,7 @@ mod tests {
     #[test]
     fn vex_never_decodes_to_an_mmx_register_form() {
         use crate::decoder::decode32::fetch_decode32;
-        use crate::opcode_isa::{opcode_state, CpuState};
+        use crate::opcode_isa::{CpuState, opcode_state};
         const MMX_OPERAND_SSE_FORMS: [Opcode; 8] = [
             Opcode::Cvtpi2psVpsQq,
             Opcode::Cvtpi2pdVpdQq,

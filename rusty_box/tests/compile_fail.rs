@@ -21,4 +21,8 @@ fn doctrine_fixtures() {
     // R2: a bare CPU cannot execute an instruction — execution requires the
     // machine context, so "CPU wired to nothing" is unrepresentable.
     t.compile_fail("tests/compile_fail/r2_bare_cpu_cannot_execute.rs");
+    // R2: only the interpreter's machine has the shared `Machine` verbs — a
+    // machine on another engine (the hypervisor's) cannot be stepped through
+    // them, instead of being stepped and refused at run time.
+    t.compile_fail("tests/compile_fail/r2_only_the_interpreter_is_a_machine.rs");
 }

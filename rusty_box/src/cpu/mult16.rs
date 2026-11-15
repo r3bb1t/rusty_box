@@ -2,11 +2,9 @@
 //!
 //! Based on Bochs mult16.cc
 
-use super::{
-    cpu::{Exception},
-    decoder::Instruction,
-    error::Result,
-};
+use super::cpu::Exception;
+use super::decoder::Instruction;
+use super::error::Result;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -183,8 +181,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn idiv_ax_ew_r(&mut self, instr: &Instruction) -> Result<()> {
         let dx = self.get_gpr16(2); // DX
         let ax = self.get_gpr16(0); // AX
-                                    // Matching C++: Bit32s op1_32 = ((((Bit32u) DX) << 16) | ((Bit32u) AX));
-                                    // Construct as unsigned first, then cast to signed
+        // Matching C++: Bit32s op1_32 = ((((Bit32u) DX) << 16) | ((Bit32u) AX));
+        // Construct as unsigned first, then cast to signed
         let op1 = (((dx as u32) << 16) | (ax as u32)) as i32;
 
         // Check MIN_INT case
@@ -219,8 +217,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn idiv_ax_ew_m(&mut self, instr: &Instruction) -> Result<()> {
         let dx = self.get_gpr16(2); // DX
         let ax = self.get_gpr16(0); // AX
-                                    // Matching C++: Bit32s op1_32 = ((((Bit32u) DX) << 16) | ((Bit32u) AX));
-                                    // Construct as unsigned first, then cast to signed
+        // Matching C++: Bit32s op1_32 = ((((Bit32u) DX) << 16) | ((Bit32u) AX));
+        // Construct as unsigned first, then cast to signed
         let op1 = (((dx as u32) << 16) | (ax as u32)) as i32;
 
         // Check MIN_INT case

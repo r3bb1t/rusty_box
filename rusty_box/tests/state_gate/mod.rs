@@ -9,6 +9,7 @@
 //! a machine with any tracer, so a test can watch what instrumentation sees
 //! while the guest faults.
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::{CpuSetupMode, Instrumentation, X86Reg};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
@@ -70,9 +71,10 @@ pub fn install_fault_handlers<T: Instrumentation>(emu: &mut Emulator<T>) {
         entry[5] = 0x8E; // present, DPL 0, 64-bit interrupt gate
         entry[6..8].copy_from_slice(&((gate.handler >> 16) as u16).to_le_bytes());
         entry[8..12].copy_from_slice(&((gate.handler >> 32) as u32).to_le_bytes());
-        emu.mem_write(IDT + gate.vector * 16, &entry)
+        emu.mem_write(BxPhyAddress::new(IDT + gate.vector * 16), &entry)
             .expect("write the gate");
-        emu.mem_write(gate.handler, &[0xF4]).expect("write the handler");
+        emu.mem_write(BxPhyAddress::new(gate.handler), &[0xF4])
+            .expect("write the handler");
     }
 }
 
@@ -101,7 +103,8 @@ pub fn run_installed_at<T: Instrumentation>(
 ) -> Outcome {
     let mut image = code.to_vec();
     image.extend_from_slice(&[0xEB, 0xFE]); // jmp $
-    emu.mem_write(at, &image).expect("write code");
+    emu.mem_write(BxPhyAddress::new(at), &image)
+        .expect("write code");
     emu.reg_write(X86Reg::Rsp, STACK);
     let stop = emu.emu_start(at, None, None, Some(8)).expect("emu_start");
     let rip = emu.cpu().rip();
@@ -114,7 +117,9 @@ pub fn run_installed_at<T: Instrumentation>(
     } else if rip == MF_GATE.handler + 1 {
         Outcome::FloatingPointError
     } else {
-        panic!("the instruction neither retired nor took #UD, #NM or #MF: rip={rip:#x}, stop={stop:?}");
+        panic!(
+            "the instruction neither retired nor took #UD, #NM or #MF: rip={rip:#x}, stop={stop:?}"
+        );
     };
     match outcome {
         Outcome::Retired => assert_eq!(
@@ -129,7 +134,7 @@ pub fn run_installed_at<T: Instrumentation>(
                 "a fault pushes exactly one exception frame"
             );
             let mut pushed_rip = [0u8; 8];
-            emu.mem_read(STACK - 40, &mut pushed_rip)
+            emu.mem_read(BxPhyAddress::new(STACK - 40), &mut pushed_rip)
                 .expect("read the frame");
             assert_eq!(
                 u64::from_le_bytes(pushed_rip),

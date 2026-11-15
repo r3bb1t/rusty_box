@@ -19,6 +19,7 @@
 //! templates in `cpu_templates_pfp.h`; [`Self::avx_pfp_2op`] and its
 //! siblings are the same shape.
 
+use super::decoder::{BxSegregs, Instruction};
 use super::simd_pfp::{
     xmm_addpd, xmm_addps, xmm_addsubpd, xmm_addsubps, xmm_cmppd, xmm_cmpps, xmm_divpd, xmm_divps,
     xmm_haddpd, xmm_haddps, xmm_hsubpd, xmm_hsubps, xmm_maxpd, xmm_maxps, xmm_minpd, xmm_minps,
@@ -34,16 +35,13 @@ use super::softfloat3e::f64_to_f32::f64_to_f32;
 use super::softfloat3e::f64_to_int::{f64_to_i32, f64_to_i32_r_min_mag};
 use super::softfloat3e::int_to_float::{i32_to_f32, i32_to_f64, i64_to_f32, i64_to_f64};
 use super::softfloat3e::softfloat::{
-    softfloat_get_exception_flags, softfloat_get_rounding_mode, SoftFloatStatus,
+    SoftFloatStatus, softfloat_get_exception_flags, softfloat_get_rounding_mode,
 };
 use super::softfloat3e::softfloat_compare::{f32_compare_predicate, f64_compare_predicate};
 use super::softfloat3e::softfloat_types::{Float32, Float64};
 use super::sse_pfp::{dppd_lane, dpps_lane, mxcsr_to_softfloat_status_word_imm_override};
 use super::sse_rcp::{approximate_rcp, approximate_rsqrt};
-use super::{
-    decoder::{BxSegregs, Instruction},
-    xmm::{BxPackedXmmRegister, BxPackedYmmRegister},
-};
+use super::xmm::{BxPackedXmmRegister, BxPackedYmmRegister};
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ════════════════════════════════════════════════════════════════════
@@ -213,6 +211,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn vcvtps2dq(&mut self, i: &Instruction) -> super::Result<()> {
         self.vex_cvt_ps2dq(i, false)
     }
+
     pub(super) fn vcvttps2dq(&mut self, i: &Instruction) -> super::Result<()> {
         self.vex_cvt_ps2dq(i, true)
     }
@@ -336,6 +335,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn vcvtpd2dq(&mut self, i: &Instruction) -> super::Result<()> {
         self.vex_cvt_pd2dq(i, false)
     }
+
     pub(super) fn vcvttpd2dq(&mut self, i: &Instruction) -> super::Result<()> {
         self.vex_cvt_pd2dq(i, true)
     }
@@ -350,36 +350,47 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn vaddss(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_scalar_ss(i, super::softfloat3e::f32_addsub::f32_add)
     }
+
     pub(super) fn vaddsd(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_scalar_sd(i, super::softfloat3e::f64_addsub::f64_add)
     }
+
     pub(super) fn vsubss(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_scalar_ss(i, super::softfloat3e::f32_addsub::f32_sub)
     }
+
     pub(super) fn vsubsd(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_scalar_sd(i, super::softfloat3e::f64_addsub::f64_sub)
     }
+
     pub(super) fn vmulss(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_scalar_ss(i, super::softfloat3e::f32_mul::f32_mul)
     }
+
     pub(super) fn vmulsd(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_scalar_sd(i, super::softfloat3e::f64_mul::f64_mul)
     }
+
     pub(super) fn vdivss(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_scalar_ss(i, super::softfloat3e::f32_div::f32_div)
     }
+
     pub(super) fn vdivsd(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_scalar_sd(i, super::softfloat3e::f64_div::f64_div)
     }
+
     pub(super) fn vminss(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_scalar_ss(i, super::softfloat3e::f32_compare::f32_min)
     }
+
     pub(super) fn vminsd(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_scalar_sd(i, super::softfloat3e::f64_compare::f64_min)
     }
+
     pub(super) fn vmaxss(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_scalar_ss(i, super::softfloat3e::f32_compare::f32_max)
     }
+
     pub(super) fn vmaxsd(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_scalar_sd(i, super::softfloat3e::f64_compare::f64_max)
     }
@@ -393,36 +404,47 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn vaddps(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_pfp_2op(i, xmm_addps)
     }
+
     pub(super) fn vaddpd(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_pfp_2op(i, xmm_addpd)
     }
+
     pub(super) fn vsubps(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_pfp_2op(i, xmm_subps)
     }
+
     pub(super) fn vsubpd(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_pfp_2op(i, xmm_subpd)
     }
+
     pub(super) fn vmulps(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_pfp_2op(i, xmm_mulps)
     }
+
     pub(super) fn vmulpd(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_pfp_2op(i, xmm_mulpd)
     }
+
     pub(super) fn vdivps(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_pfp_2op(i, xmm_divps)
     }
+
     pub(super) fn vdivpd(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_pfp_2op(i, xmm_divpd)
     }
+
     pub(super) fn vminps(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_pfp_2op(i, xmm_minps)
     }
+
     pub(super) fn vminpd(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_pfp_2op(i, xmm_minpd)
     }
+
     pub(super) fn vmaxps(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_pfp_2op(i, xmm_maxps)
     }
+
     pub(super) fn vmaxpd(&mut self, i: &Instruction) -> super::Result<()> {
         self.avx_pfp_2op(i, xmm_maxpd)
     }

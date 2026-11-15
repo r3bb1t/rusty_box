@@ -24,6 +24,7 @@
 
 use std::time::{Duration, Instant};
 
+use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
 use rusty_box::emulator::{
     DeviceClock, Emulator, EmulatorConfig, MemorySize, RunBudget, SliceEngine, StopReason,
@@ -83,7 +84,7 @@ fn guest() -> Vec<u8> {
         0x66, 0x49, // dec ecx
         0x75, 0xFC, // jnz -4
         0xE6, 0xE9, // out 0xE9, al
-        0xF4,       // hlt
+        0xF4, // hlt
     ]
 }
 
@@ -103,7 +104,10 @@ fn config() -> EmulatorConfig {
 /// unbounded and nothing counts its instructions, so a device wheel measured
 /// in retired instructions would never turn.
 fn config_on_host_time() -> EmulatorConfig {
-    EmulatorConfig { device_clock: DeviceClock::HostTime, ..config() }
+    EmulatorConfig {
+        device_clock: DeviceClock::HostTime,
+        ..config()
+    }
 }
 
 /// Run until the guest halts, and report how long that took.
@@ -221,9 +225,7 @@ fn main() -> std::process::ExitCode {
 
 fn bench() -> std::process::ExitCode {
     let code = guest();
-    println!(
-        "guest: {ITERATIONS} iterations, {INSTRUCTIONS} instructions, no device access\n"
-    );
+    println!("guest: {ITERATIONS} iterations, {INSTRUCTIONS} instructions, no device access\n");
 
     let interpreter = {
         let mut machine = match Emulator::<()>::new_with_mode(config(), CpuSetupMode::RealMode) {
@@ -233,7 +235,7 @@ fn bench() -> std::process::ExitCode {
                 return std::process::ExitCode::FAILURE;
             }
         };
-        if machine.mem_write(CODE, &code).is_err() {
+        if machine.mem_write(BxPhyAddress::new(CODE), &code).is_err() {
             eprintln!("could not load the guest");
             return std::process::ExitCode::FAILURE;
         }
@@ -270,7 +272,7 @@ fn bench() -> std::process::ExitCode {
                 return std::process::ExitCode::FAILURE;
             }
         };
-        if assembled.mem_write(CODE, &code).is_err() {
+        if assembled.mem_write(BxPhyAddress::new(CODE), &code).is_err() {
             eprintln!("could not load the guest");
             return std::process::ExitCode::FAILURE;
         }
@@ -286,14 +288,13 @@ fn bench() -> std::process::ExitCode {
             }
         };
         let took = time_until_the_port_write(&mut machine);
-        let arrived =
-            match machine.with_machine(reached_the_end) {
-                Ok(arrived) => arrived,
-                Err(refused) => {
-                    eprintln!("the paused machine could not be read: {refused}");
-                    return std::process::ExitCode::FAILURE;
-                }
-            };
+        let arrived = match machine.with_machine(reached_the_end) {
+            Ok(arrived) => arrived,
+            Err(refused) => {
+                eprintln!("the paused machine could not be read: {refused}");
+                return std::process::ExitCode::FAILURE;
+            }
+        };
         match (took, arrived) {
             (Some(took), true) => took,
             (_, false) => {

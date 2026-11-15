@@ -1,0 +1,57 @@
+--- a/target/arm/tcg/pauth_helper.c
++++ b/target/arm/tcg/pauth_helper.c
+@@ -324,26 +324,46 @@
+     }
+ }
+ 
++/*
++ * InsertPAC's selbit: the half of the address space whose extension and
++ * bottom PAC bit the code takes.  With two ranges that is ptr<55> when a
++ * top byte is ignored in either range and ptr<63> otherwise, whichever
++ * range ptr<55> itself selects.
++ */
++static int pauth_selbit(CPUARMState *env, uint64_t ptr, ARMMMUIdx mmu_idx,
++                        bool data, ARMVAParameters param)
++{
++    if (regime_has_2_ranges(mmu_idx)) {
++        uint64_t tcr = regime_tcr(env, mmu_idx);
++        int tbi = aa64_va_parameter_tbi(tcr, mmu_idx);
++
++        if (!data) {
++            tbi &= ~aa64_va_parameter_tbid(tcr, mmu_idx);
++        }
++        return extract64(ptr, tbi ? 55 : 63, 1);
++    }
++    return extract64(ptr, param.tbi ? 55 : 63, 1);
++}
++
+ static uint64_t pauth_addpac(CPUARMState *env, uint64_t ptr, uint64_t modifier,
+                              ARMPACKey *key, bool data)
+ {
+     ARMCPU *cpu = env_archcpu(env);
+     ARMMMUIdx mmu_idx = arm_stage1_mmu_idx(env);
+     ARMVAParameters param = aa64_va_parameters(env, ptr, mmu_idx, data, false);
++    ARMVAParameters sel_param;
+     ARMPauthFeature pauth_feature = cpu_isar_feature(pauth_feature, cpu);
+     uint64_t pac, ext_ptr, ext, test;
+-    int bot_bit, top_bit;
++    int bot_bit, top_bit, selbit;
+ 
+-    /* If tagged pointers are in use, use ptr<55>, otherwise ptr<63>.  */
+-    if (param.tbi) {
+-        ext = sextract64(ptr, 55, 1);
+-    } else {
+-        ext = sextract64(ptr, 63, 1);
+-    }
++    selbit = pauth_selbit(env, ptr, mmu_idx, data, param);
++    ext = selbit ? -1 : 0;
++    /* The bottom PAC bit is that of the range selbit selects. */
++    sel_param = aa64_va_parameters(env, selbit ? -1 : 0, mmu_idx, data, false);
+ 
+     /* Build a pointer with known good extension bits.  */
+     top_bit = 64 - 8 * (param.tbi || param.mtx);
+-    bot_bit = 64 - param.tsz;
++    bot_bit = 64 - sel_param.tsz;
+     ext_ptr = deposit64(ptr, bot_bit, top_bit - bot_bit, ext);
+     /*
+      * If mtx is active but not tbi, then the top 4 bits are replaced with the

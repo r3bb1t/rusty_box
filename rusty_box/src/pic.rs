@@ -117,13 +117,14 @@
 //! PCI-to-ISA bridge (Bochs `iodev/pci2isa.cc`), which stores `elcr1`/`elcr2`
 //! and forwards mode changes here via [`BxPicC::set_mode`].
 
+use crate::iodev::IoPort;
 use crate::iodev::irq::IoApicEdge;
 
 /// PIC I/O port addresses
-pub const PIC_MASTER_CMD: u16 = 0x0020;
-pub const PIC_MASTER_DATA: u16 = 0x0021;
-pub const PIC_SLAVE_CMD: u16 = 0x00A0;
-pub const PIC_SLAVE_DATA: u16 = 0x00A1;
+pub const PIC_MASTER_CMD: IoPort = IoPort::new(0x0020);
+pub const PIC_MASTER_DATA: IoPort = IoPort::new(0x0021);
+pub const PIC_SLAVE_CMD: IoPort = IoPort::new(0x00A0);
+pub const PIC_SLAVE_DATA: IoPort = IoPort::new(0x00A1);
 
 /// How many unforwarded edges a pre-fabric snapshot could carry.
 ///
@@ -541,7 +542,7 @@ impl BxPicC {
     ///
     /// Takes `&mut self` because poll mode read triggers an interrupt acknowledge
     /// which modifies PIC state (Bochs pic.cc).
-    pub fn read(&mut self, port: u16, io_len: u8) -> u32 {
+    pub fn read(&mut self, port: IoPort, io_len: u8) -> u32 {
         // Poll mode: read triggers interrupt acknowledge (Bochs pic.cc)
         if (port == PIC_MASTER_CMD || port == PIC_MASTER_DATA) && self.master.polled {
             self.master.clear_highest_interrupt();
@@ -591,7 +592,7 @@ impl BxPicC {
     /// Note: this does NOT handle 0x4D0/0x4D1 (ELCR) — those ports belong to
     /// the PIIX3 bridge, which calls [`BxPicC::set_mode`] directly. See the
     /// module-level ELCR note.
-    pub fn write(&mut self, port: u16, value: u32, _io_len: u8) {
+    pub fn write(&mut self, port: IoPort, value: u32, _io_len: u8) {
         let value = value as u8;
         match port {
             PIC_MASTER_CMD => self.write_cmd(value, true),
@@ -1081,8 +1082,9 @@ impl BxPicC {
 
 #[cfg(feature = "std")]
 impl crate::snapshot::SnapshotSection for BxPicC {
-    const TAG: u32 = crate::snapshot::SEC_PIC;
     type Restored = DeferredIoApicEdges;
+
+    const TAG: u32 = crate::snapshot::SEC_PIC;
 
     fn snapshot_len(&self) -> crate::snapshot::SnapResult<u64> {
         // Fixed body, then the v3 forwarding-queue length — always zero now
@@ -1091,10 +1093,7 @@ impl crate::snapshot::SnapshotSection for BxPicC {
         crate::snapshot::checked_snapshot_len_add(4 + 2 * 28 + 2, 4)
     }
 
-    fn save<W: crate::snapshot::SnapWrite>(
-        &self,
-        writer: &mut W,
-    ) -> crate::snapshot::SnapResult {
+    fn save<W: crate::snapshot::SnapWrite>(&self, writer: &mut W) -> crate::snapshot::SnapResult {
         self.snapshot_len()?;
         writer.write_u32(crate::snapshot::SNAPSHOT_SECTION_VERSION)?;
         for chip in [&self.master, &self.slave] {
@@ -1133,12 +1132,18 @@ impl crate::snapshot::SnapshotSection for BxPicC {
         reader: &mut R,
     ) -> crate::snapshot::SnapResult<DeferredIoApicEdges> {
         if reader.read_u32()? != crate::snapshot::SNAPSHOT_SECTION_VERSION {
-            return Err(crate::snapshot::SnapError::Invalid("unsupported PIC snapshot section version"));
+            return Err(crate::snapshot::SnapError::Invalid(
+                "unsupported PIC snapshot section version",
+            ));
         }
         let mut chips = [self.master.clone(), self.slave.clone()];
         for (index, chip) in chips.iter_mut().enumerate() {
             let master = reader.read_bool()?;
-            if master != (index == 0) { return Err(crate::snapshot::SnapError::Invalid("PIC chip topology does not match")); }
+            if master != (index == 0) {
+                return Err(crate::snapshot::SnapError::Invalid(
+                    "PIC chip topology does not match",
+                ));
+            }
             chip.master = master;
             chip.interrupt_offset = reader.read_u8()?;
             chip.sfnm = reader.read_bool()?;
@@ -1266,7 +1271,7 @@ mod tests {
         let vector = pic.iac();
         assert_eq!(vector, 0x08 + 3);
         assert_eq!(pic.master.isr, 1 << 3); // IRQ3 in service
-                                            // Specific EOI for IRQ3 (0x63)
+        // Specific EOI for IRQ3 (0x63)
         pic.write(PIC_MASTER_CMD, 0x63, 1);
         assert_eq!(pic.master.isr, 0); // Cleared
     }
@@ -1278,7 +1283,7 @@ mod tests {
         let _ = pic.raise_irq(0);
         pic.iac();
         assert_eq!(pic.master.isr, 1 << 0); // IRQ0 in service
-                                            // Non-specific EOI (0x20)
+        // Non-specific EOI (0x20)
         pic.write(PIC_MASTER_CMD, 0x20, 1);
         assert_eq!(pic.master.isr, 0); // Cleared highest priority (IRQ0)
     }

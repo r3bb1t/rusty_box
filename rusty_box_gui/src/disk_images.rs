@@ -1,12 +1,13 @@
+use rusty_box_bximage::CreatedImage;
+#[cfg(feature = "gui-egui")]
+use rusty_box_bximage::{BYTES_PER_GIB, BYTES_PER_MIB, CreatedImageKind, ImageSize};
+#[cfg(not(target_arch = "wasm32"))]
+use rusty_box_bximage::{ExistingFilePolicy, SectorSize};
+
 #[cfg(not(target_arch = "wasm32"))]
 use crate::config::ResolvedDiskCreation;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::error::RunError;
-use rusty_box_bximage::CreatedImage;
-#[cfg(feature = "gui-egui")]
-use rusty_box_bximage::{CreatedImageKind, ImageSize, BYTES_PER_GIB, BYTES_PER_MIB};
-#[cfg(not(target_arch = "wasm32"))]
-use rusty_box_bximage::{ExistingFilePolicy, SectorSize};
 
 /// Result of provisioning a startup disk image.
 #[cfg(not(target_arch = "wasm32"))]
@@ -15,7 +16,10 @@ pub(crate) enum DiskProvisionOutcome {
     /// A new image was written to disk.
     Created(CreatedImage),
     /// An existing, valid image was kept as-is (no data written).
-    Reused { path: std::path::PathBuf, bytes: u64 },
+    Reused {
+        path: std::path::PathBuf,
+        bytes: u64,
+    },
 }
 
 #[cfg(not(target_arch = "wasm32"))]

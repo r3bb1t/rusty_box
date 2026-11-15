@@ -89,11 +89,7 @@ pub(in crate::cpu) fn f32_to_i32_r_min_mag(
     if exact && ((abs_z as u32) << shift_dist) != sig {
         softfloat_raise_flags(status, FLAG_INEXACT);
     }
-    if sign {
-        -abs_z
-    } else {
-        abs_z
-    }
+    if sign { -abs_z } else { abs_z }
 }
 
 /// Bochs softfloat3e `f32_to_i64`.
@@ -188,11 +184,7 @@ pub(in crate::cpu) fn f32_to_i64_r_min_mag(
     if exact && shift_dist < 0 && (sig << (shift_dist & 31)) != 0 {
         softfloat_raise_flags(status, FLAG_INEXACT);
     }
-    if sign {
-        -abs_z
-    } else {
-        abs_z
-    }
+    if sign { -abs_z } else { abs_z }
 }
 
 #[cfg(test)]
@@ -218,7 +210,14 @@ mod tests {
     /// s_roundToI32.cc rejects a significand that does not fit).
     #[test]
     fn an_unrepresentable_float_is_the_integer_indefinite() {
-        for a in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 3.0e9, -3.0e9, 2_147_483_648.0] {
+        for a in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            3.0e9,
+            -3.0e9,
+            2_147_483_648.0,
+        ] {
             let converted = convert(a, ROUND_NEAR_EVEN);
             assert_eq!(converted.value, i32::MIN, "{a}");
             assert_ne!(converted.flags & FLAG_INVALID, 0, "{a} raises invalid");

@@ -9,6 +9,7 @@
 //! - stack64.rs: 64-bit stack instructions (PUSH/POP r64, etc.)
 
 use super::decoder::BxSegregs;
+use crate::config::BxEffAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     /// Bochs cpu.h `RSP_SPECULATIVE`: from here until [`Self::rsp_commit`], a
@@ -150,23 +151,26 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // boundary landed in whatever frame happened to follow, and a fault on
     // the second page was never raised.
 
+    // These take the stack pointer's value — SP or ESP, or it plus a frame
+    // offset — and are where it becomes an offset in SS.
+
     /// Write a 16-bit value to stack at SS:offset.
     pub(super) fn stack_write_word(&mut self, offset: u32, value: u16) -> super::Result<()> {
-        self.write_virtual_word(BxSegregs::Ss, offset, value)
+        self.write_virtual_word(BxSegregs::Ss, BxEffAddress::from_u32(offset), value)
     }
 
     /// Write a 32-bit value to stack at SS:offset.
     pub(super) fn stack_write_dword(&mut self, offset: u32, value: u32) -> super::Result<()> {
-        self.write_virtual_dword(BxSegregs::Ss, offset, value)
+        self.write_virtual_dword(BxSegregs::Ss, BxEffAddress::from_u32(offset), value)
     }
 
     /// Read a 16-bit value from stack at SS:offset.
     pub(super) fn stack_read_word(&mut self, offset: u32) -> super::Result<u16> {
-        self.read_virtual_word(BxSegregs::Ss, offset)
+        self.read_virtual_word(BxSegregs::Ss, BxEffAddress::from_u32(offset))
     }
 
     /// Read a 32-bit value from stack at SS:offset.
     pub(super) fn stack_read_dword(&mut self, offset: u32) -> super::Result<u32> {
-        self.read_virtual_dword(BxSegregs::Ss, offset)
+        self.read_virtual_dword(BxSegregs::Ss, BxEffAddress::from_u32(offset))
     }
 }

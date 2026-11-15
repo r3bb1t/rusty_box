@@ -86,7 +86,6 @@ pub enum Level {
     ERROR,
 }
 
-
 pub mod api;
 pub mod display;
 pub mod pci;

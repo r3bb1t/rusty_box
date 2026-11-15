@@ -22,22 +22,21 @@
 #![no_std]
 
 use core::mem::MaybeUninit;
+
 use log::{error, info, warn};
+use rusty_box::cpu::builder::BxCpuBuilder;
+use rusty_box::cpu::cpu::BxCpuC;
+use rusty_box::emulator::{
+    AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MachineBuilder,
+    MemorySize, RunBudget,
+};
+use rusty_box::iodev::scancodes::BxKey;
+use rusty_box::memory::BxMemoryStubC;
 use uefi::prelude::*;
 
-use rusty_box::{
-    cpu::{builder::BxCpuBuilder, cpu::BxCpuC},
-    emulator::{
-        AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MemorySize, MachineBuilder, RunBudget,
-    },
-    iodev::scancodes::BxKey,
-    memory::BxMemoryStubC,
-};
-
 static BIOS_ROM: &[u8] = include_bytes!("../../../cpp_orig/bochs/bochs/bios/BIOS-bochs-latest");
-static VGA_BIOS: &[u8] = include_bytes!(
-    "../../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin"
-);
+static VGA_BIOS: &[u8] =
+    include_bytes!("../../../cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin");
 static DLX_DISK: &[u8] = include_bytes!("../../../dlxlinux/hd10meg.img");
 
 const DLX_CYLINDERS: u16 = 306;
@@ -310,7 +309,11 @@ fn run() -> Status {
             None => Ok(()),
         };
         let printed = debug_console.and_then(|()| {
-            drain_and_print(emu.serial(0).expect("COM1 is always modelled").take_output())
+            drain_and_print(
+                emu.serial(0)
+                    .expect("COM1 is always modelled")
+                    .take_output(),
+            )
         });
         if let Err(e) = printed {
             error!("console write failed at {}M: {:?}", total / 1_000_000, e);
@@ -337,7 +340,10 @@ fn run() -> Status {
         if !login_sent && total > 50_000_000 {
             login_sent = true;
             const LOGIN: [BxKey; 5] = [BxKey::R, BxKey::O, BxKey::O, BxKey::T, BxKey::Enter];
-            let typed = LOGIN.iter().take_while(|&&key| emu.keyboard().tap(key)).count();
+            let typed = LOGIN
+                .iter()
+                .take_while(|&&key| emu.keyboard().tap(key))
+                .count();
             if typed != LOGIN.len() {
                 warn!(
                     "the keyboard refused part of login key {} of {}; the rest were not sent",

@@ -9,11 +9,11 @@
 //! Mirrors Bochs `cpu/avx/avx512.cc` broadcast handlers.
 
 use super::avx512_load::cut_opmask_to;
-use super::{
-    cpu::BxCpuC,
-    decoder::{BxSegregs, Instruction},
-    xmm::BxPackedZmmRegister,
-};
+use super::cpu::BxCpuC;
+use super::decoder::{BxSegregs, Instruction};
+use super::xmm::BxPackedZmmRegister;
+use crate::config::BxEffAddress;
+use crate::convert::u64_from_usize;
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
@@ -180,11 +180,11 @@ fn write_zmm_masked_b<T: crate::cpu::instrumentation::Instrumentation>(
 fn read_mem_128<T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     seg: BxSegregs,
-    laddr: u64,
+    eaddr: BxEffAddress,
 ) -> super::Result<[u8; 16]> {
     let mut buf = [0u8; 16];
     for i in 0..4 {
-        let val = cpu.v_read_dword(seg, laddr + (i * 4) as u64)?;
+        let val = cpu.v_read_dword(seg, eaddr.wrapping_add(u64_from_usize(i * 4)))?;
         let bytes = val.to_le_bytes();
         buf[i * 4..i * 4 + 4].copy_from_slice(&bytes);
     }
@@ -195,11 +195,11 @@ fn read_mem_128<T: crate::cpu::instrumentation::Instrumentation>(
 fn read_mem_256<T: crate::cpu::instrumentation::Instrumentation>(
     cpu: &mut crate::cpu::exec_ctx::ExecCtx<'_, T>,
     seg: BxSegregs,
-    laddr: u64,
+    eaddr: BxEffAddress,
 ) -> super::Result<[u8; 32]> {
     let mut buf = [0u8; 32];
     for i in 0..8 {
-        let val = cpu.v_read_dword(seg, laddr + (i * 4) as u64)?;
+        let val = cpu.v_read_dword(seg, eaddr.wrapping_add(u64_from_usize(i * 4)))?;
         let bytes = val.to_le_bytes();
         buf[i * 4..i * 4 + 4].copy_from_slice(&bytes);
     }
@@ -223,8 +223,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let scalar = if instr.mod_c0() {
             read_zmm(self, instr.src()).zmm32u(0)
         } else if (mask & cut_opmask_to(nelements)) != 0 {
-            let laddr = self.resolve_addr(instr);
-            self.v_read_dword(BxSegregs::from(instr.seg()), laddr)?
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_dword(BxSegregs::from(instr.seg()), eaddr)?
         } else {
             // Bochs avx512_broadcast.cc VPBROADCASTD_MASK_VdqWdM.
             0
@@ -253,8 +253,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let scalar = if instr.mod_c0() {
             read_zmm(self, instr.src()).zmm64u(0)
         } else if (mask & cut_opmask_to(nelements)) != 0 {
-            let laddr = self.resolve_addr(instr);
-            self.v_read_qword(BxSegregs::from(instr.seg()), laddr)?
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(BxSegregs::from(instr.seg()), eaddr)?
         } else {
             // Bochs avx512_broadcast.cc VPBROADCASTQ_MASK_VdqWqM.
             0
@@ -283,9 +283,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs avx512_broadcast.cc VBROADCASTF32x4_MASK_VpsMps: an empty
         // opmask performs no memory access at all.
         let src128 = if (mask & cut_opmask_to(dword_elements(vl))) != 0 {
-            let laddr = self.resolve_addr(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            read_mem_128(self, seg, laddr)?
+            read_mem_128(self, seg, eaddr)?
         } else {
             [0u8; 16]
         };
@@ -326,9 +326,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // cutting to the dword count keeps bits above the operation's own
         // width and makes a mask selecting only those bits look non-empty.
         let src128 = if (mask & cut_opmask_to(qword_elements(vl))) != 0 {
-            let laddr = self.resolve_addr(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            read_mem_128(self, seg, laddr)?
+            read_mem_128(self, seg, eaddr)?
         } else {
             [0u8; 16]
         };
@@ -365,9 +365,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let vl = instr.get_vl();
         let mask = read_opmask_for_write(self, instr);
         let src256 = if (mask & cut_opmask_to(dword_elements(vl))) != 0 {
-            let laddr = self.resolve_addr(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            read_mem_256(self, seg, laddr)?
+            read_mem_256(self, seg, eaddr)?
         } else {
             [0u8; 32]
         };
@@ -405,9 +405,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Qword-masked: cut to the qword element count, not the dword one
         // (see evex_vbroadcasti64x2).
         let src256 = if (mask & cut_opmask_to(qword_elements(vl))) != 0 {
-            let laddr = self.resolve_addr(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            read_mem_256(self, seg, laddr)?
+            read_mem_256(self, seg, eaddr)?
         } else {
             [0u8; 32]
         };
@@ -456,8 +456,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let scalar = if instr.mod_c0() {
             read_zmm(self, instr.src()).zmmubyte(0)
         } else if active != 0 {
-            let laddr = self.resolve_addr(instr);
-            self.v_read_byte(BxSegregs::from(instr.seg()), laddr)?
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_byte(BxSegregs::from(instr.seg()), eaddr)?
         } else {
             0
         };
@@ -487,8 +487,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let scalar = if instr.mod_c0() {
             read_zmm(self, instr.src()).zmm16u(0)
         } else if (mask & cut_opmask_to(nelements)) != 0 {
-            let laddr = self.resolve_addr(instr);
-            self.v_read_word(BxSegregs::from(instr.seg()), laddr)?
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_word(BxSegregs::from(instr.seg()), eaddr)?
         } else {
             0
         };

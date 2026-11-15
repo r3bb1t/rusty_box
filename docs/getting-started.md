@@ -439,8 +439,9 @@ reads `This VM is powered off`. While a startup disk is being created, the
 display shows a spinner and a notice naming the image until the guest draws
 its first frame.
 
-The serial pane is headed `Serial Console (ttyS0)` and shows what the guest
-writes to its first serial port, COM1:
+The serial pane is headed `Serial Console` and shows what the guest writes to
+its first serial port: COM1 on a PC (Linux's `ttyS0`), the PL011 UART on an
+Arm `virt` board (Linux's `ttyAMA0`):
 
 - the log, scrolled to its end;
 - a `serial input` line: `Send`, or Enter, sends the line with a newline
@@ -529,6 +530,13 @@ under Hardware › Hard Disk, open the new-disk sheet on that pane:
 The disk is a flat image with 16 heads and 63 sectors per track. It is
 written by seeking to its end, so on ext4, APFS and a phone's storage the file
 grows as the guest fills it, while on NTFS the whole size is taken at once.
+
+**Where writes go.** The attached disk's card has a `Writes` choice:
+`Saved to the image` (the default) or `Kept until power-off`. The second opens
+the image read-only and keeps the guest's writes in a journal that is removed
+at power-off, so every power-on starts from the same disk; Restart keeps them. `Journal` names the file
+the journal is named after, with a random suffix added; leave it blank to keep
+the journal beside the image.
 
 **A floppy image.** `…` › `Create floppy image…` opens the floppy maker: one
 of the ten bximage formats, from 160 KB to 2.88 MB, written to the path under
@@ -654,7 +662,7 @@ only when a limit is set.
 |-----|---------|
 | `backend` | `"egui"` (the windowed shell; the default in a build with the `gui-egui` feature, which is on by default), `"terminal"` (text mode in your terminal), or `"headless"` (no display, for benchmarks and CI). |
 | `width` / `height` / `bpp` | Preferred pre-boot VBE mode. It raises the display capability ceiling so the guest *may* select this resolution (GRUB `gfxpayload`, vesafb, KMS). It does not force the mode; the guest decides. Takes effect only when both `width` and `height` are given. `bpp` is 8, 16, 24 or 32, and defaults to 32. |
-| `pci_vga` | **Experimental.** Off by default. Registers the VGA adapter as a PCI device (`1234:1111`), which lets Linux's `bochs-drm` driver bind and switch the console to a KMS framebuffer at the preferred resolution. Caveat: when `bochs-drm` takes over, the text console goes dark until the framebuffer console comes up, and during a slow boot phase that can look like a hang. Confirm your config boots with it off before turning it on. |
+| `pci_vga` | On by default. Puts the VGA adapter on the PCI bus as device `1234:1111` (Bochs `pci: slot1=pcivga`). X servers and Linux's `bochs-drm` look for a display there: SliTaz 5.0's X finds no screen with it off. With it on, when `bochs-drm` takes over the text console goes dark until the framebuffer console comes up, which during a slow boot phase can look like a hang. `false` gives the ISA-only adapter a default Bochs configuration has. |
 | `stretch` | On a phone, stretch the full-screen console to fill the screen rather than keep the guest's shape. Off by default; the full-screen menu's `Stretch to fill` sets it. |
 | `pointer_speed_percent` | On a phone, the trackpad's cursor speed, in percent of the finger's travel across the guest's image: 50 to 300, 100 by default. The full-screen menu's `Pointer speed` sets it. |
 
@@ -686,6 +694,8 @@ disk instead of the installer again. No guest install is recorded yet (see
 path = "my-disk.img"
 channel = 0          # ATA channel 0 or 1 (default 0)
 drive = 0            # master (0) or slave (1) (default 0)
+mode = "flat"        # or "volatile": the image is read-only; writes go to a journal removed at power-off
+# journal = "xp.journal"   # volatile only, optional: the journal's name, with a random suffix added; default: beside the image
 chs = { cylinders = 1024, heads = 16, sectors_per_track = 63 }  # optional override
 ```
 
@@ -693,6 +703,19 @@ When `chs` is omitted, the geometry is worked out from the file size: 16 heads
 and 63 sectors per track, with as many cylinders as the size needs. The file
 must be a non-zero multiple of 512 bytes. Override `chs` only for images that
 expect an unusual layout.
+
+With `mode = "volatile"` the guest can write the disk but the file never
+changes: the image is opened read-only and every sector written goes to a
+journal, named after the image (or after `journal`) with a random suffix, that
+is removed at power-off. The shell's Restart keeps the writes; only powering
+off discards them. Every power-on starts from the same disk, which is what a
+debugging run wants. A snapshot taken while the VM runs carries the written
+sectors and restores them, and refuses to restore over an image that has been
+modified since. A `journal` without `mode = "volatile"` is refused, unless
+`--disk-mode flat` on the command line sets the file's volatile mode aside;
+an empty `journal` or `"none"` means beside the image, and a relative one on
+the command line or the Hard disk page names a file in the folder the
+emulator was started in.
 
 ### `[disk.create]`: create a blank disk automatically
 
@@ -958,8 +981,9 @@ Two practical notes:
 2. Did you set **`max_instructions`**? The VM stops silently when the limit
    runs out, and a literal `0` in the config file or on the command line runs
    nothing at all.
-3. Is **`pci_vga = true`**? The console goes dark between `bochs-drm` binding
-   and the framebuffer console coming up. Retest with it off to compare.
+3. Is **`pci_vga`** on (the default)? The console goes dark between
+   `bochs-drm` binding and the framebuffer console coming up. Retest with
+   `pci_vga = false` to compare.
 
 **The badge reads Faulted.** An error notice is on screen. It names what
 failed, for example a missing BIOS file or a disk image that could not be
@@ -1044,6 +1068,8 @@ add the memory and IPS target the guest needs (see
 | `--boot <disk,cdrom>` | `boot.order` | Boot order: `disk`, `cdrom`, or both, comma-separated, each at most once |
 | `--disk <PATH>` | `disk.path` | Attach an existing disk image |
 | `--disk-chs <C:H:S>` | `disk.chs` | Override the disk geometry (`,` also accepted as separator) |
+| `--disk-mode <flat\|volatile>` | `disk.mode` | Where writes go: into the image (`flat`, the default) or into a journal removed at power-off (`volatile`) |
+| `--disk-journal <PATH>` | `disk.journal` | The volatile journal's name (a random suffix is added); default: beside the image |
 | `--create-disk <PATH>` | `disk.create.path` | Create the disk image at this path (conflicts with `--disk` / `--disk-chs`) |
 | `--create-disk-size <SIZE>` | `disk.create.size` | Size of the created disk, e.g. `12G` |
 | `--overwrite-created-disk` | `disk.create.overwrite` | Recreate the image on every launch |

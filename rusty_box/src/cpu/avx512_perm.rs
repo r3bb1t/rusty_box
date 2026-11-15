@@ -5,7 +5,9 @@
 //!
 //! Mirrors Bochs `cpu/avx/avx512.cc` shuffle/permute section.
 
-use super::{cpu::BxCpuC, decoder::Instruction, xmm::BxPackedZmmRegister};
+use super::cpu::BxCpuC;
+use super::decoder::Instruction;
+use super::xmm::BxPackedZmmRegister;
 
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
@@ -595,7 +597,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let dst = read_zmm(self, instr.dst());
         let mut result = BxPackedZmmRegister::default();
         for n in 0..elements {
-            let control = if index_from_dst { dst.zmm32u(n) } else { op1.zmm32u(n) };
+            let control = if index_from_dst {
+                dst.zmm32u(n)
+            } else {
+                op1.zmm32u(n)
+            };
             let sel = (control & control_mask) as usize;
             let from_op2 = control & (elements as u32) != 0;
             let v = if from_op2 {
@@ -623,7 +629,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let dst = read_zmm(self, instr.dst());
         let mut result = BxPackedZmmRegister::default();
         for n in 0..elements {
-            let control = if index_from_dst { dst.zmm64u(n) } else { op1.zmm64u(n) };
+            let control = if index_from_dst {
+                dst.zmm64u(n)
+            } else {
+                op1.zmm64u(n)
+            };
             let sel = (control & control_mask) as usize;
             let from_op2 = control & (elements as u64) != 0;
             let v = if from_op2 {
@@ -645,14 +655,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub fn evex_vpermt2d(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_perm2_d(instr, false)
     }
+
     /// VPERMI2D / VPERMI2PS — EVEX.66.0F38.W0 76 / 77
     pub fn evex_vpermi2d(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_perm2_d(instr, true)
     }
+
     /// VPERMT2Q / VPERMT2PD — EVEX.66.0F38.W1 7E / 7F
     pub fn evex_vpermt2q(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_perm2_q(instr, false)
     }
+
     /// VPERMI2Q / VPERMI2PD — EVEX.66.0F38.W1 76 / 77
     pub fn evex_vpermi2q(&mut self, instr: &Instruction) -> super::Result<()> {
         self.evex_perm2_q(instr, true)
@@ -717,7 +730,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
-
 }
 
 #[cfg(all(test, feature = "alloc"))]
@@ -729,10 +741,10 @@ mod tests {
     //! selects between vvvv and r/m — so the same index vector gives
     //! different answers for the two, which is what these tests pin.
 
-    use crate::cpu::decoder::BxSegregs;
     use rusty_box_decoder::opcode::Opcode;
 
     use super::*;
+    use crate::cpu::decoder::BxSegregs;
 
     fn evex(opcode: Opcode) -> Instruction {
         let mut i = Instruction::default();
@@ -803,7 +815,11 @@ mod tests {
         c.execute_instruction(&evex(Opcode::EvexVpermilpdVpdHpdWpd))
             .unwrap();
         assert_eq!(c.vmm[0].zmm64u(0), 0xBBBB, "bit 1 set selects element 1");
-        assert_eq!(c.vmm[0].zmm64u(1), 0xAAAA, "bit 0 is not part of the control");
+        assert_eq!(
+            c.vmm[0].zmm64u(1),
+            0xAAAA,
+            "bit 0 is not part of the control"
+        );
     }
 
     #[test]

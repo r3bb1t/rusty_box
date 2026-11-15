@@ -1,0 +1,36 @@
+# Test inputs for rusty_box_symbols, built by writers the engine itself never
+# uses. A dev-dependency only: nothing here ships, and nothing here is held
+# to the engine's zero-panic rule (a fixture that cannot be built is a broken
+# test, and a panic says so).
+[package]
+name = "rusty_box_symbols_fixtures"
+description = "Generated PE, ELF, DWARF, PDB, cabinet and compressed-stream test files for rusty_box_symbols"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+# DEFLATE and zlib writers (miniz_oxide underneath), already in Cargo.lock.
+flate2 = "1.1"
+# The reference Zstandard library (C), to write frames the decoder must read.
+zstd = "0.13"
+# Cabinet writer (stored and MSZIP folders); LZX cabinets come from makecab.
+cab = "0.6"
+# ELF writer and reader, for test files and the images a loader makes.
+object = { version = "0.40", features = ["write"] }
+# Microsoft's PDB crate: its MSF and MSFZ writers and stream builders lay
+# the fixture PDBs out (the engine reads them with its own code).
+ms-pdb = "0.1.22"
+# ms-pdb's errors.
+anyhow = "1"
+# ms-pdb's stream headers are zerocopy structs.
+zerocopy = "0.8"
+# DWARF writer for test files.
+gimli = { version = "0.34", default-features = false, features = ["write"] }
+
+[lints]
+workspace = true

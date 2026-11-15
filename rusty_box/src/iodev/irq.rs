@@ -284,13 +284,17 @@ impl IrqFabric {
     /// Bochs ioapic.cc `ioapic_read`.
     #[inline]
     pub(crate) fn mmio_read(&self, offset: u64, len: u32, data: &mut [u8]) {
-        self.ioapic.mem_read(offset, len, data);
+        self.ioapic
+            .mem_read(rusty_box_devices::api::WindowOffset(offset), len, data);
     }
 
     /// Bochs ioapic.cc `ioapic_write`, then its trailing `service_ioapic()`.
     #[inline]
     pub(crate) fn mmio_write(&mut self, offset: u64, len: u32, data: &[u8]) {
-        match self.ioapic.mem_write(offset, len, data) {
+        match self
+            .ioapic
+            .mem_write(rusty_box_devices::api::WindowOffset(offset), len, data)
+        {
             ServiceRequest::NotNeeded => {}
             ServiceRequest::Needed => self.service_ioapic(),
         }
@@ -464,11 +468,7 @@ struct PicAcknowledge<'a> {
 impl ExtIntVector for PicAcknowledge<'_> {
     #[inline]
     fn acknowledge(&mut self) -> u8 {
-        acknowledge_8259(
-            self.pic,
-            self.acknowledge_count,
-            self.vectors_acknowledged,
-        )
+        acknowledge_8259(self.pic, self.acknowledge_count, self.vectors_acknowledged)
     }
 }
 
@@ -524,7 +524,10 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(first[0].vector, 0x45);
 
-        assert!(fabric.resample_on_eoi(0x45), "line still high → re-serviced");
+        assert!(
+            fabric.resample_on_eoi(0x45),
+            "line still high → re-serviced"
+        );
         let (again, n) = fabric.ioapic_mut().take_pending_deliveries();
         assert_eq!(n, 1);
         assert_eq!(again[0].vector, 0x45);
@@ -536,7 +539,10 @@ mod tests {
         program_ioapic_pin(&mut fabric, 6, 0x46, false);
         fabric.set_ioapic_pin(6, true);
         fabric.ioapic_mut().take_pending_deliveries();
-        assert!(!fabric.resample_on_eoi(0x46), "edge entries are never resampled");
+        assert!(
+            !fabric.resample_on_eoi(0x46),
+            "edge entries are never resampled"
+        );
         assert_eq!(fabric.ioapic_mut().take_pending_deliveries().1, 0);
     }
 
@@ -566,12 +572,18 @@ mod tests {
         fabric.set_ioapic_pin(5, true);
 
         let (queued, n) = fabric.ioapic_mut().take_pending_deliveries();
-        assert_eq!(n, 1, "the entry's own pin is the trigger, masked 8259 or not");
+        assert_eq!(
+            n, 1,
+            "the entry's own pin is the trigger, masked 8259 or not"
+        );
         assert_eq!(
             queued[0].vector, spurious,
             "the 8259 supplied the vector, and with every line masked that is its spurious one"
         );
-        assert_ne!(queued[0].vector, NEVER_FROM_THE_PIC, "the entry's vector field is ignored");
+        assert_ne!(
+            queued[0].vector, NEVER_FROM_THE_PIC,
+            "the entry's vector field is ignored"
+        );
         assert_eq!(
             fabric.acknowledge_count(),
             1,

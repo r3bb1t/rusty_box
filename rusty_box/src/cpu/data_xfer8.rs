@@ -3,6 +3,7 @@
 // 8-bit data transfer operations: MOV, etc.
 // Mirrors Bochs cpp/cpu/data_xfer8.cc
 
+use crate::config::BxEffAddress;
 use crate::cpu::decoder::{BxSegregs, Instruction};
 
 /// MOV_ALOd: MOV AL, moffs8 - Load AL from memory
@@ -14,7 +15,7 @@ pub fn MOV_ALOd<T: crate::cpu::instrumentation::Instrumentation>(
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = BxSegregs::from(instr.seg());
-    let offset = instr.id();
+    let offset = BxEffAddress::from_u32(instr.id());
     let val = cpu.v_read_byte(seg, offset)?;
     cpu.set_al(val);
     Ok(())
@@ -29,7 +30,7 @@ pub fn MOV_OdAL<T: crate::cpu::instrumentation::Instrumentation>(
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = BxSegregs::from(instr.seg());
-    let offset = instr.id();
+    let offset = BxEffAddress::from_u32(instr.id());
     let al = cpu.al();
     cpu.v_write_byte(seg, offset, al)?;
     Ok(())

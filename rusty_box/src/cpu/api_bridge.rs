@@ -9,10 +9,11 @@
 //! - `Emulator::cpu_snapshot`
 //! - `Emulator::setup_cpu_mode` (and friends)
 
+use super::BxCpuC;
 use super::arch_state::{SegmentAttributeParts, SegmentAttributes, SegmentState};
 use super::decoder::BxSegregs;
 use super::instrumentation::X86Reg;
-use super::BxCpuC;
+use crate::config::{BxLinAddress, BxPhyAddress};
 
 /// The default operand and address size a segment carries — the descriptor's
 /// D/B and L bits as one value.
@@ -225,7 +226,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             s.cache.p = state.attributes.is_present();
             s.cache.dpl = state.attributes.dpl();
             s.cache.r#type = state.attributes.kind();
-            s.cache.u.set_segment_base(state.base);
+            s.cache.u.set_segment_base(BxLinAddress::new(state.base));
             s.cache.u.set_segment_limit_scaled(state.scaled_limit());
             s.cache.u.set_segment_g(state.attributes.is_granular());
             s.cache.u.set_segment_d_b(state.attributes.is_default_big());
@@ -324,9 +325,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// task priority register on the local APIC. Return the LAPIC TPR >> 4.
     #[inline]
     pub(crate) fn cr8_for_api(&self) -> u64 {
-        {
-            (self.lapic.get_tpr() as u64) >> 4
-        }
+        (self.lapic.get_tpr() as u64) >> 4
     }
 
     #[inline]
@@ -410,16 +409,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     #[inline]
     pub(crate) fn gdtr_base_for_api(&self) -> u64 {
-        self.gdtr.base
+        self.gdtr.base.get()
     }
+
     #[inline]
     pub(crate) fn set_gdtr_base_for_api(&mut self, v: u64) {
-        self.gdtr.base = v;
+        self.gdtr.base = BxLinAddress::new(v);
     }
+
     #[inline]
     pub(crate) fn gdtr_limit_for_api(&self) -> u64 {
         self.gdtr.limit as u64
     }
+
     #[inline]
     pub(crate) fn set_gdtr_limit_for_api(&mut self, v: u32) {
         self.gdtr.limit = v as u16;
@@ -427,16 +429,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     #[inline]
     pub(crate) fn idtr_base_for_api(&self) -> u64 {
-        self.idtr.base
+        self.idtr.base.get()
     }
+
     #[inline]
     pub(crate) fn set_idtr_base_for_api(&mut self, v: u64) {
-        self.idtr.base = v;
+        self.idtr.base = BxLinAddress::new(v);
     }
+
     #[inline]
     pub(crate) fn idtr_limit_for_api(&self) -> u64 {
         self.idtr.limit as u64
     }
+
     #[inline]
     pub(crate) fn set_idtr_limit_for_api(&mut self, v: u32) {
         self.idtr.limit = v as u16;
@@ -446,6 +451,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(crate) fn ldtr_selector_for_api(&self) -> u16 {
         self.ldtr.selector.value
     }
+
     #[inline]
     pub(crate) fn set_ldtr_selector_for_api(&mut self, v: u16) {
         self.ldtr.selector.value = v;
@@ -455,6 +461,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(crate) fn tr_selector_for_api(&self) -> u16 {
         self.tr.selector.value
     }
+
     #[inline]
     pub(crate) fn set_tr_selector_for_api(&mut self, v: u16) {
         self.tr.selector.value = v;
@@ -466,6 +473,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(crate) fn tsc_for_api(&self) -> u64 {
         self.get_virtual_tsc(self.cpu_local_ticks())
     }
+
     #[inline]
     pub(crate) fn set_tsc_for_api(&mut self, v: u64) {
         let t = self.cpu_local_ticks();
@@ -547,6 +555,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(crate) fn efer_for_api(&self) -> u64 {
         self.efer.get32() as u64
     }
+
     /// Write EFER whole, including LMA, and recompute the processor's mode.
     ///
     /// This is the register-level write, not the MSR one: a caller stating
@@ -670,8 +679,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// `IA32_APERF` and `IA32_MPERF` always, and `IA32_TSC_DEADLINE` while the
     /// local APIC's timer is not in TSC-deadline mode.
     pub fn write_msr_for_api(&mut self, msr: u32, val: u64) -> super::Result<()> {
-        use super::msr::*;
         use super::MsrRefusal;
+        use super::msr::*;
         if !self.has_msr(msr) {
             return Self::msr_refused(msr, MsrRefusal::Absent);
         }
@@ -820,24 +829,31 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub(crate) fn fpu_sw_for_api(&self) -> u16 {
         self.the_i387.swd
     }
+
     pub(crate) fn set_fpu_sw_for_api(&mut self, v: u16) {
         self.the_i387.swd = v;
     }
+
     pub(crate) fn fpu_cw_for_api(&self) -> u16 {
         self.the_i387.cwd
     }
+
     pub(crate) fn set_fpu_cw_for_api(&mut self, v: u16) {
         self.the_i387.cwd = v;
     }
+
     pub(crate) fn fpu_tag_for_api(&self) -> u16 {
         self.the_i387.twd
     }
+
     pub(crate) fn set_fpu_tag_for_api(&mut self, v: u16) {
         self.the_i387.twd = v;
     }
+
     pub(crate) fn mxcsr_for_api(&self) -> u32 {
         self.mxcsr.mxcsr
     }
+
     pub(crate) fn set_mxcsr_for_api(&mut self, v: u32) {
         self.mxcsr.mxcsr = v;
     }
@@ -1318,14 +1334,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
 
     fn mem_read(&mut self, addr: u64, buf: &mut [u8]) -> bool {
         for (i, slot) in buf.iter_mut().enumerate() {
-            *slot = self.mem_read_byte(addr + i as u64);
+            *slot = self.mem_read_byte(BxPhyAddress::new(addr) + i as u64);
         }
         true
     }
 
     fn mem_write(&mut self, addr: u64, data: &[u8]) -> bool {
         for (i, &byte) in data.iter().enumerate() {
-            self.mem_write_byte(addr + i as u64, byte);
+            self.mem_write_byte(BxPhyAddress::new(addr) + i as u64, byte);
         }
         true
     }
@@ -1334,7 +1350,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
         virt_read_chunked(
             buf,
             vaddr,
-            |ctx: &mut Self, va| ctx.translate_linear_for_diag(va),
+            |ctx: &mut Self, va| ctx.translate_linear_for_diag(BxLinAddress::new(va)),
             self,
         )
     }
@@ -1343,7 +1359,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
         virt_read_chunked(
             buf,
             vaddr,
-            |ctx: &mut Self, va| ctx.translate_linear_with_cr3(va, cr3),
+            |ctx: &mut Self, va| ctx.translate_linear_with_cr3(BxLinAddress::new(va), cr3),
             self,
         )
     }
@@ -1355,9 +1371,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
     fn rip(&self) -> u64 {
         BxCpuC::rip(self)
     }
+
     fn icount(&self) -> u64 {
         self.icount
     }
+
     fn cr3(&self) -> u64 {
         self.cr3
     }
@@ -1375,7 +1393,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> CpuAccess
 fn virt_read_chunked<C, Tr>(buf: &mut [u8], start_va: u64, translate: Tr, ctx: &mut C) -> bool
 where
     C: ReadsPhysical,
-    Tr: Fn(&mut C, u64) -> Option<u64>,
+    Tr: Fn(&mut C, u64) -> Option<BxPhyAddress>,
 {
     let mut off: usize = 0;
     while off < buf.len() {
@@ -1395,14 +1413,14 @@ where
 
 /// The one operation [`virt_read_chunked`] needs from what it is reading.
 trait ReadsPhysical {
-    fn read_physical_byte(&mut self, paddr: u64) -> u8;
+    fn read_physical_byte(&mut self, paddr: BxPhyAddress) -> u8;
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> ReadsPhysical
     for crate::cpu::exec_ctx::ExecCtx<'_, T>
 {
     #[inline]
-    fn read_physical_byte(&mut self, paddr: u64) -> u8 {
+    fn read_physical_byte(&mut self, paddr: BxPhyAddress) -> u8 {
         self.mem_read_byte(paddr)
     }
 }
@@ -1448,11 +1466,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::ResetReason;
     use crate::cpu::crregs::{BxCr0, BxCr4, BxEfer};
     use crate::cpu::exec_ctx::{ExecCtx, TestMachine};
-    use crate::cpu::msr::{BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_MPERF, BX_MSR_TSC_DEADLINE};
     use crate::cpu::fetch_mode::FetchModeMask;
-    use crate::cpu::ResetReason;
+    use crate::cpu::msr::{BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_MPERF, BX_MSR_TSC_DEADLINE};
 
     /// CR0.TS and CR0.EM are what make x87, MMX and SSE unavailable. A host
     /// setting them has to close the same doors a guest `MOV CR0` closes, or
@@ -1576,10 +1594,16 @@ mod tests {
         assert_eq!(cpu.read_msr_for_api(BX_MSR_TSC_DEADLINE).unwrap(), 0);
 
         let ticks = cpu.system_ticks();
-        assert!(cpu.lapic.write_x2apic(0x320, 0x0004_0030, ticks), "LVT timer: TSC-deadline");
+        assert!(
+            cpu.lapic.write_x2apic(0x320, 0x0004_0030, ticks),
+            "LVT timer: TSC-deadline"
+        );
         cpu.write_msr_for_api(BX_MSR_TSC_DEADLINE, ticks + 1_000)
             .expect("a timer in TSC-deadline mode takes the deadline");
-        assert_eq!(cpu.read_msr_for_api(BX_MSR_TSC_DEADLINE).unwrap(), ticks + 1_000);
+        assert_eq!(
+            cpu.read_msr_for_api(BX_MSR_TSC_DEADLINE).unwrap(),
+            ticks + 1_000
+        );
     }
 
     /// Writes to `IA32_APERF` and `IA32_MPERF` are refused rather than

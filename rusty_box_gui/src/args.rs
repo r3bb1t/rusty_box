@@ -1,6 +1,9 @@
+use std::fmt;
+use std::path::PathBuf;
+use std::str::FromStr;
+
 use clap::{ArgAction, Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
-use std::{fmt, path::PathBuf, str::FromStr};
 
 /// The launcher's command line. `Args::default()` is the command line with no
 /// flags: every default below is the one clap gives an absent flag.
@@ -59,6 +62,17 @@ pub struct Args {
 
     #[arg(long = "disk-chs", value_name = "CYLINDERS:HEADS:SPT")]
     pub disk_chs: Option<DiskGeometry>,
+
+    /// Where the guest's writes to the disk go — Bochs `mode=`: `flat`
+    /// changes the image, `volatile` keeps them in a journal removed at
+    /// power-off and never changes the image.
+    #[arg(long = "disk-mode", value_enum)]
+    pub disk_mode: Option<crate::config::DiskModeName>,
+
+    /// The file a volatile disk's journal is named after, with a random
+    /// suffix added (Bochs `journal=`); by default the image itself.
+    #[arg(long = "disk-journal", value_name = "PATH")]
+    pub disk_journal: Option<PathBuf>,
 
     #[arg(long = "create-disk", value_name = "PATH", conflicts_with_all = ["disk", "disk_chs"])]
     pub create_disk: Option<PathBuf>,
@@ -152,6 +166,8 @@ impl Args {
             boot,
             disk,
             disk_chs,
+            disk_mode,
+            disk_journal,
             create_disk,
             create_disk_size,
             overwrite_created_disk,
@@ -181,6 +197,8 @@ impl Args {
             || !boot.is_empty()
             || disk.is_some()
             || disk_chs.is_some()
+            || disk_mode.is_some()
+            || disk_journal.is_some()
             || create_disk.is_some()
             || create_disk_size.is_some()
             || *overwrite_created_disk
@@ -224,6 +242,8 @@ impl Args {
             boot: _,
             disk: _,
             disk_chs: _,
+            disk_mode: _,
+            disk_journal: _,
             create_disk: _,
             create_disk_size: _,
             overwrite_created_disk: _,
@@ -258,6 +278,82 @@ impl Args {
             flags.push("--log-level");
         }
         flags
+    }
+
+    /// The flags this command line sets that only a PC has, as spelled on it.
+    /// An Arm `virt` machine refuses each rather than dropping it. The flags
+    /// every machine reads are `--config`, `--no-config`, `--display`,
+    /// `--log-level`, `--memory-mib`, `--ips` and `--disk`. The destructuring
+    /// is exhaustive, so a new flag must be sorted here too.
+    pub fn pc_flags(&self) -> Vec<&'static str> {
+        let Args {
+            config: _,
+            no_config: _,
+            bios,
+            vga_bios,
+            display: _,
+            engine,
+            cpu_capabilities,
+            boot,
+            disk: _,
+            disk_chs,
+            disk_mode,
+            disk_journal,
+            create_disk,
+            create_disk_size,
+            overwrite_created_disk,
+            cdrom,
+            memory_mib: _,
+            host_memory_mib,
+            memory_block_kib,
+            ips: _,
+            max_instructions,
+            smp_quantum,
+            cpuid_freq,
+            port_e9_hack,
+            sync_realtime,
+            cpus,
+            cpu_sockets,
+            cpu_cores,
+            cpu_threads,
+            pci,
+            no_pci,
+            sync_slowdown,
+            no_sync_slowdown,
+            log_level: _,
+        } = self;
+        [
+            ("--bios", bios.is_some()),
+            ("--vga-bios", vga_bios.is_some()),
+            ("--engine", engine.is_some()),
+            ("--cpu-capabilities", cpu_capabilities.is_some()),
+            ("--boot", !boot.is_empty()),
+            ("--disk-chs", disk_chs.is_some()),
+            ("--disk-mode", disk_mode.is_some()),
+            ("--disk-journal", disk_journal.is_some()),
+            ("--create-disk", create_disk.is_some()),
+            ("--create-disk-size", create_disk_size.is_some()),
+            ("--overwrite-created-disk", *overwrite_created_disk),
+            ("--cdrom", cdrom.is_some()),
+            ("--host-memory-mib", host_memory_mib.is_some()),
+            ("--memory-block-kib", memory_block_kib.is_some()),
+            ("--max-instructions", max_instructions.is_some()),
+            ("--smp-quantum", smp_quantum.is_some()),
+            ("--cpuid-freq", cpuid_freq.is_some()),
+            ("--port-e9-hack", port_e9_hack.is_some()),
+            ("--sync-realtime", *sync_realtime),
+            ("--cpus", cpus.is_some()),
+            ("--cpu-sockets", cpu_sockets.is_some()),
+            ("--cpu-cores", cpu_cores.is_some()),
+            ("--cpu-threads", cpu_threads.is_some()),
+            ("--pci", *pci),
+            ("--no-pci", *no_pci),
+            ("--sync-slowdown", *sync_slowdown),
+            ("--no-sync-slowdown", *no_sync_slowdown),
+        ]
+        .into_iter()
+        .filter_map(|(flag, set)| set.then_some(flag))
+        .collect()
     }
 
     /// Whether `--config` is all this command line says about the machine:
@@ -437,7 +533,16 @@ mod tests {
     fn only_a_config_or_a_machine_flag_names_a_machine() {
         let parse = |line: &[&str]| Args::try_parse_from(line).expect("the command line parses");
         assert!(!parse(&["rusty_box_gui"]).names_a_machine());
-        assert!(!parse(&["rusty_box_gui", "--display", "headless", "--log-level", "info"]).names_a_machine());
+        assert!(
+            !parse(&[
+                "rusty_box_gui",
+                "--display",
+                "headless",
+                "--log-level",
+                "info"
+            ])
+            .names_a_machine()
+        );
         assert!(!parse(&["rusty_box_gui", "--no-config", "--engine", "whp"]).names_a_machine());
         assert!(parse(&["rusty_box_gui", "--config", "vm.toml"]).names_a_machine());
         assert!(parse(&["rusty_box_gui", "--cdrom", "a.iso"]).names_a_machine());
@@ -450,18 +555,40 @@ mod tests {
     fn only_a_config_file_with_nothing_beside_it_names_only_a_config_file() {
         let parse = |line: &[&str]| Args::try_parse_from(line).expect("the command line parses");
         assert!(parse(&["rusty_box_gui", "--config", "vm.toml"]).names_only_a_config_file());
-        assert!(parse(&["rusty_box_gui", "-f", "vm.toml", "--display", "headless"])
-            .names_only_a_config_file());
+        assert!(
+            parse(&["rusty_box_gui", "-f", "vm.toml", "--display", "headless"])
+                .names_only_a_config_file()
+        );
         assert!(!parse(&["rusty_box_gui"]).names_only_a_config_file());
         assert!(!parse(&["rusty_box_gui", "--cdrom", "a.iso"]).names_only_a_config_file());
-        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--memory-mib", "64"])
-            .names_only_a_config_file());
-        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--cdrom", "a.iso"])
-            .names_only_a_config_file());
-        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--engine", "interpreter"])
-            .names_only_a_config_file());
-        assert!(!parse(&["rusty_box_gui", "--config", "vm.toml", "--log-level", "info"])
-            .names_only_a_config_file());
+        assert!(
+            !parse(&["rusty_box_gui", "--config", "vm.toml", "--memory-mib", "64"])
+                .names_only_a_config_file()
+        );
+        assert!(
+            !parse(&["rusty_box_gui", "--config", "vm.toml", "--cdrom", "a.iso"])
+                .names_only_a_config_file()
+        );
+        assert!(
+            !parse(&[
+                "rusty_box_gui",
+                "--config",
+                "vm.toml",
+                "--engine",
+                "interpreter"
+            ])
+            .names_only_a_config_file()
+        );
+        assert!(
+            !parse(&[
+                "rusty_box_gui",
+                "--config",
+                "vm.toml",
+                "--log-level",
+                "info"
+            ])
+            .names_only_a_config_file()
+        );
     }
 
     #[test]
@@ -508,6 +635,9 @@ mod tests {
             none
         );
         #[cfg(feature = "gui-egui")]
-        assert_eq!(parse(&["rusty_box_gui", "--display", "egui"]).run_flags(), none);
+        assert_eq!(
+            parse(&["rusty_box_gui", "--display", "egui"]).run_flags(),
+            none
+        );
     }
 }

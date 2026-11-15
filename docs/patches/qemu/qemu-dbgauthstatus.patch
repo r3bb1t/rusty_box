@@ -1,0 +1,64 @@
+--- a/target/arm/debug_helper.c
++++ b/target/arm/debug_helper.c
+@@ -171,6 +171,39 @@
+     env->cp15.dbgclaim &= ~(value & 0xFF);
+ }
+ 
++/*
++ * DBGAUTHSTATUS_EL1 reports what the external debug authentication
++ * interface enables, as UpdateDbgAuthStatus() sets it. QEMU has no external
++ * debugger, so its signals DBGEN, NIDEN, SPIDEN and SPNIDEN are LOW:
++ * invasive debug is implemented and disabled (0b10) in Non-secure state,
++ * and in Secure state when the CPU has one (0b00, not implemented,
++ * otherwise); non-invasive debug likewise, except that with
++ * FEAT_Debugv8p4 ExternalNoninvasiveDebugEnabled() is always TRUE (NSNID
++ * 0b11) while ExternalSecureNoninvasiveDebugEnabled() follows the Secure
++ * invasive debug enable (SNID 0b10). With FEAT_RME, Realm and Root debug
++ * are implemented and disabled too (RLID, RLNID, RTID and RTNID 0b10).
++ */
++static uint64_t dbgauthstatus_read(CPUARMState *env, const ARMCPRegInfo *ri)
++{
++    ARMCPU *cpu = env_archcpu(env);
++    bool debugv8p4 = arm_feature(env, ARM_FEATURE_AARCH64)
++        ? cpu_isar_feature(aa64_debugv8p4, cpu)
++        : cpu_isar_feature(aa32_debugv8p4, cpu);
++    uint64_t nsid = 2, nsnid = debugv8p4 ? 3 : 2, sid = 0, snid = 0;
++    uint64_t rlid = 0, rtid = 0;
++
++    if (arm_feature(env, ARM_FEATURE_EL3)) {
++        sid = 2;
++        snid = 2;
++    }
++    if (cpu_isar_feature(aa64_rme, cpu)) {
++        rlid = 2;
++        rtid = 2;
++    }
++    return nsid | nsnid << 2 | sid << 4 | snid << 6 |
++        rlid << 12 | rlid << 14 | rtid << 24 | rtid << 26;
++}
++
+ static const ARMCPRegInfo debug_cp_reginfo[] = {
+     /*
+      * DBGDRAR, DBGDSAR: always RAZ since we don't implement memory mapped
+@@ -306,6 +339,11 @@
+       .fgt = FGT_DBGCLAIM,
+       .writefn = dbgclaimclr_write, .raw_writefn = raw_write,
+       .fieldoffset = offsetof(CPUARMState, cp15.dbgclaim) },
++    { .name = "DBGAUTHSTATUS_EL1", .state = ARM_CP_STATE_BOTH,
++      .cp = 14, .opc0 = 2, .opc1 = 0, .crn = 7, .crm = 14, .opc2 = 6,
++      .access = PL1_R, .accessfn = access_tda,
++      .fgt = FGT_DBGAUTHSTATUS_EL1,
++      .type = ARM_CP_NO_RAW, .readfn = dbgauthstatus_read },
+ };
+ 
+ /* These are present only when EL1 supports AArch32 */
+--- a/target/arm/cpregs.h
++++ b/target/arm/cpregs.h
+@@ -821,6 +821,7 @@
+     DO_BIT(HDFGRTR, DBGWVRN_EL1),
+     DO_BIT(HDFGRTR, MDSCR_EL1),
+     DO_BIT(HDFGRTR, DBGCLAIM),
++    DO_BIT(HDFGRTR, DBGAUTHSTATUS_EL1),
+     DO_BIT(HDFGWTR, OSLAR_EL1),
+     DO_BIT(HDFGRTR, OSLSR_EL1),
+     DO_BIT(HDFGRTR, OSECCR_EL1),

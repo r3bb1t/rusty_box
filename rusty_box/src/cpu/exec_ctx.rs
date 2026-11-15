@@ -22,13 +22,13 @@
 
 use core::ops::{Deref, DerefMut};
 
-use super::{cpu::BxCpuC, instrumentation::Instrumentation};
-use crate::{
-    emulator::PcIo,
-    iodev::{devices::DeviceManager, BxDevicesC},
-    memory::BxMemC,
-    pc_system::BxPcSystemC,
-};
+use super::cpu::BxCpuC;
+use super::instrumentation::Instrumentation;
+use crate::emulator::PcIo;
+use crate::iodev::BxDevicesC;
+use crate::iodev::devices::DeviceManager;
+use crate::memory::BxMemC;
+use crate::pc_system::BxPcSystemC;
 
 /// One CPU plus the machine it is executing against.
 pub(crate) struct ExecCtx<'a, T: Instrumentation> {
@@ -145,7 +145,12 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
     pub(crate) fn cpu_with_io(&mut self) -> CpuWithIo<'_, T> {
         CpuWithIo {
             cpu: self.cpu,
-            io: PcIo::new(self.memory, self.devices, self.device_manager, self.pc_system),
+            io: PcIo::new(
+                self.memory,
+                self.devices,
+                self.device_manager,
+                self.pc_system,
+            ),
         }
     }
 }
@@ -277,6 +282,7 @@ pub(crate) fn exec_with<T: Instrumentation, R>(
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
+    use crate::config::A20Mask;
     use crate::emulator::{Emulator, EmulatorConfig};
 
     /// `Emulator` is several MiB; tests need an explicit stack.
@@ -301,7 +307,7 @@ mod tests {
 
                 // Memory and the device bus are reachable in the same scope,
                 // with no pointer stored on the CPU and nothing wired first.
-                ctx.memory.set_a20_mask(u64::MAX);
+                ctx.memory.set_a20_mask(A20Mask::OPEN);
                 let _ = ctx.pc_system.get_enable_a20();
 
                 // Assembling the context is what takes the allocation bases —
@@ -313,7 +319,7 @@ mod tests {
                 // exactly this, and it is the combination the raw wiring
                 // existed to fake.
                 let (cpu, memory, _devices, _pc_system) = ctx.slice_parts();
-                memory.set_a20_mask(u64::MAX);
+                memory.set_a20_mask(A20Mask::OPEN);
                 assert_eq!(cpu.rip(), rip, "deref must reach the same cpu");
             })
             .unwrap()
@@ -334,8 +340,12 @@ mod tests {
         use crate::memory::{BxMemC, BxMemoryStubC};
 
         const MIB: usize = 1024 * 1024;
-        let memory =
-            || BxMemC::new(BxMemoryStubC::create_and_init(MIB, MIB, 4096).unwrap(), false);
+        let memory = || {
+            BxMemC::new(
+                BxMemoryStubC::create_and_init(MIB, MIB, 4096).unwrap(),
+                false,
+            )
+        };
         let mut cpu = BxCpuBuilder::new().build().unwrap();
         cpu.reset(crate::cpu::ResetReason::Hardware);
         let mut first = memory();

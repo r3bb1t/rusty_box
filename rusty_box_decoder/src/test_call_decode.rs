@@ -1,7 +1,8 @@
 #[cfg(test)]
 mod test_call_decode {
-    use crate::decoder::decode32::fetch_decode32;
     use std::println;
+
+    use crate::decoder::decode32::fetch_decode32;
 
     #[test]
     fn test_call_eax_length() {

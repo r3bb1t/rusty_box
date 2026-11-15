@@ -1,13 +1,11 @@
-use super::{
-    cpu::Exception,
-    decoder::BxSegregs,
-    descriptor::{
-        BxDescriptor, BxSegmentReg, BxSelector, DescriptorGate, DescriptorSegment,
-        DescriptorTaskGate, SystemAndGateDescriptorEnum, SEG_VALID_CACHE,
-    },
-    Result,
+use super::Result;
+use super::cpu::Exception;
+use super::decoder::BxSegregs;
+use super::descriptor::{
+    BxDescriptor, BxSegmentReg, BxSelector, DescriptorGate, DescriptorSegment, DescriptorTaskGate,
+    SEG_VALID_CACHE, SystemAndGateDescriptorEnum,
 };
-use crate::config::BxAddress;
+use crate::config::{BxAddress, BxEffAddress, BxLinAddress};
 
 pub fn parse_selector(raw_selector: u16, selector: &mut BxSelector) {
     selector.value = raw_selector;
@@ -43,7 +41,7 @@ pub(super) fn set_segment_ar_data(
     d.p = (ar_data >> 7) & 0x1 != 0;
     d.dpl = ((ar_data >> 5) & 0x3) as u8;
     d.segment = (ar_data >> 4) & 0x1 != 0;
-    d.r#type = (ar_data & 0x0f) as u8;
+    d.r#type = (ar_data & 0x0F) as u8;
 
     d.valid = if valid { SEG_VALID_CACHE } else { 0 };
 
@@ -54,7 +52,7 @@ pub(super) fn set_segment_ar_data(
         d.u.set_segment_l((ar_data >> 13) & 0x1 != 0);
         d.u.set_segment_avl((ar_data >> 12) & 0x1 != 0);
 
-        d.u.set_segment_base(base);
+        d.u.set_segment_base(BxLinAddress::new(base));
         d.u.set_segment_limit_scaled(limit_scaled);
     } else {
         match d.r#type {
@@ -68,7 +66,7 @@ pub(super) fn set_segment_ar_data(
                 d.u.set_segment_avl((ar_data >> 12) & 0x1 != 0);
                 d.u.set_segment_d_b((ar_data >> 14) & 0x1 != 0);
                 d.u.set_segment_g((ar_data >> 15) & 0x1 != 0);
-                d.u.set_segment_base(base);
+                d.u.set_segment_base(BxLinAddress::new(base));
                 d.u.set_segment_limit_scaled(limit_scaled);
             }
             other => {
@@ -90,7 +88,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// Based on BX_CPU_C::fetch_raw_descriptor in segment_ctrl_pro.cc
     pub(super) fn fetch_raw_descriptor(&mut self, selector: &BxSelector) -> Result<(u32, u32)> {
         let index = selector.index as u32;
-        let offset: BxAddress = if selector.ti == 0 {
+        let offset = if selector.ti == 0 {
             // GDT
             let index_offset = index * 8 + 7;
             if index_offset > self.gdtr.limit as u32 {
@@ -103,7 +101,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
-                    error_code: (selector.value & 0xfffc),
+                    error_code: (selector.value & 0xFFFC),
                 });
             }
             self.gdtr.base + (index as u64 * 8)
@@ -113,7 +111,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 tracing::trace!("fetch_raw_descriptor: LDTR.valid=0");
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
-                    error_code: (selector.value & 0xfffc),
+                    error_code: (selector.value & 0xFFFC),
                 });
             }
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -128,7 +126,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
-                    error_code: (selector.value & 0xfffc),
+                    error_code: (selector.value & 0xFFFC),
                 });
             }
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -161,7 +159,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             segment,
             r#type,
             u: super::descriptor::Descriptor::Segment(DescriptorSegment {
-                base: 0,
+                base: BxLinAddress::new(0),
                 limit_scaled: 0,
                 g: false,
                 d_b: false,
@@ -185,7 +183,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let limit_scaled = if g { (limit << 12) | 0xFFF } else { limit };
 
             descriptor.u = super::descriptor::Descriptor::Segment(DescriptorSegment {
-                base,
+                base: BxLinAddress::new(base),
                 limit_scaled,
                 g,
                 d_b,
@@ -244,7 +242,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     let limit_scaled = if g { (limit << 12) | 0xFFF } else { limit };
 
                     descriptor.u = super::descriptor::Descriptor::Segment(DescriptorSegment {
-                        base,
+                        base: BxLinAddress::new(base),
                         limit_scaled,
                         g,
                         d_b,
@@ -339,7 +337,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         let limit_scaled = self.tr.cache.u.segment_limit_scaled();
         if (tss_stackaddr + 7) > limit_scaled {
             tracing::trace!("get_rsp_from_tss: TSSstackaddr > TSS.LIMIT");
-            let err_code = self.tr.selector.value & 0xfffc;
+            let err_code = self.tr.selector.value & 0xFFFC;
             self.exception(Exception::Ts, err_code)?;
             unreachable!("exception() always returns Err");
         }
@@ -350,7 +348,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         if !self.is_canonical(rsp) {
             tracing::error!("get_rsp_from_tss: canonical address failure {:#018x}", rsp);
-            let err_code = self.sregs[BxSegregs::Ss as usize].selector.value & 0xfffc;
+            let err_code = self.sregs[BxSegregs::Ss as usize].selector.value & 0xFFFC;
             self.exception(Exception::Ss, err_code)?;
             unreachable!("exception() always returns Err");
         }
@@ -366,7 +364,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         selector: &BxSelector,
     ) -> Result<(u32, u32, u32)> {
         let index = selector.index as u32;
-        let offset: u64 = if selector.ti == 0 {
+        let offset = if selector.ti == 0 {
             // GDT — need 16 bytes (index*8 + 15)
             let index_offset = index * 8 + 15;
             if index_offset > self.gdtr.limit as u32 {
@@ -378,7 +376,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
-                    error_code: selector.value & 0xfffc,
+                    error_code: selector.value & 0xFFFC,
                 });
             }
             self.gdtr.base + (index as u64 * 8)
@@ -388,7 +386,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 tracing::error!("fetch_raw_descriptor_64: LDTR.valid=0");
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
-                    error_code: selector.value & 0xfffc,
+                    error_code: selector.value & 0xFFFC,
                 });
             }
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -403,7 +401,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
-                    error_code: selector.value & 0xfffc,
+                    error_code: selector.value & 0xFFFC,
                 });
             }
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -419,7 +417,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             tracing::error!("fetch_raw_descriptor_64: extended attributes DWORD4 TYPE != 0");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
-                error_code: selector.value & 0xfffc,
+                error_code: selector.value & 0xFFFC,
             });
         }
 
@@ -445,7 +443,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     ) -> Result<()> {
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let seg_base = seg.cache.u.segment_base();
-        let laddr = (seg_base + addr as u64) & 0xFFFFFFFF;
+        let laddr = (seg_base + u64::from(addr)).masked(0xFFFF_FFFF);
         self.system_write_word(laddr, value)
     }
 
@@ -462,21 +460,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     ) -> Result<()> {
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let seg_base = seg.cache.u.segment_base();
-        let laddr = (seg_base + addr as u64) & 0xFFFFFFFF;
+        let laddr = (seg_base + u64::from(addr)).masked(0xFFFF_FFFF);
         self.system_write_dword(laddr, value)
     }
 
     /// Write qword to new stack at given privilege level (64-bit linear address variant).
     ///
     /// Based on BX_CPU_C::write_new_stack_qword(bx_address laddr, ...) in access.cc.
-    /// Used in long mode where the linear address is 64-bit and there is no segment base.
+    /// Used in 64-bit mode, where SS has no base: the stack pointer `rsp`
+    /// is the linear address written.
     pub(super) fn write_new_stack_qword_64(
         &mut self,
-        laddr: u64,
+        rsp: u64,
         _dpl: u8,
         value: u64,
     ) -> Result<()> {
-        self.system_write_qword(laddr, value)
+        self.system_write_qword(BxLinAddress::new(rsp), value)
     }
 
     /// Load SS segment register
@@ -559,7 +558,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // Descriptor must be valid and a code segment
         if descriptor.valid == 0 || !descriptor.segment || is_data_segment(descriptor.r#type) {
             tracing::error!("check_cs({:#06x}): not a valid code segment!", cs_raw);
-            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, cs_raw & 0xFFFC);
         }
 
         // Bochs ctrl_xfer_pro.cc — L+D_B both set is invalid in long mode
@@ -568,7 +567,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 "check_cs({:#06x}): Both CS.L and CS.D_B bits enabled!",
                 cs_raw
             );
-            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, cs_raw & 0xFFFC);
         }
 
         // Non-conforming code segment: DPL must = CPL
@@ -576,9 +575,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             if descriptor.dpl != check_cpl {
                 tracing::error!(
                     "check_cs({:#06x}): non-conforming code seg descriptor dpl != cpl, dpl={}, cpl={}",
-                    cs_raw, descriptor.dpl, check_cpl
+                    cs_raw,
+                    descriptor.dpl,
+                    check_cpl
                 );
-                return self.exception(Exception::Gp, cs_raw & 0xfffc);
+                return self.exception(Exception::Gp, cs_raw & 0xFFFC);
             }
 
             // RPL must be <= CPL
@@ -589,7 +590,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     check_rpl,
                     check_cpl
                 );
-                return self.exception(Exception::Gp, cs_raw & 0xfffc);
+                return self.exception(Exception::Gp, cs_raw & 0xFFFC);
             }
         } else {
             // Conforming code segment: DPL must be <= CPL
@@ -600,14 +601,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     descriptor.dpl,
                     check_cpl
                 );
-                return self.exception(Exception::Gp, cs_raw & 0xfffc);
+                return self.exception(Exception::Gp, cs_raw & 0xFFFC);
             }
         }
 
         // Code segment must be present — #NP (not #GP) for missing segment
         if !descriptor.p {
             tracing::error!("check_cs({:#06x}): code segment not present!", cs_raw);
-            return self.exception(Exception::Np, cs_raw & 0xfffc);
+            return self.exception(Exception::Np, cs_raw & 0xFFFC);
         }
 
         Ok(())
@@ -761,9 +762,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         };
         let mut descriptor = self.parse_descriptor(dword1, dword2)?;
 
-        tracing::trace!("jump_protected: descriptor segment={}, type={:#x}, dpl={}, p={}, base={:#010x}, limit={:#010x}",
-                      descriptor.segment, descriptor.r#type, descriptor.dpl, descriptor.p,
-                      descriptor.u.segment_base(), descriptor.u.segment_limit_scaled());
+        tracing::trace!(
+            "jump_protected: descriptor segment={}, type={:#x}, dpl={}, p={}, base={:#010x}, limit={:#010x}",
+            descriptor.segment,
+            descriptor.r#type,
+            descriptor.dpl,
+            descriptor.p,
+            descriptor.u.segment_base(),
+            descriptor.u.segment_limit_scaled()
+        );
 
         if descriptor.segment {
             // Code segment descriptor
@@ -778,11 +785,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // DPL checks for gates
             if descriptor.dpl < cpl {
                 tracing::error!("jump_protected: gate.dpl < CPL");
-                return self.exception(Exception::Gp, cs_raw & 0xfffc);
+                return self.exception(Exception::Gp, cs_raw & 0xFFFC);
             }
             if descriptor.dpl < selector.rpl {
                 tracing::error!("jump_protected: gate.dpl < selector.rpl");
-                return self.exception(Exception::Gp, cs_raw & 0xfffc);
+                return self.exception(Exception::Gp, cs_raw & 0xFFFC);
             }
 
             // In long mode, only 386 call gates (type 0xC) are allowed
@@ -793,11 +800,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         "jump_protected: gate type {:#x} unsupported in long mode",
                         descriptor.r#type
                     );
-                    return self.exception(Exception::Gp, cs_raw & 0xfffc);
+                    return self.exception(Exception::Gp, cs_raw & 0xFFFC);
                 }
                 if !descriptor.p {
                     tracing::error!("jump_protected: call gate not present!");
-                    return self.exception(Exception::Np, cs_raw & 0xfffc);
+                    return self.exception(Exception::Np, cs_raw & 0xFFFC);
                 }
                 return self.jmp_call_gate64(&selector);
             }
@@ -808,11 +815,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     tracing::trace!("jump_protected: JMP to TSS type={:#x}", descriptor.r#type);
                     if descriptor.valid == 0 || selector.ti != 0 {
                         tracing::error!("jump_protected: bad TSS selector");
-                        return self.exception(Exception::Gp, cs_raw & 0xfffc);
+                        return self.exception(Exception::Gp, cs_raw & 0xFFFC);
                     }
                     if !descriptor.p {
                         tracing::error!("jump_protected: TSS not present");
-                        return self.exception(Exception::Np, cs_raw & 0xfffc);
+                        return self.exception(Exception::Np, cs_raw & 0xFFFC);
                     }
                     let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
                     self.task_switch(
@@ -846,7 +853,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         "jump_protected: unsupported system descriptor type {:#x}",
                         descriptor.r#type
                     );
-                    self.exception(Exception::Gp, cs_raw & 0xfffc)
+                    self.exception(Exception::Gp, cs_raw & 0xFFFC)
                 }
             }
         }
@@ -871,7 +878,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 let err_code = new_value & 0xFFFC;
 
                 // Null selector check — Bochs segment_ctrl_pro.cc
-                if (new_value & 0xfffc) == 0 {
+                if (new_value & 0xFFFC) == 0 {
                     // Bochs: long64 mode allows null SS when CPL != 3 and RPL == CPL
                     if self.long64_mode() {
                         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
@@ -960,7 +967,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 // Handling for DS, ES, FS, GS
 
                 // Null selector is allowed for these segments
-                if (new_value & 0xfffc) == 0 {
+                if (new_value & 0xFFFC) == 0 {
                     self.load_null_selector(seg, new_value);
                     return Ok(());
                 }
@@ -1077,7 +1084,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         self.sregs[seg_idx].cache.r#type = 0;
 
         // Zero segment descriptor fields — Bochs segment_ctrl_pro.cc
-        self.sregs[seg_idx].cache.u.set_segment_base(0);
+        self.sregs[seg_idx]
+            .cache
+            .u
+            .set_segment_base(BxLinAddress::new(0));
         self.sregs[seg_idx].cache.u.set_segment_limit_scaled(0);
         self.sregs[seg_idx].cache.u.set_segment_g(false);
         self.sregs[seg_idx].cache.u.set_segment_d_b(false);
@@ -1124,7 +1134,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let qual = if instr.mod_c0() {
                 0
             } else {
-                self.resolve_addr(instr)
+                self.resolve_addr(instr).get()
             };
             if self.vmexit_check_ldtr_tr_access(qual)? {
                 return Ok(());
@@ -1142,7 +1152,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         };
 
         // If selector is NULL, invalidate and done
-        if (raw_selector & 0xfffc) == 0 {
+        if (raw_selector & 0xFFFC) == 0 {
             self.ldtr.selector.value = raw_selector;
             self.ldtr.cache.valid = 0;
 
@@ -1156,7 +1166,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // Selector must point into GDT (TI must be 0)
         if selector.ti != 0 {
             tracing::error!("LLDT: selector.ti != 0");
-            self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+            self.exception(Exception::Gp, raw_selector & 0xFFFC)?;
             return Ok(());
         }
 
@@ -1180,27 +1190,27 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             || descriptor.r#type != SystemAndGateDescriptorEnum::BxSysSegmentLdt as u8
         {
             tracing::error!("LLDT: doesn't point to an LDT descriptor!");
-            self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+            self.exception(Exception::Gp, raw_selector & 0xFFFC)?;
             return Ok(());
         }
 
         // Check if present
         if !descriptor.p {
             tracing::error!("LLDT: LDT descriptor not present!");
-            self.exception(Exception::Np, raw_selector & 0xfffc)?;
+            self.exception(Exception::Np, raw_selector & 0xFFFC)?;
             return Ok(());
         }
 
         // In long mode, extend base to 64 bits and check canonical
         // Bochs protect_ctrl.cc
         if self.long64_mode() {
-            descriptor
-                .u
-                .set_segment_base(descriptor.u.segment_base() | (dword3 as u64) << 32);
+            descriptor.u.set_segment_base(BxLinAddress::new(
+                descriptor.u.segment_base().get() | u64::from(dword3) << 32,
+            ));
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
-            if !self.is_canonical(descriptor.u.segment_base()) {
+            if !self.is_canonical(descriptor.u.segment_base().get()) {
                 tracing::error!("LLDT: non-canonical LDT descriptor base!");
-                self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+                self.exception(Exception::Gp, raw_selector & 0xFFFC)?;
                 return Ok(());
             }
         }
@@ -1241,7 +1251,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let qual = if instr.mod_c0() {
                 0
             } else {
-                self.resolve_addr(instr)
+                self.resolve_addr(instr).get()
             };
             if self.vmexit_check_ldtr_tr_access(qual)? {
                 return Ok(());
@@ -1259,7 +1269,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         };
 
         // NULL selector not allowed for LTR
-        if (raw_selector & 0xfffc) == 0 {
+        if (raw_selector & 0xFFFC) == 0 {
             tracing::error!("LTR: loading with NULL selector!");
             self.exception(Exception::Gp, 0)?;
             return Ok(());
@@ -1272,7 +1282,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // Selector must point into GDT (TI must be 0)
         if selector.ti != 0 {
             tracing::error!("LTR: selector.ti != 0");
-            self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+            self.exception(Exception::Gp, raw_selector & 0xFFFC)?;
             return Ok(());
         }
 
@@ -1301,7 +1311,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 "LTR: doesn't point to an available TSS descriptor! type={}",
                 tss_type
             );
-            self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+            self.exception(Exception::Gp, raw_selector & 0xFFFC)?;
             return Ok(());
         }
 
@@ -1310,27 +1320,27 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             && tss_type != SystemAndGateDescriptorEnum::BxSysSegmentAvail386Tss as u8
         {
             tracing::error!("LTR: doesn't point to an available TSS386 descriptor in long mode!");
-            self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+            self.exception(Exception::Gp, raw_selector & 0xFFFC)?;
             return Ok(());
         }
 
         // Check if present
         if !descriptor.p {
             tracing::error!("LTR: TSS descriptor not present!");
-            self.exception(Exception::Np, raw_selector & 0xfffc)?;
+            self.exception(Exception::Np, raw_selector & 0xFFFC)?;
             return Ok(());
         }
 
         // In long mode, extend base to 64 bits and check canonical
         // Bochs protect_ctrl.cc
         if self.long64_mode() {
-            descriptor
-                .u
-                .set_segment_base(descriptor.u.segment_base() | (dword3 as u64) << 32);
+            descriptor.u.set_segment_base(BxLinAddress::new(
+                descriptor.u.segment_base().get() | u64::from(dword3) << 32,
+            ));
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
-            if !self.is_canonical(descriptor.u.segment_base()) {
+            if !self.is_canonical(descriptor.u.segment_base().get()) {
                 tracing::error!("LTR: non-canonical TSS descriptor base!");
-                self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+                self.exception(Exception::Gp, raw_selector & 0xFFFC)?;
                 return Ok(());
             }
         }
@@ -1394,7 +1404,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// Protected mode far CALL
     /// Handles code segments and call gates (same-priv and inner-priv)
     pub(super) fn call_protected(&mut self, cs_raw: u16, disp: u32, os32: bool) -> Result<()> {
-        if (cs_raw & 0xfffc) == 0 {
+        if (cs_raw & 0xFFFC) == 0 {
             tracing::error!("call_protected: CS selector null");
             return self.exception(Exception::Gp, 0);
         }
@@ -1404,13 +1414,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, cs_raw & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, cs_raw & 0xFFFC),
         };
         let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
 
         if cs_descriptor.valid == 0 {
             tracing::error!("call_protected: invalid CS descriptor");
-            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, cs_raw & 0xFFFC);
         }
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
@@ -1430,7 +1440,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Bochs call_far.cc call_protected \u2014 capture old CS / linear
             // return-LIP before branch_far rewrites CS.
             let old_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
-            let temp_lip = self.get_laddr32(BxSegregs::Cs as usize, self.eip()) as u64;
+            let temp_lip = self
+                .get_laddr32(BxSegregs::Cs as usize, BxEffAddress::from_u32(self.eip()))
+                .get();
 
             if os32 {
                 self.write_new_stack_dword(
@@ -1484,11 +1496,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // Check DPL >= CPL and DPL >= RPL
         if cs_descriptor.dpl < cpl {
             tracing::error!("call_protected: gate.dpl < CPL");
-            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, cs_raw & 0xFFFC);
         }
         if cs_descriptor.dpl < cs_selector.rpl {
             tracing::error!("call_protected: gate.dpl < selector.rpl");
-            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, cs_raw & 0xFFFC);
         }
 
         match cs_descriptor.r#type {
@@ -1504,7 +1516,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 // Available TSS — CALL causes task switch
                 if !cs_descriptor.p {
                     tracing::error!("call_protected: TSS not present");
-                    return self.exception(Exception::Np, cs_raw & 0xfffc);
+                    return self.exception(Exception::Np, cs_raw & 0xFFFC);
                 }
                 self.task_switch(
                     &cs_selector,
@@ -1521,7 +1533,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     "call_protected: unsupported system descriptor type {:#x}",
                     cs_descriptor.r#type
                 );
-                return self.exception(Exception::Gp, cs_raw & 0xfffc);
+                return self.exception(Exception::Gp, cs_raw & 0xFFFC);
             }
         }
 
@@ -1544,7 +1556,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // Gate must be present
         if !gate_descriptor.p {
             tracing::error!("call_gate: gate not present");
-            return self.exception(Exception::Np, _gate_selector.value & 0xfffc);
+            return self.exception(Exception::Np, _gate_selector.value & 0xFFFC);
         }
 
         // Get CS:EIP from gate
@@ -1553,7 +1565,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // SAFETY: descriptor type verified as gate before union access
         let new_eip = gate_descriptor.u.gate_dest_offset();
 
-        if (gate_cs_raw & 0xfffc) == 0 {
+        if (gate_cs_raw & 0xFFFC) == 0 {
             tracing::error!("call_gate: CS selector null");
             return self.exception(Exception::Gp, 0);
         }
@@ -1563,7 +1575,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         let (dword1, dword2) = match self.fetch_raw_descriptor(&gate_cs_selector) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, gate_cs_raw & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, gate_cs_raw & 0xFFFC),
         };
         let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
 
@@ -1573,7 +1585,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             || is_data_segment(cs_descriptor.r#type)
         {
             tracing::error!("call_gate: not code segment");
-            return self.exception(Exception::Gp, gate_cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, gate_cs_raw & 0xFFFC);
         }
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
@@ -1590,7 +1602,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Get new SS:ESP from TSS
             let (ss_for_cpl_x, esp_for_cpl_x) = self.get_ss_esp_from_tss(cs_descriptor.dpl)?;
 
-            if (ss_for_cpl_x & 0xfffc) == 0 {
+            if (ss_for_cpl_x & 0xFFFC) == 0 {
                 tracing::error!("call_gate: new SS null");
                 return self.exception(Exception::Ts, 0);
             }
@@ -1600,30 +1612,30 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
             let (ss_dw1, ss_dw2) = match self.fetch_raw_descriptor(&ss_selector) {
                 Ok(v) => v,
-                Err(_) => return self.exception(Exception::Ts, ss_for_cpl_x & 0xfffc),
+                Err(_) => return self.exception(Exception::Ts, ss_for_cpl_x & 0xFFFC),
             };
             let mut ss_descriptor = self.parse_descriptor(ss_dw1, ss_dw2)?;
 
             // Validate new SS
             if ss_selector.rpl != cs_descriptor.dpl {
-                return self.exception(Exception::Ts, ss_for_cpl_x & 0xfffc);
+                return self.exception(Exception::Ts, ss_for_cpl_x & 0xFFFC);
             }
             if ss_descriptor.dpl != cs_descriptor.dpl {
-                return self.exception(Exception::Ts, ss_for_cpl_x & 0xfffc);
+                return self.exception(Exception::Ts, ss_for_cpl_x & 0xFFFC);
             }
             if ss_descriptor.valid == 0
                 || !ss_descriptor.segment
                 || is_code_segment(ss_descriptor.r#type)
                 || !is_data_segment_writable(ss_descriptor.r#type)
             {
-                return self.exception(Exception::Ts, ss_for_cpl_x & 0xfffc);
+                return self.exception(Exception::Ts, ss_for_cpl_x & 0xFFFC);
             }
             if !ss_descriptor.p {
-                return self.exception(Exception::Ss, ss_for_cpl_x & 0xfffc);
+                return self.exception(Exception::Ss, ss_for_cpl_x & 0xFFFC);
             }
 
             // SAFETY: descriptor type verified as gate before union access
-            let param_count = gate_descriptor.u.gate_param_count() & 0x1f;
+            let param_count = gate_descriptor.u.gate_param_count() & 0x1F;
 
             // Save return SS:ESP and CS:EIP
             let return_ss = self.sregs[BxSegregs::Ss as usize].selector.value;
@@ -1641,13 +1653,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             new_stack.cache = ss_descriptor.clone();
             new_stack.selector.rpl = cs_descriptor.dpl;
             new_stack.selector.value =
-                (new_stack.selector.value & 0xfffc) | new_stack.selector.rpl as u16;
+                (new_stack.selector.value & 0xFFFC) | new_stack.selector.rpl as u16;
 
             // Bochs call_far.cc call_gate \u2014 capture pre-transition CET
             // state for the inner-priv shadow-stack switch.
             let old_ss_dpl = self.sregs[BxSegregs::Ss as usize].cache.dpl;
             let old_cpl = cpl;
-            let temp_lip = self.get_laddr32(BxSegregs::Cs as usize, return_eip) as u64;
+            let temp_lip = self
+                .get_laddr32(BxSegregs::Cs as usize, BxEffAddress::from_u32(return_eip))
+                .get();
 
             let is_386_gate = gate_descriptor.r#type == 0xC;
 
@@ -1854,7 +1868,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Bochs call_far.cc call_gate \u2014 CALL GATE TO SAME PRIVILEGE
             // captures old CS / linear-LIP before branch_far rewrites CS.
             let old_cs_same = self.sregs[BxSegregs::Cs as usize].selector.value;
-            let temp_lip_same = self.get_laddr32(BxSegregs::Cs as usize, new_eip) as u64;
+            let temp_lip_same = self
+                .get_laddr32(BxSegregs::Cs as usize, BxEffAddress::from_u32(new_eip))
+                .get();
 
             self.branch_far(
                 &mut gate_cs_selector,
@@ -1881,7 +1897,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     ) -> Result<()> {
         if !gate_descriptor.p {
             tracing::error!("task_gate: not present");
-            return self.exception(Exception::Np, selector.value & 0xfffc);
+            return self.exception(Exception::Np, selector.value & 0xFFFC);
         }
 
         // SAFETY: descriptor type verified as task gate before union access
@@ -1891,26 +1907,26 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         if tss_selector.ti != 0 {
             tracing::error!("task_gate: tss_selector.ti=1");
-            return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+            return self.exception(Exception::Gp, raw_tss_selector & 0xFFFC);
         }
 
         let (dword1, dword2) = match self.fetch_raw_descriptor(&tss_selector) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, raw_tss_selector & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, raw_tss_selector & 0xFFFC),
         };
         let tss_descriptor = self.parse_descriptor(dword1, dword2)?;
 
         if tss_descriptor.valid == 0 || tss_descriptor.segment {
             tracing::error!("task_gate: TSS descriptor invalid");
-            return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+            return self.exception(Exception::Gp, raw_tss_selector & 0xFFFC);
         }
         if tss_descriptor.r#type != 0x1 && tss_descriptor.r#type != 0x9 {
             tracing::error!("task_gate: TSS not available type");
-            return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+            return self.exception(Exception::Gp, raw_tss_selector & 0xFFFC);
         }
         if !tss_descriptor.p {
             tracing::error!("task_gate: TSS not present");
-            return self.exception(Exception::Np, raw_tss_selector & 0xfffc);
+            return self.exception(Exception::Np, raw_tss_selector & 0xFFFC);
         }
 
         self.task_switch(
@@ -1947,7 +1963,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             (cs, ip, 4u32)
         };
 
-        if (raw_cs_raw & 0xfffc) == 0 {
+        if (raw_cs_raw & 0xFFFC) == 0 {
             tracing::error!("return_protected: CS selector null");
             return self.exception(Exception::Gp, 0);
         }
@@ -1957,14 +1973,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xFFFC),
         };
         let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         if cs_selector.rpl < cpl {
             tracing::error!("return_protected: CS.rpl < CPL");
-            return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, raw_cs_raw & 0xFFFC);
         }
 
         // check_cs validates code segment, DPL, and presence
@@ -1984,6 +2000,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 let return_lip = (cs_descriptor
                     .u
                     .segment_base()
+                    .get()
                     .wrapping_add(return_eip as u64))
                     & 0xFFFF_FFFF;
                 let prev_ssp = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
@@ -2041,7 +2058,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 (ss, rsp)
             };
 
-            if (raw_ss_raw & 0xfffc) == 0 {
+            if (raw_ss_raw & 0xFFFC) == 0 {
                 tracing::error!("return_protected: SS selector null");
                 return self.exception(Exception::Gp, 0);
             }
@@ -2052,7 +2069,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let (ss_dw1, ss_dw2) = match self.fetch_raw_descriptor(&ss_selector) {
                 Ok(v) => v,
                 Err(_) => {
-                    return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                    return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC);
                 }
             };
             let mut ss_descriptor = self.parse_descriptor(ss_dw1, ss_dw2)?;
@@ -2060,7 +2077,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Validate SS
             if ss_selector.rpl != cs_selector.rpl {
                 tracing::error!("return_protected: SS.rpl != CS.rpl");
-                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC);
             }
             if ss_descriptor.valid == 0
                 || !ss_descriptor.segment
@@ -2069,15 +2086,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // not writable
             {
                 tracing::error!("return_protected: SS not writable data");
-                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC);
             }
             if ss_descriptor.dpl != cs_selector.rpl {
                 tracing::error!("return_protected: SS.dpl != CS.rpl");
-                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                return self.exception(Exception::Gp, raw_ss_raw & 0xFFFC);
             }
             if !ss_descriptor.p {
                 tracing::error!("return_protected: SS not present");
-                return self.exception(Exception::Ss, raw_ss_raw & 0xfffc);
+                return self.exception(Exception::Ss, raw_ss_raw & 0xFFFC);
             }
 
             // Bochs ret_far.cc return_protected \u2014 outer-priv shadow-stack
@@ -2094,6 +2111,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     let return_lip = (cs_descriptor
                         .u
                         .segment_base()
+                        .get()
                         .wrapping_add(return_eip as u64))
                         & 0xFFFF_FFFF;
                     new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_raw, return_lip)?;
@@ -2152,12 +2170,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     ) -> Result<()> {
         if !gate_descriptor.p {
             tracing::error!("jmp_call_gate: gate not present");
-            return self.exception(Exception::Np, _selector.value & 0xfffc);
+            return self.exception(Exception::Np, _selector.value & 0xFFFC);
         }
 
         // SAFETY: descriptor type verified as gate before union access
         let gate_cs_raw = gate_descriptor.u.gate_dest_selector();
-        if (gate_cs_raw & 0xfffc) == 0 {
+        if (gate_cs_raw & 0xFFFC) == 0 {
             tracing::error!("jmp_call_gate: CS selector null");
             return self.exception(Exception::Gp, 0);
         }
@@ -2167,7 +2185,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         let (dword1, dword2) = match self.fetch_raw_descriptor(&gate_cs_selector) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, gate_cs_raw & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, gate_cs_raw & 0xFFFC),
         };
         let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
 
@@ -2201,7 +2219,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // SAFETY: descriptor type verified as gate before union access
         let dest_selector = gate_descriptor.u.gate_dest_selector();
         // selector must not be null else #GP(0)
-        if (dest_selector & 0xfffc) == 0 {
+        if (dest_selector & 0xFFFC) == 0 {
             tracing::error!("jmp_call_gate64: selector in gate null");
             return self.exception(Exception::Gp, 0);
         }
@@ -2211,7 +2229,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         let (dw1, dw2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, dest_selector & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, dest_selector & 0xFFFC),
         };
         let mut cs_descriptor = self.parse_descriptor(dw1, dw2)?;
 
@@ -2226,7 +2244,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             || is_data_segment(cs_descriptor.r#type)
         {
             tracing::error!("jmp_call_gate64: not code segment in 64-bit call gate");
-            return self.exception(Exception::Gp, dest_selector & 0xfffc);
+            return self.exception(Exception::Gp, dest_selector & 0xFFFC);
         }
 
         // In long mode, only 64-bit call gates are allowed, and they must point
@@ -2234,7 +2252,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         if !cs_descriptor.is_long64_segment() || cs_descriptor.u.segment_d_b() {
             tracing::error!("jmp_call_gate64: not 64-bit code segment in 64-bit call gate");
-            return self.exception(Exception::Gp, dest_selector & 0xfffc);
+            return self.exception(Exception::Gp, dest_selector & 0xFFFC);
         }
 
         // check code-segment descriptor
@@ -2258,7 +2276,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     ) -> Result<()> {
         if !gate_descriptor.p {
             tracing::error!("task_gate_jmp: not present");
-            return self.exception(Exception::Np, selector.value & 0xfffc);
+            return self.exception(Exception::Np, selector.value & 0xFFFC);
         }
 
         // SAFETY: descriptor type verified as task gate before union access
@@ -2268,28 +2286,28 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         if tss_selector.ti != 0 {
             tracing::error!("task_gate_jmp: tss_selector.ti=1");
-            return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+            return self.exception(Exception::Gp, raw_tss_selector & 0xFFFC);
         }
 
         let (dword1, dword2) = match self.fetch_raw_descriptor(&tss_selector) {
             Ok(v) => v,
             Err(_) => {
-                return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+                return self.exception(Exception::Gp, raw_tss_selector & 0xFFFC);
             }
         };
         let tss_descriptor = self.parse_descriptor(dword1, dword2)?;
 
         if tss_descriptor.valid == 0 || tss_descriptor.segment {
             tracing::error!("task_gate_jmp: bad TSS descriptor");
-            return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+            return self.exception(Exception::Gp, raw_tss_selector & 0xFFFC);
         }
         if tss_descriptor.r#type != 0x1 && tss_descriptor.r#type != 0x9 {
             tracing::error!("task_gate_jmp: TSS not available");
-            return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+            return self.exception(Exception::Gp, raw_tss_selector & 0xFFFC);
         }
         if !tss_descriptor.p {
             tracing::error!("task_gate_jmp: TSS not present");
-            return self.exception(Exception::Np, raw_tss_selector & 0xfffc);
+            return self.exception(Exception::Np, raw_tss_selector & 0xFFFC);
         }
 
         self.task_switch(
@@ -2320,7 +2338,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         cs_raw: u16,
         disp: u64,
     ) -> Result<()> {
-        if (cs_raw & 0xfffc) == 0 {
+        if (cs_raw & 0xFFFC) == 0 {
             tracing::trace!("call_protected_64: CS selector null");
             return self.exception(Exception::Gp, 0);
         }
@@ -2330,13 +2348,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, cs_raw & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, cs_raw & 0xFFFC),
         };
         let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
 
         if cs_descriptor.valid == 0 {
             tracing::error!("call_protected_64: invalid CS descriptor");
-            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, cs_raw & 0xFFFC);
         }
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
@@ -2346,7 +2364,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Bochs call_far.cc call_protected (long mode) \u2014 capture old
             // CS / linear LIP before branch_far rewrites CS.
             let old_cs_norm = self.sregs[BxSegregs::Cs as usize].selector.value;
-            let temp_lip_norm = self.get_laddr64(BxSegregs::Cs as usize, self.rip());
+            let temp_lip_norm = self
+                .get_laddr64(BxSegregs::Cs as usize, BxEffAddress::new(self.rip()))
+                .get();
 
             self.check_cs(&cs_descriptor, cs_raw, cs_selector.rpl, cpl)?;
 
@@ -2464,11 +2484,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // DPL checks
         if gate_descriptor.dpl < cpl {
             tracing::error!("call_protected_64: descriptor.dpl < CPL");
-            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, cs_raw & 0xFFFC);
         }
         if gate_descriptor.dpl < gate_selector.rpl {
             tracing::error!("call_protected_64: descriptor.dpl < selector.rpl");
-            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, cs_raw & 0xFFFC);
         }
 
         // In long mode, only 386 call gates (type 0xC) are allowed
@@ -2477,11 +2497,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 "call_protected_64: gate type {:#x} unsupported in long mode",
                 gate_descriptor.r#type
             );
-            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            return self.exception(Exception::Gp, cs_raw & 0xFFFC);
         }
         if !gate_descriptor.p {
             tracing::error!("call_protected_64: call gate not present");
-            return self.exception(Exception::Np, cs_raw & 0xfffc);
+            return self.exception(Exception::Np, cs_raw & 0xFFFC);
         }
 
         // call_gate64 implementation (inline from Bochs call_far.cc)
@@ -2500,7 +2520,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         // SAFETY: descriptor type verified as gate before union access
         let dest_selector = gate_descriptor.u.gate_dest_selector();
-        if (dest_selector & 0xfffc) == 0 {
+        if (dest_selector & 0xFFFC) == 0 {
             tracing::error!("call_gate64: selector in gate null");
             return self.exception(Exception::Gp, 0);
         }
@@ -2510,7 +2530,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         let (dw1, dw2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, dest_selector & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, dest_selector & 0xFFFC),
         };
         let mut cs_descriptor = self.parse_descriptor(dw1, dw2)?;
 
@@ -2527,27 +2547,29 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             || cs_descriptor.dpl > cpl
         {
             tracing::error!("call_gate64: selected descriptor is not code");
-            return self.exception(Exception::Gp, dest_selector & 0xfffc);
+            return self.exception(Exception::Gp, dest_selector & 0xFFFC);
         }
 
         // Must be a 64-bit code segment (L=1, D=0)
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         if !cs_descriptor.is_long64_segment() || cs_descriptor.u.segment_d_b() {
             tracing::error!("call_gate64: not 64-bit code segment in call gate 64");
-            return self.exception(Exception::Gp, dest_selector & 0xfffc);
+            return self.exception(Exception::Gp, dest_selector & 0xFFFC);
         }
 
         // Code segment must be present
         if !cs_descriptor.p {
             tracing::error!("call_gate64: code segment not present");
-            return self.exception(Exception::Np, dest_selector & 0xfffc);
+            return self.exception(Exception::Np, dest_selector & 0xFFFC);
         }
 
         let old_cs = self.sregs[BxSegregs::Cs as usize].selector.value as u64;
         let old_rip = self.rip();
 
         // Bochs call_far.cc call_gate64 \u2014 capture pre-transition CET state.
-        let temp_lip = self.get_laddr64(BxSegregs::Cs as usize, self.rip());
+        let temp_lip = self
+            .get_laddr64(BxSegregs::Cs as usize, BxEffAddress::new(self.rip()))
+            .get();
         let old_ss_dpl = self.sregs[BxSegregs::Ss as usize].cache.dpl;
         let old_cpl = cpl;
 
@@ -2653,8 +2675,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         let (raw_cs_selector, return_rip, stack_param_offset): (u16, u64, u64) =
             if instr.os64_l() != 0 {
-                let cs = self.stack_read_qword(temp_rsp.wrapping_add(8))? as u16;
-                let rip = self.stack_read_qword(temp_rsp)?;
+                let cs = self.stack_read_qword_64(temp_rsp.wrapping_add(8))? as u16;
+                let rip = self.stack_read_qword_64(temp_rsp)?;
                 (cs, rip, 16)
             } else if instr.os32_l() != 0 {
                 // Bochs ret_far.cc: CS at temp_RSP+4, RIP at temp_RSP+0
@@ -2667,7 +2689,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 (cs, rip, 4)
             };
 
-        if (raw_cs_selector & 0xfffc) == 0 {
+        if (raw_cs_selector & 0xFFFC) == 0 {
             tracing::error!("return_protected_64: CS selector null");
             return self.exception(Exception::Gp, 0);
         }
@@ -2677,14 +2699,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
         let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, raw_cs_selector & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, raw_cs_selector & 0xFFFC),
         };
         let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         if cs_selector.rpl < cpl {
             tracing::error!("return_protected_64: CS.rpl < CPL");
-            return self.exception(Exception::Gp, raw_cs_selector & 0xfffc);
+            return self.exception(Exception::Gp, raw_cs_selector & 0xFFFC);
         }
 
         // check_cs validates code segment, DPL, and presence
@@ -2700,7 +2722,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 let return_lip = if self.long_mode() && cs_descriptor.u.segment_l() {
                     return_rip
                 } else {
-                    (cs_descriptor.u.segment_base().wrapping_add(return_rip)) & 0xFFFF_FFFF
+                    (cs_descriptor
+                        .u
+                        .segment_base()
+                        .get()
+                        .wrapping_add(return_rip))
+                        & 0xFFFF_FFFF
                 };
                 let prev_ssp = self.shadow_stack_restore_lip(raw_cs_selector, return_lip)?;
                 self.set_ssp(prev_ssp);
@@ -2733,11 +2760,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             tracing::trace!("return_protected_64: return to OUTER PRIVILEGE LEVEL");
 
             let (raw_ss_selector, return_rsp): (u16, u64) = if instr.os64_l() != 0 {
-                let ss = self
-                    .stack_read_qword(temp_rsp.wrapping_add(24).wrapping_add(pop_bytes as u64))?
-                    as u16;
-                let rsp = self
-                    .stack_read_qword(temp_rsp.wrapping_add(16).wrapping_add(pop_bytes as u64))?;
+                let ss = self.stack_read_qword_64(
+                    temp_rsp.wrapping_add(24).wrapping_add(u64::from(pop_bytes)),
+                )? as u16;
+                let rsp = self.stack_read_qword_64(
+                    temp_rsp.wrapping_add(16).wrapping_add(u64::from(pop_bytes)),
+                )?;
                 (ss, rsp)
             } else if instr.os32_l() != 0 {
                 let ss = self.stack_read_word(
@@ -2770,7 +2798,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
             let mut ss_descriptor = BxDescriptor::default();
 
-            if (raw_ss_selector & 0xfffc) == 0 {
+            if (raw_ss_selector & 0xFFFC) == 0 {
                 // Null SS is allowed in long mode if it's a 64-bit code segment
                 // and not returning to ring 3
                 if self.long_mode() {
@@ -2786,14 +2814,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 let (ss_dw1, ss_dw2) = match self.fetch_raw_descriptor(&ss_selector) {
                     Ok(v) => v,
                     Err(_) => {
-                        return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                        return self.exception(Exception::Gp, raw_ss_selector & 0xFFFC);
                     }
                 };
                 ss_descriptor = self.parse_descriptor(ss_dw1, ss_dw2)?;
 
                 if ss_selector.rpl != cs_selector.rpl {
                     tracing::error!("return_protected_64: ss.rpl != cs.rpl");
-                    return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                    return self.exception(Exception::Gp, raw_ss_selector & 0xFFFC);
                 }
                 if ss_descriptor.valid == 0
                     || !ss_descriptor.segment
@@ -2802,15 +2830,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 // not writable
                 {
                     tracing::error!("return_protected_64: SS AR byte not writable data");
-                    return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                    return self.exception(Exception::Gp, raw_ss_selector & 0xFFFC);
                 }
                 if ss_descriptor.dpl != cs_selector.rpl {
                     tracing::error!("return_protected_64: SS.dpl != cs.rpl");
-                    return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                    return self.exception(Exception::Gp, raw_ss_selector & 0xFFFC);
                 }
                 if !ss_descriptor.p {
                     tracing::error!("return_protected_64: ss.present == 0");
-                    return self.exception(Exception::Ss, raw_ss_selector & 0xfffc);
+                    return self.exception(Exception::Ss, raw_ss_selector & 0xFFFC);
                 }
             }
 
@@ -2828,7 +2856,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     let return_lip = if self.long_mode() && cs_descriptor.u.segment_l() {
                         return_rip
                     } else {
-                        (cs_descriptor.u.segment_base().wrapping_add(return_rip)) & 0xFFFF_FFFF
+                        (cs_descriptor
+                            .u
+                            .segment_base()
+                            .get()
+                            .wrapping_add(return_rip))
+                            & 0xFFFF_FFFF
                     };
                     new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_selector, return_lip)?;
                 }
@@ -2838,7 +2871,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let cs_rpl = cs_selector.rpl;
             self.branch_far(&mut cs_selector, &mut cs_descriptor, return_rip, cs_rpl)?;
 
-            if (raw_ss_selector & 0xfffc) != 0 {
+            if (raw_ss_selector & 0xFFFC) != 0 {
                 // Load SS:RSP from stack
                 self.load_ss(&mut ss_selector, &mut ss_descriptor, cs_rpl)?;
             } else {
@@ -2906,9 +2939,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // Read RIP, CS, EFLAGS from stack based on operand size
         let (new_eflags, raw_cs_selector, new_rip, top_nbytes_same): (u32, u16, u64, u64) =
             if instr.os64_l() != 0 {
-                let eflags = self.stack_read_qword(temp_rsp.wrapping_add(16))? as u32;
-                let cs = self.stack_read_qword(temp_rsp.wrapping_add(8))? as u16;
-                let rip = self.stack_read_qword(temp_rsp)?;
+                let eflags = self.stack_read_qword_64(temp_rsp.wrapping_add(16))? as u32;
+                let cs = self.stack_read_qword_64(temp_rsp.wrapping_add(8))? as u16;
+                let rip = self.stack_read_qword_64(temp_rsp)?;
                 (eflags, cs, rip, 24)
             } else if instr.os32_l() != 0 {
                 let eflags = self.stack_read_dword((temp_rsp as u32).wrapping_add(8))?;
@@ -2929,7 +2962,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         parse_selector(raw_cs_selector, &mut cs_selector);
 
         // Return CS selector must be non-null
-        if (raw_cs_selector & 0xfffc) == 0 {
+        if (raw_cs_selector & 0xFFFC) == 0 {
             tracing::error!("iret64: return CS selector null");
             return self.exception(Exception::Gp, 0);
         }
@@ -2937,7 +2970,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // Fetch and parse CS descriptor
         let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
-            Err(_) => return self.exception(Exception::Gp, raw_cs_selector & 0xfffc),
+            Err(_) => return self.exception(Exception::Gp, raw_cs_selector & 0xFFFC),
         };
         let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
 
@@ -2945,7 +2978,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         if cs_selector.rpl < cpl {
             tracing::error!("iret64: return selector RPL < CPL");
-            return self.exception(Exception::Gp, raw_cs_selector & 0xfffc);
+            return self.exception(Exception::Gp, raw_cs_selector & 0xFFFC);
         }
 
         // Check code-segment descriptor
@@ -2965,7 +2998,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 let return_lip = if cs_descriptor.u.segment_l() {
                     new_rip
                 } else {
-                    (cs_descriptor.u.segment_base().wrapping_add(new_rip)) & 0xFFFF_FFFF
+                    (cs_descriptor.u.segment_base().get().wrapping_add(new_rip)) & 0xFFFF_FFFF
                 };
                 let new_ssp = self.shadow_stack_restore_lip(raw_cs_selector, return_lip)?;
                 self.set_ssp(new_ssp);
@@ -2999,7 +3032,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let mut change_mask_val = change_mask.bits();
             if instr.os32_l() == 0 {
                 // 16 bit
-                change_mask_val &= 0xffff;
+                change_mask_val &= 0xFFFF;
             }
 
             self.write_eflags(new_eflags, change_mask_val);
@@ -3022,8 +3055,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
             // Read SS and RSP from stack
             let (raw_ss_selector, new_rsp): (u16, u64) = if instr.os64_l() != 0 {
-                let ss = self.stack_read_qword(temp_rsp.wrapping_add(32))? as u16;
-                let rsp = self.stack_read_qword(temp_rsp.wrapping_add(24))?;
+                let ss = self.stack_read_qword_64(temp_rsp.wrapping_add(32))? as u16;
+                let rsp = self.stack_read_qword_64(temp_rsp.wrapping_add(24))?;
                 (ss, rsp)
             } else if instr.os32_l() != 0 {
                 let ss = self.stack_read_dword((temp_rsp as u32).wrapping_add(16))? as u16;
@@ -3038,7 +3071,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let mut ss_selector = BxSelector::default();
             let mut ss_descriptor = BxDescriptor::default();
 
-            if (raw_ss_selector & 0xfffc) == 0 {
+            if (raw_ss_selector & 0xFFFC) == 0 {
                 if !cs_descriptor.is_long64_segment() || cs_selector.rpl == 3 {
                     tracing::error!("iret64: SS selector null");
                     return self.exception(Exception::Gp, 0);
@@ -3048,13 +3081,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
 
                 if ss_selector.rpl != cs_selector.rpl {
                     tracing::error!("iret64: SS.rpl != CS.rpl");
-                    return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                    return self.exception(Exception::Gp, raw_ss_selector & 0xFFFC);
                 }
 
                 let (ss_dw1, ss_dw2) = match self.fetch_raw_descriptor(&ss_selector) {
                     Ok(v) => v,
                     Err(_) => {
-                        return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                        return self.exception(Exception::Gp, raw_ss_selector & 0xFFFC);
                     }
                 };
                 ss_descriptor = self.parse_descriptor(ss_dw1, ss_dw2)?;
@@ -3066,15 +3099,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 // not writable
                 {
                     tracing::error!("iret64: SS AR byte not writable or code segment");
-                    return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                    return self.exception(Exception::Gp, raw_ss_selector & 0xFFFC);
                 }
                 if ss_descriptor.dpl != cs_selector.rpl {
                     tracing::error!("iret64: SS.dpl != CS selector RPL");
-                    return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                    return self.exception(Exception::Gp, raw_ss_selector & 0xFFFC);
                 }
                 if !ss_descriptor.p {
                     tracing::error!("iret64: SS not present!");
-                    return self.exception(Exception::Np, raw_ss_selector & 0xfffc);
+                    return self.exception(Exception::Np, raw_ss_selector & 0xFFFC);
                 }
             }
 
@@ -3102,7 +3135,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             let mut change_mask_val = change_mask.bits();
             if instr.os32_l() == 0 && instr.os64_l() == 0 {
                 // 16 bit
-                change_mask_val &= 0xffff;
+                change_mask_val &= 0xFFFF;
             }
 
             // Bochs iret.cc long_iret \u2014 outer-priv shadow-stack restore.
@@ -3117,7 +3150,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     let return_lip = if cs_descriptor.u.segment_l() {
                         new_rip
                     } else {
-                        (cs_descriptor.u.segment_base().wrapping_add(new_rip)) & 0xFFFF_FFFF
+                        (cs_descriptor.u.segment_base().get().wrapping_add(new_rip)) & 0xFFFF_FFFF
                     };
                     new_ssp_cet = self.shadow_stack_restore_lip(raw_cs_selector, return_lip)?;
                 }
@@ -3130,7 +3163,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // Write EFLAGS
             self.write_eflags(new_eflags, change_mask_val);
 
-            if (raw_ss_selector & 0xfffc) != 0 {
+            if (raw_ss_selector & 0xFFFC) != 0 {
                 // Load SS:RSP from stack
                 self.load_ss(&mut ss_selector, &mut ss_descriptor, cs_rpl)?;
             } else {

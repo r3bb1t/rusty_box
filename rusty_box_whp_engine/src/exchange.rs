@@ -26,12 +26,14 @@
 //! enters the partition. That export compares before it writes, so a pause
 //! nobody wrote through costs the partition nothing.
 
+use rusty_box::cpu::Result;
 use rusty_box::cpu::arch_state::{ArchGroups, ExitHeader, VcpuArchState};
-use rusty_box::cpu::{cpu::BxCpuC, instrumentation::Instrumentation, Result};
+use rusty_box::cpu::cpu::BxCpuC;
+use rusty_box::cpu::instrumentation::Instrumentation;
 use rusty_box_whp::{Reg, VpContext};
 
 use crate::engine::{
-    platform_failed, refused_import, refused_state, uncarried, InjectState, InterruptStateWord,
+    InjectState, InterruptStateWord, platform_failed, refused_import, refused_state, uncarried,
 };
 use crate::state::{self, VpRegisters};
 use crate::xsave::XsaveArea;
@@ -250,8 +252,11 @@ impl Exchange {
     /// The platform's refusal of the interrupt-state write. The exchange is
     /// left as it was, so nothing it records is untrue.
     pub(crate) fn reinstall_after_reset<V: VpRegisters>(&mut self, vp: &V) -> Result<()> {
-        vp.write_words(&[Reg::InterruptState], &[InterruptStateWord::AT_RESET.encode()])
-            .map_err(platform_failed)?;
+        vp.write_words(
+            &[Reg::InterruptState],
+            &[InterruptStateWord::AT_RESET.encode()],
+        )
+        .map_err(platform_failed)?;
         *self = Self::installing();
         Ok(())
     }
@@ -288,7 +293,8 @@ impl Exchange {
         cpu.export_arch_groups(&mut self.at_park, read_now);
         self.read_at_park.insert(read_now);
         let mut tsc = [0u64; 1];
-        vp.read_words(&[Reg::Tsc], &mut tsc).map_err(platform_failed)?;
+        vp.read_words(&[Reg::Tsc], &mut tsc)
+            .map_err(platform_failed)?;
         cpu.take_time_stamp_counter(tsc[0]);
         Ok(())
     }
@@ -490,8 +496,11 @@ impl Exchange {
 
         // The interrupt state is not a [`VcpuArchState`] field, so it is not
         // this call's to write.
-        cpu.import_arch_groups(&self.scratch, importing.difference(ArchGroups::INTERRUPT_STATE))
-            .map_err(refused_import)?;
+        cpu.import_arch_groups(
+            &self.scratch,
+            importing.difference(ArchGroups::INTERRUPT_STATE),
+        )
+        .map_err(refused_import)?;
 
         self.externalised.remove(importing);
         self.imported_this_exit.insert(importing);
@@ -597,12 +606,13 @@ impl Exchange {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::fixtures::{machine_running, CODE};
-    use crate::state::test_vp::Recorder;
-    use crate::xsave::{HostComponents, XsaveArea};
     use rusty_box::cpu::arch_state::{ArchGroups, VcpuArchState};
     use rusty_box_whp::{Reg, SegmentRegister, VpContext};
+
+    use super::*;
+    use crate::fixtures::{CODE, machine_running};
+    use crate::state::test_vp::Recorder;
+    use crate::xsave::{HostComponents, XsaveArea};
 
     /// An area the size a compacted one starts at, so [`XsaveArea::read_from`]
     /// has a header to read.
@@ -625,10 +635,7 @@ mod tests {
 
         assert_eq!(
             needs(ExitClass::Cpuid),
-            ArchGroups::GPRS
-                | ArchGroups::RIP_RFLAGS
-                | ArchGroups::CONTROL_REGS
-                | ArchGroups::MSRS,
+            ArchGroups::GPRS | ArchGroups::RIP_RFLAGS | ArchGroups::CONTROL_REGS | ArchGroups::MSRS,
             "CPUID reads and writes four general registers and advances RIP — by a \
              width `CR0.PE` and `EFER.LMA` decide, so it carries those too"
         );
@@ -707,7 +714,8 @@ mod tests {
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
         let mut ex = Exchange::at_reset();
 
-        ex.import_for(&vp, cpu, ExitClass::Cpuid, &[0x0F, 0xA2], &mut xs).unwrap();
+        ex.import_for(&vp, cpu, ExitClass::Cpuid, &[0x0F, 0xA2], &mut xs)
+            .unwrap();
         assert!(
             vp.reads_of(Reg::Rax) == 1 && vp.reads_of(Reg::Es) == 0,
             "the general registers CPUID answers in, and no segment it cannot name"
@@ -733,8 +741,10 @@ mod tests {
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
         let mut ex = Exchange::at_reset();
 
-        ex.import_for(&vp, cpu, ExitClass::Msr, &[0x0F, 0x30], &mut xs).unwrap();
-        ex.import_for(&vp, cpu, ExitClass::Cpuid, &[0x0F, 0xA2], &mut xs).unwrap();
+        ex.import_for(&vp, cpu, ExitClass::Msr, &[0x0F, 0x30], &mut xs)
+            .unwrap();
+        ex.import_for(&vp, cpu, ExitClass::Cpuid, &[0x0F, 0xA2], &mut xs)
+            .unwrap();
         assert_eq!(vp.reads_of(Reg::Rax), 1, "GPRS were already local");
     }
 
@@ -751,7 +761,8 @@ mod tests {
         vp.seed(Reg::Dr7, 0x0000_0400);
         let mut ex = Exchange::at_reset();
 
-        ex.import_for(&vp, cpu, ExitClass::Cpuid, &[0x0F, 0xA2], &mut xs).unwrap();
+        ex.import_for(&vp, cpu, ExitClass::Cpuid, &[0x0F, 0xA2], &mut xs)
+            .unwrap();
 
         // The shadow drifts locally, through this task's own API.
         let mut drifted = VcpuArchState::default();
@@ -799,17 +810,33 @@ mod tests {
         ex.import_everything(&vp, cpu, &mut xs).unwrap();
         ex.export_imported(&vp, cpu, &mut xs).unwrap();
         assert_eq!(vp.writes_of(Reg::Tsc), 0);
-        assert_eq!(vp.xsave_writes(), 1, "Full imports the vector file, so Full exports it");
+        assert_eq!(
+            vp.xsave_writes(),
+            1,
+            "Full imports the vector file, so Full exports it"
+        );
 
         let mut ex = Exchange::at_reset();
-        ex.import_for(&vp, cpu, ExitClass::Cpuid, &[0x0F, 0xA2], &mut xs).unwrap();
+        ex.import_for(&vp, cpu, ExitClass::Cpuid, &[0x0F, 0xA2], &mut xs)
+            .unwrap();
         ex.export_imported(&vp, cpu, &mut xs).unwrap();
-        assert_eq!(vp.xsave_writes(), 1, "unchanged: CPUID never touches the vector file");
+        assert_eq!(
+            vp.xsave_writes(),
+            1,
+            "unchanged: CPUID never touches the vector file"
+        );
 
         let mut ex = Exchange::at_reset();
         // movdqa xmm0, [mem] — the operand is a device window, the register is
         // the vector file.
-        ex.import_for(&vp, cpu, ExitClass::Mmio, &[0x66, 0x0F, 0x6F, 0x05], &mut xs).unwrap();
+        ex.import_for(
+            &vp,
+            cpu,
+            ExitClass::Mmio,
+            &[0x66, 0x0F, 0x6F, 0x05],
+            &mut xs,
+        )
+        .unwrap();
         ex.export_imported(&vp, cpu, &mut xs).unwrap();
         assert_eq!(
             vp.xsave_writes(),
@@ -837,7 +864,8 @@ mod tests {
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
         let mut ex = Exchange::at_reset();
 
-        ex.import_for(&vp, cpu, ExitClass::Exception, &[0x0F, 0xA2], &mut xs).unwrap();
+        ex.import_for(&vp, cpu, ExitClass::Exception, &[0x0F, 0xA2], &mut xs)
+            .unwrap();
         assert_eq!(
             vp.reads_of(Reg::InterruptState),
             1,
@@ -850,7 +878,11 @@ mod tests {
             0,
             "the shadow retired nothing that shadows, so there was nothing to write"
         );
-        assert_eq!(vp.value_of(Reg::InterruptState), 0b10, "and the NMI mask still stands");
+        assert_eq!(
+            vp.value_of(Reg::InterruptState),
+            0b10,
+            "and the NMI mask still stands"
+        );
     }
 
     /// The vector question is decided at the GUEST's mode, not at whatever
@@ -892,8 +924,14 @@ mod tests {
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
         let mut ex = Exchange::at_reset();
 
-        ex.import_for(&vp, cpu, ExitClass::Mmio, &[0xF3, 0x44, 0x0F, 0x6F, 0x00], &mut xs)
-            .expect("the import");
+        ex.import_for(
+            &vp,
+            cpu,
+            ExitClass::Mmio,
+            &[0xF3, 0x44, 0x0F, 0x6F, 0x00],
+            &mut xs,
+        )
+        .expect("the import");
 
         let mut shadow = VcpuArchState::default();
         cpu.export_arch_groups(&mut shadow, ArchGroups::VECTOR);
@@ -929,7 +967,8 @@ mod tests {
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
         let mut ex = Exchange::at_reset();
 
-        ex.import_for(&vp, cpu, ExitClass::StringPort, &[], &mut xs).unwrap();
+        ex.import_for(&vp, cpu, ExitClass::StringPort, &[], &mut xs)
+            .unwrap();
 
         let mut shadow = VcpuArchState::default();
         cpu.export_arch_groups(&mut shadow, ArchGroups::VECTOR);
@@ -940,7 +979,10 @@ mod tests {
         );
 
         let calls = ex.export_imported(&vp, cpu, &mut xs).unwrap();
-        assert_eq!(calls, 2, "the class's register batch, and the area beside it");
+        assert_eq!(
+            calls, 2,
+            "the class's register batch, and the area beside it"
+        );
         assert_eq!(vp.xsave_writes(), 1);
     }
 
@@ -972,8 +1014,16 @@ mod tests {
         let handback = ex.export_owed(&vp, cpu, &mut xs).unwrap();
         assert_eq!(handback.written, ArchGroups::GPRS);
         assert_eq!(handback.calls, 1, "one batched register write");
-        assert_eq!(vp.value_of(Reg::Rbx), 0x5A, "the caller's RBX reached the partition");
-        assert_eq!(vp.writes_of(Reg::Cr3), 0, "a control register nobody wrote goes back unwritten");
+        assert_eq!(
+            vp.value_of(Reg::Rbx),
+            0x5A,
+            "the caller's RBX reached the partition"
+        );
+        assert_eq!(
+            vp.writes_of(Reg::Cr3),
+            0,
+            "a control register nobody wrote goes back unwritten"
+        );
         assert_eq!(vp.writes_of(Reg::Es), 0, "and so does a segment");
         assert_eq!(vp.xsave_writes(), 0, "and the vector file");
         assert!(!ex.owes_the_partition());
@@ -984,8 +1034,16 @@ mod tests {
         cpu.import_arch_groups(&state, ArchGroups::VECTOR).unwrap();
         let handback = ex.export_owed(&vp, cpu, &mut xs).unwrap();
         assert_eq!(handback.written, ArchGroups::VECTOR);
-        assert_eq!(vp.xsave_writes(), 1, "a changed vector file crosses as its area");
-        assert_eq!(vp.writes_of(Reg::Rbx), 1, "and the registers do not cross again");
+        assert_eq!(
+            vp.xsave_writes(),
+            1,
+            "a changed vector file crosses as its area"
+        );
+        assert_eq!(
+            vp.writes_of(Reg::Rbx),
+            1,
+            "and the registers do not cross again"
+        );
     }
 
     /// A second park before any entry keeps what the first one read.
@@ -1037,7 +1095,10 @@ mod tests {
         assert_eq!(handback.calls, 0);
         assert_eq!(vp.writes_of(Reg::Rip), 0);
         assert_eq!(vp.xsave_writes(), 0);
-        assert!(!ex.owes_the_partition(), "and every group is the partition's again");
+        assert!(
+            !ex.owes_the_partition(),
+            "and every group is the partition's again"
+        );
     }
 
     /// Adoption installs the machine's processor whole before its first
@@ -1054,24 +1115,47 @@ mod tests {
         let cpu = machine.processor(0).into_cpu();
         let mut xs = XsaveArea::read_from(&vp, HostComponents::of_this_host()).expect("an area");
         let mut ex = Exchange::installing();
-        assert!(ex.owes_the_partition(), "the machine's processor is owed before any entry");
+        assert!(
+            ex.owes_the_partition(),
+            "the machine's processor is owed before any entry"
+        );
 
         // A park before the first entry reads nothing: the machine's
         // processor is the one owed, not the platform's reset state.
         ex.import_at_park(&vp, cpu, &mut xs).unwrap();
-        assert_eq!(vp.reads_of(Reg::Rip), 0, "an install is not overwritten by the partition");
+        assert_eq!(
+            vp.reads_of(Reg::Rip),
+            0,
+            "an install is not overwritten by the partition"
+        );
 
         let handback = ex.export_owed(&vp, cpu, &mut xs).unwrap();
         assert_eq!(
             handback.written,
             ArchGroups::all().difference(ArchGroups::INTERRUPT_STATE)
         );
-        assert_eq!(vp.value_of(Reg::Rip), CODE, "the partition starts where the machine stood");
-        for reg in [Reg::Rax, Reg::Rip, Reg::Cr0, Reg::Dr7, Reg::Efer, Reg::Es, Reg::Gdtr] {
+        assert_eq!(
+            vp.value_of(Reg::Rip),
+            CODE,
+            "the partition starts where the machine stood"
+        );
+        for reg in [
+            Reg::Rax,
+            Reg::Rip,
+            Reg::Cr0,
+            Reg::Dr7,
+            Reg::Efer,
+            Reg::Es,
+            Reg::Gdtr,
+        ] {
             assert_eq!(vp.writes_of(reg), 1, "{reg:?} is installed");
         }
         assert_eq!(vp.xsave_writes(), 1, "and the vector file");
-        assert_eq!(vp.writes_of(Reg::Tsc), 0, "never the counter the hardware owns");
+        assert_eq!(
+            vp.writes_of(Reg::Tsc),
+            0,
+            "never the counter the hardware owns"
+        );
         assert_eq!(vp.writes_of(Reg::InterruptState), 0);
         assert!(!ex.owes_the_partition());
     }
@@ -1096,7 +1180,8 @@ mod tests {
         let mut state = VcpuArchState::default();
         cpu.export_arch_groups(&mut state, ArchGroups::RIP_RFLAGS);
         state.rflags = 0x0202;
-        cpu.import_arch_groups(&state, ArchGroups::RIP_RFLAGS).unwrap();
+        cpu.import_arch_groups(&state, ArchGroups::RIP_RFLAGS)
+            .unwrap();
 
         let handback = ex.export_owed(&vp, cpu, &mut xs).unwrap();
         assert_eq!(handback.written, ArchGroups::RIP_RFLAGS);

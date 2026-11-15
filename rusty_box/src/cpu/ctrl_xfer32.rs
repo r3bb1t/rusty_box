@@ -2,11 +2,10 @@
 //!
 //! Based on Bochs ctrl_xfer32.cc
 
-use super::{
-    cpu::Exception,
-    decoder::{BxSegregs, Instruction},
-    error::Result,
-};
+use super::cpu::Exception;
+use super::decoder::{BxSegregs, Instruction};
+use super::error::Result;
+use crate::config::BxLinAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -481,7 +480,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.sregs[seg_idx]
             .cache
             .u
-            .set_segment_base((selector as u64) << 4);
+            .set_segment_base(BxLinAddress::new(u64::from(selector) << 4));
         self.sregs[seg_idx].cache.segment = true;
         self.sregs[seg_idx].cache.p = true;
 
@@ -614,12 +613,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let op1_32 = self.v_read_dword(seg, eaddr)?;
         let cs_raw = self.v_read_word(
             seg,
-            (eaddr.wrapping_add(4))
-                & (if instr.as32_l() == 0 {
-                    0xFFFF
-                } else {
-                    0xFFFFFFFF
-                }),
+            eaddr.wrapping_add(4).masked(if instr.as32_l() == 0 {
+                0xFFFF
+            } else {
+                0xFFFFFFFF
+            }),
         )?;
 
         self.call_far32(instr, cs_raw, op1_32)
@@ -640,12 +638,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let op1_32 = self.v_read_dword(seg, eaddr)?;
         let cs_raw = self.v_read_word(
             seg,
-            (eaddr.wrapping_add(4))
-                & (if instr.as32_l() == 0 {
-                    0xFFFF
-                } else {
-                    0xFFFFFFFF
-                }),
+            eaddr.wrapping_add(4).masked(if instr.as32_l() == 0 {
+                0xFFFF
+            } else {
+                0xFFFFFFFF
+            }),
         )?;
 
         self.jmp_far32(instr, cs_raw, op1_32)

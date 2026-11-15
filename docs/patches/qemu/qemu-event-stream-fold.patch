@@ -1,0 +1,224 @@
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -769,6 +769,12 @@
+      */
+     bool event_register;
+ 
++    /*
++     * The system counter's value up to which the event streams' events
++     * are folded into event_register (gt_fold_event_stream()).
++     */
++    uint64_t evt_folded_to;
++
+     /* Fields up to this point are cleared by a CPU reset */
+     struct {} end_reset_fields;
+ 
+--- a/target/arm/cpu.c
++++ b/target/arm/cpu.c
+@@ -342,6 +342,10 @@
+     }
+ 
+     memset(env, 0, offsetof(CPUARMState, end_reset_fields));
++#ifndef CONFIG_USER_ONLY
++    /* The event streams generate no event before the reset. */
++    env->evt_folded_to = gt_get_countervalue(env);
++#endif
+ 
+     g_hash_table_foreach(cpu->cp_regs, cp_reg_reset, cpu);
+     g_hash_table_foreach(cpu->cp_regs, cp_reg_check_reset, cpu);
+--- a/target/arm/machine.c
++++ b/target/arm/machine.c
+@@ -1218,6 +1218,11 @@
+     if (tcg_enabled()) {
+         hw_breakpoint_update_all(cpu);
+         hw_watchpoint_update_all(cpu);
++        /*
++         * The point the event streams were folded to is not migrated:
++         * the streams' events from here on reach the Event Register.
++         */
++        env->evt_folded_to = gt_get_countervalue(env);
+     }
+ 
+     /*
+--- a/target/arm/helper.c
++++ b/target/arm/helper.c
+@@ -822,6 +822,12 @@
+     /* Clear all-context RES0 bits.  */
+     value &= valid_mask;
+     changed = env->cp15.scr_el3 ^ value;
++#ifndef CONFIG_USER_ONLY
++    if (changed & (SCR_NS | SCR_EEL2)) {
++        /* Whether EL2 is enabled selects the event streams. */
++        gt_fold_event_stream(env);
++    }
++#endif
+     env->cp15.scr_el3 = value;
+ 
+ #ifndef CONFIG_USER_ONLY
+@@ -1358,6 +1364,56 @@
+     return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / gt_cntfrq_period_ns(cpu);
+ }
+ 
++/*
++ * Whether the event stream @control selects generates an event at a count
++ * after @from and no later than @to: a transition of the selected bit of
++ * the count from 0 to 1, or from 1 to 0 with EVNTDIR set.
++ */
++static bool gt_evt_between(uint32_t control, uint64_t from, uint64_t to)
++{
++    int bit;
++    uint64_t half, period, edge, next;
++
++    if (!FIELD_EX32(control, CNTxCTL, EVNTEN)) {
++        return false;
++    }
++    bit = FIELD_EX32(control, CNTxCTL, EVNTI) +
++        (FIELD_EX32(control, CNTxCTL, EVNTIS) ? 8 : 0);
++    half = BIT_ULL(bit);
++    period = half << 1;
++    /* The bit rises where a period's upper half starts. */
++    edge = FIELD_EX32(control, CNTxCTL, EVNTDIR) ? 0 : half;
++    /* Counts from @from to the first transition after it, 1 to period. */
++    next = ((edge + period - from % period - 1) % period) + 1;
++    return next <= to - from;
++}
++
++void gt_fold_event_stream(CPUARMState *env)
++{
++    uint64_t hcr = arm_hcr_el2_eff(env);
++    uint64_t now = gt_get_countervalue(env);
++    uint64_t from = env->evt_folded_to;
++    uint64_t offset = env->cp15.cntvoff_el2;
++    bool event = false;
++
++    /* TestEventCNTP(): CNTHCTL_EL2's stream, on the physical count. */
++    if (arm_feature(env, ARM_FEATURE_EL2)) {
++        event |= gt_evt_between(env->cp15.cnthctl_el2, from, now);
++    }
++    /*
++     * TestEventCNTV(): CNTKCTL_EL1's stream, on the physical count less
++     * CNTVOFF_EL2 whatever the current EL, unless E2H and TGE are both 1.
++     */
++    if ((hcr & (HCR_E2H | HCR_TGE)) != (HCR_E2H | HCR_TGE)) {
++        event |= gt_evt_between(env->cp15.c14_cntkctl,
++                                from - offset, now - offset);
++    }
++    if (event) {
++        qatomic_set(&env->event_register, true);
++    }
++    env->evt_folded_to = now;
++}
++
+ static void gt_update_gicv5_ppi(CPUARMState *env, int timeridx, bool level)
+ {
+     static int timeridx_to_ppi[] = {
+@@ -1773,6 +1829,20 @@
+     gt_ctl_write(env, ri, GTIMER_VIRT, value);
+ }
+ 
++static void gt_cntkctl_write(CPUARMState *env, const ARMCPRegInfo *ri,
++                             uint64_t value)
++{
++    ARMCPU *cpu = env_archcpu(env);
++
++    /* EVNTIS is RES0 without FEAT_ECV, which TestEventCNTV() asks for. */
++    if (!cpu_isar_feature(aa64_ecv_traps, cpu)) {
++        value &= ~R_CNTxCTL_EVNTIS_MASK;
++    }
++    /* The stretch of the count up to now is judged by the old controls. */
++    gt_fold_event_stream(env);
++    raw_write(env, ri, value);
++}
++
+ static void gt_cnthctl_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                              uint64_t value)
+ {
+@@ -1807,6 +1877,7 @@
+     /* Clear RES0 bits */
+     value &= valid_mask;
+ 
++    gt_fold_event_stream(env);
+     raw_write(env, ri, value);
+ 
+     if ((oldval ^ value) & R_CNTHCTL_CNTVMASK_MASK) {
+@@ -1826,6 +1897,7 @@
+     ARMCPU *cpu = env_archcpu(env);
+ 
+     trace_arm_gt_cntvoff_write(value);
++    gt_fold_event_stream(env);
+     raw_write(env, ri, value);
+     gt_recalc_timer(cpu, GTIMER_VIRT);
+ }
+@@ -2085,6 +2157,7 @@
+       .vhe_redir_to_el2 = ENCODE_AA64_CP_REG(3, 4, 14, 1, 0),
+       .vhe_redir_to_el01 = ENCODE_AA64_CP_REG(3, 5, 14, 1, 0),
+       .fieldoffset = offsetof(CPUARMState, cp15.c14_cntkctl),
++      .writefn = gt_cntkctl_write, .raw_writefn = raw_write,
+       .resetvalue = 0,
+     },
+     /* per-timer control */
+@@ -3810,6 +3883,12 @@
+     }
+     hcr_change_timer = (env->cp15.hcr_el2 ^ value) &
+                        (HCR_E2H | HCR_TGE);
++#ifndef CONFIG_USER_ONLY
++    if (hcr_change_timer) {
++        /* E2H and TGE select the event streams. */
++        gt_fold_event_stream(env);
++    }
++#endif
+ 
+     /* update */
+     env->cp15.hcr_el2 = value;
+--- a/target/arm/internals.h
++++ b/target/arm/internals.h
+@@ -1982,6 +1982,27 @@
+ 
+ /* Return the current value of the system counter in ticks */
+ uint64_t gt_get_countervalue(CPUARMState *env);
++
++/*
++ * Set the Event Register if an event stream has generated an event since
++ * the counter value it was last brought up to, which becomes the current
++ * one. The streams generate their events whatever the CPU is doing
++ * (TestEventCNTV(), TestEventCNTP()); they reach the register when it is
++ * read, and before a change of what selects them.
++ */
++void gt_fold_event_stream(CPUARMState *env);
++
++/*
++ * Whether CNTHCTL_EL2 or CNTKCTL_EL1 turns an event stream on. While
++ * neither does there is nothing to fold, and the write that turns one on
++ * folds first.
++ */
++static inline bool gt_event_stream_enabled(CPUARMState *env)
++{
++    return FIELD_EX32(env->cp15.cnthctl_el2, CNTxCTL, EVNTEN) ||
++        FIELD_EX32(env->cp15.c14_cntkctl, CNTxCTL, EVNTEN);
++}
++
+ /*
+  * Return the currently applicable offset between the system counter
+  * and the counter for the specified timer, as used for direct register
+--- a/target/arm/tcg/op_helper.c
++++ b/target/arm/tcg/op_helper.c
+@@ -596,6 +596,9 @@
+     uint32_t excp;
+     int target_el;
+ 
++    if (gt_event_stream_enabled(env)) {
++        gt_fold_event_stream(env);
++    }
+     if (qatomic_xchg(&env->event_register, false)) {
+         return;
+     }
+@@ -661,6 +664,9 @@
+      * As for WFE if the event register is already set we can consume
+      * the event and return immediately.
+      */
++    if (gt_event_stream_enabled(env)) {
++        gt_fold_event_stream(env);
++    }
+     if (qatomic_xchg(&env->event_register, false)) {
+         return;
+     }

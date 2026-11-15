@@ -1,5 +1,6 @@
-use crate::ImageSize;
 use std::path::PathBuf;
+
+use crate::ImageSize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BxImageError {

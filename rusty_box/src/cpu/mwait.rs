@@ -1,7 +1,5 @@
-use super::{
-    cpu::{BxCpuC, CpuActivityState},
-    Result,
-};
+use super::Result;
+use super::cpu::{BxCpuC, CpuActivityState};
 use crate::config::BxPhyAddress;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
@@ -13,9 +11,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         const CACHE_LINE_SIZE: u64 = 64;
         let monitor_begin = self.monitor.monitor_addr;
-        let monitor_end = monitor_begin + CACHE_LINE_SIZE - 1;
+        let monitor_end = monitor_begin + (CACHE_LINE_SIZE - 1);
 
-        let end_addr = begin_addr + len as u64;
+        let end_addr = begin_addr + u64::from(len);
         !(begin_addr >= monitor_end || end_addr <= monitor_begin)
     }
 

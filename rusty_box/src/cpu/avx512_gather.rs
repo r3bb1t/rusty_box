@@ -31,10 +31,10 @@
 //! BASE register (a regular GPR), not the index, so it remains correct
 //! for VSIB without further changes.
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-};
 use rusty_box_decoder::BX_NIL_REGISTER;
+
+use super::decoder::{BxSegregs, Instruction};
+use crate::config::BxEffAddress;
 
 /// Number of 32-bit elements per vector length: VL=128→4, VL=256→8, VL=512→16
 #[inline]
@@ -95,7 +95,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Compute the effective address for VSIB element `n` with a 32-bit
     /// (dword) index lane. Bochs `BxResolveGatherD`.
     #[inline]
-    fn resolve_gather_d(&self, instr: &Instruction, sib_idx: u8, n: usize) -> u64 {
+    fn resolve_gather_d(&self, instr: &Instruction, sib_idx: u8, n: usize) -> BxEffAddress {
         let index = i64::from(self.vmm[sib_idx as usize].zmm32s(n));
         let scale = instr.sib_scale();
         let disp = i64::from(instr.displ32s());
@@ -103,17 +103,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let off = (index << scale).wrapping_add(disp);
         let addr = base.wrapping_add(off as u64);
         if instr.as64_l() != 0 {
-            addr
+            BxEffAddress::new(addr)
         } else {
             // 32-bit addressing: effective address truncated to 32 bits.
-            addr as u32 as u64
+            BxEffAddress::from_u32(addr as u32)
         }
     }
 
     /// Compute the effective address for VSIB element `n` with a 64-bit
     /// (qword) index lane. Bochs `BxResolveGatherQ`.
     #[inline]
-    fn resolve_gather_q(&self, instr: &Instruction, sib_idx: u8, n: usize) -> u64 {
+    fn resolve_gather_q(&self, instr: &Instruction, sib_idx: u8, n: usize) -> BxEffAddress {
         let index = self.vmm[sib_idx as usize].zmm64s(n);
         let scale = instr.sib_scale();
         let disp = i64::from(instr.displ32s());
@@ -121,9 +121,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let off = (index << scale).wrapping_add(disp);
         let addr = base.wrapping_add(off as u64);
         if instr.as64_l() != 0 {
-            addr
+            BxEffAddress::new(addr)
         } else {
-            addr as u32 as u64
+            // 32-bit addressing: effective address truncated to 32 bits.
+            BxEffAddress::from_u32(addr as u32)
         }
     }
 
@@ -170,9 +171,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let vl = instr.get_vl();
         let seg = BxSegregs::from(instr.seg());
-        let qword_index = matches!(form, VexGatherForm::QIndexDword | VexGatherForm::QIndexQword);
-        let qword_element =
-            matches!(form, VexGatherForm::DIndexQword | VexGatherForm::QIndexQword);
+        let qword_index = matches!(
+            form,
+            VexGatherForm::QIndexDword | VexGatherForm::QIndexQword
+        );
+        let qword_element = matches!(
+            form,
+            VexGatherForm::DIndexQword | VexGatherForm::QIndexQword
+        );
 
         // Element count and the padding bound Bochs walks to. VGATHERQPS is
         // the odd one out: qword indices but dword results, so it produces at
@@ -578,9 +584,11 @@ mod tests {
     //! Memory-touching execution is exercised by guest code under alpine
     //! when AVX-512 paths are taken (none in alpine kernel itself).
 
-    use crate::cpu::decoder::{BxSegregs, Instruction};
     use rusty_box_decoder::fetch_decode64;
     use rusty_box_decoder::opcode::Opcode;
+
+    use crate::config::BxEffAddress;
+    use crate::cpu::decoder::{BxSegregs, Instruction};
 
     /// Build an EVEX.512 instruction with default sizes; tests fill in
     /// the VSIB pieces afterwards via public setters.
@@ -655,7 +663,11 @@ mod tests {
         );
         // 0x4000 + (-1 << 2) + 0 = 0x3FFC
         let addr = cpu.resolve_gather_d(&i, 5, 0);
-        assert_eq!(addr, 0x3FFC, "signed index sign-extended before scaling");
+        assert_eq!(
+            addr,
+            BxEffAddress::new(0x3FFC),
+            "signed index sign-extended before scaling"
+        );
     }
 
     #[test]
@@ -679,7 +691,7 @@ mod tests {
         );
         // 0x10000 + (-2 << 3) + 0x10 = 0x10000 - 16 + 16 = 0x10000
         let addr = cpu.resolve_gather_q(&i, 7, 0);
-        assert_eq!(addr, 0x10000);
+        assert_eq!(addr, BxEffAddress::new(0x10000));
     }
 
     #[test]
@@ -789,9 +801,7 @@ mod tests {
         ] {
             // P1 bit 7 carries EVEX.W: 0x7D for W0, 0xFD for W1.
             let p1 = if w == 1 { 0xFD } else { 0x7D };
-            let bytes = [
-                0x62, 0x72, p1, 0x49, op, 0x94, 0xAB, 0x40, 0x00, 0x00, 0x00,
-            ];
+            let bytes = [0x62, 0x72, p1, 0x49, op, 0x94, 0xAB, 0x40, 0x00, 0x00, 0x00];
             let i = fetch_decode64(&bytes).expect("scatter should decode");
             assert_eq!(i.get_ia_opcode(), expected, "opcode {op:#04x} W{w}");
             assert_eq!(i.sib_index(), 5);

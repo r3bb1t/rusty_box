@@ -45,7 +45,11 @@ pub(in crate::cpu) fn extf80_to_i64(
 }
 
 /// Convert extFloat80 to i64 truncating toward zero.
-pub(in crate::cpu) fn extf80_to_i64_round_to_zero(a: ExtFloat80, exact: bool, status: &mut SoftFloatStatus) -> i64 {
+pub(in crate::cpu) fn extf80_to_i64_round_to_zero(
+    a: ExtFloat80,
+    exact: bool,
+    status: &mut SoftFloatStatus,
+) -> i64 {
     // Handle unsupported
     if extf80_is_unsupported(a) {
         softfloat_raise_flags(status, FLAG_INVALID);
@@ -83,9 +87,5 @@ pub(in crate::cpu) fn extf80_to_i64_round_to_zero(a: ExtFloat80, exact: bool, st
     if exact && ((sig << ((-shift_dist) & 63)) != 0) {
         softfloat_raise_flags(status, FLAG_INEXACT);
     }
-    if sign {
-        -abs_z
-    } else {
-        abs_z
-    }
+    if sign { -abs_z } else { abs_z }
 }

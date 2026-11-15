@@ -2,11 +2,9 @@
 //!
 //! Based on Bochs ctrl_xfer16.cc
 
-use super::{
-    cpu::Exception,
-    decoder::{BxSegregs, Instruction},
-    error::Result,
-};
+use super::cpu::Exception;
+use super::decoder::{BxSegregs, Instruction};
+use super::error::Result;
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
@@ -732,7 +730,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             0xFFFFFFFF
         };
-        let cs_raw = self.v_read_word(seg, (eaddr.wrapping_add(2)) & asize_mask)?;
+        let cs_raw = self.v_read_word(seg, eaddr.wrapping_add(2).masked(asize_mask))?;
 
         self.call_far16(instr, cs_raw, op1_16)
     }
@@ -755,7 +753,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             0xFFFFFFFF
         };
-        let cs_raw = self.v_read_word(seg, (eaddr.wrapping_add(2)) & asize_mask)?;
+        let cs_raw = self.v_read_word(seg, eaddr.wrapping_add(2).masked(asize_mask))?;
 
         self.jmp_far16(instr, cs_raw, op1_16)
     }

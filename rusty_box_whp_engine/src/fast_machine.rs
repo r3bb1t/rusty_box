@@ -36,12 +36,12 @@ use std::time::{Duration, Instant};
 use rusty_box::cpu::arch_state::{ArchGroups, VcpuArchState};
 use rusty_box::cpu::instrumentation::{Instrumentation, X86Reg};
 use rusty_box::emulator::{DeviceClock, Emulator, RunBudget};
-use rusty_box_core::time::{ClockHz, VmDuration, VmInstant};
 use rusty_box_core::EngineFault;
+use rusty_box_core::time::{ClockHz, VmDuration, VmInstant};
 use rusty_box_whp::WhpError;
 
 use crate::device_thread::{self, DeviceThreadControl};
-use crate::engine::{bring_up, ExitCounts, InjectCensus, WhpEngine};
+use crate::engine::{ExitCounts, InjectCensus, WhpEngine, bring_up};
 use crate::vcpu_thread::{Parked, RegistersAtPark, VcpuCensus, VcpuControl, VcpuThread};
 use crate::vm_clock::{StdClock, VmClockSource};
 
@@ -165,7 +165,10 @@ impl core::fmt::Display for FastMachineFault {
                 waited.as_secs_f32()
             ),
             Self::NoInstructionCount => {
-                write!(f, "a machine on the hypervisor cannot count instructions; budget it in ticks")
+                write!(
+                    f,
+                    "a machine on the hypervisor cannot count instructions; budget it in ticks"
+                )
             }
             Self::DeviceClockIsTicks => write!(
                 f,
@@ -181,7 +184,10 @@ impl core::fmt::Display for FastMachineFault {
                 "processor {processor} parked without its registers: the platform would not \
                  give them up"
             ),
-            Self::Uncarried { register, processor } => write!(
+            Self::Uncarried {
+                register,
+                processor,
+            } => write!(
                 f,
                 "processor {processor}'s {register:?} is not carried into the partition on this \
                  engine; the write was undone"
@@ -300,13 +306,12 @@ impl<T: Instrumentation + Send + 'static> FastMachine<T> {
         if machine.device_clock() != DeviceClock::HostTime {
             return Err(FastMachineFault::DeviceClockIsTicks);
         }
-        let rate = ClockHz::new(machine.config().ips.per_second_u64())
-            .ok_or_else(|| {
-                FastMachineFault::Engine(EngineFault::new(
-                    rusty_box_core::EngineFaultKind::Host,
-                    "a machine with no instruction rate has no clock",
-                ))
-            })?;
+        let rate = ClockHz::new(machine.config().ips.per_second_u64()).ok_or_else(|| {
+            FastMachineFault::Engine(EngineFault::new(
+                rusty_box_core::EngineFaultKind::Host,
+                "a machine with no instruction rate has no clock",
+            ))
+        })?;
         let clock = Arc::new(Mutex::new(VmClockSource::stopped_at(
             VmInstant::from_ticks(machine.ticks()),
             rate,
@@ -341,10 +346,18 @@ impl<T: Instrumentation + Send + 'static> FastMachine<T> {
             devices: None,
             state: RunState::Paused,
         };
-        let controls = adopted.vcpus.iter().map(|(_, control)| control.clone()).collect();
+        let controls = adopted
+            .vcpus
+            .iter()
+            .map(|(_, control)| control.clone())
+            .collect();
         adopted.devices = Some(
-            device_thread::spawn(Arc::clone(&adopted.shared), Arc::clone(&adopted.clock), controls)
-                .map_err(FastMachineFault::Engine)?,
+            device_thread::spawn(
+                Arc::clone(&adopted.shared),
+                Arc::clone(&adopted.clock),
+                controls,
+            )
+            .map_err(FastMachineFault::Engine)?,
         );
         adopted.wait_for_every_processor_to_park()?;
         Ok(adopted)
@@ -551,7 +564,8 @@ impl<T: Instrumentation + Send + 'static> FastMachine<T> {
             if self.processor_reset_is_owed(processor) {
                 continue;
             }
-            for refusal in stood.put_back_what_the_partition_cannot_take(&mut machine, processor, placed)
+            for refusal in
+                stood.put_back_what_the_partition_cannot_take(&mut machine, processor, placed)
             {
                 match verdict {
                     Ok(_) => verdict = Err(refusal),
@@ -740,7 +754,7 @@ impl<T: Instrumentation + Send + 'static> FastMachine<T> {
             match control.registers_at_park() {
                 Some(RegistersAtPark::InTheMachine { placed: vector }) => placed.push(vector),
                 Some(RegistersAtPark::WithThePartition) => {
-                    return Err(FastMachineFault::RegistersNotInTheMachine { processor })
+                    return Err(FastMachineFault::RegistersNotInTheMachine { processor });
                 }
                 // Paused, and yet this processor has not parked: nothing
                 // brought its registers home, whatever the state says.
@@ -814,7 +828,10 @@ impl ProcessorAsItStood {
         let mut refusals = Vec::new();
         if cpu.time_stamp_counter() != self.tsc {
             cpu.take_time_stamp_counter(self.tsc);
-            refusals.push(FastMachineFault::Uncarried { register: X86Reg::Tsc, processor });
+            refusals.push(FastMachineFault::Uncarried {
+                register: X86Reg::Tsc,
+                processor,
+            });
         }
         for (msr, held) in UNCARRIED_MSRS.iter().zip(self.msrs) {
             let Some(held) = held else { continue };
@@ -822,7 +839,10 @@ impl ProcessorAsItStood {
                 continue;
             }
             refusals.push(match cpu.write_msr_for_api(*msr, held) {
-                Ok(()) => FastMachineFault::UncarriedMsr { msr: *msr, processor },
+                Ok(()) => FastMachineFault::UncarriedMsr {
+                    msr: *msr,
+                    processor,
+                },
                 Err(refused) => {
                     tracing::error!(
                         "processor {processor} would not take back MSR {msr:#x} as it stood: \
@@ -926,13 +946,14 @@ fn set_if_again<T: Instrumentation>(
     let mut flags = VcpuArchState::default();
     cpu.export_arch_groups(&mut flags, ArchGroups::RIP_RFLAGS);
     flags.rflags |= IF;
-    cpu.import_arch_groups(&flags, ArchGroups::RIP_RFLAGS).map_err(|refused| {
-        tracing::error!("the processor would not take its flags back with IF set: {refused}");
-        FastMachineFault::Engine(EngineFault::new(
-            rusty_box_core::EngineFaultKind::Host,
-            "setting IF again under a placed interrupt",
-        ))
-    })
+    cpu.import_arch_groups(&flags, ArchGroups::RIP_RFLAGS)
+        .map_err(|refused| {
+            tracing::error!("the processor would not take its flags back with IF set: {refused}");
+            FastMachineFault::Engine(EngineFault::new(
+                rusty_box_core::EngineFaultKind::Host,
+                "setting IF again under a placed interrupt",
+            ))
+        })
 }
 
 impl<T: Instrumentation + Send> Drop for FastMachine<T> {
@@ -1011,12 +1032,14 @@ impl FastMachineFault {
 
 #[cfg(test)]
 mod tests {
+    use rusty_box::config::BxPhyAddress;
+    use rusty_box::cpu::instrumentation::X86Reg;
+
     use super::*;
     use crate::fixtures::{
-        a_turn_on_the_hardware, console_output, fast_machine_running, hypervisor_here,
-        machine_running_on, machine_with_devices_on, CODE, DEBUG_PORT, MARK,
+        CODE, DEBUG_PORT, MARK, a_turn_on_the_hardware, console_output, fast_machine_running,
+        hypervisor_here, machine_running_on, machine_with_devices_on,
     };
-    use rusty_box::cpu::instrumentation::X86Reg;
 
     /// `jmp $` — a guest that asks the hardware for nothing at all.
     ///
@@ -1039,9 +1062,8 @@ mod tests {
             return;
         }
         let _turn = a_turn_on_the_hardware();
-        let mut machine =
-            FastMachine::adopt(machine_with_devices_on(DeviceClock::HostTime, &SPIN))
-                .expect("a machine on hardware");
+        let mut machine = FastMachine::adopt(machine_with_devices_on(DeviceClock::HostTime, &SPIN))
+            .expect("a machine on hardware");
         let ips = machine
             .with_machine(|m| m.config().ips.per_second_u64())
             .expect("an adopted machine is paused");
@@ -1061,7 +1083,10 @@ mod tests {
         );
         assert_eq!(outcome.stop, StepStop::BudgetSpent);
         assert!(
-            machine.with_machine(|m| m.ticks()).expect("a stepped machine is paused") >= ten_ms,
+            machine
+                .with_machine(|m| m.ticks())
+                .expect("a stepped machine is paused")
+                >= ten_ms,
             "the wheel followed the clock rather than standing still"
         );
 
@@ -1134,9 +1159,8 @@ mod tests {
             return;
         }
         let _turn = a_turn_on_the_hardware();
-        let mut machine =
-            FastMachine::adopt(machine_with_devices_on(DeviceClock::HostTime, &SPIN))
-                .expect("a machine on hardware");
+        let mut machine = FastMachine::adopt(machine_with_devices_on(DeviceClock::HostTime, &SPIN))
+            .expect("a machine on hardware");
         let ips = machine
             .with_machine(|m| m.config().ips.per_second_u64())
             .expect("an adopted machine is paused");
@@ -1185,9 +1209,8 @@ mod tests {
             return;
         }
         let _turn = a_turn_on_the_hardware();
-        let mut machine =
-            FastMachine::adopt(machine_with_devices_on(DeviceClock::HostTime, &SPIN))
-                .expect("a machine on hardware");
+        let mut machine = FastMachine::adopt(machine_with_devices_on(DeviceClock::HostTime, &SPIN))
+            .expect("a machine on hardware");
         match machine.step(RunBudget::Instructions(1_000)) {
             Err(FastMachineFault::NoInstructionCount) => {}
             Err(other) => panic!("refused for the wrong reason: {other}"),
@@ -1231,7 +1254,10 @@ mod tests {
             Err(other) => panic!("refused for the wrong reason: {other}"),
             Ok(()) => panic!("the closure was let into a machine whose guest was running"),
         }
-        assert!(!ran, "the closure ran against a machine whose guest was running");
+        assert!(
+            !ran,
+            "the closure ran against a machine whose guest was running"
+        );
 
         machine.pause().expect("the guest pauses");
         assert!(
@@ -1259,7 +1285,11 @@ mod tests {
         );
         let budget = ten_milliseconds(&mut machine);
         machine.step(budget).expect("a step");
-        assert_eq!(debug_output(&mut machine), std::vec![MARK], "and does once stepped");
+        assert_eq!(
+            debug_output(&mut machine),
+            std::vec![MARK],
+            "and does once stepped"
+        );
     }
 
     /// A software interrupt whose delivery faults is the fault, once, and
@@ -1315,7 +1345,7 @@ mod tests {
         );
         built
             .mem_write(
-                0x1100,
+                BxPhyAddress::new(0x1100),
                 &[
                     0xB0, b'G', 0xE6, DEBUG_PORT, //
                     0x0F, 0x01, 0x1E, 0x10, 0x12, //
@@ -1325,9 +1355,24 @@ mod tests {
                 ],
             )
             .expect("#GP handler");
-        built.mem_write(0x1180, &[0xB0, b'I', 0xE6, DEBUG_PORT, 0xCF]).expect("INT 0x80 handler");
-        built.mem_write(0x1200, &[0x3F, 0x00, 0x00, 0x00, 0x00, 0x00]).expect("narrow IDTR");
-        built.mem_write(0x1210, &[0xFF, 0x03, 0x00, 0x00, 0x00, 0x00]).expect("full IDTR");
+        built
+            .mem_write(
+                BxPhyAddress::new(0x1180),
+                &[0xB0, b'I', 0xE6, DEBUG_PORT, 0xCF],
+            )
+            .expect("INT 0x80 handler");
+        built
+            .mem_write(
+                BxPhyAddress::new(0x1200),
+                &[0x3F, 0x00, 0x00, 0x00, 0x00, 0x00],
+            )
+            .expect("narrow IDTR");
+        built
+            .mem_write(
+                BxPhyAddress::new(0x1210),
+                &[0xFF, 0x03, 0x00, 0x00, 0x00, 0x00],
+            )
+            .expect("full IDTR");
         let mut machine = FastMachine::adopt(built).expect("a machine on hardware");
 
         for _ in 0..5 {
@@ -1408,7 +1453,7 @@ mod tests {
         );
         built
             .mem_write(
-                0x1100,
+                BxPhyAddress::new(0x1100),
                 &[
                     0xB0, b'G', 0xE6, DEBUG_PORT, //
                     0xE4, 0x60, //
@@ -1420,12 +1465,24 @@ mod tests {
             .expect("#GP handler");
         built
             .mem_write(
-                0x1180,
-                &[0xB0, b'K', 0xE6, DEBUG_PORT, 0xE4, 0x60, 0xB0, 0x20, 0xE6, 0x20, 0xCF],
+                BxPhyAddress::new(0x1180),
+                &[
+                    0xB0, b'K', 0xE6, DEBUG_PORT, 0xE4, 0x60, 0xB0, 0x20, 0xE6, 0x20, 0xCF,
+                ],
             )
             .expect("IRQ1 handler");
-        built.mem_write(0x1200, &[0x3F, 0x00, 0x00, 0x00, 0x00, 0x00]).expect("narrow IDTR");
-        built.mem_write(0x1210, &[0xFF, 0x03, 0x00, 0x00, 0x00, 0x00]).expect("full IDTR");
+        built
+            .mem_write(
+                BxPhyAddress::new(0x1200),
+                &[0x3F, 0x00, 0x00, 0x00, 0x00, 0x00],
+            )
+            .expect("narrow IDTR");
+        built
+            .mem_write(
+                BxPhyAddress::new(0x1210),
+                &[0xFF, 0x03, 0x00, 0x00, 0x00, 0x00],
+            )
+            .expect("full IDTR");
         let mut machine = FastMachine::adopt(built).expect("a machine on hardware");
 
         // The guest programs its 8259 and opens to interrupts before anything
@@ -1439,11 +1496,15 @@ mod tests {
         let raised = machine
             .with_machine(|m| {
                 assert!(
-                    m.keyboard().key(rusty_box::iodev::scancodes::BxKey::A, true),
+                    m.keyboard().key(
+                        rusty_box::iodev::scancodes::BxKey::A,
+                        rusty_box::emulator::KeyAction::Press
+                    ),
                     "the 8042 took the keystroke"
                 );
                 for _ in 0..200 {
-                    m.service_device_time(ips / 10_000).expect("the wheel turns");
+                    m.service_device_time(ips / 10_000)
+                        .expect("the wheel turns");
                     if m.processor(0).io().device_manager().has_interrupt() {
                         return true;
                     }
@@ -1480,12 +1541,18 @@ mod tests {
             return;
         }
         let _turn = a_turn_on_the_hardware();
-        let mut built =
-            machine_running_on(DeviceClock::HostTime, &[0xB0, MARK, 0xE6, DEBUG_PORT, 0xEB, 0xFE]);
+        let mut built = machine_running_on(
+            DeviceClock::HostTime,
+            &[0xB0, MARK, 0xE6, DEBUG_PORT, 0xEB, 0xFE],
+        );
         // #UD's real-mode vector (IVT entry 6) at 0000:2000, which spins. The
         // ROM's 0xFF bytes raise #UD at the platform's reset vector.
-        built.mem_write(6 * 4, &[0x00, 0x20, 0x00, 0x00]).expect("the IVT is writable");
-        built.mem_write(0x2000, &SPIN).expect("the spin is writable");
+        built
+            .mem_write(BxPhyAddress::new(6 * 4), &[0x00, 0x20, 0x00, 0x00])
+            .expect("the IVT is writable");
+        built
+            .mem_write(BxPhyAddress::new(0x2000), &SPIN)
+            .expect("the spin is writable");
         let mut machine = FastMachine::adopt(built).expect("a machine on hardware");
 
         let budget = ten_milliseconds(&mut machine);
@@ -1541,22 +1608,27 @@ mod tests {
         let budget = ten_milliseconds(&mut machine);
         machine.step(budget).expect("a step");
 
-        machine.with_machine(|m| {
-            assert_eq!(m.reg_read(X86Reg::Ebx), 0x1357_9BDF, "a general register");
-            assert_eq!(m.reg_read(X86Reg::Fs), 0x0200, "a segment selector");
-            assert_eq!(m.reg_read(X86Reg::FsBase), 0x2000, "and its base");
-            assert_eq!(m.reg_read(X86Reg::Cr2), 0xC2, "a control register");
-            assert_eq!(m.reg_read(X86Reg::Cr4) & 0x200, 0x200, "CR4.OSFXSR");
-            assert_eq!(m.reg_read(X86Reg::Dr0), 0xD0, "a debug register");
-            assert_eq!(
-                m.reg_read_xmm(X86Reg::Xmm0)[..4],
-                [0xDF, 0x9B, 0x57, 0x13],
-                "the vector file"
-            );
-            assert_eq!(m.reg_read(X86Reg::Rflags) & 1, 1, "CF, from the flags");
-            assert_eq!(m.reg_read(X86Reg::Rip), CODE + 0x2E, "the spin the guest stands on");
-        })
-        .expect("a stepped machine is paused");
+        machine
+            .with_machine(|m| {
+                assert_eq!(m.reg_read(X86Reg::Ebx), 0x1357_9BDF, "a general register");
+                assert_eq!(m.reg_read(X86Reg::Fs), 0x0200, "a segment selector");
+                assert_eq!(m.reg_read(X86Reg::FsBase), 0x2000, "and its base");
+                assert_eq!(m.reg_read(X86Reg::Cr2), 0xC2, "a control register");
+                assert_eq!(m.reg_read(X86Reg::Cr4) & 0x200, 0x200, "CR4.OSFXSR");
+                assert_eq!(m.reg_read(X86Reg::Dr0), 0xD0, "a debug register");
+                assert_eq!(
+                    m.reg_read_xmm(X86Reg::Xmm0)[..4],
+                    [0xDF, 0x9B, 0x57, 0x13],
+                    "the vector file"
+                );
+                assert_eq!(m.reg_read(X86Reg::Rflags) & 1, 1, "CF, from the flags");
+                assert_eq!(
+                    m.reg_read(X86Reg::Rip),
+                    CODE + 0x2E,
+                    "the spin the guest stands on"
+                );
+            })
+            .expect("a stepped machine is paused");
     }
 
     /// The time-stamp counter read while paused is the guest's own.
@@ -1590,7 +1662,8 @@ mod tests {
         let (stored, read) = machine
             .with_machine(|m| {
                 let mut bytes = [0u8; 8];
-                m.mem_read(0x500, &mut bytes).expect("the guest's store is readable");
+                m.mem_read(BxPhyAddress::new(0x500), &mut bytes)
+                    .expect("the guest's store is readable");
                 (u64::from_le_bytes(bytes), m.reg_read(X86Reg::Tsc))
             })
             .expect("a stepped machine is paused");
@@ -1644,7 +1717,10 @@ mod tests {
             m.reg_write(X86Reg::Rbx, 1);
             m.reg_write(X86Reg::Tsc, WRITTEN);
         }) {
-            Err(FastMachineFault::Uncarried { register: X86Reg::Tsc, processor: 0 }) => {}
+            Err(FastMachineFault::Uncarried {
+                register: X86Reg::Tsc,
+                processor: 0,
+            }) => {}
             Err(other) => panic!("refused for the wrong reason: {other}"),
             Ok(()) => panic!("a write to the counter the hardware owns was kept"),
         }
@@ -1660,11 +1736,15 @@ mod tests {
         let stored = machine
             .with_machine(|m| {
                 let mut bytes = [0u8; 8];
-                m.mem_read(0x500, &mut bytes).expect("the guest's store is readable");
+                m.mem_read(BxPhyAddress::new(0x500), &mut bytes)
+                    .expect("the guest's store is readable");
                 u64::from_le_bytes(bytes)
             })
             .expect("a stepped machine is paused");
-        assert_ne!(stored, 0, "the RBX write beside the refused one stood and reached the guest");
+        assert_ne!(
+            stored, 0,
+            "the RBX write beside the refused one stood and reached the guest"
+        );
         assert!(
             stored < WRITTEN,
             "the guest read its own counter ({stored}), not the refused one"
@@ -1738,7 +1818,8 @@ mod tests {
                     "the 8042 took the keystroke"
                 );
                 for _ in 0..200 {
-                    m.service_device_time(ips / 10_000).expect("the wheel turns");
+                    m.service_device_time(ips / 10_000)
+                        .expect("the wheel turns");
                     if m.processor(0).io().device_manager().has_interrupt() {
                         return true;
                     }
@@ -1750,10 +1831,15 @@ mod tests {
 
         let control = machine.vcpus[0].1.clone();
         {
-            let held = machine.shared.lock().unwrap_or_else(PoisonError::into_inner);
+            let held = machine
+                .shared
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             control.resume();
             std::thread::sleep(Duration::from_millis(200));
-            control.request_park(Parked::Paused).expect("the park request reaches the platform");
+            control
+                .request_park(Parked::Paused)
+                .expect("the park request reaches the platform");
             drop(held);
         }
         assert_eq!(
@@ -1785,7 +1871,10 @@ mod tests {
              not take it: {outcome:?}"
         );
         match cleared {
-            Err(FastMachineFault::InterruptAlreadyPlaced { vector: 9, processor: 0 }) => {}
+            Err(FastMachineFault::InterruptAlreadyPlaced {
+                vector: 9,
+                processor: 0,
+            }) => {}
             Err(other) => panic!("refused for the wrong reason: {other}"),
             Ok(()) => panic!("clearing IF under a placed vector looked like it succeeded"),
         }
@@ -1837,9 +1926,13 @@ mod tests {
 
         match machine.with_machine(|m| {
             m.reg_write(X86Reg::Rbx, 1);
-            m.msr_write(TSC_AUX, 0x77).expect("the machine takes the write");
+            m.msr_write(TSC_AUX, 0x77)
+                .expect("the machine takes the write");
         }) {
-            Err(FastMachineFault::UncarriedMsr { msr: TSC_AUX, processor: 0 }) => {}
+            Err(FastMachineFault::UncarriedMsr {
+                msr: TSC_AUX,
+                processor: 0,
+            }) => {}
             Err(other) => panic!("refused for the wrong reason: {other}"),
             Ok(()) => panic!("a TSC_AUX write the guest never sees looked like it succeeded"),
         }
@@ -1885,7 +1978,11 @@ mod tests {
         ]);
         let budget = ten_milliseconds(&mut machine);
         machine.step(budget).expect("a step");
-        assert_eq!(debug_output(&mut machine), std::vec![0x11], "the guest is waiting");
+        assert_eq!(
+            debug_output(&mut machine),
+            std::vec![0x11],
+            "the guest is waiting"
+        );
 
         machine.resume().expect("the guest runs");
         match machine.with_machine_while_running(|m| m.reg_write(X86Reg::Rbx, 0x5A)) {
@@ -1988,16 +2085,22 @@ mod tests {
         ]);
         let budget = ten_milliseconds(&mut machine);
         machine.step(budget).expect("a step");
-        assert_eq!(debug_output(&mut machine), std::vec![0x11], "the guest is waiting");
+        assert_eq!(
+            debug_output(&mut machine),
+            std::vec![0x11],
+            "the guest is waiting"
+        );
 
-        machine.with_machine(|m| {
-            m.mem_write(0x3000, &[0xF5]).expect("the byte FS will point at");
-            m.reg_write(X86Reg::Rbx, 0x5A);
-            m.reg_write(X86Reg::Cr2, 0xC2);
-            m.reg_write(X86Reg::FsBase, 0x3000);
-            m.reg_write(X86Reg::Dr0, 0xD0);
-        })
-        .expect("a stepped machine is paused");
+        machine
+            .with_machine(|m| {
+                m.mem_write(BxPhyAddress::new(0x3000), &[0xF5])
+                    .expect("the byte FS will point at");
+                m.reg_write(X86Reg::Rbx, 0x5A);
+                m.reg_write(X86Reg::Cr2, 0xC2);
+                m.reg_write(X86Reg::FsBase, 0x3000);
+                m.reg_write(X86Reg::Dr0, 0xD0);
+            })
+            .expect("a stepped machine is paused");
         machine.step(budget).expect("a second step");
         assert_eq!(
             debug_output(&mut machine),
@@ -2043,21 +2146,27 @@ mod tests {
         let mut machine = fast_machine_running(&code);
         let budget = ten_milliseconds(&mut machine);
         machine.step(budget).expect("a step");
-        assert_eq!(debug_output(&mut machine), std::vec![0x11], "the guest is spinning");
+        assert_eq!(
+            debug_output(&mut machine),
+            std::vec![0x11],
+            "the guest is spinning"
+        );
 
-        machine.with_machine(|m| {
-            m.reg_write(X86Reg::Rip, CODE + 0x100);
-            // Bit 1 is the reserved one; CF, ZF and SF beside it.
-            m.reg_write(X86Reg::Rflags, 0xC3);
-            m.reg_write(X86Reg::Rsp, 0x7000);
-            let cr4 = m.reg_read(X86Reg::Cr4);
-            m.reg_write(X86Reg::Cr4, cr4 | 0x200);
-            let mut xmm0 = [0u8; 16];
-            xmm0[0] = 0x99;
-            m.reg_write_xmm(X86Reg::Xmm0, xmm0);
-            m.msr_write(0xC000_0102, 0x6B).expect("IA32_KERNEL_GS_BASE is writable");
-        })
-        .expect("a stepped machine is paused");
+        machine
+            .with_machine(|m| {
+                m.reg_write(X86Reg::Rip, CODE + 0x100);
+                // Bit 1 is the reserved one; CF, ZF and SF beside it.
+                m.reg_write(X86Reg::Rflags, 0xC3);
+                m.reg_write(X86Reg::Rsp, 0x7000);
+                let cr4 = m.reg_read(X86Reg::Cr4);
+                m.reg_write(X86Reg::Cr4, cr4 | 0x200);
+                let mut xmm0 = [0u8; 16];
+                xmm0[0] = 0x99;
+                m.reg_write_xmm(X86Reg::Xmm0, xmm0);
+                m.msr_write(0xC000_0102, 0x6B)
+                    .expect("IA32_KERNEL_GS_BASE is writable");
+            })
+            .expect("a stepped machine is paused");
         machine.step(budget).expect("a second step");
         assert_eq!(
             debug_output(&mut machine),

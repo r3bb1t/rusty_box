@@ -175,11 +175,7 @@ pub(in crate::cpu) fn f32_to_ui64_r_min_mag(
     if sign || shift_dist < 0 {
         softfloat_raise_flags(status, FLAG_INVALID);
         return if exp == 0xFF && sig != 0 {
-            if saturate {
-                0
-            } else {
-                UI64_FROM_NAN
-            }
+            if saturate { 0 } else { UI64_FROM_NAN }
         } else if sign {
             if saturate {
                 UI64_MIN_VALUE
@@ -273,11 +269,7 @@ pub(in crate::cpu) fn f64_to_ui64_r_min_mag(
     }
     softfloat_raise_flags(status, FLAG_INVALID);
     if exp == 0x7FF && sig != 0 {
-        if saturate {
-            0
-        } else {
-            UI64_FROM_NAN
-        }
+        if saturate { 0 } else { UI64_FROM_NAN }
     } else if sign {
         if saturate {
             UI64_MIN_VALUE
@@ -401,7 +393,10 @@ mod tests {
         // Rounding a negative fraction up to zero is legal; rounding it down
         // is not, and raises #I.
         let mut st = SoftFloatStatus::default();
-        assert_eq!(f64_to_ui64((-0.5f64).to_bits(), ROUND_MAX, false, &mut st), 0);
+        assert_eq!(
+            f64_to_ui64((-0.5f64).to_bits(), ROUND_MAX, false, &mut st),
+            0
+        );
         assert_eq!(softfloat_get_exception_flags(&st) & FLAG_INVALID, 0);
         let mut st = SoftFloatStatus::default();
         assert_eq!(

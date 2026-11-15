@@ -411,8 +411,9 @@ fn open_image_file(path: &Path, policy: ExistingFilePolicy) -> Result<File, BxIm
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs::{self, File};
+
+    use super::*;
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()

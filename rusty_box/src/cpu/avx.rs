@@ -6,20 +6,17 @@
 //! VEX.L=0 (128-bit) instructions are handled by the existing SSE handlers.
 //! This file handles VEX.L=1 (256-bit) and EVEX-specific instructions.
 
-use super::{
-    cpu::Exception,
-    decoder::{features::X86Feature, BxSegregs, Instruction},
-    softfloat3e::{
-        f128::{SOFTFLOAT_MULADD_SUB_C, SOFTFLOAT_MULADD_SUB_PROD},
-        f16_to_f32::f16_to_f32,
-        f32_mul_add::f32_mul_add,
-        f32_to_f16::f32_to_f16,
-        f64_mul_add::f64_mul_add,
-        softfloat::{softfloat_get_exception_flags, FLAG_DENORMAL},
-    },
-    sse_fp::mxcsr_to_softfloat_status_word,
-    xmm::{BxPackedXmmRegister, BxPackedYmmRegister, BxPackedZmmRegister},
-};
+use super::cpu::Exception;
+use super::decoder::features::X86Feature;
+use super::decoder::{BxSegregs, Instruction};
+use super::softfloat3e::f16_to_f32::f16_to_f32;
+use super::softfloat3e::f32_mul_add::f32_mul_add;
+use super::softfloat3e::f32_to_f16::f32_to_f16;
+use super::softfloat3e::f64_mul_add::f64_mul_add;
+use super::softfloat3e::f128::{SOFTFLOAT_MULADD_SUB_C, SOFTFLOAT_MULADD_SUB_PROD};
+use super::softfloat3e::softfloat::{FLAG_DENORMAL, softfloat_get_exception_flags};
+use super::sse_fp::mxcsr_to_softfloat_status_word;
+use super::xmm::{BxPackedXmmRegister, BxPackedYmmRegister, BxPackedZmmRegister};
 
 /// Bochs sse_pfp.cc `softfloat_status_word_rc_override` — on a register
 /// operand with EVEX.b, L'L is the embedded rounding mode rather than the
@@ -39,8 +36,7 @@ pub(super) fn softfloat_rc_override(
         status.softfloat_rounding_mode = instr.get_rc();
         status.softfloat_suppress_exception =
             crate::cpu::softfloat3e::softfloat::ALL_EXCEPTIONS_MASK;
-        status.softfloat_exception_masks =
-            crate::cpu::softfloat3e::softfloat::ALL_EXCEPTIONS_MASK;
+        status.softfloat_exception_masks = crate::cpu::softfloat3e::softfloat::ALL_EXCEPTIONS_MASK;
     }
 }
 
@@ -1655,7 +1651,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 if (m & 0x80) != 0 {
                     result.set_ymmubyte(i, 0);
                 } else {
-                    result.set_ymmubyte(i, data.ymmubyte((m & 0xf) as usize));
+                    result.set_ymmubyte(i, data.ymmubyte((m & 0xF) as usize));
                 }
             }
             // Upper 128-bit lane (bytes 16-31) — shuffles within upper lane only
@@ -1664,7 +1660,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 if (m & 0x80) != 0 {
                     result.set_ymmubyte(i, 0);
                 } else {
-                    result.set_ymmubyte(i, data.ymmubyte(16 + (m & 0xf) as usize));
+                    result.set_ymmubyte(i, data.ymmubyte(16 + (m & 0xF) as usize));
                 }
             }
             self.write_ymm_reg(dst_idx, result);
@@ -1684,7 +1680,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 if (m & 0x80) != 0 {
                     result.set_xmmubyte(i, 0);
                 } else {
-                    result.set_xmmubyte(i, data.xmmubyte((m & 0xf) as usize));
+                    result.set_xmmubyte(i, data.xmmubyte((m & 0xF) as usize));
                 }
             }
             self.write_xmm_reg(dst_idx, result);
@@ -2153,13 +2149,27 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             VexVarShiftOp::SrlD => {
                 for n in 0..dwords {
                     let shift = counts.ymm32u(n);
-                    result.set_ymm32u(n, if shift > 31 { 0 } else { values.ymm32u(n) >> shift });
+                    result.set_ymm32u(
+                        n,
+                        if shift > 31 {
+                            0
+                        } else {
+                            values.ymm32u(n) >> shift
+                        },
+                    );
                 }
             }
             VexVarShiftOp::SllD => {
                 for n in 0..dwords {
                     let shift = counts.ymm32u(n);
-                    result.set_ymm32u(n, if shift > 31 { 0 } else { values.ymm32u(n) << shift });
+                    result.set_ymm32u(
+                        n,
+                        if shift > 31 {
+                            0
+                        } else {
+                            values.ymm32u(n) << shift
+                        },
+                    );
                 }
             }
             VexVarShiftOp::SraD => {
@@ -2167,11 +2177,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     let shift = counts.ymm32u(n);
                     let v = values.ymm32s(n);
                     let r = if shift > 31 {
-                        if v < 0 {
-                            -1i32
-                        } else {
-                            0
-                        }
+                        if v < 0 { -1i32 } else { 0 }
                     } else {
                         v >> shift
                     };
@@ -2181,13 +2187,27 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             VexVarShiftOp::SrlQ => {
                 for n in 0..qwords {
                     let shift = counts.ymm64u(n);
-                    result.set_ymm64u(n, if shift > 63 { 0 } else { values.ymm64u(n) >> shift });
+                    result.set_ymm64u(
+                        n,
+                        if shift > 63 {
+                            0
+                        } else {
+                            values.ymm64u(n) >> shift
+                        },
+                    );
                 }
             }
             VexVarShiftOp::SllQ => {
                 for n in 0..qwords {
                     let shift = counts.ymm64u(n);
-                    result.set_ymm64u(n, if shift > 63 { 0 } else { values.ymm64u(n) << shift });
+                    result.set_ymm64u(
+                        n,
+                        if shift > 63 {
+                            0
+                        } else {
+                            values.ymm64u(n) << shift
+                        },
+                    );
                 }
             }
         }
@@ -3552,11 +3572,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let take_src2 = if signed {
                     let a = src1.ymm_sbyte(i);
                     let b = src2.ymm_sbyte(i);
-                    if take_max {
-                        b > a
-                    } else {
-                        b < a
-                    }
+                    if take_max { b > a } else { b < a }
                 } else if take_max {
                     src2_raw > src1_raw
                 } else {
@@ -3575,11 +3591,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let take_src2 = if signed {
                     let a = src1.xmm_sbyte(i);
                     let b = src2.xmm_sbyte(i);
-                    if take_max {
-                        b > a
-                    } else {
-                        b < a
-                    }
+                    if take_max { b > a } else { b < a }
                 } else if take_max {
                     src2_raw > src1_raw
                 } else {
@@ -3609,11 +3621,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let take_src2 = if signed {
                     let a = src1.ymm16s(i);
                     let b = src2.ymm16s(i);
-                    if take_max {
-                        b > a
-                    } else {
-                        b < a
-                    }
+                    if take_max { b > a } else { b < a }
                 } else if take_max {
                     src2_raw > src1_raw
                 } else {
@@ -3632,11 +3640,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let take_src2 = if signed {
                     let a = src1.xmm16s(i);
                     let b = src2.xmm16s(i);
-                    if take_max {
-                        b > a
-                    } else {
-                        b < a
-                    }
+                    if take_max { b > a } else { b < a }
                 } else if take_max {
                     src2_raw > src1_raw
                 } else {
@@ -3666,11 +3670,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let take_src2 = if signed {
                     let a = src1.ymm32s(i);
                     let b = src2.ymm32s(i);
-                    if take_max {
-                        b > a
-                    } else {
-                        b < a
-                    }
+                    if take_max { b > a } else { b < a }
                 } else if take_max {
                     src2_raw > src1_raw
                 } else {
@@ -3689,11 +3689,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let take_src2 = if signed {
                     let a = src1.xmm32s(i);
                     let b = src2.xmm32s(i);
-                    if take_max {
-                        b > a
-                    } else {
-                        b < a
-                    }
+                    if take_max { b > a } else { b < a }
                 } else if take_max {
                     src2_raw > src1_raw
                 } else {
@@ -3763,7 +3759,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     pub(super) fn vpsrlq_reg(&mut self, instr: &Instruction) -> super::Result<()> {
         let dst_idx = instr.dst();
         let src1_idx = instr.src2(); // VEX.vvvv
-                                     // Shift count from ModRM source (register or memory)
+        // Shift count from ModRM source (register or memory)
         let count = if instr.mod_c0() {
             let src = self.read_xmm_reg(instr.src1());
             src.xmm64u(0)
