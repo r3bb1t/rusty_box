@@ -76,7 +76,30 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         form: IoInstr,
     ) -> super::Result<bool> {
         match self.allow_io(instr, port, len, direction_in, form)? {
-            IoGate::Allowed => Ok(true),
+            IoGate::Allowed => {
+                if matches!(self.hardware, super::exec_ctx::Hardware::CpuOnly) {
+                    // Zero-count REP still checks I/O privilege, as Bochs
+                    // does, but needs no provider and completes normally.
+                    let empty_rep = matches!(form, IoInstr::String)
+                        && instr.lock_rep_used_value() != 0
+                        && if instr.as64_l() != 0 {
+                            self.rcx() == 0
+                        } else if instr.as32_l() != 0 {
+                            self.ecx() == 0
+                        } else {
+                            self.cx() == 0
+                        };
+                    if !empty_rep {
+                        return Err(super::CpuError::IoUnavailable {
+                            port,
+                            len,
+                            direction_in,
+                            string: matches!(form, IoInstr::String),
+                        });
+                    }
+                }
+                Ok(true)
+            }
             IoGate::Intercepted => Ok(false),
             IoGate::Denied => {
                 self.exception(super::cpu::Exception::Gp, 0)?;
@@ -98,7 +121,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         form: IoInstr,
     ) -> super::Result<IoGate> {
         if port == crate::iodev::DEBUGCON_PORT
-            && self.devices.port_e9_hack() == crate::iodev::PortE9Hack::AllRings
+            && matches!(&self.hardware, super::exec_ctx::Hardware::Pc { devices, .. }
+                if devices.port_e9_hack() == crate::iodev::PortE9Hack::AllRings)
         {
             return Ok(IoGate::Allowed);
         }
@@ -178,7 +202,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.io_permitted(instr, port, 1, true, IoInstr::Immediate)? {
             return Ok(());
         }
-        let value = self.port_in(port, 1) as u8;
+        let value = self.port_in(port, 1)? as u8;
         self.set_al(value);
         Ok(())
     }
@@ -190,7 +214,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.io_permitted(instr, port, 2, true, IoInstr::Immediate)? {
             return Ok(());
         }
-        let value = self.port_in(port, 2) as u16;
+        let value = self.port_in(port, 2)? as u16;
         self.set_ax(value);
         Ok(())
     }
@@ -202,7 +226,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.io_permitted(instr, port, 4, true, IoInstr::Immediate)? {
             return Ok(());
         }
-        let value = self.port_in(port, 4);
+        let value = self.port_in(port, 4)?;
         self.set_rax(value as u64);
         Ok(())
     }
@@ -215,7 +239,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(());
         }
         let value = self.al();
-        self.port_out(port, value as u32, 1);
+        self.port_out(port, value as u32, 1)?;
         Ok(())
     }
 
@@ -227,7 +251,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(());
         }
         let value = self.ax();
-        self.port_out(port, value as u32, 2);
+        self.port_out(port, value as u32, 2)?;
         Ok(())
     }
 
@@ -239,7 +263,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(());
         }
         let value = self.eax();
-        self.port_out(port, value, 4);
+        self.port_out(port, value, 4)?;
         Ok(())
     }
 
@@ -250,7 +274,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.io_permitted(instr, port, 1, true, IoInstr::Dx)? {
             return Ok(());
         }
-        let value = self.port_in(port, 1) as u8;
+        let value = self.port_in(port, 1)? as u8;
         self.set_al(value);
         Ok(())
     }
@@ -262,7 +286,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.io_permitted(instr, port, 2, true, IoInstr::Dx)? {
             return Ok(());
         }
-        let value = self.port_in(port, 2) as u16;
+        let value = self.port_in(port, 2)? as u16;
         self.set_ax(value);
         Ok(())
     }
@@ -274,7 +298,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.io_permitted(instr, port, 4, true, IoInstr::Dx)? {
             return Ok(());
         }
-        let value = self.port_in(port, 4);
+        let value = self.port_in(port, 4)?;
         self.set_rax(value as u64);
         Ok(())
     }
@@ -287,7 +311,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(());
         }
         let value = self.al();
-        self.port_out(port, value as u32, 1);
+        self.port_out(port, value as u32, 1)?;
         Ok(())
     }
 
@@ -299,7 +323,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(());
         }
         let value = self.ax();
-        self.port_out(port, value as u32, 2);
+        self.port_out(port, value as u32, 2)?;
         Ok(())
     }
 
@@ -311,7 +335,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return Ok(());
         }
         let value = self.eax();
-        self.port_out(port, value, 4);
+        self.port_out(port, value, 4)?;
         Ok(())
     }
 
@@ -330,7 +354,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.check_rmw_write_permissions(laddr, 1)?;
         let old_value = self.read_prepared_rmw_byte();
         self.report_ins_rmw_access(laddr, &[old_value]);
-        let value = self.port_in(port, 1) as u8;
+        let value = self.port_in(port, 1)? as u8;
         self.write_rmw_linear_byte(value);
         if self.get_df() {
             let di = self.di();
@@ -396,7 +420,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.check_rmw_word_write_permissions(laddr)?;
         let old_value = self.read_prepared_rmw_word();
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
-        let value = self.port_in(port, 2) as u16;
+        let value = self.port_in(port, 2)? as u16;
         self.commit_insw_rmw(value);
         if self.get_df() {
             let di = self.di();
@@ -416,7 +440,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.check_rmw_write_permissions(laddr, 4)?;
         let old_value = self.read_prepared_rmw_dword();
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
-        let value = self.port_in(port, 4);
+        let value = self.port_in(port, 4)?;
         self.write_rmw_linear_dword(value);
         if self.get_df() {
             let di = self.di();
@@ -439,7 +463,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.check_rmw_write_permissions(laddr, 1)?;
         let old_value = self.read_prepared_rmw_byte();
         self.report_ins_rmw_access(laddr, &[old_value]);
-        let value = self.port_in(port, 1) as u8;
+        let value = self.port_in(port, 1)? as u8;
         self.write_rmw_linear_byte(value);
         if self.get_df() {
             self.set_rdi(edi.wrapping_sub(1) as u64);
@@ -461,7 +485,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.check_rmw_word_write_permissions(laddr)?;
         let old_value = self.read_prepared_rmw_word();
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
-        let value = self.port_in(port, 2) as u16;
+        let value = self.port_in(port, 2)? as u16;
         self.commit_insw_rmw(value);
         if self.get_df() {
             self.set_rdi(edi.wrapping_sub(2) as u64);
@@ -481,7 +505,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.check_rmw_write_permissions(laddr, 4)?;
         let old_value = self.read_prepared_rmw_dword();
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
-        let value = self.port_in(port, 4);
+        let value = self.port_in(port, 4)?;
         self.write_rmw_linear_dword(value);
         if self.get_df() {
             self.set_rdi(edi.wrapping_sub(4) as u64);
@@ -500,7 +524,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let si = BxEffAddress::from_u16(self.si());
         let value = self.v_read_byte(seg, si)?;
-        self.port_out(port, value as u32, 1);
+        self.port_out(port, value as u32, 1)?;
         if self.get_df() {
             let si = self.si();
             self.set_si(si.wrapping_sub(1));
@@ -517,7 +541,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let si = BxEffAddress::from_u16(self.si());
         let value = self.v_read_word(seg, si)?;
-        self.port_out(port, value as u32, 2);
+        self.port_out(port, value as u32, 2)?;
         if self.get_df() {
             let si = self.si();
             self.set_si(si.wrapping_sub(2));
@@ -534,7 +558,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let si = BxEffAddress::from_u16(self.si());
         let value = self.v_read_dword(seg, si)?;
-        self.port_out(port, value, 4);
+        self.port_out(port, value, 4)?;
         if self.get_df() {
             let si = self.si();
             self.set_si(si.wrapping_sub(4));
@@ -554,7 +578,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let esi = self.esi();
         let value = self.v_read_byte(seg, BxEffAddress::from_u32(esi))?;
-        self.port_out(port, value as u32, 1);
+        self.port_out(port, value as u32, 1)?;
         if self.get_df() {
             self.set_rsi(esi.wrapping_sub(1) as u64);
         } else {
@@ -570,7 +594,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let esi = self.esi();
         let value = self.v_read_word(seg, BxEffAddress::from_u32(esi))?;
-        self.port_out(port, value as u32, 2);
+        self.port_out(port, value as u32, 2)?;
         if self.get_df() {
             self.set_rsi(esi.wrapping_sub(2) as u64);
         } else {
@@ -586,7 +610,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let esi = self.esi();
         let value = self.v_read_dword(seg, BxEffAddress::from_u32(esi))?;
-        self.port_out(port, value, 4);
+        self.port_out(port, value, 4)?;
         if self.get_df() {
             self.set_rsi(esi.wrapping_sub(4) as u64);
         } else {
@@ -1081,7 +1105,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.check_rmw_write_permissions(laddr, 1)?;
         let old_value = self.read_prepared_rmw_byte();
         self.report_ins_rmw_access(laddr, &[old_value]);
-        let value = self.port_in(port, 1) as u8;
+        let value = self.port_in(port, 1)? as u8;
         self.write_rmw_linear_byte(value);
         if self.get_df() {
             self.set_rdi(rdi.wrapping_sub(1));
@@ -1103,7 +1127,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.check_rmw_word_write_permissions(laddr)?;
         let old_value = self.read_prepared_rmw_word();
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
-        let value = self.port_in(port, 2) as u16;
+        let value = self.port_in(port, 2)? as u16;
         self.commit_insw_rmw(value);
         if self.get_df() {
             self.set_rdi(rdi.wrapping_sub(2));
@@ -1122,7 +1146,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.check_rmw_write_permissions(laddr, 4)?;
         let old_value = self.read_prepared_rmw_dword();
         self.report_ins_rmw_access(laddr, &old_value.to_le_bytes());
-        let value = self.port_in(port, 4);
+        let value = self.port_in(port, 4)?;
         self.write_rmw_linear_dword(value);
         if self.get_df() {
             self.set_rdi(rdi.wrapping_sub(4));
@@ -1142,7 +1166,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let rsi = self.rsi();
         let laddr = self.get_laddr64(seg as usize, BxEffAddress::new(rsi));
         let value = self.read_virtual_byte_at_laddr(laddr)?;
-        self.port_out(port, value as u32, 1);
+        self.port_out(port, value as u32, 1)?;
         if self.get_df() {
             self.set_rsi(rsi.wrapping_sub(1));
         } else {
@@ -1157,7 +1181,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let rsi = self.rsi();
         let value = self.read_virtual_word_64(seg, BxEffAddress::new(rsi))?;
-        self.port_out(port, value as u32, 2);
+        self.port_out(port, value as u32, 2)?;
         if self.get_df() {
             self.set_rsi(rsi.wrapping_sub(2));
         } else {
@@ -1172,7 +1196,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let seg = BxSegregs::from(instr.seg());
         let rsi = self.rsi();
         let value = self.read_virtual_dword_64(seg, BxEffAddress::new(rsi))?;
-        self.port_out(port, value, 4);
+        self.port_out(port, value, 4)?;
         if self.get_df() {
             self.set_rsi(rsi.wrapping_sub(4));
         } else {
@@ -1628,29 +1652,43 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// handler, which leaves the caller to read it one element at a time.
     fn bulk_port_in(&mut self, port: IoPort, io_len: u8, buf: &mut [u8]) -> usize {
         let current_ticks = self.system_ticks();
-        let bytes_read =
-            self.devices
-                .inp_bulk(port, io_len, buf, current_ticks, self.device_manager);
+        let bytes_read = match &mut self.hardware {
+            super::exec_ctx::Hardware::Pc {
+                devices,
+                device_manager,
+                ..
+            } => devices.inp_bulk(port, io_len, buf, current_ticks, device_manager),
+            super::exec_ctx::Hardware::CpuOnly => 0,
+        };
         self.sync_io_events();
         bytes_read
     }
 
     /// Read from I/O port, dispatching to `BxDevicesC::inp`. An unclaimed port
     /// reads as all-ones there, matching Bochs iodev unmapped port semantics.
-    fn port_in(&mut self, port: IoPort, len: u8) -> u32 {
+    fn port_in(&mut self, port: IoPort, len: u8) -> super::Result<u32> {
         // BOCHS BX_INSTR_INP(addr, len) — fires before the port read.
         if self.instrumentation.active.has_io() {
             self.instrumentation.fire_inp(port, len);
         }
 
         let current_ticks = self.system_ticks();
-        let value = self.devices.inp(
-            port,
-            len,
-            current_ticks,
-            self.pc_system,
-            self.device_manager,
-        );
+        // CPU-only execution is stopped at io_permitted, before this point.
+        let value = match &mut self.hardware {
+            super::exec_ctx::Hardware::Pc {
+                devices,
+                pc_system,
+                device_manager,
+            } => devices.inp(port, len, current_ticks, pc_system, device_manager),
+            super::exec_ctx::Hardware::CpuOnly => {
+                return Err(super::CpuError::IoUnavailable {
+                    port,
+                    len: u32::from(len),
+                    direction_in: true,
+                    string: false,
+                });
+            }
+        };
         self.sync_io_events();
 
         // BOCHS BX_INSTR_INP2(addr, len, val) — fires after the read with the value.
@@ -1664,11 +1702,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.instrumentation.fire_inp2(&ev);
         }
 
-        value
+        Ok(value)
     }
 
     /// Write to I/O port, dispatching to `BxDevicesC::outp`.
-    fn port_out(&mut self, port: IoPort, value: u32, len: u8) {
+    fn port_out(&mut self, port: IoPort, value: u32, len: u8) -> super::Result<()> {
         // BOCHS BX_INSTR_OUTP(addr, len, val) — fires at the port write.
         if self.instrumentation.active.has_io() {
             let ev = super::instrumentation::IoHookEvent {
@@ -1693,20 +1731,35 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             );
         }
         let current_ticks = self.system_ticks();
-        self.devices.outp(
-            port,
-            value,
-            len,
-            current_ticks,
-            self.pc_system,
-            self.device_manager,
-            self.memory,
-        );
+        if let super::exec_ctx::Hardware::Pc {
+            devices,
+            pc_system,
+            device_manager,
+        } = &mut self.hardware
+        {
+            devices.outp(
+                port,
+                value,
+                len,
+                current_ticks,
+                pc_system,
+                device_manager,
+                self.memory,
+            );
+        } else {
+            return Err(super::CpuError::IoUnavailable {
+                port,
+                len: u32::from(len),
+                direction_in: false,
+                string: false,
+            });
+        }
         // fw_cfg and other port handlers may have written guest RAM while the
         // I/O bus was borrowed. Flush the issuing CPU after that borrow ends so
         // a cached trace cannot execute a stale tail.
         self.sync_io_events();
         self.smc_sync_after_phys_write();
+        Ok(())
     }
 }
 
@@ -1747,14 +1800,14 @@ mod tests {
         };
 
         for hack in [PortE9Hack::Off, PortE9Hack::On] {
-            ctx.devices.set_port_e9_hack(hack);
+            ctx.test_devices().set_port_e9_hack(hack);
             assert!(
                 matches!(gate(&mut ctx, 0xE9), IoGate::Denied),
                 "{hack:?}: unprivileged code is refused port 0xE9 like any port"
             );
         }
 
-        ctx.devices.set_port_e9_hack(PortE9Hack::AllRings);
+        ctx.test_devices().set_port_e9_hack(PortE9Hack::AllRings);
         assert!(
             matches!(gate(&mut ctx, 0xE9), IoGate::Allowed),
             "the all-rings console opens port 0xE9 at any privilege"

@@ -2043,17 +2043,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// every armed deadline forward silently.
     #[inline]
     pub(super) fn begin_slice_clock(&mut self, tick_denominator: u64) {
-        let clock = if tick_denominator <= 1 {
+        let clock = if matches!(self.hardware, super::exec_ctx::Hardware::CpuOnly) {
+            SliceClock::Detached
+        } else if tick_denominator <= 1 {
             SliceClock::LiveUp {
                 cpu_ticks_at_sync: self.cpu_ticks(),
             }
         } else {
             SliceClock::FrozenRound {
-                epoch: self.pc_system.time_ticks(),
+                epoch: self.platform_ticks(),
             }
         };
-        let (cpu, _mem, _devices, _pc_system) = self.slice_parts();
-        cpu.slice_clock = clock;
+        self.slice_clock = clock;
     }
 
     /// Apply final I/O state after a port dispatch.
@@ -2065,8 +2066,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// or nowhere.
     #[inline]
     pub(super) fn sync_io_events(&mut self) {
-        let mut parts = self.cpu_with_io();
-        parts.io.sync_io_events(parts.cpu);
+        if let Some(mut parts) = self.cpu_with_io() {
+            parts.io.sync_io_events(parts.cpu);
+        }
     }
 
     /// Check HRQ (DMA Hold Request) state from pc_system.
@@ -2074,14 +2076,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// `bx_pc_system.HRQ`.
     #[inline]
     pub(super) fn get_hrq(&self) -> bool {
-        self.pc_system.get_hrq()
+        match &self.hardware {
+            super::exec_ctx::Hardware::Pc { pc_system, .. } => pc_system.get_hrq(),
+            super::exec_ctx::Hardware::CpuOnly => false,
+        }
     }
 
     /// Bochs `bx_pc_system.getNumCpuTicksLeftNextEvent()` — caps FastRep
     /// transfer counts so that timers fire on schedule.
     #[inline]
     pub(super) fn ticks_left_next_event(&self) -> u32 {
-        self.pc_system.get_num_cpu_ticks_left_next_event()
+        match &self.hardware {
+            super::exec_ctx::Hardware::Pc { pc_system, .. } => {
+                pc_system.get_num_cpu_ticks_left_next_event()
+            }
+            super::exec_ctx::Hardware::CpuOnly => u32::MAX,
+        }
     }
 
     /// Probe pc_system countdown during FastRep bulk operations.
@@ -2100,8 +2110,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// it down here would have truncated a large count into a small one
     /// silently, and the callers all hold a page-bounded `u32` already.
     pub(super) fn tickn_fastrep(&mut self, n: u32) {
-        if self.pc_system.countdown_would_expire_after(n) {
-            self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+        if let super::exec_ctx::Hardware::Pc { pc_system, .. } = &self.hardware {
+            if pc_system.countdown_would_expire_after(n) {
+                self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+            }
         }
     }
 }
@@ -2138,7 +2150,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     #[inline]
     pub(crate) fn smc_sync_after_phys_write(&mut self) {
         if self.memory.smc_seq_next() > self.smc_seq_seen {
-            let (cpu, mem, _devices, _pc_system) = self.slice_parts();
+            let super::exec_ctx::CpuMemory { cpu, memory: mem } = self.cpu_memory();
             cpu.smc_apply_pending(mem, true);
         }
     }
@@ -2328,7 +2340,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // `self` — the dispatcher is an `ExecCtx` method, so it cannot run
         // while these borrows are alive.
         {
-            let (cpu, mem, _devices, _pc_system) = self.slice_parts();
+            let super::exec_ctx::CpuMemory { cpu, memory: mem } = self.cpu_memory();
             cpu.a20_mask = mem.a20_mask();
         }
 
@@ -2611,6 +2623,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         }
                         continue 'cpu_loop;
                     }
+                    Err(e @ crate::cpu::CpuError::IoUnavailable { .. }) => {
+                        // io_permitted stops before any port, memory or index
+                        // effect. Rewind only the speculative IP advance; this
+                        // instruction has NOT retired (unlike CpuLoopRestart).
+                        let restart = self.prev_rip;
+                        self.set_rip(restart);
+                        break 'cpu_loop Err(e);
+                    }
                     Err(e) => {
                         // Fatal errors still leave through the loop result so
                         // `CpuMemoryWiringGuard` tears down every CPU-memory
@@ -2783,7 +2803,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // Bochs icount units: report retired instructions, which includes
         // slow-repeat iterations charged inside handlers that `iteration`
         // (the dispatch counter carried by the Ok breaks) does not count.
-        result.map(|_| self.icount.wrapping_sub(icount_start))
+        result?;
+        if matches!(self.hardware, super::exec_ctx::Hardware::CpuOnly)
+            && self.wants_a_machine_boundary()
+        {
+            // LAPIC timer, bus or CPU-control work needs an owning machine.
+            // Its issuing instruction may ALREADY have retired: retain RIP,
+            // counts and the latch, unlike the pre-retirement port-I/O exit.
+            return Err(crate::cpu::CpuError::MachineBoundaryUnavailable);
+        }
+        Ok(self.icount.wrapping_sub(icount_start))
     }
 }
 
@@ -2860,7 +2889,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // single compare per trace lookup. No STOP_TRACE: there is no
         // running trace at a lookup boundary.
         if self.memory.smc_seq_next() > self.smc_seq_seen {
-            let (cpu, mem, _devices, _pc_system) = self.slice_parts();
+            let super::exec_ctx::CpuMemory { cpu, memory: mem } = self.cpu_memory();
             cpu.smc_apply_pending(mem, false);
         }
         // Discard allocation-based caches if guest blocks moved since they were
@@ -2871,7 +2900,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // instruction fetched straight out of the still-"valid" window — which
         // by then names another guest block's bytes.
         {
-            let (cpu, mem, _devices, _pc_system) = self.slice_parts();
+            let super::exec_ctx::CpuMemory { cpu, memory: mem } = self.cpu_memory();
             cpu.revalidate_allocation_caches(mem);
         }
         // Check if we need to prefetch a new page. Bochs cpu.cc getICacheEntry:
@@ -4103,10 +4132,10 @@ mod tests {
         assert_eq!(cpu.ticks_left_next_event(), 1000);
 
         // The probe must NOT advance the clock — the scheduler owns that.
-        let before = cpu.pc_system.time_ticks();
+        let before = cpu.test_pc_system().time_ticks();
         cpu.tickn_fastrep(1000);
         assert_eq!(
-            cpu.pc_system.time_ticks(),
+            cpu.test_pc_system().time_ticks(),
             before,
             "the FastRep probe must observe the countdown, never advance it"
         );
@@ -4412,13 +4441,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 // so the tick a guest observes is the one live at the access,
                 // not the wheel's position at the last batch boundary.
                 let now_ticks = self.system_ticks();
-                self.devices.mmio_read(
+                let Some(parts) = self.cpu_with_io() else {
+                    return Err(super::CpuError::UnsupportedCpuOperation {
+                        operation: "CPU-only PC MMIO read",
+                    }
+                    .into());
+                };
+                parts.io.devices.mmio_read(
                     hit,
                     len as u32,
                     data,
                     now_ticks,
-                    self.pc_system,
-                    self.device_manager,
+                    parts.io.pc_system,
+                    parts.io.device_manager,
                 );
                 Ok(())
             }
@@ -4437,13 +4472,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             crate::memory::PhysAccess::Done => Ok(()),
             crate::memory::PhysAccess::Mmio(hit) => {
                 let now_ticks = self.system_ticks();
-                self.devices.mmio_write(
+                let Some(parts) = self.cpu_with_io() else {
+                    return Err(super::CpuError::UnsupportedCpuOperation {
+                        operation: "CPU-only PC MMIO write",
+                    }
+                    .into());
+                };
+                parts.io.devices.mmio_write(
                     hit,
                     len as u32,
                     &data[..len],
                     now_ticks,
-                    self.pc_system,
-                    self.device_manager,
+                    parts.io.pc_system,
+                    parts.io.device_manager,
                 );
                 Ok(())
             }

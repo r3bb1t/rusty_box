@@ -34,6 +34,19 @@ pub enum CpuError {
     #[error(transparent)]
     Memory(#[from] crate::memory::MemoryError),
 
+    /// No port provider was supplied. The instruction has not retired and
+    /// RIP still names it. String forms are refused before any iteration;
+    /// this milestone does not implement partial REP I/O host completion.
+    #[error(
+        "port I/O unavailable: port={port:?}, bytes={len}, input={direction_in}, string={string}"
+    )]
+    IoUnavailable {
+        port: crate::iodev::IoPort,
+        len: u32,
+        direction_in: bool,
+        string: bool,
+    },
+
     #[error("Unimplemented instruction or feature")]
     UnimplementedInstruction,
 
@@ -52,6 +65,12 @@ pub enum CpuError {
 
     #[error("machine boundary effect failed")]
     MachineBoundaryFailed,
+
+    /// CPU-only execution reached deferred machine work (LAPIC bus/timer,
+    /// CPU-control or EOI). The issuing instruction may have retired already:
+    /// RIP and counts remain committed, and the request stays latched.
+    #[error("CPU-only execution needs a machine boundary; issuing instruction may have retired")]
+    MachineBoundaryUnavailable,
 
     /// The machine's engine refused work the machine cannot do without it: an
     /// I/O APIC message its backend would not take, an interrupt edge it could

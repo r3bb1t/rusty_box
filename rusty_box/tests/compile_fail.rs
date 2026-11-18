@@ -15,6 +15,8 @@ fn doctrine_fixtures() {
     // R3: an ExecCtx cannot be assembled outside the crate — machine parts
     // have no loose currency; the module itself is not reachable.
     t.compile_fail("tests/compile_fail/r3_execctx_is_not_assemblable.rs");
+    // R1/R3: supplied storage cannot also be written behind memory caches.
+    t.compile_fail("tests/compile_fail/r3_borrowed_backing_cannot_be_reused.rs");
     // R3: the parts a machine lends run no processor of their own choosing —
     // one machine's parts cannot be handed another machine's processor.
     t.compile_fail("tests/compile_fail/r3_parts_run_no_foreign_processor.rs");

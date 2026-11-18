@@ -421,7 +421,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     // the boundary this processor now ends its slice for.
                     crate::params::OnTripleFault::ResetTheMachine => {
                         tracing::error!("3rd exception with no resolution — resetting the machine");
-                        self.pc_system.request_reset(super::ResetReason::Hardware);
+                        let Some(parts) = self.cpu_with_io() else {
+                            // There is no board to reset. The processor's
+                            // architectural shutdown remains observable.
+                            return self.shutdown();
+                        };
+                        parts
+                            .io
+                            .pc_system
+                            .request_reset(super::ResetReason::Hardware);
                         self.request_scheduler_boundary();
                         Err(super::error::CpuError::CpuLoopRestart)
                     }

@@ -163,6 +163,10 @@ impl Default for MmioMap {
 }
 
 impl MmioMap {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.regions.iter().all(Option::is_none)
+    }
+
     /// Every region currently mapped.
     ///
     /// `lookup` answers "who owns this address"; this answers "what is claimed

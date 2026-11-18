@@ -1,21 +1,18 @@
 //! The machine state one CPU needs while it executes, held as borrows.
 //!
-//! A CPU cannot reach its own bus. It is one field of a machine, and the
-//! memory, devices and PC system it drives are siblings — so the thing that
-//! executes an instruction is not the CPU alone but the CPU together with
-//! those siblings, borrowed at once. That combination is this type.
-//!
-//! Saying it with borrows rather than with stored pointers is what makes the
-//! aliasing rule checkable: a context is built per scheduler slice from
-//! disjoint machine fields, so the borrow checker enforces what prose used to
-//! promise, and a CPU sitting outside a slice has no bus to misuse.
+//! The CPU and memory are borrowed from disjoint fields of their owner.
+//! PC execution additionally borrows its hardware through `Hardware::Pc`;
+//! CPU-only execution needs no device bus or PC clock. Neither profile stores
+//! self-referential pointers on the CPU. The assembly choke point checks
+//! backing identity and residency for both profiles before any cached offset
+//! can be consumed.
 //!
 //! It `Deref`s to the CPU, so code written against `&mut BxCpuC` keeps reading
 //! `self.rip()`, `self.get_gpr32(..)` and the rest verbatim; only the bus
 //! accessors resolve to this type instead.
 //!
 //! Two hazards come with that `Deref`. A `BxCpuC` method named after a field
-//! here (`memory`, `devices`, `pc_system`) would be silently shadowed, so those
+//! here (`memory`, `hardware`) would be silently shadowed, so those
 //! names are reserved; and `Self::CONST` inside an `impl ExecCtx` block does
 //! NOT reach the CPU's associated constants — `Deref` forwards methods, not
 //! `Self` — so those are spelled `BxCpuC::<T>::CONST`.
@@ -36,11 +33,7 @@ pub(crate) struct ExecCtx<'a, T: Instrumentation> {
     /// Guest memory. Disjoint from `cpu`, so both can be held at once — the
     /// property the raw `mem_bus` pointer existed to fake.
     pub(crate) memory: &'a mut BxMemC,
-    pub(crate) devices: &'a mut BxDevicesC,
-    /// The device models themselves. Disjoint from `devices`, which owns
-    /// the port tables that route to them — port dispatch needs both.
-    pub(crate) device_manager: &'a mut DeviceManager,
-    pub(crate) pc_system: &'a mut BxPcSystemC,
+    pub(crate) hardware: Hardware<'a>,
     /// Guest RAM as one host slice, or null when residency is partial. The
     /// data TLB measures its cached page offsets from here.
     pub(crate) mem_host_base: *mut u8,
@@ -49,6 +42,23 @@ pub(crate) struct ExecCtx<'a, T: Instrumentation> {
     /// instruction TLB, the fetch window and the VMCB measure from here,
     /// because fetch also runs out of ROM and out of relocated blocks.
     pub(crate) mem_alloc_base: *mut u8,
+}
+
+/// PC-only services, borrowed separately from the processor and memory.
+/// This is an internal migration seam, not a cross-ISA environment API.
+pub(crate) enum Hardware<'a> {
+    Pc {
+        devices: &'a mut BxDevicesC,
+        device_manager: &'a mut DeviceManager,
+        pc_system: &'a mut BxPcSystemC,
+    },
+    CpuOnly,
+}
+
+/// Named disjoint projection used by translation, fetch and SMC handling.
+pub(crate) struct CpuMemory<'a, T: Instrumentation> {
+    pub(crate) cpu: &'a mut BxCpuC<T>,
+    pub(crate) memory: &'a mut BxMemC,
 }
 
 impl<'a, T: Instrumentation> ExecCtx<'a, T> {
@@ -78,6 +88,36 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
             pc_system,
             ..
         } = io;
+        Self::assemble(
+            cpu,
+            memory,
+            Hardware::Pc {
+                devices,
+                device_manager,
+                pc_system,
+            },
+        )
+    }
+
+    /// Execute against memory alone. No devices, timer wheel or PC are built.
+    ///
+    /// Kept crate-private until an externally implementable memory contract is
+    /// proven. The supplied memory retains its existing Bochs physical-map
+    /// semantics, including legacy holes; this is not yet a flat address space.
+    pub(crate) fn cpu_only(cpu: &'a mut BxCpuC<T>, memory: &'a mut BxMemC) -> super::Result<Self> {
+        // Physical helper reads currently have infallible return types. Do not
+        // let their fallback values disguise an unserviceable device access.
+        if !memory.mmio.is_empty() {
+            return Err(super::CpuError::UnsupportedCpuOperation {
+                operation: "CPU-only execution with PC MMIO mappings",
+            });
+        }
+        cpu.slice_clock = super::cpu::SliceClock::Detached;
+        Ok(Self::assemble(cpu, memory, Hardware::CpuOnly))
+    }
+
+    /// R3/R5: both profiles adopt backing and residency through this one door.
+    fn assemble(cpu: &'a mut BxCpuC<T>, memory: &'a mut BxMemC, hardware: Hardware<'a>) -> Self {
         let (mem_host_base, mem_host_len) = memory.identity_guest_base();
         let (mem_alloc_base, alloc_len) = memory.allocation_span();
         cpu.adopt_backing(
@@ -87,9 +127,7 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         Self {
             cpu,
             memory,
-            devices,
-            device_manager,
-            pc_system,
+            hardware,
             mem_host_base,
             mem_host_len,
             mem_alloc_base,
@@ -115,42 +153,89 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         })
     }
 
-    /// Everything a scheduler slice hands to the CPU loop, in one borrow.
-    ///
-    /// This is also the proof the whole design rests on: a handler that
-    /// translates an address and then touches the bytes needs the CPU and
-    /// memory live at once, and here they are, from disjoint machine fields.
-    ///
-    /// The scheduler previously rebuilt these from a raw pointer and a
-    /// `from_raw_parts` because it could not name that split.
+    /// CPU and memory are disjoint in both profiles. No PC borrow is needed.
     #[inline]
-    pub(crate) fn slice_parts(
-        &mut self,
-    ) -> (
-        &mut BxCpuC<T>,
-        &mut BxMemC,
-        &mut BxDevicesC,
-        &mut BxPcSystemC,
-    ) {
-        (self.cpu, self.memory, self.devices, self.pc_system)
+    pub(crate) fn cpu_memory(&mut self) -> CpuMemory<'_, T> {
+        CpuMemory {
+            cpu: self.cpu,
+            memory: self.memory,
+        }
     }
 
-    /// The processor and the machine parts, as the pair a device dispatch has
-    /// to reconcile.
-    ///
-    /// The same pair an execution engine holds — a processor, and the parts it
-    /// runs against — which is why the verbs that reconcile them live on
-    /// [`PcIo`] and are reached from here rather than written twice (R5).
+    /// The named projection for a PC dispatch; absent in CPU-only execution.
     #[inline]
-    pub(crate) fn cpu_with_io(&mut self) -> CpuWithIo<'_, T> {
-        CpuWithIo {
-            cpu: self.cpu,
-            io: PcIo::new(
-                self.memory,
-                self.devices,
-                self.device_manager,
-                self.pc_system,
-            ),
+    pub(crate) fn cpu_with_io(&mut self) -> Option<CpuWithIo<'_, T>> {
+        match &mut self.hardware {
+            Hardware::Pc {
+                devices,
+                device_manager,
+                pc_system,
+            } => Some(CpuWithIo {
+                cpu: self.cpu,
+                io: PcIo::new(self.memory, devices, device_manager, pc_system),
+            }),
+            Hardware::CpuOnly => None,
+        }
+    }
+
+    #[inline]
+    pub(super) fn platform_ticks(&self) -> u64 {
+        match &self.hardware {
+            Hardware::Pc { pc_system, .. } => pc_system.time_ticks(),
+            Hardware::CpuOnly => self.cpu.cpu_local_ticks(),
+        }
+    }
+
+    /// Bochs event.cc's DMA hold path. There is no DMA controller in CPU-only.
+    pub(super) fn acknowledge_dma_hold(&mut self) {
+        if let Hardware::Pc {
+            device_manager,
+            pc_system,
+            ..
+        } = &mut self.hardware
+        {
+            device_manager.dma.raise_hlda(self.memory);
+            if let Some(level) = device_manager.dma.take_hrq_request() {
+                pc_system.set_hrq(level);
+            }
+        }
+    }
+
+    pub(super) fn legacy_intr_asserted(&self) -> bool {
+        match &self.hardware {
+            Hardware::Pc { device_manager, .. } => device_manager.irq.int_pin_asserted(),
+            Hardware::CpuOnly => false,
+        }
+    }
+
+    pub(super) fn acknowledge_legacy_intr(&mut self) -> Option<u8> {
+        match &mut self.hardware {
+            Hardware::Pc { device_manager, .. } if device_manager.irq.int_pin_asserted() => {
+                Some(device_manager.irq.acknowledge())
+            }
+            Hardware::Pc { .. } | Hardware::CpuOnly => None,
+        }
+    }
+
+    pub(super) fn reconcile_legacy_intr(&mut self) {
+        if let Hardware::Pc { device_manager, .. } = &mut self.hardware {
+            device_manager.irq.pic_mut().reconcile_deasserted_intr();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pc_system(&mut self) -> &mut BxPcSystemC {
+        match &mut self.hardware {
+            Hardware::Pc { pc_system, .. } => pc_system,
+            Hardware::CpuOnly => panic!("test requires PC services"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_devices(&mut self) -> &mut BxDevicesC {
+        match &mut self.hardware {
+            Hardware::Pc { devices, .. } => devices,
+            Hardware::CpuOnly => panic!("test requires PC services"),
         }
     }
 }
@@ -308,7 +393,7 @@ mod tests {
                 // Memory and the device bus are reachable in the same scope,
                 // with no pointer stored on the CPU and nothing wired first.
                 ctx.memory.set_a20_mask(A20Mask::OPEN);
-                let _ = ctx.pc_system.get_enable_a20();
+                let _ = ctx.test_pc_system().get_enable_a20();
 
                 // Assembling the context is what takes the allocation bases —
                 // no separate install step can be forgotten.
@@ -318,7 +403,7 @@ mod tests {
                 // that translates an address and then touches the bytes needs
                 // exactly this, and it is the combination the raw wiring
                 // existed to fake.
-                let (cpu, memory, _devices, _pc_system) = ctx.slice_parts();
+                let super::CpuMemory { cpu, memory } = ctx.cpu_memory();
                 memory.set_a20_mask(A20Mask::OPEN);
                 assert_eq!(cpu.rip(), rip, "deref must reach the same cpu");
             })

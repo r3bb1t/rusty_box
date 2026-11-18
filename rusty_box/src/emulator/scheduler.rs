@@ -501,7 +501,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                 // The CPU and memory are distinct fields, which an execution
                 // context is exactly the borrow that expresses.
                 let mut ctx = self.exec_ctx(cpu_index);
-                let (cpu, mem, _devices, _pc_system) = ctx.slice_parts();
+                let crate::cpu::exec_ctx::CpuMemory { cpu, memory: mem } = ctx.cpu_memory();
                 cpu.smc_apply_pending(mem, true);
             }
         }

@@ -232,10 +232,31 @@ impl BxMemoryStubC {
         host: usize,
         block_size: usize,
     ) -> Result<Self> {
+        if ptr.is_null() {
+            return Err(MemoryError::Internal("raw memory must be non-null").into());
+        }
+        // SAFETY: this raw entry point's caller supplies exclusively owned,
+        // valid storage for the lifetime of the returned stub. The safe
+        // constructor checks its alignment and geometry before using it.
+        let bytes = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
+        Self::from_buffer(bytes, guest, host, block_size)
+    }
+
+    /// Use caller-owned backing without a raw pointer. The exclusive static
+    /// loan prevents replacement or concurrent host writes behind CPU caches.
+    /// Storage must be 4 KiB aligned and include the existing memory model's
+    /// RAM, ROM and bogus-page tail; this does not make it a flat-memory bus.
+    pub fn from_buffer(
+        bytes: &'static mut [u8],
+        guest: usize,
+        host: usize,
+        block_size: usize,
+    ) -> Result<Self> {
         let geometry = BlockGeometry::new(guest, host, block_size)?;
         let resident_len = geometry.resident_len();
-        if ptr.is_null() || (ptr as usize & (BX_MEM_VECTOR_ALIGN - 1)) != 0 {
-            return Err(MemoryError::Internal("raw memory must be 4K aligned").into());
+        let len = bytes.len();
+        if (bytes.as_ptr() as usize & (BX_MEM_VECTOR_ALIGN - 1)) != 0 {
+            return Err(MemoryError::Internal("memory buffer must be 4K aligned").into());
         }
 
         let aux_len = BIOSROMSZ
@@ -284,12 +305,7 @@ impl BxMemoryStubC {
         );
         residency.init_layout(geometry);
         Ok(Self {
-            // SAFETY: the caller of this raw entry point guarantees `ptr` is
-            // valid, 4 KiB-aligned (checked above), `len` bytes long, and
-            // unaliased for the life of the machine. Wrapping it once here is
-            // the only place that contract is taken on trust; everything below
-            // works from the resulting slice.
-            backing: RamBacking::Borrowed(unsafe { core::slice::from_raw_parts_mut(ptr, len) }),
+            backing: RamBacking::Borrowed(bytes),
             actual_vector_len: len,
             residency,
             vector_offset,

@@ -452,7 +452,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // epoch from whichever slice ran last.
             crate::cpu::cpu::SliceClock::Detached => self.cpu_local_ticks(),
             crate::cpu::cpu::SliceClock::LiveUp { cpu_ticks_at_sync } => {
-                let live_ticks = self.pc_system.time_ticks();
+                let live_ticks = self.platform_ticks();
                 live_ticks.wrapping_add(self.cpu_ticks().wrapping_sub(cpu_ticks_at_sync))
             }
             crate::cpu::cpu::SliceClock::FrozenRound { epoch } => epoch,
@@ -4947,7 +4947,7 @@ mod tests {
 
         // A sibling may not observe this round's batch time before the
         // emulator wraps the full CPU round.
-        cpu.pc_system.tickn(71);
+        cpu.test_pc_system().tickn(71);
         cpu.icount = 780;
         assert_eq!(cpu.system_ticks(), 1_234);
     }
@@ -4956,8 +4956,8 @@ mod tests {
     fn tsc_deadline_msr_arms_local_apic_timer() {
         let mut machine = crate::cpu::exec_ctx::TestMachine::new();
         let mut cpu = machine.ctx();
-        cpu.pc_system.initialize(1_000_000);
-        cpu.pc_system.tickn(2_000);
+        cpu.test_pc_system().initialize(1_000_000);
+        cpu.test_pc_system().tickn(2_000);
 
         let current_ticks = cpu.system_ticks();
         assert!(cpu.lapic.write_x2apic(0x320, 0x0004_0030, current_ticks));

@@ -54,7 +54,8 @@ decides names it with `Repeat::periodic_if`; the snapshot keeps the bit Bochs ke
 
 *Why:* names survive at call sites; anonymous shapes leak auto-traits implicitly and cannot be
 stored, documented, or diffed. *Scope:* the public surface. Internal choke points may use
-tuples where destructuring is the point (named exemption: `ExecCtx::slice_parts`).
+tuples where destructuring is the point. `ExecCtx::cpu_memory` instead uses the
+named `CpuMemory` projection, shared by PC and CPU-only execution.
 
 **Shape stability across features:** public types are the same shape in every configuration.
 A cargo feature may gate a *type's existence* (`OwnedCpus` arrives with `alloc` — additive) or
@@ -288,7 +289,8 @@ CPU are `pub(crate)` (`rusty_box/src/emulator/io.rs`). What `Processor` lends ap
 A type cannot stop a processor's state from moving. `&mut BxCpuC` is public, because an engine
 imports registers through it, so `mem::swap` can carry one machine's processor, cached page
 offsets included, into another. The offsets are therefore checked where a processor meets
-memory: `ExecCtx::new` hands the allocation to `BxCpuC::adopt_backing`
+memory: `ExecCtx::assemble` (shared by PC and the crate-private CPU-only seam)
+hands the allocation to `BxCpuC::adopt_backing`
 (`rusty_box/src/cpu/cpu.rs`), which drops every host-memory cache filled against a different
 allocation — the same set a snapshot restore drops (R5).
 
@@ -610,6 +612,14 @@ unsafe impl Send for Emulator {} // …and this promises what the compiler canno
 
 ## R7 — Bochs parity provenance
 
+CPU-only execution may return `CpuError::IoUnavailable` before port I/O retires.
+This is host control flow, not a guest exception or Bochs longjmp: the issuing
+RIP is restored and no instruction count is charged. Nonempty string I/O is
+refused before its first iteration; partial REP host completion is not yet built.
+LAPIC work that needs a machine instead returns `MachineBoundaryUnavailable` with the scheduler latch intact; its issuing instruction may already have
+retired, so that exit does not rewind RIP or undo its instruction count. The
+existing PC path still performs the original I/O and event reconciliation.
+
 Every behavioral divergence from `cpp_orig/bochs/` cites the upstream file + symbol (never a
 line number — the snapshot rebases). Idiomatic-Rust restructuring that preserves observable
 behavior is the *sanctioned* deviation class and still cites what it restructures. A device
@@ -842,7 +852,6 @@ not stored closures.
 
 **Not erasure, but exempted from R0 by name:**
 
-- `ExecCtx::slice_parts` — internal 4-tuple destructure (R0 scope note).
 - `static_cell` — reserved as the one `unsafe` dependency for no_alloc placement (R1),
   outside this tree; not yet a dependency.
 - `rusty_box_whp_sys` — the host-FFI leaf, permanently outside R1's `forbid` end state; the

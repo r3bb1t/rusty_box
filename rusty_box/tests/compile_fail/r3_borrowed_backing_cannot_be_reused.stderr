@@ -1,0 +1,10 @@
+error[E0506]: cannot assign to `bytes[_]` because it is borrowed
+ --> tests/compile_fail/r3_borrowed_backing_cannot_be_reused.rs:6:5
+  |
+5 |     let _memory = rusty_box::memory::BxMemoryStubC::from_buffer(bytes, 4096, 4096, 4096);
+  |                   ----------------------------------------------------------------------
+  |                   |                                             |
+  |                   |                                             `bytes[_]` is borrowed here
+  |                   argument requires that `*bytes` is borrowed for `'static`
+6 |     bytes[0] = 0xF4;
+  |     ^^^^^^^^^^^^^^^ `bytes[_]` is assigned to here but it was already borrowed

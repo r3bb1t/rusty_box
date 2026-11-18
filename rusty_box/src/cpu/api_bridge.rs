@@ -1585,7 +1585,7 @@ mod tests {
         let mut machine = TestMachine::new();
         let mut cpu = machine.ctx();
         cpu.reset(ResetReason::Hardware);
-        cpu.pc_system.initialize(1_000_000);
+        cpu.test_pc_system().initialize(1_000_000);
 
         assert!(
             cpu.write_msr_for_api(BX_MSR_TSC_DEADLINE, 1_000).is_err(),

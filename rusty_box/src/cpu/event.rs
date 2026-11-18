@@ -87,12 +87,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
 
         // Handle DMA also when CPU is halted (Bochs event.cc)
         if self.get_hrq() {
-            self.device_manager.dma.raise_hlda(&mut *self.memory);
-            // Bochs dma.cc raise_HLDA: synchronous set_HRQ(0) at
-            // terminal count (see handle_async_event above).
-            if let Some(level) = self.device_manager.dma.take_hrq_request() {
-                self.pc_system.set_hrq(level);
-            }
+            self.acknowledge_dma_hold();
         }
 
         // For single processor, check if an external interrupt can wake us.
@@ -484,14 +479,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             // interrupts inhibited at the chain head — takes no hold this
             // time round.
             // NOTE: similar code in `handle_wait_for_event` (Bochs event.cc).
-            self.device_manager.dma.raise_hlda(&mut *self.memory);
-            // Bochs dma.cc raise_HLDA calls bx_pc_system.set_HRQ(0)
-            // synchronously at terminal count; apply it here so the
-            // async_event clear below observes the dropped line instead
-            // of thrashing the trace until the next boundary.
-            if let Some(level) = self.device_manager.dma.take_hrq_request() {
-                self.pc_system.set_hrq(level);
-            }
+            self.acknowledge_dma_hold();
         }
 
         // Diagnostic only, and deliberately outside the chain above: an
@@ -764,8 +752,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         // without the other: the body is entered for a pending *LAPIC* event
         // too, and a local APIC with nothing left to answer falls through to
         // the 8259 with the legacy event never having been raised at all.
-        if self.lapic.lint0_admits_ext_int() && self.device_manager.irq.int_pin_asserted() {
-            let vector = self.device_manager.irq.acknowledge();
+        let legacy_vector = if self.lapic.lint0_admits_ext_int() {
+            self.acknowledge_legacy_intr()
+        } else {
+            None
+        };
+        if let Some(vector) = legacy_vector {
             tracing::trace!(
                 "HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
                 vector,
@@ -790,11 +782,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             // Only when the pin really is low: LINT0 can refuse a line that is
             // still asserted, and telling the 8259 its pin fell would retire
             // the edge the guest owes itself once it unmasks.
-            if !self.device_manager.irq.int_pin_asserted() {
-                self.device_manager
-                    .irq
-                    .pic_mut()
-                    .reconcile_deasserted_intr();
+            if !self.legacy_intr_asserted() {
+                self.reconcile_legacy_intr();
             }
             self.clear_event(BxCpuC::<T>::BX_EVENT_PENDING_INTR);
             if self.pending_event & BxCpuC::<T>::BX_EVENT_PENDING_LAPIC_INTR == 0 {

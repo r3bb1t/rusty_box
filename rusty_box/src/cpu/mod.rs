@@ -159,3 +159,6 @@ pub use cpudb::CpuModel;
 pub use cpudb::amd::amd_ryzen::AmdRyzen;
 pub use cpudb::intel::*;
 pub use cpuid::{BxCpuIdTrait, CpuidFreq};
+
+#[cfg(all(test, feature = "std"))]
+mod cpu_only_tests;
