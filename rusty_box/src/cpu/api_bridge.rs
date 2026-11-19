@@ -82,7 +82,102 @@ impl ScaledLimit {
     }
 }
 
+/// The flat segment layout a [`CpuSetupMode`] installs.
+///
+/// `code` and `data` share a type and long mode is exactly where they differ,
+/// so passing them positionally would let a swap compile into a machine whose
+/// stack is the wrong width. Naming them — and carrying the limit they share —
+/// makes one value the whole description, which is what lets the GDT and the
+/// descriptor caches be written from the same source.
+#[derive(Clone, Copy)]
+pub(crate) struct FlatSegments {
+    code: SegmentSize,
+    /// Also SS, so this is what decides between `SP` and `ESP`.
+    data: SegmentSize,
+    /// Byte limit for every segment: the last addressable offset.
+    limit: u32,
+}
+
+impl FlatSegments {
+    const CODE_SELECTOR: u16 = 0x08;
+    const DATA_SELECTOR: u16 = 0x10;
+    /// Long mode's data segments stay 32-bit — the descriptors a 64-bit
+    /// operating system loads carry D/B set and L clear, because L belongs to
+    /// code segments alone.
+    pub(crate) const FLAT_LONG64: Self = Self {
+        code: SegmentSize::Long64,
+        data: SegmentSize::Bits32,
+        limit: 0xFFFF_FFFF,
+    };
+    pub(crate) const FLAT_PROTECTED32: Self = Self {
+        code: SegmentSize::Bits32,
+        data: SegmentSize::Bits32,
+        limit: 0xFFFF_FFFF,
+    };
+    pub(crate) const GDT_BASE: BxPhyAddress = BxPhyAddress::new(0x800);
+    pub(crate) const PROTECTED16: Self = Self {
+        code: SegmentSize::Bits16,
+        data: SegmentSize::Bits16,
+        limit: 0xFFFF,
+    };
+
+    pub(crate) fn gdt(self) -> [u64; 3] {
+        [
+            0,
+            flat_descriptor(0x9A, self.code, self.limit),
+            flat_descriptor(0x92, self.data, self.limit),
+        ]
+    }
+}
+
+/// Compose a base-zero GDT descriptor. Bochs descriptor.h `parse_descriptor`
+/// read in reverse: limit low 16, access byte at 40, limit high 4 at 48, then
+/// AVL/L/D/G, then base high — all of base being zero here.
+fn flat_descriptor(access: u8, size: SegmentSize, byte_limit: u32) -> u64 {
+    let limit = ScaledLimit::of(byte_limit);
+    u64::from(limit.field & 0xFFFF)
+        | (u64::from(access) << 40)
+        | ((u64::from(limit.field >> 16) & 0xF) << 48)
+        | (u64::from(size.long64()) << 53)
+        | (u64::from(size.d_b()) << 54)
+        | (u64::from(limit.page_granular) << 55)
+}
+
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
+    pub(crate) fn configure_real_segments(&mut self) {
+        for reg in [
+            X86Reg::Cs,
+            X86Reg::Ds,
+            X86Reg::Es,
+            X86Reg::Ss,
+            X86Reg::Fs,
+            X86Reg::Gs,
+        ] {
+            self.set_seg_for_api(reg, 0, 0, 0xFFFF, SegmentSize::Bits16);
+        }
+    }
+
+    pub(crate) fn configure_flat_segments(&mut self, layout: FlatSegments) {
+        self.set_gdtr_base_for_api(FlatSegments::GDT_BASE.get());
+        self.set_gdtr_limit_for_api(0x1F);
+        self.set_seg_for_api(
+            X86Reg::Cs,
+            FlatSegments::CODE_SELECTOR,
+            0,
+            layout.limit,
+            layout.code,
+        );
+        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
+            self.set_seg_for_api(
+                reg,
+                FlatSegments::DATA_SELECTOR,
+                0,
+                layout.limit,
+                layout.data,
+            );
+        }
+    }
+
     // ── RFLAGS / EFLAGS ────────────────────────────────────────────────
 
     #[inline]

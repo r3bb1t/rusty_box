@@ -588,10 +588,20 @@ fn timed_borrowed_memory() {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(120_000_000);
+    let controlled = std::env::var_os("BORROWED_BENCH_CONTROLLED").is_some();
     let measure = |mut execution: MemorySession<'_>| {
         execution.run(4096).unwrap();
         let start = std::time::Instant::now();
-        let executed = execution.run(count).unwrap();
+        let executed = if controlled {
+            let run = execution.run_controlled(count);
+            assert!(matches!(
+                run.stop,
+                rusty_box::cpu::memory_session::SessionStop::Budget
+            ));
+            run.instructions
+        } else {
+            execution.run(count).unwrap()
+        };
         let elapsed = start.elapsed();
         assert_eq!(executed, count);
         println!(
@@ -614,4 +624,44 @@ fn timed_borrowed_memory() {
         let mut memory = board.memory(&PAGED_MAP);
         measure(MemorySession::new(&mut cpu, memory.loan()));
     }
+}
+
+#[test]
+fn session_cr3_and_table_edits_invalidate_warm_translations() {
+    use rusty_box::cpu::X86Reg;
+    use rusty_box::cpu::memory_session::SessionStop;
+
+    let mut board = paged_board(&[
+        0xA1, 0, 0x70, 0, 0, // mov eax,[0x7000]
+        0xEB, 0xF9, // jmp 0x1100
+    ]);
+    // Alternate page root at 0x6000 and table at 0x8000.
+    board.put(5, 0, &0x8003u32.to_le_bytes());
+    board.put(3, 4, &0x1003u32.to_le_bytes());
+    board.put(3, 7 * 4, &0x3003u32.to_le_bytes());
+    board.put(6, 0, &0x1122_3344u32.to_le_bytes());
+    board.put(7, 0, &0xAABB_CCDDu32.to_le_bytes());
+    let mut cpu = cpu();
+    let mut memory = board.memory(&PAGED_MAP);
+    let mut session = MemorySession::new(&mut cpu, memory.loan());
+    run_to(&mut session, 0x1100);
+    assert!(matches!(
+        session.run_controlled(2).stop,
+        SessionStop::Budget
+    ));
+    assert_eq!(session.read_register(X86Reg::Eax).unwrap(), 0x1122_3344);
+
+    session.write_register(X86Reg::Cr3, 0x6000).unwrap();
+    assert!(matches!(
+        session.run_controlled(2).stop,
+        SessionStop::Budget
+    ));
+    assert_eq!(session.read_register(X86Reg::Eax).unwrap(), 0xAABB_CCDD);
+
+    session
+        .write_ram(BxPhyAddress::new(0x801C), &0x7003u32.to_le_bytes())
+        .unwrap();
+    session.invalidate_translations();
+    assert!(matches!(session.step().stop, SessionStop::Budget));
+    assert_eq!(session.read_register(X86Reg::Eax).unwrap(), 0x1122_3344);
 }

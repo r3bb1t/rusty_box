@@ -1,5 +1,8 @@
 //! CPU-only x86 execution over a caller's physical memory loan.
 
+mod control;
+pub use control::{EntryMode, RegisterRefusal, SessionRun, SessionStop};
+
 use super::decoder::Opcode;
 use super::exec_ctx::ExecCtx;
 use super::{BxCpuC, CpuError, Instruction, Instrumentation, Result};

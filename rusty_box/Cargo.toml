@@ -44,6 +44,11 @@ vt100 = { version = "0.16", optional = true }
 criterion = { version = "0.5", features = ["html_reports"], optional = true }
 
 [[example]]
+name = "cpu_only"
+path = "examples/cpu_only/main.rs"
+required-features = ["alloc"]
+
+[[example]]
 name = "alpine"
 path = "examples/alpine/alpine.rs"
 required-features = ["std"]
