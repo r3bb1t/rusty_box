@@ -195,6 +195,55 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         super::registers::Registers::with_pending(self.cpu, &mut self.pending_scalar_io)
     }
 
+    /// A composed endpoint is only reachable through the software PC's
+    /// registered MMIO route. Lend the selected device, RAM and interrupt
+    /// fabric separately. No device or subscriber can borrow this context.
+    #[cold]
+    pub(super) fn write_composed_mmio(
+        &mut self,
+        address: crate::config::BxPhyAddress,
+        len: usize,
+        value: u64,
+    ) {
+        use crate::emulator::hardware::{MmioWrite, PcDma, PcInterrupt, Reaction, WindowOffset};
+
+        let (ExecutionMemory::Pc(memory), Hardware::Pc { device_manager, .. }) =
+            (&mut self.memory, &mut self.hardware)
+        else {
+            unreachable!("composed MMIO is attached only to a software PC");
+        };
+        let (attached, exclusions) = self
+            .cpu
+            .mmio
+            .composed_at(address)
+            .expect("composed MMIO target was selected before the cold dispatch");
+        let mut dma = PcDma {
+            memory,
+            exclusions,
+            lapic: &self.cpu.lapic,
+            wrote: false,
+        };
+        let mut irq = PcInterrupt {
+            irq: &mut device_manager.irq,
+            line: attached.line,
+            driven: false,
+        };
+        let access = MmioWrite {
+            offset: WindowOffset(u64::from(address.page_offset())),
+            len,
+            value,
+        };
+        let reaction = attached.device.endpoint().write(access, &mut dma, &mut irq);
+
+        // The machine already collects honored hook stops after each slice.
+        // Mark this request before yielding so it survives a scheduler exit
+        // that bypasses the next outer interpreter-loop stop check.
+        self.cpu.instrumentation.stop_honored |= reaction == Reaction::Stop;
+        if dma.wrote || irq.driven || reaction == Reaction::Stop {
+            self.cpu.request_scheduler_boundary();
+        }
+    }
+
     /// The instruction-fetch window as bytes.
     ///
     /// The returned lifetime is deliberately not tied to `&self`. The bytes

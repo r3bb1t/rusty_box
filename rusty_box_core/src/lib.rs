@@ -28,6 +28,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod engine;
+pub mod events;
 pub mod float;
 pub mod input;
 pub mod machine;

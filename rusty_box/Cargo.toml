@@ -54,6 +54,11 @@ path = "examples/cpu_facade/main.rs"
 required-features = ["alloc"]
 
 [[example]]
+name = "composed_hardware"
+path = "examples/composed_hardware/main.rs"
+required-features = ["std"]
+
+[[example]]
 name = "alpine"
 path = "examples/alpine/alpine.rs"
 required-features = ["std"]

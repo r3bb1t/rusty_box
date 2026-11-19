@@ -133,6 +133,11 @@ impl<'a, T: Instrumentation> MemorySession<'a, T> {
     /// See [`super::CpuError`] for CPU-only exits and retirement semantics.
     pub fn run(&mut self, dispatch_budget: u64) -> Result<u64> {
         self.ctx.pending_scalar_io = None;
+        if self.ctx.mmio.has_composed() {
+            return Err(CpuError::UnsupportedCpuOperation {
+                operation: "a composed PC device requires the software PC",
+            });
+        }
         self.ctx.cpu_loop_n_slice(dispatch_budget, true, 1)
     }
 

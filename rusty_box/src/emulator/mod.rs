@@ -47,6 +47,7 @@ pub use display::{
 };
 
 pub mod cpu_store;
+pub mod hardware;
 use cpu_store::CpuStore;
 pub(crate) mod engine;
 pub use engine::{

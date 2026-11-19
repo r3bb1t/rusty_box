@@ -44,6 +44,29 @@ fn attach(
     machine.attach_mmio_device(BxPhyAddress::new(0x90000), device)
 }
 
+fn attach_composed(
+    machine: &mut rusty_box::Emulator,
+    device: &'static mut dyn rusty_box::emulator::hardware::PcMmioDevice,
+) -> Result<(), rusty_box::emulator::hardware::PcDeviceAttachError> {
+    use rusty_box::emulator::hardware::{IsaIrq, PcDevice};
+    machine.attach_composed_mmio(
+        BxPhyAddress::new(0x91000),
+        IsaIrq::new(5).unwrap(),
+        PcDevice::Borrowed(device),
+    )
+}
+
+fn publish(input: u8, state: &mut u8) {
+    use rusty_box::events::{Emit, Reaction, Subscriptions};
+    let mut subscriptions = Subscriptions::<u8, core::convert::Infallible>::new().on_with(
+        |data: &u8, state: &mut u8| {
+            *state = state.wrapping_add(*data);
+            Ok(Reaction::Continue)
+        },
+    );
+    let _ = subscriptions.emit(&input, state).unwrap();
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     consume(rusty_box::EmulatorConfig::default());
@@ -57,6 +80,14 @@ pub extern "C" fn _start() -> ! {
     consume(core::hint::black_box(
         attach as fn(&mut rusty_box::Emulator, &'static mut dyn MmioDevice) -> _,
     ));
+    consume(core::hint::black_box(
+        attach_composed
+            as fn(
+                &mut rusty_box::Emulator,
+                &'static mut dyn rusty_box::emulator::hardware::PcMmioDevice,
+            ) -> _,
+    ));
+    consume(core::hint::black_box(publish as fn(u8, &mut u8)));
     loop {
         core::hint::spin_loop();
     }

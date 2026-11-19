@@ -1,0 +1,23 @@
+error[E0521]: borrowed data escapes outside of closure
+ --> tests/compile_fail/events_capability_cannot_escape.rs:7:9
+  |
+5 |     let mut retained: Option<&mut PcInterrupt<'_>> = None;
+  |         ------------ `retained` declared here, outside of the closure body
+6 |     let _handlers = Subscriptions::<(), ()>::new().on_with(|_: &(), irq: &mut PcInterrupt<'_>| {
+  |                                                                     --- `irq` is only valid in the closure body
+7 |         retained = Some(irq);
+  |         ^^^^^^^^^^^^^^^^^^^^ `irq` escapes the closure body here
+
+error[E0521]: borrowed data escapes outside of closure
+ --> tests/compile_fail/events_capability_cannot_escape.rs:7:9
+  |
+5 |     let mut retained: Option<&mut PcInterrupt<'_>> = None;
+  |         ------------ `retained` declared here, outside of the closure body
+6 |     let _handlers = Subscriptions::<(), ()>::new().on_with(|_: &(), irq: &mut PcInterrupt<'_>| {
+  |                                                                     --- `irq` is only valid in the closure body
+7 |         retained = Some(irq);
+  |         ^^^^^^^^^^^^^^^^^^^^ `irq` escapes the closure body here
+  |
+  = note: requirement occurs because of a mutable reference to `PcInterrupt<'_>`
+  = note: mutable references are invariant over their type parameter
+  = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance

@@ -87,5 +87,6 @@ pub enum Level {
 }
 
 pub mod api;
+pub mod composition;
 pub mod display;
 pub mod pci;

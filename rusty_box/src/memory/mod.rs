@@ -561,6 +561,25 @@ impl BxMemC {
         Ok(copied)
     }
 
+    /// Commit one already routed DMA fragment. Resolve the whole resident
+    /// span before copying the first byte, then notify the code-stamp owner.
+    pub(crate) fn write_dma_page(&mut self, address: BxPhyAddress, bytes: &[u8]) -> Result<()> {
+        let span = memory_rusty_box::bx_guest_ram_span(
+            address,
+            bytes.len(),
+            self.inherited_memory_stub.guest_len(),
+        )
+        .ok_or(MemoryError::RamImageOutOfRange)?;
+        let target = self
+            .inherited_memory_stub
+            .get_vector_offset(span.start)?
+            .get_mut(..bytes.len())
+            .ok_or(MemoryError::Internal("short resident DMA page"))?;
+        target.copy_from_slice(bytes);
+        self.smc_dec_write_stamp(address, bytes.len() as u32);
+        Ok(())
+    }
+
     pub(crate) fn get_memory_len(&self) -> usize {
         self.inherited_memory_stub.guest_len()
     }

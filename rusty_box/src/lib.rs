@@ -122,6 +122,7 @@ pub mod memory;
 pub mod params;
 pub mod pc_system;
 pub mod pic;
+pub use rusty_box_core::events;
 /// The ring buffer every fixed-capacity device FIFO is built on. It is
 /// arch-neutral, so it lives in the core crate; re-exported under its
 /// established path because `RingBuffer<T, N>` appears in public device

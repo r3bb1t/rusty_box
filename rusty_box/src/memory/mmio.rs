@@ -7,6 +7,9 @@
 use alloc::boxed::Box;
 
 use crate::config::{BxPhyAddress, MAX_MMIO_REGIONS};
+use crate::emulator::hardware::{
+    IsaIrq, PcDevice, PcDeviceAttachError, PcDeviceAttachRefusal, WindowOffset,
+};
 
 /// A stateful x86 PC MMIO device. Offsets are relative to the attached
 /// page. Values are little-endian and accesses may be split into bytes.
@@ -56,6 +59,31 @@ enum Target {
         write: WriteCallback,
     },
     Device(&'static mut dyn MmioDevice),
+    Composed(ComposedDevice),
+}
+
+pub(crate) struct ComposedDevice {
+    pub(crate) line: IsaIrq,
+    pub(crate) device: PcDevice,
+}
+
+/// All registry ranges, projected around the exclusively borrowed endpoint.
+pub(crate) struct DmaExclusions<'a> {
+    before: &'a [Option<MmioRegion>],
+    page: BxPhyAddress,
+    after: &'a [Option<MmioRegion>],
+}
+
+impl DmaExclusions<'_> {
+    pub(crate) fn overlaps(&self, page: BxPhyAddress) -> bool {
+        self.page == page
+            || self
+                .before
+                .iter()
+                .chain(self.after)
+                .flatten()
+                .any(|region| region.overlaps(page, 4096))
+    }
 }
 
 /// A registered MMIO region: `size` bytes from `start`.
@@ -76,14 +104,21 @@ impl MmioRegion {
         match &mut self.target {
             Target::Callbacks { read, .. } => read(address, len),
             Target::Device(device) => device.read(address - self.start, len),
+            Target::Composed(attached) => attached
+                .device
+                .endpoint()
+                .read(WindowOffset(address - self.start), len),
         }
     }
 
-    pub(crate) fn write(&mut self, address: BxPhyAddress, len: usize, value: u64) {
+    /// True when this write was handled without machine capabilities.
+    pub(crate) fn write_local(&mut self, address: BxPhyAddress, len: usize, value: u64) -> bool {
         match &mut self.target {
             Target::Callbacks { write, .. } => write(address, len, value),
             Target::Device(device) => device.write(address - self.start, len, value),
+            Target::Composed(_) => return false,
         }
+        true
     }
 }
 
@@ -115,7 +150,7 @@ impl MmioRegistry {
                 .regions
                 .iter()
                 .flatten()
-                .any(|region| matches!(region.target, Target::Device(_))
+                .any(|region| !matches!(region.target, Target::Callbacks { .. })
                     && region.overlaps(addr, size)),
             "callback MMIO overlaps a device page"
         );
@@ -138,11 +173,20 @@ impl MmioRegistry {
         addr: BxPhyAddress,
         device: &'static mut dyn MmioDevice,
     ) -> Result<(), MmioAttachError> {
+        match self.attach_page(addr, Target::Device(device)) {
+            Ok(()) => Ok(()),
+            Err((reason, Target::Device(device))) => Err(MmioAttachError { reason, device }),
+            Err(_) => unreachable!(),
+        }
+    }
+
+    fn attach_page(
+        &mut self,
+        addr: BxPhyAddress,
+        target: Target,
+    ) -> Result<(), (MmioAttachRefusal, Target)> {
         if addr.page_offset() != 0 {
-            return Err(MmioAttachError {
-                reason: MmioAttachRefusal::Unaligned,
-                device,
-            });
+            return Err((MmioAttachRefusal::Unaligned, target));
         }
         if self
             .regions
@@ -150,24 +194,79 @@ impl MmioRegistry {
             .flatten()
             .any(|region| region.overlaps(addr, 4096))
         {
-            return Err(MmioAttachError {
-                reason: MmioAttachRefusal::Overlap,
-                device,
-            });
+            return Err((MmioAttachRefusal::Overlap, target));
         }
         let Some(slot) = self.regions.iter_mut().find(|slot| slot.is_none()) else {
-            return Err(MmioAttachError {
-                reason: MmioAttachRefusal::Full,
-                device,
-            });
+            return Err((MmioAttachRefusal::Full, target));
         };
         *slot = Some(MmioRegion {
             start: addr,
             size: 4096,
-            target: Target::Device(device),
+            target,
         });
         self.count += 1;
         Ok(())
+    }
+
+    pub(crate) fn attach_composed(
+        &mut self,
+        addr: BxPhyAddress,
+        line: IsaIrq,
+        device: PcDevice,
+    ) -> Result<(), PcDeviceAttachError> {
+        if self.regions.iter().flatten().any(
+            |region| matches!(&region.target, Target::Composed(attached) if attached.line == line),
+        ) {
+            return Err(PcDeviceAttachError {
+                reason: PcDeviceAttachRefusal::IrqInUse,
+                device,
+            });
+        }
+        match self.attach_page(addr, Target::Composed(ComposedDevice { line, device })) {
+            Ok(()) => Ok(()),
+            Err((reason, Target::Composed(attached))) => Err(PcDeviceAttachError {
+                reason: reason.into(),
+                device: attached.device,
+            }),
+            Err(_) => unreachable!(),
+        }
+    }
+
+    pub(crate) fn detach_composed(&mut self, addr: BxPhyAddress) -> Option<ComposedDevice> {
+        let slot = self.regions.iter_mut().find(|slot| {
+            slot.as_ref().is_some_and(|region| {
+                region.start == addr && matches!(region.target, Target::Composed(_))
+            })
+        })?;
+        let Target::Composed(attached) = slot.take()?.target else {
+            unreachable!()
+        };
+        self.count -= 1;
+        Some(attached)
+    }
+
+    pub(crate) fn composed_at(
+        &mut self,
+        addr: BxPhyAddress,
+    ) -> Option<(&mut ComposedDevice, DmaExclusions<'_>)> {
+        let index = self.regions.iter().position(|slot| {
+            slot.as_ref()
+                .is_some_and(|region| addr.offset_from(region.start) < region.size)
+        })?;
+        let (before, tail) = self.regions.split_at_mut(index);
+        let (current, after) = tail.split_first_mut()?;
+        let region = current.as_mut()?;
+        let Target::Composed(attached) = &mut region.target else {
+            return None;
+        };
+        Some((
+            attached,
+            DmaExclusions {
+                before,
+                page: region.start,
+                after,
+            },
+        ))
     }
 
     pub(crate) fn detach_device(
@@ -206,6 +305,15 @@ impl MmioRegistry {
             .iter_mut()
             .filter_map(|s| s.as_mut())
             .find(|r| addr.offset_from(r.start) < r.size)
+    }
+
+    pub(crate) fn has_composed(&self) -> bool {
+        !self.is_empty()
+            && self
+                .regions
+                .iter()
+                .flatten()
+                .any(|region| matches!(region.target, Target::Composed(_)))
     }
 
     pub fn is_empty(&self) -> bool {

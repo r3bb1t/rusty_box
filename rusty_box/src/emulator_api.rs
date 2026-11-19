@@ -651,25 +651,66 @@ impl<T: crate::cpu::Instrumentation> Emulator<T> {
         address: BxPhyAddress,
         device: &'static mut dyn crate::memory::mmio::MmioDevice,
     ) -> core::result::Result<(), crate::memory::mmio::MmioAttachError> {
-        use crate::memory::mmio::{MmioAttachError, MmioAttachRefusal};
+        use crate::memory::mmio::MmioAttachError;
 
-        if self.cpu_count() != 1 {
-            return Err(MmioAttachError {
-                reason: MmioAttachRefusal::MultipleProcessors,
-                device,
-            });
-        }
-        if self.memory.mmio.overlaps_page(address)
-            || self.cpu().lapic.is_selected(address.page_base())
-        {
-            return Err(MmioAttachError {
-                reason: MmioAttachRefusal::Overlap,
-                device,
-            });
+        if let Err(reason) = self.check_external_mmio_page(address) {
+            return Err(MmioAttachError { reason, device });
         }
         self.cpu_mut().mmio.attach_device(address, device)?;
         self.cpu_mut().invalidate_host_memory_mappings();
         Ok(())
+    }
+
+    fn check_external_mmio_page(
+        &self,
+        address: BxPhyAddress,
+    ) -> core::result::Result<(), crate::memory::mmio::MmioAttachRefusal> {
+        use crate::memory::mmio::MmioAttachRefusal;
+        if self.cpu_count() != 1 {
+            return Err(MmioAttachRefusal::MultipleProcessors);
+        }
+        if address.page_offset() != 0 {
+            return Err(MmioAttachRefusal::Unaligned);
+        }
+        if self.memory.mmio.overlaps_page(address) || self.cpu().lapic.is_selected(address) {
+            return Err(MmioAttachRefusal::Overlap);
+        }
+        Ok(())
+    }
+
+    /// Place an endpoint on one MMIO page and route its output to an unused
+    /// ISA line selected by the caller. Existing board devices may already
+    /// occupy a line. Keep the chosen page clear of relocated board windows.
+    pub fn attach_composed_mmio(
+        &mut self,
+        address: BxPhyAddress,
+        line: crate::emulator::hardware::IsaIrq,
+        device: crate::emulator::hardware::PcDevice,
+    ) -> core::result::Result<(), crate::emulator::hardware::PcDeviceAttachError> {
+        use crate::emulator::hardware::PcDeviceAttachError;
+        if let Err(reason) = self.check_external_mmio_page(address) {
+            return Err(PcDeviceAttachError {
+                reason: reason.into(),
+                device,
+            });
+        }
+        self.cpu_mut().mmio.attach_composed(address, line, device)?;
+        self.cpu_mut().invalidate_host_memory_mappings();
+        Ok(())
+    }
+
+    /// Remove the exact page, lower its IRQ output and return its endpoint.
+    /// The PC interrupt fabric applies its normal line-deassertion semantics.
+    pub fn detach_composed_mmio(
+        &mut self,
+        address: BxPhyAddress,
+    ) -> Option<crate::emulator::hardware::PcDevice> {
+        let attached = self.cpu_mut().mmio.detach_composed(address)?;
+        self.device_manager
+            .irq
+            .set_isa_level(attached.line.into(), false);
+        self.cpu_mut().invalidate_host_memory_mappings();
+        Some(attached.device)
     }
 
     /// Detach the device at its exact physical base and return its loan.

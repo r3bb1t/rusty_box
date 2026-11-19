@@ -1,0 +1,18 @@
+error[E0499]: cannot borrow `handlers` as mutable more than once at a time
+ --> tests/compile_fail/events_cannot_reenter_active_sink.rs:5:13
+  |
+5 |     let _ = handlers.emit(&1, &mut handlers);
+  |             ^^^^^^^^^----^^^^^-------------^
+  |             |        |        |
+  |             |        |        first mutable borrow occurs here
+  |             |        first borrow later used by call
+  |             second mutable borrow occurs here
+
+error[E0499]: cannot borrow `handlers` as mutable more than once at a time
+ --> tests/compile_fail/events_cannot_reenter_active_sink.rs:5:31
+  |
+5 |     let _ = handlers.emit(&1, &mut handlers);
+  |             -------- ----     ^^^^^^^^^^^^^ second mutable borrow occurs here
+  |             |        |
+  |             |        first borrow later used by call
+  |             first mutable borrow occurs here
