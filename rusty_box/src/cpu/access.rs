@@ -1840,14 +1840,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         if let Some(region) = self.mmio.find_mut(paddr) {
             if size as u64 <= region.size - paddr.offset_from(region.start) {
-                return Some((region.read_cb)(paddr, size));
+                return Some(region.read(paddr, size));
             }
         }
         let mut value = 0;
         for offset in 0..size {
             let addr = paddr.wrapping_add(offset as u64);
             let byte = if let Some(region) = self.mmio.find_mut(addr) {
-                (region.read_cb)(addr, 1) as u8
+                region.read(addr, 1) as u8
             } else {
                 self.mem_read_byte(addr)
             };
@@ -1863,7 +1863,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         if let Some(region) = self.mmio.find_mut(paddr) {
             if size as u64 <= region.size - paddr.offset_from(region.start) {
-                (region.write_cb)(paddr, size, val);
+                region.write(paddr, size, val);
                 return true;
             }
         }
@@ -1871,7 +1871,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let addr = paddr.wrapping_add(offset as u64);
             let byte = (val >> (offset * 8)) as u8;
             if let Some(region) = self.mmio.find_mut(addr) {
-                (region.write_cb)(addr, 1, u64::from(byte));
+                region.write(addr, 1, u64::from(byte));
             } else {
                 self.smc_write_check(addr, 1);
                 self.mem_write_byte(addr, byte);

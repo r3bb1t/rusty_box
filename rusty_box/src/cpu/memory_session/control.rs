@@ -16,6 +16,9 @@ pub enum EntryMode {
     /// Unpaged protected mode with flat 32-bit code and data segments.
     /// Requires writable RAM for the 24-byte GDT at physical 0x800.
     Protected32,
+    /// The same layout with the GDT in caller-selected writable physical RAM.
+    /// The full 24-byte table must fit in the unpaged 32-bit address space.
+    Protected32WithGdt(BxPhyAddress),
 }
 
 /// Why a controlled CPU-only run returned.
@@ -56,25 +59,38 @@ impl<T: Instrumentation> MemorySession<'_, T> {
     /// A missing GDT backing leaves the CPU and memory untouched.
     pub fn reset_at(&mut self, mode: EntryMode, entry: u32, stack: u32) -> crate::Result<()> {
         let segments = FlatSegments::FLAT_PROTECTED32;
-        if mode == EntryMode::Protected32 {
+        let gdt = match mode {
+            EntryMode::Real16 => None,
+            EntryMode::Protected32 => Some(FlatSegments::GDT_BASE),
+            EntryMode::Protected32WithGdt(address) => Some(address),
+        };
+        if let Some(address) = gdt {
             let mut bytes = [0; 24];
+            if address.get() > u64::from(u32::MAX) - (bytes.len() as u64 - 1) {
+                return Err(CpuError::UnsupportedCpuOperation {
+                    operation: "protected-mode GDT must fit in the 32-bit address space",
+                }
+                .into());
+            }
             for (bytes, descriptor) in bytes.chunks_exact_mut(8).zip(segments.gdt()) {
                 bytes.copy_from_slice(&descriptor.to_le_bytes());
             }
-            self.write_ram(FlatSegments::GDT_BASE, &bytes)?;
+            self.write_ram(address, &bytes)?;
         }
 
         self.ctx.instrumentation.stop_request = false;
         self.ctx.instrumentation.stop_honored = false;
         self.ctx.set_on_triple_fault(OnTripleFault::ShutDown);
         self.ctx.reset(ResetReason::Hardware);
-        let (entry, stack) = match mode {
-            EntryMode::Real16 => {
+        let (entry, stack) = match gdt {
+            None => {
                 self.ctx.configure_real_segments();
                 (entry & 0xFFFF, stack & 0xFFFF)
             }
-            EntryMode::Protected32 => {
-                self.ctx.configure_flat_segments(segments);
+            Some(address) => {
+                self.ctx.configure_flat_segments(segments, address);
+                // Last byte of the three descriptors installed by this session.
+                self.ctx.set_gdtr_limit_for_api(23);
                 self.ctx.enter_protected_mode_for_api();
                 (entry, stack)
             }
@@ -104,14 +120,14 @@ impl<T: Instrumentation> MemorySession<'_, T> {
         let activity = self.ctx.processor_activity();
         let stop = if let Err(error) = result {
             SessionStop::Exit(error)
-        } else if observer {
-            SessionStop::Observer
         } else if let Some(hit) = breakpoint {
             SessionStop::Breakpoint(CodeBreakpointHit {
                 cpu: 0,
                 breakpoint: hit.breakpoint,
                 linear: hit.linear,
             })
+        } else if observer {
+            SessionStop::Observer
         } else if activity != ProcessorActivity::Active {
             SessionStop::Inactive(activity)
         } else if instructions >= dispatch_budget {
@@ -122,9 +138,12 @@ impl<T: Instrumentation> MemorySession<'_, T> {
         SessionRun { instructions, stop }
     }
 
-    /// Use the normal engine with a one-dispatch budget. A REP instruction
-    /// can execute several elements. Guest exception delivery also consumes
-    /// the engine's budget.
+    /// Run with a one-dispatch budget, including guest exception delivery.
+    ///
+    /// A breakpoint, halt or host exit can stop before an instruction
+    /// retires. REP may execute several elements in one dispatch. A guest
+    /// fault can consume the budget and leave IP at its handler. The result
+    /// reports engine counts rather than a precise retirement count.
     pub fn step(&mut self) -> SessionRun {
         self.run_controlled(1)
     }
@@ -135,12 +154,15 @@ impl<T: Instrumentation> MemorySession<'_, T> {
         &mut self,
         breakpoints: &[CodeBreakpoint],
     ) -> Result<(), BreakpointRefusal> {
-        self.ctx.set_code_breakpoints(breakpoints)
+        self.ctx.set_code_breakpoints(breakpoints)?;
+        self.ctx.pending_scalar_io = None;
+        Ok(())
     }
 
     /// Set the instruction offset in the current CS. The next fetch checks
     /// it according to the guest mode. This preserves the activity state.
     pub fn set_instruction_pointer(&mut self, address: u64) {
+        self.ctx.pending_scalar_io = None;
         self.ctx.set_rip(address);
         self.ctx.prev_rip = address;
         self.ctx.invalidate_prefetch_q();
@@ -155,6 +177,7 @@ impl<T: Instrumentation> MemorySession<'_, T> {
 
     /// Discard cached guest translation state after editing page tables.
     pub fn invalidate_translations(&mut self) {
+        self.ctx.pending_scalar_io = None;
         self.ctx.tlb_flush();
     }
 
@@ -212,6 +235,7 @@ impl<T: Instrumentation> MemorySession<'_, T> {
             _ if is_general_register(register) => self.ctx.api_reg_write(register, value),
             _ => return Err(RegisterRefusal::Unsupported(register)),
         }
+        self.ctx.pending_scalar_io = None;
         Ok(())
     }
 }

@@ -157,8 +157,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
     }
 
-    pub(crate) fn configure_flat_segments(&mut self, layout: FlatSegments) {
-        self.set_gdtr_base_for_api(FlatSegments::GDT_BASE.get());
+    pub(crate) fn configure_flat_segments(&mut self, layout: FlatSegments, gdt_base: BxPhyAddress) {
+        self.set_gdtr_base_for_api(gdt_base.get());
         self.set_gdtr_limit_for_api(0x1F);
         self.set_seg_for_api(
             X86Reg::Cs,

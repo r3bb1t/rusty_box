@@ -1,7 +1,9 @@
 //! CPU-only x86 execution over a caller's physical memory loan.
 
 mod control;
+pub(super) mod scalar_io;
 pub use control::{EntryMode, RegisterRefusal, SessionRun, SessionStop};
+pub use scalar_io::ScalarIoRequest;
 
 use super::decoder::Opcode;
 use super::exec_ctx::ExecCtx;
@@ -104,6 +106,7 @@ impl<'a, T: Instrumentation> MemorySession<'a, T> {
     /// instruction completes. To replace the map, end the session first.
     /// See [`super::CpuError`] for CPU-only exits and retirement semantics.
     pub fn run(&mut self, dispatch_budget: u64) -> Result<u64> {
+        self.ctx.pending_scalar_io = None;
         self.ctx.cpu_loop_n_slice(dispatch_budget, true, 1)
     }
 
@@ -139,6 +142,7 @@ impl<'a, T: Instrumentation> MemorySession<'a, T> {
             });
         }
 
+        self.ctx.pending_scalar_io = None;
         self.ctx.external_scalar = Some(ExternalScalar {
             page,
             completion: None,
@@ -178,7 +182,9 @@ impl<'a, T: Instrumentation> MemorySession<'a, T> {
     /// stamp tracking. The whole write must fit in one RAM window. Updates
     /// to guest page tables still require guest TLB invalidation.
     pub fn write_ram(&mut self, address: BxPhyAddress, data: &[u8]) -> crate::Result<()> {
-        self.ctx.memory.write_ram(address, data).map(|_| ())
+        self.ctx.memory.write_ram(address, data)?;
+        self.ctx.pending_scalar_io = None;
+        Ok(())
     }
 }
 

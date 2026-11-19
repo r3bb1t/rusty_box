@@ -7,6 +7,7 @@ use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::memory_session::{EntryMode, MemorySession, SessionRun};
 use rusty_box::cpu::{BxCpuC, X86Reg};
 use rusty_box::memory::mapped::{MappedMemory, PhysicalRegion, RegionKind};
+use rusty_box::memory::mmio::{MmioAttachError, MmioDevice};
 
 fn consume<T>(_value: T) {}
 
@@ -31,6 +32,13 @@ fn execute(cpu: &mut BxCpuC) -> rusty_box::Result<SessionRun> {
     Ok(session.step())
 }
 
+fn attach(
+    machine: &mut rusty_box::Emulator,
+    device: &'static mut dyn MmioDevice,
+) -> Result<(), MmioAttachError> {
+    machine.attach_mmio_device(BxPhyAddress::new(0x90000), device)
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     consume(rusty_box::EmulatorConfig::default());
@@ -41,6 +49,9 @@ pub extern "C" fn _start() -> ! {
         .unwrap();
     consume(ram);
     consume(core::hint::black_box(execute as fn(&mut BxCpuC) -> _));
+    consume(core::hint::black_box(
+        attach as fn(&mut rusty_box::Emulator, &'static mut dyn MmioDevice) -> _,
+    ));
     loop {
         core::hint::spin_loop();
     }

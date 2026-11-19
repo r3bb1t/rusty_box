@@ -633,6 +633,51 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     }
 }
 
+impl<T: crate::cpu::Instrumentation> Emulator<T> {
+    /// Attach an independently implemented device to one physical page of
+    /// the single-CPU software PC. Dispatch uses the existing scalar MMIO
+    /// route. The device owns its state and receives page-relative offsets.
+    ///
+    /// The caller supplies stable exclusive storage. This method allocates
+    /// nothing and returns that loan on refusal. A machine may retrieve
+    /// the live device with `detach_mmio_device`.
+    pub fn attach_mmio_device(
+        &mut self,
+        address: BxPhyAddress,
+        device: &'static mut dyn crate::memory::mmio::MmioDevice,
+    ) -> core::result::Result<(), crate::memory::mmio::MmioAttachError> {
+        use crate::memory::mmio::{MmioAttachError, MmioAttachRefusal};
+
+        if self.cpu_count() != 1 {
+            return Err(MmioAttachError {
+                reason: MmioAttachRefusal::MultipleProcessors,
+                device,
+            });
+        }
+        if self.memory.mmio.overlaps_page(address)
+            || self.cpu().lapic.is_selected(address.page_base())
+        {
+            return Err(MmioAttachError {
+                reason: MmioAttachRefusal::Overlap,
+                device,
+            });
+        }
+        self.cpu_mut().mmio.attach_device(address, device)?;
+        self.cpu_mut().invalidate_host_memory_mappings();
+        Ok(())
+    }
+
+    /// Detach the device at its exact physical base and return its loan.
+    pub fn detach_mmio_device(
+        &mut self,
+        address: BxPhyAddress,
+    ) -> Option<&'static mut dyn crate::memory::mmio::MmioDevice> {
+        let device = self.cpu_mut().mmio.detach_device(address)?;
+        self.cpu_mut().invalidate_host_memory_mappings();
+        Some(device)
+    }
+}
+
 // ─────────────────────────── mem_read / mem_write ───────────────────────────
 
 impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
@@ -1261,7 +1306,8 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
         for (index, descriptor) in segments.gdt().into_iter().enumerate() {
             self.mem_write_u64_le(FlatSegments::GDT_BASE + (index * 8) as u64, descriptor)?;
         }
-        self.cpu_mut().configure_flat_segments(segments);
+        self.cpu_mut()
+            .configure_flat_segments(segments, FlatSegments::GDT_BASE);
         Ok(())
     }
 }

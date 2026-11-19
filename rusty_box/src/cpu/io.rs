@@ -53,6 +53,35 @@ fn fastrep_budget(iterations: usize) -> u32 {
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
+    /// Record an instruction that reached the port gate with permission.
+    #[cold]
+    pub(super) fn remember_scalar_io(&mut self, error: &super::CpuError, instr_index: usize) {
+        use super::memory_session::scalar_io::{PendingScalarIo, ScalarIoRequest, mask_io_value};
+
+        if let super::CpuError::IoUnavailable {
+            port,
+            len,
+            direction_in,
+            string: false,
+        } = *error
+        {
+            if matches!(self.hardware, super::exec_ctx::Hardware::CpuOnly)
+                && matches!(len, 1 | 2 | 4)
+            {
+                let len = len as u8;
+                self.pending_scalar_io = Some(PendingScalarIo {
+                    next_rip: self.rip(),
+                    request: ScalarIoRequest {
+                        port,
+                        len,
+                        output: (!direction_in).then(|| mask_io_value(self.eax(), len)),
+                    },
+                    instruction: self.i_cache.decoded_instruction(instr_index),
+                });
+            }
+        }
+    }
+
     /// The port in DX, which every port instruction without an immediate
     /// names — Bochs io.cc `DX`.
     #[inline]

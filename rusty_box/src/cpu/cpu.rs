@@ -2681,6 +2681,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         // io_permitted stops before any port, memory or index
                         // effect. Rewind only the speculative IP advance; this
                         // instruction has NOT retired (unlike CpuLoopRestart).
+                        self.remember_scalar_io(&e, instr_idx);
                         let restart = self.prev_rip;
                         self.set_rip(restart);
                         break 'cpu_loop Err(e);

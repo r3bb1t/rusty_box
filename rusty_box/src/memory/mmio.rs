@@ -8,18 +8,83 @@ use alloc::boxed::Box;
 
 use crate::config::{BxPhyAddress, MAX_MMIO_REGIONS};
 
+/// A stateful x86 PC MMIO device. Offsets are relative to the attached
+/// page. Values are little-endian and accesses may be split into bytes.
+pub trait MmioDevice: Send {
+    fn read(&mut self, offset: u64, len: usize) -> u64;
+    fn write(&mut self, offset: u64, len: usize, value: u64);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum MmioAttachRefusal {
+    #[error("MMIO device requires a page-aligned physical address")]
+    Unaligned,
+    #[error("MMIO device page overlaps an existing mapping")]
+    Overlap,
+    #[error("MMIO registry is full")]
+    Full,
+    #[error("MMIO device attachment requires a single x86 processor")]
+    MultipleProcessors,
+}
+
+/// A failed attachment returns the still-owned device loan.
+#[derive(thiserror::Error)]
+#[error("{reason}")]
+pub struct MmioAttachError {
+    pub reason: MmioAttachRefusal,
+    pub device: &'static mut dyn MmioDevice,
+}
+
+impl core::fmt::Debug for MmioAttachError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.reason.fmt(f)
+    }
+}
+
+#[cfg(feature = "alloc")]
+type ReadCallback = Box<dyn FnMut(BxPhyAddress, usize) -> u64 + Send>;
+#[cfg(feature = "alloc")]
+type WriteCallback = Box<dyn FnMut(BxPhyAddress, usize, u64) + Send>;
+#[cfg(not(feature = "alloc"))]
+type ReadCallback = fn(BxPhyAddress, usize) -> u64;
+#[cfg(not(feature = "alloc"))]
+type WriteCallback = fn(BxPhyAddress, usize, u64);
+
+enum Target {
+    Callbacks {
+        read: ReadCallback,
+        write: WriteCallback,
+    },
+    Device(&'static mut dyn MmioDevice),
+}
+
 /// A registered MMIO region: `size` bytes from `start`.
 pub(crate) struct MmioRegion {
     pub(crate) start: BxPhyAddress,
     pub(crate) size: u64,
-    #[cfg(feature = "alloc")]
-    pub(crate) read_cb: Box<dyn FnMut(BxPhyAddress, usize) -> u64 + Send>,
-    #[cfg(not(feature = "alloc"))]
-    pub(crate) read_cb: fn(BxPhyAddress, usize) -> u64,
-    #[cfg(feature = "alloc")]
-    pub(crate) write_cb: Box<dyn FnMut(BxPhyAddress, usize, u64) + Send>,
-    #[cfg(not(feature = "alloc"))]
-    pub(crate) write_cb: fn(BxPhyAddress, usize, u64),
+    target: Target,
+}
+
+impl MmioRegion {
+    fn overlaps(&self, start: BxPhyAddress, size: u64) -> bool {
+        size != 0
+            && self.size != 0
+            && (start.offset_from(self.start) < self.size || self.start.offset_from(start) < size)
+    }
+
+    pub(crate) fn read(&mut self, address: BxPhyAddress, len: usize) -> u64 {
+        match &mut self.target {
+            Target::Callbacks { read, .. } => read(address, len),
+            Target::Device(device) => device.read(address - self.start, len),
+        }
+    }
+
+    pub(crate) fn write(&mut self, address: BxPhyAddress, len: usize, value: u64) {
+        match &mut self.target {
+            Target::Callbacks { write, .. } => write(address, len, value),
+            Target::Device(device) => device.write(address - self.start, len, value),
+        }
+    }
 }
 
 /// Registry of MMIO regions, checked on physical memory access.
@@ -36,70 +101,100 @@ impl MmioRegistry {
         }
     }
 
-    /// Register an MMIO region. Reads and writes to [addr, addr+size) go
-    /// to callbacks instead of RAM.
-    #[cfg(feature = "alloc")]
+    /// Register an MMIO callback region. Device pages own their ranges
+    /// exclusively, so a callback overlapping a device page is rejected.
     pub fn map(
         &mut self,
         addr: BxPhyAddress,
         size: u64,
-        read_cb: Box<dyn FnMut(BxPhyAddress, usize) -> u64 + Send>,
-        write_cb: Box<dyn FnMut(BxPhyAddress, usize, u64) + Send>,
+        read_cb: ReadCallback,
+        write_cb: WriteCallback,
     ) {
-        assert!(self.count < MAX_MMIO_REGIONS, "MMIO region overflow");
-        // Find first empty slot
-        for slot in self.regions.iter_mut() {
-            if slot.is_none() {
-                *slot = Some(MmioRegion {
-                    start: addr,
-                    size,
-                    read_cb,
-                    write_cb,
-                });
-                self.count += 1;
-                return;
-            }
-        }
-        unreachable!("count < MAX but no empty slot");
+        assert!(
+            !self
+                .regions
+                .iter()
+                .flatten()
+                .any(|region| matches!(region.target, Target::Device(_))
+                    && region.overlaps(addr, size)),
+            "callback MMIO overlaps a device page"
+        );
+        let Some(slot) = self.regions.iter_mut().find(|slot| slot.is_none()) else {
+            panic!("MMIO region overflow");
+        };
+        *slot = Some(MmioRegion {
+            start: addr,
+            size,
+            target: Target::Callbacks {
+                read: read_cb,
+                write: write_cb,
+            },
+        });
+        self.count += 1;
     }
 
-    /// Register an MMIO region with function-pointer callbacks (no-alloc path).
-    #[cfg(not(feature = "alloc"))]
-    pub fn map(
+    pub(crate) fn attach_device(
         &mut self,
         addr: BxPhyAddress,
-        size: u64,
-        read_cb: fn(BxPhyAddress, usize) -> u64,
-        write_cb: fn(BxPhyAddress, usize, u64),
-    ) {
-        assert!(self.count < MAX_MMIO_REGIONS, "MMIO region overflow");
-        for slot in self.regions.iter_mut() {
-            if slot.is_none() {
-                *slot = Some(MmioRegion {
-                    start: addr,
-                    size,
-                    read_cb,
-                    write_cb,
-                });
-                self.count += 1;
-                return;
-            }
+        device: &'static mut dyn MmioDevice,
+    ) -> Result<(), MmioAttachError> {
+        if addr.page_offset() != 0 {
+            return Err(MmioAttachError {
+                reason: MmioAttachRefusal::Unaligned,
+                device,
+            });
         }
-        unreachable!("count < MAX but no empty slot");
+        if self
+            .regions
+            .iter()
+            .flatten()
+            .any(|region| region.overlaps(addr, 4096))
+        {
+            return Err(MmioAttachError {
+                reason: MmioAttachRefusal::Overlap,
+                device,
+            });
+        }
+        let Some(slot) = self.regions.iter_mut().find(|slot| slot.is_none()) else {
+            return Err(MmioAttachError {
+                reason: MmioAttachRefusal::Full,
+                device,
+            });
+        };
+        *slot = Some(MmioRegion {
+            start: addr,
+            size: 4096,
+            target: Target::Device(device),
+        });
+        self.count += 1;
+        Ok(())
     }
 
-    /// Remove all MMIO regions overlapping [addr, addr+size).
+    pub(crate) fn detach_device(
+        &mut self,
+        addr: BxPhyAddress,
+    ) -> Option<&'static mut dyn MmioDevice> {
+        let slot = self.regions.iter_mut().find(|slot| {
+            slot.as_ref().is_some_and(|region| {
+                region.start == addr && matches!(region.target, Target::Device(_))
+            })
+        })?;
+        if let Target::Device(device) = slot.take()?.target {
+            self.count -= 1;
+            return Some(device);
+        }
+        None
+    }
+
+    /// Remove callback regions overlapping [addr, addr+size). Device pages
+    /// are removed through their detach operation, which returns the loan.
     pub fn unmap(&mut self, addr: BxPhyAddress, size: u64) {
-        for slot in self.regions.iter_mut() {
-            if let Some(r) = slot {
-                // An empty range overlaps nothing; two others overlap where
-                // one starts inside the other.
-                let overlaps = size != 0
-                    && (addr.offset_from(r.start) < r.size || r.start.offset_from(addr) < size);
-                if overlaps {
-                    *slot = None;
-                    self.count -= 1;
-                }
+        for slot in &mut self.regions {
+            if slot.as_ref().is_some_and(|region| {
+                matches!(region.target, Target::Callbacks { .. }) && region.overlaps(addr, size)
+            }) {
+                *slot = None;
+                self.count -= 1;
             }
         }
     }

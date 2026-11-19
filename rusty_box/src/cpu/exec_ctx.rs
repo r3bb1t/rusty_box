@@ -46,6 +46,7 @@ pub(crate) struct ExecCtx<'a, T: Instrumentation> {
     /// instruction TLB, the fetch window and the VMCB measure from here,
     /// because fetch also runs out of ROM and out of relocated blocks.
     pub(crate) mem_alloc_base: *mut u8,
+    pub(super) pending_scalar_io: Option<super::memory_session::scalar_io::PendingScalarIo>,
     pub(super) external_scalar: Option<super::memory_session::ExternalScalar>,
 }
 
@@ -176,6 +177,7 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
             mem_host_base,
             mem_host_len,
             mem_alloc_base,
+            pending_scalar_io: None,
             external_scalar: None,
         }
     }

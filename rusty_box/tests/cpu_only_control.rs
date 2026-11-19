@@ -192,4 +192,242 @@ fn controlled_step_reports_a_static_observer_stop_at_the_budget_boundary() {
         session.step().stop,
         SessionStop::Inactive(ProcessorActivity::Halted)
     ));
+    // One boundary can satisfy both stop conditions. Report the breakpoint
+    // before its one-resume allowance consumes the hit.
+    session
+        .reset_at(EntryMode::Protected32, 0x1000, 0x1FF0)
+        .unwrap();
+    session
+        .set_code_breakpoints(&[CodeBreakpoint::Linear(0x1010)])
+        .unwrap();
+    assert!(matches!(
+        session.run_controlled(4).stop,
+        SessionStop::Budget
+    ));
+    assert!(matches!(session.step().stop, SessionStop::Breakpoint(hit) if hit.linear == 0x1010));
+    assert!(matches!(
+        session.step().stop,
+        SessionStop::Inactive(ProcessorActivity::Halted)
+    ));
+}
+
+#[test]
+fn scalar_io_completion_writes_the_exact_register_view_and_survives_pending() {
+    let mut cpu = BxCpuBuilder::new().build().unwrap();
+    let mut bytes = [0; 8192];
+    let mut stamps = [0; 2];
+    let mut memory = FlatMemory::new(&mut bytes, &mut stamps).unwrap();
+    let mut session = MemorySession::new(&mut cpu, memory.loan());
+    session.reset_at(EntryMode::Real16, 0x1000, 0x1FF0).unwrap();
+    session
+        .write_ram(
+            BxPhyAddress::new(0x1000),
+            &[
+                0xE4, 0x80, // in al,0x80
+                0xE5, 0x80, // in ax,0x80
+                0x66, 0xE5, 0x80, // in eax,0x80
+                0xF3, 0x6E, // rep outsb: deliberately unsupported
+            ],
+        )
+        .unwrap();
+    session
+        .write_register(X86Reg::Rax, 0x1122_3344_5566_7788)
+        .unwrap();
+    session.write_register(X86Reg::Cx, 1).unwrap();
+
+    for (i, (len, expected)) in [
+        (1, 0x1122_3344_5566_77FF),
+        (2, 0x1122_3344_5566_EEFF),
+        (4, 0x0000_0000_CCDD_EEFF),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let stop = session.step();
+        assert_eq!(stop.instructions, 0);
+        assert!(matches!(
+            stop.stop,
+            SessionStop::Exit(CpuError::IoUnavailable {
+                direction_in: true,
+                string: false,
+                ..
+            })
+        ));
+        let rip = session.read_register(X86Reg::Rip).unwrap();
+        assert!(!session.service_scalar_io(|_| None).unwrap());
+        assert_eq!(session.read_register(X86Reg::Rip).unwrap(), rip);
+        assert!(
+            session
+                .service_scalar_io(|request| {
+                    assert_eq!(request.len, len);
+                    assert_eq!(request.port.get(), 0x80);
+                    assert_eq!(request.output, None);
+                    Some(0xCCDD_EEFF)
+                })
+                .unwrap()
+        );
+        assert_eq!(session.read_register(X86Reg::Rax).unwrap(), expected);
+        assert_eq!(
+            session.read_register(X86Reg::Rip).unwrap(),
+            [0x1002, 0x1004, 0x1007][i]
+        );
+        assert!(
+            session
+                .service_scalar_io(|_| panic!("completion must be consumed"))
+                .is_err()
+        );
+    }
+    assert!(matches!(
+        session.step().stop,
+        SessionStop::Exit(CpuError::IoUnavailable { string: true, .. })
+    ));
+    assert!(
+        session
+            .service_scalar_io(|_| panic!("string I/O has no continuation"))
+            .is_err()
+    );
+    assert_eq!(session.read_register(X86Reg::Cx).unwrap(), 1);
+}
+
+#[test]
+fn scalar_output_completion_uses_the_wrapped_next_ip_and_discards_stale_requests() {
+    let mut cpu = BxCpuBuilder::new().build().unwrap();
+    let mut bytes = [0; 0x10000];
+    let mut stamps = [0; 16];
+    let mut memory = FlatMemory::new(&mut bytes, &mut stamps).unwrap();
+    let mut session = MemorySession::new(&mut cpu, memory.loan());
+    session.reset_at(EntryMode::Real16, 0xFFFD, 0xFF00).unwrap();
+    session
+        .write_ram(BxPhyAddress::new(0xFFFD), &[0x66, 0xE7, 0x80])
+        .unwrap();
+    session.write_ram(BxPhyAddress::new(0), &[0xF4]).unwrap();
+    assert!(matches!(
+        session.step().stop,
+        SessionStop::Exit(CpuError::IoUnavailable { .. })
+    ));
+
+    session.write_register(X86Reg::Eax, 0x1234_5678).unwrap();
+    assert!(
+        session
+            .service_scalar_io(|_| panic!("request predates a register edit"))
+            .is_err()
+    );
+    assert!(matches!(
+        session.step().stop,
+        SessionStop::Exit(CpuError::IoUnavailable { .. })
+    ));
+    session
+        .write_ram(BxPhyAddress::new(0xFFFF), &[0x81])
+        .unwrap();
+    assert!(
+        session
+            .service_scalar_io(|_| panic!("request predates a code edit"))
+            .is_err()
+    );
+    assert!(matches!(
+        session.step().stop,
+        SessionStop::Exit(CpuError::IoUnavailable { .. })
+    ));
+    assert!(
+        session
+            .service_scalar_io(|request| {
+                assert_eq!(request.len, 4);
+                assert_eq!(request.port.get(), 0x81);
+                assert_eq!(request.output, Some(0x1234_5678));
+                Some(0)
+            })
+            .unwrap()
+    );
+    assert_eq!(session.read_register(X86Reg::Rip).unwrap(), 0);
+    assert!(matches!(
+        session.step().stop,
+        SessionStop::Inactive(ProcessorActivity::Halted)
+    ));
+    session.reset_at(EntryMode::Real16, 0xFFFD, 0xFF00).unwrap();
+    assert!(matches!(
+        session.step().stop,
+        SessionStop::Exit(CpuError::IoUnavailable { .. })
+    ));
+}
+
+#[test]
+fn caller_placed_gdt_supports_segment_reloads_in_a_sparse_session() {
+    let mut cpu = BxCpuBuilder::new().build().unwrap();
+    let mut bytes = [0; 4096];
+    let mut stamps = [0; 1];
+    let map = [PhysicalRegion {
+        guest_start: BxPhyAddress::new(0x2000),
+        arena_offset: 0,
+        len: 4096,
+        kind: RegionKind::Ram,
+    }];
+    let mut memory = MappedMemory::new(&mut bytes, &mut stamps, &map).unwrap();
+    let mut session = MemorySession::new(&mut cpu, memory.loan());
+    let gdt = BxPhyAddress::new(0x2800);
+    session
+        .reset_at(EntryMode::Protected32WithGdt(gdt), 0x2000, 0x2FF0)
+        .unwrap();
+    assert!(
+        session
+            .reset_at(
+                EntryMode::Protected32WithGdt(BxPhyAddress::new(0xFFFF_FFF0)),
+                0,
+                0
+            )
+            .is_err()
+    );
+    // xor eax,eax; mov ds,ax; mov ax,0x10; mov ds,ax; hlt
+    session
+        .write_ram(
+            BxPhyAddress::new(0x2000),
+            &[
+                0x31, 0xC0, 0x8E, 0xD8, 0x66, 0xB8, 0x10, 0, 0x8E, 0xD8, 0xF4,
+            ],
+        )
+        .unwrap();
+    let outcome = session.run_controlled(8);
+    assert_eq!(outcome.instructions, 5);
+    assert!(matches!(
+        outcome.stop,
+        SessionStop::Inactive(ProcessorActivity::Halted)
+    ));
+    assert_eq!(session.read_register(X86Reg::Ds).unwrap(), 0x10);
+}
+
+#[test]
+fn one_dispatch_can_execute_rep_elements_or_deliver_a_guest_fault() {
+    let mut cpu = BxCpuBuilder::new().build().unwrap();
+    let mut bytes = [0; 8192];
+    let mut stamps = [0; 2];
+    let mut memory = FlatMemory::new(&mut bytes, &mut stamps).unwrap();
+    let mut session = MemorySession::new(&mut cpu, memory.loan());
+    session.reset_at(EntryMode::Real16, 0x1000, 0x1FF0).unwrap();
+    session
+        .write_ram(BxPhyAddress::new(0x1000), &[0xF3, 0xAA, 0x0F, 0x0B])
+        .unwrap(); // REP STOSB; UD2
+    session
+        .write_ram(BxPhyAddress::new(6 * 4), &[0, 0x18, 0, 0])
+        .unwrap();
+    session
+        .write_ram(BxPhyAddress::new(0x1800), &[0xF4])
+        .unwrap();
+    session.write_register(X86Reg::Cx, 4).unwrap();
+    session.write_register(X86Reg::Di, 0x1400).unwrap();
+    session.write_register(X86Reg::Al, 0x5A).unwrap();
+
+    assert!(matches!(session.step().stop, SessionStop::Budget));
+    assert_eq!(session.read_register(X86Reg::Cx).unwrap(), 0);
+    let mut data = [0; 4];
+    session
+        .read_physical(BxPhyAddress::new(0x1400), &mut data)
+        .unwrap();
+    assert_eq!(data, [0x5A; 4]);
+    let fault = session.step();
+    assert_eq!(fault.instructions, 1);
+    assert!(matches!(fault.stop, SessionStop::Budget));
+    assert_eq!(session.read_register(X86Reg::Rip).unwrap(), 0x1800);
+    assert!(matches!(
+        session.step().stop,
+        SessionStop::Inactive(ProcessorActivity::Halted)
+    ));
 }

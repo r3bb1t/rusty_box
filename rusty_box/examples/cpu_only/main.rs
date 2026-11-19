@@ -49,10 +49,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }) if port.get() == 0x80 => {
             assert_eq!(session.read_register(X86Reg::Eip)?, u64::from(RETURN));
             println!("function returned {result} after intermediate value {intermediate}");
-            println!("host received port output {result} at {port:?}");
-            // OUT did not retire. This example acknowledges it by skipping
-            // the known two-byte instruction in the trampoline.
-            session.set_instruction_pointer(u64::from(RETURN + 2));
+            assert!(session.service_scalar_io(|request| {
+                assert_eq!(request.output, Some(result as u32));
+                println!("host received port output {result} at {:?}", request.port);
+                Some(0)
+            })?);
         }
         other => return Err(std::io::Error::other(format!("unexpected stop {other:?}")).into()),
     }
