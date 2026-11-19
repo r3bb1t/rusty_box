@@ -1,12 +1,17 @@
 #![no_std]
 #![no_main]
 
+use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
 
 use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::BxCpuC;
 use rusty_box::cpu::memory_session::{EntryMode, MemorySession, SessionRun};
 use rusty_box::cpu::registers::AX;
+use rusty_box::emulator::hardware::{
+    DmaWrite, EventEndpoint, InterruptOutput, IsaIrq, MmioModel, MmioWrite, PcAttachment, PcDevice,
+    PcDeviceAttachError, WindowOffset,
+};
 use rusty_box::memory::mapped::{MappedMemory, PhysicalRegion, RegionKind};
 use rusty_box::memory::mmio::{MmioAttachError, MmioDevice};
 
@@ -44,16 +49,34 @@ fn attach(
     machine.attach_mmio_device(BxPhyAddress::new(0x90000), device)
 }
 
+struct Pulse;
+
+impl MmioModel for Pulse {
+    type Event = ();
+
+    fn read(&mut self, _: WindowOffset, _: usize) -> u64 {
+        0
+    }
+
+    fn write(
+        &mut self,
+        _: MmioWrite,
+        _: &mut impl DmaWrite,
+        irq: &mut impl InterruptOutput,
+    ) -> Option<()> {
+        irq.set_level(true);
+        Some(())
+    }
+}
+
 fn attach_composed(
     machine: &mut rusty_box::Emulator,
-    device: &'static mut dyn rusty_box::emulator::hardware::PcMmioDevice,
-) -> Result<(), rusty_box::emulator::hardware::PcDeviceAttachError> {
-    use rusty_box::emulator::hardware::{IsaIrq, PcDevice};
-    machine.attach_composed_mmio(
-        BxPhyAddress::new(0x91000),
-        IsaIrq::new(5).unwrap(),
-        PcDevice::Borrowed(device),
-    )
+    storage: &'static mut MaybeUninit<EventEndpoint<Pulse>>,
+) -> Result<(), PcDeviceAttachError> {
+    let (page, line, endpoint) =
+        PcAttachment::with_model(BxPhyAddress::new(0x91000), IsaIrq::new(5).unwrap(), Pulse)
+            .into_parts();
+    machine.attach_composed_mmio(page, line, PcDevice::Borrowed(storage.write(endpoint)))
 }
 
 fn publish(input: u8, state: &mut u8) {
@@ -82,10 +105,7 @@ pub extern "C" fn _start() -> ! {
     ));
     consume(core::hint::black_box(
         attach_composed
-            as fn(
-                &mut rusty_box::Emulator,
-                &'static mut dyn rusty_box::emulator::hardware::PcMmioDevice,
-            ) -> _,
+            as fn(&mut rusty_box::Emulator, &'static mut MaybeUninit<EventEndpoint<Pulse>>) -> _,
     ));
     consume(core::hint::black_box(publish as fn(u8, &mut u8)));
     loop {

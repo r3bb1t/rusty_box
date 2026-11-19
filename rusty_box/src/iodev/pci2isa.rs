@@ -134,6 +134,15 @@ impl Default for BxPiix3 {
 }
 
 impl BxPiix3 {
+    pub(crate) fn routes_irq(&self, line: u8) -> bool {
+        usize::from(line) < 16
+            && (self.pci_conf[0x60..0x64].contains(&line)
+                || self
+                    .irq_level
+                    .iter()
+                    .any(|levels| levels[usize::from(line)] != 0))
+    }
+
     /// Create a new PIIX3 bridge.
     /// Bochs: bx_piix3_c::init() (pci2isa.cc)
     pub fn new() -> Self {

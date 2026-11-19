@@ -323,6 +323,14 @@ impl BxHpetC {
         timer.config & HPET_TN_ENABLE != 0
     }
 
+    pub(crate) fn routes_irq(&self, line: u8) -> bool {
+        self.timers.iter().enumerate().any(|(index, timer)| {
+            (index > 1 || !self.in_legacy_mode())
+                && !Self::timer_fsb_route(timer)
+                && Self::timer_int_route(timer) == line
+        })
+    }
+
     // ── Queued side effects ──────────────────────────────────────────────
 
     fn push_irq(&mut self, route: u8, level: bool) {

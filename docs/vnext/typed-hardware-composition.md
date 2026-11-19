@@ -44,7 +44,7 @@ On an empty event route, the sink is zero-sized and delivery returns immediately
 
 The integration covers one-page endpoints on the single-CPU software PC and checked writes within one conventional RAM page. Reads use the existing scalar MMIO model. General DMA spans, IRQ sharing, timers for external composed devices, externally owned snapshot state, and direct static dispatch across the runtime address registry remain open. A CPU borrowed out of a PC refuses CPU-only execution with a composed device installed. AArch64 internals use their existing execution and device paths.
 
-[Application](../../rusty_box/examples/composed_hardware/main.rs) · [Independent device](../../rusty_box/examples/composed_hardware/gpu.rs) · [PC adapter](../../rusty_box/examples/composed_hardware/adapter.rs) · [Typed subscription implementation](../../rusty_box_core/src/events.rs) · [Real guest tests](../../rusty_box/tests/composed_hardware.rs)
+[Application](../../rusty_box/examples/composed_hardware/main.rs) · [Independent device](../../rusty_box/examples/composed_hardware/gpu.rs) · [Current PC adapter](../../rusty_box/src/emulator/hardware/event_endpoint.rs) · [Typed subscription implementation](../../rusty_box_core/src/events.rs) · [Real guest tests](../../rusty_box/tests/composed_hardware.rs)
 
 ## Validation
 

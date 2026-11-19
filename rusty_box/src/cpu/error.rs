@@ -81,6 +81,10 @@ pub enum CpuError {
     #[error("machine boundary effect failed")]
     MachineBoundaryFailed,
 
+    /// A host callback failed. The instruction's committed effects remain.
+    #[error(transparent)]
+    MmioSubscriber(crate::emulator::hardware::MmioSubscriberError),
+
     /// CPU-only execution reached deferred machine work (LAPIC bus/timer,
     /// CPU-control or EOI). The issuing instruction may have retired already:
     /// RIP and counts remain committed, and the request stays latched.

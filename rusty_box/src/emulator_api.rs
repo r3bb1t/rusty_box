@@ -679,8 +679,8 @@ impl<T: crate::cpu::Instrumentation> Emulator<T> {
     }
 
     /// Place an endpoint on one MMIO page and route its output to an unused
-    /// ISA line selected by the caller. Existing board devices may already
-    /// occupy a line. Keep the chosen page clear of relocated board windows.
+    /// ISA line selected by the caller. Keep that line and page clear of
+    /// guest reconfiguration of board IRQ routes and MMIO windows.
     pub fn attach_composed_mmio(
         &mut self,
         address: BxPhyAddress,
@@ -688,19 +688,47 @@ impl<T: crate::cpu::Instrumentation> Emulator<T> {
         device: crate::emulator::hardware::PcDevice,
     ) -> core::result::Result<(), crate::emulator::hardware::PcDeviceAttachError> {
         use crate::emulator::hardware::PcDeviceAttachError;
-        if let Err(reason) = self.check_external_mmio_page(address) {
-            return Err(PcDeviceAttachError {
-                reason: reason.into(),
-                device,
-            });
-        }
-        self.cpu_mut().mmio.attach_composed(address, line, device)?;
-        self.cpu_mut().invalidate_host_memory_mappings();
+        let slot = match self.composed_mmio_slot(address, line) {
+            Ok(slot) => slot,
+            Err(reason) => return Err(PcDeviceAttachError { reason, device }),
+        };
+        self.insert_composed_mmio(slot, address, line, device);
         Ok(())
+    }
+
+    pub(crate) fn composed_mmio_slot(
+        &self,
+        address: BxPhyAddress,
+        line: crate::emulator::hardware::IsaIrq,
+    ) -> core::result::Result<usize, crate::emulator::hardware::PcDeviceAttachRefusal> {
+        use crate::emulator::hardware::PcDeviceAttachRefusal;
+        self.check_external_mmio_page(address)?;
+        let slot = self.cpu().mmio.composed_slot(address, line)?;
+        if self
+            .device_manager
+            .claims_isa_irq(line.into(), self.devices.is_pci_enabled())
+        {
+            return Err(PcDeviceAttachRefusal::BoardIrqInUse);
+        }
+        Ok(slot)
+    }
+
+    pub(crate) fn insert_composed_mmio(
+        &mut self,
+        slot: usize,
+        address: BxPhyAddress,
+        line: crate::emulator::hardware::IsaIrq,
+        device: crate::emulator::hardware::PcDevice,
+    ) {
+        self.cpu_mut()
+            .mmio
+            .insert_composed(slot, address, line, device);
+        self.cpu_mut().invalidate_host_memory_mappings();
     }
 
     /// Remove the exact page, lower its IRQ output and return its endpoint.
     /// The PC interrupt fabric applies its normal line-deassertion semantics.
+    /// The returned storage stays erased and may be placed again.
     pub fn detach_composed_mmio(
         &mut self,
         address: BxPhyAddress,

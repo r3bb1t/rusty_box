@@ -395,6 +395,9 @@ pub struct DeviceManager {
     /// between them inside every line change, which is only expressible if one
     /// owner holds both.
     pub(crate) irq: IrqFabric,
+    /// First subscriber failure since the interpreter entered this slice.
+    /// The scheduler retrieves it after committing the slice's effects.
+    pub(crate) mmio_subscriber_error: Option<crate::emulator::hardware::MmioSubscriberError>,
     /// 8254 PIT (Programmable Interval Timer)
     pub(crate) pit: BxPitC,
     /// CMOS/RTC
@@ -474,6 +477,16 @@ impl Default for DeviceManager {
 }
 
 impl DeviceManager {
+    /// Fixed PC wiring plus currently selected guest-programmable sources.
+    /// Reserve fixed routes even when their controller is idle or masked.
+    pub(crate) fn claims_isa_irq(&self, line: rusty_box_devices::api::IrqLine, pci: bool) -> bool {
+        // PIT, keyboard, UARTs, RTC, ACPI SCI, mouse and both IDE channels.
+        matches!(line.0, 0 | 1 | 3 | 4 | 8 | 9 | 12 | 14 | 15)
+            || self.irq.line_level(line)
+            || self.hpet.routes_irq(line.0)
+            || (pci && self.pci2isa.routes_irq(line.0))
+    }
+
     /// Set the pre-boot VBE display mode on the VGA controller: raises the DISPI
     /// capability ceiling and seeds the power-on dimensions. Preserved across
     /// guest resets.
@@ -553,6 +566,7 @@ impl DeviceManager {
     pub fn new() -> Self {
         Self {
             irq: IrqFabric::new(),
+            mmio_subscriber_error: None,
             pit: BxPitC::new(),
             cmos: BxCmosC::new(),
             dma: BxDmaC::new(),

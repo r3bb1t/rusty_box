@@ -7,9 +7,7 @@
 use alloc::boxed::Box;
 
 use crate::config::{BxPhyAddress, MAX_MMIO_REGIONS};
-use crate::emulator::hardware::{
-    IsaIrq, PcDevice, PcDeviceAttachError, PcDeviceAttachRefusal, WindowOffset,
-};
+use crate::emulator::hardware::{IsaIrq, PcDevice, PcDeviceAttachRefusal, WindowOffset};
 
 /// A stateful x86 PC MMIO device. Offsets are relative to the attached
 /// page. Values are little-endian and accesses may be split into bytes.
@@ -185,8 +183,17 @@ impl MmioRegistry {
         addr: BxPhyAddress,
         target: Target,
     ) -> Result<(), (MmioAttachRefusal, Target)> {
+        let slot = match self.vacant_page(addr) {
+            Ok(slot) => slot,
+            Err(reason) => return Err((reason, target)),
+        };
+        self.insert_page(slot, addr, target);
+        Ok(())
+    }
+
+    fn vacant_page(&self, addr: BxPhyAddress) -> Result<usize, MmioAttachRefusal> {
         if addr.page_offset() != 0 {
-            return Err((MmioAttachRefusal::Unaligned, target));
+            return Err(MmioAttachRefusal::Unaligned);
         }
         if self
             .regions
@@ -194,42 +201,49 @@ impl MmioRegistry {
             .flatten()
             .any(|region| region.overlaps(addr, 4096))
         {
-            return Err((MmioAttachRefusal::Overlap, target));
+            return Err(MmioAttachRefusal::Overlap);
         }
-        let Some(slot) = self.regions.iter_mut().find(|slot| slot.is_none()) else {
-            return Err((MmioAttachRefusal::Full, target));
-        };
-        *slot = Some(MmioRegion {
+        self.regions
+            .iter()
+            .position(Option::is_none)
+            .ok_or(MmioAttachRefusal::Full)
+    }
+
+    fn insert_page(&mut self, index: usize, addr: BxPhyAddress, target: Target) {
+        debug_assert!(self.regions[index].is_none());
+        self.regions[index] = Some(MmioRegion {
             start: addr,
             size: 4096,
             target,
         });
         self.count += 1;
-        Ok(())
     }
 
-    pub(crate) fn attach_composed(
-        &mut self,
+    pub(crate) fn composed_slot(
+        &self,
         addr: BxPhyAddress,
         line: IsaIrq,
-        device: PcDevice,
-    ) -> Result<(), PcDeviceAttachError> {
+    ) -> Result<usize, PcDeviceAttachRefusal> {
         if self.regions.iter().flatten().any(
             |region| matches!(&region.target, Target::Composed(attached) if attached.line == line),
         ) {
-            return Err(PcDeviceAttachError {
-                reason: PcDeviceAttachRefusal::IrqInUse,
-                device,
-            });
+            return Err(PcDeviceAttachRefusal::IrqInUse);
         }
-        match self.attach_page(addr, Target::Composed(ComposedDevice { line, device })) {
-            Ok(()) => Ok(()),
-            Err((reason, Target::Composed(attached))) => Err(PcDeviceAttachError {
-                reason: reason.into(),
-                device: attached.device,
-            }),
-            Err(_) => unreachable!(),
-        }
+        Ok(self.vacant_page(addr)?)
+    }
+
+    pub(crate) fn insert_composed(
+        &mut self,
+        slot: usize,
+        addr: BxPhyAddress,
+        line: IsaIrq,
+        device: PcDevice,
+    ) {
+        self.insert_page(
+            slot,
+            addr,
+            Target::Composed(ComposedDevice { line, device }),
+        );
     }
 
     pub(crate) fn detach_composed(&mut self, addr: BxPhyAddress) -> Option<ComposedDevice> {

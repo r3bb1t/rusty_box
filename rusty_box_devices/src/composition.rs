@@ -28,3 +28,35 @@ pub struct MmioWrite {
     pub len: usize,
     pub value: u64,
 }
+
+/// A scalar register model that may return an owned notification after a
+/// write. A model with several notifications can use its own enum. The
+/// model borrows DMA and IRQ only for the duration of the operation.
+pub trait MmioModel {
+    type Event;
+
+    fn read(&mut self, offset: WindowOffset, len: usize) -> u64;
+
+    fn write(
+        &mut self,
+        access: MmioWrite,
+        dma: &mut impl DmaWrite,
+        irq: &mut impl InterruptOutput,
+    ) -> Option<Self::Event>;
+}
+
+/// Publish a model's notification after its write returns. The publisher
+/// lends subscribers the IRQ output while the model and DMA remain separate.
+/// A subscriber failure leaves the model's completed operation in effect.
+pub fn write_and_publish<D: MmioModel, I: InterruptOutput, S: Emit<D::Event, I>>(
+    model: &mut D,
+    access: MmioWrite,
+    dma: &mut impl DmaWrite,
+    irq: &mut I,
+    subscribers: &mut S,
+) -> Result<Reaction, S::Error> {
+    match model.write(access, dma, irq) {
+        Some(event) => subscribers.emit(&event, irq),
+        None => Ok(Reaction::Continue),
+    }
+}

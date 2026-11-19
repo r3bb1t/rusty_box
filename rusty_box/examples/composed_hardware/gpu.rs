@@ -1,6 +1,6 @@
 //! The model depends only on the architecture-independent device contracts.
 use rusty_box_devices::api::{BxPhyAddress, WindowOffset};
-use rusty_box_devices::composition::{DmaWrite, Emit, InterruptOutput, MmioWrite, Reaction};
+use rusty_box_devices::composition::{DmaWrite, InterruptOutput, MmioModel, MmioWrite};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TileWritten {
@@ -19,13 +19,32 @@ pub struct Gpu {
     status: u32,
 }
 
-enum Notification {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GpuEvent {
     Written(TileWritten),
     Rejected(TileRejected),
 }
 
-impl Gpu {
-    pub fn read(&self, at: WindowOffset, len: usize) -> u64 {
+impl GpuEvent {
+    pub fn written(&self) -> Option<&TileWritten> {
+        match self {
+            Self::Written(event) => Some(event),
+            Self::Rejected(_) => None,
+        }
+    }
+
+    pub fn rejected(&self) -> Option<&TileRejected> {
+        match self {
+            Self::Rejected(event) => Some(event),
+            Self::Written(_) => None,
+        }
+    }
+}
+
+impl MmioModel for Gpu {
+    type Event = GpuEvent;
+
+    fn read(&mut self, at: WindowOffset, len: usize) -> u64 {
         match (at.get(), len) {
             (0, 4) => u64::from(self.destination),
             (8, 4) => u64::from(self.status),
@@ -33,12 +52,12 @@ impl Gpu {
         }
     }
 
-    fn command(
+    fn write(
         &mut self,
         access: MmioWrite,
         dma: &mut impl DmaWrite,
         irq: &mut impl InterruptOutput,
-    ) -> Option<Notification> {
+    ) -> Option<GpuEvent> {
         match (access.offset.get(), access.len) {
             (0, 4) => self.destination = access.value as u32,
             (4, 4) => {
@@ -46,11 +65,11 @@ impl Gpu {
                 let pixels = (access.value as u32).to_le_bytes();
                 if dma.write(destination, &pixels).is_err() {
                     self.status = 2;
-                    return Some(Notification::Rejected(TileRejected { destination }));
+                    return Some(GpuEvent::Rejected(TileRejected { destination }));
                 }
                 self.status = 1;
                 irq.set_level(true);
-                return Some(Notification::Written(TileWritten {
+                return Some(GpuEvent::Written(TileWritten {
                     destination,
                     pixels,
                 }));
@@ -59,26 +78,5 @@ impl Gpu {
             _ => {}
         }
         None
-    }
-
-    pub fn subscriber_failed(&mut self) {
-        self.status = 3;
-    }
-}
-
-// The owner wires two distinct event sinks. A notification is produced only
-// after command() returns and releases its borrow of the device and the DMA.
-pub fn write<I: InterruptOutput, X>(
-    gpu: &mut Gpu,
-    access: MmioWrite,
-    dma: &mut impl DmaWrite,
-    irq: &mut I,
-    written: &mut impl Emit<TileWritten, I, Error = X>,
-    rejected: &mut impl Emit<TileRejected, I, Error = X>,
-) -> Result<Reaction, X> {
-    match gpu.command(access, dma, irq) {
-        Some(Notification::Written(event)) => written.emit(&event, irq),
-        Some(Notification::Rejected(event)) => rejected.emit(&event, irq),
-        None => Ok(Reaction::Continue),
     }
 }

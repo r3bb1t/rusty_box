@@ -6,7 +6,7 @@
 use rusty_box_devices::api::IrqLine;
 pub use rusty_box_devices::api::WindowOffset;
 pub use rusty_box_devices::composition::{
-    DmaWrite, Emit, InterruptOutput, MmioWrite, Reaction, Subscriptions,
+    DmaWrite, Emit, InterruptOutput, MmioModel, MmioWrite, Reaction, Subscriptions,
 };
 
 use crate::config::BxPhyAddress;
@@ -15,19 +15,37 @@ use crate::iodev::irq::IrqFabric;
 use crate::memory::BxMemC;
 use crate::memory::mmio::{DmaExclusions, MmioAttachRefusal};
 
+mod event_endpoint;
+pub use event_endpoint::EventEndpoint;
+
+/// An allocation-free diagnostic chosen by the subscriber at the PC boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("{0}")]
+pub struct SubscriberError(pub &'static str);
+
+/// A subscriber failed during a guest MMIO write. The host receives this
+/// after the interpreter returns and the scheduler services committed effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("MMIO subscriber at {address:#x}: {source}")]
+pub struct MmioSubscriberError {
+    pub address: BxPhyAddress,
+    pub source: SubscriberError,
+}
+
 /// An endpoint placed on one page of a single-CPU software PC.
 pub trait PcMmioDevice: Send {
     fn read(&mut self, offset: WindowOffset, len: usize) -> u64;
 
     /// Service the write, then deliver any notifications before returning.
     /// A stop requests a return at the next interpreter boundary. The write
-    /// has taken effect and will not be replayed by that stop.
+    /// has taken effect and will not be replayed by that stop. An error also
+    /// returns to the host at that boundary and preserves completed effects.
     fn write(
         &mut self,
         access: MmioWrite,
         dma: &mut PcDma<'_>,
         irq: &mut PcInterrupt<'_>,
-    ) -> Reaction;
+    ) -> Result<Reaction, SubscriberError>;
 }
 
 /// Optional MMIO write observer. It runs after the device and its subscribers.
@@ -36,13 +54,15 @@ pub struct ObserveWrites<D, F> {
     observe: F,
 }
 
-impl<D, F: FnMut(MmioWrite, Reaction)> ObserveWrites<D, F> {
+impl<D, F: FnMut(MmioWrite, Result<Reaction, SubscriberError>)> ObserveWrites<D, F> {
     pub fn new(device: D, observe: F) -> Self {
         Self { device, observe }
     }
 }
 
-impl<D: PcMmioDevice, F: FnMut(MmioWrite, Reaction) + Send> PcMmioDevice for ObserveWrites<D, F> {
+impl<D: PcMmioDevice, F: FnMut(MmioWrite, Result<Reaction, SubscriberError>) + Send> PcMmioDevice
+    for ObserveWrites<D, F>
+{
     fn read(&mut self, offset: WindowOffset, len: usize) -> u64 {
         self.device.read(offset, len)
     }
@@ -52,10 +72,10 @@ impl<D: PcMmioDevice, F: FnMut(MmioWrite, Reaction) + Send> PcMmioDevice for Obs
         access: MmioWrite,
         dma: &mut PcDma<'_>,
         irq: &mut PcInterrupt<'_>,
-    ) -> Reaction {
-        let reaction = self.device.write(access, dma, irq);
-        (self.observe)(access, reaction);
-        reaction
+    ) -> Result<Reaction, SubscriberError> {
+        let result = self.device.write(access, dma, irq);
+        (self.observe)(access, result);
+        result
     }
 }
 
@@ -72,7 +92,7 @@ impl<D: PcMmioDevice> PcAttachment<D> {
         Self { page, line, device }
     }
 
-    pub fn observe_writes<F: FnMut(MmioWrite, Reaction) + Send>(
+    pub fn observe_writes<F: FnMut(MmioWrite, Result<Reaction, SubscriberError>) + Send>(
         self,
         observe: F,
     ) -> PcAttachment<ObserveWrites<D, F>> {
@@ -83,17 +103,47 @@ impl<D: PcMmioDevice> PcAttachment<D> {
         )
     }
 
+    /// Separate placement from the typed endpoint, for example when placing
+    /// the endpoint in caller-owned stable storage.
+    pub fn into_parts(self) -> (BxPhyAddress, IsaIrq, D) {
+        (self.page, self.line, self.device)
+    }
+
     /// Mount with owned storage. Allocation-free boards can supply stable
     /// storage via [`PcDevice::Borrowed`] and `attach_composed_mmio`.
     #[cfg(feature = "alloc")]
     pub fn install<T: crate::cpu::Instrumentation>(
         self,
         machine: &mut crate::Emulator<T>,
-    ) -> Result<(), PcDeviceAttachError>
+    ) -> Result<(), PcAttachmentRefused<D>>
     where
         D: 'static,
     {
-        machine.attach_composed_mmio(self.page, self.line, PcDevice::owned(self.device))
+        let slot = match machine.composed_mmio_slot(self.page, self.line) {
+            Ok(slot) => slot,
+            Err(reason) => {
+                return Err(PcAttachmentRefused {
+                    reason,
+                    attachment: self,
+                });
+            }
+        };
+        machine.insert_composed_mmio(slot, self.page, self.line, PcDevice::owned(self.device));
+        Ok(())
+    }
+}
+
+/// An owned mount was refused before allocation or type erasure.
+#[derive(thiserror::Error)]
+#[error("{reason}")]
+pub struct PcAttachmentRefused<D> {
+    pub reason: PcDeviceAttachRefusal,
+    pub attachment: PcAttachment<D>,
+}
+
+impl<D> core::fmt::Debug for PcAttachmentRefused<D> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.reason.fmt(f)
     }
 }
 
@@ -157,6 +207,8 @@ impl core::fmt::Debug for PcDeviceAttachError {
 pub enum PcDeviceAttachRefusal {
     #[error(transparent)]
     Address(#[from] MmioAttachRefusal),
+    #[error("the PC already uses this ISA line")]
+    BoardIrqInUse,
     #[error("another composed endpoint is already driving this ISA line")]
     IrqInUse,
 }

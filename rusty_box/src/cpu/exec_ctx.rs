@@ -205,7 +205,9 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         len: usize,
         value: u64,
     ) {
-        use crate::emulator::hardware::{MmioWrite, PcDma, PcInterrupt, Reaction, WindowOffset};
+        use crate::emulator::hardware::{
+            MmioSubscriberError, MmioWrite, PcDma, PcInterrupt, Reaction, WindowOffset,
+        };
 
         let (ExecutionMemory::Pc(memory), Hardware::Pc { device_manager, .. }) =
             (&mut self.memory, &mut self.hardware)
@@ -233,13 +235,22 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
             len,
             value,
         };
-        let reaction = attached.device.endpoint().write(access, &mut dma, &mut irq);
+        let result = attached.device.endpoint().write(access, &mut dma, &mut irq);
 
         // The machine already collects honored hook stops after each slice.
         // Mark this request before yielding so it survives a scheduler exit
         // that bypasses the next outer interpreter-loop stop check.
-        self.cpu.instrumentation.stop_honored |= reaction == Reaction::Stop;
-        if dma.wrote || irq.driven || reaction == Reaction::Stop {
+        let stop = match result {
+            Ok(reaction) => reaction == Reaction::Stop,
+            Err(source) => {
+                device_manager
+                    .mmio_subscriber_error
+                    .get_or_insert(MmioSubscriberError { address, source });
+                true
+            }
+        };
+        self.cpu.instrumentation.stop_honored |= stop;
+        if dma.wrote || irq.driven || stop {
             self.cpu.request_scheduler_boundary();
         }
     }

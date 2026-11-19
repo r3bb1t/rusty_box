@@ -174,6 +174,15 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         batch_size: u64,
         strict_limit: bool,
     ) -> CpuResult<Progress> {
+        let result = self.run_cpu_batch_inner(batch_size, strict_limit);
+        let subscriber_error = self.device_manager.mmio_subscriber_error.take();
+        result.and_then(|progress| match subscriber_error {
+            Some(error) => Err(CpuError::MmioSubscriber(error)),
+            None => Ok(progress),
+        })
+    }
+
+    fn run_cpu_batch_inner(&mut self, batch_size: u64, strict_limit: bool) -> CpuResult<Progress> {
         if self.snapshot_restore_failed {
             return Err(CpuError::CpuNotInitialized);
         }
