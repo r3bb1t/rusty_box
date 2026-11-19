@@ -116,6 +116,24 @@ impl MmioRegistry {
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
+
+    /// RAM prefix before a callback region, including sub-page boundaries.
+    pub(crate) fn direct_len(&self, addr: BxPhyAddress, len: usize) -> usize {
+        if self.is_empty() {
+            return len;
+        }
+        let mut available = len;
+        for region in self.regions.iter().flatten() {
+            if addr.offset_from(region.start) < region.size {
+                return 0;
+            }
+            if region.size != 0 && region.start > addr {
+                available =
+                    available.min(usize::try_from(region.start - addr).unwrap_or(usize::MAX));
+            }
+        }
+        available
+    }
 }
 
 impl Default for MmioRegistry {

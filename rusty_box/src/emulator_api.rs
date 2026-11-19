@@ -622,12 +622,14 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
         write_cb: alloc::boxed::Box<dyn FnMut(BxPhyAddress, usize, u64) + Send>,
     ) {
         self.cpu_mut().mmio.map(addr, size, read_cb, write_cb);
+        self.cpu_mut().invalidate_host_memory_mappings();
     }
 
     /// Remove MMIO regions overlapping [addr, addr+size).
     #[cfg(feature = "alloc")]
     pub fn mmio_unmap(&mut self, addr: BxPhyAddress, size: u64) {
         self.cpu_mut().mmio.unmap(addr, size);
+        self.cpu_mut().invalidate_host_memory_mappings();
     }
 }
 

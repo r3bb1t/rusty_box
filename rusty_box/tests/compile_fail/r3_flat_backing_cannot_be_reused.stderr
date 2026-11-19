@@ -1,0 +1,18 @@
+error[E0506]: cannot assign to `bytes[_]` because it is borrowed
+ --> tests/compile_fail/r3_flat_backing_cannot_be_reused.rs:7:5
+  |
+6 |     let mut memory = FlatMemory::new(&mut bytes, &mut stamps).unwrap();
+  |                                      ---------- `bytes[_]` is borrowed here
+7 |     bytes[0] = 0x90;
+  |     ^^^^^^^^^^^^^^^ `bytes[_]` is assigned to here but it was already borrowed
+8 |     memory.write(BxPhyAddress::new(0), &[0xF4]).unwrap();
+  |     ------ borrow later used here
+
+warning: value assigned to `bytes` is never read
+ --> tests/compile_fail/r3_flat_backing_cannot_be_reused.rs:7:5
+  |
+7 |     bytes[0] = 0x90;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = help: maybe it is overwritten before being read?
+  = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default

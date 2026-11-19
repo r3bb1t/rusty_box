@@ -137,9 +137,6 @@ pub(crate) struct FetchWindow {
     pub(crate) len: usize,
 }
 
-/// No direct host mapping — take the slow path.
-pub(crate) const NO_DIRECT_ACCESS: Option<RamPage> = None;
-
 /// The raw bits of a mapping, or 0 when absent — for the paths that OR in a
 /// page offset before turning the result into a pointer.
 #[inline(always)]

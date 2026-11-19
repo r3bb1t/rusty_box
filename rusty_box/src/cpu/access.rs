@@ -19,7 +19,6 @@ use super::descriptor::{
 };
 use super::rusty_box::MemoryAccessType;
 use crate::config::{BxEffAddress, BxLinAddress, BxPhyAddress, BxPtrEquiv};
-use crate::memory::memory_rusty_box::bx_guest_ram_span;
 
 /// BX_MAX_MEM_ACCESS_LENGTH from Bochs — maximum access size for
 /// segment limit checks.  Matches the largest scalar access (qword=8).
@@ -155,7 +154,8 @@ pub(super) fn host_fill_bytes(dst: *mut u8, val: u8, count: usize) {
 /// Create a mutable `&[u16]` slice from a raw `*mut u8` pointer.
 ///
 /// # Safety
-/// `ptr` must be valid for `count * 2` bytes. No aliasing references may exist.
+/// `ptr` must be aligned for `u16` and valid for `count * 2` bytes.
+/// No aliasing references may exist. `RepStosChunk::new` checks alignment.
 #[inline(always)]
 pub(super) unsafe fn host_slice_mut_u16<'a>(ptr: *mut u8, count: usize) -> &'a mut [u16] {
     core::slice::from_raw_parts_mut(ptr as *mut u16, count)
@@ -164,7 +164,8 @@ pub(super) unsafe fn host_slice_mut_u16<'a>(ptr: *mut u8, count: usize) -> &'a m
 /// Create a mutable `&[u32]` slice from a raw `*mut u8` pointer.
 ///
 /// # Safety
-/// `ptr` must be valid for `count * 4` bytes. No aliasing references may exist.
+/// `ptr` must be aligned for `u32` and valid for `count * 4` bytes.
+/// No aliasing references may exist. `RepStosChunk::new` checks alignment.
 #[inline(always)]
 pub(super) unsafe fn host_slice_mut_u32<'a>(ptr: *mut u8, count: usize) -> &'a mut [u32] {
     core::slice::from_raw_parts_mut(ptr as *mut u32, count)
@@ -173,7 +174,8 @@ pub(super) unsafe fn host_slice_mut_u32<'a>(ptr: *mut u8, count: usize) -> &'a m
 /// Create a mutable `&[u64]` slice from a raw `*mut u8` pointer.
 ///
 /// # Safety
-/// `ptr` must be valid for `count * 8` bytes. No aliasing references may exist.
+/// `ptr` must be aligned for `u64` and valid for `count * 8` bytes.
+/// No aliasing references may exist. `RepStosChunk::new` checks alignment.
 #[inline(always)]
 pub(super) unsafe fn host_slice_mut_u64<'a>(ptr: *mut u8, count: usize) -> &'a mut [u64] {
     core::slice::from_raw_parts_mut(ptr as *mut u64, count)
@@ -224,12 +226,25 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     #[inline(always)]
     fn direct_ram_offset(&self, addr: BxPhyAddress, len: usize) -> Option<(BxPhyAddress, usize)> {
         let a20 = self.a20_mask.apply(addr);
-        let end = a20.checked_add(u64::try_from(len).ok()?)?;
-        let plain = (a20.get() < 0xA0000 && end.get() <= 0xA0000) || a20.get() >= 0x100000;
-        if !plain || self.mem_host_base.is_null() {
+        self.direct_ram_span(a20, len).map(|span| (a20, span.start))
+    }
+
+    /// One map gate for scalar helpers, page walks, bulk pointers and DTLB
+    /// fills. CPU-local and board MMIO must never become cached RAM.
+    #[inline]
+    pub(super) fn direct_ram_span(
+        &self,
+        addr: BxPhyAddress,
+        len: usize,
+    ) -> Option<core::ops::Range<usize>> {
+        if self.mem_host_base.is_null() || !self.mmio.is_empty() {
             return None;
         }
-        bx_guest_ram_span(a20, len, self.mem_host_len).map(|span| (a20, span.start))
+        let last = addr.checked_add(len.saturating_sub(1) as u64)?;
+        if self.lapic.is_selected(addr.page_base()) || self.lapic.is_selected(last.page_base()) {
+            return None;
+        }
+        self.memory.ram_span(addr, len, self.mem_host_len)
     }
 
     /// Slow path for mem_read_byte: MMIO/VGA/ROM through memory system handlers.
@@ -1578,7 +1593,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let page_offset = (laddr.page_offset()) as usize;
                 let paddr = tlb.ppf.at_page_offset(page_offset as u64);
                 let a20_paddr = self.a20_mask.apply(paddr);
-                let Some(span) = bx_guest_ram_span(a20_paddr, 1, self.mem_host_len) else {
+                // Eligibility was proved when this full direct page entered
+                // the DTLB, exactly as for scalar TLB hits. Retain numerical
+                // placement/bounds checks without re-running device policy.
+                let Some(span) = self
+                    .memory
+                    .backing_ram_span(a20_paddr, 1, self.mem_host_len)
+                else {
                     return Ok(None);
                 };
                 let page_remaining = 0x1000 - page_offset;
@@ -1607,10 +1628,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.cr0.pg() {
             let paddr = laddr.unpaged(self.a20_mask);
             let host_base = self.mem_host_base;
-            let plain_ram = (paddr.get() < 0xA0000 || paddr.get() >= 0x100000)
-                && bx_guest_ram_span(paddr, 1, self.mem_host_len).is_some();
+            let plain_ram = self.direct_ram_span(paddr, 1).is_some();
             if !host_base.is_null() && plain_ram {
-                let Some(span) = bx_guest_ram_span(paddr, 1, self.mem_host_len) else {
+                let Some(span) = self.direct_ram_span(paddr, 1) else {
                     return Ok(None);
                 };
                 let linear = span.start;
@@ -1661,7 +1681,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 let page_offset = (laddr.page_offset()) as usize;
                 let paddr = tlb.ppf.at_page_offset(page_offset as u64);
                 let a20_paddr = self.a20_mask.apply(paddr);
-                let Some(span) = bx_guest_ram_span(a20_paddr, 1, self.mem_host_len) else {
+                let Some(span) = self
+                    .memory
+                    .backing_ram_span(a20_paddr, 1, self.mem_host_len)
+                else {
                     return Ok(None);
                 };
                 let page_remaining = 0x1000 - page_offset;
@@ -1686,10 +1709,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if !self.cr0.pg() {
             let paddr = laddr.unpaged(self.a20_mask);
             let host_base = self.mem_host_base;
-            let plain_ram = (paddr.get() < 0xA0000 || paddr.get() >= 0x100000)
-                && bx_guest_ram_span(paddr, 1, self.mem_host_len).is_some();
+            let plain_ram = self.direct_ram_span(paddr, 1).is_some();
             if !host_base.is_null() && plain_ram {
-                let Some(span) = bx_guest_ram_span(paddr, 1, self.mem_host_len) else {
+                let Some(span) = self.direct_ram_span(paddr, 1) else {
                     return Ok(None);
                 };
                 let linear = span.start;
@@ -1812,25 +1834,49 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     #[inline]
     pub(super) fn mmio_read(&mut self, paddr: BxPhyAddress, size: usize) -> Option<u64> {
-        if self.mmio.is_empty() {
+        if self.mmio.direct_len(paddr, size) == size {
             return None;
         }
         if let Some(region) = self.mmio.find_mut(paddr) {
-            return Some((region.read_cb)(paddr, size));
+            if size as u64 <= region.size - paddr.offset_from(region.start) {
+                return Some((region.read_cb)(paddr, size));
+            }
         }
-        None
+        let mut value = 0;
+        for offset in 0..size {
+            let addr = paddr.wrapping_add(offset as u64);
+            let byte = if let Some(region) = self.mmio.find_mut(addr) {
+                (region.read_cb)(addr, 1) as u8
+            } else {
+                self.mem_read_byte(addr)
+            };
+            value |= u64::from(byte) << (offset * 8);
+        }
+        Some(value)
     }
 
     #[inline]
     pub(super) fn mmio_write(&mut self, paddr: BxPhyAddress, size: usize, val: u64) -> bool {
-        if self.mmio.is_empty() {
+        if self.mmio.direct_len(paddr, size) == size {
             return false;
         }
         if let Some(region) = self.mmio.find_mut(paddr) {
-            (region.write_cb)(paddr, size, val);
-            return true;
+            if size as u64 <= region.size - paddr.offset_from(region.start) {
+                (region.write_cb)(paddr, size, val);
+                return true;
+            }
         }
-        false
+        for offset in 0..size {
+            let addr = paddr.wrapping_add(offset as u64);
+            let byte = (val >> (offset * 8)) as u8;
+            if let Some(region) = self.mmio.find_mut(addr) {
+                (region.write_cb)(addr, 1, u64::from(byte));
+            } else {
+                self.smc_write_check(addr, 1);
+                self.mem_write_byte(addr, byte);
+            }
+        }
+        true
     }
 
     /// Read a byte given a pre-computed linear address.
@@ -1929,11 +1975,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             Ok(v)
         } else {
-            let p0 = self.translate_data_read(laddr)?;
-            let b0 = self.mem_read_byte(p0);
-            let p1 = self.translate_data_read(laddr.next_page())?;
-            let b1 = self.mem_read_byte(p1);
-            Ok(u16::from_le_bytes([b0, b1]))
+            Ok(u16::from_le_bytes(self.read_linear_split::<2>(laddr)?))
         }
     }
 
@@ -1991,12 +2033,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             Ok(v)
         } else {
-            let mut buf = [0u8; 4];
-            for i in 0..4u64 {
-                let p = self.translate_data_read(laddr.wrapping_add(i))?;
-                buf[i as usize] = self.mem_read_byte(p);
-            }
-            Ok(u32::from_le_bytes(buf))
+            Ok(u32::from_le_bytes(self.read_linear_split::<4>(laddr)?))
         }
     }
 
@@ -2054,12 +2091,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
             Ok(v)
         } else {
-            let mut buf = [0u8; 8];
-            for i in 0..8u64 {
-                let p = self.translate_data_read(laddr.wrapping_add(i))?;
-                buf[i as usize] = self.mem_read_byte(p);
-            }
-            Ok(u64::from_le_bytes(buf))
+            Ok(u64::from_le_bytes(self.read_linear_split::<8>(laddr)?))
         }
     }
 
@@ -2171,34 +2203,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 );
             }
         } else {
-            let bytes = val.to_le_bytes();
-            let next_page = laddr.next_page();
-            let p0 = self.translate_data_write(laddr)?;
-            let p1 = self.translate_data_write(next_page)?;
-            {
-                self.check_perm_write(laddr, p0, 1)?;
-                self.check_perm_write(next_page, p1, 1)?;
-            }
-            self.smc_write_check(p0, 1);
-            if !self.mmio_write(p0, 1, u64::from(bytes[0])) {
-                self.mem_write_byte(p0, bytes[0]);
-            }
-            self.on_lin_access(
-                laddr,
-                p0,
-                &bytes[..1],
-                super::instrumentation::MemAccessRW::Write,
-            );
-            self.smc_write_check(p1, 1);
-            if !self.mmio_write(p1, 1, u64::from(bytes[1])) {
-                self.mem_write_byte(p1, bytes[1]);
-            }
-            self.on_lin_access(
-                next_page,
-                p1,
-                &bytes[1..],
-                super::instrumentation::MemAccessRW::Write,
-            );
+            self.write_linear_split(laddr, &val.to_le_bytes())?;
         }
         Ok(())
     }
@@ -2265,12 +2270,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 );
             }
         } else {
-            let bytes = val.to_le_bytes();
-            for i in 0..4u64 {
-                let p = self.translate_data_write(laddr.wrapping_add(i))?;
-                self.smc_write_check(p, 1);
-                self.mem_write_byte(p, bytes[i as usize]);
-            }
+            self.write_linear_split(laddr, &val.to_le_bytes())?;
         }
         Ok(())
     }
@@ -2333,13 +2333,77 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 );
             }
         } else {
-            let bytes = val.to_le_bytes();
-            for i in 0..8u64 {
-                let p = self.translate_data_write(laddr.wrapping_add(i))?;
-                self.smc_write_check(p, 1);
-                self.mem_write_byte(p, bytes[i as usize]);
+            self.write_linear_split(laddr, &val.to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Validate both pages before consuming MMIO or committing operand bytes.
+    /// Page-table A/D updates during a fault remain the walker's own effects.
+    fn read_linear_split<const N: usize>(&mut self, laddr: BxLinAddress) -> Result<[u8; N]> {
+        let first_len = 4096 - laddr.page_offset() as usize;
+        let second = laddr.next_page();
+        let p0 = self.translate_data_read(laddr)?;
+        let p1 = self.translate_data_read(second)?;
+        self.check_perm_read(laddr, p0, first_len)?;
+        self.check_perm_read(second, p1, N - first_len)?;
+        let mut bytes = [0; N];
+        for (offset, byte) in bytes.iter_mut().enumerate() {
+            let p = if offset < first_len {
+                p0.wrapping_add(offset as u64)
+            } else {
+                p1.wrapping_add((offset - first_len) as u64)
+            };
+            *byte = self
+                .mmio_read(p, 1)
+                .map(|value| value as u8)
+                .unwrap_or_else(|| self.mem_read_byte(p));
+        }
+        self.on_lin_access(
+            laddr,
+            p0,
+            &bytes[..first_len],
+            super::instrumentation::MemAccessRW::Read,
+        );
+        self.on_lin_access(
+            second,
+            p1,
+            &bytes[first_len..],
+            super::instrumentation::MemAccessRW::Read,
+        );
+        Ok(bytes)
+    }
+
+    fn write_linear_split(&mut self, laddr: BxLinAddress, bytes: &[u8]) -> Result<()> {
+        let first_len = 4096 - laddr.page_offset() as usize;
+        let second = laddr.next_page();
+        let p0 = self.translate_data_write(laddr)?;
+        let p1 = self.translate_data_write(second)?;
+        self.check_perm_write(laddr, p0, first_len)?;
+        self.check_perm_write(second, p1, bytes.len() - first_len)?;
+        for (offset, byte) in bytes.iter().copied().enumerate() {
+            let p = if offset < first_len {
+                p0.wrapping_add(offset as u64)
+            } else {
+                p1.wrapping_add((offset - first_len) as u64)
+            };
+            self.smc_write_check(p, 1);
+            if !self.mmio_write(p, 1, u64::from(byte)) {
+                self.mem_write_byte(p, byte);
             }
         }
+        self.on_lin_access(
+            laddr,
+            p0,
+            &bytes[..first_len],
+            super::instrumentation::MemAccessRW::Write,
+        );
+        self.on_lin_access(
+            second,
+            p1,
+            &bytes[first_len..],
+            super::instrumentation::MemAccessRW::Write,
+        );
         Ok(())
     }
 

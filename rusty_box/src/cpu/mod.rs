@@ -162,3 +162,6 @@ pub use cpuid::{BxCpuIdTrait, CpuidFreq};
 
 #[cfg(all(test, feature = "std"))]
 mod cpu_only_tests;
+
+#[cfg(all(test, feature = "std"))]
+mod memory_env_tests;

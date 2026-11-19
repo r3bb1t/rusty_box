@@ -1,4 +1,7 @@
+pub(crate) mod code_writes;
 mod error;
+pub(crate) mod execution;
+pub mod flat;
 pub(crate) mod memory_rusty_box;
 pub mod memory_stub;
 pub mod misc_mem;
@@ -165,18 +168,8 @@ pub struct BxMemoryStubC {
     smc_stamps: Vec<u32>,
     #[cfg(not(feature = "alloc"))]
     smc_stamps: [u32; crate::cpu::icache::SMC_STAMP_ENTRIES],
-    /// Queued cross-cpu SMC invalidations, drained by the emulator at
-    /// round-robin slice boundaries (no sibling cpu can execute before the
-    /// drain, so deferral is observably identical to Bochs's synchronous
-    /// `handleSMC` loop). `smc_seq_next` is a monotonic event counter; each
-    /// cpu keeps a watermark (`BxCpuC::smc_seq_seen`) so it applies exactly
-    /// the events it has not seen.
-    smc_pending: [crate::cpu::icache::PendingSmc; crate::cpu::icache::SMC_PENDING_CAP],
-    smc_pending_len: usize,
-    smc_seq_next: u64,
-    /// CPUs whose watermark is below this must flush their whole icache
-    /// (an event was dropped on pending-queue overflow).
-    smc_overflow_seq: u64,
+    /// Shared code-write queue; stamps retain their existing backing.
+    code_writes: code_writes::CodeWrites,
 }
 
 // `Send` is derived, not promised (R6): every field is owned or exclusively

@@ -25,6 +25,8 @@ use crate::emulator::PcIo;
 use crate::iodev::BxDevicesC;
 use crate::iodev::devices::DeviceManager;
 use crate::memory::BxMemC;
+use crate::memory::execution::ExecutionMemory;
+use crate::memory::flat::FlatMemory;
 use crate::pc_system::BxPcSystemC;
 
 /// One CPU plus the machine it is executing against.
@@ -32,7 +34,7 @@ pub(crate) struct ExecCtx<'a, T: Instrumentation> {
     cpu: &'a mut BxCpuC<T>,
     /// Guest memory. Disjoint from `cpu`, so both can be held at once — the
     /// property the raw `mem_bus` pointer existed to fake.
-    pub(crate) memory: &'a mut BxMemC,
+    pub(crate) memory: ExecutionMemory<'a>,
     pub(crate) hardware: Hardware<'a>,
     /// Guest RAM as one host slice, or null when residency is partial. The
     /// data TLB measures its cached page offsets from here.
@@ -56,9 +58,9 @@ pub(crate) enum Hardware<'a> {
 }
 
 /// Named disjoint projection used by translation, fetch and SMC handling.
-pub(crate) struct CpuMemory<'a, T: Instrumentation> {
+pub(crate) struct CpuMemory<'a, 'mem, T: Instrumentation> {
     pub(crate) cpu: &'a mut BxCpuC<T>,
-    pub(crate) memory: &'a mut BxMemC,
+    pub(crate) memory: &'a mut ExecutionMemory<'mem>,
 }
 
 impl<'a, T: Instrumentation> ExecCtx<'a, T> {
@@ -90,7 +92,7 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         } = io;
         Self::assemble(
             cpu,
-            memory,
+            ExecutionMemory::Pc(memory),
             Hardware::Pc {
                 devices,
                 device_manager,
@@ -113,16 +115,43 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
             });
         }
         cpu.slice_clock = super::cpu::SliceClock::Detached;
-        Ok(Self::assemble(cpu, memory, Hardware::CpuOnly))
+        Ok(Self::assemble(
+            cpu,
+            ExecutionMemory::Pc(memory),
+            Hardware::CpuOnly,
+        ))
+    }
+
+    /// One exclusive flat-memory session, warm across multiple run calls.
+    /// Every bind revalidates caches, including same-address backing reuse.
+    pub(crate) fn flat(cpu: &'a mut BxCpuC<T>, memory: &'a mut FlatMemory<'_>) -> Self {
+        cpu.slice_clock = super::cpu::SliceClock::Detached;
+        let ctx = Self::assemble(
+            cpu,
+            ExecutionMemory::Flat(memory.parts()),
+            Hardware::CpuOnly,
+        );
+        ctx.cpu.smc_seq_seen = ctx.memory.smc_seq_next();
+        ctx
     }
 
     /// R3/R5: both profiles adopt backing and residency through this one door.
-    fn assemble(cpu: &'a mut BxCpuC<T>, memory: &'a mut BxMemC, hardware: Hardware<'a>) -> Self {
+    fn assemble(
+        cpu: &'a mut BxCpuC<T>,
+        mut memory: ExecutionMemory<'a>,
+        hardware: Hardware<'a>,
+    ) -> Self {
         let (mem_host_base, mem_host_len) = memory.identity_guest_base();
         let (mem_alloc_base, alloc_len) = memory.allocation_span();
         cpu.adopt_backing(
-            super::cpu::CacheBacking::of(mem_alloc_base, alloc_len),
+            match &memory {
+                ExecutionMemory::Pc(_) => super::cpu::CacheBacking::of(mem_alloc_base, alloc_len),
+                ExecutionMemory::Flat(_) => {
+                    super::cpu::CacheBacking::flat(mem_alloc_base, alloc_len)
+                }
+            },
             memory.swap_epoch(),
+            memory.a20_mask(),
         );
         Self {
             cpu,
@@ -155,10 +184,10 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
 
     /// CPU and memory are disjoint in both profiles. No PC borrow is needed.
     #[inline]
-    pub(crate) fn cpu_memory(&mut self) -> CpuMemory<'_, T> {
+    pub(crate) fn cpu_memory(&mut self) -> CpuMemory<'_, 'a, T> {
         CpuMemory {
             cpu: self.cpu,
-            memory: self.memory,
+            memory: &mut self.memory,
         }
     }
 
@@ -170,10 +199,13 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
                 devices,
                 device_manager,
                 pc_system,
-            } => Some(CpuWithIo {
-                cpu: self.cpu,
-                io: PcIo::new(self.memory, devices, device_manager, pc_system),
-            }),
+            } => match &mut self.memory {
+                ExecutionMemory::Pc(memory) => Some(CpuWithIo {
+                    cpu: self.cpu,
+                    io: PcIo::new(memory, devices, device_manager, pc_system),
+                }),
+                ExecutionMemory::Flat(_) => None,
+            },
             Hardware::CpuOnly => None,
         }
     }
@@ -194,7 +226,9 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
             ..
         } = &mut self.hardware
         {
-            device_manager.dma.raise_hlda(self.memory);
+            if let ExecutionMemory::Pc(memory) = &mut self.memory {
+                device_manager.dma.raise_hlda(memory);
+            }
             if let Some(level) = device_manager.dma.take_hrq_request() {
                 pc_system.set_hrq(level);
             }
@@ -392,7 +426,7 @@ mod tests {
 
                 // Memory and the device bus are reachable in the same scope,
                 // with no pointer stored on the CPU and nothing wired first.
-                ctx.memory.set_a20_mask(A20Mask::OPEN);
+                ctx.memory.pc_mut().unwrap().set_a20_mask(A20Mask::OPEN);
                 let _ = ctx.test_pc_system().get_enable_a20();
 
                 // Assembling the context is what takes the allocation bases —
@@ -404,7 +438,7 @@ mod tests {
                 // exactly this, and it is the combination the raw wiring
                 // existed to fake.
                 let super::CpuMemory { cpu, memory } = ctx.cpu_memory();
-                memory.set_a20_mask(A20Mask::OPEN);
+                memory.pc_mut().unwrap().set_a20_mask(A20Mask::OPEN);
                 assert_eq!(cpu.rip(), rip, "deref must reach the same cpu");
             })
             .unwrap()

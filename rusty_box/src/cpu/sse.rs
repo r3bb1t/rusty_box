@@ -2255,7 +2255,7 @@ mod tests {
         let mut machine = ryzen();
         let mut cpu = long_mode_sse(&mut machine);
         cpu.write_xmm_reg(3, xmm_from_qwords(FIELD, KEPT));
-        write_ram(cpu.memory, AT, &[0u8; 16]);
+        write_ram(cpu.memory.pc_mut().unwrap(), AT, &[0u8; 16]);
         // movntss [0x8000], xmm3: F3 0F 2B /r, ModRM 0x1C + SIB 0x25 disp32.
         execute(
             &mut cpu,
@@ -2267,7 +2267,7 @@ mod tests {
             &[0xF2, 0x0F, 0x2B, 0x1C, 0x25, 0x08, 0x80, 0x00, 0x00],
         );
         let mut stored = [0u8; 16];
-        read_ram(cpu.memory, AT, &mut stored);
+        read_ram(cpu.memory.pc_mut().unwrap(), AT, &mut stored);
         assert_eq!(
             stored[..8],
             [0xF0, 0xDE, 0xBC, 0x9A, 0, 0, 0, 0],

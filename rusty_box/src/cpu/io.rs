@@ -1731,11 +1731,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             );
         }
         let current_ticks = self.system_ticks();
-        if let super::exec_ctx::Hardware::Pc {
-            devices,
-            pc_system,
-            device_manager,
-        } = &mut self.hardware
+        if let (
+            super::exec_ctx::Hardware::Pc {
+                devices,
+                pc_system,
+                device_manager,
+            },
+            crate::memory::execution::ExecutionMemory::Pc(memory),
+        ) = (&mut self.hardware, &mut self.memory)
         {
             devices.outp(
                 port,
@@ -1744,7 +1747,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 current_ticks,
                 pc_system,
                 device_manager,
-                self.memory,
+                memory,
             );
         } else {
             return Err(super::CpuError::IoUnavailable {

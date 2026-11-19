@@ -26,7 +26,7 @@ use crate::cpu::rusty_box::MemoryAccessType;
 use crate::cpu::smm::SMMRAM_Fields;
 use crate::cpu::tlb::{Tlb, ppf_of};
 use crate::impl_eflag;
-use crate::memory::{BxMemC, CpuMemoryPolicy};
+use crate::memory::CpuMemoryPolicy;
 use crate::params::CpuTopology;
 
 pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
@@ -2014,7 +2014,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Non-consuming — events stay queued until the emulator's drain has
     /// applied them to every cpu.
     #[cold]
-    pub(crate) fn smc_apply_pending(&mut self, mem: &crate::memory::BxMemC, stop_trace: bool) {
+    pub(crate) fn smc_apply_pending(
+        &mut self,
+        mem: &crate::memory::execution::ExecutionMemory<'_>,
+        stop_trace: bool,
+    ) {
         let (needs_full_flush, events) = mem.smc_pending_since(self.smc_seq_seen);
         if needs_full_flush {
             // Pending-queue overflow dropped events — conservative full flush.
@@ -2125,7 +2129,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// The probe is intentionally non-mutating: callers can abandon the bulk
     /// path and let the scalar RMW access perform Bochs-ordered invalidation
     /// before the corresponding external side effect.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn smc_range_has_cached_code(&self, p_addr: BxPhyAddress, len: u32) -> bool {
         self.memory.smc_range_has_stamps(p_addr, len)
     }
@@ -2137,10 +2141,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// trace — exactly Bochs's synchronous behavior for the writer. Sibling
     /// cpus are flushed by the emulator's drain before their next slice,
     /// which the single-threaded round-robin scheduler guarantees runs first.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn smc_write_check(&mut self, p_addr: BxPhyAddress, len: u32) {
-        self.memory.smc_dec_write_stamp(p_addr, len);
-        self.smc_sync_after_phys_write();
+        let sequence = self.memory.smc_dec_write_stamp(p_addr, len);
+        if sequence > self.smc_seq_seen {
+            let super::exec_ctx::CpuMemory { cpu, memory: mem } = self.cpu_memory();
+            cpu.smc_apply_pending(mem, true);
+        }
     }
 
     /// After a handler-aware physical write (`write_physical_page`) issued
@@ -2888,7 +2895,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // synchronously in icache.cc handleSMC; the watermark makes this a
         // single compare per trace lookup. No STOP_TRACE: there is no
         // running trace at a lookup boundary.
-        if self.memory.smc_seq_next() > self.smc_seq_seen {
+        let cache_state = self.memory.cache_state();
+        if cache_state.code_sequence > self.smc_seq_seen {
             let super::exec_ctx::CpuMemory { cpu, memory: mem } = self.cpu_memory();
             cpu.smc_apply_pending(mem, false);
         }
@@ -2899,10 +2907,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // access evicted its own code block would otherwise have the next
         // instruction fetched straight out of the still-"valid" window — which
         // by then names another guest block's bytes.
-        {
-            let super::exec_ctx::CpuMemory { cpu, memory: mem } = self.cpu_memory();
-            cpu.revalidate_allocation_caches(mem);
-        }
+        self.revalidate_allocation_caches(cache_state.residency_epoch);
         // Check if we need to prefetch a new page. Bochs cpu.cc getICacheEntry:
         // `bx_address eipBiased = RIP + eipPageBias; if (eipBiased >=
         // eipPageWindowSize) prefetch();` — the compare runs at full bx_address
@@ -3233,8 +3238,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// epoch is a constant, so this is one compare against an unchanging value
     /// and never the branch that is taken.
     #[inline(always)]
-    fn revalidate_allocation_caches(&mut self, mem: &BxMemC) {
-        let epoch = mem.swap_epoch();
+    fn revalidate_allocation_caches(&mut self, epoch: u64) {
         if epoch == self.fetch_epoch {
             return;
         }
@@ -3261,12 +3265,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// a processor meets memory checks that they belong together). Within one
     /// allocation the swap epoch does the same job for blocks that move.
     #[inline]
-    pub(crate) fn adopt_backing(&mut self, backing: CacheBacking, swap_epoch: u64) {
-        if backing == self.cache_backing {
+    pub(crate) fn adopt_backing(
+        &mut self,
+        backing: CacheBacking,
+        swap_epoch: u64,
+        a20_mask: crate::config::A20Mask,
+    ) {
+        if !backing.flat && backing == self.cache_backing && a20_mask == self.a20_mask {
             return;
         }
         self.invalidate_host_memory_mappings();
         self.cache_backing = backing;
+        self.a20_mask = a20_mask;
+        // Sequence watermarks belong to the memory owner, not just the CPU.
+        self.smc_seq_seen = 0;
         self.fetch_epoch = swap_epoch;
     }
 }
@@ -3278,15 +3290,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 /// zeroed; a live allocation never starts at address zero.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct CacheBacking {
+    flat: bool,
     base: Option<core::num::NonZeroUsize>,
     len: usize,
 }
 
 impl CacheBacking {
+    pub(crate) fn flat(base: *mut u8, len: usize) -> Self {
+        Self {
+            flat: true,
+            ..Self::of(base, len)
+        }
+    }
+
     /// The allocation that begins at `base` and runs for `len` bytes.
     #[inline]
     pub(crate) fn of(base: *mut u8, len: usize) -> Self {
         Self {
+            flat: false,
             base: core::num::NonZeroUsize::new(base.addr()),
             len,
         }
@@ -3294,6 +3315,29 @@ impl CacheBacking {
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'_, T> {
+    /// Direct fetch stops at CPU-local MMIO rather than caching its RAM alias.
+    fn fetch_mem_range(
+        &mut self,
+        addr: BxPhyAddress,
+        policy: CpuMemoryPolicy,
+    ) -> crate::Result<Option<core::ops::Range<usize>>> {
+        if self
+            .lapic
+            .is_selected(self.a20_mask.apply(addr).page_base())
+        {
+            return Ok(None);
+        }
+        Ok(self
+            .memory
+            .host_mem_range(addr, MemoryAccessType::Execute, policy)?
+            .and_then(|range| {
+                let len = self
+                    .mmio
+                    .direct_len(addr, range.len().min(4096 - addr.page_offset() as usize));
+                (len != 0).then_some(range.start..range.start + len)
+            }))
+    }
+
     pub(super) fn prefetch(&mut self) -> Result<()> {
         let laddr: BxLinAddress;
         let page_offset;
@@ -3508,9 +3552,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             // The answer is a range, not the bytes, so the borrow of `memory`
             // ends with the call and the arms below can borrow it again.
             let mut direct_page_offset: Option<usize> = None;
-            let page_mapping =
-                self.memory
-                    .host_mem_range(page_base, MemoryAccessType::Execute, page_policy);
+            let page_mapping = self.fetch_mem_range(page_base, page_policy);
             match page_mapping {
                 Ok(Some(ref range)) if range.len() >= 4096 => {
                     // An ITLB host page is necessarily a full contiguous page.
@@ -3529,11 +3571,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     // create an ITLB page mapping from this short slice.
                     let current_policy =
                         self.memory_access_policy(self.memory.a20_addr(current_p_addr));
-                    let current_mapping = self.memory.host_mem_range(
-                        current_p_addr,
-                        MemoryAccessType::Execute,
-                        current_policy,
-                    );
+                    let current_mapping = self.fetch_mem_range(current_p_addr, current_policy);
                     match current_mapping {
                         Ok(Some(range)) => {
                             // Taking the minimum in the window's own type is
@@ -4434,6 +4472,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         len: usize,
         data: &mut [u8],
     ) -> crate::Result<()> {
+        if len > 1
+            && len <= data.len()
+            && len <= 4096 - paddr.page_offset() as usize
+            && self.memory.physical_access_len(paddr, len) < len
+        {
+            for offset in 0..len {
+                self.read_physical_routed(
+                    policy,
+                    paddr.wrapping_add(offset as u64),
+                    1,
+                    &mut data[offset..offset + 1],
+                )?;
+            }
+            return Ok(());
+        }
         match self.memory.read_physical_page(policy, paddr, len, data)? {
             crate::memory::PhysAccess::Done => Ok(()),
             crate::memory::PhysAccess::Mmio(hit) => {
@@ -4468,6 +4521,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         len: usize,
         data: &mut [u8],
     ) -> crate::Result<()> {
+        if len > 1
+            && len <= data.len()
+            && len <= 4096 - paddr.page_offset() as usize
+            && self.memory.physical_access_len(paddr, len) < len
+        {
+            for offset in 0..len {
+                self.write_physical_routed(
+                    policy,
+                    paddr.wrapping_add(offset as u64),
+                    1,
+                    &mut data[offset..offset + 1],
+                )?;
+            }
+            return Ok(());
+        }
         match self.memory.write_physical_page(policy, paddr, len, data)? {
             crate::memory::PhysAccess::Done => Ok(()),
             crate::memory::PhysAccess::Mmio(hit) => {

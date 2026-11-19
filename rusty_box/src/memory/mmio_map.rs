@@ -227,6 +227,65 @@ impl MmioMap {
         self.find(addr).is_some()
     }
 
+    /// Direct RAM pages may not cover any portion of a device mapping.
+    #[inline]
+    pub(crate) fn overlaps_page(&self, addr: BxPhyAddress) -> bool {
+        let page = megabyte(addr);
+        if page < MAPPED_MEGABYTES {
+            if self.occupancy[page / 64] & (1u64 << (page % 64)) == 0 {
+                return false;
+            }
+        } else if !self.above_bitmap {
+            return false;
+        }
+        let begin = addr.page_base();
+        let end = begin + 4095;
+        self.regions
+            .iter()
+            .flatten()
+            .any(|region| region.begin <= end && region.end >= begin)
+    }
+
+    /// Bytes before physical ownership changes, within one physical page.
+    pub(crate) fn access_len(&self, addr: BxPhyAddress, len: usize) -> usize {
+        if !self.overlaps_page(addr) {
+            return len;
+        }
+        let mut available = len;
+        for region in self.regions.iter().flatten() {
+            if region.contains(addr) {
+                return len.min(
+                    usize::try_from(region.end - addr)
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(1),
+                );
+            }
+            if region.begin > addr {
+                available =
+                    available.min(usize::try_from(region.begin - addr).unwrap_or(usize::MAX));
+            }
+        }
+        available
+    }
+
+    /// RAM prefix before a device, within one physical page.
+    pub(crate) fn direct_len(&self, addr: BxPhyAddress, len: usize) -> usize {
+        if !self.overlaps_page(addr) {
+            return len;
+        }
+        let mut available = len;
+        for region in self.regions.iter().flatten() {
+            if region.contains(addr) {
+                return 0;
+            }
+            if region.begin > addr {
+                available =
+                    available.min(usize::try_from(region.begin - addr).unwrap_or(usize::MAX));
+            }
+        }
+        available
+    }
+
     /// The 64 KB sub-range bitmap a region occupies within one 1 MB page.
     ///
     /// Bochs misc_mem.cc `registerMemoryHandlers` — the overlap currency.

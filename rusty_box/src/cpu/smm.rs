@@ -1179,7 +1179,7 @@ mod tests {
         // A DEVICE access never reaches SMRAM, even with the window wide open.
         // Bochs memory.cc guards the whole SMRAM block with `if (cpu != NULL)`,
         // so DMA and device-issued writes fall through to the VGA handler.
-        cpu.memory.enable_smram(true, false);
+        cpu.memory.pc_mut().unwrap().enable_smram(true, false);
         let mut via_cpu = [0xFFu8; 4];
         assert_eq!(
             cpu.memory
@@ -1215,7 +1215,7 @@ mod tests {
             }),
             "a device access must never see SMRAM (Bochs memory.cc cpu != NULL)"
         );
-        cpu.memory.enable_smram(false, false);
+        cpu.memory.pc_mut().unwrap().enable_smram(false, false);
 
         // Instruction fetch inside SMM must get a direct DRAM span for the
         // handler page (Bochs getHostMemAddr: SMRAM direct access is granted

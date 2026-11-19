@@ -52,6 +52,31 @@ struct RepStosChunk {
     span: BulkSpan,
 }
 
+impl RepStosChunk {
+    /// Typed fills require host alignment independently of guest alignment.
+    /// Unaligned backing falls back to the scalar, unaligned-safe accessors.
+    #[inline(always)]
+    fn new(
+        destination: *mut u8,
+        destination_paddr: BxPhyAddress,
+        span: BulkSpan,
+        element_size: usize,
+    ) -> Option<Self> {
+        // These are the supported STOS widths. Checking them also avoids
+        // align_offset's panic precondition on an arbitrary alignment.
+        let aligned = match element_size {
+            1 => true,
+            2 | 4 | 8 => destination.addr() & (element_size - 1) == 0,
+            _ => false,
+        };
+        aligned.then_some(Self {
+            destination,
+            destination_paddr,
+            span,
+        })
+    }
+}
+
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // =========================================================================
     // Helper: Get direction flag (DF)
@@ -184,11 +209,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         {
             return Ok(None);
         }
-        Ok(Some(RepStosChunk {
-            destination: destination_ptr,
+        Ok(RepStosChunk::new(
+            destination_ptr,
             destination_paddr,
             span,
-        }))
+            element_size,
+        ))
     }
 
     /// Prove a complete 64-bit-address MOVS direct-transfer chunk before mutation.
@@ -238,7 +264,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     /// Prove a complete 64-bit-address STOS direct-transfer chunk before mutation.
-    #[inline]
+    #[inline(always)]
     fn fast_rep_stos64_chunk(
         &mut self,
         destination_offset: BxEffAddress,
@@ -265,11 +291,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         {
             return Ok(None);
         }
-        Ok(Some(RepStosChunk {
-            destination: destination_ptr,
+        Ok(RepStosChunk::new(
+            destination_ptr,
             destination_paddr,
             span,
-        }))
+            element_size,
+        ))
     }
 
     // =========================================================================

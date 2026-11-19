@@ -1780,6 +1780,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.msr.apicbase = val as _;
                 let apicbase = self.msr.apicbase;
                 self.lapic.set_base(apicbase);
+                self.invalidate_host_memory_mappings();
+                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 self.sync_lapic_events();
             }
             BX_MSR_PLATFORM_ID => {
@@ -5796,7 +5798,7 @@ mod fxsave_tests {
         let mut machine = TestMachine::new();
         let mut cpu = long_mode(&mut machine);
         let guest = [0xA5u8; IMAGE_LEN];
-        write_ram(cpu.memory, IMAGE, &guest);
+        write_ram(cpu.memory.pc_mut().unwrap(), IMAGE, &guest);
 
         execute(&mut cpu, &FXSAVE64_RBX);
 
@@ -6035,7 +6037,7 @@ mod fxsave_tests {
         let mut cpu = long_mode(&mut machine);
         cpu.efer.insert(BxEfer::FFXSR);
         let guest = [0xA5u8; IMAGE_LEN];
-        write_ram(cpu.memory, IMAGE, &guest);
+        write_ram(cpu.memory.pc_mut().unwrap(), IMAGE, &guest);
         let mut xmm = BxPackedXmmRegister::default();
         xmm.set_xmm64u(0, XMM0);
         cpu.write_xmm_reg_lo128(0, xmm);
@@ -6053,7 +6055,7 @@ mod fxsave_tests {
         let mut changed = image;
         changed[24..28].copy_from_slice(&IMAGE_MXCSR.to_le_bytes());
         changed[160..176].fill(0);
-        write_ram(cpu.memory, IMAGE, &changed);
+        write_ram(cpu.memory.pc_mut().unwrap(), IMAGE, &changed);
         let mxcsr = cpu.mxcsr.mxcsr;
         assert_ne!(
             mxcsr, IMAGE_MXCSR,

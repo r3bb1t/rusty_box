@@ -210,12 +210,8 @@ impl BxMemoryStubC {
             // Machine-wide SMC write-stamp table (Bochs icache.h
             // bxPageWriteStampTable ctor allocates + resetWriteStamps).
             core::ptr::addr_of_mut!((*ptr).smc_stamps).write(smc_stamps);
-            core::ptr::addr_of_mut!((*ptr).smc_pending).write(
-                [crate::cpu::icache::PendingSmc::default(); crate::cpu::icache::SMC_PENDING_CAP],
-            );
-            core::ptr::addr_of_mut!((*ptr).smc_pending_len).write(0);
-            core::ptr::addr_of_mut!((*ptr).smc_seq_next).write(0);
-            core::ptr::addr_of_mut!((*ptr).smc_overflow_seq).write(0);
+            core::ptr::addr_of_mut!((*ptr).code_writes)
+                .write(super::code_writes::CodeWrites::new());
             Ok(alloc::boxed::Box::from_raw(ptr))
         }
     }
@@ -312,11 +308,7 @@ impl BxMemoryStubC {
             rom_offset,
             bogus_offset,
             smc_stamps,
-            smc_pending: [crate::cpu::icache::PendingSmc::default();
-                crate::cpu::icache::SMC_PENDING_CAP],
-            smc_pending_len: 0,
-            smc_seq_next: 0,
-            smc_overflow_seq: 0,
+            code_writes: super::code_writes::CodeWrites::new(),
         })
     }
 
@@ -349,16 +341,8 @@ impl BxMemoryStubC {
     #[inline]
     pub(crate) fn smc_dec_write_stamp(&mut self, p_addr: BxPhyAddress, len: u32) {
         let index = crate::cpu::icache::smc_page_index(p_addr);
-        let stamps = self.smc_stamps[index];
-        if stamps == 0 {
-            return;
-        }
-        let mask = crate::cpu::icache::smc_cache_line_mask(p_addr, len);
-        if stamps & mask == 0 {
-            return;
-        }
-        self.smc_stamps[index] = stamps & !mask;
-        self.smc_push_pending(p_addr, mask);
+        self.code_writes
+            .write(&mut self.smc_stamps, index, p_addr, len);
     }
 
     /// Bochs icache.h `bxPageWriteStampTable::decWriteStamp(pAddr)` — the
@@ -367,31 +351,15 @@ impl BxMemoryStubC {
     #[inline]
     pub(crate) fn smc_dec_write_stamp_page(&mut self, p_addr: BxPhyAddress) {
         let index = crate::cpu::icache::smc_page_index(p_addr);
-        if self.smc_stamps[index] == 0 {
-            return;
-        }
-        self.smc_stamps[index] = 0;
-        self.smc_push_pending(p_addr, u32::MAX);
-    }
-
-    fn smc_push_pending(&mut self, p_addr: BxPhyAddress, mask: u32) {
-        if self.smc_pending_len < crate::cpu::icache::SMC_PENDING_CAP {
-            self.smc_pending[self.smc_pending_len] =
-                crate::cpu::icache::PendingSmc { p_addr, mask };
-            self.smc_pending_len += 1;
-        } else {
-            // Queue full: every cpu that has not caught up past this event
-            // must do a full icache flush instead (conservative, correct).
-            self.smc_overflow_seq = self.smc_seq_next + 1;
-        }
-        self.smc_seq_next += 1;
+        self.code_writes
+            .write_mask(&mut self.smc_stamps, index, p_addr, u32::MAX);
     }
 
     /// Sequence number the next SMC event will get. A cpu whose
     /// `smc_seq_seen` watermark is below this has invalidations to apply.
     #[inline]
     pub(crate) fn smc_seq_next(&self) -> u64 {
-        self.smc_seq_next
+        self.code_writes.next()
     }
 
     /// Events a watermark of `since` has not seen yet.
@@ -401,20 +369,14 @@ impl BxMemoryStubC {
         &self,
         since: u64,
     ) -> (bool, &[crate::cpu::icache::PendingSmc]) {
-        let needs_full_flush = since < self.smc_overflow_seq;
-        let base = self.smc_seq_next - self.smc_pending_len as u64;
-        let start = since.saturating_sub(base) as usize;
-        (
-            needs_full_flush,
-            &self.smc_pending[start.min(self.smc_pending_len)..self.smc_pending_len],
-        )
+        self.code_writes.since(since)
     }
 
     /// Drop drained events. Called by the emulator once every cpu's
     /// watermark has caught up (sequence numbers stay monotonic).
     #[inline]
     pub(crate) fn smc_clear_pending(&mut self) {
-        self.smc_pending_len = 0;
+        self.code_writes.clear();
     }
 
     /// True when SMC events are queued. An empty queue means every cpu is
@@ -422,14 +384,14 @@ impl BxMemoryStubC {
     /// the per-slice drain can early-out on a single load.
     #[inline]
     pub(crate) fn smc_has_pending(&self) -> bool {
-        self.smc_pending_len != 0
+        self.code_writes.has_pending()
     }
 
     /// Bochs icache.h `bxPageWriteStampTable::resetWriteStamps` — hardware
     /// reset only (every cpu's icache is flushed there too).
     pub(crate) fn smc_reset_stamps(&mut self) {
         self.smc_stamps.fill(0);
-        self.smc_pending_len = 0;
+        self.code_writes.clear();
     }
 
     /// The bytes of one resident slot, as the block map places them in the
@@ -531,11 +493,7 @@ impl BxMemoryStubC {
             .map
             .finish_snapshot_restore(parts.ram, geometry, saved_map)?;
         self.smc_stamps.fill(0);
-        self.smc_pending
-            .fill(crate::cpu::icache::PendingSmc::default());
-        self.smc_pending_len = 0;
-        self.smc_seq_next = 0;
-        self.smc_overflow_seq = 0;
+        self.code_writes = super::code_writes::CodeWrites::new();
         Ok(())
     }
 

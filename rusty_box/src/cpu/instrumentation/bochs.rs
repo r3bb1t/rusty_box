@@ -734,7 +734,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.memory.set_a20_mask(A20Mask::OPEN);
+                ctx.memory.pc_mut().unwrap().set_a20_mask(A20Mask::OPEN);
                 ctx.in_vmx = true;
                 ctx.in_vmx_guest = true;
                 ctx.vmcs.virtual_apic_page_addr = VAPIC_PAGE;
@@ -803,7 +803,7 @@ mod hook_delivery {
 
             {
                 let mut ctx = machine.exec_ctx(0);
-                ctx.memory.set_a20_mask(A20Mask::OPEN);
+                ctx.memory.pc_mut().unwrap().set_a20_mask(A20Mask::OPEN);
                 ctx.in_vmx = true;
                 ctx.in_vmx_guest = true;
                 ctx.vmcs.proc_based_ctls = VMX_VM_EXEC_CTRL1_SECONDARY_CONTROLS;
