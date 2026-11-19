@@ -740,9 +740,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         }
 
         let remaining_in_page = self.eip_page_window_size - eip_biased;
-        let fetch_ptr_slice = self
-            .fetch_window_bytes()
-            .ok_or(crate::cpu::CpuError::CpuNotInitialized)?;
+        let fetch_ptr_slice =
+            self.fetch_window_bytes()
+                .ok_or(crate::cpu::CpuError::VetoedDirectRead {
+                    p_addr: p_addr.get(),
+                })?;
         if eip_biased as usize >= fetch_ptr_slice.len() {
             tracing::error!(
                 "serve_icache_miss: eip_biased ({}) >= fetch_ptr_slice.len ({}), pAddr={:#x}",
@@ -1121,9 +1123,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         let fetch_buffer_limit = (self.eip_page_window_size as usize).min(15);
 
         // We can fetch straight from the 0th byte, which is eipFetchPtr
-        let next_page_fetch_ptr = self
-            .fetch_window_bytes()
-            .ok_or(crate::cpu::CpuError::CpuNotInitialized)?;
+        let Some(next_page_fetch_ptr) = self.fetch_window_bytes() else {
+            // The translation succeeded but no physical mapping supplied
+            // instruction bytes. Return with RIP at the original instruction
+            // so the host can add backing and retry. Guest exception delivery
+            // above still owns RIP on a failed architectural translation.
+            let missing = self.p_addr_fetch_page;
+            self.set_rip(split_rip);
+            self.invalidate_prefetch_q();
+            return Err(crate::cpu::CpuError::VetoedDirectRead {
+                p_addr: missing.get(),
+            });
+        };
 
         // Read leftover bytes in next page (matching C++ line 287-289)
         fetch_buffer[remaining_in_page..remaining_in_page + fetch_buffer_limit]

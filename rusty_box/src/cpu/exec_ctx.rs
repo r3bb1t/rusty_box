@@ -26,7 +26,9 @@ use crate::iodev::BxDevicesC;
 use crate::iodev::devices::DeviceManager;
 use crate::memory::BxMemC;
 use crate::memory::execution::ExecutionMemory;
+#[cfg(test)]
 use crate::memory::flat::FlatMemory;
+use crate::memory::mapped::MemoryLoan;
 use crate::pc_system::BxPcSystemC;
 
 /// One CPU plus the machine it is executing against.
@@ -124,13 +126,14 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
 
     /// One exclusive flat-memory session, warm across multiple run calls.
     /// Every bind revalidates caches, including same-address backing reuse.
+    #[cfg(test)]
     pub(crate) fn flat(cpu: &'a mut BxCpuC<T>, memory: &'a mut FlatMemory<'_>) -> Self {
+        Self::borrowed(cpu, memory.loan())
+    }
+
+    pub(super) fn borrowed(cpu: &'a mut BxCpuC<T>, memory: MemoryLoan<'a>) -> Self {
         cpu.slice_clock = super::cpu::SliceClock::Detached;
-        let ctx = Self::assemble(
-            cpu,
-            ExecutionMemory::Flat(memory.parts()),
-            Hardware::CpuOnly,
-        );
+        let ctx = Self::assemble(cpu, ExecutionMemory::Borrowed(memory.0), Hardware::CpuOnly);
         ctx.cpu.smc_seq_seen = ctx.memory.smc_seq_next();
         ctx
     }
@@ -141,12 +144,24 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         mut memory: ExecutionMemory<'a>,
         hardware: Hardware<'a>,
     ) -> Self {
-        let (mem_host_base, mem_host_len) = memory.identity_guest_base();
-        let (mem_alloc_base, alloc_len) = memory.allocation_span();
+        let (mem_host_base, mem_host_len, mem_alloc_base, alloc_len) = match &mut memory {
+            ExecutionMemory::Pc(mem) => {
+                let (ram_base, ram_len) = mem.identity_guest_base();
+                let (alloc_base, alloc_len) = mem.allocation_span();
+                (ram_base, ram_len, alloc_base, alloc_len)
+            }
+            ExecutionMemory::Borrowed(mem) => {
+                // Both coordinate types name this one arena. Derive one base
+                // from the exclusive backing loan and share it between them.
+                let base = mem.bytes.as_mut_ptr();
+                let len = mem.bytes.len();
+                (base, len, base, len)
+            }
+        };
         cpu.adopt_backing(
             match &memory {
                 ExecutionMemory::Pc(_) => super::cpu::CacheBacking::of(mem_alloc_base, alloc_len),
-                ExecutionMemory::Flat(_) => {
+                ExecutionMemory::Borrowed(_) => {
                     super::cpu::CacheBacking::flat(mem_alloc_base, alloc_len)
                 }
             },
@@ -204,7 +219,7 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
                     cpu: self.cpu,
                     io: PcIo::new(memory, devices, device_manager, pc_system),
                 }),
-                ExecutionMemory::Flat(_) => None,
+                ExecutionMemory::Borrowed(_) => None,
             },
             Hardware::CpuOnly => None,
         }

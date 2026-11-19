@@ -78,11 +78,17 @@ impl<'ram> FlatMemory<'ram> {
         Ok(())
     }
 
-    pub(crate) fn parts(&mut self) -> FlatParts<'_> {
+    /// Lend the dense physical map and its code stamps to an x86 session.
+    pub fn loan(&mut self) -> super::mapped::MemoryLoan<'_> {
+        super::mapped::MemoryLoan(self.parts())
+    }
+
+    pub(super) fn parts(&mut self) -> FlatParts<'_> {
         FlatParts {
             bytes: self.bytes,
             stamps: self.stamps,
             writes: &mut self.writes,
+            regions: None,
         }
     }
 }
@@ -91,6 +97,48 @@ pub(crate) struct FlatParts<'a> {
     pub(crate) bytes: &'a mut [u8],
     pub(crate) stamps: &'a mut [u32],
     pub(crate) writes: &'a mut CodeWrites,
+    pub(super) regions: Option<&'a [super::mapped::PhysicalRegion]>,
+}
+impl FlatParts<'_> {
+    /// Offsets in the arena, not in guest address space.
+    pub(super) fn span_from(
+        &self,
+        addr: BxPhyAddress,
+        writable: bool,
+    ) -> Option<core::ops::Range<usize>> {
+        match self.regions {
+            Some(regions) => super::mapped::mapped_span(regions, addr, writable),
+            None => {
+                checked_range(addr, 1, self.bytes.len()).map(|range| range.start..self.bytes.len())
+            }
+        }
+    }
+
+    /// Code stamps are indexed by arena page. Events still carry the guest
+    /// physical address used in decoded trace tags. The map forbids aliases.
+    #[inline]
+    pub(super) fn stamp_index(&self, addr: BxPhyAddress) -> Option<usize> {
+        if let Some(regions) = self.regions {
+            super::mapped::mapped_span(regions, addr, false).map(|span| span.start >> 12)
+        } else {
+            usize::try_from(addr.get() >> 12).ok()
+        }
+    }
+
+    pub(super) fn mark_write(&mut self, mut addr: BxPhyAddress, mut len: usize) {
+        if self.regions.is_none() {
+            mark_write(self.stamps, self.writes, addr, len);
+            return;
+        }
+        while len != 0 {
+            let count = len.min(4096 - addr.page_offset() as usize);
+            if let Some(index) = self.stamp_index(addr).filter(|&i| i < self.stamps.len()) {
+                self.writes.write(self.stamps, index, addr, count as u32);
+            }
+            addr = addr.wrapping_add(count as u64);
+            len -= count;
+        }
+    }
 }
 pub(crate) fn checked_range(
     address: BxPhyAddress,

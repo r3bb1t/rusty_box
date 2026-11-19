@@ -2,14 +2,14 @@
 //! offsets; physical-map decisions stay outside instruction handlers.
 use core::ops::Range;
 
-use super::flat::{FlatParts, checked_range, mark_write};
+use super::flat::{FlatParts, checked_range};
 use super::{BxMemC, CpuMemoryPolicy, MemoryError, PhysAccess, Result};
 use crate::config::{A20Mask, BxPhyAddress};
 use crate::cpu::rusty_box::MemoryAccessType;
 
 pub(crate) enum ExecutionMemory<'a> {
     Pc(&'a mut BxMemC),
-    Flat(FlatParts<'a>),
+    Borrowed(FlatParts<'a>),
 }
 
 /// One immutable observation under the execution loan; neither read can
@@ -26,7 +26,7 @@ impl ExecutionMemory<'_> {
                 code_sequence: mem.smc_seq_next(),
                 residency_epoch: mem.swap_epoch(),
             },
-            Self::Flat(mem) => CacheState {
+            Self::Borrowed(mem) => CacheState {
                 code_sequence: mem.writes.next(),
                 residency_epoch: 0,
             },
@@ -43,9 +43,14 @@ impl ExecutionMemory<'_> {
         len: usize,
         capacity: usize,
     ) -> Option<Range<usize>> {
-        // Both environments place low RAM identically. A warm direct-page
-        // hit needs no backend test unless the span reaches the PC aperture.
-        // Flat spans crossing/above that aperture remain dense below.
+        if let Self::Borrowed(mem) = self {
+            if mem.regions.is_some() {
+                let span = mem.span_from(addr, true)?;
+                return (len <= span.len()).then(|| span.start..span.start + len);
+            }
+        }
+        // PC and dense RAM place low RAM identically. Only spans reaching
+        // the PCI aperture need the placement policy below.
         if addr < super::memory_rusty_box::BX_PCI_HOLE_START {
             let span = checked_range(addr, len, capacity)?;
             if span.end as u64 <= super::memory_rusty_box::BX_PCI_HOLE_START.get() {
@@ -54,7 +59,7 @@ impl ExecutionMemory<'_> {
         }
         match self {
             Self::Pc(_) => super::memory_rusty_box::bx_guest_ram_span(addr, len, capacity),
-            Self::Flat(_) => checked_range(addr, len, capacity),
+            Self::Borrowed(_) => checked_range(addr, len, capacity),
         }
     }
 
@@ -62,7 +67,7 @@ impl ExecutionMemory<'_> {
     pub(crate) fn pc_mut(&mut self) -> Option<&mut BxMemC> {
         match self {
             Self::Pc(mem) => Some(mem),
-            Self::Flat(_) => None,
+            Self::Borrowed(_) => None,
         }
     }
 
@@ -70,7 +75,7 @@ impl ExecutionMemory<'_> {
     pub(crate) fn a20_mask(&self) -> A20Mask {
         match self {
             Self::Pc(mem) => mem.a20_mask(),
-            Self::Flat(_) => A20Mask::OPEN,
+            Self::Borrowed(_) => A20Mask::OPEN,
         }
     }
 
@@ -81,7 +86,7 @@ impl ExecutionMemory<'_> {
     pub(crate) fn get_memory_len(&self) -> usize {
         match self {
             Self::Pc(mem) => mem.get_memory_len(),
-            Self::Flat(mem) => mem.bytes.len(),
+            Self::Borrowed(mem) => mem.bytes.len(),
         }
     }
 
@@ -89,21 +94,7 @@ impl ExecutionMemory<'_> {
     pub(crate) fn swap_epoch(&self) -> u64 {
         match self {
             Self::Pc(mem) => mem.swap_epoch(),
-            Self::Flat(_) => 0,
-        }
-    }
-
-    pub(crate) fn identity_guest_base(&mut self) -> (*mut u8, usize) {
-        match self {
-            Self::Pc(mem) => mem.identity_guest_base(),
-            Self::Flat(mem) => (mem.bytes.as_mut_ptr(), mem.bytes.len()),
-        }
-    }
-
-    pub(crate) fn allocation_span(&mut self) -> (*mut u8, usize) {
-        match self {
-            Self::Pc(mem) => mem.allocation_span(),
-            Self::Flat(mem) => (mem.bytes.as_mut_ptr(), mem.bytes.len()),
+            Self::Borrowed(_) => 0,
         }
     }
 
@@ -127,7 +118,7 @@ impl ExecutionMemory<'_> {
                     return None;
                 }
             }
-            Self::Flat(_) => {}
+            Self::Borrowed(_) => {}
         }
         self.backing_ram_span(addr, len, capacity)
     }
@@ -151,12 +142,11 @@ impl ExecutionMemory<'_> {
                     .direct_len(a20, range.len().min(4096 - addr.page_offset() as usize));
                 (len != 0).then_some(range.start..range.start + len)
             })),
-            Self::Flat(mem) => {
+            Self::Borrowed(mem) => {
                 if (rw as u32 & 1) != 0 && policy.monitor_hit() {
                     return Ok(None);
                 }
-                Ok(checked_range(addr, 1, mem.bytes.len())
-                    .map(|range| range.start..mem.bytes.len()))
+                Ok(mem.span_from(addr, (rw as u32 & 1) != 0))
             }
         }
     }
@@ -174,14 +164,14 @@ impl ExecutionMemory<'_> {
             Self::Pc(mem) => {
                 Ok(mem.allocation_slice(u64::try_from(range.start)?, u64::try_from(range.len())?))
             }
-            Self::Flat(mem) => Ok(mem.bytes.get_mut(range)),
+            Self::Borrowed(mem) => Ok(mem.bytes.get_mut(range)),
         }
     }
 
     pub(crate) fn physical_access_len(&self, addr: BxPhyAddress, len: usize) -> usize {
         match self {
             Self::Pc(mem) => mem.mmio.access_len(mem.a20_addr(addr), len),
-            Self::Flat(_) => len,
+            Self::Borrowed(_) => len,
         }
     }
 
@@ -194,13 +184,19 @@ impl ExecutionMemory<'_> {
     ) -> Result<PhysAccess> {
         match self {
             Self::Pc(mem) => mem.read_physical_page(policy, addr, len, out),
-            Self::Flat(mem) => {
+            Self::Borrowed(mem) => {
                 if len > out.len() || len > 4096 - addr.page_offset() as usize {
                     return Err(MemoryError::ReadPhysicalPage { addr, len }.into());
                 }
-                for (offset, byte) in out[..len].iter_mut().enumerate() {
-                    *byte = checked_range(addr.wrapping_add(offset as u64), 1, mem.bytes.len())
-                        .map_or(0xFF, |range| mem.bytes[range.start]);
+                // Sparse windows are page aligned. The only partial backed
+                // page is the end of dense RAM.
+                let out = &mut out[..len];
+                if let Some(span) = mem.span_from(addr, false) {
+                    let count = len.min(span.len());
+                    out[..count].copy_from_slice(&mem.bytes[span.start..span.start + count]);
+                    out[count..].fill(0xFF);
+                } else {
+                    out.fill(0xFF);
                 }
                 Ok(PhysAccess::Done)
             }
@@ -216,18 +212,15 @@ impl ExecutionMemory<'_> {
     ) -> Result<PhysAccess> {
         match self {
             Self::Pc(mem) => mem.write_physical_page(policy, addr, len, data),
-            Self::Flat(mem) => {
+            Self::Borrowed(mem) => {
                 if len > data.len() || len > 4096 - addr.page_offset() as usize {
                     return Err(MemoryError::WritePhysicalPage { addr, len }.into());
                 }
-                for (offset, byte) in data[..len].iter().enumerate() {
-                    if let Some(range) =
-                        checked_range(addr.wrapping_add(offset as u64), 1, mem.bytes.len())
-                    {
-                        mem.bytes[range.start] = *byte;
-                    }
+                if let Some(span) = mem.span_from(addr, true) {
+                    let count = len.min(span.len());
+                    mem.bytes[span.start..span.start + count].copy_from_slice(&data[..count]);
+                    mem.mark_write(addr, count);
                 }
-                mark_write(mem.stamps, mem.writes, addr, len);
                 Ok(PhysAccess::Done)
             }
         }
@@ -236,9 +229,17 @@ impl ExecutionMemory<'_> {
     pub(crate) fn read_ram(&mut self, addr: BxPhyAddress, out: &mut [u8]) -> Result<usize> {
         match self {
             Self::Pc(mem) => mem.read_ram(addr, out),
-            Self::Flat(mem) => {
-                let range = checked_range(addr, out.len(), mem.bytes.len())
+            Self::Borrowed(mem) => {
+                if out.is_empty() && mem.regions.is_none() {
+                    return checked_range(addr, 0, mem.bytes.len())
+                        .map(|_| 0)
+                        .ok_or(MemoryError::RamImageOutOfRange.into());
+                }
+                let span = mem
+                    .span_from(addr, false)
+                    .filter(|span| out.len() <= span.len())
                     .ok_or(MemoryError::RamImageOutOfRange)?;
+                let range = span.start..span.start + out.len();
                 out.copy_from_slice(&mem.bytes[range]);
                 Ok(out.len())
             }
@@ -249,11 +250,19 @@ impl ExecutionMemory<'_> {
     pub(crate) fn write_ram(&mut self, addr: BxPhyAddress, data: &[u8]) -> Result<usize> {
         match self {
             Self::Pc(mem) => mem.write_ram(addr, data),
-            Self::Flat(mem) => {
-                let range = checked_range(addr, data.len(), mem.bytes.len())
+            Self::Borrowed(mem) => {
+                if data.is_empty() && mem.regions.is_none() {
+                    return checked_range(addr, 0, mem.bytes.len())
+                        .map(|_| 0)
+                        .ok_or(MemoryError::RamImageOutOfRange.into());
+                }
+                let span = mem
+                    .span_from(addr, true)
+                    .filter(|span| data.len() <= span.len())
                     .ok_or(MemoryError::RamImageOutOfRange)?;
+                let range = span.start..span.start + data.len();
                 mem.bytes[range].copy_from_slice(data);
-                mark_write(mem.stamps, mem.writes, addr, data.len());
+                mem.mark_write(addr, data.len());
                 Ok(data.len())
             }
         }
@@ -262,9 +271,9 @@ impl ExecutionMemory<'_> {
     pub(crate) fn smc_mark_icache_mask(&mut self, addr: BxPhyAddress, mask: u32) {
         match self {
             Self::Pc(mem) => mem.smc_mark_icache_mask(addr, mask),
-            Self::Flat(mem) => {
-                if let Some(stamp) = usize::try_from(addr.get() >> 12)
-                    .ok()
+            Self::Borrowed(mem) => {
+                if let Some(stamp) = mem
+                    .stamp_index(addr)
                     .and_then(|index| mem.stamps.get_mut(index))
                 {
                     *stamp |= mask;
@@ -277,8 +286,8 @@ impl ExecutionMemory<'_> {
     pub(crate) fn smc_range_has_stamps(&self, addr: BxPhyAddress, len: u32) -> bool {
         match self {
             Self::Pc(mem) => mem.smc_range_has_stamps(addr, len),
-            Self::Flat(mem) => usize::try_from(addr.get() >> 12)
-                .ok()
+            Self::Borrowed(mem) => mem
+                .stamp_index(addr)
                 .and_then(|index| mem.stamps.get(index))
                 .is_some_and(|stamp| {
                     stamp & crate::cpu::icache::smc_cache_line_mask(addr, len) != 0
@@ -296,15 +305,15 @@ impl ExecutionMemory<'_> {
                 mem.smc_dec_write_stamp(addr, len);
                 mem.smc_seq_next()
             }
-            Self::Flat(mem) => {
+            Self::Borrowed(mem) => {
                 if len as usize <= 4096 - addr.page_offset() as usize {
-                    if let Ok(index) = usize::try_from(addr.get() >> 12) {
+                    if let Some(index) = mem.stamp_index(addr) {
                         if index < mem.stamps.len() {
                             mem.writes.write(mem.stamps, index, addr, len);
                         }
                     }
                 } else {
-                    mark_write(mem.stamps, mem.writes, addr, len as usize);
+                    mem.mark_write(addr, len as usize);
                 }
                 mem.writes.next()
             }
@@ -315,7 +324,7 @@ impl ExecutionMemory<'_> {
     pub(crate) fn smc_seq_next(&self) -> u64 {
         match self {
             Self::Pc(mem) => mem.smc_seq_next(),
-            Self::Flat(mem) => mem.writes.next(),
+            Self::Borrowed(mem) => mem.writes.next(),
         }
     }
 
@@ -325,7 +334,7 @@ impl ExecutionMemory<'_> {
     ) -> (bool, &[crate::cpu::icache::PendingSmc]) {
         match self {
             Self::Pc(mem) => mem.smc_pending_since(since),
-            Self::Flat(mem) => mem.writes.since(since),
+            Self::Borrowed(mem) => mem.writes.since(since),
         }
     }
 }

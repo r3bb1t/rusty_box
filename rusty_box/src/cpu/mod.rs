@@ -24,6 +24,7 @@ pub use error::{CpuError, MsrRefusal, Result};
 
 pub(crate) mod api_bridge;
 pub mod arch_state;
+pub mod memory_session;
 
 pub(super) mod access;
 pub(super) mod aes;

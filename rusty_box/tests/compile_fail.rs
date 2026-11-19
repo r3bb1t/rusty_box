@@ -18,6 +18,7 @@ fn doctrine_fixtures() {
     // R1/R3: supplied storage cannot also be written behind memory caches.
     t.compile_fail("tests/compile_fail/r3_borrowed_backing_cannot_be_reused.rs");
     t.compile_fail("tests/compile_fail/r3_flat_backing_cannot_be_reused.rs");
+    t.compile_fail("tests/compile_fail/r3_memory_session_prevents_remap.rs");
     // R3: the parts a machine lends run no processor of their own choosing —
     // one machine's parts cannot be handed another machine's processor.
     t.compile_fail("tests/compile_fail/r3_parts_run_no_foreign_processor.rs");

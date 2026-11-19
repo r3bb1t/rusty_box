@@ -2,6 +2,7 @@ pub(crate) mod code_writes;
 mod error;
 pub(crate) mod execution;
 pub mod flat;
+pub mod mapped;
 pub(crate) mod memory_rusty_box;
 pub mod memory_stub;
 pub mod misc_mem;

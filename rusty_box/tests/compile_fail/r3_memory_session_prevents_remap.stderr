@@ -1,0 +1,19 @@
+error[E0506]: cannot assign to `regions[_].kind` because it is borrowed
+  --> tests/compile_fail/r3_memory_session_prevents_remap.rs:15:5
+   |
+13 |     let mut memory = MappedMemory::new(arena, stamps, &regions).unwrap();
+   |                                                       -------- `regions[_].kind` is borrowed here
+14 |     let mut session = MemorySession::new(cpu, memory.loan());
+15 |     regions[0].kind = RegionKind::Rom;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `regions[_].kind` is assigned to here but it was already borrowed
+16 |     let _ = session.run(1);
+   |             ------- borrow later used here
+
+warning: value assigned to `regions` is never read
+  --> tests/compile_fail/r3_memory_session_prevents_remap.rs:15:5
+   |
+15 |     regions[0].kind = RegionKind::Rom;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: maybe it is overwritten before being read?
+   = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
