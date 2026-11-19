@@ -100,6 +100,10 @@ pub(crate) struct FlatParts<'a> {
     pub(super) regions: Option<&'a [super::mapped::PhysicalRegion]>,
 }
 impl FlatParts<'_> {
+    pub(crate) fn has_backing_at(&self, addr: BxPhyAddress) -> bool {
+        self.span_from(addr, false).is_some()
+    }
+
     /// Offsets in the arena, not in guest address space.
     pub(super) fn span_from(
         &self,

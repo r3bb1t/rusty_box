@@ -299,7 +299,12 @@ impl ExecutionMemory<'_> {
     /// The CPU still checks the sequence after every store, including a miss
     /// in the stamp table: another writer may have left pending events.
     #[inline(always)]
-    pub(crate) fn smc_dec_write_stamp(&mut self, addr: BxPhyAddress, len: u32) -> u64 {
+    pub(crate) fn smc_dec_write_stamp(
+        &mut self,
+        addr: BxPhyAddress,
+        len: u32,
+        cached_page: Option<crate::cpu::tlb::RamPage>,
+    ) -> u64 {
         match self {
             Self::Pc(mem) => {
                 mem.smc_dec_write_stamp(addr, len);
@@ -307,7 +312,15 @@ impl ExecutionMemory<'_> {
             }
             Self::Borrowed(mem) => {
                 if len as usize <= 4096 - addr.page_offset() as usize {
-                    if let Some(index) = mem.stamp_index(addr) {
+                    // The DTLB's direct RAM proof uses arena coordinates.
+                    // It remains valid under the exclusive loan, and every
+                    // rebind invalidates it. Events still use the guest GPA.
+                    let index = if let Some(page) = cached_page {
+                        Some(page.ram_offset() >> 12)
+                    } else {
+                        mem.stamp_index(addr)
+                    };
+                    if let Some(index) = index {
                         if index < mem.stamps.len() {
                             mem.writes.write(mem.stamps, index, addr, len);
                         }

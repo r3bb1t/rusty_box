@@ -2143,7 +2143,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     /// which the single-threaded round-robin scheduler guarantees runs first.
     #[inline(always)]
     pub(crate) fn smc_write_check(&mut self, p_addr: BxPhyAddress, len: u32) {
-        let sequence = self.memory.smc_dec_write_stamp(p_addr, len);
+        self.smc_write_check_with_page(p_addr, len, None);
+    }
+
+    #[inline(always)]
+    pub(super) fn smc_write_check_with_page(
+        &mut self,
+        p_addr: BxPhyAddress,
+        len: u32,
+        page: Option<super::tlb::RamPage>,
+    ) {
+        let sequence = self.memory.smc_dec_write_stamp(p_addr, len, page);
         if sequence > self.smc_seq_seen {
             let super::exec_ctx::CpuMemory { cpu, memory: mem } = self.cpu_memory();
             cpu.smc_apply_pending(mem, true);
@@ -2284,9 +2294,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     ) -> super::Result<u64> {
         self.begin_slice_clock(pc_tick_denominator);
         if strict_instruction_budget {
-            self.cpu_loop_n_impl::<false, true>(max_instructions)
+            self.cpu_loop_n_impl::<false, true, false>(max_instructions)
         } else {
-            self.cpu_loop_n_impl::<false, false>(max_instructions)
+            self.cpu_loop_n_impl::<false, false, false>(max_instructions)
         }
     }
 
@@ -2306,9 +2316,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
     ) -> super::Result<u64> {
         self.begin_slice_clock(pc_tick_denominator);
         if strict_instruction_budget {
-            self.cpu_loop_n_impl::<true, true>(max_instructions)
+            self.cpu_loop_n_impl::<true, true, false>(max_instructions)
         } else {
-            self.cpu_loop_n_impl::<true, false>(max_instructions)
+            self.cpu_loop_n_impl::<true, false, false>(max_instructions)
         }
     }
 
@@ -2331,13 +2341,43 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         }
     }
 
-    /// Shared body of `cpu_loop_n` / `cpu_run_trace_with_io`.
-    ///
-    /// With `stop_after_one_trace` set this behaves like Bochs cpu.cc
-    /// `cpu_run_trace`: the call returns at the first trace boundary, when an
-    /// async event breaks the trace, or when an exception restarts the loop
-    /// (Bochs main.cc setjmp returns control to the SMP scheduler).
-    fn cpu_loop_n_impl<const STOP_AFTER_ONE_TRACE: bool, const STRICT_INSTRUCTION_BUDGET: bool>(
+    /// Run one replayable scalar instruction with no event delivery.
+    pub(super) fn guarded_scalar_step(&mut self) -> super::Result<u64> {
+        use super::CpuError;
+
+        if self.cr0.pg()
+            || self.in_vmx
+            || self.in_svm_guest
+            || self.in_smm
+            || self.is_waiting_for_event()
+            || self.async_event & !BX_ASYNC_EVENT_STOP_TRACE != 0
+            || self.wants_a_machine_boundary()
+            || self.instrumentation.active.has_any()
+            || self.code_breakpoints.armed()
+            || !self.mmio.is_empty()
+        {
+            return Err(CpuError::UnsupportedCpuOperation {
+                operation: "external scalar step requires an unpaged, active CPU without pending events, observers, code breakpoints, or registered MMIO",
+            });
+        }
+        let rip = self.rip();
+        self.begin_slice_clock(1);
+        let result = self.cpu_loop_n_impl::<true, true, true>(1);
+        if result.is_err() {
+            self.set_rip(rip);
+            if matches!(result, Err(CpuError::GuestFaultBeforeDelivery { .. })) {
+                self.invalidate_prefetch_q();
+            }
+        }
+        result
+    }
+
+    /// Shared body of the CPU loop and the one-trace SMP scheduler slice.
+    fn cpu_loop_n_impl<
+        const STOP_AFTER_ONE_TRACE: bool,
+        const STRICT_INSTRUCTION_BUDGET: bool,
+        const SCALAR_ONLY: bool,
+    >(
         &mut self,
         max_instructions: u64,
     ) -> super::Result<u64> {
@@ -2548,6 +2588,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 // is only called from get_icache_entry, not during execution.
                 let instr_ref = || -> &Instruction { unsafe { &*i_ptr } };
 
+                if SCALAR_ONLY && !super::memory_session::supports_scalar_step(instr_ref()) {
+                    break 'cpu_loop Err(crate::cpu::CpuError::UnsupportedCpuOperation {
+                        operation: "external scalar step supports only integer MOV with a single memory operand",
+                    });
+                }
+
                 // Bochs cpu.cc sets prev_rip AFTER execution (not before ilen).
                 // prev_rip is set below, after execute_instruction returns Ok(()).
 
@@ -2609,6 +2655,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 let execution_result = self.execute_instruction(instr_ref());
                 match execution_result {
                     Ok(()) => {}
+                    Err(e) if SCALAR_ONLY => break 'cpu_loop Err(e),
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
                         // Exception delivery during execution: restart decode (Bochs longjmp).
                         // Bochs setjmp handler (cpu.cc): icount++, prev_rip = RIP,
@@ -2930,6 +2977,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 self.prefetch()?;
 
                 if self.eip_page_window_size == 0 || self.eip_fetch_window.is_none() {
+                    if self.eip_fetch_window.is_none()
+                        && matches!(
+                            &self.memory,
+                            crate::memory::execution::ExecutionMemory::Borrowed(_)
+                        )
+                    {
+                        let offset = self.rip().wrapping_add(self.eip_page_bias);
+                        let missing = self.p_addr_fetch_page.wrapping_add(offset);
+                        return Err(crate::cpu::CpuError::VetoedDirectRead {
+                            p_addr: missing.get(),
+                        });
+                    }
                     retry_count += 1;
                     if retry_count > 10 {
                         tracing::error!("prefetch retry limit exceeded, RIP={:#x}", self.rip());

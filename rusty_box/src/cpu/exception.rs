@@ -289,6 +289,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // error_code: if exception generates and error, push this error code
     #[track_caller]
     pub(super) fn exception(&mut self, vector: Exception, mut error_code: u16) -> Result<()> {
+        if self.external_scalar.is_some() {
+            return Err(super::CpuError::GuestFaultBeforeDelivery { vector, error_code });
+        }
         // Track exception counts for diagnostics
         #[cfg(debug_assertions)]
         {

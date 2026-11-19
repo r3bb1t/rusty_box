@@ -18,6 +18,21 @@ pub enum CpuError {
     #[error("prefetch: getHostMemAddr vetoed direct read, pAddr={p_addr:#x}")]
     VetoedDirectRead { p_addr: u64 },
 
+    /// The scalar instruction has not retired. The device reported no effect.
+    #[error("physical access needs host service: {0:?}")]
+    PhysicalAccessPending(super::memory_session::PhysicalRequest),
+
+    /// The physical device refused the operation without committing any effect.
+    #[error("physical bus failure {code}: {request:?}")]
+    PhysicalBusFailure {
+        request: super::memory_session::PhysicalRequest,
+        code: u32,
+    },
+
+    /// The guarded scalar step encountered an architectural fault before delivery.
+    #[error("guarded scalar step stopped before delivering {vector:?}({error_code:#x})")]
+    GuestFaultBeforeDelivery { vector: Exception, error_code: u16 },
+
     // smm
     #[error("smram map[{index}] = {value}")]
     SmramMap { index: usize, value: u32 },

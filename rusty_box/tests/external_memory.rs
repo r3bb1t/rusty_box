@@ -3,7 +3,9 @@
 
 use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::builder::BxCpuBuilder;
-use rusty_box::cpu::memory_session::MemorySession;
+use rusty_box::cpu::memory_session::{
+    MemorySession, PhysicalOperation, PhysicalRequest, PhysicalResponse,
+};
 use rusty_box::cpu::{BxCpuC, CpuError, ResetReason};
 use rusty_box::memory::mapped::{MappedMemory, MemoryMapError, PhysicalRegion, RegionKind};
 
@@ -51,6 +53,189 @@ fn cpu() -> Box<BxCpuC> {
     let mut cpu = BxCpuBuilder::new().build().unwrap();
     cpu.reset(ResetReason::Hardware);
     cpu
+}
+
+const DEVICE_PAGE: BxPhyAddress = BxPhyAddress::new(0x3000);
+const DEVICE_MAP: [PhysicalRegion; 4] = [
+    region(0x1000, 0, RegionKind::Ram),
+    region(0x2000, 1, RegionKind::Ram),
+    region(0x4000, 2, RegionKind::Ram),
+    region(RESET, 3, RegionKind::Rom),
+];
+
+#[test]
+fn external_scalar_split_store_preflights_and_retires_once() {
+    let mut board = SparseBoard::<4>::new(0x1000);
+    board.put(0, 0, &[0xB8, 0xCD, 0xAB, 0xA3, 0xFF, 0x2F]); // mov ax,0xabcd; mov [0x2fff],ax
+    board.put(1, PAGE - 1, &[0x77]);
+    let mut cpu = cpu();
+    let request = PhysicalRequest {
+        address: DEVICE_PAGE,
+        operation: PhysicalOperation::Write {
+            len: 1,
+            value: 0xAB,
+        },
+    };
+    {
+        let mut memory = board.memory(&DEVICE_MAP);
+        let mut session = MemorySession::new(&mut cpu, memory.loan());
+        assert_eq!(session.run(2).unwrap(), 2);
+        assert!(matches!(
+            session.step_with_external_page(DEVICE_PAGE, |actual| {
+                assert_eq!(actual, request);
+                PhysicalResponse::Pending
+            }),
+            Err(CpuError::PhysicalAccessPending(actual)) if actual == request
+        ));
+        assert!(matches!(
+            session.step_with_external_page(DEVICE_PAGE, |_| PhysicalResponse::Failed(41)),
+            Err(CpuError::PhysicalBusFailure { request: actual, code: 41 }) if actual == request
+        ));
+        assert_eq!(session.cpu().rip(), 0x1003);
+        assert_eq!(session.cpu().get_cr2_val(), 0);
+    }
+    assert_eq!(board.arena[2 * PAGE - 1], 0x77);
+    let mut committed = 0;
+    {
+        let mut memory = board.memory(&DEVICE_MAP);
+        let mut session = MemorySession::new(&mut cpu, memory.loan());
+        let retired = session.step_with_external_page(DEVICE_PAGE, |actual| {
+            assert_eq!(actual, request);
+            committed += 1;
+            PhysicalResponse::Complete(0)
+        });
+        assert_eq!(retired.unwrap(), 1);
+        assert_eq!(session.cpu().rip(), 0x1006);
+    }
+    assert_eq!(committed, 1);
+    assert_eq!(board.arena[2 * PAGE - 1], 0xCD);
+}
+
+#[test]
+fn external_scalar_load_restarts_and_split_fragments_keep_byte_order() {
+    let mut board = SparseBoard::<4>::new(0x1000);
+    board.put(
+        0,
+        0,
+        &[
+            0x66, 0xA1, 0xFD, 0x3F, // mov eax,[0x3ffd] (three device bytes, one RAM byte)
+            0x66, 0xA3, 0xFD, 0x3F, // mov [0x3ffd],eax
+            0xA3, 0x04, 0x30, // mov [0x3004],ax (contained word)
+            0xA0, 0x04, 0x30, // mov al,[0x3004] (contained byte)
+        ],
+    );
+    board.put(2, 0, &[0x44]);
+    let mut cpu = cpu();
+    let mut memory = board.memory(&DEVICE_MAP);
+    let mut session = MemorySession::new(&mut cpu, memory.loan());
+    session.run(1).unwrap();
+    let original_rax = session.cpu().rax();
+    let read = PhysicalRequest {
+        address: BxPhyAddress::new(0x3FFD),
+        operation: PhysicalOperation::Read { len: 3 },
+    };
+    assert!(matches!(
+        session.step_with_external_page(DEVICE_PAGE, |_| PhysicalResponse::Pending),
+        Err(CpuError::PhysicalAccessPending(request)) if request == read
+    ));
+    assert_eq!(session.cpu().rip(), 0x1000);
+    assert_eq!(session.cpu().rax(), original_rax);
+    assert_eq!(
+        session
+            .step_with_external_page(DEVICE_PAGE, |request| {
+                assert_eq!(request, read);
+                PhysicalResponse::Complete(0xFF33_2211) // high byte must come from RAM
+            })
+            .unwrap(),
+        1
+    );
+    assert_eq!(session.cpu().rax(), 0x4433_2211);
+    assert_eq!(
+        session
+            .step_with_external_page(DEVICE_PAGE, |request| {
+                assert_eq!(request.address, read.address);
+                assert_eq!(
+                    request.operation,
+                    PhysicalOperation::Write {
+                        len: 3,
+                        value: 0x33_2211
+                    }
+                );
+                PhysicalResponse::Complete(0)
+            })
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        session
+            .step_with_external_page(DEVICE_PAGE, |request| {
+                assert_eq!(request.address, BxPhyAddress::new(0x3004));
+                assert_eq!(
+                    request.operation,
+                    PhysicalOperation::Write {
+                        len: 2,
+                        value: 0x2211
+                    }
+                );
+                PhysicalResponse::Complete(0)
+            })
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        session
+            .step_with_external_page(DEVICE_PAGE, |request| {
+                assert_eq!(request.address, BxPhyAddress::new(0x3004));
+                assert_eq!(request.operation, PhysicalOperation::Read { len: 1 });
+                PhysicalResponse::Complete(0xAA)
+            })
+            .unwrap(),
+        1
+    );
+    assert_eq!(session.cpu().rax(), 0x4433_22AA);
+}
+
+#[test]
+fn external_scalar_guard_distinguishes_guest_fault_fetch_and_unsupported_opcodes() {
+    let mut board = SparseBoard::<4>::new(0x1000);
+    board.put(0, 0, &[0xA1, 0xFF, 0xFF]); // word read beyond the real-mode DS limit
+    board.put(0, 0x10, &[0xF7, 0x16, 0, 0x30]); // not word [0x3000], an RMW
+    board.put(0, 0x20, &[0xF3, 0xAA]); // rep stosb
+    board.put(0, 0x30, &[0xEA, 0, 0x30, 0, 0]); // jump to the hole
+    // Select each entry with a fresh CPU and a patched reset ROM far jump.
+    for (start, expected) in [(0x1000, 0), (0x1010, 1), (0x1020, 1), (0x1030, 2)] {
+        let mut cpu = cpu();
+        let [lo, hi] = (start as u16).to_le_bytes();
+        board.put(3, 0xFF0, &[0xEA, lo, hi, 0, 0]);
+        let mut memory = board.memory(&DEVICE_MAP);
+        let mut session = MemorySession::new(&mut cpu, memory.loan());
+        session.run(if expected == 2 { 2 } else { 1 }).unwrap();
+        let rip = session.cpu().rip();
+        let result = session.step_with_external_page(
+            if expected == 0 {
+                BxPhyAddress::new(0xF000)
+            } else {
+                DEVICE_PAGE
+            },
+            |_| panic!("preflight must stop before calling the device"),
+        );
+        match expected {
+            0 => assert!(
+                matches!(result, Err(CpuError::GuestFaultBeforeDelivery { .. })),
+                "{result:?}"
+            ),
+            1 => assert!(
+                matches!(result, Err(CpuError::UnsupportedCpuOperation { .. })),
+                "{result:?}"
+            ),
+            _ => assert!(
+                matches!(result, Err(CpuError::VetoedDirectRead { p_addr: 0x3000 })),
+                "{result:?}"
+            ),
+        }
+        assert_eq!(session.cpu().rip(), rip);
+        assert_eq!(session.cpu().get_cr2_val(), 0);
+    }
 }
 
 #[test]
@@ -264,6 +449,43 @@ fn run_to(execution: &mut MemorySession<'_>, rip: u64) {
         execution.run(1).unwrap();
     }
     assert_eq!(execution.cpu().rip(), rip);
+}
+
+#[test]
+fn paged_sparse_warm_dtlb_store_invalidates_code_at_its_guest_address() {
+    let mut board = paged_board(&[
+        0xC6, 0x05, 1, 0x70, 0, 0, 0x11, // mov byte [0x7001],0x11 (warms writable DTLB)
+        0x31, 0xC0, // xor eax,eax
+        0xE8, 0xF2, 0x5E, 0, 0, // call 0x7000 (caches old code)
+        0xC6, 0x05, 1, 0x70, 0, 0, 0x22, // mov byte [0x7001],0x22 (warm DTLB hit)
+        0xE8, 0xE6, 0x5E, 0, 0, // call 0x7000 (must decode new code)
+        0xF4,
+    ]);
+    // Physical page 7 is in arena slot 6. Looking up stamp 7 would miss.
+    board.put(6, 0, &[0xB8, 0x11, 0, 0, 0, 0xC3]); // mov eax,0x11; ret
+    let mut cpu = cpu();
+    let mut memory = board.memory(&PAGED_MAP);
+    let mut session = MemorySession::new(&mut cpu, memory.loan());
+    run_to(&mut session, 0x1100);
+    assert_eq!(session.run(5).unwrap(), 5);
+    assert_eq!(session.cpu().rax(), 0x11);
+    assert_eq!(session.run(4).unwrap(), 4);
+    assert_eq!(session.cpu().rax(), 0x22);
+}
+
+#[test]
+fn guarded_scalar_step_refuses_paged_mode_before_touching_the_operand() {
+    let mut board = paged_board(&[0xA1, 0, 0x80, 0, 0]); // mov eax,[0x8000], absent PTE
+    let mut cpu = cpu();
+    let mut memory = board.memory(&PAGED_MAP);
+    let mut session = MemorySession::new(&mut cpu, memory.loan());
+    run_to(&mut session, 0x1100);
+    assert!(matches!(
+        session.step_with_external_page(BxPhyAddress::new(0x9000), |_| panic!("paged step")),
+        Err(CpuError::UnsupportedCpuOperation { .. })
+    ));
+    assert_eq!(session.cpu().rip(), 0x1100);
+    assert_eq!(session.cpu().get_cr2_val(), 0);
 }
 
 #[test]

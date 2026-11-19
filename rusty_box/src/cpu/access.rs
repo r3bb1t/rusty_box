@@ -17,6 +17,7 @@ use super::decoder::BxSegregs;
 use super::descriptor::{
     SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
 };
+use super::memory_session::{ExternalScalar, PhysicalOperation, PhysicalRequest};
 use super::rusty_box::MemoryAccessType;
 use crate::config::{BxEffAddress, BxLinAddress, BxPhyAddress, BxPtrEquiv};
 
@@ -1879,6 +1880,63 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         true
     }
 
+    /// Identify the device fragment after the architectural checks pass.
+    /// A second device is outside this contract, even on a split operand.
+    #[cold]
+    fn external_fragment(
+        &mut self,
+        first: BxPhyAddress,
+        first_len: usize,
+        second: Option<BxPhyAddress>,
+        len: usize,
+    ) -> Result<Option<(BxPhyAddress, core::ops::Range<usize>, &mut ExternalScalar)>> {
+        if self.lapic.is_selected(first.page_base())
+            || second.is_some_and(|addr| self.lapic.is_selected(addr.page_base()))
+        {
+            return Err(super::CpuError::UnsupportedCpuOperation {
+                operation: "external scalar step cannot access LAPIC memory",
+            });
+        }
+        let Some(external) = &mut self.external_scalar else {
+            return Ok(None);
+        };
+        if external.owns(first) {
+            return Ok(Some((first, 0..first_len, external)));
+        }
+        Ok(second
+            .filter(|&addr| external.owns(addr))
+            .map(|addr| (addr, first_len..len, external)))
+    }
+
+    #[cold]
+    fn external_read_scalar(&mut self, addr: BxPhyAddress, len: u8) -> Result<Option<u64>> {
+        let Some((_, _, external)) =
+            self.external_fragment(addr, len as usize, None, len as usize)?
+        else {
+            return Ok(None);
+        };
+        external
+            .access(PhysicalRequest {
+                address: addr,
+                operation: PhysicalOperation::Read { len },
+            })
+            .map(Some)
+    }
+
+    #[cold]
+    fn external_write_scalar(&mut self, addr: BxPhyAddress, len: u8, value: u64) -> Result<bool> {
+        let Some((_, _, external)) =
+            self.external_fragment(addr, len as usize, None, len as usize)?
+        else {
+            return Ok(false);
+        };
+        external.access(PhysicalRequest {
+            address: addr,
+            operation: PhysicalOperation::Write { len, value },
+        })?;
+        Ok(true)
+    }
+
     /// Read a byte given a pre-computed linear address.
     /// Bochs: read_linear_byte (access2.cc)
     pub(crate) fn read_linear_byte(&mut self, _seg: BxSegregs, laddr: BxLinAddress) -> Result<u8> {
@@ -1909,6 +1967,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         let paddr = self.translate_data_read(laddr)?;
         self.check_perm_read(laddr, paddr, 1)?;
+        if self.external_scalar.is_some() {
+            if let Some(value) = self.external_read_scalar(paddr, 1)? {
+                return Ok(value as u8);
+            }
+        }
         if let Some(val) = self.mmio_read(paddr, 1) {
             return Ok(val as u8);
         }
@@ -1960,6 +2023,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
             self.check_perm_read(laddr, paddr, 2)?;
+            if self.external_scalar.is_some() {
+                if let Some(value) = self.external_read_scalar(paddr, 2)? {
+                    return Ok(value as u16);
+                }
+            }
             if let Some(val) = self.mmio_read(paddr, 2) {
                 return Ok(val as u16);
             }
@@ -2018,6 +2086,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if page_offset + 4 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
             self.check_perm_read(laddr, paddr, 4)?;
+            if self.external_scalar.is_some() {
+                if let Some(value) = self.external_read_scalar(paddr, 4)? {
+                    return Ok(value as u32);
+                }
+            }
             if let Some(val) = self.mmio_read(paddr, 4) {
                 return Ok(val as u32);
             }
@@ -2114,9 +2187,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             && tlb.host_page.is_some()
         {
             let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
-            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
+            let page = tlb.host_page;
+            let host = super::tlb::host_page_ptr(self.mem_host_base, page);
             self.check_perm_write(laddr, paddr, 1)?;
-            self.smc_write_check(paddr, 1);
+            self.smc_write_check_with_page(paddr, 1, page);
             unsafe { *host_at_page_offset_mut(host, laddr) = val };
             {
                 let _buf = [val];
@@ -2131,6 +2205,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         }
         let paddr = self.translate_data_write(laddr)?;
         self.check_perm_write(laddr, paddr, 1)?;
+        if self.external_scalar.is_some() && self.external_write_scalar(paddr, 1, u64::from(val))? {
+            return Ok(());
+        }
         if self.mmio_write(paddr, 1, val as u64) {
             return Ok(());
         }
@@ -2168,9 +2245,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             && tlb.host_page.is_some()
         {
             let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
-            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
+            let page = tlb.host_page;
+            let host = super::tlb::host_page_ptr(self.mem_host_base, page);
             self.check_perm_write(laddr, paddr, 2)?;
-            self.smc_write_check(paddr, 2);
+            self.smc_write_check_with_page(paddr, 2, page);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u16(ptr, val);
@@ -2189,6 +2267,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             self.check_perm_write(laddr, paddr, 2)?;
+            if self.external_scalar.is_some()
+                && self.external_write_scalar(paddr, 2, u64::from(val))?
+            {
+                return Ok(());
+            }
             self.smc_write_check(paddr, 2);
             if !self.mmio_write(paddr, 2, val as u64) {
                 self.mem_write_word(paddr, val);
@@ -2234,9 +2317,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             && tlb.host_page.is_some()
         {
             let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
-            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
+            let page = tlb.host_page;
+            let host = super::tlb::host_page_ptr(self.mem_host_base, page);
             self.check_perm_write(laddr, paddr, 4)?;
-            self.smc_write_check(paddr, 4);
+            self.smc_write_check_with_page(paddr, 4, page);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u32(ptr, val);
@@ -2255,6 +2339,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if page_offset + 4 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             self.check_perm_write(laddr, paddr, 4)?;
+            if self.external_scalar.is_some()
+                && self.external_write_scalar(paddr, 4, u64::from(val))?
+            {
+                return Ok(());
+            }
             if self.mmio_write(paddr, 4, val as u64) {
                 return Ok(());
             }
@@ -2297,9 +2386,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             && tlb.host_page.is_some()
         {
             let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
-            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
+            let page = tlb.host_page;
+            let host = super::tlb::host_page_ptr(self.mem_host_base, page);
             self.check_perm_write(laddr, paddr, 8)?;
-            self.smc_write_check(paddr, 8);
+            self.smc_write_check_with_page(paddr, 8, page);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u64(ptr, val);
@@ -2348,7 +2438,24 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         self.check_perm_read(laddr, p0, first_len)?;
         self.check_perm_read(second, p1, N - first_len)?;
         let mut bytes = [0; N];
+        let mut supplied = 0..0;
+        if self.external_scalar.is_some() {
+            if let Some((address, range, external)) =
+                self.external_fragment(p0, first_len, Some(p1), N)?
+            {
+                let len = range.len();
+                let value = external.access(PhysicalRequest {
+                    address,
+                    operation: PhysicalOperation::Read { len: len as u8 },
+                })?;
+                bytes[range.clone()].copy_from_slice(&value.to_le_bytes()[..len]);
+                supplied = range;
+            }
+        }
         for (offset, byte) in bytes.iter_mut().enumerate() {
+            if supplied.contains(&offset) {
+                continue;
+            }
             let p = if offset < first_len {
                 p0.wrapping_add(offset as u64)
             } else {
@@ -2381,7 +2488,28 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let p1 = self.translate_data_write(second)?;
         self.check_perm_write(laddr, p0, first_len)?;
         self.check_perm_write(second, p1, bytes.len() - first_len)?;
+        let mut supplied = 0..0;
+        if self.external_scalar.is_some() {
+            if let Some((address, range, external)) =
+                self.external_fragment(p0, first_len, Some(p1), bytes.len())?
+            {
+                let len = range.len();
+                let mut value = [0; 8];
+                value[..len].copy_from_slice(&bytes[range.clone()]);
+                external.access(PhysicalRequest {
+                    address,
+                    operation: PhysicalOperation::Write {
+                        len: len as u8,
+                        value: u64::from_le_bytes(value),
+                    },
+                })?;
+                supplied = range;
+            }
+        }
         for (offset, byte) in bytes.iter().copied().enumerate() {
+            if supplied.contains(&offset) {
+                continue;
+            }
             let p = if offset < first_len {
                 p0.wrapping_add(offset as u64)
             } else {

@@ -1,9 +1,79 @@
 //! CPU-only x86 execution over a caller's physical memory loan.
 
+use super::decoder::Opcode;
 use super::exec_ctx::ExecCtx;
-use super::{BxCpuC, Instrumentation, Result};
+use super::{BxCpuC, CpuError, Instruction, Instrumentation, Result};
 use crate::config::BxPhyAddress;
+use crate::memory::execution::ExecutionMemory;
 use crate::memory::mapped::MemoryLoan;
+
+/// One physical fragment of a scalar operand. Values are little-endian,
+/// with the addressed byte in the low eight bits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PhysicalRequest {
+    pub address: BxPhyAddress,
+    pub operation: PhysicalOperation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhysicalOperation {
+    Read { len: u8 },
+    Write { len: u8, value: u64 },
+}
+
+/// The host handles the entire request as one operation. A device that
+/// cannot commit the requested width must refuse it without side effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhysicalResponse {
+    /// The read or write committed exactly once. The value is used for reads.
+    Complete(u64),
+    /// No effect committed. The host may prepare the device and retry the step.
+    Pending,
+    /// No effect committed. The code is supplied by the host.
+    Failed(u32),
+}
+
+pub(super) struct ExternalScalar {
+    page: BxPhyAddress,
+    completion: Option<(PhysicalRequest, u64)>,
+}
+
+impl ExternalScalar {
+    pub(super) fn owns(&self, address: BxPhyAddress) -> bool {
+        self.page == address.page_base()
+    }
+
+    pub(super) fn access(&mut self, request: PhysicalRequest) -> Result<u64> {
+        match self.completion.take() {
+            None => Err(CpuError::PhysicalAccessPending(request)),
+            Some((expected, value)) if expected == request => Ok(value),
+            Some(_) => Err(CpuError::UnsupportedCpuOperation {
+                operation: "external scalar replay diverged from its preflight",
+            }),
+        }
+    }
+}
+
+pub(super) fn supports_scalar_step(instruction: &Instruction) -> bool {
+    match instruction.get_ia_opcode() {
+        Opcode::MovAlod
+        | Opcode::MovAxod
+        | Opcode::MovEaxod
+        | Opcode::MovOdAl
+        | Opcode::MovOdAx
+        | Opcode::MovOdEax => true,
+        Opcode::MovGbEb
+        | Opcode::MovEbGb
+        | Opcode::MovEbIb
+        | Opcode::MovGwEw
+        | Opcode::MovEwGw
+        | Opcode::MovEwIw
+        | Opcode::MovOp32GdEd
+        | Opcode::MovOp32EdGd
+        | Opcode::MovEdId => !instruction.mod_c0(),
+        _ => false,
+    }
+}
 
 /// An exclusive loan of a processor and its physical memory map.
 ///
@@ -38,10 +108,137 @@ impl<'a, T: Instrumentation> MemorySession<'a, T> {
         &self.ctx
     }
 
+    /// Execute one unpaged integer MOV step with a single external data page.
+    ///
+    /// `page` must be page-aligned and unbacked in this session. The page is
+    /// external only for this call. Instructions and implicit system accesses
+    /// are outside this interface. In particular, this step reports a guest
+    /// fault before delivering it, and rejects pending CPU events.
+    ///
+    /// The service sees at most one request, after all operand checks and
+    /// before any operand bytes or destination registers have been changed.
+    /// On completion the step consumes the response locally and retires once.
+    /// On failure or pending service, RIP still names the instruction. A
+    /// pending request must be retried with no device effect already committed.
+    pub fn step_with_external_page(
+        &mut self,
+        page: BxPhyAddress,
+        service: impl FnOnce(PhysicalRequest) -> PhysicalResponse,
+    ) -> Result<u64> {
+        // A dense partial page starts with backing too. Checking the page
+        // base rules it out, as well as any whole sparse RAM/ROM page.
+        if page.page_offset() != 0
+            || !matches!(&self.ctx.memory, ExecutionMemory::Borrowed(mem)
+                if !mem.has_backing_at(page))
+        {
+            return Err(CpuError::UnsupportedCpuOperation {
+                operation: "external data page must be aligned and unbacked",
+            });
+        }
+
+        self.ctx.external_scalar = Some(ExternalScalar {
+            page,
+            completion: None,
+        });
+        let result = self.ctx.guarded_scalar_step();
+        self.ctx.external_scalar = None;
+        let Err(CpuError::PhysicalAccessPending(request)) = result else {
+            return result;
+        };
+
+        // Release all transient engine state before calling host code. A
+        // panicking provider cannot leave the session in guarded mode.
+        let value = match service(request) {
+            PhysicalResponse::Complete(value) => value,
+            PhysicalResponse::Pending => return Err(CpuError::PhysicalAccessPending(request)),
+            PhysicalResponse::Failed(code) => {
+                return Err(CpuError::PhysicalBusFailure { request, code });
+            }
+        };
+        self.ctx.external_scalar = Some(ExternalScalar {
+            page,
+            completion: Some((request, value)),
+        });
+        let result = self.ctx.guarded_scalar_step();
+        let state = self.ctx.external_scalar.take();
+        if matches!(result, Ok(1)) && state.is_some_and(|state| state.completion.is_none()) {
+            return result;
+        }
+        // This indicates a broken replay invariant. The device might already
+        // have committed, so never return a retryable result from this arm.
+        Err(CpuError::UnsupportedCpuOperation {
+            operation: "external scalar completion did not retire the preflighted instruction",
+        })
+    }
+
     /// Update writable physical RAM between runs using the engine's code
     /// stamp tracking. The whole write must fit in one RAM window. Updates
     /// to guest page tables still require guest TLB invalidation.
     pub fn write_ram(&mut self, address: BxPhyAddress, data: &[u8]) -> crate::Result<()> {
         self.ctx.memory.write_ram(address, data).map(|_| ())
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    use super::*;
+    use crate::cpu::builder::BxCpuBuilder;
+    use crate::cpu::cpu::Exception;
+    use crate::cpu::{MemPerms, ResetReason};
+    use crate::memory::mapped::{MappedMemory, PhysicalRegion, RegionKind};
+    use crate::memory::permissions::PagePermissions;
+
+    #[test]
+    fn split_store_checks_second_fragment_before_committing_first_device_fragment() {
+        let mut cpu = BxCpuBuilder::new().build().unwrap();
+        cpu.reset(ResetReason::Hardware);
+        let mut permissions = PagePermissions::new(0x5000);
+        permissions.set(BxPhyAddress::new(0x4000), 4096, MemPerms::READ);
+        cpu.page_permissions = Some(permissions);
+        let mut arena = [0; 3 * 4096];
+        // Setup AX and execute a word store from the device page into denied RAM.
+        arena[..6].copy_from_slice(&[0xB8, 0xCD, 0xAB, 0xA3, 0xFF, 0x3F]);
+        arena[4096] = 0x77;
+        arena[0x2FF0..0x2FF5].copy_from_slice(&[0xEA, 0, 0x10, 0, 0]);
+        let map = [
+            PhysicalRegion {
+                guest_start: BxPhyAddress::new(0x1000),
+                arena_offset: 0,
+                len: 4096,
+                kind: RegionKind::Ram,
+            },
+            PhysicalRegion {
+                guest_start: BxPhyAddress::new(0x4000),
+                arena_offset: 4096,
+                len: 4096,
+                kind: RegionKind::Ram,
+            },
+            PhysicalRegion {
+                guest_start: BxPhyAddress::new(0xFFFF_F000),
+                arena_offset: 8192,
+                len: 4096,
+                kind: RegionKind::Rom,
+            },
+        ];
+        let mut stamps = [0; 3];
+        {
+            let mut memory = MappedMemory::new(&mut arena, &mut stamps, &map).unwrap();
+            let mut session = MemorySession::new(&mut cpu, memory.loan());
+            assert_eq!(session.run(2).unwrap(), 2);
+            let ticks = session.cpu().cpu_ticks();
+            let result = session.step_with_external_page(BxPhyAddress::new(0x3000), |_| {
+                panic!("the second half failed its permission check")
+            });
+            assert!(matches!(
+                result,
+                Err(CpuError::GuestFaultBeforeDelivery {
+                    vector: Exception::Gp,
+                    error_code: 0
+                })
+            ));
+            assert_eq!(session.cpu().rip(), 0x1003);
+            assert_eq!(session.cpu().cpu_ticks(), ticks);
+        }
+        assert_eq!(arena[4096], 0x77);
     }
 }
