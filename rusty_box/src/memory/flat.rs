@@ -84,12 +84,7 @@ impl<'ram> FlatMemory<'ram> {
     }
 
     pub(super) fn parts(&mut self) -> FlatParts<'_> {
-        FlatParts {
-            bytes: self.bytes,
-            stamps: self.stamps,
-            writes: &mut self.writes,
-            regions: None,
-        }
+        FlatParts::dense(self.bytes, self.stamps, &mut self.writes)
     }
 }
 /// Named reborrow: the storage owner's lifetime does not escape into the CPU.
@@ -99,7 +94,30 @@ pub(crate) struct FlatParts<'a> {
     pub(crate) writes: &'a mut CodeWrites,
     pub(super) regions: Option<&'a [super::mapped::PhysicalRegion]>,
 }
-impl FlatParts<'_> {
+impl<'a> FlatParts<'a> {
+    pub(crate) fn dense(
+        bytes: &'a mut [u8],
+        stamps: &'a mut [u32],
+        writes: &'a mut CodeWrites,
+    ) -> Self {
+        debug_assert_eq!(stamps.len(), FlatMemory::required_stamps(bytes.len()));
+        Self {
+            bytes,
+            stamps,
+            writes,
+            regions: None,
+        }
+    }
+
+    pub(super) fn reborrow(&mut self) -> FlatParts<'_> {
+        FlatParts {
+            bytes: self.bytes,
+            stamps: self.stamps,
+            writes: self.writes,
+            regions: self.regions,
+        }
+    }
+
     pub(crate) fn has_backing_at(&self, addr: BxPhyAddress) -> bool {
         self.span_from(addr, false).is_some()
     }

@@ -628,8 +628,8 @@ fn timed_borrowed_memory() {
 
 #[test]
 fn session_cr3_and_table_edits_invalidate_warm_translations() {
-    use rusty_box::cpu::X86Reg;
     use rusty_box::cpu::memory_session::SessionStop;
+    use rusty_box::cpu::registers::{CR3, EAX, PageTableRootError};
 
     let mut board = paged_board(&[
         0xA1, 0, 0x70, 0, 0, // mov eax,[0x7000]
@@ -649,19 +649,30 @@ fn session_cr3_and_table_edits_invalidate_warm_translations() {
         session.run_controlled(2).stop,
         SessionStop::Budget
     ));
-    assert_eq!(session.read_register(X86Reg::Eax).unwrap(), 0x1122_3344);
+    assert_eq!(session.regs().read(EAX), 0x1122_3344);
 
-    session.write_register(X86Reg::Cr3, 0x6000).unwrap();
+    let original = session.regs().read(CR3);
+    assert_eq!(
+        session
+            .regs()
+            .set_page_table_root(BxPhyAddress::new(0x6001)),
+        Err(PageTableRootError::Address)
+    );
+    assert_eq!(session.regs().read(CR3), original);
+    session
+        .regs()
+        .set_page_table_root(BxPhyAddress::new(0x6000))
+        .unwrap();
     assert!(matches!(
         session.run_controlled(2).stop,
         SessionStop::Budget
     ));
-    assert_eq!(session.read_register(X86Reg::Eax).unwrap(), 0xAABB_CCDD);
+    assert_eq!(session.regs().read(EAX), 0xAABB_CCDD);
 
     session
         .write_ram(BxPhyAddress::new(0x801C), &0x7003u32.to_le_bytes())
         .unwrap();
     session.invalidate_translations();
     assert!(matches!(session.step().stop, SessionStop::Budget));
-    assert_eq!(session.read_register(X86Reg::Eax).unwrap(), 0x1122_3344);
+    assert_eq!(session.regs().read(EAX), 0x1122_3344);
 }

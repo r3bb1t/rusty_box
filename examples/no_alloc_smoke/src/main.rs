@@ -4,8 +4,9 @@
 use core::panic::PanicInfo;
 
 use rusty_box::config::BxPhyAddress;
+use rusty_box::cpu::BxCpuC;
 use rusty_box::cpu::memory_session::{EntryMode, MemorySession, SessionRun};
-use rusty_box::cpu::{BxCpuC, X86Reg};
+use rusty_box::cpu::registers::AX;
 use rusty_box::memory::mapped::{MappedMemory, PhysicalRegion, RegionKind};
 use rusty_box::memory::mmio::{MmioAttachError, MmioDevice};
 
@@ -25,10 +26,14 @@ fn execute(cpu: &mut BxCpuC) -> rusty_box::Result<SessionRun> {
     let mut memory = MappedMemory::new(&mut bytes, &mut stamps, &regions).unwrap();
     let mut session = MemorySession::new(cpu, memory.loan());
     session.reset_at(EntryMode::Real16, 0x1000, 0x1FF0)?;
-    session.write_register(X86Reg::Ax, 0x42).unwrap();
-    session.write_ram(BxPhyAddress::new(0x1000), &[0x90])?;
+    session.regs().write(AX, 0x42);
+    session
+        .memory()
+        .write_phys(BxPhyAddress::new(0x1000), &[0x90])?;
     let mut code = [0];
-    session.read_physical(BxPhyAddress::new(0x1000), &mut code)?;
+    session
+        .memory()
+        .read_phys(BxPhyAddress::new(0x1000), &mut code)?;
     Ok(session.step())
 }
 

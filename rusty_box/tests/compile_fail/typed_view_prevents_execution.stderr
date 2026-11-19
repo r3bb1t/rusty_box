@@ -1,0 +1,9 @@
+error[E0499]: cannot borrow `emu` as mutable more than once at a time
+ --> tests/compile_fail/typed_view_prevents_execution.rs:7:5
+  |
+6 |     let regs = emu.regs();
+  |                --- first mutable borrow occurs here
+7 |     emu.step();
+  |     ^^^ second mutable borrow occurs here
+8 |     let _ = regs.read(EAX);
+  |             ---- first borrow later used here

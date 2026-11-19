@@ -94,7 +94,7 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
             pc_system,
             ..
         } = io;
-        Self::assemble(
+        Self::assemble::<false>(
             cpu,
             ExecutionMemory::Pc(memory),
             Hardware::Pc {
@@ -119,7 +119,7 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
             });
         }
         cpu.slice_clock = super::cpu::SliceClock::Detached;
-        Ok(Self::assemble(
+        Ok(Self::assemble::<false>(
             cpu,
             ExecutionMemory::Pc(memory),
             Hardware::CpuOnly,
@@ -135,13 +135,22 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
 
     pub(super) fn borrowed(cpu: &'a mut BxCpuC<T>, memory: MemoryLoan<'a>) -> Self {
         cpu.slice_clock = super::cpu::SliceClock::Detached;
-        let ctx = Self::assemble(cpu, ExecutionMemory::Borrowed(memory.0), Hardware::CpuOnly);
+        let ctx =
+            Self::assemble::<false>(cpu, ExecutionMemory::Borrowed(memory.0), Hardware::CpuOnly);
         ctx.cpu.smc_seq_seen = ctx.memory.smc_seq_next();
         ctx
     }
 
+    /// Reborrow the private CPU and fixed dense allocation of a CpuEmulator.
+    /// The owner keeps the code-write queue alive across these short loans.
+    #[cfg(feature = "alloc")]
+    pub(super) fn owned_flat(cpu: &'a mut BxCpuC<T>, memory: MemoryLoan<'a>) -> Self {
+        cpu.slice_clock = super::cpu::SliceClock::Detached;
+        Self::assemble::<true>(cpu, ExecutionMemory::Borrowed(memory.0), Hardware::CpuOnly)
+    }
+
     /// R3/R5: both profiles adopt backing and residency through this one door.
-    fn assemble(
+    fn assemble<const REUSE_DENSE: bool>(
         cpu: &'a mut BxCpuC<T>,
         mut memory: ExecutionMemory<'a>,
         hardware: Hardware<'a>,
@@ -162,10 +171,10 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         };
         cpu.adopt_backing(
             match &memory {
-                ExecutionMemory::Pc(_) => super::cpu::CacheBacking::of(mem_alloc_base, alloc_len),
-                ExecutionMemory::Borrowed(_) => {
+                ExecutionMemory::Borrowed(_) if !REUSE_DENSE => {
                     super::cpu::CacheBacking::flat(mem_alloc_base, alloc_len)
                 }
+                _ => super::cpu::CacheBacking::of(mem_alloc_base, alloc_len),
             },
             memory.swap_epoch(),
             memory.a20_mask(),
@@ -180,6 +189,10 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
             pending_scalar_io: None,
             external_scalar: None,
         }
+    }
+
+    pub(super) fn registers(&mut self) -> super::registers::Registers<'_, T> {
+        super::registers::Registers::with_pending(self.cpu, &mut self.pending_scalar_io)
     }
 
     /// The instruction-fetch window as bytes.

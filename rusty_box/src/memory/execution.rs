@@ -19,6 +19,13 @@ pub(crate) struct CacheState {
     pub(crate) residency_epoch: u64,
 }
 impl ExecutionMemory<'_> {
+    pub(crate) fn reborrow(&mut self) -> ExecutionMemory<'_> {
+        match self {
+            Self::Pc(memory) => ExecutionMemory::Pc(memory),
+            Self::Borrowed(memory) => ExecutionMemory::Borrowed(memory.reborrow()),
+        }
+    }
+
     #[inline(always)]
     pub(crate) fn cache_state(&self) -> CacheState {
         match self {

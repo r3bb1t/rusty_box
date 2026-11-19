@@ -1,12 +1,17 @@
 //! CPU-only x86 execution over a caller's physical memory loan.
 
 mod control;
+#[cfg(feature = "alloc")]
+mod owned;
+#[cfg(feature = "alloc")]
+pub use owned::{CpuEmulator, CpuEmulatorBuilder};
 pub(super) mod scalar_io;
-pub use control::{EntryMode, RegisterRefusal, SessionRun, SessionStop};
+pub use control::{EntryMode, SessionRun, SessionStop};
 pub use scalar_io::ScalarIoRequest;
 
 use super::decoder::Opcode;
 use super::exec_ctx::ExecCtx;
+pub use super::registers::RegisterRefusal;
 use super::{BxCpuC, CpuError, Instruction, Instrumentation, Result};
 use crate::config::BxPhyAddress;
 use crate::memory::execution::ExecutionMemory;
@@ -80,6 +85,27 @@ pub(super) fn supports_scalar_step(instruction: &Instruction) -> bool {
     }
 }
 
+/// Short host-side view of the guest's backed physical memory.
+pub struct PhysicalMemory<'a> {
+    memory: ExecutionMemory<'a>,
+    pending: &'a mut Option<scalar_io::PendingScalarIo>,
+}
+
+impl PhysicalMemory<'_> {
+    /// Read bytes from one backed RAM or ROM window.
+    pub fn read_phys(&mut self, address: BxPhyAddress, out: &mut [u8]) -> crate::Result<()> {
+        self.memory.read_ram(address, out).map(|_| ())
+    }
+
+    /// Write bytes to one writable RAM window and mark any cached code dirty.
+    /// Page-table edits still require the usual guest TLB invalidation.
+    pub fn write_phys(&mut self, address: BxPhyAddress, data: &[u8]) -> crate::Result<()> {
+        self.memory.write_ram(address, data)?;
+        *self.pending = None;
+        Ok(())
+    }
+}
+
 /// An exclusive loan of a processor and its physical memory map.
 ///
 /// The caller supplies an initialized CPU and its current register state.
@@ -108,6 +134,14 @@ impl<'a, T: Instrumentation> MemorySession<'a, T> {
     pub fn run(&mut self, dispatch_budget: u64) -> Result<u64> {
         self.ctx.pending_scalar_io = None;
         self.ctx.cpu_loop_n_slice(dispatch_budget, true, 1)
+    }
+
+    /// Borrow the physical RAM and ROM currently attached to this session.
+    pub fn memory(&mut self) -> PhysicalMemory<'_> {
+        PhysicalMemory {
+            memory: self.ctx.memory.reborrow(),
+            pending: &mut self.ctx.pending_scalar_io,
+        }
     }
 
     pub fn cpu(&self) -> &BxCpuC<T> {
@@ -182,9 +216,7 @@ impl<'a, T: Instrumentation> MemorySession<'a, T> {
     /// stamp tracking. The whole write must fit in one RAM window. Updates
     /// to guest page tables still require guest TLB invalidation.
     pub fn write_ram(&mut self, address: BxPhyAddress, data: &[u8]) -> crate::Result<()> {
-        self.ctx.memory.write_ram(address, data)?;
-        self.ctx.pending_scalar_io = None;
-        Ok(())
+        self.memory().write_phys(address, data)
     }
 }
 

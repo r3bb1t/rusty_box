@@ -49,6 +49,11 @@ path = "examples/cpu_only/main.rs"
 required-features = ["alloc"]
 
 [[example]]
+name = "cpu_facade"
+path = "examples/cpu_facade/main.rs"
+required-features = ["alloc"]
+
+[[example]]
 name = "alpine"
 path = "examples/alpine/alpine.rs"
 required-features = ["std"]

@@ -634,6 +634,11 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
 }
 
 impl<T: crate::cpu::Instrumentation> Emulator<T> {
+    /// Typed register access for the software PC.
+    pub fn regs(&mut self) -> crate::cpu::registers::Registers<'_, T> {
+        crate::cpu::registers::Registers::for_processor(self.cpu_mut())
+    }
+
     /// Attach an independently implemented device to one physical page of
     /// the single-CPU software PC. Dispatch uses the existing scalar MMIO
     /// route. The device owns its state and receives page-relative offsets.

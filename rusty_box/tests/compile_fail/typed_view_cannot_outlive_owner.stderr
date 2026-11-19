@@ -1,0 +1,11 @@
+error[E0597]: `emu` does not live long enough
+ --> tests/compile_fail/typed_view_cannot_outlive_owner.rs:7:9
+  |
+5 |     let regs = {
+  |         ---- borrow later stored here
+6 |         let mut emu = CpuEmulator::builder().build().unwrap();
+  |             ------- binding `emu` declared here
+7 |         emu.regs()
+  |         ^^^ borrowed value does not live long enough
+8 |     };
+  |     - `emu` dropped here while still borrowed

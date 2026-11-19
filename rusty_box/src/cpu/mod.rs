@@ -25,6 +25,7 @@ pub use error::{CpuError, MsrRefusal, Result};
 pub(crate) mod api_bridge;
 pub mod arch_state;
 pub mod memory_session;
+pub mod registers;
 
 pub(super) mod access;
 pub(super) mod aes;
@@ -160,6 +161,8 @@ pub use cpudb::CpuModel;
 pub use cpudb::amd::amd_ryzen::AmdRyzen;
 pub use cpudb::intel::*;
 pub use cpuid::{BxCpuIdTrait, CpuidFreq};
+#[cfg(feature = "alloc")]
+pub use memory_session::{CpuEmulator, CpuEmulatorBuilder};
 
 #[cfg(all(test, feature = "std"))]
 mod cpu_only_tests;

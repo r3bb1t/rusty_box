@@ -12,6 +12,7 @@
 #[test]
 fn doctrine_fixtures() {
     let t = trybuild::TestCases::new();
+    t.compile_fail("tests/compile_fail/typed_*.rs");
     // R3: an ExecCtx cannot be assembled outside the crate — machine parts
     // have no loose currency; the module itself is not reachable.
     t.compile_fail("tests/compile_fail/r3_execctx_is_not_assemblable.rs");
