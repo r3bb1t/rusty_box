@@ -1066,7 +1066,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs: read_RMW_virtual_byte_32 (access.h) — thin wrapper
     #[inline]
     pub fn read_rmw_virtual_byte(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u8> {
-        self.prepare_rmw_virtual_byte(seg, offset)?;
+        let laddr = self.prepare_rmw_virtual_byte(seg, offset)?;
+        self.check_rmw_write_permissions(laddr, 1)?;
         Ok(self.read_prepared_rmw_byte())
     }
 
@@ -1087,7 +1088,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs: read_RMW_virtual_word_32 (access.h) — thin wrapper
     #[inline]
     pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u16> {
-        self.prepare_rmw_virtual_word(seg, offset)?;
+        let laddr = self.prepare_rmw_virtual_word(seg, offset)?;
+        self.check_rmw_write_permissions(laddr, 2)?;
         Ok(self.read_prepared_rmw_word())
     }
 
@@ -1108,7 +1110,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs: read_RMW_virtual_dword_32 (access.h) — thin wrapper
     #[inline]
     pub fn read_rmw_virtual_dword(&mut self, seg: BxSegregs, offset: BxEffAddress) -> Result<u32> {
-        self.prepare_rmw_virtual_dword(seg, offset)?;
+        let laddr = self.prepare_rmw_virtual_dword(seg, offset)?;
+        self.check_rmw_write_permissions(laddr, 4)?;
         Ok(self.read_prepared_rmw_dword())
     }
 
@@ -1800,8 +1803,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    /// Apply instrumentation-only write permissions to a prepared RMW
-    /// translation before an external side effect.
+    /// Apply host write permissions to a prepared RMW translation before
+    /// reading a possibly side-effectful operand.
     #[inline]
     pub(super) fn check_rmw_write_permissions(
         &mut self,
@@ -2666,6 +2669,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let host_addr =
                 super::tlb::host_page_addr_bits(self.mem_host_base, tlb.host_page) | page_offset;
             let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
+            self.check_perm_write(laddr, paddr, 8)?;
             self.smc_write_check(paddr, 8);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let data = addr_read_u64(host_addr);
@@ -2678,7 +2682,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let page_offset = laddr.page_offset();
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
-            let data = self.mem_read_qword(paddr);
+            self.check_perm_write(laddr, paddr, 8)?;
+            self.smc_write_check(paddr, 8);
+            let data = self
+                .mmio_read(paddr, 8)
+                .unwrap_or_else(|| self.mem_read_qword(paddr));
             self.address_xlation.pages = 1;
             self.address_xlation.paddress1 = paddr;
             Ok((data, laddr))
@@ -2688,12 +2696,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let p0 = self.translate_data_write(laddr)?;
             let next_page = laddr.next_page();
             let p1 = self.translate_data_write(next_page)?;
+            self.check_perm_write(laddr, p0, len1 as usize)?;
+            self.check_perm_write(next_page, p1, len2 as usize)?;
             let mut buf = [0u8; 8];
-            for (i, byte) in buf[..len1 as usize].iter_mut().enumerate() {
-                *byte = self.mem_read_byte(p0 + i as u64);
-            }
-            for (i, byte) in buf[len1 as usize..].iter_mut().enumerate() {
-                *byte = self.mem_read_byte(p1 + i as u64);
+            let (first, second) = buf.split_at_mut(len1 as usize);
+            for (paddr, fragment) in [(p0, first), (p1, second)] {
+                self.smc_write_check(paddr, fragment.len() as u32);
+                for (index, byte) in fragment.iter_mut().enumerate() {
+                    let address = paddr + index as u64;
+                    *byte = self
+                        .mmio_read(address, 1)
+                        .map_or_else(|| self.mem_read_byte(address), |value| value as u8);
+                }
             }
             self.address_xlation.pages = 2;
             self.address_xlation.paddress1 = p0;
@@ -2712,6 +2726,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         laddr: BxLinAddress,
     ) -> Result<u8> {
         self.prepare_rmw_linear_byte(laddr)?;
+        self.check_rmw_write_permissions(laddr, 1)?;
         Ok(self.read_prepared_rmw_byte())
     }
 
@@ -2768,6 +2783,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         laddr: BxLinAddress,
     ) -> Result<u16> {
         self.prepare_rmw_linear_word(laddr)?;
+        self.check_rmw_write_permissions(laddr, 2)?;
         Ok(self.read_prepared_rmw_word())
     }
 
@@ -2853,6 +2869,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         laddr: BxLinAddress,
     ) -> Result<u32> {
         self.prepare_rmw_linear_dword(laddr)?;
+        self.check_rmw_write_permissions(laddr, 4)?;
         Ok(self.read_prepared_rmw_dword())
     }
 
@@ -2949,18 +2966,22 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             addr_write_u64(pages, val);
         } else if pages == 1 {
             let paddr = self.address_xlation.paddress1;
-            self.mem_write_qword(paddr, val);
+            if !self.mmio_write(paddr, 8, val) {
+                self.mem_write_qword(paddr, val);
+            }
         } else {
             let bytes = val.to_le_bytes();
             let len1 = self.address_xlation.len1 as usize;
-            let len2 = self.address_xlation.len2 as usize;
             let p0 = self.address_xlation.paddress1;
             let p1 = self.address_xlation.paddress2;
-            for (i, &byte) in bytes[..len1].iter().enumerate() {
-                self.mem_write_byte(p0 + i as u64, byte);
-            }
-            for (i, &byte) in bytes[len1..len1 + len2].iter().enumerate() {
-                self.mem_write_byte(p1 + i as u64, byte);
+            let (first, second) = bytes.split_at(len1);
+            for (paddr, fragment) in [(p0, first), (p1, second)] {
+                for (index, &byte) in fragment.iter().enumerate() {
+                    let address = paddr + index as u64;
+                    if !self.mmio_write(address, 1, u64::from(byte)) {
+                        self.mem_write_byte(address, byte);
+                    }
+                }
             }
         }
     }
@@ -3334,7 +3355,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         seg: BxSegregs,
         offset: BxEffAddress,
     ) -> Result<u8> {
-        self.prepare_rmw_virtual_byte_64(seg, offset)?;
+        let laddr = self.prepare_rmw_virtual_byte_64(seg, offset)?;
+        self.check_rmw_write_permissions(laddr, 1)?;
         Ok(self.read_prepared_rmw_byte())
     }
 
@@ -3359,7 +3381,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         seg: BxSegregs,
         offset: BxEffAddress,
     ) -> Result<u16> {
-        self.prepare_rmw_virtual_word_64(seg, offset)?;
+        let laddr = self.prepare_rmw_virtual_word_64(seg, offset)?;
+        self.check_rmw_write_permissions(laddr, 2)?;
         Ok(self.read_prepared_rmw_word())
     }
 
@@ -3384,7 +3407,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         seg: BxSegregs,
         offset: BxEffAddress,
     ) -> Result<u32> {
-        self.prepare_rmw_virtual_dword_64(seg, offset)?;
+        let laddr = self.prepare_rmw_virtual_dword_64(seg, offset)?;
+        self.check_rmw_write_permissions(laddr, 4)?;
         Ok(self.read_prepared_rmw_dword())
     }
 }

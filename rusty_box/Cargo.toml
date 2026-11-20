@@ -74,6 +74,16 @@ path = "examples/hardware_topology/recover_topology.rs"
 required-features = ["std"]
 
 [[example]]
+name = "vnext_cpu"
+path = "examples/vnext/cpu.rs"
+required-features = ["std"]
+
+[[example]]
+name = "vnext_event_device"
+path = "examples/vnext/event_device.rs"
+required-features = ["std"]
+
+[[example]]
 name = "alpine"
 path = "examples/alpine/alpine.rs"
 required-features = ["std"]

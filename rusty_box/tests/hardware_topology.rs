@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use gpu::Gpu;
 use register_bank::{RegisterBank, RegisterChanged};
 use rusty_box::config::BxPhyAddress;
-use rusty_box::cpu::instrumentation::EmuStopReason;
-use rusty_box::cpu::registers::{EAX, RIP};
+use rusty_box::cpu::instrumentation::{EmuStopReason, MemPerms};
+use rusty_box::cpu::registers::{EAX, ECX, EDI, RAX, RIP};
 use rusty_box::cpu::{CpuError, CpuSetupMode};
 use rusty_box::emulator::MachineBuilder;
 use rusty_box::emulator::hardware::{
@@ -382,4 +382,242 @@ fn a_refused_join_returns_live_models_and_handlers_for_rewiring() {
     drop(pc.detach_mmio_bus(phy(BASE)).unwrap());
     assert_eq!(models.load(Ordering::Relaxed), 2);
     assert_eq!(handlers.load(Ordering::Relaxed), 2);
+}
+
+struct RegisterBytes {
+    base: u64,
+    bytes: [u8; 8],
+}
+
+impl RegisterBytes {
+    fn read(&mut self, offset: WindowOffset, len: usize) -> u64 {
+        let index = (offset.get() - self.base) as usize;
+        let mut value = [0; 8];
+        value[..len].copy_from_slice(&self.bytes[index..index + len]);
+        u64::from_le_bytes(value)
+    }
+
+    fn write(&mut self, access: MmioWrite) -> Option<MmioWrite> {
+        let index = (access.offset.get() - self.base) as usize;
+        self.bytes[index..index + access.len]
+            .copy_from_slice(&access.value.to_le_bytes()[..access.len]);
+        Some(access)
+    }
+}
+
+fn qword_instruction(opcode: u8, target: u32) -> [u8; 7] {
+    let mut code = [0x48, opcode, 0x05, 0, 0, 0, 0];
+    code[3..].copy_from_slice(&(target as i32 - (CODE as i32 + 7)).to_le_bytes());
+    code
+}
+
+#[test]
+fn qword_rmw_reads_and_writes_the_device_instead_of_the_ram_underneath() {
+    for split in [false, true] {
+        let mut pc =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64).unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let leaf = |base| {
+            let reads = Arc::clone(&reads);
+            let writes = Arc::clone(&writes);
+            MmioWindow::registers(
+                RegisterBytes {
+                    base,
+                    bytes: [0xFF; 8],
+                },
+                move |register, offset, len| {
+                    assert_eq!(len, if split { 1 } else { 8 });
+                    reads.fetch_add(1, Ordering::Relaxed);
+                    RegisterBytes::read(register, offset, len)
+                },
+                RegisterBytes::write,
+            )
+            .on(move |event| {
+                assert_eq!(event.value, 0);
+                assert_eq!(event.len, if split { 1 } else { 8 });
+                writes.fetch_add(1, Ordering::Relaxed);
+            })
+        };
+        let target = if split { BASE + 4095 } else { BASE };
+        pc.mem_write_u64_le(phy(target), 17).unwrap();
+        if split {
+            leaf(4095)
+                .then(leaf(0))
+                .unwrap()
+                .install(&mut pc, phy(BASE))
+                .unwrap();
+        } else {
+            leaf(0).install(&mut pc, phy(BASE)).unwrap();
+        }
+        // inc qword [rip + displacement]
+        assert!(matches!(
+            start(&mut pc, &qword_instruction(0xFF, target), 1),
+            EmuStopReason::CountExhausted
+        ));
+        let expected = if split { 8 } else { 1 };
+        assert_eq!(reads.load(Ordering::Relaxed), expected);
+        assert_eq!(writes.load(Ordering::Relaxed), expected);
+        assert_eq!(pc.mem_read_u64_le(phy(target)).unwrap(), 17);
+    }
+}
+
+#[test]
+fn qword_write_permissions_are_checked_before_an_mmio_access() {
+    // A MOV writes the first page. A split INC must check its second page
+    // before consuming any potentially side-effectful register reads.
+    for (opcode, target, denied) in [(0x89, BASE, BASE), (0xFF, BASE + 4095, BASE + 4096)] {
+        let mut pc =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64).unwrap();
+        let mount = |base| {
+            MmioWindow::registers(
+                RegisterBytes {
+                    base,
+                    bytes: [0; 8],
+                },
+                |_, _, _| panic!("permission refusal must precede the MMIO read"),
+                |_, _: MmioWrite| -> Option<MmioWrite> {
+                    panic!("permission refusal must precede the MMIO write")
+                },
+            )
+        };
+        mount(if target == BASE { 0 } else { 4095 })
+            .then(mount(0))
+            .unwrap()
+            .install(&mut pc, phy(BASE))
+            .unwrap();
+        pc.mem_protect(phy(denied), 4096, MemPerms::READ);
+        pc.regs().write(RAX, 23);
+        pc.mem_write_u64_le(phy(target), 17).unwrap();
+        pc.mem_write(phy(CODE), &qword_instruction(opcode, target))
+            .unwrap();
+        pc.emu_start(CODE.into(), None, None, Some(1)).unwrap();
+        assert_ne!(pc.regs().read(RIP), u64::from(CODE) + 7);
+        assert_eq!(pc.mem_read_u64_le(phy(target)).unwrap(), 17);
+    }
+}
+
+#[test]
+fn warm_scalar_rmw_translations_respect_updated_host_write_permissions() {
+    let forms: &[&[u8]] = &[
+        &[0xFE, 0x05],
+        &[0x66, 0xFF, 0x05],
+        &[0xFF, 0x05],
+        &[0x48, 0xFF, 0x05],
+    ];
+    for form in forms {
+        let mut pc =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64).unwrap();
+        pc.mem_write_u64_le(phy(BASE), 17).unwrap();
+        let next_ip = CODE + form.len() as u32 + 4;
+        let mut increment = form.to_vec(); // inc [rip + displacement]
+        increment.extend_from_slice(&(BASE - next_ip).to_le_bytes());
+        start(&mut pc, &increment, 1);
+        pc.emu_start(CODE.into(), None, None, Some(1)).unwrap();
+        assert_eq!(pc.mem_read_u64_le(phy(BASE)).unwrap(), 19);
+
+        pc.mem_protect(phy(BASE), 4096, MemPerms::READ);
+        pc.emu_start(CODE.into(), None, None, Some(1)).unwrap();
+        assert_ne!(pc.regs().read(RIP), u64::from(next_ip));
+        assert_eq!(pc.mem_read_u64_le(phy(BASE)).unwrap(), 19);
+    }
+}
+
+#[test]
+fn split_store_commits_both_bytes_and_reports_the_first_subscriber_error() {
+    let mut pc = pc();
+    let writes = Arc::new(AtomicUsize::new(0));
+    let bank = |left| {
+        let writes = Arc::clone(&writes);
+        MmioWindow::registers(
+            RegisterBank::new(0),
+            RegisterBank::read,
+            RegisterBank::write,
+        )
+        .try_on(move |event| {
+            let delivered = writes.fetch_add(1, Ordering::Relaxed);
+            if left {
+                assert_eq!((delivered, event.value), (0, 0x34));
+                Err(SubscriberError("left observer failed"))
+            } else {
+                assert_eq!((delivered, event.value), (1, 0x12));
+                Err(SubscriberError("right observer failed"))
+            }
+        })
+    };
+    bank(true)
+        .then(bank(false))
+        .unwrap()
+        .install(&mut pc, phy(BASE))
+        .unwrap();
+
+    let target = BASE + 4095;
+    let mut code = vec![0x66, 0xC7, 0x05]; // mov word [target],0x1234
+    code.extend_from_slice(&target.to_le_bytes());
+    code.extend_from_slice(&[0x34, 0x12, 0x40]); // inc eax follows the split store
+    pc.mem_write(phy(CODE), &code).unwrap();
+    assert!(matches!(
+        pc.emu_start(CODE.into(), None, None, Some(2)),
+        Err(Error::Cpu(CpuError::MmioSubscriber(error))) if error == MmioSubscriberError {
+            address: phy(target), source: SubscriberError("left observer failed"),
+        }
+    ));
+    let next = u64::from(CODE) + 9;
+    assert_eq!(pc.regs().read(RIP), next);
+    assert_eq!(writes.load(Ordering::Relaxed), 2);
+    pc.regs().write(EAX, 0);
+    pc.emu_start(next, None, None, Some(1)).unwrap();
+    assert_eq!(pc.regs().read(EAX), 1);
+    assert_eq!(read(&mut pc, BASE), 0x34);
+    assert_eq!(read(&mut pc, BASE + 4096), 0x12);
+    assert_eq!(writes.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn rep_resumes_after_the_committed_element_on_subscriber_error_or_stop() {
+    let mut pc = pc();
+    let writes = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&writes);
+    MmioWindow::registers(
+        RegisterBytes {
+            base: 0,
+            bytes: [0; 8],
+        },
+        RegisterBytes::read,
+        RegisterBytes::write,
+    )
+    .try_on(move |event| {
+        let offset = observed.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(event.offset.get(), offset as u64);
+        assert_eq!((event.len, event.value), (1, 0x5A));
+        match offset {
+            0 => Err(SubscriberError("first element observed")),
+            1 => Ok(Reaction::Stop),
+            _ => Ok(Reaction::Continue),
+        }
+    })
+    .install(&mut pc, phy(BASE))
+    .unwrap();
+
+    pc.mem_write(phy(CODE), &[0xF3, 0xAA, 0x90]).unwrap(); // rep stosb; nop
+    pc.regs().write(EDI, BASE);
+    pc.regs().write(ECX, 3);
+    pc.regs().write(EAX, 0x5A);
+    assert!(matches!(
+        pc.emu_start(CODE.into(), None, None, Some(4)),
+        Err(Error::Cpu(CpuError::MmioSubscriber(error))) if error.address == phy(BASE)
+    ));
+    assert_eq!(pc.regs().read(RIP), u64::from(CODE));
+    assert_eq!((pc.regs().read(EDI), pc.regs().read(ECX)), (BASE + 1, 2));
+    assert!(matches!(
+        pc.emu_start(CODE.into(), None, None, Some(3)).unwrap(),
+        EmuStopReason::Stopped
+    ));
+    assert_eq!(pc.regs().read(RIP), u64::from(CODE));
+    assert_eq!((pc.regs().read(EDI), pc.regs().read(ECX)), (BASE + 2, 1));
+    pc.emu_start(CODE.into(), None, None, Some(1)).unwrap();
+    assert_eq!(pc.regs().read(RIP), u64::from(CODE) + 2);
+    assert_eq!((pc.regs().read(EDI), pc.regs().read(ECX)), (BASE + 3, 0));
+    assert_eq!(writes.load(Ordering::Relaxed), 3);
+    assert_eq!(read(&mut pc, BASE), 0x005A_5A5A);
 }
