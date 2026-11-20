@@ -613,6 +613,9 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
 
     /// Register an MMIO region. Physical addresses in [addr, addr+size)
     /// dispatch to callbacks instead of RAM.
+    ///
+    /// Panics if the range wraps, is occupied by board MMIO or a mounted
+    /// device, or intersects a reserved interrupt-controller range.
     #[cfg(feature = "alloc")]
     pub fn mmio_map(
         &mut self,
@@ -621,8 +624,40 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
         read_cb: alloc::boxed::Box<dyn FnMut(BxPhyAddress, usize) -> u64 + Send>,
         write_cb: alloc::boxed::Box<dyn FnMut(BxPhyAddress, usize, u64) + Send>,
     ) {
+        if let Some(last_offset) = size.checked_sub(1) {
+            let Some(end) = addr.get().checked_add(last_offset) else {
+                panic!("callback MMIO address overflow");
+            };
+            assert!(
+                !self.board_owns_mmio(addr, BxPhyAddress::new(end)),
+                "callback MMIO overlaps board hardware"
+            );
+        }
         self.cpu_mut().mmio.map(addr, size, read_cb, write_cb);
         self.cpu_mut().invalidate_host_memory_mappings();
+    }
+
+    fn board_owns_mmio(&self, start: BxPhyAddress, end: BxPhyAddress) -> bool {
+        use crate::cpu::apic::BX_LAPIC_BASE_ADDR;
+        use crate::iodev::ioapic::IOAPIC_ROUTABLE_RANGE;
+
+        let overlaps = |base: BxPhyAddress, last: BxPhyAddress| base <= end && start <= last;
+        let overlaps_page =
+            |page: BxPhyAddress| overlaps(page, BxPhyAddress::new(page.get() | 0xFFF));
+        if overlaps_page(BX_LAPIC_BASE_ADDR)
+            || (*IOAPIC_ROUTABLE_RANGE.start() <= end.get()
+                && start.get() <= *IOAPIC_ROUTABLE_RANGE.end())
+            || self
+                .memory
+                .mmio
+                .regions()
+                .any(|region| overlaps(region.begin, region.end))
+        {
+            return true;
+        }
+        let lapic = &self.cpu().lapic;
+        let base = lapic.get_base();
+        lapic.is_selected(base) && overlaps_page(base)
     }
 
     /// Remove MMIO regions overlapping [addr, addr+size).
@@ -672,7 +707,7 @@ impl<T: crate::cpu::Instrumentation> Emulator<T> {
         if address.page_offset() != 0 {
             return Err(MmioAttachRefusal::Unaligned);
         }
-        if self.memory.mmio.overlaps_page(address) || self.cpu().lapic.is_selected(address) {
+        if self.board_owns_mmio(address, BxPhyAddress::new(address.get() | 0xFFF)) {
             return Err(MmioAttachRefusal::Overlap);
         }
         Ok(())
@@ -681,7 +716,7 @@ impl<T: crate::cpu::Instrumentation> Emulator<T> {
     /// Place an endpoint on one MMIO page and route its output to an unused
     /// ISA line selected by the caller. A later guest IRQ remap can share
     /// the wire, with the line asserted while either output is high.
-    /// Keep the page clear of guest reconfiguration of board MMIO windows.
+    /// Guest PCI BAR and LAPIC moves cannot take over this page.
     pub fn attach_composed_mmio(
         &mut self,
         address: BxPhyAddress,
@@ -730,14 +765,7 @@ impl<T: crate::cpu::Instrumentation> Emulator<T> {
             .checked_add(size - 1)
             .map(BxPhyAddress::new)
             .ok_or(MmioBusAttachRefusal::AddressOverflow)?;
-        let lapic_base = self.cpu().lapic.get_base();
-        if self
-            .memory
-            .mmio
-            .regions()
-            .any(|region| region.begin <= end && base <= region.end)
-            || (base <= lapic_base && lapic_base <= end && self.cpu().lapic.is_selected(lapic_base))
-        {
+        if self.board_owns_mmio(base, end) {
             return Err(PcDeviceAttachRefusal::Address(MmioAttachRefusal::Overlap).into());
         }
         let slot = self

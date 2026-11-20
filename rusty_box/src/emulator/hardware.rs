@@ -9,7 +9,8 @@
 use rusty_box_devices::api::IrqLine;
 pub use rusty_box_devices::api::WindowOffset;
 pub use rusty_box_devices::composition::{
-    DmaWrite, Emit, InterruptOutput, IrqMmioModel, MmioModel, MmioWrite, Reaction, Subscriptions,
+    DmaWrite, Emit, ExecutionRequest, InterruptOutput, IrqMmioModel, MmioModel, MmioWrite,
+    Subscriptions,
 };
 
 use crate::config::BxPhyAddress;
@@ -53,7 +54,7 @@ pub trait PcMmioDevice: Send {
         access: MmioWrite,
         dma: &mut PcDma<'_>,
         irq: &mut PcInterrupt<'_>,
-    ) -> Result<Reaction, SubscriberError>;
+    ) -> Result<ExecutionRequest, SubscriberError>;
 }
 
 /// Optional MMIO write observer. It runs after the device and its subscribers.
@@ -62,14 +63,14 @@ pub struct ObserveWrites<D, F> {
     observe: F,
 }
 
-impl<D, F: FnMut(MmioWrite, Result<Reaction, SubscriberError>)> ObserveWrites<D, F> {
+impl<D, F: FnMut(MmioWrite, Result<ExecutionRequest, SubscriberError>)> ObserveWrites<D, F> {
     pub fn new(device: D, observe: F) -> Self {
         Self { device, observe }
     }
 }
 
-impl<D: PcMmioDevice, F: FnMut(MmioWrite, Result<Reaction, SubscriberError>) + Send> PcMmioDevice
-    for ObserveWrites<D, F>
+impl<D: PcMmioDevice, F: FnMut(MmioWrite, Result<ExecutionRequest, SubscriberError>) + Send>
+    PcMmioDevice for ObserveWrites<D, F>
 {
     fn read(&mut self, offset: WindowOffset, len: usize) -> u64 {
         self.device.read(offset, len)
@@ -80,7 +81,7 @@ impl<D: PcMmioDevice, F: FnMut(MmioWrite, Result<Reaction, SubscriberError>) + S
         access: MmioWrite,
         dma: &mut PcDma<'_>,
         irq: &mut PcInterrupt<'_>,
-    ) -> Result<Reaction, SubscriberError> {
+    ) -> Result<ExecutionRequest, SubscriberError> {
         let result = self.device.write(access, dma, irq);
         (self.observe)(access, result);
         result
@@ -100,7 +101,7 @@ impl<D: PcMmioDevice> PcAttachment<D> {
         Self { page, line, device }
     }
 
-    pub fn observe_writes<F: FnMut(MmioWrite, Result<Reaction, SubscriberError>) + Send>(
+    pub fn observe_writes<F: FnMut(MmioWrite, Result<ExecutionRequest, SubscriberError>) + Send>(
         self,
         observe: F,
     ) -> PcAttachment<ObserveWrites<D, F>> {
@@ -314,8 +315,8 @@ impl PcInterrupt<'_> {
     fn with_line(
         &mut self,
         line: IsaIrq,
-        operation: impl FnOnce(&mut PcInterrupt<'_>) -> Result<Reaction, SubscriberError>,
-    ) -> Result<Reaction, SubscriberError> {
+        operation: impl FnOnce(&mut PcInterrupt<'_>) -> Result<ExecutionRequest, SubscriberError>,
+    ) -> Result<ExecutionRequest, SubscriberError> {
         if self.routes.mask() & line.mask() == 0 {
             return Err(SubscriberError("MMIO window IRQ is outside this route"));
         }

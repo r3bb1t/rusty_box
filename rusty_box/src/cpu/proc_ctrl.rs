@@ -1777,12 +1777,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.set_tsc(val, ticks);
             }
             BX_MSR_APICBASE => {
-                self.msr.apicbase = val as _;
-                let apicbase = self.msr.apicbase;
-                self.lapic.set_base(apicbase);
-                self.invalidate_host_memory_mappings();
-                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-                self.sync_lapic_events();
+                if !self.try_set_apic_base(val) {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
             }
             BX_MSR_PLATFORM_ID => {
                 tracing::trace!("WRMSR: PLATFORM_ID is read-only");

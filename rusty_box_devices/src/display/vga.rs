@@ -7683,6 +7683,14 @@ impl StdVga {
         Some(relocate)
     }
 
+    /// Keep the installed LFB decoder and restore its PCI BAR readback.
+    pub(crate) fn refuse_pending_lfb_relocate(&mut self) {
+        if let Some((old_base, _)) = self.pending_lfb_relocate.take() {
+            let flags = u32::from(self.pci_conf[0x10] & 0xF);
+            self.pci_conf[0x10..0x14].copy_from_slice(&(old_base | flags).to_le_bytes());
+        }
+    }
+
     /// Inspect the BAR2 relocation awaiting memory-handler re-registration.
     pub(crate) fn peek_pending_mmio_relocate(&self) -> Option<(u32, u32)> {
         self.pending_mmio_base
@@ -7695,6 +7703,14 @@ impl StdVga {
         let relocate = (self.mmio_base, new_base);
         self.mmio_base = new_base;
         Some(relocate)
+    }
+
+    /// Keep the installed register decoder and restore its PCI BAR readback.
+    pub(crate) fn refuse_pending_mmio_relocate(&mut self) {
+        if self.pending_mmio_base.take().is_some() {
+            let flags = u32::from(self.pci_conf[0x18] & 0xF);
+            self.pci_conf[0x18..0x1C].copy_from_slice(&(self.mmio_base | flags).to_le_bytes());
+        }
     }
 
     /// Returns the desired VGA BAR targets encoded in PCI configuration without

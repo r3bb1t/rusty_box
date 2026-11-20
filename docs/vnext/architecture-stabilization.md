@@ -2,6 +2,8 @@
 
 Reviewed from `d7492382bad47c0b2e8ab7fe2b948675e3cf4bf4` on `experimental/6-x86-cpu-only-memory`.
 
+The preview milestone implements the address-space ownership policy and the AArch64 device reuse proposed here. [vNext 0.1 preview](preview-0.1.md)
+
 ## What should remain
 
 | Boundary | Keep |

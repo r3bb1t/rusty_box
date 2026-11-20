@@ -44,6 +44,7 @@ use crate::Result;
 use crate::config::BxPhyAddress;
 use crate::cpu::ResetReason;
 use crate::memory::BxMemC;
+use crate::memory::mmio::MmioRegistry;
 use crate::pc_system::{BxPcSystemC, Repeat};
 #[cfg(feature = "std")]
 use crate::snapshot::{SnapError, SnapRead, SnapResult, SnapWrite, checked_snapshot_len_add};
@@ -1142,6 +1143,32 @@ impl DeviceManager {
         }
     }
 
+    /// Refuse guest BAR assignments that would shadow host-mounted devices.
+    fn refuse_external_bar_conflicts(&mut self, external: &MmioRegistry) {
+        use rusty_box_devices::display::vga::PCI_VGA_MMIO_SIZE;
+
+        if external.is_empty() {
+            return;
+        }
+        let overlaps = |(_, base), size| {
+            base != 0 && external.overlaps_window(BxPhyAddress::new(u64::from(base)), size)
+        };
+        if self
+            .vga
+            .peek_pending_lfb_relocate()
+            .is_some_and(|request| overlaps(request, u64::from(self.vga.lfb_size())))
+        {
+            self.vga.refuse_pending_lfb_relocate();
+        }
+        if self
+            .vga
+            .peek_pending_mmio_relocate()
+            .is_some_and(|request| overlaps(request, u64::from(PCI_VGA_MMIO_SIZE)))
+        {
+            self.vga.refuse_pending_mmio_relocate();
+        }
+    }
+
     /// Apply every queued PCI/memory effect in Bochs-observable order.
     ///
     /// Each producer flag is cleared only after its operation succeeds. A
@@ -1151,6 +1178,7 @@ impl DeviceManager {
         &mut self,
         io: &mut BxDevicesC,
         mem: &mut crate::memory::BxMemC,
+        external: &MmioRegistry,
     ) -> Result<MachineBoundaryEffects> {
         let mut effects = MachineBoundaryEffects::default();
 
@@ -1203,6 +1231,7 @@ impl DeviceManager {
             self.apply_chipset_effect(ChipsetEffect::BiosRom1Meg(enabled), mem)?;
         }
         if self.pending.contains(PendingPlatformWork::VGA_BARS) {
+            self.refuse_external_bar_conflicts(external);
             effects.memory_mapping_changed |= self.reregister_vga_bars(mem)?;
             self.pending.remove(PendingPlatformWork::VGA_BARS);
         }
@@ -3367,7 +3396,7 @@ mod tests {
                 dm.pending.contains(PendingPlatformWork::SMRAM),
                 "writing 0x72 must set the deferred flag"
             );
-            dm.apply_pending_machine_boundary(&mut io, &mut mem)
+            dm.apply_pending_machine_boundary(&mut io, &mut mem, &MmioRegistry::new())
                 .unwrap();
             assert!(
                 !dm.pending.contains(PendingPlatformWork::SMRAM),
@@ -3386,7 +3415,7 @@ mod tests {
             dm.pci_conf_addr = conf_addr(0x00, 0x72);
             dm.pci_write(IoPort::new(0xCFE), 0x02, 1);
             assert!(dm.pending.contains(PendingPlatformWork::SMRAM));
-            dm.apply_pending_machine_boundary(&mut io, &mut mem)
+            dm.apply_pending_machine_boundary(&mut io, &mut mem, &MmioRegistry::new())
                 .unwrap();
             assert_eq!(
                 mem.smram_state(),
@@ -3403,7 +3432,7 @@ mod tests {
             dm.pci_conf_addr = conf_addr(0x00, 0x72);
             dm.pci_write(IoPort::new(0xCFE), 0x68, 1);
             assert!(dm.pending.contains(PendingPlatformWork::SMRAM));
-            dm.apply_pending_machine_boundary(&mut io, &mut mem)
+            dm.apply_pending_machine_boundary(&mut io, &mut mem, &MmioRegistry::new())
                 .unwrap();
             assert_eq!(
                 mem.smram_state(),
@@ -3444,7 +3473,7 @@ mod tests {
             dm.pci_conf_addr = conf_addr(0x00, 0x59);
             dm.pci_write(IoPort::new(0xCFD), 0x30, 1); // area12: read=1, write=1
             assert!(dm.pending.contains(PendingPlatformWork::PAM));
-            dm.apply_pending_machine_boundary(&mut io, &mut mem)
+            dm.apply_pending_machine_boundary(&mut io, &mut mem, &MmioRegistry::new())
                 .unwrap();
             assert_eq!(
                 mem.memory_type(12, 1),
@@ -3465,7 +3494,7 @@ mod tests {
                 dm.pending.contains(PendingPlatformWork::PAM),
                 "reset must mark PAM for re-application to memory"
             );
-            dm.apply_pending_machine_boundary(&mut io, &mut mem)
+            dm.apply_pending_machine_boundary(&mut io, &mut mem, &MmioRegistry::new())
                 .unwrap();
             assert!(
                 !dm.pending.contains(PendingPlatformWork::PAM),
@@ -3565,7 +3594,7 @@ mod tests {
             );
             assert!(!mem.bios_write_enabled());
 
-            dm.apply_pending_machine_boundary(&mut io, &mut mem)
+            dm.apply_pending_machine_boundary(&mut io, &mut mem, &MmioRegistry::new())
                 .unwrap();
             assert!(mem.memory_type(12, 1));
             assert_eq!(

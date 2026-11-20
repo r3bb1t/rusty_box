@@ -11,7 +11,7 @@ use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::CpuSetupMode;
 use rusty_box::cpu::instrumentation::EmuStopReason;
 use rusty_box::cpu::registers::RIP;
-use rusty_box::emulator::hardware::{IsaIrq, MmioWindow, Reaction};
+use rusty_box::emulator::hardware::{ExecutionRequest, IsaIrq, MmioWindow};
 use rusty_box::{Emulator, EmulatorConfig};
 
 fn store(code: &mut Vec<u8>, address: u32, value: u32) {
@@ -39,9 +39,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .try_on(move |_| {
                 Ok(if stop {
-                    Reaction::Stop
+                    ExecutionRequest::Stop
                 } else {
-                    Reaction::Continue
+                    ExecutionRequest::None
                 })
             })
     };

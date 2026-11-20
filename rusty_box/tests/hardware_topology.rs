@@ -17,9 +17,9 @@ use rusty_box::cpu::registers::{EAX, ECX, EDI, RAX, RIP};
 use rusty_box::cpu::{CpuError, CpuSetupMode};
 use rusty_box::emulator::MachineBuilder;
 use rusty_box::emulator::hardware::{
-    InterruptOutput, IrqMmioModel, IsaIrq, MmioBusAttachRefusal, MmioSubscriberError,
-    MmioTopologyError, MmioWindow, MmioWrite, PcDeviceAttachRefusal, PcMmioDevice, Reaction,
-    SubscriberError, Subscriptions, WindowOffset, register_window,
+    ExecutionRequest, InterruptOutput, IrqMmioModel, IsaIrq, MmioBusAttachRefusal,
+    MmioSubscriberError, MmioTopologyError, MmioWindow, MmioWrite, PcDeviceAttachRefusal,
+    PcMmioDevice, SubscriberError, Subscriptions, WindowOffset, register_window,
 };
 use rusty_box::memory::mmio::MmioAttachRefusal;
 use rusty_box::{Emulator, EmulatorConfig, Error};
@@ -71,6 +71,221 @@ fn irr(pc: &mut Emulator, port: u8) -> u8 {
     pc.regs().read(EAX) as u8
 }
 
+fn guest_vga_bar(pc: &mut Emulator, register: u8, write: Option<u32>) -> u32 {
+    let address = 0x8000_1000u32 | u32::from(register);
+    let mut code = vec![0xBA, 0xF8, 0x0C, 0, 0, 0xB8]; // mov edx,0xcf8; mov eax,address
+    code.extend_from_slice(&address.to_le_bytes());
+    code.extend_from_slice(&[0xEF, 0xBA, 0xFC, 0x0C, 0, 0]); // out dx,eax; mov edx,0xcfc
+    let mut count = 5;
+    if let Some(write) = write {
+        code.push(0xB8); // mov eax,write; out dx,eax
+        code.extend_from_slice(&write.to_le_bytes());
+        code.push(0xEF);
+        count += 2;
+    }
+    code.push(0xED); // in eax,dx
+    start(pc, &code, count);
+    pc.regs().read(EAX)
+}
+
+#[test]
+fn guest_pci_bars_cannot_take_over_a_live_nested_route() {
+    const BAR0: u8 = 0x10;
+    const BAR2: u8 = 0x18;
+    const REQUEST: u32 = 0xD000_0000;
+    let mut pc = MachineBuilder::new(EmulatorConfig {
+        pci_vga: true,
+        ..EmulatorConfig::default()
+    })
+    .build()
+    .unwrap();
+    pc.setup_cpu_mode(CpuSetupMode::FlatProtected32).unwrap();
+
+    // Change to known working assignments, then issue an ordinary PCI size probe.
+    let old_lfb = guest_vga_bar(&mut pc, BAR0, Some(0xE800_0000));
+    let old_regs = guest_vga_bar(&mut pc, BAR2, Some(0xF000_0000));
+    assert_eq!(old_lfb & !0xF, 0xE800_0000);
+    assert_eq!(old_regs & !0xF, 0xF000_0000);
+    let mask = guest_vga_bar(&mut pc, BAR0, Some(u32::MAX)) & !0xF;
+    let size = (!mask).wrapping_add(1);
+    assert!(size >= 8192 && size.is_power_of_two());
+
+    // The host root claims the last page of the requested BAR, and another
+    // page outside it. Neither the BAR's first byte nor its page is mounted.
+    let mount = REQUEST + size - 4096;
+    let gpu_page = mount + 4096;
+    let deliveries = Arc::new(AtomicUsize::new(0));
+    let gpu_deliveries = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&deliveries);
+    let root = MmioWindow::registers(
+        RegisterBank::new(17),
+        RegisterBank::read,
+        RegisterBank::write,
+    )
+    .on(move |event| {
+        assert_eq!(event.value, 42);
+        observed.fetch_add(1, Ordering::Relaxed);
+    })
+    .then(gpu_window(5, DMA_DATA, false, Arc::clone(&gpu_deliveries)))
+    .unwrap();
+    root.install(&mut pc, phy(mount)).unwrap();
+    assert_eq!(read(&mut pc, mount), 17);
+    assert_eq!(guest_vga_bar(&mut pc, BAR0, Some(REQUEST)), old_lfb);
+    assert_eq!(guest_vga_bar(&mut pc, BAR2, Some(gpu_page)), old_regs);
+
+    let mut code = Vec::new();
+    store(&mut code, mount, 42);
+    store(&mut code, gpu_page, DMA_DATA);
+    store(&mut code, gpu_page + 4, 0x1122_3344);
+    start(&mut pc, &code, 3);
+    assert_eq!(read(&mut pc, mount), 42);
+    assert_eq!(read(&mut pc, DMA_DATA), 0x1122_3344);
+    assert_eq!(deliveries.load(Ordering::Relaxed), 1);
+    assert_eq!(gpu_deliveries.load(Ordering::Relaxed), 1);
+    assert_ne!(irr(&mut pc, 0x20) & (1 << 5), 0);
+
+    assert_eq!(guest_vga_bar(&mut pc, BAR2, Some(0)) & !0xF, 0);
+    assert_eq!(
+        guest_vga_bar(&mut pc, BAR2, Some(0xF100_0000)) & !0xF,
+        0xF100_0000
+    );
+    assert!(pc.detach_mmio_bus(phy(mount)).is_some());
+    assert_eq!(guest_vga_bar(&mut pc, BAR0, Some(REQUEST)) & !0xF, REQUEST);
+}
+
+#[test]
+fn guest_lapic_relocation_faults_before_taking_over_the_host_page() {
+    const APIC_BASE_MSR: u32 = 0x1B;
+    const RESET_PAGE: u32 = 0xFEE0_0000;
+    const MMIO: u32 = BASE + 4096;
+    const FREE_PAGE: u32 = 0x70000;
+    const IDT_PTR: u32 = 0x20000;
+    const IDT: u32 = IDT_PTR + 8;
+    const HANDLER: u32 = 0x12000;
+    let mut pc = board();
+    let original = pc.msr_read(APIC_BASE_MSR).unwrap() as u32;
+    let flags = original & 0xFFF;
+    assert_eq!(original & !0xFFF, RESET_PAGE);
+    let version = read(&mut pc, RESET_PAGE + 0x30);
+
+    let observed = Arc::new(AtomicUsize::new(0));
+    let deliveries = Arc::clone(&observed);
+    let root = MmioWindow::registers(
+        RegisterBank::new(7),
+        RegisterBank::read,
+        RegisterBank::write,
+    )
+    .with_pages(NonZeroU16::new(2).unwrap())
+    .on(move |event| {
+        assert_eq!(event.offset.get(), 4096);
+        deliveries.fetch_add(1, Ordering::Relaxed);
+    });
+    root.install(&mut pc, phy(BASE)).unwrap();
+
+    // Protected-mode #GP gate to an actual guest handler. Record the error
+    // code in EBX, skip the two-byte faulting instruction, then IRET.
+    let mut idtr = [0xFF, 0x03, 0, 0, 0, 0];
+    idtr[2..].copy_from_slice(&IDT.to_le_bytes());
+    pc.mem_write(phy(IDT_PTR), &idtr).unwrap();
+    let [lo, hi, upper_lo, upper_hi] = HANDLER.to_le_bytes();
+    pc.mem_write(
+        phy(IDT + 13 * 8),
+        &[lo, hi, 8, 0, 0, 0x8E, upper_lo, upper_hi],
+    )
+    .unwrap();
+    pc.mem_write(phy(HANDLER), &[0x5B, 0x83, 0x04, 0x24, 2, 0xCF])
+        .unwrap();
+    pc.regs().write(rusty_box::cpu::registers::ESP, 0x21000);
+    pc.regs().write(rusty_box::cpu::registers::EBX, u32::MAX);
+    let mut code = vec![0x0F, 0x01, 0x1D]; // lidt [IDT_PTR]
+    code.extend_from_slice(&IDT_PTR.to_le_bytes());
+    code.extend_from_slice(&[0x31, 0xD2, 0xB9, 0x1B, 0, 0, 0, 0xB8]); // xor edx,edx; mov ecx,0x1b; mov eax
+    code.extend_from_slice(&(MMIO | flags).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x30, 0x0F, 0x32]); // wrmsr (faults); rdmsr (after IRET)
+    let end = u64::from(CODE) + code.len() as u64;
+    pc.mem_write(phy(CODE), &code).unwrap();
+    pc.emu_start(CODE.into(), Some(end), None, Some(20))
+        .unwrap();
+    assert_eq!(pc.regs().read(RIP), end);
+    assert_eq!(pc.regs().read(rusty_box::cpu::registers::EBX), 0);
+    assert_eq!(pc.regs().read(EAX), original);
+    assert!(
+        pc.msr_write(APIC_BASE_MSR, u64::from(MMIO | flags))
+            .is_err()
+    );
+    assert_eq!(read(&mut pc, RESET_PAGE + 0x30), version);
+    let mut code = Vec::new();
+    store(&mut code, MMIO, 44);
+    start(&mut pc, &code, 1);
+    assert_eq!(read(&mut pc, MMIO), 44);
+    assert_eq!(observed.load(Ordering::Relaxed), 1);
+
+    // A successful guest move invalidates the warm host RAM mapping in
+    // both directions. Inspect the new version register in the same run.
+    let ram = 0x1234_5678u32;
+    pc.mem_write(phy(FREE_PAGE + 0x30), &ram.to_le_bytes())
+        .unwrap();
+    assert_eq!(read(&mut pc, FREE_PAGE + 0x30), ram);
+    let mut code = vec![0x31, 0xD2, 0xB9, 0x1B, 0, 0, 0, 0xB8];
+    code.extend_from_slice(&(FREE_PAGE | flags).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x30, 0xA1]); // wrmsr; mov eax,[FREE_PAGE+0x30]
+    code.extend_from_slice(&(FREE_PAGE + 0x30).to_le_bytes());
+    start(&mut pc, &code, 5);
+    assert_eq!(pc.regs().read(EAX), version);
+    assert_eq!(
+        pc.msr_read(APIC_BASE_MSR).unwrap(),
+        u64::from(FREE_PAGE | flags)
+    );
+    pc.msr_write(APIC_BASE_MSR, original.into()).unwrap();
+    assert_eq!(read(&mut pc, FREE_PAGE + 0x30), ram);
+    assert_eq!(read(&mut pc, RESET_PAGE + 0x30), version);
+}
+
+#[test]
+fn mounting_preserves_the_lapic_reset_page_and_full_ioapic_range() {
+    let mut pc = board();
+    pc.msr_write(0x1B, 0).unwrap(); // Disable xAPIC at a different base.
+    for address in [0xFEE0_0000, 0xFEC1_0000] {
+        let window = MmioWindow::registers(
+            RegisterBank::new(0),
+            RegisterBank::read,
+            RegisterBank::write,
+        );
+        assert!(matches!(
+            window.install(&mut pc, phy(address)).unwrap_err().reason,
+            MmioBusAttachRefusal::Placement(PcDeviceAttachRefusal::Address(
+                MmioAttachRefusal::Overlap
+            ))
+        ));
+    }
+    MmioWindow::registers(
+        RegisterBank::new(0),
+        RegisterBank::read,
+        RegisterBank::write,
+    )
+    .install(&mut pc, phy(0xFEC1_1000))
+    .unwrap();
+}
+
+#[test]
+fn snapshots_refuse_live_callback_mappings_before_they_touch_the_stream() {
+    let mut pc = board();
+    pc.mmio_map(phy(BASE), 4096, Box::new(|_, _| 42), Box::new(|_, _, _| {}));
+    let mut output = Vec::new();
+    assert_eq!(
+        pc.save_snapshot(&mut output).unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert!(output.is_empty());
+    let mut input = [0u8; 64].as_slice();
+    assert_eq!(
+        pc.restore_snapshot(&mut input).unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert_eq!(input.len(), 64);
+    assert_eq!(read(&mut pc, BASE), 42);
+}
+
 fn gpu_window(
     line: u8,
     destination: u32,
@@ -82,13 +297,13 @@ fn gpu_window(
             assert_eq!(event.destination, phy(destination));
             deliveries.fetch_add(1, Ordering::Relaxed);
             return Ok(if stop {
-                Reaction::Stop
+                ExecutionRequest::Stop
             } else {
-                Reaction::Continue
+                ExecutionRequest::None
             });
         }
         assert_eq!(event.rejected().unwrap().destination, phy(SECOND));
-        Ok(Reaction::Continue)
+        Ok(ExecutionRequest::None)
     })
 }
 
@@ -198,10 +413,10 @@ fn cross_window_guest_accesses_route_both_bytes_in_order() {
                 let previous = deliveries.fetch_add(1, Ordering::Relaxed);
                 if left {
                     assert_eq!((previous, event.offset.get(), event.value), (0, 4095, 0x34));
-                    return Ok(Reaction::Stop);
+                    return Ok(ExecutionRequest::Stop);
                 }
                 assert_eq!((previous, event.offset.get(), event.value), (1, 0, 0x12));
-                Ok(Reaction::Continue)
+                Ok(ExecutionRequest::None)
             }),
         )
     };
@@ -354,7 +569,7 @@ fn a_refused_join_returns_live_models_and_handlers_for_rewiring() {
     let left = leaf(11, 42);
     let right = leaf(17, 53).on_with_irq(|_, irq| {
         irq.set_level(false);
-        Ok(Reaction::Continue)
+        Ok(ExecutionRequest::None)
     });
     let error = match left.then(right) {
         Err(error) => error,
@@ -592,8 +807,8 @@ fn rep_resumes_after_the_committed_element_on_subscriber_error_or_stop() {
         assert_eq!((event.len, event.value), (1, 0x5A));
         match offset {
             0 => Err(SubscriberError("first element observed")),
-            1 => Ok(Reaction::Stop),
-            _ => Ok(Reaction::Continue),
+            1 => Ok(ExecutionRequest::Stop),
+            _ => Ok(ExecutionRequest::None),
         }
     })
     .install(&mut pc, phy(BASE))

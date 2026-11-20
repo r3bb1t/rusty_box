@@ -213,18 +213,20 @@ impl MmioRegistry {
         addr: BxPhyAddress,
         size: u64,
     ) -> Result<usize, MmioAttachRefusal> {
-        if self
-            .regions
-            .iter()
-            .flatten()
-            .any(|region| region.overlaps(addr, size))
-        {
+        if self.overlaps_window(addr, size) {
             return Err(MmioAttachRefusal::Overlap);
         }
         self.regions
             .iter()
             .position(Option::is_none)
             .ok_or(MmioAttachRefusal::Full)
+    }
+
+    pub(crate) fn overlaps_window(&self, addr: BxPhyAddress, size: u64) -> bool {
+        self.regions
+            .iter()
+            .flatten()
+            .any(|region| region.overlaps(addr, size))
     }
 
     fn insert_region(&mut self, index: usize, addr: BxPhyAddress, size: u64, target: Target) {

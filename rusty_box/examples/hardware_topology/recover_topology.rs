@@ -6,7 +6,7 @@ use mailbox::{Mailbox, MailboxEvent};
 use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::CpuSetupMode;
 use rusty_box::cpu::registers::{EAX, EBX};
-use rusty_box::emulator::hardware::{InterruptOutput, IsaIrq, MmioWindow, Reaction};
+use rusty_box::emulator::hardware::{ExecutionRequest, InterruptOutput, IsaIrq, MmioWindow};
 use rusty_box::{Emulator, EmulatorConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if matches!(event, MailboxEvent::Doorbell(_)) {
                 irq.set_level(false);
             }
-            Ok(Reaction::Continue)
+            Ok(ExecutionRequest::None)
         });
     let failed = match left.then(right) {
         Err(failed) => failed,

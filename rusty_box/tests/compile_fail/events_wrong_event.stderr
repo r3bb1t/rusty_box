@@ -11,5 +11,5 @@ error[E0308]: mismatched types
 note: method defined here
  --> $WORKSPACE/rusty_box_core/src/events.rs
   |
-  |     fn emit(&mut self, event: &E, capability: &mut C) -> Result<Reaction, Self::Error>;
+  |     fn emit(&mut self, event: &E, capability: &mut C) -> Result<ExecutionRequest, Self::Error>;
   |        ^^^^

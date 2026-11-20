@@ -1,3 +1,4 @@
+use super::cpu_store::CpuStore;
 use super::{
     BOCHS_APIC_BUS_ID_MASK, CpuMask, DeliveryRoute, Emulator, Progress, SliceEngine, SliceRequest,
 };
@@ -1167,10 +1168,11 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                     mapping_changed |= self.apply_a20_gate(enabled);
                 }
 
-                match self
-                    .device_manager
-                    .apply_pending_machine_boundary(&mut self.devices, &mut self.memory)
-                {
+                match self.device_manager.apply_pending_machine_boundary(
+                    &mut self.devices,
+                    &mut self.memory,
+                    &self.cpus.get(0).mmio,
+                ) {
                     Ok(effects) => mapping_changed |= effects.memory_mapping_changed,
                     Err(error) => {
                         tracing::error!("machine boundary application failed: {error:?}");

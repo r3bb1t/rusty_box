@@ -21,7 +21,7 @@ CPU instrumentation already uses typed callback data, a static tracer when suppl
        .on(|event| println!("{event:?}"))
        .on_with_irq(|_, irq| {
            irq.set_level(false);
-           Reaction::Stop
+           ExecutionRequest::Stop
        })
        .on_rejected(|event| eprintln!("{event:?}"))
        .at(page, irq_line);

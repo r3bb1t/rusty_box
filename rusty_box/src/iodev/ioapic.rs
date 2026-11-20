@@ -45,6 +45,11 @@ use crate::snapshot::{
 /// Bochs: `#define BX_IOAPIC_BASE_ADDR (0xfec00000)` (ioapic.cc)
 const IOAPIC_BASE_ADDR: u32 = 0xFEC0_0000;
 
+/// Every byte the PIIX3 can route to the I/O APIC. Its six-bit selector moves
+/// a 4 KiB window in 1 KiB steps, so the window can span two pages.
+pub(crate) const IOAPIC_ROUTABLE_RANGE: core::ops::RangeInclusive<u64> =
+    IOAPIC_BASE_ADDR as u64..=IOAPIC_BASE_ADDR as u64 + (0x3F << 10) + 0xFFF;
+
 /// Number of interrupt input pins on the 82093AA.
 /// Bochs: `#define BX_IOAPIC_NUM_PINS (0x18)` (ioapic.h)
 pub const IOAPIC_NUM_PINS: usize = 0x18; // 24

@@ -1,8 +1,8 @@
 use rusty_box_devices::composition::{MmioEvent, write_and_publish};
 
 use super::{
-    BxPhyAddress, Emit, IsaIrq, MmioModel, MmioWrite, PcAttachment, PcDma, PcInterrupt,
-    PcMmioDevice, Reaction, SubscriberError, Subscriptions, WindowOffset,
+    BxPhyAddress, Emit, ExecutionRequest, IsaIrq, MmioModel, MmioWrite, PcAttachment, PcDma,
+    PcInterrupt, PcMmioDevice, SubscriberError, Subscriptions, WindowOffset,
 };
 
 /// Adapts a model and its local subscribers to the PC's scalar MMIO route.
@@ -39,7 +39,9 @@ where
         )
     }
 
-    pub(super) fn try_on<F: FnMut(&MmioEvent<D>) -> Result<Reaction, SubscriberError> + Send>(
+    pub(super) fn try_on<
+        F: FnMut(&MmioEvent<D>) -> Result<ExecutionRequest, SubscriberError> + Send,
+    >(
         self,
         handler: F,
     ) -> EventEndpoint<
@@ -62,7 +64,10 @@ where
         impl for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
     >
     where
-        F: for<'a> FnMut(&MmioEvent<D>, &mut PcInterrupt<'a>) -> Result<Reaction, SubscriberError>
+        F: for<'a> FnMut(
+                &MmioEvent<D>,
+                &mut PcInterrupt<'a>,
+            ) -> Result<ExecutionRequest, SubscriberError>
             + Send,
     {
         EventEndpoint::with_subscriptions(
@@ -118,7 +123,7 @@ where
     }
 
     /// Observe notifications and optionally stop or report a host error.
-    pub fn try_on<F: FnMut(&MmioEvent<D>) -> Result<Reaction, SubscriberError> + Send>(
+    pub fn try_on<F: FnMut(&MmioEvent<D>) -> Result<ExecutionRequest, SubscriberError> + Send>(
         self,
         handler: F,
     ) -> PcAttachment<
@@ -141,7 +146,10 @@ where
         >,
     >
     where
-        F: for<'a> FnMut(&MmioEvent<D>, &mut PcInterrupt<'a>) -> Result<Reaction, SubscriberError>
+        F: for<'a> FnMut(
+                &MmioEvent<D>,
+                &mut PcInterrupt<'a>,
+            ) -> Result<ExecutionRequest, SubscriberError>
             + Send,
     {
         self.map_device(|device| device.on_with_irq(handler))
@@ -170,7 +178,7 @@ where
         access: MmioWrite,
         dma: &mut PcDma<'_>,
         irq: &mut PcInterrupt<'_>,
-    ) -> Result<Reaction, SubscriberError> {
+    ) -> Result<ExecutionRequest, SubscriberError> {
         write_and_publish(&mut self.model, access, dma, irq, &mut self.subscribers)
     }
 }

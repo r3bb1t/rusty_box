@@ -8,7 +8,7 @@ use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::CpuSetupMode;
 use rusty_box::cpu::registers::{EAX, EBX, RIP};
 use rusty_box::emulator::hardware::{
-    InterruptOutput, IsaIrq, PcAttachment, Reaction, SubscriberError,
+    ExecutionRequest, InterruptOutput, IsaIrq, PcAttachment, SubscriberError,
 };
 use rusty_box::{Emulator, EmulatorConfig};
 use rusty_box_devices::api::WindowOffset;
@@ -17,12 +17,12 @@ use rusty_box_devices::composition::{IrqMmioModel, MmioWrite, Subscriptions, pub
 fn stop_on_tile(
     event: &GpuEvent,
     irq: &mut impl InterruptOutput,
-) -> Result<Reaction, SubscriberError> {
+) -> Result<ExecutionRequest, SubscriberError> {
     if event.written().is_some() {
         irq.set_level(false);
-        return Ok(Reaction::Stop);
+        return Ok(ExecutionRequest::Stop);
     }
-    Ok(Reaction::Continue)
+    Ok(ExecutionRequest::None)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -101,11 +101,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     assert_eq!(
         publish_events(mailbox.write(post, &mut host_irq), &mut handlers, &mut ())?,
-        Reaction::Continue
+        ExecutionRequest::None
     );
     assert_eq!(
         publish_events(mailbox.take(&mut host_irq), &mut handlers, &mut ())?,
-        Reaction::Continue
+        ExecutionRequest::None
     );
     assert!(!host_irq.0);
     Ok(())

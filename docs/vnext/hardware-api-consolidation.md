@@ -18,7 +18,7 @@ Both simple constructors start with one page. A leaf can choose its width with `
 let bank = MmioWindow::registers(RegisterBank::new(7), RegisterBank::read, RegisterBank::write)
     .on(|event| println!("{}", event.value));
 let gpu = MmioWindow::with_model(line, Gpu::default())
-    .try_on(|_| Ok(Reaction::Stop));
+    .try_on(|_| Ok(ExecutionRequest::Stop));
 bank.then(gpu)?.install(&mut pc, base)?;
 ```
 

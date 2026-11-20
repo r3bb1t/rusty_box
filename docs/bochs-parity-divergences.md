@@ -2201,3 +2201,25 @@ delivery: `a_legacy_8259_vector_reaches_a_hardware_guest_as_a_placed_ext_int`
 for a guest spinning with IF set, and `a_halted_guest_still_takes_its_legacy_tick`
 (commit `8d334de`) for one parked in `HLT`. Both return without asserting on a
 host where the hypervisor platform is unavailable.
+
+---
+
+## Host MMIO ownership across guest reconfiguration
+
+**Bochs:** `iodev/display/vga.cc` `bx_vga_c::pci_write_handler`,
+`cpu/msr.cc` `BX_MSR_APICBASE` and `cpu/apic.cc` `set_base`.
+Those paths have no concept of an aperture owned by a downstream Rust model.
+
+The software PC keeps a mounted host aperture until its owner detaches it.
+If a VGA PCI memory BAR assignment intersects that aperture, the old decoder
+stays active and PCI configuration reads the installed BAR again. Sizing
+probes and disabling a BAR keep their existing behavior. A guest `WRMSR`
+that would enable xAPIC on a mounted aperture raises `#GP(0)` with the old
+MSR and decoder intact. Bus placement also keeps the LAPIC reset page and
+the PIIX3 I/O APIC selector's entire reachable range available to the board.
+
+These rules preserve device state and interrupt wiring across reconfiguration.
+They only affect guest behavior when a host mapping would be displaced. Real
+instruction tests exercise PCI configuration I/O, BAR sizing and readback,
+and an x86 exception handler returning from a conflicting `WRMSR`.
+[Guest regressions](../rusty_box/tests/hardware_topology.rs)

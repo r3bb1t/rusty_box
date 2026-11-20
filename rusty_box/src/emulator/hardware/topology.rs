@@ -5,8 +5,8 @@ use core::num::NonZeroU16;
 use rusty_box_devices::composition::{MmioEvent, publish_events};
 
 use super::{
-    BxPhyAddress, ComposedIrqs, Emit, EventEndpoint, IsaIrq, MmioModel, MmioWrite, PcDevice,
-    PcDeviceAttachRefusal, PcDma, PcInterrupt, PcMmioDevice, Reaction, SubscriberError,
+    BxPhyAddress, ComposedIrqs, Emit, EventEndpoint, ExecutionRequest, IsaIrq, MmioModel,
+    MmioWrite, PcDevice, PcDeviceAttachRefusal, PcDma, PcInterrupt, PcMmioDevice, SubscriberError,
     Subscriptions, WindowOffset,
 };
 use crate::Emulator;
@@ -170,7 +170,7 @@ where
     }
 
     /// Observe notifications and optionally request a stop or report a failure.
-    pub fn try_on<F: FnMut(&MmioEvent<D>) -> Result<Reaction, SubscriberError> + Send>(
+    pub fn try_on<F: FnMut(&MmioEvent<D>) -> Result<ExecutionRequest, SubscriberError> + Send>(
         self,
         handler: F,
     ) -> MmioWindow<
@@ -197,7 +197,10 @@ where
         >,
     >
     where
-        F: for<'a> FnMut(&MmioEvent<D>, &mut PcInterrupt<'a>) -> Result<Reaction, SubscriberError>
+        F: for<'a> FnMut(
+                &MmioEvent<D>,
+                &mut PcInterrupt<'a>,
+            ) -> Result<ExecutionRequest, SubscriberError>
             + Send,
     {
         self.map_endpoint(|endpoint| endpoint.on_with_irq(handler))
@@ -252,7 +255,7 @@ where
     }
 
     /// Observe notifications and optionally request a stop or report a failure.
-    pub fn try_on<F: FnMut(&E::Item) -> Result<Reaction, SubscriberError> + Send>(
+    pub fn try_on<F: FnMut(&E::Item) -> Result<ExecutionRequest, SubscriberError> + Send>(
         self,
         handler: F,
     ) -> MmioWindow<RegisterWindow<D, R, W, impl Emit<E::Item, Error = SubscriberError> + Send>>
@@ -326,7 +329,7 @@ where
         access: MmioWrite,
         _: &mut PcDma<'_>,
         _: &mut PcInterrupt<'_>,
-    ) -> Result<Reaction, SubscriberError> {
+    ) -> Result<ExecutionRequest, SubscriberError> {
         publish_events(
             (self.write)(&mut self.model, access),
             &mut self.subscribers,
@@ -351,7 +354,7 @@ impl<D: PcMmioDevice> PcMmioDevice for IrqWindow<D> {
         access: MmioWrite,
         dma: &mut PcDma<'_>,
         irqs: &mut PcInterrupt<'_>,
-    ) -> Result<Reaction, SubscriberError> {
+    ) -> Result<ExecutionRequest, SubscriberError> {
         irqs.with_line(self.line, |irq| self.device.write(access, dma, irq))
     }
 }
@@ -378,7 +381,7 @@ impl<L: PcMmioDevice, R: PcMmioDevice> PcMmioDevice for WindowPair<L, R> {
         mut access: MmioWrite,
         dma: &mut PcDma<'_>,
         irqs: &mut PcInterrupt<'_>,
-    ) -> Result<Reaction, SubscriberError> {
+    ) -> Result<ExecutionRequest, SubscriberError> {
         if access.offset.get() < self.split {
             self.left.write(access, dma, irqs)
         } else {

@@ -28,6 +28,26 @@ pub const APIC_LEVEL_TRIGGERED: u8 = 1;
 /// Default Local APIC base address (Bochs: BX_LAPIC_BASE_ADDR)
 pub const BX_LAPIC_BASE_ADDR: BxPhyAddress = BxPhyAddress::new(0xFEE00000);
 
+impl<T: super::Instrumentation> super::BxCpuC<T> {
+    /// Change the MSR and its physical decoder together. The previous decoder
+    /// remains live if the requested xAPIC page belongs to a host device.
+    pub(super) fn try_set_apic_base(&mut self, value: u64) -> bool {
+        if ApicMode::from_raw((value >> 10) & 3) == ApicMode::XapicMode
+            && self
+                .mmio
+                .overlaps_window(BxPhyAddress::new(value).page_base(), 4096)
+        {
+            return false;
+        }
+        self.msr.apicbase = value;
+        self.lapic.set_base(value);
+        self.invalidate_host_memory_mappings();
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        self.sync_lapic_events();
+        true
+    }
+}
+
 /// First valid APIC vector (Bochs: BX_LAPIC_FIRST_VECTOR, apic.cc)
 const BX_LAPIC_FIRST_VECTOR: u8 = 0x10;
 

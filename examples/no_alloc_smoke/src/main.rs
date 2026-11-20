@@ -106,11 +106,11 @@ fn attach_bus(
 }
 
 fn publish(input: u8, state: &mut u8) {
-    use rusty_box::events::{Emit, Reaction, Subscriptions};
+    use rusty_box::events::{Emit, ExecutionRequest, Subscriptions};
     let mut subscriptions = Subscriptions::<u8, core::convert::Infallible>::new().on_with(
         |data: &u8, state: &mut u8| {
             *state = state.wrapping_add(*data);
-            Ok(Reaction::Continue)
+            Ok(ExecutionRequest::None)
         },
     );
     let _ = subscriptions.emit(&input, state).unwrap();

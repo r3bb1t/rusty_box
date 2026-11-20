@@ -644,7 +644,7 @@ fn save_lapics<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T
 
 #[cfg(feature = "std")]
 impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
-    /// Save the built-in machine. Detach composed endpoints before saving.
+    /// Save the built-in machine. Remove all host MMIO mappings before saving.
     pub fn save_snapshot<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
         self.check_snapshot_attachments()?;
         let mut sink = IoSink::new(writer);
@@ -710,7 +710,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
         write_device_section(writer, &self.device_manager.hpet)
     }
 
-    /// Restore the built-in machine. Detach composed endpoints before restoring.
+    /// Restore the built-in machine. Remove all host MMIO mappings before restoring.
     pub fn restore_snapshot<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
         self.check_snapshot_attachments()?;
         let mut source = IoSource::new(reader);
@@ -729,10 +729,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
     }
 
     fn check_snapshot_attachments(&self) -> io::Result<()> {
-        if self.cpu().mmio.has_composed() {
+        if !self.cpu().mmio.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "snapshots require composed MMIO devices to be detached",
+                "snapshots require host MMIO mappings to be removed",
             ));
         }
         Ok(())
@@ -1911,12 +1911,24 @@ mod tests {
 
             let mut apic_source = machine();
             apic_source.service_scheduler_boundary(0).unwrap();
-            apic_source
-                .cpu_mut_at(0)
-                .write_msr_for_api(0x1B, 0xFEE1_0000 | 0x900)
-                .unwrap();
+            let relocated = 0xFEE1_0000 | 0x900;
+            apic_source.msr_write(0x1B, relocated).unwrap();
             let mut apic_snapshot = Vec::new();
             apic_source.save_snapshot(&mut apic_snapshot).unwrap();
+            let mut restored = machine();
+            restored
+                .restore_snapshot(&mut Cursor::new(&apic_snapshot))
+                .unwrap();
+            assert_eq!(restored.msr_read(0x1B).unwrap(), relocated);
+
+            let lapic = snapshot_sections(&apic_snapshot)
+                .into_iter()
+                .find(|section| section.id == SEC_LAPIC)
+                .unwrap();
+            // Section version, CPU count, CPU id and body length precede
+            // the decoder base. Corrupt only that base.
+            let base_offset = lapic.payload + 4 + 4 + 4 + 8;
+            write_u64_at(&mut apic_snapshot, base_offset, 0xFEE2_0000);
             assert_restore_error(
                 &apic_snapshot,
                 io::ErrorKind::InvalidData,

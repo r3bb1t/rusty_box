@@ -13,8 +13,8 @@ use rusty_box::cpu::registers::{EAX, EBX, ECX, RIP};
 use rusty_box::cpu::{CpuError, CpuSetupMode};
 use rusty_box::emulator::MachineBuilder;
 use rusty_box::emulator::hardware::{
-    DmaWrite, Emit, InterruptOutput, IsaIrq, MmioModel, MmioSubscriberError, MmioWrite,
-    PcAttachment, PcDevice, PcDeviceAttachRefusal, Reaction, SubscriberError, WindowOffset,
+    DmaWrite, Emit, ExecutionRequest, InterruptOutput, IsaIrq, MmioModel, MmioSubscriberError,
+    MmioWrite, PcAttachment, PcDevice, PcDeviceAttachRefusal, SubscriberError, WindowOffset,
 };
 use rusty_box::memory::mmio::{MmioAttachRefusal, MmioDevice};
 use rusty_box::{Emulator, EmulatorConfig, Error};
@@ -69,9 +69,9 @@ struct Capture<E>(Vec<(E, bool)>);
 impl<E: Copy> Emit<E, FakeIrq> for Capture<E> {
     type Error = ();
 
-    fn emit(&mut self, event: &E, irq: &mut FakeIrq) -> Result<Reaction, ()> {
+    fn emit(&mut self, event: &E, irq: &mut FakeIrq) -> Result<ExecutionRequest, ()> {
         self.0.push((*event, irq.level));
-        Ok(Reaction::Continue)
+        Ok(ExecutionRequest::None)
     }
 }
 
@@ -81,12 +81,12 @@ fn same_device_runs_with_fake_dma_irq_and_event_sinks() {
     let mut events = Capture::<GpuEvent>(Vec::new());
     assert_eq!(
         write_and_publish(&mut gpu, access(0, RAM), &mut dma, &mut irq, &mut events),
-        Ok(Reaction::Continue)
+        Ok(ExecutionRequest::None)
     );
     assert!(events.0.is_empty());
     assert_eq!(
         write_and_publish(&mut gpu, access(4, TILE), &mut dma, &mut irq, &mut events),
-        Ok(Reaction::Continue)
+        Ok(ExecutionRequest::None)
     );
     assert_eq!(irq.edges, [true]);
     assert_eq!(
@@ -107,7 +107,7 @@ fn same_device_runs_with_fake_dma_irq_and_event_sinks() {
     dma.fail = true;
     assert_eq!(
         write_and_publish(&mut gpu, access(4, 99), &mut dma, &mut irq, &mut events),
-        Ok(Reaction::Continue)
+        Ok(ExecutionRequest::None)
     );
     assert_eq!(gpu.read(WindowOffset(8), 4), 2);
     assert_eq!(events.0.len(), 2);
@@ -132,7 +132,7 @@ fn mailbox_uses_the_same_glue_and_never_needs_dma() {
     let mut events = Capture(Vec::new());
     assert_eq!(
         write_and_publish(&mut mailbox, access(0, 42), &mut dma, &mut irq, &mut events),
-        Ok(Reaction::Continue)
+        Ok(ExecutionRequest::None)
     );
     assert_eq!(mailbox.read(WindowOffset(0), 4), 42);
     assert_eq!(
@@ -144,7 +144,7 @@ fn mailbox_uses_the_same_glue_and_never_needs_dma() {
     );
     assert_eq!(
         write_and_publish(&mut mailbox, access(4, 0), &mut dma, &mut irq, &mut events),
-        Ok(Reaction::Continue)
+        Ok(ExecutionRequest::None)
     );
     assert_eq!(events.0.len(), 2);
     assert!(dma.writes.is_empty());
@@ -162,16 +162,16 @@ fn a_host_operation_publishes_to_the_same_handlers_without_mmio() {
         let posted = IrqMmioModel::write(&mut mailbox, access(0, 42), &mut irq);
         assert_eq!(
             publish_events(posted, &mut route, &mut ()),
-            Ok(Reaction::Continue)
+            Ok(ExecutionRequest::None)
         );
         let taken = mailbox.take(&mut irq);
         assert_eq!(
             publish_events(taken, &mut route, &mut ()),
-            Ok(Reaction::Continue)
+            Ok(ExecutionRequest::None)
         );
         assert_eq!(
             publish_events(mailbox.take(&mut irq), &mut route, &mut ()),
-            Ok(Reaction::Continue)
+            Ok(ExecutionRequest::None)
         );
     }
     assert_eq!(
@@ -222,14 +222,14 @@ fn x86_dma_completion_stops_after_the_write() {
                 event.written().unwrap().destination,
                 BxPhyAddress::new(RAM.into())
             );
-            Ok(Reaction::Stop)
+            Ok(ExecutionRequest::Stop)
         })
         .on_event(GpuEvent::rejected, |_| {
             panic!("ordinary RAM DMA must succeed")
         })
         .observe_writes(|write, result| match write.offset.get() {
-            0 => assert_eq!(result, Ok(Reaction::Continue)),
-            4 => assert_eq!(result, Ok(Reaction::Stop)),
+            0 => assert_eq!(result, Ok(ExecutionRequest::None)),
+            4 => assert_eq!(result, Ok(ExecutionRequest::Stop)),
             _ => panic!("unexpected write"),
         })
         .install(&mut pc)
@@ -262,7 +262,7 @@ fn typed_attachment_subscriptions_are_local_to_their_producer() {
             .on_event(GpuEvent::written, move |event| {
                 assert_eq!(event.destination.get(), u64::from(destination))
             })
-            .on_with_irq(|_, _| Ok(Reaction::Stop))
+            .on_with_irq(|_, _| Ok(ExecutionRequest::Stop))
             .on_event(GpuEvent::rejected, |_| panic!("DMA must succeed"))
             .install(&mut pc)
             .unwrap();
@@ -355,7 +355,7 @@ fn successful_dma_survives_subscriber_failure_and_invalidates_decoded_bytes() {
     let mut pc = pc();
     PcAttachment::with_model(DEVICE, IsaIrq::new(5).unwrap(), Gpu::default())
         .on_event(GpuEvent::rejected, |_| panic!("DMA must succeed"))
-        .try_on(|_| Ok(Reaction::Stop))
+        .try_on(|_| Ok(ExecutionRequest::Stop))
         .try_on(|_| Err(SubscriberError("capture refused committed tile")))
         .on(|_| panic!("subscribers after the error are skipped"))
         .install(&mut pc)
@@ -407,7 +407,7 @@ fn dma_refuses_other_mmio_and_attachment_refusal_returns_ownership() {
             PcAttachment::with_model(DEVICE, IsaIrq::new(5).unwrap(), Gpu::default())
                 .try_on(|event| {
                     assert!(event.rejected().is_some());
-                    Ok(Reaction::Stop)
+                    Ok(ExecutionRequest::Stop)
                 })
                 .into_parts();
         PcDevice::owned(endpoint)
@@ -460,11 +460,11 @@ fn two_distinct_models_mount_together_and_a_detached_mailbox_can_move() {
                     MailboxEvent::Posted(MessagePosted(42)) => {
                         assert!(!posted);
                         posted = true;
-                        Ok(Reaction::Continue)
+                        Ok(ExecutionRequest::None)
                     }
                     MailboxEvent::Doorbell(_) => {
                         assert!(posted);
-                        Ok(Reaction::Stop)
+                        Ok(ExecutionRequest::Stop)
                     }
                     other => panic!("unexpected notification {other:?}"),
                 }

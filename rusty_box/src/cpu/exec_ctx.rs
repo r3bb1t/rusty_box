@@ -206,7 +206,7 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         value: u64,
     ) {
         use crate::emulator::hardware::{
-            MmioSubscriberError, MmioWrite, PcDma, PcInterrupt, Reaction, WindowOffset,
+            ExecutionRequest, MmioSubscriberError, MmioWrite, PcDma, PcInterrupt, WindowOffset,
         };
 
         let (ExecutionMemory::Pc(memory), Hardware::Pc { device_manager, .. }) =
@@ -214,11 +214,9 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         else {
             unreachable!("composed MMIO is attached only to a software PC");
         };
-        let (attached, exclusions) = self
-            .cpu
-            .mmio
-            .composed_at(address)
-            .expect("composed MMIO target was selected before the cold dispatch");
+        let Some((attached, exclusions)) = self.cpu.mmio.composed_at(address) else {
+            unreachable!("the MMIO registry is unchanged since the write selected this route");
+        };
         let offset = address - exclusions.start;
         let mut dma = PcDma {
             memory,
@@ -242,7 +240,7 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         // Mark this request before yielding so it survives a scheduler exit
         // that bypasses the next outer interpreter-loop stop check.
         let stop = match result {
-            Ok(reaction) => reaction == Reaction::Stop,
+            Ok(request) => request == ExecutionRequest::Stop,
             Err(source) => {
                 device_manager
                     .mmio_subscriber_error

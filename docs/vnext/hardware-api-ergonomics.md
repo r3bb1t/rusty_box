@@ -32,7 +32,7 @@ The neutral `write_and_publish` helper calls the model first, then lends its not
 
 The model and subscribers can commit DMA and IRQ changes before an error. The PC records the first callback failure, lets the interpreter reach its existing dispatch boundary, and services the scheduler before returning `CpuError::MmioSubscriber` to the host. This diagnostic carries the physical address and a static message, so the path can work without allocation. A competing CPU or scheduler error keeps precedence. Guest code can resume at its resulting IP without replaying the tested scalar store or receiving the diagnostic again. Compound x86 instructions retain their existing dispatch granularity. General event rollback and recovery from host panics remain outside this contract.
 
-The experimental low-level `PcMmioDevice::write` now returns `Result<Reaction, SubscriberError>`. Custom endpoints can wrap their previous return values in `Ok`. The optional write observer gets that same result. The architecture-independent `Emit` primitive continues to allow caller-chosen error types.
+The experimental low-level `PcMmioDevice::write` now returns `Result<ExecutionRequest, SubscriberError>`. Custom endpoints can wrap their previous return values in `Ok`. The optional write observer gets that same result. The architecture-independent `Emit` primitive continues to allow caller-chosen error types.
 
 ## Placement and IRQ ownership
 

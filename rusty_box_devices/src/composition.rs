@@ -1,6 +1,6 @@
 //! Narrow capabilities for independently implemented devices.
 
-pub use rusty_box_core::events::{Emit, Reaction, Subscriptions, publish_events};
+pub use rusty_box_core::events::{Emit, ExecutionRequest, Subscriptions, publish_events};
 
 use crate::api::{BxPhyAddress, WindowOffset};
 
@@ -87,6 +87,6 @@ pub fn write_and_publish<D: MmioModel, I: InterruptOutput, S: Emit<MmioEvent<D>,
     dma: &mut impl DmaWrite,
     irq: &mut I,
     subscribers: &mut S,
-) -> Result<Reaction, S::Error> {
+) -> Result<ExecutionRequest, S::Error> {
     publish_events(model.write(access, dma, irq), subscribers, irq)
 }

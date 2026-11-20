@@ -1040,12 +1040,22 @@ impl VgaCard<StdVga> {
         self.ext.commit_pending_lfb_relocate()
     }
 
+    /// Refuse a pending BAR move while leaving the installed LFB active.
+    pub fn refuse_pending_lfb_relocate(&mut self) {
+        self.ext.refuse_pending_lfb_relocate();
+    }
+
     pub fn peek_pending_mmio_relocate(&self) -> Option<(u32, u32)> {
         self.ext.peek_pending_mmio_relocate()
     }
 
     pub fn commit_pending_mmio_relocate(&mut self) -> Option<(u32, u32)> {
         self.ext.commit_pending_mmio_relocate()
+    }
+
+    /// Refuse a pending BAR move while leaving the installed registers active.
+    pub fn refuse_pending_mmio_relocate(&mut self) {
+        self.ext.refuse_pending_mmio_relocate();
     }
 
     #[cfg(feature = "std")]

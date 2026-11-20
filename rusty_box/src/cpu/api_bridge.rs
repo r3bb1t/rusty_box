@@ -800,7 +800,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 self.set_tsc(val, t);
             }
             BX_MSR_APICBASE => {
-                self.msr.apicbase = val as _;
+                if !self.try_set_apic_base(val) {
+                    return Self::msr_refused(msr, MsrRefusal::InvalidValue);
+                }
             }
             BX_MSR_PLATFORM_ID => return Self::msr_refused(msr, MsrRefusal::ReadOnly),
             // Bochs msr.cc `WRMSR`: "ignore write into MSR IA32_APERF/MPERF".

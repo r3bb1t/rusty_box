@@ -22,6 +22,9 @@ use crate::{
     SysReg, VirtConfig,
 };
 
+#[path = "../../../rusty_box/examples/hardware_topology/register_bank.rs"]
+mod register_bank;
+
 const RAM_LEN: usize = 1 << 20;
 
 /// Far longer than any run here takes, debug build included.
@@ -94,6 +97,101 @@ fn machine<'m>(ram: &'m mut [u8], code: &[u32]) -> Machine<'m> {
             .expect("the code is in RAM");
     }
     m
+}
+
+#[test]
+fn an_independent_register_bank_can_extend_the_native_board_bus() {
+    use core::convert::Infallible;
+
+    use register_bank::{RegisterBank, RegisterChanged};
+    use rusty_box_core::VmClock;
+    use rusty_box_devices::api::WindowOffset;
+    use rusty_box_devices::composition::{
+        Emit, ExecutionRequest, MmioWrite, Subscriptions, publish_events,
+    };
+
+    use crate::board::VirtBoard;
+    use crate::cpu::Step;
+    use crate::devices::gicv2::GicV2;
+    use crate::{AccessWidth, BusFault, GuestStorage, PhysAddr, PhysBus, Spi};
+
+    const BASE: PhysAddr = PhysAddr::new(0x1000_0000);
+
+    struct RegisterOverlay<'a, S, E> {
+        board: &'a mut VirtBoard<S>,
+        bank: RegisterBank,
+        subscribers: E,
+    }
+
+    impl<S: GuestStorage, E: Emit<RegisterChanged, GicV2, Error = Infallible>> PhysBus
+        for RegisterOverlay<'_, S, E>
+    {
+        fn read(
+            &mut self,
+            address: PhysAddr,
+            width: AccessWidth,
+            clock: VmClock,
+        ) -> Result<u64, BusFault> {
+            if address == BASE && width == AccessWidth::Word {
+                return Ok(self.bank.read(WindowOffset(0), 4));
+            }
+            self.board.read(address, width, clock)
+        }
+
+        fn write(
+            &mut self,
+            address: PhysAddr,
+            width: AccessWidth,
+            value: u64,
+            clock: VmClock,
+        ) -> Result<(), BusFault> {
+            if address == BASE && width == AccessWidth::Word {
+                let events = self.bank.write(MmioWrite {
+                    offset: WindowOffset(0),
+                    len: 4,
+                    value,
+                });
+                assert_eq!(
+                    publish_events(events, &mut self.subscribers, &mut self.board.gic),
+                    Ok(ExecutionRequest::None)
+                );
+                return Ok(());
+            }
+            self.board.write(address, width, value, clock)
+        }
+    }
+
+    let mut ram = vec![0; RAM_LEN];
+    // str w2,[x1]; ldr w3,[x1]; ldr w5,[x4] (GICD_ISPENDR1)
+    let mut machine = machine(&mut ram, &[0xB900_0022, 0xB940_0023, 0xB940_0085]);
+    machine.reg_write(Reg::X1, BASE.get());
+    machine.reg_write(Reg::X2, 42);
+    machine.reg_write(Reg::X4, GIC_DIST_BASE + 0x204);
+    assert_eq!(
+        machine
+            .board
+            .read(BASE, AccessWidth::Word, machine.cpu.clock()),
+        Err(BusFault::Unmapped)
+    );
+    // The default board leaves SPI 16 between its wired devices and MSI frame.
+    let spi = Spi::new(16).unwrap();
+    let mut bus = RegisterOverlay {
+        board: &mut machine.board,
+        bank: RegisterBank::new(7),
+        subscribers: Subscriptions::new().on_with(|event: &RegisterChanged, gic: &mut GicV2| {
+            assert_eq!(event.value, 42);
+            gic.set_line(spi.intid(), true);
+            Ok(ExecutionRequest::None)
+        }),
+    };
+    for _ in 0..3 {
+        assert_eq!(
+            machine.cpu.step(&mut bus, &mut machine.observer),
+            Step::Retired
+        );
+    }
+    assert_eq!(machine.reg_read(Reg::X3), 42);
+    assert_ne!(machine.reg_read(Reg::X5) & (1 << spi.number()), 0);
 }
 
 /// No setup: no timer runs.

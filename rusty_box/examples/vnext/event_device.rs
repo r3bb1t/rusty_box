@@ -7,7 +7,7 @@ use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::CpuSetupMode;
 use rusty_box::cpu::instrumentation::EmuStopReason;
 use rusty_box::cpu::registers::{EAX, RIP};
-use rusty_box::emulator::hardware::{IsaIrq, MmioWindow, Reaction};
+use rusty_box::emulator::hardware::{ExecutionRequest, IsaIrq, MmioWindow};
 use rusty_box::{Emulator, EmulatorConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,8 +20,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .try_on(|event| {
             Ok(match event {
-                MailboxEvent::Doorbell(_) => Reaction::Stop,
-                _ => Reaction::Continue,
+                MailboxEvent::Doorbell(_) => ExecutionRequest::Stop,
+                _ => ExecutionRequest::None,
             })
         })
         .install(&mut pc, BxPhyAddress::new(0x90000))?;
