@@ -59,6 +59,11 @@ path = "examples/composed_hardware/main.rs"
 required-features = ["std"]
 
 [[example]]
+name = "hardware_topology"
+path = "examples/hardware_topology/main.rs"
+required-features = ["std"]
+
+[[example]]
 name = "alpine"
 path = "examples/alpine/alpine.rs"
 required-features = ["std"]

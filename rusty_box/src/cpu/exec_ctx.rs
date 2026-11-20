@@ -219,6 +219,7 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
             .mmio
             .composed_at(address)
             .expect("composed MMIO target was selected before the cold dispatch");
+        let offset = address - exclusions.start;
         let mut dma = PcDma {
             memory,
             exclusions,
@@ -227,11 +228,11 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
         };
         let mut irq = PcInterrupt {
             irq: &mut device_manager.irq,
-            line: attached.line,
+            routes: attached.irqs,
             driven: false,
         };
         let access = MmioWrite {
-            offset: WindowOffset(u64::from(address.page_offset())),
+            offset: WindowOffset(offset),
             len,
             value,
         };

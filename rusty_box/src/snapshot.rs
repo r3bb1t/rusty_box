@@ -729,7 +729,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
     }
 
     fn check_snapshot_attachments(&self) -> io::Result<()> {
-        if self.device_manager.irq.has_composed_lines() {
+        if self.cpu().mmio.has_composed() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "snapshots require composed MMIO devices to be detached",

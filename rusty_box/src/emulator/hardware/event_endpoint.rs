@@ -11,16 +11,23 @@ pub struct EventEndpoint<D: MmioModel, S = Subscriptions<MmioEvent<D>, Subscribe
     subscribers: S,
 }
 
+impl<D: MmioModel + Send, S> EventEndpoint<D, S>
+where
+    S: for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
+{
+    /// Pair a model with one instance's subscribers, before board placement.
+    pub fn with_subscriptions(model: D, subscribers: S) -> Self {
+        Self { model, subscribers }
+    }
+}
+
 impl<D: MmioModel + Send> PcAttachment<EventEndpoint<D>> {
     /// Prepare a placement for a model, with no subscribers yet.
     pub fn with_model(page: BxPhyAddress, line: IsaIrq, model: D) -> Self {
         Self::new(
             page,
             line,
-            EventEndpoint {
-                model,
-                subscribers: Subscriptions::new(),
-            },
+            EventEndpoint::with_subscriptions(model, Subscriptions::new()),
         )
     }
 }

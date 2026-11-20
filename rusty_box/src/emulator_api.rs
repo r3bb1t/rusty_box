@@ -702,16 +702,70 @@ impl<T: crate::cpu::Instrumentation> Emulator<T> {
         address: BxPhyAddress,
         line: crate::emulator::hardware::IsaIrq,
     ) -> core::result::Result<usize, crate::emulator::hardware::PcDeviceAttachRefusal> {
-        use crate::emulator::hardware::PcDeviceAttachRefusal;
+        use crate::emulator::hardware::{ComposedIrqs, PcDeviceAttachRefusal};
         self.check_external_mmio_page(address)?;
-        let slot = self.cpu().mmio.composed_slot(address, line)?;
-        if self
-            .device_manager
-            .claims_isa_irq(line.into(), self.devices.is_pci_enabled())
-        {
-            return Err(PcDeviceAttachRefusal::BoardIrqInUse);
+        if self.device_manager.irq.composed_line_reserved(line.into()) {
+            return Err(PcDeviceAttachRefusal::IrqInUse);
         }
+        let slot = self.cpu().mmio.vacant_window(address, 4096)?;
+        self.check_composed_irqs(ComposedIrqs::Endpoint(line))?;
         Ok(slot)
+    }
+
+    pub(crate) fn mmio_bus_slot(
+        &self,
+        base: BxPhyAddress,
+        size: u64,
+        lines: u16,
+    ) -> core::result::Result<usize, crate::emulator::hardware::MmioBusAttachRefusal> {
+        use crate::emulator::hardware::{
+            ComposedIrqs, MmioBusAttachRefusal, PcDeviceAttachRefusal,
+        };
+        use crate::memory::mmio::MmioAttachRefusal;
+
+        self.check_external_mmio_page(base)
+            .map_err(PcDeviceAttachRefusal::from)?;
+        let end = base
+            .get()
+            .checked_add(size - 1)
+            .map(BxPhyAddress::new)
+            .ok_or(MmioBusAttachRefusal::AddressOverflow)?;
+        let lapic_base = self.cpu().lapic.get_base();
+        if self
+            .memory
+            .mmio
+            .regions()
+            .any(|region| region.begin <= end && base <= region.end)
+            || (base <= lapic_base && lapic_base <= end && self.cpu().lapic.is_selected(lapic_base))
+        {
+            return Err(PcDeviceAttachRefusal::Address(MmioAttachRefusal::Overlap).into());
+        }
+        let slot = self
+            .cpu()
+            .mmio
+            .vacant_window(base, size)
+            .map_err(PcDeviceAttachRefusal::from)?;
+        self.check_composed_irqs(ComposedIrqs::Bus(lines))?;
+        Ok(slot)
+    }
+
+    fn check_composed_irqs(
+        &self,
+        irqs: crate::emulator::hardware::ComposedIrqs,
+    ) -> core::result::Result<(), crate::emulator::hardware::PcDeviceAttachRefusal> {
+        use crate::emulator::hardware::PcDeviceAttachRefusal;
+        for line in irqs.lines() {
+            if self.device_manager.irq.composed_line_reserved(line) {
+                return Err(PcDeviceAttachRefusal::IrqInUse);
+            }
+            if self
+                .device_manager
+                .claims_isa_irq(line, self.devices.is_pci_enabled())
+            {
+                return Err(PcDeviceAttachRefusal::BoardIrqInUse);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn insert_composed_mmio(
@@ -721,10 +775,36 @@ impl<T: crate::cpu::Instrumentation> Emulator<T> {
         line: crate::emulator::hardware::IsaIrq,
         device: crate::emulator::hardware::PcDevice,
     ) {
+        use crate::emulator::hardware::ComposedIrqs;
+        self.insert_mmio_route(slot, address, 4096, ComposedIrqs::Endpoint(line), device);
+    }
+
+    pub(crate) fn insert_mmio_bus(
+        &mut self,
+        slot: usize,
+        address: BxPhyAddress,
+        size: u64,
+        lines: u16,
+        device: crate::emulator::hardware::PcDevice,
+    ) {
+        use crate::emulator::hardware::ComposedIrqs;
+        self.insert_mmio_route(slot, address, size, ComposedIrqs::Bus(lines), device);
+    }
+
+    fn insert_mmio_route(
+        &mut self,
+        slot: usize,
+        address: BxPhyAddress,
+        size: u64,
+        irqs: crate::emulator::hardware::ComposedIrqs,
+        device: crate::emulator::hardware::PcDevice,
+    ) {
         self.cpu_mut()
             .mmio
-            .insert_composed(slot, address, line, device);
-        self.device_manager.irq.reserve_composed_line(line.into());
+            .insert_composed(slot, address, size, irqs, device);
+        for line in irqs.lines() {
+            self.device_manager.irq.reserve_composed_line(line);
+        }
         self.cpu_mut().invalidate_host_memory_mappings();
     }
 
@@ -735,12 +815,35 @@ impl<T: crate::cpu::Instrumentation> Emulator<T> {
         &mut self,
         address: BxPhyAddress,
     ) -> Option<crate::emulator::hardware::PcDevice> {
-        let attached = self.cpu_mut().mmio.detach_composed(address)?;
-        self.device_manager
-            .irq
-            .release_composed_line(attached.line.into());
-        self.cpu_mut().invalidate_host_memory_mappings();
+        let (_, attached) = self.detach_mmio_route(address, false)?;
         Some(attached.device)
+    }
+
+    /// Remove a topology mounted at this exact base and release its IRQ outputs.
+    pub fn detach_mmio_bus(
+        &mut self,
+        address: BxPhyAddress,
+    ) -> Option<crate::emulator::hardware::DetachedMmioBus> {
+        use crate::emulator::hardware::DetachedMmioBus;
+        let (size, attached) = self.detach_mmio_route(address, true)?;
+        Some(DetachedMmioBus {
+            size,
+            irqs: attached.irqs,
+            device: attached.device,
+        })
+    }
+
+    fn detach_mmio_route(
+        &mut self,
+        address: BxPhyAddress,
+        bus: bool,
+    ) -> Option<(u64, crate::memory::mmio::ComposedDevice)> {
+        let (size, attached) = self.cpu_mut().mmio.detach_composed(address, bus)?;
+        for line in attached.irqs.lines() {
+            self.device_manager.irq.release_composed_line(line);
+        }
+        self.cpu_mut().invalidate_host_memory_mappings();
+        Some((size, attached))
     }
 
     /// Detach the device at its exact physical base and return its loan.

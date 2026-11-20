@@ -309,9 +309,8 @@ impl IrqFabric {
         self.board_levels = 0;
     }
 
-    #[cfg(feature = "std")]
-    pub(crate) fn has_composed_lines(&self) -> bool {
-        self.composed_lines != 0
+    pub(crate) fn composed_line_reserved(&self, line: IrqLine) -> bool {
+        self.composed_lines & (1 << line.0) != 0
     }
 
     #[inline]

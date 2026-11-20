@@ -1839,7 +1839,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return None;
         }
         if let Some(region) = self.mmio.find_mut(paddr) {
-            if size as u64 <= region.size - paddr.offset_from(region.start) {
+            if region.contains_access(paddr, size) {
                 return Some(region.read(paddr, size));
             }
         }
@@ -1862,7 +1862,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return false;
         }
         if let Some(region) = self.mmio.find_mut(paddr) {
-            if size as u64 <= region.size - paddr.offset_from(region.start) {
+            if region.contains_access(paddr, size) {
                 if !region.write_local(paddr, size, val) {
                     self.write_composed_mmio(paddr, size, val);
                 }

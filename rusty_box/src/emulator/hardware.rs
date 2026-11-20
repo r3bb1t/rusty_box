@@ -17,6 +17,11 @@ use crate::memory::mmio::{DmaExclusions, MmioAttachRefusal};
 
 mod event_endpoint;
 pub use event_endpoint::EventEndpoint;
+mod topology;
+pub use topology::{
+    DetachedMmioBus, IrqWindow, MmioBusAttachRefusal, MmioBusRefused, MmioTopologyError,
+    MmioWindow, RegisterWindow, WindowPair, register_window,
+};
 
 /// An allocation-free diagnostic chosen by the subscriber at the PC boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -32,7 +37,7 @@ pub struct MmioSubscriberError {
     pub source: SubscriberError,
 }
 
-/// An endpoint placed on one page of a single-CPU software PC.
+/// An endpoint on a single-CPU software PC, with offsets local to its window.
 pub trait PcMmioDevice: Send {
     fn read(&mut self, offset: WindowOffset, len: usize) -> u64;
 
@@ -181,6 +186,36 @@ impl IsaIrq {
             None
         }
     }
+
+    fn mask(self) -> u16 {
+        1 << self.0.0
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ComposedIrqs {
+    Endpoint(IsaIrq),
+    Bus(u16),
+}
+
+impl ComposedIrqs {
+    pub(crate) fn mask(self) -> u16 {
+        match self {
+            Self::Endpoint(line) => line.mask(),
+            Self::Bus(mask) => mask,
+        }
+    }
+
+    pub(crate) fn lines(self) -> impl Iterator<Item = IrqLine> {
+        let mask = self.mask();
+        (0..16)
+            .filter(move |line| mask & (1 << line) != 0)
+            .map(IrqLine)
+    }
+
+    pub(crate) fn is_bus(self) -> bool {
+        matches!(self, Self::Bus(_))
+    }
 }
 
 impl From<IsaIrq> for IrqLine {
@@ -268,13 +303,36 @@ impl DmaWrite for PcDma<'_> {
 /// A short loan of a single IRQ output, wired by the board.
 pub struct PcInterrupt<'a> {
     pub(crate) irq: &'a mut IrqFabric,
-    pub(crate) line: IsaIrq,
+    pub(crate) routes: ComposedIrqs,
     pub(crate) driven: bool,
+}
+
+impl PcInterrupt<'_> {
+    fn with_line(
+        &mut self,
+        line: IsaIrq,
+        operation: impl FnOnce(&mut PcInterrupt<'_>) -> Result<Reaction, SubscriberError>,
+    ) -> Result<Reaction, SubscriberError> {
+        if self.routes.mask() & line.mask() == 0 {
+            return Err(SubscriberError("MMIO window IRQ is outside this route"));
+        }
+        let mut output = PcInterrupt {
+            irq: self.irq,
+            routes: ComposedIrqs::Endpoint(line),
+            driven: false,
+        };
+        let result = operation(&mut output);
+        self.driven |= output.driven;
+        result
+    }
 }
 
 impl InterruptOutput for PcInterrupt<'_> {
     fn set_level(&mut self, asserted: bool) {
-        self.irq.set_composed_level(self.line.into(), asserted);
+        let ComposedIrqs::Endpoint(line) = self.routes else {
+            unreachable!("bus routing projects a single interrupt output to each leaf");
+        };
+        self.irq.set_composed_level(line.into(), asserted);
         self.driven = true;
     }
 }

@@ -7,7 +7,7 @@
 use alloc::boxed::Box;
 
 use crate::config::{BxPhyAddress, MAX_MMIO_REGIONS};
-use crate::emulator::hardware::{IsaIrq, PcDevice, PcDeviceAttachRefusal, WindowOffset};
+use crate::emulator::hardware::{ComposedIrqs, PcDevice, WindowOffset};
 
 /// A stateful x86 PC MMIO device. Offsets are relative to the attached
 /// page. Values are little-endian and accesses may be split into bytes.
@@ -61,20 +61,21 @@ enum Target {
 }
 
 pub(crate) struct ComposedDevice {
-    pub(crate) line: IsaIrq,
+    pub(crate) irqs: ComposedIrqs,
     pub(crate) device: PcDevice,
 }
 
 /// All registry ranges, projected around the exclusively borrowed endpoint.
 pub(crate) struct DmaExclusions<'a> {
     before: &'a [Option<MmioRegion>],
-    page: BxPhyAddress,
+    pub(crate) start: BxPhyAddress,
+    size: u64,
     after: &'a [Option<MmioRegion>],
 }
 
 impl DmaExclusions<'_> {
     pub(crate) fn overlaps(&self, page: BxPhyAddress) -> bool {
-        self.page == page
+        page.offset_from(self.start) < self.size
             || self
                 .before
                 .iter()
@@ -96,6 +97,15 @@ impl MmioRegion {
         size != 0
             && self.size != 0
             && (start.offset_from(self.start) < self.size || self.start.offset_from(start) < size)
+    }
+
+    // Child boundaries are page-aligned. Keep cross-page accesses on the
+    // existing bytewise path so no child can consume its neighbour's bytes.
+    #[inline]
+    pub(crate) fn contains_access(&self, address: BxPhyAddress, len: usize) -> bool {
+        len as u64 <= self.size - address.offset_from(self.start)
+            && (len <= 4096 - address.page_offset() as usize
+                || !matches!(&self.target, Target::Composed(target) if target.irqs.is_bus()))
     }
 
     pub(crate) fn read(&mut self, address: BxPhyAddress, len: usize) -> u64 {
@@ -187,7 +197,7 @@ impl MmioRegistry {
             Ok(slot) => slot,
             Err(reason) => return Err((reason, target)),
         };
-        self.insert_page(slot, addr, target);
+        self.insert_region(slot, addr, 4096, target);
         Ok(())
     }
 
@@ -195,11 +205,19 @@ impl MmioRegistry {
         if addr.page_offset() != 0 {
             return Err(MmioAttachRefusal::Unaligned);
         }
+        self.vacant_window(addr, 4096)
+    }
+
+    pub(crate) fn vacant_window(
+        &self,
+        addr: BxPhyAddress,
+        size: u64,
+    ) -> Result<usize, MmioAttachRefusal> {
         if self
             .regions
             .iter()
             .flatten()
-            .any(|region| region.overlaps(addr, 4096))
+            .any(|region| region.overlaps(addr, size))
         {
             return Err(MmioAttachRefusal::Overlap);
         }
@@ -209,54 +227,49 @@ impl MmioRegistry {
             .ok_or(MmioAttachRefusal::Full)
     }
 
-    fn insert_page(&mut self, index: usize, addr: BxPhyAddress, target: Target) {
+    fn insert_region(&mut self, index: usize, addr: BxPhyAddress, size: u64, target: Target) {
         debug_assert!(self.regions[index].is_none());
         self.regions[index] = Some(MmioRegion {
             start: addr,
-            size: 4096,
+            size,
             target,
         });
         self.count += 1;
-    }
-
-    pub(crate) fn composed_slot(
-        &self,
-        addr: BxPhyAddress,
-        line: IsaIrq,
-    ) -> Result<usize, PcDeviceAttachRefusal> {
-        if self.regions.iter().flatten().any(
-            |region| matches!(&region.target, Target::Composed(attached) if attached.line == line),
-        ) {
-            return Err(PcDeviceAttachRefusal::IrqInUse);
-        }
-        Ok(self.vacant_page(addr)?)
     }
 
     pub(crate) fn insert_composed(
         &mut self,
         slot: usize,
         addr: BxPhyAddress,
-        line: IsaIrq,
+        size: u64,
+        irqs: ComposedIrqs,
         device: PcDevice,
     ) {
-        self.insert_page(
+        self.insert_region(
             slot,
             addr,
-            Target::Composed(ComposedDevice { line, device }),
+            size,
+            Target::Composed(ComposedDevice { irqs, device }),
         );
     }
 
-    pub(crate) fn detach_composed(&mut self, addr: BxPhyAddress) -> Option<ComposedDevice> {
+    pub(crate) fn detach_composed(
+        &mut self,
+        addr: BxPhyAddress,
+        bus: bool,
+    ) -> Option<(u64, ComposedDevice)> {
         let slot = self.regions.iter_mut().find(|slot| {
             slot.as_ref().is_some_and(|region| {
-                region.start == addr && matches!(region.target, Target::Composed(_))
+                region.start == addr
+                    && matches!(&region.target, Target::Composed(target) if target.irqs.is_bus() == bus)
             })
         })?;
-        let Target::Composed(attached) = slot.take()?.target else {
+        let region = slot.take()?;
+        let Target::Composed(attached) = region.target else {
             unreachable!()
         };
         self.count -= 1;
-        Some(attached)
+        Some((region.size, attached))
     }
 
     pub(crate) fn composed_at(
@@ -277,7 +290,8 @@ impl MmioRegistry {
             attached,
             DmaExclusions {
                 before,
-                page: region.start,
+                start: region.start,
+                size: region.size,
                 after,
             },
         ))
