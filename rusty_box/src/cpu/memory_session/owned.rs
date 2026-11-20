@@ -38,6 +38,11 @@ impl CpuEmulator {
 }
 
 impl<T: Instrumentation> CpuEmulator<T> {
+    /// Inspect the installed observer between execution calls.
+    pub fn instrumentation(&self) -> &T {
+        &self.cpu.instrumentation.tracer
+    }
+
     pub fn regs(&mut self) -> Registers<'_, T> {
         Registers::with_pending(&mut self.cpu, &mut self.pending)
     }

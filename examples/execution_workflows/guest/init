@@ -1,0 +1,6 @@
+#!/bin/busybox sh
+
+export PATH=/bin
+stty -echo -onlcr || exit 1
+printf 'RB_READY:%s\n' "$(uname -r)"
+exec /bin/sh /dev/console

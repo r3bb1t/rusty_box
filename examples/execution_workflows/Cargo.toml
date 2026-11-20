@@ -1,0 +1,23 @@
+[package]
+name = "rusty-box-execution-workflows"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+default = []
+libafl = ["dep:libafl", "dep:libafl_bolts"]
+
+[dependencies]
+rusty_box = { path = "../../rusty_box", default-features = false, features = ["std"] }
+rusty_box_core = { path = "../../rusty_box_core" }
+sha2 = "0.10"
+thiserror = "2"
+libafl = { version = "=0.16.1", default-features = false, features = ["std", "serdeany_autoreg"], optional = true }
+libafl_bolts = { version = "=0.16.1", default-features = false, features = ["std"], optional = true }
+
+[[bin]]
+name = "libafl_fixture"
+required-features = ["libafl"]
