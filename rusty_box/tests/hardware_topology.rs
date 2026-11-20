@@ -9,7 +9,7 @@ use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use gpu::{Gpu, GpuEvent};
+use gpu::Gpu;
 use register_bank::{RegisterBank, RegisterChanged};
 use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::instrumentation::EmuStopReason;
@@ -17,9 +17,9 @@ use rusty_box::cpu::registers::{EAX, RIP};
 use rusty_box::cpu::{CpuError, CpuSetupMode};
 use rusty_box::emulator::MachineBuilder;
 use rusty_box::emulator::hardware::{
-    EventEndpoint, IsaIrq, MmioBusAttachRefusal, MmioSubscriberError, MmioTopologyError,
-    MmioWindow, PcDeviceAttachRefusal, PcMmioDevice, Reaction, SubscriberError, Subscriptions,
-    register_window,
+    InterruptOutput, IrqMmioModel, IsaIrq, MmioBusAttachRefusal, MmioSubscriberError,
+    MmioTopologyError, MmioWindow, MmioWrite, PcDeviceAttachRefusal, PcMmioDevice, Reaction,
+    SubscriberError, Subscriptions, WindowOffset, register_window,
 };
 use rusty_box::memory::mmio::MmioAttachRefusal;
 use rusty_box::{Emulator, EmulatorConfig, Error};
@@ -77,43 +77,36 @@ fn gpu_window(
     stop: bool,
     deliveries: Arc<AtomicUsize>,
 ) -> MmioWindow<impl PcMmioDevice> {
-    MmioWindow::with_irq(
-        NonZeroU16::MIN,
-        IsaIrq::new(line).unwrap(),
-        EventEndpoint::with_subscriptions(
-            Gpu::default(),
-            Subscriptions::<GpuEvent, SubscriberError>::new().try_on(move |event| {
-                if let Some(event) = event.written() {
-                    assert_eq!(event.destination, phy(destination));
-                    deliveries.fetch_add(1, Ordering::Relaxed);
-                    return Ok(if stop {
-                        Reaction::Stop
-                    } else {
-                        Reaction::Continue
-                    });
-                }
-                assert_eq!(event.rejected().unwrap().destination, phy(SECOND));
-                Ok(Reaction::Continue)
-            }),
-        ),
-    )
+    MmioWindow::with_model(IsaIrq::new(line).unwrap(), Gpu::default()).try_on(move |event| {
+        if let Some(event) = event.written() {
+            assert_eq!(event.destination, phy(destination));
+            deliveries.fetch_add(1, Ordering::Relaxed);
+            return Ok(if stop {
+                Reaction::Stop
+            } else {
+                Reaction::Continue
+            });
+        }
+        assert_eq!(event.rejected().unwrap().destination, phy(SECOND));
+        Ok(Reaction::Continue)
+    })
 }
 
 #[test]
 fn a_nested_bus_routes_dma_irqs_stops_and_keeps_instance_state() {
     let observed = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&observed);
-    let registers = register_window(
-        NonZeroU16::new(2).unwrap(),
+    let registers = MmioWindow::registers(
         RegisterBank::new(7),
         RegisterBank::read,
         RegisterBank::write,
-        Subscriptions::<RegisterChanged, SubscriberError>::new().on(move |event| {
-            assert_eq!(event.offset.get(), 4096);
-            assert_eq!(event.value, 42);
-            count.fetch_add(1, Ordering::Relaxed);
-        }),
-    );
+    )
+    .with_pages(NonZeroU16::new(2).unwrap())
+    .on(move |event| {
+        assert_eq!(event.offset.get(), 4096);
+        assert_eq!(event.value, 42);
+        count.fetch_add(1, Ordering::Relaxed);
+    });
     let first = Arc::new(AtomicUsize::new(0));
     let second = Arc::new(AtomicUsize::new(0));
     let branch = gpu_window(5, DMA_CODE + 1, false, Arc::clone(&first))
@@ -244,10 +237,6 @@ fn cross_window_guest_accesses_route_both_bytes_in_order() {
 fn topology_preflights_the_whole_aperture_and_irq_set_before_mounting() {
     let mut pc = board();
     let gpu = |line| gpu_window(line, DMA_DATA, false, Arc::new(AtomicUsize::new(0)));
-    assert!(matches!(
-        gpu(5).then(gpu(5)),
-        Err(MmioTopologyError::DuplicateIrq)
-    ));
     let tree = plain(1).then(gpu(5).then(gpu(10)).unwrap()).unwrap();
     // The base is clear, but the next page is inside the built-in VGA aperture.
     let error = tree.install(&mut pc, phy(0x9F000)).unwrap_err();
@@ -280,14 +269,12 @@ fn topology_preflights_the_whole_aperture_and_irq_set_before_mounting() {
 #[test]
 fn a_child_subscriber_error_reports_the_physical_address_after_commit() {
     let mut pc = pc();
-    let failing = register_window(
-        NonZeroU16::MIN,
+    let failing = MmioWindow::registers(
         RegisterBank::new(0),
         RegisterBank::read,
         RegisterBank::write,
-        Subscriptions::<RegisterChanged, SubscriberError>::new()
-            .try_on(|_| Err(SubscriberError("register observer failed"))),
-    );
+    )
+    .try_on(|_| Err(SubscriberError("register observer failed")));
     plain(0)
         .then(plain(1).then(failing).unwrap())
         .unwrap()
@@ -314,4 +301,85 @@ fn a_child_subscriber_error_reports_the_physical_address_after_commit() {
     assert_eq!(pc.regs().read(RIP), resume);
     pc.emu_start(resume, None, None, Some(1)).unwrap();
     assert_eq!(read(&mut pc, target), 42);
+}
+
+#[test]
+fn a_refused_join_returns_live_models_and_handlers_for_rewiring() {
+    struct DropCount(Arc<AtomicUsize>);
+
+    impl Drop for DropCount {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    struct Latch {
+        value: u32,
+        _owned_state: DropCount,
+    }
+
+    impl IrqMmioModel for Latch {
+        type Events = Option<u32>;
+
+        fn read(&mut self, _: WindowOffset, _: usize) -> u64 {
+            self.value.into()
+        }
+
+        fn write(&mut self, access: MmioWrite, irq: &mut impl InterruptOutput) -> Self::Events {
+            self.value = access.value as u32;
+            irq.set_level(true);
+            Some(self.value)
+        }
+    }
+
+    let models = Arc::new(AtomicUsize::new(0));
+    let handlers = Arc::new(AtomicUsize::new(0));
+    let deliveries = Arc::new(AtomicUsize::new(0));
+    let leaf = |initial, expected| {
+        let captured = DropCount(Arc::clone(&handlers));
+        let deliveries = Arc::clone(&deliveries);
+        MmioWindow::with_model(
+            IsaIrq::new(5).unwrap(),
+            Latch {
+                value: initial,
+                _owned_state: DropCount(Arc::clone(&models)),
+            },
+        )
+        .on(move |event| {
+            assert_eq!(captured.0.load(Ordering::Relaxed), 0);
+            assert_eq!(*event, expected);
+            deliveries.fetch_add(1, Ordering::Relaxed);
+        })
+    };
+    let left = leaf(11, 42);
+    let right = leaf(17, 53).on_with_irq(|_, irq| {
+        irq.set_level(false);
+        Ok(Reaction::Continue)
+    });
+    let error = match left.then(right) {
+        Err(error) => error,
+        Ok(_) => panic!("duplicate outputs were accepted"),
+    };
+    assert_eq!(error.reason, MmioTopologyError::DuplicateIrq);
+    assert_eq!(models.load(Ordering::Relaxed), 0);
+    assert_eq!(handlers.load(Ordering::Relaxed), 0);
+    let root = error
+        .left
+        .then(error.right.with_irq_line(IsaIrq::new(10).unwrap()))
+        .unwrap();
+
+    let mut pc = board();
+    root.install(&mut pc, phy(BASE)).unwrap();
+    assert_eq!(read(&mut pc, BASE), 11);
+    assert_eq!(read(&mut pc, BASE + 4096), 17);
+    let mut guest = Vec::new();
+    store(&mut guest, BASE, 42);
+    store(&mut guest, BASE + 4096, 53);
+    start(&mut pc, &guest, 2);
+    assert_eq!(deliveries.load(Ordering::Relaxed), 2);
+    assert_ne!(irr(&mut pc, 0x20) & (1 << 5), 0);
+    assert_eq!(irr(&mut pc, 0xA0) & (1 << 2), 0);
+    drop(pc.detach_mmio_bus(phy(BASE)).unwrap());
+    assert_eq!(models.load(Ordering::Relaxed), 2);
+    assert_eq!(handlers.load(Ordering::Relaxed), 2);
 }

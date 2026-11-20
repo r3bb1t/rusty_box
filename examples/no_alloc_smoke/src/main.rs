@@ -2,7 +2,6 @@
 #![no_main]
 
 use core::mem::MaybeUninit;
-use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 
 use rusty_box::config::BxPhyAddress;
@@ -12,7 +11,7 @@ use rusty_box::cpu::registers::AX;
 use rusty_box::emulator::hardware::{
     EventEndpoint, InterruptOutput, IrqMmioModel, IrqWindow, IsaIrq, MmioBusAttachRefusal,
     MmioWindow, MmioWrite, PcAttachment, PcDevice, PcDeviceAttachError, RegisterWindow,
-    SubscriberError, Subscriptions, WindowOffset, WindowPair, register_window,
+    SubscriberError, Subscriptions, WindowOffset, WindowPair,
 };
 use rusty_box::memory::mapped::{MappedMemory, PhysicalRegion, RegionKind};
 use rusty_box::memory::mmio::{MmioAttachError, MmioDevice};
@@ -97,18 +96,8 @@ fn attach_bus(
     machine: &mut rusty_box::Emulator,
     storage: &'static mut MaybeUninit<Bus>,
 ) -> Result<(), MmioBusAttachRefusal> {
-    let register: MmioWindow<Register> = register_window(
-        NonZeroU16::MIN,
-        0,
-        read_byte,
-        write_byte,
-        Subscriptions::new(),
-    );
-    let irq = MmioWindow::with_irq(
-        NonZeroU16::MIN,
-        IsaIrq::new(5).unwrap(),
-        EventEndpoint::with_subscriptions(Pulse, Subscriptions::new()),
-    );
+    let register: MmioWindow<Register> = MmioWindow::registers(0, read_byte, write_byte);
+    let irq = MmioWindow::with_model(IsaIrq::new(5).unwrap(), Pulse);
     let bus = register.then(irq).unwrap();
     storage
         .write(bus)

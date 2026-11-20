@@ -2,6 +2,9 @@
 //!
 //! The board erases the placed endpoint once. Device code behind it can use
 //! ordinary functions, generic capabilities and statically composed handlers.
+//! Start with [`MmioWindow::registers`] for register methods or
+//! [`MmioWindow::with_model`] for a model wired to a PC interrupt line.
+//! Model code can use `rusty_box_devices::composition` independently of the PC.
 
 use rusty_box_devices::api::IrqLine;
 pub use rusty_box_devices::api::WindowOffset;
@@ -19,8 +22,8 @@ mod event_endpoint;
 pub use event_endpoint::EventEndpoint;
 mod topology;
 pub use topology::{
-    DetachedMmioBus, IrqWindow, MmioBusAttachRefusal, MmioBusRefused, MmioTopologyError,
-    MmioWindow, RegisterWindow, WindowPair, register_window,
+    DetachedMmioBus, IrqWindow, MmioBusAttachRefusal, MmioBusRefused, MmioJoinError,
+    MmioTopologyError, MmioWindow, RegisterWindow, WindowPair, register_window,
 };
 
 /// An allocation-free diagnostic chosen by the subscriber at the PC boundary.

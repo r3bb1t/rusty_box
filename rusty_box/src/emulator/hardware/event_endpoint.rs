@@ -11,6 +11,12 @@ pub struct EventEndpoint<D: MmioModel, S = Subscriptions<MmioEvent<D>, Subscribe
     subscribers: S,
 }
 
+impl<D: MmioModel + Send> EventEndpoint<D> {
+    pub(super) fn new(model: D) -> Self {
+        Self::with_subscriptions(model, Subscriptions::new())
+    }
+}
+
 impl<D: MmioModel + Send, S> EventEndpoint<D, S>
 where
     S: for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
@@ -19,16 +25,59 @@ where
     pub fn with_subscriptions(model: D, subscribers: S) -> Self {
         Self { model, subscribers }
     }
+
+    pub(super) fn on<F: FnMut(&MmioEvent<D>) + Send>(
+        self,
+        handler: F,
+    ) -> EventEndpoint<
+        D,
+        impl for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
+    > {
+        EventEndpoint::with_subscriptions(
+            self.model,
+            Subscriptions::new().forward(self.subscribers).on(handler),
+        )
+    }
+
+    pub(super) fn try_on<F: FnMut(&MmioEvent<D>) -> Result<Reaction, SubscriberError> + Send>(
+        self,
+        handler: F,
+    ) -> EventEndpoint<
+        D,
+        impl for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
+    > {
+        EventEndpoint::with_subscriptions(
+            self.model,
+            Subscriptions::new()
+                .forward(self.subscribers)
+                .try_on(handler),
+        )
+    }
+
+    pub(super) fn on_with_irq<F>(
+        self,
+        mut handler: F,
+    ) -> EventEndpoint<
+        D,
+        impl for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
+    >
+    where
+        F: for<'a> FnMut(&MmioEvent<D>, &mut PcInterrupt<'a>) -> Result<Reaction, SubscriberError>
+            + Send,
+    {
+        EventEndpoint::with_subscriptions(
+            self.model,
+            Subscriptions::new().forward(self.subscribers).on_with(
+                move |event: &MmioEvent<D>, irq: &mut PcInterrupt<'_>| handler(event, irq),
+            ),
+        )
+    }
 }
 
 impl<D: MmioModel + Send> PcAttachment<EventEndpoint<D>> {
     /// Prepare a placement for a model, with no subscribers yet.
     pub fn with_model(page: BxPhyAddress, line: IsaIrq, model: D) -> Self {
-        Self::new(
-            page,
-            line,
-            EventEndpoint::with_subscriptions(model, Subscriptions::new()),
-        )
+        Self::new(page, line, EventEndpoint::new(model))
     }
 }
 
@@ -47,7 +96,7 @@ where
             impl for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
         >,
     > {
-        self.with_subscribers(|previous| Subscriptions::new().forward(previous).on(handler))
+        self.map_device(|device| device.on(handler))
     }
 
     /// Observe one typed selection of the model's notifications.
@@ -78,13 +127,13 @@ where
             impl for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
         >,
     > {
-        self.with_subscribers(|previous| Subscriptions::new().forward(previous).try_on(handler))
+        self.map_device(|device| device.try_on(handler))
     }
 
     /// Observe notifications with this endpoint's short IRQ loan.
     pub fn on_with_irq<F>(
         self,
-        mut handler: F,
+        handler: F,
     ) -> PcAttachment<
         EventEndpoint<
             D,
@@ -95,23 +144,15 @@ where
         F: for<'a> FnMut(&MmioEvent<D>, &mut PcInterrupt<'a>) -> Result<Reaction, SubscriberError>
             + Send,
     {
-        self.with_subscribers(|previous| {
-            Subscriptions::new()
-                .forward(previous)
-                .on_with(move |event: &MmioEvent<D>, irq: &mut PcInterrupt<'_>| handler(event, irq))
-        })
+        self.map_device(|device| device.on_with_irq(handler))
     }
 
-    fn with_subscribers<R>(self, extend: impl FnOnce(S) -> R) -> PcAttachment<EventEndpoint<D, R>> {
-        let (page, line, EventEndpoint { model, subscribers }) = self.into_parts();
-        PcAttachment {
-            page,
-            line,
-            device: EventEndpoint {
-                model,
-                subscribers: extend(subscribers),
-            },
-        }
+    fn map_device<R: PcMmioDevice>(
+        self,
+        map: impl FnOnce(EventEndpoint<D, S>) -> R,
+    ) -> PcAttachment<R> {
+        let (page, line, device) = self.into_parts();
+        PcAttachment::new(page, line, map(device))
     }
 }
 

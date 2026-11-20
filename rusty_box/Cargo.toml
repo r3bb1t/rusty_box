@@ -64,6 +64,16 @@ path = "examples/hardware_topology/main.rs"
 required-features = ["std"]
 
 [[example]]
+name = "register_window"
+path = "examples/hardware_topology/register_window.rs"
+required-features = ["std"]
+
+[[example]]
+name = "recover_topology"
+path = "examples/hardware_topology/recover_topology.rs"
+required-features = ["std"]
+
+[[example]]
 name = "alpine"
 path = "examples/alpine/alpine.rs"
 required-features = ["std"]

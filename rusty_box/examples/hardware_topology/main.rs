@@ -5,15 +5,13 @@ mod register_bank;
 
 use std::num::NonZeroU16;
 
-use gpu::{Gpu, GpuEvent};
-use register_bank::{RegisterBank, RegisterChanged};
+use gpu::Gpu;
+use register_bank::RegisterBank;
 use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::CpuSetupMode;
 use rusty_box::cpu::instrumentation::EmuStopReason;
 use rusty_box::cpu::registers::RIP;
-use rusty_box::emulator::hardware::{
-    EventEndpoint, IsaIrq, MmioWindow, Reaction, SubscriberError, Subscriptions, register_window,
-};
+use rusty_box::emulator::hardware::{IsaIrq, MmioWindow, Reaction};
 use rusty_box::{Emulator, EmulatorConfig};
 
 fn store(code: &mut Vec<u8>, address: u32, value: u32) {
@@ -23,37 +21,29 @@ fn store(code: &mut Vec<u8>, address: u32, value: u32) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let registers = register_window(
-        NonZeroU16::new(2).unwrap(),
+    let registers = MmioWindow::registers(
         RegisterBank::new(0),
         RegisterBank::read,
         RegisterBank::write,
-        Subscriptions::<RegisterChanged, SubscriberError>::new()
-            .on(|event| println!("register at {:#x} is {}", event.offset.get(), event.value)),
-    );
+    )
+    .with_pages(NonZeroU16::new(2).unwrap())
+    .on(|event| println!("register at {:#x} is {}", event.offset.get(), event.value));
     let gpu = |line, stop| {
-        MmioWindow::with_irq(
-            NonZeroU16::MIN,
-            IsaIrq::new(line).unwrap(),
-            EventEndpoint::with_subscriptions(
-                Gpu::default(),
-                Subscriptions::<GpuEvent, SubscriberError>::new()
-                    .on(move |event| {
-                        if let Some(tile) = event.written() {
-                            println!("GPU on IRQ {line} DMA to {:#x}", tile.destination);
-                        } else if let Some(failure) = event.rejected() {
-                            println!("GPU on IRQ {line} refused {:#x}", failure.destination);
-                        }
-                    })
-                    .try_on(move |_| {
-                        Ok(if stop {
-                            Reaction::Stop
-                        } else {
-                            Reaction::Continue
-                        })
-                    }),
-            ),
-        )
+        MmioWindow::with_model(IsaIrq::new(line).unwrap(), Gpu::default())
+            .on(move |event| {
+                if let Some(tile) = event.written() {
+                    println!("GPU on IRQ {line} DMA to {:#x}", tile.destination);
+                } else if let Some(failure) = event.rejected() {
+                    println!("GPU on IRQ {line} refused {:#x}", failure.destination);
+                }
+            })
+            .try_on(move |_| {
+                Ok(if stop {
+                    Reaction::Stop
+                } else {
+                    Reaction::Continue
+                })
+            })
     };
     let downstream = gpu(5, false).then(gpu(10, true))?;
     let root = registers.then(downstream)?;
