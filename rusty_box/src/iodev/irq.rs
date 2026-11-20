@@ -186,6 +186,19 @@ pub struct IrqFabric {
     /// [`Self::lint0_admits_ext_int`]. Bochs has no counterpart, because Bochs
     /// has no backend to offload an APIC to.
     lint0: u64,
+    // Only composed placements share a wire with the existing board output.
+    // These masks are transient and never part of the PIC snapshot payload.
+    composed_lines: u16,
+    composed_levels: u16,
+    board_levels: u16,
+}
+
+fn set_level_bit(mask: &mut u16, bit: u16, level: bool) {
+    if level {
+        *mask |= bit;
+    } else {
+        *mask &= !bit;
+    }
 }
 
 impl Default for IrqFabric {
@@ -202,6 +215,9 @@ impl IrqFabric {
             acknowledge_count: 0,
             vectors_acknowledged: [0; 256],
             lint0: LINT0_VIRTUAL_WIRE,
+            composed_lines: 0,
+            composed_levels: 0,
+            board_levels: 0,
         }
     }
 
@@ -241,10 +257,61 @@ impl IrqFabric {
     /// returns, exactly as upstream does.
     #[inline]
     pub(crate) fn set_isa_level(&mut self, line: IrqLine, level: bool) {
+        let bit = 1u16.checked_shl(u32::from(line.0)).unwrap_or(0);
+        if self.composed_lines & bit == 0 {
+            self.drive_isa_level(line, level);
+            return;
+        }
+        let previous = self.board_levels | self.composed_levels;
+        set_level_bit(&mut self.board_levels, bit, level);
+        self.drive_shared_change(line, bit, previous);
+    }
+
+    fn drive_isa_level(&mut self, line: IrqLine, level: bool) {
         match self.pic.set_irq_level(line.0, level) {
             IoApicEdge::NotCrossed => {}
             IoApicEdge::Crossed => self.set_ioapic_pin(line.0, level),
         }
+    }
+
+    pub(crate) fn reserve_composed_line(&mut self, line: IrqLine) {
+        let bit = 1u16 << line.0;
+        debug_assert_eq!(self.composed_lines & bit, 0);
+        debug_assert!(!self.line_level(line));
+        self.composed_lines |= bit;
+    }
+
+    pub(crate) fn set_composed_level(&mut self, line: IrqLine, level: bool) {
+        let bit = 1u16 << line.0;
+        debug_assert_ne!(self.composed_lines & bit, 0);
+        let previous = self.board_levels | self.composed_levels;
+        set_level_bit(&mut self.composed_levels, bit, level);
+        self.drive_shared_change(line, bit, previous);
+    }
+
+    fn drive_shared_change(&mut self, line: IrqLine, bit: u16, previous: u16) {
+        let next = self.board_levels | self.composed_levels;
+        if (previous ^ next) & bit != 0 {
+            self.drive_isa_level(line, next & bit != 0);
+        }
+    }
+
+    pub(crate) fn release_composed_line(&mut self, line: IrqLine) {
+        self.set_composed_level(line, false);
+        let bit = 1u16 << line.0;
+        self.composed_lines &= !bit;
+        self.board_levels &= !bit;
+    }
+
+    /// The PIC and IOAPIC reset clear the wires, while placements survive.
+    pub(crate) fn reset_composed_levels(&mut self) {
+        self.composed_levels = 0;
+        self.board_levels = 0;
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn has_composed_lines(&self) -> bool {
+        self.composed_lines != 0
     }
 
     #[inline]
@@ -311,6 +378,7 @@ impl IrqFabric {
             // The Local APIC's own gate, which decides whether a vector may be
             // PLACED; this scan decides only which entries have one to give.
             lint0: _,
+            ..
         } = self;
         ioapic.service(&mut PicAcknowledge {
             pic,
@@ -491,6 +559,29 @@ mod tests {
     use super::*;
 
     const KEYBOARD: IrqLine = IrqLine(1);
+
+    #[test]
+    fn a_composed_line_preserves_either_sources_assertion() {
+        const LINE: IrqLine = IrqLine(5);
+        let mut fabric = IrqFabric::new();
+        fabric.reserve_composed_line(LINE);
+        let check = |fabric: &IrqFabric, high| {
+            assert_eq!(fabric.line_level(LINE), high);
+            assert_eq!(fabric.ioapic().pin_state(LINE.0).0, high);
+        };
+        fabric.set_composed_level(LINE, true);
+        fabric.set_isa_level(LINE, true);
+        fabric.set_isa_level(LINE, false);
+        check(&fabric, true);
+        fabric.set_isa_level(LINE, true);
+        fabric.set_composed_level(LINE, false);
+        check(&fabric, true);
+        fabric.set_composed_level(LINE, true);
+        fabric.release_composed_line(LINE);
+        check(&fabric, true);
+        fabric.set_isa_level(LINE, false);
+        check(&fabric, false);
+    }
 
     /// Program one redirection entry's low word the way a guest does: select
     /// the register through IOREGSEL, then write the data window — through the

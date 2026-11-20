@@ -6,7 +6,7 @@ mod gpu;
 mod mailbox;
 
 use gpu::{Gpu, GpuEvent, TileRejected, TileWritten};
-use mailbox::{Mailbox, MessagePosted};
+use mailbox::{DoorbellRequested, Mailbox, MailboxEvent, MessagePosted, MessageTaken};
 use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::instrumentation::EmuStopReason;
 use rusty_box::cpu::registers::{EAX, EBX, ECX, RIP};
@@ -18,7 +18,7 @@ use rusty_box::emulator::hardware::{
 };
 use rusty_box::memory::mmio::{MmioAttachRefusal, MmioDevice};
 use rusty_box::{Emulator, EmulatorConfig, Error};
-use rusty_box_devices::composition::write_and_publish;
+use rusty_box_devices::composition::{Subscriptions, publish_events, write_and_publish};
 
 const DEVICE: BxPhyAddress = BxPhyAddress::new(0x90000);
 const CODE: u64 = 0x10000;
@@ -135,12 +135,53 @@ fn mailbox_uses_the_same_glue_and_never_needs_dma() {
         Ok(Reaction::Continue)
     );
     assert_eq!(mailbox.read(WindowOffset(0), 4), 42);
-    assert_eq!(events.0, [(MessagePosted(42), true)]);
+    assert_eq!(
+        events.0,
+        [
+            (MailboxEvent::Posted(MessagePosted(42)), true),
+            (MailboxEvent::Doorbell(DoorbellRequested), true),
+        ]
+    );
     assert_eq!(
         write_and_publish(&mut mailbox, access(4, 0), &mut dma, &mut irq, &mut events),
         Ok(Reaction::Continue)
     );
-    assert_eq!(events.0.len(), 1);
+    assert_eq!(events.0.len(), 2);
+    assert!(dma.writes.is_empty());
+    assert_eq!(irq.edges, [true, false]);
+}
+
+#[test]
+fn a_host_operation_publishes_to_the_same_handlers_without_mmio() {
+    use rusty_box_devices::composition::IrqMmioModel;
+
+    let (mut mailbox, mut irq) = (Mailbox::default(), FakeIrq::default());
+    let mut events = Vec::new();
+    {
+        let mut route = Subscriptions::<MailboxEvent>::new().on(|event| events.push(*event));
+        let posted = IrqMmioModel::write(&mut mailbox, access(0, 42), &mut irq);
+        assert_eq!(
+            publish_events(posted, &mut route, &mut ()),
+            Ok(Reaction::Continue)
+        );
+        let taken = mailbox.take(&mut irq);
+        assert_eq!(
+            publish_events(taken, &mut route, &mut ()),
+            Ok(Reaction::Continue)
+        );
+        assert_eq!(
+            publish_events(mailbox.take(&mut irq), &mut route, &mut ()),
+            Ok(Reaction::Continue)
+        );
+    }
+    assert_eq!(
+        events,
+        [
+            MailboxEvent::Posted(MessagePosted(42)),
+            MailboxEvent::Doorbell(DoorbellRequested),
+            MailboxEvent::Taken(MessageTaken(42)),
+        ]
+    );
     assert_eq!(irq.edges, [true, false]);
 }
 
@@ -413,8 +454,21 @@ fn two_distinct_models_mount_together_and_a_detached_mailbox_can_move() {
 
     let refused =
         PcAttachment::with_model(mailbox_page, IsaIrq::new(4).unwrap(), Mailbox::default())
-            .on(|event| assert_eq!(*event, MessagePosted(42)))
-            .try_on(|_| Ok(Reaction::Stop))
+            .try_on({
+                let mut posted = false;
+                move |event| match event {
+                    MailboxEvent::Posted(MessagePosted(42)) => {
+                        assert!(!posted);
+                        posted = true;
+                        Ok(Reaction::Continue)
+                    }
+                    MailboxEvent::Doorbell(_) => {
+                        assert!(posted);
+                        Ok(Reaction::Stop)
+                    }
+                    other => panic!("unexpected notification {other:?}"),
+                }
+            })
             .install(&mut pc)
             .unwrap_err();
     assert_eq!(refused.reason, PcDeviceAttachRefusal::BoardIrqInUse);
@@ -422,6 +476,15 @@ fn two_distinct_models_mount_together_and_a_detached_mailbox_can_move() {
     PcAttachment::new(page, IsaIrq::new(10).unwrap(), endpoint)
         .install(&mut pc)
         .unwrap();
+
+    let mut saved = Vec::new();
+    let save_error = pc.save_snapshot(&mut saved).unwrap_err();
+    assert_eq!(save_error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(saved.is_empty());
+    let mut restore = std::io::Cursor::new([0; 8]);
+    let restore_error = pc.restore_snapshot(&mut restore).unwrap_err();
+    assert_eq!(restore_error.kind(), std::io::ErrorKind::Unsupported);
+    assert_eq!(restore.position(), 0);
 
     program(&mut pc, RAM);
     pc.emu_start(CODE, None, None, Some(3)).unwrap();

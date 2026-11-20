@@ -1,4 +1,4 @@
-use rusty_box_devices::composition::write_and_publish;
+use rusty_box_devices::composition::{MmioEvent, write_and_publish};
 
 use super::{
     BxPhyAddress, Emit, IsaIrq, MmioModel, MmioWrite, PcAttachment, PcDma, PcInterrupt,
@@ -6,8 +6,7 @@ use super::{
 };
 
 /// Adapts a model and its local subscribers to the PC's scalar MMIO route.
-pub struct EventEndpoint<D: MmioModel, S = Subscriptions<<D as MmioModel>::Event, SubscriberError>>
-{
+pub struct EventEndpoint<D: MmioModel, S = Subscriptions<MmioEvent<D>, SubscriberError>> {
     model: D,
     subscribers: S,
 }
@@ -29,16 +28,16 @@ impl<D: MmioModel + Send> PcAttachment<EventEndpoint<D>> {
 impl<D, S> PcAttachment<EventEndpoint<D, S>>
 where
     D: MmioModel + Send,
-    S: for<'a> Emit<D::Event, PcInterrupt<'a>, Error = SubscriberError> + Send,
+    S: for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
 {
     /// Observe each notification produced by this model.
-    pub fn on<F: FnMut(&D::Event) + Send>(
+    pub fn on<F: FnMut(&MmioEvent<D>) + Send>(
         self,
         handler: F,
     ) -> PcAttachment<
         EventEndpoint<
             D,
-            impl for<'a> Emit<D::Event, PcInterrupt<'a>, Error = SubscriberError> + Send,
+            impl for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
         >,
     > {
         self.with_subscribers(|previous| Subscriptions::new().forward(previous).on(handler))
@@ -47,12 +46,12 @@ where
     /// Observe one typed selection of the model's notifications.
     pub fn on_event<E, F: FnMut(&E) + Send>(
         self,
-        select: impl Fn(&D::Event) -> Option<&E> + Send,
+        select: impl Fn(&MmioEvent<D>) -> Option<&E> + Send,
         mut handler: F,
     ) -> PcAttachment<
         EventEndpoint<
             D,
-            impl for<'a> Emit<D::Event, PcInterrupt<'a>, Error = SubscriberError> + Send,
+            impl for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
         >,
     > {
         self.on(move |event| {
@@ -63,13 +62,13 @@ where
     }
 
     /// Observe notifications and optionally stop or report a host error.
-    pub fn try_on<F: FnMut(&D::Event) -> Result<Reaction, SubscriberError> + Send>(
+    pub fn try_on<F: FnMut(&MmioEvent<D>) -> Result<Reaction, SubscriberError> + Send>(
         self,
         handler: F,
     ) -> PcAttachment<
         EventEndpoint<
             D,
-            impl for<'a> Emit<D::Event, PcInterrupt<'a>, Error = SubscriberError> + Send,
+            impl for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
         >,
     > {
         self.with_subscribers(|previous| Subscriptions::new().forward(previous).try_on(handler))
@@ -82,17 +81,17 @@ where
     ) -> PcAttachment<
         EventEndpoint<
             D,
-            impl for<'a> Emit<D::Event, PcInterrupt<'a>, Error = SubscriberError> + Send,
+            impl for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
         >,
     >
     where
-        F: for<'a> FnMut(&D::Event, &mut PcInterrupt<'a>) -> Result<Reaction, SubscriberError>
+        F: for<'a> FnMut(&MmioEvent<D>, &mut PcInterrupt<'a>) -> Result<Reaction, SubscriberError>
             + Send,
     {
         self.with_subscribers(|previous| {
             Subscriptions::new()
                 .forward(previous)
-                .on_with(move |event: &D::Event, irq: &mut PcInterrupt<'_>| handler(event, irq))
+                .on_with(move |event: &MmioEvent<D>, irq: &mut PcInterrupt<'_>| handler(event, irq))
         })
     }
 
@@ -112,7 +111,7 @@ where
 impl<D, S> PcMmioDevice for EventEndpoint<D, S>
 where
     D: MmioModel + Send,
-    S: for<'a> Emit<D::Event, PcInterrupt<'a>, Error = SubscriberError> + Send,
+    S: for<'a> Emit<MmioEvent<D>, PcInterrupt<'a>, Error = SubscriberError> + Send,
 {
     fn read(&mut self, offset: WindowOffset, len: usize) -> u64 {
         self.model.read(offset, len)

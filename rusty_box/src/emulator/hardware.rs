@@ -6,7 +6,7 @@
 use rusty_box_devices::api::IrqLine;
 pub use rusty_box_devices::api::WindowOffset;
 pub use rusty_box_devices::composition::{
-    DmaWrite, Emit, InterruptOutput, MmioModel, MmioWrite, Reaction, Subscriptions,
+    DmaWrite, Emit, InterruptOutput, IrqMmioModel, MmioModel, MmioWrite, Reaction, Subscriptions,
 };
 
 use crate::config::BxPhyAddress;
@@ -274,7 +274,7 @@ pub struct PcInterrupt<'a> {
 
 impl InterruptOutput for PcInterrupt<'_> {
     fn set_level(&mut self, asserted: bool) {
-        self.irq.set_isa_level(self.line.into(), asserted);
+        self.irq.set_composed_level(self.line.into(), asserted);
         self.driven = true;
     }
 }

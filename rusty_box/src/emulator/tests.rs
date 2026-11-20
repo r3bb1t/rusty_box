@@ -26,6 +26,56 @@ const AP_TRAMPOLINE_OPCODE: u8 = 0x90;
 const AP_TRAMPOLINE_LEN: usize = 32;
 const AP_BATCH_INSTRUCTIONS: u64 = 16;
 
+#[test]
+fn guest_hpet_remap_cannot_lower_a_mounted_devices_irq() {
+    use rusty_box_devices::api::IrqLine;
+
+    use super::hardware::{
+        InterruptOutput, IrqMmioModel, IsaIrq, MmioWrite, PcAttachment, WindowOffset,
+    };
+    struct Doorbell;
+
+    impl IrqMmioModel for Doorbell {
+        type Events = core::iter::Empty<()>;
+
+        fn read(&mut self, _: WindowOffset, _: usize) -> u64 {
+            0
+        }
+
+        fn write(&mut self, _: MmioWrite, irq: &mut impl InterruptOutput) -> Self::Events {
+            irq.set_level(true);
+            core::iter::empty()
+        }
+    }
+
+    const PAGE: BxPhyAddress = BxPhyAddress::new(0x90000);
+    const CODE: u64 = 0x10000;
+    const LINE: IrqLine = IrqLine(5);
+    let mut pc = MachineBuilder::new(EmulatorConfig::default())
+        .build()
+        .unwrap();
+    pc.setup_cpu_mode(CpuSetupMode::FlatProtected32).unwrap();
+    PcAttachment::with_model(PAGE, IsaIrq::new(LINE.0).unwrap(), Doorbell)
+        .install(&mut pc)
+        .unwrap();
+    let code = [
+        0xB0, 2, 0xE6, 0x92, // Open A20 for the HPET window.
+        0xC7, 0x05, 0, 0, 9, 0, 1, 0, 0, 0, // Assert the mounted output.
+        0xC7, 0x05, 0, 1, 0xD0, 0xFE, 4, 10, 0, 0, // Route HPET timer 0 to IRQ5.
+        0xC7, 0x05, 0x10, 0, 0xD0, 0xFE, 1, 0, 0, 0, // Enable HPET.
+        0xC7, 0x05, 0x10, 0, 0xD0, 0xFE, 0, 0, 0, 0, // Disable HPET and lower its output.
+        0xA1, 0, 1, 0xD0, 0xFE, // Read back the programmed route.
+    ];
+    pc.mem_write(BxPhyAddress::new(CODE), &code).unwrap();
+    pc.emu_start(CODE, None, None, Some(3)).unwrap();
+    assert!(pc.device_manager.irq.line_level(LINE));
+    pc.emu_start(CODE + 14, None, None, Some(4)).unwrap();
+    assert_eq!(pc.regs().read(crate::cpu::registers::EAX) & 0x3E00, 0x0A00);
+    assert!(pc.device_manager.irq.line_level(LINE));
+    assert!(pc.detach_composed_mmio(PAGE).is_some());
+    assert!(!pc.device_manager.irq.line_level(LINE));
+}
+
 /// What a hypervisor answers when it cannot take a guest-physical range —
 /// a different kind and code from [`REFUSAL`], so a test can tell which of
 /// the engine's calls a fault came out of.

@@ -699,6 +699,7 @@ impl DeviceManager {
         // the output the host has not drained and their timers as they were;
         // the firmware reprograms them.
         self.irq.ioapic_mut().reset();
+        self.irq.reset_composed_levels();
         self.irq.reset_bsp_lint0();
         // Bochs hpet.cc reset(): comparators stop, state clears, and the
         // PIT/RTC pins re-enable (queued; the emulator drains after reset).

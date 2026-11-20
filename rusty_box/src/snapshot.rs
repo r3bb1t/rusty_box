@@ -644,7 +644,9 @@ fn save_lapics<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T
 
 #[cfg(feature = "std")]
 impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
+    /// Save the built-in machine. Detach composed endpoints before saving.
     pub fn save_snapshot<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        self.check_snapshot_attachments()?;
         let mut sink = IoSink::new(writer);
         let outcome = self.save_snapshot_body(&mut sink);
         sink.host_result(outcome)
@@ -708,7 +710,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
         write_device_section(writer, &self.device_manager.hpet)
     }
 
+    /// Restore the built-in machine. Detach composed endpoints before restoring.
     pub fn restore_snapshot<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
+        self.check_snapshot_attachments()?;
         let mut source = IoSource::new(reader);
         let result = self.restore_snapshot_inner(&mut source);
         // A parked host error outranks whatever context was built around the
@@ -722,6 +726,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emulato
             self.drop_held_host_input();
         }
         result
+    }
+
+    fn check_snapshot_attachments(&self) -> io::Result<()> {
+        if self.device_manager.irq.has_composed_lines() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "snapshots require composed MMIO devices to be detached",
+            ));
+        }
+        Ok(())
     }
 
     fn restore_snapshot_inner<R: Read>(&mut self, reader: &mut IoSource<R>) -> io::Result<()> {

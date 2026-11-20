@@ -30,6 +30,21 @@ pub trait Emit<E, C: ?Sized = ()> {
     fn emit(&mut self, event: &E, capability: &mut C) -> Result<Reaction, Self::Error>;
 }
 
+/// Deliver owned events in iterator order. A stop is collected while
+/// remaining notifications are delivered. The first error ends delivery
+/// and drops the remaining iterator. Earlier effects stay committed.
+pub fn publish_events<E, C: ?Sized, S: Emit<E, C>>(
+    events: impl IntoIterator<Item = E>,
+    sink: &mut S,
+    capability: &mut C,
+) -> Result<Reaction, S::Error> {
+    let mut reaction = Reaction::Continue;
+    for event in events {
+        reaction = reaction.merge(sink.emit(&event, capability)?);
+    }
+    Ok(reaction)
+}
+
 /// A locally owned, allocation-free set of subscribers to one event type.
 ///
 /// Each registration owns its handler or takes the borrow captured by that
@@ -218,6 +233,29 @@ mod tests {
             .try_on(|_| panic!("delivery ends at the first error"));
         assert_eq!(route.emit(&3, &mut ()), Err("subscriber refused"));
         assert_eq!(called, 3);
+    }
+
+    #[test]
+    fn a_batch_collects_stop_and_returns_the_first_error_without_replaying_events() {
+        let mut route = Subscriptions::<u8, &str>::new().on_with(|event: &u8, seen: &mut u16| {
+            *seen = *seen * 10 + u16::from(*event);
+            match event {
+                1 => Ok(Reaction::Stop),
+                3 => Err("subscriber refused"),
+                _ => Ok(Reaction::Continue),
+            }
+        });
+        let mut seen = 0;
+        assert_eq!(
+            publish_events([1, 2], &mut route, &mut seen),
+            Ok(Reaction::Stop)
+        );
+        assert_eq!(seen, 12);
+        assert_eq!(
+            publish_events([1, 3, 4], &mut route, &mut seen),
+            Err("subscriber refused")
+        );
+        assert_eq!(seen, 1213);
     }
 
     #[test]

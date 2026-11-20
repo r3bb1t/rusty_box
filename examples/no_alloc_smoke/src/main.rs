@@ -9,7 +9,7 @@ use rusty_box::cpu::BxCpuC;
 use rusty_box::cpu::memory_session::{EntryMode, MemorySession, SessionRun};
 use rusty_box::cpu::registers::AX;
 use rusty_box::emulator::hardware::{
-    DmaWrite, EventEndpoint, InterruptOutput, IsaIrq, MmioModel, MmioWrite, PcAttachment, PcDevice,
+    EventEndpoint, InterruptOutput, IrqMmioModel, IsaIrq, MmioWrite, PcAttachment, PcDevice,
     PcDeviceAttachError, WindowOffset,
 };
 use rusty_box::memory::mapped::{MappedMemory, PhysicalRegion, RegionKind};
@@ -51,19 +51,14 @@ fn attach(
 
 struct Pulse;
 
-impl MmioModel for Pulse {
-    type Event = ();
+impl IrqMmioModel for Pulse {
+    type Events = Option<()>;
 
     fn read(&mut self, _: WindowOffset, _: usize) -> u64 {
         0
     }
 
-    fn write(
-        &mut self,
-        _: MmioWrite,
-        _: &mut impl DmaWrite,
-        irq: &mut impl InterruptOutput,
-    ) -> Option<()> {
+    fn write(&mut self, _: MmioWrite, irq: &mut impl InterruptOutput) -> Self::Events {
         irq.set_level(true);
         Some(())
     }

@@ -42,7 +42,7 @@ impl GpuEvent {
 }
 
 impl MmioModel for Gpu {
-    type Event = GpuEvent;
+    type Events = Option<GpuEvent>;
 
     fn read(&mut self, at: WindowOffset, len: usize) -> u64 {
         match (at.get(), len) {
@@ -57,7 +57,7 @@ impl MmioModel for Gpu {
         access: MmioWrite,
         dma: &mut impl DmaWrite,
         irq: &mut impl InterruptOutput,
-    ) -> Option<GpuEvent> {
+    ) -> Self::Events {
         match (access.offset.get(), access.len) {
             (0, 4) => self.destination = access.value as u32,
             (4, 4) => {

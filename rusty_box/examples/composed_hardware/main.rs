@@ -3,12 +3,27 @@ mod gpu;
 mod mailbox;
 
 use gpu::{Gpu, GpuEvent};
-use mailbox::Mailbox;
+use mailbox::{Mailbox, MailboxEvent};
 use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::CpuSetupMode;
 use rusty_box::cpu::registers::{EAX, EBX, RIP};
-use rusty_box::emulator::hardware::{InterruptOutput, IsaIrq, PcAttachment, Reaction};
+use rusty_box::emulator::hardware::{
+    InterruptOutput, IsaIrq, PcAttachment, Reaction, SubscriberError,
+};
 use rusty_box::{Emulator, EmulatorConfig};
+use rusty_box_devices::api::WindowOffset;
+use rusty_box_devices::composition::{IrqMmioModel, MmioWrite, Subscriptions, publish_events};
+
+fn stop_on_tile(
+    event: &GpuEvent,
+    irq: &mut impl InterruptOutput,
+) -> Result<Reaction, SubscriberError> {
+    if event.written().is_some() {
+        irq.set_level(false);
+        return Ok(Reaction::Stop);
+    }
+    Ok(Reaction::Continue)
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut completed_tiles = 0;
@@ -24,13 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             event.destination
         );
     })
-    .on_with_irq(|event, irq| {
-        if event.written().is_some() {
-            irq.set_level(false);
-            return Ok(Reaction::Stop);
-        }
-        Ok(Reaction::Continue)
-    })
+    .on_with_irq(|event, irq| stop_on_tile(event, irq))
     .on_event(GpuEvent::rejected, |event| {
         eprintln!("unwritable DMA destination {:#x}", event.destination)
     })
@@ -43,7 +52,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         IsaIrq::new(10).unwrap(),
         Mailbox::default(),
     )
-    .on(|message| println!("mailbox received {}", message.0))
+    .on(|event| println!("mailbox {event:?}"))
+    .on_event(MailboxEvent::posted, |message| {
+        assert_eq!(message.0, 42);
+    })
     .install(&mut pc)?;
     // Set destination, submit tile pixels, then load back through the CPU.
     let entry = 0x10000;
@@ -68,5 +80,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     pc.emu_start(entry, None, None, Some(2))?;
     assert_eq!(pc.regs().read(EAX), 42);
+
+    // A host-owned mailbox can use the same subscriptions outside MMIO.
+    #[derive(Default)]
+    struct HostIrq(bool);
+    impl InterruptOutput for HostIrq {
+        fn set_level(&mut self, asserted: bool) {
+            self.0 = asserted;
+        }
+    }
+    let mut host_irq = HostIrq::default();
+    let mut mailbox = Mailbox::default();
+    let mut handlers = Subscriptions::<MailboxEvent>::new().on(|event| {
+        println!("host mailbox {event:?}");
+    });
+    let post = MmioWrite {
+        offset: WindowOffset(0),
+        len: 4,
+        value: 7,
+    };
+    assert_eq!(
+        publish_events(mailbox.write(post, &mut host_irq), &mut handlers, &mut ())?,
+        Reaction::Continue
+    );
+    assert_eq!(
+        publish_events(mailbox.take(&mut host_irq), &mut handlers, &mut ())?,
+        Reaction::Continue
+    );
+    assert!(!host_irq.0);
     Ok(())
 }

@@ -679,8 +679,9 @@ impl<T: crate::cpu::Instrumentation> Emulator<T> {
     }
 
     /// Place an endpoint on one MMIO page and route its output to an unused
-    /// ISA line selected by the caller. Keep that line and page clear of
-    /// guest reconfiguration of board IRQ routes and MMIO windows.
+    /// ISA line selected by the caller. A later guest IRQ remap can share
+    /// the wire, with the line asserted while either output is high.
+    /// Keep the page clear of guest reconfiguration of board MMIO windows.
     pub fn attach_composed_mmio(
         &mut self,
         address: BxPhyAddress,
@@ -723,6 +724,7 @@ impl<T: crate::cpu::Instrumentation> Emulator<T> {
         self.cpu_mut()
             .mmio
             .insert_composed(slot, address, line, device);
+        self.device_manager.irq.reserve_composed_line(line.into());
         self.cpu_mut().invalidate_host_memory_mappings();
     }
 
@@ -736,7 +738,7 @@ impl<T: crate::cpu::Instrumentation> Emulator<T> {
         let attached = self.cpu_mut().mmio.detach_composed(address)?;
         self.device_manager
             .irq
-            .set_isa_level(attached.line.into(), false);
+            .release_composed_line(attached.line.into());
         self.cpu_mut().invalidate_host_memory_mappings();
         Some(attached.device)
     }
