@@ -1,7 +1,14 @@
 //! Local, typed event publication and ordered subscriptions.
+//!
+//! [`App`] composes handlers across event types and owns state after
+//! finalization. [`Subscriptions`] builds a per-source route for publishers
+//! that lend an event and its delivery capability through [`Emit`].
 
 use core::convert::Infallible;
 use core::marker::PhantomData;
+
+mod app;
+pub use app::{App, AppHandlers, ReadyApp, Registered};
 
 /// A subscriber's request to the execution driver after successful delivery.
 /// Requests never interrupt delivery to the remaining subscribers.
@@ -129,9 +136,14 @@ pub struct Forward<S>(S);
 #[doc(hidden)]
 pub struct WithCapability<F>(F);
 
-trait Deliver<E, C: ?Sized, X> {
-    fn deliver(&mut self, event: &E, capability: &mut C) -> Result<ExecutionRequest, X>;
+mod delivery {
+    use super::ExecutionRequest;
+
+    pub trait Deliver<E, C: ?Sized, X> {
+        fn deliver(&mut self, event: &E, capability: &mut C) -> Result<ExecutionRequest, X>;
+    }
 }
+use delivery::Deliver;
 
 impl<E, C: ?Sized, X> Deliver<E, C, X> for () {
     #[inline]

@@ -677,6 +677,8 @@ impls bound `E: SliceEngine<T>`). Traits that would be trivially erasable are ke
 non-dyn-compatible (generic methods, associated consts) when no consumer needs erasure:
 `SliceEngine` and `VgaExtension` are.
 
+The registry below names the borrowed erasure at the application event boundary.
+
 Target design, not built: in-tree device sets dispatch as enums (`DisplayDevice::{Vga, GeForce,
 …}`); user extension composes statically through profile associated types
 (`type Display = MyGpu`); optional, profile-dependent capabilities use the
@@ -781,7 +783,8 @@ recalled: a whole-word search for `dyn` over the `src` tree of every workspace c
   `api.rs` and `display/card.rs`.
 - `rusty_box_aarch64/src`: 2, code, both `Error::source` signatures, below.
 - `rusty_box_decoder/src` and `rusty_box_whp_engine/src`: 1 each, code, below.
-- `rusty_box_core`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_bximage`, `rusty_box_symbols`, `xtask`, and
+- `rusty_box_core/src`: 1, code, the application event payload loan below.
+- `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_bximage`, `rusty_box_symbols`, `xtask`, and
   the three crates under `examples/`: none.
 
 Integration tests, benches and example programs (the `tests/`, `benches/` and `examples/`
@@ -799,6 +802,13 @@ folders inside a crate) are outside this count.
 Instrumentation needs no entry: an observer is a type parameter
 (`InstrumentationRegistry<T: Instrumentation = ()>`, `cpu/instrumentation/registry.rs`),
 not stored closures.
+
+**Sanctioned borrowed erasure for application event matching:**
+
+- `EventRef` in `rusty_box_core/src/events/app.rs` borrows `&dyn Any` during an opt-in
+  `ReadyApp` delivery. An open set of independently defined events needs an exact type check
+  before a handler receives its typed reference. The reference stays private and allocation-free.
+  Handlers and their storage are statically dispatched. [Application event design](vnext/application-events.md)
 
 **Tolerated, each with what removes it — a `dyn` here is debt, not design:**
 

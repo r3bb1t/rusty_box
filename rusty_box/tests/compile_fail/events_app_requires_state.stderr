@@ -1,0 +1,5 @@
+error[E0599]: no method named `dispatch` found for struct `App<S, X, H>` in the current scope
+ --> tests/compile_fail/events_app_requires_state.rs:8:9
+  |
+8 |     app.dispatch(&Tick).unwrap();
+  |         ^^^^^^^^ method not found in `App<State, !, rusty_box::events::Then<(), rusty_box::events::Registered<{closure@$DIR/tests/compile_fail/events_app_requires_state.rs:7:42: 7:71}, (Tick, State)>>>`

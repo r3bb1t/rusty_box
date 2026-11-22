@@ -1,0 +1,9 @@
+error[E0502]: cannot borrow `app` as mutable because it is also borrowed as immutable
+  --> tests/compile_fail/events_app_state_loan_prevents_dispatch.rs:11:5
+   |
+10 |     let state = app.state();
+   |                 --- immutable borrow occurs here
+11 |     app.dispatch(&Tick).unwrap();
+   |     ^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
+12 |     assert_eq!(state.0, 0);
+   |     ---------------------- immutable borrow later used here

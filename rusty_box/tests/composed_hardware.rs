@@ -13,9 +13,11 @@ use rusty_box::cpu::registers::{EAX, EBX, ECX, RIP};
 use rusty_box::cpu::{CpuError, CpuSetupMode};
 use rusty_box::emulator::MachineBuilder;
 use rusty_box::emulator::hardware::{
-    DmaWrite, Emit, ExecutionRequest, InterruptOutput, IsaIrq, MmioModel, MmioSubscriberError,
-    MmioWrite, PcAttachment, PcDevice, PcDeviceAttachRefusal, SubscriberError, WindowOffset,
+    DmaWrite, Emit, EventEndpoint, ExecutionRequest, InterruptOutput, IsaIrq, MmioModel,
+    MmioSubscriberError, MmioWrite, PcAttachment, PcDevice, PcDeviceAttachRefusal, PcInterrupt,
+    SubscriberError, WindowOffset,
 };
+use rusty_box::events::App;
 use rusty_box::memory::mmio::{MmioAttachRefusal, MmioDevice};
 use rusty_box::{Emulator, EmulatorConfig, Error};
 use rusty_box_devices::composition::{Subscriptions, publish_events, write_and_publish};
@@ -251,6 +253,49 @@ fn x86_dma_completion_stops_after_the_write() {
     );
     let mut endpoint = pc.detach_composed_mmio(DEVICE).unwrap();
     assert_eq!(endpoint.endpoint().read(WindowOffset(8), 4), 1);
+}
+
+#[test]
+fn application_stop_preserves_the_publisher_irq_subscriber() {
+    struct Observations {
+        rejected: u32,
+    }
+
+    let app = App::<Observations, SubscriberError>::new()
+        .on(|event: &GpuEvent, state: &mut Observations| {
+            assert_eq!(
+                event.rejected().unwrap().destination,
+                BxPhyAddress::new(0x18FFE)
+            );
+            state.rejected += 1;
+            ExecutionRequest::Stop
+        })
+        .on(|_: &GpuEvent, state: &mut Observations| assert_eq!(state.rejected, 1))
+        .with_state(Observations { rejected: 0 });
+    let route = Subscriptions::<GpuEvent, SubscriberError>::new()
+        .forward(app)
+        .on_with(|_: &GpuEvent, irq: &mut PcInterrupt<'_>| {
+            irq.set_level(true);
+            Ok(ExecutionRequest::None)
+        });
+    let endpoint = EventEndpoint::with_subscriptions(Gpu::default(), route);
+    let mut pc = pc();
+    PcAttachment::new(DEVICE, IsaIrq::new(5).unwrap(), endpoint)
+        .install(&mut pc)
+        .unwrap();
+    program(&mut pc, 0x18FFE);
+
+    assert!(matches!(
+        pc.emu_start(CODE, None, None, Some(9)).unwrap(),
+        EmuStopReason::Stopped
+    ));
+    assert_eq!(pc.regs().read(RIP), CODE + 20);
+    pc.emu_start(CODE + 20, None, None, Some(5)).unwrap();
+    assert_ne!(
+        pc.regs().read(ECX) & (1 << 5),
+        0,
+        "guest sees the subscriber's IRQ"
+    );
 }
 
 #[test]

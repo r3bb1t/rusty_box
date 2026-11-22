@@ -116,6 +116,22 @@ fn publish(input: u8, state: &mut u8) {
     let _ = subscriptions.emit(&input, state).unwrap();
 }
 
+fn publish_app(input: u8) -> u8 {
+    use rusty_box::events::{App, ExecutionRequest};
+
+    struct RegisterChanged(u8);
+    struct DeviceReset;
+    let mut app = App::<u8>::new()
+        .on(|event: &RegisterChanged, state: &mut u8| *state = event.0)
+        .on(|_: &DeviceReset, state: &mut u8| *state = 0)
+        .with_state(0);
+    assert_eq!(
+        app.dispatch(&RegisterChanged(input)),
+        Ok(ExecutionRequest::None)
+    );
+    app.into_state()
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     consume(rusty_box::EmulatorConfig::default());
@@ -137,6 +153,7 @@ pub extern "C" fn _start() -> ! {
         attach_bus as fn(&mut rusty_box::Emulator, &'static mut MaybeUninit<Bus>) -> _,
     ));
     consume(core::hint::black_box(publish as fn(u8, &mut u8)));
+    consume(core::hint::black_box(publish_app as fn(u8) -> u8));
     loop {
         core::hint::spin_loop();
     }

@@ -277,6 +277,7 @@ It needs the rustup targets `x86_64-unknown-none`, `x86_64-unknown-uefi` and `wa
 - [docs/getting-started.md](docs/getting-started.md) -- using the shell: the guests and their settings, the VM file, pacing, CPU topology, disks, display
 - [rusty_box_gui/README.md](rusty_box_gui/README.md) -- the shell in full: the VM library, pages, engines, disk images, Android, browser
 - [docs/automation.md](docs/automation.md) -- driving a guest from Rust: boot it headless, read the screen, type at it, watch what it does
+- Compose typed event handlers and supply synchronous application state. [Typed application events](docs/vnext/application-events.md)
 - [docs/aarch64-automation.md](docs/aarch64-automation.md) -- the same for the AArch64 `virt` machine ([rusty_box_aarch64](rusty_box_aarch64/README.md)): boot UEFI or a Linux kernel, the serial console and its keyboard, registers, snapshots
 - [docs/whp-guest-capabilities.md](docs/whp-guest-capabilities.md) -- what a machine on the hypervisor may advertise to its guest
 

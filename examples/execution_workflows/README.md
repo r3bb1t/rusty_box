@@ -2,6 +2,14 @@
 
 This is a standalone downstream Cargo workspace. Its lockfile pins the example dependencies. The main rusty_box workspace has no dependency on this package, Linux userland, or LibAFL.
 
+## Compose typed application events
+
+```sh
+cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin typed_events
+```
+
+A reusable process integration adds handlers to an existing builder using a narrow state trait. The application adds a process counter and an unrelated device observer, then supplies state. The example checks registration order, delivery through `publish_events`, and recovery of the owned state. [Application event guide](../../docs/vnext/application-events.md)
+
 ## Boot Linux and replace `/bin/cat`
 
 The example uses a Debian 12 i386 kernel and a static i386 BusyBox. The initramfs starts a shell on COM1 and contains the original BusyBox `cat`. The replacement travels over COM1 after the guest reports readiness. The host invokes the guest's own `printf`, `chmod`, `mv`, `exec`, and `wait` through that shell.
