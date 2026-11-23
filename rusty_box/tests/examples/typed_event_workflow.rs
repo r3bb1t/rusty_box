@@ -1,99 +1,79 @@
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+use rusty_box::cpu::registers::EAX;
+
 use super::*;
 
-const SELECTED: RunProcess = RunProcess {
-    target: Target::Selected,
-    budget: 1,
-};
-
 #[test]
-fn selected_guest_changes_and_explicit_target_resumes() {
-    let mut app = routes().with_state(State::demo().unwrap());
-    assert_eq!(
-        app.dispatch(&SelectProcess(COUNTER)).unwrap(),
-        ExecutionRequest::None
-    );
-    assert_eq!(app.state().lookups, 0);
-    assert_eq!(app.dispatch(&SELECTED).unwrap(), ExecutionRequest::None);
-    assert_eq!(
-        app.dispatch(&SelectProcess(WORKER)).unwrap(),
-        ExecutionRequest::None
-    );
-    assert_eq!(app.dispatch(&SELECTED).unwrap(), ExecutionRequest::None);
-    let resume = RunProcess {
-        target: Target::Exact(COUNTER),
-        ..SELECTED
-    };
-    assert_eq!(app.dispatch(&resume).unwrap(), ExecutionRequest::Stop);
+fn one_run_resolves_both_loaded_code_ranges_and_shares_each_lookup() {
+    let observed = Rc::new(RefCell::new(Vec::new()));
+    let observations = observed.clone();
+    let app = App::<Catalog, UnknownProcess>::new()
+        .on(
+            move |event: &InstructionCompleted, Resolved(process): Resolved<'_, LoadedProcess>| {
+                observations.borrow_mut().push((event.ip, process.id));
+            },
+        )
+        .on(|_: &InstructionCompleted, Resolved(_): Resolved<'_, LoadedProcess>| {})
+        .with_state(Catalog::new());
+    let mut cpu = load_cpu(app).unwrap();
 
-    let state = app.into_state();
-    assert_eq!(state.selected, Some(WORKER));
-    assert_eq!(state.lookups, 3);
-    let observations: Vec<_> = state
-        .audit
-        .iter()
-        .map(|record| {
-            let guest = record.observed.as_ref().unwrap();
-            (guest.id, guest.eip, guest.eax)
-        })
-        .collect();
+    let run = cpu.run(16);
+
+    assert!(matches!(
+        run.stop,
+        SessionStop::Inactive(ProcessorActivity::Halted)
+    ));
+    assert_eq!(cpu.regs().read(EAX), 42);
     assert_eq!(
-        observations,
-        [
-            (COUNTER, ENTRY + 5, 42),
-            (WORKER, ENTRY + 5, 7),
-            (COUNTER, ENTRY + 6, 42)
-        ]
+        *observed.borrow(),
+        [(0x1000, 12), (0x1005, 12), (0x2000, 21), (0x2001, 21)]
     );
-    assert_eq!(state.audit[2].outcome, Ok(ExecutionRequest::Stop));
+    let tracer = cpu.instrumentation();
+    assert_eq!(tracer.delivery, Ok(ExecutionRequest::None));
+    assert_eq!(tracer.app.as_ref().unwrap().state().lookups, 4);
 }
 
 #[test]
-fn guard_skips_resolution_and_old_process_identity_is_refused() {
-    let mut state = State::demo().unwrap();
-    let replacement = ProcessId {
-        generation: 2,
-        ..COUNTER
-    };
-    state.processes[0] = Process::new(replacement, "replacement", 99).unwrap();
-    let mut app = routes().with_state(state);
+fn event_only_handler_runs_without_resolving_processes() {
+    let count = Rc::new(Cell::new(0));
+    let calls = count.clone();
+    let app = App::<Catalog, UnknownProcess>::new()
+        .on(move |_: &InstructionCompleted| calls.set(calls.get() + 1))
+        .with_state(Catalog::new());
+    let mut cpu = load_cpu(app).unwrap();
 
-    assert!(matches!(
-        app.dispatch(&RunProcess {
-            budget: 0,
-            ..SELECTED
-        }),
-        Err(WorkflowError::Budget(0))
-    ));
-    assert_eq!(app.state().lookups, 0);
+    let run = cpu.run(16);
 
-    let exact = |id| RunProcess {
-        target: Target::Exact(id),
-        ..SELECTED
-    };
-    assert!(matches!(
-        app.dispatch(&exact(COUNTER)),
-        Err(WorkflowError::Target(TargetError::Stale(id))) if id == COUNTER
-    ));
+    assert_eq!(count.get(), 4);
+    assert_eq!(run.instructions, 4);
     assert_eq!(
-        app.dispatch(&exact(replacement)).unwrap(),
-        ExecutionRequest::None
+        cpu.instrumentation().app.as_ref().unwrap().state().lookups,
+        0
     );
-
-    let state = app.into_state();
-    assert_eq!(state.lookups, 2);
-    assert!(
-        state.audit[..2]
-            .iter()
-            .all(|record| record.outcome.is_err() && record.observed.is_none())
-    );
-    assert_eq!(state.audit[2].observed.as_ref().unwrap().eax, 99);
 }
 
 #[test]
-fn failed_lookup_is_shared_for_this_delivery() {
-    let mut state = State::demo().unwrap();
-    let mut parts = RunParts::new(&mut state, Target::Selected);
-    assert_eq!(parts.target_process().err(), Some(TargetError::NoSelection));
-    assert_eq!(parts.target_process().err(), Some(TargetError::NoSelection));
-    assert_eq!(state.lookups, 1);
+fn missing_target_ends_publication_but_guest_can_finish() {
+    let count = Rc::new(Cell::new(0));
+    let calls = count.clone();
+    let app = App::<Catalog, UnknownProcess>::new()
+        .on(move |_: &InstructionCompleted| calls.set(calls.get() + 1))
+        .on(print_process)
+        .with_state(Catalog {
+            processes: &[],
+            lookups: 0,
+        });
+    let mut cpu = load_cpu(app).unwrap();
+
+    let run = cpu.run(16);
+
+    assert!(matches!(
+        run.stop,
+        SessionStop::Inactive(ProcessorActivity::Halted)
+    ));
+    assert_eq!(run.instructions, 4);
+    assert_eq!(count.get(), 1);
+    assert_eq!(cpu.instrumentation().delivery, Err(UnknownProcess(0x1000)));
 }

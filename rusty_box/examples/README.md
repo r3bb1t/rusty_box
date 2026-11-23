@@ -31,26 +31,26 @@ Handlers can also take just `&Event` if they need no state. Returning `()` means
 
 The handler argument uses the same Rust destructuring syntax as Axum's `Path(id)` examples. Rusty Box lends the event to the handler, so the pattern starts with `&`. [Axum handler examples](https://docs.rs/axum/latest/axum/extract/#common-extractors)
 
-### Add middleware and target lookup
+### Resolve a loaded process during execution
 
-The second example creates two x86 guests in memory. Open `main` for the sequence of requests and `routes` for how they are handled. [Read the workflow](typed_event_workflow.rs)
+The example loads two small code regions and calls `cpu.run(16)` once. The interpreter's `after_execution` hook delivers each completed instruction as it runs. One guest jump crosses from the counter's code into the worker's code. [Read the workflow](typed_event_workflow.rs)
 
 ```sh
 cargo run --locked --release -p rusty_box --no-default-features --features alloc --example typed_event_workflow
+cargo run --locked --release -p rusty_box --no-default-features --features alloc --example typed_event_workflow -- --instructions-only
 ```
 
-| Goal | What you write |
-| --- | --- |
-| Register a handler | A function or closure. `.on()` adapts it through `AppHandler`. |
-| Return the builder from a helper | Use `impl AppHandlers` in the return type to describe the chain that `.on()` already built. |
-| Resolve a target | A method returning the dependency, such as `RunParts::target_process()`. |
-| Wrap delivery in reusable middleware | Implement `Emit<Event, Parts>` on the wrapper. Set `type Error` and call the wrapped handler when the event should proceed. |
+The process handler declares its dependency in its argument list.
 
-`BudgetLimit { inner: run_guest }` holds the function it wraps. Tower's logging middleware uses the same pattern to hold the service it wraps. [Tower middleware example](https://docs.rs/tower/latest/tower/layer/fn.layer_fn.html#example)
+```rust,ignore
+fn print_process(_: &InstructionCompleted, Resolved(process): Resolved<'_, LoadedProcess>) {
+    println!("  process {} ({})", process.id, process.name);
+}
+```
 
-Both routes use `.on()`. For a `RunProcess` event, the route creates fresh `RunParts` and gives them to `BudgetLimit`. If the budget is valid, the wrapper calls `run_guest`, which calls `execute` and then `observe_registers`. The pattern `&RunProcess { budget, .. }` picks out the budget. Both functions call `parts.target_process()`. The first call looks up the guest and the second uses the cached slot.
+Register it with `.on(print_process)`. The app invokes `Resolve<InstructionCompleted, LoadedProcess>` on the catalog only when a matching handler asks for the dependency. The catalog looks up the instruction address using its loaded code ranges and shares the answer between both process handlers for that event. With `--instructions-only`, the CPU runs the same code and the lookup count stays at zero.
 
-When the guest halts, `execute` requests `Stop` and the register observer still runs. An error skips the remaining handlers. The route records either result. The demo reports three lookups for four run requests because the budget guard rejects one. [Application event guide](../../docs/vnext/application-events.md)
+The process IDs belong to the demo's host loader. Both code regions share one flat guest address space. The observation hook reports a lookup error to the driver after the run and stops publishing further events on that error. [Application event guide](../../docs/vnext/application-events.md)
 
 ## Required files
 

@@ -63,7 +63,9 @@ impl<S, X> Default for App<S, X> {
 
 impl<S, X, H: AppHandlers<S, X>> App<S, X, H> {
     /// Append a handler. Its first argument selects the event type. Use
-    /// `fn(&E)` or `fn(&E, &mut S)` signatures, including `FnMut` closures.
+    /// `fn(&E)`, `fn(&E, &mut S)`, or `fn(&E, Resolved<'_, D>)` signatures,
+    /// including `FnMut` closures. The last form resolves `D` using the app's
+    /// state only when the event matches the handler.
     /// A handler can return `()`, [`ExecutionRequest`], or
     /// `Result<ExecutionRequest, X>`. Each invocation borrows state afresh.
     pub fn on<F: AppHandler<S, X, Args>, Args>(
@@ -134,6 +136,45 @@ pub trait AppHandlers<S, X = Infallible>: for<'a> Deliver<EventRef<'a>, S, X> {}
 
 impl<S, X, H: for<'a> Deliver<EventRef<'a>, S, X>> AppHandlers<S, X> for H {}
 
+/// Provide a borrowed dependency for handlers of `E` that ask for
+/// [`Resolved<'_, D>`](Resolved). Implement this on application state.
+///
+/// Each matching handler invokes the resolver separately. A provider can
+/// share work across handlers using a cache scoped to the event. A resolver
+/// error is converted to the application's error and stops delivery before
+/// the handler runs.
+pub trait Resolve<E, D: ?Sized> {
+    type Error;
+
+    fn resolve(&mut self, event: &E) -> Result<&D, Self::Error>;
+}
+
+/// A dependency borrowed for one handler invocation.
+///
+/// A handler cannot keep that borrow for a later delivery.
+///
+/// ```compile_fail,E0521
+/// use core::convert::Infallible;
+/// use rusty_box_core::events::{App, Resolve, Resolved};
+///
+/// struct Tick;
+/// struct State(u8);
+/// impl Resolve<Tick, u8> for State {
+///     type Error = Infallible;
+///
+///     fn resolve(&mut self, _: &Tick) -> Result<&u8, Infallible> {
+///         Ok(&self.0)
+///     }
+/// }
+///
+/// let mut retained = None;
+/// let mut app = App::<State>::new()
+///     .on(|_: &Tick, Resolved(value): Resolved<'_, u8>| retained = Some(value))
+///     .with_state(State(0));
+/// let _delivery = app.dispatch(&Tick);
+/// ```
+pub struct Resolved<'a, D: ?Sized>(pub &'a D);
+
 #[doc(hidden)]
 pub struct Registered<F, Args>(F, PhantomData<fn() -> Args>);
 
@@ -181,6 +222,23 @@ where
     }
 }
 
+impl<E, S, X, D, F, R> AppHandler<S, X, (E, S, fn(&D))> for F
+where
+    E: 'static,
+    D: ?Sized,
+    S: Resolve<E, D>,
+    X: From<S::Error>,
+    F: FnMut(&E, Resolved<'_, D>) -> R,
+    R: HandlerResult<X>,
+{
+    type Event = E;
+
+    fn call(&mut self, event: &E, state: &mut S) -> Result<ExecutionRequest, X> {
+        let dependency = state.resolve(event)?;
+        self(event, Resolved(dependency)).into_result()
+    }
+}
+
 trait HandlerResult<X> {
     fn into_result(self) -> Result<ExecutionRequest, X>;
 }
@@ -211,6 +269,44 @@ mod tests {
 
     struct Tick(u8);
     struct Reset;
+
+    #[test]
+    fn dependency_is_borrowed_only_for_matching_handlers() {
+        struct State<'a> {
+            label: &'a str,
+            lookups: u8,
+        }
+
+        impl Resolve<Tick, str> for State<'_> {
+            type Error = &'static str;
+
+            fn resolve(&mut self, event: &Tick) -> Result<&str, Self::Error> {
+                self.lookups += 1;
+                if event.0 == 0 {
+                    return Err("missing label");
+                }
+                Ok(self.label)
+            }
+        }
+
+        let bytes = *b"guest";
+        let seen = Cell::new(0);
+        let mut app = App::<State<'_>, &str>::new()
+            .on(|_: &Tick, Resolved(label): Resolved<'_, str>| seen.set(label.len()))
+            .on(|_: &Tick, state: &mut State<'_>| state.lookups += 10)
+            .with_state(State {
+                label: core::str::from_utf8(&bytes).unwrap(),
+                lookups: 0,
+            });
+
+        assert_eq!(app.dispatch(&Reset), Ok(ExecutionRequest::None));
+        assert_eq!(app.state().lookups, 0);
+        assert_eq!(app.dispatch(&Tick(1)), Ok(ExecutionRequest::None));
+        assert_eq!(seen.get(), 5);
+        assert_eq!(app.state().lookups, 11);
+        assert_eq!(app.dispatch(&Tick(0)), Err("missing label"));
+        assert_eq!(app.state().lookups, 12);
+    }
 
     #[test]
     fn matching_handlers_share_local_state_in_registration_order() {

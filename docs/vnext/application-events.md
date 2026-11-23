@@ -45,7 +45,7 @@ A delivery runs matching handlers synchronously in registration order. An unmatc
 
 Accept the existing `App<S, X, H>` with `H: AppHandlers<S, X>` and return `App<S, X, impl AppHandlers<S, X>>`. An integration that works with several application state types can take a function that borrows just the fields it needs. The caller can add more handlers to the returned builder before supplying state.
 
-The `typed_event_workflow` example registers both event types with `.on()`. Like a Tower service wrapper, `BudgetLimit` owns the handler it wraps. It implements `Emit`, checks the budget, and calls the handler synchronously. The route records the result, including errors returned by the guard. [Example](../../rusty_box/examples/typed_event_workflow.rs)
+The `typed_event_workflow` example installs its prepared app as the sink of an x86 instrumentation hook. The interpreter calls the hook after each successful instruction. The driver starts the CPU and the hook delivers events while the loop runs. [Live execution example](../../rusty_box/examples/typed_event_workflow.rs)
 
 ## Engineering report
 
@@ -58,7 +58,7 @@ The reviewed branch head, `88357d9`, provides local, single-event `Subscriptions
 
 Design B adds two types to represent composition and ownership. `App` has no dispatch entry point. `ReadyApp` stores `S` by value beside the handlers and dispatches via `&mut self`, so the state is reborrowed only for each invocation. The builder and ready app share the named chain types. Downstream composition helpers can hide their heterogeneous return type behind `AppHandlers`.
 
-The two `FnMut` shapes require distinct trait parameters. On stable Rust, blanket implementations that differ only in their callable bounds conflict with E0119. Tuple markers `(E,)` and `(E, S)` distinguish the implementations, and the associated event type identifies what to match. This keeps `.on()` generic without depending on nightly specialization or on inferring types through arbitrary extractor projections.
+The `FnMut` shapes require distinct trait parameters. On stable Rust, blanket implementations that differ only in their callable bounds conflict with E0119. Each implementation uses a marker tuple of a different length. The associated event type identifies what to match, and the concrete type inside `Resolved<'_, D>` identifies what to look up.
 
 ```rust,compile_fail
 trait Handler<E, S> {}
@@ -70,7 +70,9 @@ The opted-in facade uses one borrowed `Any` view for exact type matching. Each r
 
 ### Dependency providers
 
-The two supported `App::on()` signatures keep selection and invocation explicit. The typed workflow shows a local analogue to Axum's `FromRequestParts`. `RunParts::target_process` looks up the requested target, caches the slot or error for one delivery, and lends `&mut Process` to each handler in turn. A subsequent delivery looks up the current selection. The budget guard runs before the extractor. [Scoped target extraction](../../rusty_box/examples/typed_event_workflow.rs)
+Register a function taking `(&Event, Resolved<'_, Dependency>)` when the handler needs a dependency. Implement `Resolve<Event, Dependency>` on the application state to supply it. The app matches the event type first, calls the resolver for a matching handler, and lends the result for that invocation. The resolver's error converts into the application error and stops delivery before the handler runs. Event-only and state handlers do no resolution. The extracted dependency is a shared borrow. [Resolver trait](../../rusty_box_core/src/events/app.rs)
+
+The live example's resolver maps the executed instruction address to a host-loader process record. Both handlers that ask for the record share a cache on that event. Providers choose the cache policy. The instruction-only run performs zero lookups. [Live process resolution](../../rusty_box/examples/typed_event_workflow.rs)
 
 The downstream image workflow demonstrates another use of publisher-scoped preparation. It shares short-lived binary metadata across observers without adding an executable-format dependency to the event core. [Linux observation example](linux-observation-libafl.md)
 
@@ -81,6 +83,7 @@ cargo test --locked --release -p rusty_box_core --no-default-features
 cargo test --locked --release -p rusty_box --no-default-features --features std
 cargo build --locked --release -p rusty_box_no_alloc_smoke --target x86_64-unknown-none
 cargo run --locked --release -p rusty_box --no-default-features --example typed_events
+cargo run --locked --release -p rusty_box --no-default-features --features alloc --example typed_event_workflow
 cargo test --locked --release -p rusty_box --no-default-features --features alloc --example typed_event_workflow
 ```
 
