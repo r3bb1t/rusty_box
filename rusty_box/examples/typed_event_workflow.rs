@@ -8,7 +8,7 @@ use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::memory_session::SessionStop;
 use rusty_box::cpu::registers::{EAX, EIP};
 use rusty_box::cpu::{CpuEmulator, ProcessorActivity};
-use rusty_box::events::{App, AppHandlers, Emit, ExecutionRequest, Subscriptions};
+use rusty_box::events::{App, AppHandlers, Emit, ExecutionRequest};
 
 const COUNTER: ProcessId = ProcessId {
     pid: 12,
@@ -23,36 +23,34 @@ const ENTRY: u32 = 0x1000;
 
 fn main() -> Result<(), WorkflowError> {
     let mut app = routes().with_state(State::demo()?);
-    let run = RunRequested {
+    let run_selected = RunProcess {
         target: Target::Selected,
         budget: 1,
     };
-
-    assert_eq!(
-        app.dispatch(&SelectProcess(COUNTER))?,
-        ExecutionRequest::None
-    );
-    assert_eq!(app.dispatch(&run)?, ExecutionRequest::None);
-    assert_eq!(
-        app.dispatch(&SelectProcess(WORKER))?,
-        ExecutionRequest::None
-    );
-    assert_eq!(app.dispatch(&run)?, ExecutionRequest::None);
-
-    // The counter resumes at HLT while the worker remains selected.
-    let resume = RunRequested {
+    let resume_counter = RunProcess {
         target: Target::Exact(COUNTER),
-        ..run
+        ..run_selected
     };
-    assert_eq!(app.dispatch(&resume)?, ExecutionRequest::Stop);
-    let denied = RunRequested {
+
+    let deliveries = [
+        app.dispatch(&SelectProcess(COUNTER))?,
+        app.dispatch(&run_selected)?,
+        app.dispatch(&SelectProcess(WORKER))?,
+        app.dispatch(&run_selected)?,
+        // Resume the counter while the worker remains selected.
+        app.dispatch(&resume_counter)?,
+    ];
+    println!("Execution requests: {deliveries:?}");
+
+    let over_budget = RunProcess {
         budget: MAX_BUDGET + 1,
-        ..resume
+        ..resume_counter
     };
-    assert!(matches!(
-        app.dispatch(&denied),
-        Err(WorkflowError::Budget(_))
-    ));
+    match app.dispatch(&over_budget) {
+        Err(WorkflowError::Budget(_)) => {} // The audit log prints this rejection.
+        Err(error) => return Err(error),
+        Ok(request) => println!("Over-budget delivery: {request:?}"),
+    }
 
     let state = app.into_state();
     for record in &state.audit {
@@ -77,12 +75,9 @@ fn main() -> Result<(), WorkflowError> {
 
 // AppHandlers describes the chain that App::on builds.
 fn routes() -> App<State, WorkflowError, impl AppHandlers<State, WorkflowError>> {
-    let handlers = Subscriptions::<RunRequested, WorkflowError>::new()
-        .on_with(execute)
-        .on_with(observe_registers);
-    let mut guarded = BudgetLimit(handlers);
+    let mut guarded = BudgetLimit { inner: run_guest };
 
-    let run_process = move |event: &RunRequested, state: &mut State| {
+    let run_process = move |event: &RunProcess, state: &mut State| {
         let mut parts = RunParts::new(state, event.target);
         let outcome = guarded.emit(event, &mut parts);
         parts.state.audit.push(RunRecord {
@@ -99,37 +94,43 @@ fn routes() -> App<State, WorkflowError, impl AppHandlers<State, WorkflowError>>
 
 struct SelectProcess(ProcessId);
 
-struct RunRequested {
+struct RunProcess {
     target: Target,
     budget: u64,
 }
 
+fn run_guest(
+    event: &RunProcess,
+    parts: &mut RunParts<'_>,
+) -> Result<ExecutionRequest, WorkflowError> {
+    let request = execute(event, parts)?;
+    // A stop still leaves the registers available to observe.
+    observe_registers(parts)?;
+    Ok(request)
+}
+
 fn select_process(
-    event: &SelectProcess,
+    &SelectProcess(id): &SelectProcess,
     state: &mut State,
 ) -> Result<ExecutionRequest, WorkflowError> {
-    state.find(event.0)?;
-    state.selected = Some(event.0);
+    state.find(id)?;
+    state.selected = Some(id);
     Ok(ExecutionRequest::None)
 }
 
 fn execute(
-    event: &RunRequested,
+    &RunProcess { budget, .. }: &RunProcess,
     parts: &mut RunParts<'_>,
 ) -> Result<ExecutionRequest, WorkflowError> {
-    let process = parts.target_process()?;
-    match process.cpu.run(event.budget).stop {
+    let Process { cpu, .. } = parts.target_process()?;
+    match cpu.run(budget).stop {
         SessionStop::Budget => Ok(ExecutionRequest::None),
         SessionStop::Inactive(ProcessorActivity::Halted) => Ok(ExecutionRequest::Stop),
         stop => Err(WorkflowError::UnexpectedStop(stop)),
     }
 }
 
-// Subscriptions still calls the observer when execute requests Stop.
-fn observe_registers(
-    _: &RunRequested,
-    parts: &mut RunParts<'_>,
-) -> Result<ExecutionRequest, WorkflowError> {
+fn observe_registers(parts: &mut RunParts<'_>) -> Result<(), TargetError> {
     let process = parts.target_process()?;
     let regs = process.cpu.regs();
     parts.observed = Some(Observation {
@@ -138,29 +139,30 @@ fn observe_registers(
         eip: regs.read(EIP),
         eax: regs.read(EAX),
     });
-    Ok(ExecutionRequest::None)
+    Ok(())
 }
 
-// This wrapper owns the next sink and rejects invalid budgets before forwarding.
-struct BudgetLimit<S>(S);
+// This wrapper owns the handler and checks the budget before calling it.
+struct BudgetLimit<F> {
+    inner: F,
+}
 
-// The event is RunRequested and the data lent for this call is RunParts.
-// The inner sink accepts the same inputs and has the same error type.
-impl<'a, S> Emit<RunRequested, RunParts<'a>> for BudgetLimit<S>
+// The event is RunProcess and the data lent for this call is RunParts.
+impl<'a, F> Emit<RunProcess, RunParts<'a>> for BudgetLimit<F>
 where
-    S: Emit<RunRequested, RunParts<'a>, Error = WorkflowError>,
+    F: FnMut(&RunProcess, &mut RunParts<'a>) -> Result<ExecutionRequest, WorkflowError>,
 {
     type Error = WorkflowError;
 
     fn emit(
         &mut self,
-        event: &RunRequested,
+        event: &RunProcess,
         parts: &mut RunParts<'a>,
     ) -> Result<ExecutionRequest, Self::Error> {
         if !(1..=MAX_BUDGET).contains(&event.budget) {
             return Err(WorkflowError::Budget(event.budget));
         }
-        self.0.emit(event, parts)
+        (self.inner)(event, parts)
     }
 }
 
@@ -293,104 +295,5 @@ enum WorkflowError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SELECTED: RunRequested = RunRequested {
-        target: Target::Selected,
-        budget: 1,
-    };
-
-    #[test]
-    fn selected_guest_changes_and_explicit_target_resumes() {
-        let mut app = routes().with_state(State::demo().unwrap());
-        assert_eq!(
-            app.dispatch(&SelectProcess(COUNTER)).unwrap(),
-            ExecutionRequest::None
-        );
-        assert_eq!(app.state().lookups, 0);
-        assert_eq!(app.dispatch(&SELECTED).unwrap(), ExecutionRequest::None);
-        assert_eq!(
-            app.dispatch(&SelectProcess(WORKER)).unwrap(),
-            ExecutionRequest::None
-        );
-        assert_eq!(app.dispatch(&SELECTED).unwrap(), ExecutionRequest::None);
-        let resume = RunRequested {
-            target: Target::Exact(COUNTER),
-            ..SELECTED
-        };
-        assert_eq!(app.dispatch(&resume).unwrap(), ExecutionRequest::Stop);
-
-        let state = app.into_state();
-        assert_eq!(state.selected, Some(WORKER));
-        assert_eq!(state.lookups, 3);
-        let observations: Vec<_> = state
-            .audit
-            .iter()
-            .map(|record| {
-                let guest = record.observed.as_ref().unwrap();
-                (guest.id, guest.eip, guest.eax)
-            })
-            .collect();
-        assert_eq!(
-            observations,
-            [
-                (COUNTER, ENTRY + 5, 42),
-                (WORKER, ENTRY + 5, 7),
-                (COUNTER, ENTRY + 6, 42)
-            ]
-        );
-        assert_eq!(state.audit[2].outcome, Ok(ExecutionRequest::Stop));
-    }
-
-    #[test]
-    fn guard_skips_resolution_and_old_process_identity_is_refused() {
-        let mut state = State::demo().unwrap();
-        let replacement = ProcessId {
-            generation: 2,
-            ..COUNTER
-        };
-        state.processes[0] = Process::new(replacement, "replacement", 99).unwrap();
-        let mut app = routes().with_state(state);
-
-        assert!(matches!(
-            app.dispatch(&RunRequested {
-                budget: 0,
-                ..SELECTED
-            }),
-            Err(WorkflowError::Budget(0))
-        ));
-        assert_eq!(app.state().lookups, 0);
-
-        let exact = |id| RunRequested {
-            target: Target::Exact(id),
-            ..SELECTED
-        };
-        assert!(matches!(
-            app.dispatch(&exact(COUNTER)),
-            Err(WorkflowError::Target(TargetError::Stale(id))) if id == COUNTER
-        ));
-        assert_eq!(
-            app.dispatch(&exact(replacement)).unwrap(),
-            ExecutionRequest::None
-        );
-
-        let state = app.into_state();
-        assert_eq!(state.lookups, 2);
-        assert!(
-            state.audit[..2]
-                .iter()
-                .all(|record| record.outcome.is_err() && record.observed.is_none())
-        );
-        assert_eq!(state.audit[2].observed.as_ref().unwrap().eax, 99);
-    }
-
-    #[test]
-    fn failed_lookup_is_shared_for_this_delivery() {
-        let mut state = State::demo().unwrap();
-        let mut parts = RunParts::new(&mut state, Target::Selected);
-        assert_eq!(parts.target_process().err(), Some(TargetError::NoSelection));
-        assert_eq!(parts.target_process().err(), Some(TargetError::NoSelection));
-        assert_eq!(state.lookups, 1);
-    }
-}
+#[path = "../tests/examples/typed_event_workflow.rs"]
+mod tests;

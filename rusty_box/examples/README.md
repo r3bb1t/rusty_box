@@ -24,10 +24,12 @@ cargo run --locked --release -p rusty_box --no-default-features --example typed_
 ```
 
 1. Define an event such as `SelectProcess` and an application state type.
-2. Register `select_process(&SelectProcess, &mut State)` with `.on()`. The first parameter tells the app which event to route to the function.
+2. Register `select_process` with `.on()`. The first parameter, `&SelectProcess(pid): &SelectProcess`, tells the app which event to route and gives the handler the ID as `pid`.
 3. Give the app its state with `.with_state()`, then call `.dispatch(&SelectProcess(12))`. The app calls the handler immediately and lends it the state so it can update the selected process ID.
 
 Handlers can also take just `&Event` if they need no state. Returning `()` means the handler makes no execution request.
+
+The handler argument uses the same Rust destructuring syntax as Axum's `Path(id)` examples. Rusty Box lends the event to the handler, so the pattern starts with `&`. [Axum handler examples](https://docs.rs/axum/latest/axum/extract/#common-extractors)
 
 ### Add middleware and target lookup
 
@@ -42,9 +44,11 @@ cargo run --locked --release -p rusty_box --no-default-features --features alloc
 | Register a handler | A function or closure. `.on()` adapts it through `AppHandler`. |
 | Return the builder from a helper | Use `impl AppHandlers` in the return type to describe the chain that `.on()` already built. |
 | Resolve a target | A method returning the dependency, such as `RunParts::target_process()`. |
-| Wrap delivery in reusable middleware | Implement `Emit<Event, Parts>` on the wrapper. Set `type Error` and call the inner sink's `emit` when the event should proceed. |
+| Wrap delivery in reusable middleware | Implement `Emit<Event, Parts>` on the wrapper. Set `type Error` and call the wrapped handler when the event should proceed. |
 
-For a `RunRequested` event, the route creates fresh `RunParts`. `BudgetLimit` is the middleware. It checks the budget before forwarding to `Subscriptions`, which calls `execute` followed by `observe_registers`. Both handlers call `parts.target_process()`. The first call looks up the guest and the second uses the cached slot. Each handler borrows the guest for its own call.
+`BudgetLimit { inner: run_guest }` holds the function it wraps. Tower's logging middleware uses the same pattern to hold the service it wraps. [Tower middleware example](https://docs.rs/tower/latest/tower/layer/fn.layer_fn.html#example)
+
+Both routes use `.on()`. For a `RunProcess` event, the route creates fresh `RunParts` and gives them to `BudgetLimit`. If the budget is valid, the wrapper calls `run_guest`, which calls `execute` and then `observe_registers`. The pattern `&RunProcess { budget, .. }` picks out the budget. Both functions call `parts.target_process()`. The first call looks up the guest and the second uses the cached slot.
 
 When the guest halts, `execute` requests `Stop` and the register observer still runs. An error skips the remaining handlers. The route records either result. The demo reports three lookups for four run requests because the budget guard rejects one. [Application event guide](../../docs/vnext/application-events.md)
 

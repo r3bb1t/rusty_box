@@ -1,6 +1,6 @@
 //! Register a function, give the app state, and deliver a typed event.
 
-use rusty_box::events::{App, ExecutionRequest};
+use rusty_box::events::App;
 
 struct SelectProcess(u32);
 
@@ -9,9 +9,9 @@ struct State {
     selected: Option<u32>,
 }
 
-// The first argument tells App::on which event this function handles.
-fn select_process(event: &SelectProcess, state: &mut State) {
-    state.selected = Some(event.0);
+// The argument pattern takes the ID straight out of the borrowed event.
+fn select_process(&SelectProcess(pid): &SelectProcess, state: &mut State) {
+    state.selected = Some(pid);
 }
 
 fn main() {
@@ -19,7 +19,7 @@ fn main() {
         .on(select_process)
         .with_state(State::default());
 
-    assert_eq!(app.dispatch(&SelectProcess(12)), Ok(ExecutionRequest::None));
-    assert_eq!(app.state().selected, Some(12));
+    let delivery = app.dispatch(&SelectProcess(12));
+    println!("Delivery: {delivery:?}");
     println!("Selected process {:?}", app.state().selected);
 }

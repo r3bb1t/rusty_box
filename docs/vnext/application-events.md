@@ -5,7 +5,7 @@
 Start with the short `typed_events` example for a single handler and its state. [Beginner walkthrough](../../rusty_box/examples/README.md#typed-events)
 
 ```rust
-use rusty_box::events::{App, ExecutionRequest};
+use rusty_box::events::App;
 
 struct ProcessCreated(u32);
 struct RegisterChanged(u8);
@@ -16,16 +16,17 @@ struct AppState {
 }
 
 let handlers = App::<AppState>::new()
-    .on(|event: &ProcessCreated, state: &mut AppState| state.processes.push(event.0))
+    .on(|&ProcessCreated(pid): &ProcessCreated, state: &mut AppState| {
+        state.processes.push(pid);
+    })
     .on(|_: &RegisterChanged, state: &mut AppState| state.writes += 1)
-    .on(|event: &RegisterChanged| println!("New register value = {}", event.0));
+    .on(|&RegisterChanged(value): &RegisterChanged| println!("New register value = {value}"));
 
 let mut app = handlers.with_state(AppState { processes: Vec::new(), writes: 0 });
-assert_eq!(app.dispatch(&ProcessCreated(42)), Ok(ExecutionRequest::None));
-assert_eq!(app.dispatch(&RegisterChanged(3)), Ok(ExecutionRequest::None));
-assert_eq!(app.state().writes, 1);
+println!("Process created: {:?}", app.dispatch(&ProcessCreated(42)));
+println!("Register changed: {:?}", app.dispatch(&RegisterChanged(3)));
 let state = app.into_state();
-assert_eq!(state.processes, [42]);
+println!("Processes: {:?}, writes: {}", state.processes, state.writes);
 ```
 
 Handlers can be ordinary functions or `FnMut` closures. Annotate the event and state arguments of closures so Rust can select the signature. `App::<State, Error>::new()` selects a shared delivery error type and `App::<State>::new()` defaults to `Infallible`. A handler can return `()`, `ExecutionRequest`, or `Result<ExecutionRequest, Error>`. An application with only event observers can use `App::<()>::new().on(observer).with_state(())`.
@@ -38,11 +39,13 @@ A delivery runs matching handlers synchronously in registration order. An unmatc
 
 `ReadyApp` implements `Emit` and works directly with `publish_events`. An existing `Subscriptions` route can use `.forward(app)` alongside local handlers. The ready app owns its state while the publisher keeps lending the delivery capability to the handlers wired to receive it. For example, a device endpoint can forward notifications to the app and then run a low-level handler that drives its IRQ output. Both deliveries obey the same stop and error rules. Passing the app to a producer or attachment transfers or lends it according to that producer's existing ownership interface. [Existing device contracts](device-capabilities-and-events.md) · [PC integration test](../../rusty_box/tests/composed_hardware.rs)
 
+`Subscriptions::on_with()` registers a low-level handler that takes the event plus a capability lent by its publisher, such as an interrupt line. Use `App::on()` for handlers that use the app's own state.
+
 ## Reusable composition
 
 Accept the existing `App<S, X, H>` with `H: AppHandlers<S, X>` and return `App<S, X, impl AppHandlers<S, X>>`. An integration that works with several application state types can take a function that borrows just the fields it needs. The caller can add more handlers to the returned builder before supplying state.
 
-The `typed_event_workflow` example uses event types as route keys. Like a Tower service wrapper, `BudgetLimit` owns its inner sink. It implements `Emit`, checks the budget, and forwards a synchronous call to the ordered `Subscriptions` handlers. The route records the result, including errors returned by the guard. [Example](../../rusty_box/examples/typed_event_workflow.rs)
+The `typed_event_workflow` example registers both event types with `.on()`. Like a Tower service wrapper, `BudgetLimit` owns the handler it wraps. It implements `Emit`, checks the budget, and calls the handler synchronously. The route records the result, including errors returned by the guard. [Example](../../rusty_box/examples/typed_event_workflow.rs)
 
 ## Engineering report
 
