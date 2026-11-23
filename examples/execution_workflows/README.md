@@ -10,6 +10,30 @@ cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.
 
 A reusable process integration adds handlers to an existing builder using a narrow state trait. The application adds a process counter and an unrelated device observer, then supplies state. The example checks registration order, delivery through `publish_events`, and recovery of the owned state. [Application event guide](../../docs/vnext/application-events.md)
 
+## Lend custom RAM to the x86 interpreter
+
+`external_ram` implements a RAM range using two independent byte lanes. A real paged x86 workload writes and reads those bytes through `MemorySession`. The demonstration replaces warm direct backing, checks that a host code write invalidates a cached instruction, reads across two provider pages, and verifies that instruction fetch requires direct backing.
+
+With an initialized CPU, a flat or mapped `direct` backing, and a provider `ram` that implements `IndirectRam`, attach the provider for one session.
+
+```rust
+use rusty_box::config::BxPhyAddress;
+use rusty_box::cpu::memory_session::MemorySession;
+use rusty_box::memory::indirect::IndirectRamRange;
+
+let range = IndirectRamRange { start: BxPhyAddress::new(0x5000), len: 8192 };
+let loan = direct.loan().with_indirect_ram(range, &mut ram)?;
+let mut session = MemorySession::new(&mut cpu, loan);
+let run = session.run_controlled(16);
+```
+
+```sh
+cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin external_ram
+cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin external_ram -- --bench
+```
+
+The benchmark uses the same guest code and virtual addresses for dense, mapped, indirect-copy, and byte-lane memory. `RB_MEMORY_COUNT` sets dispatches per sample. [Memory contracts and implementation comparison](../../docs/vnext/external-memory-providers.md)
+
 ## Sample Linux tasks from the emulator host
 
 Download the pinned Debian installer image and unpack the BusyBox package as described below. Use `--host-only` to build a guest with an ordinary shell and two executables. COM1 launches each command and checks its output and exit code. The observer selects the active task at a kernel breakpoint and reads the task, page-directory root, executable mappings, and entry from emulator-visible registers and RAM. [Design and scope](../../docs/vnext/linux-host-observation.md)

@@ -7,6 +7,7 @@ use rusty_box::cpu::memory_session::{
     MemorySession, PhysicalOperation, PhysicalRequest, PhysicalResponse,
 };
 use rusty_box::cpu::{BxCpuC, CpuError, ResetReason};
+use rusty_box::memory::indirect::{IndirectRam, IndirectRamError, IndirectRamRange};
 use rusty_box::memory::mapped::{MappedMemory, MemoryMapError, PhysicalRegion, RegionKind};
 
 const PAGE: usize = 4096;
@@ -675,4 +676,127 @@ fn session_cr3_and_table_edits_invalidate_warm_translations() {
     session.invalidate_translations();
     assert!(matches!(session.step().stop, SessionStop::Budget));
     assert_eq!(session.regs().read(EAX), 0x1122_3344);
+}
+
+struct TableRam([u8; 2 * PAGE]);
+
+impl IndirectRam for TableRam {
+    fn read(&mut self, offset: u64, out: &mut [u8]) {
+        let start = offset as usize;
+        out.copy_from_slice(&self.0[start..start + out.len()]);
+    }
+
+    fn write(&mut self, offset: u64, data: &[u8]) {
+        let start = offset as usize;
+        self.0[start..start + data.len()].copy_from_slice(data);
+    }
+}
+
+#[test]
+fn indirect_ram_backs_guest_page_tables_and_accessed_dirty_updates() {
+    let operation = [
+        0xB8, 0x11, 0x22, 0x33, 0x44, // mov eax,0x44332211
+        0xA3, 0, 0x70, 0, 0, // mov [0x7000],eax
+        0x8B, 0x1D, 0, 0x70, 0, 0, // mov ebx,[0x7000]
+    ];
+    let mut board = paged_board(&operation);
+    let mut tables = TableRam([0; 2 * PAGE]);
+    tables.0.copy_from_slice(&board.arena[PAGE..3 * PAGE]);
+    let regions = [
+        PAGED_MAP[0],
+        PAGED_MAP[1],
+        PAGED_MAP[4],
+        PAGED_MAP[5],
+        PAGED_MAP[6],
+        PAGED_MAP[7],
+    ];
+    let mut memory = board.memory(&regions);
+    let mut cpu = cpu();
+    let range = IndirectRamRange {
+        start: BxPhyAddress::new(0x4000),
+        len: (2 * PAGE) as u64,
+    };
+    {
+        let mut session = MemorySession::new(
+            &mut cpu,
+            memory.loan().with_indirect_ram(range, &mut tables).unwrap(),
+        );
+        run_to(&mut session, 0x1100);
+        assert!(matches!(
+            session.step_with_external_page(range.start, |_| panic!("provider owns this page")),
+            Err(CpuError::UnsupportedCpuOperation { .. })
+        ));
+        assert_eq!(session.run(3).unwrap(), 3);
+        assert_eq!(session.cpu().rbx(), 0x4433_2211);
+        let mut leaf = [0; 4];
+        session
+            .read_physical(BxPhyAddress::new(0x501C), &mut leaf)
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(leaf), 0x7063); // leaf A/D
+        assert!(
+            session
+                .write_ram(BxPhyAddress::new(0x5FFF), &[1, 2])
+                .is_err()
+        );
+        session
+            .write_ram(BxPhyAddress::new(0x6000), &0xAABB_CCDDu32.to_le_bytes())
+            .unwrap();
+        session
+            .write_ram(BxPhyAddress::new(0x501C), &0x6003u32.to_le_bytes())
+            .unwrap();
+        session.regs().write(rusty_box::cpu::registers::EIP, 0x110A);
+        assert_eq!(session.run(1).unwrap(), 1);
+        assert_eq!(session.cpu().rbx(), 0x4433_2211); // still the warm translation
+        session.invalidate_translations();
+        session.regs().write(rusty_box::cpu::registers::EIP, 0x110A);
+        assert_eq!(session.run(1).unwrap(), 1);
+        assert_eq!(session.cpu().rbx(), 0xAABB_CCDD);
+    }
+    assert_eq!(&tables.0[..4], &0x5023u32.to_le_bytes()); // directory A
+    assert_eq!(&tables.0[PAGE + 28..PAGE + 32], &0x6023u32.to_le_bytes()); // new leaf A
+    assert_eq!(tables.0[2 * PAGE - 1], 0);
+}
+
+#[test]
+fn indirect_aperture_must_be_disjoint_page_aligned_and_unique() {
+    fn shared_traits<T: Send + Sync + std::panic::RefUnwindSafe>() {}
+    shared_traits::<rusty_box::memory::mapped::MemoryLoan<'static>>();
+
+    let mut board = SparseBoard::<2>::new(0x1000);
+    let layout = [
+        region(0x1000, 0, RegionKind::Ram),
+        region(RESET, 1, RegionKind::Rom),
+    ];
+    let mut memory = board.memory(&layout);
+    let mut ram = TableRam([0; 2 * PAGE]);
+    for (start, len, error) in [
+        (0x1000, PAGE as u64, IndirectRamError::Overlap),
+        (
+            RESET - PAGE as u64,
+            (2 * PAGE) as u64,
+            IndirectRamError::Overlap,
+        ),
+        (0x3001, PAGE as u64, IndirectRamError::InvalidRange),
+        (0x3000, 0, IndirectRamError::InvalidRange),
+        (u64::MAX - 4095, PAGE as u64, IndirectRamError::InvalidRange),
+    ] {
+        let range = IndirectRamRange {
+            start: BxPhyAddress::new(start),
+            len,
+        };
+        assert_eq!(
+            memory.loan().with_indirect_ram(range, &mut ram).err(),
+            Some(error)
+        );
+    }
+    let range = IndirectRamRange {
+        start: DEVICE_PAGE,
+        len: PAGE as u64,
+    };
+    let loan = memory.loan().with_indirect_ram(range, &mut ram).unwrap();
+    let mut other = TableRam([0; 2 * PAGE]);
+    assert_eq!(
+        loan.with_indirect_ram(range, &mut other).err(),
+        Some(IndirectRamError::AlreadyAttached)
+    );
 }

@@ -667,8 +667,8 @@ fn read(&mut self, port: u16) -> u8 {
 
 ## R8 — Erasure is opt-in and named
 
-No `dyn` in any public signature and none on any dispatch path. Where an open set genuinely
-exists, erasure lives in exactly one named place, and that place is alloc-gated: closure
+No `dyn` in public signatures. Where an open set genuinely exists, erasure lives in exactly
+one named place. Unless listed as borrowed below, that place is alloc-gated: closure
 storage for a user's callbacks (`Box<dyn FnMut…>`, the MMIO registry below), or an enum variant
 for a user backend, which is a target (`AnyDisk::Custom(Box<dyn BlockDevice + Send>)`, not
 built). A machine names its parts' types at compile time: its observer is a type parameter
@@ -677,7 +677,8 @@ impls bound `E: SliceEngine<T>`). Traits that would be trivially erasable are ke
 non-dyn-compatible (generic methods, associated consts) when no consumer needs erasure:
 `SliceEngine` and `VgaExtension` are.
 
-The registry below names the borrowed erasure at the application event boundary.
+The registry below names borrowed erasure at the application event boundary and the
+opt-in indirect RAM route.
 
 Target design, not built: in-tree device sets dispatch as enums (`DisplayDevice::{Vga, GeForce,
 …}`); user extension composes statically through profile associated types
@@ -809,6 +810,13 @@ not stored closures.
   `ReadyApp` delivery. An open set of independently defined events needs an exact type check
   before a handler receives its typed reference. The reference stays private and allocation-free.
   Handlers and their storage are statically dispatched. [Application event design](vnext/application-events.md)
+
+**Sanctioned borrowed erasure for indirect x86 RAM:**
+
+- `IndirectRamLoan` carries one exclusive provider borrow in `memory/indirect.rs`.
+  Independently defined RAM providers serve a validated physical range through byte
+  transfers. Erasure happens when explicitly attaching the provider and is allocation-free.
+  The provider has no direct mapping or fetch path. Cached RAM bypasses its callbacks.
 
 **Tolerated, each with what removes it — a `dyn` here is debt, not design:**
 

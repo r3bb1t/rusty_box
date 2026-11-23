@@ -6,6 +6,7 @@
 //! These are not guest #PFs: paging faults still come from the real x86 MMU.
 //! Instruction fetch requires actual backing and exits when none is present.
 use super::code_writes::CodeWrites;
+use super::indirect::IndirectRamLoan;
 use crate::config::BxPhyAddress;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -93,6 +94,7 @@ pub(crate) struct FlatParts<'a> {
     pub(crate) stamps: &'a mut [u32],
     pub(crate) writes: &'a mut CodeWrites,
     pub(super) regions: Option<&'a [super::mapped::PhysicalRegion]>,
+    pub(super) indirect: Option<IndirectRamLoan<'a>>,
 }
 impl<'a> FlatParts<'a> {
     pub(crate) fn dense(
@@ -106,6 +108,7 @@ impl<'a> FlatParts<'a> {
             stamps,
             writes,
             regions: None,
+            indirect: None,
         }
     }
 
@@ -115,11 +118,41 @@ impl<'a> FlatParts<'a> {
             stamps: self.stamps,
             writes: self.writes,
             regions: self.regions,
+            indirect: self.indirect.as_mut().map(IndirectRamLoan::reborrow),
         }
     }
 
     pub(crate) fn has_backing_at(&self, addr: BxPhyAddress) -> bool {
         self.span_from(addr, false).is_some()
+            || self.indirect.as_ref().is_some_and(|ram| ram.contains(addr))
+    }
+
+    #[cold]
+    pub(super) fn read_indirect(&mut self, addr: BxPhyAddress, out: &mut [u8]) -> bool {
+        let Some(ram) = &mut self.indirect else {
+            return false;
+        };
+        let Some(offset) = ram.offset(addr, out.len()) else {
+            return false;
+        };
+        if !out.is_empty() {
+            ram.ram.read(offset, out);
+        }
+        true
+    }
+
+    #[cold]
+    pub(super) fn write_indirect(&mut self, addr: BxPhyAddress, data: &[u8]) -> bool {
+        let Some(ram) = &mut self.indirect else {
+            return false;
+        };
+        let Some(offset) = ram.offset(addr, data.len()) else {
+            return false;
+        };
+        if !data.is_empty() {
+            ram.ram.write(offset, data);
+        }
+        true
     }
 
     /// Offsets in the arena, not in guest address space.

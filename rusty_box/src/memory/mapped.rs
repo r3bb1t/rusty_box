@@ -7,6 +7,7 @@
 use core::ops::Range;
 
 use super::flat::{FlatMemory, FlatMemoryError, FlatParts};
+use super::indirect::{IndirectRam, IndirectRamError, IndirectRamLoan, IndirectRamRange};
 use crate::config::BxPhyAddress;
 
 /// The guest's write policy for a physical window.
@@ -105,6 +106,55 @@ impl<'a> MappedMemory<'a> {
 /// Checked storage borrowed for one execution session. Created by
 /// [`MappedMemory::loan`] or [`FlatMemory::loan`].
 pub struct MemoryLoan<'a>(pub(crate) FlatParts<'a>);
+
+impl<'a> MemoryLoan<'a> {
+    /// Add one disjoint data RAM range to a flat or mapped memory loan.
+    /// Indirect RAM participates in ordinary data accesses and page-table
+    /// walks. Fetch and direct caching require a window in the original map.
+    /// The provider stays exclusively borrowed until the loan is released.
+    /// `Send` and `Sync` preserve the original loan's auto traits.
+    ///
+    /// ```compile_fail,E0499
+    /// use rusty_box::config::BxPhyAddress;
+    /// use rusty_box::memory::{indirect::{IndirectRam, IndirectRamRange}, mapped::MemoryLoan};
+    /// fn overlap<'a, R: IndirectRam + Send + Sync>(loan: MemoryLoan<'a>, ram: &'a mut R) {
+    ///     let borrowed = loan.with_indirect_ram(IndirectRamRange {
+    ///         start: BxPhyAddress::new(0x10000), len: 4096,
+    ///     }, ram).unwrap();
+    ///     ram.write(0, &[42]);
+    ///     drop(borrowed);
+    /// }
+    /// ```
+    pub fn with_indirect_ram<R: IndirectRam + Send + Sync>(
+        mut self,
+        range: IndirectRamRange,
+        ram: &'a mut R,
+    ) -> Result<Self, IndirectRamError> {
+        if self.0.indirect.is_some() {
+            return Err(IndirectRamError::AlreadyAttached);
+        }
+        let start = range.start;
+        let end = start
+            .checked_add(range.len)
+            .ok_or(IndirectRamError::InvalidRange)?;
+        if range.len == 0 || start.page_offset() != 0 || end.page_offset() != 0 {
+            return Err(IndirectRamError::InvalidRange);
+        }
+        let overlap = match self.0.regions {
+            Some(regions) => regions.iter().any(|region| {
+                // MappedMemory validated this end before creating the loan.
+                let region_end = region.guest_start.wrapping_add(region.len as u64);
+                region.guest_start < end && start < region_end
+            }),
+            None => start.get() < self.0.bytes.len() as u64,
+        };
+        if overlap {
+            return Err(IndirectRamError::Overlap);
+        }
+        self.0.indirect = Some(IndirectRamLoan { start, end, ram });
+        Ok(self)
+    }
+}
 
 /// Resolve the remaining contiguous bytes in one validated physical window.
 pub(super) fn mapped_span(

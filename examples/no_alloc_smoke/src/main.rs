@@ -13,10 +13,25 @@ use rusty_box::emulator::hardware::{
     MmioWindow, MmioWrite, PcAttachment, PcDevice, PcDeviceAttachError, RegisterWindow,
     SubscriberError, Subscriptions, WindowOffset, WindowPair,
 };
+use rusty_box::memory::indirect::{IndirectRam, IndirectRamRange};
 use rusty_box::memory::mapped::{MappedMemory, PhysicalRegion, RegionKind};
 use rusty_box::memory::mmio::{MmioAttachError, MmioDevice};
 
 fn consume<T>(_value: T) {}
+
+struct StackRam([u8; 4096]);
+
+impl IndirectRam for StackRam {
+    fn read(&mut self, offset: u64, out: &mut [u8]) {
+        let start = offset as usize;
+        out.copy_from_slice(&self.0[start..start + out.len()]);
+    }
+
+    fn write(&mut self, offset: u64, data: &[u8]) {
+        let start = offset as usize;
+        self.0[start..start + data.len()].copy_from_slice(data);
+    }
+}
 
 // This target checks that both the public map and its execution entry point
 // compile with allocation disabled. The host selects and places the CPU.
@@ -30,12 +45,22 @@ fn execute(cpu: &mut BxCpuC) -> rusty_box::Result<SessionRun> {
         kind: RegionKind::Ram,
     }];
     let mut memory = MappedMemory::new(&mut bytes, &mut stamps, &regions).unwrap();
-    let mut session = MemorySession::new(cpu, memory.loan());
+    let mut independent = StackRam([0; 4096]);
+    let range = IndirectRamRange {
+        start: BxPhyAddress::new(0x2000),
+        len: 4096,
+    };
+    let loan = memory
+        .loan()
+        .with_indirect_ram(range, &mut independent)
+        .unwrap();
+    let mut session = MemorySession::new(cpu, loan);
     session.reset_at(EntryMode::Real16, 0x1000, 0x1FF0)?;
     session.regs().write(AX, 0x42);
     session
         .memory()
-        .write_phys(BxPhyAddress::new(0x1000), &[0x90])?;
+        .write_phys(BxPhyAddress::new(0x1000), &[0xA0, 0x00, 0x20])?; // mov al,[0x2000]
+    session.write_ram(BxPhyAddress::new(0x2000), &[0x12])?;
     let mut code = [0];
     session
         .memory()

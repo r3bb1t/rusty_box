@@ -202,7 +202,7 @@ impl ExecutionMemory<'_> {
                     let count = len.min(span.len());
                     out[..count].copy_from_slice(&mem.bytes[span.start..span.start + count]);
                     out[count..].fill(0xFF);
-                } else {
+                } else if !mem.read_indirect(addr, out) {
                     out.fill(0xFF);
                 }
                 Ok(PhysAccess::Done)
@@ -227,6 +227,8 @@ impl ExecutionMemory<'_> {
                     let count = len.min(span.len());
                     mem.bytes[span.start..span.start + count].copy_from_slice(&data[..count]);
                     mem.mark_write(addr, count);
+                } else if mem.write_indirect(addr, &data[..len]) {
+                    return Ok(PhysAccess::Done);
                 }
                 Ok(PhysAccess::Done)
             }
@@ -237,17 +239,21 @@ impl ExecutionMemory<'_> {
         match self {
             Self::Pc(mem) => mem.read_ram(addr, out),
             Self::Borrowed(mem) => {
-                if out.is_empty() && mem.regions.is_none() {
-                    return checked_range(addr, 0, mem.bytes.len())
-                        .map(|_| 0)
-                        .ok_or(MemoryError::RamImageOutOfRange.into());
+                if out.is_empty()
+                    && mem.regions.is_none()
+                    && checked_range(addr, 0, mem.bytes.len()).is_some()
+                {
+                    return Ok(0);
                 }
-                let span = mem
+                if let Some(span) = mem
                     .span_from(addr, false)
                     .filter(|span| out.len() <= span.len())
-                    .ok_or(MemoryError::RamImageOutOfRange)?;
-                let range = span.start..span.start + out.len();
-                out.copy_from_slice(&mem.bytes[range]);
+                {
+                    let range = span.start..span.start + out.len();
+                    out.copy_from_slice(&mem.bytes[range]);
+                } else if !mem.read_indirect(addr, out) {
+                    return Err(MemoryError::RamImageOutOfRange.into());
+                }
                 Ok(out.len())
             }
         }
@@ -258,18 +264,22 @@ impl ExecutionMemory<'_> {
         match self {
             Self::Pc(mem) => mem.write_ram(addr, data),
             Self::Borrowed(mem) => {
-                if data.is_empty() && mem.regions.is_none() {
-                    return checked_range(addr, 0, mem.bytes.len())
-                        .map(|_| 0)
-                        .ok_or(MemoryError::RamImageOutOfRange.into());
+                if data.is_empty()
+                    && mem.regions.is_none()
+                    && checked_range(addr, 0, mem.bytes.len()).is_some()
+                {
+                    return Ok(0);
                 }
-                let span = mem
+                if let Some(span) = mem
                     .span_from(addr, true)
                     .filter(|span| data.len() <= span.len())
-                    .ok_or(MemoryError::RamImageOutOfRange)?;
-                let range = span.start..span.start + data.len();
-                mem.bytes[range].copy_from_slice(data);
-                mem.mark_write(addr, data.len());
+                {
+                    let range = span.start..span.start + data.len();
+                    mem.bytes[range].copy_from_slice(data);
+                    mem.mark_write(addr, data.len());
+                } else if !mem.write_indirect(addr, data) {
+                    return Err(MemoryError::RamImageOutOfRange.into());
+                }
                 Ok(data.len())
             }
         }
