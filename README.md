@@ -278,6 +278,7 @@ It needs the rustup targets `x86_64-unknown-none`, `x86_64-unknown-uefi` and `wa
 - [rusty_box_gui/README.md](rusty_box_gui/README.md) -- the shell in full: the VM library, pages, engines, disk images, Android, browser
 - [docs/automation.md](docs/automation.md) -- driving a guest from Rust: boot it headless, read the screen, type at it, watch what it does
 - Compose typed event handlers and supply synchronous application state. [Typed application events](docs/vnext/application-events.md)
+- Execute static Linux/i386 ELF programs with application-owned standard streams and no boot image. [User-mode execution](rusty_box_linux_user/README.md)
 - Observe two supervised Linux guest programs through typed application handlers. [Linux semantic observation](docs/vnext/linux-semantic-observation.md)
 - Sample the active Linux/i386 task and its executable VMAs from the emulator host. [Host-side Linux observation](docs/vnext/linux-host-observation.md)
 - [docs/aarch64-automation.md](docs/aarch64-automation.md) -- the same for the AArch64 `virt` machine ([rusty_box_aarch64](rusty_box_aarch64/README.md)): boot UEFI or a Linux kernel, the serial console and its keyboard, registers, snapshots
@@ -306,7 +307,7 @@ Crates written here are licensed under either of, at your option:
 - [Apache License, Version 2.0](LICENSE-APACHE)
 - [MIT license](LICENSE-MIT)
 
-These are `rusty_box_core`, `rusty_box_gui`, `rusty_box_symbols`, `rusty_box_symbols_fixtures`,
+These are `rusty_box_core`, `rusty_box_gui`, `rusty_box_linux_user`, `rusty_box_symbols`, `rusty_box_symbols_fixtures`,
 `rusty_box_whp`, `rusty_box_whp_sys`, `rusty_box_whp_engine`, `rusty_box_bximage`, `xtask` and the
 examples.
 

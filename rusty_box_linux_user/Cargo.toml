@@ -1,0 +1,14 @@
+[package]
+name = "rusty_box_linux_user"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A freestanding Linux/i386 process environment for the rusty_box x86 interpreter"
+
+[dependencies]
+rusty_box = { path = "../rusty_box", default-features = false, features = ["alloc"] }
+thiserror.workspace = true
+
+[lints]
+workspace = true
