@@ -22,8 +22,8 @@ def newc(entries):
 
 
 def main():
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: mkinitramfs.py STATIC_BUSYBOX OUTPUT.cpio.gz")
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit("usage: mkinitramfs.py STATIC_BUSYBOX OUTPUT.cpio.gz [OBSERVATION_BIN_DIR]")
     busybox = Path(sys.argv[1]).read_bytes()
     if busybox[:7] != b"\x7fELF\x01\x01\x01" or int.from_bytes(busybox[18:20], "little") != 3:
         raise SystemExit("expected an i386 BusyBox ELF")
@@ -41,8 +41,15 @@ def main():
         *[(f"bin/{name}", symlink, b"busybox", 0, 0)
           for name in ("cat", "chmod", "mkfifo", "mv", "rm", "sh", "stty", "uname", "wc")],
         ("init", executable, init, 0, 0),
-        ("TRAILER!!!", 0, b"", 0, 0),
     ]
+    if len(sys.argv) == 4:
+        entries.append(("proc", directory, b"", 0, 0))
+        for name in ("rb-observe", "program_sum", "program_text"):
+            path = Path(sys.argv[3]) / name
+            if not 0 < path.stat().st_size <= 1024 * 1024:
+                raise SystemExit(f"unexpected guest fixture size for {name}")
+            entries.append((f"bin/{name}", executable, path.read_bytes(), 0, 0))
+    entries.append(("TRAILER!!!", 0, b"", 0, 0))
     Path(sys.argv[2]).write_bytes(gzip.compress(newc(entries), mtime=0))
 
 

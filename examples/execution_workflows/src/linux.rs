@@ -1,5 +1,8 @@
 //! A scoped observation of the instrumented entry point of a Linux i386 image.
 
+pub mod console;
+pub mod semantic;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusty_box::Emulator;
@@ -331,18 +334,22 @@ impl I386ImageProbe {
         if actual != GETPID {
             return Err(AnalysisError::WrongBoundary);
         }
-        let generation = NEXT_IMAGE
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .map_err(|_| AnalysisError::GenerationExhausted)?;
         Ok(ProcessImageMapped {
             pid,
-            space: AddressSpace {
-                page_table_root: root,
-                image_generation: generation,
-            },
+            space: next_address_space(root)?,
             checkpoint: self.checkpoint,
         })
     }
+}
+
+fn next_address_space(page_table_root: u64) -> Result<AddressSpace, AnalysisError> {
+    let image_generation = NEXT_IMAGE
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .map_err(|_| AnalysisError::GenerationExhausted)?;
+    Ok(AddressSpace {
+        page_table_root,
+        image_generation,
+    })
 }
 
 fn read_guest<T: Instrumentation>(
@@ -536,8 +543,8 @@ mod tests {
 
     use super::*;
 
-    const BASE: u64 = 0x1000;
-    const ENTRY: u64 = BASE + (ELF_HEADER + PROGRAM_HEADER) as u64;
+    pub(super) const BASE: u64 = 0x1000;
+    pub(super) const ENTRY: u64 = BASE + (ELF_HEADER + PROGRAM_HEADER) as u64;
 
     fn image(generation: u64) -> ProcessImageMapped {
         ProcessImageMapped {
@@ -550,7 +557,7 @@ mod tests {
         }
     }
 
-    fn elf() -> [u8; 128] {
+    pub(super) fn elf() -> [u8; 128] {
         let mut mem = [0; 128];
         mem[..7].copy_from_slice(b"\x7fELF\x01\x01\x01");
         mem[16] = 2;

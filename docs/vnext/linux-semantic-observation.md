@@ -1,0 +1,33 @@
+# Linux semantic observation
+
+Milestone 7 builds on `e4c4761`. The observation code lives in the standalone execution-workflows workspace. The x86 emulator supplies direct Linux boot, COM1, non-invasive debugger breakpoints, typed registers, address translation and checked physical RAM reads. `App`, `ReadyApp` and `Emit` supply composition and delivery. [Run the example](../../examples/execution_workflows/README.md#observe-two-linux-programs-at-user-entry) · [Typed events](application-events.md)
+
+## Observation boundary
+
+The guest boots a Debian 12 i386 kernel and a fresh BusyBox initramfs. A small guest-owned supervisor forks a child and traces only that child. `PTRACE_EVENT_EXEC` reports successful exec while the child is stopped. The supervisor reads the PID from `waitpid`, the executable identity from `/proc/<pid>/exe`, executable VMAs and file offsets from `/proc/<pid>/maps`, and the entry and program-header addresses from `/proc/<pid>/auxv`. Linux i386 `PTRACE_GETREGS` supplies the expected first EIP and initial ESP. [Guest supervisor](../../examples/execution_workflows/guest/observe_exec.c) · [Linux ptrace ABI](https://man7.org/linux/man-pages/man2/ptrace.2.html) · [Linux procfs maps](https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html)
+
+The host arms a debugger breakpoint at the reported runtime entry while the supervisor still holds the child. It then lets the supervisor resume the child. The observer checks the live ring-3 EIP and ESP against the supervisor's values and records the live CR3. Only this breakpoint produces a typed observation. A later `waitpid` for the same child and the fixture's stdout establish successful execution after the observation. The two separately compiled programs are a fixed-address static ELF and a static PIE. Neither program supplies a PID or the bytes used to choose the breakpoint. [Host observer](../../examples/execution_workflows/src/linux/semantic.rs) · [Debugger API](../../rusty_box/src/emulator/debug.rs)
+
+| Boundary considered | What it establishes |
+| --- | --- |
+| Observe entry into `execve` | Captures the requested path. The original image can still be active and exec can fail. |
+| Break after a fixture's known instruction sequence | Can inspect an exact register result, as the earlier replacement example does with `getpid`. Each executable needs a matching checkpoint. |
+| Supervised exec stop followed by live user entry | Obtains the kernel's successful-exec metadata, then correlates the held child with the active guest address space at a runtime address. This works for both tested ELF layouts. |
+
+The checked boundary assumes a single guest CPU, one supervised child at a time, and fixture executables whose initial EIP equals `AT_ENTRY`. The tests use Debian `6.1.0-50-686`. A userspace dynamic loader can start at its own entry, and a global linear debugger breakpoint can match another address space on a general workload. The example therefore scopes the identity to the controlled exec and uses EIP, ESP, the reported stack and image mappings, and the traced child's later exit as corroboration. CR3 can be reused, so events include an observation generation. The reported mappings describe the stopped image at exec. Mapping changes, arbitrary scheduler switches, and general process discovery require their own observation boundaries.
+
+## Typed delivery and optional mapped ELF metadata
+
+Independent process and image modules register with `App::on()` before the example supplies its non-`Clone` state. The process handler records identity before the image handler verifies it and records the entry. An event-only image handler prints the mappings. The app recovers the state with `into_state()` after both executions. Each observation delivers process, image, then optional metadata. Stops accumulate across that observation, and the first handler error ends delivery with its original error. The paused driver owns the guest until the caller chooses to resume it. [Application](../../examples/execution_workflows/src/bin/linux_observe.rs)
+
+Basic mode sends a plain resume command and performs no ELF reads. `--elf` asks the supervisor to try to make the header page resident. The observer then uses the active CPU's debugger translation and checked RAM reads at user entry. It uses the existing ELF32/i386 validator and checks the reported auxiliary-vector dimensions, program-header count, load bias, entry, mapped range and file offsets. Reads are bounded to the single reported header table and its readable file mapping. Unavailable guest pages and malformed or inconsistent data have distinct errors. The header bytes are read from memory. The segment sizes and offsets describe the file, and executable VMAs do not establish that all code pages are resident. [Mapped ELF inspector](../../examples/execution_workflows/src/linux/semantic/metadata.rs)
+
+The host prepares one owned `Result` at the paused boundary. Two `.on()` handlers can borrow the same `ImageMetadata` event after the emulator borrow ends. A scoped dependency argument tied to guest memory would require a different delivery lifetime than the app facade's `'static` event types. Explicit preparation and a typed event fit this example's two consumers and keep the emulator API independent of Linux and ELF.
+
+## Validation
+
+The automated guest regression boots fresh images in both modes and checks the two output lines, successful exit status, typed process and image counts, and the two shared ELF results in inspection mode. Host unit tests check that basic observations skip reads, an inconsistent entry stack fails, metadata reads share one preparation, delivery order survives an early stop, and malformed and unavailable bytes remain distinct errors. [Guest regression](../../examples/execution_workflows/tests/linux_observation.rs) · [Host tests](../../examples/execution_workflows/src/linux/semantic.rs)
+
+- Both guest modes passed on Debian `6.1.0-50-686`. An inspection run reported fixed entry `0x8049000` and PIE entry `0xb7f2a000` from link entry `0x1000`. In a basic run the two children shared CR3 `0x2cc7000`, with different PIDs and observation generations. The app recovered both records with zero ELF results.
+- The downstream Rust tests and Clippy passed. The earlier `/bin/cat` workflow also booted the guest, matched the resident-code digest, and verified restoration of the original executable.
+- All 18 compiler fixtures and 12 composed-hardware tests passed. The core and device suites passed without default features. The x86 host passed both `no_std` feature configurations, the bare-metal smoke binary linked without Rust allocator symbols, and the WebAssembly and AArch64 portability checks passed.

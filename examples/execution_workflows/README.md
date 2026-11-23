@@ -10,6 +10,32 @@ cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.
 
 A reusable process integration adds handlers to an existing builder using a narrow state trait. The application adds a process counter and an unrelated device observer, then supplies state. The example checks registration order, delivery through `publish_events`, and recovery of the owned state. [Application event guide](../../docs/vnext/application-events.md)
 
+## Observe two Linux programs at user entry
+
+Use the Debian i386 kernel and unpacked BusyBox described in the next section. Build a separate initramfs with the supervisor, a fixed-address static executable, and a static PIE. The build uses GCC with i386 code generation, GNU binutils with `elf_i386` support, and Python 3. The three fixtures link without a host or guest C library.
+
+```sh
+sh examples/execution_workflows/guest/build_observation.sh \
+  "$RB_WORK/busybox/bin/busybox" "$RB_WORK/observation"
+cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.toml \
+  --bin linux_observe -- "$RB_WORK/linux" "$RB_WORK/observation/observation.cpio.gz"
+cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.toml \
+  --bin linux_observe -- "$RB_WORK/linux" "$RB_WORK/observation/observation.cpio.gz" --elf
+```
+
+Expect `sum=22` and `argv0=/bin/program_text` from the two successful guest executions. Both modes report the PID, CR3, image generation, runtime entry and executable VMAs. `--elf` also reports the resident ELF header and program headers. The PIE's reported runtime entry includes its load bias. Basic mode requests zero ELF inspections.
+
+Run the automated two-mode guest regression with the same assets.
+
+```sh
+RB_OBSERVATION_KERNEL="$RB_WORK/linux" \
+RB_OBSERVATION_INITRAMFS="$RB_WORK/observation/observation.cpio.gz" \
+cargo test --locked --release --manifest-path examples/execution_workflows/Cargo.toml \
+  --test linux_observation -- --ignored
+```
+
+The observer relies on ptrace and procfs in the controlled Linux/i386 guest. Its typed events describe the two supervised execs. [Design and boundaries](../../docs/vnext/linux-semantic-observation.md)
+
 ## Boot Linux and replace `/bin/cat`
 
 The example uses a Debian 12 i386 kernel and a static i386 BusyBox. The initramfs starts a shell on COM1 and contains the original BusyBox `cat`. The replacement travels over COM1 after the guest reports readiness. The host invokes the guest's own `printf`, `chmod`, `mv`, `exec`, and `wait` through that shell.

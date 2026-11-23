@@ -7,132 +7,26 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use rusty_box::Emulator;
 use rusty_box::cpu::CodeBreakpoint;
-use rusty_box::emulator::{EmulatorConfig, Ips, MachineBuilder, MemorySize, RunBudget, StopReason};
-use rusty_box::gui::NoGui;
+use rusty_box::emulator::StopReason;
 use rusty_box_core::events::{Emit, ExecutionRequest, Subscriptions};
+use rusty_box_execution_workflows::linux::console::Console;
 use rusty_box_execution_workflows::linux::{
     I386ImageProbe, ImageObservers, ProcessCreated, ProcessExited,
 };
 
 type HostResult<T> = Result<T, Box<dyn Error>>;
-const TICKS: u64 = 2_000_000;
 const STAGE: &str = "/bin/cat.rb-stage";
 const ORIGINAL: &str = "/bin/cat.rb-original";
 const START: &str = "/tmp/rb-cat-start";
 const MARKER: &str = "RB_REPLACEMENT_OK";
 
-struct Console {
-    machine: Box<Emulator>,
-    output: Vec<u8>,
-}
+struct Replacement(Console);
 
-impl Console {
-    fn boot(kernel: &[u8], initramfs: &[u8]) -> HostResult<Self> {
-        let config = EmulatorConfig {
-            memory: MemorySize::bytes(128 * 1024 * 1024),
-            ips: Ips::new(300_000_000),
-            ..Default::default()
-        };
-        let mut machine = MachineBuilder::new(config).gui(NoGui::new()).build()?;
-        machine.setup_direct_linux_boot(kernel, Some(initramfs),
-            "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 nokaslr nomodeset quiet rdinit=/init")?;
-        let mut console = Self {
-            machine,
-            output: Vec::new(),
-        };
-        let version = console.wait_for("guest ready", 6_000, |line| {
-            line.strip_prefix("RB_READY:")
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        })?;
-        println!("Guest ready on COM1, Linux {version}");
-        Ok(console)
-    }
-
-    fn pump(&mut self) -> HostResult<StopReason> {
-        let stop = self.machine.step(RunBudget::Ticks(TICKS))?.stop;
-        self.output.extend(
-            self.machine
-                .serial(0)
-                .ok_or("guest has no COM1")?
-                .take_output(),
-        );
-        if self.output.len() > 64 * 1024 {
-            return Err("serial transcript exceeded 64 KiB".into());
-        }
-        Ok(stop)
-    }
-
-    fn pump_ordinary(&mut self) -> HostResult<()> {
-        match self.pump()? {
-            StopReason::BudgetExhausted | StopReason::Halted => Ok(()),
-            stop => Err(format!("unexpected console stop: {stop:?}").into()),
-        }
-    }
-
-    fn command(&mut self, command: &str) -> HostResult<()> {
-        let line = format!("{command}\n");
-        let mut rest = line.as_bytes();
-        for _ in 0..80 {
-            let sent = self
-                .machine
-                .serial(0)
-                .ok_or("guest has no COM1")?
-                .send(rest);
-            rest = &rest[sent..];
-            if rest.is_empty() {
-                return Ok(());
-            }
-            self.pump_ordinary()?;
-        }
-        Err("guest console did not accept the complete command".into())
-    }
-
-    fn lines(&self) -> impl Iterator<Item = &str> {
-        self.output
-            .split_inclusive(|&byte| byte == b'\n')
-            .filter_map(|line| {
-                if !line.ends_with(b"\n") {
-                    return None;
-                }
-                std::str::from_utf8(line).ok().map(str::trim_end)
-            })
-    }
-
-    fn tail(&self) -> String {
-        let first = self.output.len().saturating_sub(1600);
-        String::from_utf8_lossy(&self.output[first..]).into_owned()
-    }
-
-    fn wait_for<R>(
-        &mut self,
-        label: &str,
-        steps: usize,
-        mut parse: impl FnMut(&str) -> Option<R>,
-    ) -> HostResult<R> {
-        for _ in 0..steps {
-            if let Some(result) = self.lines().find_map(&mut parse) {
-                return Ok(result);
-            }
-            self.pump_ordinary()?;
-        }
-        Err(format!(
-            "missing {label} at guest IP {:#x}: {:?}",
-            self.machine.rip(),
-            self.tail()
-        )
-        .into())
-    }
-
-    fn wait_line(&mut self, line: &str) -> HostResult<()> {
-        self.wait_for(line, 350, |text| (text == line).then_some(()))
-    }
-
+impl Replacement {
     fn check_install_paths(&mut self) -> HostResult<()> {
-        self.command(&format!("test -x /bin/cat && test ! -e {ORIGINAL} && test ! -e {STAGE} && test ! -e {START} && echo RB_CLEAR"))?;
-        self.wait_line("RB_CLEAR")
+        self.0.command(&format!("test -x /bin/cat && test ! -e {ORIGINAL} && test ! -e {STAGE} && test ! -e {START} && echo RB_CLEAR"))?;
+        self.0.wait_line("RB_CLEAR")
     }
 
     fn install(&mut self, elf: &[u8]) -> HostResult<()> {
@@ -142,15 +36,16 @@ impl Console {
                 write!(bytes, "\\0{byte:03o}")?;
             }
             let redirect = if i == 0 { ">" } else { ">>" };
-            self.command(&format!("printf '%b' '{bytes}' {redirect} {STAGE}"))?;
+            self.0
+                .command(&format!("printf '%b' '{bytes}' {redirect} {STAGE}"))?;
         }
-        self.command(&format!("test \"$(wc -c < {STAGE})\" -eq {} && chmod 755 {STAGE} && mv /bin/cat {ORIGINAL} && mv {STAGE} /bin/cat && echo RB_INSTALLED", elf.len()))?;
-        self.wait_line("RB_INSTALLED")
+        self.0.command(&format!("test \"$(wc -c < {STAGE})\" -eq {} && chmod 755 {STAGE} && mv /bin/cat {ORIGINAL} && mv {STAGE} /bin/cat && echo RB_INSTALLED", elf.len()))?;
+        self.0.wait_line("RB_INSTALLED")
     }
 
     fn spawn(&mut self) -> HostResult<ProcessCreated> {
-        self.command(&format!("mkfifo {START} && {{ (read gate < {START} && exec /bin/cat) & p=$!; echo RB_FORK:$p; }}"))?;
-        self.wait_for("child PID", 350, |line| {
+        self.0.command(&format!("mkfifo {START} && {{ (read gate < {START} && exec /bin/cat) & p=$!; echo RB_FORK:$p; }}"))?;
+        self.0.wait_for("child PID", 350, |line| {
             let pid = line.strip_prefix("RB_FORK:")?.parse().ok()?;
             (pid != 0).then_some(ProcessCreated { pid })
         })
@@ -162,19 +57,20 @@ impl Console {
         probe: &I386ImageProbe,
         observers: &mut ImageObservers<'_>,
     ) -> HostResult<ProcessExited> {
-        self.machine
+        self.0
+            .machine()
             .set_code_breakpoints(&[CodeBreakpoint::Linear(probe.checkpoint())])?;
-        self.command(&format!(
+        self.0.command(&format!(
             "echo go > {START}; wait \"$p\"; echo RB_EXIT:$p:$?; p="
         ))?;
         let mut mapped_pid = None;
         for _ in 0..600 {
-            match self.pump()? {
+            match self.0.pump()? {
                 StopReason::Breakpoint(hit)
                     if hit.linear == probe.checkpoint() && mapped_pid.is_none() =>
                 {
                     let started = Instant::now();
-                    let image = observers.prepare(&mut self.machine, probe, hit)?;
+                    let image = observers.prepare(self.0.machine(), probe, hit)?;
                     let first_use = started.elapsed();
                     if image.event().pid != child.pid {
                         return Err(format!(
@@ -211,20 +107,20 @@ impl Console {
                         "Live ELF observation and analysis {:?}, cached access {:.1} ns",
                         first_use, cached_ns
                     );
-                    self.machine.set_code_breakpoints(&[])?;
-                    self.machine.stop_handle().reset();
+                    self.0.machine().set_code_breakpoints(&[])?;
+                    self.0.machine().stop_handle().reset();
                 }
                 StopReason::Halted | StopReason::BudgetExhausted => {}
                 stop => return Err(format!("unexpected child stop: {stop:?}").into()),
             }
-            if let Some(exit) = self.lines().find_map(parse_exit) {
+            if let Some(exit) = self.0.lines().find_map(parse_exit) {
                 if mapped_pid != Some(exit.pid)
                     || exit.wait_status != 0
-                    || !self.lines().any(|line| line == MARKER)
+                    || !self.0.lines().any(|line| line == MARKER)
                 {
                     return Err(format!(
                         "guest output or identity mismatch: {mapped_pid:?}, {exit:?}, {:?}",
-                        self.tail()
+                        self.0.tail()
                     )
                     .into());
                 }
@@ -232,15 +128,15 @@ impl Console {
                 return Ok(exit);
             }
         }
-        Err(format!("child did not finish: {:?}", self.tail()).into())
+        Err(format!("child did not finish: {:?}", self.0.tail()).into())
     }
 
     fn restore(&mut self) -> HostResult<()> {
-        self.machine.set_code_breakpoints(&[])?;
-        self.machine.stop_handle().reset();
-        self.command(&format!("if test -n \"$p\"; then kill \"$p\" 2>/dev/null; wait \"$p\" 2>/dev/null; p=; fi; if test -e {ORIGINAL}; then mv -f {ORIGINAL} /bin/cat; fi; rm -f {STAGE} {START}; echo RB_ORIGINAL > /tmp/rb-cat-input; /bin/cat /tmp/rb-cat-input && echo RB_RESTORED; rm -f /tmp/rb-cat-input"))?;
-        self.wait_line("RB_RESTORED")?;
-        self.wait_line("RB_ORIGINAL")
+        self.0.machine().set_code_breakpoints(&[])?;
+        self.0.machine().stop_handle().reset();
+        self.0.command(&format!("if test -n \"$p\"; then kill \"$p\" 2>/dev/null; wait \"$p\" 2>/dev/null; p=; fi; if test -e {ORIGINAL}; then mv -f {ORIGINAL} /bin/cat; fi; rm -f {STAGE} {START}; echo RB_ORIGINAL > /tmp/rb-cat-input; /bin/cat /tmp/rb-cat-input && echo RB_RESTORED; rm -f /tmp/rb-cat-input"))?;
+        self.0.wait_line("RB_RESTORED")?;
+        self.0.wait_line("RB_ORIGINAL")
     }
 }
 
@@ -257,7 +153,7 @@ fn main() -> HostResult<()> {
     let [kernel, initramfs, replacement] = args.as_slice() else {
         return Err("usage: linux_cat BZIMAGE INITRAMFS REPLACEMENT_ELF".into());
     };
-    let mut guest = Console::boot(&fs::read(kernel)?, &fs::read(initramfs)?)?;
+    let mut guest = Replacement(Console::boot(&fs::read(kernel)?, &fs::read(initramfs)?)?);
     // The replacement first reaches the host workflow after the guest is ready.
     let elf = fs::read(replacement)?;
     if elf.is_empty() || elf.len() > 4096 {

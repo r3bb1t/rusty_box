@@ -2,5 +2,8 @@
 
 export PATH=/bin
 stty -echo -onlcr || exit 1
+if [ -x /bin/rb-observe ]; then
+    /bin/busybox mount -t proc proc /proc || exit 1
+fi
 printf 'RB_READY:%s\n' "$(uname -r)"
 exec /bin/sh /dev/console
