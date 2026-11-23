@@ -2982,6 +2982,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         && matches!(
                             &self.memory,
                             crate::memory::execution::ExecutionMemory::Borrowed(_)
+                                | crate::memory::execution::ExecutionMemory::Direct(_)
                         )
                     {
                         let offset = self.rip().wrapping_add(self.eip_page_bias);
@@ -3387,15 +3388,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         {
             return Ok(None);
         }
-        Ok(self
-            .memory
-            .host_mem_range(addr, MemoryAccessType::Execute, policy)?
-            .and_then(|range| {
-                let len = self
-                    .mmio
-                    .direct_len(addr, range.len().min(4096 - addr.page_offset() as usize));
-                (len != 0).then_some(range.start..range.start + len)
-            }))
+        Ok(self.memory.fetch_range(addr, policy)?.and_then(|range| {
+            let len = self
+                .mmio
+                .direct_len(addr, range.len().min(4096 - addr.page_offset() as usize));
+            (len != 0).then_some(range.start..range.start + len)
+        }))
     }
 
     pub(super) fn prefetch(&mut self) -> Result<()> {

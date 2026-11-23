@@ -172,10 +172,7 @@ impl<'a, T: Instrumentation> MemorySession<'a, T> {
     ) -> Result<u64> {
         // A dense partial page starts with backing too. Checking the page
         // base rules it out, as well as any whole sparse RAM/ROM page.
-        if page.page_offset() != 0
-            || !matches!(&self.ctx.memory, ExecutionMemory::Borrowed(mem)
-                if !mem.has_backing_at(page))
-        {
+        if page.page_offset() != 0 || !self.ctx.memory.permits_external_page(page) {
             return Err(CpuError::UnsupportedCpuOperation {
                 operation: "external data page must be aligned and unbacked",
             });

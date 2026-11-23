@@ -5,8 +5,10 @@ use std::time::Instant;
 
 use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::builder::BxCpuBuilder;
+use rusty_box::cpu::instrumentation::ProcessorActivity;
 use rusty_box::cpu::memory_session::{EntryMode, MemorySession, SessionStop};
 use rusty_box::cpu::registers::{EAX, EBX, EIP};
+use rusty_box::memory::direct::{DirectMemory, DirectRegion};
 use rusty_box::memory::flat::FlatMemory;
 use rusty_box::memory::indirect::{IndirectRam, IndirectRamRange};
 use rusty_box::memory::mapped::{MappedMemory, PhysicalRegion, RegionKind};
@@ -14,6 +16,7 @@ use rusty_box::memory::mapped::{MappedMemory, PhysicalRegion, RegionKind};
 const PAGE: usize = 4096;
 const CODE: u32 = 0x1000;
 const DATA: u32 = 0x5000;
+const STACK: u32 = 0x8000;
 const DATA_RANGE: IndirectRamRange = IndirectRamRange {
     start: physical(DATA),
     len: 2 * PAGE as u64,
@@ -180,6 +183,85 @@ fn demonstrate() -> ExampleResult<()> {
     Ok(())
 }
 
+/// This provider owns the three allocations separately. No bytes are moved
+/// into an emulator arena, and the caller can recover them after the session.
+struct SeparateRam {
+    code_and_tables: Box<[u8]>,
+    data: Box<[u8]>,
+    stack: Box<[u8]>,
+    stamps: [[u32; 4]; 3],
+}
+
+impl SeparateRam {
+    fn new() -> Self {
+        Self {
+            code_and_tables: vec![0; 4 * PAGE].into_boxed_slice(),
+            data: vec![0; 2 * PAGE].into_boxed_slice(),
+            stack: vec![0; PAGE].into_boxed_slice(),
+            stamps: [[0; 4]; 3],
+        }
+    }
+
+    fn regions(&mut self) -> [DirectRegion<'_>; 3] {
+        let [code_stamps, data_stamps, stack_stamps] = &mut self.stamps;
+        [
+            DirectRegion {
+                guest_start: physical(0),
+                bytes: &mut self.code_and_tables,
+                stamps: code_stamps,
+                kind: RegionKind::Ram,
+            },
+            DirectRegion {
+                guest_start: physical(DATA),
+                bytes: &mut self.data,
+                stamps: data_stamps,
+                kind: RegionKind::Ram,
+            },
+            DirectRegion {
+                guest_start: physical(STACK),
+                bytes: &mut self.stack,
+                stamps: stack_stamps,
+                kind: RegionKind::Ram,
+            },
+        ]
+    }
+}
+
+fn demonstrate_direct() -> ExampleResult<()> {
+    let mut provider = SeparateRam::new();
+    let mut cpu = BxCpuBuilder::new().build()?;
+    {
+        let mut regions = provider.regions();
+        let mut memory = DirectMemory::new(&mut regions)?;
+        let mut session = MemorySession::new(&mut cpu, memory.loan());
+        session.reset_at(EntryMode::Protected32, CODE, STACK + PAGE as u32)?;
+        session.memory().write_phys(
+            physical(CODE),
+            &[
+                0xA1, 0, 0x50, 0, 0,    // mov eax,[0x5000]
+                0x40, // inc eax
+                0x50, // push eax (independent stack)
+                0x5B, // pop ebx
+                0x89, 0x1D, 4, 0x50, 0, 0,    // mov [0x5004],ebx
+                0xF4, // hlt
+            ],
+        )?;
+        session
+            .memory()
+            .write_phys(physical(DATA), &41u32.to_le_bytes())?;
+        let run = session.run_controlled(32);
+        assert!(matches!(
+            run.stop,
+            SessionStop::Inactive(ProcessorActivity::Halted)
+        ));
+        assert_eq!(session.regs().read(EBX), 42);
+    }
+    assert_eq!(&provider.data[4..8], &42u32.to_le_bytes());
+    assert_eq!(&provider.stack[PAGE - 4..], &42u32.to_le_bytes());
+    println!("Direct memory executed with independent code, data, and stack allocations");
+    Ok(())
+}
+
 fn benchmark() -> ExampleResult<()> {
     let count = std::env::var("RB_MEMORY_COUNT")
         .ok()
@@ -194,13 +276,24 @@ fn benchmark() -> ExampleResult<()> {
     let mut cpu = BxCpuBuilder::new().build()?;
     let mut lanes = ByteLanes::new();
     let mut copy = CopyRam([0; 2 * PAGE]);
-    let names = ["dense", "mapped", "indirect copy", "indirect byte lanes"];
-    let mut samples = [[0.0; 4]; 7];
+    let mut separate = SeparateRam::new();
+    let names = [
+        "dense",
+        "mapped",
+        "indirect copy",
+        "indirect byte lanes",
+        "multi-backing direct",
+    ];
+    let mut samples = [[0.0; 5]; 7];
     for (round, times) in samples.iter_mut().enumerate() {
-        for position in 0..4 {
-            let mode = (round + position) % 4;
+        for position in 0..names.len() {
+            let mode = (round + position) % names.len();
             if mode == 0 {
                 let mut direct = FlatMemory::new(&mut arena, &mut stamps)?;
+                times[mode] = measure(&mut MemorySession::new(&mut cpu, direct.loan()), count)?;
+            } else if mode == 4 {
+                let mut regions = separate.regions();
+                let mut direct = DirectMemory::new(&mut regions)?;
                 times[mode] = measure(&mut MemorySession::new(&mut cpu, direct.loan()), count)?;
             } else {
                 let regions = if mode == 1 { &DIRECT[..] } else { &DIRECT[..1] };
@@ -228,7 +321,8 @@ fn benchmark() -> ExampleResult<()> {
 fn main() -> ExampleResult<()> {
     match std::env::args().nth(1).as_deref() {
         None => demonstrate(),
+        Some("--direct") => demonstrate_direct(),
         Some("--bench") => benchmark(),
-        _ => Err("usage: external_ram [--bench]".into()),
+        _ => Err("usage: external_ram [--direct|--bench]".into()),
     }
 }

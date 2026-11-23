@@ -25,10 +25,11 @@ use crate::emulator::PcIo;
 use crate::iodev::BxDevicesC;
 use crate::iodev::devices::DeviceManager;
 use crate::memory::BxMemC;
+use crate::memory::direct::DirectOffset;
 use crate::memory::execution::ExecutionMemory;
 #[cfg(test)]
 use crate::memory::flat::FlatMemory;
-use crate::memory::mapped::MemoryLoan;
+use crate::memory::mapped::{LoanBacking, MemoryLoan};
 use crate::pc_system::BxPcSystemC;
 
 /// One CPU plus the machine it is executing against.
@@ -38,13 +39,14 @@ pub(crate) struct ExecCtx<'a, T: Instrumentation> {
     /// property the raw `mem_bus` pointer existed to fake.
     pub(crate) memory: ExecutionMemory<'a>,
     pub(crate) hardware: Hardware<'a>,
-    /// Guest RAM as one host slice, or null when residency is partial. The
-    /// data TLB measures its cached page offsets from here.
+    /// Guest RAM as one host slice, or null when it is split or only partly
+    /// resident. Untagged data TLB offsets are measured from this base.
     pub(crate) mem_host_base: *mut u8,
     pub(crate) mem_host_len: usize,
     /// The whole memory allocation — guest RAM, ROM and the bogus page. The
-    /// instruction TLB, the fetch window and the VMCB measure from here,
-    /// because fetch also runs out of ROM and out of relocated blocks.
+    /// VMCB and untagged instruction cache coordinates measure from here,
+    /// because fetch also runs out of ROM and out of relocated blocks. This
+    /// base is null for independently backed loans.
     pub(crate) mem_alloc_base: *mut u8,
     pub(super) pending_scalar_io: Option<super::memory_session::scalar_io::PendingScalarIo>,
     pub(super) external_scalar: Option<super::memory_session::ExternalScalar>,
@@ -135,8 +137,11 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
 
     pub(super) fn borrowed(cpu: &'a mut BxCpuC<T>, memory: MemoryLoan<'a>) -> Self {
         cpu.slice_clock = super::cpu::SliceClock::Detached;
-        let ctx =
-            Self::assemble::<false>(cpu, ExecutionMemory::Borrowed(memory.0), Hardware::CpuOnly);
+        let memory = match memory.0 {
+            LoanBacking::Arena(mem) => ExecutionMemory::Borrowed(mem),
+            LoanBacking::Direct(mem) => ExecutionMemory::Direct(mem),
+        };
+        let ctx = Self::assemble::<false>(cpu, memory, Hardware::CpuOnly);
         ctx.cpu.smc_seq_seen = ctx.memory.smc_seq_next();
         ctx
     }
@@ -144,9 +149,12 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
     /// Reborrow the private CPU and fixed dense allocation of a CpuEmulator.
     /// The owner keeps the code-write queue alive across these short loans.
     #[cfg(feature = "alloc")]
-    pub(super) fn owned_flat(cpu: &'a mut BxCpuC<T>, memory: MemoryLoan<'a>) -> Self {
+    pub(super) fn owned_flat(
+        cpu: &'a mut BxCpuC<T>,
+        memory: crate::memory::flat::FlatParts<'a>,
+    ) -> Self {
         cpu.slice_clock = super::cpu::SliceClock::Detached;
-        Self::assemble::<true>(cpu, ExecutionMemory::Borrowed(memory.0), Hardware::CpuOnly)
+        Self::assemble::<true>(cpu, ExecutionMemory::Borrowed(memory), Hardware::CpuOnly)
     }
 
     /// R3/R5: both profiles adopt backing and residency through this one door.
@@ -168,9 +176,13 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
                 let len = mem.bytes.len();
                 (base, len, base, len)
             }
+            ExecutionMemory::Direct(_) => (core::ptr::null_mut(), 0, core::ptr::null_mut(), 0),
         };
         cpu.adopt_backing(
             match &memory {
+                ExecutionMemory::Direct(_) => {
+                    super::cpu::CacheBacking::flat(mem_alloc_base, alloc_len)
+                }
                 ExecutionMemory::Borrowed(_) if !REUSE_DENSE => {
                     super::cpu::CacheBacking::flat(mem_alloc_base, alloc_len)
                 }
@@ -264,13 +276,38 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
     /// which is exactly what they must do.
     #[inline(always)]
     pub(super) fn fetch_window_bytes<'w>(&self) -> Option<&'w [u8]> {
-        let base = self.mem_alloc_base;
         self.eip_fetch_window.map(|w| {
+            let ptr = if let Some(offset) = DirectOffset::decode(w.start) {
+                self.memory.fetch_ptr(offset)
+            } else {
+                self.mem_alloc_base.wrapping_add(w.start)
+            };
             // SAFETY: the window is only ever set from a live directly-mapped
             // span, and `revalidate_allocation_caches` retires it whenever the
-            // residency epoch moves, so the span still names those bytes.
-            unsafe { core::slice::from_raw_parts(base.wrapping_add(w.start), w.len) }
+            // residency epoch moves. Direct loans also discard it on every
+            // bind, and their coordinate resolves within the same slice.
+            unsafe { core::slice::from_raw_parts(ptr, w.len) }
         })
+    }
+
+    /// Resolve a current DTLB entry directly against its original backing.
+    #[inline(always)]
+    pub(super) fn cached_ram_ptr(&mut self, page: Option<super::tlb::RamPage>) -> *mut u8 {
+        let base = self.mem_host_base;
+        if base.is_null() {
+            self.region_ram_ptr(page)
+        } else {
+            super::tlb::host_page_ptr(base, page)
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn region_ram_ptr(&mut self, page: Option<super::tlb::RamPage>) -> *mut u8 {
+        let Some(offset) = page.and_then(|page| DirectOffset::decode(page.ram_offset())) else {
+            unreachable!("a cached RAM page without a primary base must name a direct region");
+        };
+        self.memory.ram_ptr(offset)
     }
 
     /// CPU and memory are disjoint in both profiles. No PC borrow is needed.
@@ -295,7 +332,7 @@ impl<'a, T: Instrumentation> ExecCtx<'a, T> {
                     cpu: self.cpu,
                     io: PcIo::new(memory, devices, device_manager, pc_system),
                 }),
-                ExecutionMemory::Borrowed(_) => None,
+                ExecutionMemory::Borrowed(_) | ExecutionMemory::Direct(_) => None,
             },
             Hardware::CpuOnly => None,
         }

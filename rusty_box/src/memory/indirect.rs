@@ -43,6 +43,30 @@ pub(super) struct IndirectRamLoan<'a> {
 impl core::panic::RefUnwindSafe for IndirectRamLoan<'_> {}
 
 impl IndirectRamLoan<'_> {
+    #[cold]
+    pub(super) fn read(ram: Option<&mut Self>, addr: BxPhyAddress, out: &mut [u8]) -> bool {
+        let Some(ram) = ram else { return false };
+        let Some(offset) = ram.offset(addr, out.len()) else {
+            return false;
+        };
+        if !out.is_empty() {
+            ram.ram.read(offset, out);
+        }
+        true
+    }
+
+    #[cold]
+    pub(super) fn write(ram: Option<&mut Self>, addr: BxPhyAddress, data: &[u8]) -> bool {
+        let Some(ram) = ram else { return false };
+        let Some(offset) = ram.offset(addr, data.len()) else {
+            return false;
+        };
+        if !data.is_empty() {
+            ram.ram.write(offset, data);
+        }
+        true
+    }
+
     pub(super) fn reborrow(&mut self) -> IndirectRamLoan<'_> {
         IndirectRamLoan {
             start: self.start,

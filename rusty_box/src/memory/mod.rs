@@ -1,4 +1,5 @@
 pub(crate) mod code_writes;
+pub mod direct;
 mod error;
 pub(crate) mod execution;
 pub mod flat;

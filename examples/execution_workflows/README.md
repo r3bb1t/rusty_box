@@ -12,7 +12,9 @@ A reusable process integration adds handlers to an existing builder using a narr
 
 ## Lend custom RAM to the x86 interpreter
 
-`external_ram` implements a RAM range using two independent byte lanes. A real paged x86 workload writes and reads those bytes through `MemorySession`. The demonstration replaces warm direct backing, checks that a host code write invalidates a cached instruction, reads across two provider pages, and verifies that instruction fetch requires direct backing.
+Run `external_ram --direct` for a downstream provider that owns separate code, data, and stack allocations. The guest uses all three and the caller verifies its stores after the session ends. The provider constructs a `DirectMemory` map by lending the existing slices and one stamp per 4 KiB page. [Direct memory contract](../../docs/vnext/direct-x86-backing.md)
+
+Run `external_ram` without arguments to see indirect data RAM implemented with two independent byte lanes. A real paged x86 workload writes and reads those bytes through `MemorySession`. The demonstration replaces warm direct backing, checks that a host code write invalidates a cached instruction, reads across two provider pages, and verifies that instruction fetch requires direct backing.
 
 With an initialized CPU, a flat or mapped `direct` backing, and a provider `ram` that implements `IndirectRam`, attach the provider for one session.
 
@@ -29,10 +31,11 @@ let run = session.run_controlled(16);
 
 ```sh
 cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin external_ram
+cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin external_ram -- --direct
 cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin external_ram -- --bench
 ```
 
-The benchmark uses the same guest code and virtual addresses for dense, mapped, indirect-copy, and byte-lane memory. `RB_MEMORY_COUNT` sets dispatches per sample. [Memory contracts and implementation comparison](../../docs/vnext/external-memory-providers.md)
+The benchmark rotates dense, mapped, multi-backing direct, indirect-copy, and byte-lane memory through the same paged guest loop. `RB_MEMORY_COUNT` sets dispatches per sample. [Memory contracts and implementation comparison](../../docs/vnext/direct-x86-backing.md)
 
 ## Sample Linux tasks from the emulator host
 

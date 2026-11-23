@@ -6,6 +6,7 @@
 
 use core::ops::Range;
 
+use super::direct::DirectParts;
 use super::flat::{FlatMemory, FlatMemoryError, FlatParts};
 use super::indirect::{IndirectRam, IndirectRamError, IndirectRamLoan, IndirectRamRange};
 use crate::config::BxPhyAddress;
@@ -99,16 +100,25 @@ impl<'a> MappedMemory<'a> {
     pub fn loan(&mut self) -> MemoryLoan<'_> {
         let mut parts = self.arena.parts();
         parts.regions = Some(self.regions);
-        MemoryLoan(parts)
+        MemoryLoan(LoanBacking::Arena(parts))
     }
 }
 
 /// Checked storage borrowed for one execution session. Created by
-/// [`MappedMemory::loan`] or [`FlatMemory::loan`].
-pub struct MemoryLoan<'a>(pub(crate) FlatParts<'a>);
+/// [`MappedMemory::loan`], [`FlatMemory::loan`] or
+/// [`DirectMemory::loan`](super::direct::DirectMemory::loan).
+pub struct MemoryLoan<'a>(pub(crate) LoanBacking<'a>);
+
+// The direct table stays inline so lending needs neither an allocator nor
+// a provider call when resolving cached coordinates.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum LoanBacking<'a> {
+    Arena(FlatParts<'a>),
+    Direct(DirectParts<'a>),
+}
 
 impl<'a> MemoryLoan<'a> {
-    /// Add one disjoint data RAM range to a flat or mapped memory loan.
+    /// Add one disjoint data RAM range to a memory loan.
     /// Indirect RAM participates in ordinary data accesses and page-table
     /// walks. Fetch and direct caching require a window in the original map.
     /// The provider stays exclusively borrowed until the loan is released.
@@ -130,7 +140,11 @@ impl<'a> MemoryLoan<'a> {
         range: IndirectRamRange,
         ram: &'a mut R,
     ) -> Result<Self, IndirectRamError> {
-        if self.0.indirect.is_some() {
+        let attached = match &self.0 {
+            LoanBacking::Arena(mem) => mem.indirect.is_some(),
+            LoanBacking::Direct(mem) => mem.indirect.is_some(),
+        };
+        if attached {
             return Err(IndirectRamError::AlreadyAttached);
         }
         let start = range.start;
@@ -140,18 +154,27 @@ impl<'a> MemoryLoan<'a> {
         if range.len == 0 || start.page_offset() != 0 || end.page_offset() != 0 {
             return Err(IndirectRamError::InvalidRange);
         }
-        let overlap = match self.0.regions {
-            Some(regions) => regions.iter().any(|region| {
-                // MappedMemory validated this end before creating the loan.
-                let region_end = region.guest_start.wrapping_add(region.len as u64);
-                region.guest_start < end && start < region_end
-            }),
-            None => start.get() < self.0.bytes.len() as u64,
+        let (indirect, overlap) = match &mut self.0 {
+            LoanBacking::Arena(mem) => {
+                let overlap = match mem.regions {
+                    Some(regions) => regions.iter().any(|region| {
+                        // MappedMemory validated this end before creating the loan.
+                        let region_end = region.guest_start.wrapping_add(region.len as u64);
+                        region.guest_start < end && start < region_end
+                    }),
+                    None => start.get() < mem.bytes.len() as u64,
+                };
+                (&mut mem.indirect, overlap)
+            }
+            LoanBacking::Direct(mem) => {
+                let overlap = mem.overlaps(start, end);
+                (&mut mem.indirect, overlap)
+            }
         };
         if overlap {
             return Err(IndirectRamError::Overlap);
         }
-        self.0.indirect = Some(IndirectRamLoan { start, end, ram });
+        *indirect = Some(IndirectRamLoan { start, end, ram });
         Ok(self)
     }
 }

@@ -1494,9 +1494,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // Bochs stores hostPageAddr in each TLB entry so subsequent accesses
         // bypass the `get_host_mem_addr` slow path. Pages with MMIO handlers
         // (VGA 0xA0000-0xBFFFF) or ROM get `NO_DIRECT_ACCESS`.
-        let host_page = self
-            .direct_ram_span(self.apply_a20(ppf), 4096)
-            .and_then(|span| super::tlb::RamPage::from_ram_offset(span.start));
+        let physical_page = self.apply_a20(ppf);
+        let host_page = if self.mem_host_base.is_null()
+            && self.mmio.is_empty()
+            && !self.lapic.is_selected(physical_page)
+        {
+            self.memory.direct_ram_page(physical_page)
+        } else {
+            self.direct_ram_span(physical_page, 4096)
+                .and_then(|span| super::tlb::RamPage::from_ram_offset(span.start))
+        };
 
         {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);

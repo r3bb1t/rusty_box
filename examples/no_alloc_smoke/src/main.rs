@@ -13,8 +13,9 @@ use rusty_box::emulator::hardware::{
     MmioWindow, MmioWrite, PcAttachment, PcDevice, PcDeviceAttachError, RegisterWindow,
     SubscriberError, Subscriptions, WindowOffset, WindowPair,
 };
+use rusty_box::memory::direct::{DirectMemory, DirectRegion};
 use rusty_box::memory::indirect::{IndirectRam, IndirectRamRange};
-use rusty_box::memory::mapped::{MappedMemory, PhysicalRegion, RegionKind};
+use rusty_box::memory::mapped::RegionKind;
 use rusty_box::memory::mmio::{MmioAttachError, MmioDevice};
 
 fn consume<T>(_value: T) {}
@@ -36,15 +37,25 @@ impl IndirectRam for StackRam {
 // This target checks that both the public map and its execution entry point
 // compile with allocation disabled. The host selects and places the CPU.
 fn execute(cpu: &mut BxCpuC) -> rusty_box::Result<SessionRun> {
-    let mut bytes = [0; 4096];
-    let mut stamps = [0; 1];
-    let regions = [PhysicalRegion {
-        guest_start: BxPhyAddress::new(0x1000),
-        arena_offset: 0,
-        len: bytes.len(),
-        kind: RegionKind::Ram,
-    }];
-    let mut memory = MappedMemory::new(&mut bytes, &mut stamps, &regions).unwrap();
+    let mut code = [0; 4096];
+    let mut stack = [0; 4096];
+    let mut code_stamps = [0];
+    let mut stack_stamps = [0];
+    let mut regions = [
+        DirectRegion {
+            guest_start: BxPhyAddress::new(0x1000),
+            bytes: &mut code,
+            stamps: &mut code_stamps,
+            kind: RegionKind::Ram,
+        },
+        DirectRegion {
+            guest_start: BxPhyAddress::new(0x3000),
+            bytes: &mut stack,
+            stamps: &mut stack_stamps,
+            kind: RegionKind::Ram,
+        },
+    ];
+    let mut memory = DirectMemory::new(&mut regions).unwrap();
     let mut independent = StackRam([0; 4096]);
     let range = IndirectRamRange {
         start: BxPhyAddress::new(0x2000),
@@ -55,16 +66,16 @@ fn execute(cpu: &mut BxCpuC) -> rusty_box::Result<SessionRun> {
         .with_indirect_ram(range, &mut independent)
         .unwrap();
     let mut session = MemorySession::new(cpu, loan);
-    session.reset_at(EntryMode::Real16, 0x1000, 0x1FF0)?;
+    session.reset_at(EntryMode::Real16, 0x1000, 0x3FF0)?;
     session.regs().write(AX, 0x42);
     session
         .memory()
         .write_phys(BxPhyAddress::new(0x1000), &[0xA0, 0x00, 0x20])?; // mov al,[0x2000]
     session.write_ram(BxPhyAddress::new(0x2000), &[0x12])?;
-    let mut code = [0];
+    let mut opcode = [0];
     session
         .memory()
-        .read_phys(BxPhyAddress::new(0x1000), &mut code)?;
+        .read_phys(BxPhyAddress::new(0x1000), &mut opcode)?;
     Ok(session.step())
 }
 

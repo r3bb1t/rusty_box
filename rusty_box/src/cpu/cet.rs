@@ -349,7 +349,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let lpf = laddr.page_base();
         let host_ptr: Option<*mut u64> = {
             let tlb = self.dtlb.entry_of(laddr, 7);
-            if tlb.lpf == lpf && tlb.host_page.is_some() {
+            if tlb.lpf == lpf && tlb.host_page.is_some() && !self.mem_host_base.is_null() {
                 let byte_ptr = super::access::host_at_page_offset_mut(
                     super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page),
                     laddr,
@@ -378,8 +378,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.smc_write_check(paddr, 8);
             Ok(ok)
         } else {
-            // MMIO-backed SS page (not a real architectural case). Fall back to
-            // the Bochs sequenced RMW — no better option for non-RAM targets.
+            // Use the sequenced RMW for MMIO or exclusively lent RAM without
+            // a compatible host atomic slot.
             let val = self.mem_read_qword(paddr);
             if val == expected {
                 self.mem_write_qword(paddr, new_val);

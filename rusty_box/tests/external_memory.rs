@@ -7,6 +7,7 @@ use rusty_box::cpu::memory_session::{
     MemorySession, PhysicalOperation, PhysicalRequest, PhysicalResponse,
 };
 use rusty_box::cpu::{BxCpuC, CpuError, ResetReason};
+use rusty_box::memory::direct::{DirectMapError, DirectMemory, DirectRegion};
 use rusty_box::memory::indirect::{IndirectRam, IndirectRamError, IndirectRamRange};
 use rusty_box::memory::mapped::{MappedMemory, MemoryMapError, PhysicalRegion, RegionKind};
 
@@ -799,4 +800,260 @@ fn indirect_aperture_must_be_disjoint_page_aligned_and_unique() {
         loan.with_indirect_ram(range, &mut other).err(),
         Some(IndirectRamError::AlreadyAttached)
     );
+}
+
+/// Own one allocation per window with deliberately unaligned host starts.
+struct SeparateBoard {
+    bytes: [Vec<u8>; PAGED_MAP.len()],
+    stamps: [[u32; 1]; PAGED_MAP.len()],
+}
+
+impl SeparateBoard {
+    fn new(board: SparseBoard<9>) -> Self {
+        Self {
+            bytes: PAGED_MAP.map(|region| {
+                let mut bytes = vec![0; PAGE + 1];
+                bytes[1..]
+                    .copy_from_slice(&board.arena[region.arena_offset..region.arena_offset + PAGE]);
+                bytes
+            }),
+            stamps: [[0]; PAGED_MAP.len()],
+        }
+    }
+
+    fn regions(&mut self) -> [DirectRegion<'_>; PAGED_MAP.len()] {
+        let mut bytes = self.bytes.iter_mut();
+        let mut stamps = self.stamps.iter_mut();
+        PAGED_MAP.map(|region| DirectRegion {
+            guest_start: region.guest_start,
+            bytes: &mut bytes.next().unwrap()[1..],
+            stamps: stamps.next().unwrap(),
+            kind: region.kind,
+        })
+    }
+}
+
+#[test]
+fn direct_regions_fetch_and_invalidate_code_after_guest_and_host_writes() {
+    use rusty_box::cpu::registers::EIP;
+
+    let mut board = paged_board(&[
+        0xC6, 0x05, 1, 0x70, 0, 0, 0x11, // mov byte [0x7001],0x11 (fill DTLB)
+        0x31, 0xC0, // xor eax,eax
+        0xE8, 0xF2, 0x5E, 0, 0, // call 0x7000 (warm ITLB and instruction cache)
+        0xC6, 0x05, 1, 0x70, 0, 0, 0x22, // mov byte [0x7001],0x22 (warm DTLB)
+        0xE8, 0xE6, 0x5E, 0, 0, // call 0x7000
+        0xF4,
+    ]);
+    board.put(6, 0, &[0xB8, 0x11, 0, 0, 0, 0xC3]); // mov eax,0x11; ret
+    let mut board = SeparateBoard::new(board);
+    let mut cpu = cpu();
+    {
+        let mut regions = board.regions();
+        let mut map = DirectMemory::new(&mut regions).unwrap();
+        let mut session = MemorySession::new(&mut cpu, map.loan());
+        run_to(&mut session, 0x1100);
+        assert_eq!(session.run(5).unwrap(), 5);
+        assert_eq!(session.cpu().rax(), 0x11);
+        assert_eq!(session.run(4).unwrap(), 4);
+        assert_eq!(session.cpu().rax(), 0x22);
+        session
+            .memory()
+            .write_phys(BxPhyAddress::new(0x7001), &[0x33])
+            .unwrap();
+        session.regs().write(EIP, 0x7000);
+        assert_eq!(session.run(1).unwrap(), 1);
+        assert_eq!(session.cpu().rax(), 0x33);
+    }
+    assert_eq!(board.bytes[5][2], 0x33);
+
+    // Substitute a completely different allocation at the same GPA. Keep
+    // the former allocation alive to rule out allocator address reuse.
+    let mut replacement = vec![0; PAGE + 1];
+    replacement[1..7].copy_from_slice(&[0xB8, 0x44, 0, 0, 0, 0xC3]);
+    let mut replacement_stamps = [0];
+    let mut regions = board.regions();
+    regions[5].bytes = &mut replacement[1..];
+    regions[5].stamps = &mut replacement_stamps;
+    let mut map = DirectMemory::new(&mut regions).unwrap();
+    let mut session = MemorySession::new(&mut cpu, map.loan());
+    session.regs().write(EIP, 0x7000);
+    assert_eq!(session.run(1).unwrap(), 1);
+    assert_eq!(session.cpu().rax(), 0x44);
+}
+
+#[test]
+fn direct_regions_page_walk_updates_and_remap_preserve_tlb_rules() {
+    use rusty_box::cpu::registers::EIP;
+
+    let mut board = paged_board(&[
+        0xC7, 0x05, 0, 0x70, 0, 0, 0x11, 0, 0, 0, // mov dword [0x7000],0x11
+        0xFF, 0x05, 0, 0x70, 0, 0, // inc dword [0x7000] (RMW on unaligned host bank)
+        0xA1, 0, 0x70, 0, 0, // mov eax,[0x7000]
+    ]);
+    board.put(5, 0, &0xAABB_CCDDu32.to_le_bytes());
+    let mut board = SeparateBoard::new(board);
+    let mut cpu = cpu();
+    let mut regions = board.regions();
+    let mut map = DirectMemory::new(&mut regions).unwrap();
+    let mut session = MemorySession::new(&mut cpu, map.loan());
+    run_to(&mut session, 0x1100);
+    assert_eq!(session.run(3).unwrap(), 3);
+    assert_eq!(session.cpu().rax(), 0x12);
+    let mut leaf = [0; 4];
+    session
+        .memory()
+        .read_phys(BxPhyAddress::new(0x501C), &mut leaf)
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(leaf), 0x7063);
+
+    session
+        .memory()
+        .write_phys(BxPhyAddress::new(0x501C), &0x6003u32.to_le_bytes())
+        .unwrap();
+    session.regs().write(EIP, 0x1110);
+    assert_eq!(session.run(1).unwrap(), 1);
+    assert_eq!(session.cpu().rax(), 0x12); // the old cached physical page
+    session.invalidate_translations();
+    session.regs().write(EIP, 0x1110);
+    assert_eq!(session.run(1).unwrap(), 1);
+    assert_eq!(session.cpu().rax(), 0xAABB_CCDD);
+
+    // A checked host access never straddles two independently backed pages.
+    assert!(
+        session
+            .memory()
+            .read_phys(BxPhyAddress::new(0x6FFF), &mut [0; 2])
+            .is_err()
+    );
+    assert!(
+        session
+            .memory()
+            .write_phys(BxPhyAddress::new(RESET), &[1])
+            .is_err()
+    );
+    assert!(
+        session
+            .memory()
+            .read_phys(BxPhyAddress::new(0x2000), &mut [0])
+            .is_err()
+    );
+}
+
+#[test]
+fn direct_regions_fetch_instruction_split_across_two_allocations() {
+    use rusty_box::cpu::registers::EIP;
+    let mut board = paged_board(&[]);
+    board.put(5, PAGE - 2, &[0xB8, 0x11]); // mov eax,0x44332211 across 0x6fff
+    board.put(6, 0, &[0x22, 0x33, 0x44, 0xF4]);
+    let mut board = SeparateBoard::new(board);
+    let mut cpu = cpu();
+    let mut regions = board.regions();
+    let mut map = DirectMemory::new(&mut regions).unwrap();
+    let mut session = MemorySession::new(&mut cpu, map.loan());
+    run_to(&mut session, 0x1100);
+    session.regs().write(EIP, 0x6FFE);
+    assert_eq!(session.run(1).unwrap(), 1);
+    assert_eq!(session.cpu().rax(), 0x4433_2211);
+    assert_eq!(session.cpu().rip(), 0x7003);
+    session
+        .memory()
+        .write_phys(BxPhyAddress::new(0x7000), &[0xAA])
+        .unwrap();
+    session.regs().write(EIP, 0x6FFE);
+    assert_eq!(session.run(1).unwrap(), 1);
+    assert_eq!(session.cpu().rax(), 0x4433_AA11);
+}
+
+#[test]
+fn direct_regions_validate_boundaries_and_indirect_overlap() {
+    let (mut partial_page, mut missing_stamps) = ([0; PAGE + 1], []);
+    let mut invalid = [DirectRegion {
+        guest_start: BxPhyAddress::new(0),
+        bytes: &mut partial_page,
+        stamps: &mut missing_stamps,
+        kind: RegionKind::Ram,
+    }];
+    assert_eq!(
+        DirectMemory::new(&mut invalid).err(),
+        Some(DirectMapError::InvalidRegion { index: 0 })
+    );
+    let mut insufficient = [DirectRegion {
+        guest_start: BxPhyAddress::new(0),
+        bytes: &mut partial_page[..PAGE],
+        stamps: &mut missing_stamps,
+        kind: RegionKind::Ram,
+    }];
+    assert_eq!(
+        DirectMemory::new(&mut insufficient).err(),
+        Some(DirectMapError::StampStorage {
+            index: 0,
+            required: 1,
+            provided: 0,
+        })
+    );
+
+    let mut board = SeparateBoard::new(paged_board(&[]));
+    let mut regions = board.regions();
+    assert_eq!(
+        DirectMemory::new(&mut []).err(),
+        Some(DirectMapError::RegionCount {
+            max: DirectMemory::MAX_REGIONS
+        })
+    );
+    regions[1].guest_start = regions[0].guest_start;
+    assert_eq!(
+        DirectMemory::new(&mut regions).err(),
+        Some(DirectMapError::GuestOrder { index: 1 })
+    );
+    regions[1].guest_start = BxPhyAddress::new(0x3001);
+    assert_eq!(
+        DirectMemory::new(&mut regions).err(),
+        Some(DirectMapError::InvalidRegion { index: 1 })
+    );
+    regions[1].guest_start = BxPhyAddress::new(0x3000);
+    regions[PAGED_MAP.len() - 1].guest_start = BxPhyAddress::new(u64::MAX - 4095);
+    assert_eq!(
+        DirectMemory::new(&mut regions).err(),
+        Some(DirectMapError::InvalidRegion {
+            index: PAGED_MAP.len() - 1
+        })
+    );
+    regions[PAGED_MAP.len() - 1].guest_start = BxPhyAddress::new(RESET);
+    let mut map = DirectMemory::new(&mut regions).unwrap();
+    let mut indirect = TableRam([0; 2 * PAGE]);
+    assert_eq!(
+        map.loan()
+            .with_indirect_ram(
+                IndirectRamRange {
+                    start: BxPhyAddress::new(0x2000),
+                    len: 2 * PAGE as u64,
+                },
+                &mut indirect
+            )
+            .err(),
+        Some(IndirectRamError::Overlap)
+    );
+    let loan = map
+        .loan()
+        .with_indirect_ram(
+            IndirectRamRange {
+                start: BxPhyAddress::new(0x2000),
+                len: PAGE as u64,
+            },
+            &mut indirect,
+        )
+        .unwrap();
+    let mut cpu = cpu();
+    let mut session = MemorySession::new(&mut cpu, loan);
+    session
+        .memory()
+        .write_phys(BxPhyAddress::new(0x2000), &[42])
+        .unwrap();
+    let mut out = [0];
+    session
+        .memory()
+        .read_phys(BxPhyAddress::new(0x2000), &mut out)
+        .unwrap();
+    assert_eq!(out, [42]);
 }

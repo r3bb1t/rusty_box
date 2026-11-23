@@ -81,7 +81,7 @@ impl<'ram> FlatMemory<'ram> {
 
     /// Lend the dense physical map and its code stamps to an x86 session.
     pub fn loan(&mut self) -> super::mapped::MemoryLoan<'_> {
-        super::mapped::MemoryLoan(self.parts())
+        super::mapped::MemoryLoan(super::mapped::LoanBacking::Arena(self.parts()))
     }
 
     pub(super) fn parts(&mut self) -> FlatParts<'_> {
@@ -122,37 +122,17 @@ impl<'a> FlatParts<'a> {
         }
     }
 
-    pub(crate) fn has_backing_at(&self, addr: BxPhyAddress) -> bool {
+    pub(super) fn has_backing_at(&self, addr: BxPhyAddress) -> bool {
         self.span_from(addr, false).is_some()
             || self.indirect.as_ref().is_some_and(|ram| ram.contains(addr))
     }
 
-    #[cold]
     pub(super) fn read_indirect(&mut self, addr: BxPhyAddress, out: &mut [u8]) -> bool {
-        let Some(ram) = &mut self.indirect else {
-            return false;
-        };
-        let Some(offset) = ram.offset(addr, out.len()) else {
-            return false;
-        };
-        if !out.is_empty() {
-            ram.ram.read(offset, out);
-        }
-        true
+        IndirectRamLoan::read(self.indirect.as_mut(), addr, out)
     }
 
-    #[cold]
     pub(super) fn write_indirect(&mut self, addr: BxPhyAddress, data: &[u8]) -> bool {
-        let Some(ram) = &mut self.indirect else {
-            return false;
-        };
-        let Some(offset) = ram.offset(addr, data.len()) else {
-            return false;
-        };
-        if !data.is_empty() {
-            ram.ram.write(offset, data);
-        }
-        true
+        IndirectRamLoan::write(self.indirect.as_mut(), addr, data)
     }
 
     /// Offsets in the arena, not in guest address space.

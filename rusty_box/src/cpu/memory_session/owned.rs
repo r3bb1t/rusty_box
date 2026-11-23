@@ -11,7 +11,6 @@ use crate::memory::MemoryError;
 use crate::memory::code_writes::CodeWrites;
 use crate::memory::execution::ExecutionMemory;
 use crate::memory::flat::{FlatMemory, FlatParts};
-use crate::memory::mapped::MemoryLoan;
 
 /// Firmware-free x86 execution with owned dense RAM and the real interpreter.
 ///
@@ -96,11 +95,7 @@ impl<T: Instrumentation> CpuEmulator<T> {
     }
 
     fn with_session<R>(&mut self, use_session: impl FnOnce(&mut MemorySession<'_, T>) -> R) -> R {
-        let memory = MemoryLoan(FlatParts::dense(
-            &mut self.ram,
-            &mut self.stamps,
-            &mut self.writes,
-        ));
+        let memory = FlatParts::dense(&mut self.ram, &mut self.stamps, &mut self.writes);
         let mut ctx = ExecCtx::owned_flat(&mut self.cpu, memory);
         ctx.pending_scalar_io = self.pending.take();
         let mut session = MemorySession { ctx };

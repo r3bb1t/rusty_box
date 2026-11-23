@@ -65,7 +65,8 @@ impl RamPage {
         core::num::NonZeroUsize::new(offset.wrapping_add(1)).map(Self)
     }
 
-    /// Byte offset of this page into the RAM allocation.
+    /// Byte offset into the RAM allocation, or a tagged region coordinate
+    /// for an independently backed memory loan.
     #[inline(always)]
     pub(crate) fn ram_offset(self) -> usize {
         self.0.get() - 1
@@ -107,7 +108,8 @@ impl AllocPage {
         core::num::NonZeroUsize::new(offset.wrapping_add(1)).map(Self)
     }
 
-    /// Byte offset of this page into the memory allocation.
+    /// Byte offset into the memory allocation, or a tagged region coordinate
+    /// for an independently backed memory loan.
     #[inline(always)]
     pub(crate) fn alloc_offset(self) -> usize {
         self.0.get() - 1
@@ -131,7 +133,7 @@ impl CachedHostPage for AllocPage {
 /// legitimately stops short of a page.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct FetchWindow {
-    /// Byte offset of the first fetchable byte within the allocation.
+    /// Backing coordinate of the first fetchable byte.
     pub(crate) start: usize,
     /// How many bytes may be fetched from `start` without refilling.
     pub(crate) len: usize,

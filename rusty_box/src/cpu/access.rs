@@ -1958,8 +1958,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             && tlb.host_page.is_some()
         {
             let paddr_hit = tlb.ppf.at_page_offset(laddr.page_offset());
-            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
+            let page = tlb.host_page;
             self.check_perm_read(laddr, paddr_hit, 1)?;
+            let host = self.cached_ram_ptr(page);
             let v = unsafe { *host_at_page_offset(host, laddr) };
             {
                 let _buf = [v];
@@ -2010,8 +2011,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             && tlb.host_page.is_some()
         {
             let paddr_hit = tlb.ppf.at_page_offset(laddr.page_offset());
-            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
+            let page = tlb.host_page;
             self.check_perm_read(laddr, paddr_hit, 2)?;
+            let host = self.cached_ram_ptr(page);
             let ptr = host_at_page_offset(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let v = read_unaligned_u16(ptr);
@@ -2073,8 +2075,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             && tlb.host_page.is_some()
         {
             let paddr_hit = tlb.ppf.at_page_offset(laddr.page_offset());
-            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
+            let page = tlb.host_page;
             self.check_perm_read(laddr, paddr_hit, 4)?;
+            let host = self.cached_ram_ptr(page);
             let ptr = host_at_page_offset(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let v = read_unaligned_u32(ptr);
@@ -2136,8 +2139,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             && tlb.host_page.is_some()
         {
             let paddr_hit = tlb.ppf.at_page_offset(laddr.page_offset());
-            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
+            let page = tlb.host_page;
             self.check_perm_read(laddr, paddr_hit, 8)?;
+            let host = self.cached_ram_ptr(page);
             let ptr = host_at_page_offset(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let v = read_unaligned_u64(ptr);
@@ -2195,9 +2199,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         {
             let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
             let page = tlb.host_page;
-            let host = super::tlb::host_page_ptr(self.mem_host_base, page);
             self.check_perm_write(laddr, paddr, 1)?;
             self.smc_write_check_with_page(paddr, 1, page);
+            let host = self.cached_ram_ptr(page);
             unsafe { *host_at_page_offset_mut(host, laddr) = val };
             {
                 let _buf = [val];
@@ -2253,9 +2257,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         {
             let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
             let page = tlb.host_page;
-            let host = super::tlb::host_page_ptr(self.mem_host_base, page);
             self.check_perm_write(laddr, paddr, 2)?;
             self.smc_write_check_with_page(paddr, 2, page);
+            let host = self.cached_ram_ptr(page);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u16(ptr, val);
@@ -2325,9 +2329,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         {
             let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
             let page = tlb.host_page;
-            let host = super::tlb::host_page_ptr(self.mem_host_base, page);
             self.check_perm_write(laddr, paddr, 4)?;
             self.smc_write_check_with_page(paddr, 4, page);
+            let host = self.cached_ram_ptr(page);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u32(ptr, val);
@@ -2394,9 +2398,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         {
             let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
             let page = tlb.host_page;
-            let host = super::tlb::host_page_ptr(self.mem_host_base, page);
             self.check_perm_write(laddr, paddr, 8)?;
             self.smc_write_check_with_page(paddr, 8, page);
+            let host = self.cached_ram_ptr(page);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             write_unaligned_u64(ptr, val);
@@ -2556,7 +2560,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let pkey_mask = self.rd_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page.is_some()
         {
-            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
+            let host = self.cached_ram_ptr(tlb.host_page);
             let ptr = host_at_page_offset(host, laddr);
             // SAFETY: TLB-validated host pointer; unaligned read OK.
             return Ok(read_unaligned_u32(ptr));
@@ -2579,7 +2583,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let pkey_mask = self.rd_pkey[tlb.pkey as usize];
         if tlb.lpf == lpf && tlb.is_shadow_stack_read_ok(user, pkey_mask) && tlb.host_page.is_some()
         {
-            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
+            let host = self.cached_ram_ptr(tlb.host_page);
             let ptr = host_at_page_offset(host, laddr);
             return Ok(read_unaligned_u64(ptr));
         }
@@ -2604,8 +2608,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             && tlb.host_page.is_some()
         {
             let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
-            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
+            let page = tlb.host_page;
             self.smc_write_check(paddr, 4);
+            let host = self.cached_ram_ptr(page);
             let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: TLB-validated host pointer; unaligned write OK.
             write_unaligned_u32(ptr, val);
@@ -2634,8 +2639,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             && tlb.host_page.is_some()
         {
             let paddr = tlb.ppf.at_page_offset(laddr.page_offset());
-            let host = super::tlb::host_page_ptr(self.mem_host_base, tlb.host_page);
+            let page = tlb.host_page;
             self.smc_write_check(paddr, 8);
+            let host = self.cached_ram_ptr(page);
             let ptr = host_at_page_offset_mut(host, laddr);
             write_unaligned_u64(ptr, val);
             return Ok(());
@@ -2649,6 +2655,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Read phase of a RMW qword given a pre-computed linear address.
     /// Bochs: read_RMW_linear_qword (access2.cc)
     /// Returns (value, laddr). Caches translation in address_xlation.
+    /// Independent backings use the physical form of address_xlation, so
+    /// no host pointer escapes into a later writeback.
     pub(crate) fn read_rmw_linear_qword(
         &mut self,
         _seg: BxSegregs,
@@ -2664,6 +2672,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
             && tlb.host_page.is_some()
+            && !self.mem_host_base.is_null()
         {
             let page_offset = (laddr.page_offset()) as BxPtrEquiv;
             let host_addr =
@@ -2743,6 +2752,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
             && tlb.host_page.is_some()
+            && !self.mem_host_base.is_null()
         {
             // Both values are read out of the entry before either is
             // stored: the probe holds the TLB shared, and writing
@@ -2802,6 +2812,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
             && tlb.host_page.is_some()
+            && !self.mem_host_base.is_null()
         {
             let page_offset = (laddr.page_offset()) as BxPtrEquiv;
             let host_addr =
@@ -2887,6 +2898,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 & pkey_allow(needed_bit, tlb.pkey, &self.rd_pkey, &self.wr_pkey))
                 != 0
             && tlb.host_page.is_some()
+            && !self.mem_host_base.is_null()
         {
             // Both values are read out of the entry before either is
             // stored: the probe holds the TLB shared, and writing

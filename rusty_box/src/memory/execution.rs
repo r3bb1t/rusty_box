@@ -2,14 +2,17 @@
 //! offsets; physical-map decisions stay outside instruction handlers.
 use core::ops::Range;
 
+use super::direct::{DirectOffset, DirectParts};
 use super::flat::{FlatParts, checked_range};
 use super::{BxMemC, CpuMemoryPolicy, MemoryError, PhysAccess, Result};
 use crate::config::{A20Mask, BxPhyAddress};
 use crate::cpu::rusty_box::MemoryAccessType;
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ExecutionMemory<'a> {
     Pc(&'a mut BxMemC),
     Borrowed(FlatParts<'a>),
+    Direct(DirectParts<'a>),
 }
 
 /// One immutable observation under the execution loan; neither read can
@@ -23,6 +26,7 @@ impl ExecutionMemory<'_> {
         match self {
             Self::Pc(memory) => ExecutionMemory::Pc(memory),
             Self::Borrowed(memory) => ExecutionMemory::Borrowed(memory.reborrow()),
+            Self::Direct(memory) => ExecutionMemory::Direct(memory.reborrow()),
         }
     }
 
@@ -34,6 +38,10 @@ impl ExecutionMemory<'_> {
                 residency_epoch: mem.swap_epoch(),
             },
             Self::Borrowed(mem) => CacheState {
+                code_sequence: mem.writes.next(),
+                residency_epoch: 0,
+            },
+            Self::Direct(mem) => CacheState {
                 code_sequence: mem.writes.next(),
                 residency_epoch: 0,
             },
@@ -67,6 +75,7 @@ impl ExecutionMemory<'_> {
         match self {
             Self::Pc(_) => super::memory_rusty_box::bx_guest_ram_span(addr, len, capacity),
             Self::Borrowed(_) => checked_range(addr, len, capacity),
+            Self::Direct(_) => None,
         }
     }
 
@@ -74,7 +83,7 @@ impl ExecutionMemory<'_> {
     pub(crate) fn pc_mut(&mut self) -> Option<&mut BxMemC> {
         match self {
             Self::Pc(mem) => Some(mem),
-            Self::Borrowed(_) => None,
+            Self::Borrowed(_) | Self::Direct(_) => None,
         }
     }
 
@@ -82,7 +91,7 @@ impl ExecutionMemory<'_> {
     pub(crate) fn a20_mask(&self) -> A20Mask {
         match self {
             Self::Pc(mem) => mem.a20_mask(),
-            Self::Borrowed(_) => A20Mask::OPEN,
+            Self::Borrowed(_) | Self::Direct(_) => A20Mask::OPEN,
         }
     }
 
@@ -94,6 +103,7 @@ impl ExecutionMemory<'_> {
         match self {
             Self::Pc(mem) => mem.get_memory_len(),
             Self::Borrowed(mem) => mem.bytes.len(),
+            Self::Direct(_) => 0,
         }
     }
 
@@ -101,7 +111,7 @@ impl ExecutionMemory<'_> {
     pub(crate) fn swap_epoch(&self) -> u64 {
         match self {
             Self::Pc(mem) => mem.swap_epoch(),
-            Self::Borrowed(_) => 0,
+            Self::Borrowed(_) | Self::Direct(_) => 0,
         }
     }
 
@@ -126,6 +136,7 @@ impl ExecutionMemory<'_> {
                 }
             }
             Self::Borrowed(_) => {}
+            Self::Direct(_) => return None,
         }
         self.backing_ram_span(addr, len, capacity)
     }
@@ -155,6 +166,50 @@ impl ExecutionMemory<'_> {
                 }
                 Ok(mem.span_from(addr, (rw as u32 & 1) != 0))
             }
+            // A persistent offset for SVM must name the primary allocation.
+            Self::Direct(_) => Ok(None),
+        }
+    }
+
+    pub(crate) fn fetch_range(
+        &mut self,
+        addr: BxPhyAddress,
+        policy: CpuMemoryPolicy,
+    ) -> Result<Option<Range<usize>>> {
+        match self {
+            Self::Direct(mem) => Ok(mem.span_from(addr, false)),
+            _ => self.host_mem_range(addr, MemoryAccessType::Execute, policy),
+        }
+    }
+
+    pub(crate) fn fetch_ptr(&self, offset: DirectOffset) -> *const u8 {
+        let Self::Direct(mem) = self else {
+            unreachable!("direct fetch coordinate must be resolved against its original loan");
+        };
+        mem.fetch_ptr(offset)
+    }
+
+    pub(crate) fn direct_ram_page(&self, addr: BxPhyAddress) -> Option<crate::cpu::tlb::RamPage> {
+        let Self::Direct(mem) = self else { return None };
+        let span = mem.span_from(addr, true)?;
+        if span.len() < 4096 {
+            return None;
+        }
+        crate::cpu::tlb::RamPage::from_ram_offset(span.start)
+    }
+
+    pub(crate) fn ram_ptr(&mut self, offset: DirectOffset) -> *mut u8 {
+        let Self::Direct(mem) = self else {
+            unreachable!("direct RAM coordinate must be resolved against its original loan");
+        };
+        mem.ram_ptr(offset)
+    }
+
+    pub(crate) fn permits_external_page(&self, page: BxPhyAddress) -> bool {
+        match self {
+            Self::Pc(_) => false,
+            Self::Borrowed(mem) => !mem.has_backing_at(page),
+            Self::Direct(mem) => !mem.has_backing_at(page),
         }
     }
 
@@ -164,6 +219,13 @@ impl ExecutionMemory<'_> {
         rw: MemoryAccessType,
         policy: CpuMemoryPolicy,
     ) -> Result<Option<&mut [u8]>> {
+        if let Self::Direct(mem) = self {
+            let writable = (rw as u32 & 1) != 0;
+            if writable && policy.monitor_hit() {
+                return Ok(None);
+            }
+            return Ok(mem.bytes_at(addr, writable));
+        }
         let Some(range) = self.host_mem_range(addr, rw, policy)? else {
             return Ok(None);
         };
@@ -172,13 +234,14 @@ impl ExecutionMemory<'_> {
                 Ok(mem.allocation_slice(u64::try_from(range.start)?, u64::try_from(range.len())?))
             }
             Self::Borrowed(mem) => Ok(mem.bytes.get_mut(range)),
+            Self::Direct(_) => Ok(None),
         }
     }
 
     pub(crate) fn physical_access_len(&self, addr: BxPhyAddress, len: usize) -> usize {
         match self {
             Self::Pc(mem) => mem.mmio.access_len(mem.a20_addr(addr), len),
-            Self::Borrowed(_) => len,
+            Self::Borrowed(_) | Self::Direct(_) => len,
         }
     }
 
@@ -203,6 +266,16 @@ impl ExecutionMemory<'_> {
                     out[..count].copy_from_slice(&mem.bytes[span.start..span.start + count]);
                     out[count..].fill(0xFF);
                 } else if !mem.read_indirect(addr, out) {
+                    out.fill(0xFF);
+                }
+                Ok(PhysAccess::Done)
+            }
+            Self::Direct(mem) => {
+                if len > out.len() || len > 4096 - addr.page_offset() as usize {
+                    return Err(MemoryError::ReadPhysicalPage { addr, len }.into());
+                }
+                let out = &mut out[..len];
+                if !mem.read(addr, out) {
                     out.fill(0xFF);
                 }
                 Ok(PhysAccess::Done)
@@ -232,6 +305,13 @@ impl ExecutionMemory<'_> {
                 }
                 Ok(PhysAccess::Done)
             }
+            Self::Direct(mem) => {
+                if len > data.len() || len > 4096 - addr.page_offset() as usize {
+                    return Err(MemoryError::WritePhysicalPage { addr, len }.into());
+                }
+                mem.write(addr, &data[..len]);
+                Ok(PhysAccess::Done)
+            }
         }
     }
 
@@ -252,6 +332,12 @@ impl ExecutionMemory<'_> {
                     let range = span.start..span.start + out.len();
                     out.copy_from_slice(&mem.bytes[range]);
                 } else if !mem.read_indirect(addr, out) {
+                    return Err(MemoryError::RamImageOutOfRange.into());
+                }
+                Ok(out.len())
+            }
+            Self::Direct(mem) => {
+                if !mem.read(addr, out) {
                     return Err(MemoryError::RamImageOutOfRange.into());
                 }
                 Ok(out.len())
@@ -282,6 +368,12 @@ impl ExecutionMemory<'_> {
                 }
                 Ok(data.len())
             }
+            Self::Direct(mem) => {
+                if !mem.write(addr, data) {
+                    return Err(MemoryError::RamImageOutOfRange.into());
+                }
+                Ok(data.len())
+            }
         }
     }
 
@@ -296,6 +388,7 @@ impl ExecutionMemory<'_> {
                     *stamp |= mask;
                 }
             }
+            Self::Direct(mem) => mem.mark_icache(addr, mask),
         }
     }
 
@@ -309,6 +402,7 @@ impl ExecutionMemory<'_> {
                 .is_some_and(|stamp| {
                     stamp & crate::cpu::icache::smc_cache_line_mask(addr, len) != 0
                 }),
+            Self::Direct(mem) => mem.has_stamps(addr, len),
         }
     }
 
@@ -347,6 +441,17 @@ impl ExecutionMemory<'_> {
                 }
                 mem.writes.next()
             }
+            Self::Direct(mem) => {
+                let cached_offset = cached_page
+                    .filter(|_| len as usize <= 4096 - addr.page_offset() as usize)
+                    .and_then(|page| DirectOffset::decode(page.ram_offset()));
+                if let Some(offset) = cached_offset {
+                    mem.mark_cached_write(offset, addr, len);
+                } else {
+                    mem.mark_write(addr, len as usize);
+                }
+                mem.writes.next()
+            }
         }
     }
 
@@ -355,6 +460,7 @@ impl ExecutionMemory<'_> {
         match self {
             Self::Pc(mem) => mem.smc_seq_next(),
             Self::Borrowed(mem) => mem.writes.next(),
+            Self::Direct(mem) => mem.writes.next(),
         }
     }
 
@@ -365,6 +471,7 @@ impl ExecutionMemory<'_> {
         match self {
             Self::Pc(mem) => mem.smc_pending_since(since),
             Self::Borrowed(mem) => mem.writes.since(since),
+            Self::Direct(mem) => mem.writes.since(since),
         }
     }
 }
