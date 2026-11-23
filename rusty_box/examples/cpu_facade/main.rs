@@ -1,10 +1,8 @@
-//! Execute the same function as the borrowed `cpu_only` example.
+//! Step, edit registers, and complete a port output using the owned x86 API.
 use rusty_box::config::BxPhyAddress;
-use rusty_box::cpu::builder::BxCpuBuilder;
-use rusty_box::cpu::memory_session::{EntryMode, MemorySession, SessionStop};
-use rusty_box::cpu::registers::{AL, AX, EAX, ECX, EDX, EIP};
+use rusty_box::cpu::memory_session::SessionStop;
+use rusty_box::cpu::registers::{AL, EAX, ECX, EDX, EIP};
 use rusty_box::cpu::{CpuEmulator, CpuError, ProcessorActivity};
-use rusty_box::memory::mapped::{MappedMemory, PhysicalRegion, RegionKind};
 
 const ENTRY: u32 = 0x1000;
 const RETURN: u32 = 0x1100;
@@ -55,44 +53,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SessionStop::Inactive(ProcessorActivity::Halted)
     ));
 
-    caller_owned()?;
-    Ok(())
-}
-
-fn caller_owned() -> Result<(), Box<dyn std::error::Error>> {
-    // A discontiguous physical layout using caller-owned bytes and stamps.
-    let mut cpu = BxCpuBuilder::new().build()?;
-    let mut bytes = [0; 8192];
-    let mut stamps = [0; 2];
-    let regions = [
-        PhysicalRegion {
-            guest_start: phys(0x1000),
-            arena_offset: 0,
-            len: 4096,
-            kind: RegionKind::Ram,
-        },
-        PhysicalRegion {
-            guest_start: phys(0x5000),
-            arena_offset: 4096,
-            len: 4096,
-            kind: RegionKind::Ram,
-        },
-    ];
-    let mut memory = MappedMemory::new(&mut bytes, &mut stamps, &regions)?;
-    let mut session = MemorySession::new(&mut cpu, memory.loan());
-    session.reset_at(EntryMode::Real16, ENTRY, 0x5FFC)?;
-    // mov [0x5000],ax; hlt
-    session
-        .memory()
-        .write_phys(phys(ENTRY), &[0xA3, 0, 0x50, 0xF4])?;
-    session.regs().write(AX, 0x1234);
-    assert!(matches!(session.step().stop, SessionStop::Budget));
-    let mut stored = [0; 2];
-    session.memory().read_phys(phys(0x5000), &mut stored)?;
-    assert_eq!(u16::from_le_bytes(stored), 0x1234);
-    println!(
-        "caller-owned sparse RAM received {:#06x}",
-        u16::from_le_bytes(stored)
-    );
     Ok(())
 }

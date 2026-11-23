@@ -48,7 +48,7 @@ The two examples execute the same x86 function, change an argument between dispa
 | Read result | `session.read_register(X86Reg::Eax)?` returns `u64` | `emu.regs().read(EAX)` returns `u32` |
 | Run and service OUT | `session.run_controlled(16)`, then `session.service_scalar_io(...)` | `emu.run(16)`, then `emu.service_scalar_io(...)` |
 
-Run `cargo run --locked --release -p rusty_box --no-default-features --features std --example cpu_only` and replace `cpu_only` with `cpu_facade` for the new example. The owned facade also compiles with `alloc` without `std`. With neither feature, the typed views work through caller-provided storage, as exercised by the bare-metal smoke target. [Borrowed example](../../rusty_box/examples/cpu_only/main.rs) · [Owned and sparse examples](../../rusty_box/examples/cpu_facade/main.rs)
+Run `cargo run --locked --release -p rusty_box --no-default-features --features alloc --example cpu_only` to lend the CPU a RAM slice. Use `--example cpu_facade` for a CPU that owns its memory. The typed views also work without `std` or `alloc` through caller-provided storage, as exercised by the bare-metal smoke target. [Borrowed example](../../rusty_box/examples/cpu_only/main.rs) · [Owned example](../../rusty_box/examples/cpu_facade/main.rs) · [External and sparse RAM](../../examples/execution_workflows/README.md#lend-custom-ram-to-the-x86-interpreter)
 
 ## Validation
 

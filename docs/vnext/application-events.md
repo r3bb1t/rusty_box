@@ -38,7 +38,9 @@ A delivery runs matching handlers synchronously in registration order. An unmatc
 
 ## Reusable composition
 
-Accept the existing `App<S, X, H>` with `H: AppHandlers<S, X>` and return `App<S, X, impl AppHandlers<S, X>>`. An integration can use its own narrow trait bound on `S` for access to application data. The application can add more handlers to the returned builder and still owns the choice of state value. [Standalone example](../../examples/execution_workflows/src/bin/typed_events.rs)
+Accept the existing `App<S, X, H>` with `H: AppHandlers<S, X>` and return `App<S, X, impl AppHandlers<S, X>>`. An integration can take a function that borrows just the part of application state it needs. The process route takes `|state| &mut state.catalog`, so its module can be composed with a different application state type. The application can add more handlers to the returned builder and still owns the choice of state value. [Process route module](../../examples/execution_workflows/src/bin/typed_events/process.rs)
+
+The downstream `typed_events` workflow uses event type as the route key and puts an ordered `Subscriptions` chain behind its `RunRequested` route. Like a Tower service wrapper, the middleware owns its inner sink. It implements `Emit` and forwards a synchronous call with a borrowed capability. `BudgetLimit` validates the budget before forwarding. `Audit` wraps the guard and records the outcome after calling the inner sink, including early errors. The layers and their order are composed where the route is registered. [Route assembly](../../examples/execution_workflows/src/bin/typed_events/main.rs) · [Middleware and extraction](../../examples/execution_workflows/src/bin/typed_events/run.rs)
 
 ## Engineering report
 
@@ -63,7 +65,9 @@ The opted-in facade uses one borrowed `Any` view for exact type matching. Each r
 
 ### Dependency providers
 
-The two supported handler signatures keep selection and invocation explicit. Additional argument shapes can build on the same distinction when a concrete provider needs them. A provider needs a typed delivery scope that owns any derived data, resolves it on first use, shares it within that event delivery, and lends it for the current call. The publisher is already the boundary where inputs and explicit errors can be supplied. The existing downstream image workflow demonstrates publisher-scoped preparation and short-lived binary metadata without adding an executable-format dependency to the event core. [Linux observation example](linux-observation-libafl.md)
+The two supported `App::on()` signatures keep selection and invocation explicit. The typed workflow shows a local analogue to Axum's `FromRequestParts`. `TargetProcess::from_parts` reads the requested selector and application catalog, caches the resolved identity or error for this delivery, and lends `&mut Process` to one handler at a time. The next delivery resolves against the current selection. This extraction belongs to the route, so unrelated events and rejected runs do no target lookups. [Scoped target extraction](../../examples/execution_workflows/src/bin/typed_events/run.rs)
+
+The downstream image workflow demonstrates another use of publisher-scoped preparation. It shares short-lived binary metadata across observers without adding an executable-format dependency to the event core. [Linux observation example](linux-observation-libafl.md)
 
 ### Validation commands
 
@@ -72,6 +76,7 @@ cargo test --locked --release -p rusty_box_core --no-default-features
 cargo test --locked --release -p rusty_box --no-default-features --features std
 cargo build --locked --release -p rusty_box_no_alloc_smoke --target x86_64-unknown-none
 cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin typed_events
+cargo test --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin typed_events
 ```
 
 | Release suite | Passed | Ignored |

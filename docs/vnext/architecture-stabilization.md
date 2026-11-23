@@ -21,7 +21,7 @@ llvmkit’s D2–D4 distinguish owned or borrowed handles, explicit erasure, and
 - Point model authors at ordinary register methods or the existing shared model contracts. Show applications `MmioWindow::registers`, `with_model`, and `.on` first. Explicit `EventEndpoint`, `Subscriptions`, `PcAttachment`, legacy callbacks, and borrowed placement solve different integration needs. Each example should expose only the capabilities it uses.
 - Document the host memory boundary clearly. The CPU facade’s physical view accesses backed RAM and ROM. `Emulator::mem_read` and `mem_write` inspect or load backing without dispatching guest MMIO. `WindowOffset` is device-local. The existing `BxPhyAddress` naming is historical. A cross-architecture migration can wait for an actual shared caller.
 
-[CPU-only example](../../rusty_box/examples/vnext/cpu.rs) · [Register-only device](../../rusty_box/examples/hardware_topology/register_window.rs) · [Typed event device](../../rusty_box/examples/vnext/event_device.rs) · [Nested topology](../../rusty_box/examples/hardware_topology/main.rs)
+[CPU-only example](../../rusty_box/examples/cpu_facade/main.rs) · [Register-only device](../../rusty_box/examples/hardware_topology/register_window.rs) · [Typed event device](../../rusty_box/examples/composed_hardware/main.rs) · [Nested topology](../../rusty_box/examples/hardware_topology/main.rs)
 
 ## Correctness decisions
 

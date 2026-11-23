@@ -277,7 +277,8 @@ It needs the rustup targets `x86_64-unknown-none`, `x86_64-unknown-uefi` and `wa
 - [docs/getting-started.md](docs/getting-started.md) -- using the shell: the guests and their settings, the VM file, pacing, CPU topology, disks, display
 - [rusty_box_gui/README.md](rusty_box_gui/README.md) -- the shell in full: the VM library, pages, engines, disk images, Android, browser
 - [docs/automation.md](docs/automation.md) -- driving a guest from Rust: boot it headless, read the screen, type at it, watch what it does
-- Compose typed event handlers and supply synchronous application state. [Typed application events](docs/vnext/application-events.md)
+- Compose typed routes with synchronous state, middleware, and on-demand target lookup. [Application event guide](docs/vnext/application-events.md) · [Runnable workflow](examples/execution_workflows/README.md#route-commands-to-application-owned-x86-guests)
+- Run x86 with an owned emulator or over a caller-owned RAM slice. [Owned CPU](rusty_box/examples/cpu_facade/main.rs) · [Borrowed RAM](rusty_box/examples/cpu_only/main.rs)
 - Review the Rust emulator API, branch ancestry, and x86 performance procedure. [API consolidation](docs/vnext/api-consolidation.md)
 - Lend independent executable, data, and stack allocations to the x86 CPU-only interpreter, with optional indirect RAM. [External memory providers and API readiness](docs/vnext/external-memory-providers.md)
 - Execute static Linux/i386 ELF programs with application-owned standard streams and no boot image. [User-mode execution](rusty_box_linux_user/README.md)
