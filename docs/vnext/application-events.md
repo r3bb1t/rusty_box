@@ -38,9 +38,9 @@ A delivery runs matching handlers synchronously in registration order. An unmatc
 
 ## Reusable composition
 
-Accept the existing `App<S, X, H>` with `H: AppHandlers<S, X>` and return `App<S, X, impl AppHandlers<S, X>>`. An integration can take a function that borrows just the part of application state it needs. The process route takes `|state| &mut state.catalog`, so its module can be composed with a different application state type. The application can add more handlers to the returned builder and still owns the choice of state value. [Process route module](../../examples/execution_workflows/src/bin/typed_events/process.rs)
+Accept the existing `App<S, X, H>` with `H: AppHandlers<S, X>` and return `App<S, X, impl AppHandlers<S, X>>`. An integration that works with several application state types can take a function that borrows just the fields it needs. The caller can add more handlers to the returned builder before supplying state.
 
-The downstream `typed_events` workflow uses event type as the route key and puts an ordered `Subscriptions` chain behind its `RunRequested` route. Like a Tower service wrapper, the middleware owns its inner sink. It implements `Emit` and forwards a synchronous call with a borrowed capability. `BudgetLimit` validates the budget before forwarding. `Audit` wraps the guard and records the outcome after calling the inner sink, including early errors. The layers and their order are composed where the route is registered. [Route assembly](../../examples/execution_workflows/src/bin/typed_events/main.rs) · [Middleware and extraction](../../examples/execution_workflows/src/bin/typed_events/run.rs)
+The downstream `typed_events` example uses event types as route keys. Like a Tower service wrapper, `BudgetLimit` owns its inner sink. It implements `Emit`, checks the budget, and forwards a synchronous call to the ordered `Subscriptions` handlers. The route records the result, including errors returned by the guard. [Single-file example](../../examples/execution_workflows/src/bin/typed_events.rs)
 
 ## Engineering report
 
@@ -65,7 +65,7 @@ The opted-in facade uses one borrowed `Any` view for exact type matching. Each r
 
 ### Dependency providers
 
-The two supported `App::on()` signatures keep selection and invocation explicit. The typed workflow shows a local analogue to Axum's `FromRequestParts`. `TargetProcess::from_parts` reads the requested selector and application catalog, caches the resolved identity or error for this delivery, and lends `&mut Process` to one handler at a time. The next delivery resolves against the current selection. This extraction belongs to the route, so unrelated events and rejected runs do no target lookups. [Scoped target extraction](../../examples/execution_workflows/src/bin/typed_events/run.rs)
+The two supported `App::on()` signatures keep selection and invocation explicit. The typed workflow shows a local analogue to Axum's `FromRequestParts`. `RunParts::target_process` looks up the requested target, caches the slot or error for one delivery, and lends `&mut Process` to each handler in turn. A subsequent delivery looks up the current selection. The budget guard runs before the extractor. [Scoped target extraction](../../examples/execution_workflows/src/bin/typed_events.rs)
 
 The downstream image workflow demonstrates another use of publisher-scoped preparation. It shares short-lived binary metadata across observers without adding an executable-format dependency to the event core. [Linux observation example](linux-observation-libafl.md)
 

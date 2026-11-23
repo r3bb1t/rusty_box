@@ -9,9 +9,9 @@ cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.
 cargo test --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin typed_events
 ```
 
-The same `RunRequested` route follows changes to the selected guest and also accepts an exact process identity. The demo executes `mov` and `hlt` on two firmware-free x86 emulators, then recovers the application state and prints an audit record for each run request. The application assigns a new generation when replacing an instance that reuses a process ID. The Linux examples below demonstrate identification inside a guest OS.
+Read `main` for the workflow and `routes` for the wiring. The demo selects and runs two x86 guests, then resumes the first by its exact process identity. The process IDs and generations belong to the host application. [Single-file example](src/bin/typed_events.rs)
 
-Start at `compose` to see `App::on()` route `SelectProcess` and `RunRequested` by type before `with_state` supplies the catalog. The run route wraps `Subscriptions` in two example-local `Emit` layers. Audit surrounds the budget guard so a refused request is recorded without a lookup or a CPU dispatch. The `TargetProcess` extractor resolves the requested identity on first use and shares that result across the before, execution, and after handlers. Each handler borrows the guest for its own call. The tests cover selection changes, resuming execution, stale IDs, cached lookup errors, and observation after a stop request. [Composition](src/bin/typed_events/main.rs) · [Layers and extraction](src/bin/typed_events/run.rs) · [Application event guide](../../docs/vnext/application-events.md)
+`BudgetLimit` wraps the run route and refuses invalid budgets before any guest lookup. Both the execution and register handlers call `RunParts::target_process`, which resolves the target once per delivery. The route records successes and failures in application state. [Application event guide](../../docs/vnext/application-events.md)
 
 ## Lend custom RAM to the x86 interpreter
 
