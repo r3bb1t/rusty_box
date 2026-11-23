@@ -1,5 +1,6 @@
 //! Select a guest, run it, and resume it through typed routes.
-//! Start with `main` and `routes`. The run route's middleware and extractor follow.
+//! Start with `main` and `routes`. Register functions or closures as handlers.
+//! The example implements `Emit` only for the budget wrapper.
 
 use std::cell::OnceCell;
 
@@ -74,24 +75,26 @@ fn main() -> Result<(), WorkflowError> {
     Ok(())
 }
 
+// AppHandlers describes the chain that App::on builds.
 fn routes() -> App<State, WorkflowError, impl AppHandlers<State, WorkflowError>> {
-    let mut run = BudgetLimit(
-        Subscriptions::<RunRequested, WorkflowError>::new()
-            .on_with(execute)
-            .on_with(observe_registers),
-    );
+    let handlers = Subscriptions::<RunRequested, WorkflowError>::new()
+        .on_with(execute)
+        .on_with(observe_registers);
+    let mut guarded = BudgetLimit(handlers);
 
-    App::<State, WorkflowError>::new().on(select_process).on(
-        move |event: &RunRequested, state: &mut State| {
-            let mut parts = RunParts::new(state, event.target);
-            let outcome = run.emit(event, &mut parts);
-            parts.state.audit.push(RunRecord {
-                observed: parts.observed,
-                outcome: outcome.as_ref().copied().map_err(ToString::to_string),
-            });
-            outcome
-        },
-    )
+    let run_process = move |event: &RunRequested, state: &mut State| {
+        let mut parts = RunParts::new(state, event.target);
+        let outcome = guarded.emit(event, &mut parts);
+        parts.state.audit.push(RunRecord {
+            observed: parts.observed,
+            outcome: outcome.as_ref().copied().map_err(ToString::to_string),
+        });
+        outcome
+    };
+
+    App::<State, WorkflowError>::new()
+        .on(select_process)
+        .on(run_process)
 }
 
 struct SelectProcess(ProcessId);
@@ -141,8 +144,11 @@ fn observe_registers(
 // This wrapper owns the next sink and rejects invalid budgets before forwarding.
 struct BudgetLimit<S>(S);
 
-impl<'a, S: Emit<RunRequested, RunParts<'a>, Error = WorkflowError>>
-    Emit<RunRequested, RunParts<'a>> for BudgetLimit<S>
+// The event is RunRequested and the data lent for this call is RunParts.
+// The inner sink accepts the same inputs and has the same error type.
+impl<'a, S> Emit<RunRequested, RunParts<'a>> for BudgetLimit<S>
+where
+    S: Emit<RunRequested, RunParts<'a>, Error = WorkflowError>,
 {
     type Error = WorkflowError;
 

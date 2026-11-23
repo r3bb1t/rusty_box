@@ -13,6 +13,41 @@ of engine: `--engine interpreter` (the default) or `--engine whp`. See
 Run every command below from the workspace root; the examples look for their
 files relative to the current directory.
 
+## Typed events
+
+### Start with one handler
+
+The first example registers an ordinary function and prints the process ID it stored in application state. [Read the example](typed_events.rs)
+
+```sh
+cargo run --locked --release -p rusty_box --no-default-features --example typed_events
+```
+
+1. Define an event such as `SelectProcess` and an application state type.
+2. Register `select_process(&SelectProcess, &mut State)` with `.on()`. The first parameter tells the app which event to route to the function.
+3. Give the app its state with `.with_state()`, then call `.dispatch(&SelectProcess(12))`. The app calls the handler immediately and lends it the state so it can update the selected process ID.
+
+Handlers can also take just `&Event` if they need no state. Returning `()` means the handler makes no execution request.
+
+### Add middleware and target lookup
+
+The second example creates two x86 guests in memory. Open `main` for the sequence of requests and `routes` for how they are handled. [Read the workflow](typed_event_workflow.rs)
+
+```sh
+cargo run --locked --release -p rusty_box --no-default-features --features alloc --example typed_event_workflow
+```
+
+| Goal | What you write |
+| --- | --- |
+| Register a handler | A function or closure. `.on()` adapts it through `AppHandler`. |
+| Return the builder from a helper | Use `impl AppHandlers` in the return type to describe the chain that `.on()` already built. |
+| Resolve a target | A method returning the dependency, such as `RunParts::target_process()`. |
+| Wrap delivery in reusable middleware | Implement `Emit<Event, Parts>` on the wrapper. Set `type Error` and call the inner sink's `emit` when the event should proceed. |
+
+For a `RunRequested` event, the route creates fresh `RunParts`. `BudgetLimit` is the middleware. It checks the budget before forwarding to `Subscriptions`, which calls `execute` followed by `observe_registers`. Both handlers call `parts.target_process()`. The first call looks up the guest and the second uses the cached slot. Each handler borrows the guest for its own call.
+
+When the guest halts, `execute` requests `Stop` and the register observer still runs. An error skips the remaining handlers. The route records either result. The demo reports three lookups for four run requests because the budget guard rejects one. [Application event guide](../../docs/vnext/application-events.md)
+
 ## Required files
 
 None of these are in the repository (`/cpp_orig`, `/binaries`, `/dlxlinux` and

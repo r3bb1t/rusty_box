@@ -2,17 +2,6 @@
 
 This is a standalone downstream Cargo workspace. Its lockfile pins the example dependencies. The main rusty_box workspace has no dependency on this package, Linux userland, or LibAFL.
 
-## Route commands to application-owned x86 guests
-
-```sh
-cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin typed_events
-cargo test --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin typed_events
-```
-
-Read `main` for the workflow and `routes` for the wiring. The demo selects and runs two x86 guests, then resumes the first by its exact process identity. The process IDs and generations belong to the host application. [Single-file example](src/bin/typed_events.rs)
-
-`BudgetLimit` wraps the run route and refuses invalid budgets before any guest lookup. Both the execution and register handlers call `RunParts::target_process`, which resolves the target once per delivery. The route records successes and failures in application state. [Application event guide](../../docs/vnext/application-events.md)
-
 ## Lend custom RAM to the x86 interpreter
 
 Run `external_ram --direct` for a downstream provider that owns separate code, data, and stack allocations. The guest uses all three and the caller verifies its stores after the session ends. The provider constructs a `DirectMemory` map by lending the existing slices and one stamp per 4 KiB page. [Direct memory contract](../../docs/vnext/direct-x86-backing.md)

@@ -2,6 +2,8 @@
 
 `rusty_box::events::App` composes handlers for independently defined event types. The module is also available as `rusty_box_core::events`. Choose the state type when composing and move the value into the application with `.with_state()`.
 
+Start with the short `typed_events` example for a single handler and its state. [Beginner walkthrough](../../rusty_box/examples/README.md#typed-events)
+
 ```rust
 use rusty_box::events::{App, ExecutionRequest};
 
@@ -40,7 +42,7 @@ A delivery runs matching handlers synchronously in registration order. An unmatc
 
 Accept the existing `App<S, X, H>` with `H: AppHandlers<S, X>` and return `App<S, X, impl AppHandlers<S, X>>`. An integration that works with several application state types can take a function that borrows just the fields it needs. The caller can add more handlers to the returned builder before supplying state.
 
-The downstream `typed_events` example uses event types as route keys. Like a Tower service wrapper, `BudgetLimit` owns its inner sink. It implements `Emit`, checks the budget, and forwards a synchronous call to the ordered `Subscriptions` handlers. The route records the result, including errors returned by the guard. [Single-file example](../../examples/execution_workflows/src/bin/typed_events.rs)
+The `typed_event_workflow` example uses event types as route keys. Like a Tower service wrapper, `BudgetLimit` owns its inner sink. It implements `Emit`, checks the budget, and forwards a synchronous call to the ordered `Subscriptions` handlers. The route records the result, including errors returned by the guard. [Example](../../rusty_box/examples/typed_event_workflow.rs)
 
 ## Engineering report
 
@@ -65,7 +67,7 @@ The opted-in facade uses one borrowed `Any` view for exact type matching. Each r
 
 ### Dependency providers
 
-The two supported `App::on()` signatures keep selection and invocation explicit. The typed workflow shows a local analogue to Axum's `FromRequestParts`. `RunParts::target_process` looks up the requested target, caches the slot or error for one delivery, and lends `&mut Process` to each handler in turn. A subsequent delivery looks up the current selection. The budget guard runs before the extractor. [Scoped target extraction](../../examples/execution_workflows/src/bin/typed_events.rs)
+The two supported `App::on()` signatures keep selection and invocation explicit. The typed workflow shows a local analogue to Axum's `FromRequestParts`. `RunParts::target_process` looks up the requested target, caches the slot or error for one delivery, and lends `&mut Process` to each handler in turn. A subsequent delivery looks up the current selection. The budget guard runs before the extractor. [Scoped target extraction](../../rusty_box/examples/typed_event_workflow.rs)
 
 The downstream image workflow demonstrates another use of publisher-scoped preparation. It shares short-lived binary metadata across observers without adding an executable-format dependency to the event core. [Linux observation example](linux-observation-libafl.md)
 
@@ -75,8 +77,8 @@ The downstream image workflow demonstrates another use of publisher-scoped prepa
 cargo test --locked --release -p rusty_box_core --no-default-features
 cargo test --locked --release -p rusty_box --no-default-features --features std
 cargo build --locked --release -p rusty_box_no_alloc_smoke --target x86_64-unknown-none
-cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin typed_events
-cargo test --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin typed_events
+cargo run --locked --release -p rusty_box --no-default-features --example typed_events
+cargo test --locked --release -p rusty_box --no-default-features --features alloc --example typed_event_workflow
 ```
 
 | Release suite | Passed | Ignored |

@@ -54,6 +54,15 @@ path = "examples/cpu_facade/main.rs"
 required-features = ["alloc"]
 
 [[example]]
+name = "typed_events"
+path = "examples/typed_events.rs"
+
+[[example]]
+name = "typed_event_workflow"
+path = "examples/typed_event_workflow.rs"
+required-features = ["alloc"]
+
+[[example]]
 name = "composed_hardware"
 path = "examples/composed_hardware/main.rs"
 required-features = ["std"]
