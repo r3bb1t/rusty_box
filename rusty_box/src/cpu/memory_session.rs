@@ -86,6 +86,10 @@ pub(super) fn supports_scalar_step(instruction: &Instruction) -> bool {
 }
 
 /// Short host-side view of the guest's backed physical memory.
+///
+/// Each transfer must fit in one mapped window. An unavailable window is a
+/// host access error. Guest instructions use the processor's translation,
+/// permissions, and physical routing instead.
 pub struct PhysicalMemory<'a> {
     memory: ExecutionMemory<'a>,
     pending: &'a mut Option<scalar_io::PendingScalarIo>,

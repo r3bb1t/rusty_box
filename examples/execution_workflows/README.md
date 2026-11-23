@@ -37,6 +37,14 @@ cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.
 
 The benchmark rotates dense, mapped, multi-backing direct, indirect-copy, and byte-lane memory through the same paged guest loop. `RB_MEMORY_COUNT` sets dispatches per sample. [Memory contracts and implementation comparison](../../docs/vnext/direct-x86-backing.md)
 
+## Measure CPU-only execution and instrumentation
+
+```sh
+cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.toml --bin cpu_perf
+```
+
+`cpu_perf` reports the ordinary ALU loop with the same tracer's execution mask disabled or enabled. It also compares short warm runs with checked code writes followed by refetch. `RB_CPU_COUNTS` and `RB_CACHE_BATCHES` set the per-sample budgets. [Performance review procedure](../../docs/vnext/api-consolidation.md#performance-review-procedure)
+
 ## Sample Linux tasks from the emulator host
 
 Download the pinned Debian installer image and unpack the BusyBox package as described below. Use `--host-only` to build a guest with an ordinary shell and two executables. COM1 launches each command and checks its output and exit code. The observer selects the active task at a kernel breakpoint and reads the task, page-directory root, executable mappings, and entry from emulator-visible registers and RAM. [Design and scope](../../docs/vnext/linux-host-observation.md)
