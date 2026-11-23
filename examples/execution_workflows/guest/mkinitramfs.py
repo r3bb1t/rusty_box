@@ -22,8 +22,11 @@ def newc(entries):
 
 
 def main():
-    if len(sys.argv) not in (3, 4):
-        raise SystemExit("usage: mkinitramfs.py STATIC_BUSYBOX OUTPUT.cpio.gz [OBSERVATION_BIN_DIR]")
+    host_only = len(sys.argv) == 5 and sys.argv[4] == "--host-only"
+    if len(sys.argv) not in (3, 4) and not host_only:
+        raise SystemExit(
+            "usage: mkinitramfs.py STATIC_BUSYBOX OUTPUT.cpio.gz [OBSERVATION_BIN_DIR [--host-only]]"
+        )
     busybox = Path(sys.argv[1]).read_bytes()
     if busybox[:7] != b"\x7fELF\x01\x01\x01" or int.from_bytes(busybox[18:20], "little") != 3:
         raise SystemExit("expected an i386 BusyBox ELF")
@@ -42,9 +45,12 @@ def main():
           for name in ("cat", "chmod", "mkfifo", "mv", "rm", "sh", "stty", "uname", "wc")],
         ("init", executable, init, 0, 0),
     ]
-    if len(sys.argv) == 4:
-        entries.append(("proc", directory, b"", 0, 0))
-        for name in ("rb-observe", "program_sum", "program_text"):
+    if len(sys.argv) >= 4:
+        programs = ["program_sum", "program_text"]
+        if not host_only:
+            entries.append(("proc", directory, b"", 0, 0))
+            programs.insert(0, "rb-observe")
+        for name in programs:
             path = Path(sys.argv[3]) / name
             if not 0 < path.stat().st_size <= 1024 * 1024:
                 raise SystemExit(f"unexpected guest fixture size for {name}")

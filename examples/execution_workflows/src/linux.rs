@@ -1,7 +1,11 @@
-//! A scoped observation of the instrumented entry point of a Linux i386 image.
+//! Scoped Linux/i386 observation workflows and shared executable metadata.
 
 pub mod console;
+pub mod host;
+mod metadata;
 pub mod semantic;
+
+pub use metadata::MappedElf;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,6 +24,20 @@ const EXECUTE: u32 = 1;
 // Linux/i386 getpid returns the process ID in EAX before returning to ring 3.
 const GETPID: [u8; 7] = [0xB8, 20, 0, 0, 0, 0xCD, 0x80];
 static NEXT_IMAGE: AtomicU64 = AtomicU64::new(1);
+
+/// A half-open file-backed guest mapping and its byte offset in the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MappedRegion {
+    pub start: u64,
+    pub end: u64,
+    pub file_offset: u64,
+}
+
+impl MappedRegion {
+    fn contains(self, address: u64) -> bool {
+        (self.start..self.end).contains(&address)
+    }
+}
 
 /// Scoped to this host process. Each observation gets a fresh generation
 /// even when a guest reuses the PID and page-table root.

@@ -1,5 +1,6 @@
-use super::MappedRegion;
-use crate::linux::{AnalysisError, ELF_HEADER, Elf, ExecutableType, PROGRAM_HEADER, ProgramHeader};
+use super::{
+    AnalysisError, ELF_HEADER, Elf, ExecutableType, MappedRegion, PROGRAM_HEADER, ProgramHeader,
+};
 
 pub(super) struct AuxHeaders {
     pub(super) phdr: u64,
@@ -83,7 +84,7 @@ pub(super) fn inspect<F: FnMut(u64, &mut [u8]) -> Result<(), AnalysisError>>(
         });
         if !mapped {
             return Err(AnalysisError::Invalid(
-                "file-backed executable segment disagrees with proc maps",
+                "file-backed executable segment disagrees with executable mappings",
             ));
         }
     }

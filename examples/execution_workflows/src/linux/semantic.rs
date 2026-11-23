@@ -1,35 +1,20 @@
 //! Observe one supervised Linux/i386 exec at its first user instruction.
 
-mod metadata;
-
-pub use metadata::MappedElf;
 use rusty_box::cpu::CodeBreakpoint;
 use rusty_box::cpu::registers::{CR3, CS, ESP, RIP};
 use rusty_box::emulator::StopReason;
 use rusty_box_core::events::{Emit, ExecutionRequest};
 
 use super::console::{Console, ConsoleResult};
+use super::metadata;
 use super::{AddressSpace, AnalysisError, next_address_space};
+pub use super::{MappedElf, MappedRegion};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ProcessObserved {
     pub pid: u32,
     pub executable: String,
     pub space: AddressSpace,
-}
-
-/// A half-open file mapping reported by `/proc/<pid>/maps` at exec.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MappedRegion {
-    pub start: u64,
-    pub end: u64,
-    pub file_offset: u64,
-}
-
-impl MappedRegion {
-    fn contains(self, address: u64) -> bool {
-        (self.start..self.end).contains(&address)
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -167,6 +152,11 @@ pub struct Paused {
 }
 
 impl Paused {
+    #[cfg(test)]
+    pub(super) fn stopped_machine(&mut self) -> &mut rusty_box::Emulator {
+        self.guest.0.machine()
+    }
+
     pub fn observation(&self) -> &Observation {
         &self.observation
     }
