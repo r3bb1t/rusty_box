@@ -157,9 +157,9 @@ fn publish_app(input: u8) -> u8 {
 
     struct RegisterChanged(u8);
     struct DeviceReset;
-    let mut app = App::<u8>::new()
-        .on(|event: &RegisterChanged, state: &mut u8| *state = event.0)
-        .on(|_: &DeviceReset, state: &mut u8| *state = 0)
+    let mut app = App::new()
+        .route(|event: &RegisterChanged, state: &mut u8| *state = event.0)
+        .route(|_: &DeviceReset, state: &mut u8| *state = 0)
         .with_state(0);
     assert_eq!(
         app.dispatch(&RegisterChanged(input)),

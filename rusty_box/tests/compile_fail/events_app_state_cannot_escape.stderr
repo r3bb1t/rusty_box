@@ -1,10 +1,10 @@
 error[E0521]: borrowed data escapes outside of closure
- --> tests/compile_fail/events_app_state_cannot_escape.rs:9:43
+ --> tests/compile_fail/events_app_state_cannot_escape.rs:9:46
   |
 7 |     let mut retained = None;
   |         ------------ `retained` declared here, outside of the closure body
-8 |     let mut app = App::<State>::new()
-9 |         .on(|_: &Tick, state: &mut State| retained = Some(&mut state.0))
-  |                        -----              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `state` escapes the closure body here
-  |                        |
-  |                        `state` is only valid in the closure body
+8 |     let mut app = App::new()
+9 |         .route(|_: &Tick, state: &mut State| retained = Some(&mut state.0))
+  |                           -----              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `state` escapes the closure body here
+  |                           |
+  |                           `state` is only valid in the closure body

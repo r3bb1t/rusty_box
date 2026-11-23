@@ -1,6 +1,6 @@
 # Host-side Linux observation
 
-Milestone 8 starts from `e48b73c`. It samples the active Linux task and its main executable's mappings using an emulator pause, debugger registers, and guest RAM. The observer lives in the downstream execution-workflows crate. Consumers can use its owned snapshots with `App::on()` and `with_state()` or supply an `Emit` implementation. [Run the examples](../../examples/execution_workflows/README.md#sample-linux-tasks-from-the-emulator-host) · [Observer API](../../examples/execution_workflows/src/linux/host.rs)
+Milestone 8 starts from `e48b73c`. It samples the active Linux task and its main executable's mappings using an emulator pause, debugger registers, and guest RAM. The observer lives in the downstream execution-workflows crate. Consumers can use its owned snapshots with `App::route()` and `with_state()` or supply an `Emit` implementation. [Run the examples](../../examples/execution_workflows/README.md#sample-linux-tasks-from-the-emulator-host) · [Observer API](../../examples/execution_workflows/src/linux/host.rs)
 
 ## What changed since Milestone 7
 

@@ -432,25 +432,25 @@ mod tests {
         };
         #[derive(Default)]
         struct State(Vec<u8>);
-        let handlers = App::<State, &'static str>::new()
-            .on(|_: &ProcessSample, state: &mut State| {
+        let handlers = App::<_, &'static str>::fallible()
+            .route(|_: &ProcessSample, state: &mut State| {
                 state.0.push(1);
                 Ok(ExecutionRequest::Stop)
             })
-            .on(|_: &ProcessSample, state: &mut State| state.0.push(2));
+            .route(|_: &ProcessSample, state: &mut State| state.0.push(2));
         let mut stopped = handlers
-            .on(|_: &ExecutableSample, state: &mut State| state.0.push(3))
+            .route(|_: &ExecutableSample, state: &mut State| state.0.push(3))
             .with_state(State::default());
         assert_eq!(sample.deliver(&mut stopped), Ok(ExecutionRequest::Stop));
         assert_eq!(stopped.into_state().0, [1, 2, 3]);
 
-        let mut faulty = App::<State, &'static str>::new()
-            .on(|_: &ProcessSample| Ok(ExecutionRequest::Stop))
-            .on(|_: &ExecutableSample, state: &mut State| {
+        let mut faulty = App::<_, &'static str>::fallible()
+            .route(|_: &ProcessSample| Ok(ExecutionRequest::Stop))
+            .route(|_: &ExecutableSample, state: &mut State| {
                 state.0.push(3);
                 Err("later executable error")
             })
-            .on(|_: &ExecutableSample, state: &mut State| state.0.push(4))
+            .route(|_: &ExecutableSample, state: &mut State| state.0.push(4))
             .with_state(State::default());
         assert_eq!(sample.deliver(&mut faulty), Err("later executable error"));
         assert_eq!(faulty.into_state().0, [3]);

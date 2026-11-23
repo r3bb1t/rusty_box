@@ -34,13 +34,13 @@ fn compiled_programs_run_repeatedly_with_caller_io_and_typed_events() {
         statuses: Vec<u8>,
         total: usize,
     }
-    let handlers = App::<State, &'static str>::new()
-        .on(|event: &ProgramStarted, state: &mut State| {
+    let handlers = App::fallible()
+        .route(|event: &ProgramStarted, state: &mut State| {
             assert_eq!(event.initial_stack % 16, 0);
             assert!(!state.pending);
             state.pending = true;
         })
-        .on(|exit: &ProgramExited, state: &mut State| {
+        .route(|exit: &ProgramExited, state: &mut State| {
             if !state.pending {
                 return Err("duplicate exit");
             }
@@ -48,7 +48,7 @@ fn compiled_programs_run_repeatedly_with_caller_io_and_typed_events() {
             state.pending = false;
             Ok(ExecutionRequest::None)
         })
-        .on(|_: &ProgramExited, state: &mut State| state.total += 1);
+        .route(|_: &ProgramExited, state: &mut State| state.total += 1);
     let mut app = handlers.with_state(State::default());
 
     for _ in 0..2 {

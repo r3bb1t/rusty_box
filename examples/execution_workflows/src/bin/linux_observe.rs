@@ -22,7 +22,7 @@ mod processes {
     pub(super) fn register<H: AppHandlers<State, String>>(
         app: App<State, String, H>,
     ) -> App<State, String, impl AppHandlers<State, String>> {
-        app.on(|process: &ProcessObserved, state: &mut State| {
+        app.route(|process: &ProcessObserved, state: &mut State| {
             state.processes.push((process.pid, process.space));
             println!(
                 "Process {} pid={} cr3={:#x} generation={}",
@@ -41,7 +41,7 @@ mod images {
     pub(super) fn register<H: AppHandlers<State, String>>(
         app: App<State, String, H>,
     ) -> App<State, String, impl AppHandlers<State, String>> {
-        app.on(|image: &ImageObserved, state: &mut State| {
+        app.route(|image: &ImageObserved, state: &mut State| {
             if state.processes.len() != state.images.len() + 1
                 || state.processes.last() != Some(&(image.pid, image.space))
             {
@@ -50,7 +50,7 @@ mod images {
             state.images.push(image.entry);
             Ok(ExecutionRequest::None)
         })
-        .on(|image: &ImageObserved| {
+        .route(|image: &ImageObserved| {
             println!("Image pid={} entry={:#x}", image.pid, image.entry);
             for region in &image.executable_regions {
                 println!(
@@ -68,7 +68,7 @@ mod elf {
     pub(super) fn register<H: AppHandlers<State, String>>(
         app: App<State, String, H>,
     ) -> App<State, String, impl AppHandlers<State, String>> {
-        app.on(|metadata: &ImageMetadata, state: &mut State| {
+        app.route(|metadata: &ImageMetadata, state: &mut State| {
             let elf = metadata
                 .result
                 .as_ref()
@@ -85,7 +85,7 @@ mod elf {
             );
             Ok(ExecutionRequest::None)
         })
-        .on(|metadata: &ImageMetadata, state: &mut State| {
+        .route(|metadata: &ImageMetadata, state: &mut State| {
             let elf = metadata
                 .result
                 .as_ref()
@@ -156,7 +156,7 @@ fn main() -> ConsoleResult<()> {
         }
         _ => return Err("usage: linux_observe BZIMAGE INITRAMFS [--elf]".into()),
     };
-    let handlers = images::register(processes::register(App::<State, String>::new()));
+    let handlers = images::register(processes::register(App::fallible()));
     let guest = Guest::boot(&fs::read(kernel)?, &fs::read(initramfs)?)?;
     match request {
         MetadataRequest::Skip => run(handlers, guest, request),

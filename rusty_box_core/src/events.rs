@@ -8,7 +8,7 @@ use core::convert::Infallible;
 use core::marker::PhantomData;
 
 mod app;
-pub use app::{App, AppHandlers, Event, ReadyApp, Registered, Resolve, Resolved, event};
+pub use app::{App, AppHandlers, ReadyApp, Registered, Resolve, Resolved};
 
 /// A subscriber's request to the execution driver after successful delivery.
 /// Requests never interrupt delivery to the remaining subscribers.

@@ -14,38 +14,25 @@ mod erased {
 }
 use erased::EventRef;
 
-/// A type selector for [`App::route`]. Create one with [`event`].
-pub struct Event<E>(PhantomData<fn() -> E>);
-
-/// Select events of type `E` when registering a handler.
-pub const fn event<E>() -> Event<E> {
-    Event(PhantomData)
-}
-
 /// Typed event handlers awaiting application state.
 ///
 /// Register handlers with [`route`](Self::route) and supply the state once with
-/// [`with_state`](Self::with_state). Use `App::<()>` for stateless delivery.
+/// [`with_state`](Self::with_state). Supply `()` for stateless delivery.
 /// Handler storage is static and allocation-free. Event types must be
 /// `'static` for exact type matching. Their values are borrowed during
 /// delivery. Use [`Subscriptions`](super::Subscriptions) for event types with
 /// borrowed fields or handlers that need publisher-provided capabilities.
 ///
 /// ```
-/// use rusty_box_core::events::{App, ExecutionRequest, event};
+/// use rusty_box_core::events::{App, ExecutionRequest};
 ///
 /// struct RegisterChanged(u8);
 /// struct DeviceRegistered;
 /// struct State(u8);
 ///
-/// let handlers = App::<State>::new()
-///     .route(
-///         event::<RegisterChanged>(),
-///         |event: &RegisterChanged, state: &mut State| {
-///             state.0 = event.0;
-///         },
-///     )
-///     .route(event::<DeviceRegistered>(), |_: &DeviceRegistered| {});
+/// let handlers = App::new()
+///     .route(|event: &RegisterChanged, state: &mut State| state.0 = event.0)
+///     .route(|_: &DeviceRegistered| {});
 /// let mut app = handlers.with_state(State(0));
 /// assert_eq!(
 ///     app.dispatch(&RegisterChanged(42)),
@@ -58,9 +45,16 @@ pub struct App<S, X = Infallible, H = ()> {
     signature: PhantomData<fn(&mut S) -> X>,
 }
 
-impl<S, X> App<S, X> {
-    /// Start composing handlers. `X` is the application's delivery error type.
+impl<S> App<S> {
+    /// Start composing an app whose handlers cannot return delivery errors.
     pub const fn new() -> Self {
+        Self::fallible()
+    }
+}
+
+impl<S, X> App<S, X> {
+    /// Start composing an app with delivery error type `X`.
+    pub const fn fallible() -> Self {
         Self {
             handlers: (),
             signature: PhantomData,
@@ -70,40 +64,17 @@ impl<S, X> App<S, X> {
 
 impl<S, X> Default for App<S, X> {
     fn default() -> Self {
-        Self::new()
+        Self::fallible()
     }
 }
 
 impl<S, X, H: AppHandlers<S, X>> App<S, X, H> {
-    /// Append a handler for the selected event. Its first argument must be
-    /// `&E`. It can also take `&mut S` or `Resolved<'_, D>`, and it can be a
+    /// Register a handler. Its first argument, `&E`, selects the event type.
+    /// It can also take `&mut S` or `Resolved<'_, D>`, and it can be a
     /// `FnMut` closure. A dependency resolves only for a matching event.
     /// A handler can return `()`, [`ExecutionRequest`], or
     /// `Result<ExecutionRequest, X>`. Each invocation borrows state afresh.
-    ///
-    /// ```compile_fail,E0631
-    /// use rusty_box_core::events::{App, event};
-    ///
-    /// struct Started;
-    /// struct Finished;
-    /// fn report(_: &Finished) {}
-    ///
-    /// let _app = App::<()>::new().route(event::<Started>(), report);
-    /// ```
-    pub fn route<E, F, Args>(
-        self,
-        _: Event<E>,
-        handler: F,
-    ) -> App<S, X, Then<H, Registered<F, Args>>>
-    where
-        F: AppHandler<S, X, Args, Event = E>,
-    {
-        self.on(handler)
-    }
-
-    /// Append a handler, inferring the event type from its first argument.
-    /// See [`route`](Self::route) for the supported handler signatures.
-    pub fn on<F: AppHandler<S, X, Args>, Args>(
+    pub fn route<F: AppHandler<S, X, Args>, Args>(
         self,
         handler: F,
     ) -> App<S, X, Then<H, Registered<F, Args>>> {
@@ -173,6 +144,7 @@ impl<S, X, H: for<'a> Deliver<EventRef<'a>, S, X>> AppHandlers<S, X> for H {}
 
 /// Provide a borrowed dependency for handlers of `E` that ask for
 /// [`Resolved<'_, D>`](Resolved). Implement this on application state.
+/// The dependency may borrow from the state or the event.
 ///
 /// Each matching handler invokes the resolver separately. A provider can
 /// share work across handlers using a cache scoped to the event. A resolver
@@ -181,7 +153,7 @@ impl<S, X, H: for<'a> Deliver<EventRef<'a>, S, X>> AppHandlers<S, X> for H {}
 pub trait Resolve<E, D: ?Sized> {
     type Error;
 
-    fn resolve(&mut self, event: &E) -> Result<&D, Self::Error>;
+    fn resolve<'a>(&'a mut self, event: &'a E) -> Result<&'a D, Self::Error>;
 }
 
 /// A dependency borrowed for one handler invocation.
@@ -197,14 +169,14 @@ pub trait Resolve<E, D: ?Sized> {
 /// impl Resolve<Tick, u8> for State {
 ///     type Error = Infallible;
 ///
-///     fn resolve(&mut self, _: &Tick) -> Result<&u8, Infallible> {
+///     fn resolve<'a>(&'a mut self, _: &'a Tick) -> Result<&'a u8, Infallible> {
 ///         Ok(&self.0)
 ///     }
 /// }
 ///
 /// let mut retained = None;
-/// let mut app = App::<State>::new()
-///     .on(|_: &Tick, Resolved(value): Resolved<'_, u8>| retained = Some(value))
+/// let mut app = App::new()
+///     .route(|_: &Tick, Resolved(value): Resolved<'_, u8>| retained = Some(value))
 ///     .with_state(State(0));
 /// let _delivery = app.dispatch(&Tick);
 /// ```
@@ -315,7 +287,7 @@ mod tests {
         impl Resolve<Tick, str> for State<'_> {
             type Error = &'static str;
 
-            fn resolve(&mut self, event: &Tick) -> Result<&str, Self::Error> {
+            fn resolve<'a>(&'a mut self, event: &'a Tick) -> Result<&'a str, Self::Error> {
                 self.lookups += 1;
                 if event.0 == 0 {
                     return Err("missing label");
@@ -326,9 +298,9 @@ mod tests {
 
         let bytes = *b"guest";
         let seen = Cell::new(0);
-        let mut app = App::<State<'_>, &str>::new()
-            .on(|_: &Tick, Resolved(label): Resolved<'_, str>| seen.set(label.len()))
-            .on(|_: &Tick, state: &mut State<'_>| state.lookups += 10)
+        let mut app = App::fallible()
+            .route(|_: &Tick, Resolved(label): Resolved<'_, str>| seen.set(label.len()))
+            .route(|_: &Tick, state: &mut State<'_>| state.lookups += 10)
             .with_state(State {
                 label: core::str::from_utf8(&bytes).unwrap(),
                 lookups: 0,
@@ -351,14 +323,14 @@ mod tests {
         }
 
         let mut seen = 0;
-        let handlers = App::<State<'_>>::new()
-            .on(|event: &Tick, state: &mut State<'_>| {
+        let handlers = App::new()
+            .route(|event: &Tick, state: &mut State<'_>| {
                 state.value += event.0;
                 ExecutionRequest::Stop
             })
-            .on(|_: &Reset, state: &mut State<'_>| state.value = 0)
-            .on(|event: &Tick| seen += event.0)
-            .on(|_: &Tick, state: &mut State<'_>| state.output.set(state.value * 2));
+            .route(|_: &Reset, state: &mut State<'_>| state.value = 0)
+            .route(|event: &Tick| seen += event.0)
+            .route(|_: &Tick, state: &mut State<'_>| state.output.set(state.value * 2));
 
         let output = Cell::new(0);
         let mut app = handlers.with_state(State {
@@ -376,16 +348,16 @@ mod tests {
 
     #[test]
     fn later_error_wins_over_stop_and_short_circuits_without_retry() {
-        let mut app = App::<u8, &str>::new()
-            .on(|_: &Tick, state: &mut u8| {
+        let mut app = App::fallible()
+            .route(|_: &Tick, state: &mut u8| {
                 *state += 1;
                 Ok(ExecutionRequest::Stop)
             })
-            .on(|_: &Tick, state: &mut u8| {
+            .route(|_: &Tick, state: &mut u8| {
                 *state *= 10;
                 Err("observer refused")
             })
-            .on(|_: &Tick, state: &mut u8| *state += 100)
+            .route(|_: &Tick, state: &mut u8| *state += 100)
             .with_state(0);
 
         assert_eq!(app.dispatch(&Tick(1)), Err("observer refused"));
@@ -394,14 +366,14 @@ mod tests {
 
     #[test]
     fn independent_app_can_receive_nested_delivery() {
-        let mut inner = App::<u8>::new()
-            .on(|tick: &Tick, state: &mut u8| {
+        let mut inner = App::new()
+            .route(|tick: &Tick, state: &mut u8| {
                 *state += tick.0;
                 ExecutionRequest::Stop
             })
             .with_state(0);
-        let mut outer = App::<()>::new()
-            .on(|_: &Reset| inner.dispatch(&Tick(7)))
+        let mut outer = App::new()
+            .route(|_: &Reset| inner.dispatch(&Tick(7)))
             .with_state(());
 
         assert_eq!(outer.dispatch(&Reset), Ok(ExecutionRequest::Stop));

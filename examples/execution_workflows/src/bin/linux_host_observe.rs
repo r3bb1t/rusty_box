@@ -103,8 +103,8 @@ fn main() -> ConsoleResult<()> {
         [kernel, initramfs, flag] if flag.as_os_str() == "--benchmark" => (kernel, initramfs, true),
         _ => return Err("usage: linux_host_observe BZIMAGE INITRAMFS [--benchmark]".into()),
     };
-    let handlers = App::<State, String>::new()
-        .on(|event: &ProcessSample, state: &mut State| {
+    let handlers = App::<_, String>::fallible()
+        .route(|event: &ProcessSample, state: &mut State| {
             state.processes.push((event.task, event.mm_address));
             println!(
                 "Host process {} pid={} tid={} start={} mm={:#x} cr3={:#x} {:?} user_ip={:#x}",
@@ -118,7 +118,7 @@ fn main() -> ConsoleResult<()> {
                 event.user_ip,
             );
         })
-        .on(|event: &ExecutableSample, state: &mut State| {
+        .route(|event: &ExecutableSample, state: &mut State| {
             if state.processes.len() != state.images + 1
                 || state.processes.last() != Some(&(event.task, event.mm_address))
                 || event.entry.is_none_or(|entry| {

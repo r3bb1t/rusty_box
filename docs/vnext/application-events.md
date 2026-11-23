@@ -5,7 +5,7 @@
 Start with the short `typed_events` example for a single handler and its state. [Beginner walkthrough](../../rusty_box/examples/README.md#typed-events)
 
 ```rust
-use rusty_box::events::{App, event};
+use rusty_box::events::App;
 
 struct ProcessCreated(u32);
 struct RegisterChanged(u8);
@@ -15,27 +15,28 @@ struct AppState {
     writes: u64,
 }
 
-let handlers = App::<AppState>::new()
-    .route(event::<ProcessCreated>(), |&ProcessCreated(pid): &ProcessCreated, state: &mut AppState| {
-        state.processes.push(pid);
-    })
-    .route(event::<RegisterChanged>(), |_: &RegisterChanged, state: &mut AppState| {
-        state.writes += 1;
-    })
-    .route(event::<RegisterChanged>(), |&RegisterChanged(value): &RegisterChanged| {
-        println!("New register value = {value}");
-    });
+fn record_process(&ProcessCreated(pid): &ProcessCreated, state: &mut AppState) {
+    state.processes.push(pid);
+}
 
-let mut app = handlers.with_state(AppState { processes: Vec::new(), writes: 0 });
+fn record_write(&RegisterChanged(value): &RegisterChanged, state: &mut AppState) {
+    state.writes += 1;
+    println!("New register value = {value}");
+}
+
+let mut app = App::new()
+    .route(record_process)
+    .route(record_write)
+    .with_state(AppState { processes: Vec::new(), writes: 0 });
 println!("Process created: {:?}", app.dispatch(&ProcessCreated(42)));
 println!("Register changed: {:?}", app.dispatch(&RegisterChanged(3)));
 let state = app.into_state();
 println!("Processes: {:?}, writes: {}", state.processes, state.writes);
 ```
 
-`route(event::<E>(), handler)` names the event type at registration. The handler's first argument must be `&E`. The shorthand `on(handler)` infers `E` from that argument.
+`route(handler)` takes the event type from the handler's first argument. Handlers can be ordinary functions or `FnMut` closures. Annotate closure arguments to select the signature.
 
-Handlers can be ordinary functions or `FnMut` closures. Annotate closure arguments to select the signature. `App::<State, Error>::new()` selects a shared delivery error type and `App::<State>::new()` defaults to `Infallible`. A handler can return `()`, `ExecutionRequest`, or `Result<ExecutionRequest, Error>`. Use `App::<()>` for handlers that need no state.
+Use `App::new()` for delivery with no errors and `App::fallible()` when a handler or resolver can return an error. The app infers its state type from `.with_state(...)`. Use `.with_state(())` for stateless delivery. A handler can return `()`, `ExecutionRequest`, or `Result<ExecutionRequest, Error>`.
 
 Each matching handler gets a fresh exclusive state borrow. State and captured values can themselves contain borrows. `state()` lends a shared reference between deliveries, and `into_state()` recovers the value and drops the handlers. The application imposes no `Clone`, `Send`, `Sync`, allocator, or async runtime bounds. Existing callers such as PC endpoint placement can impose their own bounds.
 
@@ -51,7 +52,7 @@ A delivery runs matching handlers synchronously in registration order. An unmatc
 
 Accept the existing `App<S, X, H>` with `H: AppHandlers<S, X>` and return `App<S, X, impl AppHandlers<S, X>>`. An integration that works with several application state types can take a function that borrows just the fields it needs. The caller can add more handlers to the returned builder before supplying state.
 
-The `typed_event_workflow` example installs its prepared app as the sink of an x86 instrumentation hook. The interpreter calls the hook after each successful instruction. The driver starts the CPU and the hook delivers events while the loop runs. [Live execution example](../../rusty_box/examples/typed_event_workflow.rs)
+The `typed_event_workflow` example boots Debian Linux and installs the app as the sink of an x86 I/O hook. The hook emits exec reports while the guest supervisor writes them to COM1. [Live Linux example](../../rusty_box/examples/typed_event_workflow.rs)
 
 ## Engineering report
 
@@ -78,7 +79,7 @@ The opted-in facade uses one borrowed `Any` view for exact type matching. Each r
 
 Register a function taking `(&Event, Resolved<'_, Dependency>)` when the handler needs a dependency. Implement `Resolve<Event, Dependency>` on the application state to supply it. The app matches the event type first, calls the resolver for a matching handler, and lends the result for that invocation. The resolver's error converts into the application error and stops delivery before the handler runs. Event-only and state handlers do no resolution. The extracted dependency is a shared borrow. [Resolver trait](../../rusty_box_core/src/events/app.rs)
 
-The live example's resolver maps the executed instruction address to a host-loader process record. Both handlers that ask for the record share a cache on that event. Providers choose the cache policy. The instruction-only run performs zero lookups. [Live process resolution](../../rusty_box/examples/typed_event_workflow.rs)
+The live example resolves a borrowed process record from the guest supervisor's report. Its provider parses the record once per event when a handler needs it. Providers can lend values from the event or the app state and choose the cache policy. The `--events-only` run performs zero process resolutions. [Live process resolution](../../rusty_box/examples/typed_event_workflow.rs)
 
 The downstream image workflow demonstrates another use of publisher-scoped preparation. It shares short-lived binary metadata across observers without adding an executable-format dependency to the event core. [Linux observation example](linux-observation-libafl.md)
 
@@ -89,9 +90,10 @@ cargo test --locked --release -p rusty_box_core --no-default-features
 cargo test --locked --release -p rusty_box --no-default-features --features std
 cargo build --locked --release -p rusty_box_no_alloc_smoke --target x86_64-unknown-none
 cargo run --locked --release -p rusty_box --no-default-features --example typed_events
-cargo run --locked --release -p rusty_box --no-default-features --features alloc --example typed_event_workflow
-cargo test --locked --release -p rusty_box --no-default-features --features alloc --example typed_event_workflow
+cargo test --locked --release -p rusty_box --no-default-features --features std --example typed_event_workflow
 ```
+
+For the live boot, use the Debian kernel and supervisor initramfs. [Run the Linux example](../../rusty_box/examples/README.md#resolve-a-loaded-process-while-linux-runs)
 
 | Release suite | Passed | Ignored |
 | --- | ---: | ---: |

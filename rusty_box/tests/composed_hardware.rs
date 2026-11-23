@@ -261,8 +261,8 @@ fn application_stop_preserves_the_publisher_irq_subscriber() {
         rejected: u32,
     }
 
-    let app = App::<Observations, SubscriberError>::new()
-        .on(|event: &GpuEvent, state: &mut Observations| {
+    let app = App::<_, SubscriberError>::fallible()
+        .route(|event: &GpuEvent, state: &mut Observations| {
             assert_eq!(
                 event.rejected().unwrap().destination,
                 BxPhyAddress::new(0x18FFE)
@@ -270,7 +270,7 @@ fn application_stop_preserves_the_publisher_irq_subscriber() {
             state.rejected += 1;
             ExecutionRequest::Stop
         })
-        .on(|_: &GpuEvent, state: &mut Observations| assert_eq!(state.rejected, 1))
+        .route(|_: &GpuEvent, state: &mut Observations| assert_eq!(state.rejected, 1))
         .with_state(Observations { rejected: 0 });
     let route = Subscriptions::<GpuEvent, SubscriberError>::new()
         .forward(app)

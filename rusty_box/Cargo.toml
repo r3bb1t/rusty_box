@@ -60,7 +60,7 @@ path = "examples/typed_events.rs"
 [[example]]
 name = "typed_event_workflow"
 path = "examples/typed_event_workflow.rs"
-required-features = ["alloc"]
+required-features = ["std"]
 
 [[example]]
 name = "composed_hardware"

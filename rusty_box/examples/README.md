@@ -24,33 +24,37 @@ cargo run --locked --release -p rusty_box --no-default-features --example typed_
 ```
 
 1. Define an event such as `SelectProcess` and an application state type.
-2. Register the event type and its handler together with `.route(event::<SelectProcess>(), select_process)`. In the handler, `&SelectProcess(pid)` takes the ID out of the event.
+2. Register the handler with `.route(select_process)`. The `&SelectProcess` argument selects the event, and the pattern gives the handler its `pid`.
 3. Give the app its state with `.with_state()`, then call `.dispatch(&SelectProcess(12))`. The app calls the handler immediately and lends it the state so it can update the selected process ID.
 
 Handlers can also take just `&Event` if they need no state. Returning `()` means the handler makes no execution request.
 
 The handler argument uses the same Rust destructuring syntax as Axum's `Path(id)` examples. Rusty Box lends the event to the handler, so the pattern starts with `&`. [Axum handler examples](https://docs.rs/axum/latest/axum/extract/#common-extractors)
 
-### Resolve a loaded process during execution
+### Resolve a loaded process while Linux runs
 
-The example loads two small code regions and calls `cpu.run(16)` once. The interpreter's `after_execution` hook delivers each completed instruction as it runs. One guest jump crosses from the counter's code into the worker's code. [Read the workflow](typed_event_workflow.rs)
+The workflow boots Debian Linux, then runs two test programs under the guest's existing exec supervisor. The emulator delivers each exec report from the COM1 write hook, inside the run loop. [Read the workflow](typed_event_workflow.rs)
+
+Use the pinned Debian installer kernel and static i386 BusyBox. [Kernel and BusyBox setup](../../examples/execution_workflows/README.md#boot-linux-and-replace-bincat)
 
 ```sh
-cargo run --locked --release -p rusty_box --no-default-features --features alloc --example typed_event_workflow
-cargo run --locked --release -p rusty_box --no-default-features --features alloc --example typed_event_workflow -- --instructions-only
+sh examples/execution_workflows/guest/build_observation.sh \
+  "$RB_WORK/busybox/bin/busybox" "$RB_WORK/observation"
+cargo run --locked --release -p rusty_box --no-default-features --features std \
+  --example typed_event_workflow -- "$RB_WORK/linux" "$RB_WORK/observation/observation.cpio.gz"
 ```
 
 The process handler declares its dependency in its argument list.
 
 ```rust,ignore
-fn print_process(_: &InstructionCompleted, Resolved(process): Resolved<'_, LoadedProcess>) {
-    println!("  process {} ({})", process.id, process.name);
+fn print_process(_: &ExecReported, Resolved(process): Resolved<'_, LoadedProcess>) {
+    println!("  Linux PID {}", process.pid);
 }
 ```
 
-Register it with `.route(event::<InstructionCompleted>(), print_process)`. The app invokes `Resolve<InstructionCompleted, LoadedProcess>` on the catalog only when a matching handler asks for the dependency. The catalog looks up the instruction address using its loaded code ranges and shares the answer between both process handlers for that event. With `--instructions-only`, the CPU runs the same code and the lookup count stays at zero.
+Register it with `.route(print_process)`. The resolver parses the guest report once and shares the result with the entry-address handler. Add `--events-only` after the initramfs path to run the same guest programs with zero process resolutions.
 
-The process IDs belong to the demo's host loader. Both code regions share one flat guest address space. The observation hook reports a lookup error to the driver after the run and stops publishing further events on that error. [Application event guide](../../docs/vnext/application-events.md)
+The guest supervisor obtains the PID and entry address through Linux `ptrace` and reports the executable path from procfs. The driver checks that both guest programs exited successfully. [Application event guide](../../docs/vnext/application-events.md)
 
 ## Required files
 

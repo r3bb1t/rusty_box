@@ -17,12 +17,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("usage: run COMPUTE_ELF FILTER_ELF INPUT_FILE".into());
     };
     let input = std::fs::read(input)?;
-    let handlers = App::<State, &'static str>::new()
-        .on(|start: &ProgramStarted, state: &mut State| {
+    let handlers = App::fallible()
+        .route(|start: &ProgramStarted, state: &mut State| {
             state.last_started = Some(*start);
             state.exit = None;
         })
-        .on(|exit: &ProgramExited, state: &mut State| {
+        .route(|exit: &ProgramExited, state: &mut State| {
             if state.last_started.take().is_none() {
                 return Err("exit without a matching program start");
             }

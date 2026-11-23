@@ -17,7 +17,7 @@ if let Stop::Exited(exit) = run.stop {
 }
 ```
 
-Implement `Io` to provide your own standard streams. Short transfers and errors go back to the program through EAX. A `Stop::Budget` result preserves the process for another `run`. Every other stop or error ends it. Reuse the parsed `Image` to construct another process with fresh state and different input. `ProgramStarted` and `ProgramExited` are ordinary event types that the embedding application can publish to `App::on()` handlers. [Architecture and execution contract](../docs/vnext/user-mode-foundation.md)
+Implement `Io` to provide your own standard streams. Short transfers and errors go back to the program through EAX. A `Stop::Budget` result preserves the process for another `run`. Every other stop or error ends it. Reuse the parsed `Image` to construct another process with fresh state and different input. `ProgramStarted` and `ProgramExited` are ordinary event types that the embedding application can publish to `App::route()` handlers. [Architecture and execution contract](../docs/vnext/user-mode-foundation.md)
 
 ## Build and run the two guest executables
 

@@ -501,9 +501,9 @@ fn measure_user_mode() {
         assert_eq!(run.engine_count, 350_000);
         assert_eq!(run.syscalls, 50_000);
 
-        let mut app = App::<u64>::new()
-            .on(|event: &ProgramStarted, state: &mut u64| *state += u64::from(event.entry))
-            .on(|event: &ProgramExited, state: &mut u64| *state += u64::from(event.status))
+        let mut app = App::new()
+            .route(|event: &ProgramStarted, state: &mut u64| *state += u64::from(event.entry))
+            .route(|event: &ProgramExited, state: &mut u64| *state += u64::from(event.status))
             .with_state(0);
         events[round] = time_each(100_000, || {
             assert_eq!(

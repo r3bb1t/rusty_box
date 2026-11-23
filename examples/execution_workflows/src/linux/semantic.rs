@@ -442,18 +442,18 @@ mod tests {
             .unwrap();
         assert_eq!(reads.get(), 2, "one ELF header plus one program header");
 
-        let mut app = App::<Vec<&str>>::new()
-            .on(|event: &ProcessObserved, output: &mut Vec<_>| {
+        let mut app = App::new()
+            .route(|event: &ProcessObserved, output: &mut Vec<_>| {
                 assert_eq!(event.pid, PID);
                 output.push("process");
                 ExecutionRequest::Stop
             })
-            .on(|_: &ImageObserved, output: &mut Vec<_>| output.push("image"))
-            .on(|metadata: &ImageMetadata, output: &mut Vec<_>| {
+            .route(|_: &ImageObserved, output: &mut Vec<_>| output.push("image"))
+            .route(|metadata: &ImageMetadata, output: &mut Vec<_>| {
                 assert_eq!(metadata.result.as_ref().unwrap().entry, ENTRY);
                 output.push("entry");
             })
-            .on(|metadata: &ImageMetadata, output: &mut Vec<_>| {
+            .route(|metadata: &ImageMetadata, output: &mut Vec<_>| {
                 assert_eq!(metadata.result.as_ref().unwrap().program_headers.len(), 1);
                 output.push("headers");
             })
@@ -521,16 +521,16 @@ mod tests {
                 |address, _| Err(AnalysisError::Missing { address }),
             )
             .unwrap();
-        let mut app = App::<Vec<&str>, &str>::new()
-            .on(|_: &ProcessObserved, output: &mut Vec<_>| {
+        let mut app = App::fallible()
+            .route(|_: &ProcessObserved, output: &mut Vec<_>| {
                 output.push("process");
                 ExecutionRequest::Stop
             })
-            .on(|_: &ImageObserved, output: &mut Vec<_>| {
+            .route(|_: &ImageObserved, output: &mut Vec<_>| {
                 output.push("image");
                 Err("image handler failed")
             })
-            .on(|_: &ImageMetadata, output: &mut Vec<_>| output.push("metadata"))
+            .route(|_: &ImageMetadata, output: &mut Vec<_>| output.push("metadata"))
             .with_state(Vec::new());
         assert_eq!(observed.deliver(&mut app), Err("image handler failed"));
         assert_eq!(app.into_state(), ["process", "image"]);

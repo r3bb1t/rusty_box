@@ -1,79 +1,85 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
-use rusty_box::cpu::registers::EAX;
+use rusty_box::cpu::instrumentation::{IoPort, MemAccessRW};
 
 use super::*;
 
+fn write_com1(tracer: &mut impl Instrumentation, bytes: &[u8]) {
+    for &value in bytes {
+        tracer.outp(&IoHookEvent {
+            port: IoPort::new(0x3F8),
+            size: 1,
+            value: u32::from(value),
+            access: MemAccessRW::Write,
+        });
+    }
+}
+
 #[test]
-fn one_run_resolves_both_loaded_code_ranges_and_shares_each_lookup() {
+fn serial_write_delivers_the_report_and_shares_resolution() {
     let observed = Rc::new(RefCell::new(Vec::new()));
     let observations = observed.clone();
-    let app = App::<Catalog, UnknownProcess>::new()
-        .on(
-            move |event: &InstructionCompleted, Resolved(process): Resolved<'_, LoadedProcess>| {
-                observations.borrow_mut().push((event.ip, process.id));
+    let app = App::fallible()
+        .route(
+            move |report: &ExecReported, Resolved(process): Resolved<'_, LoadedProcess>| {
+                observations
+                    .borrow_mut()
+                    .push((report.path.clone(), process.pid, process.entry));
             },
         )
-        .on(|_: &InstructionCompleted, Resolved(_): Resolved<'_, LoadedProcess>| {})
-        .with_state(Catalog::new());
-    let mut cpu = load_cpu(app).unwrap();
+        .route(|_: &ExecReported, Resolved(_): Resolved<'_, LoadedProcess>| {})
+        .with_state(ProcessResolver);
+    let mut tracer = SerialReports::new(app);
 
-    let run = cpu.run(16);
+    write_com1(
+        &mut tracer,
+        b"RB_EXEC 0000000c 08049000 00000000 00000000 00000000 00000000\n",
+    );
+    assert!(observed.borrow().is_empty());
+    write_com1(&mut tracer, b"RB_EXE /bin/program_sum\n");
 
-    assert!(matches!(
-        run.stop,
-        SessionStop::Inactive(ProcessorActivity::Halted)
-    ));
-    assert_eq!(cpu.regs().read(EAX), 42);
     assert_eq!(
         *observed.borrow(),
-        [(0x1000, 12), (0x1005, 12), (0x2000, 21), (0x2001, 21)]
+        [("/bin/program_sum".to_owned(), 12, 0x08049000)]
     );
-    let tracer = cpu.instrumentation();
+    assert_eq!(tracer.lookups, 1);
     assert_eq!(tracer.delivery, Ok(ExecutionRequest::None));
-    assert_eq!(tracer.app.as_ref().unwrap().state().lookups, 4);
 }
 
 #[test]
-fn event_only_handler_runs_without_resolving_processes() {
-    let count = Rc::new(Cell::new(0));
-    let calls = count.clone();
-    let app = App::<Catalog, UnknownProcess>::new()
-        .on(move |_: &InstructionCompleted| calls.set(calls.get() + 1))
-        .with_state(Catalog::new());
-    let mut cpu = load_cpu(app).unwrap();
+fn event_only_handler_skips_parsing_process_metadata() {
+    let app = App::fallible()
+        .route(|_: &ExecReported| {})
+        .with_state(ProcessResolver);
+    let mut tracer = SerialReports::new(app);
 
-    let run = cpu.run(16);
-
-    assert_eq!(count.get(), 4);
-    assert_eq!(run.instructions, 4);
-    assert_eq!(
-        cpu.instrumentation().app.as_ref().unwrap().state().lookups,
-        0
+    write_com1(
+        &mut tracer,
+        b"RB_EXEC bad metadata\nRB_EXE /bin/program_sum\n",
     );
+
+    assert_eq!(tracer.execs, 1);
+    assert_eq!(tracer.lookups, 0);
+    assert_eq!(tracer.delivery, Ok(ExecutionRequest::None));
 }
 
 #[test]
-fn missing_target_ends_publication_but_guest_can_finish() {
-    let count = Rc::new(Cell::new(0));
-    let calls = count.clone();
-    let app = App::<Catalog, UnknownProcess>::new()
-        .on(move |_: &InstructionCompleted| calls.set(calls.get() + 1))
-        .on(print_process)
-        .with_state(Catalog {
-            processes: &[],
-            lookups: 0,
-        });
-    let mut cpu = load_cpu(app).unwrap();
+fn invalid_process_metadata_stops_delivery_when_requested() {
+    fn unexpected_resolution(_: &ExecReported, _: Resolved<'_, LoadedProcess>) {
+        panic!("resolved invalid metadata");
+    }
 
-    let run = cpu.run(16);
+    let app = App::fallible()
+        .route(unexpected_resolution)
+        .with_state(ProcessResolver);
+    let mut tracer = SerialReports::new(app);
 
-    assert!(matches!(
-        run.stop,
-        SessionStop::Inactive(ProcessorActivity::Halted)
-    ));
-    assert_eq!(run.instructions, 4);
-    assert_eq!(count.get(), 1);
-    assert_eq!(cpu.instrumentation().delivery, Err(UnknownProcess(0x1000)));
+    write_com1(
+        &mut tracer,
+        b"RB_EXEC bad metadata\nRB_EXE /bin/program_sum\n",
+    );
+
+    assert_eq!(tracer.lookups, 1);
+    assert_eq!(tracer.delivery, Err(ReportError::InvalidExec));
 }
