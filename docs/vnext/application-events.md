@@ -5,7 +5,7 @@
 Start with the short `typed_events` example for a single handler and its state. [Beginner walkthrough](../../rusty_box/examples/README.md#typed-events)
 
 ```rust
-use rusty_box::events::App;
+use rusty_box::events::{App, event};
 
 struct ProcessCreated(u32);
 struct RegisterChanged(u8);
@@ -16,11 +16,15 @@ struct AppState {
 }
 
 let handlers = App::<AppState>::new()
-    .on(|&ProcessCreated(pid): &ProcessCreated, state: &mut AppState| {
+    .route(event::<ProcessCreated>(), |&ProcessCreated(pid): &ProcessCreated, state: &mut AppState| {
         state.processes.push(pid);
     })
-    .on(|_: &RegisterChanged, state: &mut AppState| state.writes += 1)
-    .on(|&RegisterChanged(value): &RegisterChanged| println!("New register value = {value}"));
+    .route(event::<RegisterChanged>(), |_: &RegisterChanged, state: &mut AppState| {
+        state.writes += 1;
+    })
+    .route(event::<RegisterChanged>(), |&RegisterChanged(value): &RegisterChanged| {
+        println!("New register value = {value}");
+    });
 
 let mut app = handlers.with_state(AppState { processes: Vec::new(), writes: 0 });
 println!("Process created: {:?}", app.dispatch(&ProcessCreated(42)));
@@ -29,7 +33,9 @@ let state = app.into_state();
 println!("Processes: {:?}, writes: {}", state.processes, state.writes);
 ```
 
-Handlers can be ordinary functions or `FnMut` closures. Annotate the event and state arguments of closures so Rust can select the signature. `App::<State, Error>::new()` selects a shared delivery error type and `App::<State>::new()` defaults to `Infallible`. A handler can return `()`, `ExecutionRequest`, or `Result<ExecutionRequest, Error>`. An application with only event observers can use `App::<()>::new().on(observer).with_state(())`.
+`route(event::<E>(), handler)` names the event type at registration. The handler's first argument must be `&E`. The shorthand `on(handler)` infers `E` from that argument.
+
+Handlers can be ordinary functions or `FnMut` closures. Annotate closure arguments to select the signature. `App::<State, Error>::new()` selects a shared delivery error type and `App::<State>::new()` defaults to `Infallible`. A handler can return `()`, `ExecutionRequest`, or `Result<ExecutionRequest, Error>`. Use `App::<()>` for handlers that need no state.
 
 Each matching handler gets a fresh exclusive state borrow. State and captured values can themselves contain borrows. `state()` lends a shared reference between deliveries, and `into_state()` recovers the value and drops the handlers. The application imposes no `Clone`, `Send`, `Sync`, allocator, or async runtime bounds. Existing callers such as PC endpoint placement can impose their own bounds.
 
@@ -39,7 +45,7 @@ A delivery runs matching handlers synchronously in registration order. An unmatc
 
 `ReadyApp` implements `Emit` and works directly with `publish_events`. An existing `Subscriptions` route can use `.forward(app)` alongside local handlers. The ready app owns its state while the publisher keeps lending the delivery capability to the handlers wired to receive it. For example, a device endpoint can forward notifications to the app and then run a low-level handler that drives its IRQ output. Both deliveries obey the same stop and error rules. Passing the app to a producer or attachment transfers or lends it according to that producer's existing ownership interface. [Existing device contracts](device-capabilities-and-events.md) · [PC integration test](../../rusty_box/tests/composed_hardware.rs)
 
-`Subscriptions::on_with()` registers a low-level handler that takes the event plus a capability lent by its publisher, such as an interrupt line. Use `App::on()` for handlers that use the app's own state.
+`Subscriptions::on_with()` registers a low-level handler that takes the event plus a capability lent by its publisher, such as an interrupt line. Use `App::route()` for handlers that use the app's own state.
 
 ## Reusable composition
 

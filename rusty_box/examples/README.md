@@ -24,7 +24,7 @@ cargo run --locked --release -p rusty_box --no-default-features --example typed_
 ```
 
 1. Define an event such as `SelectProcess` and an application state type.
-2. Register `select_process` with `.on()`. The first parameter, `&SelectProcess(pid): &SelectProcess`, tells the app which event to route and gives the handler the ID as `pid`.
+2. Register the event type and its handler together with `.route(event::<SelectProcess>(), select_process)`. In the handler, `&SelectProcess(pid)` takes the ID out of the event.
 3. Give the app its state with `.with_state()`, then call `.dispatch(&SelectProcess(12))`. The app calls the handler immediately and lends it the state so it can update the selected process ID.
 
 Handlers can also take just `&Event` if they need no state. Returning `()` means the handler makes no execution request.
@@ -48,7 +48,7 @@ fn print_process(_: &InstructionCompleted, Resolved(process): Resolved<'_, Loade
 }
 ```
 
-Register it with `.on(print_process)`. The app invokes `Resolve<InstructionCompleted, LoadedProcess>` on the catalog only when a matching handler asks for the dependency. The catalog looks up the instruction address using its loaded code ranges and shares the answer between both process handlers for that event. With `--instructions-only`, the CPU runs the same code and the lookup count stays at zero.
+Register it with `.route(event::<InstructionCompleted>(), print_process)`. The app invokes `Resolve<InstructionCompleted, LoadedProcess>` on the catalog only when a matching handler asks for the dependency. The catalog looks up the instruction address using its loaded code ranges and shares the answer between both process handlers for that event. With `--instructions-only`, the CPU runs the same code and the lookup count stays at zero.
 
 The process IDs belong to the demo's host loader. Both code regions share one flat guest address space. The observation hook reports a lookup error to the driver after the run and stops publishing further events on that error. [Application event guide](../../docs/vnext/application-events.md)
 

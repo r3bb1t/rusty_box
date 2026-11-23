@@ -6,16 +6,22 @@ use rusty_box::config::BxPhyAddress;
 use rusty_box::cpu::instrumentation::HookMask;
 use rusty_box::cpu::memory_session::SessionStop;
 use rusty_box::cpu::{CpuEmulator, Instruction, Instrumentation, ProcessorActivity};
-use rusty_box::events::{App, AppHandlers, Emit, ExecutionRequest, ReadyApp, Resolve, Resolved};
+use rusty_box::events::{
+    App, AppHandlers, Emit, ExecutionRequest, ReadyApp, Resolve, Resolved, event,
+};
 
 fn main() -> Result<(), DemoError> {
-    let app = App::<Catalog, UnknownProcess>::new().on(print_instruction);
+    let app = App::<Catalog, UnknownProcess>::new()
+        .route(event::<InstructionCompleted>(), print_instruction);
     let catalog = Catalog::new();
 
     if std::env::args().any(|arg| arg == "--instructions-only") {
         run(app.with_state(catalog))
     } else {
-        run(app.on(print_process).on(print_entry).with_state(catalog))
+        let app = app
+            .route(event::<InstructionCompleted>(), print_process)
+            .route(event::<InstructionCompleted>(), print_entry);
+        run(app.with_state(catalog))
     }
 }
 

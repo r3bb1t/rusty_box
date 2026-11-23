@@ -14,9 +14,17 @@ mod erased {
 }
 use erased::EventRef;
 
+/// A type selector for [`App::route`]. Create one with [`event`].
+pub struct Event<E>(PhantomData<fn() -> E>);
+
+/// Select events of type `E` when registering a handler.
+pub const fn event<E>() -> Event<E> {
+    Event(PhantomData)
+}
+
 /// Typed event handlers awaiting application state.
 ///
-/// Register handlers with [`on`](Self::on) and supply the state once with
+/// Register handlers with [`route`](Self::route) and supply the state once with
 /// [`with_state`](Self::with_state). Use `App::<()>` for stateless delivery.
 /// Handler storage is static and allocation-free. Event types must be
 /// `'static` for exact type matching. Their values are borrowed during
@@ -24,15 +32,20 @@ use erased::EventRef;
 /// borrowed fields or handlers that need publisher-provided capabilities.
 ///
 /// ```
-/// use rusty_box_core::events::{App, ExecutionRequest};
+/// use rusty_box_core::events::{App, ExecutionRequest, event};
 ///
 /// struct RegisterChanged(u8);
 /// struct DeviceRegistered;
 /// struct State(u8);
 ///
 /// let handlers = App::<State>::new()
-///     .on(|event: &RegisterChanged, state: &mut State| state.0 = event.0)
-///     .on(|_: &DeviceRegistered| {});
+///     .route(
+///         event::<RegisterChanged>(),
+///         |event: &RegisterChanged, state: &mut State| {
+///             state.0 = event.0;
+///         },
+///     )
+///     .route(event::<DeviceRegistered>(), |_: &DeviceRegistered| {});
 /// let mut app = handlers.with_state(State(0));
 /// assert_eq!(
 ///     app.dispatch(&RegisterChanged(42)),
@@ -62,12 +75,34 @@ impl<S, X> Default for App<S, X> {
 }
 
 impl<S, X, H: AppHandlers<S, X>> App<S, X, H> {
-    /// Append a handler. Its first argument selects the event type. Use
-    /// `fn(&E)`, `fn(&E, &mut S)`, or `fn(&E, Resolved<'_, D>)` signatures,
-    /// including `FnMut` closures. The last form resolves `D` using the app's
-    /// state only when the event matches the handler.
+    /// Append a handler for the selected event. Its first argument must be
+    /// `&E`. It can also take `&mut S` or `Resolved<'_, D>`, and it can be a
+    /// `FnMut` closure. A dependency resolves only for a matching event.
     /// A handler can return `()`, [`ExecutionRequest`], or
     /// `Result<ExecutionRequest, X>`. Each invocation borrows state afresh.
+    ///
+    /// ```compile_fail,E0631
+    /// use rusty_box_core::events::{App, event};
+    ///
+    /// struct Started;
+    /// struct Finished;
+    /// fn report(_: &Finished) {}
+    ///
+    /// let _app = App::<()>::new().route(event::<Started>(), report);
+    /// ```
+    pub fn route<E, F, Args>(
+        self,
+        _: Event<E>,
+        handler: F,
+    ) -> App<S, X, Then<H, Registered<F, Args>>>
+    where
+        F: AppHandler<S, X, Args, Event = E>,
+    {
+        self.on(handler)
+    }
+
+    /// Append a handler, inferring the event type from its first argument.
+    /// See [`route`](Self::route) for the supported handler signatures.
     pub fn on<F: AppHandler<S, X, Args>, Args>(
         self,
         handler: F,

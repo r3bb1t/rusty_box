@@ -1,6 +1,6 @@
 //! Register a function, give the app state, and deliver a typed event.
 
-use rusty_box::events::App;
+use rusty_box::events::{App, event};
 
 struct SelectProcess(u32);
 
@@ -16,7 +16,7 @@ fn select_process(&SelectProcess(pid): &SelectProcess, state: &mut State) {
 
 fn main() {
     let mut app = App::<State>::new()
-        .on(select_process)
+        .route(event::<SelectProcess>(), select_process)
         .with_state(State::default());
 
     let delivery = app.dispatch(&SelectProcess(12));
