@@ -33,12 +33,12 @@ use crate::memory::mapped::{LoanBacking, MemoryLoan};
 use crate::pc_system::BxPcSystemC;
 
 /// One CPU plus the machine it is executing against.
+///
+/// Keep the CPU and primary bases in short-displacement fields for scalar
+/// accesses. The size of an optional backing must not move these fields.
+#[repr(C)]
 pub(crate) struct ExecCtx<'a, T: Instrumentation> {
     cpu: &'a mut BxCpuC<T>,
-    /// Guest memory. Disjoint from `cpu`, so both can be held at once — the
-    /// property the raw `mem_bus` pointer existed to fake.
-    pub(crate) memory: ExecutionMemory<'a>,
-    pub(crate) hardware: Hardware<'a>,
     /// Guest RAM as one host slice, or null when it is split or only partly
     /// resident. Untagged data TLB offsets are measured from this base.
     pub(crate) mem_host_base: *mut u8,
@@ -48,6 +48,10 @@ pub(crate) struct ExecCtx<'a, T: Instrumentation> {
     /// because fetch also runs out of ROM and out of relocated blocks. This
     /// base is null for independently backed loans.
     pub(crate) mem_alloc_base: *mut u8,
+    /// Guest memory. Disjoint from `cpu`, so both can be held at once — the
+    /// property the raw `mem_bus` pointer existed to fake.
+    pub(crate) memory: ExecutionMemory<'a>,
+    pub(crate) hardware: Hardware<'a>,
     pub(super) pending_scalar_io: Option<super::memory_session::scalar_io::PendingScalarIo>,
     pub(super) external_scalar: Option<super::memory_session::ExternalScalar>,
 }

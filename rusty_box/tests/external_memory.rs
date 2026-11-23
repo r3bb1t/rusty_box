@@ -966,6 +966,44 @@ fn direct_regions_fetch_instruction_split_across_two_allocations() {
 }
 
 #[test]
+fn warm_cache_guest_store_marks_both_pages_of_a_split_instruction() {
+    use rusty_box::cpu::registers::EIP;
+
+    for independent in [false, true] {
+        let mut board = paged_board(&[
+            0xC7, 0x05, 4, 0x60, 0, 0, 0, 0, 0, 0, // warm writable DTLB at 0x6004
+            0xC7, 0x05, 4, 0x70, 0, 0, 0, 0, 0, 0, // warm writable DTLB at 0x7004
+            0xC7, 0x05, 0xFF, 0x6F, 0, 0, 0xDD, 0xCC, 0xBB, 0xAA, // patch the split immediate
+        ]);
+        board.put(5, PAGE - 2, &[0xB8, 0x11]); // mov eax,0x44332211
+        board.put(6, 0, &[0x22, 0x33, 0x44, 0xF4]);
+        let mut cpu = cpu();
+        let verify = |mut session: MemorySession<'_>| {
+            run_to(&mut session, 0x1100);
+            assert_eq!(session.run(2).unwrap(), 2);
+            session.regs().write(EIP, 0x6FFE);
+            assert_eq!(session.run(1).unwrap(), 1);
+            assert_eq!(session.cpu().rax(), 0x4433_2211);
+
+            session.regs().write(EIP, 0x1114);
+            assert_eq!(session.run(1).unwrap(), 1);
+            session.regs().write(EIP, 0x6FFE);
+            assert_eq!(session.run(1).unwrap(), 1);
+            assert_eq!(session.cpu().rax(), 0xAABB_CCDD);
+        };
+        if independent {
+            let mut board = SeparateBoard::new(board);
+            let mut regions = board.regions();
+            let mut map = DirectMemory::new(&mut regions).unwrap();
+            verify(MemorySession::new(&mut cpu, map.loan()));
+        } else {
+            let mut map = board.memory(&PAGED_MAP);
+            verify(MemorySession::new(&mut cpu, map.loan()));
+        }
+    }
+}
+
+#[test]
 fn direct_regions_validate_boundaries_and_indirect_overlap() {
     let (mut partial_page, mut missing_stamps) = ([0; PAGE + 1], []);
     let mut invalid = [DirectRegion {

@@ -8,6 +8,9 @@ use super::{BxMemC, CpuMemoryPolicy, MemoryError, PhysAccess, Result};
 use crate::config::{A20Mask, BxPhyAddress};
 use crate::cpu::rusty_box::MemoryAccessType;
 
+// The tag is read on trace lookup and on cached stores. An explicit tag keeps
+// those paths from decoding the niche of the optional indirect RAM loan.
+#[repr(u8)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ExecutionMemory<'a> {
     Pc(&'a mut BxMemC),
@@ -409,6 +412,8 @@ impl ExecutionMemory<'_> {
     /// Publish a write and observe its sequence under the same backend match.
     /// The CPU still checks the sequence after every store, including a miss
     /// in the stamp table: another writer may have left pending events.
+    /// A cached page comes from a width-aware DTLB hit and covers the whole
+    /// store. Callers pass no page for routed and split writes.
     #[inline(always)]
     pub(crate) fn smc_dec_write_stamp(
         &mut self,
@@ -422,19 +427,14 @@ impl ExecutionMemory<'_> {
                 mem.smc_seq_next()
             }
             Self::Borrowed(mem) => {
-                if len as usize <= 4096 - addr.page_offset() as usize {
-                    // The DTLB's direct RAM proof uses arena coordinates.
-                    // It remains valid under the exclusive loan, and every
-                    // rebind invalidates it. Events still use the guest GPA.
-                    let index = if let Some(page) = cached_page {
-                        Some(page.ram_offset() >> 12)
-                    } else {
-                        mem.stamp_index(addr)
-                    };
-                    if let Some(index) = index {
-                        if index < mem.stamps.len() {
-                            mem.writes.write(mem.stamps, index, addr, len);
-                        }
+                if let Some(page) = cached_page {
+                    // The full page is backed and has a corresponding stamp
+                    // for the duration of the loan. Publish the guest GPA.
+                    mem.writes
+                        .write(mem.stamps, page.ram_offset() >> 12, addr, len);
+                } else if len as usize <= 4096 - addr.page_offset() as usize {
+                    if let Some(index) = mem.stamp_index(addr).filter(|&i| i < mem.stamps.len()) {
+                        mem.writes.write(mem.stamps, index, addr, len);
                     }
                 } else {
                     mem.mark_write(addr, len as usize);
@@ -442,9 +442,8 @@ impl ExecutionMemory<'_> {
                 mem.writes.next()
             }
             Self::Direct(mem) => {
-                let cached_offset = cached_page
-                    .filter(|_| len as usize <= 4096 - addr.page_offset() as usize)
-                    .and_then(|page| DirectOffset::decode(page.ram_offset()));
+                let cached_offset =
+                    cached_page.and_then(|page| DirectOffset::decode(page.ram_offset()));
                 if let Some(offset) = cached_offset {
                     mem.mark_cached_write(offset, addr, len);
                 } else {
