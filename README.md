@@ -278,6 +278,7 @@ It needs the rustup targets `x86_64-unknown-none`, `x86_64-unknown-uefi` and `wa
 - [rusty_box_gui/README.md](rusty_box_gui/README.md) -- the shell in full: the VM library, pages, engines, disk images, Android, browser
 - [docs/automation.md](docs/automation.md) -- driving a guest from Rust: boot it headless, read the screen, type at it, watch what it does
 - Start with one typed handler, then extract process metadata while a real Linux guest runs. [Beginner walkthrough](rusty_box/examples/README.md#typed-events) · [Application event guide](docs/vnext/application-events.md)
+- Embed the CPU, attach devices, or observe a Linux guest through the public APIs. [Application integration and readiness](docs/vnext/application-integration.md)
 - Run x86 with an owned emulator or over a caller-owned RAM slice. [Owned CPU](rusty_box/examples/cpu_facade/main.rs) · [Borrowed RAM](rusty_box/examples/cpu_only/main.rs)
 - Review the Rust emulator API, branch ancestry, and x86 performance procedure. [API consolidation](docs/vnext/api-consolidation.md)
 - Lend independent executable, data, and stack allocations to the x86 CPU-only interpreter, with optional indirect RAM. [External memory providers and API readiness](docs/vnext/external-memory-providers.md)

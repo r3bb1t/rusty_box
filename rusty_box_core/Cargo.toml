@@ -24,3 +24,7 @@ std = ["alloc"]
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "app_delivery"
+harness = false
