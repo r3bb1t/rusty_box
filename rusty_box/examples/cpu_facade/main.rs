@@ -1,8 +1,9 @@
-//! Step, edit registers, and complete a port output using the owned x86 API.
+//! Run a guest function with owned x86 RAM and service its port output.
 use rusty_box::config::BxPhyAddress;
+use rusty_box::cpu::instrumentation::HookMask;
 use rusty_box::cpu::memory_session::SessionStop;
 use rusty_box::cpu::registers::{AL, EAX, ECX, EDX, EIP};
-use rusty_box::cpu::{CpuEmulator, CpuError, ProcessorActivity};
+use rusty_box::cpu::{CpuEmulator, CpuError, Instruction, Instrumentation, ProcessorActivity};
 
 const ENTRY: u32 = 0x1000;
 const RETURN: u32 = 0x1100;
@@ -13,7 +14,11 @@ fn phys(address: u32) -> BxPhyAddress {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut emu = CpuEmulator::builder().entry(ENTRY).stack(STACK).build()?;
+    let mut emu = CpuEmulator::builder()
+        .ram(0x3000)
+        .entry(ENTRY)
+        .stack(STACK)
+        .build_with_tracer(CountInstructions::default())?;
 
     // lea eax,[ecx+edx*2]; add eax,edx; ret
     emu.memory()
@@ -27,31 +32,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         regs.write(EDX, 3);
     }
 
-    assert!(matches!(emu.step().stop, SessionStop::Budget));
+    match emu.step().stop {
+        SessionStop::Budget => {}
+        stop => return Err(std::io::Error::other(format!("unexpected step stop {stop:?}")).into()),
+    }
     let intermediate = emu.regs().read(EAX);
-    assert_eq!(intermediate, 13);
+    println!("After one step, EAX = {intermediate}");
     emu.regs().write(EDX, 10);
-    let outcome = emu.run(16);
-    match outcome.stop {
-        SessionStop::Exit(CpuError::IoUnavailable { string: false, .. }) => {
-            assert_eq!(emu.regs().read(EIP), RETURN);
-            assert_eq!(emu.regs().read(EAX), 23);
-            let result = emu.regs().read(AL);
-            assert!(emu.service_scalar_io(|request| {
-                assert_eq!(
-                    (request.port.get(), request.output),
-                    (0x80, Some(result.into()))
-                );
-                println!("function returned {result} after intermediate value {intermediate}");
-                Some(0)
-            })?);
-        }
+    match emu.run(16).stop {
+        SessionStop::Exit(CpuError::IoUnavailable { string: false, .. }) => {}
         other => return Err(std::io::Error::other(format!("unexpected stop {other:?}")).into()),
     }
-    assert!(matches!(
-        emu.step().stop,
-        SessionStop::Inactive(ProcessorActivity::Halted)
-    ));
+    let pc = emu.regs().read(EIP);
+    println!("Port output at EIP {pc:#x}, AL = {}", emu.regs().read(AL));
+    let serviced = emu.service_scalar_io(|request| {
+        match (request.port.get(), request.output) {
+            (0x80, Some(value)) => println!("Guest wrote {value} to port 0x80"),
+            _ => return None,
+        }
+        Some(0)
+    })?;
+    if !serviced {
+        return Err(std::io::Error::other("no supported port output to service").into());
+    }
 
-    Ok(())
+    match emu.run(1).stop {
+        SessionStop::Inactive(ProcessorActivity::Halted) => {
+            println!(
+                "Halted after {} instruction callbacks",
+                emu.instrumentation().observed
+            );
+            Ok(())
+        }
+        stop => Err(std::io::Error::other(format!("unexpected stop {stop:?}")).into()),
+    }
+}
+
+#[derive(Default)]
+struct CountInstructions {
+    observed: u64,
+}
+
+impl Instrumentation for CountInstructions {
+    fn active_hooks(&self) -> HookMask {
+        HookMask::EXEC
+    }
+
+    fn before_execution(&mut self, _ip: u64, _instruction: &Instruction) {
+        self.observed += 1;
+    }
 }

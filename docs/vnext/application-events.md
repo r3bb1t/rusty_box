@@ -42,11 +42,20 @@ Each handler that takes `&mut State` gets a fresh exclusive borrow. State and ca
 
 ## Extractors
 
-An extractor supplies a typed value on demand. Implement `FromEvent<Event, State>` on the extractor type and register a handler taking `(&Event, &Extractor)`. Omit `State` in the trait implementation when the application state is `()`. The handler's signature tells `.route()` which event and extractor to use. A handler takes one extractor or a mutable state argument.
+An extractor supplies a typed value on demand. Implement `FromEvent<Event, State>` on the extractor type. The handler's signature tells `.route()` which event and extractor to use.
+
+| Handler arguments | What the app lends |
+| --- | --- |
+| `(&Event)` | The event |
+| `(&Event, &mut State)` | The event and exclusive state |
+| `(&Event, &Extractor)` | A result from `FromEvent<Event, State>`, which may borrow from either input |
+| `(&Event, &Extractor, &mut State)` | A result from `FromEvent<Event>` and exclusive state |
+
+The last form gives the extractor a separate unit value, even when the app has state. The extractor may lend data from the event, so the handler can safely mutate application state. An extractor that borrows application state must run in its own handler. Register a separate state handler for later mutations, or return a single borrowed view when a handler needs several related values. The app supports one extractor argument per handler.
 
 The app matches the event type, then calls `from_event` for each matching handler that asks for the extractor. An extractor can borrow from the event or state and can prepare a value in an event-local cache so several handlers share the work. The borrow lasts for that invocation. If extraction fails, the error converts into the application error and delivery stops before calling the handler.
 
-In the Linux example, `print_process(_: &ExecReported, process: &LoadedProcess)` asks for process metadata. `LoadedProcess` implements `FromEvent<ExecReported>` and parses the guest supervisor's report on first use. The entry-address handler borrows the same parsed record. Run with `--events-only` to see delivery without extraction. [Linux workflow](../../rusty_box/examples/typed_event_workflow.rs) · [Extractor trait](../../rusty_box_core/src/events/app.rs)
+In the Linux COM1 example, `LoadedProcess` implements `FromEvent<ExecReported>`. The handler reads the parsed process and updates a separate app-owned counter. Run with `--events-only` to see delivery without extraction. The host-side example lends a paused guest as state so two handlers can share a single executable mapping walk. [COM1 workflow](../../rusty_box/examples/typed_event_workflow.rs) · [Host-side workflow](../../examples/execution_workflows/src/bin/linux_host_observe.rs) · [Extractor trait](../../rusty_box_core/src/events/app.rs)
 
 The downstream image workflow shares short-lived binary metadata across observers using a pause in execution to prepare it. [Linux observation example](linux-observation-libafl.md)
 

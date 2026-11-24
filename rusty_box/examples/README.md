@@ -47,14 +47,18 @@ cargo run --locked --release -p rusty_box --no-default-features --features std \
 The process handler asks for the `LoadedProcess` extractor in its argument list.
 
 ```rust,ignore
-fn print_process(_: &ExecReported, process: &LoadedProcess) {
-    println!("  Linux PID {}", process.pid);
+fn print_process(_: &ExecReported, process: &LoadedProcess, state: &mut ProcessCount) {
+    state.observed += 1;
+    println!("  Process {} has Linux PID {}", state.observed, process.pid);
+    println!("  entry {:#x}", process.entry);
 }
 ```
 
-Register it with `.route(print_process)`. To define the extractor, implement `FromEvent<ExecReported>` on `LoadedProcess`. The app calls `from_event` when a matching handler asks for `&LoadedProcess`. Here the extractor parses the guest report once and shares the result with the entry-address handler. Add `--events-only` after the initramfs path to run the same guest programs with zero process extractions.
+Register it with `.route(print_process)`. `LoadedProcess` implements `FromEvent<ExecReported>` because it reads the guest report. The app can lend the handler that result and its mutable process counter at the same time. Add `--events-only` after the initramfs path to run the same guest programs with zero process extractions.
 
 The guest supervisor obtains the PID and entry address through Linux `ptrace` and reports the executable path from procfs. The driver checks that both guest programs exited successfully. [Application event guide](../../docs/vnext/application-events.md)
+
+To sample tasks from the emulator host using an ordinary guest shell, run `linux_host_observe`. Its process handler receives a lightweight sample. Its two image handlers share one executable mapping walk when registered. [Host-side Linux example](../../examples/execution_workflows/README.md#sample-linux-tasks-from-the-emulator-host)
 
 ## Required files
 

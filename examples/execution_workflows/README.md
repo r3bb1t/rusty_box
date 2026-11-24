@@ -39,7 +39,7 @@ cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.
 
 ## Sample Linux tasks from the emulator host
 
-Download the pinned Debian installer image and unpack the BusyBox package as described below. Use `--host-only` to build a guest with an ordinary shell and two executables. COM1 launches each command and checks its output and exit code. The observer selects the active task at a kernel breakpoint and reads the task, page-directory root, executable mappings, and entry from emulator-visible registers and RAM. [Design and scope](../../docs/vnext/linux-host-observation.md)
+Download the pinned Debian installer image and unpack the BusyBox package as described below. Use `--host-only` to build a guest with an ordinary shell and two executables. COM1 launches each command and checks its output and exit code. At a kernel breakpoint the host reads the active task and page-directory root from emulator-visible registers and RAM. [Design and scope](../../docs/vnext/linux-host-observation.md)
 
 ```sh
 sh examples/execution_workflows/guest/build_observation.sh \
@@ -49,10 +49,12 @@ cargo run --locked --release --manifest-path examples/execution_workflows/Cargo.
 RB_OBSERVATION_KERNEL="$RB_WORK/linux" \
 RB_HOST_OBSERVATION_INITRAMFS="$RB_WORK/host-only/observation.cpio.gz" \
 cargo test --locked --release --manifest-path examples/execution_workflows/Cargo.toml \
-  --test linux_host_observation -- --ignored --nocapture
+  --test linux_host_observation -- --ignored --test-threads=1 --nocapture
 ```
 
-The example reports a pending userspace return and the executable backing it for each of `program_sum` and `program_text`. Add `--benchmark` to time paused task reads, the mapping walk with auxiliary-vector parsing, and a separate optional ELF probe. The probe reports unavailable header bytes if the read-only header page is absent.
+The process handler reports a pending userspace return for each of `program_sum` and `program_text`. The entry and mapping handlers request the same executable image extractor. The first request reads the saved auxiliary vector and walks the mappings. The second uses that result. Add `--process-only` after the initramfs path to run just the process handler and skip both reads. [Host-side handlers](src/bin/linux_host_observe.rs)
+
+Add `--benchmark` to time paused task reads, the mapping walk with auxiliary-vector parsing, and a separate optional ELF probe. The probe reports unavailable header bytes if the read-only header page is absent.
 
 The independent oracle test uses the **supervised** initramfs built in the next section. It compares a new host snapshot at a ring-3 pause against the original supervisor's PID, entry and executable ranges, and checks the live CR3 and resident ELF metadata.
 
