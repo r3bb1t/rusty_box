@@ -1,4 +1,5 @@
 //! Boot Debian Linux and handle process reports while the guest writes COM1.
+//! Start with `main` and the three handlers. `SerialReports` connects COM1 to the app.
 
 use std::cell::OnceCell;
 use std::fs;
@@ -7,7 +8,7 @@ use std::path::Path;
 use rusty_box::cpu::Instrumentation;
 use rusty_box::cpu::instrumentation::{HookMask, IoHookEvent};
 use rusty_box::emulator::{EmulatorConfig, Ips, MachineBuilder, MemorySize, RunBudget, StopReason};
-use rusty_box::events::{App, Emit, ExecutionRequest, Resolve, Resolved};
+use rusty_box::events::{App, Emit, ExecutionRequest, FromEvent};
 use rusty_box::gui::NoGui;
 
 fn main() -> Result<(), DemoError> {
@@ -15,17 +16,12 @@ fn main() -> Result<(), DemoError> {
     let app = App::fallible().route(print_exec);
     match args.as_slice() {
         [kernel, initramfs] => {
-            let app = app
-                .route(print_process)
-                .route(print_entry)
-                .with_state(ProcessResolver);
+            let app = app.route(print_process).route(print_entry).with_state(());
             run_linux(Path::new(kernel), Path::new(initramfs), app)
         }
-        [kernel, initramfs, flag] if flag == "--events-only" => run_linux(
-            Path::new(kernel),
-            Path::new(initramfs),
-            app.with_state(ProcessResolver),
-        ),
+        [kernel, initramfs, flag] if flag == "--events-only" => {
+            run_linux(Path::new(kernel), Path::new(initramfs), app.with_state(()))
+        }
         _ => Err(DemoError::Usage),
     }
 }
@@ -34,11 +30,11 @@ fn print_exec(report: &ExecReported) {
     println!("Guest reported exec of {}", report.path);
 }
 
-fn print_process(_: &ExecReported, Resolved(process): Resolved<'_, LoadedProcess>) {
+fn print_process(_: &ExecReported, process: &LoadedProcess) {
     println!("  Linux PID {}", process.pid);
 }
 
-fn print_entry(_: &ExecReported, Resolved(process): Resolved<'_, LoadedProcess>) {
+fn print_entry(_: &ExecReported, process: &LoadedProcess) {
     println!("  entry {:#x}", process.entry);
 }
 
@@ -53,43 +49,46 @@ struct LoadedProcess {
     entry: u32,
 }
 
-struct ProcessResolver;
-
-impl Resolve<ExecReported, LoadedProcess> for ProcessResolver {
+impl FromEvent<ExecReported> for LoadedProcess {
     type Error = ReportError;
 
-    fn resolve<'a>(
-        &'a mut self,
-        report: &'a ExecReported,
-    ) -> Result<&'a LoadedProcess, ReportError> {
+    fn from_event<'a>(report: &'a ExecReported, _: &'a mut ()) -> Result<&'a Self, ReportError> {
         report
             .process
-            .get_or_init(|| {
-                let mut words = report.header.split_ascii_whitespace();
-                let pid = read_word(words.next())?;
-                let entry = read_word(words.next())?;
-                if pid == 0 || pid > i32::MAX as u32 || entry == 0 {
-                    return Err(ReportError::InvalidExec);
-                }
-                Ok(LoadedProcess { pid, entry })
-            })
+            .get_or_init(|| Self::from_header(&report.header))
             .as_ref()
             .map_err(|error| *error)
     }
 }
 
-fn read_word(word: Option<&str>) -> Result<u32, ReportError> {
+impl LoadedProcess {
+    fn from_header(header: &str) -> Result<Self, ReportError> {
+        let mut words = header.split_ascii_whitespace();
+        let pid = read_hex_word(words.next())?;
+        let entry = read_hex_word(words.next())?;
+        if pid == 0 || pid > i32::MAX as u32 || entry == 0 {
+            return Err(ReportError::InvalidExec);
+        }
+        Ok(Self { pid, entry })
+    }
+}
+
+fn read_hex_word(word: Option<&str>) -> Result<u32, ReportError> {
     let word = word
         .filter(|word| word.len() == 8)
         .ok_or(ReportError::InvalidExec)?;
     u32::from_str_radix(word, 16).map_err(|_| ReportError::InvalidExec)
 }
 
-fn run_linux(
-    kernel: &Path,
-    initramfs: &Path,
-    app: impl Emit<ExecReported, Error = ReportError> + 'static,
-) -> Result<(), DemoError> {
+fn run_linux<Sink>(kernel: &Path, initramfs: &Path, app: Sink) -> Result<(), DemoError>
+where
+    Sink: 'static
+        + Emit<
+            ExecReported,
+            // The run loop propagates report errors after each guest step.
+            Error = ReportError,
+        >,
+{
     let config = EmulatorConfig {
         memory: MemorySize::bytes(128 * 1024 * 1024),
         ips: Ips::new(300_000_000),
@@ -102,7 +101,7 @@ fn run_linux(
     guest.setup_direct_linux_boot(
         &fs::read(kernel)?,
         Some(&fs::read(initramfs)?),
-        "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 nokaslr nomodeset quiet rdinit=/init",
+        KERNEL_COMMAND_LINE,
     )?;
 
     let mut command = WORKLOAD;
@@ -138,8 +137,8 @@ fn run_linux(
                 return Err(ReportError::IncompleteRun.into());
             }
             println!(
-                "Both Linux programs exited successfully. {} process resolutions.",
-                reports.lookups
+                "Both Linux programs exited successfully. {} process extractions.",
+                reports.extractions
             );
             return Ok(());
         }
@@ -156,11 +155,14 @@ fn run_linux(
 
 // The existing fixture's supervisor reports exec metadata and reads "r\n"
 // before resuming its child. The guest shell connects the input via a pipe.
-const WORKLOAD: &[u8] = b"printf 'r\\n' | /bin/rb-observe /bin/program_sum && printf 'r\\n' | /bin/rb-observe /bin/program_text && echo RB_TYPED_DONE\n";
+const WORKLOAD: &[u8] = b"printf 'r\\n' | /bin/rb-observe /bin/program_sum && \
+    printf 'r\\n' | /bin/rb-observe /bin/program_text && echo RB_TYPED_DONE\n";
+const KERNEL_COMMAND_LINE: &str = "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 \
+    nokaslr nomodeset quiet rdinit=/init";
 const MAX_LINE: usize = 512;
 
-struct SerialReports<A> {
-    app: Option<A>,
+struct SerialReports<Sink> {
+    app: Option<Sink>,
     line: Vec<u8>,
     header: Option<String>,
     delivery: Result<ExecutionRequest, ReportError>,
@@ -168,11 +170,11 @@ struct SerialReports<A> {
     finished: bool,
     execs: usize,
     exits: usize,
-    lookups: usize,
+    extractions: usize,
 }
 
-impl<A> SerialReports<A> {
-    fn new(app: A) -> Self {
+impl<Sink> SerialReports<Sink> {
+    fn new(app: Sink) -> Self {
         Self {
             app: Some(app),
             ..Self::default()
@@ -180,7 +182,7 @@ impl<A> SerialReports<A> {
     }
 }
 
-impl<A> Default for SerialReports<A> {
+impl<Sink> Default for SerialReports<Sink> {
     fn default() -> Self {
         Self {
             app: None,
@@ -191,12 +193,20 @@ impl<A> Default for SerialReports<A> {
             finished: false,
             execs: 0,
             exits: 0,
-            lookups: 0,
+            extractions: 0,
         }
     }
 }
 
-impl<A: Emit<ExecReported, Error = ReportError> + 'static> Instrumentation for SerialReports<A> {
+impl<Sink> Instrumentation for SerialReports<Sink>
+where
+    Sink: 'static
+        + Emit<
+            ExecReported,
+            // The I/O hook records delivery errors for the run loop.
+            Error = ReportError,
+        >,
+{
     fn active_hooks(&self) -> HookMask {
         if self.ready {
             HookMask::IO
@@ -226,37 +236,49 @@ impl<A: Emit<ExecReported, Error = ReportError> + 'static> Instrumentation for S
     }
 }
 
-impl<A: Emit<ExecReported, Error = ReportError>> SerialReports<A> {
+impl<Sink> SerialReports<Sink>
+where
+    Sink: Emit<
+            ExecReported,
+            // Malformed reports and delivery errors use the same error type.
+            Error = ReportError,
+        >,
+{
     fn read_line(&mut self, line: &str) {
-        if let Some(header) = line.strip_prefix("RB_EXEC ") {
-            self.header = Some(header.to_owned());
-        } else if let Some(path) = line.strip_prefix("RB_EXE ") {
-            let (Some(header), Some(app)) = (self.header.take(), &mut self.app) else {
-                self.delivery = Err(ReportError::InvalidExec);
-                return;
-            };
-            let report = ExecReported {
-                header,
-                path: path.to_owned(),
-                process: OnceCell::new(),
-            };
-            self.execs += 1;
-            self.delivery = app.emit(&report, &mut ());
-            self.lookups += usize::from(report.process.get().is_some());
-        } else if line.starts_with("RB_STATUS ") {
-            if line.split_ascii_whitespace().nth(2) == Some("00000000") {
+        match line.split_once(' ') {
+            Some(("RB_EXEC", header)) => self.header = Some(header.to_owned()),
+            Some(("RB_EXE", path)) => self.publish_exec(path),
+            Some(("RB_STATUS", fields))
+                if fields.split_ascii_whitespace().nth(1) == Some("00000000") =>
+            {
                 self.exits += 1;
-            } else {
+            }
+            Some(("RB_STATUS", _)) => self.delivery = Err(ReportError::GuestFailed),
+            Some(("RB_ERROR", _)) => {
+                eprintln!("{line}");
                 self.delivery = Err(ReportError::GuestFailed);
             }
-        } else if line.starts_with("RB_ERROR ") {
-            eprintln!("{line}");
-            self.delivery = Err(ReportError::GuestFailed);
-        } else if line == "RB_TYPED_DONE" {
-            self.finished = true;
-        } else if line.starts_with("sum=") || line.starts_with("argv0=") {
-            println!("Guest output {line}");
+            _ if line == "RB_TYPED_DONE" => self.finished = true,
+            _ if line.starts_with("sum=") || line.starts_with("argv0=") => {
+                println!("Guest output {line}");
+            }
+            _ => {}
         }
+    }
+
+    fn publish_exec(&mut self, path: &str) {
+        let (Some(header), Some(app)) = (self.header.take(), &mut self.app) else {
+            self.delivery = Err(ReportError::InvalidExec);
+            return;
+        };
+        let report = ExecReported {
+            header,
+            path: path.to_owned(),
+            process: OnceCell::new(),
+        };
+        self.execs += 1;
+        self.delivery = app.emit(&report, &mut ());
+        self.extractions += usize::from(report.process.get().is_some());
     }
 }
 

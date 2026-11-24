@@ -36,9 +36,19 @@ println!("Processes: {:?}, writes: {}", state.processes, state.writes);
 
 `route(handler)` takes the event type from the handler's first argument. Handlers can be ordinary functions or `FnMut` closures. Annotate closure arguments to select the signature.
 
-Use `App::new()` for delivery with no errors and `App::fallible()` when a handler or resolver can return an error. The app infers its state type from `.with_state(...)`. Use `.with_state(())` for stateless delivery. A handler can return `()`, `ExecutionRequest`, or `Result<ExecutionRequest, Error>`.
+Use `App::new()` for delivery with no errors and `App::fallible()` when a handler or extractor can return an error. The app infers its state type from `.with_state(...)`. Use `.with_state(())` for stateless delivery. A handler can return `()`, `ExecutionRequest`, or `Result<ExecutionRequest, Error>`.
 
-Each matching handler gets a fresh exclusive state borrow. State and captured values can themselves contain borrows. `state()` lends a shared reference between deliveries, and `into_state()` recovers the value and drops the handlers. The application imposes no `Clone`, `Send`, `Sync`, allocator, or async runtime bounds. Existing callers such as PC endpoint placement can impose their own bounds.
+Each handler that takes `&mut State` gets a fresh exclusive borrow. State and captured values can themselves contain borrows. `state()` lends a shared reference between deliveries, and `into_state()` recovers the value and drops the handlers. The application imposes no `Clone`, `Send`, `Sync`, allocator, or async runtime bounds. Existing callers such as PC endpoint placement can impose their own bounds.
+
+## Extractors
+
+An extractor supplies a typed value on demand. Implement `FromEvent<Event, State>` on the extractor type and register a handler taking `(&Event, &Extractor)`. Omit `State` in the trait implementation when the application state is `()`. The handler's signature tells `.route()` which event and extractor to use. A handler takes one extractor or a mutable state argument.
+
+The app matches the event type, then calls `from_event` for each matching handler that asks for the extractor. An extractor can borrow from the event or state and can prepare a value in an event-local cache so several handlers share the work. The borrow lasts for that invocation. If extraction fails, the error converts into the application error and delivery stops before calling the handler.
+
+In the Linux example, `print_process(_: &ExecReported, process: &LoadedProcess)` asks for process metadata. `LoadedProcess` implements `FromEvent<ExecReported>` and parses the guest supervisor's report on first use. The entry-address handler borrows the same parsed record. Run with `--events-only` to see delivery without extraction. [Linux workflow](../../rusty_box/examples/typed_event_workflow.rs) · [Extractor trait](../../rusty_box_core/src/events/app.rs)
+
+The downstream image workflow shares short-lived binary metadata across observers using a pause in execution to prepare it. [Linux observation example](linux-observation-libafl.md)
 
 ## Delivery and device integration
 
@@ -65,7 +75,7 @@ The reviewed branch head, `88357d9`, provides local, single-event `Subscriptions
 
 Design B adds two types to represent composition and ownership. `App` has no dispatch entry point. `ReadyApp` stores `S` by value beside the handlers and dispatches via `&mut self`, so the state is reborrowed only for each invocation. The builder and ready app share the named chain types. Downstream composition helpers can hide their heterogeneous return type behind `AppHandlers`.
 
-The `FnMut` shapes require distinct trait parameters. On stable Rust, blanket implementations that differ only in their callable bounds conflict with E0119. Each implementation uses a marker tuple of a different length. The associated event type identifies what to match, and the concrete type inside `Resolved<'_, D>` identifies what to look up.
+The `FnMut` shapes require distinct trait parameters. On stable Rust, blanket implementations that differ only in their callable bounds conflict with E0119. Internal marker tuples distinguish the implementations. The first handler argument identifies the event, and a second shared reference identifies the extractor.
 
 ```rust,compile_fail
 trait Handler<E, S> {}
@@ -74,14 +84,6 @@ impl<E, S, F: FnMut(&E, &mut S)> Handler<E, S> for F {}
 ```
 
 The opted-in facade uses one borrowed `Any` view for exact type matching. Each registration may do a type check until a handler fails, so worst-case delivery cost is linear in the number of registrations. The chain and calls to the concrete handlers are statically dispatched. An empty chain returns immediately. The existing per-source paths do not enter the facade, and no dispatch hook was added to CPU execution. Use `Subscriptions` directly for fully static event selection or payload types containing short borrows. The `'static` bound on a facade event describes its type. The actual event value is still lent only for the call.
-
-### Dependency providers
-
-Register a function taking `(&Event, Resolved<'_, Dependency>)` when the handler needs a dependency. Implement `Resolve<Event, Dependency>` on the application state to supply it. The app matches the event type first, calls the resolver for a matching handler, and lends the result for that invocation. The resolver's error converts into the application error and stops delivery before the handler runs. Event-only and state handlers do no resolution. The extracted dependency is a shared borrow. [Resolver trait](../../rusty_box_core/src/events/app.rs)
-
-The live example resolves a borrowed process record from the guest supervisor's report. Its provider parses the record once per event when a handler needs it. Providers can lend values from the event or the app state and choose the cache policy. The `--events-only` run performs zero process resolutions. [Live process resolution](../../rusty_box/examples/typed_event_workflow.rs)
-
-The downstream image workflow demonstrates another use of publisher-scoped preparation. It shares short-lived binary metadata across observers without adding an executable-format dependency to the event core. [Linux observation example](linux-observation-libafl.md)
 
 ### Validation commands
 
@@ -93,7 +95,7 @@ cargo run --locked --release -p rusty_box --no-default-features --example typed_
 cargo test --locked --release -p rusty_box --no-default-features --features std --example typed_event_workflow
 ```
 
-For the live boot, use the Debian kernel and supervisor initramfs. [Run the Linux example](../../rusty_box/examples/README.md#resolve-a-loaded-process-while-linux-runs)
+For the live boot, use the Debian kernel and supervisor initramfs. [Run the Linux example](../../rusty_box/examples/README.md#extract-process-metadata-while-linux-runs)
 
 | Release suite | Passed | Ignored |
 | --- | ---: | ---: |

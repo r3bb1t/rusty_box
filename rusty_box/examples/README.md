@@ -31,7 +31,7 @@ Handlers can also take just `&Event` if they need no state. Returning `()` means
 
 The handler argument uses the same Rust destructuring syntax as Axum's `Path(id)` examples. Rusty Box lends the event to the handler, so the pattern starts with `&`. [Axum handler examples](https://docs.rs/axum/latest/axum/extract/#common-extractors)
 
-### Resolve a loaded process while Linux runs
+### Extract process metadata while Linux runs
 
 The workflow boots Debian Linux, then runs two test programs under the guest's existing exec supervisor. The emulator delivers each exec report from the COM1 write hook, inside the run loop. [Read the workflow](typed_event_workflow.rs)
 
@@ -44,15 +44,15 @@ cargo run --locked --release -p rusty_box --no-default-features --features std \
   --example typed_event_workflow -- "$RB_WORK/linux" "$RB_WORK/observation/observation.cpio.gz"
 ```
 
-The process handler declares its dependency in its argument list.
+The process handler asks for the `LoadedProcess` extractor in its argument list.
 
 ```rust,ignore
-fn print_process(_: &ExecReported, Resolved(process): Resolved<'_, LoadedProcess>) {
+fn print_process(_: &ExecReported, process: &LoadedProcess) {
     println!("  Linux PID {}", process.pid);
 }
 ```
 
-Register it with `.route(print_process)`. The resolver parses the guest report once and shares the result with the entry-address handler. Add `--events-only` after the initramfs path to run the same guest programs with zero process resolutions.
+Register it with `.route(print_process)`. To define the extractor, implement `FromEvent<ExecReported>` on `LoadedProcess`. The app calls `from_event` when a matching handler asks for `&LoadedProcess`. Here the extractor parses the guest report once and shares the result with the entry-address handler. Add `--events-only` after the initramfs path to run the same guest programs with zero process extractions.
 
 The guest supervisor obtains the PID and entry address through Linux `ptrace` and reports the executable path from procfs. The driver checks that both guest programs exited successfully. [Application event guide](../../docs/vnext/application-events.md)
 

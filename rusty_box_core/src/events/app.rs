@@ -70,8 +70,8 @@ impl<S, X> Default for App<S, X> {
 
 impl<S, X, H: AppHandlers<S, X>> App<S, X, H> {
     /// Register a handler. Its first argument, `&E`, selects the event type.
-    /// It can also take `&mut S` or `Resolved<'_, D>`, and it can be a
-    /// `FnMut` closure. A dependency resolves only for a matching event.
+    /// It can also take `&mut S` for state or `&D` for a [`FromEvent`]
+    /// extractor. A matching handler can be a function or `FnMut` closure.
     /// A handler can return `()`, [`ExecutionRequest`], or
     /// `Result<ExecutionRequest, X>`. Each invocation borrows state afresh.
     pub fn route<F: AppHandler<S, X, Args>, Args>(
@@ -142,45 +142,40 @@ pub trait AppHandlers<S, X = Infallible>: for<'a> Deliver<EventRef<'a>, S, X> {}
 
 impl<S, X, H: for<'a> Deliver<EventRef<'a>, S, X>> AppHandlers<S, X> for H {}
 
-/// Provide a borrowed dependency for handlers of `E` that ask for
-/// [`Resolved<'_, D>`](Resolved). Implement this on application state.
-/// The dependency may borrow from the state or the event.
+/// An extractor that borrows from an event or application state.
 ///
-/// Each matching handler invokes the resolver separately. A provider can
-/// share work across handlers using a cache scoped to the event. A resolver
-/// error is converted to the application's error and stops delivery before
-/// the handler runs.
-pub trait Resolve<E, D: ?Sized> {
-    type Error;
-
-    fn resolve<'a>(&'a mut self, event: &'a E) -> Result<&'a D, Self::Error>;
-}
-
-/// A dependency borrowed for one handler invocation.
-///
-/// A handler cannot keep that borrow for a later delivery.
+/// Implement this on the type a handler takes by shared reference after its
+/// event argument. `S` is the app's state type and defaults to `()`.
+/// Extraction runs only for matching handlers that ask for this type.
+/// An extractor can share work using a cache on the event. If it returns an
+/// error, the app converts it to its delivery error and stops before calling
+/// the handler. The borrow lasts for one handler invocation.
 ///
 /// ```compile_fail,E0521
 /// use core::convert::Infallible;
-/// use rusty_box_core::events::{App, Resolve, Resolved};
+/// use rusty_box_core::events::{App, FromEvent};
 ///
 /// struct Tick;
 /// struct State(u8);
-/// impl Resolve<Tick, u8> for State {
+/// impl FromEvent<Tick, State> for u8 {
 ///     type Error = Infallible;
 ///
-///     fn resolve<'a>(&'a mut self, _: &'a Tick) -> Result<&'a u8, Infallible> {
-///         Ok(&self.0)
+///     fn from_event<'a>(_: &'a Tick, state: &'a mut State) -> Result<&'a Self, Infallible> {
+///         Ok(&state.0)
 ///     }
 /// }
 ///
 /// let mut retained = None;
 /// let mut app = App::new()
-///     .route(|_: &Tick, Resolved(value): Resolved<'_, u8>| retained = Some(value))
+///     .route(|_: &Tick, value: &u8| retained = Some(value))
 ///     .with_state(State(0));
 /// let _delivery = app.dispatch(&Tick);
 /// ```
-pub struct Resolved<'a, D: ?Sized>(pub &'a D);
+pub trait FromEvent<E, S = ()> {
+    type Error;
+
+    fn from_event<'a>(event: &'a E, state: &'a mut S) -> Result<&'a Self, Self::Error>;
+}
 
 #[doc(hidden)]
 pub struct Registered<F, Args>(F, PhantomData<fn() -> Args>);
@@ -195,7 +190,7 @@ impl<S, X, F: AppHandler<S, X, Args>, Args> Deliver<EventRef<'_>, S, X> for Regi
     }
 }
 
-// Distinct tuple parameters keep the two blanket implementations disjoint.
+// Distinct tuple parameters keep the handler implementations disjoint.
 #[doc(hidden)]
 pub trait AppHandler<S, X, Args> {
     type Event: 'static;
@@ -232,17 +227,16 @@ where
 impl<E, S, X, D, F, R> AppHandler<S, X, (E, S, fn(&D))> for F
 where
     E: 'static,
-    D: ?Sized,
-    S: Resolve<E, D>,
-    X: From<S::Error>,
-    F: FnMut(&E, Resolved<'_, D>) -> R,
+    D: FromEvent<E, S> + ?Sized,
+    X: From<D::Error>,
+    F: FnMut(&E, &D) -> R,
     R: HandlerResult<X>,
 {
     type Event = E;
 
     fn call(&mut self, event: &E, state: &mut S) -> Result<ExecutionRequest, X> {
-        let dependency = state.resolve(event)?;
-        self(event, Resolved(dependency)).into_result()
+        let extracted = D::from_event(event, state)?;
+        self(event, extracted).into_result()
     }
 }
 
@@ -278,28 +272,31 @@ mod tests {
     struct Reset;
 
     #[test]
-    fn dependency_is_borrowed_only_for_matching_handlers() {
+    fn extractor_is_called_only_for_matching_handlers() {
         struct State<'a> {
             label: &'a str,
             lookups: u8,
         }
 
-        impl Resolve<Tick, str> for State<'_> {
+        impl FromEvent<Tick, State<'_>> for str {
             type Error = &'static str;
 
-            fn resolve<'a>(&'a mut self, event: &'a Tick) -> Result<&'a str, Self::Error> {
-                self.lookups += 1;
+            fn from_event<'a>(
+                event: &'a Tick,
+                state: &'a mut State<'_>,
+            ) -> Result<&'a Self, Self::Error> {
+                state.lookups += 1;
                 if event.0 == 0 {
                     return Err("missing label");
                 }
-                Ok(self.label)
+                Ok(state.label)
             }
         }
 
         let bytes = *b"guest";
         let seen = Cell::new(0);
         let mut app = App::fallible()
-            .route(|_: &Tick, Resolved(label): Resolved<'_, str>| seen.set(label.len()))
+            .route(|_: &Tick, label: &str| seen.set(label.len()))
             .route(|_: &Tick, state: &mut State<'_>| state.lookups += 10)
             .with_state(State {
                 label: core::str::from_utf8(&bytes).unwrap(),

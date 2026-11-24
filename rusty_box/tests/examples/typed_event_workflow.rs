@@ -17,19 +17,17 @@ fn write_com1(tracer: &mut impl Instrumentation, bytes: &[u8]) {
 }
 
 #[test]
-fn serial_write_delivers_the_report_and_shares_resolution() {
+fn serial_write_delivers_the_report_and_shares_extraction() {
     let observed = Rc::new(RefCell::new(Vec::new()));
     let observations = observed.clone();
     let app = App::fallible()
-        .route(
-            move |report: &ExecReported, Resolved(process): Resolved<'_, LoadedProcess>| {
-                observations
-                    .borrow_mut()
-                    .push((report.path.clone(), process.pid, process.entry));
-            },
-        )
-        .route(|_: &ExecReported, Resolved(_): Resolved<'_, LoadedProcess>| {})
-        .with_state(ProcessResolver);
+        .route(move |report: &ExecReported, process: &LoadedProcess| {
+            observations
+                .borrow_mut()
+                .push((report.path.clone(), process.pid, process.entry));
+        })
+        .route(|_: &ExecReported, _: &LoadedProcess| {})
+        .with_state(());
     let mut tracer = SerialReports::new(app);
 
     write_com1(
@@ -43,15 +41,13 @@ fn serial_write_delivers_the_report_and_shares_resolution() {
         *observed.borrow(),
         [("/bin/program_sum".to_owned(), 12, 0x08049000)]
     );
-    assert_eq!(tracer.lookups, 1);
+    assert_eq!(tracer.extractions, 1);
     assert_eq!(tracer.delivery, Ok(ExecutionRequest::None));
 }
 
 #[test]
 fn event_only_handler_skips_parsing_process_metadata() {
-    let app = App::fallible()
-        .route(|_: &ExecReported| {})
-        .with_state(ProcessResolver);
+    let app = App::fallible().route(|_: &ExecReported| {}).with_state(());
     let mut tracer = SerialReports::new(app);
 
     write_com1(
@@ -60,19 +56,17 @@ fn event_only_handler_skips_parsing_process_metadata() {
     );
 
     assert_eq!(tracer.execs, 1);
-    assert_eq!(tracer.lookups, 0);
+    assert_eq!(tracer.extractions, 0);
     assert_eq!(tracer.delivery, Ok(ExecutionRequest::None));
 }
 
 #[test]
 fn invalid_process_metadata_stops_delivery_when_requested() {
-    fn unexpected_resolution(_: &ExecReported, _: Resolved<'_, LoadedProcess>) {
-        panic!("resolved invalid metadata");
+    fn unexpected_extraction(_: &ExecReported, _: &LoadedProcess) {
+        panic!("handler received invalid process metadata");
     }
 
-    let app = App::fallible()
-        .route(unexpected_resolution)
-        .with_state(ProcessResolver);
+    let app = App::fallible().route(unexpected_extraction).with_state(());
     let mut tracer = SerialReports::new(app);
 
     write_com1(
@@ -80,6 +74,6 @@ fn invalid_process_metadata_stops_delivery_when_requested() {
         b"RB_EXEC bad metadata\nRB_EXE /bin/program_sum\n",
     );
 
-    assert_eq!(tracer.lookups, 1);
+    assert_eq!(tracer.extractions, 1);
     assert_eq!(tracer.delivery, Err(ReportError::InvalidExec));
 }
