@@ -71,9 +71,22 @@ impl<S, X> Default for App<S, X> {
 impl<S, X, H: AppHandlers<S, X>> App<S, X, H> {
     /// Register a handler. Its first argument, `&E`, selects the event type.
     /// It can also take `&mut S` for state or `&D` for a [`FromEvent`]
-    /// extractor. A matching handler can be a function or `FnMut` closure.
+    /// extractor. A handler taking both uses the order `(&E, &D, &mut S)`
+    /// and requires an event-only extractor (`D: FromEvent<E>`).
+    /// A matching handler can be a function or `FnMut` closure.
     /// A handler can return `()`, [`ExecutionRequest`], or
     /// `Result<ExecutionRequest, X>`. Each invocation borrows state afresh.
+    ///
+    /// ```compile_fail,E0277
+    /// use rusty_box_core::events::App;
+    ///
+    /// struct Tick;
+    /// struct Unrelated;
+    /// fn handler(_: &Tick, _: &Unrelated) {}
+    ///
+    /// // Unrelated does not implement FromEvent<Tick>.
+    /// let _app = App::new().route(handler).with_state(());
+    /// ```
     pub fn route<F: AppHandler<S, X, Args>, Args>(
         self,
         handler: F,
@@ -151,6 +164,10 @@ impl<S, X, H: for<'a> Deliver<EventRef<'a>, S, X>> AppHandlers<S, X> for H {}
 /// error, the app converts it to its delivery error and stops before calling
 /// the handler. The borrow lasts for one handler invocation.
 ///
+/// A handler that also takes mutable application state must use
+/// `FromEvent<E>`. The app provides a separate unit value to that extractor,
+/// so its result cannot alias the application state.
+///
 /// ```compile_fail,E0521
 /// use core::convert::Infallible;
 /// use rusty_box_core::events::{App, FromEvent};
@@ -170,6 +187,28 @@ impl<S, X, H: for<'a> Deliver<EventRef<'a>, S, X>> AppHandlers<S, X> for H {}
 ///     .route(|_: &Tick, value: &u8| retained = Some(value))
 ///     .with_state(State(0));
 /// let _delivery = app.dispatch(&Tick);
+/// ```
+///
+/// A state-borrowing extractor cannot accompany a mutable state argument.
+///
+/// ```compile_fail,E0277
+/// use core::convert::Infallible;
+/// use rusty_box_core::events::{App, FromEvent};
+///
+/// struct Tick;
+/// struct Counter(u8);
+/// struct State(Counter);
+/// impl FromEvent<Tick, State> for Counter {
+///     type Error = Infallible;
+///     fn from_event<'a>(_: &'a Tick, state: &'a mut State) -> Result<&'a Self, Infallible> {
+///         Ok(&state.0)
+///     }
+/// }
+///
+/// fn update(_: &Tick, current: &Counter, state: &mut State) {
+///     state.0 = Counter(current.0 + 1);
+/// }
+/// let _app = App::new().route(update).with_state(State(Counter(0)));
 /// ```
 pub trait FromEvent<E, S = ()> {
     type Error;
@@ -240,6 +279,23 @@ where
     }
 }
 
+impl<E, S, X, D, F, R> AppHandler<S, X, (E, S, fn(&D), ())> for F
+where
+    E: 'static,
+    D: FromEvent<E> + ?Sized,
+    X: From<D::Error>,
+    F: FnMut(&E, &D, &mut S) -> R,
+    R: HandlerResult<X>,
+{
+    type Event = E;
+
+    fn call(&mut self, event: &E, state: &mut S) -> Result<ExecutionRequest, X> {
+        let mut extractor_state = ();
+        let value = D::from_event(event, &mut extractor_state)?;
+        self(event, value, state).into_result()
+    }
+}
+
 trait HandlerResult<X> {
     fn into_result(self) -> Result<ExecutionRequest, X>;
 }
@@ -270,6 +326,34 @@ mod tests {
 
     struct Tick(u8);
     struct Reset;
+
+    #[test]
+    fn event_extractor_and_mutable_state_are_delivered_in_order() {
+        impl FromEvent<Tick> for u8 {
+            type Error = &'static str;
+
+            fn from_event<'a>(event: &'a Tick, _: &'a mut ()) -> Result<&'a Self, Self::Error> {
+                match event.0 {
+                    0 => Err("invalid tick"),
+                    _ => Ok(&event.0),
+                }
+            }
+        }
+
+        let mut app = App::fallible()
+            .route(|_: &Tick, sum: &mut u32| {
+                *sum += 1;
+                ExecutionRequest::Stop
+            })
+            .route(|_: &Tick, tick: &u8, sum: &mut u32| *sum += u32::from(*tick))
+            .route(|_: &Tick, sum: &mut u32| *sum *= 2)
+            .with_state(0);
+
+        assert_eq!(app.dispatch(&Tick(2)), Ok(ExecutionRequest::Stop));
+        assert_eq!(app.state(), &6);
+        assert_eq!(app.dispatch(&Tick(0)), Err("invalid tick"));
+        assert_eq!(app.into_state(), 7);
+    }
 
     #[test]
     fn extractor_is_called_only_for_matching_handlers() {

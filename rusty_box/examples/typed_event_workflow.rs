@@ -1,5 +1,5 @@
 //! Boot Debian Linux and handle process reports while the guest writes COM1.
-//! Start with `main` and the three handlers. `SerialReports` connects COM1 to the app.
+//! Start with `main` and the two handlers. `SerialReports` connects COM1 to the app.
 
 use std::cell::OnceCell;
 use std::fs;
@@ -16,12 +16,14 @@ fn main() -> Result<(), DemoError> {
     let app = App::fallible().route(print_exec);
     match args.as_slice() {
         [kernel, initramfs] => {
-            let app = app.route(print_process).route(print_entry).with_state(());
+            let app = app.route(print_process).with_state(ProcessCount::default());
             run_linux(Path::new(kernel), Path::new(initramfs), app)
         }
-        [kernel, initramfs, flag] if flag == "--events-only" => {
-            run_linux(Path::new(kernel), Path::new(initramfs), app.with_state(()))
-        }
+        [kernel, initramfs, flag] if flag == "--events-only" => run_linux(
+            Path::new(kernel),
+            Path::new(initramfs),
+            app.with_state(ProcessCount::default()),
+        ),
         _ => Err(DemoError::Usage),
     }
 }
@@ -30,11 +32,14 @@ fn print_exec(report: &ExecReported) {
     println!("Guest reported exec of {}", report.path);
 }
 
-fn print_process(_: &ExecReported, process: &LoadedProcess) {
-    println!("  Linux PID {}", process.pid);
+#[derive(Default)]
+struct ProcessCount {
+    observed: usize,
 }
 
-fn print_entry(_: &ExecReported, process: &LoadedProcess) {
+fn print_process(_: &ExecReported, process: &LoadedProcess, state: &mut ProcessCount) {
+    state.observed += 1;
+    println!("  Process {} has Linux PID {}", state.observed, process.pid);
     println!("  entry {:#x}", process.entry);
 }
 
