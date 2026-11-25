@@ -2,75 +2,21 @@
 
 use core::fmt;
 
+use rusty_box_core::connection::Port as EndpointPort;
+pub use rusty_box_core::connection::{Protocol, Receive, Transmit};
 use rusty_box_core::{ClockHz, RunBudget, VmDuration, VmInstant};
 
 use super::StopReason;
-use super::custom::{Aarch64Machine, InvalidDeadline, MachineBoard};
+use super::custom::{Aarch64Machine, InvalidDeadline};
+use crate::board::address_space::{AddressSpace, DeviceMap, DevicesMut};
 use crate::cpu::NoEl2;
 
-/// A marker for the protocol on the wire. Two protocols may use the same
-/// frame representation and still cannot be wired together.
-pub trait Protocol {
-    type Frame;
-}
+/// The single projection that identifies an endpoint in the fixed device
+/// tree. Its input can reach peripheral models, with no access to guest RAM,
+/// mappings or CPU state.
+pub type Port<D, T> = EndpointPort<for<'a> fn(DevicesMut<'a, D>) -> &'a mut T>;
 
-/// One pending outgoing frame, owned by a guest peripheral.
-pub struct Transmit<P: Protocol>(Option<P::Frame>);
-
-impl<P: Protocol> Default for Transmit<P> {
-    fn default() -> Self {
-        Self(None)
-    }
-}
-
-impl<P: Protocol> Transmit<P> {
-    pub fn pending(&self) -> bool {
-        self.0.is_some()
-    }
-
-    /// Queue a frame, returning it to the sender if the register is full.
-    pub fn send(&mut self, frame: P::Frame) -> Result<(), P::Frame> {
-        if self.pending() {
-            return Err(frame);
-        }
-        self.0 = Some(frame);
-        Ok(())
-    }
-}
-
-/// One pending incoming frame, owned by a guest peripheral.
-pub struct Receive<P: Protocol>(Option<P::Frame>);
-
-impl<P: Protocol> Default for Receive<P> {
-    fn default() -> Self {
-        Self(None)
-    }
-}
-
-impl<P: Protocol> Receive<P> {
-    pub fn pending(&self) -> bool {
-        self.0.is_some()
-    }
-
-    pub fn take(&mut self) -> Option<P::Frame> {
-        self.0.take()
-    }
-}
-
-/// The two projections of a particular port on a board. These functions
-/// must select the same model in shared and mutable views.
-pub struct Port<B, T> {
-    inspect: fn(&B) -> &T,
-    edit: fn(&mut B) -> &mut T,
-}
-
-impl<B, T> Port<B, T> {
-    pub const fn new(inspect: fn(&B) -> &T, edit: fn(&mut B) -> &mut T) -> Self {
-        Self { inspect, edit }
-    }
-}
-
-/// A unidirectional connection owned by the orchestrator.
+/// A unidirectional connection between two checked device trees.
 ///
 /// ```compile_fail,E0308
 /// use rusty_box_aarch64::machine::link::{Link, Port, Protocol, Receive, Transmit};
@@ -78,18 +24,18 @@ impl<B, T> Port<B, T> {
 /// struct Serial;
 /// impl Protocol for Digital { type Frame = u32; }
 /// impl Protocol for Serial { type Frame = u32; }
-/// let tx = Port::<Transmit<Digital>, _>::new(|tx| tx, |tx| tx);
-/// let rx = Port::<Receive<Serial>, _>::new(|rx| rx, |rx| rx);
-/// let _link = Link::new(tx, rx);
+/// fn mismatched<A, B>(tx: Port<A, Transmit<Digital>>, rx: Port<B, Receive<Serial>>) {
+///     let _link = Link::new(tx, rx);
+/// }
 /// ```
 ///
 /// ```compile_fail,E0308
 /// use rusty_box_aarch64::machine::link::{Link, Port, Protocol, Transmit};
 /// struct Digital;
 /// impl Protocol for Digital { type Frame = u32; }
-/// let a = Port::<Transmit<Digital>, _>::new(|tx| tx, |tx| tx);
-/// let b = Port::<Transmit<Digital>, _>::new(|tx| tx, |tx| tx);
-/// let _link = Link::new(a, b);
+/// fn reversed<A, B>(tx: Port<A, Transmit<Digital>>, other_tx: Port<B, Transmit<Digital>>) {
+///     let _link = Link::new(tx, other_tx);
+/// }
 /// ```
 pub struct Link<A, B, P: Protocol> {
     from: Port<A, Transmit<P>>,
@@ -101,26 +47,10 @@ impl<A, B, P: Protocol> Link<A, B, P> {
         Self { from, to }
     }
 
-    fn transfer(
-        &self,
-        from: &mut Aarch64Machine<A, NoEl2>,
-        to: &mut Aarch64Machine<B, NoEl2>,
-    ) -> bool
-    where
-        A: MachineBoard,
-        B: MachineBoard,
-    {
-        if !(self.from.inspect)(from.board()).pending() || (self.to.inspect)(to.board()).pending() {
-            return false;
-        }
-        to.with_board_mut(|board| {
-            let input = (self.to.edit)(board);
-            if input.pending() {
-                return false;
-            }
-            input.0 = from.with_board_mut(|board| (self.from.edit)(board).0.take());
-            input.pending()
-        })
+    /// Deliver at most one frame through exclusive loans to both endpoints.
+    pub fn transfer(&self, from: DevicesMut<'_, A>, to: DevicesMut<'_, B>) -> bool {
+        let output = self.from.project(from);
+        output.pending() && output.deliver_to(self.to.project(to))
     }
 }
 
@@ -179,17 +109,19 @@ pub struct PairOutcome {
 /// moves before second-to-first, if configured. The peripherals see the
 /// incoming frames on their next run. A full receiving register keeps the
 /// outgoing frame queued. A terminal stop leaves the barrier incomplete.
-pub struct ConnectedPair<A, B, P: Protocol> {
-    first: Aarch64Machine<A, NoEl2>,
-    second: Aarch64Machine<B, NoEl2>,
+pub struct ConnectedPair<'first, 'second, A, B, P: Protocol> {
+    first: Aarch64Machine<AddressSpace<'first, A>, NoEl2>,
+    second: Aarch64Machine<AddressSpace<'second, B>, NoEl2>,
     forward: Link<A, B, P>,
     reverse: Option<Link<B, A, P>>,
 }
 
-impl<A: MachineBoard, B: MachineBoard, P: Protocol> ConnectedPair<A, B, P> {
+impl<'first, 'second, A: DeviceMap, B: DeviceMap, P: Protocol>
+    ConnectedPair<'first, 'second, A, B, P>
+{
     pub fn new(
-        first: Aarch64Machine<A, NoEl2>,
-        second: Aarch64Machine<B, NoEl2>,
+        first: Aarch64Machine<AddressSpace<'first, A>, NoEl2>,
+        second: Aarch64Machine<AddressSpace<'second, B>, NoEl2>,
         forward: Link<A, B, P>,
     ) -> Result<Self, PairError> {
         let pair = Self {
@@ -207,19 +139,19 @@ impl<A: MachineBoard, B: MachineBoard, P: Protocol> ConnectedPair<A, B, P> {
         self
     }
 
-    pub fn first(&self) -> &Aarch64Machine<A, NoEl2> {
+    pub fn first(&self) -> &Aarch64Machine<AddressSpace<'first, A>, NoEl2> {
         &self.first
     }
 
-    pub fn second(&self) -> &Aarch64Machine<B, NoEl2> {
+    pub fn second(&self) -> &Aarch64Machine<AddressSpace<'second, B>, NoEl2> {
         &self.second
     }
 
-    pub fn first_mut(&mut self) -> &mut Aarch64Machine<A, NoEl2> {
+    pub fn first_mut(&mut self) -> &mut Aarch64Machine<AddressSpace<'first, A>, NoEl2> {
         &mut self.first
     }
 
-    pub fn second_mut(&mut self) -> &mut Aarch64Machine<B, NoEl2> {
+    pub fn second_mut(&mut self) -> &mut Aarch64Machine<AddressSpace<'second, B>, NoEl2> {
         &mut self.second
     }
 
@@ -295,9 +227,14 @@ impl<A: MachineBoard, B: MachineBoard, P: Protocol> ConnectedPair<A, B, P> {
                     expected: target,
                 });
             }
-            outcome.frames += u64::from(self.forward.transfer(&mut self.first, &mut self.second));
+            outcome.frames += u64::from(
+                self.forward
+                    .transfer(self.first.device_view(), self.second.device_view()),
+            );
             if let Some(reverse) = &self.reverse {
-                outcome.frames += u64::from(reverse.transfer(&mut self.second, &mut self.first));
+                outcome.frames += u64::from(
+                    reverse.transfer(self.second.device_view(), self.first.device_view()),
+                );
             }
             outcome.rounds += 1;
         }

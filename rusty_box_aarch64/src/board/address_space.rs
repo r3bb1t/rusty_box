@@ -2,6 +2,7 @@
 
 use core::convert::Infallible;
 use core::fmt;
+use core::marker::PhantomData;
 
 use rusty_box_core::{VmClock, VmInstant};
 use rusty_box_devices::api::WindowOffset;
@@ -66,6 +67,33 @@ impl fmt::Display for MapError {
 }
 
 impl core::error::Error for MapError {}
+
+/// Validation refused a mapping before taking any resources from the caller.
+pub struct MappingRefused<R> {
+    pub reason: MapError,
+    pub resources: R,
+}
+
+impl<R> fmt::Debug for MappingRefused<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.reason.fmt(f)
+    }
+}
+
+impl<R> fmt::Display for MappingRefused<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.reason.fmt(f)
+    }
+}
+
+impl<R> core::error::Error for MappingRefused<R> {}
+
+/// The inputs to a device mount. Recover these to retry with a new range.
+pub struct MountParts<D> {
+    pub range: AddressRange,
+    pub width: AccessWidth,
+    pub device: D,
+}
 
 /// Borrowed RAM or ROM, with its length checked against the physical map.
 pub struct MemoryRegion<B> {
@@ -132,11 +160,22 @@ pub struct MappedDevice<D: ClockedDevice, S = Subscriptions<Event<D>>> {
 }
 
 impl<D: ClockedDevice> MappedDevice<D> {
-    pub fn new(range: AddressRange, width: AccessWidth, device: D) -> Result<Self, MapError> {
+    pub fn new(
+        range: AddressRange,
+        width: AccessWidth,
+        device: D,
+    ) -> Result<Self, MappingRefused<MountParts<D>>> {
         if !range.base.get().is_multiple_of(width.bytes())
             || !range.len().is_multiple_of(width.bytes())
         {
-            return Err(MapError::InvalidRange);
+            return Err(MappingRefused {
+                reason: MapError::InvalidRange,
+                resources: MountParts {
+                    range,
+                    width,
+                    device,
+                },
+            });
         }
         Ok(Self {
             range,
@@ -198,14 +237,22 @@ pub struct DevicePair<A, B> {
     second: B,
 }
 
+pub struct DevicePairParts<A, B> {
+    pub first: A,
+    pub second: B,
+}
+
 impl<A: DeviceMap, B: DeviceMap> DevicePair<A, B> {
-    pub fn new(first: A, second: B) -> Result<Self, MapError> {
+    pub fn new(first: A, second: B) -> Result<Self, MappingRefused<DevicePairParts<A, B>>> {
         let mut overlaps = false;
         first.ranges(&mut |range| {
             overlaps |= second.overlaps(range);
         });
         if overlaps {
-            return Err(MapError::Overlap);
+            return Err(MappingRefused {
+                reason: MapError::Overlap,
+                resources: DevicePairParts { first, second },
+            });
         }
         Ok(Self { first, second })
     }
@@ -224,14 +271,72 @@ impl<A: DeviceMap, B: DeviceMap> DevicePair<A, B> {
 ///
 /// ```compile_fail
 /// use rusty_box_aarch64::{Aarch64Machine, NoEl2};
-/// use rusty_box_aarch64::board::address_space::{AddressSpace, ClockedDevice, MappedDevice};
+/// use rusty_box_aarch64::board::address_space::{AddressSpace, ClockedDevice, MappedDevice, Mounted};
 /// fn retain<'a, 'mem, D: ClockedDevice>(
 ///     machine: &'a mut Aarch64Machine<AddressSpace<'mem, MappedDevice<D>>, NoEl2>,
 /// ) -> &'a mut D {
-///     machine.with_board_mut(|board| board.devices_mut().device())
+///     machine.with_devices_mut(|devices| devices.select::<Mounted>())
 /// }
 /// ```
 pub struct DevicesMut<'a, D>(&'a mut D);
+
+impl<'a, D> DevicesMut<'a, D> {
+    /// Borrow the concrete model at a named slot in this tree.
+    pub fn get<K: DeviceSlot<D>>(&mut self) -> &mut K::Model {
+        K::project(DevicesMut(self.0))
+    }
+
+    /// Consume the view and retain its lifetime while selecting a model.
+    pub fn select<K: DeviceSlot<D>>(self) -> &'a mut K::Model {
+        K::project(self)
+    }
+}
+
+/// A typed position in a static device tree. Name a path with a type alias
+/// such as `type SensorSlot = First<Mounted>`.
+///
+/// ```compile_fail,E0277
+/// use rusty_box_aarch64::board::address_space::{DevicesMut, First, Mounted};
+/// fn missing_slot(mut devices: DevicesMut<'_, ()>) {
+///     devices.get::<First<Mounted>>();
+/// }
+/// ```
+pub trait DeviceSlot<D> {
+    type Model: ClockedDevice;
+
+    fn project(devices: DevicesMut<'_, D>) -> &mut Self::Model;
+}
+
+/// Select a mounted model at the current position.
+pub struct Mounted;
+/// Select a slot within the first child of a pair.
+pub struct First<K>(PhantomData<fn() -> K>);
+/// Select a slot within the second child of a pair.
+pub struct Second<K>(PhantomData<fn() -> K>);
+
+impl<D: ClockedDevice, S> DeviceSlot<MappedDevice<D, S>> for Mounted {
+    type Model = D;
+
+    fn project(devices: DevicesMut<'_, MappedDevice<D, S>>) -> &mut D {
+        devices.device()
+    }
+}
+
+impl<A: DeviceMap, B: DeviceMap, K: DeviceSlot<A>> DeviceSlot<DevicePair<A, B>> for First<K> {
+    type Model = K::Model;
+
+    fn project(devices: DevicesMut<'_, DevicePair<A, B>>) -> &mut Self::Model {
+        devices.first().select::<K>()
+    }
+}
+
+impl<A: DeviceMap, B: DeviceMap, K: DeviceSlot<B>> DeviceSlot<DevicePair<A, B>> for Second<K> {
+    type Model = K::Model;
+
+    fn project(devices: DevicesMut<'_, DevicePair<A, B>>) -> &mut Self::Model {
+        devices.second().select::<K>()
+    }
+}
 
 impl<'a, A: DeviceMap, B: DeviceMap> DevicesMut<'a, DevicePair<A, B>> {
     pub fn first(self) -> DevicesMut<'a, A> {
@@ -406,14 +511,27 @@ pub struct AddressSpace<'mem, D> {
     touched: bool,
 }
 
+pub struct AddressSpaceParts<'mem, D> {
+    pub ram: Ram<'mem>,
+    pub rom: Option<Rom<'mem>>,
+    pub devices: D,
+}
+
 impl<'mem, D: DeviceMap> AddressSpace<'mem, D> {
-    pub fn new(ram: Ram<'mem>, rom: Option<Rom<'mem>>, devices: D) -> Result<Self, MapError> {
+    pub fn new(
+        ram: Ram<'mem>,
+        rom: Option<Rom<'mem>>,
+        devices: D,
+    ) -> Result<Self, MappingRefused<AddressSpaceParts<'mem, D>>> {
         if devices.overlaps(ram.range)
             || rom
                 .as_ref()
                 .is_some_and(|rom| ram.range.overlaps(rom.range) || devices.overlaps(rom.range))
         {
-            return Err(MapError::Overlap);
+            return Err(MappingRefused {
+                reason: MapError::Overlap,
+                resources: AddressSpaceParts { ram, rom, devices },
+            });
         }
         Ok(Self {
             ram,

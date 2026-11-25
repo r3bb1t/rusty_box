@@ -3,7 +3,8 @@
 use core::iter::Empty;
 
 use rusty_box_aarch64::board::address_space::{
-    AddressRange, AddressSpace, ClockedDevice, DevicePair, MapError, MappedDevice, Ram, Rom,
+    AddressRange, AddressSpace, ClockedDevice, DevicePair, First, MapError, MappedDevice, Mounted,
+    Ram, Rom, Second,
 };
 use rusty_box_aarch64::machine::link::{Link, Port, Protocol, Receive, Transmit};
 use rusty_box_aarch64::{Aarch64Machine, AccessWidth, Cpu, CpuConfig, CpuModel, NoEl2, PhysAddr};
@@ -224,10 +225,13 @@ impl ClockedDevice for DigitalIo {
     }
 }
 
-type Peripherals =
+pub type Peripherals =
     DevicePair<MappedDevice<Temperature>, DevicePair<MappedDevice<Gpio>, MappedDevice<DigitalIo>>>;
 pub type Board<'mem> = AddressSpace<'mem, Peripherals>;
 pub type Controller<'mem> = Aarch64Machine<Board<'mem>, NoEl2>;
+pub type TemperatureSlot = First<Mounted>;
+pub type GpioSlot = Second<First<Mounted>>;
+pub type WireSlot = Second<Second<Mounted>>;
 
 pub fn controller<'mem>(
     ram: &'mem mut [u8; RAM_LEN],
@@ -238,22 +242,28 @@ pub fn controller<'mem>(
         AddressRange::new(PhysAddr::new(SENSOR), 12)?,
         AccessWidth::Word,
         Temperature::default(),
-    )?;
+    )
+    .map_err(|refused| refused.reason)?;
     let gpio = MappedDevice::new(
         AddressRange::new(PhysAddr::new(GPIO), 8)?,
         AccessWidth::Word,
         Gpio::default(),
-    )?;
+    )
+    .map_err(|refused| refused.reason)?;
     let wire = MappedDevice::new(
         AddressRange::new(PhysAddr::new(WIRE), 16)?,
         AccessWidth::Word,
         DigitalIo::default(),
-    )?;
+    )
+    .map_err(|refused| refused.reason)?;
+    let io = DevicePair::new(gpio, wire).map_err(|refused| refused.reason)?;
+    let devices = DevicePair::new(sensor, io).map_err(|refused| refused.reason)?;
     let board = AddressSpace::new(
         Ram::new(PhysAddr::new(0), ram.as_mut_slice())?,
         Some(Rom::new(PhysAddr::new(ENTRY), rom.as_slice())?),
-        DevicePair::new(sensor, DevicePair::new(gpio, wire)?)?,
-    )?;
+        devices,
+    )
+    .map_err(|refused| refused.reason)?;
     let cpu = Cpu::new(
         CpuModel::CortexA57,
         CpuConfig {
@@ -266,14 +276,9 @@ pub fn controller<'mem>(
 
 pub fn set_inputs(machine: &mut Controller<'_>, degrees: u32, input: u32) {
     let clock = machine.clock();
-    machine.with_board_mut(|board| {
-        board.devices_mut().first().device().set(degrees, clock);
-        board
-            .devices_mut()
-            .second()
-            .first()
-            .device()
-            .set_input(input);
+    machine.with_devices_mut(|mut devices| {
+        devices.get::<TemperatureSlot>().set(degrees, clock);
+        devices.get::<GpioSlot>().set_input(input);
     });
 }
 
@@ -281,14 +286,9 @@ pub fn output(machine: &Controller<'_>) -> u32 {
     machine.board().devices().second().first().device().output()
 }
 
-pub fn digital_link<'a, 'b>() -> Link<Board<'a>, Board<'b>, Digital> {
-    let from = Port::<Board<'a>, Transmit<Digital>>::new(
-        |board| &board.devices().second().second().device().tx,
-        |board| &mut board.devices_mut().second().second().device().tx,
-    );
-    let to = Port::<Board<'b>, Receive<Digital>>::new(
-        |board| &board.devices().second().second().device().rx,
-        |board| &mut board.devices_mut().second().second().device().rx,
-    );
-    Link::new(from, to)
+pub fn digital_link() -> Link<Peripherals, Peripherals, Digital> {
+    Link::new(
+        Port::new(|devices| &mut devices.select::<WireSlot>().tx),
+        Port::new(|devices| &mut devices.select::<WireSlot>().rx),
+    )
 }

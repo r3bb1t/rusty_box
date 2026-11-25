@@ -929,6 +929,11 @@ impl<L: Levels> Cpu<L> {
         self.trace_break = true;
     }
 
+    #[cfg(all(test, feature = "custom-board"))]
+    pub(crate) fn has_cached_trace(&self, pa: u64) -> bool {
+        self.traces.lookup(pa, CodeEpoch::new(0)).is_some()
+    }
+
     /// Give each page of `bytes` of RAM a page write stamp of its own (see
     /// [`TraceCache::cover`]), so that a store to one page never forgets
     /// the code of another; the running trace ends if the traces go.

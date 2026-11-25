@@ -2,7 +2,7 @@ use rusty_box_aarch64::ClockHz;
 use rusty_box_aarch64::machine::link::{ConnectedPair, PairStop};
 use rusty_box_core::VmDuration;
 use rusty_box_embedded_controller::{
-    RAM_LEN, controller, digital_link, firmware, output, set_inputs,
+    GpioSlot, RAM_LEN, TemperatureSlot, controller, digital_link, firmware,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,15 +17,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if pair.run(1, quantum)?.stop != PairStop::Completed {
         return Err("a controller stopped during boot".into());
     }
-    set_inputs(pair.first_mut(), 90, 5);
+    let clock = pair.first().clock();
+    pair.first_mut().with_devices_mut(|mut devices| {
+        devices.get::<TemperatureSlot>().set(90, clock);
+        devices.get::<GpioSlot>().set_input(5);
+    });
     let delivery = pair.run(2, quantum)?;
     if delivery.stop != PairStop::Completed || delivery.frames != 1 {
         return Err("expected one delivered frame".into());
     }
-    println!(
-        "Controller A GPIO {}, controller B GPIO {}",
-        output(pair.first()),
-        output(pair.second())
-    );
+    let gpio_a = pair
+        .first_mut()
+        .with_devices_mut(|mut devices| devices.get::<GpioSlot>().output());
+    let gpio_b = pair
+        .second_mut()
+        .with_devices_mut(|mut devices| devices.get::<GpioSlot>().output());
+    println!("Controller A GPIO {gpio_a}, controller B GPIO {gpio_b}");
     Ok(())
 }

@@ -5,6 +5,7 @@ use core::fmt;
 use rusty_box_core::{Progress, RunBudget, VmClock, VmInstant};
 
 use super::{BatchOutcome, PowerState, StopReason};
+use crate::board::address_space::{AddressSpace, DeviceMap, DevicesMut};
 use crate::bus::PhysBus;
 use crate::cpu::{Activity, Cpu, Levels, Reg, Step, StopCause, TimerLines, VirtualLines};
 use crate::instrumentation::{Instrumentation, NoInstrumentation};
@@ -101,6 +102,37 @@ struct RunEnds {
 impl<B: MachineBoard, L: Levels> Aarch64Machine<B, L> {
     pub fn new(cpu: Cpu<L>, board: B) -> Self {
         Self::with_instrumentation(cpu, board, NoInstrumentation)
+    }
+}
+
+impl<D: DeviceMap, L: Levels, I: Instrumentation> Aarch64Machine<AddressSpace<'_, D>, L, I> {
+    /// Edit mounted models without invalidating CPU caches or reservations.
+    /// The next run settles device signals and deadlines at the current tick.
+    ///
+    /// ```compile_fail,E0500
+    /// use rusty_box_aarch64::{Aarch64Machine, NoEl2, RunBudget};
+    /// use rusty_box_aarch64::board::address_space::{AddressSpace, DeviceMap};
+    /// fn run_while_editing<D: DeviceMap>(machine: &mut Aarch64Machine<AddressSpace<'_, D>, NoEl2>) {
+    ///     machine.with_devices_mut(|_| machine.step(RunBudget::Ticks(1)));
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail,E0599
+    /// use rusty_box_aarch64::{Aarch64Machine, NoEl2, PhysAddr};
+    /// use rusty_box_aarch64::board::address_space::{AddressSpace, DeviceMap};
+    /// fn overwrite_code<D: DeviceMap>(machine: &mut Aarch64Machine<AddressSpace<'_, D>, NoEl2>) {
+    ///     machine.with_devices_mut(|mut devices| devices.write_ram(PhysAddr::new(0), &[0]));
+    /// }
+    /// ```
+    pub fn with_devices_mut<F, R>(&mut self, edit: F) -> R
+    where
+        F: FnOnce(DevicesMut<'_, D>) -> R,
+    {
+        edit(self.device_view())
+    }
+
+    pub(super) fn device_view(&mut self) -> DevicesMut<'_, D> {
+        self.board.devices_mut()
     }
 }
 
@@ -282,5 +314,47 @@ impl<B: MachineBoard, L: Levels, I: Instrumentation> Aarch64Machine<B, L, I> {
             StopCause::Undefined(i) => StopReason::Undefined(i),
             StopCause::BusFault { pc, addr } => StopReason::BusFault { pc, addr },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Aarch64Machine;
+    use crate::board::address_space::{AddressSpace, Ram};
+    use crate::{ClockHz, Cpu, CpuConfig, CpuModel, NoEl2, PhysAddr, Reg, RunBudget, StopReason};
+
+    #[test]
+    fn a_device_loan_keeps_cached_code_and_a_board_edit_clears_it() {
+        let mut bytes = [0; 4096];
+        // mov w0,#1; b back to mov
+        bytes[..4].copy_from_slice(&0x5280_0020u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&0x17FF_FFFFu32.to_le_bytes());
+        let addr = PhysAddr::new(0);
+        let board =
+            AddressSpace::new(Ram::new(addr, bytes.as_mut_slice()).unwrap(), None, ()).unwrap();
+        let cpu = Cpu::<NoEl2>::new(
+            CpuModel::CortexA57,
+            CpuConfig {
+                ips: ClockHz::BOCHS_DEFAULT,
+                reset_pc: 0,
+            },
+        );
+        let mut machine = Aarch64Machine::new(cpu, board);
+        assert_eq!(
+            machine.step(RunBudget::Instructions(8)).unwrap().stop,
+            StopReason::BudgetExhausted
+        );
+        assert!(machine.cpu.has_cached_trace(0));
+        machine.with_devices_mut(|_| {});
+        assert!(machine.cpu.has_cached_trace(0));
+        machine
+            .with_board_mut(|board| board.write_ram(addr, &0x5280_0040u32.to_le_bytes()))
+            .unwrap();
+        assert!(!machine.cpu.has_cached_trace(0));
+        assert_eq!(
+            machine.step(RunBudget::Instructions(1)).unwrap().stop,
+            StopReason::BudgetExhausted
+        );
+        assert_eq!(machine.reg_read(Reg::X0), 2);
     }
 }

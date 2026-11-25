@@ -27,6 +27,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod connection;
 pub mod engine;
 pub mod events;
 pub mod float;
