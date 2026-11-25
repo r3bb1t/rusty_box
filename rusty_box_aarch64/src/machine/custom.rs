@@ -5,9 +5,7 @@ use core::sync::atomic::AtomicBool;
 
 use rusty_box_core::{Progress, RunBudget, VmClock, VmInstant};
 
-use super::{
-    BatchOutcome, PowerState, RunEnds, STOP_POLL_TICKS, StopReason, StopSource, wait_target,
-};
+use super::{BatchOutcome, PowerState, STOP_POLL_TICKS, StopReason, StopSource};
 use crate::bus::PhysBus;
 use crate::cpu::{Activity, Cpu, Levels, Reg, Step, StopCause, TimerLines, VirtualLines};
 use crate::instrumentation::{Instrumentation, NoInstrumentation};
@@ -90,6 +88,11 @@ pub struct Aarch64Machine<B, L: Levels, I = NoInstrumentation> {
     stop: StopSource,
     next_event: Option<VmInstant>,
     pmu_event: u64,
+}
+
+struct RunEnds {
+    tick_end: u64,
+    instruction_end: u64,
 }
 
 impl<B: MachineBoard, L: Levels> Aarch64Machine<B, L> {
@@ -200,7 +203,11 @@ impl<B: MachineBoard, L: Levels, I: Instrumentation> Aarch64Machine<B, L, I> {
     /// budget when a waiting CPU can have recurring device deadlines.
     pub fn step(&mut self, budget: RunBudget) -> Result<BatchOutcome, InvalidDeadline> {
         let started = self.cpu.retired;
-        let stop = self.run(RunEnds::new(&self.cpu, budget))?;
+        let (tick_end, instruction_end) = run_ends!(self.cpu, budget);
+        let stop = self.run(RunEnds {
+            tick_end,
+            instruction_end,
+        })?;
         Ok(BatchOutcome {
             progress: Progress::Instructions(self.cpu.retired - started),
             stop,
@@ -233,7 +240,7 @@ impl<B: MachineBoard, L: Levels, I: Instrumentation> Aarch64Machine<B, L, I> {
             let deadline = self.next_event.map(VmInstant::ticks);
             let slice_end = ends.tick_end.min(now.saturating_add(STOP_POLL_TICKS));
             if matches!(self.cpu.activity, Activity::Waiting(_)) && !self.cpu.wake_if_pending() {
-                let Some(wake) = wait_target(&self.cpu, deadline) else {
+                let Some(wake) = wait_target!(self.cpu, deadline) else {
                     if ends.tick_end != u64::MAX {
                         self.cpu.wait_until(VmInstant::from_ticks(ends.tick_end));
                     }

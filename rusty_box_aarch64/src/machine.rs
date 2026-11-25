@@ -1772,8 +1772,8 @@ pub enum StopReason {
     /// the end of it; only the host (serial input, the power button) can
     /// wake the guest now.
     Halted,
-    /// A stop handle or stop flag was raised. It stays raised: every run
-    /// returns this until the host lowers it.
+    /// A host flag or a device subscriber requested a stop. A raised host
+    /// flag remains in effect until the host lowers it.
     StopRequested,
     /// The program counter reached an exit address ([`VirtMachine::set_exits`]
     /// or [`VirtMachine::emu_start`]'s `until`). Nothing at it has executed.
@@ -1948,34 +1948,26 @@ impl StopHandle {
     }
 }
 
-pub mod custom;
-
-struct RunEnds {
-    tick_end: u64,
-    instruction_end: u64,
-}
-
-impl RunEnds {
-    #[inline]
-    fn new<L: Levels>(cpu: &Cpu<L>, budget: RunBudget) -> Self {
-        let (tick_end, instruction_end) = match budget {
-            RunBudget::Ticks(n) => (cpu.icount.saturating_add(n), u64::MAX),
-            RunBudget::Instructions(n) => (u64::MAX, cpu.retired.saturating_add(n)),
-        };
-        Self {
-            tick_end,
-            instruction_end,
+// Expand into both static loops. This preserves the fixed board's field
+// accesses and evaluation order in the interpreter's hot loop.
+macro_rules! run_ends {
+    ($cpu:expr, $budget:expr) => {
+        match $budget {
+            RunBudget::Ticks(n) => ($cpu.icount.saturating_add(n), u64::MAX),
+            RunBudget::Instructions(n) => (u64::MAX, $cpu.retired.saturating_add(n)),
         }
-    }
+    };
 }
 
-#[inline]
-fn wait_target<L: Levels>(cpu: &Cpu<L>, next_event: Option<u64>) -> Option<u64> {
-    next_event
-        .into_iter()
-        .chain(cpu.wake_deadline().map(VmInstant::ticks))
-        .min()
+macro_rules! wait_target {
+    ($cpu:expr, $next_event:expr) => {{
+        let own_end = $cpu.wake_deadline().map(VmInstant::ticks);
+        $next_event.into_iter().chain(own_end).min()
+    }};
 }
+
+pub mod custom;
+pub mod link;
 
 /// What bringing the machine up to date after a device access did to its
 /// next event.
@@ -2263,10 +2255,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
         match self.after_device_access::<G>() {
             NextEvent::WorkedOutAgain | NextEvent::Unchanged => {}
         }
-        let RunEnds {
-            tick_end,
-            instruction_end,
-        } = RunEnds::new(&self.cpu, budget);
+        let (tick_end, instruction_end) = run_ends!(self.cpu, budget);
         // Watch every instruction for an exit only when there are exits.
         let watch = WATCH || self.exits.len > 0;
         loop {
@@ -2324,7 +2313,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
                 // The wait's own end (its timeout, or the event stream's next
                 // event) is in the future: had it come, the wait would have
                 // ended above.
-                let Some(wake) = wait_target(&self.cpu, self.wake_tick()) else {
+                let Some(wake) = wait_target!(self.cpu, self.wake_tick()) else {
                     // Nothing will ever wake it but the host: let a tick
                     // budget's time pass at once, as it would idly.
                     if tick_end != u64::MAX {
