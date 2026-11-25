@@ -574,6 +574,28 @@ impl<'mem, D: DeviceMap> AddressSpace<'mem, D> {
             .read(address, width)
             .or_else(|| self.rom.as_ref()?.read(address, width))
     }
+
+    // Keep device decoding out of the monomorphized ordinary RAM paths.
+    #[inline(never)]
+    fn read_device(&mut self, addr: PhysAddr, width: AccessWidth) -> Result<u64, BusFault> {
+        self.touched = true;
+        self.devices
+            .read(addr, width)
+            .unwrap_or(Err(BusFault::Unmapped))
+    }
+
+    #[inline(never)]
+    fn write_device(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+    ) -> Result<(), BusFault> {
+        self.touched = true;
+        self.devices
+            .write(addr, width, value)
+            .unwrap_or(Err(BusFault::Unmapped))
+    }
 }
 
 impl<D: DeviceMap> PhysBus for AddressSpace<'_, D> {
@@ -582,10 +604,7 @@ impl<D: DeviceMap> PhysBus for AddressSpace<'_, D> {
         if let Some(value) = self.memory_read(addr, width) {
             return Ok(value);
         }
-        self.touched = true;
-        self.devices
-            .read(addr, width)
-            .unwrap_or(Err(BusFault::Unmapped))
+        self.read_device(addr, width)
     }
 
     #[inline]
@@ -600,10 +619,7 @@ impl<D: DeviceMap> PhysBus for AddressSpace<'_, D> {
             return store_le(self.ram.bytes, offset as usize, width, value)
                 .ok_or(BusFault::Unmapped);
         }
-        self.touched = true;
-        self.devices
-            .write(addr, width, value)
-            .unwrap_or(Err(BusFault::Unmapped))
+        self.write_device(addr, width, value)
     }
 
     #[inline]
