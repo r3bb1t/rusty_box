@@ -19,6 +19,8 @@
 //! on QEMU's): a press drives the line high and a timer releases it 100 ms
 //! of guest time later (`hw/gpio/gpio_key.c`, `GPIO_KEY_LATENCY`).
 
+pub mod address_space;
+
 use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 use rusty_box_devices::display::Resolution;
 
