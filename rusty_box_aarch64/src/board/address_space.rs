@@ -95,6 +95,13 @@ impl<B: AsRef<[u8]>> MemoryRegion<B> {
 /// A scalar interrupt-capable model with clock and reset behavior. It has no
 /// DMA or machine access. A timed model consumes due work in `advance` and
 /// reports its next strictly future deadline.
+///
+/// ```compile_fail,E0599
+/// use rusty_box_devices::composition::InterruptOutput;
+/// fn attempt_dma<I: InterruptOutput>(irq: &mut I) {
+///     irq.write(0x1000, &[42]);
+/// }
+/// ```
 pub trait ClockedDevice: IrqMmioModel {
     fn advance<I: InterruptOutput>(&mut self, _clock: VmClock, _irq: &mut I) -> Option<VmInstant> {
         None
@@ -214,6 +221,16 @@ impl<A: DeviceMap, B: DeviceMap> DevicePair<A, B> {
 
 /// A short host loan of the devices on one board. Only model state is
 /// mutable through it. The checked intervals cannot be replaced.
+///
+/// ```compile_fail
+/// use rusty_box_aarch64::{Aarch64Machine, NoEl2};
+/// use rusty_box_aarch64::board::address_space::{AddressSpace, ClockedDevice, MappedDevice};
+/// fn retain<'a, 'mem, D: ClockedDevice>(
+///     machine: &'a mut Aarch64Machine<AddressSpace<'mem, MappedDevice<D>>, NoEl2>,
+/// ) -> &'a mut D {
+///     machine.with_board_mut(|board| board.devices_mut().device())
+/// }
+/// ```
 pub struct DevicesMut<'a, D>(&'a mut D);
 
 impl<'a, A: DeviceMap, B: DeviceMap> DevicesMut<'a, DevicePair<A, B>> {
