@@ -51,11 +51,12 @@ fn typed_device_subscribers_stop_after_the_guest_write_commits() {
     );
     let mut machine = Aarch64Machine::new(cpu, board);
     machine.reg_write(Reg::X1, 0x5000);
+    let untouched = machine.reg_read(Reg::X2);
     let written = machine.step(RunBudget::Instructions(3)).unwrap();
     assert_eq!(written.stop, rusty_box_aarch64::StopReason::StopRequested);
     assert_eq!(written.progress.instructions(), Some(2));
     assert_eq!(machine.board().devices().device().output(), 42);
-    assert_eq!(machine.reg_read(Reg::X2), 0);
+    assert_eq!(machine.reg_read(Reg::X2), untouched);
     assert_eq!(
         machine
             .step(RunBudget::Instructions(1))
