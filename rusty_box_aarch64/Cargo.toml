@@ -38,6 +38,7 @@ crossterm = "0.29"
 
 [features]
 default = []
+custom-board = []
 # Additive, as in rusty_box_core: neither changes the shape of the core.
 alloc = ["rusty_box_core/alloc"]
 std = ["alloc", "rusty_box_core/std"]

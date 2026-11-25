@@ -6,9 +6,13 @@ license.workspace = true
 publish = false
 
 [dependencies]
-rusty_box_aarch64 = { path = "../../rusty_box_aarch64", default-features = false }
+rusty_box_aarch64 = { path = "../../rusty_box_aarch64", default-features = false, features = ["custom-board"] }
 rusty_box_core.workspace = true
 rusty_box_devices.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "controller"
+harness = false

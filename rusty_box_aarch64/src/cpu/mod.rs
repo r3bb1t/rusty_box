@@ -696,6 +696,7 @@ pub struct Cpu<L: Levels> {
 }
 
 impl<L: Levels> Cpu<L> {
+    #[cfg(feature = "custom-board")]
     pub(crate) fn forget_board_memory(&mut self) {
         self.flush_tlb();
         self.flush_traces();

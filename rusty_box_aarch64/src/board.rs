@@ -19,6 +19,7 @@
 //! on QEMU's): a press drives the line high and a timer releases it 100 ms
 //! of guest time later (`hw/gpio/gpio_key.c`, `GPIO_KEY_LATENCY`).
 
+#[cfg(feature = "custom-board")]
 pub mod address_space;
 
 use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};

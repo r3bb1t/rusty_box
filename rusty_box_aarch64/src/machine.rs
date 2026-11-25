@@ -1966,7 +1966,9 @@ macro_rules! wait_target {
     }};
 }
 
+#[cfg(feature = "custom-board")]
 pub mod custom;
+#[cfg(feature = "custom-board")]
 pub mod link;
 
 /// What bringing the machine up to date after a device access did to its

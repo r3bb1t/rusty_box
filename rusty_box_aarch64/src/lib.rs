@@ -18,6 +18,10 @@
 //! snapshots, and an observer type parameter — and the guide in
 //! `docs/aarch64-automation.md` walks through it.
 //!
+//! The optional `custom-board` feature supplies the same trace execution
+//! engine to caller-owned boards. It also supplies checked scalar MMIO
+//! composition and a two-machine link. See `docs/aarch64-composable-machines.md`.
+//!
 //! The processor model is a Cortex-A57-shaped ARMv8.0 core with EL0 and EL1,
 //! and EL2 on a machine built with `MachineBuilder::with_el2` (no EL3, no
 //! AArch32), FP and Advanced SIMD, the
@@ -97,6 +101,7 @@ pub use layout::{DeviceLayout, UnknownDeviceLayout};
 pub use machine::Display;
 #[cfg(feature = "alloc")]
 pub use machine::StopHandle;
+#[cfg(feature = "custom-board")]
 pub use machine::custom::Aarch64Machine;
 pub use machine::{
     BatchOutcome, BuildError, GicCpuInterfaceBits, HostTreeAddress, HostTreeInterrupt, Keyboard,
