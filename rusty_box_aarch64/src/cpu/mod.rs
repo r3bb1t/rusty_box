@@ -696,6 +696,12 @@ pub struct Cpu<L: Levels> {
 }
 
 impl<L: Levels> Cpu<L> {
+    pub(crate) fn forget_board_memory(&mut self) {
+        self.flush_tlb();
+        self.flush_traces();
+        self.monitor = ExclusiveMonitor::CLEAR;
+    }
+
     /// A processor of `model` in its reset state, with EL2 where its level
     /// set has it, and on the Cortex-A57 its PERIPHBASE where the board's
     /// default layout has the GIC. Every model can have EL2.

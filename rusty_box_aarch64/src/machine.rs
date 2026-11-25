@@ -1948,6 +1948,35 @@ impl StopHandle {
     }
 }
 
+pub mod custom;
+
+struct RunEnds {
+    tick_end: u64,
+    instruction_end: u64,
+}
+
+impl RunEnds {
+    #[inline]
+    fn new<L: Levels>(cpu: &Cpu<L>, budget: RunBudget) -> Self {
+        let (tick_end, instruction_end) = match budget {
+            RunBudget::Ticks(n) => (cpu.icount.saturating_add(n), u64::MAX),
+            RunBudget::Instructions(n) => (u64::MAX, cpu.retired.saturating_add(n)),
+        };
+        Self {
+            tick_end,
+            instruction_end,
+        }
+    }
+}
+
+#[inline]
+fn wait_target<L: Levels>(cpu: &Cpu<L>, next_event: Option<u64>) -> Option<u64> {
+    next_event
+        .into_iter()
+        .chain(cpu.wake_deadline().map(VmInstant::ticks))
+        .min()
+}
+
 /// What bringing the machine up to date after a device access did to its
 /// next event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2234,10 +2263,10 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
         match self.after_device_access::<G>() {
             NextEvent::WorkedOutAgain | NextEvent::Unchanged => {}
         }
-        let (tick_end, instruction_end) = match budget {
-            RunBudget::Ticks(n) => (self.cpu.icount.saturating_add(n), u64::MAX),
-            RunBudget::Instructions(n) => (u64::MAX, self.cpu.retired.saturating_add(n)),
-        };
+        let RunEnds {
+            tick_end,
+            instruction_end,
+        } = RunEnds::new(&self.cpu, budget);
         // Watch every instruction for an exit only when there are exits.
         let watch = WATCH || self.exits.len > 0;
         loop {
@@ -2295,8 +2324,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
                 // The wait's own end (its timeout, or the event stream's next
                 // event) is in the future: had it come, the wait would have
                 // ended above.
-                let own_end = self.cpu.wake_deadline().map(VmInstant::ticks);
-                let Some(wake) = self.wake_tick().into_iter().chain(own_end).min() else {
+                let Some(wake) = wait_target(&self.cpu, self.wake_tick()) else {
                     // Nothing will ever wake it but the host: let a tick
                     // budget's time pass at once, as it would idly.
                     if tick_end != u64::MAX {

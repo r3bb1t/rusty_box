@@ -97,6 +97,7 @@ pub use layout::{DeviceLayout, UnknownDeviceLayout};
 pub use machine::Display;
 #[cfg(feature = "alloc")]
 pub use machine::StopHandle;
+pub use machine::custom::Aarch64Machine;
 pub use machine::{
     BatchOutcome, BuildError, GicCpuInterfaceBits, HostTreeAddress, HostTreeInterrupt, Keyboard,
     MachineBuilder, MemoryError, MemoryLoan, OnResetRequest, Pointer, PowerState, RamSize,
