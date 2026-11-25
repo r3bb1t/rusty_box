@@ -43,9 +43,9 @@ fn a_timed_sensor_irq_wakes_the_guest_and_drives_gpio() {
 }
 
 #[test]
-fn each_guest_sees_local_output_before_equal_time_frames_and_runs_repeatably() {
+fn equal_time_frames_wait_for_the_barrier_and_batching_preserves_results() {
     let mut observed = None;
-    for _ in 0..2 {
+    for combined in [false, true] {
         let rom = firmware();
         let mut a_ram = [0; RAM_LEN];
         let mut b_ram = [0; RAM_LEN];
@@ -61,14 +61,21 @@ fn each_guest_sees_local_output_before_equal_time_frames_and_runs_repeatably() {
         set_inputs(pair.first_mut(), 90, 5);
         set_inputs(pair.second_mut(), 100, 2);
 
-        let boundary = pair.run(1, QUANTUM).unwrap();
-        assert_eq!(boundary.stop, PairStop::Completed);
-        assert_eq!(boundary.frames, 2);
-        assert_eq!(output(pair.first()), 95);
-        assert_eq!(output(pair.second()), 102);
-        assert_eq!(pair.first().clock().now(), pair.second().clock().now());
+        if combined {
+            let batch = pair.run(2, QUANTUM).unwrap();
+            assert_eq!(batch.stop, PairStop::Completed);
+            assert_eq!(batch.rounds, 2);
+            assert_eq!(batch.frames, 2);
+        } else {
+            let boundary = pair.run(1, QUANTUM).unwrap();
+            assert_eq!(boundary.stop, PairStop::Completed);
+            assert_eq!(boundary.frames, 2);
+            assert_eq!(output(pair.first()), 95);
+            assert_eq!(output(pair.second()), 102);
+            assert_eq!(pair.run(1, QUANTUM).unwrap().frames, 0);
+        }
 
-        assert_eq!(pair.run(1, QUANTUM).unwrap().frames, 0);
+        assert_eq!(pair.first().clock().now(), pair.second().clock().now());
         assert_eq!(output(pair.first()), 102);
         assert_eq!(output(pair.second()), 95);
         assert_eq!(pair.first().board().ram()[0], 11);
@@ -127,4 +134,20 @@ fn an_incompatible_rate_is_rejected_before_pairing() {
         ConnectedPair::new(a, b, digital_link()),
         Err(PairError::RateMismatch { .. })
     ));
+}
+
+#[test]
+fn a_waiting_guest_can_reach_the_last_representable_tick() {
+    let rom = firmware();
+    let mut ram = [0; RAM_LEN];
+    let mut machine = controller(&mut ram, &rom, ClockHz::BOCHS_DEFAULT).unwrap();
+    assert_eq!(
+        machine.step(RunBudget::Ticks(32)).unwrap().stop,
+        StopReason::Halted
+    );
+    let remaining = u64::MAX - machine.clock().now().ticks();
+    let idle = machine.step(RunBudget::Ticks(remaining)).unwrap();
+    assert_eq!(idle.stop, StopReason::Halted);
+    assert_eq!(idle.progress.instructions(), Some(0));
+    assert_eq!(machine.clock().now().ticks(), u64::MAX);
 }

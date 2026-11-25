@@ -1,11 +1,10 @@
 //! A single AArch64 processor paired with an external board.
 
 use core::fmt;
-use core::sync::atomic::AtomicBool;
 
 use rusty_box_core::{Progress, RunBudget, VmClock, VmInstant};
 
-use super::{BatchOutcome, PowerState, STOP_POLL_TICKS, StopReason, StopSource};
+use super::{BatchOutcome, PowerState, StopReason};
 use crate::bus::PhysBus;
 use crate::cpu::{Activity, Cpu, Levels, Reg, Step, StopCause, TimerLines, VirtualLines};
 use crate::instrumentation::{Instrumentation, NoInstrumentation};
@@ -49,6 +48,10 @@ impl BoardInputs {
 /// such an access, and at deadlines, including whilst the CPU waits.
 /// A board with cached fetches must report host/DMA memory changes before
 /// the next instruction. Guest RAM stores use the CPU's existing coherence.
+///
+/// Guest-visible behavior must depend only on board state, virtual time and
+/// explicit inputs. Synchronization may repeat at the same tick, so consume
+/// due work once and derive signal levels from the resulting state each time.
 pub trait MachineBoard: PhysBus {
     fn synchronize(&mut self, clock: VmClock, outputs: ProcessorOutputs) -> BoardInputs;
 
@@ -85,7 +88,6 @@ pub struct Aarch64Machine<B, L: Levels, I = NoInstrumentation> {
     observer: I,
     reset_pc: u64,
     power: PowerState,
-    stop: StopSource,
     next_event: Option<VmInstant>,
     pmu_event: u64,
 }
@@ -93,6 +95,7 @@ pub struct Aarch64Machine<B, L: Levels, I = NoInstrumentation> {
 struct RunEnds {
     tick_end: u64,
     instruction_end: u64,
+    tick_bounded: bool,
 }
 
 impl<B: MachineBoard, L: Levels> Aarch64Machine<B, L> {
@@ -111,7 +114,6 @@ impl<B: MachineBoard, L: Levels, I: Instrumentation> Aarch64Machine<B, L, I> {
             board,
             observer,
             power: PowerState::Running,
-            stop: StopSource::None,
             next_event: None,
             pmu_event: u64::MAX,
         }
@@ -150,10 +152,6 @@ impl<B: MachineBoard, L: Levels, I: Instrumentation> Aarch64Machine<B, L, I> {
 
     pub fn instrumentation(&self) -> &I {
         &self.observer
-    }
-
-    pub fn set_stop_flag(&mut self, flag: &'static AtomicBool) {
-        self.stop = StopSource::Static(flag);
     }
 
     /// Restore the processor and the board's devices, keeping virtual time.
@@ -207,6 +205,7 @@ impl<B: MachineBoard, L: Levels, I: Instrumentation> Aarch64Machine<B, L, I> {
         let stop = self.run(RunEnds {
             tick_end,
             instruction_end,
+            tick_bounded: matches!(budget, RunBudget::Ticks(_)),
         })?;
         Ok(BatchOutcome {
             progress: Progress::Instructions(self.cpu.retired - started),
@@ -222,9 +221,6 @@ impl<B: MachineBoard, L: Levels, I: Instrumentation> Aarch64Machine<B, L, I> {
         }
         let mut settle = true;
         loop {
-            if self.stop.raised() {
-                return Ok(StopReason::StopRequested);
-            }
             if settle
                 || self.cpu.retired >= self.pmu_event
                 || self.next_event.is_some_and(|at| at <= self.cpu.now())
@@ -238,27 +234,28 @@ impl<B: MachineBoard, L: Levels, I: Instrumentation> Aarch64Machine<B, L, I> {
                 return Ok(StopReason::BudgetExhausted);
             }
             let deadline = self.next_event.map(VmInstant::ticks);
-            let slice_end = ends.tick_end.min(now.saturating_add(STOP_POLL_TICKS));
             if matches!(self.cpu.activity, Activity::Waiting(_)) && !self.cpu.wake_if_pending() {
                 let Some(wake) = wait_target!(self.cpu, deadline) else {
-                    if ends.tick_end != u64::MAX {
+                    if ends.tick_bounded {
                         self.cpu.wait_until(VmInstant::from_ticks(ends.tick_end));
                     }
                     return Ok(StopReason::Halted);
                 };
                 self.cpu
-                    .wait_until(VmInstant::from_ticks(wake.min(slice_end)));
+                    .wait_until(VmInstant::from_ticks(wake.min(ends.tick_end)));
                 settle = false;
                 continue;
             }
             if let Some(taken) = self.cpu.deliver_interrupt() {
                 self.observer.exception(taken);
             }
-            let burst = slice_end
+            let burst = ends
+                .tick_end
                 .min(deadline.unwrap_or(u64::MAX))
                 .saturating_sub(now)
                 .min(ends.instruction_end - self.cpu.retired)
-                .min(self.pmu_event - self.cpu.retired);
+                .min(self.pmu_event - self.cpu.retired)
+                .min(u64::from(u32::MAX));
             self.cpu.bound_run(burst);
             match self
                 .cpu
